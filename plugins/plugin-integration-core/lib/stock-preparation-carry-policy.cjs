@@ -79,7 +79,8 @@ const MANUAL_ROW_REATTACH_MODES = Object.freeze(['none', 'propose_confirm'])
 // it is NOT a conflict-planner DECISION and must never be routed as an ADD.
 // MANUAL_CONFIRM is DELIBERATELY the planner's literal so the apply-writer's
 // existing MANUAL_CONFIRM → held branch routes a carry hold to `held` with no
-// apply-writer change (apply-writer.cjs:487).
+// apply-writer change (apply-writer.cjs:548-552; a raw carry decision reaching
+// the writer instead trips its unsupported_decision throw at :565-568).
 const CARRY_DECISIONS = Object.freeze({
   NO_CARRY: 'no_carry',
   CARRY_VIA_CONFIRM: 'carry_via_confirm',

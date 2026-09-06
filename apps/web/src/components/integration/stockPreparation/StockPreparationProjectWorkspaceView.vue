@@ -129,13 +129,14 @@
                      values-free by contract, so the row carries an internal handle and no project
                      NUMBER. Re-syncing needs the number, the server never hands it out, and a panel
                      that guessed would pull the wrong project's BOM. Serving the number here is the
-                     follow-up named in the PR body; until then the honest control is one that says
-                     what it needs. -->
+                     follow-up named in the PR body; until then the honest control is one whose label
+                     matches what one click actually does — points you at the field above, does not
+                     submit anything on its own — rather than promising a re-sync it cannot perform. -->
                 <button
                   type="button"
                   class="sp-project__select"
                   data-testid="stock-prep-project-refresh"
-                  :aria-label="bi('重新同步这个项目', 'Re-sync this project')"
+                  :aria-label="bi('在上方填写项目号来同步这个项目', 'Sync this project by typing its number above')"
                   @click="onRefreshProject(project.projectId)"
                 >
                   {{ bi('刷新', 'Refresh') }}

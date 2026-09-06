@@ -52,12 +52,17 @@ describeIfDb('automation test-run sample record read gate', () => {
   })
 
   it('fails closed when the requested row does not exist', async () => {
-    const result = await loadReadableAutomationSampleRecord(adminReq, query, sheetId, `${recordId}_missing`)
+    const missingRecordId = `${recordId}_missing`
+    const result = await loadReadableAutomationSampleRecord(adminReq, query, sheetId, missingRecordId)
 
-    expect(result).toMatchObject({
+    expect(result).toEqual({
       ok: false,
       status: 404,
-      body: { error: { code: 'NOT_FOUND' } },
+      body: {
+        ok: false,
+        error: { code: 'NOT_FOUND', message: 'Sample record not found' },
+      },
     })
+    expect(JSON.stringify(result)).not.toContain(missingRecordId)
   })
 })

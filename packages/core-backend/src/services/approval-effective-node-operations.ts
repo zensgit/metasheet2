@@ -70,6 +70,15 @@ export function nodeOperationPolicyAt(
   return undefined
 }
 
+function approvalModeAt(
+  graph: NodeOperationGraphView | null | undefined,
+  nodeKey: string | null | undefined,
+): unknown {
+  if (!graph?.nodes || !nodeKey) return undefined
+  const node = graph.nodes.find((candidate) => candidate?.key === nodeKey)
+  return node && isRecord(node.config) ? node.config.approvalMode : undefined
+}
+
 /**
  * Lock-5 §1.3 / OD-L5-8(a) — the effective comment requirement at ONE node.
  *
@@ -107,6 +116,10 @@ export function isOperationAllowedAtNode(
   nodeKey: string | null | undefined,
   policyKey: NodeOperationPolicyActionKey,
 ): boolean {
+  if (
+    approvalModeAt(graph, nodeKey) === 'sequential'
+    && (policyKey === 'allowAddSign' || policyKey === 'allowReduceSign')
+  ) return false
   return nodeOperationPolicyAt(graph, nodeKey)?.[policyKey] !== false
 }
 
@@ -180,6 +193,10 @@ export function resolveEffectiveNodeOperations(
   let sawAny = false
   for (const nodeKey of seatNodeKeys) {
     const policy = nodeOperationPolicyAt(graph, nodeKey)
+    if (approvalModeAt(graph, nodeKey) === 'sequential') {
+      allowAddSign = false
+      allowReduceSign = false
+    }
     if (policy?.allowTransfer === false) allowTransfer = false
     if (policy?.allowAddSign === false) allowAddSign = false
     if (policy?.allowReduceSign === false) allowReduceSign = false

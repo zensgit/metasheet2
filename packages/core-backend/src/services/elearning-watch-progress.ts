@@ -763,7 +763,11 @@ async function lockHeartbeatSession(
   orgId: string,
   sessionId: string,
   userId: string,
-): Promise<{ session: SessionRow; durationMs: number }> {
+): Promise<{
+  session: SessionRow
+  durationMs: number
+  scheduledChallengeAuthority: boolean
+}> {
   const result = await tx.query(
     `/* elearning-watch:lock-session */
      SELECT
@@ -786,6 +790,16 @@ async function lockHeartbeatSession(
        c.status AS course_status,
        m.status AS media_status,
        m.duration_ms,
+       EXISTS (
+         SELECT 1
+           FROM elearning_watch_challenge_schedules challenge_schedule
+          WHERE challenge_schedule.org_id = s.org_id
+            AND challenge_schedule.session_id = s.id
+            AND challenge_schedule.course_version_id = s.course_version_id
+            AND challenge_schedule.course_version_item_id = s.course_version_item_id
+            AND challenge_schedule.user_id = s.user_id
+            AND challenge_schedule.mode = 'scheduled'
+       ) AS scheduled_challenge_authority,
        GREATEST(
          0,
          FLOOR(EXTRACT(EPOCH FROM (clock_timestamp() - s.last_event_at)) * 1000)
@@ -821,9 +835,12 @@ async function lockHeartbeatSession(
   ) {
     fail('unsupported_policy')
   }
+  const scheduledChallengeAuthority = asBoolean(row.scheduled_challenge_authority)
+  if (scheduledChallengeAuthority === null) fail('unavailable')
   return {
     session: parseSessionRow(row, requireRowInt(row.elapsed_ms)),
     durationMs,
+    scheduledChallengeAuthority,
   }
 }
 
@@ -866,7 +883,12 @@ export async function recordElearningHeartbeat(
     const itemId = await peekSessionItem(tx, orgId, sessionId, userId)
     await advisoryLock(tx, orgId, userId, itemId)
     await lockCourseHead(tx, orgId, itemId)
-    const { session, durationMs } = await lockHeartbeatSession(tx, orgId, sessionId, userId)
+    const {
+      session,
+      durationMs,
+      scheduledChallengeAuthority,
+    } = await lockHeartbeatSession(tx, orgId, sessionId, userId)
+    if (!challengeEnabled && scheduledChallengeAuthority) fail('unavailable')
     const access = await resolveWatchAccess(tx, orgId, userId, session.versionId)
     const progress = await lockProgress(tx, orgId, userId, session.itemId)
     if (!progress) fail('unavailable')

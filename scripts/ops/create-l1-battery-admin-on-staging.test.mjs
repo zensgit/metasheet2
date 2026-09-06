@@ -23,7 +23,8 @@ import { fileURLToPath } from 'node:url'
 //     had already committed and BEFORE the user_roles insert — leaving a fake
 //     admin (role column set, no RBAC membership). The shipped script must
 //     promote in ONE transaction that ends with an assertion (exactly one user +
-//     exactly one user_roles admin membership) and rolls back on any shortfall.
+//     exactly one user_roles admin membership + exactly one active default-org
+//     membership) and rolls back on any shortfall.
 //
 // LAYERS:
 //   1. STRUCTURAL (hermetic): parse the script text. The load-bearing predicates
@@ -170,7 +171,7 @@ function promotionHasErrorStop(execText) {
 }
 function promotionAssertsExactlyOne(execText) {
   const raises = /RAISE EXCEPTION 'promotion assertion failed/.test(execText)
-  const guardsCounts = /IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 THEN/.test(execText)
+  const guardsCounts = /IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 OR o_count <> 1 OR d_count <> 1 THEN/.test(execText)
   // The grant is keyed on the server-verified id, so the assertion counts BY id.
   const countsUsersById = /SELECT count\(\*\) INTO u_count FROM users WHERE id = uid/.test(execText)
   // the membership count must be the EXACT RBAC read path: user_roles.role_id='admin'
@@ -180,10 +181,21 @@ function promotionAssertsExactlyOne(execText) {
   // and the verified id must belong to the INTENDED email (catches a login that
   // returned some OTHER account's id).
   const countsEmailMatch = /SELECT count\(\*\) INTO e_count FROM users WHERE id = uid AND email = em/.test(execText)
+  const countsActiveOrgs = /SELECT count\(\*\) INTO o_count FROM user_orgs WHERE user_id = uid AND is_active = TRUE/.test(execText)
+  const countsDefaultMembership = /SELECT count\(\*\) INTO d_count FROM user_orgs WHERE user_id = uid AND org_id = 'default' AND is_active = TRUE/.test(execText)
   return raises && guardsCounts && countsUsersById && countsAdminMembership && countsEmailMatch
+    && countsActiveOrgs && countsDefaultMembership
 }
 
-// ---- P2-A (gate review 4): each conjunct of the 1/1/1 assertion is load-bearing ----
+function promotionMaintainsDefaultMembership(execText) {
+  const derivesSingleAnchor = /SELECT count\(DISTINCT org_id\) INTO anchor_count[\s\S]*?FROM directory_integrations[\s\S]*?btrim\(org_id\) <> ''/.test(execText)
+  const requiresDefaultAnchor = /NOT EXISTS \(SELECT 1 FROM directory_integrations WHERE org_id = 'default'\)/.test(execText)
+  const requiresActiveWitness = /SELECT count\(\*\) INTO witness_count[\s\S]*?FROM user_orgs[\s\S]*?org_id = 'default' AND is_active = TRUE/.test(execText)
+  const insertsByVerifiedId = /INSERT INTO user_orgs \(user_id, org_id, is_active\)[\s\S]*?SELECT u\.id, 'default', TRUE FROM users u WHERE u\.id = :'uid'[\s\S]*?ON CONFLICT \(user_id, org_id\) DO NOTHING;/.test(execText)
+  return derivesSingleAnchor && requiresDefaultAnchor && requiresActiveWitness && insertsByVerifiedId
+}
+
+// ---- P2-A (gate review 4): each conjunct of the closing assertion is load-bearing ----
 // The gate neutered `e_count := 1;` (a constant assignment BEFORE the IF) and the whole suite
 // stayed green — the structural guard only matched the IF *text*, not the value feeding it. Close
 // that: (1) no count var may be assigned a constant (the exact mutation), and (2) each is assigned
@@ -192,7 +204,7 @@ function promotionAssertsExactlyOne(execText) {
 test('P2-A: no promotion count var is constant-assigned, and each is scoped correctly', () => {
   const execText = scriptText
   // (1) the gate's mutation shape — a constant assignment to any count var — is forbidden.
-  for (const v of ['u_count', 'm_count', 'e_count']) {
+  for (const v of ['u_count', 'm_count', 'e_count', 'o_count', 'd_count']) {
     assert.doesNotMatch(
       execText,
       new RegExp(`\\b${v}\\s*:=\\s*\\d`),
@@ -204,8 +216,10 @@ test('P2-A: no promotion count var is constant-assigned, and each is scoped corr
   assert.match(execText, /SELECT count\(\*\) INTO u_count FROM users WHERE id = uid;/, 'u_count: users by verified id')
   assert.match(execText, /SELECT count\(\*\) INTO m_count FROM user_roles WHERE user_id = uid AND role_id = 'admin';/, "m_count: admin membership by id (the fake-admin arm)")
   assert.match(execText, /SELECT count\(\*\) INTO e_count FROM users WHERE id = uid AND email = em;/, 'e_count: id-belongs-to-email')
-  // and the IF still guards all three as a conjunction that RAISEs.
-  assert.match(execText, /IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 THEN/)
+  assert.match(execText, /SELECT count\(\*\) INTO o_count FROM user_orgs WHERE user_id = uid AND is_active = TRUE;/, 'o_count: exactly one active org')
+  assert.match(execText, /SELECT count\(\*\) INTO d_count FROM user_orgs WHERE user_id = uid AND org_id = 'default' AND is_active = TRUE;/, 'd_count: that active org is default')
+  // and the IF still guards all five as a conjunction that RAISEs.
+  assert.match(execText, /IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 OR o_count <> 1 OR d_count <> 1 THEN/)
   assert.match(execText, /RAISE EXCEPTION 'promotion assertion failed/)
 })
 
@@ -332,13 +346,18 @@ test('structural: an unconditional trap on EXIT/INT/TERM scrubs the host passwor
   assert.match(trapLine, /\bHUP\b/, 'the trap should also cover HUP (SSH drop)')
 })
 
-test('structural: promotion is ONE transaction (psql -1) with ON_ERROR_STOP and an exactly-one assertion on the real RBAC read path', () => {
+test('structural: promotion is ONE transaction and asserts the RBAC + default-org end state', () => {
   assert.equal(promotionIsSingleTransaction(executable), true, 'promotion must be a single transaction (psql -1 / BEGIN;…COMMIT;)')
   assert.equal(promotionHasErrorStop(executable), true, 'promotion must set ON_ERROR_STOP=1')
   assert.equal(
     promotionAssertsExactlyOne(executable),
     true,
-    'promotion must end asserting exactly one user (by id) + exactly one user_roles admin membership + the id belongs to the intended email',
+    'promotion must end asserting one verified user, one admin role, and one active default-org membership',
+  )
+  assert.equal(
+    promotionMaintainsDefaultMembership(executable),
+    true,
+    'promotion must derive the staging default anchor and idempotently insert membership by verified id',
   )
   // The promotion inserts are idempotent (safe re-run) and keyed on the verified id.
   assert.match(executable, /INSERT INTO roles \(id, name\) VALUES \('admin', 'admin'\) ON CONFLICT \(id\) DO NOTHING;/)
@@ -471,11 +490,31 @@ test('mutation: dropping the trim+lowercase normalization (register raw email) r
 test('mutation: deleting the exactly-one RAISE assertion reds the post-assert gate', () => {
   assert.equal(promotionAssertsExactlyOne(executable), true)
   const mutatedText = scriptText.replace(
-    /IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 THEN\n\s*RAISE EXCEPTION 'promotion assertion failed[\s\S]*?END IF;/,
+    /IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 OR o_count <> 1 OR d_count <> 1 THEN\n\s*RAISE EXCEPTION 'promotion assertion failed[\s\S]*?END IF;/,
     '-- assertion removed by mutation',
   )
   assert.notEqual(mutatedText, scriptText, 'mutation must actually remove the assertion')
   assert.equal(promotionAssertsExactlyOne(stripShellComments(mutatedText)), false)
+})
+
+test('mutation: deleting the default-org membership writer reds the membership contract', () => {
+  assert.equal(promotionMaintainsDefaultMembership(executable), true)
+  const mutated = scriptText.replace(
+    /INSERT INTO user_orgs \(user_id, org_id, is_active\)\n\s*SELECT u\.id, 'default', TRUE FROM users u WHERE u\.id = :'uid'\n\s*ON CONFLICT \(user_id, org_id\) DO NOTHING;/,
+    '-- membership writer removed by mutation',
+  )
+  assert.notEqual(mutated, scriptText)
+  assert.equal(promotionMaintainsDefaultMembership(stripShellComments(mutated)), false)
+})
+
+test('mutation: changing membership conflict handling to resurrection reds the non-resurrecting contract', () => {
+  assert.equal(promotionMaintainsDefaultMembership(executable), true)
+  const mutated = scriptText.replace(
+    "ON CONFLICT (user_id, org_id) DO NOTHING;\n-- Stash the (non-secret) verified id",
+    "ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE;\n-- Stash the (non-secret) verified id",
+  )
+  assert.notEqual(mutated, scriptText)
+  assert.equal(promotionMaintainsDefaultMembership(stripShellComments(mutated)), false)
 })
 
 test('mutation: P1 — reverting the promotion to an email lookup (not the verified id) reds the promote-by-verified-id gate', () => {
@@ -632,8 +671,12 @@ const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user');
 CREATE TABLE IF NOT EXISTS roles (id TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS user_roles (user_id TEXT NOT NULL, role_id TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE, PRIMARY KEY (user_id, role_id));
+CREATE TABLE IF NOT EXISTS directory_integrations (id TEXT PRIMARY KEY, org_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS user_orgs (user_id TEXT NOT NULL, org_id TEXT NOT NULL, is_active BOOLEAN NOT NULL, PRIMARY KEY (user_id, org_id));
 -- migration 054 seeds roles exactly like this ('admin','管理员') — the P2 trap:
 INSERT INTO roles (id, name) VALUES ('admin','管理员'),('user','普通用户') ON CONFLICT (id) DO NOTHING;
+INSERT INTO directory_integrations (id, org_id) VALUES ('staging-directory', 'default') ON CONFLICT (id) DO NOTHING;
+INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ('default-anchor-witness', 'default', TRUE) ON CONFLICT DO NOTHING;
 `
 
 // P3 — readiness must mean "the TARGET database accepts a query", not "the server
@@ -736,16 +779,16 @@ req.write(body);req.end();
   return d(['exec', '-i', backend, 'node', '-e', prog])
 }
 
-// Read the current (role, admin-membership-count) for the account, keyed on email.
+// Read the current role/admin/default-org state for the account, keyed on email.
 function readAccountState(pg, email) {
   const check = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
-    input: `SELECT (SELECT role FROM users WHERE email='${email}') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='${email}' AND ur.role_id='admin');`,
+    input: `SELECT (SELECT role FROM users WHERE email='${email}') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='${email}' AND ur.role_id='admin'), (SELECT count(*) FROM user_orgs uo JOIN users u ON u.id=uo.user_id WHERE u.email='${email}' AND uo.is_active=TRUE), (SELECT count(*) FROM user_orgs uo JOIN users u ON u.id=uo.user_id WHERE u.email='${email}' AND uo.org_id='default' AND uo.is_active=TRUE);`,
   })
   return check.stdout.trim()
 }
 
 test(
-  'golden (real Docker): the SHIPPED script promotes to a real 1/1 admin and its stdin ingestion writes NOTHING into the backend container',
+  'golden (real Docker): the SHIPPED script produces a real admin with one active default-org membership and writes no container credential',
   { skip: GOLDEN_SKIP ?? false },
   () => {
     withGoldenStack(({ backend, pg }) => {
@@ -764,11 +807,11 @@ test(
         // (P1) the host password file was scrubbed by the trap.
         assert.equal(existsSync(f), false, 'the trap must scrub the host password file on exit')
 
-        // (P2) the DB ends in the exact RBAC read-path state: 1 user, 1 admin membership.
+        // The DB ends in the exact RBAC + org state: 1 user, 1 admin role, 1 active org, default.
         const check = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
-          input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin');`,
+          input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com'), (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin'), (SELECT count(*) FROM user_orgs uo JOIN users u ON u.id=uo.user_id WHERE u.email='l1-battery-admin@example.com' AND uo.is_active=TRUE), (SELECT count(*) FROM user_orgs uo JOIN users u ON u.id=uo.user_id WHERE u.email='l1-battery-admin@example.com' AND uo.org_id='default' AND uo.is_active=TRUE);`,
         })
-        assert.equal(check.stdout.trim(), '1|1', `DB must be exactly 1 user / 1 admin membership, got: ${check.stdout.trim()}`)
+        assert.equal(check.stdout.trim(), '1|1|1|1', `DB must be exactly 1 user / 1 admin / 1 active org / default, got: ${check.stdout.trim()}`)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -798,7 +841,7 @@ test(
 
         // BEFORE: the seeded row is a plain user with no admin membership.
         const before = readAccountState(pg, EMAIL)
-        assert.equal(before, 'user|0', `precondition: attacker account must start role=user, 0 admin memberships, got: ${before}`)
+        assert.equal(before, 'user|0|0|0', `precondition: attacker account must start unprivileged and unadmitted, got: ${before}`)
 
         // Operator runs the script with the intended (different) password.
         const r = runScript(f, backend, pg)
@@ -809,8 +852,8 @@ test(
         const after = readAccountState(pg, EMAIL)
         assert.equal(
           after,
-          'user|0',
-          `P1: a failed/refused run must leave the pre-empted account ZERO-changed (role=user, 0 admin memberships), got: ${after} — a non-'user|0' here means the promotion committed BEFORE login gated it`,
+          'user|0|0|0',
+          `P1: a failed/refused run must leave the pre-empted account unprivileged and unadmitted, got: ${after}`,
         )
         assert.equal(after, before, 'P1: the account state must be byte-identical before and after a refused promotion')
 
@@ -867,7 +910,7 @@ test(
 )
 
 test(
-  'golden (real Docker): a non-canonical BATTERY_ADMIN_EMAIL (uppercase) is normalized so register/promote/login agree — still exit 0 and 1/1 on the LOWERCASE row',
+  'golden (real Docker): uppercase BATTERY_ADMIN_EMAIL is normalized across auth, RBAC, and org admission',
   { skip: GOLDEN_SKIP ?? false },
   () => {
     // The seeded users row is lowercase (mirroring what the real backend's register,
@@ -880,11 +923,11 @@ test(
         const r = runScript(f, backend, pg, { BATTERY_ADMIN_EMAIL: 'L1-Battery-Admin@Example.COM' })
         assert.equal(r.status, 0, `normalized uppercase override must succeed; stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
         const check = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
-          input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin');`,
+          input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com'), (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin'), (SELECT count(*) FROM user_orgs uo JOIN users u ON u.id=uo.user_id WHERE u.email='l1-battery-admin@example.com' AND uo.is_active=TRUE), (SELECT count(*) FROM user_orgs uo JOIN users u ON u.id=uo.user_id WHERE u.email='l1-battery-admin@example.com' AND uo.org_id='default' AND uo.is_active=TRUE);`,
         })
         assert.equal(
           check.stdout.trim(),
-          '1|1',
+          '1|1|1|1',
           'promotion must target the normalized lowercase email the backend stored — a raw-uppercase promotion would find 0 rows and roll back',
         )
       } finally {
@@ -895,7 +938,7 @@ test(
 )
 
 test(
-  'golden (real Docker): re-running the SHIPPED script is idempotent (still exit 0, still 1/1)',
+  'golden (real Docker): re-running the SHIPPED script is idempotent (still one admin and one active default membership)',
   { skip: GOLDEN_SKIP ?? false },
   () => {
     withGoldenStack(({ backend, pg }) => {
@@ -907,12 +950,44 @@ test(
         assert.equal(r2.status, 0, `re-run must succeed; stdout:\n${r2.stdout}\nstderr:\n${r2.stderr}`)
         assert.match(r2.stdout, /register: status=409 ALREADY_EXISTS\(idempotent\)/)
         const check = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
-          input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin');`,
+          input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com'), (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin'), (SELECT count(*) FROM user_orgs uo JOIN users u ON u.id=uo.user_id WHERE u.email='l1-battery-admin@example.com' AND uo.is_active=TRUE), (SELECT count(*) FROM user_orgs uo JOIN users u ON u.id=uo.user_id WHERE u.email='l1-battery-admin@example.com' AND uo.org_id='default' AND uo.is_active=TRUE);`,
         })
-        assert.equal(check.stdout.trim(), '1|1')
+        assert.equal(check.stdout.trim(), '1|1|1|1')
       } finally {
         rmSync(dir, { recursive: true, force: true })
         rmSync(dir2, { recursive: true, force: true })
+      }
+    })
+  },
+)
+
+test(
+  'golden (real Docker): a deactivated default membership is not resurrected and the whole promotion rolls back',
+  { skip: GOLDEN_SKIP ?? false },
+  () => {
+    withGoldenStack(({ backend, pg }) => {
+      const email = 'l1-battery-admin@example.com'
+      const userId = mockUserId(email)
+      const { dir, f } = makePwFile('S3cure-Passw0rd!battery')
+      try {
+        const seed = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-v', 'ON_ERROR_STOP=1'], {
+          input: `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ('${userId}', 'default', FALSE);`,
+        })
+        assert.equal(seed.status, 0, `deactivated membership seed must succeed: ${seed.stderr}`)
+
+        const before = readAccountState(pg, email)
+        assert.equal(before, 'user|0|0|0')
+        const run = runScript(f, backend, pg)
+        assert.notEqual(run.status, 0, 'a prior deactivation must fail closed instead of being overwritten')
+
+        const after = readAccountState(pg, email)
+        assert.equal(after, before, 'role, RBAC grant, and active-org state must all roll back')
+        const inactive = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
+          input: `SELECT count(*) FROM user_orgs WHERE user_id='${userId}' AND org_id='default' AND is_active=FALSE;`,
+        })
+        assert.equal(inactive.stdout.trim(), '1', 'the operator-deactivated membership must remain inactive')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
       }
     })
   },
@@ -1004,9 +1079,10 @@ test(
         input:
           `SELECT (SELECT role FROM users WHERE id='id-B'),` +
           `(SELECT count(*) FROM user_roles WHERE user_id='id-B'),` +
-          `(SELECT count(*) FROM user_roles WHERE user_id='id-A');`,
+          `(SELECT count(*) FROM user_roles WHERE user_id='id-A'),` +
+          `(SELECT count(*) FROM user_orgs WHERE user_id IN ('id-A','id-B'));`,
       })
-      assert.equal(check.stdout.trim(), 'user|0|0', 'a mismatched id must grant nothing to B and must not promote A either')
+      assert.equal(check.stdout.trim(), 'user|0|0|0', 'a mismatched id must grant no role or org membership')
     })
   },
 )

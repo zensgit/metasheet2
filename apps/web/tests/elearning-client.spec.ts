@@ -50,13 +50,14 @@ const MEMBER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const REQUEST = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 const CHALLENGE = 'abababab-abab-4bab-8bab-abababababab'
 const CHALLENGE_OPTIONS = [
-  { optionId: '10101010-1010-4010-8010-101010101010', label: '●1' },
-  { optionId: '20202020-2020-4020-8020-202020202020', label: '▲2' },
-  { optionId: '30303030-3030-4030-8030-303030303030', label: '■3' },
-  { optionId: '40404040-4040-4040-8040-404040404040', label: '◆4' },
-  { optionId: '50505050-5050-4050-8050-505050505050', label: '★5' },
-  { optionId: '60606060-6060-4060-8060-606060606060', label: '♥6' },
+  { optionId: '10101010-1010-4010-8010-101010101010', x: 24, y: 112, width: 92, height: 62 },
+  { optionId: '20202020-2020-4020-8020-202020202020', x: 134, y: 112, width: 92, height: 62 },
+  { optionId: '30303030-3030-4030-8030-303030303030', x: 244, y: 112, width: 92, height: 62 },
+  { optionId: '40404040-4040-4040-8040-404040404040', x: 24, y: 186, width: 92, height: 62 },
+  { optionId: '50505050-5050-4050-8050-505050505050', x: 134, y: 186, width: 92, height: 62 },
+  { optionId: '60606060-6060-4060-8060-606060606060', x: 244, y: 186, width: 92, height: 62 },
 ] as const
+const CHALLENGE_IMAGE = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
 const CHALLENGE_SELECTIONS = [
   CHALLENGE_OPTIONS[1].optionId,
   CHALLENGE_OPTIONS[4].optionId,
@@ -111,8 +112,10 @@ function watchChallenge(over: Record<string, unknown> = {}) {
     deadlineAt: CREATED_AT,
     ordinal: 2,
     status: 'challenged',
-    promptVersion: 'symbol-number-v1',
-    targets: [CHALLENGE_OPTIONS[1].label, CHALLENGE_OPTIONS[4].label],
+    promptVersion: 'raster-position-v2',
+    imagePngBase64: CHALLENGE_IMAGE,
+    imageWidth: 360,
+    imageHeight: 260,
     options: CHALLENGE_OPTIONS,
     ...over,
   }
@@ -581,7 +584,11 @@ describe('elearning client transport', () => {
     ['invalid challenge status', { challenge: watchChallenge({ status: 'unknown' }) }],
     ['unknown prompt version', { challenge: watchChallenge({ promptVersion: 'unknown' }) }],
     ['duplicate option id', { challenge: watchChallenge({ options: CHALLENGE_OPTIONS.map((option, index) => index === 5 ? { ...option, optionId: CHALLENGE_OPTIONS[0].optionId } : option) }) }],
-    ['missing target option', { challenge: watchChallenge({ targets: ['☂9', CHALLENGE_OPTIONS[4].label] }) }],
+    ['machine-readable target leak', { challenge: watchChallenge({ targets: ['▲2', '★5'] }) }],
+    ['machine-readable label leak', { challenge: watchChallenge({ options: CHALLENGE_OPTIONS.map((option, index) => ({ ...option, label: `leak-${index}` })) }) }],
+    ['invalid image payload', { challenge: watchChallenge({ imagePngBase64: 'not-a-png' }) }],
+    ['out-of-bounds option', { challenge: watchChallenge({ options: CHALLENGE_OPTIONS.map((option, index) => index === 5 ? { ...option, x: 359 } : option) }) }],
+    ['overlapping options', { challenge: watchChallenge({ options: CHALLENGE_OPTIONS.map((option, index) => index === 5 ? { ...option, x: 24, y: 112 } : option) }) }],
     ['challenge on completed watch', { status: 'completed', challenge: watchChallenge() }],
   ])('rejects %s in a watch response', async (_label, over) => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(200, watchState(over)))

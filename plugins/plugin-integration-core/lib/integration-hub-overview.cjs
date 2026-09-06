@@ -209,6 +209,8 @@ function describeWriteCapability(kind) {
  * `config` as an object: it pulls one string by name and drops the rest on the floor.
  */
 function readDataSourcePointer(system) {
+  const canonical = trimmedString(system && system.connectionId)
+  if (canonical) return canonical
   const config = isPlainObject(system && system.config) ? system.config : null
   if (!config) return null
   return trimmedString(config.dataSourceId)

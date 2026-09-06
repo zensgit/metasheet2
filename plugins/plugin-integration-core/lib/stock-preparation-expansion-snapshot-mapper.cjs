@@ -48,6 +48,11 @@ const MISSING_CHILD_BOM_ROW_ERROR = 'missing_child_bom'
 // stock-preparation-readonly-intake.cjs so routing an expansion row through either path yields one value.
 const DESIGN_QTY_KEYS = Object.freeze(['designQty', 'rawQuantity', 'totalQuantity'])
 
+// 规格. The expansion emits `spec` only where the read plan DECLARED a spec column
+// (readPlan.part.specField); `specification` is accepted so a row that came in through the readonly
+// intake vocabulary maps identically. Closed list, same discipline as DESIGN_QTY_KEYS.
+const SPEC_KEYS = Object.freeze(['spec', 'specification'])
+
 class StockPreparationExpansionSnapshotMapperError extends Error {
   constructor(message, details = {}) {
     super(message)
@@ -143,11 +148,34 @@ function toSnapshotLine({ row, parentIndex, snapshotBatchId, defaultDesignUnit }
       (parent ? firstValue(parent, ['componentCode']) : null),
     parentVersion: firstValue(row, ['parentVersion']) ||
       (parent ? firstValue(parent, ['sourceVersion']) : null),
+    // 父组件名称. The expansion never emits a parentName key at all — the parent is only an OBJ_ID on
+    // the child row — so it resolves the same way parentDrawingNo/parentVersion already do: through
+    // the in-batch parentIndex, reading the PARENT row's componentName. Closed vocabulary, same
+    // ordering discipline (explicit key first, then the indexed parent), no invention.
+    parentName: firstValue(row, ['parentName']) ||
+      (parent ? firstValue(parent, ['componentName']) : null),
     childDrawingNo: firstValue(row, ['childDrawingNo', 'componentCode']),
     childVersion: firstValue(row, ['childVersion', 'sourceVersion']),
+    // 当前组件/零件名称. The expansion HAS carried componentName since the MVP (createRow reads the
+    // plan's part.nameField); it was read and then dropped here. Persisting it is what lets the
+    // material matcher's plmNameOf() see a name instead of a bare drawing number.
+    childName: firstValue(row, ['childName', 'componentName']),
+    // Fingerprint decomposition (stock-prep-change-adjudication-20260901): material is persisted as a
+    // first-class line field so the diff can raise MATERIAL_CHANGED by name. It was ALREADY part of
+    // sourceIdentity (hashed below), so the fingerprint computation is unchanged — historical batches
+    // simply lack the field and the diff falls back to the fingerprint for that dimension.
+    material: firstValue(row, ['material']),
+    // 规格. Present only where the deployment DECLARED a spec column on its read plan
+    // (readPlan.part.specField). Undeclared => the expansion row has no `spec` key => firstValue
+    // yields null => clean() drops it. Absence, never a guessed column and never an empty string.
+    spec: firstValue(row, SPEC_KEYS),
     bomLevel: firstNumber(row, ['bomLevel', 'depth']),
     pathKey,
     designQty: firstNumber(row, DESIGN_QTY_KEYS),
+    // 总数量. DESIGN_QTY_KEYS deliberately falls back to totalQuantity for designQty, which meant a
+    // row carrying BOTH persisted only the per-level number and the rollup was lost. This keeps the
+    // rollup as its own field; designQty's own resolution is untouched.
+    totalQuantity: firstNumber(row, ['totalQuantity']),
     designUnit: firstValue(row, ['designUnit', 'unit']) || defaultDesignUnit || null,
     lineStatus: firstValue(row, ['lineStatus']) ||
       (row && row.active === false ? LINE_STATUSES.INACTIVE : LINE_STATUSES.ACTIVE),
@@ -267,6 +295,7 @@ module.exports = {
   LINE_STATUSES,
   MISSING_CHILD_BOM_ROW_ERROR,
   DESIGN_QTY_KEYS,
+  SPEC_KEYS,
   StockPreparationExpansionSnapshotMapperError,
   mapExpansionRowsToSnapshotLines,
   summarizeExpansionSnapshotMappingForEvidence,

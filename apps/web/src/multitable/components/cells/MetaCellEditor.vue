@@ -1,5 +1,5 @@
 <template>
-  <div class="meta-cell-editor">
+  <div class="meta-cell-editor" ref="editorRoot">
     <!-- date field type -->
     <input
       v-if="field.type === 'date'"
@@ -8,8 +8,10 @@
       type="date"
       :value="textControlValue(scalarActive ? scalarValue : modelValue)"
       @input="commitScalar(($event.target as HTMLInputElement).value)"
-      @keydown.enter="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
+      @keydown.tab="onScalarTab"
+      @blur="onScalarBlur"
     />
     <!-- datetime field type -->
     <input
@@ -19,8 +21,8 @@
       type="datetime-local"
       :value="dateTimeInputValue(scalarActive ? scalarValue : modelValue)"
       @input="commitScalar(dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
-      @keydown.enter="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
     />
     <!-- string: date-like -->
     <input
@@ -30,8 +32,10 @@
       type="date"
       :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
+      @keydown.tab="onPlainTab"
+      @blur="onPlainBlur"
     />
     <!-- string: normal -->
     <div v-else-if="field.type === 'string'" class="meta-cell-editor__text-wrap">
@@ -41,8 +45,10 @@
         type="text"
         :value="yjsActive ? yjsText : (modelValue ?? '')"
         @input="onTextInput"
-        @keydown.enter="onTextConfirm"
-        @keydown.escape="emit('cancel')"
+        @keydown.enter="onEnterTextConfirm"
+        @keydown.escape="onEscapeCancel"
+        @keydown.tab="onTextTab"
+        @blur="onTextBlur"
       />
       <MetaYjsPresenceChip
         v-if="yjsActive && yjsCollaborators.length > 0"
@@ -72,9 +78,9 @@
       rows="4"
       :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
-      @keydown.meta.enter.prevent="emit('confirm')"
-      @keydown.ctrl.enter.prevent="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.meta.enter.prevent="onEnterConfirm"
+      @keydown.ctrl.enter.prevent="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- barcode: text-backed field; scanner/image generation is out of scope. -->
@@ -87,8 +93,8 @@
       :placeholder="l('cell.barcodePlaceholder')"
       :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- qrcode: text-backed source string; the QR image renders read-only in the cell/drawer. -->
@@ -101,8 +107,8 @@
       :placeholder="l('cell.qrcodePlaceholder')"
       :value="textControlValue(modelValue)"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- location: address-only editor; coordinates can still be supplied through API. -->
@@ -114,8 +120,8 @@
       :placeholder="l('cell.locationPlaceholder')"
       :value="locationAddressValue(modelValue)"
       @input="emit('update:modelValue', locationValueFromAddress(($event.target as HTMLInputElement).value))"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- number -->
@@ -127,8 +133,10 @@
       :step="numericStep"
       :value="scalarActive ? (scalarValue ?? '') : (modelValue ?? '')"
       @input="onNumberInput"
-      @keydown.enter="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
+      @keydown.tab="onScalarTab"
+      @blur="onScalarBlur"
     />
 
     <!-- boolean -->
@@ -148,7 +156,7 @@
       class="meta-cell-editor__select"
       :value="(scalarActive ? scalarValue : modelValue) ?? ''"
       @change="commitScalar(($event.target as HTMLSelectElement).value); scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.escape="onEscapeCancel"
     >
       <option value="">—</option>
       <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">
@@ -164,9 +172,9 @@
       multiple
       :value="multiSelectValue"
       @change="onMultiSelectChange"
-      @keydown.meta.enter.prevent="scalarConfirm()"
-      @keydown.ctrl.enter.prevent="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.meta.enter.prevent="onEnterScalarConfirm"
+      @keydown.ctrl.enter.prevent="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
     >
       <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">
         {{ opt.value }}
@@ -197,8 +205,8 @@
       :step="numericStep"
       :value="scalarActive ? (scalarValue ?? '') : (modelValue ?? '')"
       @input="onNumberInput"
-      @keydown.enter="scalarConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterScalarConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- duration: format-aware text (h:mm / mm:ss) parsed to seconds. A LOCAL
@@ -215,8 +223,8 @@
       :placeholder="durationFormat"
       :value="durationText"
       @input="onDurationInput"
-      @keydown.enter="durationConfirm()"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterDurationConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- rating: click-to-set stars -->
@@ -246,8 +254,8 @@
       placeholder="https://example.com"
       :value="modelValue ?? ''"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
     <input
       v-else-if="field.type === 'email'"
@@ -257,8 +265,8 @@
       placeholder="name@example.com"
       :value="modelValue ?? ''"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
     <input
       v-else-if="field.type === 'phone'"
@@ -268,8 +276,8 @@
       placeholder="+86 138 0000 0000"
       :value="modelValue ?? ''"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @keydown.enter="emit('confirm')"
-      @keydown.escape="emit('cancel')"
+      @keydown.enter="onEnterConfirm"
+      @keydown.escape="onEscapeCancel"
     />
 
     <!-- attachment -->
@@ -290,7 +298,7 @@
             class="meta-cell-editor__file-input"
             :disabled="!!attachmentActivity || uploading"
             @change="onFileSelect"
-            @keydown.escape="emit('cancel')"
+            @keydown.escape="onEscapeCancel"
           />
           <span
             class="meta-cell-editor__file-trigger-label"
@@ -329,9 +337,11 @@
       v-if="aiRunVisible"
       type="button"
       class="meta-cell-editor__link-btn meta-cell-editor__ai-run"
-      :disabled="aiRunState?.pending || aiRunState?.busy"
+      :disabled="aiRunDisabled"
       data-test="cell-ai-run"
       @click="emit('ai-run')"
+      @keydown.tab="onAiRunTab"
+      @blur="onAiRunBlur"
     >{{ aiRunState?.pending ? l('cell.aiRunning') : l('cell.aiRun') }}</button>
   </div>
 </template>
@@ -366,6 +376,7 @@ import {
 } from '../../utils/field-display'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 import { useYjsScalarCell, type YjsScalarCellBinding } from '../../composables/useYjsScalarCell'
+import { isDateLikeStringField, isYjsTextEligible } from '../../utils/yjs-text-eligibility'
 import { useLocale } from '../../../composables/useLocale'
 import {
   metaCoreLabel,
@@ -401,16 +412,38 @@ const props = defineProps<{
    * `commentMentionSuggestions` (no fresh fetch). Absent on the anonymous form path.
    */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  /**
+   * D2/P2-1 (grid-commit-reliability): the SOLE host opt-in switch for every
+   * commit/discard-on-blur AND commit-on-Tab behaviour this editor can emit
+   * (`blur-commit`, `cancel`-on-invalid-blur, `tab-commit`). MUST be
+   * requested by the host — MetaCellEditor cannot infer it:
+   *   - `'grid'`: MetaGridTable passes this and listens for `blur-commit` /
+   *     `tab-commit` (commits the draft, moves focus to the adjacent cell on
+   *     Tab). Native Tab, in a grid `<td>` that isn't itself in tab order,
+   *     would otherwise jump focus to whatever the next DOM tabindex happens
+   *     to be — preventDefault here is what fixes that.
+   *   - `'none'` / undefined (the default): plain native blur/Tab,
+   *     byte-identical to pre-D2. MetaBulkEditDialog relies on this — its
+   *     value input sits in an ordinary tab sequence with a "Set value"/
+   *     Cancel footer after it, and only listens for `@cancel` (Escape/close
+   *     button). P2-1: an EARLIER version of this gate covered Tab only;
+   *     blur was wired unconditionally, so `onScalarBlur`'s P3-C
+   *     invalid-numeric-draft path emitted `cancel` regardless of host —
+   *     which MetaBulkEditDialog's `@cancel="onCancel"` reads as "dismiss
+   *     the whole dialog". Blurring a number input mid-typing '-7' (a
+   *     WHATWG-sanitized-to-empty in-progress value, see
+   *     `numberInvalidRawDraft` below) silently closed the bulk-edit dialog.
+   *     Every blur handler now checks this policy FIRST, before anything
+   *     else (including before touching `numberInvalidRawDraft`), so a
+   *     `'none'`-policy host is a true no-op — see each handler below.
+   */
+  hostCommitPolicy?: 'none' | 'grid'
 }>()
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}/
-const DATE_FIELD_NAMES = /date|time|deadline|due|start|end|created|updated|birthday/i
-const isDateLike = computed(() => {
-  if (props.field.type !== 'string') return false
-  if (DATE_FIELD_NAMES.test(props.field.name)) return true
-  if (typeof props.modelValue === 'string' && DATE_RE.test(props.modelValue)) return true
-  return false
-})
+// isDateLikeStringField / isYjsTextEligible live in ../../utils/yjs-text-eligibility so
+// MetaGridTable's D1 type-to-edit can apply the IDENTICAL eligibility rule (see P3-1
+// below) without duplicating these regexes and risking drift.
+const isDateLike = computed(() => isDateLikeStringField(props.field, props.modelValue))
 
 const emit = defineEmits<{
   (e: 'update:modelValue', val: unknown): void
@@ -428,6 +461,45 @@ const emit = defineEmits<{
   (e: 'yjs-commit'): void
   /** A3: AI shortcut run requested for this cell (host resolves record/field). */
   (e: 'ai-run'): void
+  /**
+   * D2 (grid-commit-reliability): the editor's input lost focus to something
+   * OUTSIDE this editor (click-away / focus moved elsewhere in the page).
+   * Emitted ONLY by the plain scalar/text/number/date branches (see the
+   * per-branch `on*Blur` handlers below) — select/multiSelect/attachment/link
+   * are excluded because their native pickers legitimately steal focus
+   * mid-edit (a blur there is a false positive, not a click-away). The host
+   * commits the draft (same "only if changed" rule as `confirm`) and closes.
+   */
+  (e: 'blur-commit'): void
+  /**
+   * D2: Tab / Shift+Tab pressed while this editor is open. Emitted by the
+   * SAME four branches as `blur-commit` (see the enumeration above) — Tab is
+   * intentionally NOT wired as a delegated wrapper-level listener because
+   * that would also swallow Tab used for in-editor keyboard nav.
+   *
+   * P3-A (round 2): concretely, the string branch's own per-input handler
+   * (`onTextTab`) now honours that in-editor nav case rather than just
+   * describing it — when the AI-run button is rendered as a focusable
+   * sibling (`aiRunVisible`), a forward Tab is left un-intercepted so native
+   * focus movement reaches the button instead of the button becoming
+   * keyboard-unreachable; Tab FROM the button (`onAiRunTab`) still emits
+   * `tab-commit` like every other exit point. Shift+Tab out of the input is
+   * unaffected (there is nothing focusable BEFORE it to reach).
+   *
+   * Payload is `event.shiftKey` (true = move backward).
+   *
+   * KNOWN RESIDUAL (round 5, scoped out — see P3-4 on `blur-commit` above):
+   * `onAiRunTab` (Tab FROM the AI-run button) is reachable on a `longText`
+   * cell too (`aiRunVisible` admits `longText`, same as `blur-commit`'s
+   * button), but — unlike `onAiRunBlur`, gated this round — it has NO
+   * `field.type === 'longText'` exclusion, so it still emits `tab-commit`
+   * there, contradicting "the SAME four branches" for THIS event
+   * specifically. The verified finding this round named `blur-commit` only;
+   * left as a named, deliberate gap rather than silently drifting further —
+   * a follow-up should either gate `onAiRunTab` the same way or amend this
+   * doc.
+   */
+  (e: 'tab-commit', shiftKey: boolean): void
 }>()
 
 const { isZh } = useLocale()
@@ -440,6 +512,13 @@ const aiRunVisible = computed(() => {
   const raw = (props.field.property ?? {}).aiShortcut
   return Boolean(raw) && typeof raw === 'object' && !Array.isArray(raw)
 })
+// P2-2: the single source of truth for the button's own `:disabled` AND for
+// onTextTab's Tab-yield decision (see that handler's doc comment) — kept as
+// ONE computed so the two can never independently drift out of sync.
+const aiRunDisabled = computed(() => Boolean(props.aiRunState?.pending || props.aiRunState?.busy))
+// Rendered AND not disabled: a disabled <button> is never a native Tab stop,
+// so `aiRunVisible` alone over-promises reachability.
+const aiRunFocusable = computed(() => aiRunVisible.value && !aiRunDisabled.value)
 
 const readonlyDisplayValue = computed(() =>
   formatFieldDisplay({
@@ -475,7 +554,18 @@ const inertYjsBinding: YjsCellBinding = {
   collaborators: ref([]),
   release: () => { /* nothing to release */ },
 }
-const yjsEligibleAtSetup = props.field?.type === 'string' && !isDateLike.value && !!props.recordId
+// P3-1 (grid-commit-reliability, round 3): eligibility is the SAME predicate
+// MetaGridTable's D1 type-to-edit now checks (isYjsTextEligible, imported
+// above) BEFORE it ever seeds a keystroke — see that call site's doc comment
+// for the full story. Because D1 no longer seeds `modelValue` for a cell
+// this composable might bind, there is no local pre-activation draft left to
+// lose, so the previous "forward the pending draft into Y.Text the instant
+// the binding activates" watcher (keyed on `yjsText.value === ''`) has been
+// REMOVED rather than fixed: that heuristic could not tell "nobody has
+// synced anything yet" apart from "a collaborator just synced an empty
+// string", and resolving that ambiguity from the client is unsafe — see the
+// removed watcher in git history (P3-B, round 2) for the superseded attempt.
+const yjsEligibleAtSetup = isYjsTextEligible(props.field, props.recordId, props.modelValue)
 const yjsBinding = yjsEligibleAtSetup
   ? useYjsCellBinding({
       recordId: computed<string | null>(() => recordIdRef.value ?? null),
@@ -605,6 +695,231 @@ function onTextInput(event: Event) {
 function onTextConfirm() {
   if (yjsActive.value) emit('yjs-commit')
   emit('confirm')
+}
+
+// --- D3/D4 (grid-commit-reliability): Enter/Escape hardening ---------------
+// isComposing (Chrome/Firefox) or keyCode 229 (older Safari/IME shims) means
+// this keydown is part of an IME composition (confirming a candidate), not a
+// real Enter/Escape from the user — every confirm/cancel wrapper below bails
+// out on it so an IME confirm can never prematurely commit or close the cell.
+function isComposingEvent(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229
+}
+// D3: stopPropagation is the chosen mechanism for "Enter must not re-open the
+// editor" — MetaGridTable.confirmEdit() clears editCell.value synchronously,
+// and without this the SAME keydown would keep bubbling to the grid root's
+// `@keydown="onKeydown"`, where (editCell.value is now falsy) the Enter case
+// would immediately call startEdit() again on the just-committed cell. See
+// MetaGridTable.vue onKeydown for the matching grid-root-side guard.
+function onEnterConfirm(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  e.stopPropagation()
+  emit('confirm')
+}
+function onEnterScalarConfirm(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  e.stopPropagation()
+  // P3-C (round 2): Enter's behaviour is UNCHANGED by the P3-C fix below —
+  // an unresolved invalid numeric draft ('-'/'.', trailing '.') still
+  // commits `null` here, exactly like every OTHER keystroke's `onNumberInput`
+  // used to (byte-identical to pre-fix). Only blur/Tab (onScalarBlur /
+  // onScalarTab) now diverge and discard instead of persisting that null —
+  // see `numberInvalidRawDraft`'s doc comment on `onNumberInput` for why.
+  if (numberInvalidRawDraft.value) {
+    numberInvalidRawDraft.value = false
+    commitScalar(null)
+  }
+  scalarConfirm()
+}
+function onEnterTextConfirm(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  e.stopPropagation()
+  onTextConfirm()
+}
+function onEnterDurationConfirm(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  e.stopPropagation()
+  durationConfirm()
+}
+// Escape does NOT stopPropagation: that bubble-to-grid-root behavior
+// (resetting focusRow/focusCol) predates this PR and is out of scope here —
+// only the isComposing guard is new.
+function onEscapeCancel(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  emit('cancel')
+}
+
+// --- D2 (grid-commit-reliability): commit-on-blur / commit-on-Tab ----------
+// Wired ONLY on the plain scalar/text/number/date branches (date, the
+// date-like string, the normal string, and number) — see the `blur-commit` /
+// `tab-commit` emit doc comments above for why select/multiSelect/attachment/
+// link are excluded.
+const editorRoot = ref<HTMLElement | null>(null)
+// A blur whose relatedTarget is still WITHIN this editor (e.g. focus moving
+// from the text input to the sibling AI-run button) is an in-editor focus
+// move, not a click-away — ignore it. `e.relatedTarget` is unset in some
+// jsdom/browser file-picker paths too, which is exactly the sort of
+// ambiguity that keeps blur-commit off the attachment/link branches.
+function shouldIgnoreBlur(e: FocusEvent): boolean {
+  const related = e.relatedTarget as Node | null
+  return !!(related && editorRoot.value && editorRoot.value.contains(related))
+}
+// P2-1: `hostCommitPolicy !== 'grid'` is the FIRST statement in every blur
+// handler below — before `shouldIgnoreBlur`, before `numberInvalidRawDraft`.
+// A host that never opts in (MetaBulkEditDialog) must see these blur
+// handlers as a true no-op: no `blur-commit`, no `cancel`, and no mutation
+// of `numberInvalidRawDraft` as a side effect (clearing that flag on a
+// policy-'none' blur would still be observable — the NEXT event to read it,
+// e.g. a later Tab, would see a false "resolved" state that was never
+// actually resolved by anything the host asked for).
+function onScalarBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (shouldIgnoreBlur(e)) return
+  // P3-C/NIT: a blur while an invalid numeric draft is pending (see
+  // `numberInvalidRawDraft`). If NO valid draft was ever reached this edit
+  // session (e.g. a lone '-' as the very first keystroke), discard via
+  // `cancel` — the existing no-patch/close path (same one Escape already
+  // uses) — so this can never persist that keystroke's would-be `null`
+  // commit. If a valid draft WAS reached earlier ('7' before a trailing
+  // '.'), `numberHasValidDraft` is true and editCell's staged value already
+  // holds that last-valid number (onNumberInput never overwrote it with the
+  // invalid keystroke) — fall through and commit it normally instead of
+  // discarding the whole session (the number-prefix-loss NIT).
+  if (numberInvalidRawDraft.value) {
+    numberInvalidRawDraft.value = false
+    if (!numberHasValidDraft.value) {
+      emit('cancel')
+      return
+    }
+  }
+  if (scalarActive.value) emit('yjs-commit')
+  emit('blur-commit')
+}
+function onTextBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (shouldIgnoreBlur(e)) return
+  if (yjsActive.value) emit('yjs-commit')
+  emit('blur-commit')
+}
+function onPlainBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (shouldIgnoreBlur(e)) return
+  emit('blur-commit')
+}
+// preventDefault stops the browser's native Tab focus-jump (which would land
+// on whatever the next DOM tabindex happens to be, not the next grid cell) —
+// the host moves focus itself in response to `tab-commit`. stopPropagation
+// for the same reason as onEnterConfirm above. Gated on `props.hostCommitPolicy`
+// FIRST, before preventDefault/stopPropagation/any emit — without the gate,
+// a host that never opts in (MetaBulkEditDialog) would still have Tab
+// silently swallowed (preventDefault with no listener consuming the emit),
+// trapping keyboard focus inside the value input. See the prop doc comment
+// above for why this can't be inferred instead of asked for.
+function onScalarTab(e: KeyboardEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (isComposingEvent(e)) return
+  // P3-C/NIT: an invalid numeric draft pending with NO earlier valid draft
+  // this session → do NOT intercept. Returning before preventDefault lets
+  // the native Tab move focus out of the input as normal, which fires a
+  // genuine `blur` — `onScalarBlur` sees the same flags and discards there.
+  // One discard path (no new event, no dangling `document.body` focus from
+  // a preventDefault'd Tab that goes nowhere). When a valid draft WAS
+  // reached earlier, fall through to the normal intercept below so focus
+  // still moves to the adjacent cell (byte-identical to a resolved draft).
+  if (numberInvalidRawDraft.value && !numberHasValidDraft.value) return
+  e.preventDefault()
+  e.stopPropagation()
+  numberInvalidRawDraft.value = false
+  if (scalarActive.value) emit('yjs-commit')
+  emit('tab-commit', e.shiftKey)
+}
+function onTextTab(e: KeyboardEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (isComposingEvent(e)) return
+  // P3-A (round 2) / P2-2 (round 3): when the AI-run button renders as a
+  // focusable sibling (`aiRunFocusable`), a FORWARD Tab must reach it via
+  // native focus movement instead of being intercepted here — otherwise the
+  // button is keyboard-unreachable (Tab always commits+moves before focus
+  // can land on it). P2-2: `aiRunVisible` alone is not enough — the button
+  // can be RENDERED but `disabled` (pending/busy), and a disabled button is
+  // never a native Tab stop, so yielding to it in that state would just
+  // exit the grid's tab sequence entirely (native Tab moves past it to
+  // whatever the next document-order tabindex is) instead of committing.
+  // `aiRunFocusable` folds in the disabled check so this only yields when
+  // the button can actually receive focus. Tab FROM the button
+  // (`onAiRunTab` below) still commits+moves like this handler always has.
+  // Shift+Tab is unaffected: there is nothing focusable BEFORE the input in
+  // this branch, so shift+Tab has nowhere to land.
+  if (aiRunFocusable.value && !e.shiftKey) return
+  e.preventDefault()
+  e.stopPropagation()
+  if (yjsActive.value) emit('yjs-commit')
+  emit('tab-commit', e.shiftKey)
+}
+function onPlainTab(e: KeyboardEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (isComposingEvent(e)) return
+  e.preventDefault()
+  e.stopPropagation()
+  emit('tab-commit', e.shiftKey)
+}
+// P3-A: Tab pressed FROM the AI-run button (reached via the native focus
+// movement `onTextTab` now leaves alone) commits+moves exactly like Tab
+// from the input itself — the button is a valid exit point, not a dead
+// end. Shift+Tab is left alone (native default returns focus to the input,
+// which is the CORRECT "back" target — nothing to commit yet).
+// P3-2: mirrors onTextTab/onTextBlur's `yjs-commit` emit when the Yjs text
+// binding is live — this Tab exits the SAME text editor session those
+// handlers do (the button is a sibling of the same `<input>`), so omitting
+// it here left the host without the signal it needs to skip the redundant
+// REST patch once Yjs already carried the edit.
+function onAiRunTab(e: KeyboardEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (isComposingEvent(e)) return
+  if (e.shiftKey) return
+  e.preventDefault()
+  e.stopPropagation()
+  if (yjsActive.value) emit('yjs-commit')
+  emit('tab-commit', false)
+}
+// P3-1 (round 4): the AI-run button is a valid Tab STOP (onAiRunTab above,
+// reached via onTextTab's `aiRunFocusable` yield) but had no blur handler at
+// all — clicking away FROM the button (as opposed to Tab-ing out of it) hit
+// no listener, so the editor was left dangling: neither committed nor
+// cancelled, exactly the D2 "click-away must commit" defect this whole
+// grid-commit-reliability line exists to close, just reachable through one
+// more focus target. Mirrors onTextBlur exactly: same `hostCommitPolicy`
+// opt-in gate, same `shouldIgnoreBlur` exclusion for focus moving back INTO
+// the editor (e.g. Shift+Tab from the button returns to the input — an
+// in-editor focus move, not a click-away), same yjs-commit-before-
+// blur-commit order as every other blur handler here.
+//
+// P3-4 (round 5): `blur-commit`'s own emit-doc comment above says it is
+// emitted "ONLY by the plain scalar/text/number/date branches" — but
+// `aiRunVisible` renders this button for BOTH `string` AND `longText` fields
+// (see that computed), so this handler is reachable from a `longText` cell
+// too, where it contradicted that contract: `longText` uses Cmd/Ctrl+Enter
+// to confirm (see the plain-textarea/rich-longText branches' own
+// `@keydown.*.enter`), not blur — a blur-triggered commit there would fire
+// on an ordinary click into the AI-run button mid-edit, surprising for an
+// editor whose whole confirm story is "you must press Cmd/Ctrl+Enter".
+// Gated HERE (field-type check) rather than by editing the doc, so
+// `blur-commit`'s own "same four branches" claim stays true without
+// amendment. (`tab-commit`'s OWN doc, which merely points at this same
+// enumeration, is NOT restored to true by this fix alone — `onAiRunTab` has
+// no matching gate; see the "KNOWN RESIDUAL" note on that emit's own doc
+// comment above for why that is a deliberately scoped-out, named gap rather
+// than a silent one.) Order:
+// `hostCommitPolicy` stays the FIRST check (this file's P2-1 doctrine — a
+// `'none'`-policy host, e.g. MetaBulkEditDialog, must see this as a true
+// no-op before anything else runs), then the `longText` gate, then
+// `shouldIgnoreBlur`.
+function onAiRunBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (props.field.type === 'longText') return
+  if (shouldIgnoreBlur(e)) return
+  if (yjsActive.value) emit('yjs-commit')
+  emit('blur-commit')
 }
 
 const inputRef = ref<HTMLElement | null>(null)
@@ -738,8 +1053,82 @@ function onFileDrop(e: DragEvent) {
   if (files?.length) void uploadFiles(files)
 }
 
+// P3-C (grid-commit-reliability, round 2): a number `<input>`'s `.value`
+// getter sanitizes an in-progress-but-invalid floating-point string (a lone
+// '-'/'.', a trailing '.') to '' — IDENTICAL to a genuinely emptied field
+// (WHATWG "value sanitization algorithm" for type=number; jsdom reproduces
+// it too). `onNumberInput` alone can't tell "the user cleared this field"
+// from "the user is mid-typing a negative/decimal number".
+//
+// The signal that survives the sanitization is the native InputEvent's own
+// `inputType`: an `insert*` type (insertText, insertFromPaste, ...) means
+// the empty `.value` is a REJECTED, still-in-progress edit; a `delete*` /
+// `historyUndo` type means the user actually cleared the field. (Deliberately
+// NOT keyed on `event.data`: a paste or the number input's spinner can carry
+// truthy `data` while genuinely representing a clear/replace, so `inputType`
+// is the narrower, correct discriminator.)
+//
+// On that "still typing" keystroke, do NOT commit — `numberInvalidRawDraft`
+// is the ONLY state that reflects it; `editCell.value.value` (the draft
+// MetaGridTable would patch) is left exactly as it was before this
+// keystroke. This matters beyond blur/Tab: startEdit's/onCellClick's
+// commit-previous guards and any other confirmEdit() caller that might fire
+// mid-typing read that same draft — leaving it untouched means NONE of them
+// can ever persist a `null` the user never asked to commit. `onScalarBlur`/
+// `onScalarTab` below discard explicitly (and quickly, via the flag) rather
+// than relying on that alone, but the flag is what makes "no commit
+// happened" true in the first place. `onEnterScalarConfirm` re-derives the
+// null commit explicitly so Enter's own behaviour stays exactly what it was
+// before this fix (see its doc comment) — Enter is the ONE path that still
+// intentionally commits null here.
+//
+// NIT (round 3, number-prefix loss): the ORIGINAL P3-C fix above stopped the
+// invalid-draft's OWN keystroke from committing `null`, but blur/Tab then
+// discarded the WHOLE session unconditionally on any pending invalid draft —
+// so typing '7' (a resolved, committed draft) then '.' (sanitizes to '',
+// invalid) and blurring lost the 7, not just the '.'. `numberHasValidDraft`
+// tracks whether a resolved value was EVER reached this session; it is set
+// ONLY in the resolved branch below — never pre-seeded from the initial
+// `modelValue` on mount — so a session whose very FIRST keystroke is invalid
+// ('-' alone, nothing resolved yet) still discards on blur/Tab exactly as
+// before. `onScalarBlur`/`onScalarTab` read this flag alongside
+// `numberInvalidRawDraft` to decide discard vs. commit-the-last-resolved-
+// value; `onEnterScalarConfirm` is UNCHANGED by this — Enter keeps
+// committing `null` on an unresolved invalid draft regardless.
+const numberInvalidRawDraft = ref(false)
+const numberHasValidDraft = ref(false)
+// P2 (round 4): this in-progress-draft tracking is opt-in state for the SAME
+// `hostCommitPolicy === 'grid'` host (MetaGridTable) that opts into
+// blur/Tab-commit above — it exists to feed onScalarBlur/onScalarTab's
+// discard-vs-commit-last-valid decision, which are themselves already gated
+// on `hostCommitPolicy`. A host that never opts in (MetaBulkEditDialog,
+// `hostCommitPolicy` left unset → 'none') has no blur/Tab-commit reading
+// these flags at all, so leaving this logic ungated here was a silent
+// behavioural DIVERGENCE from main, not a no-op: on 'none', a resolved
+// draft ('7') followed by an in-progress invalid keystroke ('.', which the
+// WHATWG number-input value-sanitization algorithm reports as '' from
+// `.value` while still mid-edit) used to skip the `commitScalar(null)` call
+// main always made on every keystroke — so `value.value` stayed at the
+// stale last-valid 7 (and, since MetaBulkEditDialog reads that same
+// `value` ref for "Set value"'s disabled state, the button stayed ENABLED)
+// instead of committing `null` and disabling it, exactly like main. Gating
+// this block on `hostCommitPolicy === 'grid'` FIRST — before touching either
+// flag — restores byte-identical main behaviour for 'none': every keystroke
+// commits `v === '' ? null : Number(v)` unconditionally, regardless of
+// `inputType`.
 function onNumberInput(e: Event) {
   const v = (e.target as HTMLInputElement).value
+  if (props.hostCommitPolicy !== 'grid') {
+    commitScalar(v === '' ? null : Number(v))
+    return
+  }
+  const inputType = (e as InputEvent).inputType ?? ''
+  if (v === '' && inputType.startsWith('insert')) {
+    numberInvalidRawDraft.value = true
+    return
+  }
+  numberInvalidRawDraft.value = false
+  numberHasValidDraft.value = true
   commitScalar(v === '' ? null : Number(v))
 }
 

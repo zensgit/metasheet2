@@ -72,8 +72,37 @@ const PLANNED_AT = '2026-01-02T03:04:05.000Z'
  * script> && git stash pop` reproduces it. If a legitimate change to the CANONICAL
  * plan shape ever moves this digest, it must be re-captured the same way and the move
  * justified — it means the "no pack fields => zero behaviour change" contract broke.
+ *
+ * RE-PINNED ONCE (was 718f1810…d793f): 备料主表 gained parentComponentCode /
+ * parentComponentName / componentSpec. Re-captured by the documented procedure
+ * (`git stash && node <that script> && git stash pop`), and the whole plan diffed field
+ * by field against the stashed run. EXACTLY two things moved, neither of them a pack
+ * fact:
+ *   1. `summary.plmSystemFields` — DERIVED from the template's plm_system band, so it
+ *      grew the three ids.
+ *   2. the CMP-0002 UPDATE patch carries parentComponentCode / parentComponentName. The
+ *      patch is a full `pickFields(row, plmFields)` projection, so every plm cell that
+ *      is present rides it; `changedFields` did NOT grow (the fixture's existing row
+ *      already matches the derived parent), and the decision stays an UPDATE for the
+ *      same quantity reason it always was.
+ * No count, no decision kind, no conflictSummary, no human field, and no ext_ column
+ * moved — the "no pack fields => zero behaviour change" contract is intact.
+ *
+ * RE-PINNED DELIBERATELY (again, was 16df242d…0ea8f0 after the step above): the canonical template gained the
+ * five human_preserved columns `makeOrBuy` / `procurementDone` / `procurementReplyDate` /
+ * `warehouseDone` / `actualArrivalDate`, so the plan's `humanPreservedFields` array — the
+ * planner's report of what a refresh must NOT touch — is five entries longer.
+ *
+ * THE MOVE WAS FALSIFIED BEFORE IT WAS ACCEPTED, which is the only reason it is allowed to
+ * move at all. Taking the NEW plan and deleting exactly those five ids from that ONE array
+ * (nothing else touched, one array rolled back) reproduces the PREVIOUS digest
+ * 16df242d…0ea8f0 BYTE-FOR-BYTE. So every decision, every count
+ * (add 1 / update 1 / skip 1 / inactive 1 / manual_confirm 0), every row and the whole
+ * plmSystemFields band are UNCHANGED: the contract this pin defends — "no pack fields =>
+ * zero behaviour change" — still holds. The larger protected set is the intended effect of
+ * the template growth, not a behaviour change in the planner.
  */
-const CONTROL_PLAN_SHA256 = '718f18109c5b9311b2898eea25031971d59d841d85d25e3e491d9d48363d793f'
+const CONTROL_PLAN_SHA256 = '10bb6cbbf386775d798921947a5d225731bb7c43f2063ee1420822cf88ec71f8'
 
 function expandedRows() {
   return [
@@ -133,6 +162,12 @@ function existingRows() {
       projectNo: 'PRJ-CTL',
       componentSourceId: 'CMP-0002',
       parentSourceId: 'CMP-0001',
+      // 备料主表's denormalized parent columns, as a sheet at the CURRENT schema carries them.
+      // The planner derives these from the in-batch parent (CMP-0001) at record construction, so a
+      // fixture that omitted them would model a sheet mid-backfill and turn the SKIP row below into
+      // an UPDATE — losing this suite's four-decision coverage for a reason unrelated to packs.
+      parentComponentCode: 'C-0001',
+      parentComponentName: 'component one',
       path: 'CMP-0001/CMP-0002',
       componentCode: 'C-0002',
       componentName: 'component two',
@@ -151,6 +186,8 @@ function existingRows() {
       projectNo: 'PRJ-CTL',
       componentSourceId: 'CMP-0003',
       parentSourceId: 'CMP-0001',
+      parentComponentCode: 'C-0001',
+      parentComponentName: 'component one',
       path: 'CMP-0001/CMP-0003',
       componentCode: 'C-0003',
       componentName: 'component three',
@@ -244,7 +281,7 @@ const EXT_PLM_SECOND = 'ext_plmSurfaceTreatment'
 const EXT_HUMAN = 'ext_stockPrepDate'
 const EXT_PINNED = 'ext_createdSource'
 
-/** A realistic installed sheet: 25 canonical columns + a small pack band. */
+/** A realistic installed sheet: 28 canonical columns + a small pack band. */
 function installedWithPack(extra = []) {
   return canonicalInstalledFields().concat([
     installedField(EXT_PLM, packStanza('plm_system')),

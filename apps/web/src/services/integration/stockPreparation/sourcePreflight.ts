@@ -217,6 +217,22 @@ export interface StockPrepSourceQuantityField {
   numericDensityFloor: number
 }
 
+/**
+ * WHOSE IDENTITY THE PULL READS UNDER — the one check that is about OUR side, not the customer's.
+ *
+ * `data-source:*` bindings are authorized by the host on strict owner equality, so unless the
+ * external system carries a server-held owner stamp, only the person who bound the connection can
+ * ever pull through it — however perfect the catalog is. `evaluated: false` means the server did not
+ * answer the question (an older server, or a source kind that carries no data-source binding at all);
+ * both `bindingShape` and `reason` come from closed server vocabularies and are never an id.
+ */
+export interface StockPrepSourcePullDelegation {
+  evaluated: boolean
+  available: boolean | null
+  bindingShape: 'canonical' | 'legacy' | 'unbound' | null
+  reason: 'binding_owner_unstamped' | null
+}
+
 export interface StockPrepSourcePreflight {
   ok: boolean
   verdict: 'go' | 'no-go'
@@ -231,6 +247,8 @@ export interface StockPrepSourcePreflight {
     topology: StockPrepSourceTopology
     presetMatch: StockPrepSourcePresetMatch
     quantityField: StockPrepSourceQuantityField
+    /** Optional: a server that predates this check sends no such key, and the row reads "not checked". */
+    pullDelegation?: StockPrepSourcePullDelegation
   }
   blockers: StockPrepSourceFinding[]
   warnings: StockPrepSourceFinding[]
@@ -295,23 +313,35 @@ export async function readStockPreparationSourcePreflight(
 }
 
 // ---------------------------------------------------------------------------
-// The four lines the panel leads with.
+// The lines the panel leads with.
 //
 // Deliberately a PROJECTION, not a re-derivation: each row's `ok` comes from a field the server
 // already decided, so the page cannot disagree with the verdict it is rendering.
 // ---------------------------------------------------------------------------
 
-export type StockPrepSourceCheckId = 'reachable' | 'has-data' | 'bom-store' | 'topology' | 'preset'
+export type StockPrepSourceCheckId =
+  | 'reachable'
+  | 'has-data'
+  | 'bom-store'
+  | 'topology'
+  | 'preset'
+  | 'pull-delegation'
 
 export interface StockPrepSourceCheckRow {
   id: StockPrepSourceCheckId
   ok: boolean
+  /**
+   * THE THIRD STATE. `ok` alone cannot say "the server did not answer this question", and rendering
+   * an unanswered check as 是 would be a claim nobody made. Only ever true where the server itself
+   * reports the check as unevaluated — never as a way to soften a real refusal.
+   */
+  unknown?: boolean
   /** The measured reading, as a short token an implementer can quote. Never a business value. */
   token: string
 }
 
 export function stockPrepSourceCheckRows(preflight: StockPrepSourcePreflight): StockPrepSourceCheckRow[] {
-  const { reachability, projectData, bomData, bomStore, topology, presetMatch } = preflight.checks
+  const { reachability, projectData, bomData, bomStore, topology, presetMatch, pullDelegation } = preflight.checks
   const bridge = topology.detectedBridge
   return [
     {
@@ -350,6 +380,22 @@ export function stockPrepSourceCheckRows(preflight: StockPrepSourcePreflight): S
       token: presetMatch.presetId
         ? `${presetMatch.presetId} (${presetMatch.matchedSignatureTables}/${presetMatch.requiredSignatureTables ?? '?'})`
         : presetMatch.reason,
+    },
+    // WHOSE IDENTITY THE PULL READS UNDER. Last, because it presupposes a source worth reading — and
+    // it is the only line here that is about our own binding rather than the customer's schema.
+    //
+    // `ok` is "this is not a blocker": the server raises `pull_principal_delegation_unavailable`
+    // exactly when `available === false`, so an UNEVALUATED check must not render as a refusal — and
+    // `unknown` is what keeps it from rendering as a pass either.
+    {
+      id: 'pull-delegation',
+      ok: !pullDelegation || pullDelegation.available !== false,
+      unknown: !pullDelegation || pullDelegation.evaluated !== true,
+      token: !pullDelegation || pullDelegation.evaluated !== true
+        ? 'not-evaluated'
+        : pullDelegation.available === true
+          ? `available (${pullDelegation.bindingShape ?? 'unknown-shape'})`
+          : `unavailable (${pullDelegation.bindingShape ?? 'unknown-shape'} · ${pullDelegation.reason ?? 'unknown'})`,
     },
   ]
 }

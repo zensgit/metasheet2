@@ -83,9 +83,14 @@ function system(overrides = {}) {
   }
 }
 
+const SECOND_PLM = 'sys_customer_plm_2'
+
 const DEFAULT_SYSTEMS = Object.freeze([
   system({ id: ENV_DEFAULT_SOURCE, name: '内置演示源', config: { dataSourceId: 'ds_demo' } }),
   system(),
+  // A SECOND source of the action's own kind, so a rebind can be exercised without crossing kinds
+  // (which R-20 proves is refused).
+  system({ id: SECOND_PLM, name: '客户 PLM 备用库', config: { dataSourceId: 'ds_customer_2' } }),
   system({ id: 'sys_bridge', name: '旧库桥接', kind: 'bridge:legacy-sql-readonly', config: {} }),
   system({ id: 'sys_k3_write', name: 'K3 写接口', kind: 'erp:k3-wise-webapi', role: 'target', config: {} }),
   system({ id: 'sys_inactive', name: '未启用源', status: 'inactive' }),
@@ -107,6 +112,19 @@ function createDataSourceDirectory() {
   }
 }
 
+// Mirrors external-systems.cjs's own `selectScopedRow`: exact (tenant, workspace, id) first; a
+// NON-null hint that misses falls back ONCE to the tenant-wide (workspace_id null) row; a NULL hint
+// that misses never widens. F3/R-22 need this fidelity — the whole point of that test is that
+// `loadTableActionSourceAdapter` must hand this lookup the RIGHT hint, and a fake that ignored
+// workspace entirely (as this one used to) could never fail that test even with the fix reverted.
+function selectScopedSystem(systems, { tenantId, workspaceId = null, id }) {
+  const hint = workspaceId ?? null
+  const exact = systems.find((entry) => entry.id === id && entry.tenantId === tenantId && (entry.workspaceId ?? null) === hint)
+  if (exact) return exact
+  if (hint === null) return null
+  return systems.find((entry) => entry.id === id && entry.tenantId === tenantId && (entry.workspaceId ?? null) === null) || null
+}
+
 function createExternalSystemRegistry(systems = DEFAULT_SYSTEMS) {
   const calls = []
   return {
@@ -115,14 +133,14 @@ function createExternalSystemRegistry(systems = DEFAULT_SYSTEMS) {
       calls.push({ op: 'list', tenantId })
       return systems.filter((entry) => entry.tenantId === tenantId).map((entry) => ({ ...entry }))
     },
-    async getExternalSystem({ tenantId, id }) {
-      calls.push({ op: 'get', tenantId, id })
-      const found = systems.find((entry) => entry.id === id && entry.tenantId === tenantId)
+    async getExternalSystem({ tenantId, workspaceId = null, id }) {
+      calls.push({ op: 'get', tenantId, workspaceId, id })
+      const found = selectScopedSystem(systems, { tenantId, workspaceId, id })
       return found ? { ...found } : null
     },
-    async getExternalSystemForAdapter({ tenantId, id }) {
-      calls.push({ op: 'getForAdapter', tenantId, id })
-      const found = systems.find((entry) => entry.id === id && entry.tenantId === tenantId)
+    async getExternalSystemForAdapter({ tenantId, workspaceId = null, id }) {
+      calls.push({ op: 'getForAdapter', tenantId, workspaceId, id })
+      const found = selectScopedSystem(systems, { tenantId, workspaceId, id })
       return found ? { ...found } : null
     },
     async upsertExternalSystem() { throw new Error('unexpected upsertExternalSystem') },
@@ -453,17 +471,18 @@ async function main() {
     assert.equal(audits[0].detail.previousExternalSystemId, undefined, 'there was no previous binding')
     assert.equal(audits[0].detail.sourceKind, 'data-source:sql-readonly')
 
-    // A REBIND records the id it replaced — the old/new pair a reviewer needs.
-    await call(mounted.routes, 'POST', SET_ROUTE, { user: WRITER_ADMIN, body: { externalSystemId: 'sys_bridge' } })
+    // A REBIND records the id it replaced — the old/new pair a reviewer needs. Rebinding to a
+    // SECOND source of the action's own kind, because crossing kinds is refused outright (R-20).
+    await call(mounted.routes, 'POST', SET_ROUTE, { user: WRITER_ADMIN, body: { externalSystemId: SECOND_PLM } })
     const rebind = mounted.db.rows.filter((row) => row.__table === 'integration_stock_prep_audit')[1]
     assert.equal(rebind.mode, 'rebound')
     assert.equal(rebind.actor, WRITER_ADMIN.id)
-    assert.equal(rebind.subject_id, 'sys_bridge')
+    assert.equal(rebind.subject_id, SECOND_PLM)
     assert.equal(rebind.detail.previousExternalSystemId, CUSTOMER_PLM)
     assert.equal(rebind.detail.changed, true)
 
     // Re-confirming the SAME source is still recorded, as changed:false.
-    await call(mounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: 'sys_bridge' } })
+    await call(mounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: SECOND_PLM } })
     const resave = mounted.db.rows.filter((row) => row.__table === 'integration_stock_prep_audit')[2]
     assert.equal(resave.detail.changed, false)
     assert.equal(resave.mode, 'rebound')
@@ -496,10 +515,11 @@ async function main() {
     assert.equal(data.takesEffectWithoutRestart, true)
 
     const offered = data.eligibleSources.map((row) => row.externalSystemId).sort()
-    assert.deepEqual(offered, [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, 'sys_bridge'].sort())
-    // The K3 write connector, the inactive source and the colleague's connection are ABSENT, not
-    // greyed out — R-11: what is not permitted must not be visible.
-    for (const excluded of ['sys_k3_write', 'sys_inactive', 'sys_not_mine']) {
+    assert.deepEqual(offered, [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, SECOND_PLM].sort())
+    // The K3 write connector, the inactive source, the colleague's connection and the CROSS-KIND
+    // bridge source are ABSENT, not greyed out — R-11: what is not permitted must not be visible,
+    // and (R-20) a choice whose Save leads to a broken read is never offered.
+    for (const excluded of ['sys_k3_write', 'sys_inactive', 'sys_not_mine', 'sys_bridge']) {
       assert.ok(!offered.includes(excluded), `${excluded} must not be offered`)
     }
 
@@ -514,12 +534,13 @@ async function main() {
     assert.ok(!JSON.stringify(data).includes('ds_demo'))
 
     // A host WITHOUT the descriptor seam must not silently empty the picker — undecided is not
-    // disqualifying, so the two data-source-backed systems stay offered.
+    // disqualifying, so the data-source-backed systems stay offered. The cross-kind bridge source
+    // stays out regardless: the kind filter is structural, not a permissions question.
     const noDirectory = mount({ withDataSourceDirectory: false })
     const fallback = await call(noDirectory.routes, 'GET', GET_ROUTE, { user: ADMIN })
     assert.deepEqual(
       fallback.body.data.eligibleSources.map((row) => row.externalSystemId).sort(),
-      [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, 'sys_bridge', 'sys_not_mine'].sort(),
+      [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, SECOND_PLM, 'sys_not_mine'].sort(),
     )
   })
 
@@ -558,6 +579,210 @@ async function main() {
       !JSON.stringify(defaultCard).includes(ACTION_ID),
       'the 备料 consumer no longer hangs off the deploy-time default',
     )
+  })
+
+  // -------------------------------------------------------------------------
+  // R-20 — THE CROSS-KIND FOOTGUN, END TO END.
+  //
+  // Both BOM read kinds are bindable in the abstract, but the binding does NOT move `source.kind`
+  // (frozen deploy-time config) and `loadTableActionSourceAdapter` refuses any system whose kind
+  // differs. Before this check, an admin whose deploy default is `data-source:sql-readonly` but
+  // whose PLM is registered as `bridge:legacy-sql-readonly` could pick it, Save would succeed, the
+  // GET would report `origin: persisted` / `takesEffectWithoutRestart: true`, and EVERY subsequent
+  // read would fail with an opaque TABLE_ACTION_SOURCE_INVALID.
+  //
+  // Fail-closed, yes — but undiscoverable, which is the onboarding cost this feature removes. Both
+  // layers are asserted: the picker never offers it, and the POST refuses it anyway.
+  // -------------------------------------------------------------------------
+  await run('R-20 a cross-kind source is never offered and is refused at POST, so no unreadable binding can persist', async () => {
+    const mounted = mount()
+
+    // The picker is scoped to the ACTION's own kind: the bridge source is absent, even though it is
+    // an active, non-target, perfectly good BOM read source in the abstract.
+    const view = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    const offered = view.body.data.eligibleSources.map((row) => row.externalSystemId)
+    assert.ok(!offered.includes('sys_bridge'), 'a cross-kind candidate is not offered')
+    assert.deepEqual(offered.sort(), [CUSTOMER_PLM, ENV_DEFAULT_SOURCE, SECOND_PLM].sort(), 'only the action\'s own kind is offered')
+    assert.equal(view.body.data.effectiveSourceKind, 'data-source:sql-readonly')
+
+    // And the POST refuses it anyway — the picker is a convenience, the POST is the authority.
+    const refused = await call(mounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: 'sys_bridge' } })
+    assert.equal(refused.statusCode, 422)
+    assert.equal(refused.body.error.code, 'SOURCE_BINDING_SOURCE_INELIGIBLE')
+    assert.equal(refused.body.error.details.reason, 'kind_mismatch')
+    assert.equal(refused.body.error.details.requiredKind, 'data-source:sql-readonly', 'the refusal names the kind the action wants')
+    assert.deepEqual(mounted.db.rows, [], 'nothing persisted and nothing audited')
+    // The action still reads what it read before — no half-applied bind.
+    assert.equal(await sourceUsedByNextDryRun(mounted), ENV_DEFAULT_SOURCE)
+
+    // THE MIRROR IMAGE: an action deployed against the BRIDGE kind offers and accepts the bridge
+    // source and refuses the data-source one. So the filter is the ACTION's kind, not a preference.
+    const bridgeMounted = mount({ actions: [{
+      actionId: ACTION_ID,
+      source: { externalSystemId: 'sys_bridge', kind: 'bridge:legacy-sql-readonly' },
+      target: { sheetId: 'sheet_stock_prep', objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId },
+    }] })
+    const bridgeView = await call(bridgeMounted.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    assert.deepEqual(
+      bridgeView.body.data.eligibleSources.map((row) => row.externalSystemId),
+      ['sys_bridge'],
+      'a bridge-wired action offers only bridge sources',
+    )
+    const bridgeRefused = await call(bridgeMounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: CUSTOMER_PLM } })
+    assert.equal(bridgeRefused.statusCode, 422)
+    assert.equal(bridgeRefused.body.error.details.reason, 'kind_mismatch')
+    assert.equal(bridgeRefused.body.error.details.requiredKind, 'bridge:legacy-sql-readonly')
+
+    // A SAME-KIND bind still works end to end, so the fix narrowed nothing it should not have.
+    const ok = await call(bridgeMounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: 'sys_bridge' } })
+    assert.equal(ok.statusCode, 200)
+    assert.equal(ok.body.data.binding.externalSystemId, 'sys_bridge')
+  })
+
+  // -------------------------------------------------------------------------
+  // R-21 — the GET's no-restart claim must not outlive the thing it promises.
+  // -------------------------------------------------------------------------
+  await run('R-21 takesEffectWithoutRestart is false, with a named reason, while the current source is unreadable', async () => {
+    // The env default names a system that was since DEACTIVATED. Nothing on this screen caused it,
+    // and "takes effect without a restart" over it would be a promise the next refresh breaks.
+    const broken = mount({
+      systems: [...DEFAULT_SYSTEMS, system({ id: 'sys_stale', status: 'inactive', config: {} })],
+      actions: [{
+        actionId: ACTION_ID,
+        source: { externalSystemId: 'sys_stale' },
+        target: { sheetId: 'sheet_stock_prep', objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId },
+      }],
+    })
+    const res = await call(broken.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.effectiveSourceProblem, 'not_active', 'the problem is named, not left to be discovered')
+    assert.equal(res.body.data.takesEffectWithoutRestart, false, 'no promise while the current source cannot be read')
+    // The picker still works — this is a repairable state, and the repair is exactly this screen.
+    assert.ok(res.body.data.eligibleSources.length > 0, 'the admin can still pick a working source')
+
+    // A healthy deployment keeps the claim.
+    const healthy = mount()
+    const ok = await call(healthy.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    assert.equal(ok.body.data.effectiveSourceProblem, null)
+    assert.equal(ok.body.data.takesEffectWithoutRestart, true)
+  })
+
+  // -------------------------------------------------------------------------
+  // R-22 — F3: the scope-fallback's real consumer, AND F2: the wire shape stays 7 fields even when
+  // the store resolved the binding via that fallback.
+  //
+  // `store.get()`'s null-workspace scope fallback can resolve `externalSystemId` to a source bound
+  // only under SOME OTHER workspace — reconcile/mvp-persist/carry/export/handoff/the project board
+  // all call the table-action registry with no workspace hint at all, exactly the shape a dry-run
+  // driven the same way exercises here. Without `loadTableActionSourceAdapter`'s own fix, the
+  // external-SYSTEM load that follows would still carry the null hint, `selectScopedRow` would refuse
+  // to widen it, and the read would 404 even though the binding step just found the source a moment
+  // earlier. This is why `createExternalSystemRegistry`'s fake above is workspace-strict now — a fake
+  // that ignored workspace (as it used to) could never fail this test even with the fix reverted.
+  // -------------------------------------------------------------------------
+  await run('R-22 a null-hint caller still loads a source bound only under another workspace', async () => {
+    // The external system itself lives at workspace 'default' — never at null. Bind it the way the
+    // UI does (POST with the workspaceId=default query hint) and then drive the dry-run with NO
+    // workspace hint at all — exactly the reconcile/mvp-persist/carry/export/handoff/project-board
+    // shape.
+    const wsScopedSystem = system({ id: CUSTOMER_PLM, workspaceId: 'default' })
+    const mounted = mount({ systems: [system({ id: ENV_DEFAULT_SOURCE, workspaceId: null }), wsScopedSystem] })
+
+    const saved = await call(mounted.routes, 'POST', SET_ROUTE, {
+      user: ADMIN,
+      query: { workspaceId: 'default' },
+      body: { externalSystemId: CUSTOMER_PLM },
+    })
+    assert.equal(saved.statusCode, 200, 'the bind itself succeeds')
+
+    assert.equal(
+      await sourceUsedByNextDryRun(mounted),
+      CUSTOMER_PLM,
+      'the null-hint caller still resolves AND LOADS the workspace-scoped binding — this is the line F3 fixes',
+    )
+
+    // F2: the GET picker's `persistedBinding` stays the 7-field wire contract even though THIS
+    // binding was resolved via the scope fallback (matchedWorkspaceId/scopeFallback are non-null
+    // internally, on the very same `store.get()` call the GET route makes). Replacing
+    // `publicPersistedBinding` with a passthrough would fail this on the key set, not merely the id.
+    const view = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    assert.equal(view.statusCode, 200)
+    assert.equal(view.body.data.persistedBinding.externalSystemId, CUSTOMER_PLM)
+    assert.deepEqual(
+      Object.keys(view.body.data.persistedBinding).sort(),
+      ['actionId', 'createdAt', 'externalSystemId', 'tenantId', 'updatedAt', 'updatedBy', 'workspaceId'],
+      'the wire shape is the 7-field contract even when the store answered via its scope fallback',
+    )
+    assert.ok(!('matchedWorkspaceId' in view.body.data.persistedBinding), 'matchedWorkspaceId never reaches the wire')
+    assert.ok(!('scopeFallback' in view.body.data.persistedBinding), 'scopeFallback never reaches the wire')
+
+    // The SAME fix, the OTHER layout: the external system lives at workspace NULL instead of the
+    // binding's own workspace. `selectScopedRow`'s non-null-hint-miss widening covers this side too.
+    const nullSystem = system({ id: SECOND_PLM, workspaceId: null })
+    const mountedNull = mount({ systems: [system({ id: ENV_DEFAULT_SOURCE, workspaceId: null }), nullSystem] })
+    await call(mountedNull.routes, 'POST', SET_ROUTE, {
+      user: ADMIN,
+      query: { workspaceId: 'default' },
+      body: { externalSystemId: SECOND_PLM },
+    })
+    assert.equal(
+      await sourceUsedByNextDryRun(mountedNull),
+      SECOND_PLM,
+      "and when the system row lives at workspace NULL instead of the binding's own workspace",
+    )
+
+    // UNAFFECTED: a caller that DOES carry a workspace hint takes the pre-F3 path exactly as before
+    // (R-10 covers this continuously; re-asserted here under the SAME mount as the fallback above so
+    // one test shows both are true at once).
+    const before = mounted.adapterCalls.length
+    await call(mounted.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: ADMIN,
+      params: { actionId: ACTION_ID },
+      query: { workspaceId: 'default' },
+      body: { parameters: { projectNo: 'P-1' } },
+    })
+    assert.deepEqual(mounted.adapterCalls.slice(before), [CUSTOMER_PLM], 'an explicit workspace hint is unaffected by the fallback fix')
+  })
+
+  // -------------------------------------------------------------------------
+  // R-23 — the `!resolveWorkspaceId(req, {})` precondition on F3's re-query, fenced. F3's fix in
+  // `loadTableActionSourceAdapter` re-queries the binding store for the null-workspace scope fallback
+  // ONLY when the caller itself carries no workspace hint — deleting that precondition (keeping the
+  // rest of the fix) stayed green under R-22 alone, because R-22 never drives a request that BOTH
+  // carries its own hint AND happens to produce a fallback whose externalSystemId coincides with what
+  // that hint's own (unrelated) resolution already settled on.
+  //
+  // Constructed here: the external system lives ONLY at workspace 'ws_a' (never at null), and its id
+  // IS the deploy-time default (`ENV_DEFAULT_SOURCE`) — the coincidence the guard has to survive. A
+  // request hinting 'ws_b' misses its OWN binding lookup (no ws_b row exists) and so degrades to that
+  // SAME-id deploy default — and if the precondition is gone, the re-query's null-hint fallback (one
+  // sibling, at 'ws_a', same id) reads as "confirmed", overriding the caller's OWN 'ws_b' hint with
+  // 'ws_a'. That would let a request scoped to 'ws_b' be silently served a system that lives only at
+  // 'ws_a' — a cross-workspace leak this specific caller never asked to widen. With the precondition
+  // intact, 'ws_b' governs, the system genuinely is not there, and the read refuses exactly as any
+  // mismatched-hint request always has (TABLE_ACTION_SOURCE_INVALID) — nothing new, nothing silent.
+  // -------------------------------------------------------------------------
+  await run("R-23 a caller's own workspace hint is never overridden by the fallback, even when it coincides with the deploy default", async () => {
+    const wsAOnlySystem = system({ id: ENV_DEFAULT_SOURCE, workspaceId: 'ws_a' })
+    const mounted = mount({ systems: [wsAOnlySystem] })
+
+    const saved = await call(mounted.routes, 'POST', SET_ROUTE, {
+      user: ADMIN,
+      query: { workspaceId: 'ws_a' },
+      body: { externalSystemId: ENV_DEFAULT_SOURCE },
+    })
+    assert.equal(saved.statusCode, 200, 'the bind at ws_a succeeds (same id as the deploy default, by construction)')
+
+    const before = mounted.adapterCalls.length
+    const res = await call(mounted.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: ADMIN,
+      params: { actionId: ACTION_ID },
+      query: { workspaceId: 'ws_b' },
+      body: { parameters: { projectNo: 'P-1' } },
+    })
+    assert.equal(res.body.ok, false, "a request hinting 'ws_b' must NOT be silently served the ws_a-only system")
+    assert.equal(res.statusCode, 422, 'the SAME refusal a mismatched hint has always produced (TABLE_ACTION_SOURCE_INVALID) — nothing new')
+    assert.deepEqual(mounted.adapterCalls.slice(before), [], 'no adapter is built for a system outside the requested scope')
   })
 
   const total = passed + failed

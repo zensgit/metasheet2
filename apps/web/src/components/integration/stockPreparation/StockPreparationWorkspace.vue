@@ -36,9 +36,9 @@
         type="button"
         role="tab"
         class="stock-prep__tab"
-        :class="{ 'stock-prep__tab--active': view.key === activeKey }"
+        :class="{ 'stock-prep__tab--active': view.key === effectiveKey }"
         :data-testid="`stock-prep-tab-${view.key}`"
-        :aria-selected="view.key === activeKey ? 'true' : 'false'"
+        :aria-selected="view.key === effectiveKey ? 'true' : 'false'"
         @click="activeKey = view.key"
       >
         {{ bi(view.zh, view.en) }}
@@ -78,8 +78,18 @@
       <!-- O1' §附: the confirmation queue is what this page WAS ADOPTED FOR — the human confirmation
            loop's operator entry. It is the only tab a customer operator (stock-prep:read) sees; the
            six MVP tabs below were explicitly not revived by that ruling and stay platform-admin. -->
+      <!-- 项目备料页 — the operator's single page. It composes the existing panels; the shell keeps
+           owning routing and the shared project context, exactly as it does for every other tab. -->
+      <StockPreparationProjectBoardView
+        v-if="effectiveKey === 'project-board'"
+        :scope="scope"
+        :project-no="selectedProjectNo"
+        @navigate-stage="handleNavigateStage"
+        @open-multitable="handleOpenFillTarget"
+        @select-project-no="handleProjectNoSelect"
+      />
       <StockPreparationConfirmationQueueView
-        v-if="effectiveKey === 'confirmation-queue'"
+        v-else-if="effectiveKey === 'confirmation-queue'"
         :scope="scope"
       />
       <!-- §14 (multitable-application-model-20260830.md): the INSTALL page — the app's defaults laid
@@ -163,12 +173,15 @@ import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.v
 import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
 import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
+import StockPreparationProjectBoardView from './StockPreparationProjectBoardView.vue'
 import StockPreparationInstallView from './StockPreparationInstallView.vue'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import { useAuth } from '../../../composables/useAuth'
 import {
   canOpenStockPrepInstallView,
+  canOpenStockPrepProjectBoard,
   canUseLegacyMvpTabs,
+  landsOnStockPrepProjectBoard,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
 
 const { locale } = useLocale()
@@ -182,6 +195,7 @@ function bi(zh: string, en: string): string {
 }
 
 type StockPreparationViewKey =
+  | 'project-board'
   | 'confirmation-queue'
   | 'install'
   | 'dashboard'
@@ -231,15 +245,40 @@ interface StockPreparationViewTab {
    * workbench admin never sees a button that would 403.
    */
   workbenchAdminOnly?: boolean
+  /**
+   * 项目备料页. True for the project board alone. Gated on the OPERATOR tier (`stock-prep:operate` ∧
+   * `stock-prep:read`) — the same tier its own board read is gated on server-side — rather than on
+   * platform admin, because that is the tier every control on it is answerable to. A `stock-prep:read`
+   * holder does not see it: the board carries project numbers and names, and the read tier is the
+   * values-free queue-watcher tier.
+   */
+  operatorBoard?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
 // name fields/statuses, never customer drawing numbers, material codes, or quantities.
 const views: StockPreparationViewTab[] = [
+  // 项目备料页 — THE PAGE THAT STRINGS THE FOUR STEPS TOGETHER, and the operator's landing view.
+  //
+  // Listed FIRST because it is what a floor operator came for: every PART of their flow already
+  // shipped and no page put them in the order the job runs. A platform admin does NOT land here —
+  // `landsOnStockPrepProjectBoard` keeps their landing on the confirmation queue, because their job
+  // on this page is the queue and the install/health surfaces and moving it is a change nobody asked
+  // for. That is why the landing tab is computed rather than left to "the first visible one".
+  {
+    key: 'project-board',
+    operatorBoard: true,
+    zh: '项目备料',
+    en: 'Project Board',
+    zhDesc: '一个项目,一页做完:从 PLM 把 BOM 拉过来、到多维表里填采购和仓库的进度、填完通知下一步、需要给别人时导出成 Excel。',
+    enDesc: 'One project, one page: pull the BOM in from PLM, fill in purchasing and warehouse progress in the multitable, tell the next person when you are done, and export to Excel when someone needs a copy.',
+    endpoint: '/api/integration/stock-preparation/projects/:projectNo/board',
+    confirmWrites: true,
+  },
   // O1' §附 (owner, 2026-08-29): `/stock-prep` is adopted as THE CONFIRMATION-QUEUE WORKBENCH — the
-  // operator entry into the human confirmation loop. It is listed FIRST so it is the landing view
-  // (the shell's "default tab is the first VISIBLE tab" pattern), and it is the ONLY tab a customer
-  // operator sees: everything below it is a legacy MVP surface the same ruling declined to revive.
+  // operator entry into the human confirmation loop. It stays the PLATFORM ADMIN's landing view (see
+  // `landingKey` below) and it stays exactly as it was; everything below it is a legacy MVP surface
+  // the same ruling declined to revive.
   {
     key: 'confirmation-queue',
     zh: '确认队列',
@@ -345,17 +384,45 @@ const visibleViews = computed(() => {
   return views.filter((view) => {
     if (view.legacyMvp) return canUseLegacyMvpTabs(probe)
     if (view.workbenchAdminOnly) return canOpenStockPrepInstallView(probe)
+    if (view.operatorBoard) return canOpenStockPrepProjectBoard(probe)
     return true
   })
 })
-// The landing tab is the first VISIBLE one, and activeKey can never name a hidden tab: without this
-// fold an operator arriving on a stale/deep-linked legacy key would render a panel of controls that
-// all 403 — the exact "visible but not actionable" failure, reintroduced through the back door.
-const activeKey = ref<StockPreparationViewKey>(views[0].key)
+
+/**
+ * THE LANDING TAB. It used to be "the first VISIBLE one", which was the same thing for everybody
+ * because there was only one tab an operator could see. 项目备料页 makes the two audiences differ:
+ * an operator lands on the board they came for, a platform admin keeps today's landing (确认队列),
+ * because moving an admin's landing is a change nobody asked for.
+ *
+ * Computed rather than captured at setup so it survives permissions arriving after the first render,
+ * and folded through `visibleViews` so it can never name a tab this principal cannot see.
+ */
+const landingKey = computed<StockPreparationViewKey>(() => {
+  const visible = visibleViews.value
+  if (visible.length === 0) return views[0].key
+  const probe = (permission: string): boolean => auth.hasPermission(permission)
+  if (landsOnStockPrepProjectBoard(probe) && visible.some((view) => view.key === 'project-board')) {
+    return 'project-board'
+  }
+  const queue = visible.find((view) => view.key === 'confirmation-queue')
+  return queue ? queue.key : visible[0].key
+})
+
+// `null` means "the operator has not chosen a tab yet", which is what lets the landing above stay
+// reactive; once they click, activeKey holds their choice. It can never name a hidden tab: without
+// this fold an operator arriving on a stale/deep-linked legacy key would render a panel of controls
+// that all 403 — the exact "visible but not actionable" failure, reintroduced through the back door.
+const activeKey = ref<StockPreparationViewKey | null>(null)
 const activeView = computed(() => {
   const visible = visibleViews.value
   if (visible.length === 0) return null
-  return visible.find((view) => view.key === activeKey.value) ?? visible[0]
+  const chosen = activeKey.value
+  if (chosen) {
+    const hit = visible.find((view) => view.key === chosen)
+    if (hit) return hit
+  }
+  return visible.find((view) => view.key === landingKey.value) ?? visible[0]
 })
 // The key the PANEL actually renders. Every panel branch below keys off this, never off the raw
 // activeKey ref — otherwise a hidden legacy key would title the panel "Confirmation Queue" while
@@ -376,6 +443,27 @@ function projectIdFromQuery(): string | undefined {
 }
 
 const selectedProjectId = ref<string | undefined>(projectIdFromQuery())
+
+/**
+ * 项目备料页's shared context. Deliberately a SECOND ref rather than a reuse of `selectedProjectId`:
+ * that one holds the internal MetaSheet handle the values-free surfaces trade in, this one holds the
+ * customer's own PROJECT NUMBER, and conflating a handle with a business value is exactly the
+ * confusion the values-free posture exists to prevent. The number is mirrored into `?projectNo=` so a
+ * reload or a shared link reopens the same project.
+ */
+function projectNoFromQuery(): string {
+  const raw = route.query?.projectNo
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' && value.length > 0 ? value : ''
+}
+
+const selectedProjectNo = ref<string>(projectNoFromQuery())
+
+function handleProjectNoSelect(projectNo: string): void {
+  selectedProjectNo.value = projectNo
+  // Replace, not push: opening a project is not a history step.
+  void router.replace({ query: { ...route.query, projectNo } })
+}
 
 function handleProjectSelect(projectId: string): void {
   selectedProjectId.value = projectId
@@ -409,6 +497,35 @@ function handleNavigateStage(viewKey: string): void {
  */
 function handleOpenMultitable(): void {
   void router.push({ path: '/multitable' })
+}
+
+/**
+ * 项目备料页's 「到多维表填写这个项目」. Unlike `handleOpenMultitable` above, this one HAS a handle to
+ * route from: the board read returns `{ sheetId, viewId }`, and only when the server has proved that
+ * sheet exists.
+ *
+ * WHAT THIS LINK DOES NOT CLAIM. It is not permission-checked here and cannot be: the plugin has no
+ * user-aware multitable ACL seam, so it can say the sheet exists and nothing about who may open it.
+ * MULTITABLE ENFORCES ACCESS ON LANDING. An operator without access lands on multitable's own
+ * refusal, which is the right place for that answer to come from.
+ *
+ * No `?filter=` is composed. A transient per-project filter would need a non-persisting overlay in
+ * the multitable view model that does not exist today — see the PR body — and inventing a query
+ * param the workbench ignores would be a link that quietly lies about what it does.
+ *
+ * NO HANDLE STILL GOES SOMEWHERE. `null` (or a malformed handle) falls back to the plain multitable
+ * route — the exact destination `handleOpenMultitable` above uses for the legacy tab. The board's
+ * composed sync panel renders its own 「到多维表看数据」 off the run verdict, which knows nothing
+ * about deep-link handles, so without this fallback that button was a silent no-op on this tab.
+ */
+function handleOpenFillTarget(target: { sheetId: string; viewId: string } | null): void {
+  if (!target || !target.sheetId || !target.viewId) {
+    void router.push({ path: '/multitable' })
+    return
+  }
+  void router.push({
+    path: `/multitable/${encodeURIComponent(target.sheetId)}/${encodeURIComponent(target.viewId)}`,
+  })
 }
 
 /** What the panel's endpoint badge claims. One expression, so no tab can claim the wrong shape. */

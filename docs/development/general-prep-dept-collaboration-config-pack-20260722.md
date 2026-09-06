@@ -10,7 +10,7 @@
 `template-library` 的安装原语**只装 sheet / field / view**:
 `packages/core-backend/src/multitable/template-library.ts` 的
 `InstallMultitableTemplateResult = { template, base, sheets, fields, views }`,安装路由
-`POST /templates/:templateId/install`(`routes/univer-meta.ts:6859`)。
+`POST /templates/:templateId/install`(`routes/univer-meta.ts:7244`,验证于 origin/main;该路由挂 `rbacGuard('multitable','write')`)。
 **字段权限、自动化规则、personal-view 均无导入原语。**
 
 所以本文档**不是**「一键导入的协作包」,而是**实施方照做的手工配置 runbook**——每一步只用
@@ -20,6 +20,8 @@
 - 【手工配置·现成】= 今天就能做,无代码;
 - 【flag·owner 门】= 原语存在但默认 OFF,开启是 owner 决策;
 - 【需代码·后续刀】= 本包做不到,诚实列账。
+
+**与在途姊妹 PR 的边界(0902 复核追加)**:另有在途 PR 计划给本线加**部门完成标记/日期**、**自制/外购分类列**、以及**真正的按列写权限**(把 §3 的 `field_permissions` 配方从「手工 runbook」变成「产品自带」)。截至本文档最后一次核对的 `origin/main`(commit `ed902eb92`),这些均**未落地**——本包不把它们当作已发生描述;等它们真的合并,再回来补 PR 号引用,现在留白比编一个假号更诚实。
 
 ## 1. 底座事实(为什么纯配置能成立)
 
@@ -41,7 +43,7 @@
    其余 `plm_system` 字段每次 refresh 由 planner 覆写。
 3. **P1a 负例(本包所有通知配方的硬边界)**:同库同 flag 下,**插件写路径
    (refresh/apply/sync/confirm)不产出任何自动化事件**——record 事件只在网格路由层发射
-   (`routes/univer-meta.ts:10530+` 的 `enqueueRecordEventIfDurable`/`emitRecordEventIfLegacy`)。
+   (`routes/univer-meta.ts:11297-11332` 的 `enqueueRecordEventIfDurable`/`emitRecordEventIfLegacy`;行号已按 origin/main 复核)。
    「批次刷新 → 自动通知采购/仓库」**今天表达不了**,是未来的 emit-seam 刀(feasibility rev-2
    §关键事实)。本包的通知配方因此**只挂人工网格编辑触发 + 日程触发**。
 
@@ -65,8 +67,8 @@
 read_only=false;subject_type 经 `zzzz20260418143000` 扩为 `user | role | member-group`)。
 
 **路由**(`routes/univer-meta.ts`):
-- 读:`GET /sheets/:sheetId/field-permissions`(:7927)
-- 写:`PUT /sheets/:sheetId/field-permissions/:fieldId/:subjectType/:subjectId`(:8040)
+- 读:`GET /sheets/:sheetId/field-permissions`(:8335,行号已按 origin/main 复核——本文档写于 0722,主干路由文件持续增长,原引用 :7927 已漂移,下同)
+- 写:`PUT /sheets/:sheetId/field-permissions/:fieldId/:subjectType/:subjectId`(:8449)
 
 **操作**:对 `plm_stock_preparation_main` 对应的 sheet,逐字段逐角色 PUT:
 - 对 `<procurement-role>`:除 `procurementReply` 外全部 `read_only: true`;
@@ -81,9 +83,9 @@ read_only=false;subject_type 经 `zzzz20260418143000` 扩为 `user | role | memb
 ## 4. 配方 B — 部门存档视图 【手工配置·现成】
 
 **原语**:`meta_views` + 视图级权限 `meta_view_permissions`。
-- 建视图:`POST /views`(univer-meta.ts:12122;`type` 默认 `grid`,支持 `filterInfo` / `config`);
-- 视图权限:`GET /views/:viewId/permissions`(:7712)、
-  `PUT /views/:viewId/permissions/:subjectType/:subjectId`(:7823;subject 同样支持
+- 建视图:`POST /views`(univer-meta.ts:13001;`type` 默认 `grid`,支持 `filterInfo` / `config`);
+- 视图权限:`GET /views/:viewId/permissions`(:8118)、
+  `PUT /views/:viewId/permissions/:subjectType/:subjectId`(:8230;subject 同样支持
   `user | role | member-group`)。
 
 **建议视图集**(过滤条件写字段引用,不写业务值——值由实施方按租户词表填):
@@ -100,21 +102,21 @@ read_only=false;subject_type 经 `zzzz20260418143000` 扩为 `user | role | memb
 **原语存在但默认 OFF**:`MULTITABLE_ENABLE_PERSONAL_VIEWS`
 (`packages/core-backend/src/multitable/personal-view-config.ts:47-53`,default-OFF;
 设计锁 `multitable-personal-views-design-lock-20260705.md`)。路由
-`GET/PUT /views/:viewId/personal-config`(univer-meta.ts:12826+)。
+`GET/PUT/DELETE /views/:viewId/personal-config`(univer-meta.ts:13741/13775/13815)。
 
 开启后,部门成员可在共享视图上叠个人 `filterInfo / sortInfo / groupInfo / hiddenFieldIds /
-fieldOrder`(overlay 白名单即此五项,personal-view-config.ts:30-37),**不改共享视图**;无
+fieldOrder`(overlay 白名单即此五项,personal-view-config.ts:45(`OVERLAY_KEYS`)),**不改共享视图**;无
 overlay 时按引用原样返回共享配置(降级契约 §1-C)。**本包不授权开 flag**——列为 owner 决策项。
 
 ## 6. 配方 D — done-state 复选字段 【手工配置·现成,带 P1b 注记】
 
-给三部门各加一个「本部门已完成」布尔字段(多维表字段类型含 `boolean`,univer-meta.ts:348-376),
+给三部门各加一个「本部门已完成」布尔字段(多维表字段类型含 `boolean`,univer-meta.ts:422-450(`MULTITABLE_FIELD_TYPES`)),
 如 `ext_procurementDone` / `ext_warehouseDone` / `ext_planReleased`(`ext_` 前缀见下)。
 
 **为什么安全(feasibility rev-2 已证)**:
 - planner 只 patch 模板内 `plm_system` 字段,模板外租户字段**永不进 refresh patch**
   ——扩展字段 refresh-安全 by construction;
-- drift 检查单向(`stock-preparation-target-provisioning.cjs:214` `missingLogicalFields`
+- drift 检查单向(`stock-preparation-target-provisioning.cjs:322` `missingLogicalFields`
   只查模板字段缺失),多余租户字段不触发 drift。
 
 **P1b 注记(诚实)**:命名空间纪律(前缀防未来模板字段撞名)是**未落的 P1b 刀**。本包先行约定
@@ -145,7 +147,7 @@ GET :17404 / PATCH :17467 / DELETE :17515)。触发词表
 不响。refresh-驱动通知 = 未来 emit-seam 刀【需代码·后续刀】。
 
 **投递 flag(owner 门,全部默认 OFF)**:
-- `send_notification` 本身是进程内 eventBus 发射(automation-executor.ts:3004-3045,best-effort
+- `send_notification` 本身是进程内 eventBus 发射(automation-executor.ts:4322-4339,`this.deps.eventBus.emit('automation.notification', ...)`,best-effort
   in-app,非持久);
 - durable 投递:`AUTOMATION_DURABLE_DELIVERY_ENABLED`(automation-durable-delivery.ts:21);
 - Class-A claim:`AUTOMATION_CLASSA_CLAIM_ENABLED`(automation-execution-ledger.ts:38);
@@ -154,7 +156,7 @@ GET :17404 / PATCH :17467 / DELETE :17515)。触发词表
 
 本包配方在 flag 全 OFF 下即可用(in-app 通知);任何出站/持久投递的开启是 **owner 决策**,
 不在本包授权范围。消息模板 `{{fields.<fieldId>}}` 插值只存在于 email/DingTalk 消息体
-(`renderAutomationTemplate`,automation-executor.ts:171-175,调用点 :3083/:3613/:4216)。
+(`renderAutomationTemplate`,定义于 automation-executor.ts:212,调用点例如 :996-997/:4380-4381/:4911-4914)。
 
 ## 8. 需代码账本(本包明确做不到的)
 

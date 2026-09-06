@@ -46,6 +46,7 @@ import {
   StockPreparationProjectSyncCallError,
   type StockPreparationProjectSyncApi,
 } from '../src/services/integration/stockPreparation/projectSync'
+import type { StockPreparationLargeBomJobApi } from '../src/services/integration/stockPreparation/largeBomPull'
 
 const PROJECT_NO = 'P2026-001'
 const PLANTED_DRAWING = 'DWG-88472-A'
@@ -70,6 +71,37 @@ function api(overrides: Partial<StockPreparationProjectSyncApi> = {}): StockPrep
     archive: vi.fn().mockResolvedValue({ status: 'created', persisted: true, created: { batch: 1, lines: 9, run: 1 } }),
     ...overrides,
   } as StockPreparationProjectSyncApi
+}
+
+/** A large-BOM job api double that reaches `done` in one tick of everything. */
+function largeBomJobApi(overrides: Partial<StockPreparationLargeBomJobApi> = {}): StockPreparationLargeBomJobApi {
+  return {
+    startExpansion: vi.fn().mockResolvedValue({ jobId: 'large-bom-expansion-panel-1', status: 'queued', authoritative: false }),
+    runExpansion: vi.fn().mockResolvedValue({
+      jobId: 'large-bom-expansion-panel-1',
+      status: 'completed',
+      authoritative: true,
+      progress: { rowsExpanded: 500, readCount: 520, frontierRemaining: 0, completedChunks: 1 },
+      budgets: { maxRows: 1000, maxPages: 10, maxReadCount: 1200, maxElapsedMs: 30000, maxDepth: 10, maxArtifactChunks: 1 },
+    }),
+    planExpansion: vi.fn().mockResolvedValue({
+      jobId: 'large-bom-expansion-panel-1',
+      status: 'completed',
+      authoritative: true,
+      evidence: { plan: { counts: { add: 40, update: 10, skip: 0, inactive: 0, manual_confirm: 0 } } },
+    }),
+    startApply: vi.fn().mockResolvedValue({
+      jobId: 'large-bom-apply-panel-1',
+      status: 'queued',
+      counts: { created: 0, updated: 0, inactive: 0, skipped: 0, held: 0, failed: 0 },
+    }),
+    runApplyChunk: vi.fn().mockResolvedValue({
+      jobId: 'large-bom-apply-panel-1',
+      status: 'succeeded',
+      counts: { created: 40, updated: 10, inactive: 0, skipped: 0, held: 0, failed: 0 },
+    }),
+    ...overrides,
+  } as StockPreparationLargeBomJobApi
 }
 
 async function flushUi(cycles = 6): Promise<void> {
@@ -120,23 +152,39 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).toBeNull()
   })
 
-  it('P-01: the stock-prep OPERATOR tier gets no sync control, and is told who runs it', () => {
-    // The exact grant a customer operator holds: R-11's mapping is zero-automatic, so this principal
-    // has no `integration:*` code at all and the server refuses them at the first call.
+  // 一线自己拉数据: the owner ruled a floor operator may self-serve the pull, and the server split the
+  // two routes that DO it (dry-run, apply) onto the operator tier while reconcile and mvp-persist
+  // stayed platform-admin. The control follows the server, not the other way round — the plugin
+  // suite stock-preparation-operator-pull-gate.test.cjs is what proves the server actually admits it.
+  it('P-01: the stock-prep OPERATOR tier gets the sync control', () => {
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
     const root = mountPanel({ api: api() })
-    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
-    const denied = root.querySelector('[data-testid="stock-prep-project-sync-denied"]') as HTMLElement
-    expect(denied).not.toBeNull()
-    expect(denied.textContent).toContain('平台管理员')
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).toBeNull()
   })
 
-  it('P-01: neither the workbench-admin nor the integration:write tier gets it either', () => {
-    for (const permissions of [['stock-prep:admin'], ['integration:write'], ['integration:read'], []]) {
+  it('P-01: the operate tier is a CONJUNCTION — operate WITHOUT read still gets nothing', () => {
+    h.permissions = ['stock-prep:operate']
+    const root = mountPanel({ api: api() })
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).not.toBeNull()
+  })
+
+  it('P-01: neither the integration:write nor the read-only tier gets it, and both are told who does', () => {
+    // NOTE the probe this suite injects is an EXACT-match one, so `stock-prep:admin` does not satisfy
+    // `stock-prep:operate` here the way the real `useAuth` ladder would. That is deliberate: this
+    // assertion is about the codes the panel asks for, and the ladder itself is pinned by
+    // stockPrepPermissionMatrix.spec.ts against the live plugin module.
+    for (const permissions of [['integration:write'], ['integration:read'], ['stock-prep:read'], []]) {
       h.permissions = permissions
       const root = mountPanel({ api: api() })
       expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
-      expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).not.toBeNull()
+      const denied = root.querySelector('[data-testid="stock-prep-project-sync-denied"]') as HTMLElement
+      expect(denied).not.toBeNull()
+      // The reason names BOTH tiers that can run it — sending someone to the wrong person is its own
+      // kind of dead end.
+      expect(denied.textContent).toContain('平台管理员')
+      expect(denied.textContent).toContain('备料操作权限')
       app?.unmount()
       app = null
       container!.innerHTML = ''
@@ -297,6 +345,54 @@ describe('StockPreparationProjectSyncPanel', () => {
     // No positive claim in either direction.
     expect(archive.textContent).not.toContain('之前已经存过了')
     expect(archive.textContent).toContain('没说清')
+  })
+
+  // ---- L-BOM: the audit's second dead-end ---------------------------------------------------
+  it('L-BOM: a large_bom_bounded plan mounts the background channel, which drives itself to done', async () => {
+    const jobApi = largeBomJobApi()
+    const double = api({
+      dryRun: vi.fn().mockResolvedValue({
+        status: 'large_bom_bounded',
+        canApply: false,
+        dryRunToken: null,
+        counts: {},
+      }),
+    })
+    const onOpenMultitable = vi.fn()
+    const root = mountPanel({
+      api: double,
+      largeBomApi: jobApi,
+      largeBomPollWait: vi.fn().mockResolvedValue(undefined),
+      onOpenMultitable,
+    })
+    await runSync(root)
+
+    // The SKIP still renders exactly as before — this fix adds a surface, it does not hide the SKIP.
+    const planStep = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(planStep.getAttribute('data-status')).toBe('skip')
+    expect(planStep.textContent).toContain('太大')
+    // The small-BOM apply/archive steps never ran — the plan stopped before them.
+    expect(double.apply).not.toHaveBeenCalled()
+
+    // The background channel is now visible and already driving itself (it starts on its own mount).
+    const largeBom = root.querySelector('[data-testid="stock-prep-large-bom-pull"]') as HTMLElement
+    expect(largeBom).not.toBeNull()
+    expect(jobApi.startExpansion).toHaveBeenCalledWith(PROJECT_NO)
+
+    await flushUi()
+    expect(largeBom.getAttribute('data-phase')).toBe('done')
+
+    // Its deep link is wired to the SAME parent event the small-BOM path's own link uses.
+    const link = root.querySelector('[data-testid="stock-prep-large-bom-open-multitable"]') as HTMLButtonElement
+    expect(link).not.toBeNull()
+    link.click()
+    expect(onOpenMultitable).toHaveBeenCalledTimes(1)
+  })
+
+  it('L-BOM: an ordinary (non-large-BOM) run never mounts the background channel', async () => {
+    const root = mountPanel({ api: api(), largeBomApi: largeBomJobApi() })
+    await runSync(root)
+    expect(root.querySelector('[data-testid="stock-prep-large-bom-pull"]')).toBeNull()
   })
 
   // ---- P-05 --------------------------------------------------------------------------------

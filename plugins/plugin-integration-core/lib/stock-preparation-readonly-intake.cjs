@@ -209,12 +209,24 @@ function normalizeBomLine(input, projectIndex, row, index, rowErrors) {
     projectId,
     parentDrawingNo: firstValue(row, ['parentDrawingNo', 'parentCode', 'parentFileCode', 'parentFNumber']),
     parentVersion: firstValue(row, ['parentVersion', 'parentRev', 'parentRevision']),
+    // The seven fields a 备料 pull must carry (owner spec). This intake path and the expansion
+    // mapper are the TWO ways a row becomes a snapshot line, and the mapper's header pins the rule
+    // that routing a row through either must yield one value — so the alias ladders mirror
+    // stock-preparation-expansion-snapshot-mapper.cjs toSnapshotLine field for field.
+    parentName: firstValue(row, ['parentName', 'parentComponentName']),
     childDrawingNo: firstValue(row, ['childDrawingNo', 'childCode', 'childFileCode', 'childFNumber', 'componentCode']),
     childVersion: firstValue(row, ['childVersion', 'childRev', 'childRevision', 'sourceVersion']),
+    childName: firstValue(row, ['childName', 'componentName', 'name']),
+    material: firstValue(row, ['material']),
+    spec: firstValue(row, ['spec', 'specification']),
     bomLevel: firstNumber(row, ['bomLevel', 'level', 'depth']),
     pathKey,
     designQty: firstNumber(row, ['designQty', 'quantity', 'qty', 'rawQuantity', 'totalQuantity']),
     designUnit: firstValue(row, ['designUnit', 'unit', 'unitName']),
+    // 总数量 kept as its own field. `designQty`'s ladder DELIBERATELY still falls back to
+    // totalQuantity (unchanged, so no existing row's designQty moves): a row carrying only the
+    // rollup keeps populating both, exactly as the mapper's DESIGN_QTY_KEYS does.
+    totalQuantity: firstNumber(row, ['totalQuantity']),
     lineStatus: firstValue(row, ['lineStatus', 'status']) || (row.missingChildBom === true ? 'missing_child_bom' : 'imported'),
     sourceFingerprint: firstValue(row, ['sourceFingerprint']) || stableFingerprint(stableJson(row)),
   }

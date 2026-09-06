@@ -71,6 +71,8 @@ ledger 侧今天的行为（`stock-preparation-confirmation-decisions.cjs`:407-4
 
 **逐点核对结论（载荷性事实）：这 12 个发出点没有任何一个附带 order id、component ref、path 或行序号。** 上下文只有 `{type, field, depth}`（`invalid_quantity` 多一个 `relation`）。`field` 是**冻结读计划里的源对象列名**（配置标识，不是客户值），`depth` 是整数 BOM 层深。
 
+> 脚注（2026-09-05，W3a）：本结论描述的是 rowError 载荷，而非展开器的全部产出。W3a 在展开结果上新增了与 `rowErrors` 平级的旁路数组 `expansion.missingComponents`，只对 `missing_component` 一族携带 `componentSourceId` 等真实客户值，专供 dry-run 响应的 `missingComponents` 键（门禁 operate ∧ 已证租户，显式 opt-in）。同时新增伴生计数 `expansion.missingComponentDistinctCount`（采集端按零件号封顶后仍能报真实去重总数）。它不进 revision 哈希（`buildRevision` 里的 expansion 投影，stock-preparation-table-actions.cjs）、不进身份哈希（`ANONYMOUS_LOCUS_IDENTITY_FIELDS`，stock-preparation-conflict-planner.cjs）、不进 ledger details（同文件 `manualConfirm` 对 rowError 的 `details` 投影）、不进 evidence（`summarizeBomExpansionForEvidence`，stock-preparation-bom-expansion.cjs），身份配方与账本语义一字未动。**本脚注只给函数名、不给行号**：上表的行号是 2026-08-29 当天 main 的快照，这四处投影此后各自漂移过；核对请按函数名搜索，行号以合并后的 main 为准。
+
 - 修复面类别：全部 `source_data_repair`。
 - 稳定身份？**有，但粒度是 `locus`（错误位点）而不是行** —— 见 §4 的诚实交代。
 
@@ -233,4 +235,4 @@ C2 的 `cell` 粒度同理：一个 (ext 目标列 × 源列 × 声明类型 × 
 1. **C2 的行级身份**：coercion 错误发生时 `rowResult.row.idempotencyKey` 在 `bom-expansion.cjs`:616 处**是在手的**，只是没被附上。附上即可把 C2 从 `cell` 升到 `row` 粒度。这是**改发出点**，另开一刀，须与 values-free 边界一起评审。
 2. **C1 的行级身份**：需要 expander 在 12 个发出点附 component ref / path。代价更大，收益需先由现场确认（位点粒度是否已经够用）。
 3. **`accept_current` / `manual_hold` 语义**：兄弟刀 O1-A。
-4. **carry policy 三类**（`carry_ambiguous_component_source` / `carry_reattach_requires_confirm` / `carry_conflicting_source_content`）：`planCarry` 仍无生产调用方（矩阵 §2.4），本规格不覆盖。
+4. **carry policy 三类**（`carry_ambiguous_component_source` / `carry_reattach_requires_confirm` / `carry_conflicting_source_content`）：本规格写作时 `planCarry` 尚无生产调用方（矩阵 §2.4），故不覆盖。**后续已接线**（执行计划 W4a/W4b + 裁决层③ stock-prep-change-adjudication-20260901.md §3.1）：planner 在 `carryPolicy` 配置 opt-in 下对每条候选 ADD 跑 `planCarry`，三类 carry hold 以**带 idempotencyKey 的 keyed 候选**入账（独立 `carryCandidates` 数组，readback 结构性拿不到，无 `duplicateGroupFingerprint`）；其确认面是 K2 carry 路由（`applyCarryViaConfirm` + `confirmCarryConfirmationDecision` 的保留 token `carry_via_confirm`），**不是**本规格的匿名身份机制——carry 行有真实 key，从不走 `anon-hold:` 命名空间，本规格的双向围栏原样成立。

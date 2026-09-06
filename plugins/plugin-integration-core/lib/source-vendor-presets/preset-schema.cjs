@@ -177,6 +177,9 @@ const LABEL_HINT_VOCABULARY = Object.freeze({
   quantity: /数量|qty|quantity/i,
   unit: /单位|unit/i,
   'material-code': /物料编码|matcode|material/i,
+  // 规格 — the seventh of the 备料 pull's required fields. A HINT WORD LIST, not a slot: which
+  // ExAttr slot a customer assigned 规格 to stays a run-time dictionary read the human confirms.
+  spec: /规格|spec|specification/i,
 })
 
 const DICTIONARY_TYPE_HINTS = Object.freeze(['numeric', 'list', 'text'])

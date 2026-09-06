@@ -103,20 +103,37 @@ function isSystemSentinelActor(actorId: string): boolean {
   return actorId.startsWith('system:')
 }
 
-/**
- * Single-valued `user` form value → local user id (string id or `{ id }`; arrays yield `null` —
- * the L2-B×L2-C latent drop Lock-2 documents, unreachable while `validateApprovalFormData`
- * rejects arrays for `user` fields). EXPORTED (Lock-2 §L2-C) so the create-time field-derived
- * freeze reads the chosen contact through the EXACT same reader the shipped `form_field_user`
- * resolution uses — a second reader could drift.
- */
-export function resolveFormUserValue(value: unknown): string | null {
+function resolveSingleFormUserValue(value: unknown): string | null {
   const stringId = normalizeId(value)
   if (stringId) return stringId
   if (isRecord(value)) {
     return normalizeId(value.id)
   }
   return null
+}
+
+/**
+ * Lock-2 §L2-B/OD-L2-7 — the one reader for both single- and multi-valued `user` fields.
+ * Every accepted id is normalized and de-duplicated without truncation. The graph executor owns
+ * shape/max validation; this pure resolver deliberately returns [] for malformed values so a
+ * hand-assembled runtime graph still falls through to the node's fail-closed empty policy.
+ */
+export function resolveFormUserValues(value: unknown): string[] {
+  const rawValues = Array.isArray(value) ? value : [value]
+  const resolved: string[] = []
+  const seen = new Set<string>()
+  for (const rawValue of rawValues) {
+    const id = resolveSingleFormUserValue(rawValue)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    resolved.push(id)
+  }
+  return resolved
+}
+
+/** Backwards-compatible single-value export for callers that intentionally require one anchor. */
+export function resolveFormUserValue(value: unknown): string | null {
+  return resolveFormUserValues(value)[0] ?? null
 }
 
 // Source-of-truth for `form_field_user` field-type validation is publish-time
@@ -335,8 +352,9 @@ export function resolveApprovalAssignees(
       }
       case 'form_field_user': {
         assertFormUserSource(source, options.formSchema, options.nodeKey)
-        const assigneeId = resolveFormUserValue(options.formSnapshot[source.fieldId])
-        if (assigneeId) pushResolved('user', assigneeId, source, sourceIndex)
+        for (const assigneeId of resolveFormUserValues(options.formSnapshot[source.fieldId])) {
+          pushResolved('user', assigneeId, source, sourceIndex)
+        }
         break
       }
       case 'requester_choice': {

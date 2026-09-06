@@ -86,6 +86,83 @@ MS_DS_SCHEMA=<schema，如 dbo>
 
 ---
 
+## 1.1 委派缺失的修法（一线拉取 `400 CONNECTION_CANONICAL_UNAVAILABLE`）
+
+**症状**：建连接的那个管理员拉取正常；换成任何别人——一线操作员、定时任务服务账号、
+另一个管理员——试算/写入一律 `400 CONNECTION_CANONICAL_UNAVAILABLE`。
+
+**机制**：数据源按**属主等值**鉴权（`DataSourceManager.assertAccess`，数据面没有管理员旁路）。
+拉取这一个冻结动作（`plm.stock-preparation.pull-bom.v1`）为此有**读身份委派**——读以外接源上
+**服务端写入的绑定者**身份进行。委派要成立，外接源必须带 `config.dataSourceOwnerId`，
+而这个戳只在**绑定被断言并通过主机校验**时由服务端写入。cutover 之后建的 canonical 行
+（只有 `connection_id`，`config` 里只有 `schema`）在 2026-09-06 之前拿不到这个戳，
+所以委派一直没有可委派的身份。
+
+**一眼确认**：跑源就绪预检，看 blockers 里有没有这一条
+
+```
+GET /api/integration/stock-preparation/source-preflight
+→ blockers[].code == "pull_principal_delegation_unavailable"
+   detail = { "bindingShape": "canonical" | "legacy" | "unbound",
+              "reason": "binding_owner_unstamped" }
+   checks.pullDelegation = { evaluated, available, bindingShape, reason }
+```
+
+报文里**不含**连接 id、也不含属主 id——只有形态词和原因词。
+
+**修法（由绑定者本人执行一次，不需要脚本、不需要动数据库）**：用**建这条连接的那个账号**
+重新提交一次该外接源的绑定，把 `connectionId` 显式带上。服务端会重新走一遍
+`resolveConnectionRegistration` → `assertAccess` 的属主校验，通过后把该账号写成归属戳。
+
+> **先 GET，再 POST——这个更新接口不是纯粹的 PATCH。** `upsertExternalSystem` 的更新分支只对
+> `config` / `capabilities` / `role` / `status` 做"未提交即保留"（external-systems.cjs 更新分支的 config/capabilities 保留段）；
+> 其余列走 `baseRow`，取的是归一化后的默认值（`projectId` / `lastTestedAt` / `lastError` 未提交
+> 即为 `null`，见 `normalizeExternalSystemInput` 的 projectId / lastTestedAt / lastError 三行），而 `db.updateRow` 无条件写入。**所以只带 `connectionId` 的一次
+> 提交会把 `project_id` / `last_tested_at` / `last_error` 清成 null。** 这是既有行为，不在本 PR
+> 修；照下面做即可避开。
+
+**步骤 1 — 读回现有行**（用同一个账号）：
+
+```
+GET /api/integration/external-systems/<external system id>
+→ 记下 name / projectId / lastTestedAt / lastError（下一步原样带回）
+```
+
+**步骤 2 — 带着这些字段重新提交绑定**：
+
+```
+POST /api/integration/external-systems
+{
+  "id": "<external system id>",
+  "name": "<步骤 1 的 name，原样回填>",
+  "kind": "data-source:sql-readonly",
+  "role": "source",
+  "connectionId": "<该外接源当前的 connectionId>",
+  "projectId": "<步骤 1 的 projectId；本来就是 null 就省略>",
+  "lastTestedAt": "<步骤 1 的 lastTestedAt；省略则清空>",
+  "lastError": "<步骤 1 的 lastError；本来就是 null 就省略>"
+}
+```
+
+要点：
+
+* **必须由绑定者本人调**。换个人调会被主机以同一句 "not found" 拒掉（属主等值，同时不泄露
+  存在性），戳不会写错人；被拒的这次更新不落库，三列也不会被清。
+* **`projectId` / `lastTestedAt` / `lastError` 必须原样带回**，否则这次更新会把它们清成 null
+  （见上面的框）。`lastTestedAt` / `lastError` 只是页面上"上次连接测试"的显示，清掉之后再跑一次
+  `POST /api/integration/external-systems/<id>/test` 就会重新写上；`projectId` 没有别的地方能
+  补回来，务必带上。
+* 请求体里写 `dataSourceOwnerId` 无效——它是服务端独占字段，在归一化处就被剥掉。
+* 不带 `config` 的更新原样继承已存 config；带 `config` 是**打补丁**，不会清掉未提交的键。
+* 复核：再跑一次源就绪预检，`checks.pullDelegation.available` 应为 `true`、blocker 消失；
+  同时核对 `projectId` 还在；然后用一线账号跑一次试算，应当 200。
+
+**做完之后审计怎么读**：每次委派打一条 values-free 日志（`{ actionId, delegated: true }`，
+两个身份都不写进去）。审计行里的 `actor` 始终是**发起人**（一线），不会被改写成属主；
+大 BOM 后台作业另外记录创建者，run 路由只允许创建者本人跑。
+
+---
+
 ## 2. 上场前 30 秒数据体检（先跑，再演）
 
 **在演示任何东西之前**，用只读账号连客户 PLM 跑下面的 SQL。目标是在
@@ -178,14 +255,24 @@ WHERE project_code = '<体检2选出的项目>' GROUP BY bom_able;
 - **预期落表列**：`图号(componentCode←DrawingType)`、`名称(←TargetName)`、
   `材料(←Material)`、`总数量(totalQuantity 逐层累乘)`、`规格(ext_spec←Specification)`；
   快照行另含 `父组件图号(parentDrawingNo，批内父连接)`。
+  > **更新**：七个字段现已全部落到**持久化的快照行**上（父组件图号 / 父组件名称 /
+  > 当前组件图号 / 当前组件名称 / 规格 / 材料 / 总数量）。`规格` 不再只走 `ext_spec`：
+  > 读计划新增**声明式** `part.specField`（默认**不声明**，即绝不猜列），声明后落为
+  > 快照行的规范列 `spec`。物料匹配器的 `plmNameOf`/`plmSpecOf` 本就读
+  > `childName`/`spec`，只是从来没有数据；字段落地后名称+规格自动匹配随之生效，
+  > 映射表单的 PLM 侧（`plmMaterialName`/`plmSpec`）不再需要人工敲入。
 - **同项目两批次按创建小时区分**：同一 `project_code` 的两次拉取，若物料
   `Createtime` 落在不同**小时**，应落到两个不同批次（`snapshotBatchId` 携小时桶），
   快照行 id 不重叠。
-  > ⚠️ **注意（见排练报告 gap #3）**：**"按小时分批"的推导目前不在发货代码里**。
-  > 发货的 mapper 需要**调用方给定**的 `snapshotBatchId`；同项目多批次现由持久化层的
-  > 单调 `snapshotVersion` 区分。现场若要"精确到小时"，需在 `snapshotBatchId` 铸造处
-  > 加一段很薄的调用方推导（排练已证明其可行）。**现场演示时用
-  > `snapshotBatchId = <project_code>|<Createtime 到小时>` 手工铸造即可复现。**
+  > **更新（排练报告 gap #3 已关闭）**：按小时分批**已进发货代码**
+  > （`lib/stock-preparation-batch-identity.cjs`，由 table-action MVP-persist 路由在
+  > `snapshotBatchId` 铸造处调用），不再需要手工铸造。但它**按部署声明启用**：在读计划
+  > 上写 `batchIdentity: { mode: 'material_create_hour' }`，并声明 `part.createTimeField`
+  > （如 `Createtime`）。**不声明 = 保持今天的行为**（内容修订摘要 id + 持久化层单调
+  > `snapshotVersion`）——批次 id 同时是持久化幂等键、advisory lock 键和每个派生子 id 的
+  > 哈希输入，默认切换会改变"哪些拉取算同一批"，所以必须由部署选择。声明了但源里没有
+  > 可用 `Createtime` 时，**回落到今天的行为，并在响应的 `batchIdentity` 证据里以编码
+  > 原因明确报告降级**，绝不静默落错桶。
 - **排练对照**：批 #1 `...|2026-08-30T09` vs 批 #2 `...|2026-08-30T10`，0 行 id 重叠。
 
 ### 步骤 3 —（已存在的部分）人工填列 + 人列墙 + 导出
@@ -203,7 +290,10 @@ WHERE project_code = '<体检2选出的项目>' GROUP BY bom_able;
 ### 现场**不**演（净新、未接线——如实说明，勿假装）
 1. **多人审批 hand-off 链到 备料 的接线**——平台有审批运行时，但**未接**到备料流。
 2. **钉钉待办推送**——无连接器接线。
-3. **按创建小时分批的推导**——见步骤 2 注意；发货代码里没有，需小段调用方推导。
+3. ~~**按创建小时分批的推导**~~——**已进发货代码，现可演**（见步骤 2 更新）。前提是
+   现场读计划声明 `part.createTimeField` 与 `batchIdentity.mode = 'material_create_hour'`；
+   不声明则维持内容修订摘要 + 单调 `snapshotVersion` 的旧行为，源里缺 `Createtime` 时
+   带编码原因降级。**要如实说明的是它是"按声明启用"，不是默认。**
 
 ---
 

@@ -1,6 +1,7 @@
 /**
  * Multitable AI provider client (A2) — anthropic messages + openai chat
- * completions behind ONE narrow `complete()` surface.
+ * completions (the openai cloud lane AND the `local-openai-compat` self-hosted
+ * lane, which speaks the same protocol) behind ONE narrow `complete()` surface.
  *
  * Design lock: docs/development/multitable-ai-shortcut-backend-a2-design-20260611.md §2.3.
  *
@@ -27,7 +28,9 @@ import {
   AI_API_KEY_ENV,
   AI_BASE_URL_ENV,
   AI_CONFIRM_LIVE_REQUESTS_ENV,
+  AI_LOCAL_PROVIDER,
   resolveAiProviderReadiness,
+  type AiCloudProvider,
   type AiProvider,
   type AiProviderCaps,
   type AiReadinessEnv,
@@ -102,10 +105,23 @@ export interface AiCompletionResult {
   message?: string
 }
 
-const DEFAULT_BASE_URLS: Record<AiProvider, string> = {
+/**
+ * CLOUD default endpoints only. The local lane has NO default on purpose: an
+ * unset MULTITABLE_AI_BASE_URL must block (readiness enforces it; `complete()`
+ * re-checks), never silently fall through to a public host.
+ */
+const DEFAULT_BASE_URLS: Record<AiCloudProvider, string> = {
   anthropic: 'https://api.anthropic.com',
   openai: 'https://api.openai.com',
 }
+
+/**
+ * Self-hosted spend is 0 USD by definition — there is no cloud account to
+ * charge, so the 估算 price table is not consulted for the local lane. Tokens
+ * are STILL metered (the ledger rows and tenant token caps apply unchanged);
+ * only the USD dimension is fixed at zero.
+ */
+export const AI_LOCAL_ZERO_PRICE: AiModelPrice = { inputUsdPerMTok: 0, outputUsdPerMTok: 0 }
 
 const ANTHROPIC_VERSION = '2023-06-01'
 
@@ -198,7 +214,9 @@ export class AiProviderClient {
       }
     }
 
-    const price = this.priceTable[`${provider}:${model}`]
+    // The local lane is priced 0 by definition (no cloud spend) and its models
+    // are operator-named, so the cloud price table is deliberately not consulted.
+    const price = provider === AI_LOCAL_PROVIDER ? AI_LOCAL_ZERO_PRICE : this.priceTable[`${provider}:${model}`]
     if (!price) {
       return {
         ok: false,
@@ -233,13 +251,23 @@ export class AiProviderClient {
 
     const apiKey = typeof env[AI_API_KEY_ENV] === 'string' ? env[AI_API_KEY_ENV]!.trim() : ''
     const baseUrlRaw = typeof env[AI_BASE_URL_ENV] === 'string' ? env[AI_BASE_URL_ENV]!.trim() : ''
-    const baseUrl = (baseUrlRaw || DEFAULT_BASE_URLS[provider]).replace(/\/+$/, '')
+    // The local lane has NO default endpoint — readiness already blocks an unset
+    // base URL, so this re-check only fires if the env raced; it must still
+    // never fall through to a public default.
+    const baseUrl = (provider === AI_LOCAL_PROVIDER ? baseUrlRaw : baseUrlRaw || DEFAULT_BASE_URLS[provider]).replace(/\/+$/, '')
+    if (!baseUrl) {
+      return blocked(`${AI_BASE_URL_ENV} is required for provider '${AI_LOCAL_PROVIDER}'; no request was sent.`, provider, model)
+    }
 
+    // The local lane speaks the same openai chat-completions protocol; its key
+    // is OPTIONAL (keyless server → no authorization header at all, never a
+    // dangling `Bearer `). Cloud lanes are unchanged — readiness guarantees a
+    // non-empty key before this code runs.
     const url = provider === 'anthropic' ? `${baseUrl}/v1/messages` : `${baseUrl}/v1/chat/completions`
     const headers: Record<string, string> =
       provider === 'anthropic'
         ? { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION }
-        : { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }
+        : { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) }
     // Same body shape for both providers (anthropic messages and openai chat
     // completions both take model + max_tokens + a user message array).
     const body = {

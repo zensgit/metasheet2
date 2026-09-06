@@ -12,6 +12,7 @@ import {
   claimPluginObjectScope,
   createPluginScopedMultitableApi,
   getPluginProjectNamespaces,
+  isSheetOwnedByProject,
 } from '../../src/multitable/plugin-scope'
 
 function createScopeQuery() {
@@ -80,6 +81,91 @@ describe('multitable plugin scope helper', () => {
     ).toThrow(MultitableProjectNamespaceError)
   })
 
+  // ---------------------------------------------------------------------------
+  // THE SHEET-OWNERSHIP PORT. It is what the stock-prep carry wall refuses on, and it is the one
+  // provisioning method whose ANSWER is a tenancy fact rather than a schema id — so its narrowing is
+  // load-bearing rather than tidy. Until these cases existed, deleting the wrapper's guard AND
+  // deleting the whole wrapper both stayed green.
+  // ---------------------------------------------------------------------------
+
+  it('isSheetOwnedByProject asks the registry for the (sheet, project) PAIR, never for the owner', async () => {
+    const rows: Array<{ sheet_id: string; project_id: string }> = [
+      { sheet_id: 'sheet_ours', project_id: 'tenant_42:after-sales' },
+      { sheet_id: 'sheet_theirs', project_id: 'tenant_99:after-sales' },
+    ]
+    const query = vi.fn(async (_sql: string, params: unknown[]) => ({
+      rows: rows.filter((row) => row.sheet_id === params[0] && row.project_id === params[1]).map(() => ({})),
+      rowCount: 0,
+    }))
+
+    await expect(isSheetOwnedByProject(query as any, 'sheet_ours', 'tenant_42:after-sales')).resolves.toBe(true)
+    // A sheet that exists but belongs to ANOTHER tenant is false — and the SQL never asked "whose is
+    // it", so there is no owner id anywhere in the answer to leak.
+    await expect(isSheetOwnedByProject(query as any, 'sheet_theirs', 'tenant_42:after-sales')).resolves.toBe(false)
+    // No row at all is the same false: "not registered" and "someone else's" are one answer here.
+    await expect(isSheetOwnedByProject(query as any, 'sheet_absent', 'tenant_42:after-sales')).resolves.toBe(false)
+
+    for (const call of query.mock.calls) {
+      expect(String(call[0])).toContain('project_id = $2')
+      expect(String(call[0])).not.toContain('SELECT project_id')
+    }
+  })
+
+  it('the scoped ownership port narrows on the projectId ARGUMENT, before any query', async () => {
+    const delegate = vi.fn(async () => true)
+    const multitable = { provisioning: { isSheetOwnedByProject: delegate }, records: {} }
+    const scoped = createPluginScopedMultitableApi(multitable as any, 'plugin-after-sales')
+
+    // (a) inside the plugin's own namespace -> delegated and answered
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:after-sales'),
+    ).resolves.toBe(true)
+    expect(delegate).toHaveBeenCalledTimes(1)
+
+    // (b) a FOREIGN plugin namespace -> refused, and the registry is never touched. This is the
+    // assertion that reds if the guard is deleted from the wrapper.
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:attendance'),
+    ).rejects.toThrow(MultitableProjectNamespaceError)
+    expect(delegate).toHaveBeenCalledTimes(1)
+  })
+
+  it('the scoped provisioning surface exposes EVERY method the delegate has', () => {
+    // Deleting a wrapper entirely used to be invisible: the hardcoded fake below only names the
+    // methods someone remembered. In production a missing wrapper is not a missing feature but a
+    // hard failure — the carry wall answers 501 on every click — so the surface is compared as a
+    // SET, and the next method added to MultitableProvisioningAPI cannot ship unwrapped.
+    // The COMPLETE provisioning surface as of this commit. Kept as a literal on purpose: a method
+    // added to the host API and forgotten in the wrapper is caught by adding it here, which is the
+    // same edit the author is already making.
+    const delegateProvisioning = {
+      getObjectSheetId: () => 'sheet_1',
+      getFieldId: () => 'fld_1',
+      getObjectField: async () => null,
+      findObjectSheet: async () => null,
+      isSheetOwnedByProject: async () => false,
+      resolveFieldIds: async () => ({}),
+      resolveExistingObjectFieldIds: async () => ({}),
+      readObjectFieldsContent: async () => ({}),
+      ensureMissingObjectFields: async () => ({}),
+      runObjectFieldsRepairTransaction: async () => ({}),
+      ensureObject: async () => ({}),
+      ensureObjectDefaultView: async () => ({}),
+      ensureView: async () => ({}),
+      patchObjectFieldProperty: async () => ({}),
+    }
+    const scoped = createPluginScopedMultitableApi(
+      { provisioning: delegateProvisioning, records: {} } as any,
+      'plugin-after-sales',
+    )
+    for (const method of Object.keys(delegateProvisioning)) {
+      expect(
+        typeof (scoped.provisioning as Record<string, unknown>)[method],
+        `plugin-scoped provisioning must wrap ${method}`,
+      ).toBe('function')
+    }
+  })
+
   it('wraps provisioning methods with namespace checks', async () => {
     const ensureObjectInScope = vi.fn(async () => ({
       baseId: 'base_legacy',
@@ -91,6 +177,14 @@ describe('multitable plugin scope helper', () => {
     const multitable = {
       provisioning: {
         getObjectSheetId: vi.fn(() => 'sheet_1'),
+        // 项目备料页's fill deep link derives its view id through this seam, so it is guarded by
+        // assertProjectIdAllowedForPlugin exactly like its sheet-id sibling — and therefore has to
+        // be exercised on BOTH sides here, or dropping that guard stays green.
+        getObjectViewId: vi.fn(() => 'view_1'),
+        // The sheet-ownership question. A BOOLEAN: the owning project id never leaves the host.
+        isSheetOwnedByProject: vi.fn(async (sheetId: string, projectId: string) => (
+          sheetId === 'sheet_1' && projectId === 'tenant_42:after-sales'
+        )),
         getFieldId: vi.fn(() => 'fld_1'),
         findObjectSheet: vi.fn(async () => ({
           id: 'sheet_1',
@@ -145,6 +239,15 @@ describe('multitable plugin scope helper', () => {
     })
 
     expect(scoped.provisioning.getObjectSheetId('tenant_42:after-sales', 'serviceTicket')).toBe('sheet_1')
+    expect(scoped.provisioning.getObjectViewId('tenant_42:after-sales', 'serviceTicket', 'default')).toBe('view_1')
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:after-sales'),
+    ).resolves.toBe(true)
+    // A sheet this project does not own is a plain no — the same answer an unclaimed sheet gets, so
+    // the port cannot be used to find out whose it actually is.
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_of_another_tenant', 'tenant_42:after-sales'),
+    ).resolves.toBe(false)
     expect(scoped.provisioning.getFieldId('tenant_42:after-sales', 'serviceTicket', 'status')).toBe('fld_1')
     await expect(
       scoped.provisioning.findObjectSheet({
@@ -218,8 +321,23 @@ describe('multitable plugin scope helper', () => {
       scoped.provisioning.getObjectSheetId('tenant_42:attendance', 'serviceTicket'),
     ).toThrow(MultitableProjectNamespaceError)
     expect(() =>
+      scoped.provisioning.getObjectViewId('tenant_42:attendance', 'serviceTicket', 'default'),
+    ).toThrow(MultitableProjectNamespaceError)
+    expect(() =>
       scoped.provisioning.getFieldId('tenant_42:attendance', 'serviceTicket', 'status'),
     ).toThrow(MultitableProjectNamespaceError)
+    // The ownership question names a PROJECT, so it narrows on the projectId ARGUMENT, before the
+    // registry is touched — a plugin may not ask about a project outside its own namespace. There is
+    // no answer to narrow afterwards: the port returns a boolean, so it can never hand back another
+    // tenant's project id — which is what an earlier id-returning cut did, since plugin namespaces
+    // are per-PLUGIN, not per-tenant, and within one namespace the guard cannot separate tenants.
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:attendance'),
+    ).rejects.toThrow(MultitableProjectNamespaceError)
+    expect(multitable.provisioning.isSheetOwnedByProject).not.toHaveBeenCalledWith(
+      'sheet_1',
+      'tenant_42:attendance',
+    )
     await expect(
       scoped.provisioning.findObjectSheet({
         projectId: 'tenant_42:attendance',

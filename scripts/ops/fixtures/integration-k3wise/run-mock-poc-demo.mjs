@@ -15,6 +15,12 @@
 // end-to-end proof of the §15.2 E4-05 property (the fence is NOT a blanket deny: reads, cleaning,
 // intake, the C6 planner and GetDetail all still work over real HTTP against the mock).
 //
+// CONVERTED AGAIN FOR E4S (sec/k3-sqlserver-fence-parity): step 7b described the SAME pre-fence
+// world for the `erp:k3-wise-sqlserver` kind — a middle-table upsert was the LEGITIMATE write path
+// before this PR extended the ban to that kind, no exception for middle tables. Same conversion,
+// same shape: "the write happened" becomes "the write is refused, with the fixed code, and the
+// mock SQL server received nothing".
+//
 // Pipeline this exercises:
 //   1. Load gate-sample.json
 //   2. preflight: buildPacket(gate) → packet (in-memory, no disk write)
@@ -26,6 +32,8 @@
 //   6b. E4 FENCE PROOF (BOM): the ban is connector-wide, not material-only — same refusal, same
 //      zero-call proof
 //   7. SQL channel read/upsert probes to verify the mock matches channel contract
+//   7b. E4S FENCE PROOF (SQL middle-table): the SQL Server channel's upsert is ALSO REFUSED with
+//       the same fixed code — the mock SQL server's call log stays empty
 //   7d. THE RULED CHAIN, as far as it now goes: read -> clean -> C6 dry-run (REAL GetDetail round
 //       trip against the mock) -> NO token minted -> apply REFUSED without consuming a pre-seeded
 //       token -> K3's own state confirms the material was never written, and that read failure
@@ -333,15 +341,33 @@ async function main() {
       throw new Error(`K3 read -> stock-prep intake failed: ${error.message}`)
     }
     try {
-      const middleWriteResult = await sqlChannel.upsert({
+      // 7b. E4S FENCE PROOF — the SQL channel's middle-table write is ALSO permanently refused.
+      //
+      // CONVERTED (E4S, sec/k3-sqlserver-fence-parity). This step asserted `written === 1`: a
+      // middle-table `writeMode` was the LEGITIMATE configuration for a K3 SQL Server channel
+      // upsert before this PR. The owner ruling extends the ban (HG v1.2 §10) to the sqlserver
+      // kind with no middle-table exception, so this is the same conversion already applied to
+      // steps 6, 6b and 7d above: a leg that asserted "the write happened" becomes a leg that
+      // asserts "the write is refused, with the fixed code, and the mock SQL server saw nothing".
+      const queryLogLengthBeforeMiddleWrite = mockSql.queryLog.length
+      const middleWriteRefusal = await sqlChannel.upsert({
         object: 'material_stage',
         records: [{ FNumber: 'MAT-STAGE-001', FName: 'Mock staged material' }],
         keyFields: ['FNumber'],
-      })
-      assert(middleWriteResult.written === 1, `expected 1 SQL middle-table write, got ${middleWriteResult.written}`)
-      console.log('✓ step 7b: SQL channel middle-table upsert wrote 1 integration row')
+      }).then(() => null, (error) => error)
+      assert(middleWriteRefusal, 'E4S: the SQL channel middle-table upsert must be REFUSED, never performed')
+      assert(
+        middleWriteRefusal.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+        `E4S: expected the fixed code K3_WISE_EXTERNAL_WRITE_DISABLED, got ${middleWriteRefusal.code}`,
+      )
+      assert(
+        mockSql.queryLog.length === queryLogLengthBeforeMiddleWrite,
+        'E4S: a refused SQL middle-table write must reach the mock SQL server ZERO times',
+      )
+      assert(mockSql.writes.size === 0, 'E4S: zero rows written to any table')
+      console.log('✓ step 7b: SQL channel middle-table upsert PERMANENTLY REFUSED (K3_WISE_EXTERNAL_WRITE_DISABLED); mock SQL server received nothing')
     } catch (error) {
-      throw new Error(`SQL channel middle-table upsert failed: ${error.message}`)
+      throw new Error(`SQL channel middle-table upsert refusal check failed: ${error.message}`)
     }
     try {
       await mockSql.exec({ sql: 'INSERT INTO dbo.t_ICItem (FNumber, FName) VALUES (?, ?)', params: ['MAT-FORBIDDEN', 'should be blocked'] })
@@ -670,9 +696,10 @@ async function main() {
   console.log('  PROVES: the READ chain works end to end over real HTTP (testConnection, SQL')
   console.log('          readonly probe, stock-prep intake, C6 read → clean → dry-run with a real')
   console.log('          GetDetail round trip), AND that K3 external write-back is PERMANENTLY')
-  console.log('          REFUSED (E4 / G-4, K3_WISE_EXTERNAL_WRITE_DISABLED) at material, BOM and')
-  console.log('          C6-apply entry points — 0 login, 0 Save, 0 Submit, 0 Audit, and a')
-  console.log('          pre-seeded approval token left unconsumed.')
+  console.log('          REFUSED (E4 / E4S / G-4, K3_WISE_EXTERNAL_WRITE_DISABLED) at material,')
+  console.log('          BOM, SQL middle-table and C6-apply entry points — 0 login, 0 Save, 0')
+  console.log('          Submit, 0 Audit, 0 SQL statements, and a pre-seeded approval token left')
+  console.log('          unconsumed.')
   console.log('  DOES NOT PROVE: any write. There is no write left to prove; the evidence')
   console.log('          compiler leg runs on a clearly-labeled SYNTHETIC packet.')
   console.log('  Note: mock pass ≠ customer live pass. See fixtures/README.md.')

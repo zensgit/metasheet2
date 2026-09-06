@@ -347,7 +347,7 @@ function buildTemplate(overrides: Partial<ApprovalTemplateDetailDTO> = {}): Appr
           id: 'reviewer',
           type: 'user',
           label: '审批人',
-          visibilityRule: { fieldId: 'amount', operator: 'notEmpty' },
+          required: true,
         },
       ],
     },
@@ -373,6 +373,23 @@ function buildTemplate(overrides: Partial<ApprovalTemplateDetailDTO> = {}): Appr
     },
     ...overrides,
   }
+}
+
+function buildVisibilityTemplate(): ApprovalTemplateDetailDTO {
+  return buildTemplate({
+    formSchema: {
+      fields: [
+        { id: 'amount', type: 'number', label: '金额', required: true },
+        {
+          id: 'note',
+          type: 'text',
+          label: '备注',
+          visibilityRule: { fieldId: 'amount', operator: 'notEmpty' },
+        },
+        { id: 'reviewer', type: 'user', label: '审批人', required: true },
+      ],
+    },
+  })
 }
 
 let container: HTMLDivElement | null = null
@@ -525,7 +542,7 @@ describe('validateTemplateBasicInfo (P1-A0 typed issue model)', () => {
 
 describe('approval template authoring helpers', () => {
   it('preserves visibilityRule metadata while rebuilding supported fields', () => {
-    const template = buildTemplate()
+    const template = buildVisibilityTemplate()
     const draft = draftFromTemplate(template)
     draft.fields[0].label = '报销金额'
 
@@ -672,8 +689,7 @@ describe('approval template authoring helpers', () => {
   })
 
   it('is authoritative: clearing the rule removes it instead of leaking the original', () => {
-    // buildTemplate's `reviewer` field carries visibilityRule { amount, notEmpty }.
-    const draft = draftFromTemplate(buildTemplate())
+    const draft = draftFromTemplate(buildVisibilityTemplate())
     expect(draft.fields[1].visibility.dependsOnFieldId).toBe('amount')
     draft.fields[1].visibility = { dependsOnFieldId: '', operator: 'eq', valueText: '' }
     expect(buildFormSchema(draft).fields[1]?.visibilityRule).toBeUndefined()
@@ -1573,7 +1589,7 @@ describe('TemplateAuthoringView', () => {
       // that shape check is save-BLOCKING in B0's minimal set (dropping it red the save with
       // 审批人 1 的表单用户字段无效 — the minimal gate doing its job, caught during authoring).
       formSchema: { fields: [
-        { id: 'reviewer', type: 'user', label: '审批人', required: false },
+        { id: 'reviewer', type: 'user', label: '审批人', required: true },
         { id: `field_${id}`, type: 'text', label: `字段 ${id}`, required: false },
       ] },
     })))
@@ -1611,7 +1627,7 @@ describe('TemplateAuthoringView', () => {
       // that shape check is save-BLOCKING in B0's minimal set (dropping it red the save with
       // 审批人 1 的表单用户字段无效 — the minimal gate doing its job, caught during authoring).
       formSchema: { fields: [
-        { id: 'reviewer', type: 'user', label: '审批人', required: false },
+        { id: 'reviewer', type: 'user', label: '审批人', required: true },
         { id: `field_${id}`, type: 'text', label: `字段 ${id}`, required: false },
       ] },
     })))
@@ -1725,7 +1741,7 @@ describe('TemplateAuthoringView', () => {
             id: 'reviewer',
             type: 'user',
             label: '审批人',
-            visibilityRule: { fieldId: 'amount', operator: 'notEmpty' },
+            required: true,
           },
           { id: 'priority', type: 'select', label: '优先级', options: [] },
         ],
@@ -1758,7 +1774,7 @@ describe('TemplateAuthoringView', () => {
             id: 'reviewer',
             type: 'user',
             label: '审批人',
-            visibilityRule: { fieldId: 'amount', operator: 'notEmpty' },
+            required: true,
           },
           { id: 'priority', type: 'select', label: '优先级', options: [] },
         ],
@@ -2864,7 +2880,7 @@ describe('TemplateAuthoringView', () => {
 
   it('wires the visibility subform through the mounted view into the saved payload', async () => {
     setRouteParams({ id: 'tpl_1' })
-    getTemplateSpy.mockResolvedValue(buildTemplate()) // fields[1] reviewer depends on `amount` (notEmpty)
+    getTemplateSpy.mockResolvedValue(buildVisibilityTemplate()) // fields[1] note depends on `amount` (notEmpty)
     await mountView()
     await flushUi()
 
@@ -2896,7 +2912,7 @@ describe('TemplateAuthoringView', () => {
 
   it('clearing the dependency in the mounted view drops the rule from the saved payload', async () => {
     setRouteParams({ id: 'tpl_1' })
-    getTemplateSpy.mockResolvedValue(buildTemplate())
+    getTemplateSpy.mockResolvedValue(buildVisibilityTemplate())
     await mountView()
     await flushUi()
 
@@ -3576,7 +3592,7 @@ describe('TemplateAuthoringView', () => {
   const d1HygieneFormSchemaBlank = {
     fields: [
       { id: 'amount', type: 'number', label: '报销金额', required: true },
-      { id: 'reviewer', type: 'user', label: '', required: false },
+      { id: 'reviewer', type: 'user', label: '', required: true },
       { id: 'reason', type: 'textarea', label: '事由', required: true },
       {
         id: 'expense_items',
@@ -3593,7 +3609,7 @@ describe('TemplateAuthoringView', () => {
   const d1HygieneFormSchemaLabeled = {
     fields: [
       { id: 'amount', type: 'number', label: '报销金额', required: true },
-      { id: 'reviewer', type: 'user', label: '指定审批人', required: false },
+      { id: 'reviewer', type: 'user', label: '指定审批人', required: true },
       { id: 'reason', type: 'textarea', label: '事由', required: true },
       {
         id: 'expense_items',
@@ -3962,6 +3978,48 @@ describe('TemplateAuthoringView', () => {
     // Positive control FIRST — proves the options list is non-trivial, not accidentally emptied.
     expect(optionValues).toContain('amount')
     expect(optionValues).not.toContain('note')
+  })
+
+  it('Lock-2 L2-A: legacy visibility and condition pickers exclude department while scalar fields stay selectable', async () => {
+    setRouteParams({ id: 'tpl_1' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额' },
+          { id: 'department', type: 'department', label: '部门', props: { selection: 'single', display: 'full_path' } },
+          { id: 'reason', type: 'text', label: '事由' },
+        ],
+      } as any,
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'cond_1', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'e-a', rules: [{ fieldId: 'amount', operator: 'gte', value: 100 }] }], defaultEdgeKey: 'e-b' } },
+          { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-c', source: 'start', target: 'cond_1' },
+          { key: 'e-a', source: 'cond_1', target: 'app_a' },
+          { key: 'e-b', source: 'cond_1', target: 'end' },
+          { key: 'e-a-end', source: 'app_a', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    const reasonRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[2] as HTMLElement
+    const visibilityValues = Array.from(
+      (reasonRow.querySelector('[data-testid="approval-field-visibility-depends"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(visibilityValues).toContain('amount')
+    expect(visibilityValues).not.toContain('department')
+
+    const conditionValues = Array.from(
+      (container!.querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(conditionValues).toContain('amount')
+    expect(conditionValues).not.toContain('department')
   })
 
   // ── F4 production mount (delta §5 F4 / §10 FB-D8) ──

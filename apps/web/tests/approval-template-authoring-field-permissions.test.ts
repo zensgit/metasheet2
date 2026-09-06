@@ -22,7 +22,7 @@ const FIELDS = [
   { id: 'reason', type: 'text' as const, label: '事由', required: true },
   { id: 'secret', type: 'text' as const, label: '机密', required: false },
   { id: 'note', type: 'text' as const, label: '备注', required: false },
-  { id: 'approver', type: 'user' as const, label: '审批人', required: false },
+  { id: 'approver', type: 'user' as const, label: '审批人', required: true },
 ]
 
 // Linear start→approval_1→end. `approval_1` hides `secret`, marks `note` readonly, and resolves its

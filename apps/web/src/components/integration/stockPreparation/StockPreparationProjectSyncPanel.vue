@@ -35,15 +35,16 @@
         :disabled="!canSubmit"
         @click="onRun"
       >
-        {{ busy
-          ? bi('正在同步…', 'Syncing…')
-          : bi('同步这个项目(可以重复点,不会重复写)', 'Sync this project (safe to repeat — it never writes twice)') }}
+        {{ busy ? bi(...runningLabel) : bi(...runLabel) }}
       </button>
-      <!-- R-11: a control the caller cannot exercise is ABSENT, and the reason is said in words. -->
+      <!-- R-11: a control the caller cannot exercise is ABSENT, and the reason is said in words.
+           一线自己拉数据 widened who may press it — a stock-prep operator now can — so this line no
+           longer says "only a platform administrator": it names both tiers, because sending someone
+           to the wrong person is its own kind of dead end. -->
       <p v-else class="sp-sync__hint" data-testid="stock-prep-project-sync-denied">
         {{ bi(
-          '从 PLM 拉数据这件事要由平台管理员来做。您可以看这里的结果,同步请找平台管理员执行。',
-          'Pulling data from PLM is a platform administrator’s job. You can read the results here; ask a platform administrator to run the sync.',
+          '从 PLM 拉数据要有备料操作权限,或者是平台管理员。您可以看这里的结果,同步请找有权限的同事或平台管理员执行。',
+          'Pulling data from PLM needs the stock-preparation operator permission, or a platform administrator. You can read the results here; ask a colleague who has it, or a platform administrator, to run the sync.',
         ) }}
       </p>
     </div>
@@ -75,6 +76,85 @@
     <p v-if="report && report.planned" class="sp-sync__counts" data-testid="stock-prep-project-sync-counts">
       {{ countsSentence }}
     </p>
+
+    <!-- B1 — the add-on's own OPT-IN was refused for THIS caller specifically (403 OPERATOR_SCOPE_*):
+         actionable, so it gets a line. `server_unsupported` (this deployment simply does not know the
+         request flag yet) is NOT actionable by an operator and renders nothing. -->
+    <p
+      v-if="report && report.missingComponentsUnavailableReason === 'scope_denied'"
+      class="sp-sync__hint"
+      data-testid="stock-prep-project-sync-missing-components-unavailable"
+    >
+      {{ bi(
+        '当前账号看不到缺件清单(需操作员权限且账号属于本工厂)',
+        'The signed-in account cannot see the missing-components list (needs the stock-prep operator permission and to belong to this tenant)',
+      ) }}
+    </p>
+
+    <!-- 缺件清单 (W3a) — THE BLOCKING EXPLANATION. Renders when the dry run hit at least one missing
+         component — `items.length > 0` is the primary signal; `distinctCount > 0` alone also counts
+         (M5: a garbage/unavailable `distinctCount` must not hide a non-empty list). This is not
+         "extra detail" the way the technical disclosure below is — it is the answer to "why did the
+         whole project not write", so it stays open by default rather than collapsed. -->
+    <details
+      v-if="report && report.missingComponents && hasMissingComponents(report.missingComponents)"
+      class="sp-sync__missing"
+      data-testid="stock-prep-project-sync-missing-components"
+      open
+    >
+      <summary class="sp-sync__missing-summary">{{ missingComponentsSummary }}</summary>
+      <!-- M5: `distinctCount` says "there are some" but the items array itself is empty (a server
+           inconsistency, e.g. `{distinctCount:5, items:[]}`) — show the count line above (the
+           `<summary>`) and STOP, rather than rendering a table with no rows in it and a copy/export
+           pair with nothing to act on. -->
+      <div v-if="report.missingComponents.items.length > 0" class="sp-sync__missing-body">
+        <table ref="missingComponentsTableEl" class="sp-sync__missing-table">
+          <thead>
+            <tr>
+              <th v-for="header in missingComponentHeaders" :key="header">{{ header }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(item, idx) in report.missingComponents.items"
+              :key="`${item.componentSourceId}-${item.bomId}-${idx}`"
+              data-testid="stock-prep-project-sync-missing-components-row"
+            >
+              <td>{{ item.componentSourceId }}</td>
+              <td>{{ missingComponentParentCell(item) }}</td>
+              <td>{{ item.bomId }}</td>
+              <td>{{ item.depth }}</td>
+              <td>{{ item.occurrenceCount }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p
+          v-if="report.missingComponents.truncated"
+          class="sp-sync__missing-truncated"
+          data-testid="stock-prep-project-sync-missing-components-truncated"
+        >
+          {{ missingComponentsTruncatedNote }}
+        </p>
+        <div class="sp-sync__missing-actions">
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-sync-missing-components-copy"
+            @click="onCopyMissingComponents"
+          >
+            {{ missingComponentsCopyLabel }}
+          </button>
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-sync-missing-components-export"
+            @click="onExportMissingComponents"
+          >
+            {{ bi('导出 CSV', 'Export CSV') }}
+          </button>
+        </div>
+      </div>
+    </details>
 
     <!-- Where to go next. Both are navigation inside this same workbench; neither is a new route. -->
     <div v-if="report" class="sp-sync__next">
@@ -133,6 +213,19 @@
       </li>
     </ol>
 
+    <!-- The large-BOM background channel. `:key="submittedProjectNo"` remounts it per run rather
+         than reusing one instance across two different large projects. -->
+    <StockPreparationLargeBomPullPanel
+      v-if="showsLargeBomPull"
+      :key="submittedProjectNo"
+      :project-no="submittedProjectNo"
+      :scope="scope"
+      :api="largeBomApi"
+      :wait="largeBomPollWait"
+      @open-multitable="emit('open-multitable')"
+      @synced="emit('synced')"
+    />
+
     <StockPrepTechnicalDetails v-if="report" testid="stock-prep-project-sync-tech">
       <dl>
         <dt>{{ bi('每一步走的路由、结果码与计数', 'The route, outcome code and counts of each step') }}</dt>
@@ -155,8 +248,8 @@
         <dt>{{ bi('这个面板能做什么、不能做什么', 'What this panel can and cannot do') }}</dt>
         <dd>
           {{ bi(
-            '只驱动四条已有路由,没有新增任何写入权限:dry-run(read)、reconcile(admin)、apply(write)、mvp-persist(admin,受部署开关控制)。不向 ERP/K3 写入,不新建物料,不提供 SQL 入口。',
-            'Drives four EXISTING routes and adds no new write authority: dry-run (read), reconcile (admin), apply (write), mvp-persist (admin, behind a deployment flag). No ERP/K3 write, no material creation, no SQL entry point.',
+            '只驱动四条已有路由,没有新增任何写入权限:dry-run(read)、reconcile(管理员或一线操作员)、apply(write)、mvp-persist(admin,受部署开关控制)。不向 ERP/K3 写入,不新建物料,不提供 SQL 入口。',
+            'Drives four EXISTING routes and adds no new write authority: dry-run (read), reconcile (admin or floor operator), apply (write), mvp-persist (admin, behind a deployment flag). No ERP/K3 write, no material creation, no SQL entry point.',
           ) }}
         </dd>
       </dl>
@@ -183,26 +276,31 @@
 // text, echoed back into their own input, and it never comes from a response — the projects read
 // route deliberately never serves it. Everything else on this panel is a count, a closed status
 // token, an HTTP status or a reason code.
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import StockPreparationLargeBomPullPanel from './StockPreparationLargeBomPullPanel.vue'
 import {
   STOCK_PREPARATION_PROJECT_SYNC_STEPS,
   createStockPreparationProjectSyncApi,
   runStockPreparationProjectSync,
+  type StockPreparationMissingComponent,
+  type StockPreparationMissingComponentList,
   type StockPreparationProjectSyncApi,
   type StockPreparationProjectSyncReport,
   type StockPreparationProjectSyncStepResult,
   type StockPreparationProjectSyncStepStatus,
 } from '../../../services/integration/stockPreparation/projectSync'
+import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import {
   stockPrepStepOutcomeText,
   stockPrepSyncReasonPlain,
   stockPrepSyncVerdictPlain,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 
 const props = withDefaults(
   defineProps<{
@@ -213,12 +311,44 @@ const props = withDefaults(
      */
     armedAt?: number
     /**
+     * 项目备料页: the project this panel is already scoped to, so an operator who opened a board does
+     * not retype a number the page is already about.
+     *
+     * A SEED, NOT A LOCK. The input stays editable — the panel's own 项目接入 use on the legacy tab
+     * has no seed at all, and a locked field would take away the "sync a different project from
+     * here" path that surface relies on. The seed follows the prop, and a later prop change
+     * (the operator opened a different board) replaces what the seed put there — but never what the
+     * operator typed over it while a run was in flight.
+     */
+    projectNo?: string
+    /**
      * Test seam ONLY: an injected API double. Production always builds its own from `scope`, so a
      * component mounted without this prop cannot be pointed at a different endpoint.
      */
     api?: StockPreparationProjectSyncApi | null
+    /** Test seam ONLY — forwarded to StockPreparationLargeBomPullPanel. */
+    largeBomApi?: StockPreparationLargeBomJobApi | null
+    /** Test seam ONLY — forwarded to StockPreparationLargeBomPullPanel so specs never wait on a real timer. */
+    largeBomPollWait?: ((ms: number) => Promise<void>) | null
+    /**
+     * H14 — WHAT THIS BUTTON IS CALLED ON THE SURFACE THAT HOSTS IT.
+     *
+     * One button, two vocabularies, because it genuinely sits on two surfaces with two audiences.
+     * The admin surfaces (项目接入, 数据来源) have called this 「同步这个项目」 since it shipped, and
+     * their own copy references that name in four places. 项目备料页 is the OPERATOR's page and its
+     * whole framing is the four steps 从 PLM 拉取 / 通知下一步 / 导出 Excel / 到多维表填写 — its empty
+     * state already tells a person to press 「从PLM拉取数据」.
+     *
+     * Which was a lie until now: the button underneath said 同步这个项目. A page that names a control
+     * by a name the control does not have is a dead end pointing at something visible, which is the
+     * worst kind — the operator reads the sentence, looks down, sees no such button, and stops. So
+     * the label is a prop, the board passes its own, and neither surface has to adopt the other's
+     * word. The repeat-safety promise rides along with whichever name is used, because it is true of
+     * the button and not of the word.
+     */
+    runVariant?: 'sync' | 'pull'
   }>(),
-  { scope: () => ({}), armedAt: 0, api: null },
+  { scope: () => ({}), armedAt: 0, projectNo: '', api: null, largeBomApi: null, largeBomPollWait: null, runVariant: 'sync' },
 )
 
 const emit = defineEmits<{
@@ -239,14 +369,45 @@ function bi(zh: string, en: string): string {
 
 const canRun = computed(() => canRunStockPrepProjectSync((permission) => auth.hasPermission(permission)))
 
-const projectNo = ref('')
+/** See `runVariant`. Tuples so the template can spread them straight into `bi`. */
+const runLabel = computed<[string, string]>(() => (props.runVariant === 'pull'
+  ? ['从PLM拉取数据(可以重复点,不会重复写)', 'Pull data from PLM (safe to repeat — it never writes twice)']
+  : ['同步这个项目(可以重复点,不会重复写)', 'Sync this project (safe to repeat — it never writes twice)']))
+
+const runningLabel = computed<[string, string]>(() => (props.runVariant === 'pull'
+  ? ['正在拉取…', 'Pulling…']
+  : ['正在同步…', 'Syncing…']))
+
+const projectNo = ref(props.projectNo ?? '')
 const busy = ref(false)
 const armedNote = ref(false)
 const results = ref<StockPreparationProjectSyncStepResult[]>([])
 const report = ref<StockPreparationProjectSyncReport | null>(null)
 const projectNoEl = ref<HTMLInputElement | null>(null)
+/**
+ * The project number a run actually submitted — frozen at the moment 试算 fires, decoupled from the
+ * live `projectNo` input. The large-BOM sub-panel below can run for a while, and the operator is
+ * free to keep editing the field for their NEXT sync while it does; feeding it the live ref would
+ * point the background channel at whatever they typed most recently instead of what this run planned.
+ */
+const submittedProjectNo = ref('')
+
+/** The `<table>` DOM node the 缺件清单 "复制" button selects into when the Clipboard API is unavailable. */
+const missingComponentsTableEl = ref<HTMLTableElement | null>(null)
+
+/** Idle → the button's default label. Reset on every new run so a stale "已复制" never survives it. */
+const missingComponentsCopyState = ref<'idle' | 'copied' | 'manual'>('idle')
 
 const canSubmit = computed(() => canRun.value && !busy.value && projectNo.value.trim().length > 0)
+
+// 项目备料页: follow the seed when the PARENT changes which project this panel is about. It never
+// runs anything on its own — the operator still presses 同步 — and it never fires while a run is in
+// flight, so a number the operator typed for their next sync is not overwritten mid-run.
+watch(() => props.projectNo, (next) => {
+  const seeded = (next ?? '').trim()
+  if (!seeded || busy.value) return
+  projectNo.value = seeded
+})
 
 // A row's 刷新 arms this panel: it explains why the number has to be typed and puts the cursor in the
 // field. It deliberately does NOT run anything — the panel cannot know which project a values-free
@@ -261,8 +422,10 @@ watch(() => props.armedAt, async (next, previous) => {
 async function onRun(): Promise<void> {
   if (!canSubmit.value) return
   const target = projectNo.value.trim()
+  submittedProjectNo.value = target
   results.value = []
   report.value = null
+  missingComponentsCopyState.value = 'idle'
   busy.value = true
   try {
     const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
@@ -335,6 +498,16 @@ const showsSheetLink = computed<boolean>(() => {
 })
 
 /**
+ * The audit's second dead-end: a `large_bom_bounded` SKIP used to be the end of the story — no link,
+ * no progress, no completion signal. Mounted ONLY on that exact reason, so the sub-panel's own
+ * `onMounted` (which starts the background channel immediately) never fires for any other SKIP.
+ */
+const showsLargeBomPull = computed<boolean>(() => {
+  const planStep = report.value?.steps.find((step) => step.id === 'dry-run')
+  return planStep?.reason === 'PLAN_LARGE_BOM_BOUNDED'
+})
+
+/**
  * The plan's five numbers as ONE sentence. The clauses that are zero are dropped — "新增 0 行,更新 0
  * 行,跳过 12 行" makes a reader hunt for the number that matters.
  */
@@ -352,6 +525,193 @@ const countsSentence = computed<string>(() => {
   if (parts.length === 0) return bi('这次试算没有需要改动的行。', 'The plan found nothing to change.')
   return bi(`这次试算:${parts.join('、')}。`, `This plan: ${parts.join(', ')}.`)
 })
+
+// ---------------------------------------------------------------------------
+// 缺件清单 (W3a) — the ONE place on this panel that renders a business value (a customer part number)
+// straight from a response. Everything below is presentation over `report.missingComponents`, which
+// `missingComponentsOf` in projectSync.ts already strict-clamped at the API boundary.
+// ---------------------------------------------------------------------------
+
+/** On-screen columns: parent gets the "(+N 处)" badge folded in — see `missingComponentParentCell`. */
+const missingComponentHeaders = computed<string[]>(() => [
+  bi('零件号', 'Component'),
+  bi('父件', 'Parent'),
+  bi('所在 BOM', 'BOM'),
+  bi('层级', 'Depth'),
+  bi('次数', 'Occurrences'),
+])
+
+/**
+ * Export columns (TSV copy + CSV export) — point 8: the parent column is the RAW id, no localized
+ * badge text (a spreadsheet cell should hold data, not a rendered sentence fragment), and two columns
+ * the on-screen table has no room for ride along since the export already has them in hand:
+ * `parentCount` (the number the badge would have shown) and `path` (the full BOM path).
+ */
+const missingComponentExportHeaders = computed<string[]>(() => [
+  bi('零件号', 'Component'),
+  bi('父件', 'Parent'),
+  bi('所在 BOM', 'BOM'),
+  bi('层级', 'Depth'),
+  bi('次数', 'Occurrences'),
+  bi('涉及父件数', 'Parent count'),
+  bi('路径', 'Path'),
+])
+
+/** M5: does this list have anything to show? `items.length` is primary — a clamped-to-0 `distinctCount` must not hide a non-empty list. */
+function hasMissingComponents(list: StockPreparationMissingComponentList): boolean {
+  return list.items.length > 0 || list.distinctCount > 0
+}
+
+/**
+ * M5: the number the summary/truncated text SAYS. `distinctCount` when it is a real, positive count;
+ * `items.length` when the server sent garbage for it (0, negative, non-numeric — `missingComponentsOf`
+ * already clamped all of those to 0) but the items themselves are real. Only genuinely empty
+ * (`items.length === 0 && distinctCount <= 0`) reads as 0, and that state never reaches this function
+ * because `hasMissingComponents` gates the whole block.
+ */
+function effectiveDistinctCount(list: StockPreparationMissingComponentList): number {
+  return list.distinctCount > 0 ? list.distinctCount : list.items.length
+}
+
+const missingComponentsSummary = computed<string>(() => {
+  const list = report.value?.missingComponents
+  if (!list) return ''
+  const count = effectiveDistinctCount(list)
+  return bi(
+    `缺件 ${count} 种(共 ${list.probeCount} 处引用)—— 这些零件在物料表里不存在,整个项目在补齐前一行都写不进去。`,
+    `${count} missing part(s) (${list.probeCount} reference(s)) — these parts do not exist `
+    + 'in the materials table, and not one row of this project can be written until they are added.',
+  )
+})
+
+/**
+ * B2 fix: the design's original wording ("用导出取全量") was WRONG — the client holds at most 200
+ * items (the same 200-item cap `missingComponentsOf` enforces), so the export is exactly the 200
+ * rows already on screen, never "the full list". Says so truthfully, and gives the actual way to see
+ * more: clear this batch and run the plan again — the next dry run surfaces whatever is still left.
+ */
+const missingComponentsTruncatedNote = computed<string>(() => {
+  const list = report.value?.missingComponents
+  if (!list) return ''
+  const count = effectiveDistinctCount(list)
+  return bi(
+    `仅显示前 200 种(共 ${count} 种);导出的也是这 200 种,补完这批再试算一次会露出下一批。`,
+    `Showing the first 200 of ${count} distinct parts; the export also contains only these 200 — clear `
+    + 'this batch and run the plan again to see the next one.',
+  )
+})
+
+/** The on-screen parent cell: the parent id, plus a "(+N 处)" badge when the part is missing under MORE than one parent. */
+function missingComponentParentCell(item: StockPreparationMissingComponent): string {
+  if (item.parentCount > 1) {
+    return `${item.parentSourceId} ${bi(`(+${item.parentCount} 处)`, `(+${item.parentCount} more)`)}`
+  }
+  return item.parentSourceId
+}
+
+/** Export rows (TSV copy + CSV export) — point 8: raw parent id (no badge), plus `parentCount`/`path`. */
+function missingComponentExportRows(items: StockPreparationMissingComponent[]): Array<Array<string | number>> {
+  return items.map((item) => [
+    item.componentSourceId,
+    item.parentSourceId,
+    item.bomId,
+    item.depth,
+    item.occurrenceCount,
+    item.parentCount,
+    item.path,
+  ])
+}
+
+const missingComponentsCopyLabel = computed<string>(() => {
+  if (missingComponentsCopyState.value === 'copied') return bi('已复制', 'Copied')
+  if (missingComponentsCopyState.value === 'manual') {
+    return bi('已为您选中,请按 Ctrl/Cmd+C 复制', 'Selected — press Ctrl/Cmd+C to copy')
+  }
+  return bi('复制', 'Copy')
+})
+
+/** Point 9: the copy button's "已复制"/"已为您选中…" label is transient — reset to idle 3s later. */
+let missingComponentsCopyResetTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleMissingComponentsCopyReset(): void {
+  if (missingComponentsCopyResetTimer !== null) clearTimeout(missingComponentsCopyResetTimer)
+  missingComponentsCopyResetTimer = setTimeout(() => {
+    missingComponentsCopyState.value = 'idle'
+    missingComponentsCopyResetTimer = null
+  }, 3000)
+}
+
+onUnmounted(() => {
+  if (missingComponentsCopyResetTimer !== null) clearTimeout(missingComponentsCopyResetTimer)
+})
+
+/**
+ * Clipboard-unavailable fallback: select the table's own text so the operator can copy it by hand.
+ * Best-effort only — a test/jsdom environment or an old browser without Selection/Range support gets
+ * the same "nothing happened" it would have gotten without this, and the label change is still true.
+ */
+function selectMissingComponentsTable(): void {
+  try {
+    const table = missingComponentsTableEl.value
+    const selection = typeof window !== 'undefined' ? window.getSelection?.() : null
+    if (!table || !selection || typeof document.createRange !== 'function') return
+    const range = document.createRange()
+    range.selectNodeContents(table)
+    selection.removeAllRanges()
+    selection.addRange(range)
+  } catch {
+    // See above — a failed selection still gets the "手动复制" label, which is the honest state.
+  }
+}
+
+async function onCopyMissingComponents(): Promise<void> {
+  const list = report.value?.missingComponents
+  if (!list) return
+  // Guard ON (2nd arg): these cells are a customer's own external part numbers reaching a
+  // spreadsheet for the first time — see stockPrepCsv.ts's module comment (B3).
+  const tsv = [missingComponentExportHeaders.value, ...missingComponentExportRows(list.items)]
+    .map((row) => row.map((cell) => escapeTsvCell(cell, { guardFormulas: true })).join('\t'))
+    .join('\n')
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
+  try {
+    if (!clipboard || typeof clipboard.writeText !== 'function') throw new Error('clipboard unavailable')
+    await clipboard.writeText(tsv)
+    missingComponentsCopyState.value = 'copied'
+  } catch {
+    // Clipboard API missing, refused, or throwing (insecure context, no permission, …): select the
+    // table for a manual copy and SAY SO — a silent failure here reads as "复制 did nothing".
+    selectMissingComponentsTable()
+    missingComponentsCopyState.value = 'manual'
+  } finally {
+    scheduleMissingComponentsCopyReset()
+  }
+}
+
+/** Point 9: characters Windows/macOS/Linux all refuse in a filename, replaced rather than left to fail the download silently. */
+function sanitizeFilenameToken(value: string): string {
+  return value.replace(/[\\/:*?"<>|]/g, '_')
+}
+
+function missingComponentsCsvFilename(): string {
+  const now = new Date()
+  const yyyy = now.getFullYear()
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  const projectToken = sanitizeFilenameToken(submittedProjectNo.value.trim() || 'project')
+  return `missing-components-${projectToken}-${yyyy}${mm}${dd}.csv`
+}
+
+function onExportMissingComponents(): void {
+  const list = report.value?.missingComponents
+  if (!list) return
+  // Guard ON (4th arg) — same reasoning as the copy path above (B3).
+  downloadCsvFile(
+    missingComponentsCsvFilename(),
+    missingComponentExportHeaders.value,
+    missingComponentExportRows(list.items),
+    { guardFormulas: true },
+  )
+}
 </script>
 
 <style scoped>
@@ -565,5 +925,69 @@ const countsSentence = computed<string>(() => {
   color: var(--ms-text-3);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+/* 缺件清单 (W3a) — deliberately louder than .sp-tech: this is the blocking explanation, not a
+   collapsed technical aside, so it gets a border of its own rather than sp-tech's quiet hairline. */
+.sp-sync__missing {
+  border: 1px solid var(--ms-color-warning, #b8860b);
+  border-radius: 6px;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  background: var(--ms-bg-page);
+}
+
+.sp-sync__missing-summary {
+  cursor: pointer;
+  color: var(--ms-text-1);
+  font-size: 13px;
+  line-height: 1.6;
+  list-style: none;
+}
+
+.sp-sync__missing-summary::-webkit-details-marker {
+  display: none;
+}
+
+.sp-sync__missing-summary:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
+.sp-sync__missing-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-2);
+  margin-top: var(--ms-space-2);
+}
+
+.sp-sync__missing-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.sp-sync__missing-table th,
+.sp-sync__missing-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--ms-border-light);
+  text-align: left;
+  color: var(--ms-text-1);
+}
+
+.sp-sync__missing-table th {
+  color: var(--ms-text-3);
+  font-weight: var(--ms-font-weight-title);
+  font-size: 12px;
+}
+
+.sp-sync__missing-truncated {
+  margin: 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.sp-sync__missing-actions {
+  display: flex;
+  gap: var(--ms-space-2);
 }
 </style>

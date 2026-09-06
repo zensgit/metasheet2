@@ -58,9 +58,11 @@
  *
  *  2. PLUGGABLE PROVIDERS. The boundary reuses the existing `AiProviderClient`
  *     (anthropic + openai-compatible). A self-hosted OpenAI-compatible server
- *     (vLLM / Ollama serving Qwen or DeepSeek weights) is selected via
- *     MULTITABLE_AI_BASE_URL — and counts as `local` only because such an endpoint
- *     sits on a PRIVATE address. Note the vendors' PUBLIC APIs (api.deepseek.com
+ *     (vLLM / Ollama serving Qwen or DeepSeek weights) is FIRST-CLASS: provider
+ *     `local-openai-compat` + MULTITABLE_AI_BASE_URL, keyless allowed, operator-
+ *     named model — and it counts as `local` only because readiness AND the
+ *     routing tier both demand the endpoint PROVE a private address
+ *     (isProvablyLocalHost). Note the vendors' PUBLIC APIs (api.deepseek.com
  *     and friends) are cloud, and the positive local check treats them as such.
  *     The provider is chosen by config + policy, NOT by the caller.
  *

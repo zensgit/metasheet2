@@ -19,8 +19,8 @@
  *   - CREDENTIALS are write-only for EVERY tier (poison-value sweep over every response body and
  *     every audit row).
  *   - DELETE gains a referential guard: 409 (coded, naming the reference COUNT) while any
- *     integration_external_systems.config->>'dataSourceId' references the source; force=true is
- *     platform-admin only and audited as a deliberate reference break.
+ *     integration_external_systems canonical or attributable legacy binding references the
+ *     source; force=true is platform-admin only and audited as a deliberate reference break.
  *
  * ACTOR TIERS
  *   T1 admin    { role: 'admin' }                        — the management tier (also T1b via roles[])
@@ -89,31 +89,40 @@ const POISON = {
 const POISON_VALUES = Object.values(POISON)
 
 // ── fake db bound to the route singleton: empty data_sources at load; a controllable
-//    integration_external_systems reference table. Rows carry the server-side attribution stamp
-//    (config.dataSourceOwnerId) the P2-A guard counts by; the count query issues TWO where
-//    predicates (dataSourceId, then dataSourceOwnerId) which the fake captures in order. ─────
-const externalRefRows: Array<{ dataSourceId: string; ownerId: string }> = []
+//    integration_external_systems reference table. Rows can carry either the canonical FK or the
+//    legacy pointer plus server-side attribution stamp. The fake models the two non-overlapping
+//    COUNT queries used during migration (canonical; then connection_id IS NULL + legacy). ─────
+const externalRefRows: Array<{ connectionId?: string | null; dataSourceId: string; ownerId: string }> = []
 const refCountQueriedIds: string[] = []
 
 function fakeDb() {
   return {
     selectFrom: (table: string) => {
       if (table === 'integration_external_systems') {
-        const captured: string[] = []
+        const captured: Array<{ lhs: unknown; op: unknown; value: unknown }> = []
         const b = {
           select: () => b,
-          where: (_lhs: unknown, _op: unknown, value: unknown) => {
-            captured.push(String(value))
+          where: (lhs: unknown, op: unknown, value: unknown) => {
+            captured.push({ lhs, op, value })
             return b
           },
           execute: async () => {
-            const [id, owner] = captured
-            refCountQueriedIds.push(id ?? '')
-            // BOTH predicates must be present: a count filtered only by id would
-            // resurrect the cross-tenant denial this fake exists to pin away.
-            expect(captured.length).toBe(2)
+            const first = captured[0]
+            if (first?.lhs === 'connection_id' && first.op === '=') {
+              const id = String(first.value)
+              refCountQueriedIds.push(id)
+              const count = externalRefRows.filter((r) => r.connectionId === id).length
+              return [{ count }]
+            }
+
+            expect(first).toMatchObject({ lhs: 'connection_id', op: 'is', value: null })
+            // The legacy query must retain BOTH attribution predicates after its
+            // connection_id IS NULL discriminator.
+            expect(captured.length).toBe(3)
+            const id = String(captured[1]?.value ?? '')
+            const owner = String(captured[2]?.value ?? '')
             const count = externalRefRows.filter(
-              (r) => r.dataSourceId === id && r.ownerId === owner,
+              (r) => r.connectionId == null && r.dataSourceId === id && r.ownerId === owner,
             ).length
             return [{ count }]
           },
@@ -172,6 +181,9 @@ const app = express()
 app.use(express.json())
 app.use((req, _res, next) => {
   req.user = currentUser as never
+  // Model the verified JWT middleware output independently from req.user: the
+  // production create route deliberately trusts only authenticatedTenantId.
+  req.authenticatedTenantId = currentUser ? 'tenant-dsv' : undefined
   next()
 })
 app.use(dataSourcesRouter())
@@ -641,10 +653,14 @@ describe('DataSourceManager.countExternalSystemReferences (owner-attributed, P2-
     await expect(m.countExternalSystemReferences('any')).resolves.toBe(0)
   })
 
-  it('counts ONLY rows attributed to the source owner (id AND dataSourceOwnerId predicates)', async () => {
+  it('counts canonical plus owner-attributed legacy rows without double-counting migrated rows', async () => {
     const m = new DataSourceManager({ db: fakeDb() as never })
     await m.addDataSource(countCfg('counted-src'), { ownerId: 'alice' })
     externalRefRows.push(
+      { connectionId: 'counted-src', dataSourceId: '', ownerId: '' },
+      // A migrated row may retain the rollback pointer; connection_id wins and
+      // this row is counted exactly once.
+      { connectionId: 'counted-src', dataSourceId: 'counted-src', ownerId: 'alice' },
       { dataSourceId: 'counted-src', ownerId: 'alice' },
       { dataSourceId: 'counted-src', ownerId: 'alice' },
       { dataSourceId: 'counted-src', ownerId: 'alice' },
@@ -652,7 +668,7 @@ describe('DataSourceManager.countExternalSystemReferences (owner-attributed, P2-
       { dataSourceId: 'counted-src', ownerId: 'mallory' },
       { dataSourceId: 'counted-src', ownerId: '' },
     )
-    await expect(m.countExternalSystemReferences('counted-src')).resolves.toBe(3)
+    await expect(m.countExternalSystemReferences('counted-src')).resolves.toBe(5)
     expect(refCountQueriedIds).toContain('counted-src')
   })
 
@@ -709,5 +725,35 @@ describe('DataSourceManager.countExternalSystemReferences (owner-attributed, P2-
     await expect((await withSource(throwingDb(broken))).countExternalSystemReferences('err-src')).rejects.toThrow(
       /connection reset/,
     )
+  })
+
+  it('does not discard an observed canonical count when the second query hits a 42P01 race', async () => {
+    let query = 0
+    const ddlRaceDb = {
+      selectFrom: () => {
+        query += 1
+        const thisQuery = query
+        const b = {
+          select: () => b,
+          where: () => b,
+          execute: async () => {
+            if (thisQuery === 1) return [{ count: 1 }]
+            throw Object.assign(new Error('table disappeared after the canonical count'), { code: '42P01' })
+          },
+        }
+        return b
+      },
+      insertInto: () => {
+        const b = { values: () => b, onConflict: () => b, execute: async () => [] }
+        return b
+      },
+      updateTable: () => {
+        const b = { set: () => b, where: () => b, execute: async () => [] }
+        return b
+      },
+    }
+    const m = new DataSourceManager({ db: ddlRaceDb as never })
+    await m.addDataSource(countCfg('ddl-race-src'), { ownerId: 'alice' })
+    await expect(m.countExternalSystemReferences('ddl-race-src')).rejects.toThrow(/disappeared/)
   })
 })

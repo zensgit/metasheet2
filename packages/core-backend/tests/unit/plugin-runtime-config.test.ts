@@ -433,4 +433,105 @@ describe('plugin runtime config resolution', () => {
     })
   })
 
+  // 通知下一步 (light 备料 handoff) — the fourth artifact on `readDeployJsonObjectFile`, and the one
+  // where "fail closed loudly" is about SILENCE rather than about data.
+  //
+  // For a pack or a mapping, a typo'd path degrades to "no extension columns" and somebody notices
+  // the missing columns within a screen. For a NOTIFICATION CHAIN it degrades to "notify nobody",
+  // which is indistinguishable from a working deployment right up until the day the warehouse asks
+  // why it never heard about a finished 备料. That is why the malformed cases below assert a THROW.
+  describe('stock preparation handoff chain', () => {
+    const ENV_KEY = 'INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH'
+    let tmpDir: string
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'stock-prep-handoff-'))
+    })
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true })
+    })
+
+    function writeHandoffFile(contents: string): string {
+      const file = join(tmpDir, 'handoff.json')
+      writeFileSync(file, contents, 'utf8')
+      return file
+    }
+
+    const HANDOFF = {
+      steps: [
+        { key: 'prep_entry', handlerUserIds: ['u-zhang'] },
+        { key: 'process', handlerUserIds: ['u-li'] },
+        { key: 'final_review', handlerUserIds: ['u-wang'] },
+      ],
+      notify: { groupDestinationId: 'dest-prep-team' },
+      terminal: { groupDestinationIds: ['dest-warehouse', 'dest-purchasing'], exportPath: '/stock-prep' },
+    }
+
+    it('omits the key entirely when unset — the advance route refuses with a named 501', () => {
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', {})
+      expect('stockPreparationHandoff' in config).toBe(false)
+    })
+
+    it('reads the chain off the named file', () => {
+      const file = writeHandoffFile(JSON.stringify(HANDOFF))
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file })
+      expect(config.stockPreparationHandoff).toEqual(HANDOFF)
+    })
+
+    // "typo" must never be indistinguishable from "nothing configured" when the difference is
+    // whether anyone gets told anything at all.
+    it('fails closed — and LOUDLY — when the path is unreadable, rather than degrading to silence', () => {
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', {
+        [ENV_KEY]: join(tmpDir, 'does-not-exist.json'),
+      })).toThrow(`${ENV_KEY} points at a file that could not be read`)
+    })
+
+    it('never echoes the configured path in the error (values-free: paths are deployment topology)', () => {
+      const secretish = join(tmpDir, 'absent-host-specific-name.json')
+      try {
+        resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: secretish })
+        throw new Error('expected a throw')
+      } catch (error) {
+        expect((error as Error).message).not.toContain(secretish)
+        expect((error as Error).message).toContain(ENV_KEY)
+      }
+    })
+
+    it('fails closed on malformed JSON', () => {
+      const file = writeHandoffFile('{not-json')
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file }))
+        .toThrow(`${ENV_KEY} must point at a file containing valid JSON`)
+    })
+
+    // The plausible mistake for this key is writing the bare steps ARRAY with no envelope, so the
+    // shape message names what this key actually wants rather than a generic "JSON object".
+    it('fails closed when the file is not a JSON object, naming the shape this key wants', () => {
+      const file = writeHandoffFile(JSON.stringify(HANDOFF.steps))
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file }))
+        .toThrow(`${ENV_KEY} must point at a JSON object with an ordered steps array`)
+    })
+
+    it('is inert for any other plugin', () => {
+      const file = writeHandoffFile(JSON.stringify(HANDOFF))
+      expect(resolvePluginRuntimeConfig('plugin-after-sales', { [ENV_KEY]: file })).toEqual({})
+    })
+
+    // The host is a READER, not a validator: step keys, handler ids and destination ids are the
+    // plugin's to validate. One authority over what a chain may say, not two that could drift.
+    it('does not second-guess the chain contents; the plugin owns that validation', () => {
+      const file = writeHandoffFile(JSON.stringify({ steps: [{ nonsense: true }] }))
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file })
+      expect(config.stockPreparationHandoff).toEqual({ steps: [{ nonsense: true }] })
+    })
+
+    // Configuring the handoff chain must not change what any OTHER key resolves to.
+    it('leaves the rest of the resolved config untouched', () => {
+      const file = writeHandoffFile(JSON.stringify(HANDOFF))
+      const without = resolvePluginRuntimeConfig('plugin-integration-core', {})
+      const with_ = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file })
+      const { stockPreparationHandoff: _configured, ...rest } = with_
+      expect(rest).toEqual(without)
+    })
+  })
+
 })

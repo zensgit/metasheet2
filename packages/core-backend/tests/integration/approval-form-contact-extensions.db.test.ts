@@ -160,6 +160,20 @@ function firstNodeGraph(kind: ExtensionKind, level: number) {
   }
 }
 
+function directUserGraph() {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: 's', config: {} },
+      { key: 'ext', type: 'approval', name: 'ext', config: { assigneeSources: [{ kind: 'form_field_user', fieldId: 'contact' }], approvalMode: 'all', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: 'e', config: {} },
+    ],
+    edges: [
+      { key: 's2x', source: 'start', target: 'ext' },
+      { key: 'x2e', source: 'ext', target: 'end' },
+    ],
+  }
+}
+
 // Lock-2 §2.4 handler admission: gate (static approval) -> handler carrying the extension -> end.
 function handlerGraph(kind: ExtensionKind, level: number) {
   return {
@@ -432,8 +446,8 @@ describeIfDatabase('Lock-2 §L2-C form-field contact extensions — real-DB crea
       // (4) required but visibility-ruled — pin (3) alone closes nothing (§L2-C): the hidden-field
       //     skip at validateApprovalFormData + pruneHiddenFormData would let the value vanish.
       ['visrule', { fields: [{ id: 'reason', type: 'text', label: 'r', required: true }, { id: 'contact', type: 'user', label: 'c', required: true, visibilityRule: { fieldId: 'reason', operator: 'eq', value: 'show' } }] }],
-      // (6) selection: 'multi' — rejected until OD-L2-7's array support lands in the same slice.
-      ['multi', { fields: [{ id: 'reason', type: 'text', label: 'r', required: true }, { id: 'contact', type: 'user', label: 'c', required: true, props: { selection: 'multi' } }] }],
+      // (6) uncapped multi — OD-L2-3 requires an explicit publish-time maxSelections pin.
+      ['multi-uncapped', { fields: [{ id: 'reason', type: 'text', label: 'r', required: true }, { id: 'contact', type: 'user', label: 'c', required: true, props: { selection: 'multi' } }] }],
     ]
     for (const kind of ['form_field_user_manager', 'form_field_user_dept_head'] as const) {
       for (const [name, schema] of negativeSchemas) {
@@ -449,6 +463,67 @@ describeIfDatabase('Lock-2 §L2-C form-field contact extensions — real-DB crea
       }
       // Positive control: the SAME kind with the compliant schema publishes.
       await createPublished(`fc-${TS}-pin-ok-${kind}`, extGraph(kind, 1))
+    }
+  })
+
+  it('L2-B multi UNION: direct and contact-derived sources resolve every distinct selected user, capped but never truncated', async () => {
+    const schema = {
+      fields: [
+        { id: 'reason', type: 'text', label: 'r', required: true },
+        { id: 'contact', type: 'user', label: '联系人', required: true, props: { selection: 'multi', maxSelections: 2, allowSelf: false } },
+      ],
+    }
+
+    const directTid = await createPublished(`fc-${TS}-multi-direct`, directUserGraph(), schema)
+    const direct = await createAsReq(directTid, [U_CONTACT, U_CONTACT_AGREE])
+    expect(direct.status, direct.text).toBe(201)
+    expect((await activeAssignees(direct.iid!, 'ext')).map((entry) => entry.assignee_id))
+      .toEqual([U_CONTACT, U_CONTACT_AGREE].sort())
+
+    const managerTid = await createPublished(`fc-${TS}-multi-manager`, firstNodeGraph('form_field_user_manager', 1), schema)
+    const manager = await createAsReq(managerTid, [U_CONTACT, U_CONTACT_AGREE])
+    expect(manager.status, manager.text).toBe(201)
+    expect((await activeAssignees(manager.iid!, 'ext')).map((entry) => entry.assignee_id))
+      .toEqual([U_AGREE, U_LEADER1].sort())
+
+    const overflow = await createAsReq(managerTid, [U_CONTACT, U_CONTACT_AGREE, U_LEADER1])
+    expect(overflow.status).toBe(400)
+    expect(overflow.text).toContain('configured user selection limit')
+    expect(await instanceCount(managerTid)).toBe(1)
+  })
+
+  it('L2-B allowSelf is enforced by the server and selected users must remain active', async () => {
+    const graph = directUserGraph()
+    const defaultSchema = {
+      fields: [
+        { id: 'reason', type: 'text', label: 'r', required: true },
+        { id: 'contact', type: 'user', label: '联系人', required: true },
+      ],
+    }
+    const blockedTid = await createPublished(`fc-${TS}-self-blocked`, graph, defaultSchema)
+    const blocked = await createAsReq(blockedTid, REQ)
+    expect(blocked.status).toBe(422)
+    expect(blocked.text).toContain('APPROVAL_FORM_USER_SELF_NOT_ALLOWED')
+    expect(blocked.text).not.toContain(REQ)
+    expect(await instanceCount(blockedTid)).toBe(0)
+
+    const allowedTid = await createPublished(`fc-${TS}-self-allowed`, graph, {
+      fields: [
+        { id: 'reason', type: 'text', label: 'r', required: true },
+        { id: 'contact', type: 'user', label: '联系人', required: true, props: { allowSelf: true } },
+      ],
+    })
+    const allowed = await createAsReq(allowedTid, REQ)
+    expect(allowed.status, allowed.text).toBe(201)
+
+    await query(`UPDATE users SET is_active = FALSE WHERE id = $1`, [U_CONTACT])
+    try {
+      const unavailable = await createAsReq(allowedTid, U_CONTACT)
+      expect(unavailable.status).toBe(422)
+      expect(unavailable.text).toContain('APPROVAL_FORM_USER_UNAVAILABLE')
+      expect(unavailable.text).not.toContain(U_CONTACT)
+    } finally {
+      await query(`UPDATE users SET is_active = TRUE WHERE id = $1`, [U_CONTACT])
     }
   })
 

@@ -281,9 +281,22 @@ const ElInputNumber = defineComponent({
 
 const ElSelect = defineComponent({
   name: 'ElSelect',
-  props: { modelValue: [String, Array], placeholder: String, multiple: Boolean, filterable: Boolean },
+  props: {
+    modelValue: [String, Array],
+    placeholder: String,
+    multiple: Boolean,
+    multipleLimit: Number,
+    filterable: Boolean,
+  },
   emits: ['update:modelValue', 'change'],
-  render() { return h('select', { 'data-el-select': 'true' }, this.$slots.default?.()) },
+  render() {
+    return h('select', {
+      'data-el-select': 'true',
+      multiple: this.multiple || undefined,
+      'data-model-value': JSON.stringify(this.modelValue ?? null),
+      'data-multiple-limit': String(this.multipleLimit ?? 0),
+    }, this.$slots.default?.())
+  },
 })
 const ElOption = defineComponent({
   name: 'ElOption',
@@ -657,6 +670,52 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     await mountView()
 
     expect(container!.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
+  })
+
+  it('seeds and submits capped multi-contact designated defaults without exposing requester as selectable', async () => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_userfield_multi',
+      formSchema: {
+        fields: [{
+          id: 'fld_assignees',
+          type: 'user',
+          label: '经办人',
+          required: true,
+          props: {
+            selection: 'multi',
+            maxSelections: 2,
+            defaultMode: 'designated',
+            defaultUserIds: ['u1', 'u2'],
+          },
+        } as FormField],
+      },
+    })
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([
+      { id: 'user_1', name: '申请人', email: '' },
+      { id: 'u1', name: 'Alice', email: '' },
+      { id: 'u2', name: 'Bob', email: '' },
+    ])
+    resolveApprovalDirectoryUsersSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice' },
+      { id: 'u2', name: 'Bob' },
+    ])
+
+    await mountView()
+
+    const picker = container!.querySelector('[data-testid="approval-user-picker"]') as HTMLElement
+    expect(picker).toBeTruthy()
+    expect(picker.getAttribute('multiple')).not.toBeNull()
+    expect(picker.dataset.multipleLimit).toBe('2')
+    expect(picker.dataset.modelValue).toBe('["u1","u2"]')
+    const options = Array.from(picker.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options.find((option) => option.value === 'user_1')?.disabled).toBe(true)
+
+    submitButton().click()
+    await flushUi()
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    expect(submitApprovalSpy.mock.calls[0][0].formData).toEqual({
+      fld_assignees: ['u1', 'u2'],
+    })
   })
 
   // -------------------------------------------------------------------------

@@ -125,6 +125,7 @@
               <el-option label="单选" value="select" />
               <el-option label="多选" value="multi-select" />
               <el-option label="用户" value="user" />
+              <el-option label="部门" value="department" />
               <el-option label="明细（子表单）" value="detail" />
               <el-option label="关联记录" value="record-link" />
               <el-option label="日期区间" value="date_range" />
@@ -210,6 +211,53 @@
             </div>
           </el-form-item>
 
+          <el-form-item
+            v-if="field.type === 'department'"
+            label="部门设置"
+            class="template-authoring__wide"
+            data-testid="approval-department-config"
+          >
+            <div class="template-authoring__grid">
+              <el-form-item label="选择数量">
+                <el-select v-model="field.departmentSelection" :disabled="readOnly" data-testid="approval-department-selection">
+                  <el-option label="单选" value="single" />
+                  <el-option label="多选" value="multi" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="展示格式">
+                <el-select v-model="field.departmentDisplay" :disabled="readOnly" data-testid="approval-department-display">
+                  <el-option label="仅末级名称" value="leaf_only" />
+                  <el-option label="完整部门路径" value="full_path" />
+                </el-select>
+              </el-form-item>
+              <el-form-item v-if="field.departmentSelection === 'multi'" label="最多可选">
+                <el-input
+                  v-model="field.departmentMaxSelectionsText"
+                  :disabled="readOnly"
+                  inputmode="numeric"
+                  placeholder="不填则不限制"
+                  data-testid="approval-department-max-selections"
+                />
+              </el-form-item>
+              <el-form-item label="默认值">
+                <el-select v-model="field.departmentDefaultMode" :disabled="readOnly" clearable data-testid="approval-department-default-mode">
+                  <el-option label="申请人所在部门" value="requester_department" />
+                  <el-option label="指定部门" value="designated" />
+                </el-select>
+              </el-form-item>
+              <el-form-item v-if="field.departmentDefaultMode === 'designated'" label="指定部门">
+                <ApprovalDepartmentPicker
+                  :model-value="departmentDefaultValue(field)"
+                  :selection="field.departmentSelection"
+                  :display="field.departmentDisplay"
+                  :max-selections="departmentMaxSelections(field)"
+                  :disabled="readOnly"
+                  aria-label="选择默认部门"
+                  @update:model-value="onDepartmentDefaultIdsChange(field, $event)"
+                />
+              </el-form-item>
+            </div>
+          </el-form-item>
           <el-form-item
             v-if="field.type === 'select' || field.type === 'multi-select'"
             label="选项"
@@ -554,6 +602,7 @@
  * No injections are used.
  */
 import type { AuthorableFieldType, DetailColumnDraft, FieldAuthoringDraft } from '../templateAuthoring'
+import ApprovalDepartmentPicker, { type ApprovalDepartmentValue } from './ApprovalDepartmentPicker.vue'
 
 interface ApprovalFormFieldPaletteEntry {
   type: AuthorableFieldType
@@ -621,6 +670,21 @@ function addFieldOfType(type: AuthorableFieldType): void {
 }
 function onPaletteDragStart(type: AuthorableFieldType, event: DragEvent): void {
   emit('palette-drag-start', type, event)
+}
+function departmentDefaultValue(field: FieldAuthoringDraft): ApprovalDepartmentValue[] {
+  return field.departmentDefaultIds.map((id) => ({ id }))
+}
+function departmentMaxSelections(field: FieldAuthoringDraft): number | undefined {
+  const value = Number(field.departmentMaxSelectionsText)
+  return field.departmentMaxSelectionsText.trim() && Number.isInteger(value) && value > 0
+    ? value
+    : undefined
+}
+function onDepartmentDefaultIdsChange(
+  field: FieldAuthoringDraft,
+  value: Array<{ id: string }>,
+): void {
+  field.departmentDefaultIds = value.map((entry) => entry.id)
 }
 function onPreviewDrop(event: DragEvent): void {
   emit('preview-drop', event)

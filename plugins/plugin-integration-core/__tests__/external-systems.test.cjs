@@ -3,12 +3,39 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 const {
-  createExternalSystemRegistry,
+  createExternalSystemRegistry: createExternalSystemRegistryRaw,
   ExternalSystemConflictError,
   ExternalSystemNotFoundError,
   ExternalSystemValidationError,
   __internals,
 } = require(path.join(__dirname, '..', 'lib', 'external-systems.cjs'))
+const { createConnectionResolver } = require(path.join(__dirname, '..', 'lib', 'connection-resolver.cjs'))
+
+function createExternalSystemRegistry(options = {}) {
+  if (options.connectionResolver || !options.dataSourceBinder) {
+    return createExternalSystemRegistryRaw(options)
+  }
+  const binder = options.dataSourceBinder
+  return createExternalSystemRegistryRaw({
+    ...options,
+    connectionResolver: createConnectionResolver({
+      facade: {
+        async resolveConnectionRegistration(id, context) {
+          if (typeof context.principal !== 'string' || context.principal.trim().length === 0) {
+            throw new Error('connection binding requires an authenticated principal')
+          }
+          await binder.assertReferenceable(id, context.principal)
+          return {
+            id,
+            tenantId: context.tenantId,
+            type: 'sqlserver',
+            scopeKind: 'private',
+          }
+        },
+      },
+    }),
+  })
+}
 
 function createMockCredentialStore() {
   return {
@@ -246,11 +273,58 @@ async function main() {
     status: 'active',
     principal: 'owner_1',
   })
-  assert.equal(publicProjectionCreate.config.dataSourceId, 'sql-readonly-1')
+  assert.equal(publicProjectionCreate.connectionId, 'sql-readonly-1')
+  assert.equal(publicProjectionCreate.config.dataSourceId, undefined,
+    'a new SQL binding stores the selected Connection only in connection_id')
+  // THE STAMP NOW SURVIVES A CANONICAL BIND — and it must, or the stock-prep pull's read-identity
+  // delegation has nothing to delegate to on any row created after the connection cutover. It was
+  // dropped here only because `withoutLegacyDataSourcePointer` used to delete the attribution
+  // ALONGSIDE the legacy pointer, which conflated two different facts: WHICH connection this
+  // binding names (canonical, `connection_id`) and WHO the host authorized as that connection's
+  // owner at bind time. The proof is identical in both shapes — `assertReferenceable` for legacy,
+  // `resolveConnectionRegistration` for canonical, and both land on the same
+  // `DataSourceManager.assertAccess` owner equality — so the stamp is as trustworthy here as there.
   assert.equal(publicProjectionCreate.config.dataSourceOwnerId, 'owner_1',
-    'a validated binding is stamped with the owning principal (what the core delete guard counts)')
+    'a canonical bind stamps the owner the host just authorized, server-side')
+  assert.equal(publicProjectionCreate.config.dataSourceId, undefined,
+    'and it is the POINTER that a canonical binding drops, not the attribution')
   assert.deepEqual(projectionBinderCalls, [['sql-readonly-1', 'owner_1']],
     'the binder saw exactly the asserted binding')
+
+  // A CLIENT MAY NOT ASSERT THE STAMP, in either direction: not to forge one and not to overwrite a
+  // stored one. `SERVER_OWNED_CONFIG_KEYS` strips it at the normalize choke point, and the canonical
+  // branch then re-decides attribution from the PROVEN principal alone.
+  const forgedStampCreate = await projectionRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_forged_stamp',
+    name: 'forged-owner-stamp',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    config: { dataSourceId: 'sql-readonly-1', schema: 'dbo', dataSourceOwnerId: 'someone_else' },
+    status: 'active',
+    principal: 'owner_1',
+  })
+  assert.equal(forgedStampCreate.config.dataSourceOwnerId, 'owner_1',
+    'a client-sent owner stamp is discarded and replaced by the proven principal')
+
+  // AN UPDATE THAT DOES NOT RE-ASSERT THE CONNECTION INHERITS THE STORED STAMP VERBATIM. A rename by
+  // a colleague must neither steal the attribution nor destroy it — destroying it would silently
+  // switch the pull back to "only the binder can read", which is the failure this whole change is
+  // about, from a name change.
+  const inheritedStampUpdate = await projectionRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_lookup_projection',
+    name: 'private-sql-lookup-projection',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    config: { schema: 'dbo2' },
+    principal: 'a_colleague',
+  })
+  assert.equal(inheritedStampUpdate.config.schema, 'dbo2', 'the unrelated config patch applied')
+  assert.equal(inheritedStampUpdate.config.dataSourceOwnerId, 'owner_1',
+    'an update that does not re-assert the connection inherits the stored owner stamp')
+  assert.deepEqual(projectionBinderCalls, [['sql-readonly-1', 'owner_1'], ['sql-readonly-1', 'owner_1']],
+    'and it re-validated nothing — the binder saw only the two asserting upserts')
   assert.equal(publicProjectionCreate.config.schema, 'dbo')
   assert.equal(publicProjectionCreate.config.lookupProjection, undefined,
     'public create response omits the complete private lookup projection')
@@ -269,6 +343,8 @@ async function main() {
   const adapterProjectionSystem = await projectionRegistry.getExternalSystemForAdapter({
     tenantId: 'tenant_1',
     id: 'sys_lookup_projection',
+    principal: 'owner_1',
+    runAs: 'user',
   })
   assert.deepEqual(adapterProjectionSystem.config.lookupProjection, lookupProjection,
     'private adapter load retains the persisted lookup projection exactly')
@@ -283,7 +359,12 @@ async function main() {
   assert.deepEqual(configOnlyProjection.config.lookupProjection, lookupProjection,
     'the non-decrypting accessor sees the private projection the public one strips')
   assert.equal(configOnlyProjection.kind, 'data-source:sql-readonly', 'and the kind the roster keys on')
-  assert.deepEqual(Object.keys(configOnlyProjection).sort(), ['config', 'id', 'kind'],
+  // `connectionId` joined the projection for the SECOND guard that must run before a credential
+  // reload: the stock-prep pull's read-identity resolution, which has to tell a canonical binding
+  // from a legacy one WITHOUT resolving either. It is already a field of the public projection, so
+  // it discloses nothing new — and the closed shape below is still the point of this assertion.
+  assert.equal(configOnlyProjection.connectionId, 'sql-readonly-1', 'and the canonical binding shape')
+  assert.deepEqual(Object.keys(configOnlyProjection).sort(), ['config', 'connectionId', 'id', 'kind'],
     'and NOTHING else — no credentials, no ciphertext, no fingerprint, no status')
   assert.equal('credentials' in configOnlyProjection, false, 'it never decrypts')
   await assert.rejects(
@@ -304,6 +385,8 @@ async function main() {
   const preservedProjectionSystem = await projectionRegistry.getExternalSystemForAdapter({
     tenantId: 'tenant_1',
     id: 'sys_lookup_projection',
+    principal: 'owner_1',
+    runAs: 'user',
   })
   assert.deepEqual(preservedProjectionSystem.config.lookupProjection, lookupProjection,
     'public config round-trip cannot accidentally erase the hidden projection')
@@ -320,6 +403,8 @@ async function main() {
   const clearedProjectionSystem = await projectionRegistry.getExternalSystemForAdapter({
     tenantId: 'tenant_1',
     id: 'sys_lookup_projection',
+    principal: 'owner_1',
+    runAs: 'user',
   })
   assert.equal(clearedProjectionSystem.config.lookupProjection, null,
     'trusted-admin explicit null clears the private lookup projection')
@@ -794,6 +879,7 @@ async function main() {
   await testInstanceDigestIsProductionBehaviour()
   await testDataSourceBindingValidation()
   await testBridgeEditPreservesFullConfig()
+  await testTenantWideScopedReadFallback()
 
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
@@ -1024,8 +1110,8 @@ async function testDataSourceBindingValidation() {
       config: { dataSourceId: 'ds-1' },
       principal: 'owner_1',
     }),
-    (err) => err instanceof ExternalSystemValidationError && /binder/.test(err.message),
-    'a dataSourceId binding with no wired binder is refused (fail closed), never silently persisted',
+    (err) => err instanceof ExternalSystemValidationError && /resolution/.test(err.message),
+    'a canonical SQL binding with no wired resolver is refused (fail closed), never silently persisted',
   )
 
   const binderCalls = []
@@ -1046,6 +1132,43 @@ async function testDataSourceBindingValidation() {
     dataSourceBinder: binder,
   })
 
+  const encryptCallsBeforeForbiddenCredential = credentialStore.calls.filter(([name]) => name === 'encrypt').length
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      name: 'binding-must-not-own-credentials',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      connectionId: 'ds-owned',
+      config: { schema: 'dbo' },
+      credentials: { password: 'duplicate-secret' },
+      principal: 'owner_1',
+    }),
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.code === 'CONNECTION_BINDING_CREDENTIALS_FORBIDDEN',
+    'a SQL Binding cannot create a second executable credential document',
+  )
+  assert.equal(
+    credentialStore.calls.filter(([name]) => name === 'encrypt').length,
+    encryptCallsBeforeForbiddenCredential,
+    'forbidden Binding credentials are rejected before encryption',
+  )
+
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      name: 'missing-canonical-connection',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      config: { schema: 'dbo' },
+      principal: 'owner_1',
+    }),
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.field === 'connectionId'
+      && /required/.test(err.message),
+    'a new SQL readonly binding cannot be persisted without a canonical Connection',
+  )
+
   // fail CLOSED without an authenticated principal
   await assert.rejects(
     () => registry.upsertExternalSystem({
@@ -1055,8 +1178,9 @@ async function testDataSourceBindingValidation() {
       role: 'source',
       config: { dataSourceId: 'ds-owned' },
     }),
-    (err) => err instanceof ExternalSystemValidationError && /principal/.test(err.message),
-    'a dataSourceId binding without an authenticated principal is refused',
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.code === 'CONNECTION_CANONICAL_UNAVAILABLE',
+    'a canonical binding without an authenticated principal is refused without an identity leak',
   )
   assert.equal(binderCalls.length, 0, 'the binder is never consulted without a principal')
 
@@ -1071,8 +1195,8 @@ async function testDataSourceBindingValidation() {
       principal: 'stranger_9',
     }),
     (err) => err instanceof ExternalSystemValidationError
-      && err.message === "Data source with id 'ds-owned' not found",
-    'a non-owner bind is refused with the uniform not-found (no existence leak) and does not persist',
+      && err.details.code === 'CONNECTION_CANONICAL_UNAVAILABLE',
+    'a non-owner canonical bind is refused with a values-free error and does not persist',
   )
   assert.equal(db.rows.length, 0, 'a refused bind leaves no row behind')
 
@@ -1087,7 +1211,10 @@ async function testDataSourceBindingValidation() {
   assert.equal(unbound.config.dataSourceOwnerId, undefined,
     'dataSourceOwnerId is server-owned metadata: a client-sent stamp without a binding is stripped')
 
-  // ...and OVERWRITTEN by the validated principal when a binding is asserted
+  // ...and, when the selected Connection is persisted canonically, the client's value is discarded
+  // and REPLACED by the principal the canonical validation just proved is the connection's owner.
+  // (It used to be discarded and nothing written, which left every post-cutover row with no owner
+  // to delegate a read identity to — see the note beside the lookup-projection create above.)
   const bound = await registry.upsertExternalSystem({
     tenantId: 'tenant_1',
     name: 'bind-owned',
@@ -1096,8 +1223,87 @@ async function testDataSourceBindingValidation() {
     config: { dataSourceId: 'ds-owned', schema: 'dbo', dataSourceOwnerId: 'victim_7' },
     principal: 'owner_1',
   })
+  assert.equal(bound.connectionId, 'ds-owned')
+  assert.equal(bound.config.dataSourceId, undefined)
   assert.equal(bound.config.dataSourceOwnerId, 'owner_1',
-    'the stamp is the VALIDATED principal — a client-sent value cannot survive')
+    'canonical storage drops the client pointer AND the client stamp, then attributes the proven owner')
+  const boundRow = db.rows.find((row) => row.id === bound.id)
+  assert.equal(boundRow.connection_id, 'ds-owned')
+  assert.equal(boundRow.legacy_connection_fallback_eligible, false,
+    'post-cutover rows can never gain legacy fallback implicitly')
+
+  // Even if a migrated row retains dormant ciphertext, SQL adapter loading
+  // resolves only the canonical Connection and never decrypts the Binding copy.
+  boundRow.credentials_encrypted = `enc:${Buffer.from(JSON.stringify({ password: 'dormant-copy' })).toString('base64')}`
+  const decryptCallsBeforeCanonicalLoad = credentialStore.calls.filter(([name]) => name === 'decrypt').length
+  const canonicalAdapterSystem = await registry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1',
+    workspaceId: null,
+    id: bound.id,
+    principal: 'owner_1',
+    runAs: 'user',
+  })
+  assert.equal(canonicalAdapterSystem.config.dataSourceId, 'ds-owned')
+  assert.equal(canonicalAdapterSystem.credentials, undefined)
+  assert.equal(
+    credentialStore.calls.filter(([name]) => name === 'decrypt').length,
+    decryptCallsBeforeCanonicalLoad,
+    'SQL adapter loading never decrypts credentials_encrypted from the Binding row',
+  )
+  const sealedFacadeCalls = []
+  const sealedRegistry = createExternalSystemRegistryRaw({
+    db,
+    credentialStore,
+    connectionResolver: createConnectionResolver({
+      facade: {
+        async resolveConnectionRegistration(id) {
+          return { id, tenantId: 'tenant_1', type: 'sqlserver', scopeKind: 'private' }
+        },
+      },
+      sealedSnapshotFacade: {
+        async resolveSqlServerConnection(id, input) {
+          sealedFacadeCalls.push({ id, input })
+          return {
+            connection: { database: 'sealed_db' },
+            credentials: { password: 'sealed-secret', user: 'sealed-user' },
+          }
+        },
+      },
+    }),
+  })
+  const ordinarySqlAdapter = await sealedRegistry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1', workspaceId: null, id: bound.id, principal: 'owner_1', runAs: 'user',
+  })
+  assert.equal(ordinarySqlAdapter.credentials, undefined,
+    'ordinary SQL adapter access never receives the sealed projection')
+  assert.equal(ordinarySqlAdapter.config.sealedSnapshotSqlServer, undefined)
+  const sealedSqlAdapter = await sealedRegistry.getExternalSystemForSealedSnapshot({
+    tenantId: 'tenant_1', workspaceId: null, id: bound.id, principal: 'owner_1', runAs: 'user',
+  })
+  assert.deepEqual(sealedSqlAdapter.config.sealedSnapshotSqlServer, { database: 'sealed_db' })
+  assert.deepEqual(sealedSqlAdapter.credentials, {
+    sealedSnapshotSqlServer: { password: 'sealed-secret', user: 'sealed-user' },
+  })
+  assert.deepEqual(sealedFacadeCalls, [{
+    id: 'ds-owned',
+    input: { tenantId: 'tenant_1', workspaceId: null, principal: 'owner_1', runAs: 'user' },
+  }])
+  boundRow.credentials_encrypted = null
+
+  await assert.rejects(
+    () => registry.upsertExternalSystem({
+      tenantId: 'tenant_1',
+      name: 'mismatched-dual-reference',
+      kind: 'data-source:sql-readonly',
+      role: 'source',
+      connectionId: 'ds-owned',
+      config: { dataSourceId: 'other-ds' },
+      principal: 'owner_1',
+    }),
+    (err) => err instanceof ExternalSystemValidationError
+      && err.details.code === 'CONNECTION_BINDING_MISMATCH',
+    'canonical and retained legacy references that disagree fail closed',
+  )
 
   // a config-preserving update (the test-result persist path) re-validates nothing and
   // needs no principal: the stored, already-validated binding rides through untouched.
@@ -1110,8 +1316,8 @@ async function testDataSourceBindingValidation() {
     status: 'error',
     lastError: 'connection test failed',
   })
-  assert.equal(preserved.config.dataSourceId, 'ds-owned', 'preserved config keeps the binding')
-  assert.equal(preserved.config.dataSourceOwnerId, 'owner_1', 'preserved config keeps the stamp')
+  assert.equal(preserved.connectionId, 'ds-owned', 'preserved update keeps the canonical binding')
+  assert.equal(preserved.config.schema, 'dbo', 'preserved update keeps semantic config')
 
   console.log('  external-systems: dataSourceId bind-time validation OK')
 }
@@ -1145,15 +1351,27 @@ async function testBridgeEditPreservesFullConfig() {
   })
 
   const lookupProjection = { table: 'dbo.t_Unit', keyColumn: 'FItemID', valueColumn: 'FName' }
-  await registry.upsertExternalSystem({
-    tenantId: 'tenant_1',
+  // Simulate a migration-backfilled row whose canonical id was deliberately nulled during the
+  // rollback window. The durable marker makes this the one shape allowed to keep exercising the
+  // legacy config.dataSourceId PATCH semantics below.
+  db.rows.push({
+    id: 'sys_bridge',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    project_id: null,
     name: 'SQL bridge',
     kind: 'data-source:sql-readonly',
     role: 'source',
     status: 'active',
-    principal: 'owner_1',
     config: { dataSourceId: 'ds-1', object: 'dbo.t_ICItem', schema: 'dbo', pageSize: 500, lookupProjection },
+    capabilities: {},
+    credentials_encrypted: null,
+    connection_id: null,
+    legacy_connection_fallback_eligible: true,
+    created_at: '2026-08-31T00:00:00.000Z',
+    updated_at: '2026-09-02T00:00:00.000Z',
   })
+  db.rows[0].config.dataSourceOwnerId = 'owner_1'
   const created = db.rows.find((row) => row.id === 'sys_bridge')
   assert.equal(created.config.schema, 'dbo', 'precondition: the created bridge stores a schema')
   assert.equal(created.config.dataSourceOwnerId, 'owner_1', 'precondition: the binding is stamped')
@@ -1266,4 +1484,112 @@ async function testBridgeEditPreservesFullConfig() {
   assert.equal(unbound.config.schema, 'dbo', 'clearing one key clears only that key')
 
   console.log('  external-systems: bridge edit preserves the full config OK')
+}
+
+// --- Tenant-wide scoped read fallback (by-id reads only) --------------------
+//
+// A caller carrying a workspace hint that misses the exact (tenant, workspace, id) row falls back
+// ONCE to the SAME tenant's tenant-wide row (workspace_id IS NULL). Tenant isolation is untouched,
+// a workspace-scoped row is never reached from another workspace or from a null hint, the four
+// by-id read accessors agree, the resolver sees the matched scope (null) rather than the hint, and
+// delete keeps its exact scope.
+async function testTenantWideScopedReadFallback() {
+  const db = createMockDb()
+  const credentialStore = createMockCredentialStore()
+  const resolverContexts = []
+  const registry = createExternalSystemRegistry({
+    db,
+    credentialStore,
+    idGenerator: () => 'unused',
+    connectionResolver: {
+      async resolve(binding, context) {
+        resolverContexts.push({ ...context })
+        return binding
+      },
+    },
+  })
+  const tenantWide = {
+    id: 'sys_tenant_wide',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    project_id: null,
+    name: 'Tenant-wide HTTP',
+    kind: 'http',
+    role: 'source',
+    config: { baseUrl: 'https://tenant-wide.example.test' },
+    credentials_encrypted: null,
+    capabilities: {},
+    status: 'active',
+    created_at: '2026-09-01T00:00:00.000Z',
+    updated_at: '2026-09-01T00:00:00.000Z',
+  }
+  const workspaceScoped = {
+    ...tenantWide,
+    id: 'sys_ws_a',
+    workspace_id: 'ws_a',
+    name: 'Workspace A HTTP',
+  }
+  const tenantWideSql = {
+    ...tenantWide,
+    id: 'sys_tenant_wide_sql',
+    kind: 'data-source:sql-readonly',
+    connection_id: 'connection_1',
+    legacy_connection_fallback_eligible: false,
+    config: { schema: 'dbo' },
+  }
+  db.rows.push(tenantWide, workspaceScoped, tenantWideSql)
+
+  // 1. A workspace hint that misses reaches the tenant-wide row, via exactly one fallback query
+  //    that still carries the caller's tenant.
+  db.calls.length = 0
+  const viaHint = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide' })
+  assert.equal(viaHint.id, 'sys_tenant_wide')
+  assert.equal(viaHint.workspaceId, null, 'the row keeps its own (tenant-wide) scope')
+  const lookups = db.calls.filter(([op]) => op === 'selectOne')
+  assert.equal(lookups.length, 2, 'exact lookup, then one tenant-wide fallback')
+  assert.deepEqual(lookups[0][2], { tenant_id: 'tenant_1', workspace_id: 'ws_hint', id: 'sys_tenant_wide' })
+  assert.deepEqual(lookups[1][2], { tenant_id: 'tenant_1', workspace_id: null, id: 'sys_tenant_wide' },
+    'the fallback is tenant-bound and tenant-wide only')
+
+  // 2. The four by-id read accessors agree.
+  const publicViaHint = await registry.getExternalSystem({ tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide' })
+  assert.equal(publicViaHint.id, 'sys_tenant_wide')
+  const configViaHint = await registry.getExternalSystemAdapterConfig({ tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide' })
+  assert.equal(configViaHint.kind, 'http')
+  const exact = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: null, id: 'sys_tenant_wide' })
+  assert.equal(exact.id, 'sys_tenant_wide', 'an exact null-scope lookup still works and needs no fallback')
+
+  // 3. Tenant isolation: another tenant never reaches the tenant-wide row, hint or not.
+  const foreign = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_2', workspaceId: 'ws_hint', id: 'sys_tenant_wide' }).catch((e) => e)
+  assert.ok(foreign instanceof ExternalSystemNotFoundError, 'cross-tenant read is refused even with the fallback')
+  const foreignNull = await registry.getExternalSystem({ tenantId: 'tenant_2', workspaceId: null, id: 'sys_tenant_wide' }).catch((e) => e)
+  assert.ok(foreignNull instanceof ExternalSystemNotFoundError)
+
+  // 4. No cross-workspace and no reverse fallback: a workspace-scoped row is reached only from its
+  //    own workspace.
+  const otherWorkspace = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: 'ws_b', id: 'sys_ws_a' }).catch((e) => e)
+  assert.ok(otherWorkspace instanceof ExternalSystemNotFoundError, 'a workspace row is not visible from another workspace')
+  const nullHint = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: null, id: 'sys_ws_a' }).catch((e) => e)
+  assert.ok(nullHint instanceof ExternalSystemNotFoundError, 'a null hint never widens into workspace rows')
+  const own = await registry.getExternalSystemForAdapter({ tenantId: 'tenant_1', workspaceId: 'ws_a', id: 'sys_ws_a' })
+  assert.equal(own.id, 'sys_ws_a')
+
+  // 5. The connection resolver sees the MATCHED scope (null), not the caller's hint, so a
+  //    tenant-wide SQL binding is resolved under its own scope.
+  resolverContexts.length = 0
+  const sqlViaHint = await registry.getExternalSystemForAdapter({
+    tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide_sql', principal: 'owner_1', runAs: 'user',
+  })
+  assert.equal(sqlViaHint.id, 'sys_tenant_wide_sql')
+  assert.equal(resolverContexts.length, 1)
+  assert.equal(resolverContexts[0].workspaceId, null, 'resolver context carries the matched (tenant-wide) scope')
+  assert.equal(resolverContexts[0].tenantId, 'tenant_1')
+  assert.equal(resolverContexts[0].principal, 'owner_1')
+
+  // 6. Writes keep the exact scope: delete under a workspace hint does not reach the tenant-wide row.
+  const deleteViaHint = await registry.deleteExternalSystem({ tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_tenant_wide' }).catch((e) => e)
+  assert.ok(deleteViaHint instanceof ExternalSystemNotFoundError, 'delete does not fall back')
+  assert.ok(db.rows.some((r) => r.id === 'sys_tenant_wide'), 'the tenant-wide row survives a mis-scoped delete')
+
+  console.log('  external-systems: tenant-wide scoped read fallback OK')
 }

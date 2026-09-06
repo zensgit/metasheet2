@@ -335,6 +335,7 @@ describe('ApprovalFormFieldInspector — surface (§3.4)', () => {
         'select',
         'multi-select',
         'user',
+        'department',
         'detail',
         'record-link',
         // Lock-8 L8-B (approval-lock8-field-vocabulary-20260817.md §1.2).
@@ -453,6 +454,93 @@ describe('ApprovalFormFieldInspector — committed edits only (FB-D7)', () => {
       operator: 'eq',
       valueText: '',
     })
+  })
+})
+
+describe('ApprovalFormFieldInspector — Lock-2 user control properties', () => {
+  it('commits selection, cap, requester default, and allow-self cleanup as distinct history entries', async () => {
+    const inspector = await mountInspector([field(1, { type: 'user' })])
+    expect(
+      inspector.q('[data-testid="approval-form-field-inspector-user"]'),
+    ).toBeTruthy()
+
+    await inspector.changeSelect(
+      'approval-form-field-inspector-user-selection',
+      'multi',
+    )
+    expect(inspector.session().draft.fields[0].userSelection).toBe('multi')
+
+    await inspector.typeText('approval-form-field-inspector-user-max', '3')
+    expect(inspector.commands).toHaveLength(1)
+    await inspector.blur('approval-form-field-inspector-user-max')
+    expect(inspector.session().draft.fields[0].userMaxSelectionsText).toBe('3')
+
+    await inspector.changeSelect(
+      'approval-form-field-inspector-user-default-mode',
+      'requester',
+    )
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      userAllowSelf: true,
+      userDefaultMode: 'requester',
+      userDefaultIds: [],
+    })
+
+    await inspector.toggle('approval-form-field-inspector-user-allow-self')
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      userAllowSelf: false,
+      userDefaultMode: '',
+      userDefaultIds: [],
+    })
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { userSelection: 'multi' },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { userMaxSelectionsText: '3' },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: {
+          userDefaultMode: 'requester',
+          userDefaultIds: [],
+          userAllowSelf: true,
+        },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: {
+          userAllowSelf: false,
+          userDefaultMode: '',
+          userDefaultIds: [],
+        },
+      },
+    ])
+    expect(inspector.session().history.undoStack).toHaveLength(4)
+  })
+
+  it('keeps an off-page designated default visible with a values-free label', async () => {
+    const inspector = await mountInspector([
+      field(1, {
+        type: 'user',
+        userDefaultMode: 'designated',
+        userDefaultIds: ['opaque-contact-id'],
+      }),
+    ])
+    await Promise.resolve()
+    await nextTick()
+
+    const select = inspector.select('approval-form-field-inspector-user-default-ids')
+    const option = Array.from(select.options).find((candidate) => candidate.value === 'opaque-contact-id')
+    expect(option).toBeTruthy()
+    expect(option?.textContent).toBe('成员 1')
+    expect(option?.textContent).not.toContain('opaque-contact-id')
+    expect(option?.disabled).toBe(false)
   })
 })
 

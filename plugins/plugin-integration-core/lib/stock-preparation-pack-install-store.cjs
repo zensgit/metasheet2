@@ -368,7 +368,37 @@ function createStockPreparationPackInstallStore({ db, idGenerator = crypto.rando
     return { fieldIds: [...ids].sort(), packIds: [...packIds].sort() }
   }
 
-  return { recordInstall, getInstall, listInstalls, listInstalledFieldIds }
+  /**
+   * WHICH PACKS HAVE EVER BEEN INSTALLED ON THIS SHEET — the proof obligation behind
+   * `legacyAdoptable`.
+   *
+   * The write-scope reconcile may adopt a pack-LESS `field_permissions` row only when the caller can
+   * show the row can have no other owner. `field_permissions` carries no pack column and every row
+   * written before #5455 carries the bare plugin marker, so the ONLY evidence available is this
+   * ledger: if exactly one pack has ever landed on (project, object), a bare row on that sheet is
+   * that pack's.
+   *
+   * EVERY STATUS COUNTS, including 'failed'. `listInstalledFieldIds` filters to the live statuses
+   * because it answers "which columns are on the sheet"; this answers "who might have written a
+   * permission row", and a run that failed AFTER the port call still wrote rows. Counting a failed
+   * pack can only make adoption LESS likely, which is the safe direction.
+   */
+  async function listInstalledPackIds({ tenantId, projectId, objectId } = {}) {
+    const where = {
+      tenant_id: requiredId(tenantId, 'tenantId'),
+      project_id: requiredId(projectId, 'projectId'),
+      object_id: requiredId(objectId, 'objectId'),
+    }
+    const rows = rowsOf(await db.select(PACK_INSTALL_TABLE, { where, limit: MAX_LIST_LIMIT }))
+    const packIds = new Set()
+    for (const row of rows) {
+      const packId = row && optionalString(row.pack_id)
+      if (packId) packIds.add(packId)
+    }
+    return { packIds: [...packIds].sort() }
+  }
+
+  return { recordInstall, getInstall, listInstalls, listInstalledFieldIds, listInstalledPackIds }
 }
 
 module.exports = {

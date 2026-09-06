@@ -461,6 +461,27 @@ describe('ApprovalAssigneeResolver', () => {
     }))
   })
 
+  it('unions every distinct multi-select form_field_user value without truncation', () => {
+    const resolved = resolveApprovalAssignees({
+      nodeKey: 'review',
+      sourceStep: 1,
+      config: { assigneeSources: [{ kind: 'form_field_user', fieldId: 'approver' }] },
+      formSnapshot: { approver: ['u2', { id: 'u1' }, 'u2'] },
+      requesterSnapshot: { id: 'requester-1' },
+      formSchema: {
+        fields: [{
+          id: 'approver',
+          type: 'user',
+          label: '审批人',
+          required: true,
+          props: { selection: 'multi', maxSelections: 3 },
+        }],
+      },
+    })
+    expect(resolved.map((entry) => entry.assigneeId)).toEqual(['u2', 'u1'])
+    expect(resolved.every((entry) => entry.metadata.resolvedFrom.kind === 'form_field_user')).toBe(true)
+  })
+
   it('dedupes duplicate resolved assignees and keeps the first source metadata', () => {
     expect(resolve({
       assigneeSources: [

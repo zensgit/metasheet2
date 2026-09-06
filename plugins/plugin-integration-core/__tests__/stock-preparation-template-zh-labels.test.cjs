@@ -71,10 +71,13 @@ const MAIN_LABELS_ZH = Object.freeze({
   idempotencyKey: '唯一键',
   componentSourceId: '部件源ID',
   parentSourceId: '父件源ID',
+  parentComponentCode: '父组件图号',
+  parentComponentName: '父组件名称',
   path: 'BOM路径',
   depth: 'BOM层级',
   componentCode: '图号',
   componentName: '名称',
+  componentSpec: '规格',
   material: '材料',
   sourceVersion: '源版本',
   rawQuantity: '单层用量',
@@ -92,6 +95,13 @@ const MAIN_LABELS_ZH = Object.freeze({
   notes: '备注',
   procurementReply: '采购回复',
   warehouseConfirmation: '仓库确认',
+  // 自制/外购 + the departmental response band. Appended, so every column above keeps
+  // the order value it already has in a deployed grid.
+  makeOrBuy: '自制/外购',
+  procurementDone: '采购完成',
+  procurementReplyDate: '采购回复日期',
+  warehouseDone: '仓库完成',
+  actualArrivalDate: '实际到货日期',
 })
 
 const LEDGER_LABELS_ZH = Object.freeze({
@@ -124,11 +134,39 @@ const SANDBOX_SHEET_LABEL_ZH = '备料主表(沙箱)'
  * every id, name, type, order, property and the sheet label -- serialised and hashed.
  */
 const BASE_BUILT_DIGESTS = Object.freeze({
-  mainStructure: '9c53cd88d2958afcabab6d5019f4c8ea2c9c4d9723c1b808d919015da9c45097',
+  // mainStructure / canonicalDescriptor / sandboxDescriptor re-pinned DELIBERATELY (were
+  // 9c53cd88…c45097, ce33abaf…237430, 93b98ea7…2a3d23): 备料主表 gained parentComponentCode /
+  // parentComponentName / componentSpec — 父组件图号 / 父组件名称 / 规格, the PLM columns the
+  // WORKING SHEET was missing (they previously reached it only as customer-pack ext_ columns).
+  // Recomputed by running this exact computation against that schema change; the digests still
+  // prove "unset language changes nothing", now over the extended structure. The human_preserved
+  // band is untouched — all three are plm_system.
+  // mainStructure re-pinned DELIBERATELY (and again here): the canonical main
+  // template grew from 28 to 33 columns — `makeOrBuy` (自制/外购) plus the departmental
+  // response band `procurementDone` / `procurementReplyDate` / `warehouseDone` /
+  // `actualArrivalDate`. All five are human_preserved and APPENDED after
+  // `warehouseConfirmation`, so every pre-existing column keeps its id, name, type,
+  // property and ORDER value; the digest moves only because the structure is five
+  // entries longer. Recomputed by running this exact computation (locale env genuinely
+  // unset, plain JSON.stringify, sha256) against the changed template — it still proves
+  // "unset language changes nothing", now over the extended structure.
+  mainStructure: 'f2a077cba33228bec89567fefbcb7a406d2d52004e81a4fb50a9f4348d79f42f',
+  // UNCHANGED by that edit, and that is itself evidence: the confirmation-decision
+  // ledger and the nine MVP tables were not touched.
   ledgerStructure: 'afaf79ff5ebefaa7d64d3d75e3e0c46b53f1eb0e11d8d70ae539106f1317c4e2',
-  mvpStructures: '124852655168c65d6a1a34f03a1f85189c731d7b137b7d94f8a17133eb3c2e15',
-  canonicalDescriptor: 'ce33abaf7b3c4352e62893770fe8654ef0075c11fc4c29779f623983d8237430',
-  sandboxDescriptor: '93b98ea7e5c8dc9c09d9c4ab3a26efe23f28cbfc7e100d1faa89ec83d72a3d23',
+  // mvpStructures re-pinned DELIBERATELY (was 1248526551…3c2e15, then 477d39ec…c8bb29): the
+  // bom-snapshot-line.v1 template gained the persisted `material` field (stock-prep-change-
+  // adjudication-20260901 fingerprint decomposition) and then `parentName` / `childName` / `spec` /
+  // `totalQuantity` (the seven fields a 备料 pull must carry). Recomputed by running this exact
+  // computation against that schema change — the digest still proves "unset language changes
+  // nothing", now over the extended structure.
+  mvpStructures: '269913dcca045127820a28719550fa4fcf22083b089c2f147edbbc4dfddf869d',
+  // Both provisioning descriptors are BUILT FROM the main template, so both move with it
+  // and for the same single reason (five appended human_preserved columns). Recomputed the
+  // same way; the zh negative control below still fails against them, so they remain
+  // capable of failing rather than being a rubber stamp.
+  canonicalDescriptor: '198fc8181f8fe9ff6d37d502c016bde003a4980eec29199e35ca68d9be0385dd',
+  sandboxDescriptor: '605c3f1c5ec12b215e495280f8f19ddfe15c0489a5de71cf19a844b987aeb77e',
 })
 
 const SANDBOX_OBJECT_ID = 'plm_stock_preparation_sandbox_demo'
@@ -186,9 +224,12 @@ function assertCompletenessAndFrozenIds() {
   assert.deepEqual(
     STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((f) => f.id),
     MAIN_IDS,
-    'main table field ids are frozen (25), in order',
+    'main table field ids are frozen (33), in order',
   )
-  assert.equal(MAIN_IDS.length, 25, 'main table has exactly 25 fields')
+  // 25 -> 28 (#5446: 父组件图号 / 父组件名称 / 规格, plm_system) -> 33: 自制/外购 plus the four
+  // departmental response columns (采购完成 / 采购回复日期 / 仓库完成 / 实际到货日期), all
+  // human_preserved and APPENDED, so no pre-existing column changed id, type, label or order.
+  assert.equal(MAIN_IDS.length, 33, 'main table has exactly 33 fields')
   assert.deepEqual(
     STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.fields.map((f) => f.id),
     LEDGER_IDS,

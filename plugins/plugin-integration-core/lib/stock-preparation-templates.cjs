@@ -101,6 +101,15 @@ const REQUIRED_SYSTEM_FIELDS = Object.freeze([
   'lastPlmConflictSummary',
 ])
 
+// THE HUMAN WHITELIST -- the load-bearing vocabulary. Growing it is an INDEPENDENT
+// DESIGN GATE (general-prep-execution-plan-20260722.md §3): every id listed here is
+// simultaneously (a) refused to the apply-writer, so a PLM refresh can never write it
+// (assertNoHumanFields, stock-preparation-apply-writer.cjs), (b) carried across a
+// re-import by the carry policy, (c) required by the conflict-planner's drift check to
+// equal the template's human band exactly, and (d) the only fields a suggestion operator
+// may propose into. Adding an id here is therefore not a label change -- it is a
+// simultaneous statement about four subsystems, which is why it may never be done by a
+// repair verb or any other runtime path.
 const HUMAN_PRESERVED_FIELD_IDS = Object.freeze([
   'materialType',
   'blankType',
@@ -110,6 +119,17 @@ const HUMAN_PRESERVED_FIELD_IDS = Object.freeze([
   'notes',
   'procurementReply',
   'warehouseConfirmation',
+  // 备料-time human decision: 自制 or 外购. See the field declaration on the main
+  // template for why this is neither a PLM column nor an ERP column.
+  'makeOrBuy',
+  // The DEPARTMENTAL RESPONSE BAND. The legacy 备料 system carried purchasing and
+  // warehouse as two separate 1:1 tables, each with its own typed completion flag and
+  // real dates; that collapsed into one sheet, and only the two free-text remarks
+  // survived. These four restore the machine-readable half.
+  'procurementDone',
+  'procurementReplyDate',
+  'warehouseDone',
+  'actualArrivalDate',
 ])
 
 const FEASIBILITY_FORBIDDEN_MECHANISMS = Object.freeze([
@@ -670,6 +690,32 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     field('idempotencyKey', 'Idempotency Key', 'string', 'plm_system', { required: true, key: true, labelZh: '唯一键' }),
     field('componentSourceId', 'Component Source ID', 'string', 'plm_system', { required: true, labelZh: '部件源ID' }),
     field('parentSourceId', 'Parent Source ID', 'string', 'plm_system', { labelZh: '父件源ID' }),
+    // 父组件图号 / 父组件名称. The WORKING SHEET has always denormalized the PLM columns a human
+    // needs in front of their eyes (图号/名称/材料/总用量 below); the parent was the exception —
+    // only ever an OBJ_ID (`parentSourceId` above), which nobody can read. These two close that
+    // gap on EXACTLY the terms the snapshot line's own parentName was added on (#5436): OPTIONAL
+    // and plm_system-owned, so rows written before this change simply carry no such column and
+    // nothing downstream may require one, and EXISTING INSTALLS gain the columns through the
+    // additive W2 repair verb (repairStockPreparationCanonicalTarget) rather than a migration.
+    //
+    // They are DENORMALIZED, not authoritative: the immutable versioned record of what PLM said
+    // remains plm_stock_preparation_bom_snapshot_line. Both sides resolve the parent through the
+    // same in-batch parent index (stock-preparation-expansion-snapshot-mapper.cjs buildParentIndex,
+    // reused by stock-preparation-conflict-planner.cjs), so they cannot disagree about who the
+    // parent is. A root row has no parent and therefore no value — absence, not an empty string.
+    //
+    // THE IDS ARE NOT `parentDrawing`/`parentName`/`spec` — deliberately, and not a style choice.
+    // `ext_` extension ids are governed as a DISJOINT namespace whose suffix may never equal a
+    // frozen template field id (stock-preparation-extension-namespace.cjs, FIELD_ID_TEMPLATE_
+    // COLLISION — the rule exists precisely for "a NEW frozen template field added under the same
+    // bare name"). Until today these three columns reached the sheet ONLY as pack columns, and the
+    // shipped pack owns `ext_parentDrawingNo`, `ext_parentName` and `ext_spec`
+    // (lib/customer-packs/factory-a.rehearsal.cjs). Freezing `parentName` or `spec` would make
+    // every install carrying that pack fail its own pack validation. So the ids follow the main
+    // table's OWN vocabulary instead — `componentCode` is 图号 here, therefore 父组件图号 is
+    // `parentComponentCode` — which collides with nothing and reads as a first-class column.
+    field('parentComponentCode', 'Parent Component Code', 'string', 'plm_system', { labelZh: '父组件图号' }),
+    field('parentComponentName', 'Parent Component Name', 'string', 'plm_system', { labelZh: '父组件名称' }),
     field('path', 'BOM Path', 'string', 'plm_system', { required: true, labelZh: 'BOM路径' }),
     field('depth', 'BOM Depth', 'number', 'plm_system', { labelZh: 'BOM层级' }),
     // 图号, deliberately NOT a translation of "Component Code". The customer's own
@@ -677,6 +723,14 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     // same word -- the table speaks the customer's vocabulary, not ours.
     field('componentCode', 'Component Code', 'string', 'plm_system', { labelZh: '图号' }),
     field('componentName', 'Component Name', 'string', 'plm_system', { labelZh: '名称' }),
+    // 规格 — one of the seven fields a 备料 pull must carry, and until now reaching the working
+    // sheet ONLY as a customer-pack extension column (`ext_spec`). Native here, on the same terms
+    // as the two parent columns above (id likewise not `spec`, for the namespace reason spelled
+    // out there), and fed from the same DECLARED read-plan slot the snapshot line's `spec` is fed
+    // from (readPlan.part.specField, absent by default — stock-preparation-bom-expansion.cjs).
+    // A deployment that declares no spec column persists no spec: an empty column, never a
+    // guessed source column.
+    field('componentSpec', 'Component Specification', 'string', 'plm_system', { labelZh: '规格' }),
     field('material', 'Material', 'string', 'plm_system', { labelZh: '材料' }),
     field('sourceVersion', 'PLM Source Version', 'string', 'plm_system', { labelZh: '源版本' }),
     field('rawQuantity', 'Raw Quantity', 'number', 'plm_system', { labelZh: '单层用量' }),
@@ -706,6 +760,68 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     field('notes', 'Notes', 'string', 'human_preserved', { labelZh: '备注' }),
     field('procurementReply', 'Procurement Reply', 'string', 'human_preserved', { labelZh: '采购回复' }),
     field('warehouseConfirmation', 'Warehouse Confirmation', 'string', 'human_preserved', { labelZh: '仓库确认' }),
+
+    // ------------------------------------------------------------------
+    // 自制/外购 -- THE FORK. Appended, never interleaved: every column above keeps
+    // the order value it has today, so an existing deployment's grid does not move.
+    //
+    // WHY IT IS HUMAN-OWNED AND NOT SOURCED. It was investigated as an upstream
+    // attribute first: the customer's PLM part dictionary (DN_PM_PartExAttrInfo, 73
+    // rows / 21 active) carries 客户名称 / 产品编号 / 设备规格 / 重量 / 总重 / 备注 /
+    // 名称 / 图号 / 材料 / 型号 / 品牌 / 描述 / 技术要求 / 物料编码 / 旧编码 / 供货范围 /
+    // 表面处理 / 包装运输 / 特殊要求 / 制造·检验验收标准 / 规格 -- and no make-or-buy
+    // attribute at all. It is a 备料-time decision a human makes, so it is
+    // human_preserved and a PLM refresh may never write it.
+    //
+    // WHY IT MATTERS STRUCTURALLY. Every row today unconditionally carries BOTH
+    // `procurementReply` and `warehouseConfirmation`, so the model cannot express
+    // WHICH follow-up a given row concerns. This column is the fork that makes
+    // 采购跟进 and 仓库跟进 separable. It is a FIELD, not a router: nothing in this
+    // module or its callers branches on it, and no auto-assignment reads it.
+    //
+    // NO VOCABULARY IS FROZEN HERE, deliberately -- and that is the codebase
+    // convention, not a shortcut. `normalizeField` above REFUSES `options` /
+    // `values` / `value` / `default` on any field descriptor ("schema only, no
+    // customer values"), so a select column names a SOURCE and never a literal set.
+    // The customer's real 自制/外购 vocabulary lives in their own `config_info`
+    // dictionary and reaches the column two supported ways, exactly as
+    // `materialType` / `blankType` / `stockPreparationStatus` do: the option-sync
+    // preset (field-option-sync-contract.cjs, `make_or_buy` → `makeOrBuy`), or a
+    // customer pack's `optionSets` entry. A platform-side default list would be a
+    // vocabulary we cannot justify for any specific factory.
+    field('makeOrBuy', 'Make or Buy', 'select', 'human_preserved', {
+      labelZh: '自制/外购',
+      optionSource: { type: 'config_info', key: 'make_or_buy' },
+    }),
+
+    // ------------------------------------------------------------------
+    // THE DEPARTMENTAL RESPONSE BAND.
+    //
+    // The legacy 备料 system had three 1:1 tables (`stock_info` + `purchase_info` +
+    // `warehouse_info`); purchasing and warehouse each had a typed `is_done`
+    // completion flag and real dates. That collapsed into ONE sheet, and only the
+    // two free-text remarks (`procurementReply` / `warehouseConfirmation`, kept
+    // above unchanged) survived the collapse. With no machine-readable completion
+    // state, a handoff/notification flow has nothing to advance on.
+    //
+    // `boolean` is the platform's checkbox-shaped type and is in
+    // STOCK_PREPARATION_FIELD_TYPES, so the completion markers are booleans rather
+    // than a select over a two-value vocabulary nobody has to maintain.
+    //
+    // These are FIELDS, NOT A WORKFLOW ENGINE. There is no state machine, no
+    // ordering constraint between the flag and the date, and nothing that clears
+    // one when the other changes -- a sibling PR owns the turn signal.
+    //
+    // All four are human_preserved, so `preserveOnRefresh: true` is DERIVED by
+    // normalizeField (never authored) and the apply-writer's `assertNoHumanFields`
+    // wall refuses them to every PLM refresh the moment they join
+    // HUMAN_PRESERVED_FIELD_IDS above.
+    field('procurementDone', 'Procurement Done', 'boolean', 'human_preserved', { labelZh: '采购完成' }),
+    field('procurementReplyDate', 'Procurement Reply Date', 'date', 'human_preserved', { labelZh: '采购回复日期' }),
+    field('warehouseDone', 'Warehouse Done', 'boolean', 'human_preserved', { labelZh: '仓库完成' }),
+    // 实际到货日期 -- what actually arrived and when, deliberately NOT a second
+    // demand date. `demandDate` (需求日期) stays production-owned above.
+    field('actualArrivalDate', 'Actual Arrival Date', 'date', 'human_preserved', { labelZh: '实际到货日期' }),
   ],
 }))
 
@@ -809,14 +925,36 @@ const STOCK_PREPARATION_MVP_TABLE_TEMPLATES = Object.freeze([
     fields: [
       field('snapshotLineId', 'Snapshot Line ID', 'string', 'plm_system', { required: true, key: true }),
       field('snapshotBatchId', 'Snapshot Batch ID', 'string', 'plm_system', { required: true }),
+      // THE SEVEN FIELDS A 备料 PULL MUST CARRY (owner spec): 父组件图号 / 父组件名称 / 当前组件图号 /
+      // 当前组件名称 / 规格 / 材料 / 总数量. Drawing numbers, versions and per-level quantity landed with
+      // the MVP; `material` landed with the fingerprint decomposition; `parentName` / `childName` /
+      // `spec` / `totalQuantity` land here. Every one of them is OPTIONAL and plm_system-owned, on the
+      // same terms `material` was added: batches persisted before this change simply carry no such
+      // column, nothing downstream may require one, and EXISTING INSTALLS heal via the W2 repair verb
+      // (repairStockPreparationMvpTargets) rather than a migration.
       field('parentDrawingNo', 'Parent Drawing No', 'string', 'plm_system'),
       field('parentVersion', 'Parent Version', 'string', 'plm_system'),
+      field('parentName', 'Parent Name', 'string', 'plm_system'),
       field('childDrawingNo', 'Child Drawing No', 'string', 'plm_system'),
       field('childVersion', 'Child Version', 'string', 'plm_system'),
+      field('childName', 'Child Name', 'string', 'plm_system'),
+      // Fingerprint decomposition (stock-prep-change-adjudication-20260901): persisted so the diff can
+      // raise material_changed by name. Optional — historical batches carry no material field, and the
+      // diff engine falls back to the sourceFingerprint for that dimension when either side lacks it.
+      // Existing installs gain the column via the W2 repair verb (repairStockPreparationMvpTargets).
+      field('material', 'Material', 'string', 'plm_system'),
+      // 规格. Only present when the deployment DECLARED a spec column on its read plan
+      // (readPlan.part.specField, defaulted to absent — see stock-preparation-bom-expansion.cjs);
+      // a deployment without one persists no spec, which is absence, not emptiness.
+      field('spec', 'Specification', 'string', 'plm_system'),
       field('bomLevel', 'BOM Level', 'number', 'plm_system'),
       field('pathKey', 'Path Key', 'string', 'plm_system', { required: true }),
       field('designQty', 'Design Quantity', 'number', 'plm_system'),
       field('designUnit', 'Design Unit', 'string', 'plm_system'),
+      // 总数量 — the per-level `designQty` multiplied down the path. The MVP kept ONLY the per-level
+      // quantity, so the rollup the warehouse actually orders against was computed by the expansion
+      // and then dropped at persist. Both are kept now; neither replaces the other.
+      field('totalQuantity', 'Total Quantity', 'number', 'plm_system'),
       field('lineStatus', 'Line Status', 'select', 'plm_system', {
         optionSource: { type: 'contract', key: 'stock_preparation_bom_line_status_v1' },
       }),

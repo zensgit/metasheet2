@@ -339,6 +339,33 @@ test('ordinary linear editable templates promote into Canvas without exposing th
   await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('有未保存更改')
 })
 
+test('linear Canvas exposes sequential approval and persists the selected mode', async ({ page }) => {
+  await mountFlow(page, {
+    canvasV2: true,
+    width: 1440,
+    height: 900,
+    template: LINEAR_TEMPLATE,
+  })
+
+  await canvasNodeSelector(page, 'approval_1').click()
+  const mode = page.locator('[data-testid="approval-node-mode"]')
+  await mode.click()
+  await page.getByRole('option', { name: '依次审批', exact: true }).click()
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('有未保存更改')
+
+  const updateRequest = page.waitForRequest((request) => (
+    request.method() === 'PATCH'
+      && /\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/.test(request.url())
+  ))
+  await page.click('[data-testid="approval-template-save-button"]')
+  const payload = (await updateRequest).postDataJSON() as {
+    approvalGraph?: { nodes?: Array<{ key?: string; config?: { approvalMode?: string } }> }
+  }
+  expect(payload.approvalGraph?.nodes?.find((node) => node.key === 'approval_1')?.config?.approvalMode)
+    .toBe('sequential')
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
+})
+
 test('entering Canvas preserves pre-flow edits and keeps the saved linear draft dirty', async ({ page }) => {
   await mountFlow(page, {
     canvasV2: true,

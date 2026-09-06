@@ -3,15 +3,42 @@
 // #2253 C5-1: backend parameterized table action contract for PLM project BOM
 // -> stock-preparation. This module wires the already-landed C2/C3/C4 helpers
 // without adding UI, migrations, external DB writes, or K3 paths.
+//
+// ---------------------------------------------------------------------------
+// THE ONE VALUE-BEARING KEY IN THIS MODULE'S RESPONSES (W3a) — register it here
+// ---------------------------------------------------------------------------
+//
+// The dry-run response is otherwise values-free by construction: statuses, counts, hashes, frozen
+// error-type tokens and field ids, and an `evidence` stanza whose every branch is a projection that
+// drops customer cells. This module is NOT covered by the `assertValuesFree*` self-checks (those
+// live on the audit store, the pack-install store and the GIP read observability seam), so the
+// registration is this comment plus the tests that pin it.
+//
+//   `missingComponents` — the ONLY key in any response this module produces that carries real
+//   customer values (PLM part numbers, their parents, their BOM ids and paths). It is:
+//     * OPT-IN: `dryRunStockPreparationAction({ includeMissingComponents: true })`, and nothing else
+//       in this module sets it — the large-BOM lane and the confirmation-decision lane never do.
+//     * CONDITIONAL: absent entirely when the flag is off OR the list is empty, so a caller that did
+//       not ask, and a project with nothing missing, get byte-identical responses to before W3a.
+//     * GATED at the route: operate ∧ a PROVEN tenant. `http-routes.cjs`'s dry-run handler calls
+//       `resolveOperatorValueScope` before it will pass the flag down — the legacy `integration:read`
+//       tier and the tenantless platform admin are refused there, 403.
+//     * OUT of everything durable: it is not in `buildRevision`'s expansion projection, not in
+//       `evidenceForDryRun`, not in the dry-run token, not in the ledger, not in the audit row.
+//       Four negative guards pin those four.
 
 const crypto = require('node:crypto')
 
 const {
+  DEFAULT_MAX_PAGES,
+  DEFAULT_MAX_ROWS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
+  // Values-BEARING (see the module header). The only import in this file that is.
+  summarizeMissingComponents,
 } = require('./stock-preparation-bom-expansion.cjs')
 const {
   DECISIONS,
@@ -25,6 +52,10 @@ const {
   normalizeRunOnlyConflictPolicyReview,
   POLICY_BOUNDARY_STORED,
 } = require('./stock-preparation-conflict-policies.cjs')
+// W4 carry opt-in: the deploy-time carryPolicy knob is validated through the
+// carry module's OWN closed vocabulary (configuration-not-code: the config can
+// only say what the policy module can mean).
+const { normalizeCarryPolicy } = require('./stock-preparation-carry-policy.cjs')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
@@ -229,6 +260,178 @@ function normalizeActionExtensionFieldIds(input, template) {
   return out
 }
 
+/**
+ * W4 carry opt-in (execution-plan W4a; adjudication Layer 3). Deploy-time config
+ * (the INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON world), validated
+ * through the carry module's OWN closed vocabulary so config and runtime can
+ * never disagree about what a policy means. Absent => null => the key is not
+ * added to the normalized action at all (conditional spread, like
+ * extensionFieldIds), so every existing config snapshot/hash is byte-identical
+ * and the planner runs exactly the pre-wiring path. The normalized object is
+ * plain JSON, so it survives the cloneJson ride into a large-BOM job's
+ * actionSnapshot unchanged.
+ */
+function normalizeActionCarryPolicy(input) {
+  if (input === undefined || input === null) return null
+  try {
+    return normalizeCarryPolicy(input)
+  } catch (error) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'carryPolicy is not a valid carry policy', {
+      field: 'carryPolicy',
+      carryPolicyReason: error && error.reason ? error.reason : 'UNKNOWN',
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Large-BOM BACKGROUND caps (C0 "Cap policy", third row).
+//
+// The C0 design asks for THREE independent caps — smoke / reviewed synchronous
+// dry-run / background full expansion — and only ONE was ever implemented: the
+// background worker was handed the SAME `action.maxRows` the interactive
+// dry-run uses. That made the whole large-BOM lane unreachable BY
+// CONSTRUCTION: the only way to enter it is to exceed the interactive cap, and
+// the background job then re-hit the identical cap, failed with
+// `max_rows_exceeded`, and left `authoritative: false` — so the plan route
+// refused with LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE and no large project could
+// ever be planned. Measured end to end on the 222 box, 2026-09-05, on a 13151-
+// row synthetic project.
+//
+// THE INTERACTIVE LANE IS NOT TOUCHED. `computeDryRun` still reads
+// `action.maxRows` / `action.maxPages` / `action.maxReadCount` /
+// `action.maxElapsedMs` directly, so a dry-run response is byte-identical
+// whether or not a `largeBom` block exists. This block supplies the background
+// lane's own numbers and nothing else.
+//
+// Precedence, per cap:
+//   1. explicit `action.largeBom.<cap>` (deploy-time config), clamped to the
+//      ceiling below;
+//   2. otherwise the INTERACTIVE cap x the multiplier below, clamped to the
+//      ceiling. For `maxRows`/`maxPages` the interactive cap is the expander's
+//      own default when config named none (10000 / 100), because that default
+//      is what the dry-run actually enforced.
+//   3. `maxReadCount`/`maxElapsedMs` have NO expander default: absent in the
+//      interactive lane means "no bound at all", and the background lane
+//      INHERITS that rather than inventing one. A deployer who wants the
+//      background lane bounded on those says so in the `largeBom` block.
+//
+// The ceilings are the "config cannot say infinite" half: a `largeBom` value
+// above one is a 422 at config-load time (not a silent clamp — a deployer who
+// typed 10_000_000 should be told), and a DERIVED value is clamped silently
+// because it is arithmetic, not a statement of intent.
+//
+// There is deliberately NO floor tying a `largeBom` value to its interactive
+// sibling: a block MAY name a value BELOW the interactive cap, which makes the
+// background lane STRICTER than the dry-run that sends callers into it and
+// reproduces exactly the failure this whole block exists to remove. That is a
+// legitimate thing for a deployer to want (a deliberately small background
+// budget on a shared box) and refusing it would be this module inventing
+// policy, so it is allowed and documented in the customer delivery guide
+// instead — unless intended, every `largeBom` value should be >= its
+// interactive sibling.
+//
+// `maxArtifactChunks` is deliberately NOT a member of this family — see
+// stock-preparation-large-bom-jobs.cjs `LARGE_BOM_ARTIFACT_CHUNK_COUNT`.
+const LARGE_BOM_BACKGROUND_CAP_FIELDS = Object.freeze(['maxRows', 'maxPages', 'maxReadCount', 'maxElapsedMs'])
+
+const LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS = Object.freeze({
+  maxRows: 20,
+  maxPages: 10,
+  maxReadCount: 20,
+  maxElapsedMs: 6,
+})
+
+const LARGE_BOM_BACKGROUND_CAP_CEILINGS = Object.freeze({
+  maxRows: 1000000,
+  maxPages: 100000,
+  maxReadCount: 5000000,
+  maxElapsedMs: 21600000,
+})
+
+/**
+ * Deploy-time `largeBom` cap block. STRICTER than the sibling `maxRows` family
+ * above on purpose: those coerce (`Number(value)`) because legacy configs ship
+ * numeric strings and moving them would be a behaviour change, while this block
+ * is new and can refuse a string outright. Absent => null => the key is not
+ * added to the normalized action at all (conditional spread, like
+ * `carryPolicy`), so every existing config snapshot and hash stays
+ * byte-identical.
+ */
+function normalizeActionLargeBomCaps(input) {
+  if (input === undefined || input === null) return null
+  if (!isPlainObject(input)) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'largeBom must be an object', { field: 'largeBom' })
+  }
+  for (const key of Object.keys(input)) {
+    if (!LARGE_BOM_BACKGROUND_CAP_FIELDS.includes(key)) {
+      throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', `unsupported largeBom cap: ${key}`, { field: `largeBom.${key}` })
+    }
+  }
+  const caps = {}
+  for (const field of LARGE_BOM_BACKGROUND_CAP_FIELDS) {
+    const value = input[field]
+    if (value === undefined || value === null || value === '') continue
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new StockPreparationTableActionError(
+        422,
+        'TABLE_ACTION_CONFIG_INVALID',
+        `largeBom.${field} must be a positive integer`,
+        { field: `largeBom.${field}` },
+      )
+    }
+    const ceiling = LARGE_BOM_BACKGROUND_CAP_CEILINGS[field]
+    if (value > ceiling) {
+      throw new StockPreparationTableActionError(
+        422,
+        'TABLE_ACTION_CONFIG_INVALID',
+        `largeBom.${field} exceeds the background expansion ceiling`,
+        { field: `largeBom.${field}`, ceiling },
+      )
+    }
+    caps[field] = value
+  }
+  return Object.keys(caps).length ? caps : null
+}
+
+// An interactive cap only counts as a scaling base if it is a usable positive
+// integer. The sibling `maxRows`/`maxDepth` keys are raw pass-throughs on the
+// normalized action, so this has to tolerate whatever config wrote there.
+function backgroundCapBase(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const number = Number(value)
+  return Number.isInteger(number) && number > 0 ? number : undefined
+}
+
+/**
+ * THE ONE definition of what the background full-expansion lane is allowed to
+ * read. Returns only the four scale caps; `pageLimit` (a page SIZE, not a
+ * bound) and `maxDepth` (a structural property of the BOM tree, not a scale
+ * budget) stay on the interactive values, because widening them would change
+ * WHAT is read rather than HOW MUCH.
+ */
+function largeBomBackgroundExpansionCaps(action = {}) {
+  const configured = isPlainObject(action) && isPlainObject(action.largeBom) ? action.largeBom : {}
+  const interactiveBase = {
+    maxRows: backgroundCapBase(action && action.maxRows) || DEFAULT_MAX_ROWS,
+    maxPages: backgroundCapBase(action && action.maxPages) || DEFAULT_MAX_PAGES,
+    maxReadCount: backgroundCapBase(action && action.maxReadCount),
+    maxElapsedMs: backgroundCapBase(action && action.maxElapsedMs),
+  }
+  const caps = {}
+  for (const field of LARGE_BOM_BACKGROUND_CAP_FIELDS) {
+    const ceiling = LARGE_BOM_BACKGROUND_CAP_CEILINGS[field]
+    const explicit = configured[field]
+    if (Number.isInteger(explicit) && explicit > 0) {
+      caps[field] = Math.min(explicit, ceiling)
+      continue
+    }
+    const base = interactiveBase[field]
+    if (base === undefined) continue
+    caps[field] = Math.min(base * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS[field], ceiling)
+  }
+  return caps
+}
+
 function normalizeStockPreparationActionConfig(input = {}) {
   if (!isPlainObject(input)) {
     throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'action config must be an object', { field: 'action' })
@@ -243,6 +446,8 @@ function normalizeStockPreparationActionConfig(input = {}) {
   }
   const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
   const extensionFieldIds = normalizeActionExtensionFieldIds(input.extensionFieldIds, template)
+  const carryPolicy = normalizeActionCarryPolicy(input.carryPolicy)
+  const largeBom = normalizeActionLargeBomCaps(input.largeBom)
   return {
     actionId,
     kind,
@@ -255,6 +460,10 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // several places, and an unconditional key would move every legacy shape
     // for a feature that config did not ask for.
     ...(extensionFieldIds.length ? { extensionFieldIds } : {}),
+    ...(carryPolicy ? { carryPolicy } : {}),
+    // Background-lane caps only. Read by `largeBomBackgroundExpansionCaps`
+    // (route -> background worker); `computeDryRun` never looks at it.
+    ...(largeBom ? { largeBom } : {}),
     conflictStrategy: isPlainObject(input.conflictStrategy) ? cloneJson(input.conflictStrategy) : {},
     pageLimit: positiveInteger(input.pageLimit, 'pageLimit', undefined),
     maxPages: positiveInteger(input.maxPages, 'maxPages', undefined),
@@ -593,7 +802,18 @@ const MVP_TEMPLATE_BY_OBJECT_ID = new Map(
   // The confirmation-decision LEDGER template rides the same registry so its
   // scoped records API translates logical keys exactly like the MVP tables'.
   // It is NOT thereby part of the frozen nine-table MVP surface.
-  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE]
+  //
+  // The CANONICAL main-table template rides it too. It was added for ONE consumer
+  // — confirm-writes' applyCarryViaConfirm, whose K2 confirm write used to address
+  // a provisioning-resolved canonical sheet by logical field keys — and that
+  // consumer NO LONGER USES IT: the carry executor now takes the bound table
+  // action's `target` and translates through the target's own `fieldIdMap`,
+  // because this registry is keyed by objectId and a sandbox twin's restamped
+  // objectId is not in it (see that module's carry header). The entry is retained
+  // rather than removed: membership grants TRANSLATION only, never authorization,
+  // and each module's own guard (confirm-writes MVP_OBJECT_ID_SET, the ledger's
+  // pinned OBJECT_ID, the carry executor's bound target) stays the wall.
+  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE]
     .map((template) => [template.objectId, template]),
 )
 
@@ -1173,6 +1393,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       plannedAt: plannedAt || new Date().toISOString(),
       duplicatePolicyReview: review,
       installedFieldProperties,
+      // W4 carry: threaded from the deploy-time action config (undefined when the
+      // config never opted in — the planner is then byte-identical to pre-wiring).
+      carryPolicy: action.carryPolicy,
     })
   }
   let plan = planWithReview(conflictPolicyReview)
@@ -1310,6 +1533,13 @@ async function dryRunStockPreparationAction(input = {}) {
       conflictPolicyReview: runOnlyReview,
     })
   }
+  // W3a. Computed ONLY when the caller explicitly asked and the route's operator-scope gate let the
+  // flag through (http-routes.cjs `tableActionDryRun`) — see the module header. Note the position:
+  // AFTER the token was minted from `dryRun.revision`, so it is structurally impossible for this to
+  // influence what the token promises.
+  const missingComponents = input.includeMissingComponents === true
+    ? summarizeMissingComponents(dryRun.expansion)
+    : null
   return {
     action: publicActionMetadata(action),
     status: dryRunStatus(dryRun),
@@ -1342,6 +1572,14 @@ async function dryRunStockPreparationAction(input = {}) {
       // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
       ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
     },
+    // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
+    // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
+    // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH
+    // the opt-in and a non-empty list, so:
+    //   * a caller that did not ask gets a byte-identical response to the pre-W3a one, and
+    //   * a project with nothing missing gets no key either, so the frontend's "render no node when
+    //     the list is empty" rule needs no special case.
+    ...(missingComponents && missingComponents.distinctCount > 0 ? { missingComponents } : {}),
   }
 }
 
@@ -1687,6 +1925,9 @@ async function applyStockPreparationAction(input = {}) {
 module.exports = {
   DEFAULT_DRY_RUN_TOKEN_TTL_MS,
   GENERIC_TABLE_ACTION_KIND,
+  LARGE_BOM_BACKGROUND_CAP_CEILINGS,
+  LARGE_BOM_BACKGROUND_CAP_FIELDS,
+  LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS,
   PLM_STOCK_PREPARATION_ACTION_ID,
   TABLE_ACTION_KIND,
   StockPreparationTableActionError,
@@ -1701,6 +1942,7 @@ module.exports = {
   resolveTargetFieldIds,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  largeBomBackgroundExpansionCaps,
   prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
@@ -1713,6 +1955,7 @@ module.exports = {
     buildRevision,
     confirmationDecisionEvidence,
     mergeTableScopeConflictPolicyReviews,
+    normalizeActionLargeBomCaps,
     consumeDryRunToken,
     createDryRunToken,
     hashJson,

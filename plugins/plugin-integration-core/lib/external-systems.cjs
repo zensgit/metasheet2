@@ -37,6 +37,7 @@ class ExternalSystemValidationError extends Error {
     super(message)
     this.name = 'ExternalSystemValidationError'
     this.details = details
+    if (typeof details.code === 'string' && details.code.trim()) this.code = details.code.trim()
   }
 }
 
@@ -112,6 +113,12 @@ function normalizeExternalSystemInput(input) {
 
   return {
     id: optionalString(input.id, 'id'),
+    // Preserve omission for PATCH semantics. `null` is distinct: canonical SQL bindings may not
+    // be cleared through the API, while a legacy pre-cutover row can remain null when the field is
+    // omitted during an unrelated update.
+    connectionId: input.connectionId === undefined
+      ? undefined
+      : optionalString(input.connectionId, 'connectionId'),
     tenantId: requiredString(input.tenantId, 'tenantId'),
     workspaceId: normalizeWorkspaceId(input.workspaceId),
     projectId: optionalString(input.projectId, 'projectId'),
@@ -143,6 +150,7 @@ function rowToPublicExternalSystem(row, credentialFingerprint = null) {
   for (const key of PRIVATE_CONFIG_KEYS_BY_KIND.get(row.kind) || []) delete publicConfig[key]
   return {
     id: row.id,
+    connectionId: row.connection_id ?? null,
     tenantId: row.tenant_id,
     workspaceId: row.workspace_id ?? null,
     projectId: row.project_id ?? null,
@@ -169,6 +177,10 @@ function rowToAdapterExternalSystem(row, credentials = undefined) {
   if (!row) return null
   const system = {
     id: row.id,
+    connectionId: row.connection_id ?? null,
+    // Server-owned cutover evidence. It is adapter-policy input only and is intentionally omitted
+    // from public create/get/list responses.
+    legacyConnectionFallbackEligible: row.legacy_connection_fallback_eligible === true,
     tenantId: row.tenant_id,
     workspaceId: row.workspace_id ?? null,
     projectId: row.project_id ?? null,
@@ -277,7 +289,13 @@ async function maybeEncryptCredentials(credentialStore, credentials) {
 // binder is rejected — a binding nobody could ever read through (the facade authorizes every read
 // with the owner principal; a pipeline's runtime principal is its creator) must not be persisted,
 // and an unvalidated pin must never be able to deny the source owner their delete.
-function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypto.randomUUID, dataSourceBinder } = {}) {
+function createExternalSystemRegistry({
+  db,
+  credentialStore,
+  idGenerator = crypto.randomUUID,
+  dataSourceBinder,
+  connectionResolver,
+} = {}) {
   if (
     !db ||
     typeof db.selectOne !== 'function' ||
@@ -384,9 +402,140 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     return merged
   }
 
+  // Drops the LEGACY POINTER only. It used to drop the attribution stamp with it, and that was the
+  // first of the two reasons the stock-prep pull's read-identity delegation never fired on a
+  // canonical binding: every canonical insert/update ran through here, so a row bound by
+  // `connection_id` could not carry a `dataSourceOwnerId` even in principle. The stamp is NOT a
+  // property of the legacy pointer — it is the answer to "who did the host authorize as this
+  // connection's owner at bind time", which a canonical binding proves exactly as strongly (see
+  // `resolveCanonicalBindingOwner`). Attribution is re-decided by that function immediately after
+  // every call here, so nothing survives from a payload merely because this stopped deleting it.
+  function withoutLegacyDataSourcePointer(config) {
+    if (!isPlainObject(config)) return config
+    const cleaned = { ...config }
+    delete cleaned.dataSourceId
+    return cleaned
+  }
+
+  /**
+   * THE SERVER-HELD OWNER OF A CANONICAL (`connection_id`) BINDING.
+   *
+   * WHY THIS IS AS TRUSTWORTHY AS THE LEGACY STAMP. `withValidatedDataSourceBinding` stamps the
+   * legacy pointer's owner only after `dataSourceBinder.assertReferenceable(id, principal)` returns
+   * — i.e. after `DataSourceManager.assertAccess` accepted that principal as the source's owner by
+   * STRICT EQUALITY. A canonical bind proves the identical fact through the identical choke point:
+   * `validateCanonicalConnectionBinding` -> `connectionResolver.resolve` -> the host facade's
+   * `resolveConnectionRegistration` -> the same `assertAccess`. So `proven === true` here means the
+   * principal WAS the connection's owner a few lines ago, on the host's own authority.
+   *
+   * WHAT IT WILL NOT DO:
+   *   * it never reads an owner out of the payload — `SERVER_OWNED_CONFIG_KEYS` already stripped
+   *     `dataSourceOwnerId` at the normalize choke point, and this function only ever writes either
+   *     the just-proven principal or the value already in STORAGE;
+   *   * an update that does NOT re-assert the connection inherits the stored stamp verbatim, so a
+   *     colleague renaming a bridge neither steals nor destroys the attribution;
+   *   * with nothing proven and nothing stored it writes NOTHING, leaving the row exactly as it was.
+   */
+  function resolveCanonicalBindingOwner({ config, storedConfig, principal, proven }) {
+    if (!isPlainObject(config)) return config
+    const provenOwner = proven && typeof principal === 'string' ? principal.trim() : ''
+    if (provenOwner) return { ...config, dataSourceOwnerId: provenOwner }
+    const stored = isPlainObject(storedConfig) && typeof storedConfig.dataSourceOwnerId === 'string'
+      ? storedConfig.dataSourceOwnerId.trim()
+      : ''
+    if (stored) return { ...config, dataSourceOwnerId: stored }
+    if (Object.prototype.hasOwnProperty.call(config, 'dataSourceOwnerId')) {
+      const cleaned = { ...config }
+      delete cleaned.dataSourceOwnerId
+      return cleaned
+    }
+    return config
+  }
+
+  function requestedConnectionId(normalized, existing) {
+    if (normalized.kind !== SQL_READONLY_SOURCE_KIND) {
+      if (normalized.connectionId !== undefined && normalized.connectionId !== null) {
+        throw new ExternalSystemValidationError(
+          'connectionId is only supported for data-source:sql-readonly bindings in this phase',
+          { field: 'connectionId' },
+        )
+      }
+      return null
+    }
+
+    if (existing) {
+      if (normalized.connectionId === undefined) return existing.connection_id ?? null
+      if (normalized.connectionId === null) {
+        throw new ExternalSystemValidationError(
+          'SQL read-only bindings cannot clear their canonical connectionId',
+          { field: 'connectionId' },
+        )
+      }
+      return normalized.connectionId
+    }
+
+    // Compatibility at the request boundary only: the current picker still names the selected
+    // Connection as config.dataSourceId. New storage is canonical regardless — only connection_id
+    // is written and the legacy pointer is removed from config before INSERT.
+    const legacyPointer = isPlainObject(normalized.config)
+      ? optionalString(normalized.config.dataSourceId, 'config.dataSourceId')
+      : null
+    const connectionId = normalized.connectionId ?? legacyPointer
+    if (!connectionId) {
+      throw new ExternalSystemValidationError(
+        'connectionId is required for a new data-source:sql-readonly binding',
+        { field: 'connectionId' },
+      )
+    }
+    return connectionId
+  }
+
+  async function validateCanonicalConnectionBinding(binding, rawInput) {
+    if (!connectionResolver || typeof connectionResolver.resolve !== 'function') {
+      throw new ExternalSystemValidationError(
+        'canonical connection resolution is unavailable',
+        { field: 'connectionId', code: 'CONNECTION_RESOLUTION_UNAVAILABLE' },
+      )
+    }
+    try {
+      await connectionResolver.resolve(binding, {
+        tenantId: binding.tenantId,
+        workspaceId: binding.workspaceId,
+        principal: rawInput.principal,
+        // Default to service. Only an authenticated HTTP surface explicitly
+        // stamps user delegation; registry/communication callers cannot gain
+        // tenantless legacy access by omission.
+        runAs: rawInput.runAs === 'user' ? 'user' : 'service',
+      })
+    } catch (error) {
+      throw new ExternalSystemValidationError(
+        error instanceof Error ? error.message : 'canonical connection validation failed',
+        {
+          field: 'connectionId',
+          code: error && typeof error.code === 'string' ? error.code : 'CONNECTION_RESOLUTION_FAILED',
+        },
+      )
+    }
+  }
+
   async function upsertExternalSystem(input) {
     const normalized = normalizeExternalSystemInput(input)
     const existing = await findExisting(normalized)
+    const connectionId = requestedConnectionId(normalized, existing)
+    // A SQL read-only Binding references the platform Connection that owns all
+    // physical credentials. Accepting a second credential document here would
+    // recreate the split secret store PR-1 is removing. Explicit null remains
+    // allowed solely to scrub a pre-cutover duplicate on update.
+    if (
+      normalized.kind === SQL_READONLY_SOURCE_KIND
+      && normalized.credentials !== undefined
+      && normalized.credentials !== null
+    ) {
+      throw new ExternalSystemValidationError(
+        'data-source:sql-readonly credentials belong to the canonical Connection',
+        { field: 'credentials', code: 'CONNECTION_BINDING_CREDENTIALS_FORBIDDEN' },
+      )
+    }
     const credentialsEncrypted = await maybeEncryptCredentials(credentialStore, normalized.credentials)
 
     const baseRow = {
@@ -401,6 +550,8 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
       status: normalized.status,
       last_tested_at: normalized.lastTestedAt,
       last_error: normalized.lastError,
+      connection_id: connectionId,
+      legacy_connection_fallback_eligible: existing?.legacy_connection_fallback_eligible === true,
     }
 
     if (existing) {
@@ -425,6 +576,31 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
       if (input.config === undefined) updateRow.config = existing.config
       else updateRow.config = await resolveUpdatedConfig(existing, updateRow.config, input)
       if (input.capabilities === undefined) updateRow.capabilities = existing.capabilities
+      if (normalized.kind === SQL_READONLY_SOURCE_KIND && connectionId !== null) {
+        const reassertsConnection = normalized.connectionId !== undefined
+          || (isPlainObject(input.config) && Object.prototype.hasOwnProperty.call(input.config, 'dataSourceId'))
+        if (reassertsConnection) {
+          await validateCanonicalConnectionBinding({
+            ...rowToAdapterExternalSystem({ ...existing, ...updateRow }),
+            connectionId,
+          }, input)
+        }
+        // Rows created after cutover are canonical-only. An old picker may still submit the
+        // compatibility alias, but it must not re-introduce the legacy storage shape. Migrated
+        // rows keep their pointer because the explicit fallback marker is their rollback proof.
+        if (existing.legacy_connection_fallback_eligible !== true) {
+          updateRow.config = withoutLegacyDataSourcePointer(updateRow.config)
+        }
+        // ATTRIBUTION LAST, on the whole canonical branch (migrated rows included — they resolve
+        // through the same facade). Re-asserting the connection re-proves the owner; not
+        // re-asserting inherits what storage already holds.
+        updateRow.config = resolveCanonicalBindingOwner({
+          config: updateRow.config,
+          storedConfig: existing.config,
+          principal: input && typeof input.principal === 'string' ? input.principal : '',
+          proven: reassertsConnection,
+        })
+      }
       if (credentialsEncrypted !== undefined) {
         updateRow.credentials_encrypted = credentialsEncrypted
       }
@@ -443,10 +619,31 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
       return publicRow(credentialStore, row)
     }
 
+    let insertConfig = normalized.config
+    if (normalized.kind === SQL_READONLY_SOURCE_KIND) {
+      await validateCanonicalConnectionBinding({
+        id: normalized.id || null,
+        tenantId: normalized.tenantId,
+        workspaceId: normalized.workspaceId,
+        kind: normalized.kind,
+        connectionId,
+        config: insertConfig,
+      }, input)
+      insertConfig = withoutLegacyDataSourcePointer(insertConfig)
+      // The insert branch ALWAYS validated the binding a line above, so the principal is proven.
+      insertConfig = resolveCanonicalBindingOwner({
+        config: insertConfig,
+        storedConfig: null,
+        principal: input && typeof input.principal === 'string' ? input.principal : '',
+        proven: true,
+      })
+    } else {
+      insertConfig = await withValidatedDataSourceBinding(insertConfig, input)
+    }
     const insertRow = {
       id: normalized.id || idGenerator(),
       ...baseRow,
-      config: await withValidatedDataSourceBinding(normalized.config, input),
+      config: insertConfig,
       credentials_encrypted: credentialsEncrypted === undefined ? null : credentialsEncrypted,
     }
     const rows = await db.insertOne(TABLE, insertRow)
@@ -454,15 +651,44 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     return publicRow(credentialStore, row || insertRow)
   }
 
+  // Scoped BY-ID read shared by the four read accessors below (public get, adapter-config, adapter
+  // load, sealed snapshot). Exact (tenant, workspace, id) first. When the caller carries a workspace
+  // hint and misses, fall back ONCE to the SAME tenant's tenant-wide row (workspace_id IS NULL).
+  //
+  // WHY: single-tenant on-prem deployments provision sources tenant-wide, while the web workbench
+  // carries a workspace hint (URL/localStorage, in practice often the tenant id) and the sealed
+  // mvp-persist step derives workspace=null from the principal (tokens carry no workspace claim).
+  // Without this the two halves of ONE pull disagree on scope and dry-run/apply 404 with
+  // ExternalSystemNotFoundError. What does NOT change, INSIDE THIS FUNCTION: tenant_id must still
+  // match (the fallback query carries the caller's tenant), a workspace-scoped row is never reached
+  // from another workspace or from a null `workspaceId` ARGUMENT, and writes/list/delete keep their
+  // exact scope.
+  //
+  // REVERSE POINTER (stock-preparation, F3): "a null hint never widens" is an invariant of what THIS
+  // FUNCTION does with the `workspaceId` it is handed — it says nothing about what that argument
+  // IS on any given call. `loadTableActionSourceAdapter` (plugin-integration-core/lib/http-routes.cjs)
+  // can substitute a server-derived NON-null hint (the stock-prep source binding's own
+  // `matchedWorkspaceId`, from that store's null-workspace scope fallback) in place of a caller whose
+  // OWN request carried none — so a request that looks hint-less end to end may still arrive here
+  // with a real `workspaceId`, and this function then does its own ordinary non-null-hint-miss
+  // widening for it, exactly as for any other caller. That is a decision made ABOVE this function, on
+  // its own inputs; nothing here changes to accommodate it.
+  //
+  // Returns the workspace the row was actually matched under, so downstream policy (the
+  // connection resolver) sees the row's own scope rather than the caller's hint.
+  async function selectScopedRow({ tenantId, workspaceId, id }) {
+    const exact = await db.selectOne(TABLE, { tenant_id: tenantId, workspace_id: workspaceId, id })
+    if (exact) return { row: exact, matchedWorkspaceId: workspaceId }
+    if (workspaceId === null) return { row: null, matchedWorkspaceId: workspaceId }
+    const tenantWide = await db.selectOne(TABLE, { tenant_id: tenantId, workspace_id: null, id })
+    return { row: tenantWide, matchedWorkspaceId: tenantWide ? null : workspaceId }
+  }
+
   async function getExternalSystem(input) {
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
     const id = requiredString(input?.id, 'id')
-    const row = await db.selectOne(TABLE, {
-      tenant_id: tenantId,
-      workspace_id: workspaceId,
-      id,
-    })
+    const { row } = await selectScopedRow({ tenantId, workspaceId, id })
     if (!row) {
       throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
     }
@@ -480,25 +706,29 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
    *     B2a read fence is contracted to land before any credential reload, and its tests assert that
    *     accessor was called exactly zero times on a refusal, so a guard may not use it.
    *
-   * So: the same row, the full config, and no `parseAdapterCredentials` call. It returns the config
-   * and the kind ONLY — never the credentials, never the ciphertext, never a fingerprint — because
-   * the one caller (the B2a object-scope resolver) needs exactly that and nothing else.
+   * So: the same row, the full config, and no `parseAdapterCredentials` call. It returns the kind,
+   * the canonical `connectionId` and the config ONLY — never the credentials, never the ciphertext,
+   * never a fingerprint — because its two callers (the B2a object-scope resolver, and the
+   * stock-prep pull's read-identity resolution) need exactly that and nothing else. Both are
+   * GUARDS that must run BEFORE the credential/connection resolution they gate, which is precisely
+   * why neither may use `getExternalSystemForAdapter`.
    */
   async function getExternalSystemAdapterConfig(input) {
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
     const id = requiredString(input?.id, 'id')
-    const row = await db.selectOne(TABLE, {
-      tenant_id: tenantId,
-      workspace_id: workspaceId,
-      id,
-    })
+    const { row } = await selectScopedRow({ tenantId, workspaceId, id })
     if (!row) {
       throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
     }
     return {
       id: row.id,
       kind: row.kind,
+      // The canonical Connection reference, so a guard can tell a canonical binding from a legacy
+      // one WITHOUT resolving either. `publicRow` already returns this field, so it discloses
+      // nothing new; what it buys is that the stock-prep pull's read-identity resolution can read
+      // the binding SHAPE before the connection resolution that the shape decides the outcome of.
+      connectionId: row.connection_id ?? null,
       config: row.config ?? {},
     }
   }
@@ -507,16 +737,85 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
     const id = requiredString(input?.id, 'id')
-    const row = await db.selectOne(TABLE, {
-      tenant_id: tenantId,
-      workspace_id: workspaceId,
-      id,
-    })
+    const { row, matchedWorkspaceId } = await selectScopedRow({ tenantId, workspaceId, id })
     if (!row) {
       throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
     }
+    const unresolved = rowToAdapterExternalSystem(row)
+    let resolved = unresolved
+    if (unresolved.kind === SQL_READONLY_SOURCE_KIND) {
+      if (!connectionResolver || typeof connectionResolver.resolve !== 'function') {
+        throw new ExternalSystemValidationError(
+          'canonical connection resolution is unavailable',
+          { field: 'connectionId', code: 'CONNECTION_RESOLUTION_UNAVAILABLE' },
+        )
+      }
+      try {
+        resolved = await connectionResolver.resolve(unresolved, {
+          tenantId,
+          workspaceId: matchedWorkspaceId,
+          principal: input?.principal,
+          runAs: input?.runAs,
+        })
+      } catch (error) {
+        throw new ExternalSystemValidationError(
+          error instanceof Error ? error.message : 'connection resolution failed',
+          {
+            field: 'connectionId',
+            code: error && typeof error.code === 'string' ? error.code : 'CONNECTION_RESOLUTION_FAILED',
+          },
+        )
+      }
+      // Never consult the Binding credential column for a canonical/legacy SQL
+      // Connection. A migrated row may retain dormant ciphertext for rollback,
+      // but only /data-sources is an executable credential authority.
+      return resolved
+    }
     const credentials = await parseAdapterCredentials(credentialStore, row.credentials_encrypted)
-    return rowToAdapterExternalSystem(row, credentials)
+    return credentials === undefined ? resolved : { ...resolved, credentials }
+  }
+
+  // This is intentionally a separate, internal-only credential boundary. Ordinary
+  // adapters never receive physical SQL credentials from a Binding row or from the
+  // Connection facade; the sealed snapshot runtime is the sole consumer of this
+  // ephemeral projection.
+  async function getExternalSystemForSealedSnapshot(input) {
+    const tenantId = requiredString(input?.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input?.workspaceId)
+    const id = requiredString(input?.id, 'id')
+    const { row, matchedWorkspaceId } = await selectScopedRow({ tenantId, workspaceId, id })
+    if (!row) {
+      throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
+    }
+    const unresolved = rowToAdapterExternalSystem(row)
+    if (unresolved.kind !== SQL_READONLY_SOURCE_KIND) {
+      throw new ExternalSystemValidationError(
+        'sealed snapshot source must be a SQL read-only binding',
+        { code: 'CONNECTION_SEALED_SNAPSHOT_KIND_UNSUPPORTED' },
+      )
+    }
+    if (!connectionResolver || typeof connectionResolver.resolveSealedSqlServer !== 'function') {
+      throw new ExternalSystemValidationError(
+        'sealed snapshot connection resolution is unavailable',
+        { field: 'connectionId', code: 'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE' },
+      )
+    }
+    try {
+      return await connectionResolver.resolveSealedSqlServer(unresolved, {
+        tenantId,
+        workspaceId: matchedWorkspaceId,
+        principal: input?.principal,
+        runAs: input?.runAs,
+      })
+    } catch (error) {
+      throw new ExternalSystemValidationError(
+        error instanceof Error ? error.message : 'sealed snapshot connection resolution failed',
+        {
+          field: 'connectionId',
+          code: error && typeof error.code === 'string' ? error.code : 'CONNECTION_SEALED_SNAPSHOT_FAILED',
+        },
+      )
+    }
   }
 
   // OWNER RULING 20260806 [P1] — K3 instance identity is (kind, origin, acctId), NOT origin alone.
@@ -713,6 +1012,7 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     getExternalSystem,
     getExternalSystemAdapterConfig,
     getExternalSystemForAdapter,
+    getExternalSystemForSealedSnapshot,
     getExternalSystemInstanceDigest,
     deleteExternalSystem,
     listExternalSystems,

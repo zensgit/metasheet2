@@ -196,6 +196,44 @@ describe('項目接入 — the four-step import run', () => {
     expect(report.verdict).toBe('held')
   })
 
+  // 一线自己拉数据 — the operator runs steps 1 and 3 and is REFUSED steps 2 and 4 by design. Both
+  // refusals must read as "not your step", not as a fault, and neither may redden the run: an
+  // operator whose rows landed must see 「导进去了」, not a red line about somebody else's job.
+  it('G-1b: a reconcile REFUSAL (403) is its own reason — not the transient one', async () => {
+    const api = makeApi({
+      dryRun: vi.fn().mockResolvedValue(plan({
+        status: 'manual_confirm_required',
+        counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 2 },
+      })),
+      reconcile: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(403, '/reconcile', { code: 'FORBIDDEN' }),
+      ),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'confirm-queue')).toMatchObject({ status: 'skip', reason: 'RECONCILE_NOT_PERMITTED' })
+    expect(stepOf(report, 'confirm-queue').detail.status).toBe(403)
+    expect(report.failCount).toBe(0)
+  })
+
+  it('G-2b: an archive REFUSAL (403) is a SKIP, and the import still reads as done', async () => {
+    const api = makeApi({
+      archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(403, '/mvp-persist', { code: 'FORBIDDEN' })),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'archive')).toMatchObject({ status: 'skip', reason: 'BATCH_ARCHIVE_NOT_PERMITTED' })
+    expect(report.imported).toBe(true)
+    expect(report.failCount).toBe(0)
+  })
+
+  it('G-2c: a 401 is treated the same way — an unauthenticated archive is not a broken import', async () => {
+    const api = makeApi({
+      archive: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(401, '/mvp-persist', { code: 'UNAUTHENTICATED' })),
+    })
+    const report = await runStockPreparationProjectSync(api, PROJECT_NO)
+    expect(stepOf(report, 'archive')).toMatchObject({ status: 'skip', reason: 'BATCH_ARCHIVE_NOT_PERMITTED' })
+    expect(report.imported).toBe(true)
+  })
+
   // ---- G-2 ---------------------------------------------------------------------------------
   it('G-2: a failed batch archive is VISIBLE but never unmakes the import', async () => {
     const api = makeApi({
@@ -428,6 +466,7 @@ describe('項目接入 — the pure helpers', () => {
     const archiveFailed = { index: 4, id: 'archive' as const, status: 'fail' as const, reason: 'BATCH_ARCHIVE_FAILED' as const, detail: {} }
     const report = summarizeProjectSync([write, archiveFailed], {
       pendingConfirmCount: 0, queuedDecisionCount: 0, planned: null, written: null,
+      missingComponents: null, missingComponentsUnavailableReason: null,
     })
     // pass is false (something failed) yet imported is true (the rows are in the sheet). Collapsing
     // the two would tell an operator to re-run an import that already succeeded.
@@ -439,6 +478,7 @@ describe('項目接入 — the pure helpers', () => {
   it('summarizeProjectSync reports not_run for an empty run', () => {
     const report = summarizeProjectSync([], {
       pendingConfirmCount: 0, queuedDecisionCount: 0, planned: null, written: null,
+      missingComponents: null, missingComponentsUnavailableReason: null,
     })
     expect(report.verdict).toBe('not_run')
     expect(report.pass).toBe(true)

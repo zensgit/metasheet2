@@ -1845,18 +1845,20 @@ describe('elearning V0.1 OpenAPI paths', () => {
       additionalProperties: false,
       required: [
         'challengeId', 'deadlineAt', 'ordinal', 'status',
-        'promptVersion', 'targets', 'options',
+        'promptVersion', 'imagePngBase64', 'imageWidth', 'imageHeight', 'options',
       ],
     })
     expect(schemas.ElearningWatchChallenge?.properties?.status?.enum)
       .toEqual(['challenged', 'paused'])
     expect(schemas.ElearningWatchChallenge?.properties?.promptVersion?.enum)
-      .toEqual(['symbol-number-v1'])
-    expect(schemas.ElearningWatchChallenge?.properties?.targets).toMatchObject({
-      minItems: 2,
-      maxItems: 2,
-      uniqueItems: true,
+      .toEqual(['raster-position-v2'])
+    expect(schemas.ElearningWatchChallenge?.properties).not.toHaveProperty('targets')
+    expect(schemas.ElearningWatchChallenge?.properties?.imagePngBase64).toMatchObject({
+      format: 'byte',
+      maxLength: 88000,
     })
+    expect(schemas.ElearningWatchChallenge?.properties?.imageWidth?.enum).toEqual([360])
+    expect(schemas.ElearningWatchChallenge?.properties?.imageHeight?.enum).toEqual([260])
     expect(schemas.ElearningWatchChallenge?.properties?.options).toMatchObject({
       minItems: 6,
       maxItems: 6,
@@ -1887,9 +1889,17 @@ describe('elearning V0.1 OpenAPI paths', () => {
       deadlineAt: string
       ordinal: number
       status: 'challenged' | 'paused'
-      promptVersion: 'symbol-number-v1'
-      targets: [string, string]
-      options: Array<{ optionId: string; label: string }>
+      promptVersion: 'raster-position-v2'
+      imagePngBase64: string
+      imageWidth: 360
+      imageHeight: 260
+      options: Array<{
+        optionId: string
+        x: number
+        y: number
+        width: number
+        height: number
+      }>
     }>()
     expectTypeOf<ExamAnswers>().toEqualTypeOf<{
       answers: {

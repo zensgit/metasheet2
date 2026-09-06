@@ -404,7 +404,42 @@ export interface MultitableRepairTransactionSurface {
 
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
+  /**
+   * IS THIS SHEET OWNED BY THIS PROJECT — the only tenancy fact about a sheet that is recorded.
+   *
+   * `meta_sheets` carries no project column; a sheet's project appears only inside its DERIVED id
+   * (`sheet_ + sha1(projectId:objectId)`), which is one-way and, more importantly, is not an
+   * invariant any consumer maintains: `sheetId` and `objectId` are independent fields on a table
+   * action, and a deployment may legitimately point an objectId at a sheet created under a different
+   * one. Reversing the hash is therefore neither possible nor sufficient.
+   *
+   * What IS recorded is `plugin_multitable_object_registry`, written by plugin-scoped
+   * `provisioning.ensureObject` and keyed by `sheet_id`. This asks that row a YES/NO question.
+   *
+   * DELIBERATELY A BOOLEAN, never the owning project id. The plugin-scope wrapper can only narrow by
+   * PROJECT NAMESPACE, and every tenant of one plugin shares that namespace
+   * (`tenant-a:integration-core` and `tenant-b:integration-core` both end in `integration-core`), so
+   * a port that RETURNED the owner would hand one tenant's caller another tenant's project id and
+   * pass the namespace guard while doing it. A boolean cannot: the caller must already know the
+   * project it is asking about, and learns nothing about any other.
+   *
+   * False means "not provably owned by that project" and covers both "owned by someone else" and
+   * "not in the registry at all" — the two are not distinguishable here, and deliberately so. A
+   * caller deciding a tenancy question must treat false as a failure to prove ownership, never as
+   * permission.
+   */
+  isSheetOwnedByProject(sheetId: string, projectId: string): Promise<boolean>
   getFieldId(projectId: string, objectId: string, fieldId: string): string
+  /**
+   * The deterministic id of one of a provisioned object's views — the read-only sibling of
+   * `getObjectSheetId` and `getFieldId`, and derived by the same content hash.
+   *
+   * PURE: it performs no IO and touches no view. It does NOT assert that the view exists, grant any
+   * access to it, or say anything about who may open it — it composes an id, exactly as the two
+   * accessors beside it do. A caller that needs existence must prove it separately (the stock-prep
+   * project board proves the SHEET exists via `findObjectSheet` before it composes a deep link).
+   */
+  getObjectViewId(projectId: string, objectId: string, viewId: string): string
   findObjectSheet(input: {
     projectId: string
     objectId: string
@@ -1144,6 +1179,135 @@ export interface PluginServices {
     >
   }
   /**
+   * 备料按部门列写权限 — host→plugin, narrow, least-privilege WRITE-SCOPE port over the platform's
+   * real per-column permission table (`field_permissions`), the ONE table the grid's write gate
+   * actually reads (`loadFieldPermissionScopeMap` → `deriveFieldPermissions` →
+   * `isFieldWriteForbidden`). Same posture as `approvalAssigneeResolver` above: core-backend is the
+   * PROVIDER and ONLY plugin-integration-core receives it; every other plugin gets `undefined` and
+   * a consumer must check before use. Implementation:
+   * `services/stock-preparation-field-permissions.ts` (the concrete class is deliberately NOT
+   * exported into this type surface — only this structural shape is).
+   *
+   * Each entry means "this ROLE may NOT WRITE this column". THE LOAD-BEARING PROPERTY: the port
+   * scopes WRITE ONLY and is structurally incapable of restricting READ — `field_permissions.visible`
+   * is a hardcoded literal inside the implementation, not a parameter of this method, so no caller
+   * can hide a column through this port. That is required by the 备料 flow: 采购 and 仓库 must keep
+   * SEEING the production band (材料类型 / 毛胚类型 / 需求日期 / 提前周期 …) and each other's
+   * responses. Read scoping stays an operator action on
+   * `PUT /api/multitable/sheets/:sheetId/field-permissions`. Fail-closed: unknown sheet /
+   * field-not-on-sheet / unknown role rejects the whole call with nothing written.
+   *
+   * WRITES ARE ADDITIVE UNLESS THE CALLER DECLARES A REGION. With no `reconcile` the call only ever
+   * upserts and `removed` is empty. With one, the SAME transaction also drops this port's OWN,
+   * still-denying rows inside that (columns × roles) region which the new declaration does not want
+   * — the fix for the one silent failure upsert-only cannot survive: a pack revision that MOVES a
+   * column's owner leaves the old denial standing next to the new one, and the write gate ORs
+   * `read_only` across a user's rows, so the column becomes unwritable by EVERY declared role while
+   * the install reports success. The delete is bounded FIVE ways — the target sheet only (the only
+   * project/tenant bound this table can carry); this PACK's `created_by` marker, plus the pack-less
+   * LEGACY marker only when the caller passes `legacyAdoptable` (a row an operator AUTHORED and a
+   * sibling pack's row are outside the predicate either way); `read_only = true` only; inside the
+   * declared region only (which the implementation REQUIRES to contain every entry being written);
+   * and never a row the same call just wrote — so it can neither reach another consumer's rows nor
+   * become "clear this sheet". Removals are returned, never silent.
+   *
+   * THE ONE THING IT CANNOT SEE: an operator edit made through the authoring route BEFORE that route
+   * started stamping `operator:<actorId>` left the PACK's marker on the row, so such a row is
+   * indistinguishable from installer output and a reconcile can retire it. Rows edited since are
+   * attributed and untouchable. There is no signal in the data to recover the difference.
+   *
+   * An entries-EMPTY call WITH a region is a legitimate "this rectangle should now hold no denial",
+   * not a no-op: that is exactly how a revision that hands every governed column to every declared
+   * role is expressed. Only entries-empty AND region-absent does nothing at all.
+   *
+   * The two READ methods are SELECT-only. `listRoleWriteScopes` is the in-process form of the
+   * provenance census (`WHERE created_by = <this port's marker>`); the reconcile heals orphans
+   * inside the caller's region, and this census is how a consumer finds and REPORTS the ones outside
+   * it. `findMissingRoleIds` lets a consumer ask "does this role exist" BEFORE it starts creating
+   * columns, instead of learning it from the write call after the schema is already half-applied.
+   * Neither can hide a column or drop a restriction. Both are OPTIONAL on this type: a consumer must
+   * degrade explicitly (say "not checked") rather than assume, so an older host stays usable.
+   */
+  stockPreparationFieldPermissions?: {
+    /**
+     * TRUE means this host HONOURS a `reconcile` region. A consumer must check it: an older host
+     * accepts the argument and ignores it, and the difference between "reconciled" and "silently
+     * did nothing" is not otherwise observable until the deployment is already wrong.
+     */
+    supportsWriteScopeReconcile?: boolean
+    applyRoleWriteScopes(input: {
+      sheetId: string
+      entries: Array<{ fieldId: string; roleId: string }>
+      /** Stamps `<marker>#<packId>` and is the reconcile's owner predicate. REQUIRED with `reconcile`. */
+      packId?: string
+      reconcile?: { fieldIds: readonly string[]; roleIds: readonly string[] } | null | false
+      /**
+       * "I can PROVE this pack is the only pack ever installed on this sheet." Only then may the
+       * reconcile adopt or retire the pack-LESS legacy rows in its rectangle. Default false, which
+       * makes such rows unattributed and REFUSES the call.
+       */
+      legacyAdoptable?: boolean
+    }): Promise<{
+      applied: number
+      entries: Array<{ fieldId: string; roleId: string }>
+      removed?: Array<{ fieldId: string; roleId: string }>
+      /** Declared pairs an operator holds: the upsert was SKIPPED, the row is untouched. */
+      operatorHeld?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+      /** Another pack's rows in the region on undeclared pairs: left standing, reported. */
+      governedByOtherPacks?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+    }>
+    /**
+     * THE REHEARSAL OF THE INVARIANT — the same classification the write path runs under its row
+     * lock, read-only and outside a transaction. A consumer that has this can say exactly what an
+     * install will change, retire, refuse and defer BEFORE it changes anything.
+     */
+    classifyRoleWriteScopeRegion?(input: {
+      sheetId: string
+      entries: Array<{ fieldId: string; roleId: string }>
+      packId: string
+      reconcile: { fieldIds: readonly string[]; roleIds: readonly string[] }
+      legacyAdoptable?: boolean
+    }): Promise<{
+      sheetId: string
+      packId: string
+      legacyAdoptable: boolean
+      /** Rows the reconcile WILL delete: this pack's, in-region, still denying, no longer declared. */
+      willRetire: Array<{ fieldId: string; roleId: string }>
+      /** Declared pairs ANOTHER pack governs. Non-empty = the install refuses. */
+      packConflicts: Array<{ fieldId: string; roleId: string; packId: string }>
+      /** In-region pack-less rows this pack cannot prove are its own. Non-empty = the install refuses. */
+      legacyUnattributed: Array<{ fieldId: string; roleId: string }>
+      /** In-region rows a HUMAN holds. Never changed; the upsert is skipped for the declared ones. */
+      operatorHeldInRegion: Array<{
+        fieldId: string
+        roleId: string
+        createdBy: string | null
+        declared: boolean
+        visible: boolean
+        readOnly: boolean
+      }>
+      /** Another pack's in-region rows on undeclared pairs. Not stale, not the operator's to clear. */
+      governedByOtherPacks: Array<{ fieldId: string; roleId: string; packId: string }>
+      /** This pack's OWN denials OUTSIDE the region — the only genuine operator to-do list. */
+      operatorMustClear: Array<{ fieldId: string; roleId: string; packId: string | null }>
+    }>
+    listRoleWriteScopes?(input: {
+      sheetId: string
+    }): Promise<{
+      sheetId: string
+      /** What THIS PLUGIN wrote, attributed by pack (`packId: null` = a legacy, pack-less row). */
+      entries: Array<{ fieldId: string; roleId: string; createdBy?: string; packId?: string | null }>
+      /** Role-scoped denials this plugin did NOT write. Reportable, never claimable, never deletable. */
+      foreignEntries?: Array<{ fieldId: string; roleId: string; createdBy?: string | null }>
+    }>
+    findMissingRoleIds?(input: { roleIds: readonly string[] }): Promise<{ missing: string[] }>
+    /** The column twin of `findMissingRoleIds`, asked about the columns an install will NOT create. */
+    findMissingFieldIds?(input: {
+      sheetId: string
+      fieldIds: readonly string[]
+    }): Promise<{ missing: string[] }>
+  }
+  /**
    * E-learning L2 — host-provided reminder-intent producer. Only
    * plugin-elearning receives this port. The plugin submits a persisted job
    * envelope; core owns same-org eligibility, canonical occurrence-key
@@ -1605,6 +1769,30 @@ export interface PluginServices {
           status: 'rolled_back'
         }
     >
+  }
+  /**
+   * 一线看得见自己工厂的项目 — the TENANT PRINCIPAL DIRECTORY port. Injected for
+   * `plugin-integration-core` only, and the narrowest port in this interface:
+   * the plugin submits two identity strings and receives one boolean.
+   *
+   * It exists because a plugin cannot establish tenancy from `req.user.tenantId`
+   * alone — `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto
+   * that field when the verified token carried no tenant claim — and the plugin's
+   * first tenant-scoped VALUE-BEARING read must not be founded on a
+   * caller-supplied string. Core owns the membership relation, the SQL, the pool
+   * and the liveness predicate; no table name, SQL, connection or callback
+   * crosses this port, and a refusal is indistinguishable from a non-membership.
+   *
+   * Grants NOTHING on its own: it is not a permission, not an ACL check, not a
+   * workspace check (no user-to-workspace relation exists in this schema), and it
+   * neither consults nor weakens multitable's ACL domain. Fail-closed — malformed
+   * input and query errors both yield `member: false`.
+   */
+  tenantPrincipalDirectory?: {
+    verifyTenantMembership(input: {
+      userId: string
+      tenantId: string
+    }): Promise<{ member: boolean }>
   }
   notification: NotificationService // Notification service instance
   automationRegistry: PluginAutomationRegistryService

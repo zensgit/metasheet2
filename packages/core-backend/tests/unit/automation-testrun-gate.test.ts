@@ -124,7 +124,7 @@ describe('G8 — test-run route capability gate', () => {
     })
   })
 
-  it('returns the record-read denial unchanged and never invokes testRun', async () => {
+  it('returns a values-free record-read denial and never invokes testRun', async () => {
     resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
     requireRecordReadable.mockResolvedValue({
       status: 403,
@@ -138,7 +138,33 @@ describe('G8 — test-run route capability gate', () => {
       .send({ recordId: 'rec-denied' })
 
     expect(res.status).toBe(403)
-    expect(res.body?.error?.code).toBe('FORBIDDEN')
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
+    })
+    expect(poolQuery).not.toHaveBeenCalled()
+    expect(svc.testRun).not.toHaveBeenCalled()
+  })
+
+  it('does not echo a missing sample record id from the shared read gate', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    requireRecordReadable.mockResolvedValue({
+      status: 404,
+      body: { ok: false, error: { code: 'NOT_FOUND', message: 'Record not found: rec-sensitive' } },
+    })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ recordId: 'rec-sensitive' })
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'NOT_FOUND', message: 'Sample record not found' },
+    })
+    expect(JSON.stringify(res.body)).not.toContain('rec-sensitive')
     expect(poolQuery).not.toHaveBeenCalled()
     expect(svc.testRun).not.toHaveBeenCalled()
   })
@@ -206,7 +232,7 @@ describe('G8 — test-run route capability gate', () => {
     expect(svc.testRun).not.toHaveBeenCalled()
   })
 
-  it('passes the authenticated actor and opaque operation key to the real-fire service gate', async () => {
+  it('requires a readable sample record before invoking real_fire', async () => {
     resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
     const svc = makeService()
 
@@ -214,6 +240,33 @@ describe('G8 — test-run route capability gate', () => {
     const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
       .send({ mode: 'real_fire', confirmSideEffects: true, testRunOperationId: 'click_1' })
+
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'TEST_RUN_SAMPLE_RECORD_REQUIRED',
+        message: 'A sample record is required for a real-fire test run',
+      },
+    })
+    expect(svc.testRun).not.toHaveBeenCalled()
+    expect(requireRecordReadable).not.toHaveBeenCalled()
+  })
+
+  it('passes the authenticated actor and opaque operation key to the real-fire service gate', async () => {
+    resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    requireRecordReadable.mockResolvedValue({
+      access: { userId: 'server_actor' },
+      capabilities: { canRead: true },
+      capabilityOrigin: 'role',
+    })
+    poolQuery.mockResolvedValue({ rows: [{ data: {} }], rowCount: 1 })
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({ mode: 'real_fire', confirmSideEffects: true, testRunOperationId: 'click_1', recordId: 'rec-real-fire' })
 
     expect(res.status).toBe(200)
     expect(res.body.dryRun).toBe(false)
@@ -222,18 +275,29 @@ describe('G8 — test-run route capability gate', () => {
       actorId: 'u1',
       testRunOperationId: 'click_1',
       confirmSideEffects: true,
+      sampleRecord: {
+        recordId: 'rec-real-fire',
+        data: {},
+        actorId: 'server_actor',
+      },
     })
   })
 
   it('keeps unexpected real-fire failures values-free', async () => {
     resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    requireRecordReadable.mockResolvedValue({
+      access: { userId: 'server_actor' },
+      capabilities: { canRead: true },
+      capabilityOrigin: 'role',
+    })
+    poolQuery.mockResolvedValue({ rows: [{ data: {} }], rowCount: 1 })
     const svc = makeService()
     svc.testRun.mockRejectedValue(new Error('connect db.internal.host:5432 as pg_app for secret-rule'))
 
     pinned.setApp(buildApp(svc))
     const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
-      .send({ mode: 'real_fire', confirmSideEffects: true, testRunOperationId: 'click_1' })
+      .send({ mode: 'real_fire', confirmSideEffects: true, testRunOperationId: 'click_1', recordId: 'rec-real-fire' })
 
     expect(res.status).toBe(500)
     expect(res.body).toEqual({
@@ -245,6 +309,12 @@ describe('G8 — test-run route capability gate', () => {
 
   it('preserves a stable typed real-fire rejection from the service gate', async () => {
     resolveSheetCapabilities.mockResolvedValue({ capabilities: { canManageAutomation: true } })
+    requireRecordReadable.mockResolvedValue({
+      access: { userId: 'server_actor' },
+      capabilities: { canRead: true },
+      capabilityOrigin: 'role',
+    })
+    poolQuery.mockResolvedValue({ rows: [{ data: {} }], rowCount: 1 })
     const svc = makeService()
     svc.testRun.mockRejectedValue(new AutomationTestRunRejectedError(
       409,
@@ -255,7 +325,7 @@ describe('G8 — test-run route capability gate', () => {
     pinned.setApp(buildApp(svc))
     const res = await request(pinned.url())
       .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
-      .send({ mode: 'real_fire', confirmSideEffects: true, testRunOperationId: 'click_1' })
+      .send({ mode: 'real_fire', confirmSideEffects: true, testRunOperationId: 'click_1', recordId: 'rec-real-fire' })
 
     expect(res.status).toBe(409)
     expect(res.body).toEqual({

@@ -1994,17 +1994,33 @@ async function testK3SqlServerChannel() {
   assert.deepEqual(selectCall.input.columns, ['FItemID', 'FNumber', 'FName'])
   assert.deepEqual(selectCall.input.filters, { FUseStatus: '1' })
 
-  const staged = await adapter.upsert({
+  // ===== E4 / G-4 PARITY (20260901) — CONVERTED, not deleted ==========================
+  // This block used to assert a SUCCESSFUL middle-table write: `staged.written === 1`,
+  // `metadata.mode === 'sqlserver-middle-table'`, and an `insertMany` landing on
+  // `dbo.integration_material_stage`. `erp:k3-wise-sqlserver` is now the SECOND subject of the
+  // permanent K3 external-write ban, so that write is refused at every configuration. The
+  // assertions are INVERTED in place rather than removed, so the exact call that used to succeed
+  // is the one now witnessed refused — and the `insertMany` that used to be found is now
+  // required to be absent.
+  const stagedRefusal = await adapter.upsert({
     object: 'material_stage',
     records: [
       { FNumber: 'MAT-002', FName: 'Nut' },
     ],
     keyFields: ['FNumber'],
-  })
-  assert.equal(staged.written, 1)
-  assert.equal(staged.metadata.mode, 'sqlserver-middle-table')
-  const insertCall = executorCalls.find((call) => call.method === 'insertMany')
-  assert.equal(insertCall.input.table, 'dbo.integration_material_stage')
+  }).catch((error) => error)
+  assert.ok(stagedRefusal instanceof AdapterValidationError, 'the middle-table write is refused')
+  assert.equal(stagedRefusal.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+  assert.equal(stagedRefusal.status, 403)
+  assert.equal(stagedRefusal.details.targetKind, 'erp:k3-wise-sqlserver')
+  assert.equal(
+    executorCalls.some((call) => call.method === 'insertMany'),
+    false,
+    'the executor is never reached — insertMany = 0',
+  )
+  // And the READ path on the very same adapter instance is untouched: `select` above did run.
+  // Without this, "insertMany = 0" could equally mean the whole channel is dead.
+  assert.ok(executorCalls.some((call) => call.method === 'select'), 'reads still reach the executor')
 
   const directWriteAdapter = createK3WiseSqlServerChannel({
     system: createSqlSystem({
@@ -2022,7 +2038,9 @@ async function testK3SqlServerChannel() {
     object: 'material',
     records: [{ FNumber: 'MAT-003' }],
   }).catch((error) => error)
-  assert.ok(directWrite instanceof UnsupportedAdapterOperationError, 'direct K3 table write is blocked')
+  // Was: UnsupportedAdapterOperationError from the middle-table rule. That rule is now dead code
+  // behind the fence, and the refusal a caller sees is the permanent one.
+  assert.equal(directWrite.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED', 'direct K3 table write is permanently refused')
 
   const missingExecutor = createK3WiseSqlServerChannel({ system: createSqlSystem() })
   const missingExecutorStatus = await missingExecutor.testConnection()
@@ -2067,6 +2085,9 @@ async function testK3SqlServerChannel() {
     records: [{ FNumber: 'MAT-READ-ONLY' }],
   }).catch((error) => error)
   assert.ok(readOnlyWrite instanceof AdapterValidationError, 'readTables must not authorize middle-table writes')
+  // The refusal is now the permanent one, which lands BEFORE the allowlist is consulted. The
+  // allowlist rule itself is still exercised on the read side just below (`writeOnlyRead`).
+  assert.equal(readOnlyWrite.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
 
   const writeOnlyScoped = createK3WiseSqlServerChannel({
     system: createSqlSystem({
@@ -2143,7 +2164,12 @@ async function testK3SqlServerChannel() {
     records: [{ FNumber: 'MAT-SHOULD-NOT-WRITE' }],
     keyFields: ['FNumber'],
   }).catch((error) => error)
-  assert.equal(runtimeWrite.code, 'SQLSERVER_WRITE_EXECUTOR_DISABLED', 'built-in runtime executor remains read-only')
+  // Was: SQLSERVER_WRITE_EXECUTOR_DISABLED — the read-only DEFAULT executor's own refusal, which
+  // is precisely the posture E4 parity replaced. That code was a property of which executor
+  // happened to be injected; this one is a property of the kind. The read-only executor still
+  // refuses on its own (asserted directly in the parity suite), but it is no longer what a
+  // caller hits first, and no longer what the guarantee rests on.
+  assert.equal(runtimeWrite.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED', 'the permanent fence answers before the executor')
 
   const { driver: failingDriver } = createFakeMssqlDriver({ failConnect: new Error('login failed password=secret-that-must-not-leak for readonly_user') })
   const failingExecutor = createK3WiseSqlServerReadOnlyExecutor({ driver: failingDriver })

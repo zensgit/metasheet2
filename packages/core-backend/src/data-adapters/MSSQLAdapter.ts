@@ -27,6 +27,7 @@ import type {
   ConnectionConfig
 } from './BaseAdapter';
 import { BaseDataAdapter, getStringConfig, getNumberConfig } from './BaseAdapter'
+import { assertSqlWriteAllowed } from './sql-write-arm-binding'
 
 // Minimal structural typing for the optional `mssql` driver (avoid `any` and a
 // hard build-time dependency on @types/mssql).
@@ -271,7 +272,59 @@ export class MSSQLAdapter extends BaseDataAdapter {
     }
   }
 
+  /**
+   * WHERE identifiers are BRACKETED, exactly like every other clause this adapter emits (projection,
+   * table, JOIN target, ORDER BY all go through `quoteIdent` already). The base class emits them bare
+   * because it has no dialect quoting; MSSQL must not, and the reason is specific to THIS adapter:
+   *
+   * `query()` below applies `isPureReadStatement` to the finished SQL TEXT. A bare identifier that
+   * happens to be a reserved word (`key`, `plan`, `file`, `check`, `open`, `set`, `read`, … — ~48 of
+   * them in ordinary use) is indistinguishable from the keyword to any text classifier, so a pure
+   * `SELECT TOP (n) * FROM [t] WHERE key = $1` was read as a WRITE and refused by the default-deny
+   * gate — a read-path outage, surfaced as an HTTP 500. Bracketing removes the CLASS rather than the
+   * instance: `[key]` is unambiguously an identifier, so no column name — reserved today, reserved by
+   * a future SQL Server version, or merely odd — can ever again be mistaken for a verb.
+   *
+   * Validation is unchanged: `quoteSqlServerIdentifier` enforces `/^[A-Za-z0-9_]+$/` per dot-segment,
+   * the same rule `sanitizeIdentifier` already applied, so nothing that used to be accepted is now
+   * rejected. Qualified keys quote per segment (`t.col` -> `[t].[col]`), preserving their meaning.
+   */
+  protected override whereIdentifier(key: string): string {
+    return this.quoteIdent(key)
+  }
+
   async query<T = Record<string, DbValue>>(sql: string, params?: DbValue[]): Promise<QueryResult<T>> {
+    // W-1(c) DEFAULT-DENY SQL WRITE GATE — THE ADAPTER-BOUNDARY CHOKEPOINT.
+    // Every write this adapter performs funnels here: insert/update/delete/select/stream/batchInsert
+    // all build SQL and call query(), and a caller who bypasses DataSourceManager entirely
+    // (getDataSource(id).query('INSERT …') or .insert(…)) still lands here.
+    //
+    // The gate asks ONE question — is this statement PROVABLY a pure read? — and never what it writes
+    // TO. A pure read costs nothing and passes; anything else needs this data source to be an ARMED
+    // target in the server-side allowlist. That is why the destination-laundering class is dead here:
+    // an aliased UPDATE…FROM, an UPDATE TOP, a 4-part linked-server INSERT, a CTE-wrapped DELETE and
+    // an unterminated `SELECT 1 / DELETE …` batch are all simply "a write", off by default.
+    //
+    // Placed FIRST, before the pool is touched.
+    //
+    // READS: the gate classifies STATEMENT TEXT, so "a read passes" holds only as far as the text is
+    // unambiguous. It was NOT unambiguous once: this adapter emitted WHERE identifiers bare (the base
+    // class builds that clause and has no dialect quoting), so an ordinary column named after a
+    // reserved word produced `… WHERE key = $1`, which `isPureReadStatement` read as a write and
+    // refused — a read-path outage, not a security event. `whereIdentifier()` above now brackets them,
+    // which is what makes the claim true rather than aspirational: every identifier this adapter emits
+    // into a statement is quoted, so a structured read it builds cannot be misread as a write.
+    //
+    // With that closed, reads — every internal select() and a read of any table — are byte-identical
+    // to a deployment that never heard of this gate. The one fragment this adapter still passes
+    // through verbatim is `options.joins[].on` (a caller-supplied raw SQL string, `select()` below);
+    // it is not quoted here because it is an expression, not an identifier, and a caller that puts a
+    // bare reserved word in it is in the raw-SQL lane the gate is designed for.
+    assertSqlWriteAllowed(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      sql,
+      { id: this.config.id, name: this.config.name, type: this.config.type, connection: this.config.connection },
+    )
     if (!this.pool) {
       throw new Error('Not connected to database')
     }
@@ -540,6 +593,16 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async beginTransaction(): Promise<Transaction> {
+    // W-1(c) SQL WRITE GATE (transaction). A transaction hands the caller a raw driver object whose
+    // Requests execute SQL OUTSIDE this adapter's query() funnel — the one write path the statement
+    // gate cannot see. So vending a transaction is itself treated as a WRITE and requires an armed
+    // target. There is no "read-only transaction" to carve out: the caller controls what runs inside
+    // it. The manager/facade never expose transactions, so an unarmed deployment loses nothing.
+    assertSqlWriteAllowed(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      'BEGIN TRANSACTION',
+      { id: this.config.id, name: this.config.name, type: this.config.type, connection: this.config.connection },
+    )
     if (!this.pool || !mssql) {
       throw new Error('Not connected to database')
     }

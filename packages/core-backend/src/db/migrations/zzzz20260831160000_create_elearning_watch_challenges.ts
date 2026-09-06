@@ -66,7 +66,7 @@ const EXPECTED_CONSTRAINTS = new Map<string, { table: string; definition: string
   }],
   ['elearning_watch_challenge_events_prompt_chk', {
     table: ELEARNING_WATCH_CHALLENGE_EVENTS_TABLE,
-    definition: "CHECK (kind = 'issue'::text AND prompt_version = 'symbol-number-v1'::text AND prompt_option_ids IS NOT NULL AND cardinality(prompt_option_ids) = 6 AND array_position(prompt_option_ids, NULL::uuid) IS NULL AND (prompt_option_ids[1] <> ALL (prompt_option_ids[2:6])) AND (prompt_option_ids[2] <> ALL (prompt_option_ids[3:6])) AND (prompt_option_ids[3] <> ALL (prompt_option_ids[4:6])) AND (prompt_option_ids[4] <> ALL (prompt_option_ids[5:6])) AND prompt_option_ids[5] <> prompt_option_ids[6] AND prompt_option_labels IS NOT NULL AND cardinality(prompt_option_labels) = 6 AND array_position(prompt_option_labels, NULL::text) IS NULL AND btrim(prompt_option_labels[1]) <> ''::text AND btrim(prompt_option_labels[2]) <> ''::text AND btrim(prompt_option_labels[3]) <> ''::text AND btrim(prompt_option_labels[4]) <> ''::text AND btrim(prompt_option_labels[5]) <> ''::text AND btrim(prompt_option_labels[6]) <> ''::text AND (prompt_option_labels[1] <> ALL (prompt_option_labels[2:6])) AND (prompt_option_labels[2] <> ALL (prompt_option_labels[3:6])) AND (prompt_option_labels[3] <> ALL (prompt_option_labels[4:6])) AND (prompt_option_labels[4] <> ALL (prompt_option_labels[5:6])) AND prompt_option_labels[5] <> prompt_option_labels[6] AND expected_selection IS NOT NULL AND cardinality(expected_selection) = 2 AND array_position(expected_selection, NULL::uuid) IS NULL AND expected_selection[1] <> expected_selection[2] AND expected_selection <@ prompt_option_ids OR kind <> 'issue'::text AND prompt_version IS NULL AND prompt_option_ids IS NULL AND prompt_option_labels IS NULL AND expected_selection IS NULL)",
+    definition: "CHECK (kind = 'issue'::text AND prompt_version = 'raster-position-v2'::text AND prompt_option_ids IS NOT NULL AND cardinality(prompt_option_ids) = 6 AND array_position(prompt_option_ids, NULL::uuid) IS NULL AND (prompt_option_ids[1] <> ALL (prompt_option_ids[2:6])) AND (prompt_option_ids[2] <> ALL (prompt_option_ids[3:6])) AND (prompt_option_ids[3] <> ALL (prompt_option_ids[4:6])) AND (prompt_option_ids[4] <> ALL (prompt_option_ids[5:6])) AND prompt_option_ids[5] <> prompt_option_ids[6] AND prompt_option_labels IS NOT NULL AND cardinality(prompt_option_labels) = 6 AND array_position(prompt_option_labels, NULL::text) IS NULL AND btrim(prompt_option_labels[1]) <> ''::text AND btrim(prompt_option_labels[2]) <> ''::text AND btrim(prompt_option_labels[3]) <> ''::text AND btrim(prompt_option_labels[4]) <> ''::text AND btrim(prompt_option_labels[5]) <> ''::text AND btrim(prompt_option_labels[6]) <> ''::text AND (prompt_option_labels[1] <> ALL (prompt_option_labels[2:6])) AND (prompt_option_labels[2] <> ALL (prompt_option_labels[3:6])) AND (prompt_option_labels[3] <> ALL (prompt_option_labels[4:6])) AND (prompt_option_labels[4] <> ALL (prompt_option_labels[5:6])) AND prompt_option_labels[5] <> prompt_option_labels[6] AND expected_selection IS NOT NULL AND cardinality(expected_selection) = 2 AND array_position(expected_selection, NULL::uuid) IS NULL AND expected_selection[1] <> expected_selection[2] AND expected_selection <@ prompt_option_ids OR kind <> 'issue'::text AND prompt_version IS NULL AND prompt_option_ids IS NULL AND prompt_option_labels IS NULL AND expected_selection IS NULL)",
   }],
   ['elearning_watch_challenge_events_kind_uniq', {
     table: ELEARNING_WATCH_CHALLENGE_EVENTS_TABLE,
@@ -467,7 +467,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT elearning_watch_challenge_events_prompt_chk CHECK (
         (
           kind = 'issue'
-          AND prompt_version = 'symbol-number-v1'
+          AND prompt_version = 'raster-position-v2'
           AND prompt_option_ids IS NOT NULL AND cardinality(prompt_option_ids) = 6
           AND array_position(prompt_option_ids, NULL) IS NULL
           AND prompt_option_ids[1] <> ALL(prompt_option_ids[2:6])
@@ -608,14 +608,39 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   if (!existing.every(Boolean)) {
     throw new Error('elearning watch challenge down refused: partial authority')
   }
-  const counts = await sql<{ schedules: string; events: string; requests: string }>`
+  await sql`
+    LOCK TABLE
+      elearning_course_version_items,
+      elearning_watch_challenge_schedules,
+      elearning_watch_challenge_requests,
+      elearning_watch_challenge_events
+    IN ACCESS EXCLUSIVE MODE
+  `.execute(db)
+  const counts = await sql<{
+    policies: string
+    schedules: string
+    events: string
+    requests: string
+  }>`
     SELECT
+      (SELECT count(*)::text
+         FROM elearning_course_version_items
+        WHERE watch_challenge_policy_revision IS NOT NULL
+           OR watch_challenge_count IS NOT NULL
+           OR watch_challenge_min_duration_ms IS NOT NULL
+           OR watch_challenge_response_window_ms IS NOT NULL) AS policies,
       (SELECT count(*)::text FROM elearning_watch_challenge_schedules) AS schedules,
       (SELECT count(*)::text FROM elearning_watch_challenge_events) AS events,
       (SELECT count(*)::text FROM elearning_watch_challenge_requests) AS requests
   `.execute(db)
   const row = counts.rows[0]
-  if (!row || row.schedules !== '0' || row.events !== '0' || row.requests !== '0') {
+  if (
+    !row
+    || row.policies !== '0'
+    || row.schedules !== '0'
+    || row.events !== '0'
+    || row.requests !== '0'
+  ) {
     throw new Error('elearning watch challenge down refused: authoritative rows exist')
   }
   await sql`DROP TABLE elearning_watch_challenge_requests`.execute(db)

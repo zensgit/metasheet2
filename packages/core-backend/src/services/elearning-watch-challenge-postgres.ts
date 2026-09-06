@@ -1,5 +1,9 @@
 import { createHash, randomInt, randomUUID } from 'node:crypto'
 import {
+  renderElearningWatchChallengeRaster,
+  type ElearningWatchChallengeRasterOption,
+} from './elearning-watch-challenge-raster.js'
+import {
   createElearningWatchChallengeSchedule,
   resolveElearningWatchChallengeDue,
   type ElearningWatchChallengeSchedule,
@@ -8,22 +12,27 @@ import {
 export const ELEARNING_WATCH_CHALLENGE_REQUEST_HASH_VERSION = 2 as const
 export const ELEARNING_WATCH_CHALLENGE_REQUEST_DOMAIN =
   'elearning.watch.challenge.ack.v2' as const
-export const ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION = 'symbol-number-v1' as const
+export const ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION = 'raster-position-v2' as const
 
 const PROMPT_SYMBOLS = ['●', '▲', '■', '◆', '★', '♥'] as const
 
-export interface ElearningWatchChallengeOption {
+interface ElearningWatchChallengeSnapshotOption {
   optionId: string
   label: string
 }
 
 export interface ElearningWatchChallengePrompt {
   promptVersion: typeof ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION
-  targets: [string, string]
-  options: ElearningWatchChallengeOption[]
+  imagePngBase64: string
+  imageWidth: number
+  imageHeight: number
+  options: ElearningWatchChallengeRasterOption[]
 }
 
-interface ElearningWatchChallengePromptSnapshot extends ElearningWatchChallengePrompt {
+export interface ElearningWatchChallengePromptSnapshot {
+  promptVersion: typeof ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION
+  targets: [string, string]
+  options: ElearningWatchChallengeSnapshotOption[]
   expectedSelections: [string, string]
 }
 
@@ -40,8 +49,10 @@ export interface ElearningWatchChallengeView {
   ordinal: number
   status: 'challenged' | 'paused'
   promptVersion: typeof ELEARNING_WATCH_CHALLENGE_PROMPT_VERSION
-  targets: [string, string]
-  options: ElearningWatchChallengeOption[]
+  imagePngBase64: string
+  imageWidth: number
+  imageHeight: number
+  options: ElearningWatchChallengeRasterOption[]
 }
 
 export interface ElearningWatchChallengeHeartbeatResult {
@@ -259,6 +270,15 @@ function isCompletionReady(row: ScheduleRow): boolean {
       || row.issuedCount === row.schedule.checkpoints.length)
 }
 
+export function createElearningWatchChallengePublicPrompt(
+  prompt: ElearningWatchChallengePromptSnapshot,
+): ElearningWatchChallengePrompt {
+  return {
+    promptVersion: prompt.promptVersion,
+    ...renderElearningWatchChallengeRaster({ targets: prompt.targets, options: prompt.options }),
+  }
+}
+
 function view(row: ScheduleRow): ElearningWatchChallengeView | null {
   if (
     (row.status !== 'challenged' && row.status !== 'paused')
@@ -267,14 +287,13 @@ function view(row: ScheduleRow): ElearningWatchChallengeView | null {
     || !row.activeDeadlineAt
     || !row.prompt
   ) return null
+  const prompt = createElearningWatchChallengePublicPrompt(row.prompt)
   return {
     challengeId: row.activeChallengeId,
     deadlineAt: row.activeDeadlineAt.toISOString(),
     ordinal: row.activeOrdinal,
     status: row.status,
-    promptVersion: row.prompt.promptVersion,
-    targets: row.prompt.targets,
-    options: row.prompt.options,
+    ...prompt,
   }
 }
 
@@ -504,15 +523,14 @@ export async function applyElearningWatchChallengeHeartbeat(
     activeChallengeId: challengeId,
     activeOrdinal: due.ordinal,
   }, 'issue', 0, 0, prompt)
+  const publicChallengePrompt = createElearningWatchChallengePublicPrompt(prompt)
   return {
     challenge: {
       challengeId,
       deadlineAt: deadlineAt.toISOString(),
       ordinal: due.ordinal,
       status: 'challenged',
-      promptVersion: prompt.promptVersion,
-      targets: prompt.targets,
-      options: prompt.options,
+      ...publicChallengePrompt,
     },
     completionReady: false,
     creditedMs: 0,

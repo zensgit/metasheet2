@@ -175,11 +175,64 @@ function preflightPayload(options: { ready?: boolean; polluted?: number } = {}):
   }
 }
 
+/** Minimal well-formed source-preflight payload — only the fields the copilot-signals derivation reads. */
+function sourcePreflightPayload(): Record<string, unknown> {
+  return {
+    ok: true,
+    verdict: 'go',
+    externalSystemId: 'plm-1',
+    readPlanId: 'plan-1',
+    rowCap: 200,
+    checks: {
+      reachability: { reachable: true, objectsProbed: 2, objectsAnswered: 2, failureCode: null },
+      projectData: {
+        entryObject: null, entryObjectPresent: true, matchField: 'x', rowsObserved: 1, exact: true,
+        populatedMatchRows: 1, nodeTypeColumn: null, projectNodeType: null, projectNodeRows: null,
+        hasProjectNumbers: true, livenessSamples: [], errorCode: null,
+      },
+      bomData: {
+        bomHeadObject: null, bomHeadRows: 1, bomHeadExact: true, bomHeadPresent: true,
+        bomDetailObject: null, bomDetailRows: 1, bomDetailExact: true, bomDetailPresent: true, hasBomRows: true,
+      },
+      bomStore: {
+        store: 'bom-details', reason: 'ok', signals: [], strongSignals: [], volumeUndecidableAtCap: false,
+        rowCap: 200, authorityBasis: null, dominanceRatio: 1, minLines: 0, candidates: [],
+      },
+      topology: {
+        detectedBridge: 'order-module', reason: 'ok', bridgeSource: 'measured', declaredBridge: null,
+        declarationContradictsMeasurement: false, measuredBridge: 'order-module', undecidableAtCap: false,
+        rowCap: 200, configuredBridge: 'order-module', matchesConfigured: true, dominanceRatio: 1,
+        minLines: 0, candidates: [],
+      },
+      presetMatch: {
+        matchedBy: 'signature', presetId: null, reason: 'ok', tablesAnswered: 2,
+        matchedSignatureTables: 0, requiredSignatureTables: null, missingSignatureTables: [],
+      },
+      quantityField: {
+        carrierObject: null, carrierStore: 'bom-details', carrierUndecided: false, carrierShape: 'columnar-numeric',
+        jsonSlotColumn: null, jsonFamilySlotKeys: [], jsonOtherKeyCount: 0, jsonPopulatedSlotRows: 0,
+        slotsUndetectable: false, configuredField: 'qty', dictionaryObject: null, dictionaryReadable: false,
+        dictionaryKeyColumn: null, dictionaryEnabledRows: 0, dictionarySlot: null, measuredSlot: 'qty',
+        measuredNumericRatio: 0.9, measuredCandidates: [], qualifyingSlots: [], measuredAmbiguous: false,
+        configuredAmongCandidates: true, resolvedSlot: 'qty', readingsAgree: true, matchesConfigured: true,
+        numericDensityFloor: 0.5,
+      },
+    },
+    blockers: [],
+    warnings: [],
+    probes: [
+      { role: 'project', object: 'plm_order_head', present: true, rowsObserved: 5, exact: true, columns: ['proj_no', 'status'], errorCode: null },
+      { role: 'bomDetail', object: 'plm_bom_detail', present: true, rowsObserved: 12, exact: true, columns: ['material_code', 'qty', 'status'], errorCode: null },
+    ],
+  }
+}
+
 interface RouteBehaviour {
   preflightReady?: boolean
   pollutedAllowlistCount?: number
   packs?: Array<Record<string, unknown>>
   ledgerStatus?: number
+  sourcePreflight?: boolean
 }
 
 function installRoutes(behaviour: RouteBehaviour = {}): void {
@@ -190,6 +243,9 @@ function installRoutes(behaviour: RouteBehaviour = {}): void {
     const url = String(input)
     if (url.includes('/api/platform/apps/stock-preparation')) {
       return new Response(JSON.stringify(manifestPayload()), { status: 200 })
+    }
+    if (url.includes('/stock-preparation/source-preflight')) {
+      return envelope(sourcePreflightPayload())
     }
     if (url.includes('/stock-preparation/preflight')) {
       return envelope(preflightPayload({ ready: behaviour.preflightReady, polluted: behaviour.pollutedAllowlistCount }))
@@ -425,6 +481,36 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     expect(summary).toContain('没有失败')
     expect(text(root, '[data-testid="stock-prep-install-verdict"]')).toContain('装好了')
     expect(root.querySelectorAll('[data-status="fail"]').length).toBe(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // COPILOT SIGNALS — the dead-control fix: 获取列映射建议 must not be permanently disabled.
+  // ---------------------------------------------------------------------------
+
+  it('copilot signals stay null (button stays disabled, empty-state copy shows) until a source preflight lands', async () => {
+    h.permissions = ['stock-prep:admin', 'integration:admin']
+    installRoutes()
+    const root = await mountView()
+
+    const propose = root.querySelector('[data-testid="copilot-propose"]') as HTMLButtonElement
+    expect(propose).not.toBeNull()
+    expect(propose.disabled).toBe(true)
+    expect(root.textContent || '').toContain('尚无来源结构信号')
+  })
+
+  it('copilot signals become non-null and the propose button enables once the source preflight succeeds', async () => {
+    h.permissions = ['stock-prep:admin', 'integration:admin']
+    installRoutes()
+    const root = await mountView()
+
+    const runSource = root.querySelector('[data-testid="stock-prep-source-preflight-run"]') as HTMLButtonElement
+    expect(runSource).not.toBeNull()
+    runSource.click()
+    await flush()
+
+    const propose = root.querySelector('[data-testid="copilot-propose"]') as HTMLButtonElement
+    expect(propose.disabled).toBe(false)
+    expect(root.textContent || '').not.toContain('尚无来源结构信号')
   })
 
   // ---------------------------------------------------------------------------

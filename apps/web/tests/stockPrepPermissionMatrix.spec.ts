@@ -198,12 +198,42 @@ describe('O2 / R-11 — /stock-prep permission matrix (front end)', () => {
     return container!
   }
 
+/**
+ * Capabilities whose control does NOT live on the confirmation-queue view, and therefore cannot be
+ * measured against that view's DOM. Each needs a reason, and each must be covered elsewhere.
+ *
+ * `confirmationQueue.projectBoard` is 项目备料页 — its own TAB in the workspace shell, a sibling of
+ * this view, not a control inside it. Asserting the queue's DOM renders it would be measuring the
+ * wrong DOM (the same argument the backend manifest header already makes about
+ * `canRunStockPrepInstall`). Its alignment IS asserted, in
+ * apps/web/tests/StockPreparationProjectBoard.spec.ts B-01: the tab is present for exactly the
+ * operator tier and absent for everyone below it, and the DOM and `canOpenStockPrepProjectBoard`
+ * are asserted to agree for every one of those actors — which is this same both-directions claim,
+ * made against the surface the control actually lives on.
+ */
+const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
+  'stock-prep-operator-project-board',
+])
+
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */
-  function renderedControls(root: HTMLElement): string[] {
-    const manifestControls = STOCK_PREP_WORKBENCH_CAPABILITIES
+  function queueViewControls(): string[] {
+    return STOCK_PREP_WORKBENCH_CAPABILITIES
       .map((capability) => capability.control)
       .filter((control): control is string => typeof control === 'string')
-    return manifestControls.filter((control) => root.querySelector(`[data-testid="${control}"]`) !== null).sort()
+      .filter((control) => !CONTROLS_NOT_ON_THE_QUEUE_VIEW.includes(control))
+  }
+
+  function renderedControls(root: HTMLElement): string[] {
+    return queueViewControls()
+      .filter((control) => root.querySelector(`[data-testid="${control}"]`) !== null)
+      .sort()
+  }
+
+  /** What this actor may see ON THIS VIEW — the granted set, minus the controls that live elsewhere. */
+  function grantedQueueViewControls(probe: (permission: string) => boolean): string[] {
+    return visibleStockPrepControls(probe)
+      .filter((control) => !CONTROLS_NOT_ON_THE_QUEUE_VIEW.includes(control))
+      .sort()
   }
 
   /**
@@ -341,7 +371,7 @@ describe('O2 / R-11 — /stock-prep permission matrix (front end)', () => {
       const root = await renderFullySettled()
 
       const rendered = renderedControls(root)
-      const granted = visibleStockPrepControls(probe()).sort()
+      const granted = grantedQueueViewControls(probe())
 
       const visibleButNotPermitted = rendered.filter((control) => !granted.includes(control))
       expect(visibleButNotPermitted, `${actor.name}: control rendered without the permission behind it`).toEqual([])
@@ -379,7 +409,7 @@ describe('O2 / R-11 — /stock-prep permission matrix (front end)', () => {
       const held = codes.filter((_, index) => (mask & (1 << index)) !== 0)
       asActor({ name: `subset-${mask}`, roles: [], permissions: held })
       const root = await renderFullySettled()
-      expect(renderedControls(root), `subset {${held.join(', ')}}`).toEqual(visibleStockPrepControls(probe()).sort())
+      expect(renderedControls(root), `subset {${held.join(', ')}}`).toEqual(grantedQueueViewControls(probe()))
       resetMount()
     }
   })

@@ -17,6 +17,7 @@ import type { PluginManifest, PluginLifecycle } from '../types/plugin'
 import { Logger } from './logger'
 import { getPluginStateManager } from './plugin-state-manager'
 import { coreMetrics } from '../integration/metrics/metrics'
+import { metrics } from '../metrics/metrics'
 
 /**
  * Cascade reload options
@@ -658,6 +659,11 @@ export class PluginLoader {
     const duration = Date.now() - startTime
     coreMetrics.increment('plugin_hot_swap_total', { plugin: pluginId })
     coreMetrics.histogram('plugin_hot_swap_duration_ms', duration, { plugin: pluginId })
+    try {
+      metrics.pluginReloadDuration.observe({ plugin_name: reloaded.manifest.name }, duration / 1000)
+    } catch {
+      // Observability must not replace a successful reload.
+    }
 
     this.logger.info(`Hot swap completed for ${pluginId} v${reloaded.manifest.version} in ${duration}ms`)
 

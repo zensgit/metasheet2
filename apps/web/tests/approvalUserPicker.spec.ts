@@ -21,10 +21,12 @@ import ApprovalUserPicker from '../src/approvals/components/ApprovalUserPicker.v
 const ElSelect = defineComponent({
   name: 'ElSelect',
   props: {
-    modelValue: { type: String, default: undefined },
+    modelValue: { type: [String, Array], default: undefined },
     loading: Boolean,
     disabled: Boolean,
     placeholder: String,
+    multiple: Boolean,
+    multipleLimit: Number,
     filterable: Boolean,
     remote: Boolean,
     clearable: Boolean,
@@ -40,9 +42,14 @@ const ElSelect = defineComponent({
       }),
       h('select', {
         'data-testid': 'stub-select',
-        value: this.modelValue ?? '',
+        multiple: this.multiple,
+        value: this.modelValue ?? (this.multiple ? [] : ''),
+        'data-multiple-limit': String(this.multipleLimit ?? 0),
         onChange: (e: Event) => {
-          const value = (e.target as HTMLSelectElement).value
+          const target = e.target as HTMLSelectElement
+          const value = this.multiple
+            ? Array.from(target.selectedOptions).map((option) => option.value)
+            : target.value
           this.$emit('update:modelValue', value)
         },
       }, this.$slots.default?.()),
@@ -52,8 +59,8 @@ const ElSelect = defineComponent({
 
 const ElOption = defineComponent({
   name: 'ElOption',
-  props: { label: String, value: String },
-  render() { return h('option', { value: this.value }, this.label) },
+  props: { label: String, value: String, disabled: Boolean },
+  render() { return h('option', { value: this.value, disabled: this.disabled }, this.label) },
 })
 
 async function flushUi(cycles = 5): Promise<void> {
@@ -83,8 +90,13 @@ describe('ApprovalUserPicker', () => {
   })
 
   async function mountPicker(props: Record<string, unknown> = {}) {
-    const events: { 'update:modelValue': unknown[]; select: unknown[] } = {
+    const events: {
+      'update:modelValue': unknown[]
+      'update:multipleModelValue': unknown[]
+      select: unknown[]
+    } = {
       'update:modelValue': [],
+      'update:multipleModelValue': [],
       select: [],
     }
     const Host = defineComponent({
@@ -93,6 +105,8 @@ describe('ApprovalUserPicker', () => {
           h(ApprovalUserPicker, {
             ...props,
             'onUpdate:modelValue': (value: unknown) => events['update:modelValue'].push(value),
+            'onUpdate:multipleModelValue': (value: unknown) =>
+              events['update:multipleModelValue'].push(value),
             onSelect: (option: unknown) => events.select.push(option),
           })
       },
@@ -153,6 +167,79 @@ describe('ApprovalUserPicker', () => {
 
     expect(events['update:modelValue']).toEqual(['u1'])
     expect(events.select).toEqual([{ id: 'u1', name: 'Alice', email: 'a@x.io' }])
+  })
+
+  it('multi-select emits the complete id array through its typed multi event and carries the max limit', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice', email: '' },
+      { id: 'u2', name: 'Bob', email: '' },
+    ])
+    const events = await mountPicker({
+      modelValue: ['u1'],
+      multiple: true,
+      maxSelections: 2,
+    })
+
+    const select = container!.querySelector('[data-testid="stub-select"]') as HTMLSelectElement
+    expect(select.multiple).toBe(true)
+    expect(select.dataset.multipleLimit).toBe('2')
+    for (const option of Array.from(select.options)) {
+      option.selected = option.value === 'u1' || option.value === 'u2'
+    }
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(events['update:multipleModelValue']).toEqual([['u1', 'u2']])
+    expect(events['update:modelValue']).toEqual([])
+    expect(events.select).toEqual([null])
+  })
+
+  it('excluded requester ids are disabled while a selected id remains usable', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'requester-1', name: '申请人', email: '' },
+      { id: 'u2', name: '审批人', email: '' },
+    ])
+    await mountPicker({
+      modelValue: ['u2'],
+      multiple: true,
+      excludedUserIds: ['requester-1'],
+    })
+
+    const options = Array.from(container!.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options.find((option) => option.value === 'requester-1')?.disabled).toBe(true)
+    expect(options.find((option) => option.value === 'u2')?.disabled).toBe(false)
+  })
+
+  it('keeps an excluded requester disabled when a restored draft already selected it', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'requester-1', name: '申请人', email: '' },
+    ])
+    await mountPicker({
+      modelValue: ['requester-1'],
+      multiple: true,
+      excludedUserIds: ['requester-1'],
+    })
+
+    const option = container!.querySelector('option') as HTMLOptionElement
+    expect(option.value).toBe('requester-1')
+    expect(option.disabled).toBe(true)
+  })
+
+  it('unresolved initial multi selections stay values-free and distinguishable', async () => {
+    searchSpy.mockResolvedValue([])
+    await mountPicker({
+      modelValue: ['opaque-a', 'opaque-b'],
+      multiple: true,
+      initialOptions: [
+        { id: 'opaque-a', name: '', email: '' },
+        { id: 'opaque-b', name: '', email: '' },
+      ],
+    })
+
+    const options = Array.from(container!.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options.map((option) => option.textContent)).toEqual(['成员 1', '成员 2'])
+    expect(options.map((option) => option.textContent).join('|')).not.toContain('opaque-')
+    expect(options.every((option) => option.disabled === false)).toBe(true)
   })
 
   it('api failure degrades to empty options — no throw, no crash', async () => {

@@ -2691,7 +2691,8 @@ describe('IntegrationWorkbenchView', () => {
     const saved = upsertBodies[0]
     expect(saved.kind).toBe('data-source:sql-readonly')
     expect(saved.role).toBe('source')
-    expect(saved.config).toEqual({ dataSourceId: 'pg-1', object: 'public.items' })
+    expect(saved.connectionId).toBe('pg-1')
+    expect(saved.config).toEqual({ object: 'public.items' })
     expect(saved).not.toHaveProperty('credentials')
     expect(JSON.stringify(saved.config)).not.toMatch(/password|token|secret|credential/i)
     expect(container.textContent).toContain('连接已保存：Warehouse bridge')
@@ -2791,7 +2792,8 @@ describe('IntegrationWorkbenchView', () => {
     expect(saved.id).toBe('ds_bridge_1')
     expect(saved.name).toBe('Warehouse bridge (renamed)')
     // Exactly the picker's own keys: a patch the registry can apply without losing anything.
-    expect(saved.config).toEqual({ dataSourceId: 'pg-1', object: 'public.items' })
+    expect(saved.connectionId).toBe('pg-1')
+    expect(saved.config).toEqual({ object: 'public.items' })
     const savedConfig = saved.config as Record<string, unknown>
     expect(Object.prototype.hasOwnProperty.call(savedConfig, 'schema')).toBe(false)
     expect(Object.prototype.hasOwnProperty.call(savedConfig, 'pageSize')).toBe(false)

@@ -177,14 +177,19 @@ describe('StockPreparationProjectWorkspaceView (readonly, values-free)', () => {
     expect(panel!.compareDocumentPosition(table!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('every row carries a 刷新 that arms the sync panel rather than syncing a guessed project', async () => {
+  it('every row carries a 刷新 whose label matches what it does — arms the sync panel, never claims to resync on its own', async () => {
     h.getOverview.mockResolvedValue(overviewWithPlantedExtras())
     const root = mountView()
     await flushUi()
 
     const refreshButtons = root.querySelectorAll('[data-testid="stock-prep-project-refresh"]')
     expect(refreshButtons.length).toBe(2)
-    expect(refreshButtons[0].getAttribute('aria-label')).toBe('重新同步这个项目')
+    // The label must NOT promise a resync the click cannot perform (dead-control finding): a bare
+    // "Re-sync this project" reads as done-in-one-click, which this button is not.
+    const label = refreshButtons[0].getAttribute('aria-label') || ''
+    expect(label).not.toBe('重新同步这个项目')
+    // It must instead say what the click actually does — point at the field above to sync.
+    expect(label).toBe('在上方填写项目号来同步这个项目')
 
     // Before: no explanation on screen.
     expect(root.querySelector('[data-testid="stock-prep-project-sync-armed"]')).toBeNull()

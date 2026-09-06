@@ -255,6 +255,15 @@
       "note": "Measured live: no native quantity column exists on order details — quantity is a dictionary-assigned slot, mirroring the BOM side. The synthetic fixture and read-plan defaults still model a literal column; reconcile there, not here."
     },
     {
+      "semantic": "part-spec",
+      "locus": "dictionary-assigned-column",
+      "columnFamily": "partExAttr",
+      "dictionary": "part-exattr-labels",
+      "dictionaryTypeHint": "text",
+      "labelHint": "spec",
+      "note": "规格 is one of the seven fields a 备料 pull must carry, and it is NOT a core part role — on a stock catalog of this family it is a part-side dictionary assignment. This entry says where to look and how to rank; the confirmed slot is configured as readPlan.part.specField, which defaults to absent."
+    },
+    {
       "semantic": "project-number",
       "locus": "native-column",
       "role": "pathExAttr",

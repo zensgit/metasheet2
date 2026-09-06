@@ -71,6 +71,24 @@
 > 默认路径,无需任何 SET/options/ALTER),记录见
 > `docs/development/role-cascade-witness-shadow-resolution-repro-20260824.md`。
 >
+> **✅ 2026-08-25 七次更新 —— role-delete/cascade exemption 腿已用可信证据重新取得;「#5147 合入后
+> 须在恰好 merged-main 重跑」一条就此闭合。** 执行链(全部 owner 逐条授权的有界执行):
+>
+> - **部署**:staging 由 `c345c6b405` 升至 **`8fa91caf64`**(run `32851344916`;含 #5147 判据修复与
+>   #5140 deploy-migrate 加固),随后升至 **`22ae2a1c07`**(run `32857075764`,#5143 UX 切片)。两次均:
+>   `set_window_env=none`、host env 的 scheduler 配置未触碰、无 soak/W4/W7 写入、迁移前后
+>   `Applied: 337 / Pending: 0`、health `build.commit` 与 deploy SHA 逐字节相符、auth 回路 200/200。
+> - **Witness**(run `32852167539`,`8fa91caf64`):`CASCADE ABSENT (premise CONFIRMED)`;四道绑定闸
+>   全开且可审计(`bound to public.roles`、会话解析一致、可见 roles 恰 1、`canonical_exact_carriers=9`、
+>   指向 roles 的 FK 总数 0)。
+> - **Battery**(run `32852172841`,`8fa91caf64`):`VERDICT: PASS`(11/11 blocked、11/11 cleared、
+>   2/2 wrong-kind、0 failures、残留 0);`PHASE 0 VERDICT: EXEMPTION-VALID`。**三项换代判据全中**:
+>   `provenance.script_sha256 = cfb6ec0a79ca7d42…`(≠ 旧镜像 `62419aa6…`,且与对 `8fa91caf64`
+>   源文件独立计算的哈希逐字节一致——脚本确来自新镜像);`build_commit = 8fa91caf64…`;posture 携带
+>   **`role_delete_binding`**(仅 #5147 之后存在的字段:canonical=public、会话一致、可见 1、精确载体 9)。
+> - 旧 run `32716676483` 的该条腿按 owner 裁决**永久保留为「不可信历史证据」**,不据其支撑任何激活。
+> - 本轮未做生产部署、未启用 L1/L2 或任何 flag;L1/L2 的启用授权仍完全在 owner。
+>
 > **⚠️ 2026-08-25 更正 —— 本条原写的「两条 workflow 运行次数均为 0、没有结论在流通」是错的,已作废。**
 > 原句依据的是 `gh run list --workflow=multitable-l1-battery.yml`,而该命令是在一个**不含这个
 > workflow 文件**的检出里跑的:gh 解析不到,返回空,我把「空」读成了「零次运行」。同一轮的

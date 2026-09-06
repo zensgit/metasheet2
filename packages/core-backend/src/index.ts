@@ -38,6 +38,33 @@ import type { User } from './auth/AuthService'
 import { poolManager } from './integration/db/connection-pool'
 import { reconcileOrphanedBulkJobs } from './services/ai-bulk-job-service'
 import type { AiUsageQueryFn } from './services/ai-usage-ledger'
+// 列映射副驾 (schema-mapping copilot): the ONE governed AI boundary. Injected into
+// plugin-integration-core so its copilot routes can ask the boundary to PROPOSE column meanings with
+// business data routed local-only. The plugin never reaches a provider any other way.
+import { GovernedAiService } from './services/governed-ai-service'
+// 按项目导出物料 Excel: the xlsx BUFFER BUILDER, injected into plugin-integration-core ONLY, same
+// per-plugin-injected-service shape as GovernedAiService above and for the same reason — the plugin
+// has no `xlsx` dependency of its own (not resolvable from its node_modules under the workspace's
+// strict pnpm layout) and must not add one; this reuses the ONE existing builder instead of a second
+// implementation. See packages/core-backend/src/routes/univer-meta.ts for the generic-export sibling
+// that already calls buildXlsxBuffer this same way (xlsx module lazily imported, never top-level).
+import { buildXlsxBuffer, type XlsxModule } from './multitable/xlsx-service'
+// 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY port, injected into plugin-integration-core
+// ONLY — same per-plugin-injected-service shape as the two above. It exists because a plugin cannot
+// establish tenancy from `req.user.tenantId` alone (the auth middleware copies the `x-tenant-id`
+// header onto that field when the token carried no claim), and the plugin's first value-bearing
+// tenant-scoped read must not be built on a caller-supplied string.
+import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-principal-directory-boundary'
+// 备料按部门列写权限: the per-column WRITE-scope port, injected into plugin-integration-core ONLY,
+// same per-plugin-injected-service shape as GovernedAiService above. It writes `field_permissions`
+// — the ONE table the grid's write gate reads — and is structurally write-only (it cannot hide a
+// column). See the service file header for the load-bearing property and the removal path.
+import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
+// 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
+// ONLY, same per-plugin-injected-service shape as the two above. It wraps the EXISTING group-robot
+// machinery (multitable/dingtalk-group-destination-service.ts) — the plugin gets no DingTalk client
+// and no new dependency. GROUP-ONLY: see the note on sendStockPreparationHandoffNotification below.
+import { sendStockPreparationHandoffNotificationToDestinations } from './multitable/stock-preparation-handoff-notifier'
 import { eventBus } from './integration/events/event-bus'
 import { initializeEventBusService } from './integration/events/event-bus-service'
 import { messageBus } from './integration/messaging/message-bus'
@@ -49,6 +76,7 @@ import {
   findObjectSheet as findProvisionedObjectSheet,
   getObjectSheetId as getProvisionedObjectSheetId,
   getObjectFieldId as getProvisionedObjectFieldId,
+  getObjectViewId as getProvisionedObjectViewId,
   resolveObjectFieldIds as resolveProvisionedObjectFieldIds,
   ensureObject as ensureMultitableObject,
   ensureMissingObjectFields as ensureMissingMultitableObjectFields,
@@ -77,6 +105,7 @@ import {
   assertPluginOwnsObject,
   assertPluginOwnsSheet,
   claimPluginObjectScope,
+  isSheetOwnedByProject,
   createPluginScopedMultitableApi,
   MultitableObjectScopeError,
   MultitableSheetScopeError,
@@ -86,12 +115,18 @@ import {
   acquireStockPreparationPersistUnitOfWorkLocks,
   validateStockPreparationPersistUnitOfWorkInput,
 } from './multitable/stock-preparation-persist-unit-of-work'
-import { installMetrics, metrics as promMetrics, requestMetricsMiddleware } from './metrics/metrics'
+import {
+  installMetrics,
+  metrics as promMetrics,
+  recoveryArchiveObservability,
+  requestMetricsMiddleware,
+} from './metrics/metrics'
 import { APIGateway } from './gateway/APIGateway'
 import { getPoolStats } from './db/pg'
 import { getBuildInfo } from './config/build-info'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
+import { startAuditLogPartitionEnsure } from './audit/audit-partition-schedule'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
@@ -265,7 +300,11 @@ import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
 import { eventsRouter } from './routes/events'
 import { commentsRouter } from './routes/comments'
 import { dataSourcesRouter, getDataSourceManager } from './routes/data-sources'
-import { createDataSourcePluginFacade, createDataSourceWritePluginFacade } from './data-adapters/data-source-plugin-facade'
+import {
+  createDataSourcePluginFacade,
+  createDataSourceSealedSnapshotConnectionFacade,
+  createDataSourceWritePluginFacade,
+} from './data-adapters/data-source-plugin-facade'
 import { federationRouter } from './routes/federation'
 import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
@@ -399,6 +438,68 @@ export interface MetaSheetServerOptions {
   readonly createRecoveryArchiveComposition?: RecoveryArchiveApplicationCompositionFactory
 }
 
+// 按项目导出物料 Excel: lazily imports `xlsx` (same lazy-import discipline as routes/univer-meta.ts's
+// own loadXlsxModule — never a top-level import, so a deployment that never touches an xlsx route
+// never pays for it) and wraps the existing buildXlsxBuffer behind the small duck-typed interface
+// plugin-integration-core's http-routes.cjs expects from services.stockPreparationXlsxExport.
+async function buildStockPreparationExportWorkbookBuffer(params: {
+  sheetName?: string
+  headers: string[]
+  rows: Array<Array<string | number | boolean | null | undefined>>
+}): Promise<Buffer> {
+  const xlsx = (await import('xlsx')) as unknown as XlsxModule
+  return buildXlsxBuffer(xlsx, params)
+}
+
+// 通知下一步: the DingTalk group-destination service used by the handoff notifier, built once and
+// reused. Lazily imported for the same reason `./db/db` is lazily imported everywhere else in this
+// file — importing it constructs a Kysely instance over the pool, which must not happen as a
+// side effect of loading this module.
+let stockPreparationHandoffDingTalkService:
+  | import('./multitable/dingtalk-group-destination-service').DingTalkGroupDestinationService
+  | undefined
+
+async function resolveStockPreparationHandoffDingTalkService(): Promise<
+  import('./multitable/dingtalk-group-destination-service').DingTalkGroupDestinationService
+> {
+  if (!stockPreparationHandoffDingTalkService) {
+    const { db: kyselyDbDingTalkGroups } = await import('./db/db')
+    const { DingTalkGroupDestinationService } = await import('./multitable/dingtalk-group-destination-service')
+    // Same construction the `/api/multitable/dingtalk-groups` routes use (see
+    // src/routes/api-tokens.ts): the shared Kysely handle, default global fetch.
+    stockPreparationHandoffDingTalkService = new DingTalkGroupDestinationService(kyselyDbDingTalkGroups)
+  }
+  return stockPreparationHandoffDingTalkService
+}
+
+// 通知下一步 (light 备料 handoff): fan one composed notification out to the configured DingTalk GROUP
+// destinations, and report how many actually landed.
+//
+// GROUP-ONLY, and that is a limitation rather than a preference. The group robot webhook is the only
+// DingTalk send path in this repository reachable WITHOUT an automation-rule record context: the
+// person-targeted `sendDingTalkWorkNotification` needs directory_account_links rows plus a
+// per-integration corp-app token that a stock-prep route has no access to, and there is no DingTalk
+// 待办/todo API anywhere in this codebase to ride. So a handoff pings the group; it cannot put a task
+// in one person's DingTalk.
+//
+// This function is the WIRING (resolve the one service, hand it to the fan-out); the loop itself,
+// including the "one broken webhook must not silence the others" rule, lives in
+// multitable/stock-preparation-handoff-notifier.ts so a unit test can prove it.
+//
+// The seam takes destination ids, a title and a body, and nothing else. `sendToDestination` also
+// accepts an `initiatedBy` for the delivery ledger, but it is deliberately NOT plumbed through from
+// the plugin: an id arriving over this seam is not one the host authenticated, and a ledger row that
+// names an unverified human as the initiator of a server-originated send is worse than one that
+// honestly records none. Server sends land with `initiated_by: null`.
+async function sendStockPreparationHandoffNotification(params: {
+  destinationIds: string[]
+  title: string
+  body: string
+}): Promise<{ delivered: number; failed: number }> {
+  const service = await resolveStockPreparationHandoffDingTalkService()
+  return sendStockPreparationHandoffNotificationToDestinations(service, params)
+}
+
 function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
   const pool = poolManager.get()
   const query = pool.query.bind(pool) as unknown as RecoveryArchiveApplicationDatabaseRuntime['query']
@@ -437,6 +538,7 @@ export class MetaSheetServer {
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
+  private stopAuditPartitionEnsure?: () => void
   private stopMultitableAttachmentCleanup?: () => void
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
@@ -490,6 +592,8 @@ export class MetaSheetServer {
     this.recoveryArchiveApplication = createRecoveryArchiveApplication(
       options.createRecoveryArchiveComposition,
       resolveRecoveryArchiveMainPoolRuntime,
+      process.env,
+      recoveryArchiveObservability,
     )
 
     // 创建核心API
@@ -653,6 +757,29 @@ export class MetaSheetServer {
         provisioning: {
           getObjectSheetId: (projectId, objectId) => getProvisionedObjectSheetId(projectId, objectId),
           getFieldId: (projectId, objectId, fieldId) => getProvisionedObjectFieldId(projectId, objectId, fieldId),
+          // IS THIS SHEET OWNED BY THIS PROJECT. Backed by `plugin_multitable_object_registry`,
+          // the one place a sheet's project is actually recorded — `meta_sheets` has no project
+          // column, and the derived id is one-way and is not an invariant any consumer maintains.
+          // A boolean by design: see the type's doc for why returning the owner would leak across
+          // tenants of the same plugin. Read-only.
+          isSheetOwnedByProject: async (sheetId, projectId) => {
+            const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+                rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+                  ? (result as { rowCount: number }).rowCount
+                  : undefined,
+              }
+            }
+            return isSheetOwnedByProject(txQuery, sheetId, projectId)
+          },
+          // Pure deterministic id derivation — no IO, no view touched, no access granted. The
+          // read-only sibling of the two accessors above. 项目备料页 composes its multitable deep
+          // link from this, AFTER proving the sheet itself exists through findObjectSheet.
+          getObjectViewId: (projectId, objectId, viewId) => getProvisionedObjectViewId(projectId, objectId, viewId),
           findObjectSheet: async ({ projectId, objectId }) => {
             const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -2807,6 +2934,72 @@ export class MetaSheetServer {
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
+        // 列映射副驾: the governed AI boundary for plugin-integration-core ONLY. The plugin's
+        // schema-mapping copilot calls `governedAi.suggest({ dataClass: 'business', ... })`; the
+        // boundary enforces local-only routing for business data. Absent for every other plugin.
+        governedAi: manifest.name === 'plugin-integration-core' ? new GovernedAiService() : undefined,
+        // 按项目导出物料 Excel: the xlsx buffer builder for plugin-integration-core ONLY. The plugin's
+        // new prep-lines/export route calls `stockPreparationXlsxExport.buildWorkbookBuffer(...)`;
+        // absent for every other plugin.
+        stockPreparationXlsxExport: manifest.name === 'plugin-integration-core'
+          ? { buildWorkbookBuffer: buildStockPreparationExportWorkbookBuffer }
+          : undefined,
+        // 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY for plugin-integration-core ONLY.
+        // The plugin's first tenant-scoped VALUE-BEARING read (the operator project directory, which
+        // carries the caller's own project numbers and names) must not accept `req.user.tenantId` as
+        // proof of tenancy — hydrateAuthenticatedUser copies the `x-tenant-id` HEADER onto that field
+        // when the verified token carried no claim. This narrow port lets the plugin ask the host to
+        // vouch for the (user, tenant) pairing instead, submitting two identity strings and receiving
+        // one boolean; the host keeps the table, the SQL and the pool. Absent for every other plugin,
+        // and REQUIRED (not fail-open) by the one read that uses it.
+        tenantPrincipalDirectory: manifest.name === 'plugin-integration-core'
+          ? createTenantPrincipalDirectoryBoundaryV1({
+              query: (sql: string, params?: unknown[]) =>
+                poolManager.get().query(sql, params) as unknown as Promise<{ rows: unknown[] }>,
+            })
+          : undefined,
+        // 备料按部门列写权限: the per-column WRITE-scope port for plugin-integration-core ONLY. The
+        // plugin declares "this ROLE may NOT WRITE this column" and the host writes the ONE table the
+        // grid's write gate actually reads (`field_permissions`). WRITE-only by construction — it
+        // cannot restrict READ, because 采购 and 仓库 must keep seeing the production band and each
+        // other's responses (see the service file's load-bearing property).
+        //
+        // THIS CAPABILITY CAN DELETE A PERMISSION ROW. Additive by default — with no `reconcile`
+        // region the call only upserts and emits no DELETE at all. With one, the same transaction
+        // also retires this PACK's own still-denying rows inside the declared (columns × roles)
+        // rectangle, bounded five ways: the target sheet only; this pack's provenance marker, PLUS
+        // the pack-less legacy marker ONLY when the caller proves (from the install ledger) that
+        // this pack is the sheet's only pack — a row an operator authored and a sibling pack's row
+        // are outside the predicate either way; `read_only = true` only; inside the declared region
+        // only; and never a row the same call just wrote. The statement's row set is then CHECKED
+        // against the same classification the rehearsal ran, and a mismatch aborts the transaction.
+        // It exists because upsert-only silently locks a column for EVERY declared role the moment a
+        // revision moves that column's owner. Removals are returned, never silent. Broad removal
+        // remains an operator action on PUT /sheets/:sheetId/field-permissions. The one thing it
+        // cannot see: an operator edit made BEFORE that route started stamping `operator:<actorId>`
+        // left the pack's marker on the row, so such a row is indistinguishable from installer
+        // output. Absent for every other plugin.
+        stockPreparationFieldPermissions: manifest.name === 'plugin-integration-core'
+          ? new StockPreparationFieldPermissionsService()
+          : undefined,
+        // 通知下一步: the DingTalk notification seam for plugin-integration-core ONLY. The plugin's
+        // handoff advance route calls `stockPreparationHandoffNotifier.sendToDestinations({ destinationIds,
+        // title, body })`; this wraps the EXISTING group-destination machinery
+        // (multitable/dingtalk-group-destination-service.ts) rather than giving the plugin a DingTalk
+        // client or a new dependency of its own. GROUP-ONLY: the group robot webhook is the only send
+        // path here that works without an automation-rule record context, and there is no per-person
+        // 待办 to ride. Absent for every other plugin; absent entirely, the handoff still moves the turn
+        // and reports `not_configured`.
+        stockPreparationHandoffNotifier: manifest.name === 'plugin-integration-core'
+          ? { sendToDestinations: sendStockPreparationHandoffNotification }
+          : undefined,
+        // Secret-bearing SQL Server projection for the sealed snapshot runtime. Keep this as a
+        // separate, plugin-scoped capability; the ordinary dataSources facade never carries
+        // credentials, and every other plugin receives no capability at all.
+        dataSourceSealedSnapshotConnections:
+          manifest.name === 'plugin-integration-core'
+            ? createDataSourceSealedSnapshotConnectionFacade(getDataSourceManager)
+            : undefined,
         security: this.pluginRuntimeSecurityService,
       } as unknown as import('./types/plugin').PluginServices,
       storage,
@@ -2969,6 +3162,13 @@ export class MetaSheetServer {
         this.stopOperationAuditRetention?.()
       } catch (err) {
         this.logger.warn(`Operation audit retention stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
+        this.stopAuditPartitionEnsure?.()
+      } catch (err) {
+        this.logger.warn(`Audit log partition ensure stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
@@ -4188,6 +4388,7 @@ export class MetaSheetServer {
     // Background tasks (after server starts listening)
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
+      this.stopAuditPartitionEnsure = startAuditLogPartitionEnsure({ logger: this.logger })
       this.stopMultitableAttachmentCleanup = startMultitableAttachmentCleanup({ logger: this.logger })
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
       this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })

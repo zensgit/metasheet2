@@ -64,6 +64,16 @@ const {
 const {
   FACTORY_A_REHEARSAL_PACK,
 } = require(path.join(LIB, 'customer-packs', 'factory-a.rehearsal.cjs'))
+// THE WAREHOUSE EXPORT PROJECTION — imported from the real exporter, not copied. This used to be
+// a local 10-column list that drifted out of sync with lib/stock-preparation-prep-line-export.cjs
+// (see PR #5458's comment, since removed) as that module grew to 17 columns. Importing
+// EXPORT_COLUMNS + its cell formatters means this demo step is now STRUCTURALLY unable to drift:
+// it renders whatever exportStockPreparationPrepLines renders, from the same array and the same
+// two functions, not a parallel guess at them.
+const {
+  EXPORT_COLUMNS: REAL_EXPORT_COLUMNS,
+  __internals: { formatCellForColumn: formatExportCell, columnSourceValue: exportColumnSourceValue },
+} = require(path.join(LIB, 'stock-preparation-prep-line-export.cjs'))
 
 const FIXTURE_DIR = path.join(__dirname, '..', 'fixtures', 'stock-preparation-structure-exact-plm')
 const PROJECT_A = 'SYN-XM-0001'
@@ -435,18 +445,26 @@ async function main() {
     template: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, expandedRows: rows, existingRows: [],
     runId: 'demo-1', plannedAt: '2026-09-01T00:00:00.000Z',
   })
-  // The human cells a 备料/采购/仓库 person types (canonical band + pack ext band).
+  // The human cells a 备料/采购/仓库 person types (canonical band + 自制/外购 + the
+  // departmental response band + pack ext band). Same five new values as the sibling
+  // rehearsal driver's humanCells (stock-preparation-structure-exact-rehearsal.test.cjs)
+  // -- a select LABEL, two booleans and two ISO dates, typed exactly as the template
+  // declares them. `warehouseDone: false` is deliberate, same reasoning as there: the
+  // negative control flips booleans, so a `false` that survives is as load-bearing as a
+  // `true` that does.
   const humanCells = {
     materialType: '30 - Q345R', blankType: '20 - 管材', stockPreparationStatus: '20 - 已下单',
     demandDate: '2026-09-20', leadTimeDays: 14, notes: '按图纸复核后下单',
     procurementReply: '供应商已确认排产', warehouseConfirmation: '待到货',
+    makeOrBuy: '20 - 外购', procurementDone: true, procurementReplyDate: '2026-09-05',
+    warehouseDone: false, actualArrivalDate: '2026-09-18',
     ext_stockPrepDate: '2026-09-02', ext_pickingNode: '10 - 示例节点一', ext_handoverSection: '10 - 示例工段一',
     ext_blankLength: 1250, ext_blankWidth: 800, ext_blankThickness: 12, ext_blankQuantity: 4, ext_blankMass: 94.2,
   }
   for (const id of ALL_HUMAN) assert.ok(Object.prototype.hasOwnProperty.call(humanCells, id), `human fill must cover ${id}`)
   const targetRows = firstPlan.decisions.filter((d) => d.decision === 'add').map((d) => ({ ...d.record, ...humanCells }))
   assert.equal(targetRows.length, 7)
-  say(`  人填 ${BOLD(ALL_HUMAN.length)} 个人列(材料类型/毛胚类型/备料情况/需求日期/提前周期/备注/备料日期/领料节点/毛胚尺寸…)于 7 行`)
+  say(`  人填 ${BOLD(ALL_HUMAN.length)} 个人列(材料类型/毛胚类型/备料情况/需求日期/提前周期/备注/自制外购/采购完成/仓库完成/备料日期/领料节点/毛胚尺寸…)于 7 行`)
 
   // THE WALL (canonical band): re-pull batch #2, re-plan against the filled rows.
   const secondPlan = planStockPreparationConflicts({
@@ -499,25 +517,31 @@ async function main() {
   assert.equal(clobberedCount, ALL_HUMAN.length)
   say(`  ${BOLD('负对照')}:同样的刷新若 ${BOLD('不过')}权属过滤器 → ${clobberedCount} 个人列 ${BOLD('全被冲掉')} ${DIM('—— 证明这堵墙是承重的,不是摆设')}`)
 
-  // THE EXPORT the warehouse/purchasing takes.
-  const EXPORT_COLUMNS = [
-    { id: 'componentCode', label: '图号' }, { id: 'componentName', label: '名称' },
-    { id: 'ext_spec', label: '规格' }, { id: 'material', label: '材料' },
-    { id: 'totalQuantity', label: '总数量' }, { id: 'stockPreparationStatus', label: '备料情况' },
-    { id: 'demandDate', label: '需求日期' }, { id: 'ext_pickingNode', label: '领料节点' },
-    { id: 'ext_stockPrepDate', label: '备料日期' }, { id: 'ext_blankLength', label: '毛胚长度' },
-  ]
-  const headers = EXPORT_COLUMNS.map((c) => c.label)
+  // THE EXPORT the warehouse/purchasing takes — projected through the REAL exporter's own
+  // EXPORT_COLUMNS + formatCellForColumn/columnSourceValue (imported above), so what prints here
+  // is exactly what exportStockPreparationPrepLines would hand buildXlsxBuffer.
+  const headers = REAL_EXPORT_COLUMNS.map((c) => c.label)
+  assert.equal(headers.length, 17, '导出列数与真实导出器 EXPORT_COLUMNS 一致(12 原有 + 5 个 #5447 部门完成列)')
   const activeRows = [...byKey.values()].filter((row) => row.active !== false)
-  const exportRows = activeRows.map((row) => EXPORT_COLUMNS.map((c) => {
-    const v = row[c.id]
-    return Array.isArray(v) ? v.join(', ') : (v === undefined || v === null ? '' : String(v))
-  }))
-  assert.equal(headers.length, 10); assert.equal(exportRows.length, 6)
-  for (const r of exportRows) { assert.ok(String(r[0]).startsWith('TZ-')); assert.equal(r[5], '20 - 已下单'); assert.equal(r[8], '2026-09-02') }
-  say(`\n  ${BOLD('导出(仓库/采购拿走的 XLSX 投影)')} —— 活跃物料行 ${exportRows.length} × 列 ${headers.length}(停用的那一行掉出拣料单):`)
-  table(headers, exportRows)
-  say(`  ${DIM('二进制打包由 packages/core-backend/src/multitable/xlsx-service.ts buildXlsxBuffer + 现有 vitest 覆盖;此处证明的是投影(物料内容)。')}`)
+  const exportRows = activeRows.map((row) =>
+    REAL_EXPORT_COLUMNS.map((c) => formatExportCell(c, exportColumnSourceValue(row, c))))
+  assert.equal(exportRows.length, 6)
+  const colIndex = (id) => REAL_EXPORT_COLUMNS.findIndex((c) => c.id === id)
+  for (const r of exportRows) {
+    assert.ok(String(r[colIndex('componentCode')]).startsWith('TZ-'))
+    assert.equal(r[colIndex('stockPreparationStatus')], '20 - 已下单')
+    assert.equal(r[colIndex('ext_stockPrepDate')], '2026-09-02')
+    // 五个部门完成列(#5447):自制/外购 + 采购完成对(布尔渲染为是/否)+ 仓库完成对,人填值原样导出。
+    assert.equal(r[colIndex('makeOrBuy')], '20 - 外购')
+    assert.equal(r[colIndex('procurementDone')], '是', '布尔完成列渲染为 是/否,不是原生 true/false')
+    assert.equal(r[colIndex('procurementReplyDate')], '2026-09-05')
+    assert.equal(r[colIndex('warehouseDone')], '否', '负对照:false 渲染为 否(不是空白,不是省略)')
+    assert.equal(r[colIndex('actualArrivalDate')], '2026-09-18')
+  }
+  say(`\n  ${BOLD('导出(仓库/采购拿走的 XLSX 投影,与真实导出器 17 列逐字节一致)')} —— 活跃物料行 ${exportRows.length} × 列 ${headers.length}(停用的那一行掉出拣料单):`)
+  say(`    ${DIM('后 5 列是 #5447 新增的部门完成列:自制/外购、采购完成、采购回复日期、仓库完成、实际到货日期(两个完成标记渲染为 是/否,未填时留空)')}`)
+  table(headers, exportRows.map((r) => r.map((v) => (v === null || v === undefined ? '' : String(v)))))
+  say(`  ${DIM('二进制打包由 packages/core-backend/src/multitable/xlsx-service.ts buildXlsxBuffer + 现有 vitest 覆盖;此处证明的是投影(与真实导出器同一份 EXPORT_COLUMNS/格式化函数)。')}`)
   say(`  ${GREEN('步骤 3 通过')}`)
 
   // ── honest caveats (staged, never faked) ─────────────────────────────────────
