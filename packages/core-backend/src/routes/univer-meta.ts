@@ -99,6 +99,7 @@ import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 // from a pack's — but the stamp itself is about THIS route owning what it writes.
 import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
+import { isElearningProjectionSheetIdCandidate } from '../multitable/elearning-projection-constants'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   checkExactAnchorRecoveryTrust,
@@ -769,6 +770,7 @@ function buildPublicFormToken(): string {
 
 function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined, publicToken: string): boolean {
   if (!view || !publicToken) return false
+  if (isElearningProjectionSheetIdCandidate(view.sheetId)) return false
   const publicForm = getPublicFormConfig(view)
   if (!publicForm || publicForm.enabled !== true) return false
   const configuredToken = typeof publicForm.publicToken === 'string' ? publicForm.publicToken.trim() : ''
@@ -776,6 +778,13 @@ function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined
   const expiryMs = parsePublicFormExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
   if (expiryMs !== null && Date.now() >= expiryMs) return false
   return true
+}
+
+function canManageFormShareForSheet(
+  capabilities: { canManageViews: boolean },
+  sheetId: string,
+): boolean {
+  return capabilities.canManageViews && !isElearningProjectionSheetIdCandidate(sheetId)
 }
 
 async function loadPublicFormAllowedSubjectSummaries(
@@ -13311,7 +13320,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const view: UniverMetaViewConfig = {
@@ -13378,7 +13387,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
@@ -13586,7 +13595,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
@@ -13682,7 +13691,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const candidates = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))

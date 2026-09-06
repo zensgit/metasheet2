@@ -5,6 +5,9 @@ export const ELEARNING_STATS_MULTITABLE_SHEETS_TABLE =
   'elearning_stats_multitable_sheets' as const
 export const ELEARNING_PROJECTION_SYSTEM_OWNER = 'system:elearning-projection' as const
 
+const ELEARNING_PROJECTION_BASE_ID_PATTERN = /^base_el_stats_[a-f0-9]{32}$/
+const ELEARNING_PROJECTION_SHEET_ID_PATTERN = /^sht_el_stats_[a-f0-9]{32}$/
+
 const DENIED_KEYS = [
   'canCreateRecord',
   'canEditRecord',
@@ -46,6 +49,14 @@ export function deriveElearningProjectionRecordId(
 
 export function deriveElearningProjectionFieldId(orgId: string, key: string): string {
   return `fld_el_stats_${identityDigest(`${deriveElearningProjectionSheetId(orgId)}:${key}`)}`
+}
+
+export function isElearningProjectionBaseIdCandidate(baseId: string): boolean {
+  return ELEARNING_PROJECTION_BASE_ID_PATTERN.test(baseId)
+}
+
+export function isElearningProjectionSheetIdCandidate(sheetId: string): boolean {
+  return ELEARNING_PROJECTION_SHEET_ID_PATTERN.test(sheetId)
 }
 
 export function hasElearningProjectionAdminAuthority(

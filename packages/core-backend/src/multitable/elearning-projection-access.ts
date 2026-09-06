@@ -4,6 +4,8 @@ import {
   ELEARNING_PROJECTION_SYSTEM_KIND,
   ELEARNING_STATS_MULTITABLE_SHEETS_TABLE,
   hasElearningProjectionAdminAuthority,
+  isElearningProjectionBaseIdCandidate,
+  isElearningProjectionSheetIdCandidate,
 } from './elearning-projection-constants'
 
 export type ElearningProjectionQuery = (
@@ -33,8 +35,11 @@ export async function loadElearningProjectionSheetOrgMap(
   query: ElearningProjectionQuery,
   sheetIds: readonly string[],
 ): Promise<Map<string, string | null>> {
-  const ids = [...new Set(sheetIds.map((id) => id.trim()).filter(Boolean))]
+  const ids = [...new Set(sheetIds
+    .map((id) => id.trim())
+    .filter(isElearningProjectionSheetIdCandidate))]
   if (ids.length === 0) return new Map()
+  const map = new Map<string, string | null>(ids.map((id) => [id, null]))
   try {
     const mappings = await query(
       `SELECT sheet_id, org_id
@@ -42,19 +47,21 @@ export async function loadElearningProjectionSheetOrgMap(
         WHERE sheet_id = ANY($1::text[])`,
       [ids],
     )
-    const map = new Map<string, string | null>()
     for (const row of mappings.rows as Array<{ sheet_id?: unknown; org_id?: unknown }>) {
       const sheetId = canonicalText(row.sheet_id)
       const orgId = canonicalText(row.org_id)
       if (sheetId && ids.includes(sheetId)) map.set(sheetId, orgId)
     }
-    if (map.size === 0) return map
+    const mappedIds = [...map]
+      .filter((entry): entry is [string, string] => entry[1] !== null)
+      .map(([sheetId]) => sheetId)
+    if (mappedIds.length === 0) return map
     const systemSheets = await query(
       `SELECT id
          FROM meta_sheets sheet
         WHERE sheet.id = ANY($1::text[])
           AND to_jsonb(sheet) ->> 'system_kind' = $2`,
-      [[...map.keys()], ELEARNING_PROJECTION_SYSTEM_KIND],
+      [mappedIds, ELEARNING_PROJECTION_SYSTEM_KIND],
     )
     const validIds = new Set(
       (systemSheets.rows as Array<{ id?: unknown }>)
@@ -66,7 +73,7 @@ export async function loadElearningProjectionSheetOrgMap(
     }
     return map
   } catch (error) {
-    if (isUndefinedTable(error, ELEARNING_STATS_MULTITABLE_SHEETS_TABLE)) return new Map()
+    if (isUndefinedTable(error, ELEARNING_STATS_MULTITABLE_SHEETS_TABLE)) return map
     throw error
   }
 }
@@ -77,6 +84,9 @@ export async function loadElearningProjectionBaseOrg(
 ): Promise<{ isProjection: boolean; orgId: string | null }> {
   const normalized = baseId.trim()
   if (!normalized) return { isProjection: false, orgId: null }
+  if (!isElearningProjectionBaseIdCandidate(normalized)) {
+    return { isProjection: false, orgId: null }
+  }
   try {
     const mapping = await query(
       `SELECT org_id, sheet_id
@@ -84,7 +94,7 @@ export async function loadElearningProjectionBaseOrg(
         WHERE base_id = $1`,
       [normalized],
     )
-    if (mapping.rows.length === 0) return { isProjection: false, orgId: null }
+    if (mapping.rows.length === 0) return { isProjection: true, orgId: null }
     if (mapping.rows.length !== 1) return { isProjection: true, orgId: null }
     const orgId = canonicalText((mapping.rows[0] as { org_id?: unknown }).org_id)
     const sheetId = canonicalText((mapping.rows[0] as { sheet_id?: unknown }).sheet_id)
@@ -103,7 +113,7 @@ export async function loadElearningProjectionBaseOrg(
     }
   } catch (error) {
     if (isUndefinedTable(error, ELEARNING_STATS_MULTITABLE_SHEETS_TABLE)) {
-      return { isProjection: false, orgId: null }
+      return { isProjection: true, orgId: null }
     }
     throw error
   }

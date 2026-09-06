@@ -417,6 +417,7 @@ export async function projectElearningStatsToMultitable(
       return { outcome: 'noop', baseId, sheetId, recordId, suppressed }
     }
 
+    // revision-exempt: trusted aggregate-only system projection; intentionally event-silent read model
     const written = await tx.query(
       `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
        VALUES ($1, $2, $3::jsonb, 1, $4, $4)

@@ -32,8 +32,12 @@ describe('A — resolveSheetCapabilitiesForUser projection guard (collab/Yjs/api
   it('ALLOWS the same non-admin on an ordinary (non-projection) sheet — canRead=true', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     vi.mocked(listUserPermissions).mockResolvedValue(['multitable:read'])
-    const res = await resolveSheetCapabilitiesForUser(mkQuery(false), 'S', 'u1')
+    const query = mkQuery(false)
+    const res = await resolveSheetCapabilitiesForUser(query, 'S', 'u1')
     expect(res.capabilities.canRead).toBe(true)
+    expect(query.mock.calls.some(([sql]) => (
+      String(sql).includes('FROM elearning_stats_multitable_sheets')
+    ))).toBe(false)
   })
 
   it('ALLOWS an admin on a projection sheet — canRead=true', async () => {
@@ -128,5 +132,21 @@ describe('e-learning aggregate projection capability guard', () => {
     )
     expect(drifted.capabilities.canRead).toBe(false)
     expect(drifted.capabilities.canManageViews).toBe(false)
+  })
+
+  it('reserves projection-shaped sheet ids and denies an unmapped candidate without treating ordinary ids as candidates', async () => {
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    vi.mocked(listUserPermissions).mockResolvedValue(['elearning:admin', 'multitable:read'])
+    const query = vi.fn(async () => ({ rows: [] }))
+    const result = await resolveSheetCapabilitiesForUser(
+      query as never,
+      sheetId,
+      'elearning-admin',
+    )
+    expect(result.capabilities.canRead).toBe(false)
+    expect(result.capabilities.canExport).toBe(false)
+    expect(query.mock.calls.some(([sql]) => (
+      String(sql).includes('FROM elearning_stats_multitable_sheets')
+    ))).toBe(true)
   })
 })
