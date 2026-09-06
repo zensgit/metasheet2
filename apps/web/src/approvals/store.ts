@@ -66,8 +66,24 @@ export const useApprovalStore = defineStore('approval', () => {
   // none has finished yet. `error` cannot answer this: it is also written by `loadHistory`, by
   // `executeAction` and by every list loader, so a rejected timeline fetch or a rejected verb would
   // be indistinguishable from "the instance on screen could not be re-read". Written ONLY by
-  // `loadDetail`, and cleared at the start of every detail load. Consumers that must not act on an
-  // instance whose last refresh failed read this one (round 3, B12).
+  // `loadDetail`. Consumers that must not act on an instance whose last refresh failed read this
+  // one (round 3, B12).
+  //
+  // Round 4 (B15) — LIFECYCLE. This latch and the reader-facing banner are ONE fact, so the latch
+  // is what the banner is derived from (see `ApprovalDetailView`), not the other way round. It is
+  // therefore NOT cleared when a load merely starts:
+  //
+  //   * a load for ANOTHER instance drops it (the switch — the latch is per instance);
+  //   * a successful settle for the instance it names drops it (the instance HAS been re-read);
+  //   * a reload of the SAME instance keeps it for as long as that reload is outstanding, so the
+  //     explanation and its 重新加载 stay on screen while the retry runs rather than blinking out.
+  //
+  // It follows that no OTHER writer of the shared `error` string can strand the refusal: round 3
+  // cleared the latch on every load start, so `loadHistory`'s start, `executeAction`'s start, the
+  // alert's own dismiss and every list loader could each null `error` while the latch stayed set —
+  // controls disabled with nothing on screen saying so and no in-page retry. Deriving the banner
+  // from the latch makes that unreachable by construction, for the whole population of `error`
+  // writers rather than for an enumerated four.
   const detailErrorInstanceId = ref<string | null>(null)
   // Bumped every time `executeAction` publishes its OWN response into `activeApproval`, together
   // with the instance it published for. A detail read that was already in flight at that moment may
@@ -185,11 +201,21 @@ export const useApprovalStore = defineStore('approval', () => {
     detailLoading.value = true
     loading.value = true
     error.value = null
-    detailErrorInstanceId.value = null
+    // Round 4 (B15): the read-only latch is per INSTANCE, so only a load for a different instance
+    // drops it here — a reload of the instance it names keeps it until that reload SUCCEEDS (see
+    // the settle path below). This one comparison covers both switch shapes: the reader navigating
+    // (`activeApproval` cleared just above) and a latch left over from a failed first-ever load,
+    // which names an instance that was never displayed at all.
+    if (detailErrorInstanceId.value !== id) detailErrorInstanceId.value = null
     try {
       const result = await getApproval(id)
       // Superseded by a newer load: discard rather than overwrite the newer instance's state.
       if (generation !== detailGeneration) return
+      // Round 4 (B15): this instance HAS now been re-read, so the refusal is released — BEFORE the
+      // action-authority return below, which is about which ROW wins, not about whether the read
+      // succeeded. Releasing it after that return would let a latch set before the verb survive a
+      // successful read, leaving the page read-only with no failing request left to explain it.
+      detailErrorInstanceId.value = null
       // An action for THIS instance published its own response while this read was in flight. The
       // read is not necessarily older in wall-clock terms, but it is the only one of the two that
       // may have been served BEFORE the action committed, and the reader has already been shown
@@ -303,9 +329,40 @@ export const useApprovalStore = defineStore('approval', () => {
    * The ORDER between a same-id refresh and the verb no longer decides the outcome either: a read
    * that was already in flight when this publication happened is refused by `loadDetail` (see
    * `actionPublishSeq` there), so the action's own response wins whichever settles last. That is the
-   * documented rule for two same-instance writers: **an action's own response is authoritative over
-   * any detail read concurrent with it**, because it is the only one of the two guaranteed to have
-   * been served after the action committed.
+   * rule for two same-instance writers: **an action's own response is authoritative over any detail
+   * read concurrent with it**, because it is the only one of the two guaranteed to have been served
+   * after the action committed.
+   *
+   * Round 4 (B16) — the FAILURE path, stated as a grid rather than as one sentence, because the
+   * rule above is enforced per branch and not everywhere the sentence reads as if it were:
+   *
+   *   |                  | the concurrent read SUCCEEDS            | the concurrent read FAILS          |
+   *   |------------------|-----------------------------------------|------------------------------------|
+   *   | verb SUCCEEDED   | enforced — `loadDetail`'s success branch | NOT enforced — the read's own      |
+   *   |                  | defers to the published row             | failure still writes `error` +     |
+   *   |                  | (`actionPublishSeq`)                    | the read-only latch over it        |
+   *   | verb FAILED      | enforced — the failure is surfaced iff  | both write; the read's failure is  |
+   *   |                  | the acted instance is still displayed;  | about the READ and legitimately    |
+   *   |                  | a read ALREADY IN FLIGHT cannot erase   | latches the instance read-only     |
+   *   |                  | it (a later-ISSUED one does; see below) |                                    |
+   *
+   * Cell (succeeded × read fails) is a KNOWN residual, deliberately not closed in this round.
+   *
+   * The failure path's own two halves, both pinned in `approval-store-detail-generation.spec.ts`:
+   *
+   *   * SURFACED IFF STILL DISPLAYED — `error` is written under exactly the predicate the success
+   *     branch publishes under (`actedInstanceStillDisplayed()`), never a looser one, so a verb
+   *     that rejects after the reader has moved on raises nothing on the instance now on screen.
+   *     The view applies the same rule to its own announcements (`stillActingOn` → `dialogError`).
+   *   * NOT SWALLOWED, NOT RESURRECTED — a read CONCURRENT with the failure cannot erase it: reads
+   *     clear `error` only at their START, which for a read that was already in flight necessarily
+   *     precedes the failure, and no settle path of `loadDetail` clears `error` afterwards. This is
+   *     deliberately about concurrency and not about all reads: a read ISSUED AFTER the failure DOES
+   *     clear the string — that is `retryLoad`'s own semantics, the reader having asked for a
+   *     reload — and what survives such a read is the read-only latch, which is now what the banner
+   *     and its retry are derived from (B15). And a failure that was refused because the page had
+   *     moved on is never replayed: nothing retains it, so navigating back to the acted instance
+   *     re-reads it with a clean error surface.
    *
    * `loading` keeps the GENERATION predicate: that flag is about request ownership, not about which
    * instance is on screen. A newer `loadDetail` owns it once it has taken a generation and clears it

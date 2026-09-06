@@ -560,6 +560,165 @@ describe('approval store — executeAction result publication', () => {
     expect(store.detailErrorInstanceId).toBeNull()
   })
 
+  // -------------------------------------------------------------------------
+  // Round 4 (B15) — the latch's LIFECYCLE, which is also the banner's.
+  //
+  // Round 3 cleared it at the START of every detail load, which made it a strictly weaker fact than
+  // the one the view needs: the refusal it drives outlived the only thing that explained it (the
+  // shared `error` string, nulled by every other loader/verb/dismiss) and the only thing that could
+  // clear it. It is now released by exactly two events — a successful read of the instance it
+  // names, or a load for a different one.
+  // -------------------------------------------------------------------------
+  async function latchApprovalA(store: ReturnType<typeof useApprovalStore>): Promise<void> {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    await store.loadDetail('apv_a')
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    await store.loadDetail('apv_a')
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+  }
+
+  it('B15: the latch survives a same-id reload while it is IN FLIGHT and clears only when it succeeds', async () => {
+    const store = useApprovalStore()
+    await latchApprovalA(store)
+
+    const pendingRetry = deferred<any>()
+    getApprovalMock.mockReturnValueOnce(pendingRetry.promise)
+    const retry = store.loadDetail('apv_a')
+    await settle()
+    // The retry has started and nulled the shared error string — the latch is what has to keep the
+    // page refused (and its explanation on screen) until the retry actually lands.
+    expect(store.error).toBeNull()
+    expect(store.detailLoading).toBe(true)
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+
+    pendingRetry.resolve(instance('apv_a'))
+    await retry
+    expect(store.detailErrorInstanceId).toBeNull()
+  })
+
+  it('B15: a load for ANOTHER instance drops the latch synchronously, before its response arrives', async () => {
+    const store = useApprovalStore()
+    await latchApprovalA(store)
+
+    const pendingB = deferred<any>()
+    getApprovalMock.mockReturnValueOnce(pendingB.promise)
+    const bLoad = store.loadDetail('apv_b')
+    // No await: the switch is synchronous, so nothing can act on a refusal that belongs to the
+    // instance the reader has just left.
+    expect(store.detailErrorInstanceId).toBeNull()
+    expect(store.activeApproval).toBeNull()
+
+    pendingB.resolve(instance('apv_b'))
+    await bLoad
+    expect(store.detailErrorInstanceId).toBeNull()
+  })
+
+  it('B15: the OTHER writers of the shared error string do not clear the latch', async () => {
+    const store = useApprovalStore()
+    await latchApprovalA(store)
+
+    // Writer 1 — a timeline refresh's start. This is the no-user-action entry: a verb's own
+    // post-action `loadHistory` nulls the error while the reader touches nothing.
+    getApprovalHistoryMock.mockResolvedValueOnce([])
+    await store.loadHistory('apv_a')
+    expect(store.error).toBeNull()
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+
+    // Writer 2 — a verb's start. Driven at the store directly: the view refuses to dispatch in this
+    // state (that is the point of the latch), so this pins the STORE's contract, not a reachable
+    // click. A promise that never settles isolates the start-of-verb write from any outcome.
+    // That promise stays dangling for the rest of this test BY DESIGN, so `store.loading` is `true`
+    // from here on — do not append `loading` assertions below it. It cannot reach the next test:
+    // `beforeEach` installs a fresh pinia, so the store this closure holds is discarded with it.
+    dispatchActionMock.mockReturnValueOnce(new Promise<any>(() => {}))
+    void store.executeAction('apv_a', { action: 'comment', comment: '一条评论' } as any)
+    await settle()
+    expect(store.error).toBeNull()
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+  })
+
+  it('B15: a first-ever load that fails latches an instance that was never displayed, and the next load drops it', async () => {
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_b')
+    expect(store.detailErrorInstanceId).toBe('apv_b')
+    expect(store.activeApproval).toBeNull()
+
+    // `activeApproval` is empty, so the switch clear above cannot be what drops it — the per-id
+    // comparison is.
+    getApprovalMock.mockResolvedValueOnce(instance('apv_c'))
+    await store.loadDetail('apv_c')
+    expect(store.detailErrorInstanceId).toBeNull()
+    expect(store.activeApproval?.id).toBe('apv_c')
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 4 (B16) — the FAILURE path of a verb, against the same concurrent-read race the success
+  // path is already pinned against. Two halves, matching the grid in `executeAction`'s doc:
+  // surfaced iff the acted instance is still displayed (the two tests above this block), and not
+  // swallowed / not resurrected by a read concurrent with it (the two below).
+  // -------------------------------------------------------------------------
+  it('B16: a same-id read in flight when the verb FAILS neither erases the failure nor loses its own row', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+
+    // The reachable shape: a 重新加载 of the instance the reader is ON is still outstanding when the
+    // verb rejects. Its START has already nulled the shared error string, which is precisely why a
+    // read cannot swallow a failure that lands after it.
+    const pendingRead = deferred<any>()
+    getApprovalMock.mockReturnValueOnce(pendingRead.promise)
+    const read = store.loadDetail('apv_a')
+    await settle()
+    expect(store.error).toBeNull()
+
+    dispatchActionMock.mockRejectedValueOnce(new Error('该操作已失效'))
+    await expect(store.executeAction('apv_a', { action: 'approve' } as any)).rejects.toThrow('该操作已失效')
+    expect(store.error).toBe('该操作已失效')
+
+    pendingRead.resolve(instance('apv_a', { currentStep: 2 }))
+    await read
+    await settle()
+
+    // The read's own row lands — a failed verb publishes nothing, so there is no authoritative row
+    // for it to defer to — and the failure it raced is still what the reader is being shown.
+    expect(store.activeApproval?.currentStep).toBe(2)
+    expect(store.error).toBe('该操作已失效')
+    expect(store.detailErrorInstanceId).toBeNull()
+  })
+
+  it('B16: a verb failure that lands while the acted instance is being RE-READ is not resurrected on the re-read page', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+
+    const pendingAction = deferred<any>()
+    dispatchActionMock.mockReturnValueOnce(pendingAction.promise)
+    const action = store.executeAction('apv_a', { action: 'approve' } as any)
+
+    // The reader leaves for B and navigates back: A is being re-read (nothing displayed) when the
+    // verb from the earlier visit finally rejects. Nothing retains that failure, so the read that
+    // completes AFTER it — and which therefore cannot clear the error string itself, having nulled
+    // it at its start — must land on a clean surface.
+    getApprovalMock.mockResolvedValueOnce(instance('apv_b'))
+    await store.loadDetail('apv_b')
+    const pendingA = deferred<any>()
+    getApprovalMock.mockReturnValueOnce(pendingA.promise)
+    const reread = store.loadDetail('apv_a')
+    await settle()
+    expect(store.activeApproval).toBeNull()
+
+    pendingAction.reject(new Error('该操作已失效'))
+    await expect(action).rejects.toThrow('该操作已失效')
+    await settle()
+
+    pendingA.resolve(instance('apv_a'))
+    await reread
+    expect(store.activeApproval?.id).toBe('apv_a')
+    expect(store.error).toBeNull()
+    expect(store.detailErrorInstanceId).toBeNull()
+  })
+
   it('a superseded action does not clear the shared loading flag a newer detail load still owns', async () => {
     getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
     const store = useApprovalStore()

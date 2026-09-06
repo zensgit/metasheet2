@@ -75,17 +75,28 @@
       </template>
     </PageHeader>
 
+    <!-- Round 4 (B15): this banner and the read-only refusal below it are ONE fact with one
+         lifecycle. It renders while EITHER the shared error string is set (a rejected timeline
+         fetch, a rejected verb, a list load) OR the displayed instance's last detail read is known
+         to have failed — and while the latter holds it is NOT closable, so the refusal can never be
+         dismissed into a silently disabled page with no way back. `store.error` is nulled by many
+         writers (every loader's start, every verb's start, this alert's own dismiss); the latch is
+         released only by a successful re-read or by leaving the instance, which is exactly when the
+         controls come back. The 重新加载 inside it is the in-page recovery, and it is the ONLY retry
+         affordance in this state — the 未找到该审批 block below renders only with no instance at all,
+         which the latch state never is. -->
     <el-alert
-      v-if="store.error"
-      :title="store.error"
+      v-if="store.error || displayedInstanceLoadFailed"
+      :title="store.error ?? DETAIL_RELOAD_REQUIRED_MESSAGE"
       type="error"
       show-icon
-      :closable="true"
+      :closable="!displayedInstanceLoadFailed"
       class="approval-detail__error"
+      data-testid="approval-detail-error-banner"
       @close="store.error = null"
     >
       <template #default>
-        <el-button type="primary" link @click="retryLoad">重新加载</el-button>
+        <el-button type="primary" link data-testid="approval-detail-retry" @click="retryLoad">重新加载</el-button>
       </template>
     </el-alert>
 
@@ -1272,12 +1283,20 @@ const instanceConsistent = computed(() => displayedInstanceId.value === routeIns
 // store answers this per instance (`detailErrorInstanceId`); the shared `error` string cannot,
 // because a failed TIMELINE fetch or a rejected verb writes it too. `=== null` short-circuit so a
 // store double that predates the field behaves exactly as it did before it existed.
+// The `displayedInstanceId.value !== null` conjunct is LOAD-BEARING, not defensive noise: the latch
+// can legitimately name an instance that is not displayed at all (a first-ever load that failed
+// leaves the slot empty), and without it `null === null` would read as "the displayed instance
+// failed" on a page with no instance, latching the banner open over the 未找到该审批 state.
 const displayedInstanceLoadFailed = computed(
   () => displayedInstanceId.value !== null && store.detailErrorInstanceId === displayedInstanceId.value,
 )
 const actionsEnabled = computed(
   () => instanceConsistent.value && !detailLoadInFlight.value && !displayedInstanceLoadFailed.value,
 )
+// Round 4 (B15): the banner's copy while the refusal is standing but no request has left an error
+// string behind — a same-id reload in flight, or another writer having nulled `store.error`. Fixed,
+// values-free copy: the page must never invent a message the server did not send.
+const DETAIL_RELOAD_REQUIRED_MESSAGE = '该审批的最新内容未能加载，请重新加载后再操作'
 
 /**
  * The id every write verb acts on: the instance actually on screen, or `null` when the page is
@@ -1834,9 +1853,16 @@ const commentDialogVisible = ref(false)
 // close-watcher below only ever DELETEs uploads that were never submitted.
 const commentStagedAttachments = ref<Array<{ id: string; name: string }>>([])
 const commentAttachmentUploading = ref(false)
-// Same "the displayed instance is the route's instance" rule as the action gate — one definition
-// (`instanceConsistent`, declared with the gate above) so the two cannot drift apart.
-const commentAttachmentContextCurrent = instanceConsistent
+// Round 4 (B17): this is the write gate itself (`actionsEnabled`, declared with the verbs above),
+// not a second copy of one of its conjuncts. Uploading a process attachment IS a write, so it is
+// refused in every state a verb is: the displayed instance is not the route's, a detail read for it
+// is still in flight, or its last read failed. It carried only `instanceConsistent` before, which
+// had already drifted from the gate twice (the in-flight conjunct, then the read-failed one) under
+// a comment claiming the two could not — so what makes drift impossible now is the SAME ref rather
+// than the assertion: a fourth conjunct added to `actionsEnabled` reaches this input with no edit
+// here. What is deliberately NOT shared is reachability — the 评论 button that opens this dialog is
+// itself gated, so this predicate governs a dialog that was already open when the state changed.
+const commentAttachmentContextCurrent = actionsEnabled
 // Captured at each pick; incremented (invalidated) by retract BEFORE staged cleanup so a later-
 // resolving upload cannot append into a closed/unmounted/switched context. Empty staged lists
 // still invalidate — that is the in-flight-pick case (nothing to retract yet).

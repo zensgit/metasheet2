@@ -49,8 +49,12 @@ vi.mock('vue-router', async () => {
 // both default to the desktop shape every other test in this file assumes.
 const mockHasFeature = vi.fn().mockReturnValue(false)
 const mockIsMobile = ref(false)
+// Round 4 (B17): the product-feature map the view reads `approvalAttachments` off. Per-test so the
+// comment dialog's file input can be reached; defaults to the flag-OFF shape every other test here
+// assumes.
+const mockProductFeatures = ref<Record<string, unknown>>({})
 vi.mock('../src/stores/featureFlags', () => ({
-  useFeatureFlags: () => ({ hasFeature: (flag: string) => mockHasFeature(flag), features: ref({}) }),
+  useFeatureFlags: () => ({ hasFeature: (flag: string) => mockHasFeature(flag), features: mockProductFeatures }),
 }))
 vi.mock('../src/composables/useMobileViewport', () => ({
   useMobileViewport: () => ({ isMobile: mockIsMobile, updateMobileState: () => {} }),
@@ -148,10 +152,28 @@ const ElButton = defineComponent({
     }, this.$slots.default?.())
   },
 })
+// Round 4 (B15): mirrors el-alert's own dismiss contract rather than inventing one — the close
+// affordance exists ONLY while `closable` is true, and dismissing it is the only thing that emits
+// `close`. `data-closable` exposes the bound prop itself so a test can assert the binding as well
+// as the affordance. The button is appended LAST so the banner's own 重新加载 stays the first
+// `button` in document order for the tests that click it that way.
 const ElAlert = defineComponent({
   name: 'ElAlert',
   props: { title: String, type: String, closable: Boolean, showIcon: Boolean },
-  render() { return h('div', { 'data-el-alert': this.type || 'default' }, [this.title, this.$slots.default?.()]) },
+  emits: ['close'],
+  render() {
+    const children: unknown[] = [this.title, this.$slots.default?.()]
+    if (this.closable) {
+      children.push(h('button', {
+        'data-testid': 'approval-detail-error-close',
+        onClick: () => this.$emit('close'),
+      }, '×'))
+    }
+    return h('div', {
+      'data-el-alert': this.type || 'default',
+      'data-closable': this.closable ? 'true' : 'false',
+    }, children as any)
+  },
 })
 // Renders the reference slot plus a confirm trigger. The trigger fires `@confirm` DIRECTLY — the
 // affordance a disabled reference button cannot gate, which is exactly why the handler carries its
@@ -257,6 +279,7 @@ describe('ApprovalDetailView — instance consistency', () => {
     mockIsMobile.value = false
     mockHasFeature.mockReset()
     mockHasFeature.mockReturnValue(false)
+    mockProductFeatures.value = {}
     markApprovalReadMock.mockClear()
     getApprovalMock.mockReset()
     getApprovalHistoryMock.mockReset()
@@ -1183,5 +1206,325 @@ describe('ApprovalDetailView — instance consistency', () => {
     expect(elMessage.success).toHaveBeenCalledWith('审批已通过')
     expect(store.activeApproval?.status).toBe('approved')
     expect(container!.textContent).toContain('该审批已结束')
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 4 (B15) — the refusal and its explanation are ONE lifecycle.
+  //
+  // Round 3's refusal (B12) was driven by a per-instance latch cleared by a single writer, while
+  // the banner that explains it — and the 重新加载 that is the only in-page way out — was driven by
+  // the SHARED error string, which many writers null. Once the two diverged the page was read-only
+  // with nothing on screen saying why and no retry: recovery needed a navigation or a browser
+  // reload. The banner is now derived from the latch, so the population of `error` writers cannot
+  // strand it, and while the latch is set the banner is not dismissible.
+  //
+  // The fixed copy below is asserted verbatim on purpose: while the refusal stands with no error
+  // string behind it the page must render THIS values-free sentence, never a fabricated one.
+  // -------------------------------------------------------------------------
+  const DETAIL_RELOAD_REQUIRED_MESSAGE = '该审批的最新内容未能加载，请重新加载后再操作'
+
+  function errorBanner(): HTMLElement | null {
+    return q(container!, 'approval-detail-error-banner')
+  }
+
+  /** Mount on A, then fail a same-id reload — the state round 3 introduced. */
+  async function latchDisplayedInstance(): Promise<ReturnType<typeof useApprovalStore>> {
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    await mountView()
+    const store = useApprovalStore()
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    await store.loadDetail('apv_a')
+    await flushUi()
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+    expect((q(container!, 'approval-approve-button') as HTMLButtonElement).disabled).toBe(true)
+    return store
+  }
+
+  it('B15 writer 1 — a timeline refresh nulls the shared error and the banner, its retry and the refusal all stand', async () => {
+    const store = await latchDisplayedInstance()
+
+    // No reader action at all: this is the verb's own post-action `loadHistory`, whose START nulls
+    // the error string. Round 3 lost the banner here while keeping every control disabled.
+    getApprovalHistoryMock.mockResolvedValueOnce([])
+    await store.loadHistory('apv_a')
+    await flushUi()
+
+    expect(store.error).toBeNull()
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+    const banner = errorBanner()
+    expect(banner).toBeTruthy()
+    expect(banner!.textContent).toContain(DETAIL_RELOAD_REQUIRED_MESSAGE)
+    expect(q(container!, 'approval-detail-retry')).toBeTruthy()
+    // Exactly ONE retry affordance in this state — the 未找到该审批 block owns the other one and must
+    // not be rendering here, because the instance IS on screen.
+    expect(q(container!, 'approval-not-found-retry')).toBeNull()
+    expect(container!.textContent).toContain('AP-APV_A')
+    expect((q(container!, 'approval-approve-button') as HTMLButtonElement).disabled).toBe(true)
+    expect((q(container!, 'approval-comment-button') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('B15 writer 2 — a verb start nulls the shared error and the banner, its retry and the refusal all stand', async () => {
+    const store = await latchDisplayedInstance()
+
+    // Driven at the store: the view refuses to dispatch in this state, which is the point of the
+    // latch, so this pins what the START of a verb does to the banner. A promise that never settles
+    // isolates that write from any outcome; it stays dangling for the rest of this test BY DESIGN,
+    // so `store.loading` is `true` from here on — do not append `loading` assertions below it. The
+    // `beforeEach` installs a fresh pinia, so it cannot reach the next test.
+    dispatchActionMock.mockReturnValueOnce(new Promise<any>(() => {}))
+    void store.executeAction('apv_a', { action: 'comment', comment: '一条评论' } as any)
+    await flushUi()
+
+    expect(store.error).toBeNull()
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+    expect(errorBanner()).toBeTruthy()
+    expect(errorBanner()!.textContent).toContain(DETAIL_RELOAD_REQUIRED_MESSAGE)
+    expect(q(container!, 'approval-detail-retry')).toBeTruthy()
+    expect((q(container!, 'approval-approve-button') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('B15 writer 3 — while the refusal stands the banner offers no dismiss; without it, dismissing works', async () => {
+    const store = await latchDisplayedInstance()
+
+    expect(errorBanner()!.getAttribute('data-closable')).toBe('false')
+    expect(q(container!, 'approval-detail-error-close')).toBeNull()
+    expect(q(container!, 'approval-detail-retry')).toBeTruthy()
+
+    // Positive control: the SAME banner, raised by something that does not latch the instance
+    // read-only (a failed timeline fetch), is dismissible exactly as before — this change closes a
+    // dismiss that hid a disabled page, it does not remove the affordance.
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    await store.loadDetail('apv_a')
+    await flushUi()
+    expect(errorBanner()).toBeNull()
+
+    getApprovalHistoryMock.mockRejectedValueOnce(new Error('加载审批历史失败'))
+    await store.loadHistory('apv_a')
+    await flushUi()
+    expect(errorBanner()!.getAttribute('data-closable')).toBe('true')
+    expect((q(container!, 'approval-approve-button') as HTMLButtonElement).disabled).toBe(false)
+
+    q(container!, 'approval-detail-error-close')!.click()
+    await flushUi()
+    expect(store.error).toBeNull()
+    expect(errorBanner()).toBeNull()
+  })
+
+  it('B15 writer 4 — the next detail load keeps the banner and the refusal until it LANDS', async () => {
+    const store = await latchDisplayedInstance()
+
+    const pendingRetry = deferred<any>()
+    getApprovalMock.mockReturnValueOnce(pendingRetry.promise)
+    q(container!, 'approval-detail-retry')!.click()
+    await flushUi()
+
+    // Mid-retry: the error string has been nulled by the load's own start, and round 3 cleared the
+    // latch here too — leaving a disabled page with no banner for the whole flight.
+    expect(store.error).toBeNull()
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+    expect(errorBanner()).toBeTruthy()
+    expect(errorBanner()!.textContent).toContain(DETAIL_RELOAD_REQUIRED_MESSAGE)
+    expect(q(container!, 'approval-detail-retry')).toBeTruthy()
+    expect((q(container!, 'approval-approve-button') as HTMLButtonElement).disabled).toBe(true)
+
+    pendingRetry.resolve(instance('apv_a'))
+    await flushUi(12)
+    expect(store.detailErrorInstanceId).toBeNull()
+    expect(errorBanner()).toBeNull()
+    expect((q(container!, 'approval-approve-button') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 4 (B16) — the verb FAILURE path, against the concurrent-read race the success path is
+  // already pinned against (B8 above). Both halves of the rule documented on `executeAction`.
+  // -------------------------------------------------------------------------
+  it('B16: a verb failure reaches the dialog of the instance it acted on, and a 重新加载 racing it swallows neither', async () => {
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    await mountView()
+    const store = useApprovalStore()
+
+    const pendingAction = deferred<any>()
+    dispatchActionMock.mockImplementation(() => pendingAction.promise)
+    await approveThroughDialog()
+    expect(dispatchActionMock).toHaveBeenCalledWith('apv_a', expect.anything())
+
+    // A same-id 重新加载, reached the way the reader reaches it: over a failed timeline fetch.
+    getApprovalHistoryMock.mockRejectedValueOnce(new Error('加载审批历史失败'))
+    await store.loadHistory('apv_a')
+    await flushUi()
+    const pendingRead = deferred<any>()
+    getApprovalMock.mockReturnValueOnce(pendingRead.promise)
+    getApprovalHistoryMock.mockResolvedValueOnce([])
+    q(container!, 'approval-detail-retry')!.click()
+    await flushUi()
+    expect(store.error).toBeNull()
+
+    pendingAction.reject(new Error('该操作已失效'))
+    await flushUi(12)
+
+    // Surfaced, because the instance it acted on is the one still displayed.
+    expect(setupState().actionDialogError).toBe('该操作已失效')
+    expect(q(container!, 'approval-action-dialog-error')).toBeTruthy()
+    expect(store.error).toBe('该操作已失效')
+
+    // ...and the read it raced, settling afterwards, erases neither.
+    pendingRead.resolve(instance('apv_a', { currentStep: 2 }))
+    await flushUi(12)
+    expect(store.activeApproval?.currentStep).toBe(2)
+    expect(setupState().actionDialogError).toBe('该操作已失效')
+    expect(store.error).toBe('该操作已失效')
+    expect(errorBanner()).toBeTruthy()
+  })
+
+  it('B16 positive control: the same failure after the reader has switched instances announces nothing', async () => {
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    await mountView()
+    const store = useApprovalStore()
+
+    const pendingAction = deferred<any>()
+    dispatchActionMock.mockImplementation(() => pendingAction.promise)
+    await approveThroughDialog()
+
+    mockRouteParams.id = 'apv_b'
+    await flushUi(12)
+    expect(store.activeApproval?.id).toBe('apv_b')
+
+    pendingAction.reject(new Error('该操作已失效'))
+    await flushUi(12)
+
+    expect(setupState().actionDialogError).toBeNull()
+    expect(store.error).toBeNull()
+    expect(errorBanner()).toBeNull()
+    expect(q(container!, 'approval-action-dialog-error')).toBeNull()
+    expect(elMessage.error).not.toHaveBeenCalled()
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 4 (B17) — the comment dialog's file input is a WRITE affordance, so it is gated by the
+  // verbs' own predicate rather than by a hand-copied conjunct of it. Round 3 left it carrying only
+  // the id-equality half while the verbs had grown two more, under a comment claiming the two could
+  // not drift.
+  //
+  // The `ElDialog` stub renders its slots regardless of `modelValue`, so what these rows assert is
+  // the input's OWN `disabled` binding — which is the thing that has to hold, because the reachable
+  // construction is a dialog that was already open when the state changed.
+  // -------------------------------------------------------------------------
+  function myTurnInstance(id: string): any {
+    return instance(id, {
+      assignments: [{
+        assigneeId: 'user_99',
+        type: 'user',
+        isActive: true,
+        nodeKey: 'approval_1',
+        metadata: { assigneeName: '张三' },
+      }],
+    })
+  }
+
+  /**
+   * The input, asserted PRESENT before its `disabled` is read. A vanished input (the `v-if` on
+   * `attachmentPipelineEnabled && isMyTurn` stops rendering it) must never be able to read as a
+   * refused one — that is the shape in which a three-state gate assertion goes vacuous.
+   */
+  function presentAttachmentInput(state: string): HTMLInputElement {
+    const input = q(container!, 'approval-comment-attachment-input') as HTMLInputElement | null
+    expect(input, `the attachment input must still be rendered in state: ${state}`).toBeTruthy()
+    return input!
+  }
+
+  it('B17: the comment attachment input is refused in each of the three states the write verbs are', async () => {
+    mockProductFeatures.value = { approvalAttachments: true }
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(myTurnInstance(id)))
+    await mountView()
+    const store = useApprovalStore()
+    setupState().commentDialogVisible = true
+    await flushUi()
+
+    // Positive control: all three conjuncts hold.
+    expect(presentAttachmentInput('positive control').disabled).toBe(false)
+
+    // State 2 — a detail read for the displayed instance is still in flight. The OTHER two
+    // conjuncts are asserted to still hold, so the refusal below can only be this one's.
+    const pendingReload = deferred<any>()
+    getApprovalMock.mockReturnValueOnce(pendingReload.promise)
+    void store.loadDetail('apv_a')
+    await flushUi()
+    expect(store.detailLoading).toBe(true)
+    expect(store.detailErrorInstanceId).toBeNull()
+    expect(store.activeApproval?.id).toBe('apv_a')
+    expect(presentAttachmentInput('detail read in flight').disabled).toBe(true)
+    pendingReload.resolve(myTurnInstance('apv_a'))
+    await flushUi(12)
+    expect(presentAttachmentInput('after the reload lands').disabled).toBe(false)
+
+    // State 3 — the displayed instance's last read failed. Again isolated: nothing is in flight and
+    // the displayed instance is still the route's.
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    await store.loadDetail('apv_a')
+    await flushUi()
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+    expect(store.detailLoading).toBe(false)
+    expect(store.activeApproval?.id).toBe('apv_a')
+    expect(presentAttachmentInput('last read failed').disabled).toBe(true)
+
+    // State 1 — the displayed instance is not the route's instance.
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(myTurnInstance(id)))
+    await store.loadDetail('apv_a')
+    await flushUi()
+    expect(presentAttachmentInput('after a successful retry').disabled).toBe(false)
+    mockRouteParams.id = 'apv_b'
+    await flushUi(12)
+    store.activeApproval = myTurnInstance('apv_a')
+    setupState().commentDialogVisible = true
+    await flushUi()
+    expect(store.detailLoading).toBe(false)
+    expect(store.detailErrorInstanceId).toBeNull()
+    expect(presentAttachmentInput('displayed instance is not the route instance').disabled).toBe(true)
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 4 (B18) — the eight-row table above reaches the mismatch by hand-writing
+  // `store.activeApproval` after the route has moved. This row reaches the SAME state through the
+  // real navigation tick instead: `watch(() => route.params.id, …)` has Vue's default `flush: 'pre'`
+  // scheduling, so the callback is queued as a microtask and the window in which the route already
+  // says B while the store still holds A is the scheduler's, not a timer's. No fake timers are
+  // needed (and none would help — there is no timer in this path).
+  //
+  // The window is anchored on both sides so a green cannot come from the wrong cause: before the
+  // click, the construction is asserted to be real (route B, store A, no request issued for B);
+  // after it, the watcher is asserted to have actually run, which is what proves the refusal
+  // happened inside the tick rather than after it.
+  // -------------------------------------------------------------------------
+  it('B18: the mismatch reached through the real route-change tick refuses the popconfirm verb', async () => {
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    await mountView()
+    const store = useApprovalStore()
+    getApprovalMock.mockClear()
+
+    mockRouteParams.id = 'apv_b'
+    // Inside the tick: the params-id watcher has NOT run yet.
+    expect(store.activeApproval?.id).toBe('apv_a')
+    expect(getApprovalMock).not.toHaveBeenCalled()
+
+    // The popconfirm's `@confirm` is the affordance no `disabled` binding reaches, so this is the
+    // one write site for which the tick window is genuinely live.
+    q(container!, 'popconfirm-confirm-trigger')!.click()
+    expect(dispatchActionMock).not.toHaveBeenCalled()
+
+    await flushUi(12)
+    expect(getApprovalMock).toHaveBeenCalledWith('apv_b')
+    expect(dispatchActionMock).not.toHaveBeenCalled()
+  })
+
+  it('B18 positive control: the same synchronous confirm with the route unchanged does dispatch', async () => {
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    await mountView()
+
+    q(container!, 'popconfirm-confirm-trigger')!.click()
+    expect(dispatchActionMock).toHaveBeenCalledTimes(1)
+    expect(dispatchActionMock.mock.calls[0][0]).toBe('apv_a')
+
+    await flushUi(12)
+    expect(dispatchActionMock).toHaveBeenCalledTimes(1)
   })
 })
