@@ -41,9 +41,20 @@ describe('elearning watch challenge migration contract', () => {
     expect(source).toContain('row.function_oid !== row.canonical_oid')
   })
 
-  it('refuses a destructive down when authoritative rows exist', async () => {
+  it('locks every authority source and refuses down for rows or configured policy', async () => {
     const source = await readFile(migrationUrl, 'utf8')
     expect(source).toContain('down refused: authoritative rows exist')
+    expect(source).toContain('LOCK TABLE')
+    expect(source).toContain('elearning_course_version_items,')
+    expect(source).toContain('elearning_watch_challenge_schedules,')
+    expect(source).toContain('elearning_watch_challenge_requests,')
+    expect(source).toContain('elearning_watch_challenge_events')
+    expect(source).toContain('IN ACCESS EXCLUSIVE MODE')
+    expect(source).toContain('row.policies !== \'0\'')
+    expect(source).toContain('watch_challenge_policy_revision IS NOT NULL')
+    expect(source).toContain('watch_challenge_count IS NOT NULL')
+    expect(source).toContain('watch_challenge_min_duration_ms IS NOT NULL')
+    expect(source).toContain('watch_challenge_response_window_ms IS NOT NULL')
     expect(source).toContain("row.schedules !== '0'")
     expect(source).toContain("row.events !== '0'")
     expect(source).toContain("row.requests !== '0'")

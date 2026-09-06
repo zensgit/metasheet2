@@ -608,14 +608,39 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   if (!existing.every(Boolean)) {
     throw new Error('elearning watch challenge down refused: partial authority')
   }
-  const counts = await sql<{ schedules: string; events: string; requests: string }>`
+  await sql`
+    LOCK TABLE
+      elearning_course_version_items,
+      elearning_watch_challenge_schedules,
+      elearning_watch_challenge_requests,
+      elearning_watch_challenge_events
+    IN ACCESS EXCLUSIVE MODE
+  `.execute(db)
+  const counts = await sql<{
+    policies: string
+    schedules: string
+    events: string
+    requests: string
+  }>`
     SELECT
+      (SELECT count(*)::text
+         FROM elearning_course_version_items
+        WHERE watch_challenge_policy_revision IS NOT NULL
+           OR watch_challenge_count IS NOT NULL
+           OR watch_challenge_min_duration_ms IS NOT NULL
+           OR watch_challenge_response_window_ms IS NOT NULL) AS policies,
       (SELECT count(*)::text FROM elearning_watch_challenge_schedules) AS schedules,
       (SELECT count(*)::text FROM elearning_watch_challenge_events) AS events,
       (SELECT count(*)::text FROM elearning_watch_challenge_requests) AS requests
   `.execute(db)
   const row = counts.rows[0]
-  if (!row || row.schedules !== '0' || row.events !== '0' || row.requests !== '0') {
+  if (
+    !row
+    || row.policies !== '0'
+    || row.schedules !== '0'
+    || row.events !== '0'
+    || row.requests !== '0'
+  ) {
     throw new Error('elearning watch challenge down refused: authoritative rows exist')
   }
   await sql`DROP TABLE elearning_watch_challenge_requests`.execute(db)

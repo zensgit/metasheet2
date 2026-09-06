@@ -65,8 +65,42 @@ interface Seed {
   versionId: string
 }
 
+async function seedDraftVideoItem(): Promise<{ itemId: string; versionId: string }> {
+  const courseId = randomUUID()
+  const versionId = randomUUID()
+  const mediaId = randomUUID()
+  const itemId = randomUUID()
+  await pool.query(
+    `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
+     VALUES ($1, $2, 'Draft challenge course', 'active', $3)`,
+    [courseId, ORG, `${NS}-author`],
+  )
+  await pool.query(
+    `INSERT INTO elearning_course_versions
+       (id, org_id, course_id, version, status, title, created_by)
+     VALUES ($1, $2, $3, 1, 'draft', 'Draft version', $4)`,
+    [versionId, ORG, courseId, `${NS}-author`],
+  )
+  await pool.query(
+    `INSERT INTO elearning_media (
+       id, org_id, storage_key, mime_type, magic_mime_type, size_bytes,
+       sha256, duration_ms, status, created_by
+     ) VALUES ($1, $2, $3, 'video/mp4', 'video/mp4', 1024, $4, 100000, 'ready', $5)`,
+    [mediaId, ORG, `${NS}/draft-video`, 'b'.repeat(64), `${NS}-author`],
+  )
+  await pool.query(
+    `INSERT INTO elearning_course_version_items (
+       id, org_id, course_version_id, item_type, position, media_id, exam_id,
+       completion_policy_version, completion_threshold_bps
+     ) VALUES ($1, $2, $3, 'video', 1, $4, NULL, 'video-v1-90pct', 9000)`,
+    [itemId, ORG, versionId, mediaId],
+  )
+  return { itemId, versionId }
+}
+
 async function seed(options: {
   challengeCount?: number
+  challengeMinDurationMs?: number
   policy?: 'configured' | 'disabled'
   startChallengeEnabled?: boolean
 } = {}): Promise<Seed> {
@@ -140,7 +174,7 @@ async function seed(options: {
       videoItemId, ORG, versionId, mediaId,
       options.policy === 'disabled' ? null : 'watch-challenge-v1',
       options.policy === 'disabled' ? null : (options.challengeCount ?? 1),
-      options.policy === 'disabled' ? null : 1,
+      options.policy === 'disabled' ? null : (options.challengeMinDurationMs ?? 1),
       options.policy === 'disabled' ? null : 120000,
     ],
   )
@@ -220,6 +254,65 @@ async function challengeSelections(challenge: { challengeId: string }): Promise<
     throw new Error('invalid challenge authority')
   }
   return selections as [string, string]
+}
+
+async function authoritySnapshot(seedRow: Seed): Promise<Record<string, unknown>> {
+  const queries = await Promise.all([
+    pool.query(
+      `SELECT to_jsonb(session_row) AS value
+         FROM elearning_learning_sessions session_row
+        WHERE org_id = $1 AND id = $2`,
+      [ORG, seedRow.sessionId],
+    ),
+    pool.query(
+      `SELECT to_jsonb(progress_row) AS value
+         FROM elearning_progress progress_row
+        WHERE org_id = $1 AND user_id = $2 AND course_version_item_id = $3`,
+      [ORG, USER, seedRow.itemId],
+    ),
+    pool.query(
+      `SELECT to_jsonb(event_row) AS value
+         FROM elearning_progress_events event_row
+        WHERE org_id = $1 AND session_id = $2
+        ORDER BY sequence`,
+      [ORG, seedRow.sessionId],
+    ),
+    pool.query(
+      `SELECT to_jsonb(schedule_row) AS value
+         FROM elearning_watch_challenge_schedules schedule_row
+        WHERE org_id = $1 AND session_id = $2`,
+      [ORG, seedRow.sessionId],
+    ),
+    pool.query(
+      `SELECT to_jsonb(event_row) AS value
+         FROM elearning_watch_challenge_events event_row
+        WHERE org_id = $1 AND session_id = $2
+        ORDER BY occurred_at, id`,
+      [ORG, seedRow.sessionId],
+    ),
+    pool.query(
+      `SELECT to_jsonb(request_row) AS value
+         FROM elearning_watch_challenge_requests request_row
+        WHERE org_id = $1 AND session_id = $2
+        ORDER BY created_at, id`,
+      [ORG, seedRow.sessionId],
+    ),
+    pool.query(
+      `SELECT to_jsonb(evidence_row) AS value
+         FROM elearning_completion_evidence evidence_row
+        WHERE org_id = $1 AND user_id = $2 AND course_version_item_id = $3`,
+      [ORG, USER, seedRow.itemId],
+    ),
+  ])
+  return {
+    session: queries[0].rows,
+    progress: queries[1].rows,
+    progressEvents: queries[2].rows,
+    schedule: queries[3].rows,
+    challengeEvents: queries[4].rows,
+    challengeRequests: queries[5].rows,
+    evidence: queries[6].rows,
+  }
 }
 
 async function pinFirstCheckpoint(sessionId: string): Promise<void> {
@@ -678,9 +771,47 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
       [ORG, disabled.sessionId],
     )
     expect(mode.rows).toEqual([{ mode: 'disabled' }])
-    const credited = await heartbeat(disabled, 1, 20_000)
+    await pool.query(
+      `UPDATE elearning_learning_sessions
+          SET last_event_at = clock_timestamp() - interval '30 seconds'
+        WHERE org_id = $1 AND id = $2`,
+      [ORG, disabled.sessionId],
+    )
+    const credited = await recordElearningHeartbeat(db, {
+      orgId: ORG,
+      userId: USER,
+      sessionId: disabled.sessionId,
+      sequence: 1,
+      positionMs: 20_000,
+      playing: true,
+    })
     expect(credited.creditedMs).toBeGreaterThan(0)
-    expect(credited.challenge).toBeNull()
+    expect(credited.challenge).toBeUndefined()
+
+    await cleanup()
+    const exempt = await seed({ challengeMinDurationMs: 200_000 })
+    const exemptMode = await pool.query(
+      `SELECT mode FROM elearning_watch_challenge_schedules
+        WHERE org_id = $1 AND session_id = $2`,
+      [ORG, exempt.sessionId],
+    )
+    expect(exemptMode.rows).toEqual([{ mode: 'short_video_exempt' }])
+    await pool.query(
+      `UPDATE elearning_learning_sessions
+          SET last_event_at = clock_timestamp() - interval '30 seconds'
+        WHERE org_id = $1 AND id = $2`,
+      [ORG, exempt.sessionId],
+    )
+    const exemptCredited = await recordElearningHeartbeat(db, {
+      orgId: ORG,
+      userId: USER,
+      sessionId: exempt.sessionId,
+      sequence: 1,
+      positionMs: 20_000,
+      playing: true,
+    })
+    expect(exemptCredited.creditedMs).toBeGreaterThan(0)
+    expect(exemptCredited.challenge).toBeUndefined()
 
     await cleanup()
     const hotEnabled = await seed({ startChallengeEnabled: false })
@@ -694,6 +825,39 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
       [ORG, hotEnabled.itemId, USER],
     )
     expect(progress.rows).toEqual([{ effective_ms: 0 }])
+  })
+
+  it('fails closed without writes when a scheduled challenge outlives the flag and resumes it', async () => {
+    await cleanup()
+    const seeded = await seed()
+    const issued = await issueChallenge(seeded)
+    const challengeId = issued.state.challenge!.challengeId
+    const nextSequence = issued.sequence + 1
+    const before = await authoritySnapshot(seeded)
+
+    await expect(recordElearningHeartbeat(db, {
+      orgId: ORG,
+      userId: USER,
+      sessionId: seeded.sessionId,
+      sequence: nextSequence,
+      positionMs: nextSequence * 20_000,
+      playing: true,
+    })).rejects.toSatisfy((error: unknown) => {
+      expectCode(error, 'unavailable')
+      return true
+    })
+    expect(await authoritySnapshot(seeded)).toEqual(before)
+
+    const resumed = await recordElearningHeartbeat(db, {
+      orgId: ORG,
+      userId: USER,
+      sessionId: seeded.sessionId,
+      sequence: nextSequence,
+      positionMs: nextSequence * 20_000,
+      playing: true,
+      challengeEnabled: true,
+    })
+    expect(resumed.challenge?.challengeId).toBe(challengeId)
   })
 
   it('discards timed-out provisional credit and keeps completion evidence absent', async () => {
@@ -894,5 +1058,79 @@ describe.sequential('elearning watch challenge PostgreSQL authority', () => {
     expect(removed.rows[0]?.table_name).toBeNull()
     await kysely.transaction().execute((tx) => challengeUp(tx))
     await kysely.transaction().execute((tx) => challengeUp(tx))
+  })
+
+  it('refuses down for configured policy even when no challenge schedule exists', async () => {
+    await cleanup()
+    const configured = await seed({ startChallengeEnabled: false })
+    const schedules = await pool.query(
+      `SELECT count(*)::int AS count FROM elearning_watch_challenge_schedules
+        WHERE org_id = $1 AND session_id = $2`,
+      [ORG, configured.sessionId],
+    )
+    expect(schedules.rows).toEqual([{ count: 0 }])
+    await expect(kysely.transaction().execute((tx) => challengeDown(tx))).rejects.toThrow(
+      'down refused: authoritative rows exist',
+    )
+    const policy = await pool.query(
+      `SELECT watch_challenge_policy_revision, watch_challenge_count,
+              watch_challenge_min_duration_ms::int AS watch_challenge_min_duration_ms,
+              watch_challenge_response_window_ms::int AS watch_challenge_response_window_ms
+         FROM elearning_course_version_items
+        WHERE org_id = $1 AND id = $2`,
+      [ORG, configured.itemId],
+    )
+    expect(policy.rows).toEqual([{
+      watch_challenge_policy_revision: 'watch-challenge-v1',
+      watch_challenge_count: 1,
+      watch_challenge_min_duration_ms: 1,
+      watch_challenge_response_window_ms: 120_000,
+    }])
+  })
+
+  it('locks policy writers before deciding whether down is safe', async () => {
+    await cleanup()
+    const disabled = await seedDraftVideoItem()
+    const writer = await pool.connect()
+    let writerOpen = false
+    try {
+      await writer.query('BEGIN')
+      writerOpen = true
+      await writer.query(
+        `UPDATE elearning_course_version_items
+            SET watch_challenge_policy_revision = 'watch-challenge-v1',
+                watch_challenge_count = 1,
+                watch_challenge_min_duration_ms = 1,
+                watch_challenge_response_window_ms = 120000
+          WHERE org_id = $1 AND id = $2`,
+        [ORG, disabled.itemId],
+      )
+      const down = kysely.transaction().execute((tx) => challengeDown(tx))
+      let downSettled = false
+      const outcome = down.then(
+        () => {
+          downSettled = true
+          return { status: 'fulfilled' as const, error: null }
+        },
+        (error: unknown) => {
+          downSettled = true
+          return { status: 'rejected' as const, error }
+        },
+      )
+      await new Promise((resolve) => setTimeout(resolve, 75))
+      expect(downSettled).toBe(false)
+
+      await writer.query('COMMIT')
+      writerOpen = false
+      const result = await outcome
+      expect(result.status).toBe('rejected')
+      expect(result.error).toBeInstanceOf(Error)
+      expect((result.error as Error).message).toContain(
+        'down refused: authoritative rows exist',
+      )
+    } finally {
+      if (writerOpen) await writer.query('ROLLBACK')
+      writer.release()
+    }
   })
 })

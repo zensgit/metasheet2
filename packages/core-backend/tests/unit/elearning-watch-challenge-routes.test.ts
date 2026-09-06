@@ -107,13 +107,48 @@ describe('elearning watch challenge routes', () => {
     }])
   })
 
-  it('keeps the legacy start payload byte-shaped when the challenge flag is off', async () => {
+  it('keeps legacy start and heartbeat payloads byte-shaped when the challenge flag is off', async () => {
     const start = vi.fn(async () => STATE)
+    const heartbeat = vi.fn(async () => STATE)
+    const env = { ...FLAGS, ELEARNING_WATCH_CHALLENGE_ENABLED: 'false' }
     await api({
-      env: { ...FLAGS, ELEARNING_WATCH_CHALLENGE_ENABLED: 'false' },
+      env,
       start,
     }).post(`/api/elearning/watch/items/${ITEM}/start`).send({}).expect(200)
+    await api({ env, heartbeat })
+      .post(`/api/elearning/watch/sessions/${SESSION}/heartbeat`)
+      .send({ sequence: 1, positionMs: 1000, playing: true })
+      .expect(200)
     expect(start).toHaveBeenCalledWith({ orgId: ORG, userId: USER, itemId: ITEM })
+    expect(heartbeat).toHaveBeenCalledWith({
+      orgId: ORG,
+      userId: USER,
+      sessionId: SESSION,
+      sequence: 1,
+      positionMs: 1000,
+      playing: true,
+    })
+  })
+
+  it('lets heartbeat fail closed on persisted challenge authority after a hot disable', async () => {
+    const heartbeat = vi.fn(async () => {
+      throw new ElearningWatchError('unavailable')
+    })
+    await api({
+      env: { ...FLAGS, ELEARNING_WATCH_CHALLENGE_ENABLED: 'false' },
+      heartbeat,
+    })
+      .post(`/api/elearning/watch/sessions/${SESSION}/heartbeat`)
+      .send({ sequence: 1, positionMs: 1000, playing: true })
+      .expect(503, { error: 'unavailable' })
+    expect(heartbeat).toHaveBeenCalledWith({
+      orgId: ORG,
+      userId: USER,
+      sessionId: SESSION,
+      sequence: 1,
+      positionMs: 1000,
+      playing: true,
+    })
   })
 
   it('acks with server-derived org/user and a closed request body', async () => {
