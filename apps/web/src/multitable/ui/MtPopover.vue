@@ -126,9 +126,10 @@ defineExpose({ close })
   min-width: 160px;
   box-sizing: border-box;
   background: var(--ms-bg-card);
-  border: 1px solid var(--ms-border);
-  border-radius: var(--ms-radius-md);
-  box-shadow: var(--ms-shadow-pop);
+  border: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  border-radius: var(--ms-radius-sm);
+  box-shadow: none;
   padding: var(--ms-space-1) 0;
+  font-size: var(--ms-sheet-font-body, 13px);
 }
 </style>

@@ -196,8 +196,8 @@ function onValueChange(value: string) {
 
 <style scoped>
 .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
-.meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
-.meta-toolbar__filter-value { flex: 1; min-width: 80px; padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
+.meta-toolbar__filter-rule select { padding: 2px 6px; font-size: var(--ms-sheet-font-header, 12px); border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); background: transparent; }
+.meta-toolbar__filter-value { flex: 1; min-width: 80px; padding: 2px 6px; font-size: var(--ms-sheet-font-header, 12px); border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); }
 .meta-toolbar__filter-empty-hint { flex: 1; min-width: 80px; color: #999; font-size: 12px; }
 .meta-toolbar__field-type { font-size: 10px; color: #aaa; margin-left: auto; }
 .meta-toolbar__remove { border: none; background: none; color: #999; cursor: pointer; font-size: 16px; }

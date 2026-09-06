@@ -717,10 +717,10 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 <style scoped>
 .meta-record-drawer__field { margin-bottom: 14px; }
 .meta-record-drawer__field-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
-.meta-record-drawer__label { display: block; font-size: 12px; color: #999; }
+.meta-record-drawer__label { display: block; font-size: var(--ms-sheet-font-header, 12px); color: var(--ms-text-3, #9ca3af); font-weight: 500; }
 .meta-record-drawer__ai-actions { display: inline-flex; gap: 4px; margin-left: auto; }
-.meta-record-drawer__ai-btn { padding: 1px 8px; border: 1px solid #c7d2fe; border-radius: 999px; background: #eef2ff; color: #4338ca; cursor: pointer; font-size: 11px; }
-.meta-record-drawer__ai-btn--run { border-color: #a7f3d0; background: #ecfdf5; color: #047857; }
+.meta-record-drawer__ai-btn { padding: 1px 8px; border: 1px solid transparent; border-radius: var(--ms-radius-sm, 6px); background: transparent; color: var(--ms-sheet-icon-color, #6b7280); cursor: pointer; font-size: 11px; }
+.meta-record-drawer__ai-btn--run { border-color: transparent; background: transparent; color: var(--ms-color-primary); }
 .meta-record-drawer__ai-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .meta-record-drawer__ai-status { margin-top: 4px; font-size: 11px; color: #4338ca; }
 .meta-record-drawer__ai-status--error { color: #b91c1c; }
@@ -729,14 +729,15 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__comment-anchor:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
 .meta-record-drawer__comment-anchor--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-record-drawer__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
-.meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
+.meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); font-size: var(--ms-sheet-font-body, 13px); background: var(--ms-bg-card, #fff); }
 .meta-record-drawer__input--multi { min-height: 96px; }
 .meta-record-drawer__textarea {
-  width: 100%; min-height: 104px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 3px;
-  font-size: 13px; line-height: 1.45; resize: vertical; white-space: pre-wrap;
+  width: 100%; min-height: 104px; padding: 6px 8px;
+  font-size: var(--ms-sheet-font-body, 13px); line-height: 1.45; resize: vertical; white-space: pre-wrap;
+  border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px);
 }
 .meta-record-drawer__check { cursor: pointer; }
-.meta-record-drawer__link-btn { padding: 4px 10px; border: 1px solid #409eff; border-radius: 3px; background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 12px; }
+.meta-record-drawer__link-btn { padding: 4px 10px; border: 1px solid transparent; border-radius: var(--ms-radius-sm, 6px); background: transparent; color: var(--ms-color-primary); cursor: pointer; font-size: var(--ms-sheet-font-header, 12px); }
 /* B1-e button field (record drawer); mirrors the B1-b grid cell variants. */
 .meta-record-drawer__button { display: inline-flex; align-items: center; max-width: 100%; padding: 4px 12px; font-size: 13px; line-height: 18px; border: 1px solid transparent; border-radius: 4px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-record-drawer__button:disabled { opacity: 0.6; cursor: default; }
@@ -752,5 +753,5 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__attachment-clear:disabled { opacity: 0.5; cursor: not-allowed; }
 .meta-record-drawer__uploading { font-size: 12px; color: #409eff; }
 .meta-record-drawer__error { color: #f56c6c; font-size: 12px; }
-.meta-record-drawer__text { font-size: 13px; color: #333; white-space: pre-wrap; word-break: break-word; }
+.meta-record-drawer__text { font-size: var(--ms-sheet-font-body, 13px); color: var(--ms-text-1, #111827); white-space: pre-wrap; word-break: break-word; }
 </style>

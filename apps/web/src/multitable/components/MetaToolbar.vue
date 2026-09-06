@@ -555,7 +555,7 @@ function onAddFilterGroup() {
 .meta-toolbar__icon-btn.is-active .meta-toolbar__badge { color: var(--ms-color-primary); }
 .meta-toolbar__dropdown { position: relative; }
 .meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); box-shadow: var(--ms-shadow-pop, 0 4px 12px rgba(0,0,0,.1)); padding: 8px; margin-top: 4px; }
-.meta-toolbar__panel--filter { min-width: 420px; }
+.meta-toolbar__panel--filter { min-width: 280px; }
 /* Hide-fields panel (UI-P2-1c slice-3): hosted inside MtPopover's own `.mt-popover` surface (which
    only pads top/bottom), so this class supplies the horizontal breathing room the old
    `.meta-toolbar__panel { padding: 8px }` gave the toggle rows — same 8px, all sides. */
@@ -568,20 +568,20 @@ function onAddFilterGroup() {
 /* Filter builder panel (UI-P2-1c slice-5): same rationale as the hide-fields/sort panels above —
    hosted inside MtPopover's own `.mt-popover` surface (which only pads top/bottom), so this class
    supplies the horizontal breathing room the old `.meta-toolbar__panel { padding: 8px }` gave the
-   builder rows. Combined with the pre-existing `.meta-toolbar__panel--filter` class (kept for its
-   `min-width: 420px`, and so it stays a stable selector for the filter-builder tests). */
+   builder rows. Combined with the pre-existing `.meta-toolbar__panel--filter` class (kept as a
+   stable selector for the filter-builder tests; min-width is content-driven, not a 420px floor). */
 .meta-toolbar__filter-panel { padding: var(--ms-space-2); box-sizing: border-box; }
 .meta-toolbar__group-panel { padding: var(--ms-space-2); box-sizing: border-box; }
 .meta-toolbar__sort-rule, .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
-.meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
-.meta-toolbar__filter-value { flex: 1; min-width: 80px; padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
-.meta-toolbar__filter-empty-hint { flex: 1; min-width: 80px; color: #999; font-size: 12px; }
-.meta-toolbar__conjunction { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666; margin-bottom: 6px; }
-.meta-toolbar__conjunction select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
+.meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: var(--ms-sheet-font-header, 12px); border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); background: transparent; }
+.meta-toolbar__filter-value { flex: 1; min-width: 80px; padding: 2px 6px; font-size: var(--ms-sheet-font-header, 12px); border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); }
+.meta-toolbar__filter-empty-hint { flex: 1; min-width: 80px; color: var(--ms-text-3, #9ca3af); font-size: var(--ms-sheet-font-header, 12px); }
+.meta-toolbar__conjunction { display: flex; align-items: center; gap: 6px; font-size: var(--ms-sheet-font-header, 12px); color: var(--ms-text-2, #4b5563); margin-bottom: 6px; }
+.meta-toolbar__conjunction select { padding: 2px 6px; font-size: var(--ms-sheet-font-header, 12px); border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); background: transparent; }
 .meta-toolbar__filter-actions { display: flex; gap: 12px; margin-top: 4px; }
 .meta-toolbar__remove { border: none; background: none; color: #999; cursor: pointer; font-size: 16px; }
 .meta-toolbar__remove:hover { color: #f56c6c; }
-.meta-toolbar__add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 4px 0; }
+.meta-toolbar__add { border: none; background: none; color: var(--ms-color-primary); cursor: pointer; font-size: var(--ms-sheet-font-header, 12px); padding: 4px 0; }
 .meta-toolbar__add:hover { text-decoration: underline; }
 .meta-toolbar__add--danger { color: #f56c6c; }
 .meta-toolbar__apply { display: block; width: 100%; margin-top: 8px; padding: 5px 0; background: var(--ms-color-primary, #245bdb); color: #fff; border: none; border-radius: var(--ms-radius-sm, 6px); font-size: 12px; cursor: pointer; }
@@ -591,11 +591,11 @@ function onAddFilterGroup() {
 .meta-toolbar__field-type { font-size: 10px; color: #aaa; margin-left: auto; }
 .meta-toolbar__panel--group { min-width: 260px; }
 .meta-toolbar__group-level { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
-.meta-toolbar__group-level-prefix { font-size: 12px; color: #666; min-width: 56px; }
-.meta-toolbar__group-select { flex: 1; padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
+.meta-toolbar__group-level-prefix { font-size: var(--ms-sheet-font-header, 12px); color: var(--ms-text-2, #4b5563); min-width: 56px; }
+.meta-toolbar__group-select { flex: 1; padding: 2px 6px; font-size: var(--ms-sheet-font-header, 12px); border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); background: transparent; }
 .meta-toolbar__group-remove { border: none; background: none; color: #999; cursor: pointer; font-size: 16px; line-height: 1; }
 .meta-toolbar__group-remove:hover { color: #f56c6c; }
-.meta-toolbar__group-add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 4px 0; }
+.meta-toolbar__group-add { border: none; background: none; color: var(--ms-color-primary); cursor: pointer; font-size: var(--ms-sheet-font-header, 12px); padding: 4px 0; }
 .meta-toolbar__group-add:hover { text-decoration: underline; }
 .meta-toolbar__search { display: flex; align-items: center; gap: 6px; height: var(--ms-control-height, 28px); box-sizing: border-box; border: 1px solid transparent; border-radius: var(--ms-radius-sm, 6px); padding: 0 8px; background: transparent; transition: border-color 0.2s, background 0.2s; flex: 1 1 96px; min-width: 96px; max-width: 220px; }
 .meta-toolbar__search:focus-within { border-color: var(--ms-sheet-hairline, #ebebeb); background: var(--ms-bg-card, #fff); }

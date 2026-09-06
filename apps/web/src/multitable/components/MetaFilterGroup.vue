@@ -114,12 +114,12 @@ function onAddGroup() {
 </script>
 
 <style scoped>
-.meta-filter-group { border: 1px solid #e5e7eb; border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; background: #fafafa; }
-.meta-filter-group__bar { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666; margin-bottom: 6px; }
-.meta-filter-group__conj { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
+.meta-filter-group { border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); padding: 6px 8px; margin-bottom: 6px; background: var(--ms-bg-card, #fff); }
+.meta-filter-group__bar { display: flex; align-items: center; gap: 6px; font-size: var(--ms-sheet-font-header, 12px); color: var(--ms-text-2, #4b5563); margin-bottom: 6px; }
+.meta-filter-group__conj { padding: 2px 6px; font-size: var(--ms-sheet-font-header, 12px); border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); background: transparent; }
 .meta-filter-group__remove { margin-left: auto; border: none; background: none; color: #999; cursor: pointer; font-size: 16px; }
 .meta-filter-group__remove:hover { color: #f56c6c; }
-.meta-filter-group__children { padding-left: 8px; border-left: 2px solid #eee; }
+.meta-filter-group__children { padding-left: 8px; border-left: 1px solid var(--ms-sheet-hairline, #ebebeb); }
 .meta-filter-group__actions { display: flex; gap: 12px; margin-top: 4px; }
 /* .meta-filter-group__add: both sharers (add-condition / add-group) are now <MtLink> (UI-P2-1c T3);
    the bespoke #409eff text is normalized to --ms-color-primary. Bespoke CSS removed (no

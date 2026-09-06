@@ -726,7 +726,16 @@ async function toggleRecordSubscription() {
 </script>
 
 <style scoped>
-.meta-record-drawer { width: 360px; border-left: 1px solid #e5e7eb; background: #fff; display: flex; flex-direction: column; overflow-y: auto; }
+.meta-record-drawer {
+  width: 360px;
+  border-left: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  background: var(--ms-bg-card, #fff);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  font-size: var(--ms-sheet-font-body, 13px);
+  font-variant-numeric: tabular-nums;
+}
 /* W2 S7 (design-lock docs/development/multitable-w2-unified-record-inspector-design-lock-20260714.md
    §3.4/§6bis, OD-W2-6=(b)): narrow viewport (<= RAIL_NARROW_BREAKPOINT, the SAME single JS constant
    defined in MultitableWorkbench.vue — no second threshold here, applied via the `isInspectorOverlay`
@@ -749,18 +758,23 @@ async function toggleRecordSubscription() {
   box-shadow: var(--ms-shadow-pop);
   border-radius: var(--ms-radius-lg) 0 0 var(--ms-radius-lg);
 }
-.meta-record-drawer__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
-.meta-record-drawer__title { font-size: 15px; font-weight: 600; margin: 0; }
-.meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; }
-.meta-record-drawer__btn { padding: 4px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
+.meta-record-drawer__header {
+  display: flex; justify-content: space-between; align-items: center;
+  height: 40px; min-height: 40px; padding: 0 12px;
+  border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb);
+}
+.meta-record-drawer__title { font-size: var(--ms-sheet-font-body, 13px); font-weight: 500; margin: 0; color: var(--ms-text-1, #111827); }
+.meta-record-drawer__actions { display: flex; gap: 4px; align-items: center; }
+.meta-record-drawer__btn { padding: 4px 8px; border: 1px solid transparent; border-radius: var(--ms-radius-sm, 6px); background: transparent; cursor: pointer; font-size: var(--ms-sheet-font-header, 12px); color: var(--ms-sheet-icon-color, #6b7280); }
+.meta-record-drawer__btn:hover:not(:disabled) { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-text-1, #111827); }
 .meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
-.meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
+.meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: transparent; background: transparent; color: var(--ms-sheet-icon-color, #6b7280); }
 /* W2 S4: inbox link + badge moved verbatim (same values) from MetaCommentsDrawer.vue's own header
    (`.meta-comments-drawer__inbox-link`/`__inbox-badge`) — renamed under this shell's OWN
    `meta-record-drawer__` prefix (not reused verbatim) since it is a structurally distinct, second
    instance now living in the shell header rather than the deprecated drawer's header. */
-.meta-record-drawer__inbox-link { color: #409eff; font-size: 12px; text-decoration: none; }
+.meta-record-drawer__inbox-link { color: var(--ms-color-primary); font-size: var(--ms-sheet-font-header, 12px); text-decoration: none; }
 .meta-record-drawer__inbox-link:hover { text-decoration: underline; }
 /* #2563eb == --ms-color-primary (tokens.css:19, exact) → tokenized; the badge bg #eff6ff and link #409eff
    are relocated verbatim from the deprecated drawer and have no design-system token yet (docket, not blind-mapped). */
@@ -774,18 +788,39 @@ async function toggleRecordSubscription() {
    so the toggle's active affordance still comes from this class, now paired with `aria-pressed`. The
    base .meta-record-drawer__btn rule above and the three --comment* rules stay untouched: the comment
    button (OD-T5b) is deliberately NOT migrated this round — it remains bespoke, styled by these rules. */
-.meta-record-drawer__btn--watching { border-color: #0f766e; color: #0f766e; background: #ecfdf5; }
+.meta-record-drawer__btn--watching { border-color: transparent; color: var(--ms-color-primary); background: transparent; }
 .meta-record-drawer__btn:disabled { opacity: 0.55; cursor: not-allowed; }
-.meta-record-drawer__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
+.meta-record-drawer__close {
+  border: none; background: transparent; width: 28px; height: 28px;
+  font-size: var(--ms-sheet-icon-size, 16px); cursor: pointer;
+  color: var(--ms-sheet-icon-color, #6b7280); border-radius: var(--ms-radius-sm, 6px);
+}
+.meta-record-drawer__close:hover { color: var(--ms-text-1, #111827); background: var(--ms-bg-page, #f5f6f8); }
 .meta-record-drawer__nav { display: flex; align-items: center; gap: 4px; margin-right: auto; margin-left: 8px; }
-.meta-record-drawer__nav-btn { width: 24px; height: 24px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
-.meta-record-drawer__nav-btn:hover:not(:disabled) { background: #f5f5f5; }
+.meta-record-drawer__nav-btn {
+  width: 24px; height: 24px; border: none; border-radius: var(--ms-radius-sm, 6px);
+  background: transparent; cursor: pointer; font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ms-sheet-icon-color, #6b7280);
+}
+.meta-record-drawer__nav-btn:hover:not(:disabled) { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-text-1, #111827); }
 .meta-record-drawer__nav-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.meta-record-drawer__nav-pos { font-size: 11px; color: #999; min-width: 36px; text-align: center; }
+.meta-record-drawer__nav-pos { font-size: 11px; color: var(--ms-text-3, #9ca3af); min-width: 36px; text-align: center; }
 .meta-record-drawer__body { padding: 12px 16px; flex: 1; }
-.meta-record-drawer__tabs { display: inline-flex; gap: 4px; padding: 3px; margin-bottom: 14px; border: 1px solid #e5e7eb; border-radius: 999px; background: #f8fafc; }
-.meta-record-drawer__tab { min-width: 76px; padding: 5px 12px; border: none; border-radius: 999px; background: transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 600; }
-.meta-record-drawer__tab--active { background: #111827; color: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16); }
+.meta-record-drawer__tabs {
+  display: flex; gap: 0; padding: 0; margin-bottom: 12px;
+  border: none; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  border-radius: 0; background: transparent; width: 100%;
+}
+.meta-record-drawer__tab {
+  min-width: 0; padding: 6px 10px; border: none; border-radius: 0;
+  background: transparent; color: var(--ms-text-3, #9ca3af); cursor: pointer;
+  font-size: var(--ms-sheet-font-header, 12px); font-weight: 500;
+}
+.meta-record-drawer__tab--active {
+  background: transparent; color: var(--ms-text-1, #111827); box-shadow: none;
+  border-bottom: 1px solid var(--ms-text-1, #111827);
+}
 /* W2 S3 (lock §3.3 focus ring convention, H4-2/#4281 lineage, same token as MetaSheetViewRail.vue).
    Not real-browser-verified in this PR — jsdom can't render CSS; §8.3 real-browser sweep lands with
    the responsive S7 slice. Zero new hex: reuses the existing --ms-color-primary token. */

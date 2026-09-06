@@ -147,7 +147,9 @@
 .mt-workbench,
 .meta-toolbar,
 .meta-grid,
-.app-sheet-chrome {
+.app-sheet-chrome,
+.meta-record-drawer,
+.mt-popover {
   --ms-sheet-font-body: 13px;
   --ms-sheet-font-header: 12px;
   --ms-sheet-icon-size: 16px;
