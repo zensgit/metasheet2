@@ -1222,6 +1222,33 @@ async function readConfirmationDecisionValueEntry({ recordsApi, provisioning, ta
   }
 }
 
+// THE SOFT LOOKUP: which project does this decision belong to? Nothing else.
+//
+// The confirm route needs one fact — the projectNo — BEFORE it appends its intent audit row, at a
+// point in the request where the only handle it holds is a decisionId. It cannot get that fact from
+// `readConfirmationDecisionValueEntry`: that one is the ONE value-content surface (see its header),
+// and reaching for it here would drag resolvedValue/resolvedAuxValue/notes into a path that has no
+// business holding them.
+//
+// SOFT, and deliberately so — this is a lookup for a NULLABLE audit column, never a gate:
+//   * 0 rows, >1 rows, a records API that answers with something other than an array, or a row whose
+//     projectNo cell is empty => `{ projectNo: null }`. The caller writes NULL and carries on; the
+//     module's own 404/409 for those same shapes still comes from the write path a moment later, so
+//     the request's answer is unchanged either way.
+//   * only INFRASTRUCTURE failures (no ledger sheet, a throwing records API) propagate — the caller
+//     decides what to do with them, and the confirm route swallows them for the same reason it keeps
+//     its audit append first: a multitable blip must not turn "audit row + 5xx" into "no row + 5xx".
+// It reads exactly one cell and returns exactly one string, so no value beyond the project handle
+// the audit trail already carries on the export route can escape through it.
+async function readConfirmationDecisionProjectNo({ recordsApi, provisioning, targetProjectId, permission, decisionId } = {}) {
+  assertAdminPermission(permission)
+  const id = requiredString(decisionId, 'decisionId')
+  const scoped = await resolveScopedLedger(recordsApi, provisioning, targetProjectId, ['queryRecords'])
+  const matches = await scoped.queryRecords({ filters: { decisionId: id }, limit: 2, offset: 0 })
+  if (!Array.isArray(matches) || matches.length !== 1) return { decisionId: id, projectNo: null }
+  return { decisionId: id, projectNo: optionalString(readCell(matches[0], 'projectNo')) || null }
+}
+
 async function confirmConfirmationDecision({ recordsApi, provisioning, targetProjectId, permission, decisionId, inputFingerprint, resolutionAction, resolvedValue, resolvedAuxValue, notes, confirmedBy, now } = {}) {
   assertAdminPermission(permission)
   const id = requiredString(decisionId, 'decisionId')
@@ -1595,6 +1622,7 @@ module.exports = {
   confirmCarryConfirmationDecision,
   assertCarryConfirmDecisionBinding,
   readConfirmationDecisionValueEntry,
+  readConfirmationDecisionProjectNo,
   loadConfirmedDuplicatePolicyReview,
   __internals: {
     stableHash,

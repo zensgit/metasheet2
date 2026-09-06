@@ -439,6 +439,7 @@ const {
   confirmCarryConfirmationDecision,
   assertCarryConfirmDecisionBinding,
   readConfirmationDecisionValueEntry,
+  readConfirmationDecisionProjectNo,
   loadConfirmedDuplicatePolicyReview,
 } = require('./stock-preparation-confirmation-decisions.cjs')
 // O2 / R-11: the confirmation-queue workbench permission vocabulary + capability manifest. Shared
@@ -5939,8 +5940,26 @@ function requireStockPreparationAudit() {
       // generation is a generation run with a fixed operation subtype, not a new action. Audit the
       // intent BEFORE the multitable write so an audit-store refusal cannot leave a committed
       // ledger row behind a failed HTTP response.
+      //
+      // WHICH PROJECT — `project_id`, the nullable column migration 066 has carried since day one
+      // (`066:22`), filled here with the projectNo the CALLER put in its own request body and this
+      // route already resolved at the top of the handler for the malformed-request 400. Same calibre
+      // as the export's `projectId: projectNo` one handler family down: a handle, not a value, and
+      // one the caller supplied — writing it back tells nobody anything they did not just say.
+      //
+      // NOT in tension with the board's deliberate NULL. That rule is scoped, by its own migration
+      // (086, the file `:9020` still calls 083), to the READ whose hit/miss would otherwise make the
+      // trail an existence oracle for a project number the caller was guessing at. Reconcile is a
+      // WRITE whose projectNo came from the request, so there is no oracle to build. The audit store
+      // shape-gates neither this column nor `actor` on purpose (audit-store.cjs:20-22 — "their
+      // discipline lives at the ROUTES"), which is exactly why the discipline is spelled out here.
+      //
+      // WHAT IT BUYS: `audit.list` already filters by `project_id` (`:8509`), so with this row filled
+      // "who touched this project, and when" becomes answerable for the two operations that actually
+      // change a queue, instead of only for the export.
       await audit.append({
         tenantId,
+        projectId: reconcileProjectNo,
         action: 'generation_run',
         subjectId: action.actionId,
         mode: 'confirmation_reconcile_requested',
@@ -8116,14 +8135,54 @@ function requireStockPreparationAudit() {
         tenantPrincipalDirectory,
       })
       const tenantId = scope.tenantId
+      // WHICH PROJECT — resolved BEFORE the intent row below, because that row is the only one this
+      // route writes and a decisionId alone does not say which project's queue is being closed.
+      //
+      // SOFT ON EVERY AXIS, and it has to be: the intent append below is deliberately the FIRST
+      // effect of this handler (see its comment), and a lookup that could refuse, throw or 404 ahead
+      // of it would quietly convert today's "audit row + error" into "no audit row + error" — the
+      // same invariant the `resolutionAction` spread three lines down exists to protect. So:
+      //   * no decisionId in the request at all => no lookup, `projectId` stays null, and the
+      //     module's own named validation error still reaches the caller from the write below;
+      //   * 0 rows or >1 rows => the module answers `projectNo: null` rather than throwing, and the
+      //     404/409 that shape deserves still comes from `confirmConfirmationDecision`, unchanged;
+      //   * the lookup ITSELF failing (no ledger sheet, multitable down) => swallowed here. The
+      //     request then behaves exactly as it does on main: intent row first, then the real failure.
+      // Nothing about the request's status code, error code or ordering changes; the only difference
+      // is whether one nullable audit column is filled.
+      //
+      // The staging derivation is written in the ONE reviewed form
+      // (`resolveIntegrationStagingProjectId(scope.tenantId, undefined)`) that
+      // stock-preparation-tenant-scoped-write-guard.test.cjs pins for every inline-staging member of
+      // the value-bearing set — the project comes from the RESOLVED SCOPE, never from the request.
+      const confirmDecisionId = firstString(input.decisionId)
+      let confirmProjectNo = null
+      if (confirmDecisionId) {
+        try {
+          const located = await readConfirmationDecisionProjectNo({
+            recordsApi: getMultitableRecordsApi(),
+            provisioning: getMultitableProvisioning(),
+            targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+            permission: 'admin',
+            decisionId: confirmDecisionId,
+          })
+          confirmProjectNo = located && located.projectNo ? located.projectNo : null
+        } catch {
+          // FAIL-OPEN, on purpose. See above: this is a nullable audit column, not a gate.
+          confirmProjectNo = null
+        }
+      }
       // A confirmation resolves a planner exception, so it rides the existing exception_resolve
       // audit action with a fixed operation subtype (the audit vocabulary is migration-frozen).
       // Record intent FIRST: if the SQL audit store is unavailable or refuses the payload, no
       // multitable patch may occur.
       await audit.append({
         tenantId,
+        // The ledger row's own project handle — same calibre as the export's and reconcile's, and
+        // null whenever the soft lookup above could not name exactly one row.
+        projectId: confirmProjectNo,
         action: 'exception_resolve',
-        subjectId: firstString(input.decisionId),
+        subjectId: confirmDecisionId,
         mode: 'confirmation_decision_requested',
         actor: user.id || user.email,
         detail: {

@@ -68,6 +68,7 @@ const {
   listConfirmationDecisions,
   confirmConfirmationDecision,
   readConfirmationDecisionValueEntry,
+  readConfirmationDecisionProjectNo,
   loadConfirmedDuplicatePolicyReview,
   __internals: ledgerInternals,
 } = require(MODULE_PATH)
@@ -820,6 +821,75 @@ async function testW4cLeaseOverrunAbortsWithFixedCodeAndNoDuplicateActiveRows() 
   const active = ledgerRows(records).filter((row) => ACTIVE_STATUSES.includes(row.data.status))
   assert.equal(active.length, 26, 'every key ends with exactly one active row')
   assert.equal(new Set(active.map((row) => row.data.stableDecisionKey)).size, 26, 'W-4(c): no duplicate active rows for any key')
+}
+
+// ── 对账/确认的审计行带项目号: the SOFT decisionId → projectNo lookup ─────────
+//
+// The confirm ROUTE needs the project handle before it appends its intent audit row, and at that
+// point it holds only a decisionId. This is the export that answers that one question — and it must
+// answer it SOFTLY, because it runs ahead of an append whose whole value is being unconditional.
+// The contrast that matters is with `readConfirmationDecisionValueEntry`, which throws 404/409 on
+// exactly these shapes: same query, opposite posture, on purpose.
+async function testSoftProjectNoLookupNamesOneRowOrNothing() {
+  const env = ledgerEnv()
+  await reconcileConfirmationDecisions(scopedCall(env, {
+    projectNo: 'P-001',
+    plan: planOf([duplicateHold('KEY-A')]),
+    sourceRevision: 'rev-1',
+  }))
+  const list = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
+  const { decisionId } = list.rows[0]
+
+  // HIT: exactly one row, so the project it belongs to is named.
+  const hit = await readConfirmationDecisionProjectNo(scopedCall(env, { decisionId }))
+  assert.deepEqual(hit, { decisionId, projectNo: 'P-001' }, 'the lookup names the project of the one matching row')
+  // …and NOTHING ELSE. This read exists so the audit column can be filled, not as a second value
+  // face: no resolvedValue, no notes, no rowIdentity, no fingerprint.
+  assert.deepEqual(Object.keys(hit).sort(), ['decisionId', 'projectNo'], 'the lookup returns two keys and no more')
+
+  // MISS: a decisionId the ledger never opened. The value-entry read 404s here; this one answers
+  // NULL, because a route that is only filling a nullable column must not acquire a failure mode.
+  const miss = await readConfirmationDecisionProjectNo(scopedCall(env, {
+    decisionId: 'sha256:0000000000000000000000000000dead',
+  }))
+  assert.equal(miss.projectNo, null, 'an unknown decisionId names no project, and does not throw')
+  await rejectsWithCode(
+    () => readConfirmationDecisionValueEntry(scopedCall(env, { decisionId: 'sha256:0000000000000000000000000000dead' })),
+    'CONFIRMATION_DECISION_NOT_FOUND',
+    'the value-entry read still refuses the same shape — the softness is this export, not the module',
+  )
+
+  // AMBIGUOUS: two rows carrying the same decisionId (a shape the ledger's own keying makes
+  // unreachable, seeded here directly). Still NULL, never "pick one".
+  const duplicated = ledgerEnv({
+    rows: [
+      seedLedgerRow({ decisionId: 'dup', projectNo: 'P-001', status: STATUSES.PENDING }, 'rec_dup_1'),
+      seedLedgerRow({ decisionId: 'dup', projectNo: 'P-002', status: STATUSES.PENDING }, 'rec_dup_2'),
+    ],
+  })
+  const ambiguous = await readConfirmationDecisionProjectNo(scopedCall(duplicated, { decisionId: 'dup' }))
+  assert.equal(ambiguous.projectNo, null, 'two rows for one decisionId name no project rather than an arbitrary one')
+
+  // A ROW WHOSE projectNo CELL IS EMPTY resolves to null too, not to an empty string that would sit
+  // in `project_id` looking like a handle.
+  const blank = ledgerEnv({
+    rows: [seedLedgerRow({ decisionId: 'blank', projectNo: '', status: STATUSES.PENDING }, 'rec_blank')],
+  })
+  const blankResult = await readConfirmationDecisionProjectNo(scopedCall(blank, { decisionId: 'blank' }))
+  assert.equal(blankResult.projectNo, null, 'an empty projectNo cell is NULL, never the empty string')
+
+  // The admin gate and the required-argument check are NOT soft: this is still a ledger read, and
+  // the softness above is about ROW SHAPES, never about who may ask.
+  await assert.rejects(
+    () => readConfirmationDecisionProjectNo({ ...scopedCall(env, { decisionId }), permission: 'read' }),
+    /admin permission/,
+    'the lookup is admin-gated like every other read on this ledger',
+  )
+  await rejectsWithCode(
+    () => readConfirmationDecisionProjectNo(scopedCall(env, { decisionId: '   ' })),
+    'CONFIRMATION_DECISION_INPUT_INVALID',
+    'a blank decisionId is a malformed call, not a miss',
+  )
 }
 
 // ── G7: unregistered / malformed / stale confirms are refused ───────────────
@@ -1789,6 +1859,7 @@ async function main() {
     testW4aFingerprintReturnReopensSupersededRowAndClearsHumanDecision,
     testW4bVanishedConflictSweepClosesOrphanPendingRows,
     testW4cLeaseOverrunAbortsWithFixedCodeAndNoDuplicateActiveRows,
+    testSoftProjectNoLookupNamesOneRowOrNothing,
     testConfirmRefusesUnregisteredMalformedAndStale,
     testReadbackDowngradesOnlyConfirmedMatchingKeepMultipleRows,
     testQueueEndpointEmitsNoCellValues,

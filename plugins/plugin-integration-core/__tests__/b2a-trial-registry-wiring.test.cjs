@@ -1787,9 +1787,16 @@ function assertRunnerRefusal(error, code, reason, label) {
 
 // The reconcile route needs the two OPTIONAL services it fails closed without. They are handed to
 // this route's mounts only, so every test that predates W-2 keeps the harness it had.
-function reconcileServices() {
+// `auditAppends`, when supplied, RECORDS every row instead of swallowing it. Only the audit-column
+// case below needs that; every pre-existing caller keeps the silent double it had.
+function reconcileServices({ auditAppends } = {}) {
   return {
-    stockPreparationAuditStore: { async append() { return { ok: true } } },
+    stockPreparationAuditStore: {
+      async append(entry) {
+        if (Array.isArray(auditAppends)) auditAppends.push(entry)
+        return { ok: true }
+      },
+    },
     stockPreparationConfirmationDecisionLease: {
       async acquire() { return { held: true, leaseId: 'lease-1' } },
       // MERGE-TRAIN (W-4 x W-2). W-4 made `renew` a REQUIRED method on the reconcile-lease
@@ -1885,6 +1892,58 @@ async function W2_reconcileRouteIsUnchangedWhenDormantOrAuthorized() {
   // And the ARMED run really did go through the guard: one operation claim was spent.
   assert.equal(claimKeysIn(armed.context.storage).length, 1, 'the authorized reconcile spent exactly one claim')
   assert.equal(claimKeysIn(dormant.context.storage).length, 0, 'a dormant reconcile records no claim at all')
+}
+
+// 对账/确认的审计行带项目号 — RECONCILE HALF.
+//
+// `integration_stock_prep_audit.project_id` has been nullable since migration 066 (`066:22`) and the
+// export route has filled it with a projectNo since the export shipped, but reconcile — the write
+// that can supersede another person's pending rows — left it NULL, so "who touched project X" was
+// answerable for the download and not for the queue change. It is filled now, from the projectNo the
+// CALLER supplied in its own request body.
+//
+// This suite is the only harness that drives reconcile PAST the audit append (the case above pins
+// exactly where it stops, and why), so the assertion lives here rather than in a matrix that refuses
+// at the gate. Nothing about the fence is exercised or claimed by it.
+async function reconcileAuditRowCarriesTheProjectFromTheRequest() {
+  const auditAppends = []
+  const { routes } = mount({
+    registrations: [registration()],
+    source: createRecordingSourceAdapter(),
+    records: createRecordsApi(),
+    extraServices: reconcileServices({ auditAppends }),
+  })
+  const res = await routeReconcile(routes)
+  // The run still stops where it always stopped — the assertion is about the row, not about a
+  // reconcile that suddenly succeeds.
+  assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+  assert.equal(res.body.error.code, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED', JSON.stringify(res.body))
+  assert.equal(auditAppends.length, 1, 'reconcile appends exactly one audit row, and it is the intent row')
+  const [row] = auditAppends
+  assert.equal(row.action, 'generation_run', 'no new audit action was invented for this')
+  assert.equal(row.mode, 'confirmation_reconcile_requested', 'and no new mode either')
+  assert.equal(row.projectId, PROJECT_NO, 'the reconcile audit row carries the projectNo the request asked for')
+  // VALUES-FREE, unchanged: `detail` is still the single fixed operation token, with no resolvedValue
+  // / notes / row content anywhere near it.
+  assert.deepEqual(row.detail, { operation: 'confirmation_decisions_reconcile' },
+    'the detail payload is untouched by the new column')
+
+  // A request whose projectNo is not a usable string leaves the column NULL rather than stamping a
+  // shape the audit store would have to coerce. (An admin reaches this path; the operator branch is
+  // refused 400 before the append by the malformed-request gate that predates this change.)
+  const numeric = []
+  const numericMount = mount({
+    registrations: [registration()],
+    source: createRecordingSourceAdapter(),
+    records: createRecordsApi(),
+    extraServices: reconcileServices({ auditAppends: numeric }),
+  })
+  await call(numericMount.routes, 'POST', RECONCILE_ROUTE, {
+    user: ADMIN_USER, params: ACTION_PARAMS, body: { parameters: { projectNo: 12345 } },
+  })
+  if (numeric.length > 0) {
+    assert.equal(numeric[0].projectId, null, 'a non-string projectNo lands as NULL, never as a coerced handle')
+  }
 }
 
 // ── (2) the cross-plugin door: the runner's own fence ────────────────────────
@@ -2781,6 +2840,8 @@ const TESTS = [
   // W-2: the choke point sunk below HTTP.
   W2_reconcileRouteIsFencedBeforeAnyCredentialReload,
   W2_reconcileRouteIsUnchangedWhenDormantOrAuthorized,
+  // 对账/确认的审计行带项目号: rides this harness because it is the only one that gets past the append.
+  reconcileAuditRowCarriesTheProjectFromTheRequest,
   W2_inProcessRunPipelineIsFencedBeforeAnyCredentialReload,
   W2_theRouteAndTheRunnerShareOneOperationClaim,
   W2_theRoutesHandTheirRunToTheRunner,
