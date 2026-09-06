@@ -743,7 +743,79 @@ function nonNegativeBudget(value, fallback) {
   return Number.isInteger(number) && number >= 0 ? number : fallback
 }
 
-function updateJobFromExpansion(job, expansion, now) {
+/**
+ * THE ONE PLACE A FAILED LARGE-BOM JOB TALKS TO AN OPERATOR. `logger` is
+ * optional (the two call sites below pass `input.logger`, which is `undefined`
+ * unless a caller wires one — see http-routes.cjs's `routeLogger`), and a
+ * deployment that wires none keeps byte-identical behaviour: this returns
+ * before touching `job` at all.
+ *
+ * The payload is a NARROWER re-projection of `job.evidence` — never a new
+ * read — so it can carry only what that stanza already carries, minus the
+ * fields `readFailureEntry`/`errorDetailEntry` never let onto `job.evidence`
+ * in the first place (`message`, `cursor`, row values). `principal` is
+ * excluded on purpose too: it identifies the data-source binding the read ran
+ * under, and a pm2 log line is a worse place for that than the stored job row
+ * an operator already has to open to see anything else about the failure.
+ *
+ * Mirrors the module's "nothing to report => key absent" rule: `readFailures`
+ * / `errorDetails` / `readFailuresTotal` mount only when `job.evidence`
+ * actually has them, so the escaped-throw path (no per-read record — see
+ * `runLargeBomBackgroundExpansionJob`'s catch block) logs without them rather
+ * than a stray `0` or `[]` that would misstate "nothing failed" as "one read
+ * failed at nothing".
+ *
+ * Never throws: a logger this defensive about its own inputs must not be the
+ * reason a job write fails, and a hostile or malformed job row must not be
+ * able to turn a diagnostic into a crash.
+ */
+function logLargeBomJobFailure(logger, job) {
+  if (!logger || typeof logger.warn !== 'function') return
+  try {
+    const evidence = isPlainObject(job.evidence) ? job.evidence : {}
+    const errorTypes = safeTokenList(evidence.errorTypes, 'errorTypes')
+    const payload = {
+      jobId: evidenceTokenOrUndefined(job.jobId),
+      actionId: evidenceTokenOrUndefined(job.actionId),
+      tenantId: evidenceTokenOrUndefined(job.tenantId),
+      workspaceId: evidenceTokenOrUndefined(job.workspaceId),
+      status: evidenceTokenOrUndefined(job.status),
+      errorTypes,
+      scaleErrorTypes: errorTypes.filter((type) => LARGE_BOM_BOUNDED_ERROR_TYPES.includes(type)),
+    }
+    if (Number.isInteger(evidence.readFailuresTotal) && evidence.readFailuresTotal > 0) {
+      payload.readFailuresTotal = Math.min(evidence.readFailuresTotal, LARGE_BOM_EVIDENCE_COUNTER_CEILING)
+    }
+    if (Array.isArray(evidence.readFailures) && evidence.readFailures.length > 0) {
+      payload.readFailures = evidence.readFailures.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT).map((entry) => {
+        const projected = {}
+        const object = evidenceTokenOrUndefined(entry && entry.object)
+        if (object) projected.object = object
+        const errorCode = evidenceTokenOrUndefined(entry && entry.errorCode)
+        if (errorCode) projected.errorCode = errorCode
+        return projected
+      })
+    }
+    if (Array.isArray(evidence.errorDetails) && evidence.errorDetails.length > 0) {
+      payload.errorDetails = evidence.errorDetails.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT).map((entry) => {
+        const projected = {}
+        const type = evidenceTokenOrUndefined(entry && entry.type)
+        if (type) projected.type = type
+        const object = evidenceTokenOrUndefined(entry && entry.object)
+        if (object) projected.object = object
+        const causeClass = evidenceTokenOrUndefined(entry && entry.causeClass)
+        if (causeClass) projected.causeClass = causeClass
+        return projected
+      })
+    }
+    logger.warn('[plugin-integration-core] large-BOM background expansion job failed', payload)
+  } catch {
+    // See the doc comment: a broken logger or a malformed job row degrades to
+    // "no log line", never to a thrown error out of a state-transition helper.
+  }
+}
+
+function updateJobFromExpansion(job, expansion, now, logger) {
   const evidence = summarizeBomExpansionForEvidence(expansion)
   const progress = {
     rowsExpanded: Number(evidence.rowsExpanded || 0),
@@ -795,6 +867,7 @@ function updateJobFromExpansion(job, expansion, now) {
   job.authoritative = false
   delete job.artifactRevision
   delete job.artifact
+  logLargeBomJobFailure(logger, job)
 }
 
 function safeErrorType(error) {
@@ -885,12 +958,13 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
       readDiagnosticShapePresent: false,
     }, { errors: [thrownErrorDetail(error)] })
     job.updatedAt = failedAt
+    logLargeBomJobFailure(input.logger, job)
     await storage.set(key, job)
     return cloneJson(job)
   }
 
   const completedAt = isoNow(typeof input.now === 'function' ? input.now() : undefined)
-  updateJobFromExpansion(job, expansion, completedAt)
+  updateJobFromExpansion(job, expansion, completedAt, input.logger)
   await storage.set(key, job)
   return cloneJson(job)
 }

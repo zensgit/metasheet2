@@ -83,6 +83,16 @@ function createStorage({ durable = true } = {}) {
   }
 }
 
+function createRecordingLogger() {
+  const warnCalls = []
+  return {
+    warnCalls,
+    warn(message, payload) {
+      warnCalls.push([message, payload])
+    },
+  }
+}
+
 const TEST_SCOPE = Object.freeze({
   tenantId: 'tenant-1',
   workspaceId: 'workspace-1',
@@ -1143,6 +1153,178 @@ async function testEscapedThrowKeepsCauseClassWithoutReadFailures() {
   assertValuesFree(publicBackgroundExpansionJob(failed))
 }
 
+// http-routes.cjs wires `routeLogger` into this call as `logger` (#5507 follow-up): a job that
+// lands in `failed` should show up as one values-free warn line, not only as a stored row nobody
+// looks at until they open it. This covers the `updateJobFromExpansion` failure branch — the
+// expander returned, but `expansion.valid !== true`.
+async function testFailedExpansionWarnsOnceWithValuesFreePayload() {
+  const storage = createStorage()
+  const logger = createRecordingLogger()
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-warn-on-failure-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  const leakyMessage = `mssql read failed for ${RAW_MARKERS[1]}`
+  const failed = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-warn-on-failure-1',
+    sourceAdapter: {
+      async read() {
+        const error = new Error(leakyMessage)
+        error.code = 'ECONNRESET'
+        throw error
+      },
+    },
+    now: () => '2026-06-08T00:01:00.000Z',
+    logger,
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.equal(logger.warnCalls.length, 1, 'exactly one warn for one failed job')
+  const [message, payload] = logger.warnCalls[0]
+  assert.equal(typeof message, 'string')
+  assert.equal(message.includes('failed'), true)
+
+  assert.equal(payload.jobId, 'job-warn-on-failure-1')
+  assert.equal(payload.actionId, 'plm.stock-preparation.pull-bom.v1')
+  assert.equal(payload.tenantId, TEST_SCOPE.tenantId)
+  assert.equal(payload.workspaceId, TEST_SCOPE.workspaceId)
+  assert.equal(payload.status, 'failed')
+  assert.deepEqual(payload.errorTypes, ['read_failed'])
+  assert.deepEqual(payload.scaleErrorTypes, [])
+
+  assert.equal(payload.readFailuresTotal, 1)
+  assert.equal(payload.readFailures.length, 1)
+  assert.deepEqual(Object.keys(payload.readFailures[0]).sort(), ['errorCode', 'object'])
+  assert.equal(payload.readFailures[0].object, 'DN_PDM_PathExAttrInfo')
+  assert.equal(payload.readFailures[0].errorCode, 'ECONNRESET')
+
+  assert.equal(payload.errorDetails.length, 1)
+  assert.deepEqual(Object.keys(payload.errorDetails[0]).sort(), ['causeClass', 'object', 'type'])
+  assert.equal(payload.errorDetails[0].causeClass, 'ECONNRESET')
+
+  const serialized = JSON.stringify(payload)
+  assert.equal(serialized.includes(RAW_MARKERS[1]), false, 'the part number in the driver message never reaches the log payload')
+  assert.equal(serialized.includes('mssql read failed for'), false, 'the driver message text never reaches the log payload')
+  assert.equal(serialized.includes('message'), false, 'no key named message ever mounts')
+  assert.equal(serialized.includes('cursor'), false)
+  assert.equal(serialized.includes('PRIVATE_TOKEN_SHOULD_NOT_APPEAR'), false, 'the read principal never reaches the log payload')
+}
+
+// The other failure branch: the expander throws before it can summarize (the catch block in
+// `runLargeBomBackgroundExpansionJob`). No per-read record exists on this path, so the payload must
+// omit `readFailures`/`readFailuresTotal` rather than report a misleading zero — mirroring the same
+// "nothing to report => key absent" rule `job.evidence` already follows on this path (see
+// `testEscapedThrowKeepsCauseClassWithoutReadFailures` above).
+async function testEscapedThrowWarnsOnceWithoutReadFailureKeys() {
+  const storage = createStorage()
+  const logger = createRecordingLogger()
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: { actionId: 'plm.stock-preparation.pull-bom.v1', source: { kind: 'data-source:sql-readonly' } },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-warn-escaped-throw-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  const failed = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-warn-escaped-throw-1',
+    sourceAdapter: { async read() { throw new Error(RAW_MARKERS[1]) } },
+    expansionOptions: { projectNo: '' },
+    now: () => '2026-06-08T00:01:00.000Z',
+    logger,
+  })
+
+  assert.equal(failed.status, 'failed')
+  assert.equal(logger.warnCalls.length, 1)
+  const [, payload] = logger.warnCalls[0]
+  assert.equal('readFailures' in payload, false, 'no per-read record exists on this path')
+  assert.equal('readFailuresTotal' in payload, false)
+  assert.equal(Array.isArray(payload.errorDetails), true)
+  assert.equal(payload.errorDetails.length, 1)
+  assert.equal(typeof payload.errorDetails[0].causeClass, 'string')
+  assert.equal(JSON.stringify(payload).includes(RAW_MARKERS[1]), false)
+}
+
+// A successful run must never warn, and a caller that passes no logger at all must see
+// byte-identical behaviour to before this change — no throw, same stored job.
+async function testSuccessDoesNotWarnAndMissingLoggerIsInert() {
+  const storage = createStorage()
+  const source = createSourceAdapter(plmData())
+  const logger = createRecordingLogger()
+  await createLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      target: { sheetId: 'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR' },
+    },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-success-no-warn-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+
+  const completed = await runLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-success-no-warn-1',
+    sourceAdapter: source.adapter,
+    now: () => '2026-06-08T00:01:00.000Z',
+    logger,
+  })
+  assert.equal(completed.status, 'completed')
+  assert.equal(logger.warnCalls.length, 0, 'a successful run never warns')
+
+  // No `logger` at all — the pre-#5507-follow-up call shape — must neither throw nor change the
+  // stored/returned job for a job that DOES fail.
+  const storageNoLogger = createStorage()
+  await createLargeBomBackgroundExpansionJob({
+    storage: storageNoLogger,
+    ...TEST_SCOPE,
+    action: { actionId: 'plm.stock-preparation.pull-bom.v1', source: { kind: 'data-source:sql-readonly' } },
+    parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
+    principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
+    createJobId: () => 'job-no-logger-1',
+    now: () => '2026-06-08T00:00:00.000Z',
+  })
+  const failedWithoutLogger = await runLargeBomBackgroundExpansionJob({
+    storage: storageNoLogger,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId: 'job-no-logger-1',
+    sourceAdapter: {
+      async read() {
+        const error = new Error(`mssql read failed for ${RAW_MARKERS[1]}`)
+        error.code = 'ECONNRESET'
+        throw error
+      },
+    },
+    now: () => '2026-06-08T00:01:00.000Z',
+    // logger intentionally omitted
+  })
+  assert.equal(failedWithoutLogger.status, 'failed')
+  assert.equal(failedWithoutLogger.evidence.readFailures[0].errorCode, 'ECONNRESET')
+}
+
 // C, FOUND IN ADVERSARIAL REVIEW OF #5507. The first cut fed `expansion.errors[]`
 // to the projection unconditionally, so a bounded expansion with ZERO failed
 // reads still grew three evidence keys whose content was a verbatim copy of
@@ -1895,6 +2077,9 @@ async function main() {
   await testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe()
   await testBackgroundWorkerPersistsValuesFreeReadFailureDiagnostics()
   await testEscapedThrowKeepsCauseClassWithoutReadFailures()
+  await testFailedExpansionWarnsOnceWithValuesFreePayload()
+  await testEscapedThrowWarnsOnceWithoutReadFailureKeys()
+  await testSuccessDoesNotWarnAndMissingLoggerIsInert()
   await testObjectLessBoundedExpansionKeepsThePreFeatureKeySet()
   testBoundedErrorsThatNameAnObjectStillMount()
   testReadFailureDetailsAreCappedAndReportTheRealTotal()
