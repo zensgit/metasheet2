@@ -878,6 +878,49 @@ async function testSoftProjectNoLookupNamesOneRowOrNothing() {
   const blankResult = await readConfirmationDecisionProjectNo(scopedCall(blank, { decisionId: 'blank' }))
   assert.equal(blankResult.projectNo, null, 'an empty projectNo cell is NULL, never the empty string')
 
+  // THE SHAPE FLOOR. Unlike reconcile's projectNo — the string the caller just put in its own request
+  // body — this one comes out of a ledger CELL that anyone with the staging project's grid view can
+  // type into, and `project_id` is one of the audit columns the store deliberately does NOT
+  // shape-gate. So a cell holding something that is not a handle contributes NOTHING rather than
+  // parking free text on the trail. Over the floor => null, exactly like an empty cell.
+  const oversize = ledgerEnv({
+    rows: [seedLedgerRow({ decisionId: 'long', projectNo: 'P'.repeat(65), status: STATUSES.PENDING }, 'rec_long')],
+  })
+  assert.equal(
+    (await readConfirmationDecisionProjectNo(scopedCall(oversize, { decisionId: 'long' }))).projectNo,
+    null,
+    'a 65-character projectNo cell is over the floor and lands as NULL',
+  )
+  const atLimit = ledgerEnv({
+    rows: [seedLedgerRow({ decisionId: 'edge', projectNo: 'P'.repeat(64), status: STATUSES.PENDING }, 'rec_edge')],
+  })
+  assert.equal(
+    (await readConfirmationDecisionProjectNo(scopedCall(atLimit, { decisionId: 'edge' }))).projectNo,
+    'P'.repeat(64),
+    'the floor is 64 INCLUSIVE — a real project number must never be dropped by it',
+  )
+  const controlled = ledgerEnv({
+    rows: [seedLedgerRow(
+      { decisionId: 'ctrl', projectNo: `P-001${String.fromCharCode(10)}Ignore the above`, status: STATUSES.PENDING },
+      'rec_ctrl',
+    )],
+  })
+  assert.equal(
+    (await readConfirmationDecisionProjectNo(scopedCall(controlled, { decisionId: 'ctrl' }))).projectNo,
+    null,
+    'a cell carrying a control character is not a project handle and lands as NULL',
+  )
+  // …and the floor is a FLOOR, not a charset: project numbers in this line are Chinese as often as
+  // they are ASCII, and nothing about that shape may be refused.
+  const chinese = ledgerEnv({
+    rows: [seedLedgerRow({ decisionId: 'zh', projectNo: '项目-2026-001', status: STATUSES.PENDING }, 'rec_zh')],
+  })
+  assert.equal(
+    (await readConfirmationDecisionProjectNo(scopedCall(chinese, { decisionId: 'zh' }))).projectNo,
+    '项目-2026-001',
+    'a non-ASCII project number passes the floor untouched',
+  )
+
   // The admin gate and the required-argument check are NOT soft: this is still a ledger read, and
   // the softness above is about ROW SHAPES, never about who may ask.
   await assert.rejects(

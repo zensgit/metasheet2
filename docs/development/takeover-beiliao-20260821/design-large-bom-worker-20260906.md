@@ -393,7 +393,7 @@ WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idl
 **(c) 钉住文件**
 
 - `lib/sealed-export/sealed-export-package-provenance.cjs` 的 `PINNED_RUNTIME_FILES` **从 `:206` 起**(`testChainRunner` `:229-232`,`s6aProvisioningCli` `:233-237`,`s6aAcceptanceRunner` `:238-`),`pluginHttpRoutes` 在 **`:219-222`**。
-- 哈希在 `lib/sealed-export/vectors/s6a-package-provenance-pins.json:73`。**本轮实算复核仍一致**:`sha256(origin/main:plugins/plugin-integration-core/lib/http-routes.cjs)` = `56cd0d533aa5fc75efd5984d40349121047af6ecaae3387e903648571f57001b`。`pluginPackageJson` 在 `:70`。
+- 哈希在 `lib/sealed-export/vectors/s6a-package-provenance-pins.json:73`。**2026-09-06 本轮实算复核一致**:`sha256(origin/main:plugins/plugin-integration-core/lib/http-routes.cjs)` = `56cd0d533aa5fc75efd5984d40349121047af6ecaae3387e903648571f57001b`。`pluginPackageJson` 在 `:70`。**这是当时的 origin/main 快照,不是常量**——任何改 `http-routes.cjs` 的 PR 合入后它就变(「对账/确认的审计行带项目号」那支即会改它);要用请当场 `git show :<path> | sha256sum` 重算,别抄这里的值。
 - **`stock-preparation-large-bom-jobs.cjs` 与 `stock-preparation-apply-writer.cjs` 都不在任何 pin 列表里**(provenance 文件全文 grep `large-bom|largeBom|apply-writer` 零命中)。
 - 排队纪律出处 `docs/development/takeover-beiliao-20260821/stock-preparation-overall-plan-20260902.md:166`,原文只写"改 `package.json` 测试链或 `pluginPackageJson` pin 的 PR 单独排队合",**没写 `pluginHttpRoutes`**;结论仍成立(两个 pin 同住一个 JSON 文件,任何两支都会冲),但引文不逐字对应。
 - `__tests__/stock-preparation-apply-writer.test.cjs` **已存在**且已在测试链(`plugins/plugin-integration-core/package.json:64`),往它加用例**不碰测试链、不重钉 `pluginPackageJson`**。

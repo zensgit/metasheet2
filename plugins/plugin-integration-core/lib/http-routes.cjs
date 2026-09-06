@@ -5944,19 +5944,29 @@ function requireStockPreparationAudit() {
       // WHICH PROJECT — `project_id`, the nullable column migration 066 has carried since day one
       // (`066:22`), filled here with the projectNo the CALLER put in its own request body and this
       // route already resolved at the top of the handler for the malformed-request 400. Same calibre
-      // as the export's `projectId: projectNo` one handler family down: a handle, not a value, and
-      // one the caller supplied — writing it back tells nobody anything they did not just say.
+      // as the `prep_line_export` append's `projectId: projectNo`, and as the `input.projectId` the
+      // whole MVP mapping / unit / exception family already writes: a handle, not a value, and one
+      // the caller supplied — writing it back tells nobody anything they did not just say.
       //
       // NOT in tension with the board's deliberate NULL. That rule is scoped, by its own migration
-      // (086, the file `:9020` still calls 083), to the READ whose hit/miss would otherwise make the
-      // trail an existence oracle for a project number the caller was guessing at. Reconcile is a
-      // WRITE whose projectNo came from the request, so there is no oracle to build. The audit store
-      // shape-gates neither this column nor `actor` on purpose (audit-store.cjs:20-22 — "their
-      // discipline lives at the ROUTES"), which is exactly why the discipline is spelled out here.
+      // (086 — the number the `stockPreparationOperatorProjectBoard` comment below now also carries;
+      // both said 083, the number that file was written under before the 084/085 renumber, and there
+      // is no 083 in the tree), to the READ whose hit/miss would otherwise make the trail an existence
+      // oracle for a project number the caller was guessing at.
+      // Reconcile is a WRITE whose projectNo came from the request, so there is no oracle to build.
+      // The audit store shape-gates neither this column nor `actor` on purpose
+      // (stock-preparation-audit-store.cjs:20-22 — "their discipline lives at the ROUTES"), which is
+      // exactly why the discipline is spelled out here.
       //
-      // WHAT IT BUYS: `audit.list` already filters by `project_id` (`:8509`), so with this row filled
-      // "who touched this project, and when" becomes answerable for the two operations that actually
-      // change a queue, instead of only for the export.
+      // NO LINE NUMBERS INTO THIS FILE, deliberately: the ones an earlier draft carried (`:8509`,
+      // `:9020`) were already wrong when they were written and were wrong again the moment this
+      // comment block shifted the file. Handler names do not rot.
+      //
+      // WHAT IT BUYS: the audit list route (`stockPreparationAuditList`) already filters by
+      // `project_id`, so with this row filled "who touched this project's QUEUE, and when" becomes
+      // answerable — the gap was never the whole trail, it was these two writes: reconcile here and
+      // the confirm below. Still NULL by design elsewhere: the board reads, `project_directory_read`,
+      // and `source_binding_set`.
       await audit.append({
         tenantId,
         projectId: reconcileProjectNo,
@@ -8146,10 +8156,28 @@ function requireStockPreparationAudit() {
       //     module's own named validation error still reaches the caller from the write below;
       //   * 0 rows or >1 rows => the module answers `projectNo: null` rather than throwing, and the
       //     404/409 that shape deserves still comes from `confirmConfirmationDecision`, unchanged;
-      //   * the lookup ITSELF failing (no ledger sheet, multitable down) => swallowed here. The
-      //     request then behaves exactly as it does on main: intent row first, then the real failure.
+      //   * the lookup ITSELF THROWING (no ledger sheet, a records API that rejects) => swallowed
+      //     here. The request then behaves exactly as it does on main: intent row first, then the
+      //     real failure.
       // Nothing about the request's status code, error code or ordering changes; the only difference
       // is whether one nullable audit column is filled.
+      //
+      // WHAT THE CATCH DOES NOT COVER, stated plainly because it is the honest limit of the claim
+      // above: a records service that HANGS rather than throws. `catch` cannot shorten a wait, so a
+      // stuck multitable now delays the intent append by however long the driver takes to give up —
+      // and a client that disconnects first leaves no audit row at all, where on main the append was
+      // this handler's first IO and could not be delayed by anything. There is no timeout here today.
+      // If that window ever matters, the fix is a short deadline around this call, not moving it.
+      //
+      // WHAT IT COSTS, also stated: this is a second trip to the same ledger row that
+      // `confirmConfirmationDecision` looks up a moment later — one `findObjectSheet` plus one
+      // `queryRecords`, measured as 4 -> 7 host calls per confirm on the permission-matrix harness. It
+      // is paid on EVERY confirm that carries a decisionId, including the ones destined for 404/409,
+      // and it runs ahead of the module's own required-field validation, so a request with a
+      // decisionId but no `inputFingerprint` now does ledger IO where main did none. The caller is
+      // already past STOCK_PREP_OPERATE and the operator-scope wall, so this is cost, not exposure;
+      // sharing one read between the two would need `confirmConfirmationDecision` to hand its row
+      // back, which is a bigger change than the column is worth today.
       //
       // The staging derivation is written in the ONE reviewed form
       // (`resolveIntegrationStagingProjectId(scope.tenantId, undefined)`) that
@@ -8169,6 +8197,12 @@ function requireStockPreparationAudit() {
           confirmProjectNo = located && located.projectNo ? located.projectNo : null
         } catch {
           // FAIL-OPEN, on purpose. See above: this is a nullable audit column, not a gate.
+          //
+          // It swallows PROGRAMMING errors too — rename the export and every confirm silently files
+          // a NULL instead of crashing. That is the right trade here (a broken audit column must not
+          // break confirms) and it is not unwatched: the happy-path case in
+          // stock-preparation-permission-matrix.test.cjs asserts the column equals the ledger's
+          // projectNo, so a degraded-to-always-NULL lookup goes red there.
           confirmProjectNo = null
         }
       }
@@ -8178,8 +8212,11 @@ function requireStockPreparationAudit() {
       // multitable patch may occur.
       await audit.append({
         tenantId,
-        // The ledger row's own project handle — same calibre as the export's and reconcile's, and
-        // null whenever the soft lookup above could not name exactly one row.
+        // The ledger row's own project handle — same calibre as the export's and reconcile's. NULL
+        // whenever the lookup could not name exactly one row, whenever that row's cell is empty or
+        // is not handle-shaped (the export applies a length / control-character floor, because unlike
+        // reconcile's this string comes out of a cell a person can type into), and whenever the
+        // lookup itself threw.
         projectId: confirmProjectNo,
         action: 'exception_resolve',
         subjectId: confirmDecisionId,
@@ -9032,8 +9069,9 @@ function requireStockPreparationAudit() {
       }
       // VALUES-FREE AUDIT over a value-bearing response, appended BEFORE the values reach the caller
       // so a refusing audit store means no board is ever sent (H3-0 ③, fail-closed). project_id stays
-      // NULL and the projectNo appears nowhere: migration 083 says why that matters most here, on the
-      // one route that is ABOUT a single project.
+      // NULL and the projectNo appears nowhere: migration 086 says why that matters most here, on the
+      // one route that is ABOUT a single project. (086, not 083: this file was written as 083 and
+      // renumbered to run after 085 — 086:36-49 tells that story itself. There is no 083 in the tree.)
       await audit.append({
         tenantId: scope.tenantId,
         action: STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,

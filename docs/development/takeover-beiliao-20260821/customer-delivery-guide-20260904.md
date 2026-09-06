@@ -450,7 +450,7 @@ pg_restore --clean --if-exists -d $env:DATABASE_URL "$backupDir\pre-upgrade-db.d
 
 ## 9. 运维排障
 
-**对账/确认的审计行带项目号,可按项目反查是谁动过。** 备料审计表 `integration_stock_prep_audit` 的 `project_id` 列,过去只有"导出 Excel"和"通知下一步"两类操作填;现在**对账**(`generation_run` / `confirmation_reconcile_requested`)与**确认**(`exception_resolve` / `confirmation_decision_requested`)两条也填上了——对账取调用方请求里带的项目号,确认由 `decisionId` 反查账本行拿到。于是"某个项目的待确认队列被谁、在什么时候动过"可以直接按项目号查:
+**对账/确认的审计行带项目号,可按项目反查是谁动过。** 备料审计表 `integration_stock_prep_audit` 的 `project_id` 列一直可空,多数操作本来就填:导出 Excel、通知下一步,以及物料匹配/单位/异常那一族(`mapping_candidates_sync` / `mapping_confirm` / `mapping_retire` / `unit_confirm` / `unit_retire` / `generation_run` / `exception_resolve` / `exception_bulk_resolve`)。**过去空着的是确认队列上的那两条**:对账与确认——恰好是会改动别人待确认行的两个动作。现在两条也填上了:**对账**(`generation_run` / `confirmation_reconcile_requested`)取调用方请求里带的项目号,**确认**(`exception_resolve` / `confirmation_decision_requested`)由 `decisionId` 反查账本行拿到。于是"某个项目的待确认队列被谁、在什么时候动过"可以直接按项目号查:
 
 ```sql
 SELECT created_at, action, mode, actor, subject_id
@@ -459,7 +459,16 @@ WHERE tenant_id = '<租户 id>' AND project_id = '<项目号>'
 ORDER BY created_at DESC;
 ```
 
-审计行**本身仍然是 values-free 的**:只有项目号、操作人、动作/模式枚举与计数,永远不含物料名、数量、填写的值或备注。`project_id` 为 NULL 有两种正常情形,不是故障:一是"项目备料页"这类读路由**刻意不填**(见迁移 086 的说明);二是确认请求的 `decisionId` 在账本里找不到唯一一行时,该列留空而请求本身照原样继续。
+审计行**本身仍然是 values-free 的**:只有项目号、操作人、动作/模式枚举与计数,永远不含物料名、数量、填写的值或备注。
+
+`project_id` 为 NULL 的正常情形有四种,都不是故障:
+
+1. **"项目备料页"与"我的项目目录"两条读路由刻意不填**(`project_board_read` / `project_directory_read`,理由见迁移 086 的注释:那条读的命中/未命中若带上项目号,审计表本身就成了"这个项目号存不存在"的探测器)。
+2. **选源(`source_binding_set`)不填**——这是一条**写**,但它改的是"这个动作连哪个外部系统",不是某个项目的事。**所以"谁改过源"按项目号是查不到的**,要按 `action = 'source_binding_set'` 直接查。
+3. 确认请求的 `decisionId` 在账本里**找不到唯一一行**(不存在、或重复),或者找到了但那一行的"项目号"格是空的、或填的不像一个项目号(超过 64 字符、或含换行等控制字符——那格在多维表里是可以被人手输的),该列留空,请求本身照原样继续(该报的 404/409 照报)。
+4. 确认时那次**反查账本本身失败**(多维表不可用等)时,也留空,请求照原样继续。这一种最容易被误判成"没人动过"——同一时刻多维表侧应该有别的报错,交叉看一眼即可。
+
+还有一个口径提醒:上面那一族物料匹配/单位/异常的动作,项目号来自请求里的 `projectId` 字段(快照批次口径);对账/确认/导出/通知下一步来自备料动作参数里的 `projectNo`。客户口径下两者都是"项目号",但由不同请求字段送来——按项目号查不到时,先确认查的是哪条线,而不是先怀疑没记录。
 
 **9.1 PG 服务端日志:位置与编码**
 

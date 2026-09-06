@@ -1928,9 +1928,20 @@ async function reconcileAuditRowCarriesTheProjectFromTheRequest() {
   assert.deepEqual(row.detail, { operation: 'confirmation_decisions_reconcile' },
     'the detail payload is untouched by the new column')
 
-  // A request whose projectNo is not a usable string leaves the column NULL rather than stamping a
-  // shape the audit store would have to coerce. (An admin reaches this path; the operator branch is
-  // refused 400 before the append by the malformed-request gate that predates this change.)
+  // A projectNo that is not a usable string never reaches this append AT ALL — and that, not "it
+  // lands as NULL", is the property worth pinning, because it is what keeps a coerced handle out of
+  // the column in the first place. `normalizeActionParameters`
+  // (stock-preparation-table-actions.cjs — its `optionalString` accepts `typeof 'string'` only)
+  // refuses `{"projectNo": 12345}` 400 `TABLE_ACTION_PARAMETERS_INVALID` from inside
+  // `prepareStockPreparationConfirmationDecisions`, which runs BEFORE the append; so the trail stays
+  // EMPTY. That holds for an ADMIN, which is what this case drives: the route's own unconditional 400
+  // for the same shape is an earlier answer on the OPERATOR branch (`!hasPermission(user,'admin')`),
+  // and an admin simply meets the downstream validator instead — same status, same code, same field,
+  // same empty trail.
+  //
+  // Pinned as a refusal ON PURPOSE. An earlier draft asserted `projectId === null` inside
+  // `if (numeric.length > 0)`, which — since the length is always 0 — was an assertion that could
+  // never run and never fail: exactly the self-disabling shape this file exists to keep out.
   const numeric = []
   const numericMount = mount({
     registrations: [registration()],
@@ -1938,12 +1949,14 @@ async function reconcileAuditRowCarriesTheProjectFromTheRequest() {
     records: createRecordsApi(),
     extraServices: reconcileServices({ auditAppends: numeric }),
   })
-  await call(numericMount.routes, 'POST', RECONCILE_ROUTE, {
+  const numericRes = await call(numericMount.routes, 'POST', RECONCILE_ROUTE, {
     user: ADMIN_USER, params: ACTION_PARAMS, body: { parameters: { projectNo: 12345 } },
   })
-  if (numeric.length > 0) {
-    assert.equal(numeric[0].projectId, null, 'a non-string projectNo lands as NULL, never as a coerced handle')
-  }
+  assert.equal(numericRes.statusCode, 400, JSON.stringify(numericRes.body))
+  assert.equal(numericRes.body.error.code, 'TABLE_ACTION_PARAMETERS_INVALID', JSON.stringify(numericRes.body))
+  assert.equal(numericRes.body.error.details.field, 'parameters.projectNo', JSON.stringify(numericRes.body))
+  assert.equal(numeric.length, 0,
+    'a non-string projectNo is refused before the append, so no audit row can carry a coerced handle')
 }
 
 // ── (2) the cross-plugin door: the runner's own fence ────────────────────────

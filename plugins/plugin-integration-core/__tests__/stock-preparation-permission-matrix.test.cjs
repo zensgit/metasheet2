@@ -585,7 +585,7 @@ async function authorizedOperatorGetsRealResponses() {
 async function theConfirmAuditRowCarriesTheProjectFromTheLedger() {
   // (a) THE HAPPY PATH. Note what the request body does not contain: a projectNo.
   {
-    const { routes, auditAppends } = mount()
+    const { routes, auditAppends, hostCallCount } = mount()
     const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
       user: OPERATOR_CONFIRM,
       body: {
@@ -595,6 +595,16 @@ async function theConfirmAuditRowCarriesTheProjectFromTheLedger() {
       },
     })
     assert.equal(res.statusCode, 200, `confirm projectId: the confirm still succeeds, got ${JSON.stringify(res.body)}`)
+    // THE COST, PINNED. The soft lookup is a SECOND trip to the same ledger row
+    // `confirmConfirmationDecision` reads a moment later: one `findObjectSheet` + one scoped
+    // `queryRecords` on top of the four calls this confirm made before. 4 -> 7 measured on this
+    // harness, and written down here so the number cannot drift silently — a route that fills one
+    // nullable column must not quietly grow a third or fourth ledger round trip.
+    //
+    // A TRIPWIRE, NOT A CONTRACT: if a legitimate change moves it, move the number and say so in the
+    // PR. If it moves and nobody noticed, that is exactly what this line is for.
+    assert.equal(hostCallCount(), 7, 'confirm projectId: the soft lookup costs exactly one extra sheet lookup + one query')
+
     assert.equal(auditAppends.length, 1, 'confirm projectId: still exactly ONE audit row — no second row was added')
     const [row] = auditAppends
     assert.equal(row.projectId, PROJECT_NO, 'confirm projectId: taken from the ledger row the decisionId resolves to')
@@ -639,7 +649,10 @@ async function theConfirmAuditRowCarriesTheProjectFromTheLedger() {
         resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
       },
     })
-    assert.ok(res.statusCode >= 500, `confirm projectId: a dead records service still fails the request, got ${res.statusCode}`)
+    assert.equal(res.statusCode, 500, `confirm projectId: a dead records service still fails the request, got ${JSON.stringify(res.body)}`)
+    // The failure the CALLER sees is the downstream read's, verbatim — the soft lookup contributed
+    // no error of its own, which is the difference between "swallowed" and "hidden".
+    assert.equal(res.body.error.message, 'records service unavailable', JSON.stringify(res.body))
     assert.equal(auditAppends.length, 1, 'confirm projectId: …and the intent row is STILL on the trail, which is the whole point')
     assert.equal(auditAppends[0].projectId, null, 'confirm projectId: a failed lookup fills nothing rather than blocking')
     assert.equal(auditAppends[0].actor, OPERATOR_CONFIRM.id, 'confirm projectId: the principal is stamped either way')
@@ -653,7 +666,11 @@ async function theConfirmAuditRowCarriesTheProjectFromTheLedger() {
       user: OPERATOR_CONFIRM,
       body: { inputFingerprint: FINGERPRINT, resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS },
     })
-    assert.ok(res.statusCode >= 400, `confirm projectId: a decisionId-less confirm still fails, got ${res.statusCode}`)
+    assert.equal(res.statusCode, 422, `confirm projectId: a decisionId-less confirm still fails, got ${JSON.stringify(res.body)}`)
+    // Pinned to the MODULE's own named error, not just "some 4xx": the point of skipping the lookup
+    // when there is no decisionId is that the caller keeps exactly the answer main gave it.
+    assert.equal(res.body.error.code, 'CONFIRMATION_DECISION_INPUT_INVALID', JSON.stringify(res.body))
+    assert.equal(res.body.error.details.field, 'decisionId', JSON.stringify(res.body))
     assert.equal(auditAppends.length, 1, 'confirm projectId: the malformed request still lands its audit row')
     assert.equal(auditAppends[0].projectId, null)
     assert.equal(auditAppends[0].subjectId, null)
