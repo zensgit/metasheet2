@@ -266,22 +266,18 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 | 角色 | 能做 | 不能做(留给 `integration:admin`) |
 |---|---|---|
-| 一线操作员(`stock-prep:operate` **且** `stock-prep:read`,已开命名空间准入) | 搜自己租户的项目、开项目备料页;跑拉取(试算/写入,含大 BOM 后台通道);确认队列的 `confirmation-decisions/reconcile`(**对账项目门默认关闭**;开启后仅限本人可见项目,且仅这一条路由——列表/确认始终是租户级,见下) | 落快照批次(`mvp-persist`);装表/装 pack/`sandbox-target/ensure`;选源(`source-binding`);跨租户读任何东西;生产写 canonical(本期任何角色都不能,见 §7④) |
+| 一线操作员(`stock-prep:operate` **且** `stock-prep:read`,已开命名空间准入) | 搜自己租户的项目、开项目备料页;跑拉取(试算/写入,含大 BOM 后台通道);确认队列的 `confirmation-decisions/reconcile`(**不做按项目限制**,同租户内任意项目号都能对账——设计如此,见下) | 落快照批次(`mvp-persist`);装表/装 pack/`sandbox-target/ensure`;选源(`source-binding`);跨租户读任何东西;生产写 canonical(本期任何角色都不能,见 §7④) |
 | 平台管理员(`role:admin` / `integration:admin`) | 上述"不能做"里的全部;授权限、开命名空间准入 | — |
 
-> **对账项目门(实验性 feature flag,默认关闭)**:`MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE=true` 打开后,一线操作员调 `confirmation-decisions/reconcile` 时,项目号必须是**「我的项目目录」(`GET /api/integration/stock-preparation/operator/projects`)能列出来的项目**;不在里面的项目号一律 403 `STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE`,且拒绝发生在读源之前(不读 PLM、不解密连接、不写审计)。平台管理员任何时候都不受此门限制。
+> **对账不做按项目限制(设计如此,不是缺口未补)**:一线操作员调 `confirmation-decisions/reconcile` 时,项目号**只校验租户,不校验项目**——同一租户内任何持 `stock-prep:operate` + `stock-prep:read` 的账号,都可以对本租户的任意项目号发起对账,包括作废该项目下别人已经排队的待确认行(孤儿清扫会把它们改判 superseded)。**边界是租户,不是项目**。
 >
-> **默认关闭时是今天的行为,逐字节相同**:不设这个变量(或设成 `true` 以外的任何值),这条路由**根本不会去读项目目录**——不是"读了以后放行",是这段代码不执行;同租户内 reconcile 仍是**租户级**边界,与开门前完全一致。
+> **为什么不做**:2026-09-06 owner 拍板。曾经做过一版按「我的项目目录」收窄的门(env 门控、默认关),这一版**已在本次删除**,原因有两条,都是结构性的,换个实现也绕不过去:(a) 项目目录本身是**按租户**给的(见 `stock-preparation-operator-scope.cjs`:作用域"不是按行的"),同一家工厂的两个操作员看到同一批项目,这道门**分不开同事**,而"分开同事"正是当初提这个需求的原因;(b) 它唯一的放行口是"本租户一个归档项目都没有",一旦本租户归档过任何项目,这个口就反转成"**从未归档过的新项目,一线对它的第一次对账被 403**",而归档(`mvp-persist`)是平台管理员 + 开关双限、一线自己的四步拉取第 4 步本来就 SKIP。真正按人归属需要一张**目前不存在**的项目归属表。设计稿:`design-project-ownership-20260906.md` §2 方案 B。
 >
-> **一条与门无关、始终生效的校验**:项目号写成 JSON 数字(不是字符串)一律 400 `TABLE_ACTION_PARAMETERS_INVALID`,同样发生在读源之前。这是"请求写错了"的答复(与下游参数校验同码、同字段),不是权限收窄,所以不跟着 flag 走。
+> **那争议怎么办 —— 靠审计反查**:reconcile 每次都会写审计行(动作 `generation_run`,mode `confirmation_reconcile_requested`,detail.operation `confirmation_decisions_reconcile`),且写在多维表落库**之前**,带操作人与时间。按时间 + 操作人可以查出"是谁发起过对账"。**注意当前限制**:这条审计行今天**不带项目号**(`project_id` 为空),所以只能按时间窗 + 人反查,不能直接按项目号过滤;补项目号是另一支改动。
 >
-> **为什么默认关**:见下面第三条。这道门一旦打开,本租户**归档过任何一个项目之后**,一线对一个**新项目**的第一次对账就会 403;而"归档"只有平台管理员在另一个开关打开时才能做。那会打断新项目的日常流程,所以默认不开,由部署方按自己的作业方式决定是否开启。真正按人归属的收窄需要一张**目前还不存在**的项目归属表。
+> **一条始终生效的请求格式校验(与上面无关)**:项目号写成 JSON 数字(不是字符串)一律 400 `TABLE_ACTION_PARAMETERS_INVALID`,发生在读源之前(不读 PLM、不解密连接、不写审计)。这是"请求写错了"的答复(与下游参数校验同码、同字段),不是权限收窄。它是随那道门一起加的,但**不随门一起删**。
 >
-> **开启后的限制**,四点如实说明,免得把这道门当成比它更强的保证:
-> - **这一句只说 `reconcile` 这一条路由**。同一本确认账本的另外两条路由**没有**按项目校验:`GET …/confirmation-decisions?projectNo=<任意本租户项目>`(读档 `stock-prep:read`)会返回该项目的全部待确认行,`POST …/confirmation-decisions/confirm`(操作档)只按 `decisionId` 改判、不看项目。它们仍然是**租户级**边界。所以开门收窄的是"谁能触发这一次对账",不是"账本按项目受保护"。
-> - **这是"限本租户的项目",不是"限本人的项目"**。目录本身是按租户给的(见 `stock-preparation-operator-scope.cjs`:作用域"不是按行的"),同一家工厂的两个操作员看到同一批项目,这道门分不开他们。要真正区分同事,需要一张目前还不存在的项目归属表。
-> - **本租户一个归档项目都没有时,这道门放行**(并在代码里明写为限制)。判据是**项目表里有没有行**,不是"项目表在不在"——项目表由 `POST …/stock-preparation/mvp/ensure` 建(默认覆盖全部 9 张冻结表,部署后的 smoke 每次都会跑),所以**装过表就等于表在**,拿表的存在当判据会让这道门在全新部署上就已经生效。项目**行**只由 `mvp-persist` 写,而 `mvp-persist` 是平台管理员 + 开关双重限制。**推论**:一旦本租户归档过任何一个项目,一个**从未归档过**的项目,一线对它的对账会被这道门拒绝(需要管理员先归档该项目,或代跑一次对账)。一线自己的四步拉取到第 4 步"归档"会 SKIP(平台管理员档),所以这个状态在正常使用里就会出现——**这正是本门默认关闭的原因**。**不要**改成"账本里有该项目的待确认行就放行":待确认行正是孤儿清扫要作废的东西,那样等于恰好在会造成损害的情形下放行。
-> - **项目行缺 `projectId` 会被当作不可见**(目录侧跳过没有主键的行,fail-closed)。表现是:项目号明明对得上,一线仍然 403。排查时先看项目表该行的 `projectId` 是不是空的。
+> **同一本确认账本的另外两条路由同样是租户级**:`GET …/confirmation-decisions?projectNo=<任意本租户项目>`(读档 `stock-prep:read`)会返回该项目的全部待确认行,`POST …/confirmation-decisions/confirm`(操作档)只按 `decisionId` 改判、不看项目。所以"按项目保护账本"这句话在本期任何一条路由上都不成立。
 
 **5-4 项目备料页 tab 的落地行为**:登录后访问 `/stock-prep`(路由不带 tab 参数)。一线操作员账号自动落在"项目备料"tab;平台管理员账号自动落在"确认队列"tab,需手动点开"项目备料"。也可以直接带 `?projectNo=<项目号>` 深链到某个项目。
 

@@ -1093,15 +1093,23 @@ describe('StockPreparationWorkspace shell', () => {
     expect(notice.textContent).toContain('请先填一个项目号')
   })
 
-  // The refusal this PR's server half added. It reaches the shell as an ordinary clamped code, so
-  // the notice must be the code's OWN sentence — not the generic "did not save" — and must carry no
-  // project number of its own.
+  // A REFUSED RECONCILE. It reaches the shell as an ordinary clamped code, so the notice must be the
+  // code's OWN sentence — not the generic "did not save" — and must carry no project number of its
+  // own.
+  //
+  // THE CODE HERE USED TO BE `STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE`, the project gate
+  // #5516 put on the server. The owner ruled on 2026-09-06 that stock-prep will not do project
+  // ownership; the gate and its copy were deleted, so no server path can produce that code any more
+  // and a test that kept asserting its sentence would have been witnessing dead copy. This case is
+  // what it was always really about — the notice renders the refusal's own words plus the code —
+  // repointed at a refusal this button can genuinely receive: the 403 `FORBIDDEN` that
+  // `requireTableActionAccess` raises.
   it('a refused reconcile shows the plain-language refusal plus its code, values-free', async () => {
     h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (String(init?.method ?? 'GET').toUpperCase() === 'POST') {
         return new Response(JSON.stringify({
           ok: false,
-          error: { code: 'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE', message: 'nope' },
+          error: { code: 'FORBIDDEN', message: 'nope' },
         }), { status: 403 })
       }
       return new Response(JSON.stringify({
@@ -1119,8 +1127,8 @@ describe('StockPreparationWorkspace shell', () => {
     ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
     const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
 
-    expect(notice.textContent).toContain('不在您能看到的项目里')
-    expect(notice.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE')
+    expect(notice.textContent).toContain('当前账号没有做这件事的权限')
+    expect(notice.querySelector('code')?.textContent).toBe('FORBIDDEN')
     // The wording is the CODE's own, not the write-generic every unknown code falls back to.
     expect(notice.textContent).not.toContain('这一步没有保存成功')
     // ...and the number the admin typed is not echoed back into the notice.

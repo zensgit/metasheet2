@@ -346,42 +346,19 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationOperatorProjectBoard',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationPrepLineExport',
-  // 对账限本人可见项目. A VALUES-FREE ROUTE IN THIS SET, and it is here for the
-  // opposite reason to `tableActionDryRun` below: reconcile returns counts and evidence tokens and
-  // nothing else, in every branch. It resolves the operator scope not to decide WHAT it may show but
-  // to decide WHOSE project directory answers "is this projectNo one of yours" — the visibility check
-  // that stops one operator's reconcile from superseding another project's pending decision rows.
+  // 对账限本人可见项目 WAS PINNED HERE AND IS NOT ANY MORE — said out loud, because the assertion
+  // below asks whoever removes a member to say so. #5516 gave reconcile a project-visibility gate
+  // that resolved an operator scope to decide WHOSE project directory answered "is this projectNo one
+  // of yours"; the owner ruled on 2026-09-06 that stock-prep will not do project ownership, and the
+  // gate was deleted rather than left behind a default-off env switch. With it went the only
+  // `resolveOperatorValueScope(` in that handler, so the SOURCE SCAN no longer finds it and pinning it
+  // here would fail the derived-equals-pinned check from the other side.
   //
-  // PINNED EVEN THOUGH THE CALL IS ENV-GATED AND OFF BY DEFAULT
-  // (`MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE`). This whole file is a SOURCE-LEVEL
-  // scan: it asks what the handler is written to do, not what a given deployment runs. The scan
-  // finds `resolveOperatorValueScope(` in the body whatever the flag says, so leaving the handler
-  // out would fail the derived-equals-pinned check outright — and, more to the point, an unarmed
-  // code path is exactly the one that drifts unwatched. The three per-handler checks below are what
-  // stop it from acquiring another way of deciding tenancy while nobody is running it.
-  //
-  // The three per-handler checks below are exactly the ones that matter for that use: the scope must
-  // be the tenancy authority (no `resolveTenantId`, no raw `user.tenantId`), because a header-picked
-  // tenant would pick which directory vouches for the number.
-  //
-  // WHAT THAT DOES AND DOES NOT COVER, because the two regexes read stronger than they measure. They
-  // pin the VISIBILITY half. This route's LEDGER tenant still comes from `resolveAuthUserTenantId(req)`
-  // — a helper whose body is `user.tenantId`, i.e. the `x-tenant-id` header on a deployment with the
-  // tenant-claim flag off — and neither regex can see through the wrapper. On the operator branch the
-  // two values are provably equal (a scope that contradicts the carrier is refused
-  // OPERATOR_SCOPE_TENANT_CONTRADICTED, and a principal with no tenant is refused before this), so
-  // there is no behavioural hole today; but "the scope is the only tenancy authority here" is true of
-  // the directory half only. The admin branch's header exposure is the pre-existing one this change
-  // does not touch.
-  //
-  // It is deliberately NOT in
-  // VALUE_BEARING_READS_WITH_INLINE_STAGING: this handler derives TWO staging projects — the
-  // visibility check's, from `reconcileScope.tenantId`, and the ledger write's, which predates this
-  // change — and that set's assertion is that a handler derives exactly one, from `scope.tenantId`.
-  // It is in VALUE_BEARING_READS_WITH_MULTIPLE_STAGING instead, which pins the exact pair, so the
-  // visibility derivation is still statically nailed to the resolved scope and a third form (a
-  // request-sourced projectId above all) cannot appear beside them unremarked.
-  'tableActionConfirmationDecisionsReconcile',
+  // WHAT THAT GIVES UP, stated rather than glossed: reconcile's ledger tenant is
+  // `resolveAuthUserTenantId(req)` — the derivation it has had since before #5516, and the one this
+  // file never covered on that route until the gate briefly enrolled it. Nothing about that
+  // derivation changed here; it simply stops being watched by THIS file, exactly as it was not
+  // watched before #5516. Re-pin it the moment reconcile resolves an operator scope again.
   // 缺件清单 (W3a). THE ONLY MEMBER WITH A VALUE-BEARING OPT-IN ON A VALUES-FREE ROUTE — it is a
   // values-free route with a value-bearing OPT-IN, and that difference is why it needs the carve-out
   // spelled out in VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT below rather than a quiet edit to
@@ -446,21 +423,19 @@ const VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT = new Map([
 ])
 
 /**
- * HANDLERS THAT DERIVE MORE THAN ONE STAGING PROJECT — the blanket inline-staging check above cannot
+ * HANDLERS THAT DERIVE MORE THAN ONE STAGING PROJECT — the blanket inline-staging check below cannot
  * cover them (it demands that EVERY derivation read `scope.tenantId`), and leaving them out entirely
  * would mean nothing pins the one derivation that matters.
  *
- * `tableActionConfirmationDecisionsReconcile` derives two: the VISIBILITY check's, from the operator
- * scope resolved in this handler, and the LEDGER's, which predates 对账限本人可见项目 and is the
- * handler's own tenant. Pinning the exact pair is what stops a third form — above all a
- * request-sourced projectId — from appearing beside them without anyone noticing.
+ * EMPTY SINCE 2026-09-06, and kept rather than deleted. Its only member was
+ * `tableActionConfirmationDecisionsReconcile`, which derived two: the deleted project gate's, from
+ * `reconcileScope.tenantId`, and the LEDGER's, which predates that gate and is still there. With the
+ * gate gone the handler derives one staging project again AND no longer resolves an operator scope,
+ * so it is out of the derived set entirely and there is nothing here for this map to pin. The
+ * machinery stays because the next handler with two derivations must land in a reviewed pair rather
+ * than in a fresh idea about how to pin them.
  */
-const VALUE_BEARING_READS_WITH_MULTIPLE_STAGING = new Map([
-  ['tableActionConfirmationDecisionsReconcile', [
-    'resolveIntegrationStagingProjectId(reconcileScope.tenantId, undefined)',
-    'resolveIntegrationStagingProjectId(tenantId, undefined)',
-  ]],
-])
+const VALUE_BEARING_READS_WITH_MULTIPLE_STAGING = new Map([])
 
 for (const name of VALUE_BEARING_READ_HANDLERS) {
   const body = handlerBody(ROUTES_SRC, name)
