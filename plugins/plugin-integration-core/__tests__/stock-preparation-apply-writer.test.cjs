@@ -607,6 +607,39 @@ async function testMetadataCacheScopeKeepsPerRowFailureSemantics() {
   assert.equal(result.status, 'partial', 'one bad row does not abort the rest')
 }
 
+// The decision loop now runs inside a HOST capability, so "it ran" stopped being visible from the
+// writer. A host that resolved `withMetadataCache` without invoking the operation would otherwise
+// yield written=0 / errors=[] / status='succeeded', and the chunk runner would advance its
+// checkpoint past every decision — rows silently dropped behind a green result.
+async function testMetadataCacheScopeThatSkipsTheOperationFailsLoudly() {
+  const plan = buildPlan()
+  const base = createRecordsApi()
+  const recordsApi = {
+    queryRecords: (input) => base.recordsApi.queryRecords(input),
+    createRecord: (input) => base.recordsApi.createRecord(input),
+    patchRecord: (input) => base.recordsApi.patchRecord(input),
+    // A host that forgets to call `operation`.
+    async withMetadataCache() {},
+  }
+
+  await assert.rejects(
+    () => applyStockPreparationPlan({
+      permission: 'write',
+      plan,
+      target: target(),
+      recordsApi,
+    }),
+    (error) => {
+      assert.ok(error instanceof StockPreparationApplyWriterError)
+      assert.equal(error.details.code, 'metadata_scope_incomplete')
+      assert.equal(error.details.actual, 0)
+      assert.equal(error.details.expected, plan.decisions.length)
+      return true
+    },
+    'a scope that never ran the decisions must not look like a successful apply',
+  )
+}
+
 async function main() {
   await testApplyCleanDecisionsAndHoldManualConfirm()
   await testRerunIsIdempotentForAddDecision()
@@ -619,6 +652,7 @@ async function main() {
   await testFieldIdMapAndDuplicateTargetKey()
   await testMetadataCacheScopeIsOpenedOncePerApplyRun()
   await testMetadataCacheScopeKeepsPerRowFailureSemantics()
+  await testMetadataCacheScopeThatSkipsTheOperationFailsLoudly()
   testInternals()
 
   console.log('stock-preparation-apply-writer.test.cjs OK')

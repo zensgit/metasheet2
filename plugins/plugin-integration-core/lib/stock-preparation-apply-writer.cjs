@@ -612,6 +612,23 @@ async function applyStockPreparationPlan(input = {}) {
     await runDecisions()
   }
 
+  // The loop above now runs inside a HOST capability, so "it ran" is no longer visible from here.
+  // A host whose `withMetadataCache` resolved without invoking the operation would produce
+  // written=0 / errors=[] / status='succeeded', and the chunk runner would advance its checkpoint
+  // past every decision in this chunk — a green lie that silently drops rows. The in-repo
+  // implementation always invokes it, so this is unreachable today and costs one comparison;
+  // it exists so that a future host cannot make skipping rows look like success.
+  if (results.length !== plan.decisions.length) {
+    throw new StockPreparationApplyWriterError(
+      'metadata scope returned without running every decision',
+      {
+        code: 'metadata_scope_incomplete',
+        expected: plan.decisions.length,
+        actual: results.length,
+      },
+    )
+  }
+
   const written = counts.created + counts.updated + counts.inactive
   const status = applyStatus(counts, written)
   return {

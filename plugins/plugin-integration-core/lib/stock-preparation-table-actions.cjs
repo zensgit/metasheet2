@@ -974,6 +974,10 @@ async function createTargetScopedRecordsApi(recordsApi, target, options = {}) {
   // row and grants nothing, so there is nothing here for withTargetSheet to fence — but the scoped
   // api is a FRESH object, so anything not forwarded is invisible to every caller behind this
   // fence, and the memo would silently never engage. Absent on a host that does not offer it.
+  // Placed BEFORE the read-only return on purpose: a read-only caller may also open a scope. That
+  // widens the surface that can open one beyond the write path, which is accepted because opening a
+  // scope authorizes nothing — a read-only api still cannot write, and every records call inside a
+  // scope still runs its own first-time ownership assertion.
   if (typeof api.withMetadataCache === 'function') {
     scopedApi.withMetadataCache = (operation) => api.withMetadataCache(operation)
   }

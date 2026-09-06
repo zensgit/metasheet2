@@ -44,6 +44,16 @@ const DEFAULT_VIEW_CACHE = new Map<string, MultitableViewConfig>()
  * re-queried, so a sheet created (or undeleted) after a negative probe is never masked by a
  * remembered `null`. There is no module-level default map here on purpose: the only supplier today
  * is the request-scoped memo in `request-metadata-cache.ts`, which dies with its request.
+ *
+ * NOTE what a hit means: the query filters `deleted_at IS NULL`, so a memoized row records "this
+ * sheet existed and was not soft-deleted AT FIRST READ". A soft delete during the caller's scope is
+ * not seen by that scope — enumerated as trade-off (4) in `request-metadata-cache.ts`.
+ *
+ * CALLERS MUST TREAT THE RETURNED OBJECT AS READ-ONLY. On a hit every caller in the scope gets the
+ * SAME object, so an in-place edit would leak across rows. Same for `loadFieldsForSheet` below: on
+ * a hit it hands back the same array and the same field objects, not fresh `serializeFieldRow`
+ * output. Current consumers only read (`fields.map` / `fields.some` in `records.ts` and
+ * `query-service.ts`); anything that wants to normalize a field must copy first.
  */
 export async function loadSheetRow(
   poolOrQuery: MultitableLoaderQueryFn | { query: MultitableLoaderQueryFn },

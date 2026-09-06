@@ -14,7 +14,10 @@ import {
   getPluginProjectNamespaces,
   isSheetOwnedByProject,
 } from '../../src/multitable/plugin-scope'
-import { runWithMultitableRequestMetadataCache } from '../../src/multitable/request-metadata-cache'
+import {
+  REQUEST_METADATA_SCOPE_MAX_AGE_MS,
+  runWithMultitableRequestMetadataCache,
+} from '../../src/multitable/request-metadata-cache'
 
 function createScopeQuery() {
   const rows: Array<{
@@ -760,8 +763,13 @@ describe('multitable plugin scope request-scoped sheet-scope memo', () => {
     }
   }
 
+  // Save/restore rather than delete: a CI runner that sets this flag globally would otherwise have
+  // it wiped by the first case here, silently changing the premise of every later case in the file.
+  const flagBefore = process.env[FLAG]
   afterEach(() => {
-    delete process.env[FLAG]
+    if (flagBefore === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = flagBefore
+    vi.restoreAllMocks()
   })
 
   it('asserts once per (plugin, sheet) inside a scope and once per call outside one', async () => {
@@ -862,5 +870,124 @@ describe('multitable plugin scope request-scoped sheet-scope memo', () => {
     await expect(
       (scoped.records.withMetadataCache as (op: unknown) => Promise<unknown>)('not-a-function'),
     ).rejects.toBeInstanceOf(TypeError)
+  })
+
+  // "Two concurrent requests each get their own store" is the entire reason memoizing a security
+  // hook is defensible here, and a serial test cannot tell AsyncLocalStorage apart from a
+  // module-level `let store` with save/restore. This one interleaves: each scope must re-assert a
+  // pair the OTHER scope already passed, in both directions, while both are still open.
+  it('never lets one open scope inherit a concurrent scope’s passed assertion', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const { scoped } = buildScoped(assertSheetScope)
+
+    const gate = () => {
+      let open = (): void => {}
+      const passed = new Promise<void>((resolve) => { open = resolve })
+      return { passed, open }
+    }
+    const aAsserted = gate()
+    const bAsserted = gate()
+    const aCrossed = gate()
+    const bCrossed = gate()
+
+    const scopeA = runWithMultitableRequestMetadataCache(async () => {
+      await scoped.records.createRecord({ sheetId: 'sheet_a', data: {} } as any) // assert #1
+      aAsserted.open()
+      await bAsserted.passed
+      // B has just passed sheet_b. A has not, and must not inherit it.
+      await scoped.records.createRecord({ sheetId: 'sheet_b', data: {} } as any) // assert #3
+      aCrossed.open()
+      await bCrossed.passed
+      // A's own pair is still memoized inside A.
+      await scoped.records.createRecord({ sheetId: 'sheet_a', data: {} } as any) // no assert
+    })
+
+    const scopeB = runWithMultitableRequestMetadataCache(async () => {
+      await aAsserted.passed
+      await scoped.records.createRecord({ sheetId: 'sheet_b', data: {} } as any) // assert #2
+      bAsserted.open()
+      await aCrossed.passed
+      // A passed sheet_a while B was open. B must still assert it for itself.
+      await scoped.records.createRecord({ sheetId: 'sheet_a', data: {} } as any) // assert #4
+      bCrossed.open()
+    })
+
+    await Promise.all([scopeA, scopeB])
+
+    // 4, not 3: a shared store would let A skip sheet_b (B already passed it in the same store).
+    expect(assertSheetScope).toHaveBeenCalledTimes(4)
+    expect(assertSheetScope.mock.calls.map((call) => (call as any[])[0])).toEqual([
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_a' },
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_b' },
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_b' },
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_a' },
+    ])
+  })
+
+  // The caller chooses how long a scope lasts, so the ownership re-check interval is capped by the
+  // mechanism rather than by the apply writer's "one scope = one chunk" convention.
+  it('re-asserts once the scope is older than the max age', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const { scoped } = buildScoped(assertSheetScope)
+
+    let clock = 1_757_000_000_000
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(scoped, 3)
+      expect(assertSheetScope).toHaveBeenCalledTimes(1)
+
+      clock += REQUEST_METADATA_SCOPE_MAX_AGE_MS + 1
+      // Same scope; the memo simply stops serving, so ownership is re-derived on every call again.
+      await writeRows(scoped, 3)
+    })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(7)
+  })
+
+  // P0-S S4: in the DEFAULT `observe` mode the host does not throw for an UNREGISTERED sheet — it
+  // logs "plugin X accessed unregistered sheet Y" and returns. From this layer that return looks
+  // exactly like a pass, so memoizing it would thin that warning from one line per records call to
+  // one line per scope, which is the signal used to decide whether the registry backfill is far
+  // enough along to flip the mode to `enforce`. The host reports `registered: false`; it must not
+  // be memoized.
+  it('does not memoize a tolerated UNREGISTERED sheet (observe mode keeps warning per call)', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => ({ registered: false }))
+    const { scoped } = buildScoped(assertSheetScope as any)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(scoped, 4)
+    })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(8)
+  })
+
+  it('memoizes an explicitly REGISTERED pass', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => ({ registered: true }))
+    const { scoped } = buildScoped(assertSheetScope as any)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(scoped, 4)
+    })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(1)
+  })
+
+  // The host hook is the only implementation of this contract and it lives inline in the server
+  // bootstrap, where a behavioural mock cannot reach it: if it stopped returning `registered`, the
+  // observe-mode tolerance above would start being memoized again and no unit test would notice.
+  it('the host assertSheetScope hook reports registration status (source contract)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { fileURLToPath } = await import('node:url')
+    const indexPath = fileURLToPath(new URL('../../src/index.ts', import.meta.url))
+    const source = readFileSync(indexPath, 'utf8')
+
+    const hook = source.slice(source.indexOf('assertSheetScope: async ('))
+    const body = hook.slice(0, hook.indexOf('runStockPreparationPersistUnitOfWork'))
+    expect(body).toContain('return { registered: ownsSheet }')
   })
 })

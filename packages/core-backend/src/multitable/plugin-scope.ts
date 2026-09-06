@@ -27,6 +27,18 @@ export type AssertPluginSheetScopeInput = {
   sheetId: string
 }
 
+/**
+ * W8-4 (L1). What a host may report back from `assertSheetScope` when it RETURNS (a refusal still
+ * throws). `registered: false` means "this sheet has no registry row and the deployment's
+ * `MULTITABLE_PLUGIN_SHEET_SCOPE_MODE` is tolerating that" — an outcome that is NOT a pass and must
+ * therefore never be memoized, or the P0-S S4 "accessed unregistered sheet" warning would drop from
+ * one line per records call to one line per scope. Omitting the value keeps the pre-existing
+ * meaning (a plain successful assertion).
+ */
+export type AssertPluginSheetScopeOutcome = {
+  registered?: boolean
+}
+
 export type AssertPluginObjectScopeInput = {
   pluginName: string
   projectId: string
@@ -39,7 +51,9 @@ export type MultitableScopeHooks = {
   ) => ReturnType<MultitableAPI['provisioning']['ensureObject']>
   assertObjectScope?: (input: AssertPluginObjectScopeInput) => Promise<void>
   claimObjectScope?: (input: ClaimPluginObjectScopeInput) => Promise<void>
-  assertSheetScope?: (input: AssertPluginSheetScopeInput) => Promise<void>
+  assertSheetScope?: (
+    input: AssertPluginSheetScopeInput,
+  ) => Promise<void | AssertPluginSheetScopeOutcome>
   isSheetOwnedByProject?: (input: { sheetId: string; projectId: string }) => Promise<boolean>
   runStockPreparationPersistUnitOfWork?: <T>(
     input: StockPreparationPersistUnitOfWorkInput & { pluginName: string },
@@ -229,17 +243,23 @@ export function createPluginScopedMultitableApi(
 ): MultitableAPI {
   /**
    * W8-4 (L1): `assertSheetScope` is a SECURITY hook, so what is memoized here is deliberately
-   * narrow — one `(pluginName, sheetId)` pair that ALREADY RETURNED SUCCESSFULLY, for the lifetime
+   * narrow — one `(pluginName, sheetId)` pair that ALREADY PASSED AS REGISTERED, for the lifetime
    * of one explicitly opened request scope, and only while the flag is on. Outside a scope this is
    * exactly `await hooks.assertSheetScope?.(...)` on every single call, unchanged.
    *
-   * Why the memo does not widen what is reachable: the ONLY caller that opens a scope today is the
-   * stock-prep apply writer, and every records call it makes has already been pinned to
-   * `target.sheetId` by `withTargetSheet` (`stock-preparation-table-actions.cjs`, 403 otherwise) —
-   * so the set of pairs asserted inside one scope is a SINGLETON, and memoizing it cannot admit a
-   * second sheet that was never asserted. The residual is the ordinary time-of-check window: a
-   * registry row that flips owner mid-chunk is re-read on the next chunk (a new request, a new
-   * scope) rather than on the next row. A throw is never memoized, so a denial is never sticky.
+   * What the memo cannot do: admit a pair that was never asserted. Every records call still runs
+   * the hook the first time this scope sees its `(plugin, sheet)` pair, and the key carries both
+   * halves, so no plugin inherits another plugin's pass and no sheet inherits another sheet's.
+   *
+   * What the memo DOES change, stated plainly rather than argued away: it lengthens the ownership
+   * re-check interval for an already-passed pair from "every records call" to "once per scope". The
+   * scope length is the CALLER's, not this file's — `records.withMetadataCache` below is on the
+   * generic plugin API — so the actual bound is the deadline in `request-metadata-cache.ts`
+   * (`REQUEST_METADATA_SCOPE_MAX_AGE_MS`), after which the memo stops serving and every call
+   * re-asserts. A registry row that flips owner inside that window is caught on the next call after
+   * it, not on the next row. Two things are never memoized: a THROW (so a refusal is never sticky)
+   * and an `observe`-mode tolerance of an UNREGISTERED sheet (so the P0-S S4 visibility warning
+   * still fires once per records call, exactly as before this change).
    */
   const assertSheetScopeOnce = async (sheetId: string): Promise<void> => {
     if (!hooks.assertSheetScope) return
@@ -254,7 +274,13 @@ export function createPluginScopedMultitableApi(
     // getting that wrong would let one pair impersonate another.
     const key = JSON.stringify([pluginName, sheetId])
     if (cache.assertedSheetScopes.has(key)) return
-    await hooks.assertSheetScope({ pluginName, sheetId })
+    const outcome = await hooks.assertSheetScope({ pluginName, sheetId })
+    // `registered === false` is the host saying "no registry row, and this deployment tolerates
+    // that" — a WARNING it emits on every call, not a pass. Memoizing it would silently thin the
+    // signal P0-S S4 uses to decide whether the registry backfill is complete enough to flip
+    // `MULTITABLE_PLUGIN_SHEET_SCOPE_MODE` to `enforce`. A host that reports nothing is treated as
+    // registered, which is what every pre-existing implementation and test means.
+    if (outcome && outcome.registered === false) return
     cache.assertedSheetScopes.add(key)
   }
 
@@ -429,6 +455,14 @@ export function createPluginScopedMultitableApi(
        * still runs its own scope assertion the first time it sees a `(plugin, sheet)` pair. Its
        * only effect is that a constant re-read inside one call is served from that call's own
        * memory instead of from PostgreSQL. No-op passthrough while the env flag is off.
+       *
+       * It is on the GENERIC records surface — `createPluginScopedMultitableApi` builds one of
+       * these for every plugin — and the env flag is process-wide, so once an operator turns the
+       * flag on for the bulk-write path, any plugin can open a scope of any length. That is why the
+       * window is capped in `request-metadata-cache.ts` by `REQUEST_METADATA_SCOPE_MAX_AGE_MS`
+       * rather than by the convention that a scope equals a chunk: past the cap the memo stops
+       * serving and every call re-reads and re-asserts. The caller-visible contract is on
+       * `MultitableRecordsAPI.withMetadataCache` in `types/plugin.ts`.
        */
       withMetadataCache: async (operation) => {
         if (typeof operation !== 'function') {
