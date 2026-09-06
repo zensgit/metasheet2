@@ -91,22 +91,13 @@
       <!-- 确认队列's two platform-admin controls (建账本 / 重新扫描) emit; the SHELL calls. They
            emitted into nothing until now, so pressing either did nothing and said nothing — the
            purest form of a control that lies about what it does. The shell is the listener because
-           the shell already owns every cross-tab service call on this page; `adminActionNotice`
-           below is where the answer lands, values-free either way. -->
+           the shell already owns every cross-tab service call on this page; the notice BELOW THE
+           WHOLE TAB CHAIN is where the answer lands, values-free either way. -->
       <StockPreparationConfirmationQueueView
         v-else-if="effectiveKey === 'confirmation-queue'"
         :scope="scope"
         @admin-action="handleAdminAction"
       />
-      <p
-        v-if="adminActionNotice"
-        class="stock-prep__admin-notice"
-        data-testid="stock-prep-admin-action-notice"
-        role="status"
-      >
-        {{ bi(adminActionNotice.zh, adminActionNotice.en) }}
-        <code v-if="adminActionErrorCode" class="stock-prep__admin-token">{{ adminActionErrorCode }}</code>
-      </p>
       <!-- §14 (multitable-application-model-20260830.md): the INSTALL page — the app's defaults laid
            out for a customer admin to confirm, the deployment preflight, and a SKIP-aware install run
            that walks the bootstrap script's own step order. Workbench-admin tier; the run control
@@ -160,6 +151,25 @@
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
         {{ bi('该视图将在后续 wave 落地,当前为容器占位。', 'This view lands in a later wave; this is a container placeholder for now.') }}
       </p>
+      <!-- AFTER the whole v-if / v-else-if chain, deliberately and permanently.
+           Vue attaches a `v-else-if` to its immediately preceding sibling branch, so an element
+           carrying its OWN `v-if` placed between two branches does not merely render in the middle —
+           it SILENTLY SPLITS THE CHAIN IN TWO. The first cut of this notice sat between the queue and
+           the install branch and did exactly that: `project-board` and `confirmation-queue` became a
+           chain with no `v-else`, so the "container placeholder" paragraph rendered UNDER both of the
+           only two tabs an operator ever sees, and the moment a notice appeared it became the head of
+           the second chain and every panel below it (install, dashboard and the six legacy tabs)
+           stopped rendering. The compiler reports none of this. Keeping the notice outside the chain
+           is what makes it a notice rather than a branch. -->
+      <p
+        v-if="adminActionNotice"
+        class="stock-prep__admin-notice"
+        data-testid="stock-prep-admin-action-notice"
+        role="status"
+      >
+        {{ bi(adminActionNotice.zh, adminActionNotice.en) }}
+        <code v-if="adminActionErrorCode" class="stock-prep__admin-token">{{ adminActionErrorCode }}</code>
+      </p>
     </section>
   </PageShell>
 </template>
@@ -174,7 +184,7 @@
 // Boundary (mutation-tested gates): READONLY-FIRST — this shell has no write path, calls no service,
 // and only renders values-free copy. NAMING — the snapshot surface uses 快照批次 / "snapshot batch"
 // to avoid colliding with PLM view-state "snapshot" and k3WiseSetup "mapping" vocabularies.
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../../../composables/useLocale'
 import { getDefaultIntegrationScope } from '../../../services/integration/workbench'
@@ -575,6 +585,12 @@ function handleOpenFillTarget(target: { sheetId: string; viewId: string } | null
 // error table's sentence for a clamped code; a returned count, a project number or a part number
 // never reaches it. The raw code is rendered beside the sentence, in the same shape the queue's own
 // error line uses, because that token is what a person quotes when they ask for help.
+//
+// WHICH FAILURES CARRY A CODE, stated exactly rather than generously: the reconcile client throws an
+// error that carries the server's `code`, so a refusal renders its own sentence plus that token. The
+// INSTALL client's error type (`StockPreparationInstallCallError`) carries a status and nothing else
+// by design, so an ensure failure renders the error table's generic sentence with NO token beside it.
+// That is the honest rendering of what the client actually knows — not a gap to paper over here.
 const adminActionNotice = ref<StockPrepPlainText | null>(null)
 /** Non-null ONLY on a failure — it is the code shown beside the sentence, never a success marker. */
 const adminActionErrorCode = ref<string | null>(null)
@@ -620,6 +636,15 @@ async function handleAdminAction(action: 'ensure' | 'reconcile', projectNo: stri
     adminActionBusy.value = false
   }
 }
+
+// The notice answers ONE press on ONE tab, so it dies with that tab. Without this it survives every
+// later navigation: an admin who pressed 建账本 would carry "确认账本已经就位" onto the install page,
+// the dashboard and every legacy tab until the page was reloaded — a stale sentence about a screen
+// the reader is no longer on.
+watch(effectiveKey, () => {
+  adminActionNotice.value = null
+  adminActionErrorCode.value = null
+})
 
 /** What the panel's endpoint badge claims. One expression, so no tab can claim the wrong shape. */
 function badgeLabel(view: StockPreparationViewTab): string {

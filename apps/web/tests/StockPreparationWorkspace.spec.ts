@@ -1127,6 +1127,81 @@ describe('StockPreparationWorkspace shell', () => {
     expect(notice.textContent).not.toContain('230920006')
   })
 
+  // -------------------------------------------------------------------------
+  // THE NOTICE IS A NOTICE, NOT A BRANCH — the v-else-if chain must stay whole
+  // -------------------------------------------------------------------------
+  //
+  // Vue attaches `v-else-if` to its immediately preceding sibling branch. An element carrying its own
+  // `v-if`, dropped BETWEEN two branches of the panel's chain, therefore splits that chain in two —
+  // silently, with no compiler warning. The first cut of the admin notice sat between the queue and
+  // the install branch, and the two observable consequences are exactly what these cases pin:
+  //   * chain 1 (project-board, confirmation-queue) lost its `v-else`, so the "container placeholder"
+  //     paragraph — the fallback for a tab with no view — rendered UNDER both of the only two tabs an
+  //     operator ever sees, with no admin action involved at all;
+  //   * chain 2 began at the notice, so the moment one appeared, install / dashboard / every legacy
+  //     panel stopped rendering.
+  // Neither shows up in an assertion about the notice text or the request, which is why the five
+  // cases above all passed while this was broken.
+
+  it('the container placeholder never renders under a real tab (the notice must not split the chain)', async () => {
+    answerQueueReads()
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+  })
+
+  it('...including the operator landing tab, which is the other half of the split chain', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    answerQueueReads()
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-board')
+    expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+  })
+
+  it('a notice never replaces the panel, and does not follow the admin onto the next tab', async () => {
+    // The install tab is the nearest branch BELOW the notice in the panel's chain, so it is the one
+    // that disappeared; it needs the workbench-admin code to be on screen at all.
+    h.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:admin']
+    answerQueueReads()
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+    // The panel it was pressed on is still the panel — the notice sits beside the view, not instead
+    // of it, and the placeholder is still absent.
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
+    await flushUi()
+    // The install view really renders (it was swallowed whole while a notice was showing) ...
+    expect(root.querySelector('[data-testid="stock-prep-install"]')).not.toBeNull()
+    // ... and the sentence about the OTHER tab is gone rather than stale-hanging over this one.
+    expect(root.querySelector('[data-testid="stock-prep-admin-action-notice"]')).toBeNull()
+  })
+
+  // The install client's error type carries a status and no `code` (by design — it never surfaces a
+  // server message), so an ensure failure has no token to quote. It must still say something, and it
+  // must not invent a code.
+  it('a failed ensure says so with the generic sentence and no invented error code', async () => {
+    h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(init?.method ?? 'GET').toUpperCase() === 'POST') {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'SOMETHING', message: 'nope' } }), { status: 500 })
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        data: String(url).includes('/operator/projects')
+          ? { tenantId: 't1', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+          : {},
+      }), { status: 200 })
+    })
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(notice.textContent).toContain('这一步没有保存成功')
+    expect(notice.querySelector('code')).toBeNull()
+  })
+
   // R-11's other half, restated for the newly-live buttons: wiring them must not have made them
   // reachable by anyone who could not see them before.
   it('a stock-prep operator sees neither admin button, so neither can be pressed', async () => {

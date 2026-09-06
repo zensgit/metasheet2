@@ -483,6 +483,11 @@ const props = defineProps<{ scope: IntegrationScope; projectNo?: string }>()
  * calls (it owns every other service call on this page's siblings too), so the payload carries the
  * one thing the shell cannot know: WHICH project the admin is looking at. reconcile is scoped to a
  * single project number server-side, and the number lives in this component's own input.
+ *
+ * ONE SIGNATURE FOR BOTH ACTIONS, deliberately. `ensure` does NOT take a project — its request body
+ * is strictly empty and the staging project is auth-derived — so the shell ignores the number for it.
+ * A second event shape for the sake of one unused argument would buy nothing and give the shell two
+ * listeners to keep in step.
  */
 const emit = defineEmits<{
   (event: 'admin-action', action: 'ensure' | 'reconcile', projectNo: string): void

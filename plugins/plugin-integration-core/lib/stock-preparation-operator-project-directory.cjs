@@ -105,6 +105,35 @@ function recordData(record) {
 }
 
 /**
+ * IS THE TENANT'S PROJECT ARCHIVE EMPTY — i.e. does it hold NO project row at all?
+ *
+ * NOT the same question as "does the project sheet exist", and the difference is the whole point.
+ * The sheet is created by `POST …/stock-preparation/mvp/ensure`, whose default object set covers all
+ * nine frozen tables and which the post-deploy smoke runs on EVERY deployment — so sheet-existence is
+ * true on essentially every installed system and tells a caller nothing. The ROWS are written by
+ * `mvp-persist` alone (platform-admin AND flag-gated), so "no rows" is the state that actually means
+ * "this tenant has no archive to check a number against".
+ *
+ * COST: zero extra round trips whenever the answer is already in hand — an unnarrowed listing has
+ * read the whole archive, and a narrowed listing that MATCHED has its answer by construction. Only a
+ * narrowed MISS pays one existence probe, bounded to a single row.
+ */
+async function projectArchiveIsEmpty(projectSheet, projectRows, narrowTo) {
+  if (projectSheet === null) return true
+  if (projectRows.length > 0) return false
+  if (!narrowTo) return true
+  const probe = await projectSheet.scoped.queryRecords({ filters: {}, limit: 1, offset: 0 })
+  if (!Array.isArray(probe)) {
+    throw new StockPreparationOperatorDirectoryError(
+      500,
+      'OPERATOR_DIRECTORY_RECORDS_API_INVALID',
+      'queryRecords must return an array',
+    )
+  }
+  return probe.length === 0
+}
+
+/**
  * PENDING WORK PER PROJECT NUMBER, from the confirmation-decision ledger.
  *
  * The ledger keys rows by `projectNo`, and `projectNo` IS the project template's `sourceProjectNo`
@@ -180,7 +209,7 @@ async function pendingDecisionCountsByProjectNo(recordsApi, provisioning, target
  * tenant confinement would have excluded. `projectCount` then means "matching projects" (0 or 1),
  * which is what the board's audit records, and `projects` is the same row shape either way.
  */
-async function listOperatorProjectDirectory({ recordsApi, provisioning, targetProjectId, scope, projectNo, includePendingIndex = false } = {}) {
+async function listOperatorProjectDirectory({ recordsApi, provisioning, targetProjectId, scope, projectNo, includePendingIndex = false, includeArchiveEmptiness = false } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationOperatorDirectoryError(500, 'OPERATOR_DIRECTORY_SCOPE_REQUIRED', 'operator project directory requires a resolved operator value scope')
   }
@@ -204,6 +233,12 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
   if (projectRows.length > MAX_LIST_ROWS) {
     throw new StockPreparationOperatorDirectoryError(422, 'OPERATOR_DIRECTORY_ROWS_TOO_LARGE', 'operator project directory exceeded the row bound', { maxRows: MAX_LIST_ROWS })
   }
+  // OPT-IN, asked by exactly one caller (the reconcile visibility gate) and off for the route, whose
+  // top-level key set is frozen and asserted. See `projectArchiveIsEmpty` for why this is a different
+  // question from `directoryReady`.
+  const archiveEmpty = includeArchiveEmptiness
+    ? await projectArchiveIsEmpty(projectSheet, projectRows, narrowTo)
+    : null
 
   const batchSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, BATCH_OBJECT_ID)
   const exceptionSheet = await findMvpSheet(recordsApi, provisioning, stagingProjectId, EXCEPTION_OBJECT_ID)
@@ -251,7 +286,13 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
     // The two honesty flags the empty state is built on: whether the project table exists at all, and
     // whether the pending-work ledger exists. Without them "nothing pending" and "nothing installed"
     // are the same screen, which is the bug the empty-state copy had.
+    //
+    // `directoryReady` IS SHEET EXISTENCE AND NOTHING MORE. It is true on any deployment where
+    // `mvp/ensure` has run (which the post-deploy smoke does every time), whether or not a single
+    // project has ever been archived — so it answers "is the table installed", never "is there an
+    // archive to look a number up in". Anything needing the latter asks `includeArchiveEmptiness`.
     directoryReady: projectSheet !== null,
+    ...(includeArchiveEmptiness ? { archiveEmpty } : {}),
     ledgerReady: pending.ready,
     projectCount: projects.length,
     pendingProjectCount: projects.filter((project) => project.pendingDecisionCount > 0).length,
@@ -296,16 +337,31 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
  * THE ONE PASS-THROUGH, STATED AS A LIMIT RATHER THAN HIDDEN AS A BEHAVIOUR
  * ---------------------------------------------------------------------------
  *
- * `directoryReady === false` means the tenant has NO MVP project table at all — `findMvpSheet`
- * found no sheet, so the directory answers every number with "not here". That is not a deployment
- * where every project is foreign; it is a deployment where the question cannot be asked. The MVP
- * project row is written by `mvp-persist` ALONE, which is platform-admin AND flag-gated, so on a
- * customer deployment that table is routinely absent — refusing there would refuse EVERY operator
- * reconcile and silently take the confirmation loop away from the tier C13 opened it for.
+ * An EMPTY ARCHIVE — the tenant's project table holds no project row at all — is a deployment where
+ * the question cannot be asked, not one where every project is foreign. The MVP project row is
+ * written by `mvp-persist` ALONE, which is platform-admin AND flag-gated, so a deployment that has
+ * never archived anything has nothing to check a number against; refusing there would refuse EVERY
+ * operator reconcile and silently take the confirmation loop away from the tier C13 opened it for.
+ * On such a deployment this gate admits and SAYS SO in its verdict (`reason`), rather than pretending
+ * to a check it did not perform.
  *
- * So on such a deployment this gate admits and SAYS SO in its verdict (`reason`), rather than
- * pretending to a check it did not perform. The tenant door above it is unaffected and still the
- * enforcement: a caller with no proven tenant never reaches this function at all.
+ * THE PASS-THROUGH IS "NO ROWS", NOT "NO TABLE", and the distinction is load-bearing. The earlier cut
+ * of this function keyed on `directoryReady` (the project SHEET exists), which is provisioned by
+ * `POST …/stock-preparation/mvp/ensure` — the default object set covers all nine frozen tables and
+ * the post-deploy smoke runs it on every deployment. Keyed that way the pass-through would almost
+ * never fire and the gate would be armed on a fresh install that had archived nothing, which is the
+ * opposite of what "the question cannot be asked" was supposed to mean.
+ *
+ * WHAT IS STILL TRUE ONCE THE ARCHIVE IS NON-EMPTY, said plainly because it is a product consequence
+ * and not a bug: a project that has NEVER been archived is not in the directory, so an operator's
+ * reconcile of it is refused 403. An operator's own four-step pull reaches steps 1-3 and SKIPs the
+ * archive step (platform-admin), so this state is reachable in normal use and needs an owner ruling —
+ * broadening the predicate to "the ledger has pending rows for this number" would NOT be that fix: it
+ * would admit precisely the case the gate exists to refuse, since pending rows are exactly what the
+ * orphan sweep supersedes.
+ *
+ * The tenant door above this is unaffected and still the enforcement: a caller with no proven tenant
+ * never reaches this function at all.
  *
  * WHAT THIS DOES NOT CLAIM. It is not a per-PERSON check. The directory is tenant-wide by
  * construction (see `stock-preparation-operator-scope.cjs`: "It is NOT per-row"), so two operators
@@ -314,26 +370,36 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
  * model can actually prove; separating colleagues needs a project-ownership store that does not
  * exist yet.
  *
- * @returns {{visible: true, reason: 'directory_match'|'directory_absent', directoryReady: boolean}}
+ * NOR IS IT A PROPERTY OF THE LEDGER AS A WHOLE. This narrows ONE route. The confirmation-decision
+ * LIST (`GET …/confirmation-decisions?projectNo=`) and CONFIRM (`POST …/confirmation-decisions/
+ * confirm`) still admit on tier + tenant with no per-project check of their own, so "对账限本人可见
+ * 项目" is a statement about reconcile and must not be restated as "the ledger is protected by
+ * project".
+ *
+ * @returns {{visible: true, reason: 'directory_match'|'archive_empty', archiveEmpty: boolean}}
  *          on admission. Refusal THROWS `StockPreparationOperatorDirectoryError` 403 so a caller
  *          cannot forget to read the verdict.
  */
 async function assertOperatorMaySeeProject({ recordsApi, provisioning, targetProjectId, scope, projectNo } = {}) {
   const wanted = requiredString(projectNo, 'projectNo')
-  // Narrowed: a projectNo that is not in the tenant's project sheet fetches ZERO project rows, so a
-  // refusal costs one filtered query and none of the per-project count fan-out.
+  // Narrowed: a projectNo that is not in the tenant's project sheet fetches ZERO project rows, so
+  // none of the per-project count fan-out runs. It is NOT one query — the listing also resolves the
+  // batch / exception / prep-line sheets and reads the ledger's pending rows for this number, so a
+  // refusal is a handful of round trips, not one. (An earlier version of this comment claimed one;
+  // it was wrong.)
   const directory = await listOperatorProjectDirectory({
     recordsApi,
     provisioning,
     targetProjectId,
     scope,
     projectNo: wanted,
+    includeArchiveEmptiness: true,
   })
   if (directory.projects.some((project) => optionalString(project.projectNo) === wanted)) {
-    return { visible: true, reason: 'directory_match', directoryReady: true }
+    return { visible: true, reason: 'directory_match', archiveEmpty: false }
   }
-  if (directory.directoryReady !== true) {
-    return { visible: true, reason: 'directory_absent', directoryReady: false }
+  if (directory.archiveEmpty === true) {
+    return { visible: true, reason: 'archive_empty', archiveEmpty: true }
   }
   // Shapeless on purpose, exactly like the board's 404: a project of another factory and a number
   // nobody has get the identical answer, and the message names no project.

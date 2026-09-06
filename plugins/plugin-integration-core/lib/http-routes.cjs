@@ -5840,10 +5840,39 @@ function requireStockPreparationAudit() {
       // credential decrypt and leaves no audit row. The staging locator is derived from the VERIFIED
       // scope, never from the request, exactly as the directory route derives it.
       //
+      // "NO TRAIL" IS ABOUT THE AUDIT LEDGER, precisely. The route shell still logs its ordinary
+      // values-free `route failed: POST …` warn for anything that is not an `HttpRouteError`, and
+      // `StockPreparationOperatorDirectoryError` is not one — the line carries a route and a code and
+      // no project number, which is the same thing every other refusal on this file logs.
+      //
       // A body with NO projectNo skips this and keeps its existing answer: the parameter validator
       // downstream already refuses it 400 with its own code, and turning that into a visibility 403
       // here would relabel a malformed request as a permission problem.
-      const reconcileProjectNo = firstString(body.parameters && body.parameters.projectNo)
+      //
+      // "NO projectNo" MEANS ABSENT, NOT "not a string". `firstString` accepts only `typeof
+      // 'string'`, so `{"projectNo": 230920006}` — a shape this domain hands out constantly, since
+      // project numbers look like integers — used to leave `reconcileProjectNo` null and skip the
+      // gate entirely, letting the request run on to the action lookup, the B2a fence and the source
+      // adapter before the downstream validator refused it 400. The ledger was never actually
+      // reachable that way only because `normalizeActionParameters` happens to carry its OWN
+      // string-only normaliser; the shared `stock-preparation-common.cjs#optionalString` next door
+      // coerces numbers, so one ordinary de-duplication would have turned a skipped gate into a
+      // bypassed one. So: PRESENT-BUT-NOT-A-USABLE-STRING is refused here, before any of that, with
+      // the same 400 code and the same `details.field` the downstream validator would have produced.
+      const reconcileParameters = body.parameters
+      const reconcileProjectNoRaw = reconcileParameters && typeof reconcileParameters === 'object' && !Array.isArray(reconcileParameters)
+        ? reconcileParameters.projectNo
+        : undefined
+      const reconcileProjectNo = firstString(reconcileProjectNoRaw)
+      const reconcileProjectNoPresent = reconcileProjectNoRaw !== undefined && reconcileProjectNoRaw !== null
+      if (reconcileProjectNoPresent && !hasPermission(user, 'admin') && !reconcileProjectNo) {
+        throw new HttpRouteError(
+          400,
+          'TABLE_ACTION_PARAMETERS_INVALID',
+          'projectNo must be a non-empty string',
+          { field: 'parameters.projectNo' },
+        )
+      }
       if (reconcileProjectNo && !hasPermission(user, 'admin')) {
         // Resolved a SECOND time on purpose. The gate above resolves a scope for its refusals and
         // returns only the user (see `requireTableActionAccess`'s header), and widening that helper's

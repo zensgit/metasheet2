@@ -354,10 +354,25 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   //
   // The three per-handler checks below are exactly the ones that matter for that use: the scope must
   // be the tenancy authority (no `resolveTenantId`, no raw `user.tenantId`), because a header-picked
-  // tenant would pick which directory vouches for the number. It is deliberately NOT in
+  // tenant would pick which directory vouches for the number.
+  //
+  // WHAT THAT DOES AND DOES NOT COVER, because the two regexes read stronger than they measure. They
+  // pin the VISIBILITY half. This route's LEDGER tenant still comes from `resolveAuthUserTenantId(req)`
+  // — a helper whose body is `user.tenantId`, i.e. the `x-tenant-id` header on a deployment with the
+  // tenant-claim flag off — and neither regex can see through the wrapper. On the operator branch the
+  // two values are provably equal (a scope that contradicts the carrier is refused
+  // OPERATOR_SCOPE_TENANT_CONTRADICTED, and a principal with no tenant is refused before this), so
+  // there is no behavioural hole today; but "the scope is the only tenancy authority here" is true of
+  // the directory half only. The admin branch's header exposure is the pre-existing one this change
+  // does not touch.
+  //
+  // It is deliberately NOT in
   // VALUE_BEARING_READS_WITH_INLINE_STAGING: this handler derives TWO staging projects — the
   // visibility check's, from `reconcileScope.tenantId`, and the ledger write's, which predates this
   // change — and that set's assertion is that a handler derives exactly one, from `scope.tenantId`.
+  // It is in VALUE_BEARING_READS_WITH_MULTIPLE_STAGING instead, which pins the exact pair, so the
+  // visibility derivation is still statically nailed to the resolved scope and a third form (a
+  // request-sourced projectId above all) cannot appear beside them unremarked.
   'tableActionConfirmationDecisionsReconcile',
   // 缺件清单 (W3a). THE ONLY MEMBER WITH A VALUE-BEARING OPT-IN ON A VALUES-FREE ROUTE — it is a
   // values-free route with a value-bearing OPT-IN, and that difference is why it needs the carve-out
@@ -422,6 +437,23 @@ const VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT = new Map([
   ['tableActionDryRun', 'const dryRunTenantId = valueScope ? valueScope.tenantId : resolveTenantId(req, {})'],
 ])
 
+/**
+ * HANDLERS THAT DERIVE MORE THAN ONE STAGING PROJECT — the blanket inline-staging check above cannot
+ * cover them (it demands that EVERY derivation read `scope.tenantId`), and leaving them out entirely
+ * would mean nothing pins the one derivation that matters.
+ *
+ * `tableActionConfirmationDecisionsReconcile` derives two: the VISIBILITY check's, from the operator
+ * scope resolved in this handler, and the LEDGER's, which predates 对账限本人可见项目 and is the
+ * handler's own tenant. Pinning the exact pair is what stops a third form — above all a
+ * request-sourced projectId — from appearing beside them without anyone noticing.
+ */
+const VALUE_BEARING_READS_WITH_MULTIPLE_STAGING = new Map([
+  ['tableActionConfirmationDecisionsReconcile', [
+    'resolveIntegrationStagingProjectId(reconcileScope.tenantId, undefined)',
+    'resolveIntegrationStagingProjectId(tenantId, undefined)',
+  ]],
+])
+
 for (const name of VALUE_BEARING_READ_HANDLERS) {
   const body = handlerBody(ROUTES_SRC, name)
 
@@ -463,6 +495,22 @@ for (const name of VALUE_BEARING_READ_HANDLERS) {
       `${name} must resolve the operator value scope`,
     )
   })
+
+  if (VALUE_BEARING_READS_WITH_MULTIPLE_STAGING.has(name)) {
+    const expected = VALUE_BEARING_READS_WITH_MULTIPLE_STAGING.get(name)
+    check(`${name}: every staging derivation is one of the two reviewed forms`, () => {
+      const calls = body.match(/resolveIntegrationStagingProjectId\([^)]*\)/g) || []
+      assert.ok(calls.length > 0, `${name} must derive its staging project`)
+      assert.ok(
+        calls.includes(expected[0]),
+        `${name} must derive the VISIBILITY check's staging project as \`${expected[0]}\` — from the scope it resolved, never from the request`,
+      )
+      assert.ok(
+        calls.every((call) => expected.includes(call)),
+        `${name} grew a staging derivation nobody reviewed (got ${JSON.stringify(calls)}, expected only ${JSON.stringify(expected)})`,
+      )
+    })
+  }
 
   if (VALUE_BEARING_READS_WITH_INLINE_STAGING.has(name)) {
     check(`${name}: the staging project comes from the RESOLVED SCOPE, with no request projectId`, () => {

@@ -682,11 +682,16 @@ export const STOCK_PREP_ADMIN_ACTION_PLAIN: Record<string, StockPrepPlainText> =
     zh: '确认账本已经就位。这个操作重复点也不会重复建表。',
     en: 'The confirmation ledger is in place. Pressing this again creates nothing twice.',
   }),
-  // Reconcile RE-READS the source and refreshes the queue; it decides nothing on the operator's
-  // behalf, which is the half most worth saying out loud.
+  // Reconcile RE-READS the source and rebuilds the SERVER's pending list; it decides nothing on the
+  // operator's behalf, which is the half most worth saying out loud.
+  //
+  // IT DOES NOT PROMISE THE SCREEN. The queue table on this page loads only when 刷新列表 is pressed
+  // (that button is the view's one load-on-demand entry point), so the rows visible after a re-scan
+  // are still the ones read before it. Copy that claimed "the list is up to date" was describing the
+  // server while the reader was looking at the stale table.
   RECONCILE_OK: Object.freeze({
-    zh: '已经重新扫描过一遍,待确认的清单是最新的了。系统没有替任何人做决定。',
-    en: 'The re-scan is done and the list of things to confirm is up to date. Nothing was decided on anyone’s behalf.',
+    zh: '已经重新扫描过一遍。请点上面的「刷新列表」看最新的待确认清单。系统没有替任何人做决定。',
+    en: 'The re-scan is done. Press “Refresh the list” above to see the latest items to confirm. Nothing was decided on anyone’s behalf.',
   }),
   // The reconcile route is scoped to ONE project. Without a number there is nothing to scan, and
   // sending the request anyway would answer with a shapeless 400 the operator cannot act on.

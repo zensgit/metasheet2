@@ -278,11 +278,12 @@ function mountWithSource({
   // `canonical` -> the row names its Connection in `connection_id` and its config carries no legacy
   // pointer, which is the 222 shape. `legacy` -> the pre-cutover `config.dataSourceId` shape.
   bindingShape = 'canonical',
-  // 对账限本人可见项目 (P-13). `null` keeps the original doubles — no MVP project sheet at all, which
-  // is the ordinary customer shape (the project row is written by mvp-persist alone, platform-admin
-  // and flag-gated) and the state the reconcile gate deliberately passes through. An ARRAY provisions
-  // the project sheet and fills it with exactly these project numbers, which is what lets a test say
-  // "this number is in the caller's directory and that one is not".
+  // 对账限本人可见项目 (P-13). `null` keeps the original doubles — no MVP project sheet at all. An
+  // ARRAY provisions the project sheet and fills it with exactly these project numbers, which is what
+  // lets a test say "this number is in the caller's directory and that one is not". `[]` is the third
+  // state and the one the field actually starts in: the sheet EXISTS (mvp/ensure provisions it) and
+  // holds no archived project, because the project row is written by mvp-persist alone — platform-
+  // admin and flag-gated. The reconcile gate passes through on both empty shapes.
   directoryProjectNos = null,
 } = {}) {
   const routes = new Map()
@@ -892,10 +893,15 @@ async function theLegacyTiersAreExactlyWhatTheyWere() {
 //      lease, and no trail;
 //   3. a platform admin                            -> unchanged on both, because the legacy branch
 //      of `requireTableActionAccess` returns before any of this;
-//   4. a deployment with NO project table at all   -> admitted, stated as the documented limit it is:
-//      the MVP project row is written by mvp-persist alone (platform-admin + flag-gated), so on an
-//      ordinary customer deployment that table is absent and refusing there would take the
-//      confirmation loop away from the very tier C13 opened it for.
+//   4. a deployment whose project ARCHIVE IS EMPTY -> admitted, stated as the documented limit it is:
+//      the MVP project row is written by mvp-persist alone (platform-admin + flag-gated), so a
+//      deployment that has archived nothing has nothing to check a number against, and refusing there
+//      would take the confirmation loop away from the very tier C13 opened it for. Both shapes of
+//      "empty" are pinned: no project SHEET at all, and a sheet that mvp/ensure provisioned with no
+//      rows in it — the second is the ordinary post-install state and the first cut of this gate
+//      (which keyed on sheet existence) would have refused every reconcile there;
+//   5. a projectNo that is not a string            -> 400 before the action lookup, so the gate is
+//      never SKIPPED by a shape the downstream validator would have rejected anyway.
 // ---------------------------------------------------------------------------
 
 const VISIBLE_PROJECT_NO = '2-20231625'
@@ -927,16 +933,21 @@ async function theOperatorReconcilesOnlyProjectsItCanSee() {
   )
 
   const refused = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  // STATUS AND CODE BOTH. The code alone would keep passing if someone changed the thrown error's
+  // 403 to a 500 or a 200 — and a refusal that is not a 403 is not the refusal the FE's copy table,
+  // the delivery guide and `projectSync`'s RECONCILE_NOT_PERMITTED branch are all written against.
+  const refusedResponse = await rawCall(refused.routes, {
+    ...RECONCILE,
+    user: OPERATOR,
+    actionId: pull,
+    body: reconcileBody(FOREIGN_PROJECT_NO),
+  })
   assert.equal(
-    await refusalCode(refused.routes, {
-      ...RECONCILE,
-      user: OPERATOR,
-      actionId: pull,
-      body: reconcileBody(FOREIGN_PROJECT_NO),
-    }),
+    refusedResponse.body && refusedResponse.body.error && refusedResponse.body.error.code,
     'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
-    'P-13: a project the operator cannot see is refused 403',
+    'P-13: a project the operator cannot see is refused',
   )
+  assert.equal(refusedResponse.statusCode, 403, 'P-13: ...as a 403, not merely with a 403-shaped code')
   assert.equal(refused.adapterPrincipals.length, 0, 'P-13: the refusal reached no source adapter')
   assert.equal(refused.loadPrincipals.length, 0, 'P-13: ...and no connection resolution / credential decrypt')
   assert.deepEqual(refused.auditAppends, [], 'P-13: ...and appended no audit row')
@@ -955,7 +966,7 @@ async function theOperatorReconcilesOnlyProjectsItCanSee() {
   )
   assert.ok(admin.adapterPrincipals.length > 0, 'P-13: ...and reaches the source exactly as before')
 
-  // (4) the documented pass-through: no project table, so the question cannot be asked.
+  // (4) the documented pass-through: an EMPTY ARCHIVE, so the question cannot be asked. Both shapes.
   const noDirectory = mountWithSource()
   assert.notEqual(
     await refusalCode(noDirectory.routes, {
@@ -967,6 +978,44 @@ async function theOperatorReconcilesOnlyProjectsItCanSee() {
     'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
     'P-13: a deployment with no MVP project table admits — refusing there would kill the operator confirmation loop',
   )
+
+  // ...and the shape that matters far more in the field: the sheet EXISTS (mvp/ensure provisions all
+  // nine frozen tables, and the post-deploy smoke runs it on every deploy) but nothing has ever been
+  // archived into it. Keying the pass-through on sheet existence made this the ARMED state on a
+  // brand-new install, which is the opposite of "the question cannot be asked".
+  const emptyArchive = mountWithSource({ directoryProjectNos: [] })
+  assert.notEqual(
+    await refusalCode(emptyArchive.routes, {
+      ...RECONCILE,
+      user: OPERATOR,
+      actionId: pull,
+      body: reconcileBody(FOREIGN_PROJECT_NO),
+    }),
+    'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
+    'P-13: a provisioned-but-EMPTY project archive admits, exactly as an absent table does',
+  )
+
+  // (5) the shape that used to walk straight past the gate: a projectNo sent as a JSON NUMBER.
+  // `firstString` accepts only strings, so this left the gate's guard expression falsy and the
+  // request ran on to the action lookup, the B2a fence and the source adapter before the downstream
+  // parameter validator refused it. Now it is refused HERE, with that validator's own code, having
+  // touched nothing.
+  const numericProjectNo = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const numericResponse = await rawCall(numericProjectNo.routes, {
+    ...RECONCILE,
+    user: OPERATOR,
+    actionId: pull,
+    body: { parameters: { projectNo: 99999999 } },
+  })
+  assert.equal(
+    numericResponse.body && numericResponse.body.error && numericResponse.body.error.code,
+    'TABLE_ACTION_PARAMETERS_INVALID',
+    'P-13: a non-string projectNo is refused as the malformed request it is',
+  )
+  assert.equal(numericResponse.statusCode, 400, 'P-13: ...with the same 400 the downstream validator would have used')
+  assert.equal(numericProjectNo.adapterPrincipals.length, 0, 'P-13: ...and it reached no source adapter')
+  assert.equal(numericProjectNo.loadPrincipals.length, 0, 'P-13: ...no connection resolution / credential decrypt')
+  assert.deepEqual(numericProjectNo.auditAppends, [], 'P-13: ...and appended no audit row')
 
   // ...and the OTHER two steps of the operator's own four-step run are NOT narrowed by this: only
   // reconcile carries a projectNo whose ledger rows another person owns.
