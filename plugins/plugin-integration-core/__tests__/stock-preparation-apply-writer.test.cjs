@@ -489,6 +489,124 @@ function testInternals() {
   assert.throws(() => __internals.normalizeTarget({}), StockPreparationApplyWriterError)
 }
 
+// W8-4 (L1): the writer opens ONE host metadata scope per apply run so the host stops re-reading
+// this target's sheet row / field list / ownership row once per written record (measured on 222:
+// 2x `meta_fields` + 2x registry + 3x `meta_sheets` per created row). These assertions pin the
+// boundary and the fact that NOTHING else moved: same records calls, same order, same result body,
+// same per-row failure semantics.
+async function testMetadataCacheScopeIsOpenedOncePerApplyRun() {
+  const plan = buildPlan()
+  const api = createRecordsApi()
+  const scopeCalls = []
+  let depth = 0
+  let maxDepth = 0
+  const recordsApi = {
+    async queryRecords(input) {
+      scopeCalls.push(['queryRecords', depth])
+      return api.recordsApi.queryRecords(input)
+    },
+    async createRecord(input) {
+      scopeCalls.push(['createRecord', depth])
+      return api.recordsApi.createRecord(input)
+    },
+    async patchRecord(input) {
+      scopeCalls.push(['patchRecord', depth])
+      return api.recordsApi.patchRecord(input)
+    },
+    async withMetadataCache(operation) {
+      depth += 1
+      maxDepth = Math.max(maxDepth, depth)
+      try {
+        return await operation()
+      } finally {
+        depth -= 1
+      }
+    },
+  }
+
+  const withScope = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi,
+  })
+
+  assert.equal(maxDepth, 1, 'exactly one metadata scope is opened, never one per row')
+  assert.ok(scopeCalls.length > 0, 'the run actually touched the records API')
+  assert.ok(
+    scopeCalls.every(([, callDepth]) => callDepth === 1),
+    'every records call happens INSIDE the single scope',
+  )
+
+  // Byte-for-byte the same answer as a host that offers no such capability at all.
+  const baseline = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  assert.deepEqual(withScope, baseline, 'opening a metadata scope does not change the result body')
+  assert.deepEqual(
+    Object.keys(summarizeApplyResultForEvidence(withScope)).sort(),
+    Object.keys(summarizeApplyResultForEvidence(baseline)).sort(),
+    'evidence key set is unchanged',
+  )
+}
+
+async function testMetadataCacheScopeKeepsPerRowFailureSemantics() {
+  const plan = buildPlan()
+  const addDecision = plan.decisions.find((entry) => entry.decision === DECISIONS.ADD)
+  const base = createRecordsApi()
+  let scopes = 0
+  const recordsApi = {
+    queryRecords: (input) => base.recordsApi.queryRecords(input),
+    async createRecord() {
+      // Fail ONLY the add row; the update/inactive rows must still be written. A chunk-wide
+      // transaction (L3) would lose exactly this contract — the metadata scope must not.
+      throw new Error('create failed')
+    },
+    patchRecord: (input) => base.recordsApi.patchRecord(input),
+    async withMetadataCache(operation) {
+      scopes += 1
+      return operation()
+    },
+  }
+  base.rows.push(
+    {
+      id: 'rec_update',
+      sheetId: 'sheet_stock_preparation',
+      version: 1,
+      data: {
+        idempotencyKey: plan.decisions.find((entry) => entry.decision === DECISIONS.UPDATE).idempotencyKey,
+      },
+    },
+    {
+      id: 'rec_inactive',
+      sheetId: 'sheet_stock_preparation',
+      version: 1,
+      data: {
+        idempotencyKey: plan.decisions.find((entry) => entry.decision === DECISIONS.INACTIVE).idempotencyKey,
+        active: true,
+      },
+    },
+  )
+
+  const result = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi,
+  })
+
+  assert.ok(addDecision, 'plan has an add decision to fail')
+  assert.equal(scopes, 1, 'still one scope, even when a row throws')
+  assert.equal(result.counts.failed, 1, 'the bad row is counted failed')
+  assert.equal(result.counts.updated, 1, 'the update row was still written')
+  assert.equal(result.counts.inactive, 1, 'the inactive row was still written')
+  assert.equal(result.written, 2, 'a failing row does not roll back the rows around it')
+  assert.equal(result.status, 'partial', 'one bad row does not abort the rest')
+}
+
 async function main() {
   await testApplyCleanDecisionsAndHoldManualConfirm()
   await testRerunIsIdempotentForAddDecision()
@@ -499,6 +617,8 @@ async function main() {
   await testPlmStringFieldsAreNormalizedBeforeCreate()
   await testTemplateTypeMismatchIsValuesFreeAndLogical()
   await testFieldIdMapAndDuplicateTargetKey()
+  await testMetadataCacheScopeIsOpenedOncePerApplyRun()
+  await testMetadataCacheScopeKeepsPerRowFailureSemantics()
   testInternals()
 
   console.log('stock-preparation-apply-writer.test.cjs OK')

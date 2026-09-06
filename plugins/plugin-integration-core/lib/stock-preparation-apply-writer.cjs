@@ -537,60 +537,79 @@ async function applyStockPreparationPlan(input = {}) {
   const results = []
   const errors = []
 
-  for (let index = 0; index < plan.decisions.length; index += 1) {
-    const decision = plan.decisions[index] || {}
-    try {
-      if (decision.decision === DECISIONS.SKIP) {
-        counts.skipped += 1
-        results.push({ index, decision: decision.decision, status: 'skipped' })
-        continue
+  // W8-4 (L1): ONE apply run = ONE metadata scope. This function is called once per chunk (the
+  // large-BOM route advances exactly one chunk per HTTP request) and once per small-BOM apply, so
+  // the scope opened here IS the "one apply request" boundary: inside it the host loads this
+  // target sheet’s row, its field list and its plugin-scope assertion once instead of per row
+  // (measured on 222: 2x `meta_fields` + 2x registry + 3x `meta_sheets` per created row, at
+  // 47.07ms of server wall-clock per row). It changes NOTHING about the loop below — same order,
+  // same per-row try/catch, same counts/results/errors — so `failed>0` still means "the other
+  // rows were written anyway", the contract `terminalApplyStatus` folds into `partial`. The scope
+  // is NOT a transaction and takes no lock; it ends when this call returns.
+  const runDecisions = async () => {
+    for (let index = 0; index < plan.decisions.length; index += 1) {
+      const decision = plan.decisions[index] || {}
+      try {
+        if (decision.decision === DECISIONS.SKIP) {
+          counts.skipped += 1
+          results.push({ index, decision: decision.decision, status: 'skipped' })
+          continue
+        }
+        if (decision.decision === DECISIONS.MANUAL_CONFIRM) {
+          counts.held += 1
+          results.push({ index, decision: decision.decision, status: 'held' })
+          continue
+        }
+        if (decision.decision === DECISIONS.ADD) {
+          const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields })
+          incrementCounts(counts, decision.decision, applied.status)
+          results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
+          continue
+        }
+        if (decision.decision === DECISIONS.UPDATE || decision.decision === DECISIONS.INACTIVE) {
+          const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields })
+          incrementCounts(counts, decision.decision, applied.status)
+          results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
+          continue
+        }
+        throw new StockPreparationApplyWriterError(`unsupported decision: ${decision.decision}`, {
+          code: 'unsupported_decision',
+          decision: decision.decision,
+        })
+      } catch (error) {
+        counts.failed += 1
+        const code = errorCode(error)
+        const operation = errorOperation(error)
+        const field = errorField(error)
+        const reason = errorReason(error)
+        const expectedType = errorExpectedType(error)
+        const errorEntry = {
+          index,
+          decision: decision.decision || null,
+          code,
+          operation,
+          message: sanitizeTargetWriteMessage(code, operation),
+        }
+        if (field) errorEntry.field = field
+        if (reason) errorEntry.reason = reason
+        if (expectedType) errorEntry.expectedType = expectedType
+        errors.push(errorEntry)
+        results.push({
+          index,
+          decision: decision.decision || null,
+          status: 'failed',
+          code,
+        })
       }
-      if (decision.decision === DECISIONS.MANUAL_CONFIRM) {
-        counts.held += 1
-        results.push({ index, decision: decision.decision, status: 'held' })
-        continue
-      }
-      if (decision.decision === DECISIONS.ADD) {
-        const applied = await applyAddDecision({ recordsApi, target, decision, humanFields, templateFields })
-        incrementCounts(counts, decision.decision, applied.status)
-        results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
-        continue
-      }
-      if (decision.decision === DECISIONS.UPDATE || decision.decision === DECISIONS.INACTIVE) {
-        const applied = await applyPatchDecision({ recordsApi, target, decision, humanFields, templateFields })
-        incrementCounts(counts, decision.decision, applied.status)
-        results.push({ index, decision: decision.decision, idempotencyKey: decisionKey(decision, target), ...applied })
-        continue
-      }
-      throw new StockPreparationApplyWriterError(`unsupported decision: ${decision.decision}`, {
-        code: 'unsupported_decision',
-        decision: decision.decision,
-      })
-    } catch (error) {
-      counts.failed += 1
-      const code = errorCode(error)
-      const operation = errorOperation(error)
-      const field = errorField(error)
-      const reason = errorReason(error)
-      const expectedType = errorExpectedType(error)
-      const errorEntry = {
-        index,
-        decision: decision.decision || null,
-        code,
-        operation,
-        message: sanitizeTargetWriteMessage(code, operation),
-      }
-      if (field) errorEntry.field = field
-      if (reason) errorEntry.reason = reason
-      if (expectedType) errorEntry.expectedType = expectedType
-      errors.push(errorEntry)
-      results.push({
-        index,
-        decision: decision.decision || null,
-        status: 'failed',
-        code,
-      })
     }
+  }
+
+  // Absent on a host without the capability, and a no-op passthrough while the host-side flag is
+  // off; either way the decisions run exactly as they did before.
+  if (typeof recordsApi.withMetadataCache === 'function') {
+    await recordsApi.withMetadataCache(runDecisions)
+  } else {
+    await runDecisions()
   }
 
   const written = counts.created + counts.updated + counts.inactive

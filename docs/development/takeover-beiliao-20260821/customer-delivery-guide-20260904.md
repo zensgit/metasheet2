@@ -384,6 +384,8 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 - **唯一的坑,必须提前check**:动作配置里的 `projectSubtree` 块(§3.1)是**为客户 PLM 的列名写的**(`pathInfo.parentIdField=Parent_OBJ_ID`、`bomHead.pathIdField=path_id`)。如果切到的源(例如验证用的合成源)**没有这两列**,订单展开完成后一进入子树阶段,第一次读 `bomHead` 就会 SQL 报错,整份后台作业判 `status=failed`、`errorTypes=[read_failed]`(**不是规模类错误**),`authoritative=false`,plan 同样 422——现象和"规模超限"很像,但根因完全不同,不能按 §7.1 的预算表去调。2026-09-05 首次实测大 BOM 时就踩了这个坑(合成源当时缺这两列),交互试算的 10000 行上限在进入子树阶段之前就已经 `large_bom_bounded` 早退,所以这个坑此前从未暴露。**接手排查时先看是不是切换到了缺这两列的源**,不要先怀疑预算配置。222 上当时是手工 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 补的这两列;永久修法是合成 PLM 生成器本身补齐这两列(PR #5508,截至 2026-09-06 04:30 为 ready 状态,rebase 后 pin 已重算完,等 CI,head `54f10f8c1`),合入后新生成的合成源不会再缺这两列。
 - **诊断缺口(#5507,截至 2026-09-06 04:30 为 ready 状态,复核判定可合,等 CI 自动合,head `f15d774a9`)**:此前作业证据把 `readDiagnostics` 砍成布尔值、失败对象与错误码不落库也不打日志,任何 `read_failed` 都无法事后诊断,只能翻 PG 服务端日志(见新增的"运维排障"一节)。#5507 合入后,`GET` 作业记录会带上 `evidence.readFailures` / `errorDetails`(至多 20 条,**只含对象名、错误码、原因类**,永不含原始 `message`,保持 values-free)。
 
+**写入慢在哪里(2026-09-06 实测)与一个默认关闭的加速开关**:上面那条 453.6s 的写入循环,2026-09-06 在 222 上用同一个 13151 行合成项目重测并逐项拆开了:整段几乎全在服务端(回环下客户端调度只占 2.11ms/chunk),**每写一行服务端花 47.07ms**;`pg_stat_user_tables` 差分显示每建一行,表元数据被重复读取 `meta_fields` ≈2 次全表顺扫、权限注册表 ≈2 次全表顺扫、`meta_sheets` ≈3 次索引查——同一张表、同一个 sheetId,一行读一遍。新增开关 **`MULTITABLE_ENABLE_REQUEST_METADATA_CACHE`(默认关闭)**:打开后,**同一次分批写入请求(一个 chunk)内**这些表元数据只加载一次,行为、返回体、审计证据、失败语义(一批里坏 1 行仍写进其余行)全部不变。**默认关闭是有意的**——一批的多行不在同一个事务里,理论上有人在一批写到一半时改表结构,那么这一批余下的行会按本批开头看到的字段快照写入(下一批会重新读)。这在正常运行中不会发生,但既然证不出"不可能",就不默认打开。**开启方式**:在 `app.env` 里加 `MULTITABLE_ENABLE_REQUEST_METADATA_CACHE=true` 后重启后端;**回滚方式**:删掉这一行再重启即可,不需要回退版本。
+
 ### 后台上限:缺省推导公式与 222 现行值
 
 不写配置时,**后台上限 = 交互上限 × 倍数,再钳到代码硬顶**:

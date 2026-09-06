@@ -273,6 +273,47 @@ WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idl
 
 ---
 
+### 1.7 实测结果(2026-09-06,已跑完,本节替代 §1.7 的"待实测")
+
+**跑法**:222,r14,两轮。第一轮项目全部命中 skip(132 chunk 全跳过),第二轮换一个从未写入过的合成项目 `SYN-PROJ-LARGE-0002`,13151 行 / 132 chunk **全部 created**(`plan` 阶段 `existingRows=0`、`add=13151`;`applyJobRun` `finalStatus=succeeded`、`counts.created=13151`、`failed=0`)。不改代码、不改 app.env、不改 PG 配置、不重启 pm2。M1(`/metrics/prom` 差分)+ M3(`pg_stat_user_tables` 差分)成立;**M4 仍不可用**(`pg_stat_statements` 未装,属改 PG 配置,不做),**M2 的真实网络 RTT 仍测不到**(驱动跑在 222 本机回环)。
+
+#### 拿到的数
+
+| 量 | skip 轮 | create 轮 | 差 |
+|---|---|---|---|
+| 每 chunk 服务端墙钟(`apply-jobs/:applyJobId/run` 的 Δsum/Δcount) | **490.8 ms** | **5179.8 ms** | +4689.0 ms/chunk |
+| 每行服务端墙钟(两轮 Δsum 相减 ÷ 13151) | — | — | **47.07 ms/行** |
+| 驱动 − 服务端(回环调度开销) | 2.08 ms/chunk | 2.11 ms/chunk | 两轮独立复现同一个小常数 |
+
+`pg_stat_user_tables` 的 create 轮增量(整数倍关系,不是量级):
+
+| 表 | 增量 | 每行 |
+|---|---|---|
+| `meta_records` | ins **+13151** / idx_scan **+13151** | 1 次插入 + 1 次索引存在性探针 |
+| `meta_record_revisions` | ins **+13151** | 1 次插入 |
+| `meta_fields` | **seq_scan +26305** | **≈2 次全表顺扫** |
+| `plugin_multitable_object_registry` | **seq_scan +26305** | **≈2 次全表顺扫** |
+| `meta_sheets` | **idx_scan +39455** | **≈3 次索引扫描** |
+| `plugin_kv` | +271 / +269 / +2 / **+267** | 与 skip 轮**逐位相同**——每 chunk 固定,与内容完全无关 |
+
+三条与代码逐条对上:`meta_fields` / registry 的 2 次 = §1.2 的 C/I 与 A/F 两对;`meta_sheets` 的 3 次 = B/H 两次 `loadSheetRow` **加上** PostgreSQL 为 `meta_records.sheet_id REFERENCES meta_sheets(id)` 做的 1 次 FK 探针(建表在 `packages/core-backend/src/db/migrations/zzzz20260404153000_repair_meta_core_schema.ts:23`;`meta_record_revisions` 无同名外键,所以是 3 不是 4)。
+
+#### 这次能下、以前下不了的结论
+
+- **§1.3 成立且可量化**:常量元数据重读是**真的**,而且是精确整数倍,不是噪声。这是 L1 第一次有实测依据。
+- **§1.4 成立**:`plugin_kv` 四个计数器两轮**逐位相同**,证实"每 chunk 固定开销、与内容无关";它在 create 轮被行级成本摊薄,这天然支持"chunk 调大"(PR-5)的前提。
+- **仍然下不了的**:**语句级时间归属**(M4 缺)与**真实远程 RTT**(驱动在回环)。所以本节给的是**次数**与**每行总墙钟**,不是"L1 能省几成"。
+
+#### 据此本 PR 做什么、不做什么
+
+- **本 PR = L1(§4.1),而且只做 L1 的最小形状**:一次 apply-run 请求(= 一个 chunk)内,同一 sheet 的 `meta_sheets` / `meta_fields` / registry 各只加载一次。落点全在宿主 `packages/core-backend`(新增 `src/multitable/request-metadata-cache.ts`,一个 `AsyncLocalStorage` 作用域),插件侧只在写入器 `applyStockPreparationPlan` 里开这一个作用域,并在 `createTargetScopedRecordsApi` 里把这个能力透传过目标围栏。**不碰任何 pin 文件,不重算 pin。**
+- **§4.1 第 3 条那个"没有现成落点"的顾虑,按隐式上下文解决**:`AsyncLocalStorage` 不改插件可见的记录 API 入参形状,只**新增**一个可选的 `records.withMetadataCache(fn)`。
+- **默认关**。开关是 `MULTITABLE_ENABLE_REQUEST_METADATA_CACHE=true`。理由写在模块头:一个 chunk **不是**一个事务,期间也没有任何锁覆盖整段,所以"请求内元数据不可能变化"**证不出来**——极小概率下 chunk 中途删字段,余下的行会按首行快照写入一个已不存在的字段 id,而不是校验失败。这是可接受但真实的行为变化,按本仓惯例(`MULTITABLE_ENABLE_WRITER_FENCE` 同形)必须门控。**关时字节级不变**:开关关闭时 `getMultitableRequestMetadataCache()` 恒返回 `undefined`,两处 `loadSheetAndFields` 与 `assertSheetScope` 跑的是与改动前完全相同的语句序列,单元测试对此有断言(8 行 → 16 次 `meta_sheets` + 16 次 `meta_fields`,开时 1 + 1)。**回滚 = 去掉这个环境变量并重启**,不需要回代码。
+- **不做 L3(一 chunk 一事务)、不做 worker 化**。理由不变且已在 §4.3 / §6 写死:L3 会把"100 行坏 1 行仍写进 99 行"这条今天的契约换掉(逐行 catch → 事务 abort),并把 G3 从"罕见崩溃"抬成"任何一次库错误",必须排在 G3 修复之后;worker 化是 §4.4 的独立议题,按"关页不丢"卖,不按"更快"卖,仍待 owner 拍板。
+- **不做 L2**:实测那轮 `existingRows=0`,在"未命中回退单行查询"的规则下收益为 0(§4.2 约束 1),而 owner 要拍的恰恰是首次导入。
+
+---
+
 ## 2. 现状盘点
 
 ### 2.1 路由面:八条(全部第四次核实)

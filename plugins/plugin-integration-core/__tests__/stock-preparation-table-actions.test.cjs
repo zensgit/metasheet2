@@ -16,6 +16,7 @@ const {
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
   normalizeStockPreparationActionConfig,
+  createTargetScopedRecordsApi,
   __internals: tableActionInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const {
@@ -1229,6 +1230,35 @@ async function testApplyDetectsDataShiftAndManualConfirmHold() {
   )
 }
 
+// W8-4 (L1): the target fence builds a FRESH api object, so anything the host offers that is not
+// explicitly forwarded is invisible to every caller behind it. `withMetadataCache` carries no
+// sheetId and reads no row, so it is forwarded verbatim — and a host that does not offer it must
+// leave the scoped api without it rather than fabricating a stub.
+async function testTargetScopedApiForwardsTheHostMetadataCacheCapability() {
+  const seen = []
+  const hostApi = {
+    queryRecords: async () => [],
+    createRecord: async () => ({ id: 'rec_1' }),
+    patchRecord: async () => ({ id: 'rec_1' }),
+    withMetadataCache: async (operation) => {
+      seen.push('scope')
+      return operation()
+    },
+  }
+  const scoped = await createTargetScopedRecordsApi(hostApi, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal(typeof scoped.withMetadataCache, 'function', 'the memo capability survives the target fence')
+  assert.equal(await scoped.withMetadataCache(async () => 'inner'), 'inner', 'the operation result passes through')
+  assert.deepEqual(seen, ['scope'], 'the host capability, not a local stub, did the work')
+
+  // Read-only callers get it too: their queryRecords hits the same constant metadata reads.
+  const readOnly = await createTargetScopedRecordsApi(hostApi, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped', readOnly: true })
+  assert.equal(typeof readOnly.withMetadataCache, 'function', 'read-only scoped api also carries the memo')
+
+  const { withMetadataCache, ...hostWithout } = hostApi
+  const withoutCapability = await createTargetScopedRecordsApi(hostWithout, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal('withMetadataCache' in withoutCapability, false, 'never fabricated when the host lacks it')
+}
+
 async function main() {
   await testRegistryListsConfiguredMetadataWithoutTargetSecrets()
   await testDryRunRequiresAllowlistedParametersAndStoresToken()
@@ -1249,6 +1279,7 @@ async function main() {
   await testApplySurfacesTypedValuesFreeRowFailureDiagnostics()
   await testApplyDetectsDataShiftAndManualConfirmHold()
   await testApplySandboxGateFailsClosed()
+  await testTargetScopedApiForwardsTheHostMetadataCacheCapability()
   testRevisionCarriesTheRowErrorOverflowFacts()
   testHardApplyBlockingRowErrorsSurviveTheCap()
   testRowErrorLimitIsAConditionalActionConfigKey()

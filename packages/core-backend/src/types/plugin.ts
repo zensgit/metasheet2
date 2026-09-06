@@ -629,6 +629,16 @@ export interface MultitableRecordsAPI {
     version: number
   }>
   /**
+   * W8-4 (L1) request-scoped table-metadata memo. Runs `operation` in a scope where the sheet row,
+   * the field list and the sheet-scope assertion for a given sheetId are loaded ONCE instead of
+   * once per records call — the shape a chunked bulk write needs (measured on 222: 2x `meta_fields`
+   * + 2x registry + 3x `meta_sheets` per created row). The scope dies with the call: it is neither
+   * a process cache nor shared between requests, and it holds schema metadata only, never values.
+   * Off unless `MULTITABLE_ENABLE_REQUEST_METADATA_CACHE=true`, in which case this is a plain
+   * passthrough. Optional so a host that does not provide it simply is not memoized.
+   */
+  withMetadataCache?<T>(operation: () => Promise<T>): Promise<T>
+  /**
    * P4 stock-preparation persist hard cut. The host owns the transaction and lock order; the plugin
    * receives only the records methods needed by the existing persist algorithm.
    */

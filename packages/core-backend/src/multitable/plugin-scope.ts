@@ -5,6 +5,10 @@ import type {
   StockPreparationPersistUnitOfWorkInput,
 } from '../types/plugin'
 import { validateStockPreparationPersistUnitOfWorkInput } from './stock-preparation-persist-unit-of-work'
+import {
+  getMultitableRequestMetadataCache,
+  runWithMultitableRequestMetadataCache,
+} from './request-metadata-cache'
 
 export type MultitableScopeQueryFn = (
   sql: string,
@@ -223,6 +227,37 @@ export function createPluginScopedMultitableApi(
   pluginName: string,
   hooks: MultitableScopeHooks = {},
 ): MultitableAPI {
+  /**
+   * W8-4 (L1): `assertSheetScope` is a SECURITY hook, so what is memoized here is deliberately
+   * narrow — one `(pluginName, sheetId)` pair that ALREADY RETURNED SUCCESSFULLY, for the lifetime
+   * of one explicitly opened request scope, and only while the flag is on. Outside a scope this is
+   * exactly `await hooks.assertSheetScope?.(...)` on every single call, unchanged.
+   *
+   * Why the memo does not widen what is reachable: the ONLY caller that opens a scope today is the
+   * stock-prep apply writer, and every records call it makes has already been pinned to
+   * `target.sheetId` by `withTargetSheet` (`stock-preparation-table-actions.cjs`, 403 otherwise) —
+   * so the set of pairs asserted inside one scope is a SINGLETON, and memoizing it cannot admit a
+   * second sheet that was never asserted. The residual is the ordinary time-of-check window: a
+   * registry row that flips owner mid-chunk is re-read on the next chunk (a new request, a new
+   * scope) rather than on the next row. A throw is never memoized, so a denial is never sticky.
+   */
+  const assertSheetScopeOnce = async (sheetId: string): Promise<void> => {
+    if (!hooks.assertSheetScope) return
+    const cache = getMultitableRequestMetadataCache()
+    if (!cache) {
+      await hooks.assertSheetScope({ pluginName, sheetId })
+      return
+    }
+    // One scope is shared by every plugin-scoped API built inside it, so the key must carry BOTH
+    // halves. JSON of the 2-tuple is injective for any pair of strings — a hand-rolled separator
+    // would have to argue that the separator cannot appear in a plugin name or a sheet id, and
+    // getting that wrong would let one pair impersonate another.
+    const key = JSON.stringify([pluginName, sheetId])
+    if (cache.assertedSheetScopes.has(key)) return
+    await hooks.assertSheetScope({ pluginName, sheetId })
+    cache.assertedSheetScopes.add(key)
+  }
+
   return {
     provisioning: {
       getObjectSheetId: (projectId, objectId) => {
@@ -387,28 +422,42 @@ export function createPluginScopedMultitableApi(
       },
     },
     records: {
+      /**
+       * W8-4 (L1): open ONE request-scoped metadata memo around `operation` (see
+       * `request-metadata-cache.ts`). Deliberately NOT a sheet capability: it takes no sheetId,
+       * reaches no row, grants nothing, and asserts nothing — every records call made inside it
+       * still runs its own scope assertion the first time it sees a `(plugin, sheet)` pair. Its
+       * only effect is that a constant re-read inside one call is served from that call's own
+       * memory instead of from PostgreSQL. No-op passthrough while the env flag is off.
+       */
+      withMetadataCache: async (operation) => {
+        if (typeof operation !== 'function') {
+          throw new TypeError('operation must be a function')
+        }
+        return runWithMultitableRequestMetadataCache(() => operation())
+      },
       listRecords: async (input) => {
-        await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
+        await assertSheetScopeOnce(input.sheetId)
         return multitable.records.listRecords(input)
       },
       queryRecords: async (input) => {
-        await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
+        await assertSheetScopeOnce(input.sheetId)
         return multitable.records.queryRecords(input)
       },
       createRecord: async (input) => {
-        await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
+        await assertSheetScopeOnce(input.sheetId)
         return multitable.records.createRecord(input)
       },
       getRecord: async (input) => {
-        await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
+        await assertSheetScopeOnce(input.sheetId)
         return multitable.records.getRecord(input)
       },
       patchRecord: async (input) => {
-        await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
+        await assertSheetScopeOnce(input.sheetId)
         return multitable.records.patchRecord(input)
       },
       deleteRecord: async (input) => {
-        await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
+        await assertSheetScopeOnce(input.sheetId)
         return multitable.records.deleteRecord(input)
       },
       runStockPreparationPersistUnitOfWork: async (input, operation) => {

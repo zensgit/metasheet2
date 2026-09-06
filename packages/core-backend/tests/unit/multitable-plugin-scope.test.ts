@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   MultitableObjectScopeError,
@@ -14,6 +14,7 @@ import {
   getPluginProjectNamespaces,
   isSheetOwnedByProject,
 } from '../../src/multitable/plugin-scope'
+import { runWithMultitableRequestMetadataCache } from '../../src/multitable/request-metadata-cache'
 
 function createScopeQuery() {
   const rows: Array<{
@@ -730,4 +731,136 @@ describe('multitable plugin scope helper', () => {
     }
   })
 
+})
+
+// W8-4 (L1): `assertSheetScope` is the plugin/sheet ownership gate and it fired once per records
+// call — twice per written row on the measured 222 run (`plugin_multitable_object_registry`
+// +26305 seq_scan for 13151 created rows). Memoizing it is only defensible if the memo is scoped
+// to one request and cannot turn a denial into a pass, which is what these tests pin.
+describe('multitable plugin scope request-scoped sheet-scope memo', () => {
+  const FLAG = 'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE'
+
+  function buildScoped(assertSheetScope: ReturnType<typeof vi.fn>) {
+    const records = {
+      queryRecords: vi.fn(async () => []),
+      createRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_target', version: 1, data: {} })),
+    }
+    const scoped = createPluginScopedMultitableApi(
+      { provisioning: {}, records } as any,
+      'plugin-integration-core',
+      { assertSheetScope } as any,
+    )
+    return { records, scoped }
+  }
+
+  async function writeRows(scoped: ReturnType<typeof buildScoped>['scoped'], count: number) {
+    for (let index = 0; index < count; index += 1) {
+      await scoped.records.queryRecords({ sheetId: 'sheet_target', filters: {} } as any)
+      await scoped.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+    }
+  }
+
+  afterEach(() => {
+    delete process.env[FLAG]
+  })
+
+  it('asserts once per (plugin, sheet) inside a scope and once per call outside one', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const { records, scoped } = buildScoped(assertSheetScope)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(scoped, 6)
+    })
+    expect(assertSheetScope).toHaveBeenCalledTimes(1)
+    // The delegate still ran for every call — only the ownership probe was memoized.
+    expect(records.queryRecords).toHaveBeenCalledTimes(6)
+    expect(records.createRecord).toHaveBeenCalledTimes(6)
+
+    assertSheetScope.mockClear()
+    await writeRows(scoped, 6)
+    expect(assertSheetScope).toHaveBeenCalledTimes(12)
+  })
+
+  it('re-asserts in a second scope, so ownership is re-derived per request', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const { scoped } = buildScoped(assertSheetScope)
+
+    await runWithMultitableRequestMetadataCache(async () => { await writeRows(scoped, 3) })
+    await runWithMultitableRequestMetadataCache(async () => { await writeRows(scoped, 3) })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(2)
+  })
+
+  it('never memoizes a REFUSAL: a throwing assertion throws on every call', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {
+      throw new MultitableSheetScopeError('plugin-integration-core', 'sheet_target', 'plugin-other')
+    })
+    const { records, scoped } = buildScoped(assertSheetScope)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      for (let index = 0; index < 3; index += 1) {
+        await expect(
+          scoped.records.createRecord({ sheetId: 'sheet_target', data: {} } as any),
+        ).rejects.toBeInstanceOf(MultitableSheetScopeError)
+      }
+    })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(3)
+    expect(records.createRecord).not.toHaveBeenCalled()
+  })
+
+  it('memoizes per (plugin, sheet) pair, never per sheet alone', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const first = buildScoped(assertSheetScope)
+    const second = createPluginScopedMultitableApi(
+      { provisioning: {}, records: first.records } as any,
+      'plugin-after-sales',
+      { assertSheetScope } as any,
+    )
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await first.scoped.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+      await second.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+      await first.scoped.records.createRecord({ sheetId: 'sheet_other', data: {} } as any)
+      // Repeats of all three, none of which may re-assert.
+      await first.scoped.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+      await second.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+      await first.scoped.records.createRecord({ sheetId: 'sheet_other', data: {} } as any)
+    })
+
+    // One assertion per DISTINCT pair: two plugins x sheet_target is two, plus sheet_other.
+    expect(assertSheetScope).toHaveBeenCalledTimes(3)
+    expect(assertSheetScope.mock.calls.map((call) => call[0])).toEqual([
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_target' },
+      { pluginName: 'plugin-after-sales', sheetId: 'sheet_target' },
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_other' },
+    ])
+  })
+
+  it('withMetadataCache is a passthrough while the flag is off (no memo at all)', async () => {
+    delete process.env[FLAG]
+    const assertSheetScope = vi.fn(async () => {})
+    const { scoped } = buildScoped(assertSheetScope)
+
+    const result = await scoped.records.withMetadataCache!(async () => {
+      await writeRows(scoped, 4)
+      return 'returned-through'
+    })
+
+    expect(result).toBe('returned-through')
+    expect(assertSheetScope).toHaveBeenCalledTimes(8)
+  })
+
+  it('withMetadataCache rejects a non-function operation', async () => {
+    process.env[FLAG] = 'true'
+    const { scoped } = buildScoped(vi.fn(async () => {}))
+
+    await expect(
+      (scoped.records.withMetadataCache as (op: unknown) => Promise<unknown>)('not-a-function'),
+    ).rejects.toBeInstanceOf(TypeError)
+  })
 })

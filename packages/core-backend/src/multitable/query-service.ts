@@ -1,6 +1,7 @@
 import { createHash } from 'crypto'
 
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
+import { getMultitableRequestMetadataCache } from './request-metadata-cache'
 import { MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
 import type { MultitableField } from './field-codecs'
 import { mapRecordLockState } from './record-lock'
@@ -172,11 +173,15 @@ async function loadSheetAndFields(
   sheet: Awaited<ReturnType<typeof loadSheetRow>>
   fields: Awaited<ReturnType<typeof loadFieldsForSheet>>
 }> {
-  const sheet = await loadSheetRow(query, sheetId)
+  // W8-4 (L1): see the twin in `records.ts`. Inside one apply-run request the sheetId is pinned by
+  // the plugin's target fence, so these two reads return the same rows for every row of the chunk.
+  // `undefined` (the default) restores the original two statements exactly.
+  const cache = getMultitableRequestMetadataCache()
+  const sheet = await loadSheetRow(query, sheetId, cache?.sheets)
   if (!sheet) {
     throw new MultitableRecordNotFoundError(`Sheet not found: ${sheetId}`)
   }
-  const fields = await loadFieldsForSheet({ query }, sheetId)
+  const fields = await loadFieldsForSheet({ query }, sheetId, cache?.fields)
   if (fields.length === 0) {
     throw new MultitableRecordNotFoundError(`Sheet not found: ${sheetId}`)
   }
