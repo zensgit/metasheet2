@@ -81,6 +81,12 @@ fi
 
 mkdir -p "$OUTPUT_ROOT"
 
+# Bind both the target build and token tenant before any acceptance side effect.
+node "${ROOT_DIR}/scripts/ops/attendance-acceptance-preflight.mjs" \
+  >"${OUTPUT_ROOT}/runtime-provenance-before.json"
+AUTH_TOKEN="$(API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" \
+  "${ROOT_DIR}/scripts/ops/attendance-resolve-auth.sh")"
+
 gate_preflight="SKIP"
 gate_api="FAIL"
 gate_provision="SKIP"
@@ -246,6 +252,10 @@ if ! run_playwright_full_flow_mobile; then
   exit_code=1
 fi
 
+node "${ROOT_DIR}/scripts/ops/attendance-acceptance-preflight.mjs" \
+  >"${OUTPUT_ROOT}/runtime-provenance-after.json"
+provenance="$(jq -c . "${OUTPUT_ROOT}/runtime-provenance-after.json")"
+
 function detect_provision_reason() {
   local log="$1"
   if [[ ! -f "$log" ]]; then
@@ -260,12 +270,20 @@ function detect_provision_reason() {
     echo "RATE_LIMITED"
     return 0
   fi
-  if grep -qE 'error: 404' "$log"; then
-    echo "ENDPOINT_MISSING"
+  if grep -qE 'PROVISION_READBACK_FAILED' "$log"; then
+    echo "PROVISION_READBACK_FAILED"
     return 0
   fi
-  if grep -qE 'error: 400 .*ROLE_NOT_FOUND|error: 400 .*role not found' "$log"; then
+  if grep -qE 'ROLE_NOT_FOUND' "$log"; then
     echo "ROLE_NOT_FOUND"
+    return 0
+  fi
+  if grep -qE 'USER_TARGET_NOT_FOUND|error: 404 NOT_FOUND' "$log"; then
+    echo "USER_TARGET_NOT_FOUND"
+    return 0
+  fi
+  if grep -qE 'USER_SCOPE_REQUIRED' "$log"; then
+    echo "USER_SCOPE_REQUIRED"
     return 0
   fi
   if grep -qE 'error: 5[0-9][0-9]' "$log"; then
@@ -371,7 +389,8 @@ fi
 summary_json="${OUTPUT_ROOT}/gate-summary.json"
 cat >"$summary_json" <<EOF
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "provenance": ${provenance},
   "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "apiBase": "${API_BASE}",
   "webUrl": "${WEB_URL}",

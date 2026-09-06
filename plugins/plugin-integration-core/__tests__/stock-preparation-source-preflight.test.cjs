@@ -61,6 +61,8 @@ const {
   SOURCE_PREFLIGHT_WARNING_CODES,
   SOURCE_PREFLIGHT_READ_ERROR_CODES,
   SOURCE_PREFLIGHT_BRIDGES,
+  SOURCE_PREFLIGHT_BINDING_SHAPES,
+  PULL_DELEGATION_REASONS,
   DESIGN_BOM_BRIDGE_OBJECTS,
   LIVENESS_SAMPLE_MAX,
   PROJECT_NODE_TYPE,
@@ -350,6 +352,9 @@ async function preflight(catalog, options = {}) {
     readPlan: options.readPlan,
     externalSystemId: options.externalSystemId || SYSTEM_ID,
     declaredBridge: options.declaredBridge,
+    ...(Object.prototype.hasOwnProperty.call(options, 'pullDelegation')
+      ? { pullDelegation: options.pullDelegation }
+      : {}),
   })
   return { report, calls: reader.calls }
 }
@@ -1187,6 +1192,20 @@ function tableActionConfig(overrides = {}) {
   }
 }
 
+// A REALISTIC `data-source:sql-readonly` ROW: a canonical Connection reference plus the server-held
+// owner stamp the registry writes at bind time. The stub used to carry neither, which made every
+// route case look like a binding whose pull can only ever be run by the person who bound it — the
+// exact condition `PULL_PRINCIPAL_DELEGATION_UNAVAILABLE` now names (see R-07).
+function boundSystem(id, overrides = {}) {
+  return {
+    id,
+    kind: 'data-source:sql-readonly',
+    connectionId: `conn_${id}`,
+    config: { schema: 'dbo', dataSourceOwnerId: 'u_binding_owner' },
+    ...overrides,
+  }
+}
+
 function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOverride } = {}) {
   const routes = new Map()
   const reader = catalog ? createReader(catalog) : null
@@ -1195,7 +1214,7 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
     ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
     async getExternalSystem(input) {
       loaded.push(input)
-      const system = (systems || { [SYSTEM_ID]: { id: SYSTEM_ID, kind: 'data-source:sql-readonly' } })[input.id]
+      const system = (systems || { [SYSTEM_ID]: boundSystem(SYSTEM_ID) })[input.id]
       if (!system) {
         const error = new Error('external system not found')
         error.name = 'ExternalSystemNotFoundError'
@@ -1290,8 +1309,8 @@ async function routeDefaultsToTheConfiguredSourceAndAcceptsAnOverride() {
   const { routes, loaded } = mountRoute({
     catalog: customerShapedSource(),
     systems: {
-      [SYSTEM_ID]: { id: SYSTEM_ID, kind: 'data-source:sql-readonly' },
-      other_system: { id: 'other_system', kind: 'data-source:sql-readonly' },
+      [SYSTEM_ID]: boundSystem(SYSTEM_ID),
+      other_system: boundSystem('other_system'),
     },
   })
 
@@ -1393,6 +1412,158 @@ async function theHttpBoundaryIsValuesFreeToo() {
 }
 
 // ---------------------------------------------------------------------------
+// S-18 — THE BINDING HALF: can this source's pull delegate its read identity at all
+// ---------------------------------------------------------------------------
+//
+// The source-shape checks measure the CUSTOMER's catalog. This one reports a fact about OUR side:
+// `data-source:*` bindings are authorized by the host facade on strict owner equality, so unless the
+// binding carries a server-held owner stamp, only the person who bound the connection can ever pull
+// through it — whatever the catalog looks like. A perfect source that nobody but the binder can read
+// is a no-go for a delivery that promises 一线自助拉取, and before this the report said `go`.
+async function theBindingHalfIsReportedAndBlocks() {
+  // 1. NOT EVALUATED is the default, and it is silent. A caller that never heard of this input gets
+  //    the report it always got.
+  {
+    const { report } = await preflight(orderModuleSource())
+    assert.deepEqual(
+      checkOf(report, 'pullDelegation'),
+      { evaluated: false, available: null, bindingShape: null, reason: null },
+      'S-18: with no stanza the check is not evaluated',
+    )
+    assert.equal(report.verdict, 'go', 'S-18: and an unevaluated check blocks nothing')
+  }
+
+  // 2. AVAILABLE -> reported, no blocker. The shape travels so an implementer can see WHICH binding
+  //    shape answered without ever being told the connection id.
+  {
+    const { report } = await preflight(orderModuleSource(), {
+      pullDelegation: { available: true, bindingShape: 'canonical', reason: null },
+    })
+    assert.deepEqual(checkOf(report, 'pullDelegation'), {
+      evaluated: true, available: true, bindingShape: 'canonical', reason: null,
+    })
+    assert.deepEqual(codesOf(report.blockers), [], 'S-18: an available delegation blocks nothing')
+    assert.equal(report.verdict, 'go')
+  }
+
+  // 3. UNAVAILABLE -> a BLOCKER on an otherwise flawless source, carrying the shape and the reason.
+  {
+    const { report } = await preflight(orderModuleSource(), {
+      pullDelegation: { available: false, bindingShape: 'canonical', reason: 'binding_owner_unstamped' },
+    })
+    assert.equal(report.verdict, 'no-go', 'S-18: a source only its binder can read is not go')
+    const blocker = report.blockers.find((entry) => entry.code === B.PULL_PRINCIPAL_DELEGATION_UNAVAILABLE)
+    assert.ok(blocker, 'S-18: and the blocker is raised')
+    assert.deepEqual(blocker.detail, { bindingShape: 'canonical', reason: 'binding_owner_unstamped' })
+    // Everything else about this source still measured clean — the blocker is ADDITIVE, it does not
+    // suppress or cascade into the shape findings.
+    assert.equal(checkOf(report, 'reachability').reachable, true)
+    assert.equal(checkOf(report, 'topology').matchesConfigured, true)
+  }
+
+  // 4. IT IS JUDGED EVEN WHEN THE SOURCE CANNOT BE REACHED — two independent facts, two blockers,
+  //    ordered with unreachable first.
+  {
+    const { report } = await preflight(orderModuleSource(), {
+      failEveryRead: 'connection refused',
+      pullDelegation: { available: false, bindingShape: 'legacy', reason: 'binding_owner_unstamped' },
+    })
+    assert.deepEqual(
+      codesOf(report.blockers),
+      [B.SOURCE_UNREACHABLE, B.PULL_PRINCIPAL_DELEGATION_UNAVAILABLE],
+      'S-18: unreachable leads; the binding finding is still reported, not swallowed',
+    )
+  }
+
+  // 5. A GARBLED STANZA IS NOT A MEASUREMENT. Anything that is not a literal boolean `available`, and
+  //    any word outside the closed vocabularies, degrades to not-evaluated / null rather than
+  //    reaching the report — which is what keeps this input from becoming a free-text channel.
+  {
+    const { report } = await preflight(orderModuleSource(), {
+      pullDelegation: { available: 'false', bindingShape: 'canonical' },
+    })
+    assert.equal(checkOf(report, 'pullDelegation').evaluated, false, 'S-18: a non-boolean is no answer')
+  }
+  {
+    const { report } = await preflight(orderModuleSource(), {
+      pullDelegation: { available: false, bindingShape: 'DSN=srv;pwd=hunter2', reason: 'because reasons' },
+    })
+    const check = checkOf(report, 'pullDelegation')
+    assert.equal(check.bindingShape, null, 'S-18: an off-vocabulary shape is dropped, not echoed')
+    assert.equal(check.reason, null, 'S-18: and so is an off-vocabulary reason')
+    assert.equal(
+      JSON.stringify(report).includes('hunter2'),
+      false,
+      'S-18: nothing from a garbled stanza reaches the report',
+    )
+  }
+
+  // 6. THE VOCABULARIES ARE CLOSED AND THE CODE IS ORDERED — the same discipline every other code in
+  //    this module is held to.
+  assert.ok(
+    SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER.includes(B.PULL_PRINCIPAL_DELEGATION_UNAVAILABLE),
+    'S-18: an unordered blocker sorts to the end by accident rather than by decision',
+  )
+  assert.deepEqual([...SOURCE_PREFLIGHT_BINDING_SHAPES], ['canonical', 'legacy', 'unbound'])
+  assert.deepEqual([...PULL_DELEGATION_REASONS], ['binding_owner_unstamped'])
+}
+
+// ---------------------------------------------------------------------------
+// R-07 — the route computes the binding half from the SAME row it built the adapter from
+// ---------------------------------------------------------------------------
+async function theRouteReportsWhetherThePullCanDelegate() {
+  // A canonical binding with NO server-held owner stamp — the shape every 222 row had, and the one
+  // that made every operator pull 400 with nothing anywhere explaining it.
+  {
+    const { routes } = mountRoute({
+      catalog: orderModuleSource(),
+      systems: {
+        [SYSTEM_ID]: boundSystem(SYSTEM_ID, { config: { schema: 'dbo' } }),
+      },
+    })
+    const res = await callRoute(routes, { user: INTEGRATION_READER })
+    assert.equal(res.statusCode, 200)
+    const blocker = res.body.data.blockers.find((entry) => entry.code === B.PULL_PRINCIPAL_DELEGATION_UNAVAILABLE)
+    assert.ok(blocker, 'R-07: an unstamped canonical binding is reported at the route')
+    assert.deepEqual(blocker.detail, { bindingShape: 'canonical', reason: 'binding_owner_unstamped' })
+    assert.deepEqual(res.body.data.checks.pullDelegation, {
+      evaluated: true, available: false, bindingShape: 'canonical', reason: 'binding_owner_unstamped',
+    })
+  }
+
+  // The same source with the stamp present: clean.
+  {
+    const { routes } = mountRoute({ catalog: orderModuleSource() })
+    const res = await callRoute(routes, { user: INTEGRATION_READER })
+    assert.equal(res.body.data.verdict, 'go')
+    assert.equal(res.body.data.checks.pullDelegation.available, true)
+  }
+
+  // A LEGACY-pointer binding is the same question with a different shape word.
+  {
+    const { routes } = mountRoute({
+      catalog: orderModuleSource(),
+      systems: {
+        [SYSTEM_ID]: boundSystem(SYSTEM_ID, { connectionId: null, config: { dataSourceId: 'ds_1' } }),
+      },
+    })
+    const res = await callRoute(routes, { user: INTEGRATION_READER })
+    assert.equal(res.body.data.checks.pullDelegation.bindingShape, 'legacy')
+    assert.equal(res.body.data.checks.pullDelegation.available, false)
+  }
+
+  // AND THE ROUTE NEVER LEAKS THE ANSWER'S INPUTS: neither the connection id nor the owner id is a
+  // field of the report, in any binding shape.
+  {
+    const { routes } = mountRoute({ catalog: orderModuleSource() })
+    const res = await callRoute(routes, { user: INTEGRATION_READER })
+    const serialized = JSON.stringify(res.body)
+    assert.equal(serialized.includes('u_binding_owner'), false, 'R-07: the owner id never travels')
+    assert.equal(serialized.includes(`conn_${SYSTEM_ID}`), false, 'R-07: nor the connection id')
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 async function main() {
   await healthyOrderModuleSource()
@@ -1459,6 +1630,11 @@ async function main() {
   console.log('  ✓ R-06 a declared bridge crosses the route and stays labelled as declared')
   await theHttpBoundaryIsValuesFreeToo()
   console.log('  ✓ R-05 the HTTP boundary is values-free too')
+
+  await theBindingHalfIsReportedAndBlocks()
+  console.log('  ✓ S-18 a source only its binder can pull through is a no-go, and says which shape')
+  await theRouteReportsWhetherThePullCanDelegate()
+  console.log('  ✓ R-07 the route reports the binding half without leaking owner or connection id')
 
   console.log('stock-preparation-source-preflight: OK')
 }

@@ -118,6 +118,13 @@
             <dt>{{ bi('轮到谁', 'Whose turn') }}</dt>
             <dd>{{ turnText }}</dd>
           </div>
+          <div class="sp-board__fact" data-testid="stock-prep-project-board-last-changed-from-plm">
+            <dt :title="bi(
+              '该项目最近一次同步中有行发生变更(新增/更新/失效)的时间;同步无变更时不更新,不代表最近一次同步的时间。',
+              'The last time a sync for this project actually changed a row (added/updated/inactivated). It does not update on a sync with no changes, so it is NOT the last sync time.',
+            )">{{ bi('最近变更(来自 PLM)', 'Last change (from PLM)') }}</dt>
+            <dd>{{ lastChangedFromPlmText }}</dd>
+          </div>
           <div class="sp-board__fact" data-testid="stock-prep-project-board-last-export">
             <dt>{{ bi('最近导出', 'Last export') }}</dt>
             <dd>{{ lastExportText }}</dd>
@@ -530,6 +537,44 @@ const lastExportText = computed<string>(() => {
   if (!at) return bi('还没导出过', 'Never exported')
   const parsed = new Date(at)
   if (Number.isNaN(parsed.getTime())) return bi('还没导出过', 'Never exported')
+  return parsed.toLocaleString(locale.value === 'zh-CN' ? 'zh-CN' : 'en-US')
+})
+
+/**
+ * 最近变更(来自 PLM) — the latest `lastPlmRefreshAt` the board saw across this project's pulled rows.
+ *
+ * NOT "上次同步". `lastPlmRefreshAt` is written by the conflict planner's `runPatch`, which only rides
+ * along an add/update/inactive DECISION (stock-preparation-conflict-planner.cjs makeAddDecision /
+ * makeUpdateDecision / makeInactiveDecision). `makeSkipDecision` — the decision an UNCHANGED row gets
+ * — calls no `runPatch` at all, so a sync where nothing changed leaves every row's stamp exactly where
+ * the LAST sync that changed something left it. A BOM that has been stable for a week and pulled
+ * every day since would show a week-old timestamp here even though the pull ran (and answered
+ * "nothing changed") every single day. The label and this tooltip say so; do not read this as
+ * "拉取成功的时间" anywhere this value is surfaced.
+ *
+ * THREE STATES, and the middle one exists only because the scan behind it can be TRUNCATED:
+ *   * `lastChangedFromPlmBounded` — the row scan hit its page bound before it could see every row, and
+ *     an unordered, offset-paged scan cannot safely report a partial max (a row past the bound could
+ *     carry a NEWER stamp than anything seen). This is deliberately NOT the same message as "never
+ *     changed" — the data may have changed recently, the page just could not prove it.
+ *   * `lastChangedFromPlmAt === null` (not bounded) — no rows carry the stamp yet, or the bound target
+ *     does not bind the (optional) `lastPlmRefreshAt` column. `—`, same as every other absent
+ *     timestamp on this card.
+ *   * otherwise — the timestamp, formatted exactly like `lastExportText`.
+ */
+const lastChangedFromPlmText = computed<string>(() => {
+  const current = board.value
+  if (!current) return '—'
+  if (current.lastChangedFromPlmBounded) {
+    return bi(
+      '行数超过看板上限,未统计',
+      'Row count exceeds the board scan limit — not counted',
+    )
+  }
+  const at = current.lastChangedFromPlmAt
+  if (!at) return '—'
+  const parsed = new Date(at)
+  if (Number.isNaN(parsed.getTime())) return '—'
   return parsed.toLocaleString(locale.value === 'zh-CN' ? 'zh-CN' : 'en-US')
 })
 

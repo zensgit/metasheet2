@@ -276,10 +276,55 @@ async function main() {
   assert.equal(publicProjectionCreate.connectionId, 'sql-readonly-1')
   assert.equal(publicProjectionCreate.config.dataSourceId, undefined,
     'a new SQL binding stores the selected Connection only in connection_id')
-  assert.equal(publicProjectionCreate.config.dataSourceOwnerId, undefined,
-    'canonical bindings do not retain the legacy owner-attribution stamp')
+  // THE STAMP NOW SURVIVES A CANONICAL BIND — and it must, or the stock-prep pull's read-identity
+  // delegation has nothing to delegate to on any row created after the connection cutover. It was
+  // dropped here only because `withoutLegacyDataSourcePointer` used to delete the attribution
+  // ALONGSIDE the legacy pointer, which conflated two different facts: WHICH connection this
+  // binding names (canonical, `connection_id`) and WHO the host authorized as that connection's
+  // owner at bind time. The proof is identical in both shapes — `assertReferenceable` for legacy,
+  // `resolveConnectionRegistration` for canonical, and both land on the same
+  // `DataSourceManager.assertAccess` owner equality — so the stamp is as trustworthy here as there.
+  assert.equal(publicProjectionCreate.config.dataSourceOwnerId, 'owner_1',
+    'a canonical bind stamps the owner the host just authorized, server-side')
+  assert.equal(publicProjectionCreate.config.dataSourceId, undefined,
+    'and it is the POINTER that a canonical binding drops, not the attribution')
   assert.deepEqual(projectionBinderCalls, [['sql-readonly-1', 'owner_1']],
     'the binder saw exactly the asserted binding')
+
+  // A CLIENT MAY NOT ASSERT THE STAMP, in either direction: not to forge one and not to overwrite a
+  // stored one. `SERVER_OWNED_CONFIG_KEYS` strips it at the normalize choke point, and the canonical
+  // branch then re-decides attribution from the PROVEN principal alone.
+  const forgedStampCreate = await projectionRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_forged_stamp',
+    name: 'forged-owner-stamp',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    config: { dataSourceId: 'sql-readonly-1', schema: 'dbo', dataSourceOwnerId: 'someone_else' },
+    status: 'active',
+    principal: 'owner_1',
+  })
+  assert.equal(forgedStampCreate.config.dataSourceOwnerId, 'owner_1',
+    'a client-sent owner stamp is discarded and replaced by the proven principal')
+
+  // AN UPDATE THAT DOES NOT RE-ASSERT THE CONNECTION INHERITS THE STORED STAMP VERBATIM. A rename by
+  // a colleague must neither steal the attribution nor destroy it — destroying it would silently
+  // switch the pull back to "only the binder can read", which is the failure this whole change is
+  // about, from a name change.
+  const inheritedStampUpdate = await projectionRegistry.upsertExternalSystem({
+    tenantId: 'tenant_1',
+    id: 'sys_lookup_projection',
+    name: 'private-sql-lookup-projection',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    config: { schema: 'dbo2' },
+    principal: 'a_colleague',
+  })
+  assert.equal(inheritedStampUpdate.config.schema, 'dbo2', 'the unrelated config patch applied')
+  assert.equal(inheritedStampUpdate.config.dataSourceOwnerId, 'owner_1',
+    'an update that does not re-assert the connection inherits the stored owner stamp')
+  assert.deepEqual(projectionBinderCalls, [['sql-readonly-1', 'owner_1'], ['sql-readonly-1', 'owner_1']],
+    'and it re-validated nothing — the binder saw only the two asserting upserts')
   assert.equal(publicProjectionCreate.config.schema, 'dbo')
   assert.equal(publicProjectionCreate.config.lookupProjection, undefined,
     'public create response omits the complete private lookup projection')
@@ -314,7 +359,12 @@ async function main() {
   assert.deepEqual(configOnlyProjection.config.lookupProjection, lookupProjection,
     'the non-decrypting accessor sees the private projection the public one strips')
   assert.equal(configOnlyProjection.kind, 'data-source:sql-readonly', 'and the kind the roster keys on')
-  assert.deepEqual(Object.keys(configOnlyProjection).sort(), ['config', 'id', 'kind'],
+  // `connectionId` joined the projection for the SECOND guard that must run before a credential
+  // reload: the stock-prep pull's read-identity resolution, which has to tell a canonical binding
+  // from a legacy one WITHOUT resolving either. It is already a field of the public projection, so
+  // it discloses nothing new — and the closed shape below is still the point of this assertion.
+  assert.equal(configOnlyProjection.connectionId, 'sql-readonly-1', 'and the canonical binding shape')
+  assert.deepEqual(Object.keys(configOnlyProjection).sort(), ['config', 'connectionId', 'id', 'kind'],
     'and NOTHING else — no credentials, no ciphertext, no fingerprint, no status')
   assert.equal('credentials' in configOnlyProjection, false, 'it never decrypts')
   await assert.rejects(
@@ -1161,7 +1211,10 @@ async function testDataSourceBindingValidation() {
   assert.equal(unbound.config.dataSourceOwnerId, undefined,
     'dataSourceOwnerId is server-owned metadata: a client-sent stamp without a binding is stripped')
 
-  // ...and discarded when the selected Connection is persisted canonically.
+  // ...and, when the selected Connection is persisted canonically, the client's value is discarded
+  // and REPLACED by the principal the canonical validation just proved is the connection's owner.
+  // (It used to be discarded and nothing written, which left every post-cutover row with no owner
+  // to delegate a read identity to — see the note beside the lookup-projection create above.)
   const bound = await registry.upsertExternalSystem({
     tenantId: 'tenant_1',
     name: 'bind-owned',
@@ -1172,8 +1225,8 @@ async function testDataSourceBindingValidation() {
   })
   assert.equal(bound.connectionId, 'ds-owned')
   assert.equal(bound.config.dataSourceId, undefined)
-  assert.equal(bound.config.dataSourceOwnerId, undefined,
-    'canonical storage keeps neither the client pointer nor its legacy attribution stamp')
+  assert.equal(bound.config.dataSourceOwnerId, 'owner_1',
+    'canonical storage drops the client pointer AND the client stamp, then attributes the proven owner')
   const boundRow = db.rows.find((row) => row.id === bound.id)
   assert.equal(boundRow.connection_id, 'ds-owned')
   assert.equal(boundRow.legacy_connection_fallback_eligible, false,

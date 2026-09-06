@@ -244,4 +244,10 @@ describe('MetaSheetServer recovery archive wiring', () => {
     expect(indexSource).toContain("process.on('SIGTERM', () => this.stopForSignal('SIGTERM'))")
     expect(indexSource).toContain("process.on('SIGINT', () => this.stopForSignal('SIGINT'))")
   })
+
+  it('injects the shared recovery archive metrics observer', () => {
+    expect(indexSource).toMatch(
+      /createRecoveryArchiveApplication\(\s*options\.createRecoveryArchiveComposition,\s*resolveRecoveryArchiveMainPoolRuntime,\s*process\.env,\s*recoveryArchiveObservability,\s*\)/,
+    )
+  })
 })

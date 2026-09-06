@@ -515,6 +515,175 @@ const VALUE_READS = Object.freeze([
   }),
 ])
 
+// ---------------------------------------------------------------------------
+// W-01..W-05 — THE FOURTH VALUE-BEARING READ: the dry-run's missing-component list (W3a)
+// ---------------------------------------------------------------------------
+//
+// A `missing_component` blocks the WHOLE project — one of them and not a single row can be written
+// — so the trial has to be able to tell an operator WHICH part numbers to create. Those are real
+// customer values, and the route they ride is `POST …/table-actions/:actionId/dry-run`, which is a
+// `read` route and stays one: a supervisor with `integration:read` has always been able to run a
+// trial and see the counts, and taking that away would be a worse trade than not shipping the list.
+//
+// That makes this read structurally different from the three above, and worth its own section:
+//
+//   * the VALUES are opt-in (`includeMissingComponents: true` in the body) and gated by the SAME
+//     `resolveOperatorValueScope` the other three use — but only on the opt-in branch, so the
+//     values-free trial is untouched;
+//   * `requireTableActionAccess`'s LEGACY branch returns before the operator scope is ever reached,
+//     which is exactly why the flag needs its own gate rather than inheriting the route's;
+//   * a tenantless platform admin, who `resolveTenantId` lets steer `?tenantId=` across tenants, is
+//     the most dangerous subject there is here, and must be refused.
+//
+// W-01 the values-free trial carries NO part number (the negative guard: without the flag, the whole
+//      response — token, revision, counts, evidence — is byte-identical to what it was before W3a)
+// W-02 with the flag, a tenant-A operator gets tenant A's list and nothing of tenant B's
+// W-03 the LEGACY `integration:read` tier is refused the flag, 403, before any source read
+// W-04 a TENANTLESS platform admin is refused the flag, 403, however they carry their tenant
+// W-05 the flag is type-checked, and an unknown body key still 400s ahead of the scope
+
+const DRY_RUN_PATH = '/api/integration/table-actions/:actionId/dry-run'
+const PULL_SOURCE_SYSTEM_ID = 'plm_sql_source'
+const PULL_SHEET_ID = 'sheet_pull_main'
+
+// The part numbers each tenant's PLM is missing. Deliberately unmistakable literals: every negative
+// assertion below is a substring search over everything the caller received.
+const A_MISSING_PART = 'ZZAMISSINGPARTZZ'
+const B_MISSING_PART = 'ZZBMISSINGPARTZZ'
+
+/** A PLM fixture whose one BOM child is absent from the part library. */
+function plmDataMissing(missingPartId) {
+  return {
+    DN_PDM_PathExAttrInfo: [{ FileCode: PROJECT_NO_A, Parent_OBJ_ID: 'PATH-1' }],
+    DN_PDM_PathInfo: [{ OBJ_ID: 'PATH-1' }],
+    DN_PDM_OrderHeadInfo: [{ OBJ_ID: 'ORDER-1', path_id: 'PATH-1' }],
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-ROOT', quantity: '1', sort_id: 1 }],
+    DN_PDM_PartLibraryInfo: [{ OBJ_ID: 'PART-ROOT', IdentityNo: 'R-001', IdentityName: 'Root', Material: 'Steel', SysVer: 'V1' }],
+    DN_PDM_BomHeadInfo: [{ part_id: 'PART-ROOT', bom_id: 'BOM-ROOT', SysVer: 'V1', bom_able: true }],
+    DN_PDM_BomDetailsInfo: [{ bom_pid: 'BOM-ROOT', part_id: missingPartId, Bom_ExAttr1: '2', sort_id: 1 }],
+  }
+}
+
+// PER-TENANT PLM DATA, reached through the per-tenant source binding — which is the thing that makes
+// "only this tenant's values" a claim about the system rather than about the fixture. The external
+// system is looked up scoped by tenant, so the tenant the route resolved decides which PLM answers.
+const PLM_BY_TENANT = Object.freeze({
+  [TENANT_A]: plmDataMissing(A_MISSING_PART),
+  [TENANT_B]: plmDataMissing(B_MISSING_PART),
+})
+
+function pullActionConfig() {
+  const fieldIds = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id)
+  return {
+    actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    source: { externalSystemId: PULL_SOURCE_SYSTEM_ID, kind: 'data-source:sql-readonly' },
+    target: {
+      sheetId: PULL_SHEET_ID,
+      objectId: MAIN_OBJECT_ID,
+      fieldIdMap: Object.fromEntries(fieldIds.map((fieldId) => [fieldId, `fld_${fieldId}`])),
+    },
+  }
+}
+
+/**
+ * A MINIMAL DRY-RUN SUBSTRATE, separate from `mount()` on purpose: the three reads above share a
+ * two-tenant multitable substrate and no source at all, and wiring a PLM adapter into it would give
+ * every one of their guards a capability they are specifically asserting the absence of.
+ */
+function mountDryRun({ tenantPrincipalDirectory = hostDirectory() } = {}) {
+  const routes = new Map()
+  const adapterTenants = []
+  const context = {
+    api: {
+      http: {
+        addRoute(method, routePath, handler) {
+          routes.set(`${method.toUpperCase()} ${routePath}`, handler)
+        },
+      },
+      multitable: {
+        provisioning: {
+          async findObjectSheet() { return { id: PULL_SHEET_ID, baseId: null, name: MAIN_OBJECT_ID, description: null } },
+          async resolveFieldIds() { return {} },
+          async ensureObject() { throw new Error('unexpected provisioning write: ensureObject') },
+        },
+        records: {
+          async queryRecords() { return [] },
+          async createRecord() { throw new Error('unexpected records write: createRecord') },
+          async patchRecord() { throw new Error('unexpected records write: patchRecord') },
+        },
+      },
+    },
+    storage: Object.assign(new Map(), { durable: true }),
+    config: { stockPreparationTableActions: [pullActionConfig()] },
+  }
+  const services = baseServices()
+  services.externalSystemRegistry = {
+    async getExternalSystem(input = {}) {
+      // The tenant the ROUTE resolved decides which customer's PLM this is. Recorded so a guard can
+      // state which tenant's source was opened, not merely which values came back.
+      adapterTenants.push(input && input.tenantId)
+      return {
+        id: PULL_SOURCE_SYSTEM_ID,
+        tenantId: input && input.tenantId,
+        kind: 'data-source:sql-readonly',
+        role: 'source',
+        status: 'active',
+        config: { dataSourceId: `ds_${input && input.tenantId}`, dataSourceOwnerId: 'u_binding_owner' },
+      }
+    },
+    async upsertExternalSystem() { throw new Error('unexpected') },
+    async deleteExternalSystem() { throw new Error('unexpected') },
+    async listExternalSystems() { return { items: [] } },
+  }
+  services.adapterRegistry = {
+    createAdapter(system) {
+      const tenantId = system && system.tenantId
+      const data = PLM_BY_TENANT[tenantId] || {}
+      return {
+        kind: system.kind,
+        async read(input = {}) {
+          const rows = Array.isArray(data[input.object]) ? data[input.object] : []
+          const matches = rows.filter((row) =>
+            Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected))
+          return { records: matches.map((row) => ({ ...row })), nextCursor: null, done: true }
+        },
+      }
+    },
+    listAdapterKinds() { return [] },
+  }
+  services.stockPreparationAuditStore = { async append() { return { ok: true } } }
+  if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
+
+  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  return { routes, adapterTenants, tenantPrincipalDirectory }
+}
+
+async function dryRun(harness, { user, authenticatedTenantId, body = {}, query = {} } = {}) {
+  return call(harness.routes, 'POST', DRY_RUN_PATH, {
+    user,
+    authenticatedTenantId,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    query,
+    body: { parameters: { projectNo: PROJECT_NO_A }, ...body },
+  })
+}
+
+// The legacy tier this route has always admitted, and the tenantless platform admin `resolveTenantId`
+// lets steer. Neither may buy a part number with the opt-in.
+const LEGACY_READER = Object.freeze({ id: 'u_int_r', tenantId: TENANT_A, permissions: ['integration:read'] })
+/** The middleware's shape for a platform admin: no verified claim, `x-tenant-id` copied onto the user. */
+const PLATFORM_ADMIN_HEADER_TENANT = Object.freeze({ id: 'u_adm_platform', roles: ['admin'], tenantId: TENANT_A, permissions: ['integration:admin'] })
+/**
+ * THE WORST CASE: a platform admin who ALSO holds the stock-prep operator tier (so the tier check
+ * cannot be what saves us) but has no tenant of their own. Before the scope, `resolveTenantId` would
+ * have let them name any tenant they liked.
+ */
+const PLATFORM_ADMIN_TENANTLESS_OPERATOR = Object.freeze({
+  id: 'u_adm_platform',
+  roles: ['admin'],
+  permissions: ['integration:admin', STOCK_PREP_READ, STOCK_PREP_OPERATE],
+})
+
 let failures = 0
 const only = process.env.ONLY_TEST || ''
 async function run(name, fn) {
@@ -690,6 +859,132 @@ async function main() {
     })
     assert.equal(refused.statusCode, 403)
     assert.deepEqual(spoofed.auditAppends, [], 'a refused export writes nothing to the trail')
+  })
+
+  // -------------------------------------------------------------------------
+  // W-01..W-05 — the dry-run's missing-component list
+  // -------------------------------------------------------------------------
+
+  await run('W-01 dry-run without the flag carries no part number, and is byte-identical to the pre-W3a response', async () => {
+    const harness = mountDryRun()
+    const res = await dryRun(harness, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    // The trial DID find the missing component — otherwise this guard is vacuous.
+    assert.equal(res.body.data.status, 'manual_confirm_required', 'a missing component holds the whole project')
+    assert.ok(
+      res.body.data.evidence.expansion.errorTypes.includes('missing_component'),
+      'the values-free half still SAYS a component is missing',
+    )
+
+    assert.equal(
+      everythingSent(res).includes(A_MISSING_PART),
+      false,
+      'W-01: the values-free trial names no part number anywhere in the response',
+    )
+    assert.equal('missingComponents' in res.body.data, false, 'W-01: and carries no key at all')
+
+    // `false` and "absent" must produce the SAME response — no key, no scope check, nothing moved.
+    const explicitlyOff = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: false } })
+    const strip = (response) => {
+      const data = JSON.parse(JSON.stringify(response.body.data))
+      delete data.dryRunToken // freshly minted per call, and deliberately not derived from the flag
+      return data
+    }
+    assert.deepEqual(strip(explicitlyOff), strip(res), 'W-01: opting OUT is byte-identical to not asking')
+  })
+
+  await run('W-02 with the flag, an operator gets their OWN tenant\'s missing parts and nothing else', async () => {
+    const harness = mountDryRun()
+    const res = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: true } })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+
+    const list = res.body.data.missingComponents
+    assert.ok(list, 'W-02: the key is present when asked for')
+    assert.deepEqual(Object.keys(list), ['distinctCount', 'probeCount', 'truncated', 'items'], 'the frozen response shape')
+    assert.equal(list.distinctCount, 1)
+    assert.equal(list.probeCount, 1)
+    assert.equal(list.truncated, false)
+    assert.equal(list.items[0].componentSourceId, A_MISSING_PART, 'the part the operator has to go and create')
+    assert.equal(list.items[0].parentSourceId, 'PART-ROOT')
+    assert.equal(list.items[0].occurrenceCount, 1)
+    assert.equal(list.items[0].parentCount, 1)
+
+    // ONLY their own tenant: the source that was opened is tenant A's binding, and tenant B's part
+    // number is nowhere in the bytes that were sent.
+    assert.deepEqual([...new Set(harness.adapterTenants)], [TENANT_A], 'W-02: only tenant A\'s source binding was opened')
+    assert.equal(everythingSent(res).includes(B_MISSING_PART), false, 'W-02: no other tenant\'s part number is reachable')
+    // The host was asked to vouch for the (principal, tenant) pairing — the gate ran, it did not
+    // merely happen to pass.
+    assert.ok(
+      harness.tenantPrincipalDirectory.calls.some((entry) => entry.userId === OPERATOR_A.id && entry.tenantId === TENANT_A),
+      'W-02: the opt-in went through resolveOperatorValueScope',
+    )
+
+    // AND THE DURABLE SURFACES DID NOT MOVE. Same revision as the values-free call, no key inside
+    // evidence — the four "does not enter" claims, asserted at the route.
+    const valuesFree = await dryRun(harness, { user: OPERATOR_A })
+    assert.equal(res.body.data.revision, valuesFree.body.data.revision, 'W-02: the opt-in does not move the dry-run revision')
+    assert.deepEqual(res.body.data.evidence, valuesFree.body.data.evidence, 'W-02: evidence is byte-identical either way')
+    assert.equal(JSON.stringify(res.body.data.evidence).includes(A_MISSING_PART), false, 'W-02: evidence never carries the value')
+  })
+
+  await run('W-03 the legacy integration:read tier is refused the flag, before any source read', async () => {
+    const harness = mountDryRun()
+    // The tier reaches the route perfectly well WITHOUT the flag — this is a refusal of the VALUES,
+    // not a narrowing of the route.
+    const valuesFree = await dryRun(harness, { user: LEGACY_READER })
+    assert.equal(valuesFree.statusCode, 200, JSON.stringify(valuesFree.body))
+
+    const harness2 = mountDryRun()
+    const res = await dryRun(harness2, { user: LEGACY_READER, body: { includeMissingComponents: true } })
+    assert.equal(res.statusCode, 403, `W-03: legacy read may not opt in (got ${JSON.stringify(res.body)})`)
+    assert.equal(errorCode(res), 'OPERATOR_SCOPE_TIER_REQUIRED')
+    assert.equal(everythingSent(res).includes(A_MISSING_PART), false, 'W-03: nothing leaked with the refusal')
+    assert.deepEqual(harness2.adapterTenants, [], 'W-03: refused BEFORE the source was even looked up')
+  })
+
+  await run('W-04 a tenantless platform admin is refused the flag, however they carry their tenant', async () => {
+    // (a) `x-tenant-id` copied onto the user by the middleware, no verified claim — the exact shape
+    //     the header hole produces. A platform admin's role satisfies the stock-prep ladder, so the
+    //     tier check does NOT stop them; what stops them is the host, which will not vouch for a
+    //     platform principal as a member of the tenant the header named. On a claimless deployment
+    //     that membership check is the whole of the proof, and this is it doing the work.
+    const headerCarried = mountDryRun()
+    const viaHeader = await dryRun(headerCarried, {
+      user: PLATFORM_ADMIN_HEADER_TENANT,
+      authenticatedTenantId: undefined,
+      body: { includeMissingComponents: true },
+    })
+    assert.equal(viaHeader.statusCode, 403, `W-04(a): a header-carried tenant buys no values (got ${JSON.stringify(viaHeader.body)})`)
+    assert.equal(errorCode(viaHeader), 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED')
+    assert.equal(everythingSent(viaHeader).includes(A_MISSING_PART), false, 'W-04(a): nothing leaked with the refusal')
+    assert.deepEqual(headerCarried.adapterTenants, [], 'W-04(a): refused before the source lookup')
+
+    // (b) THE ONE THAT MATTERS: the same platform admin also holding the operator tier, so the tier
+    //     check cannot be what saves us, steering `?tenantId=` at another tenant exactly as
+    //     `resolveTenantId` would have permitted. "No tenant of your own" is the refusal.
+    const steering = mountDryRun()
+    const viaSteer = await dryRun(steering, {
+      user: PLATFORM_ADMIN_TENANTLESS_OPERATOR,
+      authenticatedTenantId: undefined,
+      query: { tenantId: TENANT_B },
+      body: { includeMissingComponents: true },
+    })
+    assert.equal(viaSteer.statusCode, 403, `W-04(b): a tenantless principal has no tenant whose values it may see (got ${JSON.stringify(viaSteer.body)})`)
+    assert.equal(errorCode(viaSteer), 'OPERATOR_SCOPE_TENANT_REQUIRED')
+    assert.equal(everythingSent(viaSteer).includes(B_MISSING_PART), false, 'W-04(b): tenant B\'s part number never left the building')
+    assert.deepEqual(steering.adapterTenants, [], 'W-04(b): refused before tenant B\'s source was opened')
+  })
+
+  await run('W-05 the opt-in is type-checked, and an unknown key still 400s ahead of the scope', async () => {
+    const harness = mountDryRun()
+    const wrongType = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: 'true' } })
+    assert.equal(wrongType.statusCode, 400, 'a string is not an opt-in')
+    assert.equal(errorCode(wrongType), 'TABLE_ACTION_REQUEST_INVALID')
+
+    const unknown = await dryRun(harness, { user: LEGACY_READER, body: { missingComponents: true } })
+    assert.equal(unknown.statusCode, 400, 'the closed body allowlist is unchanged')
+    assert.equal(errorCode(unknown), 'TABLE_ACTION_REQUEST_INVALID')
   })
 
   if (failures > 0) {

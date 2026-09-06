@@ -154,6 +154,9 @@ jobs:
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://23.254.236.11:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+      ORG_ID: ${{ vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      ATTENDANCE_SMOKE_ORG_ID: ${{ vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
+      AUTH_EXPECTED_TENANT_ID: ${{ vars.ATTENDANCE_SYNTHETIC_ORG_ID || '' }}
       LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
       LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
       AUTH_RESOLVE_ALLOW_INSECURE_HTTP: ${{ vars.ATTENDANCE_ALLOW_INSECURE_HTTP || 'true' }}
@@ -194,6 +197,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Require synthetic organization
+        run: test -n "$ORG_ID" || { echo '::error::ACCEPTANCE_SYNTHETIC_ORG_REQUIRED'; exit 1; }
 
       - name: Resolve valid auth token
         id: resolve-auth-token
