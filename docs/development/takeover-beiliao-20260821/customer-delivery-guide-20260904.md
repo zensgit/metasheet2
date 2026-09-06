@@ -461,6 +461,13 @@ CREATE TABLE IF NOT EXISTS audit_logs_2026_10 PARTITION OF audit_logs FOR VALUES
 
 **运维建议**:即使 #5506 已合入,自愈依然是"撞上缺分区错误后才建",不是提前预建;建议**每月检查一次下一个月的分区是否已存在**(`SELECT to_regclass('audit_logs_<下月 YYYY_MM>')` 不为空即已存在),提前手工建好,不要等到写入失败才发现——这仍是唯一的保险手段。
 
+**后续修复(feat/audit-partition-ensure-schedule)**:上面"没有任何调用者"的待拍板项已给出一个小而可回滚的选项——`AuditRepository` 新增 `ensurePartitionsForCurrentAndNextMonth()`,一次事务内建**当月与下月**两个分区(与 `ensureCurrentMonthPartition` 同一套 `pg_advisory_xact_lock` + `to_regclass` + `CREATE TABLE IF NOT EXISTS ... PARTITION OF` 写法,月份由数据库端 `CURRENT_DATE` 计算,避免应用与库时区不一致),失败只记一条 `logger.warn`(不含连接串)、返回 `false`,绝不让应用启动失败。是否在启动时调用受环境变量 `AUDIT_LOG_PARTITION_ENSURE` 门控,三个取值:
+- `off`(**默认**):零调用,行为与今天完全一致;
+- `startup`:进程启动时确保一次;
+- `daily`:启动时确保一次,此后每 24 小时再确保一次(`setInterval` 已 `unref()`,不会阻止进程退出)。
+
+**222 建议开 `daily`**——本节记录的这次丢分区就是"只在写失败那一刻才自愈、且只建当月"造成的,`daily` 能在月份滚动前就把下个月的分区提前建好,不再依赖手工 `SELECT to_regclass(...)` 巡检。**回滚**:删掉 `AUDIT_LOG_PARTITION_ENSURE` 这一行环境变量(或改回 `off`)重启进程即可完全恢复到 #5506 之前的行为,不需要回滚代码。
+
 ---
 
 ## 待核对条目汇总
