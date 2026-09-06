@@ -79,10 +79,13 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_ENABLE_PERSONAL_VIEWS', // personal views (separate line)
   'MULTITABLE_FIELD_INPUT_TYPES', // field-input-type registry
   'MULTITABLE_FIELD_TYPES', // field-type registry
+  'MULTITABLE_FIELDS', // e-learning projection field registry suffix, not a flag
   'MULTITABLE_FORMULA_BULK_RECOMPUTE_MAX_ROWS', // formula recompute cap
+  'MULTITABLE_METRIC_FIELDS', // e-learning projection metric-field registry suffix, not a flag
   'MULTITABLE_OBJECT_SCOPE_FORBIDDEN', // scope guards
   'MULTITABLE_PROJECT_NAMESPACE_FORBIDDEN',
   'MULTITABLE_SHARE_PERMISSIONS', // share permission registry
+  'MULTITABLE_SHEETS_TABLE', // e-learning projection mapping-table name suffix, not a flag
   // Schema-management permission split: these four are CONSTANT NAMES (permission codes and the
   // env-var name itself), not flags. The one real flag, MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA,
   // is registered in the manifest instead.
