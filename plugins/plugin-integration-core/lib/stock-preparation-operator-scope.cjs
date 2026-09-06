@@ -105,6 +105,26 @@
 //           claimless deployment the `x-tenant-id` header decided both the row and the trail. The
 //           scope is resolved BEFORE the audit append, so a refused caller leaves no audit row.
 //
+//       10. POST …/table-actions/:actionId/confirmation-decisions/reconcile
+//           `tableActionConfirmationDecisionsReconcile` — 对账限本人可见项目. The odd one out on this
+//           list twice over. First, it resolves the scope not to decide what it may SHOW (its
+//           response is counts and evidence tokens in every branch) and not only to decide whose
+//           ledger it writes, but to decide WHOSE PROJECT DIRECTORY answers "is this projectNo one of
+//           yours". Round-2 (C13) admitted the operator tier here with the tenant proven and nothing
+//           else, and the route takes its `projectNo` from the body — so one operator can point
+//           reconcile's orphan sweep at another project's pending decision rows anywhere in the
+//           tenant. The scope resolved here picks the staging project the directory is read from,
+//           which is why a header-fillable tenant would defeat the check rather than merely mis-scope
+//           a read. Second, and the reason it is listed with a caveat rather than plainly: this call
+//           site is ENV-GATED, `MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE`, DEFAULT OFF
+//           (the check can only prove 限本租户的项目, and armed it refuses an operator's first
+//           reconcile of any never-archived project). With the flag off no scope is resolved on this
+//           route at all and the tenant boundary is the pre-existing one; it is enumerated here
+//           because the code path exists and must not be able to drift into another way of deciding
+//           tenancy while it is unarmed. OPERATOR BRANCH ONLY either way: a caller admitted by the
+//           legacy `integration:admin` tier returns from `requireTableActionAccess` before any of
+//           this and is byte-for-byte unchanged.
+//
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
 // both handoff entries so this list cannot go stale unnoticed.
