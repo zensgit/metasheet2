@@ -576,9 +576,12 @@ npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
 # named `approval-instance-consistency-race.spec.ts`, which neither token matches as a substring —
 # verified by running each token in isolation ("Test Files 1 passed").
 #
-# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against all 377 tokens already in
-# this file: neither new token contains, nor is contained by, any existing one. In particular the
-# three pre-existing `approval-detail-*` tokens (approval-detail-field,
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against all 437 tokens already in
+# this file (counting rule, so the figure stays re-derivable rather than rotting into a bare digit:
+# join backslash continuations, drop comment lines, take every whitespace-separated argument of an
+# `npx vitest run` command that does not start with `-`; that yields 437 before this change and 439
+# after, with no duplicates). Neither new token contains, nor is contained by, any existing one.
+# In particular the three pre-existing `approval-detail-*` tokens (approval-detail-field,
 # approval-detail-record-table, approval-detail-column-row-key) are unrelated to
 # `approval-detail-instance-consistency` in both directions. Both verified green in isolation
 # (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") and in this batch before wiring.

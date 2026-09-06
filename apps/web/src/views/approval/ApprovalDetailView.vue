@@ -1244,10 +1244,15 @@ const headerTitle = computed(() => approval.value?.title ?? '审批详情')
 //
 // The rule is now one predicate, defined once and reused by every consumer below: an action is
 // available only when the instance that is ACTUALLY DISPLAYED is the route's instance and no detail
-// request is in flight. `actionInstanceId()` is the single source of the id every verb sends — no
-// handler reads `route.params.id` for a write any more (the read-only page-level helpers —
-// mark-read, retry, the comments panel key, 下一条 — legitimately still do, since they are about
-// the route, not about acting on a loaded instance).
+// request is in flight. `actionInstanceId()` is the single source of the id every write VERB sends —
+// no verb handler reads `route.params.id` any more.
+//
+// Two page-level helpers still read the route id, and both are correct to: `retryLoad` and the
+// comments panel key are reads about the route, and `loadDetailPage`'s `markApprovalRead(id)` is a
+// deliberate exception — it is an `apiPost` (a WRITE), fired at the ROUTE's instance on purpose,
+// because "the reader opened this URL" is a fact about the route, not about whichever instance
+// happens to be in the shared slot at that moment. It is presence data, not a flow-changing verb:
+// it takes no reader input, carries no payload, and its outcome is swallowed (see the call site).
 const routeInstanceId = computed(() => (typeof route.params.id === 'string' ? route.params.id : ''))
 const displayedInstanceId = computed(() => approval.value?.id ?? null)
 // `store.detailLoading` is the detail-scoped in-flight flag (the shared `store.loading` is also set
@@ -2411,10 +2416,38 @@ function dialogErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback
 }
 
+/**
+ * Mobile-only: a 4xx on a member action usually means the instance moved on under the reader, so
+ * re-read it rather than leaving a stale card on screen.
+ *
+ * `id` is the instance CAPTURED when the submit started, which is not necessarily the route's
+ * instance by the time the failure lands. Round 2 makes this generation-aware in the only way that
+ * is meaningful for a captured id: if the reader has navigated away, the refresh is SKIPPED
+ * entirely — nothing at all is written into the shared detail slot for the outgoing instance.
+ * Refreshing it anyway had two effects, both wrong: it published the outgoing instance under the
+ * new route (and left it there — the route watcher only fires on a further change), and it took a
+ * newer detail generation, so the response the route's OWN load was still waiting for was then
+ * discarded as superseded and the page never repaired itself. The route's load owns the slot; the
+ * failure is still reported to the reader by the caller's dialog/toast either way.
+ */
 async function refreshAfterStaleMobileAction(id: string, error: unknown): Promise<void> {
   if (!isMobileLayout.value) return
   if (!is4xxConflict(error)) return
+  if (id !== routeInstanceId.value) return
   await Promise.all([store.loadDetail(id), store.loadHistory(id)]).catch(() => undefined)
+}
+
+/**
+ * Post-verb timeline refresh, for the instance the verb actually acted on — and only while that
+ * instance is still the route's. A verb whose response settles after the reader has navigated must
+ * not fetch (or publish) the outgoing instance's rows into the timeline rendered beside the new
+ * instance's detail. The store refuses the same thing on its own state as a second line of defence
+ * (`loadHistory` early-returns for a non-displayed instance); this site is what stops the request
+ * from being issued at all.
+ */
+async function refreshHistoryForActedInstance(id: string): Promise<void> {
+  if (id !== routeInstanceId.value) return
+  await store.loadHistory(id)
 }
 
 async function submitAction() {
@@ -2435,7 +2468,7 @@ async function submitAction() {
     rememberQuickPhraseIfOffered(actionComment.value)
     actionDialogVisible.value = false
     showNextEntry.value = true
-    await store.loadHistory(id)
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
     // B1-04: keep the dialog open + show the server's own reason inline instead of a generic
     // toast (see `actionDialogError` above); non-dialog actions further down keep their toasts.
@@ -2499,7 +2532,7 @@ async function submitTransfer() {
     })
     ElMessage.success('已成功转交')
     transferDialogVisible.value = false
-    await store.loadHistory(id)
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
     handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible, actionDialogError)
   } finally {
@@ -2560,7 +2593,7 @@ async function submitAddSign() {
     })
     ElMessage.success('已成功加签')
     addSignDialogVisible.value = false
-    await store.loadHistory(id)
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
     handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible, actionDialogError)
   } finally {
@@ -2599,7 +2632,7 @@ async function submitReduceSign() {
     })
     ElMessage.success('已成功减签')
     reduceSignDialogVisible.value = false
-    await store.loadHistory(id)
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
     handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible, actionDialogError)
   } finally {
@@ -2634,7 +2667,7 @@ async function submitComment() {
     // an already-bound row).
     commentStagedAttachments.value = []
     commentDialogVisible.value = false
-    await store.loadHistory(id)
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
     // B1-04: same dialog-scoped inline error as `submitAction` above.
     actionDialogError.value = dialogErrorMessage(error, '评论提交失败，请重试')
@@ -2661,7 +2694,7 @@ async function submitReturn() {
     })
     ElMessage.success('已退回审批')
     returnDialogVisible.value = false
-    await store.loadHistory(id)
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
     handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible, actionDialogError)
   } finally {
@@ -2686,7 +2719,7 @@ async function handleRevoke() {
   try {
     await store.executeAction(id, { action: 'revoke' })
     ElMessage.success('审批已撤回')
-    await store.loadHistory(id)
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
     ElMessage.error(dialogErrorMessage(error, '撤回失败，请重试'))
   } finally {
@@ -2763,7 +2796,7 @@ async function handleRemind() {
     const result = await remindApproval(id)
     if (result.ok) {
       ElMessage.success('已催办')
-      await store.loadHistory(id)
+      await refreshHistoryForActedInstance(id)
     } else if (result.status === 429) {
       ElMessage.warning(`已在 ${formatRemindAgo(result.error.lastRemindedAt)}催办过`)
     } else {
@@ -2818,6 +2851,39 @@ async function loadDetailPage() {
 
 onMounted(loadDetailPage)
 
+/**
+ * Instance switch (round 2): drop every piece of per-instance DIALOG state.
+ *
+ * The component is reused across a params-only navigation, so a dialog opened on the outgoing
+ * instance — and everything typed or picked into it — survives the switch. The action gate refuses
+ * the confirm while the page is mid-switch, but it re-enables the moment the incoming instance
+ * lands, at which point the very same confirm submits the OUTGOING instance's payload (a comment
+ * written about A, a 退回 target node that belongs to A's graph, a 转交/加签/减签 target picked from
+ * A's assignees) against B. Closing the dialogs and clearing their payloads makes that impossible by
+ * construction rather than by gating: whatever the reader sends on B, they composed on B.
+ *
+ * `inFlightAction` is deliberately NOT reset here — it is the one-action-at-a-time guard and is
+ * owned by each submit's own `finally`; clearing it while a request is still outstanding would let a
+ * second submit through. `currentAction` is likewise left alone: every `open*` sets it, and no
+ * dialog is open to read it.
+ */
+function resetActionDialogState(): void {
+  actionDialogVisible.value = false
+  transferDialogVisible.value = false
+  addSignDialogVisible.value = false
+  reduceSignDialogVisible.value = false
+  commentDialogVisible.value = false
+  returnDialogVisible.value = false
+  actionComment.value = ''
+  actionDialogError.value = null
+  returnTargetNodeKey.value = ''
+  transferUserId.value = ''
+  addSignUserIds.value = []
+  addSignUserLabels.value = {}
+  addSignPickerValue.value = null
+  reduceSignUserId.value = ''
+}
+
 // Params-only navigation (下一条 →): reset the next-entry offer and reload for the new instance.
 watch(
   () => route.params.id,
@@ -2826,7 +2892,10 @@ watch(
       // Lock-9 FE fix round (gate P3-2): this component instance is REUSED across a params-only
       // navigation (no unmount), so any process attachment still staged on the OUTGOING instance's
       // comment dialog must be retracted here — `onBeforeUnmount` never fires for this transition.
+      // Retract FIRST, then close: the close-watcher's own retract then finds an emptied list and
+      // issues no second DELETE.
       retractStagedCommentAttachments()
+      resetActionDialogState()
       showNextEntry.value = false
       void loadDetailPage()
     }

@@ -165,7 +165,15 @@ describe('approval store — detail request generation', () => {
     expect(store.activeApproval?.title).toBe('审批 apv_a（已刷新）')
   })
 
-  it('a failed load leaves no stale instance and surfaces the error', async () => {
+  // Round 2 narrowed the failure clear to CROSS-INSTANCE only, and this test was rewritten to say
+  // so. Its first version asserted `activeApproval === null` after a SAME-id failure, which froze a
+  // rule wider than the one instance consistency needs: the cross-instance case is already covered
+  // by the synchronous switch clear (see the test below — the slot is empty before the request is
+  // even sent), so the unconditional clear's only observable effect was to blank a correctly
+  // displayed instance whenever its own retry or post-action refresh hit a transient error. Nothing
+  // about "which instance is this?" is answered by throwing away the instance the reader is on and
+  // that both the route and the response agree about.
+  it('a failed reload of the SAME instance keeps it and surfaces the error over it', async () => {
     getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
     const store = useApprovalStore()
     await store.loadDetail('apv_a')
@@ -174,9 +182,33 @@ describe('approval store — detail request generation', () => {
     getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
     await store.loadDetail('apv_a')
 
+    expect(store.activeApproval?.id).toBe('apv_a')
+    expect(store.error).toBe('该审批暂时无法加载')
+    expect(store.detailLoading).toBe(false)
+  })
+
+  it('a failed load for ANOTHER instance leaves no stale instance and surfaces the error', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+    expect(store.activeApproval?.id).toBe('apv_a')
+
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    await store.loadDetail('apv_b')
+
     expect(store.activeApproval).toBeNull()
     expect(store.error).toBe('该审批暂时无法加载')
     expect(store.detailLoading).toBe(false)
+  })
+
+  it('the first-ever load failing leaves nothing displayed', async () => {
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    const store = useApprovalStore()
+
+    await store.loadDetail('apv_a')
+
+    expect(store.activeApproval).toBeNull()
+    expect(store.error).toBe('该审批暂时无法加载')
   })
 
   it('a superseded FAILURE neither clears nor errors over the newer successful load', async () => {
@@ -247,6 +279,71 @@ describe('approval store — history request generation', () => {
 
     expect(store.history.map((row: any) => row.instanceId)).toEqual(['apv_b'])
   })
+
+  // Round 2. The generation alone cannot answer this one: a post-verb `loadHistory` for the
+  // OUTGOING instance is the LATEST request, so it wins its own generation race and would first
+  // empty the displayed instance's timeline (the switch clear at the top of the loader) and then
+  // repopulate it with the outgoing instance's rows.
+  it('a late refresh for an instance the page has left never replaces the displayed timeline', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_b'))
+    getApprovalHistoryMock.mockResolvedValue([historyRow('apv_b')])
+    const store = useApprovalStore()
+
+    await store.loadDetail('apv_b')
+    await store.loadHistory('apv_b')
+    expect(store.history.map((row: any) => row.instanceId)).toEqual(['apv_b'])
+
+    getApprovalHistoryMock.mockClear()
+    getApprovalHistoryMock.mockResolvedValue([historyRow('apv_a')])
+    await store.loadHistory('apv_a')
+    await settle()
+
+    expect(store.history.map((row: any) => row.instanceId)).toEqual(['apv_b'])
+    // Refused outright — the request is not even issued for the instance that is not on screen.
+    expect(getApprovalHistoryMock).not.toHaveBeenCalled()
+  })
+
+  // The displayed-instance guard reads `activeApproval.value.id`, and after a verb that slot holds
+  // the ACTION's response DTO rather than the detail-load DTO. This pins the dependency that makes
+  // the post-verb refresh work: the action response carries the id it was dispatched for (server
+  // side, both dispatchAction implementations return getApproval(id, …), mapped as `id: row.id`).
+  // Were that ever to stop holding, the post-verb timeline refresh would be skipped SILENTLY — no
+  // error, no empty state, just rows that never gain the row the reader just created — so it is
+  // pinned here rather than left implicit in a fixture.
+  it('a post-verb refresh reaches the timeline through the action response DTO', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_b'))
+    getApprovalHistoryMock.mockResolvedValue([historyRow('apv_b')])
+    const store = useApprovalStore()
+    await store.loadDetail('apv_b')
+    await store.loadHistory('apv_b')
+
+    dispatchActionMock.mockResolvedValueOnce(instance('apv_b', { status: 'approved' }))
+    await store.executeAction('apv_b', { action: 'approve' } as any)
+    expect(store.activeApproval?.id).toBe('apv_b')
+
+    getApprovalHistoryMock.mockClear()
+    getApprovalHistoryMock.mockResolvedValue([historyRow('apv_b'), { ...historyRow('apv_b'), id: 'hist_apv_b_2' }])
+    await store.loadHistory('apv_b')
+
+    expect(getApprovalHistoryMock).toHaveBeenCalledWith('apv_b')
+    expect(store.history).toHaveLength(2)
+  })
+
+  it('positive control: a refresh for the DISPLAYED instance still replaces its rows', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_b'))
+    getApprovalHistoryMock.mockResolvedValue([historyRow('apv_b')])
+    const store = useApprovalStore()
+
+    await store.loadDetail('apv_b')
+    await store.loadHistory('apv_b')
+
+    getApprovalHistoryMock.mockClear()
+    getApprovalHistoryMock.mockResolvedValue([historyRow('apv_b'), { ...historyRow('apv_b'), id: 'hist_apv_b_2' }])
+    await store.loadHistory('apv_b')
+
+    expect(getApprovalHistoryMock).toHaveBeenCalledWith('apv_b')
+    expect(store.history).toHaveLength(2)
+  })
 })
 
 describe('approval store — executeAction result publication', () => {
@@ -294,5 +391,64 @@ describe('approval store — executeAction result publication', () => {
     pendingB.resolve(instance('apv_b'))
     await bLoad
     expect(store.activeApproval?.id).toBe('apv_b')
+  })
+
+  // Round 2: the same generation scoping now covers the SHARED failure surface, not just the DTO.
+  it('an action that rejects after the page moved on still throws to its caller but raises no error on the new instance', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+
+    const pendingAction = deferred<any>()
+    dispatchActionMock.mockReturnValueOnce(pendingAction.promise)
+    const action = store.executeAction('apv_a', { action: 'approve' } as any)
+
+    getApprovalMock.mockResolvedValueOnce(instance('apv_b'))
+    await store.loadDetail('apv_b')
+    expect(store.activeApproval?.id).toBe('apv_b')
+
+    pendingAction.reject(new Error('该操作已失效'))
+    await expect(action).rejects.toThrow('该操作已失效')
+    await settle()
+
+    expect(store.activeApproval?.id).toBe('apv_b')
+    expect(store.error).toBeNull()
+  })
+
+  it('positive control: an action that rejects while the page has NOT moved does raise the error', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+
+    dispatchActionMock.mockRejectedValueOnce(new Error('该操作已失效'))
+    await expect(store.executeAction('apv_a', { action: 'approve' } as any)).rejects.toThrow('该操作已失效')
+
+    expect(store.error).toBe('该操作已失效')
+    expect(store.loading).toBe(false)
+  })
+
+  it('a superseded action does not clear the shared loading flag a newer detail load still owns', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+
+    const pendingAction = deferred<any>()
+    dispatchActionMock.mockReturnValueOnce(pendingAction.promise)
+    const action = store.executeAction('apv_a', { action: 'approve' } as any)
+
+    const pendingB = deferred<any>()
+    getApprovalMock.mockReturnValueOnce(pendingB.promise)
+    const bLoad = store.loadDetail('apv_b')
+    await settle()
+    expect(store.loading).toBe(true)
+
+    pendingAction.resolve(instance('apv_a', { status: 'approved' }))
+    await action
+    await settle()
+    expect(store.loading).toBe(true)
+
+    pendingB.resolve(instance('apv_b'))
+    await bLoad
+    expect(store.loading).toBe(false)
   })
 })
