@@ -137,7 +137,7 @@
         type="button"
         data-testid="stock-prep-confirmation-ensure"
         :disabled="busy"
-        @click="emit('admin-action', 'ensure')"
+        @click="emit('admin-action', 'ensure', projectNo)"
       >
         {{ bi('创建确认账本(管理员)', 'Create the confirmation ledger (admin)') }}
       </button>
@@ -147,7 +147,7 @@
         type="button"
         data-testid="stock-prep-confirmation-reconcile"
         :disabled="busy"
-        @click="emit('admin-action', 'reconcile')"
+        @click="emit('admin-action', 'reconcile', projectNo)"
       >
         {{ bi('重新扫描待确认的事(管理员)', 'Re-scan for things to confirm (admin)') }}
       </button>
@@ -478,7 +478,20 @@ import {
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = defineProps<{ scope: IntegrationScope; projectNo?: string }>()
-const emit = defineEmits<{ (event: 'admin-action', action: 'ensure' | 'reconcile'): void }>()
+/**
+ * The two platform-admin controls below are the ONLY things this component emits. The shell owns the
+ * calls (it owns every other service call on this page's siblings too), so the payload carries the
+ * one thing the shell cannot know: WHICH project the admin is looking at. reconcile is scoped to a
+ * single project number server-side, and the number lives in this component's own input.
+ *
+ * ONE SIGNATURE FOR BOTH ACTIONS, deliberately. `ensure` does NOT take a project — its request body
+ * is strictly empty and the staging project is auth-derived — so the shell ignores the number for it.
+ * A second event shape for the sake of one unused argument would buy nothing and give the shell two
+ * listeners to keep in step.
+ */
+const emit = defineEmits<{
+  (event: 'admin-action', action: 'ensure' | 'reconcile', projectNo: string): void
+}>()
 
 const { locale } = useLocale()
 const auth = useAuth()
