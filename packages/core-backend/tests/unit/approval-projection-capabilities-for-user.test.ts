@@ -65,7 +65,7 @@ describe('e-learning aggregate projection capability guard', () => {
   const orgId = 'org-elearning-stats'
   const sheetId = deriveElearningProjectionSheetId(orgId)
 
-  function projectionQuery(member: boolean, validSystemKind = true) {
+  function projectionQuery(validSystemKind = true) {
     return vi.fn(async (sql: string) => {
       if (sql.includes("to_jsonb(sheet) ->> 'system_kind'")) {
         return { rows: validSystemKind ? [{ id: sheetId }] : [] }
@@ -73,7 +73,6 @@ describe('e-learning aggregate projection capability guard', () => {
       if (sql.includes('FROM elearning_stats_multitable_sheets')) {
         return { rows: [{ org_id: orgId, sheet_id: sheetId }] }
       }
-      if (sql.includes('FROM user_orgs')) return { rows: member ? [{ '?column?': 1 }] : [] }
       return { rows: [] }
     }) as never
   }
@@ -82,9 +81,10 @@ describe('e-learning aggregate projection capability guard', () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     vi.mocked(listUserPermissions).mockResolvedValue(['elearning:admin'])
     const result = await resolveSheetCapabilitiesForUser(
-      projectionQuery(true),
+      projectionQuery(),
       sheetId,
       'elearning-admin',
+      orgId,
     )
     expect(result.capabilities).toMatchObject({
       canRead: true,
@@ -101,21 +101,30 @@ describe('e-learning aggregate projection capability guard', () => {
     })
   })
 
-  it('fails closed for a cross-org e-learning admin and clamps platform admins to read-only', async () => {
+  it('requires authenticated tenant context and clamps platform admins to read-only', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     vi.mocked(listUserPermissions).mockResolvedValue(['elearning:admin'])
-    const denied = await resolveSheetCapabilitiesForUser(
-      projectionQuery(false),
+    const missingContext = await resolveSheetCapabilitiesForUser(
+      projectionQuery(),
+      sheetId,
+      'contextless-admin',
+    )
+    expect(missingContext.capabilities.canRead).toBe(false)
+    expect(missingContext.capabilities.canManageViews).toBe(false)
+
+    const crossOrg = await resolveSheetCapabilitiesForUser(
+      projectionQuery(),
       sheetId,
       'cross-org-admin',
+      'another-org',
     )
-    expect(denied.capabilities.canRead).toBe(false)
-    expect(denied.capabilities.canManageViews).toBe(false)
+    expect(crossOrg.capabilities.canRead).toBe(false)
+    expect(crossOrg.capabilities.canManageViews).toBe(false)
 
     vi.mocked(isAdmin).mockResolvedValue(true)
     vi.mocked(listUserPermissions).mockResolvedValue([])
     const platformAdmin = await resolveSheetCapabilitiesForUser(
-      projectionQuery(false),
+      projectionQuery(),
       sheetId,
       'platform-admin',
     )
@@ -126,7 +135,7 @@ describe('e-learning aggregate projection capability guard', () => {
     expect(platformAdmin.capabilities.canManageFields).toBe(false)
 
     const drifted = await resolveSheetCapabilitiesForUser(
-      projectionQuery(true, false),
+      projectionQuery(false),
       sheetId,
       'platform-admin',
     )

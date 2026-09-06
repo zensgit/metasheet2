@@ -244,6 +244,7 @@ export async function resolveSheetCapabilitiesForUser(
   query: QueryFn,
   sheetId: string,
   userId: string,
+  authenticatedTenantId?: string,
 ): Promise<{
   capabilities: MultitableCapabilities
   sheetScope?: SheetPermissionScope
@@ -290,27 +291,21 @@ export async function resolveSheetCapabilitiesForUser(
     const projectionIdentityValid = Boolean(
       orgId && sheetId === deriveElearningProjectionSheetId(orgId),
     )
-    let authorized = isAdminRole && projectionIdentityValid
-    if (
-      !authorized
-      && projectionIdentityValid
-      && hasElearningProjectionAdminAuthority(permissions, false)
-    ) {
-      try {
-        const membership = await query(
-          `SELECT 1
-             FROM user_orgs
-            WHERE user_id = $1
-              AND org_id = $2
-              AND is_active IS TRUE
-            LIMIT 1`,
-          [userId, orgId],
+    // Context-less callers (collab/Yjs/API-token helpers) cannot substitute
+    // user_orgs membership for the authenticated session tenant.
+    const tenantId = typeof authenticatedTenantId === 'string'
+      ? authenticatedTenantId.trim()
+      : ''
+    const authorized = Boolean(
+      projectionIdentityValid
+      && (
+        isAdminRole
+        || (
+          tenantId === orgId
+          && hasElearningProjectionAdminAuthority(permissions, false)
         )
-        authorized = membership.rows.length === 1
-      } catch {
-        authorized = false
-      }
-    }
+      ),
+    )
     capabilities = restrictElearningProjectionCapabilities(
       capabilities,
       true,
