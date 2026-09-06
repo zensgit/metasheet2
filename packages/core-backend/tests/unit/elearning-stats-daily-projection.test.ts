@@ -465,6 +465,22 @@ describe('e-learning aggregate multitable projection', () => {
     }
   })
 
+  it('reapplies the minimum-group threshold at the multitable sink', async () => {
+    const db = new MultitableScriptDb({
+      ...multitableSource(false),
+      member_count: '4',
+      min_group_size: 5,
+      suppressed: false,
+    })
+    await expect(projectElearningStatsToMultitable(db, input(), ENABLED)).resolves.toMatchObject({
+      suppressed: true,
+    })
+    expect(db.record?.data[deriveElearningProjectionFieldId(ORG, 'suppressed')]).toBe(true)
+    for (const field of ELEARNING_STATS_MULTITABLE_METRIC_FIELDS) {
+      expect(db.record?.data).not.toHaveProperty(deriveElearningProjectionFieldId(ORG, field.key))
+    }
+  })
+
   it('preserves signed aggregate credit values from manual adjustments', async () => {
     const db = new MultitableScriptDb({
       ...multitableSource(),

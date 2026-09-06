@@ -240,7 +240,13 @@ function buildProjectionData(
 ): { data: Record<string, string | number | boolean>; suppressed: boolean } {
   const departmentId = readUuid(row.department_id)
   const statsDate = readDate(row.stats_date)
-  const suppressed = readBoolean(row.suppressed)
+  const storedSuppressed = readBoolean(row.suppressed)
+  const minGroupSize = readInteger(String(row.min_group_size), 5)
+  const memberCount = storedSuppressed ? null : readInteger(row.member_count)
+  // Privacy is enforced again at the projection sink. A malformed or stale SoR
+  // row must never make a below-threshold aggregate visible in multitable.
+  const suppressed = storedSuppressed
+    || (memberCount !== null && memberCount < minGroupSize)
   if (typeof row.payload_digest !== 'string' || !DIGEST_RE.test(row.payload_digest)) {
     fail('unavailable')
   }
@@ -251,7 +257,7 @@ function buildProjectionData(
     periodStart: readTimestamp(row.period_start),
     periodEnd: readTimestamp(row.period_end),
     suppressed,
-    minGroupSize: readInteger(String(row.min_group_size), 5),
+    minGroupSize,
     projectedVersion: readInteger(row.projected_version, 1),
   }
   if (!suppressed) {
@@ -264,7 +270,7 @@ function buildProjectionData(
       examParticipantCount: readInteger(row.exam_participant_count),
       learnerCount: readInteger(row.learner_count),
       learningSeconds: readInteger(row.learning_seconds),
-      memberCount: readInteger(row.member_count),
+      memberCount,
       overdueCount: readInteger(row.overdue_count),
     })
   }

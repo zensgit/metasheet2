@@ -740,6 +740,41 @@ describe('e-learning stats daily PostgreSQL authority', () => {
       )
     }
 
+    // Projection-time privacy must not trust a drifted SoR suppression bit.
+    await firstPool.query(
+      `UPDATE elearning_stats_daily
+          SET suppressed = false,
+              assigned_count = 4,
+              completed_count = 0,
+              completion_rate = 0,
+              credit_average = 0,
+              credit_total = 0,
+              exam_participant_count = 0,
+              learner_count = 4,
+              learning_seconds = 0,
+              member_count = 4,
+              overdue_count = 0
+        WHERE org_id = $1 AND department_id = $2`,
+      [suppressedOrg, suppressed.departmentId],
+    )
+    await projectElearningStatsToMultitable(
+      multitableProjectorDb(firstPool),
+      suppressedInput,
+      ENABLED,
+    )
+    const failClosedSuppressedData = await firstPool.query(
+      'SELECT data FROM meta_records WHERE id = $1',
+      [suppressedProjection.recordId],
+    ).then((result) => result.rows[0]?.data as Record<string, unknown>)
+    expect(failClosedSuppressedData[
+      deriveElearningProjectionFieldId(suppressedOrg, 'suppressed')
+    ]).toBe(true)
+    for (const field of ELEARNING_STATS_MULTITABLE_METRIC_FIELDS) {
+      expect(failClosedSuppressedData).not.toHaveProperty(
+        deriveElearningProjectionFieldId(suppressedOrg, field.key),
+      )
+    }
+
     await firstPool.query('DELETE FROM meta_records WHERE id = $1', [visibleProjection.recordId])
     const repaired = await reconcileElearningStatsMultitable(
       multitableProjectorDb(firstPool),
