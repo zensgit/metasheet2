@@ -79,7 +79,11 @@ export function compareSeq(a: string, b: string): -1 | 0 | 1 {
 export type CheckpointState = 'building' | 'active' | 'superseded'
 
 /** Recognized server-owned system-sheet kinds (denormalized onto a checkpoint at activation). */
-export const SYSTEM_SHEET_KINDS = ['people_directory', 'approval_projection'] as const
+export const SYSTEM_SHEET_KINDS = [
+  'people_directory',
+  'approval_projection',
+  'elearning_projection',
+] as const
 export type SystemSheetKind = (typeof SYSTEM_SHEET_KINDS)[number]
 
 export interface TrustCheckpointRow {

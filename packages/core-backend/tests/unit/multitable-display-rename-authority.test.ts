@@ -26,6 +26,10 @@ import express, { type Express } from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import {
+  deriveElearningProjectionBaseId,
+  deriveElearningProjectionSheetId,
+} from '../../src/multitable/elearning-projection-constants'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET_ID = 'sheet_rn'
@@ -234,6 +238,65 @@ describe('F21 — sheet and base display rename', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.resetModules()
+  })
+
+  describe('e-learning projection identities stay system-owned', () => {
+    const projectionBaseId = deriveElearningProjectionBaseId('org-route-fence')
+    const projectionSheetId = deriveElearningProjectionSheetId('org-route-fence')
+
+    it('refuses client attempts to reserve the projection base or sheet identities', async () => {
+      const store = freshStore()
+      const app = await buildApp(ADMIN_USER, store)
+
+      const base = await on(app).post('/api/multitable/bases').send({
+        id: projectionBaseId,
+        name: 'Reserved',
+      })
+      const sheet = await on(app).post('/api/multitable/sheets').send({
+        id: projectionSheetId,
+        baseId: BASE_ID,
+        name: 'Reserved',
+      })
+      const sibling = await on(app).post('/api/multitable/sheets').send({
+        id: 'sheet_user_owned',
+        baseId: projectionBaseId,
+        name: 'Sibling',
+      })
+
+      for (const response of [base, sheet, sibling]) {
+        expect(response.status).toBe(403)
+        expect(response.body).toEqual({
+          ok: false,
+          error: {
+            code: 'FORBIDDEN',
+            message: 'E-learning statistics projection identities are system-managed read models.',
+          },
+        })
+      }
+      expect(store.writes).toEqual([])
+      expect(store.configRevisions).toEqual([])
+    })
+
+    it('refuses projection base/sheet rename, delete and restore even for a platform admin', async () => {
+      const store = freshStore()
+      const app = await buildApp(ADMIN_USER, store)
+      const responses = [
+        await on(app).patch(`/api/multitable/bases/${projectionBaseId}`).send({ name: 'Renamed' }),
+        await on(app).patch(`/api/multitable/sheets/${projectionSheetId}`).send({ name: 'Renamed' }),
+        await on(app).delete(`/api/multitable/sheets/${projectionSheetId}`),
+        await on(app).post(`/api/multitable/sheets/${projectionSheetId}/restore`),
+      ]
+
+      for (const response of responses) {
+        expect(response.status).toBe(403)
+        expect(response.body.error).toEqual({
+          code: 'FORBIDDEN',
+          message: 'E-learning statistics projection identities are system-managed read models.',
+        })
+      }
+      expect(store.writes).toEqual([])
+      expect(store.configRevisions).toEqual([])
+    })
   })
 
   // ── §1 payload validation ────────────────────────────────────────────────────
