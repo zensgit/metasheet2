@@ -162,7 +162,14 @@ function pendingRow() {
 // `tenantPrincipalDirectory` is a PARAMETER because "the host cannot vouch" is a real deployment
 // state with its own fail-closed answer (501), and a suite that could only mount the vouching case
 // could never tell a route that requires the seam from one that merely happens to have it.
-function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } } } = {}) {
+// `ledgerReadFails` is the "multitable is down" deployment state, and it exists for exactly one
+// assertion: 对账/确认的审计行带项目号 inserted a ledger READ ahead of the confirm's intent audit
+// append, and a read that could take the append down with it would turn today's "audit row + 5xx"
+// into "no audit row + 5xx" — the very invariant the append's placement protects.
+function mount({
+  tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } },
+  ledgerReadFails = false,
+} = {}) {
   const routes = new Map()
   const provisioning = {
     ...makeFakeProvisioning({
@@ -201,6 +208,9 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
       if (typeof value !== 'function') return value
       return (...args) => {
         hostCalls += 1
+        if (ledgerReadFails && prop === 'queryRecords') {
+          throw new Error('records service unavailable')
+        }
         return value.apply(target, args)
       }
     },
@@ -552,6 +562,118 @@ async function authorizedOperatorGetsRealResponses() {
     // Attributable: the customer operator's own principal is stamped, exactly as an admin's was.
     assert.equal(auditAppends.length, 1)
     assert.equal(auditAppends[0].actor, OPERATOR_CONFIRM.id)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 对账/确认的审计行带项目号 — CONFIRM HALF
+// ---------------------------------------------------------------------------
+//
+// The confirm request carries a decisionId and NO projectNo, so the project handle on its audit row
+// can only come from the ledger row that decisionId names. That lookup was inserted ahead of the
+// intent append — the one place in this handler where an added read is dangerous — so these cases
+// are as much about what did NOT change as about the column that did:
+//
+//   (a) the happy path fills `project_id` from the LEDGER, not from anything the caller said;
+//   (b) an unknown decisionId leaves it NULL and still gets its original 404, with the intent row
+//       still on the trail (the "a malformed request still lands an audit row" invariant);
+//   (c) a ledger read that FAILS OUTRIGHT leaves it NULL and still lands the intent row FIRST —
+//       "audit row + error", never "no audit row + error".
+//
+// In all three the row stays values-free in every other respect: no resolvedValue, no notes, and no
+// second audit row (the vocabulary and the append count are untouched by this change).
+async function theConfirmAuditRowCarriesTheProjectFromTheLedger() {
+  // (a) THE HAPPY PATH. Note what the request body does not contain: a projectNo.
+  {
+    const { routes, auditAppends, hostCallCount } = mount()
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(res.statusCode, 200, `confirm projectId: the confirm still succeeds, got ${JSON.stringify(res.body)}`)
+    // THE COST, PINNED. The soft lookup is a SECOND trip to the same ledger row
+    // `confirmConfirmationDecision` reads a moment later: one `findObjectSheet` + one scoped
+    // `queryRecords` on top of the four calls this confirm made before. 4 -> 7 measured on this
+    // harness, and written down here so the number cannot drift silently — a route that fills one
+    // nullable column must not quietly grow a third or fourth ledger round trip.
+    //
+    // A TRIPWIRE, NOT A CONTRACT: if a legitimate change moves it, move the number and say so in the
+    // PR. If it moves and nobody noticed, that is exactly what this line is for.
+    assert.equal(hostCallCount(), 7, 'confirm projectId: the soft lookup costs exactly one extra sheet lookup + one query')
+
+    assert.equal(auditAppends.length, 1, 'confirm projectId: still exactly ONE audit row — no second row was added')
+    const [row] = auditAppends
+    assert.equal(row.projectId, PROJECT_NO, 'confirm projectId: taken from the ledger row the decisionId resolves to')
+    assert.equal(row.action, 'exception_resolve', 'confirm projectId: no new audit action')
+    assert.equal(row.mode, 'confirmation_decision_requested', 'confirm projectId: no new mode')
+    assert.equal(row.subjectId, DECISION_ID)
+    assert.deepEqual(
+      row.detail,
+      { operation: 'confirmation_decision_confirm', resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS },
+      'confirm projectId: detail is untouched — enum + fixed token, no entered value and no notes',
+    )
+  }
+
+  // (b) AN UNKNOWN decisionId. The soft lookup names no row, so the column stays NULL — and the
+  // request keeps the module's own 404 rather than acquiring a new failure mode from the lookup.
+  {
+    const { routes, auditAppends } = mount()
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: 'decision_that_does_not_exist',
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(res.statusCode, 404, `confirm projectId: an unknown decision still 404s, got ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.code, 'CONFIRMATION_DECISION_NOT_FOUND', JSON.stringify(res.body))
+    assert.equal(auditAppends.length, 1, 'confirm projectId: the intent row still lands for a request that then fails')
+    assert.equal(auditAppends[0].projectId, null, 'confirm projectId: NULL when the lookup names no single row')
+    assert.equal(auditAppends[0].subjectId, 'decision_that_does_not_exist')
+  }
+
+  // (c) THE LEDGER READ ITSELF FAILS. This is the case the lookup's placement makes dangerous, and
+  // the reason it is wrapped: the append must still be the FIRST thing that happens.
+  {
+    const { routes, auditAppends } = mount({ ledgerReadFails: true })
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(res.statusCode, 500, `confirm projectId: a dead records service still fails the request, got ${JSON.stringify(res.body)}`)
+    // The failure the CALLER sees is the downstream read's, verbatim — the soft lookup contributed
+    // no error of its own, which is the difference between "swallowed" and "hidden".
+    assert.equal(res.body.error.message, 'records service unavailable', JSON.stringify(res.body))
+    assert.equal(auditAppends.length, 1, 'confirm projectId: …and the intent row is STILL on the trail, which is the whole point')
+    assert.equal(auditAppends[0].projectId, null, 'confirm projectId: a failed lookup fills nothing rather than blocking')
+    assert.equal(auditAppends[0].actor, OPERATOR_CONFIRM.id, 'confirm projectId: the principal is stamped either way')
+  }
+
+  // (d) A REQUEST WITH NO decisionId AT ALL. No lookup is attempted, the intent row still lands
+  // (subjectId null, projectId null), and the module's own named validation error reaches the caller.
+  {
+    const { routes, auditAppends } = mount()
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: { inputFingerprint: FINGERPRINT, resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS },
+    })
+    assert.equal(res.statusCode, 422, `confirm projectId: a decisionId-less confirm still fails, got ${JSON.stringify(res.body)}`)
+    // Pinned to the MODULE's own named error, not just "some 4xx": the point of skipping the lookup
+    // when there is no decisionId is that the caller keeps exactly the answer main gave it.
+    assert.equal(res.body.error.code, 'CONFIRMATION_DECISION_INPUT_INVALID', JSON.stringify(res.body))
+    assert.equal(res.body.error.details.field, 'decisionId', JSON.stringify(res.body))
+    assert.equal(auditAppends.length, 1, 'confirm projectId: the malformed request still lands its audit row')
+    assert.equal(auditAppends[0].projectId, null)
+    assert.equal(auditAppends[0].subjectId, null)
   }
 }
 
@@ -1281,6 +1403,7 @@ async function theConfirmWriteProvesItsTenantLikeItsSiblings() {
 async function main() {
   await matrixGoldenHolds()
   await authorizedOperatorGetsRealResponses()
+  await theConfirmAuditRowCarriesTheProjectFromTheLedger()
   await platformAdminLosesNothing()
   await nobodyGainsAnything()
   await visibleEqualsActionableForEveryActor()
