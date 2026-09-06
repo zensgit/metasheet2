@@ -285,21 +285,50 @@ async function queryRecordsForKey(recordsApi, target, key) {
 // (<= 1000 rows, typically 100). It is the SAME risk, wider — not a new class of failure, and not
 // one this PR closes. Closing it takes a unique index on the key plus an upsert, which is a
 // separate change (DDL, and it must pass the proven-tenant gate first).
+//
+// The same window has a second, milder shape worth naming: if a competing writer DELETES the target
+// row inside it, this path patches a row id that is gone and the decision fails
+// `target_row_not_found`, where the per-row path would have re-read, seen nothing, and created. Same
+// window, different observable outcome (`created` becomes `failed`); no row is corrupted and the
+// next apply of that key creates it.
 const BATCH_KEY_LOOKUP_ENV = 'MULTITABLE_STOCK_PREP_BATCH_KEY_LOOKUP'
+
+// The four spellings an operator reaching for a rollback handle actually types. A single accepted
+// spelling is a bad property for the ONLY off switch of a default-on behaviour: `0` or `off`
+// silently reading as "on" is exactly the failure you discover during the incident.
+const BATCH_KEY_LOOKUP_OFF_VALUES = new Set(['false', '0', 'off', 'no'])
+
+// Matches `LARGE_BOM_APPLY_MAX_CHUNK_SIZE`: the largest chunk this writer is ever handed by the
+// route that has a cap. Past it, batching stops being a batch (see `prefetchIdempotencyKeyIndex`).
+const BATCH_KEY_LOOKUP_MAX_KEYS = 1000
 
 // Default ON. The switch exists ONLY to roll back to the per-row path in production without a
 // redeploy; it is not a feature toggle for a second behaviour, because there is no second
-// behaviour to choose. Any value other than `false` leaves the batch lookup on.
+// behaviour to choose. Any value outside the off list (including empty/unset) leaves it on.
 function batchKeyLookupDisabled(env = process.env) {
   const raw = env && env[BATCH_KEY_LOOKUP_ENV]
-  return String(raw === undefined || raw === null ? '' : raw).trim().toLowerCase() === 'false'
+  return BATCH_KEY_LOOKUP_OFF_VALUES.has(String(raw === undefined || raw === null ? '' : raw).trim().toLowerCase())
 }
 
 // Which key does a returned row carry? `pre_mapped` targets (both apply callers) hand the records
 // API physical ids and get physical ids back; a `logical`-mode fence translates them back to the
 // template's own ids. Those are the only two spellings of the SAME field. Anything else — no
-// `data`, key absent, a value that is not one of the keys we asked for — is NOT attributed to a
-// guess; the caller falls back to per-row lookups for the whole chunk.
+// `data`, key absent, a NON-STRING value, a value that is not one of the keys we asked for — is NOT
+// attributed to a guess; the caller falls back to per-row lookups for the whole chunk.
+//
+// WHY ONLY A STRING. The server decided which rows come back using `data ->> $k` — PostgreSQL's own
+// text projection of the stored JSON value. This function has to reproduce that decision to hand
+// each row to the right key, and `String(value)` is NOT the same function for non-strings: jsonb
+// keeps a number's scale, so a stored `1.0` projects to "1.0" while `String(1)` is "1", and an
+// integer past 2^53 is rounded by JS on the way in. If a row whose key is a JSON number were
+// attributed by that re-derivation, it could land under a DIFFERENT key that is also in this chunk
+// — `index.has()` would say yes, the guard below would never fire, and the row would be patched
+// with the other key's payload while its own key inserted a duplicate. Silent, and green. So a
+// non-string is simply unattributable here: PostgreSQL, not this file, gets to decide, and the
+// whole chunk goes back to the per-row path. (Reachability is narrow — `decisionKey()` always
+// yields a string and the template declares the key as `string` — but a numeric value can sit in
+// that column from a migration, a direct SQL load, or a `fieldIdMap` pointing the key at a numeric
+// column, and "narrow" is not "impossible".)
 function readRecordKeyValue(record, physicalKey, logicalKey) {
   const data = record && record.data
   if (!isPlainObject(data)) return null
@@ -307,8 +336,7 @@ function readRecordKeyValue(record, physicalKey, logicalKey) {
   for (const candidate of candidates) {
     if (!Object.prototype.hasOwnProperty.call(data, candidate)) continue
     const value = data[candidate]
-    if (value === null || value === undefined) return null
-    return typeof value === 'string' ? value : String(value)
+    return typeof value === 'string' ? value : null
   }
   return null
 }
@@ -342,11 +370,12 @@ function collectLookupKeys(plan, target) {
  * One query for the whole chunk → `Map<key, records[]>`, or `null` meaning "use the per-row path".
  *
  * `null` is returned — never a partial or optimistic index — whenever the batch cannot be shown to
- * carry the same answer as the per-row lookups: switch off, host cannot filter by a list, the query
- * failed or returned a non-array, the row set hit its upper bound (so rows may have been cut off),
- * or a returned row cannot be attributed to a key we asked for. Falling back costs the chunk its
- * speed-up and nothing else: the per-row path then re-runs each lookup and surfaces each failure on
- * its own row, which is exactly today's behaviour.
+ * carry the same answer as the per-row lookups: switch off, host cannot filter by a list, more keys
+ * than one chunk can hold, the query failed or returned a non-array, the row set hit its upper
+ * bound (so rows may have been cut off), or a returned row cannot be attributed to a key we asked
+ * for (which includes any non-string key value — see `readRecordKeyValue`). Falling back costs the
+ * chunk its speed-up and nothing else: the per-row path then re-runs each lookup and surfaces each
+ * failure on its own row, which is exactly today's behaviour.
  */
 async function prefetchIdempotencyKeyIndex({ recordsApi, target, plan }) {
   if (batchKeyLookupDisabled()) return null
@@ -354,11 +383,24 @@ async function prefetchIdempotencyKeyIndex({ recordsApi, target, plan }) {
   try {
     const keys = collectLookupKeys(plan, target)
     if (keys.length === 0) return new Map()
+    // A chunk this large is not a chunk. The large-BOM route already caps at 1000 decisions, so
+    // this is unreachable from that path; the small-BOM path is bounded only by `action.maxRows`,
+    // whose cap block allows absurd values. Rather than build a text[] with a million elements and
+    // ask the host to hand back two million rows, fall back to the per-row path — which is what a
+    // plan that big does today anyway.
+    if (keys.length > BATCH_KEY_LOOKUP_MAX_KEYS) return null
     const logicalKey = target.keyField
     const physicalKey = mapFieldName(logicalKey, target.fieldIdMap)
     // Upper bound, never a silent truncation. Under the per-row semantics a key needs at most 2
     // rows to decide (1 = hit, >1 = duplicate), so 2 rows per key is everything this index can
     // possibly need; the `+1` makes "the host had more to give" observable instead of invisible.
+    // CONTRACT with the host: `queryRecords` must apply the `limit` it is given, unchanged. That is
+    // what the in-repo host does today (`query-service.queryRecords` pushes it straight into
+    // `LIMIT $n`, and neither `plugin-scope` nor the target fence rewrites it), and the bound below
+    // is only a truncation detector while it holds. If a future host ever CLAMPS `limit` to some
+    // ceiling of its own, a chunk asking for more than that ceiling would come back short, the
+    // `>= limit` test would not fire, and keys whose rows were cut off would be treated as new and
+    // inserted a second time. A host that wants to cap this must reject the request, not shrink it.
     const limit = keys.length * 2 + 1
     const records = await recordsApi.queryRecords({
       sheetId: target.sheetId,
@@ -732,6 +774,23 @@ async function applyStockPreparationPlan(input = {}) {
           decision: decision.decision,
         })
       } catch (error) {
+        // W9: a failed write may still have LANDED. `createRecord`/`patchRecord` wrap a committed
+        // transaction, so a connection or pool error raised AFTER the COMMIT surfaces here while
+        // the row is already in the table — and only the success paths keep the index in step
+        // (`rememberWrittenRow`). Leaving a stale empty bucket would make a LATER decision in this
+        // same chunk carrying this same key read "no such row": on ADD it inserts a SECOND row
+        // under one idempotency key (a durable defect — every future apply of that key then fails
+        // `duplicate_target_key` and needs manual cleanup), on UPDATE/INACTIVE it reports
+        // `target_row_not_found` for a row that is right there. Dropping the key sends the next
+        // lookup back to the database, which is what the per-row path does today. Dropping a key
+        // whose write did NOT land costs one extra query and nothing else.
+        if (keyIndex) {
+          try {
+            keyIndex.delete(decisionKey(decision, target))
+          } catch (keyError) {
+            // No usable key means this decision never reached a lookup: nothing to drop.
+          }
+        }
         counts.failed += 1
         const code = errorCode(error)
         const operation = errorOperation(error)
@@ -824,8 +883,10 @@ module.exports = {
   summarizeApplyResultForEvidence,
   __internals: {
     assertNoHumanFields,
+    batchKeyLookupDisabled,
     decisionKey,
     findExistingRecord,
+    readRecordKeyValue,
     applyStatus,
     classifyTargetWriteError,
     fieldIdMapHasExplicitBindings,

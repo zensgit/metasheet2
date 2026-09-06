@@ -79,10 +79,14 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_ENABLE_PERSONAL_VIEWS', // personal views (separate line)
   'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE', // W8-4: per-request multitable metadata memo (perf, default off, 120s hard deadline) — not a Global-History/recovery flag
   // W9: kill-switch for the stock-prep per-chunk batch idempotency-key lookup (perf, default ON; set
-  // to `false` to fall back to the per-row lookup). Not a Global-History/recovery flag. It is read in
-  // the PLUGIN (plugins/plugin-integration-core/lib/stock-preparation-apply-writer.cjs), which this
-  // grep does not cover — registered here anyway so the name is in the operator registry either way,
-  // and so it stays covered if the read ever moves into packages/core-backend/src.
+  // to `false`/`0`/`off`/`no` to fall back to the per-row lookup). Not a Global-History/recovery
+  // flag, which is what this list means: NON_GH_EXACT is the EXCLUSION list for the grep below, so
+  // an entry here is a statement that the name must NOT be demanded in GLOBAL_HISTORY_FLAG_MANIFEST
+  // — it is not itself a registration. It is listed pre-emptively: the read lives in the PLUGIN
+  // (plugins/plugin-integration-core/lib/stock-preparation-apply-writer.cjs) and this grep only
+  // covers packages/core-backend/src, so today the entry is inert. It earns its place the day the
+  // read moves into core-backend, when it keeps the completeness check from demanding a
+  // Global-History entry this flag does not belong in.
   'MULTITABLE_STOCK_PREP_BATCH_KEY_LOOKUP',
   'MULTITABLE_FIELD_INPUT_TYPES', // field-input-type registry
   'MULTITABLE_FIELD_TYPES', // field-type registry

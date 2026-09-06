@@ -159,6 +159,24 @@ describe('multitable query-service', () => {
     expect(recordQuery?.params).toEqual(['sheet_1', 'status', ['open', 'closed', 'held'], 7, 0])
   })
 
+  // W9 CONTRACT, pinned here because the plugin depends on it for CORRECTNESS, not just for paging:
+  // the batch idempotency-key lookup asks for `keys.length * 2 + 1` rows and treats "the host filled
+  // that bound" as "rows may have been cut off, fall back to the per-row path". That detector only
+  // works while `limit` is applied exactly as given. If this service ever CLAMPED `limit` to a
+  // ceiling of its own, a larger chunk would come back short, the bound test would not fire, and
+  // keys whose rows were cut off would be treated as new and inserted a second time. A cap here
+  // must therefore REJECT the request, never quietly shrink it — and the assertion is written with
+  // a value past every plausible ceiling so that adding one is what turns this red.
+  it('applies the requested limit verbatim, never clamped to a ceiling of its own', async () => {
+    const { query, calls } = createQuery([])
+
+    await queryRecords({ query, sheetId: 'sheet_1', filters: { status: ['open'] }, limit: 2001, offset: 0 })
+
+    const recordQuery = calls.at(-1)
+    expect(recordQuery?.sql).toContain('LIMIT $4')
+    expect(recordQuery?.params).toEqual(['sheet_1', 'status', ['open'], 2001, 0])
+  })
+
   it('keeps a single-element list on the same predicate shape, and coerces like the scalar path', async () => {
     const { query, calls } = createQuery([])
 

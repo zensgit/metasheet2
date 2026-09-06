@@ -495,6 +495,15 @@ function testInternals() {
     fld_key: 'k',
     totalQuantity: 2,
   })
+  // W9 attribution: a STRING key value is the server's own `->>` text; anything else is not, and
+  // must be reported as unattributable rather than re-derived with `String(value)`.
+  assert.equal(__internals.readRecordKeyValue({ data: { fld_key: 'K-1' } }, 'fld_key', 'idempotencyKey'), 'K-1')
+  assert.equal(__internals.readRecordKeyValue({ data: { idempotencyKey: 'K-2' } }, 'fld_key', 'idempotencyKey'), 'K-2')
+  assert.equal(__internals.readRecordKeyValue({ data: { k: 1 } }, 'k', 'k'), null, 'a JSON number is not `data ->> k`')
+  assert.equal(__internals.readRecordKeyValue({ data: { k: true } }, 'k', 'k'), null)
+  assert.equal(__internals.readRecordKeyValue({ data: { k: null } }, 'k', 'k'), null)
+  assert.equal(__internals.readRecordKeyValue({ data: {} }, 'k', 'k'), null)
+  assert.equal(__internals.readRecordKeyValue({}, 'k', 'k'), null)
   assert.equal(__internals.applyStatus({ failed: 1, held: 1 }, 0), 'failed')
   assert.equal(__internals.applyStatus({ failed: 0, held: 1 }, 0), 'held')
   assert.equal(__internals.applyStatus({ failed: 1, held: 0 }, 1), 'partial')
@@ -913,6 +922,244 @@ async function testUnattributableBatchRowsFallBackToPerRowLookup() {
   assert.equal(inner.rows.length, 1)
 }
 
+// The one fake in this file that models PostgreSQL's `data ->> key` TEXT projection instead of JS
+// `===`. It has to exist: every other fake here matches with `===`, which cannot distinguish
+// "the server matched this row" from "the writer re-derived the same text", and so cannot see the
+// bug this guards. A jsonb number keeps the scale it was stored with — `1.0` projects to "1.0" —
+// while `JSON.parse('1.0')` is already the JS number 1 and `String(1)` is "1". JS cannot hold that
+// difference, so each row carries its `->>` text beside its parsed `data`, exactly as the database
+// and the JSON payload hold two different things.
+function createPgTextRecordsApi({ existing = [], batchCapable = false, keyField = 'idempotencyKey' } = {}) {
+  const rows = existing.map((entry, index) => ({
+    id: entry.id || `rec_${index + 1}`,
+    sheetId: entry.sheetId || 'sheet_stock_preparation',
+    version: 1,
+    data: { ...entry.data },
+    keyText: entry.keyText,
+  }))
+  const calls = []
+  const matches = (record, field, value) => {
+    // Only the key column has a hand-written projection; everything else is an ordinary value.
+    const projected = field === keyField ? record.keyText : record.data[field]
+    if (Array.isArray(value)) {
+      if (!batchCapable) throw new Error(`Unsupported filter value for ${field}`)
+      return value.some((entry) => projected === entry)
+    }
+    return projected === value
+  }
+  return {
+    rows,
+    calls,
+    recordsApi: {
+      ...(batchCapable ? { supportsFilterValueLists: true } : {}),
+      async queryRecords(input) {
+        calls.push(['queryRecords', input])
+        return rows
+          .filter((record) => record.sheetId === input.sheetId)
+          .filter((record) => Object.entries(input.filters || {}).every(([field, value]) => matches(record, field, value)))
+          .slice(input.offset || 0, (input.offset || 0) + (input.limit || 1000))
+          .map((record) => ({ id: record.id, sheetId: record.sheetId, version: record.version, data: record.data }))
+      },
+      async createRecord(input) {
+        calls.push(['createRecord', input])
+        const record = {
+          id: `rec_${rows.length + 1}`,
+          sheetId: input.sheetId,
+          version: 1,
+          data: { ...input.data },
+          keyText: String(input.data[keyField]),
+        }
+        rows.push(record)
+        return { id: record.id, sheetId: record.sheetId, version: record.version, data: record.data }
+      },
+      async patchRecord(input) {
+        calls.push(['patchRecord', input])
+        const record = rows.find((item) => item.sheetId === input.sheetId && item.id === input.recordId)
+        if (!record) throw new Error(`record not found: ${input.recordId}`)
+        record.version += 1
+        record.data = { ...record.data, ...input.changes }
+        return { id: record.id, sheetId: record.sheetId, version: record.version, data: record.data }
+      },
+    },
+  }
+}
+
+// (h) A returned row whose key value is not a string must NOT be attributed by re-deriving the
+// server's text with `String(value)`. Here the stored key is the jsonb number `1.0`: the server
+// answers the `= ANY('{"1.0","1"}')` query with it because `->>` yields "1.0", but `String(1)` is
+// "1" — another key in this very chunk. Re-derivation would file the row under "1", patch it with
+// THAT decision's payload, and insert a fresh duplicate for "1.0", with `index.has()` returning
+// true so no guard ever fires. The chunk must fall back to per-row lookups instead and let the
+// database keep deciding.
+async function testNonStringKeyValuesFallBackInsteadOfBeingMisattributed() {
+  const decisionFor = (key, rawQuantity) => {
+    const record = row({ componentSourceId: `PART-${key}`, pathTokens: [`PART-${key}`], rawQuantity, totalQuantity: rawQuantity })
+    return { decision: DECISIONS.ADD, idempotencyKey: key, record: { ...record, idempotencyKey: key } }
+  }
+  // `1.0` already exists in the target sheet; `1` does not. Both are in this chunk.
+  const existing = [{ id: 'rec_a', keyText: '1.0', data: { idempotencyKey: 1, notes: 'operator note' } }]
+  const plan = { decisions: [decisionFor('1.0', 11), decisionFor('1', 22)] }
+
+  const batched = createPgTextRecordsApi({ batchCapable: true, existing })
+  const batchedResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: batched.recordsApi,
+  })
+
+  assert.equal(countQueryCalls(batched), 3, 'the batch is attempted once, then the whole chunk falls back to per-row')
+  assert.ok(Array.isArray(batched.calls[0][1].filters.idempotencyKey), 'the first query really was the batch')
+  assert.equal(batchedResult.results[0].status, 'updated', 'key `1.0` belongs to the row the server matched')
+  assert.equal(batchedResult.results[0].recordId, 'rec_a')
+  assert.equal(batchedResult.results[1].status, 'created', 'key `1` is a new row, not a patch of `1.0`')
+  assert.equal(batched.rows.length, 2)
+  assert.equal(batched.rows[0].data.rawQuantity, 11, 'the existing row carries ITS OWN key’s payload')
+  assert.equal(batched.rows[0].data.notes, 'operator note', 'and keeps the operator column')
+
+  const perRow = createPgTextRecordsApi({ existing })
+  const perRowResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: perRow.recordsApi,
+  })
+  assert.deepEqual(batchedResult, perRowResult, 'an unattributable row costs the speed-up, never the answer')
+  assert.deepEqual(
+    batched.rows.map((entry) => entry.data),
+    perRow.rows.map((entry) => entry.data),
+    'and the rows written are identical',
+  )
+}
+
+// A write that LANDED and then threw — a connection lost after COMMIT is the realistic shape, and
+// `createRecord`/`patchRecord` have nothing else outside the transaction. Only the success paths
+// keep the prefetched index in step, so a stale empty bucket would make the second decision
+// carrying this key insert a SECOND row under one idempotency key: a durable defect that fails
+// every future apply of that key with `duplicate_target_key` until someone cleans it up by hand.
+async function testWriteThatLandedBeforeThrowingLeavesNoStaleIndexEntry() {
+  const first = addDecisionFor('PART-POSTCOMMIT')
+  const plan = {
+    decisions: [first, { ...first, record: { ...first.record, rawQuantity: 9, totalQuantity: 9 } }],
+  }
+  const build = (batchCapable) => {
+    const inner = createRecordsApi({ batchCapable })
+    let creates = 0
+    return {
+      inner,
+      recordsApi: {
+        ...(batchCapable ? { supportsFilterValueLists: true } : {}),
+        queryRecords: (input) => inner.recordsApi.queryRecords(input),
+        async createRecord(input) {
+          const created = await inner.recordsApi.createRecord(input)
+          creates += 1
+          if (creates === 1) throw new Error('connection terminated unexpectedly')
+          return created
+        },
+        patchRecord: (input) => inner.recordsApi.patchRecord(input),
+      },
+    }
+  }
+
+  const batched = build(true)
+  const batchedResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: batched.recordsApi,
+  })
+
+  assert.equal(batchedResult.results[0].status, 'failed', 'the create reported failure, as it did')
+  assert.equal(batchedResult.results[1].status, 'updated', 'the second decision finds the row that landed anyway')
+  assert.equal(batched.inner.rows.length, 1, 'ONE row for one idempotency key, never two')
+  assert.equal(batched.inner.rows[0].data.rawQuantity, 9, 'and the second decision landed on it')
+
+  const perRow = build(false)
+  const perRowResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: perRow.recordsApi,
+  })
+  assert.deepEqual(batchedResult, perRowResult, 'a write that landed before throwing reads identically on both paths')
+  assert.equal(perRow.inner.rows.length, 1)
+}
+
+// `rememberWrittenRow` records a real row id or nothing — never a fabricated one. A host that
+// creates the row but answers without an id must send the next lookup for that key back to the
+// database; assuming "absent" would insert a duplicate, and inventing an id would patch nothing.
+async function testCreateWithoutARowIdSendsTheNextLookupBackToTheDatabase() {
+  const first = addDecisionFor('PART-NOID')
+  const plan = {
+    decisions: [first, { ...first, record: { ...first.record, rawQuantity: 7, totalQuantity: 7 } }],
+  }
+  const inner = createRecordsApi({ batchCapable: true })
+  const calls = []
+  const recordsApi = {
+    supportsFilterValueLists: true,
+    async queryRecords(input) {
+      calls.push(input)
+      return inner.recordsApi.queryRecords(input)
+    },
+    async createRecord(input) {
+      const created = await inner.recordsApi.createRecord(input)
+      return { ...created, id: undefined }
+    },
+    patchRecord: (input) => inner.recordsApi.patchRecord(input),
+  }
+
+  const result = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi,
+  })
+
+  assert.equal(calls.length, 2, 'the dropped key is asked of the database, not assumed absent')
+  assert.ok(!Array.isArray(calls[1].filters.idempotencyKey), 'and it is asked with the unchanged per-row lookup')
+  assert.equal(result.results[1].status, 'updated', 'the second decision patches the row that was created')
+  assert.equal(inner.rows.length, 1, 'exactly one row exists afterwards')
+  assert.equal(inner.rows[0].data.rawQuantity, 7)
+}
+
+// A chunk larger than any chunk the capped route can produce falls back rather than building a
+// list filter with no ceiling of its own.
+async function testOversizedChunkFallsBackToPerRowLookup() {
+  const oversized = { decisions: Array.from({ length: 1001 }, (unused, index) => addDecisionFor(`PART-BIG-${index}`)) }
+  const api = createRecordsApi({ batchCapable: true })
+  await applyStockPreparationPlan({ permission: 'write', plan: oversized, target: target(), recordsApi: api.recordsApi })
+  assert.equal(countQueryCalls(api), 1001, 'past the bound it is the per-row path, unchanged')
+  assert.ok(
+    api.calls.every((call) => call[0] !== 'queryRecords' || !Array.isArray(call[1].filters.idempotencyKey)),
+    'and no unbounded list filter is ever sent',
+  )
+
+  const atBound = { decisions: oversized.decisions.slice(0, 1000) }
+  const bounded = createRecordsApi({ batchCapable: true })
+  await applyStockPreparationPlan({ permission: 'write', plan: atBound, target: target(), recordsApi: bounded.recordsApi })
+  assert.equal(countQueryCalls(bounded), 1, 'a chunk at the bound is still batched')
+}
+
+// The only off switch of a default-ON behaviour has to answer to what an operator types under
+// pressure, not to one blessed spelling.
+function testKillSwitchAcceptsTheSpellingsOperatorsType() {
+  for (const value of ['false', 'FALSE', ' false ', '0', 'off', 'OFF', 'no', 'No']) {
+    assert.equal(
+      __internals.batchKeyLookupDisabled({ [BATCH_KEY_LOOKUP_ENV]: value }),
+      true,
+      `${JSON.stringify(value)} must roll the batch lookup back`,
+    )
+  }
+  for (const value of [undefined, '', '   ', 'true', '1', 'on', 'yes', 'falsey']) {
+    assert.equal(
+      __internals.batchKeyLookupDisabled({ [BATCH_KEY_LOOKUP_ENV]: value }),
+      false,
+      `${JSON.stringify(value)} must leave the default ON`,
+    )
+  }
+  assert.equal(__internals.batchKeyLookupDisabled({}), false, 'unset is ON')
+}
+
 async function main() {
   await testApplyCleanDecisionsAndHoldManualConfirm()
   await testRerunIsIdempotentForAddDecision()
@@ -932,6 +1179,11 @@ async function main() {
   await testBatchAtTheUpperBoundFallsBackToPerRowLookup()
   await testFallbackPathsMatchTheBatchPathExactly()
   await testUnattributableBatchRowsFallBackToPerRowLookup()
+  await testNonStringKeyValuesFallBackInsteadOfBeingMisattributed()
+  await testWriteThatLandedBeforeThrowingLeavesNoStaleIndexEntry()
+  await testCreateWithoutARowIdSendsTheNextLookupBackToTheDatabase()
+  await testOversizedChunkFallsBackToPerRowLookup()
+  testKillSwitchAcceptsTheSpellingsOperatorsType()
   testInternals()
 
   console.log('stock-preparation-apply-writer.test.cjs OK')
