@@ -340,7 +340,10 @@ import {
   ElearningStatsDailyJobProducerError,
   enqueueElearningStatsDailyJobs,
 } from './services/elearning-stats-daily-job-producer'
-import { projectElearningStatsToMultitable } from './services/elearning-stats-multitable-projection'
+import {
+  projectElearningStatsToMultitable,
+  reconcileElearningStatsMultitable,
+} from './services/elearning-stats-multitable-projection'
 import {
   cleanupElearningAnalyticsExport,
   ElearningAnalyticsExportError,
@@ -2442,6 +2445,9 @@ export class MetaSheetServer {
                   if (!isElearningAnalyticsSurfaceEnabled()) {
                     throw new ElearningStatsDailyJobProducerError('unavailable')
                   }
+                  await reconcileElearningStatsMultitable(poolManager.get()).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_reconcile_failed')
+                  })
                   return enqueueElearningStatsDailyJobs(poolManager.get())
                 },
                 project: async (
@@ -2451,7 +2457,9 @@ export class MetaSheetServer {
                     throw new ElearningStatsDailyProjectionError('unavailable')
                   }
                   const result = await projectElearningDepartmentStatsDaily(poolManager.get(), input)
-                  await projectElearningStatsToMultitable(poolManager.get(), input)
+                  await projectElearningStatsToMultitable(poolManager.get(), input).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_projection_failed')
+                  })
                   return result
                 },
               }

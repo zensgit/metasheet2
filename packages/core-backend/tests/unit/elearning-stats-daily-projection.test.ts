@@ -12,6 +12,7 @@ import {
   ELEARNING_STATS_MULTITABLE_METRIC_FIELDS,
   elearningStatsMultitableSql,
   projectElearningStatsToMultitable,
+  reconcileElearningStatsMultitable,
   type ElearningStatsMultitableDb,
   type ElearningStatsMultitableQueryable,
 } from '../../src/services/elearning-stats-multitable-projection'
@@ -363,6 +364,12 @@ class MultitableScriptDb implements ElearningStatsMultitableDb, ElearningStatsMu
     const orgId = ORG
     const baseId = deriveElearningProjectionBaseId(orgId)
     const sheetId = deriveElearningProjectionSheetId(orgId)
+    if (sql === elearningStatsMultitableSql.reconcileScan) {
+      const rows = this.record
+        ? []
+        : [{ department_id: DEPARTMENT, org_id: ORG, stats_date: '2026-08-30' }]
+      return { rows, rowCount: rows.length }
+    }
     if (sql === elearningStatsMultitableSql.source) return { rows: [this.source], rowCount: 1 }
     if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}], rowCount: 1 }
     if (sql.startsWith('INSERT INTO meta_bases')) return { rows: [], rowCount: 1 }
@@ -469,4 +476,18 @@ describe('e-learning aggregate multitable projection', () => {
     expect(db.record?.data[deriveElearningProjectionFieldId(ORG, 'creditTotal')]).toBe(-5)
   })
 
+  it('reconciles only a missing or stale deterministic record', async () => {
+    const db = new MultitableScriptDb()
+    await expect(reconcileElearningStatsMultitable(db, 10, ENABLED)).resolves.toEqual({
+      failed: 0,
+      projected: 1,
+      scanned: 1,
+    })
+    await expect(reconcileElearningStatsMultitable(db, 10, ENABLED)).resolves.toEqual({
+      failed: 0,
+      projected: 0,
+      scanned: 0,
+    })
+    expect(db.record?.version).toBe(1)
+  })
 })

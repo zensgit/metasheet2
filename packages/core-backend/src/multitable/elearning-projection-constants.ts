@@ -38,14 +38,14 @@ export function deriveElearningProjectionRecordId(
   statsDate: string,
 ): string {
   return `rec_el_stats_${identityDigest([
-    normalizedOrgId(orgId),
+    deriveElearningProjectionSheetId(orgId),
     departmentId.toLowerCase(),
     statsDate,
-  ].join('\u0000'))}`
+  ].join(':'))}`
 }
 
 export function deriveElearningProjectionFieldId(orgId: string, key: string): string {
-  return `fld_el_stats_${identityDigest(`${normalizedOrgId(orgId)}\u0000${key}`)}`
+  return `fld_el_stats_${identityDigest(`${deriveElearningProjectionSheetId(orgId)}:${key}`)}`
 }
 
 export function hasElearningProjectionAdminAuthority(

@@ -29,6 +29,7 @@ import {
 import {
   ELEARNING_STATS_MULTITABLE_METRIC_FIELDS,
   projectElearningStatsToMultitable,
+  reconcileElearningStatsMultitable,
   type ElearningStatsMultitableDb,
   type ElearningStatsMultitableQueryable,
 } from '../../src/services/elearning-stats-multitable-projection'
@@ -670,7 +671,7 @@ describe('e-learning stats daily PostgreSQL authority', () => {
     )).rejects.toMatchObject({ code: '23514' })
   })
 
-  it('projects visible aggregates, omits suppressed metrics and repairs a missing record on replay', async () => {
+  it('projects visible aggregates, omits suppressed metrics and reconciles only missing or stale rows', async () => {
     if (!firstPool) throw new Error('database unavailable')
     const visibleOrg = `org-stats-multitable-visible-${randomUUID()}`
     const visible = await seedDepartment(firstPool, { memberCount: 5, orgId: visibleOrg })
@@ -740,15 +741,45 @@ describe('e-learning stats daily PostgreSQL authority', () => {
     }
 
     await firstPool.query('DELETE FROM meta_records WHERE id = $1', [visibleProjection.recordId])
-    await expect(projectElearningStatsToMultitable(
+    const repaired = await reconcileElearningStatsMultitable(
       multitableProjectorDb(firstPool),
-      visibleInput,
+      200,
       ENABLED,
-    )).resolves.toMatchObject({ outcome: 'projected' })
+    )
+    expect(repaired.failed).toBe(0)
+    expect(repaired.projected).toBeGreaterThanOrEqual(1)
     expect(await firstPool.query(
       'SELECT count(*)::int AS count FROM meta_records WHERE id = $1',
       [visibleProjection.recordId],
     ).then((result) => result.rows)).toEqual([{ count: 1 }])
+    await expect(reconcileElearningStatsMultitable(
+      multitableProjectorDb(firstPool),
+      200,
+      ENABLED,
+    )).resolves.toEqual({ failed: 0, projected: 0, scanned: 0 })
+
+    await firstPool.query(
+      `INSERT INTO elearning_credit_decisions (
+         org_id, user_id, awarded_points, occurred_at
+       ) VALUES ($1, $2, 3, '2026-08-30T13:00:00.000Z')`,
+      [visibleOrg, visible.userIds[0]],
+    )
+    await projectElearningDepartmentStatsDaily(projectorDb(firstPool), visibleInput, ENABLED)
+    await expect(reconcileElearningStatsMultitable(
+      multitableProjectorDb(firstPool),
+      200,
+      ENABLED,
+    )).resolves.toEqual({ failed: 0, projected: 1, scanned: 1 })
+    expect(await firstPool.query(
+      'SELECT data, version FROM meta_records WHERE id = $1',
+      [visibleProjection.recordId],
+    ).then((result) => result.rows)).toEqual([{
+      data: expect.objectContaining({
+        [deriveElearningProjectionFieldId(visibleOrg, 'creditTotal')]: 3,
+        [deriveElearningProjectionFieldId(visibleOrg, 'projectedVersion')]: 2,
+      }),
+      version: 2,
+    }])
   })
 
   it('enforces same-org directory identity and one row per daily dataset key', async () => {

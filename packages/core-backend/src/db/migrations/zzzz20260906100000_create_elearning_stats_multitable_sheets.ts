@@ -89,6 +89,7 @@ export async function assertElearningStatsMultitableSheetsSchema(
 }
 
 export async function up(db: Kysely<unknown>): Promise<void> {
+  await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db)
   await sql`
     CREATE TABLE IF NOT EXISTS elearning_stats_multitable_sheets (
       org_id text PRIMARY KEY,

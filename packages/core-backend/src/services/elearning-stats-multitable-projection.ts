@@ -48,6 +48,31 @@ WHERE stats.org_id = $1
   AND stats.department_id = $2::uuid
   AND stats.stats_date = $3::date`
 
+const RECONCILE_SCAN_SQL = `/* elearning-stats-multitable:reconcile-scan */
+SELECT stats.org_id, stats.department_id::text, stats.stats_date::text
+FROM elearning_stats_daily stats
+LEFT JOIN elearning_stats_multitable_sheets mapping
+  ON mapping.org_id = stats.org_id
+LEFT JOIN meta_records record
+  ON record.sheet_id = mapping.sheet_id
+ AND record.id = 'rec_el_stats_' || substring(encode(digest(
+       mapping.sheet_id || ':' || lower(stats.department_id::text) || ':' || stats.stats_date::text,
+       'sha256'
+     ), 'hex'), 1, 32)
+WHERE stats.dataset = 'department_overview'
+  AND (
+    record.id IS NULL
+    OR record.data ->> (
+      'fld_el_stats_' || substring(encode(digest(
+        mapping.sheet_id || ':projectedVersion',
+        'sha256'
+      ), 'hex'), 1, 32)
+    ) IS DISTINCT FROM stats.projected_version::text
+  )
+ORDER BY stats.last_projected_at ASC, stats.org_id ASC,
+         stats.department_id ASC, stats.stats_date ASC
+LIMIT $1`
+
 type FieldType = 'text' | 'date' | 'dateTime' | 'number' | 'checkbox'
 
 interface ProjectionField {
@@ -409,6 +434,32 @@ export async function projectElearningStatsToMultitable(
   })
 }
 
+export async function reconcileElearningStatsMultitable(
+  db: ElearningStatsMultitableDb,
+  limit = 200,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ scanned: number; projected: number; failed: number }> {
+  if (!isElearningAnalyticsSurfaceEnabled(env)) fail('unavailable')
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) fail('invalid_input')
+  const rows = await db.query(RECONCILE_SCAN_SQL, [limit])
+  let projected = 0
+  let failed = 0
+  for (const row of rows.rows) {
+    try {
+      const result = await projectElearningStatsToMultitable(db, {
+        orgId: inputText(row.org_id),
+        departmentId: inputUuid(row.department_id),
+        statsDate: inputDate(row.stats_date),
+      }, env)
+      if (result.outcome === 'projected') projected += 1
+    } catch {
+      failed += 1
+    }
+  }
+  return { scanned: rows.rows.length, projected, failed }
+}
+
 export const elearningStatsMultitableSql = Object.freeze({
+  reconcileScan: RECONCILE_SCAN_SQL,
   source: SOURCE_SQL,
 })
