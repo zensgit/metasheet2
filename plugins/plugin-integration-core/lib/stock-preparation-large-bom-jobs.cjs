@@ -768,12 +768,25 @@ function nonNegativeBudget(value, fallback) {
  * Never throws: a logger this defensive about its own inputs must not be the
  * reason a job write fails, and a hostile or malformed job row must not be
  * able to turn a diagnostic into a crash.
+ *
+ * CALLED BEFORE `storage.set(key, job)` at both call sites, on purpose: if the
+ * durable write then fails, an operator still gets the diagnostic in pm2 even
+ * though the stored job row never reaches `failed`. The alternative order
+ * trades that away for the opposite gap — a write failure would swallow the
+ * one log line explaining what just failed — which is the worse trade for a
+ * feature whose whole point is "don't make failure silent".
  */
 function logLargeBomJobFailure(logger, job) {
   if (!logger || typeof logger.warn !== 'function') return
   try {
     const evidence = isPlainObject(job.evidence) ? job.evidence : {}
-    const errorTypes = safeTokenList(evidence.errorTypes, 'errorTypes')
+    // #5514 adversarial review: this is a FAILURE-PATH diagnostic, and `evidence.errorTypes` can in
+    // principle arrive from outside this module the same way `readFailures`/`errorDetails` do — so
+    // it gets the same drop-instead-of-throw twin they use (`evidenceTokenListOrEmpty`), not the
+    // throwing `safeTokenList`. The outer `try/catch` below would otherwise turn one unsafe token
+    // into NO log line at all, on the one path where a log line matters most. See the doc comment
+    // on `evidenceTokenOrUndefined` above for why "drop the field" is the failure-path verdict.
+    const errorTypes = evidenceTokenListOrEmpty(evidence.errorTypes)
     const payload = {
       jobId: evidenceTokenOrUndefined(job.jobId),
       actionId: evidenceTokenOrUndefined(job.actionId),
@@ -797,16 +810,14 @@ function logLargeBomJobFailure(logger, job) {
       })
     }
     if (Array.isArray(evidence.errorDetails) && evidence.errorDetails.length > 0) {
-      payload.errorDetails = evidence.errorDetails.slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT).map((entry) => {
-        const projected = {}
-        const type = evidenceTokenOrUndefined(entry && entry.type)
-        if (type) projected.type = type
-        const object = evidenceTokenOrUndefined(entry && entry.object)
-        if (object) projected.object = object
-        const causeClass = evidenceTokenOrUndefined(entry && entry.causeClass)
-        if (causeClass) projected.causeClass = causeClass
-        return projected
-      })
+      // #5514 adversarial review: this key set (type/object/causeClass, each through
+      // `evidenceTokenOrUndefined`) is IDENTICAL to `errorDetailEntry` above — the public
+      // projection's own re-selection of the same stored stanza. Calling it here instead of
+      // re-typing the three fields means a future narrowing of `errorDetailEntry` narrows this log
+      // line too, instead of silently diverging from it.
+      payload.errorDetails = evidence.errorDetails
+        .slice(0, LARGE_BOM_READ_FAILURE_DETAIL_LIMIT)
+        .map((entry) => errorDetailEntry(entry))
     }
     logger.warn('[plugin-integration-core] large-BOM background expansion job failed', payload)
   } catch {

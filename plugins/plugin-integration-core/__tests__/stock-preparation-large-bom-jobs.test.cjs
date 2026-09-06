@@ -1214,6 +1214,11 @@ async function testFailedExpansionWarnsOnceWithValuesFreePayload() {
   assert.deepEqual(Object.keys(payload.errorDetails[0]).sort(), ['causeClass', 'object', 'type'])
   assert.equal(payload.errorDetails[0].causeClass, 'ECONNRESET')
 
+  // #5514 adversarial review: hand-picked substrings only checked 4 of the 15 markers this fixture
+  // plants (e.g. a stray `projectNo` on the payload sailed through unnoticed). `assertValuesFree`
+  // is the file's own values-free predicate — reuse it so every marker is covered, not just the
+  // ones somebody thought to name here.
+  assertValuesFree(payload)
   const serialized = JSON.stringify(payload)
   assert.equal(serialized.includes(RAW_MARKERS[1]), false, 'the part number in the driver message never reaches the log payload')
   assert.equal(serialized.includes('mssql read failed for'), false, 'the driver message text never reaches the log payload')

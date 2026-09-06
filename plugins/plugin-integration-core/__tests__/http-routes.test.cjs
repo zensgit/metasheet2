@@ -542,7 +542,10 @@ function mountRoutes(services, contextOptions = {}) {
   const registered = registerRoutes({
     context,
     services,
-    logger: {
+    // `contextOptions.logger` lets a test observe what `routeLogger` (http-routes.cjs ~:3545) is
+    // actually WIRED INTO downstream modules with — a no-op default here would make that wiring
+    // untestable by construction. See `testLargeBomJobRunWiresRouteLoggerIntoFailedRunWarn`.
+    logger: contextOptions.logger || {
       warn() {},
       error() {},
       info() {},
@@ -550,6 +553,18 @@ function mountRoutes(services, contextOptions = {}) {
   })
 
   return { routes, registered }
+}
+
+function createRecordingLogger() {
+  const warnCalls = []
+  return {
+    warnCalls,
+    warn(message, payload) {
+      warnCalls.push([message, payload])
+    },
+    error() {},
+    info() {},
+  }
 }
 
 function clone(value) {
@@ -5683,6 +5698,84 @@ async function testLargeBomDurableStorageFailureIsValuesFree() {
   assert.equal(records.calls.length, 0, 'durable storage failure fails before target reads/writes')
 }
 
+// #5514 adversarial review: `stock-preparation-large-bom-jobs.test.cjs` proves `logLargeBomJobFailure`
+// itself end to end, but every one of those tests calls the module directly with a hand-built
+// `logger` — none of them touch http-routes.cjs at all. Nothing anywhere asserted that the ROUTE
+// actually forwards `routeLogger` into the module's `logger` option (http-routes.cjs's
+// `runLargeBomBackgroundExpansionJob` call site, `logger: routeLogger,`). Deleting that one line
+// left every other suite in the repo green — this test is the guard: it fails the moment that
+// wiring goes missing, because with no logger reaching the module `logLargeBomJobFailure` returns
+// before calling `warn` at all.
+async function testLargeBomJobRunWiresRouteLoggerIntoFailedRunWarn() {
+  const records = createTableActionRecordsApi()
+  const leakyMessage = 'mssql read failed for PART_VALUE_SHOULD_NOT_APPEAR'
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          status: 'active',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        return {
+          async read() {
+            const error = new Error(leakyMessage)
+            error.code = 'ECONNRESET'
+            throw error
+          },
+        }
+      },
+    },
+  })
+  const logger = createRecordingLogger()
+  const { routes } = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage: createDurableMemoryStorage(),
+    config: { stockPreparationTableActions: [tableActionConfig()] },
+    logger,
+  })
+
+  let res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' } },
+  })
+  assertOkResponse(res, 202)
+  const jobId = res.body.data.jobId
+  assert.equal(logger.warnCalls.length, 0, 'queuing a job does not warn')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'failed', 'the adapter throw fails the run')
+
+  assert.equal(logger.warnCalls.length, 1, 'the route-wired logger receives exactly one warn for the failed run')
+  const [message, payload] = logger.warnCalls[0]
+  assert.equal(typeof message, 'string')
+  assert.equal(message.includes('failed'), true)
+  assert.equal(payload.jobId, jobId)
+  assert.equal(payload.actionId, PLM_STOCK_PREPARATION_ACTION_ID)
+  assert.equal(payload.status, 'failed')
+  assert.deepEqual(payload.errorTypes, ['read_failed'])
+
+  const serialized = JSON.stringify(payload)
+  assert.equal(serialized.includes('PROJECT_VALUE_SHOULD_NOT_APPEAR'), false, 'the project number never reaches the routed warn payload')
+  assert.equal(serialized.includes(leakyMessage), false, 'the driver message text never reaches the routed warn payload')
+  assert.equal(serialized.includes('cursor'), false)
+  assert.equal('message' in payload, false, 'no key named message ever mounts')
+}
+
 async function testTableActionConflictPolicyRoutes() {
   const calls = []
   const adapterCalls = []
@@ -9145,6 +9238,7 @@ async function main() {
   await testLargeBomBackgroundExpansionJobRoutes()
   await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()
   await testLargeBomDurableStorageFailureIsValuesFree()
+  await testLargeBomJobRunWiresRouteLoggerIntoFailedRunWarn()
   await testTableActionConflictPolicyRoutes()
   await testTableActionRoutesSupportExplicitBridgeSource()
   await testTableActionRoutesUseConfiguredSourceWorkspaceScope()
