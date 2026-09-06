@@ -1432,7 +1432,9 @@ export function createElearningPilotRouter(
           passScore: body.passScore,
           maxAttempts: body.maxAttempts,
           questions: body.questions,
-        } as PublishElearningCourseInput)
+        } as PublishElearningCourseInput, {
+          watchChallengeEnabled: isElearningWatchChallengeSurfaceEnabled(envOf(deps)),
+        })
         res.status(201).json(result)
       } catch (error) {
         if (error instanceof ElearningCoursePublishError) {
