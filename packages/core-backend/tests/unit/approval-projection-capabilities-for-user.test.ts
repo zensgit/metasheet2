@@ -10,6 +10,7 @@ import { describe, it, expect, vi } from 'vitest'
 vi.mock('../../src/rbac/service', () => ({ isAdmin: vi.fn(), listUserPermissions: vi.fn() }))
 
 import { resolveSheetCapabilitiesForUser } from '../../src/multitable/sheet-capabilities'
+import { deriveElearningProjectionSheetId } from '../../src/multitable/elearning-projection-constants'
 import { isAdmin, listUserPermissions } from '../../src/rbac/service'
 
 const mkQuery = (isProjectionSheet: boolean) =>
@@ -53,5 +54,79 @@ describe('A — resolveSheetCapabilitiesForUser projection guard (collab/Yjs/api
     const ok = await resolveSheetCapabilitiesForUser(mkQuery(false), 'S', 'u1')
     expect(ok.capabilities.canEditRecord).toBe(true)
     expect(ok.capabilities.canManageAutomation).toBe(true)
+  })
+})
+
+describe('e-learning aggregate projection capability guard', () => {
+  const orgId = 'org-elearning-stats'
+  const sheetId = deriveElearningProjectionSheetId(orgId)
+
+  function projectionQuery(member: boolean, validSystemKind = true) {
+    return vi.fn(async (sql: string) => {
+      if (sql.includes("to_jsonb(sheet) ->> 'system_kind'")) {
+        return { rows: validSystemKind ? [{ id: sheetId }] : [] }
+      }
+      if (sql.includes('FROM elearning_stats_multitable_sheets')) {
+        return { rows: [{ org_id: orgId, sheet_id: sheetId }] }
+      }
+      if (sql.includes('FROM user_orgs')) return { rows: member ? [{ '?column?': 1 }] : [] }
+      return { rows: [] }
+    }) as never
+  }
+
+  it('gives a same-org e-learning admin read/export/view access but no write surface', async () => {
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    vi.mocked(listUserPermissions).mockResolvedValue(['elearning:admin'])
+    const result = await resolveSheetCapabilitiesForUser(
+      projectionQuery(true),
+      sheetId,
+      'elearning-admin',
+    )
+    expect(result.capabilities).toMatchObject({
+      canRead: true,
+      canExport: true,
+      canManageViews: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: false,
+      canComment: false,
+      canManageAutomation: false,
+      canSendNotification: false,
+    })
+  })
+
+  it('fails closed for a cross-org e-learning admin and clamps platform admins to read-only', async () => {
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    vi.mocked(listUserPermissions).mockResolvedValue(['elearning:admin'])
+    const denied = await resolveSheetCapabilitiesForUser(
+      projectionQuery(false),
+      sheetId,
+      'cross-org-admin',
+    )
+    expect(denied.capabilities.canRead).toBe(false)
+    expect(denied.capabilities.canManageViews).toBe(false)
+
+    vi.mocked(isAdmin).mockResolvedValue(true)
+    vi.mocked(listUserPermissions).mockResolvedValue([])
+    const platformAdmin = await resolveSheetCapabilitiesForUser(
+      projectionQuery(false),
+      sheetId,
+      'platform-admin',
+    )
+    expect(platformAdmin.capabilities.canRead).toBe(true)
+    expect(platformAdmin.capabilities.canExport).toBe(true)
+    expect(platformAdmin.capabilities.canManageViews).toBe(true)
+    expect(platformAdmin.capabilities.canEditRecord).toBe(false)
+    expect(platformAdmin.capabilities.canManageFields).toBe(false)
+
+    const drifted = await resolveSheetCapabilitiesForUser(
+      projectionQuery(true, false),
+      sheetId,
+      'platform-admin',
+    )
+    expect(drifted.capabilities.canRead).toBe(false)
+    expect(drifted.capabilities.canManageViews).toBe(false)
   })
 })

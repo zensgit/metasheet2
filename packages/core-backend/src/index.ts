@@ -340,6 +340,7 @@ import {
   ElearningStatsDailyJobProducerError,
   enqueueElearningStatsDailyJobs,
 } from './services/elearning-stats-daily-job-producer'
+import { projectElearningStatsToMultitable } from './services/elearning-stats-multitable-projection'
 import {
   cleanupElearningAnalyticsExport,
   ElearningAnalyticsExportError,
@@ -2449,7 +2450,9 @@ export class MetaSheetServer {
                   if (!isElearningAnalyticsSurfaceEnabled()) {
                     throw new ElearningStatsDailyProjectionError('unavailable')
                   }
-                  return projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                  const result = await projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                  await projectElearningStatsToMultitable(poolManager.get(), input)
+                  return result
                 },
               }
             : undefined,
