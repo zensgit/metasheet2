@@ -427,6 +427,139 @@ describe('approval store — executeAction result publication', () => {
     expect(store.loading).toBe(false)
   })
 
+  // -------------------------------------------------------------------------
+  // Round 3 (B8) — a refresh of the SAME instance must not cost the verb its own result.
+  //
+  // The round-2 predicate was the detail request GENERATION captured before the await, which asks
+  // "has any detail load started since?". A 重新加载 for the instance the reader is ON answers yes,
+  // so the verb's own response — the freshest fact about that instance anywhere on the page — was
+  // dropped while the caller still announced success, leaving 待处理 under 审批已通过. The predicate
+  // is now the INSTANCE, and it is settle-order independent: whichever of the two lands last, the
+  // action's response is the one that stays.
+  // -------------------------------------------------------------------------
+  it('a same-instance refresh that LANDED during the verb does not discard the verb result', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+
+    const pendingAction = deferred<any>()
+    dispatchActionMock.mockReturnValueOnce(pendingAction.promise)
+    const action = store.executeAction('apv_a', { action: 'approve' } as any)
+
+    // The reader clicks 重新加载 while the verb is still outstanding, and that read completes first
+    // carrying the PRE-action row (it reached the server before the action committed).
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a', { status: 'pending' }))
+    await store.loadDetail('apv_a')
+    expect(store.activeApproval?.status).toBe('pending')
+
+    pendingAction.resolve(instance('apv_a', { status: 'approved' }))
+    await action
+    await settle()
+
+    expect(store.activeApproval?.id).toBe('apv_a')
+    expect(store.activeApproval?.status).toBe('approved')
+  })
+
+  it('a same-instance refresh still IN FLIGHT when the verb published does not overwrite it', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+
+    // The other settle order of the same race: the refresh is issued first and comes back LAST.
+    const pendingRefresh = deferred<any>()
+    getApprovalMock.mockReturnValueOnce(pendingRefresh.promise)
+    const refresh = store.loadDetail('apv_a')
+
+    dispatchActionMock.mockResolvedValueOnce(instance('apv_a', { status: 'approved' }))
+    await store.executeAction('apv_a', { action: 'approve' } as any)
+    expect(store.activeApproval?.status).toBe('approved')
+
+    pendingRefresh.resolve(instance('apv_a', { status: 'pending' }))
+    await refresh
+    await settle()
+
+    expect(store.activeApproval?.status).toBe('approved')
+    // The refused read still owns — and clears — the flags it took.
+    expect(store.detailLoading).toBe(false)
+    expect(store.loading).toBe(false)
+  })
+
+  it('positive control: a refresh ISSUED after the action published does replace the row', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+
+    dispatchActionMock.mockResolvedValueOnce(instance('apv_a', { status: 'approved' }))
+    await store.executeAction('apv_a', { action: 'approve' } as any)
+    expect(store.activeApproval?.status).toBe('approved')
+
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a', { status: 'approved', title: '刷新后的标题' }))
+    await store.loadDetail('apv_a')
+    await settle()
+
+    expect(store.activeApproval?.title).toBe('刷新后的标题')
+  })
+
+  it('an action for an instance that is not the displayed one publishes nothing', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_b'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_b')
+
+    dispatchActionMock.mockResolvedValueOnce(instance('apv_a', { status: 'approved' }))
+    const result = await store.executeAction('apv_a', { action: 'approve' } as any)
+
+    expect(result.status).toBe('approved')
+    expect(store.activeApproval?.id).toBe('apv_b')
+    expect(store.activeApproval?.status).toBe('pending')
+    expect(store.error).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 3 (B12) — which instance's last detail read failed, as data.
+  // -------------------------------------------------------------------------
+  it('records the instance whose last detail read failed, and clears it on a successful retry', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+    expect(store.detailErrorInstanceId).toBeNull()
+
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    await store.loadDetail('apv_a')
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+    // The instance itself is deliberately kept on screen (round 2), which is exactly why the
+    // failure has to be recorded separately instead of being inferred from an empty slot.
+    expect(store.activeApproval?.id).toBe('apv_a')
+
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    await store.loadDetail('apv_a')
+    expect(store.detailErrorInstanceId).toBeNull()
+  })
+
+  it('a retry that fails again re-records the failure rather than clearing it', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    await store.loadDetail('apv_a')
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    await store.loadDetail('apv_a')
+    expect(store.detailErrorInstanceId).toBe('apv_a')
+  })
+
+  it('a failed TIMELINE fetch is not recorded as a failed detail read', async () => {
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
+    getApprovalHistoryMock.mockRejectedValueOnce(new Error('加载审批历史失败'))
+    const store = useApprovalStore()
+    await store.loadDetail('apv_a')
+    await store.loadHistory('apv_a')
+
+    expect(store.error).toBe('加载审批历史失败')
+    expect(store.detailErrorInstanceId).toBeNull()
+  })
+
   it('a superseded action does not clear the shared loading flag a newer detail load still owns', async () => {
     getApprovalMock.mockResolvedValueOnce(instance('apv_a'))
     const store = useApprovalStore()

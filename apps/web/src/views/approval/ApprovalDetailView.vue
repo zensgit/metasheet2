@@ -1259,20 +1259,61 @@ const displayedInstanceId = computed(() => approval.value?.id ?? null)
 // by history/list loads). `=== true` rather than a truthy read so a store double that predates the
 // flag behaves exactly as it did before it existed.
 const detailLoadInFlight = computed(() => store.detailLoading === true)
-const instanceConsistent = computed(
-  () => routeInstanceId.value !== '' && displayedInstanceId.value === routeInstanceId.value,
+// Round 3 (B11): the `routeInstanceId.value !== ''` conjunct this predicate used to carry was
+// REMOVED. It was inert — `displayedInstanceId` is `null` or a real instance id, never `''`, so an
+// empty route id already fails the equality on its own — and a mutation probe confirmed it: dropping
+// it reded nothing anywhere. What it was reaching for is still guaranteed, one layer down: every
+// write verb refuses a falsy id (`if (!id) return` after `actionInstanceId()`), which is now pinned
+// per verb by the eight-row table in approval-detail-instance-consistency.spec.ts.
+const instanceConsistent = computed(() => displayedInstanceId.value === routeInstanceId.value)
+// Round 3 (B12): an instance whose LAST detail read failed is still on screen (a same-id reload
+// failure deliberately keeps the reader's page, with the error above it), but the page beneath the
+// banner is data of unknown freshness — so the write verbs are refused until a retry succeeds. The
+// store answers this per instance (`detailErrorInstanceId`); the shared `error` string cannot,
+// because a failed TIMELINE fetch or a rejected verb writes it too. `=== null` short-circuit so a
+// store double that predates the field behaves exactly as it did before it existed.
+const displayedInstanceLoadFailed = computed(
+  () => displayedInstanceId.value !== null && store.detailErrorInstanceId === displayedInstanceId.value,
 )
-const actionsEnabled = computed(() => instanceConsistent.value && !detailLoadInFlight.value)
+const actionsEnabled = computed(
+  () => instanceConsistent.value && !detailLoadInFlight.value && !displayedInstanceLoadFailed.value,
+)
 
 /**
  * The id every write verb acts on: the instance actually on screen, or `null` when the page is
- * mid-switch / mid-load. Callers early-return on `null` — that is the defense-in-depth half of the
- * same gate the disabled controls express in the template, and it also covers the affordances that
- * cannot be disabled (the 撤回 popconfirm fires its own `@confirm`, not a button click).
+ * mid-switch / mid-load / showing an instance whose last refresh failed. Callers early-return on
+ * `null` — that is the defense-in-depth half of the same gate the disabled controls express in the
+ * template, and it also covers the affordances that cannot be disabled (the 撤回 popconfirm fires
+ * its own `@confirm`, not a button click).
  */
 function actionInstanceId(): string | null {
   if (!actionsEnabled.value) return null
   return displayedInstanceId.value
+}
+
+/**
+ * Round 3 (B10/B13) — the POST-`await` half of the same rule.
+ *
+ * `actionInstanceId()` decides what a verb may be sent for; this decides what the page may still SAY
+ * about it once the response lands. Between the two there is a whole navigation's worth of time: the
+ * reader can be on another instance by the time an approve for the previous one resolves. Every view
+ * side effect that follows the await — the success/failure toasts (policy-denial ones included), the
+ * dialog close, the inline dialog error, the 下一条 offer — belongs to the instance the verb acted
+ * on, and must not be rendered over a different one. Failure and success are treated the SAME way:
+ * announcing one but not the other is what made a departed instance's rejection appear on the
+ * incoming instance's page as a bare toast with no page to explain it.
+ *
+ * Both halves of the identity are required, for the two different ways the page can have moved: the
+ * route (the reader navigated) and the displayed instance (the shared detail slot has been emptied
+ * or replaced). A verb that succeeded with no navigation satisfies both — the store publishes the
+ * action's own response for this id, so `displayedInstanceId` is still `id`.
+ *
+ * The two REFRESH helpers below deliberately keep their own copy of this refusal rather than being
+ * folded into the caller's `if`: they must stay independently observable (each has its own
+ * isolation test), and the store holds a third, state-based line of defence in `loadHistory`.
+ */
+function stillActingOn(id: string): boolean {
+  return id === routeInstanceId.value && displayedInstanceId.value === id
 }
 
 // First-paint / switching state. `store.detailLoading` when present, otherwise the pre-existing
@@ -2464,15 +2505,22 @@ async function submitAction() {
       action: currentAction.value,
       comment: actionComment.value || undefined,
     })
-    ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
-    rememberQuickPhraseIfOffered(actionComment.value)
-    actionDialogVisible.value = false
-    showNextEntry.value = true
+    // Round 3 (B10/B13): everything the PAGE says or shows about this verb is scoped to the
+    // instance it acted on. The two refresh helpers below stay OUTSIDE this block on purpose —
+    // each keeps its own captured-id refusal so it remains independently observable.
+    if (stillActingOn(id)) {
+      ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
+      rememberQuickPhraseIfOffered(actionComment.value)
+      actionDialogVisible.value = false
+      showNextEntry.value = true
+    }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
     // B1-04: keep the dialog open + show the server's own reason inline instead of a generic
     // toast (see `actionDialogError` above); non-dialog actions further down keep their toasts.
-    actionDialogError.value = dialogErrorMessage(error, '操作失败，请重试')
+    // Round 3 (B10): symmetric with the success branch — a failure for an instance the reader has
+    // left is not announced on the instance they are now on, in any grammar.
+    if (stillActingOn(id)) actionDialogError.value = dialogErrorMessage(error, '操作失败，请重试')
     await refreshAfterStaleMobileAction(id, error)
   } finally {
     inFlightAction.value = null
@@ -2530,11 +2578,15 @@ async function submitTransfer() {
       comment: actionComment.value || undefined,
       targetUserId: transferUserId.value,
     })
-    ElMessage.success('已成功转交')
-    transferDialogVisible.value = false
+    if (stillActingOn(id)) {
+      ElMessage.success('已成功转交')
+      transferDialogVisible.value = false
+    }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
-    handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible, actionDialogError)
+    if (stillActingOn(id)) {
+      handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible, actionDialogError)
+    }
   } finally {
     inFlightAction.value = null
   }
@@ -2591,11 +2643,15 @@ async function submitAddSign() {
       targetUserIds: addSignUserIds.value,
       addSignMode: CLIENT_ADD_SIGN_MODE,
     })
-    ElMessage.success('已成功加签')
-    addSignDialogVisible.value = false
+    if (stillActingOn(id)) {
+      ElMessage.success('已成功加签')
+      addSignDialogVisible.value = false
+    }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
-    handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible, actionDialogError)
+    if (stillActingOn(id)) {
+      handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible, actionDialogError)
+    }
   } finally {
     inFlightAction.value = null
   }
@@ -2630,11 +2686,15 @@ async function submitReduceSign() {
       comment: actionComment.value || undefined,
       targetAssignmentUserId: reduceSignUserId.value,
     })
-    ElMessage.success('已成功减签')
-    reduceSignDialogVisible.value = false
+    if (stillActingOn(id)) {
+      ElMessage.success('已成功减签')
+      reduceSignDialogVisible.value = false
+    }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
-    handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible, actionDialogError)
+    if (stillActingOn(id)) {
+      handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible, actionDialogError)
+    }
   } finally {
     inFlightAction.value = null
   }
@@ -2660,17 +2720,20 @@ async function submitComment() {
       comment: actionComment.value,
       ...(stagedIds.length > 0 ? { attachmentIds: stagedIds } : {}),
     })
-    ElMessage.success('评论已提交')
-    rememberQuickPhraseIfOffered(actionComment.value)
-    // Clear BEFORE closing the dialog — the close-watcher above DELETEs whatever is still in this
-    // list, and these ids are now server-bound (clearing after the flip would race a DELETE against
-    // an already-bound row).
-    commentStagedAttachments.value = []
-    commentDialogVisible.value = false
+    if (stillActingOn(id)) {
+      ElMessage.success('评论已提交')
+      rememberQuickPhraseIfOffered(actionComment.value)
+      // Clear BEFORE closing the dialog — the close-watcher above DELETEs whatever is still in this
+      // list, and these ids are now server-bound (clearing after the flip would race a DELETE
+      // against an already-bound row). On the OTHER branch (the reader has moved on) the switch
+      // watcher has already retracted and emptied this list, so there is nothing left to clear.
+      commentStagedAttachments.value = []
+      commentDialogVisible.value = false
+    }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
     // B1-04: same dialog-scoped inline error as `submitAction` above.
-    actionDialogError.value = dialogErrorMessage(error, '评论提交失败，请重试')
+    if (stillActingOn(id)) actionDialogError.value = dialogErrorMessage(error, '评论提交失败，请重试')
     await refreshAfterStaleMobileAction(id, error)
   } finally {
     inFlightAction.value = null
@@ -2692,11 +2755,15 @@ async function submitReturn() {
       comment: actionComment.value || undefined,
       targetNodeKey: returnTargetNodeKey.value,
     })
-    ElMessage.success('已退回审批')
-    returnDialogVisible.value = false
+    if (stillActingOn(id)) {
+      ElMessage.success('已退回审批')
+      returnDialogVisible.value = false
+    }
     await refreshHistoryForActedInstance(id)
   } catch (error) {
-    handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible, actionDialogError)
+    if (stillActingOn(id)) {
+      handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible, actionDialogError)
+    }
   } finally {
     inFlightAction.value = null
   }
@@ -2718,10 +2785,10 @@ async function handleRevoke() {
   inFlightAction.value = 'revoke'
   try {
     await store.executeAction(id, { action: 'revoke' })
-    ElMessage.success('审批已撤回')
+    if (stillActingOn(id)) ElMessage.success('审批已撤回')
     await refreshHistoryForActedInstance(id)
   } catch (error) {
-    ElMessage.error(dialogErrorMessage(error, '撤回失败，请重试'))
+    if (stillActingOn(id)) ElMessage.error(dialogErrorMessage(error, '撤回失败，请重试'))
   } finally {
     inFlightAction.value = null
   }
@@ -2795,11 +2862,11 @@ async function handleRemind() {
   try {
     const result = await remindApproval(id)
     if (result.ok) {
-      ElMessage.success('已催办')
+      if (stillActingOn(id)) ElMessage.success('已催办')
       await refreshHistoryForActedInstance(id)
     } else if (result.status === 429) {
-      ElMessage.warning(`已在 ${formatRemindAgo(result.error.lastRemindedAt)}催办过`)
-    } else {
+      if (stillActingOn(id)) ElMessage.warning(`已在 ${formatRemindAgo(result.error.lastRemindedAt)}催办过`)
+    } else if (stillActingOn(id)) {
       ElMessage.error(result.error.message || '催办失败，请重试')
     }
   } finally {

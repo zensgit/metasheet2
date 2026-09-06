@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createApp, defineComponent, h, nextTick, reactive, ref, type App as VueApp } from 'vue'
@@ -59,9 +61,24 @@ vi.mock('../src/approvals/permissions', () => ({
   useApprovalPermissions: () => ({ canAct: mockCanAct }),
 }))
 
+// Round 3 (B10): the reader-facing announcements are the thing under test, so ElMessage is a spy
+// rather than the real toast renderer — "no text in the container" is not an oracle for a toast,
+// which teleports to document.body.
+const elMessage = vi.hoisted(() => ({
+  success: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+}))
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('element-plus').catch(() => ({}))
+  return { ...actual, ElMessage: elMessage }
+})
+
 const getApprovalMock = vi.fn()
 const getApprovalHistoryMock = vi.fn()
 const dispatchActionMock = vi.fn()
+const remindApprovalMock = vi.fn()
 const markApprovalReadMock = vi.fn().mockResolvedValue({ ok: true })
 
 vi.mock('../src/approvals/api', async (importOriginal) => {
@@ -72,7 +89,7 @@ vi.mock('../src/approvals/api', async (importOriginal) => {
     getApprovalHistory: (...args: unknown[]) => getApprovalHistoryMock(...args),
     dispatchAction: (...args: unknown[]) => dispatchActionMock(...args),
     markApprovalRead: (...args: unknown[]) => markApprovalReadMock(...args),
-    remindApproval: vi.fn().mockResolvedValue({ ok: true, data: {} }),
+    remindApproval: (...args: unknown[]) => remindApprovalMock(...args),
     searchApprovalDirectoryUsers: vi.fn().mockResolvedValue([]),
   }
 })
@@ -99,6 +116,7 @@ vi.mock('../src/approvals/templateStore', () => ({
 }))
 
 import { useApprovalStore } from '../src/approvals/store'
+import { NODE_OPERATION_DISABLED_CODE, NODE_OPERATION_DISABLED_MESSAGE } from '../src/approvals/memberActionErrorCopy'
 
 function stub(name: string, tag = 'div') {
   return defineComponent({
@@ -245,6 +263,12 @@ describe('ApprovalDetailView — instance consistency', () => {
     getApprovalHistoryMock.mockResolvedValue([])
     dispatchActionMock.mockReset()
     dispatchActionMock.mockImplementation((id: string) => Promise.resolve(instance(id, { status: 'approved' })))
+    remindApprovalMock.mockReset()
+    remindApprovalMock.mockResolvedValue({ ok: true, data: {} })
+    elMessage.success.mockClear()
+    elMessage.warning.mockClear()
+    elMessage.error.mockClear()
+    elMessage.info.mockClear()
     pushSpy.mockClear()
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -765,5 +789,399 @@ describe('ApprovalDetailView — instance consistency', () => {
     expect(after.addSignUserLabels).toEqual({})
     expect(after.addSignPickerValue).toBeNull()
     expect(after.reduceSignUserId).toBe('')
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 3 (B9) — the gate, pinned at EVERY write-verb site rather than at three of them.
+  //
+  // Round 2 shipped the same `actionInstanceId()` guard at all eight sites but pinned only
+  // 通过 (dialog confirm), 评论 (button `disabled`) and 撤回 (popconfirm `@confirm`): reverting the
+  // other five to the pre-change `route.params.id` reded nothing anywhere in the approval batch.
+  // That is the exact shape this file's own `handleMemberActionFailure` doc records from PR #4983
+  // (four hand-copied handlers, one pinned). Each row below is its own test, so removing the guard
+  // from ONE site goes red for that site only.
+  //
+  // The handlers are driven through the component's own setup bindings: in the mid-switch state the
+  // template's controls are `disabled`, which is the OTHER half of the gate and is already pinned
+  // above — driving the handler directly is what isolates each site's own refusal. The `typeof`
+  // assertion is not decoration: an optional call on a missing binding would pass every
+  // "nothing was sent" assertion vacuously.
+  // -------------------------------------------------------------------------
+  const REDUCIBLE_ASSIGNMENT = {
+    assigneeId: 'user_add_signed',
+    type: 'user',
+    isActive: true,
+    nodeKey: 'approval_1',
+    metadata: { addSign: true, assigneeName: '李四' },
+  }
+
+  function actionable(id: string): any {
+    return instance(id, { assignments: [REDUCIBLE_ASSIGNMENT] })
+  }
+
+  interface WriteVerbSite {
+    label: string
+    handler: string
+    /** Everything the handler's OWN preconditions need, minus the instance gate. */
+    prepare: (state: Record<string, any>) => void
+    /** What a non-refused call must have produced. */
+    assertSent: (id: string) => void
+  }
+
+  const WRITE_VERB_SITES: WriteVerbSite[] = [
+    {
+      label: '通过/驳回 submitAction',
+      handler: 'submitAction',
+      prepare: (state) => {
+        state.currentAction = 'approve'
+        state.actionDialogVisible = true
+      },
+      assertSent: (id) => {
+        expect(dispatchActionMock).toHaveBeenCalledTimes(1)
+        expect(dispatchActionMock.mock.calls[0][0]).toBe(id)
+        expect(dispatchActionMock.mock.calls[0][1].action).toBe('approve')
+      },
+    },
+    {
+      label: '转交 submitTransfer',
+      handler: 'submitTransfer',
+      prepare: (state) => {
+        state.transferUserId = 'user_77'
+        state.transferDialogVisible = true
+      },
+      assertSent: (id) => {
+        expect(dispatchActionMock).toHaveBeenCalledTimes(1)
+        expect(dispatchActionMock.mock.calls[0][0]).toBe(id)
+        expect(dispatchActionMock.mock.calls[0][1].action).toBe('transfer')
+      },
+    },
+    {
+      label: '加签 submitAddSign',
+      handler: 'submitAddSign',
+      prepare: (state) => {
+        state.addSignUserIds = ['user_77']
+        state.addSignDialogVisible = true
+      },
+      assertSent: (id) => {
+        expect(dispatchActionMock).toHaveBeenCalledTimes(1)
+        expect(dispatchActionMock.mock.calls[0][0]).toBe(id)
+        expect(dispatchActionMock.mock.calls[0][1].action).toBe('add_sign')
+      },
+    },
+    {
+      label: '减签 submitReduceSign',
+      handler: 'submitReduceSign',
+      prepare: (state) => {
+        state.reduceSignUserId = REDUCIBLE_ASSIGNMENT.assigneeId
+        state.reduceSignDialogVisible = true
+      },
+      assertSent: (id) => {
+        expect(dispatchActionMock).toHaveBeenCalledTimes(1)
+        expect(dispatchActionMock.mock.calls[0][0]).toBe(id)
+        expect(dispatchActionMock.mock.calls[0][1].action).toBe('reduce_sign')
+      },
+    },
+    {
+      label: '评论 submitComment',
+      handler: 'submitComment',
+      prepare: (state) => {
+        state.actionComment = '一条评论'
+        state.commentDialogVisible = true
+      },
+      assertSent: (id) => {
+        expect(dispatchActionMock).toHaveBeenCalledTimes(1)
+        expect(dispatchActionMock.mock.calls[0][0]).toBe(id)
+        expect(dispatchActionMock.mock.calls[0][1].action).toBe('comment')
+      },
+    },
+    {
+      label: '退回 submitReturn',
+      handler: 'submitReturn',
+      prepare: (state) => {
+        state.returnTargetNodeKey = 'approval_0'
+        state.returnDialogVisible = true
+      },
+      assertSent: (id) => {
+        expect(dispatchActionMock).toHaveBeenCalledTimes(1)
+        expect(dispatchActionMock.mock.calls[0][0]).toBe(id)
+        expect(dispatchActionMock.mock.calls[0][1].action).toBe('return')
+      },
+    },
+    {
+      label: '撤回 handleRevoke',
+      handler: 'handleRevoke',
+      prepare: () => {},
+      assertSent: (id) => {
+        expect(dispatchActionMock).toHaveBeenCalledTimes(1)
+        expect(dispatchActionMock.mock.calls[0][0]).toBe(id)
+        expect(dispatchActionMock.mock.calls[0][1].action).toBe('revoke')
+      },
+    },
+    {
+      label: '催办 handleRemind',
+      handler: 'handleRemind',
+      prepare: () => {},
+      assertSent: (id) => {
+        expect(remindApprovalMock).toHaveBeenCalledTimes(1)
+        expect(remindApprovalMock.mock.calls[0][0]).toBe(id)
+      },
+    },
+  ]
+
+  function assertNothingWasSent(): void {
+    expect(dispatchActionMock).not.toHaveBeenCalled()
+    expect(remindApprovalMock).not.toHaveBeenCalled()
+  }
+
+  it.each(WRITE_VERB_SITES.map((site) => [site.label, site] as [string, WriteVerbSite]))(
+    'B9 %s: acts on the displayed instance, and refuses once the page has moved to another one',
+    async (_label, site) => {
+      getApprovalMock.mockImplementation((id: string) => Promise.resolve(actionable(id)))
+      await mountView()
+
+      const state = setupState()
+      expect(typeof state[site.handler], `${site.handler} must be reachable on the view's setup state`).toBe('function')
+
+      // Positive control — route and displayed instance agree.
+      site.prepare(state)
+      await flushUi()
+      await state[site.handler]()
+      await flushUi(12)
+      site.assertSent('apv_a')
+
+      // The page has moved: the route says B, and a lagging write leaves A in the shared slot, so
+      // the id comparison is the only thing that can refuse (nothing is in flight).
+      dispatchActionMock.mockClear()
+      remindApprovalMock.mockClear()
+      mockRouteParams.id = 'apv_b'
+      await flushUi(12)
+      const store = useApprovalStore()
+      store.activeApproval = actionable('apv_a')
+      await flushUi()
+      expect(store.detailLoading).toBe(false)
+      expect(container!.textContent).toContain('AP-APV_A')
+
+      const moved = setupState()
+      site.prepare(moved)
+      await flushUi()
+      await moved[site.handler]()
+      await flushUi(12)
+      assertNothingWasSent()
+    },
+  )
+
+  // Drift alarm for the table above — NOT a behaviour assertion on its own. A ninth verb site added
+  // without a row here is exactly how five of the eight sites shipped unpinned in round 2.
+  it('B9 census: the table covers every `actionInstanceId()` call site in the view', () => {
+    const source = readFileSync(resolve(__dirname, '../src/views/approval/ApprovalDetailView.vue'), 'utf8')
+    const callSites = source.match(/^\s*const id = actionInstanceId\(\)$/gm) ?? []
+    expect(callSites).toHaveLength(WRITE_VERB_SITES.length)
+    expect(new Set(WRITE_VERB_SITES.map((site) => site.handler)).size).toBe(WRITE_VERB_SITES.length)
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 3 (B10 / B13) — announcement symmetry across a cross-instance switch.
+  //
+  // Round 2 left the two outcomes asymmetric: a verb that SUCCEEDED for the instance the reader had
+  // left still toasted 审批已通过 and flipped the 下一条 offer on the instance now on screen, while a
+  // failure landed in a dialog the switch had already closed. Both directions are pinned here, each
+  // against its own positive control on the un-switched page.
+  // -------------------------------------------------------------------------
+  it('B10 success: a verb that succeeds after the switch announces nothing on the incoming instance', async () => {
+    const pendingB = deferred<any>()
+    getApprovalMock.mockImplementation((id: string) => (
+      id === 'apv_b' ? pendingB.promise : Promise.resolve(instance(id))
+    ))
+    const pendingAction = deferred<any>()
+    dispatchActionMock.mockImplementation(() => pendingAction.promise)
+
+    await mountView()
+    const store = useApprovalStore()
+    // 下一条 renders only when the list holds another entry, so seed one: without it the DOM oracle
+    // below could not fail even if `showNextEntry` did flip.
+    store.pendingApprovals = [instance('apv_c')] as any
+    await flushUi()
+
+    await approveThroughDialog()
+    expect(dispatchActionMock).toHaveBeenCalledWith('apv_a', expect.anything())
+
+    mockRouteParams.id = 'apv_b'
+    await flushUi()
+    pendingB.resolve(instance('apv_b'))
+    await flushUi(12)
+    expect(container!.textContent).toContain('AP-APV_B')
+    elMessage.success.mockClear()
+
+    pendingAction.resolve(instance('apv_a', { status: 'approved' }))
+    await flushUi(12)
+
+    expect(elMessage.success).not.toHaveBeenCalled()
+    expect(q(container!, 'approval-next-pending')).toBeNull()
+    expect(store.error).toBeNull()
+    expect(container!.querySelector('[data-el-alert="error"]')).toBeNull()
+    expect(store.activeApproval?.id).toBe('apv_b')
+  })
+
+  it('B10 positive control: the same verb, un-switched, announces once and offers 下一条', async () => {
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    await mountView()
+    const store = useApprovalStore()
+    store.pendingApprovals = [instance('apv_c')] as any
+    await flushUi()
+
+    await approveThroughDialog()
+    await flushUi(12)
+
+    expect(elMessage.success).toHaveBeenCalledTimes(1)
+    expect(elMessage.success).toHaveBeenCalledWith('审批已通过')
+    expect(q(container!, 'approval-next-pending')).toBeTruthy()
+  })
+
+  it('B10 failure: a policy denial for the departed instance is not toasted over the incoming one', async () => {
+    const pendingB = deferred<any>()
+    getApprovalMock.mockImplementation((id: string) => (
+      id === 'apv_b' ? pendingB.promise : Promise.resolve(instance(id))
+    ))
+    const pendingAction = deferred<any>()
+    dispatchActionMock.mockImplementation(() => pendingAction.promise)
+
+    await mountView()
+    const state = setupState()
+    state.transferUserId = 'user_77'
+    state.transferDialogVisible = true
+    await flushUi()
+    const submitted = state.submitTransfer()
+    await flushUi()
+    expect(dispatchActionMock).toHaveBeenCalledWith('apv_a', expect.objectContaining({ action: 'transfer' }))
+
+    mockRouteParams.id = 'apv_b'
+    await flushUi()
+    pendingB.resolve(instance('apv_b'))
+    await flushUi(12)
+    elMessage.error.mockClear()
+
+    const denial: any = new Error('Operation transfer is disabled at this node')
+    denial.code = NODE_OPERATION_DISABLED_CODE
+    pendingAction.reject(denial)
+    await submitted
+    await flushUi(12)
+
+    const store = useApprovalStore()
+    expect(elMessage.error).not.toHaveBeenCalled()
+    expect(setupState().actionDialogError).toBeNull()
+    expect(store.error).toBeNull()
+    expect(store.activeApproval?.id).toBe('apv_b')
+    expect(container!.querySelector('[data-el-alert="error"]')).toBeNull()
+  })
+
+  it('B10 positive control: the same policy denial, un-switched, IS toasted and closes its dialog', async () => {
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    const denial: any = new Error('Operation transfer is disabled at this node')
+    denial.code = NODE_OPERATION_DISABLED_CODE
+    dispatchActionMock.mockRejectedValue(denial)
+
+    await mountView()
+    const state = setupState()
+    state.transferUserId = 'user_77'
+    state.transferDialogVisible = true
+    await flushUi()
+    await state.submitTransfer()
+    await flushUi(12)
+
+    expect(elMessage.error).toHaveBeenCalledWith(NODE_OPERATION_DISABLED_MESSAGE)
+    expect(setupState().transferDialogVisible).toBe(false)
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 3 (B12) — an instance whose last refresh is known to have failed is read-only.
+  //
+  // Round 2 deliberately KEEPS such an instance on screen (blanking it turned an ordinary 重新加载
+  // into a blank page). What round 2 left behind is that every write control stayed live over the
+  // error banner, dispatching against data of unknown freshness.
+  // -------------------------------------------------------------------------
+  it('B12: a same-id reload failure refuses the write verbs until a retry succeeds', async () => {
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    await mountView()
+    const approveButton = () => q(container!, 'approval-approve-button') as HTMLButtonElement
+    expect(approveButton().disabled).toBe(false)
+
+    const store = useApprovalStore()
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    await store.loadDetail('apv_a')
+    await flushUi()
+
+    // The instance the reader was on is still rendered — what is refused is ACTING on it.
+    expect(container!.textContent).toContain('AP-APV_A')
+    expect(container!.querySelector('[data-el-alert="error"]')).toBeTruthy()
+    expect(approveButton().disabled).toBe(true)
+    expect((q(container!, 'approval-comment-button') as HTMLButtonElement).disabled).toBe(true)
+    expect((q(container!, 'approval-revoke-button') as HTMLButtonElement).disabled).toBe(true)
+
+    // A retry that fails AGAIN keeps them refused — this is a state, not a one-shot.
+    getApprovalMock.mockRejectedValueOnce(new Error('该审批暂时无法加载'))
+    await store.loadDetail('apv_a')
+    await flushUi()
+    expect(approveButton().disabled).toBe(true)
+
+    // The popconfirm's own @confirm, which no `disabled` binding reaches, refuses too.
+    q(container!, 'popconfirm-confirm-trigger')!.click()
+    await flushUi()
+    expect(dispatchActionMock).not.toHaveBeenCalled()
+
+    // A successful retry re-enables them, and the same affordance now dispatches.
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    await store.loadDetail('apv_a')
+    await flushUi()
+    expect(approveButton().disabled).toBe(false)
+    expect(container!.querySelector('[data-el-alert="error"]')).toBeNull()
+
+    q(container!, 'popconfirm-confirm-trigger')!.click()
+    await flushUi(12)
+    expect(dispatchActionMock).toHaveBeenCalledTimes(1)
+    expect(dispatchActionMock.mock.calls[0][0]).toBe('apv_a')
+  })
+
+  // -------------------------------------------------------------------------
+  // Round 3 (B8, through the view) — the construction that made the verb's own result vanish.
+  // -------------------------------------------------------------------------
+  // The reported construction, end to end and with no synthetic store poking beyond the api fakes:
+  // a verb is in flight, the TIMELINE fetch for the same instance fails, the reader clicks the error
+  // banner's 重新加载, and that read comes back with the pre-action row. Round 2 discarded the verb's
+  // own response here (any same-id load took a newer generation), so 审批已通过 was announced over a
+  // page still showing 待处理 with the action bar live.
+  it('B8: a 重新加载 during a verb does not cost the verb its own result on the page', async () => {
+    getApprovalMock.mockImplementation((id: string) => Promise.resolve(instance(id)))
+    await mountView()
+    const store = useApprovalStore()
+
+    const pendingAction = deferred<any>()
+    dispatchActionMock.mockImplementation(() => pendingAction.promise)
+    await approveThroughDialog()
+    expect(dispatchActionMock).toHaveBeenCalledWith('apv_a', expect.anything())
+
+    // The timeline refresh for the SAME instance fails while the verb is still outstanding.
+    getApprovalHistoryMock.mockRejectedValueOnce(new Error('加载审批历史失败'))
+    await store.loadHistory('apv_a')
+    await flushUi()
+    const banner = container!.querySelector('[data-el-alert="error"]')
+    expect(banner).toBeTruthy()
+
+    // The reader clicks 重新加载 in that banner; the detail read it fires is served BEFORE the
+    // action commits, so it carries the pre-action row.
+    getApprovalMock.mockResolvedValueOnce(instance('apv_a', { status: 'pending' }))
+    getApprovalHistoryMock.mockResolvedValueOnce([])
+    ;(banner!.querySelector('button') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(store.activeApproval?.status).toBe('pending')
+    expect(store.detailLoading).toBe(false)
+
+    pendingAction.resolve(instance('apv_a', { status: 'approved' }))
+    await flushUi(12)
+
+    // One success announcement, and the page it is announced over agrees with it.
+    expect(elMessage.success).toHaveBeenCalledTimes(1)
+    expect(elMessage.success).toHaveBeenCalledWith('审批已通过')
+    expect(store.activeApproval?.status).toBe('approved')
+    expect(container!.textContent).toContain('该审批已结束')
   })
 })

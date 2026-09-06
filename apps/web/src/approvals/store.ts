@@ -62,6 +62,20 @@ export const useApprovalStore = defineStore('approval', () => {
   // page requests finishes first clears it. Consumers that must not act on a half-loaded instance
   // read this one.
   const detailLoading = ref(false)
+  // Instance whose LAST detail load is known to have failed, or null when the last one succeeded /
+  // none has finished yet. `error` cannot answer this: it is also written by `loadHistory`, by
+  // `executeAction` and by every list loader, so a rejected timeline fetch or a rejected verb would
+  // be indistinguishable from "the instance on screen could not be re-read". Written ONLY by
+  // `loadDetail`, and cleared at the start of every detail load. Consumers that must not act on an
+  // instance whose last refresh failed read this one (round 3, B12).
+  const detailErrorInstanceId = ref<string | null>(null)
+  // Bumped every time `executeAction` publishes its OWN response into `activeApproval`, together
+  // with the instance it published for. A detail read that was already in flight at that moment may
+  // have reached the server BEFORE the action committed, so it must not overwrite the result the
+  // reader has already been told succeeded (round 3, B8 — the reverse settle order of the same
+  // race). Plain `let`s: nothing renders them and they must not be reactive dependencies.
+  let actionPublishSeq = 0
+  let actionPublishInstanceId: string | null = null
 
   // ---------------------------------------------------------------------------
   // Getters
@@ -163,20 +177,37 @@ export const useApprovalStore = defineStore('approval', () => {
    */
   async function loadDetail(id: string) {
     const generation = (detailGeneration += 1)
+    // Round 3 (B8): remember where the action publication counter stood when this read was ISSUED,
+    // so the settle path below can tell whether an action for this same instance published its own
+    // response while the read was outstanding.
+    const actionSeqAtIssue = actionPublishSeq
     if (activeApproval.value && activeApproval.value.id !== id) activeApproval.value = null
     detailLoading.value = true
     loading.value = true
     error.value = null
+    detailErrorInstanceId.value = null
     try {
       const result = await getApproval(id)
       // Superseded by a newer load: discard rather than overwrite the newer instance's state.
       if (generation !== detailGeneration) return
+      // An action for THIS instance published its own response while this read was in flight. The
+      // read is not necessarily older in wall-clock terms, but it is the only one of the two that
+      // may have been served BEFORE the action committed, and the reader has already been shown
+      // that the action succeeded — so the action's response stays. Falls through to `finally`, so
+      // this load still clears the in-flight flags it owns. Same-instance only: a read for another
+      // instance cannot be racing this instance's action (the switch clear + the publication guard
+      // in `executeAction` already keep those apart).
+      if (actionPublishSeq !== actionSeqAtIssue && actionPublishInstanceId === id) return
       activeApproval.value = result
     } catch (e: any) {
       if (generation !== detailGeneration) return
       // Only ANOTHER instance is dropped here — never the one this load was for (see the doc above).
       if (activeApproval.value && activeApproval.value.id !== id) activeApproval.value = null
       error.value = e.message ?? '加载审批详情失败'
+      // Round 3 (B12): record WHICH instance could not be re-read, so the view can refuse write
+      // verbs against data whose last refresh is known to have failed without having to guess from
+      // the shared `error` string.
+      detailErrorInstanceId.value = id
     } finally {
       if (generation === detailGeneration) {
         detailLoading.value = false
@@ -248,28 +279,55 @@ export const useApprovalStore = defineStore('approval', () => {
     }
   }
 
+  /**
+   * Dispatch a write verb for ONE instance.
+   *
+   * The request itself and its return value (success OR throw) are untouched — the caller always
+   * gets the result or the rejection and can render it in its own dialog. What is scoped is every
+   * write into the store's SHARED slots: `activeApproval`, `error` and `loading`.
+   *
+   * Round 3 (B8) replaces the DATA guard's predicate. It used to be the detail request generation
+   * captured before the await, which answers "has any detail load started since?" — a question with
+   * the wrong shape. A refresh of the SAME instance started while the verb was in flight (the
+   * reader clicking 重新加载 over a failed timeline fetch is the reachable one) took a newer
+   * generation, so the verb's own response — the freshest fact about that instance in the whole
+   * page — was discarded, leaving a success announcement over pre-action data. The predicate is now
+   * the INSTANCE: publish iff the instance still displayed is the one this verb acted on.
+   *
+   *   * same-id refresh in flight  → still displayed → the verb's result IS published (the defect);
+   *   * cross-instance switch      → `loadDetail` cleared the slot synchronously, or the incoming
+   *                                  instance is in it → not displayed → discarded silently;
+   *   * nothing displayed at all   → not displayed → discarded (there is no page to publish onto,
+   *                                  and this is the same state a switch leaves behind).
+   *
+   * The ORDER between a same-id refresh and the verb no longer decides the outcome either: a read
+   * that was already in flight when this publication happened is refused by `loadDetail` (see
+   * `actionPublishSeq` there), so the action's own response wins whichever settles last. That is the
+   * documented rule for two same-instance writers: **an action's own response is authoritative over
+   * any detail read concurrent with it**, because it is the only one of the two guaranteed to have
+   * been served after the action committed.
+   *
+   * `loading` keeps the GENERATION predicate: that flag is about request ownership, not about which
+   * instance is on screen. A newer `loadDetail` owns it once it has taken a generation and clears it
+   * in its own `finally`, so skipping here cannot strand it.
+   */
   async function executeAction(id: string, req: ApprovalActionRequest): Promise<UnifiedApprovalDTO> {
     loading.value = true
     error.value = null
-    // The request itself and its return value (success OR throw) are untouched — the caller always
-    // gets the result or the rejection and can render it in its own dialog. What IS generation-
-    // scoped is every write into the store's SHARED slots: `activeApproval`, `error` and `loading`.
-    // An action started for one instance that settles after the page has moved to another must not
-    // publish its (now foreign) DTO as the active detail, must not raise that instance's failure as
-    // the page-level error banner on the instance now on screen, and must not clear the in-flight
-    // flag a newer detail load is relying on. Round 2 added the `error`/`loading` halves; the
-    // `activeApproval` half shipped in round 1.
     const generation = detailGeneration
+    const actedInstanceStillDisplayed = () => activeApproval.value?.id === id
     try {
       const result = await dispatchAction(id, req)
-      if (generation === detailGeneration) activeApproval.value = result
+      if (actedInstanceStillDisplayed()) {
+        actionPublishSeq += 1
+        actionPublishInstanceId = id
+        activeApproval.value = result
+      }
       return result
     } catch (e: any) {
-      if (generation === detailGeneration) error.value = e.message ?? '执行审批操作失败'
+      if (actedInstanceStillDisplayed()) error.value = e.message ?? '执行审批操作失败'
       throw e
     } finally {
-      // A newer `loadDetail` owns `loading` once it has taken a generation, and clears it in its own
-      // `finally` — so skipping here cannot strand the flag.
       if (generation === detailGeneration) loading.value = false
     }
   }
@@ -286,6 +344,7 @@ export const useApprovalStore = defineStore('approval', () => {
     history,
     loading,
     detailLoading,
+    detailErrorInstanceId,
     error,
     totalPending,
     totalMine,
