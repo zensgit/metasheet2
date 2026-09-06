@@ -10,6 +10,8 @@ const path = require('node:path')
 
 const {
   MISSING_COMPONENT_DETAIL_LIMIT,
+  ROW_ERROR_LIMIT,
+  ROW_ERROR_LIMIT_CEILING,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
@@ -1029,7 +1031,273 @@ async function testTheCapCostsAWholePartNeverAWrongCount() {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// D-C: the `rowErrors` cap.
+//
+// The cheapest possible rowError generator, on purpose: a BOM detail row whose component id is
+// blank fails at `toKey` and never reaches `readPart`, so N rowErrors cost N array entries and zero
+// extra source reads. That keeps a 6001-position fixture a sub-second test.
+// ---------------------------------------------------------------------------------------------
+function bomOfBlankComponentIds(count, { badQuantityPositions = 0 } = {}) {
+  const data = baseData()
+  data.DN_PDM_OrderDetailInfo = [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }]
+  const details = []
+  for (let i = 0; i < count; i += 1) {
+    details.push({ bom_pid: 'BOM-A', part_id: '', Bom_ExAttr1: '1', sort_id: details.length })
+  }
+  // A SECOND type, appended after the first block, so the per-type totals have something to be wrong
+  // about and the retained prefix demonstrably drops a whole type when the first block overflows.
+  for (let i = 0; i < badQuantityPositions; i += 1) {
+    details.push({ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: 'not-a-number', sort_id: details.length })
+  }
+  data.DN_PDM_BomDetailsInfo = details
+  return data
+}
+
+async function expandBlankComponentBom(count, options = {}) {
+  const { adapter } = createAdapter(bomOfBlankComponentIds(count, options))
+  return expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', ...(options.expand || {}) })
+}
+
+const ROW_ERROR_TRUNCATION_KEYS = ['rowErrorsTotal', 'rowErrorsRetained', 'rowErrorsTruncated', 'rowErrorTypeCounts']
+
+function revisionOf(expansion) {
+  return buildRevision({
+    action: REVISION_ACTION,
+    parameters: { projectNo: 'P-001' },
+    expansion,
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: null,
+  })
+}
+
+// (a) THE BOUNDARY. 4999 / 5000 / 5001 — the last two are the ones that matter, because "at the cap"
+// must still be an untruncated expansion or the stanza would appear on a project that lost nothing.
+async function testRowErrorCapBoundary() {
+  for (const [count, expected] of [
+    [ROW_ERROR_LIMIT - 1, { length: ROW_ERROR_LIMIT - 1, truncated: false }],
+    [ROW_ERROR_LIMIT, { length: ROW_ERROR_LIMIT, truncated: false }],
+    [ROW_ERROR_LIMIT + 1, { length: ROW_ERROR_LIMIT, truncated: true }],
+  ]) {
+    const result = await expandBlankComponentBom(count)
+    const label = `${count} rowErrors`
+    assert.equal(result.status, 'failed', `${label}: rowErrors still fail the expansion`)
+    assert.equal(result.rowErrors.length, expected.length, `${label}: the ARRAY is bounded by the cap`)
+
+    if (!expected.truncated) {
+      for (const key of ROW_ERROR_TRUNCATION_KEYS) {
+        assert.equal(key in result.summary, false, `${label}: an expansion that lost nothing mounts no ${key}`)
+      }
+      continue
+    }
+    assert.equal(result.summary.rowErrorsTruncated, true, `${label}: and the summary says so`)
+    assert.equal(result.summary.rowErrorsTotal, count, `${label}: the TOTAL is the truth, not the array length`)
+    assert.equal(result.summary.rowErrorsRetained, ROW_ERROR_LIMIT, `${label}: alongside what was kept`)
+    assert.deepEqual(
+      result.summary.rowErrorTypeCounts,
+      { missing_component_source_id: count },
+      `${label}: per-type counts accumulate past the cap too`,
+    )
+  }
+
+  // THE COUNTS ARE PER TYPE, and a type whose every occurrence was dropped still has to be named.
+  // 5000 blanks fill the array exactly; the 7 unparseable quantities that follow are all refused a
+  // slot, so `rowErrors` contains not one `invalid_quantity` — and the summary must still report it.
+  const mixed = await expandBlankComponentBom(ROW_ERROR_LIMIT, { badQuantityPositions: 7 })
+  assert.equal(mixed.rowErrors.length, ROW_ERROR_LIMIT)
+  assert.equal(
+    mixed.rowErrors.some((entry) => entry.type === 'invalid_quantity'),
+    false,
+    'the retained sample contains no invalid_quantity at all',
+  )
+  assert.deepEqual(mixed.summary.rowErrorTypeCounts, {
+    invalid_quantity: 7,
+    missing_component_source_id: ROW_ERROR_LIMIT,
+  }, 'but the per-type totals count the seven the array never saw')
+  assert.ok(
+    mixed.summary.errorTypes.includes('invalid_quantity'),
+    'and errorTypes names the type whose every occurrence the cap dropped — otherwise the summary would say the project has no such defect',
+  )
+
+  // Evidence stays values-free: integers, a boolean, and the type tokens `errorTypes` already
+  // publishes. Nothing customer-shaped can ride the stanza.
+  const evidence = summarizeBomExpansionForEvidence(mixed)
+  assert.equal(evidence.rowErrorsTruncated, true)
+  assert.equal(evidence.rowErrorsTotal, ROW_ERROR_LIMIT + 7)
+  assert.equal(evidence.rowErrorsRetained, ROW_ERROR_LIMIT)
+  assert.deepEqual(evidence.rowErrorTypeCounts, mixed.summary.rowErrorTypeCounts)
+  const evidenceJson = JSON.stringify(evidence)
+  for (const value of ['P-001', 'PART-A', 'PART-B', 'not-a-number']) {
+    assert.equal(evidenceJson.includes(value), false, `truncation evidence hides ${value}`)
+  }
+}
+
+// (b) THE BASELINE. Under the cap, the capped expander and an effectively-uncapped one must produce
+// the SAME OBJECT — not "the same modulo the new keys". Stated as a deepEqual against a run with the
+// limit raised to the ceiling, plus an equality through the REAL revision hasher, because "no
+// revision moves" is the only version of the promise a deployment can act on.
+async function testUnderTheCapIsByteIdenticalToAnUncappedExpansion() {
+  const count = ROW_ERROR_LIMIT - 1
+  const capped = await expandBlankComponentBom(count)
+  const uncapped = await expandBlankComponentBom(count, { expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING } })
+
+  assert.deepEqual(capped.rowErrors, uncapped.rowErrors, 'the array is untouched below the cap')
+  assert.deepEqual(capped.summary, uncapped.summary, 'so is the whole values-free summary')
+  assert.deepEqual(
+    summarizeBomExpansionForEvidence(capped),
+    summarizeBomExpansionForEvidence(uncapped),
+    'so is the evidence projection',
+  )
+  assert.equal(revisionOf(capped), revisionOf(uncapped), 'and the dry-run revision does not move')
+
+  // The stanza is CONDITIONAL, so an under-cap summary's key set is the pre-cap one exactly. Stated
+  // as a key-set equality rather than four absences: a fifth key of any name is red too.
+  assert.deepEqual(
+    Object.keys(capped.summary).filter((key) => key.startsWith('rowError')),
+    [],
+    'an under-cap summary mounts no rowError* key whatsoever',
+  )
+
+  // The clean path — the overwhelmingly common one — is the same claim with zero rowErrors.
+  const { adapter } = createAdapter(baseData())
+  const clean = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(clean.status, 'expanded')
+  assert.deepEqual(Object.keys(clean.summary).filter((key) => key.startsWith('rowError')), [])
+  assert.deepEqual(
+    Object.keys(summarizeBomExpansionForEvidence(clean)).filter((key) => key.startsWith('rowError')),
+    [],
+    'and the evidence stanza a clean expansion produces is the pre-cap one, key for key',
+  )
+}
+
+// (c) OVER THE CAP: deterministic, and NOT confusable with a different overflowing project.
+//
+// The second half is the reason the revision had to learn about the truncation at all. 5001 blanks
+// and 6001 blanks produce byte-identical `rows`, `errors` AND retained `rowErrors` — the sample
+// cannot tell them apart. Without the overflow facts in the hash they would share a revision, and
+// one project's dry-run token would validate against the other's plan.
+async function testOverTheCapIsDeterministicAndDistinguishable() {
+  const first = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1)
+  const again = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1)
+  assert.deepEqual(first.rowErrors, again.rowErrors, 'the retained prefix is the same prefix every time')
+  assert.deepEqual(first.summary, again.summary, 'and so is the summary')
+  assert.equal(revisionOf(first), revisionOf(again), 'so the same input yields the same revision')
+
+  const bigger = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1001)
+  assert.deepEqual(bigger.rowErrors, first.rowErrors, 'the two projects share their retained sample exactly…')
+  assert.deepEqual(bigger.rows, first.rows, '…and their rows…')
+  assert.deepEqual(bigger.errors, first.errors, '…and their global errors')
+  assert.notEqual(bigger.summary.rowErrorsTotal, first.summary.rowErrorsTotal, 'only the totals differ')
+  assert.notEqual(
+    revisionOf(bigger),
+    revisionOf(first),
+    'and that alone must move the revision — otherwise two different overflowing projects share a dry-run token',
+  )
+}
+
+// Configuration may move the cap, and only within reach of the ceiling. Enforcement lives in the
+// expander (the only thing that reads the cap), and it REFUSES rather than clamps: a silent
+// `Math.min` would let a deploy config say 2000000 while 20000 ran, with nothing anywhere to tell
+// the operator which number was in force.
+async function testRowErrorLimitIsConfigurableUnderACeiling() {
+  const lowered = await expandBlankComponentBom(120, { expand: { rowErrorLimit: 50 } })
+  assert.equal(lowered.rowErrors.length, 50, 'a lower configured cap is honoured')
+  assert.equal(lowered.summary.rowErrorsTotal, 120, 'and the total is still the truth')
+
+  const atCeiling = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1, {
+    expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING },
+  })
+  assert.equal(
+    atCeiling.rowErrors.length,
+    ROW_ERROR_LIMIT + 1,
+    'the ceiling itself is a legal cap, and this fixture is under it',
+  )
+  assert.ok(ROW_ERROR_LIMIT_CEILING >= ROW_ERROR_LIMIT, 'the ceiling is not below the default')
+
+  await assert.rejects(
+    () => expandBlankComponentBom(1, { expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING + 1 } }),
+    /rowErrorLimit must not exceed/,
+    'one past the ceiling is a refusal, not a silent clamp',
+  )
+  await assert.rejects(
+    () => expandBlankComponentBom(1, { expand: { rowErrorLimit: 0 } }),
+    /rowErrorLimit/,
+    'a nonsense cap is refused rather than silently defaulted',
+  )
+
+  // TYPE STRICTNESS, and it is not pedantry. `Number()` turns `true` into 1, so a coercing parser
+  // would answer a config typo by cutting the retained defect list — the operator's whole worklist —
+  // down to a single entry, while every total stayed truthful and nothing looked wrong.
+  for (const nonsense of [true, [3], '7', 5.5]) {
+    await assert.rejects(
+      () => expandBlankComponentBom(1, { expand: { rowErrorLimit: nonsense } }),
+      /rowErrorLimit must be a positive integer/,
+      `rowErrorLimit: ${JSON.stringify(nonsense)} is refused rather than coerced`,
+    )
+  }
+}
+
+/**
+ * THE MISSING-PARTS LIST MUST NOT SHRINK WHEN THE ROWERROR CAP FIRES — and the failure was not
+ * merely a low number, it was an ARITHMETICALLY IMPOSSIBLE pair on the W3a operator panel:
+ *
+ *   `distinctCount` comes off the expander's uncapped id set.
+ *   `probeCount` was counted off the `rowErrors` ARRAY, which D-C made a bounded sample.
+ *
+ * So a truncated expansion rendered "缺件 240 种(共 50 处引用)" — more distinct missing parts than
+ * references to them, which cannot happen for real data (a part is missing because it was probed).
+ * The truth was sitting in the same summary object the whole time as
+ * `rowErrorTypeCounts.missing_component`; it just was not read. Same fail-open shape as
+ * `hasHardApplyBlockingRowErrors`, in the values-BEARING projection.
+ *
+ * The fixture lowers the cap rather than building 5000 absent parts, because the cap is the cap
+ * whatever its value and 240 part reads keeps this test sub-second.
+ */
+async function testMissingComponentProbeCountSurvivesTheRowErrorCap() {
+  const distinct = MISSING_COMPONENT_DETAIL_LIMIT + 40
+  const positionsPerPart = 2
+  const retained = 50
+  const probes = distinct * positionsPerPart
+  const { adapter } = createAdapter(bomOfMissingParts(
+    Array.from({ length: distinct }, (_unused, index) => [`PART-GONE-${String(index).padStart(4, '0')}`, positionsPerPart]),
+  ))
+  const result = await expandPlmProjectBom({
+    sourceAdapter: adapter,
+    projectNo: 'P-001',
+    rowErrorLimit: retained,
+  })
+
+  assert.equal(result.rowErrors.length, retained, 'the rowError array really is a sample here')
+  assert.equal(result.summary.rowErrorsTruncated, true)
+  assert.equal(result.summary.rowErrorTypeCounts.missing_component, probes, 'and the true total is on the summary')
+
+  const summary = summarizeMissingComponents(result)
+  assert.equal(summary.distinctCount, distinct, 'distinctCount still comes off the uncapped id set')
+  assert.equal(summary.probeCount, probes, 'and probeCount is the TRUE probe total, not the retained sample')
+  // Two positions per part on purpose: the detail collector retains 200 parts carrying 2 occurrences
+  // each, so a fix that only clamped probeCount up to the DETAIL total would answer 400 here and
+  // 480 is the only right answer. The bound below would accept 400; this equality does not.
+  assert.ok(
+    summary.probeCount >= summary.distinctCount,
+    'a part cannot be missing without having been probed — this pair may never invert',
+  )
+  assert.equal(summary.truncated, true)
+
+  // The structural floor holds even for an expansion that carries no summary at all (a stored W3a
+  // artifact from before D-C, or a hand-built object): distinctCount is never allowed to exceed
+  // probeCount, whatever any upstream cap did to the array.
+  const floor = summarizeMissingComponents({ missingComponentDistinctCount: 9, missingComponents: [], rowErrors: [] })
+  assert.equal(floor.distinctCount, 9)
+  assert.equal(floor.probeCount, 9, 'the floor answers with the distinct count rather than an impossible 0')
+}
+
 async function main() {
+  await testRowErrorCapBoundary()
+  await testUnderTheCapIsByteIdenticalToAnUncappedExpansion()
+  await testOverTheCapIsDeterministicAndDistinguishable()
+  await testRowErrorLimitIsConfigurableUnderACeiling()
+  await testMissingComponentProbeCountSurvivesTheRowErrorCap()
   await testMissingComponentDetailNeverReachesTheHashedSurfaces()
   await testMissingComponentsKeyIsPresentOnEveryReturnPath()
   await testMissingRootComponentCarriesNullParentAndBom()
