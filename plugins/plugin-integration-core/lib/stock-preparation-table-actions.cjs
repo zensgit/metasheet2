@@ -33,6 +33,7 @@ const {
   DEFAULT_MAX_PAGES,
   DEFAULT_MAX_ROWS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+  ROW_ERROR_LIMIT_CEILING,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
@@ -448,6 +449,7 @@ function normalizeStockPreparationActionConfig(input = {}) {
   const extensionFieldIds = normalizeActionExtensionFieldIds(input.extensionFieldIds, template)
   const carryPolicy = normalizeActionCarryPolicy(input.carryPolicy)
   const largeBom = normalizeActionLargeBomCaps(input.largeBom)
+  const rowErrorLimit = normalizeActionRowErrorLimit(input.rowErrorLimit)
   return {
     actionId,
     kind,
@@ -471,7 +473,38 @@ function normalizeStockPreparationActionConfig(input = {}) {
     maxElapsedMs: positiveInteger(input.maxElapsedMs, 'maxElapsedMs', undefined),
     maxDepth: input.maxDepth,
     maxRows: input.maxRows,
+    // D-C `rowErrors` cap override. Spread CONDITIONALLY for the same reason the block above is:
+    // an action config is snapshotted and hashed, and an unconditional key would move every legacy
+    // config's shape for a knob it never set.
+    ...(rowErrorLimit ? { rowErrorLimit } : {}),
   }
+}
+
+// D-C. The config-time half of the cap override, and it REFUSES rather than clamps for two reasons
+// the module already knows: a normalized action config is what gets snapshotted, echoed back and
+// hashed, so silently storing 100000 while the expander runs 20000 makes the stored config a lie
+// about what ran; and the operator gets no feedback at all about a knob they demonstrably meant to
+// move. Type strictness matches `ceilingBoundedPositiveInteger` in the expander — `true` and `[3]`
+// coerce to 1 and 3 under `Number()`, and a typo that silently cuts the retained defect list to one
+// entry is exactly the shape of failure this key exists to bound.
+//
+// The expander still enforces the same ceiling (it is the only thing that reads the cap, so it has
+// to). This is a second gate at the earlier boundary, not the only one.
+function normalizeActionRowErrorLimit(input) {
+  if (input === undefined || input === null || input === '') return undefined
+  if (!Number.isInteger(input)) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'rowErrorLimit must be a positive integer', { field: 'rowErrorLimit' })
+  }
+  const value = positiveInteger(input, 'rowErrorLimit', undefined)
+  if (value > ROW_ERROR_LIMIT_CEILING) {
+    throw new StockPreparationTableActionError(
+      422,
+      'TABLE_ACTION_CONFIG_INVALID',
+      `rowErrorLimit must not exceed ${ROW_ERROR_LIMIT_CEILING}`,
+      { field: 'rowErrorLimit', ceiling: ROW_ERROR_LIMIT_CEILING },
+    )
+  }
+  return value
 }
 
 function targetFieldMapHasExplicitBindings(fieldIdMap = {}) {
@@ -987,6 +1020,19 @@ function emptyPlan() {
   }
 }
 
+// The D-C overflow facts, read off the expansion's OWN summary (the expander is the only thing in a
+// position to count what it dropped) and reduced to the three that change what will be written.
+// `{}` — and therefore no key at all — for every expansion under the cap.
+function rowErrorTruncationRevisionKeys(expansion = {}) {
+  const summary = isPlainObject(expansion.summary) ? expansion.summary : {}
+  if (summary.rowErrorsTruncated !== true) return {}
+  return {
+    rowErrorsTruncated: true,
+    rowErrorsTotal: Number(summary.rowErrorsTotal || 0),
+    rowErrorTypeCounts: isPlainObject(summary.rowErrorTypeCounts) ? { ...summary.rowErrorTypeCounts } : {},
+  }
+}
+
 function buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan }) {
   return hashJson({
     actionId: action.actionId,
@@ -1002,6 +1048,15 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
       rows: expansion.rows,
       errors: expansion.errors,
       rowErrors: expansion.rowErrors,
+      // D-C. `rowErrors` is now a BOUNDED SAMPLE, so hashing it alone stopped being enough: two
+      // projects that overflow the cap with the same first 5000 entries and different totals would
+      // hash identically, and one project's dry-run token would then validate against the other's
+      // plan. The overflow facts go into the hash so they cannot.
+      //
+      // Spread CONDITIONALLY — stableStringify emits explicitly-undefined keys, so an unconditional
+      // key would move every revision ever computed. Under the cap this contributes nothing and the
+      // hash is byte-identical to the pre-cap one.
+      ...rowErrorTruncationRevisionKeys(expansion),
     },
     existingRows,
     conflictPolicyReview: conflictPolicyReview || null,
@@ -1348,6 +1403,9 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     maxElapsedMs: action.maxElapsedMs,
     maxDepth: action.maxDepth,
     maxRows: action.maxRows,
+    // D-C. Absent on every existing config => the expander's default cap, which is the whole point:
+    // the bound arrives without a deployment having to ask for it.
+    rowErrorLimit: action.rowErrorLimit,
     extFieldMapping,
     // E3-02's 断游标 half. Armed only: a page that claims `done: false` and offers no cursor stops
     // being a silent truncation and becomes a refusal.
@@ -1476,7 +1534,18 @@ function dryRunStatus(dryRun) {
   return 'failed'
 }
 
+// D-C FAIL-CLOSED. Once `rowErrors` is a bounded SAMPLE, "no hard-blocking entry in the array" stops
+// being the same claim as "no hard-blocking rowError happened": a project whose every
+// `missing_child_bom` landed past the cap would look applicable. The per-type TOTALS the expander
+// publishes when it truncated are the authority, and they are consulted first.
 function hasHardApplyBlockingRowErrors(expansion) {
+  const summary = isPlainObject(expansion && expansion.summary) ? expansion.summary : {}
+  if (summary.rowErrorsTruncated === true) {
+    const counts = isPlainObject(summary.rowErrorTypeCounts) ? summary.rowErrorTypeCounts : {}
+    for (const type of Object.keys(counts)) {
+      if (HARD_APPLY_BLOCKING_ROW_ERROR_TYPES.has(type) && Number(counts[type]) > 0) return true
+    }
+  }
   const rowErrors = Array.isArray(expansion && expansion.rowErrors) ? expansion.rowErrors : []
   return rowErrors.some((entry) => isPlainObject(entry) && HARD_APPLY_BLOCKING_ROW_ERROR_TYPES.has(entry.type))
 }
@@ -1954,6 +2023,7 @@ module.exports = {
     assertTargetFieldMapCompleteness,
     buildRevision,
     confirmationDecisionEvidence,
+    hasHardApplyBlockingRowErrors,
     mergeTableScopeConflictPolicyReviews,
     normalizeActionLargeBomCaps,
     consumeDryRunToken,

@@ -228,6 +228,26 @@ C2 的 `cell` 粒度同理：一个 (ext 目标列 × 源列 × 声明类型 × 
 
 分组内 `conflictSummary` 的代表性：同一身份组的成员按构造**必然携带完全相同的 `conflictSummary`**——身份 context 是 `conflictSummary` 细节的超集（`locus` 含 `field`/`depth`/`relation`，`cell` 含 `depth`；A/B 族的 `conflictSummary` 只有 `{type}`）。故取组内首条作代表与顺序无关。
 
+> 脚注（2026-09-06，D-C `rowErrors` 封顶）：第 1 步的「同一 `rowErrors`」现在是**同一有界样本**。`stock-preparation-bom-expansion.cjs` 的 `addRowError` 在 `ROW_ERROR_LIMIT`（默认 5000）之后**只计数不追加**：数组保留**生产顺序的前 5000 条**，所以截断是确定性的，第 1→5 步的推理逐段照旧成立，身份配方、`stableDecisionKey`、`inputFingerprint` 一字未动。
+>
+> 上限可由 action 配置的 `rowErrorLimit` 覆盖，硬顶 `ROW_ERROR_LIMIT_CEILING` = 20000，**超顶是 422 拒绝而不是静默钳制**（配置期与展开器两处都拒），类型也不做 `Number()` 转型（`true` / `[3]` / `'7'` 一律拒），理由与同模块 `ceilingBoundedPositiveInteger` 的注释一致：把 `rowErrorLimit: true` 悄悄读成 1 会让操作员的整份缺陷工作清单只剩一条，而所有总数依旧真实、表面看不出任何异常。**这个旋钮只对前台交互式试算通道生效**——大 BOM 后台通道的 `largeBomExpansionOptionsForAction`（`http-routes.cjs`，pin 文件）不带这个键，后台恒用默认 5000。
+>
+> 对本规格的三点影响，都在**上限以内为零**：
+>
+> 1. **上限以内字节级不变。** `rowErrorsTotal` / `rowErrorsRetained` / `rowErrorsTruncated` / `rowErrorTypeCounts` 四个键**条件挂载**（与 `subtree` 同一手法），只有真的溢出才出现。因此 ≤5000 条 rowError 的项目：`rowErrors` 内容与顺序不变、`summary` 键集不变、`summarizeBomExpansionForEvidence` 输出不变、`buildRevision` 哈希不变、`anon-hold:v1:locus:…` 身份不变、ledger details 不变——**没有任何已存 revision 移动，没有任何在飞的 hold 被 supersede**。
+> 2. **超限项目的 revision 必然移动，这是有意的。** `buildRevision` 的 expansion 投影在溢出时把 `rowErrorsTruncated` / `rowErrorsTotal` / `rowErrorTypeCounts` 一并入哈希。不入哈希才是 bug：两个前 5000 条完全相同、总数不同的超限项目会撞同一 revision，一个项目的 dryRunToken 就能验过另一个项目的计划。后果是超限项目的在飞 `dryRunToken` 会 409 MISMATCH、人工确认会 SUPERSEDED 重开——可接受，因为这类项目在封顶前本来就跑不出可用结果（数万条 rowError 撑爆响应、哈希与账本）。
+> 3. **计数保真，`errorTypes` 不失真。** 每一次 `addRowError` 都进 `rowErrorsTotal` 与按 type 的真实总数；`makeSummary` 的 `errorTypes` 会并入**被丢弃条目的类型**，所以「某一类的每一条都在上限之外」时，summary 仍然说得出这个项目有这类缺陷。`stock-preparation-table-actions.cjs` 的 `hasHardApplyBlockingRowErrors` 因此改为**先查真实按类计数、再查数组**（fail-closed）：被丢掉的 `missing_child_bom` 照样挡住 apply。
+>
+> evidence 侧仍是 values-free：新增的只有四个整数/布尔与 type 令牌，而 type 令牌是 `errorTypes` 一直就在公布的同一封闭词表。
+>
+> **「数组不再等于事实」的另外三处投影（2026-09-06 对抗审查补记；前两处已随本刀修掉，第三处如实记为已知偏差）：**
+>
+> - **快照映射器 `stock-preparation-expansion-snapshot-mapper.cjs`——已修。** 它把 `missing_child_bom` rowError 铸成 `lineStatus: 'incomplete'` 的合成快照行，这是该缺陷进入快照的唯一通道；被封顶丢掉的条目它根本看不见，于是 `status` 会从 `incomplete` 翻成 `mapped`、`stock-preparation-sync-run-plan.cjs` 的 `computeFlags` 无行可标、`runStatus` 从 `partial` 翻成 `succeeded`，一份**明知短缺**的快照被当作完整的落库。改法与 `hasHardApplyBlockingRowErrors` 同一手法：映射器读 `expansion.summary.rowErrorTypeCounts` 的真实计数，与自己 stamp 出的行数比对，差额 > 0 就**不许说 `mapped`**，evidence 上条件挂 `result.unstampedMissingChildBomRowErrors`（短缺几行）与 `input.rowErrorsTruncated` / `input.rowErrorsRetained`，`input.rowErrors` / `input.missingChildBomRowErrors` 改报真实总数；`runStatus` 也随之改为「有 flag **或** 映射器不说 mapped」才算 succeeded。上限以内一个新键都不挂，run 行的 `inputShape` 字符串逐字不变。
+> - **缺件清单 `summarizeMissingComponents` 的 `probeCount`——已修。** 它数的是 `rowErrors` 数组里 `type === 'missing_component'` 的条数，而同一份返回里的 `distinctCount` 走的是**未封顶**的 id 集合；于是超限项目会渲染出「缺件 240 种（共 50 处引用）」这种引用数小于种类数、对真实数据算术上不可能的一对。改法：truncated 时取 `summary.rowErrorTypeCounts.missing_component` 作真值，并把 `distinctCount` 定为 `probeCount` 的结构性下界（一个零件不被探测就不会被判缺）。
+> - **`summarizeConflictPlanForEvidence` 的 plan 段——已知偏差，本刀不修。** 该函数的 `summary.rowErrors` 是**保留条数**，其 `conflictTypes` 也只覆盖保留样本（展开侧 `makeSummary` 的 `errorTypes` 专门并入了被丢弃类型，规划器侧没有对应处理，所以超限项目会整类丢失）。**审计者读确认账本的 plan 段时请注意：plan 段的 rowErrors 计数与 `conflictTypes` 清单是样本，真数与全量类型看同一份 evidence 的 expansion 段**（`rowErrorsTotal` / `rowErrorTypeCounts` / `errorTypes`）。不修的理由是它只进已经会因溢出而移动的 revision 与 evidence，不是任何门的判据。
+>
+> 大 BOM 后台作业（`stock-preparation-large-bom-jobs.cjs`）**没有自己的 rowErrors 投影**（它给 planner 喂的是 `rowErrors: []`）。它安全的真实理由是：**任何一条 rowError 都让展开 `status='failed'` / `valid !== true`，于是作业走 `job.status='failed'; delete job.artifact`**——被截断的展开根本产不出 artifact，`expansionArtifactRevision` 压根不会被计算。（本脚注早先写的「溢出事实经 `expansion.summary` → `expansionArtifactRevision` 自动带进作业产物哈希」是空的，按上句更正，免得后来人依据一个错误的安全论据去动那条链。同理 `job.evidence` 是固定四键投影，永远不会呈现 `rowErrorsTruncated`——今天纯属理论问题，因为超限展开不产 artifact。）
+
 ---
 
 ## 8. 留给后续刀次（本规格明确**不做**）

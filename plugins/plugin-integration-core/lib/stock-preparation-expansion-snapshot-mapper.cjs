@@ -75,6 +75,36 @@ function assertPlanGrounded(plan) {
   return { codeField, versionField: optionalString(part.versionField) }
 }
 
+// D-C (stock-preparation-bom-expansion.cjs ROW_ERROR_LIMIT). `expansion.rowErrors` is capped at 5000
+// entries, so the array this module reads is a SAMPLE, not the set — and this module's whole job is
+// to turn `missing_child_bom` rowErrors into the incomplete snapshot lines the diff engine and
+// generation branch on. A project whose `missing_child_bom` entries all landed past the cap would
+// therefore be mapped as if it had none: `status` flips 'incomplete' -> 'mapped', the incomplete
+// lines are never synthesized, `stock-preparation-sync-run-plan.cjs` computes no flags off them and
+// the run is persisted as SUCCEEDED. That is the same fail-open the cap opened in
+// `hasHardApplyBlockingRowErrors`, in the second place the array is mistaken for the facts.
+//
+// The expander publishes the TRUE per-type totals whenever it truncated, and they ride on
+// `expansion.summary`, which the live callers already hand over whole. This reads them.
+//
+// Returns `null` for every expansion under the cap, so nothing below it changes by a byte.
+function rowErrorTruncationOf(rowsArg, retainedMissingChildBom) {
+  const summary = (isPlainObject(rowsArg) && isPlainObject(rowsArg.summary)) ? rowsArg.summary : null
+  if (!summary || summary.rowErrorsTruncated !== true) return null
+  const counts = isPlainObject(summary.rowErrorTypeCounts) ? summary.rowErrorTypeCounts : {}
+  const trueMissingChildBom = Number(counts[MISSING_CHILD_BOM_ROW_ERROR] || 0)
+  const total = Number(summary.rowErrorsTotal || 0)
+  return {
+    rowErrorsTotal: Number.isFinite(total) ? total : 0,
+    // The count this mapper could NOT synthesize a line for. Non-zero is the whole point: it is the
+    // number of incomplete lines the batch is knowingly short, and it is what forbids 'mapped'.
+    unstampedMissingChildBom: Number.isFinite(trueMissingChildBom) && trueMissingChildBom > retainedMissingChildBom
+      ? trueMissingChildBom - retainedMissingChildBom
+      : 0,
+    trueMissingChildBom: Number.isFinite(trueMissingChildBom) ? trueMissingChildBom : 0,
+  }
+}
+
 function extractRowsAndErrors(rowsArg, options) {
   const optRowErrors = Array.isArray(options.rowErrors) ? options.rowErrors : null
   if (isPlainObject(rowsArg) && Array.isArray(rowsArg.rows)) {
@@ -214,15 +244,27 @@ function summarizeBy(rows, field) {
   return out
 }
 
-function buildValuesFreeEvidence({ expansionRows, rowErrors, mappedLines, stampedLines, plan }) {
+function buildValuesFreeEvidence({ expansionRows, rowErrors, mappedLines, stampedLines, plan, rowErrorTruncation }) {
   const allLines = mappedLines.concat(stampedLines)
+  const retainedMissingChildBom = rowErrors.filter(
+    (entry) => isPlainObject(entry) && optionalString(entry.type) === MISSING_CHILD_BOM_ROW_ERROR,
+  ).length
+  const truncated = isPlainObject(rowErrorTruncation) ? rowErrorTruncation : null
   return {
     input: {
       expansionRows: expansionRows.length,
-      rowErrors: rowErrors.length,
-      missingChildBomRowErrors: rowErrors.filter(
-        (entry) => isPlainObject(entry) && optionalString(entry.type) === MISSING_CHILD_BOM_ROW_ERROR,
-      ).length,
+      // TRUE TOTALS once D-C truncated, not array lengths — `input` is what
+      // `stock-preparation-sync-run-plan.cjs` stringifies into the persisted run's `inputShape`, and
+      // a run record that reports the sample size as the input size is a durable false number. The
+      // sample size stays available, under its own key, mounted only when the two differ.
+      rowErrors: truncated ? Math.max(truncated.rowErrorsTotal, rowErrors.length) : rowErrors.length,
+      missingChildBomRowErrors: truncated
+        ? Math.max(truncated.trueMissingChildBom, retainedMissingChildBom)
+        : retainedMissingChildBom,
+      // CONDITIONAL, so every expansion under the cap keeps a byte-identical evidence stanza.
+      ...(truncated
+        ? { rowErrorsTruncated: true, rowErrorsRetained: rowErrors.length }
+        : {}),
     },
     result: {
       lines: allLines.length,
@@ -231,6 +273,11 @@ function buildValuesFreeEvidence({ expansionRows, rowErrors, mappedLines, stampe
       byLineStatus: summarizeBy(allLines, 'lineStatus'),
       withParentDrawingNo: mappedLines.filter((line) => optionalString(line.parentDrawingNo)).length,
       missingChildBomMarked: allLines.filter((line) => line.missingChildBom === true).length,
+      // The gap between what the expansion FOUND and what this mapper could synthesize a line for.
+      // Mounted only when it is non-zero, and it is the reason `status` is forced off 'mapped'.
+      ...(truncated && truncated.unstampedMissingChildBom > 0
+        ? { unstampedMissingChildBomRowErrors: truncated.unstampedMissingChildBom }
+        : {}),
     },
     // readPlanId is a public compile-time template constant (not a secret / tenant / host / private config).
     readPlanId: optionalString(plan && plan.id),
@@ -275,12 +322,25 @@ function mapExpansionRowsToSnapshotLines(rows, opts = {}) {
     }
   })
 
+  // D-C fail-closed. See `rowErrorTruncationOf`: when the cap dropped `missing_child_bom` entries
+  // this mapper never saw them, so `stampedLines.length` is short and 'mapped' would be a claim the
+  // expansion's own summary contradicts. `null` (and therefore no change at all) below the cap.
+  const rowErrorTruncation = rowErrorTruncationOf(rows, stampedLines.length)
+  const missingChildBomUnstamped = rowErrorTruncation ? rowErrorTruncation.unstampedMissingChildBom > 0 : false
+
   const lines = mappedLines.concat(stampedLines)
   return {
-    status: stampedLines.length ? 'incomplete' : 'mapped',
+    status: (stampedLines.length || missingChildBomUnstamped) ? 'incomplete' : 'mapped',
     snapshotBatchId,
     lines,
-    evidence: buildValuesFreeEvidence({ expansionRows: normalizedRows, rowErrors, mappedLines, stampedLines, plan }),
+    evidence: buildValuesFreeEvidence({
+      expansionRows: normalizedRows,
+      rowErrors,
+      mappedLines,
+      stampedLines,
+      plan,
+      rowErrorTruncation,
+    }),
   }
 }
 
