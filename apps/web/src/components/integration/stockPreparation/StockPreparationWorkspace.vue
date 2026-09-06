@@ -88,10 +88,25 @@
         @open-multitable="handleOpenFillTarget"
         @select-project-no="handleProjectNoSelect"
       />
+      <!-- 确认队列's two platform-admin controls (建账本 / 重新扫描) emit; the SHELL calls. They
+           emitted into nothing until now, so pressing either did nothing and said nothing — the
+           purest form of a control that lies about what it does. The shell is the listener because
+           the shell already owns every cross-tab service call on this page; `adminActionNotice`
+           below is where the answer lands, values-free either way. -->
       <StockPreparationConfirmationQueueView
         v-else-if="effectiveKey === 'confirmation-queue'"
         :scope="scope"
+        @admin-action="handleAdminAction"
       />
+      <p
+        v-if="adminActionNotice"
+        class="stock-prep__admin-notice"
+        data-testid="stock-prep-admin-action-notice"
+        role="status"
+      >
+        {{ bi(adminActionNotice.zh, adminActionNotice.en) }}
+        <code v-if="adminActionErrorCode" class="stock-prep__admin-token">{{ adminActionErrorCode }}</code>
+      </p>
       <!-- §14 (multitable-application-model-20260830.md): the INSTALL page — the app's defaults laid
            out for a customer admin to confirm, the deployment preflight, and a SKIP-aware install run
            that walks the bootstrap script's own step order. Workbench-admin tier; the run control
@@ -183,6 +198,13 @@ import {
   canUseLegacyMvpTabs,
   landsOnStockPrepProjectBoard,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
+import { createStockPreparationInstallApi } from '../../../services/integration/stockPreparation/installRun'
+import { createStockPreparationProjectSyncApi } from '../../../services/integration/stockPreparation/projectSync'
+import {
+  stockPrepAdminActionPlain,
+  stockPrepErrorPlain,
+  type StockPrepPlainText,
+} from '../../../services/integration/stockPreparation/plainLanguage'
 
 const { locale } = useLocale()
 const auth = useAuth()
@@ -528,6 +550,77 @@ function handleOpenFillTarget(target: { sheetId: string; viewId: string } | null
   })
 }
 
+// ---------------------------------------------------------------------------
+// 确认队列's two platform-admin buttons — THE WIRING
+// ---------------------------------------------------------------------------
+//
+// WHAT WAS BROKEN. `StockPreparationConfirmationQueueView` renders 建立确认账本 and 重新扫描待确认的事
+// behind the PLATFORM_ADMIN_GATE and emitted `admin-action` for both. This shell — the component's
+// only mount point — declared no listener, so both clicks were swallowed: no request, no error, no
+// notice. A control that is visible, enabled and inert is worse than an absent one, because the
+// admin who presses it believes the ensure ran.
+//
+// WHAT THIS DOES NOT CHANGE. The buttons' VISIBILITY is untouched: it stays on
+// `STOCK_PREP_WORKBENCH_CAPABILITIES`' PLATFORM_ADMIN_GATE, evaluated inside the queue component, so
+// an operator still never sees either. This adds the calls behind them and nothing else.
+//
+// WHICH CLIENTS. Both already existed and neither is re-implemented here:
+//   * ensure    -> `createStockPreparationInstallApi(scope).ensureConfirmationLedger()`, the same
+//                  idempotent POST the install tab's run drives (body strictly empty: the staging
+//                  project is auth-derived, and a request projectId would be a steering vector).
+//   * reconcile -> `createStockPreparationProjectSyncApi(scope).reconcile(projectNo)`, the same call
+//                  step 2 of 从PLM拉取 makes, on the same frozen pull-bom action id.
+//
+// VALUES-FREE. The notice is one of three fixed sentences (plainLanguage's admin-action table) or the
+// error table's sentence for a clamped code; a returned count, a project number or a part number
+// never reaches it. The raw code is rendered beside the sentence, in the same shape the queue's own
+// error line uses, because that token is what a person quotes when they ask for help.
+const adminActionNotice = ref<StockPrepPlainText | null>(null)
+/** Non-null ONLY on a failure — it is the code shown beside the sentence, never a success marker. */
+const adminActionErrorCode = ref<string | null>(null)
+/** Guards a double-press from queueing a second identical run while the first is still in flight. */
+const adminActionBusy = ref(false)
+
+/** Identifier-shaped codes only: a server message must never reach the screen through this field. */
+const ADMIN_ACTION_ERROR_CODE = /^[A-Z0-9_]{1,80}$/
+
+function adminActionCodeOf(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' && ADMIN_ACTION_ERROR_CODE.test(code) ? code : null
+}
+
+async function handleAdminAction(action: 'ensure' | 'reconcile', projectNo: string): Promise<void> {
+  if (adminActionBusy.value) return
+  const trimmed = typeof projectNo === 'string' ? projectNo.trim() : ''
+  // reconcile is scoped to ONE project server-side. Saying so here beats sending a request that can
+  // only come back as a shapeless 400.
+  if (action === 'reconcile' && trimmed.length === 0) {
+    adminActionErrorCode.value = null
+    adminActionNotice.value = stockPrepAdminActionPlain('PROJECT_NO_REQUIRED')
+    return
+  }
+  adminActionBusy.value = true
+  adminActionNotice.value = null
+  adminActionErrorCode.value = null
+  try {
+    if (action === 'ensure') {
+      await createStockPreparationInstallApi(scope).ensureConfirmationLedger()
+      adminActionNotice.value = stockPrepAdminActionPlain('ENSURE_OK')
+    } else {
+      await createStockPreparationProjectSyncApi(scope).reconcile(trimmed)
+      adminActionNotice.value = stockPrepAdminActionPlain('RECONCILE_OK')
+    }
+  } catch (error) {
+    const code = adminActionCodeOf(error)
+    adminActionErrorCode.value = code
+    // `stockPrepErrorPlain` falls back to its own generic for an unknown/absent code, so there is no
+    // state in which the notice renders empty after a failure.
+    adminActionNotice.value = stockPrepErrorPlain(code ?? '')
+  } finally {
+    adminActionBusy.value = false
+  }
+}
+
 /** What the panel's endpoint badge claims. One expression, so no tab can claim the wrong shape. */
 function badgeLabel(view: StockPreparationViewTab): string {
   if (view.provisioning) return bi('读清单 + 幂等建表(管理员)', 'manifest read + idempotent ensure (admin)')
@@ -653,5 +746,18 @@ function effectLabel(view: StockPreparationViewTab): string {
   margin: 0;
   color: var(--ms-text-3);
   font-size: 13px;
+}
+
+.stock-prep__admin-notice {
+  margin: var(--ms-space-3) 0 0;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.stock-prep__admin-token {
+  margin-left: var(--ms-space-2);
+  font-size: 12px;
+  color: var(--ms-text-3);
 }
 </style>

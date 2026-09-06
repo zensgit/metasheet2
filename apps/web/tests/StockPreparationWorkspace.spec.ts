@@ -1025,6 +1025,119 @@ describe('StockPreparationWorkspace shell', () => {
     }
   })
 
+  // -------------------------------------------------------------------------
+  // 确认队列's two PLATFORM-ADMIN buttons — the wiring, and what it may say
+  // -------------------------------------------------------------------------
+  //
+  // THE BUG THESE PIN. `StockPreparationConfirmationQueueView` rendered 建立确认账本 and
+  // 重新扫描待确认的事 and emitted `admin-action` for both. This shell is the component's ONLY mount
+  // point and declared no listener, so both clicks were swallowed entirely: no request left the
+  // browser, no error appeared, and the admin who pressed 建账本 had every reason to believe the
+  // ensure had run. Every assertion below is about a request that must now be made and a sentence
+  // that must now appear.
+
+  /** The queue tab's own on-mount reads answered with empty, valid envelopes. */
+  function answerQueueReads(): void {
+    h.apiFetch.mockImplementation(async (url: string) => new Response(JSON.stringify({
+      ok: true,
+      data: String(url).includes('/operator/projects')
+        ? { tenantId: 't1', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+        : {},
+    }), { status: 200 }))
+  }
+
+  function postCalls(pathFragment: string): string[] {
+    return h.apiFetch.mock.calls
+      .filter((call) => String((call[1] as RequestInit | undefined)?.method ?? 'GET').toUpperCase() === 'POST')
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes(pathFragment))
+  }
+
+  it('the ensure button really calls the confirmation-ledger ensure route and says what happened', async () => {
+    answerQueueReads()
+    const root = await mountShell()
+    const ensure = root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement
+    expect(ensure).not.toBeNull()
+    ensure.click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(postCalls('/stock-preparation/confirmation-decisions/ensure').length).toBe(1)
+    expect(notice.textContent).toContain('确认账本已经就位')
+    // A SUCCESS carries no error token — the code element renders only on a failure.
+    expect(notice.querySelector('code')).toBeNull()
+  })
+
+  it('the reconcile button calls the table-action reconcile route for the number on screen', async () => {
+    answerQueueReads()
+    const root = await mountShell()
+    const input = root.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
+    input.value = '230920006'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    const calls = postCalls('/confirmation-decisions/reconcile')
+    expect(calls.length).toBe(1)
+    expect(calls[0]).toContain('/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/')
+    expect(notice.textContent).toContain('已经重新扫描过一遍')
+  })
+
+  it('reconcile with no project number asks for one instead of firing a request that cannot succeed', async () => {
+    answerQueueReads()
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(postCalls('/confirmation-decisions/reconcile').length).toBe(0)
+    expect(notice.textContent).toContain('请先填一个项目号')
+  })
+
+  // The refusal this PR's server half added. It reaches the shell as an ordinary clamped code, so
+  // the notice must be the code's OWN sentence — not the generic "did not save" — and must carry no
+  // project number of its own.
+  it('a refused reconcile shows the plain-language refusal plus its code, values-free', async () => {
+    h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(init?.method ?? 'GET').toUpperCase() === 'POST') {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: { code: 'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE', message: 'nope' },
+        }), { status: 403 })
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        data: String(url).includes('/operator/projects')
+          ? { tenantId: 't1', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+          : {},
+      }), { status: 200 })
+    })
+    const root = await mountShell()
+    const input = root.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
+    input.value = '230920006'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(notice.textContent).toContain('不在您能看到的项目里')
+    expect(notice.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE')
+    // The wording is the CODE's own, not the write-generic every unknown code falls back to.
+    expect(notice.textContent).not.toContain('这一步没有保存成功')
+    // ...and the number the admin typed is not echoed back into the notice.
+    expect(notice.textContent).not.toContain('230920006')
+  })
+
+  // R-11's other half, restated for the newly-live buttons: wiring them must not have made them
+  // reachable by anyone who could not see them before.
+  it('a stock-prep operator sees neither admin button, so neither can be pressed', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    answerQueueReads()
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]')).toBeNull()
+    expect(postCalls('/confirmation-decisions/').length).toBe(0)
+  })
+
   it('shell copy is values-free (no secrets, no long numeric runs) in both locales', async () => {
     for (const locale of ['zh-CN', 'en']) {
       h.locale = locale

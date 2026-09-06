@@ -616,6 +616,7 @@ const { listStockPreparationProjects } = require('./stock-preparation-project-re
 // tenant's projectNo + projectName; the values-free module it sits beside is not modified.
 const {
   StockPreparationOperatorDirectoryError,
+  assertOperatorMaySeeProject,
   listOperatorProjectDirectory,
 } = require('./stock-preparation-operator-project-directory.cjs')
 // 项目备料页 — ONE project's board. The fourth value-bearing stock-prep read; it rides the SAME
@@ -5819,6 +5820,51 @@ function requireStockPreparationAudit() {
         VALID_TABLE_ACTION_CONFIRMATION_DECISION_RECONCILE_BODY_KEYS,
       )
       const tenantId = resolveAuthUserTenantId(req)
+      // 对账限本人可见项目 — THE SECOND DOOR, AND THE ONLY ONE THAT LOOKS AT THE PROJECT NUMBER.
+      //
+      // `requireTableActionAccess` above answers two questions and stops: does this principal hold
+      // the tier, and (on the operator branch) is its tenant proven. Neither of them reads the body.
+      // But this route's `projectNo` comes FROM the body, and reconcile's orphan sweep supersedes
+      // the PENDING ledger rows of whichever project it is pointed at — so until now the number a
+      // floor operator typed decided whose confirmation queue got rewritten, anywhere in the tenant.
+      //
+      // WHO IS CHECKED, AND WHY THE PREDICATE IS THE SAME ONE `hasPermission(user, 'admin')` PICKS.
+      // `requireTableActionAccess` admits on `hasPermission(user, legacyGate)` FIRST and returns
+      // before the operator branch; this re-asks that exact expression with the exact same
+      // `legacyGate` value, so the two cannot disagree about which branch a caller took. A platform
+      // admin / `integration:admin` holder is therefore untouched by everything below — same route,
+      // same behaviour, byte for byte — and only the tier C13 newly admitted pays for the check.
+      //
+      // WHERE IT SITS: before `getTableAction`, before the B2a fence, before the source adapter and
+      // before the audit append — so a refused caller reaches no action, no external system, no
+      // credential decrypt and leaves no audit row. The staging locator is derived from the VERIFIED
+      // scope, never from the request, exactly as the directory route derives it.
+      //
+      // A body with NO projectNo skips this and keeps its existing answer: the parameter validator
+      // downstream already refuses it 400 with its own code, and turning that into a visibility 403
+      // here would relabel a malformed request as a permission problem.
+      const reconcileProjectNo = firstString(body.parameters && body.parameters.projectNo)
+      if (reconcileProjectNo && !hasPermission(user, 'admin')) {
+        // Resolved a SECOND time on purpose. The gate above resolves a scope for its refusals and
+        // returns only the user (see `requireTableActionAccess`'s header), and widening that helper's
+        // return shape would touch every table-action route for the benefit of one. The cost is one
+        // extra host membership boolean on the operator branch of a single route; the alternative —
+        // deriving the tenant here some cheaper way — is exactly the "another way to decide tenancy"
+        // the operator-scope module forbids.
+        const reconcileScope = await resolveOperatorValueScope({
+          user,
+          authenticatedTenantId: req.authenticatedTenantId,
+          explicitTenantIds: collectExplicitTenantIds(req, {}),
+          tenantPrincipalDirectory,
+        })
+        await assertOperatorMaySeeProject({
+          recordsApi: getMultitableRecordsApi(),
+          provisioning: getMultitableProvisioning(),
+          targetProjectId: resolveIntegrationStagingProjectId(reconcileScope.tenantId, undefined),
+          scope: reconcileScope,
+          projectNo: reconcileProjectNo,
+        })
+      }
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction({ tenantId, actionId }))
       // B2a entry point (1), RECONCILE half — the gap W-2 closes at this layer.

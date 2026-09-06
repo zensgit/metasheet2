@@ -266,8 +266,14 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 | 角色 | 能做 | 不能做(留给 `integration:admin`) |
 |---|---|---|
-| 一线操作员(`stock-prep:operate` **且** `stock-prep:read`,已开命名空间准入) | 搜自己租户的项目、开项目备料页;跑拉取(试算/写入,含大 BOM 后台通道);确认队列的 `confirmation-decisions/reconcile`;在多维表填人工列;导出 Excel;"通知下一步"推进 | 落快照批次(`mvp-persist`);装表/装 pack/`sandbox-target/ensure`;选源(`source-binding`);跨租户读任何东西;生产写 canonical(本期任何角色都不能,见 §7④) |
+| 一线操作员(`stock-prep:operate` **且** `stock-prep:read`,已开命名空间准入) | 搜自己租户的项目、开项目备料页;跑拉取(试算/写入,含大 BOM 后台通道);确认队列的 `confirmation-decisions/reconcile`(**限本人可见项目**,见下);在多维表填人工列;导出 Excel;"通知下一步"推进 | 落快照批次(`mvp-persist`);装表/装 pack/`sandbox-target/ensure`;选源(`source-binding`);跨租户读任何东西;生产写 canonical(本期任何角色都不能,见 §7④) |
 | 平台管理员(`role:admin` / `integration:admin`) | 上述"不能做"里的全部;授权限、开命名空间准入 | — |
+
+> **对账限本人可见项目**:一线操作员调 `confirmation-decisions/reconcile` 时,项目号必须是**「我的项目目录」(`GET /api/integration/stock-preparation/operator/projects`)能列出来的项目**;不在里面的项目号一律 403 `STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE`,且拒绝发生在读源之前(不读 PLM、不解密连接、不写审计)。平台管理员不受此限制,行为与之前完全一致。
+>
+> 两点如实说明,免得把这道门当成比它更强的保证:
+> - **这是"限本租户的项目",不是"限本人的项目"**。目录本身是按租户给的(见 `stock-preparation-operator-scope.cjs`:作用域"不是按行的"),同一家工厂的两个操作员看到同一批项目,这道门分不开他们。要真正区分同事,需要一张目前还不存在的项目归属表。
+> - **部署里根本没有 MVP 项目表时,这道门放行**(并在代码里明写为限制)。该表只由 `mvp-persist` 写,而 `mvp-persist` 是平台管理员 + 开关双重限制,所以客户部署上它常常压根不存在;在那里拒绝等于把确认队列整条链从一线手里拿走。**推论**:一旦某个部署跑过 `mvp-persist`、该表存在了,一个**从未归档过**的新项目,一线第一次对账会被这道门拒绝(需要管理员代跑一次对账,或先归档该项目)。这一条待 owner 追认。
 
 **5-4 项目备料页 tab 的落地行为**:登录后访问 `/stock-prep`(路由不带 tab 参数)。一线操作员账号自动落在"项目备料"tab;平台管理员账号自动落在"确认队列"tab,需手动点开"项目备料"。也可以直接带 `?projectNo=<项目号>` 深链到某个项目。
 

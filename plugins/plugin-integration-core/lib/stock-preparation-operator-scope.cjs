@@ -105,6 +105,19 @@
 //           claimless deployment the `x-tenant-id` header decided both the row and the trail. The
 //           scope is resolved BEFORE the audit append, so a refused caller leaves no audit row.
 //
+//       10. POST …/table-actions/:actionId/confirmation-decisions/reconcile
+//           `tableActionConfirmationDecisionsReconcile` — 对账限本人可见项目. The odd one out on this
+//           list: it resolves the scope not to decide what it may SHOW (its response is counts and
+//           evidence tokens in every branch) and not only to decide whose ledger it writes, but to
+//           decide WHOSE PROJECT DIRECTORY answers "is this projectNo one of yours". Round-2 (C13)
+//           admitted the operator tier here with the tenant proven and nothing else, and the route
+//           takes its `projectNo` from the body — so one operator could point reconcile's orphan
+//           sweep at another project's pending decision rows anywhere in the tenant. The scope
+//           resolved here picks the staging project the directory is read from, which is why a
+//           header-fillable tenant would defeat the check rather than merely mis-scope a read.
+//           OPERATOR BRANCH ONLY: a caller admitted by the legacy `integration:admin` tier returns
+//           from `requireTableActionAccess` before any of this and is byte-for-byte unchanged.
+//
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
 // both handoff entries so this list cannot go stale unnoticed.

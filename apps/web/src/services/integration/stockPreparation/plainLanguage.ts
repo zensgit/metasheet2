@@ -639,6 +639,15 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object
     zh: '请求指定的工厂与您的账号不一致,请切回您所属的工厂。',
     en: 'The request names a different factory from the one your account belongs to — switch back to your own factory.',
   }),
+  // 对账限本人可见项目. The reconcile route's project-visibility 403, raised only for the operator
+  // tier (a platform admin never sees it). Worded like the board's 404 rather than like a scolding:
+  // the refusal is SHAPELESS server-side — a project of another factory and a number nobody has get
+  // the identical answer — so the copy must not claim to know which of the two it was, and must not
+  // invite a retry that will answer the same way forever.
+  STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE: Object.freeze({
+    zh: '这个项目号不在您能看到的项目里,所以不能对它重新扫描。请从上面的项目列表里选一个,或者找管理员。',
+    en: 'That project number is not one of the projects you can see, so it cannot be re-scanned. Pick one from your project list above, or ask an administrator.',
+  }),
   // The 503 the audit-vocabulary gate raises. It is a DEPLOYMENT state with a named fix, and the one
   // refusal on these routes that a retry genuinely does clear — after somebody runs the migration.
   STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE: Object.freeze({
@@ -654,6 +663,42 @@ export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
 
 export function stockPrepErrorPlain(code: string): StockPrepPlainText {
   return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
+}
+
+// ---------------------------------------------------------------------------
+// THE TWO PLATFORM-ADMIN BUTTONS ON THE CONFIRMATION QUEUE — WHAT HAPPENED
+// ---------------------------------------------------------------------------
+//
+// 建账本 / 重新扫描 emitted an event nothing listened to, so pressing either did nothing at all and
+// said nothing about it. Wiring them means the page now has to be able to say what happened, and
+// these are those sentences. VALUES-FREE by construction: no interpolation, so no project number and
+// no material can reach them — the counts a run produces are read in the 确认队列 list below, which
+// is the surface built to show them.
+export const STOCK_PREP_ADMIN_ACTION_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  // Idempotent: the route creates the ledger table if it is missing and reports the mode otherwise.
+  // The copy therefore does not promise "created" — it promises the END STATE, which is what an
+  // admin pressing it twice needs to hear.
+  ENSURE_OK: Object.freeze({
+    zh: '确认账本已经就位。这个操作重复点也不会重复建表。',
+    en: 'The confirmation ledger is in place. Pressing this again creates nothing twice.',
+  }),
+  // Reconcile RE-READS the source and refreshes the queue; it decides nothing on the operator's
+  // behalf, which is the half most worth saying out loud.
+  RECONCILE_OK: Object.freeze({
+    zh: '已经重新扫描过一遍,待确认的清单是最新的了。系统没有替任何人做决定。',
+    en: 'The re-scan is done and the list of things to confirm is up to date. Nothing was decided on anyone’s behalf.',
+  }),
+  // The reconcile route is scoped to ONE project. Without a number there is nothing to scan, and
+  // sending the request anyway would answer with a shapeless 400 the operator cannot act on.
+  PROJECT_NO_REQUIRED: Object.freeze({
+    zh: '请先填一个项目号,再点重新扫描。',
+    en: 'Enter a project number first, then press re-scan.',
+  }),
+})
+
+/** One of the three sentences above, or null for anything not in the table (fail-quiet). */
+export function stockPrepAdminActionPlain(id: string): StockPrepPlainText | null {
+  return lookup(STOCK_PREP_ADMIN_ACTION_PLAIN, id)
 }
 
 // ---------------------------------------------------------------------------

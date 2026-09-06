@@ -272,11 +272,84 @@ async function listOperatorProjectDirectory({ recordsApi, provisioning, targetPr
   }
 }
 
+/**
+ * 对账限本人可见项目 — IS THIS PROJECT ONE THE OPERATOR CAN SEE?
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT IT IS FOR
+ * ---------------------------------------------------------------------------
+ *
+ * `POST …/table-actions/:actionId/confirmation-decisions/reconcile` takes its `projectNo` FROM THE
+ * CALLER. Round-2 (decision C13) admitted the stock-prep operator tier on that route so a floor
+ * operator's own pull could put its held rows in the confirmation queue — and admitted it with the
+ * tenant proven and nothing else, so within one tenant any operator could name any project number.
+ * Reconcile's orphan sweep supersedes the PENDING ledger rows of whatever project it is pointed at,
+ * so the number in the body decided whose queue got rewritten.
+ *
+ * This is the missing half: the number must be one the caller can SEE. "Can see" is not a new
+ * notion invented here — it is answered by `listOperatorProjectDirectory`, i.e. by the exact read
+ * `GET /api/integration/stock-preparation/operator/projects` serves the operator's own worklist
+ * from, narrowed to the one number, under the caller's own already-verified operator scope. One
+ * predicate, one implementation: the directory and this gate cannot drift on who may see what.
+ *
+ * ---------------------------------------------------------------------------
+ * THE ONE PASS-THROUGH, STATED AS A LIMIT RATHER THAN HIDDEN AS A BEHAVIOUR
+ * ---------------------------------------------------------------------------
+ *
+ * `directoryReady === false` means the tenant has NO MVP project table at all — `findMvpSheet`
+ * found no sheet, so the directory answers every number with "not here". That is not a deployment
+ * where every project is foreign; it is a deployment where the question cannot be asked. The MVP
+ * project row is written by `mvp-persist` ALONE, which is platform-admin AND flag-gated, so on a
+ * customer deployment that table is routinely absent — refusing there would refuse EVERY operator
+ * reconcile and silently take the confirmation loop away from the tier C13 opened it for.
+ *
+ * So on such a deployment this gate admits and SAYS SO in its verdict (`reason`), rather than
+ * pretending to a check it did not perform. The tenant door above it is unaffected and still the
+ * enforcement: a caller with no proven tenant never reaches this function at all.
+ *
+ * WHAT THIS DOES NOT CLAIM. It is not a per-PERSON check. The directory is tenant-wide by
+ * construction (see `stock-preparation-operator-scope.cjs`: "It is NOT per-row"), so two operators
+ * of the same factory see the same projects and this gate cannot tell them apart. It narrows
+ * "any number a caller can type" to "a project this factory has", which is the boundary the data
+ * model can actually prove; separating colleagues needs a project-ownership store that does not
+ * exist yet.
+ *
+ * @returns {{visible: true, reason: 'directory_match'|'directory_absent', directoryReady: boolean}}
+ *          on admission. Refusal THROWS `StockPreparationOperatorDirectoryError` 403 so a caller
+ *          cannot forget to read the verdict.
+ */
+async function assertOperatorMaySeeProject({ recordsApi, provisioning, targetProjectId, scope, projectNo } = {}) {
+  const wanted = requiredString(projectNo, 'projectNo')
+  // Narrowed: a projectNo that is not in the tenant's project sheet fetches ZERO project rows, so a
+  // refusal costs one filtered query and none of the per-project count fan-out.
+  const directory = await listOperatorProjectDirectory({
+    recordsApi,
+    provisioning,
+    targetProjectId,
+    scope,
+    projectNo: wanted,
+  })
+  if (directory.projects.some((project) => optionalString(project.projectNo) === wanted)) {
+    return { visible: true, reason: 'directory_match', directoryReady: true }
+  }
+  if (directory.directoryReady !== true) {
+    return { visible: true, reason: 'directory_absent', directoryReady: false }
+  }
+  // Shapeless on purpose, exactly like the board's 404: a project of another factory and a number
+  // nobody has get the identical answer, and the message names no project.
+  throw new StockPreparationOperatorDirectoryError(
+    403,
+    'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE',
+    'this project is not one of yours to reconcile',
+  )
+}
+
 module.exports = {
   CONFIRMATION_DECISION_OBJECT_ID,
   PROJECT_OBJECT_ID,
   StockPreparationOperatorDirectoryError,
   StockPreparationProjectReadsError,
+  assertOperatorMaySeeProject,
   listOperatorProjectDirectory,
   __internals: {
     pendingDecisionCountsByProjectNo,

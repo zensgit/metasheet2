@@ -346,7 +346,20 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationOperatorProjectBoard',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationPrepLineExport',
-  // 缺件清单 (W3a). THE ONE MEMBER OF THIS SET THAT IS NOT A VALUE-BEARING ROUTE — it is a
+  // 对账限本人可见项目. A VALUES-FREE ROUTE IN THIS SET, and it is here for the
+  // opposite reason to `tableActionDryRun` below: reconcile returns counts and evidence tokens and
+  // nothing else, in every branch. It resolves the operator scope not to decide WHAT it may show but
+  // to decide WHOSE project directory answers "is this projectNo one of yours" — the visibility check
+  // that stops one operator's reconcile from superseding another project's pending decision rows.
+  //
+  // The three per-handler checks below are exactly the ones that matter for that use: the scope must
+  // be the tenancy authority (no `resolveTenantId`, no raw `user.tenantId`), because a header-picked
+  // tenant would pick which directory vouches for the number. It is deliberately NOT in
+  // VALUE_BEARING_READS_WITH_INLINE_STAGING: this handler derives TWO staging projects — the
+  // visibility check's, from `reconcileScope.tenantId`, and the ledger write's, which predates this
+  // change — and that set's assertion is that a handler derives exactly one, from `scope.tenantId`.
+  'tableActionConfirmationDecisionsReconcile',
+  // 缺件清单 (W3a). THE ONLY MEMBER WITH A VALUE-BEARING OPT-IN ON A VALUES-FREE ROUTE — it is a
   // values-free route with a value-bearing OPT-IN, and that difference is why it needs the carve-out
   // spelled out in VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT below rather than a quiet edit to
   // the blanket check. Without `includeMissingComponents: true` this handler is byte-for-byte the
