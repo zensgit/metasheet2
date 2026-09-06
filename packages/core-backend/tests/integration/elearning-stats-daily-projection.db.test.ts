@@ -817,6 +817,63 @@ describe('e-learning stats daily PostgreSQL authority', () => {
     }])
   })
 
+  it('rotates a failed projection behind older unprocessed rows instead of blocking the queue', async () => {
+    if (!firstPool) throw new Error('database unavailable')
+    const blockedOrg = `org-stats-blocked-${randomUUID()}`
+    const healthyOrg = `org-stats-healthy-${randomUUID()}`
+    const blocked = await seedDepartment(firstPool, { memberCount: 5, orgId: blockedOrg })
+    const healthy = await seedDepartment(firstPool, { memberCount: 5, orgId: healthyOrg })
+    const blockedInput = {
+      departmentId: blocked.departmentId,
+      orgId: blockedOrg,
+      statsDate: '2026-08-30',
+    }
+    const healthyInput = {
+      departmentId: healthy.departmentId,
+      orgId: healthyOrg,
+      statsDate: '2026-08-30',
+    }
+    await projectElearningDepartmentStatsDaily(projectorDb(firstPool), blockedInput, ENABLED)
+    await projectElearningDepartmentStatsDaily(projectorDb(firstPool), healthyInput, ENABLED)
+    await firstPool.query(
+      `UPDATE elearning_stats_daily
+          SET updated_at = CASE org_id
+            WHEN $1 THEN '2026-08-01T00:00:00.000Z'::timestamptz
+            ELSE '2026-08-02T00:00:00.000Z'::timestamptz
+          END
+        WHERE org_id = ANY($2::text[])`,
+      [blockedOrg, [blockedOrg, healthyOrg]],
+    )
+
+    // Simulate a pre-hardening/manual collision. Runtime creation routes now
+    // reserve this namespace, but reconciliation must still make progress if
+    // historical drift already exists.
+    await firstPool.query(
+      `INSERT INTO meta_bases (id, name, owner_id)
+       VALUES ($1, 'Poisoned projection identity', 'unexpected-owner')`,
+      [deriveElearningProjectionBaseId(blockedOrg)],
+    )
+
+    await expect(reconcileElearningStatsMultitable(
+      multitableProjectorDb(firstPool),
+      1,
+      ENABLED,
+    )).resolves.toEqual({ failed: 1, projected: 0, scanned: 1 })
+    await expect(reconcileElearningStatsMultitable(
+      multitableProjectorDb(firstPool),
+      1,
+      ENABLED,
+    )).resolves.toEqual({ failed: 0, projected: 1, scanned: 1 })
+    expect(await firstPool.query(
+      'SELECT count(*)::int AS count FROM meta_records WHERE id = $1',
+      [deriveElearningProjectionRecordId(
+        healthyOrg,
+        healthy.departmentId,
+        healthyInput.statsDate,
+      )],
+    ).then((result) => result.rows)).toEqual([{ count: 1 }])
+  })
+
   it('enforces same-org directory identity and one row per daily dataset key', async () => {
     if (!firstPool) throw new Error('database unavailable')
     const firstOrg = `org-stats-first-${randomUUID()}`

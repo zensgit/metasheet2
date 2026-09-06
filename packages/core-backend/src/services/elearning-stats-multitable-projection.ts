@@ -69,9 +69,17 @@ WHERE stats.dataset = 'department_overview'
       ), 'hex'), 1, 32)
     ) IS DISTINCT FROM stats.projected_version::text
   )
-ORDER BY stats.last_projected_at ASC, stats.org_id ASC,
+ORDER BY stats.updated_at ASC, stats.org_id ASC,
          stats.department_id ASC, stats.stats_date ASC
 LIMIT $1`
+
+const RECONCILE_DEFER_SQL = `/* elearning-stats-multitable:reconcile-defer */
+UPDATE elearning_stats_daily
+SET updated_at = now()
+WHERE org_id = $1
+  AND dataset = 'department_overview'
+  AND department_id = $2::uuid
+  AND stats_date = $3::date`
 
 type FieldType = 'text' | 'date' | 'dateTime' | 'number' | 'checkbox'
 
@@ -461,12 +469,26 @@ export async function reconcileElearningStatsMultitable(
       if (result.outcome === 'projected') projected += 1
     } catch {
       failed += 1
+      try {
+        // A malformed projection object must not occupy the front of every
+        // bounded batch forever. Rotate only the row's generic update clock;
+        // the SoR payload, version and source-projection status stay intact.
+        await db.query(RECONCILE_DEFER_SQL, [
+          inputText(row.org_id),
+          inputUuid(row.department_id),
+          inputDate(row.stats_date),
+        ])
+      } catch {
+        // The original projection failure remains authoritative. A database
+        // outage can also prevent the best-effort rotation and will retry.
+      }
     }
   }
   return { scanned: rows.rows.length, projected, failed }
 }
 
 export const elearningStatsMultitableSql = Object.freeze({
+  reconcileDefer: RECONCILE_DEFER_SQL,
   reconcileScan: RECONCILE_SCAN_SQL,
   source: SOURCE_SQL,
 })
