@@ -22,6 +22,9 @@ const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const {
+  ROW_ERROR_LIMIT_CEILING,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
+const {
   DECISIONS,
   __internals: plannerInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'))
@@ -1352,6 +1355,49 @@ function testRevisionCarriesTheRowErrorOverflowFacts() {
   const otherTypes = clone(smaller)
   otherTypes.summary.rowErrorTypeCounts = { invalid_quantity: 5001 }
   assert.notEqual(revisionFor(smaller), revisionFor(otherTypes), 'the per-type composition is hashed as well')
+
+  // …AND EACH OF THE THREE KEYS IS PINNED INDIVIDUALLY, by the same hand-written-projection method
+  // the under-cap half uses. The pairwise tests above cannot do this: today every rowError carries a
+  // `type`, so `rowErrorsTotal === Σ rowErrorTypeCounts` and the three keys are mutually redundant —
+  // deleting `rowErrorsTotal` or `rowErrorsTruncated` from the projection left both suites green.
+  // The day someone adds a rowError with no type, total and typeCounts decouple, and this is the
+  // assertion that will be standing there.
+  const truncatedProjection = {
+    actionId: ROW_ERROR_REVISION_ACTION.actionId,
+    parameters: { projectNo: 'P-001' },
+    source: {
+      externalSystemId: ROW_ERROR_REVISION_ACTION.source.externalSystemId,
+      workspaceId: ROW_ERROR_REVISION_ACTION.source.workspaceId,
+      readPlan: ROW_ERROR_REVISION_ACTION.source.readPlan,
+    },
+    target: ROW_ERROR_REVISION_ACTION.target,
+    expansion: {
+      status: smaller.status,
+      rows: smaller.rows,
+      errors: smaller.errors,
+      rowErrors: smaller.rowErrors,
+      rowErrorsTruncated: true,
+      rowErrorsTotal: 5001,
+      rowErrorTypeCounts: { missing_component_source_id: 5001 },
+    },
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: null,
+  }
+  assert.equal(
+    revisionFor(smaller),
+    tableActionInternals.hashJson(truncatedProjection),
+    'a truncated expansion hashes EXACTLY these three overflow keys and no fourth',
+  )
+  for (const key of ['rowErrorsTruncated', 'rowErrorsTotal', 'rowErrorTypeCounts']) {
+    const without = clone(truncatedProjection)
+    delete without.expansion[key]
+    assert.notEqual(
+      revisionFor(smaller),
+      tableActionInternals.hashJson(without),
+      `${key} is load-bearing in the revision — dropping it must move the hash`,
+    )
+  }
 }
 
 // FAIL-CLOSED. The hard apply-blocking check used to read the array; past the cap the array can
@@ -1408,6 +1454,30 @@ function testRowErrorLimitIsAConditionalActionConfigKey() {
     (error) => error instanceof StockPreparationTableActionError && error.code === 'TABLE_ACTION_CONFIG_INVALID',
     'a nonsense cap is refused at config time, not silently defaulted',
   )
+
+  // THE CEILING IS ENFORCED AT CONFIG TIME TOO, and as a REFUSAL. The normalized config is what gets
+  // snapshotted and echoed back, so storing 20001 while the expander runs 20000 would make the stored
+  // config a lie about what ran — and the operator would get no feedback at all about a knob they
+  // demonstrably meant to move.
+  const atCeiling = normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: ROW_ERROR_LIMIT_CEILING })
+  assert.equal(atCeiling.rowErrorLimit, ROW_ERROR_LIMIT_CEILING, 'the ceiling itself is a legal cap')
+  assert.throws(
+    () => normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: ROW_ERROR_LIMIT_CEILING + 1 }),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && /must not exceed/.test(error.message),
+    'one past the ceiling is a 422, not a silent clamp',
+  )
+
+  // TYPE STRICTNESS. `Number()` reads `true` as 1, so a coercing parser would answer a config typo by
+  // cutting the operator's whole defect worklist down to one entry while every total stayed truthful.
+  for (const nonsense of [true, [3], '7', 5.5]) {
+    assert.throws(
+      () => normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: nonsense }),
+      (error) => error instanceof StockPreparationTableActionError && error.code === 'TABLE_ACTION_CONFIG_INVALID',
+      `rowErrorLimit: ${JSON.stringify(nonsense)} is refused rather than coerced`,
+    )
+  }
 }
 
 async function testApplySandboxGateFailsClosed() {

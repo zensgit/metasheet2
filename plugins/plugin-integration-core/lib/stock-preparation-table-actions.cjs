@@ -33,6 +33,7 @@ const {
   DEFAULT_MAX_PAGES,
   DEFAULT_MAX_ROWS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+  ROW_ERROR_LIMIT_CEILING,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
@@ -448,6 +449,7 @@ function normalizeStockPreparationActionConfig(input = {}) {
   const extensionFieldIds = normalizeActionExtensionFieldIds(input.extensionFieldIds, template)
   const carryPolicy = normalizeActionCarryPolicy(input.carryPolicy)
   const largeBom = normalizeActionLargeBomCaps(input.largeBom)
+  const rowErrorLimit = normalizeActionRowErrorLimit(input.rowErrorLimit)
   return {
     actionId,
     kind,
@@ -473,12 +475,36 @@ function normalizeStockPreparationActionConfig(input = {}) {
     maxRows: input.maxRows,
     // D-C `rowErrors` cap override. Spread CONDITIONALLY for the same reason the block above is:
     // an action config is snapshotted and hashed, and an unconditional key would move every legacy
-    // config's shape for a knob it never set. The CEILING is not enforced here — the expander
-    // clamps, so there is exactly one place that decides how big this array may get.
-    ...(positiveInteger(input.rowErrorLimit, 'rowErrorLimit', undefined)
-      ? { rowErrorLimit: positiveInteger(input.rowErrorLimit, 'rowErrorLimit', undefined) }
-      : {}),
+    // config's shape for a knob it never set.
+    ...(rowErrorLimit ? { rowErrorLimit } : {}),
   }
+}
+
+// D-C. The config-time half of the cap override, and it REFUSES rather than clamps for two reasons
+// the module already knows: a normalized action config is what gets snapshotted, echoed back and
+// hashed, so silently storing 100000 while the expander runs 20000 makes the stored config a lie
+// about what ran; and the operator gets no feedback at all about a knob they demonstrably meant to
+// move. Type strictness matches `ceilingBoundedPositiveInteger` in the expander — `true` and `[3]`
+// coerce to 1 and 3 under `Number()`, and a typo that silently cuts the retained defect list to one
+// entry is exactly the shape of failure this key exists to bound.
+//
+// The expander still enforces the same ceiling (it is the only thing that reads the cap, so it has
+// to). This is a second gate at the earlier boundary, not the only one.
+function normalizeActionRowErrorLimit(input) {
+  if (input === undefined || input === null || input === '') return undefined
+  if (!Number.isInteger(input)) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'rowErrorLimit must be a positive integer', { field: 'rowErrorLimit' })
+  }
+  const value = positiveInteger(input, 'rowErrorLimit', undefined)
+  if (value > ROW_ERROR_LIMIT_CEILING) {
+    throw new StockPreparationTableActionError(
+      422,
+      'TABLE_ACTION_CONFIG_INVALID',
+      `rowErrorLimit must not exceed ${ROW_ERROR_LIMIT_CEILING}`,
+      { field: 'rowErrorLimit', ceiling: ROW_ERROR_LIMIT_CEILING },
+    )
+  }
+  return value
 }
 
 function targetFieldMapHasExplicitBindings(fieldIdMap = {}) {

@@ -1196,28 +1196,100 @@ async function testOverTheCapIsDeterministicAndDistinguishable() {
   )
 }
 
-// Configuration may move the cap, and only within reach of the ceiling. The clamp lives in the
-// expander so a caller that forgot to clamp cannot un-bound the array by threading a big number.
+// Configuration may move the cap, and only within reach of the ceiling. Enforcement lives in the
+// expander (the only thing that reads the cap), and it REFUSES rather than clamps: a silent
+// `Math.min` would let a deploy config say 2000000 while 20000 ran, with nothing anywhere to tell
+// the operator which number was in force.
 async function testRowErrorLimitIsConfigurableUnderACeiling() {
   const lowered = await expandBlankComponentBom(120, { expand: { rowErrorLimit: 50 } })
   assert.equal(lowered.rowErrors.length, 50, 'a lower configured cap is honoured')
   assert.equal(lowered.summary.rowErrorsTotal, 120, 'and the total is still the truth')
 
-  const overCeiling = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1, {
-    expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING * 100 },
+  const atCeiling = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1, {
+    expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING },
   })
   assert.equal(
-    overCeiling.rowErrors.length,
+    atCeiling.rowErrors.length,
     ROW_ERROR_LIMIT + 1,
-    'a config far past the ceiling still clamps to the ceiling, which this fixture is under',
+    'the ceiling itself is a legal cap, and this fixture is under it',
   )
   assert.ok(ROW_ERROR_LIMIT_CEILING >= ROW_ERROR_LIMIT, 'the ceiling is not below the default')
 
+  await assert.rejects(
+    () => expandBlankComponentBom(1, { expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING + 1 } }),
+    /rowErrorLimit must not exceed/,
+    'one past the ceiling is a refusal, not a silent clamp',
+  )
   await assert.rejects(
     () => expandBlankComponentBom(1, { expand: { rowErrorLimit: 0 } }),
     /rowErrorLimit/,
     'a nonsense cap is refused rather than silently defaulted',
   )
+
+  // TYPE STRICTNESS, and it is not pedantry. `Number()` turns `true` into 1, so a coercing parser
+  // would answer a config typo by cutting the retained defect list — the operator's whole worklist —
+  // down to a single entry, while every total stayed truthful and nothing looked wrong.
+  for (const nonsense of [true, [3], '7', 5.5]) {
+    await assert.rejects(
+      () => expandBlankComponentBom(1, { expand: { rowErrorLimit: nonsense } }),
+      /rowErrorLimit must be a positive integer/,
+      `rowErrorLimit: ${JSON.stringify(nonsense)} is refused rather than coerced`,
+    )
+  }
+}
+
+/**
+ * THE MISSING-PARTS LIST MUST NOT SHRINK WHEN THE ROWERROR CAP FIRES — and the failure was not
+ * merely a low number, it was an ARITHMETICALLY IMPOSSIBLE pair on the W3a operator panel:
+ *
+ *   `distinctCount` comes off the expander's uncapped id set.
+ *   `probeCount` was counted off the `rowErrors` ARRAY, which D-C made a bounded sample.
+ *
+ * So a truncated expansion rendered "缺件 240 种(共 50 处引用)" — more distinct missing parts than
+ * references to them, which cannot happen for real data (a part is missing because it was probed).
+ * The truth was sitting in the same summary object the whole time as
+ * `rowErrorTypeCounts.missing_component`; it just was not read. Same fail-open shape as
+ * `hasHardApplyBlockingRowErrors`, in the values-BEARING projection.
+ *
+ * The fixture lowers the cap rather than building 5000 absent parts, because the cap is the cap
+ * whatever its value and 240 part reads keeps this test sub-second.
+ */
+async function testMissingComponentProbeCountSurvivesTheRowErrorCap() {
+  const distinct = MISSING_COMPONENT_DETAIL_LIMIT + 40
+  const positionsPerPart = 2
+  const retained = 50
+  const probes = distinct * positionsPerPart
+  const { adapter } = createAdapter(bomOfMissingParts(
+    Array.from({ length: distinct }, (_unused, index) => [`PART-GONE-${String(index).padStart(4, '0')}`, positionsPerPart]),
+  ))
+  const result = await expandPlmProjectBom({
+    sourceAdapter: adapter,
+    projectNo: 'P-001',
+    rowErrorLimit: retained,
+  })
+
+  assert.equal(result.rowErrors.length, retained, 'the rowError array really is a sample here')
+  assert.equal(result.summary.rowErrorsTruncated, true)
+  assert.equal(result.summary.rowErrorTypeCounts.missing_component, probes, 'and the true total is on the summary')
+
+  const summary = summarizeMissingComponents(result)
+  assert.equal(summary.distinctCount, distinct, 'distinctCount still comes off the uncapped id set')
+  assert.equal(summary.probeCount, probes, 'and probeCount is the TRUE probe total, not the retained sample')
+  // Two positions per part on purpose: the detail collector retains 200 parts carrying 2 occurrences
+  // each, so a fix that only clamped probeCount up to the DETAIL total would answer 400 here and
+  // 480 is the only right answer. The bound below would accept 400; this equality does not.
+  assert.ok(
+    summary.probeCount >= summary.distinctCount,
+    'a part cannot be missing without having been probed — this pair may never invert',
+  )
+  assert.equal(summary.truncated, true)
+
+  // The structural floor holds even for an expansion that carries no summary at all (a stored W3a
+  // artifact from before D-C, or a hand-built object): distinctCount is never allowed to exceed
+  // probeCount, whatever any upstream cap did to the array.
+  const floor = summarizeMissingComponents({ missingComponentDistinctCount: 9, missingComponents: [], rowErrors: [] })
+  assert.equal(floor.distinctCount, 9)
+  assert.equal(floor.probeCount, 9, 'the floor answers with the distinct count rather than an impossible 0')
 }
 
 async function main() {
@@ -1225,6 +1297,7 @@ async function main() {
   await testUnderTheCapIsByteIdenticalToAnUncappedExpansion()
   await testOverTheCapIsDeterministicAndDistinguishable()
   await testRowErrorLimitIsConfigurableUnderACeiling()
+  await testMissingComponentProbeCountSurvivesTheRowErrorCap()
   await testMissingComponentDetailNeverReachesTheHashedSurfaces()
   await testMissingComponentsKeyIsPresentOnEveryReturnPath()
   await testMissingRootComponentCarriesNullParentAndBom()

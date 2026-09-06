@@ -824,8 +824,11 @@ function rowErrorTruncationOf({ total, retained, typeTotals }) {
   }
 }
 
-// The types whose entries the cap dropped. Empty (and therefore invisible to the `Set` below) when
-// nothing overflowed, so `errorTypes` is unchanged for every expansion under the cap.
+// EVERY type the expansion produced — retained and dropped alike — for an expansion that overflowed.
+// A SUPERSET of the dropped types, deliberately: `errorTypes` unions this in, so a superset of the
+// truth is exactly as correct as the truth and costs one Map instead of a second one tracking which
+// types happened to lose their last array slot. Empty (and therefore invisible to the `Set` below)
+// when nothing overflowed, so `errorTypes` is unchanged for every expansion under the cap.
 function truncatedRowErrorTypes(rowErrorTruncation) {
   if (!isPlainObject(rowErrorTruncation)) return []
   return Object.keys(rowErrorTruncation.rowErrorTypeCounts || {})
@@ -846,7 +849,7 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
     readObjects: Array.from(new Set(readStats.map((entry) => entry.object))).sort(),
     readCount: readStats.length,
     readDiagnostics: readStats.map(readDiagnostic),
-    // `.concat` of the DROPPED types keeps this honest under the cap: a type whose every occurrence
+    // `.concat` of the TRUNCATED expansion's types keeps this honest: a type whose every occurrence
     // was refused an array slot still has to be named here, or the summary would say the project has
     // no such defect. Empty concat under the cap => the identical set => the identical hash.
     errorTypes: Array.from(new Set([...(errors || []), ...(rowErrors || [])].map((entry) => entry.type || entry.code).concat(truncatedRowErrorTypes(rowErrorTruncation)).filter(Boolean))).sort(),
@@ -1038,10 +1041,19 @@ async function expandPlmProjectBom(input = {}) {
     // fixture, every demo, every dormant deployment — on the loop it already had.
     requireCompleteBatch: input.requireCompleteBatch === true,
     // D-C. Configuration may move this within reach of the ceiling and no further — see
-    // ROW_ERROR_LIMIT's header. The clamp lives HERE, in the only place that enforces the cap, so a
-    // caller that forgot to clamp cannot un-bound the array by threading a big number through.
-    rowErrorLimit: Math.min(
-      positiveInteger(input.rowErrorLimit, 'rowErrorLimit', ROW_ERROR_LIMIT),
+    // ROW_ERROR_LIMIT's header. The enforcement lives HERE, in the only place that reads the cap, so
+    // a caller that forgot to validate cannot un-bound the array by threading a big number through.
+    //
+    // `ceilingBoundedPositiveInteger`, not a silent `Math.min`: over the ceiling is a REFUSAL, and
+    // the type is not coerced. A clamp would have let `rowErrorLimit: 100000` read as "hard cap
+    // 20000" with no feedback anywhere, which is the exact "recommended maximum 4 as a comment while
+    // the plan carries 100000" failure that helper exists to prevent; and `positiveInteger` alone
+    // would have accepted `true` (-> 1), silently cutting the retained sample — and the operator's
+    // defect list — to a single entry over a config typo.
+    rowErrorLimit: ceilingBoundedPositiveInteger(
+      input.rowErrorLimit,
+      'rowErrorLimit',
+      ROW_ERROR_LIMIT,
       ROW_ERROR_LIMIT_CEILING,
     ),
   }
@@ -1219,6 +1231,11 @@ async function expandPlmProjectBom(input = {}) {
         errors: [],
         rowErrors: [],
         subtree: subtreeCounters,
+        // NO `rowErrorTruncation` here, and that is not an omission: this is the ONE `makeSummary`
+        // call site reached before `addRowError` can have run even once (the project-number lookup
+        // came back empty, so nothing was expanded), which is why `rowErrors` is a hardcoded `[]`
+        // two lines up. Threading the counters would mount nothing. The other two call sites are
+        // both downstream of expansion and MUST thread it — do not copy this exception into one.
       }),
     }
   }
@@ -1696,8 +1713,11 @@ async function expandPlmProjectBom(input = {}) {
  *   `distinctCount` — every distinct missing part number, from the expander's uncapped id set, so a
  *                     BOM whose missing parts overran the detail cap still reports how many there
  *                     really are rather than the page size.
- *   `probeCount`    — every missing-component probe, counted off the rowErrors (one per probe,
- *                     uncapped), for the same reason.
+ *   `probeCount`    — every missing-component probe (one per probe). Counted off the rowErrors, but
+ *                     `rowErrors` is a bounded sample once D-C truncated, so the expander's true
+ *                     per-type total is preferred whenever it says the array is short — and
+ *                     `distinctCount` is a hard floor, because a part cannot be missing without
+ *                     having been probed.
  *   `truncated`     — true whenever the items are not the whole set: distinct parts beyond the
  *                     collector's cap, or `limit` cutting the list here. A truncated list is a
  *                     "fix these first, export for the rest" signal, never a total.
@@ -1748,10 +1768,26 @@ function summarizeMissingComponents(expansion = {}, { limit = MISSING_COMPONENT_
   // A caller may hand this function a bare `{ missingComponents }` with no rowErrors and no id count
   // at all (the frontend clamp tests do). Never report fewer than what the details themselves show.
   if (retainedProbes > probeCount) probeCount = retainedProbes
+  // D-C. `rowErrors` became a BOUNDED SAMPLE, so counting the array stopped being the same claim as
+  // counting the probes — and the undercount is not merely low, it is SELF-CONTRADICTORY: the
+  // `distinctCount` below comes off the uncapped id set, so a truncated expansion rendered
+  // "5100 parts missing across 5000 references", which is arithmetically impossible (a probe per
+  // part, at least). The expander publishes the true per-type total the moment it truncates, and it
+  // is the authority here — exactly the discipline `hasHardApplyBlockingRowErrors` follows.
+  const summary = isPlainObject(expansion.summary) ? expansion.summary : {}
+  if (summary.rowErrorsTruncated === true && isPlainObject(summary.rowErrorTypeCounts)) {
+    const trueProbes = Number(summary.rowErrorTypeCounts.missing_component || 0)
+    if (Number.isFinite(trueProbes) && trueProbes > probeCount) probeCount = trueProbes
+  }
   const distinctCount = Math.max(
     Number.isFinite(expansion.missingComponentDistinctCount) ? Math.floor(expansion.missingComponentDistinctCount) : 0,
     ranked.length,
   )
+  // Structural floor, and the last line of defence for the invariant above: every distinct missing
+  // part was probed at least once, so `probeCount >= distinctCount` can never be false for real
+  // data. Holding it here means no future truncation anywhere upstream can make this pair
+  // self-contradictory again, whatever it does to the array.
+  if (distinctCount > probeCount) probeCount = distinctCount
   const items = ranked.slice(0, boundedLimit)
 
   return {
