@@ -77,6 +77,7 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_ENSURE_FIELDS_REFUSED', // P0-S S3 destructive-reconcile refusal error code, not a flag
   'MULTITABLE_PLUGIN_SHEET_SCOPE_MODE', // P0-S S4: plugin sheet-scope enforcement mode (observe|enforce) — not a Global-History/recovery flag
   'MULTITABLE_ENABLE_PERSONAL_VIEWS', // personal views (separate line)
+  'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE', // W8-4: per-request multitable metadata memo (perf, default off, 120s hard deadline) — not a Global-History/recovery flag
   'MULTITABLE_FIELD_INPUT_TYPES', // field-input-type registry
   'MULTITABLE_FIELD_TYPES', // field-type registry
   'MULTITABLE_FIELDS', // e-learning projection field registry suffix, not a flag

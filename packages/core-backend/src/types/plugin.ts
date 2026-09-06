@@ -629,6 +629,29 @@ export interface MultitableRecordsAPI {
     version: number
   }>
   /**
+   * W8-4 (L1) request-scoped table-metadata memo. Runs `operation` in a scope where the sheet row,
+   * the field list and the sheet-scope assertion for a given sheetId are loaded ONCE instead of
+   * once per records call — the shape a chunked bulk write needs (measured on 222: 2x `meta_fields`
+   * + 2x registry + 3x `meta_sheets` per created row). The scope holds schema metadata only, never
+   * record values, and is never shared with another request: it is not a process cache.
+   *
+   * READ THIS BEFORE CALLING IT. The scope's length is YOURS, not the host's, and inside it two
+   * things stop being re-derived per call:
+   *   - the sheet row and field list are FROZEN at first read, so a field added, dropped or
+   *     retyped, or the sheet soft-deleted, mid-scope is not seen until the scope ends;
+   *   - an ownership assertion that already PASSED for a `(plugin, sheet)` pair is not repeated,
+   *     so a registry change that revokes your access is not seen until the scope ends either.
+   * Keep `operation` no longer than one request — one chunk of a bulk write is the intended shape.
+   * The host caps it regardless (a scope older than its deadline silently stops memoizing and every
+   * call re-reads and re-asserts), but the cap is a backstop, not a licence to hold a scope open.
+   * Do not run schema changes or open a unit of work inside it.
+   *
+   * `MULTITABLE_ENABLE_REQUEST_METADATA_CACHE` gates the whole mechanism and is OFF by default:
+   * while it is off this call is a plain passthrough that memoizes nothing. Optional on the type,
+   * so a host that does not provide it simply is not memoized — call it only if it is present.
+   */
+  withMetadataCache?<T>(operation: () => Promise<T>): Promise<T>
+  /**
    * P4 stock-preparation persist hard cut. The host owns the transaction and lock order; the plugin
    * receives only the records methods needed by the existing persist algorithm.
    */

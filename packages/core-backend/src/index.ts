@@ -2162,6 +2162,11 @@ export class MetaSheetServer {
                   throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
                 }
               }
+              // W8-4 (L1). Reporting `registered` keeps the tolerated-unregistered case OUT of the
+              // request-scoped memo (`plugin-scope.ts`), so the warning above still fires once per
+              // records call rather than once per scope — it is the signal P0-S S4 reads to decide
+              // whether the registry backfill is complete enough to flip this mode to `enforce`.
+              return { registered: ownsSheet }
             },
             runStockPreparationPersistUnitOfWork: async (
               { pluginName, ...rawInput },
