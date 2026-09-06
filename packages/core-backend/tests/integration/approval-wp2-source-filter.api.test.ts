@@ -194,8 +194,14 @@ describeIfDatabase('Approval Wave 2 WP2 sourceSystem filter', () => {
     }
   })
 
+  // RE-PINNED (P0-A). This test used to run as `wp2-actor-*`, an identity with no relationship to
+  // the seeded platform row — which pinned exactly the behaviour being removed: the list feed now
+  // decides its scope server-side, so a platform row reaches a caller only through that caller's own
+  // participation (or the DB-backed admin arm). The test's SUBJECT — the `sourceSystem` filter's
+  // three modes — is unchanged; it simply runs as `tabActorId`, who holds the seeded row's active
+  // seat, so the source filter is what discriminates rather than the absence of any scope.
   it('returns a unified feed when sourceSystem=all', async () => {
-    const token = await authToken(baseUrl, `wp2-actor-${suiteSuffix}`)
+    const token = await authToken(baseUrl, tabActorId)
     const payload = await getJson<ListResponse>(
       baseUrl,
       `/api/approvals?sourceSystem=all&workflowKey=${encodeURIComponent(platformWorkflowKey)}`,
@@ -267,8 +273,10 @@ describeIfDatabase('Approval Wave 2 WP2 sourceSystem filter', () => {
     expect(new Set(unifiedRows.map((row) => row.sourceSystem))).toEqual(new Set(['platform', 'plm']))
   })
 
+  // RE-PINNED (P0-A), same reason as the unified-feed test above: run as the seat-holder so the
+  // `sourceSystem=platform` filter is what this assertion measures.
   it('scopes the feed to platform rows when sourceSystem=platform', async () => {
-    const token = await authToken(baseUrl, `wp2-actor-${suiteSuffix}`)
+    const token = await authToken(baseUrl, tabActorId)
     const payload = await getJson<ListResponse>(
       baseUrl,
       `/api/approvals?sourceSystem=platform&workflowKey=${encodeURIComponent(platformWorkflowKey)}`,
