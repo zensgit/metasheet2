@@ -78,6 +78,12 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_PLUGIN_SHEET_SCOPE_MODE', // P0-S S4: plugin sheet-scope enforcement mode (observe|enforce) — not a Global-History/recovery flag
   'MULTITABLE_ENABLE_PERSONAL_VIEWS', // personal views (separate line)
   'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE', // W8-4: per-request multitable metadata memo (perf, default off, 120s hard deadline) — not a Global-History/recovery flag
+  // W9: kill-switch for the stock-prep per-chunk batch idempotency-key lookup (perf, default ON; set
+  // to `false` to fall back to the per-row lookup). Not a Global-History/recovery flag. It is read in
+  // the PLUGIN (plugins/plugin-integration-core/lib/stock-preparation-apply-writer.cjs), which this
+  // grep does not cover — registered here anyway so the name is in the operator registry either way,
+  // and so it stays covered if the read ever moves into packages/core-backend/src.
+  'MULTITABLE_STOCK_PREP_BATCH_KEY_LOOKUP',
   'MULTITABLE_FIELD_INPUT_TYPES', // field-input-type registry
   'MULTITABLE_FIELD_TYPES', // field-type registry
   'MULTITABLE_FIELDS', // e-learning projection field registry suffix, not a flag

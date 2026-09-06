@@ -44,7 +44,11 @@ function row(overrides = {}) {
   }
 }
 
-function createRecordsApi({ existing = [] } = {}) {
+// `batchCapable` models the W9 host split. A host that DECLARES `supportsFilterValueLists`
+// understands an array filter value (`= ANY(...)`); one that does not REFUSES it exactly the way an
+// older host's `normalizeQueryFilters` does — so a writer that ignored the capability probe and sent
+// a list anyway would fail here rather than quietly get the right answer from a lenient fake.
+function createRecordsApi({ existing = [], batchCapable = false } = {}) {
   const rows = existing.map((entry, index) => ({
     id: entry.id || `rec_${index + 1}`,
     sheetId: entry.sheetId || 'sheet_stock_preparation',
@@ -52,15 +56,23 @@ function createRecordsApi({ existing = [] } = {}) {
     data: { ...(entry.data || entry) },
   }))
   const calls = []
+  const matchesFilter = (record, field, value) => {
+    if (Array.isArray(value)) {
+      if (!batchCapable) throw new Error(`Unsupported filter value for ${field}`)
+      return value.some((entry) => record.data[field] === entry)
+    }
+    return record.data[field] === value
+  }
   return {
     rows,
     calls,
     recordsApi: {
+      ...(batchCapable ? { supportsFilterValueLists: true } : {}),
       async queryRecords(input) {
         calls.push(['queryRecords', input])
         return rows
           .filter((record) => record.sheetId === input.sheetId)
-          .filter((record) => Object.entries(input.filters || {}).every(([field, value]) => record.data[field] === value))
+          .filter((record) => Object.entries(input.filters || {}).every(([field, value]) => matchesFilter(record, field, value)))
           .slice(input.offset || 0, (input.offset || 0) + (input.limit || 1000))
       },
       async createRecord(input) {
@@ -640,6 +652,267 @@ async function testMetadataCacheScopeThatSkipsTheOperationFailsLoudly() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// W9: the per-chunk batch idempotency-key lookup. Every assertion below is about EQUIVALENCE — the
+// batch path must answer what the per-row path answers, and every case it cannot answer must fall
+// back to the per-row path rather than guess.
+const BATCH_KEY_LOOKUP_ENV = 'MULTITABLE_STOCK_PREP_BATCH_KEY_LOOKUP'
+
+async function withBatchKeyLookupEnv(value, run) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, BATCH_KEY_LOOKUP_ENV)
+  const previous = process.env[BATCH_KEY_LOOKUP_ENV]
+  if (value === undefined) delete process.env[BATCH_KEY_LOOKUP_ENV]
+  else process.env[BATCH_KEY_LOOKUP_ENV] = value
+  try {
+    return await run()
+  } finally {
+    if (had) process.env[BATCH_KEY_LOOKUP_ENV] = previous
+    else delete process.env[BATCH_KEY_LOOKUP_ENV]
+  }
+}
+
+function addDecisionFor(componentSourceId) {
+  const record = row({ componentSourceId, pathTokens: [componentSourceId] })
+  return { decision: DECISIONS.ADD, idempotencyKey: record.idempotencyKey, record }
+}
+
+function countQueryCalls(api) {
+  return api.calls.filter((call) => call[0] === 'queryRecords').length
+}
+
+// (f) + (a): one query for the whole chunk instead of one per row, and a key that already exists is
+// still an update — the batch answer is used, not ignored.
+async function testBatchKeyLookupIssuesOneQueryPerChunk() {
+  const plan = { decisions: ['PART-1', 'PART-2', 'PART-3', 'PART-4', 'PART-5', 'PART-6'].map(addDecisionFor) }
+  const existingKey = plan.decisions[2].idempotencyKey
+
+  const batched = createRecordsApi({
+    batchCapable: true,
+    existing: [{ id: 'rec_pre', data: { idempotencyKey: existingKey, notes: 'operator note' } }],
+  })
+  const batchedResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: batched.recordsApi,
+  })
+
+  assert.equal(countQueryCalls(batched), 1, 'a whole chunk costs ONE idempotency-key query')
+  const batchQuery = batched.calls.find((call) => call[0] === 'queryRecords')[1]
+  assert.deepEqual(
+    batchQuery.filters.idempotencyKey,
+    plan.decisions.map((decision) => decision.idempotencyKey),
+    'the one query carries every key in the chunk, in decision order',
+  )
+  assert.equal(batchQuery.limit, plan.decisions.length * 2 + 1, 'the batch query is bounded, never open-ended')
+  assert.equal(batchedResult.counts.created, 5)
+  assert.equal(batchedResult.counts.updated, 1, 'the pre-existing key is updated, not re-created')
+  assert.equal(batchedResult.results[2].status, 'updated')
+  assert.equal(batchedResult.results[2].recordId, 'rec_pre')
+
+  // Same plan, host that cannot filter by a list: one query PER ROW, and the same answer.
+  const perRow = createRecordsApi({
+    existing: [{ id: 'rec_pre', data: { idempotencyKey: existingKey, notes: 'operator note' } }],
+  })
+  const perRowResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: perRow.recordsApi,
+  })
+  assert.equal(countQueryCalls(perRow), plan.decisions.length, 'without the capability it is one query per row')
+  assert.deepEqual(batchedResult, perRowResult, 'batching changes the number of queries, not the answer')
+}
+
+// (b) THE mutation this design has to survive: two decisions carrying the SAME key inside ONE chunk.
+// A prefetched index that is not updated after the first write still says "no such row" and the
+// second decision inserts a duplicate.
+async function testSecondDecisionWithSameKeyInOneChunkUpdatesInsteadOfCreating() {
+  const first = addDecisionFor('PART-DUP')
+  const plan = {
+    decisions: [
+      first,
+      { ...first, record: { ...first.record, rawQuantity: 9, totalQuantity: 9 } },
+    ],
+  }
+
+  const batched = createRecordsApi({ batchCapable: true })
+  const batchedResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: batched.recordsApi,
+  })
+
+  assert.equal(batchedResult.results[0].status, 'created')
+  assert.equal(batchedResult.results[1].status, 'updated', 'the second decision for the same key must NOT create a second row')
+  assert.equal(batchedResult.counts.created, 1)
+  assert.equal(batchedResult.counts.updated, 1)
+  assert.equal(batched.rows.length, 1, 'exactly one target row exists afterwards')
+  assert.equal(batched.rows[0].data.rawQuantity, 9, 'the second decision landed on that row')
+
+  const perRow = createRecordsApi()
+  const perRowResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: perRow.recordsApi,
+  })
+  assert.deepEqual(batchedResult, perRowResult, 'same-key-twice behaves identically on both paths')
+  assert.equal(perRow.rows.length, 1)
+}
+
+// (c) the duplicate_target_key guard survives batching: it is now "more than one row grouped under
+// this key", which is the same question `LIMIT 2` asks per row.
+async function testDuplicateTargetKeyStillRefusesUnderBatchLookup() {
+  const decision = addDecisionFor('PART-TWIN')
+  const plan = { decisions: [decision] }
+  const existing = [
+    { id: 'rec_a', data: { idempotencyKey: decision.idempotencyKey } },
+    { id: 'rec_b', data: { idempotencyKey: decision.idempotencyKey } },
+  ]
+
+  const batched = createRecordsApi({ batchCapable: true, existing })
+  const batchedResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: batched.recordsApi,
+  })
+
+  assert.equal(batchedResult.counts.failed, 1)
+  assert.equal(batchedResult.errors[0].code, 'duplicate_target_key')
+  assert.equal(batched.calls.filter((call) => call[0] === 'createRecord').length, 0, 'a duplicate key writes nothing')
+
+  const perRowResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: createRecordsApi({ existing }).recordsApi,
+  })
+  assert.deepEqual(batchedResult, perRowResult, 'the duplicate guard reads the same on both paths')
+}
+
+// (g) the batch is BOUNDED, and hitting the bound is treated as "I may not have seen everything" —
+// the whole chunk falls back to per-row lookups rather than acting on a truncated set.
+async function testBatchAtTheUpperBoundFallsBackToPerRowLookup() {
+  const decision = addDecisionFor('PART-CROWD')
+  const plan = { decisions: [decision] }
+  // limit = 1 key * 2 + 1 = 3, and three rows carry the key: the host filled the bound exactly.
+  const existing = ['rec_a', 'rec_b', 'rec_c'].map((id) => ({ id, data: { idempotencyKey: decision.idempotencyKey } }))
+
+  const batched = createRecordsApi({ batchCapable: true, existing })
+  const batchedResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: batched.recordsApi,
+  })
+
+  assert.equal(countQueryCalls(batched), 2, 'the bounded batch is followed by the per-row query it fell back to')
+  assert.equal(batched.calls[0][1].limit, 3, 'the batch asked for one more row than it could ever need')
+  assert.equal(batched.calls[1][1].limit, 2, 'the fallback is the unchanged per-row lookup')
+  assert.equal(batchedResult.counts.failed, 1)
+  assert.equal(batchedResult.errors[0].code, 'duplicate_target_key')
+
+  const perRowResult = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi: createRecordsApi({ existing }).recordsApi,
+  })
+  assert.deepEqual(batchedResult, perRowResult, 'a truncated batch changes nothing about the answer')
+}
+
+// (d) + (e): the two ways the batch path is not taken — no host capability, and the kill switch —
+// produce the SAME result body and the SAME evidence as the batch path, on a full mixed plan.
+async function testFallbackPathsMatchTheBatchPathExactly() {
+  const existingFor = (plan) => {
+    const updateDecision = plan.decisions.find((entry) => entry.decision === DECISIONS.UPDATE)
+    const inactiveDecision = plan.decisions.find((entry) => entry.decision === DECISIONS.INACTIVE)
+    return [
+      { id: 'rec_update', data: { idempotencyKey: updateDecision.idempotencyKey, notes: 'operator note', materialType: 'human material', rawQuantity: 4 } },
+      { id: 'rec_inactive', data: { idempotencyKey: inactiveDecision.idempotencyKey, notes: 'keep gone', active: true } },
+    ]
+  }
+  const run = async (options) => {
+    const plan = buildPlan()
+    const api = createRecordsApi({ ...options, existing: existingFor(plan) })
+    const result = await applyStockPreparationPlan({
+      permission: 'write',
+      plan,
+      target: target(),
+      recordsApi: api.recordsApi,
+    })
+    return { api, result }
+  }
+
+  const batched = await withBatchKeyLookupEnv(undefined, () => run({ batchCapable: true }))
+  const noCapability = await withBatchKeyLookupEnv(undefined, () => run({}))
+  const switchedOff = await withBatchKeyLookupEnv('false', () => run({ batchCapable: true }))
+
+  const perRowQueries = countQueryCalls(noCapability.api)
+  assert.ok(perRowQueries > 1, 'the per-row baseline really does query more than once')
+  assert.equal(countQueryCalls(batched.api), 1, 'default is ON: one query for the chunk')
+  assert.equal(countQueryCalls(switchedOff.api), perRowQueries, 'the kill switch restores the per-row lookup')
+  assert.ok(
+    switchedOff.api.calls.every((call) => call[0] !== 'queryRecords' || !Array.isArray(call[1].filters.idempotencyKey)),
+    'with the switch off no list filter is ever sent',
+  )
+
+  assert.deepEqual(noCapability.result, batched.result, 'a host without the capability gets the same answer')
+  assert.deepEqual(switchedOff.result, batched.result, 'the kill switch changes the answer not at all')
+  assert.deepEqual(
+    summarizeApplyResultForEvidence(noCapability.result),
+    summarizeApplyResultForEvidence(batched.result),
+    'evidence is identical on both paths',
+  )
+  assert.deepEqual(
+    summarizeApplyResultForEvidence(switchedOff.result),
+    summarizeApplyResultForEvidence(batched.result),
+    'evidence is identical with the switch off',
+  )
+  assert.deepEqual(
+    batched.api.rows.map((entry) => entry.data),
+    noCapability.api.rows.map((entry) => entry.data),
+    'the rows actually written are identical',
+  )
+}
+
+// A host that DECLARES the capability but answers with rows the writer cannot attribute to a key it
+// asked for must not be trusted into a wrong index — the chunk falls back instead.
+async function testUnattributableBatchRowsFallBackToPerRowLookup() {
+  const decision = addDecisionFor('PART-ODD')
+  const plan = { decisions: [decision] }
+  const calls = []
+  const inner = createRecordsApi({ batchCapable: true })
+  const recordsApi = {
+    supportsFilterValueLists: true,
+    async queryRecords(input) {
+      calls.push(input)
+      if (Array.isArray(input.filters.idempotencyKey)) {
+        // A row with no recognizable key value at all.
+        return [{ id: 'rec_mystery', sheetId: input.sheetId, version: 1, data: { componentCode: 'X' } }]
+      }
+      return inner.recordsApi.queryRecords(input)
+    },
+    createRecord: (input) => inner.recordsApi.createRecord(input),
+    patchRecord: (input) => inner.recordsApi.patchRecord(input),
+  }
+
+  const result = await applyStockPreparationPlan({
+    permission: 'write',
+    plan,
+    target: target(),
+    recordsApi,
+  })
+
+  assert.equal(calls.length, 2, 'the unusable batch is followed by the per-row query')
+  assert.equal(result.counts.created, 1, 'and the row is written exactly once')
+  assert.equal(result.counts.failed, 0)
+  assert.equal(inner.rows.length, 1)
+}
+
 async function main() {
   await testApplyCleanDecisionsAndHoldManualConfirm()
   await testRerunIsIdempotentForAddDecision()
@@ -653,6 +926,12 @@ async function main() {
   await testMetadataCacheScopeIsOpenedOncePerApplyRun()
   await testMetadataCacheScopeKeepsPerRowFailureSemantics()
   await testMetadataCacheScopeThatSkipsTheOperationFailsLoudly()
+  await testBatchKeyLookupIssuesOneQueryPerChunk()
+  await testSecondDecisionWithSameKeyInOneChunkUpdatesInsteadOfCreating()
+  await testDuplicateTargetKeyStillRefusesUnderBatchLookup()
+  await testBatchAtTheUpperBoundFallsBackToPerRowLookup()
+  await testFallbackPathsMatchTheBatchPathExactly()
+  await testUnattributableBatchRowsFallBackToPerRowLookup()
   testInternals()
 
   console.log('stock-preparation-apply-writer.test.cjs OK')

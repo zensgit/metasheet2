@@ -1259,6 +1259,41 @@ async function testTargetScopedApiForwardsTheHostMetadataCacheCapability() {
   assert.equal('withMetadataCache' in withoutCapability, false, 'never fabricated when the host lacks it')
 }
 
+// W9: the same fence, the same rule, for the array-filter DECLARATION. It is data, not a method,
+// so an unforwarded declaration silently turns the batch key lookup off forever; an INVENTED one
+// sends a list to a host that rejects it. Both spellings of `not declared` (absent, and an
+// explicit false) must leave the scoped api without it.
+async function testTargetScopedApiForwardsTheHostFilterValueListDeclaration() {
+  const hostApi = {
+    supportsFilterValueLists: true,
+    queryRecords: async () => [],
+    createRecord: async () => ({ id: 'rec_1' }),
+    patchRecord: async () => ({ id: 'rec_1' }),
+  }
+  const scoped = await createTargetScopedRecordsApi(hostApi, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal(scoped.supportsFilterValueLists, true, 'the declaration survives the target fence')
+
+  // Also in `logical` mode: `toPhysicalKeys` rewrites filter KEYS and never touches values, so a
+  // list value crosses the fence unchanged.
+  const logical = await createTargetScopedRecordsApi(
+    hostApi,
+    { sheetId: 'sheet_main', objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId },
+    { resolvedFieldIds: Object.fromEntries(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`])) },
+  )
+  assert.equal(logical.supportsFilterValueLists, true, 'forwarded in logical translation mode too')
+  await logical.queryRecords({ filters: { idempotencyKey: ['k1', 'k2'] } })
+
+  const readOnly = await createTargetScopedRecordsApi(hostApi, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped', readOnly: true })
+  assert.equal(readOnly.supportsFilterValueLists, true, 'read-only scoped api carries it as well')
+
+  const { supportsFilterValueLists, ...hostWithout } = hostApi
+  const absent = await createTargetScopedRecordsApi(hostWithout, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal('supportsFilterValueLists' in absent, false, 'never fabricated when the host is silent')
+
+  const denying = await createTargetScopedRecordsApi({ ...hostWithout, supportsFilterValueLists: false }, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal('supportsFilterValueLists' in denying, false, 'an explicit false is not forwarded as true')
+}
+
 async function main() {
   await testRegistryListsConfiguredMetadataWithoutTargetSecrets()
   await testDryRunRequiresAllowlistedParametersAndStoresToken()
@@ -1280,6 +1315,7 @@ async function main() {
   await testApplyDetectsDataShiftAndManualConfirmHold()
   await testApplySandboxGateFailsClosed()
   await testTargetScopedApiForwardsTheHostMetadataCacheCapability()
+  await testTargetScopedApiForwardsTheHostFilterValueListDeclaration()
   testRevisionCarriesTheRowErrorOverflowFacts()
   testHardApplyBlockingRowErrorsSurviveTheCap()
   testRowErrorLimitIsAConditionalActionConfigKey()

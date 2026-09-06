@@ -981,6 +981,14 @@ async function createTargetScopedRecordsApi(recordsApi, target, options = {}) {
   if (typeof api.withMetadataCache === 'function') {
     scopedApi.withMetadataCache = (operation) => api.withMetadataCache(operation)
   }
+  // W9: forward the host's array-filter-value declaration across the fence. Like the memo above it
+  // is a FRESH object, so an unforwarded declaration is invisible and the batch key lookup would
+  // never engage. Honest in BOTH translation modes: `toPhysicalKeys` rewrites filter KEYS only and
+  // never touches values, so a list value crosses the fence byte-identical to a scalar one. Only
+  // ever copied from the surface underneath — this fence asserts nothing on its own.
+  if (api.supportsFilterValueLists === true) {
+    scopedApi.supportsFilterValueLists = true
+  }
   if (readOnly) return scopedApi
 
   scopedApi.createRecord = async function createRecord(input = {}) {
