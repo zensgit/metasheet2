@@ -4,9 +4,13 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  STOCK_PREP_ERROR_GENERIC,
+  STOCK_PREP_ERROR_PLAIN,
   STOCK_PREP_POSTURE_PLAIN,
+  STOCK_PREP_READ_FAILED,
   STOCK_PREP_SOURCE_BLOCKER_PLAIN,
   STOCK_PREP_SOURCE_WARNING_PLAIN,
+  stockPrepErrorPlain,
   stockPrepPosturePlain,
   stockPrepSourceBlockerPlain,
 } from '../src/services/integration/stockPreparation/plainLanguage'
@@ -164,5 +168,45 @@ describe('stock-prep posture plain language', () => {
       expect(String(plain?.zhNext ?? '').trim().length, `${entry.id}.zhNext`).toBeGreaterThan(0)
       expect(String(plain?.enNext ?? '').trim().length, `${entry.id}.enNext`).toBeGreaterThan(0)
     }
+  })
+
+  // -------------------------------------------------------------------------
+  // P0-5: THE SECOND LINE, on the error vocabulary.
+  //
+  // `STOCK_PREP_ERROR_PLAIN` widened from `StockPrepPlainText` to `StockPrepPlainEntry` (F7) so every
+  // code could carry a `zhNext`/`enNext` alongside its unchanged first line. This is the anti-vacuity
+  // half for THAT table: every entry — including the shared generic and the install page's HTTP-status
+  // read-failure line — must carry a non-empty second line, or the widening bought nothing.
+  //
+  // Deliberately no "reads the codes from an external register" step here, unlike the two guards
+  // above: `STOCK_PREP_ERROR_PLAIN`'s own header comment says the server vocabulary is OPEN (a clamp
+  // to a shape, not to a fixed list), so this table is not — and does not try to be — exhaustive.
+  // -------------------------------------------------------------------------
+  it('every STOCK_PREP_ERROR_PLAIN entry carries a second line — 发生了什么 is never alone', () => {
+    for (const code of Object.keys(STOCK_PREP_ERROR_PLAIN)) {
+      const plain = STOCK_PREP_ERROR_PLAIN[code]
+      expect(String(plain.zh ?? '').trim().length, `${code}.zh`).toBeGreaterThan(0)
+      expect(String(plain.en ?? '').trim().length, `${code}.en`).toBeGreaterThan(0)
+      expect(String(plain.zhNext ?? '').trim().length, `${code}.zhNext`).toBeGreaterThan(0)
+      expect(String(plain.enNext ?? '').trim().length, `${code}.enNext`).toBeGreaterThan(0)
+    }
+    // The fallback every unrecognised code renders through — a blank second line there would be the
+    // one gap no per-code loop above could ever catch.
+    expect(String(STOCK_PREP_ERROR_GENERIC.zhNext ?? '').trim().length).toBeGreaterThan(0)
+    expect(String(STOCK_PREP_ERROR_GENERIC.enNext ?? '').trim().length).toBeGreaterThan(0)
+    // ...and the lookup function itself hands the second line back, for a code nobody wrote a row for.
+    const unknown = stockPrepErrorPlain('SOME_CODE_NOBODY_REGISTERED')
+    expect(String(unknown.zhNext ?? '').trim().length).toBeGreaterThan(0)
+
+    // The install page's other error surface — an HTTP status, no code — widened alongside it.
+    expect(String(STOCK_PREP_READ_FAILED.zhNext ?? '').trim().length).toBeGreaterThan(0)
+    expect(String(STOCK_PREP_READ_FAILED.enNext ?? '').trim().length).toBeGreaterThan(0)
+  })
+
+  it('the existing first-line assertions are untouched by the widening (F7: additive only)', () => {
+    // The two sentences the pre-P0-5 suites already pinned, verbatim — proof the widening did not
+    // reword what a caller that has not been taught to read `zhNext` still shows.
+    expect(stockPrepErrorPlain('FORBIDDEN').zh).toBe('当前账号没有做这件事的权限。')
+    expect(stockPrepErrorPlain('STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER').zh).toBe('现在不是您这一步,所以不能通知下一步。')
   })
 })

@@ -1,5 +1,22 @@
 <template>
   <div class="stock-prep-install" data-testid="stock-prep-install">
+    <!-- P0-4: the「开始使用」向导, mounted FIRST. It reads only state this view already owns (props
+         down, no fetch of its own) and re-emits its three actions onto this view's own existing
+         functions — nothing below it changes order, testid, or behaviour. -->
+    <StockPreparationGettingStarted
+      :defaults="defaults"
+      :preflight="preflight"
+      :preflight-error-status="errorStatus"
+      :source-preflight="sourcePreflight"
+      :source-preflight-error-status="sourcePreflightErrorStatus"
+      :report="report"
+      :can-run-install="canRun"
+      :busy="busy"
+      @run-preflight-check="loadPreflight"
+      @run-install="startInstall"
+      @navigate-stage="(viewKey) => emit('navigate-stage', viewKey)"
+    />
+
     <p class="stock-prep-install__intro" data-testid="stock-prep-install-intro">
       {{ bi(
         '安装分三步:先看一遍这套部署还缺什么,再把该建的表建起来,最后回头再看一次确认建好了。这一页全是确认题,没有填空题 —— 下面列的都是默认值,您只要看一眼对不对。',
@@ -16,6 +33,12 @@
     <p v-if="errorStatus !== null" class="stock-prep-install__error" data-testid="stock-prep-install-error">
       {{ bi(readFailed.zh, readFailed.en) }}
       <code class="stock-prep-install__token">HTTP {{ errorStatus }}</code>
+      <span v-if="readFailed.zhNext" class="stock-prep-install__hint" data-testid="stock-prep-install-error-next">
+        {{ bi(readFailed.zhNext, readFailed.enNext ?? '') }}
+      </span>
+      <button type="button" data-testid="stock-prep-install-error-copy" @click="copyReadError(errorStatus)">
+        {{ readErrorCopyLabel === 'copy' ? bi('复制这条报错', 'Copy this error') : bi('已复制', 'Copied') }}
+      </button>
     </p>
 
     <!-- ===================================================================
@@ -378,6 +401,11 @@
          =================================================================== -->
     <section class="stock-prep-install__card" data-testid="stock-prep-source-preflight">
       <h3 class="stock-prep-install__h3">{{ bi('源就绪预检:这家的库能不能接', 'Source readiness: can we connect to this customer’s database') }}</h3>
+      <!-- I-11 (P0-7): said once, between the two preflight cards, so nobody reads them as duplicates
+           of each other. -->
+      <p class="stock-prep-install__hint" data-testid="stock-prep-install-preflight-relation">
+        {{ bi(twoPreflightRelation.zh, twoPreflightRelation.en) }}
+      </p>
       <p class="stock-prep-install__hint">
         {{ bi(
           '这一步只读不写:去对方库里各读一小页,数一数、看一看形状,然后告诉你行不行。不会改对方任何东西。',
@@ -394,6 +422,11 @@
       >
         {{ bi('检查这个源', 'Check this source') }}
       </button>
+      <!-- I-12 (P0-7): it never runs on page load (D6) — said out loud beside the one button that
+           runs it. -->
+      <p v-if="canCheckSource" class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-button-note">
+        {{ bi(sourcePreflightButtonNote.zh, sourcePreflightButtonNote.en) }}
+      </p>
       <p v-else class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-denied">
         {{ bi(
           '这一步要读对方的库,所以只有对接权限的人能点。装配置的人看得到结果,点不了按钮。',
@@ -408,11 +441,26 @@
       >
         {{ bi(readFailed.zh, readFailed.en) }}
         <code class="stock-prep-install__token">{{ sourcePreflightErrorStatus }}</code>
+        <span v-if="readFailed.zhNext" class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-error-next">
+          {{ bi(readFailed.zhNext, readFailed.enNext ?? '') }}
+        </span>
+        <button type="button" data-testid="stock-prep-source-preflight-error-copy" @click="copyReadError(sourcePreflightErrorStatus)">
+          {{ readErrorCopyLabel === 'copy' ? bi('复制这条报错', 'Copy this error') : bi('已复制', 'Copied') }}
+        </button>
       </p>
 
       <template v-if="sourcePreflight">
         <p class="stock-prep-install__ready" data-testid="stock-prep-source-preflight-verdict">
           <strong>{{ sourceVerdictText }}</strong>
+        </p>
+        <!-- I-10 (P0-7, G5): a `no-go` reading is a diagnosis, never a gate — this line is the whole
+             point of that guarantee being visible rather than merely true in the code. -->
+        <p
+          v-if="sourcePreflight.verdict === 'no-go'"
+          class="stock-prep-install__hint"
+          data-testid="stock-prep-source-preflight-no-go-disclaimer"
+        >
+          {{ bi(sourceNoGoDisclaimer.zh, sourceNoGoDisclaimer.en) }}
         </p>
 
         <!-- Each line a SERVER measurement rendered — never a judgement made here. -->
@@ -801,6 +849,7 @@ import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationSourceBindingPanel from './StockPreparationSourceBindingPanel.vue'
+import StockPreparationGettingStarted from './StockPreparationGettingStarted.vue'
 import SchemaMappingCopilotPanel from './SchemaMappingCopilotPanel.vue'
 import type { SchemaMappingColumnInput, SchemaMappingSignalsInput } from '../../../services/integration/stockPreparation/schemaMappingCopilot'
 import {
@@ -845,9 +894,13 @@ import {
   STOCK_PREP_INSTALLER_MAY_NOT_MODIFY,
   STOCK_PREP_NO_AUTOMATIC_HOLDERS,
   STOCK_PREP_READ_FAILED,
+  STOCK_PREP_SOURCE_NO_GO_DISCLAIMER,
+  STOCK_PREP_SOURCE_PREFLIGHT_BUTTON_NOTE,
+  STOCK_PREP_TWO_PREFLIGHT_RELATION,
   stockPrepAcceptancePlain,
   stockPrepBlockerPlain,
   stockPrepConfigSurfacePlain,
+  stockPrepErrorCopyText,
   stockPrepObjectPlain,
   stockPrepPermissionPlain,
   stockPrepPosturePlain,
@@ -858,8 +911,16 @@ import {
   stockPrepSourceWarningPlain,
   stockPrepStepOutcomeText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 
 const props = defineProps<{ scope: IntegrationScope }>()
+
+// P0-4: the getting-started wizard's step ⑥ ("拿一个项目跑一遍") points at the project board tab,
+// which this view does not own. Re-emitted verbatim, the SAME event name/shape
+// `StockPreparationWorkspace.vue` already listens to from the dashboard tab's own stepper
+// (`handleNavigateStage`) — reusing that existing, already-tested handler rather than inventing a
+// second tab-navigation path.
+const emit = defineEmits<{ (event: 'navigate-stage', viewKey: string): void }>()
 
 const { locale } = useLocale()
 const auth = useAuth()
@@ -893,6 +954,30 @@ const installerMayModifyWarning = STOCK_PREP_INSTALLER_MAY_MODIFY_WARNING
 const readFailed = STOCK_PREP_READ_FAILED
 const manifestRoute = STOCK_PREPARATION_MANIFEST_ROUTE
 const preflightRoute = STOCK_PREPARATION_PREFLIGHT_ROUTE
+
+// P0-7's five honest lines (I-10/I-11/I-12) — plain constants, no lookup, no server field.
+const sourceNoGoDisclaimer = STOCK_PREP_SOURCE_NO_GO_DISCLAIMER
+const twoPreflightRelation = STOCK_PREP_TWO_PREFLIGHT_RELATION
+const sourcePreflightButtonNote = STOCK_PREP_SOURCE_PREFLIGHT_BUTTON_NOTE
+
+/** 「复制这条报错」(P0-5, I-21), shared by the two HTTP-status-only error lines on this page. */
+const readErrorCopyLabel = ref<'copy' | 'copied'>('copy')
+let readErrorCopyResetTimer: ReturnType<typeof setTimeout> | null = null
+async function copyReadError(status: number | null): Promise<void> {
+  // Guarded: see the identical note on the confirmation queue's `copyError` — some hosts (this
+  // project's jsdom test environment included) implement neither the Clipboard API nor
+  // `document.execCommand`, and the latter throws rather than answering `false`.
+  let ok = false
+  try {
+    ok = await copyTextToClipboard(stockPrepErrorCopyText(`HTTP_${status ?? 0}`, locale.value === 'zh-CN'))
+  } catch {
+    ok = false
+  }
+  if (!ok) return
+  readErrorCopyLabel.value = 'copied'
+  if (readErrorCopyResetTimer) clearTimeout(readErrorCopyResetTimer)
+  readErrorCopyResetTimer = setTimeout(() => { readErrorCopyLabel.value = 'copy' }, 3000)
+}
 
 // ---------------------------------------------------------------------------
 // 源就绪预检 — its own state, its own error slot, its own permission.

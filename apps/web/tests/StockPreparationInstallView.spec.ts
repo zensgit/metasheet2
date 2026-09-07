@@ -685,4 +685,26 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     expect(rendered).toContain(LEDGER_OBJECT_ID)
     expect(rendered).toContain('STOCK_PREP_CONFIRMATION_LEDGER_NOT_READY')
   })
+
+  // ---------------------------------------------------------------------------
+  // P0-4: 「开始使用」向导已渲染, mounted FIRST — the design's "寄生在既有 install tab 顶部" hand-off.
+  // The wizard's own behaviour has its own suite (StockPreparationGettingStarted.spec.ts); this is
+  // only the mount-point contract — it is present, and it renders BEFORE every existing card, so
+  // "existing card testids and order are untouched" stays checkable from this file alone.
+  // ---------------------------------------------------------------------------
+
+  it('P0-4: the getting-started wizard is mounted, ahead of every existing card', async () => {
+    const root = await mountView()
+    const wizard = root.querySelector('[data-testid="stock-prep-getting-started"]')
+    expect(wizard).not.toBeNull()
+
+    const intro = root.querySelector('[data-testid="stock-prep-install-intro"]')
+    expect(intro).not.toBeNull()
+    // DOCUMENT_POSITION_FOLLOWING: `intro` comes AFTER `wizard` in tree order.
+    // eslint-disable-next-line no-bitwise
+    expect(Boolean(wizard!.compareDocumentPosition(intro!) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
+
+    // The six-step map renders too — the wizard is not an empty shell at this mount point.
+    expect(root.querySelectorAll('[data-testid="stock-prep-getting-started-step"]').length).toBe(6)
+  })
 })
