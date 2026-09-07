@@ -196,6 +196,77 @@ describe('GET /api/approvals/admin/capability', () => {
       errorSpy.mockRestore()
     }
   })
+
+  // Round-5 item 3. The test above proves the MESSAGE is not interpolated; this one is about the
+  // `code` itself, which is interpolated and therefore has to be bounded by SHAPE rather than by
+  // length. The earlier revision stripped the disallowed characters and kept the remainder, so a
+  // driver that had put free text in `.code` still reached the log — as one run, separators gone,
+  // truncated at 40. Truncating a disclosure is not removing it. The rule now is whole-value: a
+  // code either matches an allowed shape and is emitted unchanged, or it is replaced in full by a
+  // constant, so no fragment of a rejected value is ever manufactured into the line.
+  it('replaces an out-of-shape error code with a constant, never a fragment of it', async () => {
+    const { Logger } = await import('../../src/core/logger')
+    const MARKER = 'zzsyntheticsecretzz'
+    // 60 characters, one alphanumeric run: the shape a length cap alone would have truncated into
+    // the log rather than refused. It contains the marker, so "the run did not survive" is checked
+    // against a value no legitimate code could contain.
+    const LONG_RUN = `A${MARKER}0123456789abcdefghijklmnopqrstuvwxyz0123456789`
+    expect(LONG_RUN.length).toBeGreaterThan(40)
+
+    const cases: Array<{ what: string; thrown: unknown; expectCode: string; absent?: string[] }> = [
+      // The two REFUSALS. `expectCode` is the constant; `absent` is what must not appear anywhere in
+      // the emitted record — including the stripped form the old implementation would have produced.
+      {
+        what: 'a long alphanumeric run',
+        thrown: Object.assign(new Error('boom'), { code: LONG_RUN }),
+        expectCode: 'UNCLASSIFIED',
+        absent: [MARKER, LONG_RUN, LONG_RUN.slice(0, 40)],
+      },
+      {
+        what: 'free text with separators',
+        thrown: Object.assign(new Error('boom'), { code: `connect ECONNREFUSED 10.0.0.1:5432 password=${MARKER}` }),
+        expectCode: 'UNCLASSIFIED',
+        // The stripped form is what the previous implementation emitted for exactly this input.
+        absent: [MARKER, '10.0.0.1', `connectECONNREFUSED10001543password${MARKER}`.slice(0, 40)],
+      },
+      { what: 'an object where a code should be', thrown: Object.assign(new Error('boom'), { code: { toString: () => MARKER } }), expectCode: 'UNCLASSIFIED', absent: [MARKER] },
+      // The POSITIVE CONTROLS, and they are what make the two refusals meaningful: this is not
+      // passing because the function returns a constant for everything. A SQLSTATE and an errno —
+      // the two things a real failure on this route actually carries — reach the log verbatim.
+      { what: 'a PostgreSQL SQLSTATE', thrown: Object.assign(new Error('boom'), { code: '42P01' }), expectCode: '42P01' },
+      { what: 'a Node errno', thrown: Object.assign(new Error('boom'), { code: 'ETIMEDOUT' }), expectCode: 'ETIMEDOUT' },
+      // No `code` at all: the error's own name, which is the documented fallback.
+      { what: 'no code, only a name', thrown: new TypeError('boom'), expectCode: 'TypeError' },
+    ]
+
+    for (const testCase of cases) {
+      const errorSpy = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => {})
+      try {
+        authState.user = { id: 'u-db-admin', permissions: [] }
+        pgState.pool.query.mockRejectedValue(testCase.thrown)
+
+        const res = await request(pinned.url()).get(CAPABILITY_PATH)
+        expect(res.status, testCase.what).toBe(500)
+        expect(JSON.stringify(res.body), testCase.what).not.toContain(MARKER)
+
+        const emitted = errorSpy.mock.calls
+          .map((call) => call
+            .map((arg) => (arg instanceof Error
+              ? `${arg.name}:${arg.message}:${arg.stack ?? ''}`
+              : typeof arg === 'string' ? arg : JSON.stringify(arg)))
+            .join(' '))
+          .join('\n')
+
+        // The message is fixed in every case — the code is the only thing that varies.
+        expect(emitted, testCase.what).toContain(`approval admin capability lookup failed (${testCase.expectCode})`)
+        for (const forbidden of testCase.absent ?? []) {
+          expect(emitted, `${testCase.what}: ${forbidden.slice(0, 24)}`).not.toContain(forbidden)
+        }
+      } finally {
+        errorSpy.mockRestore()
+      }
+    }
+  })
 })
 
 describe('isApprovalAdministrator', () => {

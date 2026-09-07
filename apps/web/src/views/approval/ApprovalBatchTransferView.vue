@@ -335,6 +335,17 @@ const loadedSource = ref('')
 // Monotonic per list read. A response is applied only if its own generation is still the current
 // one, which is what makes a superseded read's late arrival a no-op rather than a silent refill.
 const loadGeneration = ref(0)
+// Monotonic per PRINCIPAL, and deliberately NOT `loadGeneration` (round-5 item 1). An in-flight
+// POST needs the same treatment the list read already gets — apply the answer only if it still
+// belongs to this page — but the two reads are superseded by different events. A list read is
+// superseded by any newer batch, including a picker change; a POST is not, because the source
+// picker stays live through the request and the server has ALREADY executed the batch by the time
+// the answer arrives. Keying the POST to `loadGeneration` would therefore throw away the outcome of
+// a batch that really happened whenever the operator touched the picker mid-flight — the operator
+// would never learn which rows moved. This counter is bumped by exactly ONE event, the
+// auth-transition invalidation below that empties the page, so a settle is discarded when, and only
+// when, the principal it was issued under is no longer the one holding this page.
+const principalGeneration = ref(0)
 const totalPending = ref(0)
 const loadingRows = ref(false)
 const loaded = ref(false)
@@ -386,14 +397,27 @@ function clearLoadedBatch(): void {
 // identity change puts the capability back to `pending` (so nothing actionable renders), but the
 // rows, the selection and the form are STATE, not chrome — they survive the `v-if` that hides them.
 // Left alone, principal A's queue would reappear intact the moment B's answer came back `granted`.
-// A new principal gets an empty page, not the previous one's work.
+// A new principal gets an empty page, not the previous one's work — and that has to cover requests
+// that were ALREADY ISSUED, not only the state on screen: a POST settling after the transition
+// would write A's outcomes, summary and success toast onto B's page. `principalGeneration` below is
+// what makes the claim true of an in-flight submit as well (round-5 item 1).
 const capability = useApprovalAdminCapability({
   onInvalidated: () => {
+    // Bumped FIRST, and synchronously: from this tick on, an answer to a request issued by the
+    // principal being replaced is no longer this page's to render (round-5 item 1).
+    principalGeneration.value += 1
     fromUserId.value = ''
     toUserId.value = ''
     reason.value = ''
     loadedSource.value = ''
     clearLoadedBatch()
+    // The two SUBMIT transport flags, released here for the same reason `clearLoadedBatch` releases
+    // `loadingRows`: the request they describe is no longer this page's request. Left set, the new
+    // principal inherits a spinning, permanently disabled submit control and CANNOT SUBMIT AT ALL
+    // until the previous principal's round-trip happens to finish — measured, not assumed. The
+    // settle that would have cleared them is now discarded, so this is the only place that can.
+    submitting.value = false
+    confirming.value = false
   },
 })
 
@@ -558,11 +582,33 @@ async function submit(): Promise<void> {
   // whole fix: any assignment placed after the `await` below leaves the same window open.
   confirming.value = true
   const submittedIds = [...selectedIds.value]
-  // Captured together, because they are one fact: THESE rows, of THIS approver. Whatever the picker
-  // says by the time the operator answers the dialog, the request below is the one that was
-  // confirmed — the ids and the approver they were listed for can never be taken from two different
-  // moments.
+  // Captured together, because they are one fact: THESE rows, of THIS approver, to THIS target, for
+  // THIS reason. Whatever the form says by the time the operator answers the dialog, the request
+  // below is the one that was confirmed — no part of it can be taken from a different moment.
+  //
+  // ROUND-5 ITEM 2, and the choice is stated rather than left implicit: the target and the reason
+  // are CAPTURED AND POSTED, not re-checked and refused. The source is different in kind — it names
+  // the approver the rows were listed for, so a source that has drifted means the rows themselves
+  // are no longer about the approver on screen and there is nothing coherent left to send. The
+  // target and the reason have no such relationship to the loaded rows: the confirmed fact stays
+  // sendable, and the only thing that must never happen is a value the operator did not confirm
+  // going out under a confirmation they gave for a different one. Capturing here — BEFORE the
+  // dialog, alongside the ids — is what closes that window; capturing after it would leave it open.
+  //
+  // Safe by the entry gate, not by luck: `submitDisabled` above already refused `no-target`,
+  // `same-user` and `no-reason` against these exact values in this exact tick, so a captured pair
+  // can never be a body `blockReasonForTransfer` would itself refuse.
   const submittedSource = loadedSource.value
+  const submittedTarget = toUserId.value
+  const submittedReason = reason.value.trim()
+  // The principal this activation belongs to (round-5 item 1). ONE rule, applied at every write
+  // below that happens after an await: the two transport flags belong to whoever holds the page
+  // NOW. An activation whose principal has been replaced neither renders its result nor releases a
+  // latch it no longer owns — the flags it set were already released by `onInvalidated`, and by the
+  // time it settles they may belong to a NEW principal's own in-flight submit, which it would
+  // otherwise re-arm mid-request.
+  const submittedPrincipal = principalGeneration.value
+  const stillOurs = (): boolean => submittedPrincipal === principalGeneration.value
   try {
     await ElMessageBox.confirm(
       isZh.value
@@ -575,7 +621,7 @@ async function submit(): Promise<void> {
     // Operator cancelled the confirm — no request is made, and the latch RE-OPENS. Leaving it shut
     // here would brick the button for the rest of the page's life on a plain "no", which is a worse
     // outcome than the double submit this closes.
-    confirming.value = false
+    if (stillOurs()) confirming.value = false
     return
   }
 
@@ -584,8 +630,18 @@ async function submit(): Promise<void> {
   // and prove nothing. The picker stays live while the confirmation is up, so this is the one
   // window in which the rows and the current source can drift apart after the entry check passed.
   // The operator is told through the ordinary block reason, which is already showing.
-  if (!submittedSource || submittedSource !== fromUserId.value) {
-    confirming.value = false
+  //
+  // `stillOurs()` LEADS, and it is not redundant with the source comparison. It is tempting to
+  // argue that an identity change is already caught because `onInvalidated` empties the picker and
+  // `!submittedSource` or the comparison then refuses — but only while the picker STAYS empty. If
+  // the new principal picks the same approver id the previous one had loaded, the comparison reads
+  // `'x' !== 'x'` and PASSES: the previous principal's ids, target and reason would be posted under
+  // the new principal's session, a request they confirmed nothing about. The settle is discarded
+  // either way, so nothing would render — which is precisely why only this check can prevent it.
+  if (!stillOurs() || !submittedSource || submittedSource !== fromUserId.value) {
+    // `confirming` is only cleared when it is still ours to clear; after an invalidation
+    // `onInvalidated` has already released it, and it may now belong to the new principal.
+    if (stillOurs()) confirming.value = false
     return
   }
 
@@ -595,10 +651,18 @@ async function submit(): Promise<void> {
     const result = await bulkReassignApprovals({
       // The approver the rows were LISTED for, never the picker's current value.
       fromUserId: submittedSource,
-      toUserId: toUserId.value,
-      reason: reason.value.trim(),
+      // Both confirmed above, and posted exactly as confirmed.
+      toUserId: submittedTarget,
+      reason: submittedReason,
       instanceIds: submittedIds,
     })
+    // The identity behind this page changed while the request was in flight. `onInvalidated` has
+    // already emptied the page for whoever holds it now; writing this batch's outcomes, summary,
+    // latch and success toast on top of that would put the PREVIOUS principal's work — counts of
+    // what moved out of an approver's queue — on the new principal's screen, which is the same
+    // false statement the invalidation exists to prevent. DROPPED SILENTLY: there is no one left on
+    // this page to tell, and an error state would be a second false statement (the batch succeeded).
+    if (!stillOurs()) return
     outcomes.value = buildTransferOutcomes(submittedIds, result)
     summary.value = summarizeTransferOutcomes(outcomes.value)
     // The batch reached the server and was answered. Both halves matter: the selection is dropped
@@ -607,11 +671,20 @@ async function submit(): Promise<void> {
     justSubmitted.value = true
     ElMessage.success(t.value.submitSuccess)
   } catch {
+    // Guarded on the SAME condition as the success arm: a failure toast belongs to the operator who
+    // pressed submit, and after an identity change that operator is not the one reading the page.
+    if (!stillOurs()) return
     // A failed request leaves the page re-armable on purpose: nothing was processed.
     ElMessage.error(t.value.submitFailed)
   } finally {
-    submitting.value = false
-    confirming.value = false
+    // GUARDED, and this is the half that is easy to get wrong. `onInvalidated` has already
+    // released these for the new principal, who may by now have a submit of their own in flight —
+    // clearing unconditionally here would re-arm THEIR button mid-request and let a second batch
+    // go out under one activation, which is exactly the double submit the latch exists to prevent.
+    if (stillOurs()) {
+      submitting.value = false
+      confirming.value = false
+    }
   }
 }
 </script>

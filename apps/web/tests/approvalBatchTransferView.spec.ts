@@ -986,6 +986,232 @@ describe('ApprovalBatchTransferView', () => {
   })
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Round-5 item 1 — the SUBMIT half of the same rule. The invalidation empties
+  // the page, but a POST that was already issued is not cancelled by it: when it
+  // settles it writes outcomes, a summary, the latch and a toast. Those are the
+  // previous principal's work, and the page they would land on belongs to
+  // someone else.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('drops a batch result that settles after the principal changed, and keeps the page usable', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+
+    // The POST is issued and deliberately left open.
+    let releasePost: ((value: unknown) => void) | null = null
+    apiPostSpy.mockImplementationOnce(() => new Promise((resolve) => { releasePost = resolve }))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+
+    // A different person now holds this page. Driven through the auth layer's own setter, so this
+    // is the production funnel and not a hand-fired event.
+    useAuth().setToken(tokenFor('user-b'))
+    await flushUi()
+    expect(q(root, 'batch-transfer-summary')).toBeNull()
+
+    // THE NEW PRINCIPAL CAN WORK, WITH THE PREVIOUS ONE'S REQUEST STILL OPEN. This is the half that
+    // is easy to miss: `submitting`/`confirming` are not part of the batch, so nothing else in this
+    // page clears them, and the settle that used to do it is now discarded. Left set, B inherits a
+    // spinning, permanently disabled submit control and cannot submit AT ALL until A's round-trip
+    // happens to finish. B's own request going out here is what proves they were released.
+    apiGetSpy.mockResolvedValue({ data: [listRow('apv_9', 'B 的待办')], total: 1 })
+    await setPicker(root, 'batch-transfer-source-picker', 'user_b_source')
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '接手')
+    let releaseSecond: ((value: unknown) => void) | null = null
+    apiPostSpy.mockImplementationOnce(() => new Promise((resolve) => { releaseSecond = resolve }))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(2)
+    expect(q<HTMLButtonElement>(root, 'batch-transfer-submit').disabled).toBe(true)
+
+    // NOW the server answers the batch it really did execute — for the principal that is gone, and
+    // while the new principal's own request is still open.
+    releasePost!({ ok: true, data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] } })
+    await flushUi()
+
+    // Nothing of it reaches the new principal's page: no counts, no per-row outcome, no latch, no
+    // success toast claiming an action this reader never took.
+    expect(q(root, 'batch-transfer-summary')).toBeNull()
+    expect(q(root, 'batch-transfer-submitted-notice')).toBeNull()
+    expect(q(root, 'batch-transfer-outcome-apv_1')).toBeNull()
+    expect(messageSuccessSpy).not.toHaveBeenCalled()
+    expect(root.textContent).not.toContain('提交 2')
+    // And it does not RELEASE what it does not own: B's submit is still latched by B's own
+    // in-flight request, so a second activation cannot send the same batch twice.
+    expect(q<HTMLButtonElement>(root, 'batch-transfer-submit').disabled).toBe(true)
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(2)
+
+    // POSITIVE CONTROL: a batch that settles with no transition behind it DOES render its summary,
+    // its latch and its toast. Without this leg every assertion above would also pass on a page
+    // that had simply stopped working.
+    releaseSecond!({ ok: true, data: { succeeded: ['apv_9'], skipped: [], affectedRequesterIds: [] } })
+    await flushUi()
+    expect(q(root, 'batch-transfer-summary')).toBeTruthy()
+    expect(q(root, 'batch-transfer-submitted-notice')).toBeTruthy()
+    expect(messageSuccessSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops a FAILED batch result that settles after the principal changed', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+
+    let rejectPost: ((reason: unknown) => void) | null = null
+    apiPostSpy.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectPost = reject }))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+
+    useAuth().setToken(tokenFor('user-b'))
+    await flushUi()
+
+    rejectPost!(new Error('network'))
+    await flushUi()
+
+    // The failure belongs to the operator who pressed submit; the person now reading this page did
+    // not submit anything, and must not be told that something of theirs failed.
+    expect(messageErrorSpy).not.toHaveBeenCalled()
+
+    // POSITIVE CONTROL: a failure with no transition behind it still reaches the operator who
+    // caused it — and reaches them on a page the discarded settle left usable.
+    apiGetSpy.mockResolvedValue({ data: [listRow('apv_9', 'B 的待办')], total: 1 })
+    await setPicker(root, 'batch-transfer-source-picker', 'user_b_source')
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '接手')
+    apiPostSpy.mockRejectedValueOnce(new Error('network'))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(2)
+    expect(messageErrorSpy).toHaveBeenCalledTimes(1)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-5 item 2 — the confirmation is the commitment point for the WHOLE
+  // request, not only for its rows and its source approver.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('posts the target and the reason the operator CONFIRMED, never one substituted after the dialog opened', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+
+    let resolveConfirm: (() => void) | null = null
+    confirmSpy.mockReturnValue(new Promise<void>((resolve) => { resolveConfirm = () => resolve() }))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+
+    // Both drift inside the window the dialog holds open. The form really does change — these are
+    // the values a live read at request time would have sent.
+    await setPicker(root, 'batch-transfer-target-picker', 'user_other_target')
+    await setReason(root, '换一个原因')
+    expect(q<HTMLInputElement>(root, 'batch-transfer-target-picker').value).toBe('user_other_target')
+    expect(q<HTMLTextAreaElement>(root, 'batch-transfer-reason').value).toBe('换一个原因')
+
+    apiPostSpy.mockResolvedValue({ ok: true, data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] } })
+    resolveConfirm!()
+    await flushUi()
+
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+    const body = apiPostSpy.mock.calls[0][1] as {
+      fromUserId: string; toUserId: string; reason: string; instanceIds: string[]
+    }
+    // Every field of the request is the one that was on screen when the operator said yes.
+    expect(body).toEqual({
+      fromUserId: 'user_from',
+      toUserId: 'user_to',
+      reason: '原审批人休假',
+      instanceIds: ['apv_1', 'apv_2'],
+    })
+    // Stated the other way round too, so a future refactor that made the captured and the live
+    // values coincide could not make this test vacuous without also failing it.
+    expect(body.toUserId).not.toBe('user_other_target')
+    expect(body.reason).not.toBe('换一个原因')
+  })
+
+  it('sends nothing when the new principal happens to pick the SAME approver the confirmation was opened for', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+
+    let resolveConfirm: (() => void) | null = null
+    confirmSpy.mockReturnValue(new Promise<void>((resolve) => { resolveConfirm = () => resolve() }))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+
+    // The identity changes with the dialog still open, and the NEW principal then picks the very
+    // approver the previous one had loaded. That coincidence is what makes a source-only re-check
+    // insufficient: `'user_from' !== 'user_from'` is false, so the comparison agrees and the
+    // previous principal's ids, target and reason would go out under this session.
+    useAuth().setToken(tokenFor('user-b'))
+    await flushUi()
+    await setPicker(root, 'batch-transfer-source-picker', 'user_from')
+    expect(q<HTMLInputElement>(root, 'batch-transfer-source-picker').value).toBe('user_from')
+
+    resolveConfirm!()
+    await flushUi()
+
+    expect(apiPostSpy).not.toHaveBeenCalled()
+    // And the page is left usable rather than latched by an activation that is no longer anyone's.
+    apiGetSpy.mockResolvedValue({ data: [listRow('apv_9', 'B 的待办')], total: 1 })
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '接手')
+    confirmSpy.mockReset().mockResolvedValue(undefined)
+    apiPostSpy.mockResolvedValue({ ok: true, data: { succeeded: ['apv_9'], skipped: [], affectedRequesterIds: [] } })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    // POSITIVE CONTROL: the new principal's own batch does go out, under their own name and ids.
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+    expect(apiPostSpy.mock.calls[0][1]).toEqual({
+      fromUserId: 'user_from',
+      toUserId: 'user_to',
+      reason: '接手',
+      instanceIds: ['apv_9'],
+    })
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-5 item 5 — the composable's disposal flag. `unsubscribe()` cannot
+  // cover this window: the notification has already been delivered and its
+  // deferred re-read already queued by the time the surface goes away.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('issues no capability read from a transition the surface was torn down inside', async () => {
+    await mountView()
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(1)
+
+    // POSITIVE CONTROL FIRST, on this exact sequence: a transition INTO a session, surface still
+    // mounted, DOES re-read. It isolates the disposal flag as the only thing the assertion below
+    // can be measuring — without it, that assertion would also hold if the deferred read had been
+    // skipped because `hasSession()` answered false, and would stay green with the flag removed.
+    useAuth().setToken(tokenFor('user-b'))
+    await flushUi()
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(2)
+
+    // The same transition, with the surface torn down in the SAME synchronous tick — after the
+    // notification has run and queued the deferred re-read, before that microtask executes.
+    const mounted = app!
+    useAuth().setToken(tokenFor('user-c'))
+    mounted.unmount()
+    app = null
+    await flushUi()
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(2)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Round-2 item 4 — a completed batch cannot be re-posted by a second click.
   // ───────────────────────────────────────────────────────────────────────────
   it('posts once and only once for a completed batch', async () => {

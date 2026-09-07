@@ -285,11 +285,29 @@ function getProductService(): ApprovalProductService {
 }
 
 /**
- * A log-safe identifier for a failure, following the convention
- * `services/approval-attachment-gc.ts:68` (`safeErrCode`) already established for the same hazard:
- * the driver's own `code` — falling back to the error's `name` — stripped to `[A-Za-z0-9_]` and
- * length-capped, with `unknown` when there is neither. NEVER the `message`, which is free text the
- * driver composes out of whatever it was holding.
+ * The SHAPES a `code` is allowed to have before it may be written to a log. Everything a real
+ * failure puts there fits: a PostgreSQL SQLSTATE (`42P01`, `23505`, `08006`), a Node/libpq errno
+ * (`ECONNREFUSED`, `ETIMEDOUT`, `ERR_INVALID_ARG_TYPE`), an error `name` (`TypeError`,
+ * `ServiceError`). Leading digits are permitted deliberately — SQLSTATE is the code an operator
+ * acting on this route's failures actually reads, and a class that excluded it would classify every
+ * genuine database failure as unclassified, which is the same as logging nothing at all.
+ */
+const RESTRICTED_ERROR_CODE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_]{0,31}$/
+/** Emitted in place of anything that is not one of those shapes. Never a fragment of the input. */
+const UNCLASSIFIED_ERROR_CODE = 'UNCLASSIFIED'
+
+/**
+ * A log-safe identifier for a failure. Same hazard `services/approval-attachment-gc.ts:68`
+ * (`safeErrCode`) addresses — NEVER the `message`, which is free text the driver composes out of
+ * whatever it was holding — but a DIFFERENT mechanism, and the difference is the point:
+ *
+ *   * `safeErrCode` SANITIZES: it strips the disallowed characters out and keeps the remainder, so
+ *     free text that reaches `.code` survives with its separators removed. `connect ECONNREFUSED
+ *     10.0.0.1:5432` becomes `connectECONNREFUSED10005432` — shorter, still the same disclosure.
+ *     A length cap does not close that; it only truncates it.
+ *   * this WHITELISTS: the value is tested WHOLE against the allowed shapes and is either emitted
+ *     unchanged or replaced, in full, by a constant. Nothing is ever manufactured out of a value
+ *     that failed the test, so there is no residue to bound.
  *
  * It is not returned to the client either: the response keeps the existing generic envelope, so
  * this narrows what is written to logs without opening a new channel in its place.
@@ -297,7 +315,8 @@ function getProductService(): ApprovalProductService {
 function restrictedErrorCode(error: unknown): string {
   const raw = (error as { code?: unknown; name?: unknown } | null | undefined)?.code
     ?? (error as { name?: unknown } | null | undefined)?.name
-  return typeof raw === 'string' ? raw.replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || 'unknown' : 'unknown'
+  if (typeof raw !== 'string') return UNCLASSIFIED_ERROR_CODE
+  return RESTRICTED_ERROR_CODE_SHAPE.test(raw) ? raw : UNCLASSIFIED_ERROR_CODE
 }
 
 function handleApprovalsError(
