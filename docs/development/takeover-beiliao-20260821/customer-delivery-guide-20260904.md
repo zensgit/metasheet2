@@ -20,6 +20,19 @@
 
 ---
 
+## v3(2026-09-07)变更摘要
+
+本次更新基于 2026-09-07 18:18–18:24 在 222 上的清库重建实测,以及随之而来的"222 直接转正"决定,新增/订正以下四项。
+
+1. **全新安装的零起点迁移与启动 —— 从"未验证"转为"已验证"(§2.2)**:此前(2026-09-06)止步于"建库需要 DBA、本次不经手口令";这次借 222 清库重建的机会补验了"库已建好之后"的迁移与启动:398 条迁移从零全部成功、建出 407 张表、health 200、前端 smoke PASS。**唯一仍需 DBA 的步骤是建库本身**,建好之后的步骤已证明不需要 DBA。
+2. **首个管理员(新增 §2.2 子节)**:全新安装后第一个管理员账号怎么产生——自助注册只给表格类权限,提升为平台管理员需要有数据库访问权限的人执行三条 SQL(`user_roles`/`users.is_admin`/`user_orgs`)。
+3. **每日自动备份(新增 §8)**:222 已注册每日 03:30 的 `pg_dump -Fc` 计划任务,保留 14 天,首跑成功;补充对应的 `pg_restore` 恢复方法。
+4. **清库重建对两个计划任务的影响(§3.2)**:`metasheet-stock-prep-scheduled-dry-run` 与令牌轮换计划任务因服务账号随库消失而停用,需重建服务账号后重新启用。
+
+详见 `48h-autonomous-run-record-20260906.md` 中 2026-09-07 16:2x / 18:18–18:24 两条时间线记录与新增的"222 转正剩余步骤"清单。
+
+---
+
 ## 1. 交付物
 
 | 交付物 | 说明 |
@@ -87,17 +100,39 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 **2026-09-06 实测结论**:2026-09-06 05:23–05:30 在 222 上另开一个隔离目录(独立 RootDir、独立库名、独立端口)用包内 `scripts/ops/multitable-onprem-apply-package.ps1`(`-InstallDeps 1 -RunMigrations 1 -RestartService 0 -CheckNginx 0 -RunHealthcheck 0`)实跑了一次纯 Windows 全新安装。
 
 - **已验证通过**:解包;从生产 `app.env` 派生新 env(26 个变量加载);依赖冻结安装 —— corepack 固定 pnpm 9.15.9,staging 预检 50 秒 + 离线激活 30 秒,exit 0(在 SYSTEM 账户下也能跑通)。
-- **未验证(如实标注)**:零起点数据库迁移与服务启动。原因:建库需要 `CREATEDB` 或超级用户权限;应用角色 `metasheet` 两者皆无(PostgreSQL 报"创建数据库权限不够"),`postgres` 超级用户按 `pg_hba`(scram-sha-256)需要口令,本次不经手口令,因此迁移在"数据库不存在"上失败退出。
+- **当时未验证**:零起点数据库迁移与服务启动。原因:建库需要 `CREATEDB` 或超级用户权限;应用角色 `metasheet` 两者皆无(PostgreSQL 报"创建数据库权限不够"),`postgres` 超级用户按 `pg_hba`(scram-sha-256)需要口令,本次不经手口令,因此迁移在"数据库不存在"上失败退出。
+
+**2026-09-07 实测结论(补齐上面缺的一段,已验证通过)**:2026-09-07 18:18–18:24,owner 决定 222 直接转正、旧数据不要,借这次清库重建的机会补验了"库已经建好之后"的零起点迁移与启动。核实 222 的库与 `public` 模式的所有者本来就是应用角色 `metasheet`(`super=false`、`createdb=false`),扩展 `pgcrypto`/`btree_gist` 也归 `metasheet`(迁移用 `CREATE EXTENSION IF NOT EXISTS` 自建,PG13+ 上这两个是 trusted 扩展,不需要超级用户)。流程:`pg_dump -Fc` 备份 + 复制 `app.env` → 停用两个计划任务 → `pm2 stop` → 以应用角色执行 `DROP SCHEMA public CASCADE`(级联 615 对象)→ `CREATE SCHEMA public AUTHORIZATION metasheet` → `GRANT USAGE ON SCHEMA public TO PUBLIC` → 把 `app.env` 装进当前进程环境后在 `C:\metasheet` 下跑 `node packages\core-backend\dist\src\db\migrate.js`(与就地升级用的是同一段迁移调用)。**结果:398 条迁移从零全部成功(exit 0),建出 407 张表,函数归属与升级前一致**;`pm2 restart --update-env` 后 30 秒 health 200;启动时自动建出了 `audit_logs_2026_09`/`2026_10` 分区;PG 错误日志无新错;经 nginx 的前端 smoke PASS;用户表 0 行(全新库应有状态)。**全程只用应用角色 `metasheet`,不需要 DBA 或超级用户参与**——前提只有一个:库和 `public` 模式的所有者已经是应用角色(即下面步骤 3 那个建库动作已经做完)。
+
+**结论(取代上面"当时未验证"的说法)**:全新安装唯一还需要 DBA 的步骤是**建库**本身(`CREATE DATABASE <名> OWNER <应用角色>`)——这一步仍然需要持有 `CREATEDB` 或超级用户权限的账号来做,应用角色做不到。**建好之后**的依赖安装、迁移、服务启动全部已验证通过,不需要 DBA 再参与。
 
 据此,§2.2 的步骤应为:
 
 1. 解包到新的部署根目录。
 2. `docker/app.env` 从模板生成(`PORT` / `DATABASE_URL` / `JWT_SECRET`、附件与上传路径等)。
-3. **客户侧前置,必须先做**:DBA 用持有 `CREATEDB` 或超级用户权限的账号建库,并把所有权授给应用角色 —— 纯 Windows 环境没有 `sudo -u postgres`,用 pgAdmin 或 `psql -U postgres` 代替。**本次在测试机上正是卡在这一步**,后续步骤未能实跑。
-4. 跑 `multitable-onprem-apply-package.ps1`(deps + 迁移;`-RestartService 0` 时脚本不碰 pm2)。
-5. 以**实际运行服务的那个 Windows 用户**启动 pm2(`pm2 start packages\core-backend\dist\src\index.js --name metasheet-backend --cwd <部署根目录>`;SYSTEM 账户下没有 pm2),再跑健康检查(标准同 §2.1)。
+3. **客户侧前置,必须先做**:DBA 用持有 `CREATEDB` 或超级用户权限的账号建库,并把所有权授给应用角色 —— 纯 Windows 环境没有 `sudo -u postgres`,用 pgAdmin 或 `psql -U postgres` 代替。**这是全新安装唯一还需要 DBA 的一步**(见上方 2026-09-07 结论);做完这一步之后的全部步骤已在 222 实测通过。
+4. 跑 `multitable-onprem-apply-package.ps1`(deps + 迁移;`-RestartService 0` 时脚本不碰 pm2)。**已验证**(见上方 2026-09-07 实测)。
+5. 以**实际运行服务的那个 Windows 用户**启动 pm2(`pm2 start packages\core-backend\dist\src\index.js --name metasheet-backend --cwd <部署根目录>`;SYSTEM 账户下没有 pm2),再跑健康检查(标准同 §2.1)。**已验证**。
 
 随后直接进入 §3(接入客户 PLM)。
+
+#### 首个管理员
+
+全新安装完成、库里还没有任何用户时,第一个管理员账号需要人工走完以下三步——自助注册本身只给表格类权限,不会自动成为管理员:
+
+1. **注册首个账号**:由客户/owner 在登录页点"注册"完成,密码全程由客户/owner 自己输入,不经我方之手。
+2. **提升为平台管理员**(需要有数据库访问权限的人执行,`<用户 id>` 替换为上一步注册出的账号 id):
+
+   ```sql
+   -- 管理员身份:user_roles 里挂一条 role_id='admin' 的行
+   INSERT INTO user_roles (user_id, role_id) VALUES ('<用户 id>', 'admin') ON CONFLICT DO NOTHING;
+   -- 平台另有 users.is_admin 标志,一并置位
+   UPDATE users SET is_admin = true WHERE id = '<用户 id>';
+   -- 租户成员身份:user_orgs 恰一条活跃行,租户为 default
+   INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ('<用户 id>', 'default', true) ON CONFLICT DO NOTHING;
+   ```
+
+3. **重新登录**:该账号退出后重新登录,即成为平台管理员。随后用这个管理员账号按 §5 建角色、挂权限码、开命名空间准入,才能授出备料权限。
 
 **关于 `deploy-bootstrap`**:§1 交付物里的 `deploy-bootstrap`(`.ps1`/`.bat`,即 `multitable-onprem-deploy-launcher.ps1`)是**升级 / 首跳修复入口**——它要求一个已存在的部署根目录(`-RootDir` 指向"已安装根"),用途是解决"用旧 apply 助手升级到带修复的新包时,第一次 apply 仍执行包内旧版助手"这个先有鸡还是先有蛋的问题,**不是全新安装的入口**。全新安装应直接用上面验证过的 `multitable-onprem-apply-package.ps1`。
 
@@ -173,6 +208,8 @@ W2 起 222 上注册了一个每日 **06:00** 的 Windows 计划任务 `metashee
 Start-ScheduledTask -TaskName 'metasheet-stock-prep-scheduled-dry-run'
 ```
 核对两件事:①`(Get-ScheduledTaskInfo -TaskName 'metasheet-stock-prep-scheduled-dry-run').LastTaskResult` 必须是 `0`;②脚本日志新增的那几行必须是 values-free 的试算结果(如 `200 manual_confirm_required`、`add`/`manual_confirm` 计数、`summary failed 0`),不是错误堆栈。222 上按此方法验证通过:`LastTaskResult=0`,日志新增两行,试算 200、`add 135 / manual_confirm 225`、`summary failed 0`。
+
+**2026-09-07 清库重建后的注意**:18:18–18:24 对 222 执行的清库重建(见 §2.2「2026-09-07 实测结论」与运行记录时间线)把整个 `public` 模式连同其中的服务账号一起清空,`svc-stockprep-scheduler` 的 `users` 行随之消失。因此清库后 `metasheet-stock-prep-scheduled-dry-run` 与令牌轮换计划任务 `metasheet-stock-prep-token-rotate` 均已在 Windows 任务计划程序里**停用**,避免它们拿一个不存在的服务账号令牌反复失败。**重新启用前须先按上面「账号策略」重建服务账号**(建 `users` 行、`role=admin`、登录禁用哨兵 hash、恰一条 `user_orgs` 的 `default` 记录),再签发新令牌、更新计划任务读取的令牌文件,最后用 `Start-ScheduledTask` 手动触发验证一次(见上方「验证方式」),确认 `LastTaskResult=0` 且日志 values-free 之后,再把两个任务状态改回启用。
 
 ### 3.3 源绑定切换后,定时任务/无工作区参数的调用能不能读到同一条绑定(W3b)
 
@@ -459,6 +496,14 @@ pm2 restart metasheet-backend --update-env
 
 **顺手清理的配置**:`STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS` 这份 env 允许清单**没有过期机制**,回退或窗口结束后需要人工从 `app.env` 里清理;接力链回退就是把对应的 env 路径键从 `app.env` 里拿掉后重启。**env 类回退同样要重启才生效,且必须按 §7.1 的写法先把 `app.env` 装进当前 shell 再 `pm2 restart --update-env`**,否则进程继续带着旧值。
 
+**每日自动备份(常规运维,不同于上面升级前的一次性手工备份)**:222 上已注册 Windows 计划任务 `metasheet-daily-pg-dump`(以 `SYSTEM` 身份运行,每日 03:30 触发,脚本 `C:\metasheet\secrets\daily-pg-dump.ps1`,所在目录 ACL 仅 `Administrators`/`SYSTEM` 可读),执行 `pg_dump -Fc` 把整库导出到 `C:\metasheet\output\backups\daily\metasheet-<时间戳>.dump`,保留最近 14 天(超过的自动清理),日志写 `daily-pg-dump.log`。首次运行已验证成功。恢复方法与下面「最后手段」相同,把路径换成要恢复的那个 `.dump` 文件:
+
+```powershell
+pg_restore --clean --if-exists -d $env:DATABASE_URL "C:\metasheet\output\backups\daily\metasheet-<时间戳>.dump"
+```
+
+同样只在确认要接受"备份时间点之后所有模块的新数据被抹掉"这个代价时才用,必须先经 owner/客户方确认。
+
 **最后手段(数据库级,慎用)**:只在"迁移本身跑成功了,但之后发现数据被破坏"这种场景使用,**必须先经 owner/客户方确认**——若该部署上同时运行其他业务模块(如考勤、审批),`pg_restore --clean` 类操作会把备份时间点之后**所有模块**的新数据一并抹掉:
 
 ```powershell
@@ -537,7 +582,7 @@ CREATE TABLE IF NOT EXISTS audit_logs_2026_10 PARTITION OF audit_logs FOR VALUES
 
 初稿标了 4 条,2026-09-04 晚复核后只剩 1 条:
 
-1. **§2.2 全新安装:零起点数据库迁移与服务启动尚未实测通过** —— 2026-09-06 已在 222 隔离目录用 `multitable-onprem-apply-package.ps1` 实跑,解包/派生 env/依赖冻结安装均通过;但迁移卡在"数据库不存在"(建库需要 `CREATEDB` 或超级用户权限,本次不经手数据库口令),服务启动(pm2)未验证。交付前若客户是全新装机,须先由 DBA 建好库、把 §2.2 剩余步骤在一台干净机器上走完再交。
+1. **§2.2 全新安装:零起点数据库迁移与服务启动 —— 已实测通过(2026-09-07 结论)** —— 2026-09-06 已在 222 隔离目录用 `multitable-onprem-apply-package.ps1` 实跑,解包/派生 env/依赖冻结安装均通过;当时迁移卡在"数据库不存在"(建库需要 `CREATEDB` 或超级用户权限,本次不经手数据库口令),服务启动(pm2)未验证。**2026-09-07 18:18–18:24 借 222 清库重建补验**:库和 `public` 模式所有者已是应用角色时,迁移(398 条从零全部成功)与服务启动(pm2 health 200)全部通过,不需要 DBA 参与;**唯一仍需 DBA 的步骤是建库本身**。交付前若客户是全新装机,只需 DBA 建好库并授权给应用角色,§2.2 剩余步骤已验证可由非 DBA 人员走完。
 
 已补实的三条:§1 的包标签/SHA256/钉住提交(r8-20260904,见 §1 表);§3 步骤 1 的界面入口(顶部导航「外接数据源」);§4 的 59/33 计数出处(2026-09-03 对测试库的只读枚举,记录在 `222-rehearsal-full-run-20260904.md` §1 与 memory)。
 
