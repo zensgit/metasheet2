@@ -150,9 +150,10 @@
       </div>
     </section>
 
-    <!-- ⑤ 谁能用 — STATIC in P0 (line B2 / design §6.1's own scope cut). No live role check, so
-         nothing here can ever render a 403 or a user identity: the three permission codes are the
-         same authored table the install page's own §14 defaults panel already renders. -->
+    <!-- ⑤ 谁能用 — the LIVE check (P1-3 / line B2). The three permission codes are still the same
+         authored table the install page's own §14 defaults panel renders; what is new below them is
+         a real read of the PLATFORM role catalog, projected to role names and integer counts only.
+         No user id, email or display name is fetched, so none can be rendered. -->
     <section class="stock-prep-gs__card" data-testid="stock-prep-getting-started-step-grant-access">
       <h4 class="stock-prep-gs__h4">{{ bi('⑤ 谁能用', '⑤ Who can use it') }}</h4>
       <p class="stock-prep-gs__hint">
@@ -176,6 +177,63 @@
              `stock-prep:read` and `stock-prep:operate`. -->
         {{ bi('一线要能干活,stock-prep:read 和 stock-prep:operate 两个都要,少一个就只能看不能做。', 'For the floor to do the work, both stock-prep:read and stock-prep:operate are needed — missing either leaves them able to look but not act.') }}
       </p>
+
+      <!-- 现在的情况 (线框 B2) — THE ONE LIVE READ IN THIS COMPONENT.
+           Four verdicts, and none of them is 「没完成」: ✔ 有角色有人 / ⚠ 有角色没人 / ⚠ 没有这样的角色
+           / ? 看不到. The last one is what a `stock-prep:admin` holder sees, because the catalog route
+           is platform-admin — and telling them 「还没配」 would push them to redo work that may well
+           already be done (G4). Nothing in this block gates anything: every button and link in this
+           card stays live in all four states (G5). -->
+      <div
+        class="stock-prep-gs__probe"
+        data-testid="stock-prep-getting-started-access-state"
+        :data-state="accessStateKey"
+      >
+        <p class="stock-prep-gs__probe-headline">
+          <span class="stock-prep-gs__glyph" :class="`stock-prep-gs__glyph--${accessVerdict.tone}`">{{ accessVerdict.glyph }}</span>
+          <span data-testid="stock-prep-getting-started-access-headline">{{ bi(accessVerdict.zh, accessVerdict.en) }}</span>
+        </p>
+        <!-- Role NAMES and integer COUNTS. That is the whole projection `onboardingReadiness.ts`
+             hands over — there is no user id, email or display name anywhere in it to render. -->
+        <ul v-if="accessRoles.length > 0" class="stock-prep-gs__list stock-prep-gs__list--plain">
+          <li v-for="(role, index) in accessRoles" :key="index" data-testid="stock-prep-getting-started-access-role">
+            <code class="stock-prep-gs__token">{{ role.name ?? bi('(这个角色没有名字)', '(unnamed role)') }}</code>
+            <span>{{ bi(`${role.memberCount} 人`, `${role.memberCount} member(s)`) }}</span>
+          </li>
+        </ul>
+        <p v-if="accessRoleOverflow > 0" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-overflow">
+          {{ bi(`另外还有 ${accessRoleOverflow} 个角色也同时持有这两个权限码,这里没有全部列出。`, `${accessRoleOverflow} further role(s) also hold both codes and are not listed here.`) }}
+        </p>
+        <p v-if="accessDoubleCounted" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-double-count">
+          {{ bi(
+            '人数是各角色成员数相加;同时在两个角色里的人会被数两次。',
+            'The headcount is the sum of the roles’ member counts; anyone in two of these roles is counted twice.',
+          ) }}
+        </p>
+        <p v-if="accessVerdict.nextZh" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-next">
+          {{ bi(accessVerdict.nextZh, accessVerdict.nextEn) }}
+        </p>
+        <p v-if="accessAdminNote" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-admin-note">
+          {{ bi(accessAdminNote.zh, accessAdminNote.en) }}
+        </p>
+        <!-- F9, said out loud: the catalog SQL has no tenant predicate, so this is a platform-wide
+             answer. An earlier draft called it 「贵司的配置」, which would have been a plain lie on a
+             host serving more than one tenant. -->
+        <p class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-scope">
+          {{ bi(
+            '这里读的是平台的角色目录(整个平台一份,不按租户划分),看的是「有没有这样的角色、里面有几个人」。权限只能通过角色给 —— 直接把权限码勾在某个人身上不生效,那个账号打开备料仍然是没权限。',
+            'This reads the platform-wide role catalog (one catalog for the whole platform, not per tenant) and answers only “is there such a role, and how many people are in it”. Permissions only take effect through a role — ticking a code directly on a person does not work, and that account still gets refused.',
+          ) }}
+        </p>
+        <button
+          type="button"
+          class="stock-prep-gs__button"
+          data-testid="stock-prep-getting-started-access-recheck"
+          :disabled="accessChecking"
+          @click="checkAccessReadiness"
+        >{{ accessChecking ? bi('正在看…', 'Checking…') : bi('重新检查', 'Check again') }}</button>
+      </div>
+
       <!-- Native anchors, deliberately: these leave the workbench for two platform routes, and a
            full page load is the honest thing for a destination this SPA route does not own. They are
            also what keeps this component mountable in a bare `createApp` host with no router
@@ -313,7 +371,7 @@
 <script setup lang="ts">
 // BOM备料 接入向导「开始使用」(P0-4) — a二级视图寄生在既有 install tab 顶部,零 tab 结构改动。
 //
-// PURELY PRESENTATIONAL. This component issues NO fetch of its own — every prop below is state
+// PRESENTATIONAL, WITH EXACTLY ONE READ OF ITS OWN. Every prop below is state
 // `StockPreparationInstallView.vue` already owns and already loads through its EXISTING calls
 // (manifest, deployment preflight, source preflight, the install run). That is what makes "在没点任何
 // 按钮之前就渲染" true for free: the parent's initial state (preflight=null, sourcePreflight=null,
@@ -321,12 +379,22 @@
 // this component's emits is what keeps D6 (source preflight never auto-runs) true without this file
 // having to know the rule.
 //
+// THE ONE EXCEPTION IS ⑤「谁能用」 (P1-3). No existing call on the install page answers "is anybody
+// authorised to use this yet", and the answer lives on a PLATFORM route (`/api/admin/roles`) that has
+// nothing to do with the install page's own state — so threading it through the parent would have
+// made `StockPreparationInstallView.vue` the owner of a read it has no other use for. It is issued
+// here instead, on mount and on 「重新检查」, through `onboardingReadiness.ts`, which never rejects and
+// collapses every refusal (403 for a 备料 admin, 500, network, unrecognised shape) into ONE `unknown`
+// state. D6 is untouched: that rule is about probing the CUSTOMER's database, and this reads the
+// platform's own role table. G3 is honoured by construction — a preload that cannot answer produces a
+// state, never a banner and never a redirect.
+//
 // STEPPER IS A MAP, NOT A GATE (G5). No button here is ever disabled by another step's state — see
 // the two design-mandated cases: a `no-go` source verdict never disables ⑥'s link (nothing here reads
 // the verdict for that link at all), and an outstanding `STOCK_PREP_CONFIRMATION_LEDGER_NOT_READY`
 // blocker (an `http`-kind blocker) never disables ④'s "开始安装" button (its `:disabled` is
 // `busy` alone).
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 import type { StockPreparationInstallDefaults, StockPreparationPreflight, StockPreparationPreflightBlocker } from '../../../services/integration/stockPreparation/installPlan'
@@ -344,6 +412,11 @@ import {
   type StockPrepGettingStartedBinding,
   type StockPrepGettingStartedStepKey,
 } from '../../../services/integration/stockPreparation/gettingStarted'
+import {
+  readStockPrepOnboardingReadiness,
+  stockPrepOnboardingReadinessUnknown,
+  type StockPrepOnboardingReadiness,
+} from '../../../services/integration/stockPreparation/onboardingReadiness'
 import {
   stockPrepBlockerPlain,
   stockPrepPermissionPlain,
@@ -381,12 +454,138 @@ function stepLabel(key: StockPrepGettingStartedStepKey) {
   return STOCK_PREP_GETTING_STARTED_STEP_LABEL[key]
 }
 
+// ---------------------------------------------------------------------------
+// ⑤「谁能用」— the live role-catalog check (P1-3)
+// ---------------------------------------------------------------------------
+
+/** `null` until the first read settles — the FIRST-PAINT state, rendered as 「正在看…」, not as a verdict. */
+const accessReadiness = ref<StockPrepOnboardingReadiness | null>(null)
+const accessChecking = ref(false)
+/**
+ * Monotonic sequence + an unmount latch (#3365「卸载即作废」). A 「重新检查」 pressed while an earlier
+ * read is still out must not be overwritten by that earlier read landing second, and neither read may
+ * write into a component that is already gone.
+ */
+let accessSeq = 0
+let accessDisposed = false
+onBeforeUnmount(() => { accessDisposed = true })
+
+async function checkAccessReadiness(): Promise<void> {
+  const seq = accessSeq + 1
+  accessSeq = seq
+  accessChecking.value = true
+  let answer: StockPrepOnboardingReadiness
+  try {
+    answer = await readStockPrepOnboardingReadiness()
+  } catch {
+    // The service is documented never to reject; this is the belt to that braces, so a future change
+    // there can never turn this fire-and-forget call into an unhandled rejection.
+    answer = stockPrepOnboardingReadinessUnknown(null)
+  }
+  if (accessDisposed || seq !== accessSeq) return
+  accessReadiness.value = answer
+  accessChecking.value = false
+}
+
+// Runs on mount, before any button on this page has been pressed — the wizard's whole point is that
+// it tells you where the deployment stands without being asked.
+onMounted(() => { void checkAccessReadiness() })
+
+const accessStateKey = computed<string>(() => accessReadiness.value?.state ?? 'checking')
+const accessRoles = computed(() => accessReadiness.value?.roles ?? [])
+const accessRoleOverflow = computed(() => Math.max(0, (accessReadiness.value?.roleCount ?? 0) - accessRoles.value.length))
+/** Only warn about double counting when it is actually possible — i.e. more than one qualifying role. */
+const accessDoubleCounted = computed(() => (accessReadiness.value?.roleCount ?? 0) > 1)
+
+interface AccessVerdictText {
+  glyph: string
+  tone: 'success' | 'warning' | 'muted'
+  zh: string
+  en: string
+  /** The 「下一步该做什么」 line, or empty when the state needs none. */
+  nextZh: string
+  nextEn: string
+}
+
+/**
+ * THE FOUR VERDICTS, and the words for each. Note what is NOT here: 「没完成」/「还没开始」. A role
+ * catalog this account cannot read says nothing about whether the work was done, and a deployment
+ * that has been serving the floor for a year would have been labelled 「还没开始」 every single time.
+ */
+const accessVerdict = computed<AccessVerdictText>(() => {
+  const readiness = accessReadiness.value
+  if (readiness === null) {
+    return {
+      glyph: '⋯',
+      tone: 'muted',
+      zh: '正在看现在有没有这样的角色…',
+      en: 'Checking whether such a role exists…',
+      nextZh: '',
+      nextEn: '',
+    }
+  }
+  if (readiness.state === 'ready') {
+    return {
+      glyph: '✔',
+      tone: 'success',
+      zh: `有 ${readiness.roleCount} 个角色同时持有这两个权限码,里面一共 ${readiness.memberTotal} 人。`,
+      en: `${readiness.roleCount} role(s) hold both codes, with ${readiness.memberTotal} member(s) between them.`,
+      nextZh: '这些人应该已经能打开备料工作台了。让其中一位试着打开一次,比在这里看更靠谱。',
+      nextEn: 'Those people should already be able to open the workbench. Having one of them actually open it beats reading this line.',
+    }
+  }
+  if (readiness.state === 'no_members') {
+    return {
+      glyph: '⚠',
+      tone: 'warning',
+      zh: `有 ${readiness.roleCount} 个角色同时持有这两个权限码,但里面一个人都还没有。`,
+      en: `${readiness.roleCount} role(s) hold both codes, but nobody has been put in them yet.`,
+      nextZh: '下一步:到「用户管理」把要用备料的人放进这个角色。角色本身不用再动。',
+      nextEn: 'Next: add the people who need stock-prep to that role under User Management. The role itself needs no further change.',
+    }
+  }
+  if (readiness.state === 'no_role') {
+    return {
+      glyph: '⚠',
+      tone: 'warning',
+      zh: '还没有任何角色同时持有这两个权限码。',
+      en: 'No role holds both codes yet.',
+      nextZh: '怎么建:到「角色管理」新建一个角色(或挑一个现成的),把 stock-prep:read 和 stock-prep:operate 两个都勾上并保存,再到「用户管理」把人放进这个角色。两个都勾在同一个角色上才算数。',
+      nextEn: 'How to set it up: in Role Management create a role (or pick an existing one), tick BOTH stock-prep:read and stock-prep:operate on it and save, then add people to that role under User Management. Both codes have to sit on the same role.',
+    }
+  }
+  return {
+    glyph: '?',
+    tone: 'muted',
+    zh: '看不到 —— 当前账号读不到平台的角色目录,所以这一步是不是做好了,本页判断不了。',
+    en: 'Cannot tell — this account cannot read the platform role catalog, so this page cannot judge whether this step is done.',
+    nextZh: '这不代表没配。读角色目录要平台管理员;请平台管理员确认,或者用下面的「复制一份待办」把这件事交出去。',
+    nextEn: 'That does not mean it is unconfigured. Reading the catalog needs a platform administrator — ask one to confirm, or hand the task off with the copy button below.',
+  }
+})
+
+/** 线框 B2's second row. Informational: `stock-prep:admin` is optional and never part of the verdict. */
+const accessAdminNote = computed<{ zh: string; en: string } | null>(() => {
+  const readiness = accessReadiness.value
+  if (readiness === null || readiness.state === 'unknown') return null
+  return readiness.adminRoleCount > 0
+    ? {
+      zh: `另外有 ${readiness.adminRoleCount} 个角色持有 stock-prep:admin(能看安装页,建表仍然是平台管理员的事)。`,
+      en: `${readiness.adminRoleCount} role(s) also hold stock-prep:admin (they can see the install page; creating tables stays a platform administrator's job).`,
+    }
+    : {
+      zh: '没有角色持有 stock-prep:admin —— 可以不配,一线不需要它。',
+      en: 'No role holds stock-prep:admin — that is fine, the floor does not need it.',
+    }
+})
+
 const derivationInput = computed(() => ({
   preflight: props.preflight,
   preflightErrorStatus: props.preflightErrorStatus,
   sourcePreflight: props.sourcePreflight,
   sourcePreflightErrorStatus: props.sourcePreflightErrorStatus,
   binding: props.binding,
+  roleReadiness: accessReadiness.value?.state ?? null,
 }))
 
 const steps = computed(() => stockPrepGettingStartedSteps(derivationInput.value))
@@ -591,6 +790,25 @@ function copyHandoffMessage(): void {
   border: 1px solid var(--ms-border-light);
   border-radius: 999px;
   font-size: 13px;
+}
+
+/* 现在的情况 (线框 B2). A bordered block rather than a colour wash: three of the four verdicts are
+   deliberately NOT green, and a tinted panel would have to pick a background for 「看不到」 that says
+   something the state does not. */
+.stock-prep-gs__probe {
+  margin: 0 0 var(--ms-space-2);
+  padding: var(--ms-space-2);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+}
+
+.stock-prep-gs__probe-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 0 6px;
+  color: var(--ms-text-1);
+  line-height: 1.6;
 }
 
 .stock-prep-gs__glyph--success { color: var(--ms-color-success); }

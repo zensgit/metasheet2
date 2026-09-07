@@ -1,9 +1,13 @@
 // BOM备料 接入向导「开始使用」— 六步地图的纯派生逻辑 (P0-4).
 //
-// ARCHITECTURE: this module invents NO new read. Every badge below is derived from data the install
-// page already fetches through EXISTING calls (the manifest, the deployment preflight, the source
-// preflight, the source binding) — the six-step map is a NARRATIVE layer over state
-// `StockPreparationInstallView.vue` already owns, passed down as props. R7 (design §8.1):
+// ARCHITECTURE: this module is PURE and issues no read of its own. Five of the six badges are derived
+// from data the install page already fetches through EXISTING calls (the manifest, the deployment
+// preflight, the source preflight, the source binding) — a NARRATIVE layer over state
+// `StockPreparationInstallView.vue` already owns, passed down as props. The sixth, ⑤「谁能用」, is the
+// one step no existing call answers, so P1-3 added exactly one read for it
+// (`onboardingReadiness.ts`, owned by the wizard component); this module receives that read's already
+// -decided verdict as `roleReadiness` and projects it, the same way it projects everything else.
+// R7 (design §8.1):
 // "每一步判定只用服务端答的字段,不在前端二次推导" — this file only RE-READS fields the server already
 // decided (`preflight.ready`, `sourcePreflight.verdict`, `blocker.fix.kind`, and the binding
 // envelope's `effectiveExternalSystemId` / `eligibleSources`), never a second opinion assembled out
@@ -17,6 +21,7 @@
 // never a gate — the wizard's own buttons (in the .vue) are enabled purely by permission + busy state,
 // completely independent of what this module returns.
 import type { StockPreparationPreflight, StockPreparationPreflightBlocker } from './installPlan'
+import type { StockPrepOnboardingReadinessState } from './onboardingReadiness'
 import type { StockPrepSourcePreflight } from './sourcePreflight'
 
 // ---------------------------------------------------------------------------
@@ -141,6 +146,16 @@ export interface StockPrepGettingStartedInput {
   sourcePreflightErrorStatus: number | null
   /** The source-binding panel's own answer, or `null` when this page has none. */
   binding: StockPrepGettingStartedBinding | null
+  /**
+   * 第⑤步的真实检测结果 (P1-3), or `null` while the read is still in flight / was never started.
+   *
+   * `null` is NOT a fourth verdict — it is the first-paint state, and it maps to the same `held` this
+   * step reported for its whole static life, so the map never flickers through a claim on its way to
+   * an answer. The four real values map straight through: 就绪 → `done`; 有角色没人 / 没有这样的角色 →
+   * `held` (work that exists and is somebody's — never `blocked`, because G5 says this map is not a
+   * gate and nothing downstream is stopped by it); 读不到 → `unknown` (G4「看不到」≠「没完成」).
+   */
+  roleReadiness: StockPrepOnboardingReadinessState | null
 }
 
 export type StockPrepGettingStartedSteps = Record<StockPrepGettingStartedStepKey, StockPrepGettingStartedBadgeKey>
@@ -150,12 +165,12 @@ export type StockPrepGettingStartedSteps = Record<StockPrepGettingStartedStepKey
  * guesses. ① and ③ come from the source-binding envelope (see `StockPrepGettingStartedBinding`); ②
  * and ④ come from the two manual preflights and read `not_checked` until somebody runs them — a
  * deployment that has been serving the floor for months is 「未检查」 on those two, not 「还没开始」.
- * ⑤ is fully static in P0 (no live role check — that is P1-3) and ⑥ has no derivable signal in P0
- * (the project-sync panel is not embedded here yet), so both read `held`: work that exists and is
- * somebody's, which this page does not claim to have observed.
+ * ⑤ now reads the platform role catalog for real (P1-3, `onboardingReadiness.ts`) and ⑥ still has no
+ * derivable signal in P0/P1 (the project-sync panel is not embedded here yet), so ⑥ reads `held`:
+ * work that exists and is somebody's, which this page does not claim to have observed.
  */
 export function stockPrepGettingStartedSteps(input: StockPrepGettingStartedInput): StockPrepGettingStartedSteps {
-  const { preflight, preflightErrorStatus, sourcePreflight, sourcePreflightErrorStatus, binding } = input
+  const { preflight, preflightErrorStatus, sourcePreflight, sourcePreflightErrorStatus, binding, roleReadiness } = input
 
   // ①③ — the binding envelope, or no answer at all.
   const sourceConnect: StockPrepGettingStartedBadgeKey = binding === null
@@ -195,13 +210,22 @@ export function stockPrepGettingStartedSteps(input: StockPrepGettingStartedInput
           ? 'pending_items'
           : 'blocked')
 
+  // ⑤ — the platform role catalog's answer, projected. Nothing here re-decides anything: the service
+  // already made the 合取 judgement and already collapsed every unanswerable read into `unknown`.
+  const grantAccess: StockPrepGettingStartedBadgeKey = roleReadiness === null
+    ? 'held'
+    : roleReadiness === 'ready'
+      ? 'done'
+      : roleReadiness === 'unknown'
+        ? 'unknown'
+        : 'held'
+
   return {
     'source-connect': sourceConnect,
     'source-verify': sourceVerify,
     'source-bind': sourceBind,
     'install-tables': installTables,
-    // P0: static, no live probe (line B2). Never done, never unknown — a claim this page cannot back.
-    'grant-access': 'held',
+    'grant-access': grantAccess,
     // P0: no embedded project-sync panel yet, so no signal exists to flip this off `held`.
     'first-project-run': 'held',
   }
@@ -237,6 +261,15 @@ export function stockPrepGettingStartedEvidence(
     return input.binding.effectiveExternalSystemId
       ? { zh: '已绑定', en: 'Bound' }
       : { zh: '还没选用哪一条', en: 'None chosen yet' }
+  }
+  // ⑤ — counts only, straight off the projection. `unknown` and `null` deliberately return no
+  // evidence: the badge already says 「? 看不到」/「需要别人做」, and inventing a sentence under it
+  // would be this page claiming to know why.
+  if (key === 'grant-access' && input.roleReadiness !== null) {
+    if (input.roleReadiness === 'ready') return { zh: '有角色,有人', en: 'Role exists, has members' }
+    if (input.roleReadiness === 'no_members') return { zh: '有角色,还没放人', en: 'Role exists, nobody in it' }
+    if (input.roleReadiness === 'no_role') return { zh: '还没有这样的角色', en: 'No such role yet' }
+    return null
   }
   if (key === 'install-tables' && input.preflightErrorStatus === null && input.preflight) {
     const count = Array.isArray(input.preflight.blockers) ? input.preflight.blockers.length : 0

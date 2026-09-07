@@ -20,7 +20,8 @@ import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
 //       `http`-kind blocker (e.g. ledger-not-ready) never disables step④'s run controls
 //   G6  the held steps' explanations render BEFORE any button is pressed, and the nine-step STATUS
 //       list is NOT duplicated here (the install panel below owns it)
-//   G7  step⑤ is fully static — a REVERSE assertion that no user/email-shaped token ever renders
+//   G7  step⑤'s LIVE role-catalog check (P1-3): four verdicts, none of them 「没完成」, plus a REVERSE
+//       assertion that no user/email-shaped token ever renders in ANY of them
 //   G8  every copy payload is values-free, asserted on the STRING that reaches the clipboard
 //   G9  G1「每屏一个主操作位」: at most one `--primary` button per rendering
 //   G10 the hand-off card says only what `report.pass` supports — no trial run, no landing tab
@@ -29,6 +30,14 @@ const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
   copied: [] as string[],
   copyResult: true,
+  /**
+   * The step⑤ role-catalog read's answer. `null` means the read NEVER SETTLES, which is deliberately
+   * the default: every case written before P1-3 asserts this component's FIRST PAINT, and a first
+   * paint is by definition the state before any read has come back. Cases that are about the check
+   * itself set this and then flush.
+   */
+  readiness: null as Record<string, unknown> | null,
+  readinessCalls: 0,
 }))
 
 vi.mock('../src/composables/useLocale', () => ({
@@ -47,6 +56,23 @@ vi.mock('../src/views/plm/plmClipboard', () => ({
     return h.copyResult
   }),
 }))
+
+// The step⑤ read's seam. The SERVICE's own behaviour (403/network/shape → unknown, the 合取, the
+// zero-identity projection) is pinned in StockPreparationOnboardingReadiness.spec.ts; here only the
+// four verdicts' DOM matters, so the module is replaced with a controllable answer.
+vi.mock('../src/services/integration/stockPreparation/onboardingReadiness', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/integration/stockPreparation/onboardingReadiness')>(
+    '../src/services/integration/stockPreparation/onboardingReadiness',
+  )
+  return {
+    ...actual,
+    readStockPrepOnboardingReadiness: vi.fn(async () => {
+      h.readinessCalls += 1
+      if (h.readiness === null) return new Promise(() => {}) as never
+      return h.readiness as never
+    }),
+  }
+})
 
 import StockPreparationGettingStarted from '../src/components/integration/stockPreparation/StockPreparationGettingStarted.vue'
 import type { StockPreparationPreflight, StockPreparationPreflightBlocker } from '../src/services/integration/stockPreparation/installPlan'
@@ -187,6 +213,8 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     h.locale = 'zh-CN'
     h.copied = []
     h.copyResult = true
+    h.readiness = null
+    h.readinessCalls = 0
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -208,6 +236,30 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
 
   function badgeOf(root: HTMLElement, step: string): string | undefined {
     return (root.querySelector(`[data-testid="stock-prep-getting-started-step"][data-step="${step}"]`) as HTMLElement | null)?.dataset.badge
+  }
+
+  /** Let the mounted step⑤ read settle and the DOM catch up. */
+  async function flushReadiness(): Promise<void> {
+    for (let turn = 0; turn < 4; turn += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+  }
+
+  /** The projection's shape, as `onboardingReadiness.ts` returns it. */
+  function readiness(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return { state: 'ready', roles: [{ name: '备料一线', memberCount: 6 }], roleCount: 1, memberTotal: 6, adminRoleCount: 0, status: null, ...overrides }
+  }
+
+  async function mountWithReadiness(answer: Record<string, unknown>, props: Props = {}): Promise<HTMLDivElement> {
+    h.readiness = answer
+    const root = await mount(props)
+    await flushReadiness()
+    return root
+  }
+
+  function accessBlock(root: HTMLElement): HTMLElement {
+    return root.querySelector('[data-testid="stock-prep-getting-started-access-state"]') as HTMLElement
   }
 
   // ---------------------------------------------------------------------------
@@ -494,27 +546,174 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // G7 — step⑤ is fully static: a REVERSE assertion
+  // G7 — step⑤'s live role-catalog check (P1-3), four verdicts + the REVERSE assertion
   // ---------------------------------------------------------------------------
 
-  it('step⑤ renders no user identity, email, or role-membership data — it is fully static in P0', async () => {
+  it('step⑤ keeps the three codes, the two links and the hand-off fallback', async () => {
     const root = await mount({ canRunInstall: true })
     const section = root.querySelector('[data-testid="stock-prep-getting-started-step-grant-access"]') as HTMLElement
     expect(section).not.toBeNull()
     const text = section.textContent ?? ''
-    // No email shape, no numeric "N 人" membership count, no obviously-a-name token — because none of
-    // that is ever fetched: this step has no live check in P0 (P1-3 adds it).
-    expect(text).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.-]+/)
-    expect(text).not.toMatch(/\d+\s*人/)
-    expect(text).not.toMatch(/成员/)
     // The two codes are named by their real names, not by a third paraphrase (B2).
     expect(text).toContain('stock-prep:read')
     expect(text).toContain('stock-prep:operate')
     expect(text).not.toContain('查看和填写')
-    // The two links and the fallback are there — the panel is not silently empty either.
     expect(section.querySelector('[data-testid="stock-prep-getting-started-link-roles"]')).not.toBeNull()
     expect(section.querySelector('[data-testid="stock-prep-getting-started-link-users"]')).not.toBeNull()
     expect(section.querySelector('[data-testid="stock-prep-getting-started-access-fallback"]')?.textContent).toContain('平台管理员')
+    // F9: the catalog is PLATFORM-wide. Saying 「贵司的配置」 would be false on a multi-tenant host,
+    // and the design's own earlier draft said exactly that.
+    const scope = section.querySelector('[data-testid="stock-prep-getting-started-access-scope"]')?.textContent ?? ''
+    expect(scope).toContain('平台的角色目录')
+    expect(scope).not.toContain('租户配置')
+    // 2026-09-08 on the customer host: a code ticked straight onto a person is filtered out by the
+    // namespace-admission gate and the account still gets refused. The page says so.
+    expect(scope).toContain('权限只能通过角色给')
+  })
+
+  it('the check runs on mount, before any button on this page has been pressed', async () => {
+    await mount()
+    expect(h.readinessCalls).toBe(1)
+  })
+
+  it('✔ 有角色有人 — names the roles and the headcount, and the map badge flips to 已完成', async () => {
+    const root = await mountWithReadiness(readiness({
+      roles: [{ name: '备料一线', memberCount: 6 }], roleCount: 1, memberTotal: 6, adminRoleCount: 0,
+    }))
+    const block = accessBlock(root)
+    expect(block.dataset.state).toBe('ready')
+    const headline = block.querySelector('[data-testid="stock-prep-getting-started-access-headline"]')?.textContent ?? ''
+    expect(headline).toContain('1 个角色')
+    expect(headline).toContain('6 人')
+    const roles = Array.from(block.querySelectorAll('[data-testid="stock-prep-getting-started-access-role"]'))
+    expect(roles).toHaveLength(1)
+    expect(roles[0].textContent).toContain('备料一线')
+    // A single qualifying role cannot double-count anybody, so that caveat stays off.
+    expect(block.querySelector('[data-testid="stock-prep-getting-started-access-double-count"]')).toBeNull()
+    expect(badgeOf(root, 'grant-access')).toBe('done')
+  })
+
+  it('⚠ 有角色但一个人都没有 → NOT ✔ (0 成员 is not ready)', async () => {
+    const root = await mountWithReadiness(readiness({
+      state: 'no_members', roles: [{ name: '备料一线', memberCount: 0 }], roleCount: 1, memberTotal: 0,
+    }))
+    const block = accessBlock(root)
+    expect(block.dataset.state).toBe('no_members')
+    expect(block.dataset.state).not.toBe('ready')
+    expect(block.textContent).toContain('一个人都还没有')
+    expect(block.querySelector('[data-testid="stock-prep-getting-started-access-next"]')?.textContent).toContain('用户管理')
+    // 「需要别人做」 — never 已完成, and never 卡住了 (G5: this map is not a gate).
+    expect(badgeOf(root, 'grant-access')).toBe('held')
+  })
+
+  it('⚠ 还没有任何角色同时持有两码 — says how to build one, naming both codes and both pages', async () => {
+    const root = await mountWithReadiness(readiness({
+      state: 'no_role', roles: [], roleCount: 0, memberTotal: 0,
+    }))
+    const block = accessBlock(root)
+    expect(block.dataset.state).toBe('no_role')
+    const next = block.querySelector('[data-testid="stock-prep-getting-started-access-next"]')?.textContent ?? ''
+    expect(next).toContain('角色管理')
+    expect(next).toContain('用户管理')
+    expect(next).toContain('stock-prep:read')
+    expect(next).toContain('stock-prep:operate')
+    expect(block.querySelectorAll('[data-testid="stock-prep-getting-started-access-role"]')).toHaveLength(0)
+    expect(badgeOf(root, 'grant-access')).toBe('held')
+  })
+
+  it('? 看不到 — a caller who cannot read the catalog is told exactly that, and NOT that it is undone', async () => {
+    const root = await mountWithReadiness(readiness({
+      state: 'unknown', roles: [], roleCount: 0, memberTotal: 0, status: 403,
+    }))
+    const block = accessBlock(root)
+    expect(block.dataset.state).toBe('unknown')
+    const text = block.textContent ?? ''
+    expect(text).toContain('看不到')
+    expect(text).toContain('这不代表没配')
+    // The three words this state must never produce.
+    expect(text).not.toContain('没完成')
+    expect(text).not.toContain('还没开始')
+    expect(text).not.toContain('还没配好')
+    // …and the status code is NOT rendered as a bare number nobody can act on.
+    expect(text).not.toContain('403')
+    // The map says 「? 看不到」 too — the card and the badge cannot disagree.
+    expect(badgeOf(root, 'grant-access')).toBe('unknown')
+    // stock-prep:admin is unknowable too when the catalog is unreadable, so that line stays off.
+    expect(block.querySelector('[data-testid="stock-prep-getting-started-access-admin-note"]')).toBeNull()
+  })
+
+  it('several qualifying roles: the sum is labelled as a sum, and an over-cap catalog says so', async () => {
+    const root = await mountWithReadiness(readiness({
+      roles: [{ name: '备料一线', memberCount: 6 }, { name: '备料班组长', memberCount: 3 }],
+      roleCount: 7,
+      memberTotal: 21,
+    }))
+    const block = accessBlock(root)
+    expect(block.querySelector('[data-testid="stock-prep-getting-started-access-double-count"]')?.textContent).toContain('数两次')
+    expect(block.querySelector('[data-testid="stock-prep-getting-started-access-overflow"]')?.textContent).toContain('5 个角色')
+  })
+
+  it('the stock-prep:admin line is informational — its absence never changes the verdict', async () => {
+    const withAdmin = await mountWithReadiness(readiness({ adminRoleCount: 2 }))
+    expect(accessBlock(withAdmin).querySelector('[data-testid="stock-prep-getting-started-access-admin-note"]')?.textContent)
+      .toContain('2 个角色')
+    if (app) app.unmount()
+    app = null
+    container!.innerHTML = ''
+    h.readinessCalls = 0
+    const withoutAdmin = await mountWithReadiness(readiness({ adminRoleCount: 0 }))
+    const note = accessBlock(withoutAdmin).querySelector('[data-testid="stock-prep-getting-started-access-admin-note"]')?.textContent ?? ''
+    expect(note).toContain('可以不配')
+    expect(accessBlock(withoutAdmin).dataset.state).toBe('ready')
+  })
+
+  it('「重新检查」 issues the read again', async () => {
+    const root = await mountWithReadiness(readiness({ state: 'no_role', roles: [], roleCount: 0, memberTotal: 0 }))
+    expect(h.readinessCalls).toBe(1)
+    ;(root.querySelector('[data-testid="stock-prep-getting-started-access-recheck"]') as HTMLButtonElement).click()
+    await flushReadiness()
+    expect(h.readinessCalls).toBe(2)
+  })
+
+  it('G5 — no verdict gates anything: every link and button in step⑤ stays live in all four states', async () => {
+    for (const state of ['ready', 'no_members', 'no_role', 'unknown'] as const) {
+      if (app) app.unmount()
+      app = null
+      container!.innerHTML = ''
+      const root = await mountWithReadiness(readiness({ state, roles: [], roleCount: state === 'ready' ? 1 : 0, memberTotal: state === 'ready' ? 4 : 0 }))
+      const section = root.querySelector('[data-testid="stock-prep-getting-started-step-grant-access"]') as HTMLElement
+      expect(section.querySelector('[data-testid="stock-prep-getting-started-link-roles"]'), state).not.toBeNull()
+      expect((section.querySelector('[data-testid="stock-prep-getting-started-copy-todo-access"]') as HTMLButtonElement).disabled, state).toBe(false)
+      // ⑥'s button is on a different card and must not be touched by ⑤'s verdict either.
+      expect((root.querySelector('[data-testid="stock-prep-getting-started-go-project-board"]') as HTMLButtonElement).disabled, state).toBe(false)
+    }
+  })
+
+  // THE REVERSE ASSERTION (设计稿 线框 B2 硬规则): role names and integer counts only. Whatever the
+  // verdict, nothing user-shaped may reach the DOM — the projection never carries an identity, so
+  // this is a guard against a future widening putting one back.
+  it('step⑤ renders NO user identity in any of the four verdicts', async () => {
+    const PLANTED = ['u-8f3c19', 'zhang.wei@factory-a.example.com', '张伟']
+    for (const state of ['ready', 'no_members', 'no_role', 'unknown'] as const) {
+      if (app) app.unmount()
+      app = null
+      container!.innerHTML = ''
+      const root = await mountWithReadiness(readiness({
+        state,
+        // Only the two fields the projection is allowed to carry, holding values-free content.
+        roles: state === 'ready' || state === 'no_members' ? [{ name: '备料一线', memberCount: state === 'ready' ? 6 : 0 }] : [],
+        roleCount: state === 'ready' || state === 'no_members' ? 1 : 0,
+        memberTotal: state === 'ready' ? 6 : 0,
+      }))
+      const text = (root.querySelector('[data-testid="stock-prep-getting-started-step-grant-access"]') as HTMLElement).textContent ?? ''
+      expect(text, `${state}: no email shape`).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.-]+/)
+      for (const planted of PLANTED) {
+        expect(text, `${state}: must not render ${planted}`).not.toContain(planted)
+      }
+      // No user-id-shaped token, and no part/quantity value either (values-free).
+      expect(text, state).not.toMatch(/\b(userId|user_id|subjectId|actorId)\b/)
+      expect(text, state).not.toMatch(/\d{6,}/)
+    }
   })
 
   // ---------------------------------------------------------------------------
