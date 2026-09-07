@@ -597,4 +597,33 @@ describe('ApprovalCenterView — desktop empty-text i18n (report item O-8)', () 
       'No approvals you have processed',
     ])
   })
+  // -------------------------------------------------------------------------
+  // Verification round (2026-09-08): every test above sets the locale BEFORE mountView(), so the
+  // set passes identically whether `tabEmptyText` reads the shared locale reactively or took a
+  // one-shot snapshot at setup time. This one pins the property the slice claims — the desktop
+  // table's empty text FOLLOWS the shared shell locale on an ALREADY-MOUNTED page, through both
+  // of useLocale's write paths (setLocale(), as App.vue:283 calls, and useLocale.ts:41-49's
+  // cross-tab 'storage' listener).
+  // Discriminating probe: freezing only the LOCALE read inside `tabEmptyText`
+  // (`const frozen = isZh.value` hoisted out of the computed, keeping `searchText.value` live)
+  // leaves every other test in this file GREEN — including both search-vs-default tests — and
+  // turns exactly this one RED.
+  // -------------------------------------------------------------------------
+  it('desktop empty text follows a post-mount shell locale change, both via setLocale() and via a cross-tab storage event', async () => {
+    setLocale('zh-CN')
+    mockPendingApprovals.value = []
+    await mountView()
+    expect(container!.querySelector('[data-el-empty]')?.textContent).toBe('暂无待处理审批')
+
+    // No remount: flip the SAME singleton the app shell writes to.
+    useLocale().setLocale('en')
+    await flushUi()
+    expect(container!.querySelector('[data-el-empty]')?.textContent).toBe('No pending approvals')
+
+    // And again through the cross-tab listener path.
+    window.localStorage.setItem('metasheet_locale', 'zh-CN')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'metasheet_locale', newValue: 'zh-CN' }))
+    await flushUi()
+    expect(container!.querySelector('[data-el-empty]')?.textContent).toBe('暂无待处理审批')
+  })
 })

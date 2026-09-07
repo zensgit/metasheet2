@@ -597,4 +597,51 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
       expect(offenders).toEqual([])
     }
   })
+  // -------------------------------------------------------------------------
+  // Verification round (2026-09-08): the tests above all set the locale BEFORE mountView(), so
+  // they pass identically whether `t` is a reactive `computed` or a one-shot snapshot taken at
+  // setup time. These two pin the property the slice actually claims — the surface FOLLOWS the
+  // shared shell locale on a MOUNTED page, through both of useLocale's write paths:
+  //   1. setLocale() — what App.vue's own switcher calls (App.vue:283).
+  //   2. the 'storage' event — useLocale.ts:41-49's cross-tab listener, i.e. the shell locale
+  //      changing in another tab.
+  // Discriminating probe: replacing `const t = computed(() => (isZh.value ? ZH : EN))` with
+  // `const t = ref(isZh.value ? ZH : EN)` leaves every other test in this file GREEN and turns
+  // exactly these two RED.
+  // -------------------------------------------------------------------------
+  it('follows a post-mount shell locale change via setLocale() without remounting', async () => {
+    setLocale('zh-CN')
+    mockTemplates.value = [buildTemplate({ id: 'tpl_pub', status: 'published', category: null })]
+    const root = await mountView()
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+
+    // No remount, no re-import: flip the SAME singleton the app shell writes to.
+    useLocale().setLocale('en')
+    await flushUi()
+
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('Approval Templates')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('New template')
+    expect(root.querySelector('[data-el-input]')?.getAttribute('placeholder')).toBe('Search template name')
+    const tabLabels = Array.from(root.querySelectorAll('[data-tab-pane]')).map((p) => p.getAttribute('data-tab-label'))
+    expect(tabLabels).toEqual(['All', 'Published', 'Draft', 'Archived'])
+    // The status badge (StatusTag with no force-locale) must follow too, not stay pinned.
+    expect(root.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('Published')
+    expect(renderedTextAndAttributes(root)).not.toMatch(CJK)
+  })
+
+  it('follows a post-mount shell locale change delivered as a cross-tab storage event', async () => {
+    setLocale('en')
+    mockTemplates.value = [buildTemplate({ id: 'tpl_pub', status: 'published', category: null })]
+    const root = await mountView()
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('Approval Templates')
+
+    window.localStorage.setItem('metasheet_locale', 'zh-CN')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'metasheet_locale', newValue: 'zh-CN' }))
+    await flushUi()
+
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+    expect(root.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('已发布')
+  })
 })
