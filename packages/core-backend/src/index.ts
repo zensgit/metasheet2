@@ -146,6 +146,9 @@ import {
   refreshAttendanceReportProjectionAnchor,
   withholdAttendanceReportProjectionAnchors,
   readAttendanceCleaningSourceSeed,
+  assertAttendanceCleaningActor,
+  readAttendanceCleaningCompletedOperations,
+  cleanupAttendanceCleaningProposal,
   lockAttendanceCleaningSource,
 } from './attendance/attendance-multitable-cleaning-authority'
 import {
@@ -2525,6 +2528,31 @@ export class MetaSheetServer {
         attendanceMultitableCleaningAuthority:
           manifest.name === 'plugin-attendance'
             ? {
+                cleanupProposal: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof cleanupAttendanceCleaningProposal>[1],
+                  seed: Parameters<typeof cleanupAttendanceCleaningProposal>[2], reason: string) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return cleanupAttendanceCleaningProposal(async (statement, params) => ({ rows: await trx.query(statement, params) }), input, seed, reason)
+                },
+                readCompletedInTransaction: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof readAttendanceCleaningCompletedOperations>[1]) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return readAttendanceCleaningCompletedOperations(async (statement, params) => ({ rows: await trx.query(statement, params) }), input)
+                },
+                readCompleted: (input: Parameters<typeof readAttendanceCleaningCompletedOperations>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => readAttendanceCleaningCompletedOperations(
+                    async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input,
+                  )),
+                assertActor: (input: Parameters<typeof assertAttendanceCleaningActor>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => {
+                    await assertAttendanceCleaningActor(async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input)
+                  }),
                 readSeed: (input: Parameters<typeof readAttendanceCleaningSourceSeed>[1]) =>
                   poolManager.get().transaction(async ({ query }) => readAttendanceCleaningSourceSeed(
                     async (statement, params) => {

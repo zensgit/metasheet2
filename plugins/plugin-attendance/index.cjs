@@ -20,6 +20,10 @@ const {
 } = require('./lib/attendance-report-managed-content-drift.cjs')
 const {
   normalizeAttendanceMultitableCleaningPolicy,
+  createAttendanceCleaningApplyHandler,
+  readAttendanceCleaningReviewDescriptor,
+  createAttendanceCleaningOperationAdapter,
+  createAttendanceCleaningFingerprintReader,
 } = require('./lib/attendance-report-cleaning-proposal.cjs')
 // W6-1 (#4556): the fixed-schedule producer key has exactly one
 // implementation, in lib/, so the backend can inject the same function into
@@ -14344,6 +14348,7 @@ const MAKEUP_REQUEST_TYPE_ANOMALY_TABLE = Object.freeze({
 let attendanceW4ActiveCurrentPort = null
 // W4C-3c record operation boundary — set at activate; routes resolve at call time.
 let w4RecordOperationBoundary = null
+let w4CleaningRecordOperationBoundary = null
 let attendanceW4SegmentCalculationPortRef = null
 
 // #4556 Gate A / Option B cutover: the ONE seam every reference-producing writer consults to
@@ -31417,6 +31422,14 @@ module.exports = {
 	      })
 	    )
 
+      context.api.http.addRoute('POST', '/api/attendance/report-records/:recordId/cleaning-apply',
+        withPermission('attendance:admin', createAttendanceCleaningApplyHandler({
+          getUserId, getOrgId, getTokenSubject: getAuthenticatedTokenSubjectUserId,
+          loadSettings: () => loadSettings(db, { failClosed: true }),
+          getAuthority: () => context.services?.attendanceMultitableCleaningAuthority,
+          getBoundary: () => w4CleaningRecordOperationBoundary,
+        })))
+
 	    context.api.http.addRoute(
 	      'POST',
 	      '/api/attendance/anomaly-result-edits',
@@ -36485,6 +36498,26 @@ module.exports = {
           })
         : null
     attendanceW4SegmentCalculationPortRef = attendanceW4SegmentCalculationPort
+
+    const cleaningAdapter = createAttendanceCleaningOperationAdapter({
+      manualEditAdapter,
+      authority: context.services?.attendanceMultitableCleaningAuthority,
+      loadSettings: trx => loadSettings(trx, { failClosed: true }),
+      readManagedFingerprint: createAttendanceCleaningFingerprintReader({
+        fieldId: (orgId, objectId, code) => context.api.multitable.provisioning.getFieldId(`${orgId}:attendance`, objectId, code),
+        catalogFieldCodes: Object.values(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS),
+        loadDynamic: loadAttendanceReportDynamicSubtypeContext,
+        mergeCatalog: mergeAttendanceReportFieldDefinitions,
+        buildColumns: buildAttendanceReportRecordsValueColumns,
+        fingerprint: buildAttendanceReportRecordSourceFingerprint,
+        extras: buildAttendanceRecordOvertimeSegmentationFingerprintInput,
+      }),
+    })
+    w4CleaningRecordOperationBoundary = attendanceW4SegmentCalculationPort?.createRecordOperationBoundary
+      && context.services?.attendanceMultitableCleaningAuthority
+      ? attendanceW4SegmentCalculationPort.createRecordOperationBoundary({
+        adapters: { manual_edit: cleaningAdapter, recompute: recomputeAdapter, ops_retirement: opsRetirementAdapter },
+      }) : null
 
     context.api.http.addRoute(
       'POST',
@@ -49540,6 +49573,12 @@ module.exports = {
         const data = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
           provision: false,
           ...formulaOptions,
+        })
+        data.cleaningReview = await readAttendanceCleaningReviewDescriptor({ orgId,
+          settings: await loadSettings(db, { failClosed: true }), provisioning: context.api.multitable?.provisioning,
+          authorize: () => context.services.attendanceMultitableCleaningAuthority.assertActor({
+            orgId, actorId: getUserId(req), tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req),
+          }),
         })
         res.json({ ok: true, data })
       })

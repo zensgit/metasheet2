@@ -24,9 +24,10 @@ canonical identity through the attendance-only core port. The anchor migration
 adds immutable identity, composite source constraints and nonempty-down refusal.
 Duplicate rows now stop before managed first-row repair.
 
-The apply route, locked W4 authorization/replay, pending-proposal UI, full migration
-drift gates and required CI selection are not yet complete. No public PR has been
-published for this implementation. No runtime flag has been enabled.
+The apply route, locked W4 authorization/replay and pending-proposal UI are now
+implemented locally; the chronological evidence below distinguishes each gate.
+Final required CI selection, candidate review and publication remain incomplete.
+No public PR has been published for this implementation. No runtime flag has been enabled.
 
 ## Evidence and defects
 
@@ -264,6 +265,194 @@ Remaining before publication: real ACP HTTP adapter and exact business fingerpri
 dual-CAS checks, canonical apply plus durable cleanup-only replay, user-visible UI,
 final repeated gates and required CI selector union, final isolated DB cleanup.
 
+### HTTP and fresh-source follow-up (uncommitted)
+
+Snapshot/resource checkpoint: `e2ff06648635358b3d866a6082b597d4f7df7fcd`.
+Its parent already includes main `976711b254d129e6c23bf8327c4be67018942ba3`,
+which the publication-ref readback still reports unchanged.
+
+The new HTTP entry test first returned 404 (missing route). Minimal route wiring
+and a handler in the attendance-owned sibling module now pass that test with
+`RBAC_BYPASS=false`: ACP is default-off, only expectedVersion is accepted, extra
+authority fields are rejected without echoing their values, and no ACP operation
+is created. This is exactly one HTTP entry test, not successful canonical apply.
+The dedicated cleaning boundary is now connected to the existing manual-edit
+adapter. Only the isolated synthetic test DB temporarily enables the policy and
+restores its prior settings; no runtime flag or external environment is enabled.
+
+A fresh-source checker adds strict proposal version, canonical digest, managed
+fingerprint, calculation selector/id/version, source identity and proposal digest
+comparisons, and accepts only the five ratified anomalous statuses. Its new unit
+test was RED when absent; dedicated unit suites now pass **44/44** on Node20.
+The checker and stable completed-operation readback are installed in the actual
+manual adapter. Concurrent HTTP dual-CAS acceptance remains outstanding.
+
+The follow-up adapter factory now prepares server-derived manual input only:
+fixed normal target, no metric override, original calculation seed, bounded audit
+reference, and notification suppression. Fresh admission refuses any source
+operation appearing after the route pre-read. Removing that refusal makes its
+unit test RED; the guard is restored. Recovery reconstructs the original command
+from the immutable audit and calculation rather than current projection values.
+It binds the original live actor, selected calculation, exact reason/evidence and
+anchor lifetime (including PostgreSQL timestamp precision). Cleanup reuses the existing
+plugin `multitable/records.ts` transaction-injected CAS patch with revision logging;
+cleanup can reuse it without adopting the REST writer's event fan-out or adding a
+new shared patch API.
+
+Node20 real HTTP scope passes **35/35**: 32 ordinary W4 neighbors, one strict-body/
+default-off case, and two ACP cases (authoritative and shadow). Both ACP cases use
+`RBAC_BYPASS=false`, real plugin/server/PostgreSQL and synthetic managed projection
+fixtures; they do not prove the projection sync writer end-to-end. Each asserts
+one canonical calculation, audit, completed operation and W4 event, zero notified
+edits, and cleanup of only the two proposal fields while retaining custom content.
+The authoritative case injects a row-specific cleanup SQL failure: canonical
+commit survives as `applied_pending_cleanup`; another administrator, revoked
+membership, changed reason and withdrawal cannot consume the proposal. After a
+simulated legitimate sync/anchor refresh, retry consumes the original operation
+without another canonical effect. Subsequent managed-value tampering with the
+stored fingerprint unchanged is rejected through HTTP in both postures (2/2).
+Discriminating HTTP mutation: removing only the recomputed-managed-fingerprint
+comparison changed both expected 409 responses to 200, making both cases RED.
+The comparison is restored; the stored fingerprint alone is demonstrably unsafe.
+
+Concurrent proposal edit (both HTTP postures): an independent PostgreSQL client
+holds the projection row; bounded condition polling of `pg_blocking_pids` proves
+the HTTP transaction is actually waiting. The writer changes the reason and
+increments version, then commits. Pre-fix both cases returned an incorrect 403:
+the projection-access catch masked a SERIALIZABLE failure as authorization denial.
+The attendance-owned catch now preserves 40001/40P01 for the existing operation
+retry loop; an authorized stale proposal version returns a fixed 409 conflict.
+Both cases pass after the fix, preserve the concurrent reason/version, retain
+the anomalous canonical status and create no audit or ACP operation. This proves
+the concurrent proposal side only, not the still-pending canonical/cleanup races.
+Restored Node20 combined real-DB run passes **74/74** (HTTP 35, dedicated authority
+26, registry 13); backend `tsc --noEmit` and `git diff --check` also pass. This is
+local uncommitted evidence, not an exact-head CI or publication claim.
+
+The same server-observed concurrency barrier now also holds the canonical row
+while a second client changes its timezone, then releases the waiting HTTP apply.
+Both postures reject with 409, preserve the new canonical field and proposal, and
+create no ACP effect. Removing only the canonical-source-digest comparison makes
+both HTTP cases incorrectly return 200 (mutation RED); the comparison is restored.
+An earlier attempt to directly alter W4-owned status was correctly rejected by
+the existing pointer/snapshot DB trigger. That fixture-construction failure is
+retained, and no trigger was disabled. This timezone case proves concurrent
+canonical-fact freshness, not replacement by a newly appended calculation; the
+selected-calculation replacement and cleanup races still require distinct gates.
+
+### Review UI first integration (uncommitted)
+
+The attendance-owned report-fields GET now includes a read-only cleaning review
+descriptor only when both existing policies permit it and an existing daily sheet
+belongs to the organization project. It neither provisions a sheet nor grants
+record access. Logic stays in the sibling module; index wiring is minimal.
+The report-fields section uses existing GET `/api/multitable/records` with its
+field/record read checks and physical requested-field filter. It shows loaded
+proposals, cursor pagination, an explicit review/confirm step and only sends
+`expectedVersion` to apply. Consumed, pending cleanup and unconfirmed outcomes
+are distinct; server error values are never rendered. Metadata from another
+organization/default-OFF does not expose the entry.
+
+Pre-implementation unit descriptor and web-entry tests were RED. Current local
+Node20 scope: descriptor/proposal/catalog **45/45**, report-fields web **34/34**,
+real HTTP **35/35** including descriptor metadata in both ACP postures; vue-tsc
+and diff-check pass. The web test runner emitted an existing websocket-port-in-use
+warning but all assertions completed. Initial HTTP metadata fixtures used a random
+sheet id unlike the real provisioning id; they now use `getObjectSheetId`, without
+loosening ownership checks. Real browser end-to-end, generic-list live integration,
+async organization-switch negatives and UI mutation remain outstanding; these
+unit tests are not a claim of browser acceptance or full product completion.
+
+Follow-up live generic-list proof: both ACP HTTP postures call the exact existing
+list URL used by the UI and receive the pending physical-field record/version.
+With a real field permission hiding reason, the response omits that field; hiding
+the requested field instead makes filtering fail with a values-free 400. Exact
+temporary permission rows are removed in finally. No shared permission code is
+changed, and a descriptor is not counted as an authorization gate.
+
+Six focused organization UI cases pass: unavailable/cross-org metadata, late
+old-org list response, confirmation invalidation, and late apply response. After
+switching organization no old proposal/confirmation/result is shown and no old
+request is automatically resubmitted. Removing the list-response identity guard
+makes the old-org reason visible and the test RED; guard restored and all six
+pass. The suite now collects 37 cases; only these six were rerun after this delta.
+Live-list permission proof passes both HTTP cases. Browser positive control,
+selected-calculation replacement, cleanup race and CI union remain outstanding.
+
+Browser positive control now passes with installed Chromium, real Vue component
+and a loopback Vite harness, using explicitly synthetic intercepted API responses.
+Command: Node20 `node tmp/acp1b-browser-verification.mjs` from the worktree root.
+The harness checks no POST before confirmation, exact `{expectedVersion}` payload
+and organization header, pending-cleanup messaging, explicit retry and consumed
+row removal; no page errors. Screenshots under `tmp/acp1b-browser-{review,pending,
+consumed}.png` were visually inspected. The ignored harness is local evidence,
+not a new CI selector or claimed real-backend browser E2E. Initial harness runs
+failed loudly: middleware after Vite's fallback loaded the main application and
+timed out. Registering the isolated page before the fallback fixed that harness
+defect; no product authentication or dependency failure was silently skipped.
+
+### New selected calculation while HTTP waits
+
+The real-DB fixture helper now supports appending version 2 inside the competing
+client's transaction, with complete calculation/segment snapshots and the normal
+authoritative pointer guard intact. After `pg_blocking_pids` proves the HTTP
+request waits on its canonical row, that transaction appends the new calculation
+and commits. Both authoritative/current-pointer and shadow/latest-completed
+postures return 409 and leave no ACP operation or edit audit. A trusted anchor
+refresh is required before the independent successful apply path proceeds.
+
+Pre-fix shadow returned 503 from PostgreSQL 23505 on `uq_arc_record_version`:
+its SERIALIZABLE snapshot predates the concurrent append, and the unique version
+constraint rolls back the attempted operation. The attendance handler now maps
+only this exact code/constraint pair to a values-free 409 after boundary rollback;
+other database failures remain unchanged. Focused HTTP postures pass 2/2 after
+the change; diagnostic-only code/constraint logging was removed. Cleanup race,
+anchor recreation precision negatives, final CI union/review and cleanup remain.
+
+Cleanup-only replay race now has an actual independent projection writer and
+server-observed lock wait. The writer changes a custom field and version while
+the original actor retries cleanup; retry returns 409, preserves the complete
+new projection, and the canonical manual calculation/audit remain exactly one.
+The fixture is restored only for subsequent independent recovery negatives.
+
+Anchor-lifetime integration: delete/reinsert the exact synthetic anchor with a
+creation timestamp one PostgreSQL microsecond after the completed operation.
+Cleanup refuses with 409 and preserves the pending proposal. Removing the native
+precision `anchor_epoch_matches` guard makes this real HTTP case wrongly consume
+the proposal with 200 (mutation RED); guard restored. The exact original synthetic
+anchor is restored in finally, without disabling its immutability trigger.
+
+Candidate consolidation: Node20 real-DB authority/registry/HTTP passes 74/74,
+plugin unit 45/45, backend tsc, vue-tsc, CJS syntax and diff-check pass. Focused
+ESLint reports zero errors and 22 pre-existing core index warnings, without auto-fix.
+The combined frontend invocation passed report-fields 37 and self-service 59, but
+its administrator worker hit the default JS heap limit: this run is FAILED (96
+assertions passed, 144 unproven), not a green batch. The existing required script's
+single-fork 8GB administrator invocation is the appropriate follow-up resource lane.
+That follow-up completed **144/144**. Node18 also passes the same full real-DB
+scope **74/74**, not only the earlier 39-test authority/registry subset.
+
+Final metadata negative reproduced a new exposure: report-fields supports a
+legacy query organization override, so an administrator from another organization
+could receive the added cleaning descriptor. Its readback now invokes the same
+database-fresh actor/membership/admin/namespace authority through a read-only
+attendance port before computing the descriptor. A JWT organization-equality-only
+attempt also denied legitimate sessions without an organization claim, so it was
+replaced with actual current membership verification, never a header fallback.
+The existing report-fields behavior is unchanged. This metadata check is not a
+replacement for the apply or generic-list server permissions.
+
+Retained failed setup evidence: an early static authority import initialized the
+DB pool before test environment setup, causing a driver-default connection error
+and timeout. Imports are now inside the test after server initialization; real-DB
+commands set both DATABASE_URL and ATTENDANCE_TEST_DATABASE_URL before startup.
+That setup failure is not classified as a product assertion failure.
+
+Still outstanding: real concurrent HTTP dual-CAS/cleanup races, anchor recreation
+precision integration negatives, further discriminating mutations, user-visible
+review UI, CI selector union, repeated final gates, and task DB shutdown/cleanup.
+The full synthetic DB is intentionally retained for these remaining gates.
+
 ## Exact current file census
 
 1. `docs/development/attendance-multitable-cleaning-acp1b-apply-route-decision-20260907.md`
@@ -281,3 +470,6 @@ final repeated gates and required CI selector union, final isolated DB cleanup.
 13. `packages/core-backend/src/attendance/w4c0-operation-registry.ts`
 14. `packages/core-backend/src/attendance/w4c3c-record-operation-boundary.ts`
 15. `packages/core-backend/tests/integration/attendance-w4c0-operation-registry.db.test.ts`
+16. `packages/core-backend/tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts`
+17. `apps/web/src/views/attendance/AttendanceReportFieldsSection.vue`
+18. `apps/web/tests/AttendanceReportFieldsSection.spec.ts`

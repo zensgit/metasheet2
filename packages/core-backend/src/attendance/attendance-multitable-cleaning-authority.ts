@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { isAttendanceProjectionOwnerWithCalculationPointerV1 } from './w7-provenance-domain'
 import { getObjectFieldId } from '../multitable/provisioning'
+import { patchRecord } from '../multitable/records'
 import { acquireCanonicalSheetFence } from '../multitable/canonical-sheet-fence'
 import { hasPermission, type ResolvedRequestAccess } from '../multitable/access'
 import { loadDatabaseFreshRecoveryAccess } from '../multitable/recovery-authorization-stability'
@@ -123,7 +124,11 @@ export async function lockAttendanceCleaningProjectionAccess(
     const permissions = deriveFieldPermissions(fields.rows as FieldLike[], resolved.capabilities, { fieldScopeMap: fieldScopes })
     if (Object.values(fieldIds).some(id => isFieldWriteForbidden(permissions[id]))) unavailable()
     return { projection, fieldIds, access, projectId: owner.project_id }
-  } catch {
+  } catch (error) {
+    // Let the owning SERIALIZABLE operation retry actual concurrent row edits;
+    // they are not authorization denials.
+    if (error && typeof error === 'object' && 'code' in error
+      && (error.code === '40001' || error.code === '40P01')) throw error
     throw new Error('ATTENDANCE_CLEANING_FORBIDDEN')
   }
 }
@@ -191,7 +196,8 @@ export async function readAttendanceCleaningSourceSeed(
     positiveInteger(input.expectedVersion)
     const sheetScope = await readAttendanceCleaningSheetScope(query, input)
     const result = await query(`SELECT anchor.*, projection.sheet_id, projection.data, projection.version,
-        canonical.user_id, canonical.work_date::text AS work_date
+        canonical.user_id, canonical.work_date::text AS work_date,
+        canonical.projection_owner, canonical.current_calculation_id
       FROM attendance_report_projection_anchors anchor
       JOIN meta_records projection ON projection.id = anchor.projection_record_id
       JOIN meta_sheets sheet ON sheet.id = projection.sheet_id AND sheet.deleted_at IS NULL
@@ -200,8 +206,10 @@ export async function readAttendanceCleaningSourceSeed(
         AND registry.project_id = anchor.org_id || ':attendance'
       JOIN attendance_records canonical ON canonical.id = anchor.canonical_record_id AND canonical.org_id = anchor.org_id
       WHERE anchor.projection_record_id = $1 AND anchor.org_id = $2`, [input.projectionRecordId, input.orgId])
-    const row = result.rows[0] as (CleaningAnchor & { sheet_id: string; data: Record<string, unknown>; version: number; user_id: string; work_date: string }) | undefined
+    const row = result.rows[0] as (CleaningAnchor & { sheet_id: string; data: Record<string, unknown>; version: number; user_id: string; work_date: string; projection_owner: string; current_calculation_id: string | null }) | undefined
     if (result.rows.length !== 1 || !row || row.version !== input.expectedVersion) unavailable()
+    const selected = await loadSelectedCalculation(query, row)
+    if (!selected) unavailable()
     return {
       sheetScope,
       projectionRecordId: input.projectionRecordId,
@@ -213,6 +221,7 @@ export async function readAttendanceCleaningSourceSeed(
       anchorCreatedAt: timestamp(row.created_at),
       sourceCalculationId: nonEmpty(row.source_calculation_id),
       sourceCalculationVersion: positiveInteger(row.source_calculation_version),
+      selectedCalculationId: selected.calculation.id,
       requested: row.data[getObjectFieldId(`${input.orgId}:attendance`, 'attendance_report_records', 'cleaning_requested')],
       reason: row.data[getObjectFieldId(`${input.orgId}:attendance`, 'attendance_report_records', 'cleaning_reason')],
     }
@@ -221,14 +230,49 @@ export async function readAttendanceCleaningSourceSeed(
   }
 }
 
+/** Stable locator only; the plugin must verify every operation/audit/calculation tuple. */
+export async function readAttendanceCleaningCompletedOperations(
+  query: AttendanceCleaningAuthorityQuery,
+  input: AttendanceCleaningActorInput & { projectionRecordId: string; sourceRef: string },
+) {
+  await assertAttendanceCleaningActor(query, input)
+  const digest = createHash('sha256').update(JSON.stringify([
+    'attendance-cleaning-source-v1', input.orgId, input.projectionRecordId,
+  ])).digest('hex')
+  if (input.sourceRef !== `attendance-cleaning-source-v1:${digest}`) unavailable()
+  try {
+    const result = await query(`SELECT to_jsonb(operation) || jsonb_build_object(
+        'anchor_epoch_matches', operation.created_at >= anchor.created_at) AS operation, to_jsonb(audit) AS audit,
+        to_jsonb(calculation) AS calculation, prior.id AS prior_calculation_id,
+        prior.version AS prior_calculation_version
+      FROM attendance_result_operations operation
+      LEFT JOIN attendance_report_projection_anchors anchor
+        ON anchor.projection_record_id = $3 AND anchor.org_id = operation.org_id
+        AND anchor.canonical_record_id = operation.resolved_record_id
+      LEFT JOIN attendance_record_result_edits audit
+        ON audit.org_id = operation.org_id AND audit.idempotency_key = operation.operation_id::text
+      LEFT JOIN attendance_record_calculations calculation
+        ON calculation.org_id = operation.org_id AND calculation.attendance_record_id = operation.resolved_record_id
+        AND calculation.id = operation.resolved_calculation_id
+      LEFT JOIN attendance_record_calculations prior
+        ON prior.org_id = calculation.org_id AND prior.attendance_record_id = calculation.attendance_record_id
+        AND prior.id::text = calculation.input_provenance->>'priorCalculationId'
+      WHERE operation.org_id = $1 AND operation.source_ref = $2
+      ORDER BY operation.created_at, operation.operation_id LIMIT 3`, [input.orgId, input.sourceRef, input.projectionRecordId])
+    return result.rows
+  } catch { unavailable() }
+}
+
 export async function lockAttendanceCleaningSource(
   query: AttendanceCleaningAuthorityQuery,
   input: AttendanceCleaningSourceInput,
   seed: Awaited<ReturnType<typeof readAttendanceCleaningSourceSeed>>,
 ) {
   const scope = await lockAttendanceCleaningProjectionAccess(query, input)
-  if (scope.projection.version !== input.expectedVersion || seed.orgId !== input.orgId
-    || seed.projectionRecordId !== input.projectionRecordId) unavailable()
+  if (scope.projection.version !== input.expectedVersion) {
+    throw Object.assign(new Error('ATTENDANCE_CLEANING_CONFLICT'), { code: 'ATTENDANCE_CLEANING_CONFLICT' })
+  }
+  if (seed.orgId !== input.orgId || seed.projectionRecordId !== input.projectionRecordId) unavailable()
   const sheetScope = await readAttendanceCleaningSheetScope(query, input)
   if (JSON.stringify(sheetScope) !== JSON.stringify(seed.sheetScope)
     || scope.projection.sheet_id !== sheetScope.projectionSheetId) unavailable()
@@ -257,6 +301,26 @@ export async function lockAttendanceCleaningSource(
   return { ...scope, anchor, record, selected, sheetScope, catalog: catalog.rows,
     leaveTypes: leaveTypes.rows, overtimeRules: overtimeRules.rows,
     canonicalSourceDigest: buildAttendanceCanonicalSourceDigest(record) }
+}
+
+/** Called only by the locked completed-operation replay hook, never fresh apply. */
+export async function cleanupAttendanceCleaningProposal(
+  query: AttendanceCleaningAuthorityQuery,
+  input: AttendanceCleaningSourceInput,
+  seed: Awaited<ReturnType<typeof readAttendanceCleaningSourceSeed>>,
+  expectedReason: string,
+) {
+  const locked = await lockAttendanceCleaningSource(query, input, seed)
+  const requested = locked.projection.data[locked.fieldIds.requested]
+  const rawReason = locked.projection.data[locked.fieldIds.reason]
+  if (requested !== true || typeof rawReason !== 'string' || rawReason.trim() !== expectedReason) unavailable()
+  // Existing plugin CAS path keeps revision history and custom values intact;
+  // it does not enter REST webhook/automation dispatch or emit an ACP outbox.
+  const result = await patchRecord({ query, sheetId: locked.sheetScope.projectionSheetId,
+    recordId: input.projectionRecordId, expectedVersion: input.expectedVersion,
+    changes: { [locked.fieldIds.requested]: false, [locked.fieldIds.reason]: null },
+  })
+  return { version: result.version }
 }
 
 function unavailable(): never {
@@ -374,7 +438,7 @@ async function lockDailyProjectionGroup(
 
 async function loadSelectedCalculation(
   query: AttendanceCleaningAuthorityQuery,
-  record: CanonicalRow,
+  record: Pick<CanonicalRow, 'projection_owner' | 'current_calculation_id' | 'canonical_record_id' | 'org_id'>,
 ): Promise<{ selector: 'current_calculation' | 'latest_completed_calculation'; calculation: CalculationRow } | null> {
   if (isAttendanceProjectionOwnerWithCalculationPointerV1(record.projection_owner)) {
     if (!record.current_calculation_id) unavailable()
