@@ -186,8 +186,8 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0)).then(() => nextTick()).then(() => undefined)
 }
 
-function mountView(): HTMLDivElement {
-  app = createApp(StockPreparationConfirmationQueueView as Component, { scope: SCOPE })
+function mountView(extraProps: Record<string, unknown> = {}): HTMLDivElement {
+  app = createApp(StockPreparationConfirmationQueueView as Component, { scope: SCOPE, ...extraProps })
   app.mount(container!)
   return container!
 }
@@ -524,6 +524,65 @@ describe('一线看得见自己工厂的项目 — the operator project director
       expect(STOCK_PREP_ERROR_PLAIN[code].en, `${code} needs the English half too`).not.toBe('')
       expect(STOCK_PREP_ERROR_PLAIN[code].en).not.toBe(STOCK_PREP_ERROR_GENERIC.en)
     }
+  })
+
+  // ---------------------------------------------------------------------------
+  // P0-7 —— the `ledger_missing` dead end, and who is actually allowed out of it
+  // ---------------------------------------------------------------------------
+
+  async function landOnLedgerMissing(extraProps: Record<string, unknown> = {}): Promise<HTMLDivElement> {
+    routeFetch({ directory: directoryPayload({ ledgerReady: false, pendingProjectCount: 0 }) })
+    const root = mountView(extraProps)
+    await flush()
+    const input = q(root, 'stock-prep-confirmation-project-input') as HTMLInputElement
+    input.value = P1.no
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(q(root, 'stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+    expect(q(root, 'stock-prep-confirmation-empty')!.getAttribute('data-empty-state')).toBe('ledger_missing')
+    return root
+  }
+
+  it('P0-7a a platform admin landing on the empty queue gets [去装:开始使用], and it asks the shell for the install tab', async () => {
+    h.roles = ['admin']
+    const onNavigateStage = vi.fn()
+    const root = await landOnLedgerMissing({ onNavigateStage })
+    const button = q(root, 'stock-prep-confirmation-empty-go-install') as HTMLButtonElement
+    expect(button, 'the one dead end this wave closes').not.toBeNull()
+    button.click()
+    await nextTick()
+    expect(onNavigateStage).toHaveBeenCalledWith('install')
+  })
+
+  it('P0-7b an operator sees the SAME empty state without that button — it would teleport them to another tab', async () => {
+    // `ledger_missing` is reachable by anyone who can read the directory, and the install tab is
+    // filtered out of `visibleViews` without `stock-prep:admin`. A button that silently drops this
+    // person on their landing tab is a new dead end, not a closed one (R-11「可见即可用」).
+    h.permissions = [STOCK_PREP_READ, STOCK_PREP_OPERATE]
+    h.roles = []
+    const root = await landOnLedgerMissing()
+    expect(q(root, 'stock-prep-confirmation-empty-go-install'), 'no button this caller cannot follow').toBeNull()
+    // ...and they still get the sentence that tells them what to do instead.
+    expect(q(root, 'stock-prep-confirmation-empty')!.textContent).toContain('管理员')
+  })
+
+  it('P0-7c the reconcile note (I-13) rides with the reconcile button and says it runs per FACTORY', async () => {
+    h.roles = ['admin']
+    const root = mountView()
+    await flush()
+    const note = q(root, 'stock-prep-confirmation-reconcile-note')
+    expect(note, 'the note only exists where the button does').not.toBeNull()
+    expect(note!.textContent).toContain('按工厂')
+    expect(note!.textContent).toContain('不按项目')
+  })
+
+  it('P0-7d an operator, who has no reconcile button, is not shown its note either', async () => {
+    h.permissions = [STOCK_PREP_READ, STOCK_PREP_OPERATE]
+    h.roles = []
+    const root = mountView()
+    await flush()
+    expect(q(root, 'stock-prep-confirmation-reconcile-note')).toBeNull()
   })
 
   it('W-09 a degraded payload degrades conservatively — no crash, and never a false “all clear”', async () => {

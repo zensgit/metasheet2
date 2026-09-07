@@ -151,13 +151,24 @@
       >
         {{ bi('重新扫描待确认的事(管理员)', 'Re-scan for things to confirm (admin)') }}
       </button>
+      <!-- I-13 (P0-7): today's ONLY reconcile note — it runs per FACTORY, not per project, and can
+           supersede a colleague's already-queued row. New, never shown before. -->
+      <small v-if="can('confirmationQueue.reconcile')" class="stock-prep-confirm__hint" data-testid="stock-prep-confirmation-reconcile-note">
+        {{ bi(reconcileButtonNote.zh, reconcileButtonNote.en) }}
+      </small>
     </div>
 
-    <!-- The clamped enum code is what a person quotes when they ask us for help, so it stays on
-         screen — subordinate to a sentence that says what actually happened to their data. -->
+    <!-- TWO LINES (P0-5): 发生了什么 / 该做什么, plus a copy button carrying only the code and a
+         fixed, values-free sentence — never the dynamic prose above it. -->
     <p v-if="errorCode" class="stock-prep-confirm__error" data-testid="stock-prep-confirmation-error">
       {{ bi(errorPlain(errorCode).zh, errorPlain(errorCode).en) }}
       <code class="stock-prep-confirm__token">{{ errorCode }}</code>
+      <span v-if="errorPlain(errorCode).zhNext" class="stock-prep-confirm__hint" data-testid="stock-prep-confirmation-error-next">
+        {{ bi(errorPlain(errorCode).zhNext || '', errorPlain(errorCode).enNext || '') }}
+      </span>
+      <button type="button" data-testid="stock-prep-confirmation-error-copy" @click="copyError(errorCode)">
+        {{ errorCopyLabel === 'copy' ? bi('复制这条报错', 'Copy this error') : bi('已复制', 'Copied') }}
+      </button>
     </p>
 
     <!-- The download still happened — a valid, headers-only workbook — this is purely the notice. -->
@@ -332,6 +343,22 @@
       <span v-if="emptyStateText.zhNext" class="stock-prep-confirm__hint" data-testid="stock-prep-confirmation-empty-next">
         {{ bi(emptyStateText.zhNext, emptyStateText.enNext ?? '') }}
       </span>
+      <!-- P0-7 / D2: the ONE dead-end this wave closes. A platform admin landing here on a fresh
+           deployment previously had no button anywhere on this page saying "go install it" — this is
+           that button, and it changes nothing else about this empty state (same text, same testid).
+
+           GATED ON WHO CAN ACTUALLY ARRIVE (R-11「可见即可用」). `ledger_missing` is reachable by any
+           caller who can read the directory — an operator on a half-installed deployment sees this
+           empty state too — but the install tab is filtered out of `visibleViews` for anyone without
+           `stock-prep:admin`, so for them `activeKey='install'` silently falls back to their landing
+           tab. A button that teleports an operator to the project board is a NEW dead end, not a
+           closed one. Ungated, they keep the empty state's own zhNext:「得先请管理员建这张表」. -->
+      <button
+        v-if="emptyState === 'ledger_missing' && canOpenInstallView"
+        type="button"
+        data-testid="stock-prep-confirmation-empty-go-install"
+        @click="emit('navigate-stage', 'install')"
+      >{{ bi(ledgerMissingActionLabel.zh, ledgerMissingActionLabel.en) }}</button>
     </p>
 
     <!-- The value-entry pane: the ONE content-bearing surface, gated on the same code as confirm. -->
@@ -432,7 +459,7 @@
 //     value-entry pane renders content, and it renders under the same gate the server puts on that
 //     read. Errors surface as the CLAMPED enum-shaped code from confirmApi.ts — never a server
 //     message, which could carry a value.
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
@@ -461,16 +488,21 @@ import {
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import {
   STOCK_PREP_WORKBENCH_CAPABILITIES,
+  canOpenStockPrepInstallView,
   canStockPrepCapability,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 import {
   STOCK_PREP_DECISION_ACTION_PLAIN,
   STOCK_PREP_DECISION_STATUS_PLAIN,
+  STOCK_PREP_LEDGER_MISSING_ACTION,
+  STOCK_PREP_RECONCILE_BUTTON_NOTE,
   stockPrepDirectoryEmptyPlain,
   stockPrepDirectoryEmptyState,
   stockPrepEnumPlain,
+  stockPrepErrorCopyText,
   stockPrepErrorPlain,
   stockPrepHandoffOutcomePlain,
   stockPrepHandoffStepPlain,
@@ -491,6 +523,11 @@ const props = defineProps<{ scope: IntegrationScope; projectNo?: string }>()
  */
 const emit = defineEmits<{
   (event: 'admin-action', action: 'ensure' | 'reconcile', projectNo: string): void
+  // P0-7 / D2: the `ledger_missing` empty state's new [去装:开始使用] button. Reuses the SAME
+  // event/handler `StockPreparationWorkspace.vue` already wires for the dashboard tab's own stepper
+  // (`handleNavigateStage`) — this view stays a pure emitter, exactly like `admin-action` above; the
+  // shell is still the only thing that owns tab navigation.
+  (event: 'navigate-stage', viewKey: string): void
 }>()
 
 const { locale } = useLocale()
@@ -528,6 +565,41 @@ function decisionActionLabel(action: string | null): string {
 }
 
 const errorPlain = stockPrepErrorPlain
+const reconcileButtonNote = STOCK_PREP_RECONCILE_BUTTON_NOTE
+const ledgerMissingActionLabel = STOCK_PREP_LEDGER_MISSING_ACTION
+
+/**
+ * THE SAME predicate the shell filters the install tab with (`workbenchAccess.ts`), not a second
+ * opinion: whoever this answers `false` for cannot reach that tab, so they must not be offered a
+ * button that navigates to it. Deliberately NOT `can('confirmationQueue.ensure')` — that is the
+ * platform-admin write gate, and a `stock-prep:admin` holder who may READ the install page but not
+ * run it should still be able to go look at it.
+ */
+const canOpenInstallView = computed(() => canOpenStockPrepInstallView((permission) => auth.hasPermission(permission)))
+
+/** 「复制这条报错」(P0-5, I-21). idle → copy → copied → idle again 3s later; never a permanent state. */
+const errorCopyLabel = ref<'copy' | 'copied'>('copy')
+let errorCopyResetTimer: ReturnType<typeof setTimeout> | null = null
+async function copyError(code: string): Promise<void> {
+  // Guarded: `copyTextToClipboard`'s own fallback calls `document.execCommand`, which an environment
+  // without any copy mechanism (this project's jsdom test host included) may not implement at all.
+  let ok = false
+  try {
+    ok = await copyTextToClipboard(stockPrepErrorCopyText(code, locale.value === 'zh-CN'))
+  } catch {
+    ok = false
+  }
+  if (!ok) return
+  errorCopyLabel.value = 'copied'
+  if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer)
+  errorCopyResetTimer = setTimeout(() => { errorCopyLabel.value = 'copy' }, 3000)
+}
+
+// #3365「卸载即作废」 — a scheduled callback dies with the view that scheduled it.
+onBeforeUnmount(() => {
+  if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer)
+  errorCopyResetTimer = null
+})
 
 /** The step vocabulary in words, degrading to the raw key exactly like the two labels above. */
 function handoffStepLabel(key: string | null): string {

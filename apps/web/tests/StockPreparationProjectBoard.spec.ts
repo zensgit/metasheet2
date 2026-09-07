@@ -570,6 +570,35 @@ describe('项目备料页 — the operator project board', () => {
     expect(banner.textContent, 'and this page writes nothing').not.toContain('没有保存成功')
   })
 
+  // ---------------------------------------------------------------------------
+  // P0-5 —— TWO LINES ON THE SURFACE THE FLOOR ACTUALLY USES.
+  //
+  // `HANDOFF_NOT_CURRENT_HANDLER`'s second line —「看上面「轮到谁」,轮到您时这个按钮会自己亮」—
+  // has exactly one render point in the whole app, and it is this banner. A wave that widened the
+  // vocabulary but taught only the admin-facing queue to render the second line would have written
+  // that sentence for nobody.
+  // ---------------------------------------------------------------------------
+
+  it('P0-5: a refusal renders 发生了什么 / 该做什么 plus a copy button', async () => {
+    routeApi({
+      board: () => new Response(
+        JSON.stringify({ ok: false, error: { code: 'STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER', message: 'x' } }),
+        { status: 409 },
+      ),
+    })
+    const root = await mountBoard()
+    const banner = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(banner).not.toBeNull()
+    // First line: what happened. Unchanged from before this wave.
+    expect(banner.textContent).toContain('现在不是您这一步')
+    // Second line: what to do about it, and who does it.
+    const next = banner.querySelector('[data-testid="stock-prep-project-board-error-next"]') as HTMLElement
+    expect(next, 'the second line has nowhere else to render').not.toBeNull()
+    expect(next.textContent).toContain('轮到')
+    // ...and the one thing a person can hand to us.
+    expect(banner.querySelector('[data-testid="stock-prep-project-board-error-copy"]')).not.toBeNull()
+  })
+
   it('B-17: a database one migration behind names the fix instead of the generic', async () => {
     routeApi({
       board: () => new Response(
