@@ -121,6 +121,73 @@ census and migration drift refusal, implement locked W4 apply/replay, add dedica
 Vue UI/tests, run Node18/20 and isolated DB mutation matrix, then request only the
 mechanical shared CI-selector coordination window. Publication remains Draft/HOLD.
 
+## DB-fresh actor gate checkpoint (2026-09-08)
+
+The attendance-owned authority helper now locks active user, same-org membership,
+and existing grant rows before resolving DB-fresh attendance administrator access.
+JWT identity alone and generic multitable write permission cannot grant approval.
+The helper is not yet wired into the W4 apply route; this is not end-to-end proof.
+
+Node20 dedicated PostgreSQL suite: 10/10 PASS, including wrong organization,
+token-subject mismatch, generic-write-only actor, revoked membership, inactive
+account and pending activation. Removing the attendance-specific permission guard
+produced the expected RED (generic write incorrectly resolved); restoring it gave
+10/10 PASS. Backend `tsc --noEmit` passed before the final test-only additions.
+
+Read-only replay review found that existing generic W4 completed replay returns
+before class-00/10/11 locks. ACP must not reuse this path without its locked
+authorization and cleanup checks. Coordination interpreted the existing ratified
+contract without new owner ratification: cleanup requires the original operation
+actor plus current access; suspended ACP cleanup performs no new DML and retries
+only after posture recovers. Cross-admin and suspended cleanup writes remain out
+of this slice.
+
+Registry now defers only an internal ACP manual-edit single-command decision with
+the canonical source-reference format. Default callers retain ordinary fast replay,
+including while suspended. Locked replay returns a frozen actual organization
+witness only, not executable item witnesses. Boundary takes class-11 before the
+cleanup hook and never executes, seals or enqueues that completed operation again.
+The trusted plugin caller is still pending.
+
+Node20 registry whole-file: 13/13 PASS, including allow-new first claim,
+missing/claimed/canceled locator refusal, original-actor congruence, membership
+revocation, suspended ACP/ordinary controls, complete boundary 00/10/11 order,
+ordinary boundary zero-lock replay, and two-stage decision drift. Removing the
+missing-locator guard produced RED by wrongly claiming a new operation. Skipping
+replay class-11 produced RED by observing two locks instead of three. Both mutations
+were restored. Existing real-plugin W4 route neighbor: 32/32 PASS; its fixture
+internally enables RBAC bypass, so this is NOT ACP strict-route permission evidence.
+
+Dedicated anchor/authority PostgreSQL suite: 11/11 PASS after adding effective
+sheet/proposal-field/row access, hidden/read-only fields, duplicates and deleted
+sheet negatives, with positive recovery controls between denials. Existing grant
+rows are locked and existing multitable permission logic is reused. The helper is
+not yet wired to the public ACP route. Full route, cleanup CAS, concurrent grant
+revocation and UI acceptance remain pending.
+
+Subsequent refute-first review reproduced two additional P1 cases. Role-only admin
+without the attendance permission family wrongly passed; it now fails. Attendance
+namespace admission is resolved on the same transaction using existing pure
+namespace derivation and actual role/admission rows, never the global-pool resolver;
+missing/disabled namespace also fails. Existing wildcard semantics are preserved.
+
+An actual second connection could INSERT a new field deny while the earlier
+SERIALIZABLE transaction held all existing grant rows. Row locks alone therefore
+did not prove authority stability. The ACP-only internal boundary entry now selects
+a fixed SHARE NOWAIT relation fence immediately after BEGIN and before even the
+first SELECT set_config. It locks the 14 explicitly named authority/schema/policy
+relations in the registry wrapper; ordinary W4 entry does not take this fence.
+This is table-wide serialization, NOT per-subject concurrency. It can temporarily
+block unrelated grant, user, sheet-schema and settings writers. The runtime remains
+default OFF and this performance limitation is part of release review.
+
+Real PostgreSQL proof: deny committed immediately before the fence is observed and
+refused; deny inserted while the fence is held waits; a pre-existing writer gives
+fixed busy and rollback leaves zero relation ShareLocks. A mutation inserting
+SELECT set_config before the fence recreates the old-snapshot wrong allowance and
+turns the test RED. Restored Node20 combined registry/authority/W4 neighbor: 56/56
+PASS. These still do not prove the not-yet-wired ACP HTTP apply or cleanup effects.
+
 ## Exact current file census
 
 1. `docs/development/attendance-multitable-cleaning-acp1b-apply-route-decision-20260907.md`
@@ -135,3 +202,6 @@ mechanical shared CI-selector coordination window. Publication remains Draft/HOL
 10. `packages/core-backend/tests/integration/attendance-report-cleaning-proposal.db.test.ts`
 11. `plugins/plugin-attendance/index.cjs`
 12. `plugins/plugin-attendance/lib/attendance-report-cleaning-proposal.cjs`
+13. `packages/core-backend/src/attendance/w4c0-operation-registry.ts`
+14. `packages/core-backend/src/attendance/w4c3c-record-operation-boundary.ts`
+15. `packages/core-backend/tests/integration/attendance-w4c0-operation-registry.db.test.ts`

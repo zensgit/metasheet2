@@ -553,7 +553,14 @@ async function insertClaimedItemRow(
 // ---------------------------------------------------------------------------
 
 export type AttendanceResultOperationPreflightResultV1 =
-  | { readonly kind: 'replay'; readonly responses: AttendanceOperationReplayResponsesV1 }
+  | {
+      readonly kind: 'replay'
+      readonly responses: AttendanceOperationReplayResponsesV1
+      /** ACP only: completed, not claimed; never execute, enqueue or reseal. */
+      readonly lockedAttendanceCleaning?: {
+        readonly org: VerifiedAttendanceOrgIdentityV1
+      }
+    }
   | { readonly kind: 'suspended' }
   | {
       readonly kind: 'claimed'
@@ -586,6 +593,7 @@ export async function attendanceResultOperationPreflightV1(
   trx: AttendanceW4TransactionClientV1,
   authorization: unknown,
   envelope: AttendanceResultOperationEnvelopeInputV1,
+  options?: { readonly attendanceCleaningReplay: 'allow-new' | 'require-completed' },
 ): Promise<AttendanceResultOperationPreflightResultV1> {
   const plan = planEnvelope(envelope)
   // Step 1: branded authorization covers every envelope item; org binding; SQL recheck.
@@ -594,6 +602,14 @@ export async function attendanceResultOperationPreflightV1(
     throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
   }
   await recheckAttendanceActorLivenessInTransactionV1(trx, auth)
+  // Internal adapter decision, never inferred from a sourceRef or HTTP body.
+  const cleaningReplay = options?.attendanceCleaningReplay
+  if (options !== undefined && (
+    (cleaningReplay !== 'allow-new' && cleaningReplay !== 'require-completed')
+    || plan.entrypoint !== 'manual_edit' || plan.batch !== null
+    || plan.sourced.length !== 1 || plan.legacyNullIdCount !== 0
+    || !/^attendance-cleaning-source-v1:[0-9a-f]{64}$/.test(auth.sourceRef)
+  )) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
 
   // Step 1 (cont.): non-locking read of exact keys in stable order — an
   // all-completed congruent replay returns with zero DML even under suspension.
@@ -601,7 +617,7 @@ export async function attendanceResultOperationPreflightV1(
   const preBatchRow = plan.batch ? await readBatchRow(trx, plan.orgKey, plan.entrypoint, plan.batch.batchCommandId) : null
   const preRows = await readOperationRows(trx, plan.orgKey, plan.entrypoint, candidateIds)
   const preClassification = classify(plan, auth, preBatchRow, preRows, false)
-  if (preClassification.kind === 'all_completed_congruent') {
+  if (preClassification.kind === 'all_completed_congruent' && cleaningReplay === undefined) {
     return { kind: 'replay', responses: preClassification.responses }
   }
 
@@ -659,8 +675,14 @@ export async function attendanceResultOperationPreflightV1(
   const lockedRows = await readOperationRows(trx, plan.orgKey, plan.entrypoint, candidateIds)
   const lockedClassification = classify(plan, auth, lockedBatchRow, lockedRows, true)
   if (lockedClassification.kind === 'all_completed_congruent') {
+    if (cleaningReplay !== undefined) {
+      return { kind: 'replay', responses: lockedClassification.responses,
+        lockedAttendanceCleaning: Object.freeze({ org }) }
+    }
     return { kind: 'replay', responses: lockedClassification.responses }
   }
+  // A completed locator may not degrade into a fresh claim after locking.
+  if (cleaningReplay === 'require-completed') conflict('ATTENDANCE_OPERATION_CONFLICT')
 
   // Section 8.2 step 2 (P07/P08): after the operation rows, lock and re-read the
   // V1 operational-job reservation for this batch tuple. A W4C-0 synchronous
@@ -937,7 +959,9 @@ export function isRetryableSqlState(error: unknown): boolean {
 export async function runAttendanceResultOperationTransactionV1<T>(
   connection: AttendanceW4TransactionClientV1,
   body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
+  options?: { readonly attendanceCleaningAuthority: true },
 ): Promise<T> {
+  if (options !== undefined && options.attendanceCleaningAuthority !== true) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
   // Gate E (#4844) first batch: `connection` is CALLER-supplied. PostgreSQL only WARNs on a
   // nested `BEGIN` (never errors) — on a dirty caller connection this function's own `COMMIT`
   // below would durably publish the caller's uncommitted writes, strictly worse than a merely
@@ -953,6 +977,23 @@ export async function runAttendanceResultOperationTransactionV1<T>(
   for (;;) {
     try {
       await connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE', [])
+      if (options?.attendanceCleaningAuthority === true) {
+        // LOCK is a utility statement: fence before even set_config's SELECT can
+        // establish the SERIALIZABLE snapshot. Fixed relations only, no table input.
+        // Deliberately table-wide and default-off; unrelated authority DML waits.
+        try {
+          await connection.query(`LOCK TABLE
+            public.field_permissions, public.meta_fields, public.meta_sheets,
+            public.platform_member_group_members, public.plugin_multitable_object_registry,
+            public.record_permissions, public.role_permissions, public.spreadsheet_permissions,
+            public.system_configs, public.user_namespace_admissions, public.user_orgs,
+            public.user_permissions, public.user_roles, public.users
+            IN SHARE MODE NOWAIT`, [])
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code
+          fail(code === '55P03' ? 'W4C0_ATTENDANCE_CLEANING_AUTHORITY_BUSY' : 'W4C0_ATTENDANCE_CLEANING_AUTHORITY_UNAVAILABLE')
+        }
+      }
       await connection.query("SELECT set_config('statement_timeout', $1, true)", [
         String(W4_TRANSACTION_STATEMENT_TIMEOUT_MS),
       ])

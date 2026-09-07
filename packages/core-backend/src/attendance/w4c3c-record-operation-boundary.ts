@@ -29,6 +29,7 @@ import {
 } from './w4c0-authorization'
 import {
   attendanceResultOperationPreflightV1,
+  AttendanceW4RegistryError,
   enqueueAttendanceResultEventOutboxV1,
   runAttendanceResultOperationTransactionV1,
   sealAttendanceResultOperationV1,
@@ -151,6 +152,8 @@ export interface AttendanceRecordOperationPreparedV1<TState = unknown> {
   readonly targetWorkDate: string
   readonly subjectScope: AttendanceWriteSubjectScopeV1
   readonly commandPayload: Readonly<Record<string, unknown>>
+  /** Attendance adapter-owned decision; never copied from the HTTP body. */
+  readonly attendanceCleaningReplay?: 'allow-new' | 'require-completed'
   readonly state: TState
 }
 
@@ -171,6 +174,12 @@ export interface AttendanceRecordOperationContextV1 {
 }
 
 export interface AttendanceRecordOperationAdapterV1<TState = unknown> {
+  prepareLockedAttendanceCleaningReplay?(
+    trx: AttendanceRecordPluginTrxV1,
+    routeInput: unknown,
+    operation: AttendanceRecordOperationContextV1,
+    response: unknown,
+  ): Promise<unknown>
   prepareIdentity(
     trx: AttendanceRecordPluginTrxV1,
     routeInput: unknown,
@@ -214,6 +223,8 @@ export type AttendanceRecordOperationBoundaryResultV1 =
 
 export interface AttendanceRecordOperationBoundaryV1 {
   execute(input: AttendanceRecordOperationBoundaryInputV1): Promise<AttendanceRecordOperationBoundaryResultV1>
+  /** Internal ACP route only; acquires authority fence before its first snapshot. */
+  executeAttendanceCleaning(input: AttendanceRecordOperationBoundaryInputV1): Promise<AttendanceRecordOperationBoundaryResultV1>
 }
 
 export interface AttendanceRecordOperationBoundaryDepsV1 {
@@ -283,6 +294,7 @@ function preparedIdentityCongruent(
     && identity.tokenSubjectUserId === prepared.tokenSubjectUserId
     && identity.subjectUserId === prepared.subjectUserId
     && identity.targetWorkDate === prepared.targetWorkDate
+    && identity.attendanceCleaningReplay === prepared.attendanceCleaningReplay
     && JSON.stringify(identity.subjectScope) === JSON.stringify(prepared.subjectScope)
     && JSON.stringify(identity.commandPayload) === JSON.stringify(prepared.commandPayload)
 }
@@ -303,9 +315,10 @@ export function createAttendanceRecordOperationBoundaryV1(
     }
   }
 
-  return {
-    async execute(rawInput) {
+  const execute = async (rawInput: AttendanceRecordOperationBoundaryInputV1, attendanceCleaningEntry = false): Promise<AttendanceRecordOperationBoundaryResultV1> => {
       const input = normalizeInput(rawInput)
+      if (attendanceCleaningEntry && (input.kind !== 'manual_edit' || input.operationId === null
+        || !/^attendance-cleaning-source-v1:[0-9a-f]{64}$/.test(input.sourceRef ?? ''))) fail('W4C3C_ATTENDANCE_CLEANING_REPLAY_INVALID')
       const connection = await deps.acquireConnection()
       try {
         return await runAttendanceResultOperationTransactionV1(connection.client, async (trx) => {
@@ -319,6 +332,12 @@ export function createAttendanceRecordOperationBoundaryV1(
           const identityPrepared = input.operationId === null
             ? await adapter.prepare(shapedTrx, input.routeInput, operation)
             : await adapter.prepareIdentity(shapedTrx, input.routeInput, operation)
+          const cleaningReplay = identityPrepared.attendanceCleaningReplay
+          if (attendanceCleaningEntry !== (cleaningReplay !== undefined)) fail('W4C3C_ATTENDANCE_CLEANING_REPLAY_INVALID')
+          if (cleaningReplay !== undefined && (
+            input.kind !== 'manual_edit' || input.operationId === null
+            || typeof adapter.prepareLockedAttendanceCleaningReplay !== 'function'
+          )) fail('W4C3C_ATTENDANCE_CLEANING_REPLAY_INVALID')
 
           let canonicalOrg = true
           try {
@@ -366,8 +385,10 @@ export function createAttendanceRecordOperationBoundaryV1(
             trx,
             authorization,
             envelope.registryInput,
+            cleaningReplay === undefined ? undefined : { attendanceCleaningReplay: cleaningReplay },
           )
-          if (preflight.kind === 'replay') {
+          if (preflight.kind === 'replay' && !preflight.lockedAttendanceCleaning) {
+            if (cleaningReplay !== undefined) fail('W4C3C_ATTENDANCE_CLEANING_REPLAY_INVALID', 409)
             const response = Object.values(preflight.responses.itemResponses)[0] ?? null
             return { kind: 'replay' as const, response }
           }
@@ -375,12 +396,25 @@ export function createAttendanceRecordOperationBoundaryV1(
             throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
           }
 
+          const lockedOrg = preflight.kind === 'replay'
+            ? preflight.lockedAttendanceCleaning!.org : preflight.org
           const targetIdentity = createVerifiedAttendanceCalculationTargetIdentityV1({
-            org: preflight.org,
+            org: lockedOrg,
             userId: identityPrepared.subjectUserId,
             workDate: identityPrepared.targetWorkDate,
           })
           await acquireAttendanceCalculationTargetLocks(trx, [targetIdentity])
+          if (preflight.kind === 'replay') {
+            const response = Object.values(preflight.responses.itemResponses)[0] ?? null
+            // The attendance-only hook revalidates current authority and performs
+            // proposal CAS cleanup only. Never call execute/seal/enqueue on replay.
+            const cleanedResponse = await adapter.prepareLockedAttendanceCleaningReplay!(
+              shapedTrx, input.routeInput,
+              Object.freeze({ ...operation, acceptedWritePosture: lockedOrg.acceptedWritePosture }),
+              response,
+            )
+            return { kind: 'replay' as const, response: jsonValue(cleanedResponse) }
+          }
 
           const prepared = input.operationId === null
             ? identityPrepared
@@ -423,11 +457,20 @@ export function createAttendanceRecordOperationBoundaryV1(
             kind: isLegacyCompat ? 'legacy_compat' as const : 'executed' as const,
             response: result.response,
           }
-        })
+        }, attendanceCleaningEntry ? { attendanceCleaningAuthority: true } : undefined)
+      } catch (error) {
+        if (attendanceCleaningEntry && error instanceof AttendanceW4RegistryError) {
+          if (error.code === 'W4C0_ATTENDANCE_CLEANING_AUTHORITY_BUSY') fail('ATTENDANCE_CLEANING_BUSY', 409)
+          if (error.code === 'W4C0_ATTENDANCE_CLEANING_AUTHORITY_UNAVAILABLE') fail('ATTENDANCE_CLEANING_UNAVAILABLE', 503)
+        }
+        throw error
       } finally {
         connection.release()
       }
-    },
+    }
+  return {
+    execute: input => execute(input),
+    executeAttendanceCleaning: input => execute(input, true),
   }
 }
 
