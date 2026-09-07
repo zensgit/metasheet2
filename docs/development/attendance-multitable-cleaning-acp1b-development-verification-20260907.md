@@ -4,6 +4,37 @@ Status: IN PROGRESS / DRAFT-HOLD. This report is not completion or release evide
 
 ## Post-publication CI correction (current, 2026-09-08)
 
+### b9c current-main integration (local gates complete)
+
+After sequential preflight confirmed clean local checkpoint
+`18d11a2549ddfd5498e48b84868d85aa5a109308`, remote PR head
+`4e548afffe1832b10224478d60ea772395afc4c3`, and authoritative main
+`b9cba726295fcfac1a039c297e3dbd6015f684b8`, true merge
+`d9e47ad9cd87af29895309366ac7e9e4035e0d99` was created with exactly those
+first/second local/main parents. Tree
+`afaa07d5334be1af57b9db21b951273795b80420` equals the read-only prediction.
+No conflicts or manual product edits occurred.
+
+All 34 non-pin ACP paths are byte-identical to 18d11; all seven non-pin main
+stock paths are byte-identical to b9c. The shared JSON automatically preserves
+main `runtimeFiles.pluginHttpRoutes` and ACP `evidenceFiles.pluginTestsWorkflow`.
+The official calculator confirms zero differences in migrations, modules,
+externalModules, dependencies, runtimeFiles and evidenceFiles; no synthetic pin
+edit or whole-file side selection was needed. Full S5 and each of the three
+changed stock test files pass under Node20: operator-project-directory,
+operator-scope-tripwires, project-board. Logs:
+`tmp/acp1b-b9c-full-s5.log`, `tmp/acp1b-b9c-stock-directory.log`,
+`tmp/acp1b-b9c-stock-tripwires.log`, `tmp/acp1b-b9c-stock-board.log`.
+
+The exact non-DB backend 13007-PASS and typecheck evidence on 18d11 is inherited
+by byte-equivalence of its backend/ACP inputs, with the changed stock plugin
+paths separately tested above. No identical full-backend or DB rerun was added.
+The required-web script and Web product paths are unchanged from the 4e548
+remote 7275-PASS run. These are explicitly layered local/inherited results,
+not proof of final candidate remote CI. The final documentation child must be
+pushed only after another sequential main/remote preflight and then receive
+its own complete CI. b9c main checks remain separate from candidate checks.
+
 ### 4e548 full-backend completeness corrections (local verification complete)
 
 Exact `4e548afffe1832b10224478d60ea772395afc4c3` remote required-web passes
