@@ -19,6 +19,7 @@ import {
   seatNodeKeysForViewer,
   type NodeOperationGraphView,
 } from './approval-effective-node-operations'
+import { resolveCanDecideCurrentNode } from './approval-seat-authorization'
 import type {
   ApprovalActionRequest,
   ApprovalAssignmentRow,
@@ -976,6 +977,22 @@ export class ApprovalBridgeService {
         row.policy_snapshot,
       )
       if (nodeOperations) dto.nodeOperations = nodeOperations
+    }
+    // Viewer-scoped decision affordance. The detail view renders approve/reject and the member
+    // verbs on the coarse `approvals:act` grant alone, which disagrees with the server for anyone
+    // who may act somewhere but not at the node this instance is stopped on. This is the server's
+    // own answer for THIS viewer, produced by the door's OWN predicate
+    // (`assignmentMatchesActor` over `decidableNodeKeysForInstance`) rather than a second
+    // approximation — see `approval-seat-authorization.ts`. `viewerRoles` is the same set the
+    // route hands the dispatch door (`resolveApprovalActorRoles`), so a ROLE-typed seat is
+    // first-class here exactly as it is there.
+    if (dto) {
+      dto.canDecideCurrentNode = resolveCanDecideCurrentNode({
+        instance: row,
+        assignments: instanceAssignments,
+        viewerUserId: viewerUserId ?? null,
+        viewerRoles: viewerRoles ?? null,
+      })
     }
     // Attach the FROZEN form schema (detail `columns` included) from the instance's pinned
     // template version so the read renders detail rows from the frozen schema (design-lock Fact B).

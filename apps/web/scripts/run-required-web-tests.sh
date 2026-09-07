@@ -587,6 +587,28 @@ npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
 # (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") and in this batch before wiring.
 npx vitest run approval-detail-instance-consistency approval-store-detail-generation --reporter=dot
 
+# 视角化决策可用性 (viewer-scoped decision affordance), 2026-09-07: ONE token added —
+# `approval-detail-can-decide-current-node`, a NEW spec
+# (apps/web/tests/approval-detail-can-decide-current-node.spec.ts) over the mounted
+# ApprovalDetailView. It pins the six decision verbs against the server-resolved
+# `canDecideCurrentNode`: all six render on `true`, none on `false` (with `canAct` still true), all
+# six on ABSENT (older backend ⇒ today's behaviour, so absence never reads as deny), none when
+# `canAct` itself is false, and the #5528 instance-consistency gate still refusing on top of it.
+# It also pins the disclosed non-changes — 评论 / 撤回 / 催一下 keep their present reach — and
+# carries a fixture control proving the six verbs are otherwise eligible, so "no button" can only
+# be this field talking.
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
+# file (same counting rule as the paragraph above: join backslash continuations, drop comment lines,
+# take every non-flag positional of each `vitest run` command — 439 before this change, 440 after,
+# no duplicates): no existing token contains the new one, and the new one contains no existing
+# token. In particular the four pre-existing `approval-detail-*` tokens (approval-detail-field,
+# approval-detail-record-table, approval-detail-column-row-key, approval-detail-instance-consistency)
+# are unrelated to it in both directions. Verified green in isolation
+# (`npx vitest run approval-detail-can-decide-current-node --reporter=dot` → "Test Files 1 passed")
+# and in this batch before wiring.
+npx vitest run approval-detail-can-decide-current-node --reporter=dot
+
 # 审批可发现性 (approval discoverability), 2026-09-07. Tokens are BARE BASENAMES, as
 # packages/core-backend/tests/unit/approval-ci-coverage-enumeration.ts's T1 tier requires (each of
 # these files matches /^approval.*\.(test|spec)\.ts$/, and an incidental substring match is
@@ -609,7 +631,7 @@ npx vitest run approval-detail-instance-consistency approval-store-detail-genera
 # SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
 # file using this file's own counting rule (join backslash continuations, drop comment lines, take
 # every whitespace-separated argument of an `npx vitest run` command that does not start with `-`;
-# that yields 439 before this change and 443 after, with no duplicates). None of the four new
+# that yields 440 before this change and 444 after, with no duplicates). None of the four new
 # tokens contains, nor is contained by, any existing one — in particular the neighbouring
 # `approvalCenterRemindBadge` / `approvalCenterUnreadBadge` share only the `approval` prefix with
 # `approvalNavTodoBadge`, and `approvalDelegationForm` /

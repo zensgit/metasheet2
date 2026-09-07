@@ -67,6 +67,15 @@ export default defineConfig({
       // the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-node-operation-policy.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-node-operation-policy.db.test.ts',
+      // `canDecideCurrentNode` — the viewer-scoped decision affordance on the detail DTO, asserted
+      // together with what the decision endpoint actually does for the same viewer. Requires real
+      // PostgreSQL: the ROLE arm resolves through AuthService -> `user_roles` (the case is a
+      // false->true flip on one row, with the claim-trusting fast path off so the database is the
+      // only source of the role), and the door agreement is only meaningful against the real
+      // dispatch transaction. Excluded from the no-DB default job so `describeIfDatabase` cannot
+      // skip-green it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-can-decide-current-node.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-can-decide-current-node.db.test.ts',
       // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
       // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
       // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).

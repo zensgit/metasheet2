@@ -18305,6 +18305,21 @@ export interface components {
             fieldAccess?: {
                 [key: string]: "editable" | "readonly" | "hidden" | "required";
             } | null;
+            /**
+             * @description Would the decision endpoint's own authorization predicate let THIS viewer decide the
+             *     node the instance is currently stopped on? Resolved server-side per viewer by the
+             *     dispatch door's own seat predicate (user seats, role seats, delegated seats — a
+             *     delegatee is the assignee on a real assignment row — and, inside a parallel region,
+             *     the pending branch frontier). `false` when the instance is not pending or the viewer
+             *     holds no matching active seat at a decidable node key; `true` for a pending instance
+             *     whose decisions do not go through the seat-gated door (a legacy platform row with no
+             *     published definition, a `plm:` mirror, an after-sales row), because those dispatches do
+             *     not gate on assignments and `true` is what those surfaces already do today. Present on the detail read and on the action response. ABSENT means
+             *     the server does not compute it — clients must fall back to their prior behaviour, not
+             *     read absence as `false`. Presentation only: the 403 APPROVAL_ASSIGNMENT_REQUIRED
+             *     remains the authority.
+             */
+            canDecideCurrentNode?: boolean;
             currentNodeKey?: string | null;
             /**
              * @description Parallel gateway (并行分支) runtime frontier. Present only when
