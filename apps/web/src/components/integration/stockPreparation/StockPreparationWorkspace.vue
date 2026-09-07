@@ -95,7 +95,9 @@
            WHOLE TAB CHAIN is where the answer lands, values-free either way. -->
       <StockPreparationConfirmationQueueView
         v-else-if="effectiveKey === 'confirmation-queue'"
+        ref="confirmationQueueEl"
         :scope="scope"
+        :project-no="selectedProjectNo"
         @admin-action="handleAdminAction"
         @navigate-stage="handleNavigateStage"
       />
@@ -493,6 +495,14 @@ function projectNoFromQuery(): string {
 
 const selectedProjectNo = ref<string>(projectNoFromQuery())
 
+/**
+ * P0-8's handle onto the mounted queue instance — the shell's only way to tell it "reload now" after
+ * a successful admin action, since the shell (not the queue) owns the reconcile call. `null` whenever
+ * the confirmation-queue tab is not the active panel; a v-else-if branch that has never rendered, or
+ * has since unmounted, leaves this null and `handleAdminAction` below already guards on that.
+ */
+const confirmationQueueEl = ref<InstanceType<typeof StockPreparationConfirmationQueueView> | null>(null)
+
 function handleProjectNoSelect(projectNo: string): void {
   selectedProjectNo.value = projectNo
   // Replace, not push: opening a project is not a history step.
@@ -527,8 +537,18 @@ function handleDashboardProjectSelect(projectId: string): void {
 // the one tab-nav surface, never a second one. viewKey is a plain string at the stageOverview.ts
 // boundary (STOCK_PREPARATION_STAGE_VIEW_KEY) to avoid a circular type import; every value it can
 // hold is one of this file's own StockPreparationViewKey literals.
-function handleNavigateStage(viewKey: string): void {
+//
+// P0-9: `projectNo` is a NEW, OPTIONAL third argument — every existing caller (the board's own
+// stepper, the install wizard, the dashboard, the getting-started completion card) still calls this
+// with one argument and is unaffected. Only the confirmation queue's `nothing_pending` closure button
+// passes a number, so the destination tab reopens the SAME project rather than whatever the shell last
+// had selected (§2.3's `?projectNo=` state bit) — routed through the same `handleProjectNoSelect` the
+// board's own row-open path uses, so the query mirroring stays the one implementation.
+function handleNavigateStage(viewKey: string, projectNo?: string): void {
   activeKey.value = viewKey as StockPreparationViewKey
+  if (typeof projectNo === 'string' && projectNo.trim().length > 0) {
+    handleProjectNoSelect(projectNo.trim())
+  }
 }
 
 /**
@@ -635,6 +655,13 @@ async function handleAdminAction(action: 'ensure' | 'reconcile', projectNo: stri
     } else {
       await createStockPreparationProjectSyncApi(scope).reconcile(trimmed)
       adminActionNotice.value = stockPrepAdminActionPlain('RECONCILE_OK')
+      // P0-8: action → result → AUTO-RELOAD. A successful reconcile rescans the confirmation ledger
+      // server-side, so the queue this admin is looking at is now stale the instant this resolves —
+      // reload it on their behalf rather than leaving a "these numbers may be old" gap the old copy
+      // used to paper over with "click refresh again". `?.` because the queue tab may have been
+      // navigated away from while this request was in flight; a reload aimed at an unmounted instance
+      // is simply skipped, never an error.
+      void confirmationQueueEl.value?.loadQueue?.()
     }
   } catch (error) {
     const code = adminActionCodeOf(error)

@@ -118,7 +118,10 @@
       data-testid="stock-prep-project-sync-missing-components"
       open
     >
-      <summary class="sp-sync__missing-summary">{{ missingComponentsSummary }}</summary>
+      <summary
+        class="sp-sync__missing-summary"
+        :title="bi(missingComponentsTooltip.zh, missingComponentsTooltip.en)"
+      >{{ missingComponentsSummary }}</summary>
       <!-- M5: `distinctCount` says "there are some" but the items array itself is empty (a server
            inconsistency, e.g. `{distinctCount:5, items:[]}`) — show the count line above (the
            `<summary>`) and STOP, rather than rendering a table with no rows in it and a copy/export
@@ -169,6 +172,11 @@
             {{ bi('导出 CSV', 'Export CSV') }}
           </button>
         </div>
+        <!-- I-4 / 线框 D ③ (P0-9): the closure line — there is no "I fixed it" button on this page,
+             and saying so out loud is what stops an operator hunting for one. -->
+        <p class="sp-sync__missing-resync-hint" data-testid="stock-prep-project-sync-missing-components-resync-hint">
+          {{ bi(missingComponentsResyncHint.zh, missingComponentsResyncHint.en) }}
+        </p>
       </div>
     </details>
 
@@ -329,6 +337,8 @@ import {
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import {
+  STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT,
+  STOCK_PREP_TOOLTIP_MISSING_COMPONENTS,
   stockPrepStepOutcomeText,
   stockPrepSyncReasonPlain,
   stockPrepSyncVerdictPlain,
@@ -691,6 +701,12 @@ function hasMissingComponents(list: StockPreparationMissingComponentList): boole
 function effectiveDistinctCount(list: StockPreparationMissingComponentList): number {
   return list.distinctCount > 0 ? list.distinctCount : list.items.length
 }
+
+/** I-20: 缺件's tooltip — what the COUNT means, since "N 种" alone reads as "N occurrences" to a
+ *  first-time reader. */
+const missingComponentsTooltip = STOCK_PREP_TOOLTIP_MISSING_COMPONENTS
+/** I-4 / 线框 D ③: the card's own bottom closure line. */
+const missingComponentsResyncHint = STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT
 
 const missingComponentsSummary = computed<string>(() => {
   const list = report.value?.missingComponents
@@ -1188,5 +1204,12 @@ function onExportMissingComponents(): void {
 .sp-sync__missing-actions {
   display: flex;
   gap: var(--ms-space-2);
+}
+
+.sp-sync__missing-resync-hint {
+  margin: var(--ms-space-2) 0 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

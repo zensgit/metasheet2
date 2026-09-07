@@ -116,7 +116,7 @@
         <datalist id="stock-prep-board-directory-options" data-testid="stock-prep-project-board-datalist">
           <option
             v-for="project in directoryProjects"
-            :key="project.projectId"
+            :key="project.projectNo ?? project.projectId ?? ''"
             :value="project.projectNo ?? ''"
           >{{ project.projectName ?? '' }}</option>
           <option
@@ -185,7 +185,7 @@
         </h3>
         <dl class="sp-board__facts">
           <div class="sp-board__fact" data-testid="stock-prep-project-board-rows">
-            <dt>{{ bi('表里有多少行', 'Rows in the table') }}</dt>
+            <dt :title="bi(rowsTooltip.zh, rowsTooltip.en)">{{ bi('表里有多少行', 'Rows in the table') }}</dt>
             <dd>{{ rowsText }}</dd>
           </div>
           <div class="sp-board__fact" data-testid="stock-prep-project-board-pull-state">
@@ -364,11 +364,11 @@ import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
 import {
-  readStockPreparationOperatorDirectory,
   exportStockPreparationPrepLines,
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
+import { readStockPreparationOperatorHomeDirectory } from '../../../services/integration/stockPreparation/operatorHomeDirectory'
 import {
   advanceStockPreparationHandoff,
   readStockPreparationHandoff,
@@ -379,6 +379,7 @@ import {
 import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport } from '../../../services/integration/stockPreparation/projectSync'
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
+  STOCK_PREP_TOOLTIP_ROWS_IN_TABLE,
   stockPrepBoardErrorPlain,
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
@@ -762,6 +763,9 @@ const lastChangedFromPlmText = computed<string>(() => {
   return parsed.toLocaleString(locale.value === 'zh-CN' ? 'zh-CN' : 'en-US')
 })
 
+/** I-20: 表里有多少行's tooltip, the design's own worked example. */
+const rowsTooltip = STOCK_PREP_TOOLTIP_ROWS_IN_TABLE
+
 const notifyTitle = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return ''
@@ -886,7 +890,12 @@ async function run(work: () => Promise<void>, shape: 'read' | 'write' = 'read'):
  */
 async function loadDirectory(): Promise<void> {
   try {
-    directory.value = await readStockPreparationOperatorDirectory(props.scope)
+    // U2 契约 (P0 补项 5): the ONE opted-in, throttled directory read this whole page composes off —
+    // the datalist below, the home page's cards AND its three-sentence banner all read this same
+    // `directory` ref. See operatorHomeDirectory.ts for why this call (and only this one) opts into
+    // `includePullTargets`/`includePendingCounts` and throttles: the confirmation queue's own
+    // directory read stays the plain, un-opted-in, un-throttled call it always was.
+    directory.value = await readStockPreparationOperatorHomeDirectory(props.scope)
   } catch {
     directory.value = null
   } finally {

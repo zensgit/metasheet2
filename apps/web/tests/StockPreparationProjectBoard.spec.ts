@@ -77,6 +77,7 @@ import {
   STOCK_PREP_OPERATOR_PULL_STEPS,
   STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
+import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 
 const backendAccess = require('../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs')
 
@@ -254,6 +255,11 @@ describe('项目备料页 — the operator project board', () => {
     routeApi()
     routerPush.mockReset()
     routerReplace.mockReset()
+    // P0 补项 4c: the board's directory read is throttled per scope (operatorHomeDirectory.ts). Every
+    // test in this file uses the SAME `SCOPE`, so a cold cache per test keeps each mount's directory
+    // fetch behaving exactly as it did before the throttle existed — no test here is ABOUT the
+    // throttle itself (that lives in StockPreparationOperatorHome.spec.ts).
+    resetStockPreparationOperatorHomeDirectoryThrottle()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -1143,5 +1149,58 @@ describe('项目备料页 — the operator project board', () => {
   it('P0-6: the workspace title carries a posture badge', async () => {
     const root = await mountBoard()
     expect(root.querySelector('[data-testid="stock-prep-project-board-posture"]')).not.toBeNull()
+  })
+
+  // ---- P0-9: 缺件卡 (I-4) — top consequence + bottom closure, both already/newly present ---------
+
+  it('P0-9 / I-4: 缺件卡 carries the top consequence sentence AND the bottom closure line, with the count tooltip', async () => {
+    const syncApi = syncApiDouble({
+      dryRun: vi.fn().mockResolvedValue({
+        canApply: true,
+        dryRunToken: 'tok_missing',
+        counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 },
+        evidence: {},
+        projectName: PROJECT_NAME,
+        missingComponents: {
+          distinctCount: 2,
+          probeCount: 3,
+          truncated: false,
+          items: [
+            { componentSourceId: 'C-1', parentSourceId: 'P-1', bomId: 'BOM-1', depth: 1, occurrenceCount: 2, parentCount: 1, path: 'Root' },
+            { componentSourceId: 'C-2', parentSourceId: 'P-2', bomId: 'BOM-1', depth: 2, occurrenceCount: 1, parentCount: 1, path: 'Root/P-2' },
+          ],
+        },
+      }),
+    })
+    const root = await mountBoard({ syncApi })
+    await runPullPanel(root)
+
+    const box = root.querySelector('[data-testid="stock-prep-project-sync-missing-components"]') as HTMLElement
+    expect(box).not.toBeNull()
+    // I-4's top sentence: the CONSEQUENCE, before the list (design's own exact wording, unchanged by
+    // this pass — this pins it stays there rather than re-derives it).
+    expect(box.textContent).toContain('整个项目在补齐前一行都写不进去')
+    // I-4's NEW bottom closure line (线框 D ③): no "mark done" button exists, and the card says so.
+    expect(box.textContent).toContain('回到上面点「同步一次」')
+    expect(box.textContent).toContain('不用在这里标记完成')
+    // I-20: the summary's own tooltip — what the COUNT means.
+    const summary = box.querySelector('summary') as HTMLElement
+    expect(summary.title).toContain('去重后的数量')
+  })
+
+  // ---- P0-9: I-20 tooltips reachable from this page (the other two are on the composed queue) ----
+
+  it('I-20: 表里有多少行 carries a values-free tooltip explaining what the row count does NOT mean', async () => {
+    const root = await mountBoard()
+    const dt = root.querySelector('[data-testid="stock-prep-project-board-rows"] dt') as HTMLElement
+    expect(dt.title).toContain('不是 BOM 总行数')
+  })
+
+  it('I-20: the home page\'s 可以导出 filter carries a tooltip (the board composes the home page when no project is open)', async () => {
+    const root = await mountBoard({ projectNo: '' })
+    await flush()
+    const chip = root.querySelector('[data-testid="stock-prep-operator-home-filter-ready"]') as HTMLElement
+    expect(chip).not.toBeNull()
+    expect(chip.title).toContain('已经写进多维表')
   })
 })

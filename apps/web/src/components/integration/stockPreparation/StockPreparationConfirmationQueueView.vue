@@ -29,7 +29,7 @@
         <datalist id="stock-prep-project-directory-options" data-testid="stock-prep-operator-project-datalist">
           <option
             v-for="project in directoryProjects"
-            :key="project.projectId"
+            :key="project.projectNo ?? project.projectId ?? ''"
             :value="project.projectNo ?? ''"
           >{{ project.projectName ?? '' }}</option>
         </datalist>
@@ -191,7 +191,7 @@
     >
       <h3>{{ bi('您这边等着处理的项目', 'Projects waiting on you') }}</h3>
       <ul>
-        <li v-for="project in worklist" :key="project.projectId">
+        <li v-for="project in worklist" :key="project.projectNo ?? project.projectId ?? ''">
           <button
             type="button"
             class="stock-prep-confirm__worklist-item"
@@ -264,7 +264,9 @@
     </p>
 
     <div v-if="queue" class="stock-prep-confirm__counts" data-testid="stock-prep-confirmation-counts">
-      <span>{{ bi('等您处理', 'Waiting for you') }}: {{ queue.rowCount }}</span>
+      <span :title="bi(pendingConfirmTooltip.zh, pendingConfirmTooltip.en)">
+        {{ bi('等您处理', 'Waiting for you') }}: {{ queue.rowCount }}
+      </span>
       <span>{{ bi('先挂起的', 'Parked for later') }}: {{ queue.parkedCount }}</span>
     </div>
 
@@ -359,6 +361,16 @@
         data-testid="stock-prep-confirmation-empty-go-install"
         @click="emit('navigate-stage', 'install')"
       >{{ bi(ledgerMissingActionLabel.zh, ledgerMissingActionLabel.en) }}</button>
+      <!-- P0-9 (线框 D ④): "把『确认完要回来再同步一次』从词表句子变成控件" — the closed-loop button
+           for the ONE step every day loses the most. Goes back to the project board FOR THE SAME
+           PROJECT (§2.3's `?projectNo=` state bit), reusing the same event `admin-action`'s sibling
+           already uses — no new route, no new controlled control. -->
+      <button
+        v-if="emptyState === 'nothing_pending'"
+        type="button"
+        data-testid="stock-prep-confirmation-empty-resync"
+        @click="emit('navigate-stage', 'project-board', projectNo)"
+      >{{ bi(resyncActionLabel.zh, resyncActionLabel.en) }}</button>
     </p>
 
     <!-- The value-entry pane: the ONE content-bearing surface, gated on the same code as confirm. -->
@@ -459,7 +471,7 @@
 //     value-entry pane renders content, and it renders under the same gate the server puts on that
 //     read. Errors surface as the CLAMPED enum-shaped code from confirmApi.ts — never a server
 //     message, which could carry a value.
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
@@ -498,7 +510,9 @@ import {
   STOCK_PREP_DECISION_ACTION_PLAIN,
   STOCK_PREP_DECISION_STATUS_PLAIN,
   STOCK_PREP_LEDGER_MISSING_ACTION,
+  STOCK_PREP_QUEUE_RESYNC_ACTION,
   STOCK_PREP_RECONCILE_BUTTON_NOTE,
+  STOCK_PREP_TOOLTIP_PENDING_CONFIRM,
   stockPrepDirectoryEmptyPlain,
   stockPrepDirectoryEmptyState,
   stockPrepEnumPlain,
@@ -523,11 +537,16 @@ const props = defineProps<{ scope: IntegrationScope; projectNo?: string }>()
  */
 const emit = defineEmits<{
   (event: 'admin-action', action: 'ensure' | 'reconcile', projectNo: string): void
-  // P0-7 / D2: the `ledger_missing` empty state's new [去装:开始使用] button. Reuses the SAME
-  // event/handler `StockPreparationWorkspace.vue` already wires for the dashboard tab's own stepper
+  // P0-7 / D2: the `ledger_missing` empty state's [去装:开始使用] button, and now (P0-9) the
+  // `nothing_pending` empty state's [再同步一次] button too. Reuses the SAME event/handler
+  // `StockPreparationWorkspace.vue` already wires for the dashboard tab's own stepper
   // (`handleNavigateStage`) — this view stays a pure emitter, exactly like `admin-action` above; the
-  // shell is still the only thing that owns tab navigation.
-  (event: 'navigate-stage', viewKey: string): void
+  // shell is still the only thing that owns tab navigation. `projectNo` is OPTIONAL and additive: the
+  // ledger_missing button still calls this with one argument, unaffected; the nothing_pending button
+  // carries the queue's OWN current number so the shell can bring the board back to the SAME project
+  // (§2.3's `?projectNo=` state bit) rather than whatever it last had open — no new route, no new
+  // controlled control (workbenchAccess.ts is untouched: this is a plain event payload, not a capability).
+  (event: 'navigate-stage', viewKey: string, projectNo?: string): void
 }>()
 
 const { locale } = useLocale()
@@ -567,6 +586,8 @@ function decisionActionLabel(action: string | null): string {
 const errorPlain = stockPrepErrorPlain
 const reconcileButtonNote = STOCK_PREP_RECONCILE_BUTTON_NOTE
 const ledgerMissingActionLabel = STOCK_PREP_LEDGER_MISSING_ACTION
+const resyncActionLabel = STOCK_PREP_QUEUE_RESYNC_ACTION
+const pendingConfirmTooltip = STOCK_PREP_TOOLTIP_PENDING_CONFIRM
 
 /**
  * THE SAME predicate the shell filters the install tab with (`workbenchAccess.ts`), not a second
@@ -608,6 +629,25 @@ function handoffStepLabel(key: string | null): string {
 }
 
 const projectNo = ref<string>(props.projectNo ?? '')
+
+/**
+ * P0-1 (F5) — the shell keeps `props.projectNo` in step with the project open elsewhere on this page.
+ * NON-IMMEDIATE on purpose: the initial value is already captured by the `ref()` seed above, and this
+ * view's own contract (see StockPreparationHandoff.spec.ts's `render()` helper) is "no onMounted, no
+ * watcher firing on mount — it loads when the operator asks". So this fires ONLY on a genuine
+ * post-mount CHANGE — the shell's `?projectNo=` moving under an already-mounted instance (P1's
+ * `embedded` panel; today's tab-switch remounts fresh so the seed alone already covers it) or a test
+ * driving the prop directly. A change RESETS the input to the new number and, when it is non-empty,
+ * RELOADS that project's queue; an emptied value only resets the box — there is no project to load a
+ * queue for.
+ */
+watch(() => props.projectNo, (next) => {
+  const value = typeof next === 'string' ? next : ''
+  if (value === projectNo.value) return
+  projectNo.value = value
+  if (value) void loadQueue()
+})
+
 const statusFilter = ref<StockPreparationDecisionStatus | ''>('')
 const busy = ref(false)
 const errorCode = ref<string | null>(null)
@@ -904,17 +944,31 @@ async function loadHandoff(): Promise<void> {
 }
 
 /**
- * The queue refresh is this view's ONE load-on-demand entry point (there is no watcher and no
- * onMounted here — the operator types a project number and presses 刷新列表), so the turn signal
- * rides it rather than introducing a second refresh idiom the file does not otherwise use.
+ * The queue reload point — the operator's own 刷新列表 press, the P0-1 prop watcher (a project
+ * change elsewhere on the page), the P0-8 auto-reload after a successful admin reconcile (the shell
+ * calls this SAME function via `defineExpose`), and a successful confirm submit. One implementation,
+ * so none of those four callers can end up re-fetching a slightly different shape.
+ *
+ * THE RESPONSE IS NORMALIZED, not trusted verbatim. A malformed/partial payload — an older backend,
+ * a proxy answering something envelope-shaped but content-free — must degrade to an honest EMPTY
+ * queue (G3/G4 discipline this file already applies to the directory read above) rather than leave
+ * `queue.rows` as `undefined` and crash the very next render, which is unrecoverable: a floor
+ * operator's only page must not white-screen on a shape it did not expect.
  */
 async function loadQueue(): Promise<void> {
   await run(async () => {
-    queue.value = await listStockPreparationDecisions({
+    const result = await listStockPreparationDecisions({
       ...props.scope,
       projectNo: projectNo.value,
       status: statusFilter.value === '' ? null : statusFilter.value,
     })
+    queue.value = {
+      rowCount: typeof result?.rowCount === 'number' ? result.rowCount : 0,
+      byStatus: result?.byStatus && typeof result.byStatus === 'object' ? result.byStatus : {},
+      byResolutionAction: result?.byResolutionAction && typeof result.byResolutionAction === 'object' ? result.byResolutionAction : {},
+      parkedCount: typeof result?.parkedCount === 'number' ? result.parkedCount : 0,
+      rows: Array.isArray(result?.rows) ? result.rows : [],
+    }
   })
   await loadHandoff()
 }
@@ -1029,7 +1083,12 @@ async function submitConfirm(): Promise<void> {
   })
 }
 
-defineExpose({ can })
+// P0-8: the shell's ONE handle onto this view for the "action → result → auto-reload" wiring — after
+// a SUCCESSFUL admin-triggered reconcile, the shell calls `loadQueue()` on this same mounted instance
+// so the operator sees the rescanned queue without an extra manual refresh. `can` was already exposed;
+// `loadQueue` reuses the view's own load path verbatim (same project number, same status filter) —
+// no second implementation of "what does refreshing this queue mean".
+defineExpose({ can, loadQueue })
 </script>
 
 <style scoped>

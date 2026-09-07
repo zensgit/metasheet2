@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h as createElement, nextTick, ref, type App as VueApp, type Component, type Ref } from 'vue'
 
 // 一线看得见自己工厂的项目 — the FRONT-END half of the operator project directory.
 //
@@ -286,6 +286,21 @@ describe('一线看得见自己工厂的项目 — the operator project director
     expect(queueCall).toContain(`projectNo=${P2.no}`)
   })
 
+  it('I-20: 待确认 (等您处理 count) carries a values-free tooltip', async () => {
+    routeFetch({ queueRows: [pendingRow()] })
+    const root = mountView()
+    await flush()
+    const input = q(root, 'stock-prep-confirmation-project-input') as HTMLInputElement
+    input.value = P1.no
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(q(root, 'stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+    const counts = q(root, 'stock-prep-confirmation-counts') as HTMLElement
+    const span = counts.querySelector('span') as HTMLElement
+    expect(span.title).toContain('不是这个项目全部的行数')
+  })
+
   it('W-06a “nothing synced yet” is NOT reported as 都清了', async () => {
     routeFetch({ directory: directoryPayload({ directoryReady: false, projectCount: 0, projects: [], pendingProjectCount: 0 }) })
     const root = mountView()
@@ -327,8 +342,9 @@ describe('一线看得见自己工厂的项目 — the operator project director
     expect(q(root, 'stock-prep-operator-project-datalist')!.querySelectorAll('option')).toHaveLength(2)
   })
 
-  it('W-06d 都清了 renders ONLY when the project is real, provisioned and genuinely clear', async () => {
-    const root = mountView()
+  it('W-06d / P0-9 nothing_pending renders ONLY when the project is real, provisioned and genuinely clear — with the closure button', async () => {
+    const onNavigateStage = vi.fn()
+    const root = mountView({ onNavigateStage })
     await flush()
     const input = q(root, 'stock-prep-confirmation-project-input') as HTMLInputElement
     input.value = P2.no
@@ -338,7 +354,18 @@ describe('一线看得见自己工厂的项目 — the operator project director
     await flush()
     const empty = q(root, 'stock-prep-confirmation-empty')!
     expect(empty.getAttribute('data-empty-state')).toBe('nothing_pending')
-    expect(empty.textContent).toContain('都清了')
+    // P0-9 (§4.3): the CLOSED-LOOP wording — the good news alone used to be the whole sentence, which
+    // told a reader confirming was the end of the job when writing the data still had not happened.
+    expect(empty.textContent).toContain('没有要您拿主意的事')
+    expect(empty.textContent).toContain('可以回到上面再同步一次')
+    expect(empty.textContent).not.toContain('都清了')
+
+    // 线框 D ④ — the sentence is now ALSO a control: 「再同步一次」 goes back to the project board FOR
+    // THE SAME PROJECT NUMBER, through the shell's one navigate-stage surface (P0-1/P0-9 wiring).
+    const resync = q(root, 'stock-prep-confirmation-empty-resync') as HTMLButtonElement
+    expect(resync).not.toBeNull()
+    resync.click()
+    expect(onNavigateStage).toHaveBeenCalledWith('project-board', P2.no)
   })
 
   it('W-06e the four states are genuinely four DIFFERENT sentences', async () => {
@@ -596,5 +623,64 @@ describe('一线看得见自己工厂的项目 — the operator project director
     const empty = q(root, 'stock-prep-confirmation-empty')!
     expect(empty.getAttribute('data-empty-state')).toBe('nothing_synced')
     expect(empty.textContent).not.toContain('都清了')
+  })
+
+  // ---------------------------------------------------------------------------
+  // P0-1 (F5) — the shell's `:project-no` prop, and the watcher that keeps this view in step with it
+  // ---------------------------------------------------------------------------
+  //
+  // Mounted through a small reactive Harness (the SAME idiom StockPreparationProjectBoard.spec.ts uses
+  // for its own prop-watch coverage) rather than through `mountView()`, because the whole point is a
+  // PROP CHANGE on an already-mounted instance — something the shell's real v-else-if tab switch does
+  // not exercise today (a fresh mount already carries the right seed) but P1's embedded panel, and a
+  // deep-link projectNo change while this tab stays active, will.
+
+  function mountWithReactiveProjectNo(initial: string): { projectNoProp: Ref<string> } {
+    const projectNoProp = ref(initial)
+    const Harness = defineComponent({
+      setup() {
+        return () => createElement(StockPreparationConfirmationQueueView as Component, {
+          scope: SCOPE,
+          projectNo: projectNoProp.value,
+        })
+      },
+    })
+    app = createApp(Harness)
+    app.mount(container!)
+    return { projectNoProp }
+  }
+
+  function queueCallCount(): number {
+    return h.apiFetch.mock.calls.filter((call) => String(call[0]).includes(QUEUE_URL)).length
+  }
+
+  it('P0-1: a projectNo prop CHANGE resets the input and reloads that project’s queue', async () => {
+    routeFetch({ queueRows: [pendingRow()] })
+    const { projectNoProp } = mountWithReactiveProjectNo(P1.no)
+    await flush()
+    const input = () => q(container!, 'stock-prep-confirmation-project-input') as HTMLInputElement
+    expect(input().value, 'the initial SEED already carries the shell’s number').toBe(P1.no)
+    // No onMounted/no watcher firing on mount (StockPreparationHandoff.spec.ts’s own contract): the
+    // seed alone filled the box, and nothing was fetched for it yet.
+    expect(queueCallCount()).toBe(0)
+
+    projectNoProp.value = P2.no
+    await flush()
+    expect(input().value, 'the watcher resets the box to the NEW number').toBe(P2.no)
+    expect(queueCallCount(), 'and reloads — the same project a colleague’s worklist row would open').toBe(1)
+    const lastQueueCall = h.apiFetch.mock.calls.map((call) => String(call[0])).filter((url) => url.includes(QUEUE_URL)).pop()
+    expect(lastQueueCall).toContain(`projectNo=${P2.no}`)
+  })
+
+  it('P0-1: an EMPTIED projectNo only resets the box — it does not fetch for no project at all', async () => {
+    routeFetch({ queueRows: [pendingRow()] })
+    const { projectNoProp } = mountWithReactiveProjectNo(P1.no)
+    await flush()
+    expect(queueCallCount()).toBe(0)
+
+    projectNoProp.value = ''
+    await flush()
+    expect((q(container!, 'stock-prep-confirmation-project-input') as HTMLInputElement).value).toBe('')
+    expect(queueCallCount(), 'an empty number is not a project to load a queue for').toBe(0)
   })
 })
