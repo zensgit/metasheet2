@@ -4,6 +4,25 @@ Status: IN PROGRESS / DRAFT-HOLD. This report is not completion or release evide
 
 ## Post-publication CI correction (current, 2026-09-08)
 
+CI correction checkpoint: 26581ee555cd6eb77ec2f49027d2eeb8c9ad322e.
+The original published 8fa head reached terminal 20 SUCCESS / 2 SKIPPED /
+5 FAILURE (27 checks). A separately approved diagnostic step now runs before
+the unchanged recovery-schema migration step on the existing PR-triggered lane.
+It creates a unique synthetic DB with the CI service database's actual locale,
+executes the byte-original migration, and emits only environment and synthetic
+closed catalog metadata plus changed top-level fields against the local reference.
+This diagnostic is not a migration fix and is intended to be removed after capture.
+
+Local diagnostic positive: migrationOutcome passed, exit0, owned DB residue0.
+Temporary all-zero pin mutation: migrationOutcome failed, exit1, cleanup residue0;
+original migration restored SHA256
+949555417fd4181c410cfca0afa00c630f2702bae1828ead3e27ab17fcb3a9d4.
+Backend tsc and workflow YAML parsing pass. Removing exactly the diagnostic step
+recovers the prior workflow byte-for-byte; all migration/guard commands, permissions
+and triggers remain unchanged. Provenance frozen/live diff remains zero.
+Publishing this diagnostic is authorized despite the unresolved migration failure:
+it is new evidence collection on the same Draft PR, never a rerun/dispatch or green claim.
+
 Draft/HOLD #5542 published at 8faebc105c090b11336a65c08756cf4d5141b044.
 That head is **not CI green**. Two independent failures are established:
 
@@ -41,8 +60,9 @@ It occupies about 274MiB with source/build files, not a global installation.
 macOS libc and Linux CI libc are not claimed equivalent. The capture harness
 uses unique synthetic databases, explicit role, loopback port allowlist, emits
 explicit migration outcome and closes owned pools before dropping its own DB.
-At this correction checkpoint task PG15/PG16 instances are running for isolated
-verification; the earlier shutdown record below predates these new instances.
+After local diagnostic verification, both task PG15/PG16 instances were stopped;
+each reported task database prefix0 and matching backend0. The private PG16
+runtime is retained for reuse, not deleted or installed as a system service.
 
 ## Current delivery snapshot (supersedes chronological pending notes below)
 

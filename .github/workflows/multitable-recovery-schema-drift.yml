@@ -97,6 +97,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Capture ACP synthetic catalog before migrations
+        env:
+          ACP_CATALOG_DIAGNOSTIC: 'true'
+        run: pnpm --filter @metasheet/core-backend exec tsx scripts/attendance-acp1b-catalog-capture.ts
+
       - name: Run DB migrations
         env:
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
