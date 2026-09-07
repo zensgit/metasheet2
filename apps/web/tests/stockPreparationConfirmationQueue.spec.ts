@@ -54,6 +54,7 @@ import {
   readStockPreparationValueEntry,
 } from '../src/services/integration/stockPreparation/confirmationQueue'
 import StockPreparationWorkspace from '../src/components/integration/stockPreparation/StockPreparationWorkspace.vue'
+import { STOCK_PREP_ADMIN_ACTION_PLAIN } from '../src/services/integration/stockPreparation/plainLanguage'
 
 function jsonResponse(body: unknown, init: { status?: number; ok?: boolean } = {}): Response {
   const status = init.status ?? 200
@@ -245,5 +246,65 @@ describe('P0-8 — 对账(reconcile)成功后队列自动重读,失败不重读'
     // The refusal DID produce a notice — but it did not trigger a second queue read.
     expect(container!.querySelector('[data-testid="stock-prep-admin-action-notice"]')).not.toBeNull()
     expect(queueGetCount, 'a failure reloads nothing — the numbers on screen stay exactly what they were').toBe(1)
+  })
+
+  // 验收 9's other half: 「页面上不再出现『再手动点一次刷新』」. The reload above is only half the fix —
+  // while the success sentence still ended with 「请点上面的「刷新列表」」 the screen said both things at
+  // once, and the copy contradicted the behaviour rather than describing it.
+  it('验收 9: the success notice does not send the reader back to a button the shell already pressed', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method ?? 'GET').toUpperCase()
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (method === 'POST' && path.includes('/confirmation-decisions/reconcile')) return ok({ counts: {} })
+      if (method === 'GET' && path.includes('/confirmation-decisions')) return ok(queuePayload(0))
+      return ok({})
+    })
+
+    await openQueueFor(PROJECT_NO)
+    ;(container!.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    await flush()
+
+    const notice = container!.querySelector('[data-testid="stock-prep-admin-action-notice"]')!
+    expect(notice.textContent).toContain('已经重新扫描过一遍')
+    expect(notice.textContent, 'the queue was reloaded FOR them — telling them to press it is now a lie').not.toContain('刷新列表')
+    // Read from the SHIPPED table, so the sentence cannot be fixed on screen and left stale at source.
+    expect(STOCK_PREP_ADMIN_ACTION_PLAIN.RECONCILE_OK.zh).not.toContain('刷新列表')
+    expect(STOCK_PREP_ADMIN_ACTION_PLAIN.RECONCILE_OK.en).not.toContain('Refresh the list')
+  })
+
+  // I-18 says 「任一管理动作完成 → 动作 → 结果 → 自动重读」, and 建立确认账本 is the action whose result is
+  // most visible: it flips `ledgerReady`, which is what the `ledger_missing` empty state (and its
+  // 去装 button) hangs off. That flag arrives in the DIRECTORY payload, so the DIRECTORY is what has
+  // to be re-read — reloading the queue would leave the dead end sitting there until a manual refresh.
+  it('P0-8: a successful 建立确认账本 re-reads the directory, so the ledger_missing dead end does not survive its own fix', async () => {
+    shellState.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:operate']
+    let directoryGetCount = 0
+    let ledgerReady = false
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method ?? 'GET').toUpperCase()
+      const path = String(url)
+      if (path.includes('/operator/projects')) {
+        directoryGetCount += 1
+        return ok({ ...directoryPayload(), ledgerReady })
+      }
+      if (method === 'POST' && path.includes('/confirmation-decisions/ensure')) {
+        ledgerReady = true
+        return ok({})
+      }
+      if (method === 'GET' && path.includes('/confirmation-decisions')) return ok(queuePayload(0))
+      return ok({})
+    })
+
+    app = createApp(StockPreparationWorkspace as Component)
+    app.mount(container!)
+    await flush()
+    expect(directoryGetCount, 'the queue reads its directory once on mount').toBe(1)
+
+    ;(container!.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(container!.querySelector('[data-testid="stock-prep-admin-action-notice"]')?.textContent).toContain('确认账本已经就位')
+    expect(directoryGetCount, 'and re-reads it once the table it was waiting for exists').toBe(2)
   })
 })

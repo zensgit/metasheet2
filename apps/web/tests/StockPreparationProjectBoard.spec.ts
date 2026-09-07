@@ -1203,4 +1203,55 @@ describe('项目备料页 — the operator project board', () => {
     expect(chip).not.toBeNull()
     expect(chip.title).toContain('已经写进多维表')
   })
+
+  // ---- U2 契约: WHO pays for the union scan --------------------------------------------------
+  //
+  // This one component file is both faces of §2.3 — 今天要处理 when `?projectNo=` is empty and 项目备料页
+  // when it is not — and the U2 opt-in
+  // (`?includePullTargets=1&includePendingCounts=1`) is NOT free: the backend module states in its own
+  // header that the scan reads the whole binding sheet, pages by LIMIT/OFFSET, and that 「项目备料页
+  // does not opt in — it runs its own NARROWED scan and must not also pay an unnarrowed one … so this
+  // whole feature costs that route exactly zero queries」. These three cases are that ruling, expressed
+  // as request URLs, because it is invisible in the DOM and a single `if` is all that separates
+  // "charged once, on the home page" from "charged on every project an operator opens".
+
+  function directoryRequestUrls(): string[] {
+    return h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/operator/projects'))
+  }
+
+  it('U2: a WORKSPACE mount (a project is open) asks for the plain directory — no union scan is charged to it', async () => {
+    await mountBoard({ projectNo: PROJECT_NO })
+    const urls = directoryRequestUrls()
+    expect(urls.length, 'the board still fills its datalist from one directory read').toBe(1)
+    expect(urls[0]).not.toContain('includePullTargets')
+    expect(urls[0]).not.toContain('includePendingCounts')
+  })
+
+  it('U2: a HOME mount (no project open) is the one read that opts in', async () => {
+    await mountBoard({ projectNo: '' })
+    const urls = directoryRequestUrls()
+    expect(urls.length).toBe(1)
+    expect(urls[0]).toContain('includePullTargets=1')
+    expect(urls[0]).toContain('includePendingCounts=1')
+  })
+
+  it('U2: 返回今天要处理 re-reads WITH the opt-in — the home page never renders off the workspace\'s plain directory', async () => {
+    const root = await mountBoard({ projectNo: PROJECT_NO })
+    expect(directoryRequestUrls().length).toBe(1)
+
+    ;(root.querySelector('[data-testid="stock-prep-project-board-back-home"]') as HTMLButtonElement).click()
+    await flush()
+
+    // The component does not remount when it comes home (the shell drops `?projectNo=` under a live
+    // instance), so without an explicit re-read the home page would render off the un-opted-in payload
+    // for the rest of the session: every U2 field absent, the three sentences therefore permanently
+    // silent, and pull-target-only projects permanently missing from the cards.
+    const urls = directoryRequestUrls()
+    expect(urls.length, 'coming home issues exactly one more directory read').toBe(2)
+    expect(urls[1]).toContain('includePullTargets=1')
+    expect(urls[1]).toContain('includePendingCounts=1')
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+  })
 })

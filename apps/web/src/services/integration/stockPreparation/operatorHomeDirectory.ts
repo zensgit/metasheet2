@@ -1,18 +1,30 @@
-// 首页目录读的节流包装 (P0-2/P0-9 补项 · U2 契约) — the ONE fetch StockPreparationProjectBoardView.vue's
-// home-page mount issues.
+// 首页目录读的节流包装 (P0-2/P0-9 补项 · U2 契约) — the fetch StockPreparationProjectBoardView.vue
+// issues WHEN, AND ONLY WHEN, it is showing 今天要处理.
 //
-// WHAT THIS IS FOR. The home page's cards, three-sentence banner and per-row timestamps all read the
-// U2 union (设计稿 N1/N2: `?includePullTargets=1&includePendingCounts=1`). That union is a full-sheet
-// scan on the server (see the plugin module's own header) and must not be paid on every mount/re-render
-// of the tab that composes the home page — a tab flick or a fast re-render within the same operator
-// session must not double the request. This module is that ONE caller's throttle: at most one LIVE
-// request per (tenantId, workspaceId) scope every `THROTTLE_WINDOW_MS`; a call inside the window reuses
-// the in-flight or just-settled promise instead of issuing a second fetch.
+// WHAT THIS IS FOR. The home page's cards and its three-sentence banner read the U2 union (设计稿
+// N1/N2: `?includePullTargets=1&includePendingCounts=1`) — the union is what adds the projects that
+// exist only as self-service pull targets, and the three top-level flags are what the banner says or
+// stays quiet about. That union is a full-sheet, LIMIT/OFFSET-paged scan on the server (the plugin
+// module's own header states the cost and the owner's ruling on who may be charged it) and must not be
+// paid on every mount/re-render of the tab that composes the home page — a tab flick or a fast
+// re-render within the same operator session must not double the request. This module is that
+// caller's throttle: at most one LIVE request per (tenantId, workspaceId) scope every
+// `THROTTLE_WINDOW_MS`; a call inside the window reuses the in-flight or just-settled promise instead
+// of issuing a second fetch.
 //
-// WHAT THIS IS NOT FOR. The confirmation queue's OWN directory read
-// (`readStockPreparationOperatorDirectory` called directly, unwrapped, un-opted-in) is UNCHANGED — it
-// is a different caller with a different (values-free-by-default) need, and routing it through this
-// cache would be a silent behaviour change nobody asked for. This wrapper has exactly one caller.
+// WHAT THIS IS NOT FOR — TWO CALLERS THAT MUST KEEP PAYING NOTHING.
+//   * 项目备料页. The SAME component file renders the workspace, and the owner ruled that the union's
+//     cost 「may not be charged to every home-page open and every board mount」 — the board runs its own
+//     narrowed pull-target read and must not also run an unnarrowed one. Its directory read therefore
+//     goes straight to `readStockPreparationOperatorDirectory`, un-opted-in, un-throttled, exactly as
+//     it did before this pass. See that file's `loadDirectory`.
+//   * The confirmation queue's OWN directory read — a different caller with a different
+//     (values-free-by-default) need; routing it through this cache would be a silent behaviour change
+//     nobody asked for.
+//
+// The throttle key is the SCOPE, not the principal, and entries outlive the components that made them
+// (module-level Map). That is fine for a 5-second window on a page one person is looking at; it is not
+// a session cache and must not grow into one.
 import type { IntegrationScope } from '../workbench'
 import {
   readStockPreparationOperatorDirectory,
@@ -35,8 +47,10 @@ function scopeKey(scope: IntegrationScope): string {
 }
 
 /**
- * 首页那一次目录读. Always opts into both U2 flags — the home page's banner and per-row timestamps
- * need the union unconditionally, so there is no partial-opt-in variant of this function.
+ * 首页那一次目录读. Always opts into both U2 flags — the home page's banner and its card list need the
+ * union unconditionally, so there is no partial-opt-in variant of this function. Callers that must NOT
+ * pay for the union call `readStockPreparationOperatorDirectory` directly instead of reaching for a
+ * flag here.
  *
  * A window is not extended by a call landing inside it: the clock is set once, at the moment the LIVE
  * request goes out, so a burst of calls inside `THROTTLE_WINDOW_MS` all resolve together and the next

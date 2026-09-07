@@ -652,6 +652,13 @@ async function handleAdminAction(action: 'ensure' | 'reconcile', projectNo: stri
     if (action === 'ensure') {
       await createStockPreparationInstallApi(scope).ensureConfirmationLedger()
       adminActionNotice.value = stockPrepAdminActionPlain('ENSURE_OK')
+      // P0-8's other half. The one fact this changes on the queue's screen is `ledgerReady`, and that
+      // arrives in the DIRECTORY payload — so the DIRECTORY is what has to be re-read. Reloading the
+      // queue instead would change nothing: the `ledger_missing` empty state (and its 去装 button)
+      // would stay put until a manual refresh, which is the dead end this wave exists to close, back
+      // one action later. The queue list itself is deliberately NOT re-read here — 建账本 needs no
+      // project number, and firing a queue read without one is a request that can only 400.
+      void confirmationQueueEl.value?.loadDirectory?.()
     } else {
       await createStockPreparationProjectSyncApi(scope).reconcile(trimmed)
       adminActionNotice.value = stockPrepAdminActionPlain('RECONCILE_OK')

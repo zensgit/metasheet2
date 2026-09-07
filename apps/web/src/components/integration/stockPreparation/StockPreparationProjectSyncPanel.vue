@@ -172,12 +172,18 @@
             {{ bi('导出 CSV', 'Export CSV') }}
           </button>
         </div>
-        <!-- I-4 / 线框 D ③ (P0-9): the closure line — there is no "I fixed it" button on this page,
-             and saying so out loud is what stops an operator hunting for one. -->
-        <p class="sp-sync__missing-resync-hint" data-testid="stock-prep-project-sync-missing-components-resync-hint">
-          {{ bi(missingComponentsResyncHint.zh, missingComponentsResyncHint.en) }}
-        </p>
       </div>
+      <!-- I-4 / 线框 D ③ (P0-9): the closure line — there is no "I fixed it" button on this page,
+           and saying so out loud is what stops an operator hunting for one.
+
+           OUTSIDE the `items.length > 0` body on purpose. I-4 asks this card for a consequence
+           sentence on top and a closure sentence at the bottom, and the M5 degraded shape
+           (`{distinctCount: 5, items: []}`) renders the summary and stops — which left that shape with
+           a top half and no bottom half. The closure is true in all four shapes: a later sync is what
+           clears these rows, whether or not this response could list them. -->
+      <p class="sp-sync__missing-resync-hint" data-testid="stock-prep-project-sync-missing-components-resync-hint">
+        {{ bi(missingComponentsResyncHint.zh, missingComponentsResyncHint.en) }}
+      </p>
     </details>
 
     <!-- Where to go next. Both are navigation inside this same workbench; neither is a new route. -->

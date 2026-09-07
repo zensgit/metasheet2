@@ -116,7 +116,7 @@
         <datalist id="stock-prep-board-directory-options" data-testid="stock-prep-project-board-datalist">
           <option
             v-for="project in directoryProjects"
-            :key="project.projectNo ?? project.projectId ?? ''"
+            :key="project.projectId ?? project.projectNo ?? ''"
             :value="project.projectNo ?? ''"
           >{{ project.projectName ?? '' }}</option>
           <option
@@ -365,6 +365,7 @@ import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
 import {
   exportStockPreparationPrepLines,
+  readStockPreparationOperatorDirectory,
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
@@ -884,18 +885,42 @@ async function run(work: () => Promise<void>, shape: 'read' | 'write' = 'read'):
 }
 
 /**
- * The directory is loaded ONCE, on mount, for the search box. It is loaded independently of any
- * board read: an operator arriving with nothing typed must still see their own projects in the
- * type-ahead, and a directory failure must not stop a board read that was going to work.
+ * The directory read. Loaded independently of any board read: an operator arriving with nothing typed
+ * must still see their own projects in the type-ahead, and a directory failure must not stop a board
+ * read that was going to work.
+ *
+ * IT IS TWO DIFFERENT READS, chosen by which of this component's two faces is on screen — and that
+ * split is a CONTRACT, not a preference.
+ *
+ * This one file is both 今天要处理 (the home page, `showHome`) and 项目备料页 (the workspace, a project
+ * open). Only the home page needs the U2 union: its cards, its three-sentence banner and its
+ * pull-target-only rows all come from `?includePullTargets=1&includePendingCounts=1`. The workspace
+ * needs none of it — the only thing it renders off `directory` is the search box's datalist, which
+ * the plain archived-project list has always filled.
+ *
+ * And the union is not free. `stock-preparation-operator-project-directory.cjs` states the cost and
+ * the owner's ruling on it in its own header: the scan reads the whole binding sheet and pages by
+ * LIMIT/OFFSET, so it is quadratic (~2.5·10⁶ rows touched at the 50,000-row bound), and 「项目备料页
+ * does not opt in — it runs its own NARROWED scan and must not also pay an unnarrowed one」. The board
+ * already pays a narrowed pull-target read of its own (`readPullTargetRowFacts`). Sending the opted-in
+ * call from a workspace mount would charge that scan to every single project an operator opens, which
+ * the 5-second throttle cannot help with at all — opening A, then B, then C is minutes apart, so it is
+ * three full scans.
+ *
+ * So: home → the opted-in, throttled wrapper. Workspace → the plain call, byte-for-byte what this view
+ * sent before this pass. `watch(showHome)` below covers the one transition that flips faces without
+ * remounting.
  */
 async function loadDirectory(): Promise<void> {
+  // Read the face ONCE, up front: `showHome` can flip while the request is in flight, and a `finally`
+  // that re-read it could label the response with the wrong mode.
+  const home = showHome.value
   try {
-    // U2 契约 (P0 补项 5): the ONE opted-in, throttled directory read this whole page composes off —
-    // the datalist below, the home page's cards AND its three-sentence banner all read this same
-    // `directory` ref. See operatorHomeDirectory.ts for why this call (and only this one) opts into
-    // `includePullTargets`/`includePendingCounts` and throttles: the confirmation queue's own
-    // directory read stays the plain, un-opted-in, un-throttled call it always was.
-    directory.value = await readStockPreparationOperatorHomeDirectory(props.scope)
+    // See operatorHomeDirectory.ts for why the home call (and only it) opts in and throttles: the
+    // confirmation queue's own directory read stays the plain, un-opted-in, un-throttled call too.
+    directory.value = home
+      ? await readStockPreparationOperatorHomeDirectory(props.scope)
+      : await readStockPreparationOperatorDirectory(props.scope)
   } catch {
     directory.value = null
   } finally {
@@ -905,6 +930,23 @@ async function loadDirectory(): Promise<void> {
     directoryLoaded.value = true
   }
 }
+
+/**
+ * 返回今天要处理 — the ONE transition that changes face without changing component.
+ *
+ * `goHome` (and the shell's `?projectNo=` dropping for any other reason) clears `openedProjectNo` on a
+ * component that is already mounted, so nothing re-runs `onMounted`. Without this the home page would
+ * render off whatever directory the WORKSPACE mount fetched — the un-opted-in one — and every U2
+ * surface would be silently, permanently dead: the three sentences never appear (their fields are
+ * absent, and absent means "unknown, say nothing"), and self-service pull-target projects never show
+ * up in the card list. So the moment this view comes home, it re-reads with the opt-in.
+ *
+ * ONE DIRECTION ONLY. Going the other way — home → a project — keeps the union already in hand, which
+ * is a superset of what the workspace needs; re-reading there would pay for less data.
+ */
+watch(showHome, (isHome) => {
+  if (isHome) void loadDirectory()
+})
 
 /**
  * READ ONE PROJECT'S BOARD.

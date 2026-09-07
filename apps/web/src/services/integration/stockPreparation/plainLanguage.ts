@@ -587,6 +587,16 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '过一会儿再点一次;如果一直这样,把下面的报错代码给管理员。',
     enNext: 'Try again shortly; if it keeps happening, give an administrator the code below.',
   }),
+  // A 200 whose body is not a queue at all — an unparseable payload, an envelope with no data, the
+  // HTML an SPA-fallback proxy answers with. READ-SHAPED on purpose: nothing was being saved, so the
+  // generic 「这一步没有保存成功」 would answer a question nobody asked. It exists so the queue view
+  // can say 「读不出来」 instead of rendering a fabricated empty list as 「都清了」 (G4).
+  STOCK_PREPARATION_DECISION_QUEUE_UNREADABLE: Object.freeze({
+    zh: '这份待确认清单没读回来,所以下面暂时什么都不显示——不代表没有要处理的事。',
+    en: 'The list of items to confirm did not come back, so nothing is shown below — that does not mean there is nothing waiting.',
+    zhNext: '点上面的「刷新列表」再试一次;如果一直这样,把下面的报错代码给管理员。',
+    enNext: 'Press 刷新列表 above to try again; if it keeps happening, give an administrator the code below.',
+  }),
   FORBIDDEN: Object.freeze({
     zh: '当前账号没有做这件事的权限。',
     en: 'This account is not allowed to do that.',
@@ -749,13 +759,19 @@ export const STOCK_PREP_ADMIN_ACTION_PLAIN: Record<string, StockPrepPlainText> =
   // Reconcile RE-READS the source and rebuilds the SERVER's pending list; it decides nothing on the
   // operator's behalf, which is the half most worth saying out loud.
   //
-  // IT DOES NOT PROMISE THE SCREEN. The queue table on this page loads only when 刷新列表 is pressed
-  // (that button is the view's one load-on-demand entry point), so the rows visible after a re-scan
-  // are still the ones read before it. Copy that claimed "the list is up to date" was describing the
-  // server while the reader was looking at the stale table.
+  // IT NO LONGER SENDS ANYONE BACK TO A BUTTON (P0-8 / 验收 9). The old wording ended with 「请点上面
+  // 的「刷新列表」看最新的待确认清单」, which was true only while the shell left the table stale after a
+  // successful re-scan. The shell now re-reads the queue itself the moment this sentence appears
+  // (StockPreparationWorkspace.vue's `handleAdminAction`), so that half was worse than redundant: the
+  // screen would have said 「已经替您重读了」 and 「请您再点一次刷新」 at the same time.
+  //
+  // IT STILL DOES NOT PROMISE THE SCREEN'S CONTENT. The sentence describes the two things that DID
+  // happen — the server re-scanned, and the list was re-read on the reader's behalf — not a claim
+  // that the table below is now correct: a re-read that fails renders the queue's own error line
+  // right beside this notice, and copy asserting 「下面就是最新的」 would be contradicted by it.
   RECONCILE_OK: Object.freeze({
-    zh: '已经重新扫描过一遍。请点上面的「刷新列表」看最新的待确认清单。系统没有替任何人做决定。',
-    en: 'The re-scan is done. Press “Refresh the list” above to see the latest items to confirm. Nothing was decided on anyone’s behalf.',
+    zh: '已经重新扫描过一遍,下面的清单也替您重读了一遍,不用再手动点刷新。系统没有替任何人做决定。',
+    en: 'The re-scan is done, and the list below was re-read for you — no need to press refresh yourself. Nothing was decided on anyone’s behalf.',
   }),
   // The reconcile route is scoped to ONE project. Without a number there is nothing to scan, and
   // sending the request anyway would answer with a shapeless 400 the operator cannot act on.
@@ -886,8 +902,12 @@ export const STOCK_PREP_LEDGER_MISSING_ACTION: StockPrepPlainText = Object.freez
 /**
  * The `nothing_pending` empty state's new closure button (P0-9, 线框 D ④): "把『确认完要回来再同步一
  * 次』从词表句子变成控件" — turns the queue's OWN closure sentence into a click, back to the project
- * board for the SAME project number. Reused verbatim for the missing-components card's own bottom
- * closure line (线框 D ③) — the two sentences are the same idea, so they carry the same words.
+ * board for the SAME project number.
+ *
+ * IT IS THE BUTTON'S LABEL AND NOTHING ELSE. The missing-components card's bottom closure line (线框
+ * D ③) is a SEPARATE constant, `STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT` below — same idea, but a
+ * whole sentence rather than a four-character label, because that card has no button to attach one to.
+ * An earlier draft of this comment claimed the two shared these words; they never did.
  */
 export const STOCK_PREP_QUEUE_RESYNC_ACTION: StockPrepPlainText = Object.freeze({
   zh: '再同步一次',
