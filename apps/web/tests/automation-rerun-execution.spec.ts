@@ -189,6 +189,10 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     expect(btn.disabled).toBe(true)
     const reason = mounted.container.querySelector('[data-field="rerun-blocked-reason"]')
     expect(reason?.textContent ?? '').toContain('Manual test runs cannot be re-run.')
+    // The reason is a visible sibling AND is announced with the control: a disabled button can be
+    // dropped from the accessibility tree, so a title-only reason would not reach a screen reader.
+    expect(reason?.id).toBeTruthy()
+    expect(btn.getAttribute('aria-describedby')).toBe(reason?.id)
     btn.click()
     await settle()
     expect(confirmSpy).not.toHaveBeenCalled()
@@ -228,6 +232,8 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     expect(btn).not.toBeNull()
     expect(btn.disabled).toBe(false)
     expect(mounted.container.querySelector('[data-field="rerun-blocked-reason"]')).toBeNull()
+    // No stale description pointing at a span that is not rendered.
+    expect(btn.getAttribute('aria-describedby')).toBeNull()
   })
 
   it('B1: an ordinary event-triggered row with a usable trigger event is ENABLED and sends', async () => {

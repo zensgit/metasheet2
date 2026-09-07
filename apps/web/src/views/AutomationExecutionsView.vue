@@ -132,10 +132,18 @@
                 data-action="rerun"
                 :disabled="rerunning === run.id || rerunBlockedReason(run) !== null"
                 :title="rerunBlockedReason(run) ?? undefined"
+                :aria-describedby="rerunBlockedReason(run) ? `rerun-blocked-${run.id}` : undefined"
                 @click.stop="rerunExecution(run)"
               >{{ automationLabel('runs.rerun', isZh) }}</button>
+              <!--
+                The reason is a VISIBLE sibling, not only the button's `title`: a disabled button is
+                dropped from the accessibility tree by some assistive tech, which would hide a
+                title-only reason from exactly the readers who need it. `aria-describedby` points at
+                this span for the tech that does expose it.
+              -->
               <span
                 v-if="rerunBlockedReason(run)"
+                :id="`rerun-blocked-${run.id}`"
                 class="automation-runs__rerun-blocked"
                 data-field="rerun-blocked-reason"
                 role="note"
@@ -417,7 +425,10 @@ function mapRerunError(err: unknown): string {
  *      stored trigger event must be a NON-EMPTY, non-array plain object. The detail GET serializes
  *      the SAME persisted object the retry guard reads (`svc.logs.getById` → toRunView
  *      `triggerEvent: execution.triggerEvent ?? null`, routes/automation.ts:152), so
- *      `hasUsableStoredTriggerEvent` below is a byte-faithful mirror of :903.
+ *      `hasUsableStoredTriggerEvent` below restates the same predicate. Claim scope: the mirror is
+ *      asserted equal to :903 for the values the spec exercises — null, `[]`, `{}`, a populated
+ *      event, and a record-less `{ _triggeredBy: 'schedule' }` — not proven equivalent over all
+ *      inputs. It fails CLOSED on `undefined`/absent, which the current detail path cannot produce.
  *      → button DISABLED + reason.
  *
  *  NOT PREDICTABLE (still sent; the server's refusal is surfaced verbatim-by-code via mapRerunError):
