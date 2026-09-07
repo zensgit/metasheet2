@@ -385,17 +385,22 @@ describeIfDatabase('approval attachment round-trip + flag guard (real DB, booted
       expect(tokenRes.status).toBe(200)
       const { token } = (await tokenRes.json()) as { token: string }
 
-      // Upload — authenticated, approvals:write-capable principal, route unmounted.
+      // Upload — authenticated, approvals:write-capable principal, route unmounted. MEASURED (not
+      // assumed) then pinned POSITIVELY: `text/html` is Express's own routing-miss body — a router
+      // that mounted and refused would answer JSON (every refusal in approval-attachments.ts is
+      // `res.status(...).json(...)`), so this is a real discriminator between "unmounted" and
+      // "mounted and refusing", not a not-this-error exclusion that would also pass on some other
+      // unmounted-but-different-shape failure.
       const upOff = await uploadPdf(token, templateId, 'files', pdfBuffer('off-upload'), offBaseUrl)
       expect(upOff.status).toBe(404) // MEASURED: unmounted route, Express routing-miss (not 401/403/503)
-      expect(upOff.headers.get('content-type') ?? '').not.toContain('application/json') // routing-miss, not the router's JSON refusal shape
+      expect(upOff.headers.get('content-type')).toContain('text/html')
 
       // Download — same real, pre-existing (live) attachment id, flag OFF.
       const dlOff = await fetch(`${offBaseUrl}/api/approval/attachments/${liveAttId}/download`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       expect(dlOff.status).toBe(404)
-      expect(dlOff.headers.get('content-type') ?? '').not.toContain('application/json')
+      expect(dlOff.headers.get('content-type')).toContain('text/html')
 
       // Delete — same id, flag OFF.
       const delOff = await fetch(`${offBaseUrl}/api/approval/attachments/${liveAttId}`, {
@@ -403,7 +408,7 @@ describeIfDatabase('approval attachment round-trip + flag guard (real DB, booted
         headers: { Authorization: `Bearer ${token}` },
       })
       expect(delOff.status).toBe(404)
-      expect(delOff.headers.get('content-type') ?? '').not.toContain('application/json')
+      expect(delOff.headers.get('content-type')).toContain('text/html')
 
       // Positive control: the SAME id, back on the flag-ON server, is still a normal live row (the
       // OFF boot above touched no data — it just never mounted the surface).

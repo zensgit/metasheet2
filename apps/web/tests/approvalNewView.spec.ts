@@ -620,10 +620,12 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     // BYTE-IDENTICALLY, not just via the loose textContent/data-testid checks above — a rung-4 change
     // ("flip authorability + retire B2-28") is only allowed once the flag is ratified ON and rungs
     // 1-3 have landed (design-lock §7); this exact string is the tripwire that a rung-4-shaped edit
-    // touched the OFF markup ahead of that ratify. `data-v-*` is Vue's scoped-style attribute — it is
-    // a hash of this component's resolved module id, not of its content (verified stable against an
-    // unrelated same-file edit), so it stays fixed across CI runs and only moves if the component's
-    // file path itself moves.
+    // touched the OFF markup ahead of that ratify. `data-v-*` is Vue's scoped-style attribute:
+    // @vitejs/plugin-vue hashes `path.relative(root, filename)` alone in dev/test mode (source is
+    // folded in only when `isProduction`, per its `createDescriptor` — checked in this repo's
+    // installed dist, not assumed), so the id is ROOT-RELATIVE, not absolute-path- or
+    // content-dependent (verified stable against an unrelated same-file edit) — stable across any
+    // checkout location as long as `apps/web` stays vitest's root and this file's path is unchanged.
     expect(disabled?.outerHTML).toBe(
       '<div data-v-7078a16d="" class="approval-new__attachment-disabled" data-testid="approval-attachment-disabled"> 附件上传功能即将支持，请先在其他字段中注明附件信息。 </div>',
     )
