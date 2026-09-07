@@ -82,8 +82,9 @@ export function useApprovalAdminCapability(
     // matched the current generation when it settled, and wrote its answer — measured as a
     // `granted` answer restoring the form after the session was cleared. Bumping here makes the
     // guard a statement about the TRANSITION rather than about the next request, so it holds
-    // whether or not a request follows. Ahead of `onInvalidated` too, so a consumer's own
-    // teardown cannot run while an old answer is still eligible to land.
+    // whether or not a request follows. Written first in the callback for readability, not for
+    // ordering: the whole callback is synchronous with nothing awaited in it, so the position
+    // relative to the two statements below is not itself load-bearing and no test pins it.
     generation += 1
     // Whatever this surface was showing was about the principal that has just been replaced, and it
     // must not survive a single frame of the new one.
