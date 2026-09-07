@@ -3365,7 +3365,7 @@ function resolveTestError(result) {
 
 async function persistExternalSystemTestResult(externalSystems, req, system, result) {
   if (!system || !system.id || !system.name || !system.kind) return null
-  return externalSystems.upsertExternalSystem(scopedInput(req, {
+  const update = scopedInput(req, {
     id: system.id,
     name: system.name,
     kind: system.kind,
@@ -3374,7 +3374,17 @@ async function persistExternalSystemTestResult(externalSystems, req, system, res
     status: resolveTestedStatus(system, result),
     lastTestedAt: new Date().toISOString(),
     lastError: resolveTestError(result),
-  }))
+  })
+  // SAVE UNDER THE ROW'S OWN SCOPE, not the caller's workspace hint. The read above
+  // (`getExternalSystemForAdapter`) may have reached this row through the registry's tenant-wide
+  // fallback (workspace_id IS NULL) while the request still carries a workspace hint. Writes are
+  // exact-scope by design and must stay that way (#5471 widened reads only), so persisting under
+  // the hint misses `findExisting` and takes the INSERT branch — "connectionId is required" for a
+  // canonical SQL binding, a duplicate-id insert for everything else — and the tested status never
+  // lands. The loaded system carries the scope it was actually matched under; write exactly there.
+  // A registry that does not report a scope (test doubles) keeps the request scope as before.
+  if (system.workspaceId !== undefined) update.workspaceId = system.workspaceId ?? null
+  return externalSystems.upsertExternalSystem(update)
 }
 
 // S2-c: map read-source-config store errors to HTTP, keeping the payload values-free — the S1
