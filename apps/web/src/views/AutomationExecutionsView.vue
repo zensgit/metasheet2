@@ -112,6 +112,39 @@
             <!-- A6-2: resume failures map the discriminated code to an INLINE message (never a generic toast). -->
             <div v-if="resumeError" class="automation-runs__step-error" data-field="resume-error" role="alert">{{ resumeError }}</div>
 
+            <!--
+              P3-4: whole-EXECUTION re-run (distinct from per-step Resume above). Admin-gated (mirrors
+              the `<template v-else>` wrapper) AND state-gated on the SAME status the backend's
+              retryExecution() enforces (failed/skipped only) — the `isAdmin &&` conjunct here is
+              intentionally redundant with the outer guard so a regression that drops it still fails
+              its own gate test.
+            -->
+            <div v-if="isAdmin && canRerunExecution(run)" class="automation-runs__rerun" data-field="rerun-panel">
+              <button
+                class="automation-runs__btn automation-runs__btn--rerun"
+                type="button"
+                data-action="rerun"
+                :disabled="rerunning === run.id"
+                @click.stop="rerunExecution(run)"
+              >{{ automationLabel('runs.rerun', isZh) }}</button>
+              <span
+                v-if="rerunTargetId === run.id && rerunSuccessId !== null"
+                class="automation-runs__rerun-success"
+                data-field="rerun-success"
+              >{{ automationLabel('runs.rerunSuccessPrefix', isZh) }} {{ rerunSuccessId }}</span>
+              <span
+                v-else-if="rerunTargetId === run.id && rerunSuccessGeneric"
+                class="automation-runs__rerun-success"
+                data-field="rerun-success"
+              >{{ automationLabel('runs.rerunSuccessGeneric', isZh) }}</span>
+            </div>
+            <div
+              v-if="rerunTargetId === run.id && rerunError"
+              class="automation-runs__step-error"
+              data-field="rerun-error"
+              role="alert"
+            >{{ rerunError }}</div>
+
             <h2 class="automation-runs__detail-h">{{ automationLabel('runs.triggerEvent', isZh) }}</h2>
             <pre class="automation-runs__json" data-field="trigger-event">{{ jsonView(detail.triggerEvent) }}</pre>
             <h2 class="automation-runs__detail-h">{{ automationLabel('runs.ruleSnapshot', isZh) }}</h2>
@@ -130,7 +163,7 @@ import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
 import type { AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
-import { automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
+import { automationActionTypeLabel, automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 import StatusTag from '../components/status/StatusTag.vue'
 import EmptyState from '../components/status/EmptyState.vue'
@@ -157,6 +190,15 @@ const detail = ref<AutomationRunView | null>(null)
 const detailLoading = ref(false)
 const resuming = ref<string | null>(null)
 const resumeError = ref<string | null>(null)
+
+// P3-4: whole-execution re-run state. `rerunTargetId` scopes success/error display to the run
+// that was actually re-run (only one row can be expanded at a time, but this stays explicit
+// rather than relying on that coincidence).
+const rerunning = ref<string | null>(null)
+const rerunTargetId = ref<string | null>(null)
+const rerunSuccessId = ref<string | null>(null)
+const rerunSuccessGeneric = ref(false)
+const rerunError = ref<string | null>(null)
 
 // A6-3-2b/A6-3-4 (read-only): surface branch lineage from the persisted C1 jobs.
 // Parent step's result carries { selectedBranchKey, matched }; nested branch-action jobs use a
@@ -222,6 +264,10 @@ async function loadData() {
 
 async function toggleExpand(id: string) {
   resumeError.value = null
+  rerunError.value = null
+  rerunSuccessId.value = null
+  rerunSuccessGeneric.value = false
+  rerunTargetId.value = null
   if (expandedId.value === id) {
     expandedId.value = null
     detail.value = null
@@ -302,6 +348,119 @@ async function resumeStep(step: AutomationRunStepView) {
   }
 }
 
+// P3-4 — whole-execution re-run (A5 `POST /automation-executions/:id/retry`, mirrored from
+// packages/core-backend/src/multitable/automation-service.ts retryExecution()). CONFIRM_SIDE_EFFECTS_REQUIRED
+// is deliberately NOT mapped here: this client always sends confirmSideEffects:true, so that code
+// firing means the request stopped sending it — let it fall through to the raw message instead of
+// dressing up a real defect as a normal rejection reason.
+const RERUN_ERROR_LABELS: Record<string, AutomationLabelKey> = {
+  NOT_FOUND: 'runs.rerunError.notFound',
+  NOT_RETRYABLE: 'runs.rerunError.notRetryable',
+  TEST_RUN_NOT_RETRYABLE: 'runs.rerunError.testRunNotRetryable',
+  MISSING_TRIGGER_EVENT: 'runs.rerunError.missingTriggerEvent',
+  RETRY_WINDOW_EXPIRED: 'runs.rerunError.retryWindowExpired',
+  START_APPROVAL_ALREADY_CREATED: 'runs.rerunError.approvalAlreadyCreated',
+  RULE_MISSING_OR_DISABLED: 'runs.rerunError.ruleMissingOrDisabled',
+  RULE_CHANGED: 'runs.rerunError.ruleChanged',
+  RETRY_LEDGER_EVIDENCE_MISSING: 'runs.rerunError.ledgerEvidenceMissing',
+}
+
+/** Map the retry endpoint's discriminated code → an inline localized message (never a generic toast). */
+function mapRerunError(err: unknown): string {
+  const code = (err as { code?: string })?.code
+  if (code && RERUN_ERROR_LABELS[code]) return automationLabel(RERUN_ERROR_LABELS[code], isZh.value)
+  const msg = err instanceof Error ? err.message : String(err)
+  return redactString(msg) || automationLabel('runs.rerunError.generic', isZh.value)
+}
+
+/**
+ * Only rendered where the backend would actually accept it: `retryExecution()` fails closed with
+ * 409 NOT_RETRYABLE for any status other than failed/skipped (the C1 `status` field mirrors the
+ * legacy status 1:1 for these two — automation.ts legacyAutomationStatusToJobStatus). The service
+ * has several OTHER runtime guards (rule enabled/unchanged, retry window, ledger evidence, no prior
+ * approval) that are not determinable from row data — those surface as an inline error at request
+ * time (mapRerunError) instead of being pre-guessed here.
+ */
+function canRerunExecution(run: AutomationRunView): boolean {
+  return run.status === 'failed' || run.status === 'skipped'
+}
+
+/** Unique, localized action-kind labels from the already-loaded detail's ruleSnapshot (no extra fetch). */
+function rerunActionKinds(): string[] {
+  const snapshot = detail.value?.ruleSnapshot
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return []
+  const actions = (snapshot as Record<string, unknown>).actions
+  if (!Array.isArray(actions)) return []
+  const seen = new Set<string>()
+  const kinds: string[] = []
+  for (const action of actions) {
+    if (!action || typeof action !== 'object') continue
+    const type = (action as Record<string, unknown>).type
+    if (typeof type !== 'string') continue
+    const label = automationActionTypeLabel(type, isZh.value)
+    if (!seen.has(label)) {
+      seen.add(label)
+      kinds.push(label)
+    }
+  }
+  return kinds
+}
+
+// UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6). Enumerates the
+// consequences from data already on the row (rule/sheet) + the loaded detail (action kinds) —
+// req (2): the operator sees what will run again before confirming, not just a generic warning.
+async function confirmRerunExecution(run: AutomationRunView): Promise<boolean> {
+  const ruleName = run.ruleName || run.ruleId
+  const sheetName = run.sheetName || run.sheetId || automationLabel('runs.rerunConfirmNoSheet', isZh.value)
+  const kinds = rerunActionKinds()
+  const kindsText = kinds.length > 0 ? kinds.join(', ') : automationLabel('runs.rerunConfirmUnknownActions', isZh.value)
+  const message = [
+    `${automationLabel('runs.rerunConfirmRuleLabel', isZh.value)} ${ruleName}`,
+    `${automationLabel('runs.rerunConfirmSheetLabel', isZh.value)} ${sheetName}`,
+    `${automationLabel('runs.rerunConfirmActionsLabel', isZh.value)} ${kindsText}`,
+    automationLabel('runs.rerunConfirmFooter', isZh.value),
+  ].join('\n')
+  try {
+    await ElMessageBox.confirm(
+      message,
+      automationLabel('runs.rerunConfirmTitle', isZh.value),
+      { type: 'warning', confirmButtonText: automationLabel('runs.rerun', isZh.value), cancelButtonText: automationLabel('editor.cancel', isZh.value) },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * P3-4: re-run a whole execution through the EXISTING A5 retry endpoint (never a new one).
+ * Confirm-gated; on success shows the new execution id inline (never auto-reloads the list, which
+ * would collapse this just-confirmed row); on failure the discriminated code maps to an INLINE
+ * message next to the button that was clicked (per-row, honest — never a generic toast, never
+ * silently swallowed into the existing list).
+ */
+async function rerunExecution(run: AutomationRunView) {
+  if (rerunning.value || !canRerunExecution(run)) return
+  if (!(await confirmRerunExecution(run))) return
+  rerunTargetId.value = run.id
+  rerunError.value = null
+  rerunSuccessId.value = null
+  rerunSuccessGeneric.value = false
+  rerunning.value = run.id
+  try {
+    const result = await client.retryAutomationExecution(run.id)
+    if (typeof result?.id === 'string' && result.id) {
+      rerunSuccessId.value = result.id
+    } else {
+      rerunSuccessGeneric.value = true
+    }
+  } catch (err) {
+    rerunError.value = mapRerunError(err)
+  } finally {
+    rerunning.value = null
+  }
+}
+
 function formatTime(ts: string): string {
   try {
     return new Date(ts).toLocaleString()
@@ -337,6 +496,11 @@ if (isAdmin) void loadData()
 .automation-runs__toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .automation-runs__select, .automation-runs__input { border: 1px solid var(--ms-border); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--ms-bg-card); }
 .automation-runs__btn { border: 1px solid var(--ms-border); border-radius: 8px; padding: 6px 14px; background: var(--ms-bg-card); color: var(--ms-text-1); font-size: 13px; cursor: pointer; }
+/* P3-4: visually distinct from the plain `.automation-runs__btn` load-failure Retry (req 1) —
+   warning-toned border/text, same family as the destructive/side-effect affordances elsewhere. */
+.automation-runs__btn--rerun { border-color: var(--el-color-warning); color: var(--el-color-warning-dark-2); }
+.automation-runs__rerun { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 4px 0; }
+.automation-runs__rerun-success { font-size: 12px; color: var(--el-color-success); }
 .automation-runs__empty { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: var(--ms-bg-page); color: var(--ms-text-2); }
 .automation-runs__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .automation-runs__item { border: 1px solid var(--ms-border-light); border-radius: 8px; padding: 10px 12px; cursor: pointer; margin-bottom: 8px; }
