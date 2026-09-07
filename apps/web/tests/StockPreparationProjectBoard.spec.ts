@@ -1208,7 +1208,7 @@ describe('项目备料页 — the operator project board', () => {
   //
   // This one component file is both faces of §2.3 — 今天要处理 when `?projectNo=` is empty and 项目备料页
   // when it is not — and the U2 opt-in
-  // (`?includePullTargets=1&includePendingCounts=1`) is NOT free: the backend module states in its own
+  // (`?includePullTargets=1`) is NOT free: the backend module states in its own
   // header that the scan reads the whole binding sheet, pages by LIMIT/OFFSET, and that 「项目备料页
   // does not opt in — it runs its own NARROWED scan and must not also pay an unnarrowed one … so this
   // whole feature costs that route exactly zero queries」. These three cases are that ruling, expressed
@@ -1234,7 +1234,7 @@ describe('项目备料页 — the operator project board', () => {
     const urls = directoryRequestUrls()
     expect(urls.length).toBe(1)
     expect(urls[0]).toContain('includePullTargets=1')
-    expect(urls[0]).toContain('includePendingCounts=1')
+    expect(urls[0]).not.toContain('includePendingCounts')
   })
 
   it('U2: 返回今天要处理 re-reads WITH the opt-in — the home page never renders off the workspace\'s plain directory', async () => {
@@ -1251,7 +1251,7 @@ describe('项目备料页 — the operator project board', () => {
     const urls = directoryRequestUrls()
     expect(urls.length, 'coming home issues exactly one more directory read').toBe(2)
     expect(urls[1]).toContain('includePullTargets=1')
-    expect(urls[1]).toContain('includePendingCounts=1')
+    expect(urls[1]).not.toContain('includePendingCounts')
     expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
   })
 })

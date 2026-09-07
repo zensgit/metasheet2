@@ -2,7 +2,7 @@
 // issues WHEN, AND ONLY WHEN, it is showing 今天要处理.
 //
 // WHAT THIS IS FOR. The home page's cards and its three-sentence banner read the U2 union (设计稿
-// N1/N2: `?includePullTargets=1&includePendingCounts=1`) — the union is what adds the projects that
+// N1: `?includePullTargets=1`) — the union is what adds the projects that
 // exist only as self-service pull targets, and the three top-level flags are what the banner says or
 // stays quiet about. That union is a full-sheet, LIMIT/OFFSET-paged scan on the server (the plugin
 // module's own header states the cost and the owner's ruling on who may be charged it) and must not be
@@ -47,10 +47,10 @@ function scopeKey(scope: IntegrationScope): string {
 }
 
 /**
- * 首页那一次目录读. Always opts into both U2 flags — the home page's banner and its card list need the
- * union unconditionally, so there is no partial-opt-in variant of this function. Callers that must NOT
- * pay for the union call `readStockPreparationOperatorDirectory` directly instead of reaching for a
- * flag here.
+ * 首页那一次目录读. Always opts into the pull-target U2 flag (`includePullTargets=1`) — the home page's
+ * banner and its card list need the union unconditionally, so there is no partial-opt-in variant of
+ * this function. Callers that must NOT pay for the union call `readStockPreparationOperatorDirectory`
+ * directly instead of reaching for a flag here.
  *
  * A window is not extended by a call landing inside it: the clock is set once, at the moment the LIVE
  * request goes out, so a burst of calls inside `THROTTLE_WINDOW_MS` all resolve together and the next
@@ -68,7 +68,6 @@ export function readStockPreparationOperatorHomeDirectory(
   if (hit && now - hit.at < THROTTLE_WINDOW_MS) return hit.promise
   const promise = readStockPreparationOperatorDirectory(scope, {
     includePullTargets: true,
-    includePendingCounts: true,
   })
   cache.set(key, { at: now, promise })
   promise.catch(() => {

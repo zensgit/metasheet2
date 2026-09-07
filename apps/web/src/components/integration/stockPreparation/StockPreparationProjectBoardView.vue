@@ -894,7 +894,7 @@ async function run(work: () => Promise<void>, shape: 'read' | 'write' = 'read'):
  *
  * This one file is both 今天要处理 (the home page, `showHome`) and 项目备料页 (the workspace, a project
  * open). Only the home page needs the U2 union: its cards, its three-sentence banner and its
- * pull-target-only rows all come from `?includePullTargets=1&includePendingCounts=1`. The workspace
+ * pull-target-only rows all come from `?includePullTargets=1`. The workspace
  * needs none of it — the only thing it renders off `directory` is the search box's datalist, which
  * the plain archived-project list has always filled.
  *

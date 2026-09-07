@@ -958,8 +958,8 @@ export const STOCK_PREP_TOOLTIP_READY_TO_EXPORT: StockPrepPlainText = Object.fre
 
 /** `pullTargetReady === false`. */
 export const STOCK_PREP_HOME_PULL_TARGET_UNREADABLE: StockPrepPlainText = Object.freeze({
-  zh: '拉取目标表暂时读不到,目录只显示归档过的项目;您仍可直接输入项目号打开。',
-  en: 'The pull-target table cannot be read right now — the list only shows archived projects; you can still open a project directly by its number.',
+  zh: '自助拉取的项目这次读不到,目录只显示归档过的项目;您仍可直接输入项目号打开。',
+  en: 'Projects pulled by operators could not be read this time; the directory lists archived projects only. You can still open a project by typing its number.',
 })
 
 /** `pullTargetScanCapped === true`. */

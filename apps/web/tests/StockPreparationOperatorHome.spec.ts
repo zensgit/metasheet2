@@ -681,7 +681,7 @@ describe('首页目录三句提示 (U2 契约) — StockPreparationOperatorHome.
       const banner = root.querySelector(`[data-testid="${BANNER}"]`)
       expect(banner).not.toBeNull()
       expect(banner!.getAttribute('data-pull-banner')).toBe('pull_target_unreadable')
-      expect(bannerText(root)).toContain('拉取目标表暂时读不到')
+      expect(bannerText(root)).toContain('自助拉取的项目这次读不到')
     } finally {
       unmount()
     }
@@ -780,11 +780,11 @@ describe('首页目录读节流 (P0 补项 4c) — operatorHomeDirectory.ts', ()
     expect(h.apiFetch).toHaveBeenCalledTimes(1)
   })
 
-  it('the one request it does make opts into BOTH U2 flags', async () => {
+  it('the one request it does make opts into the pull-target U2 flag only', async () => {
     await readStockPreparationOperatorHomeDirectory(SCOPE)
     const url = String(h.apiFetch.mock.calls[0]?.[0] ?? '')
     expect(url).toContain('includePullTargets=1')
-    expect(url).toContain('includePendingCounts=1')
+    expect(url).not.toContain('includePendingCounts')
   })
 
   it('a DIFFERENT scope is not held back by another scope’s window', async () => {

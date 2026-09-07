@@ -203,9 +203,6 @@ export interface StockPreparationOperatorDirectory {
   /** True when the `lastExportAt` window could not be read, or came back full (so a `null` on a row
    *  may mean "never exported" or "outside the window we could see" — not "never", unconditionally). */
   lastExportAtMayBeIncomplete?: boolean
-  /** U2 / N2 — present only under the SEPARATE `includePendingCounts=1` opt-in: projectNo -> pending
-   *  decision count, for a caller that needs the index rather than per-row counts already on `projects`. */
-  pendingCountsByProjectNo?: Record<string, number>
 }
 
 const EXPORT_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
@@ -280,22 +277,21 @@ export async function exportStockPreparationPrepLines(
  * server derives the scope from the authenticated principal and refuses any value that is not the
  * caller's own tenant.
  *
- * `options` are U2's two opt-in query flags — both strict `=== '1'` server-side, so anything else
- * (including omission) is the SAME pre-N1 response byte for byte. `includePullTargets` runs the
- * bound-sheet union scan (设计稿 N1: `sources`/`lastChangedFromPlm*`/`lastExportAt` per row, plus the
- * four top-level honesty flags); `includePendingCounts` adds `pendingCountsByProjectNo` (N2). Neither
- * is sent unless asked for — a caller that omits `options` gets exactly today's request.
+ * `options.includePullTargets` is U2's opt-in query flag — strict `=== '1'` server-side, so anything
+ * else (including omission) is the SAME pre-N1 response byte for byte: it runs the bound-sheet union
+ * scan (设计稿 N1: `sources`/`lastChangedFromPlm*`/`lastExportAt` per row, plus the four top-level
+ * honesty flags). It is not sent unless asked for — a caller that omits `options` gets exactly today's
+ * request.
  * GET /api/integration/stock-preparation/operator/projects
  */
 export async function readStockPreparationOperatorDirectory(
   scope: IntegrationScope,
-  options?: { includePullTargets?: boolean; includePendingCounts?: boolean },
+  options?: { includePullTargets?: boolean },
 ): Promise<StockPreparationOperatorDirectory> {
   const query = buildQuerySuffix({
     tenantId: scope.tenantId,
     workspaceId: scope.workspaceId,
     ...(options?.includePullTargets ? { includePullTargets: '1' } : {}),
-    ...(options?.includePendingCounts ? { includePendingCounts: '1' } : {}),
   })
   const response = await apiFetch(`/api/integration/stock-preparation/operator/projects${query}`)
   return parseStockPreparationConfirmResponse<StockPreparationOperatorDirectory>(response)
