@@ -75,6 +75,13 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 
 **升级后必做**:①`BUILD_PROVENANCE.json` 不会被脚本自动刷新,需要手动从包根目录拷到部署根目录;②确认备料所在 base 能正常打开、四张受管表都能点开(零默认视图的表会拖累整个 base 打不开);③挑 1-2 张与备料无关的既有业务表(如考勤/审批)比对升级前后行数,必须一致,不一致立即停止并评估数据库级回滚。
 
+
+**升级后必查:前端 smoke(2026-09-07 新增,血的教训)**:后端 `health` 200、接口全绿,**不等于**网页能打开。2026-09-06 r12 到 r16 五个包的前端资源路径被打包参数写错(`index.html` 里的脚本路径以 `/C:/Program Files/Git/` 开头而不是 `/assets/`),nginx 对这种路径回落成 `index.html`,浏览器把 JS 当 HTML 加载,结果是**白屏但接口全部正常**,一整天没被 API 级验证发现。每次升级后请照做:
+1. 在服务器上取首页:`curl -s http://127.0.0.1/ | findstr assets`(或 PowerShell `Invoke-WebRequest http://127.0.0.1/`),`index.html` 里每个 `<script src>` / `<link href>` 都必须以 `/assets/` 开头;出现盘符或其它前缀就是包坏了,不要交付、不要继续。
+2. 逐个请求这些资源,响应头 `Content-Type` 必须是 `application/javascript` / `text/css`;如果是 `text/html`,说明 nginx 回落成了首页,前端一定白屏。
+3. 浏览器打开首页,Ctrl+F5 强刷一次,看到登录页才算通过。
+包侧的兜底:打包工作流的 `base_path` 参数默认就是 `/`,**不要在 Git Bash 里显式传 `-f base_path=/`**(MSYS 会把它改写成 Git 安装目录);打包完成后先解开 `apps/web/dist/index.html` 检查资源前缀,再上传。
+
 ### 2.2 全新安装(无既有部署)
 
 **2026-09-06 实测结论**:2026-09-06 05:23–05:30 在 222 上另开一个隔离目录(独立 RootDir、独立库名、独立端口)用包内 `scripts/ops/multitable-onprem-apply-package.ps1`(`-InstallDeps 1 -RunMigrations 1 -RestartService 0 -CheckNginx 0 -RunHealthcheck 0`)实跑了一次纯 Windows 全新安装。
@@ -523,6 +530,8 @@ CREATE TABLE IF NOT EXISTS audit_logs_2026_10 PARTITION OF audit_logs FOR VALUES
 **222 建议开 `daily`**——本节记录的这次丢分区就是"只在写失败那一刻才自愈、且只建当月"造成的,`daily` 能在月份滚动前就把下个月的分区提前建好,不再依赖手工 `SELECT to_regclass(...)` 巡检。**回滚**:删掉 `AUDIT_LOG_PARTITION_ENSURE` 这一行环境变量(或改回 `off`)重启进程即可完全恢复到 #5506 之前的行为,不需要回滚代码。
 
 ---
+
+**网页白屏(空白页)但 `/api/health` 与接口都正常(2026-09-07 新增)**:几乎一定是前端包的资源路径前缀错了——`index.html` 里的 `src` 不以 `/assets/` 开头,nginx 把 JS 请求回落成首页。在服务器上 `curl -s http://127.0.0.1/` 看 `src` 前缀;若不是 `/assets/`,换用资源前缀正确的包重新就地升级(2026-09-07 的 r16b 起已修),再让浏览器 Ctrl+F5。这不是后端故障,不要重启数据库或回滚迁移。详见 §2.1「升级后必查:前端 smoke」。
 
 ## 待核对条目汇总
 
