@@ -55,9 +55,19 @@
          (2) IT DOES NOT DOUBLE UP WITH THE EMPTY STATE. A 404 used to render this banner AND the
              empty state below, saying two different things about one fact. When the empty state is
              already explaining the miss, the banner stays out of the way. -->
+    <!-- TWO LINES (P0-5 / I-21): 发生了什么 on the first, 该做什么(含找谁) on the second, plus the
+         one payload a person can hand to us. This is the render point that matters most for the
+         floor: `HANDOFF_NOT_CURRENT_HANDLER`'s second line 「看上面「轮到谁」…」 has nowhere else to
+         appear, because handoff refusals surface here and nowhere else. -->
     <p v-if="visibleErrorCode" class="sp-board__error" data-testid="stock-prep-project-board-error">
       {{ bi(errorText.zh, errorText.en) }}
       <code class="sp-board__token">{{ visibleErrorCode }}</code>
+      <span v-if="errorText.zhNext" class="sp-board__hint" data-testid="stock-prep-project-board-error-next">
+        {{ bi(errorText.zhNext, errorText.enNext ?? '') }}
+      </span>
+      <button type="button" data-testid="stock-prep-project-board-error-copy" @click="copyError(visibleErrorCode)">
+        {{ errorCopyLabel === 'copy' ? bi('复制这条报错', 'Copy this error') : bi('已复制', 'Copied') }}
+      </button>
     </p>
 
     <!-- THREE-WAY EMPTY STATE, reused verbatim from #5445 rather than re-derived: it is the one
@@ -280,7 +290,7 @@
 // project's rows — because a transient per-project filter turned out to need changes across the
 // multitable view model and ACL layers, and promising a filter we did not build would be worse than
 // the honest sentence.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
@@ -301,10 +311,12 @@ import type { StockPreparationProjectSyncApi } from '../../../services/integrati
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
   stockPrepBoardErrorPlain,
+  stockPrepErrorCopyText,
   stockPrepErrorPlain,
   type StockPrepPlainEntry,
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { useAuth } from '../../../composables/useAuth'
 
@@ -431,10 +443,38 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
  * THE FAILURE SENTENCE, and which table it comes from. A board read that failed says so as a READ;
  * an export or a handoff that failed keeps the write vocabulary the rest of this workbench uses.
  */
-const errorText = computed<StockPrepPlainText>(() => {
+const errorText = computed<StockPrepPlainEntry>(() => {
   const code = errorCode.value
   if (!code) return stockPrepBoardErrorPlain('')
   return errorShape.value === 'write' ? stockPrepErrorPlain(code) : stockPrepBoardErrorPlain(code)
+})
+
+/**
+ * 「复制这条报错」(P0-5, I-21). The payload is the CODE plus one committed sentence — never the prose
+ * above it, and never anything the server sent — so a person can paste it into a chat without
+ * carrying a project number or a part out of the system with it.
+ */
+const errorCopyLabel = ref<'copy' | 'copied'>('copy')
+let errorCopyResetTimer: ReturnType<typeof setTimeout> | null = null
+async function copyError(code: string): Promise<void> {
+  // Guarded: `copyTextToClipboard`'s fallback calls `document.execCommand`, which a host without any
+  // copy mechanism (jsdom included) may not implement at all rather than answering `false`.
+  let ok = false
+  try {
+    ok = await copyTextToClipboard(stockPrepErrorCopyText(code, locale.value === 'zh-CN'))
+  } catch {
+    ok = false
+  }
+  if (!ok) return
+  errorCopyLabel.value = 'copied'
+  if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer)
+  errorCopyResetTimer = setTimeout(() => { errorCopyLabel.value = 'copy' }, 3000)
+}
+
+// #3365「卸载即作废」.
+onBeforeUnmount(() => {
+  if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer)
+  errorCopyResetTimer = null
 })
 
 /**

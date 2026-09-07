@@ -345,9 +345,16 @@
       </span>
       <!-- P0-7 / D2: the ONE dead-end this wave closes. A platform admin landing here on a fresh
            deployment previously had no button anywhere on this page saying "go install it" — this is
-           that button, and it changes nothing else about this empty state (same text, same testid). -->
+           that button, and it changes nothing else about this empty state (same text, same testid).
+
+           GATED ON WHO CAN ACTUALLY ARRIVE (R-11「可见即可用」). `ledger_missing` is reachable by any
+           caller who can read the directory — an operator on a half-installed deployment sees this
+           empty state too — but the install tab is filtered out of `visibleViews` for anyone without
+           `stock-prep:admin`, so for them `activeKey='install'` silently falls back to their landing
+           tab. A button that teleports an operator to the project board is a NEW dead end, not a
+           closed one. Ungated, they keep the empty state's own zhNext:「得先请管理员建这张表」. -->
       <button
-        v-if="emptyState === 'ledger_missing'"
+        v-if="emptyState === 'ledger_missing' && canOpenInstallView"
         type="button"
         data-testid="stock-prep-confirmation-empty-go-install"
         @click="emit('navigate-stage', 'install')"
@@ -452,7 +459,7 @@
 //     value-entry pane renders content, and it renders under the same gate the server puts on that
 //     read. Errors surface as the CLAMPED enum-shaped code from confirmApi.ts — never a server
 //     message, which could carry a value.
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
@@ -481,6 +488,7 @@ import {
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import {
   STOCK_PREP_WORKBENCH_CAPABILITIES,
+  canOpenStockPrepInstallView,
   canStockPrepCapability,
 } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
@@ -560,6 +568,15 @@ const errorPlain = stockPrepErrorPlain
 const reconcileButtonNote = STOCK_PREP_RECONCILE_BUTTON_NOTE
 const ledgerMissingActionLabel = STOCK_PREP_LEDGER_MISSING_ACTION
 
+/**
+ * THE SAME predicate the shell filters the install tab with (`workbenchAccess.ts`), not a second
+ * opinion: whoever this answers `false` for cannot reach that tab, so they must not be offered a
+ * button that navigates to it. Deliberately NOT `can('confirmationQueue.ensure')` — that is the
+ * platform-admin write gate, and a `stock-prep:admin` holder who may READ the install page but not
+ * run it should still be able to go look at it.
+ */
+const canOpenInstallView = computed(() => canOpenStockPrepInstallView((permission) => auth.hasPermission(permission)))
+
 /** 「复制这条报错」(P0-5, I-21). idle → copy → copied → idle again 3s later; never a permanent state. */
 const errorCopyLabel = ref<'copy' | 'copied'>('copy')
 let errorCopyResetTimer: ReturnType<typeof setTimeout> | null = null
@@ -577,6 +594,12 @@ async function copyError(code: string): Promise<void> {
   if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer)
   errorCopyResetTimer = setTimeout(() => { errorCopyLabel.value = 'copy' }, 3000)
 }
+
+// #3365「卸载即作废」 — a scheduled callback dies with the view that scheduled it.
+onBeforeUnmount(() => {
+  if (errorCopyResetTimer) clearTimeout(errorCopyResetTimer)
+  errorCopyResetTimer = null
+})
 
 /** The step vocabulary in words, degrading to the raw key exactly like the two labels above. */
 function handoffStepLabel(key: string | null): string {

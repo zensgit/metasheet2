@@ -3,23 +3,33 @@ import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
 
 // BOM备料 接入向导「开始使用」(P0-4) — the six-step map's DOM half.
 //
-// PURELY PRESENTATIONAL — this component issues no fetch of its own (gettingStarted.spec covers the
-// pure derivation directly; there is no such file because the derivation has no branch this suite does
-// not also exercise through props). Every prop here is exactly what
+// PURELY PRESENTATIONAL — this component issues no fetch of its own. Every prop here is exactly what
 // `StockPreparationInstallView.vue` already owns and passes down.
 //
 // Guards this suite pins:
-//   G1  六步地图: all six steps render, each with exactly one badge
-//   G2  403 on the source-preflight OR deployment-preflight read renders `? 看不到` (unknown) — never
-//       a silent "not started"
-//   G3  blockers split by `fix.kind`: `http` gets a fix button + "重复点是安全的"; `env` gets NO fix
-//       button (no "立即修复" anywhere) — only a copy-for-ops line
-//   G4  G5 restated twice: a `no-go` source verdict never disables step⑥'s link; an outstanding
+//   G1  六步地图: all six steps render, each with exactly one badge, before any button is pressed
+//   G2  THE TWO THIRD STATES, kept apart (G4): a read that FAILED — with ANY status, not only 403 —
+//       reads 「? 看不到」; a manual probe NOBODY HAS RUN reads 「未检查」. Neither is 「没完成」, and
+//       a 500 on either read must never paint a step red.
+//   G3  ①③ project the SOURCE-BINDING envelope (R7), so a deployment that has been bound for months
+//       reads 已完成 on first paint — and reads 「? 看不到」, never 「需要别人做」, when nobody could
+//       read that envelope.
+//   G4  blockers split by `fix.kind`: `http` points at the card's single 「开始安装」 and carries the
+//       "重复点是安全的" reassurance; `env` gets NO fix path (no "立即修复" anywhere) — copy only
+//   G5  G5 restated twice: a `no-go` source verdict never disables step⑥'s button; an outstanding
 //       `http`-kind blocker (e.g. ledger-not-ready) never disables step④'s run controls
-//   G5  the nine-step plan renders BEFORE any button is pressed, held steps' explanations included
-//   G6  step⑤ is fully static — a REVERSE assertion that no user/email-shaped token ever renders
+//   G6  the held steps' explanations render BEFORE any button is pressed, and the nine-step STATUS
+//       list is NOT duplicated here (the install panel below owns it)
+//   G7  step⑤ is fully static — a REVERSE assertion that no user/email-shaped token ever renders
+//   G8  every copy payload is values-free, asserted on the STRING that reaches the clipboard
+//   G9  G1「每屏一个主操作位」: at most one `--primary` button per rendering
+//   G10 the hand-off card says only what `report.pass` supports — no trial run, no landing tab
 
-const h = vi.hoisted(() => ({ locale: 'zh-CN' as string }))
+const h = vi.hoisted(() => ({
+  locale: 'zh-CN' as string,
+  copied: [] as string[],
+  copyResult: true,
+}))
 
 vi.mock('../src/composables/useLocale', () => ({
   useLocale: () => ({
@@ -29,10 +39,21 @@ vi.mock('../src/composables/useLocale', () => ({
   }),
 }))
 
+// The clipboard seam. Real payloads are asserted here rather than "the button still exists": a copy
+// button whose content is never read by a test is a values-free claim nobody checks.
+vi.mock('../src/views/plm/plmClipboard', () => ({
+  copyTextToClipboard: vi.fn(async (text: string) => {
+    h.copied.push(text)
+    return h.copyResult
+  }),
+}))
+
 import StockPreparationGettingStarted from '../src/components/integration/stockPreparation/StockPreparationGettingStarted.vue'
 import type { StockPreparationPreflight, StockPreparationPreflightBlocker } from '../src/services/integration/stockPreparation/installPlan'
 import type { StockPrepSourcePreflight } from '../src/services/integration/stockPreparation/sourcePreflight'
 import type { StockPreparationInstallRunReport } from '../src/services/integration/stockPreparation/installRun'
+import { STOCK_PREPARATION_INSTALL_STEPS } from '../src/services/integration/stockPreparation/installRun'
+import type { StockPrepGettingStartedBinding } from '../src/services/integration/stockPreparation/gettingStarted'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -62,6 +83,10 @@ function preflight(overrides: Partial<StockPreparationPreflight> = {}): StockPre
     posture: {},
     ...overrides,
   }
+}
+
+function binding(overrides: Partial<StockPrepGettingStartedBinding> = {}): StockPrepGettingStartedBinding {
+  return { effectiveExternalSystemId: 'plm-1', eligibleSourceCount: 1, ...overrides }
 }
 
 function sourcePreflight(overrides: Partial<StockPrepSourcePreflight> = {}): StockPrepSourcePreflight {
@@ -133,6 +158,7 @@ interface Props {
   preflightErrorStatus?: number | null
   sourcePreflight?: StockPrepSourcePreflight | null
   sourcePreflightErrorStatus?: number | null
+  binding?: StockPrepGettingStartedBinding | null
   report?: StockPreparationInstallRunReport | null
   canRunInstall?: boolean
   busy?: boolean
@@ -145,6 +171,7 @@ function defaultProps(overrides: Props = {}): Required<Props> {
     preflightErrorStatus: null,
     sourcePreflight: null,
     sourcePreflightErrorStatus: null,
+    binding: null,
     report: null,
     canRunInstall: false,
     busy: false,
@@ -158,6 +185,8 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
 
   beforeEach(() => {
     h.locale = 'zh-CN'
+    h.copied = []
+    h.copyResult = true
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -192,17 +221,78 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(Array.from(steps).map((el) => (el as HTMLElement).dataset.step)).toEqual([
       'source-connect', 'source-verify', 'source-bind', 'install-tables', 'grant-access', 'first-project-run',
     ])
-    // Nothing has been proven yet: the off-page steps read 需要别人做, the on-page ones read 还没开始.
-    expect(badgeOf(root, 'source-connect')).toBe('held')
-    expect(badgeOf(root, 'source-verify')).toBe('not_started')
-    expect(badgeOf(root, 'source-bind')).toBe('held')
-    expect(badgeOf(root, 'install-tables')).toBe('not_started')
+    // NOTHING HAS BEEN READ YET, and the three ways of not knowing stay apart (G4):
+    // the binding envelope has not arrived → 「? 看不到」; the two manual probes have not been run →
+    // 「未检查」; the two off-page steps are somebody's work → 「需要别人做」. None of them is
+    // 「还没开始」, a word this vocabulary deliberately does not contain.
+    expect(badgeOf(root, 'source-connect')).toBe('unknown')
+    expect(badgeOf(root, 'source-verify')).toBe('not_checked')
+    expect(badgeOf(root, 'source-bind')).toBe('unknown')
+    expect(badgeOf(root, 'install-tables')).toBe('not_checked')
     expect(badgeOf(root, 'grant-access')).toBe('held')
     expect(badgeOf(root, 'first-project-run')).toBe('held')
+    expect(root.textContent ?? '').not.toContain('还没开始')
   })
 
-  it('badge: done — a registered, reachable, correctly-bound source and a ready deployment', async () => {
+  it('progress counts only 已完成 — 未检查 / 看不到 / 需要别人做 are not progress', async () => {
+    const empty = await mount()
+    expect(empty.querySelector('[data-testid="stock-prep-getting-started-progress"]')?.textContent).toContain('0/6')
+    if (app) app.unmount()
+    app = null
+    const wired = await mount({
+      binding: binding(),
+      sourcePreflight: sourcePreflight(),
+      preflight: preflight({ ready: true, blockerCount: 0, blockers: [] }),
+    })
+    // ①②③④ done; ⑤⑥ are held by construction in P0, so 6/6 is unreachable and 4/6 is the truth.
+    expect(wired.querySelector('[data-testid="stock-prep-getting-started-progress"]')?.textContent).toContain('4/6')
+  })
+
+  // ---------------------------------------------------------------------------
+  // G3 — ①③ project the source-binding envelope, not the source preflight's topology check
+  // ---------------------------------------------------------------------------
+
+  it('an already-bound deployment reads 已完成 on ①③ from the binding envelope alone — no preflight needed', async () => {
+    // This is the "已经装好、天天在跑" deployment: nobody has pressed either preflight button today.
+    const root = await mount({ binding: binding({ eligibleSourceCount: 2 }) })
+    expect(badgeOf(root, 'source-connect')).toBe('done')
+    expect(badgeOf(root, 'source-bind')).toBe('done')
+    // ...and the two manual probes still read 未检查, not 卡住了.
+    expect(badgeOf(root, 'source-verify')).toBe('not_checked')
+    expect(badgeOf(root, 'install-tables')).toBe('not_checked')
+  })
+
+  it('the binding envelope answers with 0 eligible / nothing bound → 需要别人做, not 已完成', async () => {
+    const root = await mount({ binding: binding({ effectiveExternalSystemId: null, eligibleSourceCount: 0 }) })
+    expect(badgeOf(root, 'source-connect')).toBe('held')
+    expect(badgeOf(root, 'source-bind')).toBe('held')
+  })
+
+  it('no binding answer at all (a workbench admin, whose panel never calls the route) reads 「? 看不到」', async () => {
+    const root = await mount({ binding: null, sourcePreflight: sourcePreflight() })
+    expect(badgeOf(root, 'source-connect')).toBe('unknown')
+    expect(badgeOf(root, 'source-bind')).toBe('unknown')
+    // The source preflight, which this caller CAN see the result of, is unaffected.
+    expect(badgeOf(root, 'source-verify')).toBe('done')
+  })
+
+  it('the evidence column quotes the envelope it came from', async () => {
+    const root = await mount({ binding: binding({ eligibleSourceCount: 3 }), preflight: preflight() })
+    const evidence = (step: string) => (root.querySelector(
+      `[data-testid="stock-prep-getting-started-step"][data-step="${step}"] [data-testid="stock-prep-getting-started-step-evidence"]`,
+    ) as HTMLElement | null)?.textContent ?? ''
+    expect(evidence('source-connect')).toContain('已登记 3 条')
+    expect(evidence('source-bind')).toContain('已绑定')
+    expect(evidence('install-tables')).toContain('还差 1 件事')
+  })
+
+  // ---------------------------------------------------------------------------
+  // Badges
+  // ---------------------------------------------------------------------------
+
+  it('badge: done — a bound source, a go verdict and a ready deployment', async () => {
     const root = await mount({
+      binding: binding(),
       sourcePreflight: sourcePreflight(),
       preflight: preflight({ ready: true, blockerCount: 0, blockers: [] }),
     })
@@ -212,9 +302,13 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(badgeOf(root, 'install-tables')).toBe('done')
   })
 
-  it('badge: in_progress — every outstanding blocker is fixable by this page\'s own button', async () => {
+  it('badge: pending_items — every outstanding blocker is fixable by this page\'s own button', async () => {
     const root = await mount({ preflight: preflight({ blockers: [httpBlocker()] }) })
-    expect(badgeOf(root, 'install-tables')).toBe('in_progress')
+    expect(badgeOf(root, 'install-tables')).toBe('pending_items')
+    // 「还差几件事」, never 「进行中」: nothing is running at this moment.
+    const badge = root.querySelector('[data-testid="stock-prep-getting-started-step"][data-step="install-tables"] [data-testid="stock-prep-getting-started-step-badge"]')
+    expect(badge?.textContent).toContain('还差')
+    expect(badge?.textContent).not.toContain('进行中')
   })
 
   it('badge: blocked — a no-go source verdict, and a deployment-data-only blocker', async () => {
@@ -227,51 +321,70 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // G2 — 403 → 「? 看不到」, the third state
+  // G2 — a FAILED read is 「? 看不到」 at ANY status, never red and never 未检查
   // ---------------------------------------------------------------------------
 
-  it('403 on the source-preflight read renders unknown on every source-derived step, not a silent "not started"', async () => {
-    const root = await mount({ sourcePreflightErrorStatus: 403 })
-    expect(badgeOf(root, 'source-connect')).toBe('unknown')
+  it('403 on the source-preflight read renders unknown on ②, and leaves ①③ to the binding envelope', async () => {
+    const root = await mount({ sourcePreflightErrorStatus: 403, binding: binding() })
     expect(badgeOf(root, 'source-verify')).toBe('unknown')
-    expect(badgeOf(root, 'source-bind')).toBe('unknown')
-    // The install step is independent — its own read did not fail.
-    expect(badgeOf(root, 'install-tables')).toBe('not_started')
+    expect(badgeOf(root, 'source-connect')).toBe('done')
+    expect(badgeOf(root, 'source-bind')).toBe('done')
+    expect(badgeOf(root, 'install-tables')).toBe('not_checked')
     const badge = root.querySelector('[data-testid="stock-prep-getting-started-step"][data-step="source-verify"] [data-testid="stock-prep-getting-started-step-badge"]')
     expect(badge?.textContent).toContain('?')
     expect(badge?.textContent).toContain('看不到')
   })
 
+  it('a 500 (or a 0 for a network drop) on either read is ALSO 「? 看不到」 — never 卡住了', async () => {
+    // The bug this pins: only 403 used to qualify, so a backend that was simply down painted ②④ red
+    // and told an administrator to go fix something nobody had checked.
+    for (const status of [500, 0, 502]) {
+      const root = await mount({ preflightErrorStatus: status, sourcePreflightErrorStatus: status })
+      expect(badgeOf(root, 'install-tables')).toBe('unknown')
+      expect(badgeOf(root, 'source-verify')).toBe('unknown')
+      expect(root.querySelector('[data-testid="stock-prep-getting-started-step"][data-step="install-tables"]')?.getAttribute('data-badge')).not.toBe('blocked')
+      if (app) app.unmount()
+      app = null
+    }
+  })
+
   it('403 on the deployment-preflight read renders unknown on install-tables only', async () => {
-    const root = await mount({ preflightErrorStatus: 403 })
+    const root = await mount({ preflightErrorStatus: 403, binding: binding() })
     expect(badgeOf(root, 'install-tables')).toBe('unknown')
-    expect(badgeOf(root, 'source-connect')).toBe('held')
+    expect(badgeOf(root, 'source-connect')).toBe('done')
   })
 
   // ---------------------------------------------------------------------------
-  // G3 — http vs env blockers render differently
+  // G4 — http vs env blockers render differently
   // ---------------------------------------------------------------------------
 
-  it('an http blocker gets a fix button and the "重复点是安全的" reassurance', async () => {
+  it('an http blocker points at the card\'s own button and carries the "重复点是安全的" reassurance', async () => {
     const root = await mount({ preflight: preflight({ blockers: [httpBlocker()] }), canRunInstall: true })
     const row = root.querySelector('[data-testid="stock-prep-getting-started-blocker"][data-fix-kind="http"]') as HTMLElement
     expect(row).not.toBeNull()
-    expect(row.querySelector('[data-testid="stock-prep-getting-started-blocker-fix"]')).not.toBeNull()
     expect(row.textContent).toContain('重复点是安全的')
     expect(row.querySelector('[data-testid="stock-prep-getting-started-blocker-copy"]')).toBeNull()
+    // G1: the action itself is rendered ONCE for this card, at its foot — not per blocker row.
+    expect(row.querySelector('button')).toBeNull()
+    expect(root.querySelectorAll('[data-testid="stock-prep-getting-started-run-install"]').length).toBe(1)
   })
 
-  it('an env blocker gets NO fix button and NO "立即修复" anywhere — only a copy-for-ops line', async () => {
+  it('the http reassurance is suppressed for a reader who cannot see the button it refers to', async () => {
+    const root = await mount({ preflight: preflight({ blockers: [httpBlocker()] }), canRunInstall: false })
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-blocker-safe-note"]')).toBeNull()
+    expect(root.textContent ?? '').not.toContain('重复点是安全的')
+  })
+
+  it('an env blocker gets NO fix path and NO "立即修复" anywhere — only a copy-for-ops line', async () => {
     const root = await mount({ preflight: preflight({ blockers: [envBlocker()] }), canRunInstall: true })
     const row = root.querySelector('[data-testid="stock-prep-getting-started-blocker"][data-fix-kind="env"]') as HTMLElement
     expect(row).not.toBeNull()
-    expect(row.querySelector('[data-testid="stock-prep-getting-started-blocker-fix"]')).toBeNull()
     expect(row.querySelector('[data-testid="stock-prep-getting-started-blocker-copy"]')).not.toBeNull()
     expect(root.textContent ?? '').not.toContain('立即修复')
   })
 
   // ---------------------------------------------------------------------------
-  // G4 — the map is not a gate
+  // G5 — the map is not a gate
   // ---------------------------------------------------------------------------
 
   it('no-go does not lock step⑥: the "去项目备料页试一遍" button stays enabled and present', async () => {
@@ -279,6 +392,8 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     const button = root.querySelector('[data-testid="stock-prep-getting-started-go-project-board"]') as HTMLButtonElement
     expect(button).not.toBeNull()
     expect(button.disabled).toBe(false)
+    // ...and the tenancy caveat (wireframe B3's closing ⓘ) is said before the click, not after.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-first-run-tenancy"]')?.textContent).toContain('工厂')
   })
 
   it('ledger-not-ready (an http blocker) does not lock step④\'s run controls', async () => {
@@ -291,9 +406,6 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     const checkButton = root.querySelector('[data-testid="stock-prep-getting-started-check-preflight"]') as HTMLButtonElement
     expect(runButton.disabled).toBe(false)
     expect(checkButton.disabled).toBe(false)
-    // ...and the same blocker's own inline fix button too.
-    const inlineFix = root.querySelector('[data-testid="stock-prep-getting-started-blocker-fix"]') as HTMLButtonElement
-    expect(inlineFix.disabled).toBe(false)
   })
 
   it('「只检查」 is never gated on canRunInstall — a workbench admin (read tier) can still press it', async () => {
@@ -307,23 +419,43 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // G5 — the nine-step plan, pre-rendered
+  // G9 — one primary action position per screen
   // ---------------------------------------------------------------------------
 
-  it('the nine-step plan renders before any button is pressed, held steps\' explanations included', async () => {
-    const root = await mount()
-    const rows = root.querySelectorAll('[data-testid="stock-prep-getting-started-plan-step"]')
-    expect(rows.length).toBe(9)
-    // Every row not yet run reads pending.
-    for (const row of Array.from(rows)) {
-      expect((row as HTMLElement).dataset.status).toBe('pending')
+  it('at most one primary-filled button renders, in every reader\'s view', async () => {
+    for (const props of [
+      { canRunInstall: true, preflight: preflight() },
+      { canRunInstall: false, preflight: preflight() },
+      { canRunInstall: true, report: report({ pass: true, skipCount: 5 }) },
+    ] as Props[]) {
+      const root = await mount(props)
+      expect(root.querySelectorAll('.stock-prep-gs__button--primary').length).toBeLessThanOrEqual(1)
+      if (app) app.unmount()
+      app = null
     }
-    // A held step (source-wiring) carries its held explanation, unprompted.
-    const sourceWiring = root.querySelector('[data-testid="stock-prep-getting-started-plan-step"][data-step="source-wiring"]') as HTMLElement
-    expect(sourceWiring.querySelector('[data-testid="stock-prep-getting-started-plan-held"]')?.textContent?.length ?? 0).toBeGreaterThan(0)
   })
 
-  it('a completed run\'s steps are reflected in the nine-step plan', async () => {
+  // ---------------------------------------------------------------------------
+  // G6 — the held steps' explanations, pre-rendered; the status list NOT duplicated
+  // ---------------------------------------------------------------------------
+
+  it('the steps that need a person are explained before any button is pressed', async () => {
+    const root = await mount()
+    const rows = root.querySelectorAll('[data-testid="stock-prep-getting-started-plan-held-step"]')
+    const heldDescriptors = STOCK_PREPARATION_INSTALL_STEPS.filter((step) => !step.driven)
+    expect(rows.length).toBe(heldDescriptors.length)
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of Array.from(rows)) {
+      expect((row.querySelector('[data-testid="stock-prep-getting-started-plan-held"]')?.textContent ?? '').length).toBeGreaterThan(0)
+    }
+    // The summary states the split rather than re-listing nine rows.
+    const summary = root.querySelector('[data-testid="stock-prep-getting-started-plan-summary"]')?.textContent ?? ''
+    expect(summary).toContain(String(STOCK_PREPARATION_INSTALL_STEPS.length - heldDescriptors.length))
+    expect(summary).toContain(String(heldDescriptors.length))
+    expect(summary).toContain('跳过不等于失败')
+  })
+
+  it('the nine-step STATUS list is not duplicated here — the install panel below owns it', async () => {
     const root = await mount({
       report: report({
         pass: true,
@@ -332,27 +464,37 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
         steps: [{ index: 1, id: 'preflight', status: 'ok', reason: 'PREFLIGHT_READY', detail: {}, fixes: [] }],
       }),
     })
-    const preflightRow = root.querySelector('[data-testid="stock-prep-getting-started-plan-step"][data-step="preflight"]') as HTMLElement
-    expect(preflightRow.dataset.status).toBe('ok')
+    expect(root.querySelectorAll('[data-testid="stock-prep-getting-started-plan-step"]').length).toBe(0)
+    expect(root.querySelectorAll('[data-status]').length).toBe(0)
   })
 
   // ---------------------------------------------------------------------------
-  // The completion / hand-off card
+  // G10 — the hand-off card claims only what `pass` supports
   // ---------------------------------------------------------------------------
 
-  it('the completion card appears once the run reports pass, and never claims the script-judged criteria', async () => {
-    const root = await mount({ report: report({ pass: true }) })
-    expect(root.querySelector('[data-testid="stock-prep-getting-started-complete"]')).not.toBeNull()
-    expect(root.textContent ?? '').toContain('由随版本发布的脚本判定')
+  it('the hand-off card never claims a trial run, and never names a landing tab', async () => {
+    // `installRun.ts`: "A run that is all SKIP still passes — held is not broken". So a pass with five
+    // SKIPs means tables were created, nothing more. The card must not upgrade that into a trial run,
+    // and must not contradict the map above it, where ⑥ still reads 需要别人做.
+    const root = await mount({ report: report({ pass: true, okCount: 4, skipCount: 5 }) })
+    const card = root.querySelector('[data-testid="stock-prep-getting-started-complete"]') as HTMLElement
+    expect(card).not.toBeNull()
+    const text = card.textContent ?? ''
+    expect(text).not.toContain('真的跑通了一次')
+    expect(text).not.toContain('确认队列')
+    expect(card.querySelector('[data-testid="stock-prep-getting-started-complete-verdict"]')?.textContent).toContain('没有失败')
+    expect(text).toContain('5 步要人来做')
+    expect(text).toContain('由随版本发布的脚本判定')
+    expect(badgeOf(root, 'first-project-run')).toBe('held')
   })
 
-  it('no completion card before the run has passed', async () => {
+  it('no hand-off card before the run has passed', async () => {
     const root = await mount()
     expect(root.querySelector('[data-testid="stock-prep-getting-started-complete"]')).toBeNull()
   })
 
   // ---------------------------------------------------------------------------
-  // G6 — step⑤ is fully static: a REVERSE assertion
+  // G7 — step⑤ is fully static: a REVERSE assertion
   // ---------------------------------------------------------------------------
 
   it('step⑤ renders no user identity, email, or role-membership data — it is fully static in P0', async () => {
@@ -365,20 +507,82 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(text).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.-]+/)
     expect(text).not.toMatch(/\d+\s*人/)
     expect(text).not.toMatch(/成员/)
+    // The two codes are named by their real names, not by a third paraphrase (B2).
+    expect(text).toContain('stock-prep:read')
+    expect(text).toContain('stock-prep:operate')
+    expect(text).not.toContain('查看和填写')
     // The two links and the fallback are there — the panel is not silently empty either.
     expect(section.querySelector('[data-testid="stock-prep-getting-started-link-roles"]')).not.toBeNull()
     expect(section.querySelector('[data-testid="stock-prep-getting-started-link-users"]')).not.toBeNull()
     expect(section.querySelector('[data-testid="stock-prep-getting-started-access-fallback"]')?.textContent).toContain('平台管理员')
   })
 
-  it('step⑤\'s copy-todo button is values-free (no project number, no material, no identity)', async () => {
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+  // ---------------------------------------------------------------------------
+  // G8 — the copy payloads, asserted on the string that reaches the clipboard
+  // ---------------------------------------------------------------------------
+
+  const VALUE_SHAPES: Array<[string, RegExp]> = [
+    ['an email address', /[\w.+-]+@[\w-]+\.[\w.-]+/],
+    ['a bare long digit run (project/part number shape)', /\d{6,}/],
+    ['a quantity phrase', /\d+\s*(个|件|pcs)/i],
+  ]
+
+  function expectValuesFree(payload: string): void {
+    for (const [label, shape] of VALUE_SHAPES) {
+      expect(payload, `payload must not contain ${label}: ${payload}`).not.toMatch(shape)
+    }
+  }
+
+  it('step⑤\'s copy-todo payload is values-free and names the two codes', async () => {
+    const root = await mount()
+    ;(root.querySelector('[data-testid="stock-prep-getting-started-copy-todo-access"]') as HTMLButtonElement).click()
+    await nextTick()
+    expect(h.copied).toHaveLength(1)
+    const payload = h.copied[0]
+    expectValuesFree(payload)
+    expect(payload).toContain('stock-prep:read')
+    expect(payload).toContain('stock-prep:operate')
+  })
+
+  it('the env blocker\'s copy-for-ops payload carries the code, the sentence AND the route\'s own fix line verbatim (I-9)', async () => {
+    const root = await mount({ preflight: preflight({ blockers: [envBlocker()] }) })
+    ;(root.querySelector('[data-testid="stock-prep-getting-started-blocker-copy"]') as HTMLButtonElement).click()
+    await nextTick()
+    expect(h.copied).toHaveLength(1)
+    const payload = h.copied[0]
+    expectValuesFree(payload)
+    expect(payload).toContain('STOCK_PREP_CUSTOMER_PACK_NOT_CONFIGURED')
+    expect(payload).toContain(envBlocker().fix!.run)
+  })
+
+  it('the hand-off to-do names the outstanding blockers by code, not just "第 4 步卡住了" (线框 F)', async () => {
+    const root = await mount({ canRunInstall: false, preflight: preflight({ blockers: [httpBlocker(), envBlocker()] }) })
+    ;(root.querySelector('[data-testid="stock-prep-getting-started-copy-todo-install"]') as HTMLButtonElement).click()
+    await nextTick()
+    const payload = h.copied[0]
+    expectValuesFree(payload)
+    expect(payload).toContain('STOCK_PREP_CONFIRMATION_LEDGER_NOT_READY')
+    expect(payload).toContain('STOCK_PREP_CUSTOMER_PACK_NOT_CONFIGURED')
+  })
+
+  it('the group-chat payload is values-free and does not name a landing tab or claim installation', async () => {
+    const root = await mount({ report: report({ pass: true, skipCount: 5 }) })
+    ;(root.querySelector('[data-testid="stock-prep-getting-started-copy-handoff"]') as HTMLButtonElement).click()
+    await nextTick()
+    const payload = h.copied[0]
+    expectValuesFree(payload)
+    expect(payload).toContain('/stock-prep')
+    expect(payload).not.toContain('确认队列')
+    expect(payload).not.toContain('装好了')
+  })
+
+  it('a host with no copy mechanism at all degrades to "nothing happened" rather than throwing', async () => {
+    h.copyResult = false
     const root = await mount()
     const button = root.querySelector('[data-testid="stock-prep-getting-started-copy-todo-access"]') as HTMLButtonElement
     button.click()
     await nextTick()
-    // execCommand is not implemented in jsdom; the button must still not throw, and must still exist.
-    expect(button).not.toBeNull()
+    expect(button.textContent).toContain('复制一份待办')
   })
 
   // ---------------------------------------------------------------------------

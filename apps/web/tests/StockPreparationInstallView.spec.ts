@@ -233,6 +233,8 @@ interface RouteBehaviour {
   packs?: Array<Record<string, unknown>>
   ledgerStatus?: number
   sourcePreflight?: boolean
+  /** Fail the MANIFEST read only — the one read this page issues without being asked. */
+  manifestStatus?: number
 }
 
 function installRoutes(behaviour: RouteBehaviour = {}): void {
@@ -242,6 +244,8 @@ function installRoutes(behaviour: RouteBehaviour = {}): void {
   h.apiFetch.mockImplementation(async (input: string) => {
     const url = String(input)
     if (url.includes('/api/platform/apps/stock-preparation')) {
+      const status = behaviour.manifestStatus ?? 200
+      if (status >= 400) return new Response(JSON.stringify({ ok: false }), { status })
       return new Response(JSON.stringify(manifestPayload()), { status: 200 })
     }
     if (url.includes('/stock-preparation/source-preflight')) {
@@ -706,5 +710,90 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
 
     // The six-step map renders too — the wizard is not an empty shell at this mount point.
     expect(root.querySelectorAll('[data-testid="stock-prep-getting-started-step"]').length).toBe(6)
+  })
+
+  it('P0-4: a MANIFEST failure does not repaint the wizard\'s ④ badge', async () => {
+    // `errorStatus` is the page-wide banner slot, shared by three actions. Feeding it to the wizard
+    // meant the manifest read — which runs on mount, unprompted — decided what 「建表 + 装列」 said.
+    // A deployment whose backend is simply down was told step ④ was 「卡住了」 / 「? 看不到」 before
+    // anyone had pressed a single button. The preflight now has its own slot.
+    installRoutes({ manifestStatus: 500 })
+    const root = await mountView()
+    // The banner still fires — this is a real read failure and the page says so.
+    expect(root.querySelector('[data-testid="stock-prep-install-error"]')).not.toBeNull()
+    // ...but the step whose own read nobody has run reads 未检查, not blocked and not unknown.
+    const step = root.querySelector('[data-testid="stock-prep-getting-started-step"][data-step="install-tables"]') as HTMLElement
+    expect(step.dataset.badge).toBe('not_checked')
+  })
+
+  // ---------------------------------------------------------------------------
+  // P0-7 —— 诚实文案 that this page did not carry before. Each is a line about what a
+  // control/verdict MEANS, positioned where the misreading actually happens.
+  // ---------------------------------------------------------------------------
+
+  it('P0-7a: the two-preflight relation sentence sits BETWEEN the two cards and matches the page order', async () => {
+    const root = await mountView()
+    const relation = root.querySelector('[data-testid="stock-prep-install-preflight-relation"]') as HTMLElement
+    expect(relation).not.toBeNull()
+
+    const deployment = root.querySelector('[data-testid="stock-prep-install-preflight"]') as HTMLElement
+    const source = root.querySelector('[data-testid="stock-prep-source-preflight"]') as HTMLElement
+    // eslint-disable-next-line no-bitwise
+    expect(Boolean(deployment.compareDocumentPosition(relation) & Node.DOCUMENT_POSITION_FOLLOWING), 'after the deployment card').toBe(true)
+    // eslint-disable-next-line no-bitwise
+    expect(Boolean(source.compareDocumentPosition(relation) & Node.DOCUMENT_POSITION_PRECEDING), 'before the source card').toBe(true)
+    // It is INSIDE neither card, so 上面/下面 mean the two cards and not a heading.
+    expect(deployment.contains(relation)).toBe(false)
+    expect(source.contains(relation)).toBe(false)
+
+    // ...and it points the right way round for THIS page's order: this system above, customer below.
+    const said = relation.textContent ?? ''
+    const aboveIsSystem = said.indexOf('这台系统') < said.indexOf('客户的库')
+    expect(aboveIsSystem, `the sentence must follow the page order: ${said}`).toBe(true)
+  })
+
+  it('P0-7b: the source-preflight button says it never runs by itself (D6/I-12)', async () => {
+    h.permissions = ['stock-prep:admin', 'integration:read']
+    const root = await mountView()
+    const note = root.querySelector('[data-testid="stock-prep-source-preflight-button-note"]')
+    expect(note).not.toBeNull()
+    expect(note!.textContent).toContain('不会自动跑')
+    // The denied line is its own `v-if`, not the tail of a chain, so it is absent here.
+    expect(root.querySelector('[data-testid="stock-prep-source-preflight-denied"]')).toBeNull()
+  })
+
+  it('P0-7b\': a caller who cannot run it sees the denied line and NOT the button note', async () => {
+    const root = await mountView()
+    expect(root.querySelector('[data-testid="stock-prep-source-preflight-button-note"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-source-preflight-denied"]')).not.toBeNull()
+  })
+
+  it('P0-7c: a no-go verdict is labelled a diagnosis, not a gate (I-10/G5)', async () => {
+    h.permissions = ['stock-prep:admin', 'integration:read']
+    installRoutes({ sourcePreflight: true })
+    h.apiFetch.mockImplementation(async (input: string) => {
+      const url = String(input)
+      if (url.includes('/api/platform/apps/stock-preparation')) {
+        return new Response(JSON.stringify(manifestPayload()), { status: 200 })
+      }
+      if (url.includes('/stock-preparation/source-preflight')) {
+        const payload = { ...sourcePreflightPayload(), verdict: 'no-go' }
+        return new Response(JSON.stringify({ ok: true, data: payload }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+    const root = await mountView()
+    ;(root.querySelector('[data-testid="stock-prep-source-preflight-run"]') as HTMLButtonElement).click()
+    await flush()
+    const disclaimer = root.querySelector('[data-testid="stock-prep-source-preflight-no-go-disclaimer"]')
+    expect(disclaimer, 'a no-go reading owes the reader this sentence').not.toBeNull()
+    expect(disclaimer!.textContent).toContain('不是一道闸门')
+  })
+
+  it('P0-5: the page\'s read failure renders two lines and offers a values-free copy payload', async () => {
+    installRoutes({ manifestStatus: 500 })
+    const root = await mountView()
+    expect(root.querySelector('[data-testid="stock-prep-install-error-next"]')?.textContent?.trim().length ?? 0).toBeGreaterThan(0)
+    expect(root.querySelector('[data-testid="stock-prep-install-error-copy"]')).not.toBeNull()
   })
 })

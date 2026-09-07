@@ -4,12 +4,17 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  STOCK_PREP_BOARD_ERROR_GENERIC,
+  STOCK_PREP_BOARD_ERROR_PLAIN,
+  STOCK_PREP_ERROR_COPY_SENTENCE,
   STOCK_PREP_ERROR_GENERIC,
   STOCK_PREP_ERROR_PLAIN,
   STOCK_PREP_POSTURE_PLAIN,
   STOCK_PREP_READ_FAILED,
   STOCK_PREP_SOURCE_BLOCKER_PLAIN,
   STOCK_PREP_SOURCE_WARNING_PLAIN,
+  stockPrepBoardErrorPlain,
+  stockPrepErrorCopyText,
   stockPrepErrorPlain,
   stockPrepPosturePlain,
   stockPrepSourceBlockerPlain,
@@ -208,5 +213,59 @@ describe('stock-prep posture plain language', () => {
     // reword what a caller that has not been taught to read `zhNext` still shows.
     expect(stockPrepErrorPlain('FORBIDDEN').zh).toBe('当前账号没有做这件事的权限。')
     expect(stockPrepErrorPlain('STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER').zh).toBe('现在不是您这一步,所以不能通知下一步。')
+  })
+
+  // -------------------------------------------------------------------------
+  // P0-5 (second half): THE BOARD'S OWN TABLE — the one the FLOOR reads.
+  //
+  // The confirmation queue is where an administrator looks; the project board is where an operator
+  // lives. A wave that widened only the write table would have delivered the second line to the
+  // surface that needed it least.
+  // -------------------------------------------------------------------------
+  it('every STOCK_PREP_BOARD_ERROR_PLAIN entry carries a second line, and so does its READ-shaped generic', () => {
+    for (const code of Object.keys(STOCK_PREP_BOARD_ERROR_PLAIN)) {
+      const plain = STOCK_PREP_BOARD_ERROR_PLAIN[code]
+      expect(String(plain.zh ?? '').trim().length, `${code}.zh`).toBeGreaterThan(0)
+      expect(String(plain.zhNext ?? '').trim().length, `${code}.zhNext`).toBeGreaterThan(0)
+      expect(String(plain.enNext ?? '').trim().length, `${code}.enNext`).toBeGreaterThan(0)
+    }
+    expect(String(STOCK_PREP_BOARD_ERROR_GENERIC.zhNext ?? '').trim().length).toBeGreaterThan(0)
+    expect(String(STOCK_PREP_BOARD_ERROR_GENERIC.enNext ?? '').trim().length).toBeGreaterThan(0)
+    // The board's own 404 keeps its first line and gains the sentence §4.5 asked for.
+    const notFound = stockPrepBoardErrorPlain('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND')
+    expect(notFound.zh).toBe('这个项目号在您这里还没有数据。')
+    expect(notFound.zhNext).toContain('从 PLM 拉取数据')
+    // A cross-plane code still resolves through the shared table, second line included — one
+    // definition, two surfaces. This is the sentence whose only render point is the board.
+    expect(stockPrepBoardErrorPlain('STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER').zhNext).toContain('轮到')
+  })
+
+  // -------------------------------------------------------------------------
+  // 「复制这条报错」的载荷 (§6.1 acceptance #8: 复制内容 values-free)
+  //
+  // The payload is built by a pure function precisely so it can be asserted here rather than only
+  // through a clipboard nobody reads back. It is the code plus one committed sentence — never the
+  // prose beside it, and never anything a server said.
+  // -------------------------------------------------------------------------
+  it('the copy-this-error payload is the code plus one fixed sentence, in both locales', () => {
+    const zh = stockPrepErrorCopyText('STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER', true)
+    expect(zh).toContain('STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER')
+    expect(zh).toContain(STOCK_PREP_ERROR_COPY_SENTENCE.zh)
+    const en = stockPrepErrorCopyText('FORBIDDEN', false)
+    expect(en).toContain('FORBIDDEN')
+    expect(en).toContain(STOCK_PREP_ERROR_COPY_SENTENCE.en)
+  })
+
+  it('the copy payload never carries a value, whatever it is handed', () => {
+    // A caller that passed a server message, a project number or a part code instead of a clamped
+    // enum would be the one way this button could leak — so the payload is built from a code-shaped
+    // argument and one constant, and nothing else. These are the shapes that must never appear from
+    // the CONSTANT half; the code half is the caller's own clamped token.
+    const payload = stockPrepErrorCopyText('FORBIDDEN', true)
+    expect(payload).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.-]+/)
+    expect(payload).not.toMatch(/\d{6,}/)
+    // An absent/blank code degrades to a placeholder rather than emitting a dangling separator.
+    expect(stockPrepErrorCopyText('', true)).toContain('UNKNOWN')
+    expect(stockPrepErrorCopyText(null, true)).toContain('UNKNOWN')
   })
 })
