@@ -216,10 +216,16 @@
         <p class="sp-board__archive" data-testid="stock-prep-project-board-archive">
           {{ bi(archiveText.zh, archiveText.en) }}
         </p>
+        <!-- P1-2: the SENTENCE no longer says 「在『确认队列』里」. It was true when the only way to
+             act was a tab switch; now 面板 2 below composes that queue on THIS page, so naming
+             another tab would send the operator away from the control that is already in front of
+             them. The link stays — it goes to the CROSS-PROJECT queue, which this page does not
+             replace — but it is a text link, not the primary action; the 「下一步」 bar above owns
+             that (G1) and now opens 面板 2 in place. -->
         <p v-if="board.pendingDecisionCount > 0" class="sp-board__pending" data-testid="stock-prep-project-board-pending">
           {{ bi(
-            `这个项目有 ${board.pendingDecisionCount} 件事等您在「确认队列」里拿主意。`,
-            `${board.pendingDecisionCount} thing(s) on this project are waiting for your decision in the confirmation queue.`,
+            `这个项目有 ${board.pendingDecisionCount} 件事等您拿主意 —— 在下面的「等您拿主意」里就能处理。`,
+            `${board.pendingDecisionCount} thing(s) on this project are waiting for your decision — you can handle them in 「等您拿主意」 below.`,
           ) }}
           <button
             type="button"
@@ -228,6 +234,98 @@
             @click="emit('navigate-stage', 'confirmation-queue')"
           >{{ bi('去确认队列', 'Open the confirmation queue') }}</button>
         </p>
+      </section>
+
+      <!-- ── 2c. 面板 2:等您拿主意 (P1-2, 设计稿 §6.2 P1-2 / 线框 C·D) ───────────────────────────
+           Composes #5445's confirmation queue IN PLACE, via its own `embedded` prop — same service
+           calls, same capability gates, same rows; this section only decides WHERE it renders. The
+           progress bar reads the SAME response the composed view already fetched (`byStatus`) via its
+           `queue-changed` emit — no second fetch, no new interface.
+
+           COLLAPSED BY DEFAULT. 线框 C's own marginal note tags the expand toggle itself as the P1
+           feature; nothing under it calls the server until the operator presses 展开 — which also
+           means every existing fixture that never clicks it (nearly all of them: the default
+           `pendingDecisionCount` is 0) gains no request it did not already make.
+
+           ENTRY CONDITION §2.4 P-2c: `pendingDecisionCount > 0`. The `|| confirmPanelExpanded` half is
+           not a loosening of it — it is what stops the panel from vanishing UNDER the operator at the
+           exact moment they confirm the last row in it, which is the one moment this panel exists
+           for. Once they collapse it (or open another project, which resets the flag) the entry
+           condition is the only thing left holding it open. -->
+      <section
+        v-if="board.pendingDecisionCount > 0 || confirmPanelExpanded"
+        ref="confirmPanelEl"
+        class="sp-board__confirm-panel"
+        data-testid="stock-prep-project-board-confirm-panel"
+      >
+        <div class="sp-board__confirm-panel-header">
+          <h3 class="sp-board__confirm-panel-title">
+            {{ bi('等您拿主意', 'Waiting on your decision') }}
+            <span v-if="board.pendingDecisionCount > 0">({{ board.pendingDecisionCount }})</span>
+          </h3>
+          <button
+            type="button"
+            class="sp-board__link"
+            data-testid="stock-prep-project-board-confirm-toggle"
+            @click="confirmPanelExpanded = !confirmPanelExpanded"
+          >
+            {{ confirmPanelExpanded ? bi('收起 ▴', 'Collapse ▴') : bi('展开逐条处理 ▾', 'Expand to review one by one ▾') }}
+          </button>
+        </div>
+        <!-- I-3 (线框 C 面板 2): the STANDING sentence, in BOTH states. Collapsed, it is the only
+             thing on screen that says what this box is and that confirming is not the last step;
+             expanded, it is the reminder the closed-loop button at the bottom acts on. -->
+        <p class="sp-board__confirm-panel-note" data-testid="stock-prep-project-board-confirm-note">
+          {{ bi(confirmPanelNote.zh, confirmPanelNote.en) }}
+        </p>
+        <template v-if="confirmPanelExpanded">
+          <!-- 进度条 — 已确认 / 待确认, straight off the composed queue's OWN `byStatus`. `null` (no
+               bar) until it has answered once, or when confirmed+pending is 0 (nothing to show a
+               ratio of — the empty-state text inside the composed queue already says so in words).
+
+               INSIDE THE EXPANDED REGION (线框 D ① draws it there). Outside it, a collapsed panel kept
+               showing the last ratio it saw — including, after a project switch, the PREVIOUS
+               project's, since the numbers come from a composed child that is no longer mounted.
+
+               NOT GREEN UNTIL IT IS ACTUALLY DONE. §4.4 reserves 🟢 for 可以导出/已就绪; a half-filled
+               green bar next to 「等您拿主意 (2)」 is a mixed signal, so the fill is `primary` until
+               the ratio reaches 100%. -->
+          <div
+            v-if="confirmProgress"
+            class="sp-board__confirm-progress"
+            data-testid="stock-prep-project-board-confirm-progress"
+          >
+            <span :title="bi(
+              '「共」= 已确认 + 待确认,不含已作废(被新一次扫描取代)的行,所以它可能小于下面表格的行数。',
+              'The total counts confirmed + pending only. Superseded rows (replaced by a later scan) are excluded, so it can be smaller than the row count in the table below.',
+            )">{{ bi(
+              `进度:已处理 ${confirmProgress.confirmed} / 共 ${confirmProgress.total}`,
+              `Progress: ${confirmProgress.confirmed} of ${confirmProgress.total} handled`,
+            ) }}</span>
+            <div class="sp-board__confirm-progress-track">
+              <div
+                class="sp-board__confirm-progress-fill"
+                :class="{ 'sp-board__confirm-progress-fill--done': confirmProgress.percent >= 100 }"
+                :style="{ width: `${confirmProgress.percent}%` }"
+              />
+            </div>
+          </div>
+          <!-- `@navigate-stage` is the composed queue's ONE surviving navigation in embedded mode:
+               the `ledger_missing` empty state's 去装:开始使用 (its 「回到上面再同步一次」 sibling
+               routes through `embedded-resync` instead). Forwarded verbatim, exactly the way the sync
+               panel above forwards its own, so the button lands on 开始使用 rather than emitting into
+               nothing. One argument, like this view's own emit — the second one the queue can pass is
+               a project number, and the only branch that carries it is the non-embedded one. -->
+          <StockPreparationConfirmationQueueView
+            ref="confirmQueueEl"
+            :scope="scope"
+            :project-no="openedProjectNo"
+            embedded
+            @queue-changed="onEmbeddedQueueChanged"
+            @embedded-resync="onEmbeddedResync"
+            @navigate-stage="(key: string) => emit('navigate-stage', key)"
+          />
+        </template>
       </section>
 
       <!-- ── 3. 四个动作 ────────────────────────────────────────────────────────────────────────
@@ -363,9 +461,11 @@ import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
+import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import {
   exportStockPreparationPrepLines,
   readStockPreparationOperatorDirectory,
+  type StockPreparationDecisionQueue,
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
@@ -380,6 +480,7 @@ import {
 import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport } from '../../../services/integration/stockPreparation/projectSync'
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
+  STOCK_PREP_CONFIRM_PANEL_NOTE,
   STOCK_PREP_TOOLTIP_ROWS_IN_TABLE,
   stockPrepBoardErrorPlain,
   stockPrepErrorCopyText,
@@ -508,6 +609,130 @@ const memoryOnlyProjectNos = computed<string[]>(() => {
 const syncReport = ref<StockPreparationProjectSyncReport | null>(null)
 const syncBusy = ref(false)
 const syncPanelEl = ref<InstanceType<typeof StockPreparationProjectSyncPanel> | null>(null)
+
+// ---------------------------------------------------------------------------
+// P1-2 (§6.2 P1-2, 线框 C/D) — Panel 2: 就地展开 embedded 队列 + 进度条.
+// ---------------------------------------------------------------------------
+
+/**
+ * Collapsed by default — 线框 C's own P1 marginal note tags the expand toggle as the whole of what P1
+ * adds here. Session-local (not remembered across a mount): the composed queue's own contract is "no
+ * onMounted, no watcher firing on mount — it loads when the operator asks" (see its P0-1 comment), and
+ * a panel that reopened itself already-expanded on every visit would fetch on the operator's behalf
+ * without being asked, the exact thing that contract exists to avoid.
+ */
+const confirmPanelExpanded = ref(false)
+/** I-3 (线框 C 面板 2) — the standing sentence, from the shared word table so the panel and the
+ *  「下一步」 bar cannot end up describing the same closing step in two different ways. */
+const confirmPanelNote = STOCK_PREP_CONFIRM_PANEL_NOTE
+const confirmQueueEl = ref<InstanceType<typeof StockPreparationConfirmationQueueView> | null>(null)
+/** The panel's own <section>, so the 「下一步」 bar can scroll to it after opening it. */
+const confirmPanelEl = ref<HTMLElement | null>(null)
+/**
+ * THE composed queue's OWN response — forwarded up by its `queue-changed` emit, not fetched a second
+ * time here and not the same number as `board.pendingDecisionCount` (that counts STILL-OPEN rows
+ * only; the progress bar below needs confirmed-vs-pending, which only the queue's `byStatus` carries).
+ */
+const embeddedQueue = ref<StockPreparationDecisionQueue | null>(null)
+
+/**
+ * THE PANEL'S ANSWER COMES BACK TO THE WHOLE PAGE, not just to the progress bar.
+ *
+ * Before this, confirming a row inside 面板 2 left four numbers on one screen disagreeing: the status
+ * card, the panel's own 「(N)」 and the 「下一步」 bar all read `board.pendingDecisionCount`, whose last
+ * read happened before the panel was even expanded, while the progress bar under them read the live
+ * queue. So the page could say 「等您拿主意 (2)」 directly above 「已处理 2 / 共 2」.
+ *
+ * `board.pendingDecisionCount` and this `byStatus.pending` are the same quantity from the same table —
+ * the directory tallies ledger rows with `status = pending` for this projectNo
+ * (stock-preparation-operator-project-directory.cjs's `pendingDecisionCountsByProjectNo`), which is
+ * what `byStatus.pending` counts for an unfiltered LIST (and embedded hides the status filter, so it
+ * is always unfiltered here). A difference therefore means the board's copy is STALE, and the fix is
+ * to re-read it.
+ *
+ * NO FEEDBACK LOOP: `reloadBoard` re-reads the BOARD, never the queue, so it cannot cause another
+ * `queue-changed`. Worst case — a deployment where the two numbers genuinely disagree — this costs
+ * one board re-read per queue response, not a loop.
+ */
+function onEmbeddedQueueChanged(next: StockPreparationDecisionQueue | null): void {
+  embeddedQueue.value = next
+  const byStatus = next?.byStatus
+  if (!byStatus) return
+  const pending = typeof byStatus.pending === 'number' ? byStatus.pending : 0
+  const current = board.value
+  if (current === null || current.pendingDecisionCount === pending) return
+  // §4.2 rule 4 ON THE IN-PLACE PATH. Its wording is 「本次会话内 pending 归零」, and until now the ONLY
+  // way that could be observed was `watch(board.pendingDecisionCount)` after a tab round-trip, which
+  // this path never makes — so 「都确认完了。再同步一次」, the step the design calls 「每天漏得最多的
+  // 一步」, would never have fired for the operator who confirmed without leaving the page. Set from
+  // the transition itself (was > 0, is now 0), so it cannot latch on a project that was already clear.
+  if (pending === 0 && current.pendingDecisionCount > 0) justConfirmedFlag.value = true
+  void reloadBoard()
+}
+
+/** 进度条 (P1-2) — confirmed vs. pending, straight off `byStatus`. `null` (no bar) until the composed
+ *  queue has actually answered once, or when there is nothing to show a ratio of (0 of 0). */
+const confirmProgress = computed<{ confirmed: number; pending: number; total: number; percent: number } | null>(() => {
+  const byStatus = embeddedQueue.value?.byStatus
+  if (!byStatus) return null
+  const confirmed = typeof byStatus.confirmed === 'number' ? byStatus.confirmed : 0
+  const pending = typeof byStatus.pending === 'number' ? byStatus.pending : 0
+  const total = confirmed + pending
+  if (total <= 0) return null
+  return { confirmed, pending, total, percent: Math.round((confirmed / total) * 100) }
+})
+
+/**
+ * THE ONE LOAD THIS PANEL SUPPLIES. The composed queue never loads on its own mount (see above), so
+ * expanding Panel 2 has to be the "operator asked" moment — fired once, exactly when a fresh instance
+ * of the queue actually mounts (the toggle just flipped true, or a NEW project opened while it was
+ * already expanded — `loadBoard`'s non-refresh path nulls `board`, tearing this whole section down and
+ * rebuilding it). A project switch AFTERWARDS is already covered by the queue's own P0-1 prop watcher,
+ * which this same instance keeps: no second wiring of "what does a project change mean" here.
+ */
+watch(confirmQueueEl, (instance) => {
+  if (instance) void instance.loadQueue()
+})
+
+/** P1-2: put 面板 2 in front of the operator after the 「下一步」 bar opens it. Same try/catch as every
+ *  other scroll on this page — jsdom implements no `scrollIntoView` at all. */
+async function scrollToConfirmPanel(): Promise<void> {
+  await nextTick()
+  try {
+    confirmPanelEl.value?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  } catch {
+    // jsdom / an older browser without smooth-scroll support: no-op, never a thrown error.
+  }
+}
+
+/**
+ * P1-2 (线框 D ④) — 「回到上面再同步一次」 in embedded mode. The parent already IS "上面": this page
+ * composes the queue in place, so asking the shell to switch to a tab the operator is already looking
+ * at would be a no-op dressed as an action.
+ *
+ * IT ACTUALLY RUNS THE SYNC, for exactly the reason `onNextStepAction`'s own pull/resync branch does
+ * (see its comment): a button labelled 再同步一次 that only scrolled would put two near-identically
+ * worded buttons on one screen with the upper one doing the work — the 「which of these do I press」
+ * this redesign exists to delete. It scrolls FIRST so the operator watches the run they just started,
+ * on the panel that reports it.
+ *
+ * NEVER AN UNEXERCISABLE PRESS. The composed queue renders this button only for a caller who passes
+ * `canOpenStockPrepProjectBoard` (operate ∧ read), and `canRunStockPrepProjectSync` is that same tier
+ * plus platform admin — so every caller who can see it can run it. The panel's own `run` re-checks
+ * permission and busy state anyway; this adds no second implementation of what 同步 means.
+ */
+async function onEmbeddedResync(): Promise<void> {
+  await nextTick()
+  try {
+    syncPanelEl.value?.$el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  } catch {
+    // jsdom / an older browser without smooth-scroll support: no-op, never a thrown error.
+  }
+  const runButton = (syncPanelEl.value?.$el as HTMLElement | undefined)
+    ?.querySelector?.('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement | null | undefined
+  runButton?.focus()
+  void syncPanelEl.value?.run?.()
+}
 
 /** §4.2 rule 4: this browser saw a `held` verdict for the currently-open project and has not yet
  *  re-run sync. Cleared the moment a DIFFERENT verdict lands, or a different project is opened. */
@@ -838,6 +1063,12 @@ watch(openedProjectNo, () => {
   justConfirmedFlag.value = false
   syncReport.value = null
   syncBusy.value = false
+  // P1-2: 面板 2 collapses with everything else. Left expanded it would pull the new project's queue
+  // before being asked (the composed view's contract is "it loads when the operator asks"), and left
+  // populated its `embeddedQueue` would draw the PREVIOUS project's progress bar over the new page
+  // for as long as the new request took — or forever, if that request failed.
+  confirmPanelExpanded.value = false
+  embeddedQueue.value = null
 })
 
 watch(syncReport, (report) => {
@@ -1101,7 +1332,13 @@ function onNextStepAction(): void {
     return
   }
   if (step.action === 'go-confirm') {
-    emit('navigate-stage', 'confirmation-queue')
+    // P1-2 (§5 流程 1's P1 column: 「主按钮就地展开面板 2」). It used to switch tabs. 面板 2 now composes
+    // the SAME queue, for the SAME project, on this page — so sending the operator to another tab
+    // would walk them past the control they were reaching for, and cost the return trip this wave
+    // exists to delete (3 击 0 跳转). Expand and scroll; the cross-project queue is still one text
+    // link away in the status card for the times that is genuinely what someone wants.
+    confirmPanelExpanded.value = true
+    void scrollToConfirmPanel()
     return
   }
   if (step.action === 'open-fill') {
@@ -1402,6 +1639,64 @@ onMounted(async () => {
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
+}
+
+/* P1-2: Panel 2 — 就地展开 embedded 队列 + 进度条. */
+.sp-board__confirm-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+}
+
+.sp-board__confirm-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ms-space-2);
+}
+
+.sp-board__confirm-panel-title {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-size: 14px;
+}
+
+.sp-board__confirm-panel-note {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sp-board__confirm-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--ms-text-2);
+  font-size: 12px;
+}
+
+.sp-board__confirm-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ms-bg-page);
+  overflow: hidden;
+}
+
+/* §4.4 keeps 🟢 for 可以导出 / 已就绪. A half-green bar under a heading that reads 「等您拿主意 (2)」
+   is a mixed signal, so the running state is `primary` and only a finished ratio turns green. */
+.sp-board__confirm-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--ms-color-primary);
+  transition: width 0.2s ease;
+}
+
+.sp-board__confirm-progress-fill--done {
+  background: var(--ms-color-success);
 }
 
 .sp-board__actions {
