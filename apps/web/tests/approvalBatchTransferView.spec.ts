@@ -948,6 +948,24 @@ describe('ApprovalBatchTransferView', () => {
     expect(q(root, 'batch-transfer-empty')).toBeNull()
   })
 
+  it('shows nothing about the caller’s rights BETWEEN the two answers', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    expect(q(root, 'batch-transfer-row-apv_1')).toBeTruthy()
+
+    // The re-read never settles, so everything asserted below is the state the page holds while the
+    // new principal's answer is outstanding — the window the previous answer used to survive.
+    resolveCapabilitySpy.mockReturnValue(new Promise<string>(() => {}))
+    useAuth().setToken(tokenFor('user-b'))
+    await flushUi()
+
+    expect(q(root, 'batch-transfer-capability-pending')).toBeTruthy()
+    // Not `granted` carried over, and not `denied` invented either: the server has said nothing yet.
+    expect(q(root, 'batch-transfer-source-picker')).toBeNull()
+    expect(q(root, 'batch-transfer-forbidden')).toBeNull()
+    expect(q(root, 'batch-transfer-row-apv_1')).toBeNull()
+  })
+
   it('discards a capability answer a newer read has already superseded', async () => {
     let releaseFirst: ((value: string) => void) | null = null
     resolveCapabilitySpy.mockReturnValueOnce(new Promise<string>((resolve) => { releaseFirst = resolve }))
