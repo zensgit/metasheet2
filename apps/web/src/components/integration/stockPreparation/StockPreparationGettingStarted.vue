@@ -184,6 +184,9 @@
            is platform-admin — and telling them 「还没配」 would push them to redo work that may well
            already be done (G4). Nothing in this block gates anything: every button and link in this
            card stays live in all four states (G5). -->
+      <p class="stock-prep-gs__probe-label" data-testid="stock-prep-getting-started-access-label">
+        {{ bi('现在的情况', 'Where this stands right now') }}
+      </p>
       <div
         class="stock-prep-gs__probe"
         data-testid="stock-prep-getting-started-access-state"
@@ -202,7 +205,12 @@
           </li>
         </ul>
         <p v-if="accessRoleOverflow > 0" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-overflow">
-          {{ bi(`另外还有 ${accessRoleOverflow} 个角色也同时持有这两个权限码,这里没有全部列出。`, `${accessRoleOverflow} further role(s) also hold both codes and are not listed here.`) }}
+          <!-- WHICH ones were listed is a fact about the catalog's own ordering, not a ranking this
+               page made. Saying so stops 「主要的那几个」 being read into an `ORDER BY id`. -->
+          {{ bi(
+            `还有 ${accessRoleOverflow} 个角色也满足,这里没有全部列出 —— 上面那几个是角色目录返回的前几个,不是「最主要的」。`,
+            `${accessRoleOverflow} further role(s) also qualify and are not listed — the ones above are simply the first the catalog returned, not the "main" ones.`,
+          ) }}
         </p>
         <p v-if="accessDoubleCounted" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-double-count">
           {{ bi(
@@ -215,6 +223,20 @@
         </p>
         <p v-if="accessAdminNote" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-admin-note">
           {{ bi(accessAdminNote.zh, accessAdminNote.en) }}
+        </p>
+        <!-- Platform-admin roles satisfy the gate through the short-circuit, so they are NOT missing
+             from the picture — they are deliberately outside the verdict, and the page says which. -->
+        <p v-if="accessPlatformAdminNote" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-platform-admin-note">
+          {{ bi(accessPlatformAdminNote.zh, accessPlatformAdminNote.en) }}
+        </p>
+        <!-- THE THIRD LEG, said in every verdict that is not 「看不到」. Two of the three conditions
+             are readable here; this one is a per-person switch on another page, and a wizard that
+             stopped at two would send an administrator away believing the floor can work. -->
+        <p v-if="accessStateKey !== 'unknown'" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-access-admission">
+          {{ bi(
+            '还有一件本页看不到的事:角色配好、人也放进去之后,平台管理员还要到「用户管理」找到这个人 →「插件使用」→ 把 stock-prep 开通(那一行显示「当前实际可用」才算数)。把已有的人加进角色不会自动开通它,漏了这一步,人打开备料仍然是没权限。',
+            'One more thing this page cannot see: after the role is set up and the people are in it, a platform administrator still has to open User Management → that person → "Plugin access" → enable stock-prep (the row has to read "currently effective"). Adding an existing person to a role does not enable it automatically, and without it they still get refused.',
+          ) }}
         </p>
         <!-- F9, said out loud: the catalog SQL has no tenant predicate, so this is a platform-wide
              answer. An earlier draft called it 「贵司的配置」, which would have been a plain lie on a
@@ -350,6 +372,14 @@
           'Next, hand it to the floor: send them the address below and have them open it with their own account.',
         ) }}
       </p>
+      <!-- 线框 B3 第 2 行, AND the fix for a card that used to contradict the step⑤ two screens up:
+           `report.pass` says the install run had no failure, and says NOTHING about who may open the
+           page. Handing the address to the floor before step⑤ is done sends them to a 403, so this
+           line carries step⑤'s own current answer rather than assuming it. It never gates the
+           buttons (G5) — it tells the reader what they are about to hand over. -->
+      <p class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-complete-access">
+        {{ bi(handoffReadiness.zh, handoffReadiness.en) }}
+      </p>
       <div class="stock-prep-gs__actions">
         <button type="button" class="stock-prep-gs__button stock-prep-gs__button--primary" data-testid="stock-prep-getting-started-copy-handoff" @click="copyHandoffMessage">
           {{ handoffCopyLabel === 'copy' ? bi('复制一段发群里', 'Copy a message for the group chat') : bi('已复制', 'Copied') }}
@@ -468,19 +498,41 @@ const accessChecking = ref(false)
  */
 let accessSeq = 0
 let accessDisposed = false
-onBeforeUnmount(() => { accessDisposed = true })
+/** The in-flight soft-timeout timer, cancelled on unmount alongside the copy timers (#3365). */
+let accessTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+onBeforeUnmount(() => {
+  accessDisposed = true
+  if (accessTimeoutTimer) clearTimeout(accessTimeoutTimer)
+  accessTimeoutTimer = null
+})
+
+/**
+ * The soft timeout. A request that neither resolves nor rejects — a hung proxy, a connection the OS
+ * never tears down — would otherwise leave this card stuck on 「正在看…」 with 「重新检查」 disabled
+ * forever, i.e. a page with no second way out. At the deadline the card falls to the same
+ * 「? 看不到」 it uses for every other unanswered read; the in-flight request is simply ignored if it
+ * ever lands late (the sequence latch below already handles that).
+ */
+const ACCESS_READ_TIMEOUT_MS = 15000
 
 async function checkAccessReadiness(): Promise<void> {
   const seq = accessSeq + 1
   accessSeq = seq
   accessChecking.value = true
+  if (accessTimeoutTimer) clearTimeout(accessTimeoutTimer)
+  const deadline = new Promise<StockPrepOnboardingReadiness>((resolve) => {
+    accessTimeoutTimer = setTimeout(() => resolve(stockPrepOnboardingReadinessUnknown(null)), ACCESS_READ_TIMEOUT_MS)
+  })
   let answer: StockPrepOnboardingReadiness
   try {
-    answer = await readStockPrepOnboardingReadiness()
+    answer = await Promise.race([readStockPrepOnboardingReadiness(), deadline])
   } catch {
     // The service is documented never to reject; this is the belt to that braces, so a future change
     // there can never turn this fire-and-forget call into an unhandled rejection.
     answer = stockPrepOnboardingReadinessUnknown(null)
+  } finally {
+    if (accessTimeoutTimer) clearTimeout(accessTimeoutTimer)
+    accessTimeoutTimer = null
   }
   if (accessDisposed || seq !== accessSeq) return
   accessReadiness.value = answer
@@ -528,55 +580,100 @@ const accessVerdict = computed<AccessVerdictText>(() => {
     return {
       glyph: '✔',
       tone: 'success',
-      zh: `有 ${readiness.roleCount} 个角色同时持有这两个权限码,里面一共 ${readiness.memberTotal} 人。`,
-      en: `${readiness.roleCount} role(s) hold both codes, with ${readiness.memberTotal} member(s) between them.`,
-      nextZh: '这些人应该已经能打开备料工作台了。让其中一位试着打开一次,比在这里看更靠谱。',
-      nextEn: 'Those people should already be able to open the workbench. Having one of them actually open it beats reading this line.',
+      // 验收 4's own wording. Scoped on purpose: it reports the two things the catalog answers, and
+      // the 「还有一件本页看不到的事」 line right below it names the third.
+      zh: `有 ${readiness.roleCount} 个角色能让一线满足备料的权限要求,成员共 ${readiness.memberTotal} 人。`,
+      en: `${readiness.roleCount} role(s) satisfy the stock-prep access requirement for the floor, with ${readiness.memberTotal} member(s) between them.`,
+      // NOT 「这些人应该已经能打开了」. That was a sufficiency promise the gate does not back: the
+      // per-user 「插件使用」 admission is a third condition this read cannot see (module header of
+      // onboardingReadiness.ts), and an administrator who trusted the promise would ship a floor
+      // that opens 备料 to a flat 403.
+      nextZh: '这两件事本页看得到,第三件看不到(见下面那条)。最靠谱的确认方式:让其中一位一线用自己的账号真的打开一次备料工作台。',
+      nextEn: 'This page can see those two things; it cannot see the third (see the line below). The reliable confirmation is to have one of those people actually open the workbench with their own account.',
     }
   }
   if (readiness.state === 'no_members') {
     return {
       glyph: '⚠',
       tone: 'warning',
-      zh: `有 ${readiness.roleCount} 个角色同时持有这两个权限码,但里面一个人都还没有。`,
-      en: `${readiness.roleCount} role(s) hold both codes, but nobody has been put in them yet.`,
-      nextZh: '下一步:到「用户管理」把要用备料的人放进这个角色。角色本身不用再动。',
-      nextEn: 'Next: add the people who need stock-prep to that role under User Management. The role itself needs no further change.',
+      zh: `有 ${readiness.roleCount} 个角色能让一线满足备料的权限要求,但里面一个人都还没有。`,
+      en: `${readiness.roleCount} role(s) satisfy the requirement, but nobody has been put in them yet.`,
+      nextZh: '下一步:到「用户管理」把要用备料的人放进这个角色,再在同一个人的「插件使用」里把 stock-prep 开通。角色本身不用再动。',
+      nextEn: 'Next: add the people who need stock-prep to that role under User Management, then enable stock-prep under the same person\'s "Plugin access". The role itself needs no further change.',
     }
   }
   if (readiness.state === 'no_role') {
     return {
       glyph: '⚠',
       tone: 'warning',
-      zh: '还没有任何角色同时持有这两个权限码。',
-      en: 'No role holds both codes yet.',
-      nextZh: '怎么建:到「角色管理」新建一个角色(或挑一个现成的),把 stock-prep:read 和 stock-prep:operate 两个都勾上并保存,再到「用户管理」把人放进这个角色。两个都勾在同一个角色上才算数。',
-      nextEn: 'How to set it up: in Role Management create a role (or pick an existing one), tick BOTH stock-prep:read and stock-prep:operate on it and save, then add people to that role under User Management. Both codes have to sit on the same role.',
+      zh: '还没有任何角色同时持有这两个权限码(持有 stock-prep:admin 的角色也算,同样没有)。',
+      en: 'No role holds both codes yet (a role holding stock-prep:admin would also count — there is none).',
+      nextZh: '怎么建,三件事:① 到「角色管理」新建一个角色(或挑一个现成的),把 stock-prep:read 和 stock-prep:operate 两个都勾上并保存 —— 两个要勾在同一个角色上;② 到「用户管理」把人放进这个角色;③ 在同一个人的「插件使用」里把 stock-prep 开通。三件都做完才生效。',
+      nextEn: 'How to set it up, three things: (1) in Role Management create a role (or pick an existing one) and tick BOTH stock-prep:read and stock-prep:operate on it — both on the same role; (2) add people to that role under User Management; (3) enable stock-prep under the same person\'s "Plugin access". All three are needed.',
+    }
+  }
+  // 「看不到」 SPLIT BY STATUS. The service collapses 403/401/404/500/502/network/HTML/unknown-shape
+  // into one state on purpose (G4), but the WORDS cannot collapse with it: telling a platform
+  // administrator that they lack permission because the server returned 500 is a causal claim this
+  // page cannot back, and it points them at the wrong next move (see onboardingReadiness.ts's
+  // `status`, which is carried precisely so this sentence can fork).
+  if (readiness.status === 401 || readiness.status === 403) {
+    return {
+      glyph: '?',
+      tone: 'muted',
+      zh: '看不到 —— 当前账号读不到平台的角色目录,所以这一步是不是做好了,本页判断不了。',
+      en: 'Cannot tell — this account cannot read the platform role catalog, so this page cannot judge whether this step is done.',
+      nextZh: '这不代表没配。读角色目录要平台管理员;请平台管理员确认,或者用下面的「复制一份待办」把这件事交出去。',
+      nextEn: 'That does not mean it is unconfigured. Reading the catalog needs a platform administrator — ask one to confirm, or hand the task off with the copy button below.',
     }
   }
   return {
     glyph: '?',
     tone: 'muted',
-    zh: '看不到 —— 当前账号读不到平台的角色目录,所以这一步是不是做好了,本页判断不了。',
-    en: 'Cannot tell — this account cannot read the platform role catalog, so this page cannot judge whether this step is done.',
-    nextZh: '这不代表没配。读角色目录要平台管理员;请平台管理员确认,或者用下面的「复制一份待办」把这件事交出去。',
-    nextEn: 'That does not mean it is unconfigured. Reading the catalog needs a platform administrator — ask one to confirm, or hand the task off with the copy button below.',
+    zh: '看不到 —— 这次没读到平台的角色目录,所以这一步是不是做好了,本页判断不了。',
+    en: 'Cannot tell — the platform role catalog could not be read this time, so this page cannot judge whether this step is done.',
+    nextZh: '这不代表没配。可能是网络或服务端,也可能是当前账号没有读角色目录的权限。可以点「重新检查」再试一次;还是不行就用下面的「复制一份待办」交给平台管理员。',
+    nextEn: 'That does not mean it is unconfigured. It may be the network or the server, or this account may not be allowed to read the catalog. Press "Check again", and if it still will not answer, hand it off with the copy button below.',
   }
 })
 
-/** 线框 B2's second row. Informational: `stock-prep:admin` is optional and never part of the verdict. */
+/**
+ * 线框 B2's second row, restated to match the gate.
+ *
+ * The wireframe's own gloss — 「能看安装页(只读);建表仍是平台管理员」 — describes the SMALLEST
+ * thing `stock-prep:admin` does, and reading it as the whole thing is dangerous in the unsafe
+ * direction: `satisfiesStockPrepAccess` returns true for that code BEFORE it looks at read/operate
+ * (`stock-preparation-workbench-access.cjs`), so holding it means the queue, the confirm button and
+ * the export as well. An administrator who took it for a read-only observer badge would hand out
+ * full operate. It is therefore counted like any other qualifying role, and described as what it is.
+ */
 const accessAdminNote = computed<{ zh: string; en: string } | null>(() => {
   const readiness = accessReadiness.value
   if (readiness === null || readiness.state === 'unknown') return null
   return readiness.adminRoleCount > 0
     ? {
-      zh: `另外有 ${readiness.adminRoleCount} 个角色持有 stock-prep:admin(能看安装页,建表仍然是平台管理员的事)。`,
-      en: `${readiness.adminRoleCount} role(s) also hold stock-prep:admin (they can see the install page; creating tables stays a platform administrator's job).`,
+      zh: `上面这些角色里,有 ${readiness.adminRoleCount} 个是靠 stock-prep:admin 满足的 —— 这一码在备料里同时满足 read 和 operate(三码里最大的一个),持有它的人能开队列、能逐条确认、能导出,不只是看安装页。`,
+      en: `${readiness.adminRoleCount} of the roles above qualify through stock-prep:admin — that code satisfies both read and operate here (the largest of the three), so its holders can open the queue, confirm and export, not merely view the install page.`,
     }
     : {
-      zh: '没有角色持有 stock-prep:admin —— 可以不配,一线不需要它。',
-      en: 'No role holds stock-prep:admin — that is fine, the floor does not need it.',
+      zh: '没有角色持有 stock-prep:admin。一线用 read + operate 就够,不必配它;要配也请当成最大的那一码来配 —— 它同时满足 read 和 operate,不是「只能看安装页」。',
+      en: 'No role holds stock-prep:admin. The floor needs only read + operate, so it is not required; if you do grant it, treat it as the largest of the three — it satisfies both read and operate, it is not a view-only install-page badge.',
     }
+})
+
+/**
+ * The roles that satisfy the gate through its PLATFORM-ADMIN short-circuit (`role:admin` from the
+ * role id, or the `integration:admin` code). Kept out of the verdict — every deployment has one from
+ * the moment it is installed, and counting it would let this step read ✔ on a host where no one on
+ * the floor can open anything — but said out loud, because they are real holders.
+ */
+const accessPlatformAdminNote = computed<{ zh: string; en: string } | null>(() => {
+  const readiness = accessReadiness.value
+  if (readiness === null || readiness.state === 'unknown' || readiness.platformAdminRoleCount < 1) return null
+  return {
+    zh: `另外有 ${readiness.platformAdminRoleCount} 个平台管理员档的角色,里面的人本来就能打开备料 —— 上面的判定没有把他们算进去,因为他们不是一线。`,
+    en: `${readiness.platformAdminRoleCount} platform-administrator role(s) exist as well, and their members can already open stock-prep — the verdict above excludes them, because they are not the floor.`,
+  }
 })
 
 const derivationInput = computed(() => ({
@@ -635,6 +732,32 @@ const outstandingSteps = computed(() => (
 ))
 
 const showCompletion = computed(() => props.report?.pass === true)
+
+/**
+ * What the hand-off card is allowed to say about WHO can open the address it is about to hand over.
+ * Straight off step⑤'s live answer — the two cards used to be able to say opposite things on one
+ * screen (⑤:「还没有任何角色…」 / card:「把地址发给他们」), and the confident one was the false one.
+ */
+const handoffReadiness = computed<{ zh: string; en: string }>(() => {
+  const readiness = accessReadiness.value
+  const state = readiness?.state ?? null
+  if (state === 'ready') {
+    return {
+      zh: `第⑤步现在看到:有 ${readiness!.roleCount} 个角色能让一线满足权限要求,成员共 ${readiness!.memberTotal} 人。还有每个人的「插件使用」要开通 stock-prep,那一步本页看不到 —— 先让一位一线打开一次确认,再群发。`,
+      en: `Step ⑤ currently reads: ${readiness!.roleCount} qualifying role(s) with ${readiness!.memberTotal} member(s). Each person still needs stock-prep enabled under "Plugin access", which this page cannot see — have one of them open it once before you send this to everyone.`,
+    }
+  }
+  if (state === 'no_role' || state === 'no_members') {
+    return {
+      zh: '先别急着群发:第⑤步现在看到的是权限还没配齐(上面第⑤步写了差哪一步)。现在发过去,他们打开会是没权限。',
+      en: 'Hold off on sending this out: step ⑤ currently reads that access is not set up yet (it says which part is missing). If you send it now, they will be refused when they open it.',
+    }
+  }
+  return {
+    zh: '发之前先确认谁能用:第⑤步这个账号看不到,本页判断不了权限配没配好。',
+    en: 'Before you send it, confirm who can use it: this account cannot read step ⑤\'s answer, so this page cannot judge whether access is set up.',
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Copy buttons — every payload below is authored/constant text plus, at most, a clamped blocker
@@ -720,10 +843,16 @@ function copyInstallTodo(): void {
 
 const accessTodoCopy = makeCopyState()
 const accessTodoCopyLabel = accessTodoCopy.state
+/**
+ * THREE steps, not two. The role and the membership are the two this page can check; the per-user
+ * 「插件使用」 admission is the one it cannot, and it is the one that is missed by default — adding
+ * an EXISTING user to a role writes no admission row, so a to-do that stopped at step two would be
+ * followed to the letter and still leave the floor at 403.
+ */
 function copyAccessTodo(): void {
   void accessTodoCopy.run(bi(
-    '请帮备料工作台配一下权限:创建或确认一个角色同时持有 stock-prep:read 与 stock-prep:operate,再把要用它的人放进这个角色。角色在「角色管理」配,人在「用户管理」放。',
-    'Please set up permissions for the stock-prep workbench: create or confirm one role that holds both stock-prep:read and stock-prep:operate, then add the people who need it to that role. Roles are configured under Role Management; people are added under User Management.',
+    '请帮备料工作台配一下权限,三件事:① 在「角色管理」创建或确认一个角色,同时持有 stock-prep:read 与 stock-prep:operate(两个勾在同一个角色上;已有持 stock-prep:admin 的角色也可以,那一码同时满足这两项);② 在「用户管理」把要用它的人放进这个角色;③ 在同一个人的「插件使用」里把 stock-prep 开通 —— 把已有的人加进角色不会自动开通,漏了第三步他们打开备料还是没权限。',
+    'Please set up permissions for the stock-prep workbench — three things: (1) in Role Management create or confirm one role holding both stock-prep:read and stock-prep:operate (both on the same role; an existing role holding stock-prep:admin also works, as that code satisfies both); (2) in User Management add the people who need it to that role; (3) enable stock-prep under the same person\'s "Plugin access" — adding an existing user to a role does not enable it automatically, and without step 3 they are still refused.',
   ))
 }
 
@@ -745,9 +874,21 @@ const handoffCopyLabel = handoffCopy.state
  * cannot know that a project has ever run through it.
  */
 function copyHandoffMessage(): void {
+  // THE LEAD SENTENCE IS THE CLAIM, so it follows step⑤ rather than `report.pass`. 「可以用了」 is a
+  // statement about the READER's access, which `pass` (= the install run had no failure) does not
+  // support on its own; sending it while no role qualifies is a promise the page can already see is
+  // false. The rest of the message — the five steps and the 「打不开就找管理员」 tail — is identical
+  // either way, because it is true either way.
+  const ready = accessReadiness.value?.state === 'ready'
+  const zhLead = ready
+    ? '备料工作台可以用了:用自己的账号打开 /stock-prep。'
+    : '备料工作台请先试着打开一次:用自己的账号打开 /stock-prep。'
+  const enLead = ready
+    ? 'The stock-prep workbench is ready to use: open /stock-prep with your own account.'
+    : 'Please try opening the stock-prep workbench once: open /stock-prep with your own account.'
   void handoffCopy.run(bi(
-    '备料工作台可以用了:用自己的账号打开 /stock-prep。用法:找到您的项目 → 从 PLM 拉进来 → 有拿不准的就逐条拿主意 → 回来再同步一次 → 导出 Excel。打不开或看不到项目,说明权限还没配到您头上,找管理员。',
-    'The stock-prep workbench is ready to use: open /stock-prep with your own account. How to use it: find your project → pull it in from PLM → decide anything the system is unsure about → sync once more → export to Excel. If it will not open, or shows no projects, your account has not been granted access yet — ask an administrator.',
+    `${zhLead}用法:找到您的项目 → 从 PLM 拉进来 → 有拿不准的就逐条拿主意 → 回来再同步一次 → 导出 Excel。打不开或看不到项目,说明权限还没配到您头上,找管理员。`,
+    `${enLead} How to use it: find your project → pull it in from PLM → decide anything the system is unsure about → sync once more → export to Excel. If it will not open, or shows no projects, your account has not been granted access yet — ask an administrator.`,
   ))
 }
 </script>
@@ -795,6 +936,14 @@ function copyHandoffMessage(): void {
 /* 现在的情况 (线框 B2). A bordered block rather than a colour wash: three of the four verdicts are
    deliberately NOT green, and a tinted panel would have to pick a background for 「看不到」 that says
    something the state does not. */
+/* 线框 B2's 「现在的情况」 heading — the probe block used to sit label-less directly under the ⓘ
+   conjunction sentence, which read as a continuation of it rather than as a live reading. */
+.stock-prep-gs__probe-label {
+  margin: 0 0 6px;
+  color: var(--ms-text-2);
+  font-weight: 600;
+}
+
 .stock-prep-gs__probe {
   margin: 0 0 var(--ms-space-2);
   padding: var(--ms-space-2);

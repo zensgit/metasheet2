@@ -20,11 +20,15 @@ import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
 //       `http`-kind blocker (e.g. ledger-not-ready) never disables step④'s run controls
 //   G6  the held steps' explanations render BEFORE any button is pressed, and the nine-step STATUS
 //       list is NOT duplicated here (the install panel below owns it)
-//   G7  step⑤'s LIVE role-catalog check (P1-3): four verdicts, none of them 「没完成」, plus a REVERSE
-//       assertion that no user/email-shaped token ever renders in ANY of them
+//   G7  step⑤'s LIVE role-catalog check (P1-3): four verdicts, none of them 「没完成」 and none of
+//       them 「已完成」 either — the third condition (per-user 「插件使用」 admission) is invisible to
+//       this read, so the badge tops out at ⚑ and every actionable verdict names that third step.
+//       Plus a REVERSE assertion that no user/email-shaped token ever renders in ANY of them
 //   G8  every copy payload is values-free, asserted on the STRING that reaches the clipboard
 //   G9  G1「每屏一个主操作位」: at most one `--primary` button per rendering
-//   G10 the hand-off card says only what `report.pass` supports — no trial run, no landing tab
+//   G10 the hand-off card says only what `report.pass` supports — no trial run, no landing tab —
+//       and carries step⑤'s live answer, so it can never invite a hand-off the page can already see
+//       will land on a 403
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -248,7 +252,16 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
 
   /** The projection's shape, as `onboardingReadiness.ts` returns it. */
   function readiness(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-    return { state: 'ready', roles: [{ name: '备料一线', memberCount: 6 }], roleCount: 1, memberTotal: 6, adminRoleCount: 0, status: null, ...overrides }
+    return {
+      state: 'ready',
+      roles: [{ name: '备料一线', memberCount: 6 }],
+      roleCount: 1,
+      memberTotal: 6,
+      adminRoleCount: 0,
+      platformAdminRoleCount: 0,
+      status: null,
+      ...overrides,
+    }
   }
 
   async function mountWithReadiness(answer: Record<string, unknown>, props: Props = {}): Promise<HTMLDivElement> {
@@ -545,6 +558,62 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(root.querySelector('[data-testid="stock-prep-getting-started-complete"]')).toBeNull()
   })
 
+  // The hand-off card and step⑤ are two screens apart and used to be able to say opposite things:
+  // `report.pass` (= the install run had no failure) says nothing about who may open the page, so a
+  // brand-new deployment could read 「还没有任何角色…」 above and 「把地址发给他们」 below.
+  it.each([
+    ['no_role', '先别急着群发'],
+    ['no_members', '先别急着群发'],
+  ])('the hand-off card carries step⑤\'s answer: %s → 「%s」', async (state, expected) => {
+    const root = await mountWithReadiness(
+      readiness({ state, roles: [], roleCount: 0, memberTotal: 0 }),
+      { report: report({ pass: true, skipCount: 5 }) },
+    )
+    const line = root.querySelector('[data-testid="stock-prep-getting-started-complete-access"]')?.textContent ?? ''
+    expect(line).toContain(expected)
+    // G5 — it warns, it does not gate: both buttons stay live.
+    expect((root.querySelector('[data-testid="stock-prep-getting-started-copy-handoff"]') as HTMLButtonElement).disabled).toBe(false)
+    expect((root.querySelector('[data-testid="stock-prep-getting-started-copy-link"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('the hand-off card quotes step⑤\'s headcount when it is ready (线框 B3 第 2 行)', async () => {
+    const root = await mountWithReadiness(readiness(), { report: report({ pass: true, skipCount: 5 }) })
+    const line = root.querySelector('[data-testid="stock-prep-getting-started-complete-access"]')?.textContent ?? ''
+    expect(line).toContain('1 个角色')
+    expect(line).toContain('6 人')
+    // …and still refuses to promise it, because the admission leg is invisible from here too.
+    expect(line).toContain('插件使用')
+  })
+
+  it('the hand-off card admits it cannot judge access when step⑤ could not be read', async () => {
+    const root = await mountWithReadiness(
+      readiness({ state: 'unknown', roles: [], roleCount: 0, memberTotal: 0, status: 403 }),
+      { report: report({ pass: true, skipCount: 5 }) },
+    )
+    const line = root.querySelector('[data-testid="stock-prep-getting-started-complete-access"]')?.textContent ?? ''
+    expect(line).toContain('本页判断不了')
+  })
+
+  it('the group-chat payload does not claim 「可以用了」 until step⑤ says so', async () => {
+    const root = await mountWithReadiness(
+      readiness({ state: 'no_role', roles: [], roleCount: 0, memberTotal: 0 }),
+      { report: report({ pass: true, skipCount: 5 }) },
+    )
+    ;(root.querySelector('[data-testid="stock-prep-getting-started-copy-handoff"]') as HTMLButtonElement).click()
+    await nextTick()
+    expect(h.copied[0]).not.toContain('可以用了')
+    expect(h.copied[0]).toContain('/stock-prep')
+    if (app) app.unmount()
+    app = null
+    container!.innerHTML = ''
+    h.copied = []
+    h.readinessCalls = 0
+    const ready = await mountWithReadiness(readiness(), { report: report({ pass: true, skipCount: 5 }) })
+    ;(ready.querySelector('[data-testid="stock-prep-getting-started-copy-handoff"]') as HTMLButtonElement).click()
+    await nextTick()
+    expect(h.copied[0]).toContain('可以用了')
+  })
+
   // ---------------------------------------------------------------------------
   // G7 — step⑤'s live role-catalog check (P1-3), four verdicts + the REVERSE assertion
   // ---------------------------------------------------------------------------
@@ -565,7 +634,12 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     // and the design's own earlier draft said exactly that.
     const scope = section.querySelector('[data-testid="stock-prep-getting-started-access-scope"]')?.textContent ?? ''
     expect(scope).toContain('平台的角色目录')
-    expect(scope).not.toContain('租户配置')
+    // Every way of saying「这是贵司/本租户的配置」, not just the one phrase the first cut banned:
+    // `fetchRoleCatalog`'s SQL carries no tenant predicate at all (admin-users.ts), so any of these
+    // would be false on a host serving more than one tenant.
+    for (const forbidden of ['租户配置', '本租户', '贵司', '您的租户']) {
+      expect(scope, `access scope must not claim ${forbidden}`).not.toContain(forbidden)
+    }
     // 2026-09-08 on the customer host: a code ticked straight onto a person is filtered out by the
     // namespace-admission gate and the account still gets refused. The page says so.
     expect(scope).toContain('权限只能通过角色给')
@@ -590,7 +664,24 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(roles[0].textContent).toContain('备料一线')
     // A single qualifying role cannot double-count anybody, so that caveat stays off.
     expect(block.querySelector('[data-testid="stock-prep-getting-started-access-double-count"]')).toBeNull()
-    expect(badgeOf(root, 'grant-access')).toBe('done')
+    // THE BADGE IS NOT 已完成, and cannot become it: 「谁能用」 is three conditions and this read sees
+    // two. The per-user 「插件使用」 admission (`user_namespace_admissions`) is written by neither
+    // `/roles/assign` nor `assignUserRoles`, so a correctly-built role full of people can still be a
+    // floor that gets 403 — a ✔ on the map here would be the 假绿 G4 exists to forbid.
+    expect(badgeOf(root, 'grant-access')).toBe('held')
+    expect(badgeOf(root, 'grant-access')).not.toBe('done')
+  })
+
+  it('✔ still names the third condition it cannot see, and does not promise those people can open it', async () => {
+    const root = await mountWithReadiness(readiness())
+    const block = accessBlock(root)
+    const admission = block.querySelector('[data-testid="stock-prep-getting-started-access-admission"]')?.textContent ?? ''
+    expect(admission).toContain('插件使用')
+    expect(admission).toContain('stock-prep')
+    // The sufficiency promise this line replaced: 「角色本身不用再动」/「应该已经能打开了」.
+    const next = block.querySelector('[data-testid="stock-prep-getting-started-access-next"]')?.textContent ?? ''
+    expect(next).not.toContain('应该已经能打开')
+    expect(next).toContain('真的打开一次')
   })
 
   it('⚠ 有角色但一个人都没有 → NOT ✔ (0 成员 is not ready)', async () => {
@@ -601,7 +692,11 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(block.dataset.state).toBe('no_members')
     expect(block.dataset.state).not.toBe('ready')
     expect(block.textContent).toContain('一个人都还没有')
-    expect(block.querySelector('[data-testid="stock-prep-getting-started-access-next"]')?.textContent).toContain('用户管理')
+    const next = block.querySelector('[data-testid="stock-prep-getting-started-access-next"]')?.textContent ?? ''
+    expect(next).toContain('用户管理')
+    // …and the step that is missed by default: adding an EXISTING user to a role writes no
+    // admission row, so 「放进角色」 alone still leaves them refused.
+    expect(next).toContain('插件使用')
     // 「需要别人做」 — never 已完成, and never 卡住了 (G5: this map is not a gate).
     expect(badgeOf(root, 'grant-access')).toBe('held')
   })
@@ -617,6 +712,8 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(next).toContain('用户管理')
     expect(next).toContain('stock-prep:read')
     expect(next).toContain('stock-prep:operate')
+    // The third thing, named in the how-to itself rather than left to be discovered at the 403.
+    expect(next).toContain('插件使用')
     expect(block.querySelectorAll('[data-testid="stock-prep-getting-started-access-role"]')).toHaveLength(0)
     expect(badgeOf(root, 'grant-access')).toBe('held')
   })
@@ -640,31 +737,90 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(badgeOf(root, 'grant-access')).toBe('unknown')
     // stock-prep:admin is unknowable too when the catalog is unreadable, so that line stays off.
     expect(block.querySelector('[data-testid="stock-prep-getting-started-access-admin-note"]')).toBeNull()
+    // …and so is the admission line: it is advice about a state this page could not read.
+    expect(block.querySelector('[data-testid="stock-prep-getting-started-access-admission"]')).toBeNull()
+    // A 403 IS a permission answer, so this is the one status allowed to say so.
+    expect(text).toContain('读不到平台的角色目录')
+  })
+
+  it.each([
+    ['a 500', 500],
+    ['a 502', 502],
+    ['a transport failure with no status at all', null],
+  ])('? 看不到 after %s does NOT blame the caller\'s permissions', async (_label, status) => {
+    const root = await mountWithReadiness(readiness({ state: 'unknown', roles: [], roleCount: 0, memberTotal: 0, status }))
+    const text = accessBlock(root).textContent ?? ''
+    // The service collapses every unanswered read into ONE state (G4) — but a 500 is not evidence
+    // that this account lacks permission, and the reader may well BE the platform administrator the
+    // 403 wording would send them to find.
+    expect(text).not.toContain('当前账号读不到')
+    expect(text).not.toContain('读角色目录要平台管理员')
+    expect(text).toContain('看不到')
+    expect(text).toContain('可能是网络或服务端')
+    // Still not a verdict, and still not a number nobody can act on.
+    expect(text).not.toContain('没完成')
+    expect(text).not.toMatch(/\b(500|502)\b/)
+    expect(badgeOf(root, 'grant-access')).toBe('unknown')
   })
 
   it('several qualifying roles: the sum is labelled as a sum, and an over-cap catalog says so', async () => {
+    // The fixture matches what the projection can actually produce: the cap is 5, so an over-cap
+    // catalog arrives as FIVE names plus a true total — an earlier fixture sent two names with a
+    // total of seven, a shape no real read can return.
     const root = await mountWithReadiness(readiness({
-      roles: [{ name: '备料一线', memberCount: 6 }, { name: '备料班组长', memberCount: 3 }],
+      roles: [
+        { name: '备料一线', memberCount: 6 },
+        { name: '备料班组长', memberCount: 3 },
+        { name: '备料计划', memberCount: 2 },
+        { name: '备料工艺', memberCount: 4 },
+        { name: '备料仓管', memberCount: 5 },
+      ],
       roleCount: 7,
       memberTotal: 21,
     }))
     const block = accessBlock(root)
+    expect(block.querySelectorAll('[data-testid="stock-prep-getting-started-access-role"]')).toHaveLength(5)
     expect(block.querySelector('[data-testid="stock-prep-getting-started-access-double-count"]')?.textContent).toContain('数两次')
-    expect(block.querySelector('[data-testid="stock-prep-getting-started-access-overflow"]')?.textContent).toContain('5 个角色')
+    const overflow = block.querySelector('[data-testid="stock-prep-getting-started-access-overflow"]')?.textContent ?? ''
+    expect(overflow).toContain('2 个角色')
+    // …and says the listed ones are the catalog's first few, not a ranking this page made.
+    expect(overflow).toContain('不是「最主要的」')
   })
 
-  it('the stock-prep:admin line is informational — its absence never changes the verdict', async () => {
+  it('the stock-prep:admin line describes what that code actually confers — the LARGEST of the three', async () => {
+    // stock-preparation-workbench-access.cjs `satisfiesStockPrepAccess` returns true for
+    // stock-prep:admin BEFORE it looks at read/operate. Describing it as 「能看安装页(只读)」 would
+    // understate a grant in the unsafe direction: its holders can confirm and export.
     const withAdmin = await mountWithReadiness(readiness({ adminRoleCount: 2 }))
-    expect(accessBlock(withAdmin).querySelector('[data-testid="stock-prep-getting-started-access-admin-note"]')?.textContent)
-      .toContain('2 个角色')
+    const note = accessBlock(withAdmin).querySelector('[data-testid="stock-prep-getting-started-access-admin-note"]')?.textContent ?? ''
+    expect(note).toContain('2 个')
+    expect(note).toContain('同时满足 read 和 operate')
+    expect(note).toContain('导出')
+    // The words the old note used, which read as a view-only badge.
+    expect(note).not.toContain('建表仍然是平台管理员的事')
     if (app) app.unmount()
     app = null
     container!.innerHTML = ''
     h.readinessCalls = 0
     const withoutAdmin = await mountWithReadiness(readiness({ adminRoleCount: 0 }))
-    const note = accessBlock(withoutAdmin).querySelector('[data-testid="stock-prep-getting-started-access-admin-note"]')?.textContent ?? ''
-    expect(note).toContain('可以不配')
+    const none = accessBlock(withoutAdmin).querySelector('[data-testid="stock-prep-getting-started-access-admin-note"]')?.textContent ?? ''
+    expect(none).toContain('不必配它')
+    expect(none).toContain('同时满足 read 和 operate')
     expect(accessBlock(withoutAdmin).dataset.state).toBe('ready')
+  })
+
+  it('platform-admin roles are named as out-of-scope, not silently dropped', async () => {
+    const root = await mountWithReadiness(readiness({ state: 'no_role', roles: [], roleCount: 0, memberTotal: 0, platformAdminRoleCount: 2 }))
+    const note = accessBlock(root).querySelector('[data-testid="stock-prep-getting-started-access-platform-admin-note"]')?.textContent ?? ''
+    expect(note).toContain('2 个')
+    expect(note).toContain('本来就能打开')
+    expect(note).toContain('不是一线')
+    if (app) app.unmount()
+    app = null
+    container!.innerHTML = ''
+    h.readinessCalls = 0
+    const none = await mountWithReadiness(readiness({ platformAdminRoleCount: 0 }))
+    expect(accessBlock(none).querySelector('[data-testid="stock-prep-getting-started-access-platform-admin-note"]')).toBeNull()
   })
 
   it('「重新检查」 issues the read again', async () => {
@@ -698,12 +854,26 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
       if (app) app.unmount()
       app = null
       container!.innerHTML = ''
+      const hasRoles = state === 'ready' || state === 'no_members'
       const root = await mountWithReadiness(readiness({
         state,
-        // Only the two fields the projection is allowed to carry, holding values-free content.
-        roles: state === 'ready' || state === 'no_members' ? [{ name: '备料一线', memberCount: state === 'ready' ? 6 : 0 }] : [],
-        roleCount: state === 'ready' || state === 'no_members' ? 1 : 0,
+        // The role objects carry the two permitted fields PLUS planted identity fields, so this
+        // assertion has something to catch: a future template that renders `role` wholesale, or
+        // reaches for a field the projection is not supposed to hand over, turns this red. (The
+        // service-side spec proves the real projection strips them; this proves the DOM would not
+        // print them even if one got through.)
+        roles: hasRoles
+          ? [{
+            name: '备料一线',
+            memberCount: state === 'ready' ? 6 : 0,
+            userId: PLANTED[0],
+            ownerEmail: PLANTED[1],
+            displayName: PLANTED[2],
+          }]
+          : [],
+        roleCount: hasRoles ? 1 : 0,
         memberTotal: state === 'ready' ? 6 : 0,
+        actorId: PLANTED[0],
       }))
       const text = (root.querySelector('[data-testid="stock-prep-getting-started-step-grant-access"]') as HTMLElement).textContent ?? ''
       expect(text, `${state}: no email shape`).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.-]+/)
@@ -741,6 +911,11 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expectValuesFree(payload)
     expect(payload).toContain('stock-prep:read')
     expect(payload).toContain('stock-prep:operate')
+    // THREE steps, not two. A to-do that stops at 「把人放进角色」 is followed to the letter and
+    // still leaves the floor at 403, because adding an existing user writes no admission row.
+    expect(payload).toContain('插件使用')
+    expect(payload).toContain('角色管理')
+    expect(payload).toContain('用户管理')
   })
 
   it('the env blocker\'s copy-for-ops payload carries the code, the sentence AND the route\'s own fix line verbatim (I-9)', async () => {

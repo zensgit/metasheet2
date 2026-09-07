@@ -211,14 +211,18 @@ export function stockPrepGettingStartedSteps(input: StockPrepGettingStartedInput
           : 'blocked')
 
   // ⑤ — the platform role catalog's answer, projected. Nothing here re-decides anything: the service
-  // already made the 合取 judgement and already collapsed every unanswerable read into `unknown`.
-  const grantAccess: StockPrepGettingStartedBadgeKey = roleReadiness === null
-    ? 'held'
-    : roleReadiness === 'ready'
-      ? 'done'
-      : roleReadiness === 'unknown'
-        ? 'unknown'
-        : 'held'
+  // already applied the gate's ladder and already collapsed every unanswerable read into `unknown`.
+  //
+  // WHY `ready` IS NOT `done`, AND WILL NOT BE. 「谁能用」 is a CONJUNCTION OF THREE conditions: a
+  // role that satisfies the gate, a person inside it, and — per user — an enabled `stock-prep` row
+  // in `user_namespace_admissions` (用户管理 →「插件使用」). The catalog read answers the first two
+  // and CANNOT SEE the third: `assignUserRoles` writes `user_roles` alone, and the only caller of
+  // `grantNamespaceAdmissions` is the user-creation path, so adding an existing person to a
+  // correctly-configured role leaves them at a flat 403 with this page showing a ✔.
+  // 「已完成」 on two legs out of three is exactly the 假绿 G4 forbids, so this step's badge tops out
+  // at 「⚑ 需要别人做」 — there is a third thing, off this page, that someone still has to have done.
+  // The card underneath says which thing, and still shows ✔ for the part that WAS verified (验收 4).
+  const grantAccess: StockPrepGettingStartedBadgeKey = roleReadiness === 'unknown' ? 'unknown' : 'held'
 
   return {
     'source-connect': sourceConnect,

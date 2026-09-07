@@ -11,6 +11,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 //       `actorId` projects to role names and integers only (REVERSE assertion on the whole result)
 //   R5  the route is read literally, as a GET, with no query string and no write method
 //   R6  the read never rejects — a caller cannot turn it into a red banner by forgetting a catch
+//   R7  THE LADDER IS THE GATE'S LADDER: a role carrying only `stock-prep:admin` QUALIFIES (the
+//       plugin gate returns true for it before it looks at read/operate), while `stock-prep:*` and a
+//       non-admin role's `*:*` do NOT (that same gate matches literally, so the server refuses them)
+//   R8  platform-admin roles (`id === 'admin'`, or holding `integration:admin`) are reported on
+//       their own counter and NEVER decide `state` — every deployment has one from day one
 
 const h = vi.hoisted(() => ({ apiFetch: vi.fn() }))
 
@@ -144,13 +149,85 @@ describe('BOM备料 第⑤步授权检测 — 纯投影 (stockPrepOnboardingRead
     expect(result.memberTotal).toBe(STOCK_PREP_READINESS_ROLE_NAME_CAP + 3)
   })
 
-  it('counts stock-prep:admin roles separately, and never lets them change the verdict', () => {
+  // R7 — the ladder ------------------------------------------------------------
+  it('a role carrying ONLY stock-prep:admin QUALIFIES — the gate satisfies read and operate from it', () => {
+    // plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs
+    // `satisfiesStockPrepAccess`: `if (held.includes(STOCK_PREP_ADMIN)) return true`, checked before
+    // the read/operate branches. Answering `no_role` here would tell an administrator to go build a
+    // role whose job is already being done by one that exists.
     const result = stockPrepOnboardingReadinessFromPayload({
       items: [role({ id: 'r-admin', name: '备料管理员', permissions: [STOCK_PREP_ADMIN_PERMISSION_CODE], memberCount: 2 })],
     })
+    expect(result.state).toBe('ready')
+    expect(result.roleCount).toBe(1)
+    expect(result.memberTotal).toBe(2)
+    // Counted, and flagged as qualifying THROUGH :admin so the view can say what that code confers.
     expect(result.adminRoleCount).toBe(1)
-    // Holding only :admin does NOT make the floor able to work.
+  })
+
+  it('a stock-prep:admin role with nobody in it is no_members, exactly like any other qualifying role', () => {
+    const result = stockPrepOnboardingReadinessFromPayload({
+      items: [role({ permissions: [STOCK_PREP_ADMIN_PERMISSION_CODE], memberCount: 0 })],
+    })
+    expect(result.state).toBe('no_members')
+    expect(result.adminRoleCount).toBe(1)
+  })
+
+  it('a NAMESPACE WILDCARD does not qualify — the server matches literally and refuses it', () => {
+    // `satisfiesStockPrepAccess` does `held.includes('stock-prep:read')`, not a wildcard expansion.
+    // `useAuth().hasPermission` WOULD expand `stock-prep:*` and render the controls, but the routes
+    // behind them 403 — counting this role as 能用 would promise access the server then refuses.
+    const result = stockPrepOnboardingReadinessFromPayload({
+      items: [role({ id: 'r-wild', name: '备料通配', permissions: ['stock-prep:*'], memberCount: 4 })],
+    })
     expect(result.state).toBe('no_role')
+    expect(result.adminRoleCount).toBe(0)
+    expect(result.platformAdminRoleCount).toBe(0)
+  })
+
+  it('a role holding *:* but NOT named admin qualifies for nothing — its members get no role:admin', () => {
+    // `listUserPermissions` (http-routes.cjs) synthesises `role:<id>` from role IDS, so a role called
+    // anything else contributes `*:*` alone, which the stock-prep gate does not match.
+    const result = stockPrepOnboardingReadinessFromPayload({
+      items: [role({ id: 'superuser', name: '超级用户', permissions: ['*:*'], memberCount: 3 })],
+    })
+    expect(result.state).toBe('no_role')
+    expect(result.platformAdminRoleCount).toBe(0)
+  })
+
+  // R8 — platform-admin roles --------------------------------------------------
+  it.each([
+    ['the platform-admin role id', { id: 'admin', name: '系统管理员', permissions: ['*:*'] }],
+    ['the integration:admin code', { id: 'ops', name: '集成管理员', permissions: ['integration:admin'] }],
+  ])('a platform-admin role (%s) is counted apart and never decides the verdict', (_label, overrides) => {
+    const result = stockPrepOnboardingReadinessFromPayload({ items: [role({ ...overrides, memberCount: 2 })] })
+    expect(result.platformAdminRoleCount).toBe(1)
+    // They CAN open 备料 — but they are not 一线, and every deployment has one on day one. Counting
+    // them would make this step read ✔ on a host where nobody on the floor can open anything.
+    expect(result.state).toBe('no_role')
+    expect(result.roleCount).toBe(0)
+    expect(result.memberTotal).toBe(0)
+  })
+
+  it('a platform-admin role that ALSO carries both codes still stays out of the verdict', () => {
+    const result = stockPrepOnboardingReadinessFromPayload({
+      items: [role({ id: 'admin', name: '系统管理员', permissions: [READ, OPERATE], memberCount: 5 })],
+    })
+    expect(result.platformAdminRoleCount).toBe(1)
+    expect(result.state).toBe('no_role')
+  })
+
+  it('platform-admin roles never crowd out a real operator role', () => {
+    const result = stockPrepOnboardingReadinessFromPayload({
+      items: [
+        role({ id: 'admin', name: '系统管理员', permissions: ['*:*'], memberCount: 2 }),
+        role({ id: 'r-line', name: '备料一线', permissions: [READ, OPERATE], memberCount: 6 }),
+      ],
+    })
+    expect(result.state).toBe('ready')
+    expect(result.roleCount).toBe(1)
+    expect(result.memberTotal).toBe(6)
+    expect(result.platformAdminRoleCount).toBe(1)
   })
 
   // R4 — the REVERSE assertion -----------------------------------------------
@@ -178,8 +255,16 @@ describe('BOM备料 第⑤步授权检测 — 纯投影 (stockPrepOnboardingRead
 
   it('the exported unknown shape carries nothing but the status', () => {
     expect(stockPrepOnboardingReadinessUnknown(403)).toEqual({
-      state: 'unknown', roles: [], roleCount: 0, memberTotal: 0, adminRoleCount: 0, status: 403,
+      state: 'unknown', roles: [], roleCount: 0, memberTotal: 0, adminRoleCount: 0, platformAdminRoleCount: 0, status: 403,
     })
+  })
+
+  it('an over-long role name is MARKED as truncated, so it is not hunted for verbatim in 角色管理', () => {
+    const long = '备'.repeat(120)
+    const result = stockPrepOnboardingReadinessFromPayload({ items: [role({ name: long })] })
+    const name = result.roles[0].name ?? ''
+    expect(name.endsWith('…')).toBe(true)
+    expect(name.length).toBeLessThan(long.length)
   })
 
   it('the two required codes are the two the wizard names in its copy', () => {

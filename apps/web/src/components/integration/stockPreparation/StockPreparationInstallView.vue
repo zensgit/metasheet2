@@ -1,8 +1,10 @@
 <template>
   <div class="stock-prep-install" data-testid="stock-prep-install">
-    <!-- P0-4: the「开始使用」向导, mounted FIRST. It reads only state this view already owns (props
-         down, no fetch of its own) and re-emits its three actions onto this view's own existing
-         functions — nothing below it changes order, testid, or behaviour. -->
+    <!-- P0-4: the「开始使用」向导, mounted FIRST. Every deployment fact it renders comes down as a
+         prop this view already owns; since P1-3 it additionally issues ONE read of its own, the
+         platform role catalog for step⑤「谁能用」(`onboardingReadiness.ts`, a preload that degrades
+         to 「? 看不到」 and never to a banner). It re-emits its three actions onto this view's own
+         existing functions — nothing below it changes order, testid, or behaviour. -->
     <StockPreparationGettingStarted
       :defaults="defaults"
       :preflight="preflight"
