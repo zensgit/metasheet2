@@ -3,23 +3,36 @@
 //
 // WHAT THIS IS. `plainLanguage.ts` is a FORWARD lookup: a view holds a server-returned code and asks
 // "what does this mean" one code at a time. This module builds the REVERSE — every code any of the
-// six chosen tables can answer for, listed and searchable, so an implementer who is staring at a raw
+// chosen tables can answer for, listed and searchable, so an implementer who is staring at a raw
 // code from a support thread (rather than a rendering that already looked it up) has a place to type
 // it in.
 //
-// WHY THESE SIX TABLES, AND NOT EVERY TABLE IN THE FILE. `plainLanguage.ts` holds 20+ constants, most
-// of which translate an ENUM a view already renders in words next to its own control (a decision
-// status, a match method, a rounding mode — see e.g. STOCK_PREP_DECISION_STATUS_PLAIN). Those never
-// reach a person as a bare code to look up; the six below are the ones that DO — a preflight/blocker
-// `code`, an HTTP-error `code`, a source-check `code`, an admin-action `id` — the identifiers this
-// codebase's own error copy already tells a reader to "把这条报错给管理员" or "复制这条给运维" about.
-// Naming a seventh table here is a real scope decision (which codes an implementer can search) and
-// belongs in review, not a silent later edit — hence the single list below rather than "every
+// WHICH TABLES, AND ON WHAT BASIS. The design doc names six (design-ops-overview §4.6); this module
+// carries those six plus `STOCK_PREP_SYNC_REASON_PLAIN`, and the selection rule is deliberately a
+// CHECKABLE one rather than a claim about what codes "can" be looked up:
+//
+//     a table belongs here if some view renders its key as bare text a reader can copy.
+//
+// That rule is what a future editor should re-run, and it is why the seventh table is here. An
+// earlier draft justified the six as "the rest are enums a view already renders in words, so they
+// never appear as a bare code" — which is false in both directions, and the check above catches both:
+//   · STOCK_PREP_SYNC_REASON_PLAIN was excluded, yet StockPreparationProjectSyncPanel.vue:284 renders
+//     `<code>{{ row.result.reason }}</code>` verbatim in its technical details, and :576 falls back to
+//     printing the raw reason when the table has no entry. Design §4.5 names one of its codes
+//     (RECONCILE_NOT_PERMITTED) directly. It is now included.
+//   · STOCK_PREP_ADMIN_ACTION_PLAIN's three ids are front-end-authored and never rendered as a code
+//     at all (StockPreparationWorkspace.vue:174-175 renders only the sentence). By the rule above they
+//     do not qualify — they are KEPT anyway, because §4.6 names the table and three extra rows cost a
+//     reader nothing, but they are the exception, not the precedent.
+// Tables still excluded are the enum vocabularies a control renders in words beside itself (decision
+// status, match method, rounding mode — e.g. STOCK_PREP_DECISION_STATUS_PLAIN), and
+// STOCK_PREP_SOURCE_CHECK_PLAIN, which §4.6 leaves out. Adding or dropping a table changes what an
+// implementer can search, so it belongs in review — hence the explicit list below rather than "every
 // Record<string, StockPrepPlain*> this file exports".
 //
-// ANTI-DROP CONTRACT (the "渲染条目数 = 六张词表 key 数之和" test in
+// ANTI-DROP CONTRACT (the "渲染条目数 = 词表 key 数之和" test in
 // StockPreparationCodeHelp.spec.ts): `stockPrepCodeHelpEntries()` returns exactly one row per key
-// across the six tables below, computed by iterating `Object.keys` — nothing here filters, dedupes or
+// across the tables below, computed by iterating `Object.keys` — nothing here filters, dedupes or
 // skips a key for any reason. A future edit that silently drops rows (a bad filter, an off-by-one in a
 // slice, a table forgotten after a rename) fails that count, independent of any table's own key count
 // changing over time.
@@ -35,13 +48,14 @@ import {
   STOCK_PREP_ERROR_PLAIN,
   STOCK_PREP_SOURCE_BLOCKER_PLAIN,
   STOCK_PREP_SOURCE_WARNING_PLAIN,
+  STOCK_PREP_SYNC_REASON_PLAIN,
   type StockPrepPlainEntry,
 } from './plainLanguage'
 
 export interface StockPrepCodeHelpEntry {
   /** The code/id a server response, a preflight blocker or an admin-action route actually carries. */
   code: string
-  /** Which of the six tables this row came from — a stable id, never shown untranslated. */
+  /** Which source table this row came from — a stable id, never shown untranslated. */
   group: string
   groupZh: string
   groupEn: string
@@ -61,7 +75,7 @@ interface StockPrepCodeHelpSource {
 }
 
 /**
- * THE SIX TABLES, in the fixed order they render — grouped by which SURFACE a reader met the code on,
+ * THE SOURCE TABLES, in the fixed order they render — grouped by which SURFACE a reader met the code on,
  * not alphabetically, so the drawer's default (unsearched) order groups related codes together.
  * `STOCK_PREP_ADMIN_ACTION_PLAIN` is `Record<string, StockPrepPlainText>` (no `zhNext`/`enNext` — those
  * three rows are outcome sentences, not fixes) and is structurally assignable here unchanged: every
@@ -73,6 +87,7 @@ const STOCK_PREP_CODE_HELP_SOURCES: readonly StockPrepCodeHelpSource[] = Object.
   { id: 'blocker', groupZh: '建表 / 装列阻断', groupEn: 'Install blockers', table: STOCK_PREP_BLOCKER_PLAIN },
   { id: 'source-blocker', groupZh: '源预检阻断', groupEn: 'Source-readiness blockers', table: STOCK_PREP_SOURCE_BLOCKER_PLAIN },
   { id: 'source-warning', groupZh: '源预检提醒', groupEn: 'Source-readiness warnings', table: STOCK_PREP_SOURCE_WARNING_PLAIN },
+  { id: 'sync-reason', groupZh: '拉取 / 试算结果原因', groupEn: 'Pull & plan outcome reasons', table: STOCK_PREP_SYNC_REASON_PLAIN },
   { id: 'admin-action', groupZh: '管理员动作结果', groupEn: 'Admin action outcomes', table: STOCK_PREP_ADMIN_ACTION_PLAIN },
 ])
 

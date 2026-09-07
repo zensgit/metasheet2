@@ -4,17 +4,22 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 // BOM备料 错误码对照抽屉 (P1-6, I-22) — the DOM half of `codeHelp.ts`'s pure reversal.
 //
 // Guards this suite pins:
-//   H1 防漏 (anti-drop): the drawer renders EXACTLY one row per key across the six source tables —
+//   H1 防漏 (anti-drop): the drawer renders EXACTLY one row per key across the source tables —
 //      computed independently here by importing the raw tables and summing `Object.keys(...).length`,
 //      never by re-reading `codeHelp.ts`'s own internal list. A future edit that silently drops a row
 //      (a bad filter, an off-by-one slice, a table forgotten after a rename) fails this count even if
-//      the underlying table's own key count changes.
+//      the underlying table's own key count changes. A second case pins the COMPOSITION as well as the
+//      total, so swapping one table for a different one of the same size cannot pass.
 //   H2 搜索: narrows by CODE substring and by PROSE substring (zh), case-insensitively; an empty query
 //      is the full list, not an empty one; a query matching nothing renders the empty state.
 //   H3 双语: the SAME entry renders in Chinese under zh-CN and in English under any other locale.
 //   H4 值面反向断言: no entry's rendered text looks like a business value (an email, a part/drawing
 //      number shaped token) — every field here is authored prose, never response data, so this proves
 //      the invariant rather than merely restating "no props were passed".
+//   H5 抽屉: the panel IS a <details>, collapsed on first render (§2.4 P-7 / §6.2 P1-6 / §4.1 I-22 all
+//      call it a 抽屉), and collapsing does not remove a single row from the DOM.
+//   H6 诚实空态: the empty state carries a `data-empty-state` value (G2) and says "not in this
+//      reference", never "no such code" (G4).
 
 const h = vi.hoisted(() => ({ locale: 'zh-CN' as string }))
 
@@ -35,23 +40,29 @@ import {
   STOCK_PREP_ERROR_PLAIN,
   STOCK_PREP_SOURCE_BLOCKER_PLAIN,
   STOCK_PREP_SOURCE_WARNING_PLAIN,
+  STOCK_PREP_SYNC_REASON_PLAIN,
 } from '../src/services/integration/stockPreparation/plainLanguage'
 
 /**
- * H1's independent count — imported straight from `plainLanguage.ts`, NOT via `codeHelp.ts`, so a
- * regression in the module under test cannot also corrupt the number it is checked against.
+ * H1's independent expectation — imported straight from `plainLanguage.ts`, NOT via `codeHelp.ts`, so
+ * a regression in the module under test cannot also corrupt the number it is checked against. Keyed by
+ * the `group` id the panel stamps on every row, so H1 can check COMPOSITION and not just the total:
+ * replacing one table with a different table of the same size fails here, which a bare sum would not.
  */
-const SIX_SOURCE_TABLES = [
-  STOCK_PREP_ERROR_PLAIN,
-  STOCK_PREP_BOARD_ERROR_PLAIN,
-  STOCK_PREP_BLOCKER_PLAIN,
-  STOCK_PREP_SOURCE_BLOCKER_PLAIN,
-  STOCK_PREP_SOURCE_WARNING_PLAIN,
-  STOCK_PREP_ADMIN_ACTION_PLAIN,
-]
+const SOURCE_TABLES_BY_GROUP: Record<string, Record<string, unknown>> = {
+  'error': STOCK_PREP_ERROR_PLAIN,
+  'board-error': STOCK_PREP_BOARD_ERROR_PLAIN,
+  'blocker': STOCK_PREP_BLOCKER_PLAIN,
+  'source-blocker': STOCK_PREP_SOURCE_BLOCKER_PLAIN,
+  'source-warning': STOCK_PREP_SOURCE_WARNING_PLAIN,
+  // Included after review: StockPreparationProjectSyncPanel.vue renders `row.result.reason` as a bare
+  // `<code>`, so these codes DO reach a person as text to look up.
+  'sync-reason': STOCK_PREP_SYNC_REASON_PLAIN,
+  'admin-action': STOCK_PREP_ADMIN_ACTION_PLAIN,
+}
 
 function expectedRowCount(): number {
-  return SIX_SOURCE_TABLES.reduce((total, table) => total + Object.keys(table).length, 0)
+  return Object.values(SOURCE_TABLES_BY_GROUP).reduce((total, table) => total + Object.keys(table).length, 0)
 }
 
 describe('BOM备料 错误码对照抽屉 (P1-6)', () => {
@@ -87,9 +98,9 @@ describe('BOM备料 错误码对照抽屉 (P1-6)', () => {
   // H1 — 防漏
   // ---------------------------------------------------------------------------
 
-  it('H1: renders exactly one row per key across the six source tables, unfiltered', async () => {
+  it('H1: renders exactly one row per key across the source tables, unfiltered', async () => {
     const expected = expectedRowCount()
-    // A positive control on the expectation itself: if this ever reads 0, the six imports above are
+    // A positive control on the expectation itself: if this ever reads 0, the imports above are
     // broken and the test below would pass vacuously.
     expect(expected).toBeGreaterThan(30)
 
@@ -110,6 +121,23 @@ describe('BOM备料 错误码对照抽屉 (P1-6)', () => {
     expect(new Set(pairs).size).toBe(pairs.length)
   })
 
+  it('H1: the COMPOSITION matches too — every group present, with its own exact key set', async () => {
+    // A total-only assertion passes if a table is swapped for a different one of the same size. This
+    // one compares each group's rendered code set against that group's own raw table, so a swapped,
+    // renamed or dropped table fails even at an unchanged total.
+    const root = await mount()
+    const byGroup = new Map<string, string[]>()
+    for (const row of rows(root)) {
+      const group = row.dataset.group!
+      byGroup.set(group, [...(byGroup.get(group) ?? []), row.dataset.code!])
+    }
+    expect([...byGroup.keys()].sort()).toEqual(Object.keys(SOURCE_TABLES_BY_GROUP).sort())
+    for (const [group, table] of Object.entries(SOURCE_TABLES_BY_GROUP)) {
+      expect(byGroup.get(group)!.slice().sort(), `group ${group} must render exactly its own keys`)
+        .toEqual(Object.keys(table).slice().sort())
+    }
+  })
+
   // ---------------------------------------------------------------------------
   // H2 — 搜索
   // ---------------------------------------------------------------------------
@@ -121,10 +149,13 @@ describe('BOM备料 错误码对照抽屉 (P1-6)', () => {
     input.dispatchEvent(new Event('input'))
     await nextTick()
 
+    // Asserted as "narrowed, and the FORBIDDEN row is among the survivors" rather than "exactly one":
+    // the search also scans prose, so a future entry whose sentence happens to contain "forbidden"
+    // would otherwise turn this red for a reason that has nothing to do with the behaviour under test.
     const matched = rows(root)
-    expect(matched.length).toBe(1)
-    expect(matched[0].dataset.code).toBe('FORBIDDEN')
-    expect(root.querySelector('[data-testid="stock-prep-code-help-count"]')?.textContent).toContain('1')
+    expect(matched.length).toBeGreaterThan(0)
+    expect(matched.length).toBeLessThan(expectedRowCount())
+    expect(matched.map((row) => row.dataset.code)).toContain('FORBIDDEN')
   })
 
   it('H2: searching by a PROSE substring narrows to the row(s) whose sentence contains it', async () => {
@@ -214,6 +245,51 @@ describe('BOM备料 错误码对照抽屉 (P1-6)', () => {
       expect(emailPattern.test(blob), `entry ${entry.code} looks like it contains an email`).toBe(false)
       expect(partNumberPattern.test(blob), `entry ${entry.code} looks like it contains a part/drawing number`).toBe(false)
     }
+  })
+
+  // ---------------------------------------------------------------------------
+  // H5 — 抽屉 (collapsed by default) / H6 — 诚实空态
+  // ---------------------------------------------------------------------------
+
+  it('H5: the panel is a native <details>, COLLAPSED on first render, with every row still in the DOM', async () => {
+    const root = await mount()
+    const drawer = root.querySelector('[data-testid="stock-prep-code-help"]') as HTMLDetailsElement
+    expect(drawer, 'the panel root must exist').not.toBeNull()
+    expect(drawer.tagName.toLowerCase(), 'a native <details>, not a div with a class').toBe('details')
+    expect(drawer.open, 'a 抽屉 opens on demand — it must not render expanded').toBe(false)
+    // G6: a native disclosure, never `el-drawer`. The summary is the affordance.
+    expect(root.querySelector('[data-testid="stock-prep-code-help-summary"]')?.tagName.toLowerCase()).toBe('summary')
+
+    // Collapsed hides visually, never structurally: every row (and the search box) is still queryable,
+    // which is what lets StockPreparationInstallView.spec.ts's P1-7c count rows without opening it.
+    expect(rows(root).length).toBe(expectedRowCount())
+    expect(root.querySelector('[data-testid="stock-prep-code-help-search"]')).not.toBeNull()
+  })
+
+  it('H6: the empty state is enumerated (G2) and says "not in this reference", never "no such code" (G4)', async () => {
+    const root = await mount()
+    const input = root.querySelector('[data-testid="stock-prep-code-help-search"]') as HTMLInputElement
+    input.value = 'zzz-not-a-real-code-zzz'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    const empty = root.querySelector('[data-testid="stock-prep-code-help-empty"]') as HTMLElement
+    expect(empty).not.toBeNull()
+    expect(empty.dataset.emptyState, 'G2: every new empty state carries an enumerated value').toBe('code-help-no-match')
+    // G4: an admin pasting a real code from a support thread must not read this as "that code does not
+    // exist" — the copy scopes the miss to this reference and names the next step.
+    expect(empty.textContent).toContain('这不代表这个代码不存在')
+    expect(empty.textContent).toContain('交给管理员')
+  })
+
+  it('H6: the intro makes a BOUNDED claim — it states its own count and disclaims being the全集', async () => {
+    // The first draft opened with 「把系统里能报的每一个代码」 / "Every code this system can raise",
+    // which is falsifiable on sight: plainLanguage.ts has 20+ tables and this drawer reads seven.
+    const root = await mount()
+    const intro = root.querySelector('[data-testid="stock-prep-code-help-intro"]') as HTMLElement
+    expect(intro.textContent).not.toContain('每一个代码')
+    expect(intro.textContent).toContain(String(expectedRowCount()))
+    expect(intro.textContent).toContain('不是全系统所有代码的全集')
   })
 
   it('H4: the rendered panel never contains a realistic planted business value', async () => {

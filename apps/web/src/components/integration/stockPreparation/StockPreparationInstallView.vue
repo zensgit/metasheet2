@@ -45,6 +45,32 @@
     </p>
 
     <!-- ===================================================================
+         数据来源 — WHICH database 备料 reads, chosen here instead of in a
+         server env file.
+
+         It leads the page deliberately. Everything below is "confirm the
+         defaults we ship"; this is the ONE decision that is genuinely the
+         customer's, it is the thing an implementer previously needed a shell
+         and a `pm2 restart` to change, and every table and column the rest of
+         this page creates is worthless pointed at the wrong database. It
+         renders its own gate (platform admin to change, read-only for a
+         `stock-prep:admin` holder) and its own reads, so it neither depends on
+         nor blocks the manifest/preflight panels beneath it.
+
+         P1-7 KEPT IT HERE ON PURPOSE. An earlier draft of this wave moved it
+         into region ③ 「装完之后回来复查」on the strength of design-ops-overview
+         P-5, which lists 源绑定 among the things you come back to. P-5 assigns
+         this panel to this PAGE; it says nothing about where on the page. The
+         wizard's step ③「告诉备料用这条源」has no button, no anchor and no
+         scroll of its own — this panel IS its only execution site — so putting
+         it below ②'s ~240 template lines would leave the wizard pointing at
+         something the reader has to go hunting for. `P1-7b` pins the ordering.
+         =================================================================== -->
+    <!-- @binding-read hands the wizard above THIS panel's server answer (which source 备料 will read,
+         how many the server considers eligible) so steps ①③ project it rather than re-deriving it. -->
+    <StockPreparationSourceBindingPanel :scope="scope" @binding-read="onBindingRead" />
+
+    <!-- ===================================================================
          §14 DEFAULTS FOR CONFIRMATION — rendered FROM the served manifest.
          Nothing below is typed here: an id this page restated would be an id
          a deployment could disagree with, which is the incident the manifest
@@ -75,9 +101,11 @@
            comprehension problem. Splitting changes NOTHING about what is asserted: every row a spec
            reads by testid stays in the DOM (a closed <details> hides visually, never structurally —
            `.textContent` and `querySelector` do not care), and V-02's "zero buttons in this section"
-           holds because `<summary>` is not a `<button>`. -->
+           holds because `<summary>` is not a `<button>`. Each summary keeps the section's `<h4>`
+           INSIDE it rather than replacing it: a disclosure control that is also a heading stays in
+           the screen-reader outline, so heading navigation through these five still works. -->
       <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="objects" open>
-        <summary class="stock-prep-install__h4">{{ bi('会建哪几张表', 'Which tables get created') }}</summary>
+        <summary><h4 class="stock-prep-install__h4">{{ bi('会建哪几张表', 'Which tables get created') }}</h4></summary>
       <table class="stock-prep-install__table">
         <thead>
           <tr>
@@ -118,7 +146,7 @@
       </details>
 
       <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="permissions">
-        <summary class="stock-prep-install__h4">{{ bi('装好之后谁能做什么', 'Who can do what once it is installed') }}</summary>
+        <summary><h4 class="stock-prep-install__h4">{{ bi('装好之后谁能做什么', 'Who can do what once it is installed') }}</h4></summary>
       <ul class="stock-prep-install__list stock-prep-install__list--plain" data-testid="stock-prep-install-permissions">
         <li v-for="code in defaults.permissions.codes" :key="code" data-testid="stock-prep-install-permission-row">
           <strong v-if="permissionPlain(code)">{{ bi(permissionPlain(code)!.zh, permissionPlain(code)!.en) }}</strong>
@@ -144,7 +172,7 @@
       </details>
 
       <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="config-surfaces">
-        <summary class="stock-prep-install__h4">{{ bi('需要在服务器上准备的东西', 'What has to be set up on the server') }}</summary>
+        <summary><h4 class="stock-prep-install__h4">{{ bi('需要在服务器上准备的东西', 'What has to be set up on the server') }}</h4></summary>
       <ul class="stock-prep-install__list stock-prep-install__list--plain">
         <li
           v-for="surface in defaults.configSurfaces"
@@ -168,7 +196,7 @@
       </details>
 
       <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="posture">
-        <summary class="stock-prep-install__h4">{{ bi('系统绝对不会做的事', 'What the system will never do') }}</summary>
+        <summary><h4 class="stock-prep-install__h4">{{ bi('系统绝对不会做的事', 'What the system will never do') }}</h4></summary>
       <p class="stock-prep-install__hint" data-testid="stock-prep-install-no-switch">
         {{ bi(
           '下面这几条是这套部署的硬性边界。本页只报告它们的状态,没有开关可以打开它们 —— 显示「未设」或「关闭」就是正确的,不是漏配。',
@@ -201,7 +229,7 @@
       </details>
 
       <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="acceptance">
-        <summary class="stock-prep-install__h4">{{ bi('怎么算装成功了', 'What counts as installed') }}</summary>
+        <summary><h4 class="stock-prep-install__h4">{{ bi('怎么算装成功了', 'What counts as installed') }}</h4></summary>
       <ul class="stock-prep-install__list stock-prep-install__list--plain" data-testid="stock-prep-install-acceptance">
         <li v-for="criterion in defaults.acceptance.criteria" :key="criterion.id">
           <strong v-if="acceptancePlain(criterion.id)">
@@ -293,29 +321,18 @@
          one-time confirmation read". testids on every card inside are UNCHANGED — this is a wrapper,
          not a rewrite.
 
-         THE ONE REORDER THIS WAVE MAKES: `StockPreparationSourceBindingPanel` moves from ABOVE
-         「即将安装的内容」(where it rendered before this change) to the FIRST card in this region.
-         design-ops-overview.md's own P-5 mapping already places source binding inside "装完回来复查:
-         源绑定、部署预检、源预检、重装" — rebinding a source is exactly a "come back and recheck" act,
-         not a first-read confirmation, so it belongs beside preflight/source-preflight/install-run
-         rather than ahead of the manifest defaults. Nothing internal to the panel changed: its own
-         testids, its own spec (StockPreparationSourceBinding.spec.ts, which mounts it standalone), and
-         its `@binding-read` wiring into the wizard above are all untouched — Vue's event binding does
-         not depend on template position. See the PR body for this reorder called out explicitly.
+         ZERO CARDS MOVE. Every panel below renders in the order it rendered on main; this region is
+         a wrapper plus a heading, nothing else. (An earlier draft of this wave DID move the source-
+         binding panel down into here — see the comment above that panel for why it was put back.)
          =================================================================== -->
     <section class="stock-prep-install__section-group" data-testid="stock-prep-install-review-section">
-      <h2 class="stock-prep-install__h2">{{ bi('装完之后回来复查', 'Come back here to review, after installing') }}</h2>
+      <h3 class="stock-prep-install__section-title">{{ bi('装完之后回来复查', 'Come back here to review, after installing') }}</h3>
       <p class="stock-prep-install__intro" data-testid="stock-prep-install-review-intro">
         {{ bi(
-          '上面「即将安装的内容」是装之前确认一次的默认值。下面这几张卡是您装完之后、或者以后要换源 / 重新体检时会回来看的地方。',
-          'The card above is what you confirm once, before installing. The cards below are where you come back — right after installing, or later to swap the source or run another health check.',
+          '这几张卡是您装完之后、或者以后要重新体检 / 重装时会回来看的地方 —— 装之前只要确认一次默认值就行,不用先读完这里。',
+          'These cards are where you come back — right after installing, or later to run another health check or reinstall. Before installing you only confirm the defaults once; you do not need to read this section first.',
         ) }}
       </p>
-
-      <!-- @binding-read hands the wizard at the TOP of this page that panel's server answer (which
-           source 备料 will read, how many the server considers eligible) so steps ①③ project it rather
-           than re-deriving it — unchanged by this panel's move within the template. -->
-      <StockPreparationSourceBindingPanel :scope="scope" @binding-read="onBindingRead" />
 
     <!-- ===================================================================
          PREFLIGHT — 查. Read tier, provisions nothing. Every blocker now
@@ -851,11 +868,16 @@
       <SchemaMappingCopilotPanel :scope="props.scope" :signals="copilotSignals" />
     </section>
 
-      <!-- P1-6 / I-22: the error-code drawer's entry point THIS WAVE. It is a self-contained, prop-free
-           panel (codeHelp.ts's own contract), so mounting it here is the whole feature — no wiring,
-           no scope, no fetch. It is "暗装" per the takeover discipline: the next wave's 【帮助】rail
-           group reuses this SAME component instance shape rather than a second copy, once rail exists
-           to give it a second entry point. -->
+      <!-- P1-6 / I-22: the error-code drawer's entry point THIS WAVE — a real, visible entry at the
+           foot of this region (NOT "暗装": the component is mounted AND reachable). It is a
+           self-contained, prop-free panel (codeHelp.ts's own contract), so mounting it here is the
+           whole feature — no wiring, no scope, no fetch. The next wave's 【帮助】rail group mounts
+           this SAME component rather than a second copy.
+
+           The panel renders its own collapsed `<details>`: it is a DRAWER (§2.4 P-7 / §6.2 P1-6 /
+           §4.1 I-22 all call it one), so it costs one line of page height until someone has a code to
+           look up. Folding ② and then unfolding 74 rows here would have made this page LONGER than
+           it was before P1-7, which is the exact A13 complaint the wave exists to answer. -->
       <section class="stock-prep-install__card" data-testid="stock-prep-install-code-help">
         <StockPreparationCodeHelpPanel />
       </section>
@@ -1402,9 +1424,10 @@ defineExpose({ loadDefaults, loadPreflight, loadSourcePreflight, startInstall })
   color: var(--ms-text-1);
 }
 
-/* P1-7 region ③'s own heading — one notch heavier than a card's `__h3` so the page reads as
-   ①向导 → ②即将安装的内容 → ③装完之后回来复查 rather than five equal-weight cards. */
-.stock-prep-install__h2 {
+/* P1-7 region ③'s own heading. It is an `<h3>` in the DOM — the SAME level as ②'s card heading and
+   the wizard's, because the three regions are peers — and carries only extra visual weight here, so
+   the page reads as ①向导 → ②即将安装的内容 → ③装完之后回来复查 without an h3→h2 level jump. */
+.stock-prep-install__section-title {
   margin: 0 0 var(--ms-space-2);
   font-size: 16px;
   font-weight: var(--ms-font-weight-title);
@@ -1418,11 +1441,18 @@ defineExpose({ loadDefaults, loadPreflight, loadSourcePreflight, startInstall })
   border-top: 1px solid var(--ms-border-light);
 }
 
-/* The five "即将安装的内容" subsections (P1-7). `<summary>` reuses `__h4`'s type scale; this block adds
-   only what a disclosure needs — pointer cursor, a caret, and a focus ring — the same idiom
-   StockPrepTechnicalDetails.vue already uses elsewhere on this page, restated locally because these
-   five are native `<details>` with no shared component (each one is a plain-language subsection of a
-   single served manifest, not a reusable disclosure). -->
+/* The five "即将安装的内容" subsections (P1-7). Each `<summary>` wraps the section's own `<h4>` — the
+   heading stays a heading (screen-reader outline intact) and the disclosure gains only what a
+   disclosure needs: pointer cursor, a caret, and a focus ring. Same idiom StockPrepTechnicalDetails
+   .vue already uses elsewhere on this page, restated locally because these five are native
+   `<details>` with no shared component (each one is a plain-language subsection of a single served
+   manifest, not a reusable disclosure).
+
+   CLOSE EVERY COMMENT IN THIS BLOCK THE CSS WAY — star-slash. The HTML terminator is not one: PostCSS
+   reads straight past it to the next real terminator and silently deletes every rule in between. It
+   cost 12 rules here once, six of them pre-existing. P1-7d in StockPreparationInstallView.spec.ts
+   parses this block and fails if a named selector stops resolving, because neither vue-tsc nor jsdom
+   can see CSS at all. (Which is also why neither sequence appears literally in this comment.) */
 .stock-prep-install__fold {
   margin: 0 0 var(--ms-space-3);
 }
@@ -1431,6 +1461,12 @@ defineExpose({ loadDefaults, loadPreflight, loadSourcePreflight, startInstall })
   cursor: pointer;
   list-style: none;
   user-select: none;
+}
+
+/* The heading inside the summary sits on the caret's line rather than opening a block of its own. */
+.stock-prep-install__fold > summary > .stock-prep-install__h4 {
+  display: inline;
+  margin: 0;
 }
 
 .stock-prep-install__fold > summary::-webkit-details-marker {
