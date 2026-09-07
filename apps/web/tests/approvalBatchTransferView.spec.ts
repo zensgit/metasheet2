@@ -1096,6 +1096,144 @@ describe('ApprovalBatchTransferView', () => {
   })
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Round-6 item 1 — the OTHER half of the same rule, and the one round 5 got
+  // wrong. The invalidation fires from `useAuth`'s single session-reset funnel,
+  // which a token REFRESH for the same subject also goes through. "Invalidated"
+  // is therefore not "someone else holds this page", and discarding on it threw
+  // away the summary, the per-row outcomes and the toast of a batch the server
+  // had really executed — for the operator who had just submitted it.
+  //
+  // The three tests below plus the two above are the 2×2 (and its no-session
+  // corner): previous principal null or real, next principal same or different.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('keeps an in-flight batch, and the page it belongs to, across a SAME-SUBJECT token refresh', async () => {
+    // Signed in BEFORE the mount, so the page starts holding a real principal key rather than the
+    // `null` every test above starts from. That is what makes the comparison below meaningful.
+    useAuth().setToken(tokenFor('user-a', 'first'))
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+
+    let releasePost: ((value: unknown) => void) | null = null
+    apiPostSpy.mockImplementationOnce(() => new Promise((resolve) => { releasePost = resolve }))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+
+    // THE SAME PERSON, a new token string — a dev-token refresh, or any re-authentication. `nonce`
+    // changes the token while leaving `sub`, so the subject key is provably unchanged; the assertion
+    // is stated rather than assumed so this test cannot go vacuous if `tokenFor` ever changes.
+    const keyBefore = getAuthPrincipalKey()
+    expect(keyBefore).not.toBeNull()
+    useAuth().setToken(tokenFor('user-a', 'refreshed'))
+    await flushUi()
+    expect(getAuthPrincipalKey()).toBe(keyBefore)
+
+    // WHAT IS STILL RE-READ: the capability. The layer re-reads on every transition including this
+    // one, because a same-subject re-authentication is exactly the case its per-principal key cannot
+    // see — the same person's rights changing server-side. That is unchanged here.
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(2)
+
+    // WHAT IS NOT THROWN AWAY: everything on this page belongs to the person still reading it.
+    expect(q(root, 'batch-transfer-row-apv_1')).toBeTruthy()
+    expect(q(root, 'batch-transfer-row-apv_2')).toBeTruthy()
+    expect(q<HTMLInputElement>(root, 'batch-transfer-source-picker').value).toBe('user_from')
+    expect(q<HTMLTextAreaElement>(root, 'batch-transfer-reason').value).toBe('原审批人休假')
+    // And the latch is still held by the operator's OWN request — the refresh must not release a
+    // button whose batch is still in flight.
+    expect(q<HTMLButtonElement>(root, 'batch-transfer-submit').disabled).toBe(true)
+
+    // The server answers the batch it really executed, and the operator who submitted it is told.
+    releasePost!({ ok: true, data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] } })
+    await flushUi()
+
+    expect(q(root, 'batch-transfer-summary')).toBeTruthy()
+    expect(q(root, 'batch-transfer-summary')!.textContent).toContain('2')
+    expect(q(root, 'batch-transfer-submitted-notice')).toBeTruthy()
+    expect(q(root, 'batch-transfer-outcome-apv_1')).toBeTruthy()
+    expect(messageSuccessSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('still drops an in-flight batch when the subject changes from one REAL principal to another', async () => {
+    // The counterpart of the test above on the same starting state: a page that already holds a
+    // principal key. Without this leg, "keep whenever there was a previous principal" would pass
+    // every other test in this file.
+    useAuth().setToken(tokenFor('user-a'))
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+
+    let releasePost: ((value: unknown) => void) | null = null
+    apiPostSpy.mockImplementationOnce(() => new Promise((resolve) => { releasePost = resolve }))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+
+    const keyBefore = getAuthPrincipalKey()
+    useAuth().setToken(tokenFor('user-b'))
+    await flushUi()
+    expect(getAuthPrincipalKey()).not.toBe(keyBefore)
+    expect(q(root, 'batch-transfer-row-apv_1')).toBeNull()
+    expect(q<HTMLInputElement>(root, 'batch-transfer-source-picker').value).toBe('')
+
+    releasePost!({ ok: true, data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] } })
+    await flushUi()
+
+    expect(q(root, 'batch-transfer-summary')).toBeNull()
+    expect(q(root, 'batch-transfer-submitted-notice')).toBeNull()
+    expect(messageSuccessSpy).not.toHaveBeenCalled()
+
+    // POSITIVE CONTROL on the same wiring: B's own batch does settle onto B's page. Without it
+    // every assertion above would also hold on a page that had simply stopped working.
+    apiGetSpy.mockResolvedValue({ data: [listRow('apv_9', 'B 的待办')], total: 1 })
+    await setPicker(root, 'batch-transfer-source-picker', 'user_b_source')
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '接手')
+    apiPostSpy.mockResolvedValue({ ok: true, data: { succeeded: ['apv_9'], skipped: [], affectedRequesterIds: [] } })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(q(root, 'batch-transfer-summary')).toBeTruthy()
+    expect(messageSuccessSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves a page with nothing in flight exactly as it was across a SAME-SUBJECT refresh', async () => {
+    useAuth().setToken(tokenFor('user-a', 'first'))
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+    // A NON-TRIVIAL selection: "all rows still ticked" would also be the state a page that had
+    // dropped and reloaded everything happens to show.
+    const rowCheck = q<HTMLInputElement>(root, 'batch-transfer-row-check-apv_1')
+    rowCheck.checked = false
+    rowCheck.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(q(root, 'batch-transfer-selected-count').textContent).toContain('已选 1 / 2')
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+
+    useAuth().setToken(tokenFor('user-a', 'second'))
+    await flushUi()
+
+    // The capability re-read still happens — kept, not collateral damage of the fix.
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(2)
+    // Nothing else moved: rows, the selection inside them, both pickers and the reason.
+    expect(q(root, 'batch-transfer-row-apv_1')).toBeTruthy()
+    expect(q(root, 'batch-transfer-row-apv_2')).toBeTruthy()
+    expect(q(root, 'batch-transfer-selected-count').textContent).toContain('已选 1 / 2')
+    expect(q<HTMLInputElement>(root, 'batch-transfer-source-picker').value).toBe('user_from')
+    expect(q<HTMLInputElement>(root, 'batch-transfer-target-picker').value).toBe('user_to')
+    expect(q<HTMLTextAreaElement>(root, 'batch-transfer-reason').value).toBe('原审批人休假')
+    // And the list was not silently re-read behind the operator: the rows on screen are the ones
+    // they loaded, not a fresh page that happens to look the same.
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+    expect(q(root, 'batch-transfer-empty')).toBeNull()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Round-5 item 2 — the confirmation is the commitment point for the WHOLE
   // request, not only for its rows and its source approver.
   // ───────────────────────────────────────────────────────────────────────────

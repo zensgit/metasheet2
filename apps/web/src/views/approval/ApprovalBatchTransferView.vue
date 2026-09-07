@@ -244,6 +244,7 @@ import {
   type ApprovalBatchTransferSummary,
 } from '../../approvals/batchTransfer'
 import { useLocale } from '../../composables/useLocale'
+import { getAuthPrincipalKey } from '../../composables/authPrincipal'
 import type { UnifiedApprovalDTO } from '../../types/approval'
 
 const { isZh } = useLocale()
@@ -346,6 +347,23 @@ const loadGeneration = ref(0)
 // auth-transition invalidation below that empties the page, so a settle is discarded when, and only
 // when, the principal it was issued under is no longer the one holding this page.
 const principalGeneration = ref(0)
+function readHeldPrincipal(): string | null {
+  try {
+    return getAuthPrincipalKey()
+  } catch {
+    // A storage read can throw (Safari private mode). `null` never compares equal to a real key
+    // under the rule below, so a page that cannot tell discards rather than keeps — the same safe
+    // direction `adminCapability.ts` takes for the same read.
+    return null
+  }
+}
+// The principal this page's state belongs to, as the SAME key `adminCapability.ts` caches under
+// (`getAuthPrincipalKey`, i.e. the token's subject claim). Round 6 item 1: the invalidation below
+// fires on every session-funnel event, and a dev-token refresh for the SAME subject is one of them
+// — so "invalidated" is not "someone else holds this page", and treating it as such threw away the
+// summary and the toast of a batch the server had really executed. This is the one notion of
+// identity in play; nothing here derives a second one.
+let heldPrincipal: string | null = readHeldPrincipal()
 const totalPending = ref(0)
 const loadingRows = ref(false)
 const loaded = ref(false)
@@ -401,23 +419,55 @@ function clearLoadedBatch(): void {
 // that were ALREADY ISSUED, not only the state on screen: a POST settling after the transition
 // would write A's outcomes, summary and success toast onto B's page. `principalGeneration` below is
 // what makes the claim true of an in-flight submit as well (round-5 item 1).
+//
+// ONLY WHEN THE PRINCIPAL ACTUALLY CHANGED (round-6 item 1). The notification does NOT mean "someone
+// else holds this page": it is fired from `useAuth`'s single session-reset funnel, which a dev-token
+// refresh for the SAME subject also goes through (`useAuth.setToken` → `resetSessionBootstrap`).
+// Discarding on that event threw away the summary, the per-row outcomes and the toast of a batch the
+// server had really executed, for the operator who had just submitted it — a measured regression, not
+// a hypothetical. Everything below is therefore gated on a comparison of the subject before and
+// after, using the one key `adminCapability.ts` already caches under.
+//
+// DEFERRED BY ONE MICROTASK, and that is forced rather than chosen: the funnel ANNOUNCES the
+// transition and writes storage immediately AFTER, so a key read inside the notification is still
+// the outgoing one and every transition would compare equal. `useApprovalAdminCapability.ts:83-91`
+// already defers its own `hasSession()` read for exactly this reason and documents the measurement.
+// A microtask queued here still runs before any later network settle, so a real change is recorded
+// before the in-flight POST it must discard can arrive.
+//
+// WHAT IS NOT GATED, deliberately: the capability itself. `useApprovalAdminCapability` puts the
+// answer back to `pending` and re-reads on EVERY transition including a same-subject one, because
+// that is the case its key cannot see — the same person's rights changing server-side under an
+// unchanged subject (`adminCapability.ts` docblock, mechanism 2). That behaviour is untouched here;
+// this page only stops throwing away ITS OWN state when the person has not changed.
 const capability = useApprovalAdminCapability({
   onInvalidated: () => {
-    // Bumped FIRST, and synchronously: from this tick on, an answer to a request issued by the
-    // principal being replaced is no longer this page's to render (round-5 item 1).
-    principalGeneration.value += 1
-    fromUserId.value = ''
-    toUserId.value = ''
-    reason.value = ''
-    loadedSource.value = ''
-    clearLoadedBatch()
-    // The two SUBMIT transport flags, released here for the same reason `clearLoadedBatch` releases
-    // `loadingRows`: the request they describe is no longer this page's request. Left set, the new
-    // principal inherits a spinning, permanently disabled submit control and CANNOT SUBMIT AT ALL
-    // until the previous principal's round-trip happens to finish — measured, not assumed. The
-    // settle that would have cleared them is now discarded, so this is the only place that can.
-    submitting.value = false
-    confirming.value = false
+    const previous = heldPrincipal
+    void Promise.resolve().then(() => {
+      const next = readHeldPrincipal()
+      heldPrincipal = next
+      // KEPT ONLY ON A PROVEN SAME SUBJECT. `null` on either side is a change: no session is a
+      // distinct principal, and a key this page could not read is not evidence of anything.
+      if (next !== null && next === previous) return
+      // Bumped BEFORE anything is cleared: from here on, an answer to a request issued by the
+      // principal being replaced is no longer this page's to render (round-5 item 1).
+      principalGeneration.value += 1
+      fromUserId.value = ''
+      toUserId.value = ''
+      reason.value = ''
+      loadedSource.value = ''
+      clearLoadedBatch()
+      // The two SUBMIT transport flags, released here for the same reason `clearLoadedBatch`
+      // releases `loadingRows`: the request they describe is no longer this page's request. Left
+      // set, the new principal inherits a spinning, permanently disabled submit control and CANNOT
+      // SUBMIT AT ALL until the previous principal's round-trip happens to finish — measured, not
+      // assumed. The settle that would have cleared them is now discarded, so this is the only
+      // place that can. On a SAME-subject transition none of this runs, and it must not: the
+      // request is still the reader's own, and releasing the latch under it would re-arm a button
+      // whose batch is still in flight.
+      submitting.value = false
+      confirming.value = false
+    })
   },
 })
 

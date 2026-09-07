@@ -67,6 +67,37 @@ vi.mock('../../src/rbac/namespace-admission', () => ({
 
 const CAPABILITY_PATH = '/api/approvals/admin/capability'
 
+/**
+ * Everything a captured `Logger.error(...)` call would carry into the emitted record, flattened into
+ * one searchable string. Used by both disclosure tests below so they cannot drift apart.
+ *
+ * AN ERROR ARGUMENT IS SERIALIZED TWO WAYS, and the second is not redundant. `Logger.error(msg, err)`
+ * folds the error into what it emits, so reading only the message argument would call a "fix" clean
+ * that had merely moved the interpolation into the second argument — hence `name`/`message`/`stack`,
+ * which `JSON.stringify` cannot see because they are not enumerable. But a driver's `code` (and
+ * anything else assigned onto the error, which is how every case below is built) IS an own
+ * enumerable property, and the first form cannot see THAT. A record that leaked the raw `.code`
+ * through a nested error object read as clean until this line was widened.
+ */
+function capturedLogRecord(spy: { mock: { calls: unknown[][] } }): string {
+  return spy.mock.calls
+    .map((call) => call
+      .map((arg) => (arg instanceof Error
+        ? `${arg.name}:${arg.message}:${arg.stack ?? ''}:${JSON.stringify(arg)}`
+        : typeof arg === 'string' ? arg : JSON.stringify(arg)))
+      .join(' '))
+    .join('\n')
+}
+
+/**
+ * The code the fixed message actually carries, read back out of the emitted line. Compared WHOLE:
+ * `toContain('… (UNCLASSIFIED)')` would still pass on a record that had also appended a fragment of
+ * a refused value somewhere else in the same line.
+ */
+function emittedErrorCode(record: string): string | undefined {
+  return /approval admin capability lookup failed \(([^)]*)\)/.exec(record)?.[1]
+}
+
 describe('GET /api/approvals/admin/capability', () => {
   let app: Express
   const pinned = usePinnedServer()
@@ -174,18 +205,11 @@ describe('GET /api/approvals/admin/capability', () => {
       expect(res.body?.error?.code).toBe('APPROVAL_ADMIN_CAPABILITY_FAILED')
       expect(JSON.stringify(res.body)).not.toContain(MARKER)
 
-      // EVERY argument of every call is inspected, not just the message: `Logger.error(msg, err)`
-      // folds `err.message` and `err.stack` into the record it emits, so a "fix" that merely moved
-      // the interpolation into the second argument would look clean and leak exactly as much. An
-      // Error is serialized explicitly because `JSON.stringify` of one yields `{}`.
+      // EVERY argument of every call is inspected, not just the message — see `capturedLogRecord`
+      // for why an Error argument is serialized both by its non-enumerable fields and by
+      // `JSON.stringify`, and which regression each half catches.
       expect(errorSpy).toHaveBeenCalled()
-      const emitted = errorSpy.mock.calls
-        .map((call) => call
-          .map((arg) => (arg instanceof Error
-            ? `${arg.name}:${arg.message}:${arg.stack ?? ''}`
-            : typeof arg === 'string' ? arg : JSON.stringify(arg)))
-          .join(' '))
-        .join('\n')
+      const emitted = capturedLogRecord(errorSpy)
       expect(emitted).not.toContain(MARKER)
       expect(emitted).not.toContain('10.0.0.1')
       // POSITIVE CONTROL: this is not passing because nothing useful was logged. The fixed message
@@ -214,20 +238,33 @@ describe('GET /api/approvals/admin/capability', () => {
     expect(LONG_RUN.length).toBeGreaterThan(40)
 
     const cases: Array<{ what: string; thrown: unknown; expectCode: string; absent?: string[] }> = [
-      // The two REFUSALS. `expectCode` is the constant; `absent` is what must not appear anywhere in
-      // the emitted record — including the stripped form the old implementation would have produced.
+      // The two REFUSALS. `expectCode` is the constant, compared WHOLE against the code the line
+      // actually carries — that comparison is what catches "a fragment of a refused value reached
+      // the code position", which is the strip-and-cap behaviour this rule replaced.
+      //
+      // `absent` covers the REST OF THE RECORD, which the code comparison says nothing about: a
+      // value reaching the log through some OTHER argument (an `err` folded in as
+      // `Logger.error(msg, err)`, a debugging meta object carrying the raw code). Measured, not
+      // assumed — that regression leaves the emitted code at the constant and is caught here and
+      // nowhere else; see `capturedLogRecord` for the serialization it needs to be visible at all.
+      //
+      // A previous revision also listed a hand-written reconstruction of the OLD implementation's
+      // stripped output. It was transcribed wrong — one digit short — so it could never have
+      // matched anything, and its comment asserted a provenance it did not have. A reconstruction
+      // of a different implementation is not evidence about this one, so it is gone rather than
+      // corrected; the whole-value code comparison above is what covers that regression.
       {
         what: 'a long alphanumeric run',
         thrown: Object.assign(new Error('boom'), { code: LONG_RUN }),
         expectCode: 'UNCLASSIFIED',
-        absent: [MARKER, LONG_RUN, LONG_RUN.slice(0, 40)],
+        absent: [MARKER, LONG_RUN],
       },
       {
         what: 'free text with separators',
         thrown: Object.assign(new Error('boom'), { code: `connect ECONNREFUSED 10.0.0.1:5432 password=${MARKER}` }),
         expectCode: 'UNCLASSIFIED',
-        // The stripped form is what the previous implementation emitted for exactly this input.
-        absent: [MARKER, '10.0.0.1', `connectECONNREFUSED10001543password${MARKER}`.slice(0, 40)],
+        // The two secrets this input carries — a host and a credential — named directly.
+        absent: [MARKER, '10.0.0.1'],
       },
       { what: 'an object where a code should be', thrown: Object.assign(new Error('boom'), { code: { toString: () => MARKER } }), expectCode: 'UNCLASSIFIED', absent: [MARKER] },
       // The POSITIVE CONTROLS, and they are what make the two refusals meaningful: this is not
@@ -249,16 +286,11 @@ describe('GET /api/approvals/admin/capability', () => {
         expect(res.status, testCase.what).toBe(500)
         expect(JSON.stringify(res.body), testCase.what).not.toContain(MARKER)
 
-        const emitted = errorSpy.mock.calls
-          .map((call) => call
-            .map((arg) => (arg instanceof Error
-              ? `${arg.name}:${arg.message}:${arg.stack ?? ''}`
-              : typeof arg === 'string' ? arg : JSON.stringify(arg)))
-            .join(' '))
-          .join('\n')
+        const emitted = capturedLogRecord(errorSpy)
 
-        // The message is fixed in every case — the code is the only thing that varies.
-        expect(emitted, testCase.what).toContain(`approval admin capability lookup failed (${testCase.expectCode})`)
+        // The message is fixed in every case — the code is the only thing that varies, and it is
+        // compared whole rather than by containment (see `emittedErrorCode`).
+        expect(emittedErrorCode(emitted), testCase.what).toBe(testCase.expectCode)
         for (const forbidden of testCase.absent ?? []) {
           expect(emitted, `${testCase.what}: ${forbidden.slice(0, 24)}`).not.toContain(forbidden)
         }
