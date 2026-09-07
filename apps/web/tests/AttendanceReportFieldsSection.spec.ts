@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App } from 'vue'
 import AttendanceReportFieldsSection from '../src/views/attendance/AttendanceReportFieldsSection.vue'
 import { apiFetch } from '../src/utils/api'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { load as loadYaml } from 'js-yaml'
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: vi.fn(),
@@ -123,6 +126,23 @@ function formulaEditorPayload(expression = '={late_duration}+1', scope = 'record
 }
 
 describe('AttendanceReportFieldsSection', () => {
+  it('is explicitly selected by both executable CI lanes and the attendance classifier', () => {
+    const filename = 'tests/AttendanceReportFieldsSection.spec.ts'
+    const workflow = loadYaml(readFileSync(resolve(process.cwd(), '../../.github/workflows/attendance-web-guard.yml'), 'utf8')) as {
+      on: { push: { paths: string[] } }
+      jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }>
+    }
+    const runs = Object.values(workflow.jobs).flatMap(job => job.steps).filter(step => step.run).map(step => step.run!)
+    const args = (source: string) => source.replace(/\\\r?\n/g, ' ').split('\n')
+      .map(line => line.replace(/#.*$/, '').trim()).filter(line => /^(?:exec )?(?:npx|pnpm\s+--filter\s+@metasheet\/web\s+exec)\s+vitest run\s/.test(line))
+      .flatMap(line => line.split(/\bvitest run\s+/)[1].trim().split(/\s+/))
+    expect(runs.flatMap(args)).toContain(filename)
+    expect(args(readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8'))).toContain(filename)
+    for (const path of [`apps/web/${filename}`, 'plugins/plugin-attendance/index.cjs', 'plugins/plugin-attendance/lib/attendance-report-cleaning-proposal.cjs']) {
+      expect(workflow.on.push.paths).toContain(path)
+      expect(runs.some(run => run.includes('case "$path" in') && run.includes(`${path}|`))).toBe(true)
+    }
+  })
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
 

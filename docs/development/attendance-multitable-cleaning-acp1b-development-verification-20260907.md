@@ -442,6 +442,26 @@ replaced with actual current membership verification, never a header fallback.
 The existing report-fields behavior is unchanged. This metadata check is not a
 replacement for the apply or generic-list server permissions.
 
+## Product checkpoint and CI tail
+
+Product checkpoint `c659265f72019347958500fcbeba48720b27d644` is clean and retains
+the existing main `976711b254d129e6c23bf8327c4be67018942ba3`; live main was unchanged
+before the tail. The two shared CI files were identical to that main before edits.
+The tail adds the exact report-fields spec to both executable commands and adds
+its test path plus the two attendance CJS paths to attendance push/classifier
+coverage. No old tokens, paths or flags are removed.
+
+Using Vitest 1.6.1's actual `globTestFiles` and parsed CLI filters against current
+web configuration, attendance coverage is 63→64 tokens / 64→65 files; required
+coverage is 444→445 tokens / 513→514 files. In each lane the sole newly collected
+file is `tests/AttendanceReportFieldsSection.spec.ts`; no previous file is lost.
+Full local file census is retained at `tmp/acp1b-ci-census.json` with its harness.
+The dedicated spec now pins the parsed executable argv and classifier/push paths.
+Removing its workflow token fails that assertion; restoring and independently
+removing the required-script token also fails. Both mutations are restored.
+Initial census parsing preserved empty arguments across multiline shell whitespace;
+normalizing shell whitespace fixed the harness, not a selector/product defect.
+
 Retained failed setup evidence: an early static authority import initialized the
 DB pool before test environment setup, causing a driver-default connection error
 and timeout. Imports are now inside the test after server initialization; real-DB
