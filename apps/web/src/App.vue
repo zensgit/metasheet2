@@ -73,6 +73,16 @@
         </label>
         <template v-if="isLoggedIn">
           <span v-if="accountEmail" class="nav-user" :title="accountEmail">{{ accountEmailDisplay }}</span>
+          <!-- P1b slice 2: the SELF-SERVICE delegation entry. `/my-delegation` is requiresAuth-only
+               (the delegator is forced to the actor server-side), but until now its only entry point
+               in the whole app was TemplateCenterView's 委托管理 button — which is gated on
+               `approval-templates:manage` and points at the ADMIN surface `/approval-delegations`.
+               An ordinary approver therefore had no way to reach their own delegation page except by
+               typing the URL. This is the account-area (user menu) counterpart; the admin button is
+               left exactly as it was. Deliberately narrowed to approvals:read holders — the same
+               gate the 审批中心 link uses — so the account area stays quiet for principals who
+               cannot see approvals at all. -->
+          <router-link v-if="canUseApprovals" to="/my-delegation" class="nav-link" data-testid="nav-my-delegation">{{ navLabels.myDelegation }}</router-link>
           <router-link to="/settings" class="nav-link">{{ navLabels.mySessions }}</router-link>
           <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
         </template>
@@ -166,6 +176,7 @@ const navLabels = computed(() => {
       plm: 'PLM',
       audit: '审计',
       plmWorkbench: 'PLM 工作台',
+      myDelegation: '我的委托',
       mySessions: '我的会话',
       signOut: '退出登录',
       language: '语言',
@@ -191,6 +202,7 @@ const navLabels = computed(() => {
     plm: 'PLM',
     audit: 'Audit',
     plmWorkbench: 'PLM Workbench',
+    myDelegation: 'My Delegation',
     mySessions: 'My Sessions',
     signOut: 'Sign out',
     language: 'Language',

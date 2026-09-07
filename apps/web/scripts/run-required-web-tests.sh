@@ -594,15 +594,20 @@ npx vitest run approval-detail-instance-consistency approval-store-detail-genera
 #   * `approvalNavTodoBadge` — the app-shell 待办 badge on the top-nav 审批中心 entry: it is bound to
 #     the fetched pending count, moves on a realtime push without a second read, keeps the nav
 #     link's own text unchanged, hides on zero/failure, and renders for approvals:read only.
+#   * `approvalNavDelegationEntry` — the non-admin /my-delegation entry in the account area of the
+#     nav, plus the tripwires that the ADMIN 委托管理 button and the self-service route's own
+#     requiresAuth-only meta were both left as they were.
 #
 # SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
 # file using this file's own counting rule (join backslash continuations, drop comment lines, take
 # every whitespace-separated argument of an `npx vitest run` command that does not start with `-`;
-# that yields 439 before this change). `approvalNavTodoBadge` neither contains nor is contained by
-# any existing token — in particular the neighbouring `approvalCenterRemindBadge` /
-# `approvalCenterUnreadBadge` share only the `approval` prefix with it. Verified green in isolation
-# (`npx vitest run approvalNavTodoBadge --reporter=dot` → "Test Files 1 passed") before wiring.
-npx vitest run approvalNavTodoBadge --reporter=dot
+# that yields 439 before this change). Neither new token contains, nor is contained by, any existing
+# one — in particular the neighbouring `approvalCenterRemindBadge` / `approvalCenterUnreadBadge`
+# share only the `approval` prefix with `approvalNavTodoBadge`, and `approvalDelegationForm` /
+# `approvalDelegationRoute` / `approvalDelegationStatus` / `approvalDelegationView` /
+# `myDelegationView` are unrelated to `approvalNavDelegationEntry` in both directions. Each verified
+# green in isolation (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") before wiring.
+npx vitest run approvalNavTodoBadge approvalNavDelegationEntry --reporter=dot
 
 # 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
 # batch below, StockPreparationSourcePreflight — a NEW spec
