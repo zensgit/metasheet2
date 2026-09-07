@@ -587,6 +587,23 @@ npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
 # (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") and in this batch before wiring.
 npx vitest run approval-detail-instance-consistency approval-store-detail-generation --reporter=dot
 
+# 审批可发现性 (approval discoverability), 2026-09-07. Tokens are BARE BASENAMES, as
+# packages/core-backend/tests/unit/approval-ci-coverage-enumeration.ts's T1 tier requires (each of
+# these files matches /^approval.*\.(test|spec)\.ts$/, and an incidental substring match is
+# explicitly rejected there).
+#   * `approvalNavTodoBadge` — the app-shell 待办 badge on the top-nav 审批中心 entry: it is bound to
+#     the fetched pending count, moves on a realtime push without a second read, keeps the nav
+#     link's own text unchanged, hides on zero/failure, and renders for approvals:read only.
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
+# file using this file's own counting rule (join backslash continuations, drop comment lines, take
+# every whitespace-separated argument of an `npx vitest run` command that does not start with `-`;
+# that yields 439 before this change). `approvalNavTodoBadge` neither contains nor is contained by
+# any existing token — in particular the neighbouring `approvalCenterRemindBadge` /
+# `approvalCenterUnreadBadge` share only the `approval` prefix with it. Verified green in isolation
+# (`npx vitest run approvalNavTodoBadge --reporter=dot` → "Test Files 1 passed") before wiring.
+npx vitest run approvalNavTodoBadge --reporter=dot
+
 # 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
 # batch below, StockPreparationSourcePreflight — a NEW spec
 # (apps/web/tests/StockPreparationSourcePreflight.spec.ts) over the same StockPreparationInstallView

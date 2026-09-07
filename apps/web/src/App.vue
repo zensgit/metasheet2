@@ -12,14 +12,24 @@
             <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
-            <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <!-- P1b slice 1: the 待办 badge is a SIBLING of the link, never a child of it, so the
+                 nav link's own text stays exactly the label (see approvalNavTodoBadge.spec.ts).
+                 The two are wrapped in ONE flex item so `.nav-links`' 8px gap falls between this
+                 pair and the NEXT entry, not between the label and its own badge. -->
+            <span v-if="canUseApprovals" class="nav-approvals">
+              <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+              <ApprovalTodoBadge :label="navLabels.approvalTodo" />
+            </span>
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
             <router-link to="/apps" class="nav-link">{{ navLabels.apps }}</router-link>
             <router-link to="/multitable" class="nav-link">{{ navLabels.multitable }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
-            <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <span v-if="canUseApprovals" class="nav-approvals">
+              <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+              <ApprovalTodoBadge :label="navLabels.approvalTodo" />
+            </span>
             <router-link
               v-for="item in pluginNavItems"
               :key="item.id"
@@ -81,6 +91,7 @@ import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
+import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { STOCK_PREP_ROUTE_PERMISSION } from './services/integration/stockPreparation/workbenchAccess'
@@ -139,6 +150,8 @@ const navLabels = computed(() => {
       multitable: '多维表',
       workflows: '流程',
       approvals: '审批中心',
+      // Values-free: names the surface, never the count or any row content.
+      approvalTodo: '待办审批',
       apps: '应用',
       users: '用户',
       roles: '角色',
@@ -163,6 +176,7 @@ const navLabels = computed(() => {
     multitable: 'Multitable',
     workflows: 'Workflows',
     approvals: 'Approvals',
+    approvalTodo: 'Pending approvals',
     apps: 'Apps',
     users: 'Users',
     roles: 'Roles',
@@ -309,6 +323,15 @@ html, body {
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
+}
+
+/* P1b slice 1: groups the 审批中心 link with its 待办 badge into a single `.nav-links` flex item.
+   Without it the badge is a peer entry — `.nav-links` puts its 8px gap on BOTH sides of it, so the
+   badge sits as far from its own label as from the next nav entry. */
+.nav-approvals {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
 }
 
 .nav-links::-webkit-scrollbar {
