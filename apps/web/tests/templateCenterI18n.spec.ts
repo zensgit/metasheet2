@@ -402,11 +402,13 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     const tabLabels = Array.from(root.querySelectorAll('[data-tab-pane]')).map((p) => p.getAttribute('data-tab-label'))
     expect(tabLabels).toEqual(['All', 'Published', 'Draft', 'Archived'])
 
-    // Column HEADER text is not observable through this file's ElTable/ElTableColumn stub (it
-    // only renders per-row cell content, mirroring approvalTemplateGovernance.spec.ts's own
-    // stub — the `:label` bindings are exercised directly in templateCenterLabels.spec-adjacent
-    // fashion by every OTHER assertion in this file reading a column's actual rendered VALUE,
-    // which only renders at all when the label prop threaded through correctly).
+    // Column HEADER text is not observable through this file's ElTable/ElTableColumn stub — it
+    // only renders per-row cell content (mirroring approvalTemplateGovernance.spec.ts's own
+    // stub), so a column's `:label` binding is not asserted on directly by name. It IS exercised
+    // indirectly: the two `[data-el-cell="<label>"]` selectors just below key on the RESOLVED
+    // `t.colCategory`/`t.colVisibility` string, so they only match (rather than returning null)
+    // when that binding resolved to the expected locale's text — a wrong/missing label would
+    // fail those two lookups, not silently pass.
     //
     // Row chrome: category empty state, visibility summary, status badge, action buttons. The
     // visibility/category cells carry no data-testid of their own (ElTag's stub drops unknown
