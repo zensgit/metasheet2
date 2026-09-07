@@ -616,6 +616,17 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     const disabled = container!.querySelector('[data-testid="approval-attachment-disabled"]')
     expect(disabled).toBeTruthy()
     expect(disabled?.textContent).toContain('附件上传功能即将支持')
+    // Slice A (approval-attachment-roundtrip-guard, #4195 §7/§11 G1): pin the OFF-path placeholder
+    // BYTE-IDENTICALLY, not just via the loose textContent/data-testid checks above — a rung-4 change
+    // ("flip authorability + retire B2-28") is only allowed once the flag is ratified ON and rungs
+    // 1-3 have landed (design-lock §7); this exact string is the tripwire that a rung-4-shaped edit
+    // touched the OFF markup ahead of that ratify. `data-v-*` is Vue's scoped-style attribute — it is
+    // a hash of this component's resolved module id, not of its content (verified stable against an
+    // unrelated same-file edit), so it stays fixed across CI runs and only moves if the component's
+    // file path itself moves.
+    expect(disabled?.outerHTML).toBe(
+      '<div data-v-7078a16d="" class="approval-new__attachment-disabled" data-testid="approval-attachment-disabled"> 附件上传功能即将支持，请先在其他字段中注明附件信息。 </div>',
+    )
 
     expect(container!.querySelector('[data-el-upload]')).toBeNull()
 
