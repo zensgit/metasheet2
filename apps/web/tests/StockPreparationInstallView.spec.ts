@@ -640,6 +640,32 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // P0-8 — action → result → AUTO-REREAD: a successful run repaints the preflight card on its own.
+  // ---------------------------------------------------------------------------
+
+  it('P0-8: a successful install run RE-READS the preflight card — no separate click needed', async () => {
+    h.permissions = ['stock-prep:admin', 'integration:admin']
+    // A mutable behaviour object: `installRoutes` closes over it and re-reads `.preflightReady` on
+    // EVERY GET, so flipping it between actions simulates "the run itself fixed what the earlier
+    // check complained about" without a second `installRoutes()` call tearing down the mock.
+    const behaviour: RouteBehaviour = { preflightReady: false, packs: [] }
+    installRoutes(behaviour)
+    const root = await mountView()
+
+    ;(root.querySelector('[data-testid="stock-prep-install-preflight-run"]') as HTMLButtonElement).click()
+    await flush()
+    expect(text(root, '[data-testid="stock-prep-install-preflight-result"]')).toContain('未就绪')
+
+    behaviour.preflightReady = true
+    ;(root.querySelector('[data-testid="stock-prep-install-run"]') as HTMLButtonElement).click()
+    await flush(14)
+
+    // The run's OWN final preflight read repaints this line — the "检查一下" button above was
+    // pressed exactly once, before the run, never again.
+    expect(text(root, '[data-testid="stock-prep-install-preflight-result"]')).toContain('都齐了')
+  })
+
+  // ---------------------------------------------------------------------------
   // V-08 a proxy answering 200 with HTML must not read as a finished install
   // ---------------------------------------------------------------------------
 

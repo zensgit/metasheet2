@@ -68,6 +68,10 @@ import {
   recordStockPrepProjectVisit,
 } from '../src/services/integration/stockPreparation/operatorHomeMemory'
 import type { StockPreparationOperatorDirectory, StockPreparationOperatorProject } from '../src/services/integration/stockPreparation/confirmationQueue'
+import {
+  readStockPreparationOperatorHomeDirectory,
+  resetStockPreparationOperatorHomeDirectoryThrottle,
+} from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 
 const SCOPE = { tenantId: 'tenant-a', workspaceId: 'workspace-default' }
 const OTHER_SCOPE = { tenantId: 'tenant-b', workspaceId: 'workspace-default' }
@@ -350,6 +354,10 @@ describe('三处徽标同词一致 (P0-6) — home card / workspace title / sync
     h.locale = 'zh-CN'
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
     try { window.localStorage.clear() } catch { /* jsdom always has it; guard anyway */ }
+    // P0 补项 4c: the board's OWN directory read is throttled (operatorHomeDirectory.ts). Reset
+    // between tests so a fixture two tests ago cannot silently answer THIS test's mount — every test
+    // below starts with a genuinely cold cache, exactly as it behaved before the throttle existed.
+    resetStockPreparationOperatorHomeDirectoryThrottle()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -631,5 +639,177 @@ describe('预读失败静默 (G3) + 空态三值互不共享文案 (P0-2)', () =
     } finally {
       unmount()
     }
+  })
+
+  // P0 补项 5 (U2 契约): a pull-target-only row per 设计稿 N1 has NO archive `projectId` — the row's
+  // whole point is that a floor operator's own pull wrote no MVP archive row to take one from. Cards
+  // are built and keyed off `projectNo` (operatorHomeCards.ts never reads `projectId` at all), so this
+  // must not crash the merge and must not leave the card without its primary button.
+  it('a projectId=null (pull-target-only) directory row still gets a card with a working primary action', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: directoryWith({ projectId: null, pendingDecisionCount: 2, sources: ['pull_target'] }),
+      directoryLoaded: true,
+    })
+    try {
+      expect(root.querySelector('[data-testid="stock-prep-operator-home-card"]')).not.toBeNull()
+      const action = root.querySelector('[data-testid="stock-prep-operator-home-card-action"]') as HTMLButtonElement
+      expect(action).not.toBeNull()
+      expect(action.disabled).toBe(false)
+    } finally {
+      unmount()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// U2 契约 (P0 补项 5) — 首页三句提示,互斥、旧后端降级
+// ---------------------------------------------------------------------------
+
+describe('首页目录三句提示 (U2 契约) — StockPreparationOperatorHome.vue', () => {
+  const BANNER = 'stock-prep-operator-home-pull-banner'
+
+  function bannerText(root: HTMLElement): string {
+    return root.querySelector(`[data-testid="${BANNER}"]`)?.textContent ?? ''
+  }
+
+  it('pullTargetReady === false renders the FIRST sentence', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: { ...emptyDirectory(), pullTargetReady: false },
+      directoryLoaded: true,
+    })
+    try {
+      const banner = root.querySelector(`[data-testid="${BANNER}"]`)
+      expect(banner).not.toBeNull()
+      expect(banner!.getAttribute('data-pull-banner')).toBe('pull_target_unreadable')
+      expect(bannerText(root)).toContain('自助拉取的项目这次读不到')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('pullTargetScanCapped === true renders the SECOND sentence (a standing cap, not a broken read)', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: { ...emptyDirectory(), pullTargetReady: true, pullTargetScanCapped: true, directoryMayBeIncomplete: true },
+      directoryLoaded: true,
+    })
+    try {
+      const banner = root.querySelector(`[data-testid="${BANNER}"]`)
+      expect(banner!.getAttribute('data-pull-banner')).toBe('pull_target_scan_capped')
+      expect(bannerText(root)).toContain('超过一次扫描的上限')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('directoryMayBeIncomplete === true ALONE (neither of the two more specific flags) renders the THIRD sentence', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: { ...emptyDirectory(), pullTargetReady: true, pullTargetScanCapped: false, directoryMayBeIncomplete: true },
+      directoryLoaded: true,
+    })
+    try {
+      const banner = root.querySelector(`[data-testid="${BANNER}"]`)
+      expect(banner!.getAttribute('data-pull-banner')).toBe('directory_may_be_incomplete')
+      expect(bannerText(root)).toContain('目录本次可能不全')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('all three flags false/absent renders NO banner at all', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: { ...emptyDirectory(), pullTargetReady: true, pullTargetScanCapped: false, directoryMayBeIncomplete: false },
+      directoryLoaded: true,
+    })
+    try {
+      expect(root.querySelector(`[data-testid="${BANNER}"]`)).toBeNull()
+    } finally {
+      unmount()
+    }
+  })
+
+  it('MUTUALLY EXCLUSIVE: pullTargetReady=false wins over directoryMayBeIncomplete=true (priority order, at most one sentence)', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      directory: { ...emptyDirectory(), pullTargetReady: false, pullTargetScanCapped: false, directoryMayBeIncomplete: true },
+      directoryLoaded: true,
+    })
+    try {
+      expect(root.querySelectorAll(`[data-testid="${BANNER}"]`).length).toBe(1)
+      expect(root.querySelector(`[data-testid="${BANNER}"]`)!.getAttribute('data-pull-banner')).toBe('pull_target_unreadable')
+    } finally {
+      unmount()
+    }
+  })
+
+  // THE OLD-BACKEND DEGRADE. A pre-U2 backend (or a directory this page did not opt the union into)
+  // OMITS all four keys — `undefined`, not `false`. Coercing "unknown" into "false" would show the
+  // most alarming sentence on every deployment that simply predates the contract.
+  it('an older backend’s shape (no new fields at all) shows NONE of the three sentences', () => {
+    const { root, unmount } = mountIsolated(StockPreparationOperatorHome, {
+      // The exact pre-N1 key set — `pullTargetReady`/`pullTargetScanCapped`/`directoryMayBeIncomplete`
+      // are absent, not present-and-false.
+      directory: emptyDirectory(),
+      directoryLoaded: true,
+    })
+    try {
+      expect(root.querySelector(`[data-testid="${BANNER}"]`)).toBeNull()
+    } finally {
+      unmount()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P0 补项 4c — 首页目录读的 5 秒节流 (operatorHomeDirectory.ts)
+// ---------------------------------------------------------------------------
+
+describe('首页目录读节流 (P0 补项 4c) — operatorHomeDirectory.ts', () => {
+  beforeEach(() => {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    h.apiFetch.mockReset()
+    h.apiFetch.mockImplementation(async () => ok(emptyDirectory()))
+  })
+
+  afterEach(() => {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    vi.clearAllMocks()
+  })
+
+  it('two calls within the 5s window share ONE live request', async () => {
+    await readStockPreparationOperatorHomeDirectory(SCOPE)
+    await readStockPreparationOperatorHomeDirectory(SCOPE)
+    expect(h.apiFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('the one request it does make opts into the pull-target U2 flag only', async () => {
+    await readStockPreparationOperatorHomeDirectory(SCOPE)
+    const url = String(h.apiFetch.mock.calls[0]?.[0] ?? '')
+    expect(url).toContain('includePullTargets=1')
+    expect(url).not.toContain('includePendingCounts')
+  })
+
+  it('a DIFFERENT scope is not held back by another scope’s window', async () => {
+    await readStockPreparationOperatorHomeDirectory(SCOPE)
+    await readStockPreparationOperatorHomeDirectory(OTHER_SCOPE)
+    expect(h.apiFetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('a call AFTER the window issues a fresh request', async () => {
+    vi.useFakeTimers()
+    try {
+      await readStockPreparationOperatorHomeDirectory(SCOPE)
+      vi.advanceTimersByTime(5001)
+      await readStockPreparationOperatorHomeDirectory(SCOPE)
+      expect(h.apiFetch).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a FAILED read does not poison the window — the very next call retries rather than replaying the failure', async () => {
+    h.apiFetch.mockRejectedValueOnce(new Error('network'))
+    await expect(readStockPreparationOperatorHomeDirectory(SCOPE)).rejects.toThrow()
+    h.apiFetch.mockImplementation(async () => ok(emptyDirectory()))
+    await expect(readStockPreparationOperatorHomeDirectory(SCOPE)).resolves.toBeTruthy()
+    expect(h.apiFetch).toHaveBeenCalledTimes(2)
   })
 })

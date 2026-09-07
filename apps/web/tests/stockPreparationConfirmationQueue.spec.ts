@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
 
 /**
  * `confirmationQueue.ts` is the client for the ONLY tab a floor stock-prep operator can see
@@ -19,11 +20,41 @@ vi.mock('../src/utils/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }))
 
+// P0-8's shell-mounting describe block (below) needs the same three composables every other
+// component-level stock-prep spec mocks. Kept as plain module state (not `vi.hoisted`) — the SAME
+// idiom `apiFetchMock` above already relies on: both this and the `vi.mock` calls below sit ABOVE
+// every `import` in this file, so no reordering is needed for the factories to see them initialised.
+const shellState = { locale: 'zh-CN', permissions: ['integration:admin', 'stock-prep:read'] as string[] }
+
+vi.mock('../src/composables/useLocale', () => ({
+  useLocale: () => ({
+    locale: ref(shellState.locale),
+    isZh: ref(shellState.locale === 'zh-CN'),
+    setLocale: vi.fn(),
+  }),
+}))
+
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getToken: () => 'session-token',
+    clearToken: vi.fn(),
+    getAccessSnapshot: () => ({ isAdmin: false, email: '' }),
+    hasPermission: (permission: string) => shellState.permissions.includes(permission),
+  }),
+}))
+
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: {} }),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+}))
+
 import {
   listStockPreparationDecisions,
   readStockPreparationDecisionReadiness,
   readStockPreparationValueEntry,
 } from '../src/services/integration/stockPreparation/confirmationQueue'
+import StockPreparationWorkspace from '../src/components/integration/stockPreparation/StockPreparationWorkspace.vue'
+import { STOCK_PREP_ADMIN_ACTION_PLAIN } from '../src/services/integration/stockPreparation/plainLanguage'
 
 function jsonResponse(body: unknown, init: { status?: number; ok?: boolean } = {}): Response {
   const status = init.status ?? 200
@@ -96,5 +127,184 @@ describe('confirmationQueue request URLs (O1 — the query string must be separa
     const url = apiFetchMock.mock.calls[0]?.[0] as string
     expect(url).toBe('/api/integration/stock-preparation/confirmation-decisions/readiness')
     expect(url.endsWith('?')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P0-8 — action → result → AUTO-RELOAD. Mounts the REAL shell (StockPreparationWorkspace), because
+// the reconcile call and the reload-after-success wiring both live there, not in the queue view
+// alone: the shell owns the POST, and the queue only exposes `loadQueue()` for the shell to call.
+// ---------------------------------------------------------------------------
+
+describe('P0-8 — 对账(reconcile)成功后队列自动重读,失败不重读', () => {
+  let app: VueApp | null = null
+  let container: HTMLDivElement | null = null
+  const PROJECT_NO = '230920006'
+
+  function directoryPayload(): Record<string, unknown> {
+    return { tenantId: 'default', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+  }
+
+  function queuePayload(rowCount: number): Record<string, unknown> {
+    return { rowCount, byStatus: {}, byResolutionAction: {}, parkedCount: 0, rows: [] }
+  }
+
+  function ok(data: unknown): Response {
+    return new Response(JSON.stringify({ ok: true, data }), { status: 200 })
+  }
+
+  async function flush(cycles = 8): Promise<void> {
+    for (let turn = 0; turn < cycles; turn += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  beforeEach(() => {
+    shellState.locale = 'zh-CN'
+    shellState.permissions = ['integration:admin', 'stock-prep:read']
+    apiFetchMock.mockReset()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function openQueueFor(projectNo: string): Promise<void> {
+    app = createApp(StockPreparationWorkspace as Component)
+    app.mount(container!)
+    await flush()
+    const input = container!.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
+    input.value = projectNo
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(container!.querySelector('[data-testid="stock-prep-confirmation-queue-refresh"]') as HTMLButtonElement).click()
+    await flush()
+  }
+
+  function countsText(): string {
+    return container!.querySelector('[data-testid="stock-prep-confirmation-counts"]')?.textContent ?? ''
+  }
+
+  it('a SUCCESSFUL reconcile reloads the queue on THIS SAME tab — no manual refresh needed', async () => {
+    let queueGetCount = 0
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method ?? 'GET').toUpperCase()
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (method === 'POST' && path.includes('/confirmation-decisions/reconcile')) {
+        return ok({ counts: { created: 0, existing: 0, pending: 5 } })
+      }
+      if (method === 'GET' && path.includes('/confirmation-decisions')) {
+        queueGetCount += 1
+        // The FIRST read (the operator's own 刷新列表 press) sees nothing pending; the SECOND — the
+        // auto-reload this test is about, pressed by nobody — sees what the reconcile just found.
+        return ok(queuePayload(queueGetCount === 1 ? 0 : 5))
+      }
+      return ok({})
+    })
+
+    await openQueueFor(PROJECT_NO)
+    expect(queueGetCount, 'the operator\'s own 刷新列表 press').toBe(1)
+    expect(countsText()).toContain('0')
+
+    ;(container!.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(queueGetCount, 'the shell reloaded the queue after the reconcile succeeded — nobody pressed refresh a second time').toBe(2)
+    expect(countsText()).toContain('5')
+  })
+
+  it('a FAILED reconcile does NOT reload the queue — the numbers on screen are exactly what they were', async () => {
+    let queueGetCount = 0
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method ?? 'GET').toUpperCase()
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (method === 'POST' && path.includes('/confirmation-decisions/reconcile')) {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'no' } }), { status: 403 })
+      }
+      if (method === 'GET' && path.includes('/confirmation-decisions')) {
+        queueGetCount += 1
+        return ok(queuePayload(0))
+      }
+      return ok({})
+    })
+
+    await openQueueFor(PROJECT_NO)
+    expect(queueGetCount).toBe(1)
+
+    ;(container!.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    await flush()
+
+    // The refusal DID produce a notice — but it did not trigger a second queue read.
+    expect(container!.querySelector('[data-testid="stock-prep-admin-action-notice"]')).not.toBeNull()
+    expect(queueGetCount, 'a failure reloads nothing — the numbers on screen stay exactly what they were').toBe(1)
+  })
+
+  // 验收 9's other half: 「页面上不再出现『再手动点一次刷新』」. The reload above is only half the fix —
+  // while the success sentence still ended with 「请点上面的「刷新列表」」 the screen said both things at
+  // once, and the copy contradicted the behaviour rather than describing it.
+  it('验收 9: the success notice does not send the reader back to a button the shell already pressed', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method ?? 'GET').toUpperCase()
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (method === 'POST' && path.includes('/confirmation-decisions/reconcile')) return ok({ counts: {} })
+      if (method === 'GET' && path.includes('/confirmation-decisions')) return ok(queuePayload(0))
+      return ok({})
+    })
+
+    await openQueueFor(PROJECT_NO)
+    ;(container!.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    await flush()
+
+    const notice = container!.querySelector('[data-testid="stock-prep-admin-action-notice"]')!
+    expect(notice.textContent).toContain('已经重新扫描过一遍')
+    expect(notice.textContent, 'the queue was reloaded FOR them — telling them to press it is now a lie').not.toContain('刷新列表')
+    // Read from the SHIPPED table, so the sentence cannot be fixed on screen and left stale at source.
+    expect(STOCK_PREP_ADMIN_ACTION_PLAIN.RECONCILE_OK.zh).not.toContain('刷新列表')
+    expect(STOCK_PREP_ADMIN_ACTION_PLAIN.RECONCILE_OK.en).not.toContain('Refresh the list')
+  })
+
+  // I-18 says 「任一管理动作完成 → 动作 → 结果 → 自动重读」, and 建立确认账本 is the action whose result is
+  // most visible: it flips `ledgerReady`, which is what the `ledger_missing` empty state (and its
+  // 去装 button) hangs off. That flag arrives in the DIRECTORY payload, so the DIRECTORY is what has
+  // to be re-read — reloading the queue would leave the dead end sitting there until a manual refresh.
+  it('P0-8: a successful 建立确认账本 re-reads the directory, so the ledger_missing dead end does not survive its own fix', async () => {
+    shellState.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:operate']
+    let directoryGetCount = 0
+    let ledgerReady = false
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method ?? 'GET').toUpperCase()
+      const path = String(url)
+      if (path.includes('/operator/projects')) {
+        directoryGetCount += 1
+        return ok({ ...directoryPayload(), ledgerReady })
+      }
+      if (method === 'POST' && path.includes('/confirmation-decisions/ensure')) {
+        ledgerReady = true
+        return ok({})
+      }
+      if (method === 'GET' && path.includes('/confirmation-decisions')) return ok(queuePayload(0))
+      return ok({})
+    })
+
+    app = createApp(StockPreparationWorkspace as Component)
+    app.mount(container!)
+    await flush()
+    expect(directoryGetCount, 'the queue reads its directory once on mount').toBe(1)
+
+    ;(container!.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(container!.querySelector('[data-testid="stock-prep-admin-action-notice"]')?.textContent).toContain('确认账本已经就位')
+    expect(directoryGetCount, 'and re-reads it once the table it was waiting for exists').toBe(2)
   })
 })

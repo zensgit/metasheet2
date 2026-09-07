@@ -77,6 +77,7 @@ import {
   STOCK_PREP_OPERATOR_PULL_STEPS,
   STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
+import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 
 const backendAccess = require('../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs')
 
@@ -254,6 +255,11 @@ describe('项目备料页 — the operator project board', () => {
     routeApi()
     routerPush.mockReset()
     routerReplace.mockReset()
+    // P0 补项 4c: the board's directory read is throttled per scope (operatorHomeDirectory.ts). Every
+    // test in this file uses the SAME `SCOPE`, so a cold cache per test keeps each mount's directory
+    // fetch behaving exactly as it did before the throttle existed — no test here is ABOUT the
+    // throttle itself (that lives in StockPreparationOperatorHome.spec.ts).
+    resetStockPreparationOperatorHomeDirectoryThrottle()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -1143,5 +1149,109 @@ describe('项目备料页 — the operator project board', () => {
   it('P0-6: the workspace title carries a posture badge', async () => {
     const root = await mountBoard()
     expect(root.querySelector('[data-testid="stock-prep-project-board-posture"]')).not.toBeNull()
+  })
+
+  // ---- P0-9: 缺件卡 (I-4) — top consequence + bottom closure, both already/newly present ---------
+
+  it('P0-9 / I-4: 缺件卡 carries the top consequence sentence AND the bottom closure line, with the count tooltip', async () => {
+    const syncApi = syncApiDouble({
+      dryRun: vi.fn().mockResolvedValue({
+        canApply: true,
+        dryRunToken: 'tok_missing',
+        counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 },
+        evidence: {},
+        projectName: PROJECT_NAME,
+        missingComponents: {
+          distinctCount: 2,
+          probeCount: 3,
+          truncated: false,
+          items: [
+            { componentSourceId: 'C-1', parentSourceId: 'P-1', bomId: 'BOM-1', depth: 1, occurrenceCount: 2, parentCount: 1, path: 'Root' },
+            { componentSourceId: 'C-2', parentSourceId: 'P-2', bomId: 'BOM-1', depth: 2, occurrenceCount: 1, parentCount: 1, path: 'Root/P-2' },
+          ],
+        },
+      }),
+    })
+    const root = await mountBoard({ syncApi })
+    await runPullPanel(root)
+
+    const box = root.querySelector('[data-testid="stock-prep-project-sync-missing-components"]') as HTMLElement
+    expect(box).not.toBeNull()
+    // I-4's top sentence: the CONSEQUENCE, before the list (design's own exact wording, unchanged by
+    // this pass — this pins it stays there rather than re-derives it).
+    expect(box.textContent).toContain('整个项目在补齐前一行都写不进去')
+    // I-4's NEW bottom closure line (线框 D ③): no "mark done" button exists, and the card says so.
+    expect(box.textContent).toContain('回到上面点「同步一次」')
+    expect(box.textContent).toContain('不用在这里标记完成')
+    // I-20: the summary's own tooltip — what the COUNT means.
+    const summary = box.querySelector('summary') as HTMLElement
+    expect(summary.title).toContain('去重后的数量')
+  })
+
+  // ---- P0-9: I-20 tooltips reachable from this page (the other two are on the composed queue) ----
+
+  it('I-20: 表里有多少行 carries a values-free tooltip explaining what the row count does NOT mean', async () => {
+    const root = await mountBoard()
+    const dt = root.querySelector('[data-testid="stock-prep-project-board-rows"] dt') as HTMLElement
+    expect(dt.title).toContain('不是 BOM 总行数')
+  })
+
+  it('I-20: the home page\'s 可以导出 filter carries a tooltip (the board composes the home page when no project is open)', async () => {
+    const root = await mountBoard({ projectNo: '' })
+    await flush()
+    const chip = root.querySelector('[data-testid="stock-prep-operator-home-filter-ready"]') as HTMLElement
+    expect(chip).not.toBeNull()
+    expect(chip.title).toContain('已经写进多维表')
+  })
+
+  // ---- U2 契约: WHO pays for the union scan --------------------------------------------------
+  //
+  // This one component file is both faces of §2.3 — 今天要处理 when `?projectNo=` is empty and 项目备料页
+  // when it is not — and the U2 opt-in
+  // (`?includePullTargets=1`) is NOT free: the backend module states in its own
+  // header that the scan reads the whole binding sheet, pages by LIMIT/OFFSET, and that 「项目备料页
+  // does not opt in — it runs its own NARROWED scan and must not also pay an unnarrowed one … so this
+  // whole feature costs that route exactly zero queries」. These three cases are that ruling, expressed
+  // as request URLs, because it is invisible in the DOM and a single `if` is all that separates
+  // "charged once, on the home page" from "charged on every project an operator opens".
+
+  function directoryRequestUrls(): string[] {
+    return h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/operator/projects'))
+  }
+
+  it('U2: a WORKSPACE mount (a project is open) asks for the plain directory — no union scan is charged to it', async () => {
+    await mountBoard({ projectNo: PROJECT_NO })
+    const urls = directoryRequestUrls()
+    expect(urls.length, 'the board still fills its datalist from one directory read').toBe(1)
+    expect(urls[0]).not.toContain('includePullTargets')
+    expect(urls[0]).not.toContain('includePendingCounts')
+  })
+
+  it('U2: a HOME mount (no project open) is the one read that opts in', async () => {
+    await mountBoard({ projectNo: '' })
+    const urls = directoryRequestUrls()
+    expect(urls.length).toBe(1)
+    expect(urls[0]).toContain('includePullTargets=1')
+    expect(urls[0]).not.toContain('includePendingCounts')
+  })
+
+  it('U2: 返回今天要处理 re-reads WITH the opt-in — the home page never renders off the workspace\'s plain directory', async () => {
+    const root = await mountBoard({ projectNo: PROJECT_NO })
+    expect(directoryRequestUrls().length).toBe(1)
+
+    ;(root.querySelector('[data-testid="stock-prep-project-board-back-home"]') as HTMLButtonElement).click()
+    await flush()
+
+    // The component does not remount when it comes home (the shell drops `?projectNo=` under a live
+    // instance), so without an explicit re-read the home page would render off the un-opted-in payload
+    // for the rest of the session: every U2 field absent, the three sentences therefore permanently
+    // silent, and pull-target-only projects permanently missing from the cards.
+    const urls = directoryRequestUrls()
+    expect(urls.length, 'coming home issues exactly one more directory read').toBe(2)
+    expect(urls[1]).toContain('includePullTargets=1')
+    expect(urls[1]).not.toContain('includePendingCounts')
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
   })
 })

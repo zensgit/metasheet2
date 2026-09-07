@@ -23,6 +23,19 @@
       {{ guidance }}
     </p>
 
+    <!-- U2 契约 (P0 补项 5) — at most ONE of three sentences, in this order, and ONLY when the
+         directory explicitly says so (an older backend, or a directory that has not settled the union
+         read yet, shows NONE of them — see `pullBanner`'s own comment for why `undefined` must never
+         read as `false`). -->
+    <p
+      v-if="pullBanner"
+      class="sp-home__pull-banner"
+      data-testid="stock-prep-operator-home-pull-banner"
+      :data-pull-banner="pullBanner.key"
+    >
+      {{ bi(pullBanner.text.zh, pullBanner.text.en) }}
+    </p>
+
     <EmptyState
       v-if="emptyState"
       class="sp-home__empty"
@@ -48,6 +61,7 @@
         :class="{ 'sp-home__filter--active': activeFilter === filter.key }"
         :data-testid="`stock-prep-operator-home-filter-${filter.key}`"
         :aria-pressed="activeFilter === filter.key ? 'true' : 'false'"
+        :title="filter.key === 'ready' ? bi(readyTooltip.zh, readyTooltip.en) : undefined"
         @click="toggleFilter(filter.key)"
       >
         {{ filter.label }} {{ filter.count }}
@@ -184,6 +198,13 @@ import {
   type StockPrepHomeCard,
   type StockPrepHomeFilterKey,
 } from '../../../services/integration/stockPreparation/operatorHomeCards'
+import {
+  STOCK_PREP_HOME_DIRECTORY_MAY_BE_INCOMPLETE,
+  STOCK_PREP_HOME_PULL_TARGET_SCAN_CAPPED,
+  STOCK_PREP_HOME_PULL_TARGET_UNREADABLE,
+  STOCK_PREP_TOOLTIP_READY_TO_EXPORT,
+  type StockPrepPlainText,
+} from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
   defineProps<{
@@ -286,6 +307,31 @@ const guidance = computed<string | null>(() => {
     `今天有 ${n} 个项目在等您。先处理最上面这个:${lead[0]}`,
     `${n} project(s) are waiting on you today. Start with the one on top: ${lead[1]}`,
   )
+})
+
+/** I-20: the 可以导出 filter chip's tooltip. */
+const readyTooltip = STOCK_PREP_TOOLTIP_READY_TO_EXPORT
+
+/**
+ * U2 契约 (P0 补项 5) — at most ONE of three sentences, mutually exclusive, in this priority order:
+ *
+ *   1. `pullTargetReady === false` — the operator's own pull-target store could not be read at all.
+ *   2. `pullTargetScanCapped === true` — the standing 「表太大」 scan cap, distinct from a broken read.
+ *   3. `directoryMayBeIncomplete === true` and neither of the above already covered it — a shorter
+ *      answer for a reason the first two do not name specifically.
+ *
+ * EVERY CHECK IS `=== true` / `=== false`, NEVER A TRUTHINESS COERCION. An older backend (or a caller
+ * that somehow reached this page without opting in) OMITS these fields entirely — `undefined` is
+ * "unknown", and the strict comparison is what keeps "unknown" from silently reading as "false" (which
+ * would show the FIRST, most alarming sentence on every deployment that simply predates the contract).
+ */
+const pullBanner = computed<{ key: string; text: StockPrepPlainText } | null>(() => {
+  const dir = props.directory
+  if (!dir) return null
+  if (dir.pullTargetReady === false) return { key: 'pull_target_unreadable', text: STOCK_PREP_HOME_PULL_TARGET_UNREADABLE }
+  if (dir.pullTargetScanCapped === true) return { key: 'pull_target_scan_capped', text: STOCK_PREP_HOME_PULL_TARGET_SCAN_CAPPED }
+  if (dir.directoryMayBeIncomplete === true) return { key: 'directory_may_be_incomplete', text: STOCK_PREP_HOME_DIRECTORY_MAY_BE_INCOMPLETE }
+  return null
 })
 
 const FILTER_LABELS: Record<StockPrepHomeFilterKey, [string, string]> = {
@@ -411,6 +457,19 @@ async function exportCard(projectNo: string): Promise<void> {
   border: 1px solid var(--ms-border-light);
   border-radius: 8px;
   background: var(--ms-bg-card);
+}
+
+/* U2 契约 (P0 补项 5): a diagnostic, not an alarm — same muted treatment as every other subordinate
+   hint on this page (§4's 「不吓人」), never the danger/warning color used for a real blocker. */
+.sp-home__pull-banner {
+  margin: 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .sp-home__link {
