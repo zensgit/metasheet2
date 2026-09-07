@@ -17,6 +17,7 @@ import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
   acquireAttendanceCalculationTargetLocks,
   acquireAttendanceCalculationRolloutLock,
+  assertConnectionIsIdleV1,
   createVerifiedAttendanceCalculationTargetIdentityV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
@@ -30,10 +31,12 @@ import {
 import {
   attendanceResultOperationPreflightV1,
   AttendanceW4RegistryError,
+  AttendanceCleaningConnectionUncertainError,
   enqueueAttendanceResultEventOutboxV1,
   runAttendanceResultOperationTransactionV1,
   sealAttendanceResultOperationV1,
 } from './w4c0-operation-registry'
+import { readAttendanceCleaningSheetScope } from './attendance-multitable-cleaning-authority'
 import { AttendanceW4OperationError } from './w4c0-operation-contract'
 import type { AttendanceW4OutboxEventKindV1 } from './w4c0-operation-contract'
 import { computeAttendanceBusinessKeyFingerprintV1 } from './w4c0-fingerprints'
@@ -174,6 +177,8 @@ export interface AttendanceRecordOperationContextV1 {
 }
 
 export interface AttendanceRecordOperationAdapterV1<TState = unknown> {
+  /** Server-owned locator only, never a client-supplied sheet list or authority. */
+  prepareAttendanceCleaningFence?(routeInput: unknown): Promise<{ orgId: string; projectionRecordId: string }>
   prepareLockedAttendanceCleaningReplay?(
     trx: AttendanceRecordPluginTrxV1,
     routeInput: unknown,
@@ -203,7 +208,7 @@ export type AttendanceRecordOperationAdaptersV1 = Readonly<{
 
 export interface AttendanceRecordOperationBoundaryConnectionV1 {
   readonly client: AttendanceW4TransactionClientV1
-  release(): void
+  release(error?: Error): void
 }
 
 export interface AttendanceRecordOperationBoundaryInputV1 {
@@ -320,8 +325,20 @@ export function createAttendanceRecordOperationBoundaryV1(
       if (attendanceCleaningEntry && (input.kind !== 'manual_edit' || input.operationId === null
         || !/^attendance-cleaning-source-v1:[0-9a-f]{64}$/.test(input.sourceRef ?? ''))) fail('W4C3C_ATTENDANCE_CLEANING_REPLAY_INVALID')
       const connection = await deps.acquireConnection()
+      let connectionError: Error | undefined
       try {
+        const cleaningAdapter = deps.adapters[input.kind]
+        if (attendanceCleaningEntry && !cleaningAdapter.prepareAttendanceCleaningFence) fail('W4C3C_ATTENDANCE_CLEANING_REPLAY_INVALID')
+        if (attendanceCleaningEntry) await assertConnectionIsIdleV1(connection.client)
+        const sheetScope = attendanceCleaningEntry
+          ? await readAttendanceCleaningSheetScope((statement, params) => connection.client.query(statement, params),
+            await cleaningAdapter.prepareAttendanceCleaningFence!(input.routeInput))
+          : undefined
         return await runAttendanceResultOperationTransactionV1(connection.client, async (trx) => {
+          if (sheetScope) {
+            const lockedScope = await readAttendanceCleaningSheetScope((statement, params) => trx.query(statement, params), sheetScope)
+            if (JSON.stringify(lockedScope) !== JSON.stringify(sheetScope)) fail('W4C3C_RECORD_IDENTITY_CHANGED', 409)
+          }
           const shapedTrx = pluginTrx(trx)
           const adapter = deps.adapters[input.kind]
           const operation = Object.freeze({
@@ -333,6 +350,7 @@ export function createAttendanceRecordOperationBoundaryV1(
             ? await adapter.prepare(shapedTrx, input.routeInput, operation)
             : await adapter.prepareIdentity(shapedTrx, input.routeInput, operation)
           const cleaningReplay = identityPrepared.attendanceCleaningReplay
+          if (sheetScope && identityPrepared.orgId !== sheetScope.orgId) fail('W4C3C_RECORD_IDENTITY_CHANGED', 409)
           if (attendanceCleaningEntry !== (cleaningReplay !== undefined)) fail('W4C3C_ATTENDANCE_CLEANING_REPLAY_INVALID')
           if (cleaningReplay !== undefined && (
             input.kind !== 'manual_edit' || input.operationId === null
@@ -457,15 +475,19 @@ export function createAttendanceRecordOperationBoundaryV1(
             kind: isLegacyCompat ? 'legacy_compat' as const : 'executed' as const,
             response: result.response,
           }
-        }, attendanceCleaningEntry ? { attendanceCleaningAuthority: true } : undefined)
+        }, sheetScope ? { attendanceCleaningAuthority: true,
+          attendanceCleaningSheetIds: [sheetScope.projectionSheetId, sheetScope.catalogSheetId] } : undefined)
       } catch (error) {
+        if (error instanceof AttendanceCleaningConnectionUncertainError) connectionError = error
         if (attendanceCleaningEntry && error instanceof AttendanceW4RegistryError) {
+          if (error instanceof AttendanceCleaningConnectionUncertainError) fail('ATTENDANCE_CLEANING_OUTCOME_UNKNOWN', 503)
           if (error.code === 'W4C0_ATTENDANCE_CLEANING_AUTHORITY_BUSY') fail('ATTENDANCE_CLEANING_BUSY', 409)
           if (error.code === 'W4C0_ATTENDANCE_CLEANING_AUTHORITY_UNAVAILABLE') fail('ATTENDANCE_CLEANING_UNAVAILABLE', 503)
         }
         throw error
       } finally {
-        connection.release()
+        if (connectionError) connection.release(connectionError)
+        else connection.release()
       }
     }
   return {

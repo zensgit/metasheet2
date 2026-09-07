@@ -145,6 +145,8 @@ import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-p
 import {
   refreshAttendanceReportProjectionAnchor,
   withholdAttendanceReportProjectionAnchors,
+  readAttendanceCleaningSourceSeed,
+  lockAttendanceCleaningSource,
 } from './attendance/attendance-multitable-cleaning-authority'
 import {
   buildAttendanceRequestCreationAttributionSnapshotV1,
@@ -2523,6 +2525,19 @@ export class MetaSheetServer {
         attendanceMultitableCleaningAuthority:
           manifest.name === 'plugin-attendance'
             ? {
+                readSeed: (input: Parameters<typeof readAttendanceCleaningSourceSeed>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => readAttendanceCleaningSourceSeed(
+                    async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input,
+                  )),
+                lockSource: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof lockAttendanceCleaningSource>[1],
+                  seed: Parameters<typeof lockAttendanceCleaningSource>[2]) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return lockAttendanceCleaningSource(async (statement, params) => ({ rows: await trx.query(statement, params) }), input, seed)
+                },
                 refresh: async (input: {
                   projectionRecordId: string
                   canonicalRecordId: string
@@ -2605,7 +2620,7 @@ export class MetaSheetServer {
                     adapters: config.adapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: () => client.release() }
+                      return { client, release: (error?: Error) => client.release(error) }
                     },
                   }),
                 appendOperatorRetirementCalculation: (input) =>

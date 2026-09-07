@@ -20,6 +20,28 @@ export type AttendanceCleaningActorInput = {
   tokenSubjectUserId: string
 }
 
+/** Non-authorizing lock locator. Re-read after the schema fence and compare exactly. */
+export async function readAttendanceCleaningSheetScope(
+  query: AttendanceCleaningAuthorityQuery,
+  input: { orgId: string; projectionRecordId: string },
+) {
+  const orgId = nonEmpty(input.orgId)
+  const projectionRecordId = nonEmpty(input.projectionRecordId)
+  const result = await query(`SELECT registry.object_id, registry.sheet_id
+    FROM plugin_multitable_object_registry registry
+    JOIN meta_sheets sheet ON sheet.id = registry.sheet_id AND sheet.deleted_at IS NULL
+    WHERE registry.plugin_name = 'plugin-attendance' AND registry.project_id = $1
+      AND registry.object_id IN ('attendance_report_records', 'attendance_report_field_catalog')
+      AND (registry.object_id = 'attendance_report_field_catalog' OR EXISTS (
+        SELECT 1 FROM meta_records projection WHERE projection.id = $2 AND projection.sheet_id = sheet.id))
+    ORDER BY registry.object_id, registry.sheet_id`, [`${orgId}:attendance`, projectionRecordId])
+  const rows = result.rows as Array<{ object_id: string; sheet_id: string }>
+  if (rows.length !== 2 || rows[0].object_id !== 'attendance_report_field_catalog'
+    || rows[1].object_id !== 'attendance_report_records' || rows[0].sheet_id === rows[1].sheet_id) unavailable()
+  return Object.freeze({ orgId, projectionRecordId,
+    catalogSheetId: nonEmpty(rows[0].sheet_id), projectionSheetId: nonEmpty(rows[1].sheet_id) })
+}
+
 /** Called in the owning W4 transaction; JWT claims identify, never grant. */
 export async function assertAttendanceCleaningActor(
   query: AttendanceCleaningAuthorityQuery,
@@ -137,9 +159,105 @@ type CanonicalRow = {
   current_calculation_id: string | null
   visibility_state: string
   visibility_reason: string
+  meta: Record<string, unknown>
 }
 
 type CalculationRow = { id: string; version: number; mode: string; outcome: string }
+
+export type AttendanceCleaningSourceInput = AttendanceCleaningActorInput & {
+  projectionRecordId: string
+  expectedVersion: number
+}
+
+type CleaningAnchor = {
+  projection_record_id: string
+  org_id: string
+  canonical_record_id: string
+  source_selector: string
+  source_calculation_id: string
+  source_calculation_version: number
+  canonical_source_digest: string
+  source_fingerprint: string
+  created_at: Date | string
+}
+
+/** Seed only: editable row values never select the canonical target. */
+export async function readAttendanceCleaningSourceSeed(
+  query: AttendanceCleaningAuthorityQuery,
+  input: AttendanceCleaningSourceInput,
+) {
+  await assertAttendanceCleaningActor(query, input)
+  try {
+    positiveInteger(input.expectedVersion)
+    const sheetScope = await readAttendanceCleaningSheetScope(query, input)
+    const result = await query(`SELECT anchor.*, projection.sheet_id, projection.data, projection.version,
+        canonical.user_id, canonical.work_date::text AS work_date
+      FROM attendance_report_projection_anchors anchor
+      JOIN meta_records projection ON projection.id = anchor.projection_record_id
+      JOIN meta_sheets sheet ON sheet.id = projection.sheet_id AND sheet.deleted_at IS NULL
+      JOIN plugin_multitable_object_registry registry ON registry.sheet_id = sheet.id
+        AND registry.plugin_name = 'plugin-attendance' AND registry.object_id = 'attendance_report_records'
+        AND registry.project_id = anchor.org_id || ':attendance'
+      JOIN attendance_records canonical ON canonical.id = anchor.canonical_record_id AND canonical.org_id = anchor.org_id
+      WHERE anchor.projection_record_id = $1 AND anchor.org_id = $2`, [input.projectionRecordId, input.orgId])
+    const row = result.rows[0] as (CleaningAnchor & { sheet_id: string; data: Record<string, unknown>; version: number; user_id: string; work_date: string }) | undefined
+    if (result.rows.length !== 1 || !row || row.version !== input.expectedVersion) unavailable()
+    return {
+      sheetScope,
+      projectionRecordId: input.projectionRecordId,
+      canonicalRecordId: nonEmpty(row.canonical_record_id),
+      orgId: input.orgId,
+      subjectUserId: nonEmpty(row.user_id),
+      workDate: nonEmpty(row.work_date),
+      sourceFingerprint: nonEmpty(row.source_fingerprint),
+      anchorCreatedAt: timestamp(row.created_at),
+      sourceCalculationId: nonEmpty(row.source_calculation_id),
+      sourceCalculationVersion: positiveInteger(row.source_calculation_version),
+      requested: row.data[getObjectFieldId(`${input.orgId}:attendance`, 'attendance_report_records', 'cleaning_requested')],
+      reason: row.data[getObjectFieldId(`${input.orgId}:attendance`, 'attendance_report_records', 'cleaning_reason')],
+    }
+  } catch {
+    unavailable()
+  }
+}
+
+export async function lockAttendanceCleaningSource(
+  query: AttendanceCleaningAuthorityQuery,
+  input: AttendanceCleaningSourceInput,
+  seed: Awaited<ReturnType<typeof readAttendanceCleaningSourceSeed>>,
+) {
+  const scope = await lockAttendanceCleaningProjectionAccess(query, input)
+  if (scope.projection.version !== input.expectedVersion || seed.orgId !== input.orgId
+    || seed.projectionRecordId !== input.projectionRecordId) unavailable()
+  const sheetScope = await readAttendanceCleaningSheetScope(query, input)
+  if (JSON.stringify(sheetScope) !== JSON.stringify(seed.sheetScope)
+    || scope.projection.sheet_id !== sheetScope.projectionSheetId) unavailable()
+  // Match sync's projection -> canonical -> anchor order. The initial seed is
+  // only a locator; the locked anchor must still bind exactly that target.
+  const record = await loadCanonicalRow(query, {
+    projectionRecordId: input.projectionRecordId,
+    canonicalRecordId: seed.canonicalRecordId,
+    sourceFingerprint: seed.sourceFingerprint,
+  })
+  const anchors = await query(`SELECT * FROM attendance_report_projection_anchors
+    WHERE projection_record_id = $1 AND org_id = $2 FOR UPDATE`, [input.projectionRecordId, input.orgId])
+  const anchor = anchors.rows[0] as CleaningAnchor | undefined
+  if (anchors.rows.length !== 1 || !anchor || anchor.canonical_record_id !== seed.canonicalRecordId
+    || timestamp(anchor.created_at) !== seed.anchorCreatedAt || record.user_id !== seed.subjectUserId
+    || record.work_date !== seed.workDate || record.visibility_state !== 'active') unavailable()
+  const selected = await loadSelectedCalculation(query, record)
+  if (!selected) unavailable()
+  // The boundary holds both sheet session fences plus the fixed definition-table
+  // fences. Existing row edits are detected by SERIALIZABLE FOR UPDATE; new rows
+  // cannot slip into either sheet while these reads determine the managed map.
+  const catalog = await query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1 ORDER BY id FOR UPDATE', [sheetScope.catalogSheetId])
+  if (catalog.rows.length > 1000) unavailable()
+  const leaveTypes = await query('SELECT id, code, name, is_active FROM attendance_leave_types WHERE org_id = $1 AND is_active = true ORDER BY id', [input.orgId])
+  const overtimeRules = await query('SELECT id, name, is_active FROM attendance_overtime_rules WHERE org_id = $1 AND is_active = true ORDER BY id', [input.orgId])
+  return { ...scope, anchor, record, selected, sheetScope, catalog: catalog.rows,
+    leaveTypes: leaveTypes.rows, overtimeRules: overtimeRules.rows,
+    canonicalSourceDigest: buildAttendanceCanonicalSourceDigest(record) }
+}
 
 function unavailable(): never {
   throw new AttendanceMultitableCleaningAuthorityError()
@@ -206,7 +324,7 @@ async function loadCanonicalRow(
             attendance_record.timezone, attendance_record.first_in_at, attendance_record.last_out_at, attendance_record.work_minutes,
             attendance_record.late_minutes, attendance_record.early_leave_minutes, attendance_record.status, attendance_record.is_workday,
             attendance_record.projection_owner, attendance_record.current_calculation_id, attendance_record.visibility_state,
-            attendance_record.visibility_reason
+            attendance_record.visibility_reason, attendance_record.meta
        FROM meta_records projection
        JOIN meta_sheets sheet ON sheet.id = projection.sheet_id AND sheet.deleted_at IS NULL
        JOIN plugin_multitable_object_registry registry

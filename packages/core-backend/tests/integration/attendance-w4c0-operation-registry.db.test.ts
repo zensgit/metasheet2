@@ -50,6 +50,7 @@ import {
   sealAttendanceResultOperationBatchV1,
   sealAttendanceResultOperationV1,
   AttendanceW4RegistryError,
+  AttendanceCleaningConnectionUncertainError,
 } from '../../src/attendance/w4c0-operation-registry'
 import { AttendanceW4OperationError } from '../../src/attendance/w4c0-operation-contract'
 import { normalizeAttendanceSourceOperationEnvelopeV1 } from '../../src/attendance/w4c0-source-commands'
@@ -68,6 +69,9 @@ const INACTIVE_ACTOR = `w4c0-reg-inactive-${RUN}`
 const ENV_KEY = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
 const HEX64_A = 'a'.repeat(64)
 const HEX64_B = 'b'.repeat(64)
+const CLEANING_SHEET = `w4c0-cleaning-${RUN}`
+const CATALOG_SHEET = `w4c0-catalog-${RUN}`
+const CLEANING_RECORD = `w4c0-projection-${RUN}`
 
 function trx(client: PoolClient): AttendanceW4TransactionClientV1 {
   return {
@@ -140,6 +144,11 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
   beforeAll(async () => {
     priorEnv = process.env[ENV_KEY]
     process.env[ENV_KEY] = ORG_SHADOW
+    await pool.query('INSERT INTO meta_sheets (id, name) VALUES ($1, $1), ($2, $2)', [CLEANING_SHEET, CATALOG_SHEET])
+    await pool.query(`INSERT INTO plugin_multitable_object_registry (sheet_id, project_id, object_id, plugin_name)
+      VALUES ($1, $3, 'attendance_report_records', 'plugin-attendance'),
+        ($2, $3, 'attendance_report_field_catalog', 'plugin-attendance')`, [CLEANING_SHEET, CATALOG_SHEET, `${ORG_SHADOW}:attendance`])
+    await pool.query('INSERT INTO meta_records (id, sheet_id) VALUES ($1, $2)', [CLEANING_RECORD, CLEANING_SHEET])
     await pool.query(
       `INSERT INTO users (id, password_hash) VALUES ($1, ''), ($2, '') ON CONFLICT (id) DO NOTHING`,
       [ACTOR, INACTIVE_ACTOR],
@@ -164,6 +173,9 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
   afterAll(async () => {
     if (priorEnv === undefined) delete process.env[ENV_KEY]
     else process.env[ENV_KEY] = priorEnv
+    await pool.query('DELETE FROM meta_records WHERE id = $1', [CLEANING_RECORD])
+    await pool.query('DELETE FROM plugin_multitable_object_registry WHERE sheet_id = ANY($1::text[])', [[CLEANING_SHEET, CATALOG_SHEET]])
+    await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[CLEANING_SHEET, CATALOG_SHEET]])
     await pool.end()
   })
 
@@ -366,6 +378,7 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
       }
       let cleanupCalls = 0
       const adapter: AttendanceRecordOperationAdapterV1 = {
+        prepareAttendanceCleaningFence: async () => ({ orgId: ORG_SHADOW, projectionRecordId: CLEANING_RECORD }),
         prepareIdentity: async () => prepared,
         prepare: async () => { throw new Error('REPLAY_MUST_NOT_PREPARE_CANONICAL') },
         execute: async () => { throw new Error('REPLAY_MUST_NOT_EXECUTE_CANONICAL') },
@@ -420,6 +433,32 @@ describeIfDatabase('W4C-0 Stage C — operation registry service (real DB)', () 
         correlationId: `drift-boundary-${RUN}`, routeInput: {} })).rejects.toThrow('W4C3C_RECORD_IDENTITY_CHANGED')
       const residue = await pool.query('SELECT count(*)::int AS count FROM attendance_result_operations WHERE org_id = $1 AND operation_id = $2', [ORG_SHADOW, driftOperationId])
       expect(residue.rows[0].count).toBe(0)
+      let releasedError: Error | undefined
+      let unlockFault = false
+      const uncertainBoundary = createAttendanceRecordOperationBoundaryV1({
+        acquireConnection: async () => {
+          const owned = await pool.connect()
+          return {
+            client: { query: async (statement, params) => {
+              const result = await owned.query(statement, params ? [...params] : [])
+              if (statement.startsWith('SELECT pg_advisory_unlock') && !unlockFault) {
+                unlockFault = true
+                throw new Error('SYNTHETIC_UNLOCK_RESPONSE_LOST')
+              }
+              return result
+            } },
+            release: (error?: Error) => { releasedError = error; owned.release(error) },
+          }
+        },
+        adapters: { manual_edit: { ...adapter,
+          prepareLockedAttendanceCleaningReplay: async (_trx, _input, _operation, response) => response,
+        }, recompute: adapter, ops_retirement: adapter },
+      })
+      await expect(uncertainBoundary.executeAttendanceCleaning({ kind: 'manual_edit', operationId, sourceRef,
+        correlationId: `uncertain-boundary-${RUN}`, routeInput: {} }))
+        .rejects.toMatchObject({ code: 'ATTENDANCE_CLEANING_OUTCOME_UNKNOWN', httpStatus: 503 })
+      expect(unlockFault).toBe(true)
+      expect(releasedError).toBeInstanceOf(AttendanceCleaningConnectionUncertainError)
     })
   })
 

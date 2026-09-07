@@ -1440,6 +1440,13 @@ export interface PluginServices {
   }
   /** ACP-1B: attendance-only canonical anchor writer; never exposed to generic plugins. */
   attendanceMultitableCleaningAuthority?: {
+    readSeed(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput):
+      ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>
+    lockSource(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput,
+      seed: Awaited<ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>>,
+    ): ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').lockAttendanceCleaningSource>
     refresh(input: {
       projectionRecordId: string
       canonicalRecordId: string

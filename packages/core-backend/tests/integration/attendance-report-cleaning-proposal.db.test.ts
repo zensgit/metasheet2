@@ -3,10 +3,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import { up, down } from '../../src/db/migrations/zzzz20260907110000_create_attendance_report_projection_anchors'
-import { refreshAttendanceReportProjectionAnchor, withholdAttendanceReportProjectionAnchors, assertAttendanceCleaningActor, lockAttendanceCleaningProjectionAccess } from '../../src/attendance/attendance-multitable-cleaning-authority'
+import { refreshAttendanceReportProjectionAnchor, withholdAttendanceReportProjectionAnchors, assertAttendanceCleaningActor, lockAttendanceCleaningProjectionAccess, readAttendanceCleaningSourceSeed, lockAttendanceCleaningSource } from '../../src/attendance/attendance-multitable-cleaning-authority'
 import { getObjectFieldId } from '../../src/multitable/provisioning'
-import { acquireCanonicalSheetFence } from '../../src/multitable/canonical-sheet-fence'
-import { runAttendanceResultOperationTransactionV1 } from '../../src/attendance/w4c0-operation-registry'
+import { acquireCanonicalSheetFence, canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
+import { AttendanceCleaningConnectionUncertainError, runAttendanceResultOperationTransactionV1 } from '../../src/attendance/w4c0-operation-registry'
 
 // This suite owns its database; never fall back to an application DATABASE_URL.
 const source = process.env.ATTENDANCE_TEST_DATABASE_URL
@@ -41,6 +41,8 @@ suite('ACP projection authority real database', () => {
       CREATE TABLE role_permissions (role_id text, permission_code text);
       CREATE TABLE user_namespace_admissions (user_id text, namespace text, enabled boolean);
       CREATE TABLE system_configs (key text PRIMARY KEY, value text);
+      CREATE TABLE attendance_leave_types (id text PRIMARY KEY, org_id text, code text, name text, is_active boolean);
+      CREATE TABLE attendance_overtime_rules (id text PRIMARY KEY, org_id text, code text, name text, is_active boolean);
       INSERT INTO users VALUES ('actor-acp', 'user', '[]', true, 'activated');
       INSERT INTO user_orgs VALUES ('actor-acp', 'org-acp', true);
       INSERT INTO user_permissions VALUES ('actor-acp', 'attendance:admin');
@@ -59,8 +61,10 @@ suite('ACP projection authority real database', () => {
         version integer NOT NULL, mode text NOT NULL, outcome text NOT NULL,
         UNIQUE(id, attendance_record_id, org_id));
       INSERT INTO meta_sheets VALUES ('sheet_acp', NULL);
+      INSERT INTO meta_sheets VALUES ('sheet_catalog', NULL);
       INSERT INTO meta_records(id, sheet_id) VALUES ('rec_acp', 'sheet_acp');
       INSERT INTO plugin_multitable_object_registry VALUES ('sheet_acp', 'org-acp:attendance', 'plugin-attendance', 'attendance_report_records');
+      INSERT INTO plugin_multitable_object_registry VALUES ('sheet_catalog', 'org-acp:attendance', 'plugin-attendance', 'attendance_report_field_catalog');
     `)
     await pool.query('INSERT INTO meta_fields VALUES ($1, $2)', [rowKeyField, 'sheet_acp'])
     await pool.query(`
@@ -77,6 +81,7 @@ suite('ACP projection authority real database', () => {
     await pool.query(`INSERT INTO attendance_records VALUES
       ($1, 'org-acp', 'user-acp', '2026-09-07', 'UTC', NULL, NULL, 480, 10, 0,
        'late', true, 'w4', $2, 'active', 'active')`, [recordId, calculationId])
+    await pool.query("ALTER TABLE attendance_records ADD COLUMN meta jsonb NOT NULL DEFAULT '{}'")
     await pool.query(`INSERT INTO attendance_record_calculations VALUES
       ($1, $2, 'org-acp', 1, 'authoritative', 'completed')`, [calculationId, recordId])
     await up(db)
@@ -96,6 +101,99 @@ suite('ACP projection authority real database', () => {
 
   beforeEach(async () => {
     await pool.query('DELETE FROM meta_records')
+  })
+
+  it.each([
+    { attendanceCleaningAuthority: true },
+    { attendanceCleaningSheetIds: ['sheet_acp'] },
+    { attendanceCleaningAuthority: false, attendanceCleaningSheetIds: ['sheet_acp'] },
+    { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: [] },
+  ])('rejects an incomplete ACP fence option before touching the connection: %j', async (options) => {
+    let queries = 0
+    await expect(Reflect.apply(runAttendanceResultOperationTransactionV1, undefined, [
+      { query: async () => { queries += 1; throw new Error('CONNECTION_MUST_NOT_BE_USED') } },
+      async () => null, options,
+    ])).rejects.toThrow('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+    expect(queries).toBe(0)
+  })
+
+  it('experiments with a pre-BEGIN session fence in the exact one-argument writer lock space', async () => {
+    const reader = await pool.connect()
+    const writer = await pool.connect()
+    const key = canonicalSheetFenceKey('sheet_acp')
+    let held = false
+    try {
+      const acquired = await reader.query('SELECT pg_try_advisory_lock(hashtext($1)) AS acquired', [key])
+      held = acquired.rows[0].acquired
+      expect(held).toBe(true)
+      await reader.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      expect((await reader.query("SELECT count(*)::int AS count FROM meta_records WHERE sheet_id = 'sheet_acp'")).rows[0].count).toBe(0)
+      await writer.query('BEGIN')
+      // Same one-argument bigint overload as the unconditional create helper.
+      expect((await writer.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired', [key])).rows[0].acquired).toBe(false)
+      // The two-int namespace is disjoint and must not be mistaken for protection.
+      expect((await writer.query('SELECT pg_try_advisory_xact_lock(0, hashtext($1)) AS acquired', [key])).rows[0].acquired).toBe(true)
+      await writer.query('ROLLBACK')
+      await reader.query('COMMIT')
+      expect((await reader.query('SELECT pg_advisory_unlock(hashtext($1)) AS released', [key])).rows[0].released).toBe(true)
+      held = false
+      await writer.query('BEGIN')
+      await acquireCanonicalSheetFence((statement, params) => writer.query(statement, params), 'sheet_acp')
+      await writer.query("INSERT INTO meta_records (id, sheet_id) VALUES ('rec_after_session', 'sheet_acp')")
+      await writer.query('COMMIT')
+      expect((await reader.query("SELECT count(*)::int AS count FROM meta_records WHERE id = 'rec_after_session'")).rows[0].count).toBe(1)
+    } finally {
+      await writer.query('ROLLBACK')
+      await reader.query('ROLLBACK')
+      if (held) expect((await reader.query('SELECT pg_advisory_unlock(hashtext($1)) AS released', [key])).rows[0].released).toBe(true)
+      writer.release()
+      reader.release()
+    }
+  })
+
+  it('experiments with inverse lock order: initial try-lock does not prevent a later wait cycle', async () => {
+    const first = await pool.connect()
+    const second = await pool.connect()
+    const sheetKey = canonicalSheetFenceKey('sheet_acp')
+    const precedingKey = 'attendance-acp-test-only-preceding-lock'
+    let held = false
+    let waiting: Promise<unknown> | undefined
+    try {
+      held = (await first.query('SELECT pg_try_advisory_lock(hashtext($1)) AS acquired', [sheetKey])).rows[0].acquired
+      expect(held).toBe(true)
+      const pid = (await second.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+      await second.query('BEGIN')
+      await second.query("SET LOCAL lock_timeout = '2000ms'")
+      await second.query('SELECT pg_advisory_xact_lock(hashtext($1))', [precedingKey])
+      // Deliberately synthetic preceding lock: this proves the candidate's hazard,
+      // not that an existing production W4 caller uses this inverse order.
+      waiting = acquireCanonicalSheetFence((statement, params) => second.query(statement, params), 'sheet_acp')
+        .then(() => ({ acquired: true }), () => ({ acquired: false }))
+      const deadline = Date.now() + 1500
+      let blocked = false
+      while (Date.now() < deadline) {
+        blocked = (await first.query("SELECT wait_event_type = 'Lock' AS blocked FROM pg_stat_activity WHERE pid = $1", [pid])).rows[0]?.blocked === true
+        if (blocked) break
+      }
+      expect(blocked).toBe(true)
+      await first.query('BEGIN')
+      await first.query("SET LOCAL lock_timeout = '100ms'")
+      await expect(first.query('SELECT pg_advisory_xact_lock(hashtext($1))', [precedingKey])).rejects.toMatchObject({ code: '55P03' })
+      await first.query('ROLLBACK')
+      expect((await first.query('SELECT pg_advisory_unlock(hashtext($1)) AS released', [sheetKey])).rows[0].released).toBe(true)
+      held = false
+      expect(await waiting).toEqual({ acquired: true })
+      await second.query('ROLLBACK')
+      const residue = await first.query("SELECT count(*)::int AS count FROM pg_locks WHERE locktype = 'advisory' AND pid IN (pg_backend_pid(), $1)", [pid])
+      expect(residue.rows[0].count).toBe(0)
+    } finally {
+      await first.query('ROLLBACK')
+      if (held) expect((await first.query('SELECT pg_advisory_unlock(hashtext($1)) AS released', [sheetKey])).rows[0].released).toBe(true)
+      if (waiting) await waiting
+      await second.query('ROLLBACK')
+      second.release()
+      first.release()
+    }
   })
 
   it('requires a DB-fresh active same-org attendance administrator, not generic multitable write', async () => {
@@ -148,6 +246,212 @@ suite('ACP projection authority real database', () => {
     }
   })
 
+  it('releases actual session fences on partial acquisition, body refusal and serialization retry without stealing reentrant locks', async () => {
+    const client = await pool.connect()
+    const writer = await pool.connect()
+    const statements: string[] = []
+    const connection = { query: (statement: string, params?: readonly unknown[]) => {
+      statements.push(statement)
+      return client.query(statement, params ? [...params] : [])
+    } }
+    const options = { attendanceCleaningAuthority: true as const, attendanceCleaningSheetIds: ['sheet_acp', 'sheet_catalog'] }
+    const keys = (await client.query(`SELECT DISTINCT hashtext(value)::bigint AS key
+      FROM unnest($1::text[]) AS value ORDER BY key`, [options.attendanceCleaningSheetIds.map(canonicalSheetFenceKey)])).rows.map(row => String(row.key))
+    const pid = (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    const ownLocks = async () => (await writer.query("SELECT count(*)::int AS count FROM pg_locks WHERE pid = $1 AND locktype = 'advisory'", [pid])).rows[0].count
+    try {
+      await writer.query('BEGIN')
+      await writer.query('SELECT pg_advisory_xact_lock($1::bigint)', [keys[1]])
+      await expect(runAttendanceResultOperationTransactionV1(connection, async () => { throw new Error('BODY_MUST_NOT_RUN') }, options))
+        .rejects.toThrow('W4C0_ATTENDANCE_CLEANING_AUTHORITY_BUSY')
+      expect(await ownLocks()).toBe(0)
+      expect(statements.filter(statement => statement.startsWith('SELECT pg_advisory_unlock'))).toHaveLength(1)
+      await writer.query('ROLLBACK')
+      await client.query('SELECT pg_advisory_lock($1::bigint)', [keys[0]])
+      await expect(runAttendanceResultOperationTransactionV1(connection, async () => null, options))
+        .rejects.toThrow('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+      expect(await ownLocks()).toBe(1)
+      expect((await client.query('SELECT pg_advisory_unlock($1::bigint) AS released', [keys[0]])).rows[0].released).toBe(true)
+      expect((await client.query('SELECT pg_advisory_unlock($1::bigint) AS released', [keys[0]])).rows[0].released).toBe(false)
+      await expect(runAttendanceResultOperationTransactionV1(connection, async () => { throw new Error('SYNTHETIC_REFUSAL') }, options))
+        .rejects.toThrow('SYNTHETIC_REFUSAL')
+      expect(await ownLocks()).toBe(0)
+      statements.length = 0
+      let attempts = 0
+      expect(await runAttendanceResultOperationTransactionV1(connection, async () => {
+        attempts += 1
+        if (attempts === 1) throw Object.assign(new Error('SYNTHETIC_SERIALIZATION'), { code: '40001' })
+        return 'completed'
+      }, { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp', 'sheet_acp'] })).toBe('completed')
+      expect(attempts).toBe(2)
+      expect(statements.filter(statement => statement.startsWith('SELECT pg_try_advisory_lock'))).toHaveLength(2)
+      expect(statements.filter(statement => statement.startsWith('SELECT pg_advisory_unlock'))).toHaveLength(2)
+      const firstRelease = statements.findIndex(statement => statement.startsWith('SELECT pg_advisory_unlock'))
+      const secondBegin = statements.lastIndexOf('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      expect(firstRelease).toBeLessThan(secondBegin)
+      expect(await ownLocks()).toBe(0)
+    } finally {
+      await writer.query('ROLLBACK')
+      await client.query('ROLLBACK')
+      // Exact candidate keys only; no unlock-all, including when an assertion fails.
+      for (const key of keys) await client.query('SELECT pg_advisory_unlock($1::bigint)', [key])
+      writer.release()
+      client.release()
+    }
+  })
+
+  it.each(['attendance_leave_types', 'attendance_overtime_rules'] as const)(
+    'fences new and changed %s definitions before the SERIALIZABLE snapshot', async (table) => {
+      // Closed two-table fixture list above, never an HTTP-provided SQL identifier.
+      await pool.query(`INSERT INTO ${table} (id, org_id, name, is_active) VALUES ('existing', 'org-acp', 'before', true)`)
+      const client = await pool.connect()
+      let changed = false
+      const connection = { query: async (statement: string, params?: readonly unknown[]) => {
+        if (statement.startsWith('LOCK TABLE') && !changed) {
+          await pool.query(`UPDATE ${table} SET name = 'after' WHERE id = 'existing'`)
+          await pool.query(`INSERT INTO ${table} (id, org_id, name, is_active) VALUES ('new', 'org-acp', 'added', true)`)
+          changed = true
+        }
+        return client.query(statement, params ? [...params] : [])
+      } }
+      try {
+        const definitions = await runAttendanceResultOperationTransactionV1(connection, async () =>
+          (await client.query(`SELECT id, name FROM ${table} WHERE org_id = 'org-acp' AND is_active ORDER BY id`)).rows,
+        { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })
+        expect(definitions).toEqual([{ id: 'existing', name: 'after' }, { id: 'new', name: 'added' }])
+        const writer = await pool.connect()
+        try {
+          await writer.query('BEGIN')
+          await writer.query(`UPDATE ${table} SET name = 'in-flight' WHERE id = 'existing'`)
+          await expect(runAttendanceResultOperationTransactionV1(connection, async () => null,
+            { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] }))
+            .rejects.toThrow('W4C0_ATTENDANCE_CLEANING_AUTHORITY_BUSY')
+          await writer.query('ROLLBACK')
+          await runAttendanceResultOperationTransactionV1(connection, async () => {
+            await writer.query('BEGIN')
+            await writer.query("SET LOCAL lock_timeout = '100ms'")
+            await expect(writer.query(`INSERT INTO ${table} (id, org_id, name, is_active) VALUES ('during', 'org-acp', 'during', true)`))
+              .rejects.toMatchObject({ code: '55P03' })
+            await writer.query('ROLLBACK')
+          }, { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })
+        } finally {
+          await writer.query('ROLLBACK')
+          writer.release()
+        }
+      } finally {
+        client.release()
+        await pool.query(`DELETE FROM ${table}`)
+      }
+    },
+  )
+
+  it('locks the canonical-anchored source and sees catalog insertion plus retries a concurrent catalog edit', async () => {
+    const requested = getObjectFieldId('org-acp:attendance', 'attendance_report_records', 'cleaning_requested')
+    const reason = getObjectFieldId('org-acp:attendance', 'attendance_report_records', 'cleaning_reason')
+    await pool.query('INSERT INTO meta_fields (id, sheet_id) VALUES ($1, $3), ($2, $3) ON CONFLICT DO NOTHING', [requested, reason, 'sheet_acp'])
+    await pool.query("INSERT INTO user_permissions VALUES ('actor-acp', 'multitable:write')")
+    await pool.query('INSERT INTO meta_records (id, sheet_id, data) VALUES ($1, $2, $3)',
+      ['rec_acp', 'sheet_acp', JSON.stringify({ [rowKeyField]: 'synthetic-row', [requested]: true, [reason]: 'synthetic reason' })])
+    await pool.query("INSERT INTO meta_records (id, sheet_id, data) VALUES ('catalog_existing', 'sheet_catalog', '{\"revision\":1}')")
+    const client = await pool.connect()
+    const input = { orgId: 'org-acp', actorId: 'actor-acp', tokenSubjectUserId: 'actor-acp', projectionRecordId: 'rec_acp', expectedVersion: 1 }
+    const query = (statement: string, params?: unknown[]) => client.query(statement, params)
+    let inserted = false
+    let edited = false
+    let bodies = 0
+    try {
+      await client.query('BEGIN')
+      await refreshAttendanceReportProjectionAnchor(query, { projectionRecordId: 'rec_acp', canonicalRecordId: recordId, sourceFingerprint: 'a'.repeat(40) })
+      await client.query('COMMIT')
+      await client.query('BEGIN')
+      const seed = await readAttendanceCleaningSourceSeed(query, input)
+      await client.query('COMMIT')
+      const observed = { query: async (statement: string, params?: readonly unknown[]) => {
+        if (statement.startsWith('SELECT pg_try_advisory_lock') && !inserted) {
+          const creator = await pool.connect()
+          try {
+            await creator.query('BEGIN')
+            await acquireCanonicalSheetFence((sql, values) => creator.query(sql, values), 'sheet_catalog')
+            await creator.query("INSERT INTO meta_records (id, sheet_id, data) VALUES ('catalog_new', 'sheet_catalog', '{\"revision\":1}')")
+            await creator.query('COMMIT')
+            inserted = true
+          } finally {
+            await creator.query('ROLLBACK')
+            creator.release()
+          }
+        }
+        if (statement.startsWith('SELECT id, data, version FROM meta_records WHERE sheet_id = $1 ORDER BY id') && !edited) {
+          // Existing PATCH does not require the writer flag. FOR UPDATE must detect
+          // its post-snapshot commit instead of silently using the old definition.
+          await pool.query("UPDATE meta_records SET data = '{\"revision\":2}', version = version + 1 WHERE id = 'catalog_existing'")
+          edited = true
+        }
+        return client.query(statement, params ? [...params] : [])
+      } }
+      const result = await runAttendanceResultOperationTransactionV1(observed, async () => {
+        bodies += 1
+        return lockAttendanceCleaningSource(observed.query, input, seed)
+      }, { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp', 'sheet_catalog'] })
+      expect(inserted && edited).toBe(true)
+      expect(bodies).toBe(2)
+      expect(result.catalog).toEqual([
+        { id: 'catalog_existing', data: { revision: 2 }, version: 2 },
+        { id: 'catalog_new', data: { revision: 1 }, version: 1 },
+      ])
+      expect(result.record.canonical_record_id).toBe(recordId)
+      expect(result.projection.data[requested]).toBe(true)
+      await expect(runAttendanceResultOperationTransactionV1(observed, () => lockAttendanceCleaningSource(observed.query, input,
+        { ...seed, canonicalRecordId: randomUUID() }),
+      { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp', 'sheet_catalog'] })).rejects.toThrow()
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+      await pool.query("DELETE FROM user_permissions WHERE permission_code = 'multitable:write'")
+      await pool.query('DELETE FROM meta_fields WHERE id = ANY($1::text[])', [[requested, reason]])
+    }
+  })
+
+  it.each(['acquire', 'begin', 'commit', 'rollback', 'unlock'] as const)(
+    'marks the pooled connection for destruction after an uncertain %s result', async (fault) => {
+      const client = await pool.connect()
+      let injected = false
+      let bodyCalls = 0
+      const connection = { query: async (statement: string, params?: readonly unknown[]) => {
+        const matches = fault === 'acquire' ? statement.startsWith('SELECT pg_try_advisory_lock')
+          : fault === 'unlock' ? statement.startsWith('SELECT pg_advisory_unlock')
+            : statement.startsWith(fault.toUpperCase())
+        const result = await client.query(statement, params ? [...params] : [])
+        if (matches && !injected) {
+          injected = true
+          // Lose the response after the real server action, not before it.
+          throw new Error('SYNTHETIC_LOST_RESPONSE')
+        }
+        return result
+      } }
+      try {
+        await expect(runAttendanceResultOperationTransactionV1(connection, async () => {
+          bodyCalls += 1
+          if (fault === 'rollback') throw new Error('SYNTHETIC_BODY_REFUSAL')
+          return null
+        }, { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] }))
+          .rejects.toBeInstanceOf(AttendanceCleaningConnectionUncertainError)
+        expect(injected).toBe(true)
+        expect(bodyCalls).toBeLessThanOrEqual(1)
+      } finally {
+        // This is the actual pg pool destruction contract, not a normal release.
+        client.release(new Error('SYNTHETIC_DESTROY_UNCERTAIN_CONNECTION'))
+      }
+      const observer = await pool.connect()
+      try {
+        await observer.query('BEGIN')
+        expect((await observer.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired', [canonicalSheetFenceKey('sheet_acp')])).rows[0].acquired).toBe(true)
+      } finally {
+        await observer.query('ROLLBACK')
+        observer.release()
+      }
+    },
+  )
+
   it('locks effective proposal access and refuses sheet, field, row, duplicate and liveness drift', async () => {
     const requested = getObjectFieldId('org-acp:attendance', 'attendance_report_records', 'cleaning_requested')
     const reason = getObjectFieldId('org-acp:attendance', 'attendance_report_records', 'cleaning_reason')
@@ -160,9 +464,30 @@ suite('ACP projection authority real database', () => {
     const check = () => runAttendanceResultOperationTransactionV1(connection, async () =>
       lockAttendanceCleaningProjectionAccess((statement, params) => client.query(statement, params),
         { actorId: 'actor-acp', tokenSubjectUserId: 'actor-acp', orgId: 'org-acp', projectionRecordId: 'rec_acp' }),
-    { attendanceCleaningAuthority: true })
+    { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })
     try {
       expect((await check()).fieldIds).toEqual({ requested, reason })
+      let duplicateCommitted = false
+      const insertBeforeFence = async (statement: string, params?: readonly unknown[]) => {
+          if ((statement === 'SELECT pg_advisory_xact_lock(hashtext($1))'
+            || statement === 'SELECT pg_try_advisory_lock($1::bigint) AS acquired') && !duplicateCommitted) {
+            const creator = await pool.connect()
+            try {
+              await creator.query('BEGIN')
+              await acquireCanonicalSheetFence((sql, values) => creator.query(sql, values), 'sheet_acp')
+              await creator.query("INSERT INTO meta_records (id, sheet_id, data) SELECT 'rec_snapshot_duplicate', sheet_id, data FROM meta_records WHERE id = 'rec_acp'")
+              await creator.query('COMMIT')
+              duplicateCommitted = true
+            } finally { creator.release() }
+          }
+          return connection.query(statement, params)
+      }
+      await expect(runAttendanceResultOperationTransactionV1({ query: insertBeforeFence }, async () =>
+        lockAttendanceCleaningProjectionAccess(insertBeforeFence,
+          { actorId: 'actor-acp', tokenSubjectUserId: 'actor-acp', orgId: 'org-acp', projectionRecordId: 'rec_acp' }),
+      { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })).rejects.toThrow('ATTENDANCE_CLEANING_FORBIDDEN')
+      expect(duplicateCommitted).toBe(true)
+      await pool.query("DELETE FROM meta_records WHERE id = 'rec_snapshot_duplicate'")
       // The deny commits exactly before the fence. Moving that fence after the
       // wrapper's first SELECT leaves an old snapshot and makes this reject RED.
       let denyCommitted = false
@@ -176,7 +501,7 @@ suite('ACP projection authority real database', () => {
       await expect(runAttendanceResultOperationTransactionV1(interleaved, async () =>
         lockAttendanceCleaningProjectionAccess((statement, params) => client.query(statement, params),
           { actorId: 'actor-acp', tokenSubjectUserId: 'actor-acp', orgId: 'org-acp', projectionRecordId: 'rec_acp' }),
-      { attendanceCleaningAuthority: true })).rejects.toThrow('ATTENDANCE_CLEANING_FORBIDDEN')
+      { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })).rejects.toThrow('ATTENDANCE_CLEANING_FORBIDDEN')
       expect(denyCommitted).toBe(true)
       await pool.query('DELETE FROM field_permissions')
       expect((await check()).projection.id).toBe('rec_acp')
@@ -212,7 +537,7 @@ suite('ACP projection authority real database', () => {
         }
         expect(waiting, 'new deny must wait for the ACP authority transaction').toBe(true)
         expect(inserted).toBe(false)
-        }, { attendanceCleaningAuthority: true })
+        }, { attendanceCleaningAuthority: true, attendanceCleaningSheetIds: ['sheet_acp'] })
       } finally {
         if (insertion) await insertion
         writer.release()

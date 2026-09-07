@@ -188,6 +188,82 @@ SELECT set_config before the fence recreates the old-snapshot wrong allowance an
 turns the test RED. Restored Node20 combined registry/authority/W4 neighbor: 56/56
 PASS. These still do not prove the not-yet-wired ACP HTTP apply or cleanup effects.
 
+## SERIALIZABLE projection phantom and candidate repair (2026-09-08 local)
+
+Integrated HEAD is `e88175d69c125fc28d72c6e14743471627771adf`, with product
+checkpoint `7f218673f3bd0790ebaf39dbd3d9c9ae7639aa9d` as first parent and main
+`976711b254d129e6c23bf8327c4be67018942ba3` as second parent. The following
+evidence is from uncommitted follow-up work, not the earlier green checkpoint.
+
+The actual SERIALIZABLE wrapper establishes its snapshot before the existing
+transaction-scoped sheet fence. A second connection commits a duplicate projection
+through the canonical create fence in that interval. The access check incorrectly
+returns the projection instead of refusing. The dedicated regression was RED;
+the earlier READ COMMITTED sync test did not cover this schedule.
+There was no canonical attendance mutation in this reproduction.
+
+Two Node20 / PostgreSQL15 experiments pass, but are not a production fix:
+
+- A pre-BEGIN session lock on `hashtext(canonicalSheetFenceKey(sheetId))` excludes
+  the writer's one-argument transaction lock. A two-int lock with the same hash
+  does not conflict. Exact unlock allows the writer to proceed.
+- A synthetic inverse-order holder demonstrates that initial try-lock success
+  does not prevent a later wait cycle. A bounded lock timeout, rollback and exact
+  unlock release the waiter; both backends then have zero advisory locks. This
+  is a candidate-protocol hazard, not evidence that an existing W4 caller takes
+  that synthetic lock or has a production deadlock.
+
+The coordinator authorized a bounded production candidate within the existing
+files. It now runs through the ACP-specific record boundary. No writer flag is
+enabled. This is a transaction/source milestone, not HTTP apply or UI completion.
+
+### Actual candidate order and resource gates
+
+The ACP boundary performs an idle probe and same-client non-authorizing lookup of
+the daily and catalog sheets. Each attempt acquires session locks in actual signed
+PG key order, deduplicating hashes, then begins SERIALIZABLE. Its first transaction
+statement locks the fixed **16** relations (the original 14 plus leave/overtime
+definitions) in SHARE NOWAIT mode. The boundary rechecks the exact sheet scope in
+that snapshot before normal W4 class-00, class-10 and class-11 processing. Only
+after target locking does the adapter enter source/projection/anchor row locking.
+
+Mechanical caller audit: RecordService create takes the same one-argument fence
+with writer flags OFF; the optional link plan is null in that posture. Attendance
+sync's anchor refresh/withhold ports open separate short pool transactions, not a
+W4-held callback. Ordinary W4 execute does not request either ACP fence. The
+bounded independent callgraph/resource/snapshot review found no new P1; its P2
+about optional sheet IDs is closed by mandatory paired options and pre-query
+refusal tests. The source-seed actor pre-read is a separate short transaction;
+its temporary FOR SHARE locks do not survive into W4 or grant authority to apply.
+
+Every attempt releases only its recorded session locks in reverse order, including
+partial busy, body refusal and 40001 retry. Existing same-backend locks are refused
+without changing their reentrant count. Lost acquisition/BEGIN/COMMIT/ROLLBACK or
+unlock results produce an uncertain-connection error; actual boundary tests prove
+pg `release(error)` destroys that client. The boundary maps this to fixed 503
+`ATTENDANCE_CLEANING_OUTCOME_UNKNOWN`, never a blind apply retry or raw error.
+
+The original duplicate test is now GREEN on the real wrapper. Removing its session
+acquisition makes the original wrong allowance RED again. Catalog insertion is
+observed; a concurrent catalog edit triggers 40001 and one whole-attempt retry.
+Removing catalog FOR UPDATE yields one attempt instead of two (RED). Removing the
+two definition-table fences independently makes both in-flight-definition refusal
+tests RED. All mutations are restored.
+
+Restored Node20 combined scope is **71/71**: dedicated authority 26, registry 13,
+existing plugin W4 HTTP neighbors 32. Node18 dedicated authority + registry is
+**39/39**, not the full 71. Backend type-check and diff-check pass. Focused source
+ESLint exits zero with 0 errors and 22 warnings in `src/index.ts`; no auto-fix.
+The existing 32 HTTP tests are not the still-unimplemented ACP apply endpoint.
+The intermediate catalog fixture collision was a test cleanup defect, corrected by
+removing its own two physical fields; it was retained as a failed run, not counted
+as a product concurrency defect. The full synthetic migration DB remains task-owned
+and running for the next route tests; only per-suite scratch DB residue is cleared.
+
+Remaining before publication: real ACP HTTP adapter and exact business fingerprint/
+dual-CAS checks, canonical apply plus durable cleanup-only replay, user-visible UI,
+final repeated gates and required CI selector union, final isolated DB cleanup.
+
 ## Exact current file census
 
 1. `docs/development/attendance-multitable-cleaning-acp1b-apply-route-decision-20260907.md`
