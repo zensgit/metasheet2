@@ -78,6 +78,11 @@
 | 2026-09-08 02:47 | #5540 已合(b9cba7262) | U2 落地:操作员项目目录并入拉取目标表项目号(`includePullTargets=1` opt-in)、可选待确认计数(`includePendingCounts=1`)、两个时间戳三态(`lastChangedFromPlmAt`/`lastExportAt`);独立反驳员复核确认**默认路径(不带参数)响应与 origin/main 字节级相同**;C5(多租户共享部署级拉取目标表时,拥有目标表的租户在 opt-in 下会枚举到其他租户 apply 写入的项目号)记为已知限制,222 单租户无实际影响,长期修法为按租户目标表,未排期 |
 | 2026-09-08 02:57 | #5541 已合(7dd38238d) | U1-B 落地:`StockPreparationOperatorHome.vue` 任务首页寄生 `project-board` tab(四个计数筛选 chip + 全部 + 卡片 + 空态四态)、四步 stepper 皮肤(既有 testid 不变)、`operatorNextStep.ts` 全页唯一「下一步」条、`projectPosture.ts` 状态徽标三处同词 |
 | 2026-09-08 02:31 | C 线工作流启动 | 队列自动带项目号(P0-1)、动作后自动重读(P0-8)、闭环句(P0-9)三项收尾工作流开工 |
+| 2026-09-08 03:5x | 交付文档 #5547 已合(6af167b90) | 交付说明补 P0 界面(接入向导 / 首页 / stepper)、操作员项目目录两个查询参数、多租户已知限制;运行记录补 U1/U2 时间线 |
+| 2026-09-08 04:51 | C 线 #5546 已合(61ecc67d1) | 队列自动带项目号(P0-1)、动作后自动重读(P0-8,对账成功重读队列、建账本成功重读目录)、闭环句/tooltip(P0-9)、首页目录接拉取目标并集(#5540 契约);三路对抗核验共 6 组 blocker(`RECONCILE_OK` 文案仍暗示"手动刷新"未清干净、并集扫描误算到项目备料页头上、`nothing_pending` 空态按钮无权限门、`loadQueue` 把读不出来的响应"规整"成伪造空队列、三处 `:key` 从 `projectId` 降级成 `projectNo`)全部修复;另有两条协调者裁决:摘掉 `includePendingCounts=1`(首页目录读改为只带 `includePullTargets=1`,`confirmationQueue.ts` 同步删除已无消费方的 `pendingCountsByProjectNo` 响应字段与请求选项)、`pullTargetReady=false` 文案改口(不再暗示"临时性",改为"这次读不到") |
+| 2026-09-08 04:55 | r17 上 222 | main `61ecc67d1`,包 12.49 MB;就地升级 8 步全过(pg_dump 备份、442 文件哈希 OK、迁移 0、health 200);经 nginx 前端 smoke PASS(`index-CFl7s7Vf.js`);U2/P0 标记全 True;§5-5 租户声明硬门 flag 有效(无声明 403 / 有声明 200) |
+| 2026-09-08 05:0x | 操作员链首跑全部 403,定位根因 | 测试操作员通过 `/api/permissions/grant` 直接拿到 `stock-prep:read`/`stock-prep:operate`(`user_permissions` 表里确实有),但 `/api/auth/me` 只返回考勤权限——命名空间过滤:控制命名空间只从用户的角色(`user_roles`→`role_permissions`)推导,清库后没有任何角色带 stock-prep 码,直接授予的权限被过滤掉(`filterPermissionCodesByNamespaceAdmission`/`fetchUserNamespaceRoleContext`,`packages/core-backend/src/rbac/namespace-admission.ts`) |
+| 2026-09-08 05:05 | 建角色 `stock-prep-operator` 并分配,立即生效 | 按产品正路在「角色管理」建角色(备料一线操作员,权限 `stock-prep:read`+`stock-prep:operate`)并在「用户管理」分配给测试操作员后立即生效:目录 200、确认队列 200;看板/拉取/导出/对账 404(`ExternalSystemNotFoundError`/`PROJECT_NOT_FOUND`——外接源尚未在界面建立,属预期);建账本/切换数据源 403(正确拒绝)。P0 API 验收 PASS:默认目录响应键与升级前完全一致;`includePullTargets=1` 返回 `pullTargetReady=true`/`directoryMayBeIncomplete=false`/`pullTargetScanCapped=false`/`lastExportAtMayBeIncomplete=false`;`includePendingCounts=1` 返回 `pendingCountsByProjectNo`;传字面字符串 `"true"` 不打开并集;四种请求均 20–160ms |
 
 
 ## 待 owner 拍板(来自设计 §4 与 W1–W3 实证)
@@ -166,3 +171,7 @@
 1. 封顶类改动要枚举所有消费该数组的下游(快照映射器、缺件汇总),否则封顶本身制造 fail-open。
 
 2. 授权门要先证明数据模型能表达威胁,否则只会把合法流程挡住。
+
+3. **PR 的 base 不要指向一条会被 squash 合并删除的分支**:squash 合并后源分支在 GitHub 上被删,若后续 PR 以它为 base,实现者在该分支已消失后建不出 PR(GitHub 找不到 base ref)。链式提交多个 PR 时,后一个 PR 的 base 要么等前一个真正合入 `main` 后再切,要么直接以 `main` 为 base、自己处理 rebase 冲突。
+
+4. **"一处不剩"类的文案清理声称,不能只 grep 原句字面量,要按语义查常量表**:C 线核验里 `RECONCILE_OK` 的文案曾被判定"已改完、不再暗示手动刷新",但反驳员按常量表逐个 key 核对时,仍抓到一处遗漏——grep 原句只能找到未改的逐字匹配,找不到"同一段话被换了个措辞但语义仍是旧的"这种情况。以后遇到"某类文案已全部清理"的声称,要先列出该文案所在的完整常量表(或所有语言变体),逐条核对语义,而不是对原句做一次全仓 grep 就下结论。

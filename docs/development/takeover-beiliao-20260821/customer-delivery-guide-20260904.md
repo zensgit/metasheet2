@@ -95,6 +95,14 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 3. 浏览器打开首页,Ctrl+F5 强刷一次,看到登录页才算通过。
 包侧的兜底:打包工作流的 `base_path` 参数默认就是 `/`,**不要在 Git Bash 里显式传 `-f base_path=/`**(MSYS 会把它改写成 Git 安装目录);打包完成后先解开 `apps/web/dist/index.html` 检查资源前缀,再上传。
 
+**r17 升级验证记录(2026-09-08,222,main `61ecc67d1`,包 12.49 MB)**:
+
+- **04:55 就地升级**:pg_dump 备份完成、442 个文件哈希核对通过、迁移 0 条(无新增迁移)、health 200。
+- **前端 smoke PASS**(经 nginx,资源文件 `index-CFl7s7Vf.js`)。
+- **U2、P0 两批标记全部为 True**;§5-5 租户声明硬门 flag 实测有效:无声明令牌 403、有声明令牌 200。
+- **操作员权限链**:清库重建后新建的测试操作员通过 `POST /api/permissions/grant` 直接拿到权限码,`GET /api/auth/me` 仍读不到、备料接口一律 403——根因见 §6.3「谁能用」小节的命名空间过滤说明;按正路建角色 `stock-prep-operator` 并分配后立即生效:目录 200、确认队列 200;看板/拉取/导出/对账因外接源尚未在界面上新建而 404(`ExternalSystemNotFoundError` / `PROJECT_NOT_FOUND`,属预期,不是权限问题);建确认账本 / 切换数据源 403(正确拒绝,留给平台管理员)。
+- **P0 目录接口验收**(`GET /api/integration/stock-preparation/operator/projects`):默认(不带参数)响应键与升级前完全一致;`includePullTargets=1` 返回 `pullTargetReady=true`/`directoryMayBeIncomplete=false`/`pullTargetScanCapped=false`/`lastExportAtMayBeIncomplete=false`;`includePendingCounts=1` 返回顶层 `pendingCountsByProjectNo`;传字面字符串 `"true"`(而非严格的 `"1"`)不会打开并集扫描,与 §7.1 记录的严格值匹配规则一致。四种请求响应时间均在 20–160 毫秒。
+
 ### 2.2 全新安装(无既有部署)
 
 **2026-09-06 实测结论**:2026-09-06 05:23–05:30 在 222 上另开一个隔离目录(独立 RootDir、独立库名、独立端口)用包内 `scripts/ops/multitable-onprem-apply-package.ps1`(`-InstallDeps 1 -RunMigrations 1 -RestartService 0 -CheckNginx 0 -RunHealthcheck 0`)实跑了一次纯 Windows 全新安装。
@@ -385,7 +393,7 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 ### 6.3 备料工作台 P0 界面(r17 起)
 
-> **以下描述的界面 r17 才出现在 222;r16b 没有。** r17 起,`/stock-prep` 新增两块界面,做法都是"寄生"在既有 tab 内——零 tab 结构改动、零路由改动、零接口改动,既有卡片的 testid 与顺序一个字节没动。
+> **以下描述的界面 r17 才出现在 222;r16b 没有。** r17 起,`/stock-prep` 新增两块界面,做法都是"寄生"在既有 tab 内——零 tab 结构改动、零路由改动、零接口改动,既有卡片的 testid 与顺序一个字节没动。**r17 已于 2026-09-08 上 222(main `61ecc67d1`)。**
 
 **接入向导(寄生在「安装」tab 顶部,平台管理员可见)**
 
@@ -393,6 +401,8 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 - 九步安装计划**提前**渲染:没点任何按钮之前就能看到一行摘要(几步系统自己跑、几步要人做,跳过不等于失败)以及五个"需要人工做"的步骤的解释文字。
 - blocker 按类型分两种渲染:`fix.kind='http'`(界面能自己补)的一行指向卡片底部**唯一**的「开始安装」按钮,并注明"重复点是安全的";`fix.kind='env'`(需要运维在部署机上做,比如放好客户列清单文件)的一行**没有**「立即修复」按钮,只有 [复制这条给运维],复制内容带逐字修复命令。
 - 第⑤步「谁能用」是纯静态说明(不做实时角色检测):列出三个权限码组合起来"谁能做什么",两条直链(角色管理 / 用户管理)各带一句兜底,打不开时用 [复制一份待办给平台管理员]。
+
+  > **权限码必须通过「角色」授予,直接给账号本人勾权限不生效。** 正确做法:在「角色管理」建一个角色(例如「备料一线操作员」),把 `stock-prep:read` 与 `stock-prep:operate` 两个权限码都勾到这个角色上,再到「用户管理」把角色分配给一线账号。**只在用户身上直接勾这两个权限码、不建角色分配,权限会被命名空间准入过滤掉,账号打开备料会一律提示无权限(403)**——这是平台的命名空间准入规则(见 §5 开头"2026-09-05 实测订正"一节),不是备料本身的缺陷。**2026-09-08 222 清库重建后按此正路实测确认**:清库后新建的测试操作员账号即便直接通过 `POST /api/permissions/grant` 拿到了两个权限码(数据库里确实有),`GET /api/auth/me` 仍读不到 stock-prep 权限,备料相关接口一律 403;按上面的正路在「角色管理」建角色 `stock-prep-operator`(备料一线操作员,权限 `stock-prep:read` + `stock-prep:operate`)并在「用户管理」分配给该账号后,权限立即生效。
 - 装完之后出现一张完成交接卡:标题只说明"该建的都建好了、还剩几步要人做",**不宣称**"真的跑通了一次"——那需要拿一个项目实际跑一遍试算才能验证,这一点向导本身说明白,不含糊。
 - **stepper 是地图,不是闸机**:`no-go` 状态不锁第⑥步,`ledger-not-ready` 状态不锁第④步——「只检查」是读操作,不受安装闸门限制。
 
@@ -422,7 +432,18 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 - 首页卡片 / 工作区标题 / stepper 三处状态徽标用**同一个纯函数**判定(等您拿主意 N 件 / 卡住了:缺件 N 种 / 正在跑 / 可以导出 / 已就绪 / 还没拉过 等),保证三处同色同词,不会出现同一个状态在不同地方描述不一致。
 
-**C 线(队列自动带项目号、动作后自动重读、闭环句)**:待 r17 定稿补充。
+**C 线(队列自动带项目号、动作后自动重读、闭环句)**
+
+- **队列自动带项目号**:从项目工作区进入确认队列时,队列自动带上当前项目号;切换到另一个项目号,队列跟着变,不需要手动在队列里重新输入。
+- **动作后自动重读**:对账成功后,确认队列自动重新读取一遍——不用手动点刷新;对账失败时队列不重读、不弹二次错误,维持失败前的画面。建立确认账本成功后,首页/项目目录也会自动重读一遍(避免"账本刚修好、页面上还显示成没建"这种一次动作后原样立回来的情况)。
+- **确认队列空态的闭环句**:队列里"没有要您拿主意的事"这句空态下方新增 [再同步一次] 按钮,点击后带着当前项目号跳回项目看板;**这个按钮带权限门,只对能打开项目看板的账号显示**。
+- **缺件卡的顶部后果句 + 底部闭环句**:缺件区块顶部补一句"为什么整个项目一行都写不进去"的后果说明,底部补一句"补完之后怎么办"的闭环说明(§6.2 已有文字口径,r17 把它做进界面)。
+- **四处原生 `title` 提示**:表里有多少行(项目工作区状态条)、待确认(队列"等您处理"计数)、缺件(拉取面板缺件卡标题)、可以导出(首页筛选 chip)四处补了原生浏览器 `title` 悬停提示,解释这个数字/状态是什么意思。
+- **首页目录接拉取目标并集,带节流与三句互斥中性提示**:首页(任务首页 tab)读取项目目录时带 `includePullTargets=1`(不带 `includePendingCounts`);同一作用域 5 秒内的重复请求会被节流,不重复打后端。返回的信号按互斥关系最多显示一句,后端没有这些字段(旧版本)时一句都不显示:
+  - `pullTargetReady=false`——「自助拉取的项目这次读不到,目录只显示归档过的项目;您仍可直接输入项目号打开」;
+  - `pullTargetScanCapped=true`——「项目数超过一次扫描的上限,目录可能不全;找不到的项目请直接输入项目号」;
+  - `directoryMayBeIncomplete=true`(且以上两者都不是)——「目录本次可能不全;找不到的项目请直接输入项目号」。
+- **队列读不出来时说"读不出来",不说"没有"**:确认队列读到一个看不懂的响应(如错误页 HTML、形状不对的信封)时,页面显示"读不出来"这类错误提示,不会把它当成空队列渲染成"没有要您拿主意的事"——避免把读取失败伪装成"皆大欢喜"。
 
 ---
 
@@ -530,6 +551,7 @@ pm2 restart metasheet-backend --update-env
 - **`includePendingCounts=1`**:只有传这个值才返回顶层键 `pendingCountsByProjectNo`(每个项目号的待确认计数)。
 - **两者相互独立**:可以单独带一个、都不带、或都带,互不牵连——带了 `includePendingCounts` 不会顺带把并集扫描一起打开,反之亦然。
 - **不带任何参数时,响应与审计 `detail` 与升级前(main)逐键相同,绑定表零查询、审计窗口零调用**——首页/看板挂载时若不传这两个参数,这套能力对原有调用方是**零成本**的。项目备料页(`StockPreparationProjectBoardView.vue`)mount 时刻意不传这两个参数,保持零成本。
+- **前端首页只带 `includePullTargets=1`;`includePendingCounts` 目前无前端消费方,保留为接口能力**——首页卡片的待确认计数用的是目录行内本来就有的 `pendingDecisionCount`,不需要再拿 `includePendingCounts=1` 换一份顶层 `pendingCountsByProjectNo`。这个查询参数在后端仍然有效、可被其它调用方按需使用,只是当前 web 端没有任何页面传它。
 
 **扫描上限**:`includePullTargets=1` 时的并集扫描受分页上限约束(页数 × 每页,与导出共用同一组代码常量,当前为 100 页 × 500 行 = 5 万行,数字以代码常量 `PULL_TARGET_MAX_PAGES`/`PULL_TARGET_PAGE_LIMIT` 为准)。命中该上限后,`directoryMayBeIncomplete=true` 且新增顶层键 **`pullTargetScanCapped=true`**,前端据此提示"目录可能不全,请直接输入项目号"而不是让人反复重试。`pullTargetScanCapped`(表太大被截断)、`pullTargetReady=false`(这次读挂了)、"合并撞总行数上限"是三种可区分的情形,响应里不共用同一对布尔,不会说反。
 
