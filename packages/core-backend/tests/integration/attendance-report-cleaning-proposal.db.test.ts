@@ -10,7 +10,8 @@ import { AttendanceCleaningConnectionUncertainError, runAttendanceResultOperatio
 
 // This suite owns its database; never fall back to an application DATABASE_URL.
 const source = process.env.ATTENDANCE_TEST_DATABASE_URL
-const suite = source ? describe : describe.skip
+if (!source) throw new Error('ACP_TEST_LOCAL_DATABASE_REQUIRED')
+const suite = describe
 suite('ACP projection authority real database', () => {
   const name = `attendance_acp_${randomUUID().replaceAll('-', '')}`
   const recordId = randomUUID()

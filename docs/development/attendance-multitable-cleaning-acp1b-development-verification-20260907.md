@@ -2,6 +2,48 @@
 
 Status: IN PROGRESS / DRAFT-HOLD. This report is not completion or release evidence.
 
+## Post-publication CI correction (current, 2026-09-08)
+
+Draft/HOLD #5542 published at 8faebc105c090b11336a65c08756cf4d5141b044.
+That head is **not CI green**. Two independent failures are established:
+
+1. Three Linux postgres:16 lanes reject the new anchor migration with
+   `ATTENDANCE_CLEANING_ANCHOR_SCHEMA_DRIFT` (comments, org-writer W4-S1,
+   recovery-schema-drift). The precise semantic/catalog difference remains
+   unproven. PG15-alpine parity and migration-replay pass. The original pin
+   also passes native macOS arm64 PG16.15 (26/26), and C/en_US.UTF-8 minimal
+   schema captures are identical. Therefore "major16 always fails" is refuted.
+   No migration pin weakening or guessed normalization has been made.
+2. Node18/20 fail the attendance corpus wiring gate: the new DB suite makes
+   the exact family 110 rather than 109 and lacked the two required wiring
+   points. Local correction adds exactly one whole-file argument and quoted
+   no-DB exclusion, one corpus member, and a fail-loud test-specific DB guard.
+   The existing step-specific DB environment value is retained, not propagated
+   to another step. Full wiring now passes 262/262. Independent removal of
+   exclusion, whole-file argument and environment each fails; restoration passes.
+   Without the explicit test DB URL the real suite now fails, never skip-greens.
+
+Workflow/config strict union is checked against both published HEAD and main:
+removing exactly the new lines produces byte-identical prior files. Official
+`computePackageProvenancePinSet` reports only `evidenceFiles.pluginTestsWorkflow`
+changed. Old-pin positive verification fails; updated pin passes provenance and
+all five S5 script suites (6/6 script processes), frozen/live diff zero.
+
+Discarded mutation attempts are not evidence: an early orchestration restored
+files before subprocess completion; a subsequent ambiguous restoration anchor
+temporarily inserted lines in another step. Both were corrected and serial
+terminal runs used instead. One restored run's Python YAML subprocess stalled,
+was bounded/terminated, and is recorded as failed; the next bounded run passes.
+
+Private PG16.15 runtime was built from the official PostgreSQL source archive,
+SHA256 `c1575341fa7bd40f5274ea465b34390f4dc64cdd0770af327005caaeb9f6b7ed`.
+It occupies about 274MiB with source/build files, not a global installation.
+macOS libc and Linux CI libc are not claimed equivalent. The capture harness
+uses unique synthetic databases, explicit role, loopback port allowlist, emits
+explicit migration outcome and closes owned pools before dropping its own DB.
+At this correction checkpoint task PG15/PG16 instances are running for isolated
+verification; the earlier shutdown record below predates these new instances.
+
 ## Current delivery snapshot (supersedes chronological pending notes below)
 
 Candidate product/CI head: `a71d0020bd9e45725c79cd2420a39d74bbb5aa03`.
