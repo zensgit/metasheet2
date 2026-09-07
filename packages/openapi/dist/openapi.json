@@ -6251,6 +6251,10 @@
             },
             "description": "Lock-7 OD-L7-10 (widened by Lock-7B OD-L7B-1) — the actor-scoped per-field\naccess map for the viewer at their claimed handler seat(s): fieldId ->\neditable | readonly | hidden | required. Present ONLY on the DETAIL read\n(getApproval); absent on the list. A field absent from the map is editable\n(legacy default, OD-L7-9). `required` is editable plus a submit-time\nobligation enforced at handler submit. Presentation only — enforcement is\nserver-side (a masked field write is refused regardless of what the client\nrenders).\n"
           },
+          "canDecideCurrentNode": {
+            "type": "boolean",
+            "description": "Would the decision endpoint's own authorization predicate let THIS viewer decide the\nnode the instance is currently stopped on? Resolved server-side per viewer by the\ndispatch door's own seat predicate (user seats, role seats, delegated seats — a\ndelegatee is the assignee on a real assignment row — and, inside a parallel region,\nthe pending branch frontier). `false` when the instance is not pending or the viewer\nholds no matching active seat at a decidable node key; `true` for a pending instance\nwhose decisions do not go through the seat-gated door (a legacy platform row with no\npublished definition, a `plm:` mirror, an after-sales row), because those dispatches do\nnot gate on assignments and `true` is what those surfaces already do today. Present on the detail read and on the action response. ABSENT means\nthe server does not compute it — clients must fall back to their prior behaviour, not\nread absence as `false`. Presentation only: the 403 APPROVAL_ASSIGNMENT_REQUIRED\nremains the authority.\n"
+          },
           "currentNodeKey": {
             "type": "string",
             "nullable": true

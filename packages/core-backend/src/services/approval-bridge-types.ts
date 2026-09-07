@@ -64,6 +64,25 @@ export interface UnifiedApprovalDTO {
    */
   nodeOperations?: EffectiveNodeOperations | null
   /**
+   * Would the decision endpoint's own authorization predicate let THIS viewer decide the node the
+   * instance is currently stopped on? Server-resolved per viewer, by the door's OWN predicate
+   * (`approval-seat-authorization.ts`: `assignmentMatchesActor` over `decidableNodeKeysForInstance`),
+   * so the client renders rather than re-derives and cannot drift from the server's answer.
+   *
+   * `false` when the instance is not pending, when the viewer holds no matching active seat at a
+   * decidable node key, and when no viewer identity was supplied. `true` for a pending instance
+   * whose decisions do NOT go through the seat-gated door (a legacy platform row with no published
+   * definition, a `plm:` mirror, an after-sales row): those dispatches do not gate on assignments,
+   * so `false` would hide controls the server accepts — and `true` is what those surfaces already
+   * do today.
+   *
+   * Presentation only — the 403 `APPROVAL_ASSIGNMENT_REQUIRED` remains the authority, and hiding a
+   * button is never the guard. ABSENT means "this backend does not compute it" (an older server),
+   * and clients must fall back to their pre-existing behaviour rather than reading absence as
+   * `false`.
+   */
+  canDecideCurrentNode?: boolean
+  /**
    * Parallel gateway (并行分支) — populated only when the instance is in a
    * parallel region (length ≥ 2). Absent on linear state; callers that don't
    * care about parallelism keep using `currentNodeKey` unchanged.

@@ -57,6 +57,11 @@ import {
   type NodeOperationGraphView,
 } from './approval-effective-node-operations'
 import {
+  assignmentMatchesActor,
+  readParallelBranchStates,
+  resolveCanDecideCurrentNode,
+} from './approval-seat-authorization'
+import {
   ACTION_POLICY_KEYS,
   APPROVAL_POLICY_DENIED_ACTION,
   APPROVAL_TERMINAL_STATUSES,
@@ -4164,25 +4169,15 @@ function toUnifiedApprovalDTO(
 }
 
 /**
- * D-5 (Lock-9 implementation brief): exported (was module-private) so the process-attachment
- * upload route (§5.2) can re-derive the acting seat WITHOUT reimplementing the user/role match
- * rule. `dispatchAction`'s own inline uses (currentNodeAssignments.filter(...)) are unaffected —
- * this is a pure widening of visibility, not a behavior change.
+ * D-5 (Lock-9 implementation brief): exported so the process-attachment upload route (§5.2) can
+ * re-derive the acting seat WITHOUT reimplementing the user/role match rule.
+ *
+ * The BODY now lives in `./approval-seat-authorization` (moved unchanged) so the detail DTO
+ * builders can call the door's own predicate without importing this module — `ApprovalProductService`
+ * imports `ApprovalBridgeService`, so the other direction would be a cycle. Re-exported from here so
+ * every existing importer and `path:line` reference keeps resolving.
  */
-export function assignmentMatchesActor(
-  assignment: ApprovalAssignmentRow,
-  actorId: string,
-  actorRoles: string[],
-): boolean {
-  if (!assignment.is_active) return false
-  if (assignment.assignment_type === 'user') {
-    return assignment.assignee_id === actorId
-  }
-  if (assignment.assignment_type === 'role') {
-    return actorRoles.includes(assignment.assignee_id)
-  }
-  return false
-}
+export { assignmentMatchesActor } from './approval-seat-authorization'
 
 /**
  * Lock-9 OD-L9-3(a) §5.2 — a FAIL-FAST-ONLY seat check for the process-attachment upload route,
@@ -4524,37 +4519,6 @@ function buildPersistableParallelState(state: ParallelInstanceState): Record<str
         },
       ]),
     ),
-  }
-}
-
-function readParallelBranchStates(metadata: unknown): ParallelInstanceState | null {
-  if (!isRecord(metadata)) return null
-  const states = (metadata as { parallelBranchStates?: unknown }).parallelBranchStates
-  if (!isRecord(states)) return null
-  if (typeof states.parallelNodeKey !== 'string'
-    || typeof states.joinNodeKey !== 'string'
-    || (states.joinMode !== 'all' && states.joinMode !== 'any')
-    || !isRecord(states.branches)) {
-    return null
-  }
-  const branches: Record<string, ParallelInstanceState['branches'][string]> = {}
-  for (const [edgeKey, entryRaw] of Object.entries(states.branches)) {
-    if (!isRecord(entryRaw)) return null
-    const entry = entryRaw as { edgeKey?: unknown; currentNodeKey?: unknown; complete?: unknown }
-    if (typeof entry.edgeKey !== 'string') return null
-    if (entry.currentNodeKey !== null && typeof entry.currentNodeKey !== 'string') return null
-    if (typeof entry.complete !== 'boolean') return null
-    branches[edgeKey] = {
-      edgeKey: entry.edgeKey,
-      currentNodeKey: entry.currentNodeKey as string | null,
-      complete: entry.complete,
-    }
-  }
-  return {
-    parallelNodeKey: states.parallelNodeKey as string,
-    joinNodeKey: states.joinNodeKey as string,
-    joinMode: states.joinMode as 'all' | 'any',
-    branches,
   }
 }
 
@@ -8215,7 +8179,14 @@ export class ApprovalProductService {
       emitApprovalCompletionEvent(completionEvent)
     }
 
-    const approval = await this.getApproval(instanceId, actor.userId)
+    // VIEWER ROLES, not just the id — the same pair every dispatch-verb call site passes. The
+    // creation response is a viewer-scoped read like any other, and `canDecideCurrentNode` filters
+    // the seat rows by BOTH: a requester who is themselves a ROLE-seated approver at the entry node
+    // (`assigneeType: 'role'` on node 1) would otherwise be told `false` on this one response while
+    // a fresh detail GET says `true` and the door accepts them. Harmless before this field existed
+    // (`nodeOperations` fails OPEN on a missing carrier); the new field fails CLOSED, so the
+    // omission now costs a truthful answer.
+    const approval = await this.getApproval(instanceId, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
     }
@@ -11418,6 +11389,19 @@ export class ApprovalProductService {
         if (nodeOperations) dto.nodeOperations = nodeOperations
       }
     }
+
+    // Viewer-scoped decision affordance — the SAME predicate this service's own `dispatchAction`
+    // gate uses (`assignmentMatchesActor` over the door's decidable node keys), answered here so
+    // the client renders rather than re-derives. Shipped on the ACTION response too, not only the
+    // detail read: the FE store publishes an action response into the slot the detail read fills,
+    // so omitting it here would flip the field to `undefined` (its older-backend fallback) the
+    // moment an approver acts.
+    dto.canDecideCurrentNode = resolveCanDecideCurrentNode({
+      instance: row,
+      assignments: assignmentsResult.rows,
+      viewerUserId: viewerUserId ?? null,
+      viewerRoles: viewerRoles ?? null,
+    })
     return dto
   }
 

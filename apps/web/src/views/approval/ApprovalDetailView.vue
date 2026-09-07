@@ -570,7 +570,7 @@
                (and a detail/history refresh no longer spins the whole bar). -->
           <div class="approval-detail__actions-primary">
             <el-button
-              v-if="canAct"
+              v-if="canDecide"
               type="success"
               :loading="inFlightAction === 'approve'"
               :disabled="!actionsEnabled"
@@ -580,7 +580,7 @@
               通过
             </el-button>
             <el-button
-              v-if="canAct"
+              v-if="canDecide"
               type="danger"
               :loading="inFlightAction === 'reject'"
               :disabled="!actionsEnabled"
@@ -597,7 +597,7 @@
                  control is additionally gated on `!isMobileLayout`. 评论 stays
                  visible on both surfaces. -->
             <el-button
-              v-if="canAct && !isMobileLayout && returnableNodes.length > 0 && allowReturn"
+              v-if="canDecide && !isMobileLayout && returnableNodes.length > 0 && allowReturn"
               type="warning"
               :loading="inFlightAction === 'return'"
               :disabled="!actionsEnabled"
@@ -607,7 +607,7 @@
               退回
             </el-button>
             <el-button
-              v-if="canAct && !isMobileLayout && allowTransfer"
+              v-if="canDecide && !isMobileLayout && allowTransfer"
               type="warning"
               :loading="inFlightAction === 'transfer'"
               :disabled="!actionsEnabled"
@@ -618,7 +618,7 @@
             </el-button>
             <!-- P1-B 加签: pull additional co-signer(s) into the current node. -->
             <el-button
-              v-if="canAct && !isMobileLayout && allowAddSign"
+              v-if="canDecide && !isMobileLayout && allowAddSign"
               type="primary"
               plain
               :loading="inFlightAction === 'add_sign'"
@@ -631,7 +631,7 @@
             <!-- P1-B 减签: remove a previously add-signed co-signer at the
                  current node. Only shown when at least one such row exists. -->
             <el-button
-              v-if="canAct && !isMobileLayout && reducibleAssignees.length > 0 && allowReduceSign"
+              v-if="canDecide && !isMobileLayout && reducibleAssignees.length > 0 && allowReduceSign"
               type="primary"
               plain
               :loading="inFlightAction === 'reduce_sign'"
@@ -1658,6 +1658,31 @@ const allowRevoke = computed(() => approval.value?.policy?.allowRevoke === true)
 // ABSENT ≡ ALLOWED (OD-L5-3(a)), deliberately the OPPOSITE of `allowRevoke`'s `=== true`
 // fail-closed idiom above. Copying that idiom would hide all four verbs on every pre-Lock-5
 // instance, on every bridged instance with no runtime graph, and for every seatless viewer.
+// ---------------------------------------------------------------------------
+// Viewer-scoped decision affordance (2026-09-07)
+// ---------------------------------------------------------------------------
+// The action bar's verbs used to render on `canAct` alone. `canAct` is the COARSE global RBAC
+// grant `approvals:act` — "this reader may act on approvals somewhere" — not "the server will
+// accept a decision on THIS instance from this reader". The server's dispatch door additionally
+// requires an active seat at the node the instance is stopped on, so a requester (or any other
+// reader who holds the grant but no seat here) was shown 通过/驳回 that could only ever come back
+// 403.
+//
+// The obvious local fix — reuse `isMyTurn` (below) — is WRONG and is deliberately not taken:
+// `isMyTurn` matches `type === 'user'` seats only, while the server's door matches ROLE seats
+// too, so gating the buttons on it would take the whole action bar away from every role-seated
+// approver the server does accept. Instead the server now answers the question itself, with the
+// door's own predicate, and ships the answer as `canDecideCurrentNode`.
+//
+// `!== false`, not truthiness: `undefined` means the backend does not compute the field (an older
+// server), and must fall back to exactly today's behaviour rather than hiding the bar. Same idiom
+// as `allowTransfer`/`allowAddSign`/... below, for the same reason.
+//
+// This is a NARROWING of an affordance, never a permission: the 403 remains the authority, and the
+// separate instance-consistency gate (`actionsEnabled`) is untouched and still applies on top.
+const canDecideCurrentNode = computed(() => approval.value?.canDecideCurrentNode !== false)
+const canDecide = computed(() => canAct.value && canDecideCurrentNode.value)
+
 const nodeOperations = computed(() => approval.value?.nodeOperations ?? null)
 const allowTransfer = computed(() => nodeOperations.value?.allowTransfer !== false)
 const allowAddSign = computed(() => nodeOperations.value?.allowAddSign !== false)
