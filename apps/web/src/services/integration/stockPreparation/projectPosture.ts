@@ -13,9 +13,17 @@
 // business quantity off a BOM line); it is how many decisions/parts are outstanding, the same kind of
 // number `board.pendingDecisionCount` already renders elsewhere on this page today.
 //
-// SCOPE. Table §4.4 lists ten badges; only the six below apply to the three P0 call sites (home card,
-// workspace title, sync-panel status line). The remaining four — 未检查/看不到/未接入监控/需要别人做 —
-// belong to the install wizard and the ops/health panel, both P1/out of scope for this pass.
+// SCOPE. Table §4.4 lists ten badges; the seven below are the ones the P0 call sites can reach (home
+// card, workspace title, sync-panel status line, and the stepper's 第④步 ⊘不归您做). The remaining
+// three — 未检查 / 未接入监控 / 需要别人做 — belong to the install wizard and the ops/health panel,
+// both P1/out of scope for this pass.
+//
+// WHY `unknown` EXISTS (G4 诚实态). The operator project directory carries an ARCHIVE's line counts,
+// written by the platform-admin `mvp-persist` surface — never the live pull target (F1). A directory
+// row with no pending decisions therefore says NOTHING about whether rows were pulled: reading it as
+// 「还没拉过」 or as 「可以导出」 are both fabrications, in opposite directions. `unknown` is §4.4's
+// `? 看不到` third state for exactly that: not green, not grey-meaning-empty, just "this screen
+// cannot see it from here". See operatorHomeCards.ts for the one place that asks for it.
 
 export type StockPrepPostureKey =
   | 'pending_decision' // 🟠 等您拿主意 N 件
@@ -23,6 +31,7 @@ export type StockPrepPostureKey =
   | 'running' // 🔵 正在跑
   | 'ready' // 🟢 可以导出 / 已就绪
   | 'not_pulled' // ⚪ 还没拉过
+  | 'unknown' // ? 看不到 — 这一屏拿不到判断依据(§4.4 第三态,G4)
   | 'not_yours' // ⊘ 不归您做 — stepper 第④步(存档),对一线恒为此
 
 export type StockPrepPostureTone = 'warning' | 'danger' | 'primary' | 'success' | 'neutral' | 'info'
@@ -47,6 +56,13 @@ export interface StockPrepPostureInput {
   pulledRowCount?: number
   /** Step-4-only override: on this deployment archiving is never the operator's job. */
   notYours?: boolean
+  /**
+   * THIS SCREEN CANNOT SEE the pull state at all — not "it is zero", not "it is fine". Set by the
+   * home page's directory branch, whose row carries an archive's counts rather than the live pull
+   * target (F1). Ranked below the two counts that ARE trustworthy on such a row, and above every
+   * branch that would have to guess.
+   */
+  progressUnknown?: boolean
 }
 
 const NOT_YOURS: StockPrepPosture = Object.freeze({
@@ -61,6 +77,13 @@ const RUNNING: StockPrepPosture = Object.freeze({
   zh: '正在跑',
   en: 'Running',
   tone: 'primary',
+})
+
+const UNKNOWN: StockPrepPosture = Object.freeze({
+  key: 'unknown',
+  zh: '看不到进度',
+  en: 'Progress not visible',
+  tone: 'neutral',
 })
 
 const NOT_PULLED: StockPrepPosture = Object.freeze({
@@ -78,10 +101,16 @@ const READY: StockPrepPosture = Object.freeze({
 })
 
 /**
- * THE one function every posture badge on the P0 surfaces calls. Priority order matches §4.4's own
- * reading order — a project that is both "还没拉过" and would-be "可以导出" is impossible by
- * construction (ready requires `pulledRowCount > 0`), so the branches below never actually compete for
- * the same input; the order still matters for `busy`, which can be true alongside any count.
+ * THE one function every posture badge on the P0 surfaces calls.
+ *
+ * PRIORITY ORDER, AND WHERE IT DEPARTS FROM §4.4's TABLE ORDER. The table lists 正在跑 third, after
+ * the two count-bearing badges; this function checks `busy` SECOND, before them. That is deliberate
+ * and it is the only departure: `busy` is the one input that can be true simultaneously with any
+ * count, and while a run is in flight every count on screen is the PREVIOUS run's. Saying 「正在跑」
+ * over a stale number is honest; saying 「等您拿主意 2 件」 while a sync is actively changing that 2
+ * is not. `notYours` is checked first because it is a hard override, not a state. Below `busy` the
+ * branches are mutually exclusive by construction (ready requires `pulledRowCount > 0`), so their
+ * relative order is documentation rather than behaviour.
  */
 export function stockPrepPosture(input: StockPrepPostureInput): StockPrepPosture {
   if (input.notYours) return NOT_YOURS
@@ -104,6 +133,7 @@ export function stockPrepPosture(input: StockPrepPostureInput): StockPrepPosture
       tone: 'danger',
     }
   }
+  if (input.progressUnknown) return UNKNOWN
   const pulled = input.pulledRowCount ?? 0
   if (pulled > 0) return READY
   return NOT_PULLED

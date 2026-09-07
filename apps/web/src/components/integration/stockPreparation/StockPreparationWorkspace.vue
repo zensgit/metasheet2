@@ -496,7 +496,15 @@ const selectedProjectNo = ref<string>(projectNoFromQuery())
 function handleProjectNoSelect(projectNo: string): void {
   selectedProjectNo.value = projectNo
   // Replace, not push: opening a project is not a history step.
-  void router.replace({ query: { ...route.query, projectNo } })
+  //
+  // AN EMPTY NUMBER REMOVES THE KEY rather than writing `?projectNo=`. This is the 返回今天要处理
+  // path (§2.3 makes `?projectNo=` the 首页 ⇄ 工作区 state bit), and a query that still carries an
+  // empty value is not the same URL as one that carries none — reloading or sharing it would land
+  // on a page whose own reading of "is a project open" disagreed with the shell's.
+  const query = { ...route.query }
+  if (projectNo) query.projectNo = projectNo
+  else delete query.projectNo
+  void router.replace({ query })
 }
 
 function handleProjectSelect(projectId: string): void {

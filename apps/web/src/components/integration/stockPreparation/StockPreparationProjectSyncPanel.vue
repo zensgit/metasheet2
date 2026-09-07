@@ -27,11 +27,16 @@
           @keyup.enter="onRun"
         />
       </label>
+      <!-- G1 每屏一个主操作位: when the workspace's 「下一步」 bar is on screen it owns the one
+           filled primary, and this button steps down to a neutral secondary. `data-primary-cta` is
+           therefore conditional — it is the attribute a spec counts to prove the rule holds. -->
       <button
         v-if="canRun"
         type="button"
         class="sp-sync__run"
+        :class="{ 'sp-sync__run--secondary': runEmphasis === 'secondary' }"
         data-testid="stock-prep-project-sync-run"
+        :data-primary-cta="runEmphasis === 'primary' ? 'stock-prep-project-sync-run' : undefined"
         :disabled="!canSubmit"
         @click="onRun"
       >
@@ -221,6 +226,15 @@
         <span class="sp-sync__step-body">
           <span class="sp-sync__status" :class="`sp-sync__status--${row.status}`">{{ statusLabel(row.status) }}</span>
           <span class="sp-sync__step-name">{{ bi(row.descriptor.zh, row.descriptor.en) }}</span>
+          <!-- §4.4 row 6 / 线框 C ②: 第④步 存档 is not the operator's job on this deployment, and
+               a bare SKIP reads as "something did not happen" rather than "this one was never
+               yours". Rendered only for a caller who cannot run the archive step themselves, so an
+               administrator's own view is unchanged. -->
+          <span
+            v-if="showsNotYoursBadge(row)"
+            class="sp-sync__step-badge"
+            data-testid="stock-prep-project-sync-step-not-yours"
+          >{{ bi(notYoursPosture.zh, notYoursPosture.en) }}</span>
           <template v-if="row.result">
             <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason">{{ reasonText(row.result) }}</small>
             <small v-if="reasonNext(row.result)" class="sp-sync__next-line" data-testid="stock-prep-project-sync-step-next">
@@ -242,7 +256,7 @@
       :api="largeBomApi"
       :wait="largeBomPollWait"
       @open-multitable="emit('open-multitable')"
-      @synced="emit('synced', report)"
+      @synced="emit('synced', null)"
     />
 
     <StockPrepTechnicalDetails v-if="report" testid="stock-prep-project-sync-tech">
@@ -324,6 +338,13 @@ import { stockPrepPosture, type StockPrepPosture } from '../../../services/integ
 
 const props = withDefaults(
   defineProps<{
+    /**
+     * Whether this panel's own run button may wear the filled primary treatment. The workspace hands
+     * it `secondary` whenever its 「下一步」 bar is showing a button, so the two never appear as two
+     * competing primaries on one screen (G1). Default `primary` keeps every other mount — the legacy
+     * project workspace tab included — exactly as it was.
+     */
+    runEmphasis?: 'primary' | 'secondary'
     scope?: IntegrationScope
     /**
      * Bumped by the parent when a row's 刷新 is pressed. A COUNTER rather than a boolean so pressing
@@ -368,7 +389,16 @@ const props = withDefaults(
      */
     runVariant?: 'sync' | 'pull'
   }>(),
-  { scope: () => ({}), armedAt: 0, projectNo: '', api: null, largeBomApi: null, largeBomPollWait: null, runVariant: 'sync' },
+  {
+    runEmphasis: 'primary',
+    scope: () => ({}),
+    armedAt: 0,
+    projectNo: '',
+    api: null,
+    largeBomApi: null,
+    largeBomPollWait: null,
+    runVariant: 'sync',
+  },
 )
 
 const emit = defineEmits<{
@@ -380,9 +410,12 @@ const emit = defineEmits<{
    * Fired after a run settles so the parent can re-read the project overview. P0-3: carries this
    * run's own report so the workspace's "下一步" bar (operatorNextStep.ts) can read
    * `missingComponents`/`verdict` without a second copy of this panel's state living in the parent.
-   * `null` only when the large-BOM background channel forwards this before any report has landed —
-   * existing listeners that take no argument (StockPreparationProjectWorkspaceView.vue's `@synced=
-   * "load"`) are unaffected, since Vue drops an emitted argument a handler declares no parameter for.
+   * `null` from the large-BOM background channel, ALWAYS. That channel finishes long after the run
+   * that spawned it, and `report` by then is the trial run that ended in a `large_bom_bounded` SKIP —
+   * forwarding it would drive the parent's 「下一步」 bar and badge off a snapshot the apply has since
+   * superseded. `null` means "re-read the board, I have no fresher verdict for you", which is exactly
+   * true. Existing listeners that take no argument (StockPreparationProjectWorkspaceView.vue's
+   * `@synced="load"`) are unaffected: Vue drops an argument a handler declares no parameter for.
    */
   (e: 'synced', report: StockPreparationProjectSyncReport | null): void
   /** P0-3: whether a run is in flight right now — lets the workspace title badge show 🔵正在跑. */
@@ -492,6 +525,24 @@ const stepRows = computed(() => STOCK_PREPARATION_PROJECT_SYNC_STEPS.map((descri
 function statusLabel(status: StockPreparationProjectSyncStepStatus): string {
   const text = stockPrepStepOutcomeText(status)
   return bi(text.zh, text.en)
+}
+
+/**
+ * §4.4 row 6 (⊘ 不归您做) wired to the one place it applies: the archive step, when the server
+ * itself said this caller may not run it.
+ *
+ * DRIVEN BY THE RUN'S OWN REASON, not by a permission check re-done in the browser.
+ * `BATCH_ARCHIVE_NOT_PERMITTED` is emitted by `projectSync.ts` for exactly this case — archiving is
+ * `mvp-persist`, a platform-admin surface, so an operator who CAN pull still cannot archive — and it
+ * is the difference between "something did not happen" and "this one was never yours". Reading it
+ * off the result means an administrator, for whom the step really does run, never sees the badge,
+ * and nobody is told a step is not theirs on a deployment where it is. The step's own `data-status`
+ * is untouched: this is an explanation beside it, not a new status.
+ */
+const notYoursPosture = stockPrepPosture({ notYours: true })
+
+function showsNotYoursBadge(row: { descriptor: { id: string }; result: StockPreparationProjectSyncStepResult | null }): boolean {
+  return row.descriptor.id === 'archive' && row.result?.reason === 'BATCH_ARCHIVE_NOT_PERMITTED'
 }
 
 /** P0-3 皮肤: purely decorative (aria-hidden — `statusLabel` above still carries the accessible text). */
@@ -856,6 +907,12 @@ function onExportMissingComponents(): void {
   cursor: pointer;
 }
 
+/* G1: the same control, stepped down while the workspace's 「下一步」 bar owns the filled primary. */
+.sp-sync__run--secondary {
+  background: var(--ms-bg-page);
+  color: var(--ms-color-primary);
+}
+
 .sp-sync__run:disabled {
   opacity: 0.5;
   cursor: default;
@@ -908,6 +965,14 @@ function onExportMissingComponents(): void {
   color: var(--ms-text-3);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.sp-sync__step-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ms-color-info) 20%, transparent);
+  color: var(--ms-color-info);
+  font-size: 11px;
 }
 
 .sp-sync__posture {

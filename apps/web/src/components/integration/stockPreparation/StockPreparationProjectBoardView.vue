@@ -16,42 +16,23 @@
       :scope="scope"
       :directory="directory"
       :directory-loaded="directoryLoaded"
+      :memory="recentProjects"
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
+      @focus-quick-open="focusProjectNoInput"
     />
 
-    <!-- ── 1. 搜项目 ────────────────────────────────────────────────────────────────────────────
-         The SAME native datalist #5445 built for the confirmation queue: option VALUE is the number
-         and option LABEL is the name, so the browser's own type-ahead filters on either. An operator
-         who only remembers 「注射水缓冲罐」 finds 230920006 without being told it, and the trained
-         operator who types the number keeps the path they already use. -->
-    <div class="sp-board__search">
-      <label class="sp-board__field">
-        <span>{{ bi('项目号(可按号码或名称搜)', 'Project no. (search by number or name)') }}</span>
-        <input
-          v-model="projectNoInput"
-          type="text"
-          list="stock-prep-board-directory-options"
-          data-testid="stock-prep-project-board-input"
-          :placeholder="bi('项目号或名称', 'Project number or name')"
-          @keyup.enter="openProject"
-        >
-        <datalist id="stock-prep-board-directory-options" data-testid="stock-prep-project-board-datalist">
-          <option
-            v-for="project in directoryProjects"
-            :key="project.projectId"
-            :value="project.projectNo ?? ''"
-          >{{ project.projectName ?? '' }}</option>
-        </datalist>
-      </label>
+    <!-- 线框 C ①: the way BACK. Without it `?projectNo=` is a one-way door — once an operator opens
+         any project the home page is unreachable for the rest of the browser session, which would
+         rebuild on the new landing page exactly the dead end this redesign exists to remove. -->
+    <div v-if="!showHome" class="sp-board__back">
       <button
         type="button"
-        class="sp-board__open"
-        data-testid="stock-prep-project-board-open"
-        :disabled="busy || refreshing || projectNoInput.trim().length === 0"
-        @click="openProject"
+        class="sp-board__back-button"
+        data-testid="stock-prep-project-board-back-home"
+        @click="goHome"
       >
-        {{ busy ? bi('正在打开…', 'Opening…') : bi('打开这个项目', 'Open this project') }}
+        {{ bi('‹ 返回今天要处理', '‹ Back to what needs you today') }}
       </button>
     </div>
 
@@ -106,11 +87,55 @@
         type="button"
         class="sp-board__next-step-button"
         data-testid="stock-prep-project-board-next-step-action"
+        data-primary-cta="stock-prep-project-board-next-step"
         @click="onNextStepAction"
       >
         {{ bi(nextStep.actionZh, nextStep.actionEn) }}
       </button>
     </section>
+
+    <!-- ── 1. 搜项目 ────────────────────────────────────────────────────────────────────────────
+         The SAME native datalist #5445 built for the confirmation queue: option VALUE is the number
+         and option LABEL is the name, so the browser's own type-ahead filters on either. An operator
+         who only remembers 「注射水缓冲罐」 finds 230920006 without being told it, and the trained
+         operator who types the number keeps the path they already use. -->
+    <div class="sp-board__search" :class="{ 'sp-board__search--home': showHome }">
+      <label class="sp-board__field">
+        <span>{{ bi('项目号(可按号码或名称搜)', 'Project no. (search by number or name)') }}</span>
+        <input
+          ref="projectNoInputEl"
+          v-model="projectNoInput"
+          type="text"
+          list="stock-prep-board-directory-options"
+          data-testid="stock-prep-project-board-input"
+          :placeholder="bi('项目号或名称', 'Project number or name')"
+          @keyup.enter="openProject"
+        >
+        <!-- D1=A: the union, not the directory alone. The home page's own caption says the list
+             holds "这台电脑最近开过的、和管理员归档过的项目" — so it has to. -->
+        <datalist id="stock-prep-board-directory-options" data-testid="stock-prep-project-board-datalist">
+          <option
+            v-for="project in directoryProjects"
+            :key="project.projectId"
+            :value="project.projectNo ?? ''"
+          >{{ project.projectName ?? '' }}</option>
+          <option
+            v-for="entry in memoryOnlyProjectNos"
+            :key="`memory:${entry}`"
+            :value="entry"
+          >{{ bi('这台电脑最近开过的', 'Recently opened on this computer') }}</option>
+        </datalist>
+      </label>
+      <button
+        type="button"
+        class="sp-board__open"
+        data-testid="stock-prep-project-board-open"
+        :disabled="busy || refreshing || projectNoInput.trim().length === 0"
+        @click="openProject"
+      >
+        {{ busy ? bi('正在打开…', 'Opening…') : bi('打开这个项目', 'Open this project') }}
+      </button>
+    </div>
 
     <!-- ── 2'. 从PLM拉取, OUTSIDE the board ────────────────────────────────────────────────────────
          THE BUG THIS FIXES. The pull panel used to live inside `v-if="board"`, and the board 404s
@@ -131,6 +156,7 @@
         :scope="scope"
         :project-no="openedProjectNo"
         run-variant="pull"
+        :run-emphasis="nextStep ? 'secondary' : 'primary'"
         :api="syncApi"
         :large-bom-api="largeBomApi"
         :large-bom-poll-wait="largeBomPollWait"
@@ -332,7 +358,7 @@
 // project's rows — because a transient per-project filter turned out to need changes across the
 // multitable view model and ACL layers, and promising a filter we did not build would be worse than
 // the honest sentence.
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
@@ -364,7 +390,12 @@ import { canRunStockPrepProjectSync } from '../../../services/integration/stockP
 import { useAuth } from '../../../composables/useAuth'
 import { operatorNextStep, type OperatorNextStepResult } from '../../../services/integration/stockPreparation/operatorNextStep'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
-import { recordStockPrepProjectVisit } from '../../../services/integration/stockPreparation/operatorHomeMemory'
+import {
+  readStockPrepRecentProjects,
+  readStockPrepRememberedPosture,
+  recordStockPrepProjectVisit,
+  type StockPrepRecentProjectEntry,
+} from '../../../services/integration/stockPreparation/operatorHomeMemory'
 
 const props = withDefaults(
   defineProps<{
@@ -429,18 +460,47 @@ const board = ref<StockPreparationProjectBoard | null>(null)
 const handoff = ref<StockPreparationHandoffCursor | null>(null)
 const handoffNotice = ref<string>('')
 const exportEmptyNotice = ref(false)
+const projectNoInputEl = ref<HTMLInputElement | null>(null)
 const directory = ref<StockPreparationOperatorDirectory | null>(null)
 /** True once the FIRST directory read has settled (success or failure) — see `directoryLoaded` below. */
 const directoryLoaded = ref(false)
-/** The number a load actually asked for — frozen at request time, decoupled from the live input. */
-const openedProjectNo = ref<string>('')
+/**
+ * The number a load actually asked for — frozen at request time, decoupled from the live input.
+ *
+ * SEEDED FROM THE PROP AT SETUP, not in `onMounted`. `showHome` is derived from this, `onMounted`
+ * runs AFTER the first render, and the directory read it awaited added a whole network round-trip on
+ * top: a mount carrying `?projectNo=` therefore painted a full screen of task home — its
+ * 「这里还没有您的项目」 empty state included — before the workspace replaced it, on every deep link
+ * and every tab switch back to 项目备料.
+ */
+const openedProjectNo = ref<string>((props.projectNo ?? '').trim())
 
 // ---------------------------------------------------------------------------
 // P0-2/P0-3/P0-6 — the task-oriented home page, the "下一步" bar, and the shared posture badge.
 // ---------------------------------------------------------------------------
 
-/** No project open yet — 设计稿 §2.3: `?projectNo=` empty renders the home page, in the SAME tab. */
+/**
+ * No project open yet — 设计稿 §2.3: `?projectNo=` empty renders the home page, in the SAME tab.
+ *
+ * `openedProjectNo` is seeded SYNCHRONOUSLY (see `onMounted`) rather than after the directory read
+ * resolves. Deriving this from a value that only arrives one network round-trip later meant a mount
+ * carrying `?projectNo=` painted a whole screen of task home — 「这里还没有您的项目」 and all —
+ * before swapping to the workspace, on every single tab switch back to 项目备料.
+ */
 const showHome = computed<boolean>(() => openedProjectNo.value === '')
+
+/**
+ * D1=A's local half, read ONCE per mount and handed down — the home page never touches storage
+ * itself. Re-read (not mutated in place) after each write so the card list reflects what this
+ * browser just learned without a second component owning the same state.
+ */
+const recentProjects = ref<StockPrepRecentProjectEntry[]>(readStockPrepRecentProjects(props.scope))
+
+/** Numbers this browser remembers that the directory does not carry — the F1 gap, for the datalist. */
+const memoryOnlyProjectNos = computed<string[]>(() => {
+  const known = new Set(directoryProjects.value.map((project) => project.projectNo ?? ''))
+  return recentProjects.value.map((entry) => entry.projectNo).filter((no) => !known.has(no))
+})
 
 /** The composed sync panel's own report, mirrored up here ONLY so the "下一步" bar can read it. */
 const syncReport = ref<StockPreparationProjectSyncReport | null>(null)
@@ -452,6 +512,17 @@ const syncPanelEl = ref<InstanceType<typeof StockPreparationProjectSyncPanel> | 
 const wasHeldPending = ref(false)
 /** §4.2 rule 4's OWN condition: pending just hit zero while `wasHeldPending` was true. */
 const justConfirmedFlag = ref(false)
+/**
+ * §4.2 rule 4, THE PART THAT SURVIVES AN UNMOUNT. The only way to clear `pendingDecisionCount` in
+ * this release is the confirmation-queue tab, and the shell mounts these tabs with `v-if` — no
+ * KeepAlive anywhere in the chain — so going to confirm and coming back destroys and rebuilds this
+ * whole component. Every session-local flag above is therefore guaranteed to be false at exactly the
+ * moment rule 4 is supposed to fire, and the operator would instead be told 「数据都在多维表里了」
+ * about rows that were never written. This ref carries the one fact that has to outlive the unmount,
+ * read out of the SAME 本机记忆 D8 already sanctions (a closed enum key, nothing else), and captured
+ * BEFORE this mount's own `watch(posture)` overwrites it.
+ */
+const rememberedHeld = ref(false)
 
 const missingComponentsCount = computed<number>(() => {
   const list = syncReport.value?.missingComponents
@@ -721,15 +792,39 @@ const posture = computed<StockPrepPosture>(() => stockPrepPosture({
 const nextStep = computed<OperatorNextStepResult | null>(() => {
   if (!openedProjectNo.value || visibleErrorCode.value) return null
   const cursor = handoff.value
-  return operatorNextStep({
+  const step = operatorNextStep({
     boardFound: board.value !== null,
     pulledRowCount: board.value?.pulledRowCount ?? 0,
     missingComponentsCount: missingComponentsCount.value,
     pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
-    justConfirmed: justConfirmedFlag.value,
+    justConfirmed: justConfirmed.value,
     hasExported: Boolean(board.value?.lastExportAt),
     isCurrentHandler: Boolean(cursor?.isCurrentHandler && !cursor.terminal),
   })
+  // R-11 again: a control the caller cannot exercise is ABSENT, not disabled and not silently inert.
+  // Both sync-driving actions are gated by the same predicate the composed panel gates its own run
+  // button with, so the bar can never offer a button whose click would be swallowed. The SENTENCE
+  // still renders — knowing what the next step is remains useful to someone who has to ask a
+  // colleague to press it, and the panel below says in words who that is.
+  if ((step.action === 'pull' || step.action === 'resync') && !canRunPull.value) {
+    return { ...step, action: null, actionZh: '', actionEn: '' }
+  }
+  return step
+})
+
+/**
+ * §4.2 rule 4's real condition: everything this browser knows says the operator has just finished
+ * confirming and has not yet re-synced. Either half is enough — the live one for "confirmed without
+ * leaving the tab" (P1's embedded panel), the remembered one for the only path P0 actually has.
+ * `pulledRowCount > 0` keeps it off a project that has never been pulled at all, where rule 1 owns
+ * the bar.
+ */
+const justConfirmed = computed<boolean>(() => {
+  if (justConfirmedFlag.value) return true
+  if (!rememberedHeld.value) return false
+  if (syncReport.value) return false // a run landed in THIS mount; its verdict is the newer fact
+  const current = board.value
+  return current !== null && current.pendingDecisionCount === 0 && current.pulledRowCount > 0
 })
 
 // justConfirmed tracking (§4.2 rule 4), SESSION-LOCAL and reset whenever a different project opens.
@@ -744,6 +839,7 @@ watch(syncReport, (report) => {
   if (!report) return
   wasHeldPending.value = report.verdict === 'held'
   justConfirmedFlag.value = false
+  rememberedHeld.value = false
 })
 
 watch(() => board.value?.pendingDecisionCount ?? 0, (count) => {
@@ -755,8 +851,14 @@ watch(() => board.value?.pendingDecisionCount ?? 0, (count) => {
 
 // P0-6/D8: refresh this browser's memory of the open project's posture whenever it actually changes —
 // see operatorHomeMemory.ts for what is (and is not) stored.
+//
+// ONLY FOR A PROJECT THAT REALLY RESOLVED. Without the `board` guard a mistyped number would 404,
+// leave `board` null, settle on 「还没拉过」 and be remembered forever: the home page would grow a
+// permanent junk card per typo, and 30 of them would evict every real entry.
 watch(posture, (value) => {
-  if (openedProjectNo.value) recordStockPrepProjectVisit(openedProjectNo.value, value.key)
+  if (!openedProjectNo.value || board.value === null) return
+  recordStockPrepProjectVisit(openedProjectNo.value, value.key, props.scope)
+  recentProjects.value = readStockPrepRecentProjects(props.scope)
 })
 
 async function run(work: () => Promise<void>, shape: 'read' | 'write' = 'read'): Promise<void> {
@@ -816,6 +918,14 @@ async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): 
   const mine = ++loadGeneration
   const target = projectNo.trim()
   const refresh = mode === 'refresh' && board.value !== null && openedProjectNo.value === target
+  // Read the remembered conclusion BEFORE this mount's own `watch(posture)` overwrites it — that
+  // watch fires as soon as the board lands, so anything read afterwards would be this mount's own
+  // echo rather than what the previous mount left behind. A refresh must not re-read it: by then the
+  // entry has already been rewritten, and rule 4 would latch on forever.
+  if (!refresh) {
+    rememberedHeld.value = target !== ''
+      && readStockPrepRememberedPosture(target, props.scope) === 'pending_decision'
+  }
   openedProjectNo.value = target
   if (!refresh) {
     board.value = null
@@ -871,6 +981,18 @@ async function openProject(): Promise<void> {
   await openProjectByNo(projectNoInput.value)
 }
 
+/** 线框 C ①: back to 今天要处理. The shell owns the URL, so this asks it to drop `?projectNo=`;
+ *  the prop watcher below then brings this view home, exactly as a browser Back button would. */
+function goHome(): void {
+  emit('select-project-no', '')
+  void loadBoard('')
+}
+
+async function focusProjectNoInput(): Promise<void> {
+  await nextTick()
+  projectNoInputEl.value?.focus()
+}
+
 /** P0-2: a home card / the home page's own fallback input opened a project. */
 async function onHomeOpenProject(projectNo: string): Promise<void> {
   await openProjectByNo(projectNo)
@@ -908,9 +1030,18 @@ function onSyncBusyChanged(value: boolean): void {
 function onNextStepAction(): void {
   const step = nextStep.value
   if (!step || !step.action) return
-  if (step.action === 'pull' || step.action === 'view-missing') {
-    // Both point at the composed sync panel, already rendered just below this bar — scroll it into
-    // view rather than duplicating its controls up here (G1: this bar's own button count stays at 1).
+  if (step.action === 'pull' || step.action === 'resync') {
+    // IT ACTUALLY RUNS THE SYNC. An earlier revision only scrolled down to the panel's own run
+    // button, which put two nearly-identically-worded buttons on one screen where the upper one did
+    // nothing — the exact "which of these do I press" this redesign exists to delete. The panel
+    // exposes its single `onRun` (permission- and busy-guarded there too), so there is still only
+    // one implementation of what 同步 means.
+    void syncPanelEl.value?.run?.()
+    return
+  }
+  if (step.action === 'view-missing') {
+    // A LIST, not an action: the missing-parts table is rendered by the panel below, so the honest
+    // thing this button can do is put it in front of the operator.
     try {
       syncPanelEl.value?.$el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
     } catch {
@@ -920,10 +1051,6 @@ function onNextStepAction(): void {
   }
   if (step.action === 'go-confirm') {
     emit('navigate-stage', 'confirmation-queue')
-    return
-  }
-  if (step.action === 'resync') {
-    void syncPanelEl.value?.run?.()
     return
   }
   if (step.action === 'open-fill') {
@@ -998,16 +1125,21 @@ function openFillTarget(): void {
   emit('open-multitable', board.value?.fillTarget ?? null)
 }
 
+/**
+ * The shell's `?projectNo=` is the state bit for 首页 ⇄ 工作区 (§2.3), so it has to be followed in
+ * BOTH directions. The empty case used to early-return, which meant browser Back — and the shell's
+ * own 「返回今天要处理」 — left the workspace on screen with no way out.
+ */
 watch(() => props.projectNo, (next) => {
   const target = (next ?? '').trim()
-  if (!target || target === openedProjectNo.value) return
+  if (target === openedProjectNo.value) return
   projectNoInput.value = target
   void loadBoard(target)
 })
 
 onMounted(async () => {
-  await loadDirectory()
   const seeded = (props.projectNo ?? '').trim()
+  await loadDirectory()
   if (seeded) await loadBoard(seeded)
 })
 </script>
@@ -1130,6 +1262,30 @@ onMounted(async () => {
 .sp-board__posture--success { background: color-mix(in srgb, var(--ms-color-success) 16%, transparent); color: var(--ms-color-success); }
 .sp-board__posture--info { background: color-mix(in srgb, var(--ms-color-info) 20%, transparent); color: var(--ms-color-info); }
 .sp-board__posture--neutral { background: var(--ms-bg-page); color: var(--ms-text-3); }
+
+.sp-board__back {
+  display: flex;
+}
+
+.sp-board__back-button {
+  padding: 4px 0;
+  border: none;
+  background: none;
+  color: var(--ms-color-primary, #1677ff);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* In home mode the search box IS the 「拉一个新项目」 card's input, so it joins the dashed block the
+   home page renders directly above it rather than floating loose under the cards. */
+.sp-board__search--home {
+  margin-top: calc(var(--ms-space-4) * -1);
+  padding: 0 var(--ms-space-3) var(--ms-space-3);
+  border: 1px dashed var(--ms-border-light);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+}
 
 .sp-board__next-step {
   display: flex;
