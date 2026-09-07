@@ -42,6 +42,22 @@ const FAILED_DETAIL: AutomationRunView = {
 }
 const SKIPPED_LIST: AutomationRunView = { ...FAILED_LIST, id: 'axe_sk', status: 'skipped', statusLegacy: 'skipped' }
 const SKIPPED_DETAIL: AutomationRunView = { ...FAILED_DETAIL, id: 'axe_sk', status: 'skipped', statusLegacy: 'skipped' }
+
+// Round-2 B1 — rows the backend refuses using data ALREADY on screen.
+// (a) triggeredBy === 'manual_test' → 409 TEST_RUN_NOT_RETRYABLE (automation-service.ts:2733).
+const MANUAL_TEST_LIST: AutomationRunView = { ...FAILED_LIST, id: 'axe_mt', triggeredBy: 'manual_test' }
+const MANUAL_TEST_DETAIL: AutomationRunView = { ...FAILED_DETAIL, id: 'axe_mt', triggeredBy: 'manual_test' }
+// (b) the stored trigger event is not a NON-EMPTY plain object → 409 MISSING_TRIGGER_EVENT
+// (automation-service.ts:2740, predicate at :903 — null/undefined, array, and `{}` all refuse).
+const NO_EVENT_CASES: { name: string; triggerEvent: unknown }[] = [
+  { name: 'null', triggerEvent: null },
+  { name: 'an array', triggerEvent: [] },
+  { name: 'an empty object', triggerEvent: {} },
+]
+// Positive control for the SHAPE of that mirror: the backend's own comment (automation-service.ts:900)
+// blesses a record-less scheduler event as retryable, so a mirror narrowed to "has recordId" would
+// disable a row the server accepts. This row must stay ENABLED.
+const SCHEDULE_DETAIL: AutomationRunView = { ...FAILED_DETAIL, triggerEvent: { _triggeredBy: 'schedule' } }
 // A non-retryable status (backend's retryExecution() 409s NOT_RETRYABLE for anything but
 // failed/skipped) — the button must not render even though the row is otherwise identical.
 const RESOLVED_LIST: AutomationRunView = { ...FAILED_LIST, id: 'axe_r', status: 'resolved', statusLegacy: 'success' }
@@ -91,13 +107,40 @@ async function expandRow(container: HTMLElement, runId: string) {
 }
 
 describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
-  it('is absent for non-admin (gate)', async () => {
+  // Round-2 B2 — this test asserts on the BUTTON, and it drives the non-admin mount down every path
+  // an un-gated body would offer (refresh → load, expand → detail). The previous shape ("mount as
+  // non-admin, never expand, expect null") could not tell a working gate apart from a page with
+  // nothing seeded: removing the admin gate from the body left it green. The paired positive control
+  // below (same client, same seeding, admin) is what makes the absence meaningful.
+  it('the BUTTON is absent for a non-admin even when the view is driven towards it (gate)', async () => {
+    // Positive control: identical seeding as an admin renders the button.
+    mockIsAdmin = true
+    const adminClient = makeClient()
+    const adminMount = mount(adminClient)
+    await settle()
+    await expandRow(adminMount.container, 'axe_f')
+    expect(adminMount.container.querySelector('[data-action="rerun"]')).not.toBeNull()
+    adminMount.app.unmount()
+    adminMount.container.remove()
+
     mockIsAdmin = false
     const client = makeClient()
     mounted = mount(client)
-    await nextTick()
+    await settle()
     expect(mounted.container.querySelector('[data-denied="true"]')).not.toBeNull()
+    // If the body were un-gated, these two clicks would load the list and expand the row — the exact
+    // sequence that reveals the button. Both controls are absent while the gate holds.
+    const refresh = mounted.container.querySelector('[data-action="refresh"]') as HTMLElement | null
+    refresh?.click()
+    await settle()
+    const row = mounted.container.querySelector('[data-run-id="axe_f"]') as HTMLElement | null
+    row?.click()
+    await settle()
+    // THE gate assertion, asserted first so a regression is reported on the control itself.
     expect(mounted.container.querySelector('[data-action="rerun"]')).toBeNull()
+    expect(refresh).toBeNull()
+    expect(row).toBeNull()
+    expect(client.listAutomationRuns).not.toHaveBeenCalled()
     expect(client.retryAutomationExecution).not.toHaveBeenCalled()
   })
 
@@ -125,6 +168,83 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     await expandRow(mounted.container, 'axe_f') // collapse
     await expandRow(mounted.container, 'axe_sk')
     expect(mounted.container.querySelector('[data-action="rerun"]')).not.toBeNull()
+  })
+
+  // ── Round-2 B1: refusals this view can predict from loaded data are shown, not sent ──
+  // Chosen shape: DISABLED + reason (not hidden). A hidden button leaves an operator staring at a
+  // failed run with no control and no explanation, and the two reasons below are not legible from
+  // the row on their own. The status gate stays HIDDEN because the row's own status tag already
+  // states that reason, and because "absent for a non-retryable status" is a shipped assertion.
+  it('B1: a manual_test row renders the button DISABLED with the refusal reason and sends nothing', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([MANUAL_TEST_LIST]),
+      getAutomationRun: vi.fn().mockResolvedValue(MANUAL_TEST_DETAIL),
+    })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_mt')
+    const btn = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+    expect(btn).not.toBeNull() // shown, so the operator sees WHY — not silently removed
+    expect(btn.disabled).toBe(true)
+    const reason = mounted.container.querySelector('[data-field="rerun-blocked-reason"]')
+    expect(reason?.textContent ?? '').toContain('Manual test runs cannot be re-run.')
+    btn.click()
+    await settle()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
+  for (const testCase of NO_EVENT_CASES) {
+    it(`B1: a stored trigger event that is ${testCase.name} renders DISABLED with the refusal reason`, async () => {
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const client = makeClient({
+        getAutomationRun: vi.fn().mockResolvedValue({ ...FAILED_DETAIL, triggerEvent: testCase.triggerEvent }),
+      })
+      mounted = mount(client)
+      await settle()
+      await expandRow(mounted.container, 'axe_f')
+      const btn = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+      expect(btn).not.toBeNull()
+      expect(btn.disabled).toBe(true)
+      const reason = mounted.container.querySelector('[data-field="rerun-blocked-reason"]')
+      expect(reason?.textContent ?? '').toContain('The original trigger data is unavailable')
+      btn.click()
+      await settle()
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+      confirmSpy.mockRestore()
+    })
+  }
+
+  // Positive control for the two mirrors above: neither may be wider than the backend's guard.
+  it('B1: a record-less scheduler trigger event stays ENABLED (the mirror is key-count, not recordId)', async () => {
+    const client = makeClient({ getAutomationRun: vi.fn().mockResolvedValue(SCHEDULE_DETAIL) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    const btn = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+    expect(btn).not.toBeNull()
+    expect(btn.disabled).toBe(false)
+    expect(mounted.container.querySelector('[data-field="rerun-blocked-reason"]')).toBeNull()
+  })
+
+  it('B1: an ordinary event-triggered row with a usable trigger event is ENABLED and sends', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const client = makeClient({
+      retryAutomationExecution: vi.fn().mockResolvedValue({ ...FAILED_DETAIL, id: 'axe_new2' }),
+    })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    const btn = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+    expect(btn.disabled).toBe(false)
+    expect(mounted.container.querySelector('[data-field="rerun-blocked-reason"]')).toBeNull()
+    btn.click()
+    await settle()
+    expect(client.retryAutomationExecution).toHaveBeenCalledTimes(1)
+    confirmSpy.mockRestore()
   })
 
   it('the confirm dialog enumerates rule name, target sheet, action kinds, and that actions run again', async () => {
@@ -192,6 +312,113 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     expect(mounted.container.querySelector('[data-run-id="axe_f"]')).not.toBeNull()
     expect(mounted.container.querySelector('[data-field="rerun-success"]')).toBeNull()
     confirmSpy.mockRestore()
+  })
+
+  // ── Round-2 B3: the consequence list is not always derivable ──
+  // Chosen shape: say so honestly and demand a SECOND acknowledgement (not: refuse the re-run).
+  // `retryExecution()` never reads `ruleSnapshot`, so an unusable snapshot is not a server refusal —
+  // refusing here would withdraw a capability the backend still grants.
+  for (const snapshotCase of [
+    { name: 'a null ruleSnapshot', ruleSnapshot: null },
+    { name: 'a ruleSnapshot with no actions array', ruleSnapshot: { id: 'rule-1', name: 'Notify Customers' } },
+    { name: 'an action whose type is unreadable', ruleSnapshot: { actions: [{ type: 'lock_record' }, { config: {} }] } },
+  ]) {
+    it(`B3: ${snapshotCase.name} shows "cannot be listed" and requires a second acknowledgement`, async () => {
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+      const client = makeClient({
+        getAutomationRun: vi.fn().mockResolvedValue({ ...FAILED_DETAIL, ruleSnapshot: snapshotCase.ruleSnapshot }),
+        retryAutomationExecution: vi.fn().mockResolvedValue({ ...FAILED_DETAIL, id: 'axe_new3' }),
+      })
+      mounted = mount(client)
+      await settle()
+      await expandRow(mounted.container, 'axe_f')
+      ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+      await settle()
+      const first = confirmSpy.mock.calls[0]?.[0] as string
+      expect(first).toContain('CANNOT BE LISTED')
+      expect(first).not.toContain('Lock record') // no partial list dressed up as the full one
+      // The extra acknowledgement is a SECOND dialog with its own copy — not a re-render of the first.
+      expect(confirmSpy).toHaveBeenCalledTimes(2)
+      const second = confirmSpy.mock.calls[1]?.[0] as string
+      expect(second).toContain('cannot be listed')
+      expect(confirmSpy.mock.calls[1]?.[1] as string).toContain('without knowing which actions')
+      expect(client.retryAutomationExecution).toHaveBeenCalledTimes(1)
+      confirmSpy.mockRestore()
+    })
+  }
+
+  it('B3: cancelling the extra acknowledgement sends nothing', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm')
+      .mockResolvedValueOnce('confirm' as never)
+      .mockRejectedValueOnce(new Error('cancel'))
+    const client = makeClient({
+      getAutomationRun: vi.fn().mockResolvedValue({ ...FAILED_DETAIL, ruleSnapshot: null }),
+    })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(2)
+    expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+    expect(mounted.container.querySelector('[data-field="rerun-success"]')).toBeNull()
+    confirmSpy.mockRestore()
+  })
+
+  // Positive control: an enumerable run must NOT pay the extra acknowledgement.
+  it('B3: an enumerable run asks exactly once and sends', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const client = makeClient({
+      retryAutomationExecution: vi.fn().mockResolvedValue({ ...FAILED_DETAIL, id: 'axe_new4' }),
+    })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(confirmSpy.mock.calls[0]?.[0] as string).toContain('Lock record')
+    expect(client.retryAutomationExecution).toHaveBeenCalledTimes(1)
+    confirmSpy.mockRestore()
+  })
+
+  // ── Round-2 B4/B5: the UI admin mirror is NOT the backend's admin predicate ──
+  // `useAuth().hasAdminAccess()` reads the JWT payload + localStorage; the route calls
+  // requireAdminRole() against the RBAC service, so a principal this view treats as admin can still
+  // be refused. That refusal must render honestly, and in the reader's language (B5).
+  it('B4/B5: a 403 AccessDenied refusal renders localized copy inline, not the raw server string', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const err = Object.assign(new Error('This operation requires admin privileges'), { code: 'AccessDenied' })
+    const client = makeClient({ retryAutomationExecution: vi.fn().mockRejectedValue(err) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    const inline = mounted.container.querySelector('[data-field="rerun-error"]')
+    expect(inline?.textContent ?? '').toBe('Re-running an execution requires admin privileges.')
+    expect(inline?.textContent ?? '').not.toContain('This operation requires admin privileges')
+    // Honest degradation: no success, the row is still listed, nothing was reloaded away.
+    expect(mounted.container.querySelector('[data-field="rerun-success"]')).toBeNull()
+    expect(mounted.container.querySelector('[data-run-id="axe_f"]')).not.toBeNull()
+    expect(client.listAutomationRuns).toHaveBeenCalledTimes(1)
+    confirmSpy.mockRestore()
+  })
+
+  it('B5: the documented ADMIN_REQUIRED code renders the zh copy in a zh session', async () => {
+    useLocale().setLocale('zh-CN')
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const err = Object.assign(new Error('This operation requires admin privileges'), { code: 'ADMIN_REQUIRED' })
+    const client = makeClient({ retryAutomationExecution: vi.fn().mockRejectedValue(err) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    const inline = mounted.container.querySelector('[data-field="rerun-error"]')
+    expect(inline?.textContent ?? '').toBe('重新执行需要管理员权限。')
+    confirmSpy.mockRestore()
+    useLocale().setLocale('en')
   })
 
   it('zh: the button label and confirm dialog switch to the zh copy', async () => {

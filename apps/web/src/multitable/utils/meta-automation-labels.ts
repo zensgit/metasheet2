@@ -328,6 +328,12 @@ export type AutomationLabelKey =
   | 'runs.rerunConfirmFooter'
   | 'runs.rerunConfirmNoSheet'
   | 'runs.rerunConfirmUnknownActions'
+  // Round-2 B3: the consequence list is NOT always derivable (a null/unusable ruleSnapshot on the
+  // loaded detail). That case gets an honest "cannot enumerate" line plus a SECOND explicit
+  // acknowledgement, never a boilerplate sentence that reads like a real enumeration.
+  | 'runs.rerunUnknownActionsAckTitle'
+  | 'runs.rerunUnknownActionsAckMessage'
+  | 'runs.rerunUnknownActionsAckConfirm'
   | 'runs.rerunSuccessPrefix'
   | 'runs.rerunSuccessGeneric'
   | 'runs.rerunError.notFound'
@@ -339,6 +345,10 @@ export type AutomationLabelKey =
   | 'runs.rerunError.ruleMissingOrDisabled'
   | 'runs.rerunError.ruleChanged'
   | 'runs.rerunError.ledgerEvidenceMissing'
+  // Round-2 B5: the route's requireAdminRole() 403 body carries `code` BESIDE the string `error`,
+  // so the shared normalizer keys the thrown error as `AccessDenied` and the raw English server
+  // string would otherwise render verbatim in a zh session.
+  | 'runs.rerunError.adminRequired'
   | 'runs.rerunError.generic'
   // W7 start_approval approval-result writeback pickers.
   | 'resultWriteback.title'
@@ -621,6 +631,9 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.rerunConfirmFooter',
   'runs.rerunConfirmNoSheet',
   'runs.rerunConfirmUnknownActions',
+  'runs.rerunUnknownActionsAckTitle',
+  'runs.rerunUnknownActionsAckMessage',
+  'runs.rerunUnknownActionsAckConfirm',
   'runs.rerunSuccessPrefix',
   'runs.rerunSuccessGeneric',
   'runs.rerunError.notFound',
@@ -632,6 +645,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.rerunError.ruleMissingOrDisabled',
   'runs.rerunError.ruleChanged',
   'runs.rerunError.ledgerEvidenceMissing',
+  'runs.rerunError.adminRequired',
   'runs.rerunError.generic',
   'resultWriteback.title',
   'resultWriteback.hint',
@@ -976,7 +990,20 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     zh: '这将创建一次新的执行，并使用当前规则和原始触发数据重新执行以上动作。',
   },
   'runs.rerunConfirmNoSheet': { en: '(no target sheet)', zh: '（无目标表）' },
-  'runs.rerunConfirmUnknownActions': { en: '(unavailable)', zh: '（不可用）' },
+  // Round-2 B3 — honest "cannot enumerate", not a boilerplate stand-in that reads like a list.
+  'runs.rerunConfirmUnknownActions': {
+    en: 'CANNOT BE LISTED — this execution has no usable rule snapshot.',
+    zh: '无法列出 —— 该执行没有可用的规则快照。',
+  },
+  'runs.rerunUnknownActionsAckTitle': {
+    en: 'Re-run without knowing which actions will run?',
+    zh: '在无法确认动作的情况下重新执行？',
+  },
+  'runs.rerunUnknownActionsAckMessage': {
+    en: "This execution's actions cannot be listed, so you cannot preview what re-running does. It may write records, call webhooks, or send emails and notifications again. Confirm only if you accept running side effects you cannot see.",
+    zh: '无法列出该执行的动作，因此无法预览重新执行的后果。它可能会再次写入记录、调用 Webhook，或再次发送邮件与通知。仅在你接受执行无法预览的副作用时确认。',
+  },
+  'runs.rerunUnknownActionsAckConfirm': { en: 'Run unlisted actions', zh: '执行无法列出的动作' },
   'runs.rerunSuccessPrefix': { en: 'Re-run started as new execution:', zh: '重新执行已发起，新执行 ID：' },
   'runs.rerunSuccessGeneric': { en: 'Re-run started.', zh: '重新执行已发起。' },
   'runs.rerunError.notFound': { en: 'Execution not found.', zh: '执行不存在。' },
@@ -988,6 +1015,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'runs.rerunError.ruleMissingOrDisabled': { en: 'The rule is missing or disabled; cannot re-run.', zh: '规则缺失或已停用，无法重新执行。' },
   'runs.rerunError.ruleChanged': { en: "The rule's actions changed since this run; cannot re-run safely.", zh: '规则动作在此次运行后已变更，无法安全重新执行。' },
   'runs.rerunError.ledgerEvidenceMissing': { en: 'Retry evidence for this execution is missing.', zh: '该执行的重试证据缺失。' },
+  'runs.rerunError.adminRequired': { en: 'Re-running an execution requires admin privileges.', zh: '重新执行需要管理员权限。' },
   'runs.rerunError.generic': { en: 'Re-run failed.', zh: '重新执行失败。' },
   'resultWriteback.title': { en: 'Approval-result writeback (optional)', zh: '审批结果写回（可选）' },
   'resultWriteback.hint': {
