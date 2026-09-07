@@ -61,6 +61,20 @@ preceded the later selector fix and is not evidence for that later candidate.
 
 ### Latest local checkpoint (2026-09-07)
 
+Anchor/migration checkpoint: `5d1ba2f87fd909d5e6236f373afab9c77dd5dcf2`.
+Subsequent work adds the two-connection scope-read → concurrent CREATE → fence
+regression. It proves a committed duplicate causes the old anchor to be revoked;
+mutating the duplicate threshold to 1000 retains one anchor and makes the count
+assertion RED. The restored Node20 suite passes 9/9. Per-test projection cleanup
+also permits running these cases individually.
+
+The pure operation-identity helper now derives a deterministic UUIDv5 from the
+proposal digest and a separate stable source reference from organization/record.
+The first new test failed while the helper was absent. Including the managed
+fingerprint in the stable source reference made its resync-replay test RED;
+restoration returned the dedicated unit suites to 41/41. This is identity planning
+evidence only; no W4 apply or cleanup replay execution is claimed yet.
+
 The database suite now contains eight tests. Node 18.20.8 and Node 20.20.2 each
 passed five consecutive runs on the same restored candidate, with PostgreSQL
 15.17 and `RBAC_BYPASS=false`. These are migration/anchor tests, not HTTP permission

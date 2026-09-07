@@ -33,9 +33,32 @@ function buildAttendanceCleaningProposalCleanup() {
   }
 }
 
+function buildAttendanceCleaningOperationIdentity(input) {
+  const proposalDigest = buildAttendanceCleaningProposalDigest(input)
+  // RFC 4122 URL namespace; the versioned name binds the fresh W4 operation to
+  // the normalized proposal, independently of record CAS version/custom columns.
+  const namespace = Buffer.from('6ba7b8119dad11d180b400c04fd430c8', 'hex')
+  const bytes = crypto.createHash('sha1').update(namespace)
+    .update(`urn:metasheet:attendance-cleaning:v1:${proposalDigest}`).digest().subarray(0, 16)
+  bytes[6] = (bytes[6] & 0x0f) | 0x50
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  const operationId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  const sourceDigest = crypto.createHash('sha256')
+    .update(JSON.stringify(['attendance-cleaning-source-v1', input.orgId, input.projectionRecordId]))
+    .digest('hex')
+  return {
+    proposalDigest,
+    operationId,
+    sourceRef: `attendance-cleaning-source-v1:${sourceDigest}`,
+    reviewedProposalRef: `attendance-cleaning-proposal-v1:${proposalDigest}`,
+  }
+}
+
 module.exports = {
   buildAttendanceCleaningProposal,
   buildAttendanceCleaningProposalCleanup,
   buildAttendanceCleaningProposalDigest,
+  buildAttendanceCleaningOperationIdentity,
   normalizeAttendanceMultitableCleaningPolicy,
 }

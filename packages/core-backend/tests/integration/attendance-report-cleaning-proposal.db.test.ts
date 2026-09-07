@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import { up, down } from '../../src/db/migrations/zzzz20260907110000_create_attendance_report_projection_anchors'
 import { refreshAttendanceReportProjectionAnchor, withholdAttendanceReportProjectionAnchors } from '../../src/attendance/attendance-multitable-cleaning-authority'
 import { getObjectFieldId } from '../../src/multitable/provisioning'
+import { acquireCanonicalSheetFence } from '../../src/multitable/canonical-sheet-fence'
 
 // This suite owns its database; never fall back to an application DATABASE_URL.
 const source = process.env.ATTENDANCE_TEST_DATABASE_URL
@@ -70,7 +71,13 @@ suite('ACP projection authority real database', () => {
     }
   })
 
+  beforeEach(async () => {
+    await pool.query('DELETE FROM meta_records')
+  })
+
   it('refreshes an anchor from a PostgreSQL date and guards canonical identity and nonempty down', async () => {
+    await pool.query('INSERT INTO meta_records(id, sheet_id, data) VALUES ($1, $2, $3)',
+      ['rec_acp', 'sheet_acp', JSON.stringify({ [rowKeyField]: 'synthetic-row' })])
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
@@ -146,6 +153,45 @@ suite('ACP projection authority real database', () => {
       await withholdAttendanceReportProjectionAnchors((statement, params) => client.query(statement, params),
         Array.from({ length: 50 }, (_, index) => `rec_duplicate_${index + 1}`))
       await client.query('COMMIT')
+      expect((await pool.query('SELECT count(*)::int AS count FROM attendance_report_projection_anchors')).rows[0].count).toBe(0)
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+      await pool.query('DELETE FROM meta_records')
+    }
+  })
+
+  it('rechecks a duplicate committed between initial scope lookup and the sync fence', async () => {
+    const data = JSON.stringify({ [rowKeyField]: 'synthetic-row' })
+    await pool.query('INSERT INTO meta_records(id, sheet_id, data) VALUES ($1, $2, $3)', ['rec_acp', 'sheet_acp', data])
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await refreshAttendanceReportProjectionAnchor((statement, params) => client.query(statement, params), {
+        projectionRecordId: 'rec_acp', canonicalRecordId: recordId, sourceFingerprint: 'a'.repeat(40),
+      })
+      await client.query('COMMIT')
+      let raced = false
+      await client.query('BEGIN')
+      await refreshAttendanceReportProjectionAnchor(async (statement, params) => {
+        const result = await client.query(statement, params)
+        if (!raced && statement.includes('SELECT registry.sheet_id, registry.project_id')) {
+          raced = true
+          const writer = await pool.connect()
+          try {
+            await writer.query('BEGIN')
+            await acquireCanonicalSheetFence((text, args) => writer.query(text, args), 'sheet_acp')
+            await writer.query('INSERT INTO meta_records(id, sheet_id, data) VALUES ($1, $2, $3)', ['rec_racing', 'sheet_acp', data])
+            await writer.query('COMMIT')
+          } finally {
+            await writer.query('ROLLBACK')
+            writer.release()
+          }
+        }
+        return result
+      }, { projectionRecordId: 'rec_acp', canonicalRecordId: recordId, sourceFingerprint: 'a'.repeat(40) })
+      await client.query('COMMIT')
+      expect(raced).toBe(true)
       expect((await pool.query('SELECT count(*)::int AS count FROM attendance_report_projection_anchors')).rows[0].count).toBe(0)
     } finally {
       await client.query('ROLLBACK')

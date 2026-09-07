@@ -27,10 +27,33 @@ const {
   buildAttendanceCleaningProposal,
   buildAttendanceCleaningProposalDigest,
   buildAttendanceCleaningProposalCleanup,
+  buildAttendanceCleaningOperationIdentity,
   normalizeAttendanceMultitableCleaningPolicy,
 } = require('../../../../plugins/plugin-attendance/lib/attendance-report-cleaning-proposal.cjs')
 
 describe('attendance report cleaning proposal', () => {
+  it('keeps cleanup source stable across resync while binding fresh operations to proposal content', () => {
+    const input = {
+      orgId: 'org-a', projectionRecordId: 'rec-a', sourceFingerprint: 'a'.repeat(40),
+      proposal: { requested: true, reason: 'verified exception', targetStatus: 'normal' },
+    }
+    const original = buildAttendanceCleaningOperationIdentity(input)
+    const customEdit = buildAttendanceCleaningOperationIdentity({ ...input, projectionVersion: 99, custom: 'ignored' })
+    expect(customEdit).toEqual(original)
+    expect(original.operationId).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-5[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+    const reprojected = buildAttendanceCleaningOperationIdentity({ ...input, sourceFingerprint: 'b'.repeat(40) })
+    expect(reprojected.sourceRef).toBe(original.sourceRef)
+    expect(reprojected.operationId).not.toBe(original.operationId)
+    expect(reprojected.reviewedProposalRef).not.toBe(original.reviewedProposalRef)
+    const newReason = buildAttendanceCleaningOperationIdentity({ ...input, proposal: { ...input.proposal, reason: 'new proposal' } })
+    expect(newReason.operationId).not.toBe(original.operationId)
+    const otherOrg = buildAttendanceCleaningOperationIdentity({ ...input, orgId: 'org-b' })
+    expect(otherOrg.sourceRef).not.toBe(original.sourceRef)
+    expect(otherOrg.operationId).not.toBe(original.operationId)
+    expect(JSON.stringify(original)).not.toContain('verified exception')
+    expect(JSON.stringify(original)).not.toContain('org-a')
+  })
+
   it('enables the ACP gate only for literal true', () => {
     expect(normalizeAttendanceMultitableCleaningPolicy({ enabled: true })).toEqual({ enabled: true })
     expect(normalizeAttendanceMultitableCleaningPolicy({ enabled: 'true' })).toEqual({ enabled: false })
