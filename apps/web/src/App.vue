@@ -44,6 +44,9 @@
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
+            <!-- P1b slice 3: the admin 批量转交 page. Same nav gate as its sibling admin approval
+                 entry above, whose route meta is likewise `requiresAdmin`. -->
+            <router-link v-if="canManageUsers" to="/approvals/batch-transfer" class="nav-link" data-testid="nav-approval-batch-transfer">{{ navLabels.approvalBatchTransfer }}</router-link>
             <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-link">{{ navLabels.systemIntegration }}</router-link>
             <!-- O2 / R-11: the nav link is a control like any other — it follows the route's own gate
                  (stock-prep:read), not the Data Factory's integration:write. Left on canUseIntegration
@@ -169,6 +172,7 @@ const navLabels = computed(() => {
       adminAudit: '管理审计',
       automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
+      approvalBatchTransfer: '批量转交',
       systemIntegration: '数据工厂',
       stockPreparation: '备料工作台',
       dataSources: '外接数据源',
@@ -195,6 +199,7 @@ const navLabels = computed(() => {
     adminAudit: 'Admin Audit',
     automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
+    approvalBatchTransfer: 'Batch Transfer',
     systemIntegration: 'Data Factory',
     stockPreparation: 'Stock Preparation',
     dataSources: 'Data Sources',

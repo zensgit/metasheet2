@@ -24,6 +24,11 @@ const TARGET_FILES = [
   // IU-3/IU-4 wizard components above.
   'src/views/approval/ApprovalCenterDetailPane.vue',
   'src/views/approval/ApprovalDetailView.vue',
+  // P1b (审批可发现性, 2026-09-07): the two NEW approval surfaces join the UF-6 target set in their
+  // introducing slice, born token-only (var(--ms-*)/--el-* exclusively) — same precedent as the
+  // F2/F3/UI-7 components above.
+  'src/views/approval/ApprovalBatchTransferView.vue',
+  'src/approvals/components/ApprovalTodoBadge.vue',
   'src/views/approval/ApprovalMetricsView.vue',
   'src/views/approval/ApprovalMobileList.vue',
   'src/views/approval/ApprovalNewView.vue',

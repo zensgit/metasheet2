@@ -597,17 +597,23 @@ npx vitest run approval-detail-instance-consistency approval-store-detail-genera
 #   * `approvalNavDelegationEntry` — the non-admin /my-delegation entry in the account area of the
 #     nav, plus the tripwires that the ADMIN 委托管理 button and the self-service route's own
 #     requiresAuth-only meta were both left as they were.
+#   * `approvalBatchTransferView` — the admin 批量转交 page over the EXISTING bulk reassign
+#     endpoint: the route's admin gate (with both a positive and a negative control on the same
+#     guard helper), the pinned request path/query/body, the confirm-before-submit step, and the
+#     per-row outcomes including the "server answered about neither" case.
 #
 # SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
 # file using this file's own counting rule (join backslash continuations, drop comment lines, take
 # every whitespace-separated argument of an `npx vitest run` command that does not start with `-`;
-# that yields 439 before this change). Neither new token contains, nor is contained by, any existing
-# one — in particular the neighbouring `approvalCenterRemindBadge` / `approvalCenterUnreadBadge`
-# share only the `approval` prefix with `approvalNavTodoBadge`, and `approvalDelegationForm` /
+# that yields 439 before this change and 442 after, with no duplicates). None of the three new
+# tokens contains, nor is contained by, any existing one — in particular the neighbouring
+# `approvalCenterRemindBadge` / `approvalCenterUnreadBadge` share only the `approval` prefix with
+# `approvalNavTodoBadge`, and `approvalDelegationForm` /
 # `approvalDelegationRoute` / `approvalDelegationStatus` / `approvalDelegationView` /
-# `myDelegationView` are unrelated to `approvalNavDelegationEntry` in both directions. Each verified
-# green in isolation (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") before wiring.
-npx vitest run approvalNavTodoBadge approvalNavDelegationEntry --reporter=dot
+# `myDelegationView` are unrelated to `approvalNavDelegationEntry` in both directions, and no
+# existing token is a prefix of `approvalBatchTransferView` nor it of one. Each verified green in
+# isolation (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") before wiring.
+npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView --reporter=dot
 
 # 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
 # batch below, StockPreparationSourcePreflight — a NEW spec
