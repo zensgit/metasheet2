@@ -80,6 +80,17 @@ const {
 const DIRECTORY_PATH = '/api/integration/stock-preparation/operator/projects'
 const VALUES_FREE_PROJECTS_PATH = '/api/integration/stock-preparation/projects'
 
+/**
+ * THE OPT-IN, SPELLED ONCE (核验裁决 r3).
+ *
+ * The 设计稿 N1 union — scanning the bound table-action target for the project numbers the
+ * operator's own pull wrote — is a full-sheet, LIMIT/OFFSET-paged read, so the owner ruled it may
+ * not run on an unqualified GET. Every N1/N6 guard below therefore asks for it in as many words,
+ * and N1-r asserts what a caller who does NOT ask gets: the pre-N1 response, and zero queries
+ * against that sheet.
+ */
+const UNION_QUERY = Object.freeze({ includePullTargets: '1' })
+
 const TENANT_A = 'tenant-a'
 const TENANT_B = 'tenant-b'
 const STAGING_A = `${TENANT_A}:integration-core`
@@ -717,14 +728,34 @@ async function main() {
     assert.equal(entry.actor, OPERATOR_A.id)
     assert.equal(entry.tenantId, TENANT_A)
     assert.equal(entry.projectId, undefined, 'this read is not about one project — no projectNo on the trail')
-    // CONTRACT REVIEW (设计稿 N1, this PR). Two booleans joined this trail:
-    //   `pullTargetReady`          — was the operator's OWN store readable at all, and
-    //   `directoryMayBeIncomplete` — was the answer whole.
-    // Both are values-free by construction (booleans; the store's structural gate would refuse
-    // anything else), and both are unrecoverable from `projectCount` alone: when an operator reports
-    // 「我的项目不见了」, the trail has to separate 「目录本来就是空的」 from 「拉取目标没绑好」 from
-    // 「扫描撞到上限被截断了」. Nothing else was added, and no key here names a project.
+    // CONTRACT REVIEW (设计稿 N1 + 核验裁决 r3). THE DEFAULT TRAIL ROW DID NOT GROW. The union is
+    // `?includePullTargets=1` opt-in, and a read that did not scan has nothing to say about a scan:
+    // three booleans that really meant 「没人要求扫」 would make every ordinary home-page open look
+    // like a deployment with a broken binding, which is how a trail stops being evidence. G-05d
+    // pins what the opt-in path records instead.
     assert.deepEqual(Object.keys(entry.detail).sort(), [
+      'directoryReady',
+      'ledgerReady',
+      'operation',
+      'pendingProjectCount',
+      'projectCount',
+      'tenantClaimVerified',
+    ])
+  })
+
+  await run('G-05d the opt-in trail records WHICH store answered and WHY the answer was short', async () => {
+    // CONTRACT REVIEW (设计稿 N1 + r3). Three booleans join the trail on the scanning path:
+    //   `pullTargetReady`          — was the operator's OWN store readable at all,
+    //   `directoryMayBeIncomplete` — was the answer whole, and
+    //   `pullTargetScanCapped`     — if it was short, was that the standing 5-万行 cap or an incident.
+    // All three are values-free by construction (booleans; the store's structural gate would refuse
+    // anything else), and none is recoverable from `projectCount` alone: when an operator reports
+    // 「我的项目不见了」, the trail has to separate 「目录本来就是空的」 from 「拉取目标没绑好」 from
+    // 「扫描撞到上限被截断了」 from 「读挂了」. No key here names a project.
+    const { routes, auditAppends } = mount()
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200)
+    assert.deepEqual(Object.keys(auditAppends[0].detail).sort(), [
       'directoryMayBeIncomplete',
       'directoryReady',
       'ledgerReady',
@@ -732,8 +763,10 @@ async function main() {
       'pendingProjectCount',
       'projectCount',
       'pullTargetReady',
+      'pullTargetScanCapped',
       'tenantClaimVerified',
     ])
+    assert.equal(JSON.stringify(auditAppends).includes(PROJECT_A_NO), false, 'still values-free')
   })
 
   await run('G-05b the audit action is a member of the store vocabulary (migration 082)', async () => {
@@ -961,7 +994,7 @@ async function main() {
         { projectNo: PROJECT_A3_NO },
       ],
     })
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     assert.equal(res.statusCode, 200)
     const data = res.body.data
     const numbers = data.projects.map((project) => project.projectNo)
@@ -996,7 +1029,7 @@ async function main() {
       archivePersisted: false,
       mainTableRows: [{ projectNo: PROJECT_A3_NO }, { projectNo: PROJECT_A4_NO }],
     })
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     assert.equal(res.statusCode, 200)
     assert.equal(res.body.data.directoryReady, true, 'the archive TABLE exists — it is simply empty')
     assert.deepEqual(res.body.data.projects.map((project) => project.projectNo), [PROJECT_A3_NO, PROJECT_A4_NO])
@@ -1007,7 +1040,7 @@ async function main() {
 
   await run('N1-c no bound table action -> the archive alone, and pullTargetReady says why', async () => {
     const { routes, queryLog } = mount()
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     assert.equal(res.statusCode, 200)
     assert.equal(res.body.data.pullTargetReady, false)
     assert.equal(res.body.data.directoryMayBeIncomplete, false,
@@ -1022,7 +1055,7 @@ async function main() {
     const { routes, queryLog } = mount({
       mainTableRows: [{ projectNo: PROJECT_A3_NO }, { projectNo: `NO-${SECRET_B}-PULL` }],
     })
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_B })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_B, query: UNION_QUERY })
     assert.equal(res.statusCode, 200)
     assert.equal(res.body.data.tenantId, TENANT_B)
     assert.equal(res.body.data.pullTargetReady, false, 'the sheet is not tenant B\'s own, so it is not read')
@@ -1041,7 +1074,7 @@ async function main() {
         { projectNo: PROJECT_A_NO, componentName: PART_CANARY, totalQuantity: QTY_CANARY },
       ],
     })
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     const serialized = JSON.stringify(res.body)
     assert.equal(serialized.includes(PART_CANARY), false, 'a part NAME must not ride the directory out')
     assert.equal(serialized.includes(String(QTY_CANARY)), false, 'nor a quantity')
@@ -1094,12 +1127,16 @@ async function main() {
       provisioning,
       targetProjectId: STAGING_A,
       scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      includePullTargets: true,
       boundTarget: { sheetId: MAIN_SHEET_A, objectId: MAIN_OBJECT_ID, fieldIdMap: { ...MAIN_FIELD_ID_MAP } },
     })
     assert.equal(pages, PULL_TARGET_MAX_PAGES, 'the scan stops AT the shared export bound, not beyond it')
     assert.equal(result.pullTargetReady, true)
     assert.equal(result.directoryMayBeIncomplete, true,
       'the page bound was hit, so the set of project numbers is a SUBSET and the response must say so')
+    // …and WHICH kind of short answer this is, which `directoryMayBeIncomplete` alone cannot say
+    // (核验裁决 r3). This is the standing 5-万行 cap, not an incident.
+    assert.equal(result.pullTargetScanCapped, true)
     // …and the timestamps go to "unknown", not to "never changed".
     for (const project of result.projects) {
       assert.equal(project.lastChangedFromPlmAt, null)
@@ -1131,10 +1168,16 @@ async function main() {
       provisioning,
       targetProjectId: STAGING_A,
       scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      includePullTargets: true,
       boundTarget: { sheetId: MAIN_SHEET_A, objectId: MAIN_OBJECT_ID, fieldIdMap: { ...MAIN_FIELD_ID_MAP } },
     })
     assert.equal(result.projectCount, MAX_LIST_ROWS, 'capped at the same row bound the archive path uses')
     assert.equal(result.directoryMayBeIncomplete, true, 'and the cap is DECLARED')
+    // THE MERGE CAP IS NOT THE SCAN CAP. `pullTargetScanCapped` names ONE bound — the scan's page
+    // bound — and this scan ran to its short-page exit. Collapsing the two would leave a front end
+    // unable to say which limit it hit, which is the whole reason the key exists.
+    assert.equal(result.pullTargetScanCapped, false)
+    assert.equal(result.pullTargetReady, true)
   })
 
   // -------------------------------------------------------------------------
@@ -1188,6 +1231,7 @@ async function main() {
       provisioning: breakingScanProvisioning,
       targetProjectId: STAGING_A,
       scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      includePullTargets: true,
       boundTarget: BOUND_TARGET_A,
     })
     assert.equal(recordsApi.pageCount(), 3, 'two pages read, the third threw')
@@ -1195,6 +1239,9 @@ async function main() {
     assert.equal(result.directoryMayBeIncomplete, true,
       'and every project number the pull target held is missing from this answer, so it says so')
     assert.equal(result.projectCount, 0, 'the partial read is DISCARDED rather than served as a whole union')
+    // AN INCIDENT, NOT THE CAP. A page bound that was never reached must not be reported as reached
+    // — 「稍后再试」 and 「表太大」 are different sentences and this is the flag that picks one.
+    assert.equal(result.pullTargetScanCapped, false)
   })
 
   await run('N1-i …and a page that comes back as a non-array is the same break, not an empty sheet', async () => {
@@ -1204,18 +1251,20 @@ async function main() {
       provisioning: breakingScanProvisioning,
       targetProjectId: STAGING_A,
       scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      includePullTargets: true,
       boundTarget: BOUND_TARGET_A,
     })
     assert.equal(result.pullTargetReady, false)
     assert.equal(result.directoryMayBeIncomplete, true,
       'a null page is a broken read; treating it as "the sheet ended" is how a truncation goes silent')
+    assert.equal(result.pullTargetScanCapped, false, 'and it is not the cap either')
   })
 
   await run('N1-j THE TWO SIGNATURES ARE DIFFERENT, which is what the audit trail is read for', async () => {
     // Nothing bound at all — N1-c's state, restated here so the pair is asserted side by side and a
     // future change cannot collapse one into the other without failing this.
     const { routes, auditAppends } = mount()
-    assert.equal((await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })).statusCode, 200)
+    assert.equal((await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })).statusCode, 200)
     assert.deepEqual(
       { ready: auditAppends[0].detail.pullTargetReady, incomplete: auditAppends[0].detail.directoryMayBeIncomplete },
       { ready: false, incomplete: false },
@@ -1226,12 +1275,57 @@ async function main() {
       provisioning: breakingScanProvisioning,
       targetProjectId: STAGING_A,
       scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      includePullTargets: true,
       boundTarget: BOUND_TARGET_A,
     })
     assert.deepEqual(
       { ready: broken.pullTargetReady, incomplete: broken.directoryMayBeIncomplete },
       { ready: false, incomplete: true },
       '「读挂了」 — a different pair, so the trail can tell a support question apart',
+    )
+  })
+
+  await run('N1-j2 …and the THIRD signature — 「表太大被截断」 — is distinguishable from both', async () => {
+    // 核验裁决 r3. The two pairs above use `pullTargetReady` + `directoryMayBeIncomplete`; that pair
+    // is exhausted by them, so the page bound and the merge bound BOTH read {true, true} and a front
+    // end cannot tell 「这是这个部署的固定上限」 from 「刚才那次读出了问题」. `pullTargetScanCapped`
+    // is the third bit, and this asserts all three signatures side by side so a future change cannot
+    // collapse any two of them without failing here.
+    const projectNoField = MAIN_FIELD_ID_MAP.projectNo
+    const cappedScan = {
+      async queryRecords({ sheetId }) {
+        if (sheetId !== MAIN_SHEET_A) return []
+        // ALWAYS full: the scan can only ever stop at its page bound.
+        return Array.from({ length: PULL_TARGET_PAGE_LIMIT }, (_unused, index) => ({
+          data: { [projectNoField]: `NO-${index}` },
+        }))
+      },
+    }
+    const capped = await listOperatorProjectDirectory({
+      recordsApi: cappedScan,
+      provisioning: breakingScanProvisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      includePullTargets: true,
+      boundTarget: BOUND_TARGET_A,
+    })
+    assert.deepEqual(
+      { ready: capped.pullTargetReady, incomplete: capped.directoryMayBeIncomplete, capped: capped.pullTargetScanCapped },
+      { ready: true, incomplete: true, capped: true },
+      '「表太大,被上限截断」',
+    )
+    const broken = await listOperatorProjectDirectory({
+      recordsApi: recordsApiThatBreaksOnPage(1, () => { throw new Error('connection reset by peer') }),
+      provisioning: breakingScanProvisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      includePullTargets: true,
+      boundTarget: BOUND_TARGET_A,
+    })
+    assert.deepEqual(
+      { ready: broken.pullTargetReady, incomplete: broken.directoryMayBeIncomplete, capped: broken.pullTargetScanCapped },
+      { ready: false, incomplete: true, capped: false },
+      '「读挂了」 — a THIRD distinct triple',
     )
   })
 
@@ -1292,6 +1386,7 @@ async function main() {
       targetProjectId: STAGING_A,
       scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
       projectNo: PROJECT_A_NO,
+      includePullTargets: true,
       boundTarget: BOUND_TARGET_A,
     })
     assert.equal(result.pullTargetReady, true)
@@ -1314,11 +1409,11 @@ async function main() {
   await run('N1-m a refresh inside the window re-reads NOTHING, and answers the same thing', async () => {
     const { routes, queryLog } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }, { projectNo: PROJECT_A4_NO }] })
     const scanQueries = () => queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length
-    const first = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const first = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     assert.equal(first.statusCode, 200)
     const afterFirst = scanQueries()
     assert.ok(afterFirst > 0, 'the first read really did scan the bound sheet')
-    const second = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const second = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     assert.equal(second.statusCode, 200)
     assert.equal(scanQueries(), afterFirst, 'the second read paid nothing')
     assert.deepEqual(
@@ -1336,10 +1431,10 @@ async function main() {
     const { routes, queryLog } = mount({
       mainTableRows: [{ projectNo: PROJECT_A3_NO }, { projectNo: `NO-${SECRET_B}-PULL` }],
     })
-    assert.equal((await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })).statusCode, 200)
+    assert.equal((await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })).statusCode, 200)
     const afterWarming = queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length
     assert.ok(afterWarming > 0)
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_B })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_B, query: UNION_QUERY })
     assert.equal(res.statusCode, 200)
     assert.equal(res.body.data.tenantId, TENANT_B)
     assert.equal(res.body.data.pullTargetReady, false, 'tenant B never proved ownership, so nothing was read for them')
@@ -1384,7 +1479,7 @@ async function main() {
       mainTableRows: [{ projectNo: PROJECT_A3_NO }],
       sourceBindingGet: async () => { throw new Error('relation "stock_preparation_source_binding" does not exist') },
     })
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     assert.equal(res.statusCode, 200, `the landing page must open, got ${JSON.stringify(res.body)}`)
     assert.equal(res.body.data.pullTargetReady, false, 'reported as unbound, which is what it is from here')
     assert.equal(res.body.data.directoryReady, true, 'and the archive half still answers')
@@ -1472,7 +1567,7 @@ async function main() {
         { projectNo: PROJECT_A3_NO, lastPlmRefreshAt: '2027-01-01T00:00:00.000Z' },
       ],
     })
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     const byNo = new Map(res.body.data.projects.map((project) => [project.projectNo, project]))
     assert.equal(byNo.get(PROJECT_A_NO).lastChangedFromPlmAt, PLM_REFRESH_NEW)
     assert.equal(byNo.get(PROJECT_A_NO).lastChangedFromPlmBounded, false)
@@ -1489,7 +1584,7 @@ async function main() {
           { projectNo: PROJECT_A3_NO },
         ],
       })
-      const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+      const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
       const byNo = new Map(res.body.data.projects.map((project) => [project.projectNo, project]))
       assert.equal(byNo.get(PROJECT_A_NO).lastChangedFromPlmAt, PLM_REFRESH_NEW)
       assert.equal(byNo.get(PROJECT_A_NO).lastChangedFromPlmBounded, false)
@@ -1503,11 +1598,21 @@ async function main() {
     //      cell or a sort key, separated from the top-level `pullTargetReady`.
     {
       const { routes } = mount()
-      const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+      const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
       assert.equal(res.body.data.pullTargetReady, false)
       for (const project of res.body.data.projects) {
         assert.equal(project.lastChangedFromPlmAt, null)
         assert.equal(project.lastChangedFromPlmBounded, true, 'unknown, NOT "never"')
+      }
+    }
+    // (4) NOBODY ASKED. Not a fourth state of the flag — the KEY is gone, because a column of
+    //     「未知」 on every unqualified home-page open is worse than no column. N1-r pins the shape.
+    {
+      const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A_NO, lastPlmRefreshAt: PLM_REFRESH_NEW }] })
+      const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+      for (const project of res.body.data.projects) {
+        assert.equal(Object.prototype.hasOwnProperty.call(project, 'lastChangedFromPlmAt'), false)
+        assert.equal(Object.prototype.hasOwnProperty.call(project, 'lastChangedFromPlmBounded'), false)
       }
     }
   })
@@ -1519,7 +1624,7 @@ async function main() {
         { projectId: PROJECT_A_NO, action: 'prep_line_export', createdAt: EXPORT_AT_A_OLDER },
       ],
     })
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     const byNo = new Map(res.body.data.projects.map((project) => [project.projectNo, project]))
     assert.equal(byNo.get(PROJECT_A_NO).lastExportAt, EXPORT_AT_A, 'the DESC window\'s first row for a project wins')
     assert.equal(byNo.get(PROJECT_A2_NO).lastExportAt, null)
@@ -1547,7 +1652,7 @@ async function main() {
         { projectId: PROJECT_A2_NO, action: 'prep_line_export', createdAt: EXPORT_AT_A_OLDER },
       ],
     })
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     assert.equal(res.body.data.lastExportAtMayBeIncomplete, true)
     const byNo = new Map(res.body.data.projects.map((project) => [project.projectNo, project]))
     assert.equal(byNo.get(PROJECT_A_NO).lastExportAt, EXPORT_AT_A)
@@ -1556,17 +1661,124 @@ async function main() {
 
   await run('N6-e no audit `list` at all -> the directory still answers, and declares the gap', async () => {
     const { routes } = mount()
-    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     assert.equal(res.statusCode, 200)
     assert.equal(res.body.data.lastExportAtMayBeIncomplete, true)
     for (const project of res.body.data.projects) assert.equal(project.lastExportAt, null)
   })
 
   // -------------------------------------------------------------------------
+  // N1-r — 核验裁决 r3: THE UNION IS OPT-IN, AND OPTING OUT COSTS NOTHING
+  // -------------------------------------------------------------------------
+  //
+  // The scan reads the whole bound sheet through a LIMIT/OFFSET port (≈P²·500/2 row accesses for a
+  // P-page pass), and this route is a landing page. The owner ruled the union may not be charged to
+  // a caller who did not ask, and that the unqualified response must be what it was before 设计稿
+  // N1 — not "the same keys with nulls in them", the SAME KEYS.
+  //
+  // This is the guard the whole ruling rests on: without it, a later change that quietly restores
+  // the default scan (or leaves one key behind) is invisible, because every other N1/N6 guard now
+  // passes the parameter and would stay green.
+
+  await run('N1-r NO `includePullTargets` -> zero pull-target queries, and the pre-N1 response shape', async () => {
+    // The substrate is FULLY configured — a bound target with rows in it, an audit window with an
+    // export in it — so nothing here passes because there was nothing to find.
+    const { routes, queryLog, auditAppends, auditListCalls } = mount({
+      mainTableRows: [{ projectNo: PROJECT_A3_NO, lastPlmRefreshAt: PLM_REFRESH_NEW }],
+      auditEntries: [{ projectId: PROJECT_A_NO, action: 'prep_line_export', createdAt: EXPORT_AT_A }],
+    })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200)
+
+    // ① NOT ONE QUERY against the bound sheet, and not one audit window read. This is the cost
+    //    assertion — the reason the ruling exists — and it is measured, not assumed.
+    assert.equal(queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length, 0,
+      'the expensive scan must not run for a caller who did not ask for it')
+    assert.deepEqual(auditListCalls, [], 'nor the export window, which only exists to fill an opt-in column')
+
+    // ② THE RESPONSE IS THE PRE-N1 ONE, key for key. Absent, never present-and-null.
+    assert.deepEqual(Object.keys(res.body.data).sort(), [
+      'directoryReady',
+      'ledgerReady',
+      'pendingProjectCount',
+      'projectCount',
+      'projects',
+      'tenantId',
+    ])
+    assert.ok(res.body.data.projects.length > 0, 'precondition: there is a row to pin')
+    for (const project of res.body.data.projects) {
+      assert.deepEqual(Object.keys(project).sort(), [
+        'heldLineCount',
+        'lastSyncRunId',
+        'openExceptionCount',
+        'pendingDecisionCount',
+        'projectId',
+        'projectName',
+        'projectNo',
+        'projectStatus',
+        'readyLineCount',
+        'snapshotBatchCount',
+      ])
+    }
+
+    // ③ AND THE PULL-TARGET-ONLY PROJECT IS SIMPLY NOT THERE. That is the honest consequence of not
+    //    scanning, and the front end's cue to pass the parameter on a surface that needs it.
+    assert.equal(res.body.data.projects.some((project) => project.projectNo === PROJECT_A3_NO), false)
+    assert.equal(res.body.data.projectCount, 2, 'the archive half answers exactly as it always did')
+
+    // ④ THE AUDIT DETAIL IS THE PRE-N1 ONE TOO — the trail must not report on a scan nobody ran.
+    assert.deepEqual(Object.keys(auditAppends[0].detail).sort(), [
+      'directoryReady',
+      'ledgerReady',
+      'operation',
+      'pendingProjectCount',
+      'projectCount',
+      'tenantClaimVerified',
+    ])
+
+    // ⑤ THE POSITIVE CONTROL, on the SAME substrate: with the parameter, all of it appears. Without
+    //    this, ①–④ would also pass on a build where the union had simply been deleted.
+    const asked = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(asked.statusCode, 200)
+    assert.ok(queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length > 0)
+    assert.equal(asked.body.data.pullTargetReady, true)
+    assert.equal(asked.body.data.pullTargetScanCapped, false)
+    assert.equal(asked.body.data.projects.some((project) => project.projectNo === PROJECT_A3_NO), true)
+    assert.equal(asked.body.data.projects.find((project) => project.projectNo === PROJECT_A_NO).lastExportAt, EXPORT_AT_A)
+  })
+
+  await run('N1-r2 any value but "1" is not an opt-in, and the flag is still allowlisted', async () => {
+    const { routes, queryLog } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }] })
+    // (Whitespace around a value is normalized away before this comparison — the same rule every
+    // other query flag in this family is read under — so `'1 '` IS an opt-in and is not listed.)
+    for (const value of ['0', 'true', 'yes', '']) {
+      const res = await call(routes, 'GET', DIRECTORY_PATH, {
+        user: OPERATOR_A,
+        query: { includePullTargets: value },
+      })
+      assert.equal(res.statusCode, 200)
+      assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'pullTargetReady'), false,
+        `includePullTargets=${JSON.stringify(value)} must not open the union`)
+    }
+    assert.equal(queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length, 0,
+      'and none of them paid for a scan')
+    // THE TWO OPT-INS ARE INDEPENDENT: asking for the cheap pending index must not drag the
+    // expensive scan in with it.
+    const pendingOnly = await call(routes, 'GET', DIRECTORY_PATH, {
+      user: OPERATOR_A,
+      query: { includePendingCounts: '1' },
+    })
+    assert.equal(pendingOnly.statusCode, 200)
+    assert.ok(pendingOnly.body.data.pendingCountsByProjectNo, 'the index really was served')
+    assert.equal(Object.prototype.hasOwnProperty.call(pendingOnly.body.data, 'pullTargetReady'), false)
+    assert.equal(queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length, 0)
+  })
+
+  // -------------------------------------------------------------------------
   // 项目备料页 PAYS NOTHING FOR ANY OF THIS
   // -------------------------------------------------------------------------
 
-  await run('N-cost the board\'s in-process call passes no boundTarget, so it runs no union scan', async () => {
+  await run('N-cost the board\'s in-process call opts out, so it runs no union scan', async () => {
     let mainSheetQueries = 0
     const recordsApi = {
       async queryRecords({ sheetId }) {
@@ -1587,9 +1799,29 @@ async function main() {
       projectNo: PROJECT_A_NO,
       includePendingIndex: true,
     })
-    assert.equal(mainSheetQueries, 0, 'the unnarrowed scan is opt-in on `boundTarget`; the board does not opt in')
-    assert.equal(result.pullTargetReady, false)
-    assert.equal(result.directoryMayBeIncomplete, false)
+    assert.equal(mainSheetQueries, 0, 'the scan is opt-in; the board does not opt in')
+    // AND IT PAYS FOR NOTHING IT DOES NOT READ, even if a caller later hands it a boundTarget: the
+    // switch is `includePullTargets`, so a board that grew a target parameter still scans nothing.
+    const withTarget = await listOperatorProjectDirectory({
+      recordsApi,
+      provisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      projectNo: PROJECT_A_NO,
+      includePendingIndex: true,
+      boundTarget: BOUND_TARGET_A,
+    })
+    assert.equal(mainSheetQueries, 0, 'a boundTarget alone is not an opt-in')
+    // The board reads `projectId`/`projectNo`/counts and `pendingByProjectNo` off this result and
+    // projects its OWN frozen key set, so the union keys being absent is invisible to it — pinned
+    // here so a future reader does not "restore" them for the board's benefit.
+    for (const project of [...result.projects, ...withTarget.projects]) {
+      assert.equal(Object.prototype.hasOwnProperty.call(project, 'sources'), false)
+      assert.equal(Object.prototype.hasOwnProperty.call(project, 'lastExportAt'), false)
+    }
+    assert.equal(Object.prototype.hasOwnProperty.call(result, 'pullTargetReady'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(result, 'directoryMayBeIncomplete'), false)
+    assert.ok(result.pendingByProjectNo instanceof Map, 'and the channel the board DOES read is intact')
   })
 
   // -------------------------------------------------------------------------

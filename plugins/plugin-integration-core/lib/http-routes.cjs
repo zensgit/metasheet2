@@ -619,8 +619,9 @@ const {
   StockPreparationOperatorDirectoryError,
   listOperatorProjectDirectory,
 } = require('./stock-preparation-operator-project-directory.cjs')
-// The directory's union scan reads the WHOLE bound sheet. This is what stops an operator landing
-// page — with a refresh button on it — from paying that scan once per click. See the factory's note.
+// The directory's union scan reads the WHOLE bound sheet, and it only runs at all for a caller that
+// passed `?includePullTargets=1`. This is what stops the surfaces that DO pass it — with a refresh
+// button on them — from paying that scan once per click. See the factory's note.
 const { createPullTargetScanCache } = require('./stock-preparation-pull-target-scan.cjs')
 // 项目备料页 — ONE project's board. The fourth value-bearing stock-prep read; it rides the SAME
 // operator value scope as the directory above and returns a frozen key set (numbers, names, counts,
@@ -1838,15 +1839,25 @@ const VALID_STOCK_PREPARATION_PREP_LINE_EXPORT_QUERY_KEYS = new Set([
 // "that number is not in this system" from "that project is real and has nothing pending". `tenantId`
 // is accepted for shape-compatibility with every other call in this family and is NEVER a steering
 // vector: the scope resolver refuses any value that is not the caller's own authenticated tenant.
-// `includePendingCounts` is the ONE selector this route accepts, and it selects nothing about WHOSE
-// data is read — it asks for one extra top-level key (`pendingCountsByProjectNo`, projectNo -> count)
-// over the SAME tenant-scoped ledger read the response already performs. It is opt-in because this
-// route's top-level key set is frozen and asserted (S-02a): a value-bearing projection widens on a
-// reviewed, explicitly requested basis or not at all.
+// TWO SELECTORS, AND NEITHER SELECTS WHOSE DATA IS READ — the tenant is the resolved scope's, always.
+//
+// `includePendingCounts` asks for one extra top-level key (`pendingCountsByProjectNo`,
+// projectNo -> count) over the SAME tenant-scoped ledger read the response already performs. It is
+// opt-in because this route's top-level key set is frozen and asserted (S-02a): a value-bearing
+// projection widens on a reviewed, explicitly requested basis or not at all.
+//
+// `includePullTargets` asks for the 设计稿 N1 UNION — the bound table-action target scanned for the
+// project numbers the operator's own pull wrote — and it is opt-in for COST, on the owner's ruling.
+// That scan reads the whole bound sheet with no DISTINCT and no projection, and the records port
+// pages by LIMIT/OFFSET, so a P-page pass touches ≈P²·500/2 rows (~2.5·10⁶ at the 50,000-row bound).
+// A home page and a board mount may not be charged that on every open; a caller that needs the union
+// asks for it and throttles itself. WITHOUT IT THIS ROUTE ANSWERS EXACTLY WHAT IT ANSWERED BEFORE
+// N1 — same top-level keys, same row keys, same audit detail, and not one query against that sheet.
 const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_QUERY_KEYS = new Set([
   'tenantId',
   'workspaceId',
   'includePendingCounts',
+  'includePullTargets',
 ])
 // 通知下一步: the status READ. `projectNo` for the same reason the export uses it — the business
 // project number, which is what a person means by "this project".
@@ -3490,7 +3501,8 @@ function createHandlers(services, options = {}) {
   // ONE PER REGISTRATION — not per request, and not module-global. In production `createHandlers`
   // runs once, so this is one small bounded memo for the process; in the suites it runs per mount,
   // so no test can be answered out of another test's window. It holds pull-target SCAN RESULTS keyed
-  // by an already-proved-own sheet id; the module that owns it explains why that is safe.
+  // by an already-proved-own sheet id; the module that owns it explains why that is safe. Only the
+  // `?includePullTargets=1` path ever puts anything in it, because that is the only path that scans.
   const pullTargetScanCache = createPullTargetScanCache()
   // NO ROUTE FORWARDS A CALLER'S RAW `?workspaceId` INTO THE AUDIT TRAIL.
 //
@@ -8426,6 +8438,11 @@ function requireStockPreparationAudit() {
       // schema answered the directory read with a raw CHECK violation rather than with the 503 that
       // says which migration to run. After the scope, before any records IO.
       await requireStockPreparationAuditVocabulary(audit, 'project_directory_read', '082', scope.tenantId)
+      // THE UNION IS OPT-IN, AND THIS IS THE WHOLE SWITCH (核验裁决 r3). `false` here means this
+      // handler behaves exactly as it did before 设计稿 N1: no table-action lookup, no bound-sheet
+      // scan, no audit window, and a response and audit row whose key sets are unchanged. See the
+      // query-key allowlist above for the cost argument the owner ruled on.
+      const includePullTargets = firstString(input.includePullTargets) === '1'
       // THE BOUND TABLE-ACTION TARGET — the sheet `apply` actually writes to, and the SECOND store
       // this directory is a union over (设计稿 N1). Without it the directory reads only the MVP
       // project ledger, which `mvp-persist` writes and `mvp-persist` is platform-admin: a project a
@@ -8446,14 +8463,16 @@ function requireStockPreparationAudit() {
       // the narrow catch because it is a single-project page a reader arrives at deliberately; the
       // landing page is where the whole tier starts, and it must open.
       let boundTarget = null
-      try {
-        const boundAction = await tableActions.getTableAction({
-          tenantId: scope.tenantId,
-          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
-        })
-        boundTarget = boundAction && boundAction.target ? boundAction.target : null
-      } catch {
-        boundTarget = null
+      if (includePullTargets) {
+        try {
+          const boundAction = await tableActions.getTableAction({
+            tenantId: scope.tenantId,
+            actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+          })
+          boundTarget = boundAction && boundAction.target ? boundAction.target : null
+        } catch {
+          boundTarget = null
+        }
       }
       const result = await listOperatorProjectDirectory({
         recordsApi: getMultitableRecordsApi(),
@@ -8462,11 +8481,16 @@ function requireStockPreparationAudit() {
         // which tenant A's caller addresses tenant B's staging project.
         targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         scope,
+        // 设计稿 N1, BEHIND THE OPT-IN. The module reads `boundTarget` and `audit` only under this
+        // flag, so opting out is one decision here rather than four conditionals spread downstream.
+        includePullTargets,
         boundTarget,
-        // ONE FULL-SHEET SCAN PER WINDOW, NOT PER CLICK. This route is the operator's landing page
-        // and its refresh button is replayable by anyone holding the operate grant, so the union
-        // scan is memoized for a few seconds per proved-own sheet — concurrent refreshes share one
-        // in-flight scan instead of starting one each.
+        // ONE FULL-SHEET SCAN PER WINDOW, NOT PER CLICK — and only on the opt-in path, which is the
+        // only path that scans. The refresh button on the surfaces that DO opt in is replayable by
+        // anyone holding the operate grant, so the union scan is memoized for a few seconds per
+        // proved-own sheet; concurrent refreshes share one in-flight scan instead of starting one
+        // each. The window lowers FREQUENCY only — it does not make a single scan cheaper, and it
+        // does not lift the 50,000-row cap.
         pullTargetScanCache,
         // For `lastExportAt` only, and read through ONE bounded descending window rather than one
         // query per project — see `lastExportAtByProjectNo`. This route's own audit APPEND below is
@@ -8493,11 +8517,21 @@ function requireStockPreparationAudit() {
           directoryReady: result.directoryReady,
           ledgerReady: result.ledgerReady,
           // WHICH STORES ANSWERED, and whether the answer was whole. Booleans only — the trail must
-          // be able to tell 「目录是空的」 from 「拉取目标没绑好」 from 「扫描被上限截断了」 when an
-          // operator says their project is missing, and none of those three is inferable from
-          // `projectCount` alone.
-          pullTargetReady: result.pullTargetReady,
-          directoryMayBeIncomplete: result.directoryMayBeIncomplete,
+          // be able to tell 「目录是空的」 from 「拉取目标没绑好」 from 「扫描被上限截断了」 from
+          // 「读挂了」 when an operator says their project is missing, and none of those four is
+          // inferable from `projectCount` alone. `pullTargetScanCapped` is what splits the last two:
+          // the scan hitting PULL_TARGET_MAX_PAGES and the scan breaking mid-flight both raise
+          // `directoryMayBeIncomplete`, and they are a config decision and an incident respectively.
+          //
+          // PRESENT ONLY ON THE OPT-IN PATH, exactly like the response keys they mirror. A read that
+          // did not scan has nothing to report about the scan, and three booleans that were really
+          // "nobody asked" would make the trail read as a deployment with a broken binding on every
+          // ordinary home-page open — which is how a trail stops being evidence.
+          ...(includePullTargets ? {
+            pullTargetReady: result.pullTargetReady,
+            directoryMayBeIncomplete: result.directoryMayBeIncomplete,
+            pullTargetScanCapped: result.pullTargetScanCapped,
+          } : {}),
           tenantClaimVerified: scope.tenantClaimVerified,
         },
       })
