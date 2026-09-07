@@ -41,6 +41,8 @@
 // attendance-owned table gets a bucket. It is not auto-derived from a naming convention.
 
 const TABLE_BUCKETS = Object.freeze({
+  // ACP-1B OD-ATC-11R(a): immutable canonical identity authority, never operational data.
+  attendance_report_projection_anchors: 'w4_canonical',
   // --- business: calculation source/effect/result -----------------------------------------
   attendance_events: 'business',
   attendance_records: 'business',
@@ -338,6 +340,14 @@ function classifyTable(tableName) {
   return TABLE_BUCKETS[tableName] || null
 }
 
+// ACP grants only these reviewed writes, not a new canonical path prefix.
+const W4_EXACT_CANONICAL_SITES = Object.freeze([
+  Object.freeze({ relPath: 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',
+    enclosingSymbol: 'refreshAttendanceReportProjectionAnchor', table: 'attendance_report_projection_anchors', verb: 'insert', count: 1 }),
+  Object.freeze({ relPath: 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',
+    enclosingSymbol: 'withholdAttendanceReportProjectionAnchors', table: 'attendance_report_projection_anchors', verb: 'delete', count: 1 }),
+])
+
 module.exports = {
   TABLE_BUCKETS,
   P25_FORBIDDEN_AUTHORITY_ROLES,
@@ -346,6 +356,7 @@ module.exports = {
   TRACKED_BUCKETS,
   BUCKET_ALLOWLISTED_BUCKETS,
   W4_CANONICAL_PATH_PREFIXES,
+  W4_EXACT_CANONICAL_SITES,
   classifyTable,
   classifyP25Use,
   assertP25Use,

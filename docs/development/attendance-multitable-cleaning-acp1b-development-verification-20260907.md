@@ -4,6 +4,43 @@ Status: IN PROGRESS / DRAFT-HOLD. This report is not completion or release evide
 
 ## Post-publication CI correction (current, 2026-09-08)
 
+### f3 exact-head follow-up classification gates
+
+Linux migration/approval/recovery and attendance-web checks pass on f3dd471c2.
+Two later gates expose independent inventory omissions, not migration regressions:
+Node20 job 101831423106 rejects an undecided `AttendanceCleaningConnectionUncertainError`
+in the W4C5 error-class sweep; Node18 job 101831423127 rejects the new anchor table
+and the new exact base/calculation read symbols in the DML/read inventory.
+
+The W4C5 correction is test-only: explicitly known-not-boundary, with its inherited
+registry name/code and values-free rendering tested as INTERNAL_ERROR/exit1.
+Production classifier/error bytes do not change. Original whole-file 66/67 RED;
+corrected whole-file 68/68 GREEN; deleting the registration returns RED, restored.
+
+The inventory correction registers the anchor as w4_canonical but grants no path
+prefix. Only exact refresh/insert1 and withhold/delete1 match; duplicate, missing,
+stale, wrong-table/verb/symbol/path sites are rejected. The anchor cannot inherit
+older canonical-directory prefixes either. The existing CI full-census assertion
+now enforces exact descriptor count drift, while historical frozen-baseline
+consumers retain their existing interpretation. Non-ACP debt/baseline contracts
+and all previous canonical paths remain unchanged for their existing tables.
+Seed and locked-row reads are individually count-pinned; calculation recovery
+and posture-selected write-CAS reads are internal/history preconditions, never
+public current-view readers. Existing active-current predicate gates remain intact.
+
+Original local complete collector reproduces 54/58 PASS, four failures matching
+Node18. An intermediate corrected run additionally exposed the closed canonical
+table-set assertion; it now includes exactly the newly classified anchor table,
+not a lower bound. Final full collector passes **60/60 on Node18 and Node20**,
+including the existing shadow active-predicate mutation and frozen baseline
+contracts. Individually removing either exact write descriptor or each of the
+four read entries makes the scoped ACP controls fail (six independent exit1
+runs); all are restored. Scoped controls pass 2/2 afterward. W4C5 whole-file
+passes **68/68 on both Node18/20**, including inherited-name INTERNAL_ERROR and
+fixed-code-only rendering with an attached synthetic private payload. Its
+registration-removal mutation fails and is restored. Production packages/plugin
+bytes are identical to f3, provenance frozen/live diff zero, diff-check PASS.
+
 ### Confirmed root cause and minimal correction
 
 Linux diagnostic run 34149928769 / job 101829878985 reports PG16.15 Debian,
@@ -654,3 +691,9 @@ untouched. Main still read back as 976711b254d129e6c23bf8327c4be67018942ba3.
 22. `packages/core-backend/vitest.config.ts`
 23. `scripts/ops/attendance-w4c2-ci-wiring.test.mjs`
 24. `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`
+25. `scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts`
+26. `scripts/attendance/w4c0-dml-inventory/table-classification.cjs`
+27. `scripts/attendance/w4c0-dml-inventory/collector.cjs`
+28. `scripts/attendance/w4c0-dml-inventory/current-record-read-classification.cjs`
+29. `scripts/attendance/w4c0-dml-inventory/calculation-read-classification.cjs`
+30. `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs`
