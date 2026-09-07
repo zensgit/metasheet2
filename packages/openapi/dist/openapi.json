@@ -13386,7 +13386,7 @@
           "Approvals"
         ],
         "summary": "List approval instances",
-        "description": "Returns a paginated list of approval instances. The live route accepts\nboth page/pageSize and the older limit/offset pagination fallback.\nUse `tab` for the current inbox lens, plus optional sourceSystem,\nworkflowKey, businessKey, assignee, status, and search filters.\n",
+        "description": "Returns a paginated list of approval instances. The live route accepts\nboth page/pageSize and the older limit/offset pagination fallback.\nUse `tab` for the current inbox lens, plus optional sourceSystem,\nworkflowKey, businessKey, assignee, status, and search filters.\n\nThe visible set is determined server-side on every request. No query\nparameter can make a response exceed it; adding a parameter can only\nnarrow the result, never reach a row the scope does not already admit.\n\nThe two halves of that set are NOT the same, and the difference is\nstated rather than averaged over. PLATFORM rows are limited to the\ncaller's own participation -- instances they requested, hold a seat on\n(user-, role- or queue-typed), recorded an action on, or were CC'd on.\nNON-PLATFORM rows (phase-1 external mirrors, `sourceSystem` other than\n`platform`) carry no participation condition at all: they are visible to\nany caller holding `approvals:read` whose actor id the request resolves.\nA request whose actor id does not resolve receives nothing, mirrors\nincluded. Roles are read from the database, not from token claims; a\nqueue-typed seat is matched against the request's permission set.\n\nThe scope also carries a database-backed approval-administrator arm.\nThat arm is not observable through this endpoint: every `tab` is itself\nlimited to the caller's own participation and is ANDed with the scope,\nso an administrator's response is the same as any other caller's. This\nendpoint is not an administrative listing surface.\n\nCOMPATIBILITY: a request that omits `tab` is served the default\n(`pending`) tab, which carries its own `status = 'pending'` condition --\nUNLESS the request supplies a `status` filter of its own. In that case\nno tab condition is applied at all, and the response is the\nserver-determined scope intersected with that status filter and nothing\nelse. So a tab-less `status=approved` returns the caller's own approved\nrows, from both source systems, rather than an empty page. An EXPLICIT\ntab is never overridden by this rule: `tab=pending&status=approved`\nkeeps both conditions and therefore returns nothing, because the caller\nnamed both halves. An empty `status=` is absent, not a filter, and so\nleaves the default tab in place. Measured change,\nstated as a narrowing rather than as a preservation: a tab-less request\npreviously returned the whole `approval_instances` table to any caller;\nit now returns that caller's own scoped feed, mixed across platform and\nnon-platform sources. What is preserved is the source-system axis of\nthat feed, not its size.\n",
         "security": [
           {
             "bearerAuth": []
@@ -13431,8 +13431,17 @@
           {
             "in": "query",
             "name": "tab",
+            "description": "Inbox lens applied within the server-determined visible set. Omitted\nor empty selects the default, `pending`. Any other value outside the\nlisted set is rejected with 400 APPROVAL_TAB_INVALID, and so is any\nnon-single-valued form -- a repeated `tab=a&tab=b` or a bracketed\n`tab[]=a` -- which is refused rather than silently served the\ndefault.\n",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "default": "pending",
+              "enum": [
+                "pending",
+                "mine",
+                "cc",
+                "completed",
+                "processed"
+              ]
             }
           },
           {
@@ -13487,6 +13496,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -13896,7 +13908,7 @@
         ],
         "deprecated": true,
         "summary": "Get pending approvals for current actor",
-        "description": "Deprecated. Use GET /api/approvals with `tab=pending` instead.\n",
+        "description": "Deprecated. Use GET /api/approvals with `tab=pending` instead.\n\nThe visible set is determined server-side, by the same scope\n`GET /api/approvals` applies and in both this endpoint's queries -- the\npage and the `total` alike. Because this endpoint is hard-filtered to\npending platform-owned rows, that scope reduces to the caller's own\nparticipation: instances they requested, hold a seat on (user-, role- or\nqueue-typed), recorded an action on, or were CC'd on, plus the\ndatabase-backed approval-administrator arm. Roles are read from the\ndatabase, not from token claims. Measured change: this endpoint\npreviously returned every pending platform instance to any caller\nholding `approvals:read`.\n\nThe administrator arm IS observable here, unlike on\nGET /api/approvals where every `tab` narrows to the caller's own\nparticipation: this endpoint applies no tab, so an identity the database\nrecords as an approval administrator receives the pending platform rows\nit has no participation in. That reach is bounded to the\nadministrator's own organisations only while the organisation pin is\nenabled; the pin ships disabled.\n",
         "parameters": [
           {
             "in": "query",
