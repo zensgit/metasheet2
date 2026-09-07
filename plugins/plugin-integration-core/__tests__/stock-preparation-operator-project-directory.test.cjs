@@ -63,6 +63,9 @@ const {
 const {
   PULL_TARGET_MAX_PAGES,
   PULL_TARGET_PAGE_LIMIT,
+  SCAN_WHOLE_SHEET,
+  createPullTargetScanCache,
+  scanPullTargetProjects,
 } = require(path.join(LIB, 'stock-preparation-pull-target-scan.cjs'))
 const {
   __internals: { MAX_LIST_ROWS },
@@ -232,6 +235,11 @@ function mount({
   auditEntries = null,
   // MVP-side rows. `false` models the self-service main line: nobody ever ran mvp-persist here.
   archivePersisted = true,
+  // THE PERSISTED SOURCE-BINDING STORE, which `getTableAction` resolves through and whose throws the
+  // registry deliberately lets PROPAGATE. `undefined` = no such store (the default). A function
+  // models a deployment where that table is missing or unreachable — the half-migrated upgrade — and
+  // is how N1-j proves the landing page still opens.
+  sourceBindingGet,
 } = {}) {
   const MAIN_SHEET = boundSheetIdOverride || MAIN_SHEET_A
   const routes = new Map()
@@ -267,7 +275,7 @@ function mount({
           idempotencyKey: `idem_${index}`,
           componentSourceId: `comp_${index}`,
           path: `/${index}`,
-          totalQuantity: 1,
+          totalQuantity: row.totalQuantity !== undefined ? row.totalQuantity : 1,
           active: row.active !== false,
           ...(row.componentName !== undefined ? { componentName: row.componentName } : {}),
           ...(row.lastPlmRefreshAt !== undefined ? { lastPlmRefreshAt: row.lastPlmRefreshAt } : {}),
@@ -444,6 +452,9 @@ function mount({
     } : {}),
   }
   if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
+  if (typeof sourceBindingGet === 'function') {
+    services.stockPreparationSourceBindingStore = { get: sourceBindingGet }
+  }
 
   httpRoutes.registerIntegrationRoutes({
     context,
@@ -1021,19 +1032,40 @@ async function main() {
   })
 
   await run('N1-e VALUES-FREE: the pull target is a MATERIALS table and not one part value crosses', async () => {
+    // A QUANTITY as well as a NAME: the two families 派活 names, and the second one is a number, so a
+    // leak that survives a string search for a part name would still be caught here.
+    const QTY_CANARY = 90210424242
     const { routes } = mount({
       mainTableRows: [
-        { projectNo: PROJECT_A3_NO, componentName: PART_CANARY },
-        { projectNo: PROJECT_A_NO, componentName: PART_CANARY },
+        { projectNo: PROJECT_A3_NO, componentName: PART_CANARY, totalQuantity: QTY_CANARY },
+        { projectNo: PROJECT_A_NO, componentName: PART_CANARY, totalQuantity: QTY_CANARY },
       ],
     })
     const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
     const serialized = JSON.stringify(res.body)
     assert.equal(serialized.includes(PART_CANARY), false, 'a part NAME must not ride the directory out')
-    assert.equal(serialized.includes('componentName'), false, 'nor the field name, which discloses the schema')
-    assert.equal(serialized.includes('totalQuantity'), false)
-    // The canary really was in the substrate, or this guard is vacuous.
+    assert.equal(serialized.includes(String(QTY_CANARY)), false, 'nor a quantity')
+    // THE FIELD NAMES, AS THE SUBSTRATE REALLY KEYS THEM. The stored row is keyed by the PHYSICAL
+    // fieldId provisioning materialized — a hash — not by the logical name, so searching the
+    // response for the string 'componentName' proves nothing at all: it could not appear even if the
+    // whole row were spread into the response. These are the keys a spread would actually produce.
+    for (const logicalField of ['componentName', 'totalQuantity', 'path', 'idempotencyKey', 'componentSourceId', 'projectNo']) {
+      assert.equal(
+        serialized.includes(physicalFieldId(STAGING_A, MAIN_OBJECT_ID, logicalField)),
+        false,
+        `${logicalField}'s physical key discloses the schema and must not appear`,
+      )
+    }
+    // The canaries really were in the substrate, or this guard is vacuous. Proved from BOTH ends: the
+    // projection carries the number, and the stored row carries the value the projection dropped.
     assert.equal(serialized.includes(PROJECT_A3_NO), true, 'the project number IS the projection — that part works')
+    const storedRow = mainRow(STAGING_A, MAIN_SHEET_A, 'rec_probe', { componentName: PART_CANARY, totalQuantity: QTY_CANARY })
+    assert.equal(JSON.stringify(storedRow).includes(PART_CANARY), true, 'the fixture really does store the part name')
+    assert.equal(
+      JSON.stringify(storedRow).includes(physicalFieldId(STAGING_A, MAIN_OBJECT_ID, 'componentName')),
+      true,
+      'and it stores it under the physical key this guard searches for',
+    )
   })
 
   await run('N1-f PAST THE SCAN BOUND the directory says so — it never truncates silently', async () => {
@@ -1103,6 +1135,260 @@ async function main() {
     })
     assert.equal(result.projectCount, MAX_LIST_ROWS, 'capped at the same row bound the archive path uses')
     assert.equal(result.directoryMayBeIncomplete, true, 'and the cap is DECLARED')
+  })
+
+  // -------------------------------------------------------------------------
+  // N1-h/N1-i — A SCAN THAT BREAKS MID-FLIGHT IS THE THIRD WAY THE UNION GOES SHORT
+  // -------------------------------------------------------------------------
+  //
+  // The failure this pins: the pull target is bound, provisioned and the caller's own; the read
+  // starts, and page 3 of 100 throws. The pages already read are DISCARDED — a partial group would
+  // understate a project's row count and hand back a max timestamp over an arbitrary prefix — so
+  // every project that lives only in the pull target vanishes from the answer. If the response also
+  // said `directoryMayBeIncomplete: false`, it would be asserting the union is whole in the one case
+  // where the whole second store went missing, and an operator whose project disappeared would be
+  // shown a page that confidently says it does not exist.
+  //
+  // It must ALSO be distinguishable from 「什么都没绑」, because the audit trail is what a support
+  // question is answered from: N1-c pins {pullTargetReady:false, directoryMayBeIncomplete:false} for
+  // "nothing bound", and this pins {false, true} for "the read broke". Those are the two signatures.
+  const breakingScanProvisioning = {
+    async findObjectSheet() { return null },
+    getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
+    async isSheetOwnedByProject(sheetId, projectId) { return sheetId === MAIN_SHEET_A && projectId === STAGING_A },
+  }
+  const BOUND_TARGET_A = {
+    sheetId: MAIN_SHEET_A,
+    objectId: MAIN_OBJECT_ID,
+    fieldIdMap: { ...MAIN_FIELD_ID_MAP },
+  }
+  /** Two full pages of real project numbers, and then the break. */
+  function recordsApiThatBreaksOnPage(breakAt, breakWith) {
+    let pages = 0
+    return {
+      pageCount: () => pages,
+      async queryRecords({ sheetId, offset }) {
+        if (sheetId !== MAIN_SHEET_A) return []
+        pages += 1
+        if (pages >= breakAt) return breakWith()
+        return Array.from({ length: PULL_TARGET_PAGE_LIMIT }, (_unused, index) => ({
+          data: {
+            [MAIN_FIELD_ID_MAP.projectNo]: `NO-${String(offset + index).padStart(6, '0')}`,
+            [MAIN_FIELD_ID_MAP.active]: true,
+          },
+        }))
+      },
+    }
+  }
+
+  await run('N1-h A SCAN THAT THREW MIDWAY says 「可能不全」 — it never claims a whole union', async () => {
+    const recordsApi = recordsApiThatBreaksOnPage(3, () => { throw new Error('connection reset by peer') })
+    const result = await listOperatorProjectDirectory({
+      recordsApi,
+      provisioning: breakingScanProvisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      boundTarget: BOUND_TARGET_A,
+    })
+    assert.equal(recordsApi.pageCount(), 3, 'two pages read, the third threw')
+    assert.equal(result.pullTargetReady, false, 'the store was not readable through to the end')
+    assert.equal(result.directoryMayBeIncomplete, true,
+      'and every project number the pull target held is missing from this answer, so it says so')
+    assert.equal(result.projectCount, 0, 'the partial read is DISCARDED rather than served as a whole union')
+  })
+
+  await run('N1-i …and a page that comes back as a non-array is the same break, not an empty sheet', async () => {
+    const recordsApi = recordsApiThatBreaksOnPage(3, () => null)
+    const result = await listOperatorProjectDirectory({
+      recordsApi,
+      provisioning: breakingScanProvisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      boundTarget: BOUND_TARGET_A,
+    })
+    assert.equal(result.pullTargetReady, false)
+    assert.equal(result.directoryMayBeIncomplete, true,
+      'a null page is a broken read; treating it as "the sheet ended" is how a truncation goes silent')
+  })
+
+  await run('N1-j THE TWO SIGNATURES ARE DIFFERENT, which is what the audit trail is read for', async () => {
+    // Nothing bound at all — N1-c's state, restated here so the pair is asserted side by side and a
+    // future change cannot collapse one into the other without failing this.
+    const { routes, auditAppends } = mount()
+    assert.equal((await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })).statusCode, 200)
+    assert.deepEqual(
+      { ready: auditAppends[0].detail.pullTargetReady, incomplete: auditAppends[0].detail.directoryMayBeIncomplete },
+      { ready: false, incomplete: false },
+      '「什么都没绑」',
+    )
+    const broken = await listOperatorProjectDirectory({
+      recordsApi: recordsApiThatBreaksOnPage(1, () => { throw new Error('connection reset by peer') }),
+      provisioning: breakingScanProvisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      boundTarget: BOUND_TARGET_A,
+    })
+    assert.deepEqual(
+      { ready: broken.pullTargetReady, incomplete: broken.directoryMayBeIncomplete },
+      { ready: false, incomplete: true },
+      '「读挂了」 — a different pair, so the trail can tell a support question apart',
+    )
+  })
+
+  // -------------------------------------------------------------------------
+  // N1-k — WHICH READ WAS ASKED FOR, SAID IN AS MANY WORDS
+  // -------------------------------------------------------------------------
+
+  await run('N1-k the whole-sheet read has a NAME: a missing narrowing reads nothing, never everything', async () => {
+    const seen = []
+    const recordsApi = {
+      async queryRecords(input) {
+        seen.push(input.filters)
+        return []
+      },
+    }
+    const ownSheet = { sheetId: MAIN_SHEET_A, objectId: MAIN_OBJECT_ID }
+
+    const whole = await scanPullTargetProjects(recordsApi, ownSheet, BOUND_TARGET_A, SCAN_WHOLE_SHEET)
+    assert.equal(whole.ready, true)
+    assert.deepEqual(seen.at(-1), {}, 'the sentinel is the ONLY way to get an unfiltered scan')
+
+    const narrowed = await scanPullTargetProjects(recordsApi, ownSheet, BOUND_TARGET_A, PROJECT_A_NO)
+    assert.equal(narrowed.ready, true)
+    assert.deepEqual(seen.at(-1), { [MAIN_FIELD_ID_MAP.projectNo]: PROJECT_A_NO }, 'a number narrows')
+
+    // A NUMERIC project number narrows too, because `optionalString` — the one reader every cell in
+    // this feature goes through — coerces a number to its string, and a business number arriving out
+    // of a spreadsheet cell as a number is ordinary. The sentinel rule tightens the EMPTY cases; it
+    // does not invent a stricter type discipline than the rest of the module keeps.
+    assert.equal((await scanPullTargetProjects(recordsApi, ownSheet, BOUND_TARGET_A, 230920006)).ready, true)
+    assert.deepEqual(seen.at(-1), { [MAIN_FIELD_ID_MAP.projectNo]: '230920006' })
+
+    // The case this rule exists for: a caller that MEANT to narrow and lost its number. Widening to
+    // the whole sheet here would report the whole table's rows and max timestamp under one project's
+    // name; reading nothing is the honest answer, and it is what the pre-merge board did by accident.
+    const before = seen.length
+    for (const lost of [null, undefined, '', '   ', {}, []]) {
+      const result = await scanPullTargetProjects(recordsApi, ownSheet, BOUND_TARGET_A, lost)
+      assert.equal(result.ready, false, `a ${JSON.stringify(lost) || String(lost)} narrowing must not become a whole-sheet scan`)
+      assert.equal(result.failed, false, 'and it is not a READ failure — nothing was read')
+    }
+    assert.equal(seen.length, before, 'not one query was issued for any of them')
+  })
+
+  await run('N1-l the directory NARROWS the pull-target scan too when it is asked about one project', async () => {
+    // 项目备料页 reaches `listOperatorProjectDirectory` with a projectNo; the narrowing has to reach
+    // the pull target as well as the archive, or a single-project caller pays the whole-sheet scan.
+    const filters = []
+    const recordsApi = {
+      async queryRecords(input) {
+        if (input.sheetId === MAIN_SHEET_A) filters.push(input.filters)
+        return []
+      },
+    }
+    const result = await listOperatorProjectDirectory({
+      recordsApi,
+      provisioning: breakingScanProvisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      projectNo: PROJECT_A_NO,
+      boundTarget: BOUND_TARGET_A,
+    })
+    assert.equal(result.pullTargetReady, true)
+    assert.deepEqual(filters, [{ [MAIN_FIELD_ID_MAP.projectNo]: PROJECT_A_NO }],
+      'ONE narrowed page, not a walk of the whole sheet')
+  })
+
+  // -------------------------------------------------------------------------
+  // N1-m/N1-n — THE COST OF THE LANDING PAGE IS PER WINDOW, NOT PER CLICK
+  // -------------------------------------------------------------------------
+  //
+  // The union scan reads the whole bound sheet, of every column, with no DISTINCT and no projection,
+  // and the records port pages by OFFSET (so a full pass is quadratic in pages). This route is the
+  // operator's LANDING PAGE and carries a refresh button that any holder of the operate grant can
+  // replay. Without a window, holding it down is one full-table scan per click.
+  //
+  // WHAT THIS DOES NOT DO: it does not make the scan cheap, and it does not raise the 50,000-row
+  // ceiling. Both are in the PR body as owner decisions.
+
+  await run('N1-m a refresh inside the window re-reads NOTHING, and answers the same thing', async () => {
+    const { routes, queryLog } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }, { projectNo: PROJECT_A4_NO }] })
+    const scanQueries = () => queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length
+    const first = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(first.statusCode, 200)
+    const afterFirst = scanQueries()
+    assert.ok(afterFirst > 0, 'the first read really did scan the bound sheet')
+    const second = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(second.statusCode, 200)
+    assert.equal(scanQueries(), afterFirst, 'the second read paid nothing')
+    assert.deepEqual(
+      second.body.data.projects.map((project) => project.projectNo),
+      first.body.data.projects.map((project) => project.projectNo),
+      'and it is the same answer, not a degraded one',
+    )
+    assert.equal(second.body.data.pullTargetReady, true)
+  })
+
+  await run('N1-n a WARM window is still not a way past the tenant gate', async () => {
+    // The gate runs in the CALLER's own request, before the window is ever consulted, and the window
+    // is keyed by the sheet id that gate proved. So tenant A's freshly-cached scan of tenant A's
+    // sheet is not reachable by tenant B, who is handed the same deploy-time target.
+    const { routes, queryLog } = mount({
+      mainTableRows: [{ projectNo: PROJECT_A3_NO }, { projectNo: `NO-${SECRET_B}-PULL` }],
+    })
+    assert.equal((await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })).statusCode, 200)
+    const afterWarming = queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length
+    assert.ok(afterWarming > 0)
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_B })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.tenantId, TENANT_B)
+    assert.equal(res.body.data.pullTargetReady, false, 'tenant B never proved ownership, so nothing was read for them')
+    assert.equal(JSON.stringify(res.body).includes(PROJECT_A3_NO), false,
+      'and not one project number out of tenant A\'s window crosses')
+  })
+
+  await run('N1-o a FAILED scan is never held: one blip is not a window of blips', async () => {
+    let clock = 1_000
+    const cache = createPullTargetScanCache({ ttlMs: 5_000, now: () => clock })
+    let runs = 0
+    const failing = async () => { runs += 1; return { ready: false, failed: true } }
+    const succeeding = async () => { runs += 1; return { ready: true, failed: false } }
+
+    await cache.resolve('k', failing)
+    await cache.resolve('k', failing)
+    assert.equal(runs, 2, 'a broken read is retried immediately rather than served for the whole window')
+
+    await cache.resolve('k', succeeding)
+    await cache.resolve('k', succeeding)
+    assert.equal(runs, 3, 'a good read IS held')
+    clock += 5_001
+    await cache.resolve('k', succeeding)
+    assert.equal(runs, 4, 'and released when the window closes')
+  })
+
+  await run('N1-p the window is BOUNDED — a deployment cannot grow one entry per sheet forever', async () => {
+    let clock = 1_000
+    const cache = createPullTargetScanCache({ ttlMs: 60_000, maxEntries: 4, now: () => clock })
+    for (let index = 0; index < 40; index += 1) {
+      await cache.resolve(`sheet-${index}`, async () => ({ ready: true, failed: false }))
+    }
+    assert.ok(cache.size() <= 4, `at most maxEntries are held, saw ${cache.size()}`)
+  })
+
+  await run('N1-q the landing page still OPENS when the source-binding table is unreachable', async () => {
+    // `getTableAction` resolves the persisted source binding on the way out, and the registry lets a
+    // throw from that store PROPAGATE on purpose. Every other failure path in this feature degrades;
+    // this one used to 500 the one page the whole operator tier starts from — over a table the route
+    // can simply report as unbound. A half-migrated upgrade is the realistic way to reach it.
+    const { routes } = mount({
+      mainTableRows: [{ projectNo: PROJECT_A3_NO }],
+      sourceBindingGet: async () => { throw new Error('relation "stock_preparation_source_binding" does not exist') },
+    })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200, `the landing page must open, got ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.data.pullTargetReady, false, 'reported as unbound, which is what it is from here')
+    assert.equal(res.body.data.directoryReady, true, 'and the archive half still answers')
+    assert.equal(res.body.data.projectCount, 2, 'the two archived projects are still findable')
   })
 
   // -------------------------------------------------------------------------

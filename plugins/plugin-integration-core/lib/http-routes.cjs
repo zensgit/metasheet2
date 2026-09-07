@@ -619,6 +619,9 @@ const {
   StockPreparationOperatorDirectoryError,
   listOperatorProjectDirectory,
 } = require('./stock-preparation-operator-project-directory.cjs')
+// The directory's union scan reads the WHOLE bound sheet. This is what stops an operator landing
+// page — with a refresh button on it — from paying that scan once per click. See the factory's note.
+const { createPullTargetScanCache } = require('./stock-preparation-pull-target-scan.cjs')
 // 项目备料页 — ONE project's board. The fourth value-bearing stock-prep read; it rides the SAME
 // operator value scope as the directory above and returns a frozen key set (numbers, names, counts,
 // timestamps, handles), never a row value. See the module header.
@@ -3484,6 +3487,11 @@ function createHandlers(services, options = {}) {
   // it — an unaudited confirm/generation/resolve is refused, not silently allowed. System-sync
   // persists instead carry their immutable run record inside the same unit of work.
   const stockPreparationAudit = services.stockPreparationAuditStore || null
+  // ONE PER REGISTRATION — not per request, and not module-global. In production `createHandlers`
+  // runs once, so this is one small bounded memo for the process; in the suites it runs per mount,
+  // so no test can be answered out of another test's window. It holds pull-target SCAN RESULTS keyed
+  // by an already-proved-own sheet id; the module that owns it explains why that is safe.
+  const pullTargetScanCache = createPullTargetScanCache()
   // NO ROUTE FORWARDS A CALLER'S RAW `?workspaceId` INTO THE AUDIT TRAIL.
 //
 // `workspace_id` is a plain nullable TEXT column on that table, and the store cannot shape-gate it
@@ -8423,10 +8431,20 @@ function requireStockPreparationAudit() {
       // project ledger, which `mvp-persist` writes and `mvp-persist` is platform-admin: a project a
       // floor operator pulled themselves was never in this response at all.
       //
-      // An UNCONFIGURED or unknown action is a deployment state the page renders as 「表还没建好」,
-      // not a failure of the directory, so those two refusals become "no bound target" and the
-      // response comes back with `pullTargetReady: false`; anything else is a real fault and
-      // propagates. Same treatment, same two codes, as 项目备料页 — see that route's own note.
+      // AN UNREADABLE ACTION IS A DEPLOYMENT STATE, NOT A FAILURE OF THE DIRECTORY, so ANY refusal
+      // from the registry becomes "no bound target": the response comes back with
+      // `pullTargetReady: false`, the page renders 「表还没建好」, and the archive half of the union
+      // still answers.
+      //
+      // WHY ANY, AND NOT THE TWO NAMED CODES 项目备料页 CATCHES. This lookup is not just a config
+      // read — `getTableAction` resolves the PERSISTED source binding on the way out, and the
+      // registry deliberately lets that store's exceptions PROPAGATE (see the note at the registry's
+      // own construction), so `TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED`, a normalize refusal, or a
+      // plain "relation does not exist" on a half-migrated upgrade all reach here. Every one of them
+      // would have turned the operator's LANDING PAGE into a 500 over a table this route can simply
+      // report as unbound — while every other failure path in this feature degrades. 项目备料页 keeps
+      // the narrow catch because it is a single-project page a reader arrives at deliberately; the
+      // landing page is where the whole tier starts, and it must open.
       let boundTarget = null
       try {
         const boundAction = await tableActions.getTableAction({
@@ -8434,9 +8452,8 @@ function requireStockPreparationAudit() {
           actionId: PLM_STOCK_PREPARATION_ACTION_ID,
         })
         boundTarget = boundAction && boundAction.target ? boundAction.target : null
-      } catch (error) {
-        const code = error && error.code ? String(error.code) : ''
-        if (code !== 'TABLE_ACTION_NOT_CONFIGURED' && code !== 'TABLE_ACTION_NOT_FOUND') throw error
+      } catch {
+        boundTarget = null
       }
       const result = await listOperatorProjectDirectory({
         recordsApi: getMultitableRecordsApi(),
@@ -8446,6 +8463,11 @@ function requireStockPreparationAudit() {
         targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         scope,
         boundTarget,
+        // ONE FULL-SHEET SCAN PER WINDOW, NOT PER CLICK. This route is the operator's landing page
+        // and its refresh button is replayable by anyone holding the operate grant, so the union
+        // scan is memoized for a few seconds per proved-own sheet — concurrent refreshes share one
+        // in-flight scan instead of starting one each.
+        pullTargetScanCache,
         // For `lastExportAt` only, and read through ONE bounded descending window rather than one
         // query per project — see `lastExportAtByProjectNo`. This route's own audit APPEND below is
         // unrelated and unchanged.

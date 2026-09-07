@@ -75,6 +75,7 @@ const { optionalString } = require('./stock-preparation-common.cjs')
 // directory is a union over. Shared with 项目备料页 rather than restated: one tenant gate, one
 // timestamp parse, one rule about what a truncated scan may claim.
 const {
+  SCAN_WHOLE_SHEET,
   resolveOwnBoundSheet,
   scanPullTargetProjects,
 } = require('./stock-preparation-pull-target-scan.cjs')
@@ -303,14 +304,31 @@ async function pendingDecisionCountsByProjectNo(recordsApi, provisioning, target
  * The union scan reads the WHOLE bound sheet, in pages of `PULL_TARGET_PAGE_LIMIT`, up to
  * `PULL_TARGET_MAX_PAGES` — the export's own bound, shared so the two cannot drift. There is no
  * DISTINCT and no column projection on the records port, so "which project numbers are in this
- * sheet" genuinely costs one full pass; the caller decides whether to pay it by passing (or not
- * passing) `boundTarget`.
+ * sheet" genuinely costs one full pass, of every column, discarded; the caller decides whether to
+ * pay it by passing (or not passing) `boundTarget`.
+ *
+ * AND THE PASS IS QUADRATIC, NOT LINEAR, WHICH IS THE PART THAT IS EASY TO UNDER-BUDGET. The records
+ * port pages by LIMIT/OFFSET (`query-service.ts`), so page P skips P·500 rows server-side and a
+ * full P-page pass touches about P²·500/2 rows: ~40 rows·10⁴ at 20,000 rows, ~2.5 rows·10⁶ at the
+ * 50,000-row bound. A keyset variant exists in the host (`queryRecordsWithCursor`) but is NOT on the
+ * plugin records API, so making this linear is a host-contract change and is not this change.
+ * `createPullTargetScanCache` is what keeps a landing page with a refresh button from paying it per
+ * click; the remaining per-window cost is real and the PR body carries it to the owner.
  *
  * PAST THE BOUND, THE ANSWER IS A SUBSET AND THE RESPONSE SAYS SO. `directoryMayBeIncomplete` is
- * true when the scan hit the page bound, when the merge hit `MAX_LIST_ROWS`, or when the scan failed
- * midway. A directory that silently returned the first 50,000 rows' worth of project numbers would
+ * true when the scan hit the page bound, when the scan broke mid-flight (whatever it had already
+ * read is discarded, so the pull target contributes nothing), or when the merge hit `MAX_LIST_ROWS`.
+ * A directory that silently returned the first 50,000 rows' worth of project numbers would
  * be telling an operator their project does not exist, which is the one answer a "find my project"
  * surface must never give by accident.
+ *
+ * THE FLAG GOES PERMANENTLY TRUE ONCE THE SHEET PASSES THE BOUND, and that is a known, DECLARED
+ * limit rather than a designed steady state: past 50,000 rows every row's `lastChangedFromPlmAt`
+ * reads null/unknown and 「可能不全」 never clears, which is the same permanently-true flag this
+ * module argues against for `pullTargetReady`. 备料主表 accumulates a row per BOM line, so a
+ * deployment reaches it; the escape hatches (an opt-in query parameter for the union, or a
+ * projectNo-keyed read on the host) are written up in the PR body for the owner to pick. Nothing
+ * here silently degrades — that is the whole point of the flag — but nothing here fixes it either.
  *
  * @param {object} params.scope  a scope resolved by `stock-preparation-operator-scope.cjs`. REQUIRED:
  *                               this module will not project a value without one, so it cannot be
@@ -332,6 +350,11 @@ async function pendingDecisionCountsByProjectNo(recordsApi, provisioning, target
  * @param {object} [params.audit]  the audit store, for the values-free last-export lookup. Absent
  *                               means "do not look": `lastExportAt` is null on every row and
  *                               `lastExportAtMayBeIncomplete` is true, because nobody looked.
+ * @param {object} [params.pullTargetScanCache]  a `createPullTargetScanCache()`, so a landing page
+ *                               whose refresh button an operator can hold down pays one scan per
+ *                               window rather than one per click. Absent = every call scans. The
+ *                               cache is keyed by the sheet id the caller was JUST PROVED to own,
+ *                               so it can only ever return a caller their own sheet.
  *
  * The whole tenant's directory is returned (bounded at MAX_LIST_ROWS), not only the projects with
  * pending work: an operator who typed a number that yields nothing has to be able to tell "that
@@ -365,6 +388,7 @@ async function listOperatorProjectDirectory({
   includePendingCounts = false,
   boundTarget = null,
   audit = null,
+  pullTargetScanCache = null,
 } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationOperatorDirectoryError(500, 'OPERATOR_DIRECTORY_SCOPE_REQUIRED', 'operator project directory requires a resolved operator value scope')
@@ -399,7 +423,17 @@ async function listOperatorProjectDirectory({
   // from the caller's tenant, and a caller who is not the proved owner reads nothing here at all.
   // With no `boundTarget` the gate short-circuits to null and the scan never runs.
   const ownSheet = boundTarget ? await resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget) : null
-  const pullScan = await scanPullTargetProjects(recordsApi, ownSheet, boundTarget, narrowTo)
+  // WHICH READ, SAID IN AS MANY WORDS. A caller about ONE project narrows the pull-target scan the
+  // same way it narrows the archive query; the directory's own route never narrows and asks for the
+  // whole sheet by name. The sentinel is what keeps a lost `projectNo` from silently becoming the
+  // second read — see `SCAN_WHOLE_SHEET`.
+  const pullScan = await scanPullTargetProjects(
+    recordsApi,
+    ownSheet,
+    boundTarget,
+    narrowTo === null ? SCAN_WHOLE_SHEET : narrowTo,
+    { cache: pullTargetScanCache },
+  )
   const exportTimes = await lastExportAtByProjectNo(audit, { tenantId: scope.tenantId })
 
   /**
@@ -531,15 +565,30 @@ async function listOperatorProjectDirectory({
     ledgerReady: pending.ready,
     // WAS THE OPERATOR'S OWN STORE READABLE AT ALL. False when no target is bound, when the bound
     // sheet is not provably the caller's own, when the target's explicit field map does not bind the
-    // scope columns, or when the scan threw. It is NOT `directoryMayBeIncomplete`: a deployment with
-    // nothing bound has no pull-target projects to be missing, and a flag that was permanently true
-    // there would train every reader to ignore it.
+    // scope columns, or when the scan broke mid-flight.
+    //
+    // IT IS NOT `directoryMayBeIncomplete`, AND THE TWO TOGETHER ARE WHAT SEPARATE THE CASES. A
+    // deployment with nothing bound has no pull-target projects to be missing, so flagging it
+    // incomplete would flag it forever and train every reader to ignore the flag. A scan that broke
+    // mid-flight is the opposite: pull-target projects really are missing from this answer, so it
+    // sets BOTH — false/true, a pair that no other state produces. That pair is also what a reader of
+    // the audit trail needs, because `{pullTargetReady:false, directoryMayBeIncomplete:false}`
+    // otherwise reads identically for 「什么都没绑」 and 「读挂了」.
+    //
+    // WHAT A FRONT END MAY SAY ON `pullTargetReady:false` IS THEREFORE LIMITED. It is one boolean
+    // over four distinct situations (unbound / not ours / scope columns unbound / the read broke),
+    // so it will not carry a sentence about deployment configuration — 「自助拉取的项目暂时读不到」
+    // is true in all four; 「外接源还没绑好」 is a confident falsehood in the fourth. Splitting it
+    // into a closed enum is a new top-level key and therefore a new S-02a contract review; it is
+    // named in the PR body as the follow-up rather than smuggled in here.
     pullTargetReady: pullScan.ready,
     // THE ANTI-SILENT-TRUNCATION FLAG (设计稿 N1). True when the union may be missing project
-    // numbers: the pull-target scan hit `PULL_TARGET_MAX_PAGES`, or the merge hit `MAX_LIST_ROWS`.
+    // numbers, in all THREE ways that can happen: the pull-target scan hit `PULL_TARGET_MAX_PAGES`,
+    // the scan broke mid-flight (`failed` — the pages already read are discarded, so the pull
+    // target's whole contribution is gone), or the merge hit `MAX_LIST_ROWS`.
     // A "find my project" surface that quietly returns a prefix tells an operator their project does
     // not exist; this is the flag that lets the page say 「可能不全」 instead.
-    directoryMayBeIncomplete: pullScan.bounded === true || mergeTruncated,
+    directoryMayBeIncomplete: pullScan.bounded === true || pullScan.failed === true || mergeTruncated,
     // The same honesty for the export column: a null `lastExportAt` means 「从未导出」 only when this
     // is false. True when no audit store was passed, when its `list` threw, or when the single
     // descending window it serves came back full.

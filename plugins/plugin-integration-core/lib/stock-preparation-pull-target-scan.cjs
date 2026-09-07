@@ -40,6 +40,22 @@
 // A caller who is not the owner never reads that sheet at all. This module adds no new way to name a
 // sheet and takes no tenant id of its own: it is handed an already-proved `ownSheet` or it reads
 // nothing.
+//
+// WHAT THIS DOES NOT CLAIM — carried over VERBATIM IN SUBSTANCE from the board's own header, because
+// the correction it records was written to retract an overclaim and moving the code must not lose it.
+// `plm_stock_preparation_main` has NO tenant column; the only row-level scope inside it is
+// `projectNo`. So this does not claim that a deployment which points SEVERAL tenants at ONE shared
+// target keeps their rows apart: it cannot, and the export route has the same property for the same
+// reason. On such a deployment the owning tenant reads the whole sheet — which is what "owning"
+// means here.
+//
+// AND THE UNNARROWED SCAN WIDENS WHAT THAT COSTS, so it is said out loud rather than left implied.
+// The board's narrowed read let the owner CONFIRM a project number they already had. The directory's
+// unnarrowed scan ENUMERATES every distinct project number in that sheet — including, on a shared
+// target, the numbers another tenant's `apply` wrote. It is the same sheet, the same owner and the
+// same gate: what changes is that the owner no longer has to guess a number to see it. Single-target
+// deployments (222 today) are unaffected; a multi-tenant shared target needs the per-tenant target
+// the board's header already names as the real fix, and it is not this change either.
 
 const { optionalString } = require('./stock-preparation-common.cjs')
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
@@ -63,6 +79,91 @@ const PULL_TARGET_NOT_READY = Object.freeze({
   lastChangedFromPlmAt: null,
   lastChangedFromPlmBounded: false,
 })
+
+/**
+ * "SCAN THE WHOLE SHEET" — SAID IN AS MANY WORDS, never inferred from a falsy value.
+ *
+ * The narrowing argument decides between two RADICALLY different reads: one project's rows, or every
+ * row in the bound sheet. The first cut let `null`/`''`/a non-string mean the second, which is a
+ * fail-OPEN default in a scan whose whole job is scoping: a caller that lost its project number
+ * mid-flight would silently widen to the whole table and then attribute the WHOLE table's row count
+ * and max timestamp to the one project it thought it was asking about. (Before the two reads were
+ * merged, that same input produced `filters: { <projectNo field>: <falsy> }` — a filter that matches
+ * nothing. Fail-closed by accident, but fail-closed.)
+ *
+ * So the whole-sheet read now has a NAME, and anything that is neither this sentinel nor a non-empty
+ * string reads NOTHING (`ready: false`) instead of guessing which of the two the caller meant.
+ */
+const SCAN_WHOLE_SHEET = Symbol('stock-preparation.scanPullTargetProjects.SCAN_WHOLE_SHEET')
+
+/**
+ * HOW LONG ONE UNNARROWED SCAN MAY BE REUSED, and how many distinct scans may be held at once.
+ *
+ * The unnarrowed scan is the expensive read on this module (see `scanPullTargetProjects`), it is on
+ * an operator's LANDING PAGE, and the page has a refresh button — so without this, an authenticated
+ * operator holding down refresh is a full-table scan per click, serially paged, on a single-node
+ * deployment. The cache is what makes the cost per WINDOW rather than per CLICK, and it also
+ * coalesces the several-operators-refresh-at-once case, since concurrent callers share one in-flight
+ * promise rather than starting a scan each.
+ *
+ * FIVE SECONDS IS CHOSEN AGAINST ONE SPECIFIC FAILURE: an operator finishes their own pull and goes
+ * looking for the project. A pull that writes hundreds of rows takes far longer than this window, so
+ * the project is in the sheet well before the window a post-pull navigation could land in — and a
+ * second refresh five seconds later is never stale. Set the TTL to 0 to turn the cache off entirely.
+ */
+const PULL_TARGET_SCAN_CACHE_TTL_MS = 5_000
+const PULL_TARGET_SCAN_CACHE_MAX_ENTRIES = 32
+
+/**
+ * A TINY, BOUNDED, PER-REGISTRATION MEMO for `scanPullTargetProjects`.
+ *
+ * WHAT IT MAY HOLD AND WHY THAT IS SAFE. Entries are keyed by the ALREADY-PROVED sheet id (plus the
+ * narrowing and the field bindings the scan ran under). `resolveOwnBoundSheet` runs in the CALLER's
+ * request, before this is ever consulted, so a caller who cannot prove ownership of a sheet never
+ * reaches the key that names it: the cache can only ever hand a reader the sheet they had just been
+ * proved to own. Two tenants that share one target read the same sheet with or without this — see the
+ * header's WHAT THIS DOES NOT CLAIM.
+ *
+ * A FAILED SCAN IS NEVER HELD. Caching a transient read failure would turn one blip into five
+ * seconds of degraded answers for every operator on the deployment, so a result that carries
+ * `failed: true` (and a rejected promise, which today's scan cannot produce) is evicted on
+ * settlement, leaving the next caller to retry immediately.
+ *
+ * It is created per `createHandlers` call — one per plugin registration in production, one per mount
+ * in the suites, so no test ever sees another test's scan.
+ */
+function createPullTargetScanCache({
+  ttlMs = PULL_TARGET_SCAN_CACHE_TTL_MS,
+  maxEntries = PULL_TARGET_SCAN_CACHE_MAX_ENTRIES,
+  now = Date.now,
+} = {}) {
+  const entries = new Map()
+  return {
+    async resolve(key, run) {
+      if (!(ttlMs > 0)) return run()
+      const nowMs = now()
+      const hit = entries.get(key)
+      if (hit && hit.expiresAt > nowMs) return hit.promise
+      for (const [entryKey, entry] of entries) {
+        if (entry.expiresAt <= nowMs) entries.delete(entryKey)
+      }
+      while (entries.size >= maxEntries) {
+        const oldest = entries.keys().next()
+        if (oldest.done) break
+        entries.delete(oldest.value)
+      }
+      const promise = run()
+      entries.set(key, { expiresAt: nowMs + ttlMs, promise })
+      promise.then(
+        (result) => { if (!result || result.failed === true) entries.delete(key) },
+        () => { entries.delete(key) },
+      )
+      return promise
+    },
+    /** For the suites only: how many windows are currently held. */
+    size() { return entries.size },
+  }
+}
 
 /**
  * THE TENANT GATE ON THE BOUND TARGET, factored out because THREE things ride it — the board's fill
@@ -194,16 +295,31 @@ function rowData(row) {
  * THE SCAN. Pages the caller's OWN bound sheet and accumulates, per project number AND in aggregate,
  * the row count, the active row count and the max `lastPlmRefreshAt` seen.
  *
- * @param {string|null} projectNo  when set, the scan is FILTERED to that project (the board's read);
- *                                 when null, the whole sheet is walked and grouped (the directory's).
+ * @param {string|symbol} narrowing  a non-empty project number FILTERS the scan to that project (the
+ *                                 board's read); `SCAN_WHOLE_SHEET` walks and groups the whole sheet
+ *                                 (the directory's). Anything else reads nothing — see the sentinel.
+ * @param {object} [options.cache]  a `createPullTargetScanCache()`, or nothing for an uncached scan.
  *
- * @returns {Promise<{ready:boolean, bounded:boolean, byProjectNo:Map, rowCount:number,
- *                    activeRowCount:number, lastChangedFromPlmAtMs:number|null}>}
+ * @returns {Promise<{ready:boolean, failed:boolean, bounded:boolean, byProjectNo:Map,
+ *                    rowCount:number, activeRowCount:number, lastChangedFromPlmAtMs:number|null}>}
  *
  * IT DEGRADES, NEVER FAILS. A target that is not bound, not the caller's own, not provisioned, does
  * not bind the two scope columns, or whose query throws yields `ready:false` and the page says the
  * table is not ready — the same posture the fill handle already takes. A status bar (or a home page)
  * that 500s because a deployment has not finished configuring itself is a worse one.
+ *
+ * `failed` SEPARATES THE FOUR WAYS OF NOT BEING READY INTO THE TWO THAT MATTER TO A READER, and it
+ * exists because collapsing them produced a response that contradicted itself. It is true ONLY for a
+ * scan that started and then broke mid-flight — a page that came back as a non-array, or a query
+ * that threw — and false for every state where nothing was read in the first place: no target bound,
+ * the target not provably the caller's own, an explicit field map that binds no scope column.
+ *
+ * The distinction is load-bearing rather than decorative. On a mid-flight break the project numbers
+ * found on the pages already read are DISCARDED (a partial group would understate row counts and
+ * could hand back a max timestamp computed over an arbitrary prefix), so the caller's union really is
+ * missing pull-target projects and must say so. Nothing-was-read is the opposite case: a deployment
+ * with no target bound has no pull-target projects to be missing, and a caller that flagged it as
+ * incomplete would be permanently flagged — which trains every reader to ignore the flag.
  *
  * `bounded` IS THE HONESTY FLAG AND IT IS LOAD-BEARING. Past `PULL_TARGET_MAX_PAGES` the counts are
  * a floor rather than a total, the set of project numbers is a SUBSET rather than the distinct set,
@@ -213,22 +329,40 @@ function rowData(row) {
  * understate freshness; that is the "cron ran fine, the page just says it looks stale" failure this
  * whole flag exists to head off.
  */
-async function scanPullTargetProjects(recordsApi, ownSheet, boundTarget, projectNo = null) {
-  const notReady = {
+function notScanned(failed) {
+  return {
     ready: false,
+    failed,
     bounded: false,
     byProjectNo: new Map(),
     rowCount: 0,
     activeRowCount: 0,
     lastChangedFromPlmAtMs: null,
   }
-  if (!ownSheet) return notReady
-  if (!recordsApi || typeof recordsApi.queryRecords !== 'function') return notReady
+}
+
+async function scanPullTargetProjects(recordsApi, ownSheet, boundTarget, narrowing, options = {}) {
+  if (!ownSheet) return notScanned(false)
+  if (!recordsApi || typeof recordsApi.queryRecords !== 'function') return notScanned(false)
 
   const bindings = resolvePullTargetBindings(boundTarget)
-  if (!bindings) return notReady
+  if (!bindings) return notScanned(false)
 
-  const narrowTo = optionalString(projectNo)
+  // THE TWO READS, NAMED. `SCAN_WHOLE_SHEET` is the directory's; a non-empty string is the board's.
+  // A caller that supplies neither has not said which read it wants, and guessing is how a lost
+  // project number turns into a whole-table scan reported as one project's numbers.
+  const narrowTo = narrowing === SCAN_WHOLE_SHEET ? null : optionalString(narrowing)
+  if (narrowing !== SCAN_WHOLE_SHEET && narrowTo === null) return notScanned(false)
+
+  const cache = options && options.cache
+  const run = () => runPullTargetScan(recordsApi, ownSheet, bindings, narrowTo)
+  if (!cache || typeof cache.resolve !== 'function') return run()
+  // The key is the (proved-own) sheet, the read, and the bindings it was read through — a rebound
+  // target is a different read and must not be answered from the old one's window.
+  return cache.resolve(JSON.stringify([ownSheet.sheetId, narrowTo, bindings]), run)
+}
+
+async function runPullTargetScan(recordsApi, ownSheet, bindings, narrowTo) {
   const byProjectNo = new Map()
   let rowCount = 0
   let activeRowCount = 0
@@ -246,7 +380,9 @@ async function scanPullTargetProjects(recordsApi, ownSheet, boundTarget, project
         limit: PULL_TARGET_PAGE_LIMIT,
         offset: page * PULL_TARGET_PAGE_LIMIT,
       })
-      if (!Array.isArray(pageRows)) return notReady
+      // A MID-FLIGHT BREAK, both here and in the catch below: `failed: true`, and everything found so
+      // far is dropped rather than returned as if it were the whole answer.
+      if (!Array.isArray(pageRows)) return notScanned(true)
       for (const row of pageRows) {
         const data = rowData(row)
         rowCount += 1
@@ -281,10 +417,10 @@ async function scanPullTargetProjects(recordsApi, ownSheet, boundTarget, project
       }
     }
   } catch {
-    return notReady
+    return notScanned(true)
   }
 
-  return { ready: true, bounded, byProjectNo, rowCount, activeRowCount, lastChangedFromPlmAtMs }
+  return { ready: true, failed: false, bounded, byProjectNo, rowCount, activeRowCount, lastChangedFromPlmAtMs }
 }
 
 /**
@@ -299,6 +435,12 @@ async function scanPullTargetProjects(recordsApi, ownSheet, boundTarget, project
  *
  * The bounded case reports `lastChangedFromPlmAt: null` — an honest "cannot say" — and
  * `lastChangedFromPlmBounded: true` is the flag a caller reads instead. See `scanPullTargetProjects`.
+ *
+ * `projectNo` IS REQUIRED AND IS NEVER A WHOLE-SHEET READ. This projection is about ONE project, so
+ * an empty or non-string number is a caller bug, and the scan's sentinel rule turns it into "not
+ * ready" rather than into the whole sheet's counts reported under one project's name. 项目备料页
+ * validates the number well before this (`STOCK_PREPARATION_PROJECT_BOARD_REQUEST_INVALID`), so the
+ * board reaches this with a real number on every live path and its behaviour is unchanged.
  */
 async function readPullTargetRowFacts(recordsApi, ownSheet, boundTarget, projectNo) {
   const scan = await scanPullTargetProjects(recordsApi, ownSheet, boundTarget, projectNo)
@@ -319,7 +461,11 @@ module.exports = {
   PULL_TARGET_MAX_PAGES,
   PULL_TARGET_NOT_READY,
   PULL_TARGET_PAGE_LIMIT,
+  PULL_TARGET_SCAN_CACHE_MAX_ENTRIES,
+  PULL_TARGET_SCAN_CACHE_TTL_MS,
+  SCAN_WHOLE_SHEET,
   STOCK_PREPARATION_FILL_OBJECT_ID,
+  createPullTargetScanCache,
   parsePlmRefreshTimestampMs,
   readPullTargetRowFacts,
   resolveOwnBoundSheet,
