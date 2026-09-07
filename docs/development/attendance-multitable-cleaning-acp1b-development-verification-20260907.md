@@ -4,6 +4,43 @@ Status: IN PROGRESS / DRAFT-HOLD. This report is not completion or release evide
 
 ## Post-publication CI correction (current, 2026-09-08)
 
+### Confirmed root cause and minimal correction
+
+Linux diagnostic run 34149928769 / job 101829878985 reports PG16.15 Debian,
+x64, UTF8, en_US.utf8, libc provider. Its only changed top-level field is
+`constraints`; fingerprint is
+43493252a4aabeea29c45e64717836bf1279fcbf5b5cdc7e3830387da209c3c8.
+Exact structured comparison proves the complete constraint-row multiset is
+byte-identical to the native reference and every other shape field is identical.
+Linux sorts the canonical digest CHECK before the extra-parenthesized org/record
+CHECKs; native C order puts those checks first. This is collection ordering,
+not a missing constraint or a version-wide schema change.
+
+The fix sorts only complete constraint rows by JSON bytes using codepoint `<`/`>`.
+It does not use localeCompare, deduplicate, lowercase, strip punctuation, sort
+constraint-internal columns, or change any other shape field. The expected pin
+6f02326815187f905ff1b7429a2b8442e0c6090ed28fc68dd6397b8fa57cfd3e remains unchanged.
+Real-DB observer tests replay both the exact Linux permutation and reverse order:
+pre-fix 2 RED, fixed GREEN; comparator-zero mutation returns both to RED, restored.
+A genuinely weakened calculation-version CHECK is still rejected; nullable/default,
+canonical uniqueness, deferred FK and disabled trigger drift remain rejected.
+Node18/20 each pass the expanded authority/registry/HTTP scope, **78/78**.
+Backend tsc and complete wiring **262/262** pass after correction.
+
+The one-off diagnostic workflow step and tracked script are removed after capture;
+original migration/guard execution is restored. Logs remain local evidence.
+PG15 full fresh migration passes. PG16 full-chain verification initially stopped
+before ACP because the task-built runtime lacked pgcrypto; adding OpenSSL without
+cleaning old objects then failed with duplicate libpq symbols. These are retained
+runtime-build failures, not product assertion failures. The clean private rebuild
+completed; the next full-chain attempt also identified missing btree_gist, which
+was built from the same official source into the same private prefix. A new clean
+PG16 database then passes the entire migration chain and replay. PG16 also passes
+the full authority/registry/HTTP scope **78/78**, including all 30 dedicated
+authority/migration tests. PG15 fresh migration plus replay and Node18/20 full
+scope remain green. Runtime/source/build/data remain below the 2GiB budget (446MiB
+at this point). PG14/17 are not tested and no all-version portability claim is made.
+
 CI correction checkpoint: 26581ee555cd6eb77ec2f49027d2eeb8c9ad322e.
 The original published 8fa head reached terminal 20 SUCCESS / 2 SKIPPED /
 5 FAILURE (27 checks). A separately approved diagnostic step now runs before
@@ -613,3 +650,7 @@ untouched. Main still read back as 976711b254d129e6c23bf8327c4be67018942ba3.
 18. `apps/web/tests/AttendanceReportFieldsSection.spec.ts`
 19. `.github/workflows/attendance-web-guard.yml`
 20. `apps/web/scripts/run-required-web-tests.sh`
+21. `.github/workflows/plugin-tests.yml`
+22. `packages/core-backend/vitest.config.ts`
+23. `scripts/ops/attendance-w4c2-ci-wiring.test.mjs`
+24. `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`

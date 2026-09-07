@@ -608,6 +608,25 @@ suite('ACP projection authority real database', () => {
     await up(db)
   })
 
+  it.each(['linux-en-US', 'reverse'])('accepts identical constraint sets ordered as %s', async order => {
+    let observed = false
+    const reordered = db.withPlugin({
+      transformQuery: ({ node }) => node,
+      transformResult: async ({ result }) => {
+        const shape = result.rows[0]?.shape as Record<string, unknown> | undefined
+        if (!shape || !Array.isArray(shape.constraints)) return result
+        observed = true
+        const constraints = shape.constraints
+        const reorderedConstraints = order === 'linux-en-US'
+          ? [constraints[2], constraints[0], constraints[1], ...constraints.slice(3)]
+          : [...constraints].reverse()
+        return { ...result, rows: [{ ...result.rows[0], shape: { ...shape, constraints: reorderedConstraints } }] }
+      },
+    })
+    await expect(up(reordered)).resolves.toBeUndefined()
+    expect(observed).toBe(true)
+  })
+
   it('rejects a replay with missing canonical uniqueness instead of accepting drift', async () => {
     await pool.query('ALTER TABLE attendance_report_projection_anchors DROP CONSTRAINT uq_attendance_report_projection_anchor_canonical')
     try {
@@ -617,10 +636,32 @@ suite('ACP projection authority real database', () => {
     }
   })
 
+  it('still rejects a genuinely weakened CHECK after constraint ordering normalization', async () => {
+    const constraint = await pool.query<{ name: string; definition: string }>(`
+      SELECT conname AS name, pg_get_constraintdef(oid, false) AS definition
+      FROM pg_constraint WHERE conrelid = 'attendance_report_projection_anchors'::regclass
+        AND contype = 'c' AND pg_get_constraintdef(oid, false) LIKE '%source_calculation_version%'`)
+    expect(constraint.rows).toHaveLength(1)
+    const { name, definition } = constraint.rows[0]
+    const identifier = '"' + name.replaceAll('"', '""') + '"'
+    await pool.query(`ALTER TABLE attendance_report_projection_anchors DROP CONSTRAINT ${identifier}`)
+    await pool.query(`ALTER TABLE attendance_report_projection_anchors ADD CONSTRAINT ${identifier} CHECK (source_calculation_version >= 0)`)
+    try {
+      await expect(up(db)).rejects.toThrow('ATTENDANCE_CLEANING_ANCHOR_SCHEMA_DRIFT')
+    } finally {
+      await pool.query(`ALTER TABLE attendance_report_projection_anchors DROP CONSTRAINT ${identifier}`)
+      await pool.query(`ALTER TABLE attendance_report_projection_anchors ADD CONSTRAINT ${identifier} ${definition}`)
+    }
+    await up(db)
+  })
+
   it.each([
     ['nullable calculation revision',
       'ALTER TABLE attendance_report_projection_anchors ALTER COLUMN source_calculation_version DROP NOT NULL',
       'ALTER TABLE attendance_report_projection_anchors ALTER COLUMN source_calculation_version SET NOT NULL'],
+    ['deferred canonical foreign key',
+      'ALTER TABLE attendance_report_projection_anchors ALTER CONSTRAINT fk_attendance_report_projection_anchor_record DEFERRABLE INITIALLY DEFERRED',
+      'ALTER TABLE attendance_report_projection_anchors ALTER CONSTRAINT fk_attendance_report_projection_anchor_record NOT DEFERRABLE INITIALLY IMMEDIATE'],
     ['changed timestamp default',
       "ALTER TABLE attendance_report_projection_anchors ALTER COLUMN created_at SET DEFAULT '2020-01-01'::timestamptz",
       'ALTER TABLE attendance_report_projection_anchors ALTER COLUMN created_at SET DEFAULT now()'],

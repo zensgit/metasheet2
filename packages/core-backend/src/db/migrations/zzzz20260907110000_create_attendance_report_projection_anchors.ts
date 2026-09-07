@@ -7,7 +7,7 @@ const IMMUTABLE_GUARD = 'attendance_report_projection_anchor_identity_guard'
 
 // Pin semantic catalog data rather than database-local OIDs or object names.
 async function schemaFingerprint(db: Kysely<unknown>): Promise<string> {
-  const result = await sql<{ shape: unknown }>`
+  const result = await sql<{ shape: Record<string, unknown> }>`
     SELECT jsonb_build_object(
       'relation', (SELECT jsonb_build_array(relkind, relpersistence, relrowsecurity, relforcerowsecurity)
         FROM pg_class WHERE oid = to_regclass(${TABLE})),
@@ -45,7 +45,17 @@ async function schemaFingerprint(db: Kysely<unknown>): Promise<string> {
         WHERE t.tgrelid = to_regclass(${TABLE}) AND NOT t.tgisinternal)
     ) AS shape
   `.execute(db)
-  return createHash('sha256').update(JSON.stringify(result.rows[0]?.shape)).digest('hex')
+  const shape = result.rows[0]?.shape
+  // Constraint rows form a set; database-locale ordering is not schema semantics.
+  // Compare complete bytes, never normalize literals or internal column ordering.
+  if (Array.isArray(shape?.constraints)) {
+    shape.constraints = [...shape.constraints].sort((left, right) => {
+      const a = JSON.stringify(left)
+      const b = JSON.stringify(right)
+      return a < b ? -1 : a > b ? 1 : 0
+    })
+  }
+  return createHash('sha256').update(JSON.stringify(shape)).digest('hex')
 }
 
 async function assertSchema(db: Kysely<unknown>): Promise<void> {
