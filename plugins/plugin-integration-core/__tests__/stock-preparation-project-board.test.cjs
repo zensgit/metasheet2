@@ -1448,6 +1448,54 @@ async function theBoardRefusesBeforeItsAuditActionCanBeStored() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// B-14 — THE BOARD IS ABOUT ONE PROJECT, AND THE SHEET HOLDS MANY
+// ---------------------------------------------------------------------------
+//
+// Every pull-target number on this page — pulledRowCount, activePulledRowCount, lastChangedFromPlmAt
+// — is a number ABOUT ONE PROJECT read out of a sheet that holds every project the deployment ever
+// pulled. The narrowing is what makes them true, and until now the fixture only ever put ONE project
+// number in that sheet, so nothing here could tell a narrowed scan from a whole-table scan: deleting
+// the filter outright left this whole suite green. That is the shape the numbers are wrong in if it
+// ever breaks — every project's rows counted under whichever project the operator happens to open,
+// and a 「上次从 PLM 拉过」 stamp that belongs to somebody else's pull.
+async function oneProjectsNumbersAreReadOutOfASheetThatHoldsMany() {
+  const OTHER_PROJECT_NO = '230920099'
+  const OURS = '2026-09-01T00:00:00.000Z'
+  const THEIRS = '2026-09-05T00:00:00.000Z'
+  const boundTarget = {
+    sheetId: ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID),
+    objectId: MAIN_OBJECT_ID,
+    fieldIdMap: {
+      ...MAIN_FIELD_ID_MAP,
+      lastPlmRefreshAt: physicalFieldId(STAGING_A, MAIN_OBJECT_ID, 'lastPlmRefreshAt'),
+    },
+  }
+  const res = await callBoard(mount({
+    boundTarget,
+    mainTableRows: [
+      { projectNo: PROJECT_A_NO, lastPlmRefreshAt: OURS },
+      { projectNo: PROJECT_A_NO, lastPlmRefreshAt: OURS, active: false },
+      // FOUR rows of somebody else's project, one of them newer than anything of ours, and three of
+      // them active — so an unnarrowed scan is wrong in every one of the three numbers at once.
+      { projectNo: OTHER_PROJECT_NO, lastPlmRefreshAt: THEIRS },
+      { projectNo: OTHER_PROJECT_NO, lastPlmRefreshAt: THEIRS },
+      { projectNo: OTHER_PROJECT_NO, lastPlmRefreshAt: THEIRS },
+      { projectNo: OTHER_PROJECT_NO, lastPlmRefreshAt: THEIRS, active: false },
+    ],
+  }).routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+
+  assert.equal(res.statusCode, 200)
+  const board = res.body.data
+  assert.equal(board.pullTargetReady, true)
+  assert.equal(board.pulledRowCount, 2, 'B-14: OUR two rows — not the six in the sheet')
+  assert.equal(board.activePulledRowCount, 1, 'B-14: and our ONE active row, not the four in the sheet')
+  assert.equal(board.lastChangedFromPlmAt, OURS,
+    'B-14: the stamp is the max over OUR rows; another project\'s newer pull is not our news')
+  assert.equal(JSON.stringify(res.body).includes(OTHER_PROJECT_NO), false,
+    'B-14: and the other project number never appears in a board that is not about it')
+}
+
 async function main() {
   await onlyTheOperatorTierReachesTheBoard()
   await anotherTenantsProjectIsIndistinguishableFromNoProject()
@@ -1463,6 +1511,7 @@ async function main() {
   await anAuditStoreWithoutListStillAnswersTheBoard()
   await theBoardReportsLastChangedFromPlmFromTheBoundLastPlmRefreshColumn()
   await lastChangedFromPlmIsNeverReportedFromATruncatedScan()
+  await oneProjectsNumbersAreReadOutOfASheetThatHoldsMany()
   await theBoardRefusesBeforeItsAuditActionCanBeStored()
   console.log('✓ stock-preparation-project-board')
 }
