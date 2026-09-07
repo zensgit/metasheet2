@@ -596,12 +596,22 @@ function createResponse() {
 async function invoke(routes, method, routePath, req = {}) {
   const route = getRoute(routes, method, routePath)
   const res = createResponse()
+  // W4 (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED) reads `req.authenticatedTenantId` — the host's
+  // VERIFIED token claim, set by jwt-middleware ONLY when the token actually carries a tenant. A
+  // caller here that explicitly names the key (even as `undefined`, meaning "no claim") is honored
+  // verbatim; every other caller gets the middleware's claim-bearing-token default (`user.tenantId`)
+  // so the hundreds of pre-existing invoke() calls in this file keep behaving as a verified caller
+  // without having to spell that out themselves.
+  const authenticatedTenantId = Object.prototype.hasOwnProperty.call(req, 'authenticatedTenantId')
+    ? req.authenticatedTenantId
+    : (req.user && typeof req.user.tenantId === 'string' ? req.user.tenantId : undefined)
   await route.handler({
     user: req.user,
     authUser: req.authUser,
     body: req.body || {},
     query: req.query || {},
     params: req.params || {},
+    authenticatedTenantId,
   }, res)
   assert.notEqual(res.body, undefined, `${method} ${routePath} produced a JSON body`)
   return res
@@ -9273,6 +9283,7 @@ async function main() {
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
   await testExternalSystemTestSavesUnderMatchedScope()
+  await testSqlBindingUpsertRequiresVerifiedTenantClaimWhenFlagOn()
   await testExternalSystemTestRequiresSavedSystem()
   await testExternalSystemTestRedactsAdapterResultSecrets()
   await testDiscoveryRoutes()
@@ -9712,4 +9723,120 @@ async function testExternalSystemTestSavesUnderMatchedScope() {
   assert.equal(rows.find((row) => row.id === 'sys_sql_tw').connection_id, 'connection_1',
     'the canonical SQL binding keeps its connection_id through a status-only update')
   assert.equal(rows.length, 2, 'exactly the two seeded rows remain')
+}
+
+// W4 (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED) applied to the canonical SQL-binding write path:
+// `POST /api/integration/external-systems` with `kind: 'data-source:sql-readonly'` calls
+// `scopedAuthenticatedWriteInput` -> `resolveAuthenticatedWriteTenantId` -> `resolveAuthUserTenantId`,
+// which resolves the tenant from `user.tenantId` and then hands it to `assertVerifiedTenantClaim`.
+// With the flag OFF (default, tested in (d) below) that assertion is a no-op and `user.tenantId` is
+// trusted outright — including a value the jwt-middleware only put there because a claimless-token
+// caller sent an `x-tenant-id` header. With the flag ON (a)-(c) below, a write whose tenant cannot be
+// traced to `req.authenticatedTenantId` (the VERIFIED token claim) is refused before
+// `upsertExternalSystem` is ever called.
+async function testSqlBindingUpsertRequiresVerifiedTenantClaimWhenFlagOn() {
+  const TENANT_CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+
+  /** Run `fn` with the flag in a known state, and leave the environment exactly as it was found. */
+  async function withTenantClaimFlag(value, fn) {
+    const had = Object.prototype.hasOwnProperty.call(process.env, TENANT_CLAIM_FLAG)
+    const previous = process.env[TENANT_CLAIM_FLAG]
+    if (value === null) delete process.env[TENANT_CLAIM_FLAG]
+    else process.env[TENANT_CLAIM_FLAG] = value
+    try {
+      return await fn()
+    } finally {
+      if (had) process.env[TENANT_CLAIM_FLAG] = previous
+      else delete process.env[TENANT_CLAIM_FLAG]
+    }
+  }
+
+  // Same shape as the `canonicalSqlBody` fixture above (already proven to pass `hasPrivateConfigMutation`
+  // and to persist under `integration:write`/`integration:admin`) — no credentials in the body.
+  const SQL_BINDING_BODY = {
+    id: 'sys_sql_tenant_claim_probe',
+    workspaceId: 'workspace_1',
+    name: 'Tenant claim probe SQL source',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    connectionId: 'connection_1',
+    config: { schema: 'dbo' },
+  }
+
+  // (a) Flag ON. `user.tenantId` is header-filled ('attacker-tenant', simulating a claimless token
+  //     whose x-tenant-id header the middleware copied onto the user object) and the request also
+  //     echoes that tenant on the query string. `authenticatedTenantId` is named explicitly as
+  //     `undefined` so `invoke()` passes NO verified claim through, rather than applying its
+  //     claim-bearing-token default. The write must be refused before the registry is ever reached.
+  await withTenantClaimFlag('true', async () => {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: { ...TENANTLESS_ADMIN, tenantId: 'attacker-tenant' },
+      authenticatedTenantId: undefined,
+      query: { tenantId: 'attacker-tenant' },
+      body: SQL_BINDING_BODY,
+    })
+    assertErrorResponse(res, [403])
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_REQUIRED',
+      'a sql-readonly binding write from a claimless caller is refused once the tenant-claim door is on')
+    assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0,
+      'the write never reaches the registry when the tenant claim is missing')
+  })
+
+  // (b) Flag ON. `authenticatedTenantId` is NOT named explicitly, so `invoke()` applies its
+  //     claim-bearing-token default (`user.tenantId`) — modeling a real verified token whose claim
+  //     agrees with the carried tenant. The write proceeds and persists under that tenant.
+  await withTenantClaimFlag('true', async () => {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: { ...ADMIN_USER },
+      body: SQL_BINDING_BODY,
+    })
+    assertOkResponse(res, 201)
+    const saved = findCall(calls, 'upsertExternalSystem')[1]
+    assert.equal(saved.tenantId, 'tenant_1', 'a verified-claim caller authors the binding under its own tenant')
+  })
+
+  // (c) Flag ON. `authenticatedTenantId` ('tenant_2') is named explicitly and disagrees with
+  //     `user.tenantId` ('tenant_1'). Traced against `assertVerifiedTenantClaim`: its SECOND check
+  //     (`carried && carried !== claimed`) fires before the third ("resolved tenant vs. claim") check
+  //     is ever reached, so the ACTUAL refusal is OPERATOR_SCOPE_TENANT_CONTRADICTED, not TENANT_MISMATCH.
+  await withTenantClaimFlag('true', async () => {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: { ...ADMIN_USER },
+      authenticatedTenantId: 'tenant_2',
+      body: SQL_BINDING_BODY,
+    })
+    assertErrorResponse(res, [403])
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+      'a carried tenant that disagrees with the verified claim is refused before any mismatch check runs')
+    assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0,
+      'the write never reaches the registry when the carried tenant contradicts the claim')
+  })
+
+  // (d) Flag OFF (the default). THE SAME claimless + header-echoed request as (a) — but this records
+  //     the CURRENT, deliberately staged pre-cutover posture: with the door shut, `user.tenantId` is
+  //     trusted outright and the write succeeds under the header-filled tenant. This is exactly what
+  //     the flag exists to narrow (see its own comment in http-routes.cjs). If this assertion ever
+  //     needs to change — i.e. the default flips to ON — that must be a DELIBERATE edit to this test,
+  //     not a silent side effect of some other change.
+  await withTenantClaimFlag(null, async () => {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: { ...TENANTLESS_ADMIN, tenantId: 'attacker-tenant' },
+      authenticatedTenantId: undefined,
+      query: { tenantId: 'attacker-tenant' },
+      body: SQL_BINDING_BODY,
+    })
+    assertOkResponse(res, 201)
+    const saved = findCall(calls, 'upsertExternalSystem')[1]
+    assert.equal(saved.tenantId, 'attacker-tenant',
+      'W4 OFF (default staged posture): a header-filled tenant is trusted outright — narrowing this is the flag\'s entire purpose')
+  })
 }
