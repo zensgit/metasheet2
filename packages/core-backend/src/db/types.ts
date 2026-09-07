@@ -1,4 +1,5 @@
 import type { ColumnType, Generated, JSONColumnType } from 'kysely'
+import type { AttendanceProjectionOwnerV1 } from '../attendance/w7-provenance-domain'
 
 /**
  * Timestamp type aliases for Kysely columns
@@ -1072,7 +1073,7 @@ export interface AttendanceRecordsTable {
   is_workday: boolean
   meta: JSONColumnType<Record<string, unknown> | null>
   current_calculation_id: ColumnType<string | null, string | null | undefined, string | null>
-  projection_owner: ColumnType<'legacy_untracked' | 'w4', 'legacy_untracked' | 'w4' | undefined, 'legacy_untracked' | 'w4'>
+  projection_owner: ColumnType<AttendanceProjectionOwnerV1, AttendanceProjectionOwnerV1 | undefined, AttendanceProjectionOwnerV1>
   visibility_state: ColumnType<'active' | 'retired', 'active' | 'retired' | undefined, 'active' | 'retired'>
   visibility_reason: ColumnType<string, string | undefined, string>
   created_at: CreatedAt

@@ -4,6 +4,59 @@ Status: IN PROGRESS / DRAFT-HOLD. This report is not completion or release evide
 
 ## Post-publication CI correction (current, 2026-09-08)
 
+### 4e548 full-backend completeness corrections (local verification complete)
+
+Exact `4e548afffe1832b10224478d60ea772395afc4c3` remote required-web passes
+515 files / 7275 assertions, matching local execution, with no unhandled-error
+summary. Node18 job 101835329648 and Node20 job 101835329901 both fail the same
+three full-backend assertions (863 files / 13002 assertions pass; 175 files /
+1571 assertions skip). These are not flaky reruns: readiness policy completeness,
+provenance widening completeness, and W6 preservation domain completeness.
+
+The bounded correction includes two product declaration changes, not just tests:
+`AttendanceRecordsTable.projection_owner` now reuses the existing canonical
+`AttendanceProjectionOwnerV1` in Select/Insert/Update, preserving insert undefined.
+The previous two-member annotation omitted already-ratified `w4_group`; this
+was a real type omission, not an intentionally narrow projection-anchor domain.
+No ACP parser, SQL, anchor, migration, policy enablement or apply behavior is widened.
+`attendanceMultitableCleaningPolicy` is classified OUT of punch readiness because
+managed cleaning is not one of the four org-inherited punch-method settings.
+The four IN keys, default mirror and SQL comparison remain unchanged.
+
+The authority's current-calculation selector uses the existing widened pointer
+predicate; its exact ledger entry is `widened_predicate`. The DB column entry is
+`closed_set_member_list` with canonical type reuse, never a neutral exemption.
+Both ACP modules are classified calculation_path: authority participates in
+canonical calculation selection/CAS, and the plugin helper initiates the
+controlled cleaning operation. Both W6 module-import and HTTP-consumption bans
+therefore remain applicable; the carve-out list stays empty.
+
+Local pre-fix three whole files reproduce **82 PASS / 3 FAIL**. Corrected three
+whole files pass **87/87**; with the dedicated cleaning/catalog neighbors,
+**132/132 on Node18 and Node20**. Backend `tsc --noEmit` passes. Independent
+physical mutations deleting the OUT entry, restoring the narrow column type,
+and deleting each module's classification all exit 1; all are restored. Removing
+each exact ledger entry in memory exposes unledgered sites. Synthetic W6 module
+and route consumers at both exact ACP paths are rejected by both real ban legs.
+Existing domain tests prove w4_group inclusion and novel-value refusal.
+
+The complete non-DB backend command completed before another push:
+`CI=true NODE_OPTIONS=--max-old-space-size=8192 pnpm --filter @metasheet/core-backend test --maxWorkers=2 --minWorkers=1`
+under Node20. Only worker/heap resource limits differ from the workflow command;
+no test selector or exclusion changed. Terminal exit 0: **866 files / 13007
+assertions PASS**, 175 files / 1571 assertions skipped (1041 files / 14578
+assertions total). The earlier CI had three failed assertions; their correction
+plus the two new controls explains the five additional passes. No local
+PostgreSQL was started. Authoritative main meanwhile advanced to
+`b9cba726295fcfac1a039c297e3dbd6015f684b8` (#5540, eight stock-preparation
+plugin files); this local checkpoint is not pushed on the known stale base.
+The next step is a separately bounded true-merge after exact overlap/pin audit.
+Evidence is retained in `tmp/acp1b-three-guards-prefix-red.log`,
+`tmp/acp1b-classification-node{18,20}-final.log`,
+`tmp/acp1b-classification-tsc.log`, the four `tmp/acp1b-*-mutation-red.log`
+files for this correction, and `tmp/acp1b-classification-full-backend-node20.log`.
+This correction is not yet remote-CI or completion evidence.
+
 ### Current-main replay and exact workflow-shell correction
 
 Main advanced from `976711b254d129e6c23bf8327c4be67018942ba3` to
@@ -750,3 +803,8 @@ untouched. Main still read back as 976711b254d129e6c23bf8327c4be67018942ba3.
 28. `scripts/attendance/w4c0-dml-inventory/current-record-read-classification.cjs`
 29. `scripts/attendance/w4c0-dml-inventory/calculation-read-classification.cjs`
 30. `scripts/ops/attendance-w4c0-dml-inventory-collector.test.mjs`
+31. `packages/core-backend/src/services/AttendanceSetupReadinessAggregate.ts`
+32. `packages/core-backend/tests/unit/attendance-w7-1am-provenance-widening-completeness.test.ts`
+33. `packages/core-backend/tests/unit/attendance-w7-w6r5-preservation-guard.test.ts`
+34. `packages/core-backend/tests/unit/w7-w6r5-guard/classification.ts`
+35. `packages/core-backend/tests/utils/w7-provenance-widening-scan.ts`
