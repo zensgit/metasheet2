@@ -416,6 +416,18 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Approval Metrics', titleZh: '审批耗时与 SLA', requiresAuth: true, requiresAdmin: true }
   },
   {
+    // P1b slice 3: the web surface for the existing POST /api/approvals/admin/reassign endpoint.
+    // Gated exactly like its sibling admin approval route above (`requiresAdmin`, resolved by
+    // `resolveAdminRouteRedirect` → `resolveHomePath()`), whose backend counterpart is likewise
+    // `rbacGuard('approvals:admin')`. No extra `permissions` conjunct: adding one would make this
+    // route stricter than that sibling and could lock out an admin principal whose permission set
+    // does not carry the literal code.
+    path: '/approvals/batch-transfer',
+    name: 'approval-batch-transfer',
+    component: () => import('../views/approval/ApprovalBatchTransferView.vue'),
+    meta: { title: 'Batch Transfer', titleZh: '批量转交', requiresAuth: true, requiresAdmin: true }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,

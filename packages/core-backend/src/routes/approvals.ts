@@ -37,6 +37,7 @@ import {
   resolveApprovalListPaging,
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
+import { isApprovalAdministrator } from '../services/approval-admin-capability'
 import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
 import {
   canReadApprovalInstance,
@@ -281,6 +282,41 @@ function getBridgeService(options?: ApprovalRouterOptions): ApprovalBridgeServic
 
 function getProductService(): ApprovalProductService {
   return new ApprovalProductService()
+}
+
+/**
+ * The SHAPES a `code` is allowed to have before it may be written to a log. Everything a real
+ * failure puts there fits: a PostgreSQL SQLSTATE (`42P01`, `23505`, `08006`), a Node/libpq errno
+ * (`ECONNREFUSED`, `ETIMEDOUT`, `ERR_INVALID_ARG_TYPE`), an error `name` (`TypeError`,
+ * `ServiceError`). Leading digits are permitted deliberately — SQLSTATE is the code an operator
+ * acting on this route's failures actually reads, and a class that excluded it would classify every
+ * genuine database failure as unclassified, which is the same as logging nothing at all.
+ */
+const RESTRICTED_ERROR_CODE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_]{0,31}$/
+/** Emitted in place of anything that is not one of those shapes. Never a fragment of the input. */
+const UNCLASSIFIED_ERROR_CODE = 'UNCLASSIFIED'
+
+/**
+ * A log-safe identifier for a failure. Same hazard `services/approval-attachment-gc.ts:68`
+ * (`safeErrCode`) addresses — NEVER the `message`, which is free text the driver composes out of
+ * whatever it was holding — but a DIFFERENT mechanism, and the difference is the point:
+ *
+ *   * `safeErrCode` SANITIZES: it strips the disallowed characters out and keeps the remainder, so
+ *     free text that reaches `.code` survives with its separators removed. `connect ECONNREFUSED
+ *     10.0.0.1:5432` becomes `connectECONNREFUSED10005432` — shorter, still the same disclosure.
+ *     A length cap does not close that; it only truncates it.
+ *   * this WHITELISTS: the value is tested WHOLE against the allowed shapes and is either emitted
+ *     unchanged or replaced, in full, by a constant. Nothing is ever manufactured out of a value
+ *     that failed the test, so there is no residue to bound.
+ *
+ * It is not returned to the client either: the response keeps the existing generic envelope, so
+ * this narrows what is written to logs without opening a new channel in its place.
+ */
+function restrictedErrorCode(error: unknown): string {
+  const raw = (error as { code?: unknown; name?: unknown } | null | undefined)?.code
+    ?? (error as { name?: unknown } | null | undefined)?.name
+  if (typeof raw !== 'string') return UNCLASSIFIED_ERROR_CODE
+  return RESTRICTED_ERROR_CODE_SHAPE.test(raw) ? raw : UNCLASSIFIED_ERROR_CODE
 }
 
 function handleApprovalsError(
@@ -2186,6 +2222,62 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_ADMIN_JUMP_FAILED',
         'Failed to jump approval',
+      )
+    }
+  })
+
+  /**
+   * Read-only: "is the CALLER an approval administrator by the same DB-backed predicate the
+   * approval list scope binds?" — see `services/approval-admin-capability.ts` for why the three
+   * existing admin predicates disagree and which one this answers.
+   *
+   * `authenticate` ONLY, deliberately no `rbacGuard`. A guard here would answer 403 for a caller
+   * without the `approvals:admin` PERMISSION, folding the permission axis back into a question that
+   * is about the `users`-table columns — and 403 is not distinguishable, client-side, from the
+   * transport failing. The three answers a client needs are `true`, `false`, and "could not
+   * determine", so this route returns the first two as data and the third as a non-200.
+   *
+   * It grants nothing. `rbacGuard('approvals:admin')` still gates every admin mutation and the list
+   * scope still gates the projection; a client that lies about this value gains no access.
+   *
+   * IT ANSWERS THE SCOPE'S ADMIN ARM, NOT THE WHOLE SCOPE. `listApprovals` conjoins a SECOND
+   * condition when `APPROVAL_S1_ORG_PIN_ENABLED` is true (default OFF): a platform row is admitted
+   * only if its `org_id` is one of the viewer's active orgs. That is a per-ROW relation with no
+   * caller-level counterpart, so it is deliberately not mirrored in this boolean — see
+   * `services/approval-admin-capability.ts` for the rejected reuse and the reasoning. CONSEQUENCE,
+   * disclosed rather than discovered: with the pin ON, a client told `true` here may still be served
+   * fewer rows than that answer implies, and a client that renders "this approver has nothing
+   * pending" off an empty list is making a claim this endpoint does not support. Not reachable on
+   * the shipped default.
+   */
+  r.get('/api/approvals/admin/capability', authenticate, async (req: Request, res: Response) => {
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+      const isApprovalAdmin = await isApprovalAdministrator(pool, userId)
+      return res.json({ ok: true, data: { isApprovalAdmin } })
+    } catch (error) {
+      // NOT folded into `false`. A lookup failure must reach the client as "could not determine",
+      // never as a statement about the caller's rights.
+      //
+      // VALUES-FREE BY CONSTRUCTION (round-4 item 4). The earlier revision interpolated the driver's
+      // `message` into this line. A driver message is not a diagnostic string an operator writes —
+      // it is assembled from whatever the driver was holding: hosts, ports, connection URIs with
+      // credentials, and for a constraint violation the offending ROW. Written to a log that is
+      // shipped and retained, that is a disclosure channel opened by an error path nobody exercises
+      // in review. The bounded code below is what an operator can actually act on.
+      logger.error(`approval admin capability lookup failed (${restrictedErrorCode(error)})`)
+      return res.status(500).json(
+        approvalErrorResponse('APPROVAL_ADMIN_CAPABILITY_FAILED', 'Failed to resolve approval administrator capability'),
       )
     }
   })
