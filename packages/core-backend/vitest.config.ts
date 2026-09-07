@@ -1314,6 +1314,17 @@ export default defineConfig({
       // EXPECT_DB=1. As of #5095, also wired (whole file, no EXPECT_DB) into the required
       // plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect it.
       'tests/integration/approval-lock9-process-attachments-realdb.db.test.ts',
+      // P0-A list-scope acceptance — the server-determined visibility scope on GET /api/approvals
+      // (participant arms, the DB-backed admin arm, the org pin under its own flag, the tab default
+      // and the unknown-tab refusal). Needs real PostgreSQL: the scope is a SQL conjunct over
+      // approval_instances/approval_assignments/approval_records/users/user_orgs, which the no-DB
+      // job's fake pool does not interpret. Excluded here so describeIfDatabase cannot skip-green
+      // it; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-list-scope.yml lane, which arms EXPECT_DB=1.
+      // plugin-tests.yml is left byte-identical (it is an s6a sha256-pinned provenance input, so an
+      // allowlist entry there would force an s6a re-pin and a merge-serialisation race) — the same
+      // precedent the sibling approval-realdb-* lanes above cite.
+      'tests/integration/approval-list-scope-server-side.db.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

@@ -346,42 +346,32 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationOperatorProjectBoard',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationPrepLineExport',
-  // 对账限本人可见项目. A VALUES-FREE ROUTE IN THIS SET, and it is here for the
-  // opposite reason to `tableActionDryRun` below: reconcile returns counts and evidence tokens and
-  // nothing else, in every branch. It resolves the operator scope not to decide WHAT it may show but
-  // to decide WHOSE project directory answers "is this projectNo one of yours" — the visibility check
-  // that stops one operator's reconcile from superseding another project's pending decision rows.
+  // 对账限本人可见项目 WAS PINNED HERE AND IS NOT ANY MORE — said out loud, because the assertion
+  // below asks whoever removes a member to say so. #5516 gave reconcile a project-visibility gate
+  // that resolved an operator scope to decide WHOSE project directory answered "is this projectNo one
+  // of yours"; the owner ruled on 2026-09-06 that stock-prep will not do project ownership, and the
+  // gate was deleted rather than left behind a default-off env switch. With it went the only
+  // `resolveOperatorValueScope(` in that handler, so the SOURCE SCAN no longer finds it and pinning it
+  // here would fail the derived-equals-pinned check from the other side.
   //
-  // PINNED EVEN THOUGH THE CALL IS ENV-GATED AND OFF BY DEFAULT
-  // (`MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE`). This whole file is a SOURCE-LEVEL
-  // scan: it asks what the handler is written to do, not what a given deployment runs. The scan
-  // finds `resolveOperatorValueScope(` in the body whatever the flag says, so leaving the handler
-  // out would fail the derived-equals-pinned check outright — and, more to the point, an unarmed
-  // code path is exactly the one that drifts unwatched. The three per-handler checks below are what
-  // stop it from acquiring another way of deciding tenancy while nobody is running it.
+  // WHAT THAT WOULD HAVE GIVEN UP, AND WHERE IT WENT INSTEAD. Leaving it at "it drops out of the
+  // derived set" would have silently unwatched two derivations that have NOTHING to do with the
+  // deleted gate: reconcile's LEDGER tenant (`resolveAuthUserTenantId(req)`) and its LEDGER staging
+  // project (`resolveIntegrationStagingProjectId(tenantId, undefined)`), both of which predate #5516
+  // and are both still there. Membership-derived coverage cannot hold them, because membership is
+  // exactly what the deletion changed. They are pinned BY NAME instead, in
+  // `LEDGER_WRITES_PINNED_BY_NAME` at the foot of this file, in a loop that walks its own keys —
+  // see the header there for the mutation that proved the hole was real.
   //
-  // The three per-handler checks below are exactly the ones that matter for that use: the scope must
-  // be the tenancy authority (no `resolveTenantId`, no raw `user.tenantId`), because a header-picked
-  // tenant would pick which directory vouches for the number.
-  //
-  // WHAT THAT DOES AND DOES NOT COVER, because the two regexes read stronger than they measure. They
-  // pin the VISIBILITY half. This route's LEDGER tenant still comes from `resolveAuthUserTenantId(req)`
-  // — a helper whose body is `user.tenantId`, i.e. the `x-tenant-id` header on a deployment with the
-  // tenant-claim flag off — and neither regex can see through the wrapper. On the operator branch the
-  // two values are provably equal (a scope that contradicts the carrier is refused
-  // OPERATOR_SCOPE_TENANT_CONTRADICTED, and a principal with no tenant is refused before this), so
-  // there is no behavioural hole today; but "the scope is the only tenancy authority here" is true of
-  // the directory half only. The admin branch's header exposure is the pre-existing one this change
-  // does not touch.
-  //
-  // It is deliberately NOT in
-  // VALUE_BEARING_READS_WITH_INLINE_STAGING: this handler derives TWO staging projects — the
-  // visibility check's, from `reconcileScope.tenantId`, and the ledger write's, which predates this
-  // change — and that set's assertion is that a handler derives exactly one, from `scope.tenantId`.
-  // It is in VALUE_BEARING_READS_WITH_MULTIPLE_STAGING instead, which pins the exact pair, so the
-  // visibility derivation is still statically nailed to the resolved scope and a third form (a
-  // request-sourced projectId above all) cannot appear beside them unremarked.
-  'tableActionConfirmationDecisionsReconcile',
+  // THE x-tenant-id EXPOSURE THIS ROUTE STILL CARRIES, kept here because this is the entry that
+  // says "the boundary is the tenant" and the next reader must not take that for "the tenant is
+  // proven". `resolveAuthUserTenantId`'s body is `user.tenantId`, which is filled from the
+  // `x-tenant-id` REQUEST HEADER on a deployment with the tenant-claim flag off. On the OPERATOR
+  // branch the header cannot lie: `requireTableActionAccess` resolves an operator scope for its
+  // refusals, a scope that contradicts the carrier is refused OPERATOR_SCOPE_TENANT_CONTRADICTED,
+  // and a principal with no tenant is refused before that — so the two values are provably equal.
+  // The legacy `integration:admin` branch returns from that helper (see :992-998) before the scope,
+  // and its header exposure is the pre-existing one neither #5516 nor this change touches.
   // 缺件清单 (W3a). THE ONLY MEMBER WITH A VALUE-BEARING OPT-IN ON A VALUES-FREE ROUTE — it is a
   // values-free route with a value-bearing OPT-IN, and that difference is why it needs the carve-out
   // spelled out in VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT below rather than a quiet edit to
@@ -446,21 +436,23 @@ const VALUE_BEARING_READS_WITH_GATED_LEGACY_TENANT = new Map([
 ])
 
 /**
- * HANDLERS THAT DERIVE MORE THAN ONE STAGING PROJECT — the blanket inline-staging check above cannot
+ * HANDLERS THAT DERIVE MORE THAN ONE STAGING PROJECT — the blanket inline-staging check below cannot
  * cover them (it demands that EVERY derivation read `scope.tenantId`), and leaving them out entirely
  * would mean nothing pins the one derivation that matters.
  *
- * `tableActionConfirmationDecisionsReconcile` derives two: the VISIBILITY check's, from the operator
- * scope resolved in this handler, and the LEDGER's, which predates 对账限本人可见项目 and is the
- * handler's own tenant. Pinning the exact pair is what stops a third form — above all a
- * request-sourced projectId — from appearing beside them without anyone noticing.
+ * EMPTY SINCE 2026-09-06, and kept rather than deleted. Its only member was
+ * `tableActionConfirmationDecisionsReconcile`, which derived two: the deleted project gate's, from
+ * `reconcileScope.tenantId`, and the LEDGER's, which predates that gate and is still there. With the
+ * gate gone the handler derives one staging project again AND no longer resolves an operator scope,
+ * so it is out of the derived set entirely and there is nothing here for this map to pin. The
+ * machinery stays because the next handler with two derivations must land in a reviewed pair rather
+ * than in a fresh idea about how to pin them.
+ *
+ * THE SURVIVING DERIVATION DID NOT GO UNPINNED WITH IT. `resolveIntegrationStagingProjectId(tenantId,
+ * undefined)` — the ledger write's — is pinned exhaustively in `LEDGER_WRITES_PINNED_BY_NAME` below,
+ * which is where it belongs now that reconcile is not in the derived set this map hangs off.
  */
-const VALUE_BEARING_READS_WITH_MULTIPLE_STAGING = new Map([
-  ['tableActionConfirmationDecisionsReconcile', [
-    'resolveIntegrationStagingProjectId(reconcileScope.tenantId, undefined)',
-    'resolveIntegrationStagingProjectId(tenantId, undefined)',
-  ]],
-])
+const VALUE_BEARING_READS_WITH_MULTIPLE_STAGING = new Map([])
 
 for (const name of VALUE_BEARING_READ_HANDLERS) {
   const body = handlerBody(ROUTES_SRC, name)
@@ -530,6 +522,85 @@ for (const name of VALUE_BEARING_READ_HANDLERS) {
       )
     })
   }
+}
+
+// ── LEDGER WRITES PINNED BY NAME — coverage that no membership list can drop ─────────────────────
+//
+// WHY THIS EXISTS AS A THIRD LOOP. Both loops above are MEMBERSHIP-derived. The write list is
+// hand-kept; the value-bearing list is derived by SOURCE SCAN (a handler is in it iff its body calls
+// `resolveOperatorValueScope(`). Membership-derived coverage has one failure mode, and on 2026-09-06
+// it fired: deleting 对账限本人可见项目 removed the only `resolveOperatorValueScope(` from
+// `tableActionConfirmationDecisionsReconcile`, so the handler left the derived set as a SIDE EFFECT
+// of an edit that was about something else entirely — and took with it the pins on two derivations
+// the gate never owned. Nothing about those derivations changed; they simply stopped being watched.
+//
+// THE HOLE WAS MEASURED, NOT REASONED ABOUT. With reconcile out of the derived set and nothing here,
+// both of these edits passed this whole file (they fail on the commit before the deletion):
+//   - `const tenantId = resolveTenantId(req, {})` in place of `resolveAuthUserTenantId(req)` — the
+//     GHSA-m6qv steering vector this file exists for, on the route whose orphan sweep rewrites other
+//     people's PENDING ledger rows;
+//   - `resolveIntegrationStagingProjectId(tenantId, body.parameters.projectId)` in place of
+//     `(tenantId, undefined)` — the second vector, a request-supplied `X:integration-core` projectId
+//     returned verbatim.
+//
+// SO: pinned BY NAME, in a loop that walks THIS MAP's own keys. A handler listed here is checked
+// because it is listed here — not because it is still in somebody else's set — and dropping it takes
+// a deliberate edit to this map rather than an unrelated refactor.
+//
+// AND EXHAUSTIVELY, which is the other half. The write loop's staging check is an ABSENCE check
+// against one literal spelling (`resolveIntegrationStagingProjectId(tenantId, input.projectId)`), so
+// `body.parameters.projectId` — the same vulnerability, spelled the way THIS route names its input —
+// walks straight through it. Here EVERY derivation in the body must be one of the reviewed forms, so
+// a new spelling is a failure rather than a gap.
+const LEDGER_WRITES_PINNED_BY_NAME = new Map([
+  ['tableActionConfirmationDecisionsReconcile', {
+    // The LEDGER write's staging project, and the only one this handler derives since the project
+    // gate was deleted. `reconcileConfirmationDecisions` supersedes PENDING rows inside it.
+    staging: ['resolveIntegrationStagingProjectId(tenantId, undefined)'],
+  }],
+])
+
+for (const [name, pin] of LEDGER_WRITES_PINNED_BY_NAME) {
+  const body = handlerBody(ROUTES_SRC, name)
+
+  check(`${name}: derives its ledger tenant from the authenticated principal (resolveAuthUserTenantId)`, () => {
+    assert.equal(
+      body.includes('resolveAuthUserTenantId(req)'),
+      true,
+      `${name} must derive the tenant it writes under from resolveAuthUserTenantId(req)`,
+    )
+  })
+
+  check(`${name}: does NOT derive tenant via the request-steerable resolveTenantId, in ANY form`, () => {
+    assert.equal(
+      /resolveTenantId\(/.test(body),
+      false,
+      `${name} calls resolveTenantId(...) — that resolver reads the REQUEST first (input/query/params tenantId) and skips the mismatch check for admins, which on this ledger write is a cross-tenant steering vector`,
+    )
+  })
+
+  check(`${name}: does NOT read user.tenantId directly`, () => {
+    assert.equal(
+      /user\.tenantId/.test(body),
+      false,
+      `${name} reads user.tenantId inline — go through resolveAuthUserTenantId(req) so there is one derivation to audit, not two`,
+    )
+  })
+
+  check(`${name}: every staging derivation is one of the reviewed forms`, () => {
+    const calls = body.match(/resolveIntegrationStagingProjectId\([^)]*\)/g) || []
+    assert.ok(calls.length > 0, `${name} must derive its staging project`)
+    assert.ok(
+      calls.every((call) => pin.staging.includes(call)),
+      `${name} grew a staging derivation nobody reviewed (got ${JSON.stringify(calls)}, expected only ${JSON.stringify(pin.staging)}) — a request-supplied projectId is returned VERBATIM by that helper, so anything but \`undefined\` in the second argument steers the write off this tenant`,
+    )
+    for (const form of pin.staging) {
+      assert.ok(
+        calls.includes(form),
+        `${name} no longer derives \`${form}\` — if the derivation moved or was renamed, re-pin it here rather than deleting the entry`,
+      )
+    }
+  })
 }
 
 console.log(`\nstock-preparation-tenant-scoped-write-guard.test.cjs: ${passed} passed, ${failed} failed`)

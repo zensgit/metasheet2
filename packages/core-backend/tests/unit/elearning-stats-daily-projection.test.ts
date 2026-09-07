@@ -7,6 +7,23 @@ import {
   type ElearningStatsDailyDb,
   type ElearningStatsDailyQueryable,
 } from '../../src/services/elearning-stats-daily-projection'
+import {
+  ELEARNING_STATS_MULTITABLE_FIELDS,
+  ELEARNING_STATS_MULTITABLE_METRIC_FIELDS,
+  elearningStatsMultitableSql,
+  projectElearningStatsToMultitable,
+  reconcileElearningStatsMultitable,
+  type ElearningStatsMultitableDb,
+  type ElearningStatsMultitableQueryable,
+} from '../../src/services/elearning-stats-multitable-projection'
+import {
+  deriveElearningProjectionBaseId,
+  deriveElearningProjectionFieldId,
+  deriveElearningProjectionRecordId,
+  deriveElearningProjectionSheetId,
+  ELEARNING_PROJECTION_SYSTEM_KIND,
+  ELEARNING_PROJECTION_SYSTEM_OWNER,
+} from '../../src/multitable/elearning-projection-constants'
 
 const ORG = 'org-stats-daily'
 const DEPARTMENT = '11111111-1111-4111-8111-111111111111'
@@ -303,5 +320,190 @@ describe('e-learning stats daily projection', () => {
       ),
       'unavailable',
     )
+  })
+})
+
+function multitableSource(suppressed = false): Record<string, unknown> {
+  return {
+    assigned_count: suppressed ? null : '4',
+    completed_count: suppressed ? null : '3',
+    completion_rate: suppressed ? null : '0.750000000',
+    credit_average: suppressed ? null : '5.000000000',
+    credit_total: suppressed ? null : '25',
+    department_id: DEPARTMENT,
+    department_name: 'Engineering',
+    exam_participant_count: suppressed ? null : '2',
+    last_projected_at: new Date('2026-08-30T01:02:03.000Z'),
+    learner_count: suppressed ? null : '4',
+    learning_seconds: suppressed ? null : '7200',
+    member_count: suppressed ? null : '5',
+    min_group_size: 5,
+    overdue_count: suppressed ? null : '1',
+    payload_digest: 'a'.repeat(64),
+    period_end: new Date('2026-08-31T00:00:00.000Z'),
+    period_start: new Date('2026-08-30T00:00:00.000Z'),
+    projected_version: '3',
+    source_version: '2026-08-30T01:02:03.123456Z',
+    stats_date: '2026-08-30',
+    suppressed,
+  }
+}
+
+class MultitableScriptDb implements ElearningStatsMultitableDb, ElearningStatsMultitableQueryable {
+  readonly calls: Call[] = []
+  record: { data: Record<string, unknown>; sheetId: string; version: number } | null = null
+
+  constructor(private readonly source = multitableSource()) {}
+
+  async transaction<T>(run: (tx: ElearningStatsMultitableQueryable) => Promise<T>): Promise<T> {
+    return run(this)
+  }
+
+  async query(sql: string, params: unknown[] = []) {
+    this.calls.push({ sql, params })
+    const orgId = ORG
+    const baseId = deriveElearningProjectionBaseId(orgId)
+    const sheetId = deriveElearningProjectionSheetId(orgId)
+    if (sql === elearningStatsMultitableSql.reconcileScan) {
+      const rows = this.record
+        ? []
+        : [{ department_id: DEPARTMENT, org_id: ORG, stats_date: '2026-08-30' }]
+      return { rows, rowCount: rows.length }
+    }
+    if (sql === elearningStatsMultitableSql.source) return { rows: [this.source], rowCount: 1 }
+    if (sql.includes('pg_advisory_xact_lock')) return { rows: [{}], rowCount: 1 }
+    if (sql.startsWith('INSERT INTO meta_bases')) return { rows: [], rowCount: 1 }
+    if (sql.includes('FROM meta_bases')) {
+      return {
+        rows: [{ deleted_at: null, id: baseId, owner_id: ELEARNING_PROJECTION_SYSTEM_OWNER }],
+        rowCount: 1,
+      }
+    }
+    if (sql.startsWith('INSERT INTO meta_sheets')) return { rows: [], rowCount: 1 }
+    if (sql.includes('FROM meta_sheets')) {
+      return {
+        rows: [{ base_id: baseId, id: sheetId, system_kind: ELEARNING_PROJECTION_SYSTEM_KIND }],
+        rowCount: 1,
+      }
+    }
+    if (sql.startsWith('INSERT INTO meta_fields')) return { rows: [], rowCount: 1 }
+    if (sql.includes('FROM meta_fields')) {
+      return {
+        rows: ELEARNING_STATS_MULTITABLE_FIELDS.map((field, order) => ({
+          id: deriveElearningProjectionFieldId(orgId, field.key),
+          name: field.name,
+          order,
+          property: {},
+          sheet_id: sheetId,
+          type: field.type,
+        })),
+        rowCount: ELEARNING_STATS_MULTITABLE_FIELDS.length,
+      }
+    }
+    if (sql.startsWith('INSERT INTO elearning_stats_multitable_sheets')) {
+      return { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('FROM elearning_stats_multitable_sheets')) {
+      return { rows: [{ base_id: baseId, org_id: orgId, sheet_id: sheetId }], rowCount: 1 }
+    }
+    if (sql.includes('FROM meta_records')) {
+      return {
+        rows: this.record
+          ? [{ data: this.record.data, sheet_id: this.record.sheetId, version: this.record.version }]
+          : [],
+        rowCount: this.record ? 1 : 0,
+      }
+    }
+    if (sql.startsWith('INSERT INTO meta_records')) {
+      const data = JSON.parse(String(params[2])) as Record<string, unknown>
+      this.record = {
+        data,
+        sheetId,
+        version: (this.record?.version ?? 0) + 1,
+      }
+      return { rows: [{ id: params[0] }], rowCount: 1 }
+    }
+    throw new Error('unexpected multitable projection query')
+  }
+}
+
+describe('e-learning aggregate multitable projection', () => {
+  it('is query-inert while the analytics surface is disabled', async () => {
+    const db = new MultitableScriptDb()
+    await expect(
+      projectElearningStatsToMultitable(db, input(), {}),
+    ).rejects.toMatchObject({ code: 'unavailable' })
+    expect(db.calls).toEqual([])
+  })
+
+  it('writes one deterministic chart-ready aggregate record and replays as a no-op', async () => {
+    const db = new MultitableScriptDb()
+    const expected = {
+      baseId: deriveElearningProjectionBaseId(ORG),
+      outcome: 'projected',
+      recordId: deriveElearningProjectionRecordId(ORG, DEPARTMENT, '2026-08-30'),
+      sheetId: deriveElearningProjectionSheetId(ORG),
+      suppressed: false,
+    }
+    await expect(projectElearningStatsToMultitable(db, input(), ENABLED)).resolves.toEqual(expected)
+    expect(db.record?.data[deriveElearningProjectionFieldId(ORG, 'completionRate')]).toBe(0.75)
+    expect(db.record?.data[deriveElearningProjectionFieldId(ORG, 'completedCount')]).toBe(3)
+    expect(db.record?.version).toBe(1)
+    await expect(projectElearningStatsToMultitable(db, input(), ENABLED)).resolves.toEqual({
+      ...expected,
+      outcome: 'noop',
+    })
+    expect(db.record?.version).toBe(1)
+  })
+
+  it('omits every metric field from suppressed rows instead of projecting zero', async () => {
+    const db = new MultitableScriptDb(multitableSource(true))
+    await projectElearningStatsToMultitable(db, input(), ENABLED)
+    expect(db.record?.data[deriveElearningProjectionFieldId(ORG, 'suppressed')]).toBe(true)
+    for (const field of ELEARNING_STATS_MULTITABLE_METRIC_FIELDS) {
+      expect(db.record?.data).not.toHaveProperty(deriveElearningProjectionFieldId(ORG, field.key))
+    }
+  })
+
+  it('reapplies the minimum-group threshold at the multitable sink', async () => {
+    const db = new MultitableScriptDb({
+      ...multitableSource(false),
+      member_count: '4',
+      min_group_size: 5,
+      suppressed: false,
+    })
+    await expect(projectElearningStatsToMultitable(db, input(), ENABLED)).resolves.toMatchObject({
+      suppressed: true,
+    })
+    expect(db.record?.data[deriveElearningProjectionFieldId(ORG, 'suppressed')]).toBe(true)
+    for (const field of ELEARNING_STATS_MULTITABLE_METRIC_FIELDS) {
+      expect(db.record?.data).not.toHaveProperty(deriveElearningProjectionFieldId(ORG, field.key))
+    }
+  })
+
+  it('preserves signed aggregate credit values from manual adjustments', async () => {
+    const db = new MultitableScriptDb({
+      ...multitableSource(),
+      credit_average: '-1.000000000',
+      credit_total: '-5',
+    })
+    await projectElearningStatsToMultitable(db, input(), ENABLED)
+    expect(db.record?.data[deriveElearningProjectionFieldId(ORG, 'creditAverage')]).toBe(-1)
+    expect(db.record?.data[deriveElearningProjectionFieldId(ORG, 'creditTotal')]).toBe(-5)
+  })
+
+  it('reconciles only a missing or stale deterministic record', async () => {
+    const db = new MultitableScriptDb()
+    await expect(reconcileElearningStatsMultitable(db, 10, ENABLED)).resolves.toEqual({
+      failed: 0,
+      projected: 1,
+      scanned: 1,
+    })
+    await expect(reconcileElearningStatsMultitable(db, 10, ENABLED)).resolves.toEqual({
+      failed: 0,
+      projected: 0,
+      scanned: 0,
+    })
+    expect(db.record?.version).toBe(1)
   })
 })

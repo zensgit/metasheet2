@@ -167,7 +167,12 @@ function assertValuesFreeDetail(detail) {
  * The values-free property for those columns is kept where it can be kept without refusing real
  * work: AT THE ROUTES. No stock-prep route forwards a caller's raw `?workspaceId` into this store
  * any more (there is no workspace registry to validate one against, so the honest answer is to
- * select nothing from it), and `project_id` is written only by the route whose subject it is.
+ * select nothing from it), and `project_id` is written only by routes whose subject IS a project:
+ * the MVP mapping / unit / exception family, `prep_line_export`, `handoff_advance`, and — since
+ * 对账/确认的审计行带项目号 — the confirmation-queue reconcile and confirm. Deliberately NULL, and
+ * to be kept that way: the project BOARD read and `project_directory_read` (migration 086 says why
+ * — a hit/miss carrying the number would make this trail an existence oracle) and
+ * `source_binding_set`, whose subject is an external system, not a project.
  *
  * FAIL-CLOSED and value-blind on what it does gate: the refusal names the COLUMN, never the value.
  */

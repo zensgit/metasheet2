@@ -99,6 +99,10 @@ import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 // from a pack's — but the stamp itself is about THIS route owning what it writes.
 import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
+import {
+  isElearningProjectionBaseIdCandidate,
+  isElearningProjectionSheetIdCandidate,
+} from '../multitable/elearning-projection-constants'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   checkExactAnchorRecoveryTrust,
@@ -769,6 +773,7 @@ function buildPublicFormToken(): string {
 
 function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined, publicToken: string): boolean {
   if (!view || !publicToken) return false
+  if (isElearningProjectionSheetIdCandidate(view.sheetId)) return false
   const publicForm = getPublicFormConfig(view)
   if (!publicForm || publicForm.enabled !== true) return false
   const configuredToken = typeof publicForm.publicToken === 'string' ? publicForm.publicToken.trim() : ''
@@ -776,6 +781,13 @@ function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined
   const expiryMs = parsePublicFormExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
   if (expiryMs !== null && Date.now() >= expiryMs) return false
   return true
+}
+
+function canManageFormShareForSheet(
+  capabilities: { canManageViews: boolean },
+  sheetId: string,
+): boolean {
+  return capabilities.canManageViews && !isElearningProjectionSheetIdCandidate(sheetId)
 }
 
 async function loadPublicFormAllowedSubjectSummaries(
@@ -4431,6 +4443,19 @@ const DISPLAY_RENAME_FORBIDDEN_MESSAGE =
 const SHEET_DELETE_FORBIDDEN_MESSAGE =
   'Deleting or restoring a sheet requires whole-sheet authority: an admin role, the multitable:manage-schema permission, or a sheet-scoped admin grant on this sheet. multitable:write — global or sheet-scoped — is not sufficient.'
 
+const ELEARNING_PROJECTION_IDENTITY_FORBIDDEN_MESSAGE =
+  'E-learning statistics projection identities are system-managed read models.'
+
+function sendElearningProjectionIdentityForbidden(res: Response) {
+  return res.status(403).json({
+    ok: false,
+    error: {
+      code: 'FORBIDDEN',
+      message: ELEARNING_PROJECTION_IDENTITY_FORBIDDEN_MESSAGE,
+    },
+  })
+}
+
 /**
  * Authority to DESTROY or RESURRECT a whole sheet.
  *
@@ -7165,6 +7190,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     const baseId = parsed.data.id ?? buildId('base').slice(0, 50)
     const ownerId = parsed.data.ownerId ?? req.user?.id?.toString() ?? null
+    if (isElearningProjectionBaseIdCandidate(baseId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
 
     try {
       const pool = poolManager.get()
@@ -7208,6 +7236,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
     if (!baseId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'baseId is required' } })
+    }
+    if (isElearningProjectionBaseIdCandidate(baseId)) {
+      return sendElearningProjectionIdentityForbidden(res)
     }
     const parsed = parseDisplayRenamePayload(req.body)
     if (!parsed.ok) return sendInvalidDisplayName(res)
@@ -13311,7 +13342,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const view: UniverMetaViewConfig = {
@@ -13378,7 +13409,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
@@ -13586,7 +13617,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
@@ -13682,7 +13713,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const candidates = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))
@@ -13912,6 +13943,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     if (!sheetId || typeof sheetId !== 'string') {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
+    if (isElearningProjectionSheetIdCandidate(sheetId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
 
     try {
       const pool = poolManager.get()
@@ -13964,6 +13998,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    if (isElearningProjectionSheetIdCandidate(sheetId)) {
+      return sendElearningProjectionIdentityForbidden(res)
     }
 
     try {
@@ -14049,6 +14086,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
+    if (isElearningProjectionSheetIdCandidate(sheetId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
     const parsed = parseDisplayRenamePayload(req.body)
     if (!parsed.ok) return sendInvalidDisplayName(res)
     const hygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.name)
@@ -14132,6 +14172,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const description = parsed.data.description ?? null
     const requestedBaseId = parsed.data.baseId?.trim()
     const seed = parsed.data.seed === true
+    if (
+      isElearningProjectionSheetIdCandidate(sheetId)
+      || (requestedBaseId !== undefined && isElearningProjectionBaseIdCandidate(requestedBaseId))
+    ) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
 
     try {
       const pool = poolManager.get()

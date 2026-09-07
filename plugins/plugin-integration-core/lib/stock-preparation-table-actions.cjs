@@ -970,6 +970,25 @@ async function createTargetScopedRecordsApi(recordsApi, target, options = {}) {
   }
 
   const scopedApi = { queryRecords }
+  // W8-4 (L1): forward the host's request-scoped metadata memo. It carries no sheetId, reads no
+  // row and grants nothing, so there is nothing here for withTargetSheet to fence — but the scoped
+  // api is a FRESH object, so anything not forwarded is invisible to every caller behind this
+  // fence, and the memo would silently never engage. Absent on a host that does not offer it.
+  // Placed BEFORE the read-only return on purpose: a read-only caller may also open a scope. That
+  // widens the surface that can open one beyond the write path, which is accepted because opening a
+  // scope authorizes nothing — a read-only api still cannot write, and every records call inside a
+  // scope still runs its own first-time ownership assertion.
+  if (typeof api.withMetadataCache === 'function') {
+    scopedApi.withMetadataCache = (operation) => api.withMetadataCache(operation)
+  }
+  // W9: forward the host's array-filter-value declaration across the fence. Like the memo above it
+  // is a FRESH object, so an unforwarded declaration is invisible and the batch key lookup would
+  // never engage. Honest in BOTH translation modes: `toPhysicalKeys` rewrites filter KEYS only and
+  // never touches values, so a list value crosses the fence byte-identical to a scalar one. Only
+  // ever copied from the surface underneath — this fence asserts nothing on its own.
+  if (api.supportsFilterValueLists === true) {
+    scopedApi.supportsFilterValueLists = true
+  }
   if (readOnly) return scopedApi
 
   scopedApi.createRecord = async function createRecord(input = {}) {

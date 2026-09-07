@@ -439,6 +439,7 @@ const {
   confirmCarryConfirmationDecision,
   assertCarryConfirmDecisionBinding,
   readConfirmationDecisionValueEntry,
+  readConfirmationDecisionProjectNo,
   loadConfirmedDuplicatePolicyReview,
 } = require('./stock-preparation-confirmation-decisions.cjs')
 // O2 / R-11: the confirmation-queue workbench permission vocabulary + capability manifest. Shared
@@ -616,7 +617,6 @@ const { listStockPreparationProjects } = require('./stock-preparation-project-re
 // tenant's projectNo + projectName; the values-free module it sits beside is not modified.
 const {
   StockPreparationOperatorDirectoryError,
-  assertOperatorMaySeeProject,
   listOperatorProjectDirectory,
 } = require('./stock-preparation-operator-project-directory.cjs')
 // 项目备料页 — ONE project's board. The fourth value-bearing stock-prep read; it rides the SAME
@@ -1311,35 +1311,6 @@ function stockPreparationErpAutoPersistEnabled() {
 // itself gates is a no-op when this returns false.
 function stockPreparationTenantClaimRequired() {
   return String(process.env.MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED ?? '').trim().toLowerCase() === 'true'
-}
-
-// 对账限本人可见项目 — THE RECONCILE PROJECT-DIRECTORY GATE. EXPERIMENTAL, DEFAULT OFF. Same idiom as
-// every other MULTITABLE_ gate — truthy ONLY when the env var is exactly 'true' (trimmed,
-// case-insensitive).
-//
-// WHY IT IS OFF BY DEFAULT, AND WHY THAT IS NOT TIMIDITY. The gate asks "is this projectNo one the
-// caller's own project directory lists". The directory is TENANT-WIDE by construction (see
-// `stock-preparation-operator-scope.cjs`: the scope "is NOT per-row"), so the strongest thing this
-// check can prove is 限本租户的项目 — two operators of the same factory are indistinguishable to it.
-// A real per-person answer needs a project-OWNERSHIP store, which this data model does not have.
-//
-// AND IT HAS A COST THAT LANDS ON THE FLOOR, NOT ON AN ATTACKER. The one pass-through is "the
-// tenant's project archive holds no row at all" (see `assertOperatorMaySeeProject`). Turn that
-// around: once a tenant has archived ANY project, a project that has never been archived is not in
-// the directory, so an operator's FIRST reconcile of a new project is refused 403. Archiving is
-// `mvp-persist` — platform-admin AND flag-gated — and the operator's own four-step pull SKIPs that
-// step, so this is not an edge case; it is the ordinary shape of a new customer project, and armed
-// by default the gate would interrupt it every time.
-//
-// So: the code ships, the narrowing is available to a deployment that wants it, and OFF is
-// byte-for-byte the behaviour this route had before 对账限本人可见项目 — with ONE deliberate
-// exception, stated here so nobody has to find it: a `projectNo` that is PRESENT but not a usable
-// string is refused 400 on the operator branch regardless of this flag. That refusal is not part of
-// the visibility narrowing; it is the malformed-request answer the downstream validator would have
-// given anyway, moved ahead of the source read (see the handler for why leaving it downstream turned
-// a skipped gate into a bypassable one).
-function stockPreparationReconcileProjectDirectoryGateEnabled() {
-  return String(process.env.MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE ?? '').trim().toLowerCase() === 'true'
 }
 
 // T3a OD-2: with auto-persist ON the ERP source-run has a write side-effect, so an explicit request
@@ -5849,56 +5820,63 @@ function requireStockPreparationAudit() {
         VALID_TABLE_ACTION_CONFIRMATION_DECISION_RECONCILE_BODY_KEYS,
       )
       const tenantId = resolveAuthUserTenantId(req)
-      // 对账限本人可见项目 — THE SECOND DOOR, AND THE ONLY ONE THAT LOOKS AT THE PROJECT NUMBER.
-      // EXPERIMENTAL AND OFF BY DEFAULT: everything below the 400 is behind
-      // `stockPreparationReconcileProjectDirectoryGateEnabled()` (see that function for why — in
-      // short, the check can only prove 限本租户的项目, and armed it would refuse a floor operator's
-      // FIRST reconcile of any never-archived project).
+      // 对账不做按项目限制 — RECONCILE IS TENANT-SCOPED AND NOTHING FINER, BY DESIGN AS OF 2026-09-06.
       //
       // `requireTableActionAccess` above answers two questions and stops: does this principal hold
       // the tier, and (on the operator branch) is its tenant proven. Neither of them reads the body.
-      // But this route's `projectNo` comes FROM the body, and reconcile's orphan sweep supersedes
-      // the PENDING ledger rows of whichever project it is pointed at — so the number a floor
-      // operator types decides whose confirmation queue gets rewritten, anywhere in the tenant. With
-      // the flag off that is still true; the flag is what a deployment turns on to narrow it.
+      // This route's `projectNo` comes FROM the body, and reconcile's orphan sweep supersedes the
+      // PENDING ledger rows of whichever project it is pointed at — so inside one tenant the number a
+      // floor operator types decides whose confirmation queue gets rewritten. That is stated plainly
+      // rather than hidden, because it is the accepted boundary here, not an oversight.
       //
-      // WHO IS CHECKED, AND WHY THE PREDICATE IS THE SAME ONE `hasPermission(user, 'admin')` PICKS.
-      // `requireTableActionAccess` admits on `hasPermission(user, legacyGate)` FIRST and returns
-      // before the operator branch; this re-asks that exact expression with the exact same
-      // `legacyGate` value, so the two cannot disagree about which branch a caller took. A platform
-      // admin / `integration:admin` holder is therefore untouched by everything below — same route,
-      // same behaviour, byte for byte — and only the tier C13 newly admitted pays for the check.
+      // WHY THERE IS NO PROJECT GATE, since the paragraph above reads like one is missing. #5516
+      // shipped one behind an env flag, default off; the owner ruled on 2026-09-06 to DELETE it
+      // rather than leave a switch nobody would ever turn on. Two reasons, both structural. First,
+      // the operator project directory is TENANT-WIDE by construction (see
+      // `stock-preparation-operator-scope.cjs`: the scope "is NOT per-row"), so the strongest thing a
+      // directory-based check can prove is 限本租户的项目 — two operators of one factory are
+      // indistinguishable to it, and the complaint that motivated the gate was about colleagues.
+      // Second, its only pass-through — "this tenant's project archive holds no row at all" — inverts
+      // the moment a tenant archives anything: a never-archived project is then refused 403 on its
+      // FIRST operator reconcile, and archiving is `mvp-persist` (platform-admin AND flag-gated),
+      // which the operator's own four-step pull SKIPs. A real per-person answer needs a project-
+      // OWNERSHIP store, which this data model does not have. Until one exists the answer to "who
+      // reconciled someone else's project" is the AUDIT TRAIL, not a gate that cannot tell colleagues
+      // apart. See docs/development/takeover-beiliao-20260821/design-project-ownership-20260906.md
+      // §2 方案 B. Broadening the predicate to "the ledger has pending rows for this number" was
+      // examined and rejected there too: pending rows are exactly what the orphan sweep supersedes,
+      // so that admits precisely the case a gate would exist to refuse.
       //
-      // WHERE IT SITS: before `getTableAction`, before the B2a fence, before the source adapter and
-      // before the audit append — so a refused caller reaches no action, no external system, no
-      // credential decrypt and leaves no audit row. The staging locator is derived from the VERIFIED
-      // scope, never from the request, exactly as the directory route derives it.
+      // WHAT DID NOT GO WITH THE GATE: THE MALFORMED-projectNo 400 BELOW. It was never part of the
+      // narrowing and it is kept.
       //
-      // "NO TRAIL" IS ABOUT THE AUDIT LEDGER, precisely. The route shell still logs its ordinary
-      // values-free `route failed: POST …` warn for anything that is not an `HttpRouteError`, and
-      // `StockPreparationOperatorDirectoryError` is not one — the line carries a route and a code and
-      // no project number, which is the same thing every other refusal on this file logs.
+      // A body with NO projectNo skips it and keeps its existing answer: the parameter validator
+      // downstream already refuses that 400 with its own code, and answering it earlier here would
+      // buy nothing.
       //
-      // A body with NO projectNo skips this and keeps its existing answer: the parameter validator
-      // downstream already refuses it 400 with its own code, and turning that into a visibility 403
-      // here would relabel a malformed request as a permission problem.
+      // "NO projectNo" MEANS ABSENT, NOT "not a string". `firstString` accepts only
+      // `typeof 'string'`, so `{"projectNo": 230920006}` — a shape this domain hands out constantly,
+      // since project numbers look like integers — leaves `reconcileProjectNo` null and lets the
+      // request run on to the action lookup, the B2a fence and the source adapter before the
+      // downstream validator refuses it 400. The ledger is not actually reachable that way today,
+      // but only because `normalizeActionParameters` happens to carry its OWN string-only normaliser;
+      // the shared `stock-preparation-common.cjs#optionalString` next door coerces numbers, so one
+      // ordinary de-duplication would turn a request that answers 400 late into one that reaches an
+      // external system first. So PRESENT-BUT-NOT-A-USABLE-STRING is refused here, before any of
+      // that, with the same 400 code and the same `details.field` the downstream validator would have
+      // produced — no external read, no credential decrypt, no lease, no audit row.
       //
-      // "NO projectNo" MEANS ABSENT, NOT "not a string" — AND THIS ONE CHECK IS NOT FLAG-GATED.
-      // `firstString` accepts only `typeof 'string'`, so `{"projectNo": 230920006}` — a shape this
-      // domain hands out constantly, since project numbers look like integers — leaves
-      // `reconcileProjectNo` null, which would skip the visibility gate entirely and let the request
-      // run on to the action lookup, the B2a fence and the source adapter before the downstream
-      // validator refused it 400. The ledger is not actually reachable that way today, but only
-      // because `normalizeActionParameters` happens to carry its OWN string-only normaliser; the
-      // shared `stock-preparation-common.cjs#optionalString` next door coerces numbers, so one
-      // ordinary de-duplication would turn a skipped gate into a bypassed one. So:
-      // PRESENT-BUT-NOT-A-USABLE-STRING is refused here, before any of that, with the same 400 code
-      // and the same `details.field` the downstream validator would have produced.
+      // It is a MALFORMED-REQUEST answer, not a narrowing: no caller gains or loses a capability from
+      // it, and the code and field are the ones the request was already going to get.
       //
-      // It stays unconditional because it is a MALFORMED-REQUEST answer, not a narrowing: no caller
-      // gains or loses a capability from it, the code and field are the ones the request was already
-      // going to get, and gating it would mean the flag-off deployment keeps the exact shape that
-      // makes the flag-on gate skippable — a trap for whoever turns the flag on next.
+      // WHY THE `!hasPermission(user, 'admin')` CONJUNCT BELOW IS LOAD-BEARING, and not the leftover
+      // it now looks like. It is what scopes this 400 to the operator branch, and it is deliberately
+      // the SAME EXPRESSION, with the same `legacyGate` value, that `requireTableActionAccess`
+      // admits on FIRST — so the two cannot disagree about which branch a caller took. (That helper
+      // RETURNS THE USER; it does not return from this route. Nothing else here excuses an admin.)
+      // Delete the conjunct and a platform admin who sends `{"projectNo": 230920006}` stops getting
+      // the late downstream 400 it gets today and starts getting an early one from here — a
+      // behaviour change on the branch this whole route promises to leave byte-for-byte alone.
       const reconcileParameters = body.parameters
       const reconcileProjectNoRaw = reconcileParameters && typeof reconcileParameters === 'object' && !Array.isArray(reconcileParameters)
         ? reconcileParameters.projectNo
@@ -5912,27 +5890,6 @@ function requireStockPreparationAudit() {
           'projectNo must be a non-empty string',
           { field: 'parameters.projectNo' },
         )
-      }
-      if (reconcileProjectNo && !hasPermission(user, 'admin') && stockPreparationReconcileProjectDirectoryGateEnabled()) {
-        // Resolved a SECOND time on purpose. The gate above resolves a scope for its refusals and
-        // returns only the user (see `requireTableActionAccess`'s header), and widening that helper's
-        // return shape would touch every table-action route for the benefit of one. The cost is one
-        // extra host membership boolean on the operator branch of a single route; the alternative —
-        // deriving the tenant here some cheaper way — is exactly the "another way to decide tenancy"
-        // the operator-scope module forbids.
-        const reconcileScope = await resolveOperatorValueScope({
-          user,
-          authenticatedTenantId: req.authenticatedTenantId,
-          explicitTenantIds: collectExplicitTenantIds(req, {}),
-          tenantPrincipalDirectory,
-        })
-        await assertOperatorMaySeeProject({
-          recordsApi: getMultitableRecordsApi(),
-          provisioning: getMultitableProvisioning(),
-          targetProjectId: resolveIntegrationStagingProjectId(reconcileScope.tenantId, undefined),
-          scope: reconcileScope,
-          projectNo: reconcileProjectNo,
-        })
       }
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction({ tenantId, actionId }))
@@ -5983,8 +5940,36 @@ function requireStockPreparationAudit() {
       // generation is a generation run with a fixed operation subtype, not a new action. Audit the
       // intent BEFORE the multitable write so an audit-store refusal cannot leave a committed
       // ledger row behind a failed HTTP response.
+      //
+      // WHICH PROJECT — `project_id`, the nullable column migration 066 has carried since day one
+      // (`066:22`), filled here with the projectNo the CALLER put in its own request body and this
+      // route already resolved at the top of the handler for the malformed-request 400. Same calibre
+      // as the `prep_line_export` append's `projectId: projectNo`, and as the `input.projectId` the
+      // whole MVP mapping / unit / exception family already writes: a handle, not a value, and one
+      // the caller supplied — writing it back tells nobody anything they did not just say.
+      //
+      // NOT in tension with the board's deliberate NULL. That rule is scoped, by its own migration
+      // (086 — the number the `stockPreparationOperatorProjectBoard` comment below now also carries;
+      // both said 083, the number that file was written under before the 084/085 renumber, and there
+      // is no 083 in the tree), to the READ whose hit/miss would otherwise make the trail an existence
+      // oracle for a project number the caller was guessing at.
+      // Reconcile is a WRITE whose projectNo came from the request, so there is no oracle to build.
+      // The audit store shape-gates neither this column nor `actor` on purpose
+      // (stock-preparation-audit-store.cjs:20-22 — "their discipline lives at the ROUTES"), which is
+      // exactly why the discipline is spelled out here.
+      //
+      // NO LINE NUMBERS INTO THIS FILE, deliberately: the ones an earlier draft carried (`:8509`,
+      // `:9020`) were already wrong when they were written and were wrong again the moment this
+      // comment block shifted the file. Handler names do not rot.
+      //
+      // WHAT IT BUYS: the audit list route (`stockPreparationAuditList`) already filters by
+      // `project_id`, so with this row filled "who touched this project's QUEUE, and when" becomes
+      // answerable — the gap was never the whole trail, it was these two writes: reconcile here and
+      // the confirm below. Still NULL by design elsewhere: the board reads, `project_directory_read`,
+      // and `source_binding_set`.
       await audit.append({
         tenantId,
+        projectId: reconcileProjectNo,
         action: 'generation_run',
         subjectId: action.actionId,
         mode: 'confirmation_reconcile_requested',
@@ -8160,14 +8145,81 @@ function requireStockPreparationAudit() {
         tenantPrincipalDirectory,
       })
       const tenantId = scope.tenantId
+      // WHICH PROJECT — resolved BEFORE the intent row below, because that row is the only one this
+      // route writes and a decisionId alone does not say which project's queue is being closed.
+      //
+      // SOFT ON EVERY AXIS, and it has to be: the intent append below is deliberately the FIRST
+      // effect of this handler (see its comment), and a lookup that could refuse, throw or 404 ahead
+      // of it would quietly convert today's "audit row + error" into "no audit row + error" — the
+      // same invariant the `resolutionAction` spread three lines down exists to protect. So:
+      //   * no decisionId in the request at all => no lookup, `projectId` stays null, and the
+      //     module's own named validation error still reaches the caller from the write below;
+      //   * 0 rows or >1 rows => the module answers `projectNo: null` rather than throwing, and the
+      //     404/409 that shape deserves still comes from `confirmConfirmationDecision`, unchanged;
+      //   * the lookup ITSELF THROWING (no ledger sheet, a records API that rejects) => swallowed
+      //     here. The request then behaves exactly as it does on main: intent row first, then the
+      //     real failure.
+      // Nothing about the request's status code, error code or ordering changes; the only difference
+      // is whether one nullable audit column is filled.
+      //
+      // WHAT THE CATCH DOES NOT COVER, stated plainly because it is the honest limit of the claim
+      // above: a records service that HANGS rather than throws. `catch` cannot shorten a wait, so a
+      // stuck multitable now delays the intent append by however long the driver takes to give up —
+      // and a client that disconnects first leaves no audit row at all, where on main the append was
+      // this handler's first IO and could not be delayed by anything. There is no timeout here today.
+      // If that window ever matters, the fix is a short deadline around this call, not moving it.
+      //
+      // WHAT IT COSTS, also stated: this is a second trip to the same ledger row that
+      // `confirmConfirmationDecision` looks up a moment later — one `findObjectSheet` plus one
+      // `queryRecords`, measured as 4 -> 7 host calls per confirm on the permission-matrix harness. It
+      // is paid on EVERY confirm that carries a decisionId, including the ones destined for 404/409,
+      // and it runs ahead of the module's own required-field validation, so a request with a
+      // decisionId but no `inputFingerprint` now does ledger IO where main did none. The caller is
+      // already past STOCK_PREP_OPERATE and the operator-scope wall, so this is cost, not exposure;
+      // sharing one read between the two would need `confirmConfirmationDecision` to hand its row
+      // back, which is a bigger change than the column is worth today.
+      //
+      // The staging derivation is written in the ONE reviewed form
+      // (`resolveIntegrationStagingProjectId(scope.tenantId, undefined)`) that
+      // stock-preparation-tenant-scoped-write-guard.test.cjs pins for every inline-staging member of
+      // the value-bearing set — the project comes from the RESOLVED SCOPE, never from the request.
+      const confirmDecisionId = firstString(input.decisionId)
+      let confirmProjectNo = null
+      if (confirmDecisionId) {
+        try {
+          const located = await readConfirmationDecisionProjectNo({
+            recordsApi: getMultitableRecordsApi(),
+            provisioning: getMultitableProvisioning(),
+            targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+            permission: 'admin',
+            decisionId: confirmDecisionId,
+          })
+          confirmProjectNo = located && located.projectNo ? located.projectNo : null
+        } catch {
+          // FAIL-OPEN, on purpose. See above: this is a nullable audit column, not a gate.
+          //
+          // It swallows PROGRAMMING errors too — rename the export and every confirm silently files
+          // a NULL instead of crashing. That is the right trade here (a broken audit column must not
+          // break confirms) and it is not unwatched: the happy-path case in
+          // stock-preparation-permission-matrix.test.cjs asserts the column equals the ledger's
+          // projectNo, so a degraded-to-always-NULL lookup goes red there.
+          confirmProjectNo = null
+        }
+      }
       // A confirmation resolves a planner exception, so it rides the existing exception_resolve
       // audit action with a fixed operation subtype (the audit vocabulary is migration-frozen).
       // Record intent FIRST: if the SQL audit store is unavailable or refuses the payload, no
       // multitable patch may occur.
       await audit.append({
         tenantId,
+        // The ledger row's own project handle — same calibre as the export's and reconcile's. NULL
+        // whenever the lookup could not name exactly one row, whenever that row's cell is empty or
+        // is not handle-shaped (the export applies a length / control-character floor, because unlike
+        // reconcile's this string comes out of a cell a person can type into), and whenever the
+        // lookup itself threw.
+        projectId: confirmProjectNo,
         action: 'exception_resolve',
-        subjectId: firstString(input.decisionId),
+        subjectId: confirmDecisionId,
         mode: 'confirmation_decision_requested',
         actor: user.id || user.email,
         detail: {
@@ -9017,8 +9069,9 @@ function requireStockPreparationAudit() {
       }
       // VALUES-FREE AUDIT over a value-bearing response, appended BEFORE the values reach the caller
       // so a refusing audit store means no board is ever sent (H3-0 ③, fail-closed). project_id stays
-      // NULL and the projectNo appears nowhere: migration 083 says why that matters most here, on the
-      // one route that is ABOUT a single project.
+      // NULL and the projectNo appears nowhere: migration 086 says why that matters most here, on the
+      // one route that is ABOUT a single project. (086, not 083: this file was written as 083 and
+      // renumbered to run after 085 — 086:36-49 tells that story itself. There is no 083 in the tree.)
       await audit.append({
         tenantId: scope.tenantId,
         action: STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,

@@ -341,6 +341,10 @@ import {
   enqueueElearningStatsDailyJobs,
 } from './services/elearning-stats-daily-job-producer'
 import {
+  projectElearningStatsToMultitable,
+  reconcileElearningStatsMultitable,
+} from './services/elearning-stats-multitable-projection'
+import {
   cleanupElearningAnalyticsExport,
   ElearningAnalyticsExportError,
   materializeElearningAnalyticsExport,
@@ -977,6 +981,13 @@ export class MetaSheetServer {
           },
         },
         records: {
+          // W9: this records surface routes `queryRecords` straight to the multitable query
+          // service, which builds `data ->> $k = ANY($v::text[])` for an array filter value. The
+          // declaration lives HERE, next to the implementation it describes, so a caller can tell
+          // "the host cannot do this" from "the query was invalid" without guessing from an error
+          // message. Wrapping surfaces (plugin-scope, the plugin's own target fence) forward it
+          // only when the surface underneath declares it.
+          supportsFilterValueLists: true,
           listRecords: async ({ sheetId, limit, offset }) => {
             const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -2158,6 +2169,11 @@ export class MetaSheetServer {
                   throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
                 }
               }
+              // W8-4 (L1). Reporting `registered` keeps the tolerated-unregistered case OUT of the
+              // request-scoped memo (`plugin-scope.ts`), so the warning above still fires once per
+              // records call rather than once per scope — it is the signal P0-S S4 reads to decide
+              // whether the registry backfill is complete enough to flip this mode to `enforce`.
+              return { registered: ownsSheet }
             },
             runStockPreparationPersistUnitOfWork: async (
               { pluginName, ...rawInput },
@@ -2441,6 +2457,9 @@ export class MetaSheetServer {
                   if (!isElearningAnalyticsSurfaceEnabled()) {
                     throw new ElearningStatsDailyJobProducerError('unavailable')
                   }
+                  await reconcileElearningStatsMultitable(poolManager.get()).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_reconcile_failed')
+                  })
                   return enqueueElearningStatsDailyJobs(poolManager.get())
                 },
                 project: async (
@@ -2449,7 +2468,11 @@ export class MetaSheetServer {
                   if (!isElearningAnalyticsSurfaceEnabled()) {
                     throw new ElearningStatsDailyProjectionError('unavailable')
                   }
-                  return projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                  const result = await projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                  await projectElearningStatsToMultitable(poolManager.get(), input).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_projection_failed')
+                  })
+                  return result
                 },
               }
             : undefined,
