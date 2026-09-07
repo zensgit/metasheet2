@@ -8,8 +8,18 @@ name: Approval real-DB acceptance (list scope determined server-side)
 #     nothing, `tab` is a filter WITHIN that scope (absent ⇒ the documented `pending` default,
 #     unknown ⇒ 400 APPROVAL_TAB_INVALID), and the org conjunct is proven correct with
 #     APPROVAL_S1_ORG_PIN_ENABLED forced ON in-process while it ships dormant.
-# The org pin ships DEFAULT OFF and nothing in this lane flips the shipped default — the suite's own
-# afterEach clears the in-process override.
+#   - tests/integration/approval-admin-capability-realdb.db.test.ts — the approval-ADMINISTRATOR
+#     capability that the batch-transfer page and its nav entry gate on: the predicate
+#     `is_active = TRUE AND (is_admin = TRUE OR role = 'admin')` executed against real PostgreSQL
+#     (both true arms, the token-only-admin negative, the deactivated row, the absent row) plus the
+#     NOT NULL constraints that keep the predicate two-valued — a row with NULL in those columns
+#     cannot be seeded, which is itself something only the real schema could establish —
+#     the route's own true/false-as-data behaviour, and — the point of running it here rather than
+#     in its own lane — that the identity the capability calls an administrator is the SAME one the
+#     list scope above serves another approver's row to. That agreement had only ever been
+#     established as text agreement between two source strings.
+# The org pin ships DEFAULT OFF and nothing in this lane flips the shipped default — the list-scope
+# suite's own afterEach clears the in-process override, and the capability suite never sets it.
 # Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
@@ -37,6 +47,8 @@ on:
     # filter keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/tests/integration/approval-list-scope-server-side.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-admin-capability-realdb.db.test.ts'
+      - 'packages/core-backend/src/services/approval-admin-capability.ts'
       - 'packages/core-backend/tests/unit/approvals-bridge-routes.test.ts'
       - 'packages/core-backend/tests/integration/approval-wp2-source-filter.api.test.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
@@ -50,6 +62,8 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/approval-list-scope-server-side.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-admin-capability-realdb.db.test.ts'
+      - 'packages/core-backend/src/services/approval-admin-capability.ts'
       - 'packages/core-backend/tests/unit/approvals-bridge-routes.test.ts'
       - 'packages/core-backend/tests/integration/approval-wp2-source-filter.api.test.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
@@ -126,14 +140,15 @@ jobs:
           --config vitest.integration.config.ts run
           tests/integration/approval-list-scope-server-side.db.test.ts
           tests/integration/approval-wp2-source-filter.api.test.ts
+          tests/integration/approval-admin-capability-realdb.db.test.ts
           --reporter=verbose
 
       - name: Values-free evidence (this job)
         run: |
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
-            echo "suites=approval-list-scope-server-side.db.test.ts,approval-wp2-source-filter.api.test.ts"
-            echo "scope=GET /api/approvals server-determined visibility scope; tab default + unknown-tab refusal; org pin (default OFF) forced ON in-process"
+            echo "suites=approval-list-scope-server-side.db.test.ts,approval-wp2-source-filter.api.test.ts,approval-admin-capability-realdb.db.test.ts"
+            echo "scope=GET /api/approvals server-determined visibility scope; tab default + unknown-tab refusal; org pin (default OFF) forced ON in-process; approval-administrator capability predicate + route + its agreement with the scope admin arm"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"

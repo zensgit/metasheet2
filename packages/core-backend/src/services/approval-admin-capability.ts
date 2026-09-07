@@ -17,11 +17,35 @@
  * state, as fact, that the approver has nothing to transfer. That is a claim about another user's
  * queue which a caller-scoped read cannot support.
  *
- * This function answers exactly (3), so the client can gate on the same truth the list scope binds
- * instead of inferring it from a token. It is a READ of an existing predicate — it grants nothing,
- * widens nothing, and is never consulted as an authorization decision: `rbacGuard('approvals:admin')`
- * remains the sole gate on the reassign endpoint, and the list scope remains the sole gate on the
- * projection.
+ * This function answers exactly (3)'s ADMIN ARM, so the client can gate on the same truth the list
+ * scope binds instead of inferring it from a token. It is a READ of an existing predicate — it
+ * grants nothing, widens nothing, and is never consulted as an authorization decision:
+ * `rbacGuard('approvals:admin')` remains the sole gate on the reassign endpoint, and the list scope
+ * remains the sole gate on the projection.
+ *
+ * WHAT "THE ADMIN ARM" LEAVES OUT — the org pin, and why this is a disclosure rather than a fix.
+ * `buildApprovalListScopeCondition`'s arms are one conjunct of the list query. When
+ * `APPROVAL_S1_ORG_PIN_ENABLED` is true (`approval-instance-readability.ts`; DEFAULT OFF, and the
+ * shipped default is asserted by its own gate) `listApprovals` AND-s in a SECOND conjunct
+ * (`ApprovalBridgeService.ts`, the `isOrgPinEnabled()` block): a platform row is admitted only if
+ * its `org_id` is one of `viewerActiveOrgIds(viewer)`. So with the pin ON, a caller this function
+ * calls an approval administrator still sees only the rows inside their own orgs.
+ *
+ * THAT CONJUNCT HAS NO CALLER-LEVEL COUNTERPART, which is why it is not mirrored here. It is a
+ * relation between the viewer's orgs and EACH ROW's `org_id`, not a property of the viewer: no
+ * boolean about the caller can express it. The nearest reusable approximation —
+ * `isOrgPinEnabled() ? viewerActiveOrgIds(...).length > 0 : true` — would be a DIFFERENT predicate
+ * that still fails to close the gap (a viewer WITH orgs is still outside some other org's rows),
+ * would make this endpoint answer a question about visible rows rather than about the caller, would
+ * add a query on a path that is dormant by default, and fails in the direction that HIDES the page
+ * from a genuine administrator. It was considered and rejected.
+ *
+ * RESIDUAL, STATED PLAINLY: with the pin ON, a `granted` administrator who shares no org with the
+ * picked approver's rows is served a narrowed queue, and the batch-transfer page's empty state then
+ * asserts that the approver has nothing to transfer — the same over-strong claim this capability
+ * closed on the token axis, surviving on the org axis. It is not reachable on the shipped default.
+ * Whoever flips `APPROVAL_S1_ORG_PIN_ENABLED` owns closing it, and the page's empty-state copy is
+ * where it has to be closed.
  *
  * DELIBERATELY A SECOND SITE, NOT A REFACTOR OF ARM 5. `buildApprovalListScopeCondition` is
  * Lock-10 / OD-S1-8 governed and its own docblock frames its arm 5 and

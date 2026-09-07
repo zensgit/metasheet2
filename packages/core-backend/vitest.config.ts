@@ -1325,6 +1325,16 @@ export default defineConfig({
       // allowlist entry there would force an s6a re-pin and a merge-serialisation race) — the same
       // precedent the sibling approval-realdb-* lanes above cite.
       'tests/integration/approval-list-scope-server-side.db.test.ts',
+      // P1b round 3 item 6 — the approval-administrator CAPABILITY predicate
+      // (`is_active = TRUE AND (is_admin = TRUE OR role = 'admin')`) executed against real
+      // PostgreSQL, plus its route and its agreement with the list scope's admin arm on one seeded
+      // row. Needs real PostgreSQL for the same reason its sibling above does: the no-DB job's fake
+      // pool answers rows the test wrote and never parses the SQL, so the inactive-row and
+      // NULL-column arms are unfalsifiable there. Excluded here so describeIfDatabase cannot
+      // skip-green it; wired as a WHOLE FILE into the same
+      // .github/workflows/approval-realdb-list-scope.yml lane, which arms EXPECT_DB=1.
+      // plugin-tests.yml is left byte-identical for the s6a re-pin reason cited above.
+      'tests/integration/approval-admin-capability-realdb.db.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

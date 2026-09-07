@@ -2204,6 +2204,16 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
    *
    * It grants nothing. `rbacGuard('approvals:admin')` still gates every admin mutation and the list
    * scope still gates the projection; a client that lies about this value gains no access.
+   *
+   * IT ANSWERS THE SCOPE'S ADMIN ARM, NOT THE WHOLE SCOPE. `listApprovals` conjoins a SECOND
+   * condition when `APPROVAL_S1_ORG_PIN_ENABLED` is true (default OFF): a platform row is admitted
+   * only if its `org_id` is one of the viewer's active orgs. That is a per-ROW relation with no
+   * caller-level counterpart, so it is deliberately not mirrored in this boolean — see
+   * `services/approval-admin-capability.ts` for the rejected reuse and the reasoning. CONSEQUENCE,
+   * disclosed rather than discovered: with the pin ON, a client told `true` here may still be served
+   * fewer rows than that answer implies, and a client that renders "this approver has nothing
+   * pending" off an empty list is making a claim this endpoint does not support. Not reachable on
+   * the shipped default.
    */
   r.get('/api/approvals/admin/capability', authenticate, async (req: Request, res: Response) => {
     try {
