@@ -2,6 +2,37 @@
 
 Status: IN PROGRESS / DRAFT-HOLD. This report is not completion or release evidence.
 
+## Current delivery snapshot (supersedes chronological pending notes below)
+
+Candidate product/CI head: `a71d0020bd9e45725c79cd2420a39d74bbb5aa03`.
+Live main readback: `976711b254d129e6c23bf8327c4be67018942ba3`.
+The sections below retain failed attempts and intermediate states as history,
+not as current blockers. No production or customer-data verification is claimed.
+
+The user-visible path is attendance report fields → open multitable → edit the
+two proposal fields → load proposals → review → explicit confirm. Canonical
+attendance remains authoritative; arbitrary cell edits do not become attendance
+facts. This ratified slice corrects the five anomalous daily statuses to normal,
+not raw punch timestamps, business-trip, leave or overtime facts.
+
+| Gate | Verified local evidence |
+| --- | --- |
+| Real PostgreSQL authority, W4 registry and HTTP | Node 18 and 20: 74/74 each |
+| Dedicated plugin unit suites | 45/45 |
+| Dedicated UI plus workflow contract after final P2 fix | 41 + 6 = 47/47 |
+| Administrator / self-service neighbors | 144/144 and 59/59 |
+| Original attendance web command | 65 files / 1257 tests on 15d0d7f1; later UI delta separately verified |
+| Required-web command | 13 batches, 514 files / 7228 tests PASS, terminal exit 0 on a71d0020 |
+| Type/syntax/diff checks | backend tsc, vue-tsc, CJS syntax, diff-check PASS |
+| Browser positive control | Real Vue/Chromium, synthetic intercepted API; not full-stack E2E |
+| Final narrow review | No P1; one metadata ordering P2 reproduced RED then fixed |
+
+Task synthetic database cleanup is complete: exact owned full database dropped,
+remaining task-prefixed databases and active backends both zero; dedicated PG15
+instance stopped. Local evidence/results are retained. Pending delivery steps:
+ordinary push and Draft/HOLD publication with exact-head CI readback. No Ready,
+merge, flag enablement, workflow dispatch or deployment is authorized by this report.
+
 ## Authority and baseline
 
 Owner ratified OD-ATC-12A(a) in the owning task; the exact approved contract is
@@ -26,7 +57,7 @@ Duplicate rows now stop before managed first-row repair.
 
 The apply route, locked W4 authorization/replay and pending-proposal UI are now
 implemented locally; the chronological evidence below distinguishes each gate.
-Final required CI selection, candidate review and publication remain incomplete.
+Required CI selection and candidate review are implemented; publication is pending.
 No public PR has been published for this implementation. No runtime flag has been enabled.
 
 ## Evidence and defects
@@ -472,7 +503,7 @@ Completed since the initial checkpoint: concurrent HTTP dual-CAS/cleanup races,
 anchor recreation precision negatives, discriminating mutations, user-visible
 review UI, and CI selector union. The full attendance web command passed on
 15d0d7f1 (65 files / 1257 tests). Required-web execution and final task DB
-shutdown/cleanup remain pending; the synthetic DB is retained until then.
+shutdown/cleanup were subsequently completed as recorded in the current snapshot.
 
 Final narrow review found no P1 and one metadata request-order P2. Three new
 deferred-response cases were RED before the fix: stale success cleared current
@@ -480,6 +511,23 @@ loading; a late old response replaced the new catalog; stale error cleared loadi
 and displayed an old error. A request epoch now guards success, catch and finally.
 After the fix, the dedicated UI suite passes 41/41, the workflow contract 6/6,
 and vue-tsc passes. This does not expand apply authority or change backend logic.
+
+Final required-web command: Node20, `NODE_OPTIONS=--max-old-space-size=8192`,
+web cwd, `bash scripts/run-required-web-tests.sh`. All 13 batches pass: file
+counts 35,1,2,2,6,27,3,2,2,2,1,4,427 (514 total); assertions
+605,23,21,28,58,376,185,95,7,71,9,104,5646 (7228 total). Terminal exit 0.
+No Vitest Unhandled Errors/Rejection/Uncaught Exception or fatal heap report.
+The Vue async-loader warning and mocked import Error belong to the deliberate
+`multitable-chart-load-error.spec.ts` negative (explicit throw at line 70); its
+four cases pass. Expected network-failure warnings and nonfatal WebSocket port
+warnings remain visible in the retained log; they were not suppressed.
+
+Prepublication OPEN attendance-related audit found no competing ACP implementation.
+Historical #4630 at 7d8ba0d1 has broad index/types/registry path overlap, but is an
+old diverged stack (56 ahead / 1187 behind main), not an active ACP write lock.
+Its diff contains no ACP cleaning/projection-anchor implementation. It was not
+absorbed or rebased. Coordinator confirmed this distinction; #5362/#5364 remain
+untouched. Main still read back as 976711b254d129e6c23bf8327c4be67018942ba3.
 
 ## Exact current file census
 
