@@ -336,7 +336,19 @@ function renderedTextAndAttributes(root: HTMLElement): string {
 // and `：`(U+FF1A), both present in templateCenterLabels.ts's ZH table, previously fell outside
 // the class entirely, so a punctuation-only stray literal (no U+4E00–U+9FFF characters at all)
 // would have passed every sweep and the guard below undetected.
-const CJK = /[一-鿿＀-￯]/
+//
+// Round-3 fix (verifier): that widening still left the CJK Symbols and Punctuation block
+// (U+3000–U+303F) out, so the round-2 claim that "a punctuation-only stray literal cannot pass
+// undetected" was over-stated: the ideographic comma U+3001 and full stop U+3002 are the two most
+// common Chinese punctuation marks of all and both sat outside the class. Verified by mutation —
+// before this line, appending U+3002 to an EN label value AND inserting a bare U+3001/U+3002 pair
+// into TemplateCenterView.vue's template together left all 16 tests green. Widening only ADDS
+// detection, so every existing probe still reddens; and no value in either locale table, and no
+// scanned line of either converted file, contains a U+3000–U+303F character today (the only two
+// occurrences in TemplateCenterView.vue sit inside an HTML comment, which is stripped before the
+// scan), so this is byte-equivalent in effect at this head — the unmutated 16/16 green run below
+// is the positive control for that.
+const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/
 
 describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
   let app: VueApp<Element> | null = null
