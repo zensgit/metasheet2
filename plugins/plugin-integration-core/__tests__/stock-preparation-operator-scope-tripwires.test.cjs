@@ -130,8 +130,37 @@ const EXTRA_COLUMN_CANARY = 'ZZEXTRACOLUMNCANARYZZ'
 const EXTRA_COLUMN_PHYSICAL_ID = 'fld_zzunknowncolumnzz1234'
 
 /** The ten keys an operator project row may carry. A new key here is a widening — restate it. */
+// CONTRACT REVIEW — 设计稿 N1/N6, this PR. THE ROW GREW BY FOUR, and each one is argued for here
+// because this list is the only place a row key can be added at all:
+//
+//   `sources`                     WHICH STORE(S) ANSWERED — `['mvp']`, `['pull_target']`, or both.
+//       The directory is now a union, and the two stores are written by two different TIERS: the
+//       archive by `mvp-persist` (platform-admin, and empty on the flow the operator tier exists
+//       for), the pull target by the operator's own `apply`. Without this token a pull-only row's
+//       zeros read as 「归档里是零」 rather than 「还没归档」 — the same conflation that made a
+//       successful import look like nothing had happened on 项目备料页. Values-free: a closed
+//       two-token vocabulary, fixed in code.
+//   `lastChangedFromPlmAt`        当 project 的行最近一次从 PLM 变更的时刻, ISO or null. The board
+//       already returns this field, computed by the SAME shared scan; the directory had no
+//       timestamp at all, so time filtering and sorting were impossible (设计稿 N6).
+//   `lastChangedFromPlmBounded`   THE THIRD STATE. A max over a truncated, unordered page scan is
+//       not a floor the way a truncated count is — rows past the bound may be NEWER — so the
+//       bounded case reports a null timestamp and sets this flag instead of quietly understating
+//       freshness. It is also true when nobody scanned at all, because a row travels alone into a
+//       table cell or a sort key and cannot consult a top-level flag. 「未知」 and 「从未变更」 must
+//       not be the same pixel.
+//   `lastExportAt`                最近一次导出物料清单的时刻, ISO or null, from the values-free audit
+//       trail — the same fact 项目备料页 shows for one project, read here for the whole tenant in
+//       ONE bounded window (see the response-level `lastExportAtMayBeIncomplete`).
+//
+// NONE of the four is a customer ROW VALUE: two timestamps, one boolean and one closed enum list.
+// The two value-bearing fields on this row are still exactly `projectNo` and `projectName`, and
+// S-02b pins that the pull target's own part names and quantities reach no byte of this response.
 const OPERATOR_PROJECT_PROJECTION = Object.freeze([
   'heldLineCount',
+  'lastChangedFromPlmAt',
+  'lastChangedFromPlmBounded',
+  'lastExportAt',
   'lastSyncRunId',
   'openExceptionCount',
   'pendingDecisionCount',
@@ -141,6 +170,7 @@ const OPERATOR_PROJECT_PROJECTION = Object.freeze([
   'projectStatus',
   'readyLineCount',
   'snapshotBatchCount',
+  'sources',
 ])
 
 // ---------------------------------------------------------------------------
@@ -466,16 +496,55 @@ async function main() {
   // S-02 THE RESPONSE PROJECTION IS KEY-PINNED
   // -------------------------------------------------------------------------
 
-  await run('S-02a every project row carries EXACTLY the ten-key projection', async () => {
+  await run('S-02a the response and every project row carry EXACTLY the frozen projections', async () => {
     const { routes } = mount()
     const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
     assert.equal(res.statusCode, 200)
+    // ─────────────────────────────────────────────────────────────────────────
+    // CONTRACT REVIEW — 设计稿 N1/N2/N6, this PR. THE TOP-LEVEL KEY SET GREW BY THREE.
+    //
+    // This assertion is the review gate: a key reaches this list because somebody argued for it
+    // here, never because a response object happened to grow one. The three additions, and what
+    // each is for:
+    //
+    //   `pullTargetReady`            WAS THE OPERATOR'S OWN STORE READABLE AT ALL. The directory is
+    //       now a UNION over the MVP archive and the bound table-action target — the sheet the
+    //       operator's own pull writes, and the only store their run touches. When nothing is
+    //       bound, when the bound sheet is not provably the caller's own, or when the scan throws,
+    //       the union contributes nothing and every timestamp is an "unknown". Without this
+    //       boolean, 「这个部署还没绑外接源」 and 「你确实没有项目」 are the same empty screen — the
+    //       exact class of collapsed empty state `directoryReady`/`ledgerReady` already exist to
+    //       prevent.
+    //
+    //   `directoryMayBeIncomplete`   THE ANTI-SILENT-TRUNCATION FLAG, required by 设计稿 N1 in as
+    //       many words ("超限时必须返回『可能不全』标志,不得静默截断"). The union scan is bounded by
+    //       the export's own PULL_TARGET_MAX_PAGES, and the merge is bounded by MAX_LIST_ROWS. A
+    //       "find my project" surface that silently returns a prefix tells an operator their
+    //       project does not exist. It is deliberately NOT the same fact as `pullTargetReady`: a
+    //       deployment with nothing bound has no pull-target projects to be missing, and a flag
+    //       that was permanently true there would train every reader to ignore it.
+    //
+    //   `lastExportAtMayBeIncomplete`  THE SAME HONESTY FOR THE EXPORT COLUMN. `lastExportAt` is
+    //       read from ONE bounded descending window over the values-free audit trail (the audit
+    //       table has no index on project_id, so one query per project is not an option on a home
+    //       page). When that window comes back full, a project whose last export fell outside it is
+    //       indistinguishable from one that has never been exported — and 「从未导出」 is a claim,
+    //       not an absence.
+    //
+    // ALL THREE ARE BOOLEANS ABOUT THE READ ITSELF, not about a customer row: they disclose
+    // nothing that `directoryReady` and `ledgerReady` did not already disclose. The value-bearing
+    // addition in this PR is `pendingCountsByProjectNo`, whose KEYS are customer project numbers —
+    // and it is deliberately NOT in this list, because it is opt-in. S-02c pins that.
+    // ─────────────────────────────────────────────────────────────────────────
     assert.deepEqual(Object.keys(res.body.data).sort(), [
+      'directoryMayBeIncomplete',
       'directoryReady',
+      'lastExportAtMayBeIncomplete',
       'ledgerReady',
       'pendingProjectCount',
       'projectCount',
       'projects',
+      'pullTargetReady',
       'tenantId',
     ])
     assert.ok(res.body.data.projects.length > 0, 'precondition: there is a row to pin')
@@ -483,6 +552,36 @@ async function main() {
       assert.deepEqual(Object.keys(project).sort(), OPERATOR_PROJECT_PROJECTION,
         'a row must be BUILT key by key, never spread from the stored record')
     }
+  })
+
+  await run('S-02c the pending INDEX is opt-in — absent by default, and only "1" opens it', async () => {
+    // 设计稿 N2. The index is keyed by CUSTOMER PROJECT NUMBERS, so making it default would widen a
+    // value-bearing projection without anyone asking. The default response above must not contain
+    // it, and this is the assertion that goes red if someone later moves it into the base object.
+    const { routes } = mount()
+    const plain = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(Object.prototype.hasOwnProperty.call(plain.body.data, 'pendingCountsByProjectNo'), false)
+
+    const asked = await call(routes, 'GET', DIRECTORY_PATH, {
+      user: OPERATOR_A,
+      query: { includePendingCounts: '1' },
+    })
+    assert.equal(asked.statusCode, 200)
+    assert.deepEqual(Object.keys(asked.body.data).sort(), [
+      'directoryMayBeIncomplete',
+      'directoryReady',
+      'lastExportAtMayBeIncomplete',
+      'ledgerReady',
+      'pendingCountsByProjectNo',
+      'pendingProjectCount',
+      'projectCount',
+      'projects',
+      'pullTargetReady',
+      'tenantId',
+    ], 'the opt-in adds EXACTLY one key and changes nothing else')
+    // …and the in-process Map channel never reaches the wire under either shape: a Map would
+    // serialize as `{}` and quietly report "nothing pending" for the whole tenant.
+    assert.equal(Object.prototype.hasOwnProperty.call(asked.body.data, 'pendingByProjectNo'), false)
   })
 
   await run('S-02b neither the omitted template field NOR an unknown column reaches any byte', async () => {

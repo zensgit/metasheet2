@@ -57,10 +57,20 @@ const {
 } = require(path.join(LIB, 'stock-preparation-confirmation-decisions.cjs'))
 const {
   PROJECT_OBJECT_ID,
+  listOperatorProjectDirectory,
+  __internals: { EXPORT_AUDIT_WINDOW },
 } = require(path.join(LIB, 'stock-preparation-operator-project-directory.cjs'))
+const {
+  PULL_TARGET_MAX_PAGES,
+  PULL_TARGET_PAGE_LIMIT,
+} = require(path.join(LIB, 'stock-preparation-pull-target-scan.cjs'))
+const {
+  __internals: { MAX_LIST_ROWS },
+} = require(path.join(LIB, 'stock-preparation-project-reads.cjs'))
 const {
   makeFakeProvisioning,
   makeStrictRecordsApi,
+  physicalFieldId,
   physicalRow,
 } = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
 
@@ -89,6 +99,42 @@ const PROJECT_A_ID = 'stockprep_project_a1'
 const PROJECT_A2_NO = '230920007'
 const PROJECT_A2_NAME = 'RY2纯化水储罐部件'
 const PROJECT_A2_ID = 'stockprep_project_a2'
+
+// ---------------------------------------------------------------------------
+// 设计稿 N1/N2/N6 — THE SECOND STORE
+// ---------------------------------------------------------------------------
+//
+// The bound table-action target: the sheet the operator's OWN four-step pull writes, and the sheet
+// the export reads. It is the ONLY store a floor operator's run touches — `mvp-persist`, which fills
+// the project ledger above, stayed platform-admin — so a project they pulled themselves lives here
+// and NOWHERE else. The directory is now a union over the two, keyed by project number.
+const MAIN_OBJECT_ID = 'plm_stock_preparation_main'
+/** The deterministic sheet id the CALLER'S OWN provisioning computes — the tenant gate's yardstick. */
+const MAIN_SHEET_A = `sheet__${STAGING_A}__${MAIN_OBJECT_ID}`
+const MAIN_FIELD_ID_MAP = Object.freeze({
+  projectNo: physicalFieldId(STAGING_A, MAIN_OBJECT_ID, 'projectNo'),
+  active: physicalFieldId(STAGING_A, MAIN_OBJECT_ID, 'active'),
+  lastPlmRefreshAt: physicalFieldId(STAGING_A, MAIN_OBJECT_ID, 'lastPlmRefreshAt'),
+})
+
+/** Two projects that exist ONLY in the pull target — the self-service main line F1 describes. */
+const PROJECT_A3_NO = '230920008'
+const PROJECT_A4_NO = '230920009'
+
+/**
+ * A PART NAME planted in the pull target's own `componentName` column.
+ *
+ * This is the canary N1 makes necessary: the union's second store is a MATERIALS table, one row per
+ * BOM line, carrying part numbers, names, specs and quantities. The directory is a values-free
+ * projection over project-level facts — numbers, counts, enums, timestamps — and a scan that leaked
+ * a row value out of that table would be a new disclosure class, not a widening of an old one.
+ */
+const PART_CANARY = 'ZZPARTNAMECANARYZZ'
+
+const EXPORT_AT_A = '2026-09-01T02:03:04.000Z'
+const EXPORT_AT_A_OLDER = '2026-08-01T02:03:04.000Z'
+const PLM_REFRESH_OLD = '2026-08-20T01:00:00.000Z'
+const PLM_REFRESH_NEW = '2026-08-27T09:30:00.000Z'
 
 // ---------------------------------------------------------------------------
 // actors
@@ -148,6 +194,13 @@ function decisionRow(stagingProjectId, sheetId, recordId, fields) {
   return row
 }
 
+/** One BOM line in the bound table-action target — the sheet the operator's OWN pull writes. */
+function mainRow(stagingProjectId, sheetId, recordId, fields) {
+  const row = physicalRow(stagingProjectId, MAIN_OBJECT_ID, fields, recordId)
+  row.sheetId = sheetId
+  return row
+}
+
 /**
  * A TWO-TENANT substrate. The shipped fixtures are scoped to one staging project each (a lookup with
  * any other projectId misses, mirroring the real provisioning scope), so the cross-tenant guard is
@@ -163,7 +216,24 @@ function mount({
   // G-05c — `undefined` models an audit store with no `supportsAction` at all (the vocabulary guard
   // returns at its first line, fail-open), which is what every other case here wants.
   auditSupportsAction,
+  // ── 设计稿 N1/N2/N6 knobs. All default to the PRE-EXISTING world: no bound table action, no main
+  //    table, no audit `list`. Every guard written before this change therefore runs against exactly
+  //    the substrate it was written against, and the new state is opt-in per scenario.
+  //
+  // `null` = no table action is configured at all (the default, and a real deployment state).
+  // An ARRAY = the rows the operator's own pull put in the bound target, `{ projectNo, active,
+  // lastPlmRefreshAt, componentName }` per row.
+  mainTableRows = null,
+  // Which sheet the action is bound to. Defaults to the caller's OWN deterministic id, which is what
+  // the tenant gate demands; a scenario that models a foreign binding overrides it.
+  boundSheetIdOverride = null,
+  // `null` = the audit store has no `list` at all (the default). An ARRAY = what one descending
+  // window over `prep_line_export` returns, newest first, as the store would return it.
+  auditEntries = null,
+  // MVP-side rows. `false` models the self-service main line: nobody ever ran mvp-persist here.
+  archivePersisted = true,
 } = {}) {
+  const MAIN_SHEET = boundSheetIdOverride || MAIN_SHEET_A
   const routes = new Map()
 
   const missingA = new Set()
@@ -172,7 +242,11 @@ function mount({
 
   const provisioningA = makeFakeProvisioning({
     stagingProjectId: STAGING_A,
-    sheetIdByObjectId: { [PROJECT_OBJECT_ID]: PROJECT_SHEET_A, [DECISION_OBJECT_ID]: LEDGER_SHEET_A },
+    sheetIdByObjectId: {
+      [PROJECT_OBJECT_ID]: PROJECT_SHEET_A,
+      [DECISION_OBJECT_ID]: LEDGER_SHEET_A,
+      ...(mainTableRows ? { [MAIN_OBJECT_ID]: MAIN_SHEET } : {}),
+    },
     missing: missingA,
   })
   const provisioningB = makeFakeProvisioning({
@@ -181,9 +255,25 @@ function mount({
   })
   const recordsA = makeStrictRecordsApi({
     stagingProjectId: STAGING_A,
-    objectIdBySheetId: { [PROJECT_SHEET_A]: PROJECT_OBJECT_ID, [LEDGER_SHEET_A]: DECISION_OBJECT_ID },
+    objectIdBySheetId: {
+      [PROJECT_SHEET_A]: PROJECT_OBJECT_ID,
+      [LEDGER_SHEET_A]: DECISION_OBJECT_ID,
+      ...(mainTableRows ? { [MAIN_SHEET]: MAIN_OBJECT_ID } : {}),
+    },
     rowsBySheet: {
-      [PROJECT_SHEET_A]: [
+      ...(mainTableRows ? {
+        [MAIN_SHEET]: mainTableRows.map((row, index) => mainRow(STAGING_A, MAIN_SHEET, `rec_main_a${index}`, {
+          projectNo: row.projectNo,
+          idempotencyKey: `idem_${index}`,
+          componentSourceId: `comp_${index}`,
+          path: `/${index}`,
+          totalQuantity: 1,
+          active: row.active !== false,
+          ...(row.componentName !== undefined ? { componentName: row.componentName } : {}),
+          ...(row.lastPlmRefreshAt !== undefined ? { lastPlmRefreshAt: row.lastPlmRefreshAt } : {}),
+        })),
+      } : {}),
+      [PROJECT_SHEET_A]: archivePersisted ? [
         projectRow(STAGING_A, PROJECT_SHEET_A, 'rec_a1', {
           projectId: PROJECT_A_ID,
           sourceProjectNo: PROJECT_A_NO,
@@ -198,7 +288,7 @@ function mount({
           projectStatus: 'active',
           lastSyncRunId: 'run_a2',
         }),
-      ],
+      ] : [],
       [LEDGER_SHEET_A]: [
         // TWO pending rows on project A, so a count that silently collapsed to a boolean would show.
         decisionRow(STAGING_A, LEDGER_SHEET_A, 'rec_d1', {
@@ -265,13 +355,25 @@ function mount({
     async resolveFieldIds(input = {}) {
       return provisioningA.resolveFieldIds(input)
     },
+    // The host's PURE id derivation — the yardstick the bound target's sheet id is compared against.
+    getObjectSheetId(projectId, objectId) {
+      return `sheet__${projectId}__${objectId}`
+    },
+    // The host's OWNERSHIP question, a BOOLEAN about the project we name. ONLY tenant A's own
+    // staging project owns the main sheet; tenant B asking about it gets `false` and therefore never
+    // reads a row of it, which is what makes the cross-tenant guard below non-vacuous.
+    async isSheetOwnedByProject(sheetId, projectId) {
+      return sheetId === MAIN_SHEET && projectId === STAGING_A
+    },
     async ensureObject() {
       throw new Error('unexpected provisioning write: ensureObject')
     },
   })
+  const queryLog = []
   const records = counted({
     async queryRecords(input = {}) {
       const sheetId = input && input.sheetId
+      queryLog.push({ sheetId, filters: { ...(input && input.filters) } })
       if (sheetId === PROJECT_SHEET_B) return recordsB.queryRecords(input)
       return recordsA.queryRecords(input)
     },
@@ -295,15 +397,45 @@ function mount({
       multitable: { provisioning, records },
     },
     storage: new Map(),
-    config: {},
+    // The deploy-time table-action config the registry is built from. `target.sheetId` is what the
+    // union scan is gated on, and the tenant gate compares it against the caller's own deterministic
+    // sheet id. Absent by default — a real deployment state, and the one every pre-existing guard
+    // here was written against.
+    config: mainTableRows
+      ? {
+          stockPreparationTableActions: [{
+            actionId: 'plm.stock-preparation.pull-bom.v1',
+            source: { kind: 'data-source:sql-readonly', externalSystemId: 'ext_demo' },
+            target: {
+              sheetId: MAIN_SHEET,
+              objectId: MAIN_OBJECT_ID,
+              // THE EXPLICIT MODE, which is what a real deployment configures: logical id -> the
+              // PHYSICAL fieldId provisioning materialized.
+              fieldIdMap: MAIN_FIELD_ID_MAP,
+            },
+          }],
+        }
+      : {},
   }
   const services = baseServices()
+  const auditListCalls = []
   services.stockPreparationAuditStore = {
     async append(entry) {
       auditAppends.push(entry)
       if (typeof auditAppend === 'function') return auditAppend(entry)
       return { ok: true }
     },
+    // `lastExportAt` reads ONE descending window over `prep_line_export`. A store with no `list` at
+    // all is the pre-existing default here, and the directory must still answer.
+    ...(auditEntries === null ? {} : {
+      async list(input) {
+        auditListCalls.push(input)
+        // The real store CLAMPS `limit` to its own MAX_LIST_LIMIT and returns at most that many
+        // rows, newest first. Slicing here is what makes a SATURATED window reachable in a test.
+        const entries = auditEntries.slice(0, input.limit)
+        return { rowCount: entries.length, entries }
+      },
+    }),
     ...(typeof auditSupportsAction === 'function' ? {
       async supportsAction(action, options = {}) {
         auditProbes.push({ action, tenantId: (options && options.tenantId) || null, at: auditAppends.length })
@@ -318,7 +450,17 @@ function mount({
     services,
     logger: { info() {}, warn() {}, error() {} },
   })
-  return { routes, auditAppends, auditProbes, hostCallCount: () => hostCalls, recordsA, recordsB }
+  return {
+    routes,
+    auditAppends,
+    auditListCalls,
+    auditProbes,
+    hostCallCount: () => hostCalls,
+    queryLog,
+    recordsA,
+    recordsB,
+    mainSheetId: MAIN_SHEET,
+  }
 }
 
 /**
@@ -564,12 +706,21 @@ async function main() {
     assert.equal(entry.actor, OPERATOR_A.id)
     assert.equal(entry.tenantId, TENANT_A)
     assert.equal(entry.projectId, undefined, 'this read is not about one project — no projectNo on the trail')
+    // CONTRACT REVIEW (设计稿 N1, this PR). Two booleans joined this trail:
+    //   `pullTargetReady`          — was the operator's OWN store readable at all, and
+    //   `directoryMayBeIncomplete` — was the answer whole.
+    // Both are values-free by construction (booleans; the store's structural gate would refuse
+    // anything else), and both are unrecoverable from `projectCount` alone: when an operator reports
+    // 「我的项目不见了」, the trail has to separate 「目录本来就是空的」 from 「拉取目标没绑好」 from
+    // 「扫描撞到上限被截断了」. Nothing else was added, and no key here names a project.
     assert.deepEqual(Object.keys(entry.detail).sort(), [
+      'directoryMayBeIncomplete',
       'directoryReady',
       'ledgerReady',
       'operation',
       'pendingProjectCount',
       'projectCount',
+      'pullTargetReady',
       'tenantClaimVerified',
     ])
   })
@@ -781,6 +932,378 @@ async function main() {
     assert.equal(res.body.data.directoryReady, true)
     assert.equal(res.body.data.ledgerReady, true)
     assert.equal(idle.pendingDecisionCount, 0)
+  })
+
+  // -------------------------------------------------------------------------
+  // 设计稿 N1 — THE UNION, AND THE FLAG THAT FORBIDS A SILENT TRUNCATION
+  // -------------------------------------------------------------------------
+
+  await run('N1-a the directory is a UNION over the archive and the pull target, deduped by project number', async () => {
+    const { routes } = mount({
+      mainTableRows: [
+        // PROJECT_A_NO is in BOTH stores — the dedupe case. Two rows here, ONE directory row.
+        { projectNo: PROJECT_A_NO },
+        { projectNo: PROJECT_A_NO, active: false },
+        // …and two projects that exist ONLY here: the self-service main line F1 describes.
+        { projectNo: PROJECT_A4_NO },
+        { projectNo: PROJECT_A3_NO },
+        { projectNo: PROJECT_A3_NO },
+      ],
+    })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200)
+    const data = res.body.data
+    const numbers = data.projects.map((project) => project.projectNo)
+    assert.deepEqual(numbers, [PROJECT_A_NO, PROJECT_A2_NO, PROJECT_A3_NO, PROJECT_A4_NO],
+      'four project numbers, each exactly once — the overlap is ONE row, and the pull-only tail is sorted')
+    assert.equal(data.projectCount, 4)
+    assert.equal(data.pullTargetReady, true)
+    assert.equal(data.directoryMayBeIncomplete, false, 'the scan finished, so the union is whole')
+
+    const byNo = new Map(data.projects.map((project) => [project.projectNo, project]))
+    assert.deepEqual(byNo.get(PROJECT_A_NO).sources, ['mvp', 'pull_target'], 'in both stores')
+    assert.deepEqual(byNo.get(PROJECT_A2_NO).sources, ['mvp'], 'archived, never pulled through the bound target')
+    assert.deepEqual(byNo.get(PROJECT_A3_NO).sources, ['pull_target'], 'the operator pulled it themselves')
+
+    // A pull-only row keeps the ARCHIVE fields honest: null/zero, never invented. `projectId` is
+    // null because there is no archive row to take a handle from, and a fabricated handle would
+    // resolve to nothing.
+    const pullOnly = byNo.get(PROJECT_A3_NO)
+    assert.equal(pullOnly.projectId, null)
+    assert.equal(pullOnly.projectName, null)
+    assert.equal(pullOnly.projectStatus, null)
+    assert.equal(pullOnly.lastSyncRunId, null)
+    assert.equal(pullOnly.snapshotBatchCount, 0)
+    assert.equal(pullOnly.readyLineCount, 0)
+    // …and the MVP row keeps everything it always had.
+    assert.equal(byNo.get(PROJECT_A_NO).projectId, PROJECT_A_ID)
+    assert.equal(byNo.get(PROJECT_A_NO).projectName, PROJECT_A_NAME)
+  })
+
+  await run('N1-b F1 ITSELF: nobody ever ran mvp-persist, and the operator still sees their own projects', async () => {
+    const { routes } = mount({
+      archivePersisted: false,
+      mainTableRows: [{ projectNo: PROJECT_A3_NO }, { projectNo: PROJECT_A4_NO }],
+    })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.directoryReady, true, 'the archive TABLE exists — it is simply empty')
+    assert.deepEqual(res.body.data.projects.map((project) => project.projectNo), [PROJECT_A3_NO, PROJECT_A4_NO])
+    // Before this change this response was `projects: []` on the one flow the operator tier exists
+    // for. That is the whole bug F1 names.
+    assert.equal(res.body.data.projectCount, 2)
+  })
+
+  await run('N1-c no bound table action -> the archive alone, and pullTargetReady says why', async () => {
+    const { routes, queryLog } = mount()
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.pullTargetReady, false)
+    assert.equal(res.body.data.directoryMayBeIncomplete, false,
+      'nothing is bound, so there are no pull-target projects to be missing — a permanently-true flag would be ignored')
+    assert.deepEqual(res.body.data.projects.map((project) => project.sources), [['mvp'], ['mvp']])
+    assert.equal(queryLog.some((entry) => entry.sheetId === MAIN_SHEET_A), false, 'and nothing was scanned')
+  })
+
+  await run('N1-d the union is TENANT-GATED: tenant B never reads tenant A\'s bound sheet', async () => {
+    // The action config is deploy-time and shared by every tenant on the deployment, so tenant B's
+    // operator is handed the SAME target — naming tenant A's sheet. The gate is what stops it.
+    const { routes, queryLog } = mount({
+      mainTableRows: [{ projectNo: PROJECT_A3_NO }, { projectNo: `NO-${SECRET_B}-PULL` }],
+    })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_B })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.tenantId, TENANT_B)
+    assert.equal(res.body.data.pullTargetReady, false, 'the sheet is not tenant B\'s own, so it is not read')
+    assert.equal(queryLog.some((entry) => entry.sheetId === MAIN_SHEET_A), false)
+    assert.equal(JSON.stringify(res.body).includes(PROJECT_A3_NO), false,
+      'a project number that lives only in tenant A\'s pull target must not cross')
+  })
+
+  await run('N1-e VALUES-FREE: the pull target is a MATERIALS table and not one part value crosses', async () => {
+    const { routes } = mount({
+      mainTableRows: [
+        { projectNo: PROJECT_A3_NO, componentName: PART_CANARY },
+        { projectNo: PROJECT_A_NO, componentName: PART_CANARY },
+      ],
+    })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const serialized = JSON.stringify(res.body)
+    assert.equal(serialized.includes(PART_CANARY), false, 'a part NAME must not ride the directory out')
+    assert.equal(serialized.includes('componentName'), false, 'nor the field name, which discloses the schema')
+    assert.equal(serialized.includes('totalQuantity'), false)
+    // The canary really was in the substrate, or this guard is vacuous.
+    assert.equal(serialized.includes(PROJECT_A3_NO), true, 'the project number IS the projection — that part works')
+  })
+
+  await run('N1-f PAST THE SCAN BOUND the directory says so — it never truncates silently', async () => {
+    // Driven at the MODULE, not the route: forcing 100 full pages through the route harness would
+    // seed 50,000 rows to prove a branch that one always-full page proves.
+    const projectNoField = MAIN_FIELD_ID_MAP.projectNo
+    const activeField = MAIN_FIELD_ID_MAP.active
+    let pages = 0
+    const recordsApi = {
+      async queryRecords({ sheetId }) {
+        if (sheetId !== MAIN_SHEET_A) return []
+        pages += 1
+        // ALWAYS a full page: the scan can never reach its short-page exit.
+        return Array.from({ length: PULL_TARGET_PAGE_LIMIT }, (_unused, index) => ({
+          data: { [projectNoField]: `NO-${index}`, [activeField]: true },
+        }))
+      },
+    }
+    const provisioning = {
+      async findObjectSheet() { return null },
+      getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
+      async isSheetOwnedByProject(sheetId, projectId) { return sheetId === MAIN_SHEET_A && projectId === STAGING_A },
+    }
+    const result = await listOperatorProjectDirectory({
+      recordsApi,
+      provisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      boundTarget: { sheetId: MAIN_SHEET_A, objectId: MAIN_OBJECT_ID, fieldIdMap: { ...MAIN_FIELD_ID_MAP } },
+    })
+    assert.equal(pages, PULL_TARGET_MAX_PAGES, 'the scan stops AT the shared export bound, not beyond it')
+    assert.equal(result.pullTargetReady, true)
+    assert.equal(result.directoryMayBeIncomplete, true,
+      'the page bound was hit, so the set of project numbers is a SUBSET and the response must say so')
+    // …and the timestamps go to "unknown", not to "never changed".
+    for (const project of result.projects) {
+      assert.equal(project.lastChangedFromPlmAt, null)
+      assert.equal(project.lastChangedFromPlmBounded, true)
+    }
+  })
+
+  await run('N1-g the merge cap is a DEGRADE plus the same flag, never a 422 that hides the pull target', async () => {
+    const projectNoField = MAIN_FIELD_ID_MAP.projectNo
+    const activeField = MAIN_FIELD_ID_MAP.active
+    const TOTAL = MAX_LIST_ROWS + 100
+    const recordsApi = {
+      async queryRecords({ sheetId, offset }) {
+        if (sheetId !== MAIN_SHEET_A) return []
+        const start = offset
+        if (start >= TOTAL) return []
+        return Array.from({ length: Math.min(PULL_TARGET_PAGE_LIMIT, TOTAL - start) }, (_unused, index) => ({
+          data: { [projectNoField]: `NO-${String(start + index).padStart(6, '0')}`, [activeField]: true },
+        }))
+      },
+    }
+    const provisioning = {
+      async findObjectSheet() { return null },
+      getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
+      async isSheetOwnedByProject(sheetId, projectId) { return sheetId === MAIN_SHEET_A && projectId === STAGING_A },
+    }
+    const result = await listOperatorProjectDirectory({
+      recordsApi,
+      provisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      boundTarget: { sheetId: MAIN_SHEET_A, objectId: MAIN_OBJECT_ID, fieldIdMap: { ...MAIN_FIELD_ID_MAP } },
+    })
+    assert.equal(result.projectCount, MAX_LIST_ROWS, 'capped at the same row bound the archive path uses')
+    assert.equal(result.directoryMayBeIncomplete, true, 'and the cap is DECLARED')
+  })
+
+  // -------------------------------------------------------------------------
+  // 设计稿 N2 — THE PENDING INDEX, OPT-IN AND ONLY OPT-IN
+  // -------------------------------------------------------------------------
+
+  await run('N2-a the serializable pending index is ABSENT unless the caller asks for it', async () => {
+    const { routes } = mount()
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200)
+    assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'pendingCountsByProjectNo'), false,
+      'the default response shape is frozen (S-02a) and this key is not in it')
+    // The per-row count is NOT the opt-in: it predates this change and the confirmation queue's
+    // worklist is built on it.
+    assert.equal(res.body.data.projects.find((project) => project.projectNo === PROJECT_A_NO).pendingDecisionCount, 2)
+  })
+
+  await run('N2-b …and with includePendingCounts=1 it is present and agrees with the board\'s own index', async () => {
+    const { routes, recordsA } = mount()
+    const res = await call(routes, 'GET', DIRECTORY_PATH, {
+      user: OPERATOR_A,
+      query: { includePendingCounts: '1' },
+    })
+    assert.equal(res.statusCode, 200)
+    const index = res.body.data.pendingCountsByProjectNo
+    assert.ok(index, 'the opt-in key is served')
+    assert.deepEqual({ ...index }, { [PROJECT_A_NO]: 2 },
+      'two pending decisions on project A; the CONFIRMED one on project A2 is not work waiting for anyone')
+    // THE SAME NUMBERS THE BOARD READS. `pendingByProjectNo` is the in-process Map 项目备料页
+    // consumes; both are projections of one computation, and this pins that they cannot drift.
+    const boardChannel = await listOperatorProjectDirectory({
+      recordsApi: recordsA,
+      provisioning: makeFakeProvisioning({
+        stagingProjectId: STAGING_A,
+        sheetIdByObjectId: { [PROJECT_OBJECT_ID]: PROJECT_SHEET_A, [DECISION_OBJECT_ID]: LEDGER_SHEET_A },
+      }),
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      includePendingIndex: true,
+    })
+    assert.deepEqual({ ...index }, Object.fromEntries(boardChannel.pendingByProjectNo))
+    // …and with every row's own count, which is the third projection of the same map.
+    for (const project of res.body.data.projects) {
+      assert.equal(project.pendingDecisionCount, index[project.projectNo] || 0)
+    }
+  })
+
+  await run('N2-c an unknown query flag is still refused — the allowlist did not become a sieve', async () => {
+    const { routes } = mount()
+    const res = await call(routes, 'GET', DIRECTORY_PATH, {
+      user: OPERATOR_A,
+      query: { includePendingIndex: '1' },
+    })
+    assert.equal(res.statusCode, 400)
+    assert.equal(errorCode(res), 'STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_REQUEST_INVALID')
+  })
+
+  await run('N2-d any value but "1" is not an opt-in — a flag is a flag, not a truthiness test', async () => {
+    const { routes } = mount()
+    for (const value of ['0', 'true', 'yes', '']) {
+      const res = await call(routes, 'GET', DIRECTORY_PATH, {
+        user: OPERATOR_A,
+        query: { includePendingCounts: value },
+      })
+      assert.equal(res.statusCode, 200)
+      assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'pendingCountsByProjectNo'), false,
+        `includePendingCounts=${JSON.stringify(value)} must not open the index`)
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // 设计稿 N6 — THE TWO TIMESTAMPS, THREE-STATE
+  // -------------------------------------------------------------------------
+
+  await run('N6-a lastChangedFromPlmAt is the MAX over the project\'s own rows', async () => {
+    const { routes } = mount({
+      mainTableRows: [
+        { projectNo: PROJECT_A_NO, lastPlmRefreshAt: PLM_REFRESH_OLD },
+        { projectNo: PROJECT_A_NO, lastPlmRefreshAt: PLM_REFRESH_NEW },
+        // Another project's NEWER stamp must not leak into project A's answer.
+        { projectNo: PROJECT_A3_NO, lastPlmRefreshAt: '2027-01-01T00:00:00.000Z' },
+      ],
+    })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const byNo = new Map(res.body.data.projects.map((project) => [project.projectNo, project]))
+    assert.equal(byNo.get(PROJECT_A_NO).lastChangedFromPlmAt, PLM_REFRESH_NEW)
+    assert.equal(byNo.get(PROJECT_A_NO).lastChangedFromPlmBounded, false)
+    assert.equal(byNo.get(PROJECT_A3_NO).lastChangedFromPlmAt, '2027-01-01T00:00:00.000Z')
+  })
+
+  await run('N6-b THE THREE STATES are distinguishable: a value / never / unknown', async () => {
+    // (1) and (2): the scan finished. A project with a stamp gets it; a project whose rows carry
+    //     none gets null with `bounded:false` — 「从未变更」 is then safe to say.
+    {
+      const { routes } = mount({
+        mainTableRows: [
+          { projectNo: PROJECT_A_NO, lastPlmRefreshAt: PLM_REFRESH_NEW },
+          { projectNo: PROJECT_A3_NO },
+        ],
+      })
+      const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+      const byNo = new Map(res.body.data.projects.map((project) => [project.projectNo, project]))
+      assert.equal(byNo.get(PROJECT_A_NO).lastChangedFromPlmAt, PLM_REFRESH_NEW)
+      assert.equal(byNo.get(PROJECT_A_NO).lastChangedFromPlmBounded, false)
+      assert.equal(byNo.get(PROJECT_A3_NO).lastChangedFromPlmAt, null)
+      assert.equal(byNo.get(PROJECT_A3_NO).lastChangedFromPlmBounded, false, 'no row of this project ever changed')
+      // A project the pull target has never heard of is in the same state — the scan DID look.
+      assert.equal(byNo.get(PROJECT_A2_NO).lastChangedFromPlmBounded, false)
+    }
+    // (3): NOBODY LOOKED. The pull target is not bound, so 「从未变更」 would be a fabrication —
+    //      the row's own flag has to carry the "unknown", because a row travels alone into a table
+    //      cell or a sort key, separated from the top-level `pullTargetReady`.
+    {
+      const { routes } = mount()
+      const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+      assert.equal(res.body.data.pullTargetReady, false)
+      for (const project of res.body.data.projects) {
+        assert.equal(project.lastChangedFromPlmAt, null)
+        assert.equal(project.lastChangedFromPlmBounded, true, 'unknown, NOT "never"')
+      }
+    }
+  })
+
+  await run('N6-c lastExportAt comes from the values-free audit trail, newest row per project', async () => {
+    const { routes, auditListCalls } = mount({
+      auditEntries: [
+        { projectId: PROJECT_A_NO, action: 'prep_line_export', createdAt: EXPORT_AT_A },
+        { projectId: PROJECT_A_NO, action: 'prep_line_export', createdAt: EXPORT_AT_A_OLDER },
+      ],
+    })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    const byNo = new Map(res.body.data.projects.map((project) => [project.projectNo, project]))
+    assert.equal(byNo.get(PROJECT_A_NO).lastExportAt, EXPORT_AT_A, 'the DESC window\'s first row for a project wins')
+    assert.equal(byNo.get(PROJECT_A2_NO).lastExportAt, null)
+    assert.equal(res.body.data.lastExportAtMayBeIncomplete, false, 'the window was not full, so null really means never')
+    // ONE query for the whole tenant, not one per project: the audit table has no index on
+    // project_id, and this read is a home page.
+    assert.equal(auditListCalls.length, 1)
+    assert.equal(auditListCalls[0].projectId, undefined)
+    assert.equal(auditListCalls[0].action, 'prep_line_export')
+    assert.equal(auditListCalls[0].tenantId, TENANT_A)
+  })
+
+  await run('N6-d a SATURATED export window is declared, so a null is not read as "never exported"', async () => {
+    // A FULL page back from the store means older rows exist that this window never saw. Project A2
+    // really has exported — its row is one past the window — and the response must not claim it
+    // never did. Seeded to exactly the width the reader asks for, which is what saturation IS.
+    const { routes } = mount({
+      auditEntries: [
+        { projectId: PROJECT_A_NO, action: 'prep_line_export', createdAt: EXPORT_AT_A },
+        ...Array.from({ length: EXPORT_AUDIT_WINDOW - 1 }, (_unused, index) => ({
+          projectId: `OTHER-${index}`,
+          action: 'prep_line_export',
+          createdAt: EXPORT_AT_A_OLDER,
+        })),
+        { projectId: PROJECT_A2_NO, action: 'prep_line_export', createdAt: EXPORT_AT_A_OLDER },
+      ],
+    })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.body.data.lastExportAtMayBeIncomplete, true)
+    const byNo = new Map(res.body.data.projects.map((project) => [project.projectNo, project]))
+    assert.equal(byNo.get(PROJECT_A_NO).lastExportAt, EXPORT_AT_A)
+    assert.equal(byNo.get(PROJECT_A2_NO).lastExportAt, null, '…and this null is an "unknown", which the flag says')
+  })
+
+  await run('N6-e no audit `list` at all -> the directory still answers, and declares the gap', async () => {
+    const { routes } = mount()
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.lastExportAtMayBeIncomplete, true)
+    for (const project of res.body.data.projects) assert.equal(project.lastExportAt, null)
+  })
+
+  // -------------------------------------------------------------------------
+  // 项目备料页 PAYS NOTHING FOR ANY OF THIS
+  // -------------------------------------------------------------------------
+
+  await run('N-cost the board\'s in-process call passes no boundTarget, so it runs no union scan', async () => {
+    let mainSheetQueries = 0
+    const recordsApi = {
+      async queryRecords({ sheetId }) {
+        if (sheetId === MAIN_SHEET_A) mainSheetQueries += 1
+        return []
+      },
+    }
+    const provisioning = {
+      async findObjectSheet() { return null },
+      getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
+      async isSheetOwnedByProject() { return true },
+    }
+    const result = await listOperatorProjectDirectory({
+      recordsApi,
+      provisioning,
+      targetProjectId: STAGING_A,
+      scope: { tenantId: TENANT_A, actorId: 'u_op_a' },
+      projectNo: PROJECT_A_NO,
+      includePendingIndex: true,
+    })
+    assert.equal(mainSheetQueries, 0, 'the unnarrowed scan is opt-in on `boundTarget`; the board does not opt in')
+    assert.equal(result.pullTargetReady, false)
+    assert.equal(result.directoryMayBeIncomplete, false)
   })
 
   // -------------------------------------------------------------------------

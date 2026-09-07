@@ -1835,9 +1835,15 @@ const VALID_STOCK_PREPARATION_PREP_LINE_EXPORT_QUERY_KEYS = new Set([
 // "that number is not in this system" from "that project is real and has nothing pending". `tenantId`
 // is accepted for shape-compatibility with every other call in this family and is NEVER a steering
 // vector: the scope resolver refuses any value that is not the caller's own authenticated tenant.
+// `includePendingCounts` is the ONE selector this route accepts, and it selects nothing about WHOSE
+// data is read — it asks for one extra top-level key (`pendingCountsByProjectNo`, projectNo -> count)
+// over the SAME tenant-scoped ledger read the response already performs. It is opt-in because this
+// route's top-level key set is frozen and asserted (S-02a): a value-bearing projection widens on a
+// reviewed, explicitly requested basis or not at all.
 const VALID_STOCK_PREPARATION_OPERATOR_PROJECT_DIRECTORY_QUERY_KEYS = new Set([
   'tenantId',
   'workspaceId',
+  'includePendingCounts',
 ])
 // 通知下一步: the status READ. `projectNo` for the same reason the export uses it — the business
 // project number, which is what a person means by "this project".
@@ -8412,6 +8418,26 @@ function requireStockPreparationAudit() {
       // schema answered the directory read with a raw CHECK violation rather than with the 503 that
       // says which migration to run. After the scope, before any records IO.
       await requireStockPreparationAuditVocabulary(audit, 'project_directory_read', '082', scope.tenantId)
+      // THE BOUND TABLE-ACTION TARGET — the sheet `apply` actually writes to, and the SECOND store
+      // this directory is a union over (设计稿 N1). Without it the directory reads only the MVP
+      // project ledger, which `mvp-persist` writes and `mvp-persist` is platform-admin: a project a
+      // floor operator pulled themselves was never in this response at all.
+      //
+      // An UNCONFIGURED or unknown action is a deployment state the page renders as 「表还没建好」,
+      // not a failure of the directory, so those two refusals become "no bound target" and the
+      // response comes back with `pullTargetReady: false`; anything else is a real fault and
+      // propagates. Same treatment, same two codes, as 项目备料页 — see that route's own note.
+      let boundTarget = null
+      try {
+        const boundAction = await tableActions.getTableAction({
+          tenantId: scope.tenantId,
+          actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+        })
+        boundTarget = boundAction && boundAction.target ? boundAction.target : null
+      } catch (error) {
+        const code = error && error.code ? String(error.code) : ''
+        if (code !== 'TABLE_ACTION_NOT_CONFIGURED' && code !== 'TABLE_ACTION_NOT_FOUND') throw error
+      }
       const result = await listOperatorProjectDirectory({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
@@ -8419,6 +8445,15 @@ function requireStockPreparationAudit() {
         // which tenant A's caller addresses tenant B's staging project.
         targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
         scope,
+        boundTarget,
+        // For `lastExportAt` only, and read through ONE bounded descending window rather than one
+        // query per project — see `lastExportAtByProjectNo`. This route's own audit APPEND below is
+        // unrelated and unchanged.
+        audit,
+        // N2 — OPT-IN, and off by default. The index's KEYS are customer project numbers, and this
+        // route's top-level key set is frozen and asserted (S-02a), so it is served only to a caller
+        // that asked for it in as many words.
+        includePendingCounts: firstString(input.includePendingCounts) === '1',
       })
       // VALUES-FREE AUDIT over a value-bearing response. Counts, booleans and handles only: no
       // projectNo, no projectName, and no `projects` array — the row records THAT a directory read
@@ -8435,6 +8470,12 @@ function requireStockPreparationAudit() {
           pendingProjectCount: result.pendingProjectCount,
           directoryReady: result.directoryReady,
           ledgerReady: result.ledgerReady,
+          // WHICH STORES ANSWERED, and whether the answer was whole. Booleans only — the trail must
+          // be able to tell 「目录是空的」 from 「拉取目标没绑好」 from 「扫描被上限截断了」 when an
+          // operator says their project is missing, and none of those three is inferable from
+          // `projectCount` alone.
+          pullTargetReady: result.pullTargetReady,
+          directoryMayBeIncomplete: result.directoryMayBeIncomplete,
           tenantClaimVerified: scope.tenantClaimVerified,
         },
       })
