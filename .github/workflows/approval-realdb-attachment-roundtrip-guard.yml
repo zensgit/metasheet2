@@ -58,7 +58,7 @@ on:
       - 'packages/core-backend/src/db/migrations/zzzz20260721120000_approval_attachments_scan_and_purge_dedup.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260822130000_approval_attachments_process_binding.ts'
       - 'packages/core-backend/vitest.config.ts'
-      - '.github/workflows/approval-attachment-roundtrip-guard.yml'
+      - '.github/workflows/approval-realdb-attachment-roundtrip-guard.yml'
   push:
     branches: [main]
     paths:
@@ -80,7 +80,7 @@ on:
       - 'packages/core-backend/src/db/migrations/zzzz20260721120000_approval_attachments_scan_and_purge_dedup.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260822130000_approval_attachments_process_binding.ts'
       - 'packages/core-backend/vitest.config.ts'
-      - '.github/workflows/approval-attachment-roundtrip-guard.yml'
+      - '.github/workflows/approval-realdb-attachment-roundtrip-guard.yml'
 
 permissions:
   contents: read

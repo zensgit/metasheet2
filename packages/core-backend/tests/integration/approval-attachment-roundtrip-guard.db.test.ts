@@ -31,7 +31,7 @@
  * `approval-attachment-pipeline-realdb.test.ts` already uses (`publishAttachmentTemplate`).
  *
  * Two-point wired: excluded from the no-DB `vitest.config.ts` job, and run by the standalone
- * `.github/workflows/approval-attachment-roundtrip-guard.yml` real-DB lane (EXPECT_DB=1 sentinel
+ * `.github/workflows/approval-realdb-attachment-roundtrip-guard.yml` real-DB lane (EXPECT_DB=1 sentinel
  * below — modeled on `approval-list-scope-server-side.db.test.ts`'s top-level anti-skip-green check).
  */
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -81,6 +81,28 @@ describeIfDatabase('approval attachment round-trip + flag guard (real DB, booted
   const createdApprovalIds = new Set<string>()
   const createdAttachmentIds = new Set<string>()
   const createdUserIds = new Set<string>()
+
+  /**
+   * Durable-row count for THIS suite's uploader only, for the "a refused upload left nothing behind"
+   * before/after deltas below.
+   *
+   * SCOPED, not whole-table, on purpose: `vitest.integration.config.ts` runs serially today
+   * (`fileParallelism: false`, `maxConcurrency: 1`) and the booted server does not start its GC/purge
+   * workers under VITEST, so no concurrent writer exists — but a whole-table count would silently start
+   * measuring other writers' rows the moment either of those changes, turning a real regression into a
+   * flake and a flake into a passing run. `REQUESTER` is run-unique (`artg-req-${RUN}`), so this scope
+   * is stable across parallel files and reruns against a shared DB.
+   *
+   * KNOWN NARROWING, stated so it is not mistaken for a strict improvement: a refused upload that
+   * nonetheless wrote a row under a DIFFERENT uploader_id is invisible to this assertion, where the
+   * whole-table count would have caught it. That trade is deliberate — the refusals under test here are
+   * rejected before any identity substitution is possible (they fail request validation, not
+   * authorization), so a row under another uploader is not a failure mode this route has.
+   */
+  async function attachmentRowCountForRequester(): Promise<number> {
+    const res = await pool().query('SELECT count(*)::int AS c FROM approval_attachments WHERE uploader_id = $1', [REQUESTER])
+    return Number(res.rows[0].c)
+  }
 
   async function authToken(userId: string, roles = 'admin', perms = '*:*'): Promise<string> {
     if (perms.split(',').some((permission) => ['*:*', 'approvals:*', 'approvals:write'].includes(permission.trim()))) {
@@ -307,7 +329,7 @@ describeIfDatabase('approval attachment round-trip + flag guard (real DB, booted
   // -------------------------------------------------------------------------------------------
   it('upload rejects a request missing templateId and/or fieldId — 400, no row/blob', async () => {
     const requesterToken = await authToken(REQUESTER, 'user', 'approvals:read,approvals:write')
-    const before = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+    const before = await attachmentRowCountForRequester()
 
     const missingField = await uploadPdf(requesterToken, templateId, undefined, pdfBuffer('missing-field'))
     expect(missingField.status).toBe(400)
@@ -321,18 +343,18 @@ describeIfDatabase('approval attachment round-trip + flag guard (real DB, booted
     expect(missingBoth.status).toBe(400)
     expect(await missingBoth.json()).toEqual({ error: 'template_and_field_required' })
 
-    const after = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+    const after = await attachmentRowCountForRequester()
     expect(after).toBe(before) // none of the three refused uploads left a durable row
   })
 
   it('upload rejects a fieldId naming a field that exists but is NOT attachment-typed — 400 not_an_attachment_field', async () => {
     const requesterToken = await authToken(REQUESTER, 'user', 'approvals:read,approvals:write')
-    const before = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+    const before = await attachmentRowCountForRequester()
     // 'reason' is a real field on this template's schema — just not attachment-typed.
     const res = await uploadPdf(requesterToken, templateId, 'reason', pdfBuffer('non-attachment-field'))
     expect(res.status).toBe(400)
     expect(await res.json()).toEqual({ error: 'not_an_attachment_field' })
-    const after = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+    const after = await attachmentRowCountForRequester()
     expect(after).toBe(before)
   })
 
