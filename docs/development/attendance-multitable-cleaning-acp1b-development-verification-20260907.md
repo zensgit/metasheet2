@@ -468,10 +468,18 @@ and timeout. Imports are now inside the test after server initialization; real-D
 commands set both DATABASE_URL and ATTENDANCE_TEST_DATABASE_URL before startup.
 That setup failure is not classified as a product assertion failure.
 
-Still outstanding: real concurrent HTTP dual-CAS/cleanup races, anchor recreation
-precision integration negatives, further discriminating mutations, user-visible
-review UI, CI selector union, repeated final gates, and task DB shutdown/cleanup.
-The full synthetic DB is intentionally retained for these remaining gates.
+Completed since the initial checkpoint: concurrent HTTP dual-CAS/cleanup races,
+anchor recreation precision negatives, discriminating mutations, user-visible
+review UI, and CI selector union. The full attendance web command passed on
+15d0d7f1 (65 files / 1257 tests). Required-web execution and final task DB
+shutdown/cleanup remain pending; the synthetic DB is retained until then.
+
+Final narrow review found no P1 and one metadata request-order P2. Three new
+deferred-response cases were RED before the fix: stale success cleared current
+loading; a late old response replaced the new catalog; stale error cleared loading
+and displayed an old error. A request epoch now guards success, catch and finally.
+After the fix, the dedicated UI suite passes 41/41, the workflow contract 6/6,
+and vue-tsc passes. This does not expand apply authority or change backend logic.
 
 ## Exact current file census
 
@@ -493,3 +501,5 @@ The full synthetic DB is intentionally retained for these remaining gates.
 16. `packages/core-backend/tests/integration/attendance-w4c3c-record-operation-routes.db.test.ts`
 17. `apps/web/src/views/attendance/AttendanceReportFieldsSection.vue`
 18. `apps/web/tests/AttendanceReportFieldsSection.spec.ts`
+19. `.github/workflows/attendance-web-guard.yml`
+20. `apps/web/scripts/run-required-web-tests.sh`

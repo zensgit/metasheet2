@@ -212,6 +212,45 @@ describe('AttendanceReportFieldsSection', () => {
     expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).startsWith('/api/multitable/records'))).toBe(false)
   })
 
+  it.each(['stale-first', 'latest-first', 'stale-error'])('keeps current-org metadata when responses arrive %s', async order => {
+    const org = ref('org-1')
+    const replies = new Map<string, (response: Response) => void>()
+    vi.mocked(apiFetch).mockImplementation(url => new Promise<Response>(resolve => {
+      replies.set(String(url), resolve)
+    }))
+    const reply = (orgId: string, failed = false) => {
+      const catalog = populatedCatalogPayload()
+      catalog.data.items[0].name = `CATALOG_${orgId}`
+      replies.get(`/api/attendance/report-fields?orgId=${orgId}`)!(failed
+        ? jsonResponse(500, { ok: false, error: { message: 'OLD_METADATA_ERROR' } })
+        : jsonResponse(200, { ...catalog, data: { ...catalog.data,
+          cleaningReview: { enabled: true, orgId, sheetId: `sheet-${orgId}`,
+            fieldIds: { cleaning_requested: 'fld_requested', cleaning_reason: 'fld_reason', employee_name: 'fld_name', work_date: 'fld_date' } },
+        } }))
+    }
+    app = createApp({ setup: () => () => h(AttendanceReportFieldsSection, { orgId: org.value, tr: (en: string) => en }) })
+    app.mount(container!)
+    await flushUi()
+    org.value = 'org-2'
+    await flushUi()
+    if (order !== 'latest-first') {
+      reply('org-1', order === 'stale-error')
+      await flushUi()
+      expect(container!.textContent).toContain('Loading')
+      expect(container!.textContent).not.toContain('CATALOG_org-1')
+      expect(container!.textContent).not.toContain('OLD_METADATA_ERROR')
+    }
+    reply('org-2')
+    await flushUi()
+    if (order === 'latest-first') {
+      reply('org-1')
+      await flushUi()
+    }
+    expect(container!.textContent).toContain('CATALOG_org-2')
+    expect(container!.textContent).not.toContain('CATALOG_org-1')
+    expect(container!.querySelector('[data-cleaning-section]')).not.toBeNull()
+  })
+
   it('discards a pending old-org list response after switching organizations', async () => {
     const org = ref('org-1')
     let resolveList!: (value: Response) => void

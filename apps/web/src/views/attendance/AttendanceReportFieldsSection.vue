@@ -2539,7 +2539,10 @@ function buildReportPeriodSummariesSyncStatusMessage(data: AttendanceReportPerio
   return `${tr('Period summaries synchronized.', '周期汇总已同步。')}${summary}`
 }
 
+let reportFieldsLoadEpoch = 0
+
 async function loadReportFields(): Promise<void> {
+  const epoch = ++reportFieldsLoadEpoch
   loading.value = true
   loadError.value = ''
   try {
@@ -2549,14 +2552,17 @@ async function loadReportFields(): Promise<void> {
     const suffix = params.toString()
     const response = await apiFetch(`/api/attendance/report-fields${suffix ? `?${suffix}` : ''}`)
     const payload = await response.json()
+    if (epoch !== reportFieldsLoadEpoch) return
     if (!response.ok || payload?.ok === false) {
       throw payload
     }
     reportFieldsPayload.value = payload?.data ?? { categories: [], items: [], multitable: { available: false } }
   } catch (error) {
-    loadError.value = readErrorMessage(error, tr('Failed to load report fields', '加载统计字段失败'))
+    if (epoch === reportFieldsLoadEpoch) {
+      loadError.value = readErrorMessage(error, tr('Failed to load report fields', '加载统计字段失败'))
+    }
   } finally {
-    loading.value = false
+    if (epoch === reportFieldsLoadEpoch) loading.value = false
   }
 }
 
