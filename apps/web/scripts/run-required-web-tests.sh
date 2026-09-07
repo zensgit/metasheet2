@@ -587,6 +587,28 @@ npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
 # (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") and in this batch before wiring.
 npx vitest run approval-detail-instance-consistency approval-store-detail-generation --reporter=dot
 
+# 视角化决策可用性 (viewer-scoped decision affordance), 2026-09-07: ONE token added —
+# `approval-detail-can-decide-current-node`, a NEW spec
+# (apps/web/tests/approval-detail-can-decide-current-node.spec.ts) over the mounted
+# ApprovalDetailView. It pins the six decision verbs against the server-resolved
+# `canDecideCurrentNode`: all six render on `true`, none on `false` (with `canAct` still true), all
+# six on ABSENT (older backend ⇒ today's behaviour, so absence never reads as deny), none when
+# `canAct` itself is false, and the #5528 instance-consistency gate still refusing on top of it.
+# It also pins the disclosed non-changes — 评论 / 撤回 / 催一下 keep their present reach — and
+# carries a fixture control proving the six verbs are otherwise eligible, so "no button" can only
+# be this field talking.
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
+# file (same counting rule as the paragraph above: join backslash continuations, drop comment lines,
+# take every non-flag positional of each `vitest run` command — 439 before this change, 440 after,
+# no duplicates): no existing token contains the new one, and the new one contains no existing
+# token. In particular the four pre-existing `approval-detail-*` tokens (approval-detail-field,
+# approval-detail-record-table, approval-detail-column-row-key, approval-detail-instance-consistency)
+# are unrelated to it in both directions. Verified green in isolation
+# (`npx vitest run approval-detail-can-decide-current-node --reporter=dot` → "Test Files 1 passed")
+# and in this batch before wiring.
+npx vitest run approval-detail-can-decide-current-node --reporter=dot
+
 # 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
 # batch below, StockPreparationSourcePreflight — a NEW spec
 # (apps/web/tests/StockPreparationSourcePreflight.spec.ts) over the same StockPreparationInstallView

@@ -535,6 +535,16 @@ export interface UnifiedApprovalDTO {
   currentNodeKeys?: string[] | null
   /** Lock-5 §2.3 / A-2 — server-resolved effective operations for THIS viewer. Detail read only. */
   nodeOperations?: EffectiveNodeOperations | null
+  /**
+   * Would the server's decision endpoint let THIS viewer decide the node the instance is currently
+   * stopped on? Resolved server-side by the dispatch door's OWN seat predicate — so it covers role
+   * seats and delegated seats, which the client-side `isMyTurn` mirror does not.
+   *
+   * `undefined` means the backend does not compute it (an older server). Read it as
+   * `!== false`, never as a truthiness test: absence must fall back to the pre-existing behaviour,
+   * not deny.
+   */
+  canDecideCurrentNode?: boolean
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state, populated ONLY on the 待我处理 (pending) tab — `true`
