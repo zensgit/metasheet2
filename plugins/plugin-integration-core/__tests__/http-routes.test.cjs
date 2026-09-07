@@ -9633,6 +9633,7 @@ async function testExternalSystemTestSavesUnderMatchedScope() {
   //     SAME row, with no duplicate insert, for both failure shapes the bug produced (an HTTP row and
   //     a canonical SQL binding).
   const { createExternalSystemRegistry } = require(path.join(__dirname, '..', 'lib', 'external-systems.cjs'))
+  const { createConnectionResolver } = require(path.join(__dirname, '..', 'lib', 'connection-resolver.cjs'))
   const rows = []
   const matchesWhere = (row, where) => Object.entries(where || {}).every(([key, value]) => {
     if (value === null || value === undefined) return row[key] === null || row[key] === undefined
@@ -9657,7 +9658,15 @@ async function testExternalSystemTestSavesUnderMatchedScope() {
     db,
     credentialStore,
     idGenerator: () => 'unused',
-    connectionResolver: { async resolve(binding) { return binding } },
+    // The REAL resolver over a stub host facade, so the canonical SQL binding takes the production
+    // producer path (cloneBinding/adapterBinding spreads) before the route persists the result.
+    connectionResolver: createConnectionResolver({
+      facade: {
+        async resolveConnectionRegistration(id, context) {
+          return { id, tenantId: context.tenantId, type: 'sqlserver', scopeKind: 'private' }
+        },
+      },
+    }),
   })
   const base = {
     tenant_id: 'tenant_1',
