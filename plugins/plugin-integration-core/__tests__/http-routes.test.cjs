@@ -9272,6 +9272,7 @@ async function main() {
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
+  await testExternalSystemTestSavesUnderMatchedScope()
   await testExternalSystemTestRequiresSavedSystem()
   await testExternalSystemTestRedactsAdapterResultSecrets()
   await testDiscoveryRoutes()
@@ -9573,3 +9574,133 @@ main().catch((err) => {
   console.error(err)
   process.exit(1)
 })
+
+// --- test-connection persists under the ROW's scope, not the caller's workspace hint ------------
+//
+// #5471 let the by-id reads fall back from a workspace hint to the same tenant's tenant-wide row.
+// The test-connection route then wrote its status update under the REQUEST scope, missed
+// `findExisting` (writes are exact-scope by design) and took the INSERT branch: "connectionId is
+// required" for a canonical SQL binding, a duplicate-id insert for everything else. The write must
+// land on the row that was actually read.
+async function testExternalSystemTestSavesUnderMatchedScope() {
+  // (a) Mock registry: the loaded system is tenant-wide (workspaceId null) while the request
+  //     carries a workspace hint. The write must use the row's scope.
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: null,
+          projectId: null,
+          name: 'Tenant-wide ERP',
+          kind: 'erp',
+          role: 'target',
+          status: 'error',
+          credentials: { bearerToken: 'secret-token' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(input) {
+        calls.push(['createAdapter', input])
+        return {
+          async testConnection() {
+            calls.push(['testConnection'])
+            return { ok: true, status: 200 }
+          },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+  const res = await invoke(routes, 'POST', '/api/integration/external-systems/:id/test', {
+    user: WRITE_USER,
+    params: { id: 'sys_tenant_wide' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(findCall(calls, 'getExternalSystemForAdapter')[1].workspaceId, 'workspace_1',
+    'the read still carries the caller hint — the registry owns the fallback decision')
+  const saved = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(saved.workspaceId, null, 'the status write targets the row\'s own (tenant-wide) scope, not the hint')
+  assert.equal(saved.tenantId, 'tenant_1')
+  assert.equal(saved.id, 'sys_tenant_wide')
+  assert.equal(saved.status, 'active')
+
+  // (b) Real registry round trip over an in-memory db: read via hint -> test -> save lands on the
+  //     SAME row, with no duplicate insert, for both failure shapes the bug produced (an HTTP row and
+  //     a canonical SQL binding).
+  const { createExternalSystemRegistry } = require(path.join(__dirname, '..', 'lib', 'external-systems.cjs'))
+  const rows = []
+  const matchesWhere = (row, where) => Object.entries(where || {}).every(([key, value]) => {
+    if (value === null || value === undefined) return row[key] === null || row[key] === undefined
+    return row[key] === value
+  })
+  const db = {
+    async selectOne(table, where) { return rows.find((row) => matchesWhere(row, where)) || null },
+    async insertOne(table, row) { const stored = { ...row, created_at: '2026-09-01T00:00:00.000Z', updated_at: '2026-09-01T00:00:00.000Z' }; rows.push(stored); return [stored] },
+    async updateRow(table, set, where) { const row = rows.find((candidate) => matchesWhere(candidate, where)); if (!row) return []; Object.assign(row, set, { updated_at: '2026-09-01T01:00:00.000Z' }); return [row] },
+    async select(table, options = {}) { return rows.filter((row) => matchesWhere(row, options.where || {})) },
+    async countRows(table, where) { return rows.filter((row) => matchesWhere(row, where)).length },
+    async deleteRows(table, where) { const before = rows.length; for (let i = rows.length - 1; i >= 0; i -= 1) { if (matchesWhere(rows[i], where)) rows.splice(i, 1) } return before - rows.length },
+  }
+  const credentialStore = {
+    source: 'host-security',
+    format: 'enc',
+    async encrypt(value) { return `enc:${Buffer.from(value, 'utf8').toString('base64')}` },
+    async decrypt(value) { return Buffer.from(value.slice(4), 'base64').toString('utf8') },
+    async fingerprint(value) { return `fp_${Buffer.from(value).toString('hex').slice(0, 13)}` },
+  }
+  const registry = createExternalSystemRegistry({
+    db,
+    credentialStore,
+    idGenerator: () => 'unused',
+    connectionResolver: { async resolve(binding) { return binding } },
+  })
+  const base = {
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    project_id: null,
+    role: 'source',
+    credentials_encrypted: null,
+    capabilities: {},
+    status: 'error',
+    last_tested_at: null,
+    last_error: 'previous failure',
+    created_at: '2026-09-01T00:00:00.000Z',
+    updated_at: '2026-09-01T00:00:00.000Z',
+  }
+  rows.push(
+    { ...base, id: 'sys_http_tw', name: 'Tenant-wide HTTP', kind: 'http', config: { baseUrl: 'https://tenant-wide.example.test' } },
+    { ...base, id: 'sys_sql_tw', name: 'Tenant-wide SQL', kind: 'data-source:sql-readonly', connection_id: 'connection_1', legacy_connection_fallback_eligible: false, config: { schema: 'dbo' } },
+  )
+  const { services: realServices } = createMockServices({
+    externalSystemRegistry: registry,
+    adapterRegistry: {
+      createAdapter() {
+        return { async testConnection() { return { ok: true, status: 200 } } }
+      },
+    },
+  })
+  const { routes: realRoutes } = mountRoutes(realServices)
+  for (const id of ['sys_http_tw', 'sys_sql_tw']) {
+    const roundTrip = await invoke(realRoutes, 'POST', '/api/integration/external-systems/:id/test', {
+      user: WRITE_USER,
+      params: { id },
+      query: { workspaceId: 'workspace_1' },
+    })
+    assertOkResponse(roundTrip, 200)
+    assert.equal(roundTrip.body.data.ok, true, `${id}: the connection test itself succeeds`)
+    const stored = rows.filter((row) => row.id === id)
+    assert.equal(stored.length, 1, `${id}: no duplicate row was inserted under the hint scope`)
+    assert.equal(stored[0].workspace_id, null, `${id}: the row keeps its tenant-wide scope`)
+    assert.equal(stored[0].status, 'active', `${id}: the tested status landed on the row that was read`)
+    assert.equal(stored[0].last_error, null, `${id}: a successful test clears the previous error`)
+    assert.ok(typeof stored[0].last_tested_at === 'string' && !Number.isNaN(Date.parse(stored[0].last_tested_at)), `${id}: last_tested_at was recorded`)
+  }
+  assert.equal(rows.find((row) => row.id === 'sys_sql_tw').connection_id, 'connection_1',
+    'the canonical SQL binding keeps its connection_id through a status-only update')
+  assert.equal(rows.length, 2, 'exactly the two seeded rows remain')
+}

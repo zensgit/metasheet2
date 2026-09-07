@@ -880,6 +880,7 @@ async function main() {
   await testDataSourceBindingValidation()
   await testBridgeEditPreservesFullConfig()
   await testTenantWideScopedReadFallback()
+  await testSealedSnapshotAccessorUsesMatchedScope()
 
   console.log('✓ external-systems: registry + credential boundary tests passed')
 }
@@ -1592,4 +1593,82 @@ async function testTenantWideScopedReadFallback() {
   assert.ok(db.rows.some((r) => r.id === 'sys_tenant_wide'), 'the tenant-wide row survives a mis-scoped delete')
 
   console.log('  external-systems: tenant-wide scoped read fallback OK')
+}
+
+// --- Sealed snapshot accessor: fallback and matched scope, same as the other three by-id reads ---
+async function testSealedSnapshotAccessorUsesMatchedScope() {
+  const db = createMockDb()
+  const credentialStore = createMockCredentialStore()
+  const sealedContexts = []
+  const registry = createExternalSystemRegistry({
+    db,
+    credentialStore,
+    idGenerator: () => 'unused',
+    connectionResolver: {
+      async resolve(binding) { return binding },
+      async resolveSealedSqlServer(binding, context) {
+        sealedContexts.push({ ...context })
+        return {
+          ...binding,
+          config: { ...binding.config, sealedSnapshotSqlServer: { database: 'sealed_db' } },
+          credentials: { sealedSnapshotSqlServer: { user: 'u', password: 'p' } },
+        }
+      },
+    },
+  })
+  const base = {
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    project_id: null,
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    connection_id: 'connection_1',
+    legacy_connection_fallback_eligible: false,
+    config: { schema: 'dbo' },
+    credentials_encrypted: null,
+    capabilities: {},
+    status: 'active',
+    created_at: '2026-09-01T00:00:00.000Z',
+    updated_at: '2026-09-01T00:00:00.000Z',
+  }
+  db.rows.push(
+    { ...base, id: 'sys_sealed_tw', name: 'Tenant-wide sealed SQL' },
+    { ...base, id: 'sys_sealed_ws', workspace_id: 'ws_a', name: 'Workspace A sealed SQL' },
+  )
+
+  // A workspace hint that misses reaches the tenant-wide row; the sealed resolver sees the matched
+  // scope (null) and the caller's principal/runAs unchanged.
+  const viaHint = await registry.getExternalSystemForSealedSnapshot({
+    tenantId: 'tenant_1', workspaceId: 'ws_hint', id: 'sys_sealed_tw', principal: 'owner_1', runAs: 'user',
+  })
+  assert.equal(viaHint.id, 'sys_sealed_tw')
+  assert.equal(sealedContexts.length, 1)
+  assert.equal(sealedContexts[0].workspaceId, null, 'sealed resolver receives the matched (tenant-wide) scope')
+  assert.equal(sealedContexts[0].tenantId, 'tenant_1')
+  assert.equal(sealedContexts[0].principal, 'owner_1')
+  assert.equal(sealedContexts[0].runAs, 'user')
+
+  // Tenant isolation and no cross-workspace / reverse fallback — identical to the other accessors.
+  const foreign = await registry.getExternalSystemForSealedSnapshot({
+    tenantId: 'tenant_2', workspaceId: 'ws_hint', id: 'sys_sealed_tw', principal: 'owner_1', runAs: 'user',
+  }).catch((e) => e)
+  assert.ok(foreign instanceof ExternalSystemNotFoundError, 'sealed read never crosses tenants')
+  const otherWorkspace = await registry.getExternalSystemForSealedSnapshot({
+    tenantId: 'tenant_1', workspaceId: 'ws_b', id: 'sys_sealed_ws', principal: 'owner_1', runAs: 'user',
+  }).catch((e) => e)
+  assert.ok(otherWorkspace instanceof ExternalSystemNotFoundError, 'a workspace row is not visible from another workspace')
+  const nullHint = await registry.getExternalSystemForSealedSnapshot({
+    tenantId: 'tenant_1', workspaceId: null, id: 'sys_sealed_ws', principal: 'owner_1', runAs: 'user',
+  }).catch((e) => e)
+  assert.ok(nullHint instanceof ExternalSystemNotFoundError, 'a null hint never widens into workspace rows')
+
+  // An exact workspace match reports its own scope, not null.
+  sealedContexts.length = 0
+  const own = await registry.getExternalSystemForSealedSnapshot({
+    tenantId: 'tenant_1', workspaceId: 'ws_a', id: 'sys_sealed_ws', principal: 'owner_1', runAs: 'user',
+  })
+  assert.equal(own.id, 'sys_sealed_ws')
+  assert.equal(sealedContexts[0].workspaceId, 'ws_a', 'an exact match keeps its own workspace scope')
+
+  console.log('  external-systems: sealed snapshot accessor uses the matched scope OK')
 }
