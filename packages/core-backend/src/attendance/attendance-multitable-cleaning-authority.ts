@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto'
+import { isAttendanceProjectionOwnerWithCalculationPointerV1 } from './w7-provenance-domain'
+import { getObjectFieldId } from '../multitable/provisioning'
+import { acquireCanonicalSheetFence } from '../multitable/canonical-sheet-fence'
 
 type QueryResult = { rows: unknown[]; rowCount?: number }
 export type AttendanceCleaningAuthorityQuery = (sql: string, params?: unknown[]) => Promise<QueryResult>
@@ -98,7 +101,8 @@ async function loadCanonicalRow(
 ): Promise<CanonicalRow> {
   const result = await query(
     `SELECT projection.id AS projection_record_id,
-            attendance_record.id AS canonical_record_id, attendance_record.org_id, attendance_record.user_id, attendance_record.work_date,
+            attendance_record.id AS canonical_record_id, attendance_record.org_id, attendance_record.user_id,
+            attendance_record.work_date::text AS work_date,
             attendance_record.timezone, attendance_record.first_in_at, attendance_record.last_out_at, attendance_record.work_minutes,
             attendance_record.late_minutes, attendance_record.early_leave_minutes, attendance_record.status, attendance_record.is_workday,
             attendance_record.projection_owner, attendance_record.current_calculation_id, attendance_record.visibility_state,
@@ -120,11 +124,42 @@ async function loadCanonicalRow(
   return row
 }
 
+async function lockDailyProjectionGroup(
+  query: AttendanceCleaningAuthorityQuery,
+  projectionRecordId: string,
+): Promise<string[]> {
+  const scope = await query(
+    `SELECT registry.sheet_id, registry.project_id
+       FROM plugin_multitable_object_registry registry
+       JOIN meta_records source ON source.sheet_id = registry.sheet_id
+       JOIN meta_sheets sheet ON sheet.id = source.sheet_id AND sheet.deleted_at IS NULL
+      WHERE source.id = $1 AND registry.plugin_name = 'plugin-attendance'
+        AND registry.object_id = 'attendance_report_records'`, [projectionRecordId],
+  )
+  if (scope.rows.length !== 1) unavailable()
+  const owner = scope.rows[0] as { sheet_id: string; project_id: string }
+  const sheetId = nonEmpty(owner.sheet_id)
+  const rowKeyField = getObjectFieldId(nonEmpty(owner.project_id), 'attendance_report_records', 'row_key')
+  // Existing create/form writers use this same fence even when the global flag is off.
+  await acquireCanonicalSheetFence(query, sheetId)
+  // Lock every existing row in a deterministic order: a row-key PATCH can otherwise
+  // move a previously unrelated row into the duplicate group after a filtered read.
+  const rows = await query('SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY id FOR UPDATE', [sheetId])
+  const fields = await query('SELECT id FROM meta_fields WHERE id = $1 AND sheet_id = $2 FOR SHARE', [rowKeyField, sheetId])
+  if (fields.rows.length !== 1) unavailable()
+  const records = rows.rows as Array<{ id: string; data: Record<string, unknown> }>
+  const source = records.find(row => row.id === projectionRecordId)
+  const rowKey = source?.data?.[rowKeyField]
+  if (typeof rowKey !== 'string' || rowKey.length === 0) unavailable()
+  return records.filter(row => row.data?.[rowKeyField] === rowKey).map(row => row.id)
+}
+
 async function loadSelectedCalculation(
   query: AttendanceCleaningAuthorityQuery,
   record: CanonicalRow,
 ): Promise<{ selector: 'current_calculation' | 'latest_completed_calculation'; calculation: CalculationRow } | null> {
-  if (record.projection_owner === 'w4' && record.current_calculation_id) {
+  if (isAttendanceProjectionOwnerWithCalculationPointerV1(record.projection_owner)) {
+    if (!record.current_calculation_id) unavailable()
     const current = await query(
       `SELECT id, version, mode, outcome
          FROM attendance_record_calculations
@@ -136,6 +171,7 @@ async function loadSelectedCalculation(
     if (current.rows.length === 1 && calculation?.mode === 'authoritative' && calculation.outcome === 'completed') {
       return { selector: 'current_calculation', calculation }
     }
+    unavailable()
   }
   const latest = await query(
     `SELECT id, version, mode, outcome
@@ -158,6 +194,11 @@ export async function refreshAttendanceReportProjectionAnchor(
 ): Promise<void> {
   try {
     assertRefreshInput(input)
+    const group = await lockDailyProjectionGroup(query, input.projectionRecordId)
+    if (group.length > 1) {
+      await withholdAttendanceReportProjectionAnchors(query, group)
+      return
+    }
     const record = await loadCanonicalRow(query, input)
     const selected = await loadSelectedCalculation(query, record)
     if (!selected) {
@@ -216,15 +257,35 @@ export async function withholdAttendanceReportProjectionAnchors(
     if (!Array.isArray(projectionRecordIds) || projectionRecordIds.length === 0 || projectionRecordIds.some(id => !/^rec_[A-Za-z0-9_-]+$/.test(id))) {
       unavailable()
     }
-    await query(
-      `DELETE FROM attendance_report_projection_anchors anchor
-        USING meta_records projection, plugin_multitable_object_registry registry
-       WHERE anchor.projection_record_id = projection.id
-         AND projection.sheet_id = registry.sheet_id
+    const sources = await query(
+      `SELECT projection.id AS projection_record_id, registry.project_id
+        FROM meta_records projection JOIN plugin_multitable_object_registry registry
+          ON registry.sheet_id = projection.sheet_id
+       WHERE projection.id = ANY($1::text[])
          AND registry.plugin_name = 'plugin-attendance'
          AND registry.object_id = 'attendance_report_records'
-         AND anchor.projection_record_id = ANY($1::text[])`,
+       ORDER BY projection.id FOR UPDATE OF projection`,
       [projectionRecordIds],
+    )
+    const mappings = sources.rows.map(raw => {
+      const source = raw as { projection_record_id: string; project_id: string }
+      return {
+        projection_record_id: nonEmpty(source.projection_record_id),
+        field_id: getObjectFieldId(nonEmpty(source.project_id), 'attendance_report_records', 'row_key'),
+      }
+    })
+    await query(
+      `DELETE FROM attendance_report_projection_anchors anchor USING (
+         SELECT DISTINCT peer.id
+           FROM jsonb_to_recordset($1::jsonb) mapping(projection_record_id text, field_id text)
+           JOIN meta_records source ON source.id = mapping.projection_record_id
+           LEFT JOIN meta_fields field ON field.id = mapping.field_id AND field.sheet_id = source.sheet_id
+           JOIN meta_records peer ON peer.sheet_id = source.sheet_id
+            AND (peer.id = source.id OR (
+              field.id IS NOT NULL AND jsonb_typeof(source.data -> field.id) = 'string'
+              AND peer.data -> field.id = source.data -> field.id))
+       ) duplicate_group WHERE anchor.projection_record_id = duplicate_group.id`,
+      [JSON.stringify(mappings)],
     )
   } catch (error) {
     if (error instanceof AttendanceMultitableCleaningAuthorityError) throw error

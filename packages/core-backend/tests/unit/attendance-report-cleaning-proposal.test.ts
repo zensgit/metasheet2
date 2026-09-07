@@ -3,8 +3,24 @@ import { describe, expect, it } from 'vitest'
 import {
   AttendanceMultitableCleaningAuthorityError,
   buildAttendanceCanonicalSourceDigest,
-  refreshAttendanceReportProjectionAnchor,
+  refreshAttendanceReportProjectionAnchor as refreshAnchor,
+  type AttendanceCleaningAuthorityQuery,
+  type RefreshAttendanceReportProjectionAnchorInput,
 } from '../../src/attendance/attendance-multitable-cleaning-authority'
+import { getObjectFieldId } from '../../src/multitable/provisioning'
+
+// These unit cases isolate selector/digest behavior; real lock contention is
+// exercised by attendance-report-cleaning-proposal.db.test.ts.
+function refreshAttendanceReportProjectionAnchor(query: AttendanceCleaningAuthorityQuery, input: RefreshAttendanceReportProjectionAnchorInput) {
+  const fieldId = getObjectFieldId('org-a:attendance', 'attendance_report_records', 'row_key')
+  return refreshAnchor(async (statement, params) => {
+    if (statement.includes('SELECT registry.sheet_id, registry.project_id')) return { rows: [{ sheet_id: 'sheet-a', project_id: 'org-a:attendance' }] }
+    if (statement.includes('pg_advisory_xact_lock')) return { rows: [] }
+    if (statement.includes('SELECT id, data FROM meta_records')) return { rows: [{ id: input.projectionRecordId, data: { [fieldId]: 'synthetic-row' } }] }
+    if (statement.includes('SELECT id FROM meta_fields')) return { rows: [{ id: fieldId }] }
+    return query(statement, params)
+  }, input)
+}
 
 const require = createRequire(import.meta.url)
 const {
@@ -102,9 +118,31 @@ describe('attendance report cleaning proposal', () => {
     })
     expect(statements.some(statement => statement.includes('INSERT INTO attendance_report_projection_anchors'))).toBe(true)
 
+    const groupStatements: string[] = []
+    await refreshAttendanceReportProjectionAnchor(async (statement) => {
+      groupStatements.push(statement)
+      if (statement.includes('FROM meta_records projection')) return { rows: [{ ...baseRow, projection_owner: 'w4_group' }] }
+      if (statement.includes('WHERE id = $1')) return { rows: [{ id: baseRow.current_calculation_id, version: 2, mode: 'authoritative', outcome: 'completed' }] }
+      if (statement.includes('FROM attendance_report_projection_anchors')) return { rows: [] }
+      if (statement.includes('INSERT INTO attendance_report_projection_anchors')) return { rows: [{ projection_record_id: baseRow.projection_record_id }] }
+      throw new Error('unexpected query')
+    }, { projectionRecordId: baseRow.projection_record_id, canonicalRecordId: baseRow.canonical_record_id, sourceFingerprint: 'a'.repeat(40) })
+    expect(groupStatements.some(statement => statement.includes('ORDER BY version DESC'))).toBe(false)
+
+    const invalidCurrentStatements: string[] = []
+    await expect(refreshAttendanceReportProjectionAnchor(async (statement) => {
+      invalidCurrentStatements.push(statement)
+      if (statement.includes('FROM meta_records projection')) return { rows: [baseRow] }
+      if (statement.includes('WHERE id = $1')) return { rows: [] }
+      throw new Error('unexpected query')
+    }, { projectionRecordId: baseRow.projection_record_id, canonicalRecordId: baseRow.canonical_record_id, sourceFingerprint: 'a'.repeat(40) }))
+      .rejects.toThrow(AttendanceMultitableCleaningAuthorityError)
+    expect(invalidCurrentStatements.some(statement => statement.includes('ORDER BY version DESC'))).toBe(false)
+
     const legacyStatements: string[] = []
     await refreshAttendanceReportProjectionAnchor(async (statement) => {
       legacyStatements.push(statement)
+      if (statement.includes('SELECT projection.id AS projection_record_id, registry.project_id')) return { rows: [{ projection_record_id: baseRow.projection_record_id, project_id: 'org-a:attendance' }] }
       if (statement.includes('FROM meta_records projection')) return { rows: [{ ...baseRow, projection_owner: 'legacy_untracked', current_calculation_id: null }] }
       if (statement.includes("outcome = 'completed'")) return { rows: [] }
       if (statement.includes('DELETE FROM attendance_report_projection_anchors')) return { rows: [] }
