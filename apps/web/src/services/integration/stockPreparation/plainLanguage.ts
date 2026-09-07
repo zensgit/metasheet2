@@ -572,41 +572,80 @@ export function stockPrepSourceVerdictPlain(verdict: string): StockPrepPlainText
  * this map cannot be exhaustive and does not try to be: known codes get a sentence, everything else
  * gets the generic one. Either way the code itself stays on screen, subordinate to the sentence —
  * it is the thing a person quotes when they ask us for help.
+ *
+ * TWO LINES (2026-09-08 wave). `zh`/`en` answer 「发生了什么」 and stay EXACTLY what they were — every
+ * existing assertion reads only that first line, so nothing here reworded it. `zhNext`/`enNext` are
+ * NEW and answer 「该做什么(含找谁)」; the type widens from `StockPrepPlainText` to
+ * `StockPrepPlainEntry` to carry them (F7: the same widening 11 other tables in this file already
+ * use). A caller that has not been taught to render the second line simply never reads the new field
+ * — nothing here can break by ADDING a field to an object literal.
  */
-export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
   STOCK_PREPARATION_CONFIRM_REQUEST_FAILED: Object.freeze({
     zh: '这一步没有保存成功,数据没有变化。',
     en: 'That did not save; nothing was changed.',
+    zhNext: '过一会儿再点一次;如果一直这样,把下面的报错代码给管理员。',
+    enNext: 'Try again shortly; if it keeps happening, give an administrator the code below.',
   }),
   FORBIDDEN: Object.freeze({
     zh: '当前账号没有做这件事的权限。',
     en: 'This account is not allowed to do that.',
+    zhNext: '这要找管理员给您的角色加"备料操作"权限;权限只能按角色给,给个人不生效。',
+    enNext: 'Ask an administrator to add stock-prep operate permission to your role — permissions are granted by role, never to an individual.',
   }),
   EXCEPTION_BULK_MIXED_TYPES: Object.freeze({
     zh: '选中的行不是同一类问题,批量处理要求同一类。',
     en: 'The selected rows are not the same kind of problem; a bulk action needs one kind.',
+    zhNext: '按问题类型重新勾选,同一批只选一种。',
+    enNext: 'Re-select by problem type — one kind per batch.',
   }),
   CONFIRM_UNIT_CANDIDATE_NOT_FOUND: Object.freeze({
     zh: '这条建议已经过期(数据在您查看期间变了),请刷新后重看。',
     en: 'This suggestion is out of date (the data changed while you were looking) — refresh and read it again.',
+    zhNext: '刷新列表后再选一次;不是您操作错了。',
+    enNext: 'Refresh the list and pick again — nothing you did was wrong.',
+  }),
+  // The 409 the ledger raises when the row moved under the reader. Not a fault of either person —
+  // two people looked at the same queue, and one of them acted first.
+  CONFIRMATION_DECISION_ACTION_CONFLICT_MISMATCH: Object.freeze({
+    zh: '这条在您看的时候被别人处理过了。',
+    en: 'Someone else handled this row while you had it open.',
+    zhNext: '点一下「刷新」,按最新的再决定一次。',
+    enNext: 'Press refresh and decide again against what it says now.',
+  }),
+  // The client-side code the export helper raises when the request itself did not come back. It is a
+  // READ that produces a file: the important half is that no prep data moved.
+  STOCK_PREPARATION_EXPORT_REQUEST_FAILED: Object.freeze({
+    zh: '导出没有做完。',
+    en: 'The export did not finish.',
+    zhNext: '文件没有下载成功,数据没有变化。稍后再点一次;还是不行就把这条报错给管理员。',
+    enNext: 'No file was downloaded and nothing in your data changed. Try again shortly; if it still fails, give an administrator this error.',
   }),
   // 通知下一步. Each one says what happened to the CHAIN, because that is the only thing at stake —
   // none of these four touched a single prep row.
   STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER: Object.freeze({
     zh: '现在不是您这一步,所以不能通知下一步。',
     en: 'It is not your step right now, so you cannot hand it on.',
+    zhNext: '看上面「轮到谁」,轮到您时这个按钮会自己亮。',
+    enNext: 'Check "whose turn" above — the button lights up on its own once it is your turn.',
   }),
   STOCK_PREPARATION_HANDOFF_STEP_MISMATCH: Object.freeze({
     zh: '这一步已经有人往下交接过了,页面刷新后就是最新的。',
     en: 'Someone has already handed this step on; refresh the page and you will see where it stands.',
+    zhNext: '刷新页面即可,不用重复操作。',
+    enNext: 'Refresh the page — nothing further to do.',
   }),
   STOCK_PREPARATION_HANDOFF_NOT_CONFIGURED: Object.freeze({
     zh: '这个部署还没有配置备料接力的步骤,通知下一步暂时用不了。',
     en: 'This deployment has no handoff chain set up yet, so notifying the next person is not available.',
+    zhNext: '这要请平台管理员配置接力步骤,不是您这边能开的。',
+    enNext: 'Ask a platform administrator to configure the handoff chain — this is not something you can turn on.',
   }),
   STOCK_PREPARATION_HANDOFF_STORE_UNAVAILABLE: Object.freeze({
     zh: '记录接力进度的地方现在读不到,交接没有发生,备料数据也没有变化。',
     en: 'The place that records the handoff could not be reached — the turn did not move, and nothing in your prep data changed.',
+    zhNext: '过一会儿再试一次;还是不行就把报错代码给管理员。',
+    enNext: 'Try again shortly; if it persists, give an administrator the code below.',
   }),
   // H13 — THE TENANCY REFUSALS, WHICH BOTH PLANES CAN RAISE AND NEITHER HAD WORDS FOR.
   //
@@ -618,10 +657,14 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object
   OPERATOR_SCOPE_TENANT_REQUIRED: Object.freeze({
     zh: '当前账号不属于任何一家工厂,所以看不到具体项目的数据。这不是故障,再试也一样 —— 请用您工厂的账号登录。',
     en: 'This account does not belong to any one factory, so it cannot see a specific project’s data. This is not an outage and retrying will not change it — sign in with your factory’s own account.',
+    zhNext: '换成您工厂发的账号重新登录;再点几次也不会变。',
+    enNext: 'Sign in again with the account your factory issued you — pressing this again will not change the answer.',
   }),
   OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED: Object.freeze({
     zh: '这个账号不在这家工厂的名单里,看不到这里的数据。请找管理员确认账号归属。',
     en: 'This account is not on this factory’s roster, so it cannot see the data here. Ask an administrator to check which factory the account belongs to.',
+    zhNext: '找管理员确认这个账号该归到哪家工厂。',
+    enNext: 'Ask an administrator which factory this account should belong to.',
   }),
   // W4 — THE OTHER TWO TENANCY REFUSALS, WHICH HAD NO WORDS OF THEIR OWN.
   //
@@ -634,26 +677,56 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object
   OPERATOR_SCOPE_TENANT_CONTRADICTED: Object.freeze({
     zh: '登录令牌里的工厂与请求里的不一致,请重新登录后再试。',
     en: 'The factory in your sign-in token does not match the one in the request — sign in again and retry.',
+    zhNext: '退出后重新登录一次即可,不是数据出了问题。',
+    enNext: 'Sign out and sign back in — nothing about your data is wrong.',
   }),
   OPERATOR_SCOPE_TENANT_MISMATCH: Object.freeze({
     zh: '请求指定的工厂与您的账号不一致,请切回您所属的工厂。',
     en: 'The request names a different factory from the one your account belongs to — switch back to your own factory.',
+    zhNext: '切回您自己工厂的项目号再试一次。',
+    enNext: 'Switch back to a project number under your own factory and try again.',
   }),
   // The 503 the audit-vocabulary gate raises. It is a DEPLOYMENT state with a named fix, and the one
   // refusal on these routes that a retry genuinely does clear — after somebody runs the migration.
   STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE: Object.freeze({
     zh: '这套系统的数据库还差一次升级,所以这一步暂时不能记录、也就不能进行。请把这条报错给管理员,升级完再点一次就好。',
     en: 'This system’s database is one upgrade behind, so this step cannot be recorded and therefore cannot run. Show an administrator this message; once the upgrade is done, click again.',
+    zhNext: '这不是您能修的;管理员升级完数据库,您再点一次就行。',
+    enNext: 'This is not something you can fix — once an administrator finishes the upgrade, click again.',
   }),
 })
 
-export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
+export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
   zh: '这一步没有保存成功,数据没有变化。',
   en: 'That did not save; nothing was changed.',
+  zhNext: '过一会儿再点一次;如果一直这样,把下面的报错代码给管理员。',
+  enNext: 'Try again shortly; if it keeps happening, give an administrator the code below.',
 })
 
-export function stockPrepErrorPlain(code: string): StockPrepPlainText {
+export function stockPrepErrorPlain(code: string): StockPrepPlainEntry {
   return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
+}
+
+// ---------------------------------------------------------------------------
+// 「复制这条报错」— the fixed, values-free copy payload every two-line error carries (P0-5, I-21).
+//
+// Deliberately NOT the zh/zhNext prose above: that prose is free text an implementer may one day want
+// to reword, and letting a "copy" button serialise arbitrary prose is how a values-free surface
+// eventually copies something it should not. What a person actually needs to hand to us is the CODE
+// (what we grep support threads for) plus ONE fixed sentence saying what a blob like this is for.
+// Nothing here is ever interpolated with response content — `code` is expected to already be the
+// clamped, identifier-shaped string every caller renders beside the sentence.
+// ---------------------------------------------------------------------------
+
+export const STOCK_PREP_ERROR_COPY_SENTENCE: StockPrepPlainText = Object.freeze({
+  zh: '这是备料工作台的一条报错,请把这段文字和发生的时间一起发给管理员。',
+  en: 'This is an error from the stock-preparation workbench — send this text, with when it happened, to an administrator.',
+})
+
+export function stockPrepErrorCopyText(code: string | null | undefined, zh: boolean): string {
+  const safeCode = typeof code === 'string' && code.length > 0 ? code : 'UNKNOWN'
+  const sentence = zh ? STOCK_PREP_ERROR_COPY_SENTENCE.zh : STOCK_PREP_ERROR_COPY_SENTENCE.en
+  return `${safeCode} — ${sentence}`
 }
 
 // ---------------------------------------------------------------------------
@@ -711,40 +784,103 @@ export function stockPrepAdminActionPlain(id: string): StockPrepPlainText | null
 // So a read surface gets read-shaped sentences, and the LOOKUP falls back to a read-shaped generic
 // rather than the write one. The codes that genuinely belong to both planes (FORBIDDEN and friends)
 // are still resolved out of the shared table first, so there is one place to change them.
-export const STOCK_PREP_BOARD_ERROR_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+// TWO LINES HERE TOO (P0-5). Widened to `StockPrepPlainEntry` alongside `STOCK_PREP_ERROR_PLAIN`,
+// for the same reason and with the same guarantee: `zh`/`en` are byte-identical to what they were,
+// so every existing assertion still reads the same first line; `zhNext`/`enNext` are additive.
+// This table matters MORE than the write one for the second line, because this is the table the
+// operator's own page reads — the confirmation queue is where an admin looks, the project board is
+// where the floor lives.
+export const STOCK_PREP_BOARD_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
   // The board's own 404. Deliberately DOES NOT say "this project does not exist" — the refusal is
   // shapeless by construction (a project of another tenant and a number nobody has are the same
   // answer), so the copy must not claim to know which it was. It says what the operator can do.
   STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND: Object.freeze({
     zh: '这个项目号在您这里还没有数据。',
     en: 'There is no data for this project number here yet.',
+    zhNext: '号码没打错的话,用「从 PLM 拉取数据」把它拉进来。',
+    enNext: 'If the number is right, use “Pull from PLM” to bring it in.',
   }),
   STOCK_PREPARATION_PROJECT_BOARD_REQUEST_INVALID: Object.freeze({
     zh: '请求里的项目号不对,请重新输入一次。',
     en: 'The project number in that request was not valid — type it again.',
+    zhNext: '项目号只认字母、数字和短横线;去掉空格和中文标点再试。',
+    enNext: 'A project number takes letters, digits and hyphens only — drop spaces and punctuation, then try again.',
   }),
 })
 
 /** The board's read-shaped generic: nothing was changed, because nothing was going to be. */
-export const STOCK_PREP_BOARD_ERROR_GENERIC: StockPrepPlainText = Object.freeze({
+export const STOCK_PREP_BOARD_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
   zh: '没能读到这个项目的情况,请稍后再试一次。什么都没有改动。',
   en: 'Could not read this project’s status — try again shortly. Nothing was changed.',
+  zhNext: '过一会儿再刷新一次;一直这样就把下面的报错代码给管理员。',
+  enNext: 'Refresh again shortly; if it keeps happening, give an administrator the code below.',
 })
 
 /**
  * The board's failure copy. Its OWN codes first, then the shared table (so FORBIDDEN and the other
  * cross-plane codes keep one definition), then a READ-shaped generic — never the write one.
  */
-export function stockPrepBoardErrorPlain(code: string): StockPrepPlainText {
+export function stockPrepBoardErrorPlain(code: string): StockPrepPlainEntry {
   return lookup(STOCK_PREP_BOARD_ERROR_PLAIN, code)
     ?? lookup(STOCK_PREP_ERROR_PLAIN, code)
     ?? STOCK_PREP_BOARD_ERROR_GENERIC
 }
 
-/** The HTTP read failures the install page surfaces. Status stays visible in the disclosure. */
-export const STOCK_PREP_READ_FAILED: StockPrepPlainText = Object.freeze({
+/**
+ * The HTTP read failures the install page surfaces. Status stays visible beside it (rendered as a
+ * `<code>` token by every call site, never folded into this sentence). `zhNext` widened alongside
+ * `STOCK_PREP_ERROR_PLAIN` (P0-5): the two render points that use this constant (the manifest/
+ * deployment-preflight read and the source-preflight read) get the same two-line treatment.
+ */
+export const STOCK_PREP_READ_FAILED: StockPrepPlainEntry = Object.freeze({
   zh: '没能读到这套部署的信息,请稍后再试。',
   en: 'Could not read this deployment’s information — try again shortly.',
+  zhNext: '过一会儿刷新重试;一直不行就把下面的 HTTP 状态码给管理员。',
+  enNext: 'Refresh and try again shortly; if it persists, give an administrator the HTTP status code below.',
+})
+
+// ---------------------------------------------------------------------------
+// 五处诚实文案 (P0-7) — I-10 / I-11 / I-12 / I-13, plus the ledger_missing empty-state button above.
+// Each is a standalone constant rather than a new key inside an existing table, because none of them
+// answers a server code — they are structural narration the install/queue pages did not carry before.
+// ---------------------------------------------------------------------------
+
+/** I-10: the no-go verdict is a diagnosis, never a gate (G5) — said next to the verdict itself. */
+export const STOCK_PREP_SOURCE_NO_GO_DISCLAIMER: StockPrepPlainText = Object.freeze({
+  zh: '这是一份诊断,不是一道闸门 —— 它不会挡住后面的拉取,只是照现在的配置很可能拉到 0 行。',
+  en: 'This is a diagnosis, not a gate — it does not block the pull that follows; it only means that, as configured, the pull is likely to return 0 rows.',
+})
+
+/**
+ * I-11: said once, in the gap BETWEEN the deployment-preflight card and the source-readiness card.
+ *
+ * 上面/下面 ARE THE PAGE'S ACTUAL ORDER, not the design doc's. The design sentence was written
+ * against P1-7's reordered page (source card first); on today's page the deployment preflight
+ * (「先看看这套部署缺什么」) is above and the source readiness (「这家的库能不能接」) is below, so
+ * copying it verbatim taught the split backwards — a sentence whose entire job is to stop two
+ * similar-looking cards being confused for one another. If P1-7 swaps the cards, swap this too.
+ */
+export const STOCK_PREP_TWO_PREFLIGHT_RELATION: StockPrepPlainText = Object.freeze({
+  zh: '上面查的是这台系统自己,下面查的是客户的库。两者互不替代。',
+  en: 'The check above reads this system itself; the one below reads the customer’s database. Neither replaces the other.',
+})
+
+/** I-12: next to 「检查这个源」— it never runs on page load (D6), and this says so out loud. */
+export const STOCK_PREP_SOURCE_PREFLIGHT_BUTTON_NOTE: StockPrepPlainText = Object.freeze({
+  zh: '这会去读客户的库,按需跑,不会自动跑。',
+  en: 'This reads the customer’s database — it runs only when you press it, never automatically.',
+})
+
+/** I-13: next to 「重新扫描待确认的事(管理员)」— reconcile is per-factory, not per-project. */
+export const STOCK_PREP_RECONCILE_BUTTON_NOTE: StockPrepPlainText = Object.freeze({
+  zh: '对账按工厂执行,不按项目 —— 它可能让同事正在排队的行作废。',
+  en: 'Reconciling runs per factory, not per project — it can supersede rows a colleague already has queued.',
+})
+
+/** The `ledger_missing` empty state's new P0 button — the death-end fix (D2/§2.3). */
+export const STOCK_PREP_LEDGER_MISSING_ACTION: StockPrepPlainText = Object.freeze({
+  zh: '去装:开始使用',
+  en: 'Go install: Getting started',
 })
 
 // ---------------------------------------------------------------------------

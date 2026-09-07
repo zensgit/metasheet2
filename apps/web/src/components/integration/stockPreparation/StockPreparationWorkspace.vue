@@ -97,6 +97,7 @@
         v-else-if="effectiveKey === 'confirmation-queue'"
         :scope="scope"
         @admin-action="handleAdminAction"
+        @navigate-stage="handleNavigateStage"
       />
       <!-- §14 (multitable-application-model-20260830.md): the INSTALL page — the app's defaults laid
            out for a customer admin to confirm, the deployment preflight, and a SKIP-aware install run
@@ -105,6 +106,7 @@
       <StockPreparationInstallView
         v-else-if="effectiveKey === 'install'"
         :scope="scope"
+        @navigate-stage="handleNavigateStage"
       />
       <StockPreparationDashboardView
         v-else-if="effectiveKey === 'dashboard'"
