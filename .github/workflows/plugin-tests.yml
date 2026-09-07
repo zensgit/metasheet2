@@ -700,7 +700,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_LIB_TESTS=67
+          EXPECTED_LIB_TESTS=68
           if ! lib_out="$(pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts 2>&1)"; then
             printf '%s\n' "$lib_out"
             echo "W4C-5 tooling unit tests: tsx --test exited non-zero (output above)" >&2

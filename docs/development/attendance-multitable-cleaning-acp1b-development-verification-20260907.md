@@ -4,6 +4,59 @@ Status: IN PROGRESS / DRAFT-HOLD. This report is not completion or release evide
 
 ## Post-publication CI correction (current, 2026-09-08)
 
+### Current-main replay and exact workflow-shell correction
+
+Main advanced from `976711b254d129e6c23bf8327c4be67018942ba3` to
+`a22141772d9f12b05534ebd07ee5b69533e68f67` (#5539, 14 stock-preparation
+Web/script files). The d853 push started before its preflight main read was
+inspected; the initial "main unchanged" coordination statement was incorrect
+and immediately corrected. No force push or history rewrite was used.
+
+After a separately granted bounded replay window, sequential preflight confirmed
+local and remote product head d853, clean status, and authoritative main a221.
+True merge `f16070c41090f73f08259e192325c6ac9f9228cc` has ordered parents
+`d85391de07f709976a7388a464adc9ed46639775` and
+`a22141772d9f12b05534ebd07ee5b69533e68f67`, with tree
+`8a0d16f9c5293b78ec4a1b0c4f3b1213ce3cf431`. This equals the read-only
+merge prediction: zero conflicts, zero manual product edits. The full 30-file
+ACP diff intersects main's 14 files only at the required-web script. All other
+ACP paths, backend and plugin bytes are unchanged at the merge checkpoint.
+The combined script preserves every executable test token from both parents;
+`StockPreparationGettingStarted` and `tests/AttendanceReportFieldsSection.spec.ts`
+each occur exactly once. No database was restarted for this replay.
+
+On the merged tree, Node18 and Node20 complete collector **60/60** and W4C5
+**68/68**. Full wiring passes **262/262**. The actual required-web shell,
+Node20 with 8 GiB heap, terminates exit 0: **13 batches, 515 files, 7275 tests**.
+Its final batch is 428 files / 5693 tests; earlier 7228-test evidence belongs
+to the previous script and is not substituted for this combined run.
+
+Old d853 Node20 job 101833956660 exposed a missed load-bearing shell pin:
+all W4C5 68 assertions passed, but the workflow still required exactly 67.
+Running the complete old workflow shell locally reproduces exit 1. The bounded
+correction changes only `EXPECTED_LIB_TESTS=67` to `68`, preserving the matrix,
+whole-file command, missing-summary refusal, exact comparison and failure exit.
+The new complete shell passes; shell fixtures returning 67 tests or a failed
+test still exit 1. No test was removed and no exact gate became a lower bound.
+Future suite additions must validate the complete workflow shell, not only tsx.
+
+The official provenance calculator changes only
+`evidenceFiles.pluginTestsWorkflow` to
+`6b65eb8a44f958c4225921f97f201b0ac31d6f166209af34d2bae23af652001e`.
+The old pin fails the positive provenance test; the corrected pin passes the
+full `test:sealed-export-s5` command. Frozen/live differences are zero across all
+six pinned categories. Wiring remains 262/262; workflow test paths are a
+superset of both parents. No other product or shared logic changed.
+
+Retained evidence: `tmp/acp1b-main-replay-required-web.log`,
+`tmp/acp1b-replay-node{18,20}-{collector,w4c5}.log`,
+`tmp/acp1b-replay-step-old67-red.log`, `tmp/acp1b-replay-full-step-controls.log`,
+`tmp/acp1b-replay-oldpin-red.log`, `tmp/acp1b-replay-final-wiring.log`,
+`tmp/acp1b-replay-full-s5.log`, and `tmp/acp1b-d853-node20.log`.
+Main CI, old d853 CI, and final candidate CI are separate evidence layers.
+Final candidate remote CI remains pending publication/verification; this section
+does not claim combined-main green, Ready, merge, deployment or runtime UAT.
+
 ### f3 exact-head follow-up classification gates
 
 Linux migration/approval/recovery and attendance-web checks pass on f3dd471c2.
