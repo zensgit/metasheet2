@@ -81,6 +81,33 @@ function readWebFile(rel: string): string {
   return readFileSync(join(__dirname, '..', rel), 'utf8')
 }
 
+/**
+ * The single route-record literal that declares `path: '<path>'`, delimited by the NEXT route's
+ * `path:` declaration (or the end of the array) — a real boundary, not a byte count. Returns ''
+ * when the path is not declared at all, so a typo reads as "no block" rather than as a window that
+ * happens to satisfy every negative assertion.
+ */
+function routeBlock(routesSource: string, path: string): string {
+  const anchor = `path: '${path}'`
+  const start = routesSource.indexOf(anchor)
+  if (start < 0) return ''
+  const nextPath = routesSource.indexOf('path: \'', start + anchor.length)
+  return routesSource.slice(start, nextPath < 0 ? undefined : nextPath)
+}
+
+/**
+ * The opening tag that carries `needle`, from its own `<` to the `>` that closes it. Attribute
+ * values here contain no `<` or `>`, which is what makes this delimiting safe for these two files.
+ */
+function enclosingOpeningTag(source: string, needle: string): string {
+  const at = source.indexOf(needle)
+  if (at < 0) return ''
+  const open = source.lastIndexOf('<', at)
+  const close = source.indexOf('>', at)
+  if (open < 0 || close < 0) return ''
+  return source.slice(open, close + 1)
+}
+
 describe('my-delegation self-service entry', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -173,20 +200,51 @@ describe('my-delegation self-service entry', () => {
     const source = readWebFile('src/views/approval/TemplateCenterView.vue')
     expect(source).toContain('data-testid="template-center-delegations-link"')
     expect(source).toContain("$router.push('/approval-delegations')")
+    // Round-2 item 5: the enclosing ELEMENT, parsed by its own tag boundaries, not a fixed number
+    // of characters around the hook. A byte window silently moves when a neighbouring attribute
+    // grows, which is both a false red and (in the negative assertions below) a false green.
+    const block = enclosingOpeningTag(source, 'data-testid="template-center-delegations-link"')
+    // The window is real, and it is the right one, BEFORE anything is asserted about its absences.
+    expect(block.length).toBeGreaterThan(0)
+    expect(block).toContain('data-testid="template-center-delegations-link"')
+    expect(block).toContain("$router.push('/approval-delegations')")
+    // …and it stops at this element: the sibling 新建模板 button is outside it.
+    expect(block).not.toContain('template-center-new-button')
     // Still behind canManageTemplates, and still NOT repointed at the self-service route.
-    const block = source.slice(source.indexOf('data-testid="template-center-delegations-link"') - 200)
-      .slice(0, 400)
     expect(block).toContain('v-if="canManageTemplates"')
     expect(source).not.toContain("$router.push('/my-delegation')")
   })
 
   it('the route it points at is still the requiresAuth-only self-service one', () => {
     const routes = readWebFile('src/router/appRoutes.ts')
-    const block = routes.slice(routes.indexOf("path: '/my-delegation'")).slice(0, 400)
+    const block = routeBlock(routes, '/my-delegation')
+    // Same discipline: prove the window is non-empty and is THIS route's block before asserting
+    // that two tokens are absent from it — an empty slice would satisfy both absences vacuously.
+    expect(block.length).toBeGreaterThan(0)
     expect(block).toContain('MyDelegationView.vue')
     expect(block).toContain('requiresAuth: true')
+    // The neighbouring route (which DOES carry a permissions conjunct) is outside the window —
+    // this is what proves the boundary isolated the right block.
+    expect(block).not.toContain('TemplateAuthoringView.vue')
+    expect(block).not.toContain("path: '/approval-templates/new'")
     // No manage permission and no admin flag was added to reach it from the new entry.
     expect(block).not.toContain('permissions:')
     expect(block).not.toContain('requiresAdmin')
+  })
+
+  it('the block parsers are not vacuous (positive controls on both windows)', () => {
+    const routes = readWebFile('src/router/appRoutes.ts')
+    // The very tokens asserted ABSENT above are PRESENT in the neighbouring route's own block, so
+    // "not found" above is a real boundary and not a parser that returns nothing useful.
+    const neighbour = routeBlock(routes, '/approval-templates/new')
+    expect(neighbour).toContain('permissions:')
+    const adminRoute = routeBlock(routes, '/approvals/batch-transfer')
+    expect(adminRoute).toContain('requiresAdmin')
+    // A path that does not exist yields an EMPTY block — so a typo cannot pass as "nothing found".
+    expect(routeBlock(routes, '/no-such-route-anywhere')).toBe('')
+
+    const source = readWebFile('src/views/approval/TemplateCenterView.vue')
+    expect(enclosingOpeningTag(source, 'template-center-new-button')).toContain('createTemplate')
+    expect(enclosingOpeningTag(source, 'no-such-attribute-anywhere')).toBe('')
   })
 })
