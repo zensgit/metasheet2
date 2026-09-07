@@ -14,9 +14,20 @@
  *
  * RED-before: reverting TemplateCenterView.vue to the pre-retrofit hardcoded strings makes the
  * "en" tests below fail (the page would render Chinese regardless of locale) and the "zh" tests
- * pass by coincidence (same literal). Reverting a single EN table entry to Chinese reddens only
- * the matching "en" assertion + the CJK guard sweep; reverting a single ZH table entry to English
- * reddens only the matching "zh" assertion.
+ * pass by coincidence (same literal).
+ *
+ * Round-3 correction (verifier): this header previously claimed "reverting a single EN table
+ * entry to Chinese reddens only the matching 'en' assertion + the CJK guard sweep". That was
+ * FALSE for most keys. The mount tests below only assert the STRINGS THEY RENDER, and 13 of the
+ * 42 EN values (and 16 of the 42 ZH values) are never rendered by any test here — e.g. setting
+ * `EN.colName` to '模板名称' or `EN.visibilityAll` to '' reddened nothing across this spec,
+ * approvalCenterDesktopEmptyTextI18n, approvalTemplateCenterCategory, templateGalleryFilter and
+ * statusTag (verified by mutation). The CJK guard does NOT cover it either: it scans
+ * TemplateCenterView.vue, not templateCenterLabels.ts. `EN: Record<keyof typeof ZH, string>`
+ * makes vue-tsc enforce KEY PRESENCE only — never that a value is non-empty, translated, or not
+ * a copy-pasted Chinese literal. The "locale label tables are complete and actually translated"
+ * test below closes that: it asserts over the tables themselves, so it covers all 42 keys
+ * whether or not a mount test happens to render them.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -32,6 +43,7 @@ import {
   type Slot,
 } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
+import { ZH, EN } from '../src/views/approval/templateCenterLabels'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -658,6 +670,51 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     expect(cardZh?.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('已发布')
   })
 
+  // Round-3 fix (verifier): the ZH/EN label tables had ZERO runtime coverage — every other test
+  // in this file asserts rendered DOM, so it only reaches the subset of keys some test happens to
+  // render (29 of 42 for EN, 26 of 42 for ZH). `EN: Record<keyof typeof ZH, string>` is a TYPE
+  // constraint: it enforces that every ZH key exists in EN and nothing more. A Chinese string
+  // sitting in the EN table, or an empty EN value, type-checks and renders — and the CJK guard
+  // below scans TemplateCenterView.vue, never templateCenterLabels.ts, so it does not catch it
+  // either. This asserts over the tables directly, so it holds for every key.
+  it('locale label tables are complete and actually translated (all keys, both directions)', () => {
+    const zhKeys = Object.keys(ZH).sort()
+    const enKeys = Object.keys(EN).sort()
+
+    // Vacuity control: if the tables were ever emptied or the import resolved to `{}`, every
+    // per-key loop below would pass over zero entries. Pin the count is non-trivial first.
+    expect(zhKeys.length).toBeGreaterThan(30)
+    expect(enKeys).toEqual(zhKeys)
+
+    const emptyZh: string[] = []
+    const emptyEn: string[] = []
+    const chineseInEn: string[] = []
+    const untranslated: string[] = []
+    const asciiOnlyZh: string[] = []
+
+    for (const key of zhKeys) {
+      const zhValue = ZH[key as keyof typeof ZH]
+      const enValue = EN[key as keyof typeof ZH]
+      if (zhValue.trim() === '') emptyZh.push(key)
+      if (enValue.trim() === '') emptyEn.push(key)
+      // The EN table must never carry a CJK character — that is an untranslated string shipped
+      // to English users, exactly the class of defect this whole slice exists to remove.
+      if (CJK.test(enValue)) chineseInEn.push(`${key}=${enValue}`)
+      // A value copy-pasted across both tables is not a translation.
+      if (zhValue === enValue) untranslated.push(key)
+      // Positive control for the CJK class itself: every ZH value must MATCH it. If this list is
+      // ever non-empty the `chineseInEn` check above may be silently vacuous (a CJK regex that
+      // matches nothing would report zero offenders for a fully-Chinese EN table too).
+      if (!CJK.test(zhValue)) asciiOnlyZh.push(`${key}=${zhValue}`)
+    }
+
+    expect(emptyZh).toEqual([])
+    expect(emptyEn).toEqual([])
+    expect(chineseInEn).toEqual([])
+    expect(untranslated).toEqual([])
+    expect(asciiOnlyZh).toEqual([])
+  })
+
   // -------------------------------------------------------------------------
   // Guard: no CJK literal survives outside a locale table, for every converted surface in this
   // slice (report item O-8). Round-2 fixes (C4/C5):
@@ -703,7 +760,16 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
         const slashIdx = line.indexOf('//')
         if (slashIdx === -1) return line
         const before = line.slice(0, slashIdx)
-        if (/['"`]/.test(before)) return line
+        // Round-3 tightening (verifier): the round-2 rule was "strip unless something before the
+        // `//` is a quote", which still stripped an UNQUOTED attribute — `<img src=//cdn/x.png
+        // alt=\"\u6700\u8fd1\u4f7f\u7528\">` has no quote before `//`, so the whole line
+        // including the CJK literal was deleted and the guard stayed green (verified by
+        // mutation). Only a FULL-LINE comment is stripped now: nothing but whitespace may precede
+        // the `//`. Verified byte-equivalent on both converted files at this head — neither has a
+        // single line with any non-whitespace before a `//` (`grep -n '[^[:space:]/].*//'` over
+        // both: zero matches) — and the guard's green run on the unmodified files is the positive
+        // control that every REAL comment in them still strips.
+        if (before.trim() !== '') return line
         return before
       })
       .join('\n')
