@@ -914,6 +914,35 @@ export const STOCK_PREP_QUEUE_RESYNC_ACTION: StockPrepPlainText = Object.freeze(
   en: 'Sync once more',
 })
 
+/**
+ * P1-2 (线框 D ④) — THE SAME BUTTON'S LABEL WHEN THE QUEUE IS COMPOSED IN PLACE (`embedded`).
+ *
+ * 线框 D writes it out as 「回到上面再同步一次 ▴」, and the extra four characters are the whole point:
+ * in the tab this button LEAVES the page, so 「再同步一次」 describes where the operator lands. Inside
+ * 项目备料页's 面板 2 it does not leave anything — it takes the operator back UP the same page and
+ * runs the sync panel that is already sitting there. A label that only said 「再同步一次」 would be
+ * true about the sync and silent about the journey; this one says both, which is what stops the
+ * operator hunting for a second button after the page scrolls under them.
+ */
+export const STOCK_PREP_QUEUE_RESYNC_ACTION_EMBEDDED: StockPrepPlainText = Object.freeze({
+  zh: '回到上面再同步一次',
+  en: 'Go back up and sync once more',
+})
+
+/**
+ * I-3 (线框 C 面板 2) — 面板 2「等您拿主意」's STANDING explanatory line, present in BOTH the collapsed
+ * and the expanded state.
+ *
+ * 线框 C draws this sentence inside 面板 2 in both the P0 and the P1 rendering, and it carries the one
+ * instruction the whole redesign says is lost most often: confirming is not the last step — the data
+ * only reaches 多维表 after one more 同步. Without it the collapsed panel is a box with a count and a
+ * toggle and no word about what it is for.
+ */
+export const STOCK_PREP_CONFIRM_PANEL_NOTE: StockPrepPlainText = Object.freeze({
+  zh: '系统拿不准的事排在这里,处理完记得回上面再点一次「同步一次」。',
+  en: 'Anything the system cannot decide lands here. When you have handled them, go back up and press 同步一次 once more.',
+})
+
 /** I-4 (线框 D ③): 缺件卡's bottom closure line — there is no "mark done" button on this page; a
  *  later sync is what clears the row. */
 export const STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT: StockPrepPlainText = Object.freeze({

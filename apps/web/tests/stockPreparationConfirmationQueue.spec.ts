@@ -326,13 +326,13 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
     return new Response(JSON.stringify({ ok: true, data }), { status: 200 })
   }
 
-  function directoryPayload(): Record<string, unknown> {
+  function directoryPayload(pendingDecisionCount = 0): Record<string, unknown> {
     return {
       tenantId: 'default',
       directoryReady: true,
       ledgerReady: true,
       projectCount: 1,
-      pendingProjectCount: 0,
+      pendingProjectCount: pendingDecisionCount > 0 ? 1 : 0,
       projects: [{
         projectId: 'stockprep_project_a1',
         projectNo: PROJECT_NO,
@@ -343,7 +343,7 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
         openExceptionCount: 0,
         heldLineCount: 0,
         readyLineCount: 0,
-        pendingDecisionCount: 0,
+        pendingDecisionCount,
       }],
     }
   }
@@ -406,9 +406,12 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
     await flush()
     expect(embedded.querySelector('[data-testid="stock-prep-confirmation-project-input"]')).toBeNull()
     expect(embedded.querySelector('[data-testid="stock-prep-confirmation-scope"]')).toBeNull()
-    // …and ONLY those two — the rest of the bar (status filter, refresh) is untouched.
-    expect(embedded.querySelector('[data-testid="stock-prep-confirmation-status-filter"]')).not.toBeNull()
+    // The controls that act on THIS view alone stay: they do what they say in either mode.
     expect(embedded.querySelector('[data-testid="stock-prep-confirmation-queue-refresh"]')).not.toBeNull()
+    expect(
+      embedded.querySelector('[data-testid="stock-prep-operator-project-directory"]'),
+      'the directory read still decides WHICH empty state 面板 2 shows, so its retry stays',
+    ).not.toBeNull()
     app!.unmount()
     app = null
     container!.innerHTML = ''
@@ -420,6 +423,76 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
       'non-embedded (the confirmation-queue TAB, unchanged): the input renders exactly as before',
     ).not.toBeNull()
     expect(standalone.querySelector('[data-testid="stock-prep-confirmation-scope"]')).not.toBeNull()
+  })
+
+  it('P1-2 (G4): embedded hides the status filter — a filtered `byStatus` would let the host draw a full green bar over open rows', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      return ok({})
+    })
+
+    const embedded = mount({ projectNo: PROJECT_NO, embedded: true })
+    await flush()
+    expect(
+      embedded.querySelector('[data-testid="stock-prep-confirmation-status-filter"]'),
+      'the server tallies byStatus over the rows the FILTER returned, and the host 进度条 reads that field',
+    ).toBeNull()
+    app!.unmount()
+    app = null
+    container!.innerHTML = ''
+
+    const standalone = mount({ projectNo: PROJECT_NO })
+    await flush()
+    expect(
+      standalone.querySelector('[data-testid="stock-prep-confirmation-status-filter"]'),
+      'the TAB keeps it — there is no progress bar there for a filtered tally to mislead',
+    ).not.toBeNull()
+  })
+
+  it('P1-2 (R-11): embedded renders NO control whose click goes nowhere and NO second way to change project', async () => {
+    // `integration:admin` is the code the two PLATFORM_ADMIN_GATE capabilities actually probe
+    // (workbenchAccess.ts's `canStockPrepCapability`), so this is the account that sees both buttons.
+    shellState.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:operate']
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      // A project with work waiting — otherwise the worklist is data-empty and proves nothing.
+      if (path.includes('/operator/projects')) return ok(directoryPayload(4))
+      return ok({})
+    })
+
+    const embedded = mount({ projectNo: PROJECT_NO, embedded: true })
+    await flush()
+    // The two `admin-action` emitters: the host that composes this view is NOT the shell, so nothing
+    // would answer them there.
+    expect(embedded.querySelector('[data-testid="stock-prep-confirmation-ensure"]')).toBeNull()
+    expect(embedded.querySelector('[data-testid="stock-prep-confirmation-reconcile"]')).toBeNull()
+    expect(
+      embedded.querySelector('[data-testid="stock-prep-confirmation-reconcile-note"]'),
+      'and the note describing that scan goes with it — it describes an action that is not on screen',
+    ).toBeNull()
+    // The cross-project worklist: `pickProject` rewrites this view's OWN projectNo, which in a host
+    // would point 面板 2 at another project while the whole page above stayed on this one.
+    expect(embedded.querySelector('[data-testid="stock-prep-operator-project-worklist"]')).toBeNull()
+    expect(embedded.querySelector('[data-testid="stock-prep-operator-project-pick"]')).toBeNull()
+    // G1: the host renders its own 导出 / 通知下一步 for the same project.
+    expect(embedded.querySelector('[data-testid="stock-prep-confirmation-export"]')).toBeNull()
+    expect(embedded.querySelector('[data-testid="stock-prep-handoff-advance"]')).toBeNull()
+    expect(embedded.querySelector('[data-testid="stock-prep-handoff-status"]')).toBeNull()
+    app!.unmount()
+    app = null
+    container!.innerHTML = ''
+
+    // THE OTHER HALF: every one of those is still exactly where it was on the confirmation-queue TAB,
+    // for the same account. Nothing above is a capability change.
+    const standalone = mount({ projectNo: PROJECT_NO })
+    await flush()
+    expect(standalone.querySelector('[data-testid="stock-prep-confirmation-ensure"]')).not.toBeNull()
+    expect(standalone.querySelector('[data-testid="stock-prep-confirmation-reconcile"]')).not.toBeNull()
+    expect(standalone.querySelector('[data-testid="stock-prep-confirmation-reconcile-note"]')).not.toBeNull()
+    expect(standalone.querySelector('[data-testid="stock-prep-operator-project-worklist"]')).not.toBeNull()
+    expect(standalone.querySelector('[data-testid="stock-prep-operator-project-pick"]')).not.toBeNull()
+    expect(standalone.querySelector('[data-testid="stock-prep-confirmation-export"]')).not.toBeNull()
   })
 
   it('P1-2: embedded fetches the PARENT-supplied projectNo — no typing required to see this project\'s queue', async () => {
@@ -466,6 +539,10 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
     await flush()
     const resync = root.querySelector('[data-testid="stock-prep-confirmation-empty-resync"]') as HTMLButtonElement
     expect(resync, 'nothing_pending (2 confirmed, 0 pending) renders the closed-loop button').not.toBeNull()
+    expect(
+      resync.textContent?.trim(),
+      '线框 D ④ writes the embedded label out in full — it goes back UP the page, and says so',
+    ).toBe('回到上面再同步一次')
     resync.click()
     await flush()
     expect(embeddedResyncSpy, 'embedded mode: the host handles it — the panel is already "上面"').toHaveBeenCalledTimes(1)
@@ -485,7 +562,12 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
     await flush()
     ;(standalone.querySelector('[data-testid="stock-prep-confirmation-queue-refresh"]') as HTMLButtonElement).click()
     await flush()
-    ;(standalone.querySelector('[data-testid="stock-prep-confirmation-empty-resync"]') as HTMLButtonElement).click()
+    const standaloneResync = standalone.querySelector('[data-testid="stock-prep-confirmation-empty-resync"]') as HTMLButtonElement
+    expect(
+      standaloneResync.textContent?.trim(),
+      'the TAB keeps the short label it always had — there is no "上面" to go back to from here',
+    ).toBe('再同步一次')
+    standaloneResync.click()
     await flush()
     expect(standaloneNavigateSpy).toHaveBeenCalledWith('project-board', PROJECT_NO)
     expect(standaloneResyncSpy).not.toHaveBeenCalled()
