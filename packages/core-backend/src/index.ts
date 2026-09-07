@@ -143,6 +143,10 @@ import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middl
 import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
 import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
 import {
+  refreshAttendanceReportProjectionAnchor,
+  withholdAttendanceReportProjectionAnchors,
+} from './attendance/attendance-multitable-cleaning-authority'
+import {
   buildAttendanceRequestCreationAttributionSnapshotV1,
   createAttendanceLiveScheduledBoundaryV1,
   computeAttendanceOuterSourceDefinitionFingerprintV1,
@@ -2512,6 +2516,43 @@ export class MetaSheetServer {
                   }
                   return checkElearningAssignmentReminderEligibility(poolManager.get(), input)
                 },
+              }
+            : undefined,
+        // ACP-1B: core owns the canonical anchor ledger. The attendance plugin only receives
+        // this narrow sync port; it cannot query or write the ledger generically.
+        attendanceMultitableCleaningAuthority:
+          manifest.name === 'plugin-attendance'
+            ? {
+                refresh: async (input: {
+                  projectionRecordId: string
+                  canonicalRecordId: string
+                  sourceFingerprint: string
+                }) => poolManager.get().transaction(async ({ query }) => {
+                  await refreshAttendanceReportProjectionAnchor(async (statement, params) => {
+                    const result = await query(statement, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: typeof (result as { rowCount?: unknown }).rowCount === 'number'
+                        ? (result as { rowCount: number }).rowCount
+                        : undefined,
+                    }
+                  }, input)
+                }),
+                withhold: async (projectionRecordIds: readonly string[]) => poolManager.get().transaction(async ({ query }) => {
+                  await withholdAttendanceReportProjectionAnchors(async (statement, params) => {
+                    const result = await query(statement, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: typeof (result as { rowCount?: unknown }).rowCount === 'number'
+                        ? (result as { rowCount: number }).rowCount
+                        : undefined,
+                    }
+                  }, projectionRecordIds)
+                }),
               }
             : undefined,
         // W4C-2 (#4556 lock §12.2 last sentence; #4607 P3-4): host-provided strict W4

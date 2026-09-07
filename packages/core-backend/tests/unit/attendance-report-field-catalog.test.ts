@@ -1169,8 +1169,8 @@ describe('attendance report field catalog multitable foundation', () => {
       // NO findObjectSheet → catalog falls back to deterministic built-in field set
     }
     const attendanceRows = [
-      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, status: 'normal', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
-      { user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-14', timezone: 'UTC', first_in_at: '2026-05-14T09:10:00Z', last_out_at: '2026-05-14T18:00:00Z', work_minutes: 470, late_minutes: 10, early_leave_minutes: 0, status: 'late', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
+      { canonical_record_id: 'attendance-1', user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-13', timezone: 'UTC', first_in_at: '2026-05-13T09:00:00Z', last_out_at: '2026-05-13T18:00:00Z', work_minutes: 480, late_minutes: 0, early_leave_minutes: 0, status: 'normal', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
+      { canonical_record_id: 'attendance-2', user_id: 'u-1', org_id: 'org-1', work_date: '2026-05-14', timezone: 'UTC', first_in_at: '2026-05-14T09:10:00Z', last_out_at: '2026-05-14T18:00:00Z', work_minutes: 470, late_minutes: 10, early_leave_minutes: 0, status: 'late', is_workday: true, meta: {}, user_name: '张三', username: 'zhangsan', employee_no: 'E-1001', department: 'Assembly', position: 'Line Lead', hire_date: '2026-05-29' },
     ]
     const db = {
       query: async (sql: string) => {
@@ -1178,7 +1178,12 @@ describe('attendance report field catalog multitable foundation', () => {
         return [] // system_configs / leave_types / overtime_rules / approved → empty (tolerated)
       },
     }
-    const context = { api: { multitable: { provisioning, records }, database: db } }
+    const refreshAnchor = vi.fn().mockResolvedValue(undefined)
+    const withholdAnchors = vi.fn().mockResolvedValue(undefined)
+    const context = {
+      api: { multitable: { provisioning, records }, database: db },
+      services: { attendanceMultitableCleaningAuthority: { refresh: refreshAnchor, withhold: withholdAnchors } },
+    }
 
     // sync #1 → all created
     const r1 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
@@ -1189,6 +1194,11 @@ describe('attendance report field catalog multitable foundation', () => {
       sheetId: 'sheet_rr',
     })
     expect(store.length).toBe(2)
+    expect(refreshAnchor).toHaveBeenCalledTimes(2)
+    expect(refreshAnchor).toHaveBeenCalledWith(expect.objectContaining({
+      projectionRecordId: 'rec-1',
+      canonicalRecordId: 'attendance-1',
+    }))
     // Fix-1 integration: the descriptor handed to ensureObject (value-columns ensure) must
     // carry work_date exactly once and still as type 'date' (no string overwrite collision)
     const valueEnsure = ensureObjectDescriptors[ensureObjectDescriptors.length - 1]
@@ -1205,11 +1215,14 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(store[0].data.fld_hire_date).toBe('2026-05-29')
     expect(typeof store[0].data['fld_field_fingerprint']).toBe('string')
     expect(typeof store[0].data['fld_source_fingerprint']).toBe('string')
+    expect(store[0].data).not.toHaveProperty('fld_cleaning_requested')
+    expect(store[0].data).not.toHaveProperty('fld_cleaning_reason')
     expect(Object.keys(store[0].data).some(key => key.includes('__source'))).toBe(false)
 
     // sync #2 same data → all skipped (source+field fingerprint 双等)
     const r2 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
     expect(r2).toMatchObject({ synced: 2, created: 0, skipped: 2, patched: 0 })
+    expect(refreshAnchor).toHaveBeenCalledTimes(4)
     expect(store.length).toBe(2)
 
     // Same fingerprints are not proof of content integrity: repair only the managed projection map.
@@ -1245,6 +1258,7 @@ describe('attendance report field catalog multitable foundation', () => {
     const r5 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
     expect(r5.duplicateRowKeys).toBeGreaterThanOrEqual(1)
     expect(store.filter(r => r.data[rowKeyFid] === 'org-1:u-1:2026-05-13').length).toBe(2) // not auto-deleted (v1)
+    expect(withholdAnchors).toHaveBeenCalledWith(expect.arrayContaining(['rec-1', 'rec-dup']))
   })
 
   it('report-records sync: bulk explicit users dedupe and aggregate per-user results', async () => {
