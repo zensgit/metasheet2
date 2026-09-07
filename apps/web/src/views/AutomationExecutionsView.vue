@@ -113,11 +113,12 @@
             <div v-if="resumeError" class="automation-runs__step-error" data-field="resume-error" role="alert">{{ resumeError }}</div>
 
             <!--
-              P3-4: whole-EXECUTION re-run (distinct from per-step Resume above). Admin-gated (mirrors
-              the `<template v-else>` wrapper) AND state-gated on the SAME status the backend's
-              retryExecution() enforces (failed/skipped only) — the `isAdmin &&` conjunct here is
-              intentionally redundant with the outer guard so a regression that drops it still fails
-              its own gate test.
+              P3-4: whole-EXECUTION re-run (distinct from per-step Resume above), state-gated on the
+              SAME status the backend's retryExecution() enforces (failed/skipped only). The EFFECTIVE
+              admin gate is the outer `<template v-else>` wrapper (this markup only exists at all when
+              isAdmin is true) — verified by mutation: dropping just the `isAdmin &&` conjunct below is
+              observably a no-op (this block is already unreachable for a non-admin), so that conjunct
+              is a redundant explicit statement of intent, not an independently-tested gate.
             -->
             <div v-if="isAdmin && canRerunExecution(run)" class="automation-runs__rerun" data-field="rerun-panel">
               <button
