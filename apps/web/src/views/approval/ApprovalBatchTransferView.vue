@@ -1,138 +1,178 @@
 <template>
   <PageShell width="default">
     <PageHeader
-      title="批量转交"
-      subtitle="把某位审批人名下的待办，整批交给另一位审批人。转交后由服务端逐条判定，结果逐条显示。"
+      :title="t.title"
+      :subtitle="t.subtitle"
     />
 
-    <section class="batch-transfer__form" aria-label="批量转交设置">
-      <div class="batch-transfer__field">
-        <span class="batch-transfer__label">原审批人</span>
-        <ApprovalUserPicker
-          :model-value="fromUserId || null"
-          placeholder="搜索用户名 / 邮箱 / ID"
-          data-testid="batch-transfer-source-picker"
-          @update:model-value="onSourceChange"
-        />
-        <el-button
-          class="batch-transfer__load"
-          :loading="loadingRows"
-          :disabled="!fromUserId"
-          data-testid="batch-transfer-load"
-          @click="loadRows"
-        >
-          载入待办
-        </el-button>
-      </div>
-
-      <div class="batch-transfer__field">
-        <span class="batch-transfer__label">转交给</span>
-        <ApprovalUserPicker
-          :model-value="toUserId || null"
-          placeholder="搜索用户名 / 邮箱 / ID"
-          :excluded-user-ids="excludedTargets"
-          data-testid="batch-transfer-target-picker"
-          @update:model-value="toUserId = $event ?? ''"
-        />
-      </div>
-
-      <div class="batch-transfer__field">
-        <span class="batch-transfer__label">转交原因</span>
-        <el-input
-          v-model="reason"
-          type="textarea"
-          :rows="2"
-          placeholder="填写转交原因（必填，会写入审批记录）"
-          data-testid="batch-transfer-reason"
-        />
-      </div>
-    </section>
+    <!-- The server's own approval-administrator answer decides what this page may claim. Nothing
+         below the header renders until it arrives: a form drawn before the answer would invite the
+         operator to act on a queue the page cannot yet describe. -->
+    <p
+      v-if="capability === 'pending'"
+      class="batch-transfer__gate"
+      data-testid="batch-transfer-capability-pending"
+    >{{ t.capabilityPending }}</p>
 
     <el-alert
-      v-if="loadError"
-      type="error"
+      v-else-if="capability === 'denied'"
+      type="warning"
       show-icon
       :closable="false"
       class="batch-transfer__alert"
-      data-testid="batch-transfer-load-error"
-      title="待办列表加载失败，请重试"
+      data-testid="batch-transfer-forbidden"
+      :title="t.forbiddenTitle"
+      :description="t.forbiddenBody"
     />
 
-    <section class="batch-transfer__rows" aria-label="待转交审批">
-      <div class="batch-transfer__rows-head">
-        <el-checkbox
-          :model-value="allSelected"
-          :disabled="rows.length === 0"
-          data-testid="batch-transfer-select-all"
-          @update:model-value="toggleAll"
-        >
-          全选
-        </el-checkbox>
-        <span class="batch-transfer__count" data-testid="batch-transfer-selected-count">
-          已选 {{ selectedIds.length }} / {{ rows.length }}
-        </span>
-      </div>
+    <el-alert
+      v-else-if="capability === 'unavailable'"
+      type="info"
+      show-icon
+      :closable="false"
+      class="batch-transfer__alert"
+      data-testid="batch-transfer-capability-unavailable"
+      :title="t.capabilityUnavailableTitle"
+      :description="t.capabilityUnavailableBody"
+    />
 
-      <p v-if="loaded && rows.length === 0" class="batch-transfer__empty" data-testid="batch-transfer-empty">
-        该审批人名下没有可转交的平台待办。
-      </p>
-
-      <p v-if="truncationNotice" class="batch-transfer__truncated" data-testid="batch-transfer-truncated">
-        {{ truncationNotice }}
-      </p>
-
-      <ul class="batch-transfer__list">
-        <li
-          v-for="(row, index) in rows"
-          :key="row.id"
-          class="batch-transfer__row"
-          :data-testid="`batch-transfer-row-${row.id}`"
-        >
-          <el-checkbox
-            :model-value="selectedSet.has(row.id)"
-            :data-testid="`batch-transfer-row-check-${row.id}`"
-            @update:model-value="toggleRow(row.id, $event)"
+    <template v-else>
+      <section class="batch-transfer__form" :aria-label="t.formRegion">
+        <div class="batch-transfer__field">
+          <span class="batch-transfer__label">{{ t.sourceApprover }}</span>
+          <ApprovalUserPicker
+            :model-value="fromUserId || null"
+            :placeholder="t.userPickerPlaceholder"
+            data-testid="batch-transfer-source-picker"
+            @update:model-value="onSourceChange"
           />
-          <span class="batch-transfer__row-title">{{ rowLabel(row, index) }}</span>
-          <span
-            v-if="outcomeFor(row.id)"
-            class="batch-transfer__row-outcome"
-            :data-testid="`batch-transfer-outcome-${row.id}`"
-            :data-outcome="outcomeFor(row.id)!.kind"
-            :data-outcome-reason="outcomeFor(row.id)!.reason ?? ''"
-          >{{ outcomeText(outcomeFor(row.id)!) }}</span>
-        </li>
-      </ul>
-    </section>
+          <el-button
+            class="batch-transfer__load"
+            :loading="loadingRows"
+            :disabled="!fromUserId"
+            data-testid="batch-transfer-load"
+            @click="loadRows"
+          >
+            {{ t.loadPending }}
+          </el-button>
+        </div>
 
-    <section class="batch-transfer__actions">
-      <span v-if="blockText" class="batch-transfer__block" data-testid="batch-transfer-block-reason">
-        {{ blockText }}
-      </span>
-      <el-button
-        type="primary"
-        :loading="submitting"
-        :disabled="blockReason !== null || submitting"
-        data-testid="batch-transfer-submit"
-        @click="submit"
+        <div class="batch-transfer__field">
+          <span class="batch-transfer__label">{{ t.targetApprover }}</span>
+          <ApprovalUserPicker
+            :model-value="toUserId || null"
+            :placeholder="t.userPickerPlaceholder"
+            :excluded-user-ids="excludedTargets"
+            data-testid="batch-transfer-target-picker"
+            @update:model-value="toUserId = $event ?? ''"
+          />
+        </div>
+
+        <div class="batch-transfer__field">
+          <span class="batch-transfer__label">{{ t.reasonLabel }}</span>
+          <el-input
+            v-model="reason"
+            type="textarea"
+            :rows="2"
+            :placeholder="t.reasonPlaceholder"
+            data-testid="batch-transfer-reason"
+          />
+        </div>
+      </section>
+
+      <el-alert
+        v-if="loadError"
+        type="error"
+        show-icon
+        :closable="false"
+        class="batch-transfer__alert"
+        data-testid="batch-transfer-load-error"
+        :title="t.loadFailed"
+      />
+
+      <section class="batch-transfer__rows" :aria-label="t.rowsRegion">
+        <div class="batch-transfer__rows-head">
+          <el-checkbox
+            :model-value="allSelected"
+            :disabled="rows.length === 0"
+            data-testid="batch-transfer-select-all"
+            @update:model-value="toggleAll"
+          >
+            {{ t.selectAll }}
+          </el-checkbox>
+          <span class="batch-transfer__count" data-testid="batch-transfer-selected-count">
+            {{ t.selectedPrefix }} {{ selectedIds.length }} / {{ rows.length }}
+          </span>
+        </div>
+
+        <!-- Reachable ONLY on the `granted` branch, so "this approver has nothing to transfer" is
+             never stated off a read the caller's own scope may have narrowed. -->
+        <p v-if="loaded && rows.length === 0" class="batch-transfer__empty" data-testid="batch-transfer-empty">
+          {{ t.emptyQueue }}
+        </p>
+
+        <p v-if="truncationNotice" class="batch-transfer__truncated" data-testid="batch-transfer-truncated">
+          {{ truncationNotice }}
+        </p>
+
+        <ul class="batch-transfer__list">
+          <li
+            v-for="(row, index) in rows"
+            :key="row.id"
+            class="batch-transfer__row"
+            :data-testid="`batch-transfer-row-${row.id}`"
+          >
+            <el-checkbox
+              :model-value="selectedSet.has(row.id)"
+              :data-testid="`batch-transfer-row-check-${row.id}`"
+              @update:model-value="toggleRow(row.id, $event)"
+            />
+            <span class="batch-transfer__row-title">{{ rowLabel(row, index) }}</span>
+            <span
+              v-if="outcomeFor(row.id)"
+              class="batch-transfer__row-outcome"
+              :data-testid="`batch-transfer-outcome-${row.id}`"
+              :data-outcome="outcomeFor(row.id)!.kind"
+              :data-outcome-reason="outcomeFor(row.id)!.reason ?? ''"
+            >{{ outcomeText(outcomeFor(row.id)!) }}</span>
+          </li>
+        </ul>
+      </section>
+
+      <section class="batch-transfer__actions">
+        <span
+          v-if="justSubmitted"
+          class="batch-transfer__block"
+          data-testid="batch-transfer-submitted-notice"
+        >{{ t.alreadySubmitted }}</span>
+        <span v-else-if="blockText" class="batch-transfer__block" data-testid="batch-transfer-block-reason">
+          {{ blockText }}
+        </span>
+        <el-button
+          type="primary"
+          :loading="submitting"
+          :disabled="submitDisabled"
+          data-testid="batch-transfer-submit"
+          @click="submit"
+        >
+          {{ t.submit }}
+        </el-button>
+      </section>
+
+      <section
+        v-if="summary"
+        class="batch-transfer__summary"
+        :aria-label="t.summaryRegion"
+        data-testid="batch-transfer-summary"
       >
-        转交所选
-      </el-button>
-    </section>
-
-    <section
-      v-if="summary"
-      class="batch-transfer__summary"
-      aria-label="转交结果"
-      data-testid="batch-transfer-summary"
-    >
-      <span>提交 {{ summary.submitted }}</span>
-      <span>成功 {{ summary.transferred }}</span>
-      <span>跳过 {{ summary.skipped }}</span>
-      <span v-if="summary.unreported > 0" data-testid="batch-transfer-unreported">
-        未返回结果 {{ summary.unreported }}
-      </span>
-    </section>
+        <span>{{ t.summarySubmitted }} {{ summary.submitted }}</span>
+        <span>{{ t.summaryTransferred }} {{ summary.transferred }}</span>
+        <span>{{ t.summarySkipped }} {{ summary.skipped }}</span>
+        <span v-if="summary.unreported > 0" data-testid="batch-transfer-unreported">
+          {{ t.summaryUnreported }} {{ summary.unreported }}
+        </span>
+      </section>
+    </template>
   </PageShell>
 </template>
 
@@ -155,12 +195,23 @@
 // per instance inside a transaction (status re-check under lock, seat re-check, attendance-scope
 // authorization), so a listed row can still come back skipped. That is why every submitted row gets
 // its own outcome, and why an id the server mentions in NEITHER `succeeded` nor `skipped` renders as
-// "未返回结果" instead of quietly looking like a success.
+// "no result returned" instead of quietly looking like a success.
 //
-// PROJECTION PERMISSIONS ARE NOT RELAXED: the list read is the ordinary
-// `GET /api/approvals` projection with the existing `assignee` filter. An admin sees another
-// approver's rows only because the list scope already admits every row for an admin principal.
-import { computed, ref } from 'vue'
+// WHOSE QUEUE THIS CAN DESCRIBE (round-2 item 1, the P2 this page shipped with). The list read is
+// the ordinary `GET /api/approvals` projection, whose scope admits another approver's rows only
+// through the DB-backed admin arm `users.is_active AND (is_admin OR role = 'admin')`. The route and
+// nav gates, by contrast, are TOKEN-derived (`getAccessSnapshot().isAdmin`). A principal admitted by
+// the token gate but not the DB one was served arms 1-4 of the scope — a SUBSET of the picked
+// approver's queue — and this page stated, as fact, that the approver had nothing to transfer.
+// It now asks the server which it is (`GET /api/approvals/admin/capability`, the same DB predicate
+// the list scope binds) and renders THREE outcomes: granted (the queue, and only then the
+// "nothing pending" copy), denied (an explicit insufficient-privilege state), and unavailable (the
+// server did not confirm — never restated as "you are not an administrator").
+//
+// PROJECTION PERMISSIONS ARE NOT RELAXED: the capability read grants nothing. It is a read of an
+// existing predicate; `rbacGuard('approvals:admin')` still gates the mutation and the list scope
+// still gates the projection.
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
@@ -170,6 +221,7 @@ import {
   bulkReassignApprovals,
   listPendingApprovalsForApprover,
 } from '../../approvals/api'
+import { resolveApprovalAdminCapability, type ApprovalAdminCapability } from '../../approvals/adminCapability'
 import {
   blockReasonForTransfer,
   buildTransferOutcomes,
@@ -184,6 +236,81 @@ import type { UnifiedApprovalDTO } from '../../types/approval'
 
 const { isZh } = useLocale()
 
+// ONE table for the whole surface, in the shape App.vue's `navLabels` established. Every string
+// this page renders comes from here — the page had a mixed-locale chrome (hardcoded Chinese
+// labels around locale-branched error text), which is worse than either consistent alternative.
+const ZH = {
+  title: '批量转交',
+  subtitle: '把某位审批人名下的待办，整批交给另一位审批人。转交后由服务端逐条判定，结果逐条显示。',
+  formRegion: '批量转交设置',
+  rowsRegion: '待转交审批',
+  summaryRegion: '转交结果',
+  sourceApprover: '原审批人',
+  targetApprover: '转交给',
+  reasonLabel: '转交原因',
+  userPickerPlaceholder: '搜索用户名 / 邮箱 / ID',
+  reasonPlaceholder: '填写转交原因（必填，会写入审批记录）',
+  loadPending: '载入待办',
+  loadFailed: '待办列表加载失败，请重试',
+  selectAll: '全选',
+  selectedPrefix: '已选',
+  emptyQueue: '该审批人名下没有可转交的平台待办。',
+  submit: '转交所选',
+  alreadySubmitted: '本批已提交。如需继续处理该审批人，请重新载入待办。',
+  summarySubmitted: '提交',
+  summaryTransferred: '成功',
+  summarySkipped: '跳过',
+  summaryUnreported: '未返回结果',
+  outcomeTransferred: '已转交',
+  outcomeUnreported: '未返回结果',
+  capabilityPending: '正在确认权限…',
+  forbiddenTitle: '权限不足：无法查看其他审批人的待办',
+  forbiddenBody: '批量转交需要审批管理员权限（由服务端按账号判定）。当前账号不具备该权限，因此本页无法列出任何审批人的待办，也无法执行转交。请联系平台管理员。',
+  capabilityUnavailableTitle: '暂时无法确认权限',
+  capabilityUnavailableBody: '服务端未能确认当前账号是否为审批管理员。这不代表权限不足；在确认之前，本页不会列出任何待办。请稍后重试。',
+  submitSuccess: '批量转交已处理，请查看逐条结果',
+  submitFailed: '批量转交请求未成功，请重试',
+  confirmTitle: '确认批量转交',
+} as const
+
+const EN: Record<keyof typeof ZH, string> = {
+  title: 'Batch Transfer',
+  subtitle: 'Hand one approver’s pending items to another approver in a single batch. The server decides item by item, and every item’s result is shown.',
+  formRegion: 'Batch transfer settings',
+  rowsRegion: 'Approvals to transfer',
+  summaryRegion: 'Transfer results',
+  sourceApprover: 'Source approver',
+  targetApprover: 'Transfer to',
+  reasonLabel: 'Transfer reason',
+  userPickerPlaceholder: 'Search by name / email / ID',
+  reasonPlaceholder: 'Why this batch is being transferred (required; written to the approval record)',
+  loadPending: 'Load pending items',
+  loadFailed: 'The pending list could not be loaded; please retry',
+  selectAll: 'Select all',
+  selectedPrefix: 'Selected',
+  emptyQueue: 'This approver has no transferable platform items pending.',
+  submit: 'Transfer selected',
+  alreadySubmitted: 'This batch has been submitted. Reload the pending list to continue with this approver.',
+  summarySubmitted: 'Submitted',
+  summaryTransferred: 'Transferred',
+  summarySkipped: 'Skipped',
+  summaryUnreported: 'No result returned',
+  outcomeTransferred: 'Transferred',
+  outcomeUnreported: 'No result returned',
+  capabilityPending: 'Confirming your access…',
+  forbiddenTitle: 'Insufficient privilege: another approver’s queue cannot be shown',
+  forbiddenBody: 'Batch transfer requires approval-administrator access, which the server decides per account. This account does not have it, so no approver’s pending items can be listed here and no transfer can be made. Please contact a platform administrator.',
+  capabilityUnavailableTitle: 'Your access could not be confirmed right now',
+  capabilityUnavailableBody: 'The server did not confirm whether this account is an approval administrator. That is not the same as being refused; until it is confirmed, this page lists nothing. Please retry shortly.',
+  submitSuccess: 'Batch transfer processed; see the per-row results',
+  submitFailed: 'The batch transfer request did not succeed; please retry',
+  confirmTitle: 'Confirm batch transfer',
+}
+
+const t = computed(() => (isZh.value ? ZH : EN))
+
+const capability = ref<ApprovalAdminCapability | 'pending'>('pending')
+
 const fromUserId = ref('')
 const toUserId = ref('')
 const reason = ref('')
@@ -194,8 +321,25 @@ const loadingRows = ref(false)
 const loaded = ref(false)
 const loadError = ref(false)
 const submitting = ref(false)
+// Round-2 item 4: a completed batch latches this until the list is reloaded (or the source approver
+// changes). Clearing the selection alone would leave the button re-armable by re-ticking stale
+// rows, and a second identical POST overwrites the success summary with a wall of `not-assigned`
+// skips — an operator's successful batch reads as a failure.
+const justSubmitted = ref(false)
 const outcomes = ref<ApprovalBatchTransferRowOutcome[]>([])
 const summary = ref<ApprovalBatchTransferSummary | null>(null)
+
+onMounted(async () => {
+  try {
+    capability.value = await resolveApprovalAdminCapability()
+  } catch {
+    // `resolveApprovalAdminCapability` answers `unavailable` rather than rejecting today, so this
+    // is unreachable — but an unhandled rejection here would leave `capability` at 'pending'
+    // FOREVER: the page would sit on "confirming your access" with no queue, no privilege state
+    // and no error, which is the worst of the four outcomes and the only one nothing else covers.
+    capability.value = 'unavailable'
+  }
+})
 
 const selectedSet = computed(() => new Set(selectedIds.value))
 // The list read is capped at the endpoint's own page maximum, which is also the service's cap on an
@@ -219,6 +363,8 @@ const blockReason = computed<ApprovalBatchTransferBlockReason | null>(() => bloc
   selectedIds: selectedIds.value,
   limit: APPROVAL_BATCH_TRANSFER_PAGE_LIMIT,
 }))
+
+const submitDisabled = computed(() => justSubmitted.value || blockReason.value !== null || submitting.value)
 
 const BLOCK_TEXT: Record<ApprovalBatchTransferBlockReason, { zh: string; en: string }> = {
   'no-source': { zh: '请先选择原审批人', en: 'Pick the source approver first' },
@@ -247,6 +393,7 @@ function onSourceChange(next: string | null): void {
   totalPending.value = 0
   loaded.value = false
   loadError.value = false
+  justSubmitted.value = false
   resetResults()
 }
 
@@ -254,6 +401,7 @@ async function loadRows(): Promise<void> {
   if (!fromUserId.value || loadingRows.value) return
   loadingRows.value = true
   loadError.value = false
+  justSubmitted.value = false
   resetResults()
   try {
     const page = await listPendingApprovalsForApprover(fromUserId.value)
@@ -303,20 +451,20 @@ function outcomeFor(id: string): ApprovalBatchTransferRowOutcome | undefined {
 }
 
 function outcomeText(outcome: ApprovalBatchTransferRowOutcome): string {
-  if (outcome.kind === 'transferred') return isZh.value ? '已转交' : 'Transferred'
-  if (outcome.kind === 'unreported') return isZh.value ? '未返回结果' : 'No result returned'
+  if (outcome.kind === 'transferred') return t.value.outcomeTransferred
+  if (outcome.kind === 'unreported') return t.value.outcomeUnreported
   return describeSkipReason(outcome.reason, isZh.value)
 }
 
 async function submit(): Promise<void> {
-  if (blockReason.value !== null || submitting.value) return
+  if (submitDisabled.value) return
   const submittedIds = [...selectedIds.value]
   try {
     await ElMessageBox.confirm(
       isZh.value
         ? `将把所选 ${submittedIds.length} 条待办转交给所选用户，转交原因会写入审批记录。是否继续？`
         : `${submittedIds.length} selected item(s) will be transferred to the selected user, and the reason will be written to the approval record. Continue?`,
-      isZh.value ? '确认批量转交' : 'Confirm batch transfer',
+      t.value.confirmTitle,
       { type: 'warning' },
     )
   } catch {
@@ -335,9 +483,14 @@ async function submit(): Promise<void> {
     })
     outcomes.value = buildTransferOutcomes(submittedIds, result)
     summary.value = summarizeTransferOutcomes(outcomes.value)
-    ElMessage.success(isZh.value ? '批量转交已处理，请查看逐条结果' : 'Batch transfer processed; see the per-row results')
+    // The batch reached the server and was answered. Both halves matter: the selection is dropped
+    // so nothing is armed, and the latch below keeps it that way until the list is reloaded.
+    selectedIds.value = []
+    justSubmitted.value = true
+    ElMessage.success(t.value.submitSuccess)
   } catch {
-    ElMessage.error(isZh.value ? '批量转交请求未成功，请重试' : 'The batch transfer request did not succeed; please retry')
+    // A failed request leaves the page re-armable on purpose: nothing was processed.
+    ElMessage.error(t.value.submitFailed)
   } finally {
     submitting.value = false
   }
@@ -370,6 +523,11 @@ async function submit(): Promise<void> {
 
 .batch-transfer__alert {
   margin-bottom: var(--ms-space-3);
+}
+
+.batch-transfer__gate {
+  padding: var(--ms-space-4) 0;
+  color: var(--ms-text-3);
 }
 
 .batch-transfer__rows-head {

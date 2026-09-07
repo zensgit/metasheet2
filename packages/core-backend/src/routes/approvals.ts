@@ -37,6 +37,7 @@ import {
   resolveApprovalListPaging,
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
+import { isApprovalAdministrator } from '../services/approval-admin-capability'
 import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
 import {
   canReadApprovalInstance,
@@ -2186,6 +2187,47 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_ADMIN_JUMP_FAILED',
         'Failed to jump approval',
+      )
+    }
+  })
+
+  /**
+   * Read-only: "is the CALLER an approval administrator by the same DB-backed predicate the
+   * approval list scope binds?" — see `services/approval-admin-capability.ts` for why the three
+   * existing admin predicates disagree and which one this answers.
+   *
+   * `authenticate` ONLY, deliberately no `rbacGuard`. A guard here would answer 403 for a caller
+   * without the `approvals:admin` PERMISSION, folding the permission axis back into a question that
+   * is about the `users`-table columns — and 403 is not distinguishable, client-side, from the
+   * transport failing. The three answers a client needs are `true`, `false`, and "could not
+   * determine", so this route returns the first two as data and the third as a non-200.
+   *
+   * It grants nothing. `rbacGuard('approvals:admin')` still gates every admin mutation and the list
+   * scope still gates the projection; a client that lies about this value gains no access.
+   */
+  r.get('/api/approvals/admin/capability', authenticate, async (req: Request, res: Response) => {
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+      const isApprovalAdmin = await isApprovalAdministrator(pool, userId)
+      return res.json({ ok: true, data: { isApprovalAdmin } })
+    } catch (error) {
+      // NOT folded into `false`. A lookup failure must reach the client as "could not determine",
+      // never as a statement about the caller's rights.
+      logger.error(
+        `approval admin capability lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      return res.status(500).json(
+        approvalErrorResponse('APPROVAL_ADMIN_CAPABILITY_FAILED', 'Failed to resolve approval administrator capability'),
       )
     }
   })

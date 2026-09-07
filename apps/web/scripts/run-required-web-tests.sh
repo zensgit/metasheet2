@@ -602,18 +602,23 @@ npx vitest run approval-detail-instance-consistency approval-store-detail-genera
 #     guard helper), the pinned request path/query/body, the confirm-before-submit step, and the
 #     per-row outcomes including the "server answered about neither" case.
 #
+#   * `approvalNavBatchTransferEntry` (round 2) — the 批量转交 NAV ENTRY's gate: it renders only when
+#     the SERVER's DB-backed approval-administrator capability says so, is absent on `denied` AND on
+#     "could not determine", and an ordinary user's shell never issues the read at all.
+#
 # SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
 # file using this file's own counting rule (join backslash continuations, drop comment lines, take
 # every whitespace-separated argument of an `npx vitest run` command that does not start with `-`;
-# that yields 439 before this change and 442 after, with no duplicates). None of the three new
+# that yields 439 before this change and 443 after, with no duplicates). None of the four new
 # tokens contains, nor is contained by, any existing one — in particular the neighbouring
 # `approvalCenterRemindBadge` / `approvalCenterUnreadBadge` share only the `approval` prefix with
 # `approvalNavTodoBadge`, and `approvalDelegationForm` /
 # `approvalDelegationRoute` / `approvalDelegationStatus` / `approvalDelegationView` /
 # `myDelegationView` are unrelated to `approvalNavDelegationEntry` in both directions, and no
-# existing token is a prefix of `approvalBatchTransferView` nor it of one. Each verified green in
+# existing token is a prefix of `approvalBatchTransferView` nor it of one; `approvalBatchTransferView`
+# and `approvalNavBatchTransferEntry` do not contain each other either. Each verified green in
 # isolation (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") before wiring.
-npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView --reporter=dot
+npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry --reporter=dot
 
 # 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
 # batch below, StockPreparationSourcePreflight — a NEW spec

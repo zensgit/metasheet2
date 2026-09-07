@@ -52,9 +52,15 @@
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
-            <!-- P1b slice 3: the admin 批量转交 page. Same nav gate as its sibling admin approval
-                 entry above, whose route meta is likewise `requiresAdmin`. -->
-            <router-link v-if="canManageUsers" to="/approvals/batch-transfer" class="nav-link" data-testid="nav-approval-batch-transfer">{{ navLabels.approvalBatchTransfer }}</router-link>
+            <!-- P1b slice 3 / round-2 item 1: the admin 批量转交 page. The gate is CONJUNCTIVE —
+                 `canManageUsers` (token-derived, the same gate its sibling admin entries use, and
+                 what keeps an ordinary user's shell from issuing the read at all) AND the SERVER's
+                 own DB-backed approval-administrator capability, which the entry component
+                 resolves. The two predicates genuinely differ; the list scope binds the second, so
+                 the second is what decides whether this page can show another approver's queue. -->
+            <ShellChromeBoundary v-if="canManageUsers && !isPublicRoute">
+              <ApprovalBatchTransferNavEntry :label="navLabels.approvalBatchTransfer" />
+            </ShellChromeBoundary>
             <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-link">{{ navLabels.systemIntegration }}</router-link>
             <!-- O2 / R-11: the nav link is a control like any other — it follows the route's own gate
                  (stock-prep:read), not the Data Factory's integration:write. Left on canUseIntegration
@@ -113,6 +119,7 @@ import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
+import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchTransferNavEntry.vue'
 import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'

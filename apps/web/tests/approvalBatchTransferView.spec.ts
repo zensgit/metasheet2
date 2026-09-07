@@ -48,6 +48,18 @@ vi.mock('element-plus', () => ({
   ElMessageBox: { confirm: (...a: unknown[]) => confirmSpy(...a) },
 }))
 
+// Round-2 item 1: the page asks the SERVER whether the caller is an approval administrator (the
+// same DB-backed predicate the approval list scope binds) instead of trusting the token-derived
+// admin flag the route/nav gate uses. The module is mocked here so each of its three answers can be
+// driven independently; the module's OWN mapping from the wire is exercised against the real
+// implementation further down (`vi.importActual`), so nothing about it is only ever asserted
+// against a stub.
+const resolveCapabilitySpy = vi.fn()
+vi.mock('../src/approvals/adminCapability', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/approvals/adminCapability')>()
+  return { ...actual, resolveApprovalAdminCapability: (...args: unknown[]) => resolveCapabilitySpy(...args) }
+})
+
 // The real picker fetches the participant directory on mount; the stub keeps these tests on the
 // page's own behaviour while still exposing the props the page binds (notably `excludedUserIds`,
 // which is how "source and target must differ" is enforced through the EXISTING picker API).
@@ -66,6 +78,7 @@ vi.mock('../src/approvals/components/ApprovalUserPicker.vue', async () => {
         return vh('input', {
           'data-testid': (this.$attrs as Record<string, string>)['data-testid'],
           'data-approval-user-picker': 'true',
+          placeholder: this.placeholder,
           'data-excluded': (this.excludedUserIds as string[]).join(','),
           value: (this.modelValue as string | null) ?? '',
           onInput: (event: Event) => {
@@ -108,6 +121,7 @@ const ElInput = defineComponent({
   render() {
     return h('textarea', {
       'data-testid': (this.$attrs as Record<string, string>)['data-testid'],
+      placeholder: this.placeholder,
       value: this.modelValue,
       onInput: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLTextAreaElement).value),
     })
@@ -118,22 +132,35 @@ const ElCheckbox = defineComponent({
   name: 'ElCheckbox',
   props: { modelValue: { type: Boolean, default: false }, disabled: Boolean },
   emits: ['update:modelValue'],
+  // The stub's root is a wrapper, so attribute fallthrough would ALSO stamp `data-testid` on that
+  // wrapper — and a `[data-testid=...]` query would then return the wrapper instead of the input.
+  inheritAttrs: false,
   render() {
-    return h('input', {
-      type: 'checkbox',
-      checked: this.modelValue,
-      disabled: this.disabled,
-      'data-testid': (this.$attrs as Record<string, string>)['data-testid'],
-      onChange: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLInputElement).checked),
-    })
+    // The real el-checkbox renders its default slot as the visible label; the stub must too, or a
+    // locale assertion over the page text silently skips every checkbox label. A <span>, not a
+    // <label>: a real <label> forwards activation to the input it wraps, which would make a
+    // programmatic `change` on the input round-trip and re-toggle it.
+    return h('span', {}, [
+      h('input', {
+        type: 'checkbox',
+        checked: this.modelValue,
+        disabled: this.disabled,
+        'data-testid': (this.$attrs as Record<string, string>)['data-testid'],
+        onChange: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLInputElement).checked),
+      }),
+      this.$slots.default?.(),
+    ])
   },
 })
 
 const ElAlert = defineComponent({
   name: 'ElAlert',
-  props: { title: String, type: String, showIcon: Boolean, closable: Boolean },
+  props: { title: String, description: String, type: String, showIcon: Boolean, closable: Boolean },
   render() {
-    return h('div', { 'data-testid': (this.$attrs as Record<string, string>)['data-testid'] }, this.title)
+    return h('div', {
+      'data-testid': (this.$attrs as Record<string, string>)['data-testid'],
+      'data-alert-type': this.type,
+    }, [this.title, this.description].filter(Boolean).join(' '))
   },
 })
 
@@ -298,6 +325,7 @@ describe('ApprovalBatchTransferView', () => {
     confirmSpy.mockReset().mockResolvedValue(undefined)
     messageSuccessSpy.mockReset()
     messageErrorSpy.mockReset()
+    resolveCapabilitySpy.mockReset().mockResolvedValue('granted')
   })
 
   afterEach(() => {
@@ -331,6 +359,20 @@ describe('ApprovalBatchTransferView', () => {
     return root.querySelector(`[data-testid="${testId}"]`) as T
   }
 
+  // Everything a user can READ on the page: rendered text plus the attributes that carry copy
+  // (aria-label, placeholder, title). A locale assertion on textContent alone would miss exactly
+  // the strings this page had left hardcoded — the section landmarks and the two placeholders.
+  function renderedTextAndAttributes(root: HTMLElement): string {
+    const parts = [root.textContent ?? '']
+    for (const el of Array.from(root.querySelectorAll('*'))) {
+      for (const attr of ['aria-label', 'placeholder', 'title']) {
+        const value = el.getAttribute(attr)
+        if (value) parts.push(value)
+      }
+    }
+    return parts.join(' | ')
+  }
+
   async function setPicker(root: HTMLElement, testId: string, value: string): Promise<void> {
     const input = q<HTMLInputElement>(root, testId)
     input.value = value
@@ -345,8 +387,8 @@ describe('ApprovalBatchTransferView', () => {
     await flushUi()
   }
 
-  async function loadTwoRows(root: HTMLElement): Promise<void> {
-    apiGetSpy.mockResolvedValue({ data: [listRow('apv_1', '出差申请'), listRow('apv_2', '采购申请')], total: 2 })
+  async function loadTwoRows(root: HTMLElement, titles: [string, string] = ['出差申请', '采购申请']): Promise<void> {
+    apiGetSpy.mockResolvedValue({ data: [listRow('apv_1', titles[0]), listRow('apv_2', titles[1])], total: 2 })
     await setPicker(root, 'batch-transfer-source-picker', 'user_from')
     q<HTMLButtonElement>(root, 'batch-transfer-load').click()
     await flushUi()
@@ -585,5 +627,305 @@ describe('ApprovalBatchTransferView', () => {
     expect(messageErrorSpy).toHaveBeenCalledTimes(1)
     expect(q(root, 'batch-transfer-summary')).toBeNull()
     expect(q(root, 'batch-transfer-outcome-apv_1')).toBeNull()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-2 item 1 — the page never states another approver's queue is empty off
+  // a read its own caller scope may have narrowed.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('asks the SERVER whether the caller is an approval administrator, once, on mount', async () => {
+    await mountView()
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('a DB-backed approval administrator sees the source approver\u2019s queue (positive control)', async () => {
+    resolveCapabilitySpy.mockResolvedValue('granted')
+    const root = await mountView()
+    await loadTwoRows(root)
+
+    expect(q(root, 'batch-transfer-row-apv_1')).toBeTruthy()
+    expect(q(root, 'batch-transfer-row-apv_2')).toBeTruthy()
+    expect(q(root, 'batch-transfer-forbidden')).toBeNull()
+    expect(q(root, 'batch-transfer-capability-unavailable')).toBeNull()
+  })
+
+  it('a TOKEN-only admin gets an explicit insufficient-privilege state, never an empty queue', async () => {
+    resolveCapabilitySpy.mockResolvedValue('denied')
+    const root = await mountView()
+
+    const state = q(root, 'batch-transfer-forbidden')
+    expect(state).toBeTruthy()
+    expect(state.textContent).toContain('\u6743\u9650\u4e0d\u8db3')
+    // The whole queue surface is gone — there is nothing to read as "this approver has nothing".
+    expect(q(root, 'batch-transfer-empty')).toBeNull()
+    expect(q(root, 'batch-transfer-selected-count')).toBeNull()
+    expect(q(root, 'batch-transfer-source-picker')).toBeNull()
+    expect(q(root, 'batch-transfer-submit')).toBeNull()
+    // And no list read is issued at all.
+    expect(apiGetSpy).not.toHaveBeenCalled()
+  })
+
+  it('an UNCONFIRMED capability is reported as unconfirmed, not as a refusal', async () => {
+    resolveCapabilitySpy.mockResolvedValue('unavailable')
+    const root = await mountView()
+
+    expect(q(root, 'batch-transfer-capability-unavailable')).toBeTruthy()
+    // "could not determine" and "you are not an administrator" must not render the same.
+    expect(q(root, 'batch-transfer-forbidden')).toBeNull()
+    expect(q(root, 'batch-transfer-empty')).toBeNull()
+    expect(q(root, 'batch-transfer-source-picker')).toBeNull()
+    expect(apiGetSpy).not.toHaveBeenCalled()
+  })
+
+  it('a REJECTED capability read is reported as unconfirmed, never left stuck on "confirming"', async () => {
+    // Unreachable through the shipped client (its own read is total), so this pins the view's
+    // belt: without it `capability` would stay 'pending' forever — a page with no queue, no
+    // privilege state and no error, which is the one outcome nothing else on this page covers.
+    resolveCapabilitySpy.mockRejectedValue(new Error('capability read rejected'))
+    const root = await mountView()
+
+    expect(q(root, 'batch-transfer-capability-unavailable')).toBeTruthy()
+    expect(q(root, 'batch-transfer-capability-pending')).toBeNull()
+    expect(q(root, 'batch-transfer-forbidden')).toBeNull()
+    expect(q(root, 'batch-transfer-source-picker')).toBeNull()
+  })
+
+  it('renders nothing actionable while the capability answer is still in flight', async () => {
+    let release: ((value: string) => void) | null = null
+    resolveCapabilitySpy.mockReturnValue(new Promise<string>((resolve) => { release = resolve }))
+    const root = await mountView()
+
+    expect(q(root, 'batch-transfer-capability-pending')).toBeTruthy()
+    expect(q(root, 'batch-transfer-source-picker')).toBeNull()
+    expect(q(root, 'batch-transfer-empty')).toBeNull()
+
+    release!('granted')
+    await flushUi()
+    expect(q(root, 'batch-transfer-source-picker')).toBeTruthy()
+    expect(q(root, 'batch-transfer-capability-pending')).toBeNull()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-2 item 4 — a completed batch cannot be re-posted by a second click.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('posts once and only once for a completed batch', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '\u539f\u5ba1\u6279\u4eba\u4f11\u5047')
+
+    apiPostSpy.mockResolvedValue({
+      ok: true,
+      data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] },
+    })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    // Positive control: the FIRST click did post, exactly once.
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+
+    // Selection dropped, button disabled, and the page says why rather than showing a bare
+    // "select at least one item" beside a success summary.
+    expect(q(root, 'batch-transfer-selected-count').textContent).toContain('\u5df2\u9009 0 / 2')
+    expect(q<HTMLButtonElement>(root, 'batch-transfer-submit').disabled).toBe(true)
+    expect(q(root, 'batch-transfer-submitted-notice')).toBeTruthy()
+    expect(q(root, 'batch-transfer-block-reason')).toBeNull()
+
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    // The success summary still stands; it was not overwritten by a second pass of skips.
+    expect(q(root, 'batch-transfer-summary').textContent).toContain('\u6210\u529f 2')
+  })
+
+  it('stays latched even if the operator re-ticks the stale rows, until the list is reloaded', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '\u539f\u5ba1\u6279\u4eba\u4f11\u5047')
+    apiPostSpy.mockResolvedValue({ ok: true, data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] } })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+
+    const rowCheck = q<HTMLInputElement>(root, 'batch-transfer-row-check-apv_1')
+    rowCheck.checked = true
+    rowCheck.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(q<HTMLButtonElement>(root, 'batch-transfer-submit').disabled).toBe(true)
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+
+    // Reloading the list is the documented way back.
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+    expect(q(root, 'batch-transfer-submitted-notice')).toBeNull()
+    expect(q<HTMLButtonElement>(root, 'batch-transfer-submit').disabled).toBe(false)
+  })
+
+  it('a FAILED submit stays re-armable — nothing was processed', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '\u539f\u5ba1\u6279\u4eba\u4f11\u5047')
+
+    apiPostSpy.mockRejectedValue(new Error('unavailable'))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+
+    expect(q(root, 'batch-transfer-submitted-notice')).toBeNull()
+    expect(q<HTMLButtonElement>(root, 'batch-transfer-submit').disabled).toBe(false)
+    apiPostSpy.mockResolvedValue({ ok: true, data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] } })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(2)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-2 item 2 — one locale per page. Both assertions are on a MOUNTED page,
+  // not on source text.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('renders every chrome string in zh', async () => {
+    useLocale().setLocale('zh-CN')
+    const root = await mountView()
+    apiGetSpy.mockResolvedValue({ data: [], total: 0 })
+    await setPicker(root, 'batch-transfer-source-picker', 'user_from')
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+
+    const text = root.textContent ?? ''
+    for (const zh of ['\u6279\u91cf\u8f6c\u4ea4', '\u539f\u5ba1\u6279\u4eba', '\u8f7d\u5165\u5f85\u529e', '\u8f6c\u4ea4\u7ed9', '\u8f6c\u4ea4\u539f\u56e0', '\u5168\u9009', '\u5df2\u9009', '\u8f6c\u4ea4\u6240\u9009']) {
+      expect(text).toContain(zh)
+    }
+    expect(q(root, 'batch-transfer-empty').textContent?.trim())
+      .toBe('\u8be5\u5ba1\u6279\u4eba\u540d\u4e0b\u6ca1\u6709\u53ef\u8f6c\u4ea4\u7684\u5e73\u53f0\u5f85\u529e\u3002')
+    expect(q<HTMLInputElement>(root, 'batch-transfer-source-picker').getAttribute('placeholder'))
+      .toBe('\u641c\u7d22\u7528\u6237\u540d / \u90ae\u7bb1 / ID')
+    // The section landmarks are localized too, not left as Chinese constants.
+    expect(root.querySelector('[aria-label="\u6279\u91cf\u8f6c\u4ea4\u8bbe\u7f6e"]')).toBeTruthy()
+    expect(root.querySelector('[aria-label="\u5f85\u8f6c\u4ea4\u5ba1\u6279"]')).toBeTruthy()
+  })
+
+  it('renders every chrome string in en — no Chinese survives on the page', async () => {
+    useLocale().setLocale('en')
+    const root = await mountView()
+    apiGetSpy.mockResolvedValue({ data: [], total: 0 })
+    await setPicker(root, 'batch-transfer-source-picker', 'user_from')
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+
+    const text = root.textContent ?? ''
+    for (const en of ['Batch Transfer', 'Source approver', 'Load pending items', 'Transfer to', 'Transfer reason', 'Select all', 'Selected', 'Transfer selected']) {
+      expect(text).toContain(en)
+    }
+    expect(q(root, 'batch-transfer-empty').textContent?.trim())
+      .toBe('This approver has no transferable platform items pending.')
+    expect(root.querySelector('[aria-label="Batch transfer settings"]')).toBeTruthy()
+    expect(root.querySelector('[aria-label="Approvals to transfer"]')).toBeTruthy()
+    // The whole rendered page, including every aria-label and placeholder, carries no CJK.
+    expect(renderedTextAndAttributes(root)).not.toMatch(/[\u4e00-\u9fff]/)
+  })
+
+  it('localizes the two capability states as well', async () => {
+    resolveCapabilitySpy.mockResolvedValue('denied')
+    useLocale().setLocale('en')
+    let root = await mountView()
+    expect(q(root, 'batch-transfer-forbidden').textContent).toContain('Insufficient privilege')
+    expect(renderedTextAndAttributes(root)).not.toMatch(/[\u4e00-\u9fff]/)
+    app?.unmount(); container?.remove(); app = null; container = null
+
+    resolveCapabilitySpy.mockResolvedValue('unavailable')
+    root = await mountView()
+    expect(q(root, 'batch-transfer-capability-unavailable').textContent).toContain('could not be confirmed')
+    expect(renderedTextAndAttributes(root)).not.toMatch(/[\u4e00-\u9fff]/)
+  })
+
+  it('localizes the per-row outcome labels', async () => {
+    useLocale().setLocale('en')
+    const root = await mountView()
+    // ASCII row titles: the CJK sweep below is about the page's own CHROME, and a row title is
+    // approval DATA the page must render verbatim in whatever language it was written.
+    await loadTwoRows(root, ['Travel request', 'Purchase request'])
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, 'approver on leave')
+    apiPostSpy.mockResolvedValue({
+      ok: true,
+      data: { succeeded: ['apv_1'], skipped: [{ id: 'apv_2', reason: 'not-pending' }], affectedRequesterIds: [] },
+    })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+
+    expect(q(root, 'batch-transfer-outcome-apv_1').textContent?.trim()).toBe('Transferred')
+    expect(q(root, 'batch-transfer-outcome-apv_2').textContent?.trim()).toBe('No longer pending')
+    expect(q(root, 'batch-transfer-summary').textContent).toContain('Transferred 1')
+    expect(renderedTextAndAttributes(root)).not.toMatch(/[\u4e00-\u9fff]/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The capability client itself — exercised against the REAL module (the mount
+// tests above drive a stub of it, which cannot pin how the wire is read).
+// ─────────────────────────────────────────────────────────────────────────────
+describe('approval admin capability client', () => {
+  type CapabilityModule = typeof import('../src/approvals/adminCapability')
+
+  async function real(): Promise<CapabilityModule> {
+    const actual = await vi.importActual<CapabilityModule>('../src/approvals/adminCapability')
+    actual.resetApprovalAdminCapabilityCache()
+    return actual
+  }
+
+  beforeEach(() => {
+    apiGetSpy.mockReset()
+  })
+
+  it('reads the pinned path', async () => {
+    const mod = await real()
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    await mod.fetchApprovalAdminCapability()
+    expect(apiGetSpy).toHaveBeenCalledWith('/api/approvals/admin/capability')
+    expect(mod.APPROVAL_ADMIN_CAPABILITY_PATH).toBe('/api/approvals/admin/capability')
+  })
+
+  it('maps true/false to granted/denied, through the envelope and without it', async () => {
+    const mod = await real()
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    await expect(mod.fetchApprovalAdminCapability()).resolves.toBe('granted')
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: false } })
+    await expect(mod.fetchApprovalAdminCapability()).resolves.toBe('denied')
+    apiGetSpy.mockResolvedValue({ isApprovalAdmin: true })
+    await expect(mod.fetchApprovalAdminCapability()).resolves.toBe('granted')
+  })
+
+  it('never folds a failure or an unrecognised shape into `denied`', async () => {
+    const mod = await real()
+    apiGetSpy.mockRejectedValue(new Error('network'))
+    await expect(mod.fetchApprovalAdminCapability()).resolves.toBe('unavailable')
+    for (const body of [null, {}, { ok: true, data: {} }, { ok: true, data: { isApprovalAdmin: 'yes' } }, { ok: true, data: { isApprovalAdmin: 1 } }]) {
+      apiGetSpy.mockResolvedValue(body)
+      await expect(mod.fetchApprovalAdminCapability()).resolves.toBe('unavailable')
+    }
+  })
+
+  it('caches a definitive answer so the nav entry and the page share ONE request', async () => {
+    const mod = await real()
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    const [a, b] = await Promise.all([
+      mod.resolveApprovalAdminCapability(),
+      mod.resolveApprovalAdminCapability(),
+    ])
+    expect([a, b]).toEqual(['granted', 'granted'])
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT cache `unavailable` — a blip must not hide the entry for the session', async () => {
+    const mod = await real()
+    apiGetSpy.mockRejectedValue(new Error('network'))
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('unavailable')
+    apiGetSpy.mockReset()
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
   })
 })
