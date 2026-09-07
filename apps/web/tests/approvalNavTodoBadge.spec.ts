@@ -30,8 +30,14 @@ type CountsCallback = (payload: {
 }) => void
 
 let capturedOnCountsUpdated: CountsCallback | null = null
+const realtimeCallCount = { value: 0 }
 vi.mock('../src/approvals/useApprovalCountsRealtime', () => ({
   useApprovalCountsRealtime: (options: { onCountsUpdated: CountsCallback }) => {
+    realtimeCallCount.value += 1
+    // Round-2 item 3: the composable is the one call in the badge's setup that reaches outside the
+    // component, and the badge now lives in the APP SHELL — an escaping throw would blank the whole
+    // nav, not just the badge.
+    if (mocks.realtimeThrows) throw new Error('realtime composable exploded')
     capturedOnCountsUpdated = options.onCountsUpdated
     return { reconnect: vi.fn(), disconnect: vi.fn() }
   },
@@ -40,10 +46,13 @@ vi.mock('../src/approvals/useApprovalCountsRealtime', () => ({
 const mocks = vi.hoisted(() => ({
   permissions: ['approvals:read'] as string[],
   isZh: true,
+  realtimeThrows: false,
+  routePath: '/multitable',
+  routeMeta: { requiresAuth: true } as Record<string, unknown>,
 }))
 
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ path: '/multitable', fullPath: '/multitable', meta: { requiresAuth: true } }),
+  useRoute: () => ({ path: mocks.routePath, fullPath: mocks.routePath, meta: mocks.routeMeta }),
 }))
 
 vi.mock('../src/composables/usePlugins', () => ({
@@ -100,7 +109,11 @@ describe('app-level approval todo badge', () => {
   beforeEach(() => {
     mocks.permissions = ['approvals:read']
     mocks.isZh = true
+    mocks.realtimeThrows = false
+    mocks.routePath = '/multitable'
+    mocks.routeMeta = { requiresAuth: true }
     capturedOnCountsUpdated = null
+    realtimeCallCount.value = 0
     getPendingCountSpy.mockReset()
     getPendingCountSpy.mockResolvedValue({ count: 0, unreadCount: 0 })
   })
@@ -241,5 +254,93 @@ describe('app-level approval todo badge', () => {
 
     expect(badgeOf(root)).toBeNull()
     expect(getPendingCountSpy).not.toHaveBeenCalled()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-2 item 5 — no network read on a public route, mirroring App.vue's own
+  // `isPublicRoute` suppression (`loadProductFeatures(..., {skipSessionProbe})`
+  // and the early return before `fetchPlugins()`).
+  //
+  // Latent, not live: every route `isPublicRoute` admits today also carries
+  // `hideNavbar: true`, so the nav — and therefore the badge — does not render on
+  // any of them. This closes the divergence before the first public route with a
+  // visible nav makes it reachable.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('issues no count read on a public route (non-path arm: requiresAuth === false)', async () => {
+    mocks.routePath = '/public-thing'
+    mocks.routeMeta = { requiresAuth: false }
+    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 7 })
+    const root = await mountApp()
+
+    expect(getPendingCountSpy).not.toHaveBeenCalled()
+    expect(badgeOf(root)).toBeNull()
+    // Positive control that the shell itself DID render here — the absence above is the guard,
+    // not a nav that failed to mount.
+    expect(Array.from(root.querySelectorAll('a')).map((a) => a.getAttribute('href'))).toContain('/approvals')
+  })
+
+  it('issues no count read on /login, and DOES on an ordinary gated route (positive control)', async () => {
+    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 7 })
+    mocks.routePath = '/login'
+    mocks.routeMeta = {}
+    let root = await mountApp()
+    expect(getPendingCountSpy).not.toHaveBeenCalled()
+    if (app) app.unmount()
+    app = null
+    container?.remove()
+    container = null
+
+    mocks.routePath = '/multitable'
+    mocks.routeMeta = { requiresAuth: true }
+    root = await mountApp()
+    expect(getPendingCountSpy).toHaveBeenCalledWith('all')
+    expect(badgeOf(root)).toBeTruthy()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-2 item 3 — the badge cannot take the app shell down. TWO independent
+  // guards, each pinned by its own test so neither can cover for the other:
+  //   (a) the try/catch inside the badge around the realtime composable, and
+  //   (b) ShellChromeBoundary around the badge in App.vue.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('(a) a THROWING realtime composable leaves the nav AND the badge intact', async () => {
+    mocks.realtimeThrows = true
+    getPendingCountSpy.mockResolvedValue({ count: 7, unreadCount: 2 })
+    const root = await mountApp()
+
+    // The throw really happened — otherwise this test asserts nothing.
+    expect(realtimeCallCount.value).toBeGreaterThan(0)
+    // Shell intact: specific sibling entries, not merely "some markup exists".
+    const hrefs = Array.from(root.querySelectorAll('a')).map((a) => a.getAttribute('href'))
+    expect(hrefs).toContain('/approvals')
+    expect(hrefs).toContain('/settings')
+    // …and the badge still renders the fetched count. Losing realtime degrades the badge to
+    // "read once on mount"; it does not remove it.
+    expect(badgeOf(root)?.textContent?.trim()).toBe('7')
+    expect(capturedOnCountsUpdated).toBeNull()
+  })
+
+  it('(b) a badge that throws for ANY other reason renders the nav WITHOUT the badge', async () => {
+    const throwingSetup = vi.fn(() => { throw new Error('badge component exploded') })
+    vi.resetModules()
+    vi.doMock('../src/approvals/components/ApprovalTodoBadge.vue', async () => {
+      const { defineComponent } = await import('vue')
+      return { default: defineComponent({ name: 'ApprovalTodoBadge', props: { label: String }, setup: throwingSetup }) }
+    })
+    try {
+      const root = await mountApp()
+
+      expect(throwingSetup).toHaveBeenCalled()
+      const hrefs = Array.from(root.querySelectorAll('a')).map((a) => a.getAttribute('href'))
+      expect(hrefs).toContain('/approvals')
+      expect(hrefs).toContain('/settings')
+      // The 审批中心 link is untouched; only its decoration is gone.
+      const link = Array.from(root.querySelectorAll('a')).find((a) => a.getAttribute('href') === '/approvals')
+      expect(link!.textContent?.trim()).toBe('审批中心')
+      expect(badgeOf(root)).toBeNull()
+    } finally {
+      vi.doUnmock('../src/approvals/components/ApprovalTodoBadge.vue')
+      vi.resetModules()
+    }
   })
 })

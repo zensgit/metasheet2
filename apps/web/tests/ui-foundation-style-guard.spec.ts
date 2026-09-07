@@ -29,6 +29,9 @@ const TARGET_FILES = [
   // F2/F3/UI-7 components above.
   'src/views/approval/ApprovalBatchTransferView.vue',
   'src/approvals/components/ApprovalTodoBadge.vue',
+  // Round 2 (same slice): the app-shell error boundary that keeps the badge from taking the shell
+  // down. Born token-only as well (it carries no <style> block at all).
+  'src/components/ShellChromeBoundary.vue',
   'src/views/approval/ApprovalMetricsView.vue',
   'src/views/approval/ApprovalMobileList.vue',
   'src/views/approval/ApprovalNewView.vue',

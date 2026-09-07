@@ -59,7 +59,21 @@ function handleCountsUpdated(payload: ApprovalCountsUpdatedPayload): void {
   applyCount(scoped.count)
 }
 
-useApprovalCountsRealtime({ onCountsUpdated: handleCountsUpdated })
+// P1b round 2, item (3): this component lives in the APP SHELL, so a throw here takes the whole
+// nav down (`main.ts` installs no `app.config.errorHandler`). The realtime composable is the one
+// call in this setup that reaches outside the component — it constructs a socket client and reads
+// module state — so it is isolated. Losing it degrades the badge to "fetched once on mount", which
+// is a correct, honest badge; letting it escape would blank the shell.
+//
+// This is one of TWO independent guards, deliberately not overlapping: `ShellChromeBoundary` in
+// App.vue catches anything else in this component's setup or render, and each is pinned by its own
+// test (a throwing composable — the badge still renders its count; a throwing component — the nav
+// renders without the badge).
+try {
+  useApprovalCountsRealtime({ onCountsUpdated: handleCountsUpdated })
+} catch {
+  // No realtime updates for this session; the mounted count below is still shown.
+}
 
 async function refresh(): Promise<void> {
   try {

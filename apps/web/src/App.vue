@@ -15,10 +15,16 @@
             <!-- P1b slice 1: the 待办 badge is a SIBLING of the link, never a child of it, so the
                  nav link's own text stays exactly the label (see approvalNavTodoBadge.spec.ts).
                  The two are wrapped in ONE flex item so `.nav-links`' 8px gap falls between this
-                 pair and the NEXT entry, not between the label and its own badge. -->
+                 pair and the NEXT entry, not between the label and its own badge.
+                 Round 2: the badge mounts inside ShellChromeBoundary (a failure there renders the
+                 nav WITHOUT the badge instead of blanking the shell) and only off a public route
+                 (item 5 — mirroring this component's own onMounted network suppression). Neither
+                 wrapper is a DOM element, so the badge's parent is still this flex item. -->
             <span v-if="canUseApprovals" class="nav-approvals">
               <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
-              <ApprovalTodoBadge :label="navLabels.approvalTodo" />
+              <ShellChromeBoundary>
+                <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
+              </ShellChromeBoundary>
             </span>
           </template>
           <template v-else>
@@ -28,7 +34,9 @@
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
             <span v-if="canUseApprovals" class="nav-approvals">
               <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
-              <ApprovalTodoBadge :label="navLabels.approvalTodo" />
+              <ShellChromeBoundary>
+                <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
+              </ShellChromeBoundary>
             </span>
             <router-link
               v-for="item in pluginNavItems"
@@ -105,6 +113,7 @@ import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
+import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { STOCK_PREP_ROUTE_PERMISSION } from './services/integration/stockPreparation/workbenchAccess'
