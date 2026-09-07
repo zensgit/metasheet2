@@ -822,4 +822,78 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     expect(root.querySelector('[data-testid="stock-prep-install-error-next"]')?.textContent?.trim().length ?? 0).toBeGreaterThan(0)
     expect(root.querySelector('[data-testid="stock-prep-install-error-copy"]')).not.toBeNull()
   })
+
+  // ---------------------------------------------------------------------------
+  // P1-7 — the three-region reorg. ① (the wizard, mounted first) is unchanged and already covered by
+  // the P0-4 tests above. These three pin ② (「即将安装的内容」split into <details>, first section
+  // open) and ③ (the new 「装完之后回来复查」 wrapper, including the one card that MOVES into it —
+  // StockPreparationSourceBindingPanel — and the new error-code drawer mounted at its foot).
+  // ---------------------------------------------------------------------------
+
+  it('P1-7a: 「即将安装的内容」splits into <details> — first section open, the rest collapsed', async () => {
+    const root = await mountView()
+    const defaultsSection = root.querySelector('[data-testid="stock-prep-install-defaults"]') as HTMLElement
+    const folds = Array.from(defaultsSection.querySelectorAll('[data-testid="stock-prep-install-fold"]')) as HTMLDetailsElement[]
+    // 五段:会建哪几张表 / 装好之后谁能做什么 / 需要在服务器上准备的东西 / 系统绝对不会做的事 / 怎么算装成功了
+    expect(folds.length).toBe(5)
+    expect(folds.map((fold) => fold.tagName.toLowerCase()), 'a real <details>, not a CSS-only hide').toEqual(Array(5).fill('details'))
+    expect(folds[0].dataset.fold).toBe('objects')
+    expect(folds[0].open, 'the first section (哪几张表) renders expanded').toBe(true)
+    for (const fold of folds.slice(1)) {
+      expect(fold.open, `${fold.dataset.fold} must start collapsed`).toBe(false)
+    }
+
+    // Collapsed does NOT mean absent from the DOM: V-01 above already reads every one of these rows
+    // by testid regardless of which <details> it now sits inside — restated here as the structural
+    // guarantee the split depends on, using a row inside a COLLAPSED section (config surfaces, the
+    // third fold) rather than the open first one.
+    const configFold = folds.find((fold) => fold.dataset.fold === 'config-surfaces')!
+    expect(configFold.open).toBe(false)
+    expect(configFold.querySelector('[data-testid="stock-prep-install-config-surface"]')).not.toBeNull()
+    expect(configFold.textContent).toContain('装在服务器上')
+
+    // V-02's "no button in this panel" still holds: <summary> is not a <button>.
+    expect(defaultsSection.querySelectorAll('button').length).toBe(0)
+  })
+
+  it('P1-7b: 「装完之后回来复查」wraps the source-binding, preflight, source-preflight and run panels', async () => {
+    h.permissions = ['stock-prep:admin', 'integration:admin']
+    const root = await mountView()
+    const review = root.querySelector('[data-testid="stock-prep-install-review-section"]') as HTMLElement
+    expect(review, 'the review region must exist').not.toBeNull()
+
+    for (const testid of [
+      'stock-prep-source-binding',
+      'stock-prep-install-preflight',
+      'stock-prep-install-preflight-relation',
+      'stock-prep-source-preflight',
+      'stock-prep-install-run-panel',
+    ]) {
+      const node = root.querySelector(`[data-testid="${testid}"]`)
+      expect(node, `${testid} must still render`).not.toBeNull()
+      expect(review.contains(node), `${testid} must now sit inside the review region`).toBe(true)
+    }
+
+    // 「即将安装的内容」is region ②, not part of region ③ — the two must not nest either way.
+    const defaults = root.querySelector('[data-testid="stock-prep-install-defaults"]') as HTMLElement
+    expect(review.contains(defaults)).toBe(false)
+    expect(defaults.contains(review)).toBe(false)
+
+    // The moved panel's OWN testid and behaviour are untouched by the relocation — it still renders
+    // its root element, still surfaces the "not configured yet" empty state on this route double
+    // (which answers `{}` for every unmatched route, including source-binding reads).
+    expect(root.querySelector('[data-testid="stock-prep-source-binding"]')).not.toBeNull()
+  })
+
+  it('P1-7c: the error-code drawer mounts at the foot of the review region, self-contained', async () => {
+    const root = await mountView()
+    const review = root.querySelector('[data-testid="stock-prep-install-review-section"]') as HTMLElement
+    const drawer = root.querySelector('[data-testid="stock-prep-code-help"]')
+    expect(drawer, 'the code-help drawer must be mounted').not.toBeNull()
+    expect(review.contains(drawer)).toBe(true)
+    // It renders real rows without any scope/props of its own (codeHelp.ts is pure) — a smoke check
+    // that this mount point actually wires the component rather than an empty stub. The panel's own
+    // exhaustive count/search/bilingual/values-free guards live in StockPreparationCodeHelp.spec.ts.
+    expect(root.querySelectorAll('[data-testid="stock-prep-code-help-row"]').length).toBeGreaterThan(0)
+  })
 })
