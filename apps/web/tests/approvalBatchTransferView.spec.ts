@@ -13,6 +13,8 @@ import {
 } from '../src/approvals/batchTransfer'
 import { normalizeBulkReassignEnvelope } from '../src/approvals/api'
 import { useLocale } from '../src/composables/useLocale'
+import { useAuth } from '../src/composables/useAuth'
+import { getAuthPrincipalKey, onAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 // P1b slice 3 — the admin 批量转交 page over the EXISTING bulk reassign endpoint.
 //
@@ -484,6 +486,55 @@ describe('ApprovalBatchTransferView', () => {
 
     expect(confirmSpy).toHaveBeenCalledTimes(1)
     expect(apiPostSpy).not.toHaveBeenCalled()
+    // Round-3 item 2: the in-flight latch closes at ENTRY, so the cancel path is the one that has to
+    // re-open it. Without this assertion a latch that never re-opens ships as a green "no request
+    // was made" — the operator says "no" once and the button is dead for the rest of the page.
+    expect(q<HTMLButtonElement>(root, 'batch-transfer-submit').disabled).toBe(false)
+    // …and re-arming is real, not just an enabled-looking button.
+    apiPostSpy.mockResolvedValue({ ok: true, data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] } })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-3 item 2 — the latch must close BEFORE the confirm is awaited.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('two activations inside the CONFIRM window open one dialog and post one batch', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+
+    // A confirm that stays open, which is exactly the window the pre-fix code left unguarded: the
+    // guard read `submitDisabled` and only THEN awaited, so both activations passed it.
+    let release: (() => void) | null = null
+    confirmSpy.mockReset().mockImplementation(() => new Promise<void>((resolve) => { release = () => resolve() }))
+    apiPostSpy.mockResolvedValue({
+      ok: true,
+      data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] },
+    })
+
+    const button = q<HTMLButtonElement>(root, 'batch-transfer-submit')
+    button.click()
+    // POSITIVE CONTROL on the test's own discriminating power. No `flushUi` between the two clicks,
+    // so Vue has NOT re-rendered `:disabled` yet — the DOM gate is still open and the second click's
+    // handler genuinely runs `submit()`. Asserting it here is what stops this test from passing
+    // vacuously because jsdom silently dropped the second click on a disabled button; what refuses
+    // the second run is the reactive latch inside `submit()`, which is the thing under test.
+    expect(button.disabled).toBe(false)
+    button.click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(apiPostSpy).not.toHaveBeenCalled()
+
+    release!()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    // The single batch that DID run is the whole selection, not a truncated one.
+    expect((apiPostSpy.mock.calls[0][1] as { instanceIds: string[] }).instanceIds).toEqual(['apv_1', 'apv_2'])
   })
 
   it('posts the pinned payload to the existing endpoint after the confirm resolves', async () => {
@@ -840,6 +891,70 @@ describe('ApprovalBatchTransferView', () => {
     expect(renderedTextAndAttributes(root)).not.toMatch(/[\u4e00-\u9fff]/)
   })
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-3 item 3 — the four en branches that live OUTSIDE the ZH/EN table.
+  //
+  // The round-2 en sweep asserted "no CJK survives on the page", which is only as strong as the
+  // population it renders. It never rendered the truncation notice (no fixture set `total >
+  // rows.length` in en), never rendered the ordinal row-label fallback (its fixture gave every row
+  // an ASCII title), never triggered a block reason, and never looked at the string handed to the
+  // confirm — so replacing ALL FOUR English branches with Chinese literals left it 42/42 green.
+  // This fixture renders each of the four and asserts on it. The confirm body is asserted on the
+  // ARGUMENT, not on the DOM: it is a JS string passed to a mocked dialog, so no sweep over
+  // rendered text or attributes can ever reach it.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('renders the truncation notice, the block reason, the ordinal row label and the confirm body in en', async () => {
+    useLocale().setLocale('en')
+    const root = await mountView()
+
+    // (1) BLOCK TEXT — a source picked, no target yet.
+    await setPicker(root, 'batch-transfer-source-picker', 'user_from')
+    const block = q(root, 'batch-transfer-block-reason')
+    expect(block).toBeTruthy()
+    expect(block.textContent).toContain('Pick who to transfer to')
+    expect(block.textContent).not.toMatch(/[\u4e00-\u9fff]/)
+
+    // (2) TRUNCATION NOTICE and (3) ORDINAL ROW LABEL — a short page off a large queue, whose first
+    // row carries neither a title nor a request number.
+    const untitled = { ...listRow('apv_1', ''), title: null as string | null, requestNo: null as string | null }
+    apiGetSpy.mockResolvedValue({ data: [untitled, listRow('apv_2', 'Purchase request')], total: 250 })
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+
+    const notice = q(root, 'batch-transfer-truncated')
+    expect(notice).toBeTruthy()
+    expect(notice.textContent).toContain('per-request cap')
+    expect(notice.textContent).toContain('250')
+    expect(notice.textContent).not.toMatch(/[\u4e00-\u9fff]/)
+
+    const ordinal = q(root, 'batch-transfer-row-apv_1').querySelector('.batch-transfer__row-title')
+    expect(ordinal?.textContent?.trim()).toBe('Approval 1')
+    expect(ordinal?.textContent).not.toMatch(/[\u4e00-\u9fff]/)
+
+    // (4) CONFIRM BODY.
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, 'approver on leave')
+    apiPostSpy.mockResolvedValue({
+      ok: true,
+      data: { succeeded: ['apv_1', 'apv_2'], skipped: [], affectedRequesterIds: [] },
+    })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    const confirmBody = String(confirmSpy.mock.calls[0][0])
+    expect(confirmBody).toContain('will be transferred to the selected user')
+    expect(confirmBody).toContain('2')
+    expect(confirmBody).not.toMatch(/[\u4e00-\u9fff]/)
+    // The confirm TITLE comes from the table and is swept elsewhere; asserted here too so this
+    // fixture pins the whole dialog it drives, not half of it.
+    expect(String(confirmSpy.mock.calls[0][1])).toBe('Confirm batch transfer')
+
+    // And the page around all four is still CJK-free, so a regression cannot hide by moving a
+    // Chinese literal from one of these sites into the surrounding chrome.
+    expect(renderedTextAndAttributes(root)).not.toMatch(/[\u4e00-\u9fff]/)
+  })
+
   it('localizes the per-row outcome labels', async () => {
     useLocale().setLocale('en')
     const root = await mountView()
@@ -877,6 +992,12 @@ describe('approval admin capability client', () => {
 
   beforeEach(() => {
     apiGetSpy.mockReset()
+    // The cache is keyed on the CURRENT principal, so a token left behind by a neighbouring test
+    // would silently change which key each read below is filed under. Cleared through the auth
+    // layer's own setter so the transition funnel fires too, then the module cache is dropped by
+    // `real()`.
+    useAuth().clearToken()
+    localStorage.clear()
   })
 
   it('reads the pinned path', async () => {
@@ -927,5 +1048,110 @@ describe('approval admin capability client', () => {
     apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
     await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
     expect(apiGetSpy).toHaveBeenCalledTimes(1)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-3 item 1 — the cached answer belongs to a PRINCIPAL, not to the page.
+  //
+  // Round 2 observed principal B inheriting principal A's `granted` with no second read: the module
+  // cached for the process lifetime on the premise that every logout is a full navigation, which is
+  // false. TWO independent mechanisms now cover it, and they are pinned separately BECAUSE each
+  // covers a case the other cannot — a single test that both satisfy would let either rot silently:
+  //
+  //   * the KEY covers a principal swap this app never performed (another tab writing the shared
+  //     `localStorage`), where no transition fires at all;
+  //   * the LISTENER covers the same subject re-authenticating, where the key is UNCHANGED by
+  //     construction and only the transition is observable.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  // A parseable JWT-shaped token. `nonce` changes the token STRING while leaving `sub` — and so the
+  // principal key — identical; that is what makes the listener test discriminating.
+  function tokenFor(subject: string, nonce = 'a'): string {
+    const payload = btoa(JSON.stringify({ sub: subject, nonce })).replace(/=+$/, '')
+    return `header.${payload}.signature`
+  }
+
+  it('serves a cached answer only to the principal it was resolved for, even when the swap bypassed this app’s setters', async () => {
+    const mod = await real()
+    localStorage.setItem('auth_token', tokenFor('user-a'))
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+
+    // POSITIVE CONTROL: the same principal still shares ONE request, so this test cannot pass by the
+    // cache having been disabled outright.
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+
+    // Another tab signs a different principal in. No setter of this app ran, so no auth transition
+    // was ever announced in this process — only the key can catch this.
+    localStorage.setItem('auth_token', tokenFor('user-b'))
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: false } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('denied')
+    expect(apiGetSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('refetches when the SAME subject re-authenticates — a case the key cannot see', async () => {
+    const mod = await real()
+    const auth = useAuth()
+    localStorage.setItem('auth_token', tokenFor('user-a', 'first'))
+    const keyBefore = getAuthPrincipalKey()
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+
+    // A fresh token for the SAME person, through the app's own setter.
+    auth.setToken(tokenFor('user-a', 'second'))
+    // THE CONTROL THAT MAKES THIS TEST ABOUT THE LISTENER: the key is byte-identical across the
+    // transition, so a refetch below cannot be attributed to the key. It also cannot be attributed
+    // to "there is no cache", which the previous test's positive control rules out.
+    expect(getAuthPrincipalKey()).toBe(keyBefore)
+    expect(keyBefore).toBeTruthy()
+
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: false } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('denied')
+    expect(apiGetSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('refetches across a logout / login cycle', async () => {
+    const mod = await real()
+    const auth = useAuth()
+    auth.setToken(tokenFor('user-a'))
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+
+    // Sign-out with no navigation — the shape `bootstrapSession`'s 401 branch takes.
+    auth.clearToken()
+    expect(getAuthPrincipalKey()).toBeNull()
+    auth.setToken(tokenFor('user-b'))
+
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: false } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('denied')
+    expect(apiGetSpy).toHaveBeenCalledTimes(2)
+    // This cycle changes BOTH the key and the transition state, so it is deliberately NOT the
+    // discriminating evidence for either mechanism — the two tests above are. It is here because it
+    // is the scenario an operator actually performs.
+  })
+
+  it('exposes the reset as the auth layer’s subscriber, not only as a test seam', async () => {
+    const mod = await real()
+    localStorage.setItem('auth_token', tokenFor('user-a'))
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+
+    // A subscriber registered here proves the funnel really fires on a transition — the same funnel
+    // the module registers on at import time. Without this, "the listener is wired" would rest on
+    // reading the import side effect rather than on observing it.
+    let notified = 0
+    const unsubscribe = onAuthPrincipalChange(() => { notified += 1 })
+    try {
+      useAuth().clearToken()
+      expect(notified).toBe(1)
+    } finally {
+      unsubscribe()
+    }
+    useAuth().setToken(tokenFor('user-c'))
+    expect(notified).toBe(1)
   })
 })

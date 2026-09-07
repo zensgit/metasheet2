@@ -1,6 +1,14 @@
 import { getApiBase } from '../utils/api'
+// Single definitions, in a module with no dependencies of its own so a leaf that caches a
+// per-principal answer can import them without importing this whole surface. See
+// `authPrincipal.ts` for why that separation exists.
+import {
+  TOKEN_KEYS,
+  notifyAuthPrincipalChange,
+  parseJwtPayload,
+  readStoredToken,
+} from './authPrincipal'
 
-const TOKEN_KEYS = ['auth_token', 'jwt', 'devToken'] as const
 const USER_SNAPSHOT_KEYS = ['user_permissions', 'user_roles'] as const
 const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
 
@@ -68,6 +76,12 @@ function resetSessionBootstrap(clearUserSnapshot = false, clearTenantHint = fals
   if (clearTenantHint) {
     clearStoredTenantHint()
   }
+  // THE app's single "the principal may have changed" announcement. Every transition routes here:
+  // `setToken` (login, invite acceptance, DingTalk callback, forced password change, dev-token
+  // refresh), `clearToken` (sign-out, and `bootstrapSession`'s 401 branch, which clears with NO
+  // navigation), and `bootstrapSession`'s no-token branch. Subscribers can only drop their own
+  // per-principal state; see `authPrincipal.ts`.
+  notifyAuthPrincipalChange()
 }
 
 function extractSessionUser(payload: SessionBootstrapPayload | null): unknown {
@@ -108,21 +122,6 @@ function clearStoredTenantHint(): void {
 }
 
 export function useAuth() {
-  function readStoredToken(): string | null {
-    try {
-      if (typeof localStorage === 'undefined') return null
-      for (const key of TOKEN_KEYS) {
-        const value = localStorage.getItem(key)
-        if (typeof value === 'string' && value.trim().length > 0) {
-          return value
-        }
-      }
-      return null
-    } catch {
-      return null
-    }
-  }
-
   function readStoredTenantHint(): string | null {
     try {
       if (typeof localStorage === 'undefined') return null
@@ -194,21 +193,6 @@ export function useAuth() {
       }
     } catch (err) {
       console.warn('[auth] failed to clear token from localStorage', err)
-    }
-  }
-
-  function parseJwtPayload(token: string): Record<string, unknown> | null {
-    try {
-      const parts = token.split('.')
-      if (parts.length < 2) return null
-      const normalized = parts[1]
-        .replace(/-/g, '+')
-        .replace(/_/g, '/')
-        .padEnd(Math.ceil(parts[1].length / 4) * 4, '=')
-      const json = atob(normalized)
-      return JSON.parse(json) as Record<string, unknown>
-    } catch {
-      return null
     }
   }
 

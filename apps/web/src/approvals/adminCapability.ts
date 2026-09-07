@@ -10,19 +10,55 @@
  * established. Every consumer must render `unavailable` as "the server did not confirm", never as
  * "you are not an administrator".
  *
- * CACHING. A definitive answer (`granted` / `denied`) is cached for the page's lifetime, so the
- * nav entry and the page itself share ONE request. `unavailable` is NOT cached — a transient blip
- * must not hide an administrator's entry for the rest of the session. Both logout paths in this
- * app are full navigations (`window.location.assign` / `.replace`), so the cache cannot outlive
- * the principal it was resolved for.
+ * CACHING, AND WHOSE ANSWER IS CACHED. A definitive answer (`granted` / `denied`) is cached so the
+ * nav entry and the page share ONE request. `unavailable` is NOT cached — a transient blip must not
+ * hide an administrator's entry for the rest of the session.
+ *
+ * Both of those come from `composables/authPrincipal.ts` rather than from `useAuth`: it is a
+ * dependency-free leaf, so importing it here cannot break the many specs that replace `useAuth`
+ * wholesale with a hand-built stub. See that module for the measurement behind that choice.
+ *
+ * The cache is PER PRINCIPAL, guarded two independent ways, because an answer about one account is
+ * a statement about a different account the moment the session changes:
+ *
+ *   1. KEYED. Every read compares `getAuthPrincipalKey()` against the key the cached answer was
+ *      resolved under and refetches on any difference — including `null`, i.e. signed out. This is
+ *      what covers a principal swap this process never performed, such as another tab writing a new
+ *      token into the shared `localStorage`.
+ *   2. INVALIDATED ON AUTH TRANSITIONS. `onAuthPrincipalChange` fires from `useAuth`'s single
+ *      session-reset funnel — login, sign-out, the 401 path that clears the token with no
+ *      navigation, dev-token refresh, invite acceptance. This is what covers the case the key
+ *      cannot see: the SAME subject re-authenticating (a refreshed token carries the same `sub`, so
+ *      the key is unchanged) after their rights changed server-side.
+ *
+ * Neither mechanism subsumes the other, and each is pinned by its own test.
+ *
+ * WHAT IS STILL NOT COVERED, stated rather than implied: a DB change to an unchanged, still-signed-in
+ * principal's `users` row is picked up at the next auth transition or page load, not immediately.
+ * The answer is advisory chrome — it decides whether an entry and a queue surface are OFFERED. Every
+ * actual gate is server-side and re-evaluated per request: `rbacGuard('approvals:admin')` on the
+ * mutation and the list scope on the projection.
+ *
+ * AN EARLIER REVISION OF THIS DOCBLOCK CLAIMED "both logout paths in this app are full navigations
+ * (`window.location.assign` / `.replace`), so the cache cannot outlive the principal it was resolved
+ * for." That was false and is the reason for everything above: there is no `location.replace` logout
+ * at all, `bootstrapSession`'s 401 branch calls `clearToken()` with no navigation, and both the
+ * router guard and `LoginView` move between principals with SPA transitions.
  */
 import { apiGet } from '../utils/api'
+import { getAuthPrincipalKey, onAuthPrincipalChange } from '../composables/authPrincipal'
 
 export type ApprovalAdminCapability = 'granted' | 'denied' | 'unavailable'
 
 export const APPROVAL_ADMIN_CAPABILITY_PATH = '/api/approvals/admin/capability'
 
-let cached: Promise<ApprovalAdminCapability> | null = null
+type CachedAnswer = {
+  /** The principal the in-flight/settled answer belongs to. `null` is a real key: "no session". */
+  principal: string | null
+  answer: Promise<ApprovalAdminCapability>
+}
+
+let cached: CachedAnswer | null = null
 
 /** Uncached single read. Exported for tests and for a caller that must not reuse a prior answer. */
 export async function fetchApprovalAdminCapability(): Promise<ApprovalAdminCapability> {
@@ -41,17 +77,41 @@ export async function fetchApprovalAdminCapability(): Promise<ApprovalAdminCapab
   }
 }
 
+function currentPrincipalKey(): string | null {
+  try {
+    return getAuthPrincipalKey()
+  } catch {
+    // A storage read can throw (Safari private mode, a disabled-cookies profile). Treating that as
+    // "no identifiable principal" is the safe direction: `null` never equals a real key, so the
+    // answer is refetched rather than a stranger's being reused.
+    return null
+  }
+}
+
 export function resolveApprovalAdminCapability(): Promise<ApprovalAdminCapability> {
-  if (cached) return cached
-  const pending = fetchApprovalAdminCapability().then((result) => {
-    if (result === 'unavailable') cached = null
-    return result
-  })
-  cached = pending
-  return pending
+  const principal = currentPrincipalKey()
+  if (cached && cached.principal === principal) return cached.answer
+  const entry: CachedAnswer = {
+    principal,
+    answer: fetchApprovalAdminCapability().then((result) => {
+      // Only ever clear THIS entry. A late `unavailable` from a superseded principal's read must
+      // not evict the answer that replaced it.
+      if (result === 'unavailable' && cached === entry) cached = null
+      return result
+    }),
+  }
+  cached = entry
+  return entry.answer
 }
 
 /** Test seam; also the correct call for a surface that has just changed principal. */
 export function resetApprovalAdminCapabilityCache(): void {
   cached = null
 }
+
+// The production subscriber. Registered at module scope so it is active for the whole lifetime of
+// every surface that can consult this capability, with no per-component wiring to forget: the nav
+// entry and the page both reach the cache through `resolveApprovalAdminCapability`, and neither is
+// mounted at the moment most transitions happen. Never unsubscribed — the module lives as long as
+// the app does, and the listener only clears this module's own cache.
+onAuthPrincipalChange(resetApprovalAdminCapabilityCache)

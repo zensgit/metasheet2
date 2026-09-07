@@ -321,6 +321,19 @@ const loadingRows = ref(false)
 const loaded = ref(false)
 const loadError = ref(false)
 const submitting = ref(false)
+// Round-3 item 2 — the IN-FLIGHT half of the double-submit latch, and the reason it is a second ref
+// rather than an earlier assignment to `submitting`. `submit()` awaits a confirmation dialog before
+// it posts, so the window between "the operator activated submit" and "the request exists" is open
+// for as long as that dialog is up; `submitting` alone closed only the window around the POST, and
+// two activations that both started before the confirm settled both passed the gate and both
+// posted. The second answers `not-assigned` for rows the first already moved and overwrites the
+// success summary, so a successful batch reads as a failure — the same harm the completed-batch
+// latch exists to prevent, one step earlier. This closes SYNCHRONOUSLY at entry, before any await.
+//
+// SEPARATE FROM `submitting` because `:loading` binds `submitting`: folding the two would put a
+// spinner on the button for the whole time the confirmation dialog is open, which is a visible
+// behaviour change this fix has no reason to make. `submitDisabled` reads both.
+const confirming = ref(false)
 // Round-2 item 4: a completed batch latches this until the list is reloaded (or the source approver
 // changes). Clearing the selection alone would leave the button re-armable by re-ticking stale
 // rows, and a second identical POST overwrites the success summary with a wall of `not-assigned`
@@ -364,7 +377,7 @@ const blockReason = computed<ApprovalBatchTransferBlockReason | null>(() => bloc
   limit: APPROVAL_BATCH_TRANSFER_PAGE_LIMIT,
 }))
 
-const submitDisabled = computed(() => justSubmitted.value || blockReason.value !== null || submitting.value)
+const submitDisabled = computed(() => justSubmitted.value || blockReason.value !== null || submitting.value || confirming.value)
 
 const BLOCK_TEXT: Record<ApprovalBatchTransferBlockReason, { zh: string; en: string }> = {
   'no-source': { zh: '请先选择原审批人', en: 'Pick the source approver first' },
@@ -458,6 +471,11 @@ function outcomeText(outcome: ApprovalBatchTransferRowOutcome): string {
 
 async function submit(): Promise<void> {
   if (submitDisabled.value) return
+  // CLOSED BEFORE THE FIRST AWAIT. Everything from here to the `finally` is inside the latch, so a
+  // second activation that arrives while the confirmation dialog is up re-reads `submitDisabled`
+  // above and returns without opening a second dialog or posting a second batch. Ordering is the
+  // whole fix: any assignment placed after the `await` below leaves the same window open.
+  confirming.value = true
   const submittedIds = [...selectedIds.value]
   try {
     await ElMessageBox.confirm(
@@ -468,7 +486,10 @@ async function submit(): Promise<void> {
       { type: 'warning' },
     )
   } catch {
-    // Operator cancelled the confirm — no request is made.
+    // Operator cancelled the confirm — no request is made, and the latch RE-OPENS. Leaving it shut
+    // here would brick the button for the rest of the page's life on a plain "no", which is a worse
+    // outcome than the double submit this closes.
+    confirming.value = false
     return
   }
 
@@ -493,6 +514,7 @@ async function submit(): Promise<void> {
     ElMessage.error(t.value.submitFailed)
   } finally {
     submitting.value = false
+    confirming.value = false
   }
 }
 </script>

@@ -378,6 +378,13 @@ on:
       # only, and the backend half is collected by plugin-tests.yml's core-backend vitest run —
       # which is required, and which approval-ci-coverage-enumeration's T1 tier pins.
       - 'apps/web/src/approvals/adminCapability.ts'
+      # Round 3: the capability cache is per-PRINCIPAL, and both halves of that (the principal
+      # key and the auth-transition subscription it invalidates on) live in `authPrincipal.ts`,
+      # with `useAuth` calling the notifier from its session-reset funnel. A change to either
+      # can serve one account's answer to the next, which is the defect this surface exists to
+      # prevent — so both belong in this filter alongside the module that consumes them.
+      - 'apps/web/src/composables/authPrincipal.ts'
+      - 'apps/web/src/composables/useAuth.ts'
       - 'apps/web/src/approvals/components/ApprovalBatchTransferNavEntry.vue'
       - 'apps/web/src/components/ShellChromeBoundary.vue'
       - 'apps/web/tests/approvalNavBatchTransferEntry.spec.ts'
@@ -723,6 +730,13 @@ on:
       # only, and the backend half is collected by plugin-tests.yml's core-backend vitest run —
       # which is required, and which approval-ci-coverage-enumeration's T1 tier pins.
       - 'apps/web/src/approvals/adminCapability.ts'
+      # Round 3: the capability cache is per-PRINCIPAL, and both halves of that (the principal
+      # key and the auth-transition subscription it invalidates on) live in `authPrincipal.ts`,
+      # with `useAuth` calling the notifier from its session-reset funnel. A change to either
+      # can serve one account's answer to the next, which is the defect this surface exists to
+      # prevent — so both belong in this filter alongside the module that consumes them.
+      - 'apps/web/src/composables/authPrincipal.ts'
+      - 'apps/web/src/composables/useAuth.ts'
       - 'apps/web/src/approvals/components/ApprovalBatchTransferNavEntry.vue'
       - 'apps/web/src/components/ShellChromeBoundary.vue'
       - 'apps/web/tests/approvalNavBatchTransferEntry.spec.ts'
