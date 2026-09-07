@@ -284,6 +284,22 @@ function getProductService(): ApprovalProductService {
   return new ApprovalProductService()
 }
 
+/**
+ * A log-safe identifier for a failure, following the convention
+ * `services/approval-attachment-gc.ts:68` (`safeErrCode`) already established for the same hazard:
+ * the driver's own `code` — falling back to the error's `name` — stripped to `[A-Za-z0-9_]` and
+ * length-capped, with `unknown` when there is neither. NEVER the `message`, which is free text the
+ * driver composes out of whatever it was holding.
+ *
+ * It is not returned to the client either: the response keeps the existing generic envelope, so
+ * this narrows what is written to logs without opening a new channel in its place.
+ */
+function restrictedErrorCode(error: unknown): string {
+  const raw = (error as { code?: unknown; name?: unknown } | null | undefined)?.code
+    ?? (error as { name?: unknown } | null | undefined)?.name
+  return typeof raw === 'string' ? raw.replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || 'unknown' : 'unknown'
+}
+
 function handleApprovalsError(
   res: Response,
   error: unknown,
@@ -2233,9 +2249,14 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     } catch (error) {
       // NOT folded into `false`. A lookup failure must reach the client as "could not determine",
       // never as a statement about the caller's rights.
-      logger.error(
-        `approval admin capability lookup failed: ${error instanceof Error ? error.message : String(error)}`,
-      )
+      //
+      // VALUES-FREE BY CONSTRUCTION (round-4 item 4). The earlier revision interpolated the driver's
+      // `message` into this line. A driver message is not a diagnostic string an operator writes —
+      // it is assembled from whatever the driver was holding: hosts, ports, connection URIs with
+      // credentials, and for a constraint violation the offending ROW. Written to a log that is
+      // shipped and retained, that is a disclosure channel opened by an error path nobody exercises
+      // in review. The bounded code below is what an operator can actually act on.
+      logger.error(`approval admin capability lookup failed (${restrictedErrorCode(error)})`)
       return res.status(500).json(
         approvalErrorResponse('APPROVAL_ADMIN_CAPABILITY_FAILED', 'Failed to resolve approval administrator capability'),
       )

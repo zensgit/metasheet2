@@ -147,6 +147,55 @@ describe('GET /api/approvals/admin/capability', () => {
     // "Could not determine" must not be reported as a statement about the caller's rights.
     expect(JSON.stringify(res.body)).not.toContain('isApprovalAdmin')
   })
+
+  // Round-4 item 4. The failure PATH is the disclosure path: a driver message is assembled from
+  // whatever the driver was holding — hosts, ports, connection URIs with credentials, and for a
+  // constraint violation the offending row — and the earlier revision interpolated it verbatim into
+  // a log line. Nothing above catches that: every assertion there is about the RESPONSE, and the
+  // response was already generic.
+  it('logs a fixed message with a restricted code — never the driver’s error text', async () => {
+    // A marker no legitimate log line could contain, standing in for whatever a real driver would
+    // have put in the same position.
+    const MARKER = 'zzsyntheticsecretzz'
+    const { Logger } = await import('../../src/core/logger')
+    // Spied on the PROTOTYPE, so the router's module-scope instance is covered without reaching
+    // into it, and mocked out so nothing is written to the real transport either.
+    const errorSpy = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => {})
+    try {
+      authState.user = { id: 'u-db-admin', permissions: [] }
+      pgState.pool.query.mockRejectedValue(
+        Object.assign(new Error(`connection to 10.0.0.1:5432 failed: password=${MARKER}`), { code: 'ECONNREFUSED' }),
+      )
+
+      const res = await request(pinned.url()).get(CAPABILITY_PATH)
+
+      // The existing envelope is unchanged: a generic code, and no marker anywhere in it.
+      expect(res.status).toBe(500)
+      expect(res.body?.error?.code).toBe('APPROVAL_ADMIN_CAPABILITY_FAILED')
+      expect(JSON.stringify(res.body)).not.toContain(MARKER)
+
+      // EVERY argument of every call is inspected, not just the message: `Logger.error(msg, err)`
+      // folds `err.message` and `err.stack` into the record it emits, so a "fix" that merely moved
+      // the interpolation into the second argument would look clean and leak exactly as much. An
+      // Error is serialized explicitly because `JSON.stringify` of one yields `{}`.
+      expect(errorSpy).toHaveBeenCalled()
+      const emitted = errorSpy.mock.calls
+        .map((call) => call
+          .map((arg) => (arg instanceof Error
+            ? `${arg.name}:${arg.message}:${arg.stack ?? ''}`
+            : typeof arg === 'string' ? arg : JSON.stringify(arg)))
+          .join(' '))
+        .join('\n')
+      expect(emitted).not.toContain(MARKER)
+      expect(emitted).not.toContain('10.0.0.1')
+      // POSITIVE CONTROL: this is not passing because nothing useful was logged. The fixed message
+      // and the driver's own bounded code — the part an operator can act on — are both there.
+      expect(emitted).toContain('approval admin capability lookup failed')
+      expect(emitted).toContain('ECONNREFUSED')
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
 })
 
 describe('isApprovalAdministrator', () => {
