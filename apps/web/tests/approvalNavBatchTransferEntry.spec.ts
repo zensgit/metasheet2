@@ -98,6 +98,9 @@ describe('批量转交 nav entry gate', () => {
     mocks.routePath = '/multitable'
     mocks.routeMeta = { requiresAuth: true }
     capabilitySpy.mockReset().mockResolvedValue('granted')
+    // Round 4: the entry re-reads on an auth transition, and whether a transition is "to another
+    // session" or "to none" is read off storage. Cleared both sides so no test inherits a session.
+    localStorage.clear()
   })
 
   afterEach(() => {
@@ -105,6 +108,7 @@ describe('批量转交 nav entry gate', () => {
     if (container) container.remove()
     app = null
     container = null
+    localStorage.clear()
     vi.clearAllMocks()
   })
 
@@ -197,6 +201,88 @@ describe('批量转交 nav entry gate', () => {
 
     expect(capabilitySpy).not.toHaveBeenCalled()
     expect(entryOf(root)).toBeNull()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-4 item 2 — the answer is re-read when the principal changes.
+  //
+  // This entry lives in the app SHELL, which no identity change is guaranteed to remount:
+  // `bootstrapSession`'s 401 branch clears the token with no navigation at all. A mount-only read
+  // therefore left a `granted` link rendered for the principal that replaced the one it was
+  // resolved for. `authPrincipal` is imported inside each test rather than at the top of the file
+  // because a neighbouring test resets the module registry; a stale top-level binding would notify
+  // an `authPrincipal` instance no mounted component is subscribed to, and the tests would pass or
+  // fail on file order.
+  // ───────────────────────────────────────────────────────────────────────────
+  function tokenFor(subject: string): string {
+    return `header.${btoa(JSON.stringify({ sub: subject })).replace(/=+$/, '')}.signature`
+  }
+
+  it('HIDES when the principal changes to one the server refuses', async () => {
+    localStorage.setItem('auth_token', tokenFor('user-a'))
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    const root = await mountApp()
+    expect(entryOf(root)).toBeTruthy()
+    expect(capabilitySpy).toHaveBeenCalledTimes(1)
+
+    localStorage.setItem('auth_token', tokenFor('user-b'))
+    capabilitySpy.mockResolvedValue('denied')
+    notifyAuthPrincipalChange()
+    await flushUi()
+
+    expect(capabilitySpy).toHaveBeenCalledTimes(2)
+    expect(entryOf(root)).toBeNull()
+    // The re-read narrows THIS entry and nothing else in the nav.
+    const hrefs = Array.from(root.querySelectorAll('a')).map((a) => a.getAttribute('href'))
+    expect(hrefs).toContain('/approvals/metrics')
+  })
+
+  it('RE-RENDERS when the new principal is one the server confirms (positive control)', async () => {
+    localStorage.setItem('auth_token', tokenFor('user-a'))
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    capabilitySpy.mockResolvedValue('denied')
+    const root = await mountApp()
+    expect(entryOf(root)).toBeNull()
+
+    localStorage.setItem('auth_token', tokenFor('user-b'))
+    capabilitySpy.mockResolvedValue('granted')
+    notifyAuthPrincipalChange()
+    await flushUi()
+
+    expect(capabilitySpy).toHaveBeenCalledTimes(2)
+    expect(entryOf(root)).toBeTruthy()
+  })
+
+  it('issues no further read when the transition left no session at all', async () => {
+    localStorage.setItem('auth_token', tokenFor('user-a'))
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    const root = await mountApp()
+    expect(entryOf(root)).toBeTruthy()
+    expect(capabilitySpy).toHaveBeenCalledTimes(1)
+
+    // A sign-out: there is no principal to ask about, and the read could only be an anonymous
+    // request the endpoint refuses. The entry still goes — it is back to "not answered yet".
+    localStorage.clear()
+    notifyAuthPrincipalChange()
+    await flushUi()
+    expect(capabilitySpy).toHaveBeenCalledTimes(1)
+    expect(entryOf(root)).toBeNull()
+  })
+
+  it('stops re-reading once it is unmounted', async () => {
+    localStorage.setItem('auth_token', tokenFor('user-a'))
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    await mountApp()
+    expect(capabilitySpy).toHaveBeenCalledTimes(1)
+
+    app!.unmount()
+    app = null
+    localStorage.setItem('auth_token', tokenFor('user-b'))
+    notifyAuthPrincipalChange()
+    await flushUi()
+    // An unmounted component that keeps re-reading is a leak, and in a shared process it spends a
+    // neighbouring test's request budget.
+    expect(capabilitySpy).toHaveBeenCalledTimes(1)
   })
 
   it('a THROWING entry component leaves the rest of the nav rendered (ShellChromeBoundary)', async () => {

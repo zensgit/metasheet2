@@ -95,6 +95,7 @@ export function summarizeTransferOutcomes(
 
 export type ApprovalBatchTransferBlockReason =
   | 'no-source'
+  | 'source-changed'
   | 'no-target'
   | 'same-user'
   | 'no-selection'
@@ -102,10 +103,19 @@ export type ApprovalBatchTransferBlockReason =
   | 'over-limit'
 
 /**
- * Client-side preflight. Every arm mirrors a refusal the endpoint already
- * makes (`fromUserId`/`toUserId`/`reason` required, the two ids must differ,
- * at most 200 instances) — this is an affordance, not a second authority: the
- * server still decides.
+ * Client-side preflight. Every arm but one mirrors a refusal the endpoint
+ * already makes (`fromUserId`/`toUserId`/`reason` required, the two ids must
+ * differ, at most 200 instances) — this is an affordance, not a second
+ * authority: the server still decides.
+ *
+ * `source-changed` is the exception, and it is a refusal the endpoint CANNOT
+ * make (round-4 item 1). The rows a batch carries were listed for one approver;
+ * the endpoint is told which approver to move seats from. If those two ever
+ * disagree the request is well-formed and the server will honour it — against
+ * the wrong approver's seats. So the mismatch has to be caught here, on the one
+ * side that knows both halves. It is reported rather than silently corrected
+ * because the operator picked the new source deliberately: the answer is
+ * "reload for this approver", not "we transferred someone else's queue".
  */
 export function blockReasonForTransfer(input: {
   fromUserId: string
@@ -113,9 +123,17 @@ export function blockReasonForTransfer(input: {
   reason: string
   selectedIds: readonly string[]
   limit?: number
+  /**
+   * The approver the currently-held rows were LISTED for; `''`/absent when no
+   * list read has landed. Compared against `fromUserId`, never substituted for
+   * it — a caller that omits it gets the same answers this helper always gave.
+   */
+  loadedForUserId?: string
 }): ApprovalBatchTransferBlockReason | null {
   const limit = input.limit ?? 200
   if (!input.fromUserId.trim()) return 'no-source'
+  const loadedFor = (input.loadedForUserId ?? '').trim()
+  if (loadedFor && loadedFor !== input.fromUserId.trim()) return 'source-changed'
   if (!input.toUserId.trim()) return 'no-target'
   if (input.fromUserId.trim() === input.toUserId.trim()) return 'same-user'
   if (input.selectedIds.length === 0) return 'no-selection'

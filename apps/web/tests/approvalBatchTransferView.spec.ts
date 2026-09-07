@@ -173,6 +173,15 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
+// A parseable JWT-shaped token. `nonce` changes the token STRING while leaving `sub` — and so the
+// principal key — identical; that is what makes the listener test discriminating. At module scope
+// because the MOUNTED-page tests need it too: round 4 drives an identity change through the auth
+// layer's own setter while a page is up.
+function tokenFor(subject: string, nonce = 'a'): string {
+  const payload = btoa(JSON.stringify({ sub: subject, nonce })).replace(/=+$/, '')
+  return `header.${payload}.signature`
+}
+
 function listRow(id: string, title: string) {
   return {
     id,
@@ -300,6 +309,25 @@ describe('批量转交 outcome helpers', () => {
     expect(blockReasonForTransfer({ ...base, selectedIds: Array.from({ length: 201 }, (_, i) => `a${i}`) })).toBe('over-limit')
   })
 
+  // Round-4 item 1. The only arm here that does NOT mirror a refusal the endpoint makes: the
+  // endpoint cannot see that the ids it was handed were listed for a different approver.
+  it('refuses a batch whose rows were listed for a DIFFERENT approver than the one now picked', () => {
+    const base = { fromUserId: 'u1', toUserId: 'u2', reason: 'cover', selectedIds: ['a'] }
+    // Absent or empty, the helper answers exactly as it always did — nothing loaded, nothing to
+    // disagree with.
+    expect(blockReasonForTransfer(base)).toBeNull()
+    expect(blockReasonForTransfer({ ...base, loadedForUserId: '' })).toBeNull()
+    expect(blockReasonForTransfer({ ...base, loadedForUserId: '  ' })).toBeNull()
+    // POSITIVE CONTROL: agreement is not a refusal.
+    expect(blockReasonForTransfer({ ...base, loadedForUserId: 'u1' })).toBeNull()
+    // Disagreement is.
+    expect(blockReasonForTransfer({ ...base, loadedForUserId: 'u9' })).toBe('source-changed')
+    // Ordering, both directions. With no source picked at all, "pick one" is the accurate answer;
+    // once one IS picked, the mismatch outranks the refusals that are only its consequence.
+    expect(blockReasonForTransfer({ ...base, fromUserId: '  ', loadedForUserId: 'u9' })).toBe('no-source')
+    expect(blockReasonForTransfer({ ...base, loadedForUserId: 'u9', selectedIds: [], toUserId: '' })).toBe('source-changed')
+  })
+
   it('unwraps the endpoint’s {ok,data} envelope (the shape the server actually sends)', () => {
     const unwrapped = normalizeBulkReassignEnvelope({
       ok: true,
@@ -335,6 +363,11 @@ describe('ApprovalBatchTransferView', () => {
     container?.remove()
     app = null
     container = null
+    // Round 4 drives real auth transitions in this block. The token is cleared AFTER the unmount so
+    // the page's own subscription is already gone, and so the capability-client tests below start
+    // from no session rather than inheriting one of these principals.
+    useAuth().clearToken()
+    localStorage.clear()
   })
 
   async function mountView(): Promise<HTMLElement> {
@@ -757,6 +790,184 @@ describe('ApprovalBatchTransferView', () => {
   })
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Round-4 item 1 — ONE source approver per batch. The read, the rows on screen
+  // and the request are bound together; a superseded read is dropped rather than
+  // merged, and a batch is never posted under an approver it was not listed for.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('drops a superseded list response instead of refilling the page under a different approver', async () => {
+    const root = await mountView()
+
+    // A's read is issued and deliberately left open.
+    let releaseA: ((page: unknown) => void) | null = null
+    apiGetSpy.mockImplementationOnce(() => new Promise((resolve) => { releaseA = resolve }))
+    await setPicker(root, 'batch-transfer-source-picker', 'user_a')
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+
+    // The operator moves to B and loads B's queue while A's read is still in flight. This half is a
+    // POSITIVE CONTROL as much as a setup step: if the picker change did not release the load
+    // control, B's read would never be issued at all and every assertion below would pass against
+    // an empty page for the wrong reason.
+    apiGetSpy.mockResolvedValue({ data: [listRow('apv_b1', 'B 的待办')], total: 1 })
+    await setPicker(root, 'batch-transfer-source-picker', 'user_b')
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+    expect(apiGetSpy).toHaveBeenCalledTimes(2)
+    expect(String(apiGetSpy.mock.calls[1][0])).toContain('assignee=user_b')
+    expect(q(root, 'batch-transfer-row-apv_b1')).toBeTruthy()
+
+    // A's answer finally arrives. It describes an approver this page no longer names.
+    releaseA!({ data: [listRow('apv_a1', 'A 的待办')], total: 1 })
+    await flushUi()
+    expect(q(root, 'batch-transfer-row-apv_a1')).toBeNull()
+    expect(q(root, 'batch-transfer-row-apv_b1')).toBeTruthy()
+    expect(q(root, 'batch-transfer-selected-count').textContent).toContain('已选 1 / 1')
+
+    // And the request carries B's rows under B's name — never one approver's ids under another's.
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+    apiPostSpy.mockResolvedValue({ ok: true, data: { succeeded: ['apv_b1'], skipped: [], affectedRequesterIds: [] } })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+    const body = apiPostSpy.mock.calls[0][1] as { fromUserId: string; instanceIds: string[] }
+    expect(body.fromUserId).toBe('user_b')
+    expect(body.instanceIds).toEqual(['apv_b1'])
+  })
+
+  it('does not post a batch whose source approver changed while the confirmation was open', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, '原审批人休假')
+
+    // The confirmation is held open — the one window in which the picker is still live after the
+    // entry checks have already passed.
+    let resolveConfirm: (() => void) | null = null
+    confirmSpy.mockReturnValue(new Promise<void>((resolve) => { resolveConfirm = () => resolve() }))
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+
+    await setPicker(root, 'batch-transfer-source-picker', 'user_other')
+    resolveConfirm!()
+    await flushUi()
+
+    // The operator confirmed a batch for the approver they were looking at, and the page is no
+    // longer looking at that approver: nothing is sent, under either name.
+    expect(apiPostSpy).not.toHaveBeenCalled()
+    expect(q(root, 'batch-transfer-block-reason').textContent).toContain('原审批人已更改')
+
+    // POSITIVE CONTROL, in this same test: the page is not bricked. Loading for the approver now
+    // picked and submitting posts — under that approver's name.
+    apiGetSpy.mockResolvedValue({ data: [listRow('apv_9', '新待办')], total: 1 })
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+    confirmSpy.mockReset().mockResolvedValue(undefined)
+    apiPostSpy.mockResolvedValue({ ok: true, data: { succeeded: ['apv_9'], skipped: [], affectedRequesterIds: [] } })
+    q<HTMLButtonElement>(root, 'batch-transfer-submit').click()
+    await flushUi()
+    expect(apiPostSpy).toHaveBeenCalledTimes(1)
+    expect((apiPostSpy.mock.calls[0][1] as { fromUserId: string }).fromUserId).toBe('user_other')
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-4 item 3 — a degraded read is a FAILED read, not an empty queue.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('treats a DEGRADED list answer as a failed read, never as “this approver has nothing”', async () => {
+    const root = await mountView()
+    // The exact shape the backend sends when it cannot read the approval tables:
+    // `routes/approvals.ts` answers `res.json({ data: [], total: 0, degraded: true })` — a 200 that
+    // is indistinguishable from an empty queue unless the flag is read.
+    apiGetSpy.mockResolvedValue({ data: [], total: 0, degraded: true })
+    await setPicker(root, 'batch-transfer-source-picker', 'user_from')
+    q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+    await flushUi()
+
+    expect(q(root, 'batch-transfer-load-error')).toBeTruthy()
+    expect(q(root, 'batch-transfer-empty')).toBeNull()
+    // Not only the test hook: the sentence itself must not be on the page.
+    expect(root.textContent).not.toContain('该审批人名下没有可转交的平台待办')
+    expect(q<HTMLButtonElement>(root, 'batch-transfer-submit').disabled).toBe(true)
+  })
+
+  it('treats a list answer that is not a page as a failed read', async () => {
+    const root = await mountView()
+    const payloads: unknown[] = [null, { ok: true }, { data: null, total: 0 }, { data: {}, total: 0 }]
+    for (const [index, payload] of payloads.entries()) {
+      apiGetSpy.mockResolvedValue(payload)
+      await setPicker(root, 'batch-transfer-source-picker', `user_${index}`)
+      q<HTMLButtonElement>(root, 'batch-transfer-load').click()
+      await flushUi()
+      expect(q(root, 'batch-transfer-load-error'), `payload ${index}`).toBeTruthy()
+      expect(q(root, 'batch-transfer-empty'), `payload ${index}`).toBeNull()
+    }
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Round-4 item 2 — the answer belongs to a principal, and so does the queue.
+  // The transition is driven through the auth layer's OWN setter, so what these
+  // pin is the production path (useAuth → authPrincipal → the capability
+  // module's invalidation → this page), not a hand-fired event.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('re-reads the capability when the principal changes while the page is mounted', async () => {
+    resolveCapabilitySpy.mockResolvedValue('granted')
+    const root = await mountView()
+    expect(q(root, 'batch-transfer-source-picker')).toBeTruthy()
+
+    resolveCapabilitySpy.mockResolvedValue('denied')
+    useAuth().setToken(tokenFor('user-b'))
+    await flushUi()
+
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(2)
+    expect(q(root, 'batch-transfer-forbidden')).toBeTruthy()
+    expect(q(root, 'batch-transfer-source-picker')).toBeNull()
+    expect(q(root, 'batch-transfer-empty')).toBeNull()
+  })
+
+  it('drops the previous principal’s queue on an identity change, even when the answer is unchanged', async () => {
+    const root = await mountView()
+    await loadTwoRows(root)
+    await setReason(root, '原审批人休假')
+    expect(q(root, 'batch-transfer-row-apv_1')).toBeTruthy()
+
+    // Same answer, different person. `granted` is a statement about the caller's rights, never
+    // about whose queue is on screen — the rows were listed under the PREVIOUS principal's scope.
+    useAuth().setToken(tokenFor('user-b'))
+    await flushUi()
+
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(2)
+    expect(q(root, 'batch-transfer-row-apv_1')).toBeNull()
+    expect(q(root, 'batch-transfer-row-apv_2')).toBeNull()
+    expect(q(root, 'batch-transfer-selected-count').textContent).toContain('已选 0 / 0')
+    // Cleared, not merely hidden: the form the previous principal filled in is gone too.
+    expect(q<HTMLInputElement>(root, 'batch-transfer-source-picker').value).toBe('')
+    expect(q<HTMLTextAreaElement>(root, 'batch-transfer-reason').value).toBe('')
+    // And "nothing to transfer" is not what an emptied page says.
+    expect(q(root, 'batch-transfer-empty')).toBeNull()
+  })
+
+  it('discards a capability answer a newer read has already superseded', async () => {
+    let releaseFirst: ((value: string) => void) | null = null
+    resolveCapabilitySpy.mockReturnValueOnce(new Promise<string>((resolve) => { releaseFirst = resolve }))
+    const root = await mountView()
+    expect(q(root, 'batch-transfer-capability-pending')).toBeTruthy()
+
+    resolveCapabilitySpy.mockResolvedValue('denied')
+    useAuth().setToken(tokenFor('user-b'))
+    await flushUi()
+    expect(q(root, 'batch-transfer-forbidden')).toBeTruthy()
+
+    // The FIRST read — issued for the principal that has since been replaced — finally answers, and
+    // answers `granted`. Applying it would hand the new principal the old one's rights.
+    releaseFirst!('granted')
+    await flushUi()
+    expect(q(root, 'batch-transfer-forbidden')).toBeTruthy()
+    expect(q(root, 'batch-transfer-source-picker')).toBeNull()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Round-2 item 4 — a completed batch cannot be re-posted by a second click.
   // ───────────────────────────────────────────────────────────────────────────
   it('posts once and only once for a completed batch', async () => {
@@ -955,6 +1166,26 @@ describe('ApprovalBatchTransferView', () => {
     expect(renderedTextAndAttributes(root)).not.toMatch(/[\u4e00-\u9fff]/)
   })
 
+  // Round-4 item 1 added a user-visible refusal, so it gets the same en fixture the other four
+  // locale-branched strings on this page have: a branch only ever rendered in one language is
+  // exactly the failure the round-2 sweep could not see.
+  it('renders the source-changed refusal in en', async () => {
+    useLocale().setLocale('en')
+    const root = await mountView()
+    await loadTwoRows(root, ['Travel request', 'Purchase request'])
+    await setPicker(root, 'batch-transfer-target-picker', 'user_to')
+    await setReason(root, 'approver on leave')
+    // POSITIVE CONTROL: nothing refuses this batch until the source moves.
+    expect(q(root, 'batch-transfer-block-reason')).toBeNull()
+
+    await setPicker(root, 'batch-transfer-source-picker', 'user_other')
+    const block = q(root, 'batch-transfer-block-reason')
+    expect(block).toBeTruthy()
+    expect(block.textContent).toContain('The source approver changed')
+    expect(block.textContent).not.toMatch(/[\u4e00-\u9fff]/)
+    expect(renderedTextAndAttributes(root)).not.toMatch(/[\u4e00-\u9fff]/)
+  })
+
   it('localizes the per-row outcome labels', async () => {
     useLocale().setLocale('en')
     const root = await mountView()
@@ -1064,13 +1295,6 @@ describe('approval admin capability client', () => {
   //     construction and only the transition is observable.
   // ───────────────────────────────────────────────────────────────────────────
 
-  // A parseable JWT-shaped token. `nonce` changes the token STRING while leaving `sub` — and so the
-  // principal key — identical; that is what makes the listener test discriminating.
-  function tokenFor(subject: string, nonce = 'a'): string {
-    const payload = btoa(JSON.stringify({ sub: subject, nonce })).replace(/=+$/, '')
-    return `header.${payload}.signature`
-  }
-
   it('serves a cached answer only to the principal it was resolved for, even when the swap bypassed this app’s setters', async () => {
     const mod = await real()
     localStorage.setItem('auth_token', tokenFor('user-a'))
@@ -1132,6 +1356,38 @@ describe('approval admin capability client', () => {
     // This cycle changes BOTH the key and the transition state, so it is deliberately NOT the
     // discriminating evidence for either mechanism — the two tests above are. It is here because it
     // is the scenario an operator actually performs.
+  })
+
+  // Round-4 item 2. The mounted consumers re-read from INSIDE this notification, so "the cache is
+  // dropped" and "the consumers are told" are not two independent facts — their ORDER decides
+  // whether the re-read is a request or a replay of the answer that just went stale. Nothing in a
+  // consumer can observe that order, so it is pinned here, at the module that owns both halves.
+  it('has already dropped the cached answer by the time it tells consumers to re-read', async () => {
+    const mod = await real()
+    localStorage.setItem('auth_token', tokenFor('user-a', 'first'))
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+
+    let answeredInsideNotification: string | null = null
+    const unsubscribe = mod.onApprovalAdminCapabilityInvalidated(() => {
+      apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: false } })
+      void mod.resolveApprovalAdminCapability().then((answer) => { answeredInsideNotification = answer })
+    })
+    try {
+      // The SAME subject re-authenticates: the principal key is unchanged by construction, so the
+      // key cannot be what produces a second request here — only the cache having been dropped
+      // before this listener ran can.
+      const keyBefore = getAuthPrincipalKey()
+      useAuth().setToken(tokenFor('user-a', 'second'))
+      expect(getAuthPrincipalKey()).toBe(keyBefore)
+      await flushUi()
+    } finally {
+      unsubscribe()
+    }
+
+    expect(apiGetSpy).toHaveBeenCalledTimes(2)
+    expect(answeredInsideNotification).toBe('denied')
   })
 
   it('exposes the reset as the auth layer’s subscriber, not only as a test seam', async () => {

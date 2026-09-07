@@ -22,22 +22,17 @@
 // ANY answer other than `granted` hides the entry, INCLUDING `unavailable`: an entry that leads to
 // a page which cannot confirm the caller's rights is worse than no entry. The page itself remains
 // reachable by URL and states, there, which of the three answers it got.
-import { onMounted, ref } from 'vue'
-import { resolveApprovalAdminCapability, type ApprovalAdminCapability } from '../adminCapability'
+//
+// Round-4 item 2: the answer is held through `useApprovalAdminCapability`, which re-reads on an auth
+// transition instead of resolving once at mount. This entry lives in the app shell, which is NOT
+// remounted by every identity change (`bootstrapSession`'s 401 branch clears the token with no
+// navigation at all), so a mount-only read left a `granted` link rendered for the principal that
+// replaced the one it was resolved for.
+import { useApprovalAdminCapability } from '../useApprovalAdminCapability'
 
 defineProps<{ label: string }>()
 
-const capability = ref<ApprovalAdminCapability | 'pending'>('pending')
-
-onMounted(async () => {
-  try {
-    capability.value = await resolveApprovalAdminCapability()
-  } catch {
-    // `resolveApprovalAdminCapability` already answers `unavailable` rather than rejecting; this
-    // is the belt for a future change that lets a rejection escape. Nav chrome never throws.
-    capability.value = 'unavailable'
-  }
-})
+const capability = useApprovalAdminCapability()
 
 defineExpose({ capability })
 </script>

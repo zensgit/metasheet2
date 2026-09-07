@@ -211,7 +211,19 @@
 // PROJECTION PERMISSIONS ARE NOT RELAXED: the capability read grants nothing. It is a read of an
 // existing predicate; `rbacGuard('approvals:admin')` still gates the mutation and the list scope
 // still gates the projection.
-import { computed, onMounted, ref } from 'vue'
+//
+// ONE SOURCE APPROVER PER BATCH (round-4 item 1). The list read, the rows on screen and the
+// submitted request must all be about the SAME approver, and nothing in the wire shape enforces
+// that: the read is a query, the request is a body, and the operator can change the picker between
+// them. A read is therefore issued with the source it is about and a generation, and a response is
+// applied only if BOTH still hold; the source a batch was listed for travels with the rows and is
+// what the request carries. A picker change clears the rows it invalidates in the same tick.
+//
+// WHOSE ANSWER, FOR HOW LONG (round-4 item 2). The capability is held through
+// `useApprovalAdminCapability`, which re-reads on an auth transition and drops this page's loaded
+// queue with it — an answer resolved for one principal is not a statement about the next, and
+// neither is a queue listed under one principal's scope.
+import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
@@ -221,7 +233,7 @@ import {
   bulkReassignApprovals,
   listPendingApprovalsForApprover,
 } from '../../approvals/api'
-import { resolveApprovalAdminCapability, type ApprovalAdminCapability } from '../../approvals/adminCapability'
+import { useApprovalAdminCapability } from '../../approvals/useApprovalAdminCapability'
 import {
   blockReasonForTransfer,
   buildTransferOutcomes,
@@ -309,13 +321,20 @@ const EN: Record<keyof typeof ZH, string> = {
 
 const t = computed(() => (isZh.value ? ZH : EN))
 
-const capability = ref<ApprovalAdminCapability | 'pending'>('pending')
-
 const fromUserId = ref('')
 const toUserId = ref('')
 const reason = ref('')
 const rows = ref<UnifiedApprovalDTO[]>([])
 const selectedIds = ref<string[]>([])
+// The approver `rows` were LISTED for. Stored WITH the rows because it is what makes them
+// interpretable: a set of instance ids means nothing without the approver whose seats they are.
+// This — never the picker's live value — is what a submit sends. It deliberately SURVIVES a picker
+// change so the page can say "the source approver changed, reload" instead of the much weaker
+// "select at least one item" it would otherwise fall through to.
+const loadedSource = ref('')
+// Monotonic per list read. A response is applied only if its own generation is still the current
+// one, which is what makes a superseded read's late arrival a no-op rather than a silent refill.
+const loadGeneration = ref(0)
 const totalPending = ref(0)
 const loadingRows = ref(false)
 const loaded = ref(false)
@@ -342,16 +361,40 @@ const justSubmitted = ref(false)
 const outcomes = ref<ApprovalBatchTransferRowOutcome[]>([])
 const summary = ref<ApprovalBatchTransferSummary | null>(null)
 
-onMounted(async () => {
-  try {
-    capability.value = await resolveApprovalAdminCapability()
-  } catch {
-    // `resolveApprovalAdminCapability` answers `unavailable` rather than rejecting today, so this
-    // is unreachable — but an unhandled rejection here would leave `capability` at 'pending'
-    // FOREVER: the page would sit on "confirming your access" with no queue, no privilege state
-    // and no error, which is the worst of the four outcomes and the only one nothing else covers.
-    capability.value = 'unavailable'
-  }
+/**
+ * Everything about the batch currently on screen, dropped in ONE tick.
+ *
+ * `loadGeneration` is bumped here rather than only in `loadRows` because the reads this cancels are
+ * the ones already in flight: without the bump, a read issued for the batch being dropped would
+ * still land and re-populate the page. `loadingRows` is cleared for the same reason — the in-flight
+ * read is no longer this page's read, so the control it disables must be released immediately or
+ * the operator cannot load the source they just picked.
+ */
+function clearLoadedBatch(): void {
+  loadGeneration.value += 1
+  rows.value = []
+  selectedIds.value = []
+  totalPending.value = 0
+  loaded.value = false
+  loadError.value = false
+  loadingRows.value = false
+  justSubmitted.value = false
+  resetResults()
+}
+
+// The capability, and everything derived from it. The `onInvalidated` half is not decoration: an
+// identity change puts the capability back to `pending` (so nothing actionable renders), but the
+// rows, the selection and the form are STATE, not chrome — they survive the `v-if` that hides them.
+// Left alone, principal A's queue would reappear intact the moment B's answer came back `granted`.
+// A new principal gets an empty page, not the previous one's work.
+const capability = useApprovalAdminCapability({
+  onInvalidated: () => {
+    fromUserId.value = ''
+    toUserId.value = ''
+    reason.value = ''
+    loadedSource.value = ''
+    clearLoadedBatch()
+  },
 })
 
 const selectedSet = computed(() => new Set(selectedIds.value))
@@ -375,12 +418,17 @@ const blockReason = computed<ApprovalBatchTransferBlockReason | null>(() => bloc
   reason: reason.value,
   selectedIds: selectedIds.value,
   limit: APPROVAL_BATCH_TRANSFER_PAGE_LIMIT,
+  loadedForUserId: loadedSource.value,
 }))
 
 const submitDisabled = computed(() => justSubmitted.value || blockReason.value !== null || submitting.value || confirming.value)
 
 const BLOCK_TEXT: Record<ApprovalBatchTransferBlockReason, { zh: string; en: string }> = {
   'no-source': { zh: '请先选择原审批人', en: 'Pick the source approver first' },
+  'source-changed': {
+    zh: '原审批人已更改，请重新载入该审批人的待办',
+    en: 'The source approver changed; reload this approver’s pending items',
+  },
   'no-target': { zh: '请选择转交给谁', en: 'Pick who to transfer to' },
   'same-user': { zh: '原审批人与目标用户不能相同', en: 'Source and target must differ' },
   'no-selection': { zh: '请至少勾选一条待办', en: 'Select at least one item' },
@@ -399,41 +447,74 @@ function resetResults(): void {
   summary.value = null
 }
 
+// SYNCHRONOUS, and that is the whole point: from the tick the picker changes, the page holds no
+// rows and no selection belonging to the approver it no longer names. `loadedSource` is NOT cleared
+// here — it is what lets `blockReason` name the mismatch until a read for the new approver lands.
 function onSourceChange(next: string | null): void {
   fromUserId.value = next ?? ''
-  rows.value = []
-  selectedIds.value = []
-  totalPending.value = 0
-  loaded.value = false
-  loadError.value = false
-  justSubmitted.value = false
-  resetResults()
+  clearLoadedBatch()
 }
 
 async function loadRows(): Promise<void> {
-  if (!fromUserId.value || loadingRows.value) return
+  // The source is captured HERE, once, and every decision below is made against this value rather
+  // than against the live picker: the request is about this approver, and so is its answer.
+  const source = fromUserId.value
+  if (!source || loadingRows.value) return
+  loadGeneration.value += 1
+  const generation = loadGeneration.value
   loadingRows.value = true
   loadError.value = false
   justSubmitted.value = false
   resetResults()
   try {
-    const page = await listPendingApprovalsForApprover(fromUserId.value)
-    rows.value = Array.isArray(page?.data) ? page.data : []
+    const page = await listPendingApprovalsForApprover(source)
+    // TWO independent conditions, because they catch different things: the generation catches a
+    // newer read of the SAME approver (a second click, or a re-read after an identity change), and
+    // the source comparison catches a picker change — including one that happens to leave the
+    // generation looking current. A stale answer is DROPPED, never merged.
+    if (generation !== loadGeneration.value || source !== fromUserId.value) return
+    // A degraded answer is the server saying "I could not read the approval tables", and it is
+    // shaped exactly like an empty queue (`{data: [], total: 0}` plus this flag). Rendered as the
+    // business empty state it becomes the page asserting, as fact, that this approver has nothing
+    // to transfer — the same false statement the capability gate exists to prevent, arriving
+    // through a different door. A payload that is not a page at all is treated the same way: an
+    // unreadable answer is a failed read, never an empty one.
+    const data = (page as { data?: unknown } | null | undefined)?.data
+    const degraded = (page as { degraded?: unknown } | null | undefined)?.degraded === true
+    if (degraded || !Array.isArray(data)) {
+      applyFailedRead()
+      return
+    }
+    rows.value = data as UnifiedApprovalDTO[]
     totalPending.value = typeof page?.total === 'number' && Number.isFinite(page.total) && page.total >= 0
       ? page.total
       : rows.value.length
     // Default to "everything the operator just looked at"; they can untick.
     selectedIds.value = rows.value.map((row) => row.id)
+    loadedSource.value = source
     loaded.value = true
   } catch {
-    rows.value = []
-    selectedIds.value = []
-    totalPending.value = 0
-    loaded.value = false
-    loadError.value = true
+    if (generation !== loadGeneration.value || source !== fromUserId.value) return
+    applyFailedRead()
   } finally {
-    loadingRows.value = false
+    // Only the CURRENT read owns this flag. A superseded read clearing it would re-enable the load
+    // control while the read that replaced it is still running.
+    if (generation === loadGeneration.value) loadingRows.value = false
   }
+}
+
+/**
+ * The read did not produce a queue. `loaded` stays false so the "nothing pending" copy cannot
+ * render, and the rows/selection are dropped so nothing is submittable — an operator must never be
+ * able to act on a batch that a failed read left behind. The alert this raises names retrying, and
+ * the load control stays available as the retry.
+ */
+function applyFailedRead(): void {
+  rows.value = []
+  selectedIds.value = []
+  totalPending.value = 0
+  loaded.value = false
+  loadError.value = true
 }
 
 function toggleAll(next: unknown): void {
@@ -477,6 +558,11 @@ async function submit(): Promise<void> {
   // whole fix: any assignment placed after the `await` below leaves the same window open.
   confirming.value = true
   const submittedIds = [...selectedIds.value]
+  // Captured together, because they are one fact: THESE rows, of THIS approver. Whatever the picker
+  // says by the time the operator answers the dialog, the request below is the one that was
+  // confirmed — the ids and the approver they were listed for can never be taken from two different
+  // moments.
+  const submittedSource = loadedSource.value
   try {
     await ElMessageBox.confirm(
       isZh.value
@@ -493,11 +579,22 @@ async function submit(): Promise<void> {
     return
   }
 
+  // RE-CHECKED AFTER THE DIALOG, against the captured source and NOT against `submitDisabled` —
+  // `confirming` is true here by construction, so re-reading the aggregate would refuse everything
+  // and prove nothing. The picker stays live while the confirmation is up, so this is the one
+  // window in which the rows and the current source can drift apart after the entry check passed.
+  // The operator is told through the ordinary block reason, which is already showing.
+  if (!submittedSource || submittedSource !== fromUserId.value) {
+    confirming.value = false
+    return
+  }
+
   submitting.value = true
   resetResults()
   try {
     const result = await bulkReassignApprovals({
-      fromUserId: fromUserId.value,
+      // The approver the rows were LISTED for, never the picker's current value.
+      fromUserId: submittedSource,
       toUserId: toUserId.value,
       reason: reason.value.trim(),
       instanceIds: submittedIds,

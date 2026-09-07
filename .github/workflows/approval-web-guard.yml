@@ -385,6 +385,11 @@ on:
       # prevent — so both belong in this filter alongside the module that consumes them.
       - 'apps/web/src/composables/authPrincipal.ts'
       - 'apps/web/src/composables/useAuth.ts'
+      # Round 4: both consumers hold the answer through ONE composable, which re-reads on an auth
+      # transition and guards a late answer with a generation. A change to it can leave a mounted
+      # page or a rendered nav entry describing the previous principal's rights — the defect this
+      # surface exists to remove — so it belongs in this filter alongside the module it consumes.
+      - 'apps/web/src/approvals/useApprovalAdminCapability.ts'
       - 'apps/web/src/approvals/components/ApprovalBatchTransferNavEntry.vue'
       - 'apps/web/src/components/ShellChromeBoundary.vue'
       - 'apps/web/tests/approvalNavBatchTransferEntry.spec.ts'
@@ -737,6 +742,11 @@ on:
       # prevent — so both belong in this filter alongside the module that consumes them.
       - 'apps/web/src/composables/authPrincipal.ts'
       - 'apps/web/src/composables/useAuth.ts'
+      # Round 4: both consumers hold the answer through ONE composable, which re-reads on an auth
+      # transition and guards a late answer with a generation. A change to it can leave a mounted
+      # page or a rendered nav entry describing the previous principal's rights — the defect this
+      # surface exists to remove — so it belongs in this filter alongside the module it consumes.
+      - 'apps/web/src/approvals/useApprovalAdminCapability.ts'
       - 'apps/web/src/approvals/components/ApprovalBatchTransferNavEntry.vue'
       - 'apps/web/src/components/ShellChromeBoundary.vue'
       - 'apps/web/tests/approvalNavBatchTransferEntry.spec.ts'
