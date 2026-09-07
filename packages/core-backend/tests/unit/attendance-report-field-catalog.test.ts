@@ -862,6 +862,7 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(ids).toEqual([
       'row_key', 'org_id', 'user_id', 'employee_name', 'department',
       'attendance_group', 'work_date', 'field_fingerprint', 'source_fingerprint', 'synced_at',
+      'cleaning_requested', 'cleaning_reason',
     ])
     // provisioning field-type contract: string/date/dateTime only (no "text")
     const typeByCode = Object.fromEntries(d1.fields.map((f: { id: string, type: string }) => [f.id, f.type]))
@@ -1253,12 +1254,15 @@ describe('attendance report field catalog multitable foundation', () => {
     expect(r4.skipped).toBe(1)
     expect(store[0].data['fld_field_fingerprint']).not.toBe('STALE-FIELD-FP') // rewritten
 
-    // duplicate row_key fuse: inject a 2nd record same row_key → patch first, count duplicate
+    // Duplicate rows with drift must all retain their content and lose authority.
     store.push({ id: 'rec-dup', version: 1, data: { ...store[0].data } })
+    store[0].data['fld_field_fingerprint'] = 'DUPLICATE-DRIFT'
+    const duplicateBefore = JSON.stringify([store[0], store[2]])
     const r5 = await helpers.syncAttendanceReportRecords(context, db, 'org-1', { warn: vi.fn() }, { from: '2026-05-01', to: '2026-05-31', userId: 'u-1' })
     expect(r5.duplicateRowKeys).toBeGreaterThanOrEqual(1)
     expect(store.filter(r => r.data[rowKeyFid] === 'org-1:u-1:2026-05-13').length).toBe(2) // not auto-deleted (v1)
     expect(withholdAnchors).toHaveBeenCalledWith(expect.arrayContaining(['rec-1', 'rec-dup']))
+    expect(JSON.stringify([store[0], store[2]])).toBe(duplicateBefore)
   })
 
   it('report-records sync: bulk explicit users dedupe and aggregate per-user results', async () => {

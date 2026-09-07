@@ -48,7 +48,7 @@ function nonEmpty(value: unknown): string {
 }
 
 function positiveInteger(value: unknown): number {
-  if (!Number.isSafeInteger(value) || value < 1) unavailable()
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) unavailable()
   return value
 }
 

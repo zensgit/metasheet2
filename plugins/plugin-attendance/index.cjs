@@ -3149,6 +3149,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
       if (duplicateRowKey) {
         result.duplicateRowKeys += existing.length - 1
         if (anchorAuthority) await anchorAuthority.withhold(existing.map(record => record?.id))
+        continue
       }
       const target = existing[0]
       const existingData = (target && target.data && typeof target.data === 'object') ? target.data : {}
