@@ -13,7 +13,14 @@
         <!-- ① 数据源 — auto, admin tier. -->
         <li class="sp-ops__cell" data-testid="stock-prep-ops-cell-source" :data-cell-status="sourceCell.status">
           <span class="sp-ops__cell-label">{{ bi('数据源', 'Data source') }}</span>
-          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${sourceTone}`">{{ sourceSummary }}</span>
+          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${sourceView.tone}`">{{ sourceView.badge }}</span>
+          <p
+            v-if="sourceView.note"
+            class="sp-ops__cell-note"
+            :class="{ 'sp-ops__cell-note--alert': sourceView.alert }"
+            :role="sourceView.alert ? 'alert' : undefined"
+            data-testid="stock-prep-ops-cell-source-note"
+          >{{ sourceView.note }}</p>
           <button
             type="button"
             class="sp-ops__cell-action"
@@ -25,19 +32,33 @@
           </button>
         </li>
 
-        <!-- ② 建表/装包 — auto, admin tier. Two independent reads (catalog, installs) plus a THIRD
-             read (sandbox readiness) that only fires once the catalog names an objectId — see
-             deploymentHealth.ts's header for why that third read cannot run in parallel with the
-             other two. -->
+        <!-- ② 建表/装包 — auto, admin tier. Catalog first (it names the objectId), then installs and
+             readiness about THAT SAME id. deploymentHealth.ts's header carries the plugin-source
+             evidence for why the id decides which readiness route may legally answer at all. The
+             note line is how a failed readiness read stays VISIBLE while the other two halves still
+             render their data — §6.2 P1-5's 「这一格看不了 + 谁能看」 applies per sub-read, not only
+             when the whole tile dies. -->
         <li class="sp-ops__cell" data-testid="stock-prep-ops-cell-packs" :data-cell-status="packsCellStatus">
           <span class="sp-ops__cell-label">{{ bi('建表/装包', 'Tables & packs') }}</span>
-          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${packsTone}`">{{ packsSummary }}</span>
+          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${packsView.tone}`">{{ packsView.badge }}</span>
+          <p
+            v-if="packsView.note"
+            class="sp-ops__cell-note"
+            data-testid="stock-prep-ops-cell-packs-note"
+          >{{ packsView.note }}</p>
         </li>
 
         <!-- ③ 部署自检 — manual, stock-prep:read tier. Feeds ⑤ 四条硬边界 below (same payload). -->
         <li class="sp-ops__cell" data-testid="stock-prep-ops-cell-preflight" :data-cell-status="preflightCell.status">
           <span class="sp-ops__cell-label">{{ bi('部署自检', 'Deployment self-check') }}</span>
-          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${preflightTone}`">{{ preflightSummary }}</span>
+          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${preflightView.tone}`">{{ preflightView.badge }}</span>
+          <p
+            v-if="preflightView.note"
+            class="sp-ops__cell-note"
+            :class="{ 'sp-ops__cell-note--alert': preflightView.alert }"
+            :role="preflightView.alert ? 'alert' : undefined"
+            data-testid="stock-prep-ops-cell-preflight-note"
+          >{{ preflightView.note }}</p>
           <button
             type="button"
             class="sp-ops__cell-action"
@@ -53,7 +74,14 @@
              never fires on its own (D6). -->
         <li class="sp-ops__cell" data-testid="stock-prep-ops-cell-source-preflight" :data-cell-status="sourcePreflightCell.status">
           <span class="sp-ops__cell-label">{{ bi('源就绪预检', 'Source readiness check') }}</span>
-          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${sourcePreflightTone}`">{{ sourcePreflightSummary }}</span>
+          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${sourcePreflightView.tone}`">{{ sourcePreflightView.badge }}</span>
+          <p
+            v-if="sourcePreflightView.note"
+            class="sp-ops__cell-note"
+            :class="{ 'sp-ops__cell-note--alert': sourcePreflightView.alert }"
+            :role="sourcePreflightView.alert ? 'alert' : undefined"
+            data-testid="stock-prep-ops-cell-source-preflight-note"
+          >{{ sourcePreflightView.note }}</p>
           <button
             type="button"
             class="sp-ops__cell-action"
@@ -83,9 +111,16 @@
         <!-- ⑤ 四条硬边界 — derived from ③'s own payload (`preflight.posture`), never a second call. -->
         <li class="sp-ops__cell" data-testid="stock-prep-ops-cell-fences" :data-cell-status="preflightCell.status">
           <span class="sp-ops__cell-label">{{ bi('四条硬边界', 'The four fences') }}</span>
-          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${fencesTone}`">{{ fencesSummary }}</span>
+          <span class="sp-ops__cell-badge" :class="`sp-ops__cell-badge--${fencesView.tone}`">{{ fencesView.badge }}</span>
+          <p
+            v-if="fencesView.note"
+            class="sp-ops__cell-note"
+            :class="{ 'sp-ops__cell-note--alert': fencesView.alert }"
+            :role="fencesView.alert ? 'alert' : undefined"
+            data-testid="stock-prep-ops-cell-fences-note"
+          >{{ fencesView.note }}</p>
           <StockPrepTechnicalDetails
-            v-if="fenceRows.length > 0"
+            v-if="fenceCounts.known > 0"
             :label="bi('看明细', 'Details')"
             testid="stock-prep-ops-cell-fences-detail"
           >
@@ -93,7 +128,7 @@
               <li v-for="fence in fenceRows" :key="fence.id" data-testid="stock-prep-ops-fence-row">
                 <span v-if="stockPrepPosturePlain(fence.id)">{{ bi(stockPrepPosturePlain(fence.id)!.zh, stockPrepPosturePlain(fence.id)!.en) }}</span>
                 <span v-else><code>{{ fence.id }}</code></span>
-                <em>{{ fenceStateLabel(fence.state) }}</em>
+                <em>{{ fence.state === null ? bi('这次没读到', 'not returned this time') : fenceStateLabel(fence.state) }}</em>
               </li>
             </ul>
           </StockPrepTechnicalDetails>
@@ -149,10 +184,18 @@
       <p v-if="auditLoading" role="status" data-testid="stock-prep-ops-audit-loading">{{ bi('正在查…', 'Looking it up…') }}</p>
 
       <template v-else-if="auditOutcome">
-        <p v-if="auditForbidden" class="sp-ops__audit-forbidden" data-testid="stock-prep-ops-audit-forbidden">
-          {{ bi(STOCK_PREP_AUDIT_FORBIDDEN.zh, STOCK_PREP_AUDIT_FORBIDDEN.en) }}
-        </p>
-        <p v-else-if="auditFailed" class="sp-ops__audit-error" data-testid="stock-prep-ops-audit-error">
+        <!-- §4.3 wants every empty state to be an EmptyState with its own `data-empty-state` enum —
+             `not_permitted` included. It is not a "no data" state in the usual sense, but it IS the
+             state this section renders instead of results, and giving it the enum is what lets the
+             空态矩阵 be checked rather than believed. -->
+        <EmptyState
+          v-if="auditForbidden"
+          class="sp-ops__audit-forbidden"
+          data-testid="stock-prep-ops-audit-forbidden"
+          data-empty-state="not_permitted"
+          :title="bi(STOCK_PREP_AUDIT_FORBIDDEN.zh, STOCK_PREP_AUDIT_FORBIDDEN.en)"
+        />
+        <p v-else-if="auditFailed" class="sp-ops__audit-error" role="alert" data-testid="stock-prep-ops-audit-error">
           {{ bi(STOCK_PREP_OPS_CELL_UNAVAILABLE.zh, STOCK_PREP_OPS_CELL_UNAVAILABLE.en) }}
           <button type="button" data-testid="stock-prep-ops-audit-retry" @click="onAuditSearch">{{ bi('重试', 'Retry') }}</button>
         </p>
@@ -170,13 +213,14 @@
               :key="entry.id"
               class="sp-ops__audit-row"
               data-testid="stock-prep-ops-audit-row"
-              :data-self="entry.isSelf ? 'true' : 'false'"
+              :data-self="auditSelfAttribute(entry.who)"
+              :data-who="entry.who"
             >
               <span data-testid="stock-prep-ops-audit-row-time">{{ formatAuditTime(entry.createdAt) }}</span>
               <span data-testid="stock-prep-ops-audit-row-action">{{ auditActionLabel(entry.action) }}</span>
-              <span data-testid="stock-prep-ops-audit-row-who">
-                {{ entry.isSelf ? bi(STOCK_PREP_AUDIT_ACTOR_SELF.zh, STOCK_PREP_AUDIT_ACTOR_SELF.en) : bi(STOCK_PREP_AUDIT_ACTOR_OTHER.zh, STOCK_PREP_AUDIT_ACTOR_OTHER.en) }}
-              </span>
+              <!-- THREE outcomes, not two. An unreadable current account or an actor-less row must not
+                   be rendered as the positive claim 「其他同事」 — see audit.ts's `StockPrepAuditWho`. -->
+              <span data-testid="stock-prep-ops-audit-row-who">{{ auditWhoLabel(entry.who) }}</span>
               <!-- `actor`/`subjectId`/`mode`/`detail` live ONLY here, inside the disclosure — never
                    in the three spans above (F11 / G8). -->
               <StockPrepTechnicalDetails :label="bi('详情', 'Details')" testid="stock-prep-ops-audit-row-detail">
@@ -231,15 +275,28 @@
         ) }}
       </p>
       <StockPrepTechnicalDetails :label="bi('技术详情', 'Technical details')" testid="stock-prep-ops-data-location-tech">
-        <dl>
+        <!-- `<dl>`'s content model admits only dt/dd/div/script/template, so the fallback sentence is
+             a SIBLING of the list rather than a `<p>` inside it (a parser hoists that out of the
+             `<dl>` anyway, which is how it went unnoticed). -->
+        <dl v-if="dataLocationObjectId || dataLocationPack">
           <dt v-if="dataLocationObjectId">{{ bi('表内部编号', 'Table internal id') }}</dt>
-          <dd v-if="dataLocationObjectId"><code>{{ dataLocationObjectId }}</code></dd>
+          <dd v-if="dataLocationObjectId">
+            <code>{{ dataLocationObjectId }}</code>
+            <span v-if="dataLocationKind === 'canonical'">{{ bi('(生产主表)', ' (production main table)') }}</span>
+            <span v-else-if="dataLocationKind === 'sandbox'">{{ bi('(沙箱表)', ' (sandbox table)') }}</span>
+          </dd>
           <dt v-if="dataLocationPack">{{ bi('装了哪个包版本', 'Installed pack version') }}</dt>
           <dd v-if="dataLocationPack"><code>{{ dataLocationPack.packId }}@{{ dataLocationPack.packVersion ?? '—' }}</code></dd>
-          <p v-if="!dataLocationObjectId && !dataLocationPack">
-            {{ bi('还没有读到装包记录 —— 见上面「建表/装包」格。', 'No install record read yet — see the "Tables & packs" tile above.') }}
-          </p>
+          <!-- A multi-pack deployment has more than one target table, and the tile above reports on
+               the catalog's FIRST pack only. Say so rather than let one table stand in for several. -->
+          <dt v-if="dataLocationPackCount > 1">{{ bi('这套部署配了几个客户列包', 'Customer packs configured') }}</dt>
+          <dd v-if="dataLocationPackCount > 1">
+            {{ bi(`${dataLocationPackCount} 个 —— 上面读的是其中第一个的目标表。`, `${dataLocationPackCount} — the tile above reports on the first one's target table.`) }}
+          </dd>
         </dl>
+        <p v-else data-testid="stock-prep-ops-data-location-empty">
+          {{ bi('还没有读到装包记录 —— 见上面「建表/装包」格。', 'No install record read yet — see the "Tables & packs" tile above.') }}
+        </p>
       </StockPrepTechnicalDetails>
     </section>
   </div>
@@ -256,6 +313,21 @@
 //   2. 谁在什么时候动过这个项目 — R6: three lines that must render in EVERY state or a reader
 //      concludes "no rows" means "nobody touched it", which is false three separate ways.
 //   3. 数据落在哪 — reuses ①/②'s already-fetched data; issues no read of its own.
+//
+// THE FAILURE THIS PANEL IS MOST LIKELY TO COMMIT IS A CONFIDENT SENTENCE BUILT ON A READ THAT DID
+// NOT HAPPEN, and three separate places in here used to do exactly that. All three are now typed out
+// of existence rather than commented against:
+//   - the audit query sent a `workspaceId` that filters on a column NULL on every row it can match,
+//     so the search returned nothing forever while the three caveat lines stood ready to explain the
+//     emptiness with three reasons that were all false (audit.ts's header);
+//   - the 「谁」 column was two-valued, so a failed read of the CALLER's own id rendered every row as
+//     「其他同事」 — a positive identification manufactured out of a network error;
+//   - the 建表/装包 tile asked the sandbox readiness route about a canonical objectId (a guaranteed
+//     422 on every production deployment) and then swallowed the refusal, staying `ready` and simply
+//     omitting half a sentence (deploymentHealth.ts's header).
+// The pattern in all three: an absent fact rendered as a present one. `CellView`'s `note`, the
+// four-valued `StockPrepAuditWho`, and the namespace-routed readiness read exist to make the absent
+// case have somewhere to go.
 //
 // VALUES-FREE THROUGHOUT. Every string on screen is an id, an enum, a count, or a bilingual constant
 // authored in plainLanguage.ts. The one caller-supplied string this component ever puts in the DOM
@@ -283,29 +355,40 @@ import {
 import {
   readStockPreparationCustomerPackCatalog,
   readStockPreparationCustomerPackInstalls,
-  readStockPreparationSandboxTargetReadiness,
+  readStockPreparationTargetReadiness,
   type StockPrepCustomerPackCatalog,
   type StockPrepCustomerPackInstallList,
-  type StockPrepSandboxTargetReadiness,
+  type StockPrepTargetReadiness,
 } from '../../../services/integration/stockPreparation/deploymentHealth'
 import {
   listStockPreparationAudit,
   STOCK_PREP_AUDIT_PROJECT_SCOPED_ACTIONS,
   type StockPrepAuditListOutcome,
+  type StockPrepAuditWho,
 } from '../../../services/integration/stockPreparation/audit'
 import {
   STOCK_PREP_AUDIT_ACTOR_OTHER,
   STOCK_PREP_AUDIT_ACTOR_SELF,
+  STOCK_PREP_AUDIT_ACTOR_UNKNOWN_ACTOR,
+  STOCK_PREP_AUDIT_ACTOR_UNKNOWN_VIEWER,
   STOCK_PREP_AUDIT_CAVEAT_LEGACY,
   STOCK_PREP_AUDIT_CAVEAT_LIMIT,
   STOCK_PREP_AUDIT_CAVEAT_SCOPE,
   STOCK_PREP_AUDIT_EMPTY,
   STOCK_PREP_AUDIT_FORBIDDEN,
+  STOCK_PREP_OPS_CELL_LOCKED_PREFIX,
+  STOCK_PREP_OPS_CELL_MISCONFIGURED,
   STOCK_PREP_OPS_CELL_UNAVAILABLE,
   STOCK_PREP_OPS_CELL_UNCHECKED,
+  STOCK_PREP_OPS_CELL_UNKNOWN_BADGE,
   STOCK_PREP_OPS_NEEDS_ADMIN,
   STOCK_PREP_OPS_NEEDS_INTEGRATION_READ,
   STOCK_PREP_OPS_SCHEDULED_TASK_UNMONITORED,
+  STOCK_PREP_OPS_TARGET_CANONICAL_NOT_READY,
+  STOCK_PREP_OPS_TARGET_CANONICAL_READY,
+  STOCK_PREP_OPS_TARGET_READINESS_UNREADABLE,
+  STOCK_PREP_OPS_TARGET_SANDBOX_NOT_READY,
+  STOCK_PREP_OPS_TARGET_SANDBOX_READY,
   stockPrepAuditActionPlain,
   stockPrepPosturePlain,
   stockPrepSourceCheckPlain,
@@ -329,7 +412,34 @@ const scheduledTaskText = STOCK_PREP_OPS_SCHEDULED_TASK_UNMONITORED
 // cell's DATA into a colour, which is a separate axis on purpose — a cell can be `status: 'ready'`
 // and still be `tone: 'warning'` (e.g. preflight ran and found blockers).
 // ---------------------------------------------------------------------------
-type CellStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'forbidden'
+// `misconfigured` is a PERMANENT refusal (400/422) held apart from the transient `unavailable`,
+// because the sentence each deserves is different and the wrong one is bad advice: "请稍后再试" told
+// an admin to wait out a 422 that will still be a 422 next year. The producer this panel actually
+// meets is a customer pack whose declared target table is neither the canonical one nor inside the
+// sandbox namespace — see deploymentHealth.ts's header.
+type CellStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'forbidden' | 'misconfigured'
+
+/**
+ * §4.4's badge tokens, kept as four distinct tones rather than one shared "neutral". The table gives
+ * 未检查 (`--ms-color-info`), `? 看不到` (`--ms-text-3` + a sentence) and 未接入监控 (`--ms-text-3`)
+ * three separate readings, and a reader who cannot tell "nobody asked yet" from "we asked and are not
+ * allowed to know" from "nothing here can ever know" is being given one word for three situations.
+ * None of them may borrow `success`/`warning` (G4).
+ */
+type CellTone = 'neutral' | 'unchecked' | 'unknown' | 'success' | 'warning'
+
+/**
+ * What one health tile renders. `note` exists so the two halves of §6.2 P1-5's 「这一格看不了 + 谁能
+ * 看」 always travel together: the badge is too small for a sentence, so the sentence lives here and
+ * is never the thing that gets dropped for space.
+ */
+interface CellView {
+  badge: string
+  tone: CellTone
+  note: string | null
+  /** G3: the user CLICKED for this and it failed, so it is announced rather than shown quietly. */
+  alert: boolean
+}
 
 interface CellState<T> {
   status: CellStatus
@@ -353,7 +463,10 @@ function statusOfError(error: unknown): number {
 }
 
 function cellFromError<T>(error: unknown): CellState<T> {
-  return { status: statusOfError(error) === 403 ? 'forbidden' : 'unavailable', data: null }
+  const status = statusOfError(error)
+  if (status === 403) return { status: 'forbidden', data: null }
+  if (status === 400 || status === 422) return { status: 'misconfigured', data: null }
+  return { status: 'unavailable', data: null }
 }
 
 function cellFromSettled<T>(result: PromiseSettledResult<T>): CellState<T> {
@@ -361,41 +474,86 @@ function cellFromSettled<T>(result: PromiseSettledResult<T>): CellState<T> {
   return cellFromError<T>(result.reason)
 }
 
-/** The one sentence a failed cell shows, whatever it needs. Never a raw status/message. */
-function unavailableText(status: CellStatus, needs: { zh: string; en: string } = STOCK_PREP_OPS_NEEDS_ADMIN): string {
-  if (status === 'forbidden') return bi(needs.zh, needs.en)
+function isFailedStatus(status: CellStatus): boolean {
+  return status === 'forbidden' || status === 'unavailable' || status === 'misconfigured'
+}
+
+/** 未检查 — G4's third state. Its own tone, never green and never red. */
+function uncheckedView(): CellView {
+  return {
+    badge: bi(STOCK_PREP_OPS_CELL_UNCHECKED.zh, STOCK_PREP_OPS_CELL_UNCHECKED.en),
+    tone: 'unchecked',
+    note: null,
+    alert: false,
+  }
+}
+
+function loadingView(text: { zh: string; en: string }): CellView {
+  return { badge: bi(text.zh, text.en), tone: 'neutral', note: null, alert: false }
+}
+
+/** The sentence a failed cell shows — both halves, always. Never a raw status or a server message. */
+function failureNote(
+  status: CellStatus,
+  needs: { zh: string; en: string } = STOCK_PREP_OPS_NEEDS_ADMIN,
+): string {
+  if (status === 'forbidden') {
+    return bi(
+      `${STOCK_PREP_OPS_CELL_LOCKED_PREFIX.zh}${needs.zh}。`,
+      `${STOCK_PREP_OPS_CELL_LOCKED_PREFIX.en}${needs.en}.`,
+    )
+  }
+  if (status === 'misconfigured') {
+    return bi(STOCK_PREP_OPS_CELL_MISCONFIGURED.zh, STOCK_PREP_OPS_CELL_MISCONFIGURED.en)
+  }
   return bi(STOCK_PREP_OPS_CELL_UNAVAILABLE.zh, STOCK_PREP_OPS_CELL_UNAVAILABLE.en)
+}
+
+function failureView(
+  status: CellStatus,
+  needs: { zh: string; en: string } = STOCK_PREP_OPS_NEEDS_ADMIN,
+  manual = false,
+): CellView {
+  return {
+    badge: status === 'forbidden'
+      ? bi(STOCK_PREP_OPS_CELL_UNKNOWN_BADGE.zh, STOCK_PREP_OPS_CELL_UNKNOWN_BADGE.en)
+      : bi('读不到', 'Cannot read'),
+    tone: 'unknown',
+    note: failureNote(status, needs),
+    alert: manual,
+  }
 }
 
 // ---------------------------------------------------------------------------
 // ① 数据源
 // ---------------------------------------------------------------------------
 const sourceCell = ref<CellState<StockPreparationSourceBindingView>>(idleCell())
+const sourceManual = ref(false)
 
-const sourceSummary = computed(() => {
-  if (sourceCell.value.status === 'loading') return bi('正在读取…', 'Reading…')
-  if (sourceCell.value.status === 'forbidden' || sourceCell.value.status === 'unavailable') {
-    return unavailableText(sourceCell.value.status)
+const sourceView = computed<CellView>(() => {
+  if (sourceCell.value.status === 'loading') return loadingView({ zh: '正在读取…', en: 'Reading…' })
+  if (isFailedStatus(sourceCell.value.status)) {
+    return failureView(sourceCell.value.status, STOCK_PREP_OPS_NEEDS_ADMIN, sourceManual.value)
   }
   const data = sourceCell.value.data
-  if (!data) return bi(STOCK_PREP_OPS_CELL_UNCHECKED.zh, STOCK_PREP_OPS_CELL_UNCHECKED.en)
-  if (data.origin === 'unconfigured') return bi('未配置任何数据源', 'No data source configured')
+  if (!data) return uncheckedView()
+  if (data.origin === 'unconfigured') {
+    return { badge: bi('未配置任何数据源', 'No data source configured'), tone: 'neutral', note: null, alert: false }
+  }
   const candidate = data.eligibleSources.find((source) => source.externalSystemId === data.effectiveExternalSystemId)
   const name = candidate?.name || data.effectiveExternalSystemId || bi('未命名', 'unnamed')
   const verb = data.origin === 'persisted' ? bi('已绑定', 'Bound to') : bi('使用默认源', 'Using the default source')
-  return `${verb}「${name}」`
-})
-
-const sourceTone = computed(() => {
-  if (sourceCell.value.status !== 'ready') return 'neutral'
-  const origin = sourceCell.value.data?.origin
-  if (origin === 'persisted') return 'success'
-  if (origin === 'deploy_default') return 'warning'
-  return 'neutral'
+  return {
+    badge: `${verb}「${name}」`,
+    tone: data.origin === 'persisted' ? 'success' : 'warning',
+    note: null,
+    alert: false,
+  }
 })
 
 async function onRefreshSource(): Promise<void> {
   if (sourceCell.value.status === 'loading') return
+  sourceManual.value = true
   sourceCell.value = loadingCell(sourceCell.value.data)
   try {
     const data = await readStockPreparationSourceBinding(scope.value)
@@ -406,35 +564,65 @@ async function onRefreshSource(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// ② 建表/装包 — catalog + installs in parallel, sandbox readiness sequential after (see
-// deploymentHealth.ts). `packsCellStatus`/`packsTone` fold all three into ONE cell reading, because
-// the wireframe draws this as a single row — a per-sub-read status still lives on each ref below for
-// the "one piece failed, the rest still renders" test.
+// ② 建表/装包 — three reads about ONE table.
+//
+// The catalog goes first because its `pack.targetObjectId` is the id the other two must agree on:
+// the install ledger is filtered by object_id, and WHICH readiness route may legally answer is
+// decided by that same id (deploymentHealth.ts's header carries the plugin-source evidence). Reading
+// installs with the route's default while reading readiness with the pack's own id is what produced
+// a tile that said 「沙箱表已就绪」 and 「还没有装包记录」 in one breath, about two different tables.
+//
+// `packsCoreStatus` folds the two reads WITHOUT which the tile can say nothing at all; `targetCell`
+// is folded separately, because when catalog+installs succeed and only readiness fails the tile still
+// holds real information and should show it — with an explicit sentence naming the half it is
+// missing, never by quietly rendering one clause short. `packsCellStatus` (the DOM attribute) is the
+// worst of all three, so a failed sub-read is machine-visible even when the tile still renders data.
 // ---------------------------------------------------------------------------
 const catalogCell = ref<CellState<StockPrepCustomerPackCatalog>>(idleCell())
 const installsCell = ref<CellState<StockPrepCustomerPackInstallList>>(idleCell())
-const sandboxCell = ref<CellState<StockPrepSandboxTargetReadiness>>(idleCell())
+const targetCell = ref<CellState<StockPrepTargetReadiness>>(idleCell())
 
-const packsCellStatus = computed<CellStatus>(() => {
-  const statuses = [catalogCell.value.status, installsCell.value.status]
+function foldStatus(statuses: CellStatus[]): CellStatus {
   if (statuses.includes('loading')) return 'loading'
   if (statuses.every((status) => status === 'idle')) return 'idle'
   if (statuses.includes('forbidden')) return 'forbidden'
+  if (statuses.includes('misconfigured')) return 'misconfigured'
   if (statuses.includes('unavailable')) return 'unavailable'
   return 'ready'
-})
+}
+
+const packsCoreStatus = computed<CellStatus>(() => foldStatus([catalogCell.value.status, installsCell.value.status]))
+
+const packsCellStatus = computed<CellStatus>(() => foldStatus([
+  catalogCell.value.status,
+  installsCell.value.status,
+  targetCell.value.status,
+]))
 
 const latestInstall = computed(() => installsCell.value.data?.installs?.[0] ?? null)
 
-const packsSummary = computed(() => {
-  if (packsCellStatus.value === 'loading') return bi('正在读取…', 'Reading…')
-  if (packsCellStatus.value === 'forbidden' || packsCellStatus.value === 'unavailable') {
-    return unavailableText(packsCellStatus.value)
+/** Which table was inspected, said out loud. 「已就绪」 alone cannot distinguish two tables. */
+function targetReadyLabel(readiness: StockPrepTargetReadiness): string {
+  if (readiness.kind === 'canonical') {
+    return readiness.ready
+      ? bi(STOCK_PREP_OPS_TARGET_CANONICAL_READY.zh, STOCK_PREP_OPS_TARGET_CANONICAL_READY.en)
+      : bi(STOCK_PREP_OPS_TARGET_CANONICAL_NOT_READY.zh, STOCK_PREP_OPS_TARGET_CANONICAL_NOT_READY.en)
   }
-  if (packsCellStatus.value === 'idle') return bi(STOCK_PREP_OPS_CELL_UNCHECKED.zh, STOCK_PREP_OPS_CELL_UNCHECKED.en)
+  return readiness.ready
+    ? bi(STOCK_PREP_OPS_TARGET_SANDBOX_READY.zh, STOCK_PREP_OPS_TARGET_SANDBOX_READY.en)
+    : bi(STOCK_PREP_OPS_TARGET_SANDBOX_NOT_READY.zh, STOCK_PREP_OPS_TARGET_SANDBOX_NOT_READY.en)
+}
+
+const packsView = computed<CellView>(() => {
+  const core = packsCoreStatus.value
+  if (core === 'loading') return loadingView({ zh: '正在读取…', en: 'Reading…' })
+  if (core === 'idle') return uncheckedView()
+  if (isFailedStatus(core)) return failureView(core)
+
+  const readiness = targetCell.value
   const parts: string[] = []
-  if (sandboxCell.value.status === 'ready' && sandboxCell.value.data) {
-    parts.push(sandboxCell.value.data.ready ? bi('沙箱表已就绪', 'Sandbox table ready') : bi('沙箱表还没就绪', 'Sandbox table not ready'))
+  if (readiness.status === 'ready' && readiness.data) {
+    parts.push(targetReadyLabel(readiness.data))
   } else if (catalogCell.value.data && catalogCell.value.data.packCount === 0) {
     parts.push(bi('还没有配置客户列包', 'No customer pack configured yet'))
   }
@@ -444,42 +632,50 @@ const packsSummary = computed(() => {
   } else if (installsCell.value.status === 'ready') {
     parts.push(bi('还没有装包记录', 'No install record yet'))
   }
-  return parts.length > 0 ? parts.join(' · ') : bi('没有可显示的信息', 'Nothing to show')
-})
 
-const packsTone = computed(() => {
-  if (packsCellStatus.value !== 'ready') return 'neutral'
-  if (sandboxCell.value.status === 'ready' && sandboxCell.value.data) {
-    return sandboxCell.value.data.ready ? 'success' : 'warning'
+  // The readiness half failed while the other two succeeded — say which half, and why.
+  const note = isFailedStatus(readiness.status)
+    ? `${bi(STOCK_PREP_OPS_TARGET_READINESS_UNREADABLE.zh, STOCK_PREP_OPS_TARGET_READINESS_UNREADABLE.en)}—— ${failureNote(readiness.status)}`
+    : null
+
+  let tone: CellTone = 'neutral'
+  if (readiness.status === 'ready' && readiness.data) tone = readiness.data.ready ? 'success' : 'warning'
+  else if (isFailedStatus(readiness.status)) tone = 'unknown'
+
+  return {
+    badge: parts.length > 0 ? parts.join(' · ') : bi('没有可显示的信息', 'Nothing to show'),
+    tone,
+    note,
+    alert: false,
   }
-  return 'neutral'
 })
 
 // ---------------------------------------------------------------------------
 // ③ 部署自检 + ⑤ 四条硬边界 (same payload — see template comments)
 // ---------------------------------------------------------------------------
 const preflightCell = ref<CellState<StockPreparationPreflight>>(idleCell())
+const preflightManual = ref(false)
 
-const preflightSummary = computed(() => {
-  if (preflightCell.value.status === 'loading') return bi('正在检查…', 'Checking…')
-  if (preflightCell.value.status === 'forbidden' || preflightCell.value.status === 'unavailable') {
-    return unavailableText(preflightCell.value.status)
+const preflightView = computed<CellView>(() => {
+  if (preflightCell.value.status === 'loading') return loadingView({ zh: '正在检查…', en: 'Checking…' })
+  if (isFailedStatus(preflightCell.value.status)) {
+    return failureView(preflightCell.value.status, STOCK_PREP_OPS_NEEDS_ADMIN, preflightManual.value)
   }
-  if (preflightCell.value.status === 'idle') return bi(STOCK_PREP_OPS_CELL_UNCHECKED.zh, STOCK_PREP_OPS_CELL_UNCHECKED.en)
   const data = preflightCell.value.data
-  if (!data) return bi(STOCK_PREP_OPS_CELL_UNCHECKED.zh, STOCK_PREP_OPS_CELL_UNCHECKED.en)
-  return data.ready
-    ? bi('都齐了', 'Everything is in place')
-    : bi(`还差 ${data.blockerCount} 项`, `${data.blockerCount} thing(s) still missing`)
-})
-
-const preflightTone = computed(() => {
-  if (preflightCell.value.status !== 'ready' || !preflightCell.value.data) return 'neutral'
-  return preflightCell.value.data.ready ? 'success' : 'warning'
+  if (preflightCell.value.status === 'idle' || !data) return uncheckedView()
+  return {
+    badge: data.ready
+      ? bi('都齐了', 'Everything is in place')
+      : bi(`还差 ${data.blockerCount} 项`, `${data.blockerCount} thing(s) still missing`),
+    tone: data.ready ? 'success' : 'warning',
+    note: null,
+    alert: false,
+  }
 })
 
 async function onCheckPreflight(): Promise<void> {
   if (preflightCell.value.status === 'loading') return
+  preflightManual.value = true
   preflightCell.value = loadingCell(preflightCell.value.data)
   try {
     const data = await readStockPreparationPreflight(scope.value)
@@ -503,58 +699,88 @@ function fenceStateLabel(state: string): string {
   return state
 }
 
-const fenceRows = computed(() => {
-  const posture = preflightCell.value.data?.posture
-  if (!posture) return []
-  return FENCE_KEYS
-    .filter((id) => posture[id])
-    .map((id) => ({ id, state: posture[id]?.state ?? '—' }))
+/**
+ * All four keys, ALWAYS — a key the payload did not carry becomes `state: null` rather than being
+ * dropped. Dropping it silently let the tile keep the title 「四条硬边界」 while concluding
+ * 「全部关闭(正常)」 from however many it happened to receive, which is a claim about four fences
+ * made from three readings. Today `buildPosture` returns all four unconditionally; this is the guard
+ * for the day it does not, and these four are G8's 「产品对客户的承诺」.
+ */
+const fenceRows = computed(() => FENCE_KEYS.map((id) => ({
+  id,
+  state: preflightCell.value.data?.posture?.[id]?.state ?? null,
+})))
+
+const fenceCounts = computed(() => {
+  const known = fenceRows.value.filter((fence) => fence.state !== null)
+  return {
+    known: known.length,
+    missing: fenceRows.value.length - known.length,
+    attention: known.filter((fence) => !FENCE_SAFE_STATES.has(fence.state as string)).length,
+  }
 })
 
-const fencesSummary = computed(() => {
-  if (preflightCell.value.status === 'loading') return bi('正在检查…', 'Checking…')
-  if (preflightCell.value.status === 'forbidden' || preflightCell.value.status === 'unavailable') {
-    return unavailableText(preflightCell.value.status)
+const fencesView = computed<CellView>(() => {
+  if (preflightCell.value.status === 'loading') return loadingView({ zh: '正在检查…', en: 'Checking…' })
+  if (isFailedStatus(preflightCell.value.status)) {
+    return failureView(preflightCell.value.status, STOCK_PREP_OPS_NEEDS_ADMIN, preflightManual.value)
   }
-  if (fenceRows.value.length === 0) return bi(STOCK_PREP_OPS_CELL_UNCHECKED.zh, STOCK_PREP_OPS_CELL_UNCHECKED.en)
-  const attention = fenceRows.value.filter((fence) => !FENCE_SAFE_STATES.has(fence.state)).length
-  return attention === 0
+  if (preflightCell.value.status !== 'ready') return uncheckedView()
+
+  const { known, missing, attention } = fenceCounts.value
+  // The read SUCCEEDED and carried nothing — that is not 未检查, and saying 未检查 here would be a
+  // second, quieter lie: it invites a re-check that will return the same empty payload.
+  if (known === 0) {
+    return {
+      badge: bi('这次自检没带回边界状态', 'The self-check returned no fence states'),
+      tone: 'unknown',
+      note: bi(
+        '自检读成功了,但载荷里没有这四条的状态 —— 这不是「没检查过」。请平台管理员看服务端版本。',
+        'The self-check succeeded but its payload carried none of the four fence states — this is not "not checked yet". A platform administrator should check the server version.',
+      ),
+      alert: preflightManual.value,
+    }
+  }
+  const head = attention === 0
     ? bi('全部关闭(正常)', 'All closed (normal)')
     : bi(`${attention} 项处于非默认状态`, `${attention} not in its default state`)
-})
-
-const fencesTone = computed(() => {
-  if (fenceRows.value.length === 0) return 'neutral'
-  const attention = fenceRows.value.filter((fence) => !FENCE_SAFE_STATES.has(fence.state)).length
-  return attention === 0 ? 'success' : 'warning'
+  const tail = missing > 0 ? bi(` · ${missing} 项这次没读到`, ` · ${missing} not returned this time`) : ''
+  return {
+    badge: `${head}${tail}`,
+    tone: attention === 0 && missing === 0 ? 'success' : 'warning',
+    note: null,
+    alert: false,
+  }
 })
 
 // ---------------------------------------------------------------------------
 // ④ 源就绪预检 — never auto-fires (D6: it reads the customer's own database).
 // ---------------------------------------------------------------------------
 const sourcePreflightCell = ref<CellState<StockPrepSourcePreflight>>(idleCell())
+const sourcePreflightManual = ref(false)
 const sourceCheckPlain = stockPrepSourceCheckPlain
 const sourceCheckRows = computed(() => (
   sourcePreflightCell.value.data ? stockPrepSourceCheckRows(sourcePreflightCell.value.data) : []
 ))
 
-const sourcePreflightSummary = computed(() => {
-  if (sourcePreflightCell.value.status === 'loading') return bi('正在检查…', 'Checking…')
-  if (sourcePreflightCell.value.status === 'forbidden' || sourcePreflightCell.value.status === 'unavailable') {
-    return unavailableText(sourcePreflightCell.value.status, STOCK_PREP_OPS_NEEDS_INTEGRATION_READ)
+const sourcePreflightView = computed<CellView>(() => {
+  if (sourcePreflightCell.value.status === 'loading') return loadingView({ zh: '正在检查…', en: 'Checking…' })
+  if (isFailedStatus(sourcePreflightCell.value.status)) {
+    return failureView(sourcePreflightCell.value.status, STOCK_PREP_OPS_NEEDS_INTEGRATION_READ, sourcePreflightManual.value)
   }
   const data = sourcePreflightCell.value.data
-  if (!data) return bi(STOCK_PREP_OPS_CELL_UNCHECKED.zh, STOCK_PREP_OPS_CELL_UNCHECKED.en)
-  return data.verdict === 'go' ? bi('可以接', 'Ready to connect') : bi('接不了', 'Not ready to connect')
-})
-
-const sourcePreflightTone = computed(() => {
-  if (sourcePreflightCell.value.status !== 'ready' || !sourcePreflightCell.value.data) return 'neutral'
-  return sourcePreflightCell.value.data.verdict === 'go' ? 'success' : 'warning'
+  if (!data) return uncheckedView()
+  return {
+    badge: data.verdict === 'go' ? bi('可以接', 'Ready to connect') : bi('接不了', 'Not ready to connect'),
+    tone: data.verdict === 'go' ? 'success' : 'warning',
+    note: null,
+    alert: false,
+  }
 })
 
 async function onCheckSourcePreflight(): Promise<void> {
   if (sourcePreflightCell.value.status === 'loading') return
+  sourcePreflightManual.value = true
   sourcePreflightCell.value = loadingCell(sourcePreflightCell.value.data)
   try {
     const data = await readStockPreparationSourcePreflight(scope.value)
@@ -573,40 +799,56 @@ let healthSeq = 0
 
 async function loadAutoHealth(): Promise<void> {
   const seq = ++healthSeq
+  sourceManual.value = false
   sourceCell.value = loadingCell()
   catalogCell.value = loadingCell()
   installsCell.value = loadingCell()
-  sandboxCell.value = idleCell()
+  targetCell.value = loadingCell()
 
-  const [sourceResult, catalogResult, installsResult] = await Promise.allSettled([
+  // Wave 1: the two reads that need no id. `allSettled`, so the source tile is untouched by a pack
+  // catalog failure and vice versa.
+  const [sourceResult, catalogResult] = await Promise.allSettled([
     readStockPreparationSourceBinding(scope.value),
     readStockPreparationCustomerPackCatalog(scope.value),
-    readStockPreparationCustomerPackInstalls(scope.value),
   ])
   if (seq !== healthSeq) return
-
   sourceCell.value = cellFromSettled(sourceResult)
   catalogCell.value = cellFromSettled(catalogResult)
-  installsCell.value = cellFromSettled(installsResult)
 
+  // Wave 2: ONE objectId, both reads. `packs[0]` is the catalog's own first entry — the catalog is
+  // built by sorting pack ids (`stock-preparation-customer-pack-catalog.cjs`), so on a multi-pack
+  // deployment this is "the alphabetically first pack", which the 数据落在哪 disclosure names
+  // explicitly rather than passing off as "the" table. Single-pack is the shipped shape.
   const objectId = catalogCell.value.data?.packs?.[0]?.targetObjectId ?? null
-  if (!objectId) return // no configured pack — stays 'idle' (neutral), not a failure
-  sandboxCell.value = loadingCell()
-  try {
-    const readiness = await readStockPreparationSandboxTargetReadiness(scope.value, objectId)
-    if (seq !== healthSeq) return
-    sandboxCell.value = { status: 'ready', data: readiness }
-  } catch (error) {
-    if (seq !== healthSeq) return
-    sandboxCell.value = cellFromError(error)
+  targetCell.value = objectId ? loadingCell() : idleCell()
+  const [installsResult, targetResult] = await Promise.allSettled([
+    // No configured pack → no id → the route's own canonical default, which is also what a
+    // pack-less deployment installs onto.
+    readStockPreparationCustomerPackInstalls(scope.value, objectId ?? undefined),
+    // ...but readiness is NOT asked speculatively: with no pack there is no declared target, and a
+    // guess would be a request this panel cannot honestly attribute. The tile stays 未检查 for that
+    // half and says 「还没有配置客户列包」.
+    objectId ? readStockPreparationTargetReadiness(scope.value, objectId) : Promise.resolve(null),
+  ])
+  if (seq !== healthSeq) return
+  installsCell.value = cellFromSettled(installsResult)
+  if (targetResult.status === 'rejected') {
+    targetCell.value = cellFromError(targetResult.reason)
+  } else {
+    targetCell.value = targetResult.value === null ? idleCell() : { status: 'ready', data: targetResult.value }
   }
 }
 
 // ---------------------------------------------------------------------------
-// 数据落点 — reuses ②'s already-fetched data, no read of its own.
+// 数据落点 — reuses ②'s already-fetched data, no read of its own. `installsCell.data.objectId` is
+// the server's echo of the id THIS panel asked about (the pack's own target, or the route default
+// when no pack is configured), so the id printed here and the table the readiness half reported on
+// are now the same table rather than two.
 // ---------------------------------------------------------------------------
 const dataLocationObjectId = computed(() => installsCell.value.data?.objectId ?? null)
+const dataLocationKind = computed(() => targetCell.value.data?.kind ?? null)
 const dataLocationPack = computed(() => latestInstall.value)
+const dataLocationPackCount = computed(() => catalogCell.value.data?.packCount ?? 0)
 
 // ---------------------------------------------------------------------------
 // 审计反查
@@ -641,6 +883,28 @@ function auditActionLabel(action: string): string {
   const plain = stockPrepAuditActionPlain(action)
   if (plain) return bi(plain.zh, plain.en)
   return bi(`其他动作(${action})`, `Other action (${action})`)
+}
+
+/**
+ * Three outcomes on screen, not two. `getCurrentUserId()` is a network read that can fail and the
+ * store's own append allows a null actor; a two-way 「您 / 其他同事」 rendered both of those absences
+ * as a positive claim that a COLLEAGUE did it — on the one page built to answer "who". See audit.ts's
+ * `StockPrepAuditWho`.
+ */
+function auditWhoLabel(who: StockPrepAuditWho): string {
+  if (who === 'self') return bi(STOCK_PREP_AUDIT_ACTOR_SELF.zh, STOCK_PREP_AUDIT_ACTOR_SELF.en)
+  if (who === 'other') return bi(STOCK_PREP_AUDIT_ACTOR_OTHER.zh, STOCK_PREP_AUDIT_ACTOR_OTHER.en)
+  if (who === 'unknown_actor') {
+    return bi(STOCK_PREP_AUDIT_ACTOR_UNKNOWN_ACTOR.zh, STOCK_PREP_AUDIT_ACTOR_UNKNOWN_ACTOR.en)
+  }
+  return bi(STOCK_PREP_AUDIT_ACTOR_UNKNOWN_VIEWER.zh, STOCK_PREP_AUDIT_ACTOR_UNKNOWN_VIEWER.en)
+}
+
+/** `true` / `false` / `unknown` — kept three-valued for the same reason the sentence is. */
+function auditSelfAttribute(who: StockPrepAuditWho): string {
+  if (who === 'self') return 'true'
+  if (who === 'other') return 'false'
+  return 'unknown'
 }
 
 function formatAuditTime(value: string | null): string {
@@ -726,7 +990,14 @@ onMounted(async () => {
   font-size: 12px;
 }
 
+/* §4.4's three NON-verdict tokens, kept visually distinct: 未检查 is `--ms-color-info` ("nobody has
+   asked yet"), `? 看不到` / 读不到 is `--ms-text-3` ("we asked and cannot know"), and 未接入监控 is
+   `--ms-text-3` ("nothing in this application can know"). None of the three borrows success/danger
+   (G4), and 未检查 is the one with its own hue so a grid of tiles shows at a glance which cells are
+   simply waiting for a click. */
 .sp-ops__cell-badge--neutral { background: var(--ms-bg-page); color: var(--ms-text-3); }
+.sp-ops__cell-badge--unchecked { background: color-mix(in srgb, var(--ms-color-info) 12%, transparent); color: var(--ms-color-info); }
+.sp-ops__cell-badge--unknown { background: var(--ms-bg-page); color: var(--ms-text-3); border: 1px dashed var(--ms-border-light); }
 .sp-ops__cell-badge--success { background: color-mix(in srgb, var(--ms-color-success) 16%, transparent); color: var(--ms-color-success); }
 .sp-ops__cell-badge--warning { background: color-mix(in srgb, var(--ms-color-warning) 16%, transparent); color: var(--ms-color-warning); }
 
@@ -740,6 +1011,13 @@ onMounted(async () => {
   margin: 0;
   font-size: 12px;
   color: var(--ms-text-3);
+}
+
+/* G3's other half: a failure the user ASKED for by clicking is announced, not murmured. A background
+   pre-read that fails keeps the quiet grey line above (§6.2 P1-5: 不整页红). */
+.sp-ops__cell-note--alert {
+  color: var(--ms-color-warning);
+  font-weight: 600;
 }
 
 .sp-ops__fence-list {
@@ -764,8 +1042,30 @@ onMounted(async () => {
   color: var(--ms-text-3);
 }
 
+/* 线框 E marks 「查一下」 ★ — the ONE primary action on this screen. G1 caps a screen at one
+   `--ms-color-primary` button; this is it, and the two 「现在检查」 tile buttons stay plain so the
+   hierarchy between "the thing this page is for" and "a tile-level probe" is visible rather than
+   merely intended. */
 .sp-ops__audit-search {
   cursor: pointer;
+  padding: 4px 14px;
+  border: 1px solid var(--ms-color-primary);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ms-color-primary) 10%, transparent);
+  color: var(--ms-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sp-ops__audit-search:disabled {
+  cursor: not-allowed;
+  border-color: var(--ms-border-light);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-3);
+}
+
+.sp-ops__audit-error {
+  color: var(--ms-color-warning);
 }
 
 .sp-ops__audit-list {

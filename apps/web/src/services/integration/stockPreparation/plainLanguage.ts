@@ -1699,9 +1699,27 @@ export function stockPrepAuditActionPlain(action: string): StockPrepPlainText | 
   return lookup(STOCK_PREP_AUDIT_ACTION_PLAIN, action)
 }
 
-/** 「您」/「其他同事」 — the ONLY two words a primary audit row may say about who. Never a name (F11). */
+/**
+ * What a primary audit row may say about WHO. Never a name (F11) — and never a positive claim the
+ * comparison could not actually support.
+ *
+ * The two 「不确定」 lines are not padding. `audit.ts`'s `who` is four-valued because both inputs to
+ * the equality check can be absent — `getCurrentUserId()` is a network read that can fail, and the
+ * store's append allows a null actor. Folding either absence into 「其他同事」 would make a page
+ * whose whole job is attribution assert that someone else did it, on the strength of a read that
+ * did not happen. Saying so plainly is the only honest option, and it is cheap: the row's 技术详情
+ * already carries whatever the trail does know.
+ */
 export const STOCK_PREP_AUDIT_ACTOR_SELF: StockPrepPlainText = Object.freeze({ zh: '您', en: 'You' })
 export const STOCK_PREP_AUDIT_ACTOR_OTHER: StockPrepPlainText = Object.freeze({ zh: '其他同事', en: 'A colleague' })
+export const STOCK_PREP_AUDIT_ACTOR_UNKNOWN_VIEWER: StockPrepPlainText = Object.freeze({
+  zh: '不确定是不是您(没读到当前账号)',
+  en: "Can't tell whether this was you (your own account could not be read)",
+})
+export const STOCK_PREP_AUDIT_ACTOR_UNKNOWN_ACTOR: StockPrepPlainText = Object.freeze({
+  zh: '这条记录没有留下操作者',
+  en: 'This row records no actor',
+})
 
 /**
  * The three lines 线框 E calls "全套稿子里唯一一处'不写就会主动生产错误结论'的文案" — R6: without
@@ -1745,9 +1763,41 @@ export const STOCK_PREP_AUDIT_FORBIDDEN: StockPrepPlainText = Object.freeze({
 
 export const STOCK_PREP_OPS_CELL_UNCHECKED: StockPrepPlainText = Object.freeze({ zh: '未检查', en: 'Not checked yet' })
 
+/**
+ * §4.4's `? 看不到` mark. A THIRD neutral badge beside 未检查 and 未接入监控, because the three mean
+ * different things and the table gives each its own token: 未检查 is `--ms-color-info` ("nobody has
+ * asked yet"), `? 看不到` is `--ms-text-3` + a sentence ("we asked and are not allowed to know"), and
+ * 未接入监控 is `--ms-text-3` ("nothing in this application can know"). None of the three may borrow
+ * success/danger (G4).
+ */
+export const STOCK_PREP_OPS_CELL_UNKNOWN_BADGE: StockPrepPlainText = Object.freeze({ zh: '? 看不到', en: '? Cannot see' })
+
+/**
+ * The FIRST half of §6.2 P1-5's 「这一格看不了 + 谁能看」. It is a prefix rather than a whole
+ * sentence so that both halves are always emitted together: the 403 wording used to say only the
+ * second half ("需要平台管理员"), which in a six-tile grid reads as a fact about the DEPLOYMENT
+ * ("this thing needs an admin") rather than about the READER ("you can't see it"), and the audit
+ * block one section below already said both halves — same meaning, two different sentences.
+ */
+export const STOCK_PREP_OPS_CELL_LOCKED_PREFIX: StockPrepPlainText = Object.freeze({
+  zh: '这一格看不了:',
+  en: 'This tile cannot be read here: ',
+})
+
 export const STOCK_PREP_OPS_CELL_UNAVAILABLE: StockPrepPlainText = Object.freeze({
   zh: '这一格暂时看不了,请稍后再试。',
   en: 'This tile cannot be read right now — try again shortly.',
+})
+
+/**
+ * A PERMANENT refusal, kept apart from the transient one above. A 400/422 is a statement about this
+ * deployment's configuration, and "请稍后再试" is false advice for it — retrying at any hour returns
+ * the same 422. The most likely producer is a customer pack whose declared `targetObjectId` is
+ * neither the canonical target nor inside the sandbox namespace.
+ */
+export const STOCK_PREP_OPS_CELL_MISCONFIGURED: StockPrepPlainText = Object.freeze({
+  zh: '这一格读不了:这套部署的目标表配置不对(重试也不会变)。请平台管理员核对客户列包声明的目标表。',
+  en: 'This tile cannot be read: this deployment\'s target-table configuration is wrong (retrying will not change it). A platform administrator should check the target table the customer pack declares.',
 })
 
 export const STOCK_PREP_OPS_NEEDS_ADMIN: StockPrepPlainText = Object.freeze({ zh: '需要平台管理员', en: 'Needs a platform administrator' })
@@ -1767,4 +1817,27 @@ export const STOCK_PREP_OPS_SCHEDULED_TASK_UNMONITORED: StockPrepPlainEntry = Ob
   en: 'Not wired into monitoring',
   zhNext: '这项在服务器的任务计划程序里,页面读不到它的运行结果。',
   enNext: "This runs in the server's own task scheduler; the page cannot read its result.",
+})
+
+/**
+ * 建表/装包 names WHICH table it inspected. A pack that declares no `targetObjectId` normalizes to
+ * the production canonical table server-side (`normalizePackTargetObjectId`), so "沙箱表已就绪" was
+ * simply the wrong noun on every production deployment — and the two readiness routes answer about
+ * two different tables, which a single 「已就绪」 could not distinguish.
+ */
+export const STOCK_PREP_OPS_TARGET_CANONICAL_READY: StockPrepPlainText = Object.freeze({ zh: '生产主表已就绪', en: 'Production main table ready' })
+export const STOCK_PREP_OPS_TARGET_CANONICAL_NOT_READY: StockPrepPlainText = Object.freeze({ zh: '生产主表还没就绪', en: 'Production main table not ready' })
+export const STOCK_PREP_OPS_TARGET_SANDBOX_READY: StockPrepPlainText = Object.freeze({ zh: '沙箱表已就绪', en: 'Sandbox table ready' })
+export const STOCK_PREP_OPS_TARGET_SANDBOX_NOT_READY: StockPrepPlainText = Object.freeze({ zh: '沙箱表还没就绪', en: 'Sandbox table not ready' })
+
+/**
+ * The 建表/装包 tile's PARTIAL failure line. Two of its three reads can succeed while the readiness
+ * one fails, and the tile then still has real information to show — so it shows it, and says plainly
+ * which half is missing rather than silently rendering one sentence short. Without this the tile
+ * stayed `data-cell-status="ready"` and simply omitted the readiness clause, which is the one
+ * failure §6.2 P1-5 names by hand: 「每个失败格子渲染『这一格看不了 + 谁能看』」.
+ */
+export const STOCK_PREP_OPS_TARGET_READINESS_UNREADABLE: StockPrepPlainText = Object.freeze({
+  zh: '表就绪度这一半没读到',
+  en: 'the table-readiness half could not be read',
 })
