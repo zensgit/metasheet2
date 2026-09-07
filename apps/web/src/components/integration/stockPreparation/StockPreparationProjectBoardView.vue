@@ -7,6 +7,19 @@
       ) }}
     </p>
 
+    <!-- P0-2 (§2.3 寄生): `?projectNo=` empty renders the task-oriented home page, right here inside
+         the SAME `project-board` tab — zero tab-structure change, zero landing-page change. Once a
+         project is opened (below, or from a home card) this gives way to the existing workspace,
+         which renders exactly as it did before this pass. -->
+    <StockPreparationOperatorHome
+      v-if="showHome"
+      :scope="scope"
+      :directory="directory"
+      :directory-loaded="directoryLoaded"
+      @open-project="onHomeOpenProject"
+      @open-project-in-queue="onHomeOpenProjectInQueue"
+    />
+
     <!-- ── 1. 搜项目 ────────────────────────────────────────────────────────────────────────────
          The SAME native datalist #5445 built for the confirmation queue: option VALUE is the number
          and option LABEL is the name, so the browser's own type-ahead filters on either. An operator
@@ -79,6 +92,26 @@
       </span>
     </p>
 
+    <!-- P0-3 「下一步」条 — the workspace's ONE filled primary button (G1). §4.2's seven rules,
+         evaluated by the pure `operatorNextStep` — this bar never invents its own priority order. -->
+    <section
+      v-if="nextStep"
+      class="sp-board__next-step"
+      data-testid="stock-prep-project-board-next-step"
+      :data-next-step="nextStep.key"
+    >
+      <p class="sp-board__next-step-text">{{ bi(nextStep.zh, nextStep.en) }}</p>
+      <button
+        v-if="nextStep.action"
+        type="button"
+        class="sp-board__next-step-button"
+        data-testid="stock-prep-project-board-next-step-action"
+        @click="onNextStepAction"
+      >
+        {{ bi(nextStep.actionZh, nextStep.actionEn) }}
+      </button>
+    </section>
+
     <!-- ── 2'. 从PLM拉取, OUTSIDE the board ────────────────────────────────────────────────────────
          THE BUG THIS FIXES. The pull panel used to live inside `v-if="board"`, and the board 404s
          for a project number this tenant has no data for. So the ONE control that creates that data
@@ -94,6 +127,7 @@
       <!-- H14: this page's step 1 is 从PLM拉取数据, and its empty state already sends people to a
            button by that name. `run-variant` makes the button actually carry it. See the panel. -->
       <StockPreparationProjectSyncPanel
+        ref="syncPanelEl"
         :scope="scope"
         :project-no="openedProjectNo"
         run-variant="pull"
@@ -102,7 +136,8 @@
         :large-bom-poll-wait="largeBomPollWait"
         @navigate-stage="(key: string) => emit('navigate-stage', key)"
         @open-multitable="openFillTarget"
-        @synced="reloadBoard"
+        @synced="onSyncReportChanged"
+        @busy-changed="onSyncBusyChanged"
       />
     </section>
 
@@ -114,6 +149,13 @@
         <h3 class="sp-board__title" data-testid="stock-prep-project-board-title">
           <span class="sp-board__no">{{ board.projectNo }}</span>
           <span v-if="board.projectName" class="sp-board__name">{{ board.projectName }}</span>
+          <!-- P0-6: the workspace title's own posture badge — same word as the home card / the sync
+               panel's own status line, one shared `stockPrepPosture` call. -->
+          <span
+            class="sp-board__posture"
+            :class="`sp-board__posture--${posture.tone}`"
+            data-testid="stock-prep-project-board-posture"
+          >{{ bi(posture.zh, posture.en) }}</span>
         </h3>
         <dl class="sp-board__facts">
           <div class="sp-board__fact" data-testid="stock-prep-project-board-rows">
@@ -294,6 +336,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
+import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
 import {
   readStockPreparationOperatorDirectory,
   exportStockPreparationPrepLines,
@@ -307,7 +350,7 @@ import {
   type StockPreparationHandoffCursor,
   type StockPreparationProjectBoard,
 } from '../../../services/integration/stockPreparation/projectBoard'
-import type { StockPreparationProjectSyncApi } from '../../../services/integration/stockPreparation/projectSync'
+import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport } from '../../../services/integration/stockPreparation/projectSync'
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
   stockPrepBoardErrorPlain,
@@ -319,6 +362,9 @@ import {
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { useAuth } from '../../../composables/useAuth'
+import { operatorNextStep, type OperatorNextStepResult } from '../../../services/integration/stockPreparation/operatorNextStep'
+import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
+import { recordStockPrepProjectVisit } from '../../../services/integration/stockPreparation/operatorHomeMemory'
 
 const props = withDefaults(
   defineProps<{
@@ -384,8 +430,35 @@ const handoff = ref<StockPreparationHandoffCursor | null>(null)
 const handoffNotice = ref<string>('')
 const exportEmptyNotice = ref(false)
 const directory = ref<StockPreparationOperatorDirectory | null>(null)
+/** True once the FIRST directory read has settled (success or failure) — see `directoryLoaded` below. */
+const directoryLoaded = ref(false)
 /** The number a load actually asked for — frozen at request time, decoupled from the live input. */
 const openedProjectNo = ref<string>('')
+
+// ---------------------------------------------------------------------------
+// P0-2/P0-3/P0-6 — the task-oriented home page, the "下一步" bar, and the shared posture badge.
+// ---------------------------------------------------------------------------
+
+/** No project open yet — 设计稿 §2.3: `?projectNo=` empty renders the home page, in the SAME tab. */
+const showHome = computed<boolean>(() => openedProjectNo.value === '')
+
+/** The composed sync panel's own report, mirrored up here ONLY so the "下一步" bar can read it. */
+const syncReport = ref<StockPreparationProjectSyncReport | null>(null)
+const syncBusy = ref(false)
+const syncPanelEl = ref<InstanceType<typeof StockPreparationProjectSyncPanel> | null>(null)
+
+/** §4.2 rule 4: this browser saw a `held` verdict for the currently-open project and has not yet
+ *  re-run sync. Cleared the moment a DIFFERENT verdict lands, or a different project is opened. */
+const wasHeldPending = ref(false)
+/** §4.2 rule 4's OWN condition: pending just hit zero while `wasHeldPending` was true. */
+const justConfirmedFlag = ref(false)
+
+const missingComponentsCount = computed<number>(() => {
+  const list = syncReport.value?.missingComponents
+  if (!list) return 0
+  if (list.items.length === 0 && list.distinctCount <= 0) return 0
+  return list.distinctCount > 0 ? list.distinctCount : list.items.length
+})
 
 const directoryProjects = computed<StockPreparationOperatorProject[]>(() => {
   // `Array.isArray` rather than a truthiness check: a degraded or partial payload must leave the
@@ -626,6 +699,66 @@ const notifyTitle = computed<string>(() => {
   return ''
 })
 
+/**
+ * P0-6: the workspace title's own posture badge — the second of the "三处同词一致" call sites, fed
+ * from THIS page's own live `board` + the composed sync panel's `busy`/report state (via `syncBusy`/
+ * `missingComponentsCount` above).
+ */
+const posture = computed<StockPrepPosture>(() => stockPrepPosture({
+  busy: syncBusy.value,
+  pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
+  missingComponentsCount: missingComponentsCount.value,
+  pulledRowCount: board.value?.pulledRowCount ?? 0,
+}))
+
+/**
+ * P0-3: the "下一步" bar's input — every field already lives on this page or the composed panel; see
+ * operatorNextStep.ts's own header for why this adds no fetch. `null` while no project is open, or
+ * while a genuine read failure is already showing its own red banner (G3: that banner is the answer;
+ * a second, guessed suggestion underneath it would contradict it — a `boardFound: false` reading of a
+ * 500 would wrongly say "never pulled").
+ */
+const nextStep = computed<OperatorNextStepResult | null>(() => {
+  if (!openedProjectNo.value || visibleErrorCode.value) return null
+  const cursor = handoff.value
+  return operatorNextStep({
+    boardFound: board.value !== null,
+    pulledRowCount: board.value?.pulledRowCount ?? 0,
+    missingComponentsCount: missingComponentsCount.value,
+    pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
+    justConfirmed: justConfirmedFlag.value,
+    hasExported: Boolean(board.value?.lastExportAt),
+    isCurrentHandler: Boolean(cursor?.isCurrentHandler && !cursor.terminal),
+  })
+})
+
+// justConfirmed tracking (§4.2 rule 4), SESSION-LOCAL and reset whenever a different project opens.
+watch(openedProjectNo, () => {
+  wasHeldPending.value = false
+  justConfirmedFlag.value = false
+  syncReport.value = null
+  syncBusy.value = false
+})
+
+watch(syncReport, (report) => {
+  if (!report) return
+  wasHeldPending.value = report.verdict === 'held'
+  justConfirmedFlag.value = false
+})
+
+watch(() => board.value?.pendingDecisionCount ?? 0, (count) => {
+  if (wasHeldPending.value && count === 0) {
+    justConfirmedFlag.value = true
+    wasHeldPending.value = false
+  }
+})
+
+// P0-6/D8: refresh this browser's memory of the open project's posture whenever it actually changes —
+// see operatorHomeMemory.ts for what is (and is not) stored.
+watch(posture, (value) => {
+  if (openedProjectNo.value) recordStockPrepProjectVisit(openedProjectNo.value, value.key)
+})
+
 async function run(work: () => Promise<void>, shape: 'read' | 'write' = 'read'): Promise<void> {
   busy.value = true
   errorCode.value = null
@@ -654,6 +787,11 @@ async function loadDirectory(): Promise<void> {
     directory.value = await readStockPreparationOperatorDirectory(props.scope)
   } catch {
     directory.value = null
+  } finally {
+    // P0-2: lets the home page tell "the read failed" (directory stays null AFTER this settles) apart
+    // from "still loading" (directory is null BEFORE it settles) — see StockPreparationOperatorHome
+    // .vue's `directoryAvailable`.
+    directoryLoaded.value = true
   }
 }
 
@@ -719,11 +857,29 @@ async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): 
   })
 }
 
-async function openProject(): Promise<void> {
-  const target = projectNoInput.value.trim()
+/** The one place that actually opens a project — the search box below and the home page above both
+ *  funnel through this, so "typed a number" and "clicked a home card" can never diverge in behaviour. */
+async function openProjectByNo(no: string): Promise<void> {
+  const target = no.trim()
   if (!target) return
+  projectNoInput.value = target
   emit('select-project-no', target)
   await loadBoard(target)
+}
+
+async function openProject(): Promise<void> {
+  await openProjectByNo(projectNoInput.value)
+}
+
+/** P0-2: a home card / the home page's own fallback input opened a project. */
+async function onHomeOpenProject(projectNo: string): Promise<void> {
+  await openProjectByNo(projectNo)
+}
+
+/** P0-2: a home card whose posture is 等您拿主意 — open the project AND land straight in the queue. */
+async function onHomeOpenProjectInQueue(projectNo: string): Promise<void> {
+  await openProjectByNo(projectNo)
+  emit('navigate-stage', 'confirmation-queue')
 }
 
 /**
@@ -733,6 +889,50 @@ async function openProject(): Promise<void> {
 async function reloadBoard(): Promise<void> {
   if (!openedProjectNo.value) return
   await loadBoard(openedProjectNo.value, 'refresh')
+}
+
+/** P0-3: the composed sync panel just finished a run (or forwarded the large-BOM channel's own). */
+function onSyncReportChanged(report: StockPreparationProjectSyncReport | null): void {
+  syncReport.value = report
+  void reloadBoard()
+}
+
+function onSyncBusyChanged(value: boolean): void {
+  syncBusy.value = value
+}
+
+/**
+ * P0-3: the "下一步" bar's ONE button. Each action reuses an existing control's own handler/emit —
+ * this function adds no new capability, it only decides which existing one to reach for.
+ */
+function onNextStepAction(): void {
+  const step = nextStep.value
+  if (!step || !step.action) return
+  if (step.action === 'pull' || step.action === 'view-missing') {
+    // Both point at the composed sync panel, already rendered just below this bar — scroll it into
+    // view rather than duplicating its controls up here (G1: this bar's own button count stays at 1).
+    try {
+      syncPanelEl.value?.$el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+    } catch {
+      // jsdom / an older browser without smooth-scroll support: no-op, never a thrown error.
+    }
+    return
+  }
+  if (step.action === 'go-confirm') {
+    emit('navigate-stage', 'confirmation-queue')
+    return
+  }
+  if (step.action === 'resync') {
+    void syncPanelEl.value?.run?.()
+    return
+  }
+  if (step.action === 'open-fill') {
+    openFillTarget()
+    return
+  }
+  if (step.action === 'notify-next') {
+    void notifyNext()
+  }
 }
 
 async function notifyNext(): Promise<void> {
@@ -914,6 +1114,52 @@ onMounted(async () => {
 .sp-board__name {
   color: var(--ms-text-2);
   font-weight: 400;
+}
+
+.sp-board__posture {
+  margin-left: auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sp-board__posture--warning { background: color-mix(in srgb, var(--ms-color-warning) 16%, transparent); color: var(--ms-color-warning); }
+.sp-board__posture--danger { background: color-mix(in srgb, var(--ms-color-danger) 16%, transparent); color: var(--ms-color-danger); }
+.sp-board__posture--primary { background: color-mix(in srgb, var(--ms-color-primary) 16%, transparent); color: var(--ms-color-primary); }
+.sp-board__posture--success { background: color-mix(in srgb, var(--ms-color-success) 16%, transparent); color: var(--ms-color-success); }
+.sp-board__posture--info { background: color-mix(in srgb, var(--ms-color-info) 20%, transparent); color: var(--ms-color-info); }
+.sp-board__posture--neutral { background: var(--ms-bg-page); color: var(--ms-text-3); }
+
+.sp-board__next-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ms-space-3);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-color-primary);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ms-color-primary) 6%, var(--ms-bg-card));
+}
+
+.sp-board__next-step-text {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.sp-board__next-step-button {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border: 1px solid var(--ms-color-primary);
+  border-radius: 6px;
+  background: var(--ms-color-primary);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .sp-board__facts {

@@ -1004,4 +1004,85 @@ describe('项目备料页 — the operator project board', () => {
     await flush()
     expect(routerPush).toHaveBeenCalledWith({ path: `/multitable/${SHEET_ID}/${VIEW_ID}` })
   })
+
+  // ---- P0-2: 二级视图寄生 —— `?projectNo=` 无值渲染首页,有值走既有工作区分支 --------------------
+  //
+  // 设计稿 §2.3's whole point: EVERY test above this block mounts with a `projectNo`, so it always
+  // took the "existing workspace" branch and never once exercised the home page — which is exactly
+  // what makes the P0 mechanism safe. This block is what actually mounts with none.
+
+  it('P0-2: no projectNo renders the home page, not the workspace status section', async () => {
+    const root = await mountBoard({ projectNo: '' })
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-next-step"]')).toBeNull()
+    // The search box stays reachable too (F1: it is the one path guaranteed to work regardless of
+    // what the directory or this browser's own memory hold) — this is additive, not a replacement.
+    expect(root.querySelector('[data-testid="stock-prep-project-board-input"]')).not.toBeNull()
+  })
+
+  it('P0-2: every OTHER spec in this file seeds a projectNo and therefore never sees the home page', async () => {
+    const root = await mountBoard()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).not.toBeNull()
+  })
+
+  it('P0-2: the home page carries this operator\'s own directory as a card', async () => {
+    const root = await mountBoard({ projectNo: '' })
+    const card = root.querySelector('[data-testid="stock-prep-operator-home-card"]') as HTMLElement
+    expect(card).not.toBeNull()
+    expect(card.getAttribute('data-project-no')).toBe(PROJECT_NO)
+  })
+
+  it('P0-2: opening a project from the home page\'s own fallback input switches to the workspace', async () => {
+    const root = await mountBoard({ projectNo: '' })
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+    const input = root.querySelector('[data-testid="stock-prep-operator-home-quick-open-input"]') as HTMLInputElement
+    input.value = PROJECT_NO
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(root.querySelector('[data-testid="stock-prep-operator-home-quick-open-button"]') as HTMLButtonElement).click()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).not.toBeNull()
+  })
+
+  // ---- P0-3: 「下一步」条 ------------------------------------------------------------------------
+
+  it('P0-3: shows the 全清 state for a fully-synced, fully-exported fixture — no primary button', async () => {
+    const root = await mountBoard()
+    const bar = root.querySelector('[data-testid="stock-prep-project-board-next-step"]') as HTMLElement
+    expect(bar).not.toBeNull()
+    expect(bar.getAttribute('data-next-step')).toBe('clear')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-next-step-action"]')).toBeNull()
+  })
+
+  it('P0-3: points at the confirmation queue, with the real count, when decisions are pending', async () => {
+    routeApi({ board: ok(boardPayload({ pendingDecisionCount: 3 })) })
+    const navigateStageSpy = vi.fn()
+    const root = await mountBoard({ onNavigateStage: navigateStageSpy })
+    const bar = root.querySelector('[data-testid="stock-prep-project-board-next-step"]') as HTMLElement
+    expect(bar.getAttribute('data-next-step')).toBe('pending')
+    const action = root.querySelector('[data-testid="stock-prep-project-board-next-step-action"]') as HTMLButtonElement
+    expect(action).not.toBeNull()
+    expect(action.textContent).toContain('3')
+    action.click()
+    await flush()
+    expect(navigateStageSpy).toHaveBeenCalledWith('confirmation-queue')
+  })
+
+  it('P0-3: G5 — a project that has never been pulled still shows a "下一步" bar (never a locked gate)', async () => {
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    const bar = root.querySelector('[data-testid="stock-prep-project-board-next-step"]') as HTMLElement
+    expect(bar).not.toBeNull()
+    expect(bar.getAttribute('data-next-step')).toBe('pull')
+  })
+
+  // ---- P0-6: the workspace title's own posture badge ---------------------------------------------
+
+  it('P0-6: the workspace title carries a posture badge', async () => {
+    const root = await mountBoard()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-posture"]')).not.toBeNull()
+  })
 })

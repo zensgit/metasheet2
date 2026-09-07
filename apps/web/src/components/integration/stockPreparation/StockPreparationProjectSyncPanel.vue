@@ -72,6 +72,17 @@
       </span>
     </p>
 
+    <!-- P0-6: the SAME `stockPrepPosture` word the home card and the workspace title use, fed from
+         this run's own report — the third of the "三处同词一致" call sites. -->
+    <p
+      v-if="report"
+      class="sp-sync__posture"
+      :class="`sp-sync__posture--${posture.tone}`"
+      data-testid="stock-prep-project-sync-posture"
+    >
+      {{ bi(posture.zh, posture.en) }}
+    </p>
+
     <!-- What the plan found, as a sentence rather than five chips. -->
     <p v-if="report && report.planned" class="sp-sync__counts" data-testid="stock-prep-project-sync-counts">
       {{ countsSentence }}
@@ -190,26 +201,34 @@
       </button>
     </div>
 
-    <!-- The four steps. A SKIP is rendered with the same weight as an OK, and its reason is never
-         dropped — hiding it is how the outstanding work goes unnoticed. -->
-    <ol class="sp-sync__steps">
+    <!-- The four steps (P0-3 皮肤: a connected four-step strip rather than a plain list). A SKIP is
+         rendered with the same weight as an OK, and its reason is never dropped — hiding it is how the
+         outstanding work goes unnoticed. EVERY testid and `data-status` value below is byte-identical
+         to before this pass — only the marker/connector chrome around them is new. -->
+    <ol class="sp-sync__steps" data-testid="stock-prep-project-sync-steps">
       <li
-        v-for="row in stepRows"
+        v-for="(row, idx) in stepRows"
         :key="row.descriptor.id"
         class="sp-sync__step"
         data-testid="stock-prep-project-sync-step"
         :data-step="row.descriptor.id"
         :data-status="row.status"
       >
-        <span class="sp-sync__status" :class="`sp-sync__status--${row.status}`">{{ statusLabel(row.status) }}</span>
-        <span class="sp-sync__step-name">{{ bi(row.descriptor.zh, row.descriptor.en) }}</span>
-        <template v-if="row.result">
-          <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason">{{ reasonText(row.result) }}</small>
-          <small v-if="reasonNext(row.result)" class="sp-sync__next-line" data-testid="stock-prep-project-sync-step-next">
-            {{ reasonNext(row.result) }}
-          </small>
-        </template>
-        <small v-else class="sp-sync__hint">{{ bi('还没走到这一步', 'Not reached yet') }}</small>
+        <span class="sp-sync__step-marker" aria-hidden="true">
+          <span class="sp-sync__step-icon" :class="`sp-sync__step-icon--${row.status}`">{{ stepIcon(row.status) }}</span>
+          <span class="sp-sync__step-index">{{ idx + 1 }}</span>
+        </span>
+        <span class="sp-sync__step-body">
+          <span class="sp-sync__status" :class="`sp-sync__status--${row.status}`">{{ statusLabel(row.status) }}</span>
+          <span class="sp-sync__step-name">{{ bi(row.descriptor.zh, row.descriptor.en) }}</span>
+          <template v-if="row.result">
+            <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason">{{ reasonText(row.result) }}</small>
+            <small v-if="reasonNext(row.result)" class="sp-sync__next-line" data-testid="stock-prep-project-sync-step-next">
+              {{ reasonNext(row.result) }}
+            </small>
+          </template>
+          <small v-else class="sp-sync__hint">{{ bi('还没走到这一步', 'Not reached yet') }}</small>
+        </span>
       </li>
     </ol>
 
@@ -223,7 +242,7 @@
       :api="largeBomApi"
       :wait="largeBomPollWait"
       @open-multitable="emit('open-multitable')"
-      @synced="emit('synced')"
+      @synced="emit('synced', report)"
     />
 
     <StockPrepTechnicalDetails v-if="report" testid="stock-prep-project-sync-tech">
@@ -301,6 +320,7 @@ import {
   stockPrepSyncVerdictPlain,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
+import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 
 const props = withDefaults(
   defineProps<{
@@ -356,8 +376,17 @@ const emit = defineEmits<{
   (e: 'navigate-stage', viewKey: string): void
   /** "Open the multitable" — the parent owns routing; this panel composes no route. */
   (e: 'open-multitable'): void
-  /** Fired after a run settles so the parent can re-read the project overview. */
-  (e: 'synced'): void
+  /**
+   * Fired after a run settles so the parent can re-read the project overview. P0-3: carries this
+   * run's own report so the workspace's "下一步" bar (operatorNextStep.ts) can read
+   * `missingComponents`/`verdict` without a second copy of this panel's state living in the parent.
+   * `null` only when the large-BOM background channel forwards this before any report has landed —
+   * existing listeners that take no argument (StockPreparationProjectWorkspaceView.vue's `@synced=
+   * "load"`) are unaffected, since Vue drops an emitted argument a handler declares no parameter for.
+   */
+  (e: 'synced', report: StockPreparationProjectSyncReport | null): void
+  /** P0-3: whether a run is in flight right now — lets the workspace title badge show 🔵正在跑. */
+  (e: 'busy-changed', busy: boolean): void
 }>()
 
 const { locale } = useLocale()
@@ -434,11 +463,21 @@ async function onRun(): Promise<void> {
       results.value = [...results.value, step]
     })
     armedNote.value = false
-    emit('synced')
+    emit('synced', report.value)
   } finally {
     busy.value = false
   }
 }
+
+/** P0-3: the workspace title badge's only window into "a run is happening right now". */
+watch(busy, (value) => emit('busy-changed', value))
+
+/**
+ * P0-3: lets the workspace's "下一步" bar re-run THIS SAME sync (再同步一次 / go-back-and-resync) —
+ * without this the parent would need its own second copy of `onRun`'s logic to drive a resync, and
+ * two copies is how the two eventually disagree about what "同步" does.
+ */
+defineExpose({ run: onRun })
 
 /** Every planned step, with its result once it has one. Steps not reached are still listed. */
 const stepRows = computed(() => STOCK_PREPARATION_PROJECT_SYNC_STEPS.map((descriptor) => {
@@ -453,6 +492,14 @@ const stepRows = computed(() => STOCK_PREPARATION_PROJECT_SYNC_STEPS.map((descri
 function statusLabel(status: StockPreparationProjectSyncStepStatus): string {
   const text = stockPrepStepOutcomeText(status)
   return bi(text.zh, text.en)
+}
+
+/** P0-3 皮肤: purely decorative (aria-hidden — `statusLabel` above still carries the accessible text). */
+function stepIcon(status: StockPreparationProjectSyncStepStatus): string {
+  if (status === 'ok') return '✔'
+  if (status === 'skip') return '●'
+  if (status === 'fail') return '✖'
+  return '○'
 }
 
 function reasonText(result: StockPreparationProjectSyncStepResult): string {
@@ -495,6 +542,27 @@ const verdictCount = computed<string>(() => {
 const showsSheetLink = computed<boolean>(() => {
   const verdict = report.value?.verdict
   return verdict === 'imported' || verdict === 'already_up_to_date' || verdict === 'partial'
+})
+
+/**
+ * P0-6: this run's own posture, fed to the SAME `stockPrepPosture` the home card and the workspace
+ * title read. `pendingDecisionCount` prefers `queuedDecisionCount` (reconcile's real ledger count)
+ * over `pendingConfirmCount` (the plan's own manualConfirm tally) — the identical precedence the
+ * 「去确认队列」 link's own label already uses just below, so the two never disagree about which
+ * number is the true one.
+ */
+const posture = computed<StockPrepPosture>(() => {
+  const value = report.value
+  if (!value) return stockPrepPosture({})
+  const pendingDecisionCount = value.queuedDecisionCount > 0 ? value.queuedDecisionCount : value.pendingConfirmCount
+  const missingList = value.missingComponents
+  const missingComponentsCount = missingList && hasMissingComponents(missingList) ? effectiveDistinctCount(missingList) : 0
+  return stockPrepPosture({
+    busy: busy.value,
+    pendingDecisionCount,
+    missingComponentsCount,
+    pulledRowCount: showsSheetLink.value ? 1 : 0,
+  })
 })
 
 /**
@@ -842,6 +910,19 @@ function onExportMissingComponents(): void {
   font-variant-numeric: tabular-nums;
 }
 
+.sp-sync__posture {
+  margin: 0;
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title, 600);
+}
+
+.sp-sync__posture--warning { color: var(--ms-color-warning); }
+.sp-sync__posture--danger { color: var(--ms-color-danger); }
+.sp-sync__posture--primary { color: var(--ms-color-primary); }
+.sp-sync__posture--success { color: var(--ms-color-success); }
+.sp-sync__posture--info { color: var(--ms-color-info); }
+.sp-sync__posture--neutral { color: var(--ms-text-3); }
+
 .sp-sync__next {
   display: flex;
   flex-wrap: wrap;
@@ -868,20 +949,73 @@ function onExportMissingComponents(): void {
   outline-offset: 1px;
 }
 
+/* P0-3 皮肤: a connected four-step strip. `.sp-sync__step` becomes the flex ROW item (was the whole
+   line before); `.sp-sync__step-marker`/`.sp-sync__step-body` are new wrappers around content that
+   already existed, so nothing that was there before this pass lost its class or its testid. */
 .sp-sync__steps {
   margin: 0;
-  padding: 0 0 0 var(--ms-space-4);
+  padding: 0;
+  list-style: none;
   display: flex;
-  flex-direction: column;
-  gap: var(--ms-space-2);
+  flex-wrap: wrap;
+  gap: var(--ms-space-3);
 }
 
 .sp-sync__step {
+  position: relative;
+  display: flex;
+  flex: 1 1 200px;
+  align-items: flex-start;
+  gap: var(--ms-space-2);
+  padding-right: var(--ms-space-3);
+  line-height: 1.6;
+}
+
+.sp-sync__step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 11px;
+  right: 0;
+  width: var(--ms-space-3);
+  height: 1px;
+  background: var(--ms-border-light);
+}
+
+.sp-sync__step-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sp-sync__step-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--ms-border-light);
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.sp-sync__step-icon--ok { border-color: var(--ms-color-success); color: var(--ms-color-success); }
+.sp-sync__step-icon--skip { border-color: var(--ms-color-warning); color: var(--ms-color-warning); }
+.sp-sync__step-icon--fail { border-color: var(--ms-color-danger); color: var(--ms-color-danger); }
+
+.sp-sync__step-index {
+  color: var(--ms-text-3);
+  font-size: 11px;
+}
+
+.sp-sync__step-body {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: var(--ms-space-2);
-  line-height: 1.6;
+  min-width: 0;
 }
 
 .sp-sync__status {
