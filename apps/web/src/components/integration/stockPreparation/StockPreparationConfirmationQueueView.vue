@@ -1,6 +1,10 @@
 <template>
   <div class="stock-prep-confirm" data-testid="stock-prep-confirmation-queue">
-    <p class="stock-prep-confirm__scope" data-testid="stock-prep-confirmation-scope">
+    <!-- P1-2 (§6.2 P1-2): EMBEDDED MODE hides this scope paragraph — the closest thing this view has
+         to a title — because the host composing it in place (StockPreparationProjectBoardView's Panel
+         2) already carries its own heading for the same section. `v-if="!embedded"` means an
+         undeclared prop (every non-embedded caller, unchanged) renders this exactly as before. -->
+    <p v-if="!embedded" class="stock-prep-confirm__scope" data-testid="stock-prep-confirmation-scope">
       {{ bi(
         '这里列出系统拿不准、需要您拿主意的事。每一条说明是什么情况,您选一个处理办法,系统按您的决定继续。列表本身不显示具体内容,只有点开某一条时才会读出您填过的值。',
         'This is where the system lists what it cannot decide on its own. Each row says what the situation is; you pick how to handle it and the system carries on from there. The list itself shows no content — what you typed is read back only when you open a single row.',
@@ -17,7 +21,11 @@
            type-ahead filters on either — which is the whole point: an operator who only remembers
            「注射水缓冲罐」 can now find 230920006 without being told it. The input stays a plain text
            field, so the hand-typed path a trained operator already uses is unchanged. -->
-      <label class="stock-prep-confirm__field">
+      <!-- P1-2: EMBEDDED MODE hides this input — the host already knows the project (it passed
+           `:project-no`, and this view's own P0-1 watcher keeps `projectNo` in step with it), so a
+           second, editable box for the SAME number would invite it to drift from the page around it.
+           Non-embedded (every caller today) renders this exactly as before. -->
+      <label v-if="!embedded" class="stock-prep-confirm__field">
         <span>{{ bi('项目号(可按号码或名称搜)', 'Project no. (search by number or name)') }}</span>
         <input
           v-model="projectNo"
@@ -379,7 +387,7 @@
         v-if="emptyState === 'nothing_pending' && canOpenProjectBoard"
         type="button"
         data-testid="stock-prep-confirmation-empty-resync"
-        @click="emit('navigate-stage', 'project-board', projectNo)"
+        @click="handleResync"
       >{{ bi(resyncActionLabel.zh, resyncActionLabel.en) }}</button>
     </p>
 
@@ -534,7 +542,20 @@ import {
   type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
-const props = defineProps<{ scope: IntegrationScope; projectNo?: string }>()
+const props = defineProps<{
+  scope: IntegrationScope
+  projectNo?: string
+  /**
+   * P1-2 (§6.2 P1-2) — composed IN PLACE by StockPreparationProjectBoardView's own Panel 2 (线框
+   * C/D). `false`/unset is the ONLY value every caller before this pass ever passed, so this prop's
+   * whole contract is additive: the non-embedded render path below is byte-for-byte what it was.
+   * Embedded hides the project-no input and the scope paragraph (the host already carries both, and
+   * `projectNo` already arrives as a prop — the P0-1 watcher above keeps it in step with the host's
+   * own number) and reroutes the closed-loop "回到上面再同步一次" button to an emit instead of a tab
+   * switch, because the host already IS "上面".
+   */
+  embedded?: boolean
+}>()
 /**
  * The two platform-admin controls below are the ONLY things this component emits. The shell owns the
  * calls (it owns every other service call on this page's siblings too), so the payload carries the
@@ -558,6 +579,24 @@ const emit = defineEmits<{
   // (§2.3's `?projectNo=` state bit) rather than whatever it last had open — no new route, no new
   // controlled control (workbenchAccess.ts is untouched: this is a plain event payload, not a capability).
   (event: 'navigate-stage', viewKey: string, projectNo?: string): void
+  /**
+   * P1-2 — EMBEDDED MODE's own escape hatch for the SAME "回到上面再同步一次" button `navigate-stage`
+   * above already carries. When this view is composed in place (StockPreparationProjectBoardView's
+   * Panel 2) the host already IS "上面": a `navigate-stage('project-board', …)` there would ask the
+   * shell to switch to a tab the operator is already looking at — a no-op dressed as an action, and
+   * on a `stock-prep:read`-only queue-tab session it would even be wrong (see the button's own R-11
+   * comment). The host listens for this instead and scrolls/focuses its own sync panel; no route, no
+   * new controlled control (this is a plain event payload, exactly like `navigate-stage` itself).
+   */
+  (event: 'embedded-resync'): void
+  /**
+   * P1-2 — the queue's OWN response, forwarded so a host composing this view in place (Panel 2's
+   * progress bar) can read `byStatus`/`parkedCount` without a second fetch or a new interface. Fires
+   * on every `queue` change, embedded or not — a non-embedded caller that does not listen loses
+   * nothing, and this adds no DOM, so it cannot be the "one byte" P1-2's non-embedded guarantee
+   * covers.
+   */
+  (event: 'queue-changed', queue: StockPreparationDecisionQueue | null): void
 }>()
 
 const { locale } = useLocale()
@@ -673,6 +712,11 @@ const statusFilter = ref<StockPreparationDecisionStatus | ''>('')
 const busy = ref(false)
 const errorCode = ref<string | null>(null)
 const queue = ref<StockPreparationDecisionQueue | null>(null)
+/** P1-2: forward every change to `queue` up to whoever composed this view — see the emit's own
+ *  comment for why (Panel 2's progress bar reads `byStatus` off this, no second fetch). */
+watch(queue, (value) => {
+  emit('queue-changed', value)
+})
 const readiness = ref<StockPreparationDecisionReadiness | null>(null)
 const valueEntry = ref<StockPreparationDecisionValueEntry | null>(null)
 const selected = ref<StockPreparationDecisionRow | null>(null)
@@ -797,6 +841,19 @@ async function loadDirectory(): Promise<void> {
   } finally {
     directoryBusy.value = false
   }
+}
+
+/**
+ * P1-2: the "回到上面再同步一次" button's ONE handler, for both modes. Embedded routes through the
+ * new `embedded-resync` emit (the host already IS "上面"); every existing, non-embedded caller keeps
+ * emitting exactly the `navigate-stage` call it always has — same event name, same two arguments.
+ */
+function handleResync(): void {
+  if (props.embedded) {
+    emit('embedded-resync')
+    return
+  }
+  emit('navigate-stage', 'project-board', projectNo.value)
 }
 
 /** Pick a project from the worklist: fill the number the typed path already uses, then load it. */

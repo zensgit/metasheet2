@@ -230,6 +230,61 @@
         </p>
       </section>
 
+      <!-- ── 2c. 面板 2:等您拿主意 (P1-2, 设计稿 §6.2 P1-2 / 线框 C·D) ───────────────────────────
+           Composes #5445's confirmation queue IN PLACE, via its own `embedded` prop — same service
+           calls, same capability gates, same rows; this section only decides WHERE it renders. The
+           progress bar reads the SAME response the composed view already fetched (`byStatus`) via its
+           `queue-changed` emit — no second fetch, no new interface.
+
+           COLLAPSED BY DEFAULT. 线框 C's own marginal note tags the expand toggle itself as the P1
+           feature; nothing under it calls the server until the operator presses 展开 — which also
+           means every existing fixture that never clicks it (nearly all of them: the default
+           `pendingDecisionCount` is 0) gains no request it did not already make. -->
+      <section
+        class="sp-board__confirm-panel"
+        data-testid="stock-prep-project-board-confirm-panel"
+      >
+        <div class="sp-board__confirm-panel-header">
+          <h3 class="sp-board__confirm-panel-title">
+            {{ bi('等您拿主意', 'Waiting on your decision') }}
+            <span v-if="board.pendingDecisionCount > 0">({{ board.pendingDecisionCount }})</span>
+          </h3>
+          <button
+            type="button"
+            class="sp-board__link"
+            data-testid="stock-prep-project-board-confirm-toggle"
+            @click="confirmPanelExpanded = !confirmPanelExpanded"
+          >
+            {{ confirmPanelExpanded ? bi('收起 ▴', 'Collapse ▴') : bi('展开逐条处理 ▾', 'Expand to review one by one ▾') }}
+          </button>
+        </div>
+        <!-- 进度条 — 已确认 / 待确认, straight off the composed queue's OWN `byStatus`. `null` (no
+             bar) until it has answered once, or when confirmed+pending is 0 (nothing to show a ratio
+             of — the empty-state text inside the composed queue already says so in words). -->
+        <div
+          v-if="confirmProgress"
+          class="sp-board__confirm-progress"
+          data-testid="stock-prep-project-board-confirm-progress"
+        >
+          <span>{{ bi(
+            `进度:已处理 ${confirmProgress.confirmed} / 共 ${confirmProgress.total}`,
+            `Progress: ${confirmProgress.confirmed} of ${confirmProgress.total} handled`,
+          ) }}</span>
+          <div class="sp-board__confirm-progress-track">
+            <div class="sp-board__confirm-progress-fill" :style="{ width: `${confirmProgress.percent}%` }" />
+          </div>
+        </div>
+        <StockPreparationConfirmationQueueView
+          v-if="confirmPanelExpanded"
+          ref="confirmQueueEl"
+          :scope="scope"
+          :project-no="openedProjectNo"
+          embedded
+          @queue-changed="onEmbeddedQueueChanged"
+          @embedded-resync="onEmbeddedResync"
+        />
+      </section>
+
       <!-- ── 3. 四个动作 ────────────────────────────────────────────────────────────────────────
            从PLM拉取 / 通知下一步 / 导出Excel / 推送宜搭. Every control that renders is one the
            server answers for this caller (R-11); the ones that do not render say why in words. -->
@@ -363,9 +418,11 @@ import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
+import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import {
   exportStockPreparationPrepLines,
   readStockPreparationOperatorDirectory,
+  type StockPreparationDecisionQueue,
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
@@ -508,6 +565,73 @@ const memoryOnlyProjectNos = computed<string[]>(() => {
 const syncReport = ref<StockPreparationProjectSyncReport | null>(null)
 const syncBusy = ref(false)
 const syncPanelEl = ref<InstanceType<typeof StockPreparationProjectSyncPanel> | null>(null)
+
+// ---------------------------------------------------------------------------
+// P1-2 (§6.2 P1-2, 线框 C/D) — Panel 2: 就地展开 embedded 队列 + 进度条.
+// ---------------------------------------------------------------------------
+
+/**
+ * Collapsed by default — 线框 C's own P1 marginal note tags the expand toggle as the whole of what P1
+ * adds here. Session-local (not remembered across a mount): the composed queue's own contract is "no
+ * onMounted, no watcher firing on mount — it loads when the operator asks" (see its P0-1 comment), and
+ * a panel that reopened itself already-expanded on every visit would fetch on the operator's behalf
+ * without being asked, the exact thing that contract exists to avoid.
+ */
+const confirmPanelExpanded = ref(false)
+const confirmQueueEl = ref<InstanceType<typeof StockPreparationConfirmationQueueView> | null>(null)
+/**
+ * THE composed queue's OWN response — forwarded up by its `queue-changed` emit, not fetched a second
+ * time here and not the same number as `board.pendingDecisionCount` (that counts STILL-OPEN rows
+ * only; the progress bar below needs confirmed-vs-pending, which only the queue's `byStatus` carries).
+ */
+const embeddedQueue = ref<StockPreparationDecisionQueue | null>(null)
+
+function onEmbeddedQueueChanged(next: StockPreparationDecisionQueue | null): void {
+  embeddedQueue.value = next
+}
+
+/** 进度条 (P1-2) — confirmed vs. pending, straight off `byStatus`. `null` (no bar) until the composed
+ *  queue has actually answered once, or when there is nothing to show a ratio of (0 of 0). */
+const confirmProgress = computed<{ confirmed: number; pending: number; total: number; percent: number } | null>(() => {
+  const byStatus = embeddedQueue.value?.byStatus
+  if (!byStatus) return null
+  const confirmed = typeof byStatus.confirmed === 'number' ? byStatus.confirmed : 0
+  const pending = typeof byStatus.pending === 'number' ? byStatus.pending : 0
+  const total = confirmed + pending
+  if (total <= 0) return null
+  return { confirmed, pending, total, percent: Math.round((confirmed / total) * 100) }
+})
+
+/**
+ * THE ONE LOAD THIS PANEL SUPPLIES. The composed queue never loads on its own mount (see above), so
+ * expanding Panel 2 has to be the "operator asked" moment — fired once, exactly when a fresh instance
+ * of the queue actually mounts (the toggle just flipped true, or a NEW project opened while it was
+ * already expanded — `loadBoard`'s non-refresh path nulls `board`, tearing this whole section down and
+ * rebuilding it). A project switch AFTERWARDS is already covered by the queue's own P0-1 prop watcher,
+ * which this same instance keeps: no second wiring of "what does a project change mean" here.
+ */
+watch(confirmQueueEl, (instance) => {
+  if (instance) void instance.loadQueue()
+})
+
+/**
+ * P1-2 (线框 D ④) — 「回到上面再同步一次」 in embedded mode. The parent already IS "上面": this page
+ * composes the queue in place, so asking the shell to switch to a tab the operator is already looking
+ * at would be a no-op dressed as an action. Scroll to, and focus the run button of, the SAME sync
+ * panel `onNextStepAction`'s own 'view-missing' branch reaches for below — same try/catch guard for a
+ * jsdom / older-browser host with no smooth-scroll support.
+ */
+async function onEmbeddedResync(): Promise<void> {
+  await nextTick()
+  try {
+    syncPanelEl.value?.$el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  } catch {
+    // jsdom / an older browser without smooth-scroll support: no-op, never a thrown error.
+  }
+  const runButton = (syncPanelEl.value?.$el as HTMLElement | undefined)
+    ?.querySelector?.('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement | null | undefined
+  runButton?.focus()
+}
 
 /** §4.2 rule 4: this browser saw a `held` verdict for the currently-open project and has not yet
  *  re-run sync. Cleared the moment a DIFFERENT verdict lands, or a different project is opened. */
@@ -1402,6 +1526,51 @@ onMounted(async () => {
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
+}
+
+/* P1-2: Panel 2 — 就地展开 embedded 队列 + 进度条. */
+.sp-board__confirm-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+}
+
+.sp-board__confirm-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ms-space-2);
+}
+
+.sp-board__confirm-panel-title {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-size: 14px;
+}
+
+.sp-board__confirm-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--ms-text-2);
+  font-size: 12px;
+}
+
+.sp-board__confirm-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ms-bg-page);
+  overflow: hidden;
+}
+
+.sp-board__confirm-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--ms-color-success);
+  transition: width 0.2s ease;
 }
 
 .sp-board__actions {

@@ -1254,4 +1254,123 @@ describe('项目备料页 — the operator project board', () => {
     expect(urls[1]).not.toContain('includePendingCounts')
     expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
   })
+
+  // ---------------------------------------------------------------------------
+  // P1-2 (§6.2 P1-2, 线框 C/D) — Panel 2: 就地展开 embedded 队列 + 进度条.
+  //
+  // WHAT THESE WITNESS. The panel composes #5445's confirmation queue IN PLACE via its own `embedded`
+  // prop (StockPreparationConfirmationQueueView.vue) — nothing here re-implements the queue, and
+  // stockPreparationConfirmationQueue.spec.ts's own P1-2 block already covers that prop's contract in
+  // isolation. What can ONLY be witnessed from this side is: the panel starts collapsed (no request
+  // gained by any fixture above that never clicks it), expanding it never asks the shell to switch
+  // tabs, the progress bar reads the SAME response the composed queue fetched, and 「回到上面再同步
+  //一次」 scrolls to and focuses the sync panel rather than navigating away from it.
+  // ---------------------------------------------------------------------------
+
+  function decisionsListPayload(byStatus: Record<string, number>): Record<string, unknown> {
+    const total = Object.values(byStatus).reduce((sum, n) => sum + n, 0)
+    return { rowCount: total, byStatus, byResolutionAction: {}, parkedCount: 0, rows: [] }
+  }
+
+  /** Bare LIST route only. NOT `path.includes('/confirm')` — `'/confirmation-decisions'` itself
+   *  contains that substring ("confirmation" starts with "confirm"), which would match the list call
+   *  too; anchoring on the `/` before the differing suffix is what keeps it out. */
+  function isDecisionsListUrl(path: string): boolean {
+    return /\/confirmation-decisions(\?|$)/.test(path)
+  }
+
+  function routeApiWithConfirmPanel(pendingDecisionCount: number, byStatus: Record<string, number>): void {
+    h.apiFetch.mockImplementation(async (path: string) => {
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (isDecisionsListUrl(path)) return ok(decisionsListPayload(byStatus))
+      if (path.includes('/handoff')) return new Response('', { status: 404 })
+      if (path.includes('/board')) return ok(boardPayload({ pendingDecisionCount }))
+      return ok({})
+    })
+  }
+
+  it('P1-2: Panel 2 starts COLLAPSED — no composed queue, no request beyond what every other fixture already makes', async () => {
+    routeApi({ board: ok(boardPayload({ pendingDecisionCount: 2 })) })
+    const root = await mountBoard()
+    const panel = root.querySelector('[data-testid="stock-prep-project-board-confirm-panel"]') as HTMLElement
+    expect(panel, 'Panel 2 itself is always present once a project has resolved').not.toBeNull()
+    expect(panel.textContent).toContain('(2)')
+    expect(
+      root.querySelector('[data-testid="stock-prep-confirmation-queue"]'),
+      'nothing composed until the operator asks',
+    ).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-confirm-toggle"]')?.textContent).toContain('展开')
+    // No request went to the confirmation-decisions LIST route — only board/handoff/directory, exactly
+    // like every OTHER fixture in this file that never touches this toggle.
+    const listCalls = h.apiFetch.mock.calls.map((call) => String(call[0])).filter((url) => isDecisionsListUrl(url))
+    expect(listCalls).toEqual([])
+  })
+
+  it('P1-2: expanding composes the queue IN PLACE (embedded — its own input/title stay hidden), never a tab switch', async () => {
+    routeApiWithConfirmPanel(2, { confirmed: 1, pending: 1 })
+    const navigateStageSpy = vi.fn()
+    const root = await mountBoard({ onNavigateStage: navigateStageSpy })
+
+    ;(root.querySelector('[data-testid="stock-prep-project-board-confirm-toggle"]') as HTMLButtonElement).click()
+    await flush()
+
+    const embedded = root.querySelector('[data-testid="stock-prep-confirmation-queue"]')
+    expect(embedded, 'expanding mounts the composed queue in place, on THIS SAME screen').not.toBeNull()
+    expect(embedded!.querySelector('[data-testid="stock-prep-confirmation-project-input"]'), 'embedded hides its own project-no input').toBeNull()
+    expect(embedded!.querySelector('[data-testid="stock-prep-confirmation-scope"]'), 'embedded hides its own scope/title paragraph').toBeNull()
+    expect(navigateStageSpy, 'expanding never asks the shell to switch tabs').not.toHaveBeenCalled()
+    // The board's own tab (data-active on the shell) is out of scope for a standalone board mount —
+    // the absence of any `navigate-stage` call above is the direct proof no tab switch was requested.
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]'), 'and the workspace status card is still on screen underneath').not.toBeNull()
+  })
+
+  it('P1-2: 进度条 reads the SAME response the composed queue fetched — no second interface, no manual click needed', async () => {
+    routeApiWithConfirmPanel(1, { confirmed: 1, pending: 1 })
+    const root = await mountBoard()
+
+    ;(root.querySelector('[data-testid="stock-prep-project-board-confirm-toggle"]') as HTMLButtonElement).click()
+    await flush()
+
+    const progress = root.querySelector('[data-testid="stock-prep-project-board-confirm-progress"]') as HTMLElement
+    expect(progress, 'Panel 2 itself asks once on mount — the operator did not have to press 刷新列表').not.toBeNull()
+    expect(progress.textContent).toContain('已处理 1 / 共 2')
+    const fill = progress.querySelector('.sp-board__confirm-progress-fill') as HTMLElement
+    expect(fill.style.width).toBe('50%')
+  })
+
+  it('P1-2: an all-confirmed queue clears the progress bar (nothing left to show a ratio of) and still renders 面板', async () => {
+    routeApiWithConfirmPanel(0, { confirmed: 3, pending: 0 })
+    const root = await mountBoard({ projectNo: '230920006' })
+    ;(root.querySelector('[data-testid="stock-prep-project-board-confirm-toggle"]') as HTMLButtonElement).click()
+    await flush()
+    // 3 confirmed / 0 pending is a genuinely 100% bar (total 3), not "nothing to show" — only 0/0 is.
+    const progress = root.querySelector('[data-testid="stock-prep-project-board-confirm-progress"]') as HTMLElement
+    expect(progress).not.toBeNull()
+    expect(progress.textContent).toContain('已处理 3 / 共 3')
+  })
+
+  it('P1-2 (线框 D ④): 「回到上面再同步一次」 inside Panel 2 scrolls to and focuses the sync panel — it never navigates away', async () => {
+    routeApiWithConfirmPanel(0, { confirmed: 2, pending: 0 })
+    const navigateStageSpy = vi.fn()
+    const root = await mountBoard({ onNavigateStage: navigateStageSpy })
+
+    ;(root.querySelector('[data-testid="stock-prep-project-board-confirm-toggle"]') as HTMLButtonElement).click()
+    await flush()
+
+    const syncSection = root.querySelector('[data-testid="stock-prep-project-sync"]') as HTMLElement
+    const scrollSpy = vi.fn()
+    // jsdom implements no scrollIntoView at all — stub it on the element the handler actually targets.
+    syncSection.scrollIntoView = scrollSpy
+    const runButton = root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement
+    const focusSpy = vi.spyOn(runButton, 'focus')
+
+    const resync = root.querySelector('[data-testid="stock-prep-confirmation-empty-resync"]') as HTMLButtonElement
+    expect(resync, 'nothing_pending (2 confirmed, 0 pending) renders the closed-loop button').not.toBeNull()
+    resync.click()
+    await flush()
+
+    expect(scrollSpy, 'scrolled to the SAME sync panel 「下一步」 already reaches for').toHaveBeenCalled()
+    expect(focusSpy, 'and focused its run button, ready for the next press').toHaveBeenCalled()
+    expect(navigateStageSpy, 'never asked the shell to switch tabs — the panel already IS "上面"').not.toHaveBeenCalled()
+  })
 })
