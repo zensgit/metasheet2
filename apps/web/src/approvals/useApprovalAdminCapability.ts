@@ -21,7 +21,11 @@
  *      renders as "nothing actionable yet", so this needs no new UI.
  *   3. GENERATION-GUARDED. Reads are not ordered: a slow first read can settle after the read that
  *      superseded it. Only the answer belonging to the newest read is ever applied, so an old
- *      request can never refill the state after a newer one.
+ *      request can never refill the state after a newer one. The generation is bumped by the
+ *      TRANSITION as well as by each new read (round-7): a transition that issues no new read — a
+ *      sign-out — must still retire the read already in flight, or the answer about the principal
+ *      that has gone would be applied to the surface after it. This is display state; every real
+ *      gate is server-side and unchanged.
  *
  * `onInvalidated` is the seam for state a consumer derives FROM the capability — the page's loaded
  * queue, for instance, which belongs to the principal that loaded it and must be dropped with it.
@@ -71,8 +75,18 @@ export function useApprovalAdminCapability(
   let disposed = false
 
   const unsubscribe = onApprovalAdminCapabilityInvalidated(() => {
-    // SYNCHRONOUS. Whatever this surface was showing was about the principal that has just been
-    // replaced, and it must not survive a single frame of the new one.
+    // RETIRE EVERY READ IN FLIGHT, SYNCHRONOUSLY AND FIRST (round-7). Bumping the generation only
+    // inside `read()` tied invalidation to the issuing of a NEW read, and one transition issues
+    // none: a sign-out leaves no principal to ask about, so the branch below returns without
+    // reading and the counter never moved. A read issued for the previous principal then still
+    // matched the current generation when it settled, and wrote its answer — measured as a
+    // `granted` answer restoring the form after the session was cleared. Bumping here makes the
+    // guard a statement about the TRANSITION rather than about the next request, so it holds
+    // whether or not a request follows. Ahead of `onInvalidated` too, so a consumer's own
+    // teardown cannot run while an old answer is still eligible to land.
+    generation += 1
+    // Whatever this surface was showing was about the principal that has just been replaced, and it
+    // must not survive a single frame of the new one.
     capability.value = 'pending'
     options.onInvalidated?.()
     // A transition that left NO session is answered without asking: there is no principal to ask

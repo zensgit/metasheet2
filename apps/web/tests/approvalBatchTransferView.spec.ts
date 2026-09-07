@@ -986,6 +986,62 @@ describe('ApprovalBatchTransferView', () => {
   })
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Round-7 — the transition the test above does NOT cover, because it is the
+  // one transition that issues no new read. The generation guard was moved by
+  // the issuing of a NEW request, so a sign-out (no principal left to ask
+  // about, so no request) never moved it, and the previous principal's answer
+  // still matched when it settled. The pair below is the whole rule: a
+  // transition retires the reads in flight, and a page with no transition still
+  // gets its answer.
+  // ───────────────────────────────────────────────────────────────────────────
+  it('never applies a capability answer that arrives after the session was cleared', async () => {
+    // Signed in before the mount, so the read below is issued FOR a principal and what follows is a
+    // real sign-out rather than a null-to-null transition.
+    useAuth().setToken(tokenFor('user-a'))
+    let releaseFirst: ((value: string) => void) | null = null
+    resolveCapabilitySpy.mockReturnValueOnce(new Promise<string>((resolve) => { releaseFirst = resolve }))
+    const root = await mountView()
+    expect(q(root, 'batch-transfer-capability-pending')).toBeTruthy()
+
+    useAuth().clearToken()
+    await flushUi()
+    // There is no principal to ask about, so nothing is re-read: the state below is what the page
+    // holds with ONE outstanding request, issued by the principal that has gone.
+    expect(getAuthPrincipalKey()).toBeNull()
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(1)
+
+    releaseFirst!('granted')
+    await flushUi()
+
+    // `granted` about nobody is not a state this page may enter.
+    expect(q(root, 'batch-transfer-capability-pending')).toBeTruthy()
+    expect(q(root, 'batch-transfer-source-picker')).toBeNull()
+    expect(q(root, 'batch-transfer-target-picker')).toBeNull()
+    expect(q(root, 'batch-transfer-reason')).toBeNull()
+    expect(q(root, 'batch-transfer-load')).toBeNull()
+    expect(q(root, 'batch-transfer-select-all')).toBeNull()
+    expect(q(root, 'batch-transfer-submit')).toBeNull()
+  })
+
+  it('still applies an in-flight capability answer when no transition happened (positive control)', async () => {
+    // The same outstanding read, and nothing else the same: no sign-out. Without this leg, a page
+    // that had simply stopped applying capability answers at all would pass the test above.
+    useAuth().setToken(tokenFor('user-a'))
+    let releaseFirst: ((value: string) => void) | null = null
+    resolveCapabilitySpy.mockReturnValueOnce(new Promise<string>((resolve) => { releaseFirst = resolve }))
+    const root = await mountView()
+    expect(q(root, 'batch-transfer-capability-pending')).toBeTruthy()
+
+    releaseFirst!('granted')
+    await flushUi()
+
+    expect(q(root, 'batch-transfer-capability-pending')).toBeNull()
+    expect(q(root, 'batch-transfer-source-picker')).toBeTruthy()
+    expect(q(root, 'batch-transfer-reason')).toBeTruthy()
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(1)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Round-5 item 1 — the SUBMIT half of the same rule. The invalidation empties
   // the page, but a POST that was already issued is not cancelled by it: when it
   // settles it writes outcomes, a summary, the latch and a toast. Those are the
