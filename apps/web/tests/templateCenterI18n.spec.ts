@@ -319,7 +319,12 @@ function renderedTextAndAttributes(root: HTMLElement): string {
   return parts.join(' | ')
 }
 
-const CJK = /[一-鿿]/
+// Round-2 fix (C6, NIT): widened from `[一-鿿]` (U+4E00–U+9FFF only) to also include the
+// Halfwidth-and-Fullwidth-Forms block (U+FF00–U+FFEF) — fullwidth punctuation like `，`(U+FF0C)
+// and `：`(U+FF1A), both present in templateCenterLabels.ts's ZH table, previously fell outside
+// the class entirely, so a punctuation-only stray literal (no U+4E00–U+9FFF characters at all)
+// would have passed every sweep and the guard below undetected.
+const CJK = /[一-鿿＀-￯]/
 
 describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
   let app: VueApp<Element> | null = null
@@ -567,34 +572,218 @@ describe('TemplateCenterView — i18n retrofit (report item O-8)', () => {
     expect(elSuccessSpy).toHaveBeenCalledWith('已克隆模板：出差申请 (副本)')
   })
 
+  // Round-2 fix (C1): every test above seeds the locale BEFORE mounting, so none of them can
+  // distinguish a reactive read from a snapshot taken once at setup. This mounts in zh-CN, flips
+  // the SAME shell locale source (`useLocale().setLocale`, exactly what App.vue's switcher calls)
+  // AFTER mount, and asserts the already-mounted DOM re-renders in the new locale — then flips
+  // back. Asserted on `t`-derived text specifically (header title, new-template button), not the
+  // StatusTag badge: StatusTag reads `useLocale()` itself, so a badge-only assertion would stay
+  // green even if THIS page's own `t` stopped following the locale — it would not discriminate
+  // the mutation this test exists to catch.
+  it('re-renders admin-table chrome when the shell locale flips AFTER mount, not just a mount-time snapshot', async () => {
+    setLocale('zh-CN')
+    mockTemplates.value = [buildTemplate({ id: 'tpl_pub', status: 'published' })]
+    const root = await mountView()
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+    expect(root.querySelector('[data-tab-pane="all"]')?.getAttribute('data-tab-label')).toBe('全部')
+
+    setLocale('en')
+    await flushUi()
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('Approval Templates')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('New template')
+    expect(root.querySelector('[data-tab-pane="all"]')?.getAttribute('data-tab-label')).toBe('All')
+
+    setLocale('zh-CN')
+    await flushUi()
+    expect(root.querySelector('.template-center__header')?.textContent).toContain('审批模板')
+    expect(root.querySelector('[data-testid="template-center-new-button"]')?.textContent).toBe('新建模板')
+    expect(root.querySelector('[data-tab-pane="all"]')?.getAttribute('data-tab-label')).toBe('全部')
+  })
+
+  // Round-2 fix (C2): `formatDate` (TemplateCenterView.vue) branches on `isZh.value` with zero
+  // prior coverage. Pins BOTH locales' output: the repo convention (approval-detail-field.test.ts)
+  // of comparing against `new Date(x).toLocaleString(locale)` computed inline (timezone-
+  // independent, since both sides run in the same process), PLUS a structural shape regex so the
+  // two locales are pinned as actually DIFFERENT shapes (comma + AM/PM for en-US vs a bare 24h
+  // clock for zh-CN), not just "whatever toLocaleString happens to return today". Seeded before
+  // mount in each locale (unmount/remount), not flip-based, so this stays independent of the C1
+  // flip-mutation above.
+  it('table date columns (Last updated / Created) follow the locale format, not a hardcoded zh-CN one', async () => {
+    const template = buildTemplate({
+      id: 'tpl_pub',
+      status: 'published',
+      updatedAt: '2026-04-10T10:00:00Z',
+      createdAt: '2026-01-02T03:04:05Z',
+    })
+
+    setLocale('en')
+    mockTemplates.value = [template]
+    const root = await mountView()
+    const updatedEn = root.querySelector('[data-el-row="0"] [data-el-cell="Last updated"]')?.textContent?.trim()
+    const createdEn = root.querySelector('[data-el-row="0"] [data-el-cell="Created"]')?.textContent?.trim()
+    expect(updatedEn).toBe(new Date(template.updatedAt).toLocaleString('en-US'))
+    expect(createdEn).toBe(new Date(template.createdAt).toLocaleString('en-US'))
+    expect(updatedEn).toMatch(/^\d{1,2}\/\d{1,2}\/\d{4},\s\d{1,2}:\d{2}:\d{2}\s?(AM|PM)$/)
+
+    if (app) app.unmount()
+    setLocale('zh-CN')
+    const root2 = await mountView()
+    const updatedZh = root2.querySelector('[data-el-row="0"] [data-el-cell="最近更新"]')?.textContent?.trim()
+    const createdZh = root2.querySelector('[data-el-row="0"] [data-el-cell="创建时间"]')?.textContent?.trim()
+    expect(updatedZh).toBe(new Date(template.updatedAt).toLocaleString('zh-CN'))
+    expect(createdZh).toBe(new Date(template.createdAt).toLocaleString('zh-CN'))
+    expect(updatedZh).toMatch(/^\d{4}\/\d{1,2}\/\d{1,2}\s\d{1,2}:\d{2}:\d{2}$/)
+  })
+
+  // Round-2 fix (C3): removing `force-locale="zh"` from the GALLERY-CARD StatusTag had zero
+  // coverage (the admin-table StatusTag's twin IS covered, via the [data-domain] assertions in
+  // the "renders every admin-table chrome string" tests above). Mounts the requester gallery
+  // (the only path that renders `template-center-gallery-card`) in both locales and reads the
+  // badge specifically inside that card.
+  it("requester gallery card's status badge follows the locale (not pinned via force-locale)", async () => {
+    setLocale('en')
+    mockCanManageTemplates.value = false
+    mockTemplates.value = [buildTemplate({ id: 'tpl_pub', status: 'published' })]
+    const root = await mountView()
+    const cardEn = root.querySelector('[data-testid="template-center-gallery-card"]')
+    expect(cardEn).toBeTruthy()
+    expect(cardEn?.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('Published')
+
+    if (app) app.unmount()
+    setLocale('zh-CN')
+    const root2 = await mountView()
+    const cardZh = root2.querySelector('[data-testid="template-center-gallery-card"]')
+    expect(cardZh).toBeTruthy()
+    expect(cardZh?.querySelector('[data-domain="approvalTemplate"]')?.textContent).toBe('已发布')
+  })
+
   // -------------------------------------------------------------------------
-  // Guard: no CJK literal survives outside templateCenterLabels.ts's ZH table. Mechanical scan
-  // of the one file this slice converted — a closed list scoped to this slice (report item O-8),
-  // not a discovery scan over the whole approval module. Comments and other approval views are
-  // out of scope and untouched; see couldNotDo in the O-8 report for what else remains hardcoded.
+  // Guard: no CJK literal survives outside a locale table, for every converted surface in this
+  // slice (report item O-8). Round-2 fixes (C4/C5):
+  //
+  //  - C4: the previous `line.replace(/\/\/.*$/, '')` stripped from the FIRST `//` on a line
+  //    unconditionally, which defeats the guard entirely when a CJK literal shares a line with a
+  //    URL (`<a href="https://x/docs">最近使用</a>` — the `//` inside `https://` truncated
+  //    everything after it, including the literal). Fixed by only treating `//` as a comment
+  //    starter when nothing before it on the line contains a quote character — a genuine
+  //    commented-out line has nothing but whitespace before `//`; a URL inside an attribute or a
+  //    string literal always has an unclosed quote before it. See `stripLineCommentsConservatively`.
+  //  - C5: the guard previously covered only TemplateCenterView.vue (converted in full).
+  //    ApprovalCenterView.vue — this slice's OTHER converted file — is now covered too, but NOT
+  //    via a whole-file sweep: that file is only PARTIALLY converted (just the `tabEmptyText`
+  //    empty-text wiring), and the rest of its ~1800 lines are deliberately untouched, still-
+  //    Chinese chrome, out of scope for this slice (tabs/filters/batch-toolbar/dialogs/etc. — see
+  //    this slice's commit body). A whole-file scan would fire on hundreds of pre-existing,
+  //    intentional literals unrelated to this change. So ApprovalCenterView.vue's guard is scoped
+  //    to the converted CONSTRUCT: it allowlists the `tabEmptyText` computed's `isZh` branch BY
+  //    NAME, with this reason (it is real Chinese-language DATA, not a stray untranslated
+  //    string) — the file is not dropped from coverage, only the guard shape differs per file.
   // -------------------------------------------------------------------------
+  const CONVERTED_FILES = [
+    '../src/views/approval/TemplateCenterView.vue',
+    '../src/views/approval/ApprovalCenterView.vue',
+  ]
+
+  // Strips a line's trailing `// ...` ONLY when nothing before the FIRST `//` on that line
+  // contains a quote character (`'`, `"`, `` ` ``). A truly commented-out line has nothing but
+  // whitespace before `//`, so it strips exactly as before. A `//` that is part of a URL inside a
+  // quoted attribute or string (`<a href="https://…">`, `const u = 'https://…/中文'`) always has
+  // an opening quote earlier on the same line, so this leaves the WHOLE line untouched instead of
+  // truncating everything after the URL's `//` — the defeat this guard had. Tradeoff (intentional,
+  // fail-closed): a genuine trailing comment after a quoted expression (`foo('bar') // 说明`)
+  // would also be left unstripped and could false-positive the CJK check below — verified this
+  // pattern occurs nowhere in either converted file (`grep -n "['"\`].*//"` over both: zero
+  // matches), and the guard runs green on the unmodified files below, which is itself a positive
+  // control that stripping still works for every REAL comment in both files.
+  function stripLineCommentsConservatively(source: string): string {
+    return source
+      .split('\n')
+      .map((line) => {
+        const slashIdx = line.indexOf('//')
+        if (slashIdx === -1) return line
+        const before = line.slice(0, slashIdx)
+        if (/['"`]/.test(before)) return line
+        return before
+      })
+      .join('\n')
+  }
+
+  // Extracts the source span of a balanced `{...}` starting at `openBraceIndex` (the character AT
+  // that index must be `{`). Used to pull ApprovalCenterView.vue's `tabEmptyText` computed body,
+  // and its nested `if (isZh.value) { ... }` block, out of the file without a full parser — both
+  // are plain object-literal returns with no template strings or nested functions, so a bare
+  // brace counter is sufficient.
+  function extractBalanced(source: string, openBraceIndex: number): { text: string; endIndex: number } {
+    let depth = 0
+    for (let i = openBraceIndex; i < source.length; i += 1) {
+      if (source[i] === '{') depth += 1
+      else if (source[i] === '}') {
+        depth -= 1
+        if (depth === 0) return { text: source.slice(openBraceIndex, i + 1), endIndex: i }
+      }
+    }
+    throw new Error(`unbalanced braces starting at index ${openBraceIndex}`)
+  }
+
   it('guard: TemplateCenterView.vue has no CJK literal in its template or script outside templateCenterLabels.ts', async () => {
     const fs = await import('node:fs')
     const path = await import('node:path')
-    const CONVERTED_FILES = ['../src/views/approval/TemplateCenterView.vue']
-    for (const rel of CONVERTED_FILES) {
-      const abs = path.resolve(__dirname, rel)
-      const source = fs.readFileSync(abs, 'utf-8')
-      const noStyle = source.replace(/<style[\s\S]*?<\/style>/g, '')
-      // Strip HTML comments (which may span multiple lines — a naive per-line
-      // `.startsWith('<!--')` check misses a continuation line of a multi-line block) and
-      // block/line JS comments, THEN scan what remains for CJK. Line comments are stripped with
-      // a regex rather than a full JS/TS tokenizer, so a CJK character inside a STRING literal
-      // that happens to follow `//` on the same line would be missed — not a risk here since
-      // every string this file's script section holds is either ASCII (ids/keys) or already
-      // routed through templateCenterLabels.ts, which this guard does not scan.
-      const noHtmlComments = noStyle.replace(/<!--[\s\S]*?-->/g, '')
-      const noBlockComments = noHtmlComments.replace(/\/\*[\s\S]*?\*\//g, '')
-      const codeLines = noBlockComments
-        .split('\n')
-        .map((line) => line.replace(/\/\/.*$/, ''))
-      const offenders = codeLines.filter((line) => CJK.test(line))
-      expect(offenders).toEqual([])
+    const abs = path.resolve(__dirname, CONVERTED_FILES[0]!)
+    const source = fs.readFileSync(abs, 'utf-8')
+    // Strip HTML comments (which may span multiple lines — a naive per-line
+    // `.startsWith('<!--')` check misses a continuation line of a multi-line block), block
+    // comments, then line comments (conservatively — see stripLineCommentsConservatively above),
+    // THEN scan what remains for CJK. Every string this file's script section holds is either
+    // ASCII (ids/keys) or already routed through templateCenterLabels.ts, which this guard does
+    // not scan.
+    const noStyle = source.replace(/<style[\s\S]*?<\/style>/g, '')
+    const noHtmlComments = noStyle.replace(/<!--[\s\S]*?-->/g, '')
+    const noBlockComments = noHtmlComments.replace(/\/\*[\s\S]*?\*\//g, '')
+    const stripped = stripLineCommentsConservatively(noBlockComments)
+    const offenders = stripped.split('\n').filter((line) => CJK.test(line))
+    expect(offenders).toEqual([])
+  })
+
+  it("guard: ApprovalCenterView.vue's converted tabEmptyText construct has no CJK literal outside its by-design ZH branch", async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const abs = path.resolve(__dirname, CONVERTED_FILES[1]!)
+    const source = fs.readFileSync(abs, 'utf-8')
+
+    // 1) Every `:empty-text="..."` binding (desktop ApprovalCenterTable + mobile
+    //    ApprovalMobileList, 5 tabs × 2 layouts = 10) must read a `tabEmptyText.<key>` property
+    //    path, never a hardcoded literal — this is exactly where the pre-fix bug lived (report
+    //    item O-8). The length assertion guards against this silently becoming a vacuous 0-match
+    //    check if the attribute is ever renamed.
+    const emptyTextBindings = Array.from(source.matchAll(/:empty-text="([^"]*)"/g)).map((m) => m[1])
+    expect(emptyTextBindings.length).toBe(10)
+    for (const binding of emptyTextBindings) {
+      expect(binding).toMatch(/^tabEmptyText\.[a-zA-Z]+$/)
     }
+
+    // 2) tabEmptyText's own body: the `if (isZh.value) { ... }` branch is real Chinese-language
+    //    DATA by design (the construct report item C5 names) and is allowlisted here, BY NAME,
+    //    with this reason — not by excluding the rest of the file. Everything else in the
+    //    computed (the English `return` branch) must be CJK-free like any other converted surface.
+    const computedMarker = 'const tabEmptyText = computed(() => {'
+    const computedStart = source.indexOf(computedMarker)
+    expect(computedStart).toBeGreaterThan(-1)
+    const { text: computedBody } = extractBalanced(source, computedStart + computedMarker.length - 1)
+
+    const ifMarker = 'if (isZh.value) {'
+    const ifStart = computedBody.indexOf(ifMarker)
+    expect(ifStart).toBeGreaterThan(-1)
+    const { text: allowedZhBranch, endIndex: ifEnd } = extractBalanced(
+      computedBody,
+      ifStart + ifMarker.length - 1,
+    )
+    // Sanity: the allowlisted span really is the ZH data, not an extraction bug that silently
+    // allowlists nothing (which would make this whole check vacuous).
+    expect(CJK.test(allowedZhBranch)).toBe(true)
+
+    const englishBranch = computedBody.slice(0, ifStart) + computedBody.slice(ifEnd + 1)
+    const offenders = englishBranch.split('\n').filter((line) => CJK.test(line))
+    expect(offenders).toEqual([])
   })
 })

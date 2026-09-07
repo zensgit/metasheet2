@@ -582,10 +582,13 @@ describe('ApprovalCenterView — desktop empty-text i18n (report item O-8)', () 
     await mountView()
 
     // This stubbed ElTabs/ElTabPane (unlike real Element Plus) renders every pane's content
-    // unconditionally rather than lazily mounting only the active one — confirmed by this same
-    // file's own "renders 5 tabs" test, which counts all 5 `[data-tab-pane]` nodes right after
-    // mount with no tab switch. So all five ApprovalCenterTable empty states are already in the
-    // DOM in template order (pending, mine, cc, completed, processed) with no drive needed.
+    // unconditionally rather than lazily mounting only the active one, mirroring
+    // approval-center.spec.ts's own "renders 5 tabs" test — this file is a fresh COPY of that
+    // file's harness (see the header comment above), not the same file, so that test does not
+    // itself live here. Confirmed IN THIS FILE by the inline assertion immediately below
+    // (`[data-tab-pane]` count === 5) right after mount with no tab switch. So all five
+    // ApprovalCenterTable empty states are already in the DOM in template order (pending, mine,
+    // cc, completed, processed) with no drive needed.
     expect(container!.querySelectorAll('[data-tab-pane]').length).toBe(5)
 
     const emptyNodes = Array.from(container!.querySelectorAll('[data-el-empty]')).map((el) => el.textContent)
@@ -596,5 +599,28 @@ describe('ApprovalCenterView — desktop empty-text i18n (report item O-8)', () 
       'No completed approvals',
       'No approvals you have processed',
     ])
+  })
+
+  // Round-2 fix (C1): every test above seeds the locale BEFORE mounting, so none of them can
+  // distinguish `tabEmptyText` actually reacting to the shell locale from a snapshot taken once
+  // at setup. This mounts in zh-CN, flips the SAME shell locale source (`useLocale().setLocale`,
+  // exactly what App.vue's switcher calls) AFTER mount, and asserts the already-mounted DOM
+  // re-renders in the new locale — then flips back.
+  it('desktop empty text re-renders when the shell locale flips AFTER mount, not just a mount-time snapshot', async () => {
+    setLocale('zh-CN')
+    mockPendingApprovals.value = []
+    await mountView()
+    let empty = container!.querySelector('[data-el-empty]')
+    expect(empty?.textContent).toBe('暂无待处理审批')
+
+    setLocale('en')
+    await flushUi()
+    empty = container!.querySelector('[data-el-empty]')
+    expect(empty?.textContent).toBe('No pending approvals')
+
+    setLocale('zh-CN')
+    await flushUi()
+    empty = container!.querySelector('[data-el-empty]')
+    expect(empty?.textContent).toBe('暂无待处理审批')
   })
 })
