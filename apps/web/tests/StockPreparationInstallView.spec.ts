@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 // BOM备料 安装页 — the DOM half.
 //
@@ -821,5 +823,183 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     const root = await mountView()
     expect(root.querySelector('[data-testid="stock-prep-install-error-next"]')?.textContent?.trim().length ?? 0).toBeGreaterThan(0)
     expect(root.querySelector('[data-testid="stock-prep-install-error-copy"]')).not.toBeNull()
+  })
+
+  // ---------------------------------------------------------------------------
+  // P1-7 — the three-region reorg. ① (the wizard, mounted first) is unchanged and already covered by
+  // the P0-4 tests above. These three pin ② (「即将安装的内容」split into <details>, first section
+  // open) and ③ (the new 「装完之后回来复查」 wrapper, including the one card that MOVES into it —
+  // StockPreparationSourceBindingPanel — and the new error-code drawer mounted at its foot).
+  // ---------------------------------------------------------------------------
+
+  it('P1-7a: 「即将安装的内容」splits into <details> — first section open, the rest collapsed', async () => {
+    const root = await mountView()
+    const defaultsSection = root.querySelector('[data-testid="stock-prep-install-defaults"]') as HTMLElement
+    const folds = Array.from(defaultsSection.querySelectorAll('[data-testid="stock-prep-install-fold"]')) as HTMLDetailsElement[]
+    // 五段:会建哪几张表 / 装好之后谁能做什么 / 需要在服务器上准备的东西 / 系统绝对不会做的事 / 怎么算装成功了
+    expect(folds.length).toBe(5)
+    expect(folds.map((fold) => fold.tagName.toLowerCase()), 'a real <details>, not a CSS-only hide').toEqual(Array(5).fill('details'))
+    expect(folds[0].dataset.fold).toBe('objects')
+    expect(folds[0].open, 'the first section (哪几张表) renders expanded').toBe(true)
+    for (const fold of folds.slice(1)) {
+      expect(fold.open, `${fold.dataset.fold} must start collapsed`).toBe(false)
+    }
+
+    // Collapsed does NOT mean absent from the DOM: V-01 above already reads every one of these rows
+    // by testid regardless of which <details> it now sits inside — restated here as the structural
+    // guarantee the split depends on, using a row inside a COLLAPSED section (config surfaces, the
+    // third fold) rather than the open first one.
+    const configFold = folds.find((fold) => fold.dataset.fold === 'config-surfaces')!
+    expect(configFold.open).toBe(false)
+    expect(configFold.querySelector('[data-testid="stock-prep-install-config-surface"]')).not.toBeNull()
+    expect(configFold.textContent).toContain('装在服务器上')
+
+    // V-02's "no button in this panel" still holds: <summary> is not a <button>.
+    expect(defaultsSection.querySelectorAll('button').length).toBe(0)
+
+    // A11Y: the five section titles must STILL be headings. Replacing each <h4> with a bare <summary>
+    // would drop this whole region out of the screen-reader outline — heading navigation through
+    // 「即将安装的内容」would silently stop working, and no other assertion here would notice.
+    for (const fold of folds) {
+      const summary = fold.querySelector('summary')!
+      expect(summary, `${fold.dataset.fold} needs a <summary>`).not.toBeNull()
+      const heading = summary.querySelector('h4')
+      expect(heading, `${fold.dataset.fold}'s summary must still carry its <h4>`).not.toBeNull()
+      expect(heading!.textContent?.trim().length ?? 0).toBeGreaterThan(0)
+    }
+  })
+
+  it('P1-7b: 「装完之后回来复查」wraps the preflight, source-preflight and run panels', async () => {
+    h.permissions = ['stock-prep:admin', 'integration:admin']
+    const root = await mountView()
+    const review = root.querySelector('[data-testid="stock-prep-install-review-section"]') as HTMLElement
+    expect(review, 'the review region must exist').not.toBeNull()
+
+    for (const testid of [
+      'stock-prep-install-preflight',
+      'stock-prep-install-preflight-relation',
+      'stock-prep-source-preflight',
+      'stock-prep-install-run-panel',
+    ]) {
+      const node = root.querySelector(`[data-testid="${testid}"]`)
+      expect(node, `${testid} must still render`).not.toBeNull()
+      expect(review.contains(node), `${testid} must sit inside the review region`).toBe(true)
+    }
+
+    // 「即将安装的内容」is region ②, not part of region ③ — the two must not nest either way.
+    const defaults = root.querySelector('[data-testid="stock-prep-install-defaults"]') as HTMLElement
+    expect(review.contains(defaults)).toBe(false)
+    expect(defaults.contains(review)).toBe(false)
+  })
+
+  it('P1-7b: the source-binding panel STAYS under the wizard — after it, above ②, outside ③', async () => {
+    // The wizard's step ③「告诉备料用这条源」has no button, no anchor and no scroll of its own:
+    // StockPreparationSourceBindingPanel IS its only execution site. An earlier draft of this wave
+    // moved that panel below ②'s ~240 template lines, which left the wizard's next action somewhere
+    // the reader had to go hunting for — and nothing in this suite noticed, because every other
+    // assertion locates by testid and testids are position-independent. This pins the ORDER itself.
+    h.permissions = ['stock-prep:admin', 'integration:admin']
+    const root = await mountView()
+    const binding = root.querySelector('[data-testid="stock-prep-source-binding"]') as HTMLElement
+    const wizard = root.querySelector('[data-testid="stock-prep-getting-started"]') as HTMLElement
+    const defaults = root.querySelector('[data-testid="stock-prep-install-defaults"]') as HTMLElement
+    const review = root.querySelector('[data-testid="stock-prep-install-review-section"]') as HTMLElement
+    expect(binding, 'the source-binding panel must still render').not.toBeNull()
+    expect(wizard, 'the wizard must still render').not.toBeNull()
+    expect(defaults, 'the manifest defaults card must render on this route double').not.toBeNull()
+
+    const afterWizard = (wizard.compareDocumentPosition(binding) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    const beforeDefaults = (defaults.compareDocumentPosition(binding) & Node.DOCUMENT_POSITION_PRECEDING) !== 0
+    expect(afterWizard, 'source binding must follow the wizard').toBe(true)
+    expect(beforeDefaults, 'source binding must precede 「即将安装的内容」').toBe(true)
+    expect(review.contains(binding), 'and must NOT have been swept into region ③').toBe(false)
+  })
+
+  it('P1-7c: the error-code drawer mounts at the foot of the review region, self-contained', async () => {
+    const root = await mountView()
+    const review = root.querySelector('[data-testid="stock-prep-install-review-section"]') as HTMLElement
+    const drawer = root.querySelector('[data-testid="stock-prep-code-help"]')
+    expect(drawer, 'the code-help drawer must be mounted').not.toBeNull()
+    expect(review.contains(drawer)).toBe(true)
+    // It renders real rows without any scope/props of its own (codeHelp.ts is pure) — a smoke check
+    // that this mount point actually wires the component rather than an empty stub. The panel's own
+    // exhaustive count/search/bilingual/values-free guards live in StockPreparationCodeHelp.spec.ts.
+    expect(root.querySelectorAll('[data-testid="stock-prep-code-help-row"]').length).toBeGreaterThan(0)
+    // The drawer is COLLAPSED here — it costs one line of page height on a page P1-7 just spent its
+    // budget shortening, and the rows above are still in the DOM regardless (that is the whole reason
+    // a closed <details> is safe to assert through).
+    expect((drawer as HTMLDetailsElement).open, 'the drawer must not render expanded').toBe(false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // P1-7d — the STYLE BLOCK actually compiles to the rules it appears to declare.
+  //
+  // Why this exists as a test at all: this file's `<style scoped>` once ended a CSS comment with the
+  // HTML terminator `-->` instead of `*/`. PostCSS reads on to the next real `*/`, so 74 lines were
+  // silently swallowed — the six new `__fold*` rules AND six pre-existing ones (`__table` and
+  // `__table th,td` among them, i.e. every bit of styling on the one section P1-7 leaves expanded).
+  // Nothing in the toolchain saw it: vue-tsc does not parse CSS, jsdom does not apply scoped styles,
+  // there is no stylelint, and this file is not in ui-foundation-style-guard's TARGET_FILES. Eight
+  // suites were green while the page's table had lost its padding and its row separators.
+  //
+  // So this asserts on the compiled shape rather than on the source text: strip comments the way a CSS
+  // parser does, then require each selector to survive. A comment that swallows a block fails here.
+  // ---------------------------------------------------------------------------
+
+  it('P1-7d: every selector this page declares survives comment-stripping (no `-->`-terminated comment eats a block)', () => {
+    const SFC = readFileSync(
+      join(__dirname, '../src/components/integration/stockPreparation/StockPreparationInstallView.vue'),
+      'utf8',
+    )
+    const styleBlock = SFC.match(/<style scoped>([\s\S]*?)<\/style>/)?.[1]
+    expect(styleBlock, 'this component must have a <style scoped> block').toBeTruthy()
+
+    // Exactly what PostCSS does: a comment runs from `/*` to the FIRST `*/`, and `-->` is just text.
+    const stripped = styleBlock!.replace(/\/\*[\s\S]*?\*\//g, '')
+
+    // The selectors that actually survive to a rule: every `…{` header, split on `,` and trimmed.
+    // No regex over the selector itself, so nothing here depends on escaping `[`, `>` or `::`.
+    const declared = new Set<string>()
+    for (const header of stripped.split('{')) {
+      const selectorGroup = header.slice(header.lastIndexOf('}') + 1).trim()
+      if (selectorGroup.length === 0 || selectorGroup.startsWith('@')) continue
+      for (const one of selectorGroup.split(',')) declared.add(one.trim().replace(/\s+/g, ' '))
+    }
+    const declares = (selector: string): boolean => declared.has(selector)
+
+    // Six rules P1-7 ADDS (the five <details> disclosures' affordance and keyboard focus ring)...
+    for (const selector of [
+      '.stock-prep-install__fold',
+      '.stock-prep-install__fold > summary',
+      '.stock-prep-install__fold > summary::before',
+      '.stock-prep-install__fold[open] > summary::before',
+      '.stock-prep-install__fold > summary:focus-visible',
+      '.stock-prep-install__section-title',
+    ]) {
+      expect(declares(selector), `${selector} must reach the compiled stylesheet`).toBe(true)
+    }
+
+    // ...and six that were already on main, which the swallowed comment took down with it. These are
+    // the regression half: they are not this wave's styles, and nothing else in the suite covers them.
+    for (const selector of [
+      '.stock-prep-install__app',
+      '.stock-prep-install__value',
+      '.stock-prep-install__table',
+      '.stock-prep-install__purpose',
+      '.stock-prep-install__list',
+    ]) {
+      expect(declares(selector), `${selector} (pre-existing) must not be swallowed by a comment`).toBe(true)
+    }
+    // Both halves of the grouped `th,td` rule — the cell padding, row separators and alignment.
+    expect(declares('.stock-prep-install__table th')).toBe(true)
+    expect(declares('.stock-prep-install__table td')).toBe(true)
+
+    // A positive control on the checker itself: a selector that is only ever mentioned INSIDE a
+    // comment must NOT be reported as declared, or every assertion above would pass vacuously.
+    expect(declares('.stock-prep-install__no-such-rule')).toBe(false)
+
+    // The direct cause, pinned separately so the failure message names it: a CSS comment never ends
+    // with `-->`. (Template comments above the <style> block are HTML and are unaffected.)
+    expect(styleBlock!.includes('-->'), 'a CSS comment must end with `*/`, never `-->`').toBe(false)
   })
 })
