@@ -310,7 +310,7 @@ describe('项目备料页 — the operator project board', () => {
       const tab = root.querySelector('[data-testid="stock-prep-tab-project-board"]')
       expect(Boolean(tab), `${JSON.stringify(actor)} tab visibility`).toBe(actor.visible)
       // The predicate and the DOM must agree — the tab is not allowed to have its own opinion.
-      expect(canOpenStockPrepProjectBoard(realHasPermission)).toBe(actor.visible)
+      expect(canOpenStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })).toBe(actor.visible)
       remount()
     }
   })
@@ -331,7 +331,7 @@ describe('项目备料页 — the operator project board', () => {
     let root = mount(StockPreparationWorkspace)
     await flush()
     expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
-    expect(landsOnStockPrepProjectBoard(realHasPermission)).toBe(true)
+    expect(landsOnStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })).toBe(true)
     // ...and 项目备料 is still one click away, still its own rail item.
     expect(root.querySelector('[data-testid="stock-prep-tab-project-board"]')).not.toBeNull()
     remount()
@@ -341,7 +341,7 @@ describe('项目备料页 — the operator project board', () => {
     root = mount(StockPreparationWorkspace)
     await flush()
     expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('getting-started')
-    expect(landsOnStockPrepProjectBoard(realHasPermission)).toBe(false)
+    expect(landsOnStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })).toBe(false)
   })
 
   it('B-01: the pull control follows the SERVER split, and the two vocabularies are byte-mirrored', () => {
@@ -366,7 +366,7 @@ describe('项目备料页 — the operator project board', () => {
       const serverAdmitsOperator = backendAccess.operatorMayRunStockPrepPull(flattened, STOCK_PREP_OPERATOR_PULL_ACTION_ID)
       // The button renders when EITHER tier admits: the legacy platform admin, or the operator tier.
       const legacyAdmin = flattened.includes('integration:admin') || flattened.includes('role:admin')
-      expect(canRunStockPrepProjectSync(realHasPermission)).toBe(serverAdmitsOperator || legacyAdmin)
+      expect(canRunStockPrepProjectSync({ roles: h.roles, permissions: h.permissions })).toBe(serverAdmitsOperator || legacyAdmin)
     }
   })
 

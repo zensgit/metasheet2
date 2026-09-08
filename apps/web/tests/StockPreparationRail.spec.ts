@@ -160,6 +160,20 @@ const ACTORS: RailActor[] = [
       'help',
     ],
   },
+  {
+    // 裸 `integration:admin`,没有 admin 角色 —— 服务端一直把它算平台管理员
+    // (`PLATFORM_ADMIN_PERMISSIONS`),PR #5555 起工作台也这么算,所以它看到的与上面一档完全相同。
+    // 这一档以前在浏览器侧只开得出 深度工具,于是【部署与接入】的标题下面除了折叠什么都没有。
+    name: '裸 integration:admin(无 admin 角色)',
+    permissions: ['integration:admin'],
+    roles: [],
+    keys: [
+      'home', 'project-board', 'confirmation-queue',
+      'getting-started', 'install', 'ops',
+      ...LEGACY_MVP_VIEW_KEYS,
+      'help',
+    ],
+  },
 ]
 
 async function flushUi(cycles = 3): Promise<void> {
@@ -355,16 +369,43 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
       const expected: string[] = []
       for (const group of STOCK_PREP_RAIL_GROUPS) {
         for (const item of group.items) {
-          if (canOpenStockPrepRailItem(item.gate, realHasPermission)) expected.push(item.key)
+          if (canOpenStockPrepRailItem(item.gate, { roles: h.roles, permissions: h.permissions })) expected.push(item.key)
         }
         const advancedGate = group.advancedGate
-        if (advancedGate && canOpenStockPrepRailItem(advancedGate, realHasPermission)) {
+        if (advancedGate && canOpenStockPrepRailItem(advancedGate, { roles: h.roles, permissions: h.permissions })) {
           for (const key of group.advanced ?? []) expected.push(key)
         }
       }
       expect([...tabKeys(root)].sort(), `${actor.name}: manifest gates vs rendered rail`).toEqual(expected.sort())
       app!.unmount()
       app = null
+    }
+  })
+
+  it('R-02: 通配持有者只剩确认队列 —— 侧栏不再画一整排会 403 的项', async () => {
+    // 不吃通配 (PR #5555), AT THE DOM LEVEL. `stock-prep:*` / `*:*` / `stock-prep:write` are all
+    // expanded by `useAuth().hasPermission` and refused by the server, so while the workbench decided
+    // on that probe these principals were shown 【工作】 and 【部署与接入】 in full and every control
+    // under them 403'd. The workbench now decides on the server's own literal ladder, so their rail
+    // collapses to the ONE item the shell renders ungated.
+    //
+    // NOT AN `ACTORS` ROW, and the reason is the expected value itself: R-02's manifest-vs-DOM loop
+    // asserts 「rendered == what the manifest's gates admit」, and 确认队列 is exactly where those two
+    // part company — its `views[]` entry carries no gate flag, so the shell renders it for anyone who
+    // got through the route guard. That is stated here with its value rather than hidden by leaving
+    // the principal out. Nothing behind it opens: `stockPrepPermissionMatrix.spec.ts` F-10 asserts
+    // the capability set is empty on both sides, so the queue paints its refusal, not its controls.
+    for (const permissions of [['stock-prep:*'], ['*:*'], ['stock-prep:write']]) {
+      h.permissions = [...permissions]
+      h.roles = []
+      const root = await mountShell()
+      expect([...tabKeys(root)].sort(), `${permissions[0]}: 只剩确认队列`).toEqual(['confirmation-queue'])
+      expect(root.querySelector('[data-testid="stock-prep-rail-group-deploy"]'), `${permissions[0]}: 没有【部署与接入】`).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]'), `${permissions[0]}: 没有深度工具`).toBeNull()
+      expect(await waitForActive(root), `${permissions[0]}: 落确认队列`).toBe('confirmation-queue')
+      app!.unmount()
+      app = null
+      container!.innerHTML = ''
     }
   })
 
@@ -399,7 +440,23 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     // styles are never even injected. So the guard is at SOURCE level, and it is deliberately
     // stronger than 「a rule exists」: the element that gets `display` for its layout must also carry
     // an explicit `[hidden]` branch turning it off.
-    expect(RAIL_SRC).toMatch(/\.sp-rail__advanced-panel\[hidden\]\s*\{[^}]*display:\s*none/)
+    //
+    // AND THE RULE IS LOOKED UP BY THE CLASS THE PANEL ACTUALLY WEARS, not by a class name copied
+    // into this file. A literal `.sp-rail__advanced-panel[hidden]` needle passes for ever once
+    // written: renaming the panel's class leaves the old, now-dead rule in the style block and the
+    // assertion still finds it, while the live element is back to being painted. So the class is read
+    // out of the panel's own tag first, and the stylesheet is then required to switch THAT class off.
+    const panelTag = RAIL_SRC.slice(
+      RAIL_SRC.lastIndexOf('<', RAIL_SRC.indexOf('data-testid="stock-prep-rail-advanced-panel"')),
+      RAIL_SRC.indexOf('>', RAIL_SRC.indexOf('data-testid="stock-prep-rail-advanced-panel"')),
+    )
+    const panelClass = /\bclass="([^"]+)"/.exec(panelTag)?.[1]?.trim()
+    expect(panelClass, '深度工具 的面板必须有一个静态 class,样式表才有东西可关').toBeTruthy()
+    expect(panelClass!.split(/\s+/).length, 'one static class, so the rule below is unambiguous').toBe(1)
+    const hiddenRule = new RegExp(
+      `\\.${panelClass!.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&')}\\[hidden\\]\\s*\\{[^}]*display:\\s*none`,
+    )
+    expect(RAIL_SRC, `${panelClass} 必须有一条 [hidden] 分支把 display 关掉`).toMatch(hiddenRule)
     // And no `!important` smuggled in to make it work by force — a fold whose off state needs to
     // out-shout its own layout rule is a fold that will lose the next time the layout changes.
     expect(RAIL_SRC).not.toContain('!important')
@@ -588,6 +645,37 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     expect(root.querySelector('[data-testid="stock-prep-source-binding"]')).not.toBeNull()
     // ②「证明它只能读」的执行位:这一档跑不了(要 integration 权限),所以出的是说明而不是按钮。
     expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-verify-denied"]')).not.toBeNull()
+  })
+
+  it('mode: 「开始使用」读不到时也说得出为什么 —— 报错条与「复制这条报错」都在', async () => {
+    // THE BLIND MODE. `mode="wizard"` renders the wizard and (before this fix) nothing else, so the
+    // one paragraph this component uses to report its OWN failed reads sat inside the review-only
+    // wrapper. D2 lands a brand-new deployment's admin here, and a refused/500 manifest read left
+    // them looking at 「? 看不到」 on every step with no HTTP code, no next step and no
+    // 复制这条报错 — 「读不到」 rendered as 「没完成」, manufactured by us.
+    h.permissions = ['stock-prep:read', 'stock-prep:admin']
+    h.roles = []
+    h.apiFetch.mockImplementation(async (url: string) => {
+      const target = String(url)
+      if (target.includes('/platform/apps/stock-preparation')) {
+        return new Response(JSON.stringify({ ok: false }), { status: 500 })
+      }
+      if (target.includes('/stock-preparation/preflight')) {
+        return new Response(JSON.stringify({ ok: true, data: NOT_INSTALLED }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: { eligibleSources: [] } }), { status: 200 })
+    })
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-tab-getting-started"]') as HTMLButtonElement).click()
+    await flushUi(8)
+    expect(root.querySelector('[data-testid="stock-prep-install"]')?.getAttribute('data-mode')).toBe('wizard')
+    // 仍然只出向导 —— 这条报错不是把复查区偷偷带回来了。
+    expect(root.querySelector('[data-testid="stock-prep-install-intro"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-install-review-section"]')).toBeNull()
+    const error = root.querySelector('[data-testid="stock-prep-install-error"]')
+    expect(error, '向导模式下读不到也要说读不到').not.toBeNull()
+    expect(error!.textContent).toContain('500')
+    expect(root.querySelector('[data-testid="stock-prep-install-error-copy"]'), '「复制这条报错」是这条报错唯一的出口').not.toBeNull()
   })
 
   it('mode: 「安装 / 体检」出三分区,不再出向导', async () => {

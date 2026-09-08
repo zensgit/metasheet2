@@ -694,7 +694,7 @@ const capabilityById = computed(() => {
 function can(capabilityId: string): boolean {
   const capability = capabilityById.value.get(capabilityId)
   if (!capability) return false
-  return canStockPrepCapability(capability, (permission) => auth.hasPermission(permission))
+  return canStockPrepCapability(capability, auth.getAccessSnapshot())
 }
 
 /**
@@ -732,7 +732,7 @@ const pendingConfirmTooltip = STOCK_PREP_TOOLTIP_PENDING_CONFIRM
  * platform-admin write gate, and a `stock-prep:admin` holder who may READ the install page but not
  * run it should still be able to go look at it.
  */
-const canOpenInstallView = computed(() => canOpenStockPrepInstallView((permission) => auth.hasPermission(permission)))
+const canOpenInstallView = computed(() => canOpenStockPrepInstallView(auth.getAccessSnapshot()))
 
 /**
  * The SAME predicate the shell filters 项目备料 with — the sibling of the one above, for the sibling
@@ -742,7 +742,7 @@ const canOpenInstallView = computed(() => canOpenStockPrepInstallView((permissio
  * their landing tab — a button that moves nothing. It is one predicate, read from workbenchAccess.ts,
  * so a change to who may open that tab can never leave this button behind.
  */
-const canOpenProjectBoard = computed(() => canOpenStockPrepProjectBoard((permission) => auth.hasPermission(permission)))
+const canOpenProjectBoard = computed(() => canOpenStockPrepProjectBoard(auth.getAccessSnapshot()))
 
 /** 「复制这条报错」(P0-5, I-21). idle → copy → copied → idle again 3s later; never a permanent state. */
 const errorCopyLabel = ref<'copy' | 'copied'>('copy')

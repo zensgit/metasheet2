@@ -35,6 +35,14 @@
 //     `useAuth().hasPermission` (`apps/web/src/composables/useAuth.ts`) would expand it and render
 //     the controls. That divergence is a platform-level misalignment, not this page's to paper
 //     over: counting such a role as 「能用」 would promise access the server then refuses.
+//     AS OF PR #5555 THE WORKBENCH PREDICATES DO NOT HONOUR IT EITHER: every gate, landing key and
+//     capability set in `workbenchAccess.ts` is now computed by that file's own literal
+//     `satisfiesStockPrepAccess` / `holdsPlatformAdmin` over a `{ roles, permissions }` snapshot
+//     rather than through `useAuth().hasPermission`, so this step and the tab strip it describes
+//     answer the same way for the same role. `useAuth().hasPermission` still expands the wildcard
+//     for the ROUTE guard (app-wide machinery this wave did not touch), which is why a
+//     wildcard-only holder can still reach `/stock-prep` and then find every panel empty — the
+//     residual misalignment named in that PR's 「没做/偏离」.
 //   · `*:*` on a role that is not the platform-admin role — members get `*:*` in their permission
 //     list but NOT the `role:admin` pseudo-code (`http-routes.cjs` `listUserPermissions` synthesises
 //     `role:<id>` from role IDS), so `satisfiesStockPrepAccess` refuses them too.

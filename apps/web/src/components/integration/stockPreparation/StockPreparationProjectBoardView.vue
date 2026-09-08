@@ -769,7 +769,7 @@ const directoryProjects = computed<StockPreparationOperatorProject[]>(() => {
  * MAY THIS CALLER PRESS 从PLM拉取数据 — the same predicate the composed panel gates its own control
  * on, so the empty state below can never point at a button this caller does not have.
  */
-const canRunPull = computed<boolean>(() => canRunStockPrepProjectSync((permission) => auth.hasPermission(permission)))
+const canRunPull = computed<boolean>(() => canRunStockPrepProjectSync(auth.getAccessSnapshot()))
 
 const projectKnown = computed<boolean>(() =>
   directoryProjects.value.some((project) => project.projectNo === openedProjectNo.value))

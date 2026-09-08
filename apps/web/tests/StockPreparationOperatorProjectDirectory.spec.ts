@@ -801,7 +801,7 @@ describe('一线看得见自己工厂的项目 — the operator project director
       projectNoProp.value = P2.no
       await flush()
 
-      const mayOpenBoard = canOpenStockPrepProjectBoard(realHasPermission)
+      const mayOpenBoard = canOpenStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })
       const label = JSON.stringify(permissions)
       expect(
         Boolean(q(container!, 'stock-prep-confirmation-empty-resync')),

@@ -575,12 +575,15 @@ const RAIL_GROUP_LABELS: Record<string, { zh: string; en: string }> = {
 // platform-admin gated end to end, so only a platform admin sees them; a customer operator holding
 // stock-prep:read sees exactly the confirmation queue this page was adopted for.
 const visibleViews = computed(() => {
-  const probe = (permission: string): boolean => auth.hasPermission(permission)
+  // THE PRINCIPAL, NOT A PROBE. `workbenchAccess.ts` takes a `{ roles, permissions }` snapshot so its
+  // literal, server-shaped ladder cannot be handed `useAuth().hasPermission`'s expanding one — see
+  // that file's 「两侧同形,不吃通配」 header.
+  const principal = auth.getAccessSnapshot()
   return views.filter((view) => {
-    if (view.legacyMvp) return canUseLegacyMvpTabs(probe)
-    if (view.workbenchAdminOnly) return canOpenStockPrepInstallView(probe)
-    if (view.operatorBoard) return canOpenStockPrepProjectBoard(probe)
-    if (view.helpOnly) return canOpenStockPrepHelp(probe)
+    if (view.legacyMvp) return canUseLegacyMvpTabs(principal)
+    if (view.workbenchAdminOnly) return canOpenStockPrepInstallView(principal)
+    if (view.operatorBoard) return canOpenStockPrepProjectBoard(principal)
+    if (view.helpOnly) return canOpenStockPrepHelp(principal)
     return true
   })
 })
@@ -645,7 +648,7 @@ const deepLinkedProjectBoard = computed<boolean>(() => (
 const landingKey = computed<StockPreparationViewKey>(() => {
   const visible = visibleViews.value
   if (visible.length === 0) return views[0].key
-  const probe = (permission: string): boolean => auth.hasPermission(permission)
+  const principal = auth.getAccessSnapshot()
   // A PROJECT IN THE URL OUTRANKS EVERY LANDING RULE, D2 included.
   //
   // §2.3 makes `?projectNo=` the 首页 ⇄ 工作区 state bit and says in so many words that a reload, a
@@ -663,11 +666,11 @@ const landingKey = computed<StockPreparationViewKey>(() => {
   if (deepLinkedProjectBoard.value) return 'project-board'
   // D2=A. The whole decision is one call into workbenchAccess.ts, which is what lets the ruling be
   // asserted against the predicate and against the DOM without either restating the other.
-  const preferred = stockPrepLandingKey(probe, deploymentReady.value)
+  const preferred = stockPrepLandingKey(principal, deploymentReady.value)
   if (visible.some((view) => view.key === preferred)) return preferred as StockPreparationViewKey
   // FOLDED THROUGH `visibleViews`, always. A landing the principal cannot see would render an empty
   // page; the fallbacks below are the pre-P1 order, unchanged.
-  if (landsOnStockPrepProjectBoard(probe) && visible.some((view) => view.key === 'project-board')) {
+  if (landsOnStockPrepProjectBoard(principal) && visible.some((view) => view.key === 'project-board')) {
     return 'project-board'
   }
   const queue = visible.find((view) => view.key === 'confirmation-queue')
@@ -712,10 +715,16 @@ async function readDeploymentPosture(): Promise<void> {
   // landing this read exists to choose is never consulted — and the two panels it would send an
   // admin to (开始使用 / 数据来源与体检) read the same preflight for themselves anyway.
   if (activeKey.value !== null) return
-  const probe = (permission: string): boolean => auth.hasPermission(permission)
+  // ...AND NEITHER HAS A `?projectNo=` DEEP LINK ALREADY ANSWERED IT. `landingKey` gives the URL's
+  // project number precedence over D2, so for those arrivals the posture this read exists to choose
+  // is never consulted — and the tab it opens (项目备料页) reads nothing from the preflight. Placed
+  // AFTER the `activeKey` short-circuit and read as a value (never at setup time) because
+  // `deepLinkedProjectBoard` is declared further up as a computed over `selectedProjectNo`.
+  if (deepLinkedProjectBoard.value) return
+  const principal = auth.getAccessSnapshot()
   // Only the tier whose landing depends on it pays for it. An operator's landing (今天要处理) and a
   // queue watcher's (确认队列) are decided from permissions alone, so they issue nothing.
-  if (!canOpenStockPrepInstallView(probe)) return
+  if (!canOpenStockPrepInstallView(principal)) return
   deploymentPending.value = true
   try {
     const preflight = await readStockPreparationPreflight(scope)

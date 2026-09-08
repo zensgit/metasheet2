@@ -1511,12 +1511,48 @@ function theRailVocabularyAndTheLandingRuleHold() {
   assert.equal(stockPrepWorkbenchLandingKey(['role:admin'], null), 'getting-started')
 
   // AND IT GRANTS NOTHING. The rail vocabulary is a layout contract; no route may consult it.
-  assert.equal(
-    HTTP_ROUTES_SOURCE.includes('STOCK_PREP_RAIL_GROUPS')
-      || HTTP_ROUTES_SOURCE.includes('stockPrepWorkbenchLandingKey')
-      || HTTP_ROUTES_SOURCE.includes('satisfiesStockPrepRailGate'),
-    false,
-    'rail: no route consults the rail vocabulary — it decides layout, never access',
+  //
+  // THE SCAN IS THE WHOLE PLUGIN, not `http-routes.cjs` alone. Pinning one file made the guard's
+  // claim ("no route consults it") narrower than its wording: a helper, a middleware or a second
+  // route table importing `satisfiesStockPrepRailGate` would turn a LAYOUT decision into an
+  // AUTHORIZATION one — the thing this asserts cannot happen — with the pin still green. Two
+  // exclusions, both of them the point rather than holes in it: the module that DEFINES the
+  // vocabulary, and the tests (this file names all three tokens on nearly every line).
+  const RAIL_VOCABULARY_TOKENS = ['STOCK_PREP_RAIL_GROUPS', 'stockPrepWorkbenchLandingKey', 'satisfiesStockPrepRailGate']
+  const PLUGIN_ROOT = path.join(__dirname, '..')
+  const VOCABULARY_MODULE = path.join(PLUGIN_ROOT, 'lib', 'stock-preparation-workbench-access.cjs')
+  const scanned = []
+  const offenders = []
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        // `__tests__` states the vocabulary by name on purpose; `node_modules` is not ours.
+        if (entry.name === '__tests__' || entry.name === 'node_modules') continue
+        walk(full)
+        continue
+      }
+      if (!entry.name.endsWith('.cjs')) continue
+      if (path.resolve(full) === path.resolve(VOCABULARY_MODULE)) continue
+      scanned.push(full)
+      const source = fs.readFileSync(full, 'utf8')
+      for (const token of RAIL_VOCABULARY_TOKENS) {
+        if (source.includes(token)) offenders.push(`${path.relative(PLUGIN_ROOT, full)} :: ${token}`)
+      }
+    }
+  }
+  walk(PLUGIN_ROOT)
+  // The scan has to have LOOKED at something — an empty sweep would pass this vacuously, and
+  // http-routes.cjs is the file the guard has always been about.
+  assert.ok(scanned.length > 20, `rail: the vocabulary scan covered only ${scanned.length} files`)
+  assert.ok(
+    scanned.some((file) => path.basename(file) === 'http-routes.cjs'),
+    'rail: the vocabulary scan must still cover http-routes.cjs',
+  )
+  assert.deepEqual(
+    offenders,
+    [],
+    'rail: nothing in the plugin consults the rail vocabulary — it decides layout, never access',
   )
 }
 

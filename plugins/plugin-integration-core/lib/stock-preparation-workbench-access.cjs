@@ -575,17 +575,14 @@ function stockPrepWorkbenchLandingKey(permissions, deploymentReady) {
   // `landsOnStockPrepProjectBoard` fold, that one excluding a platform admin from the operator
   // landing rather than admitting them earlier.
   //
-  // ONE ARCHITECTURAL FORK, AND IT IS NOT A DRIFT. 「platform admin」 is not spelled the same way on
-  // the two sides: here it is `PLATFORM_ADMIN_PERMISSIONS` (`role:admin` OR a bare `integration:admin`
-  // in the flattened list), while the browser's `useAuth().hasPermission` short-circuits on
-  // `snapshot.isAdmin || roles.includes('admin')` and treats a bare `integration:admin` as nothing
-  // more than the literal code it is. So for the ONE principal holding `integration:admin` with no
-  // admin role, this function answers 'ops'/'getting-started' where the browser answers
-  // 'confirmation-queue', and three of the four rail gates likewise part company. That principal is
-  // enumerated in `stockPrepPermissionMatrix.spec.ts`'s ACTORS and the fork is asserted there
-  // explicitly, value by value, so it can be READ rather than discovered — and so that closing it
-  // (by widening what the browser accepts as a platform admin) reddens a test the day somebody does.
-  // Nothing routes on this function today; it is vocabulary, and the fork is latent, not live.
+  // 两侧同形,不吃通配. The browser half
+  // (`apps/web/src/services/integration/stockPreparation/workbenchAccess.ts`) computes every gate,
+  // landing key and capability set from its own transcription of `satisfiesStockPrepAccess` /
+  // `holdsPlatformAdmin` over the SAME flattened principal — literal `includes`, no `*:*`, no
+  // `stock-prep:*`, no `stock-prep:write` → read. `stockPrepPermissionMatrix.spec.ts` F-09/F-10
+  // assert the two as a UNIVERSAL equality (every actor, every gate, every landing key, every
+  // capability set), so there is no principal for whom the sides answer differently and no exception
+  // to enumerate here.
   if (satisfiesStockPrepRailGate(held, STOCK_PREP_RAIL_GATE_OPERATOR_BOARD)) return 'home'
   return 'confirmation-queue'
 }

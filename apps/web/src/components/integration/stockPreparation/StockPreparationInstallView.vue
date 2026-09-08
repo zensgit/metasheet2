@@ -49,6 +49,21 @@
       ) }}
     </p>
 
+    </template>
+    <!-- ===================================================================
+         读不到就说读不到 — IN EVERY MODE, which is why the `mode !== 'wizard'`
+         wrapper is cut in two around this paragraph as well.
+
+         `errorStatus` is the ONE report this component makes about its own
+         reads (manifest / preflight / source preflight). The wizard is driven
+         entirely by those same reads: with them refused or 500-ing it renders
+         「? 看不到」 on every step and offers nothing to press. Left inside the
+         review-only wrapper, the mode D2 lands a brand-new deployment's admin
+         on was the one mode that never said WHY — no HTTP code, no next step,
+         and no 复制这条报错 to paste to us. Same posture as
+         StockPreparationSourceBindingPanel below: an error bar is not part of
+         a mode's content, it is the page telling the truth about itself.
+         =================================================================== -->
     <p v-if="errorStatus !== null" class="stock-prep-install__error" data-testid="stock-prep-install-error">
       {{ bi(readFailed.zh, readFailed.en) }}
       <code class="stock-prep-install__token">HTTP {{ errorStatus }}</code>
@@ -59,6 +74,7 @@
         {{ readErrorCopyLabel === 'copy' ? bi('复制这条报错', 'Copy this error') : bi('已复制', 'Copied') }}
       </button>
     </p>
+    <template v-if="props.mode !== 'wizard'">
 
     <!-- ===================================================================
          数据来源 — WHICH database 备料 reads, chosen here instead of in a
@@ -1051,7 +1067,7 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-const canRun = computed(() => canRunStockPrepInstall((permission) => auth.hasPermission(permission)))
+const canRun = computed(() => canRunStockPrepInstall(auth.getAccessSnapshot()))
 
 const busy = ref(false)
 const errorStatus = ref<number | null>(null)

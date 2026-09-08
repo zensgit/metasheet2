@@ -38,7 +38,10 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getToken: () => 'session-token',
     clearToken: vi.fn(),
-    getAccessSnapshot: () => ({ isAdmin: false, email: '' }),
+    // `roles` / `permissions` are the shape `workbenchAccess.ts` decides on (it takes the SNAPSHOT,
+    // never the expanding probe), so this double has to carry them or every stock-prep predicate
+    // reads an empty principal.
+    getAccessSnapshot: () => ({ isAdmin: false, email: '', roles: [], permissions: shellState.permissions }),
     hasPermission: (permission: string) => shellState.permissions.includes(permission),
   }),
 }))
@@ -177,10 +180,28 @@ describe('P0-8 — 对账(reconcile)成功后队列自动重读,失败不重读'
     vi.clearAllMocks()
   })
 
-  async function openQueueFor(projectNo: string): Promise<void> {
+  /**
+   * Mount the shell and put 确认队列 on screen.
+   *
+   * THE TAB CLICK IS NOT DECORATION. This block's actor holds `integration:admin`, and since PR #5555
+   * the workbench counts that as a platform admin exactly as the server always has — so D2 lands them
+   * on 开始使用 (a not-installed deployment) rather than on the queue. The queue is still one click
+   * away and is still theirs; these tests are about what 对账 / 建立确认账本 do once it is open, so
+   * they open it. Asserting the landing is stockPrepPermissionMatrix.spec.ts / StockPreparationRail
+   * .spec.ts's job, not this file's.
+   */
+  async function mountShellOnTheQueue(): Promise<void> {
     app = createApp(StockPreparationWorkspace as Component)
     app.mount(container!)
     await flush()
+    const tab = container!.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement | null
+    expect(tab, '确认队列 must still be a tab this actor can open').not.toBeNull()
+    tab!.click()
+    await flush()
+  }
+
+  async function openQueueFor(projectNo: string): Promise<void> {
+    await mountShellOnTheQueue()
     const input = container!.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
     input.value = projectNo
     input.dispatchEvent(new Event('input'))
@@ -297,9 +318,7 @@ describe('P0-8 — 对账(reconcile)成功后队列自动重读,失败不重读'
       return ok({})
     })
 
-    app = createApp(StockPreparationWorkspace as Component)
-    app.mount(container!)
-    await flush()
+    await mountShellOnTheQueue()
     expect(directoryGetCount, 'the queue reads its directory once on mount').toBe(1)
 
     ;(container!.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
