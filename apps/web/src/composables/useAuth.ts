@@ -196,6 +196,36 @@ export function useAuth() {
     }
   }
 
+  // Only the explicit, authenticated organization-switch response uses this
+  // hook. Payload checks are consistency checks, not signature verification.
+  // Login hints and login/logout behavior are intentionally unchanged.
+  function setExplicitSessionOrg(token: string, orgId: string, expectedToken: string): boolean {
+    if (!expectedToken || getToken() !== expectedToken || !orgId
+      || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) return false
+    const previous = parseJwtPayload(expectedToken)
+    const next = parseJwtPayload(token)
+    const actor = previous?.userId ?? previous?.sub ?? previous?.id
+    if (typeof actor !== 'string' || !actor
+      || (next?.userId ?? next?.sub ?? next?.id) !== actor
+      || next?.tenantId !== orgId || typeof next?.exp !== 'number'
+      || !Number.isFinite(next.exp) || next.exp <= Date.now() / 1000
+      || typeof localStorage === 'undefined') return false
+    const originalAuth = localStorage.getItem('auth_token')
+    const originalJwt = localStorage.getItem('jwt')
+    try {
+      localStorage.setItem('auth_token', token)
+      localStorage.setItem('jwt', token)
+    } catch {
+      for (const [key, value] of [['auth_token', originalAuth], ['jwt', originalJwt]]) {
+        if (value === null) localStorage.removeItem(key!)
+        else localStorage.setItem(key!, value!)
+      }
+      return false
+    }
+    resetSessionBootstrap(true)
+    return true
+  }
+
   function parseStringArray(raw: unknown): string[] {
     if (Array.isArray(raw)) {
       return raw.map((item) => String(item || '').trim()).filter(Boolean)
@@ -426,6 +456,7 @@ export function useAuth() {
   return {
     getToken,
     setToken,
+    setExplicitSessionOrg,
     clearToken,
     bootstrapSession,
     primeSession,

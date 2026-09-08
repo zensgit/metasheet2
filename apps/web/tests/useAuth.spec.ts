@@ -64,6 +64,41 @@ describe('useAuth', () => {
     expect(getToken()).toBeNull()
   })
 
+  it('replaces only an explicitly selected same-actor session and preserves login hints', () => {
+    const jwt = (tenantId: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    const original = jwt('org-a')
+    const next = jwt('org-b')
+    auth.setToken(original)
+    expect(auth.setExplicitSessionOrg(next, 'org-b', original)).toBe(true)
+    expect(auth.getToken()).toBe(next)
+    expect(store.tenantId).toBe('org-a')
+    expect(store.workspaceId).toBe('org-a')
+  })
+
+  it.each(['', 'invalid', 'a.b.c'])('rejects invalid explicit-session responses without changing storage: %s', (token) => {
+    const auth = useAuth()
+    auth.setToken('original')
+    const before = { ...store }
+    expect(auth.setExplicitSessionOrg(token, 'org-b', 'original')).toBe(false)
+    expect(store).toEqual(before)
+  })
+
+  it('rejects explicit-session responses for a replaced session, actor, tenant or expiration', () => {
+    const jwt = (userId: string, tenantId: string, exp = Math.floor(Date.now() / 1000) + 60) => `header.${btoa(JSON.stringify({ userId, tenantId, exp }))}.signature`
+    const auth = useAuth()
+    const original = jwt('actor', 'org-a')
+    auth.setToken(original)
+    for (const token of [jwt('other', 'org-b'), jwt('actor', 'other'), jwt('actor', 'org-b', 1)]) {
+      expect(auth.setExplicitSessionOrg(token, 'org-b', original)).toBe(false)
+      expect(auth.getToken()).toBe(original)
+    }
+    auth.setToken(jwt('other', 'org-c'))
+    const before = { ...store }
+    expect(auth.setExplicitSessionOrg(jwt('actor', 'org-b'), 'org-b', original)).toBe(false)
+    expect(store).toEqual(before)
+  })
+
   it('refreshes dev token and stores aliases', async () => {
     store.tenantId = 'tenant_42'
     const fetchMock = vi.fn().mockResolvedValue({
