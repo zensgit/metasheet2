@@ -96,6 +96,13 @@ interface StockPrepHelpFlow {
   enLink: string
 }
 
+// A PAGE NAME INSIDE THIS COPY IS QUOTED IN THE READER'S OWN LOCALE — 「今天要处理」 in the zh strings,
+// 'Today' in the en ones, and so on for every rail item named below. The en half used to quote the
+// CHINESE names (a reader on the English UI was told to open 「今天要处理」 while the rail said 'Today'),
+// which read as merely odd until the 数据来源与体检 rename translated one of them and left the same
+// sentence half-translated. Every en name here is the literal `en` label of that rail item in
+// StockPreparationWorkspace.vue's `views` array — Today / Getting Started / Sources & Health Check /
+// Records & Diagnostics — so a future rename has exactly two places to touch, and they are named here.
 const flows: StockPrepHelpFlow[] = [
   {
     key: 'daily',
@@ -106,13 +113,13 @@ const flows: StockPrepHelpFlow[] = [
     zhBody: '打开页面先看「今天要处理」,上面列着在等您的项目。点进一个项目:先从 PLM 把 BOM 拉进来;'
       + '系统拿不准的行会停下来问您,逐条拿完主意以后回来再同步一次,数据才会写进多维表;'
       + '要给别人一份就导出 Excel。整个过程不会改动 ERP/K3 里的任何数据。',
-    enBody: 'Start on 今天要处理 — it lists the projects waiting for you. Open one: pull its BOM in from PLM;'
+    enBody: 'Start on Today — it lists the projects waiting for you. Open one: pull its BOM in from PLM;'
       + ' anything the system is unsure about stops and asks you, and once you have decided each one you come back'
       + ' and sync again — that is the step that writes the data into the multitable. Export to Excel when someone'
       + ' needs a copy. None of this changes anything inside ERP/K3.',
     target: 'home',
     zhLink: '去「今天要处理」',
-    enLink: 'Go to 今天要处理',
+    enLink: 'Go to Today',
   },
   {
     key: 'onboarding',
@@ -123,13 +130,13 @@ const flows: StockPrepHelpFlow[] = [
     zhBody: '「开始使用」里是一张六步地图:接一条只读连接、证明它只能读、告诉备料用这条源、建表装列、'
       + '给角色授权、拿一个项目跑一遍。任何一步都能点开看 —— 它是地图,不是闸机,前一步没做完也不挡着您看后一步。'
       + '装完之后再回来复查,去「数据来源与体检」。',
-    enBody: '开始使用 lays out six steps: wire a read-only connection, prove it can only read, point stock preparation'
+    enBody: 'Getting Started lays out six steps: wire a read-only connection, prove it can only read, point stock preparation'
       + ' at it, create the tables and columns, grant the roles, then take one project through end to end. Every step'
       + ' opens — it is a map, not a turnstile, and an unfinished step never blocks the next one. Come back to'
       + ' Sources & Health Check afterwards to re-check.',
     target: 'getting-started',
     zhLink: '去「开始使用」',
-    enLink: 'Go to 开始使用',
+    enLink: 'Go to Getting Started',
   },
   {
     key: 'troubleshooting',
@@ -140,13 +147,13 @@ const flows: StockPrepHelpFlow[] = [
     zhBody: '「记录与排查」里有两块:上面是这套部署现在好不好(没检查过的项会明说「未检查」,不会涂成绿的);'
       + '下面按项目号查谁在什么时候动过它。那份记录只涵盖确认、对账、导出、通知下一步四类动作,'
       + '所以「这里没有记录」不等于「没有人动过这个项目」—— 面板上把这句话常驻写着。',
-    enBody: '记录与排查 has two halves. The top one says whether this deployment is healthy right now — anything that'
+    enBody: 'Records & Diagnostics has two halves. The top one says whether this deployment is healthy right now — anything that'
       + ' has never been checked says so rather than being painted green. The bottom one looks up who touched a'
       + ' project and when. That record covers four kinds of action only, so "nothing here" does not mean "nobody'
       + ' touched it" — the panel says so permanently, in those words.',
     target: 'ops',
     zhLink: '去「记录与排查」',
-    enLink: 'Go to 记录与排查',
+    enLink: 'Go to Records & Diagnostics',
   },
 ]
 </script>

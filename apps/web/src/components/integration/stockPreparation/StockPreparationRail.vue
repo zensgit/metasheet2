@@ -7,48 +7,61 @@
     under its ORIGINAL key. That is the one invariant every existing suite reads by name, and it is
     unchanged by this file's restructuring.
 
-    HARDENING WAVE (2026-09-08): `<nav>` used to BE the tablist. Two things nested under it turned out
-    to leak into the tablist's ACCESSIBLE children despite living inside a `role="presentation"` group
-    wrapper — presentation only prunes the WRAPPER's own box; a descendant that carries its own
-    implicit role is re-parented UP to the nearest surviving ancestor, which was the tablist itself:
+    HARDENING WAVE (2026-09-08), AND THE FIX ROUND THAT FOLLOWED IT. `<nav>` used to BE the tablist.
+    Two things nested under it leaked into the tablist's ACCESSIBLE children despite living inside a
+    `role="presentation"` group wrapper — presentation only prunes the WRAPPER's own box:
 
       * 深度工具's disclosure `<button>` has an implicit role of "button" (native, unremovable — ARIA
         forbids `role="presentation"` on a focusable element), so it was exposed as a tablist child
         that is not a tab. Fixed by making it a literal DOM sibling of the tablist rather than a
         descendant: `<nav>` is now a plain wrapper holding `.sp-rail__tablist` (the widget) and
         `.sp-rail__advanced` (the disclosure + its panel) SIDE BY SIDE, not one inside the other.
-      * Each group heading `<p>` carries the HTML-AAM implicit role "paragraph", which is not
-        presentational either, so it leaked the same way. Fixed by giving the heading its OWN explicit
-        `role="presentation"` — it stays a visual DOM descendant of the tablist (for the CSS grouping),
-        but is pruned from the accessibility tree individually rather than relying on its wrapper. The
-        heading text is not lost: every tab in the group now points `aria-labelledby` at the heading's
-        id AND its own, which is the same "borrow a presentational node's text" technique used to
-        recover a caption after hiding it — see F-KB below for the reasoning this addresses.
+      * Each group heading `<p>`. The first cut gave the heading its own `role="presentation"` and
+        called the leak closed. IT DID NOT. `role="presentation"` drops the ELEMENT's semantics; its
+        TEXT is re-parented up to the nearest surviving ancestor — the tablist — so 「工作 / 部署与接入
+        / 帮助」 stayed inside the tablist's accessible content, which is precisely what pruning the
+        `<p>` was supposed to remove. What removes it is `aria-hidden="true"`, which prunes the
+        element AND its subtree. The heading now carries BOTH: `role="presentation"` (so a role
+        census over this subtree still reads 「tab or presentational, nothing else」) and
+        `aria-hidden="true"` (so the words themselves are gone from the tree).
+        The heading text is not lost to the tabs that need it: every tab — permanent AND folded —
+        points `aria-labelledby` at its group heading's id and then its own. Accname's rule for a
+        node DIRECTLY referenced by `aria-labelledby` is to include it EVEN WHEN IT IS HIDDEN, which
+        is exactly what makes 「borrow the presentational caption's words」 work here; and because the
+        tab also references itself, the worst case if a UA disagreed is the tab's own visible text,
+        never an empty name.
 
-    组标题不是 tab, twice over now: no `role="tab"`, no `stock-prep-tab-*` testid, AND (new) an explicit
-    `role="presentation"` so it cannot leak into the tablist's accessible children the way a bare `<p>`
-    would. `querySelectorAll('[data-testid^="stock-prep-tab-"]')` still enumerates only the real tabs.
+    组标题 IS STILL A DOM DESCENDANT OF THE TABLIST — it has to be, for the CSS grouping. What it is no
+    longer is part of the tablist's ACCESSIBLE content. R-05 asserts that as TEXT rather than as a role
+    census, because a role census structurally cannot see a stray text node — the exact way the first
+    cut's guard was blind to the very failure it was written for.
+
+    THE ACCESSIBLE NAME LIVES ON THE `role="tablist"` ELEMENT, not on `<nav>`. On main the two were one
+    element and `aria-label="备料视图"` named the tablist; splitting them without moving the label left
+    the tablist anonymous (APG requires a tablist to be named) and silently promoted `<nav>` to a
+    landmark wearing the tablist's old name. Both elements are named now, with DIFFERENT words, so a
+    screen reader announces a navigation landmark and a named tab list rather than the same phrase twice.
   -->
   <nav
     ref="navEl"
     class="sp-rail"
-    :aria-label="bi('备料视图', 'Stock preparation views')"
+    :aria-label="bi('备料工作台导航', 'Stock preparation navigation')"
     @keydown="handleTablistKeydown"
   >
     <div
       class="sp-rail__tablist"
       role="tablist"
+      :aria-label="bi('备料视图', 'Stock preparation views')"
       :aria-orientation="orientation"
       data-testid="stock-prep-tabs"
-      :aria-owns="advancedTabIdRefs || undefined"
+      :aria-owns="advancedOpen && advancedTabIdRefs ? advancedTabIdRefs : undefined"
     >
       <!--
         role="presentation" ON THE GROUP WRAPPERS remains the layout affordance it always was: it
         removes the wrapper's OWN box from the accessibility tree while leaving its `role="tab"`
-        children owned by the tablist. What changed is that the heading inside each wrapper now ALSO
-        carries its own `role="presentation"` (see the file header) rather than relying on the
-        wrapper's alone — a `<p>` has its own implicit role and does not get pruned just because its
-        parent is presentational.
+        children owned by the tablist. What changed is the HEADING inside each wrapper: it carries
+        `role="presentation"` AND `aria-hidden="true"` (see the file header for why the first alone
+        left the heading's TEXT inside the tablist), and the tabs recover its words by reference.
       -->
       <div
         v-for="group in groups"
@@ -59,6 +72,7 @@
       >
         <p
           role="presentation"
+          aria-hidden="true"
           :id="groupHeadingId(group.group)"
           class="sp-rail__group-title"
           :data-testid="`stock-prep-rail-group-title-${group.group}`"
@@ -75,6 +89,7 @@
           class="sp-rail__tab"
           :class="{ 'sp-rail__tab--active': item.key === activeKey }"
           :data-testid="`stock-prep-tab-${item.key}`"
+          :data-rail-key="item.key"
           :aria-selected="item.key === activeKey ? 'true' : 'false'"
           :aria-labelledby="`${groupHeadingId(group.group)} stock-prep-tab-${item.key}`"
           :tabindex="item.key === rovingKey ? 0 : -1"
@@ -131,6 +146,13 @@
         data-testid="stock-prep-rail-advanced-panel"
         :hidden="!advancedOpen"
       >
+        <!--
+          SAME NAMING RULE AS THE PERMANENT TABS: `aria-labelledby` points at 【部署与接入】's heading
+          and then at the tab itself. The first cut left these seven without it, so one tablist had two
+          naming conventions in it — the eight above announced as 「组名 条目名」 and these seven as the
+          bare item. `advancedGroup.group` is the group the manifest actually attached them to, so the
+          id is not hard-coded to `deploy`.
+        -->
         <button
           v-for="item in advancedGroup.advanced"
           :key="item.key"
@@ -140,7 +162,9 @@
           class="sp-rail__tab sp-rail__tab--advanced"
           :class="{ 'sp-rail__tab--active': item.key === activeKey }"
           :data-testid="`stock-prep-tab-${item.key}`"
+          :data-rail-key="item.key"
           :aria-selected="item.key === activeKey ? 'true' : 'false'"
+          :aria-labelledby="`${groupHeadingId(advancedGroup.group)} stock-prep-tab-${item.key}`"
           :tabindex="item.key === rovingKey ? 0 : -1"
           @click="selectTab(item.key)"
         >
@@ -161,12 +185,21 @@
 // matrix suite's F-06 asserts exactly that, by reading this source.
 //
 // What it DOES decide (hardening wave, F-KB below): keyboard roving focus among the currently VISIBLE
-// tabs — WAI-ARIA's tabs pattern, automatic-activation variant. Arrow-key movement both moves focus
-// AND selects (the alternative the pattern allows, Enter/Space-to-activate, is not separately wired —
-// it needs no code here, because every tab is a native `<button>`, and a native button already fires
-// its `click` handler on Enter (keydown) and Space (keyup) with no listener of ours involved. So
-// Enter/Space activate the FOCUSED tab either way; automatic activation is simply the model this file
-// commits to for arrow-key movement itself.)
+// tabs — WAI-ARIA's tabs pattern, MANUAL-ACTIVATION variant. Arrow keys and Home/End move FOCUS ONLY;
+// Enter and Space are what select, and they need no listener here because every tab is a native
+// `<button>` that already fires its `click` handler on Enter (keydown) and Space (keyup).
+//
+// F-ACT — WHY MANUAL, NOT AUTOMATIC. The APG allows either, and the first cut of this wave chose
+// automatic ("moving focus selects"). That turned out to be unsafe HERE specifically, because a rail
+// selection is not a pure panel switch in this shell: `handleRailSelect('home')`
+// (StockPreparationWorkspace.vue) also clears `selectedProjectNo` and strips `?projectNo=` from the
+// URL. Under automatic activation a keyboard reader who is on 项目备料 with a project open and presses
+// ArrowUp merely to LOOK at the neighbouring item closes that project — and cannot get back to it with
+// the keyboard, because with no number open D3's fold bounces the highlight straight back to
+// 今天要处理. A mouse reader never meets this: one click is one intent. Manual activation restores that
+// property for the keyboard — arrowing PAST an item costs nothing, and Enter/Space is the deliberate
+// act — and, as a second-order benefit, stops a single roam of the rail from firing every panel's
+// data reads on the way through (the APG's own reason to prefer manual when panels are not cheap).
 //
 // F-KB — WHY BOTH ArrowUp/Down AND ArrowLeft/Right, AT EVERY WIDTH, RATHER THAN ONE PAIR PICKED BY
 // `orientation`. The APG assigns Up/Down to a vertical tablist and Left/Right to a horizontal one, and
@@ -176,6 +209,13 @@
 // SUPERSET of what either single pairing would cover, never a violation of it: a vertical layout that
 // also answers Left/Right, or a horizontal one that also answers Up/Down, has not promised a reader
 // anything the pattern forbids.
+//
+// AND THE NARROW LAYOUT IS NOT PURELY HORIZONTAL ANYWAY (pre-existing, unchanged by this wave, worth
+// writing down where the arrow-key decision is made): the `@media` block below turns the GROUP ROW
+// horizontal while the tabs INSIDE each group stay stacked, so 「horizontal」 is an approximation of a
+// two-dimensional layout rather than a description of it. That is the second, independent reason this
+// handler answers both pairs instead of trusting `orientation` to pick one — whichever pair a reader
+// tries from whichever direction their eye says the next tab lies, it works.
 import { computed, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useMobileViewport } from '../../../composables/useMobileViewport'
@@ -223,22 +263,18 @@ const advancedGroup = computed<StockPreparationRailGroupView | null>(() => (
 ))
 
 /** Space-separated ids for `aria-owns` — declares the folded tabs as logically the tablist's, even
- *  while they live outside it in the DOM (see the template's file-header note on WHY). Native `hidden`
- *  already prunes them from the accessibility tree while folded, so this is inert-but-correct then and
- *  load-bearing once the panel opens. */
+ *  while they live outside it in the DOM (see the template's file-header note on WHY). Emitted ONLY
+ *  while the disclosure is open: `hidden` already prunes those tabs from the accessibility tree when
+ *  it is shut, so claiming ownership of them then was inert but said something untrue — a tablist that
+ *  announces fifteen children while seven of them do not exist. The template gates it on
+ *  `advancedOpen` so the declaration and the fold cannot disagree. */
 const advancedTabIdRefs = computed<string>(() => (
   advancedGroup.value ? advancedGroup.value.advanced.map((item) => `stock-prep-tab-${item.key}`).join(' ') : ''
 ))
 
-/**
- * ROVING TABINDEX (F-KB). Exactly one tab is `tabindex="0"` at a time — the currently ACTIVE one,
- * which is what the automatic-activation model in this file collapses "focused" and "selected" into.
- * `activeKey` can legitimately name a tab this render is not currently showing (folded-and-collapsed,
- * most commonly), in which case nothing in the DOM may set `tabindex="0"` at all — and a tablist with
- * no roving stop is not reachable by Tab from outside it. The fallback is the FIRST tab in DOM order,
- * the same "nothing chosen yet" default the APG examples use.
- */
-const rovingKey = computed<string | null>(() => {
+/** Every currently VISIBLE tab key, in DOM order: the permanent items group by group, then 深度工具's
+ *  seven if and only if the disclosure is open. This is the roam order and the roving-stop domain. */
+const visibleTabKeys = computed<string[]>(() => {
   const flat: string[] = []
   for (const group of props.groups) {
     for (const item of group.items) flat.push(item.key)
@@ -246,12 +282,39 @@ const rovingKey = computed<string | null>(() => {
   if (advancedGroup.value && advancedOpen.value) {
     for (const item of advancedGroup.value.advanced) flat.push(item.key)
   }
+  return flat
+})
+
+/**
+ * WHERE THE ROVING STOP SITS, under manual activation (F-ACT). Focus and selection are two different
+ * facts now, so the tablist's single `tabindex="0"` follows the LAST KEYBOARD-OR-POINTER-VISITED tab
+ * when there is one — that is the APG's rule, and it is what lets a reader Tab away and come back to
+ * where they were rather than to where the panel is.
+ *
+ * Per-mount, deliberately: it is a focus memory, not shell state.
+ */
+const focusedKey = ref<string | null>(null)
+
+/**
+ * ROVING TABINDEX (F-KB). Exactly one tab is `tabindex="0"` at a time, resolved in this order:
+ * the last visited tab, else the ACTIVE one, else the first tab in DOM order. Both of the first two
+ * can legitimately name a tab this render is not showing (`activeKey` most often — a folded-and-
+ * collapsed legacy key; `focusedKey` after the disclosure shuts under the reader's own focus), and a
+ * tablist with NO roving stop is not reachable by Tab from outside it at all, which is why the final
+ * fallback is unconditional — the same "nothing chosen yet" default the APG examples use.
+ */
+const rovingKey = computed<string | null>(() => {
+  const flat = visibleTabKeys.value
   if (flat.length === 0) return null
+  if (focusedKey.value !== null && flat.includes(focusedKey.value)) return focusedKey.value
   if (props.activeKey !== null && flat.includes(props.activeKey)) return props.activeKey
   return flat[0]
 })
 
+/** A tab was ACTIVATED — by a pointer click, or by Enter/Space on the focused tab, which a native
+ *  `<button>` turns into the very same click with no listener of ours involved. */
 function selectTab(key: string): void {
+  focusedKey.value = key
   emit('select', key)
 }
 
@@ -274,8 +337,19 @@ const ROVING_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 
  * and those now live in a DOM sibling of the tablist (see the template's file-header note), not a
  * descendant of it. Bubbling reaches a common ancestor either way; `<nav>` is the nearest one both
  * subtrees share.
+ *
+ * WHICH IS WHY THE FIRST THING IT DOES IS CHECK WHERE THE EVENT CAME FROM. `<nav>` also contains
+ * 深度工具's disclosure `<button>` — the control this wave deliberately moved OUT of the tablist
+ * precisely so it would stop being part of the tab widget. Without this gate that move only took
+ * effect in the accessibility tree, never in behaviour: a reader who Tabs off the roving stop lands on
+ * the disclosure (it is the very next thing in the tab order), presses ArrowDown to open it — the most
+ * natural gesture there is — and instead has focus yanked into the tablist, with `preventDefault()`
+ * eating the scroll on the way. The disclosure pattern does not allow a disclosure to swallow those
+ * keys, and neither does anything else in `<nav>`.
  */
 function handleTablistKeydown(event: KeyboardEvent): void {
+  const source = event.target instanceof Element ? event.target : null
+  if (!source || !source.closest('button[role="tab"]')) return
   if (!ROVING_KEYS.has(event.key)) return
   const tabs = focusableTabs()
   if (tabs.length === 0) return
@@ -294,11 +368,13 @@ function handleTablistKeydown(event: KeyboardEvent): void {
   // A key this handler claims must not also scroll the page (Up/Down/Home/End all do, natively).
   event.preventDefault()
   const target = tabs[nextIndex]
+  // MANUAL ACTIVATION (F-ACT): move the focus and the roving stop, select NOTHING. `data-rail-key`
+  // carries the business key rather than the handler re-deriving it from `data-testid` — a test id is
+  // a test id, and having production keyboard behaviour silently depend on its spelling is how a
+  // rename becomes a dead key that only the keyboard path notices.
+  const key = target.getAttribute('data-rail-key')
+  if (key) focusedKey.value = key
   target.focus()
-  const key = target.getAttribute('data-testid')?.replace('stock-prep-tab-', '')
-  // AUTOMATIC ACTIVATION: moving focus selects. See the top-of-script note for why Enter/Space need
-  // no separate handler here.
-  if (key) selectTab(key)
 }
 
 /**

@@ -661,7 +661,7 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
 # batch below, StockPreparationSourcePreflight — a NEW spec
 # (apps/web/tests/StockPreparationSourcePreflight.spec.ts) over the same StockPreparationInstallView
-# component, because the source panel lives in the 安装/体检 page beside the deployment preflight. It
+# component, because the source panel lives in the 数据来源与体检 page beside the deployment preflight. It
 # pins the four measured lines, the topology-mismatch sentence (the one that names the zero-row
 # outcome the old behaviour produced silently), the gate on the run control, and the values-free
 # rendering. Substring collisions checked in BOTH directions, as this file requires: the token

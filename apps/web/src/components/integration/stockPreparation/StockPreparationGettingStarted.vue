@@ -873,7 +873,7 @@ function copyInstallTodo(): void {
     return plain ? `· ${blocker.code} — ${bi(plain.zh, plain.en)}` : `· ${blocker.code}`
   })
   // THE ROUTE IN THIS SENTENCE IS A PLACE ON A SCREEN, so it moves when the screen does. P1-1 gave
-  // 开始使用 its own rail item, which means it is no longer 「『安装 / 体检』最上面的那一段」 — an
+  // 开始使用 its own rail item, which means it is no longer 「『数据来源与体检』最上面的那一段」 — an
   // administrator following the old wording would land on a page with no wizard on it. Asserted in
   // StockPreparationGettingStarted.spec.ts so the next move of this view reddens a test rather than
   // a chat message somebody already pasted.

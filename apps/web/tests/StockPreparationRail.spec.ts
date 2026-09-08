@@ -495,10 +495,12 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
   it('R-04: 窄屏 is a media query, not a second container — the tablist is unconditional', () => {
     // R11's lesson, in the one shape that can regress silently: ApprovalCenterView shipped a
     // conditionally-rendered split container that became a no-op div at narrow widths. A CSS media
-    // query cannot do that — there is one `<nav role="tablist">`, rendered at every width, and the
-    // fold only changes its flex direction.
+    // query cannot do that — there is one `<nav>` wrapping one `role="tablist"` (the hardening wave
+    // split them; before it the `<nav>` WAS the tablist), both rendered at every width, and the fold
+    // only changes the tablist's flex direction.
     expect(RAIL_SRC).toContain('@media (max-width: 899px)')
     expect(RAIL_SRC).toMatch(/<nav\s/)
+    expect(RAIL_SRC).toMatch(/class="sp-rail__tablist"/)
     // No `v-if` / `v-show` anywhere on the container or on the group loop: the ONLY conditional
     // rendering in this component is 深度工具's own presence and its `hidden` fold.
     expect(RAIL_SRC).not.toMatch(/<nav[^>]*v-(if|show)/)
@@ -521,7 +523,7 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
   }
 
-  it('R-05: roving tabindex — exactly one tab is 0, and it is the ACTIVE one', async () => {
+  it('R-05: roving tabindex — exactly one tab is 0, and it is the last VISITED one', async () => {
     // 项目查询, not 项目备料: clicking 项目备料 with no project number open is D3's OWN fold (see
     // below), and conflating the two here would make this test assert on two features at once.
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
@@ -539,23 +541,93 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     }
   })
 
-  it('R-05: ArrowDown/ArrowUp move focus AND activate among the VISIBLE tabs, in order', async () => {
+  it('R-05: ArrowDown/ArrowUp move focus among the VISIBLE tabs and select NOTHING (manual activation)', async () => {
     // 项目查询 ⇄ 确认队列, not 今天要处理 ⇄ 项目备料: the latter pair is D3's fold subject (see below)
-    // and would make `data-active` diverge from the focused tab for a reason unrelated to this test.
+    // and would make the panel's key move for a reason unrelated to this test.
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
     h.roles = []
     const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-query"]') as HTMLButtonElement).click()
+    await flushUi()
     const query = root.querySelector('[data-testid="stock-prep-tab-project-query"]') as HTMLButtonElement
     query.focus()
+
     dispatchArrow(query, 'ArrowDown')
     await flushUi()
     expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-confirmation-queue')
-    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    // F-ACT: the panel does NOT follow the focus. Arrowing PAST an item is free, which is the whole
+    // point — the shell's `handleRailSelect` has side effects (it can close the open project), so
+    // "moving focus selects" would make a roam of the rail destructive to keyboard readers only.
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-query')
+    // The roving stop follows the FOCUS, not the selection — otherwise Tab away and back would land
+    // the reader somewhere they never put the cursor.
+    expect(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]')?.getAttribute('tabindex')).toBe('0')
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-query"]')?.getAttribute('tabindex')).toBe('-1')
+    // `aria-selected` stays on the tab whose panel is showing, never on the merely-focused one.
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-query"]')?.getAttribute('aria-selected')).toBe('true')
+    expect(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]')?.getAttribute('aria-selected')).toBe('false')
+
     const queueTab = document.activeElement as HTMLButtonElement
     dispatchArrow(queueTab, 'ArrowUp')
     await flushUi()
     expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-project-query')
     expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-query')
+  })
+
+  it('R-05: Enter/Space is what selects — the click every tab already has, no extra listener', async () => {
+    // jsdom does NOT implement a native button's default activation behaviour for Enter/Space, so
+    // dispatching a KeyboardEvent here would prove nothing either way; the REAL keystroke is asserted
+    // in the browser lane (P1-08). What this case pins is the half jsdom CAN judge: activation goes
+    // through the tab's own `click`, i.e. the identical path a pointer takes, with no keyboard-only
+    // branch that could drift from it — and the component's keydown handler adds no selection of its
+    // own (`selectTab` appears exactly once outside the template's `@click`).
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    const root = await mountShell()
+    const queue = root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement
+    queue.focus()
+    dispatchArrow(queue, 'ArrowUp')
+    await flushUi()
+    const focused = document.activeElement as HTMLButtonElement
+    expect(focused.getAttribute('data-testid')).toBe('stock-prep-tab-project-query')
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).not.toBe('project-query')
+    focused.click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-query')
+    // SOURCE-LEVEL half of the same claim: the keydown handler moves focus and nothing else.
+    expect(RAIL_SRC).not.toMatch(/selectTab\(key\)/)
+    expect(RAIL_SRC).toContain('focusedKey.value = key')
+  })
+
+  it('R-05: 方向键/Home/End 打在「深度工具」折叠按钮上时什么都不做 —— disclosure 不是 tab 部件的一部分', async () => {
+    // THE MOVE OUT OF THE TABLIST HAS TO BE A BEHAVIOURAL MOVE, NOT ONLY AN ARIA ONE. The keydown
+    // handler is bound on `<nav>` (it must be: 深度工具's folded tabs are a DOM sibling of the tablist),
+    // and `<nav>` also contains the disclosure. Without an event-source gate, a reader who Tabs off the
+    // roving stop onto the disclosure — the very next stop in the tab order — and presses ArrowDown to
+    // open it gets focus yanked into the tablist instead, with the page scroll eaten by preventDefault.
+    h.roles = ['admin']
+    const root = await mountShell()
+    // Settle the D2 landing read first — an in-flight posture response is the one thing that could
+    // move `data-active` for a reason that has nothing to do with the keys under test. Each key then
+    // re-reads it immediately before pressing, so the comparison is never against a stale landing.
+    await waitForActive(root)
+    await flushUi()
+    const toggle = root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]') as HTMLButtonElement
+    toggle.focus()
+    for (const key of ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End']) {
+      const panelBefore = root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')
+      dispatchArrow(toggle, key)
+      await flushUi()
+      expect(document.activeElement, `${key} must leave focus on the disclosure`).toBe(toggle)
+      expect(
+        root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active'),
+        `${key} must not switch the panel`,
+      ).toBe(panelBefore)
+    }
+    // ...and the key is not swallowed either: an ungated handler calls preventDefault() on all six.
+    const probe = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
+    toggle.dispatchEvent(probe)
+    expect(probe.defaultPrevented, '方向键在 disclosure 上必须留给浏览器(滚动)').toBe(false)
   })
 
   it('R-05: ArrowLeft/ArrowRight move focus too — a superset, not a width-gated alternative (F-KB)', async () => {
@@ -589,6 +661,24 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
     expect(root.querySelector('[data-testid="stock-prep-tab-home"]')?.getAttribute('aria-selected')).toBe('true')
     expect(root.querySelector('[data-testid="stock-prep-tab-project-board"]')?.getAttribute('aria-selected')).toBe('false')
+  })
+
+  it('D3: `?tab=project-board` 不带项目号的深链 —— 面板与高亮都落在「今天要处理」', async () => {
+    // THE CASE THAT ACTUALLY CHANGED BEHAVIOUR, and it had no coverage: the existing 「旧 key 仍然认」
+    // regression below was given a `projectNo` so it would keep testing what it was written to test,
+    // which left the number-less deep link — the one the fold DOES move — asserted nowhere. The panel
+    // content is what it always was (same component, empty projectNo); what moved is the label, the
+    // description and the highlight, which now agree with it instead of contradicting it.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: { tab: 'project-board' } }
+    const root = await mountShell()
+    expect(await waitForActive(root)).toBe('home')
+    expect(root.querySelector('[data-testid="stock-prep-tab-home"]')?.getAttribute('aria-selected')).toBe('true')
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-board"]')?.getAttribute('aria-selected')).toBe('false')
+    // The fold does NOT rewrite the URL — `?tab=project-board` is still an accepted, still-honoured
+    // key, and a reader who later opens a project from this very screen gets the board back.
+    expect(h.router.replace).not.toHaveBeenCalledWith(expect.objectContaining({ query: expect.objectContaining({ tab: 'home' }) }))
   })
 
   it('D3: 带项目号时行为不变 —— 「项目备料」照常高亮', async () => {
@@ -656,28 +746,92 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     }
   })
 
-  it('R-05: aria-controls / aria-expanded on the disclosure stay wired to the panel', async () => {
+  it('R-05: tablist 本体有可访问名,且和外层 <nav> 的名字不是同一个词', async () => {
+    // MAIN HAD ONE ELEMENT (`<nav role="tablist" aria-label="备料视图">`), so the name and the role sat
+    // together. Splitting the tablist down into an inner `<div>` without moving the label would leave
+    // the widget APG requires to be named anonymous, and hand its old name to a `<nav>` that had just
+    // become a landmark — a screen reader would announce 「备料视图 navigation」 and then a nameless tab
+    // list. Both are named here, and DIFFERENTLY, so neither borrows the other's words.
     h.roles = ['admin']
     const root = await mountShell()
+    const tablist = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
+    const nav = root.querySelector('nav.sp-rail') as HTMLElement
+    expect(tablist.getAttribute('role')).toBe('tablist')
+    expect(tablist.getAttribute('aria-label')).toBe('备料视图')
+    expect(String(nav.getAttribute('aria-label') ?? '').length).toBeGreaterThan(0)
+    expect(nav.getAttribute('aria-label')).not.toBe(tablist.getAttribute('aria-label'))
+    expect(nav.contains(tablist)).toBe(true)
+  })
+
+  it('R-05: aria-controls / aria-expanded on the disclosure stay wired to the panel, and aria-owns follows the fold', async () => {
+    h.roles = ['admin']
+    const root = await mountShell()
+    const tablist = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
     const toggle = root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]') as HTMLElement
     const panel = root.querySelector('[data-testid="stock-prep-rail-advanced-panel"]') as HTMLElement
     expect(toggle.getAttribute('aria-controls')).toBe(panel.id)
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    // `aria-owns` IS THE WHOLE CORRECTNESS ARGUMENT for tabs that live outside their tablist, and it
+    // had no assertion at all until this case: delete the attribute and both lanes stayed green.
+    // Closed, it must be ABSENT — `hidden` has already pruned those seven, so claiming them would have
+    // the tablist announce fifteen children of which seven do not exist.
+    expect(tablist.getAttribute('aria-owns'), '收起时不得宣称拥有折叠区的七个 tab').toBeNull()
     toggle.click()
     await flushUi()
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    const owned = String(tablist.getAttribute('aria-owns') ?? '').split(/\s+/).filter(Boolean)
+    const advancedIds = [...panel.querySelectorAll('[role="tab"]')].map((tab) => tab.id)
+    expect(advancedIds.length).toBe(7)
+    expect(owned).toEqual(advancedIds)
+    // Every owned id must actually resolve — a stale id is a dangling reference, not a tab.
+    for (const id of owned) expect(root.querySelector(`#${id}`), `${id} must exist`).not.toBeNull()
   })
 
-  it('R-05: 组标题不在 tablist 内 —— explicit role=presentation, recovered via aria-labelledby', async () => {
+  it('R-05: 组标题的文字不在 tablist 的可访问内容里(role=presentation 只摘元素,aria-hidden 才摘文字)', async () => {
+    // THE FIRST CUT'S GUARD COULD NOT SEE ITS OWN FAILURE MODE. It enumerated `role` attributes, and a
+    // `role="presentation"` heading passes that census while its TEXT is re-parented up into the
+    // tablist — which is the very thing 「组标题不在 tablist 内」 was asking to remove. This case reads
+    // TEXT instead: the tablist's accessible content, with `aria-hidden` subtrees removed, must be
+    // exactly the tab labels and nothing else. Drop `aria-hidden` from the heading and this reddens.
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
     h.roles = []
     const root = await mountShell()
+    const tablist = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
+
     const heading = root.querySelector('[data-testid="stock-prep-rail-group-title-work"]') as HTMLElement
     expect(heading.getAttribute('role')).toBe('presentation')
-    const tab = root.querySelector('[data-testid="stock-prep-tab-home"]') as HTMLElement
-    const labelledBy = String(tab.getAttribute('aria-labelledby') ?? '').split(/\s+/)
-    expect(labelledBy).toContain(heading.id)
-    expect(labelledBy).toContain(tab.id)
+    expect(heading.getAttribute('aria-hidden'), 'presentation alone leaves the WORDS in the tablist').toBe('true')
+    expect(tablist.contains(heading), 'the heading stays nested — the CSS grouping needs it there').toBe(true)
+
+    const clone = tablist.cloneNode(true) as HTMLElement
+    for (const hidden of [...clone.querySelectorAll('[aria-hidden="true"]')]) hidden.remove()
+    const accessibleText = (clone.textContent ?? '').replace(/\s+/g, '')
+    const tabText = [...tablist.querySelectorAll('[role="tab"]')]
+      .map((tab) => (tab.textContent ?? '').replace(/\s+/g, ''))
+      .join('')
+    expect(accessibleText).toBe(tabText)
+    expect(accessibleText).not.toContain('工作')
+    expect(accessibleText).toContain('今天要处理')
+  })
+
+  it('R-05: 每个 tab 都用 aria-labelledby 借组标题的词 —— 折叠区那七个也一样,一条 rail 不许两套命名', async () => {
+    h.roles = ['admin']
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]') as HTMLButtonElement).click()
+    await flushUi()
+    const tabs = [...root.querySelectorAll('[role="tab"]')] as HTMLElement[]
+    expect(tabs.length, '8 常驻 + 7 折叠').toBe(15)
+    for (const tab of tabs) {
+      const refs = String(tab.getAttribute('aria-labelledby') ?? '').split(/\s+/).filter(Boolean)
+      expect(refs.length, `${tab.dataset.testid} 必须借组标题 + 自己两个 id`).toBe(2)
+      expect(refs[1], `${tab.dataset.testid} 的第二个引用必须是它自己`).toBe(tab.id)
+      const groupHeading = root.querySelector(`#${refs[0]}`)
+      expect(groupHeading, `${tab.dataset.testid} 引用的组标题 ${refs[0]} 必须存在`).not.toBeNull()
+      expect(groupHeading?.getAttribute('role')).toBe('presentation')
+    }
+    // 折叠区那七个借的是【部署与接入】的标题 —— 它们在 manifest 里就挂在那一组下面。
+    const legacy = root.querySelector('[data-testid="stock-prep-tab-exception-queue"]') as HTMLElement
+    expect(String(legacy.getAttribute('aria-labelledby')).split(/\s+/)[0]).toBe('stock-prep-rail-group-title-deploy')
   })
 
   // -------------------------------------------------------------------------

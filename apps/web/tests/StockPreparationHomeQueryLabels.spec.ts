@@ -1,8 +1,52 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
 
+const h = vi.hoisted(() => ({
+  locale: 'zh-CN' as string,
+  route: {
+    path: '/stock-prep',
+    fullPath: '/stock-prep',
+    meta: {} as Record<string, unknown>,
+    query: {} as Record<string, unknown>,
+  },
+  router: { push: vi.fn(), replace: vi.fn() },
+  apiFetch: vi.fn(),
+}))
+
+vi.mock('vue-router', async () => {
+  const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
+  return { ...actual, useRoute: () => h.route, useRouter: () => h.router }
+})
+
+vi.mock('../src/composables/useLocale', () => ({
+  useLocale: () => ({
+    locale: ref(h.locale),
+    isZh: ref(h.locale === 'zh-CN'),
+    setLocale: vi.fn(),
+  }),
+}))
+
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getToken: () => 'session-token',
+    clearToken: vi.fn(),
+    getAccessSnapshot: () => ({ isAdmin: false, roles: [], permissions: ['stock-prep:read', 'stock-prep:operate'] }),
+    hasAdminAccess: () => false,
+    hasPermission: (permission: string) => ['stock-prep:read', 'stock-prep:operate'].includes(permission),
+  }),
+}))
+
+vi.mock('../src/utils/api', async () => {
+  const actual = await vi.importActual<typeof import('../src/utils/api')>('../src/utils/api')
+  return { ...actual, apiFetch: h.apiFetch }
+})
+
+import StockPreparationOperatorHome from '../src/components/integration/stockPreparation/StockPreparationOperatorHome.vue'
+import StockPreparationProjectQueryView from '../src/components/integration/stockPreparation/StockPreparationProjectQueryView.vue'
+import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 import {
   STOCK_PREP_HOME_FILTER_KEYS,
   STOCK_PREP_HOME_STATUS_LABELS,
@@ -27,11 +71,12 @@ import {
 // local copy — a component-level mount would only prove today's wiring, not that a later edit cannot
 // quietly grow a second copy the way the original duplication did.
 //
-// 「两视图渲染出的 chip 文案逐字相同」 follows from this file BY CONSTRUCTION rather than being
-// re-proven by mounting both components: `bi(...stockPrepHomeStatusLabel(key))` and
-// `bi(pullBanner.text.zh, pullBanner.text.en)` are literally the SAME expression evaluated in both
-// templates once each view is confirmed (below) to call the shared function rather than a local
-// table — there is only one place either word can come from.
+// 「两视图渲染出的 chip 文案逐字相同」 IS ASSERTED AT THE RENDER LEVEL, at the bottom of this file:
+// both components are mounted against the same directory and their five chips' words compared
+// character for character, in both locales. The source guards stay alongside it rather than instead of
+// it — they answer a different question (「can a second copy grow back later」, which one mounting can
+// never prove), and the first cut of this wave shipped only the guards and argued the render-level
+// equality 「by construction」, which is exactly the sort of reasoning a test is supposed to replace.
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const HOME_SRC = fs.readFileSync(
@@ -106,6 +151,125 @@ describe('StockPreparationHomeQueryLabels — 今天要处理 / 项目查询 共
     expect(QUERY_SRC).toContain('stockPrepHomeStatusLabel')
     expect(QUERY_SRC).not.toMatch(/\bSTATUS_LABELS\b/)
     expect(QUERY_SRC).not.toMatch(/\bFILTER_LABELS\b/)
+  })
+
+  // -------------------------------------------------------------------------
+  // RENDER-LEVEL: the two views' chips, mounted, compared word for word
+  // -------------------------------------------------------------------------
+
+  const SCOPE = { tenantId: 'tenant-a', workspaceId: 'workspace-default' }
+
+  function project(projectNo: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      projectId: `id-${projectNo}`,
+      projectNo,
+      projectName: null,
+      projectStatus: 'active',
+      lastSyncRunId: null,
+      snapshotBatchCount: 1,
+      openExceptionCount: 0,
+      heldLineCount: 0,
+      readyLineCount: 2,
+      pendingDecisionCount: 0,
+      ...overrides,
+    }
+  }
+
+  /** VALUES-FREE: the two project numbers below are synthetic fixtures, not customer data. */
+  const DIRECTORY = {
+    tenantId: 'tenant-a',
+    directoryReady: true,
+    ledgerReady: true,
+    projectCount: 2,
+    pendingProjectCount: 1,
+    projects: [project('LBL-0001'), project('LBL-0002', { pendingDecisionCount: 3 })],
+    pullTargetReady: true,
+    directoryMayBeIncomplete: false,
+    pullTargetScanCapped: false,
+    lastExportAtMayBeIncomplete: false,
+  }
+
+  let app: VueApp | null = null
+  let container: HTMLDivElement | null = null
+
+  async function flushUi(): Promise<void> {
+    for (let i = 0; i < 6; i += 1) {
+      await nextTick()
+      await Promise.resolve()
+    }
+  }
+
+  async function mountView(component: Component, props: Record<string, unknown>): Promise<HTMLElement> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(component, props)
+    app.mount(container)
+    await flushUi()
+    return container
+  }
+
+  /** `{{ label }} {{ count }}` — the count is the reader's number, the words are what must match. */
+  function chipWords(root: HTMLElement, testidOf: (key: string) => string): string[] {
+    return STOCK_PREP_HOME_FILTER_KEYS.map((key) => {
+      const chip = root.querySelector(`[data-testid="${testidOf(key)}"]`)
+      expect(chip, `${testidOf(key)} 必须渲染出来,否则这条比对是空转`).not.toBeNull()
+      return String(chip?.textContent ?? '').replace(/\s*\d+\s*$/, '').trim()
+    })
+  }
+
+  async function homeChips(): Promise<string[]> {
+    const root = await mountView(StockPreparationOperatorHome as Component, {
+      scope: SCOPE,
+      directory: DIRECTORY,
+      directoryLoaded: true,
+      memory: [],
+    })
+    return chipWords(root, (key) => `stock-prep-operator-home-filter-${key}`)
+  }
+
+  async function queryChips(): Promise<string[]> {
+    h.apiFetch.mockImplementation(async () => (
+      new Response(JSON.stringify({ ok: true, data: DIRECTORY }), { status: 200 })
+    ))
+    const root = await mountView(StockPreparationProjectQueryView as Component, { scope: SCOPE })
+    return chipWords(root, (key) => `stock-prep-project-query-status-${key}`)
+  }
+
+  beforeEach(() => {
+    h.locale = 'zh-CN'
+    h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: {} }
+    h.router.push.mockReset()
+    h.router.replace.mockReset()
+    h.apiFetch.mockReset()
+    localStorage.clear()
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+  })
+
+  afterEach(() => {
+    app?.unmount()
+    app = null
+    container?.remove()
+    container = null
+  })
+
+  it('RENDER: 今天要处理 与 项目查询 挂载出来的五个 chip,中文逐字相同', async () => {
+    const home = await homeChips()
+    app?.unmount(); app = null; container?.remove(); container = null
+    const query = await queryChips()
+    expect(home).toEqual(query)
+    // Anchored, so a shared-but-wrong map cannot make both sides equally wrong and still pass.
+    expect(home).toEqual(STOCK_PREP_HOME_FILTER_KEYS.map((key) => STOCK_PREP_HOME_STATUS_LABELS[key][0]))
+  })
+
+  it('RENDER: 英文一样 —— 同一份 map 的第二个元素,两边同时切语言', async () => {
+    h.locale = 'en-US'
+    const home = await homeChips()
+    app?.unmount(); app = null; container?.remove(); container = null
+    const query = await queryChips()
+    expect(home).toEqual(query)
+    expect(home).toEqual(STOCK_PREP_HOME_FILTER_KEYS.map((key) => STOCK_PREP_HOME_STATUS_LABELS[key][1]))
+    // ...and the two locales really do differ, so the case above is not comparing zh to zh twice.
+    expect(home).not.toEqual(STOCK_PREP_HOME_FILTER_KEYS.map((key) => STOCK_PREP_HOME_STATUS_LABELS[key][0]))
   })
 
   it('SOURCE GUARD: both views call the shared pullBanner resolver, not their own if/if/if chain', () => {

@@ -988,8 +988,15 @@ function handleProjectNoSelect(projectNo: string): void {
   //
   // Only these two keys move. Every other caller (the queue's closure button, the dashboard, the
   // wizard) names its own destination through `handleNavigateStage` and is untouched by this.
+  //
+  // THE SECOND BRANCH READS `activeKey`, NOT `effectiveKey`, and that asymmetry is deliberate. By the
+  // time it runs, `selectedProjectNo` is ALREADY empty (first line of this function), so D3's fold has
+  // already turned `effectiveKey` into `'home'` — the branch could never fire against it, and the raw
+  // `activeKey` would have been left saying `'project-board'` for ever. Nothing rendered differs
+  // either way (every panel branch keys off `effectiveKey`), but a state ref that disagrees with the
+  // screen is a trap for whoever reads it next, and a condition that cannot be true is worse.
   if (projectNo && effectiveKey.value === 'home') activeKey.value = 'project-board'
-  else if (!projectNo && effectiveKey.value === 'project-board') activeKey.value = 'home'
+  else if (!projectNo && activeKey.value === 'project-board') activeKey.value = 'home'
   // Replace, not push: opening a project is not a history step.
   //
   // AN EMPTY NUMBER REMOVES THE KEY rather than writing `?projectNo=`. This is the 返回今天要处理
