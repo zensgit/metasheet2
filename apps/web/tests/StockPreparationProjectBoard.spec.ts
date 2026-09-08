@@ -1522,6 +1522,9 @@ describe('项目备料页 — the operator project board', () => {
     await flush()
     // NOT a dead button: unlike the two admin-action emitters (absent above), this one rides the
     // `navigate-stage` this host already emits to the shell, and it is re-emitted verbatim.
-    expect(navigateStageSpy).toHaveBeenCalledWith('install')
+    // P1-1 renamed the destination — 开始使用 is a rail item of its own now and the install page
+    // no longer renders the wizard — so the stage name that reaches the shell moved with it. The
+    // forwarding this case exists to pin (host re-emits the child's event unchanged) is unaffected.
+    expect(navigateStageSpy).toHaveBeenCalledWith('getting-started')
   })
 })

@@ -122,11 +122,11 @@ const flows: StockPrepHelpFlow[] = [
     enWho: 'For the administrator setting a deployment up for the first time.',
     zhBody: '「开始使用」里是一张六步地图:接一条只读连接、证明它只能读、告诉备料用这条源、建表装列、'
       + '给角色授权、拿一个项目跑一遍。任何一步都能点开看 —— 它是地图,不是闸机,前一步没做完也不挡着您看后一步。'
-      + '装完之后再回来复查,去「数据来源与体检」。',
+      + '装完之后再回来复查,去「安装 / 体检」。',
     enBody: '开始使用 lays out six steps: wire a read-only connection, prove it can only read, point stock preparation'
       + ' at it, create the tables and columns, grant the roles, then take one project through end to end. Every step'
       + ' opens — it is a map, not a turnstile, and an unfinished step never blocks the next one. Come back to'
-      + ' 数据来源与体检 afterwards to re-check.',
+      + ' 安装 / 体检 afterwards to re-check.',
     target: 'getting-started',
     zhLink: '去「开始使用」',
     enLink: 'Go to 开始使用',

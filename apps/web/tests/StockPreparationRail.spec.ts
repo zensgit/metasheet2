@@ -91,7 +91,10 @@ vi.mock('vue-router', async () => {
 })
 
 import StockPreparationWorkspace from '../src/components/integration/stockPreparation/StockPreparationWorkspace.vue'
-import { STOCK_PREP_RAIL_GROUPS } from '../src/services/integration/stockPreparation/workbenchAccess'
+import {
+  STOCK_PREP_RAIL_GROUPS,
+  canOpenStockPrepRailItem,
+} from '../src/services/integration/stockPreparation/workbenchAccess'
 import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 
 const RAIL_SRC = readFileSync(
@@ -260,8 +263,16 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     expect(tablist, 'the rail must keep the tab strip\'s container testid').not.toBeNull()
     expect(tablist!.getAttribute('role')).toBe('tablist')
     // The one attribute that is NEW: the strip turned vertical, and a vertical tablist has to say so
-    // or a screen reader announces the wrong arrow keys.
+    // or a screen reader announces the wrong arrow keys. `vertical` is what this environment reads,
+    // because jsdom has no `window.matchMedia` and the guarded composable answers 「not narrow」.
     expect(tablist!.getAttribute('aria-orientation')).toBe('vertical')
+    // ...BUT IT MUST NOT BE A CONSTANT. The same component lays this tablist out as a horizontal
+    // strip under `@media (max-width: 899px)`, so a hard-coded 「vertical」 announces an orientation
+    // the narrow layout does not have. jsdom cannot reach that width, so the guard is at source
+    // level: the attribute is bound, and it is bound to the SAME query the stylesheet uses.
+    expect(RAIL_SRC).toContain(':aria-orientation="orientation"')
+    expect(RAIL_SRC).not.toContain('aria-orientation="vertical"')
+    expect(RAIL_SRC).toContain("RAIL_NARROW_QUERY = '(max-width: 899px)'")
     // Exactly one tablist. A rail that shipped alongside the old strip would render two.
     expect(root.querySelectorAll('[role="tablist"]').length).toBe(1)
   })
@@ -326,6 +337,37 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     expect(root.querySelector('[data-testid="stock-prep-rail-group-help"]')).not.toBeNull()
   })
 
+  it('R-02: the manifest gate each item declares matches the item the shell actually renders', async () => {
+    // WHAT THIS CLOSES. `STOCK_PREP_RAIL_GROUPS` is mirrored to the plugin module and asserted
+    // byte-equal there (F-09), but the shell filters on the `views[]` flags rather than on the
+    // manifest's gate token — so re-tiering an item IN THE MANIFEST changed the server's mirrored
+    // answer and moved nothing on screen, with every cross-side assertion still green. This ties the
+    // two together at the only place that matters: what is on the page.
+    //
+    // The domain is the principals who can actually OPEN /stock-prep (route meta:
+    // `permissions: ['stock-prep:read']`), which is every actor in this file. `canOpenStockPrepRailItem`
+    // is called here rather than in the shell deliberately — the shell's filtering is unchanged and
+    // this is a guard, not a second implementation.
+    for (const actor of ACTORS) {
+      h.permissions = actor.permissions
+      h.roles = actor.roles
+      const root = await mountShell()
+      const expected: string[] = []
+      for (const group of STOCK_PREP_RAIL_GROUPS) {
+        for (const item of group.items) {
+          if (canOpenStockPrepRailItem(item.gate, realHasPermission)) expected.push(item.key)
+        }
+        const advancedGate = group.advancedGate
+        if (advancedGate && canOpenStockPrepRailItem(advancedGate, realHasPermission)) {
+          for (const key of group.advanced ?? []) expected.push(key)
+        }
+      }
+      expect([...tabKeys(root)].sort(), `${actor.name}: manifest gates vs rendered rail`).toEqual(expected.sort())
+      app!.unmount()
+      app = null
+    }
+  })
+
   it('R-02: the rail decides nothing — it holds no permission probe of its own', () => {
     // 「侧栏项的可见性只能调 workbenchAccess.ts 既有/新增谓词,不得在组件里重算权限」. The shell hands
     // the rail an ALREADY-FILTERED list; a rail that grew its own probe would make the two lists
@@ -347,6 +389,20 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     // 默认收起. `hidden` is a real collapse — not painted, out of the tab order, out of the a11y
     // tree — which is what makes 「默认收起」 honest rather than a styling claim.
     expect(panel.hasAttribute('hidden')).toBe(true)
+    // ...AND THE ATTRIBUTE HAS TO STILL MEAN THAT. `hidden`'s whole effect is the UA stylesheet's
+    // `[hidden] { display: none }`, which ANY author-origin `display` on the same element outranks —
+    // and this panel carries `display: flex` for its own layout, scoped by Vue into a
+    // specificity-(0,2,0) selector. The first cut of this component shipped exactly that pair, so
+    // the seven folded tabs stayed painted, stayed focusable and stayed in the accessibility tree
+    // while this very assertion passed. The DOM cannot show it: vitest's jsdom environment runs no
+    // cascade and `apps/web/vite.config.ts`'s test block sets no `css` option, so an SFC's scoped
+    // styles are never even injected. So the guard is at SOURCE level, and it is deliberately
+    // stronger than 「a rule exists」: the element that gets `display` for its layout must also carry
+    // an explicit `[hidden]` branch turning it off.
+    expect(RAIL_SRC).toMatch(/\.sp-rail__advanced-panel\[hidden\]\s*\{[^}]*display:\s*none/)
+    // And no `!important` smuggled in to make it work by force — a fold whose off state needs to
+    // out-shout its own layout rule is a fold that will lose the next time the layout changes.
+    expect(RAIL_SRC).not.toContain('!important')
     const toggle = root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]') as HTMLButtonElement
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     // 不下线: every legacy key is in there, under its original testid, and none escaped into a group.
@@ -450,6 +506,131 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     h.roles = []
     const root = await mountShell()
     expect(await waitForActive(root)).toBe('confirmation-queue')
+  })
+
+  // -------------------------------------------------------------------------
+  // §2.3 — `?projectNo=` is the 首页 ⇄ 工作区 state bit, and it outranks the landing
+  // -------------------------------------------------------------------------
+
+  it('§2.3: `?projectNo=` 深链/刷新仍然打开那个项目,而不是落回「今天要处理」', async () => {
+    // THE REGRESSION THIS PINS. Before P1-1 an operator's landing WAS 项目备料, so a URL carrying a
+    // project number opened it by accident of the default. P1-1 moved the landing to 今天要处理 —
+    // whose branch passes an EMPTY project number on purpose — and nothing carried the state bit
+    // across, so a reload or a shared link painted the task list while the number sat in the address
+    // bar. §2.3 says in so many words that a reload, a shared link and the back button reopen the
+    // same project, and `?tab=` cannot compensate: this wave writes it in, never out.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    h.route = {
+      path: '/stock-prep',
+      fullPath: '/stock-prep',
+      meta: {},
+      // Values-free: a shape, not a customer's number.
+      query: { projectNo: 'PROJECT-A' },
+    }
+    const root = await mountShell()
+    expect(await waitForActive(root)).toBe('project-board')
+  })
+
+  it('§2.3: 没有 `?projectNo=` 时一线仍落「今天要处理」—— 深链是加法,不是新落地页', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    const root = await mountShell()
+    expect(await waitForActive(root)).toBe('home')
+  })
+
+  it('§2.3: 点左栏「今天要处理」会把 `?projectNo=` 清掉 —— 地址栏和屏幕不许各说各话', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: { projectNo: 'PROJECT-A' } }
+    const root = await mountShell()
+    expect(await waitForActive(root)).toBe('project-board')
+    ;(root.querySelector('[data-testid="stock-prep-tab-home"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
+    // The number is REMOVED rather than blanked: `?projectNo=` with an empty value is not the same
+    // URL as one carrying none, and the shell's own comment says why.
+    const lastReplace = h.router.replace.mock.calls.at(-1)?.[0] as { query?: Record<string, unknown> } | undefined
+    expect(lastReplace, 'picking 今天要处理 with a project open must rewrite the query').toBeTruthy()
+    expect(Object.prototype.hasOwnProperty.call(lastReplace!.query ?? {}, 'projectNo')).toBe(false)
+  })
+
+  it('§2.3: 纯 read 带着 `?projectNo=` 仍落确认队列 —— 深链不能开一扇本来关着的门', async () => {
+    // Folded through `visibleViews` like every other landing branch: 项目备料 is not this tier's, so
+    // a link naming a project cannot conjure it.
+    h.permissions = ['stock-prep:read']
+    h.roles = []
+    h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: { projectNo: 'PROJECT-A' } }
+    const root = await mountShell()
+    expect(await waitForActive(root)).toBe('confirmation-queue')
+  })
+
+  // -------------------------------------------------------------------------
+  // 开始使用 / 数据来源与体检 — ONE component, two modes, and what each must render
+  // -------------------------------------------------------------------------
+
+  it('mode: 「开始使用」出向导 + 源绑定面板 + ② 的检查按钮,不出安装页三分区', async () => {
+    // The install view's `mode` prop is the whole of P1-1's 「不重复渲染」 claim, and until now no
+    // assertion touched either shipped value — the only spec that mounts that component uses the
+    // default `'full'`, which no caller passes. Nesting the `mode !== 'wizard'` wrapper one level
+    // wrong would blank 数据来源与体检 with every suite still green.
+    h.permissions = ['stock-prep:read', 'stock-prep:admin']
+    h.roles = []
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-tab-getting-started"]') as HTMLButtonElement).click()
+    await flushUi()
+    const install = root.querySelector('[data-testid="stock-prep-install"]')
+    expect(install?.getAttribute('data-mode')).toBe('wizard')
+    expect(root.querySelector('[data-testid="stock-prep-getting-started"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-install-intro"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-install-review-section"]')).toBeNull()
+    // ③「告诉备料用这条源」的执行位必须跟着向导走 —— 少了它,①③ 永远是「? 看不到」。
+    expect(root.querySelector('[data-testid="stock-prep-source-binding"]')).not.toBeNull()
+    // ②「证明它只能读」的执行位:这一档跑不了(要 integration 权限),所以出的是说明而不是按钮。
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-verify-denied"]')).not.toBeNull()
+  })
+
+  it('mode: 「安装 / 体检」出三分区,不再出向导', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:admin']
+    h.roles = []
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
+    await flushUi()
+    const install = root.querySelector('[data-testid="stock-prep-install"]')
+    expect(install?.getAttribute('data-mode')).toBe('review')
+    expect(root.querySelector('[data-testid="stock-prep-getting-started"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-install-intro"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-install-review-section"]')).not.toBeNull()
+    // 源绑定面板在两种形态里都在 —— 它是「数据来源」这一段本身。
+    expect(root.querySelector('[data-testid="stock-prep-source-binding"]')).not.toBeNull()
+  })
+
+  it('mode: 能跑源预检的人,在向导里就有 ②「检查这个源」这颗按钮', async () => {
+    // 线框 B's step table puts ②「在哪做 = 本页」. The card that carries this action lives in the
+    // install page's region ③, i.e. NOT on 开始使用 — so without this entry point ② would read
+    // 「未检查」 for ever on the page D2 lands a new deployment's admin on, with nothing to press.
+    h.permissions = []
+    h.roles = ['admin']
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-tab-getting-started"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-run-source-preflight"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-verify-denied"]')).toBeNull()
+  })
+
+  it('A1 死路:空队列的「去装:开始使用」按钮真的到得了向导', async () => {
+    // 设计稿 §2.3's minimal fix for A1 sends an admin stranded on an empty queue to the wizard. While
+    // the wizard rode the install page's first screen, `navigate-stage('install')` did that; P1-1
+    // made the install page render `mode="review"`, so the same emit would now land on a page with
+    // no 开始使用 on it. The destination is asserted here rather than in the queue's own suite
+    // because only the shell knows what a stage name resolves to.
+    const queue = readFileSync(
+      join(__dirname, '../src/components/integration/stockPreparation/StockPreparationConfirmationQueueView.vue'),
+      'utf8',
+    )
+    const at = queue.indexOf('data-testid="stock-prep-confirmation-empty-go-install"')
+    expect(at).toBeGreaterThan(-1)
+    expect(queue.slice(at, at + 220)).toContain("emit('navigate-stage', 'getting-started')")
   })
 
   // -------------------------------------------------------------------------

@@ -572,7 +572,13 @@ describe('一线看得见自己工厂的项目 — the operator project director
     return root
   }
 
-  it('P0-7a a platform admin landing on the empty queue gets [去装:开始使用], and it asks the shell for the install tab', async () => {
+  it('P0-7a a platform admin landing on the empty queue gets [去装:开始使用], and it asks the shell for 开始使用', async () => {
+    // P1-1 MOVED THE DESTINATION, NOT THE INTENT. 设计稿 §2.3's fix for A1 was always 「把落在空
+    // 队列上的管理员送到向导」; while the wizard rode the install page's first screen, `'install'`
+    // WAS the way to reach it. Now 开始使用 is its own rail item and the install page renders
+    // `mode="review"` (no wizard), so the old stage name would land this reader on a page with no
+    // 开始使用 on it — the same dead end, one screen further along. Same button, same testid, same
+    // label, same gate; only the name of where it goes changed.
     h.roles = ['admin']
     const onNavigateStage = vi.fn()
     const root = await landOnLedgerMissing({ onNavigateStage })
@@ -580,7 +586,7 @@ describe('一线看得见自己工厂的项目 — the operator project director
     expect(button, 'the one dead end this wave closes').not.toBeNull()
     button.click()
     await nextTick()
-    expect(onNavigateStage).toHaveBeenCalledWith('install')
+    expect(onNavigateStage).toHaveBeenCalledWith('getting-started')
   })
 
   it('P0-7b an operator sees the SAME empty state without that button — it would teleport them to another tab', async () => {

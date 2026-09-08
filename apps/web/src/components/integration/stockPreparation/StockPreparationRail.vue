@@ -1,9 +1,10 @@
 <template>
   <!--
     THE RAIL IS STILL ONE TABLIST. 设计稿 §2.2 是把横条竖过来并分组,不是换一种导航:容器保留
-    `data-testid="stock-prep-tabs"` 与 `role="tablist"`(加上 `aria-orientation="vertical"`),每个条目
-    保留 `role="tab"` 与 `data-testid="stock-prep-tab-${key}"` 原名。这一条是让绝大多数既有断言不动的
-    关键一招,也是"rail 本质仍是一组 tab"这句话在 DOM 上的兑现。
+    `data-testid="stock-prep-tabs"` 与 `role="tablist"`(并宣告 aria 方向,见下方 `orientation` —— 竖排
+    时 vertical,窄屏折成横排时 horizontal),每个条目保留 `role="tab"` 与
+    `data-testid="stock-prep-tab-${key}"` 原名。这一条是让绝大多数既有断言不动的关键一招,也是
+    "rail 本质仍是一组 tab"这句话在 DOM 上的兑现。
 
     组标题不是 tab:它没有 `role="tab"`,也没有 `stock-prep-tab-*` testid,因此
     `querySelectorAll('[data-testid^="stock-prep-tab-"]')` 数出来的仍然只有真正可点的视图。
@@ -11,13 +12,21 @@
   <nav
     class="sp-rail"
     role="tablist"
-    aria-orientation="vertical"
+    :aria-orientation="orientation"
     data-testid="stock-prep-tabs"
     :aria-label="bi('备料视图', 'Stock preparation views')"
   >
+    <!--
+      role="presentation" ON THE GROUP WRAPPERS. A `tablist` owns `tab`s; the grouping this rail
+      introduces puts two levels of `<div>` between them, and an un-neutralised wrapper makes the
+      screen reader's enumeration of the tablist wrong (「1 of 3 groups」 instead of 「1 of 14 tabs」).
+      `presentation` removes the box from the accessibility tree while leaving its children owned by
+      the tablist, which is the whole point: the grouping is a VISUAL affordance, not a semantic one.
+    -->
     <div
       v-for="group in groups"
       :key="group.group"
+      role="presentation"
       class="sp-rail__group"
       :data-testid="`stock-prep-rail-group-${group.group}`"
     >
@@ -44,14 +53,24 @@
         unchanged, nothing goes offline). They are rendered and then HIDDEN with the `hidden`
         attribute rather than dropped with `v-if`, and that choice is load-bearing twice over:
 
-          * `hidden` is a real collapse — the browser does not paint them, they leave the tab order
-            and they leave the accessibility tree — so 「默认收起」 is honest; and
+          * `hidden` collapses for real — not painted, out of the tab order, out of the accessibility
+            tree — so 「默认收起」 is honest; and
           * every existing suite that reaches a legacy tab by testid keeps working unchanged. Making
             the fold a `v-if` would have meant either expanding the disclosure in a dozen unrelated
             specs or deleting their assertions, and 「不得为迁就 rail 而删断言」 is the rule this wave
             was given.
+
+        THE FIRST CUT OF THIS SHIPPED A FOLD THAT NEVER FOLDED. `hidden`'s entire effect comes from
+        the UA stylesheet's `[hidden] { display: none }`, and the panel's own
+        `.sp-rail__advanced-panel { display: flex }` — an AUTHOR-origin rule, and once Vue compiles
+        the scope onto it a specificity-(0,2,0) one — beats it on both counts. Nothing in this repo
+        supplies a forced global `[hidden]` reset as a backstop either. So the seven legacy tabs
+        stayed painted, stayed in the tab order and stayed in the a11y tree while the toggle did
+        nothing but flip ▾/▴. The explicit `[hidden]` rule in the style block below is what makes the
+        attribute mean what this comment says; it is asserted at source level in R-03, because jsdom
+        runs no cascade and a DOM assertion structurally cannot see this class of defect.
       -->
-      <div v-if="group.advanced.length > 0" class="sp-rail__advanced">
+      <div v-if="group.advanced.length > 0" role="presentation" class="sp-rail__advanced">
         <button
           type="button"
           class="sp-rail__disclosure"
@@ -63,6 +82,7 @@
           <span aria-hidden="true">{{ advancedOpen ? '▴' : '▾' }}</span>
         </button>
         <div
+          role="presentation"
           class="sp-rail__advanced-panel"
           data-testid="stock-prep-rail-advanced-panel"
           :hidden="!advancedOpen"
@@ -99,8 +119,9 @@
 // The container renders UNCONDITIONALLY in both shapes, which is exactly what R11 warns about —
 // ApprovalCenterView shipped a conditionally-rendered split container that became a no-op div on
 // narrow screens. A media query cannot do that, and it keeps `role="tablist"` true at every width.
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
+import { useMobileViewport } from '../../../composables/useMobileViewport'
 
 interface StockPreparationRailItem {
   key: string
@@ -134,6 +155,23 @@ function bi(zh: string, en: string): string {
 
 /** 默认收起 (设计稿 §2.2). Per-mount state: a fold is a view preference, not shared shell state. */
 const advancedOpen = ref(false)
+
+/**
+ * `aria-orientation` FOLLOWS THE BREAKPOINT rather than being asserted once.
+ *
+ * The first cut hard-coded 「vertical」 while the `@media (max-width: 899px)` block below lays the
+ * same tablist out as a horizontal strip — so on a narrow screen the page announced an orientation
+ * it did not have, and a screen reader would offer the wrong arrow keys for it. The width query is
+ * the SAME one the stylesheet uses; keeping the two literals side by side is deliberate, since a
+ * breakpoint that moved in only one of them is exactly the drift this fixes.
+ *
+ * `useMobileViewport` is the repo's existing guarded wrapper: `window.matchMedia` is undefined under
+ * jsdom and SSR, and it answers 「not narrow」 there, so the default stays 「vertical」 — which is what
+ * every existing assertion reads.
+ */
+const RAIL_NARROW_QUERY = '(max-width: 899px)'
+const { isMobile: railIsNarrow } = useMobileViewport(RAIL_NARROW_QUERY)
+const orientation = computed<'vertical' | 'horizontal'>(() => (railIsNarrow.value ? 'horizontal' : 'vertical'))
 </script>
 
 <style scoped>
@@ -218,6 +256,15 @@ const advancedOpen = ref(false)
   flex-direction: column;
   gap: 2px;
   padding-left: var(--ms-space-2);
+}
+
+/* 默认收起, FOR REAL. The rule above is author-origin and scoped, so it outranks the UA stylesheet's
+   `[hidden] { display: none }` on both origin and specificity — without this line the `hidden`
+   attribute on the panel is inert and the seven folded tabs stay painted, focusable and announced.
+   Written as an explicit `[hidden]` branch of the SAME class rather than as a forced override, so
+   the layout declaration and its off state live one line apart and cannot drift. */
+.sp-rail__advanced-panel[hidden] {
+  display: none;
 }
 
 .sp-rail__tab--advanced {

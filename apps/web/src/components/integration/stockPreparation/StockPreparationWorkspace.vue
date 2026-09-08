@@ -618,6 +618,22 @@ const railGroups = computed<StockPreparationRailGroupView[]>(() => {
 })
 
 /**
+ * `?projectNo=` HAS ALREADY ANSWERED "which view", for anyone whose rail carries 项目备料.
+ *
+ * Declared beside the landing rather than inside it because TWO things read it: the landing itself,
+ * and the D2 hold below — an admin arriving on a shared project link has nothing to wait for, so
+ * making them read 「正在确认这套部署装到哪一步…」 first would be a spinner in front of an answer we
+ * already have.
+ *
+ * (`selectedProjectNo` is declared further down. A computed body runs on first ACCESS — during
+ * render — by which time every ref in this setup has been initialised.)
+ */
+const deepLinkedProjectBoard = computed<boolean>(() => (
+  selectedProjectNo.value.length > 0
+  && visibleViews.value.some((view) => view.key === 'project-board')
+))
+
+/**
  * THE LANDING TAB. It used to be "the first VISIBLE one", which was the same thing for everybody
  * because there was only one tab an operator could see. 项目备料页 makes the two audiences differ:
  * an operator lands on the board they came for, a platform admin keeps today's landing (确认队列),
@@ -630,6 +646,21 @@ const landingKey = computed<StockPreparationViewKey>(() => {
   const visible = visibleViews.value
   if (visible.length === 0) return views[0].key
   const probe = (permission: string): boolean => auth.hasPermission(permission)
+  // A PROJECT IN THE URL OUTRANKS EVERY LANDING RULE, D2 included.
+  //
+  // §2.3 makes `?projectNo=` the 首页 ⇄ 工作区 state bit and says in so many words that a reload, a
+  // shared link and the back button all reopen the same project. P1-1's first cut broke that in the
+  // one place it is used most: a floor operator's landing became `home`, and the `home` branch below
+  // deliberately passes an EMPTY project number — so `/stock-prep?projectNo=…` painted the task list
+  // and dropped the number off the screen while leaving it in the address bar, the exact
+  // URL-disagrees-with-page state `handleProjectNoSelect` warns about a hundred lines down.
+  //
+  // Read here rather than in `stockPrepLandingKey`: the ruling that predicate mirrors is about who
+  // the principal IS, and this is about what the link asked for. Folded through `visible` like every
+  // other branch, so it can never name a tab this principal cannot open — a `stock-prep:read` queue
+  // watcher with a number in their URL still lands on the queue, because 项目备料 is not theirs.
+  //
+  if (deepLinkedProjectBoard.value) return 'project-board'
   // D2=A. The whole decision is one call into workbenchAccess.ts, which is what lets the ruling be
   // asserted against the predicate and against the DOM without either restating the other.
   const preferred = stockPrepLandingKey(probe, deploymentReady.value)
@@ -672,9 +703,15 @@ const deploymentPending = ref(false)
  * `activeKey` short-circuits it: the moment the reader picks a tab themselves, there is nothing left
  * to decide and the panel renders immediately even if the read is still out.
  */
-const landingPending = computed<boolean>(() => activeKey.value === null && deploymentPending.value)
+const landingPending = computed<boolean>(() => (
+  activeKey.value === null && deploymentPending.value && !deepLinkedProjectBoard.value
+))
 
 async function readDeploymentPosture(): Promise<void> {
+  // NOTHING LEFT TO DECIDE, NOTHING READ. A `?tab=` deep link has already fixed the panel, so the
+  // landing this read exists to choose is never consulted — and the two panels it would send an
+  // admin to (开始使用 / 数据来源与体检) read the same preflight for themselves anyway.
+  if (activeKey.value !== null) return
   const probe = (permission: string): boolean => auth.hasPermission(permission)
   // Only the tier whose landing depends on it pays for it. An operator's landing (今天要处理) and a
   // queue watcher's (确认队列) are decided from permissions alone, so they issue nothing.
@@ -784,6 +821,12 @@ const confirmationQueueEl = ref<InstanceType<typeof StockPreparationConfirmation
 /** A rail click. The rail decides nothing — it names a key and this is what acts on it. */
 function handleRailSelect(key: string): void {
   activeKey.value = key as StockPreparationViewKey
+  // 今天要处理 MEANS 「没有项目打开」, so picking it clears the state bit that says otherwise.
+  // Without this the URL keeps `?projectNo=` while the panel shows the task list, and the next
+  // reload (which now honours the number — see `deepLinkedProjectBoard`) would reopen the project
+  // the reader just navigated away from. The board's own 「返回今天要处理」 already goes through
+  // `handleProjectNoSelect('')`; this puts the rail on the same path rather than a second one.
+  if (key === 'home' && selectedProjectNo.value.length > 0) handleProjectNoSelect('')
 }
 
 function handleProjectNoSelect(projectNo: string): void {

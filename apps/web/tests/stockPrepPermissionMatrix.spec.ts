@@ -157,6 +157,30 @@ const ACTORS: Actor[] = [
   { name: 'platform admin', roles: ['admin'], permissions: ['integration:admin'] },
 ]
 
+/**
+ * THE BOUNDARY THE TABLE ABOVE WALKS AROUND — deliberately its own constant, not an eighth row.
+ *
+ * Every actor in ACTORS either carries no platform signal at all or carries BOTH `role:admin` and
+ * `integration:admin`, so no case in this file ever separated the two. And they are separable,
+ * because the two sides spell 「platform admin」 differently: the server's `PLATFORM_ADMIN_PERMISSIONS`
+ * accepts a bare `integration:admin` in the flattened list, while the browser's `hasPermission`
+ * short-circuits only on `isAdmin` / `roles.includes('admin')` and otherwise treats `integration:admin`
+ * as the literal code it is. This principal sits exactly on that seam, and it is not hypothetical:
+ * StockPreparationWorkspace.spec.ts stands its platform admin up as `integration:admin` +
+ * `stock-prep:read` in four places.
+ *
+ * IT IS NOT AN ACTORS ROW because the fork is older and wider than the rail: dropping it into the
+ * shared table would redden F-01 (the CAPABILITY mirror, an earlier wave's guarantee) for a reason
+ * that has nothing to do with P1-1. Instead F-10 below enumerates the fork — every rail gate, every
+ * landing posture, and the capability answer that bounds F-01 — value by value on both sides, so it
+ * is stated rather than discovered, and so that closing it reddens a test on the day somebody does.
+ */
+const INTEGRATION_ADMIN_WITHOUT_ROLE: Actor = Object.freeze({
+  name: 'integration:admin without role',
+  roles: [],
+  permissions: ['integration:admin'],
+}) as Actor
+
 function asActor(actor: Actor): void {
   h.roles = [...actor.roles]
   h.permissions = [...actor.permissions]
@@ -471,6 +495,13 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(rail).toContain('v-for="item in group.advanced"')
     expect(rail).not.toContain('hasPermission')
     expect(rail).not.toContain('workbenchAccess')
+    // ...AND THE WIRE BETWEEN THEM. The three above pin each end — the shell filters, the rail
+    // iterates what it is handed — and say nothing about whether the list handed over is the
+    // filtered one. These two are that link: `railGroups` is assembled FROM `visibleViews.value`,
+    // and `railGroups` is what the template passes. Without them, re-pointing the assembly at the
+    // unfiltered `views` array leaves every assertion in this test green.
+    expect(workspace).toContain('const visible = visibleViews.value')
+    expect(workspace).toContain(':groups="railGroups"')
     expect(workspace).toContain('canUseLegacyMvpTabs')
     expect(workspace).toContain("effectiveKey === 'confirmation-queue'")
     expect(workspace).not.toContain("v-if=\"activeKey === 'dashboard'\"")
@@ -524,7 +555,10 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     }
   })
 
-  it('F-09: the rail gate resolver agrees with the server for every actor and every gate', () => {
+  it('F-09: the rail gate resolver agrees with the server for every ACTORS actor and every gate', () => {
+    // BOUNDED ON PURPOSE, and the bound is named: the one principal for whom this does NOT hold is
+    // `integration:admin` without an admin role, and F-10 below asserts its answers explicitly on
+    // both sides rather than leaving this loop to imply a universal it cannot deliver.
     for (const actor of ACTORS) {
       asActor(actor)
       const flattened = [...actor.permissions, ...actor.roles.map((role) => `role:${role}`)]
@@ -557,7 +591,8 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     }
   })
 
-  it('F-09 / D2=A: the landing key agrees with the server for every actor and all three postures', () => {
+  it('F-09 / D2=A: the landing key agrees with the server for every ACTORS actor and all three postures', () => {
+    // Same bound as the gate loop above; the exception is enumerated in F-10.
     for (const actor of ACTORS) {
       asActor(actor)
       const flattened = [...actor.permissions, ...actor.roles.map((role) => `role:${role}`)]
@@ -592,5 +627,86 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     for (const ready of [true, false, null]) {
       expect(stockPrepLandingKey(probe(), ready)).toBe('confirmation-queue')
     }
+  })
+
+  // ---------------------------------------------------------------------------
+  // F-10 — the ONE principal the two sides spell differently, enumerated
+  // ---------------------------------------------------------------------------
+  //
+  // 「the mirror agrees for every actor」 is true of ACTORS and false of the world, and the gap is one
+  // principal wide: `integration:admin` held WITHOUT an admin role (see
+  // `INTEGRATION_ADMIN_WITHOUT_ROLE`). The server counts it as a platform admin, the browser does not.
+  //
+  // These assertions are written as LITERAL expected values on each side rather than as
+  // `expect(web).not.toBe(server)`, so they say what each side answers today. Any change to either
+  // algebra — closing the fork by widening the browser, or narrowing the server — reddens here with
+  // the new answer in the diff, which is the point: this is a decision to be taken deliberately, not
+  // a difference to be rediscovered by a reviewer a third time.
+  //
+  // NOTHING ROUTES ON THE SERVER-SIDE COPY. `satisfiesStockPrepRailGate` /
+  // `stockPrepWorkbenchLandingKey` are vocabulary the plugin exports for the mirror; no handler
+  // consults them, so the fork is latent rather than a live authorization difference. The live gates
+  // (`satisfiesStockPrepAccess`, `holdsPlatformAdmin`) are untouched by P1-1.
+
+  it('F-10: the rail gates fork for `integration:admin` without an admin role — three of four', () => {
+    asActor(INTEGRATION_ADMIN_WITHOUT_ROLE)
+    const flattened = [...INTEGRATION_ADMIN_WITHOUT_ROLE.permissions]
+
+    // The browser: `hasPermission('stock-prep:*')` finds no code, and `integration:admin` neither
+    // short-circuits nor satisfies a `stock-prep:` resource rule.
+    expect(canOpenStockPrepRailItem('route', probe())).toBe(false)
+    expect(canOpenStockPrepRailItem('operator-board', probe())).toBe(false)
+    expect(canOpenStockPrepRailItem('workbench-admin', probe())).toBe(false)
+    // ...except 深度工具, whose predicate asks for the literal `integration:admin` and gets it. This
+    // is the one gate that already agreed, and it is why this principal sees a 【部署与接入】 heading
+    // with nothing under it but the fold.
+    expect(canOpenStockPrepRailItem('platform-admin', probe())).toBe(true)
+
+    // The server: `holdsPlatformAdmin` accepts the bare code, so every gate opens.
+    expect(backendAccess.satisfiesStockPrepRailGate(flattened, 'route')).toBe(true)
+    expect(backendAccess.satisfiesStockPrepRailGate(flattened, 'operator-board')).toBe(true)
+    expect(backendAccess.satisfiesStockPrepRailGate(flattened, 'workbench-admin')).toBe(true)
+    expect(backendAccess.satisfiesStockPrepRailGate(flattened, 'platform-admin')).toBe(true)
+
+    // An unknown token still refuses on both sides — the fork is about who is a platform admin, not
+    // about what an unrecognised gate does.
+    expect(canOpenStockPrepRailItem('not-a-gate' as never, probe())).toBe(false)
+    expect(backendAccess.satisfiesStockPrepRailGate(flattened, 'not-a-gate')).toBe(false)
+  })
+
+  it('F-10: the landing forks for the same principal, in all three postures', () => {
+    asActor(INTEGRATION_ADMIN_WITHOUT_ROLE)
+    const flattened = [...INTEGRATION_ADMIN_WITHOUT_ROLE.permissions]
+    for (const ready of [true, false, null]) {
+      // The browser folds it out of the operator landing (`landsOnStockPrepProjectBoard` excludes an
+      // `integration:admin` holder by name) and out of the install tier, leaving the queue.
+      expect(stockPrepLandingKey(probe(), ready), `browser @ ready=${String(ready)}`).toBe('confirmation-queue')
+    }
+    // The server puts it above the workbench ceiling, so D2's posture rule applies to it.
+    expect(backendAccess.stockPrepWorkbenchLandingKey(flattened, true)).toBe('ops')
+    expect(backendAccess.stockPrepWorkbenchLandingKey(flattened, false)).toBe('getting-started')
+    expect(backendAccess.stockPrepWorkbenchLandingKey(flattened, null)).toBe('getting-started')
+  })
+
+  it('F-10: the fork is OLDER than the rail — F-01 is bounded the same way', () => {
+    // Stated here so the boundedness of F-01's 「every actor」 lives next to its cause rather than
+    // being inferred. This is the PRE-EXISTING capability mirror, untouched by P1-1.
+    asActor(INTEGRATION_ADMIN_WITHOUT_ROLE)
+    const flattened = [...INTEGRATION_ADMIN_WITHOUT_ROLE.permissions]
+
+    // The browser grants exactly the capabilities whose gate is the platform-admin token — the only
+    // place `canStockPrepCapability` asks for the literal `integration:admin` — and nothing else,
+    // because none of the `stock-prep:` codes is satisfied by that permission on this side.
+    const platformAdminGated = STOCK_PREP_WORKBENCH_CAPABILITIES
+      .filter((capability) => capability.code === PLATFORM_ADMIN_GATE)
+      .map((capability) => capability.capability)
+    expect(platformAdminGated.length).toBeGreaterThan(0)
+    expect(grantedStockPrepCapabilities(probe()).sort()).toEqual([...platformAdminGated].sort())
+
+    // The server grants ALL of them, because `holdsPlatformAdmin` short-circuits every code.
+    expect([...backendAccess.grantedStockPrepCapabilities(flattened)].sort())
+      .toEqual(STOCK_PREP_WORKBENCH_CAPABILITIES.map((capability) => capability.capability).sort())
+    // ...and the two sets genuinely differ, so this is a fork and not two spellings of one answer.
+    expect(platformAdminGated.length).toBeLessThan(STOCK_PREP_WORKBENCH_CAPABILITIES.length)
   })
 })

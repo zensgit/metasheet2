@@ -23,7 +23,9 @@
       :report="report"
       :can-run-install="canRun"
       :busy="busy"
+      :source-check-control="wizardSourceCheckControl"
       @run-preflight-check="loadPreflight"
+      @run-source-preflight="loadSourcePreflight()"
       @run-install="startInstall"
       @navigate-stage="(viewKey) => emit('navigate-stage', viewKey)"
     />
@@ -79,10 +81,21 @@
          scroll of its own — this panel IS its only execution site — so putting
          it below ②'s ~240 template lines would leave the wizard pointing at
          something the reader has to go hunting for. `P1-7b` pins the ordering.
+
+         P1-1 FIX — IT RENDERS IN EVERY MODE, and that is why the `mode !== 'wizard'` wrapper is cut
+         in two around it. This panel is the ONLY thing on the page that answers 「哪条源、有几条可
+         选」, and the wizard's steps ①③ are derived from its `binding-read` envelope and from nothing
+         else (`gettingStarted.ts`: `binding === null` ⇒ 「? 看不到」). The first cut of the rail put
+         the wizard on its own item and left this panel behind on 数据来源与体检 — so a brand-new
+         deployment's admin, whom D2 lands on 开始使用, was shown 「? 看不到」 on the two steps that
+         were in fact done, with no control on screen and no link to one. That is 「看不到」 being
+         mistaken for 「没完成」, manufactured by us, which is exactly what G4 forbids.
          =================================================================== -->
+    </template>
     <!-- @binding-read hands the wizard above THIS panel's server answer (which source 备料 will read,
          how many the server considers eligible) so steps ①③ project it rather than re-deriving it. -->
     <StockPreparationSourceBindingPanel :scope="scope" @binding-read="onBindingRead" />
+    <template v-if="props.mode !== 'wizard'">
 
     <!-- ===================================================================
          §14 DEFAULTS FOR CONFIRMATION — rendered FROM the served manifest.
@@ -1115,6 +1128,26 @@ const sourcePreflight = ref<StockPrepSourcePreflight | null>(null)
 const sourcePreflightErrorStatus = ref<number | null>(null)
 const sourcePreflightRoute = STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE
 const canCheckSource = computed(() => canRunStockPrepSourcePreflight((permission) => auth.hasPermission(permission)))
+
+/**
+ * WHETHER THE WIZARD CARRIES STEP ②'s OWN RUN CONTROL — and it does so in `mode="wizard"` alone.
+ *
+ * 线框 B's step table says ②「证明它只能读」 is done 「本页」, and the only control that does it is the
+ * 源就绪预检 card's 「检查这个源」 button — which lives inside region ③ 「装完之后回来复查」, i.e. on
+ * 数据来源与体检, not on 开始使用. Rather than move that card (P1-7 pinned its position, and duplicating
+ * it would put one action on screen twice), the wizard gets a one-button entry point into the SAME
+ * `loadSourcePreflight()` this component already owns.
+ *
+ *   'none'    the card itself is on screen (`full` / `review`) — a second button would be the
+ *             「一个动作画两次」 confusion I-11 exists to prevent.
+ *   'run'     wizard, and this caller may press it.
+ *   'denied'  wizard, and this caller may not — R-11 the other way round: it says who can, instead
+ *             of showing a button that 403s or leaving ② silently un-runnable forever.
+ */
+const wizardSourceCheckControl = computed<'none' | 'run' | 'denied'>(() => {
+  if (props.mode !== 'wizard') return 'none'
+  return canCheckSource.value ? 'run' : 'denied'
+})
 const sourceBlockerPlain = stockPrepSourceBlockerPlain
 const sourceWarningPlain = stockPrepSourceWarningPlain
 const sourceCheckPlain = stockPrepSourceCheckPlain

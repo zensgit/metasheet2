@@ -570,9 +570,22 @@ function stockPrepWorkbenchLandingKey(permissions, deploymentReady) {
   if (satisfiesStockPrepRailGate(held, STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN)) {
     return deploymentReady === true ? 'ops' : 'getting-started'
   }
-  // The operator tier lands on 今天要处理; a platform admin never reaches this line (the workbench
-  // ceiling above admits them first), which is what keeps the browser's own `landsOn…` fold — which
-  // excludes a platform admin from the operator landing — equivalent to this one.
+  // The operator tier lands on 今天要处理. A platform admin never reaches this line — the workbench
+  // ceiling above admits them first — which is how this stays aligned with the browser's own
+  // `landsOnStockPrepProjectBoard` fold, that one excluding a platform admin from the operator
+  // landing rather than admitting them earlier.
+  //
+  // ONE ARCHITECTURAL FORK, AND IT IS NOT A DRIFT. 「platform admin」 is not spelled the same way on
+  // the two sides: here it is `PLATFORM_ADMIN_PERMISSIONS` (`role:admin` OR a bare `integration:admin`
+  // in the flattened list), while the browser's `useAuth().hasPermission` short-circuits on
+  // `snapshot.isAdmin || roles.includes('admin')` and treats a bare `integration:admin` as nothing
+  // more than the literal code it is. So for the ONE principal holding `integration:admin` with no
+  // admin role, this function answers 'ops'/'getting-started' where the browser answers
+  // 'confirmation-queue', and three of the four rail gates likewise part company. That principal is
+  // enumerated in `stockPrepPermissionMatrix.spec.ts`'s ACTORS and the fork is asserted there
+  // explicitly, value by value, so it can be READ rather than discovered — and so that closing it
+  // (by widening what the browser accepts as a platform admin) reddens a test the day somebody does.
+  // Nothing routes on this function today; it is vocabulary, and the fork is latent, not live.
   if (satisfiesStockPrepRailGate(held, STOCK_PREP_RAIL_GATE_OPERATOR_BOARD)) return 'home'
   return 'confirmation-queue'
 }
