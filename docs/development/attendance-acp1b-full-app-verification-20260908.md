@@ -1,9 +1,79 @@
 # ACP-1B full-application synthetic acceptance
 
-Status: local full-application synthetic functional acceptance PASS; final
-publication-tree verification and Draft/HOLD delivery remain IN PROGRESS.
+Status: final combined code tree `a08ebc39e300994ad022f19f1918e19162d6b5ce`
+passes local full-application synthetic acceptance. Draft/HOLD publication and
+its own natural exact-head CI remain pending. No deployed or real-data UAT claim.
 
-## Latest local acceptance checkpoint
+## Current final-tree evidence (2026-09-08)
+
+- Remote dependencies were read serially before this verification: #5564 OPEN
+  Draft at `10f12e5ae41534e053af0900075d86897ea0762a`; #5559 OPEN Draft at
+  `5f006a9e0cc4ba5dce2e7f2b77495f0452cf3ada`. Product dependency #5564 has
+  terminal 25 SUCCESS + 1 SKIPPED, zero pending/failure. These are dependency
+  checks, not this acceptance PR's checks.
+- Remote main is `2366157fc13ff2b011a519eb0956a1fe7927aad2`; its intervening
+  stock-prep documentation delta does not overlap this acceptance scope. Fresh
+  open-attendance PR search still identifies #5559 as component acceptance and
+  #5145 as the separate owner-held session-org picker, not duplicate full-app work.
+- Final worktree: `/private/tmp/codex-attendance-full-app-final-20260908`.
+  True merge `d31913669e9a20c3681fd3924a5b5920c6ed0695` has first parent exact
+  #5564 above and second parent exact #5559 above. There was no rebase/conflict.
+- Exactly THREE old full-app checkpoints were consolidated, not four:
+  `99a6beb878b4bd45dc5ae05df2df48d318666ba1` ->
+  `a0a6fa92d3a514c1ae303d57af8903bc7731a62c` ->
+  `c04e35b007f5359a452d06c34896e462f7f2299e`.
+  Range-diff explains the squash; all three resulting full-app files at
+  `a08ebc39e300994ad022f19f1918e19162d6b5ce` equal the old final tree byte-for-byte.
+- Actual stacked PR delta relative to #5564 is six added paths: frozen component
+  runner/fixture/MD plus new full-app runner/fixture/MD. No third dependency PR.
+- Exact #5564 byte-equivalence was checked individually for all eight paths:
+  `plugins/plugin-attendance/index.cjs`,
+  `plugins/plugin-attendance/lib/attendance-record-read-identity.cjs`,
+  `packages/core-backend/tests/unit/attendance-record-read-identity.test.ts`,
+  `packages/core-backend/tests/integration/attendance-plugin.test.ts`,
+  `docs/development/attendance-record-read-tenant-verification-20260908.md`,
+  `packages/core-backend/tests/unit/w7-w6r5-guard/classification.ts`,
+  `packages/core-backend/tests/unit/attendance-w7-w6r5-preservation-guard.test.ts`,
+  `packages/core-backend/tests/integration/attendance-w4c3a-p09-p10-p24-routes.db.test.ts`.
+  Frozen component runner/fixture/MD also each match #5559 exactly.
+- On final code SHA `a08ebc39e300994ad022f19f1918e19162d6b5ce`, Node20 positive
+  invocation exited 0 with BASELINE_PASS and databases/backends/ports all zero.
+  Evidence: `tmp/acp-full-42efd2f6d58a4ddab3ab2581bd9cc565/` in this worktree.
+  Actual `narrow-review-section.png`, `desktop-denied-section.png`,
+  `narrow-canonical-report.png`, `narrow-grid-consumed.png`, and
+  `narrow-custom-retained.png` were visually inspected: explicit review controls,
+  clear refused-confirmation state, Normal result, cleared proposal fields and
+  retained custom content are visible. Screenshots contain synthetic values and
+  remain local; they are not customer data or values-free diagnostic logs.
+- Identity/proposal unit suites pass 68/68; inherited-config runner typecheck
+  exits 0; diff-check passes. No new product or shared-surface edit was made.
+- Disconnect-apply on that same code SHA deliberately exits 1 at
+  APPLY_HTTP_STATUS (404), full pre-apply snapshot unchanged, source-seed
+  diagnostic PASS, cleanup all zero. Evidence:
+  `tmp/acp-full-3de1c4771d284df880d366613b7a8b9c/`.
+- Foreign-tenant on the same code SHA deliberately exits 1 at APPLY_HTTP_STATUS
+  (403 / ATTENDANCE_CLEANING_FORBIDDEN), full snapshot unchanged, source-seed
+  diagnostic PASS, cleanup all zero. Evidence:
+  `tmp/acp-full-011d890a61724cfcb055c5a0d1e24dfb/`.
+- Response-timeout on the same code SHA deliberately exits 1 at
+  response-timeout-control, fixed ACCEPTANCE_ERROR diagnostic, browser faults
+  empty and cleanup all zero. Evidence:
+  `tmp/acp-full-e1f8937fdc874c37a8a6b959ae605e69/`.
+- Final evidence update changes only this MD; executable runner, fixture and
+  dependencies remain the exact positive/negative-tested code bytes above.
+- Custom-wipe mutation below is retained historical RED evidence, not a claim
+  that it was rerun on the new SHA. Its owning cleaning-authority module is
+  byte-identical between the historical mutation baseline and this final tree.
+
+The single-org login is real and tenant-bound. This does not implement or verify
+the separately owned shell organization picker (#5145); it verifies current
+attendance organization context and rejects a foreign organization selection.
+Raw punch and leave/travel facts are not freely rewritten: this ratified slice
+reviews eligible daily anomalies and applies the existing normal correction.
+The historical ledgers below retain failed runs and earlier pending states;
+this section supersedes their topology and local-verification status.
+
+## Earlier local acceptance checkpoint (historical)
 
 - Runner source checkpoint: `16f09dae6` (three-file workstream; prior failures retained).
 - Combined verification checkpoint: `300b9bed5` (full SHA available from Git).
@@ -34,7 +104,7 @@ publication-tree verification and Draft/HOLD delivery remain IN PROGRESS.
   bytes equal #5559 `5f006a9e`; combined worktree clean after verification.
 
 This does not establish final-publication-tree CI, merge, deployment or real-data
-UAT. Final Draft is approved to stack on #5564 exact `6b69a88c`, true-merge #5559
+UAT. The earlier Draft topology stacked on #5564 exact `6b69a88c`, true-merge #5559
 exact `5f006a9e`, then carry these three full-app files: real PR delta six files,
 three inherited and three new, with two unmerged dependencies.
 
@@ -304,7 +374,7 @@ Remaining: discriminating product mutation controls, API-error classification,
 final screenshot/content review, final gates, and a separate Draft/HOLD test PR.
 No full acceptance or deployed fix is claimed.
 
-## Final publication candidate
+## Earlier publication candidate (historical)
 
 The preceding paragraphs are a chronological failure/progress ledger, not the
 current acceptance verdict. Full functional positive acceptance now passes.
