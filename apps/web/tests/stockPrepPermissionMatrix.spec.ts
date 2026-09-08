@@ -97,6 +97,7 @@ import {
   canOpenStockPrepHome,
   canOpenStockPrepInstallView,
   canOpenStockPrepOpsPanel,
+  canOpenStockPrepProjectQuery,
   canOpenStockPrepRailItem,
   canUseLegacyMvpTabs,
   grantedStockPrepCapabilities,
@@ -593,9 +594,10 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       for (const item of group.items) keys.push(item.key)
       for (const key of group.advanced ?? []) keys.push(key)
     }
-    // 14 today: 3 【工作】 + 3 【部署与接入】 + 7 深度工具 + 1 【帮助】. Stated as a number so that
+    // 15 today: 4 【工作】 + 3 【部署与接入】 + 7 深度工具 + 1 【帮助】. Stated as a number so that
     // adding a rail item without a view — or a view without a rail item — has to be deliberate.
-    expect(keys.length).toBe(14)
+    // 14 -> 15 是 P2-1 的 项目查询(设计稿 §6.3 第一行),【工作】里排在 项目备料 之后。
+    expect(keys.length).toBe(15)
     expect(new Set(keys).size).toBe(keys.length)
     for (const key of keys) {
       expect(workspace, `${key} must be a view key in the shell`).toContain(`key: '${key}',`)
@@ -635,6 +637,11 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       // The right-hand sides are the SERVER's answers, so this is a cross-side equality as well
       // rather than the browser agreeing with itself.
       expect(canOpenStockPrepHome(principal()), `${actor.name} home`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'operator-board'))
+      // 项目查询 (P2-1) rides the SAME operator tier, through its own named predicate: the shell asks
+      // this one, the manifest names `operator-board`, and this line is what stops the two from ever
+      // meaning different things.
+      expect(canOpenStockPrepProjectQuery(principal()), `${actor.name} project-query`)
         .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'operator-board'))
       expect(canOpenStockPrepInstallView(principal()), `${actor.name} install view`)
         .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'workbench-admin'))

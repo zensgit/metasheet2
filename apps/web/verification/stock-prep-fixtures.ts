@@ -793,6 +793,64 @@ export async function installStockPrepRoutes(
   }
 }
 
+// ---------------------------------------------------------------------------
+// G1 的可证伪判据 —— 数「解析之后真的被主色填充的按钮」,不是数类名
+// ---------------------------------------------------------------------------
+//
+// 设计稿 §1.2 写的是「任一屏截图里 --ms-color-primary 填充的按钮 ≤ 1」。jsdom 数得到 class 名,却
+// 不知道 `--ms-color-primary` 解析成了什么,更看不见别处的样式表把某个 chip 刷成了主色 —— 这两个
+// helper 是那一半只有真浏览器答得出来的证据。它们住在 fixtures 里给每一条需要的 lane 用例共用,而
+// 不是留在某一个 spec 文件里当私有函数:P2-1 的 G1 一度只有类名证据,正是因为这段代码只在 P0 那个
+// 文件里、别的 lane 够不着,而两处注释却都声称它被浏览器证过了。
+
+/** `--ms-color-primary` as the token sheet resolves it — read from the page, never retyped here. */
+export async function primaryFillRgb(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const probe = document.createElement('span')
+    probe.style.backgroundColor = 'var(--ms-color-primary)'
+    document.body.appendChild(probe)
+    const value = getComputedStyle(probe).backgroundColor
+    probe.remove()
+    return value
+  })
+}
+
+/**
+ * Every rendered `<button>` inside `root` whose RESOLVED background is the primary fill.
+ *
+ * `stopBeforeSelector` narrows the count to the DOM段 BEFORE that element. Document order, not
+ * coordinates: a viewport-relative "above the fold" test would move with the browser window, while
+ * 「工作区顶部」 is a structural place on that page (everything above 从 PLM 拉取).
+ *
+ * Returns -1 when `rootSelector` matches nothing, so a spec cannot read a missing subtree as
+ * 「零个主按钮,通过」.
+ */
+export async function primaryFilledButtonCount(
+  page: Page,
+  rootSelector: string,
+  stopBeforeSelector?: string,
+): Promise<number> {
+  const primary = await primaryFillRgb(page)
+  return page.evaluate(({ rootSelector: root, stopBeforeSelector: stop, primary: fill }) => {
+    const container = document.querySelector(root)
+    if (!container) return -1
+    const boundary = stop ? container.querySelector(stop) : null
+    let count = 0
+    for (const button of Array.from(container.querySelectorAll('button'))) {
+      if (boundary) {
+        const precedesBoundary = Boolean(
+          boundary.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_PRECEDING,
+        )
+        if (!precedesBoundary) continue
+      }
+      const style = getComputedStyle(button)
+      if (style.display === 'none' || style.visibility === 'hidden') continue
+      if (style.backgroundColor === fill) count += 1
+    }
+    return count
+  }, { rootSelector, stopBeforeSelector, primary })
+}
+
 export const STOCK_PREP_HARNESS = '/verification/stock-prep-workbench-harness.html'
 
 export type StockPrepActor = 'reader' | 'operator' | 'stockadmin' | 'platform'
@@ -804,6 +862,13 @@ export interface StockPrepOpenOptions {
   tab?: string
   /** `?projectNo=` — §2.3's 首页 ⇄ 工作区 state bit. */
   projectNo?: string
+  /**
+   * Any FURTHER query parameters the shared link carries — P2-1's 项目查询 owns four of its own
+   * (`q` / `status` / `source` / `sel`). Kept as an open bag rather than four named options because
+   * the harness passes the whole query through verbatim anyway; a named option per state bit would
+   * be a second place to keep that list in step.
+   */
+  query?: Record<string, string>
   routes?: StockPrepRouteOptions
 }
 
@@ -837,6 +902,7 @@ export async function openStockPrepHarness(
   const query = new URLSearchParams({ actor: options.actor, scenario: options.scenario })
   if (options.tab) query.set('tab', options.tab)
   if (options.projectNo) query.set('projectNo', options.projectNo)
+  for (const [key, value] of Object.entries(options.query ?? {})) query.set(key, value)
   await page.goto(`${STOCK_PREP_HARNESS}?${query.toString()}`)
   await page.waitForFunction(
     () => (window as unknown as { __STOCK_PREP_READY__?: boolean }).__STOCK_PREP_READY__ === true,

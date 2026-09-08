@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test } from '@playwright/test'
 import {
   SYN_PROJECT_A,
   SYN_PROJECT_B,
   openStockPrepHarness,
+  primaryFilledButtonCount,
   type StockPrepRouteLog,
 } from './stock-prep-fixtures'
 
@@ -32,50 +33,9 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url))
 const WEB_ROOT = join(HERE, '..')
 
-/** `--ms-color-primary` as the token sheet resolves it — read from the page, never retyped here. */
-async function primaryFillRgb(page: Page): Promise<string> {
-  return page.evaluate(() => {
-    const probe = document.createElement('span')
-    probe.style.backgroundColor = 'var(--ms-color-primary)'
-    document.body.appendChild(probe)
-    const value = getComputedStyle(probe).backgroundColor
-    probe.remove()
-    return value
-  })
-}
-
-/**
- * Every rendered `<button>` inside `root` whose RESOLVED background is the primary fill.
- *
- * `stopBeforeSelector` narrows the count to the DOM段 BEFORE that element. Document order, not
- * coordinates: a viewport-relative "above the fold" test would move with the browser window, while
- * 「工作区顶部」 is a structural place on this page (everything above 从 PLM 拉取).
- */
-async function primaryFilledButtonCount(
-  page: Page,
-  rootSelector: string,
-  stopBeforeSelector?: string,
-): Promise<number> {
-  const primary = await primaryFillRgb(page)
-  return page.evaluate(({ rootSelector: root, stopBeforeSelector: stop, primary: fill }) => {
-    const container = document.querySelector(root)
-    if (!container) return -1
-    const boundary = stop ? container.querySelector(stop) : null
-    let count = 0
-    for (const button of Array.from(container.querySelectorAll('button'))) {
-      if (boundary) {
-        const precedesBoundary = Boolean(
-          boundary.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_PRECEDING,
-        )
-        if (!precedesBoundary) continue
-      }
-      const style = getComputedStyle(button)
-      if (style.display === 'none' || style.visibility === 'hidden') continue
-      if (style.backgroundColor === fill) count += 1
-    }
-    return count
-  }, { rootSelector, stopBeforeSelector, primary })
-}
+// `primaryFillRgb` / `primaryFilledButtonCount` moved to stock-prep-fixtures.ts so the P1/P2 lane
+// can count the same way: G1 is a per-SCREEN criterion, and a helper only one spec file can reach is
+// how a second screen ends up claiming browser evidence it does not have.
 
 function expectNoUnmockedRoutes(log: StockPrepRouteLog): void {
   expect(log.unmocked, `夹具没有覆盖到的路由(说明组件长出了新的读):\n${log.unmocked.join('\n')}`).toEqual([])
