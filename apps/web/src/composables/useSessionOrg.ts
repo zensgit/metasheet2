@@ -1,6 +1,6 @@
 import { computed, getCurrentScope, onScopeDispose, ref } from 'vue'
 import { apiFetch } from '../utils/api'
-import { onAuthPrincipalChange } from './authPrincipal'
+import { onAuthPrincipalChange, readStoredToken } from './authPrincipal'
 import { useAuth } from './useAuth'
 
 // Adapted from #5145's explicit list/switch flow. No default-login filtering,
@@ -23,10 +23,10 @@ export function useSessionOrg() {
   if (getCurrentScope()) onScopeDispose(() => { generation++; invalidate() })
 
   async function loadSessionOrgs() {
-    const token = auth.getToken()
+    const token = readStoredToken()
     const started = generation
     const request = ++listRequest
-    const current = () => started === generation && token === auth.getToken() && request === listRequest
+    const current = () => started === generation && token === readStoredToken() && request === listRequest
     loading.value = true
     errorMessage.value = ''
     try {
@@ -50,10 +50,10 @@ export function useSessionOrg() {
 
   async function switchSessionOrg(orgId: string): Promise<boolean> {
     const chosen = orgId.trim()
-    const token = auth.getToken()
+    const token = readStoredToken()
     if (!chosen || !token || switching.value) return false
     const started = generation
-    const current = () => started === generation && token === auth.getToken()
+    const current = () => started === generation && token === readStoredToken()
     switching.value = true
     errorMessage.value = ''
     try {
@@ -63,11 +63,13 @@ export function useSessionOrg() {
       const payload = await response.json()
       if (!current()) return false
       const data = payload?.data
+      const memberships = orgs.value
       if (!response.ok || payload?.success !== true || data?.currentOrgId !== chosen
         || typeof data?.token !== 'string'
         || !auth.setExplicitSessionOrg(data.token, chosen, token)) {
         throw new Error('SESSION_ORG_SWITCH_REFUSED')
       }
+      orgs.value = memberships
       currentOrgId.value = chosen
       return true
     } catch {

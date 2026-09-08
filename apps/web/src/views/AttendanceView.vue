@@ -24,16 +24,22 @@
             }}
           </p>
         </div>
-        <!--
-          Trailing slot on overview: reserved for a compact session-org switcher
-          (#5145 Draft). Keep this node empty on main so that PR can land a
-          control here without fighting first-viewport layout.
-        -->
         <div
           v-if="showOverview"
           class="attendance__header-aside"
           data-attendance-overview-header-aside
-        />
+        >
+          <AttendanceSessionOrgSwitcher
+            :tr="tr"
+            :orgs="sessionOrgIds"
+            :model-value="sessionOrgId ?? ''"
+            :loading="sessionOrgLoading"
+            :switching="sessionOrgSwitching"
+            :error-message="sessionOrgError"
+            :has-usable-claim="Boolean(sessionOrgId)"
+            @change="switchSessionOrg"
+          />
+        </div>
         <div v-if="showReports" class="attendance__chip-list attendance__chip-list--header">
           <span class="attendance__status-chip">
             {{ tr('Records', '记录') }} {{ recordsTotal }}
@@ -10253,6 +10259,9 @@ import {
 } from './attendance/useAttendanceAdminPayroll'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
+import { useSessionOrg } from '../composables/useSessionOrg'
+import AttendanceSessionOrgSwitcher from './attendance/AttendanceSessionOrgSwitcher.vue'
+
 import { getCalendarVisibleRange } from '../composables/useCalendarDays'
 import {
   EffectiveCalendarFetchError,
@@ -14761,6 +14770,11 @@ const importPreviewSummaryCards = computed(() => [
 
 const initialAuthHeaders = typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders() : {}
 const orgId = ref(String(initialAuthHeaders['x-tenant-id'] || '').trim())
+const {
+  loading: sessionOrgLoading, switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError, orgs: sessionOrgIds, currentOrgId: sessionOrgId,
+  loadSessionOrgs, switchSessionOrg,
+} = useSessionOrg()
 const targetUserId = ref('')
 
 const {
@@ -29451,6 +29465,7 @@ onMounted(() => {
   auth.getCurrentUserId().then((id) => {
     if (!id) return
     currentUserId.value = id
+    if (showOverview.value) void loadSessionOrgs()
     if (!committedCalendarUserId.value && !normalizedUserId()) {
       committedCalendarUserId.value = id
     }
