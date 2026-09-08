@@ -1,0 +1,162 @@
+name: Stock-prep Browser Verify
+
+# 备料工作台 (`/stock-prep`) real-browser acceptance lane —— 设计稿
+# `beiliao-ux-redesign-20260907.md` §6.1 (P0 十一条) 与 §6.2 (P1 七条).
+#
+# WHAT IT REPLACES: a person clicking through the workbench once per wave. Boots Vite through the
+# OWNED playwright.stock-prep-verification config (its own server on port 5176 — never a reused,
+# disappearing one), mounts the REAL StockPreparationWorkspace on a real router through
+# apps/web/verification/stock-prep-workbench-harness.html, and drives it against a synthetic,
+# values-free `page.route()` world (apps/web/verification/stock-prep-fixtures.ts).
+#
+# WHY A BROWSER AND NOT MORE jsdom. Three of the acceptance items are structurally invisible without
+# a cascade, and the jsdom suites cannot be fixed to see them:
+#   * 深度工具「默认收起」—— the fold's whole effect is one `[hidden] { display: none }` rule that has
+#     to out-specify the panel's own author-origin `display: flex`. This exact rule shipped broken
+#     once, and jsdom reported the attribute as present the entire time.
+#   * G1「每屏一个主操作位」—— counted from resolved `background-color`, i.e. from `--ms-color-primary`.
+#   * G4「未检查 ≠ 绿 ≠ 红」—— same, on the ops panel's badge colours.
+# Everything else in the two specs is asserted against real network ordering and the real clipboard.
+#
+# This lane is intended as a required context. Pull requests intentionally have NO top-level path
+# filter: a filtered required check never reports for an unrelated PR and blocks it forever. The
+# in-job classifier below is what keeps the context stable, and
+# scripts/ops/stock-prep-browser-ci-wiring.test.mjs EXECUTES that classifier against throwaway git
+# fixtures (rather than reading it) and pins both the job name and the `playwright test --list`
+# collection set, so neither a rename nor a deleted testMatch can turn this into a vacuous green.
+
+on:
+  workflow_dispatch:
+  merge_group:
+  pull_request:
+
+jobs:
+  browser-verify:
+    name: Stock-prep browser verify (chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect relevant stock-prep changes
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          relevant=false
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            relevant=true
+          else
+            if [[ -z "$BASE_SHA" || "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+              echo 'Stock-prep Browser Verify: unable to determine the changed-file base.' >&2
+              exit 1
+            fi
+
+            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+            while IFS= read -r path; do
+              case "$path" in
+                apps/web/src/components/integration/stockPreparation/*|\
+                apps/web/src/services/integration/stockPreparation/*|\
+                apps/web/src/components/layout/PageShell.vue|\
+                apps/web/src/components/layout/PageHeader.vue|\
+                apps/web/src/composables/useAuth.ts|\
+                apps/web/src/composables/useLocale.ts|\
+                apps/web/src/composables/useMobileViewport.ts|\
+                apps/web/src/styles/tokens.css|\
+                apps/web/src/utils/api.ts|\
+                apps/web/verification/stock-prep-*|\
+                apps/web/playwright.stock-prep-verification.config.ts|\
+                apps/web/playwright.verification.config.ts|\
+                apps/web/vite.config.ts|\
+                apps/web/package.json|\
+                package.json|\
+                pnpm-lock.yaml|\
+                plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs|\
+                scripts/ops/stock-prep-browser-ci-wiring.test.mjs|\
+                .github/workflows/stock-prep-browser-verify.yml)
+                  relevant=true
+                  break
+                  ;;
+              esac
+            done <<< "$changed_files"
+          fi
+
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [[ "$relevant" == true ]]; then
+            echo "Stock-prep Browser Verify: relevant changes detected for $EVENT_NAME."
+          else
+            echo "Stock-prep Browser Verify: no relevant changes detected for $EVENT_NAME."
+          fi
+
+      - name: Report success for unrelated changes
+        if: steps.changes.outputs.relevant == 'false'
+        run: |
+          echo 'Stock-prep Browser Verify passed: no guarded stock-prep web files changed.'
+
+      - name: Setup Node.js 20.x
+        if: steps.changes.outputs.relevant == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        if: steps.changes.outputs.relevant == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        if: steps.changes.outputs.relevant == 'true'
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        if: steps.changes.outputs.relevant == 'true'
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        if: steps.changes.outputs.relevant == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright chromium (+ system deps)
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      # AFTER the browser install, deliberately: this test runs `playwright test --list`, which needs
+      # a resolvable browser registry, and its whole job is to prove the lane below is not empty.
+      - name: Verify stock-prep browser CI ownership and collection
+        if: steps.changes.outputs.relevant == 'true'
+        run: node --test scripts/ops/stock-prep-browser-ci-wiring.test.mjs
+
+      - name: Run stock-prep browser verification (boots Vite, renders the real workbench)
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm --filter @metasheet/web exec playwright test --config playwright.stock-prep-verification.config.ts
+
+      - name: Upload failure traces
+        if: failure() && steps.changes.outputs.relevant == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-prep-browser-verify-traces
+          path: apps/web/verification-output/_pw-stock-prep/**
+          if-no-files-found: ignore
