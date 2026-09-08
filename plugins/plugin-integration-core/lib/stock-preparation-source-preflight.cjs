@@ -1953,9 +1953,31 @@ function refuse(path, kind, value) {
   })
 }
 
-// The exact four keys `refuse` mints above, in the order it builds them. Declared once so both
-// `refuse` and the picker below stay honest about what "the values-free detail keys" means.
-const VALUES_FREE_REFUSAL_DETAIL_KEYS = Object.freeze(['path', 'kind', 'length', 'masked'])
+// The exact four keys `refuse` mints above, in the order it builds them, each beside the scalar
+// shape it is declared to hold. Declared once so `refuse` and the picker below stay honest about
+// what "the values-free detail keys" means — and checked on BOTH axes, because whitelisting key
+// NAMES alone would carry whatever a future `refuse()` chose to put under one of them (an object, an
+// array of rows) straight into a log line. A key that is absent, or present with a value outside its
+// declared shape, means "not this refusal": the descriptor is refused whole, never partially. Same
+// fail-closed default the self-check applies to report leaves.
+const VALUES_FREE_REFUSAL_DETAIL_SHAPE = Object.freeze({
+  path: (value) => typeof value === 'string',
+  kind: (value) => typeof value === 'string',
+  length: (value) => Number.isInteger(value),
+  masked: (value) => typeof value === 'string',
+})
+
+// The floor under `maskForRefusal`'s first-and-last-character mask — applied ONLY where the mask
+// leaves this module through the picker below, NEVER to what `refuse` puts on the error.
+//
+// `maskForRefusal` already collapses length <= 2 to '**'. The gap is 3 and 4: `B****9` published
+// beside an exact `length: 3` pins two of three characters AND the width, which over a part-number
+// alphabet leaves a couple dozen candidates — that is the value, not a hint of it. From 5 up the
+// same pair is a coarse orientation aid and nothing more, which is the whole reason to log it at
+// all. So the picker republishes the mask only from 5 up and hands back '**' below that. `length`
+// survives either way: a length alone reveals no characters and is the coarse fact an operator on
+// site actually needs.
+const MASKED_FIRST_LAST_MIN_LENGTH = 5
 
 /**
  * Pick the values-free self-check's own detail keys off a caught error, for a caller (the route)
@@ -1970,17 +1992,32 @@ const VALUES_FREE_REFUSAL_DETAIL_KEYS = Object.freeze(['path', 'kind', 'length',
  * `SourcePreflightError` could carry a `details` object that happens to also be plain — matching by
  * message is matching by what actually happened, not by shape.
  *
+ * WHAT IT PUBLISHES IS NOT `error.details` VERBATIM. `error.details` never leaves the process; this
+ * projection does, into a server-side log. So two narrowings apply here and only here, both of them
+ * about the mask, neither of them a change to what the self-check refuses:
+ *
+ *   - a mask of a value shorter than {@link MASKED_FIRST_LAST_MIN_LENGTH} is republished as '**';
+ *   - a `kind: 'secret'` refusal publishes its path and class ONLY — no mask, no length — because
+ *     for that class the two characters and the width describe a CREDENTIAL. Unreachable from the
+ *     route today (the runner's only call site supplies observed values and identifiers, never
+ *     secrets), and written so it stays harmless the day secrets are wired in.
+ *
  * Never changes what the self-check refuses or how — this is read-only over what `refuse()` already
  * decided to put in `error.details`.
  */
 function describeValuesFreeRefusal(error) {
   if (!(error instanceof SourcePreflightError)) return null
   if (error.message !== 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED') return null
-  const details = isPlainObject(error.details) ? error.details : {}
+  const details = error.details
+  if (!isPlainObject(details)) return null
   const described = {}
-  for (const key of VALUES_FREE_REFUSAL_DETAIL_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(details, key)) described[key] = details[key]
+  for (const [key, isDeclaredShape] of Object.entries(VALUES_FREE_REFUSAL_DETAIL_SHAPE)) {
+    if (!Object.prototype.hasOwnProperty.call(details, key)) return null
+    if (!isDeclaredShape(details[key])) return null
+    described[key] = details[key]
   }
+  if (described.kind === 'secret') return { path: described.path, kind: described.kind }
+  if (described.length < MASKED_FIRST_LAST_MIN_LENGTH) described.masked = '**'
   return described
 }
 

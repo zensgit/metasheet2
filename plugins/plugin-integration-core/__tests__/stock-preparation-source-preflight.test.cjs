@@ -1624,7 +1624,16 @@ function selfCheckTrippingSource() {
   return catalog
 }
 
-/** Every string leaf of `object` neither equals nor contains `value` — the values-free assertion. */
+/**
+ * Every string leaf of `object` neither equals nor contains `value`.
+ *
+ * PARTIAL-BY-DESIGN, and this assertion does NOT say otherwise: `masked` carries the refused value's
+ * FIRST and LAST character plus, beside it, an exact `length`. That is whole-value containment this
+ * checks, not information-theoretic secrecy — `B****9` passes here and still narrows the candidates.
+ * The narrowing is bounded on purpose elsewhere, not here: `describeValuesFreeRefusal` republishes
+ * the mask only from length 5 up (below that '**', see `MASKED_FIRST_LAST_MIN_LENGTH`) and publishes
+ * no mask at all for `kind: 'secret'`. Both floors are asserted directly, further down.
+ */
 function assertNoStringLeafCarries(object, value, label) {
   for (const [key, leaf] of Object.entries(object)) {
     if (typeof leaf !== 'string') continue
@@ -1688,7 +1697,103 @@ async function theSelfCheckRefusalDescriptorIsExactlyTheFourKeys() {
   assert.equal(describeValuesFreeRefusal(new Error('boom')), null, 'not a SourcePreflightError at all')
   assert.equal(describeValuesFreeRefusal(null), null)
   assert.equal(describeValuesFreeRefusal(undefined), null)
+
+  // KEYS AND SHAPES, both required, and refused WHOLE rather than partially. A right-message error
+  // whose details are missing a key, or carry a non-scalar under one, must not produce a half
+  // descriptor that the route would then log as if it were a refusal report.
+  assert.equal(
+    describeValuesFreeRefusal(new SourcePreflightError('SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED', {})),
+    null,
+    'no detail keys at all is not a describable refusal',
+  )
+  assert.equal(
+    describeValuesFreeRefusal(new SourcePreflightError('SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED', {
+      path: 'probes[0].object', kind: 'observed-row-value', length: 7, // no `masked`
+    })),
+    null,
+    'a missing key refuses the whole descriptor',
+  )
+  for (const wrongShape of [
+    { path: { toString: () => 'x' }, kind: 'observed-row-value', length: 7, masked: 'a****b' },
+    { path: 'p', kind: ['observed-row-value'], length: 7, masked: 'a****b' },
+    { path: 'p', kind: 'observed-row-value', length: '7', masked: 'a****b' },
+    { path: 'p', kind: 'observed-row-value', length: 7.5, masked: 'a****b' },
+    // The one that matters: a future `refuse()` putting the ROW under a declared key.
+    { path: 'p', kind: 'observed-row-value', length: 7, masked: { row: { PartNo: 'B-100019' } } },
+  ]) {
+    assert.equal(
+      describeValuesFreeRefusal(new SourcePreflightError('SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED', wrongShape)),
+      null,
+      'a declared key carrying an undeclared shape refuses the whole descriptor',
+    )
+  }
+
+  // THE MASK FLOOR. `maskForRefusal` publishes first + last character from length 3 up; at 3 and 4
+  // that pair beside an exact length is effectively the value, and THIS projection is the first
+  // thing that carries it out of the process. So the picker republishes the mask only from 5 up.
+  // Driven through the REAL self-check, not hand-built errors: `probes[].object` is an identifier
+  // leaf, and an observed value nobody vouched for as an identifier of this run is refused there.
+  const maskedAtLength = (value) => {
+    try {
+      assertSourcePreflightValuesFree({ probes: [{ object: value }] }, { observedValues: new Set([value]) })
+      assert.fail(`expected the self-check to refuse ${value.length} characters`)
+    } catch (error) {
+      assert.ok(error instanceof SourcePreflightError)
+      assert.equal(error.details.length, value.length)
+      return { onTheError: error.details.masked, published: describeValuesFreeRefusal(error) }
+    }
+  }
+  for (const short of ['ABC', 'ABCD']) {
+    const { onTheError, published } = maskedAtLength(short)
+    assert.match(onTheError, /^.\*{4}.$/, 'the self-check itself still masks first/last — unchanged')
+    assert.equal(published.masked, '**', 'but below the floor the published mask carries no characters')
+    assert.equal(published.length, short.length, 'the length still travels: it names no character')
+    assertNoStringLeafCarries(published, short, `published(${short.length})`)
+    assert.equal(published.masked.includes(short[0]), false)
+    assert.equal(published.masked.includes(short[short.length - 1]), false)
+  }
+  const atFloor = maskedAtLength('ABCDE')
+  assert.equal(atFloor.published.masked, atFloor.onTheError, 'at and above the floor the mask travels as minted')
+  assert.match(atFloor.published.masked, /^.\*{4}.$/)
+
+  // THE SECRET FLOOR. `refuse(..., 'secret', ...)` describes a SUPPLIED CREDENTIAL, so for that class
+  // neither the mask nor the exact length is publishable at any length. Unreachable from the route
+  // today (the runner passes observed values and identifiers, never secrets) — pinned so it stays
+  // harmless if secrets are ever wired in.
+  try {
+    assertSourcePreflightValuesFree(
+      { checks: { projectData: { livenessSamples: [PLANTED_PASSWORD] } } },
+      { secrets: [PLANTED_PASSWORD] },
+    )
+    assert.fail('expected a secret refusal')
+  } catch (error) {
+    assert.equal(error.details.kind, 'secret')
+    assert.equal(error.details.length, PLANTED_PASSWORD.length, 'the error itself still carries it')
+    const publishedSecret = describeValuesFreeRefusal(error)
+    assert.deepEqual(Object.keys(publishedSecret).sort(), ['kind', 'path'], 'no mask and no length leave for a secret')
+    assert.equal(publishedSecret.kind, 'secret')
+    assert.equal(publishedSecret.path, error.details.path)
+    assertNoStringLeafCarries(publishedSecret, PLANTED_PASSWORD, 'publishedSecret')
+    assert.equal(JSON.stringify(publishedSecret).includes(String(PLANTED_PASSWORD.length)), false)
+  }
 }
+
+// The wire answer this route gives a self-check refusal, captured from `origin/main` BEFORE this PR
+// (same fixture, same route, run in a `git archive` sandbox of the pre-change tree) and pinned here
+// so "byte-identical" is a re-runnable assertion rather than something a reader has to confirm by
+// eyeballing a diff. If a change ever makes this line fail, the response body moved — which is
+// exactly what this PR promises it does not do.
+const WIRE_RESPONSE_BEFORE_THIS_PR = JSON.stringify({
+  status: 500,
+  body: {
+    ok: false,
+    error: {
+      code: 'SOURCE_PREFLIGHT_FAILED',
+      message: 'source preflight could not complete',
+      details: { reason: 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED' },
+    },
+  },
+})
 
 async function theRouteLogsTheRefusalAndTheResponseStaysByteIdentical() {
   const recording = createRecordingLogger()
@@ -1706,6 +1811,12 @@ async function theRouteLogsTheRefusalAndTheResponseStaysByteIdentical() {
   // compares prototypes too) — so this checks the one key and its value directly instead.
   assert.deepEqual(Object.keys(loggedRes.body.error.details), ['reason'])
   assert.equal(loggedRes.body.error.details.reason, 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED')
+  // …and the whole thing, serialised, against what `origin/main` answered before this PR.
+  assert.equal(
+    JSON.stringify({ status: loggedRes.statusCode, body: loggedRes.body }),
+    WIRE_RESPONSE_BEFORE_THIS_PR,
+    'the wire answer must be byte-identical to the pre-change one',
+  )
 
   // (a) the warn fired EXACTLY once, with the fixed prefix and ONLY `externalSystemId` plus the four
   // values-free keys — never a spread of `error.details`.
@@ -1739,7 +1850,10 @@ async function theRouteLogsTheRefusalAndTheResponseStaysByteIdentical() {
   const warnlessRes = await callRoute(warnlessRoutes, { user: INTEGRATION_READER })
   assert.deepEqual(warnlessRes.body, loggedRes.body)
 
-  // (c) REVERSE at the route too: a healthy catalog never logs anything on this route.
+  // (c) REVERSE at the route: a HEALTHY catalog logs nothing here. Deliberately not "another kind of
+  // SourcePreflightError at the route" — the module's only other throw site is the missing-`readObject`
+  // guard, and the route always supplies `readObject` itself, so that error is unreachable from here.
+  // The picker's `null` for it is asserted in the pure-function test above, where it is reachable.
   const cleanRecording = createRecordingLogger()
   const { routes: cleanRoutes } = mountRoute({ catalog: orderModuleSource(), logger: cleanRecording })
   const cleanRes = await callRoute(cleanRoutes, { user: INTEGRATION_READER })
