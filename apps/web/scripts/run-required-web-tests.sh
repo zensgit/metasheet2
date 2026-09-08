@@ -416,6 +416,7 @@ cd "$(dirname "$0")/.."
 # chosen for exactness (a future `*-api.spec.ts` would substring-collide with a bare
 # `api.spec.ts` token; today the bare token still selects exactly one file).
 npx vitest run \
+  tests/AttendanceReportFieldsSection.spec.ts \
   tests/api.spec.ts \
   tests/attendance-rules-me-contract-sync.spec.ts \
   approval-canvas-commands \
