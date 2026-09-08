@@ -87,7 +87,15 @@ shows Normal=1 and Late=0 but does not itself frame the detailed record row.
 ## Remaining delivery and acceptance boundaries
 
 Remote-main readback moved to `2794494f0258835911186fc976fa4f4089ed72c8` during
-local verification. Pre-publication delta/overlap reconciliation is pending.
+local verification. Pre-publication reconciliation completed as true merge
+`eebec391c05a7e50e0e70d89a033b836fd5f3968`, ordered parents
+`977105772c3237d15d7a2d82bfcf3e7f4f7cffd5` then that exact main. Its 15
+stock-preparation changes do not overlap the five repair paths; those five
+paths were byte-equivalent to the verified checkpoint. Post-merge identity
+unit tests pass 58/58; backend typecheck and diff-check pass. The 166/166 and
+combined canary evidence are inherited by runtime/test byte equivalence, not
+misreported as additional database reruns. Open attendance PR review found no
+second implementation of this tenant-read repair. Publication/readback pending.
 Full-app custom-field preservation, repeat controls, API-error classification,
 final screenshots and complete verification remain separate unfinished work;
 this repair's baseline pass must not be called full application UAT acceptance.
