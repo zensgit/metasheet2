@@ -14,7 +14,7 @@
 ### 0-a. 🚧 硬前置：真实回调帧的 corpId 字段形状（**flag ON 之前必须做完**）
 
 P1-2 跨企业门（#4116）用「点击方企业」与「台账 `integration_id` 所属企业」比对，fail-closed。它按优先级读：
-**(1) frame header `eventCorpId`**（SDK 类型化、网关填充，adapter 盖到 payload 上）→ **(2) body `corpId`**；两者都缺 ⇒ 判 `corp_mismatch` 拒绝。
+**(1) frame header `eventCorpId`**（SDK 类型化、网关填充，adapter 盖到 payload 上）→ **(2) body `corpId`**；两者都缺 ⇒ 判 `corp_anchor_absent` 拒绝；锚点存在但与台账企业不一致 ⇒ 判真正的 `corp_mismatch`；header/body 同时存在但互相冲突 ⇒ 判 `corp_anchor_conflict`。
 
 **风险（#4116 对抗审阅 P3-2，未经真实帧验证）**：`dingtalk-stream@2.1.5` 的类型声明里 `eventCorpId` 只出现在 **EVENT 主题**的 header 组；**互动卡 callback 帧很可能根本不带这个 header**。若为真：
 - 门会静默退化为只认 body `corpId`（不是「网关保证的权威锚点」，与设计意图不符）；
@@ -79,9 +79,16 @@ DingTalk interactive-card callback corp anchor
 |---|---|---|---|
 | U4 | 受理人 A 点「同意」 | 引擎记录 approve（web 端可见）；audit actor=A 的本地账号；台账回调结果 executed | ⬜ |
 | U5 | A 重复点击（重复回调） | 幂等收敛：无第二次引擎写；卡面显示真实终态 | ⬜ |
-| U6 | 非受理人 B 点「同意」（转发的卡） | 引擎 403 `APPROVAL_ASSIGNMENT_REQUIRED`；**无审批写入**；卡面「当前账号无权处理该审批」 | ⬜ |
+| U6 | 非受理人 B 的受控技术注入同意回调（不依赖卡片转发） | 保持 `supportForward=false`、不开转发；引擎 403 `APPROVAL_ASSIGNMENT_REQUIRED`；**无审批写入**；卡面「当前账号无权处理该审批」 | ⬜ |
 | U7 | 未绑定钉钉的操作者点卡 | 无引擎调用；卡面「请先在网页端绑定钉钉后再处理」 | ⬜ |
 | U8 | 点「驳回」 | 跳 Slice-A 决策页（深链），页面强制意见后驳回成功 | ⬜ |
+
+**U4–U7 每次回调的证据纪律**：对该 delivery 启动 `observe`，看到
+`observer_armed=true` 后立即执行**恰一次**点击/受控技术注入，并等待完整五分钟观察窗结束。
+`observe` 只读取该固定窗口内的日志，并要求恰好一条原子 completion-evidence 记录；该记录把 delivery、corp 锚点判定与
+callback outcome 绑定在同一次完成调用中。不得拿 U4 的历史日志证明 U5；容器在窗口内重建、
+零条或多条 completion evidence 都必须失败。U8 是网页深链，不产生 Stream callback；以网页
+响应、审批审计与原卡终态更新三者证明，不套用 `observe`。
 
 ## 3. 卡片终态（B-4 面）
 
@@ -90,7 +97,7 @@ DingTalk interactive-card callback corp anchor
 | U9 | U4 成功后卡面 | `已由 <A 的服务端本地显示名> 同意 · <时间>`（显示名非钉钉 payload 回显），且「同意」「驳回」操作区消失；模板须定义默认值为 `true` 的公共布尔变量 `actionsVisible`，两个按钮均以其为显示条件 | ⬜ |
 | U10 | 卡片更新 API 人为置失败（如临时错模板）后 A 同意 | **审批已提交不回滚**；日志 values-free 错误；再次点击经 stale summary 收敛出真实终态 | ⬜ |
 | U11 | 伪造/过期 outTrackId 的回调（技术注入） | 卡面中性文案，与 operator-未解析场景**字节等同**（无存在性 oracle） | ⬜ |
-| **U11-a** | **真实点击的企业来源（#4116 跨企业门实证）** | 一次**真实**的同意点击必须**通过**跨企业门（而不是被 `corp_mismatch` 拒掉）。这是 §0-a 的验收面：worker values-free 日志应显示门读到了企业锚点（header `eventCorpId` 或 body `corpId`）**且与台账 `integration_id` 所属企业一致**。**若真实点击被判 `corp_mismatch` ⇒ 说明真实帧根本不带任何 corp 字段 ⇒ 立刻停止 UAT、关 flag**（这正是 §0-a 预警的 dead-on-arrival）。 | ⬜ |
+| **U11-a** | **真实点击的企业来源（#4116 跨企业门实证）** | 一次**真实**的同意点击必须**通过**跨企业门（而不是被拒）。这是 §0-a 的验收面：worker values-free 日志应显示门读到了企业锚点（header `eventCorpId` 或 body `corpId`）**且与台账 `integration_id` 所属企业一致**。**若真实点击判 `corp_anchor_absent` ⇒ 真实帧缺企业锚点，立刻停止 UAT、关 flag**；**若判真正的 `corp_mismatch` ⇒ 锚点存在但企业确实不一致，按跨企业点击处置，保持拒绝并检查测试账号/绑定企业/台账配置，不得把它误报为缺锚点 dead-on-arrival**。 | ⬜ |
 | **U11-b** | **过期卡（若已启用保留期清扫 #4142）** | 已被清扫成 `expired` 的卡再点击 ⇒ 不可操作、**零审批写入**，卡面走 stale 终态文案。（清扫默认 OFF；只有设了 `DINGTALK_DELIVERY_RETENTION_DAYS` 才需验这条，且**窗口须大于审批 SLA**，否则活卡会被过期。） | ⬜ |
 
 ## 4. 生命周期与运维（W2b 面）

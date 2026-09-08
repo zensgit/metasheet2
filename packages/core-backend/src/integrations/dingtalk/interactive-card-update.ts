@@ -26,7 +26,10 @@ import {
 } from './client'
 import { resolveDingTalkInteractiveCardStreamConfig } from './interactive-card-stream'
 import type { DingTalkApprovalCardCallbackResult } from './interactive-card-callback'
-import type { ApprovalCardDeliverySummary } from '../../services/ApprovalCardDeliveryAction'
+import type {
+  ApprovalCardActionOutcome,
+  ApprovalCardDeliverySummary,
+} from '../../services/ApprovalCardDeliveryAction'
 
 const logger = new Logger('DingTalkInteractiveCardUpdate')
 
@@ -165,6 +168,37 @@ export function buildDingTalkApprovalCardTerminalUpdate(
 }
 
 /**
+ * Web deep-link convergence is deliberately narrower than the Stream callback mapping. It updates
+ * only the interactive card named by the authoritative delivery summary, and only after the
+ * approval engine reports a true reject/revoke terminal state. Replaying the same outcome produces
+ * the same update-by-key payload, so retries and stale deep-link submissions are idempotent.
+ */
+export function buildDingTalkApprovalCardWebTerminalUpdate(
+  outcome: ApprovalCardActionOutcome,
+): DingTalkApprovalCardTerminalUpdate | null {
+  if (outcome.status !== 'ok' && outcome.status !== 'stale') return null
+
+  const { summary } = outcome
+  if (summary.deliveryKind !== 'interactive_card') return null
+
+  if (summary.approval.status === 'revoked') {
+    return {
+      outTrackId: summary.deliveryId,
+      statusText: '审批已撤销',
+      actionsVisible: false,
+    }
+  }
+  if (summary.approval.status !== 'rejected') return null
+
+  const actedAt = summary.actedAction === 'reject' ? formatCardTime(summary.actedAt) : null
+  return {
+    outTrackId: summary.deliveryId,
+    statusText: actedAt ? `已驳回 · ${actedAt}` : '审批已拒绝',
+    actionsVisible: false,
+  }
+}
+
+/**
  * Production sender: same env-gated Stream credentials the B-2 send used (`resolve…StreamConfig`),
  * app-token via the shared cache, official update endpoint. Returns `null` when the stream gate is
  * off — with the flag off no card was ever sent by this channel, so there is nothing to update.
@@ -183,6 +217,49 @@ export function createDingTalkApprovalCardStreamUpdateSender(
   }
 }
 
+async function applyBuiltDingTalkApprovalCardTerminalUpdate(
+  build: () => DingTalkApprovalCardTerminalUpdate | null,
+  fallbackOutTrackId: string,
+  sender?: DingTalkApprovalCardUpdateSender,
+): Promise<DingTalkApprovalCardTerminalUpdateOutcome> {
+  try {
+    const update = build()
+    if (!update) return { status: 'skipped', reason: 'no_update_for_outcome' }
+
+    const send = sender ?? createDingTalkApprovalCardStreamUpdateSender()
+    if (!send) return { status: 'skipped', reason: 'stream_config_disabled' }
+
+    await send(update)
+    return { status: 'updated', outTrackId: update.outTrackId }
+  } catch (error) {
+    const reason = error instanceof Error ? error.name : 'UnknownError'
+    // Values-free: stable error class + ledger id only. Never log error messages, API bodies,
+    // comments, approval titles, or card parameter values.
+    logger.warn(`DingTalk approval-card terminal update failed (card_update_failed:${reason}) delivery=${fallbackOutTrackId}`)
+    return { status: 'failed', outTrackId: fallbackOutTrackId, reason }
+  }
+}
+
+/**
+ * Post-commit presentation hook for the `/m/approval-decision` web path. This function is total:
+ * DingTalk/config failures resolve to a typed failure and can never alter the committed approval or
+ * delivery ledger. The route intentionally ignores that typed result after recording the warning.
+ */
+export async function applyDingTalkApprovalCardWebTerminalUpdate(
+  outcome: ApprovalCardActionOutcome,
+  sender?: DingTalkApprovalCardUpdateSender,
+): Promise<DingTalkApprovalCardTerminalUpdateOutcome> {
+  const outTrackId =
+    outcome.status === 'ok' || outcome.status === 'stale' || outcome.status === 'engine_rejected'
+      ? outcome.summary.deliveryId
+      : 'unknown'
+  return applyBuiltDingTalkApprovalCardTerminalUpdate(
+    () => buildDingTalkApprovalCardWebTerminalUpdate(outcome),
+    outTrackId,
+    sender,
+  )
+}
+
 /**
  * The B-4 follow-up hook: build the terminal update for an outcome and send it. NEVER throws and
  * touches no database — the committed approval action is out of reach from here (no-rollback
@@ -194,24 +271,10 @@ export async function applyDingTalkApprovalCardTerminalUpdate(
   context: DingTalkApprovalCardTerminalUpdateContext = {},
   sender?: DingTalkApprovalCardUpdateSender,
 ): Promise<DingTalkApprovalCardTerminalUpdateOutcome> {
-  // Review P3-1: the copy builder and sender resolution sit INSIDE the try so "never throws" is
-  // structural, not incidental — both are total functions today, but a future edit to either must
-  // not be able to break the no-rollback invariant.
-  try {
-    const update = buildDingTalkApprovalCardTerminalUpdate(result, context)
-    if (!update) return { status: 'skipped', reason: 'no_update_for_outcome' }
-
-    const send = sender ?? createDingTalkApprovalCardStreamUpdateSender()
-    if (!send) return { status: 'skipped', reason: 'stream_config_disabled' }
-
-    await send(update)
-    return { status: 'updated', outTrackId: update.outTrackId }
-  } catch (error) {
-    const reason = error instanceof Error ? error.name : 'UnknownError'
-    // Values-free (lock §5.3): reason class + ledger id only — API error bodies and card payloads
-    // never enter logs. The action itself is already committed and stays committed.
-    const outTrackId = 'deliveryId' in result ? result.deliveryId : ('outTrackId' in result ? result.outTrackId : 'unknown')
-    logger.warn(`DingTalk approval-card terminal update failed (card_update_failed:${reason}) delivery=${outTrackId}`)
-    return { status: 'failed', outTrackId, reason }
-  }
+  const outTrackId = 'deliveryId' in result ? result.deliveryId : ('outTrackId' in result ? result.outTrackId : 'unknown')
+  return applyBuiltDingTalkApprovalCardTerminalUpdate(
+    () => buildDingTalkApprovalCardTerminalUpdate(result, context),
+    outTrackId,
+    sender,
+  )
 }

@@ -7,8 +7,9 @@
 #
 # EXECUTABLE:
 #   status  — read-only snapshot (booleans / counts / reason classes / SHA only)
-#   observe — read-only callback/corp-anchor/card-update result classes for one
-#             validated expected delivery UUID; never emits raw logs or ids
+#   observe — open a fresh five-minute log window, then require exactly one atomic
+#             callback-completion evidence record for a validated delivery UUID;
+#             never emits raw logs or ids
 #   prepare — transport Stream credentials via chmod-600 files, derive exactly
 #             one active integration for live DINGTALK_CORP_ID with >=2 active
 #             linked local users, atomically write the four credential/id env
@@ -1742,62 +1743,79 @@ action_observe() {
   [[ "$live_flag" == "true" ]] \
     || fail "action=observe requires live Stream ON (got stream_enabled=${live_flag})"
 
-  local tmp anchor_count handled_count window_handler_error_count update_failed_count
-  local header_present="unknown" body_present="unknown" handled_outcome="unknown"
+  local tmp window_started container_id current_container_id attempt evidence_count="0"
+  local evidence_line header_present="" body_present="" corp_gate_result="" callback_outcome=""
+  local window_handler_error_count update_failed_count
   tmp="$(mktemp "${STREAM_UAT_PERSIST_DIR}/.callback-observer.XXXXXX")"
   register_ephemeral "$tmp"
   chmod 600 "$tmp"
-  docker logs "$BACKEND_CONTAINER" >"$tmp" 2>&1 \
-    || fail "action=observe could not read current backend container logs"
+  container_id="$(docker inspect --format '{{.Id}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
+  [[ "$container_id" =~ ^[0-9a-f]{12,64}$ ]] \
+    || fail "action=observe could not resolve the backend container identity"
+  window_started="$(date -u +'%Y-%m-%dT%H:%M:%S.%NZ')"
+  [[ "$window_started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] \
+    || fail "action=observe could not establish a fresh log-window timestamp"
 
-  anchor_count="$(grep -F 'DingTalk interactive-card callback corp anchor' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
-  handled_count="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+  log "observer_armed=true; perform exactly one callback now; observation remains open for the full five-minute window"
+  for attempt in $(seq 1 300); do
+    current_container_id="$(docker inspect --format '{{.Id}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
+    [[ "$current_container_id" == "$container_id" ]] \
+      || fail "action=observe backend container changed during the observation window"
+    docker logs --since "$window_started" "$BACKEND_CONTAINER" >"$tmp" 2>&1 \
+      || fail "action=observe could not read the fresh backend log window"
+    evidence_count="$(grep -F 'DingTalk interactive-card callback completed evidence' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
+    [[ "$evidence_count" -le 1 ]] \
+      || fail "action=observe requires exactly one completed callback in the fresh window (callback_evidence_count=${evidence_count})"
+    sleep 1
+  done
+  [[ "$evidence_count" -ge 1 ]] \
+    || fail "action=observe timed out without one completed callback in the fresh window (callback_evidence_count=${evidence_count})"
+
+  current_container_id="$(docker inspect --format '{{.Id}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
+  [[ "$current_container_id" == "$container_id" ]] \
+    || fail "action=observe backend container changed before evidence classification"
+  evidence_line="$(grep -F 'DingTalk interactive-card callback completed evidence' "$tmp" | grep -F "$EXPECTED_DELIVERY_ID")"
+  case "$evidence_line" in
+    *'"headerEventCorpIdPresent":true'*|*'headerEventCorpIdPresent=true'*) header_present="true" ;;
+    *'"headerEventCorpIdPresent":false'*|*'headerEventCorpIdPresent=false'*) header_present="false" ;;
+    *) fail "action=observe completed evidence omitted header anchor presence" ;;
+  esac
+  case "$evidence_line" in
+    *'"bodyCorpIdPresent":true'*|*'bodyCorpIdPresent=true'*) body_present="true" ;;
+    *'"bodyCorpIdPresent":false'*|*'bodyCorpIdPresent=false'*) body_present="false" ;;
+    *) fail "action=observe completed evidence omitted body anchor presence" ;;
+  esac
+  for candidate in matched corp_anchor_conflict corp_anchor_absent delivery_corp_unresolved corp_mismatch; do
+    if [[ "$evidence_line" == *"\"corpGateResult\":\"${candidate}\""* || "$evidence_line" == *"corpGateResult=${candidate}"* ]]; then
+      [[ -z "$corp_gate_result" ]] || fail "action=observe completed evidence carried ambiguous corp gate results"
+      corp_gate_result="$candidate"
+    fi
+  done
+  [[ -n "$corp_gate_result" ]] || fail "action=observe completed evidence carried a corp gate result outside the closed set"
+  for candidate in operator_unresolved link_secret_unavailable executed stale engine_rejected wrapper_not_found; do
+    if [[ "$evidence_line" == *"\"callbackOutcome\":\"${candidate}\""* || "$evidence_line" == *"callbackOutcome=${candidate}"* ]]; then
+      [[ -z "$callback_outcome" ]] || fail "action=observe completed evidence carried ambiguous callback outcomes"
+      callback_outcome="$candidate"
+    fi
+  done
+  [[ -n "$callback_outcome" ]] || fail "action=observe completed evidence carried a callback outcome outside the closed set"
+
   # The worker's catch log intentionally carries no delivery id. Keep it as a
-  # window-level diagnostic; it must never be presented as scoped evidence for
-  # EXPECTED_DELIVERY_ID.
+  # fresh-window diagnostic; it must never be presented as scoped evidence.
   window_handler_error_count="$(grep -F -c 'DingTalk interactive-card callback failed (callback_handler_error)' "$tmp" || true)"
   update_failed_count="$(grep -F 'DingTalk approval-card terminal update failed (card_update_failed:' "$tmp" | grep -F -c "$EXPECTED_DELIVERY_ID" || true)"
 
-  if [[ "$anchor_count" -gt 0 ]]; then
-    local anchor_line
-    anchor_line="$(grep -F 'DingTalk interactive-card callback corp anchor' "$tmp" | grep -F "$EXPECTED_DELIVERY_ID" | tail -n 1)"
-    [[ "$anchor_line" == *'headerEventCorpIdPresent=true'* || "$anchor_line" == *'"headerEventCorpIdPresent":true'* ]] \
-      && header_present="true"
-    [[ "$anchor_line" == *'headerEventCorpIdPresent=false'* || "$anchor_line" == *'"headerEventCorpIdPresent":false'* ]] \
-      && header_present="false"
-    [[ "$anchor_line" == *'bodyCorpIdPresent=true'* || "$anchor_line" == *'"bodyCorpIdPresent":true'* ]] \
-      && body_present="true"
-    [[ "$anchor_line" == *'bodyCorpIdPresent=false'* || "$anchor_line" == *'"bodyCorpIdPresent":false'* ]] \
-      && body_present="false"
-  fi
-
-  if [[ "$handled_count" -gt 0 ]]; then
-    local handled_line
-    handled_line="$(grep -F 'DingTalk interactive-card callback handled (' "$tmp" | grep -F "$EXPECTED_DELIVERY_ID" | tail -n 1)"
-    case "$handled_line" in
-      *'(ignored_unsupported_action out_track_id='*) handled_outcome="ignored_unsupported_action" ;;
-      *'(delivery_not_found out_track_id='*) handled_outcome="delivery_not_found" ;;
-      *'(executed delivery='*) handled_outcome="executed" ;;
-      *'(stale delivery='*) handled_outcome="stale" ;;
-      *'(operator_unresolved:'*) handled_outcome="operator_unresolved" ;;
-      *'(link_secret_unavailable delivery='*) handled_outcome="link_secret_unavailable" ;;
-      *'(engine_rejected:'*) handled_outcome="engine_rejected" ;;
-      *'(wrapper_not_found delivery='*) handled_outcome="wrapper_not_found" ;;
-      *) handled_outcome="other" ;;
-    esac
-  fi
-
   rm -f "$tmp"
   {
-    echo "schema=dingtalk-interactive-card-stream-callback-observer-v1"
+    echo "schema=dingtalk-interactive-card-stream-callback-observer-v3"
     echo "action=observe"
     echo "reason=ok"
     echo "stream_enabled=true"
-    echo "callback_anchor_log_count=${anchor_count}"
+    echo "callback_evidence_count=1"
     echo "header_event_corp_id_present=${header_present}"
     echo "body_corp_id_present=${body_present}"
-    echo "callback_handled_count=${handled_count}"
-    echo "latest_callback_outcome=${handled_outcome}"
+    echo "corp_gate_result=${corp_gate_result}"
+    echo "latest_callback_outcome=${callback_outcome}"
     echo "window_callback_handler_error_count=${window_handler_error_count}"
     echo "card_update_failed_count=${update_failed_count}"
   } > "${OUTPUT_DIR}/callback-observer.txt"
