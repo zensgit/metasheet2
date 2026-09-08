@@ -472,6 +472,7 @@ html, body {
   flex-shrink: 0;
   background: var(--ms-bg-card, #fff);
   border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  box-shadow: none;
 }
 
 .sheet-chrome__brand {
@@ -483,14 +484,23 @@ html, body {
 
 .sheet-chrome__back {
   flex: 0 0 auto;
-  color: var(--ms-text-3, #9ca3af);
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ms-sheet-icon-color, #6b7280);
   text-decoration: none;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 400;
   white-space: nowrap;
 }
 
 .sheet-chrome__back:hover {
-  color: var(--ms-color-primary);
+  background: #f5f5f5;
+  color: var(--ms-text-1, #111827);
 }
 
 .sheet-chrome__actions {
@@ -502,10 +512,10 @@ html, body {
 }
 
 .app-sheet-chrome .brand-text {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--ms-text-1, #111827);
-  letter-spacing: -0.01em;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ms-sheet-icon-color, #6b7280);
+  letter-spacing: 0;
 }
 
 .app-sheet-chrome .nav-link {

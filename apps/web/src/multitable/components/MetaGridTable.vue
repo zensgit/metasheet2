@@ -151,7 +151,6 @@
           </tr>
           <tr v-if="!rows.length && !loading">
             <td :colspan="colSpan" class="meta-grid__empty">
-              <div class="meta-grid__empty-icon">&#x1F4CB;</div>
               <div class="meta-grid__empty-title">{{ l('grid.noRecordsTitle') }}</div>
               <div class="meta-grid__empty-hint">{{ l('grid.noRecordsHintPrefix') }} <strong>{{ l('grid.noRecordsHintAction') }}</strong> {{ l('grid.noRecordsHintSuffix') }}</div>
             </td>
@@ -313,12 +312,10 @@
           <tr v-if="!filteredRows.length && !loading">
             <td :colspan="colSpan" class="meta-grid__empty">
               <template v-if="searchText">
-                <div class="meta-grid__empty-icon">&#x1F50D;</div>
                 <div class="meta-grid__empty-title">{{ l('grid.noMatchingTitle') }}</div>
                 <div class="meta-grid__empty-hint">{{ l('grid.noMatchingHint') }}</div>
               </template>
               <template v-else>
-                <div class="meta-grid__empty-icon">&#x1F4CB;</div>
                 <div class="meta-grid__empty-title">{{ l('grid.noRecordsTitle') }}</div>
                 <div class="meta-grid__empty-hint">{{ l('grid.noRecordsHintPrefix') }} <strong>{{ l('grid.noRecordsHintAction') }}</strong> {{ l('grid.noRecordsHintSuffix') }}</div>
               </template>
@@ -1417,7 +1414,7 @@ thead .meta-grid__check-col {
   border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb);
 }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: var(--ms-sheet-font-body, 13px); }
-.meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: var(--ms-text-3, #9ca3af); font-size: var(--ms-sheet-font-header, 12px); background: var(--ms-bg-card, #fff); border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); border-right: 1px solid var(--ms-sheet-hairline, #ebebeb); padding: 8px 4px; position: sticky; left: 0; z-index: 1; }
+.meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: var(--ms-text-3, #9ca3af); font-size: var(--ms-sheet-font-header, 12px); background: var(--ms-bg-card, #fff); border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); border-right: 1px solid var(--ms-sheet-hairline, #ebebeb); padding: 8px 8px; position: sticky; left: 0; z-index: 1; }
 .meta-grid__lock-indicator,
 .meta-grid__lock-action {
   display: inline-flex; align-items: center; justify-content: center;
@@ -1494,10 +1491,9 @@ thead .meta-grid__check-col {
 }
 .meta-grid__add-row-btn:hover { background: #f5f7fa; color: #2563eb; }
 .meta-grid__add-row-plus { font-weight: 700; font-size: 15px; line-height: 1; }
-.meta-grid__empty { text-align: center; padding: 48px 32px; color: #999; }
-.meta-grid__empty-icon { font-size: 36px; margin-bottom: 8px; opacity: 0.5; }
-.meta-grid__empty-title { font-size: 15px; font-weight: 600; color: #666; margin-bottom: 4px; }
-.meta-grid__empty-hint { font-size: 13px; color: #aaa; }
+.meta-grid__empty { text-align: center; padding: 48px 32px; color: var(--ms-text-3, #9ca3af); }
+.meta-grid__empty-title { font-size: var(--ms-sheet-font-body, 13px); font-weight: 400; color: var(--ms-text-2, #4b5563); margin-bottom: 4px; }
+.meta-grid__empty-hint { font-size: var(--ms-sheet-font-header, 12px); font-weight: 400; color: var(--ms-text-3, #9ca3af); }
 .meta-grid__pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px; border-top: 1px solid #e5e7eb; }
 .meta-grid__page-btn { padding: 4px 12px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
 .meta-grid__page-btn:hover:not(:disabled) { background: #f5f5f5; }
@@ -1511,7 +1507,7 @@ thead .meta-grid__check-col {
 .meta-grid__check-col { width: 36px; min-width: 36px; text-align: center; padding: 4px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); border-right: 1px solid var(--ms-sheet-hairline, #ebebeb); background: var(--ms-bg-card, #fff); position: sticky; left: 0; z-index: 1; }
 .meta-grid__expand-btn { border: none; background: none; cursor: pointer; font-size: 8px; color: #bbb; padding: 0 2px; transition: transform 0.15s; display: inline-block; }
 .meta-grid__expand-btn:hover { color: #666; }
-.meta-grid__expand-btn--open { transform: rotate(90deg); color: #409eff; }
+.meta-grid__expand-btn--open { transform: rotate(90deg); color: var(--ms-sheet-icon-color, #6b7280); }
 .meta-grid__expand-row td { padding: 0; background: #fafbfc; border-bottom: 1px solid #eee; }
 .meta-grid__expand-detail { padding: 8px 16px 12px !important; }
 .meta-grid__expand-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; }
@@ -1535,7 +1531,7 @@ thead .meta-grid__check-col {
 .meta-grid__group-count { font-weight: 400; color: #999; font-size: 12px; }
 .meta-grid--compact .meta-grid__cell { padding: 3px 8px; font-size: 12px; }
 .meta-grid--compact .meta-grid__row { contain-intrinsic-size: auto 28px; }
-.meta-grid--compact .meta-grid__row-num { padding: 3px 4px; font-size: 11px; }
+.meta-grid--compact .meta-grid__row-num { padding: 3px 8px; font-size: 11px; }
 .meta-grid--expanded .meta-grid__cell { padding: 10px 12px; }
 .meta-grid--expanded .meta-grid__row { contain-intrinsic-size: auto 52px; }
 @media print {

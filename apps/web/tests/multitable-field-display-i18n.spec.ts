@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { formatDateValue, formatFieldDisplay } from '../src/multitable/utils/field-display'
+import {
+  formatAxisDayLabel,
+  formatAxisLongDateLabel,
+  formatAxisMonthLabel,
+  formatAxisWeekRangeLabel,
+  formatDateValue,
+  formatFieldDisplay,
+} from '../src/multitable/utils/field-display'
 import type { MetaField } from '../src/multitable/types'
 
 describe('formatFieldDisplay i18n fallbacks', () => {
@@ -38,6 +45,20 @@ describe('formatFieldDisplay i18n fallbacks', () => {
     expect(formatFieldDisplay({ field, value: '2026-08-31', isZh: true })).toBe('2026-08-31')
     expect(formatFieldDisplay({ field, value: '2026-08-31', isZh: true })).not.toMatch(/Aug|Sep|Oct|Jan|Feb|Mar|Apr|May|Jun|Jul|Nov|Dec/)
     expect(formatDateValue('2026-08-31', false)).toBe('Aug 31, 2026')
+  })
+
+  it('formats sheet axis labels in zh without English month names', () => {
+    const day = new Date(2026, 7, 31)
+    expect(formatAxisDayLabel(day, true)).toBe('8月31日')
+    expect(formatAxisDayLabel(day, true)).not.toMatch(/Aug|Sep|Oct|Jan|Feb|Mar|Apr|May|Jun|Jul|Nov|Dec/)
+    expect(formatAxisDayLabel(day, false)).toBe('Aug 31')
+    expect(formatAxisMonthLabel(day, true)).toBe('2026年8月')
+    expect(formatAxisMonthLabel(day, true, 'long')).toBe('2026年8月')
+    expect(formatAxisMonthLabel(day, false, 'long')).toBe('August 2026')
+    expect(formatAxisLongDateLabel(day, true)).toBe('2026年8月31日星期一')
+    expect(formatAxisLongDateLabel(day, true)).not.toMatch(/Aug|August|Monday/)
+    expect(formatAxisWeekRangeLabel(day, new Date(2026, 8, 6), true)).toBe('8月31日 - 2026年9月6日')
+    expect(formatAxisWeekRangeLabel(day, new Date(2026, 8, 6), true)).not.toMatch(/Aug|Sep/)
   })
 
   it('localizes attachment count summaries without translating file names', () => {

@@ -344,7 +344,7 @@ const isPersonLink = computed(() => isPersonField(props.field))
 
 function personInitial(display: string): string {
   const trimmed = display.trim()
-  if (!trimmed) return '?'
+  if (!trimmed) return '·'
   return [...trimmed][0]!.toUpperCase()
 }
 

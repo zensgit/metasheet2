@@ -147,7 +147,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGanttViewConfig, MetaRecord } from '../types'
 import { useLocale } from '../../composables/useLocale'
-import { formatFieldDisplay } from '../utils/field-display'
+import { formatAxisDayLabel, formatAxisMonthLabel, formatFieldDisplay } from '../utils/field-display'
 import { isSelfTableLinkField, resolveGanttViewConfig } from '../utils/view-config'
 import { managerLabel } from '../utils/meta-manager-labels'
 import { MtButton } from '../ui'
@@ -437,8 +437,8 @@ const axisTicks = computed(() => {
     ticks.push({
       key: String(ts),
       label: zoom.value === 'month'
-        ? date.toLocaleDateString(undefined, { month: 'short', year: '2-digit' })
-        : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+        ? formatAxisMonthLabel(date, isZh.value)
+        : formatAxisDayLabel(date, isZh.value),
       left: ((ts - min) / range) * 100,
     })
   }

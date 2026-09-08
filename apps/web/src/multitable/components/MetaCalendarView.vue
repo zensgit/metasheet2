@@ -351,7 +351,7 @@
 import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaCalendarViewConfig, MetaField, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveCalendarViewConfig } from '../utils/view-config'
-import { formatFieldDisplay } from '../utils/field-display'
+import { formatAxisLongDateLabel, formatAxisMonthLabel, formatAxisWeekRangeLabel, formatFieldDisplay } from '../utils/field-display'
 import {
   buildCalendarDay,
   buildCalendarDays,
@@ -654,23 +654,16 @@ function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: 
   handleCommentAffordanceKeydown(event, () => emit('open-field-comments', { recordId, fieldId }))
 }
 
-const activeDayLabel = computed(() =>
-  viewDate.value.toLocaleDateString('default', {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-  }),
-)
+const activeDayLabel = computed(() => formatAxisLongDateLabel(viewDate.value, isZh.value))
 
 const periodLabel = computed(() => {
   if (viewMode.value === 'day') return activeDayLabel.value
   if (viewMode.value === 'week') {
     const start = startOfWeek(viewDate.value)
     const end = addDays(start, 6)
-    return `${start.toLocaleDateString('default', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('default', { month: 'short', day: 'numeric', year: 'numeric' })}`
+    return formatAxisWeekRangeLabel(start, end, isZh.value)
   }
-  return viewDate.value.toLocaleString('default', { month: 'long', year: 'numeric' })
+  return formatAxisMonthLabel(viewDate.value, isZh.value, 'long')
 })
 
 function fmt(y: number, m: number, d: number): string {

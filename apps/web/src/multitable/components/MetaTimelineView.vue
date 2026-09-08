@@ -181,7 +181,7 @@
 import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRecord, MetaTimelineViewConfig, MultitableCommentPresenceSummary } from '../types'
 import { resolveTimelineViewConfig } from '../utils/view-config'
-import { formatFieldDisplay } from '../utils/field-display'
+import { formatAxisDayLabel, formatAxisMonthLabel, formatFieldDisplay } from '../utils/field-display'
 import { useLocale } from '../../composables/useLocale'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
@@ -482,8 +482,8 @@ const axisTicks = computed(() => {
   while (t <= max) {
     const d = new Date(t)
     const label = zoom.value === 'month'
-      ? d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' })
-      : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+      ? formatAxisMonthLabel(d, isZh.value)
+      : formatAxisDayLabel(d, isZh.value)
     ticks.push({
       key: String(t),
       label,

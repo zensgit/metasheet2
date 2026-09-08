@@ -30,6 +30,59 @@ function pad2(n: number): string {
   return String(n).padStart(2, '0')
 }
 
+function toDisplayDate(value: Date | number | string): Date | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value
+  if (typeof value === 'number') {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+  return parseDisplayDate(value)
+}
+
+/** zh: 9月8日. en: Sep 8. Never English month names in zh. */
+export function formatAxisDayLabel(value: Date | number | string, isZh = false): string {
+  const date = toDisplayDate(value)
+  if (!date) return String(value)
+  if (isZh) return `${date.getMonth() + 1}月${date.getDate()}日`
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+/** zh: 2026年9月. en: Sep 26 (short axis) or September 2026 (long). Never English month names in zh. */
+export function formatAxisMonthLabel(value: Date | number | string, isZh = false, style: 'short' | 'long' = 'short'): string {
+  const date = toDisplayDate(value)
+  if (!date) return String(value)
+  if (isZh) return `${date.getFullYear()}年${date.getMonth() + 1}月`
+  return date.toLocaleDateString('en-US', style === 'long'
+    ? { month: 'long', year: 'numeric' }
+    : { month: 'short', year: '2-digit' })
+}
+
+/** Calendar day heading. zh uses numeric Chinese form, never Aug/September. */
+export function formatAxisLongDateLabel(value: Date | number | string, isZh = false): string {
+  const date = toDisplayDate(value)
+  if (!date) return String(value)
+  if (isZh) {
+    const weekdays = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六']
+    return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日${weekdays[date.getDay()] ?? ''}`
+  }
+  return date.toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  })
+}
+
+export function formatAxisWeekRangeLabel(start: Date | number | string, end: Date | number | string, isZh = false): string {
+  const startDate = toDisplayDate(start)
+  const endDate = toDisplayDate(end)
+  if (!startDate || !endDate) return `${start} - ${end}`
+  if (isZh) {
+    return `${startDate.getMonth() + 1}月${startDate.getDate()}日 - ${endDate.getFullYear()}年${endDate.getMonth() + 1}月${endDate.getDate()}日`
+  }
+  return `${startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+}
+
 /** zh: 2026-09-08. en: Aug 31, 2026. Never English month names in zh. */
 export function formatDateValue(value: unknown, isZh = false): string {
   if (value === null || value === undefined || value === '') return '—'

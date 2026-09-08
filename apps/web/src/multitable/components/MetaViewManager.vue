@@ -13,7 +13,7 @@
           class="meta-view-mgr__row"
           :class="{ 'meta-view-mgr__row--active': view.id === activeViewId }"
         >
-          <span class="meta-view-mgr__icon">{{ VIEW_ICONS[view.type] ?? '?' }}</span>
+          <span class="meta-view-mgr__icon">{{ VIEW_ICONS[view.type] ?? '' }}</span>
 
           <template v-if="editingId === view.id">
             <input
