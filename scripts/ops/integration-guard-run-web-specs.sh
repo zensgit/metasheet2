@@ -29,6 +29,29 @@
 # fires the lane, and this line is what makes the lane actually execute the spec. Adding the
 # apps/web/tests/StockPreparationSourceBinding.spec.ts roster entry alongside its `on.push.paths`
 # twin is the same follow-up as the one above, for the same person.
+#
+# 项目查询 note: StockPreparationProjectQuery (P2-1) is in THIS list on exactly the same footing as the
+# two above, and for the same reason: its .spec.ts would need a roster entry, and the roster is pinned
+# byte-for-byte against `on.push.paths` in integration-guard.yml — a workflow file that change could
+# not touch. The guard still fires on any edit to this feature: the panel lives under
+# apps/web/src/components/integration/stockPreparation/** and its pure module under
+# apps/web/src/services/integration/stockPreparation/**, both `/**` roster entries. The filter token
+# is `StockPreparationProjectQuery`, which is neither a substring nor a superstring of any other token
+# in this list (`StockPreparationProjectWorkspaceView` is the nearest, and neither contains the other),
+# so it resolves to exactly one file. Adding the roster entry alongside its `on.push.paths` twin is the
+# same follow-up as the two above, for the same person.
+#
+# 收尾小修波 D4 共享常量 note: StockPreparationHomeQueryLabels (hardening wave, 2026-09-08) is in THIS
+# list on the same footing as the three notes above. It is a pure-module spec for
+# `stockPrepHomeStatusLabel` / `resolveStockPrepPullBanner` — both under
+# apps/web/src/services/integration/stockPreparation/** — plus a source-level guard reading the two
+# `.vue` callers under apps/web/src/components/integration/stockPreparation/**, so the SAME two `/**`
+# roster entries that already fire this lane for every stock-prep change cover it too; a roster entry
+# for the .spec.ts itself is the same follow-up as the three notes above, for the same person. The
+# filter token is `StockPreparationHomeQueryLabels`, neither a substring nor a superstring of any other
+# token in this list — the nearest neighbours, `StockPreparationWorkspace` and
+# `StockPreparationProjectWorkspaceView`, diverge right after `StockPreparation` — so it resolves to
+# exactly one file.
 set -euo pipefail
 
-pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror k3-endpoint-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationHubOverviewSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView bomSnapshotDiff StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper StockPreparationSourceBinding --reporter=dot
+pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror k3-endpoint-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationHubOverviewSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView bomSnapshotDiff StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper StockPreparationSourceBinding StockPreparationProjectQuery StockPreparationHomeQueryLabels --reporter=dot

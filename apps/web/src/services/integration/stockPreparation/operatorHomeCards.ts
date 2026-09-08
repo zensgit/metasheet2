@@ -33,6 +33,30 @@ export const STOCK_PREP_HOME_FILTER_KEYS = ['all', 'pending_decision', 'blocked'
 export type StockPrepHomeFilterKey = typeof STOCK_PREP_HOME_FILTER_KEYS[number]
 
 /**
+ * The FIVE CHIP WORDS, shared (hardening wave, 2026-09-08) between 今天要处理's filter row and 项目查询's
+ * status chips — 项目查询's `StockPrepProjectQueryStatusKey` (projectQuery.ts) is a straight type alias
+ * of `StockPrepHomeFilterKey`, not a second vocabulary, because `STOCK_PREP_PROJECT_QUERY_STATUS_KEYS`
+ * IS `STOCK_PREP_HOME_FILTER_KEYS` (see that file's own comment on why). Before this the two `.vue`
+ * files each carried a byte-identical `Record<..., [string, string]>` literal of their own — two
+ * copies of the same five words with nothing tying them together, so a wording change made to one chip
+ * row silently left the other saying something different for the identical status. One map, imported
+ * by both; `stockPrepPermissionMatrix`-style drift is now impossible because there is only one file to
+ * edit. `stockPrepHomeStatusLabel` below is the one place a caller turns a key into the bilingual pair.
+ */
+export const STOCK_PREP_HOME_STATUS_LABELS: Record<StockPrepHomeFilterKey, readonly [string, string]> = Object.freeze({
+  all: ['全部', 'All'],
+  pending_decision: ['等您拿主意', 'Waiting on you'],
+  blocked: ['卡住了', 'Blocked'],
+  ready: ['可以导出', 'Ready to export'],
+  not_pulled: ['还没拉过', 'Not pulled yet'],
+})
+
+/** `bi(...)`-ready accessor — spares every caller its own `STOCK_PREP_HOME_STATUS_LABELS[key]` index. */
+export function stockPrepHomeStatusLabel(key: StockPrepHomeFilterKey): readonly [string, string] {
+  return STOCK_PREP_HOME_STATUS_LABELS[key]
+}
+
+/**
  * A REMEMBERED posture, rendered without a count this browser does not actually have (R9/D8: memory
  * stores the enum key alone). The fixed-wording keys call straight into `stockPrepPosture` so the
  * word is byte-identical to the live version; the two count-bearing keys (pending_decision/blocked)

@@ -131,8 +131,13 @@ const allVerificationSpecs = walkFiles(verificationRoot)
   .sort()
 const approvalSpecs = allVerificationSpecs
   .filter((path) => basename(path).startsWith('approval-'))
+// 备料 has its OWN lane (playwright.stock-prep-verification.config.ts / stock-prep-browser-verify.yml,
+// pinned by scripts/ops/stock-prep-browser-ci-wiring.test.mjs), so the shared lane's testIgnore drops
+// those specs too. Excluded here for exactly that reason: this assertion is 「the shared lane collects
+// every spec that belongs to no dedicated lane」, and it has to know about every dedicated lane to
+// stay true rather than becoming a false red the moment a second one ships.
 const sharedSpecs = allVerificationSpecs
-  .filter((path) => !basename(path).startsWith('approval-'))
+  .filter((path) => !basename(path).startsWith('approval-') && !basename(path).startsWith('stock-prep-'))
 
 test('approval workflow creates a stable PR and merge-queue context with a real classifier', () => {
   const source = readFileSync(workflowPath, 'utf8')
@@ -224,7 +229,7 @@ test('approval and shared Playwright configs own disjoint, exhaustive spec sets'
   const approvalConfig = readFileSync(approvalConfigPath, 'utf8')
   const sharedConfig = readFileSync(sharedConfigPath, 'utf8')
   assert.match(approvalConfig, /testMatch:\s*\[\s*['"]\*\*\/approval-\*\.spec\.ts['"]\s*\]/)
-  assert.match(sharedConfig, /testIgnore:\s*\[\s*['"]\*\*\/approval-\*\.spec\.ts['"]\s*\]/)
+  assert.match(sharedConfig, /testIgnore:\s*\[[^\]]*['"]\*\*\/approval-\*\.spec\.ts['"][^\]]*\]/)
 
   assert.deepEqual(
     listPlaywrightSpecs('playwright.approval-verification.config.ts'),

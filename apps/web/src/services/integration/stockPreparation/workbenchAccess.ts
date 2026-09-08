@@ -573,6 +573,11 @@ export const STOCK_PREP_RAIL_GROUPS: readonly StockPrepRailGroup[] = Object.free
       // behaviour is not reimplemented here: this key just addresses it directly.
       Object.freeze({ key: 'home', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
       Object.freeze({ key: 'project-board', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
+      // 项目查询 (P2-1, 设计稿 §6.3 第一行). Reads NOTHING the board does not already read — the U2
+      // directory union plus, once a row is selected, that project's own board — so it sits on the
+      // SAME operator tier: a principal who may open 项目备料 may query the same list, and one who
+      // may not would be handed a panel of project numbers their tier is not entitled to.
+      Object.freeze({ key: 'project-query', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
       Object.freeze({ key: 'confirmation-queue', gate: STOCK_PREP_RAIL_GATE_ROUTE }),
     ]),
   }),
@@ -610,6 +615,19 @@ export const STOCK_PREP_RAIL_GROUPS: readonly StockPrepRailGroup[] = Object.free
  * Delegated rather than restated so the two can never be gated differently.
  */
 export function canOpenStockPrepHome(snapshot: StockPrepAccessSnapshot): boolean {
+  return canOpenStockPrepProjectBoard(snapshot)
+}
+
+/**
+ * 项目查询 (P2-1) — same tier as 项目备料, and delegated for the same reason 今天要处理 is.
+ *
+ * The panel's data is the U2 directory union (the same read 今天要处理 makes, through the same
+ * throttle) plus ONE board read for whichever row the reader selects. Every value it can put on
+ * screen — a project number, a project name, a count — is a value the board already shows to this
+ * exact tier, and every read it makes is a read that tier is already granted. A separate predicate
+ * would be a second place for that tier to be spelled, and the first divergence would be invisible.
+ */
+export function canOpenStockPrepProjectQuery(snapshot: StockPrepAccessSnapshot): boolean {
   return canOpenStockPrepProjectBoard(snapshot)
 }
 
