@@ -804,25 +804,25 @@ import {
 } from '../utils/base-local-state'
 import { ElIcon } from 'element-plus'
 import {
-  User as IconPresence,
-  MessageBox as IconMentions,
-  ChatDotRound as IconCommentInbox,
-  Setting as IconFields,
-  Lock as IconAccess,
-  Menu as IconViews,
-  Setting as IconWorkflow,
-  Lightning as IconAutomations,
-  Files as IconTemplates,
-  DataBoard as IconDashboard,
-  Link as IconShareForm,
-  Key as IconApiWebhooks,
-  Delete as IconTrash,
-  Clock as IconHistory,
-  Setting as IconConfigHistory,
-  FolderOpened as IconArchiveRecovery,
-} from '@element-plus/icons-vue'
+  SheetUser as IconPresence,
+  SheetInbox as IconMentions,
+  SheetChat as IconCommentInbox,
+  SheetGear as IconFields,
+  SheetLock as IconAccess,
+  SheetFields as IconViews,
+  SheetGear as IconWorkflow,
+  SheetBolt as IconAutomations,
+  SheetFiles as IconTemplates,
+  SheetDashboard as IconDashboard,
+  SheetLink as IconShareForm,
+  SheetKey as IconApiWebhooks,
+  SheetTrash as IconTrash,
+  SheetClock as IconHistory,
+  SheetGear as IconConfigHistory,
+  SheetFolder as IconArchiveRecovery,
+} from '../ui/sheet-chrome-icons'
 
-// Feature-row chrome icon map (UI-P1b). Same idiom as MetaToolbar's ICON map (UI-P1 slice-1): keyed by
+// Feature-row / overflow chrome icon map. Same idiom as MetaToolbar's ICON map: keyed by
 // action so the template reads `ICON.trash` etc. `fields`/`workflow`/`configHistory` intentionally share
 // the Setting glyph — the source markup already rendered the same gear character (&#x2699;) for all three,
 // so this is a like-for-like swap, not a new distinction.
@@ -4693,6 +4693,8 @@ defineExpose({
 .mt-workbench__mgr-btn--attention { color: var(--ms-text-1, #111827); background: transparent; }
 .mt-workbench__mgr-btn--active { color: var(--ms-color-primary); }
 .mt-workbench__mgr-btn-icon { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
+.mt-workbench__mgr-btn-icon :deep(.ms-sheet-icon),
+.mt-workbench__mgr-btn-icon :deep(svg) { width: 1em; height: 1em; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; margin-left: 6px; padding: 0 5px; border-radius: 999px; background: var(--ms-color-info, #6b7280); color: #fff; font-size: 11px; font-weight: 500; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); }
 /* UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §2.1/§3.1):

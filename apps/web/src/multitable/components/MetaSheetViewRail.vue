@@ -145,17 +145,17 @@ import { useLocale } from '../../composables/useLocale'
 import { railLabel } from '../utils/meta-sheet-view-rail-labels'
 import { ElIcon } from 'element-plus'
 import {
-  Grid as IconGrid,
-  Tickets as IconForm,
-  Postcard as IconKanban,
-  Picture as IconGallery,
-  Calendar as IconCalendar,
-  DataLine as IconTimeline,
-  Histogram as IconGantt,
-  Share as IconHierarchy,
-  CaretRight as IconCaretRight,
-  CaretBottom as IconCaretBottom,
-} from '@element-plus/icons-vue'
+  SheetViewGrid as IconGrid,
+  SheetViewForm as IconForm,
+  SheetViewKanban as IconKanban,
+  SheetViewGallery as IconGallery,
+  SheetViewCalendar as IconCalendar,
+  SheetViewTimeline as IconTimeline,
+  SheetViewGantt as IconGantt,
+  SheetViewHierarchy as IconHierarchy,
+  SheetCaretRight as IconCaretRight,
+  SheetCaretBottom as IconCaretBottom,
+} from '../ui/sheet-chrome-icons'
 
 const props = defineProps<{
   sheets: MetaSheet[]
@@ -189,8 +189,7 @@ function onAddSheet() {
   emit('create-sheet', name)
 }
 
-// View-type icon map (UI-P1b): monochrome Element Plus SVGs replacing the former Unicode-glyph map
-// (grid \u2637, form \u2263, kanban \u2630, gallery \u25A6, calendar \u2339, timeline \u2500, gantt \u25AC, hierarchy \u251C).
+// View-type icon map: quiet outline glyphs (sheet-chrome-icons), not Element Plus filled SVGs.
 const VIEW_TYPE_ICON: Record<string, Component> = {
   grid: IconGrid,
   form: IconForm,

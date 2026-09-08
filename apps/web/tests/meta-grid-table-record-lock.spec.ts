@@ -70,6 +70,7 @@ describe('MetaGridTable record locking (LR-T9)', () => {
     const rows: MetaRecord[] = [{ id: 'r1', version: 1, data: { title: 'Locked' }, locked: true, lockedBy: 'u1', canUnlock: false }]
     const root = mountGrid(rows)
     expect(root.querySelector('[data-test="row-lock-indicator"]')).toBeTruthy()
+    expect(root.querySelector('.meta-grid__row-num-lock-slot')).toBeTruthy()
   })
 
   it('does NOT render a lock indicator on an unlocked row', () => {

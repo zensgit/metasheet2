@@ -186,6 +186,7 @@
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
                 <span class="meta-grid__row-num-cluster">
                 <span class="meta-grid__row-num-index">{{ startIndex + ri + 1 }}</span>
+                <span class="meta-grid__row-num-lock-slot">
                 <span
                   v-if="isRowLocked(row.id)"
                   class="meta-grid__lock-indicator"
@@ -213,6 +214,7 @@
                     <path d="M5.5 7.25V5.4a2.5 2.5 0 0 1 5 0v1.85" />
                   </svg>
                 </button>
+                </span>
                 </span>
                 <button
                   v-if="resolveRowActions(row.id).canComment"
@@ -1425,14 +1427,23 @@ thead .meta-grid__check-col {
   border-right: 1px solid var(--ms-sheet-hairline, #ebebeb);
   padding: 8px 4px; position: sticky; left: 0; z-index: 1;
 }
-.meta-grid__row-num-cluster { display: inline-flex; align-items: center; justify-content: center; gap: 1px; min-width: 0; }
+.meta-grid__row-num-cluster { display: inline-flex; align-items: center; justify-content: center; gap: 2px; min-width: 0; }
 .meta-grid__row-num-index { display: inline-flex; align-items: center; justify-content: center; min-width: 1.1em; }
+.meta-grid__row-num-lock-slot {
+  position: relative;
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .meta-grid__lock-indicator,
 .meta-grid__lock-action {
+  position: absolute; inset: 0;
   display: inline-flex; align-items: center; justify-content: center;
-  width: 12px; height: 12px; padding: 0; margin-left: 0;
-  border: 0; background: transparent; color: var(--ms-sheet-icon-color, #6b7280); vertical-align: middle;
-  flex: 0 0 12px;
+  width: 12px; height: 12px; padding: 0; margin: 0;
+  border: 0; background: transparent; color: var(--ms-sheet-icon-color, #6b7280);
 }
 .meta-grid__lock-action { cursor: pointer; border-radius: 4px; }
 .meta-grid__lock-action:hover { color: var(--ms-color-primary); background: var(--ms-bg-page, #f5f6f8); }

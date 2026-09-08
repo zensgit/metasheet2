@@ -138,8 +138,8 @@ describe('comment affordance helper', () => {
     // SVG icon (presentation-only change) — assert the icon element + its SVG content, not text.
     const icon = container.querySelector('[data-comment-affordance-icon="true"]')
     expect(icon).not.toBeNull()
-    expect(icon?.classList.contains('el-icon')).toBe(true)
-    expect(icon?.querySelector('svg')).not.toBeNull()
+    expect(icon?.querySelector('svg, .ms-sheet-icon') || icon?.matches('svg, .ms-sheet-icon')).toBeTruthy()
+    expect(icon?.closest('.el-icon') || icon?.classList.contains('el-icon') || icon?.querySelector('.ms-sheet-icon')).toBeTruthy()
     expect(container.querySelector('[data-comment-affordance-badge]')).toBeNull()
 
     app.unmount()
@@ -192,8 +192,8 @@ describe('comment affordance helper', () => {
     // Same #3734 SVG-icon swap as above — verify the icon renders, not emoji text content.
     const chipIcon = container.querySelector('[data-comment-affordance-icon="true"]')
     expect(chipIcon).not.toBeNull()
-    expect(chipIcon?.classList.contains('el-icon')).toBe(true)
-    expect(chipIcon?.querySelector('svg')).not.toBeNull()
+    expect(chipIcon?.querySelector('svg, .ms-sheet-icon') || chipIcon?.matches('svg, .ms-sheet-icon')).toBeTruthy()
+    expect(chipIcon?.closest('.el-icon') || chipIcon?.classList.contains('el-icon') || chipIcon?.querySelector('.ms-sheet-icon')).toBeTruthy()
 
     app.unmount()
     container.remove()

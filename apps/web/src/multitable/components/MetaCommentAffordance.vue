@@ -29,7 +29,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { ElIcon } from 'element-plus'
-import { ChatDotRound } from '@element-plus/icons-vue'
+import { SheetChat as ChatDotRound } from '../ui/sheet-chrome-icons'
 import {
   resolveCommentAffordanceStateClass,
   resolveCommentAffordanceStateName,

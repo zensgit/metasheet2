@@ -55,7 +55,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
 import { ElIcon } from 'element-plus'
-import { Bell } from '@element-plus/icons-vue'
+import { SheetBell as Bell } from '../ui/sheet-chrome-icons'
 import { useLocale } from '../../composables/useLocale'
 import { scheduleIdle } from '../../utils/scheduleIdle'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'

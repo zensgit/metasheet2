@@ -38,6 +38,8 @@ describe('sheet workbench grammar tokens', () => {
     expect(grid).toMatch(/\.meta-grid__row-num \{[\s\S]*padding:\s*8px 4px/)
     expect(grid).toMatch(/const ROW_NUM_W = 56/)
     expect(grid).toMatch(/\.meta-grid__expand-btn \{[\s\S]*flex:\s*0 0 12px/)
+    expect(grid).toMatch(/\.meta-grid__row-num-lock-slot \{[\s\S]*flex:\s*0 0 12px/)
+    expect(grid).toMatch(/class="meta-grid__row-num-lock-slot"/)
     expect(grid).not.toMatch(/\.meta-grid__expand-btn--open \{[^}]*#409eff/)
     expect(grid).not.toMatch(/\.meta-grid__row-num \{[^}]*(#d97706|#f59e0b|#eab308|#facc15|#ffd700)/)
     const renderer = read('src/multitable/components/cells/MetaCellRenderer.vue')
@@ -86,6 +88,23 @@ describe('sheet workbench grammar tokens', () => {
     const group = read('src/multitable/components/MetaFilterGroup.vue')
     expect(group).toMatch(/--ms-sheet-hairline,\s*#ebebeb/)
     expect(group).not.toMatch(/background:\s*#fafafa/)
+  })
+
+  it('uses local outline sheet-chrome icons instead of Element Plus filled SVGs', () => {
+    const icons = read('src/multitable/ui/sheet-chrome-icons.ts')
+    expect(icons).toMatch(/stroke:\s*'currentColor'/)
+    expect(icons).toMatch(/stroke-width/)
+    expect(icons).not.toMatch(/@element-plus\/icons-vue|lucide/)
+    for (const rel of [
+      'src/multitable/components/MetaToolbar.vue',
+      'src/multitable/components/MetaSheetViewRail.vue',
+      'src/multitable/components/MetaNotificationBell.vue',
+      'src/multitable/components/MetaCommentAffordance.vue',
+      'src/multitable/views/MultitableWorkbench.vue',
+    ]) {
+      expect(read(rel), rel).not.toMatch(/@element-plus\/icons-vue/)
+      expect(read(rel), rel).toMatch(/sheet-chrome-icons/)
+    }
   })
 
   it('quiets the left rail to sheet tokens (13px labels, hairline, ghost collapse, wash not blue block)', () => {

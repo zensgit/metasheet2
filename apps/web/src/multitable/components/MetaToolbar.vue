@@ -411,35 +411,35 @@ import {
 } from '../utils/meta-core-labels'
 import { ElIcon } from 'element-plus'
 import {
-  Menu as IconFields,
-  Sort as IconSort,
-  Filter as IconFilter,
-  Operation as IconGroup,
-  RefreshLeft as IconUndo,
-  RefreshRight as IconRedo,
-  Search as IconSearch,
-  Rank as IconRowHeight,
-  ScaleToOriginal as IconFit,
-  Printer as IconPrint,
-  Upload as IconImport,
-  Download as IconExport,
-  Check as IconCheck,
-  More as IconMore,
-  ChatDotRound as IconCommentInbox,
-  Setting as IconOverflowFields,
-  Lock as IconAccess,
-  Lightning as IconAutomations,
-  Files as IconTemplates,
-  DataBoard as IconDashboard,
-  Link as IconShareForm,
-  Key as IconApi,
-  Delete as IconTrash,
-  Clock as IconHistory,
-  FolderOpened as IconArchiveRecovery,
-} from '@element-plus/icons-vue'
+  SheetFields as IconFields,
+  SheetSort as IconSort,
+  SheetFilter as IconFilter,
+  SheetGroup as IconGroup,
+  SheetUndo as IconUndo,
+  SheetRedo as IconRedo,
+  SheetSearch as IconSearch,
+  SheetRowHeight as IconRowHeight,
+  SheetFit as IconFit,
+  SheetPrint as IconPrint,
+  SheetImport as IconImport,
+  SheetExport as IconExport,
+  SheetCheck as IconCheck,
+  SheetMore as IconMore,
+  SheetChat as IconCommentInbox,
+  SheetGear as IconOverflowFields,
+  SheetLock as IconAccess,
+  SheetBolt as IconAutomations,
+  SheetFiles as IconTemplates,
+  SheetDashboard as IconDashboard,
+  SheetLink as IconShareForm,
+  SheetKey as IconApi,
+  SheetTrash as IconTrash,
+  SheetClock as IconHistory,
+  SheetFolder as IconArchiveRecovery,
+} from '../ui/sheet-chrome-icons'
 
-// Reusable monochrome icon map for toolbar buttons (UI-P1 slice-1). Keyed by toolbar action so the
-// template can reference `ICON.sort` etc. instead of scattering per-icon imports around the markup.
+// Reusable outline icon map for toolbar buttons. Keyed by toolbar action so the
+// template can reference `ICON.sort` etc. Local sheet-chrome SVGs, not Element Plus fills.
 const ICON = {
   fields: IconFields,
   sort: IconSort,
@@ -774,7 +774,8 @@ function onAddFilterGroup() {
 .meta-toolbar :deep(.mt-button) { font-size: var(--ms-sheet-font-body, 13px); }
 .meta-toolbar :deep(.mt-button__icon) { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
 .meta-toolbar :deep(.el-icon) { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
-.meta-toolbar :deep(.el-icon svg) { width: var(--ms-sheet-icon-size, 16px); height: var(--ms-sheet-icon-size, 16px); }
+.meta-toolbar :deep(.el-icon svg),
+.meta-toolbar :deep(.ms-sheet-icon) { width: var(--ms-sheet-icon-size, 16px); height: var(--ms-sheet-icon-size, 16px); }
 .meta-toolbar__icon-btn { padding: 0 4px !important; min-width: var(--ms-control-height, 28px); }
 .meta-toolbar__icon-btn.is-active { color: var(--ms-color-primary); }
 .meta-toolbar__primary {
