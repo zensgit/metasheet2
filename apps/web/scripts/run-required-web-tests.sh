@@ -20,6 +20,21 @@
 # k3WiseSetup, platform-app-launcher, …) are deliberately OUT of this set until fixed; broaden
 # toward full-suite-minus-quarantine once they are triaged.
 #
+# CASING CONVENTION (备料, noted 2026-09-08 — no token added, no behaviour change): every 备料
+# vitest token below is CamelCase — `StockPreparation*` / `stockPrep*` (see the many `Stock
+# Preparation*` and `stockPrepPermissionMatrix` tokens further down). That is not incidental: this
+# script's filter is a vitest path-SUBSTRING match, and `apps/web/verification/stock-prep-*.spec.ts`
+# (`stock-prep-p0-acceptance.spec.ts`, `stock-prep-p1-acceptance.spec.ts`) are Playwright cases —
+# they `import { test } from '@playwright/test'` and run under `playwright.verification.config.ts`,
+# never under vitest. Vitest's own default include glob still COLLECTS them (see the `verification/`
+# note further down in this file), so the only thing keeping this gate from trying to run Playwright
+# specs under vitest is that no CamelCase `StockPreparation*`/`stockPrep*` token is a substring of
+# their lowercase, hyphenated `stock-prep-*` filenames. If a future 备料 change ever needs a NEW
+# vitest token that starts with the lowercase `stock-prep` prefix, it must first add an explicit
+# exclusion for these two Playwright files — both here and in the shared lane(s) this script's
+# tokens are mirrored into (approval-web-guard.yml / multitable-web-guard.yml, per the two-point
+# discipline above) — or a lowercase token risks silently sweeping a Playwright file into vitest.
+#
 # T3/T4/T5 post-hoc gate (2026-07-12): `mount-behind-flow` added — the harness self-test
 # (tests/helpers/mount-behind-flow.spec.ts) that proves the shared UI-P2-1c T4 mock-client mount
 # helper actually does what its own doc comments claim (real DOM mount/teardown, router dispatch +
