@@ -31,6 +31,8 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useAttendanceAdminUsers } from './useAttendanceAdminUsers'
+import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
+import { apiFetch } from '../../utils/api'
 
 type Translate = (en: string, zh: string) => string
 
@@ -63,6 +65,7 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
 
+const sessionGuard = useAttendanceSessionGuard()
 const {
   formatUserLabel,
   loading,
@@ -71,6 +74,8 @@ const {
   statusMessage,
   users,
 } = useAttendanceAdminUsers({
+  apiFetch: sessionGuard.wrapFetch(apiFetch),
+  isSessionCurrent: sessionGuard.isCurrent,
   tr: props.tr,
   endpoint: props.endpoint,
   orgId: computed(() => props.orgId),

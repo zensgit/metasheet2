@@ -1253,7 +1253,8 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { apiFetch } from '../../utils/api'
+import { apiFetch as sendApiFetch } from '../../utils/api'
+import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../../utils/error'
 
 type TranslateFn = (en: string, zh: string) => string
@@ -1494,6 +1495,8 @@ const props = defineProps<{
   orgId?: string
 }>()
 
+const sessionGuard = useAttendanceSessionGuard()
+const apiFetch = sessionGuard.wrapFetch(sendApiFetch)
 const tr = props.tr
 const loading = ref(false)
 const syncing = ref(false)
@@ -1541,6 +1544,7 @@ async function loadCleaningProposals(append: boolean): Promise<void> {
 }
 
 async function applyCleaningProposal(): Promise<void> {
+  try { sessionGuard.assertCurrent() } catch { return }
   const review = cleaningReview.value
   const row = cleaningSelected.value
   if (!review || !row || cleaningBusy.value) return
