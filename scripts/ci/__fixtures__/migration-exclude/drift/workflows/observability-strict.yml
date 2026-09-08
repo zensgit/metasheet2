@@ -5,5 +5,5 @@ jobs:
       - name: Run DB migrations
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql,zzzz20260114110000_create_user_orgs_table.ts,999_bogus_undocumented_migration.sql
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,zzzz20260114110000_create_user_orgs_table.ts,999_bogus_undocumented_migration.sql
         run: echo fixture
