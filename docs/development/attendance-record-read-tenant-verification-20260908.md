@@ -134,3 +134,61 @@ Backend typecheck and diff-check pass. No additional DB replay is claimed or
 needed for these test-only changes. A private official Node18 binary was used;
 its archive SHA256 matched the official SHASUMS256 entry. No system Node,
 dependency manifest, global store or shared configuration was modified.
+# Follow-up: tenant-bound retired-reader fixture (2026-09-08)
+
+At PR head `6b69a88c8c2563c803bb831ee7bf35bc427759ef`, Node18 job
+`102008859600` failed only the retired-reader case in
+`attendance-w4c3a-p09-p10-p24-routes.db.test.ts:881`: expected200, received403
+`FORBIDDEN / Attendance access denied`. Attendance lane:123 files passed/1 failed,
+1783 tests passed/1 failed. Node20 is a separate observation, not inferred green
+or failed from Node18.
+
+The fixture created a random organization and membership but minted its real dev
+token without `tenantId`. The existing dev-token route only signs an explicit
+tenant/request context; `verifyToken` does not infer a missing tenant from the
+fixture membership. The new reader correctly rejects this unbound principal.
+This is a test setup correction, not permission expansion or removal of the
+retired-row negative. The old suite already sets RBAC_BYPASS; that line is not
+changed and this suite is not presented as full role-authorization UAT.
+
+Pre-fix local isolated whole-file evidence:
+
+- Node18.20.8:19 PASS/1 FAIL, exact same403,72.41s;
+  `tmp/p1-integration-f39fd523fedb4b42af87c3922c31426a/`.
+- Node20.20.2:19 PASS/1 FAIL, exact same403,80.71s;
+  `tmp/p1-integration-211f1be6e04f42f59645bb5b907afa69/`.
+- Both exited1 and cleaned all owned databases/backends/ports to zero.
+
+Authorized scope: only this existing MD and the owning integration test.
+The mint helper now takes an explicit organization (null only for the unbound
+negative), uses the existing signed `tenantId` parameter, and checks both returned
+token payload and the real `/api/auth/me` actor/tenant. The positive still requires
+200 and only the active row on records/calendar. Missing tenant, foreign signed
+tenant with the original selector, and original signed tenant with a foreign
+selector require fixed403 errors on both aliases. No new roles/memberships,
+forged authentication headers, production resolver or shared changes.
+
+Post-fix whole-file verification:
+
+- Node20.20.2:20/20 PASS,65.98s;
+  `tmp/p1-integration-b4b422bf15004803ada935f0b0a2dac3/`.
+- Node18.20.8:20/20 PASS,70.19s;
+  `tmp/p1-integration-1afdffff2f594bfeafd778d2c7fecc54/`.
+- Both exit0, cleanup databases/backends/ports all zero; all original retired-row
+  and neighboring assertions remain, plus six explicit403 cases on the aliases.
+- Discriminating mutation: temporarily remove the tenant query from the actual
+  dev-token request. Node20 selected retired-reader test fails specifically
+  `SIGNED_TENANT_BINDING`,1 failed/19 intentionally unselected,exit1,cleanup0;
+  `tmp/p1-integration-7870fede8d6a448a8e67ca1c6fa37707/`. Restored immediately;
+  no mutated code is committed or published.
+- Restored Node20 selected target PASS (1 selected/19 unselected),exit0,cleanup0;
+  `tmp/p1-integration-a3d35d3341a34a7bbfd01689d861f70c/`.
+- Pre-push main moved to `2366157fc13ff2b011a519eb0956a1fe7927aad2` via #5563:
+  only two stock-prep development MD files, no overlap with this fix or product
+  paths. No unrelated main merge/rebase is included. Remote PR head remained
+  `6b69a88c8c2563c803bb831ee7bf35bc427759ef`; old Node20 job102008859726 was
+  still running the attendance integration step at this observation, not green.
+
+Core typecheck and identity unit58/58 pass with the current test edit. Full-app candidate
+`c04e35b007f5359a452d06c34896e462f7f2299e` stays frozen and unpublished pending
+this dependency's verified successor; its prior pass is not a claim about a new SHA.
