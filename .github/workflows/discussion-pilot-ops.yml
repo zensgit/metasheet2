@@ -1,0 +1,135 @@
+name: Discussion Pilot Ops (manual)
+
+# Manual, dispatch-only operator workflow for the Discussion 点灯 pilot. Runs a single
+# action per dispatch on the deploy host over SSH (reuses the DEPLOY_* secrets already
+# used by attendance-remote-docker-gc-prod.yml). One action = one dispatch, mirroring the
+# owner's three-口令 protocol: provisioning, lighting the READ flag, and lighting the WRITE
+# flag are SEPARATE dispatches that never chain. All acceptance traffic stays on the host's
+# 127.0.0.1 / a private docker bridge — no public HTTP in the path.
+#
+# NOT scheduled. NOT triggered by push/PR.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Ops action'
+        required: true
+        type: choice
+        options:
+          - status
+          - stage0-provision
+          - stage0-datasource
+          - stage0-probe
+          - grant-read
+          - light-read
+          - rollback-read
+      pilot_tenant:
+        description: 'Pilot tenant id'
+        required: false
+        default: 'pilot-tenant'
+      pilot_org:
+        description: 'Pilot org id'
+        required: false
+        default: 'pilot-org'
+      ms2_public_origin:
+        description: 'Origin the ms2 web UI is served from (for embed allowlist); required for stage0-provision'
+        required: false
+        default: ''
+      confirm:
+        description: 'Type the action name again to confirm mutating actions (provision/datasource/grant/light/rollback)'
+        required: false
+        default: ''
+
+concurrency:
+  group: discussion-pilot-ops
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  pilot-ops:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (for the ops scripts)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Confirm gate for mutating actions
+        env:
+          ACTION: ${{ github.event.inputs.action }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          case "$ACTION" in
+            status|stage0-probe) echo "read-only-ish action '$ACTION'; no confirm needed" ;;
+            *)
+              if [ "$CONFIRM" != "$ACTION" ]; then
+                echo "::error title=confirm required::mutating action '$ACTION' needs input confirm='$ACTION' (got '$CONFIRM')"
+                exit 1
+              fi
+              echo "confirmed: $ACTION" ;;
+          esac
+
+      - name: Require ms2_public_origin for provision
+        if: ${{ github.event.inputs.action == 'stage0-provision' }}
+        env:
+          ORIGIN: ${{ github.event.inputs.ms2_public_origin }}
+        run: |
+          set -euo pipefail
+          [ -n "$ORIGIN" ] || { echo "::error::stage0-provision requires ms2_public_origin"; exit 1; }
+          case "$ORIGIN" in
+            https://*|http://127.0.0.1*|http://localhost*) echo "origin ok: $ORIGIN" ;;
+            *) echo "::error title=transport::ms2_public_origin must be https:// or a loopback tunnel (got $ORIGIN)"; exit 1 ;;
+          esac
+
+      - name: Run pilot ops on deploy host (SSH)
+        id: run
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          ACTION: ${{ github.event.inputs.action }}
+          PILOT_TENANT: ${{ github.event.inputs.pilot_tenant }}
+          PILOT_ORG: ${{ github.event.inputs.pilot_org }}
+          MS2_PUBLIC_ORIGIN: ${{ github.event.inputs.ms2_public_origin }}
+          MS2_ADMIN_BEARER: ${{ secrets.MS2_ADMIN_BEARER }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
+
+          # Ship the ops scripts to the host (small, self-contained dir).
+          remote_dir="~/discussion-pilot-ops"
+          tar -czf - -C scripts/ops discussion-pilot | ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p $remote_dir && tar -xzf - -C $remote_dir"
+
+          # Execute the single action; env is passed through explicitly (no secrets echoed).
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+            "PILOT_TENANT='$PILOT_TENANT' PILOT_ORG='$PILOT_ORG' MS2_PUBLIC_ORIGIN='$MS2_PUBLIC_ORIGIN' \
+             MS2_ADMIN_BEARER='${MS2_ADMIN_BEARER:-}' \
+             bash $remote_dir/discussion-pilot/pilot_ops.sh '$ACTION'" 2>&1 | tee ops-output.log
+          echo "rc=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+          # Pull back the evidence dir (no secrets — scripts write only status/smoke/logs there).
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "cd /tmp && tar -czf - discussion-pilot-evidence 2>/dev/null || true" > evidence.tgz || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discussion-pilot-${{ github.event.inputs.action }}-${{ github.run_id }}
+          retention-days: 14
+          path: |
+            ops-output.log
+            evidence.tgz
+
+      - name: Fail if ops action failed
+        if: always()
+        run: |
+          rc="${{ steps.run.outputs.rc }}"
+          [ "$rc" = "0" ] || { echo "pilot ops action failed rc=$rc"; exit 1; }
