@@ -12,7 +12,13 @@ export default defineConfig({
   // Approval specs run in their OWN lane
   // (playwright.approval-verification.config.ts / approval-browser-verify.yml)
   // so an approval-harness failure cannot red the shared browser lane.
-  testIgnore: ['**/approval-*.spec.ts'],
+  //
+  // 备料 (stock-prep-*) does the same, for the same reason plus one more: its lane boots its own
+  // Vite on 5176 and mints its own principal per test, so collecting those specs here would run
+  // them against THIS lane's server and harness assumptions. The two ignores are asserted to be
+  // exhaustive by scripts/ops/stock-prep-browser-ci-wiring.test.mjs (and its approval sibling), so a
+  // spec that belongs to neither lane cannot silently fall out of every lane.
+  testIgnore: ['**/approval-*.spec.ts', '**/stock-prep-*.spec.ts'],
   timeout: 60_000,
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,

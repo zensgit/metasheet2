@@ -301,8 +301,11 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     vi.clearAllMocks()
   })
 
-  async function mountView(): Promise<HTMLDivElement> {
-    app = createApp(StockPreparationInstallView as Component, { scope: SCOPE })
+  async function mountView(mode?: 'full' | 'wizard' | 'review'): Promise<HTMLDivElement> {
+    app = createApp(
+      StockPreparationInstallView as Component,
+      mode === undefined ? { scope: SCOPE } : { scope: SCOPE, mode },
+    )
     app.mount(container!)
     await flush()
     return container!
@@ -1001,5 +1004,75 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     // The direct cause, pinned separately so the failure message names it: a CSS comment never ends
     // with `-->`. (Template comments above the <style> block are HTML and are unaffected.)
     expect(styleBlock!.includes('-->'), 'a CSS comment must end with `*/`, never `-->`').toBe(false)
+  })
+
+  // ---------------------------------------------------------------------------
+  // mode 形态 — P1-1 split this component into three renderings ('full' default / 'wizard' /
+  // 'review'), each mounted twice from the shell (getting-started / install rail items). U4's
+  // counter-review named the gap R-01 "jsdom 没人写" rather than "jsdom 看不到": nothing about the
+  // branch is unreachable from jsdom, nobody had asserted through it from THIS file. These three
+  // cases put that assertion back where the component's whole DOM contract already lives, rather
+  // than leaving `mode="wizard"` / `mode="review"` unattested by anything except eyeballing the
+  // shell's own two mount sites.
+  // ---------------------------------------------------------------------------
+
+  describe('mode 形态', () => {
+    it('mode="wizard": wizard + source-binding panel + error bar render; none of the three main sections do', async () => {
+      // The manifest read fires unprompted on mount (`loadDefaults`, called from `onMounted`) —
+      // failing it is the cheapest way to prove the error bar renders in wizard mode too.
+      // `errorStatus`'s <p> sits OUTSIDE both `v-if="props.mode !== 'wizard'"` template wrappers on
+      // purpose (see the component's own comment above that paragraph: "IN EVERY MODE"), so a
+      // brand-new deployment landed on the wizard-only rail item still gets told a read failed
+      // instead of silently showing an empty wizard.
+      installRoutes({ manifestStatus: 500 })
+      const root = await mountView('wizard')
+
+      expect(root.querySelector('[data-testid="stock-prep-install"]')?.getAttribute('data-mode')).toBe('wizard')
+
+      // The wizard mounts (`v-if="props.mode !== 'review'"` — true for 'wizard').
+      expect(root.querySelector('[data-testid="stock-prep-getting-started"]')).not.toBeNull()
+      // The source-binding panel renders in EVERY mode: it is the wizard's own steps ①③ evidence
+      // and is deliberately not wrapped in either `mode !== 'wizard'` template.
+      expect(root.querySelector('[data-testid="stock-prep-source-binding"]')).not.toBeNull()
+      // The page-wide read-failure bar, and its copy-to-clipboard control, render in every mode too.
+      expect(root.querySelector('[data-testid="stock-prep-install-error"]')).not.toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-install-error-copy"]')).not.toBeNull()
+
+      // None of the three `mode !== 'wizard'`-gated main sections render: the intro paragraphs, the
+      // §14 defaults panel (probed via its <details> folds), and the "装完之后回来复查" wrapper.
+      expect(root.querySelector('[data-testid="stock-prep-install-intro"]')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-install-review-section"]')).toBeNull()
+      expect(root.querySelectorAll('[data-testid="stock-prep-install-fold"]').length).toBe(0)
+    })
+
+    it('mode="review": the three main sections render; the wizard does not', async () => {
+      installRoutes()
+      const root = await mountView('review')
+
+      expect(root.querySelector('[data-testid="stock-prep-install"]')?.getAttribute('data-mode')).toBe('review')
+
+      // `v-if="props.mode !== 'review'"` is false here — the wizard never mounts.
+      expect(root.querySelector('[data-testid="stock-prep-getting-started"]')).toBeNull()
+
+      // The three `mode !== 'wizard'`-gated sections all render: the intro paragraphs, the §14
+      // defaults panel's five <details> folds, and the "装完之后回来复查" wrapper.
+      expect(root.querySelector('[data-testid="stock-prep-install-intro"]')).not.toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-install-review-section"]')).not.toBeNull()
+      expect(root.querySelectorAll('[data-testid="stock-prep-install-fold"]').length).toBe(5)
+    })
+
+    it('mode omitted (defaults to \'full\'): every existing assertion in this file is untouched', async () => {
+      // A positive control, not a new claim: proves the two cases above exercise a REAL three-way
+      // branch rather than a component that renders this shape regardless of `mode` — and that the
+      // default stays exactly what every other test in this file already mounts via `mountView()`
+      // with no argument.
+      installRoutes()
+      const root = await mountView()
+      expect(root.querySelector('[data-testid="stock-prep-install"]')?.getAttribute('data-mode')).toBe('full')
+      expect(root.querySelector('[data-testid="stock-prep-getting-started"]')).not.toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-install-intro"]')).not.toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-install-review-section"]')).not.toBeNull()
+      expect(root.querySelectorAll('[data-testid="stock-prep-install-fold"]').length).toBe(5)
+    })
   })
 })
