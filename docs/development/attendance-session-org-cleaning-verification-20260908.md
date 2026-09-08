@@ -116,3 +116,34 @@ Visually reviewed local final screenshots: `desktop-review-section.png`, `narrow
 ## Outstanding delivery gates
 
 Local gates above are terminal. CI and documentation are separate local commits in the delivery branch; their final IDs are reported in the task handoff (avoiding a self-referential documentation commit hash). No remote exact-head CI, main merge, main runtime rerun, user-site UAT, deployment or persistent flag validation is claimed. Frozen #5145/#5559/#5564/#5566 are unchanged at the recorded readback. Draft publication requires coordination; green local evidence alone is not publication/Ready/merge authority.
+
+## September 9 repair-batch evidence addendum
+
+The preceding section is the pre-publication snapshot. Draft #5575 was published at `8603df96e8a65537fec14c5be13624d4bfc7db31`. Its failed checks are retained, not rerun or relabeled:
+
+- Stock-prep run `34250171993`, job `102142276736`: ownership guard 5 PASS / 1 FAIL, missing transitive dependency `apps/web/src/utils/explicitSessionOrg.ts` in its classifier.
+- Attendance run `34250172248`, job `102142278263`: three suites, 47 tests / 10 failures (override 23/6, preview 17/2, caliber 7/2). Other remote jobs were still running at the last pre-checkpoint read; no terminal CI-green claim is made.
+- Independent consumer review identified late punch, cleaning and mount continuations. The shared-auth review was closed without a terminal verdict; it is **not** an approval.
+
+### Refute-first repair evidence
+
+With unchanged 8603 product code, new/strengthened tests produced seven discriminating failures: punch body resolve/reject cleared the note (2); cleaning body resolve/reject cleared the selection (2); late identity and plugin resolve/reject mutated mount state (3). Before-send confirmation remained passing. The sent-action tests wait until the actual mocked body reader is entered, then change/invalidate the page session and settle the body. They assert state preservation and no follow-up requests, not server-side rollback. Busy flags are asserted released.
+
+After the bounded two-component repair, the selected eight tests pass. Three mutation runs independently neutralized the punch protection (2 RED), the mount-continuation family (3 RED), and the cleaning catch/finalizer protection (2 RED). Every process reached terminal before restoring code; restored selected tests are 8/8 PASS.
+
+The old CI trio independently reproduced 37 PASS / 10 FAIL locally. The caliber tests now provide an explicit synthetic root scope. Import tests wait for the specific preview-ready button, settled operation, or diagnostic before checking the original assertions. No timeout increase, payload/count assertion removal, or product import change was used. First repair rerun was 46 PASS / 1 FAIL: the truncated-sample test's second preview exposed the same premature read. Adding that completion wait yielded **47/47 PASS**, retaining both denied sample-derived backup and allowed explicit-user backup assertions.
+
+Stock-prep's unchanged six-test guard ran RED (missing the exact path), GREEN after the single case addition, RED after removing that addition, and restored **6/6 GREEN**. No guard/ownership rule was edited.
+
+### Final local gates for the repair source
+
+All gates below bind the eight-file binary-diff SHA256 `1948e73d0b33ca7ba7ef2d9fcf1cb734b62755e6d5975828306498a674b1c6bb` against 8603; documents were appended afterwards.
+
+- Parsed and executed the workflow's actual `Run attendance web guard specs (targeted)` command, unchanged argv/env: **65 files / 1,290 tests PASS**, including Admin 144, self-service 65 and ReportFields 44. Duration 49.29s.
+- Auth/session/API/approval neighbor group: **6 files / 142 tests PASS**.
+- Real application `vue-tsc --noEmit -p tsconfig.app.json`: exit 0.
+- ESLint across all 21 changed web source files: no findings outside AttendanceView; its 16 findings equal exact main by ruleId, message and trimmed source line. Both candidate and baseline lint exit 1; this is baseline equivalence, not whole-source lint PASS.
+- Original `bash apps/web/scripts/run-required-web-tests.sh`, Node 20 and offline npm, unchanged grouping: exit 0. Fourteen file/test execution groups: **4/55, 35/620, 1/23, 2/21, 2/28, 6/58, 27/376, 3/185, 2/95, 2/7, 2/71, 1/9, 4/107, 436/6035**. Total **527 file executions / 7,690 test executions**, not unique counts. Before/after diff hashes are identical. Mocked network/dynamic-import error text appears in output, but all groups and the command terminate successfully.
+- Official live package provenance versus frozen manifest: equal, no pin changes. `git diff --check`: exit 0.
+
+No local DB/browser was started during this repair batch. The changed product source still requires the coordinated late-action synthetic tail and final review; old e007 runtime evidence is historical, not a repaired-head run. Local checkpoint identifiers are reported separately in the task handoff. No repair push/remote CI success, Ready, main merge, UAT, deployment or persistent flag enablement is implied.

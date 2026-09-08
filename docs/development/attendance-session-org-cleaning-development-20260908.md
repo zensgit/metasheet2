@@ -52,3 +52,13 @@ Existing API and approval specs retain their actual required invocation position
 ## Delivery status
 
 See [verification](attendance-session-org-cleaning-verification-20260908.md) for evidence and failures. Local source and fixed-combined synthetic browser validation are separate from remote exact-head CI, main runtime, user-site UAT, deployment and flag state. No such downstream state is inferred from source. Publication is pending coordination; no push, new PR, Ready, merge, deployment or persistent flag change was performed in this tail.
+
+## September 9 post-publication repair addendum
+
+The preceding delivery-status paragraph records the original local tail. Draft/HOLD [#5575](https://github.com/zensgit/metasheet2/pull/5575) was subsequently published at `8603df96e8a65537fec14c5be13624d4bfc7db31`, base `97dc5cefaef6ac11020d83851312f7fc0a812435`. That head is not a green delivery: attendance and stock-prep checks failed, and independent consumer review identified late-continuation state loss. The time-bounded shared-auth reviewer returned **NO VERDICT**, not approval.
+
+The bounded repair changes only AttendanceView and AttendanceReportFieldsSection product code: stale punch errors cannot clear a note/message; stale cleaning errors/finalizers cannot clear the reviewed selection/message; late mount identity/plugin continuations cannot populate old-page state or initiate follow-up work. Busy indicators still release when the already-sent attempt settles. This does not cancel or roll back server writes. Existing response/body guards remain responsible for rejecting late successful results; explicit reload creates a fresh page scope.
+
+Dedicated tests now exercise delayed body resolution and rejection plus mount identity/plugin continuations. Three existing CI test files receive only the missing test-root provider or bounded readiness assertions; no production provider fallback or safety assertion is removed. The stock-prep workflow receives one exact dependency-classifier path for `explicitSessionOrg.ts`, with all previous cases retained.
+
+These product changes invalidate any claim that old e007 browser evidence was executed against the repaired source. A targeted synthetic late-action browser tail, final review and updated exact-head CI remain outstanding. No repair-batch push, main merge, persistent flag change or deployment is authorized by this addendum.
