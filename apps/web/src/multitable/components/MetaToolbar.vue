@@ -194,6 +194,55 @@
       >{{ resetToSharedLabel }}</button>
     </div>
     <div class="meta-toolbar__right">
+      <div
+        v-if="visiblePins.length"
+        class="meta-toolbar__pins"
+        data-testid="toolbar-pins"
+      >
+        <template v-for="id in visiblePins" :key="id">
+          <MtMenu v-if="id === 'row-height'">
+            <template #trigger>
+              <MtButton
+                class="meta-toolbar__icon-btn"
+                data-testid="toolbar-pin-btn-row-height"
+                draggable="true"
+                :title="pinnedTitle(id)"
+                :aria-label="pinnedTitle(id)"
+                @dragstart="onPinDragStart(id, $event)"
+                @dragover.prevent
+                @drop.prevent="onPinDrop(id)"
+              >
+                <template #icon><el-icon><component :is="pinIcon(id)" /></el-icon></template>
+              </MtButton>
+            </template>
+            <MtMenuItem
+              v-for="d in DENSITIES"
+              :key="`pin-${d.value}`"
+              class="meta-toolbar__density-item"
+              :class="{ 'meta-toolbar__density-item--active': rowDensity === d.value }"
+              :aria-current="rowDensity === d.value ? 'true' : undefined"
+              @select="emit('set-row-density', d.value)"
+            >
+              <template #icon><el-icon v-if="rowDensity === d.value"><component :is="ICON.check" /></el-icon></template>
+              {{ l(d.labelKey) }}
+            </MtMenuItem>
+          </MtMenu>
+          <MtButton
+            v-else
+            class="meta-toolbar__icon-btn"
+            :data-testid="`toolbar-pin-btn-${id}`"
+            draggable="true"
+            :title="pinnedTitle(id)"
+            :aria-label="pinnedTitle(id)"
+            @click="onPinnedClick(id)"
+            @dragstart="onPinDragStart(id, $event)"
+            @dragover.prevent
+            @drop.prevent="onPinDrop(id)"
+          >
+            <template #icon><el-icon><component :is="pinIcon(id)" /></el-icon></template>
+          </MtButton>
+        </template>
+      </div>
       <div class="meta-toolbar__search" :class="{ 'meta-toolbar__search--active': !!searchText }" role="search">
         <el-icon class="meta-toolbar__search-icon" aria-hidden="true"><component :is="ICON.search" /></el-icon>
         <input class="meta-toolbar__search-input" type="search" :placeholder="l('toolbar.searchPlaceholder')" :aria-label="l('toolbar.searchAria')" :value="searchText" @input="emit('update:search-text', ($event.target as HTMLInputElement).value)" />
@@ -226,48 +275,97 @@
         >
           <div class="meta-toolbar__more-native">
             <!-- Row density (UI-P2-1c slice-2: still MtMenu/MtMenuItem; trigger lives in overflow). -->
-            <MtMenu>
-              <template #trigger>
-                <MtButton class="meta-toolbar__more-item" :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')">
-                  <template #icon><el-icon><component :is="ICON.rowHeight" /></el-icon></template>
-                  {{ l('toolbar.rows') }}
-                </MtButton>
-              </template>
-              <MtMenuItem
-                v-for="d in DENSITIES"
-                :key="d.value"
-                class="meta-toolbar__density-item"
-                :class="{ 'meta-toolbar__density-item--active': rowDensity === d.value }"
-                :aria-current="rowDensity === d.value ? 'true' : undefined"
-                @select="emit('set-row-density', d.value)"
-              >
-                <template #icon><el-icon v-if="rowDensity === d.value"><component :is="ICON.check" /></el-icon></template>
-                {{ l(d.labelKey) }}
-              </MtMenuItem>
-            </MtMenu>
-            <MtButton class="meta-toolbar__more-item" :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">
-              <template #icon><el-icon><component :is="ICON.fit" /></el-icon></template>
-              {{ l('toolbar.fit') }}
-            </MtButton>
-            <MtButton class="meta-toolbar__more-item" :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')">
-              <template #icon><el-icon><component :is="ICON.print" /></el-icon></template>
-              {{ l('toolbar.print') }}
-            </MtButton>
-            <MtButton v-if="canCreateRecord" class="meta-toolbar__more-item" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')">
-              <template #icon><el-icon><component :is="ICON.import" /></el-icon></template>
-              {{ l('toolbar.import') }}
-            </MtButton>
-            <MtButton v-if="canExport" class="meta-toolbar__more-item" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
-              <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
-              {{ l('toolbar.exportCsv') }}
-            </MtButton>
-            <MtButton v-if="canExport" class="meta-toolbar__more-item" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
-              <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
-              {{ l('toolbar.exportXlsx') }}
-            </MtButton>
+            <OverflowCommandRow command-id="row-height">
+              <MtMenu>
+                <template #trigger>
+                  <MtButton class="meta-toolbar__more-item" data-command="row-height" :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')">
+                    <template #icon><el-icon><component :is="ICON.rowHeight" /></el-icon></template>
+                    {{ l('toolbar.rows') }}
+                  </MtButton>
+                </template>
+                <MtMenuItem
+                  v-for="d in DENSITIES"
+                  :key="d.value"
+                  class="meta-toolbar__density-item"
+                  :class="{ 'meta-toolbar__density-item--active': rowDensity === d.value }"
+                  :aria-current="rowDensity === d.value ? 'true' : undefined"
+                  @select="emit('set-row-density', d.value)"
+                >
+                  <template #icon><el-icon v-if="rowDensity === d.value"><component :is="ICON.check" /></el-icon></template>
+                  {{ l(d.labelKey) }}
+                </MtMenuItem>
+              </MtMenu>
+            </OverflowCommandRow>
+            <OverflowCommandRow command-id="fit">
+              <MtButton class="meta-toolbar__more-item" data-command="fit" :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">
+                <template #icon><el-icon><component :is="ICON.fit" /></el-icon></template>
+                {{ l('toolbar.fit') }}
+              </MtButton>
+            </OverflowCommandRow>
+            <OverflowCommandRow command-id="print">
+              <MtButton class="meta-toolbar__more-item" data-command="print" :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')">
+                <template #icon><el-icon><component :is="ICON.print" /></el-icon></template>
+                {{ l('toolbar.print') }}
+              </MtButton>
+            </OverflowCommandRow>
+            <OverflowCommandRow v-if="canCreateRecord" command-id="import">
+              <MtButton class="meta-toolbar__more-item" data-command="import" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')">
+                <template #icon><el-icon><component :is="ICON.import" /></el-icon></template>
+                {{ l('toolbar.import') }}
+              </MtButton>
+            </OverflowCommandRow>
+            <OverflowCommandRow v-if="canExport" command-id="export-csv">
+              <MtButton class="meta-toolbar__more-item" data-command="export-csv" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
+                <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+                {{ l('toolbar.exportCsv') }}
+              </MtButton>
+            </OverflowCommandRow>
+            <OverflowCommandRow v-if="canExport" command-id="export-xlsx">
+              <MtButton class="meta-toolbar__more-item" data-command="export-xlsx" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
+                <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+                {{ l('toolbar.exportXlsx') }}
+              </MtButton>
+            </OverflowCommandRow>
           </div>
-          <div v-if="$slots.overflow" class="meta-toolbar__more-slot">
-            <slot name="overflow" />
+          <div v-if="$slots.overflow" ref="overflowRootRef" class="meta-toolbar__more-slot">
+            <slot name="overflow" :pin-api="toolbarPins" />
+          </div>
+          <div v-if="toolbarPins.pins.value.length" class="meta-toolbar__layout" data-testid="toolbar-layout">
+            <div class="meta-toolbar__layout-title">{{ l('toolbar.layout') }}</div>
+            <p class="meta-toolbar__layout-hint">{{ l('toolbar.layoutHint') }}</p>
+            <div
+              v-for="(id, index) in toolbarPins.pins.value"
+              :key="id"
+              class="meta-toolbar__layout-row"
+              :data-testid="`toolbar-layout-row-${id}`"
+            >
+              <span class="meta-toolbar__layout-name">{{ pinnedTitle(id) }}</span>
+              <button
+                type="button"
+                class="meta-toolbar__layout-move"
+                data-testid="toolbar-layout-up"
+                :title="l('toolbar.moveUp')"
+                :aria-label="l('toolbar.moveUp')"
+                :disabled="index === 0"
+                @click="toolbarPins.move(id, -1)"
+              >↑</button>
+              <button
+                type="button"
+                class="meta-toolbar__layout-move"
+                data-testid="toolbar-layout-down"
+                :title="l('toolbar.moveDown')"
+                :aria-label="l('toolbar.moveDown')"
+                :disabled="index === toolbarPins.pins.value.length - 1"
+                @click="toolbarPins.move(id, 1)"
+              >↓</button>
+              <OverflowPinControl :command-id="id" :api="toolbarPins" />
+            </div>
+            <button
+              type="button"
+              class="meta-toolbar__layout-reset"
+              data-testid="toolbar-pins-reset"
+              @click="toolbarPins.reset()"
+            >{{ l('toolbar.resetPins') }}</button>
           </div>
         </div>
       </div>
@@ -276,7 +374,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, onMounted, onUpdated, provide, type Component } from 'vue'
 import type { MetaField, RowDensity } from '../types'
 import type { SortRule, FilterRule, FilterGroup, FilterConjunction } from '../composables/useMultitableGrid'
 import { useLocale } from '../../composables/useLocale'
@@ -295,6 +393,16 @@ import MetaFilterGroup from './MetaFilterGroup.vue'
 // trigger that opens a `.meta-toolbar__panel` (group) is NOT touched in this slice — deferred to a
 // later slice.
 import { MtButton, MtIconButton, MtMenu, MtMenuItem, MtPopover } from '../ui'
+import OverflowCommandRow from './OverflowCommandRow.vue'
+import OverflowPinControl from './OverflowPinControl.vue'
+import { TOOLBAR_PINS_KEY, useToolbarPins } from '../composables/useToolbarPins'
+import {
+  isNativePinCommandId,
+  isOverflowPinCommandId,
+  OVERFLOW_PIN_COMMAND_IDS,
+  TOOLBAR_PIN_TITLES,
+  type ToolbarPinCommandId,
+} from '../utils/toolbar-pins'
 import { seedFilterCondition } from '../utils/filter-condition-seed'
 import {
   metaCoreLabel,
@@ -317,6 +425,17 @@ import {
   Download as IconExport,
   Check as IconCheck,
   More as IconMore,
+  ChatDotRound as IconCommentInbox,
+  Setting as IconOverflowFields,
+  Lock as IconAccess,
+  Lightning as IconAutomations,
+  Files as IconTemplates,
+  DataBoard as IconDashboard,
+  Link as IconShareForm,
+  Key as IconApi,
+  Delete as IconTrash,
+  Clock as IconHistory,
+  FolderOpened as IconArchiveRecovery,
 } from '@element-plus/icons-vue'
 
 // Reusable monochrome icon map for toolbar buttons (UI-P1 slice-1). Keyed by toolbar action so the
@@ -336,7 +455,41 @@ const ICON = {
   export: IconExport,
   check: IconCheck,
   more: IconMore,
+  commentInbox: IconCommentInbox,
+  overflowFields: IconOverflowFields,
+  access: IconAccess,
+  automations: IconAutomations,
+  templates: IconTemplates,
+  dashboard: IconDashboard,
+  shareForm: IconShareForm,
+  api: IconApi,
+  trash: IconTrash,
+  history: IconHistory,
+  archiveRecovery: IconArchiveRecovery,
 } as const
+
+const PIN_ICONS: Record<ToolbarPinCommandId, Component> = {
+  'row-height': ICON.rowHeight,
+  fit: ICON.fit,
+  print: ICON.print,
+  import: ICON.import,
+  'export-csv': ICON.export,
+  'export-xlsx': ICON.export,
+  'comment-inbox': ICON.commentInbox,
+  fields: ICON.overflowFields,
+  access: ICON.access,
+  views: ICON.fields,
+  workflow: ICON.overflowFields,
+  automations: ICON.automations,
+  templates: ICON.templates,
+  dashboard: ICON.dashboard,
+  'share-form': ICON.shareForm,
+  api: ICON.api,
+  trash: ICON.trash,
+  history: ICON.history,
+  'config-history': ICON.overflowFields,
+  'archive-recovery': ICON.archiveRecovery,
+}
 
 const props = withDefaults(defineProps<{
   fields: MetaField[]
@@ -358,6 +511,8 @@ const props = withDefaults(defineProps<{
   // Slice 3: true only when personal views are enabled for the session AND the personal toggle is ON for
   // the active view — absent/false hides the action entirely (no request can ever originate from it).
   canResetToShared?: boolean
+  pinUserId?: string | null
+  pinSheetId?: string | null
 }>(), { filterGroups: () => [] })
 
 const emit = defineEmits<{
@@ -391,6 +546,85 @@ const emit = defineEmits<{
 const { isZh } = useLocale()
 const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
 const resetToSharedLabel = computed(() => (isZh.value ? '恢复为共享视图' : 'Reset to shared'))
+
+const pinUserId = computed(() => props.pinUserId)
+const pinSheetId = computed(() => props.pinSheetId)
+const toolbarPins = useToolbarPins({ userId: pinUserId, sheetId: pinSheetId })
+provide(TOOLBAR_PINS_KEY, toolbarPins)
+
+const overflowRootRef = ref<HTMLElement | null>(null)
+const overflowAvailable = ref<Partial<Record<string, boolean>>>({})
+const dragPinId = ref<ToolbarPinCommandId | null>(null)
+
+function syncOverflowAvailable(): void {
+  const root = overflowRootRef.value
+  const next: Partial<Record<string, boolean>> = {}
+  if (root) {
+    for (const id of OVERFLOW_PIN_COMMAND_IDS) {
+      next[id] = !!root.querySelector(`[data-command="${id}"]`)
+    }
+  }
+  overflowAvailable.value = next
+}
+
+function isPinVisible(id: ToolbarPinCommandId): boolean {
+  if (isNativePinCommandId(id)) {
+    if (id === 'import') return props.canCreateRecord
+    if (id === 'export-csv' || id === 'export-xlsx') return !!props.canExport
+    return true
+  }
+  if (isOverflowPinCommandId(id)) return !!overflowAvailable.value[id]
+  return false
+}
+
+const visiblePins = computed(() => toolbarPins.pins.value.filter(isPinVisible))
+
+const NATIVE_PIN_TITLES: Record<string, MetaCoreLabelKey> = {
+  'row-height': 'toolbar.rowHeight',
+  fit: 'toolbar.autoFitColumns',
+  print: 'toolbar.print',
+  import: 'toolbar.importRecords',
+  'export-csv': 'toolbar.exportCsv',
+  'export-xlsx': 'toolbar.exportExcelXlsx',
+}
+
+function pinnedTitle(id: ToolbarPinCommandId): string {
+  const nativeKey = NATIVE_PIN_TITLES[id]
+  if (nativeKey) return l(nativeKey)
+  const titles = TOOLBAR_PIN_TITLES[id]
+  return isZh.value ? titles.zh : titles.en
+}
+
+function pinIcon(id: ToolbarPinCommandId): Component {
+  return PIN_ICONS[id]
+}
+
+function activateOverflowCommand(id: string): void {
+  const el = overflowRootRef.value?.querySelector(`[data-command="${id}"]`)
+  if (el instanceof HTMLElement) el.click()
+}
+
+function onPinnedClick(id: ToolbarPinCommandId): void {
+  if (id === 'fit') emit('auto-fit-columns')
+  else if (id === 'print') emit('print')
+  else if (id === 'import') emit('import')
+  else if (id === 'export-csv') emit('export-csv')
+  else if (id === 'export-xlsx') emit('export-xlsx')
+  else activateOverflowCommand(id)
+}
+
+function onPinDragStart(id: ToolbarPinCommandId, event: DragEvent): void {
+  dragPinId.value = id
+  event.dataTransfer?.setData('text/plain', id)
+}
+
+function onPinDrop(id: ToolbarPinCommandId): void {
+  if (dragPinId.value) toolbarPins.reorder(dragPinId.value, id)
+  dragPinId.value = null
+}
+
+onMounted(syncOverflowAvailable)
+onUpdated(syncOverflowAvailable)
 
 const showFieldPicker = ref(false)
 const showSortPanel = ref(false)
@@ -611,11 +845,36 @@ function onAddFilterGroup() {
   background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-sheet-hairline, #ebebeb);
   border-radius: var(--ms-radius-sm, 6px); box-shadow: none;
 }
+.meta-toolbar__pins { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
 .meta-toolbar__more-native,
 .meta-toolbar__more-slot { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
 .meta-toolbar__more-slot { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--ms-sheet-hairline, #ebebeb); }
 .meta-toolbar__more-item { width: 100%; justify-content: flex-start; }
 .meta-toolbar__more-panel :deep(.mt-button) { width: 100%; justify-content: flex-start; }
+.meta-toolbar__more-panel :deep(.meta-toolbar__more-row .mt-button),
+.meta-toolbar__more-panel :deep(.meta-toolbar__more-row .mt-workbench__mgr-btn) {
+  width: auto; flex: 1 1 auto; justify-content: flex-start;
+}
+.meta-toolbar__layout {
+  margin-top: 6px; padding-top: 6px;
+  border-top: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.meta-toolbar__layout-title { font-size: var(--ms-sheet-font-header, 12px); color: var(--ms-text-2, #4b5563); }
+.meta-toolbar__layout-hint { margin: 0; font-size: 11px; color: var(--ms-text-3, #9ca3af); }
+.meta-toolbar__layout-row { display: flex; align-items: center; gap: 4px; }
+.meta-toolbar__layout-name { flex: 1 1 auto; min-width: 0; font-size: var(--ms-sheet-font-body, 13px); color: var(--ms-text-1, #111827); }
+.meta-toolbar__layout-move {
+  width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: var(--ms-sheet-icon-color, #6b7280); cursor: pointer;
+}
+.meta-toolbar__layout-move:hover:not(:disabled) { color: var(--ms-color-primary); background: var(--ms-bg-page, #f5f6f8); }
+.meta-toolbar__layout-move:disabled { opacity: 0.3; cursor: not-allowed; }
+.meta-toolbar__layout-reset {
+  align-self: flex-start; border: 0; background: none; padding: 4px 0 0;
+  font-size: var(--ms-sheet-font-header, 12px); color: var(--ms-color-info, #6b7280); cursor: pointer;
+}
+.meta-toolbar__layout-reset:hover { color: var(--ms-color-primary); }
 .meta-toolbar__more-panel :deep(.mt-workbench__mgr-btn),
 .meta-toolbar__more-panel :deep(.mt-workbench__presence-chip),
 .meta-toolbar__more-panel :deep(.mt-workbench__mention-chip),

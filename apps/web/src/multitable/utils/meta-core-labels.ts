@@ -46,6 +46,8 @@ export type MetaCoreLabelKey =
   | 'toolbar.exportCsv' | 'toolbar.exportExcel' | 'toolbar.exportExcelXlsx' | 'toolbar.exportXlsx'
   | 'toolbar.newRecord'
   | 'toolbar.more'
+  | 'toolbar.pinToBar' | 'toolbar.unpinFromBar' | 'toolbar.pinCapReached'
+  | 'toolbar.layout' | 'toolbar.layoutHint' | 'toolbar.moveUp' | 'toolbar.moveDown' | 'toolbar.resetPins'
   // --- Export options dialog (A2: column/row selection) ---
   | 'export.title' | 'export.close' | 'export.columns' | 'export.selectAll' | 'export.clearAll'
   | 'export.rowScope' | 'export.allRows' | 'export.selectedRows'
@@ -162,6 +164,14 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'toolbar.exportExcelXlsx': { en: 'Export Excel (.xlsx)', zh: '导出 Excel (.xlsx)' },
   'toolbar.exportXlsx': { en: 'Export XLSX', zh: '导出 XLSX' },
   'toolbar.more': { en: 'More', zh: '更多' },
+  'toolbar.pinToBar': { en: 'Pin to toolbar', zh: '钉在工具栏' },
+  'toolbar.unpinFromBar': { en: 'Unpin from toolbar', zh: '从工具栏取消固定' },
+  'toolbar.pinCapReached': { en: 'Pin up to 8 toolbar items', zh: '工具栏最多固定 8 项' },
+  'toolbar.layout': { en: 'Toolbar layout', zh: '工具栏排布' },
+  'toolbar.layoutHint': { en: 'Reorder pinned buttons. Unpin returns them to More.', zh: '调整已钉按钮的顺序；取消固定后回到「更多」。' },
+  'toolbar.moveUp': { en: 'Move up', zh: '上移' },
+  'toolbar.moveDown': { en: 'Move down', zh: '下移' },
+  'toolbar.resetPins': { en: 'Reset toolbar layout', zh: '恢复默认排布' },
   'export.title': { en: 'Export options', zh: '导出选项' },
   'export.close': { en: 'Close', zh: '关闭' },
   'export.columns': { en: 'Columns', zh: '列' },
