@@ -1,0 +1,13 @@
+{
+  "campaign": "attendance-windows-native-qa-v2-20260804",
+  "expectedSourceSha": "676ed2433813139216d77685021a5b5c1acdb235",
+  "status": "DRAFT_HOLD",
+  "deploymentAuthorized": false,
+  "syntheticDataOnly": true,
+  "isolatedDatabaseName": "metasheet_windows_qa",
+  "notes": [
+    "Exact source SHA for Windows-native internal QA v2 preparation on current main.",
+    "Old W4C-2 package claims (for example 8dfde5a7 / 66a98035) are stale and must not be reused as current evidence.",
+    "Draft/HOLD only: no deployment, staging, customer UAT, flag enablement, external notification, or issue-closure authorization."
+  ]
+}
