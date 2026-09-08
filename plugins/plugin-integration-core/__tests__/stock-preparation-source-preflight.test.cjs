@@ -1862,6 +1862,162 @@ async function theRouteLogsTheRefusalAndTheResponseStaysByteIdentical() {
 }
 
 // ---------------------------------------------------------------------------
+// S-19 / R-09 — 222 2026-09-08, the SECOND refusal on this route. With the customer's order data
+// finally loaded, `GET /api/integration/stock-preparation/source-preflight` answered 500
+// `SOURCE_PREFLIGHT_FAILED` again, and #5569's new warn named the leaf for the first time:
+//
+//     kind=observed-row-value, length=4, masked=**, path=probes[10].columns[27]
+//
+// A COLUMN NAME — an identifier leaf, built from `Object.keys(row)`, refused for CONTAINING a
+// four-character value sampled from some row of the same run. The identifier exemption tested
+// `entry.value` (the ROW VALUE) rather than `leaf.value` (the LEAF), while every comment around it
+// described the leaf. In a real PLM that misreading is not an edge case: a dictionary's labels
+// eventually spell `Code` / `Name` / `Type` / `Unit`, every one of them four characters, and column
+// names spell them too — so the whole source 500'd, and which run it broke on moved with the
+// customer's data.
+//
+// The guards below fix the mechanism in place, in both directions.
+// ---------------------------------------------------------------------------
+
+// Four characters — long enough for the `length >= 4` containment test — and deliberately NOT a
+// column or table name of any fixture here, so it can never earn the exemption on its own.
+const IDENTIFIER_SUBSTRING_ROW_VALUE = 'Code'
+// A column the shipped read plan names AND every probe of `DN_PDM_PathExAttrInfo` observes. It
+// contains the row value above, which is the entire bug.
+const OBSERVED_COLUMN_CARRYING_IT = 'FileCode'
+
+/**
+ * `orderModuleSource()` with ONE cell changed: a part row whose `Material` holds exactly `Code`.
+ * That single string enters `observedValues` (every string cell of every sampled row does), and from
+ * that moment the report's own `probes[].columns[]` — which carry `FileCode` — reproduce it by
+ * containment. Nothing else about the catalog moves, so S-01's verdict is the control.
+ */
+function columnNameContainsARowValueSource() {
+  const catalog = orderModuleSource()
+  catalog.DN_PDM_PartLibraryInfo = catalog.DN_PDM_PartLibraryInfo.map((row, index) => (
+    index === 0 ? { ...row, Material: IDENTIFIER_SUBSTRING_ROW_VALUE } : row
+  ))
+  return catalog
+}
+
+async function aColumnNameContainingARowValueIsNotARefusal() {
+  // END TO END — the 222 shape through the real runner. Before the fix this threw
+  // SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED and the route answered 500 for the whole source.
+  const { report } = await preflight(columnNameContainsARowValueSource())
+
+  // The fixture really is the reproduction: the value is in a sampled row, and the report really
+  // does name the column that contains it — in TWO identifier classes, `columns[]` and `matchField`.
+  assert.equal(
+    columnNameContainsARowValueSource().DN_PDM_PartLibraryInfo[0].Material,
+    IDENTIFIER_SUBSTRING_ROW_VALUE,
+    'the row value is planted in a table the roster samples',
+  )
+  const carrier = report.probes.find((probe) => (probe.columns || []).includes(OBSERVED_COLUMN_CARRYING_IT))
+  assert.ok(carrier, 'the report names the observed column that contains the row value')
+  assert.equal(report.checks.projectData.matchField, OBSERVED_COLUMN_CARRYING_IT)
+  assert.ok(
+    OBSERVED_COLUMN_CARRYING_IT.includes(IDENTIFIER_SUBSTRING_ROW_VALUE),
+    'containment is what the self-check tests, and it holds here',
+  )
+
+  // And the run is otherwise S-01: the fix buys back the report, it does not blunt it.
+  assert.equal(report.verdict, 'go')
+  assert.equal(report.checks.topology.detectedBridge, 'order-module')
+  assert.deepEqual(codesOf(report.blockers), [])
+}
+
+async function theIdentifierExemptionIsByLeafValueAndStaysNarrow() {
+  // The 222 report shape, hand-built so the mechanism is pinned without a whole catalog behind it.
+  // `identifiers` holds what that run genuinely observed; `Code` is NOT one of them.
+  const armed = {
+    observedValues: new Set([IDENTIFIER_SUBSTRING_ROW_VALUE, 'PRJ-2600']),
+    identifiers: new Set(['DN_PDM_PathExAttrInfo', 'ID', OBSERVED_COLUMN_CARRYING_IT, 'NodeType']),
+  }
+  const twoTwoTwoShape = {
+    verdict: 'go',
+    checks: { projectData: { matchField: OBSERVED_COLUMN_CARRYING_IT, livenessSamples: ['PRJ-2600'] } },
+    probes: [{
+      role: 'pathExAttr',
+      object: 'DN_PDM_PathExAttrInfo',
+      columns: ['ID', OBSERVED_COLUMN_CARRYING_IT, 'NodeType'],
+    }],
+  }
+  assert.equal(
+    assertSourcePreflightValuesFree(twoTwoTwoShape, armed),
+    twoTwoTwoShape,
+    'an identifier leaf whose OWN value is an identifier this run observed is exempt',
+  )
+
+  // REVERSE 1 — the exemption is by VALUE, never by field. An identifier-class leaf whose value is
+  // NOT one of this run's identifiers is still refused for containing the row value, at the exact
+  // path/kind/length shape 222 logged. Without this, the fix would read "all identifier fields are
+  // exempt", which is a values channel.
+  const refusalFor = (report) => {
+    try {
+      assertSourcePreflightValuesFree(report, armed)
+      assert.fail('expected the values-free self-check to refuse this report')
+    } catch (error) {
+      assert.ok(error instanceof SourcePreflightError)
+      assert.equal(error.message, 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED')
+      return error.details
+    }
+  }
+  const shadowed = refusalFor({ probes: [{ columns: [`${OBSERVED_COLUMN_CARRYING_IT}Shadow`] }] })
+  assert.equal(shadowed.kind, 'observed-row-value')
+  assert.equal(shadowed.path, 'probes[0].columns[0]')
+  assert.equal(shadowed.length, IDENTIFIER_SUBSTRING_ROW_VALUE.length)
+
+  // REVERSE 2 — an identifier leaf whose value EQUALS the row value and is vouched for by nobody is
+  // still refused. This is R-08's live `dictionarySlot` case, restated at the unit level.
+  const equalled = refusalFor({ checks: { quantityField: { dictionarySlot: IDENTIFIER_SUBSTRING_ROW_VALUE } } })
+  assert.equal(equalled.kind, 'observed-row-value')
+  assert.equal(equalled.path, 'checks.quantityField.dictionarySlot')
+
+  // REVERSE 3 — nothing outside the identifier class gained anything. The same row value at an
+  // unclassified path, at a liveness-LOOKING path that is not the one allowlisted, and in a
+  // closed-vocabulary field, is refused in all three places.
+  assert.equal(refusalFor({ somethingNew: IDENTIFIER_SUBSTRING_ROW_VALUE }).kind, 'unclassified-string-leaf')
+  assert.equal(
+    refusalFor({ checks: { bomData: { livenessSamples: [IDENTIFIER_SUBSTRING_ROW_VALUE] } } }).kind,
+    'unclassified-string-leaf',
+    'the liveness exemption is an exact path, not a field name that can be spelled elsewhere',
+  )
+  assert.equal(refusalFor({ verdict: IDENTIFIER_SUBSTRING_ROW_VALUE }).kind, 'closed-vocabulary-violated')
+  // …while the ONE allowlisted liveness path still is exempt, so the boundary is a boundary.
+  assertSourcePreflightValuesFree(
+    { checks: { projectData: { livenessSamples: [IDENTIFIER_SUBSTRING_ROW_VALUE] } } },
+    armed,
+  )
+
+  // REVERSE 4 — the exemption is still BELOW secrets. A supplied secret is refused at an identifier
+  // leaf whose value is an observed identifier, which is the strongest form of the new exemption.
+  const secreted = (() => {
+    try {
+      assertSourcePreflightValuesFree(
+        { probes: [{ columns: [OBSERVED_COLUMN_CARRYING_IT] }] },
+        { identifiers: new Set([OBSERVED_COLUMN_CARRYING_IT]), secrets: [OBSERVED_COLUMN_CARRYING_IT] },
+      )
+      assert.fail('expected a secret refusal')
+    } catch (error) {
+      return error.details
+    }
+  })()
+  assert.equal(secreted.kind, 'secret', 'secrets are exempt nowhere, the new ground included')
+
+  // THE SECOND GROUND, unchanged by this PR and pinned so a later narrowing is a deliberate red: an
+  // identifier leaf that merely CONTAINS a row value which is itself a known identifier stays exempt,
+  // even though the leaf's own value is not one. This is the dictionary "row that names a column"
+  // case, and it is the wider of the two grounds.
+  assertSourcePreflightValuesFree(
+    { probes: [{ columns: [`X_${OBSERVED_COLUMN_CARRYING_IT}_Y`] }] },
+    {
+      observedValues: new Set([OBSERVED_COLUMN_CARRYING_IT]),
+      identifiers: new Set([OBSERVED_COLUMN_CARRYING_IT]),
+    },
+  )
+}
+
+// ---------------------------------------------------------------------------
 
 async function main() {
   await healthyOrderModuleSource()
@@ -1937,6 +2093,10 @@ async function main() {
   await theSelfCheckRefusalDescriptorIsExactlyTheFourKeys()
   await theRouteLogsTheRefusalAndTheResponseStaysByteIdentical()
   console.log('  ✓ R-08 the self-check refusal logs path/kind/length/masked (and only those), values-free, response unchanged')
+
+  await aColumnNameContainingARowValueIsNotARefusal()
+  await theIdentifierExemptionIsByLeafValueAndStaysNarrow()
+  console.log('  ✓ S-19 a column name is exempt because IT is an observed identifier — not because its field is one')
 
   console.log('stock-preparation-source-preflight: OK')
 }
