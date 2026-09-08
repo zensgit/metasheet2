@@ -490,4 +490,33 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
     // ...while still rendering the things it is supposed to.
     expect(root.textContent).toContain('客户 PLM 只读库')
   })
+
+  // -------------------------------------------------------------------------
+  // S-09 (P0-8) — action → result → AUTO-REREAD, no manual refresh.
+  // -------------------------------------------------------------------------
+
+  it('S-09: a successful save RE-READS the binding — the panel reflects the new source on its own', async () => {
+    installRoutes({
+      // The GET after the POST answers with the source that was just chosen — the server's own
+      // authority on what the action will now resolve to, not a value this panel invented locally.
+      afterSave: bindingPayload({ effectiveExternalSystemId: CUSTOMER_PLM, origin: 'persisted' }),
+    })
+    const root = await mountPanel()
+    expect(text(root, 'stock-prep-source-current-name')).toContain('内置演示源')
+
+    const select = node(root, 'stock-prep-source-select') as HTMLSelectElement
+    select.value = CUSTOMER_PLM
+    select.dispatchEvent(new Event('change'))
+    await flush(2)
+    ;(node(root, 'stock-prep-source-save') as HTMLButtonElement).click()
+    await flush(2)
+    ;(node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement).click()
+    await flush()
+
+    // No control on this page says "refresh" — the re-read is automatic, and its OWN answer (not the
+    // POST's echo, not a locally patched field) is what the panel now shows.
+    expect(getCount).toBeGreaterThan(1)
+    expect(text(root, 'stock-prep-source-current-name')).toContain('客户 PLM 只读库')
+    expect(root.querySelector('[data-testid="stock-prep-source-refresh"]')).toBeNull()
+  })
 })

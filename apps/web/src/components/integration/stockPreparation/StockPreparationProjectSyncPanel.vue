@@ -27,11 +27,16 @@
           @keyup.enter="onRun"
         />
       </label>
+      <!-- G1 每屏一个主操作位: when the workspace's 「下一步」 bar is on screen it owns the one
+           filled primary, and this button steps down to a neutral secondary. `data-primary-cta` is
+           therefore conditional — it is the attribute a spec counts to prove the rule holds. -->
       <button
         v-if="canRun"
         type="button"
         class="sp-sync__run"
+        :class="{ 'sp-sync__run--secondary': runEmphasis === 'secondary' }"
         data-testid="stock-prep-project-sync-run"
+        :data-primary-cta="runEmphasis === 'primary' ? 'stock-prep-project-sync-run' : undefined"
         :disabled="!canSubmit"
         @click="onRun"
       >
@@ -72,6 +77,17 @@
       </span>
     </p>
 
+    <!-- P0-6: the SAME `stockPrepPosture` word the home card and the workspace title use, fed from
+         this run's own report — the third of the "三处同词一致" call sites. -->
+    <p
+      v-if="report"
+      class="sp-sync__posture"
+      :class="`sp-sync__posture--${posture.tone}`"
+      data-testid="stock-prep-project-sync-posture"
+    >
+      {{ bi(posture.zh, posture.en) }}
+    </p>
+
     <!-- What the plan found, as a sentence rather than five chips. -->
     <p v-if="report && report.planned" class="sp-sync__counts" data-testid="stock-prep-project-sync-counts">
       {{ countsSentence }}
@@ -102,7 +118,10 @@
       data-testid="stock-prep-project-sync-missing-components"
       open
     >
-      <summary class="sp-sync__missing-summary">{{ missingComponentsSummary }}</summary>
+      <summary
+        class="sp-sync__missing-summary"
+        :title="bi(missingComponentsTooltip.zh, missingComponentsTooltip.en)"
+      >{{ missingComponentsSummary }}</summary>
       <!-- M5: `distinctCount` says "there are some" but the items array itself is empty (a server
            inconsistency, e.g. `{distinctCount:5, items:[]}`) — show the count line above (the
            `<summary>`) and STOP, rather than rendering a table with no rows in it and a copy/export
@@ -154,6 +173,17 @@
           </button>
         </div>
       </div>
+      <!-- I-4 / 线框 D ③ (P0-9): the closure line — there is no "I fixed it" button on this page,
+           and saying so out loud is what stops an operator hunting for one.
+
+           OUTSIDE the `items.length > 0` body on purpose. I-4 asks this card for a consequence
+           sentence on top and a closure sentence at the bottom, and the M5 degraded shape
+           (`{distinctCount: 5, items: []}`) renders the summary and stops — which left that shape with
+           a top half and no bottom half. The closure is true in all four shapes: a later sync is what
+           clears these rows, whether or not this response could list them. -->
+      <p class="sp-sync__missing-resync-hint" data-testid="stock-prep-project-sync-missing-components-resync-hint">
+        {{ bi(missingComponentsResyncHint.zh, missingComponentsResyncHint.en) }}
+      </p>
     </details>
 
     <!-- Where to go next. Both are navigation inside this same workbench; neither is a new route. -->
@@ -190,26 +220,43 @@
       </button>
     </div>
 
-    <!-- The four steps. A SKIP is rendered with the same weight as an OK, and its reason is never
-         dropped — hiding it is how the outstanding work goes unnoticed. -->
-    <ol class="sp-sync__steps">
+    <!-- The four steps (P0-3 皮肤: a connected four-step strip rather than a plain list). A SKIP is
+         rendered with the same weight as an OK, and its reason is never dropped — hiding it is how the
+         outstanding work goes unnoticed. EVERY testid and `data-status` value below is byte-identical
+         to before this pass — only the marker/connector chrome around them is new. -->
+    <ol class="sp-sync__steps" data-testid="stock-prep-project-sync-steps">
       <li
-        v-for="row in stepRows"
+        v-for="(row, idx) in stepRows"
         :key="row.descriptor.id"
         class="sp-sync__step"
         data-testid="stock-prep-project-sync-step"
         :data-step="row.descriptor.id"
         :data-status="row.status"
       >
-        <span class="sp-sync__status" :class="`sp-sync__status--${row.status}`">{{ statusLabel(row.status) }}</span>
-        <span class="sp-sync__step-name">{{ bi(row.descriptor.zh, row.descriptor.en) }}</span>
-        <template v-if="row.result">
-          <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason">{{ reasonText(row.result) }}</small>
-          <small v-if="reasonNext(row.result)" class="sp-sync__next-line" data-testid="stock-prep-project-sync-step-next">
-            {{ reasonNext(row.result) }}
-          </small>
-        </template>
-        <small v-else class="sp-sync__hint">{{ bi('还没走到这一步', 'Not reached yet') }}</small>
+        <span class="sp-sync__step-marker" aria-hidden="true">
+          <span class="sp-sync__step-icon" :class="`sp-sync__step-icon--${row.status}`">{{ stepIcon(row.status) }}</span>
+          <span class="sp-sync__step-index">{{ idx + 1 }}</span>
+        </span>
+        <span class="sp-sync__step-body">
+          <span class="sp-sync__status" :class="`sp-sync__status--${row.status}`">{{ statusLabel(row.status) }}</span>
+          <span class="sp-sync__step-name">{{ bi(row.descriptor.zh, row.descriptor.en) }}</span>
+          <!-- §4.4 row 6 / 线框 C ②: 第④步 存档 is not the operator's job on this deployment, and
+               a bare SKIP reads as "something did not happen" rather than "this one was never
+               yours". Rendered only for a caller who cannot run the archive step themselves, so an
+               administrator's own view is unchanged. -->
+          <span
+            v-if="showsNotYoursBadge(row)"
+            class="sp-sync__step-badge"
+            data-testid="stock-prep-project-sync-step-not-yours"
+          >{{ bi(notYoursPosture.zh, notYoursPosture.en) }}</span>
+          <template v-if="row.result">
+            <small class="sp-sync__reason" data-testid="stock-prep-project-sync-step-reason">{{ reasonText(row.result) }}</small>
+            <small v-if="reasonNext(row.result)" class="sp-sync__next-line" data-testid="stock-prep-project-sync-step-next">
+              {{ reasonNext(row.result) }}
+            </small>
+          </template>
+          <small v-else class="sp-sync__hint">{{ bi('还没走到这一步', 'Not reached yet') }}</small>
+        </span>
       </li>
     </ol>
 
@@ -223,7 +270,7 @@
       :api="largeBomApi"
       :wait="largeBomPollWait"
       @open-multitable="emit('open-multitable')"
-      @synced="emit('synced')"
+      @synced="emit('synced', null)"
     />
 
     <StockPrepTechnicalDetails v-if="report" testid="stock-prep-project-sync-tech">
@@ -296,14 +343,24 @@ import {
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
 import {
+  STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT,
+  STOCK_PREP_TOOLTIP_MISSING_COMPONENTS,
   stockPrepStepOutcomeText,
   stockPrepSyncReasonPlain,
   stockPrepSyncVerdictPlain,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
+import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 
 const props = withDefaults(
   defineProps<{
+    /**
+     * Whether this panel's own run button may wear the filled primary treatment. The workspace hands
+     * it `secondary` whenever its 「下一步」 bar is showing a button, so the two never appear as two
+     * competing primaries on one screen (G1). Default `primary` keeps every other mount — the legacy
+     * project workspace tab included — exactly as it was.
+     */
+    runEmphasis?: 'primary' | 'secondary'
     scope?: IntegrationScope
     /**
      * Bumped by the parent when a row's 刷新 is pressed. A COUNTER rather than a boolean so pressing
@@ -348,7 +405,16 @@ const props = withDefaults(
      */
     runVariant?: 'sync' | 'pull'
   }>(),
-  { scope: () => ({}), armedAt: 0, projectNo: '', api: null, largeBomApi: null, largeBomPollWait: null, runVariant: 'sync' },
+  {
+    runEmphasis: 'primary',
+    scope: () => ({}),
+    armedAt: 0,
+    projectNo: '',
+    api: null,
+    largeBomApi: null,
+    largeBomPollWait: null,
+    runVariant: 'sync',
+  },
 )
 
 const emit = defineEmits<{
@@ -356,8 +422,20 @@ const emit = defineEmits<{
   (e: 'navigate-stage', viewKey: string): void
   /** "Open the multitable" — the parent owns routing; this panel composes no route. */
   (e: 'open-multitable'): void
-  /** Fired after a run settles so the parent can re-read the project overview. */
-  (e: 'synced'): void
+  /**
+   * Fired after a run settles so the parent can re-read the project overview. P0-3: carries this
+   * run's own report so the workspace's "下一步" bar (operatorNextStep.ts) can read
+   * `missingComponents`/`verdict` without a second copy of this panel's state living in the parent.
+   * `null` from the large-BOM background channel, ALWAYS. That channel finishes long after the run
+   * that spawned it, and `report` by then is the trial run that ended in a `large_bom_bounded` SKIP —
+   * forwarding it would drive the parent's 「下一步」 bar and badge off a snapshot the apply has since
+   * superseded. `null` means "re-read the board, I have no fresher verdict for you", which is exactly
+   * true. Existing listeners that take no argument (StockPreparationProjectWorkspaceView.vue's
+   * `@synced="load"`) are unaffected: Vue drops an argument a handler declares no parameter for.
+   */
+  (e: 'synced', report: StockPreparationProjectSyncReport | null): void
+  /** P0-3: whether a run is in flight right now — lets the workspace title badge show 🔵正在跑. */
+  (e: 'busy-changed', busy: boolean): void
 }>()
 
 const { locale } = useLocale()
@@ -367,7 +445,7 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-const canRun = computed(() => canRunStockPrepProjectSync((permission) => auth.hasPermission(permission)))
+const canRun = computed(() => canRunStockPrepProjectSync(auth.getAccessSnapshot()))
 
 /** See `runVariant`. Tuples so the template can spread them straight into `bi`. */
 const runLabel = computed<[string, string]>(() => (props.runVariant === 'pull'
@@ -434,11 +512,21 @@ async function onRun(): Promise<void> {
       results.value = [...results.value, step]
     })
     armedNote.value = false
-    emit('synced')
+    emit('synced', report.value)
   } finally {
     busy.value = false
   }
 }
+
+/** P0-3: the workspace title badge's only window into "a run is happening right now". */
+watch(busy, (value) => emit('busy-changed', value))
+
+/**
+ * P0-3: lets the workspace's "下一步" bar re-run THIS SAME sync (再同步一次 / go-back-and-resync) —
+ * without this the parent would need its own second copy of `onRun`'s logic to drive a resync, and
+ * two copies is how the two eventually disagree about what "同步" does.
+ */
+defineExpose({ run: onRun })
 
 /** Every planned step, with its result once it has one. Steps not reached are still listed. */
 const stepRows = computed(() => STOCK_PREPARATION_PROJECT_SYNC_STEPS.map((descriptor) => {
@@ -453,6 +541,32 @@ const stepRows = computed(() => STOCK_PREPARATION_PROJECT_SYNC_STEPS.map((descri
 function statusLabel(status: StockPreparationProjectSyncStepStatus): string {
   const text = stockPrepStepOutcomeText(status)
   return bi(text.zh, text.en)
+}
+
+/**
+ * §4.4 row 6 (⊘ 不归您做) wired to the one place it applies: the archive step, when the server
+ * itself said this caller may not run it.
+ *
+ * DRIVEN BY THE RUN'S OWN REASON, not by a permission check re-done in the browser.
+ * `BATCH_ARCHIVE_NOT_PERMITTED` is emitted by `projectSync.ts` for exactly this case — archiving is
+ * `mvp-persist`, a platform-admin surface, so an operator who CAN pull still cannot archive — and it
+ * is the difference between "something did not happen" and "this one was never yours". Reading it
+ * off the result means an administrator, for whom the step really does run, never sees the badge,
+ * and nobody is told a step is not theirs on a deployment where it is. The step's own `data-status`
+ * is untouched: this is an explanation beside it, not a new status.
+ */
+const notYoursPosture = stockPrepPosture({ notYours: true })
+
+function showsNotYoursBadge(row: { descriptor: { id: string }; result: StockPreparationProjectSyncStepResult | null }): boolean {
+  return row.descriptor.id === 'archive' && row.result?.reason === 'BATCH_ARCHIVE_NOT_PERMITTED'
+}
+
+/** P0-3 皮肤: purely decorative (aria-hidden — `statusLabel` above still carries the accessible text). */
+function stepIcon(status: StockPreparationProjectSyncStepStatus): string {
+  if (status === 'ok') return '✔'
+  if (status === 'skip') return '●'
+  if (status === 'fail') return '✖'
+  return '○'
 }
 
 function reasonText(result: StockPreparationProjectSyncStepResult): string {
@@ -495,6 +609,27 @@ const verdictCount = computed<string>(() => {
 const showsSheetLink = computed<boolean>(() => {
   const verdict = report.value?.verdict
   return verdict === 'imported' || verdict === 'already_up_to_date' || verdict === 'partial'
+})
+
+/**
+ * P0-6: this run's own posture, fed to the SAME `stockPrepPosture` the home card and the workspace
+ * title read. `pendingDecisionCount` prefers `queuedDecisionCount` (reconcile's real ledger count)
+ * over `pendingConfirmCount` (the plan's own manualConfirm tally) — the identical precedence the
+ * 「去确认队列」 link's own label already uses just below, so the two never disagree about which
+ * number is the true one.
+ */
+const posture = computed<StockPrepPosture>(() => {
+  const value = report.value
+  if (!value) return stockPrepPosture({})
+  const pendingDecisionCount = value.queuedDecisionCount > 0 ? value.queuedDecisionCount : value.pendingConfirmCount
+  const missingList = value.missingComponents
+  const missingComponentsCount = missingList && hasMissingComponents(missingList) ? effectiveDistinctCount(missingList) : 0
+  return stockPrepPosture({
+    busy: busy.value,
+    pendingDecisionCount,
+    missingComponentsCount,
+    pulledRowCount: showsSheetLink.value ? 1 : 0,
+  })
 })
 
 /**
@@ -572,6 +707,12 @@ function hasMissingComponents(list: StockPreparationMissingComponentList): boole
 function effectiveDistinctCount(list: StockPreparationMissingComponentList): number {
   return list.distinctCount > 0 ? list.distinctCount : list.items.length
 }
+
+/** I-20: 缺件's tooltip — what the COUNT means, since "N 种" alone reads as "N occurrences" to a
+ *  first-time reader. */
+const missingComponentsTooltip = STOCK_PREP_TOOLTIP_MISSING_COMPONENTS
+/** I-4 / 线框 D ③: the card's own bottom closure line. */
+const missingComponentsResyncHint = STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT
 
 const missingComponentsSummary = computed<string>(() => {
   const list = report.value?.missingComponents
@@ -788,6 +929,12 @@ function onExportMissingComponents(): void {
   cursor: pointer;
 }
 
+/* G1: the same control, stepped down while the workspace's 「下一步」 bar owns the filled primary. */
+.sp-sync__run--secondary {
+  background: var(--ms-bg-page);
+  color: var(--ms-color-primary);
+}
+
 .sp-sync__run:disabled {
   opacity: 0.5;
   cursor: default;
@@ -842,6 +989,27 @@ function onExportMissingComponents(): void {
   font-variant-numeric: tabular-nums;
 }
 
+.sp-sync__step-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ms-color-info) 20%, transparent);
+  color: var(--ms-color-info);
+  font-size: 11px;
+}
+
+.sp-sync__posture {
+  margin: 0;
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title, 600);
+}
+
+.sp-sync__posture--warning { color: var(--ms-color-warning); }
+.sp-sync__posture--danger { color: var(--ms-color-danger); }
+.sp-sync__posture--primary { color: var(--ms-color-primary); }
+.sp-sync__posture--success { color: var(--ms-color-success); }
+.sp-sync__posture--info { color: var(--ms-color-info); }
+.sp-sync__posture--neutral { color: var(--ms-text-3); }
+
 .sp-sync__next {
   display: flex;
   flex-wrap: wrap;
@@ -868,20 +1036,73 @@ function onExportMissingComponents(): void {
   outline-offset: 1px;
 }
 
+/* P0-3 皮肤: a connected four-step strip. `.sp-sync__step` becomes the flex ROW item (was the whole
+   line before); `.sp-sync__step-marker`/`.sp-sync__step-body` are new wrappers around content that
+   already existed, so nothing that was there before this pass lost its class or its testid. */
 .sp-sync__steps {
   margin: 0;
-  padding: 0 0 0 var(--ms-space-4);
+  padding: 0;
+  list-style: none;
   display: flex;
-  flex-direction: column;
-  gap: var(--ms-space-2);
+  flex-wrap: wrap;
+  gap: var(--ms-space-3);
 }
 
 .sp-sync__step {
+  position: relative;
+  display: flex;
+  flex: 1 1 200px;
+  align-items: flex-start;
+  gap: var(--ms-space-2);
+  padding-right: var(--ms-space-3);
+  line-height: 1.6;
+}
+
+.sp-sync__step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 11px;
+  right: 0;
+  width: var(--ms-space-3);
+  height: 1px;
+  background: var(--ms-border-light);
+}
+
+.sp-sync__step-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sp-sync__step-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--ms-border-light);
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.sp-sync__step-icon--ok { border-color: var(--ms-color-success); color: var(--ms-color-success); }
+.sp-sync__step-icon--skip { border-color: var(--ms-color-warning); color: var(--ms-color-warning); }
+.sp-sync__step-icon--fail { border-color: var(--ms-color-danger); color: var(--ms-color-danger); }
+
+.sp-sync__step-index {
+  color: var(--ms-text-3);
+  font-size: 11px;
+}
+
+.sp-sync__step-body {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: var(--ms-space-2);
-  line-height: 1.6;
+  min-width: 0;
 }
 
 .sp-sync__status {
@@ -989,5 +1210,12 @@ function onExportMissingComponents(): void {
 .sp-sync__missing-actions {
   display: flex;
   gap: var(--ms-space-2);
+}
+
+.sp-sync__missing-resync-hint {
+  margin: var(--ms-space-2) 0 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

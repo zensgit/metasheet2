@@ -77,6 +77,7 @@ import {
   STOCK_PREP_OPERATOR_PULL_STEPS,
   STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
+import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 
 const backendAccess = require('../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs')
 
@@ -254,6 +255,11 @@ describe('项目备料页 — the operator project board', () => {
     routeApi()
     routerPush.mockReset()
     routerReplace.mockReset()
+    // P0 补项 4c: the board's directory read is throttled per scope (operatorHomeDirectory.ts). Every
+    // test in this file uses the SAME `SCOPE`, so a cold cache per test keeps each mount's directory
+    // fetch behaving exactly as it did before the throttle existed — no test here is ABOUT the
+    // throttle itself (that lives in StockPreparationOperatorHome.spec.ts).
+    resetStockPreparationOperatorHomeDirectoryThrottle()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -304,26 +310,38 @@ describe('项目备料页 — the operator project board', () => {
       const tab = root.querySelector('[data-testid="stock-prep-tab-project-board"]')
       expect(Boolean(tab), `${JSON.stringify(actor)} tab visibility`).toBe(actor.visible)
       // The predicate and the DOM must agree — the tab is not allowed to have its own opinion.
-      expect(canOpenStockPrepProjectBoard(realHasPermission)).toBe(actor.visible)
+      expect(canOpenStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })).toBe(actor.visible)
       remount()
     }
   })
 
-  it('B-01: an operator LANDS on the board; a platform admin keeps 确认队列', async () => {
+  // P1-1 / D2=A (2026-09-08). This case is about WHOSE LANDING IS WHOSE, and both halves still say
+  // exactly that — the keys they name moved:
+  //   * the operator lands on 今天要处理 rather than 项目备料. Same component, same pixels: P0 already
+  //     rendered the task home inside the board whenever no project was open, and P1-1 gave that
+  //     page its own rail item. `landsOnStockPrepProjectBoard` — the tier predicate, unchanged — is
+  //     still asserted, because it is still what decides that this actor gets the operator landing.
+  //   * the platform admin no longer keeps 确认队列. That is the D2 ruling itself: landing an admin
+  //     on an empty queue was the documented dead end (设计稿 §2.3 A1). They land on 开始使用 here
+  //     because this file's `routeApi` answers the deployment preflight with `{}`, i.e. not ready —
+  //     and a not-ready (or unreadable) deployment lands on the wizard, never on the health page.
+  it('B-01: an operator LANDS on 今天要处理; a platform admin lands where D2 sends them', async () => {
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
     h.roles = []
     let root = mount(StockPreparationWorkspace)
     await flush()
-    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-board')
-    expect(landsOnStockPrepProjectBoard(realHasPermission)).toBe(true)
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
+    expect(landsOnStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })).toBe(true)
+    // ...and 项目备料 is still one click away, still its own rail item.
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-board"]')).not.toBeNull()
     remount()
 
     h.permissions = ['integration:admin']
     h.roles = ['admin']
     root = mount(StockPreparationWorkspace)
     await flush()
-    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
-    expect(landsOnStockPrepProjectBoard(realHasPermission)).toBe(false)
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('getting-started')
+    expect(landsOnStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })).toBe(false)
   })
 
   it('B-01: the pull control follows the SERVER split, and the two vocabularies are byte-mirrored', () => {
@@ -348,7 +366,7 @@ describe('项目备料页 — the operator project board', () => {
       const serverAdmitsOperator = backendAccess.operatorMayRunStockPrepPull(flattened, STOCK_PREP_OPERATOR_PULL_ACTION_ID)
       // The button renders when EITHER tier admits: the legacy platform admin, or the operator tier.
       const legacyAdmin = flattened.includes('integration:admin') || flattened.includes('role:admin')
-      expect(canRunStockPrepProjectSync(realHasPermission)).toBe(serverAdmitsOperator || legacyAdmin)
+      expect(canRunStockPrepProjectSync({ roles: h.roles, permissions: h.permissions })).toBe(serverAdmitsOperator || legacyAdmin)
     }
   })
 
@@ -568,6 +586,35 @@ describe('项目备料页 — the operator project board', () => {
     expect(banner.textContent, 'retrying is precisely what will not help').toContain('再试也一样')
     expect(banner.textContent, 'the read generic must not answer this').not.toContain('请稍后再试一次')
     expect(banner.textContent, 'and this page writes nothing').not.toContain('没有保存成功')
+  })
+
+  // ---------------------------------------------------------------------------
+  // P0-5 —— TWO LINES ON THE SURFACE THE FLOOR ACTUALLY USES.
+  //
+  // `HANDOFF_NOT_CURRENT_HANDLER`'s second line —「看上面「轮到谁」,轮到您时这个按钮会自己亮」—
+  // has exactly one render point in the whole app, and it is this banner. A wave that widened the
+  // vocabulary but taught only the admin-facing queue to render the second line would have written
+  // that sentence for nobody.
+  // ---------------------------------------------------------------------------
+
+  it('P0-5: a refusal renders 发生了什么 / 该做什么 plus a copy button', async () => {
+    routeApi({
+      board: () => new Response(
+        JSON.stringify({ ok: false, error: { code: 'STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER', message: 'x' } }),
+        { status: 409 },
+      ),
+    })
+    const root = await mountBoard()
+    const banner = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(banner).not.toBeNull()
+    // First line: what happened. Unchanged from before this wave.
+    expect(banner.textContent).toContain('现在不是您这一步')
+    // Second line: what to do about it, and who does it.
+    const next = banner.querySelector('[data-testid="stock-prep-project-board-error-next"]') as HTMLElement
+    expect(next, 'the second line has nowhere else to render').not.toBeNull()
+    expect(next.textContent).toContain('轮到')
+    // ...and the one thing a person can hand to us.
+    expect(banner.querySelector('[data-testid="stock-prep-project-board-error-copy"]')).not.toBeNull()
   })
 
   it('B-17: a database one migration behind names the fix instead of the generic', async () => {
@@ -974,5 +1021,510 @@ describe('项目备料页 — the operator project board', () => {
     cta.click()
     await flush()
     expect(routerPush).toHaveBeenCalledWith({ path: `/multitable/${SHEET_ID}/${VIEW_ID}` })
+  })
+
+  // ---- P0-2: 二级视图寄生 —— `?projectNo=` 无值渲染首页,有值走既有工作区分支 --------------------
+  //
+  // 设计稿 §2.3's whole point: EVERY test above this block mounts with a `projectNo`, so it always
+  // took the "existing workspace" branch and never once exercised the home page — which is exactly
+  // what makes the P0 mechanism safe. This block is what actually mounts with none.
+
+  it('P0-2: no projectNo renders the home page, not the workspace status section', async () => {
+    const root = await mountBoard({ projectNo: '' })
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-next-step"]')).toBeNull()
+    // ONE project-number input on the screen, and it is the existing one: the home page contributes
+    // the 「拉一个新项目」 heading and the honest sentence, never a second box with the same label.
+    expect(root.querySelectorAll('[data-testid="stock-prep-project-board-input"]').length).toBe(1)
+    expect(root.querySelectorAll('input[list="stock-prep-board-directory-options"]').length).toBe(1)
+  })
+
+  it('P0-2: every OTHER spec in this file seeds a projectNo and therefore never sees the home page', async () => {
+    const root = await mountBoard()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).not.toBeNull()
+  })
+
+  it('P0-2: a seeded projectNo never paints the home page, not even for one frame', async () => {
+    // THE REGRESSION. `showHome` used to be derived from a ref assigned inside `loadBoard`, which
+    // `onMounted` only reached after awaiting a full directory round-trip — so a deep link, and
+    // every switch back to this tab (the shell mounts it with `v-if`), painted a whole screen of
+    // task home including 「这里还没有您的项目」 before the workspace replaced it. Asserted BEFORE
+    // any flush, which is the only place the flash was ever visible.
+    const root = mount(StockPreparationProjectBoardView, { scope: SCOPE, projectNo: PROJECT_NO })
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).toBeNull()
+    await nextTick()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).toBeNull()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).toBeNull()
+  })
+
+  it('P0-2: the home page carries this operator\'s own directory as a card', async () => {
+    const root = await mountBoard({ projectNo: '' })
+    const card = root.querySelector('[data-testid="stock-prep-operator-home-card"]') as HTMLElement
+    expect(card).not.toBeNull()
+    expect(card.getAttribute('data-project-no')).toBe(PROJECT_NO)
+  })
+
+  it('P0-2: opening a project from the fallback input switches to the workspace', async () => {
+    const root = await mountBoard({ projectNo: '' })
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+    const input = root.querySelector('[data-testid="stock-prep-project-board-input"]') as HTMLInputElement
+    input.value = PROJECT_NO
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(root.querySelector('[data-testid="stock-prep-project-board-open"]') as HTMLButtonElement).click()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).not.toBeNull()
+  })
+
+  // ---- 线框 C ①: the way BACK. Without it `?projectNo=` is a one-way door. ----------------------
+
+  it('P0-2: 「返回今天要处理」 takes the operator back to the home page', async () => {
+    const root = await mountBoard()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).toBeNull()
+    const back = root.querySelector('[data-testid="stock-prep-project-board-back-home"]') as HTMLButtonElement
+    expect(back, 'the workspace must offer a way home').not.toBeNull()
+    back.click()
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]')).toBeNull()
+  })
+
+  it('P0-2: through the shell, going back DROPS ?projectNo= instead of writing an empty one', async () => {
+    const root = mount(StockPreparationWorkspace)
+    await flush()
+    await openProjectInShell(root)
+    routerReplace.mockClear()
+    ;(root.querySelector('[data-testid="stock-prep-project-board-back-home"]') as HTMLButtonElement).click()
+    await flush()
+    expect(routerReplace).toHaveBeenCalled()
+    const query = (routerReplace.mock.calls[0][0] as { query: Record<string, string> }).query
+    expect('projectNo' in query).toBe(false)
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+  })
+
+  // ---- P0-3: 「下一步」条 ------------------------------------------------------------------------
+
+  it('P0-3: shows the 全清 state for a fully-synced, fully-exported fixture — no primary button', async () => {
+    const root = await mountBoard()
+    const bar = root.querySelector('[data-testid="stock-prep-project-board-next-step"]') as HTMLElement
+    expect(bar).not.toBeNull()
+    expect(bar.getAttribute('data-next-step')).toBe('clear')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-next-step-action"]')).toBeNull()
+  })
+
+  // P1-2 CHANGED WHERE THIS BUTTON GOES, not what it says. §5 流程 1's P1 column is 「主按钮就地展开
+  // 面板 2」: the same queue, for the same project, is now composed on THIS page, so the press opens
+  // it in place instead of asking the shell for another tab. The count and the sentence are the P0
+  // assertions, unchanged.
+  it('P0-3/P1-2: names the real count when decisions are pending, and the press opens 面板 2 IN PLACE — no tab switch', async () => {
+    routeApi({ board: ok(boardPayload({ pendingDecisionCount: 3 })) })
+    const navigateStageSpy = vi.fn()
+    const root = await mountBoard({ onNavigateStage: navigateStageSpy })
+    const bar = root.querySelector('[data-testid="stock-prep-project-board-next-step"]') as HTMLElement
+    expect(bar.getAttribute('data-next-step')).toBe('pending')
+    const action = root.querySelector('[data-testid="stock-prep-project-board-next-step-action"]') as HTMLButtonElement
+    expect(action).not.toBeNull()
+    expect(action.textContent).toContain('3')
+    expect(
+      root.querySelector('[data-testid="stock-prep-confirmation-queue"]'),
+      'nothing composed before the press — 面板 2 is collapsed by default',
+    ).toBeNull()
+    action.click()
+    await flush()
+    expect(
+      root.querySelector('[data-testid="stock-prep-confirmation-queue"]'),
+      'one press, and the rows are on this same screen',
+    ).not.toBeNull()
+    expect(navigateStageSpy, '…and the shell was never asked to move (3 击 0 跳转)').not.toHaveBeenCalled()
+  })
+
+  it('P0-3: G5 — a project that has never been pulled still shows a "下一步" bar (never a locked gate)', async () => {
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    const bar = root.querySelector('[data-testid="stock-prep-project-board-next-step"]') as HTMLElement
+    expect(bar).not.toBeNull()
+    expect(bar.getAttribute('data-next-step')).toBe('pull')
+  })
+
+  it('P0-3: the 拉取 button RUNS the sync — it is not a decoration that scrolls to another button', async () => {
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const syncApi = syncApiDouble()
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT', syncApi })
+    ;(root.querySelector('[data-testid="stock-prep-project-board-next-step-action"]') as HTMLButtonElement).click()
+    await flush()
+    expect(syncApi.dryRun).toHaveBeenCalled()
+  })
+
+  it('P0-3: a caller who may not run the sync gets the SENTENCE and no button (R-11)', async () => {
+    h.permissions = ['stock-prep:read']
+    routeApi({ board: notFound('STOCK_PREPARATION_PROJECT_BOARD_NOT_FOUND') })
+    const root = await mountBoard({ projectNo: 'NO-SUCH-PROJECT' })
+    const bar = root.querySelector('[data-testid="stock-prep-project-board-next-step"]') as HTMLElement
+    expect(bar.getAttribute('data-next-step')).toBe('pull')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-next-step-action"]')).toBeNull()
+  })
+
+  // ---- P0-6: the workspace title's own posture badge ---------------------------------------------
+
+  it('P0-6: the workspace title carries a posture badge', async () => {
+    const root = await mountBoard()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-posture"]')).not.toBeNull()
+  })
+
+  // ---- P0-9: 缺件卡 (I-4) — top consequence + bottom closure, both already/newly present ---------
+
+  it('P0-9 / I-4: 缺件卡 carries the top consequence sentence AND the bottom closure line, with the count tooltip', async () => {
+    const syncApi = syncApiDouble({
+      dryRun: vi.fn().mockResolvedValue({
+        canApply: true,
+        dryRunToken: 'tok_missing',
+        counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 },
+        evidence: {},
+        projectName: PROJECT_NAME,
+        missingComponents: {
+          distinctCount: 2,
+          probeCount: 3,
+          truncated: false,
+          items: [
+            { componentSourceId: 'C-1', parentSourceId: 'P-1', bomId: 'BOM-1', depth: 1, occurrenceCount: 2, parentCount: 1, path: 'Root' },
+            { componentSourceId: 'C-2', parentSourceId: 'P-2', bomId: 'BOM-1', depth: 2, occurrenceCount: 1, parentCount: 1, path: 'Root/P-2' },
+          ],
+        },
+      }),
+    })
+    const root = await mountBoard({ syncApi })
+    await runPullPanel(root)
+
+    const box = root.querySelector('[data-testid="stock-prep-project-sync-missing-components"]') as HTMLElement
+    expect(box).not.toBeNull()
+    // I-4's top sentence: the CONSEQUENCE, before the list (design's own exact wording, unchanged by
+    // this pass — this pins it stays there rather than re-derives it).
+    expect(box.textContent).toContain('整个项目在补齐前一行都写不进去')
+    // I-4's NEW bottom closure line (线框 D ③): no "mark done" button exists, and the card says so.
+    expect(box.textContent).toContain('回到上面点「同步一次」')
+    expect(box.textContent).toContain('不用在这里标记完成')
+    // I-20: the summary's own tooltip — what the COUNT means.
+    const summary = box.querySelector('summary') as HTMLElement
+    expect(summary.title).toContain('去重后的数量')
+  })
+
+  // ---- P0-9: I-20 tooltips reachable from this page (the other two are on the composed queue) ----
+
+  it('I-20: 表里有多少行 carries a values-free tooltip explaining what the row count does NOT mean', async () => {
+    const root = await mountBoard()
+    const dt = root.querySelector('[data-testid="stock-prep-project-board-rows"] dt') as HTMLElement
+    expect(dt.title).toContain('不是 BOM 总行数')
+  })
+
+  it('I-20: the home page\'s 可以导出 filter carries a tooltip (the board composes the home page when no project is open)', async () => {
+    const root = await mountBoard({ projectNo: '' })
+    await flush()
+    const chip = root.querySelector('[data-testid="stock-prep-operator-home-filter-ready"]') as HTMLElement
+    expect(chip).not.toBeNull()
+    expect(chip.title).toContain('已经写进多维表')
+  })
+
+  // ---- U2 契约: WHO pays for the union scan --------------------------------------------------
+  //
+  // This one component file is both faces of §2.3 — 今天要处理 when `?projectNo=` is empty and 项目备料页
+  // when it is not — and the U2 opt-in
+  // (`?includePullTargets=1`) is NOT free: the backend module states in its own
+  // header that the scan reads the whole binding sheet, pages by LIMIT/OFFSET, and that 「项目备料页
+  // does not opt in — it runs its own NARROWED scan and must not also pay an unnarrowed one … so this
+  // whole feature costs that route exactly zero queries」. These three cases are that ruling, expressed
+  // as request URLs, because it is invisible in the DOM and a single `if` is all that separates
+  // "charged once, on the home page" from "charged on every project an operator opens".
+
+  function directoryRequestUrls(): string[] {
+    return h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/operator/projects'))
+  }
+
+  it('U2: a WORKSPACE mount (a project is open) asks for the plain directory — no union scan is charged to it', async () => {
+    await mountBoard({ projectNo: PROJECT_NO })
+    const urls = directoryRequestUrls()
+    expect(urls.length, 'the board still fills its datalist from one directory read').toBe(1)
+    expect(urls[0]).not.toContain('includePullTargets')
+    expect(urls[0]).not.toContain('includePendingCounts')
+  })
+
+  it('U2: a HOME mount (no project open) is the one read that opts in', async () => {
+    await mountBoard({ projectNo: '' })
+    const urls = directoryRequestUrls()
+    expect(urls.length).toBe(1)
+    expect(urls[0]).toContain('includePullTargets=1')
+    expect(urls[0]).not.toContain('includePendingCounts')
+  })
+
+  it('U2: 返回今天要处理 re-reads WITH the opt-in — the home page never renders off the workspace\'s plain directory', async () => {
+    const root = await mountBoard({ projectNo: PROJECT_NO })
+    expect(directoryRequestUrls().length).toBe(1)
+
+    ;(root.querySelector('[data-testid="stock-prep-project-board-back-home"]') as HTMLButtonElement).click()
+    await flush()
+
+    // The component does not remount when it comes home (the shell drops `?projectNo=` under a live
+    // instance), so without an explicit re-read the home page would render off the un-opted-in payload
+    // for the rest of the session: every U2 field absent, the three sentences therefore permanently
+    // silent, and pull-target-only projects permanently missing from the cards.
+    const urls = directoryRequestUrls()
+    expect(urls.length, 'coming home issues exactly one more directory read').toBe(2)
+    expect(urls[1]).toContain('includePullTargets=1')
+    expect(urls[1]).not.toContain('includePendingCounts')
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+  })
+
+  // ---------------------------------------------------------------------------
+  // P1-2 (§6.2 P1-2, 线框 C/D) — Panel 2: 就地展开 embedded 队列 + 进度条.
+  //
+  // WHAT THESE WITNESS. The panel composes #5445's confirmation queue IN PLACE via its own `embedded`
+  // prop (StockPreparationConfirmationQueueView.vue) — nothing here re-implements the queue, and
+  // stockPreparationConfirmationQueue.spec.ts's own P1-2 block already covers that prop's contract in
+  // isolation (what it hides, and why each hide is a lie or a drift it prevents). What can ONLY be
+  // witnessed from this side is: WHEN the panel appears at all, that it starts collapsed and still
+  // says what it is, that expanding it never asks the shell to switch tabs, that the progress bar
+  // reads the SAME response the composed queue fetched, that confirming the last row IN PLACE brings
+  // the whole screen with it (§4.2 rule 4, on a path that never leaves the page), and that 「回到上面
+  // 再同步一次」 goes up AND runs the sync rather than pointing at a button and hoping.
+  // ---------------------------------------------------------------------------
+
+  function decisionsListPayload(byStatus: Record<string, number>): Record<string, unknown> {
+    const total = Object.values(byStatus).reduce((sum, n) => sum + n, 0)
+    return { rowCount: total, byStatus, byResolutionAction: {}, parkedCount: 0, rows: [] }
+  }
+
+  /** Bare LIST route only. NOT `path.includes('/confirm')` — `'/confirmation-decisions'` itself
+   *  contains that substring ("confirmation" starts with "confirm"), which would match the list call
+   *  too; anchoring on the `/` before the differing suffix is what keeps it out. */
+  function isDecisionsListUrl(path: string): boolean {
+    return /\/confirmation-decisions(\?|$)/.test(path)
+  }
+
+  interface ConfirmPanelState {
+    /** What the BOARD read answers — the number the title, the status card and 「下一步」 all read. */
+    boardPending: number
+    /** What the composed QUEUE's own LIST answers — the number the progress bar reads. */
+    byStatus: Record<string, number>
+    /** Directory switches, for the empty states 面板 2 can legitimately reach. */
+    ledgerReady?: boolean
+    directoryPending?: number
+  }
+
+  /** Mutable BY DESIGN: the whole point of the closed-loop test below is that these two numbers
+   *  disagree for a moment — the operator has just confirmed the last row — and the page must notice. */
+  function routeApiWithConfirmPanel(state: ConfirmPanelState): void {
+    h.apiFetch.mockImplementation(async (path: string) => {
+      if (path.includes('/operator/projects')) {
+        const directory = directoryPayload() as Record<string, unknown>
+        if (state.ledgerReady === false) directory.ledgerReady = false
+        if (typeof state.directoryPending === 'number') {
+          const projects = directory.projects as Record<string, unknown>[]
+          projects[0].pendingDecisionCount = state.directoryPending
+          directory.pendingProjectCount = state.directoryPending > 0 ? 1 : 0
+        }
+        return ok(directory)
+      }
+      if (isDecisionsListUrl(path)) return ok(decisionsListPayload(state.byStatus))
+      if (path.includes('/handoff')) return new Response('', { status: 404 })
+      if (path.includes('/board')) return ok(boardPayload({ pendingDecisionCount: state.boardPending }))
+      return ok({})
+    })
+  }
+
+  function toggleConfirmPanel(root: HTMLElement): void {
+    ;(root.querySelector('[data-testid="stock-prep-project-board-confirm-toggle"]') as HTMLButtonElement).click()
+  }
+
+  it('P1-2 (§2.4 P-2c): 面板 2 appears when something is waiting, and is absent when nothing is', async () => {
+    routeApi({ board: ok(boardPayload({ pendingDecisionCount: 0 })) })
+    const clear = await mountBoard()
+    expect(
+      clear.querySelector('[data-testid="stock-prep-project-board-confirm-panel"]'),
+      'the entry condition is pendingDecisionCount > 0 — a project with nothing waiting gets no empty box',
+    ).toBeNull()
+    app!.unmount()
+    app = null
+    container!.innerHTML = ''
+
+    routeApi({ board: ok(boardPayload({ pendingDecisionCount: 2 })) })
+    const waiting = await mountBoard()
+    expect(waiting.querySelector('[data-testid="stock-prep-project-board-confirm-panel"]')).not.toBeNull()
+  })
+
+  it('P1-2: Panel 2 starts COLLAPSED but not silent — 线框 C standing sentence included, and no request is gained', async () => {
+    routeApi({ board: ok(boardPayload({ pendingDecisionCount: 2 })) })
+    const root = await mountBoard()
+    const panel = root.querySelector('[data-testid="stock-prep-project-board-confirm-panel"]') as HTMLElement
+    expect(panel).not.toBeNull()
+    expect(panel.textContent).toContain('(2)')
+    // I-3: the collapsed panel explains itself AND names the step the design says is missed most often.
+    const note = root.querySelector('[data-testid="stock-prep-project-board-confirm-note"]') as HTMLElement
+    expect(note, '线框 C draws this sentence in BOTH states').not.toBeNull()
+    expect(note.textContent).toContain('同步一次')
+    expect(
+      root.querySelector('[data-testid="stock-prep-confirmation-queue"]'),
+      'nothing composed until the operator asks',
+    ).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-confirm-toggle"]')?.textContent).toContain('展开')
+    // No request went to the confirmation-decisions LIST route — only board/handoff/directory, exactly
+    // like every OTHER fixture in this file that never touches this toggle.
+    const listCalls = h.apiFetch.mock.calls.map((call) => String(call[0])).filter((url) => isDecisionsListUrl(url))
+    expect(listCalls).toEqual([])
+  })
+
+  it('P1-2: expanding composes the queue IN PLACE (embedded — its own input/title stay hidden), never a tab switch', async () => {
+    routeApiWithConfirmPanel({ boardPending: 2, byStatus: { confirmed: 1, pending: 1 } })
+    const navigateStageSpy = vi.fn()
+    const root = await mountBoard({ onNavigateStage: navigateStageSpy })
+
+    toggleConfirmPanel(root)
+    await flush()
+
+    const embedded = root.querySelector('[data-testid="stock-prep-confirmation-queue"]')
+    expect(embedded, 'expanding mounts the composed queue in place, on THIS SAME screen').not.toBeNull()
+    expect(embedded!.querySelector('[data-testid="stock-prep-confirmation-project-input"]'), 'embedded hides its own project-no input').toBeNull()
+    expect(embedded!.querySelector('[data-testid="stock-prep-confirmation-scope"]'), 'embedded hides its own scope/title paragraph').toBeNull()
+    expect(navigateStageSpy, 'expanding never asks the shell to switch tabs').not.toHaveBeenCalled()
+    // The board's own tab (data-active on the shell) is out of scope for a standalone board mount —
+    // the absence of any `navigate-stage` call above is the direct proof no tab switch was requested.
+    expect(root.querySelector('[data-testid="stock-prep-project-board-status"]'), 'and the workspace status card is still on screen underneath').not.toBeNull()
+  })
+
+  it('P1-2 (线框 D ①): 进度条 reads the SAME response the composed queue fetched, and lives INSIDE the expanded panel', async () => {
+    routeApiWithConfirmPanel({ boardPending: 1, byStatus: { confirmed: 1, pending: 1 } })
+    const root = await mountBoard()
+
+    toggleConfirmPanel(root)
+    await flush()
+
+    const progress = root.querySelector('[data-testid="stock-prep-project-board-confirm-progress"]') as HTMLElement
+    expect(progress, 'Panel 2 itself asks once on mount — the operator did not have to press 刷新列表').not.toBeNull()
+    expect(progress.textContent).toContain('已处理 1 / 共 2')
+    const fill = progress.querySelector('.sp-board__confirm-progress-fill') as HTMLElement
+    expect(fill.style.width).toBe('50%')
+    // §4.4 keeps 🟢 for 可以导出 / 已就绪 — a half-done bar must not wear it.
+    expect(fill.className).not.toContain('sp-board__confirm-progress-fill--done')
+
+    // Collapse again: the bar goes with the rows it describes. Left outside the expanded region it
+    // kept showing the last ratio it saw — including, after a project switch, the PREVIOUS project's.
+    toggleConfirmPanel(root)
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-confirm-progress"]')).toBeNull()
+  })
+
+  it('P1-2 (§4.2 rule 4): confirming the last row IN PLACE re-reads the board — one screen, one number, and 再同步一次 finally fires', async () => {
+    const state: ConfirmPanelState = { boardPending: 2, byStatus: { confirmed: 0, pending: 2 } }
+    routeApiWithConfirmPanel(state)
+    const root = await mountBoard()
+
+    toggleConfirmPanel(root)
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-confirm-panel"]')?.textContent).toContain('(2)')
+
+    // The operator confirms both rows inside the panel. What the SERVER holds afterwards:
+    state.byStatus = { confirmed: 2, pending: 0 }
+    state.boardPending = 0
+    // …and the panel re-reads its own list — the same `loadQueue` a successful confirm runs.
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-queue-refresh"]') as HTMLButtonElement).click()
+    await flush()
+
+    // ALL FOUR PLACES AGREE. Before this, the three that read `board.pendingDecisionCount` kept saying
+    // 2 while the progress bar directly under them said 「已处理 2 / 共 2」.
+    const panel = root.querySelector('[data-testid="stock-prep-project-board-confirm-panel"]') as HTMLElement
+    expect(panel, 'still on screen: it was expanded, so it does not vanish under the operator').not.toBeNull()
+    expect(panel.textContent, 'the panel own (N) is gone').not.toContain('(2)')
+    expect(
+      root.querySelector('[data-testid="stock-prep-project-board-pending"]'),
+      'and so is the status card sentence about things waiting',
+    ).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-board-confirm-progress"]')?.textContent).toContain('已处理 2 / 共 2')
+    // §4.2 rule 4 — 「都确认完了。再同步一次,数据才会写进多维表。」 The design calls this the step lost
+    // most often, and on the in-place path it could never fire at all before this.
+    const bar = root.querySelector('[data-testid="stock-prep-project-board-next-step"]') as HTMLElement
+    expect(bar.getAttribute('data-next-step')).toBe('resync')
+    expect(root.querySelector('[data-testid="stock-prep-project-board-next-step-action"]')?.textContent).toContain('再同步一次')
+  })
+
+  it('P1-2 (线框 D ④): 回到上面再同步一次 scrolls up AND runs the sync — it never navigates away', async () => {
+    const state: ConfirmPanelState = { boardPending: 2, byStatus: { confirmed: 2, pending: 0 } }
+    routeApiWithConfirmPanel(state)
+    const navigateStageSpy = vi.fn()
+    const syncApi = syncApiDouble()
+    const root = await mountBoard({ onNavigateStage: navigateStageSpy, syncApi })
+
+    state.boardPending = 0
+    toggleConfirmPanel(root)
+    await flush()
+
+    const syncSection = root.querySelector('[data-testid="stock-prep-project-sync"]') as HTMLElement
+    const scrollSpy = vi.fn()
+    // jsdom implements no scrollIntoView at all — stub it on the element the handler actually targets.
+    syncSection.scrollIntoView = scrollSpy
+    const runButton = root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement
+    const focusSpy = vi.spyOn(runButton, 'focus')
+
+    const resync = root.querySelector('[data-testid="stock-prep-confirmation-empty-resync"]') as HTMLButtonElement
+    expect(resync, 'nothing_pending (2 confirmed, 0 pending) renders the closed-loop button').not.toBeNull()
+    expect(resync.textContent, 'the wireframe label, which promises the journey as well as the sync').toContain('回到上面再同步一次')
+    resync.click()
+    await flush()
+
+    expect(scrollSpy, 'scrolled to the SAME sync panel 「下一步」 already reaches for').toHaveBeenCalled()
+    expect(focusSpy, 'and focused its run button').toHaveBeenCalled()
+    // THE LABEL IS NOT A DECORATION. A button that said 再同步一次 and only scrolled would put two
+    // near-identically worded buttons on one screen with the upper one doing the work.
+    expect(syncApi.dryRun, 'and the sync it names actually ran').toHaveBeenCalled()
+    expect(navigateStageSpy, 'never asked the shell to switch tabs — the panel already IS 上面').not.toHaveBeenCalled()
+  })
+
+  it('P1-2 (R-11): 面板 2 carries no control whose click goes nowhere, and no second way to change project', async () => {
+    // The account that would see the most: platform-admin capabilities on top of the operator tier.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'integration:admin']
+    routeApiWithConfirmPanel({ boardPending: 2, byStatus: { confirmed: 0, pending: 2 }, directoryPending: 4 })
+    const root = await mountBoard()
+    toggleConfirmPanel(root)
+    await flush()
+
+    const panel = root.querySelector('[data-testid="stock-prep-project-board-confirm-panel"]') as HTMLElement
+    // The two `admin-action` emitters: this host is not the shell, so nothing would answer them here.
+    expect(panel.querySelector('[data-testid="stock-prep-confirmation-ensure"]')).toBeNull()
+    expect(panel.querySelector('[data-testid="stock-prep-confirmation-reconcile"]')).toBeNull()
+    expect(panel.querySelector('[data-testid="stock-prep-confirmation-reconcile-note"]')).toBeNull()
+    // The cross-project worklist: one click would point 面板 2 at another project while the title, the
+    // status card, 导出 and 通知下一步 above it all stayed on this one.
+    expect(panel.querySelector('[data-testid="stock-prep-operator-project-worklist"]')).toBeNull()
+    expect(panel.querySelector('[data-testid="stock-prep-operator-project-pick"]')).toBeNull()
+    // G4: the status filter would let a filtered `byStatus` redraw the progress bar above it.
+    expect(panel.querySelector('[data-testid="stock-prep-confirmation-status-filter"]')).toBeNull()
+    // G1: exactly ONE 导出 on the screen, the host's own.
+    expect(root.querySelectorAll('[data-testid="stock-prep-confirmation-export"]').length).toBe(0)
+    expect(root.querySelectorAll('[data-testid="stock-prep-project-board-export"]').length).toBe(1)
+  })
+
+  it('P1-2: 去装:开始使用 inside 面板 2 still reaches 开始使用 — the host forwards navigate-stage', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin']
+    routeApiWithConfirmPanel({ boardPending: 2, byStatus: {}, ledgerReady: false })
+    const navigateStageSpy = vi.fn()
+    const root = await mountBoard({ onNavigateStage: navigateStageSpy })
+    toggleConfirmPanel(root)
+    await flush()
+
+    const empty = root.querySelector('[data-testid="stock-prep-confirmation-empty"]') as HTMLElement
+    expect(empty?.getAttribute('data-empty-state')).toBe('ledger_missing')
+    const goInstall = root.querySelector('[data-testid="stock-prep-confirmation-empty-go-install"]') as HTMLButtonElement
+    expect(goInstall, 'the P0-7 dead-end fix is still on screen in the composed view').not.toBeNull()
+    goInstall.click()
+    await flush()
+    // NOT a dead button: unlike the two admin-action emitters (absent above), this one rides the
+    // `navigate-stage` this host already emits to the shell, and it is re-emitted verbatim.
+    // P1-1 renamed the destination — 开始使用 is a rail item of its own now and the install page
+    // no longer renders the wizard — so the stage name that reaches the shell moved with it. The
+    // forwarding this case exists to pin (host re-emits the child's event unchanged) is unaffected.
+    expect(navigateStageSpy).toHaveBeenCalledWith('getting-started')
   })
 })
