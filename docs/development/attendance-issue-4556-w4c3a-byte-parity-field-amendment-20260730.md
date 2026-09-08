@@ -1,8 +1,26 @@
 # Attendance issue #4556 W4C-3a byte-parity field amendment
 
-Status: **PROPOSED — owner RATIFY required**
+Status: **RATIFIED** (the three exact byte-parity fields in section 3 only)
 
 Date: 2026-07-30
+
+Ratified: 2026-07-30, merged SHA
+`ab752d722327f11887e3884a23ed4f6304faa3c5` — the commit that landed this
+document on `main` (PR 4679) — with `OD-W4C-57=(a)`. Durable owner record
+(transcription of the owner's explicit instruction): PR 4679 comment
+`5125993049`,
+<https://github.com/zensgit/metasheet2/pull/4679#issuecomment-5125993049>.
+
+Scope of what the ratification authorizes: **only** the three exact
+byte-parity fields in section 3, and W4C-3a implementation depending on them.
+
+**Status reconciliation note (2026-08-09):** this header previously read
+`PROPOSED — owner RATIFY required`. That was in-repo status drift, not a
+pending decision — the owner record cited above predates this correction and is
+unchanged by it. This edit transcribes that existing record and confers no new
+authority; the linked owner comment is the authority, not this document and not
+the pull request carrying this edit. If any line here misstates that record, it
+must not merge.
 
 Authority proposed against:
 

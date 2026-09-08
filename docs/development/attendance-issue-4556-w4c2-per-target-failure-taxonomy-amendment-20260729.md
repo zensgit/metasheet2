@@ -1,15 +1,35 @@
 # Attendance Issue #4556 W4C-2 Per-Target Failure Taxonomy Amendment
 
-> Status: **PROPOSED**
+> Status: **RATIFIED** (option (a) implementation and its independent gate only)
 >
 > Date: 2026-07-29
 >
-> Decision: `OD-W4C-54`
+> Decision: `OD-W4C-54` — resolved `(a)`
 >
-> This document does not authorize runtime changes, merge of PR #4612 or
-> PR #4668, later W4C slices, staging soak, flag changes, deployment, production
-> use, or closure of issue #4556. It requires owner RATIFY of the exact merged
-> SHA before its selected option is implemented.
+> Ratified: 2026-07-29, merged SHA
+> `548d9f35974cfd50a5cc4c54a76d4a3df01a198e` — the commit that landed this
+> document on `main` (PR 4669) — with `OD-W4C-54=(a)`. Durable owner record
+> (relayed transcription): PR 4669 comment `5110505124`,
+> <https://github.com/zensgit/metasheet2/pull/4669#issuecomment-5110505124>.
+>
+> Scope of what the ratification authorizes: resume W4C-2 **only** to implement
+> and independently gate option (a) — keep the production permanent-rejection
+> allowlist empty, keep production failed-outcome callsites at zero, exercise
+> the failed-outcome writer through the named real-DB contract fixture, and
+> record the run/event/promotion pinning residual honestly.
+>
+> Ratification authorizes the slice it names and nothing downstream: this
+> document still does not authorize merging parent PR 4612 or PR 4668, starting
+> W4C-3a or any later W4C slice, enabling flags, deploying, using customer data,
+> running the W4C-5 staging soak, or closing issue 4556. Each of those remains
+> separately gated.
+>
+> **Status reconciliation note (2026-08-09):** this header previously read
+> `PROPOSED`. That was in-repo status drift, not a pending decision — the owner
+> record cited above predates this correction and is unchanged by it. This edit
+> transcribes that existing record and confers no new authority; the linked
+> owner comment is the authority, not this document and not the pull request
+> carrying this edit. If any line here misstates that record, it must not merge.
 
 ## 0. Why this amendment exists
 
@@ -23,9 +43,12 @@ The durable owner record is PR #4617 comment `c-5090978124` (2026-07-27):
 it RATIFYs amendment merge
 `d1bed9d640f8ee634975c70a6c981d2f49a97832` together with provenance erratum
 `d449aa7e6d02f94df2738a77cafffa778b12fde0`, and selects Bundle A including
-`OD-W4C-50=(a)`. The source amendment's own header remains a point-in-time
+`OD-W4C-50=(a)`. The source amendment's own header carried a point-in-time
 `PROPOSED` header because the owner decision happened after that document
-merged; that stale header is not itself the ratification evidence.
+merged; that stale header was never itself the ratification evidence.
+(Status reconciliation, 2026-08-09: that stale header has since been corrected
+to `RATIFIED` against this same durable record. The reasoning in this paragraph
+is unchanged — the comment, not either header, is the evidence.)
 
 PR #4612 implements that representation, writer, integrity checks,
 finalization behavior, and run-level event counts. Its production scheduled

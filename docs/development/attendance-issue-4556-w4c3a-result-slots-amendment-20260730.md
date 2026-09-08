@@ -1,8 +1,28 @@
 # Attendance issue #4556 W4C-3a result-slot amendment
 
-Status: **PROPOSED - owner RATIFY required**
+Status: **RATIFIED** (W4C-3a remediation and a fresh exact-head gate only)
 
 Date: 2026-07-30
+
+Ratified: 2026-07-31, merged SHA
+`d13a1a6ec09f663895c390b6e48406b078eb3239` — the commit that landed this
+document on `main` (PR 4687) — with `OD-W4C-60=(a)`. Durable owner record
+(relayed from the owner's explicit instruction): PR 4687 comment `5137579132`,
+<https://github.com/zensgit/metasheet2/pull/4687#issuecomment-5137579132>.
+
+Scope of what the ratification authorizes: exactly what this amendment states
+— W4C-3a remediation and a fresh exact-head independent gate, and nothing
+downstream. It does **not** authorize the W4C-3a code PR merge or caller
+cutover, W4C-3b or later slices, staging or soak, flag changes, deployment,
+production/customer data, or issue closure.
+
+**Status reconciliation note (2026-08-09):** this header previously read
+`PROPOSED - owner RATIFY required`. That was in-repo status drift, not a
+pending decision — the owner record cited above predates this correction and is
+unchanged by it. This edit transcribes that existing record and confers no new
+authority; the linked owner comment is the authority, not this document and not
+the pull request carrying this edit. If any line here misstates that record, it
+must not merge.
 
 Authority proposed against:
 
@@ -91,9 +111,13 @@ the async compact summary a synchronous response.
 
 ### OD-W4C-60 - close result policy and result slots
 
-Numbers 58 and 59 are already reserved by the still-PROPOSED group-precondition
-and locked-race amendments in PRs #4685 and #4686. This numbering records only
-ballot order; it does not imply either earlier amendment is merged or RATIFIED.
+Numbers 58 and 59 are already reserved by the group-precondition and
+locked-race amendments in PR 4685 and PR 4686, which were still `PROPOSED` when
+this ballot was written. This numbering records only ballot order; it did not
+imply either earlier amendment was merged or RATIFIED at the time.
+(Status reconciliation, 2026-08-09: both were subsequently RATIFIED on
+2026-07-31 — `OD-W4C-58=(a)` and `OD-W4C-59=(a)` — so the "still-PROPOSED"
+wording above is corrected to past tense. The ballot-order point is unchanged.)
 
 - **(a) Recommended:** apply the exact corrections in section 4 and continue
   W4C-3a only after the merged amendment is independently reviewed and

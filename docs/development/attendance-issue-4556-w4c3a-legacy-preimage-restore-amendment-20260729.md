@@ -1,15 +1,34 @@
 # Attendance Issue #4556 W4C-3a Legacy Preimage Restore Amendment
 
-> Status: **PROPOSED**
+> Status: **RATIFIED** (implementation of option (a) only)
 >
 > Date: 2026-07-29
 >
-> Decision: `OD-W4C-55`
+> Decision: `OD-W4C-55` — resolved `(a)`
 >
-> This document does not authorize W4C-3a runtime changes, merge of a W4C-3a
-> implementation PR, W4C-3b or later slices, flag changes, deployment, staging
-> soak, production use, or closure of issue #4556. The selected option requires
-> owner RATIFY of the exact merged SHA before rollback DML is implemented.
+> Ratified: 2026-07-29, merged SHA
+> `1055e543a3680be9f37462de23483bf61ad4610c` — the commit that landed this
+> document on `main` (PR 4672) — with `OD-W4C-55=(a)`. Durable owner record
+> (transcribed by the implementation agent, which is not the decision-maker):
+> PR 4672 comment `5113759839`,
+> <https://github.com/zensgit/metasheet2/pull/4672#issuecomment-5113759839>.
+>
+> Scope of what the ratification authorizes: implementing **only option (a)**
+> of this amendment at the exact merge SHA above. The implementation remains
+> subject to a fresh exact-head independent gate with zero P1/P2 findings and a
+> separate owner merge decision.
+>
+> Ratification authorizes the slice it names and nothing downstream: this
+> document still does not authorize merge of the W4C-3a implementation PR,
+> W4C-3b or later slices, flag changes, deployment, staging or soak, customer
+> or production data, or closure of issue 4556.
+>
+> **Status reconciliation note (2026-08-09):** this header previously read
+> `PROPOSED`. That was in-repo status drift, not a pending decision — the owner
+> record cited above predates this correction and is unchanged by it. This edit
+> transcribes that existing record and confers no new authority; the linked
+> owner comment is the authority, not this document and not the pull request
+> carrying this edit. If any line here misstates that record, it must not merge.
 
 ## 0. Why this amendment exists
 
