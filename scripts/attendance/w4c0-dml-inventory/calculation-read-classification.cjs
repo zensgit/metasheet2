@@ -17,6 +17,17 @@ function entry(relPath, enclosingSymbol, table, count, posture, role, requiredPr
 }
 
 const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
+  // #4840: operator, QA, and staging reads use exact path/symbol/table identity and pinned multiplicity.
+  entry('scripts/attendance/execute-ops-retirement-cleanup.cjs', 'main', 'attendance_record_calculations', 3, 'history', 'operator_cleanup'),
+  entry('scripts/attendance/generate-cleanup-sql.cjs', 'buildCleanupSql', 'attendance_record_calculations', 1, 'history', 'operator_cleanup'),
+  entry('scripts/attendance/w4c2-qa/qa-residue-check.sql', '(module-scope)', 'attendance_record_calculations', 4, 'history', 'qa_read_check'),
+  entry('scripts/attendance/w4c2-qa/qa-residue-check.sql', '(module-scope)', 'attendance_record_segments', 2, 'history', 'qa_read_check'),
+  entry('scripts/attendance/w4c2-qa/w4c2-roster-read-side-reconciliation.sql', '(module-scope)', 'attendance_record_calculations', 2, 'history', 'qa_read_check'),
+  entry('scripts/ops/attendance-staging-window-runner-remote.sh', '(module-scope)', 'attendance_record_calculations', 18, 'history', 'staging_window_verification'),
+  entry('scripts/ops/attendance-staging-window-runner-remote.sh', 'pg', 'attendance_record_calculations', 5, 'history', 'staging_window_verification'),
+  entry('scripts/ops/staging-attendance-tooling-teardown.mjs', 'cleanupStagingAttendanceScope', 'attendance_record_calculations', 3, 'history', 'staging_teardown'),
+  entry('scripts/ops/staging-attendance-tooling-teardown.mjs', 'countW4ImmutableAttendanceRows', 'attendance_record_calculations', 1, 'history', 'staging_teardown'),
+  entry('scripts/ops/staging-attendance-tooling-teardown.mjs', 'runStagingAttendanceRecordTeardown', 'attendance_record_calculations', 1, 'history', 'staging_teardown'),
   // Immutable operation/prior-calculation recovery and posture-selected write CAS, not public current reads.
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'readAttendanceCleaningCompletedOperations', 'attendance_record_calculations', 2, 'history', 'cleanup_recovery_precondition'),
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'loadSelectedCalculation', 'attendance_record_calculations', 2, 'history', 'posture_selected_write_precondition'),
@@ -78,10 +89,6 @@ function classifyAttendanceCalculationReadSites(
   const predicateDrift = []
 
   for (const site of sites) {
-    if (site.relPath.startsWith('scripts/')) {
-      classifiedSites.push({ ...site, posture: 'history', role: 'operator_fixture_or_audit' })
-      continue
-    }
     if (site.relPath.includes('/migrations/')) {
       classifiedSites.push({ ...site, posture: 'history', role: 'schema_migration' })
       continue
