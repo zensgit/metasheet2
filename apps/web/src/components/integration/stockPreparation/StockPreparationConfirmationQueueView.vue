@@ -407,8 +407,8 @@
 
            GATED ON WHO CAN ACTUALLY ARRIVE (R-11「可见即可用」). `ledger_missing` is reachable by any
            caller who can read the directory — an operator on a half-installed deployment sees this
-           empty state too — but the install tab is filtered out of `visibleViews` for anyone without
-           `stock-prep:admin`, so for them `activeKey='install'` silently falls back to their landing
+           empty state too — but 开始使用 is filtered out of `visibleViews` for anyone without
+           `stock-prep:admin`, so for them `activeKey='getting-started'` silently falls back to their landing
            tab. A button that teleports an operator to the project board is a NEW dead end, not a
            closed one. Ungated, they keep the empty state's own zhNext:「得先请管理员建这张表」. -->
       <!-- P1-2: STAYS in embedded mode, and it works there — unlike the two `admin-action` buttons
@@ -416,11 +416,18 @@
            shell for its own reasons and now re-emits verbatim for this view. So the click still lands
            on 开始使用. It is gated on `canOpenInstallView`, so only a caller whose shell actually
            renders that tab ever sees it — in either mode. -->
+      <!-- P1-1: THE DESTINATION IS 开始使用, and now it is named that. It always meant the wizard —
+           设计稿 §2.3's minimal fix for A1 is 「把落在空队列上的管理员送到向导」 — and while the wizard
+           was a passenger on the install page's first screen, `'install'` was how you got there. P1-1
+           gave it its own rail item and made the install page render `mode="review"` (no wizard), so
+           a button labelled 「去装:开始使用」 would have arrived on a page with no 开始使用 on it. The
+           gate is unchanged: `getting-started` rides the same `canOpenStockPrepInstallView` the
+           install tab does, so a caller whose shell does not render it still never sees this. -->
       <button
         v-if="emptyState === 'ledger_missing' && canOpenInstallView"
         type="button"
         data-testid="stock-prep-confirmation-empty-go-install"
-        @click="emit('navigate-stage', 'install')"
+        @click="emit('navigate-stage', 'getting-started')"
       >{{ bi(ledgerMissingActionLabel.zh, ledgerMissingActionLabel.en) }}</button>
       <!-- P0-9 (线框 D ④): "把『确认完要回来再同步一次』从词表句子变成控件" — the closed-loop button
            for the ONE step every day loses the most. Goes back to the project board FOR THE SAME
@@ -687,7 +694,7 @@ const capabilityById = computed(() => {
 function can(capabilityId: string): boolean {
   const capability = capabilityById.value.get(capabilityId)
   if (!capability) return false
-  return canStockPrepCapability(capability, (permission) => auth.hasPermission(permission))
+  return canStockPrepCapability(capability, auth.getAccessSnapshot())
 }
 
 /**
@@ -725,7 +732,7 @@ const pendingConfirmTooltip = STOCK_PREP_TOOLTIP_PENDING_CONFIRM
  * platform-admin write gate, and a `stock-prep:admin` holder who may READ the install page but not
  * run it should still be able to go look at it.
  */
-const canOpenInstallView = computed(() => canOpenStockPrepInstallView((permission) => auth.hasPermission(permission)))
+const canOpenInstallView = computed(() => canOpenStockPrepInstallView(auth.getAccessSnapshot()))
 
 /**
  * The SAME predicate the shell filters 项目备料 with — the sibling of the one above, for the sibling
@@ -735,7 +742,7 @@ const canOpenInstallView = computed(() => canOpenStockPrepInstallView((permissio
  * their landing tab — a button that moves nothing. It is one predicate, read from workbenchAccess.ts,
  * so a change to who may open that tab can never leave this button behind.
  */
-const canOpenProjectBoard = computed(() => canOpenStockPrepProjectBoard((permission) => auth.hasPermission(permission)))
+const canOpenProjectBoard = computed(() => canOpenStockPrepProjectBoard(auth.getAccessSnapshot()))
 
 /** 「复制这条报错」(P0-5, I-21). idle → copy → copied → idle again 3s later; never a permanent state. */
 const errorCopyLabel = ref<'copy' | 'copied'>('copy')

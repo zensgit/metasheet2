@@ -462,10 +462,136 @@ function stockPrepGateTokensInSource(source) {
   return requireAccessGateExpressionsInSource(source).literals.filter(isStockPrepPermissionCode).sort()
 }
 
+// ---------------------------------------------------------------------------
+// P1-1 — THE WORKBENCH RAIL AND THE LANDING RULING (D2), MIRRORED
+// ---------------------------------------------------------------------------
+//
+// The `/stock-prep` tab strip became a grouped vertical rail. Its grouping, its per-item gate and
+// the landing item are stated here as DATA and as one pure decision, for exactly the reason the
+// capability manifest above is: the browser half
+// (`apps/web/src/services/integration/stockPreparation/workbenchAccess.ts`) is asserted byte-equal
+// to this block by `stockPrepPermissionMatrix.spec.ts` F-01, so a rename or a re-tier on either side
+// reddens a test instead of drifting.
+//
+// WHAT THIS BLOCK IS NOT. It grants nothing and no route consults it. It is vocabulary — the same
+// role `STOCK_PREP_ROUTE_PERMISSION` above already plays for the route meta the browser declares.
+// The permission decisions it composes are the existing ones: `satisfiesStockPrepAccess` and
+// `holdsPlatformAdmin`, called and never restated.
+
+/** Reachability alone: everyone who can OPEN `/stock-prep` sees the item. */
+const STOCK_PREP_RAIL_GATE_ROUTE = 'route'
+/** The operator VALUE tier (operate AND read) — 今天要处理 / 项目备料. */
+const STOCK_PREP_RAIL_GATE_OPERATOR_BOARD = 'operator-board'
+/** The workbench-scoped ceiling (stock-prep:admin and above) — the whole 【部署与接入】 group. */
+const STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN = 'workbench-admin'
+/** Platform admin — the legacy MVP tabs, folded into 深度工具 but NOT re-tiered. */
+const STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN = 'platform-admin'
+
+const STOCK_PREP_RAIL_GATES = Object.freeze([
+  STOCK_PREP_RAIL_GATE_ROUTE,
+  STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+  STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN,
+  STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
+])
+
+/**
+ * The rail, group by group and item by item. `key` is the view key the browser renders as
+ * `data-testid="stock-prep-tab-<key>"`; the GROUP HEADING is not an item and is not a tab.
+ */
+const STOCK_PREP_RAIL_GROUPS = Object.freeze([
+  Object.freeze({
+    group: 'work',
+    items: Object.freeze([
+      Object.freeze({ key: 'home', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
+      Object.freeze({ key: 'project-board', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
+      Object.freeze({ key: 'confirmation-queue', gate: STOCK_PREP_RAIL_GATE_ROUTE }),
+    ]),
+  }),
+  Object.freeze({
+    group: 'deploy',
+    items: Object.freeze([
+      Object.freeze({ key: 'getting-started', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+      Object.freeze({ key: 'install', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+      Object.freeze({ key: 'ops', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+    ]),
+    advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
+    advanced: Object.freeze([
+      'dashboard',
+      'project-workspace',
+      'bom-snapshot-diff',
+      'material-mapping',
+      'unit-conversion',
+      'prep-line',
+      'exception-queue',
+    ]),
+  }),
+  Object.freeze({
+    group: 'help',
+    items: Object.freeze([
+      Object.freeze({ key: 'help', gate: STOCK_PREP_RAIL_GATE_ROUTE }),
+    ]),
+  }),
+])
+
+/**
+ * Resolve one rail gate token against a flattened permission list. An UNKNOWN token is a refusal —
+ * including for a platform admin — for the same reason `satisfiesStockPrepAccess` refuses an unknown
+ * code: a mistyped gate must not fall through to a looser default.
+ */
+function satisfiesStockPrepRailGate(permissions, gate) {
+  const held = Array.isArray(permissions) ? permissions : []
+  if (gate === STOCK_PREP_RAIL_GATE_ROUTE) return satisfiesStockPrepAccess(held, STOCK_PREP_ROUTE_PERMISSION)
+  if (gate === STOCK_PREP_RAIL_GATE_OPERATOR_BOARD) return satisfiesStockPrepAccess(held, STOCK_PREP_OPERATE)
+  if (gate === STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN) return satisfiesStockPrepAccess(held, STOCK_PREP_ADMIN)
+  if (gate === STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN) return holdsPlatformAdmin(held)
+  return false
+}
+
+/** Every value `stockPrepWorkbenchLandingKey` can return, in decision order. */
+const STOCK_PREP_LANDING_KEYS = Object.freeze([
+  'getting-started',
+  'ops',
+  'home',
+  'confirmation-queue',
+])
+
+/**
+ * D2=A — WHERE A PRINCIPAL LANDS on `/stock-prep`.
+ *
+ * `deploymentReady` is THREE-valued and the third value is the point of the rule:
+ *   true   the deployment answered and it is installed          -> 记录与排查
+ *   false  the deployment answered and it is not installed yet  -> 开始使用
+ *   null   nobody could read the preflight                      -> 开始使用
+ * 「看不到」 is not 「装完了」, so an unreadable preflight lands on the wizard, never on the health
+ * page. The argument is not consulted for a principal below the workbench-admin ceiling.
+ */
+function stockPrepWorkbenchLandingKey(permissions, deploymentReady) {
+  const held = Array.isArray(permissions) ? permissions : []
+  if (satisfiesStockPrepRailGate(held, STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN)) {
+    return deploymentReady === true ? 'ops' : 'getting-started'
+  }
+  // The operator tier lands on 今天要处理. A platform admin never reaches this line — the workbench
+  // ceiling above admits them first — which is how this stays aligned with the browser's own
+  // `landsOnStockPrepProjectBoard` fold, that one excluding a platform admin from the operator
+  // landing rather than admitting them earlier.
+  //
+  // 两侧同形,不吃通配. The browser half
+  // (`apps/web/src/services/integration/stockPreparation/workbenchAccess.ts`) computes every gate,
+  // landing key and capability set from its own transcription of `satisfiesStockPrepAccess` /
+  // `holdsPlatformAdmin` over the SAME flattened principal — literal `includes`, no `*:*`, no
+  // `stock-prep:*`, no `stock-prep:write` → read. `stockPrepPermissionMatrix.spec.ts` F-09/F-10
+  // assert the two as a UNIVERSAL equality (every actor, every gate, every landing key, every
+  // capability set), so there is no principal for whom the sides answer differently and no exception
+  // to enumerate here.
+  if (satisfiesStockPrepRailGate(held, STOCK_PREP_RAIL_GATE_OPERATOR_BOARD)) return 'home'
+  return 'confirmation-queue'
+}
+
 module.exports = {
   PLATFORM_ADMIN_GATE,
   PLATFORM_ADMIN_PERMISSIONS,
   STOCK_PREP_ADMIN,
+  STOCK_PREP_LANDING_KEYS,
   STOCK_PREP_OPERATE,
   STOCK_PREP_OPERATOR_PULL_ACTION_ID,
   STOCK_PREP_OPERATOR_PULL_STEPS,
@@ -473,6 +599,12 @@ module.exports = {
   STOCK_PREP_PERMISSION_DESCRIPTORS,
   STOCK_PREP_PERMISSION_NAMESPACE,
   STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
+  STOCK_PREP_RAIL_GATES,
+  STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+  STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
+  STOCK_PREP_RAIL_GATE_ROUTE,
+  STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN,
+  STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
   STOCK_PREP_WORKBENCH_CAPABILITIES,
@@ -482,5 +614,7 @@ module.exports = {
   operatorMayRunStockPrepPull,
   requireAccessGateExpressionsInSource,
   satisfiesStockPrepAccess,
+  satisfiesStockPrepRailGate,
   stockPrepGateTokensInSource,
+  stockPrepWorkbenchLandingKey,
 }

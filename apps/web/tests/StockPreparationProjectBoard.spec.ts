@@ -310,26 +310,38 @@ describe('项目备料页 — the operator project board', () => {
       const tab = root.querySelector('[data-testid="stock-prep-tab-project-board"]')
       expect(Boolean(tab), `${JSON.stringify(actor)} tab visibility`).toBe(actor.visible)
       // The predicate and the DOM must agree — the tab is not allowed to have its own opinion.
-      expect(canOpenStockPrepProjectBoard(realHasPermission)).toBe(actor.visible)
+      expect(canOpenStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })).toBe(actor.visible)
       remount()
     }
   })
 
-  it('B-01: an operator LANDS on the board; a platform admin keeps 确认队列', async () => {
+  // P1-1 / D2=A (2026-09-08). This case is about WHOSE LANDING IS WHOSE, and both halves still say
+  // exactly that — the keys they name moved:
+  //   * the operator lands on 今天要处理 rather than 项目备料. Same component, same pixels: P0 already
+  //     rendered the task home inside the board whenever no project was open, and P1-1 gave that
+  //     page its own rail item. `landsOnStockPrepProjectBoard` — the tier predicate, unchanged — is
+  //     still asserted, because it is still what decides that this actor gets the operator landing.
+  //   * the platform admin no longer keeps 确认队列. That is the D2 ruling itself: landing an admin
+  //     on an empty queue was the documented dead end (设计稿 §2.3 A1). They land on 开始使用 here
+  //     because this file's `routeApi` answers the deployment preflight with `{}`, i.e. not ready —
+  //     and a not-ready (or unreadable) deployment lands on the wizard, never on the health page.
+  it('B-01: an operator LANDS on 今天要处理; a platform admin lands where D2 sends them', async () => {
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
     h.roles = []
     let root = mount(StockPreparationWorkspace)
     await flush()
-    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-board')
-    expect(landsOnStockPrepProjectBoard(realHasPermission)).toBe(true)
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
+    expect(landsOnStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })).toBe(true)
+    // ...and 项目备料 is still one click away, still its own rail item.
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-board"]')).not.toBeNull()
     remount()
 
     h.permissions = ['integration:admin']
     h.roles = ['admin']
     root = mount(StockPreparationWorkspace)
     await flush()
-    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
-    expect(landsOnStockPrepProjectBoard(realHasPermission)).toBe(false)
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('getting-started')
+    expect(landsOnStockPrepProjectBoard({ roles: h.roles, permissions: h.permissions })).toBe(false)
   })
 
   it('B-01: the pull control follows the SERVER split, and the two vocabularies are byte-mirrored', () => {
@@ -354,7 +366,7 @@ describe('项目备料页 — the operator project board', () => {
       const serverAdmitsOperator = backendAccess.operatorMayRunStockPrepPull(flattened, STOCK_PREP_OPERATOR_PULL_ACTION_ID)
       // The button renders when EITHER tier admits: the legacy platform admin, or the operator tier.
       const legacyAdmin = flattened.includes('integration:admin') || flattened.includes('role:admin')
-      expect(canRunStockPrepProjectSync(realHasPermission)).toBe(serverAdmitsOperator || legacyAdmin)
+      expect(canRunStockPrepProjectSync({ roles: h.roles, permissions: h.permissions })).toBe(serverAdmitsOperator || legacyAdmin)
     }
   })
 
@@ -1510,6 +1522,9 @@ describe('项目备料页 — the operator project board', () => {
     await flush()
     // NOT a dead button: unlike the two admin-action emitters (absent above), this one rides the
     // `navigate-stage` this host already emits to the shell, and it is re-emitted verbatim.
-    expect(navigateStageSpy).toHaveBeenCalledWith('install')
+    // P1-1 renamed the destination — 开始使用 is a rail item of its own now and the install page
+    // no longer renders the wizard — so the stage name that reaches the shell moved with it. The
+    // forwarding this case exists to pin (host re-emits the child's event unchanged) is unaffected.
+    expect(navigateStageSpy).toHaveBeenCalledWith('getting-started')
   })
 })

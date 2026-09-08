@@ -208,7 +208,7 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-const canBind = computed(() => canRunStockPrepInstall((permission) => auth.hasPermission(permission)))
+const canBind = computed(() => canRunStockPrepInstall(auth.getAccessSnapshot()))
 
 const busy = ref(false)
 const errorStatus = ref<number | null>(null)

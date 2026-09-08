@@ -445,7 +445,7 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-const canRun = computed(() => canRunStockPrepProjectSync((permission) => auth.hasPermission(permission)))
+const canRun = computed(() => canRunStockPrepProjectSync(auth.getAccessSnapshot()))
 
 /** See `runVariant`. Tuples so the template can spread them straight into `bi`. */
 const runLabel = computed<[string, string]>(() => (props.runVariant === 'pull'

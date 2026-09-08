@@ -51,6 +51,39 @@
       <a href="/data-sources" data-testid="stock-prep-getting-started-link-data-sources">{{ bi('去外接数据源页 ↗', 'Go to the data-sources page ↗') }}</a>
     </p>
 
+    <!-- ② 证明它只能读 — 线框 B says 「在哪做 = 本页」, and P1-1 is what made that need saying: when
+         the wizard has a rail item of its own, the 源就绪预检 card that carries this action stays
+         behind on 数据来源与体检. Without an entry point here, ② would read 「未检查」 forever on the
+         one page the ruling lands a new deployment's admin on, with nothing on screen to check it
+         with. Absent (`'none'`) whenever that card IS on screen — one action, one control. -->
+    <p
+      v-if="props.sourceCheckControl === 'run'"
+      class="stock-prep-gs__hint"
+      data-testid="stock-prep-getting-started-step-source-verify"
+    >
+      {{ bi(
+        '②「证明它只能读」要真跑一次才有答案 —— 只读一小页,不动对方任何东西。',
+        'Step ② only has an answer once it has actually been run — it reads one small page and changes nothing on their side.',
+      ) }}
+      <button
+        type="button"
+        class="stock-prep-gs__button"
+        data-testid="stock-prep-getting-started-run-source-preflight"
+        :disabled="props.busy"
+        @click="emit('run-source-preflight')"
+      >{{ bi('检查这个源', 'Check this source') }}</button>
+    </p>
+    <p
+      v-else-if="props.sourceCheckControl === 'denied'"
+      class="stock-prep-gs__hint"
+      data-testid="stock-prep-getting-started-step-source-verify-denied"
+    >
+      {{ bi(
+        '②「证明它只能读」要读对方的库,所以只有对接权限的人能跑。您看得到结果,点不了这一步。',
+        'Step ② reads the customer’s database, so only an integration role may run it. You can read the result; you cannot run it yourself.',
+      ) }}
+    </p>
+
     <!-- ④ 建表 + 装列 — the one step this page actually DRIVES. Blockers split by fix.kind (I-8/I-9):
          an `http` blocker's next-step sentence points at THE card's own 「开始安装」 and carries the
          "重复点是安全的" reassurance; an `env` blocker gets no fix path at all — only a copy-for-ops
@@ -464,10 +497,18 @@ const props = defineProps<{
   report: StockPreparationInstallRunReport | null
   canRunInstall: boolean
   busy: boolean
+  /**
+   * P1-1 — whether THIS component carries step ②'s run control (see the install view's
+   * `wizardSourceCheckControl`). Optional and defaulting to `'none'`, so every existing caller and
+   * every spec that mounts this component directly renders byte-for-byte what it did before.
+   */
+  sourceCheckControl?: 'none' | 'run' | 'denied'
 }>()
 
 const emit = defineEmits<{
   (event: 'run-preflight-check'): void
+  /** ② 证明它只能读 — the host owns the read; this component owns only the button. */
+  (event: 'run-source-preflight'): void
   (event: 'run-install'): void
   (event: 'navigate-stage', viewKey: string): void
 }>()
@@ -831,9 +872,14 @@ function copyInstallTodo(): void {
     const plain = blockerPlain(blocker.code)
     return plain ? `· ${blocker.code} — ${bi(plain.zh, plain.en)}` : `· ${blocker.code}`
   })
+  // THE ROUTE IN THIS SENTENCE IS A PLACE ON A SCREEN, so it moves when the screen does. P1-1 gave
+  // 开始使用 its own rail item, which means it is no longer 「『安装 / 体检』最上面的那一段」 — an
+  // administrator following the old wording would land on a page with no wizard on it. Asserted in
+  // StockPreparationGettingStarted.spec.ts so the next move of this view reddens a test rather than
+  // a chat message somebody already pasted.
   const head = bi(
-    '备料工作台第 4 步(建表 + 装列)还没过。请平台管理员打开备料工作台 →「安装 / 体检」→ 最上面的「开始使用」→ 第④步 → 点「开始安装」。重复运行是安全的。',
-    'Stock-prep step 4 (create tables and install columns) has not passed. Please have a platform administrator open the stock-preparation workbench → "Install / Health" → "Getting started" at the top → step ④ → press "Start install". Running it again is safe.',
+    '备料工作台第 4 步(建表 + 装列)还没过。请平台管理员打开备料工作台 → 左栏「开始使用」→ 第④步 → 点「开始安装」。重复运行是安全的。',
+    'Stock-prep step 4 (create tables and install columns) has not passed. Please have a platform administrator open the stock-preparation workbench → "Getting started" in the left rail → step ④ → press "Start install". Running it again is safe.',
   )
   const detail = lines.length > 0
     ? `\n${bi('还差这些:', 'Outstanding:')}\n${lines.join('\n')}`

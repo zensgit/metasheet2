@@ -939,6 +939,25 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(payload).toContain('STOCK_PREP_CUSTOMER_PACK_NOT_CONFIGURED')
   })
 
+  it('the hand-off to-do routes the reader to where this wizard ACTUALLY is (P1-1)', async () => {
+    // THIS STRING IS PASTED INTO A CHAT WINDOW, so it outlives the screen it was written against and
+    // nobody re-reads it when a view moves. It used to say 「打开备料工作台 →『安装 / 体检』→ 最上面
+    // 的『开始使用』」, which was true while the wizard rode the install page's first screen; P1-1
+    // gave 开始使用 its own rail item and made the install page render without a wizard, so the old
+    // wording sent a platform administrator to a page that has none. Pinned here so the NEXT move of
+    // this view reddens a test rather than a message somebody already sent.
+    const root = await mount({ canRunInstall: false, preflight: preflight({ blockers: [httpBlocker()] }) })
+    ;(root.querySelector('[data-testid="stock-prep-getting-started-copy-todo-install"]') as HTMLButtonElement).click()
+    await nextTick()
+    const payload = h.copied[0]
+    expectValuesFree(payload)
+    expect(payload).toContain('左栏「开始使用」')
+    expect(payload).toContain('第④步')
+    expect(payload).toContain('开始安装')
+    // The tab it no longer lives on must not be named as the way in.
+    expect(payload).not.toContain('安装 / 体检')
+  })
+
   it('the group-chat payload is values-free and does not name a landing tab or claim installation', async () => {
     const root = await mount({ report: report({ pass: true, skipCount: 5 }) })
     ;(root.querySelector('[data-testid="stock-prep-getting-started-copy-handoff"]') as HTMLButtonElement).click()
