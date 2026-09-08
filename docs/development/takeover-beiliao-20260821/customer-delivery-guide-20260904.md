@@ -586,7 +586,7 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 ### 6.6 验收方式(r19 起)
 
-自 r19 起,备料工作台的界面验收已经进入 CI 的**真浏览器验收 lane**「Stock-prep browser verify (chromium)」(仿 `approval-browser-verify.yml` 先例):**28 条 Playwright 用例**,覆盖设计稿 P0 十一条验收里的九条(浏览器直接证明,含折叠层叠、解析后填充色按钮数、真实点击路径)、P1 七条验收里的五条、两条 jsdom 证不到的形态/层叠回归(向导态报错条、安装页折叠样式真的生效)、D2 落地页裁决的四种落地姿态、三档主体(一线 / 工作台管理员 / 平台管理员)的左栏 rail 组成、以及本波新增的「项目查询面板」深链用例(`?tab=project-query&sel=…` 刷新后选中仍在、右栏只读一次看板、整屏解析后只有一个主色填充按钮、搜索词不落本机存储)。
+自 r19 起,备料工作台的界面验收已经进入 CI 的**真浏览器验收 lane**「Stock-prep browser verify (chromium)」(仿 `approval-browser-verify.yml` 先例):**29 条 Playwright 用例**,覆盖设计稿 P0 十一条验收里的九条(浏览器直接证明,含折叠层叠、解析后填充色按钮数、真实点击路径)、P1 七条验收里的五条、两条 jsdom 证不到的形态/层叠回归(向导态报错条、安装页折叠样式真的生效)、D2 落地页裁决的四种落地姿态、三档主体(一线 / 工作台管理员 / 平台管理员)的左栏 rail 组成、以及本波新增的「项目查询面板」深链用例(`?tab=project-query&sel=…` 刷新后选中仍在、右栏只读一次看板、整屏解析后只有一个主色填充按钮、搜索词不落本机存储)、以及收尾小修加的左栏键盘用例(方向键 / Home / End 只移焦点不切面板、回车或空格才激活、折叠内的 tab 不进漫游、焦点在「深度工具」按钮上按方向键什么都不发生)。
 
 **触发方式**:每一支改到备料前端组件、验证用例(`apps/web/verification/stock-prep-*.spec.ts`)或权限镜像文件的 PR 会自动跑这条 lane;不命中这些路径的 PR 不触发,直接绿——job 内的分类器从 harness + fixtures 的 import 闭包与两支 spec 里的落盘读路径推导出真正的依赖集合,不是手打清单(手打清单会漏记 lane 自己读到的新文件,这是这条 lane 立项时的对抗核验教训)。
 
