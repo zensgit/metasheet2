@@ -556,6 +556,16 @@ const overflowRootRef = ref<HTMLElement | null>(null)
 const overflowAvailable = ref<Partial<Record<string, boolean>>>({})
 const dragPinId = ref<ToolbarPinCommandId | null>(null)
 
+function overflowAvailabilityChanged(
+  prev: Partial<Record<string, boolean>>,
+  next: Partial<Record<string, boolean>>,
+): boolean {
+  for (const id of OVERFLOW_PIN_COMMAND_IDS) {
+    if (!!prev[id] !== !!next[id]) return true
+  }
+  return false
+}
+
 function syncOverflowAvailable(): void {
   const root = overflowRootRef.value
   const next: Partial<Record<string, boolean>> = {}
@@ -564,7 +574,9 @@ function syncOverflowAvailable(): void {
       next[id] = !!root.querySelector(`[data-command="${id}"]`)
     }
   }
-  overflowAvailable.value = next
+  if (overflowAvailabilityChanged(overflowAvailable.value, next)) {
+    overflowAvailable.value = next
+  }
 }
 
 function isPinVisible(id: ToolbarPinCommandId): boolean {

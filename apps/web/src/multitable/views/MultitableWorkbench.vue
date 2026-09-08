@@ -36,7 +36,7 @@
       <template #status>
         <MetaNotificationBell :api-client="workbench.client" @navigate="onNotificationNavigate" />
       </template>
-      <template #overflow="{ pinApi }">
+      <template #overflow="slotProps">
         <div class="mt-workbench__actions">
           <div
             v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
@@ -57,7 +57,7 @@
             <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ fmtMentionsUnread(mentionInboxState.unreadMentionCount.value, isZh) }}</span>
             <span class="mt-workbench__mention-chip-records">{{ fmtMentionsRecords(mentionInboxState.summary.value.mentionedRecordCount, isZh) }}</span>
           </button>
-          <OverflowCommandRow command-id="comment-inbox" :pin-api="pinApi">
+          <OverflowCommandRow command-id="comment-inbox" :pin-api="slotProps?.pinApi">
             <button
               class="mt-workbench__mgr-btn"
               data-command="comment-inbox"
@@ -69,43 +69,43 @@
               <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
             </button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="caps.canManageFields.value" command-id="fields" :pin-api="pinApi">
+          <OverflowCommandRow v-if="caps.canManageFields.value" command-id="fields" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="fields" @click="showFieldManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.fields" /></el-icon> {{ wb('toolbar.fields', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="caps.canManageSheetAccess.value" command-id="access" :pin-api="pinApi">
+          <OverflowCommandRow v-if="caps.canManageSheetAccess.value" command-id="access" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="access" @click="showPermissionManager = true; void loadPermissionEntries()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.access" /></el-icon> {{ wb('toolbar.access', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="caps.canManageViews.value && canConfigureCurrentView" command-id="views" :pin-api="pinApi">
+          <OverflowCommandRow v-if="caps.canManageViews.value && canConfigureCurrentView" command-id="views" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="views" @click="showViewManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.views" /></el-icon> {{ wb('toolbar.views', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="canOpenWorkflowDesigner" command-id="workflow" :pin-api="pinApi">
+          <OverflowCommandRow v-if="canOpenWorkflowDesigner" command-id="workflow" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="workflow" @click="openWorkflowDesigner()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.workflow" /></el-icon> {{ wb('toolbar.workflow', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="caps.canManageAutomation.value" command-id="automations" :pin-api="pinApi">
+          <OverflowCommandRow v-if="caps.canManageAutomation.value" command-id="automations" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="automations" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="canCreateBasesAndSheets" command-id="templates" :pin-api="pinApi">
+          <OverflowCommandRow v-if="canCreateBasesAndSheets" command-id="templates" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="templates" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow command-id="dashboard" :pin-api="pinApi">
+          <OverflowCommandRow command-id="dashboard" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="dashboard" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="activeViewType === 'form'" command-id="share-form" :pin-api="pinApi">
+          <OverflowCommandRow v-if="activeViewType === 'form'" command-id="share-form" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="share-form" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow command-id="api" :pin-api="pinApi">
+          <OverflowCommandRow command-id="api" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="api" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="caps.canDeleteRecord.value" command-id="trash" :pin-api="pinApi">
+          <OverflowCommandRow v-if="caps.canDeleteRecord.value" command-id="trash" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="trash" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="activeBaseId" command-id="history" :pin-api="pinApi">
+          <OverflowCommandRow v-if="activeBaseId" command-id="history" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="history" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="workbench.activeSheetId.value" command-id="config-history" :pin-api="pinApi">
+          <OverflowCommandRow v-if="workbench.activeSheetId.value" command-id="config-history" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="config-history" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
           </OverflowCommandRow>
-          <OverflowCommandRow v-if="workbench.activeSheetId.value" command-id="archive-recovery" :pin-api="pinApi">
+          <OverflowCommandRow v-if="workbench.activeSheetId.value" command-id="archive-recovery" :pin-api="slotProps?.pinApi">
             <button class="mt-workbench__mgr-btn" data-command="archive-recovery" data-action="open-archive-recovery" @click="showRecoveryArchive = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.archiveRecovery" /></el-icon> {{ isZh ? '归档恢复' : 'Archive recovery' }}</button>
           </OverflowCommandRow>
         </div>
