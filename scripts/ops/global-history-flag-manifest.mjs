@@ -459,6 +459,16 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/elearning/feature-flags.ts:28-30',
   },
   {
+    key: 'ELEARNING_NOTIFICATIONS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED', 'ELEARNING_CONTENT_ENABLED'],
+    conflictsWith: [],
+    danger: 'high',
+    purpose: 'Opt-in personal learning reminders. Default OFF; exact true only. Unknown external outcomes are fenced, never blindly retried.',
+    source: 'packages/core-backend/src/services/elearning-notification-dispatch.ts#isElearningNotificationDispatchEnabled',
+  },
+  {
     key: 'ELEARNING_CONTENT_ENABLED',
     type: 'boolean',
     activationValue: 'true',

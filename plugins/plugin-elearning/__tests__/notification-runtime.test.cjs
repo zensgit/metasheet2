@@ -22,6 +22,7 @@ const FLAGS_ON = Object.freeze({
   ELEARNING_ENABLED: 'true',
   ELEARNING_CONTENT_ENABLED: 'true',
   ELEARNING_ASSIGNMENT_ENABLED: 'true',
+  ELEARNING_NOTIFICATIONS_ENABLED: 'true',
 })
 
 function claimedRow(overrides) {
@@ -62,6 +63,22 @@ function createDatabase(rows) {
 async function main() {
   stopNotificationRuntime()
   assert.equal(RUNTIME_INTERVAL_MS, 30_000)
+  await withFlagsAsync({ ...FLAGS_ON, ELEARNING_ASSIGNMENT_ENABLED: 'false' }, async () => {
+    let collected = 0
+    const database = createDatabase([])
+    const context = { api: { database }, services: {
+      elearningNotificationEligibility: { check: async () => true },
+      elearningNotificationDispatch: { dispatch: async () => ({ outcome: 'sent' }) },
+      elearningNotificationSource: { collect: async () => { collected += 1 } },
+    } }
+    assert.equal(startNotificationRuntime(context), true)
+    await runNotificationRuntimeTick()
+    assert.equal(collected, 1, 'training/result collection must not depend on assignment capability')
+    delete process.env.ELEARNING_NOTIFICATIONS_ENABLED
+    await runNotificationRuntimeTick()
+    assert.equal(collected, 1, 'OFF must not collect new intents')
+    stopNotificationRuntime()
+  })
 
   const runtimeSource = fs.readFileSync(
     path.join(__dirname, '../lib/notification-runtime.cjs'),
@@ -95,6 +112,13 @@ async function main() {
       recipientUserId: 'learner-runtime',
     },
   })
+  for (const kind of ['training_available', 'result_published']) {
+    const result = runtimeInputFromDelivery(claimedRow({ kind, assignment_member_id: null, payload: {} }))
+    assert.deepEqual(result.eligibility, { orgId: 'org-runtime', deliveryId: DELIVERY_ID, recipientUserId: 'learner-runtime' })
+    assert.equal(result.dispatch.kind, kind)
+    assert.equal(result.dispatch.assignmentMemberId, null)
+    assert.throws(() => runtimeInputFromDelivery(claimedRow({ kind, assignment_member_id: null, payload: { score: 100 } })))
+  }
   for (const invalid of [
     null,
     claimedRow({ id: 'not-a-uuid' }),
@@ -194,7 +218,7 @@ async function main() {
     const database = createDatabase([claimedRow()])
     const context = { api: { database }, services: ports }
     assert.equal(startNotificationRuntime(context, { workerId: 'runtime-worker' }), true)
-    delete process.env.ELEARNING_ASSIGNMENT_ENABLED
+    delete process.env.ELEARNING_NOTIFICATIONS_ENABLED
     const disabled = await runNotificationRuntimeTick()
     assert.equal(disabled.claimed, 0)
     assert.equal(database.queries.length, 0)
