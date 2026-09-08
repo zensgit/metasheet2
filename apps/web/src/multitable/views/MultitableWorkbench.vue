@@ -4694,7 +4694,7 @@ defineExpose({
 .mt-workbench__mgr-btn--active { color: var(--ms-color-primary); }
 .mt-workbench__mgr-btn-icon { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; margin-left: 6px; padding: 0 5px; border-radius: 999px; background: var(--ms-color-info, #6b7280); color: #fff; font-size: 11px; font-weight: 500; }
-.mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
+.mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); }
 /* UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §2.1/§3.1):
    persistent, collapsible left rail housing the base-bar (workspace picker) + the sheet/view tree
    (MetaSheetViewRail). Width values (240px / 36px) are layout sizing, not color — the token vocabulary
@@ -4704,7 +4704,8 @@ defineExpose({
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--ms-border-light);
+  border-right: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  background: var(--ms-bg-card, #fff);
   overflow: hidden;
 }
 .mt-workbench__rail--collapsed { width: 36px; }
@@ -4733,13 +4734,14 @@ defineExpose({
   border: none;
   border-radius: var(--ms-radius-sm);
   background: transparent;
-  color: var(--ms-text-2);
-  font-size: 14px;
+  color: var(--ms-sheet-icon-color, #6b7280);
+  font-size: var(--ms-sheet-font-body, 13px);
+  font-weight: 400;
   line-height: 1;
   cursor: pointer;
 }
-.mt-workbench__rail-toggle:hover { background: var(--ms-bg-card); }
-.mt-workbench__rail-toggle:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -2px; }
+.mt-workbench__rail-toggle:hover { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-text-1, #111827); }
+.mt-workbench__rail-toggle:focus-visible { outline: 1px solid var(--ms-color-primary); outline-offset: -1px; }
 .mt-template-library {
   margin: 8px 16px 0;
   padding: 14px;

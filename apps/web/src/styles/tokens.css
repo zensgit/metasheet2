@@ -149,7 +149,10 @@
 .meta-grid,
 .app-sheet-chrome,
 .meta-record-drawer,
-.mt-popover {
+.mt-popover,
+.mt-workbench__rail,
+.meta-view-rail,
+.meta-base-picker {
   --ms-sheet-font-body: 13px;
   --ms-sheet-font-header: 12px;
   --ms-sheet-icon-size: 16px;

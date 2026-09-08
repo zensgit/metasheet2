@@ -384,7 +384,7 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
   flex-direction: column;
   height: 100%;
   overflow-y: auto;
-  background: var(--ms-bg-page);
+  background: var(--ms-bg-card);
 }
 .meta-view-rail__tree {
   flex: 1;
@@ -404,14 +404,15 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
   border: none;
   border-radius: var(--ms-radius-sm);
   background: transparent;
-  color: var(--ms-text-2);
-  font-size: 13px;
+  color: var(--ms-text-1);
+  font-size: var(--ms-sheet-font-body, 13px);
+  font-weight: 400;
   text-align: left;
   cursor: pointer;
 }
-.meta-view-rail__sheet:hover { background: var(--ms-bg-card); }
-.meta-view-rail__sheet.--active { background: var(--el-color-primary-light-9); color: var(--ms-color-primary); font-weight: 500; }
-.meta-view-rail__sheet.--active:hover { background: var(--el-color-primary-light-8); }
+.meta-view-rail__sheet:hover { background: var(--ms-bg-page); }
+.meta-view-rail__sheet.--active { background: var(--el-color-primary-light-9); color: var(--ms-text-1); font-weight: 400; }
+.meta-view-rail__sheet.--active:hover { background: var(--el-color-primary-light-9); }
 .meta-view-rail__sheet-rename-btn {
   flex-shrink: 0;
   width: 22px;
@@ -452,7 +453,7 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
 .meta-view-rail__sheet-rename-ok:hover:not(:disabled) { background: var(--ms-bg-card); color: var(--ms-color-success); }
 .meta-view-rail__sheet-rename-ok:disabled { opacity: 0.5; cursor: not-allowed; }
 .meta-view-rail__sheet-rename-cancel:hover { background: var(--ms-bg-card); color: var(--ms-color-danger); }
-.meta-view-rail__chevron { display: inline-flex; align-items: center; width: 14px; flex-shrink: 0; font-size: 12px; color: var(--ms-text-3); }
+.meta-view-rail__chevron { display: inline-flex; align-items: center; width: 14px; flex-shrink: 0; font-size: var(--ms-sheet-font-header, 12px); color: var(--ms-sheet-icon-color); }
 .meta-view-rail__sheet-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-view-rail__views { list-style: none; margin: 0; padding: 0; }
 .meta-view-rail__view-row { display: flex; align-items: center; gap: var(--ms-space-1); padding-right: var(--ms-space-2); }
@@ -468,14 +469,15 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
   border-radius: var(--ms-radius-sm);
   background: transparent;
   color: var(--ms-text-3);
-  font-size: 12px;
+  font-size: var(--ms-sheet-font-header, 12px);
+  font-weight: 400;
   text-align: left;
   cursor: pointer;
 }
-.meta-view-rail__view:hover { background: var(--ms-bg-card); }
-.meta-view-rail__view.--active { background: var(--el-color-primary-light-9); color: var(--ms-color-primary); font-weight: 500; }
-.meta-view-rail__view.--active:hover { background: var(--el-color-primary-light-8); }
-.meta-view-rail__view-icon { display: inline-flex; align-items: center; font-size: 14px; color: currentColor; flex-shrink: 0; }
+.meta-view-rail__view:hover { background: var(--ms-bg-page); }
+.meta-view-rail__view.--active { background: var(--el-color-primary-light-9); color: var(--ms-text-2); font-weight: 400; }
+.meta-view-rail__view.--active:hover { background: var(--el-color-primary-light-9); }
+.meta-view-rail__view-icon { display: inline-flex; align-items: center; font-size: var(--ms-sheet-icon-size, 16px); color: var(--ms-sheet-icon-color); flex-shrink: 0; }
 .meta-view-rail__view-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-view-rail__personal-toggle {
   flex-shrink: 0;
@@ -502,15 +504,15 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
   width: 100%;
   padding: var(--ms-space-2) var(--ms-space-3);
   border: none;
-  border-top: 1px solid var(--ms-border-light);
+  border-top: 1px solid var(--ms-sheet-hairline);
   background: transparent;
-  color: var(--ms-color-primary);
-  font-size: 13px;
-  font-weight: 600;
+  color: var(--ms-sheet-icon-color);
+  font-size: var(--ms-sheet-font-body, 13px);
+  font-weight: 400;
   text-align: left;
   cursor: pointer;
 }
-.meta-view-rail__add:hover { background: var(--ms-bg-card); }
+.meta-view-rail__add:hover { background: var(--ms-bg-page); color: var(--ms-text-1); }
 .meta-view-rail__sheet:focus-visible,
 .meta-view-rail__view:focus-visible,
 .meta-view-rail__add:focus-visible,

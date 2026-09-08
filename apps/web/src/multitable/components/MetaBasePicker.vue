@@ -191,35 +191,35 @@ function cancelRenameBase() {
 
 <style scoped>
 .meta-base-picker { position: relative; }
-.meta-base-picker__current { display: flex; align-items: center; gap: 8px; padding: 6px 12px; cursor: pointer; border-radius: 6px; }
-.meta-base-picker__current:hover { background: #f5f7fa; }
-.meta-base-picker__icon { width: 24px; height: 24px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 14px; color: #fff; }
-.meta-base-picker__name { font-size: 14px; font-weight: 600; color: #333; }
-.meta-base-picker__arrow { font-size: 10px; color: #999; }
-.meta-base-picker__dropdown { position: absolute; top: 100%; left: 0; min-width: 260px; background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); z-index: 50; overflow: hidden; }
-.meta-base-picker__search { padding: 8px; border-bottom: 1px solid #eee; }
-.meta-base-picker__search-input { width: 100%; padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+.meta-base-picker__current { display: flex; align-items: center; gap: 8px; padding: 6px 8px; cursor: pointer; border-radius: var(--ms-radius-sm, 6px); }
+.meta-base-picker__current:hover { background: var(--ms-bg-page, #f5f6f8); }
+.meta-base-picker__icon { width: 20px; height: 20px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: var(--ms-sheet-font-header, 12px); color: #fff; }
+.meta-base-picker__name { font-size: var(--ms-sheet-font-body, 13px); font-weight: 400; color: var(--ms-text-1, #111827); }
+.meta-base-picker__arrow { font-size: 10px; color: var(--ms-text-3, #9ca3af); }
+.meta-base-picker__dropdown { position: absolute; top: 100%; left: 0; min-width: 260px; background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); box-shadow: none; z-index: 50; overflow: hidden; }
+.meta-base-picker__search { padding: 8px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); }
+.meta-base-picker__search-input { width: 100%; padding: 5px 8px; border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); font-size: var(--ms-sheet-font-body, 13px); background: transparent; }
 .meta-base-picker__list { max-height: 200px; overflow-y: auto; }
 .meta-base-picker__item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; }
-.meta-base-picker__item:hover { background: #f5f7fa; }
-.meta-base-picker__item--active { background: #ecf5ff; }
-.meta-base-picker__item-icon { width: 20px; height: 20px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #fff; flex-shrink: 0; }
-.meta-base-picker__item-copy { min-width: 0; flex: 1; display: grid; gap: 4px; }
-.meta-base-picker__item-name { font-size: 13px; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-base-picker__item:hover { background: var(--ms-bg-page, #f5f6f8); }
+.meta-base-picker__item--active { background: var(--el-color-primary-light-9); }
+.meta-base-picker__item-icon { width: 20px; height: 20px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: var(--ms-sheet-font-header, 12px); color: #fff; flex-shrink: 0; }
+.meta-base-picker__item-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.meta-base-picker__item-name { font-size: var(--ms-sheet-font-body, 13px); font-weight: 400; color: var(--ms-text-1, #111827); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-base-picker__badges { display: flex; flex-wrap: wrap; gap: 4px; }
-.meta-base-picker__badges span { border-radius: 999px; padding: 2px 6px; background: #eff6ff; color: #1d4ed8; font-size: 10px; font-weight: 700; }
-.meta-base-picker__favorite { flex-shrink: 0; width: 28px; height: 28px; border: 1px solid #dbeafe; border-radius: 999px; background: #f8fbff; color: #2563eb; cursor: pointer; font-size: 14px; line-height: 1; }
-.meta-base-picker__favorite[aria-pressed='true'] { border-color: #f59e0b; background: #fffbeb; color: #92400e; }
-.meta-base-picker__rename { flex-shrink: 0; width: 24px; height: 24px; border: none; border-radius: 4px; background: transparent; color: #94a3b8; cursor: pointer; font-size: 12px; line-height: 1; }
-.meta-base-picker__rename:hover { background: #eff6ff; color: #2563eb; }
-.meta-base-picker__rename-input { flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid #2563eb; border-radius: 4px; font-size: 13px; }
-.meta-base-picker__rename-ok, .meta-base-picker__rename-cancel { flex-shrink: 0; width: 24px; height: 24px; border: none; border-radius: 4px; background: transparent; color: #94a3b8; cursor: pointer; font-size: 12px; line-height: 1; }
-.meta-base-picker__rename-ok:hover:not(:disabled) { background: #f0fdf4; color: #16a34a; }
+.meta-base-picker__badges span { border-radius: 999px; padding: 1px 6px; background: transparent; color: var(--ms-text-3, #9ca3af); font-size: 10px; font-weight: 400; }
+.meta-base-picker__favorite { flex-shrink: 0; width: 24px; height: 24px; border: none; border-radius: var(--ms-radius-sm, 6px); background: transparent; color: var(--ms-sheet-icon-color, #6b7280); cursor: pointer; font-size: var(--ms-sheet-font-body, 13px); line-height: 1; }
+.meta-base-picker__favorite[aria-pressed='true'] { border: none; background: transparent; color: var(--ms-text-2, #4b5563); }
+.meta-base-picker__rename { flex-shrink: 0; width: 24px; height: 24px; border: none; border-radius: 4px; background: transparent; color: var(--ms-sheet-icon-color, #6b7280); cursor: pointer; font-size: var(--ms-sheet-font-header, 12px); line-height: 1; }
+.meta-base-picker__rename:hover { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-text-1, #111827); }
+.meta-base-picker__rename-input { flex: 1; min-width: 0; padding: 4px 8px; border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); font-size: var(--ms-sheet-font-body, 13px); }
+.meta-base-picker__rename-ok, .meta-base-picker__rename-cancel { flex-shrink: 0; width: 24px; height: 24px; border: none; border-radius: 4px; background: transparent; color: var(--ms-sheet-icon-color, #6b7280); cursor: pointer; font-size: var(--ms-sheet-font-header, 12px); line-height: 1; }
+.meta-base-picker__rename-ok:hover:not(:disabled) { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-color-success); }
 .meta-base-picker__rename-ok:disabled { opacity: 0.5; cursor: not-allowed; }
-.meta-base-picker__rename-cancel:hover { background: #fef2f2; color: #dc2626; }
-.meta-base-picker__empty { padding: 16px; text-align: center; color: #999; font-size: 12px; }
-.meta-base-picker__create { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #eee; }
-.meta-base-picker__create-input { flex: 1; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; }
+.meta-base-picker__rename-cancel:hover { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-color-danger); }
+.meta-base-picker__empty { padding: 16px; text-align: center; color: var(--ms-text-3, #9ca3af); font-size: var(--ms-sheet-font-header, 12px); }
+.meta-base-picker__create { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--ms-sheet-hairline, #ebebeb); }
+.meta-base-picker__create-input { flex: 1; padding: 4px 8px; border: 1px solid var(--ms-sheet-hairline, #ebebeb); border-radius: var(--ms-radius-sm, 6px); font-size: var(--ms-sheet-font-header, 12px); }
 /* UI-P2-1c batch-3: .meta-base-picker__create-btn (its only sharer, glyph-only "+") is now
    <MtIconButton variant="primary">; the bespoke #409eff fill is normalized to --ms-color-primary
    (sanctioned token convergence). Bespoke CSS removed to avoid double-styling the MtButton root; class
