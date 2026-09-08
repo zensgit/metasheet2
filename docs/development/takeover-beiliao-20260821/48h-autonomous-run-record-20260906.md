@@ -71,6 +71,18 @@
 | 2026-09-07 08:35–08:37 | 清理五轮实测的合成数据(owner 08:1x 批准) | 只读盘点先证明判别谓词(sheet_id + 项目号 `^SYN-PROJ-LARGE-000[1-5]$` + 幂等键里 `componentSourceId LIKE 'SYNL-%'`)正反向零误差:65,704 行;同一 sheet 另有 7 行项目号 `SYN-PROJ-0001`(源行非 SYNL 前缀,像最早的小合成 BOM,也可能是演示数据)→ **不动,待 owner**。`pg_dump` 后单事务删除,每步 `GET DIAGNOSTICS` 与预期精确比对:revisions 65,704、records 65,704、plugin_kv 作业键 14(含 0003 轮 paused 检查点;展开作业已完成,cancel 端点不适用)、`dn_pdm_*` SYNL 行 26,956(13150/651/1/1/13151/1/1);第一次运行在「孤儿 revision 必须为 0」处主动回滚——库里有 129 条与本次无关的既有孤儿 revision,改为「孤儿数前后相等」后通过。`VACUUM (ANALYZE)` 后 `meta_records` 149→46MB、`meta_record_revisions` 232→64MB。非 SYNL 源行、审计表、客户 PLM 绑定未动;verify + 前端 smoke 全过 |
 | 2026-09-07 16:2x | 客户决定 222 直接转正,不再是彩排/测试环境;备料即 metasheet 应用内的 `/stock-prep` 页,不是独立系统 | 后续步骤按"222 转正"口径推进,不再是演示环境的临时状态;直接触发 18:18–18:24 的清库重建与零起点迁移实测,以及本文件下方新增的"222 转正剩余步骤"清单 |
 | 2026-09-07 18:18–18:24 | 权限核实 + 清库重建(owner 决定 222 直接转正、旧数据不要) | 先核实:222 的库与 `public` 模式已归应用角色 `metasheet`(`super=false`、`createdb=false`),扩展 `pgcrypto`/`btree_gist` 也归 `metasheet`(迁移用 `CREATE EXTENSION IF NOT EXISTS` 自建,PG13+ 上这两个是 trusted 扩展,不需要超级用户)。流程:`pg_dump -Fc` 备份 + 复制 `app.env` → 停用两个计划任务(`metasheet-stock-prep-scheduled-dry-run`、`metasheet-stock-prep-token-rotate`)→ `pm2 stop` → 以应用角色执行 `DROP SCHEMA public CASCADE`(级联 615 对象)→ `CREATE SCHEMA public AUTHORIZATION metasheet` → `GRANT USAGE ON SCHEMA public TO PUBLIC` → 装载 `app.env` 到进程环境后在 `C:\metasheet` 下跑 `node packages\core-backend\dist\src\db\migrate.js`(与就地升级脚本同一调用):**398 条迁移从零全部成功(exit 0)**,建出 407 张表,函数归属与升级前一致;`pm2 restart --update-env` 后 30 秒 health 200;启动自动建出 `audit_logs_2026_09`/`2026_10` 分区;错误日志无新错;经 nginx 的前端 smoke PASS;用户表 0 行。全程只用应用角色,不需要 DBA/超级用户,前提只有一个:库和 `public` 模式的所有者已经是应用角色。随后注册每日 `pg_dump -Fc` 备份计划任务(`metasheet-daily-pg-dump`,SYSTEM,每日 03:30,保留 14 天),首跑成功 |
+| 2026-09-08 00:15 | owner 授权全自主 UX 落地 | 拍板设计稿 `beiliao-ux-redesign-20260907.md` 的 UX 实现分 U1(前端两线)/U2(后端 N1/N2/N6)/C(收尾三项)三线全自主推进,按任务难度选模型:sonnet 实现 → 三路 opus 对抗核验 → opus 修复,定为默认节奏 |
+| 2026-09-08 00:1x | U1 第一波启动(A/B 两线) | A 线(PR #5539,接入向导 + 错误两行化 + 五处诚实文案,对应设计稿 P0-4/5/7)与 B 线(PR #5541,任务首页 + 四步 stepper + 下一步条 + 状态徽标,对应 P0-2/3/6)并行由 sonnet 实现;随后各自转入三路 opus 对抗核验(security/correctness/regression 视角),核验发现的 blocker 回 opus 修复 |
+| 2026-09-08 01:5x | 核验完成 + U2 裁决 r3 | A 线三路核验去重后 6 组 blocker(交接卡假绿宣称跑通、六步地图对已装好部署报零进度、`ledger_missing` 按钮无权限门等)全部修完;B 线三路核验 17 条 blocker,12 条修复(工作区同屏两个填充主按钮、首页徽标建在管理员归档上而非活看板、并集合并方向反了、带 `projectNo` 挂载先闪一屏首页等)+ 1 条(§4.2 规则 2:缺件重新进入 tab 后不可达)有据不修、记入 PR"有意偏离"一节。同时 U2(PR #5540)的核验裁决 r3 落地:并集扫描由默认改为 `includePullTargets=1` **opt-in**,不带参数时响应形状与审计 detail 回到与 origin/main 逐键相同 |
+| 2026-09-08 02:18 | #5539 已合(a22141772) | U1-A 落地:`StockPreparationGettingStarted.vue` 接入向导(六步地图 + 六态徽标 + 九步计划提前渲染 + blocker 按 `http`/`env` 两类渲染 + 第⑤步静态版 + 完成交接卡),`STOCK_PREP_ERROR_PLAIN` 等错误词表放宽为两行 + 「复制这条报错」,五处诚实文案(no-go 免责句 / 两卡关系句 / 源预检按钮旁注 / 对账按钮旁注 / `ledger_missing` 空态按钮) |
+| 2026-09-08 02:47 | #5540 已合(b9cba7262) | U2 落地:操作员项目目录并入拉取目标表项目号(`includePullTargets=1` opt-in)、可选待确认计数(`includePendingCounts=1`)、两个时间戳三态(`lastChangedFromPlmAt`/`lastExportAt`);独立反驳员复核确认**默认路径(不带参数)响应与 origin/main 字节级相同**;C5(多租户共享部署级拉取目标表时,拥有目标表的租户在 opt-in 下会枚举到其他租户 apply 写入的项目号)记为已知限制,222 单租户无实际影响,长期修法为按租户目标表,未排期 |
+| 2026-09-08 02:57 | #5541 已合(7dd38238d) | U1-B 落地:`StockPreparationOperatorHome.vue` 任务首页寄生 `project-board` tab(四个计数筛选 chip + 全部 + 卡片 + 空态四态)、四步 stepper 皮肤(既有 testid 不变)、`operatorNextStep.ts` 全页唯一「下一步」条、`projectPosture.ts` 状态徽标三处同词 |
+| 2026-09-08 02:31 | C 线工作流启动 | 队列自动带项目号(P0-1)、动作后自动重读(P0-8)、闭环句(P0-9)三项收尾工作流开工 |
+| 2026-09-08 03:5x | 交付文档 #5547 已合(6af167b90) | 交付说明补 P0 界面(接入向导 / 首页 / stepper)、操作员项目目录两个查询参数、多租户已知限制;运行记录补 U1/U2 时间线 |
+| 2026-09-08 04:51 | C 线 #5546 已合(61ecc67d1) | 队列自动带项目号(P0-1)、动作后自动重读(P0-8,对账成功重读队列、建账本成功重读目录)、闭环句/tooltip(P0-9)、首页目录接拉取目标并集(#5540 契约);三路对抗核验共 6 组 blocker(`RECONCILE_OK` 文案仍暗示"手动刷新"未清干净、并集扫描误算到项目备料页头上、`nothing_pending` 空态按钮无权限门、`loadQueue` 把读不出来的响应"规整"成伪造空队列、三处 `:key` 从 `projectId` 降级成 `projectNo`)全部修复;另有两条协调者裁决:摘掉 `includePendingCounts=1`(首页目录读改为只带 `includePullTargets=1`,`confirmationQueue.ts` 同步删除已无消费方的 `pendingCountsByProjectNo` 响应字段与请求选项)、`pullTargetReady=false` 文案改口(不再暗示"临时性",改为"这次读不到") |
+| 2026-09-08 04:55 | r17 上 222 | main `61ecc67d1`,包 12.49 MB;就地升级 8 步全过(pg_dump 备份、442 文件哈希 OK、迁移 0、health 200);经 nginx 前端 smoke PASS(`index-CFl7s7Vf.js`);U2/P0 标记全 True;§5-5 租户声明硬门 flag 有效(无声明 403 / 有声明 200) |
+| 2026-09-08 05:0x | 操作员链首跑全部 403,定位根因 | 测试操作员通过 `/api/permissions/grant` 直接拿到 `stock-prep:read`/`stock-prep:operate`(`user_permissions` 表里确实有),但 `/api/auth/me` 只返回考勤权限——命名空间过滤:控制命名空间只从用户的角色(`user_roles`→`role_permissions`)推导,清库后没有任何角色带 stock-prep 码,直接授予的权限被过滤掉(`filterPermissionCodesByNamespaceAdmission`/`fetchUserNamespaceRoleContext`,`packages/core-backend/src/rbac/namespace-admission.ts`) |
+| 2026-09-08 05:05 | 建角色 `stock-prep-operator` 并分配,立即生效 | 按产品正路在「角色管理」建角色(备料一线操作员,权限 `stock-prep:read`+`stock-prep:operate`)并在「用户管理」分配给测试操作员后立即生效:目录 200、确认队列 200;看板/拉取/导出/对账 404(`ExternalSystemNotFoundError`/`PROJECT_NOT_FOUND`——外接源尚未在界面建立,属预期);建账本/切换数据源 403(正确拒绝)。P0 API 验收 PASS:默认目录响应键与升级前完全一致;`includePullTargets=1` 返回 `pullTargetReady=true`/`directoryMayBeIncomplete=false`/`pullTargetScanCapped=false`/`lastExportAtMayBeIncomplete=false`;`includePendingCounts=1` 返回 `pendingCountsByProjectNo`;传字面字符串 `"true"` 不打开并集;四种请求均 20–160ms |
 
 
 ## 待 owner 拍板(来自设计 §4 与 W1–W3 实证)
@@ -135,6 +147,13 @@
 
 27. **222 转正的安装/切换日期待定**:16:2x 客户口头决定直接用 222 当正式环境,18:18–18:24 完成了清库重建与零起点迁移/启动的实测验证,但下面「222 转正剩余步骤」清单尚未走完。正式记录的"安装日期"/"切换日期"该算成决定的那一刻(2026-09-07)、还是清单全部走完的那一刻,待 owner 拍板;在此之前不应认定 222 已经是可交付给客户使用的正式环境。
 
+28. **U1 P0 落地时替 owner 采纳的五项假设(D1/D2/D6/D8/D9,均按设计稿 §8.2 给出的建议值执行,可回滚)**:PR #5539(U1-A)与 #5541(U1-B)对设计稿 §8.2 待拍板的 12 条里以下五项直接按建议值实现,没有先等 owner 拍板——记录在此供追认,任一项都可单独回滚(各自独立实现,互不耦合):
+    - **D1**(首页数据来源):**A**——「项目目录」∪「本机记忆」按字段合并:`pendingDecisionCount` 永远取目录(权威的活账本),拉取与否取本机记忆(这台电脑最近一次同步/拉取的活看板结论),两者都没有时出第三态「看不到进度」。
+    - **D2**(平台管理员落地页):**A**——P0 不动落地页,只在确认队列 `ledger_missing` 空态加 [去装:开始使用] 按钮,切到「安装」tab 的接入向导。
+    - **D6**(源预检自动/手动触发):**手动**——接入向导对源预检零自动触发;第②④步的「未检查」态正是为此准备的默认值。
+    - **D8**(本机记忆存什么):**只存时间 + 结论**——每条记忆恰好三个字段 `{projectNo, updatedAt, postureKey}`,有反向断言钉住;`running`(同步中途)与 404(打错的号)均不落盘。
+    - **D9**(宜搭按钮范围):**只留在项目工作区**——首页与「下一步」条均不出现宜搭按钮(本波实际是"宜搭未涉及",两处都不出)。
+
 ## 222 转正剩余步骤
 
 18:18–18:24 完成的只是"零起点迁移与启动"这一段技术验证。222 要真正成为客户可用的正式环境,还需要按顺序做完以下几步——任一步骤未做完,都不应视为"222 已转正":
@@ -152,3 +171,7 @@
 1. 封顶类改动要枚举所有消费该数组的下游(快照映射器、缺件汇总),否则封顶本身制造 fail-open。
 
 2. 授权门要先证明数据模型能表达威胁,否则只会把合法流程挡住。
+
+3. **PR 的 base 不要指向一条会被 squash 合并删除的分支**:squash 合并后源分支在 GitHub 上被删,若后续 PR 以它为 base,实现者在该分支已消失后建不出 PR(GitHub 找不到 base ref)。链式提交多个 PR 时,后一个 PR 的 base 要么等前一个真正合入 `main` 后再切,要么直接以 `main` 为 base、自己处理 rebase 冲突。
+
+4. **"一处不剩"类的文案清理声称,不能只 grep 原句字面量,要按语义查常量表**:C 线核验里 `RECONCILE_OK` 的文案曾被判定"已改完、不再暗示手动刷新",但反驳员按常量表逐个 key 核对时,仍抓到一处遗漏——grep 原句只能找到未改的逐字匹配,找不到"同一段话被换了个措辞但语义仍是旧的"这种情况。以后遇到"某类文案已全部清理"的声称,要先列出该文案所在的完整常量表(或所有语言变体),逐条核对语义,而不是对原句做一次全仓 grep 就下结论。

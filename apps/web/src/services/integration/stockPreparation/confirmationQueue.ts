@@ -134,7 +134,12 @@ export interface StockPreparationExportResult {
  * its own, so a values-free platform/admin surface can never receive this shape.
  */
 export interface StockPreparationOperatorProject {
-  projectId: string
+  /**
+   * The archive row's own handle — null for a PULL-TARGET-ONLY row (设计稿 N1: a project a floor
+   * operator pulled themselves, with no MVP archive row to take an id from). A `null` here is a real,
+   * expected shape — never treat it as "this row is broken"; key off `projectNo` instead.
+   */
+  projectId: string | null
   /** 番号 — the number an operator would otherwise have to memorise. Null if the row carries none. */
   projectNo: string | null
   /** …and the name that makes memorising it unnecessary. */
@@ -147,6 +152,22 @@ export interface StockPreparationOperatorProject {
   readyLineCount: number
   /** Rows in the confirmation ledger still waiting on a human, for THIS project. */
   pendingDecisionCount: number
+  /**
+   * U2 / 设计稿 N1 — PRESENT ONLY when the caller opted into `includePullTargets=1`. Which store(s)
+   * answered for this row: the MVP archive (`mvp`), the bound pull-target sheet a floor operator's own
+   * run writes (`pull_target`), or both. Absent (not an empty array) on every other read, including an
+   * older backend that predates the flag — never coerce a missing value to a guess.
+   */
+  sources?: Array<'mvp' | 'pull_target'>
+  /** U2 / N1 — present only under `includePullTargets=1`. See `lastChangedFromPlmBounded` for the
+   *  three-state reading: a value, `null` + bounded:false ("never changed"), or `null` + bounded:true
+   *  ("unknown" — the scan could not prove it either way). */
+  lastChangedFromPlmAt?: string | null
+  lastChangedFromPlmBounded?: boolean
+  /** U2 / N6 — present only under `includePullTargets=1`. The last time this project's materials left
+   *  the system via 导出物料清单, from the values-free audit trail; see the directory's own
+   *  `lastExportAtMayBeIncomplete` for whether a `null` here means "never" or "unknown". */
+  lastExportAt?: string | null
 }
 
 /**
@@ -164,6 +185,24 @@ export interface StockPreparationOperatorDirectory {
   projectCount: number
   pendingProjectCount: number
   projects: StockPreparationOperatorProject[]
+  // ---------------------------------------------------------------------------
+  // U2 / 设计稿 N1 — every key below is PRESENT ONLY when the caller sent `includePullTargets=1`.
+  // Absent, not `false`: a caller that did not opt in gets the pre-N1 response byte for byte (S-02a),
+  // and an older backend that predates the flag never sends these either. A reader MUST distinguish
+  // "absent" (unknown / not asked) from `false` (asked, and the answer is no) — coercing the two
+  // together is exactly the silent-degrade bug this contract exists to prevent.
+  // ---------------------------------------------------------------------------
+  /** Was the operator's own pull-target store readable at all for this scan. */
+  pullTargetReady?: boolean
+  /** True when the union may be missing project numbers — the scan hit its page bound, broke
+   *  mid-flight, or the merge hit the row cap. See `pullTargetScanCapped` for which of those it was. */
+  directoryMayBeIncomplete?: boolean
+  /** True ONLY when the scan reached its standing page bound with a full page still coming back — the
+   *  declared 「表太大」 cap, as opposed to a broken read (which sets `directoryMayBeIncomplete` alone). */
+  pullTargetScanCapped?: boolean
+  /** True when the `lastExportAt` window could not be read, or came back full (so a `null` on a row
+   *  may mean "never exported" or "outside the window we could see" — not "never", unconditionally). */
+  lastExportAtMayBeIncomplete?: boolean
 }
 
 const EXPORT_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
@@ -237,12 +276,23 @@ export async function exportStockPreparationPrepLines(
  * `tenantId` is sent for shape-compatibility with every other call here and is NOT a selector: the
  * server derives the scope from the authenticated principal and refuses any value that is not the
  * caller's own tenant.
+ *
+ * `options.includePullTargets` is U2's opt-in query flag — strict `=== '1'` server-side, so anything
+ * else (including omission) is the SAME pre-N1 response byte for byte: it runs the bound-sheet union
+ * scan (设计稿 N1: `sources`/`lastChangedFromPlm*`/`lastExportAt` per row, plus the four top-level
+ * honesty flags). It is not sent unless asked for — a caller that omits `options` gets exactly today's
+ * request.
  * GET /api/integration/stock-preparation/operator/projects
  */
 export async function readStockPreparationOperatorDirectory(
   scope: IntegrationScope,
+  options?: { includePullTargets?: boolean },
 ): Promise<StockPreparationOperatorDirectory> {
-  const query = buildQuerySuffix({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const query = buildQuerySuffix({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+    ...(options?.includePullTargets ? { includePullTargets: '1' } : {}),
+  })
   const response = await apiFetch(`/api/integration/stock-preparation/operator/projects${query}`)
   return parseStockPreparationConfirmResponse<StockPreparationOperatorDirectory>(response)
 }

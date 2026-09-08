@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, defineComponent, h as createElement, nextTick, ref, type App as VueApp, type Component, type Ref } from 'vue'
 
 // 一线看得见自己工厂的项目 — the FRONT-END half of the operator project directory.
 //
@@ -70,6 +70,7 @@ import StockPreparationConfirmationQueueView from '../src/components/integration
 import {
   STOCK_PREP_OPERATE,
   STOCK_PREP_READ,
+  canOpenStockPrepProjectBoard,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import {
   STOCK_PREP_DIRECTORY_EMPTY_PLAIN,
@@ -286,6 +287,21 @@ describe('一线看得见自己工厂的项目 — the operator project director
     expect(queueCall).toContain(`projectNo=${P2.no}`)
   })
 
+  it('I-20: 待确认 (等您处理 count) carries a values-free tooltip', async () => {
+    routeFetch({ queueRows: [pendingRow()] })
+    const root = mountView()
+    await flush()
+    const input = q(root, 'stock-prep-confirmation-project-input') as HTMLInputElement
+    input.value = P1.no
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(q(root, 'stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+    const counts = q(root, 'stock-prep-confirmation-counts') as HTMLElement
+    const span = counts.querySelector('span') as HTMLElement
+    expect(span.title).toContain('不是这个项目全部的行数')
+  })
+
   it('W-06a “nothing synced yet” is NOT reported as 都清了', async () => {
     routeFetch({ directory: directoryPayload({ directoryReady: false, projectCount: 0, projects: [], pendingProjectCount: 0 }) })
     const root = mountView()
@@ -327,8 +343,9 @@ describe('一线看得见自己工厂的项目 — the operator project director
     expect(q(root, 'stock-prep-operator-project-datalist')!.querySelectorAll('option')).toHaveLength(2)
   })
 
-  it('W-06d 都清了 renders ONLY when the project is real, provisioned and genuinely clear', async () => {
-    const root = mountView()
+  it('W-06d / P0-9 nothing_pending renders ONLY when the project is real, provisioned and genuinely clear — with the closure button', async () => {
+    const onNavigateStage = vi.fn()
+    const root = mountView({ onNavigateStage })
     await flush()
     const input = q(root, 'stock-prep-confirmation-project-input') as HTMLInputElement
     input.value = P2.no
@@ -338,7 +355,18 @@ describe('一线看得见自己工厂的项目 — the operator project director
     await flush()
     const empty = q(root, 'stock-prep-confirmation-empty')!
     expect(empty.getAttribute('data-empty-state')).toBe('nothing_pending')
-    expect(empty.textContent).toContain('都清了')
+    // P0-9 (§4.3): the CLOSED-LOOP wording — the good news alone used to be the whole sentence, which
+    // told a reader confirming was the end of the job when writing the data still had not happened.
+    expect(empty.textContent).toContain('没有要您拿主意的事')
+    expect(empty.textContent).toContain('可以回到上面再同步一次')
+    expect(empty.textContent).not.toContain('都清了')
+
+    // 线框 D ④ — the sentence is now ALSO a control: 「再同步一次」 goes back to the project board FOR
+    // THE SAME PROJECT NUMBER, through the shell's one navigate-stage surface (P0-1/P0-9 wiring).
+    const resync = q(root, 'stock-prep-confirmation-empty-resync') as HTMLButtonElement
+    expect(resync).not.toBeNull()
+    resync.click()
+    expect(onNavigateStage).toHaveBeenCalledWith('project-board', P2.no)
   })
 
   it('W-06e the four states are genuinely four DIFFERENT sentences', async () => {
@@ -596,5 +624,236 @@ describe('一线看得见自己工厂的项目 — the operator project director
     const empty = q(root, 'stock-prep-confirmation-empty')!
     expect(empty.getAttribute('data-empty-state')).toBe('nothing_synced')
     expect(empty.textContent).not.toContain('都清了')
+  })
+
+  // ---------------------------------------------------------------------------
+  // P0-1 (F5) — the shell's `:project-no` prop, and the watcher that keeps this view in step with it
+  // ---------------------------------------------------------------------------
+  //
+  // Mounted through a small reactive Harness (the SAME idiom StockPreparationProjectBoard.spec.ts uses
+  // for its own prop-watch coverage) rather than through `mountView()`, because the whole point is a
+  // PROP CHANGE on an already-mounted instance — something the shell's real v-else-if tab switch does
+  // not exercise today (a fresh mount already carries the right seed) but P1's embedded panel, and a
+  // deep-link projectNo change while this tab stays active, will.
+
+  function mountWithReactiveProjectNo(initial: string): { projectNoProp: Ref<string> } {
+    const projectNoProp = ref(initial)
+    const Harness = defineComponent({
+      setup() {
+        return () => createElement(StockPreparationConfirmationQueueView as Component, {
+          scope: SCOPE,
+          projectNo: projectNoProp.value,
+        })
+      },
+    })
+    app = createApp(Harness)
+    app.mount(container!)
+    return { projectNoProp }
+  }
+
+  function queueCallCount(): number {
+    return h.apiFetch.mock.calls.filter((call) => String(call[0]).includes(QUEUE_URL)).length
+  }
+
+  it('P0-1: a projectNo prop CHANGE resets the input and reloads that project’s queue', async () => {
+    routeFetch({ queueRows: [pendingRow()] })
+    const { projectNoProp } = mountWithReactiveProjectNo(P1.no)
+    await flush()
+    const input = () => q(container!, 'stock-prep-confirmation-project-input') as HTMLInputElement
+    expect(input().value, 'the initial SEED already carries the shell’s number').toBe(P1.no)
+    // No onMounted/no watcher firing on mount (StockPreparationHandoff.spec.ts’s own contract): the
+    // seed alone filled the box, and nothing was fetched for it yet.
+    expect(queueCallCount()).toBe(0)
+
+    projectNoProp.value = P2.no
+    await flush()
+    expect(input().value, 'the watcher resets the box to the NEW number').toBe(P2.no)
+    expect(queueCallCount(), 'and reloads — the same project a colleague’s worklist row would open').toBe(1)
+    const lastQueueCall = h.apiFetch.mock.calls.map((call) => String(call[0])).filter((url) => url.includes(QUEUE_URL)).pop()
+    expect(lastQueueCall).toContain(`projectNo=${P2.no}`)
+  })
+
+  it('P0-1: an EMPTIED projectNo only resets the box — it does not fetch for no project at all', async () => {
+    routeFetch({ queueRows: [pendingRow()] })
+    const { projectNoProp } = mountWithReactiveProjectNo(P1.no)
+    await flush()
+    expect(queueCallCount()).toBe(0)
+
+    projectNoProp.value = ''
+    await flush()
+    expect((q(container!, 'stock-prep-confirmation-project-input') as HTMLInputElement).value).toBe('')
+    expect(queueCallCount(), 'an empty number is not a project to load a queue for').toBe(0)
+  })
+
+  // ---------------------------------------------------------------------------
+  // W-09b 「读不出来」不能渲染成「没有」(G4) —— the queue read answered 200 with something that is
+  // not a queue
+  // ---------------------------------------------------------------------------
+  //
+  // The real shape of this failure in this repo: an SPA-fallback proxy answering `200 text/html` for
+  // an API path (r12–r16 shipped exactly that; the install page carries a dedicated guard for it).
+  // `parseStockPreparationConfirmResponse` cannot parse it, so the client hands the view `undefined`.
+  // Filling that in with zeros would render 「没有要您拿主意的事」 plus an action button — the page
+  // stating, with confidence, that a project is clear because it could not read it.
+
+  function routeUnreadableQueue(body: BodyInit, contentType: string): void {
+    h.apiFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes(DIRECTORY_URL)) {
+        return new Response(JSON.stringify({ ok: true, data: directoryPayload() }), { status: 200 })
+      }
+      if (String(url).includes(QUEUE_URL)) {
+        return new Response(body, { status: 200, headers: { 'content-type': contentType } })
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+  }
+
+  async function typeAndRefresh(root: HTMLElement, projectNo: string): Promise<void> {
+    const input = q(root, 'stock-prep-confirmation-project-input') as HTMLInputElement
+    input.value = projectNo
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(q(root, 'stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+  }
+
+  it('W-09b a 200 that is not a queue at all says 读不出来 — it never claims 没有要您拿主意的事', async () => {
+    routeUnreadableQueue('<!doctype html><html><body>app shell</body></html>', 'text/html')
+    const root = mountView()
+    await flush()
+    await typeAndRefresh(root, P2.no)
+
+    expect(q(root, 'stock-prep-confirmation-empty'), 'an unread queue is not an empty queue').toBeNull()
+    expect(q(root, 'stock-prep-confirmation-empty-resync'), 'and it certainly does not hand out an action button').toBeNull()
+    expect(q(root, 'stock-prep-confirmation-counts'), 'nor a 等您处理: 0 that nothing supports').toBeNull()
+    const error = q(root, 'stock-prep-confirmation-error')!
+    expect(error).not.toBeNull()
+    expect(error.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_DECISION_QUEUE_UNREADABLE')
+    expect(error.textContent).toContain(STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_DECISION_QUEUE_UNREADABLE.zh)
+  })
+
+  it('W-09b an envelope with no queue in it leaves the LAST GOOD queue on screen rather than blanking it', async () => {
+    routeFetch({ queueRows: [pendingRow()] })
+    const root = mountView()
+    await flush()
+    await typeAndRefresh(root, P1.no)
+    expect(all(root, 'stock-prep-confirmation-row')).toHaveLength(1)
+
+    routeUnreadableQueue(JSON.stringify({ ok: true, data: {} }), 'application/json')
+    ;(q(root, 'stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+
+    expect(all(root, 'stock-prep-confirmation-row'), 'the row that WAS read stays — it is still the last thing known').toHaveLength(1)
+    expect(q(root, 'stock-prep-confirmation-error')?.querySelector('code')?.textContent)
+      .toBe('STOCK_PREPARATION_DECISION_QUEUE_UNREADABLE')
+    expect(q(root, 'stock-prep-confirmation-empty')).toBeNull()
+  })
+
+  it('W-09b a PARTIAL but genuinely queue-shaped payload is still filled in defensively, not rejected', async () => {
+    // The other half of the same discipline: a payload that IS a queue but predates a field must not
+    // crash the render (the old code left `rows` undefined and the next render threw) and must not be
+    // treated as unreadable either — it carries a real row count.
+    routeUnreadableQueue(JSON.stringify({ ok: true, data: { rowCount: 3 } }), 'application/json')
+    const root = mountView()
+    await flush()
+    await typeAndRefresh(root, P2.no)
+
+    expect(q(root, 'stock-prep-confirmation-error'), 'a queue-shaped payload is not an error').toBeNull()
+    expect(q(root, 'stock-prep-confirmation-counts')!.textContent).toContain('3')
+  })
+
+  // ---------------------------------------------------------------------------
+  // P0-9 — 「再同步一次」 is gated on WHO CAN ACTUALLY ARRIVE at 项目备料页 (R-11「可见即可用」)
+  // ---------------------------------------------------------------------------
+  //
+  // The button navigates to the `project-board` tab, whose predicate is `canOpenStockPrepProjectBoard`
+  // = operate ∧ read. Its SIBLING in the same `<p>` (去装:开始使用) is gated on the install tab's
+  // predicate for exactly this reason: a button that teleports someone to a tab they cannot see is a
+  // NEW dead end, not a closed one — it sets `activeKey`, the shell folds it back to their landing
+  // tab, and the screen does not move.
+  //
+  // IS IT REACHABLE TODAY? No — and this case says so rather than pretending otherwise. The directory
+  // read that produces every one of these empty states is an OPERATE-tier capability, and
+  // `canStockPrepCapability` computes that tier as the SAME conjunction (operate ∧ read). So the two
+  // predicates coincide for every principal, and the gate is defence in depth. What this pins is the
+  // coincidence itself plus the coupling: the button's presence tracks the BOARD predicate, so on the
+  // day either side moves, the button stops being offered instead of quietly becoming inert.
+
+  it('P0-9: 再同步一次 is offered exactly to the callers who can open 项目备料页', async () => {
+    const principals: string[][] = [
+      [STOCK_PREP_READ],
+      [STOCK_PREP_OPERATE],
+      [STOCK_PREP_READ, STOCK_PREP_OPERATE],
+    ]
+    for (const permissions of principals) {
+      h.permissions = [...permissions]
+      routeFetch()
+      // The prop watcher rather than 刷新列表: that control is READ-tier, and two of these three
+      // principals do not have it — the watcher is how the queue can load for any of them.
+      const { projectNoProp } = mountWithReactiveProjectNo('')
+      await flush()
+      projectNoProp.value = P2.no
+      await flush()
+
+      const mayOpenBoard = canOpenStockPrepProjectBoard(realHasPermission)
+      const label = JSON.stringify(permissions)
+      expect(
+        Boolean(q(container!, 'stock-prep-confirmation-empty-resync')),
+        `${label}: the button is offered iff the tab it navigates to is`,
+      ).toBe(mayOpenBoard)
+      // The DIRECTORY control is the OPERATE-tier capability in DOM form. Its presence matching the
+      // board predicate is what makes the empty state unreachable for the two who cannot act on it —
+      // the coincidence the paragraph above depends on, asserted rather than assumed.
+      expect(
+        Boolean(q(container!, 'stock-prep-operator-project-directory')),
+        `${label}: the directory tier and the board tier are the same conjunction today`,
+      ).toBe(mayOpenBoard)
+      if (mayOpenBoard) {
+        // ...and for the one who CAN, the sentence and the control say the same thing.
+        expect(q(container!, 'stock-prep-confirmation-empty')!.textContent).toContain('可以回到上面再同步一次')
+      }
+
+      if (app) app.unmount()
+      app = null
+      container!.innerHTML = ''
+      h.apiFetch.mockClear()
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // 目录行的 :key —— projectId 优先,因为它才是可证明唯一的那个
+  // ---------------------------------------------------------------------------
+  //
+  // The server de-duplicates by `projectNo` only BETWEEN the pull-target and archived halves of the
+  // union; two ARCHIVED rows are upserted by `projectId` and nothing on the write path forces
+  // `projectId` and `sourceProjectNo` to be 1:1. So "two rows, different projectId, same projectNo" is
+  // a state the store allows — and keying on `projectNo` would collide there, which for the worklist
+  // means two <li> buttons sharing one key.
+
+  it('two archived rows sharing a projectNo still get distinct keys (projectId first)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const root = mountView()
+      await flush()
+      expect(q(root, 'stock-prep-operator-project-datalist')!.querySelectorAll('option')).toHaveLength(2)
+
+      // A REFRESH (a patch, not a first render) is what makes Vue check keys at all — and the two
+      // colliding rows have to land in the same unkeyed-middle run for the check to reach them, which
+      // is why the refreshed list leads with the twins and ends on a row the old list started with.
+      const twins = [
+        { ...project(P2, 0), projectId: 'stockprep_archive_a' },
+        { ...project(P2, 0), projectId: 'stockprep_archive_b', projectName: `${P2.name} 2` },
+        project(P1, 0),
+      ]
+      routeFetch({ directory: directoryPayload({ projects: twins, projectCount: 3, pendingProjectCount: 0 }) })
+      ;(q(root, 'stock-prep-operator-project-directory') as HTMLButtonElement).click()
+      await flush()
+
+      expect(q(root, 'stock-prep-operator-project-datalist')!.querySelectorAll('option')).toHaveLength(3)
+      const duplicates = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('Duplicate keys'))
+      expect(duplicates, 'keying on projectNo would collide here; projectId does not').toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

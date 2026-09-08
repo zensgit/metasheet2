@@ -1,8 +1,10 @@
 <template>
   <div class="stock-prep-install" data-testid="stock-prep-install">
-    <!-- P0-4: the「开始使用」向导, mounted FIRST. It reads only state this view already owns (props
-         down, no fetch of its own) and re-emits its three actions onto this view's own existing
-         functions — nothing below it changes order, testid, or behaviour. -->
+    <!-- P0-4: the「开始使用」向导, mounted FIRST. Every deployment fact it renders comes down as a
+         prop this view already owns; since P1-3 it additionally issues ONE read of its own, the
+         platform role catalog for step⑤「谁能用」(`onboardingReadiness.ts`, a preload that degrades
+         to 「? 看不到」 and never to a banner). It re-emits its three actions onto this view's own
+         existing functions — nothing below it changes order, testid, or behaviour. -->
     <StockPreparationGettingStarted
       :defaults="defaults"
       :preflight="preflight"
@@ -54,6 +56,15 @@
          renders its own gate (platform admin to change, read-only for a
          `stock-prep:admin` holder) and its own reads, so it neither depends on
          nor blocks the manifest/preflight panels beneath it.
+
+         P1-7 KEPT IT HERE ON PURPOSE. An earlier draft of this wave moved it
+         into region ③ 「装完之后回来复查」on the strength of design-ops-overview
+         P-5, which lists 源绑定 among the things you come back to. P-5 assigns
+         this panel to this PAGE; it says nothing about where on the page. The
+         wizard's step ③「告诉备料用这条源」has no button, no anchor and no
+         scroll of its own — this panel IS its only execution site — so putting
+         it below ②'s ~240 template lines would leave the wizard pointing at
+         something the reader has to go hunting for. `P1-7b` pins the ordering.
          =================================================================== -->
     <!-- @binding-read hands the wizard above THIS panel's server answer (which source 备料 will read,
          how many the server considers eligible) so steps ①③ project it rather than re-deriving it. -->
@@ -85,7 +96,16 @@
         {{ defaults.valueStatement }}
       </p>
 
-      <h4 class="stock-prep-install__h4">{{ bi('会建哪几张表', 'Which tables get created') }}</h4>
+      <!-- P1-7: the five subsections below split into native <details>, default-collapsed except the
+           first — the "五段一次性铺开" A13 named as the page's own five-minute-op-turned-reading-
+           comprehension problem. Splitting changes NOTHING about what is asserted: every row a spec
+           reads by testid stays in the DOM (a closed <details> hides visually, never structurally —
+           `.textContent` and `querySelector` do not care), and V-02's "zero buttons in this section"
+           holds because `<summary>` is not a `<button>`. Each summary keeps the section's `<h4>`
+           INSIDE it rather than replacing it: a disclosure control that is also a heading stays in
+           the screen-reader outline, so heading navigation through these five still works. -->
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="objects" open>
+        <summary><h4 class="stock-prep-install__h4">{{ bi('会建哪几张表', 'Which tables get created') }}</h4></summary>
       <table class="stock-prep-install__table">
         <thead>
           <tr>
@@ -123,8 +143,10 @@
           </tr>
         </tbody>
       </table>
+      </details>
 
-      <h4 class="stock-prep-install__h4">{{ bi('装好之后谁能做什么', 'Who can do what once it is installed') }}</h4>
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="permissions">
+        <summary><h4 class="stock-prep-install__h4">{{ bi('装好之后谁能做什么', 'Who can do what once it is installed') }}</h4></summary>
       <ul class="stock-prep-install__list stock-prep-install__list--plain" data-testid="stock-prep-install-permissions">
         <li v-for="code in defaults.permissions.codes" :key="code" data-testid="stock-prep-install-permission-row">
           <strong v-if="permissionPlain(code)">{{ bi(permissionPlain(code)!.zh, permissionPlain(code)!.en) }}</strong>
@@ -147,8 +169,10 @@
           ? bi(noHolders.zh + (noHolders.zhNext ?? ''), `${noHolders.en} ${noHolders.enNext ?? ''}`)
           : defaults.permissions.automaticHolders.join(', ') }}
       </p>
+      </details>
 
-      <h4 class="stock-prep-install__h4">{{ bi('需要在服务器上准备的东西', 'What has to be set up on the server') }}</h4>
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="config-surfaces">
+        <summary><h4 class="stock-prep-install__h4">{{ bi('需要在服务器上准备的东西', 'What has to be set up on the server') }}</h4></summary>
       <ul class="stock-prep-install__list stock-prep-install__list--plain">
         <li
           v-for="surface in defaults.configSurfaces"
@@ -169,8 +193,10 @@
           </span>
         </li>
       </ul>
+      </details>
 
-      <h4 class="stock-prep-install__h4">{{ bi('系统绝对不会做的事', 'What the system will never do') }}</h4>
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="posture">
+        <summary><h4 class="stock-prep-install__h4">{{ bi('系统绝对不会做的事', 'What the system will never do') }}</h4></summary>
       <p class="stock-prep-install__hint" data-testid="stock-prep-install-no-switch">
         {{ bi(
           '下面这几条是这套部署的硬性边界。本页只报告它们的状态,没有开关可以打开它们 —— 显示「未设」或「关闭」就是正确的,不是漏配。',
@@ -200,8 +226,10 @@
           </span>
         </li>
       </ul>
+      </details>
 
-      <h4 class="stock-prep-install__h4">{{ bi('怎么算装成功了', 'What counts as installed') }}</h4>
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="acceptance">
+        <summary><h4 class="stock-prep-install__h4">{{ bi('怎么算装成功了', 'What counts as installed') }}</h4></summary>
       <ul class="stock-prep-install__list stock-prep-install__list--plain" data-testid="stock-prep-install-acceptance">
         <li v-for="criterion in defaults.acceptance.criteria" :key="criterion.id">
           <strong v-if="acceptancePlain(criterion.id)">
@@ -217,6 +245,7 @@
           'Both are checked by the acceptance script that ships with the release, not by a button here — the script is named in the technical details below.',
         ) }}
       </p>
+      </details>
 
       <!-- Everything the page used to lead with, kept verbatim and one click away. -->
       <StockPrepTechnicalDetails testid="stock-prep-install-defaults-tech">
@@ -283,6 +312,27 @@
         </dl>
       </StockPrepTechnicalDetails>
     </section>
+
+    <!-- ===================================================================
+         P1-7 REGION ③ — 「装完之后回来复查」. Everything below used to render as five loose cards
+         with no shared frame; grouped here under one heading because every one of them answers the
+         SAME question an admin has after the first install run finishes, or weeks later when
+         something needs rechecking: "come back here, not to 「即将安装的内容」above, which is a
+         one-time confirmation read". testids on every card inside are UNCHANGED — this is a wrapper,
+         not a rewrite.
+
+         ZERO CARDS MOVE. Every panel below renders in the order it rendered on main; this region is
+         a wrapper plus a heading, nothing else. (An earlier draft of this wave DID move the source-
+         binding panel down into here — see the comment above that panel for why it was put back.)
+         =================================================================== -->
+    <section class="stock-prep-install__section-group" data-testid="stock-prep-install-review-section">
+      <h3 class="stock-prep-install__section-title">{{ bi('装完之后回来复查', 'Come back here to review, after installing') }}</h3>
+      <p class="stock-prep-install__intro" data-testid="stock-prep-install-review-intro">
+        {{ bi(
+          '这几张卡是您装完之后、或者以后要重新体检 / 重装时会回来看的地方 —— 装之前只要确认一次默认值就行,不用先读完这里。',
+          'These cards are where you come back — right after installing, or later to run another health check or reinstall. Before installing you only confirm the defaults once; you do not need to read this section first.',
+        ) }}
+      </p>
 
     <!-- ===================================================================
          PREFLIGHT — 查. Read tier, provisions nothing. Every blocker now
@@ -817,6 +867,21 @@
     <section v-if="canRun" class="stock-prep-install__section" data-testid="stock-prep-install-copilot">
       <SchemaMappingCopilotPanel :scope="props.scope" :signals="copilotSignals" />
     </section>
+
+      <!-- P1-6 / I-22: the error-code drawer's entry point THIS WAVE — a real, visible entry at the
+           foot of this region (NOT "暗装": the component is mounted AND reachable). It is a
+           self-contained, prop-free panel (codeHelp.ts's own contract), so mounting it here is the
+           whole feature — no wiring, no scope, no fetch. The next wave's 【帮助】rail group mounts
+           this SAME component rather than a second copy.
+
+           The panel renders its own collapsed `<details>`: it is a DRAWER (§2.4 P-7 / §6.2 P1-6 /
+           §4.1 I-22 all call it one), so it costs one line of page height until someone has a code to
+           look up. Folding ② and then unfolding 74 rows here would have made this page LONGER than
+           it was before P1-7, which is the exact A13 complaint the wave exists to answer. -->
+      <section class="stock-prep-install__card" data-testid="stock-prep-install-code-help">
+        <StockPreparationCodeHelpPanel />
+      </section>
+    </section>
   </div>
 </template>
 
@@ -863,6 +928,7 @@ import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationSourceBindingPanel from './StockPreparationSourceBindingPanel.vue'
 import StockPreparationGettingStarted from './StockPreparationGettingStarted.vue'
 import SchemaMappingCopilotPanel from './SchemaMappingCopilotPanel.vue'
+import StockPreparationCodeHelpPanel from './StockPreparationCodeHelpPanel.vue'
 import type { SchemaMappingColumnInput, SchemaMappingSignalsInput } from '../../../services/integration/stockPreparation/schemaMappingCopilot'
 import {
   buildStockPreparationInstallDefaults,
@@ -1356,6 +1422,72 @@ defineExpose({ loadDefaults, loadPreflight, loadSourcePreflight, startInstall })
   margin: var(--ms-space-3) 0 var(--ms-space-2);
   font-size: 13px;
   color: var(--ms-text-1);
+}
+
+/* P1-7 region ③'s own heading. It is an `<h3>` in the DOM — the SAME level as ②'s card heading and
+   the wizard's, because the three regions are peers — and carries only extra visual weight here, so
+   the page reads as ①向导 → ②即将安装的内容 → ③装完之后回来复查 without an h3→h2 level jump. */
+.stock-prep-install__section-title {
+  margin: 0 0 var(--ms-space-2);
+  font-size: 16px;
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
+}
+
+/* The wrapper for every "come back and recheck" card. A top border stands in for the page break a
+   heading alone would not give — without it, ②'s last card and ③'s first ran together visually. */
+.stock-prep-install__section-group {
+  padding-top: var(--ms-space-4);
+  border-top: 1px solid var(--ms-border-light);
+}
+
+/* The five "即将安装的内容" subsections (P1-7). Each `<summary>` wraps the section's own `<h4>` — the
+   heading stays a heading (screen-reader outline intact) and the disclosure gains only what a
+   disclosure needs: pointer cursor, a caret, and a focus ring. Same idiom StockPrepTechnicalDetails
+   .vue already uses elsewhere on this page, restated locally because these five are native
+   `<details>` with no shared component (each one is a plain-language subsection of a single served
+   manifest, not a reusable disclosure).
+
+   CLOSE EVERY COMMENT IN THIS BLOCK THE CSS WAY — star-slash. The HTML terminator is not one: PostCSS
+   reads straight past it to the next real terminator and silently deletes every rule in between. It
+   cost 12 rules here once, six of them pre-existing. P1-7d in StockPreparationInstallView.spec.ts
+   parses this block and fails if a named selector stops resolving, because neither vue-tsc nor jsdom
+   can see CSS at all. (Which is also why neither sequence appears literally in this comment.) */
+.stock-prep-install__fold {
+  margin: 0 0 var(--ms-space-3);
+}
+
+.stock-prep-install__fold > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+/* The heading inside the summary sits on the caret's line rather than opening a block of its own. */
+.stock-prep-install__fold > summary > .stock-prep-install__h4 {
+  display: inline;
+  margin: 0;
+}
+
+.stock-prep-install__fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.stock-prep-install__fold > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 1em;
+  color: var(--ms-text-3);
+  transition: transform 0.12s ease;
+}
+
+.stock-prep-install__fold[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.stock-prep-install__fold > summary:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .stock-prep-install__app {

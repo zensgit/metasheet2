@@ -587,6 +587,16 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '过一会儿再点一次;如果一直这样,把下面的报错代码给管理员。',
     enNext: 'Try again shortly; if it keeps happening, give an administrator the code below.',
   }),
+  // A 200 whose body is not a queue at all — an unparseable payload, an envelope with no data, the
+  // HTML an SPA-fallback proxy answers with. READ-SHAPED on purpose: nothing was being saved, so the
+  // generic 「这一步没有保存成功」 would answer a question nobody asked. It exists so the queue view
+  // can say 「读不出来」 instead of rendering a fabricated empty list as 「都清了」 (G4).
+  STOCK_PREPARATION_DECISION_QUEUE_UNREADABLE: Object.freeze({
+    zh: '这份待确认清单没读回来,所以下面暂时什么都不显示——不代表没有要处理的事。',
+    en: 'The list of items to confirm did not come back, so nothing is shown below — that does not mean there is nothing waiting.',
+    zhNext: '点上面的「刷新列表」再试一次;如果一直这样,把下面的报错代码给管理员。',
+    enNext: 'Press 刷新列表 above to try again; if it keeps happening, give an administrator the code below.',
+  }),
   FORBIDDEN: Object.freeze({
     zh: '当前账号没有做这件事的权限。',
     en: 'This account is not allowed to do that.',
@@ -749,13 +759,19 @@ export const STOCK_PREP_ADMIN_ACTION_PLAIN: Record<string, StockPrepPlainText> =
   // Reconcile RE-READS the source and rebuilds the SERVER's pending list; it decides nothing on the
   // operator's behalf, which is the half most worth saying out loud.
   //
-  // IT DOES NOT PROMISE THE SCREEN. The queue table on this page loads only when 刷新列表 is pressed
-  // (that button is the view's one load-on-demand entry point), so the rows visible after a re-scan
-  // are still the ones read before it. Copy that claimed "the list is up to date" was describing the
-  // server while the reader was looking at the stale table.
+  // IT NO LONGER SENDS ANYONE BACK TO A BUTTON (P0-8 / 验收 9). The old wording ended with 「请点上面
+  // 的「刷新列表」看最新的待确认清单」, which was true only while the shell left the table stale after a
+  // successful re-scan. The shell now re-reads the queue itself the moment this sentence appears
+  // (StockPreparationWorkspace.vue's `handleAdminAction`), so that half was worse than redundant: the
+  // screen would have said 「已经替您重读了」 and 「请您再点一次刷新」 at the same time.
+  //
+  // IT STILL DOES NOT PROMISE THE SCREEN'S CONTENT. The sentence describes the two things that DID
+  // happen — the server re-scanned, and the list was re-read on the reader's behalf — not a claim
+  // that the table below is now correct: a re-read that fails renders the queue's own error line
+  // right beside this notice, and copy asserting 「下面就是最新的」 would be contradicted by it.
   RECONCILE_OK: Object.freeze({
-    zh: '已经重新扫描过一遍。请点上面的「刷新列表」看最新的待确认清单。系统没有替任何人做决定。',
-    en: 'The re-scan is done. Press “Refresh the list” above to see the latest items to confirm. Nothing was decided on anyone’s behalf.',
+    zh: '已经重新扫描过一遍,下面的清单也替您重读了一遍,不用再手动点刷新。系统没有替任何人做决定。',
+    en: 'The re-scan is done, and the list below was re-read for you — no need to press refresh yourself. Nothing was decided on anyone’s behalf.',
   }),
   // The reconcile route is scoped to ONE project. Without a number there is nothing to scan, and
   // sending the request anyway would answer with a shapeless 400 the operator cannot act on.
@@ -883,6 +899,110 @@ export const STOCK_PREP_LEDGER_MISSING_ACTION: StockPrepPlainText = Object.freez
   en: 'Go install: Getting started',
 })
 
+/**
+ * The `nothing_pending` empty state's new closure button (P0-9, 线框 D ④): "把『确认完要回来再同步一
+ * 次』从词表句子变成控件" — turns the queue's OWN closure sentence into a click, back to the project
+ * board for the SAME project number.
+ *
+ * IT IS THE BUTTON'S LABEL AND NOTHING ELSE. The missing-components card's bottom closure line (线框
+ * D ③) is a SEPARATE constant, `STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT` below — same idea, but a
+ * whole sentence rather than a four-character label, because that card has no button to attach one to.
+ * An earlier draft of this comment claimed the two shared these words; they never did.
+ */
+export const STOCK_PREP_QUEUE_RESYNC_ACTION: StockPrepPlainText = Object.freeze({
+  zh: '再同步一次',
+  en: 'Sync once more',
+})
+
+/**
+ * P1-2 (线框 D ④) — THE SAME BUTTON'S LABEL WHEN THE QUEUE IS COMPOSED IN PLACE (`embedded`).
+ *
+ * 线框 D writes it out as 「回到上面再同步一次 ▴」, and the extra four characters are the whole point:
+ * in the tab this button LEAVES the page, so 「再同步一次」 describes where the operator lands. Inside
+ * 项目备料页's 面板 2 it does not leave anything — it takes the operator back UP the same page and
+ * runs the sync panel that is already sitting there. A label that only said 「再同步一次」 would be
+ * true about the sync and silent about the journey; this one says both, which is what stops the
+ * operator hunting for a second button after the page scrolls under them.
+ */
+export const STOCK_PREP_QUEUE_RESYNC_ACTION_EMBEDDED: StockPrepPlainText = Object.freeze({
+  zh: '回到上面再同步一次',
+  en: 'Go back up and sync once more',
+})
+
+/**
+ * I-3 (线框 C 面板 2) — 面板 2「等您拿主意」's STANDING explanatory line, present in BOTH the collapsed
+ * and the expanded state.
+ *
+ * 线框 C draws this sentence inside 面板 2 in both the P0 and the P1 rendering, and it carries the one
+ * instruction the whole redesign says is lost most often: confirming is not the last step — the data
+ * only reaches 多维表 after one more 同步. Without it the collapsed panel is a box with a count and a
+ * toggle and no word about what it is for.
+ */
+export const STOCK_PREP_CONFIRM_PANEL_NOTE: StockPrepPlainText = Object.freeze({
+  zh: '系统拿不准的事排在这里,处理完记得回上面再点一次「同步一次」。',
+  en: 'Anything the system cannot decide lands here. When you have handled them, go back up and press 同步一次 once more.',
+})
+
+/** I-4 (线框 D ③): 缺件卡's bottom closure line — there is no "mark done" button on this page; a
+ *  later sync is what clears the row. */
+export const STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT: StockPrepPlainText = Object.freeze({
+  zh: '补好之后:回到上面点「同步一次」,系统会自己发现,不用在这里标记完成。',
+  en: 'Once it is fixed: go back up and press 同步一次 — the system finds it on its own; there is no "mark done" button here.',
+})
+
+// ---------------------------------------------------------------------------
+// I-20 — field-level tooltips (native `title`, the existing 最近变更(来自 PLM) pattern)
+// ---------------------------------------------------------------------------
+
+/** 表里有多少行 (项目工作区状态条). Verbatim from 设计稿 §4.1 I-20's own worked example. */
+export const STOCK_PREP_TOOLTIP_ROWS_IN_TABLE: StockPrepPlainText = Object.freeze({
+  zh: '拉取目标表里属于这个项目的行,不是 BOM 总行数。',
+  en: "Rows in the pull-target table that belong to this project — not the BOM's total line count.",
+})
+
+/** 待确认 (确认队列「等您处理」计数). */
+export const STOCK_PREP_TOOLTIP_PENDING_CONFIRM: StockPrepPlainText = Object.freeze({
+  zh: '等您处理 = 还没被确认或挂起的行数,不是这个项目全部的行数。',
+  en: 'Waiting for you = rows not yet confirmed or parked — not the project’s total row count.',
+})
+
+/** 缺件 (从PLM拉取面板缺件卡标题). */
+export const STOCK_PREP_TOOLTIP_MISSING_COMPONENTS: StockPrepPlainText = Object.freeze({
+  zh: '缺件种数 = 源系统里找不到的零件去重后的数量,不是出现的次数。',
+  en: 'Missing-part count = the number of distinct parts not found in the source system — not how many times they occur.',
+})
+
+/** 可导出 (首页「可以导出」筛选). */
+export const STOCK_PREP_TOOLTIP_READY_TO_EXPORT: StockPrepPlainText = Object.freeze({
+  zh: '可以导出 = 数据已经写进多维表、且没有等您拿主意的事;不代表已经导出过。',
+  en: 'Ready to export = the data is already written into the multitable and nothing is waiting on your decision — it does not mean it has already been exported.',
+})
+
+// ---------------------------------------------------------------------------
+// 首页目录三句提示 (U2 契约 · P0 补项 5) — mutually exclusive, at most one shown, in this order.
+// PRESENT ONLY when the matching directory field is the EXPLICIT boolean the sentence names — an
+// older backend (or a caller that did not opt in) that OMITS the field must show none of these three;
+// `undefined` is "unknown", never "false".
+// ---------------------------------------------------------------------------
+
+/** `pullTargetReady === false`. */
+export const STOCK_PREP_HOME_PULL_TARGET_UNREADABLE: StockPrepPlainText = Object.freeze({
+  zh: '自助拉取的项目这次读不到,目录只显示归档过的项目;您仍可直接输入项目号打开。',
+  en: 'Projects pulled by operators could not be read this time; the directory lists archived projects only. You can still open a project by typing its number.',
+})
+
+/** `pullTargetScanCapped === true`. */
+export const STOCK_PREP_HOME_PULL_TARGET_SCAN_CAPPED: StockPrepPlainText = Object.freeze({
+  zh: '项目数超过一次扫描的上限,目录可能不全;找不到的项目请直接输入项目号。',
+  en: 'The project count is past what one scan covers, so the list may be incomplete — if you cannot find a project, open it directly by its number.',
+})
+
+/** `directoryMayBeIncomplete === true`, and neither of the two more specific sentences above applied. */
+export const STOCK_PREP_HOME_DIRECTORY_MAY_BE_INCOMPLETE: StockPrepPlainText = Object.freeze({
+  zh: '目录本次可能不全;找不到的项目请直接输入项目号。',
+  en: 'The list may be incomplete this time — if you cannot find a project, open it directly by its number.',
+})
+
 // ---------------------------------------------------------------------------
 // 一线看得见自己工厂的项目 — the five HONEST empty states
 // ---------------------------------------------------------------------------
@@ -940,10 +1060,17 @@ export const STOCK_PREP_DIRECTORY_EMPTY_PLAIN: Record<string, StockPrepPlainEntr
     zhNext: '项目本身能看到,但要开始处理,得先请管理员建这张表。',
     enNext: 'You can still see the projects; an administrator has to create that table before you can start working through them.',
   }),
-  /** The good news case — and now it only shows when it is actually true. */
+  /**
+   * The good news case — and now it only shows when it is actually true. P0-9 (设计稿 §4.3): the
+   * closure line names the ACTUAL next step (「再同步一次」, wired to the button below) rather than
+   * leaving 「都清了」 as the whole sentence — a reader who just finished confirming everything is not
+   * told that the job is actually done until the data has been written into the multitable.
+   */
   nothing_pending: Object.freeze({
-    zh: '这个项目下没有需要您处理的事 —— 都清了。',
-    en: 'Nothing on this project needs your attention — it is all clear.',
+    zh: '没有要您拿主意的事。',
+    en: 'Nothing here needs your decision.',
+    zhNext: '可以回到上面再同步一次,把数据写进多维表。',
+    enNext: 'You can go back up and sync once more to write the data into the multitable.',
   }),
 })
 
@@ -1533,3 +1660,184 @@ export const STOCK_PREP_HANDOFF_OUTCOME_PLAIN: Record<string, StockPrepPlainEntr
 export function stockPrepHandoffOutcomePlain(outcome: string): StockPrepPlainEntry | null {
   return lookup(STOCK_PREP_HANDOFF_OUTCOME_PLAIN, outcome)
 }
+
+// ---------------------------------------------------------------------------
+// 记录与排查 (P1-4/P1-5, 暗装) — 审计动作词表 + 三行免责 + 健康格的诚实态文案
+//
+// 「谁在什么时候动过这个项目」reads `audit.ts`'s values-free projection, and this table is what
+// turns its closed `action` vocabulary into the sentence a person reads. An action with no entry
+// here falls through `lookup` to `null`, same as every other table in this file — the CALLER (not
+// this module) renders the `其他动作(${code})` fallback, because that fallback needs the raw code
+// interpolated and this file never receives one it did not already look up.
+//
+// THE COUNT MUST STAY AT FOURTEEN. `StockPreparationOpsPanel.spec.ts` reads
+// `STOCK_PREP_AUDIT_ACTIONS` straight out of `stock-preparation-audit-store.cjs` (the DB CHECK
+// constraint's own source of truth, same anti-vacuity discipline as
+// `StockPreparationPosturePlainLanguage.spec.ts`'s manifest read) and asserts `Object.keys(...).length`
+// equals that count — a missing entry is exactly the failure this table exists to prevent: an admin
+// mid-troubleshoot meeting a bare action code instead of a sentence.
+// ---------------------------------------------------------------------------
+
+export const STOCK_PREP_AUDIT_ACTION_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  mapping_candidates_sync: Object.freeze({ zh: '同步了一批字段映射候选', en: 'Synced a batch of field-mapping candidates' }),
+  mapping_confirm: Object.freeze({ zh: '确认了一条字段映射', en: 'Confirmed a field mapping' }),
+  mapping_retire: Object.freeze({ zh: '撤销了一条字段映射', en: 'Retired a field mapping' }),
+  unit_confirm: Object.freeze({ zh: '确认了一条单位换算', en: 'Confirmed a unit conversion' }),
+  unit_retire: Object.freeze({ zh: '撤销了一条单位换算', en: 'Retired a unit conversion' }),
+  generation_run: Object.freeze({ zh: '对账了一次', en: 'Ran a reconcile' }),
+  exception_resolve: Object.freeze({ zh: '确认了一条系统拿不准的行', en: 'Resolved a row the system could not decide on its own' }),
+  exception_bulk_resolve: Object.freeze({ zh: '批量确认了一批系统拿不准的行', en: 'Bulk-resolved a batch of undecidable rows' }),
+  persist_repair_once: Object.freeze({ zh: '做了一次一次性修复', en: 'Ran the one-shot repair' }),
+  source_binding_set: Object.freeze({ zh: '换了这套部署读的数据源', en: 'Changed the source this deployment reads' }),
+  prep_line_export: Object.freeze({ zh: '导出了物料清单(Excel)', en: 'Exported the materials list (Excel)' }),
+  project_directory_read: Object.freeze({ zh: '打开了项目清单', en: 'Opened the project list' }),
+  handoff_advance: Object.freeze({ zh: '通知了下一步', en: 'Advanced the handoff to the next step' }),
+  project_board_read: Object.freeze({ zh: '打开了一个项目的备料页', en: "Opened a project's 备料 page" }),
+})
+
+export function stockPrepAuditActionPlain(action: string): StockPrepPlainText | null {
+  return lookup(STOCK_PREP_AUDIT_ACTION_PLAIN, action)
+}
+
+/**
+ * What a primary audit row may say about WHO. Never a name (F11) — and never a positive claim the
+ * comparison could not actually support.
+ *
+ * The two 「不确定」 lines are not padding. `audit.ts`'s `who` is four-valued because both inputs to
+ * the equality check can be absent — `getCurrentUserId()` is a network read that can fail, and the
+ * store's append allows a null actor. Folding either absence into 「其他同事」 would make a page
+ * whose whole job is attribution assert that someone else did it, on the strength of a read that
+ * did not happen. Saying so plainly is the only honest option, and it is cheap: the row's 技术详情
+ * already carries whatever the trail does know.
+ */
+export const STOCK_PREP_AUDIT_ACTOR_SELF: StockPrepPlainText = Object.freeze({ zh: '您', en: 'You' })
+export const STOCK_PREP_AUDIT_ACTOR_OTHER: StockPrepPlainText = Object.freeze({ zh: '其他同事', en: 'A colleague' })
+export const STOCK_PREP_AUDIT_ACTOR_UNKNOWN_VIEWER: StockPrepPlainText = Object.freeze({
+  zh: '不确定是不是您(没读到当前账号)',
+  en: "Can't tell whether this was you (your own account could not be read)",
+})
+export const STOCK_PREP_AUDIT_ACTOR_UNKNOWN_ACTOR: StockPrepPlainText = Object.freeze({
+  zh: '这条记录没有留下操作者',
+  en: 'This row records no actor',
+})
+
+/**
+ * The three lines 线框 E calls "全套稿子里唯一一处'不写就会主动生产错误结论'的文案" — R6: without
+ * them, "no rows found" reads as "nobody touched this project", which is false in three distinct,
+ * independent ways (scope / cap / legacy id). Rendered together, always, never collapsed — see
+ * `StockPreparationOpsPanel.vue`'s audit block, which places them as SIBLINGS of every search-result
+ * branch rather than inside any one of them.
+ */
+export const STOCK_PREP_AUDIT_CAVEAT_SCOPE: StockPrepPlainText = Object.freeze({
+  zh: '这份记录只涵盖四类动作:确认、对账、导出、通知下一步。试算和写入不在这份记录里 —— 它们有自己的运行记录。所以「这里没有记录」不等于「没有人动过这个项目」。',
+  en: 'This trail covers only four kinds of action: confirm, reconcile, export, and handoff. Trial runs and writes are NOT in it — they have their own run records. So "nothing here" does not mean "nobody touched this project".',
+})
+export const STOCK_PREP_AUDIT_CAVEAT_LIMIT: StockPrepPlainText = Object.freeze({
+  zh: '只看了最近 100 条(最多 500,没有翻页)。项目多的时候,更早的动作会落在范围之外。',
+  en: 'Only the most recent 100 rows are read (500 at most, no paging). On a busy tenant an earlier action can fall outside that window.',
+})
+export const STOCK_PREP_AUDIT_CAVEAT_LEGACY: StockPrepPlainText = Object.freeze({
+  zh: '旧版本写下的记录用的是内部编号、不是项目号,按项目号查不到。',
+  en: 'Rows written by an older version used an internal id instead of a project number, so a project-number search will not find them.',
+})
+
+/** The empty state's own sentence — never "no data", because that reads as "nothing happened". */
+export const STOCK_PREP_AUDIT_EMPTY: StockPrepPlainEntry = Object.freeze({
+  zh: '这个项目号在最近的记录里没有出现。',
+  en: 'That project number does not appear in the recent trail.',
+  zhNext: '这不等于没有人动过这个项目 —— 见下面的说明。',
+  enNext: 'That does not mean nobody touched this project — see the notes below.',
+})
+
+/** The audit route's own gate (`requireAccess(req, 'admin')`) in one sentence. */
+export const STOCK_PREP_AUDIT_FORBIDDEN: StockPrepPlainText = Object.freeze({
+  zh: '这一格看不了:需要平台管理员。',
+  en: 'This tile cannot be read here: needs a platform administrator.',
+})
+
+// ---------------------------------------------------------------------------
+// 「记录与排查」健康六格 — the honest third/fourth states G4 requires: 未检查 is neither green nor
+// red, and 未接入监控 is never allowed to render green (R5/F5: the scheduled task can be stopped for
+// days and a page that shows green anyway is lying).
+// ---------------------------------------------------------------------------
+
+export const STOCK_PREP_OPS_CELL_UNCHECKED: StockPrepPlainText = Object.freeze({ zh: '未检查', en: 'Not checked yet' })
+
+/**
+ * §4.4's `? 看不到` mark. A THIRD neutral badge beside 未检查 and 未接入监控, because the three mean
+ * different things and the table gives each its own token: 未检查 is `--ms-color-info` ("nobody has
+ * asked yet"), `? 看不到` is `--ms-text-3` + a sentence ("we asked and are not allowed to know"), and
+ * 未接入监控 is `--ms-text-3` ("nothing in this application can know"). None of the three may borrow
+ * success/danger (G4).
+ */
+export const STOCK_PREP_OPS_CELL_UNKNOWN_BADGE: StockPrepPlainText = Object.freeze({ zh: '? 看不到', en: '? Cannot see' })
+
+/**
+ * The FIRST half of §6.2 P1-5's 「这一格看不了 + 谁能看」. It is a prefix rather than a whole
+ * sentence so that both halves are always emitted together: the 403 wording used to say only the
+ * second half ("需要平台管理员"), which in a six-tile grid reads as a fact about the DEPLOYMENT
+ * ("this thing needs an admin") rather than about the READER ("you can't see it"), and the audit
+ * block one section below already said both halves — same meaning, two different sentences.
+ */
+export const STOCK_PREP_OPS_CELL_LOCKED_PREFIX: StockPrepPlainText = Object.freeze({
+  zh: '这一格看不了:',
+  en: 'This tile cannot be read here: ',
+})
+
+export const STOCK_PREP_OPS_CELL_UNAVAILABLE: StockPrepPlainText = Object.freeze({
+  zh: '这一格暂时看不了,请稍后再试。',
+  en: 'This tile cannot be read right now — try again shortly.',
+})
+
+/**
+ * A PERMANENT refusal, kept apart from the transient one above. A 400/422 is a statement about this
+ * deployment's configuration, and "请稍后再试" is false advice for it — retrying at any hour returns
+ * the same 422. The most likely producer is a customer pack whose declared `targetObjectId` is
+ * neither the canonical target nor inside the sandbox namespace.
+ */
+export const STOCK_PREP_OPS_CELL_MISCONFIGURED: StockPrepPlainText = Object.freeze({
+  zh: '这一格读不了:这套部署的目标表配置不对(重试也不会变)。请平台管理员核对客户列包声明的目标表。',
+  en: 'This tile cannot be read: this deployment\'s target-table configuration is wrong (retrying will not change it). A platform administrator should check the target table the customer pack declares.',
+})
+
+export const STOCK_PREP_OPS_NEEDS_ADMIN: StockPrepPlainText = Object.freeze({ zh: '需要平台管理员', en: 'Needs a platform administrator' })
+
+export const STOCK_PREP_OPS_NEEDS_INTEGRATION_READ: StockPrepPlainText = Object.freeze({
+  zh: '需要对接读取权限或平台管理员',
+  en: 'Needs integration read access or a platform administrator',
+})
+
+/**
+ * The scheduled dry-run task's own row (P12 / D7). `owner` has not yet decided whether it may report
+ * back (N5, P2), so THIS deployment cannot see whether it is alive — the sentence must stay exactly
+ * this, not a colour, until that decision lands.
+ */
+export const STOCK_PREP_OPS_SCHEDULED_TASK_UNMONITORED: StockPrepPlainEntry = Object.freeze({
+  zh: '未接入监控',
+  en: 'Not wired into monitoring',
+  zhNext: '这项在服务器的任务计划程序里,页面读不到它的运行结果。',
+  enNext: "This runs in the server's own task scheduler; the page cannot read its result.",
+})
+
+/**
+ * 建表/装包 names WHICH table it inspected. A pack that declares no `targetObjectId` normalizes to
+ * the production canonical table server-side (`normalizePackTargetObjectId`), so "沙箱表已就绪" was
+ * simply the wrong noun on every production deployment — and the two readiness routes answer about
+ * two different tables, which a single 「已就绪」 could not distinguish.
+ */
+export const STOCK_PREP_OPS_TARGET_CANONICAL_READY: StockPrepPlainText = Object.freeze({ zh: '生产主表已就绪', en: 'Production main table ready' })
+export const STOCK_PREP_OPS_TARGET_CANONICAL_NOT_READY: StockPrepPlainText = Object.freeze({ zh: '生产主表还没就绪', en: 'Production main table not ready' })
+export const STOCK_PREP_OPS_TARGET_SANDBOX_READY: StockPrepPlainText = Object.freeze({ zh: '沙箱表已就绪', en: 'Sandbox table ready' })
+export const STOCK_PREP_OPS_TARGET_SANDBOX_NOT_READY: StockPrepPlainText = Object.freeze({ zh: '沙箱表还没就绪', en: 'Sandbox table not ready' })
+
+/**
+ * The 建表/装包 tile's PARTIAL failure line. Two of its three reads can succeed while the readiness
+ * one fails, and the tile then still has real information to show — so it shows it, and says plainly
+ * which half is missing rather than silently rendering one sentence short. Without this the tile
+ * stayed `data-cell-status="ready"` and simply omitted the readiness clause, which is the one
+ * failure §6.2 P1-5 names by hand: 「每个失败格子渲染『这一格看不了 + 谁能看』」.
+ */
+export const STOCK_PREP_OPS_TARGET_READINESS_UNREADABLE: StockPrepPlainText = Object.freeze({
+  zh: '表就绪度这一半没读到',
+  en: 'the table-readiness half could not be read',
+})
