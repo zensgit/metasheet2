@@ -985,6 +985,31 @@ describe('ApprovalBatchTransferView', () => {
     expect(q(root, 'batch-transfer-source-picker')).toBeNull()
   })
 
+  it('discards a mounted late grant after the same actor explicitly changes organizations', async () => {
+    const auth = useAuth()
+    const token = (tenantId: string) => `header.${btoa(JSON.stringify({
+      sub: 'synthetic-member', tenantId, exp: Math.floor(Date.now() / 1000) + 3600,
+    })).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')}.signature`
+    const first = token('synthetic-a')
+    const second = token('synthetic-b')
+    auth.setToken(first)
+    expect(auth.setExplicitSessionOrg(first, 'synthetic-a', first)).toBe(true)
+    let release!: (value: string) => void
+    resolveCapabilitySpy.mockReturnValueOnce(new Promise<string>(resolve => { release = resolve }))
+    const root = await mountView()
+    expect(q(root, 'batch-transfer-capability-pending')).toBeTruthy()
+    resolveCapabilitySpy.mockResolvedValue('denied')
+    expect(auth.setExplicitSessionOrg(second, 'synthetic-b', first)).toBe(true)
+    await flushUi()
+    expect(q(root, 'batch-transfer-forbidden')).toBeTruthy()
+    release('granted')
+    await flushUi()
+    expect(resolveCapabilitySpy).toHaveBeenCalledTimes(2)
+    expect(q(root, 'batch-transfer-forbidden')).toBeTruthy()
+    expect(q(root, 'batch-transfer-source-picker')).toBeNull()
+    expect(apiPostSpy).not.toHaveBeenCalled()
+  })
+
   // ───────────────────────────────────────────────────────────────────────────
   // Round-7 — the transition the test above does NOT cover, because it is the
   // one transition that issues no new read. The generation guard was moved by
@@ -1653,6 +1678,16 @@ describe('ApprovalBatchTransferView', () => {
 describe('approval admin capability client', () => {
   type CapabilityModule = typeof import('../src/approvals/adminCapability')
 
+  function externalExplicitSession(tenantId: string, epoch: string) {
+    const payload = { sub: 'synthetic-member', tenantId, exp: Math.floor(Date.now() / 1000) + 3600 }
+    const token = `header.${btoa(JSON.stringify(payload))}.signature`
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    localStorage.setItem('metasheet.explicitSessionOrg.v1', JSON.stringify({
+      state: 'ready', token, actor: payload.sub, tenantId, exp: payload.exp, epoch,
+    }))
+  }
+
   async function real(): Promise<CapabilityModule> {
     const actual = await vi.importActual<CapabilityModule>('../src/approvals/adminCapability')
     actual.resetApprovalAdminCapabilityCache()
@@ -1749,6 +1784,42 @@ describe('approval admin capability client', () => {
     // was ever announced in this process — only the key can catch this.
     localStorage.setItem('auth_token', tokenFor('user-b'))
     apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: false } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('denied')
+    expect(apiGetSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not reuse an explicit organization grant across same-actor A-B-A without storage notifications', async () => {
+    const mod = await real()
+    externalExplicitSession('synthetic-a', 'first-a')
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: true } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('granted')
+    expect(apiGetSpy).toHaveBeenCalledTimes(1)
+
+    externalExplicitSession('synthetic-b', 'first-b')
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: false } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('denied')
+    expect(apiGetSpy).toHaveBeenCalledTimes(2)
+
+    externalExplicitSession('synthetic-a', 'second-a')
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('denied')
+    expect(apiGetSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not let a late explicit-session answer replace the current organization cache', async () => {
+    const mod = await real()
+    externalExplicitSession('synthetic-a', 'first-a')
+    let release!: (value: unknown) => void
+    apiGetSpy.mockImplementationOnce(() => new Promise((resolve) => { release = resolve }))
+    const oldAnswer = mod.resolveApprovalAdminCapability()
+    // Same organization and actor, but a new explicit session epoch; no notification.
+    externalExplicitSession('synthetic-a', 'second-a')
+    apiGetSpy.mockResolvedValue({ ok: true, data: { isApprovalAdmin: false } })
+    await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('denied')
+    release({ ok: true, data: { isApprovalAdmin: true } })
+    // The old caller still receives its own answer; mounted-consumer generation
+    // guards, not this cache, must discard it. It cannot poison the new cache.
+    await expect(oldAnswer).resolves.toBe('granted')
     await expect(mod.resolveApprovalAdminCapability()).resolves.toBe('denied')
     expect(apiGetSpy).toHaveBeenCalledTimes(2)
   })

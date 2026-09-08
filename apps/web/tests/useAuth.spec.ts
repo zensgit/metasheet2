@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { useAuth } from '../src/composables/useAuth'
+import { effectScope } from 'vue'
+import { onAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 describe('useAuth', () => {
   const store: Record<string, string> = {}
@@ -14,6 +16,7 @@ describe('useAuth', () => {
   beforeEach(() => {
     ;(globalThis as any).localStorage = ls
     Object.keys(store).forEach((k) => delete store[k])
+    sessionStorage.clear()
     vi.clearAllMocks()
     useAuth().clearToken()
   })
@@ -97,6 +100,210 @@ describe('useAuth', () => {
     const before = { ...store }
     expect(auth.setExplicitSessionOrg(jwt('actor', 'org-b'), 'org-b', original)).toBe(false)
     expect(store).toEqual(before)
+  })
+
+  it('keeps the login hint across explicit-session bootstrap and priming', async () => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    auth.setToken(jwt('org-a'))
+    expect(auth.setExplicitSessionOrg(jwt('org-b'), 'org-b', jwt('org-a'))).toBe(true)
+    const payload = { data: { user: { id: 'actor', tenantId: 'org-b', permissions: [] } } }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => payload }))
+    await auth.bootstrapSession(true)
+    auth.primeSession(payload)
+    expect(store.tenantId).toBe('org-a')
+    expect(store.workspaceId).toBe('org-a')
+    expect(auth.buildAuthHeaders()['x-tenant-id']).toBe('org-b')
+  })
+
+  it('preserves token aliases if the shared explicit-session barrier cannot be stored', () => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    auth.setToken(jwt('org-a'))
+    const before = { ...store }
+    const storage = ls.setItem.mockImplementationOnce(() => { throw new Error('quota') })
+    try {
+      expect(auth.setExplicitSessionOrg(jwt('org-b'), 'org-b', jwt('org-a'))).toBe(false)
+      expect(store).toEqual(before)
+      expect(store['metasheet.explicitSessionOrg.v1']).toBeUndefined()
+    } finally { storage.mockImplementation((k: string, v: string) => (store[k] = v)) }
+  })
+
+  it('ignores priming payloads for another tenant during an explicit session', () => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    auth.setToken(jwt('org-a'))
+    auth.setExplicitSessionOrg(jwt('org-b'), 'org-b', jwt('org-a'))
+    auth.primeSession({ data: { user: { id: 'actor', tenantId: 'org-a', roles: ['stale'] } } })
+    expect(auth.getCurrentUser()).toBeNull()
+    expect(store.user_roles).toBeUndefined()
+    expect(store.tenantId).toBe('org-a')
+  })
+
+  it.each(['jwt', 'ready'])('restores the original explicit session when the %s write fails', failure => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    const a = jwt('org-a')
+    auth.setToken(a)
+    expect(auth.setExplicitSessionOrg(a, 'org-a', a)).toBe(true)
+    const before = { ...store }
+    let failed = false
+    ls.setItem.mockImplementation((key, value) => {
+      if (!failed && ((failure === 'jwt' && key === 'jwt')
+        || (failure === 'ready' && key === 'metasheet.explicitSessionOrg.v1' && JSON.parse(value).state === 'ready'))) {
+        failed = true
+        throw new Error('synthetic storage failure')
+      }
+      return (store[key] = value)
+    })
+    try {
+      expect(auth.setExplicitSessionOrg(jwt('org-b'), 'org-b', a)).toBe(false)
+      expect(failed).toBe(true)
+      expect(JSON.stringify(store) === JSON.stringify(before)).toBe(true)
+      expect(auth.buildAuthHeaders()['x-tenant-id']).toBe('org-a')
+    } finally { ls.setItem.mockImplementation((key, value) => (store[key] = value)) }
+  })
+
+  it.each(['switch', 'login'])('does not overwrite a newer overlapping %s with the old transition', replacement => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    const a = jwt('org-a'), b = jwt('org-b'), c = jwt('org-c')
+    auth.setToken(a)
+    let replaced = false
+    ls.setItem.mockImplementation((key, value) => {
+      store[key] = value
+      if (!replaced && key === 'auth_token' && value === b) {
+        replaced = true
+        if (replacement === 'switch') expect(auth.setExplicitSessionOrg(c, 'org-c', b)).toBe(true)
+        else auth.setToken(c)
+      }
+      return value
+    })
+    try {
+      expect(auth.setExplicitSessionOrg(b, 'org-b', a)).toBe(false)
+      expect(replaced).toBe(true)
+      expect(store.auth_token === c && store.jwt === c).toBe(true)
+      expect(auth.buildAuthHeaders()['x-tenant-id']).toBe('org-c')
+    } finally { ls.setItem.mockImplementation((key, value) => (store[key] = value)) }
+  })
+
+  it('keeps requests blocked when token rollback storage also fails', () => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    const a = jwt('org-a'), b = jwt('org-b')
+    auth.setToken(a)
+    let failed = false
+    ls.setItem.mockImplementation((key, value) => {
+      if (key === 'jwt' && value === b) { failed = true; throw new Error('synthetic write failure') }
+      if (failed && key === 'auth_token' && value === a) throw new Error('synthetic rollback failure')
+      return (store[key] = value)
+    })
+    try {
+      expect(auth.setExplicitSessionOrg(b, 'org-b', a)).toBe(false)
+      expect(failed).toBe(true)
+      expect(() => auth.buildAuthHeaders()).toThrow('SESSION_ORG_REAUTH_REQUIRED')
+      expect(JSON.parse(store['metasheet.explicitSessionOrg.v1']).state).toBe('changing')
+    } finally { ls.setItem.mockImplementation((key, value) => (store[key] = value)) }
+  })
+
+  // Model another realm's completed storage writes without this realm's auth
+  // notifications. Real two-tab browser validation is a separate gate.
+  function externalSession(token: string, epoch: string) {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    store.auth_token = token
+    store.jwt = token
+    store['metasheet.explicitSessionOrg.v1'] = JSON.stringify({ state: 'ready', token,
+      actor: payload.userId, tenantId: payload.tenantId, exp: payload.exp, epoch })
+  }
+
+  it('deduplicates explicit storage notifications and releases its scoped listener', () => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    auth.setToken(jwt('org-a'))
+    auth.primeSession({ data: { user: { id: 'actor', tenantId: 'org-a' } } })
+    const scope = effectScope()
+    scope.run(() => { useAuth(); useAuth() })
+    const changed = vi.fn()
+    const unsubscribe = onAuthPrincipalChange(changed)
+    const dispatch = () => window.dispatchEvent(new StorageEvent('storage', {
+      key: 'metasheet.explicitSessionOrg.v1', newValue: store['metasheet.explicitSessionOrg.v1'],
+    }))
+    try {
+      externalSession(jwt('org-b'), 'external-b')
+      dispatch()
+      expect(changed).toHaveBeenCalledTimes(1)
+      expect(auth.getCurrentUser()).toBeNull()
+      dispatch()
+      expect(changed).toHaveBeenCalledTimes(1)
+      scope.stop()
+      externalSession(jwt('org-a'), 'external-a2')
+      dispatch()
+      expect(changed).toHaveBeenCalledTimes(1)
+    } finally { scope.stop(); unsubscribe() }
+  })
+
+  it('does not return an old cached user before the explicit storage event arrives', () => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    auth.setToken(jwt('org-a'))
+    auth.primeSession({ data: { user: { id: 'actor', tenantId: 'org-a' } } })
+    externalSession(jwt('org-b'), 'external-b')
+    expect(auth.getCurrentUser() === null).toBe(true)
+    expect(store.tenantId).toBe('org-a')
+  })
+
+  it('rejects a late bootstrap after an unobserved external A-B-A epoch change', async () => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    const a = jwt('org-a')
+    auth.setToken(a)
+    auth.setExplicitSessionOrg(a, 'org-a', a)
+    let finish!: (value: unknown) => void
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => { finish = resolve })))
+    const pending = auth.bootstrapSession(true)
+    externalSession(jwt('org-b'), 'external-b')
+    externalSession(a, 'external-a2')
+    finish({ ok: true, status: 200, json: async () => ({ data: { user: { id: 'actor', tenantId: 'org-a', roles: ['old'] } } }) })
+    expect((await pending).ok).toBe(false)
+    expect(auth.getCurrentUser()).toBeNull()
+    expect(store.user_roles).toBeUndefined()
+  })
+
+  it('does not let an old bootstrap overwrite an explicit switch or its login hint', async () => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    auth.setToken(jwt('org-a'))
+    let resolve!: (value: unknown) => void
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => new Promise(done => { resolve = done })))
+    const pending = auth.bootstrapSession(true)
+    auth.setExplicitSessionOrg(jwt('org-b'), 'org-b', jwt('org-a'))
+    resolve({ ok: true, status: 200, json: async () => ({ data: { user: { id: 'actor', tenantId: 'org-a', roles: ['stale'] } } }) })
+    expect((await pending).ok).toBe(false)
+    expect(auth.getCurrentUser()).toBeNull()
+    expect(store.user_roles).toBeUndefined()
+    expect(auth.buildAuthHeaders()['x-tenant-id']).toBe('org-b')
+  })
+
+  it('does not evict the new bootstrap promise when the old organization response settles', async () => {
+    const jwt = (org: string) => `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+    const auth = useAuth()
+    const a = jwt('org-a')
+    auth.setToken(a)
+    const pending: Array<(value: unknown) => void> = []
+    const fetchMock = vi.fn().mockImplementation(() => new Promise(done => pending.push(done)))
+    vi.stubGlobal('fetch', fetchMock)
+    const old = auth.bootstrapSession()
+    expect(auth.setExplicitSessionOrg(jwt('org-b'), 'org-b', a)).toBe(true)
+    const current = auth.bootstrapSession()
+    pending[0]({ ok: true, status: 200, json: async () => ({}) })
+    expect((await old).ok).toBe(false)
+    const concurrent = auth.bootstrapSession()
+    const calls = fetchMock.mock.calls.length
+    for (const resolve of pending.slice(1)) resolve({ ok: true, status: 200,
+      json: async () => ({ data: { user: { id: 'actor', tenantId: 'org-b' } } }) })
+    await Promise.all([current, concurrent])
+    expect(calls).toBe(2)
+    expect(store.tenantId).toBe('org-a')
   })
 
   it('refreshes dev token and stores aliases', async () => {

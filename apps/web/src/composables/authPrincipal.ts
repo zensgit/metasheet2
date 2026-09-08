@@ -1,3 +1,5 @@
+import { readExplicitSession } from '../utils/explicitSessionOrg'
+
 /**
  * WHOSE SESSION IS THIS, and how a module that caches a per-principal answer is told it changed.
  *
@@ -65,19 +67,32 @@ export function parseJwtPayload(token: string): Record<string, unknown> | null {
  * the token changes" rather than to "no key at all". `null` means no session — itself a distinct
  * key, so an answer resolved while signed in is not reused after the token is cleared.
  *
- * SUBJECT-KEYED BY CHOICE. A token refresh for the same person keeps the key, so it does not force a
+ * Ordinary sessions remain SUBJECT-KEYED BY CHOICE. A token refresh for the same person keeps the key, so it does not force a
  * re-read on every refresh. What that leaves uncovered — the same person's rights changing
  * server-side under an unchanged subject — is exactly what `onAuthPrincipalChange` below covers,
  * because a refresh goes through `useAuth`'s `setToken`. Neither mechanism subsumes the other.
+ * An explicitly selected current session additionally binds tenant and a fresh switch epoch.
+ * That key changes synchronously even before another tab receives a storage event, including
+ * A-B-A switches that issue the same token text. Invalid/partial explicit metadata throws;
+ * callers must not treat it as a valid ordinary session or an authorization grant.
  */
 export function getAuthPrincipalKey(): string | null {
   const token = readStoredToken()
+  const explicit = readExplicitSession(token, token ? parseJwtPayload(token) : null)
+  if (explicit) return JSON.stringify(['explicit', explicit.actor, explicit.tenantId, explicit.epoch])
   if (!token) return null
   const payload = parseJwtPayload(token)
   const subject = payload?.sub ?? payload?.userId ?? payload?.id
   if (typeof subject === 'string' && subject.trim().length > 0) return `sub:${subject.trim()}`
   if (typeof subject === 'number' && Number.isFinite(subject)) return `sub:${subject}`
   return `token:${token}`
+}
+
+export function explicitSessionOrg(token: string | null): string | null {
+  const current = readStoredToken()
+  // Check the barrier even for an override: no request escapes a partial switch.
+  const explicit = readExplicitSession(current, current ? parseJwtPayload(current) : null)
+  return token === current ? explicit?.tenantId ?? null : null
 }
 
 type AuthPrincipalChangeListener = () => void

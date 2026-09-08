@@ -1,4 +1,9 @@
 <template>
+  <aside v-if="sessionGuard.stale.value" role="alert" data-attendance-group-session-stale>
+    <p>{{ tr('Session changed. Reload before continuing.', '会话已切换，请重新加载后继续。') }}</p>
+    <button type="button" @click="reload">{{ tr('Discard unsaved drafts and reload', '放弃未保存草稿并重新加载') }}</button>
+  </aside>
+  <div :inert="sessionGuard.stale.value" :aria-hidden="sessionGuard.stale.value || undefined">
   <section v-if="state.kind === 'loading'" class="attendance-group-context" data-attendance-group-context="loading">
     <p>{{ tr('Loading attendance group...', '正在加载考勤组...') }}</p>
   </section>
@@ -29,12 +34,16 @@
       :return-to="state.returnTo"
     />
   </section>
+  </div>
 </template>
 
 <script setup lang="ts">
 import { computed, toRef } from 'vue'
 import type { AttendanceGroupRouteContext } from '../../router/attendanceGroupContextRoute'
 import { useLocale } from '../../composables/useLocale'
+import { useAuth } from '../../composables/useAuth'
+import { provideAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
+import { apiFetch } from '../../utils/api'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useAttendanceGroupRouteContext } from './useAttendanceGroupRouteContext'
 import AttendanceGroupEffectivePolicyPanel from './AttendanceGroupEffectivePolicyPanel.vue'
@@ -47,9 +56,14 @@ const emit = defineEmits<{
   (event: 'return'): void
 }>()
 
+const auth = useAuth()
+const sessionGuard = provideAttendanceSessionGuard(String(auth.buildAuthHeaders()['x-tenant-id'] || ''))
+const reload = () => window.location.reload()
 const { state, retry } = useAttendanceGroupRouteContext({
   context: toRef(props, 'context'),
   enabled: computed(() => true),
+  apiFetch: sessionGuard.wrapFetch(apiFetch),
+  isSessionCurrent: sessionGuard.isCurrent,
 })
 const { isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)

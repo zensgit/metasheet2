@@ -868,7 +868,7 @@ describe('Attendance self-service dashboard', () => {
     // Positive control INSIDE the negative test: the refresh failure genuinely reached the shared
     // banner (its retry control renders the refresh-overview action label) — without this the leg
     // could pass vacuously with no error at all.
-    expect(container!.textContent).toContain('Retry refresh')
+    await vi.waitFor(() => expect(container!.textContent).toContain('Retry refresh'), { timeout: 1000 })
 
     const attention = container!.querySelector('[data-attendance-overview-attention]')
     expect(attention).toBeTruthy()
@@ -1695,6 +1695,26 @@ describe('Attendance self-service dashboard', () => {
     expect(overtimeRule!.textContent).toContain('Standard Overtime')
   })
 
+  it('preserves a stale outdoor-note draft and sends nothing when punch is invoked programmatically', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    const state = app._instance!.setupState as unknown as {
+      attendanceSessionGuard: { invalidate: () => void }
+      punchOutdoorNoteDraft: string
+      punchOutdoorNoteRequired: boolean
+      punch: (event: string, note: string) => Promise<void>
+    }
+    state.punchOutdoorNoteDraft = 'Synthetic unsaved note'
+    state.punchOutdoorNoteRequired = true
+    state.attendanceSessionGuard.invalidate()
+    const before = vi.mocked(apiFetch).mock.calls.length
+    await state.punch('check_in', state.punchOutdoorNoteDraft)
+    expect(vi.mocked(apiFetch).mock.calls).toHaveLength(before)
+    expect(state.punchOutdoorNoteDraft).toBe('Synthetic unsaved note')
+    expect(state.punchOutdoorNoteRequired).toBe(true)
+  })
+
   it('submits shift-swap requests through the dedicated route with exact assignment ids', async () => {
     authMockState.currentUserId = 'swap-user-a'
     const { createBodies } = installShiftSwapSelfServiceMock({ actorUserId: 'swap-user-a' })
@@ -1712,8 +1732,10 @@ describe('Attendance self-service dashboard', () => {
     const counterpartyAssignment = container!.querySelector<HTMLSelectElement>('#attendance-shift-swap-counterparty-assignment')
     expect(requesterAssignment).toBeTruthy()
     expect(counterpartyAssignment).toBeTruthy()
-    expect(requesterAssignment!.value).toBe('assignment-a')
-    expect(counterpartyAssignment!.value).toBe('assignment-b')
+    await vi.waitFor(() => {
+      expect(requesterAssignment!.value).toBe('assignment-a')
+      expect(counterpartyAssignment!.value).toBe('assignment-b')
+    }, { timeout: 1000 })
 
     const reason = container!.querySelector<HTMLInputElement>('#attendance-request-reason')
     expect(reason).toBeTruthy()
