@@ -18,6 +18,15 @@ import {
 //
 // 反空转:每条用例结束时 `log.unmocked` 必须为空。任何组件新长出来的读都会撞上夹具的 404
 // `VERIFY_UNMOCKED_ROUTE`,变成这里的一条失败,而不是悄悄打到 Vite 的 /api 代理上。
+//
+// 本 lane 明确不覆盖的半条(写在这里,不写在 PR 正文里,免得读代码的人以为它们被证明了):
+//   * P0-03 的「整屏 ≤1 个主操作位」被收窄成「board 子树里 `…-board-pull` 之前的 DOM 段」。文档序
+//     的边界比视口稳,但它不是设计稿字面上的「一张截图」。收窄是刻意的,不是遗漏。
+//   * P0-06 的 http 半边按实现读:设计稿写「按钮旁边有那句话」,实现把那颗动作位挪到了卡片底部的
+//     唯一主操作位上,所以断言是「http blocker 里零按钮 + 那句话在」。
+//   * P0-02 的「免重挂跟号」(queue view 的 `watch(() => props.projectNo)`)在浏览器里没有入口,
+//     由 jsdom 的 StockPreparationOperatorProjectDirectory.spec.ts 覆盖 —— 见该条用例末尾。
+//   * P0-10 / P0-11 是源码断言,用例名里写了。跑 jsdom 套件本身是 web 单测 job 的事。
 // ---------------------------------------------------------------------------
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -93,6 +102,14 @@ test.describe('设计稿 §6.1 —— P0 验收', () => {
     await expect(empty).toContainText('这里还没有您的项目')
     // 反向断言:通用兜底文案一个字都不许出现在这一屏上。
     await expect(page.locator('[data-testid="stock-prep-panel"]')).not.toContainText('暂无数据')
+    // 验收条的后半句:「+ 兜底输入框」。空态不是死路 —— 目录读不到项目的人仍然可以直接敲号码进去,
+    // 而且那颗按钮此刻是禁用的(输入框空),这就是 P0-07 缺的那个 disabled 正向对照。
+    const fallbackInput = page.locator('[data-testid="stock-prep-project-board-input"]')
+    await expect(fallbackInput).toBeVisible()
+    await expect(fallbackInput).toHaveValue('')
+    await expect(page.locator('[data-testid="stock-prep-project-board-open"]')).toBeDisabled()
+    await fallbackInput.fill(SYN_PROJECT_A)
+    await expect(page.locator('[data-testid="stock-prep-project-board-open"]')).toBeEnabled()
     expectNoUnmockedRoutes(emptyLog)
   })
 
@@ -111,6 +128,13 @@ test.describe('设计稿 §6.1 —— P0 验收', () => {
     await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'confirmation-queue')
     await expect(page.locator('[data-testid="stock-prep-confirmation-project-input"]')).toHaveValue(SYN_PROJECT_A)
 
+    // 「队列跟着变」的前半:真读一次。这个视图的既有契约是 onMounted 不读队列(P0-04 的注释),
+    // 所以不按刷新的话这一屏根本没发生过队列读,断言输入框的值就只证明了输入框。
+    await page.locator('[data-testid="stock-prep-confirmation-queue-refresh"]').click()
+    await expect(page.locator('[data-testid="stock-prep-confirmation-counts"]')).toBeVisible()
+    const firstRead = log.urls('/confirmation-decisions').at(-1) ?? ''
+    expect(firstRead, '第一次队列读带的是 A 的项目号').toContain(`projectNo=${SYN_PROJECT_A}`)
+
     // 换一个号:回首页(清掉状态位)→ 用兜底输入框打开另一个项目 → 再进队列。
     await page.locator('[data-testid="stock-prep-tab-home"]').click()
     await expect(page.locator('[data-testid="stock-prep-operator-home"]')).toBeVisible()
@@ -120,6 +144,22 @@ test.describe('设计稿 §6.1 —— P0 验收', () => {
 
     await page.locator('[data-testid="stock-prep-tab-confirmation-queue"]').click()
     await expect(page.locator('[data-testid="stock-prep-confirmation-project-input"]')).toHaveValue(SYN_PROJECT_B)
+
+    // ...「队列跟着变」的后半:再读一次,读的必须是 B。断言的是发出去的查询串,不是输入框的值 ——
+    // 一个只把号码抄进输入框、却仍然按旧号码查的实现,会在这里红。
+    const readsBefore = log.count('GET', '/confirmation-decisions')
+    await page.locator('[data-testid="stock-prep-confirmation-queue-refresh"]').click()
+    await expect
+      .poll(() => log.count('GET', '/confirmation-decisions'), { message: '换号之后必须再读一次队列' })
+      .toBeGreaterThan(readsBefore)
+    const secondRead = log.urls('/confirmation-decisions').at(-1) ?? ''
+    expect(secondRead, '换号之后队列读带的是 B 的项目号').toContain(`projectNo=${SYN_PROJECT_B}`)
+    expect(secondRead, '换号之后不许再带 A 的项目号').not.toContain(SYN_PROJECT_A)
+
+    // 覆盖边界,写在这里而不是只写在 PR 正文里:props.projectNo 变化时队列「免重挂」自动跟号的那条
+    // watch,在浏览器里没有入口 —— 换号必然经过一次重挂(board 的 watch(openedProjectNo) 会收起
+    // 内嵌队列;换 tab 同样是重挂)。那条路径由 jsdom 的
+    // apps/web/tests/StockPreparationOperatorProjectDirectory.spec.ts 覆盖,不由本 lane 覆盖。
     expectNoUnmockedRoutes(log)
   })
 
@@ -249,6 +289,29 @@ test.describe('设计稿 §6.1 —— P0 验收', () => {
     const goBoard = page.locator('[data-testid="stock-prep-getting-started-go-project-board"]')
     await expect(goBoard).toBeVisible()
     await expect(goBoard).toBeEnabled()
+
+    // 反空转。`toBeEnabled()` 自己是一条弱断言:这一屏上这两颗按钮压根没有任何跟诊断挂钩的
+    // `:disabled`,所以哪怕整条绑定被删掉它也绿。补一条对绑定形状的源码断言 —— 谁把闸门重新装
+    // 回来(`:disabled="hasBlockers"` / `verdict === 'no-go'` 之类),会在这里红,而不是等到有人
+    // 手工点一遍才发现。P0-01 的空态里另有一颗真被禁用的按钮做正向对照,证明本 lane 认得出 disabled。
+    const gettingStartedSource = readFileSync(
+      join(WEB_ROOT, 'src', 'components', 'integration', 'stockPreparation', 'StockPreparationGettingStarted.vue'),
+      'utf8',
+    )
+    for (const testid of ['stock-prep-getting-started-run-install', 'stock-prep-getting-started-go-project-board']) {
+      const index = gettingStartedSource.indexOf(`data-testid="${testid}"`)
+      expect(index, `${testid} 必须还在模板里`).toBeGreaterThan(0)
+      // 这颗按钮的整个开标签 —— 从它自己的 `<button` 起,到 `>` 为止。按 testid 之后切会漏掉写在
+      // testid 前面的 `:disabled`,那正是这条断言最需要看见的位置。
+      const openTag = gettingStartedSource.lastIndexOf('<button', index)
+      expect(openTag, `${testid} 必须挂在一个 <button> 上`).toBeGreaterThan(0)
+      const attributes = gettingStartedSource.slice(openTag, gettingStartedSource.indexOf('>', index))
+      const disabled = /:disabled="([^"]*)"/.exec(attributes)?.[1] ?? ''
+      for (const gate of ['blocker', 'verdict', 'ready', 'preflight', 'go']) {
+        expect(disabled.toLowerCase(), `${testid} 的 :disabled 不许挂在诊断上(现为 ${disabled || '无'})`)
+          .not.toContain(gate)
+      }
+    }
     expectNoUnmockedRoutes(log)
   })
 
@@ -262,7 +325,13 @@ test.describe('设计稿 §6.1 —— P0 验收', () => {
     await expect(page.locator('[data-testid="stock-prep-install-error-next"]')).toBeVisible()
     await expect(page.locator('[data-testid="stock-prep-install-error-next"]')).not.toHaveText(/^\s*$/)
 
-    await page.locator('[data-testid="stock-prep-install-error-copy"]').click()
+    // 点完不能立刻读:`copyReadError` 是 `await copyTextToClipboard(...)` 之后才把按钮文案翻成
+    // 「已复制」的,而那句文案正是「写进去了」的唯一可观测证据。先等它,再读 —— 否则这条断言在
+    // 一条 required lane 上会间歇性地读到空剪贴板。(标签 3 秒后自动复位,所以读要紧跟着等。)
+    const copyButton = page.locator('[data-testid="stock-prep-install-error-copy"]')
+    await expect(copyButton).toHaveText(/复制这条报错/)
+    await copyButton.click()
+    await expect(copyButton, '写入成功之后按钮才会说「已复制」').toHaveText(/已复制/)
     const copied = await page.evaluate(() => navigator.clipboard.readText())
     expect(copied).toContain('HTTP_500')
     // values-free:合成夹具里每一个业务形状的串都不许出现在剪贴板里,连带主机/邮箱/IP 的形状。
@@ -300,17 +369,41 @@ test.describe('设计稿 §6.1 —— P0 验收', () => {
     expectNoUnmockedRoutes(log)
   })
 
-  test('P0-10 [源码断言 · 浏览器证明不了] StockPreparationWorkspace.spec.ts 的 tab 计数四处与落地五处仍在,本 lane 一个字没动它', async () => {
+  test('P0-10 [源码断言 · 浏览器证明不了] StockPreparationWorkspace.spec.ts 的 tab 计数与逐键落地断言一处不少', async () => {
     // 这条验收说的是「既有 jsdom 套件零改动且全绿」。跑那套是 vitest 的事(CI 的 web 单测 job),
-    // 浏览器只能证明「它还在、而且它钉的还是那九处」—— 所以这里做的是源码断言,并且在用例名里
+    // 浏览器只能证明「它还在、而且它钉的还是那些处」—— 所以这里做的是源码断言,并且在用例名里
     // 写明了这一点,免得被读成「浏览器已经验过了」。
     const source = readFileSync(join(WEB_ROOT, 'tests', 'StockPreparationWorkspace.spec.ts'), 'utf8')
     const tabCountAssertions = source.match(
       /querySelectorAll\('\[data-testid\^="stock-prep-tab-"\]'\)\.length\)\.toBe\(\d+\)/g,
     ) ?? []
     expect(tabCountAssertions.length, 'tab 计数断言(F6 的四处)').toBeGreaterThanOrEqual(4)
-    const landingAssertions = source.match(/data-active/g) ?? []
-    expect(landingAssertions.length, '落地 data-active 断言(F6 的五处)').toBeGreaterThanOrEqual(5)
+
+    // 落地断言按 KEY 数,不数裸字符串。以前这里是 `/data-active/g` 的 `>= 5` 对着 12 处实际断言:
+    // 注释和模板串也算数,而且删掉 D2 那两条最要紧的(confirmation-queue / home)之后照样绿。
+    // 现在每个键的下界就是它今天的实际条数 —— 删任何一条都红,新增任何一条都不红。
+    const landingByKey = new Map<string, number>()
+    for (const match of source.matchAll(/getAttribute\('data-active'\)\)\.toBe\('([a-z-]+)'\)/g)) {
+      landingByKey.set(match[1], (landingByKey.get(match[1]) ?? 0) + 1)
+    }
+    // 前两条是 D2 裁决本身(只读队列观察者与一线的落地);其余是 rail 各项的切换断言。
+    // 第四个落地键 `ops` 在 jsdom 侧没有断言 —— 它由本 lane 的「落地 · 平台管理员 + 已装完 →
+    // 记录与排查」在浏览器里证明,不假装这里有。
+    const landingFloor: Record<string, number> = {
+      'confirmation-queue': 4,
+      home: 1,
+      'getting-started': 2,
+      install: 1,
+      dashboard: 1,
+      'project-workspace': 1,
+      'exception-queue': 1,
+      'bom-snapshot-diff': 1,
+    }
+    for (const [key, floor] of Object.entries(landingFloor)) {
+      expect(landingByKey.get(key) ?? 0, `落地断言 data-active='${key}' 的条数`).toBeGreaterThanOrEqual(floor)
+    }
+    const landingTotal = [...landingByKey.values()].reduce((sum, count) => sum + count, 0)
+    expect(landingTotal, '落地断言总数').toBeGreaterThanOrEqual(12)
   })
 
   test('P0-11 [源码断言 · 浏览器证明不了] 备料域的 .vue 里没有未显式 import 的 el-*,且没有 steps/drawer/alert/tabs', async () => {
@@ -322,7 +415,14 @@ test.describe('设计稿 §6.1 —— P0 验收', () => {
     const offenders: string[] = []
     for (const name of files) {
       const source = readFileSync(join(dir, name), 'utf8')
-      const template = source.slice(0, source.indexOf('<script') >= 0 ? source.indexOf('<script') : source.length)
+      // 按 `<template>…</template>` 取段,不按「第一个 `<script>` 之前」取。后者今天恰好有效(23 个
+      // SFC 全是 template 在前),但 `<script setup>` 写在前面完全合法,而那样一来对那个文件的扫描
+      // 会静默变成空串 —— 不报错、不红、少扫一个文件。取不到顶层 template 直接判失败。
+      const start = source.search(/^<template[\s>]/m)
+      const end = source.lastIndexOf('\n</template>')
+      expect(start, `${name} 没有顶层 <template>`).toBeGreaterThanOrEqual(0)
+      expect(end, `${name} 没有顶层 </template>`).toBeGreaterThan(start)
+      const template = source.slice(start, end)
       for (const match of template.matchAll(/<(el-[a-z-]+)/g)) {
         const tag = match[1]
         // 只有显式 import 过的共享件才算数(G6);steps/drawer/alert/tabs 一律不通过。

@@ -16,7 +16,17 @@ import {
 // 下面凡是用 `getComputedStyle` 的断言,都是只有真浏览器能回答的那一类;其余几条是把「不切 tab」
 // 「三行免责常驻」这种流程事实钉在真实网络时序上。
 //
-// 落地三态 + 深链一态在文件末尾单列 —— D2 的裁决是这条 lane 里最容易被一次改动悄悄推翻的东西。
+// D2 的落地裁决在文件末尾单列 —— 它是这条 lane 里最容易被一次改动悄悄推翻的东西。
+// `STOCK_PREP_LANDING_KEYS` 是四个键,所以那里是四态各一条(getting-started / ops / home /
+// confirmation-queue)+ 深链一态 + 两条 rail 组成(工作台管理员、只读观察者)。曾经只写了三态,
+// 而没写的那一个正好是 fixture 里造好却没人进去的世界(`readerOnly` / `reader`);
+// scripts/ops/stock-prep-browser-ci-wiring.test.mjs 现在有一条机械断言钉住「每个夹具世界、每个
+// 夹具身份都至少被一条用例打开过」,免得再长出这种死码。
+//
+// 本 lane 明确不覆盖的半条(声明在这里,不藏在 PR 正文里):
+//   * §6.2 验收 3 的后半「确认队列 tab 独立打开时逐像素一致」—— 没有基线截图,config 里
+//     `screenshot: 'off'`。要做就得先立基线并接受它的维护成本;今天不做,所以不声称。
+//   * P1-04 只跑了 ok / forbidden 两态。真实世界里还有 500 与超时,那两条与「? 看不到」同一分支。
 // ---------------------------------------------------------------------------
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -146,7 +156,12 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
 
     await embeddedQueue.locator('[data-testid="stock-prep-confirmation-select"]').click()
     await embeddedQueue.locator('[data-testid="stock-prep-confirmation-confirm"]').click()
-    expect(log.count('POST', '/confirmation-decisions/confirm')).toBe(1)
+    // `click()` 的 ack 与 route 拦截事件走同一条 CDP 连接、先后无序,所以这里必须轮询而不是即时读
+    // 计数 —— 同文件 P0-09 对同类事实用的就是 `expect.poll`。一条 required lane 上的间歇红会卡住
+    // 所有备料 PR 的合并。
+    await expect
+      .poll(() => log.count('POST', '/confirmation-decisions/confirm'), { message: '就地确认必须发出且只发出一次写' })
+      .toBe(1)
 
     // 确认完队列真的清空了,于是空态换成 nothing_pending —— 闭环按钮就挂在这个空态上。
     const empty = embeddedQueue.locator('[data-testid="stock-prep-confirmation-empty"]')
@@ -217,6 +232,14 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
     for (let index = 0; index < 3; index += 1) await expect(caveats.nth(index)).toBeVisible()
     await expect(caveats.nth(0)).toContainText('不等于')
 
+    // 「常驻」的另一半:不可关闭。既不是 <details>(那样默认可收),也没有自己的关闭按钮,而且它
+    // 不是被塞在某个可折叠祖先里的。只断言「在」的话,把三行包进一个 <details> 也照样绿。
+    const caveatList = page.locator('[data-testid="stock-prep-ops-audit-caveats"]')
+    await expect(caveatList).toHaveCount(1)
+    await expect(caveatList.locator('button')).toHaveCount(0)
+    const dismissible = await caveatList.evaluate((el) => Boolean(el.closest('details')) || el.tagName === 'DETAILS')
+    expect(dismissible, '三行免责不许可折叠 / 可关闭').toBe(false)
+
     await page.locator('[data-testid="stock-prep-ops-audit-project-input"]').fill(SYN_PROJECT_A)
     await page.locator('[data-testid="stock-prep-ops-audit-search"]').click()
     await expect(page.locator('[data-testid="stock-prep-ops-audit-list"]')).toBeVisible()
@@ -268,24 +291,49 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
     expectNoUnmockedRoutes(log)
   })
 
-  test('P1-07 [源码断言 · 浏览器证明不了] 安装页与源预检的既有 jsdom 套件仍在,并且仍钉着折叠分节', async () => {
-    // 「这一期只改一次」是一句关于 PR 数量的话,浏览器测不了。能测的是那两套还在、而且还在钉
-    // P1-7 引进来的折叠分节 —— 套件被悄悄删掉的话,这条会红。
+  test('P1-07 [源码断言 · 浏览器证明不了] 安装页与源预检的既有 jsdom 套件仍在,并且各自还钉着自己那件事', async () => {
+    // 「这一期只改一次」是一句关于 PR 数量的话,浏览器测不了。能测的是设计稿 §6.2 第 7 条点名的
+    // 那两套还在、而且还在钉各自的锚点 —— 套件被悄悄删掉的话,这条会红。
+    //
+    // 这里以前只查了安装页那一套:用例名与注释都写「两套」,函数体里源预检一个字节没碰。删掉整个
+    // 源预检套件,当时这条照样绿。
     const installSpec = join(REPO_ROOT, 'apps', 'web', 'tests', 'StockPreparationInstallView.spec.ts')
     expect(existsSync(installSpec), 'StockPreparationInstallView.spec.ts').toBe(true)
+    // P1-7 引进来的折叠分节。
     expect(readFileSync(installSpec, 'utf8')).toContain('stock-prep-install-fold')
+
+    const sourcePreflightSpec = join(REPO_ROOT, 'apps', 'web', 'tests', 'StockPreparationSourcePreflight.spec.ts')
+    expect(existsSync(sourcePreflightSpec), 'StockPreparationSourcePreflight.spec.ts').toBe(true)
+    const sourcePreflightSource = readFileSync(sourcePreflightSpec, 'utf8')
+    // 源预检自己那件事:逐项 check 行、blocker 行、以及 go / no-go 的判定 —— P0-07「no-go 不是闸门」
+    // 在浏览器侧只证明按钮还能点,判定本身的形状由这一套钉。
+    for (const anchor of [
+      'stock-prep-source-preflight-check',
+      'stock-prep-source-preflight-blocker',
+      'stock-prep-source-preflight-verdict',
+    ]) {
+      expect(sourcePreflightSource, `源预检套件缺锚点 ${anchor}`).toContain(anchor)
+    }
   })
 })
 
 // ---------------------------------------------------------------------------
-// jsdom 盲区回归 —— 两条只有真浏览器能答的
+// 两条回归,分属两类 —— 类别写在标题里,不含糊
 // ---------------------------------------------------------------------------
 
-test.describe('jsdom 盲区回归', () => {
+test.describe('形态回归(jsdom 能写,只是没人写)', () => {
   test('R-01 wizard 形态下,defaults 读 500 时报错条与「复制这条报错」都看得见', async ({ page }) => {
     // 这条曾经真的错过:报错条本来包在 `mode !== 'wizard'` 里,于是 D2 把新部署的管理员送到的
-    // 那一个形态,恰好是唯一不说「为什么读不到」的形态。jsdom 看得到 DOM,但看不到「这一屏上到底
-    // 有没有」—— 因为在 wizard 形态里那个节点压根不渲染,而单测挂载的是默认 full 形态。
+    // 那一个形态,恰好是唯一不说「为什么读不到」的形态。
+    //
+    // 分类要说准:这不是 jsdom 盲区。`mode` 是 StockPreparationInstallView.vue 上一个普通的
+    // props('full' | 'wizard' | 'review',默认 'full'),jsdom 完全可以 `mount({ mode: 'wizard' })`
+    // 然后断言 `[data-testid=stock-prep-install-error]` 存在;把报错条包回 `mode !== 'wizard'`
+    // 之后的失败信息是「元素不存在」,纯 DOM 缺席,与层叠无关。真正只有浏览器能答的是 R-02 与
+    // P1-01。这一条留在这条 lane 里的理由,是它 CHECKS THE COMPOSITION —— D2 把哪个账号送到哪个
+    // 形态、那个形态在真实层叠下这一屏上有没有,是壳+路由+组件一起决定的;而
+    // apps/web/tests/StockPreparationInstallView.spec.ts 里今天没有任何一处以 mode:'wizard'
+    // 挂载,所以在 jsdom 侧补一条同类用例,才是它长期该待的地方。
     const log = await openStockPrepHarness(page, {
       actor: 'platform',
       scenario: 'defaults500',
@@ -307,7 +355,9 @@ test.describe('jsdom 盲区回归', () => {
     expect(box?.height ?? 0).toBeGreaterThan(0)
     expectNoUnmockedRoutes(log)
   })
+})
 
+test.describe('jsdom 盲区回归(只有真层叠能答)', () => {
   test('R-02 安装页的折叠分节样式真的生效(不是 UA 默认的 <details>)', async ({ page }) => {
     const log = await openStockPrepHarness(page, { actor: 'platform', scenario: 'ready', tab: 'install' })
     const fold = page.locator('[data-testid="stock-prep-install-fold"]').first()
@@ -358,6 +408,80 @@ test.describe('D2 落地裁决(§2.2 / workbenchAccess.stockPrepLandingKey)', ()
     const log = await openStockPrepHarness(page, { actor: 'operator', scenario: 'ready' })
     await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'home')
     await expect(page.locator('[data-testid="stock-prep-operator-home"]')).toBeVisible()
+    expectNoUnmockedRoutes(log)
+  })
+
+  test('落地 · 只读队列观察者(只有 stock-prep:read)→ 确认队列,rail 只剩 确认队列 + 帮助', async ({ page }) => {
+    // `STOCK_PREP_LANDING_KEYS` 的第四个键。这是四态里最容易被漏掉的一个:它是 `stockPrepLandingKey`
+    // 的 fallback 分支 —— 既不是管理员、也不满足 operate ∧ read 的那个人。
+    const log = await openStockPrepHarness(page, { actor: 'reader', scenario: 'ready' })
+    await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'confirmation-queue')
+    await expect(page.locator('[data-testid="stock-prep-confirmation-queue"]')).toBeVisible()
+
+    // R-11「可见即可用」在最窄的主体上:能看见的只有他真能开的两项。这也是反向断言 —— 只读账号
+    // 若看得见 今天要处理 / 开始使用,就是「可见但一点就 403」。
+    const rail = page.locator('[data-testid="stock-prep-tabs"]')
+    await expect(rail.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(2)
+    for (const visible of ['confirmation-queue', 'help']) {
+      await expect(rail.locator(`[data-testid="stock-prep-tab-${visible}"]`)).toHaveCount(1)
+    }
+    for (const hidden of ['home', 'project-board', 'getting-started', 'install', 'ops']) {
+      await expect(rail.locator(`[data-testid="stock-prep-tab-${hidden}"]`)).toHaveCount(0)
+    }
+    // 深度工具那一组整组不属于他 —— 连折叠开关都不该在。
+    await expect(page.locator('[data-testid="stock-prep-rail-advanced-toggle"]')).toHaveCount(0)
+
+    // 而且这个身份连目录都不去读:`confirmationQueue.projectDirectory` 是 OPERATE 层的能力,
+    // 视图对没有这项能力的人 `return` 而不是发一个注定 403 的请求。
+    expect(log.count('GET', '/operator/projects'), '只读观察者不发目录读').toBe(0)
+    expectNoUnmockedRoutes(log)
+  })
+
+  test('落地 · 工作台管理员(stock-prep:admin)→ 与平台管理员同判定,但 rail 里没有深度工具', async ({ page }) => {
+    // 同一条 D2 分支(`canOpenStockPrepInstallView` → deploymentReady ? ops : getting-started),
+    // 不同的 rail 组成:legacy MVP 那七项是 platform-admin 门,`stock-prep:admin` 够不着。
+    const log = await openStockPrepHarness(page, { actor: 'stockadmin', scenario: 'ready' })
+    await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'ops')
+
+    const rail = page.locator('[data-testid="stock-prep-tabs"]')
+    await expect(rail.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(7)
+    for (const key of ['home', 'project-board', 'confirmation-queue', 'getting-started', 'install', 'ops', 'help']) {
+      await expect(rail.locator(`[data-testid="stock-prep-tab-${key}"]`)).toHaveCount(1)
+    }
+    await expect(page.locator('[data-testid="stock-prep-rail-advanced-toggle"]')).toHaveCount(0)
+    for (const legacy of LEGACY_TAB_KEYS) {
+      await expect(rail.locator(`[data-testid="stock-prep-tab-${legacy}"]`)).toHaveCount(0)
+    }
+    expectNoUnmockedRoutes(log)
+  })
+
+  test('readerOnly:目录被 OPERATOR_SCOPE_TENANT_REQUIRED 拒绝时,页面说「判断不了」,而不是「都清了」,也不是报错', async ({ page }) => {
+    // 服务端按设计拒绝两类主体的目录读(无自己租户的平台管理员 / 没有宿主成员关系的部署)。这两条
+    // 不是故障:它们每次开页都会到,把它们渲染成红色错误条,就是每个管理员每次打开都看见一条假警报。
+    // 但也不许静音 —— 静音的那一版让所有人看见「都清了」,而那是一句没人能背书的好消息。
+    const log = await openStockPrepHarness(page, {
+      actor: 'operator',
+      scenario: 'readerOnly',
+      tab: 'confirmation-queue',
+    })
+    await expect(page.locator('[data-testid="stock-prep-confirmation-queue"]')).toBeVisible()
+    // 目录读确实发生了,而且确实被拒了 —— 否则下面那条空态断言可能只是「压根没读」。
+    await expect
+      .poll(() => log.count('GET', '/operator/projects'), { message: 'operate 主体必须去读目录' })
+      .toBeGreaterThan(0)
+
+    await page.locator('[data-testid="stock-prep-confirmation-project-input"]').fill(SYN_PROJECT_A)
+    await page.locator('[data-testid="stock-prep-confirmation-queue-refresh"]').click()
+
+    const empty = page.locator('[data-testid="stock-prep-confirmation-empty"]')
+    await expect(empty).toBeVisible()
+    await expect(empty).toHaveAttribute('data-empty-state', 'directory_unavailable')
+    await expect(empty).toContainText('无法判断')
+    // 反向断言两头:既不是 `nothing_pending` 那句「没有要您拿主意的事」的好消息(那是我们背书不了
+    // 的一句话),也不是页面级错误条。
+    await expect(empty).not.toContainText('没有要您拿主意的事')
+    await expect(empty).not.toHaveAttribute('data-empty-state', 'nothing_pending')
+    await expect(page.locator('[data-testid="stock-prep-confirmation-error"]')).toHaveCount(0)
     expectNoUnmockedRoutes(log)
   })
 

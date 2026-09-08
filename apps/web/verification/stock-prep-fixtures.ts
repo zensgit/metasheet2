@@ -17,6 +17,14 @@
 // `VERIFY_UNMOCKED_ROUTE` and records the path, so a component that grows a new read shows up as a
 // visible refusal in the spec that owns it rather than as a silent hit against the Vite dev-server's
 // `/api` proxy (which would 502/ECONNREFUSED and look like an unrelated flake).
+//
+// ...with one KNOWN HOLE, stated so nobody reads the tripwire as stronger than it is: a request the
+// page starts and nobody awaits (the project board's fire-and-forget `GET …/handoff`, for instance)
+// can still be in flight when the test body ends. Playwright tears the route table down with the
+// test, so that one request reaches the dev-server proxy and prints an `ECONNREFUSED 127.0.0.1:7778`
+// line in the webServer log — visible, harmless, and NOT recorded in `unmocked`. It is a race at
+// teardown, not a gap in the table; the fix would be a spec that waits for a read whose result the
+// product itself does not wait for, which is a worse trade.
 import type { Page, Route } from '@playwright/test'
 
 // ---------------------------------------------------------------------------
@@ -523,7 +531,14 @@ function json(route: Route, status: number, body: string): Promise<void> {
   return route.fulfill({ status, contentType: 'application/json', body })
 }
 
-/** Longest-prefix-first: `/confirmation-decisions/confirm` must be matched before `/confirmation-decisions`. */
+/**
+ * EXACT-MATCH, not prefix-match. `resolveResponder` compares `path === entry.path`, so ORDER IS
+ * IRRELEVANT here and a prefix like `/confirmation-decisions` can never shadow
+ * `/confirmation-decisions/confirm`. (An earlier note claimed the opposite — "longest-prefix-first"
+ * — which would have sent anyone adding a prefix rule down a road where their rule never fires and
+ * the request lands on the `VERIFY_UNMOCKED_ROUTE` 404 instead.) The two genuinely pattern-shaped
+ * routes are handled below, explicitly, by `BOARD_PATTERN` / `TABLE_ACTION_PATTERN`.
+ */
 const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
   {
     method: 'GET',
@@ -805,6 +820,20 @@ export async function openStockPrepHarness(
   options: StockPrepOpenOptions,
 ): Promise<StockPrepRouteLog> {
   const log = await installStockPrepRoutes(page, options.scenario, options.routes ?? {})
+  // A SECOND `openStockPrepHarness` on the same `page` (P0-01 and P1-04 both do it) is a fresh
+  // document but the SAME origin, so it inherits everything the first run wrote — including
+  // `metasheet.stockPrep.operatorHomeMemory.v2:<tenant>:<principal>`, which the board writes on every
+  // project visit. Nothing reads it on the landing screen today, so the leak is currently harmless;
+  // that is exactly the kind of "harmless today" that turns into a red on an unrelated PR later.
+  // Wiped here so every `open` starts from the same state as the first one in its test.
+  await page.evaluate(() => {
+    try {
+      localStorage.clear()
+      sessionStorage.clear()
+    } catch {
+      // `about:blank` has no accessible storage — nothing to clear, and nothing to report.
+    }
+  })
   const query = new URLSearchParams({ actor: options.actor, scenario: options.scenario })
   if (options.tab) query.set('tab', options.tab)
   if (options.projectNo) query.set('projectNo', options.projectNo)
