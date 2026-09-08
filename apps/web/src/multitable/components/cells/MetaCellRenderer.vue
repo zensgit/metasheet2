@@ -458,13 +458,22 @@ const conditionalClass = computed(() => {
 </script>
 
 <style scoped>
-.meta-cell-renderer { font-size: 13px; line-height: 1.4; }
+.meta-cell-renderer {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.4;
+}
 .meta-cell-renderer__bool { font-size: 16px; }
 .meta-cell-renderer__long-text {
-  display: inline-block;
+  display: block;
   max-width: 100%;
-  white-space: pre-wrap;
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .meta-cell-renderer__tag {
   display: inline-block; padding: 1px 7px; border-radius: 4px;

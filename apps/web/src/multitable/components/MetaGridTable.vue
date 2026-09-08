@@ -63,7 +63,7 @@
                 <input type="checkbox" :checked="selectedIds.has(item.row.id)" :disabled="!rowAllowsAnyBulkAction(item.row.id)" @change="toggleSelectRow(item.row.id)" />
               </td>
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
-                <span>{{ startIndex + item.navIndex + 1 }}</span>
+                <span class="meta-grid__row-num-index">{{ startIndex + item.navIndex + 1 }}</span>
                 <button
                   v-if="resolveRowActions(item.row.id).canComment"
                   type="button"
@@ -184,7 +184,8 @@
               </td>
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
-                <span>{{ startIndex + ri + 1 }}</span>
+                <span class="meta-grid__row-num-cluster">
+                <span class="meta-grid__row-num-index">{{ startIndex + ri + 1 }}</span>
                 <span
                   v-if="isRowLocked(row.id)"
                   class="meta-grid__lock-indicator"
@@ -192,7 +193,7 @@
                   :aria-label="l('grid.lockedIndicator')"
                   data-test="row-lock-indicator"
                 >
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.25">
+                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.25">
                     <rect x="3.5" y="7.25" width="9" height="6.25" rx="1.2" />
                     <path d="M5.5 7.25V5.4a2.5 2.5 0 0 1 5 0v1.85" />
                   </svg>
@@ -207,11 +208,12 @@
                   data-test="row-lock-action"
                   @click.stop="emit('toggle-lock', { recordId: row.id, locked: !isRowLocked(row.id) })"
                 >
-                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.25">
+                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.25">
                     <rect x="3.5" y="7.25" width="9" height="6.25" rx="1.2" />
                     <path d="M5.5 7.25V5.4a2.5 2.5 0 0 1 5 0v1.85" />
                   </svg>
                 </button>
+                </span>
                 <button
                   v-if="resolveRowActions(row.id).canComment"
                   type="button"
@@ -1414,25 +1416,35 @@ thead .meta-grid__check-col {
   border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb);
 }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: var(--ms-sheet-font-body, 13px); }
-.meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: var(--ms-text-3, #9ca3af); font-size: var(--ms-sheet-font-header, 12px); background: var(--ms-bg-card, #fff); border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); border-right: 1px solid var(--ms-sheet-hairline, #ebebeb); padding: 8px 8px; position: sticky; left: 0; z-index: 1; }
+.meta-grid__row-num {
+  width: 56px; min-width: 56px; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center; gap: 2px;
+  color: var(--ms-text-3, #9ca3af); font-size: var(--ms-sheet-font-header, 12px);
+  background: var(--ms-bg-card, #fff);
+  border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  border-right: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  padding: 8px 4px; position: sticky; left: 0; z-index: 1;
+}
+.meta-grid__row-num-cluster { display: inline-flex; align-items: center; justify-content: center; gap: 1px; min-width: 0; }
+.meta-grid__row-num-index { display: inline-flex; align-items: center; justify-content: center; min-width: 1.1em; }
 .meta-grid__lock-indicator,
 .meta-grid__lock-action {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 16px; height: 16px; padding: 0; margin-left: 2px;
+  width: 12px; height: 12px; padding: 0; margin-left: 0;
   border: 0; background: transparent; color: var(--ms-sheet-icon-color, #6b7280); vertical-align: middle;
+  flex: 0 0 12px;
 }
 .meta-grid__lock-action { cursor: pointer; border-radius: 4px; }
 .meta-grid__lock-action:hover { color: var(--ms-color-primary); background: var(--ms-bg-page, #f5f6f8); }
 .meta-grid__lock-action--idle { opacity: 0; }
 .meta-grid__row:hover .meta-grid__lock-action--idle,
 .meta-grid__row:focus-within .meta-grid__lock-action--idle { opacity: 1; }
-.meta-grid__row-num > span { display: inline-flex; align-items: center; justify-content: center; }
 .meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
 .meta-grid__row:hover { background: var(--ms-bg-page, #f5f6f8); }
 .meta-grid__row--selected, .meta-grid__row--focused { background: var(--el-color-primary-light-9, #eff6ff); }
-.meta-grid__cell { position: relative; padding: 8px 12px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); overflow: hidden; text-overflow: ellipsis; cursor: default; }
-.meta-grid__cell--editing { padding: 2px 4px; background: #fff; }
+.meta-grid__cell { position: relative; padding: 8px 12px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
+.meta-grid__cell--editing { padding: 2px 4px; background: #fff; white-space: normal; overflow: visible; text-overflow: clip; }
 .meta-grid__cell--readonly { color: #666; }
 .meta-grid__cell--focused { outline: 1px solid var(--ms-color-primary); outline-offset: -1px; }
 /* Live cell-cursor: a remote collaborator is on this cell (presentational, no interaction change). */
@@ -1456,7 +1468,8 @@ thead .meta-grid__check-col {
   cursor: pointer;
 }
 .meta-grid__comment-action {
-  margin-left: 4px;
+  margin-left: 0;
+  flex: 0 0 auto;
   vertical-align: middle;
 }
 .meta-grid__field-comment-action {
@@ -1505,8 +1518,14 @@ thead .meta-grid__check-col {
 .meta-grid__skeleton-cell { flex: 1; height: 20px; background: linear-gradient(90deg, #eee 25%, #e0e0e0 50%, #eee 75%); background-size: 200% 100%; border-radius: 4px; animation: meta-skeleton-pulse 1.5s ease-in-out infinite; }
 @keyframes meta-skeleton-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .meta-grid__check-col { width: 36px; min-width: 36px; text-align: center; padding: 4px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); border-right: 1px solid var(--ms-sheet-hairline, #ebebeb); background: var(--ms-bg-card, #fff); position: sticky; left: 0; z-index: 1; }
-.meta-grid__expand-btn { border: none; background: none; cursor: pointer; font-size: 8px; color: #bbb; padding: 0 2px; transition: transform 0.15s; display: inline-block; }
-.meta-grid__expand-btn:hover { color: #666; }
+.meta-grid__expand-btn {
+  flex: 0 0 12px; width: 12px; height: 14px; box-sizing: border-box;
+  border: none; background: transparent; cursor: pointer;
+  font-size: 8px; line-height: 1; color: var(--ms-sheet-icon-color, #6b7280);
+  padding: 0; margin: 0; transition: transform 0.15s;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.meta-grid__expand-btn:hover { color: var(--ms-text-2, #4b5563); }
 .meta-grid__expand-btn--open { transform: rotate(90deg); color: var(--ms-sheet-icon-color, #6b7280); }
 .meta-grid__expand-row td { padding: 0; background: #fafbfc; border-bottom: 1px solid #eee; }
 .meta-grid__expand-detail { padding: 8px 16px 12px !important; }
@@ -1531,7 +1550,7 @@ thead .meta-grid__check-col {
 .meta-grid__group-count { font-weight: 400; color: #999; font-size: 12px; }
 .meta-grid--compact .meta-grid__cell { padding: 3px 8px; font-size: 12px; }
 .meta-grid--compact .meta-grid__row { contain-intrinsic-size: auto 28px; }
-.meta-grid--compact .meta-grid__row-num { padding: 3px 8px; font-size: 11px; }
+.meta-grid--compact .meta-grid__row-num { padding: 3px 4px; font-size: 11px; }
 .meta-grid--expanded .meta-grid__cell { padding: 10px 12px; }
 .meta-grid--expanded .meta-grid__row { contain-intrinsic-size: auto 52px; }
 @media print {
