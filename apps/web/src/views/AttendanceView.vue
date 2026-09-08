@@ -21861,6 +21861,7 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
     }
   } catch (error: any) {
     const apiError = error as { status?: number; code?: string } | null
+    if (!attendanceSessionGuard.isCurrent()) return
     const errorOutcome = classifyPunchErrorOutcome({ status: apiError?.status, code: apiError?.code }, tr)
     if (errorOutcome?.kind === 'noteRequired') {
       // G2: enum-strict — only this exact code opens the inline note form.
@@ -29482,7 +29483,7 @@ onMounted(() => {
   // already typed a targetUserId — refreshAll will commit that the next
   // time it runs.
   auth.getCurrentUserId().then((id) => {
-    if (!id) return
+    if (!attendanceSessionGuard.isCurrent() || !id) return
     currentUserId.value = id
     if (showOverview.value) void loadSessionOrgs()
     if (!committedCalendarUserId.value && !normalizedUserId()) {
@@ -29494,6 +29495,7 @@ onMounted(() => {
   })
   fetchPlugins()
     .then(() => {
+      if (!attendanceSessionGuard.isCurrent()) return
       pluginsLoaded.value = true
       if (attendancePluginActive.value) {
         refreshAll()
@@ -29506,6 +29508,7 @@ onMounted(() => {
       }
     })
     .catch(() => {
+      if (!attendanceSessionGuard.isCurrent()) return
       pluginsLoaded.value = true
     })
 })

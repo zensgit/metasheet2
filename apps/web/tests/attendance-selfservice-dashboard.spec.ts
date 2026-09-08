@@ -10,6 +10,8 @@ import { resolveMakeupPunchRequestStatusCopy } from '../src/views/attendance/mak
 
 const authMockState = vi.hoisted(() => ({
   currentUserId: 'swap-user-a',
+  identityPending: null as Promise<string> | null,
+  pluginsPending: null as Promise<void> | null,
 }))
 
 vi.mock('../src/composables/usePlugins', () => ({
@@ -24,13 +26,13 @@ vi.mock('../src/composables/usePlugins', () => ({
     navItems: ref([]),
     loading: ref(false),
     error: ref(null),
-    fetchPlugins: vi.fn().mockResolvedValue(undefined),
+    fetchPlugins: vi.fn(() => authMockState.pluginsPending ?? Promise.resolve()),
   }),
 }))
 
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
-    getCurrentUserId: vi.fn(async () => authMockState.currentUserId),
+    getCurrentUserId: vi.fn(() => authMockState.identityPending ?? Promise.resolve(authMockState.currentUserId)),
   }),
 }))
 
@@ -676,6 +678,8 @@ describe('Attendance self-service dashboard', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-15T08:00:00Z'))
     authMockState.currentUserId = 'swap-user-a'
+    authMockState.identityPending = null
+    authMockState.pluginsPending = null
     HTMLElement.prototype.scrollIntoView = vi.fn()
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
@@ -1713,6 +1717,68 @@ describe('Attendance self-service dashboard', () => {
     expect(vi.mocked(apiFetch).mock.calls).toHaveLength(before)
     expect(state.punchOutdoorNoteDraft).toBe('Synthetic unsaved note')
     expect(state.punchOutdoorNoteRequired).toBe(true)
+  })
+
+  it.each(['identity', 'plugins-resolve', 'plugins-reject'])('ignores stale mount continuation: %s', async phase => {
+    let finishIdentity!: (id: string) => void
+    let finishPlugins!: () => void
+    let rejectPlugins!: (error: Error) => void
+    authMockState.identityPending = new Promise(resolve => { finishIdentity = resolve })
+    authMockState.pluginsPending = new Promise((resolve, reject) => { finishPlugins = resolve; rejectPlugins = reject })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    const state = app._instance!.setupState as unknown as {
+      attendanceSessionGuard: { invalidate: () => void }
+      currentUserId: string; committedCalendarUserId: string; pluginsLoaded: boolean
+    }
+    const before = [state.currentUserId, state.committedCalendarUserId, state.pluginsLoaded]
+    const sent = vi.mocked(apiFetch).mock.calls.length
+    state.attendanceSessionGuard.invalidate()
+    if (phase === 'identity') finishIdentity('late-synthetic-user')
+    else if (phase === 'plugins-resolve') finishPlugins()
+    else rejectPlugins(new Error('Synthetic plugin failure'))
+    await flushUi()
+    expect([state.currentUserId, state.committedCalendarUserId, state.pluginsLoaded]).toEqual(before)
+    expect(vi.mocked(apiFetch).mock.calls).toHaveLength(sent)
+    finishIdentity('late-synthetic-user')
+    finishPlugins()
+    await flushUi()
+  })
+
+  it.each(['resolve', 'reject'])('preserves the sent punch draft after session change and late body %s', async outcome => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    const state = app._instance!.setupState as unknown as {
+      attendanceSessionGuard: { invalidate: () => void }
+      punchOutdoorNoteDraft: string; punchOutdoorNoteRequired: boolean
+      statusMessage: string; punching: boolean
+      punch: (event: string, note: string) => Promise<void>
+    }
+    let resolveBody!: (value: unknown) => void
+    let rejectBody!: (error: Error) => void
+    vi.mocked(apiFetch).mockResolvedValueOnce({ ok: true, status: 200,
+      json: () => new Promise((resolve, reject) => { resolveBody = resolve; rejectBody = reject }),
+    } as Response)
+    state.punchOutdoorNoteDraft = 'Synthetic sent note'
+    state.punchOutdoorNoteRequired = true
+    const attempt = state.punch('check_in', state.punchOutdoorNoteDraft)
+    await flushUi()
+    expect(resolveBody).toBeTypeOf('function')
+    expect(vi.mocked(apiFetch).mock.lastCall?.[0]).toBe('/api/attendance/punch')
+    const sent = vi.mocked(apiFetch).mock.calls.length
+    const message = state.statusMessage
+    state.attendanceSessionGuard.invalidate()
+    if (outcome === 'reject') rejectBody(new Error('Synthetic body failure'))
+    else resolveBody({ ok: true, data: {} })
+    await attempt
+    await flushUi()
+    expect(state.punchOutdoorNoteDraft).toBe('Synthetic sent note')
+    expect(state.punchOutdoorNoteRequired).toBe(true)
+    expect(state.statusMessage).toBe(message)
+    expect(state.punching).toBe(false)
+    expect(vi.mocked(apiFetch).mock.calls).toHaveLength(sent)
   })
 
   it('submits shift-swap requests through the dedicated route with exact assignment ids', async () => {

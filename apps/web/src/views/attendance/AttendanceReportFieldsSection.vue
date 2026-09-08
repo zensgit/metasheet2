@@ -1564,8 +1564,11 @@ async function applyCleaningProposal(): Promise<void> {
       cleaningMessage.value = tr('Attendance updated; proposal cleanup pending. Reload and retry as the original reviewer.', '考勤已更新，建议清理待重试。请由原审阅人重载后重试。')
     } else throw new Error('CLEANING_OUTCOME_UNKNOWN')
   } catch {
-    if (cleaningReview.value === review) cleaningMessage.value = tr('Correction not confirmed. Reload to check permissions, source changes or a pending cleanup before retrying.', '未确认更正结果。请重载检查权限、数据变化或待清理状态后再重试。')
-  } finally { cleaningSelected.value = null; cleaningBusy.value = false }
+    if (sessionGuard.isCurrent() && cleaningReview.value === review) cleaningMessage.value = tr('Correction not confirmed. Reload to check permissions, source changes or a pending cleanup before retrying.', '未确认更正结果。请重载检查权限、数据变化或待清理状态后再重试。')
+  } finally {
+    if (sessionGuard.isCurrent()) cleaningSelected.value = null
+    cleaningBusy.value = false
+  }
 }
 const syncStatusMessage = ref('')
 const syncStatusKind = ref<'info' | 'error'>('info')

@@ -322,14 +322,15 @@ describe('AttendanceReportFieldsSection', () => {
     if (phase === 'apply') expect(applies[0][1]).toMatchObject({ headers: { 'X-Org-Id': 'org-1' }, body: JSON.stringify({ expectedVersion: 9 }) })
   })
 
-  it.each(['before-send', 'during-body'])('refuses an old cleaning confirmation after explicit session change: %s', async phase => {
+  it.each(['before-send', 'during-body', 'rejected-body'])('refuses an old cleaning confirmation after explicit session change: %s', async phase => {
     const catalog = populatedCatalogPayload() as any
     catalog.data.cleaningReview = { enabled: true, orgId: 'org-1', sheetId: 'sheet-daily',
       fieldIds: { cleaning_requested: 'fld_requested', cleaning_reason: 'fld_reason', employee_name: 'fld_name', work_date: 'fld_date' } }
     let finishBody!: (value: unknown) => void
+    let rejectBody!: (error: Error) => void
     vi.mocked(apiFetch).mockImplementation(async url => {
       if (String(url).includes('/cleaning-apply')) return {
-        ok: true, status: 200, json: () => new Promise(resolve => { finishBody = resolve }),
+        ok: true, status: 200, json: () => new Promise((resolve, reject) => { finishBody = resolve; rejectBody = reject }),
       } as Response
       if (String(url).startsWith('/api/multitable/records?')) return jsonResponse(200, { ok: true, data: { records: [
         { id: 'rec_test', version: 7, data: { fld_requested: true, fld_reason: 'Synthetic draft', fld_name: 'Synthetic employee', fld_date: '2026-09-01' } },
@@ -345,12 +346,21 @@ describe('AttendanceReportFieldsSection', () => {
     if (phase === 'before-send') sessionIdentity = 'actor:org-2:epoch2'
     container!.querySelector<HTMLButtonElement>('[data-cleaning-confirm]')!.click()
     await flushUi()
-    if (phase === 'during-body') {
+    const state = app!._instance!.setupState as unknown as { cleaningSelected: unknown; cleaningMessage: string; cleaningBusy: boolean }
+    const selected = state.cleaningSelected
+    const message = state.cleaningMessage
+    const sent = vi.mocked(apiFetch).mock.calls.length
+    if (phase !== 'before-send') {
       expect(finishBody).toBeTypeOf('function')
       sessionIdentity = 'actor:org-2:epoch2'
-      finishBody({ ok: true, data: { cleaningState: 'consumed' } })
+      if (phase === 'rejected-body') rejectBody(new Error('Synthetic body failure'))
+      else finishBody({ ok: true, data: { cleaningState: 'consumed' } })
       await flushUi()
     }
+    expect(state.cleaningSelected).toBe(selected)
+    expect(state.cleaningMessage).toBe(message)
+    expect(state.cleaningBusy).toBe(false)
+    expect(vi.mocked(apiFetch).mock.calls).toHaveLength(sent)
     const applies = vi.mocked(apiFetch).mock.calls.filter(([url]) => String(url).includes('/cleaning-apply'))
     expect(applies).toHaveLength(phase === 'before-send' ? 0 : 1)
     expect(container!.textContent).not.toContain('Attendance updated; proposal consumed')
