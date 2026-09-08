@@ -103,3 +103,34 @@ this repair's baseline pass must not be called full application UAT acceptance.
 The five-file product repair must be published separately from full-app test
 assets. Exact product and combined-test commits will be recorded after those
 checkpoints exist. No Ready/merge/dispatch/deployment/production authorization.
+
+## Bounded CI classification follow-up
+
+Published #5564 at `e1ae1a1875833083ad5d9c9d49cb340f8bca39ef` exposed the W7
+Leg0 completeness gate: the new identity helper was walked but not claimed.
+Node18 job102004864926 failed `attendance-w7-w6r5-preservation-guard.test.ts`
+with exactly that unclaimed path (13079 assertions passed, one failed). The
+failure was reproduced locally: whole file12 PASS /1 FAIL before adjustment.
+
+Coordinator-authorized scope adds only the owning classification and existing
+guard test to the original five paths (seven total). The helper is registered
+in the stricter calculation_path partition so both W6 aggregate bans remain
+applicable. The comment accurately describes a records/calendar identity
+boundary, not a calculation engine. No carve-out, walk, root-set, policy,
+workflow or generic selector was changed; product bytes remain unchanged.
+
+Node20.20.2 and Node18.20.8 each pass109/109 over five suites: identity58,
+preservation13, W6 import graph10, inertness20, caller inventory8. The latter
+two also examine shell/source boundaries. No workflow/shell references to the
+changed guard or hard count were found; the guard still has13 tests. The
+existing test now plants independent aggregate-module and HTTP consumers at
+the new helper's exact relative path in isolated mirror trees. Each real ban
+reports that path; the unrelated ban remains empty. These checks keep the
+production tree untouched and are not mere regex-only simulations.
+
+Deleting only the new registration again produces Leg0 RED and the explicit
+classification assertion RED (11 PASS /2 FAIL); restoring it returns green.
+Backend typecheck and diff-check pass. No additional DB replay is claimed or
+needed for these test-only changes. A private official Node18 binary was used;
+its archive SHA256 matched the official SHASUMS256 entry. No system Node,
+dependency manifest, global store or shared configuration was modified.
