@@ -192,16 +192,27 @@
                   :title="l('grid.lockedIndicator')"
                   :aria-label="l('grid.lockedIndicator')"
                   data-test="row-lock-indicator"
-                >&#x1F512;</span>
+                >
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.25">
+                    <rect x="3.5" y="7.25" width="9" height="6.25" rx="1.2" />
+                    <path d="M5.5 7.25V5.4a2.5 2.5 0 0 1 5 0v1.85" />
+                  </svg>
+                </span>
                 <button
                   v-if="canShowLockAction(row.id)"
                   type="button"
                   class="meta-grid__lock-action"
+                  :class="{ 'meta-grid__lock-action--idle': !isRowLocked(row.id) }"
                   :aria-label="isRowLocked(row.id) ? l('grid.unlockRow') : l('grid.lockRow')"
                   :title="isRowLocked(row.id) ? l('grid.unlockRow') : l('grid.lockRow')"
                   data-test="row-lock-action"
                   @click.stop="emit('toggle-lock', { recordId: row.id, locked: !isRowLocked(row.id) })"
-                >{{ isRowLocked(row.id) ? '🔓' : '🔒' }}</button>
+                >
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.25">
+                    <rect x="3.5" y="7.25" width="9" height="6.25" rx="1.2" />
+                    <path d="M5.5 7.25V5.4a2.5 2.5 0 0 1 5 0v1.85" />
+                  </svg>
+                </button>
                 <button
                   v-if="resolveRowActions(row.id).canComment"
                   type="button"
@@ -1407,6 +1418,17 @@ thead .meta-grid__check-col {
 }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: var(--ms-sheet-font-body, 13px); }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: var(--ms-text-3, #9ca3af); font-size: var(--ms-sheet-font-header, 12px); background: var(--ms-bg-card, #fff); border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); border-right: 1px solid var(--ms-sheet-hairline, #ebebeb); padding: 8px 4px; position: sticky; left: 0; z-index: 1; }
+.meta-grid__lock-indicator,
+.meta-grid__lock-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; padding: 0; margin-left: 2px;
+  border: 0; background: transparent; color: var(--ms-sheet-icon-color, #6b7280); vertical-align: middle;
+}
+.meta-grid__lock-action { cursor: pointer; border-radius: 4px; }
+.meta-grid__lock-action:hover { color: var(--ms-color-primary); background: var(--ms-bg-page, #f5f6f8); }
+.meta-grid__lock-action--idle { opacity: 0; }
+.meta-grid__row:hover .meta-grid__lock-action--idle,
+.meta-grid__row:focus-within .meta-grid__lock-action--idle { opacity: 1; }
 .meta-grid__row-num > span { display: inline-flex; align-items: center; justify-content: center; }
 .meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }

@@ -10,6 +10,7 @@ import {
   dateTimeValueFromLocalInput,
   resolveDateTimeTimezone,
 } from '../src/multitable/utils/field-display'
+import { useLocale } from '../src/composables/useLocale'
 
 async function flushUi(cycles = 3) {
   for (let i = 0; i < cycles; i += 1) {
@@ -57,6 +58,28 @@ describe('dateTime field UI', () => {
 
     app.unmount()
     container.remove()
+  })
+
+  it('renders date cells in zh as 2026-09-08 without English month names', async () => {
+    useLocale().setLocale('zh-CN')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({
+      render() {
+        return h(MetaCellRenderer, {
+          field: { id: 'fld_date', name: 'Due', type: 'date' },
+          value: '2026-08-31',
+        })
+      },
+    })
+    app.mount(container)
+    await flushUi()
+    const value = container.querySelector('.meta-cell-renderer__date') as HTMLElement | null
+    expect(value?.textContent).toBe('2026-08-31')
+    expect(value?.textContent).not.toMatch(/Aug|Sep/)
+    app.unmount()
+    container.remove()
+    useLocale().setLocale('en')
   })
 
   it('uses a datetime-local cell editor and emits ISO/null values', async () => {

@@ -90,9 +90,13 @@ describe('MetaGridTable record locking (LR-T9)', () => {
     expect(cannotUnlock.querySelector('[data-test="row-lock-action"]')).toBeNull()
   })
 
-  it('shows the lock action on an unlocked editable row', () => {
+  it('shows the lock action on an unlocked editable row as a muted outline, not a gold padlock', () => {
     const root = mountGrid([{ id: 'r1', version: 1, data: { title: 'Open' } }])
-    expect(root.querySelector('[data-test="row-lock-action"]')).toBeTruthy()
+    const action = root.querySelector('[data-test="row-lock-action"]') as HTMLButtonElement | null
+    expect(action).toBeTruthy()
+    expect(action!.classList.contains('meta-grid__lock-action--idle')).toBe(true)
+    expect(action!.textContent).not.toMatch(/🔒|🔓|\u{1F512}/u)
+    expect(action!.querySelector('svg')).toBeTruthy()
   })
 
   it('emits toggle-lock with the inverse locked state when clicked', async () => {

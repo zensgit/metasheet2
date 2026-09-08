@@ -55,7 +55,7 @@
         v-for="(tag, i) in selectTags"
         :key="i"
         class="meta-cell-renderer__tag"
-        :style="{ background: tag.color ?? '#e8eaed', color: tag.color ? '#fff' : '#333' }"
+        :style="optionChipTone(tag.color)"
       >{{ tag.value }}</span>
     </template>
 
@@ -212,7 +212,8 @@ import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaLinkedRecordPopover from '../MetaLinkedRecordPopover.vue'
 import { useLocale } from '../../../composables/useLocale'
 import { isNativePersonField, isPersonField } from '../../utils/link-fields'
-import { formatFieldDisplay } from '../../utils/field-display'
+import { formatDateValue, formatFieldDisplay } from '../../utils/field-display'
+import { optionChipTone } from '../../utils/option-chip-tone'
 import { isSystemFieldType } from '../../utils/system-fields'
 import { resolveRatingFieldProperty, resolveButtonFieldProperty } from '../../utils/field-config'
 import { percentGaugeAria, ratingGaugeAria } from '../../utils/meta-core-labels'
@@ -301,11 +302,8 @@ const qrSvg = computed<string | null>(() => {
 const dateDisplay = computed(() => {
   const v = props.value
   if (v === null || v === undefined || v === '') return ''
-  try {
-    const d = new Date(String(v))
-    if (isNaN(d.getTime())) return String(v)
-    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
-  } catch { return String(v) }
+  const formatted = formatDateValue(v, isZh.value)
+  return formatted === '—' ? '' : formatted
 })
 
 const selectTags = computed(() => {
@@ -469,8 +467,8 @@ const conditionalClass = computed(() => {
   word-break: break-word;
 }
 .meta-cell-renderer__tag {
-  display: inline-block; padding: 1px 6px; border-radius: 3px;
-  font-size: 11px; margin-right: 4px; white-space: nowrap;
+  display: inline-block; padding: 1px 7px; border-radius: 4px;
+  font-size: 11px; margin-right: 4px; white-space: nowrap; font-weight: 500;
 }
 .meta-cell-renderer__link {
   display: inline-block; padding: 1px 6px; background: #ecf5ff;

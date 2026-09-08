@@ -12,11 +12,34 @@ import {
 } from './field-config'
 import { isSystemFieldType } from './system-fields'
 
-function formatDate(value: unknown): string {
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})/
+
+function parseDisplayDate(value: unknown): Date | null {
+  if (value === null || value === undefined || value === '') return null
+  const raw = String(value)
+  const ymd = DATE_ONLY.exec(raw)
+  if (ymd) {
+    const date = new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]))
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+  const date = new Date(raw)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
+/** zh: 2026-09-08. en: Aug 31, 2026. Never English month names in zh. */
+export function formatDateValue(value: unknown, isZh = false): string {
   if (value === null || value === undefined || value === '') return '—'
-  const date = new Date(String(value))
-  if (Number.isNaN(date.getTime())) return String(value)
-  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  const raw = String(value)
+  const ymd = DATE_ONLY.exec(raw)
+  if (isZh && ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`
+  const date = parseDisplayDate(value)
+  if (!date) return raw
+  if (isZh) return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+  return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
 export function resolveDateTimeTimezone(property?: Record<string, unknown> | null): string {
@@ -46,11 +69,24 @@ export function dateTimeValueFromLocalInput(value: string): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString()
 }
 
-function formatDateTime(value: unknown, timezone?: string): string {
+export function formatDateTimeValue(value: unknown, timezone?: string, isZh = false): string {
   if (value === null || value === undefined || value === '') return '—'
   const date = new Date(String(value))
   if (Number.isNaN(date.getTime())) return String(value)
-  return date.toLocaleString(undefined, {
+  if (isZh) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: timezone,
+    }).formatToParts(date)
+    const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? ''
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`
+  }
+  return date.toLocaleString('en-US', {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
@@ -130,9 +166,9 @@ export function formatFieldDisplay(params: {
     return ids.map((id) => byId.get(id) || id).join(', ')
   }
 
-  if (field.type === 'date') return formatDate(value)
-  if (field.type === 'dateTime') return formatDateTime(value, resolveDateTimeTimezone(field.property))
-  if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value)
+  if (field.type === 'date') return formatDateValue(value, isZh)
+  if (field.type === 'dateTime') return formatDateTimeValue(value, resolveDateTimeTimezone(field.property), isZh)
+  if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTimeValue(value, undefined, isZh)
   if (field.type === 'autoNumber') return formatAutoNumber(value, field.property)
   if (isSystemFieldType(field.type)) return String(value)
   if (field.type === 'boolean') return isZh ? (value ? '是' : '否') : (value ? 'Yes' : 'No')

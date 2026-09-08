@@ -12,7 +12,7 @@
           :key="field.id"
           class="meta-field-mgr__row"
         >
-          <span class="meta-field-mgr__icon">{{ FIELD_ICONS[displayFieldType(field)] ?? '?' }}</span>
+          <span class="meta-field-mgr__icon">{{ fieldTypeGlyph(displayFieldType(field)) }}</span>
 
           <template v-if="editingId === field.id">
             <div class="meta-field-mgr__rename-wrap">
@@ -857,6 +857,7 @@ import {
 import type { AiShortcutConfigInput, AiShortcutKind, AiShortcutPreviewData, AiUsageSummary } from '../api/client'
 import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
 import { MtButton, MtIconButton } from '../ui'
+import { fieldTypeGlyph } from '../utils/field-type-glyph'
 
 /** Field types where the validation panel is configurable. */
 const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'longText', 'number', 'select', 'multiSelect'])
@@ -952,13 +953,6 @@ const FIELD_TYPES: MetaFieldCreateType[] = [
   'currency', 'percent', 'rating', 'duration', 'url', 'email', 'phone', 'barcode', 'qrcode', 'location', 'button',
   ...SYSTEM_FIELD_TYPES,
 ]
-const FIELD_ICONS: Record<string, string> = {
-  string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', dateTime: '\u{1F552}', select: '\u25CF', multiSelect: '\u25C9',
-  link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
-  currency: '\u00A4', percent: '%', rating: '\u2605', duration: '\u23F1', url: '\u{1F517}', email: '\u2709', phone: '\u260E', barcode: '\u25A5', qrcode: '\u25A6', location: '\u{1F4CD}',
-  autoNumber: '#+', createdTime: 'CT', modifiedTime: 'MT', createdBy: 'CB', modifiedBy: 'MB', button: '\u{1F518}',
-}
-
 const props = defineProps<{
   visible: boolean
   fields: MetaField[]

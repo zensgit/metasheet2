@@ -10,7 +10,7 @@
     @dragleave="isDragOver = false"
     @drop.prevent="onDrop"
   >
-    <span class="meta-field-header__icon">{{ fieldTypeIcon }}</span>
+    <span v-if="fieldTypeIcon" class="meta-field-header__icon" aria-hidden="true">{{ fieldTypeIcon }}</span>
     <span class="meta-field-header__name" :title="field.name">{{ field.name }}</span>
     <span v-if="sortDirection" class="meta-field-header__sort">
       {{ sortDirection === 'asc' ? '\u25B2' : '\u25BC' }}
@@ -36,13 +36,7 @@ import { ref, computed } from 'vue'
 import type { MetaField } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel } from '../utils/meta-core-labels'
-
-const FIELD_ICONS: Record<string, string> = {
-  string: 'Aa', longText: '\u00B6', number: '#', boolean: '\u2611', date: '\u{1F4C5}', dateTime: '\u{1F552}', select: '\u25CF', multiSelect: '\u25C9',
-  link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
-  currency: '\u00A4', percent: '%', rating: '\u2605', url: '\u{1F517}', email: '\u2709', phone: '\u260E', barcode: '\u25A5', qrcode: '\u25A6', location: '\u{1F4CD}',
-  autoNumber: '#+', createdTime: 'CT', modifiedTime: 'MT', createdBy: 'CB', modifiedBy: 'MB', button: '\u{1F518}',
-}
+import { fieldTypeGlyph } from '../utils/field-type-glyph'
 
 const props = defineProps<{
   field: MetaField
@@ -82,7 +76,7 @@ function onDrop(e: DragEvent) {
   }
 }
 
-const fieldTypeIcon = computed(() => FIELD_ICONS[props.field.type] ?? '?')
+const fieldTypeIcon = computed(() => fieldTypeGlyph(props.field.type))
 
 const headerStyle = computed(() => {
   const style: Record<string, string> = {}
@@ -121,14 +115,19 @@ function onResizeStart(e: MouseEvent) {
 
 <style scoped>
 .meta-field-header {
-  padding: 8px 12px; text-align: left; font-weight: 500; font-size: var(--ms-sheet-font-header, 12px);
+  padding: 8px 16px; text-align: left; font-weight: 500; font-size: var(--ms-sheet-font-header, 12px);
   color: var(--ms-text-2, #4b5563);
   border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); background: var(--ms-bg-card, #fff); white-space: nowrap;
   user-select: none; position: sticky; top: 0; z-index: 3;
 }
 .meta-field-header--sortable { cursor: pointer; }
 .meta-field-header--sortable:hover { background: var(--ms-bg-page, #f5f6f8); }
-.meta-field-header__icon { display: inline-block; width: 22px; text-align: center; color: var(--ms-color-info, #6b7280); font-size: 12px; margin-right: 4px; }
+.meta-field-header__icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: var(--ms-sheet-icon-size, 16px); height: var(--ms-sheet-icon-size, 16px);
+  margin-right: 6px; flex-shrink: 0;
+  font-size: 11px; line-height: 1; color: var(--ms-sheet-icon-color, #6b7280);
+}
 .meta-field-header__name { overflow: hidden; text-overflow: ellipsis; }
 .meta-field-header__sort { margin-left: 4px; font-size: 10px; color: var(--ms-color-info, #6b7280); }
 .meta-field-header__pin { border: none; background: none; cursor: pointer; padding: 0 2px; margin-left: 4px; font-size: 11px; line-height: 1; opacity: 0; transition: opacity 0.12s; vertical-align: middle; }

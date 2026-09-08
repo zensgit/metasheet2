@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatFieldDisplay } from '../src/multitable/utils/field-display'
+import { formatDateValue, formatFieldDisplay } from '../src/multitable/utils/field-display'
 import type { MetaField } from '../src/multitable/types'
 
 describe('formatFieldDisplay i18n fallbacks', () => {
@@ -29,6 +29,15 @@ describe('formatFieldDisplay i18n fallbacks', () => {
       linkSummaries: [{ id: 'u1', display: 'Amy Wong' }],
       isZh: true,
     })).toBe('Amy Wong')
+  })
+
+  it('formats date cells as 2026-09-08 in zh and never uses English month names', () => {
+    const field: MetaField = { id: 'due', name: 'Due', type: 'date' }
+    expect(formatDateValue('2026-08-31', true)).toBe('2026-08-31')
+    expect(formatDateValue('2026-09-08', true)).toBe('2026-09-08')
+    expect(formatFieldDisplay({ field, value: '2026-08-31', isZh: true })).toBe('2026-08-31')
+    expect(formatFieldDisplay({ field, value: '2026-08-31', isZh: true })).not.toMatch(/Aug|Sep|Oct|Jan|Feb|Mar|Apr|May|Jun|Jul|Nov|Dec/)
+    expect(formatDateValue('2026-08-31', false)).toBe('Aug 31, 2026')
   })
 
   it('localizes attachment count summaries without translating file names', () => {
