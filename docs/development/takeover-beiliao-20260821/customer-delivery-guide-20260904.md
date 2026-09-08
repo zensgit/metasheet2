@@ -121,6 +121,15 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 - **P0 接口验收 PASS**:默认(不带参数)目录响应与升级前一致;四个 opt-in 查询标志核对无误;传字面字符串 `"true"` 不会打开并集扫描。
 - 详见 §6.5「项目查询面板」、§6.6「验收方式」与 `48h-autonomous-run-record-20260906.md` 2026-09-08 时间线。
 
+**r20 升级验证记录(2026-09-08,222,main `db13f7b6a`,包 12.55 MB)**:
+
+- **19:42 就地升级**:pg_dump 备份完成、443 个文件哈希核对通过、迁移 0 条、health 200(第 3 次探测)。
+- **前端 smoke PASS**(经 nginx,资源文件 `index-CpDeNWOD.js`)。
+- **U2、P0、P1、P2 四批代码标记全部为 True**;本波(收尾小修 #5565)标记——左栏 `data-rail-key`、`sp-rail__tablist`、新导航项名「数据来源与体检」(按 UTF-8 读 dist 复核:新名命中 1 个文件、旧名 0 个)全部为 True;§5-5 租户声明硬门 flag 实测仍然有效。
+- **操作员权限链**(角色 `stock-prep-operator`):与 r19 一致——目录 200、确认队列 200;看板/拉取/导出/对账 404(外接源尚未在界面上新建,属预期);建确认账本 / 切换数据源 403(正确拒绝)。
+- **P0 接口验收 PASS**:默认目录响应与 r19 一致;四个 opt-in 查询标志核对无误;传字面字符串 `"true"` 不会打开并集扫描。
+- 本波变化全部是前端:导航项改名、左栏键盘可用(方向键只移焦点,回车/空格切换)、无项目号时两入口高亮收敛、状态词表合一、matchMedia change;无迁移、无开关、无接口、权限口径不变。详见 §6.4 与 `48h-autonomous-run-record-20260906.md` 2026-09-08 时间线。
+
 ### 2.2 全新安装(无既有部署)
 
 **2026-09-06 实测结论**:2026-09-06 05:23–05:30 在 222 上另开一个隔离目录(独立 RootDir、独立库名、独立端口)用包内 `scripts/ops/multitable-onprem-apply-package.ps1`(`-InstallDeps 1 -RunMigrations 1 -RestartService 0 -CheckNginx 0 -RunHealthcheck 0`)实跑了一次纯 Windows 全新安装。
