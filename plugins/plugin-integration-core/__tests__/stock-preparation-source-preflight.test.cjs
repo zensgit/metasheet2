@@ -1903,15 +1903,35 @@ function columnNameContainsARowValueSource() {
 async function aColumnNameContainingARowValueIsNotARefusal() {
   // END TO END — the 222 shape through the real runner. Before the fix this threw
   // SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED and the route answered 500 for the whole source.
-  const { report } = await preflight(columnNameContainsARowValueSource())
+  //
+  // The reader is wrapped rather than used through `preflight()` for ONE reason: this test is only a
+  // reproduction while the planted cell is actually READ. If a later fixture edit stopped the roster
+  // from sampling `DN_PDM_PartLibraryInfo`, or renamed `Material`, the value would never reach
+  // `observedValues`, the containment would never be tested, and the assertions below would all still
+  // pass — a green that reproduces nothing. So the run records what came back, and the test asserts
+  // on it.
+  const reader = createReader(columnNameContainsARowValueSource())
+  const partRowsRead = []
+  const report = await runStockPreparationSourcePreflight({
+    readObject: async (request) => {
+      const result = await reader.readObject(request)
+      if (String(request && request.object).toLowerCase() === 'dn_pdm_partlibraryinfo') {
+        partRowsRead.push(...result.records)
+      }
+      return result
+    },
+    externalSystemId: SYSTEM_ID,
+  })
 
-  // The fixture really is the reproduction: the value is in a sampled row, and the report really
-  // does name the column that contains it — in TWO identifier classes, `columns[]` and `matchField`.
-  assert.equal(
-    columnNameContainsARowValueSource().DN_PDM_PartLibraryInfo[0].Material,
-    IDENTIFIER_SUBSTRING_ROW_VALUE,
-    'the row value is planted in a table the roster samples',
+  // ARM — the planted cell really was read this run, so it really is in `observedValues`: the runner
+  // adds every non-blank string cell of every sampled row (`observedValues.add(value)`), with no
+  // filter of any kind in between.
+  assert.ok(
+    partRowsRead.some((row) => row.Material === IDENTIFIER_SUBSTRING_ROW_VALUE),
+    'the planted row value was actually sampled — without this the test reproduces nothing',
   )
+  // TARGET — and the report really does reproduce it, by containment, at identifier leaves: in TWO
+  // identifier classes, `probes[].columns[]` and `matchField`.
   const carrier = report.probes.find((probe) => (probe.columns || []).includes(OBSERVED_COLUMN_CARRYING_IT))
   assert.ok(carrier, 'the report names the observed column that contains the row value')
   assert.equal(report.checks.projectData.matchField, OBSERVED_COLUMN_CARRYING_IT)
@@ -1919,6 +1939,19 @@ async function aColumnNameContainingARowValueIsNotARefusal() {
     OBSERVED_COLUMN_CARRYING_IT.includes(IDENTIFIER_SUBSTRING_ROW_VALUE),
     'containment is what the self-check tests, and it holds here',
   )
+  // …and it is the identifier exemption alone that saves it: run the SAME report through the
+  // self-check with the identifiers withheld and the refusal comes back, in the 222 shape.
+  try {
+    assertSourcePreflightValuesFree(report, {
+      observedValues: new Set([IDENTIFIER_SUBSTRING_ROW_VALUE]),
+    })
+    assert.fail('expected the report to be refused once the identifier ground is withheld')
+  } catch (error) {
+    assert.ok(error instanceof SourcePreflightError)
+    assert.equal(error.message, 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED')
+    assert.equal(error.details.kind, 'observed-row-value')
+    assert.equal(error.details.length, IDENTIFIER_SUBSTRING_ROW_VALUE.length)
+  }
 
   // And the run is otherwise S-01: the fix buys back the report, it does not blunt it.
   assert.equal(report.verdict, 'go')
@@ -1973,9 +2006,15 @@ async function theIdentifierExemptionIsByLeafValueAndStaysNarrow() {
   assert.equal(equalled.kind, 'observed-row-value')
   assert.equal(equalled.path, 'checks.quantityField.dictionarySlot')
 
-  // REVERSE 3 — nothing outside the identifier class gained anything. The same row value at an
-  // unclassified path, at a liveness-LOOKING path that is not the one allowlisted, and in a
-  // closed-vocabulary field, is refused in all three places.
+  // REVERSE 3 — nothing outside the identifier class gained anything, and these three say so at an
+  // EARLIER gate than the line this PR touched: (1) CLASSIFICATION refuses them for being
+  // unclassified or for violating a closed vocabulary, so they never reach (2) CONTAINMENT at all —
+  // which the asserted `kind` states outright rather than papering over. That is structural, not a
+  // hole in the test: a non-identifier leaf CANNOT produce an `observed-row-value` refusal, because
+  // liveness / closed-vocabulary / server-authored leaves `continue` before the containment loop and
+  // every remaining non-identifier leaf has already been refused as unclassified. What these three
+  // pin is that the classification gate in front of the exemption did not move; the narrowness of the
+  // exemption itself is pinned by REVERSE 1 and REVERSE 2 above.
   assert.equal(refusalFor({ somethingNew: IDENTIFIER_SUBSTRING_ROW_VALUE }).kind, 'unclassified-string-leaf')
   assert.equal(
     refusalFor({ checks: { bomData: { livenessSamples: [IDENTIFIER_SUBSTRING_ROW_VALUE] } } }).kind,
@@ -1989,13 +2028,20 @@ async function theIdentifierExemptionIsByLeafValueAndStaysNarrow() {
     armed,
   )
 
-  // REVERSE 4 — the exemption is still BELOW secrets. A supplied secret is refused at an identifier
-  // leaf whose value is an observed identifier, which is the strongest form of the new exemption.
+  // REVERSE 4 — the exemption is still BELOW secrets, on the ONE leaf where the two actually cross:
+  // `FileCode` is an observed identifier (so ground (a) exempts it from the row value `Code` it
+  // contains) AND is a supplied secret. The row value is armed here deliberately — with an empty
+  // `observedValues` this would only prove that secrets run before the identifier logic, not that a
+  // leaf the new ground genuinely exempts is still refused for the secret.
   const secreted = (() => {
     try {
       assertSourcePreflightValuesFree(
         { probes: [{ columns: [OBSERVED_COLUMN_CARRYING_IT] }] },
-        { identifiers: new Set([OBSERVED_COLUMN_CARRYING_IT]), secrets: [OBSERVED_COLUMN_CARRYING_IT] },
+        {
+          observedValues: new Set([IDENTIFIER_SUBSTRING_ROW_VALUE]),
+          identifiers: new Set([OBSERVED_COLUMN_CARRYING_IT]),
+          secrets: [OBSERVED_COLUMN_CARRYING_IT],
+        },
       )
       assert.fail('expected a secret refusal')
     } catch (error) {

@@ -486,9 +486,13 @@ const SERVER_AUTHORED_LEAF_FIELDS = Object.freeze(new Set([
   'readPlanId', 'externalSystemId', 'presetId', 'matchedBy',
 ]))
 
-// 3. SCHEMA IDENTIFIERS — table and column names. Exempt ONLY when the leaf's value really is one of
-//    the identifiers this run observed (a table it probed, a column it saw), which is the same test
-//    the source-discovery probe uses to tell a dictionary's schema-naming row from its content.
+// 3. SCHEMA IDENTIFIERS — table and column names. Exempt on either of TWO grounds, both spelled out
+//    with their reasoning at the exemption itself in `assertSourcePreflightValuesFree`: (a) the
+//    LEAF'S OWN value really is one of the identifiers this run observed (a table it probed, a column
+//    it saw); or (b) — the second and pre-existing ground — the row value it reproduces is itself one,
+//    which is the same test the source-discovery probe uses to tell a dictionary's schema-naming row
+//    from its content. Neither ground is a pass for the FIELD: a leaf listed below whose value earns
+//    neither is refused like any other.
 //    RESIDUAL, stated honestly: a business value that is character-for-character a column name of the
 //    same catalog is indistinguishable from that column name here. That channel carries one token, is
 //    the same one the discovery probe accepts, and is review-gated.
@@ -2116,6 +2120,10 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
       }
     }
     if (isClosed || isServerAuthored) continue
+    // Ground (a) of the identifier exemption, stated in full at the decision below. It is a property
+    // of the LEAF alone, so it is settled once per leaf rather than re-tested against every observed
+    // value. `leaf.value` is a string by construction — `collectStringLeaves` pushes nothing else.
+    const leafIsAnObservedIdentifier = isIdentifier && knownIdentifiers.has(leaf.value.toLowerCase())
     for (const entry of guarded) {
       const hit = leaf.value === entry.value
         || (entry.value.length >= 4 && leaf.value.includes(entry.value))
@@ -2141,10 +2149,8 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
       //       column name rather than content. It is the WIDER of the two, because it exempts an
       //       identifier leaf that merely CONTAINS such a value; narrowing it is a separate
       //       judgement with its own 500 risk, and is deliberately not made here.
-      if (isIdentifier && (
-        knownIdentifiers.has(leaf.value.toLowerCase())
-        || knownIdentifiers.has(entry.value.toLowerCase())
-      )) continue
+      if (leafIsAnObservedIdentifier) continue
+      if (isIdentifier && knownIdentifiers.has(entry.value.toLowerCase())) continue
       refuse(leaf.path, entry.kind, entry.value)
     }
   }
