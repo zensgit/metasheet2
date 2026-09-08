@@ -300,6 +300,22 @@ describe('W7-R10: W6-R5 preservation guard — derived domain', () => {
 })
 
 describe('W7-R10 positive control: ONE probe reds BOTH ban legs', () => {
+  it('both ACP modules remain subject to the real module and HTTP bans', () => {
+    for (const rel of [
+      'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',
+      'plugins/plugin-attendance/lib/attendance-report-cleaning-proposal.cjs',
+    ]) {
+      expect(classifiedCalculationPath().has(rel)).toBe(true)
+      expect(ATTENDANCE_W7_NOT_CALCULATION_PATH_FILES_V1.some(entry => entry.relPath === rel)).toBe(false)
+      const specifier = './' + path.posix.relative(path.posix.dirname(rel), BANNED_AGGREGATE_REL)
+      const probe = `require(${JSON.stringify(specifier)}); fetch('/api/attendance/groups/:groupId/effective-policy')`
+      withDecoyTree({ [rel]: probe, [BANNED_AGGREGATE_REL]: 'export {}' }, root => {
+        expect(referenceBanViolations([rel], classifiedCalculationPath(), root)).toEqual([rel])
+        expect(transportBanViolations([rel], classifiedCalculationPath(), root)).toEqual([rel])
+      })
+    }
+  })
+
   const CONSUMER_PROBE = [
     "import { buildAttendanceGroupEffectivePolicyAggregateV1 } from '../w6-group-effective-policy-aggregate'",
     '',

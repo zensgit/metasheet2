@@ -17,6 +17,9 @@ function entry(relPath, enclosingSymbol, table, count, posture, role, requiredPr
 }
 
 const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
+  // Immutable operation/prior-calculation recovery and posture-selected write CAS, not public current reads.
+  entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'readAttendanceCleaningCompletedOperations', 'attendance_record_calculations', 2, 'history', 'cleanup_recovery_precondition'),
+  entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'loadSelectedCalculation', 'attendance_record_calculations', 2, 'history', 'posture_selected_write_precondition'),
   entry('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', 'nextCalculationVersion', 'attendance_record_calculations', 1, 'history', 'version_allocation'),
   // #4556 W4C-2 Gate D1 (#4844): the INERT authoritative-result-write CORE. All four reads are
   // internal write-path preconditions over the immutable calculation lineage (version allocation,

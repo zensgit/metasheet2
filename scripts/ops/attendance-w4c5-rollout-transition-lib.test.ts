@@ -909,6 +909,20 @@ test('P2-A negative control: an AttendanceW4RegistryError-shaped refusal (same "
   assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
 })
 
+test('ACP connection uncertainty keeps its inherited registry name and internal-error exit', () => {
+  // The subclass calls only super(fixedCode), inheriting AttendanceW4RegistryError.name.
+  // An uncertain connection/commit is not a confirmed boundary refusal or success.
+  const code = 'W4C0_ATTENDANCE_CLEANING_CONNECTION_UNCERTAIN'
+  const error = Object.assign(new Error(code), { name: 'AttendanceW4RegistryError', code })
+  Object.assign(error, { secretPayload: 'SYNTHETIC_PRIVATE_DETAIL' })
+  assert.equal(error.message, code)
+  assert.equal(describeAttendanceW4C5ErrorV1(error), code)
+  assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
+  // Even a future explicit subclass name must not silently become boundary-refused.
+  error.name = 'AttendanceCleaningConnectionUncertainError'
+  assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
+})
+
 test('exitCodeForAttendanceW4C5ErrorV1 does not fire on a raw driver-shaped error (negative control: `.name` is never one of the three boundary class names)', () => {
   // A real PostgreSQL/pg-driver error has `.code` as a 5-character SQLSTATE, `.message` as a
   // distinct human-readable sentence, and a driver-assigned `.name` (never one of this repo's own
@@ -950,6 +964,8 @@ const ATTENDANCE_W4C5_REACHABLE_ERROR_FILES = [
 const ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES = [
   'AttendanceRequestSnapshotError',
   'AttendanceW4RegistryError',
+  // Inherits registry name; uncertain commit/connection remains INTERNAL_ERROR, never refusal.
+  'AttendanceCleaningConnectionUncertainError',
 ]
 // The base-class alternation is load-bearing, not defensive breadth. With `extends Error` alone,
 // `export class AttendanceW4FooError extends AttendanceW4IdentityError` — a subclass of a class

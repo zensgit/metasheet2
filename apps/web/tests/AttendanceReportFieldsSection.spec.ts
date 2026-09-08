@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
 import AttendanceReportFieldsSection from '../src/views/attendance/AttendanceReportFieldsSection.vue'
 import { apiFetch } from '../src/utils/api'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { load as loadYaml } from 'js-yaml'
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: vi.fn(),
@@ -123,6 +126,23 @@ function formulaEditorPayload(expression = '={late_duration}+1', scope = 'record
 }
 
 describe('AttendanceReportFieldsSection', () => {
+  it('is explicitly selected by both executable CI lanes and the attendance classifier', () => {
+    const filename = 'tests/AttendanceReportFieldsSection.spec.ts'
+    const workflow = loadYaml(readFileSync(resolve(process.cwd(), '../../.github/workflows/attendance-web-guard.yml'), 'utf8')) as {
+      on: { push: { paths: string[] } }
+      jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }>
+    }
+    const runs = Object.values(workflow.jobs).flatMap(job => job.steps).filter(step => step.run).map(step => step.run!)
+    const args = (source: string) => source.replace(/\\\r?\n/g, ' ').split('\n')
+      .map(line => line.replace(/#.*$/, '').trim()).filter(line => /^(?:exec )?(?:npx|pnpm\s+--filter\s+@metasheet\/web\s+exec)\s+vitest run\s/.test(line))
+      .flatMap(line => line.split(/\bvitest run\s+/)[1].trim().split(/\s+/))
+    expect(runs.flatMap(args)).toContain(filename)
+    expect(args(readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8'))).toContain(filename)
+    for (const path of [`apps/web/${filename}`, 'plugins/plugin-attendance/index.cjs', 'plugins/plugin-attendance/lib/attendance-report-cleaning-proposal.cjs']) {
+      expect(workflow.on.push.paths).toContain(path)
+      expect(runs.some(run => run.includes('case "$path" in') && run.includes(`${path}|`))).toBe(true)
+    }
+  })
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
 
@@ -146,6 +166,152 @@ describe('AttendanceReportFieldsSection', () => {
     })
     app.mount(container!)
   }
+
+  it.each(['pending', 'consumed', 'denied'])('reviews a pending cleaning proposal with %s outcome and sends only the reviewed version', async (outcome) => {
+    const catalog = populatedCatalogPayload() as any
+    catalog.data.cleaningReview = { enabled: true, orgId: 'org-1', sheetId: 'sheet-daily',
+      fieldIds: { cleaning_requested: 'fld_requested', cleaning_reason: 'fld_reason', employee_name: 'fld_name', work_date: 'fld_date' } }
+    vi.mocked(apiFetch).mockImplementation(async (url) => {
+      if (String(url).includes('/cleaning-apply')) return outcome === 'denied'
+        ? jsonResponse(403, { ok: false, error: { message: 'SENSITIVE_SERVER_DETAIL' } })
+        : jsonResponse(200, { ok: true, data: { cleaningState: outcome === 'pending' ? 'applied_pending_cleanup' : 'consumed' } })
+      if (String(url).startsWith('/api/multitable/records?')) return jsonResponse(200, { ok: true, data: { records: [
+        { id: 'rec_test', version: 7, data: { fld_requested: true, fld_reason: 'Verified correction', fld_name: 'Synthetic employee', fld_date: '2026-09-01' } },
+      ], hasMore: false } })
+      return jsonResponse(200, catalog)
+    })
+    mountSection()
+    await flushUi()
+    const load = container!.querySelector<HTMLButtonElement>('[data-cleaning-load]')
+    expect(load).not.toBeNull()
+    load!.click()
+    await flushUi()
+    expect(container!.textContent).toContain('Verified correction')
+    container!.querySelector<HTMLButtonElement>('[data-cleaning-review]')!.click()
+    await flushUi()
+    expect(apiFetch).not.toHaveBeenCalledWith(expect.stringContaining('/cleaning-apply'), expect.anything())
+    container!.querySelector<HTMLButtonElement>('[data-cleaning-confirm]')!.click()
+    await flushUi()
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/report-records/rec_test/cleaning-apply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Org-Id': 'org-1' }, body: JSON.stringify({ expectedVersion: 7 }),
+    })
+    expect(container!.textContent).toContain(outcome === 'pending' ? 'Attendance updated; proposal cleanup pending'
+      : outcome === 'consumed' ? 'Attendance updated; proposal consumed' : 'Correction not confirmed')
+    expect(container!.textContent).not.toContain('SENSITIVE_SERVER_DETAIL')
+    expect(container!.querySelector('[data-cleaning-review]') !== null).toBe(outcome !== 'consumed')
+  })
+
+  it.each([undefined, { enabled: false }, { enabled: true, orgId: 'other-org', sheetId: 'sheet-other',
+    fieldIds: { cleaning_requested: 'fld_requested', cleaning_reason: 'fld_reason', employee_name: 'fld_name', work_date: 'fld_date' } }])('hides unavailable or cross-org cleaning review metadata: %j', async (review) => {
+    const catalog = populatedCatalogPayload() as any
+    catalog.data.cleaningReview = review
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, catalog))
+    mountSection()
+    await flushUi()
+    expect(container!.querySelector('[data-cleaning-section]')).toBeNull()
+    expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).startsWith('/api/multitable/records'))).toBe(false)
+  })
+
+  it.each(['stale-first', 'latest-first', 'stale-error'])('keeps current-org metadata when responses arrive %s', async order => {
+    const org = ref('org-1')
+    const replies = new Map<string, (response: Response) => void>()
+    vi.mocked(apiFetch).mockImplementation(url => new Promise<Response>(resolve => {
+      replies.set(String(url), resolve)
+    }))
+    const reply = (orgId: string, failed = false) => {
+      const catalog = populatedCatalogPayload()
+      catalog.data.items[0].name = `CATALOG_${orgId}`
+      replies.get(`/api/attendance/report-fields?orgId=${orgId}`)!(failed
+        ? jsonResponse(500, { ok: false, error: { message: 'OLD_METADATA_ERROR' } })
+        : jsonResponse(200, { ...catalog, data: { ...catalog.data,
+          cleaningReview: { enabled: true, orgId, sheetId: `sheet-${orgId}`,
+            fieldIds: { cleaning_requested: 'fld_requested', cleaning_reason: 'fld_reason', employee_name: 'fld_name', work_date: 'fld_date' } },
+        } }))
+    }
+    app = createApp({ setup: () => () => h(AttendanceReportFieldsSection, { orgId: org.value, tr: (en: string) => en }) })
+    app.mount(container!)
+    await flushUi()
+    org.value = 'org-2'
+    await flushUi()
+    if (order !== 'latest-first') {
+      reply('org-1', order === 'stale-error')
+      await flushUi()
+      expect(container!.textContent).toContain('Loading')
+      expect(container!.textContent).not.toContain('CATALOG_org-1')
+      expect(container!.textContent).not.toContain('OLD_METADATA_ERROR')
+    }
+    reply('org-2')
+    await flushUi()
+    if (order === 'latest-first') {
+      reply('org-1')
+      await flushUi()
+    }
+    expect(container!.textContent).toContain('CATALOG_org-2')
+    expect(container!.textContent).not.toContain('CATALOG_org-1')
+    expect(container!.querySelector('[data-cleaning-section]')).not.toBeNull()
+  })
+
+  it('discards a pending old-org list response after switching organizations', async () => {
+    const org = ref('org-1')
+    let resolveList!: (value: Response) => void
+    const pendingList = new Promise<Response>(resolve => { resolveList = resolve })
+    vi.mocked(apiFetch).mockImplementation(async url => {
+      if (String(url).startsWith('/api/multitable/records?')) return pendingList
+      const catalog = populatedCatalogPayload() as any
+      catalog.data.cleaningReview = { enabled: true, orgId: org.value, sheetId: `sheet-${org.value}`,
+        fieldIds: { cleaning_requested: 'fld_requested', cleaning_reason: 'fld_reason', employee_name: 'fld_name', work_date: 'fld_date' } }
+      return jsonResponse(200, catalog)
+    })
+    app = createApp({ setup: () => () => h(AttendanceReportFieldsSection, { orgId: org.value, tr: (en: string) => en }) })
+    app.mount(container!)
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-cleaning-load]')!.click()
+    await flushUi()
+    org.value = 'org-2'
+    await flushUi()
+    resolveList(jsonResponse(200, { ok: true, data: { records: [{ id: 'rec_old', version: 1,
+      data: { fld_requested: true, fld_reason: 'OLD_ORG_PRIVATE_REASON', fld_name: 'Old employee', fld_date: '2026-09-01' } }], hasMore: false } }))
+    await flushUi()
+    expect(container!.textContent).not.toContain('OLD_ORG_PRIVATE_REASON')
+    expect(container!.querySelector('[data-cleaning-review]')).toBeNull()
+    expect(container!.querySelector('[data-cleaning-confirm]')).toBeNull()
+  })
+
+  it.each(['confirm', 'apply'])('clears old-org %s state without resubmitting after organization switch', async phase => {
+    const org = ref('org-1')
+    let resolveApply!: (value: Response) => void
+    const pendingApply = new Promise<Response>(resolve => { resolveApply = resolve })
+    vi.mocked(apiFetch).mockImplementation(async url => {
+      if (String(url).includes('/cleaning-apply')) return pendingApply
+      if (String(url).startsWith('/api/multitable/records?')) return jsonResponse(200, { ok: true, data: { records: [
+        { id: 'rec_old', version: 9, data: { fld_requested: true, fld_reason: 'OLD_ORG_REVIEW', fld_name: 'Old employee', fld_date: '2026-09-01' } },
+      ], hasMore: false } })
+      const catalog = populatedCatalogPayload() as any
+      catalog.data.cleaningReview = { enabled: true, orgId: org.value, sheetId: `sheet-${org.value}`,
+        fieldIds: { cleaning_requested: 'fld_requested', cleaning_reason: 'fld_reason', employee_name: 'fld_name', work_date: 'fld_date' } }
+      return jsonResponse(200, catalog)
+    })
+    app = createApp({ setup: () => () => h(AttendanceReportFieldsSection, { orgId: org.value, tr: (en: string) => en }) })
+    app.mount(container!)
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-cleaning-load]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-cleaning-review]')!.click()
+    await flushUi()
+    const confirm = container!.querySelector<HTMLButtonElement>('[data-cleaning-confirm]')!
+    if (phase === 'apply') { confirm.click(); await flushUi() }
+    org.value = 'org-2'
+    await flushUi()
+    expect(container!.textContent).not.toContain('OLD_ORG_REVIEW')
+    expect(container!.querySelector('[data-cleaning-confirm]')).toBeNull()
+    if (phase === 'confirm') confirm.click()
+    resolveApply(jsonResponse(200, { ok: true, data: { cleaningState: 'consumed' } }))
+    await flushUi()
+    expect(container!.textContent).not.toContain('Attendance updated')
+    const applies = vi.mocked(apiFetch).mock.calls.filter(([url]) => String(url).includes('/cleaning-apply'))
+    expect(applies).toHaveLength(phase === 'apply' ? 1 : 0)
+    if (phase === 'apply') expect(applies[0][1]).toMatchObject({ headers: { 'X-Org-Id': 'org-1' }, body: JSON.stringify({ expectedVersion: 9 }) })
+  })
 
   it('renders DingTalk-compatible report field categories and multitable entry', async () => {
     vi.mocked(apiFetch).mockResolvedValue(jsonResponse(200, populatedCatalogPayload()))
