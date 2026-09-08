@@ -4,11 +4,11 @@
       class="template-detail__header"
       :title="headerTitle"
       back
-      back-label="返回模板列表"
+      :back-label="t.backLabel"
       @back="goBack"
     >
       <template v-if="template" #meta>
-        <StatusTag domain="approvalTemplate" :status="template.status" force-locale="zh" />
+        <StatusTag domain="approvalTemplate" :status="template.status" />
       </template>
       <template v-if="template" #actions>
         <el-button
@@ -17,14 +17,14 @@
           :loading="store.loading"
           @click="startApproval"
         >
-          发起审批
+          {{ t.startApproval }}
         </el-button>
         <el-button
           v-if="canManageTemplates"
           data-testid="template-detail-edit-button"
           @click="editTemplate"
         >
-          编辑模板
+          {{ t.editTemplate }}
         </el-button>
         <el-button
           v-if="canManageTemplates && template.status === 'published'"
@@ -32,7 +32,7 @@
           data-testid="template-detail-archive-button"
           @click="handleArchive"
         >
-          停用
+          {{ t.archiveButton }}
         </el-button>
         <el-button
           v-if="canManageTemplates && template.status === 'archived'"
@@ -40,7 +40,7 @@
           data-testid="template-detail-unarchive-button"
           @click="handleUnarchive"
         >
-          启用
+          {{ t.unarchiveButton }}
         </el-button>
       </template>
     </PageHeader>
@@ -55,7 +55,7 @@
       @close="store.error = null"
     >
       <template #default>
-        <el-button type="primary" link @click="retryLoad">重新加载</el-button>
+        <el-button type="primary" link @click="retryLoad">{{ t.reload }}</el-button>
       </template>
     </el-alert>
 
@@ -71,7 +71,7 @@
             that broader editor is deferred to a later WP4 slice.
           -->
           <div class="template-detail__category">
-            <span class="template-detail__category-label">模板分类:</span>
+            <span class="template-detail__category-label">{{ t.categoryLabel }}</span>
             <template v-if="!editingCategory">
               <el-tag
                 v-if="template.category"
@@ -83,7 +83,7 @@
                 {{ template.category }}
               </el-tag>
               <span v-else class="template-detail__category-empty" data-testid="template-detail-category-empty">
-                未分组
+                {{ t.categoryEmpty }}
               </span>
               <el-button
                 v-if="canManageTemplates"
@@ -93,14 +93,14 @@
                 class="ms-ml-8"
                 @click="beginEditCategory"
               >
-                编辑
+                {{ t.edit }}
               </el-button>
             </template>
             <template v-else>
               <el-input
                 v-model="categoryDraft"
                 size="small"
-                placeholder="分组标识，用于模板中心筛选，留空表示未分组"
+                :placeholder="t.categoryPlaceholder"
                 class="ms-w-240 ms-mr-8"
                 maxlength="64"
                 data-testid="template-detail-category-input"
@@ -114,7 +114,7 @@
                 data-testid="template-detail-category-save-button"
                 @click="saveCategory"
               >
-                保存
+                {{ t.save }}
               </el-button>
               <el-button
                 size="small"
@@ -122,12 +122,12 @@
                 data-testid="template-detail-category-cancel-button"
                 @click="cancelEditCategory"
               >
-                取消
+                {{ t.cancel }}
               </el-button>
             </template>
           </div>
           <div class="template-detail__visibility">
-            <span class="template-detail__category-label">可见范围:</span>
+            <span class="template-detail__category-label">{{ t.visibilityLabel }}</span>
             <template v-if="!editingVisibility">
               <el-tag size="small" effect="plain" data-testid="template-detail-visibility-tag">
                 {{ visibilityScopeLabel(template.visibilityScope) }}
@@ -147,7 +147,7 @@
                 class="ms-ml-8"
                 @click="beginEditVisibility"
               >
-                编辑
+                {{ t.edit }}
               </el-button>
             </template>
             <template v-else>
@@ -157,15 +157,15 @@
                 class="ms-w-120 ms-mr-8"
                 data-testid="template-detail-visibility-type"
               >
-                <el-option label="全员" value="all" />
-                <el-option label="部门" value="dept" />
-                <el-option label="角色" value="role" />
-                <el-option label="用户" value="user" />
+                <el-option :label="t.unitAll" value="all" />
+                <el-option :label="t.unitDept" value="dept" />
+                <el-option :label="t.unitRole" value="role" />
+                <el-option :label="t.unitUser" value="user" />
               </el-select>
               <el-input
                 v-model="visibilityIdsDraft"
                 size="small"
-                placeholder="逗号分隔 id，如 dept-finance, role-manager"
+                :placeholder="t.visibilityIdsPlaceholder"
                 class="ms-w-320 ms-mr-8"
                 :disabled="visibilityTypeDraft === 'all'"
                 data-testid="template-detail-visibility-ids-input"
@@ -179,7 +179,7 @@
                 data-testid="template-detail-visibility-save-button"
                 @click="saveVisibility"
               >
-                保存
+                {{ t.save }}
               </el-button>
               <el-button
                 size="small"
@@ -187,7 +187,7 @@
                 data-testid="template-detail-visibility-cancel-button"
                 @click="cancelEditVisibility"
               >
-                取消
+                {{ t.cancel }}
               </el-button>
             </template>
           </div>
@@ -196,7 +196,7 @@
             (留空). Visible to all; inline editable by admins.
           -->
           <div class="template-detail__sla">
-            <span class="template-detail__category-label">SLA (小时):</span>
+            <span class="template-detail__category-label">{{ t.slaLabel }}</span>
             <template v-if="!editingSla">
               <el-tag
                 v-if="template.slaHours !== null && template.slaHours !== undefined"
@@ -208,7 +208,7 @@
                 {{ template.slaHours }}
               </el-tag>
               <span v-else class="template-detail__category-empty" data-testid="template-detail-sla-empty">
-                未设置
+                {{ t.slaEmpty }}
               </span>
               <el-button
                 v-if="canManageTemplates"
@@ -218,7 +218,7 @@
                 class="ms-ml-8"
                 @click="beginEditSla"
               >
-                编辑
+                {{ t.edit }}
               </el-button>
             </template>
             <template v-else>
@@ -229,7 +229,7 @@
                 size="small"
                 class="ms-w-160 ms-mr-8"
                 data-testid="template-detail-sla-input"
-                placeholder="留空清除"
+                :placeholder="t.slaPlaceholder"
                 :controls="false"
               />
               <el-button
@@ -239,7 +239,7 @@
                 data-testid="template-detail-sla-save-button"
                 @click="saveSla"
               >
-                保存
+                {{ t.save }}
               </el-button>
               <el-button
                 size="small"
@@ -247,41 +247,41 @@
                 data-testid="template-detail-sla-cancel-button"
                 @click="cancelEditSla"
               >
-                取消
+                {{ t.cancel }}
               </el-button>
             </template>
           </div>
           <div class="template-detail__meta">
-            <span>模板 Key: {{ template.key }}</span>
-            <span>当前版本: {{ template.activeVersionId ?? '无' }}</span>
-            <span>创建时间: {{ formatDate(template.createdAt) }}</span>
-            <span>更新时间: {{ formatDate(template.updatedAt) }}</span>
+            <span>{{ t.metaKeyLabel }} {{ template.key }}</span>
+            <span>{{ t.metaVersionLabel }} {{ template.activeVersionId ?? t.metaVersionNone }}</span>
+            <span>{{ t.metaCreatedLabel }} {{ formatDate(template.createdAt) }}</span>
+            <span>{{ t.metaUpdatedLabel }} {{ formatDate(template.updatedAt) }}</span>
           </div>
         </div>
 
         <div class="template-detail__content">
           <!-- Form schema section -->
           <div class="template-detail__section">
-            <h2>表单字段</h2>
+            <h2>{{ t.formFieldsHeading }}</h2>
             <el-table :data="template.formSchema.fields" class="ms-w-100pct" max-height="400" stripe>
-              <el-table-column prop="label" label="字段名" min-width="160" />
-              <el-table-column label="类型" width="120">
+              <el-table-column prop="label" :label="t.colFieldName" min-width="160" />
+              <el-table-column :label="t.colType" width="120">
                 <template #default="{ row }">
                   <el-tag size="small">{{ fieldTypeLabel(row.type) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="必填" width="80">
+              <el-table-column :label="t.colRequired" width="80">
                 <template #default="{ row }">
-                  <el-tag v-if="row.required" type="danger" size="small">必填</el-tag>
+                  <el-tag v-if="row.required" type="danger" size="small">{{ t.colRequired }}</el-tag>
                   <span v-else>-</span>
                 </template>
               </el-table-column>
-              <el-table-column prop="placeholder" label="占位文本" min-width="160">
+              <el-table-column prop="placeholder" :label="t.colPlaceholder" min-width="160">
                 <template #default="{ row }">
                   {{ row.placeholder ?? '-' }}
                 </template>
               </el-table-column>
-              <el-table-column label="选项" min-width="200">
+              <el-table-column :label="t.colOptions" min-width="200">
                 <template #default="{ row }">
                   <span v-if="row.options && row.options.length">
                     {{ row.options.map((o: any) => o.label).join(', ') }}
@@ -290,25 +290,25 @@
                 </template>
               </el-table-column>
               <template #empty>
-                <el-empty description="暂无表单字段" :image-size="60" />
+                <el-empty :description="t.emptyFormFields" :image-size="60" />
               </template>
             </el-table>
           </div>
 
           <div class="template-detail__section">
-            <h2>字段显隐规则</h2>
+            <h2>{{ t.visibilityRulesHeading }}</h2>
             <el-empty
               v-if="visibilityRuleSummaries.length === 0"
-              description="暂无字段显隐规则"
+              :description="t.emptyVisibilityRules"
               :image-size="60"
             />
             <el-table v-else :data="visibilityRuleSummaries" class="ms-w-100pct" stripe>
-              <el-table-column label="字段" min-width="160">
+              <el-table-column :label="t.colField" min-width="160">
                 <template #default="{ row }">
                   {{ row.field.label }}
                 </template>
               </el-table-column>
-              <el-table-column label="规则说明" min-width="260">
+              <el-table-column :label="t.colRuleSummary" min-width="260">
                 <template #default="{ row }">
                   {{ row.summary }}
                 </template>
@@ -318,7 +318,7 @@
 
           <!-- Approval graph section -->
           <div class="template-detail__section">
-            <h2>审批流程</h2>
+            <h2>{{ t.approvalGraphHeading }}</h2>
             <el-timeline v-if="template.approvalGraph.nodes.length">
               <el-timeline-item
                 v-for="node in template.approvalGraph.nodes"
@@ -336,7 +336,7 @@
                     v-if="'assigneeType' in node.config && node.config.assigneeType"
                     class="template-detail__node-assignee"
                   >
-                    {{ (node.config as any).assigneeType === 'role' ? '角色' : '用户' }}:
+                    {{ (node.config as any).assigneeType === 'role' ? t.unitRole : t.unitUser }}:
                     {{ legacyAssigneeIdsDisplay((node.config as any).assigneeType, (node.config as any).assigneeIds) }}
                   </span>
                   <el-tag
@@ -344,7 +344,7 @@
                     size="small"
                     class="template-detail__node-mode"
                   >
-                    {{ approvalModeLabel((node.config as any).approvalMode) }}<template v-if="(node.config as any).approvalMode === 'threshold' && Number.isInteger((node.config as any).approvalThreshold)">（{{ (node.config as any).approvalThreshold }} 人同意）</template>
+                    {{ approvalModeLabel((node.config as any).approvalMode) }}<template v-if="(node.config as any).approvalMode === 'threshold' && Number.isInteger((node.config as any).approvalThreshold)">{{ approveThresholdText((node.config as any).approvalThreshold) }}</template>
                   </el-tag>
                   <el-tag
                     v-if="node.type === 'approval' && (node.config as any).emptyAssigneePolicy"
@@ -362,12 +362,12 @@
                     type="info"
                     class="template-detail__node-timeout"
                   >
-                    {{ nodeTimeoutEffectLabel((node.config as any).timeout.effect) }}（{{ (node.config as any).timeout.afterMinutes }} 分钟）
+                    {{ nodeTimeoutEffectLabel((node.config as any).timeout.effect) }}{{ timeoutMinutesText((node.config as any).timeout.afterMinutes) }}
                   </el-tag>
                 </div>
               </el-timeline-item>
             </el-timeline>
-            <el-empty v-else description="暂无审批节点" :image-size="60" />
+            <el-empty v-else :description="t.emptyApprovalNodes" :image-size="60" />
           </div>
 
           <!-- B3-09 (模板治理 — 版本历史): admin-only (the endpoint sits behind the same
@@ -379,7 +379,7 @@
             class="template-detail__section"
             data-testid="template-detail-version-history"
           >
-            <h2>版本历史</h2>
+            <h2>{{ t.versionHistoryHeading }}</h2>
             <el-alert
               v-if="versionHistoryError"
               type="warning"
@@ -393,10 +393,10 @@
               max-height="320"
               stripe
             >
-              <el-table-column label="版本" :width="isNarrowViewport ? 72 : 90">
+              <el-table-column :label="t.colVersion" :width="isNarrowViewport ? 72 : 90">
                 <template #default="{ row }">v{{ row.version }}</template>
               </el-table-column>
-              <el-table-column label="状态" :width="isNarrowViewport ? 120 : 140">
+              <el-table-column :label="t.colVersionStatus" :width="isNarrowViewport ? 120 : 140">
                 <template #default="{ row }">
                   <el-tag size="small" :type="versionStatusTagType(row.status)">
                     {{ versionStatusLabel(row.status) }}
@@ -407,7 +407,7 @@
                     type="success"
                     class="template-detail__version-active-tag"
                   >
-                    当前生效
+                    {{ t.activeTag }}
                   </el-tag>
                   <el-tag
                     v-if="row.restoredFromVersionId"
@@ -415,21 +415,21 @@
                     type="warning"
                     class="template-detail__version-source-tag"
                   >
-                    恢复自 {{ restoredSourceLabel(row.restoredFromVersionId) }}
+                    {{ t.restoredFromPrefix }}{{ restoredSourceLabel(row.restoredFromVersionId) }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column v-if="!isNarrowViewport" label="发布说明" min-width="240">
+              <el-table-column v-if="!isNarrowViewport" :label="t.colPublishNote" min-width="240">
                 <template #default="{ row }">
                   <span v-if="row.publishNote" class="template-detail__version-note">{{ row.publishNote }}</span>
                   <span v-else>-</span>
                 </template>
               </el-table-column>
-              <el-table-column v-if="!isNarrowViewport" label="更新时间" width="180">
+              <el-table-column v-if="!isNarrowViewport" :label="t.colVersionUpdated" width="180">
                 <template #default="{ row }">{{ formatDate(row.updatedAt) }}</template>
               </el-table-column>
               <el-table-column
-                label="操作"
+                :label="t.colVersionActions"
                 :width="isNarrowViewport ? 142 : 190"
                 :fixed="isNarrowViewport ? undefined : 'right'"
               >
@@ -442,7 +442,7 @@
                     :data-testid="`template-version-compare-${row.id}`"
                     @click="openVersionDiff(row)"
                   >
-                    查看变化
+                    {{ t.viewChanges }}
                   </el-button>
                   <el-button
                     v-if="row.id !== template.latestVersionId"
@@ -453,12 +453,12 @@
                     :data-testid="`template-version-restore-${row.id}`"
                     @click="handleRestoreVersion(row)"
                   >
-                    恢复
+                    {{ t.restore }}
                   </el-button>
                 </template>
               </el-table-column>
               <template #empty>
-                <el-empty description="暂无版本记录" :image-size="60" />
+                <el-empty :description="t.emptyVersionHistory" :image-size="60" />
               </template>
             </el-table>
 
@@ -472,23 +472,23 @@
                 <div>
                   <h3>{{ versionDiffTitle }}</h3>
                   <span v-if="selectedVersion?.restoredFromVersionId" class="template-detail__version-source">
-                    恢复自 {{ restoredSourceLabel(selectedVersion.restoredFromVersionId) }}
+                    {{ t.restoredFromPrefix }}{{ restoredSourceLabel(selectedVersion.restoredFromVersionId) }}
                   </span>
                 </div>
                 <el-button
                   circle
                   text
                   :icon="Close"
-                  title="关闭版本比较"
-                  aria-label="关闭版本比较"
+                  :title="t.closeDiffTitle"
+                  :aria-label="t.closeDiffTitle"
                   @click="closeVersionDiff"
                 />
               </div>
               <template v-if="versionDiff">
                 <div class="template-detail__version-diff-summary" data-testid="template-version-read-summary">
-                  <span>表单字段 {{ versionDiff.fieldChanges }}</span>
-                  <span>流程节点 {{ versionDiff.nodeChanges }}</span>
-                  <span>连线 {{ versionDiff.edgeChanges }}</span>
+                  <span>{{ t.diffFieldsLabel }}{{ versionDiff.fieldChanges }}</span>
+                  <span>{{ t.diffNodesLabel }}{{ versionDiff.nodeChanges }}</span>
+                  <span>{{ t.diffEdgesLabel }}{{ versionDiff.edgeChanges }}</span>
                   <p
                     v-if="versionReadSummary"
                     class="template-detail__version-read-summary-line"
@@ -501,8 +501,8 @@
                     class="template-detail__version-read-summary-overlay"
                     data-testid="template-version-read-summary-overlay"
                   >
-                    画布叠加：节点 +{{ versionReadSummary.overlay.addedNodes }}/−{{ versionReadSummary.overlay.removedNodes }}/~{{ versionReadSummary.overlay.changedNodes }}
-                    · 连线 +{{ versionReadSummary.overlay.addedEdges }}/−{{ versionReadSummary.overlay.removedEdges }}/~{{ versionReadSummary.overlay.changedEdges }}
+                    {{ t.diffOverlayNodesPrefix }}+{{ versionReadSummary.overlay.addedNodes }}/−{{ versionReadSummary.overlay.removedNodes }}/~{{ versionReadSummary.overlay.changedNodes }}
+                    {{ t.diffOverlayEdgesSep }}+{{ versionReadSummary.overlay.addedEdges }}/−{{ versionReadSummary.overlay.removedEdges }}/~{{ versionReadSummary.overlay.changedEdges }}
                   </p>
                 </div>
                 <el-segmented
@@ -515,7 +515,7 @@
                 />
                 <el-empty
                   v-if="versionDiff.totalChanges === 0"
-                  description="与上一版本无结构变化"
+                  :description="t.diffNoStructuralChange"
                   :image-size="48"
                 />
                 <ul v-else-if="versionDiffMode === 'list'" class="template-detail__version-change-list">
@@ -554,7 +554,7 @@
                     </li>
                   </ul>
                   <p v-if="versionDiff.fieldChanges" class="template-detail__version-overlay-note">
-                    另有 {{ versionDiff.fieldChanges }} 项表单字段变化，请切回列表查看。
+                    {{ fieldChangesNoteText(versionDiff.fieldChanges) }}
                   </p>
                   <div class="template-detail__version-dual-row">
                     <div
@@ -673,7 +673,7 @@
                   data-testid="template-version-graph-overlay"
                 >
                   <p v-if="versionDiff.fieldChanges" class="template-detail__version-overlay-note">
-                    另有 {{ versionDiff.fieldChanges }} 项表单字段变化，请切回列表查看。
+                    {{ fieldChangesNoteText(versionDiff.fieldChanges) }}
                   </p>
                   <div
                     class="template-detail__version-overlay-canvas"
@@ -735,7 +735,7 @@
         </div>
       </div>
 
-      <el-empty v-else-if="!store.loading" description="未找到模板" />
+      <el-empty v-else-if="!store.loading" :description="t.notFound" />
     </div>
   </PageShell>
 </template>
@@ -803,16 +803,45 @@ import {
 } from '../../approvals/graphLayout'
 import { describeFieldVisibilityRule } from '../../approvals/fieldVisibility'
 import { templateArchiveConfirmMessage, templateUnarchiveConfirmMessage } from '../../approvals/templateArchiveConfirm'
+import { useLocale } from '../../composables/useLocale'
+import {
+  ZH,
+  EN,
+  FIELD_TYPE_ZH,
+  FIELD_TYPE_EN,
+  NODE_TYPE_ZH,
+  NODE_TYPE_EN,
+  APPROVAL_MODE_ZH,
+  APPROVAL_MODE_EN,
+  EMPTY_ASSIGNEE_POLICY_ZH,
+  EMPTY_ASSIGNEE_POLICY_EN,
+  NODE_TIMEOUT_EFFECT_ZH,
+  NODE_TIMEOUT_EFFECT_EN,
+  VERSION_STATUS_ZH,
+  VERSION_STATUS_EN,
+  VERSION_CHANGE_KIND_ZH,
+  VERSION_CHANGE_KIND_EN,
+  VERSION_CHANGE_ENTITY_ZH,
+  VERSION_CHANGE_ENTITY_EN,
+} from './templateDetailLabels'
 
 const route = useRoute()
 const router = useRouter()
 const store = useApprovalTemplateStore()
 const { canWrite, canManageTemplates } = useApprovalPermissions()
 
+// Report item O-8 continuation (PR #5545) — TemplateDetailView.vue previously never called
+// useLocale() at all, exactly like TemplateCenterView.vue before its own O-8 retrofit; every
+// string below was an unconditional Chinese literal regardless of the app shell's locale. Same
+// `useLocale()` module-scope singleton App.vue and TemplateCenterView.vue already read, same
+// `ZH`/`EN` + `t = computed(...)` convention.
+const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? ZH : EN))
+
 const template = computed(() => store.activeTemplate)
 // PageHeader requires a non-optional title; before the template loads (or on error) fall back to
 // generic copy — the original hand-rolled `<h1 v-if="template">` rendered nothing at all here.
-const headerTitle = computed(() => template.value?.name ?? '审批模板')
+const headerTitle = computed(() => template.value?.name ?? t.value.headerFallback)
 const visibilityRuleSummaries = computed(() => {
   const currentTemplate = template.value
   if (!currentTemplate) return []
@@ -856,12 +885,16 @@ function cancelEditSla() {
   slaDraft.value = null
 }
 
+function slaUpdatedToastText(hours: number): string {
+  return isZh.value ? `已更新 SLA 为 ${hours} 小时` : `SLA updated to ${hours} hours`
+}
+
 async function saveSla() {
   if (!template.value || slaSaving.value) return
   const raw = slaDraft.value
   const nextSla = raw === null || raw === undefined || Number.isNaN(Number(raw)) ? null : Number(raw)
   if (nextSla !== null && (!Number.isInteger(nextSla) || nextSla <= 0)) {
-    ElMessage.error('SLA 必须是正整数小时')
+    ElMessage.error(t.value.slaInvalid)
     return
   }
   const current = template.value.slaHours ?? null
@@ -874,9 +907,9 @@ async function saveSla() {
     const updated = await updateTemplateSlaHours(template.value.id, nextSla)
     store.activeTemplate = updated
     editingSla.value = false
-    ElMessage.success(nextSla === null ? '已清除 SLA' : `已更新 SLA 为 ${nextSla} 小时`)
+    ElMessage.success(nextSla === null ? t.value.slaClearedToast : slaUpdatedToastText(nextSla))
   } catch (e: any) {
-    ElMessage.error(e?.message ?? '更新 SLA 失败')
+    ElMessage.error(e?.message ?? t.value.slaUpdateFailed)
   } finally {
     slaSaving.value = false
   }
@@ -891,6 +924,10 @@ function beginEditCategory() {
 function cancelEditCategory() {
   editingCategory.value = false
   categoryDraft.value = ''
+}
+
+function categoryUpdatedToastText(category: string): string {
+  return isZh.value ? `已更新分类为 ${category}` : `Category updated to ${category}`
 }
 
 async function saveCategory() {
@@ -908,21 +945,21 @@ async function saveCategory() {
     // Patch the cached store so the header refreshes without a round-trip.
     store.activeTemplate = updated
     editingCategory.value = false
-    ElMessage.success(nextCategory ? `已更新分类为 ${nextCategory}` : '已清除模板分类')
+    ElMessage.success(nextCategory ? categoryUpdatedToastText(nextCategory) : t.value.categoryClearedToast)
   } catch (e: any) {
-    ElMessage.error(e?.message ?? '更新分类失败')
+    ElMessage.error(e?.message ?? t.value.categoryUpdateFailed)
   } finally {
     categorySaving.value = false
   }
 }
 
 function visibilityScopeLabel(scope: ApprovalTemplateVisibilityScope): string {
-  if (!scope || scope.type === 'all') return '全员可见'
+  if (!scope || scope.type === 'all') return t.value.visibilityAllLabel
   const map: Record<ApprovalTemplateVisibilityType, string> = {
-    all: '全员可见',
-    dept: '按部门',
-    role: '按角色',
-    user: '按用户',
+    all: t.value.visibilityAllLabel,
+    dept: t.value.visibilityDeptLabel,
+    role: t.value.visibilityRoleLabel,
+    user: t.value.visibilityUserLabel,
   }
   return map[scope.type]
 }
@@ -942,18 +979,32 @@ function visibilityScopeLabel(scope: ApprovalTemplateVisibilityScope): string {
 // (net-new, a separate owner decision per the scout report), so a `dept` scope is ALWAYS the count
 // form.
 const NON_ALL_SCOPE_UNIT_LABEL: Record<'dept' | 'user', string> = { dept: '部门', user: '用户' }
+// English companion for the zh-CN map immediately above (report item O-8 continuation, PR #5545).
+// Kept as a SEPARATE constant, never merged into `NON_ALL_SCOPE_UNIT_LABEL` itself: that map's
+// exact source text is pinned BY NAME in
+// apps/web/tests/approval-member-identity-coverage-enumeration.spec.ts (file-keyed to this view,
+// OUT-OF-SCOPE group "a COUNT (`.length`), never the raw ids") — renaming or restructuring it
+// would make that census's staleness check fail for no behavioral reason.
+const NON_ALL_SCOPE_UNIT_LABEL_EN: Record<'dept' | 'user', string> = { dept: 'Department', user: 'User' }
 
 function resolvedIdsOrCount(kind: 'dept' | 'role' | 'user', ids: readonly string[] | undefined | null): string {
   const safeIds = ids ?? []
-  if (safeIds.length === 0) return '-'
+  const count = safeIds.length
+  if (count === 0) return '-'
   if (kind === 'role') {
-    return `指定角色（${safeIds.length} 个）`
+    // The zh-CN line below is pinned VERBATIM by the census referenced above — do not reshape it
+    // (rename `safeIds`, change the bracket style, etc.) without updating that entry too.
+    return isZh.value ? `指定角色（${safeIds.length} 个）` : `Designated role (${count})`
   }
   if (kind === 'user') {
     const names = joinIfAllResolved(safeIds, getResolvedUserName)
-    if (names) return names.join('、')
+    if (names) return names.join(isZh.value ? '、' : ', ')
   }
-  return `${NON_ALL_SCOPE_UNIT_LABEL[kind]} ${safeIds.length}`
+  // Same pinning note as the role branch above — the zh-CN line must keep referencing
+  // `NON_ALL_SCOPE_UNIT_LABEL` (not `_EN`) and `safeIds.length` (not `count`) verbatim.
+  return isZh.value
+    ? `${NON_ALL_SCOPE_UNIT_LABEL[kind]} ${safeIds.length}`
+    : `${NON_ALL_SCOPE_UNIT_LABEL_EN[kind]} ${count}`
 }
 
 function visibilityScopeIdsDisplay(scope: ApprovalTemplateVisibilityScope): string {
@@ -1010,7 +1061,7 @@ async function saveVisibility() {
     .map((entry) => entry.trim())
     .filter(Boolean)
   if (visibilityTypeDraft.value !== 'all' && ids.length === 0) {
-    ElMessage.error('可见范围至少需要一个 id')
+    ElMessage.error(t.value.visibilityIdsRequired)
     return
   }
   const nextScope: ApprovalTemplateVisibilityScope = visibilityTypeDraft.value === 'all'
@@ -1026,45 +1077,22 @@ async function saveVisibility() {
     const updated = await updateTemplateVisibilityScope(template.value.id, nextScope)
     store.activeTemplate = updated
     editingVisibility.value = false
-    ElMessage.success('已更新模板可见范围')
+    ElMessage.success(t.value.visibilityUpdatedToast)
   } catch (e: any) {
-    ElMessage.error(e?.message ?? '更新可见范围失败')
+    ElMessage.error(e?.message ?? t.value.visibilityUpdateFailed)
   } finally {
     visibilitySaving.value = false
   }
 }
 
 function fieldTypeLabel(type: FormFieldType) {
-  const map: Record<FormFieldType, string> = {
-    text: '文本',
-    textarea: '多行文本',
-    number: '数字',
-    date: '日期',
-    datetime: '日期时间',
-    select: '单选',
-    'multi-select': '多选',
-    user: '用户',
-    department: '部门',
-    attachment: '附件',
-    detail: '明细',
-    'record-link': '关联记录',
-    date_range: '日期区间',
-    explanation: '说明',
-  }
+  const map = isZh.value ? FIELD_TYPE_ZH : FIELD_TYPE_EN
   return map[type] ?? type
 }
 
 function nodeTypeLabel(type: ApprovalNodeType) {
-  const map: Record<ApprovalNodeType, string> = {
-    start: '开始',
-    approval: '审批',
-    cc: '抄送',
-    condition: '条件',
-    parallel: '并行',
-    // Lock-3 §1.5 — 办理 (handler) node.
-    handler: '办理',
-    end: '结束',
-  }
+  // Lock-3 §1.5 — 办理/handler node.
+  const map = isZh.value ? NODE_TYPE_ZH : NODE_TYPE_EN
   return map[type] ?? type
 }
 
@@ -1110,8 +1138,22 @@ function nodeTagType(type: ApprovalNodeType): string {
 function approvalModeLabel(mode: ApprovalMode): string {
   // Threshold and sequential are the fourth and fifth shipped engine modes. See ApprovalMode's
   // type comment for the linear-only constraint this read-only detail label does not enforce.
-  const map: Record<ApprovalMode, string> = { single: '单人审批', all: '会签', any: '或签', threshold: '门槛会签', sequential: '依次审批' }
+  const map = isZh.value ? APPROVAL_MODE_ZH : APPROVAL_MODE_EN
   return map[mode] ?? mode
+}
+
+// Report item O-8 continuation (PR #5545) — the two dynamic parenthetical suffixes the approval
+// graph section renders next to a threshold-mode tag / a timeout-effect tag. Kept as functions
+// (not table keys) because each is a full sentence fragment wrapping a live count, matching the
+// `resetPickerRecordCount(count, isZh)` convention in
+// src/multitable/utils/meta-record-labels.ts — a table entry for bare punctuation/brackets would
+// be ASCII-only in zh and identical across locales, tripping the completeness test's own guards.
+function approveThresholdText(n: number): string {
+  return isZh.value ? `（${n} 人同意）` : ` (${n} approvals required)`
+}
+
+function timeoutMinutesText(n: number): string {
+  return isZh.value ? `（${n} 分钟）` : ` (${n} min)`
 }
 
 // P1-C: business labels for the WIRED timeout effects only (`NODE_TIMEOUT_SUPPORTED_EFFECTS` — never
@@ -1120,30 +1162,22 @@ function approvalModeLabel(mode: ApprovalMode): string {
 // `APPROVAL_NODE_TIMEOUT_EFFECT_UNSUPPORTED`) or genuinely malformed data, and this is a read-only
 // echo, not an authoring surface, so silently rendering nothing for that case is correct (never
 // invent a label for a capability that isn't real).
-const NODE_TIMEOUT_EFFECT_LABELS: Partial<Record<string, string>> = {
-  remind: '超时提醒',
-  transfer: '超时转交',
-  jump: '超时跳转',
-}
 function nodeTimeoutEffectLabel(effect: string | undefined): string {
-  return (effect && NODE_TIMEOUT_EFFECT_LABELS[effect]) ?? ''
+  const map = isZh.value ? NODE_TIMEOUT_EFFECT_ZH : NODE_TIMEOUT_EFFECT_EN
+  return (effect && map[effect]) ?? ''
 }
 
 function emptyAssigneePolicyLabel(policy: EmptyAssigneePolicy): string {
   // Fix-round P1-1 (gate P3A-F4B-20260819) — 'designated' added so this compiles against the
   // widened `EmptyAssigneePolicy` union (read-only detail echo; NOT an authoring surface, so no
   // FE follower-slice scope is implied by this label existing).
-  const map: Record<EmptyAssigneePolicy, string> = {
-    error: '无人时报错',
-    'auto-approve': '无人时自动通过',
-    designated: '无人时转交指定人员',
-  }
+  const map = isZh.value ? EMPTY_ASSIGNEE_POLICY_ZH : EMPTY_ASSIGNEE_POLICY_EN
   return map[policy] ?? policy
 }
 
 function formatDate(dateStr: string) {
   if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN')
+  return new Date(dateStr).toLocaleString(isZh.value ? 'zh-CN' : 'en-US')
 }
 
 function goBack() {
@@ -1182,8 +1216,8 @@ async function handleArchive() {
   try {
     await ElMessageBox.confirm(
       templateArchiveConfirmMessage(current.name, usage),
-      '停用模板',
-      { confirmButtonText: '停用', cancelButtonText: '取消', type: 'warning' },
+      t.value.archiveDialogTitle,
+      { confirmButtonText: t.value.archiveButton, cancelButtonText: t.value.cancel, type: 'warning' },
     )
   } catch {
     return
@@ -1192,9 +1226,9 @@ async function handleArchive() {
   try {
     const updated = await archiveTemplate(current.id)
     store.activeTemplate = updated
-    ElMessage.success('已停用模板')
+    ElMessage.success(t.value.archiveSuccessToast)
   } catch (e: any) {
-    ElMessage.error(e?.message ?? '停用模板失败')
+    ElMessage.error(e?.message ?? t.value.archiveFailed)
   } finally {
     archiving.value = false
   }
@@ -1206,8 +1240,8 @@ async function handleUnarchive() {
   try {
     await ElMessageBox.confirm(
       templateUnarchiveConfirmMessage(current.name),
-      '启用模板',
-      { confirmButtonText: '启用', cancelButtonText: '取消', type: 'info' },
+      t.value.unarchiveDialogTitle,
+      { confirmButtonText: t.value.unarchiveButton, cancelButtonText: t.value.cancel, type: 'info' },
     )
   } catch {
     return
@@ -1216,9 +1250,9 @@ async function handleUnarchive() {
   try {
     const updated = await unarchiveTemplate(current.id)
     store.activeTemplate = updated
-    ElMessage.success('已启用模板')
+    ElMessage.success(t.value.unarchiveSuccessToast)
   } catch (e: any) {
-    ElMessage.error(e?.message ?? '启用模板失败')
+    ElMessage.error(e?.message ?? t.value.unarchiveFailed)
   } finally {
     archiving.value = false
   }
@@ -1236,11 +1270,13 @@ const selectedBaseline = ref<ApprovalTemplateVersionSummaryDTO | null>(null)
 const selectedBaselineSnapshot = ref<Pick<ApprovalTemplateVersionDetailDTO, 'formSchema' | 'approvalGraph'> | null>(null)
 const versionDiff = ref<TemplateVersionDiff | null>(null)
 const versionDiffMode = ref<'list' | 'canvas' | 'dual'>('list')
-const versionDiffModeOptions = [
-  { label: '变化列表', value: 'list' },
-  { label: '流程画布', value: 'canvas' },
-  { label: '双画布', value: 'dual' },
-]
+// A computed, not a plain array literal: it must re-render when the shell locale flips after
+// mount, not just reflect whatever locale was active at setup time (report item O-8 continuation).
+const versionDiffModeOptions = computed(() => [
+  { label: t.value.diffModeList, value: 'list' },
+  { label: t.value.diffModeCanvas, value: 'canvas' },
+  { label: t.value.diffModeDual, value: 'dual' },
+])
 const versionDiffLoading = ref(false)
 const versionDiffError = ref('')
 const restoringVersionId = ref<string | null>(null)
@@ -1248,10 +1284,10 @@ const versionDetailCache = new Map<string, ApprovalTemplateVersionDetailDTO>()
 let versionHistoryFetched = false
 
 const versionDiffTitle = computed(() => {
-  if (!selectedVersion.value) return '版本变化'
+  if (!selectedVersion.value) return t.value.versionDiffTitleFallback
   return selectedBaseline.value
     ? `v${selectedBaseline.value.version} -> v${selectedVersion.value.version}`
-    : `v${selectedVersion.value.version} 初始内容`
+    : `v${selectedVersion.value.version}${t.value.versionInitialSuffix}`
 })
 const versionOverlay = computed(() => {
   if (!selectedVersion.value || !selectedBaselineSnapshot.value || !versionDiff.value) return null
@@ -1338,14 +1374,9 @@ function versionDualNodeLabel(
   return node?.name?.trim() || (node ? nodeTypeLabel(node.type) : '流程节点')
 }
 
-const VERSION_STATUS_LABELS: Record<ApprovalTemplateStatus, string> = {
-  draft: '草稿',
-  published: '已发布',
-  archived: '已停用',
-}
-
 function versionStatusLabel(status: ApprovalTemplateStatus): string {
-  return VERSION_STATUS_LABELS[status] ?? status
+  const map = isZh.value ? VERSION_STATUS_ZH : VERSION_STATUS_EN
+  return map[status] ?? status
 }
 
 function versionStatusTagType(status: ApprovalTemplateStatus): 'primary' | 'info' | 'warning' {
@@ -1362,7 +1393,7 @@ async function loadVersionHistory() {
     versionHistoryError.value = ''
   } catch (e: any) {
     // Load failure degrades to an inline warning — never blocks the rest of the detail page.
-    versionHistoryError.value = e?.message ?? '版本历史加载失败'
+    versionHistoryError.value = e?.message ?? t.value.versionHistoryLoadFailed
   }
 }
 
@@ -1405,7 +1436,7 @@ async function openVersionDiff(row: ApprovalTemplateVersionSummaryDTO) {
     versionDiff.value = diffApprovalTemplateVersions(previous, current)
   } catch (e: any) {
     if (selectedVersionId.value === row.id) {
-      versionDiffError.value = e?.message ?? '版本变化加载失败'
+      versionDiffError.value = e?.message ?? t.value.versionDiffLoadFailed
     }
   } finally {
     if (selectedVersionId.value === row.id) versionDiffLoading.value = false
@@ -1424,7 +1455,21 @@ function closeVersionDiff() {
 
 function restoredSourceLabel(versionId: string): string {
   const source = versionHistory.value.find((entry) => entry.id === versionId)
-  return source ? `v${source.version}` : '历史版本'
+  return source ? `v${source.version}` : t.value.restoredSourceFallback
+}
+
+function restoreConfirmMessage(version: number): string {
+  return isZh.value
+    ? `将 v${version} 复制为新的草稿版本。当前已发布版本和运行中的审批不会改变。`
+    : `This will copy v${version} into a new draft version. The currently published version and any in-progress approvals are unaffected.`
+}
+
+function restoreConfirmTitle(version: number): string {
+  return isZh.value ? `恢复 v${version}` : `Restore v${version}`
+}
+
+function restoreSuccessToastText(version: number): string {
+  return isZh.value ? `已恢复为草稿 v${version}` : `Restored as draft v${version}`
 }
 
 async function handleRestoreVersion(row: ApprovalTemplateVersionSummaryDTO) {
@@ -1432,9 +1477,9 @@ async function handleRestoreVersion(row: ApprovalTemplateVersionSummaryDTO) {
   if (!currentTemplate?.latestVersionId || restoringVersionId.value) return
   try {
     await ElMessageBox.confirm(
-      `将 v${row.version} 复制为新的草稿版本。当前已发布版本和运行中的审批不会改变。`,
-      `恢复 v${row.version}`,
-      { confirmButtonText: '恢复为新草稿', cancelButtonText: '取消', type: 'warning' },
+      restoreConfirmMessage(row.version),
+      restoreConfirmTitle(row.version),
+      { confirmButtonText: t.value.restoreConfirmButton, cancelButtonText: t.value.cancel, type: 'warning' },
     )
   } catch {
     return
@@ -1447,35 +1492,30 @@ async function handleRestoreVersion(row: ApprovalTemplateVersionSummaryDTO) {
     })
     versionDetailCache.set(restored.id, restored)
     await Promise.all([store.loadTemplate(currentTemplate.id), refreshVersionHistory()])
-    ElMessage.success(`已恢复为草稿 v${restored.version}`)
+    ElMessage.success(restoreSuccessToastText(restored.version))
     const restoredRow = versionHistory.value.find((entry) => entry.id === restored.id)
     if (restoredRow) await openVersionDiff(restoredRow)
   } catch (e: any) {
-    ElMessage.error(e?.message ?? '恢复版本失败')
+    ElMessage.error(e?.message ?? t.value.restoreFailed)
   } finally {
     restoringVersionId.value = null
   }
 }
 
-const VERSION_CHANGE_KIND_LABELS: Record<TemplateVersionChangeKind, string> = {
-  added: '新增',
-  removed: '删除',
-  changed: '修改',
-  moved: '移动',
-}
-
-const VERSION_CHANGE_ENTITY_LABELS: Record<TemplateVersionChangeEntity, string> = {
-  field: '字段',
-  node: '节点',
-  edge: '连线',
-}
-
 function versionChangeKindLabel(kind: TemplateVersionChangeKind): string {
-  return VERSION_CHANGE_KIND_LABELS[kind]
+  const map = isZh.value ? VERSION_CHANGE_KIND_ZH : VERSION_CHANGE_KIND_EN
+  return map[kind]
 }
 
 function versionChangeEntityLabel(entity: TemplateVersionChangeEntity): string {
-  return VERSION_CHANGE_ENTITY_LABELS[entity]
+  const map = isZh.value ? VERSION_CHANGE_ENTITY_ZH : VERSION_CHANGE_ENTITY_EN
+  return map[entity]
+}
+
+function fieldChangesNoteText(n: number): string {
+  return isZh.value
+    ? `另有 ${n} 项表单字段变化，请切回列表查看。`
+    : `There are also ${n} form field changes — switch back to the list view to see them.`
 }
 
 function versionChangeTagType(kind: TemplateVersionChangeKind): 'success' | 'danger' | 'warning' | 'info' {
