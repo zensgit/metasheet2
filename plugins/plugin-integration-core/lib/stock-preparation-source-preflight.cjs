@@ -1953,6 +1953,37 @@ function refuse(path, kind, value) {
   })
 }
 
+// The exact four keys `refuse` mints above, in the order it builds them. Declared once so both
+// `refuse` and the picker below stay honest about what "the values-free detail keys" means.
+const VALUES_FREE_REFUSAL_DETAIL_KEYS = Object.freeze(['path', 'kind', 'length', 'masked'])
+
+/**
+ * Pick the values-free self-check's own detail keys off a caught error, for a caller (the route)
+ * that wants to LOG them without inventing its own notion of "safe to log" and without spreading
+ * `error.details` wholesale — a future field added to `refuse()`'s payload must be classified here
+ * on purpose before it can reach a log line, the same fail-closed shape the self-check itself uses
+ * for report leaves.
+ *
+ * Returns `null` for anything that is not this exact refusal: a non-`SourcePreflightError`, or a
+ * `SourcePreflightError` whose message names a different failure (this module throws more than
+ * one). The message check is deliberate and not `instanceof` alone, because a different
+ * `SourcePreflightError` could carry a `details` object that happens to also be plain — matching by
+ * message is matching by what actually happened, not by shape.
+ *
+ * Never changes what the self-check refuses or how — this is read-only over what `refuse()` already
+ * decided to put in `error.details`.
+ */
+function describeValuesFreeRefusal(error) {
+  if (!(error instanceof SourcePreflightError)) return null
+  if (error.message !== 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED') return null
+  const details = isPlainObject(error.details) ? error.details : {}
+  const described = {}
+  for (const key of VALUES_FREE_REFUSAL_DETAIL_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(details, key)) described[key] = details[key]
+  }
+  return described
+}
+
 /**
  * The independent second check, in the spirit of the discovery probe's H0 self-check.
  *
@@ -2086,6 +2117,7 @@ module.exports = {
   SourcePreflightError,
   runStockPreparationSourcePreflight,
   assertSourcePreflightValuesFree,
+  describeValuesFreeRefusal,
   __internals: {
     buildProbeRoster,
     classifyReadError,
