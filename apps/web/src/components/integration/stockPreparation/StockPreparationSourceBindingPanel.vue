@@ -150,7 +150,7 @@
 //
 // WHO SEES WHAT (R-11 — what is not permitted must not be visible):
 //   * a platform admin gets the current source, the candidate list, and Save;
-//   * a `stock-prep:admin` holder who can open the 安装/体检 tab gets the current source and is told
+//   * a `stock-prep:admin` holder who can open the 数据来源与体检 tab gets the current source and is told
 //     who changes it. They are NOT shown a Save that would 403, and the panel does not call the
 //     admin-tier routes on their behalf.
 // `canRunStockPrepInstall` is reused rather than a new predicate invented: it already means "this

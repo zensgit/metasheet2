@@ -424,8 +424,8 @@
           </button>
           <p class="sp-board__fill-hint" data-testid="stock-prep-project-board-no-fill-target">
             {{ bi(
-              '填写用的备料主表还没建好,所以没法直接跳到那张表 —— 这个按钮只会打开多维表首页。请管理员在「安装 / 体检」里把表建出来。',
-              'The stock-preparation table you would fill in has not been created yet, so there is no direct jump to it — this button opens the multitable home instead. Ask an administrator to create it on the Install / Health tab.',
+              '填写用的备料主表还没建好,所以没法直接跳到那张表 —— 这个按钮只会打开多维表首页。请管理员在「数据来源与体检」里把表建出来。',
+              'The stock-preparation table you would fill in has not been created yet, so there is no direct jump to it — this button opens the multitable home instead. Ask an administrator to create it on the Sources & Health Check tab.',
             ) }}
           </p>
         </template>

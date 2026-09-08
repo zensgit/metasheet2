@@ -409,7 +409,7 @@ GET /api/integration/stock-preparation/source-preflight?externalSystemId=104e9ba
 
 ## Step 5 — UI 选源(把源绑定切到客户 PLM,验证免重启)
 
-**动作**(工作台点法:安装/体检页顶部"选源"面板;等价 API):
+**动作**(工作台点法:「数据来源与体检」页顶部"选源"面板;等价 API):
 ```
 POST /api/integration/stock-preparation/source-binding
 { "externalSystemId": "104e9bad-3400-42bb-b427-e7a1d9cf9174" }

@@ -112,6 +112,16 @@
         @open-multitable="handleOpenFillTarget"
         @select-project-no="handleProjectNoSelect"
       />
+      <!-- 项目查询 (P2-1) — 「怎么查询」。A SIBLING BRANCH of 今天要处理 / 项目备料, not a passenger
+           on them: it owns four URL state bits of its own (`q` / `status` / `source` / `sel`) and one
+           board read per selection, and folding it into the board component would have made that
+           component read its own directory twice under two different opt-ins. Its two actions go out
+           through the SAME `navigate-stage` the stepper and the wizard use — one nav surface. -->
+      <StockPreparationProjectQueryView
+        v-else-if="effectiveKey === 'project-query'"
+        :scope="scope"
+        @navigate-stage="handleNavigateStage"
+      />
       <!-- 确认队列's two platform-admin controls (建账本 / 重新扫描) emit; the SHELL calls. They
            emitted into nothing until now, so pressing either did nothing and said nothing — the
            purest form of a control that lies about what it does. The shell is the listener because
@@ -246,7 +256,7 @@
 // and only renders values-free copy. NAMING — the snapshot surface uses 快照批次 / "snapshot batch"
 // to avoid colliding with PLM view-state "snapshot" and k3WiseSetup "mapping" vocabularies.
 import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import { useLocale } from '../../../composables/useLocale'
 import { getDefaultIntegrationScope } from '../../../services/integration/workbench'
 import PageShell from '../../layout/PageShell.vue'
@@ -260,6 +270,7 @@ import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
 import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import StockPreparationProjectBoardView from './StockPreparationProjectBoardView.vue'
+import StockPreparationProjectQueryView from './StockPreparationProjectQueryView.vue'
 import StockPreparationInstallView from './StockPreparationInstallView.vue'
 import StockPreparationOpsPanel from './StockPreparationOpsPanel.vue'
 import StockPreparationCodeHelpPanel from './StockPreparationCodeHelpPanel.vue'
@@ -272,6 +283,7 @@ import {
   canOpenStockPrepHelp,
   canOpenStockPrepInstallView,
   canOpenStockPrepProjectBoard,
+  canOpenStockPrepProjectQuery,
   canUseLegacyMvpTabs,
   landsOnStockPrepProjectBoard,
   stockPrepLandingKey,
@@ -304,6 +316,7 @@ type StockPreparationViewKey =
   | 'ops'
   | 'help'
   | 'project-board'
+  | 'project-query'
   | 'confirmation-queue'
   | 'install'
   | 'dashboard'
@@ -401,6 +414,22 @@ const views: StockPreparationViewTab[] = [
     endpoint: '/api/integration/stock-preparation/projects/:projectNo/board',
     confirmWrites: true,
   },
+  // 项目查询 (P2-1, 设计稿 §6.3 第一行) — 「怎么查询」的那一屏:两级筛选 + 主从视图 + URL 状态位。
+  //
+  // Same `operatorBoard` tier as the two above, and for the same reason 今天要处理 shares it: the
+  // panel's data is the SAME U2 directory union (through the same throttled wrapper) plus one board
+  // read for the row the reader selects — no read this tier is not already granted, and no value it
+  // is not already shown. Listed immediately after 项目备料 because that is where 设计稿 §2.2 puts it
+  // in 【工作】, and the rail's ORDER comes from the manifest, not from this array.
+  {
+    key: 'project-query',
+    operatorBoard: true,
+    zh: '项目查询',
+    en: 'Project Query',
+    zhDesc: '按状态和来源筛出一批项目,再点开其中一个看它的行数、待确认和最近变更。筛选条件写在网址里,刷新或者发给别人都还是这一屏。',
+    enDesc: 'Filter projects by status and source, then open one to see its row count, pending decisions and latest change. The filters live in the URL, so a reload or a shared link reopens the same view.',
+    endpoint: '/api/integration/stock-preparation/operator/projects',
+  },
   // O1' §附 (owner, 2026-08-29): `/stock-prep` is adopted as THE CONFIRMATION-QUEUE WORKBENCH — the
   // operator entry into the human confirmation loop. It stays the PLATFORM ADMIN's landing view (see
   // `landingKey` below) and it stays exactly as it was; everything below it is a legacy MVP surface
@@ -431,16 +460,18 @@ const views: StockPreparationViewTab[] = [
     provisioning: true,
   },
   {
-    // THE LABEL STAYS 「安装 / 体检」. 设计稿 §2.2 calls this item 「数据来源与体检」, and renaming it
-    // is a copy change rather than a layout one: two other components point a reader at this tab BY
-    // NAME (the board's 「请管理员在『安装 / 体检』里把表建出来」 and the wizard's paste-able TODO),
-    // and one of those strings is something an admin copies into a chat window. Renaming the tab
-    // without them would leave instructions naming a tab that no longer exists — see the PR body's
-    // 「没做/偏离」.
+    // THE LABEL IS NOW 「数据来源与体检」, matching 设计稿 §2.2 exactly. It shipped as 「安装 / 体检」
+    // through P0/P1 because two OTHER components pointed a reader at this tab BY NAME (the board's
+    // 「请管理员在『安装 / 体检』里把表建出来」 and a since-corrected wizard TODO string), and one of
+    // those strings is something an admin copies into a chat window — renaming the tab alone would
+    // have left instructions naming a tab that no longer exists. This hardening wave renames BOTH
+    // ends together: the board's hint string below now reads the new name too (grep 「数据来源与体检」
+    // to find every reference this rename had to carry). The KEY stays `install` — no route, no
+    // `?tab=` deep link and no rail-manifest gate token moved, only the two rendered words did.
     key: 'install',
     workbenchAdminOnly: true,
-    zh: '安装 / 体检',
-    en: 'Install / Health',
+    zh: '数据来源与体检',
+    en: 'Sources & Health Check',
     zhDesc: '把这套部署会装的东西摆出来给您确认,然后看看还缺什么、建该建的表、再检查一次。跳过的步骤是还需要人来做的事,不是装失败了。',
     enDesc: 'Lays out what this deployment installs for you to confirm, then checks what is missing, creates what needs creating, and checks again. A skipped step is work still waiting for a person, not a failed install.',
     endpoint: '/api/platform/apps/stock-preparation',
@@ -582,6 +613,10 @@ const visibleViews = computed(() => {
   return views.filter((view) => {
     if (view.legacyMvp) return canUseLegacyMvpTabs(principal)
     if (view.workbenchAdminOnly) return canOpenStockPrepInstallView(principal)
+    // 项目查询 rides its OWN named predicate rather than the board's, even though the two are one
+    // expression today: the rail manifest gates it on its own token, and a shell that consulted a
+    // different predicate than the manifest names is precisely the drift F-09 exists to catch.
+    if (view.key === 'project-query') return canOpenStockPrepProjectQuery(principal)
     if (view.operatorBoard) return canOpenStockPrepProjectBoard(principal)
     if (view.helpOnly) return canOpenStockPrepHelp(principal)
     return true
@@ -743,12 +778,43 @@ async function readDeploymentPosture(): Promise<void> {
 // this fold an operator arriving on a stale/deep-linked legacy key would render a panel of controls
 // that all 403 — the exact "visible but not actionable" failure, reintroduced through the back door.
 const activeKey = ref<StockPreparationViewKey | null>(null)
+
+/**
+ * D3 (hardening wave, 2026-09-08) — 无项目号时两入口收敛.
+ *
+ * `home` and `project-board` are the SAME component with the project number withheld or not (§2.3) —
+ * a click on 项目备料 while `selectedProjectNo` is still empty renders EXACTLY what 今天要处理 would.
+ * The panel was always right; what was wrong is the HIGHLIGHT: before this fold, choosing
+ * `project-board` with no number lit up 项目备料 in the rail while the screen showed 今天要处理's task
+ * list — highlighted-A-shows-B, which reads as a bug even though nothing actually broke.
+ *
+ * This folds the effective key, not the raw choice: `activeKey.value` still remembers
+ * `'project-board'` was clicked (so a project opened moments later from 今天要处理's own picker still
+ * reads as "the reader is on the board", not as a second navigation), but `activeView` below renders
+ * `home`'s label/description and the rail highlights `home` for as long as no number is open.
+ *
+ * `?projectNo=` still outranks everything here, exactly as it always has: `deepLinkedProjectBoard`
+ * above is what makes `landingKey` resolve to `project-board` in the first place when a link carries a
+ * number, and `selectedProjectNo` is non-empty for the whole of that visit — so this fold's own guard
+ * (`selectedProjectNo.value.length === 0`) never engages for a deep-linked project, and behaviour there
+ * is byte-identical to before this wave.
+ */
+function foldEmptyProjectBoardToHome(
+  key: StockPreparationViewKey,
+  visible: StockPreparationViewTab[],
+): StockPreparationViewKey {
+  if (key !== 'project-board') return key
+  if (selectedProjectNo.value.length > 0) return key
+  return visible.some((view) => view.key === 'home') ? 'home' : key
+}
+
 const activeView = computed(() => {
   const visible = visibleViews.value
   if (visible.length === 0) return null
   const chosen = activeKey.value
   if (chosen) {
-    const hit = visible.find((view) => view.key === chosen)
+    const folded = foldEmptyProjectBoardToHome(chosen, visible)
+    const hit = visible.find((view) => view.key === folded)
     if (hit) return hit
   }
   return visible.find((view) => view.key === landingKey.value) ?? visible[0]
@@ -766,6 +832,68 @@ const route = useRoute()
 const router = useRouter()
 
 /**
+ * 项目查询's OWN four URL state bits (P2-1) — the shell's half of that contract.
+ *
+ * The panel writes `?tab=project-query&q=&status=&source=&sel=` itself (see its own header for why it
+ * mirrors `?tab=` when nothing else on this page does). What it cannot do is clean up after itself:
+ * by the time the reader has clicked another rail item the panel is unmounted, and an unmount-time
+ * `router.replace` would race the shell's own. So the SHELL drops the five keys the moment the active
+ * key stops being `project-query` — otherwise a reader who filters, then opens 确认队列, then reloads
+ * is thrown back into a query panel they had already left, with filters they had already finished
+ * with. That is the same class of URL-disagrees-with-page state `handleProjectNoSelect` warns about.
+ *
+ * EVERY GUARD HERE IS 「are those keys actually present」, never 「which tab is it」 alone: with none of
+ * them in the query this is a pure no-op that issues NO `router.replace` at all, which is what keeps
+ * the shell's existing replace-call contract (the project-number specs read `replace.mock.calls[0]`)
+ * byte-identical for every route that never visits this panel.
+ *
+ * `tab` IS ONE OF THOSE KEYS, and it has to be. The panel writes `tab=project-query` on every state
+ * write while a DEFAULT value deletes its own key, so 「筛一下、再筛回全部」 leaves a URL carrying
+ * `?tab=project-query` and nothing else. A staleness test that looked only at the four filter keys
+ * called that clean, issued no replace, and let the tab bit outlive the visit — so the next reload
+ * threw the reader back into a panel they had already left. That is the exact failure this block was
+ * written to prevent, reached by two clicks. (No route outside this panel can carry the value: the
+ * shell never writes `?tab=` itself.)
+ */
+const PROJECT_QUERY_STATE_KEYS = ['q', 'status', 'source', 'sel'] as const
+
+/**
+ * True when the URL still carries 项目查询's state while the panel is no longer the active one.
+ *
+ * Keyed off `effectiveKey`, never off the raw `activeKey` ref — the same rule every panel branch
+ * above follows. `tabFromQuery()` accepts a key by NAME, without asking whether this principal may
+ * see it, so a reader who cannot open 项目查询 can still arrive with `activeKey === 'project-query'`
+ * while `activeView` folds them back to their landing. Reading `activeKey` here would call that
+ * reader's panel "active", keep five keys belonging to a screen they never saw, and carry them
+ * forward through every later replace.
+ */
+function hasStaleProjectQueryState(): boolean {
+  if (effectiveKey.value === 'project-query') return false
+  if (route.query?.tab === 'project-query') return true
+  return PROJECT_QUERY_STATE_KEYS.some((key) => route.query?.[key] !== undefined)
+}
+
+/**
+ * `{ ...route.query }` for every replace this shell makes, minus 项目查询's bits when that panel is
+ * not the active one. Every existing call site spread `route.query` directly; routing them through
+ * this is what stops one of them from faithfully carrying a stale `sel=` forward into a URL that has
+ * nothing to do with it.
+ */
+function shellQueryBase(): LocationQueryRaw {
+  const query: LocationQueryRaw = { ...route.query }
+  if (effectiveKey.value === 'project-query') return query
+  for (const key of PROJECT_QUERY_STATE_KEYS) delete query[key]
+  if (query.tab === 'project-query') delete query.tab
+  return query
+}
+
+/** Drop them on their own, for the paths that make no other replace. No-op when there is nothing to drop. */
+function dropStaleProjectQueryState(): void {
+  if (!hasStaleProjectQueryState()) return
+  void router.replace({ query: shellQueryBase() })
+}
+
+/**
  * `?tab=` — the deep link into one rail item.
  *
  * SEEDED SYNCHRONOUSLY, during setup, so a shared link paints its destination on the FIRST frame
@@ -779,6 +907,12 @@ const router = useRouter()
  * shell's `router.replace` calls are part of its contract with the project-number specs (which read
  * `replace.mock.calls[0]`), and a landing-time replace would insert a call ahead of every one of
  * them. Deep links in, no URL churn out — see the PR body's 「没做/偏离」.
+ *
+ * ONE PANEL IS THE EXCEPTION, AND THE ASYMMETRY IS ON PURPOSE. 项目查询 writes `tab=project-query`
+ * itself, because its four filter keys are worthless in a URL that reopens on somebody else's
+ * landing tab. It is the WRITER; the shell is the CLEANER (`hasStaleProjectQueryState` /
+ * `shellQueryBase` above), so no unmount-time replace from the panel can race one of the shell's.
+ * Any future panel that mirrors its own `?tab=` inherits both halves of that deal.
  */
 function tabFromQuery(): StockPreparationViewKey | null {
   const raw = route.query?.tab
@@ -835,7 +969,13 @@ function handleRailSelect(key: string): void {
   // reload (which now honours the number — see `deepLinkedProjectBoard`) would reopen the project
   // the reader just navigated away from. The board's own 「返回今天要处理」 already goes through
   // `handleProjectNoSelect('')`; this puts the rail on the same path rather than a second one.
-  if (key === 'home' && selectedProjectNo.value.length > 0) handleProjectNoSelect('')
+  if (key === 'home' && selectedProjectNo.value.length > 0) {
+    // `handleProjectNoSelect` already rebuilds the query through `shellQueryBase()`, so letting it
+    // make the ONE replace keeps this path at exactly one navigation, as it has always been.
+    handleProjectNoSelect('')
+    return
+  }
+  dropStaleProjectQueryState()
 }
 
 function handleProjectNoSelect(projectNo: string): void {
@@ -848,15 +988,22 @@ function handleProjectNoSelect(projectNo: string): void {
   //
   // Only these two keys move. Every other caller (the queue's closure button, the dashboard, the
   // wizard) names its own destination through `handleNavigateStage` and is untouched by this.
+  //
+  // THE SECOND BRANCH READS `activeKey`, NOT `effectiveKey`, and that asymmetry is deliberate. By the
+  // time it runs, `selectedProjectNo` is ALREADY empty (first line of this function), so D3's fold has
+  // already turned `effectiveKey` into `'home'` — the branch could never fire against it, and the raw
+  // `activeKey` would have been left saying `'project-board'` for ever. Nothing rendered differs
+  // either way (every panel branch keys off `effectiveKey`), but a state ref that disagrees with the
+  // screen is a trap for whoever reads it next, and a condition that cannot be true is worse.
   if (projectNo && effectiveKey.value === 'home') activeKey.value = 'project-board'
-  else if (!projectNo && effectiveKey.value === 'project-board') activeKey.value = 'home'
+  else if (!projectNo && activeKey.value === 'project-board') activeKey.value = 'home'
   // Replace, not push: opening a project is not a history step.
   //
   // AN EMPTY NUMBER REMOVES THE KEY rather than writing `?projectNo=`. This is the 返回今天要处理
   // path (§2.3 makes `?projectNo=` the 首页 ⇄ 工作区 state bit), and a query that still carries an
   // empty value is not the same URL as one that carries none — reloading or sharing it would land
   // on a page whose own reading of "is a project open" disagreed with the shell's.
-  const query = { ...route.query }
+  const query = shellQueryBase()
   if (projectNo) query.projectNo = projectNo
   else delete query.projectNo
   void router.replace({ query })
@@ -867,7 +1014,7 @@ function handleProjectSelect(projectId: string): void {
   // Jump straight into view 2 already scoped — no re-select there.
   activeKey.value = 'bom-snapshot-diff'
   // Mirror the handle into the query (replace: selecting is not a history step).
-  void router.replace({ query: { ...route.query, projectId } })
+  void router.replace({ query: { ...shellQueryBase(), projectId } })
 }
 
 // H1: the dashboard's OWN picker updates the shared handle WITHOUT switching tabs — the operator
@@ -875,7 +1022,7 @@ function handleProjectSelect(projectId: string): void {
 // row action above, which jumps straight to view 2).
 function handleDashboardProjectSelect(projectId: string): void {
   selectedProjectId.value = projectId
-  void router.replace({ query: { ...route.query, projectId } })
+  void router.replace({ query: { ...shellQueryBase(), projectId } })
 }
 
 // H2: the stepper / recommend-action navigates by reusing this SAME activeKey ref — a satellite of
@@ -892,8 +1039,12 @@ function handleDashboardProjectSelect(projectId: string): void {
 function handleNavigateStage(viewKey: string, projectNo?: string): void {
   activeKey.value = viewKey as StockPreparationViewKey
   if (typeof projectNo === 'string' && projectNo.trim().length > 0) {
+    // One replace, made by `handleProjectNoSelect` — whose query already comes from `shellQueryBase()`,
+    // so 项目查询's bits are dropped in the SAME navigation rather than in a second one racing it.
     handleProjectNoSelect(projectNo.trim())
+    return
   }
+  dropStaleProjectQueryState()
 }
 
 /**

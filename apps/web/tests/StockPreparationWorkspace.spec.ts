@@ -539,13 +539,14 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`)).not.toBeNull()
     }
-    // P1-1 (设计稿 §2.2, D3=A): 8 -> 9 -> 14. The last step is PR #5555's alignment, not a new tab:
+    // P1-1 (设计稿 §2.2, D3=A): 8 -> 9 -> 14 -> 15. 14 was PR #5555's alignment, not a new tab:
     // this actor holds a bare `integration:admin`, which the SERVER has always counted as a platform
     // admin (`PLATFORM_ADMIN_PERMISSIONS`) while the browser's `hasPermission` did not.
     // `workbenchAccess.ts` now uses the server's own literal ladder over the auth SNAPSHOT, so this
-    // principal is a platform admin here too and sees the whole rail: 3 【工作】 + 3 【部署与接入】 +
-    // 7 深度工具 (folded, still rendered) + 1 【帮助】.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(14)
+    // principal is a platform admin here too and sees the whole rail. 14 -> 15 IS a new tab: P2-1's
+    // 项目查询, in 【工作】 after 项目备料 — 4 【工作】 + 3 【部署与接入】 + 7 深度工具 (folded, still
+    // rendered) + 1 【帮助】.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
   })
 
   // O2 / R-11: the operator tier. The tab strip is itself a control surface, so a tab whose panel
@@ -558,8 +559,10 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of LEGACY_MVP_VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be hidden`).toBeNull()
     }
-    // P1-1: 1 -> 2. 【帮助】 joined, and only 【帮助】: a `stock-prep:read` holder is still refused
-    // 今天要处理 / 项目备料 (value-bearing, operate tier) and the whole 【部署与接入】 group.
+    // P1-1: 1 -> 2, and P2-1 leaves it at 2. 【帮助】 joined, and only 【帮助】: a `stock-prep:read`
+    // holder is still refused 今天要处理 / 项目备料 / 项目查询 (all value-bearing, operate tier) and
+    // the whole 【部署与接入】 group.
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-query"]'), '项目查询 is operate-tier').toBeNull()
     expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(2)
     expect(root.querySelector('[data-testid="stock-prep-tab-help"]')).not.toBeNull()
     // ...and the panel really is the confirmation queue, not a legacy panel wearing its title.
@@ -597,8 +600,9 @@ describe('StockPreparationWorkspace shell', () => {
     // and 项目备料 come with the code, which is what StockPreparationRail.spec.ts's own
     // `stock-prep:admin` actor (already on the real ladder) always expected.
     // The seven legacy MVP tabs stay platform-admin and did NOT come along with this code.
-    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(7)
-    for (const key of ['home', 'project-board', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
+    // 7 -> 8 is P2-1's 项目查询: same operate tier as 今天要处理 / 项目备料, which this code satisfies.
+    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
+    for (const key of ['home', 'project-board', 'project-query', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
       expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be visible`).not.toBeNull()
     }
     for (const key of LEGACY_MVP_VIEW_KEYS) {
@@ -630,8 +634,8 @@ describe('StockPreparationWorkspace shell', () => {
     // still counted. This actor holds no `stock-prep:operate`, so 今天要处理 and 项目备料 stay hidden.
     // 12 -> 14 (PR #5555): this actor holds `stock-prep:admin` AND a bare `integration:admin`, and
     // both satisfy operate on the server's ladder — the ladder the workbench now uses — so 今天要处理
-    // and 项目备料 join the twelve.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(14)
+    // and 项目备料 join the twelve. 14 -> 15 (P2-1): 项目查询 rides that same operate tier.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
     ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
     await flushUi()
 
@@ -650,11 +654,16 @@ describe('StockPreparationWorkspace shell', () => {
   it('renders Chinese labels + the readonly-boundary copy when locale is zh-CN', async () => {
     h.locale = 'zh-CN'
     const root = await mountShell()
-    const tabs = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
-    expect(tabs.textContent).toContain('项目工作台')
+    // THE WHOLE RAIL, not just `[data-testid="stock-prep-tabs"]` (hardening wave, 2026-09-08): 深度工具
+    // moved outside the tablist witness element (R-05 in StockPreparationRail.spec.ts has the full
+    // reasoning), so the seven legacy labels these three lines check now live in a NAV-level sibling of
+    // it, `.sp-rail__advanced`. `.sp-rail` is the outer container both live inside, unaffected by that
+    // internal move.
+    const rail = root.querySelector('.sp-rail') as HTMLElement
+    expect(rail.textContent).toContain('项目工作台')
     // NAMING: snapshot uses 快照批次 / batch vocabulary (collision-avoidance requirement).
-    expect(tabs.textContent).toContain('BOM 快照批次与差异')
-    expect(tabs.textContent).toContain('异常队列')
+    expect(rail.textContent).toContain('BOM 快照批次与差异')
+    expect(rail.textContent).toContain('异常队列')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toContain('只读')
     expect(boundary.textContent).toMatch(/K3 Save/)
@@ -663,10 +672,11 @@ describe('StockPreparationWorkspace shell', () => {
   it('renders English labels when locale is not zh-CN', async () => {
     h.locale = 'en'
     const root = await mountShell()
-    const tabs = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
-    expect(tabs.textContent).toContain('Project Workspace')
-    expect(tabs.textContent).toContain('BOM Snapshot Batch & Diff')
-    expect(tabs.textContent).toContain('Exception Queue')
+    // See the zh-CN case above for why `.sp-rail` rather than the tablist testid.
+    const rail = root.querySelector('.sp-rail') as HTMLElement
+    expect(rail.textContent).toContain('Project Workspace')
+    expect(rail.textContent).toContain('BOM Snapshot Batch & Diff')
+    expect(rail.textContent).toContain('Exception Queue')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toMatch(/readonly/i)
   })
@@ -1251,6 +1261,46 @@ describe('StockPreparationWorkspace shell', () => {
     // is a key rename in the assertion rather than a behaviour change under it.
     expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
     expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+  })
+
+  // P2-1's URL contract, the half the SHELL owns. 项目查询 is the one panel that mirrors `?tab=`
+  // itself, so the shell is the only thing that can clean the bit up when the reader leaves — and a
+  // staleness test that looked only at `q`/`status`/`source`/`sel` called a bare `?tab=project-query`
+  // clean. Two clicks reach that state (filter once, press the same chip again: every filter key
+  // deletes itself at its default and `tab` is what is left), and the next reload then threw the
+  // reader back into a panel they had already walked away from.
+  it('leaving 项目查询 clears a bare `?tab=project-query` — the four filter keys being absent is not "clean"', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.route.query = { tab: 'project-query' }
+    answerQueueReads()
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-query')
+    expect(h.router.replace, '深链进来本身不发 replace').not.toHaveBeenCalled()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.router.replace).toHaveBeenCalledTimes(1)
+    expect(h.router.replace.mock.calls[0][0]).toEqual({ query: {} })
+  })
+
+  // The same guard, keyed off `effectiveKey` rather than the raw `activeKey`: `tabFromQuery()`
+  // accepts a key by NAME without asking whether this principal may see it, so a 纯 read 主体 can
+  // arrive with `activeKey === 'project-query'` while `activeView` folds them back to their landing.
+  // Reading `activeKey` would call that reader's panel "active" and keep five keys belonging to a
+  // screen they never saw — forever, and carried forward by every later replace.
+  it('a principal who cannot open 项目查询 does not carry its five keys around after a deep link', async () => {
+    h.permissions = ['stock-prep:read']
+    h.route.query = { tab: 'project-query', status: 'ready', source: 'mvp', q: 'x', sel: 'PRJ-1' }
+    answerQueueReads()
+    const root = await mountShell()
+    // Folded back to their landing, and the panel they cannot see never mounted.
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-project-query"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-help"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.router.replace).toHaveBeenCalledTimes(1)
+    expect(h.router.replace.mock.calls[0][0]).toEqual({ query: {} })
   })
 
   it('a notice never replaces the panel, and does not follow the admin onto the next tab', async () => {

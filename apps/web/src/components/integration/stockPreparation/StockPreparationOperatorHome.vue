@@ -194,16 +194,14 @@ import {
   filterOperatorHomeCards,
   resolveOperatorHomeEmptyState,
   sortOperatorHomeCards,
+  stockPrepHomeStatusLabel,
   STOCK_PREP_HOME_FILTER_KEYS,
   type StockPrepHomeCard,
   type StockPrepHomeFilterKey,
 } from '../../../services/integration/stockPreparation/operatorHomeCards'
 import {
-  STOCK_PREP_HOME_DIRECTORY_MAY_BE_INCOMPLETE,
-  STOCK_PREP_HOME_PULL_TARGET_SCAN_CAPPED,
-  STOCK_PREP_HOME_PULL_TARGET_UNREADABLE,
+  resolveStockPrepPullBanner,
   STOCK_PREP_TOOLTIP_READY_TO_EXPORT,
-  type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
@@ -313,38 +311,15 @@ const guidance = computed<string | null>(() => {
 const readyTooltip = STOCK_PREP_TOOLTIP_READY_TO_EXPORT
 
 /**
- * U2 契约 (P0 补项 5) — at most ONE of three sentences, mutually exclusive, in this priority order:
- *
- *   1. `pullTargetReady === false` — the operator's own pull-target store could not be read at all.
- *   2. `pullTargetScanCapped === true` — the standing 「表太大」 scan cap, distinct from a broken read.
- *   3. `directoryMayBeIncomplete === true` and neither of the above already covered it — a shorter
- *      answer for a reason the first two do not name specifically.
- *
- * EVERY CHECK IS `=== true` / `=== false`, NEVER A TRUTHINESS COERCION. An older backend (or a caller
- * that somehow reached this page without opting in) OMITS these fields entirely — `undefined` is
- * "unknown", and the strict comparison is what keeps "unknown" from silently reading as "false" (which
- * would show the FIRST, most alarming sentence on every deployment that simply predates the contract).
+ * U2 契约 (P0 补项 5)'s three-sentence priority chain — shared with 项目查询 (hardening wave, see
+ * `resolveStockPrepPullBanner`'s own comment in plainLanguage.ts for the priority order and why every
+ * check is `=== true` / `=== false` rather than a truthiness test, never restated here).
  */
-const pullBanner = computed<{ key: string; text: StockPrepPlainText } | null>(() => {
-  const dir = props.directory
-  if (!dir) return null
-  if (dir.pullTargetReady === false) return { key: 'pull_target_unreadable', text: STOCK_PREP_HOME_PULL_TARGET_UNREADABLE }
-  if (dir.pullTargetScanCapped === true) return { key: 'pull_target_scan_capped', text: STOCK_PREP_HOME_PULL_TARGET_SCAN_CAPPED }
-  if (dir.directoryMayBeIncomplete === true) return { key: 'directory_may_be_incomplete', text: STOCK_PREP_HOME_DIRECTORY_MAY_BE_INCOMPLETE }
-  return null
-})
-
-const FILTER_LABELS: Record<StockPrepHomeFilterKey, [string, string]> = {
-  all: ['全部', 'All'],
-  pending_decision: ['等您拿主意', 'Waiting on you'],
-  blocked: ['卡住了', 'Blocked'],
-  ready: ['可以导出', 'Ready to export'],
-  not_pulled: ['还没拉过', 'Not pulled yet'],
-}
+const pullBanner = computed(() => resolveStockPrepPullBanner(props.directory))
 
 const filters = computed(() => STOCK_PREP_HOME_FILTER_KEYS.map((key) => ({
   key,
-  label: bi(...FILTER_LABELS[key]),
+  label: bi(...stockPrepHomeStatusLabel(key)),
   count: countOperatorHomeCardsByFilter(cards.value, key),
 })))
 

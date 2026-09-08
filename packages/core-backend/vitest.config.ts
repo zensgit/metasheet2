@@ -1254,6 +1254,11 @@ export default defineConfig({
       // attachment scan_state + purge-intent storage_key unique upgrade path (real DB, isolated schema).
       // Two-point wiring — excluded HERE so it cannot skip-green in the no-DB lane.
       'tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts',
+      // Attachment round-trip guard (SLICE A, #4195 §11/§12): missing templateId/fieldId → 400,
+      // non-attachment fieldId → 400, and flag-OFF pins for upload+download+delete in ONE suite —
+      // real DB, booted server. Two-point wiring — standalone
+      // .github/workflows/approval-realdb-attachment-roundtrip-guard.yml lane, EXPECT_DB=1 sentinel.
+      'tests/integration/approval-attachment-roundtrip-guard.db.test.ts',
       // Lock-10 (S1) instance readability — canReadApprovalInstance, all 5 arms + org pin (G-S1-1,
       // G-S1-3, G-S1-6, G-S1-10, G-S1-11, G-S1-12 partial), real DB. Excluded here so
       // describeIfDatabase cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
