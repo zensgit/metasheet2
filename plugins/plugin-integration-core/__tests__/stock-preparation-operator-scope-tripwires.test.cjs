@@ -129,8 +129,16 @@ const OWNER_CANARY = 'ZZOWNERCANARYZZ'
 const EXTRA_COLUMN_CANARY = 'ZZEXTRACOLUMNCANARYZZ'
 const EXTRA_COLUMN_PHYSICAL_ID = 'fld_zzunknowncolumnzz1234'
 
-/** The ten keys an operator project row may carry. A new key here is a widening — restate it. */
-const OPERATOR_PROJECT_PROJECTION = Object.freeze([
+/**
+ * THE DEFAULT ROW — the ten keys an operator project row carries when the caller asked for nothing
+ * beyond the directory itself. A new key here is a widening; restate it.
+ *
+ * IT IS ALSO THE PRE-设计稿-N1 ROW, BYTE FOR BYTE, and that is now a ruled property rather than an
+ * accident (核验裁决 r3): the union scan is `?includePullTargets=1` opt-in, so a plain GET of this
+ * route answers exactly what it answered before this line of work started. `OPERATOR_PROJECT_ROW_
+ * WITH_PULL_TARGETS` below is what the opt-in adds.
+ */
+const OPERATOR_PROJECT_PROJECTION_DEFAULT = Object.freeze([
   'heldLineCount',
   'lastSyncRunId',
   'openExceptionCount',
@@ -141,6 +149,68 @@ const OPERATOR_PROJECT_PROJECTION = Object.freeze([
   'projectStatus',
   'readyLineCount',
   'snapshotBatchCount',
+])
+
+/** The fourteen keys a row carries under `?includePullTargets=1`. */
+// CONTRACT REVIEW — 设计稿 N1/N6, this PR. THE OPT-IN ROW GROWS BY FOUR, and each one is argued for
+// here because this list is the only place a row key can be added at all:
+//
+//   `sources`                     WHICH STORE(S) ANSWERED — `['mvp']`, `['pull_target']`, or both.
+//       The directory is now a union, and the two stores are written by two different TIERS: the
+//       archive by `mvp-persist` (platform-admin, and empty on the flow the operator tier exists
+//       for), the pull target by the operator's own `apply`. Without this token a pull-only row's
+//       zeros read as 「归档里是零」 rather than 「还没归档」 — the same conflation that made a
+//       successful import look like nothing had happened on 项目备料页. Values-free: a closed
+//       two-token vocabulary, fixed in code.
+//   `lastChangedFromPlmAt`        当 project 的行最近一次从 PLM 变更的时刻, ISO or null. The board
+//       already returns this field, computed by the SAME shared scan; the directory had no
+//       timestamp at all, so time filtering and sorting were impossible (设计稿 N6).
+//   `lastChangedFromPlmBounded`   THE THIRD STATE. A max over a truncated, unordered page scan is
+//       not a floor the way a truncated count is — rows past the bound may be NEWER — so the
+//       bounded case reports a null timestamp and sets this flag instead of quietly understating
+//       freshness. It is also true when nobody scanned at all, because a row travels alone into a
+//       table cell or a sort key and cannot consult a top-level flag. 「未知」 and 「从未变更」 must
+//       not be the same pixel.
+//   `lastExportAt`                最近一次导出物料清单的时刻, ISO or null, from the values-free audit
+//       trail — the same fact 项目备料页 shows for one project, read here for the whole tenant in
+//       ONE bounded window (see the response-level `lastExportAtMayBeIncomplete`).
+//
+// NONE of the four is a customer ROW VALUE: two timestamps, one boolean and one closed enum list.
+// The two value-bearing fields on this row are still exactly `projectNo` and `projectName`, and
+// S-02b pins that the pull target's own part names and quantities reach no byte of this response.
+//
+// AND ALL FOUR ARE ABSENT WITHOUT THE OPT-IN, not present-and-null. `lastChangedFromPlmBounded` on
+// a row nobody scanned would be a truthful 「未知」 rendered as a whole column of 「未知」 on every
+// home page; a row key that only ever carries "we did not look" is worse than no key. S-02d pins it.
+const OPERATOR_PROJECT_ROW_WITH_PULL_TARGETS = Object.freeze([
+  'heldLineCount',
+  'lastChangedFromPlmAt',
+  'lastChangedFromPlmBounded',
+  'lastExportAt',
+  'lastSyncRunId',
+  'openExceptionCount',
+  'pendingDecisionCount',
+  'projectId',
+  'projectName',
+  'projectNo',
+  'projectStatus',
+  'readyLineCount',
+  'snapshotBatchCount',
+  'sources',
+])
+
+/**
+ * THE DEFAULT TOP-LEVEL KEY SET — what a plain GET of this route answers with, and what it answered
+ * with before 设计稿 N1. Restated as a named constant because THREE assertions now compare against
+ * it (S-02a, S-02c, S-02d) and a widening that edited only one of them would still be a widening.
+ */
+const DIRECTORY_RESPONSE_KEYS_DEFAULT = Object.freeze([
+  'directoryReady',
+  'ledgerReady',
+  'pendingProjectCount',
+  'projectCount',
+  'projects',
+  'tenantId',
 ])
 
 // ---------------------------------------------------------------------------
@@ -466,23 +536,138 @@ async function main() {
   // S-02 THE RESPONSE PROJECTION IS KEY-PINNED
   // -------------------------------------------------------------------------
 
-  await run('S-02a every project row carries EXACTLY the ten-key projection', async () => {
+  await run('S-02a the response and every project row carry EXACTLY the frozen projections', async () => {
     const { routes } = mount()
     const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
     assert.equal(res.statusCode, 200)
-    assert.deepEqual(Object.keys(res.body.data).sort(), [
+    // ─────────────────────────────────────────────────────────────────────────
+    // CONTRACT REVIEW — 设计稿 N1/N2/N6 + 核验裁决 r3. THE DEFAULT KEY SET DID NOT GROW AT ALL.
+    //
+    // 设计稿 N1 added four top-level keys and four row keys. The owner then ruled that the union
+    // scan they describe is too expensive to run on every open of an operator's home page (a
+    // full-sheet, LIMIT/OFFSET-paged scan: ≈P²·500/2 row accesses), so the whole of N1 became
+    // `?includePullTargets=1` opt-in and this — the UNQUALIFIED read — went back to exactly the
+    // shape it had before. That is what this assertion is for now: not "these are the new keys",
+    // but "asking for nothing still returns nothing new".
+    //
+    // The opt-in shapes are pinned separately and argued there: S-02c (the pending index) and
+    // S-02d (the union). Every key that ever reaches this response is therefore reviewed in one of
+    // the three, and a key that appeared in none of them fails all three.
+    // ─────────────────────────────────────────────────────────────────────────
+    assert.deepEqual(Object.keys(res.body.data).sort(), DIRECTORY_RESPONSE_KEYS_DEFAULT)
+    assert.ok(res.body.data.projects.length > 0, 'precondition: there is a row to pin')
+    for (const project of res.body.data.projects) {
+      assert.deepEqual(Object.keys(project).sort(), OPERATOR_PROJECT_PROJECTION_DEFAULT,
+        'a row must be BUILT key by key, never spread from the stored record')
+    }
+  })
+
+  await run('S-02d the UNION is opt-in — `?includePullTargets=1` is the only thing that widens it', async () => {
+    // ─────────────────────────────────────────────────────────────────────────
+    // CONTRACT REVIEW — 设计稿 N1/N6 behind the r3 opt-in. FOUR top-level keys and FOUR row keys,
+    // and every one of them is a fact about THE READ ITSELF or a timestamp — none is a customer row
+    // value. They exist only when a caller asked for the scan that produces them:
+    //
+    //   `pullTargetReady`            WAS THE OPERATOR'S OWN STORE READABLE AT ALL. The directory is
+    //       a UNION over the MVP archive and the bound table-action target — the sheet the
+    //       operator's own pull writes, and the only store their run touches. When nothing is
+    //       bound, when the bound sheet is not provably the caller's own, or when the scan throws,
+    //       the union contributes nothing and every timestamp is an "unknown". Without this
+    //       boolean, 「这个部署还没绑外接源」 and 「你确实没有项目」 are the same empty screen — the
+    //       exact class of collapsed empty state `directoryReady`/`ledgerReady` already exist to
+    //       prevent.
+    //
+    //   `directoryMayBeIncomplete`   THE ANTI-SILENT-TRUNCATION FLAG, required by 设计稿 N1 in as
+    //       many words ("超限时必须返回『可能不全』标志,不得静默截断"). The union scan is bounded by
+    //       the export's own PULL_TARGET_MAX_PAGES, and the merge is bounded by MAX_LIST_ROWS. A
+    //       "find my project" surface that silently returns a prefix tells an operator their
+    //       project does not exist. It is deliberately NOT the same fact as `pullTargetReady`: a
+    //       deployment with nothing bound has no pull-target projects to be missing, and a flag
+    //       that was permanently true there would train every reader to ignore it.
+    //
+    //   `pullTargetScanCapped`       WHICH KIND OF SHORT ANSWER (核验裁决 r3, a NEW key reviewed
+    //       here). Past PULL_TARGET_MAX_PAGES×PAGE_LIMIT rows `directoryMayBeIncomplete` is
+    //       permanently true — a DECLARED limit of this deployment, not an incident — and a scan
+    //       that broke mid-flight raises the same flag while being exactly an incident. One says
+    //       「表太大,目录只列到前 N 行」, the other says 「稍后再试」. A front end that cannot tell
+    //       them apart tells an operator to retry forever, or files a data-loss ticket over a blip.
+    //       True ONLY for the page bound; the merge cap and the mid-flight break are the other two
+    //       states, and the trio is separable — asserted below.
+    //
+    //   `lastExportAtMayBeIncomplete`  THE SAME HONESTY FOR THE EXPORT COLUMN. `lastExportAt` is
+    //       read from ONE bounded descending window over the values-free audit trail (the audit
+    //       table has no index on project_id, so one query per project is not an option on a home
+    //       page). When that window comes back full, a project whose last export fell outside it is
+    //       indistinguishable from one that has never been exported — and 「从未导出」 is a claim,
+    //       not an absence.
+    //
+    // The row keys are reviewed at OPERATOR_PROJECT_ROW_WITH_PULL_TARGETS' own definition.
+    // ─────────────────────────────────────────────────────────────────────────
+    const { routes } = mount()
+    const asked = await call(routes, 'GET', DIRECTORY_PATH, {
+      user: OPERATOR_A,
+      query: { includePullTargets: '1' },
+    })
+    assert.equal(asked.statusCode, 200)
+    assert.deepEqual(Object.keys(asked.body.data).sort(), [
+      'directoryMayBeIncomplete',
       'directoryReady',
+      'lastExportAtMayBeIncomplete',
       'ledgerReady',
       'pendingProjectCount',
       'projectCount',
       'projects',
+      'pullTargetReady',
+      'pullTargetScanCapped',
       'tenantId',
-    ])
-    assert.ok(res.body.data.projects.length > 0, 'precondition: there is a row to pin')
-    for (const project of res.body.data.projects) {
-      assert.deepEqual(Object.keys(project).sort(), OPERATOR_PROJECT_PROJECTION,
-        'a row must be BUILT key by key, never spread from the stored record')
+    ], 'the opt-in adds EXACTLY four keys and changes nothing else')
+    assert.ok(asked.body.data.projects.length > 0, 'precondition: there is a row to pin')
+    for (const project of asked.body.data.projects) {
+      assert.deepEqual(Object.keys(project).sort(), OPERATOR_PROJECT_ROW_WITH_PULL_TARGETS,
+        'and the row is still BUILT key by key — four more named keys, never a spread')
     }
+    // …and a flag is a flag: anything but "1" leaves the default shape alone, the same rule
+    // `includePendingCounts` keeps (S-02c / N2-d).
+    for (const value of ['0', 'true', 'yes', '']) {
+      const res = await call(routes, 'GET', DIRECTORY_PATH, {
+        user: OPERATOR_A,
+        query: { includePullTargets: value },
+      })
+      assert.equal(res.statusCode, 200)
+      assert.deepEqual(Object.keys(res.body.data).sort(), DIRECTORY_RESPONSE_KEYS_DEFAULT,
+        `includePullTargets=${JSON.stringify(value)} must not open the union`)
+    }
+  })
+
+  await run('S-02c the pending INDEX is opt-in — absent by default, and only "1" opens it', async () => {
+    // 设计稿 N2. The index is keyed by CUSTOMER PROJECT NUMBERS, so making it default would widen a
+    // value-bearing projection without anyone asking. The default response above must not contain
+    // it, and this is the assertion that goes red if someone later moves it into the base object.
+    const { routes } = mount()
+    const plain = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(Object.prototype.hasOwnProperty.call(plain.body.data, 'pendingCountsByProjectNo'), false)
+
+    const asked = await call(routes, 'GET', DIRECTORY_PATH, {
+      user: OPERATOR_A,
+      query: { includePendingCounts: '1' },
+    })
+    assert.equal(asked.statusCode, 200)
+    assert.deepEqual(Object.keys(asked.body.data).sort(), [
+      'directoryReady',
+      'ledgerReady',
+      'pendingCountsByProjectNo',
+      'pendingProjectCount',
+      'projectCount',
+      'projects',
+      'tenantId',
+    ], 'the opt-in adds EXACTLY one key and changes nothing else')
+    // THE TWO OPT-INS ARE INDEPENDENT. Asking for the pending index must not drag the union in with
+    // it — that would put the expensive scan back on every caller that wanted a cheap count map.
+    assert.deepEqual(Object.keys(asked.body.data).sort().filter((key) => !DIRECTORY_RESPONSE_KEYS_DEFAULT.includes(key)),
+      ['pendingCountsByProjectNo'])
+    // …and the in-process Map channel never reaches the wire under either shape: a Map would
+    // serialize as `{}` and quietly report "nothing pending" for the whole tenant.
+    assert.equal(Object.prototype.hasOwnProperty.call(asked.body.data, 'pendingByProjectNo'), false)
   })
 
   await run('S-02b neither the omitted template field NOR an unknown column reaches any byte', async () => {

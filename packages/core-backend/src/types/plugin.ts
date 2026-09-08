@@ -1438,6 +1438,36 @@ export interface PluginServices {
       | { outcome: 'outcome_unknown'; code?: string }
     >
   }
+  /** ACP-1B: attendance-only canonical anchor writer; never exposed to generic plugins. */
+  attendanceMultitableCleaningAuthority?: {
+    assertActor(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput): Promise<void>
+    cleanupProposal(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput,
+      seed: Awaited<ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>>,
+      reason: string,
+    ): Promise<{ version: number }>
+    readCompletedInTransaction(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput & { projectionRecordId: string; sourceRef: string },
+    ): Promise<unknown[]>
+    readCompleted(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput & {
+      projectionRecordId: string; sourceRef: string;
+    }): Promise<unknown[]>
+    readSeed(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput):
+      ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>
+    lockSource(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput,
+      seed: Awaited<ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>>,
+    ): ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').lockAttendanceCleaningSource>
+    refresh(input: {
+      projectionRecordId: string
+      canonicalRecordId: string
+      sourceFingerprint: string
+    }): Promise<void>
+    withhold(projectionRecordIds: readonly string[]): Promise<void>
+  }
   /**
    * W4C-2 (#4556 lock 12.2 last sentence; #4607 P3-4) — host→plugin, narrow,
    * least-privilege W4 segment-calculation port. Same posture as

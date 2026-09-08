@@ -1078,6 +1078,7 @@ export default defineConfig({
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
       'tests/integration/attendance-result-edit.test.ts',
+      'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

@@ -45,6 +45,22 @@ describe('W7-1a-M provenance widening — derive-and-diff completeness', () => {
     expect(violations.map((violation) => `${violation.kind}: ${violation.detail}`)).toEqual([])
   })
 
+  it('ACP uses the canonical owner type and pointer predicate with mandatory exact ledger entries', () => {
+    const types = fs.readFileSync(path.join(repoRoot, 'packages/core-backend/src/db/types.ts'), 'utf8')
+    expect(types).toContain("import type { AttendanceProjectionOwnerV1 } from '../attendance/w7-provenance-domain'")
+    expect(types).toContain('projection_owner: ColumnType<AttendanceProjectionOwnerV1, AttendanceProjectionOwnerV1 | undefined, AttendanceProjectionOwnerV1>')
+    const entries = W7_PROVENANCE_WIDENING_LEDGER_V1.filter(entry =>
+      entry.file === 'packages/core-backend/src/db/types.ts' ||
+      entry.file === 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',
+    )
+    expect(entries).toHaveLength(2)
+    expect(entries.map(entry => entry.rule).sort()).toEqual(['closed_set_member_list', 'widened_predicate'])
+    for (const entry of entries) {
+      const violations = diffProvenanceWideningV1(derivation, W7_PROVENANCE_WIDENING_LEDGER_V1.filter(item => item !== entry))
+      expect(violations.some(item => item.kind === 'unledgered_site' && item.detail.includes(entry.file))).toBe(true)
+    }
+  })
+
   // -------------------------------------------------------------------------
   // Non-vacuity. A derivation that found nothing would pass the diff trivially,
   // so the shape of what it found is asserted, not just the empty violation set.
