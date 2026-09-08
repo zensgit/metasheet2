@@ -69,6 +69,7 @@ const {
   SourcePreflightError,
   runStockPreparationSourcePreflight,
   assertSourcePreflightValuesFree,
+  describeValuesFreeRefusal,
 } = require(path.join(LIB, 'stock-preparation-source-preflight.cjs'))
 const {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
@@ -1206,7 +1207,7 @@ function boundSystem(id, overrides = {}) {
   }
 }
 
-function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOverride } = {}) {
+function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOverride, logger } = {}) {
   const routes = new Map()
   const reader = catalog ? createReader(catalog) : null
   const loaded = []
@@ -1255,9 +1256,24 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
       readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
     },
-    logger: { info() {}, warn() {}, error() {} },
+    // A caller may inject a recording logger (see `createRecordingLogger` below, R-08) to observe
+    // what `routeLogger` is wired with, or explicitly pass `logger: null` to mean NO logger at all
+    // (`routeLogger` resolves to `null`, http-routes.cjs:~3582) — distinguished from "not passed",
+    // which stays a no-op so every other case is unaffected.
+    logger: logger === undefined ? { info() {}, warn() {}, error() {} } : logger,
   })
   return { routes, reader, loaded }
+}
+
+/** Captures every `warn(message, payload)` call, for R-08 (values-free refusal logging). */
+function createRecordingLogger() {
+  const warnCalls = []
+  return {
+    warnCalls,
+    info() {},
+    warn(message, payload) { warnCalls.push([message, payload]) },
+    error() {},
+  }
 }
 
 function createResponse() {
@@ -1564,6 +1580,288 @@ async function theRouteReportsWhetherThePullCanDelegate() {
 }
 
 // ---------------------------------------------------------------------------
+// R-08 — 222 2026-09-08: the values-free self-check's refusal reached a real customer as
+// `SOURCE_PREFLIGHT_FAILED` / `{"reason":"SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED"}` and
+// NOTHING else anywhere — the self-check's own `path`/`kind`/`length`/`masked` never left
+// `error.details` for pm2. `describeValuesFreeRefusal` (exported alongside `refuse`, above) picks
+// exactly those four keys and NOTHING else off the caught error; the route logs them plus
+// `externalSystemId` on one `warn`, and the wire response stays byte-identical.
+// ---------------------------------------------------------------------------
+
+// The value the fixture below gets the self-check to refuse. Length 11 (>= 6, per the PR spec),
+// so a masked stub (`B****9`) is trivially distinguishable from the real thing in every assertion.
+const SELF_CHECK_TRIPPING_VALUE = 'Bom_ExAttr9'
+
+/**
+ * A catalog that trips the values-free self-check ITSELF — distinct from `poisonedSource()` above,
+ * whose planted values are redacted well before the self-check ever runs (see `poisonedValuesNeverTravel`).
+ *
+ * The mechanism: the customer's OWN quantity dictionary (`DN_PM_BomExAttrInfo`, read by
+ * `decodeQuantitySlotFromDictionary`) names a family slot — `Bom_ExAttr9`, within the `bomDetailExAttr`
+ * family's declared index range 1..30 (`dn-pdm-family.preset.json`) — that is enabled (`isable: 1`,
+ * `nonzero-means-enabled`) and labelled with the quantity hint ('数量'). The decoder reads that
+ * assignment straight off the dictionary ROW, exactly as it must (that reading IS the feature: see
+ * `theCustomersOwnDictionaryBreaksTheTie`). But THIS slot is not a column any probed table actually
+ * has — `orderModuleSource()`'s `DN_PDM_BomDetailsInfo` only carries `Bom_ExAttr1`/`Bom_ExAttr2` — so
+ * it never enters `identifiers` (built only from columns THIS RUN observed), while it DID enter
+ * `observedValues` (every string cell of every sampled row, dictionary included). The report then
+ * carries it at `checks.quantityField.dictionarySlot`, and `assertSourcePreflightValuesFree` refuses
+ * that leaf as class `dictionarySlot` reproducing an observed value nobody can vouch for as a real
+ * identifier of this source. Everything else is `orderModuleSource()`, unmodified — a fixture already
+ * proven (S-01) to pass the self-check on its own, so this is the ONE deliberate difference.
+ */
+function selfCheckTrippingSource() {
+  const catalog = orderModuleSource()
+  catalog.DN_PM_BomExAttrInfo = [{
+    describes_table: 'DN_PDM_BomDetailsInfo',
+    ID: 9,
+    attr_name: SELF_CHECK_TRIPPING_VALUE,
+    display_name: '数量',
+    attr_type: 'float',
+    isable: 1,
+    sort_id: 1,
+  }]
+  return catalog
+}
+
+/**
+ * Every string leaf of `object` neither equals nor contains `value`.
+ *
+ * PARTIAL-BY-DESIGN, and this assertion does NOT say otherwise: `masked` carries the refused value's
+ * FIRST and LAST character plus, beside it, an exact `length`. That is whole-value containment this
+ * checks, not information-theoretic secrecy — `B****9` passes here and still narrows the candidates.
+ * The narrowing is bounded on purpose elsewhere, not here: `describeValuesFreeRefusal` republishes
+ * the mask only from length 5 up (below that '**', see `MASKED_FIRST_LAST_MIN_LENGTH`) and publishes
+ * no mask at all for `kind: 'secret'`. Both floors are asserted directly, further down.
+ */
+function assertNoStringLeafCarries(object, value, label) {
+  for (const [key, leaf] of Object.entries(object)) {
+    if (typeof leaf !== 'string') continue
+    assert.notEqual(leaf, value, `${label}.${key} must not equal the refused value`)
+    assert.equal(leaf.includes(value), false, `${label}.${key} must not contain the refused value`)
+  }
+}
+
+async function theSelfCheckRefusalDescriptorIsExactlyTheFourKeys() {
+  let caught = null
+  try {
+    await preflight(selfCheckTrippingSource())
+    assert.fail('expected the values-free self-check to refuse this catalog')
+  } catch (error) {
+    caught = error
+  }
+  assert.ok(caught instanceof SourcePreflightError)
+  assert.equal(caught.message, 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED')
+  assert.equal(caught.details.kind, 'observed-row-value')
+
+  // (a) the picker returns EXACTLY the four keys, values matching `error.details` verbatim.
+  const described = describeValuesFreeRefusal(caught)
+  assert.ok(described)
+  assert.deepEqual(Object.keys(described).sort(), ['kind', 'length', 'masked', 'path'])
+  assert.deepEqual(described, {
+    path: caught.details.path,
+    kind: caught.details.kind,
+    length: caught.details.length,
+    masked: caught.details.masked,
+  })
+  assert.equal(described.length, SELF_CHECK_TRIPPING_VALUE.length)
+  assert.match(described.masked, /^.\*{4}.$/)
+
+  // (d) VALUES-FREE: nothing the picker hands back equals or contains the value the self-check
+  // actually refused.
+  assertNoStringLeafCarries(described, SELF_CHECK_TRIPPING_VALUE, 'described')
+
+  // (c) REVERSE — the picker answers `null` for every `SourcePreflightError` that is not this exact
+  // refusal, and for anything that is not a `SourcePreflightError` at all. This module has exactly
+  // one other throw site (the missing-capability guard); exercised for real, not hand-built.
+  let capabilityError = null
+  try {
+    await runStockPreparationSourcePreflight({})
+    assert.fail('expected a capability refusal')
+  } catch (error) {
+    capabilityError = error
+  }
+  assert.ok(capabilityError instanceof SourcePreflightError)
+  assert.notEqual(capabilityError.message, 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED')
+  assert.equal(describeValuesFreeRefusal(capabilityError), null, 'a different SourcePreflightError must not match')
+
+  // A hand-built SourcePreflightError with the RIGHT-shaped `details` but a DIFFERENT message: matched
+  // by message, never merely by whether `details` happens to look right.
+  assert.equal(
+    describeValuesFreeRefusal(new SourcePreflightError('some other refusal', {
+      path: 'x', kind: 'observed-row-value', length: 3, masked: 'a**b',
+    })),
+    null,
+    'matched by message, not by details shape',
+  )
+  assert.equal(describeValuesFreeRefusal(new Error('boom')), null, 'not a SourcePreflightError at all')
+  assert.equal(describeValuesFreeRefusal(null), null)
+  assert.equal(describeValuesFreeRefusal(undefined), null)
+
+  // KEYS AND SHAPES, both required, and refused WHOLE rather than partially. A right-message error
+  // whose details are missing a key, or carry a non-scalar under one, must not produce a half
+  // descriptor that the route would then log as if it were a refusal report.
+  assert.equal(
+    describeValuesFreeRefusal(new SourcePreflightError('SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED', {})),
+    null,
+    'no detail keys at all is not a describable refusal',
+  )
+  assert.equal(
+    describeValuesFreeRefusal(new SourcePreflightError('SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED', {
+      path: 'probes[0].object', kind: 'observed-row-value', length: 7, // no `masked`
+    })),
+    null,
+    'a missing key refuses the whole descriptor',
+  )
+  for (const wrongShape of [
+    { path: { toString: () => 'x' }, kind: 'observed-row-value', length: 7, masked: 'a****b' },
+    { path: 'p', kind: ['observed-row-value'], length: 7, masked: 'a****b' },
+    { path: 'p', kind: 'observed-row-value', length: '7', masked: 'a****b' },
+    { path: 'p', kind: 'observed-row-value', length: 7.5, masked: 'a****b' },
+    // The one that matters: a future `refuse()` putting the ROW under a declared key.
+    { path: 'p', kind: 'observed-row-value', length: 7, masked: { row: { PartNo: 'B-100019' } } },
+  ]) {
+    assert.equal(
+      describeValuesFreeRefusal(new SourcePreflightError('SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED', wrongShape)),
+      null,
+      'a declared key carrying an undeclared shape refuses the whole descriptor',
+    )
+  }
+
+  // THE MASK FLOOR. `maskForRefusal` publishes first + last character from length 3 up; at 3 and 4
+  // that pair beside an exact length is effectively the value, and THIS projection is the first
+  // thing that carries it out of the process. So the picker republishes the mask only from 5 up.
+  // Driven through the REAL self-check, not hand-built errors: `probes[].object` is an identifier
+  // leaf, and an observed value nobody vouched for as an identifier of this run is refused there.
+  const maskedAtLength = (value) => {
+    try {
+      assertSourcePreflightValuesFree({ probes: [{ object: value }] }, { observedValues: new Set([value]) })
+      assert.fail(`expected the self-check to refuse ${value.length} characters`)
+    } catch (error) {
+      assert.ok(error instanceof SourcePreflightError)
+      assert.equal(error.details.length, value.length)
+      return { onTheError: error.details.masked, published: describeValuesFreeRefusal(error) }
+    }
+  }
+  for (const short of ['ABC', 'ABCD']) {
+    const { onTheError, published } = maskedAtLength(short)
+    assert.match(onTheError, /^.\*{4}.$/, 'the self-check itself still masks first/last — unchanged')
+    assert.equal(published.masked, '**', 'but below the floor the published mask carries no characters')
+    assert.equal(published.length, short.length, 'the length still travels: it names no character')
+    assertNoStringLeafCarries(published, short, `published(${short.length})`)
+    assert.equal(published.masked.includes(short[0]), false)
+    assert.equal(published.masked.includes(short[short.length - 1]), false)
+  }
+  const atFloor = maskedAtLength('ABCDE')
+  assert.equal(atFloor.published.masked, atFloor.onTheError, 'at and above the floor the mask travels as minted')
+  assert.match(atFloor.published.masked, /^.\*{4}.$/)
+
+  // THE SECRET FLOOR. `refuse(..., 'secret', ...)` describes a SUPPLIED CREDENTIAL, so for that class
+  // neither the mask nor the exact length is publishable at any length. Unreachable from the route
+  // today (the runner passes observed values and identifiers, never secrets) — pinned so it stays
+  // harmless if secrets are ever wired in.
+  try {
+    assertSourcePreflightValuesFree(
+      { checks: { projectData: { livenessSamples: [PLANTED_PASSWORD] } } },
+      { secrets: [PLANTED_PASSWORD] },
+    )
+    assert.fail('expected a secret refusal')
+  } catch (error) {
+    assert.equal(error.details.kind, 'secret')
+    assert.equal(error.details.length, PLANTED_PASSWORD.length, 'the error itself still carries it')
+    const publishedSecret = describeValuesFreeRefusal(error)
+    assert.deepEqual(Object.keys(publishedSecret).sort(), ['kind', 'path'], 'no mask and no length leave for a secret')
+    assert.equal(publishedSecret.kind, 'secret')
+    assert.equal(publishedSecret.path, error.details.path)
+    assertNoStringLeafCarries(publishedSecret, PLANTED_PASSWORD, 'publishedSecret')
+    assert.equal(JSON.stringify(publishedSecret).includes(String(PLANTED_PASSWORD.length)), false)
+  }
+}
+
+// The wire answer this route gives a self-check refusal, captured from `origin/main` BEFORE this PR
+// (same fixture, same route, run in a `git archive` sandbox of the pre-change tree) and pinned here
+// so "byte-identical" is a re-runnable assertion rather than something a reader has to confirm by
+// eyeballing a diff. If a change ever makes this line fail, the response body moved — which is
+// exactly what this PR promises it does not do.
+const WIRE_RESPONSE_BEFORE_THIS_PR = JSON.stringify({
+  status: 500,
+  body: {
+    ok: false,
+    error: {
+      code: 'SOURCE_PREFLIGHT_FAILED',
+      message: 'source preflight could not complete',
+      details: { reason: 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED' },
+    },
+  },
+})
+
+async function theRouteLogsTheRefusalAndTheResponseStaysByteIdentical() {
+  const recording = createRecordingLogger()
+  const { routes: loggedRoutes } = mountRoute({ catalog: selfCheckTrippingSource(), logger: recording })
+  const loggedRes = await callRoute(loggedRoutes, { user: INTEGRATION_READER })
+
+  // (b) THE WIRE RESPONSE — unchanged from before this PR: 500, the same code/message, and `details`
+  // carrying `reason` alone (never the four keys — those are the LOG line's, not the response's).
+  assert.equal(loggedRes.statusCode, 500)
+  assert.equal(loggedRes.body.ok, false)
+  assert.equal(loggedRes.body.error.code, 'SOURCE_PREFLIGHT_FAILED')
+  assert.equal(loggedRes.body.error.message, 'source preflight could not complete')
+  // Not `assert.deepEqual` against a literal object: `sendError`'s `sanitizeIntegrationPayload` hands
+  // back a null-prototype object, and `node:assert/strict`'s `deepEqual` is `deepStrictEqual` (which
+  // compares prototypes too) — so this checks the one key and its value directly instead.
+  assert.deepEqual(Object.keys(loggedRes.body.error.details), ['reason'])
+  assert.equal(loggedRes.body.error.details.reason, 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED')
+  // …and the whole thing, serialised, against what `origin/main` answered before this PR.
+  assert.equal(
+    JSON.stringify({ status: loggedRes.statusCode, body: loggedRes.body }),
+    WIRE_RESPONSE_BEFORE_THIS_PR,
+    'the wire answer must be byte-identical to the pre-change one',
+  )
+
+  // (a) the warn fired EXACTLY once, with the fixed prefix and ONLY `externalSystemId` plus the four
+  // values-free keys — never a spread of `error.details`.
+  assert.equal(recording.warnCalls.length, 1, 'the self-check refusal logs exactly one warn')
+  const [message, payload] = recording.warnCalls[0]
+  assert.equal(typeof message, 'string')
+  assert.match(message, /values-free self-check refused/)
+  assert.deepEqual(Object.keys(payload).sort(), ['externalSystemId', 'kind', 'length', 'masked', 'path'])
+  assert.equal(payload.externalSystemId, SYSTEM_ID)
+  assert.equal(payload.kind, 'observed-row-value')
+  assert.equal(payload.length, SELF_CHECK_TRIPPING_VALUE.length)
+  assert.match(payload.masked, /^.\*{4}.$/)
+
+  // (d) VALUES-FREE at the log line itself: nothing in the payload equals or contains the refused
+  // value, and its JSON form doesn't either.
+  assertNoStringLeafCarries(payload, SELF_CHECK_TRIPPING_VALUE, 'payload')
+  assert.equal(JSON.stringify(payload).includes(SELF_CHECK_TRIPPING_VALUE), false)
+
+  // (b) continued — BYTE-IDENTICAL regardless of whether a logger is wired at all, or wired without
+  // a `.warn`: the log line is a pure side effect of the catch block, so the wire answer a deployment
+  // with no logger gets today must be the one this PR still gives it.
+  const { routes: noLoggerRoutes } = mountRoute({ catalog: selfCheckTrippingSource(), logger: null })
+  const noLoggerRes = await callRoute(noLoggerRoutes, { user: INTEGRATION_READER })
+  assert.deepEqual(noLoggerRes.body, loggedRes.body)
+  assert.equal(noLoggerRes.statusCode, loggedRes.statusCode)
+
+  const { routes: warnlessRoutes } = mountRoute({
+    catalog: selfCheckTrippingSource(),
+    logger: { info() {}, error() {} }, // no `.warn` at all — must not throw and must not change the body
+  })
+  const warnlessRes = await callRoute(warnlessRoutes, { user: INTEGRATION_READER })
+  assert.deepEqual(warnlessRes.body, loggedRes.body)
+
+  // (c) REVERSE at the route: a HEALTHY catalog logs nothing here. Deliberately not "another kind of
+  // SourcePreflightError at the route" — the module's only other throw site is the missing-`readObject`
+  // guard, and the route always supplies `readObject` itself, so that error is unreachable from here.
+  // The picker's `null` for it is asserted in the pure-function test above, where it is reachable.
+  const cleanRecording = createRecordingLogger()
+  const { routes: cleanRoutes } = mountRoute({ catalog: orderModuleSource(), logger: cleanRecording })
+  const cleanRes = await callRoute(cleanRoutes, { user: INTEGRATION_READER })
+  assert.equal(cleanRes.statusCode, 200)
+  assert.equal(cleanRecording.warnCalls.length, 0, 'a clean run logs nothing on this path')
+}
+
+// ---------------------------------------------------------------------------
 
 async function main() {
   await healthyOrderModuleSource()
@@ -1635,6 +1933,10 @@ async function main() {
   console.log('  ✓ S-18 a source only its binder can pull through is a no-go, and says which shape')
   await theRouteReportsWhetherThePullCanDelegate()
   console.log('  ✓ R-07 the route reports the binding half without leaking owner or connection id')
+
+  await theSelfCheckRefusalDescriptorIsExactlyTheFourKeys()
+  await theRouteLogsTheRefusalAndTheResponseStaysByteIdentical()
+  console.log('  ✓ R-08 the self-check refusal logs path/kind/length/masked (and only those), values-free, response unchanged')
 
   console.log('stock-preparation-source-preflight: OK')
 }

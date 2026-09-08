@@ -469,6 +469,7 @@ const {
   DECLARABLE_BRIDGES,
   SourcePreflightError,
   runStockPreparationSourcePreflight,
+  describeValuesFreeRefusal,
 } = require('./stock-preparation-source-preflight.cjs')
 const {
   assertAuthoritativeLargeBomExpansion,
@@ -6642,6 +6643,29 @@ function requireStockPreparationAudit() {
         }))
       } catch (error) {
         if (error instanceof SourcePreflightError) {
+          // 222 2026-09-08: this refusal reached a real customer as `SOURCE_PREFLIGHT_FAILED` with
+          // `details: { reason: 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED' }` and NOTHING else
+          // anywhere — the self-check's own `path`/`kind`/`length`/`masked` (see `refuse` in
+          // stock-preparation-source-preflight.cjs) stayed on `error.details` and never reached pm2,
+          // so nobody on site could tell which report leaf the self-check refused. This is the one
+          // values-free view onto that: `describeValuesFreeRefusal` hands back at MOST those four
+          // keys (never `error.details` spread, so a future detail field is refused-by-default here
+          // too, same as at the self-check itself), already narrowed for the fact that THIS is the
+          // first thing that carries the mask out of the process — short values and the `secret`
+          // class publish no first/last characters — and `null` for every other `SourcePreflightError`.
+          if (routeLogger && typeof routeLogger.warn === 'function') {
+            const valuesFreeRefusal = describeValuesFreeRefusal(error)
+            if (valuesFreeRefusal) {
+              try {
+                routeLogger.warn(
+                  '[plugin-integration-core] stock-prep source preflight values-free self-check refused a report leaf',
+                  { externalSystemId, ...valuesFreeRefusal },
+                )
+              } catch {
+                // A broken logger must not turn a diagnostic attempt into the reason the request fails.
+              }
+            }
+          }
           // Coarse and values-free. `error.details` on the values-free self-check carries a path, a
           // length and a mask by construction — never the value that tripped it — but the refusal is
           // still reported as a REASON CODE only, so a future detail field cannot become an exfil
