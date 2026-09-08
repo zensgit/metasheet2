@@ -64,6 +64,8 @@ const {
   STOCK_PREP_PERMISSION_CODES,
   STOCK_PREP_PERMISSION_DESCRIPTORS,
   STOCK_PREP_RAIL_GATES,
+  STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+  STOCK_PREP_RAIL_GATE_ROUTE,
   STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
@@ -1437,6 +1439,28 @@ function theRailVocabularyAndTheLandingRuleHold() {
       assert.ok(STOCK_PREP_RAIL_GATES.includes(group.advancedGate), 'rail: 深度工具 names a known gate')
     }
   }
+  // 【工作】 — its composition and ORDER, item by item. P2-1 put 项目查询 between 项目备料 and
+  // 确认队列 (设计稿 §2.2 / §6.3), and the rail renders the manifest's order verbatim, so the order
+  // is a contract rather than a detail. Its gate is the OPERATOR tier: the panel reads the same U2
+  // directory union 今天要处理 reads plus the selected project's own board, and a `stock-prep:read`
+  // queue watcher must not be handed a page of project numbers.
+  const work = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'work')
+  assert.deepEqual(
+    work.items.map((item) => item.key),
+    ['home', 'project-board', 'project-query', 'confirmation-queue'],
+    'rail: 【工作】 lists 项目查询 between 项目备料 and 确认队列',
+  )
+  assert.deepEqual(
+    work.items.map((item) => item.gate),
+    [
+      STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+      STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+      STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+      STOCK_PREP_RAIL_GATE_ROUTE,
+    ],
+    'rail: 项目查询 rides the operator tier, like the two items it sits beside',
+  )
+
   // 不下线 — the seven legacy MVP keys are FOLDED into 深度工具, not removed, and they are still on
   // the platform-admin gate they were always on.
   const deploy = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'deploy')
