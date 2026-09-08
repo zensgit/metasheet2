@@ -539,13 +539,14 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`)).not.toBeNull()
     }
-    // P1-1 (设计稿 §2.2, D3=A): 8 -> 9 -> 14. The last step is PR #5555's alignment, not a new tab:
+    // P1-1 (设计稿 §2.2, D3=A): 8 -> 9 -> 14 -> 15. 14 was PR #5555's alignment, not a new tab:
     // this actor holds a bare `integration:admin`, which the SERVER has always counted as a platform
     // admin (`PLATFORM_ADMIN_PERMISSIONS`) while the browser's `hasPermission` did not.
     // `workbenchAccess.ts` now uses the server's own literal ladder over the auth SNAPSHOT, so this
-    // principal is a platform admin here too and sees the whole rail: 3 【工作】 + 3 【部署与接入】 +
-    // 7 深度工具 (folded, still rendered) + 1 【帮助】.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(14)
+    // principal is a platform admin here too and sees the whole rail. 14 -> 15 IS a new tab: P2-1's
+    // 项目查询, in 【工作】 after 项目备料 — 4 【工作】 + 3 【部署与接入】 + 7 深度工具 (folded, still
+    // rendered) + 1 【帮助】.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
   })
 
   // O2 / R-11: the operator tier. The tab strip is itself a control surface, so a tab whose panel
@@ -558,8 +559,10 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of LEGACY_MVP_VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be hidden`).toBeNull()
     }
-    // P1-1: 1 -> 2. 【帮助】 joined, and only 【帮助】: a `stock-prep:read` holder is still refused
-    // 今天要处理 / 项目备料 (value-bearing, operate tier) and the whole 【部署与接入】 group.
+    // P1-1: 1 -> 2, and P2-1 leaves it at 2. 【帮助】 joined, and only 【帮助】: a `stock-prep:read`
+    // holder is still refused 今天要处理 / 项目备料 / 项目查询 (all value-bearing, operate tier) and
+    // the whole 【部署与接入】 group.
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-query"]'), '项目查询 is operate-tier').toBeNull()
     expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(2)
     expect(root.querySelector('[data-testid="stock-prep-tab-help"]')).not.toBeNull()
     // ...and the panel really is the confirmation queue, not a legacy panel wearing its title.
@@ -597,8 +600,9 @@ describe('StockPreparationWorkspace shell', () => {
     // and 项目备料 come with the code, which is what StockPreparationRail.spec.ts's own
     // `stock-prep:admin` actor (already on the real ladder) always expected.
     // The seven legacy MVP tabs stay platform-admin and did NOT come along with this code.
-    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(7)
-    for (const key of ['home', 'project-board', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
+    // 7 -> 8 is P2-1's 项目查询: same operate tier as 今天要处理 / 项目备料, which this code satisfies.
+    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
+    for (const key of ['home', 'project-board', 'project-query', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
       expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be visible`).not.toBeNull()
     }
     for (const key of LEGACY_MVP_VIEW_KEYS) {
@@ -630,8 +634,8 @@ describe('StockPreparationWorkspace shell', () => {
     // still counted. This actor holds no `stock-prep:operate`, so 今天要处理 and 项目备料 stay hidden.
     // 12 -> 14 (PR #5555): this actor holds `stock-prep:admin` AND a bare `integration:admin`, and
     // both satisfy operate on the server's ladder — the ladder the workbench now uses — so 今天要处理
-    // and 项目备料 join the twelve.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(14)
+    // and 项目备料 join the twelve. 14 -> 15 (P2-1): 项目查询 rides that same operate tier.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
     ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
     await flushUi()
 

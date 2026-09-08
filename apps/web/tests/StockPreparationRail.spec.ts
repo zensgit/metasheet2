@@ -136,7 +136,8 @@ const ACTORS: RailActor[] = [
     name: 'operate ∧ read',
     permissions: ['stock-prep:read', 'stock-prep:operate'],
     roles: [],
-    keys: ['home', 'project-board', 'confirmation-queue', 'help'],
+    // P2-1 添加 项目查询:与 今天要处理 / 项目备料 同一层(operate ∧ read),所以一线四项变五项。
+    keys: ['home', 'project-board', 'project-query', 'confirmation-queue', 'help'],
   },
   {
     // stock-prep:admin — the workbench ceiling. It opens the WHOLE 【部署与接入】 group (开始使用 and
@@ -146,7 +147,7 @@ const ACTORS: RailActor[] = [
     name: 'stock-prep:admin',
     permissions: ['stock-prep:read', 'stock-prep:admin'],
     roles: [],
-    keys: ['home', 'project-board', 'confirmation-queue', 'getting-started', 'install', 'ops', 'help'],
+    keys: ['home', 'project-board', 'project-query', 'confirmation-queue', 'getting-started', 'install', 'ops', 'help'],
   },
   {
     // 平台管理员 — everything, 深度工具's seven included.
@@ -154,7 +155,7 @@ const ACTORS: RailActor[] = [
     permissions: [],
     roles: ['admin'],
     keys: [
-      'home', 'project-board', 'confirmation-queue',
+      'home', 'project-board', 'project-query', 'confirmation-queue',
       'getting-started', 'install', 'ops',
       ...LEGACY_MVP_VIEW_KEYS,
       'help',
@@ -168,7 +169,7 @@ const ACTORS: RailActor[] = [
     permissions: ['integration:admin'],
     roles: [],
     keys: [
-      'home', 'project-board', 'confirmation-queue',
+      'home', 'project-board', 'project-query', 'confirmation-queue',
       'getting-started', 'install', 'ops',
       ...LEGACY_MVP_VIEW_KEYS,
       'help',

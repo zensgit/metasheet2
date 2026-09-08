@@ -804,6 +804,13 @@ export interface StockPrepOpenOptions {
   tab?: string
   /** `?projectNo=` — §2.3's 首页 ⇄ 工作区 state bit. */
   projectNo?: string
+  /**
+   * Any FURTHER query parameters the shared link carries — P2-1's 项目查询 owns four of its own
+   * (`q` / `status` / `source` / `sel`). Kept as an open bag rather than four named options because
+   * the harness passes the whole query through verbatim anyway; a named option per state bit would
+   * be a second place to keep that list in step.
+   */
+  query?: Record<string, string>
   routes?: StockPrepRouteOptions
 }
 
@@ -837,6 +844,7 @@ export async function openStockPrepHarness(
   const query = new URLSearchParams({ actor: options.actor, scenario: options.scenario })
   if (options.tab) query.set('tab', options.tab)
   if (options.projectNo) query.set('projectNo', options.projectNo)
+  for (const [key, value] of Object.entries(options.query ?? {})) query.set(key, value)
   await page.goto(`${STOCK_PREP_HARNESS}?${query.toString()}`)
   await page.waitForFunction(
     () => (window as unknown as { __STOCK_PREP_READY__?: boolean }).__STOCK_PREP_READY__ === true,

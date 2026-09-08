@@ -504,6 +504,10 @@ const STOCK_PREP_RAIL_GROUPS = Object.freeze([
     items: Object.freeze([
       Object.freeze({ key: 'home', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
       Object.freeze({ key: 'project-board', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
+      // 项目查询 (P2-1, 设计稿 §6.3 第一行). Same OPERATOR tier as 项目备料: the panel reads the U2
+      // directory union and, for the selected row, that project's own board — nothing this tier is
+      // not already granted, and nothing a lower tier may be shown.
+      Object.freeze({ key: 'project-query', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
       Object.freeze({ key: 'confirmation-queue', gate: STOCK_PREP_RAIL_GATE_ROUTE }),
     ]),
   }),
