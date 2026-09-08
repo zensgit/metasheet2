@@ -9920,6 +9920,7 @@ attendanceIntegrationDescribe(
     const foreignRecordId = randomUuidV4()
     const pool = new Pool({ connectionString: dbUrl })
     const previousRbacBypass = process.env.RBAC_BYPASS
+    const verificationErrors: unknown[] = []
 
     const tokenFor = async (userId: string, tenantId?: string, perms = 'attendance:read') => {
       const query = new URLSearchParams({ userId, roles: 'user', perms })
@@ -10059,8 +10060,10 @@ attendanceIntegrationDescribe(
         })
         expect(spoofedIdentity.status, spoofedIdentity.raw).toBe(401)
       }
+    } catch (error) {
+      verificationErrors.push(error)
     } finally {
-      const cleanupErrors: unknown[] = []
+      const cleanupErrors = verificationErrors
       const userIds = [selfId, sameOrgOtherId, foreignId, unauthorizedId]
       for (const cleanup of [
         () => pool.query('DELETE FROM attendance_records WHERE org_id = ANY($1::text[])', [[orgA, orgB]]),
@@ -10097,8 +10100,8 @@ attendanceIntegrationDescribe(
       }
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
-      if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'attendance record tenant test cleanup failed')
     }
+    if (verificationErrors.length > 0) throw new AggregateError(verificationErrors, 'attendance record tenant test verification or cleanup failed')
   })
 
   it('rejects invalid attendance calendar date ranges with 400', async () => {
