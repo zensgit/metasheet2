@@ -654,11 +654,16 @@ describe('StockPreparationWorkspace shell', () => {
   it('renders Chinese labels + the readonly-boundary copy when locale is zh-CN', async () => {
     h.locale = 'zh-CN'
     const root = await mountShell()
-    const tabs = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
-    expect(tabs.textContent).toContain('项目工作台')
+    // THE WHOLE RAIL, not just `[data-testid="stock-prep-tabs"]` (hardening wave, 2026-09-08): 深度工具
+    // moved outside the tablist witness element (R-05 in StockPreparationRail.spec.ts has the full
+    // reasoning), so the seven legacy labels these three lines check now live in a NAV-level sibling of
+    // it, `.sp-rail__advanced`. `.sp-rail` is the outer container both live inside, unaffected by that
+    // internal move.
+    const rail = root.querySelector('.sp-rail') as HTMLElement
+    expect(rail.textContent).toContain('项目工作台')
     // NAMING: snapshot uses 快照批次 / batch vocabulary (collision-avoidance requirement).
-    expect(tabs.textContent).toContain('BOM 快照批次与差异')
-    expect(tabs.textContent).toContain('异常队列')
+    expect(rail.textContent).toContain('BOM 快照批次与差异')
+    expect(rail.textContent).toContain('异常队列')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toContain('只读')
     expect(boundary.textContent).toMatch(/K3 Save/)
@@ -667,10 +672,11 @@ describe('StockPreparationWorkspace shell', () => {
   it('renders English labels when locale is not zh-CN', async () => {
     h.locale = 'en'
     const root = await mountShell()
-    const tabs = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
-    expect(tabs.textContent).toContain('Project Workspace')
-    expect(tabs.textContent).toContain('BOM Snapshot Batch & Diff')
-    expect(tabs.textContent).toContain('Exception Queue')
+    // See the zh-CN case above for why `.sp-rail` rather than the tablist testid.
+    const rail = root.querySelector('.sp-rail') as HTMLElement
+    expect(rail.textContent).toContain('Project Workspace')
+    expect(rail.textContent).toContain('BOM Snapshot Batch & Diff')
+    expect(rail.textContent).toContain('Exception Queue')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toMatch(/readonly/i)
   })

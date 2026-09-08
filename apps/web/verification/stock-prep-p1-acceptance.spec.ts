@@ -10,7 +10,10 @@ import {
 } from './stock-prep-fixtures'
 
 // ---------------------------------------------------------------------------
-// 备料工作台 —— 设计稿 §6.2 的 P1 七条验收,加上两条 jsdom 天生看不见的回归。
+// 备料工作台 —— 设计稿 §6.2 的 P1 七条验收,加上两条 jsdom 天生看不见的回归,以及
+// P1-08(2026-09-08 收尾小修波追加):rail 键盘漫游 + 折叠内 tab 不可达 + tablist 里没有裸露的非 tab
+// 控件 —— 三件都靠真实 KeyboardEvent 与 focus() 才能证明,jsdom 的镜像版本
+// (StockPreparationRail.spec.ts 的 R-05/R-06)只覆盖不需要真实层叠/焦点管理的那一半。
 //
 // 这条 lane 存在的理由,一句话:jsdom 不跑层叠。它读得到 `hidden` 属性,却不知道那条属性有没有被
 // 组件自己的 `display: flex` 盖掉;它读得到 class 名,却不知道 `--ms-color-primary` 解析成了什么。
@@ -79,10 +82,24 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
 
     // 条目 testid 原名 + role="tab"。平台管理员看得到全部 15 项(8 常驻 + 7 折叠)。
     // 14 -> 15 是 P2-1 的 项目查询(设计稿 §6.3 第一行),【工作】里排在 项目备料 之后。
-    await expect(rail.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(15)
+    //
+    // COUNTED OVER THE WHOLE PAGE, NOT SCOPED TO `rail` (hardening wave, 2026-09-08): 深度工具's
+    // disclosure button moved OUT of `[data-testid="stock-prep-tabs"]` so it can never be read as one
+    // of the tablist's own accessible children (R-05 in StockPreparationRail.spec.ts has the full
+    // reasoning) — which means the seven legacy tabs it folds moved with it, into a NAV-level sibling
+    // of the tablist rather than a descendant of it. `rail.locator(...)` would now find only the 8
+    // regular items. There is exactly one rail on this page, so scoping to it bought nothing this
+    // count actually needed.
+    await expect(page.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(15)
     for (const key of ['home', 'project-board', 'project-query', 'confirmation-queue', 'getting-started', 'install', 'ops', 'help']) {
-      await expect(rail.locator(`[data-testid="stock-prep-tab-${key}"]`)).toHaveAttribute('role', 'tab')
+      await expect(page.locator(`[data-testid="stock-prep-tab-${key}"]`)).toHaveAttribute('role', 'tab')
     }
+    // ...and the tablist witness element itself now owns ONLY the 8 non-folded items directly — the
+    // seven legacy ones are outside it until 深度工具 is opened. `aria-owns` is what keeps that
+    // ARIA-correct rather than merely convenient, and it is asserted (both states) by
+    // StockPreparationRail.spec.ts's 「aria-controls / aria-expanded ... and aria-owns follows the
+    // fold」 case.
+    await expect(rail.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(8)
 
     // ---- 这条只有真浏览器能答:`hidden` 的全部效力来自 UA 的 `[hidden]{display:none}`,而面板自己
     //      的 `.sp-rail__advanced-panel{display:flex}` 是作者来源、还带 scope 属性,两项都赢它。仓库里
@@ -114,6 +131,127 @@ test.describe('设计稿 §6.2 —— P1 验收', () => {
       return document.activeElement === el ? 'focusable' : 'not-focusable'
     }), [...LEGACY_TAB_KEYS])
     expect(focusableAfter).toEqual(LEGACY_TAB_KEYS.map(() => 'focusable'))
+    expectNoUnmockedRoutes(log)
+  })
+
+  test('P1-08 [hardening] rail 键盘漫游:方向键只移焦点、回车才切;折叠内 tab 不可达;tablist 里没有裸露的非 tab 内容', async ({ page }) => {
+    // 三件事合成一条,按设计裁决原话:「方向键漫游 + 折叠内 tab 不可达 + tablist 直接子节点只有 tab」。
+    // The third clause is proved here as the ACCESSIBLE-CONTENT invariant it actually is, in two
+    // halves, because a role census alone provably cannot see one of the two failure modes:
+    //   * no element inside `[data-testid="stock-prep-tabs"]` carries a role other than tab /
+    //     presentation (that is the census), AND
+    //   * the tablist's accessible TEXT — everything left after `aria-hidden` subtrees are removed —
+    //     is exactly the tab labels. The group headings stay DOM-nested for the CSS grouping, and
+    //     `role="presentation"` prunes the `<p>` element while re-parenting its WORDS up into the
+    //     tablist; only `aria-hidden="true"` removes those. A census over `getAttribute('role')` can
+    //     never see a stray text node, which is exactly how the first cut of this wave passed.
+    // What changed for 深度工具's disclosure button is different again: it is no longer a descendant of
+    // the tablist AT ALL — a native `<button>` has an implicit role that presentation-on-a-wrapper
+    // cannot suppress, so it had to move OUT rather than be re-wrapped.
+    const log = await openStockPrepHarness(page, { actor: 'platform', scenario: 'ready' })
+    const tablist = page.locator('[data-testid="stock-prep-tabs"]')
+
+    // ---- 折叠内 tab 不可达 first, so the roving order below is asserted against the SAME collapsed
+    //      state the reader actually lands on. ----
+    const landing = String(await page.locator('[data-testid="stock-prep-panel"]').getAttribute('data-active') ?? '')
+    await page.locator('[data-testid="stock-prep-tab-help"]').focus()
+    await page.keyboard.press('ArrowDown')
+    // 帮助 is the last VISIBLE tab with 深度工具 collapsed — ArrowDown wraps to the FIRST visible tab,
+    // never into the seven folded ones (they are not even in the tab order while `hidden`).
+    await expect(page.locator('[data-testid="stock-prep-tab-home"]')).toBeFocused()
+
+    // ---- 方向键漫游, ArrowDown across a run inside 【工作】. MANUAL ACTIVATION (F-ACT in
+    //      StockPreparationRail.vue): moving focus selects NOTHING, so the panel must not budge for
+    //      the whole roam — asserted after every key, not only at the end. ----
+    await page.keyboard.press('ArrowDown')
+    await expect(page.locator('[data-testid="stock-prep-tab-project-board"]')).toBeFocused()
+    await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', landing)
+    await page.keyboard.press('ArrowDown')
+    await expect(page.locator('[data-testid="stock-prep-tab-project-query"]')).toBeFocused()
+    await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', landing)
+    // ArrowRight is a SUPERSET, not a width-gated alternative to ArrowDown (F-KB in
+    // StockPreparationRail.vue) — it must move focus too, at this (desktop) width.
+    await page.keyboard.press('ArrowRight')
+    await expect(page.locator('[data-testid="stock-prep-tab-confirmation-queue"]')).toBeFocused()
+    await page.keyboard.press('ArrowLeft')
+    await expect(page.locator('[data-testid="stock-prep-tab-project-query"]')).toBeFocused()
+    // Home jumps to the very first visible tab from anywhere in the list — still without selecting.
+    await page.keyboard.press('Home')
+    await expect(page.locator('[data-testid="stock-prep-tab-home"]')).toBeFocused()
+    await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', landing)
+
+    // ---- ...AND Enter IS WHAT SELECTS. Only a real browser can judge this: the tabs carry no
+    //      keydown selection of their own, they are native `<button>`s whose default activation
+    //      behaviour turns Enter into the very same click a pointer makes. jsdom does not implement
+    //      that behaviour at all, so its mirror case (R-05) can only assert the click path. ----
+    await page.keyboard.press('ArrowDown')
+    await page.keyboard.press('ArrowDown')
+    await expect(page.locator('[data-testid="stock-prep-tab-project-query"]')).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'project-query')
+    await expect(page.locator('[data-testid="stock-prep-tab-project-query"]')).toHaveAttribute('aria-selected', 'true')
+
+    // ---- 深度工具's disclosure IS NOT PART OF THE TAB WIDGET, behaviourally and not only in the ARIA
+    //      tree. It is the next stop in the tab order after the rail's single roving stop, so a reader
+    //      lands on it constantly; ArrowDown there is the most natural "open this" gesture there is.
+    //      Before the event-source gate, that keystroke pulled focus into the tablist and — under the
+    //      automatic activation this wave first shipped — switched the whole panel, which for a reader
+    //      with a project open also closed the project. ----
+    await page.keyboard.press('Tab')
+    await expect(page.locator('[data-testid="stock-prep-rail-advanced-toggle"]')).toBeFocused()
+    for (const key of ['ArrowDown', 'ArrowUp', 'Home', 'End']) {
+      await page.keyboard.press(key)
+      await expect(
+        page.locator('[data-testid="stock-prep-rail-advanced-toggle"]'),
+        `${key} 在 disclosure 上不许把焦点拽进 tablist`,
+      ).toBeFocused()
+      await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'project-query')
+    }
+    // Enter on the disclosure still does what a disclosure does.
+    await page.keyboard.press('Enter')
+    await expect(page.locator('[data-testid="stock-prep-rail-advanced-toggle"]')).toHaveAttribute('aria-expanded', 'true')
+
+    // ---- 折叠内 tab 不可达, opened counter-proof: the SAME End key reaches the LAST legacy tab once
+    //      the disclosure is open — proving the earlier wrap was about visibility, not a dead key. ----
+    await page.locator('[data-testid="stock-prep-tab-help"]').focus()
+    await page.keyboard.press('End')
+    await expect(page.locator('[data-testid="stock-prep-tab-exception-queue"]')).toBeFocused()
+
+    // ---- tablist 直接子节点只有 tab (as the accessible-content invariant, see the note above) ----
+    const disclosureOutside = await tablist.evaluate((el, toggleId) => {
+      const toggle = document.querySelector(`[data-testid="${toggleId}"]`)
+      return toggle !== null && !el.contains(toggle)
+    }, 'stock-prep-rail-advanced-toggle')
+    expect(disclosureOutside, '深度工具 disclosure 必须不是 tablist 的后代').toBe(true)
+    const leakedRoles = await tablist.evaluate((el) => (
+      [...el.querySelectorAll('*')]
+        .map((node) => node.getAttribute('role'))
+        // A null role is NOT a leak by itself — an icon `<span>` inside a tab has none — so the census
+        // is over elements that DECLARE a role. The text assertion below is what covers the rest.
+        .filter((role) => role !== null && role !== 'tab' && role !== 'presentation')
+    ))
+    expect(leakedRoles, 'tablist 子树里不该有既非 tab 也非 presentation 的角色').toEqual([])
+    const textLeak = await tablist.evaluate((el) => {
+      const clone = el.cloneNode(true) as HTMLElement
+      for (const hidden of [...clone.querySelectorAll('[aria-hidden="true"]')]) hidden.remove()
+      const accessibleText = (clone.textContent ?? '').replace(/\s+/g, '')
+      const tabText = [...el.querySelectorAll('[role="tab"]')]
+        .map((tab) => (tab.textContent ?? '').replace(/\s+/g, ''))
+        .join('')
+      return { accessibleText, tabText }
+    })
+    expect(textLeak.accessibleText, 'tablist 的可访问文字必须只有 tab 的名字 —— 组标题的字不许留在里面')
+      .toBe(textLeak.tabText)
+
+    // ---- 名字:role="tablist" 的那个元素自己必须有名,且不和外层 <nav> 同名。 ----
+    const names = await tablist.evaluate((el) => ({
+      tablist: el.getAttribute('aria-label'),
+      nav: el.closest('nav')?.getAttribute('aria-label') ?? null,
+    }))
+    expect(names.tablist, 'APG 要求 tablist 带 aria-label / aria-labelledby').toBeTruthy()
+    expect(names.nav).toBeTruthy()
+    expect(names.nav).not.toBe(names.tablist)
+
     expectNoUnmockedRoutes(log)
   })
 
