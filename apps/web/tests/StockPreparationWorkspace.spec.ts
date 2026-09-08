@@ -1257,6 +1257,46 @@ describe('StockPreparationWorkspace shell', () => {
     expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
   })
 
+  // P2-1's URL contract, the half the SHELL owns. 项目查询 is the one panel that mirrors `?tab=`
+  // itself, so the shell is the only thing that can clean the bit up when the reader leaves — and a
+  // staleness test that looked only at `q`/`status`/`source`/`sel` called a bare `?tab=project-query`
+  // clean. Two clicks reach that state (filter once, press the same chip again: every filter key
+  // deletes itself at its default and `tab` is what is left), and the next reload then threw the
+  // reader back into a panel they had already walked away from.
+  it('leaving 项目查询 clears a bare `?tab=project-query` — the four filter keys being absent is not "clean"', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.route.query = { tab: 'project-query' }
+    answerQueueReads()
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-query')
+    expect(h.router.replace, '深链进来本身不发 replace').not.toHaveBeenCalled()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.router.replace).toHaveBeenCalledTimes(1)
+    expect(h.router.replace.mock.calls[0][0]).toEqual({ query: {} })
+  })
+
+  // The same guard, keyed off `effectiveKey` rather than the raw `activeKey`: `tabFromQuery()`
+  // accepts a key by NAME without asking whether this principal may see it, so a 纯 read 主体 can
+  // arrive with `activeKey === 'project-query'` while `activeView` folds them back to their landing.
+  // Reading `activeKey` would call that reader's panel "active" and keep five keys belonging to a
+  // screen they never saw — forever, and carried forward by every later replace.
+  it('a principal who cannot open 项目查询 does not carry its five keys around after a deep link', async () => {
+    h.permissions = ['stock-prep:read']
+    h.route.query = { tab: 'project-query', status: 'ready', source: 'mvp', q: 'x', sel: 'PRJ-1' }
+    answerQueueReads()
+    const root = await mountShell()
+    // Folded back to their landing, and the panel they cannot see never mounted.
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-project-query"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-help"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.router.replace).toHaveBeenCalledTimes(1)
+    expect(h.router.replace.mock.calls[0][0]).toEqual({ query: {} })
+  })
+
   it('a notice never replaces the panel, and does not follow the admin onto the next tab', async () => {
     // The install tab is the nearest branch BELOW the notice in the panel's chain, so it is the one
     // that disappeared; it needs the workbench-admin code to be on screen at all.

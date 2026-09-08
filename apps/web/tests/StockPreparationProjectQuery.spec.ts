@@ -22,6 +22,14 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //   Q-09 最近导出 —— 「—」与「从未导出过」的分界,由 `lastExportAtMayBeIncomplete === false` 决定;
 //        undefined 不得被当成 false。
 //   Q-10 三句中性提示沿用首页那一份文案与优先级。
+//   Q-11 空清单不许替后端说话 —— 一个零项目的租户看不到筛选区,更看不到「后端未提供来源」。
+//   Q-12 目录读不到但本机记得几个项目时,那几行仍然在屏上(横幅 + 清单并列,同首页那一套),
+//        chip 上的数与看得见的行数一致,而且那句提示说的是「清单没读到」,不是「后端未提供来源」。
+//   Q-13 chip 的数是「按下去会看到的行数」—— 吃 来源 与 搜索,不是全量。
+//   Q-14 URL 里的 `source=` 落到一个答不出来源的部署上时不参与过滤(否则是个改不回来的死胡同),
+//        并且明说它这次没生效。
+//   Q-15 右栏「表里有多少行」的三个分支与项目备料页逐字同词 —— 尤其是「表还没建好」不得渲染成 0。
+//   Q-16 `q` / `sel` 的读与写同界(120):写出去比读回来长,就等于刷新一次换一个筛选结果。
 //
 // 与首页并集的关系:本面板不自带并集实现,`projectQuery.ts` 调 `operatorHomeCards.ts` 的
 // `buildOperatorHomeCards`。Q-01 里那条「记忆里的项目也进清单」就是这一点的见证 —— 如果哪天有人在这
@@ -73,6 +81,7 @@ import { recordStockPrepProjectVisit } from '../src/services/integration/stockPr
 import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 import {
   buildStockPrepProjectQueryRows,
+  countStockPrepProjectQueryRowsByStatus,
   filterStockPrepProjectQueryRows,
   resolveStockPrepProjectQueryEmptyState,
   stockPrepLastExportDisplay,
@@ -659,6 +668,21 @@ describe('项目查询 · G1、最近导出、三句提示(Q-08 / Q-09 / Q-10)',
     expect(cell.textContent).not.toContain('从未')
   })
 
+  it('Q-16 `q` / `sel` 写出去和读回来是同一个界 —— 否则刷新一次就换了个筛选结果', () => {
+    const long = '甲'.repeat(200)
+    const written = stockPrepProjectQueryUrlState({
+      status: 'all',
+      source: 'all',
+      search: long,
+      selection: `${PROJECT_A}-${'x'.repeat(200)}`,
+    })
+    expect(written.q).toHaveLength(120)
+    expect(written.sel).toHaveLength(120)
+    // 真正的判据是往返不变:写出去的值再读回来必须一模一样。
+    expect(stockPrepProjectQuerySearchFromQuery(written.q)).toBe(written.q)
+    expect(stockPrepProjectQuerySelectionFromQuery(written.sel)).toBe(written.sel)
+  })
+
   it('Q-10 三句中性提示与首页同词同序', async () => {
     routeApi({
       directory: directory([row({ projectNo: PROJECT_A, sources: ['mvp'] })], {
@@ -702,5 +726,231 @@ describe('项目查询 · G1、最近导出、三句提示(Q-08 / Q-09 / Q-10)',
     })
     const third = await mount()
     expect(testid(third, 'stock-prep-project-query-pull-banner')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Q-11 / Q-12 空态下这一屏说的话
+// ---------------------------------------------------------------------------
+
+describe('项目查询 · 空的时候不许替后端说话(Q-11 / Q-12)', () => {
+  it('Q-11 零项目的租户看不到筛选区,也就看不到那句关于后端的断言', async () => {
+    // `stockPrepProjectQuerySourceAvailable` 对空 projects 数组答 false —— 它自己写明了这不是
+    // 「关于后端的主张」。模板得把这条裁决执行下去:没有可筛的东西,就一个筛选控件都不摆。
+    routeApi({ directory: directory([]) })
+    const root = await mount()
+
+    expect(testid(root, 'stock-prep-project-query-empty')!.getAttribute('data-empty-state')).toBe('no_projects')
+    expect(testid(root, 'stock-prep-project-query-status-filters'), '没有可筛的东西就没有筛选区').toBeNull()
+    expect(testid(root, 'stock-prep-project-query-source')).toBeNull()
+    expect(
+      testid(root, 'stock-prep-project-query-source-unavailable'),
+      '一个刚装好的租户不该被告知「后端未提供来源」',
+    ).toBeNull()
+    expect(root.textContent).not.toContain('后端未提供来源')
+  })
+
+  it('Q-12 目录读不到时,本机记得的项目仍然在屏上;chip 的数与看得见的行一致', async () => {
+    // 首页把空态当横幅渲染在卡片网格之上,同一个人在「今天要处理」看得见这一行;这一屏必须一样,
+    // 否则「读不到」被实现成了「这些项目消失了」。
+    recordStockPrepProjectVisit(PROJECT_B, 'ready', SCOPE)
+    routeApi({ directory: 'reject' })
+    const root = await mount()
+
+    const empty = testid(root, 'stock-prep-project-query-empty')!
+    expect(empty.getAttribute('data-empty-state')).toBe('directory_unavailable')
+    expect(rowNumbers(root), '记忆里的那一行不许被空态顶掉').toEqual([PROJECT_B])
+
+    const all = testid(root, 'stock-prep-project-query-status-all')!
+    const ready = testid(root, 'stock-prep-project-query-status-ready')!
+    expect(all.textContent?.replace(/\s+/g, '')).toContain('全部1')
+    expect(ready.textContent?.replace(/\s+/g, '')).toContain('可以导出1')
+
+    // 而且那句提示说的是「清单这次没读到」——「后端未提供来源」在这里是一句没人说过的话。
+    const hint = testid(root, 'stock-prep-project-query-source-unavailable')!
+    expect(hint.getAttribute('data-source-hint')).toBe('directory_unavailable')
+    expect(hint.textContent).toContain('没读到')
+    expect(hint.textContent).not.toContain('后端未提供来源')
+    expect((testid(root, 'stock-prep-project-query-source') as HTMLSelectElement).disabled).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Q-13 chip 的数 = 按下去会看到的行数
+// ---------------------------------------------------------------------------
+
+describe('项目查询 · chip 上的数是一个承诺(Q-13)', () => {
+  const dir = () => directory([
+    row({ projectId: 'a', projectNo: PROJECT_A, projectName: '甲项目', pendingDecisionCount: 2, sources: ['mvp'] }),
+    row({ projectId: 'b', projectNo: PROJECT_B, projectName: '乙项目', pendingDecisionCount: 3, sources: ['pull_target'] }),
+    row({ projectId: 'c', projectNo: PROJECT_C, projectName: '丙项目', pendingDecisionCount: 1, sources: ['mvp'] }),
+  ])
+
+  function chipCount(root: HTMLElement, key: string): string {
+    return (testid(root, `stock-prep-project-query-status-${key}`)!.textContent ?? '').replace(/\s+/g, '')
+  }
+
+  it('搜索之后 chip 的数跟着收窄 —— 不会「等您拿主意 3」压着一行清单', async () => {
+    routeApi({ directory: dir() })
+    const root = await mount()
+    expect(chipCount(root, 'all')).toContain('全部3')
+    expect(chipCount(root, 'pending_decision')).toContain('等您拿主意3')
+
+    const input = testid(root, 'stock-prep-project-query-search') as HTMLInputElement
+    input.value = '甲'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(rowNumbers(root)).toEqual([PROJECT_A])
+    expect(chipCount(root, 'all'), 'chip 的数必须是按下去会看到的行数').toContain('全部1')
+    expect(chipCount(root, 'pending_decision')).toContain('等您拿主意1')
+
+    // 反面:一个搜不到的词让每个 chip 都归零,同时左栏是 filter_empty —— 不许一边说 3 一边说没有。
+    input.value = '这个词一个项目都对不上'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(chipCount(root, 'pending_decision')).toContain('等您拿主意0')
+    expect(testid(root, 'stock-prep-project-query-empty')!.getAttribute('data-empty-state')).toBe('filter_empty')
+  })
+
+  it('来源也吃进 chip 的计数里', async () => {
+    routeApi({ directory: dir() })
+    const root = await mount()
+    const select = testid(root, 'stock-prep-project-query-source') as HTMLSelectElement
+    select.value = 'pull_target'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(rowNumbers(root)).toEqual([PROJECT_B])
+    expect(chipCount(root, 'all')).toContain('全部1')
+    expect(chipCount(root, 'pending_decision')).toContain('等您拿主意1')
+  })
+
+  it('纯函数层的同一条:计数就是过滤结果的长度', () => {
+    const rows = buildStockPrepProjectQueryRows(dir(), [])
+    expect(countStockPrepProjectQueryRowsByStatus(rows, 'all', { source: 'all', search: '' })).toBe(3)
+    expect(countStockPrepProjectQueryRowsByStatus(rows, 'all', { source: 'mvp', search: '' })).toBe(2)
+    expect(countStockPrepProjectQueryRowsByStatus(rows, 'pending_decision', { source: 'all', search: '乙' })).toBe(1)
+    expect(countStockPrepProjectQueryRowsByStatus(rows, 'ready', { source: 'all', search: '' })).toBe(0)
+    for (const key of ['all', 'pending_decision', 'blocked', 'ready', 'not_pulled'] as const) {
+      expect(countStockPrepProjectQueryRowsByStatus(rows, key, { source: 'mvp', search: '甲' }))
+        .toBe(filterStockPrepProjectQueryRows(rows, { status: key, source: 'mvp', search: '甲' }).length)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Q-14 链接里的来源筛选不许把人锁死
+// ---------------------------------------------------------------------------
+
+describe('项目查询 · 一条带 source 的链接落到答不出来源的部署上(Q-14)', () => {
+  it('那一项不参与过滤,清单照常,而且明说它这次没生效', async () => {
+    // 老后端 / 没 opt-in:sources 整个字段缺席。`?source=mvp` 是合法枚举,所以什么都不会拦下它。
+    h.route.query = { source: 'mvp' }
+    routeApi({ directory: directory([row({ projectNo: PROJECT_A }), row({ projectNo: PROJECT_B })]) })
+    const root = await mount()
+
+    expect(rowNumbers(root), '来源筛不了的时候不许把清单筛空').toHaveLength(2)
+    expect(testid(root, 'stock-prep-project-query-empty'), 'filter_empty 在这里是个改不回来的死胡同').toBeNull()
+    const select = testid(root, 'stock-prep-project-query-source') as HTMLSelectElement
+    expect(select.disabled).toBe(true)
+    const hint = testid(root, 'stock-prep-project-query-source-unavailable')!
+    expect(hint.getAttribute('data-source-hint')).toBe('not_reported')
+    expect(hint.textContent).toContain('后端未提供来源')
+    expect(hint.textContent, '在 URL 里但没生效的筛选必须说出来').toContain('没有生效')
+  })
+
+  it('后端答得出来源的时候,同一条链接照常生效', async () => {
+    h.route.query = { source: 'mvp' }
+    routeApi({
+      directory: directory([
+        row({ projectNo: PROJECT_A, sources: ['mvp'] }),
+        row({ projectNo: PROJECT_B, sources: ['pull_target'] }),
+      ]),
+    })
+    const root = await mount()
+    expect(rowNumbers(root)).toEqual([PROJECT_A])
+    expect((testid(root, 'stock-prep-project-query-source') as HTMLSelectElement).disabled).toBe(false)
+    expect(testid(root, 'stock-prep-project-query-source-unavailable')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Q-15 「表里有多少行」的三个分支,与项目备料页同词
+// ---------------------------------------------------------------------------
+
+describe('项目查询 · 右栏的行数不许把「读不到」印成 0(Q-15)', () => {
+  const dir = () => directory([row({ projectNo: PROJECT_A, sources: ['mvp'] })])
+
+  async function rowsCellText(overrides: Record<string, unknown>): Promise<string> {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    routeApi({ directory: dir(), boards: { [PROJECT_A]: board(PROJECT_A, overrides) } })
+    const root = await mount()
+    const first = root.querySelector(`[data-project-no="${PROJECT_A}"]`) as HTMLButtonElement
+    first.click()
+    await flushUi()
+    const text = testid(root, 'stock-prep-project-query-metric-rows')!.textContent ?? ''
+    app!.unmount()
+    app = null
+    container!.innerHTML = ''
+    return text
+  }
+
+  it('表还没建好 → 说它没建好,不说 0', async () => {
+    // 服务端在 pullTargetReady:false 时把 pulledRowCount / activePulledRowCount 一律发 0
+    // (PULL_TARGET_NOT_READY),所以「0 行」在这一支上是一句让人放心的假话。
+    const text = await rowsCellText({ pullTargetReady: false, pulledRowCount: 0, activePulledRowCount: 0 })
+    expect(text).toContain('备料主表还没建好')
+    expect(text).not.toContain('0 行')
+  })
+
+  it('表建好了但一行都没有 → 「还没有行」', async () => {
+    const text = await rowsCellText({ pullTargetReady: true, pulledRowCount: 0, activePulledRowCount: 0 })
+    expect(text).toContain('还没有行')
+  })
+
+  it('全都有效时不啰嗦;有失效行时才说有多少还有效;超上限说「超过」', async () => {
+    const whole = await rowsCellText({ pulledRowCount: 12, activePulledRowCount: 12 })
+    expect(whole).toContain('12 行')
+    expect(whole).not.toContain('还有效')
+    const partial = await rowsCellText({ pulledRowCount: 12, activePulledRowCount: 11 })
+    expect(partial).toContain('12 行')
+    expect(partial).toContain('11 行还有效')
+    const bounded = await rowsCellText({
+      pulledRowCount: 500,
+      activePulledRowCount: 500,
+      pulledRowCountBounded: true,
+    })
+    expect(bounded).toContain('超过 500 行')
+  })
+
+  it('存档缺席时说的是「管理员还没有留存快照」,不是一个绿色的 0,也不借用「看不到」', async () => {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    routeApi({
+      directory: dir(),
+      boards: { [PROJECT_A]: board(PROJECT_A, { archivedSnapshotPresent: false, heldLineCount: 0 }) },
+    })
+    const root = await mount()
+    const first = root.querySelector(`[data-project-no="${PROJECT_A}"]`) as HTMLButtonElement
+    first.click()
+    await flushUi()
+    const held = testid(root, 'stock-prep-project-query-metric-held')!.textContent ?? ''
+    expect(held).toContain('管理员还没有留存快照')
+    expect(held, '§4.4 的「看不到」是留给「权限不够、判断不了」的').not.toContain('看不到')
+  })
+
+  it('同词纪律:这三句在项目备料页里逐字存在(两屏对同一个字段不许两种说法)', () => {
+    const panel = readFileSync(
+      join(__dirname, '../src/components/integration/stockPreparation/StockPreparationProjectQueryView.vue'),
+      'utf8',
+    )
+    const boardView = readFileSync(
+      join(__dirname, '../src/components/integration/stockPreparation/StockPreparationProjectBoardView.vue'),
+      'utf8',
+    )
+    for (const sentence of ['备料主表还没建好', '还没有行', '行还有效']) {
+      expect(panel, `面板必须用这句:${sentence}`).toContain(sentence)
+      expect(boardView, `项目备料页必须还是这句:${sentence}`).toContain(sentence)
+    }
   })
 })

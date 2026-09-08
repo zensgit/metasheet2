@@ -5,6 +5,7 @@ import { expect, test, type Page } from '@playwright/test'
 import {
   SYN_PROJECT_A,
   openStockPrepHarness,
+  primaryFilledButtonCount,
   type StockPrepRouteLog,
 } from './stock-prep-fixtures'
 
@@ -405,10 +406,24 @@ test.describe('D2 落地裁决(§2.2 / workbenchAccess.stockPrepLandingKey)', ()
     expectNoUnmockedRoutes(log)
   })
 
-  test('落地 · 一线(operate ∧ read)→ 今天要处理', async ({ page }) => {
+  test('落地 · 一线(operate ∧ read)→ 今天要处理,rail 是 五项(P2-1 把 项目查询 加进这一层)', async ({ page }) => {
     const log = await openStockPrepHarness(page, { actor: 'operator', scenario: 'ready' })
     await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'home')
     await expect(page.locator('[data-testid="stock-prep-operator-home"]')).toBeVisible()
+
+    // 一线这一层的 rail 组成,在真浏览器里点名 —— 之前只有 jsdom 的 StockPreparationRail.spec 见证过
+    // 「operator 应看到几项」,而 P2-1 恰恰是往这一层里加了一项。数目 + 集合都断言:只数个数,换掉
+    // 其中一项也照样绿。
+    const rail = page.locator('[data-testid="stock-prep-tabs"]')
+    await expect(rail.locator('[data-testid^="stock-prep-tab-"]')).toHaveCount(5)
+    for (const key of ['home', 'project-board', 'project-query', 'confirmation-queue', 'help']) {
+      await expect(rail.locator(`[data-testid="stock-prep-tab-${key}"]`)).toHaveCount(1)
+    }
+    // 反面:部署与接入整组、深度工具整组都不属于这一层。
+    for (const hidden of ['getting-started', 'install', 'ops']) {
+      await expect(rail.locator(`[data-testid="stock-prep-tab-${hidden}"]`)).toHaveCount(0)
+    }
+    await expect(page.locator('[data-testid="stock-prep-rail-advanced-toggle"]')).toHaveCount(0)
     expectNoUnmockedRoutes(log)
   })
 
@@ -506,9 +521,15 @@ test.describe('D2 落地裁决(§2.2 / workbenchAccess.stockPrepLandingKey)', ()
 // 为什么这条非得在浏览器里跑:jsdom 侧的 StockPreparationProjectQuery.spec.ts 用的是一个 route 替身,
 // 它证得了「组件从 query 里读出了什么、又往 router.replace 里写了什么」,证不了「这份 query 经过整个壳
 // 之后还在不在」。刷新才是那个判据 —— 一次真的 document 重建,壳重新决定落地页、重新种 `?tab=`、
-// 面板重新挂载。P2-1 的整条卖点(「刷新/分享可复现」)只有在这里能被证伪。
+// 面板重新挂载。加上 G1:主按钮的个数得按解析后的色值数,jsdom 数的只是类名。
+//
+// 这条 lane 证不到的那一半,写在这里而不是写在 PR 正文里:harness 用 `createMemoryHistory()`(见
+// stock-prep-workbench-harness.ts 的注释 —— 故意的,免得壳的 replace 改写 harness 自己的地址),所以
+// 面板 `writeUrlState()` 写出去的 URL 从不进 `window.location`,`page.reload()` 读回来的还是最初
+// goto 的那一条。于是「从 URL 恢复 → 扛过一次真的 document 重建」被证到了,「筛完之后写出去的那条
+// URL 能不能被刷新/分享复现」没有。后者今天只有 jsdom 侧对 `router.replace` 入参的断言。
 test.describe('设计稿 §6.3 —— P2-1 项目查询', () => {
-  test('P2-1 `?tab=project-query&sel=…` 刷新后选中仍在,右栏仍然只读了一次看板;搜索词不落本机存储', async ({ page }) => {
+  test('P2-1 `?tab=project-query&sel=…` 刷新后选中仍在,右栏仍然只读了一次看板;整屏解析后只有一个主色填充按钮;搜索词不落本机存储', async ({ page }) => {
     const boardSuffix = `/projects/${SYN_PROJECT_A}/board`
     const log = await openStockPrepHarness(page, {
       actor: 'operator',
@@ -553,6 +574,17 @@ test.describe('设计稿 §6.3 —— P2-1 项目查询', () => {
     await expect
       .poll(() => log.count('GET', boardSuffix), { message: '刷新之后同样只读一次' })
       .toBe(2)
+
+    // ---- G1:整屏(不是某个子树)解析之后被主色填充的按钮 ≤ 1 —— 这一条只有浏览器答得出来。 ----
+    // 选中已经存在,所以「打开项目备料」已经在屏上;左栏的 chip、行、次操作位一个都不许拿这个填充。
+    const panelPrimaries = await primaryFilledButtonCount(page, '[data-testid="stock-prep-project-query"]')
+    expect(panelPrimaries, '面板子树里主色填充的按钮必须恰好是「打开项目备料」那一个').toBe(1)
+    const openBoardIsPrimary = await primaryFilledButtonCount(
+      page,
+      '[data-testid="stock-prep-project-query-detail"]',
+      '[data-testid="stock-prep-project-query-open-queue"]',
+    )
+    expect(openBoardIsPrimary, '那一个必须是「打开项目备料」,不是它旁边的次操作位').toBe(1)
 
     // ---- values-free:人填进搜索框的词只进地址栏,不落这台电脑的存储。 ----
     const needle = 'QRY-NEEDLE-7788'

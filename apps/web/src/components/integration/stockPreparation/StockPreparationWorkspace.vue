@@ -813,12 +813,30 @@ const router = useRouter()
  * them in the query this is a pure no-op that issues NO `router.replace` at all, which is what keeps
  * the shell's existing replace-call contract (the project-number specs read `replace.mock.calls[0]`)
  * byte-identical for every route that never visits this panel.
+ *
+ * `tab` IS ONE OF THOSE KEYS, and it has to be. The panel writes `tab=project-query` on every state
+ * write while a DEFAULT value deletes its own key, so 「筛一下、再筛回全部」 leaves a URL carrying
+ * `?tab=project-query` and nothing else. A staleness test that looked only at the four filter keys
+ * called that clean, issued no replace, and let the tab bit outlive the visit — so the next reload
+ * threw the reader back into a panel they had already left. That is the exact failure this block was
+ * written to prevent, reached by two clicks. (No route outside this panel can carry the value: the
+ * shell never writes `?tab=` itself.)
  */
 const PROJECT_QUERY_STATE_KEYS = ['q', 'status', 'source', 'sel'] as const
 
-/** True when the URL still carries 项目查询's state while the panel is no longer the active one. */
+/**
+ * True when the URL still carries 项目查询's state while the panel is no longer the active one.
+ *
+ * Keyed off `effectiveKey`, never off the raw `activeKey` ref — the same rule every panel branch
+ * above follows. `tabFromQuery()` accepts a key by NAME, without asking whether this principal may
+ * see it, so a reader who cannot open 项目查询 can still arrive with `activeKey === 'project-query'`
+ * while `activeView` folds them back to their landing. Reading `activeKey` here would call that
+ * reader's panel "active", keep five keys belonging to a screen they never saw, and carry them
+ * forward through every later replace.
+ */
 function hasStaleProjectQueryState(): boolean {
-  if (activeKey.value === 'project-query') return false
+  if (effectiveKey.value === 'project-query') return false
+  if (route.query?.tab === 'project-query') return true
   return PROJECT_QUERY_STATE_KEYS.some((key) => route.query?.[key] !== undefined)
 }
 
@@ -830,7 +848,7 @@ function hasStaleProjectQueryState(): boolean {
  */
 function shellQueryBase(): LocationQueryRaw {
   const query: LocationQueryRaw = { ...route.query }
-  if (activeKey.value === 'project-query') return query
+  if (effectiveKey.value === 'project-query') return query
   for (const key of PROJECT_QUERY_STATE_KEYS) delete query[key]
   if (query.tab === 'project-query') delete query.tab
   return query
@@ -856,6 +874,12 @@ function dropStaleProjectQueryState(): void {
  * shell's `router.replace` calls are part of its contract with the project-number specs (which read
  * `replace.mock.calls[0]`), and a landing-time replace would insert a call ahead of every one of
  * them. Deep links in, no URL churn out — see the PR body's 「没做/偏离」.
+ *
+ * ONE PANEL IS THE EXCEPTION, AND THE ASYMMETRY IS ON PURPOSE. 项目查询 writes `tab=project-query`
+ * itself, because its four filter keys are worthless in a URL that reopens on somebody else's
+ * landing tab. It is the WRITER; the shell is the CLEANER (`hasStaleProjectQueryState` /
+ * `shellQueryBase` above), so no unmount-time replace from the panel can race one of the shell's.
+ * Any future panel that mirrors its own `?tab=` inherits both halves of that deal.
  */
 function tabFromQuery(): StockPreparationViewKey | null {
   const raw = route.query?.tab

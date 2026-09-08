@@ -148,7 +148,13 @@ export function buildStockPrepProjectQueryRows(
  * says why (G4: 看不到 ≠ 没有).
  *
  * A directory with no projects at all answers `false` too. That is not a claim about the backend —
- * there is simply nothing to filter, and the list is already showing `no_projects`.
+ * there is simply nothing to filter, and the list is already showing `no_projects`. THE CALLER MUST
+ * NOT RENDER 「后端未提供来源」 off this `false` alone; see the component's `sourceHint`.
+ *
+ * AND THE CALLER MUST CLAMP THE FILTER TO 「全部」 WHEN THIS IS FALSE. `?source=mvp` is a legal enum
+ * value, so nothing above rejects it — but on a deployment that answers no `sources` at all, every
+ * row's is `null`, `matchesSource` refuses every one of them, and the reader lands in `filter_empty`
+ * with the only control that could undo it greyed out. A dead end reachable from a shared link.
  */
 export function stockPrepProjectQuerySourceAvailable(
   directory: StockPreparationOperatorDirectory | null,
@@ -164,6 +170,15 @@ export interface StockPrepProjectQueryFilter {
   search: string
 }
 
+/**
+ * 姿态 —— the same predicate `filterOperatorHomeCards` applies, over a row instead of a card.
+ *
+ * Not a call into that function: it takes `StockPrepHomeCard[]` and returns cards, so reusing it
+ * would mean mapping rows to cards and back on every keystroke. What matters is that ONE fact is
+ * stated once — 「这一档 = posture.key === filter key」 — and the two screens filter identically
+ * because the KEY VOCABULARY is shared (`STOCK_PREP_HOME_FILTER_KEYS`, imported above) rather than
+ * because the two lines happen to be spelled alike today.
+ */
 function matchesStatus(row: StockPrepProjectQueryRow, status: StockPrepProjectQueryStatusKey): boolean {
   if (status === 'all') return true
   return row.posture.key === status
@@ -196,12 +211,26 @@ export function filterStockPrepProjectQueryRows(
     && matchesSearch(row, needle))
 }
 
-/** How many rows one 姿态 chip would show — the chip's own count, computed from the SAME predicate. */
+/**
+ * How many rows one 姿态 chip would show IF IT WERE PRESSED RIGHT NOW.
+ *
+ * The other two filters ride along — that is the whole content of this function. A chip renders as
+ * 「{label} {count}」, so the number is a PROMISE about what pressing it produces; counting over the
+ * unfiltered union breaks that promise the moment a source or a search term is set. Searching 甲 and
+ * then reading 「等您拿主意 3」 over a list that comes back empty is one screen holding a count and
+ * 「一个都没有」 at the same time, which is precisely the self-contradiction
+ * `countActionableOperatorHomeCards` refuses on the home page (it has no second filter, so its own
+ * chips satisfy this by construction — this panel has to arrange it).
+ *
+ * Implemented BY CALLING the filter, not by re-deriving it: a chip count and the list under it that
+ * disagree can only be a bug, so they must not be two code paths.
+ */
 export function countStockPrepProjectQueryRowsByStatus(
   rows: readonly StockPrepProjectQueryRow[],
   status: StockPrepProjectQueryStatusKey,
+  rest: Omit<StockPrepProjectQueryFilter, 'status'>,
 ): number {
-  return rows.reduce((total, row) => (matchesStatus(row, status) ? total + 1 : total), 0)
+  return filterStockPrepProjectQueryRows(rows, { ...rest, status }).length
 }
 
 // ---------------------------------------------------------------------------
@@ -233,16 +262,26 @@ export function stockPrepProjectQuerySourceFromQuery(raw: unknown): StockPrepPro
     : 'all'
 }
 
+/**
+ * The bound on both free-text bits, named once so the READ and the WRITE cannot drift apart.
+ *
+ * They did drift, and the bug is worth stating: the reader clamped at 120 while the writer did not,
+ * so a 130-character search term went into the address bar whole and came back out truncated. The
+ * URL and the box then disagreed about what was being filtered, and 「刷新/分享可复现」 — this
+ * panel's whole claim — was false on exactly the input a person had to work hardest to type.
+ */
+const QUERY_VALUE_MAX = 120
+
 /** The search box's restored contents. Length-bounded so a hand-built URL cannot paste an essay in. */
 export function stockPrepProjectQuerySearchFromQuery(raw: unknown): string {
   const value = firstQueryValue(raw)
-  return typeof value === 'string' ? value.slice(0, 120) : ''
+  return typeof value === 'string' ? value.slice(0, QUERY_VALUE_MAX) : ''
 }
 
 /** The selected project number. Same bound and the same trim the board's own `?projectNo=` uses. */
 export function stockPrepProjectQuerySelectionFromQuery(raw: unknown): string {
   const value = firstQueryValue(raw)
-  return typeof value === 'string' ? value.trim().slice(0, 120) : ''
+  return typeof value === 'string' ? value.trim().slice(0, QUERY_VALUE_MAX) : ''
 }
 
 export interface StockPrepProjectQueryUrlState {
@@ -259,16 +298,21 @@ export interface StockPrepProjectQueryUrlState {
  * a longer link that says nothing, and it makes every 「回到默认」 leave litter behind in the address
  * bar and in whatever chat window someone pastes it into. Returning `undefined` for a default lets
  * the caller delete the key with one spread rather than branching per key.
+ *
+ * BOTH FREE-TEXT BITS ARE CLAMPED HERE TOO, with the same `QUERY_VALUE_MAX` the readers use. Writing
+ * an unbounded value into a key that is read back bounded is a round trip that silently changes the
+ * filter — see that constant's own note.
  */
 export function stockPrepProjectQueryUrlState(
   state: StockPrepProjectQueryUrlState,
 ): Record<'q' | 'status' | 'source' | 'sel', string | undefined> {
-  const search = state.search.trim()
+  const search = state.search.trim().slice(0, QUERY_VALUE_MAX)
+  const selection = state.selection.trim().slice(0, QUERY_VALUE_MAX)
   return {
     q: search.length > 0 ? search : undefined,
     status: state.status === 'all' ? undefined : state.status,
     source: state.source === 'all' ? undefined : state.source,
-    sel: state.selection.length > 0 ? state.selection : undefined,
+    sel: selection.length > 0 ? selection : undefined,
   }
 }
 
