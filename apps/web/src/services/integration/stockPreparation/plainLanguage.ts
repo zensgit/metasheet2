@@ -1003,6 +1003,54 @@ export const STOCK_PREP_HOME_DIRECTORY_MAY_BE_INCOMPLETE: StockPrepPlainText = O
   en: 'The list may be incomplete this time — if you cannot find a project, open it directly by its number.',
 })
 
+/** The subset of `StockPreparationOperatorDirectory` `resolveStockPrepPullBanner` reads. Declared as
+ *  its own narrow shape (rather than importing the full directory type from confirmationQueue.ts) so
+ *  this file — which every stock-prep view already imports for its plain-language text — does not
+ *  gain a dependency on the directory service module just to name three optional booleans. */
+export interface StockPrepPullBannerDirectory {
+  pullTargetReady?: boolean
+  pullTargetScanCapped?: boolean
+  directoryMayBeIncomplete?: boolean
+}
+
+export interface StockPrepPullBanner {
+  key: string
+  text: StockPrepPlainText
+}
+
+/**
+ * U2 契约 (P0 补项 5)'s priority chain, shared (hardening wave, 2026-09-08) between 今天要处理 and
+ * 项目查询 — both panels read the identical directory shape and owe the reader the identical sentence
+ * for the identical reason. Before this the three-way `if` chain below was pasted into both `.vue`
+ * files' own `pullBanner` computed; one function now, called from both.
+ *
+ * At most ONE of three sentences, mutually exclusive, in this priority order:
+ *   1. `pullTargetReady === false` — the operator's own pull-target store could not be read at all.
+ *   2. `pullTargetScanCapped === true` — the standing 「表太大」 scan cap, distinct from a broken read.
+ *   3. `directoryMayBeIncomplete === true` and neither of the above already covered it — a shorter
+ *      answer for a reason the first two do not name specifically.
+ *
+ * EVERY CHECK IS `=== true` / `=== false`, NEVER A TRUTHINESS COERCION. An older backend (or a caller
+ * that somehow reached this page without opting in) OMITS these fields entirely — `undefined` is
+ * "unknown", and the strict comparison is what keeps "unknown" from silently reading as "false" (which
+ * would show the FIRST, most alarming sentence on every deployment that simply predates the contract).
+ */
+export function resolveStockPrepPullBanner(
+  directory: StockPrepPullBannerDirectory | null | undefined,
+): StockPrepPullBanner | null {
+  if (!directory) return null
+  if (directory.pullTargetReady === false) {
+    return { key: 'pull_target_unreadable', text: STOCK_PREP_HOME_PULL_TARGET_UNREADABLE }
+  }
+  if (directory.pullTargetScanCapped === true) {
+    return { key: 'pull_target_scan_capped', text: STOCK_PREP_HOME_PULL_TARGET_SCAN_CAPPED }
+  }
+  if (directory.directoryMayBeIncomplete === true) {
+    return { key: 'directory_may_be_incomplete', text: STOCK_PREP_HOME_DIRECTORY_MAY_BE_INCOMPLETE }
+  }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // 一线看得见自己工厂的项目 — the five HONEST empty states
 // ---------------------------------------------------------------------------

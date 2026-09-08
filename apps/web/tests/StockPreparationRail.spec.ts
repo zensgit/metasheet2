@@ -514,6 +514,245 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
   })
 
   // -------------------------------------------------------------------------
+  // R-05 — keyboard roving (hardening wave, WAI-ARIA tabs pattern)
+  // -------------------------------------------------------------------------
+
+  function dispatchArrow(el: Element, key: string): void {
+    el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+  }
+
+  it('R-05: roving tabindex — exactly one tab is 0, and it is the ACTIVE one', async () => {
+    // 项目查询, not 项目备料: clicking 项目备料 with no project number open is D3's OWN fold (see
+    // below), and conflating the two here would make this test assert on two features at once.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    const root = await mountShell()
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-query"]') as HTMLButtonElement).click()
+    await flushUi()
+    const tabs = [...root.querySelectorAll('[role="tab"]')] as HTMLButtonElement[]
+    const zeroTabbable = tabs.filter((tab) => tab.getAttribute('tabindex') === '0')
+    expect(zeroTabbable.map((tab) => tab.dataset.testid)).toEqual(['stock-prep-tab-project-query'])
+    for (const tab of tabs) {
+      if (tab.dataset.testid !== 'stock-prep-tab-project-query') {
+        expect(tab.getAttribute('tabindex'), `${tab.dataset.testid} must be -1`).toBe('-1')
+      }
+    }
+  })
+
+  it('R-05: ArrowDown/ArrowUp move focus AND activate among the VISIBLE tabs, in order', async () => {
+    // 项目查询 ⇄ 确认队列, not 今天要处理 ⇄ 项目备料: the latter pair is D3's fold subject (see below)
+    // and would make `data-active` diverge from the focused tab for a reason unrelated to this test.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    const root = await mountShell()
+    const query = root.querySelector('[data-testid="stock-prep-tab-project-query"]') as HTMLButtonElement
+    query.focus()
+    dispatchArrow(query, 'ArrowDown')
+    await flushUi()
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    const queueTab = document.activeElement as HTMLButtonElement
+    dispatchArrow(queueTab, 'ArrowUp')
+    await flushUi()
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-project-query')
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-query')
+  })
+
+  it('R-05: ArrowLeft/ArrowRight move focus too — a superset, not a width-gated alternative (F-KB)', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    const root = await mountShell()
+    const query = root.querySelector('[data-testid="stock-prep-tab-project-query"]') as HTMLButtonElement
+    query.focus()
+    dispatchArrow(query, 'ArrowRight')
+    await flushUi()
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-confirmation-queue')
+    dispatchArrow(document.activeElement as HTMLButtonElement, 'ArrowLeft')
+    await flushUi()
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-project-query')
+  })
+
+  // -------------------------------------------------------------------------
+  // D3 — 无项目号时两入口收敛 (hardening wave)
+  // -------------------------------------------------------------------------
+
+  it('D3: 点「项目备料」且无项目号时,高亮回落到「今天要处理」——不再高亮 A 却显示 B', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    const root = await mountShell()
+    expect(await waitForActive(root)).toBe('home')
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-board"]') as HTMLButtonElement).click()
+    await flushUi()
+    // The panel was ALWAYS correct here (same component, empty projectNo) — what was wrong is that
+    // 项目备料 stayed highlighted while the screen showed 今天要处理's content. The fold moves the
+    // highlight to match what is actually on screen.
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
+    expect(root.querySelector('[data-testid="stock-prep-tab-home"]')?.getAttribute('aria-selected')).toBe('true')
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-board"]')?.getAttribute('aria-selected')).toBe('false')
+  })
+
+  it('D3: 带项目号时行为不变 —— 「项目备料」照常高亮', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    // `?projectNo=` seeded BEFORE mount, so `selectedProjectNo` starts non-empty — the fold's guard
+    // condition (`selectedProjectNo.value.length > 0`) is false, so it never engages below.
+    h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: { projectNo: 'PROJECT-A' } }
+    const root = await mountShell()
+    expect(await waitForActive(root), 'sanity: §2.3 deep link lands on 项目备料').toBe('project-board')
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-board"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-board')
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-board"]')?.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('R-05: Home/End jump to the first/last VISIBLE tab', async () => {
+    h.roles = ['admin']
+    const root = await mountShell()
+    const anyTab = root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement
+    anyTab.focus()
+    dispatchArrow(anyTab, 'End')
+    await flushUi()
+    // 深度工具 is collapsed, so the last VISIBLE tab is 帮助's one item — never a folded legacy tab.
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-help')
+    dispatchArrow(document.activeElement as HTMLButtonElement, 'Home')
+    await flushUi()
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-home')
+  })
+
+  it('R-05: 折叠内(hidden)的 tab 不进入漫游 — closed, End cannot reach a legacy tab; opened, it can', async () => {
+    h.roles = ['admin']
+    const root = await mountShell()
+    const helpTab = root.querySelector('[data-testid="stock-prep-tab-help"]') as HTMLButtonElement
+    helpTab.focus()
+    dispatchArrow(helpTab, 'ArrowDown')
+    await flushUi()
+    // 帮助 is the last group; with 深度工具 collapsed there is nothing after it to roll onto, so
+    // ArrowDown from the last visible tab wraps to the FIRST visible tab — never a folded one.
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-home')
+
+    ;(root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]') as HTMLButtonElement).click()
+    await flushUi()
+    const helpTabAgain = root.querySelector('[data-testid="stock-prep-tab-help"]') as HTMLButtonElement
+    helpTabAgain.focus()
+    dispatchArrow(helpTabAgain, 'End')
+    await flushUi()
+    // Opened, the seven legacy tabs are reachable — End now lands on the LAST one.
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('stock-prep-tab-exception-queue')
+  })
+
+  it('R-05: 深度工具的 disclosure button is a DOM sibling of the tablist, never a descendant of it', async () => {
+    h.roles = ['admin']
+    const root = await mountShell()
+    const tablist = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
+    const toggle = root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]') as HTMLElement
+    expect(tablist.contains(toggle), 'the disclosure must not be nested inside role="tablist"').toBe(false)
+    // ...and every element the tablist DOES contain is either a tab or explicitly presentational —
+    // the exact leak `role="presentation"` on a WRAPPER alone does not close, because a child with its
+    // own implicit role (a `<p>`, a `<button>`) is re-parented up to the tablist rather than pruned.
+    for (const el of [...tablist.querySelectorAll('*')]) {
+      const role = el.getAttribute('role')
+      expect(['tab', 'presentation'], `${el.tagName}.${el.className || '(no class)'} inside the tablist must be role=tab or role=presentation, got ${role}`)
+        .toContain(role)
+    }
+  })
+
+  it('R-05: aria-controls / aria-expanded on the disclosure stay wired to the panel', async () => {
+    h.roles = ['admin']
+    const root = await mountShell()
+    const toggle = root.querySelector('[data-testid="stock-prep-rail-advanced-toggle"]') as HTMLElement
+    const panel = root.querySelector('[data-testid="stock-prep-rail-advanced-panel"]') as HTMLElement
+    expect(toggle.getAttribute('aria-controls')).toBe(panel.id)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    toggle.click()
+    await flushUi()
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('R-05: 组标题不在 tablist 内 —— explicit role=presentation, recovered via aria-labelledby', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.roles = []
+    const root = await mountShell()
+    const heading = root.querySelector('[data-testid="stock-prep-rail-group-title-work"]') as HTMLElement
+    expect(heading.getAttribute('role')).toBe('presentation')
+    const tab = root.querySelector('[data-testid="stock-prep-tab-home"]') as HTMLElement
+    const labelledBy = String(tab.getAttribute('aria-labelledby') ?? '').split(/\s+/)
+    expect(labelledBy).toContain(heading.id)
+    expect(labelledBy).toContain(tab.id)
+  })
+
+  // -------------------------------------------------------------------------
+  // R-06 — useMobileViewport 监听 matchMedia 的 change 事件 (hardening wave)
+  // -------------------------------------------------------------------------
+
+  /**
+   * A minimal, controllable `MediaQueryList` stub. Unlike `approvalMobileResponsive.spec.ts`'s
+   * `setViewport` (whose `addEventListener` is a permanent no-op — it exists only so code that
+   * REGISTERS a listener does not throw), this one actually KEEPS the registered callback and lets
+   * the test fire it — that is the one thing `resize`-only coverage cannot exercise: devtools'
+   * responsive-mode width picker, an external-display connect/disconnect, or any other change that
+   * flips a media query's match state WITHOUT the window itself firing `resize`.
+   */
+  function stubMatchMedia(): { fire: (matches: boolean) => void; restore: () => void } {
+    const original = window.matchMedia
+    let matches = false
+    const listeners = new Set<() => void>()
+    const mql = {
+      get matches() { return matches },
+      media: RAIL_NARROW_QUERY,
+      addEventListener: (type: string, cb: () => void) => { if (type === 'change') listeners.add(cb) },
+      removeEventListener: (type: string, cb: () => void) => { listeners.delete(cb) },
+    } as unknown as MediaQueryList
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(window as any).matchMedia = () => mql
+    return {
+      fire(next: boolean) {
+        matches = next
+        listeners.forEach((cb) => cb())
+      },
+      restore() {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).matchMedia = original
+      },
+    }
+  }
+
+  const RAIL_NARROW_QUERY = '(max-width: 899px)'
+
+  it('R-06: matchMedia 的 change 触发后 aria-orientation 立即变化 —— 不需要 resize 事件', async () => {
+    const stub = stubMatchMedia()
+    try {
+      h.roles = ['admin']
+      const root = await mountShell()
+      const tablist = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
+      expect(tablist.getAttribute('aria-orientation'), 'stub starts not-narrow').toBe('vertical')
+      // Fire ONLY the media query's own `change` event — no `resize` dispatched at all — so a pass
+      // here is proof the `change` listener itself is what moved `isMobile`, not the resize fallback.
+      stub.fire(true)
+      await flushUi()
+      expect(tablist.getAttribute('aria-orientation')).toBe('horizontal')
+      stub.fire(false)
+      await flushUi()
+      expect(tablist.getAttribute('aria-orientation')).toBe('vertical')
+    } finally {
+      stub.restore()
+    }
+  })
+
+  it('R-06: resize 仍是兜底 —— matchMedia 不可用时退回 window resize', async () => {
+    // No `stubMatchMedia()` here: jsdom's own `window.matchMedia` is undefined, exactly the
+    // environment `useMobileViewport`'s guard exists for, and `updateMobileState` still runs on
+    // `resize` — reading `matchesMediaQuery`, which answers `false` without a real `matchMedia` either
+    // way. This is the "nothing throws, the fallback path still executes" half of the guarantee.
+    h.roles = ['admin']
+    const root = await mountShell()
+    const tablist = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
+    expect(tablist.getAttribute('aria-orientation')).toBe('vertical')
+    window.dispatchEvent(new Event('resize'))
+    await flushUi()
+    expect(tablist.getAttribute('aria-orientation'), 'no matchMedia to answer true from — stays vertical').toBe('vertical')
+  })
+
+  // -------------------------------------------------------------------------
   // D2=A — the landing, at the DOM level, all four postures
   // -------------------------------------------------------------------------
 
@@ -679,7 +918,7 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     expect(root.querySelector('[data-testid="stock-prep-install-error-copy"]'), '「复制这条报错」是这条报错唯一的出口').not.toBeNull()
   })
 
-  it('mode: 「安装 / 体检」出三分区,不再出向导', async () => {
+  it('mode: 「数据来源与体检」出三分区,不再出向导', async () => {
     h.permissions = ['stock-prep:read', 'stock-prep:admin']
     h.roles = []
     const root = await mountShell()
@@ -730,7 +969,16 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     h.permissions = ['stock-prep:read', 'stock-prep:admin']
     h.roles = []
 
-    h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: { tab: 'project-board' } }
+    // `projectNo` rides along (hardening wave, D3): `project-board` with NO number now folds its
+    // highlight to `home` (see the D3 block above), so this old-key-still-works assertion needs a
+    // number in the URL to stay about what it was written to test — that `?tab=project-board` is
+    // still an accepted key — rather than incidentally exercising the new fold.
+    h.route = {
+      path: '/stock-prep',
+      fullPath: '/stock-prep',
+      meta: {},
+      query: { tab: 'project-board', projectNo: 'PROJECT-A' },
+    }
     let root = await mountShell()
     expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-board')
     app!.unmount()

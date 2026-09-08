@@ -544,7 +544,18 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     // the unfiltered list or re-derives permissions of its own — hence the two negative assertions.
     expect(workspace).toContain('const visibleViews = computed(')
     expect(rail).toContain('v-for="item in group.items"')
-    expect(rail).toContain('v-for="item in group.advanced"')
+    // 深度工具 MOVED OUT OF THE TABLIST (hardening wave, 2026-09-08 — see StockPreparationRail.vue's
+    // own top-of-file comment and R-05 in StockPreparationRail.spec.ts), so its `v-for` is no longer
+    // written inline inside the SAME `v-for="group in groups"` loop `group.items` sits in — the
+    // template loops a single `advancedGroup` computed instead, since only one group (`deploy`) ever
+    // carries a non-empty `advanced` list and the disclosure now renders once, as a nav-level sibling
+    // of the tablist rather than once per group. The GUARANTEE this line exists to pin is unchanged:
+    // `advancedGroup.advanced` still traces straight back to the SAME prop-derived `groups` array (see
+    // `advancedGroup = computed(() => props.groups.find(...))` a few lines above the template in that
+    // file) — nothing here re-derives or re-filters permissions of its own, which is exactly what the
+    // two negative assertions below still hold down.
+    expect(rail).toContain('v-for="item in advancedGroup.advanced"')
+    expect(rail).toContain('advancedGroup = computed')
     expect(rail).not.toContain('hasPermission')
     expect(rail).not.toContain('workbenchAccess')
     // ...AND THE WIRE BETWEEN THEM. The three above pin each end — the shell filters, the rail

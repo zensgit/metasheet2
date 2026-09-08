@@ -332,13 +332,11 @@ import {
   type StockPrepProjectQuerySourceKey,
   type StockPrepProjectQueryStatusKey,
 } from '../../../services/integration/stockPreparation/projectQuery'
+import { stockPrepHomeStatusLabel } from '../../../services/integration/stockPreparation/operatorHomeCards'
 import {
+  resolveStockPrepPullBanner,
   stockPrepBoardErrorPlain,
-  STOCK_PREP_HOME_DIRECTORY_MAY_BE_INCOMPLETE,
-  STOCK_PREP_HOME_PULL_TARGET_SCAN_CAPPED,
-  STOCK_PREP_HOME_PULL_TARGET_UNREADABLE,
   type StockPrepPlainEntry,
-  type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(defineProps<{ scope?: IntegrationScope }>(), { scope: () => ({}) })
@@ -477,14 +475,6 @@ const visibleRows = computed<StockPrepProjectQueryRow[]>(() => filterStockPrepPr
   ...activeFilter.value,
 }))
 
-const STATUS_LABELS: Record<StockPrepProjectQueryStatusKey, [string, string]> = {
-  all: ['全部', 'All'],
-  pending_decision: ['等您拿主意', 'Waiting on you'],
-  blocked: ['卡住了', 'Blocked'],
-  ready: ['可以导出', 'Ready to export'],
-  not_pulled: ['还没拉过', 'Not pulled yet'],
-}
-
 /**
  * The chip row. EVERY COUNT IS TAKEN UNDER THE OTHER TWO FILTERS — see
  * `countStockPrepProjectQueryRowsByStatus`.
@@ -493,10 +483,14 @@ const STATUS_LABELS: Record<StockPrepProjectQueryStatusKey, [string, string]> = 
  * unfiltered union makes that a lie the moment a search term or a source is set: 「3」 above 「这组
  * 条件下一个项目都没有」, on one screen, at the same time. 今天要处理 gets this for free (one filter
  * level, one predicate); this panel has two levels and has to arrange it deliberately.
+ *
+ * The WORDS themselves are `stockPrepHomeStatusLabel` (operatorHomeCards.ts, hardening wave) — the
+ * same map 今天要处理's own filter row reads, not a second copy of the five labels. See that map's
+ * comment for why: `StockPrepProjectQueryStatusKey` is a straight alias of `StockPrepHomeFilterKey`.
  */
 const statusChips = computed(() => STOCK_PREP_PROJECT_QUERY_STATUS_KEYS.map((key) => ({
   key,
-  label: bi(...STATUS_LABELS[key]),
+  label: bi(...stockPrepHomeStatusLabel(key)),
   count: countStockPrepProjectQueryRowsByStatus(rows.value, key, activeFilter.value),
 })))
 
@@ -627,17 +621,11 @@ const listEmptyText = computed(() => {
   return { title: bi(...entry.title), hint: bi(...entry.hint) }
 })
 
-/** U2 契约 (P0 补项 5) — at most ONE of three sentences, same order and same words as 今天要处理.
- *  Every check is `=== true` / `=== false`: an older backend OMITS these fields, and 「不知道」 must
- *  never read as 「否」 (which would show the most alarming sentence on every pre-U2 deployment). */
-const pullBanner = computed<{ key: string; text: StockPrepPlainText } | null>(() => {
-  const dir = directory.value
-  if (!dir) return null
-  if (dir.pullTargetReady === false) return { key: 'pull_target_unreadable', text: STOCK_PREP_HOME_PULL_TARGET_UNREADABLE }
-  if (dir.pullTargetScanCapped === true) return { key: 'pull_target_scan_capped', text: STOCK_PREP_HOME_PULL_TARGET_SCAN_CAPPED }
-  if (dir.directoryMayBeIncomplete === true) return { key: 'directory_may_be_incomplete', text: STOCK_PREP_HOME_DIRECTORY_MAY_BE_INCOMPLETE }
-  return null
-})
+/** U2 契约 (P0 补项 5)'s three-sentence priority chain — `resolveStockPrepPullBanner`
+ *  (plainLanguage.ts, hardening wave), the SAME function 今天要处理 calls, not a second copy of the
+ *  chain. See that function's own comment for the priority order and the `=== true` / `=== false`
+ *  reasoning. */
+const pullBanner = computed(() => resolveStockPrepPullBanner(directory.value))
 
 // ---------------------------------------------------------------------------
 // 右栏 — ONE board read per selection, never a poll

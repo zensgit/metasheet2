@@ -460,16 +460,18 @@ const views: StockPreparationViewTab[] = [
     provisioning: true,
   },
   {
-    // THE LABEL STAYS 「安装 / 体检」. 设计稿 §2.2 calls this item 「数据来源与体检」, and renaming it
-    // is a copy change rather than a layout one: two other components point a reader at this tab BY
-    // NAME (the board's 「请管理员在『安装 / 体检』里把表建出来」 and the wizard's paste-able TODO),
-    // and one of those strings is something an admin copies into a chat window. Renaming the tab
-    // without them would leave instructions naming a tab that no longer exists — see the PR body's
-    // 「没做/偏离」.
+    // THE LABEL IS NOW 「数据来源与体检」, matching 设计稿 §2.2 exactly. It shipped as 「安装 / 体检」
+    // through P0/P1 because two OTHER components pointed a reader at this tab BY NAME (the board's
+    // 「请管理员在『安装 / 体检』里把表建出来」 and a since-corrected wizard TODO string), and one of
+    // those strings is something an admin copies into a chat window — renaming the tab alone would
+    // have left instructions naming a tab that no longer exists. This hardening wave renames BOTH
+    // ends together: the board's hint string below now reads the new name too (grep 「数据来源与体检」
+    // to find every reference this rename had to carry). The KEY stays `install` — no route, no
+    // `?tab=` deep link and no rail-manifest gate token moved, only the two rendered words did.
     key: 'install',
     workbenchAdminOnly: true,
-    zh: '安装 / 体检',
-    en: 'Install / Health',
+    zh: '数据来源与体检',
+    en: 'Sources & Health Check',
     zhDesc: '把这套部署会装的东西摆出来给您确认,然后看看还缺什么、建该建的表、再检查一次。跳过的步骤是还需要人来做的事,不是装失败了。',
     enDesc: 'Lays out what this deployment installs for you to confirm, then checks what is missing, creates what needs creating, and checks again. A skipped step is work still waiting for a person, not a failed install.',
     endpoint: '/api/platform/apps/stock-preparation',
@@ -776,12 +778,43 @@ async function readDeploymentPosture(): Promise<void> {
 // this fold an operator arriving on a stale/deep-linked legacy key would render a panel of controls
 // that all 403 — the exact "visible but not actionable" failure, reintroduced through the back door.
 const activeKey = ref<StockPreparationViewKey | null>(null)
+
+/**
+ * D3 (hardening wave, 2026-09-08) — 无项目号时两入口收敛.
+ *
+ * `home` and `project-board` are the SAME component with the project number withheld or not (§2.3) —
+ * a click on 项目备料 while `selectedProjectNo` is still empty renders EXACTLY what 今天要处理 would.
+ * The panel was always right; what was wrong is the HIGHLIGHT: before this fold, choosing
+ * `project-board` with no number lit up 项目备料 in the rail while the screen showed 今天要处理's task
+ * list — highlighted-A-shows-B, which reads as a bug even though nothing actually broke.
+ *
+ * This folds the effective key, not the raw choice: `activeKey.value` still remembers
+ * `'project-board'` was clicked (so a project opened moments later from 今天要处理's own picker still
+ * reads as "the reader is on the board", not as a second navigation), but `activeView` below renders
+ * `home`'s label/description and the rail highlights `home` for as long as no number is open.
+ *
+ * `?projectNo=` still outranks everything here, exactly as it always has: `deepLinkedProjectBoard`
+ * above is what makes `landingKey` resolve to `project-board` in the first place when a link carries a
+ * number, and `selectedProjectNo` is non-empty for the whole of that visit — so this fold's own guard
+ * (`selectedProjectNo.value.length === 0`) never engages for a deep-linked project, and behaviour there
+ * is byte-identical to before this wave.
+ */
+function foldEmptyProjectBoardToHome(
+  key: StockPreparationViewKey,
+  visible: StockPreparationViewTab[],
+): StockPreparationViewKey {
+  if (key !== 'project-board') return key
+  if (selectedProjectNo.value.length > 0) return key
+  return visible.some((view) => view.key === 'home') ? 'home' : key
+}
+
 const activeView = computed(() => {
   const visible = visibleViews.value
   if (visible.length === 0) return null
   const chosen = activeKey.value
   if (chosen) {
-    const hit = visible.find((view) => view.key === chosen)
+    const folded = foldEmptyProjectBoardToHome(chosen, visible)
+    const hit = visible.find((view) => view.key === folded)
     if (hit) return hit
   }
   return visible.find((view) => view.key === landingKey.value) ?? visible[0]
