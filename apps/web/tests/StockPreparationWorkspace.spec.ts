@@ -516,7 +516,14 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`)).not.toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
+    // P1-1 (设计稿 §2.2, D3=A): 8 -> 9. This actor holds `integration:admin` + `stock-prep:read` and
+    // this spec's auth double matches codes EXACTLY, so it is neither a workbench admin (no
+    // `stock-prep:admin` -> no 【部署与接入】 group) nor an operator (no `stock-prep:operate` -> no
+    // 今天要处理 / 项目备料). The ONE item that joined its rail is 【帮助】's 怎么用这个页面, which is
+    // gated on reachability alone. The 7 legacy tabs are unchanged in number and in tier — they moved
+    // INTO 深度工具 ▾ (collapsed), and a collapsed item is still rendered (hidden), which is why the
+    // presence loop above is untouched.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(9)
   })
 
   // O2 / R-11: the operator tier. The tab strip is itself a control surface, so a tab whose panel
@@ -529,8 +536,15 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of LEGACY_MVP_VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be hidden`).toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(1)
+    // P1-1: 1 -> 2. 【帮助】 joined, and only 【帮助】: a `stock-prep:read` holder is still refused
+    // 今天要处理 / 项目备料 (value-bearing, operate tier) and the whole 【部署与接入】 group.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(2)
+    expect(root.querySelector('[data-testid="stock-prep-tab-help"]')).not.toBeNull()
     // ...and the panel really is the confirmation queue, not a legacy panel wearing its title.
+    //
+    // D2=A LEAVES THIS ONE ALONE, and that is the ruling working rather than an omission: this actor
+    // is below the workbench-admin ceiling (so no 开始使用 / 记录与排查 landing) and below the
+    // operator tier (so no 今天要处理). 确认队列 is what is left, which is where they landed before.
     const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
     expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
     expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
@@ -552,15 +566,27 @@ describe('StockPreparationWorkspace shell', () => {
     h.permissions = ['stock-prep:read', 'stock-prep:admin']
     const adminRoot = await mountShell()
     expect(adminRoot.querySelector('[data-testid="stock-prep-tab-install"]')).not.toBeNull()
-    // Exactly two: the confirmation queue this page was adopted for, plus install. The seven legacy
-    // MVP tabs stay platform-admin and did NOT come along with the workbench-admin code.
-    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(2)
+    // P1-1: 2 -> 5. The workbench-admin code now opens the WHOLE 【部署与接入】 group, not just the
+    // install page: 开始使用 (the wizard, promoted off the install page's first screen) and
+    // 记录与排查 (the ops panel, which shipped mounted-but-unreachable) ride exactly the same
+    // `canOpenStockPrepInstallView` gate the install tab always did. Plus 确认队列 and 【帮助】.
+    // The seven legacy MVP tabs stay platform-admin and did NOT come along with this code.
+    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(5)
+    for (const key of ['getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
+      expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be visible`).not.toBeNull()
+    }
     for (const key of LEGACY_MVP_VIEW_KEYS) {
       expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must stay hidden`).toBeNull()
     }
-    // ...and the landing tab is unchanged: install is reachable, not imposed.
+    // D2=A: 'confirmation-queue' -> 'getting-started'. THIS IS THE RULING, and this is the actor it
+    // is about — a workbench admin. Landing them on an empty confirmation queue was the dead end the
+    // whole redesign opened with (设计稿 §2.3 A1): the page never said "you have to install this
+    // first". They now land on 开始使用 because the preflight could not be read here (this test's
+    // apiFetch is reset, so the read rejects) — and 「读不到」 lands on the wizard, never on the health
+    // page, since 「看不到」 is not 「装完了」. The installed case lands on 记录与排查; both are
+    // asserted directly against the predicate in the D2 block further down this file.
     const panel = adminRoot.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
-    expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(panel.getAttribute('data-active')).toBe('getting-started')
   })
 
   it('opens the install tab and badges it as a manifest read plus an idempotent ensure', async () => {
@@ -573,8 +599,10 @@ describe('StockPreparationWorkspace shell', () => {
     }), { status: 200 }))
 
     const root = await mountShell()
-    // Nine tabs now: the queue, install, and the seven legacy MVP tabs.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(9)
+    // P1-1: 9 -> 12. The queue, the whole 【部署与接入】 group (开始使用 / 安装 · 体检 / 记录与排查),
+    // 【帮助】, and the seven legacy MVP tabs — now folded into 深度工具 ▾ but still rendered, so
+    // still counted. This actor holds no `stock-prep:operate`, so 今天要处理 and 项目备料 stay hidden.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(12)
     ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
     await flushUi()
 
@@ -617,6 +645,12 @@ describe('StockPreparationWorkspace shell', () => {
   // O1' §附 moved the landing tab: this page is now the confirmation-queue workbench, so the queue —
   // not the MVP dashboard — is what an operator sees on arrival. The dashboard remains reachable for
   // a platform admin via its tab, asserted immediately below.
+  //
+  // D2=A DOES NOT MOVE THIS ONE. The actor is `integration:admin` + `stock-prep:read` and this file's
+  // auth double is exact-code, so it holds no `stock-prep:admin` and is not a workbench admin here —
+  // the tier D2 re-lands. (A REAL platform admin does satisfy that code through the ladder's
+  // short-circuit, and their landing DOES move; that case is asserted in
+  // StockPreparationProjectBoard.spec.ts B-01, whose probe is the real ladder.)
   it('lands on the confirmation queue (O1\': the page this workbench was adopted to be)', async () => {
     const root = await mountShell()
     const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
@@ -1151,6 +1185,7 @@ describe('StockPreparationWorkspace shell', () => {
   // Neither shows up in an assertion about the notice text or the request, which is why the five
   // cases above all passed while this was broken.
 
+  // D2=A does not move this actor either — same exact-code reason as the landing case above.
   it('the container placeholder never renders under a real tab (the notice must not split the chain)', async () => {
     answerQueueReads()
     const root = await mountShell()
@@ -1162,7 +1197,12 @@ describe('StockPreparationWorkspace shell', () => {
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
     answerQueueReads()
     const root = await mountShell()
-    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-board')
+    // P1-1 / D2=A: 'project-board' -> 'home'. WHAT THE OPERATOR SEES IS THE SAME PIXELS. P0 shipped
+    // the task home INSIDE the board view, keyed on 「?projectNo= 无值即首页」, so a bare landing on
+    // 项目备料 already painted 今天要处理. P1-1 gives that page its own rail item and lands on it by
+    // name; the branch is literally the same component with the number withheld, which is why this
+    // is a key rename in the assertion rather than a behaviour change under it.
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
     expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
   })
 
@@ -1172,6 +1212,12 @@ describe('StockPreparationWorkspace shell', () => {
     h.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:admin']
     answerQueueReads()
     const root = await mountShell()
+    // NOT one of the nine: a NAVIGATION step, added because D2 moved this actor's landing off the
+    // queue and onto 开始使用. The claim under test (a notice sits beside its panel and dies with the
+    // tab) is about the queue's two admin buttons, so the test has to be ON the queue to press one.
+    // Nothing was weakened — every assertion below is the one that was there.
+    ;(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement).click()
+    await flushUi()
     ;(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
     await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
     // The panel it was pressed on is still the panel — the notice sits beside the view, not instead

@@ -79,13 +79,23 @@ vi.mock('../src/utils/api', async () => {
 import {
   PLATFORM_ADMIN_GATE,
   STOCK_PREP_ADMIN,
+  STOCK_PREP_LANDING_KEYS,
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
+  STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
   STOCK_PREP_WORKBENCH_CAPABILITIES,
+  canOpenStockPrepGettingStarted,
+  canOpenStockPrepHelp,
+  canOpenStockPrepHome,
+  canOpenStockPrepInstallView,
+  canOpenStockPrepOpsPanel,
+  canOpenStockPrepRailItem,
   canUseLegacyMvpTabs,
   grantedStockPrepCapabilities,
+  landsOnStockPrepGettingStarted,
+  stockPrepLandingKey,
   visibleStockPrepControls,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import {
@@ -445,13 +455,142 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationWorkspace.vue'),
       'utf8',
     )
+    const rail = readFileSync(
+      resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationRail.vue'),
+      'utf8',
+    )
     // The tab strip iterates the FILTERED list, and the panel keys off the effective (visible) key —
     // both halves are needed, since either alone leaves a reachable admin-only panel.
-    expect(workspace).toContain('v-for="view in visibleViews"')
+    //
+    // P1-1 SPLIT THE FIRST HALF ACROSS TWO FILES, so the pin follows it rather than being dropped:
+    // the shell still computes `visibleViews` (and still computes it from `canUseLegacyMvpTabs`), and
+    // the rail iterates ONLY what the shell hands it. What must not exist is a rail that reaches for
+    // the unfiltered list or re-derives permissions of its own — hence the two negative assertions.
+    expect(workspace).toContain('const visibleViews = computed(')
+    expect(rail).toContain('v-for="item in group.items"')
+    expect(rail).toContain('v-for="item in group.advanced"')
+    expect(rail).not.toContain('hasPermission')
+    expect(rail).not.toContain('workbenchAccess')
     expect(workspace).toContain('canUseLegacyMvpTabs')
     expect(workspace).toContain("effectiveKey === 'confirmation-queue'")
     expect(workspace).not.toContain("v-if=\"activeKey === 'dashboard'\"")
     // Exactly the seven legacy MVP tabs are marked; the confirmation queue is not.
     expect(workspace.split('legacyMvp: true').length - 1).toBe(7)
+  })
+  // ---------------------------------------------------------------------------
+  // F-09 the RAIL manifest and the D2 landing — the second thing the mirror pins
+  // ---------------------------------------------------------------------------
+  //
+  // P1-1 turned the tab strip into a grouped rail and P1-1's D2=A moved the landing. Both are now
+  // DATA (`STOCK_PREP_RAIL_GROUPS`) plus one pure decision (`stockPrepLandingKey`), and both are
+  // mirrored by the plugin module, so this block is F-01's shape applied to them: byte-equality of
+  // the manifest, then per-actor agreement of the resolvers.
+
+  it('F-09: the rail manifest is byte-equal to the plugin module, gate token for gate token', () => {
+    const flatten = (groups: readonly unknown[]): unknown => JSON.parse(JSON.stringify(groups))
+    expect(flatten(STOCK_PREP_RAIL_GROUPS)).toEqual(flatten(backendAccess.STOCK_PREP_RAIL_GROUPS))
+    expect([...STOCK_PREP_LANDING_KEYS]).toEqual([...backendAccess.STOCK_PREP_LANDING_KEYS])
+    // Every gate token used by the manifest is one the resolver knows. An unknown token resolves to
+    // a REFUSAL on both sides, so a typo would hide a whole group rather than open one — but it
+    // would still be a silent outage, and this is what catches it.
+    const tokens = new Set<string>()
+    for (const group of STOCK_PREP_RAIL_GROUPS) {
+      for (const item of group.items) tokens.add(item.gate)
+      if (group.advancedGate) tokens.add(group.advancedGate)
+    }
+    expect([...tokens].sort()).toEqual([...backendAccess.STOCK_PREP_RAIL_GATES].sort())
+  })
+
+  it('F-09: every rail item names a view the shell actually renders, and no key was dropped', () => {
+    const workspace = readFileSync(
+      resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationWorkspace.vue'),
+      'utf8',
+    )
+    const keys: string[] = []
+    for (const group of STOCK_PREP_RAIL_GROUPS) {
+      for (const item of group.items) keys.push(item.key)
+      for (const key of group.advanced ?? []) keys.push(key)
+    }
+    // 14 today: 3 【工作】 + 3 【部署与接入】 + 7 深度工具 + 1 【帮助】. Stated as a number so that
+    // adding a rail item without a view — or a view without a rail item — has to be deliberate.
+    expect(keys.length).toBe(14)
+    expect(new Set(keys).size).toBe(keys.length)
+    for (const key of keys) {
+      expect(workspace, `${key} must be a view key in the shell`).toContain(`key: '${key}',`)
+    }
+    // 不下线: every legacy MVP key is still in the manifest, folded rather than removed.
+    for (const key of ['dashboard', 'project-workspace', 'bom-snapshot-diff', 'material-mapping', 'unit-conversion', 'prep-line', 'exception-queue']) {
+      expect(keys, `${key} must still be reachable`).toContain(key)
+    }
+  })
+
+  it('F-09: the rail gate resolver agrees with the server for every actor and every gate', () => {
+    for (const actor of ACTORS) {
+      asActor(actor)
+      const flattened = [...actor.permissions, ...actor.roles.map((role) => `role:${role}`)]
+      for (const gate of backendAccess.STOCK_PREP_RAIL_GATES as string[]) {
+        expect(
+          canOpenStockPrepRailItem(gate as never, probe()),
+          `${actor.name} @ ${gate}`,
+        ).toBe(backendAccess.satisfiesStockPrepRailGate(flattened, gate))
+      }
+      // An unknown token refuses on both sides, for everyone — including the platform admin.
+      expect(canOpenStockPrepRailItem('not-a-gate' as never, probe())).toBe(false)
+      expect(backendAccess.satisfiesStockPrepRailGate(flattened, 'not-a-gate')).toBe(false)
+    }
+  })
+
+  it('F-09: the named rail predicates are exactly the gates the manifest assigns them', () => {
+    for (const actor of ACTORS) {
+      asActor(actor)
+      // 【工作】's two value-bearing items ride the operator tier; 【部署与接入】 rides the workbench
+      // ceiling; 【帮助】 rides reachability. Asserted through the NAMED predicates, because that is
+      // what the rest of the app calls and a manifest that agreed with nothing would prove nothing.
+      expect(canOpenStockPrepHome(probe()), `${actor.name} home`)
+        .toBe(canOpenStockPrepRailItem('operator-board', probe()))
+      expect(canOpenStockPrepGettingStarted(probe()), `${actor.name} getting-started`)
+        .toBe(canOpenStockPrepInstallView(probe()))
+      expect(canOpenStockPrepOpsPanel(probe()), `${actor.name} ops`)
+        .toBe(canOpenStockPrepInstallView(probe()))
+      expect(canOpenStockPrepHelp(probe()), `${actor.name} help`)
+        .toBe(probe()(STOCK_PREP_ROUTE_PERMISSION))
+    }
+  })
+
+  it('F-09 / D2=A: the landing key agrees with the server for every actor and all three postures', () => {
+    for (const actor of ACTORS) {
+      asActor(actor)
+      const flattened = [...actor.permissions, ...actor.roles.map((role) => `role:${role}`)]
+      for (const ready of [true, false, null]) {
+        expect(
+          stockPrepLandingKey(probe(), ready),
+          `${actor.name} @ deploymentReady=${String(ready)}`,
+        ).toBe(backendAccess.stockPrepWorkbenchLandingKey(flattened, ready))
+      }
+    }
+  })
+
+  it('F-09 / D2=A: 装完落总览,未装完落开始使用,读不到也落开始使用', () => {
+    // The workbench admin — the tier the ruling is about.
+    asActor({ name: 'workbench admin', roles: [], permissions: [STOCK_PREP_ADMIN] })
+    expect(stockPrepLandingKey(probe(), true)).toBe('ops')
+    expect(stockPrepLandingKey(probe(), false)).toBe('getting-started')
+    // 「看不到」 IS NOT 「装完了」. An unreadable preflight must not send anyone to the health page.
+    expect(stockPrepLandingKey(probe(), null)).toBe('getting-started')
+    expect(landsOnStockPrepGettingStarted(probe(), null)).toBe(true)
+    expect(landsOnStockPrepGettingStarted(probe(), true)).toBe(false)
+
+    // 一线 (operate ∧ read) lands on 今天要处理, and the preflight argument is not consulted for them
+    // at all — their landing cannot depend on a read their tier does not make.
+    asActor({ name: 'operator', roles: [], permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
+    for (const ready of [true, false, null]) {
+      expect(stockPrepLandingKey(probe(), ready)).toBe('home')
+    }
+
+    // The values-free queue watcher keeps today's landing, in all three postures.
+    asActor({ name: 'read only', roles: [], permissions: [STOCK_PREP_READ] })
+    for (const ready of [true, false, null]) {
+      expect(stockPrepLandingKey(probe(), ready)).toBe('confirmation-queue')
+    }
   })
 })

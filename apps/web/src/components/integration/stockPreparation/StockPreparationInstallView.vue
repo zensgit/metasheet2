@@ -1,11 +1,19 @@
 <template>
-  <div class="stock-prep-install" data-testid="stock-prep-install">
+  <div class="stock-prep-install" data-testid="stock-prep-install" :data-mode="props.mode">
     <!-- P0-4: the「开始使用」向导, mounted FIRST. Every deployment fact it renders comes down as a
          prop this view already owns; since P1-3 it additionally issues ONE read of its own, the
          platform role catalog for step⑤「谁能用」(`onboardingReadiness.ts`, a preload that degrades
          to 「? 看不到」 and never to a banner). It re-emits its three actions onto this view's own
-         existing functions — nothing below it changes order, testid, or behaviour. -->
+         existing functions — nothing below it changes order, testid, or behaviour.
+
+         P1-1: 向导现在在左栏里有自己的一项(「开始使用」),所以这个挂载点变成了 CONDITIONAL —
+         但条件化的是位置,不是实现。壳把 SAME COMPONENT 挂两次:`getting-started` 这一项传
+         `mode="wizard"`(只出向导),`install`(数据来源与体检)传 `mode="review"`(不出向导)。
+         两个 key 因此共用这一份数据加载与这一套 run 编排 —— 把向导单独提到壳里去挂,就得把
+         defaults / preflight / sourcePreflight / binding / report / busy 与两条 run 全部再实现一遍。
+         DEFAULT IS 'full' — 直接挂载这个组件的既有 spec 一个字节都不受影响。 -->
     <StockPreparationGettingStarted
+      v-if="props.mode !== 'review'"
       :defaults="defaults"
       :preflight="preflight"
       :preflight-error-status="preflightErrorStatus"
@@ -20,6 +28,12 @@
       @navigate-stage="(viewKey) => emit('navigate-stage', viewKey)"
     />
 
+    <!-- 数据来源与体检 — everything the wizard is NOT. `mode="wizard"` renders the wizard alone, so
+         the rail's 「开始使用」 and 「数据来源与体检」 are two views of ONE component and one data
+         load rather than two implementations. A `<template>` wrapper is used rather than a v-if per
+         card because the alternative is fourteen conditions that can drift apart; nothing inside
+         moves, and every testid keeps its position in document order. -->
+    <template v-if="props.mode !== 'wizard'">
     <p class="stock-prep-install__intro" data-testid="stock-prep-install-intro">
       {{ bi(
         '安装分三步:先看一遍这套部署还缺什么,再把该建的表建起来,最后回头再看一次确认建好了。这一页全是确认题,没有填空题 —— 下面列的都是默认值,您只要看一眼对不对。',
@@ -882,6 +896,7 @@
         <StockPreparationCodeHelpPanel />
       </section>
     </section>
+    </template>
   </div>
 </template>
 
@@ -991,7 +1006,23 @@ import {
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 
-const props = defineProps<{ scope: IntegrationScope }>()
+/**
+ * P1-1 — WHICH HALF OF THIS PAGE TO RENDER.
+ *
+ *   'full'    (default) wizard + everything below it. What every existing caller and every existing
+ *             spec that mounts this component directly gets, byte for byte.
+ *   'wizard'  the 「开始使用」 rail item — the wizard alone.
+ *   'review'  the 「数据来源与体检」 rail item — everything EXCEPT the wizard.
+ *
+ * The split is presentational only: the reads, the gates and the install-run orchestration are the
+ * same instance's, whichever half is on screen. That is the whole point of putting the switch here
+ * rather than lifting the wizard into the shell — the wizard needs seven derived deployment facts
+ * and two run entry points that this component already owns.
+ */
+const props = withDefaults(defineProps<{
+  scope: IntegrationScope
+  mode?: 'full' | 'wizard' | 'review'
+}>(), { mode: 'full' })
 
 // P0-4: the getting-started wizard's step ⑥ ("拿一个项目跑一遍") points at the project board tab,
 // which this view does not own. Re-emitted verbatim, the SAME event name/shape

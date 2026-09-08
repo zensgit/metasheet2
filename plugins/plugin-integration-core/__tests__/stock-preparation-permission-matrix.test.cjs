@@ -59,16 +59,21 @@ const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const {
   PLATFORM_ADMIN_GATE,
   STOCK_PREP_ADMIN,
+  STOCK_PREP_LANDING_KEYS,
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
   STOCK_PREP_PERMISSION_DESCRIPTORS,
+  STOCK_PREP_RAIL_GATES,
+  STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
   STOCK_PREP_WORKBENCH_CAPABILITIES,
   grantedStockPrepCapabilities,
   requireAccessGateExpressionsInSource,
   satisfiesStockPrepAccess,
+  satisfiesStockPrepRailGate,
   stockPrepGateTokensInSource,
+  stockPrepWorkbenchLandingKey,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const {
   OBJECT_ID,
@@ -1400,6 +1405,121 @@ async function theConfirmWriteProvesItsTenantLikeItsSiblings() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// P1-1 — THE RAIL MANIFEST AND THE D2 LANDING (mirror half)
+// ---------------------------------------------------------------------------
+//
+// `/stock-prep`'s tab strip became a grouped rail, and the landing became a rule. Both live in this
+// module as data + one pure function so the browser half can be asserted byte-equal to them
+// (apps/web/tests/stockPrepPermissionMatrix.spec.ts F-09). This function is the server-side half of
+// that pair: it pins the vocabulary as frozen, the gate resolver as REFUSING an unknown token, and
+// the landing rule's three postures — including the one that matters, 「读不到」.
+function theRailVocabularyAndTheLandingRuleHold() {
+  // The manifest is frozen, values-free structure: group ids, view keys, gate tokens. No labels, no
+  // copy, no route paths — a rail item is not a capability and must not look like one.
+  assert.ok(Object.isFrozen(STOCK_PREP_RAIL_GROUPS), 'rail: the manifest is frozen')
+  const seenKeys = new Set()
+  for (const group of STOCK_PREP_RAIL_GROUPS) {
+    assert.ok(Object.isFrozen(group), `rail: group ${group.group} is frozen`)
+    assert.equal(typeof group.group, 'string')
+    for (const item of group.items) {
+      assert.equal(typeof item.key, 'string', 'rail: every item has a key')
+      assert.ok(!seenKeys.has(item.key), `rail: ${item.key} appears once`)
+      seenKeys.add(item.key)
+      assert.ok(STOCK_PREP_RAIL_GATES.includes(item.gate), `rail: ${item.key} names a known gate`)
+      assert.deepEqual(Object.keys(item).sort(), ['gate', 'key'], `rail: ${item.key} carries nothing else`)
+    }
+    for (const key of group.advanced || []) {
+      assert.ok(!seenKeys.has(key), `rail: ${key} appears once`)
+      seenKeys.add(key)
+    }
+    if (group.advanced && group.advanced.length > 0) {
+      assert.ok(STOCK_PREP_RAIL_GATES.includes(group.advancedGate), 'rail: 深度工具 names a known gate')
+    }
+  }
+  // 不下线 — the seven legacy MVP keys are FOLDED into 深度工具, not removed, and they are still on
+  // the platform-admin gate they were always on.
+  const deploy = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'deploy')
+  assert.equal(deploy.advancedGate, 'platform-admin', 'rail: 深度工具 stays platform-admin')
+  assert.deepEqual([...deploy.advanced].sort(), [
+    'bom-snapshot-diff',
+    'dashboard',
+    'exception-queue',
+    'material-mapping',
+    'prep-line',
+    'project-workspace',
+    'unit-conversion',
+  ], 'rail: all seven legacy MVP tabs are folded, none dropped')
+
+  // THE GATE RESOLVER. Per actor, per token, plus the refusal an unknown token must produce for
+  // EVERYONE — a mistyped gate must hide a group, never open one.
+  const cases = [
+    { name: 'anonymous', permissions: [], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false } },
+    { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true } },
+  ]
+  for (const testCase of cases) {
+    for (const gate of STOCK_PREP_RAIL_GATES) {
+      assert.equal(
+        satisfiesStockPrepRailGate(testCase.permissions, gate),
+        testCase.expected[gate],
+        `rail gate: ${testCase.name} @ ${gate}`,
+      )
+    }
+    assert.equal(
+      satisfiesStockPrepRailGate(testCase.permissions, 'not-a-gate'),
+      false,
+      `rail gate: ${testCase.name} is refused an unknown token`,
+    )
+  }
+
+  // D2=A — THE LANDING RULE, all three postures.
+  assert.deepEqual([...STOCK_PREP_LANDING_KEYS], ['getting-started', 'ops', 'home', 'confirmation-queue'])
+  const admin = [STOCK_PREP_ADMIN]
+  assert.equal(stockPrepWorkbenchLandingKey(admin, true), 'ops', 'D2: 装完落总览')
+  assert.equal(stockPrepWorkbenchLandingKey(admin, false), 'getting-started', 'D2: 未装完落开始使用')
+  // THE ONE THAT MATTERS. An unreadable preflight is not a finished install, so it must never land
+  // on the health page — that would be the page telling an admin a deployment story nobody has.
+  assert.equal(stockPrepWorkbenchLandingKey(admin, null), 'getting-started', 'D2: 读不到也落开始使用')
+  assert.equal(stockPrepWorkbenchLandingKey(admin, undefined), 'getting-started', 'D2: absent is unreadable too')
+
+  // The operator tier lands on 今天要处理 and does not consult the deployment posture at all.
+  for (const posture of [true, false, null]) {
+    assert.equal(
+      stockPrepWorkbenchLandingKey([STOCK_PREP_READ, STOCK_PREP_OPERATE], posture),
+      'home',
+      `D2: 一线落 home @ ${String(posture)}`,
+    )
+    assert.equal(
+      stockPrepWorkbenchLandingKey([STOCK_PREP_READ], posture),
+      'confirmation-queue',
+      `D2: 只读档保持确认队列 @ ${String(posture)}`,
+    )
+    assert.equal(
+      stockPrepWorkbenchLandingKey([], posture),
+      'confirmation-queue',
+      `D2: no codes, no landing change @ ${String(posture)}`,
+    )
+  }
+
+  // A platform admin is caught by the workbench ceiling FIRST, which is what keeps this rule
+  // equivalent to the browser's (whose operator-landing fold excludes a platform admin explicitly).
+  assert.equal(stockPrepWorkbenchLandingKey(['role:admin'], true), 'ops')
+  assert.equal(stockPrepWorkbenchLandingKey(['role:admin'], null), 'getting-started')
+
+  // AND IT GRANTS NOTHING. The rail vocabulary is a layout contract; no route may consult it.
+  assert.equal(
+    HTTP_ROUTES_SOURCE.includes('STOCK_PREP_RAIL_GROUPS')
+      || HTTP_ROUTES_SOURCE.includes('stockPrepWorkbenchLandingKey')
+      || HTTP_ROUTES_SOURCE.includes('satisfiesStockPrepRailGate'),
+    false,
+    'rail: no route consults the rail vocabulary — it decides layout, never access',
+  )
+}
+
 async function main() {
   await matrixGoldenHolds()
   await authorizedOperatorGetsRealResponses()
@@ -1420,6 +1540,7 @@ async function main() {
   // corroborates it. Running the source check first would let it short-circuit a real relaxation.
   await projectSyncRefusesTheTiersItAlwaysRefused()
   projectSyncGatesAreUnchanged()
+  theRailVocabularyAndTheLandingRuleHold()
   console.log('stock-preparation permission matrix (O2/R-11): all assertions passed')
 }
 

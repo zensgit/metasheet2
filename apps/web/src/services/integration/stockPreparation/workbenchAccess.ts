@@ -417,3 +417,194 @@ export function landsOnStockPrepProjectBoard(hasPermission: StockPrepPermissionP
   if (hasPermission(INTEGRATION_ADMIN)) return false
   return canOpenStockPrepProjectBoard(hasPermission)
 }
+
+// ---------------------------------------------------------------------------
+// P1-1 — THE LEFT RAIL (设计稿 §2.2) AND THE LANDING RULING (D2)
+// ---------------------------------------------------------------------------
+//
+// The tab strip became a grouped vertical rail. Structurally it is still ONE tablist of the same
+// tabs under the same testids; what is new is that the grouping, the per-item gate and the landing
+// item are now DATA rather than three restatements spread across a template, a computed and a
+// predicate. The manifest below is that data, and it is mirrored byte-for-byte by
+// `plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs`
+// (`STOCK_PREP_RAIL_GROUPS` / `stockPrepWorkbenchLandingKey`) with `stockPrepPermissionMatrix.spec.ts`
+// F-01 asserting the equality — the same cross-side tripwire the capability manifest above keeps.
+//
+// WHY A GATE TOKEN RATHER THAN A FUNCTION REFERENCE. The mirror has to be comparable as plain data,
+// and a function cannot cross that boundary. The token is resolved by `canOpenStockPrepRailItem`
+// below, which does nothing but call the named predicates — so a rail item and the predicate it is
+// gated on can never disagree, and the server-side mirror resolves the identical token set.
+
+/** Reachability alone: everyone who can OPEN `/stock-prep` sees the item. */
+export const STOCK_PREP_RAIL_GATE_ROUTE = 'route'
+/** The operator VALUE tier (`stock-prep:operate` ∧ `stock-prep:read`) — 今天要处理 / 项目备料. */
+export const STOCK_PREP_RAIL_GATE_OPERATOR_BOARD = 'operator-board'
+/** The workbench-scoped ceiling (`stock-prep:admin` and above) — the whole 【部署与接入】 group. */
+export const STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN = 'workbench-admin'
+/** Platform admin — the legacy MVP tabs, folded into 深度工具 but NOT re-tiered. */
+export const STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN = 'platform-admin'
+
+export type StockPrepRailGate =
+  | typeof STOCK_PREP_RAIL_GATE_ROUTE
+  | typeof STOCK_PREP_RAIL_GATE_OPERATOR_BOARD
+  | typeof STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN
+  | typeof STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN
+
+export interface StockPrepRailItem {
+  /** The view key — unchanged from the horizontal strip, so `stock-prep-tab-${key}` keeps its name. */
+  key: string
+  gate: StockPrepRailGate
+}
+
+export interface StockPrepRailGroup {
+  /** Group id. The group HEADING is not a tab: no `role="tab"`, no `stock-prep-tab-*` testid. */
+  group: string
+  items: readonly StockPrepRailItem[]
+  /**
+   * 深度工具 — the legacy MVP tabs, collapsed by default. They are FOLDED, not retired:
+   * `canUseLegacyMvpTabs` is untouched and every one of them still renders for a platform admin.
+   */
+  advancedGate?: StockPrepRailGate
+  advanced?: readonly string[]
+}
+
+export const STOCK_PREP_RAIL_GROUPS: readonly StockPrepRailGroup[] = Object.freeze([
+  Object.freeze({
+    group: 'work',
+    items: Object.freeze([
+      // 今天要处理 — the operator's landing. It renders the SAME component `project-board` does
+      // (StockPreparationProjectBoardView with an empty projectNo), so the P0 「无 projectNo 即首页」
+      // behaviour is not reimplemented here: this key just addresses it directly.
+      Object.freeze({ key: 'home', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
+      Object.freeze({ key: 'project-board', gate: STOCK_PREP_RAIL_GATE_OPERATOR_BOARD }),
+      Object.freeze({ key: 'confirmation-queue', gate: STOCK_PREP_RAIL_GATE_ROUTE }),
+    ]),
+  }),
+  Object.freeze({
+    group: 'deploy',
+    items: Object.freeze([
+      Object.freeze({ key: 'getting-started', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+      Object.freeze({ key: 'install', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+      Object.freeze({ key: 'ops', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+    ]),
+    advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
+    advanced: Object.freeze([
+      'dashboard',
+      'project-workspace',
+      'bom-snapshot-diff',
+      'material-mapping',
+      'unit-conversion',
+      'prep-line',
+      'exception-queue',
+    ]),
+  }),
+  Object.freeze({
+    group: 'help',
+    items: Object.freeze([
+      // 怎么用这个页面 + 错误码对照. One tab, two sections: the static card and the existing
+      // (self-contained, prop-free) code drawer. A second tab would have been a second key for a
+      // disclosure that is already one click away inside this one.
+      Object.freeze({ key: 'help', gate: STOCK_PREP_RAIL_GATE_ROUTE }),
+    ]),
+  }),
+])
+
+/**
+ * 今天要处理 — same tier as 项目备料, because it is the same component reading the same directory.
+ * Delegated rather than restated so the two can never be gated differently.
+ */
+export function canOpenStockPrepHome(hasPermission: StockPrepPermissionProbe): boolean {
+  return canOpenStockPrepProjectBoard(hasPermission)
+}
+
+/** 开始使用 — the wizard. The whole 【部署与接入】 group rides `canOpenStockPrepInstallView`. */
+export function canOpenStockPrepGettingStarted(hasPermission: StockPrepPermissionProbe): boolean {
+  return canOpenStockPrepInstallView(hasPermission)
+}
+
+/**
+ * 记录与排查 — the ops panel. Same tier as the install view it sits beside: every cell it reads is
+ * either the read-tier preflight / source binding / pack catalog, or an admin-tier read that renders
+ * its own 「这一格看不了」 line rather than a page-level error.
+ */
+export function canOpenStockPrepOpsPanel(hasPermission: StockPrepPermissionProbe): boolean {
+  return canOpenStockPrepInstallView(hasPermission)
+}
+
+/**
+ * 帮助 — static copy plus the error-code dictionary. Both are values-free and NEITHER issues a
+ * request, so the gate is exactly reachability: whoever can open `/stock-prep` can read it.
+ */
+export function canOpenStockPrepHelp(hasPermission: StockPrepPermissionProbe): boolean {
+  return hasPermission(STOCK_PREP_ROUTE_PERMISSION)
+}
+
+/** Resolve one rail item's gate token. The ONLY place a token becomes a permission decision. */
+export function canOpenStockPrepRailItem(
+  gate: StockPrepRailGate,
+  hasPermission: StockPrepPermissionProbe,
+): boolean {
+  if (gate === STOCK_PREP_RAIL_GATE_ROUTE) return canOpenStockPrepHelp(hasPermission)
+  if (gate === STOCK_PREP_RAIL_GATE_OPERATOR_BOARD) return canOpenStockPrepHome(hasPermission)
+  if (gate === STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN) return canOpenStockPrepGettingStarted(hasPermission)
+  if (gate === STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN) return canUseLegacyMvpTabs(hasPermission)
+  // An unknown token is a refusal, never a looser default — the same posture the server's
+  // `satisfiesStockPrepAccess` takes for a mistyped code.
+  return false
+}
+
+export type StockPrepLandingKey = 'getting-started' | 'ops' | 'home' | 'confirmation-queue'
+
+/** Every value `stockPrepLandingKey` can return, in decision order. Mirrored server-side. */
+export const STOCK_PREP_LANDING_KEYS: readonly StockPrepLandingKey[] = Object.freeze([
+  'getting-started',
+  'ops',
+  'home',
+  'confirmation-queue',
+])
+
+/**
+ * D2=A — WHERE EACH PRINCIPAL LANDS.
+ *
+ * `deploymentReady` is the shell's reading of the EXISTING read-tier preflight
+ * (`readStockPreparationPreflight`, `preflight.ready && preflight.blockerCount === 0`). It is a
+ * THREE-valued input on purpose:
+ *
+ *   true   the deployment answered and it is installed          -> 记录与排查 (「总览」)
+ *   false  the deployment answered and it is not installed yet  -> 开始使用
+ *   null   we could not read it (403, 500, offline, not asked)  -> 开始使用
+ *
+ * `null` deliberately lands on 开始使用 rather than 记录与排查: 「看不到」 is not 「装完了」, and an
+ * admin sent to a health page about a deployment nobody could read would be told a deployment story
+ * we do not actually have. Sending them to the wizard costs one click and states the truth.
+ *
+ * A non-admin never reaches the preflight branch at all — the argument is not consulted for them —
+ * so no operator's landing depends on a read they cannot make.
+ */
+export function stockPrepLandingKey(
+  hasPermission: StockPrepPermissionProbe,
+  deploymentReady: boolean | null,
+): StockPrepLandingKey {
+  if (canOpenStockPrepInstallView(hasPermission)) {
+    return deploymentReady === true ? 'ops' : 'getting-started'
+  }
+  // 一线 (operate ∧ read, no workbench-admin ceiling) lands on 今天要处理 — the page they came for.
+  // `landsOnStockPrepProjectBoard` is reused verbatim rather than re-derived: the tier is identical,
+  // only the key it names moved from 项目备料 to 今天要处理 (which renders the same component with no
+  // project open, exactly what 项目备料 did on a bare mount before this wave).
+  if (landsOnStockPrepProjectBoard(hasPermission)) return 'home'
+  // Everyone else — the values-free `stock-prep:read` queue watcher — keeps today's landing.
+  return 'confirmation-queue'
+}
+
+/**
+ * 开始使用 is this principal's landing. Named separately because D2 is stated in those words and a
+ * spec that asserts the ruling should be able to say so; it is one expression over the resolver
+ * above, so the two can never disagree.
+ */
+export function landsOnStockPrepGettingStarted(
+  hasPermission: StockPrepPermissionProbe,
+  deploymentReady: boolean | null,
+): boolean {
+  return stockPrepLandingKey(hasPermission, deploymentReady) === 'getting-started'
+}

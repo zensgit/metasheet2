@@ -315,20 +315,32 @@ describe('项目备料页 — the operator project board', () => {
     }
   })
 
-  it('B-01: an operator LANDS on the board; a platform admin keeps 确认队列', async () => {
+  // P1-1 / D2=A (2026-09-08). This case is about WHOSE LANDING IS WHOSE, and both halves still say
+  // exactly that — the keys they name moved:
+  //   * the operator lands on 今天要处理 rather than 项目备料. Same component, same pixels: P0 already
+  //     rendered the task home inside the board whenever no project was open, and P1-1 gave that
+  //     page its own rail item. `landsOnStockPrepProjectBoard` — the tier predicate, unchanged — is
+  //     still asserted, because it is still what decides that this actor gets the operator landing.
+  //   * the platform admin no longer keeps 确认队列. That is the D2 ruling itself: landing an admin
+  //     on an empty queue was the documented dead end (设计稿 §2.3 A1). They land on 开始使用 here
+  //     because this file's `routeApi` answers the deployment preflight with `{}`, i.e. not ready —
+  //     and a not-ready (or unreadable) deployment lands on the wizard, never on the health page.
+  it('B-01: an operator LANDS on 今天要处理; a platform admin lands where D2 sends them', async () => {
     h.permissions = ['stock-prep:read', 'stock-prep:operate']
     h.roles = []
     let root = mount(StockPreparationWorkspace)
     await flush()
-    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-board')
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
     expect(landsOnStockPrepProjectBoard(realHasPermission)).toBe(true)
+    // ...and 项目备料 is still one click away, still its own rail item.
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-board"]')).not.toBeNull()
     remount()
 
     h.permissions = ['integration:admin']
     h.roles = ['admin']
     root = mount(StockPreparationWorkspace)
     await flush()
-    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('getting-started')
     expect(landsOnStockPrepProjectBoard(realHasPermission)).toBe(false)
   })
 
