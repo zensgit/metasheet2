@@ -3,6 +3,7 @@
 Base: `6624cd74056a09d25958d2fda2768f5022bc313d`.
 Branch: `codex/elearning-app-installation-20260909`.
 Status: local implementation, not deployed; publication/merged-main acceptance pending.
+Verified product commit: `958c0b1d1fb72b8977dc09c9a9dc88dac57a9ba8`.
 
 ## Implemented
 
@@ -39,18 +40,29 @@ Status: local implementation, not deployed; publication/merged-main acceptance p
 - OpenAPI focused 18/18, canonical build/SDK generation/guard passed.
 - Official provenance helper: only workflow fingerprint changed; frozen/live equal.
   Positive provenance and complete sealed-export S5 chain passed.
-- Core tsc and Web application tsconfig typecheck passed. Source ESLint passed using
-  existing pnpm-store parser modules via NODE_PATH; no package/lockfile edits.
+- Full Web `pnpm --filter @metasheet/web run type-check` and core
+  `pnpm --filter @metasheet/core-backend exec tsc --noEmit` passed.
+- Web production build passed (Vite 5.4.21); only the nonblocking chunk-size advisory
+  remains. This is a local build, not deployment evidence.
+- After isolated dependency repair, source Web ESLint passed without NODE_PATH;
+  installation/admin/learner Web neighbors passed 6 files / 149 tests, backend
+  focused tests passed 4 files / 41 tests, and boot/runtime neighbors passed
+  3 files / 24 tests. Wiring passed 15/15. These overlap earlier runs.
 - Independent read-only review found two UI P2s (stale-principal write and learner
   controls), both fixed and re-reviewed closed; limited re-review P1/P2=0.
 - All owned scratch databases dropped with drained=true, forced=false,
   residualBackends=0; `elearning_app_` database prefix and backend residue both zero.
 
+## Dependency verification correction
+
+- The initial full Web typecheck failed because reused node_modules symlinks resolved
+  Vite 7 while this branch's lockfile requires Vite 5. Only this worktree's verified
+  dependency symlinks were unlinked, then `pnpm install --frozen-lockfile --ignore-scripts`
+  installed the locked dependencies. No source, package manifest or lockfile changed;
+  other worktrees were untouched. The full command subsequently passed as recorded above.
+
 ## Honest remaining boundaries
 
-- Full `apps/web` type-check command fails in unchanged vite.config.ts due to linked
-  dependencies resolving incompatible Vite 5/Vite 7 plugin types. Application-only
-  vue-tsc passes; full command is NOT claimed green. No shared dependency repair made.
 - New behavior requires remote exact-head CI, UI visual acceptance and staging testing.
 - Notification delivery PR #5572 is separate and not included in this base. Installation
   opt-in guards the existing worker, not proof that the pending channel is deployed.
