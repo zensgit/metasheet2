@@ -1,11 +1,11 @@
 <template>
   <PageShell width="default">
-    <PageHeader class="template-center__header" title="审批模板">
+    <PageHeader class="template-center__header" :title="t.title">
       <template #actions>
         <div class="template-center__toolbar">
           <el-select
             v-model="categoryFilter"
-            placeholder="全部分类"
+            :placeholder="t.categoryFilterPlaceholder"
             clearable
             data-testid="template-center-category-filter"
             class="ms-w-160 ms-mr-12"
@@ -20,7 +20,7 @@
           </el-select>
           <el-input
             v-model="searchText"
-            placeholder="搜索模板名称"
+            :placeholder="t.searchPlaceholder"
             clearable
             class="ms-w-240"
             @clear="handleSearch"
@@ -37,7 +37,7 @@
             data-testid="template-center-new-button"
             @click="createTemplate"
           >
-            新建模板
+            {{ t.newTemplateButton }}
           </el-button>
           <el-button
             v-if="canManageTemplates"
@@ -45,7 +45,7 @@
             data-testid="template-center-delegations-link"
             @click="$router.push('/approval-delegations')"
           >
-            委托管理
+            {{ t.delegationsButton }}
           </el-button>
         </div>
       </template>
@@ -58,7 +58,7 @@
       class="template-center__recent"
       data-testid="template-center-recent"
     >
-      <span class="template-center__recent-label">最近使用</span>
+      <span class="template-center__recent-label">{{ t.recentLabel }}</span>
       <el-tag
         v-for="entry in recentTemplates"
         :key="entry.templateId"
@@ -81,15 +81,15 @@
       @close="store.error = null"
     >
       <template #default>
-        <el-button type="primary" link @click="loadData">重新加载</el-button>
+        <el-button type="primary" link @click="loadData">{{ t.reload }}</el-button>
       </template>
     </el-alert>
 
     <el-tabs v-model="statusTab" class="template-center__tabs" @tab-change="handleTabChange">
-      <el-tab-pane label="全部" name="all" />
-      <el-tab-pane label="已发布" name="published" />
-      <el-tab-pane label="草稿" name="draft" />
-      <el-tab-pane label="已归档" name="archived" />
+      <el-tab-pane :label="t.tabAll" name="all" />
+      <el-tab-pane :label="t.tabPublished" name="published" />
+      <el-tab-pane :label="t.tabDraft" name="draft" />
+      <el-tab-pane :label="t.tabArchived" name="archived" />
     </el-tabs>
 
     <!-- G-B2-17: admin path unchanged — the management table stays exactly as before. -->
@@ -103,13 +103,13 @@
       highlight-current-row
       @row-click="handleRowClick"
     >
-      <el-table-column prop="name" label="模板名称" min-width="200" />
-      <el-table-column prop="description" label="描述" min-width="180">
+      <el-table-column prop="name" :label="t.colName" min-width="200" />
+      <el-table-column prop="description" :label="t.colDescription" min-width="180">
         <template #default="{ row }">
           {{ row.description ?? '-' }}
         </template>
       </el-table-column>
-      <el-table-column label="分类" width="120">
+      <el-table-column :label="t.colCategory" width="120">
         <template #default="{ row }">
           <el-tag
             v-if="row.category"
@@ -120,32 +120,32 @@
           >
             {{ row.category }}
           </el-tag>
-          <span v-else class="template-center__category-empty">未分组</span>
+          <span v-else class="template-center__category-empty">{{ t.categoryEmpty }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="可见范围" width="160">
+      <el-table-column :label="t.colVisibility" width="160">
         <template #default="{ row }">
           <el-tag size="small" effect="plain" data-testid="template-center-row-visibility">
             {{ visibilityScopeLabel(row.visibilityScope) }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="100">
+      <el-table-column :label="t.colStatus" width="100">
         <template #default="{ row }">
-          <StatusTag domain="approvalTemplate" :status="row.status" size="sm" force-locale="zh" />
+          <StatusTag domain="approvalTemplate" :status="row.status" size="sm" />
         </template>
       </el-table-column>
-      <el-table-column label="最近更新" width="180">
+      <el-table-column :label="t.colUpdated" width="180">
         <template #default="{ row }">
           {{ formatDate(row.updatedAt) }}
         </template>
       </el-table-column>
-      <el-table-column label="创建时间" width="180">
+      <el-table-column :label="t.colCreated" width="180">
         <template #default="{ row }">
           {{ formatDate(row.createdAt) }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="280" fixed="right">
+      <el-table-column :label="t.colActions" width="280" fixed="right">
         <template #default="{ row }">
           <el-button
             v-if="row.status === 'published' && canWrite"
@@ -153,7 +153,7 @@
             size="small"
             @click.stop="startApproval(row.id)"
           >
-            发起审批
+            {{ t.startApproval }}
           </el-button>
           <el-button
             v-if="canManageTemplates"
@@ -162,7 +162,7 @@
             data-testid="template-center-clone-button"
             @click.stop="handleClone(row)"
           >
-            克隆
+            {{ t.clone }}
           </el-button>
           <el-button
             v-if="canManageTemplates && row.status === 'published'"
@@ -171,7 +171,7 @@
             data-testid="template-center-archive-button"
             @click.stop="handleArchive(row)"
           >
-            停用
+            {{ t.archive }}
           </el-button>
           <el-button
             v-if="canManageTemplates && row.status === 'archived'"
@@ -180,13 +180,13 @@
             data-testid="template-center-unarchive-button"
             @click.stop="handleUnarchive(row)"
           >
-            启用
+            {{ t.unarchive }}
           </el-button>
         </template>
       </el-table-column>
       <template #empty>
         <el-empty
-          :description="searchText ? '未找到匹配的模板' : '暂无审批模板，点击新建模板开始'"
+          :description="searchText ? t.emptyTableSearch : t.emptyTableDefault"
           :image-size="100"
         />
       </template>
@@ -212,10 +212,10 @@
         >
           <div class="template-center__gallery-card-head">
             <span class="template-center__gallery-card-name">{{ tpl.name }}</span>
-            <StatusTag domain="approvalTemplate" :status="tpl.status" size="sm" force-locale="zh" />
+            <StatusTag domain="approvalTemplate" :status="tpl.status" size="sm" />
           </div>
           <p class="template-center__gallery-card-desc">
-            {{ tpl.description || '暂无描述' }}
+            {{ tpl.description || t.noDescription }}
           </p>
           <div class="template-center__gallery-card-footer">
             <el-tag
@@ -227,7 +227,7 @@
             >
               {{ tpl.category }}
             </el-tag>
-            <span v-else class="template-center__category-empty">未分组</span>
+            <span v-else class="template-center__category-empty">{{ t.categoryEmpty }}</span>
             <el-button
               v-if="tpl.status === 'published' && canWrite"
               type="primary"
@@ -235,7 +235,7 @@
               data-testid="template-center-gallery-start-button"
               @click="startApproval(tpl.id)"
             >
-              发起申请
+              {{ t.galleryStart }}
             </el-button>
           </div>
         </el-card>
@@ -243,7 +243,7 @@
       <EmptyState
         v-else
         data-testid="template-center-gallery-empty"
-        :title="searchText || categoryFilter ? '未找到匹配的模板' : '暂无可用的审批模板'"
+        :title="searchText || categoryFilter ? t.emptyTableSearch : t.emptyGalleryDefault"
       />
     </div>
 
@@ -283,11 +283,20 @@ import { listRecentTemplates, type RecentTemplateEntry } from '../../approvals/r
 import { useAuth } from '../../composables/useAuth'
 import { filterGalleryTemplates } from '../../approvals/templateGalleryFilter'
 import { templateArchiveConfirmMessage, templateUnarchiveConfirmMessage } from '../../approvals/templateArchiveConfirm'
+import { useLocale } from '../../composables/useLocale'
+import { ZH, EN } from './templateCenterLabels'
 
 const router = useRouter()
 const store = useApprovalTemplateStore()
 const { canWrite, canManageTemplates } = useApprovalPermissions()
 const recentTemplates = ref<RecentTemplateEntry[]>([])
+
+// Report item O-8 (approval UI locale consistency) — this page previously never called
+// useLocale() at all; every string below was an unconditional Chinese literal regardless of the
+// app shell's locale. `t` follows the same shared useLocale() singleton App.vue reads, mirroring
+// the ZH/EN + computed convention ApprovalBatchTransferView.vue established in this directory.
+const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? ZH : EN))
 
 const statusTab = ref<'all' | ApprovalTemplateStatus>('all')
 const searchText = ref('')
@@ -312,19 +321,19 @@ const visibleGalleryTemplates = computed(() =>
 )
 
 function visibilityScopeLabel(scope: ApprovalTemplateListItemDTO['visibilityScope']) {
-  if (!scope || scope.type === 'all') return '全员可见'
+  if (!scope || scope.type === 'all') return t.value.visibilityAll
   const count = scope.ids?.length ?? 0
   const map: Record<string, string> = {
-    dept: '部门',
-    role: '角色',
-    user: '用户',
+    dept: t.value.visibilityDept,
+    role: t.value.visibilityRole,
+    user: t.value.visibilityUser,
   }
   return `${map[scope.type] ?? scope.type} ${count}`
 }
 
 function formatDate(dateStr: string) {
   if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN')
+  return new Date(dateStr).toLocaleString(isZh.value ? 'zh-CN' : 'en-US')
 }
 
 function loadData() {
@@ -388,12 +397,12 @@ async function handleClone(row: ApprovalTemplateListItemDTO) {
   cloningId.value = row.id
   try {
     const cloned = await cloneTemplate(row.id)
-    ElMessage.success(`已克隆模板：${cloned.name}`)
+    ElMessage.success(`${t.value.clonedPrefix}${cloned.name}`)
     // Refresh categories in the background; navigation should not wait on it.
     void loadCategories()
     router.push({ path: `/approval-templates/${cloned.id}` })
   } catch (e: any) {
-    ElMessage.error(e?.message ?? '克隆模板失败')
+    ElMessage.error(e?.message ?? t.value.cloneError)
   } finally {
     cloningId.value = null
   }
@@ -414,8 +423,8 @@ async function handleArchive(row: ApprovalTemplateListItemDTO) {
   try {
     await ElMessageBox.confirm(
       templateArchiveConfirmMessage(row.name, usage),
-      '停用模板',
-      { confirmButtonText: '停用', cancelButtonText: '取消', type: 'warning' },
+      t.value.archiveDialogTitle,
+      { confirmButtonText: t.value.archive, cancelButtonText: t.value.cancel, type: 'warning' },
     )
   } catch {
     return
@@ -424,9 +433,9 @@ async function handleArchive(row: ApprovalTemplateListItemDTO) {
   try {
     const updated = await archiveTemplate(row.id)
     row.status = updated.status
-    ElMessage.success('已停用模板')
+    ElMessage.success(t.value.archiveSuccess)
   } catch (e: any) {
-    ElMessage.error(e?.message ?? '停用模板失败')
+    ElMessage.error(e?.message ?? t.value.archiveError)
   } finally {
     archivingId.value = null
   }
@@ -437,8 +446,8 @@ async function handleUnarchive(row: ApprovalTemplateListItemDTO) {
   try {
     await ElMessageBox.confirm(
       templateUnarchiveConfirmMessage(row.name),
-      '启用模板',
-      { confirmButtonText: '启用', cancelButtonText: '取消', type: 'info' },
+      t.value.unarchiveDialogTitle,
+      { confirmButtonText: t.value.unarchive, cancelButtonText: t.value.cancel, type: 'info' },
     )
   } catch {
     return
@@ -447,9 +456,9 @@ async function handleUnarchive(row: ApprovalTemplateListItemDTO) {
   try {
     const updated = await unarchiveTemplate(row.id)
     row.status = updated.status
-    ElMessage.success('已启用模板')
+    ElMessage.success(t.value.unarchiveSuccess)
   } catch (e: any) {
-    ElMessage.error(e?.message ?? '启用模板失败')
+    ElMessage.error(e?.message ?? t.value.unarchiveError)
   } finally {
     archivingId.value = null
   }

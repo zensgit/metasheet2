@@ -413,7 +413,12 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/TemplateAuthoringView.vue', "label: node.name?.trim() || '未命名节点',"],
     ['src/views/approval/TemplateDetailView.vue', "node?.name?.trim() || (node ? nodeTypeLabel(node.type) : '流程节点')"],
     ['src/views/approval/TemplateDetailView.vue', '{{ node.name ?? node.key }}'],
-    ['src/views/approval/TemplateDetailView.vue', '模板 Key: {{ template.key }}'],
+    // Report item O-8 continuation (PR #5545, TemplateDetailView.vue i18n retrofit): the label
+    // text moved from an inline "模板 Key:" literal to a locale-aware `t.metaKeyLabel` lookup —
+    // the `.key` mustache itself is unchanged (still a structural template key, not a member
+    // identity), only its surrounding label text became bilingual. Updated to match, same
+    // disposition.
+    ['src/views/approval/TemplateDetailView.vue', '{{ t.metaKeyLabel }} {{ template.key }}'],
     ['src/approvals/components/ApprovalCanvasNodeInspector.vue', '{{ graphNodeLabel(node.key) }}'],
     ['src/approvals/components/ApprovalFlowCanvas.vue', "nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval')"],
     ['src/approvals/components/ApprovalFlowCanvas.vue', '{{ canvasNodeSummary(pos.key) }}'],
