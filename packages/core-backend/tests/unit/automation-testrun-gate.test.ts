@@ -353,6 +353,25 @@ describe('G8 — test-run route capability gate', () => {
     expect(svc.testRun).not.toHaveBeenCalled()
   })
 
+  it('fails CLOSED (503) when the DB reports a missing table in Chinese — SQLSTATE, not prose', async () => {
+    // 222 测试机 lc_messages=Chinese (Simplified)_China.936：PG 的散文是「关系 "x" 不存在」，
+    // 英文正则 /does not exist/ 匹配不到，pre-migration 的 DB 会被误判成 500。
+    resolveSheetCapabilities.mockRejectedValue(
+      Object.assign(new Error('关系 "spreadsheet_permissions" 不存在'), { code: '42P01' }),
+    )
+    const svc = makeService()
+
+    pinned.setApp(buildApp(svc))
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({})
+
+    expect(res.status).toBe(503)
+    expect(res.body?.error?.code).toBe('DB_NOT_READY')
+    // 不管 503 还是 500，能力解析失败永远不放行 testRun。
+    expect(svc.testRun).not.toHaveBeenCalled()
+  })
+
   it('fails CLOSED (500, values-free) on a non-transient resolution error', async () => {
     resolveSheetCapabilities.mockRejectedValue(new Error('unexpected TypeError: cannot read x of undefined at /srv/app/secret-path'))
     const svc = makeService()
