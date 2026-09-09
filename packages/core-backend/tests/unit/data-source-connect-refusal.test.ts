@@ -80,6 +80,81 @@ describe('DataSourceManager.connectDataSource — coded, values-free refusal (#2
     expectValuesFree({ message: err.message, ...err })
   })
 
+  // The failure class that has NO `connectionError`: every adapter's driver-package-missing guard
+  // throws BEFORE the try block that calls onError (MSSQLAdapter.ts:217 `mssql package is not
+  // installed`, PostgresAdapter.ts:74, MySQLAdapter.ts:195, HTTPAdapter.ts:134), so
+  // `adapter.connectionError` stays null. If the manager logged shape only, this cause would be
+  // readable NOWHERE — not in the response (fixed sentence), not in 「测试连接」 (same null
+  // connectionError), not in the log. The refusal must stay values-free AND the log must carry it.
+  it('still logs the cause when the failure never reached onError (connectionError === null)', async () => {
+    const m = new DataSourceManager()
+    await m.addDataSource(sqlServerConfig('mssql-no-driver'), { ownerId: 'alice' })
+    const adapter = m.getDataSource('mssql-no-driver')
+    // NOT via onError — exactly MSSQLAdapter.ts:217's early throw.
+    vi.spyOn(adapter, 'connect').mockRejectedValue(new Error('mssql package is not installed'))
+    expect(adapter.connectionError).toBeNull()
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const err = await m.connectDataSource('mssql-no-driver').then(
+      () => { throw new Error('expected connectDataSource to reject') },
+      (e: unknown) => e as Error & { status?: number; code?: string },
+    )
+
+    // Client side unchanged: still the fixed 503.
+    expect(err.status).toBe(503)
+    expect(err.code).toBe(DATA_SOURCE_UNAVAILABLE_CODE)
+    expect(err.message).toBe(DATA_SOURCE_UNAVAILABLE_MESSAGE)
+    // Server side: the cause survives in the log.
+    const call = logged.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('Connect failed for mssql-no-driver'),
+    )
+    expect(call).toBeDefined()
+    expect((call?.[1] as { redactedCause?: unknown }).redactedCause).toBe('mssql package is not installed')
+  })
+
+  it('redacts the fallback message, so a pre-onError throw cannot log a secret', async () => {
+    const PASSWORD = 'SuperSecretPw!2026'
+    const m = new DataSourceManager()
+    await m.addDataSource(
+      { ...sqlServerConfig('mssql-secret'), credentials: { username: 'plm_reader', password: PASSWORD } },
+      { ownerId: 'alice' },
+    )
+    const adapter = m.getDataSource('mssql-secret')
+    vi.spyOn(adapter, 'connect').mockRejectedValue(
+      new Error(`driver bootstrap failed (password=${PASSWORD})`), // no onError -> no connectionError
+    )
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await expect(m.connectDataSource('mssql-secret')).rejects.toMatchObject({ status: 503 })
+
+    const call = logged.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('Connect failed for mssql-secret'),
+    )
+    const cause = (call?.[1] as { redactedCause?: unknown }).redactedCause as string
+    expect(cause).toContain('driver bootstrap failed')
+    expect(cause).not.toContain(PASSWORD)
+    expect(cause).toContain('***')
+  })
+
+  it('prefers the onError-recorded redacted cause over the raw message', async () => {
+    const m = new DataSourceManager()
+    await m.addDataSource(sqlServerConfig('mssql-onerror'), { ownerId: 'alice' })
+    const adapter = m.getDataSource('mssql-onerror')
+    vi.spyOn(adapter, 'connect').mockImplementation(async () => {
+      // What a real adapter does: record the redacted cause, then rethrow the wrapped driver text.
+      await (adapter as unknown as { onError(e: Error): Promise<void> }).onError(new Error('recorded cause'))
+      throw new Error(DRIVER_TEXT)
+    })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await expect(m.connectDataSource('mssql-onerror')).rejects.toMatchObject({ status: 503 })
+
+    const call = logged.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('Connect failed for mssql-onerror'),
+    )
+    expect((call?.[1] as { redactedCause?: unknown }).redactedCause).toBe('recorded cause')
+  })
+
   it('a piggy-backing caller sharing the in-flight connect gets the SAME values-free refusal', async () => {
     const m = new DataSourceManager()
     await m.addDataSource(sqlServerConfig('mssql-shared'), { ownerId: 'alice' })

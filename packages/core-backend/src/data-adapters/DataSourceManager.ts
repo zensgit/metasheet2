@@ -91,7 +91,36 @@ export const DATA_SOURCE_UNAVAILABLE_CODE = 'SOURCE_UNAVAILABLE'
 export const DATA_SOURCE_UNAVAILABLE_MESSAGE =
   '数据源当前无法连接，请先「测试连接」查看原因 / Data source is currently unreachable; run "Test connection" for details'
 
-function sourceUnavailableError(id: string, cause: unknown, redactedCause: string | null): Error {
+// The cause as it may be LOGGED: never the raw message when a redacted one exists.
+// `connectionError` is only populated by BaseAdapter.onError, and every adapter has a connect()
+// branch that throws BEFORE reaching it — the driver-package-missing guard (MSSQLAdapter.ts:217,
+// PostgresAdapter.ts:74, MySQLAdapter.ts:195, HTTPAdapter.ts:134). On that branch `connectionError`
+// is null, so logging shape-only would leave the failure explainable NOWHERE: the client gets a
+// fixed sentence and the 「测试连接」 the sentence points at reads the same null `connectionError`.
+// Fall back to the cause's own message, put through the adapter's OWN redactSecrets (via the public
+// `redactCause`), so an adapter that embeds a secret in a pre-onError throw still cannot log it.
+function loggableCause(
+  adapter: Pick<BaseDataAdapter, 'connectionError' | 'redactCause'>,
+  cause: unknown
+): string | null {
+  const recorded = adapter.connectionError
+  if (recorded) return recorded
+  const raw = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : null
+  if (!raw) return null
+  try {
+    return adapter.redactCause(raw)
+  } catch {
+    // A logging helper must never break the refusal itself: a broken redactor costs the log line,
+    // not the 503. Returning null also guarantees an unredacted message can never be logged.
+    return null
+  }
+}
+
+function sourceUnavailableError(
+  id: string,
+  cause: unknown,
+  adapter: Pick<BaseDataAdapter, 'connectionError' | 'redactCause'>
+): Error {
   // A deliberate coded refusal (arm-binding / provisioning / K3 fence) already carries its own
   // status+code and is values-free by construction — never downgrade it to a generic 503.
   if (cause instanceof Error) {
@@ -101,12 +130,13 @@ function sourceUnavailableError(id: string, cause: unknown, redactedCause: strin
       return cause
     }
   }
-  // Log the cause by SHAPE only: name + driver code, plus the already-redacted connectionError that
-  // BaseAdapter.onError recorded via redactSecrets. Never the raw message.
+  // Log the cause: name + driver code + a REDACTED message (onError's `connectionError` when it
+  // exists, else the cause's message through the same redaction — see loggableCause above).
+  // Never the raw message.
   consoleLogger.error(`[DataSourceManager] Connect failed for ${id}`, {
     name: cause instanceof Error ? cause.name : typeof cause,
     driverCode: (cause as { code?: unknown } | null | undefined)?.code,
-    redactedCause,
+    redactedCause: loggableCause(adapter, cause),
   })
   return Object.assign(new Error(DATA_SOURCE_UNAVAILABLE_MESSAGE), {
     status: 503,
@@ -844,7 +874,7 @@ export class DataSourceManager extends EventEmitter {
       // refusal as the originator — otherwise a /schema landing while /select connects would still
       // surface the raw driver text this translation exists to suppress.
       return connectionPromise.catch((error: unknown) => {
-        throw sourceUnavailableError(id, error, adapter.connectionError)
+        throw sourceUnavailableError(id, error, adapter)
       })
     }
 
@@ -857,7 +887,7 @@ export class DataSourceManager extends EventEmitter {
       // VALUES-FREE REFUSAL (#2). See sourceUnavailableError above: a fixed 503 SOURCE_UNAVAILABLE
       // for the client, the cause to the log only. The callers that used to forward `error.message`
       // verbatim (routes /schema, /tables/:table, /:id/connect) now forward this fixed sentence.
-      throw sourceUnavailableError(id, error, adapter.connectionError)
+      throw sourceUnavailableError(id, error, adapter)
     } finally {
       this.connectionPool.delete(id)
     }
