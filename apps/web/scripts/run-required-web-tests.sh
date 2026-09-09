@@ -921,8 +921,8 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # SUBSTRING COLLISION, checked mechanically in both directions against every token already on the
 # final exec line at the time (369 before, 370 after on that exec line only; join backslash
 # continuations, drop comment lines, take every non-flag positional of the exec line's `vitest
-# run` command — the union across all thirteen `vitest run` commands in this file was larger
-# still): no existing token is a substring of `templateDetailI18n`, and it is not a substring of
+# run` command — the union across all `vitest run` commands in this file was larger still): no
+# existing token is a substring of `templateDetailI18n`, and it is not a substring of
 # any of them — in particular `templateCenterI18n` shares only the `template` prefix and the
 # `I18n` suffix, diverging at `Center`/`Detail`; the hyphenated `multitable-template-detail-view`
 # shares only "template-detail-view", not `templateDetailI18n`'s camelCase form. Matches exactly
