@@ -74,3 +74,25 @@ export const SheetViewGantt = outline('view-gantt', [rect(3, 3.6, 7, 2.2, 0.5), 
 export const SheetViewHierarchy = outline('view-hierarchy', [p('M8 3v3.2'), p('M4.4 9.6V8h7.2v1.6'), circ(8, 3.6, 1.1), circ(4.4, 11.4, 1.1), circ(11.6, 11.4, 1.1)])
 export const SheetCaretRight = outline('caret-right', p('M6 4.2 10.4 8 6 11.8'))
 export const SheetCaretBottom = outline('caret-bottom', p('M4.2 6 8 10.4 11.8 6'))
+export const SheetCaretTop = outline('caret-top', p('M4.2 10 8 5.6 11.8 10'))
+export const SheetCheckbox = outline('checkbox', rect(3.2, 3.2, 9.6, 9.6, 1.4))
+export const SheetCheckboxOn = outline('checkbox-on', [rect(3.2, 3.2, 9.6, 9.6, 1.4), p('M5.2 8.2 7.1 10.1 11 5.8')])
+export const SheetPin = outline('pin', [
+  p('M5.2 3.4h5.6l-1.2 4.2H6.4L5.2 3.4Z'),
+  line(5.4, 3.4, 10.6, 3.4),
+  line(8, 7.6, 8, 13),
+])
+const STAR_D = 'M8 2.6 9.7 6.2l4 .4-3 2.7.9 3.9L8 11.2l-3.6 2 .9-3.9-3-2.7 4-.4Z'
+export const SheetStar = outline('star', p(STAR_D))
+export const SheetStarFilled: FunctionalComponent = (_props, { attrs }) => h('svg', {
+  class: 'ms-sheet-icon',
+  viewBox: '0 0 16 16',
+  width: '1em',
+  height: '1em',
+  fill: 'currentColor',
+  stroke: 'none',
+  'aria-hidden': 'true',
+  'data-sheet-icon': 'star-filled',
+  ...attrs,
+}, p(STAR_D))
+SheetStarFilled.displayName = 'SheetIcon(star-filled)'

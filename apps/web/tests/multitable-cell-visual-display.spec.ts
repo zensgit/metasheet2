@@ -78,6 +78,10 @@ describe('MetaCellRenderer rating segments', () => {
     expect(segments.length).toBe(5)
     const filled = container.querySelectorAll('.meta-cell-renderer__rating-segment--filled')
     expect(filled.length).toBe(3)
+    expect(container.querySelectorAll('[data-sheet-icon="star-filled"]').length).toBe(3)
+    expect(container.querySelectorAll('[data-sheet-icon="star"]').length).toBe(2)
+    expect(container.textContent).not.toContain('★')
+    expect(container.textContent).not.toContain('☆')
 
     app.unmount()
     container.remove()
@@ -150,5 +154,32 @@ describe('MetaCellRenderer person avatar chip', () => {
     expect(container.textContent).toContain('Acme Supply')
     app.unmount()
     container.remove()
+  })
+})
+
+describe('MetaCellRenderer boolean outline', () => {
+  it('renders muted outline checkboxes instead of ☑/☐', async () => {
+    const checked = mount({
+      field: { id: 'fld_done', name: 'Done', type: 'boolean' },
+      value: true,
+    })
+    await nextTick()
+    expect(checked.container.querySelector('.meta-cell-renderer__bool--on')).not.toBeNull()
+    expect(checked.container.querySelector('[data-sheet-icon="checkbox-on"]')).not.toBeNull()
+    expect(checked.container.textContent).not.toContain('\u2611')
+    expect(checked.container.textContent).not.toContain('\u2610')
+    checked.app.unmount()
+    checked.container.remove()
+
+    const unchecked = mount({
+      field: { id: 'fld_done', name: 'Done', type: 'boolean' },
+      value: false,
+    })
+    await nextTick()
+    expect(unchecked.container.querySelector('[data-checked="false"]')).not.toBeNull()
+    expect(unchecked.container.querySelector('[data-sheet-icon="checkbox"]')).not.toBeNull()
+    expect(unchecked.container.querySelector('[data-sheet-icon="checkbox-on"]')).toBeNull()
+    unchecked.app.unmount()
+    unchecked.container.remove()
   })
 })

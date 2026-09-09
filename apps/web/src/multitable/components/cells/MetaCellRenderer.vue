@@ -45,7 +45,13 @@
 
     <!-- boolean -->
     <template v-else-if="field.type === 'boolean'">
-      <span class="meta-cell-renderer__bool">{{ value ? '\u2611' : '\u2610' }}</span>
+      <span
+        class="meta-cell-renderer__bool"
+        :class="{ 'meta-cell-renderer__bool--on': value }"
+        :data-checked="value ? 'true' : 'false'"
+      >
+        <component :is="value ? SheetCheckboxOn : SheetCheckbox" />
+      </span>
     </template>
 
     <!-- select / multiSelect -->
@@ -144,7 +150,7 @@
           class="meta-cell-renderer__rating-segment"
           :class="{ 'meta-cell-renderer__rating-segment--filled': i <= ratingGauge.filled }"
           aria-hidden="true"
-        >{{ i <= ratingGauge.filled ? '★' : '☆' }}</span>
+        ><component :is="i <= ratingGauge.filled ? SheetStarFilled : SheetStar" /></span>
       </span>
       <span v-else class="meta-cell-renderer__rating" :title="ratingTitle">{{ displayValue }}</span>
     </template>
@@ -218,6 +224,7 @@ import { resolveRatingFieldProperty, resolveButtonFieldProperty } from '../../ut
 import { percentGaugeAria, ratingGaugeAria } from '../../utils/meta-core-labels'
 import { qrSvgFromText } from '../../utils/qr-code'
 import { isRichLongTextField, richLongTextToPlainTextFE } from '../../utils/rich-longtext'
+import { SheetCheckbox, SheetCheckboxOn, SheetStar, SheetStarFilled } from '../../ui/sheet-chrome-icons'
 
 const props = defineProps<{
   field: MetaField
@@ -477,7 +484,14 @@ const conditionalClass = computed(() => {
   font-size: 13px;
   line-height: 1.4;
 }
-.meta-cell-renderer__bool { font-size: 16px; }
+.meta-cell-renderer__bool {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ms-sheet-icon-color, #6b7280);
+  font-size: 14px;
+}
+.meta-cell-renderer__bool--on { color: #4b5563; }
+.meta-cell-renderer__bool :deep(.ms-sheet-icon) { width: 14px; height: 14px; }
 .meta-cell-renderer__long-text {
   display: block;
   min-width: 0;
@@ -520,11 +534,17 @@ button.meta-cell-renderer__link--clickable:hover { background: rgba(37, 99, 235,
   font-feature-settings: 'tnum';
 }
 .meta-cell-renderer__rating {
-  color: #f5a623;
-  letter-spacing: 1px;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  color: var(--ms-sheet-icon-color, #6b7280);
 }
-.meta-cell-renderer__rating-segment { color: #d8dee9; }
-.meta-cell-renderer__rating-segment--filled { color: #f5a623; }
+.meta-cell-renderer__rating-segment {
+  display: inline-flex;
+  color: #d1d5db;
+}
+.meta-cell-renderer__rating-segment--filled { color: #6b7280; }
+.meta-cell-renderer__rating-segment :deep(.ms-sheet-icon) { width: 12px; height: 12px; }
 .meta-cell-renderer__gauge {
   display: inline-flex;
   align-items: center;

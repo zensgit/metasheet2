@@ -14,8 +14,8 @@
       <component :is="headerMarkIcon" />
     </span>
     <span class="meta-field-header__name" :title="field.name">{{ field.name }}</span>
-    <span v-if="sortDirection" class="meta-field-header__sort">
-      {{ sortDirection === 'asc' ? '\u25B2' : '\u25BC' }}
+    <span v-if="sortDirection" class="meta-field-header__sort" aria-hidden="true">
+      <component :is="sortDirection === 'asc' ? SheetCaretTop : SheetCaretBottom" />
     </span>
     <button
       type="button"
@@ -25,7 +25,7 @@
       :title="pinLabel"
       @click.stop="emit('toggle-freeze')"
       @mousedown.stop
-    >&#x1F4CC;</button>
+    ><SheetPin /></button>
     <div
       class="meta-field-header__resize"
       @mousedown.stop.prevent="onResizeStart"
@@ -40,12 +40,15 @@ import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel } from '../utils/meta-core-labels'
 import { fieldTypeHeaderMark } from '../utils/field-type-glyph'
 import {
+  SheetCaretBottom,
+  SheetCaretTop,
   SheetCheck,
   SheetClock,
   SheetFields,
   SheetFiles,
   SheetFilter,
   SheetLink,
+  SheetPin,
   SheetUser,
   SheetViewCalendar,
 } from '../ui/sheet-chrome-icons'
@@ -156,14 +159,25 @@ function onResizeStart(e: MouseEvent) {
 }
 .meta-field-header__icon :deep(.ms-sheet-icon) { width: 12px; height: 12px; }
 .meta-field-header__name { overflow: hidden; text-overflow: ellipsis; }
-.meta-field-header__sort { margin-left: 4px; font-size: 10px; color: var(--ms-color-info, #6b7280); }
-.meta-field-header__pin { border: none; background: none; cursor: pointer; padding: 0 2px; margin-left: 4px; font-size: 11px; line-height: 1; opacity: 0; transition: opacity 0.12s; vertical-align: middle; }
+.meta-field-header__sort {
+  display: inline-flex; align-items: center; margin-left: 4px;
+  color: var(--ms-sheet-icon-color, #6b7280);
+}
+.meta-field-header__sort :deep(.ms-sheet-icon) { width: 12px; height: 12px; }
+.meta-field-header__pin {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 12px; height: 12px; padding: 0; margin-left: 4px;
+  border: none; background: none; cursor: pointer;
+  color: var(--ms-sheet-icon-color, #6b7280);
+  opacity: 0; transition: opacity 0.12s; vertical-align: middle;
+}
+.meta-field-header__pin :deep(.ms-sheet-icon) { width: 12px; height: 12px; }
 .meta-field-header:hover .meta-field-header__pin { opacity: 0.4; }
 .meta-field-header__pin:hover { opacity: 0.85; }
 .meta-field-header__pin--on { opacity: 0.9; }
 .meta-field-header__resize { position: absolute; top: 0; right: -4px; width: 9px; height: 100%; cursor: col-resize; z-index: 2; }
-.meta-field-header__resize:hover { background: #409eff; opacity: 0.5; }
+.meta-field-header__resize:hover { background: rgba(37, 99, 235, 0.14); }
 .meta-field-header__resize::after { content: ''; position: absolute; top: 25%; left: 3px; width: 3px; height: 50%; border-left: 1px solid transparent; border-right: 1px solid transparent; }
-.meta-field-header__resize:hover::after { border-left-color: #fff; border-right-color: #fff; }
-.meta-field-header--drag-over { background: #ecf5ff; border-left: 2px solid #409eff; }
+.meta-field-header__resize:hover::after { border-left-color: rgb(32, 56, 107); border-right-color: rgb(32, 56, 107); }
+.meta-field-header--drag-over { background: rgba(37, 99, 235, 0.14); border-left: 2px solid rgba(37, 99, 235, 0.45); }
 </style>

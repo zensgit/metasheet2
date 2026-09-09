@@ -74,4 +74,26 @@ describe('field header type marks', () => {
     expect(header).toMatch(/\.meta-field-header__icon \{[\s\S]*width:\s*12px; height:\s*12px/)
     expect(header).not.toMatch(/width:\s*var\(--ms-sheet-icon-size,\s*16px\)/)
   })
+
+  it('uses a muted 12px outline pin and sort caret, never 📌 or EP blue', () => {
+    const root = mountHeader({ id: 'f5', name: 'Title', type: 'string' })
+    expect(root.querySelector('.meta-field-header__pin [data-sheet-icon="pin"]')).not.toBeNull()
+    expect(root.textContent).not.toContain('📌')
+    expect(root.querySelector('.meta-field-header__sort')).toBeNull()
+
+    const sorted = document.createElement('div')
+    document.body.appendChild(sorted)
+    const app = createApp({
+      setup: () => () => h('table', [h('thead', [h('tr', [h(MetaFieldHeader, {
+        field: { id: 'f6', name: 'Title', type: 'string' },
+        sortDirection: 'asc',
+        sortable: true,
+      })])])]),
+    })
+    app.mount(sorted)
+    mounts.push({ app, container: sorted })
+    expect(sorted.querySelector('.meta-field-header__sort [data-sheet-icon="caret-top"]')).not.toBeNull()
+    expect(sorted.textContent).not.toContain('\u25B2')
+    expect(sorted.textContent).not.toContain('\u25BC')
+  })
 })

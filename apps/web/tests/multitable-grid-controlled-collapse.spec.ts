@@ -50,16 +50,16 @@ describe('MetaGridTable group-collapse — controlled from parent', () => {
     const root = mountGrid({ collapsedGroupKeys: [] })
     expect(groupHeaders(root)).toHaveLength(2) // todo + done
     expect(dataRows(root)).toHaveLength(3)
-    // expanded glyph (▼) for both groups
-    expect(toggles(root).map((t) => t.textContent?.trim())).toEqual(['▼', '▼'])
+    // expanded caret for both groups
+    expect(toggles(root).map((t) => t.querySelector('[data-sheet-icon]')?.getAttribute('data-sheet-icon'))).toEqual(['caret-bottom', 'caret-bottom'])
   })
 
   it('hides the rows of a group whose key is in collapsedGroupKeys', () => {
     const root = mountGrid({ collapsedGroupKeys: ['todo'] })
     // only the "done" group's single row remains visible
     expect(dataRows(root)).toHaveLength(1)
-    // collapsed group shows ▶, expanded shows ▼
-    expect(toggles(root).map((t) => t.textContent?.trim())).toEqual(['▶', '▼'])
+    // collapsed group shows caret-right, expanded shows caret-bottom
+    expect(toggles(root).map((t) => t.querySelector('[data-sheet-icon]')?.getAttribute('data-sheet-icon'))).toEqual(['caret-right', 'caret-bottom'])
   })
 
   it('emits toggle-group with the group key on header click (does NOT mutate locally)', () => {

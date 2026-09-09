@@ -41,7 +41,9 @@
             <tr v-if="item.kind === 'header'" class="meta-grid__group-header" :class="`meta-grid__group-header--l${item.level}`" data-test="group-header" :data-group-path="item.path" :data-group-level="item.level" @click="toggleGroup(item.path)">
               <td :colspan="colSpan">
                 <span class="meta-grid__group-indent" :style="{ paddingLeft: `${item.level * 18}px` }">
-                  <span class="meta-grid__group-toggle">{{ item.collapsed ? '&#x25B6;' : '&#x25BC;' }}</span>
+                  <span class="meta-grid__group-toggle" aria-hidden="true">
+                    <component :is="item.collapsed ? SheetCaretRight : SheetCaretBottom" />
+                  </span>
                   <span class="meta-grid__group-label">{{ item.label }}</span>
                   <span class="meta-grid__group-count">({{ item.count }})</span>
                 </span>
@@ -403,6 +405,7 @@ import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
 import MetaFieldHeader from './MetaFieldHeader.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import { SheetCaretBottom, SheetCaretRight } from '../ui/sheet-chrome-icons'
 import {
   handleCommentAffordanceKeydown,
   resolveCommentAffordanceStateClass,
@@ -1556,7 +1559,12 @@ thead .meta-grid__check-col {
 .meta-grid__group-header--l1 td { background: var(--ms-bg-card, #fff); font-weight: 500; }
 .meta-grid__group-header--l2 td { background: var(--ms-bg-card, #fff); font-weight: 500; }
 .meta-grid__group-indent { display: inline-flex; align-items: center; }
-.meta-grid__group-toggle { display: inline-block; width: 16px; font-size: 10px; color: #999; }
+.meta-grid__group-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 12px; height: 12px; margin-right: 4px;
+  color: var(--ms-sheet-icon-color, #6b7280);
+}
+.meta-grid__group-toggle :deep(.ms-sheet-icon) { width: 12px; height: 12px; }
 .meta-grid__group-label { margin-right: 6px; }
 .meta-grid__group-count { font-weight: 400; color: #999; font-size: 12px; }
 .meta-grid--compact .meta-grid__cell { padding: 3px 8px; font-size: 12px; }
