@@ -677,7 +677,29 @@ button.meta-cell-renderer__link--clickable:hover { background: rgba(37, 99, 235,
   white-space: nowrap;
 }
 .meta-cell-renderer__button:disabled { opacity: 0.6; cursor: default; }
-.meta-cell-renderer__button--primary { background: #2563eb; color: #fff; }
-.meta-cell-renderer__button--secondary { background: #f1f5f9; color: #1f2937; border-color: #cbd5e1; }
-.meta-cell-renderer__button--danger { background: #ef4444; color: #fff; }
+.meta-cell-renderer__button--primary {
+  background: color-mix(in srgb, var(--ms-color-primary) 16%, transparent);
+  color: rgb(32, 56, 107);
+  border-color: color-mix(in srgb, var(--ms-color-primary) 22%, transparent);
+}
+.meta-cell-renderer__button--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ms-color-primary) 22%, transparent);
+}
+.meta-cell-renderer__button--secondary {
+  background: var(--ms-bg-page, #f5f6f8);
+  color: var(--ms-text-2, #4b5563);
+  border-color: var(--ms-sheet-hairline, #ebebeb);
+}
+.meta-cell-renderer__button--secondary:hover:not(:disabled) {
+  background: var(--ms-bg-card, #fff);
+  color: var(--ms-text-1, #111827);
+}
+.meta-cell-renderer__button--danger {
+  background: color-mix(in srgb, var(--ms-color-danger) 14%, transparent);
+  color: #9f3d3d;
+  border-color: transparent;
+}
+.meta-cell-renderer__button--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ms-color-danger) 20%, transparent);
+}
 </style>
