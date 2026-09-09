@@ -15,6 +15,8 @@ import express from 'express'
 import request from 'supertest'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { usePinnedServer } from '../utils/pinned-server'
+
 type QueryResult = { rows: any[]; rowCount?: number }
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
@@ -164,6 +166,10 @@ const ROUTES = [
   },
 ] as const
 
+// #4154: one pinned listener per suite file instead of supertest's per-request `app.listen(0)`,
+// so this new required-lane file cannot become an ephemeral-port cross-talk victim/collider.
+const pinned = usePinnedServer()
+
 describe('permission-subject hydration + PG locale guards (route level, mock pool)', () => {
   beforeEach(() => {
     vi.resetModules()
@@ -183,13 +189,18 @@ describe('permission-subject hydration + PG locale guards (route level, mock poo
         throw new Error(`Unhandled SQL in test: ${sql}`)
       })
 
-      const response = await request(app).get(route.url).expect(200)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).get(route.url).expect(200)
 
       expect(response.body.data.items).toEqual([route.expectedItem])
       const calls = pool.query.mock.calls.filter(([sql]) => String(sql).includes(route.marker))
       expect(calls).toHaveLength(1)
       expect(String(calls[0]?.[0])).not.toContain('r.description')
       expect(String(calls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
+      // JOIN 在还不够:SELECT 列表必须真的取组名/组描述,否则 subjectLabel 又退回裸 UUID。
+      // (mock 直接返回行,只有对 SQL 文本断言才能钉住这一步。)
+      expect(String(calls[0]?.[0])).toContain('g.name AS group_name')
+      expect(String(calls[0]?.[0])).toContain('g.description AS group_description')
     })
 
     test(`${route.name}: 中文 42703「字段 g.description 不存在」照样降级(丢 g JOIN,保留 r JOIN)`, async () => {
@@ -203,7 +214,8 @@ describe('permission-subject hydration + PG locale guards (route level, mock poo
         throw new Error(`Unhandled SQL in test: ${sql}`)
       })
 
-      const response = await request(app).get(route.url).expect(200)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).get(route.url).expect(200)
 
       expect(response.body.data.items).toEqual([])
       const calls = pool.query.mock.calls.filter(([sql]) => String(sql).includes(route.marker))
@@ -224,7 +236,8 @@ describe('permission-subject hydration + PG locale guards (route level, mock poo
         throw new Error(`Unhandled SQL in test: ${sql}`)
       })
 
-      await request(app).get(route.url).expect(200)
+      pinned.setApp(app)
+      const response = await request(pinned.url()).get(route.url).expect(200)
       const calls = pool.query.mock.calls.filter(([sql]) => String(sql).includes(route.marker))
       expect(calls).toHaveLength(2)
     })
@@ -244,7 +257,8 @@ describe('permission-subject hydration + PG locale guards (route level, mock poo
           throw new Error(`Unhandled SQL in test: ${sql}`)
         })
 
-        const response = await request(app).get(route.url).expect(500)
+        pinned.setApp(app)
+        const response = await request(pinned.url()).get(route.url).expect(500)
 
         expect(response.body.error.code).toBe('INTERNAL_ERROR')
         const calls = pool.query.mock.calls.filter(([sql]) => String(sql).includes(route.marker))
@@ -263,7 +277,10 @@ describe('permission-subject hydration + PG locale guards (route level, mock poo
       throw new Error(`Unhandled SQL in test: ${sql}`)
     })
 
-    const response = await request(app).get('/api/multitable/sheets/sheet_ops/field-permissions').expect(503)
+    pinned.setApp(app)
+    const response = await request(pinned.url())
+      .get('/api/multitable/sheets/sheet_ops/field-permissions')
+      .expect(503)
     expect(response.body.error.code).toBe('DB_NOT_READY')
   })
 })
