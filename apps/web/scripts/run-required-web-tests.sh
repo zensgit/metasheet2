@@ -918,15 +918,17 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # disposition/group — the `.key` mustache itself is unchanged, only its label text became
 # bilingual) after that census's own mechanical scan caught the literal going stale.
 #
-# SUBSTRING COLLISION, checked mechanically in both directions against every token already in this
-# file (369 before, 370 after; join backslash continuations, drop comment lines, take every
-# non-flag positional of each `vitest run` command): no existing token is a substring of
-# `templateDetailI18n`, and it is not a substring of any of them — in particular
-# `templateCenterI18n` shares only the `template` prefix and the `I18n` suffix, diverging at
-# `Center`/`Detail`; the hyphenated `multitable-template-detail-view` shares only
-# "template-detail-view", not `templateDetailI18n`'s camelCase form. Matches exactly one file
-# under apps/web/tests. Verified green in isolation (`npx vitest run templateDetailI18n
-# --reporter=dot` -> "Test Files 1 passed", 13/13) and in this batch before wiring.
+# SUBSTRING COLLISION, checked mechanically in both directions against every token already on the
+# final exec line at the time (369 before, 370 after on that exec line only; join backslash
+# continuations, drop comment lines, take every non-flag positional of the exec line's `vitest
+# run` command — the union across all thirteen `vitest run` commands in this file was larger
+# still): no existing token is a substring of `templateDetailI18n`, and it is not a substring of
+# any of them — in particular `templateCenterI18n` shares only the `template` prefix and the
+# `I18n` suffix, diverging at `Center`/`Detail`; the hyphenated `multitable-template-detail-view`
+# shares only "template-detail-view", not `templateDetailI18n`'s camelCase form. Matches exactly
+# one file under apps/web/tests. Verified green in isolation (`npx vitest run templateDetailI18n
+# --reporter=dot` -> "Test Files 1 passed", 13/13 then; 14/14 after a later coverage-gap fix added
+# one more test to the same file) and in this batch before wiring.
 # P3-4 (2026-09-08): the whole-execution re-run button on AutomationExecutionsView added
 # `apps/web/tests/automation-rerun-execution.spec.ts` (view-level: admin/state gating, confirm-
 # dialog consequence enumeration, cancel/confirm/failure paths, i18n, and a pin on the untouched
