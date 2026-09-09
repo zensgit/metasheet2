@@ -16,6 +16,8 @@ import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService, ICommentService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
+import { dispatchElearningNotification, isElearningNotificationDispatchEnabled } from './services/elearning-notification-dispatch'
+import { collectElearningNotificationEvents, checkElearningEventNotificationEligibility } from './services/elearning-notification-events'
 import {
   getWorkdayCalendarRegistry,
   type WorkdayCalendarPort,
@@ -2522,12 +2524,42 @@ export class MetaSheetServer {
           manifest.name === 'plugin-elearning'
             ? {
                 check: async (
-                  input: import('./services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput,
+                  input: import('./services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput
+                    | { orgId: string; deliveryId: string; recipientUserId: string },
                 ) => {
+                  if ('deliveryId' in input) {
+                    if (!isElearningNotificationDispatchEnabled()) return false
+                    return checkElearningEventNotificationEligibility(poolManager.get(), input)
+                  }
                   if (!isElearningAssignmentSurfaceEnabled()) {
                     throw new ElearningAssignmentReminderError('unavailable')
                   }
                   return checkElearningAssignmentReminderEligibility(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        elearningNotificationDispatch:
+          manifest.name === 'plugin-elearning' && isElearningNotificationDispatchEnabled()
+            ? {
+                dispatch: async (input: import('./services/elearning-notification-dispatch').ElearningNotificationDispatchInput) => {
+                  if (!isElearningNotificationDispatchEnabled()) {
+                    return { outcome: 'retryable' as const, code: 'NOTIFICATION_DISABLED' }
+                  }
+                  return dispatchElearningNotification(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        elearningNotificationSource:
+          manifest.name === 'plugin-elearning' && isElearningNotificationDispatchEnabled()
+            ? {
+                collect: () => {
+                  if (!isElearningNotificationDispatchEnabled()) return Promise.resolve({ inserted: 0 })
+                  return collectElearningNotificationEvents(poolManager.get(), {
+                    since: process.env.ELEARNING_NOTIFICATIONS_SINCE ?? '',
+                    assignments: isElearningAssignmentSurfaceEnabled(),
+                    enrollments: process.env.ELEARNING_ENROLLMENT_ENABLED === 'true',
+                    results: isElearningExamSurfaceEnabled(),
+                  })
                 },
               }
             : undefined,

@@ -13,6 +13,7 @@ const FLAG_NAMES = [
   'ELEARNING_MEDIA_ENABLED',
   'ELEARNING_ASSESSMENT_ENABLED',
   'ELEARNING_ANALYTICS_ENABLED',
+  'ELEARNING_NOTIFICATIONS_ENABLED',
 ] as const
 const originalFlags = Object.fromEntries(
   FLAG_NAMES.map((name) => [name, process.env[name]]),
@@ -43,6 +44,26 @@ afterEach(() => {
 })
 
 describe('e-learning L2 reminder producer port scoping', () => {
+  it('exposes sending only to the opted-in learning plugin and rechecks OFF before pool access', async () => {
+    setFlags({ ELEARNING_ENABLED: 'true', ELEARNING_CONTENT_ENABLED: 'true', ELEARNING_NOTIFICATIONS_ENABLED: 'true' })
+    const services = contextFor('plugin-elearning').services
+    expect(services.elearningNotificationDispatch).toBeDefined()
+    expect(services.elearningNotificationSource).toBeDefined()
+    for (const plugin of ['plugin-attendance', 'plugin-integration-core', 'plugin-other']) {
+      expect(contextFor(plugin).services.elearningNotificationDispatch).toBeUndefined()
+      expect(contextFor(plugin).services.elearningNotificationSource).toBeUndefined()
+    }
+    setFlags({})
+    const poolGet = vi.spyOn(poolManager, 'get').mockImplementation(() => { throw new Error('database touched') })
+    expect(await services.elearningNotificationDispatch!.dispatch({
+      orgId: 'org', recipientUserId: 'user', kind: 'assignment_reminder',
+      deliveryId: '11111111-1111-4111-8111-111111111111', assignmentMemberId: '22222222-2222-4222-8222-222222222222',
+      idempotencyKey: 'delivery:11111111-1111-4111-8111-111111111111', payload: {},
+    })).toEqual({ outcome: 'retryable', code: 'NOTIFICATION_DISABLED' })
+    expect(await services.elearningNotificationSource!.collect()).toEqual({ inserted: 0 })
+    expect(poolGet).not.toHaveBeenCalled()
+  })
+
   it('injects the narrow port only into plugin-elearning', () => {
     const elearning = contextFor('plugin-elearning').services
     expect(elearning.elearningReminderProducer).toBeDefined()

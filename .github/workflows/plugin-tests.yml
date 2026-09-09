@@ -948,6 +948,9 @@ jobs:
             tests/unit/elearning-assessment-admin-routes.test.ts \
             tests/unit/elearning-assessment-import.test.ts \
             tests/unit/elearning-notification-delivery.test.ts \
+            tests/unit/elearning-notification-dispatch.test.ts \
+            tests/unit/elearning-notification-dingtalk.test.ts \
+            tests/unit/elearning-notification-events.test.ts \
             tests/unit/elearning-open-completion-policy.test.ts \
             tests/unit/elearning-open-completion-postgres.test.ts \
             tests/unit/elearning-reminder-port-scoping.test.ts \
