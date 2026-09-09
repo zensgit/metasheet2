@@ -116,6 +116,11 @@ describe('sheet workbench grammar tokens', () => {
     const group = read('src/multitable/components/MetaFilterGroup.vue')
     expect(group).toMatch(/--ms-sheet-hairline,\s*#ebebeb/)
     expect(group).not.toMatch(/background:\s*#fafafa/)
+    expect(toolbar).toMatch(/class="meta-toolbar__new-record"/)
+    expect(toolbar).toMatch(/\.meta-toolbar__new-record\.mt-button--primary[\s\S]*color-mix\([\s\S]*--ms-color-primary/)
+    expect(toolbar).not.toMatch(/\.meta-toolbar__btn--primary \{[^}]*color:\s*#fff/)
+    expect(toolbar).not.toMatch(/\.meta-toolbar__new-record[\s\S]{0,280}background:\s*var\(--ms-color-primary/)
+    expect(toolbar).not.toMatch(/\.meta-toolbar__btn--primary \{[^}]*background:\s*var\(--ms-color-primary/)
   })
 
   it('uses local outline sheet-chrome icons instead of Element Plus filled SVGs', () => {

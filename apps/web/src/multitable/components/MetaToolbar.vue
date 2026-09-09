@@ -250,7 +250,7 @@
       </div>
       <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ rowCount(totalRows, isZh) }}</span>
       <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". Short text stays. -->
-      <MtButton v-if="canCreateRecord" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
+      <MtButton v-if="canCreateRecord" class="meta-toolbar__new-record" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
     </div>
     </div>
     <div class="meta-toolbar__end">
@@ -793,8 +793,25 @@ function onAddFilterGroup() {
 }
 .meta-toolbar__btn:hover:not(:disabled) { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-text-1, #1f2329); }
 .meta-toolbar__btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.meta-toolbar__btn--primary { background: var(--ms-color-primary, #245bdb); color: #fff; border-color: var(--ms-color-primary, #245bdb); }
-.meta-toolbar__btn--primary:hover:not(:disabled) { background: var(--el-color-primary-dark-2, #1e4fc0); color: #fff; }
+.meta-toolbar__btn--primary {
+  background: color-mix(in srgb, var(--ms-color-primary) 16%, transparent);
+  color: rgb(32, 56, 107);
+  border-color: color-mix(in srgb, var(--ms-color-primary) 22%, transparent);
+}
+.meta-toolbar__btn--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ms-color-primary) 22%, transparent);
+  color: rgb(32, 56, 107);
+}
+/* Create-record CTA: same ~16% primary wash as button-field cells, not a solid MtButton pill. */
+.meta-toolbar :deep(.meta-toolbar__new-record.mt-button--primary) {
+  background: color-mix(in srgb, var(--ms-color-primary) 16%, transparent);
+  color: rgb(32, 56, 107);
+  border-color: color-mix(in srgb, var(--ms-color-primary) 22%, transparent);
+}
+.meta-toolbar :deep(.meta-toolbar__new-record.mt-button--primary:hover:not(:disabled)) {
+  background: color-mix(in srgb, var(--ms-color-primary) 22%, transparent);
+  color: rgb(32, 56, 107);
+}
 .meta-toolbar__btn--reset-personal { color: var(--ms-text-2, #4b5563); border-color: transparent; background: transparent; }
 .meta-toolbar__btn--reset-personal:hover { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-text-1, #111827); }
 .meta-toolbar__btn-icon { font-size: var(--ms-sheet-icon-size, 16px); color: currentColor; }
