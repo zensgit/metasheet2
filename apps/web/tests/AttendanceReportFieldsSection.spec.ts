@@ -5,6 +5,7 @@ import { apiFetch } from '../src/utils/api'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
+import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 
 vi.mock('../src/utils/api', () => ({
   apiFetch: vi.fn(),
@@ -145,9 +146,13 @@ describe('AttendanceReportFieldsSection', () => {
   })
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
+  let sessionIdentity = 'actor:org-1:epoch1'
+  let sessionGuard: ReturnType<typeof createAttendanceSessionGuard>
 
   beforeEach(() => {
     vi.clearAllMocks()
+    sessionIdentity = 'actor:org-1:epoch1'
+    sessionGuard = createAttendanceSessionGuard('org-1', () => sessionIdentity)
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -164,6 +169,7 @@ describe('AttendanceReportFieldsSection', () => {
       tr: (en: string) => en,
       orgId,
     })
+    app.provide(attendanceSessionGuardKey, sessionGuard)
     app.mount(container!)
   }
 
@@ -229,6 +235,7 @@ describe('AttendanceReportFieldsSection', () => {
         } }))
     }
     app = createApp({ setup: () => () => h(AttendanceReportFieldsSection, { orgId: org.value, tr: (en: string) => en }) })
+    app.provide(attendanceSessionGuardKey, sessionGuard)
     app.mount(container!)
     await flushUi()
     org.value = 'org-2'
@@ -263,6 +270,7 @@ describe('AttendanceReportFieldsSection', () => {
       return jsonResponse(200, catalog)
     })
     app = createApp({ setup: () => () => h(AttendanceReportFieldsSection, { orgId: org.value, tr: (en: string) => en }) })
+    app.provide(attendanceSessionGuardKey, sessionGuard)
     app.mount(container!)
     await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-cleaning-load]')!.click()
@@ -292,6 +300,7 @@ describe('AttendanceReportFieldsSection', () => {
       return jsonResponse(200, catalog)
     })
     app = createApp({ setup: () => () => h(AttendanceReportFieldsSection, { orgId: org.value, tr: (en: string) => en }) })
+    app.provide(attendanceSessionGuardKey, sessionGuard)
     app.mount(container!)
     await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-cleaning-load]')!.click()
@@ -311,6 +320,51 @@ describe('AttendanceReportFieldsSection', () => {
     const applies = vi.mocked(apiFetch).mock.calls.filter(([url]) => String(url).includes('/cleaning-apply'))
     expect(applies).toHaveLength(phase === 'apply' ? 1 : 0)
     if (phase === 'apply') expect(applies[0][1]).toMatchObject({ headers: { 'X-Org-Id': 'org-1' }, body: JSON.stringify({ expectedVersion: 9 }) })
+  })
+
+  it.each(['before-send', 'during-body', 'rejected-body'])('refuses an old cleaning confirmation after explicit session change: %s', async phase => {
+    const catalog = populatedCatalogPayload() as any
+    catalog.data.cleaningReview = { enabled: true, orgId: 'org-1', sheetId: 'sheet-daily',
+      fieldIds: { cleaning_requested: 'fld_requested', cleaning_reason: 'fld_reason', employee_name: 'fld_name', work_date: 'fld_date' } }
+    let finishBody!: (value: unknown) => void
+    let rejectBody!: (error: Error) => void
+    vi.mocked(apiFetch).mockImplementation(async url => {
+      if (String(url).includes('/cleaning-apply')) return {
+        ok: true, status: 200, json: () => new Promise((resolve, reject) => { finishBody = resolve; rejectBody = reject }),
+      } as Response
+      if (String(url).startsWith('/api/multitable/records?')) return jsonResponse(200, { ok: true, data: { records: [
+        { id: 'rec_test', version: 7, data: { fld_requested: true, fld_reason: 'Synthetic draft', fld_name: 'Synthetic employee', fld_date: '2026-09-01' } },
+      ], hasMore: false } })
+      return jsonResponse(200, catalog)
+    })
+    mountSection()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-cleaning-load]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-cleaning-review]')!.click()
+    await flushUi()
+    if (phase === 'before-send') sessionIdentity = 'actor:org-2:epoch2'
+    container!.querySelector<HTMLButtonElement>('[data-cleaning-confirm]')!.click()
+    await flushUi()
+    const state = app!._instance!.setupState as unknown as { cleaningSelected: unknown; cleaningMessage: string; cleaningBusy: boolean }
+    const selected = state.cleaningSelected
+    const message = state.cleaningMessage
+    const sent = vi.mocked(apiFetch).mock.calls.length
+    if (phase !== 'before-send') {
+      expect(finishBody).toBeTypeOf('function')
+      sessionIdentity = 'actor:org-2:epoch2'
+      if (phase === 'rejected-body') rejectBody(new Error('Synthetic body failure'))
+      else finishBody({ ok: true, data: { cleaningState: 'consumed' } })
+      await flushUi()
+    }
+    expect(state.cleaningSelected).toBe(selected)
+    expect(state.cleaningMessage).toBe(message)
+    expect(state.cleaningBusy).toBe(false)
+    expect(vi.mocked(apiFetch).mock.calls).toHaveLength(sent)
+    const applies = vi.mocked(apiFetch).mock.calls.filter(([url]) => String(url).includes('/cleaning-apply'))
+    expect(applies).toHaveLength(phase === 'before-send' ? 0 : 1)
+    expect(container!.textContent).not.toContain('Attendance updated; proposal consumed')
+    expect(sessionGuard.stale.value).toBe(true)
   })
 
   it('renders DingTalk-compatible report field categories and multitable entry', async () => {

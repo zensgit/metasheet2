@@ -420,6 +420,9 @@
 # approval-web-guard.yml / multitable-web-guard.yml collides with either new filename.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Explicit organization sessions: a separate small process, retaining existing
+# API/approval and attendance suite ownership below.
+npx vitest run tests/useAuth.spec.ts tests/useSessionOrg.spec.ts tests/AttendanceSessionOrgSwitcher.spec.ts tests/useAttendanceSessionGuard.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
 # #5012 (2026-08-19, human-tail finding): tests/api.spec.ts carries the omitHeaders
 # MECHANIC leg (SR-1 rules/me self-service contract) — it ran in NO workflow before, so

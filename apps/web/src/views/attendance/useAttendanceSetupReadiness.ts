@@ -137,11 +137,13 @@ export function shouldReloadSetupReadinessOnSurfaceOpen(
 }
 
 interface UseAttendanceSetupReadinessOptions {
+  isSessionCurrent?: () => boolean
   apiFetch?: ApiFetchFn
   endpoint?: string
 }
 
 export function useAttendanceSetupReadiness({
+  isSessionCurrent = () => true,
   apiFetch = defaultApiFetch,
   endpoint = ATTENDANCE_SETUP_READINESS_ENDPOINT,
 }: UseAttendanceSetupReadinessOptions = {}) {
@@ -161,6 +163,7 @@ export function useAttendanceSetupReadiness({
   const needsAttention = computed(() => deriveAttendanceSetupEntryNeedsAttention(steps.value))
 
   async function loadReadiness(orgId: string | null | undefined): Promise<void> {
+    if (!isSessionCurrent()) return
     const normalized = resolveAttendanceReadinessOrgId(orgId)
     const seq = ++requestSeq
     lastOrgId.value = normalized
@@ -170,7 +173,7 @@ export function useAttendanceSetupReadiness({
     try {
       const params = new URLSearchParams({ orgId: normalized })
       const response = await apiFetch(`${endpoint}?${params.toString()}`)
-      if (seq !== requestSeq) return
+      if (seq !== requestSeq || !isSessionCurrent()) return
       if (response.status === 403) {
         input.value = { kind: 'forbidden' }
         state.value = 'loaded'
@@ -179,7 +182,7 @@ export function useAttendanceSetupReadiness({
       const body = await response.json().catch(() => null) as
         | { ok?: boolean; data?: unknown; error?: { code?: string } }
         | null
-      if (seq !== requestSeq) return
+      if (seq !== requestSeq || !isSessionCurrent()) return
       if (response.status === 503 && body?.error?.code === 'DB_NOT_READY') {
         input.value = { kind: 'db_not_ready' }
         state.value = 'loaded'
@@ -197,7 +200,7 @@ export function useAttendanceSetupReadiness({
       input.value = { kind: 'ok', data }
       state.value = 'loaded'
     } catch {
-      if (seq !== requestSeq) return
+      if (seq !== requestSeq || !isSessionCurrent()) return
       input.value = null
       state.value = 'error'
     }

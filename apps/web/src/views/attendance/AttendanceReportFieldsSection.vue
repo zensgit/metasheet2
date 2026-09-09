@@ -1253,7 +1253,8 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { apiFetch } from '../../utils/api'
+import { apiFetch as sendApiFetch } from '../../utils/api'
+import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../../utils/error'
 
 type TranslateFn = (en: string, zh: string) => string
@@ -1494,6 +1495,8 @@ const props = defineProps<{
   orgId?: string
 }>()
 
+const sessionGuard = useAttendanceSessionGuard()
+const apiFetch = sessionGuard.wrapFetch(sendApiFetch)
 const tr = props.tr
 const loading = ref(false)
 const syncing = ref(false)
@@ -1541,6 +1544,7 @@ async function loadCleaningProposals(append: boolean): Promise<void> {
 }
 
 async function applyCleaningProposal(): Promise<void> {
+  try { sessionGuard.assertCurrent() } catch { return }
   const review = cleaningReview.value
   const row = cleaningSelected.value
   if (!review || !row || cleaningBusy.value) return
@@ -1560,8 +1564,11 @@ async function applyCleaningProposal(): Promise<void> {
       cleaningMessage.value = tr('Attendance updated; proposal cleanup pending. Reload and retry as the original reviewer.', '考勤已更新，建议清理待重试。请由原审阅人重载后重试。')
     } else throw new Error('CLEANING_OUTCOME_UNKNOWN')
   } catch {
-    if (cleaningReview.value === review) cleaningMessage.value = tr('Correction not confirmed. Reload to check permissions, source changes or a pending cleanup before retrying.', '未确认更正结果。请重载检查权限、数据变化或待清理状态后再重试。')
-  } finally { cleaningSelected.value = null; cleaningBusy.value = false }
+    if (sessionGuard.isCurrent() && cleaningReview.value === review) cleaningMessage.value = tr('Correction not confirmed. Reload to check permissions, source changes or a pending cleanup before retrying.', '未确认更正结果。请重载检查权限、数据变化或待清理状态后再重试。')
+  } finally {
+    if (sessionGuard.isCurrent()) cleaningSelected.value = null
+    cleaningBusy.value = false
+  }
 }
 const syncStatusMessage = ref('')
 const syncStatusKind = ref<'info' | 'error'>('info')

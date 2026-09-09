@@ -56,6 +56,7 @@ export class TeamAvailabilityFetchError extends Error {
 
 export async function fetchTeamAvailability(
   options: FetchTeamAvailabilityOptions,
+  send: typeof apiFetch = apiFetch,
 ): Promise<TeamAvailabilityResponse> {
   const { groupId, from, to, suppressUnauthorizedRedirect, signal } = options
   if (!groupId) {
@@ -66,7 +67,7 @@ export async function fetchTeamAvailability(
   }
 
   const query = new URLSearchParams({ groupId, from, to })
-  const response = await apiFetch(`/api/attendance/team-availability?${query.toString()}`, {
+  const response = await send(`/api/attendance/team-availability?${query.toString()}`, {
     suppressUnauthorizedRedirect: suppressUnauthorizedRedirect ?? true,
     signal,
   })

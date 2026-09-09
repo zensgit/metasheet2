@@ -215,6 +215,7 @@ export class EffectiveCalendarFetchError extends Error {
 
 export async function fetchEffectiveCalendar(
   options: FetchEffectiveCalendarOptions,
+  send: typeof apiFetch = apiFetch,
 ): Promise<CalendarEffectiveResponse> {
   const { from, to, userId, groupId, orgOnly, suppressUnauthorizedRedirect, signal } = options
   if (!from || !to) {
@@ -236,7 +237,7 @@ export async function fetchEffectiveCalendar(
     if (groupId) body.groupId = groupId
     if (orgOnly) body.orgOnly = true
 
-    const response = await apiFetch('/api/attendance/effective-calendar/preview', {
+    const response = await send('/api/attendance/effective-calendar/preview', {
       method: 'POST',
       body: JSON.stringify(body),
       suppressUnauthorizedRedirect: suppressUnauthorizedRedirect ?? true,
@@ -261,7 +262,7 @@ export async function fetchEffectiveCalendar(
   if (groupId) query.set('groupId', groupId)
   if (orgOnly) query.set('orgOnly', 'true')
 
-  const response = await apiFetch(`/api/attendance/effective-calendar?${query.toString()}`, {
+  const response = await send(`/api/attendance/effective-calendar?${query.toString()}`, {
     suppressUnauthorizedRedirect: suppressUnauthorizedRedirect ?? true,
     signal,
   })
