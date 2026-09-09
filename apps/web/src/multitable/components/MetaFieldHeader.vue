@@ -10,7 +10,9 @@
     @dragleave="isDragOver = false"
     @drop.prevent="onDrop"
   >
-    <span v-if="fieldTypeIcon" class="meta-field-header__icon" aria-hidden="true">{{ fieldTypeIcon }}</span>
+    <span v-if="headerMarkIcon" class="meta-field-header__icon" aria-hidden="true">
+      <component :is="headerMarkIcon" />
+    </span>
     <span class="meta-field-header__name" :title="field.name">{{ field.name }}</span>
     <span v-if="sortDirection" class="meta-field-header__sort">
       {{ sortDirection === 'asc' ? '\u25B2' : '\u25BC' }}
@@ -36,7 +38,17 @@ import { ref, computed } from 'vue'
 import type { MetaField } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel } from '../utils/meta-core-labels'
-import { fieldTypeGlyph } from '../utils/field-type-glyph'
+import { fieldTypeHeaderMark } from '../utils/field-type-glyph'
+import {
+  SheetCheck,
+  SheetClock,
+  SheetFields,
+  SheetFiles,
+  SheetFilter,
+  SheetLink,
+  SheetUser,
+  SheetViewCalendar,
+} from '../ui/sheet-chrome-icons'
 
 const props = defineProps<{
   field: MetaField
@@ -76,7 +88,21 @@ function onDrop(e: DragEvent) {
   }
 }
 
-const fieldTypeIcon = computed(() => fieldTypeGlyph(props.field.type))
+const HEADER_MARK_ICONS = {
+  fields: SheetFields,
+  calendar: SheetViewCalendar,
+  clock: SheetClock,
+  user: SheetUser,
+  files: SheetFiles,
+  link: SheetLink,
+  check: SheetCheck,
+  filter: SheetFilter,
+} as const
+
+const headerMarkIcon = computed(() => {
+  const mark = fieldTypeHeaderMark(props.field.type)
+  return mark.kind === 'outline' ? HEADER_MARK_ICONS[mark.name] : null
+})
 
 const headerStyle = computed(() => {
   const style: Record<string, string> = {}
@@ -124,10 +150,11 @@ function onResizeStart(e: MouseEvent) {
 .meta-field-header--sortable:hover { background: var(--ms-bg-page, #f5f6f8); }
 .meta-field-header__icon {
   display: inline-flex; align-items: center; justify-content: center;
-  width: var(--ms-sheet-icon-size, 16px); height: var(--ms-sheet-icon-size, 16px);
+  width: 12px; height: 12px;
   margin-right: 6px; flex-shrink: 0;
-  font-size: 11px; line-height: 1; color: var(--ms-sheet-icon-color, #6b7280);
+  color: var(--ms-sheet-icon-color, #6b7280);
 }
+.meta-field-header__icon :deep(.ms-sheet-icon) { width: 12px; height: 12px; }
 .meta-field-header__name { overflow: hidden; text-overflow: ellipsis; }
 .meta-field-header__sort { margin-left: 4px; font-size: 10px; color: var(--ms-color-info, #6b7280); }
 .meta-field-header__pin { border: none; background: none; cursor: pointer; padding: 0 2px; margin-left: 4px; font-size: 11px; line-height: 1; opacity: 0; transition: opacity 0.12s; vertical-align: middle; }

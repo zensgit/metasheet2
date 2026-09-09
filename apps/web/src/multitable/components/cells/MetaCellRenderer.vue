@@ -3,10 +3,9 @@
     <!-- string / formula -->
     <template v-if="field.type === 'string' || field.type === 'formula'">{{ displayValue }}</template>
 
-    <!-- long text: grid shows the plain-text projection (truncated, fast) for rich
-         fields — never the formatted HTML (§7 grid-vs-drawer). Plain longText is
-         unchanged (mustache-escaped display). -->
-    <template v-else-if="field.type === 'longText'">
+    <!-- long text / notes / leftover `text`: grid is a single ellipsis line
+         (same as title). Newlines collapse here only — editing still wraps. -->
+    <template v-else-if="isNotesField">
       <span class="meta-cell-renderer__long-text">{{ longTextDisplay }}</span>
     </template>
 
@@ -275,14 +274,24 @@ const displayValue = computed(() => {
 })
 const isSystemField = computed(() => isSystemFieldType(props.field.type))
 
-// Grid long-text display: for a RICH longText field show the tag-stripped
-// plain-text projection (§7 grid-vs-drawer) so the cell reads as text, never
-// `<p>…</p>`. Plain (non-rich) longText keeps the existing formatted display.
+function isNotesLikeType(type: string): boolean {
+  return type === 'longText' || type === 'text'
+}
+
+function singleLineGridText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+const isNotesField = computed(() => isNotesLikeType(props.field.type))
+
+// Grid long-text / notes display: one ellipsis line, same as title. Rich fields
+// still use the tag-stripped projection (§7); plain notes collapse newlines so
+// English sample copy cannot wrap onto a second row. Editing keeps the raw value.
 const longTextDisplay = computed(() => {
-  if (isRichLongTextField(props.field)) {
-    return richLongTextToPlainTextFE(props.value)
-  }
-  return displayValue.value
+  const raw = isRichLongTextField(props.field)
+    ? richLongTextToPlainTextFE(props.value)
+    : displayValue.value
+  return singleLineGridText(raw)
 })
 
 // Render-only QR: encode the cell's own string value into an inline SVG. On an
@@ -461,6 +470,7 @@ const conditionalClass = computed(() => {
 .meta-cell-renderer {
   display: block;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -470,6 +480,7 @@ const conditionalClass = computed(() => {
 .meta-cell-renderer__bool { font-size: 16px; }
 .meta-cell-renderer__long-text {
   display: block;
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;

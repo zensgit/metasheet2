@@ -51,14 +51,15 @@ describe('grid cell (MetaCellRenderer) — §7 plain-text projection for rich', 
     container.remove()
   })
 
-  it('plain longText cell display is unchanged (escaped multiline text)', async () => {
+  it('plain longText cell display is a single escaped line (newlines collapsed)', async () => {
     const { container, app } = mount(MetaCellRenderer, {
       field: PLAIN,
       value: 'line 1\nline 2',
     })
     await nextTick()
     const cell = container.querySelector('.meta-cell-renderer__long-text') as HTMLElement
-    expect(cell.textContent).toBe('line 1\nline 2')
+    expect(cell.textContent).toBe('line 1 line 2')
+    expect(cell.textContent).not.toMatch(/\n/)
     app.unmount()
     container.remove()
   })

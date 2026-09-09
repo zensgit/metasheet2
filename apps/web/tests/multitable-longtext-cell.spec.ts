@@ -22,7 +22,7 @@ describe('longText cells', () => {
 
     const value = container.querySelector('.meta-cell-renderer__long-text') as HTMLElement | null
     expect(value).not.toBeNull()
-    expect(value?.textContent).toBe('line 1\nline 2')
+    expect(value?.textContent).toBe('line 1 line 2')
 
     app.unmount()
     container.remove()

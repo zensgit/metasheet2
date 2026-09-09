@@ -48,6 +48,8 @@ describe('sheet workbench grammar tokens', () => {
     expect(renderer).not.toMatch(/white-space:\s*pre-wrap/)
     const header = read('src/multitable/components/MetaFieldHeader.vue')
     expect(header).toMatch(/font-size:\s*var\(--ms-sheet-font-header,\s*12px\)/)
+    expect(header).toMatch(/padding:\s*8px 16px/)
+    expect(header).toMatch(/\.meta-field-header__icon \{[\s\S]*width:\s*12px; height:\s*12px/)
     expect(header).toMatch(/--ms-sheet-hairline,\s*#ebebeb/)
     expect(header).toMatch(/background:\s*var\(--ms-bg-card,\s*#fff\)/)
   })

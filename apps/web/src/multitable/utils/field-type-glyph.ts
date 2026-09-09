@@ -1,5 +1,7 @@
 /**
- * Quiet type glyphs for field headers. Unknown types render nothing — never 「?」.
+ * Field-type marks.
+ * - Field manager still uses quiet unicode via `fieldTypeGlyph`.
+ * - Grid headers use a 12px muted outline (or nothing). Unknown types stay blank — never 「?」.
  */
 
 export const FIELD_TYPE_GLYPHS: Record<string, string> = {
@@ -37,4 +39,46 @@ export const FIELD_TYPE_GLYPHS: Record<string, string> = {
 
 export function fieldTypeGlyph(type: string): string {
   return FIELD_TYPE_GLYPHS[type] ?? ''
+}
+
+/** Existing sheet-chrome outline names used as 12px header marks. */
+export type FieldTypeHeaderOutlineName =
+  | 'fields'
+  | 'calendar'
+  | 'clock'
+  | 'user'
+  | 'files'
+  | 'link'
+  | 'check'
+  | 'filter'
+
+export type FieldTypeHeaderMark =
+  | { kind: 'none' }
+  | { kind: 'outline'; name: FieldTypeHeaderOutlineName }
+
+const FIELD_TYPE_HEADER_OUTLINES: Record<string, FieldTypeHeaderOutlineName> = {
+  string: 'fields',
+  longText: 'fields',
+  text: 'fields',
+  formula: 'fields',
+  date: 'calendar',
+  dateTime: 'calendar',
+  createdTime: 'clock',
+  modifiedTime: 'clock',
+  duration: 'clock',
+  person: 'user',
+  createdBy: 'user',
+  modifiedBy: 'user',
+  attachment: 'files',
+  link: 'link',
+  url: 'link',
+  boolean: 'check',
+  select: 'filter',
+  multiSelect: 'filter',
+}
+
+/** Header mark only. Types without a quiet outline (number, leftover glyphs, unknown) stay blank. */
+export function fieldTypeHeaderMark(type: string): FieldTypeHeaderMark {
+  const name = FIELD_TYPE_HEADER_OUTLINES[type]
+  return name ? { kind: 'outline', name } : { kind: 'none' }
 }

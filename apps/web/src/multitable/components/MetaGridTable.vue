@@ -1454,7 +1454,7 @@ thead .meta-grid__check-col {
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
 .meta-grid__row:hover { background: var(--ms-bg-page, #f5f6f8); }
 .meta-grid__row--selected, .meta-grid__row--focused { background: var(--el-color-primary-light-9, #eff6ff); }
-.meta-grid__cell { position: relative; padding: 8px 12px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
+.meta-grid__cell { position: relative; padding: 8px 12px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; cursor: default; }
 .meta-grid__cell--editing { padding: 2px 4px; background: #fff; white-space: normal; overflow: visible; text-overflow: clip; }
 .meta-grid__cell--readonly { color: #666; }
 .meta-grid__cell--focused { outline: 1px solid var(--ms-color-primary); outline-offset: -1px; }
