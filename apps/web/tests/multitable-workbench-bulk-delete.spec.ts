@@ -236,11 +236,13 @@ describe('MultitableWorkbench bulk-delete: report actual per-record results, not
     gridMock.deleteRecord = vi.fn().mockResolvedValue(true)
     const onBulkDelete = await mountAndGetBulkDelete()
 
-    await onBulkDelete(['r1', 'r2'])
+    // Three records here on purpose: the partial-failure case above also lands on 2 successes,
+    // so a hard-coded `fmtRecordsDeleted(2, …)` would pass both. 3 vs 2 pins the count itself.
+    await onBulkDelete(['r1', 'r2', 'r3'])
     await flushUi()
 
     expect(showSuccessSpy).toHaveBeenCalledTimes(1)
-    expectDeletedToast(2)
+    expectDeletedToast(3)
     expect(showErrorSpy).not.toHaveBeenCalled()
     expect(gridMock.reloadCurrentPage).not.toHaveBeenCalled()
   })
