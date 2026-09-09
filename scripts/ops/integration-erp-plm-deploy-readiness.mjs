@@ -147,8 +147,8 @@ function normalizeRuns(value) {
   throw new Error('Runs JSON must be an array or an object with runs/workflowRuns')
 }
 
-function readRunsFromGh(config) {
-  const output = runCommand('gh', [
+export function readRunsFromGh(config, headSha, command = runCommand) {
+  const output = command('gh', [
     'run',
     'list',
     '--repo',
@@ -158,9 +158,22 @@ function readRunsFromGh(config) {
     '--limit',
     '40',
     '--json',
-    'databaseId,workflowName,headSha,status,conclusion,url,createdAt,updatedAt',
+    'databaseId,workflowName,headSha,status,conclusion,url,createdAt,updatedAt,event',
   ])
-  return normalizeRuns(JSON.parse(output || '[]'))
+  const runs = normalizeRuns(JSON.parse(output || '[]'))
+  const images = findWorkflowRun(runs, 'Build and Push Docker Images', headSha)
+  if (images?.event === 'workflow_dispatch' && images.status === 'completed' && images.conclusion === 'success') {
+    // A successful ordinary build no longer proves that any image was published.
+    try {
+      const response = JSON.parse(command('gh', [
+        'api', '--method', 'GET', `repos/${config.repo}/actions/runs/${images.databaseId}/jobs`,
+      ]))
+      images.jobs = response.jobs
+    } catch {
+      images.jobs = []
+    }
+  }
+  return runs
 }
 
 function resolveHeadSha(config) {
@@ -212,6 +225,17 @@ function evaluateWorkflowRun(spec, run) {
       conclusion: run.conclusion || '',
       url: run.url || '',
       reason: `workflow conclusion is ${run.conclusion || 'empty'}, expected success`,
+    }
+  }
+  if (spec.id === 'docker-images') {
+    const builds = Array.isArray(run.jobs) ? run.jobs.filter((job) => job.name === 'build') : []
+    const build = builds.length === 1 ? builds[0] : null
+    const published = Array.isArray(build?.steps) && build.steps.some((step) =>
+      step.name === 'Publish approved commit images' && step.status === 'completed' && step.conclusion === 'success')
+    if (run.event !== 'workflow_dispatch' || build?.head_sha !== run.headSha
+      || build?.status !== 'completed' || build?.conclusion !== 'success' || !published) {
+      return { ...spec, ok: false, status: run.status, conclusion: run.conclusion, url: run.url || '',
+        reason: 'IMAGE_PUBLICATION_NOT_VERIFIED' }
     }
   }
   return {
@@ -419,7 +443,7 @@ export function main(argv = process.argv.slice(2)) {
     return 0
   }
   const headSha = resolveHeadSha(config)
-  const runs = config.runsJson ? normalizeRuns(readJsonFile(config.runsJson)) : readRunsFromGh(config)
+  const runs = config.runsJson ? normalizeRuns(readJsonFile(config.runsJson)) : readRunsFromGh(config, headSha)
   const summary = evaluateDeployReadiness({
     runs,
     repoRoot: config.repoRoot,

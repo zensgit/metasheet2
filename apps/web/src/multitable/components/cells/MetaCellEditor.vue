@@ -23,6 +23,8 @@
       @input="commitScalar(dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
       @keydown.enter="onEnterScalarConfirm"
       @keydown.escape="onEscapeCancel"
+      @keydown.tab="onScalarTab"
+      @blur="onScalarBlur"
     />
     <!-- string: date-like -->
     <input
