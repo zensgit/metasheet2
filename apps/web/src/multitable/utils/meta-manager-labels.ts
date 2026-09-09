@@ -78,6 +78,7 @@ export type MetaManagerLabelKey =
   | 'field.error.buttonNotifyConfig'
   | 'field.autoNumberHint' | 'field.saveSettings' | 'field.applyDefaults'
   | 'field.namePlaceholder' | 'field.addButton'
+  | 'field.nameRequiredHint' | 'field.optionColorEmpty'
   | 'field.changedTypeBlocking' | 'field.changedWarning'
   | 'field.latestMetadataLoaded'
   | 'field.discardManagerConfirm'
@@ -366,6 +367,11 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.applyDefaults': { en: 'Apply defaults', zh: '应用默认值' },
   'field.namePlaceholder': { en: 'Field name', zh: '字段名称' },
   'field.addButton': { en: '+ Add', zh: '+ 添加' },
+  // Quiet inline hint for the empty-name leg of the '+ Add' disabled predicate
+  // (MetaFieldManager.vue). The duplicate-name leg already had a visible error;
+  // the empty-name leg silently did nothing at all.
+  'field.nameRequiredHint': { en: 'Enter a field name to add', zh: '输入字段名称后可添加' },
+  'field.optionColorEmpty': { en: 'No colour set', zh: '未设置颜色' },
   'field.changedTypeBlocking': {
     en: 'This field changed type in the background. Reload latest before saving.',
     zh: '该字段类型已在后台变更。保存前请重新加载最新设置。',
@@ -519,6 +525,19 @@ export function managerLabel(key: MetaManagerLabelKey, isZh: boolean): string {
 
 export function duplicateFieldName(name: string, isZh: boolean): string {
   return isZh ? `字段“${name}”已存在` : `A field named "${name}" already exists`
+}
+
+/**
+ * Shown inline (and repeated in the confirm) before a field-manager retype save.
+ * `normalizeFieldWriteInput` (core-backend routes/univer-meta.ts:5565-5588) re-runs
+ * `sanitizeFieldProperty` under the NEW type, so type-specific formatting (decimals,
+ * unit, currency code, options...) is dropped; stored cell values are left exactly as
+ * they are (the forward retype migrates nothing).
+ */
+export function fieldRetypeNotice(targetTypeLabel: string, isZh: boolean): string {
+  return isZh
+    ? `改为${targetTypeLabel}后，现有格式设置会被清除；已有数据不转换。`
+    : `Changing to ${targetTypeLabel} clears the current format settings; existing data is not converted.`
 }
 
 export function deleteFieldConfirm(name: string, isZh: boolean): string {

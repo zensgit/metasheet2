@@ -1168,3 +1168,428 @@ describe('MetaFieldManager — layer-2 visibility keys survive a config Save', (
     } finally { app.unmount(); container.remove() }
   })
 })
+
+// ---------------------------------------------------------------------------
+// #3 — the '+ Add' button's disabled predicate has TWO legs
+// (`!newFieldName.trim() || addNameConflict`) and only the duplicate leg ever had a
+// visible reason. These pin the empty-name leg: a quiet inline hint + a button title,
+// wired to aria-describedby exactly like the duplicate leg.
+// ---------------------------------------------------------------------------
+describe('MetaFieldManager — empty-name add hint', () => {
+  function mountManager(fields: Record<string, unknown>[] = []) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, { visible: true, sheetId: 'sheet_1', sheets: [], fields })
+      },
+    })
+    app.mount(container)
+    return { container, app }
+  }
+
+  it('shows a quiet hint + button title while the name is empty, and drops both once typed', async () => {
+    const { container, app } = mountManager()
+    try {
+      await nextTick()
+      const hint = container.querySelector('[data-test="add-name-required-hint"]') as HTMLElement | null
+      expect(hint).not.toBeNull()
+      expect(hint!.textContent).toContain('Enter a field name to add')
+      // quiet: muted inline line, NOT the boxed __hint info block, and not an alert
+      expect(hint!.className).toContain('meta-field-mgr__inline-hint')
+      expect(hint!.className).not.toContain('meta-field-mgr__hint ')
+      expect(hint!.getAttribute('role')).toBeNull()
+
+      const button = container.querySelector('[data-test="add-field-submit"]') as HTMLButtonElement
+      expect(button.disabled).toBe(true)
+      expect(button.getAttribute('title')).toBe('Enter a field name to add')
+
+      const nameInput = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__input') as HTMLInputElement
+      expect(nameInput.getAttribute('aria-describedby')).toBe('meta-field-mgr-add-name-required')
+      expect(hint!.id).toBe('meta-field-mgr-add-name-required')
+
+      nameInput.value = 'Amount'
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      await nextTick()
+
+      expect(container.querySelector('[data-test="add-name-required-hint"]')).toBeNull()
+      expect(button.disabled).toBe(false)
+      expect(button.getAttribute('title')).toBeNull()
+      expect(nameInput.getAttribute('aria-describedby')).toBeNull()
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a whitespace-only name still counts as empty (same predicate as :disabled)', async () => {
+    const { container, app } = mountManager()
+    try {
+      await nextTick()
+      const nameInput = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__input') as HTMLInputElement
+      nameInput.value = '   '
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      await nextTick()
+      expect(container.querySelector('[data-test="add-name-required-hint"]')).not.toBeNull()
+      expect((container.querySelector('[data-test="add-field-submit"]') as HTMLButtonElement).disabled).toBe(true)
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('the duplicate leg keeps ITS own message (hint is empty-name only)', async () => {
+    const { container, app } = mountManager([{ id: 'fld_a', name: 'Status', type: 'string', property: {} }])
+    try {
+      await nextTick()
+      const nameInput = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__input') as HTMLInputElement
+      nameInput.value = 'status'
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      await nextTick()
+      expect(container.querySelector('[data-test="add-name-required-hint"]')).toBeNull()
+      expect(container.querySelector('[data-test="add-conflict-error"]')).not.toBeNull()
+      const button = container.querySelector('[data-test="add-field-submit"]') as HTMLButtonElement
+      expect(button.getAttribute('title')).toBe('A field named "status" already exists')
+      expect(nameInput.getAttribute('aria-describedby')).toBe('meta-field-mgr-add-error')
+    } finally { app.unmount(); container.remove() }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6 — select/multiSelect option colours were a bare hex text box whose placeholder
+// (#409eff) looked identical to a set value. Palette swatches + native picker +
+// auto-assigned colour for new options. The hand-typed hex box STAYS (last input).
+// ---------------------------------------------------------------------------
+describe('MetaFieldManager — select option colour palette', () => {
+  async function openNewSelectField() {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const createSpy = vi.fn()
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true, sheetId: 'sheet_1', sheets: [], fields: [], onCreateField: createSpy,
+        })
+      },
+    })
+    app.mount(container)
+    await nextTick()
+    const nameInput = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__input') as HTMLInputElement
+    nameInput.value = 'Status'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const typeSelect = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__select') as HTMLSelectElement
+    typeSelect.value = 'select'
+    typeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+    return { container, app, createSpy }
+  }
+
+  const hexBoxes = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('.meta-field-mgr__option-row--select')).map(
+      (row) => (Array.from(row.querySelectorAll('.meta-field-mgr__input')) as HTMLInputElement[])[1],
+    )
+
+  it('clicking a preset swatch writes that hex into the option colour', async () => {
+    const { container, app, createSpy } = await openNewSelectField()
+    try {
+      const swatch = container.querySelector('[data-test="option-swatch-0-#67c23a"]') as HTMLButtonElement
+      expect(swatch).not.toBeNull()
+      swatch.click()
+      await nextTick()
+
+      expect(hexBoxes(container)[0].value).toBe('#67c23a')
+      expect(swatch.className).toContain('meta-field-mgr__swatch--active')
+      // and it round-trips into the emitted property
+      const valueInput = container.querySelector('.meta-field-mgr__option-row--select .meta-field-mgr__input') as HTMLInputElement
+      valueInput.value = 'Open'
+      valueInput.dispatchEvent(new Event('input', { bubbles: true }))
+      await nextTick()
+      ;(container.querySelector('[data-test="add-field-submit"]') as HTMLButtonElement).click()
+      await nextTick()
+      expect(createSpy).toHaveBeenCalledWith(expect.objectContaining({
+        property: { options: [{ value: 'Open', color: '#67c23a' }] },
+      }))
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a newly added option gets an auto colour distinct from the previous row', async () => {
+    const { container, app } = await openNewSelectField()
+    try {
+      const addOption = (Array.from(container.querySelectorAll('.meta-field-mgr__btn-inline')) as HTMLButtonElement[])
+        .find((b) => b.textContent?.includes('Add option')) as HTMLButtonElement
+      addOption.click()
+      await nextTick()
+      addOption.click()
+      await nextTick()
+
+      const colors = hexBoxes(container).map((input) => input.value)
+      expect(colors).toHaveLength(3)
+      // row 0 is the pre-existing seeded option — untouched (still blank)
+      expect(colors[0]).toBe('')
+      expect(colors[1]).not.toBe('')
+      expect(colors[2]).not.toBe('')
+      expect(colors[2]).not.toBe(colors[1])
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a 3-digit hex is expanded for the native colour input (which rejects #rgb)', async () => {
+    const { container, app } = await openNewSelectField()
+    try {
+      const hexBox = hexBoxes(container)[0]
+      hexBox.value = '#0AF'
+      hexBox.dispatchEvent(new Event('input', { bubbles: true }))
+      await nextTick()
+
+      const picker = container.querySelector('[data-test="option-color-picker-0"]') as HTMLInputElement
+      expect(picker.getAttribute('value')).toBe('#00aaff')
+      // the preview is no longer in the "unset" state
+      const preview = container.querySelector('[data-test="option-color-preview-0"]') as HTMLElement
+      expect(preview.className).not.toContain('meta-field-mgr__color-preview--empty')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('an unset colour is visually distinct (empty preview + picker falls back)', async () => {
+    const { container, app } = await openNewSelectField()
+    try {
+      const preview = container.querySelector('[data-test="option-color-preview-0"]') as HTMLElement
+      expect(preview.className).toContain('meta-field-mgr__color-preview--empty')
+      const picker = container.querySelector('[data-test="option-color-picker-0"]') as HTMLInputElement
+      expect(picker.getAttribute('value')).toBe('#409eff')
+      expect(hexBoxes(container)[0].value).toBe('')
+    } finally { app.unmount(); container.remove() }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #9 — the edit panel's type was a read-only <span>; the backend PATCH has accepted
+// `type` all along. FE now opens ONLY the lossless directions (utils/field-retype.ts),
+// behind an explicit confirm. Background drift still blocks (see the older spec above).
+// ---------------------------------------------------------------------------
+describe('MetaFieldManager — lossless retype in the edit panel', () => {
+  function mountWithField(field: Record<string, unknown>) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true, sheetId: 'sheet_1', sheets: [], fields: [field], onUpdateField: updateSpy,
+        })
+      },
+    })
+    app.mount(container)
+    return { container, app, updateSpy }
+  }
+
+  async function openConfig(container: HTMLElement) {
+    await nextTick()
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+  }
+
+  function clickSave(container: HTMLElement) {
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((b) => b.textContent?.includes('Save field settings'))
+      ?.click()
+  }
+
+  it('a number field offers exactly [number, text] — no link/formula/computed targets', async () => {
+    const { container, app } = mountWithField({ id: 'fld_qty', name: 'Qty', type: 'number', property: { decimals: 2 } })
+    try {
+      await openConfig(container)
+      const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+      expect(select).not.toBeNull()
+      expect(Array.from(select.options).map((o) => o.value)).toEqual(['number', 'string'])
+      expect(select.value).toBe('number')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a link field keeps the read-only type label (no dropdown at all)', async () => {
+    const { container, app } = mountWithField({
+      id: 'fld_link', name: 'Owner', type: 'link', property: { foreignSheetId: 'sheet_2' },
+    })
+    try {
+      await openConfig(container)
+      expect(container.querySelector('[data-test="config-type-select"]')).toBeNull()
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('picking text and confirming emits update-field with type:string', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container, app, updateSpy } = mountWithField({
+      id: 'fld_qty', name: 'Qty', type: 'number', property: { decimals: 2, hidden: true },
+    })
+    try {
+      await openConfig(container)
+      const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+      select.value = 'string'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await nextTick()
+
+      // the consequence is stated BEFORE the save, not only in the confirm
+      const notice = container.querySelector('[data-test="retype-notice"]') as HTMLElement
+      expect(notice.textContent).toContain('Changing to text clears the current format settings')
+      // a user retype must NOT be reported as background drift
+      expect(container.textContent).not.toContain('Reload latest before saving')
+
+      clickSave(container)
+      await nextTick()
+
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      const [fieldId, payload] = updateSpy.mock.calls[0]
+      expect(fieldId).toBe('fld_qty')
+      expect(payload.type).toBe('string')
+      // the layer-2 visibility carry still applies on the retype path
+      expect(payload.property.hidden).toBe(true)
+      // the number-only formatting is NOT re-sent under the new type
+      expect(payload.property.decimals).toBeUndefined()
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('declining the confirm emits nothing', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { container, app, updateSpy } = mountWithField({ id: 'fld_qty', name: 'Qty', type: 'number', property: {} })
+    try {
+      await openConfig(container)
+      const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+      select.value = 'string'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await nextTick()
+      clickSave(container)
+      await nextTick()
+      expect(confirmSpy).toHaveBeenCalled()
+      expect(updateSpy).not.toHaveBeenCalled()
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a plain settings save on a retypeable field still carries NO type key', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container, app, updateSpy } = mountWithField({
+      id: 'fld_qty', name: 'Qty', type: 'number', property: { decimals: 2 },
+    })
+    try {
+      await openConfig(container)
+      clickSave(container)
+      await nextTick()
+      expect(confirmSpy).not.toHaveBeenCalled()
+      const [, payload] = updateSpy.mock.calls[0]
+      expect('type' in payload).toBe(false)
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('text -> long text survives the string/longText no-op skip', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container, app, updateSpy } = mountWithField({ id: 'fld_note', name: 'Note', type: 'string', property: {} })
+    try {
+      await openConfig(container)
+      const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+      expect(Array.from(select.options).map((o) => o.value)).toEqual(['string', 'longText'])
+      select.value = 'longText'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await nextTick()
+      clickSave(container)
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy.mock.calls[0][1].type).toBe('longText')
+    } finally { app.unmount(); container.remove() }
+  })
+})
+
+// The split between "the user picked a new type" and "the stored type moved" is what
+// keeps a retype savable: ANY upstream field change while the panel is dirty flips
+// fieldConfigOutdated, and the old single `fieldConfigSchemaChanged` predicate would
+// then read the user's own pick as background drift and block the save forever
+// (with a "Reload latest" that discards the pick).
+describe('MetaFieldManager — user retype vs background drift', () => {
+  it('an unrelated upstream field change does not turn the user retype into a block', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const Harness = defineComponent({
+      setup() {
+        const fields = ref([
+          { id: 'fld_qty', name: 'Qty', type: 'number', property: { decimals: 2 } },
+          { id: 'fld_note', name: 'Note', type: 'string', property: {} },
+        ])
+        return { fields }
+      },
+      render() {
+        return h(MetaFieldManager, {
+          visible: true, sheetId: 'sheet_1', sheets: [], fields: this.fields, onUpdateField: updateSpy,
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    await nextTick()
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement).click()
+    await nextTick()
+
+    const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+    select.value = 'string'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    // someone renames a DIFFERENT field upstream -> the source signature changes
+    vm.fields = [
+      { id: 'fld_qty', name: 'Qty', type: 'number', property: { decimals: 2 } },
+      { id: 'fld_note', name: 'Notes', type: 'string', property: {} },
+    ]
+    await nextTick()
+
+    expect(container.textContent).not.toContain('Reload latest before saving')
+    const saveButton = (Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((b) => b.textContent?.includes('Save field settings')) as HTMLButtonElement
+    expect(saveButton.disabled).toBe(false)
+    saveButton.click()
+    await nextTick()
+    expect(updateSpy).toHaveBeenCalledTimes(1)
+    expect(updateSpy.mock.calls[0][1].type).toBe('string')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('the STORED type moving still blocks, even while the user has a retype pending', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const Harness = defineComponent({
+      setup() {
+        const fields = ref([{ id: 'fld_qty', name: 'Qty', type: 'number', property: { decimals: 2 } }])
+        return { fields }
+      },
+      render() {
+        return h(MetaFieldManager, {
+          visible: true, sheetId: 'sheet_1', sheets: [], fields: this.fields, onUpdateField: updateSpy,
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    await nextTick()
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement).click()
+    await nextTick()
+
+    const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+    select.value = 'string'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    // …and meanwhile the field itself is re-typed in the background
+    vm.fields = [{ id: 'fld_qty', name: 'Qty', type: 'rating', property: { max: 5 } }]
+    await nextTick()
+
+    expect(container.textContent).toContain('This field changed type in the background. Reload latest before saving.')
+    const saveButton = (Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((b) => b.textContent?.includes('Save field settings')) as HTMLButtonElement
+    expect(saveButton.disabled).toBe(true)
+    saveButton.click()
+    await nextTick()
+    expect(updateSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+    container.remove()
+  })
+})

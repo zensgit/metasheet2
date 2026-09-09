@@ -46,6 +46,12 @@ on:
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
+      # Field-manager option palette + lossless-retype table: both are pure modules the
+      # component imports, so a change there is invisible to the MetaFieldManager.vue path
+      # trigger and would run multitable-field-manager.spec.ts in no gate at all.
+      - 'apps/web/src/multitable/utils/select-option-palette.ts'
+      - 'apps/web/src/multitable/utils/field-retype.ts'
+      - 'apps/web/tests/multitable-field-manager.spec.ts'
       - 'apps/web/src/multitable/composables/useMultitableGrid.ts'
       - 'apps/web/src/multitable/composables/useTrash.ts'
       - 'apps/web/src/multitable/components/TrashModal.vue'
@@ -405,6 +411,12 @@ on:
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
+      # Field-manager option palette + lossless-retype table: both are pure modules the
+      # component imports, so a change there is invisible to the MetaFieldManager.vue path
+      # trigger and would run multitable-field-manager.spec.ts in no gate at all.
+      - 'apps/web/src/multitable/utils/select-option-palette.ts'
+      - 'apps/web/src/multitable/utils/field-retype.ts'
+      - 'apps/web/tests/multitable-field-manager.spec.ts'
       - 'apps/web/src/multitable/composables/useMultitableGrid.ts'
       - 'apps/web/src/multitable/composables/useTrash.ts'
       - 'apps/web/src/multitable/components/TrashModal.vue'
