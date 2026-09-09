@@ -185,7 +185,7 @@
                 <input type="checkbox" :checked="selectedIds.has(row.id)" :disabled="!rowAllowsAnyBulkAction(row.id)" @change="toggleSelectRow(row.id)" />
               </td>
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
-                <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
+                <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)"><SheetCaretRight /></button>
                 <span class="meta-grid__row-num-cluster">
                 <span class="meta-grid__row-num-index">{{ startIndex + ri + 1 }}</span>
                 <span class="meta-grid__row-num-lock-slot">
@@ -1535,23 +1535,35 @@ thead .meta-grid__check-col {
 .meta-grid__expand-btn {
   flex: 0 0 12px; width: 12px; height: 14px; box-sizing: border-box;
   border: none; background: transparent; cursor: pointer;
-  font-size: 8px; line-height: 1; color: var(--ms-sheet-icon-color, #6b7280);
+  color: var(--ms-sheet-icon-color, #6b7280);
   padding: 0; margin: 0; transition: transform 0.15s;
   display: inline-flex; align-items: center; justify-content: center;
 }
 .meta-grid__expand-btn:hover { color: var(--ms-text-2, #4b5563); }
 .meta-grid__expand-btn--open { transform: rotate(90deg); color: var(--ms-sheet-icon-color, #6b7280); }
+.meta-grid__expand-btn :deep(.ms-sheet-icon) { width: 12px; height: 12px; }
 .meta-grid__expand-row td { padding: 0; background: #fafbfc; border-bottom: 1px solid #eee; }
 .meta-grid__expand-detail { padding: 8px 16px 12px !important; }
 .meta-grid__expand-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; }
 .meta-grid__expand-field { display: flex; gap: 8px; font-size: 12px; padding: 3px 0; }
 .meta-grid__expand-label { color: #999; font-weight: 500; min-width: 80px; flex-shrink: 0; }
 .meta-grid__expand-value { color: #333; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.meta-grid__bulk-bar { display: flex; align-items: center; gap: 10px; padding: 6px 16px; background: #ecf5ff; border-bottom: 1px solid #c0d8f0; font-size: 12px; }
-.meta-grid__bulk-count { color: #409eff; font-weight: 500; }
-.meta-grid__bulk-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 11px; }
-.meta-grid__bulk-btn--danger { color: #f56c6c; border-color: #f56c6c; }
-.meta-grid__bulk-btn--danger:hover { background: #fef0f0; }
+.meta-grid__bulk-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 16px;
+  background: var(--ms-bg-page, #f5f6f8);
+  border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb);
+  font-size: var(--ms-sheet-font-header, 12px);
+}
+.meta-grid__bulk-count { color: var(--ms-text-2, #4b5563); font-weight: 400; }
+.meta-grid__bulk-btn {
+  padding: 2px 8px; border: 1px solid transparent; border-radius: var(--ms-radius-sm, 6px);
+  background: transparent; cursor: pointer; font-size: 12px;
+  color: var(--ms-text-2, #4b5563);
+}
+.meta-grid__bulk-btn:hover { background: var(--ms-bg-card, #fff); color: var(--ms-text-1, #111827); }
+.meta-grid__bulk-btn--danger { color: #b45353; }
+.meta-grid__bulk-btn--danger:hover { background: rgba(180, 83, 83, 0.12); color: #9f3d3d; }
 .meta-grid__group-header { cursor: pointer; }
 .meta-grid__group-header td { padding: 8px 12px; background: var(--ms-bg-card, #fff); font-size: var(--ms-sheet-font-body, 13px); font-weight: 600; color: var(--ms-text-1, #111827); border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); }
 .meta-grid__group-header:hover td { background: var(--ms-bg-page, #f5f6f8); }
