@@ -57,6 +57,7 @@ import {
   loadElearningProjectionSheetOrgMap,
 } from './elearning-projection-access'
 import { restrictElearningProjectionCapabilities } from './elearning-projection-constants'
+import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   parseConditionalRules,
   parseConditionalRulesCached,
@@ -223,19 +224,9 @@ export const PUBLIC_FORM_CAPABILITIES: MultitableCapabilities = {
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
-function isUndefinedTableError(err: unknown, tableName: string): boolean {
-  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
-  const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
-  if (code === '42P01') return msg.includes(tableName)
-  return msg.includes(`relation "${tableName}" does not exist`)
-}
-
-function isUndefinedColumnError(err: unknown, columnName: string): boolean {
-  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
-  const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
-  if (code === '42703') return msg.includes(columnName)
-  return msg.includes(`column "${columnName}" does not exist`)
-}
+// 缺表/缺列守卫统一到 utils/database-errors。有 code 时判据不变(42P01/42703 + message 提到
+// 该标识符),差别只在两处放宽:标识符比对会先去掉引号/空白(认 `column "g"."name"` 这种形态),
+// 以及无 code 的散文兜底同时认中文译文(「关系 x 不存在」/「字段 x 不存在」)。
 
 export function isSheetPermissionSubjectType(
   value: unknown,
@@ -1456,7 +1447,9 @@ export async function loadRecordCreatorMap(
       ]),
     )
   } catch (err) {
-    if (err instanceof Error && err.message.includes('column') && err.message.includes('created_by')) {
+    // 只对「meta_records 还没有 created_by 列」降级;散文匹配在中文 locale 下失效,
+    // 这里换成 SQLSTATE 主判的共享守卫(无 code 的英文错误仍走散文兜底)。
+    if (isUndefinedColumnError(err, 'created_by')) {
       return new Map()
     }
     throw err
