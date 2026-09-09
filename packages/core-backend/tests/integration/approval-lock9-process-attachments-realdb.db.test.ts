@@ -645,8 +645,11 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
     // `resolveApprovalActorRoles` (routes/approvals.ts) / `resolveActorRolesFromRequest`
     // (approval-attachment-runtime.ts, now the SAME extracted helper) that this file's other G-5
     // legs never exercise is a ROLE-typed seat — every other G-5/G-6/G-8/G-11 test seats its actor
-    // via `assignment_type='user'`, which `assignmentMatchesActor` (ApprovalProductService.ts:3985)
-    // matches on `assignee_id === actorId` alone, never touching `actorRoles` at all. Measured: the
+    // via `assignment_type='user'`, which `assignmentMatchesActor`
+    // (`packages/core-backend/src/services/approval-seat-authorization.ts`, from which
+    // `ApprovalProductService` re-exports it) matches on `assignee_id === actorId` alone, never
+    // touching `actorRoles` at all. NO line number on purpose: the pointer this replaces named a
+    // line the function had already moved away from before it also changed file. Measured: the
     // NIT-2 extraction's own acceptance mutation (`resolveApprovalActorRoles` returns `[]`) reds
     // NOTHING in this suite, the S1 lane, approval-rbac-boundary, approval-history-routing,
     // approval-field-edit-enforcement, approval-comments, approval-handler-node, or

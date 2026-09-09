@@ -27,6 +27,11 @@ export const ELEARNING_COURSE_PUBLISH_OPTION_TEXT_MAX = 500
 export const ELEARNING_COURSE_PUBLISH_EXPLANATION_MAX = 2000
 export const ELEARNING_COURSE_PUBLISH_QUESTION_MAX = 50
 export const ELEARNING_COURSE_PUBLISH_OPTION_MAX = 20
+export const ELEARNING_SIMPLE_WATCH_CHALLENGE_POLICY_REVISION =
+  'watch-challenge-simple-v1' as const
+export const ELEARNING_SIMPLE_WATCH_CHALLENGE_COUNT = 1 as const
+export const ELEARNING_SIMPLE_WATCH_CHALLENGE_MIN_DURATION_MS = 60_000 as const
+export const ELEARNING_SIMPLE_WATCH_CHALLENGE_RESPONSE_WINDOW_MS = 30_000 as const
 const PG_INT32_MAX = 2147483647
 
 const UUID_RE =
@@ -96,6 +101,10 @@ export interface PublishElearningCourseInput {
   passScore: number
   maxAttempts: number
   questions: PublishElearningCourseQuestion[]
+}
+
+export interface PublishElearningCourseOptions {
+  watchChallengeEnabled?: boolean
 }
 
 export interface ElearningCoursePublishResult {
@@ -415,6 +424,7 @@ function publicResultFromRequest(row: Record<string, unknown>): ElearningCourseP
 export async function publishElearningCourse(
   db: ElearningCoursePublishDb,
   input: PublishElearningCourseInput,
+  options: PublishElearningCourseOptions = {},
 ): Promise<ElearningCoursePublishResult> {
   const canonical = canonicalizeElearningCoursePublishInput(input)
   const requestHash = hashElearningCoursePublishRequest(canonical)
@@ -430,6 +440,14 @@ export async function publishElearningCourse(
     questionId: randomUUID(),
     revisionId: randomUUID(),
   }))
+  const watchChallengePolicy = options.watchChallengeEnabled === true
+    ? {
+        revision: ELEARNING_SIMPLE_WATCH_CHALLENGE_POLICY_REVISION,
+        count: ELEARNING_SIMPLE_WATCH_CHALLENGE_COUNT,
+        minimumDurationMs: ELEARNING_SIMPLE_WATCH_CHALLENGE_MIN_DURATION_MS,
+        responseWindowMs: ELEARNING_SIMPLE_WATCH_CHALLENGE_RESPONSE_WINDOW_MS,
+      }
+    : null
 
   return db.transaction(async (tx) => {
     try {
@@ -602,8 +620,13 @@ export async function publishElearningCourse(
         `/* elearning-publish:insert-video-item */
          INSERT INTO elearning_course_version_items (
            id, org_id, course_version_id, item_type, position, media_id, exam_id,
-           completion_policy_version, completion_threshold_bps
-         ) VALUES ($1, $2, $3, 'video', 1, $4, NULL, $5, $6)`,
+           completion_policy_version, completion_threshold_bps,
+           watch_challenge_policy_revision, watch_challenge_count,
+           watch_challenge_min_duration_ms, watch_challenge_response_window_ms
+         ) VALUES (
+           $1, $2, $3, 'video', 1, $4, NULL, $5, $6,
+           $7, $8, $9, $10
+         )`,
         [
           videoItem.itemId,
           canonical.orgId,
@@ -611,6 +634,10 @@ export async function publishElearningCourse(
           videoItem.mediaId,
           videoItem.completionPolicyVersion,
           videoItem.completionThresholdBps,
+          watchChallengePolicy?.revision ?? null,
+          watchChallengePolicy?.count ?? null,
+          watchChallengePolicy?.minimumDurationMs ?? null,
+          watchChallengePolicy?.responseWindowMs ?? null,
         ],
       )
       await tx.query(

@@ -5,6 +5,8 @@ export const ELEARNING_ASSESSMENT_ENABLED = 'ELEARNING_ASSESSMENT_ENABLED' as co
 export const ELEARNING_INCENTIVE_ENABLED = 'ELEARNING_INCENTIVE_ENABLED' as const
 export const ELEARNING_ANALYTICS_ENABLED = 'ELEARNING_ANALYTICS_ENABLED' as const
 export const ELEARNING_MEDIA_ENABLED = 'ELEARNING_MEDIA_ENABLED' as const
+export const ELEARNING_WATCH_CHALLENGE_ENABLED = 'ELEARNING_WATCH_CHALLENGE_ENABLED' as const
+export const ELEARNING_ENROLLMENT_ENABLED = 'ELEARNING_ENROLLMENT_ENABLED' as const
 
 export const ELEARNING_FLAG_NAMES = [
   ELEARNING_ENABLED,
@@ -14,6 +16,8 @@ export const ELEARNING_FLAG_NAMES = [
   ELEARNING_INCENTIVE_ENABLED,
   ELEARNING_ANALYTICS_ENABLED,
   ELEARNING_MEDIA_ENABLED,
+  ELEARNING_WATCH_CHALLENGE_ENABLED,
+  ELEARNING_ENROLLMENT_ENABLED,
 ] as const
 
 export type ElearningFlagName = (typeof ELEARNING_FLAG_NAMES)[number]
@@ -56,6 +60,16 @@ export function isElearningContentSurfaceEnabled(env: NodeJS.ProcessEnv = proces
   return isElearningEnabled(env) && isElearningFlagEnabled(ELEARNING_CONTENT_ENABLED, env)
 }
 
+/** Online self-study enrollment is independently demand-gated and never grants access. */
+export function isElearningEnrollmentSurfaceEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    isElearningContentSurfaceEnabled(env)
+    && isElearningFlagEnabled(ELEARNING_ENROLLMENT_ENABLED, env)
+  )
+}
+
 /** Assignment writes additionally require the independent ASSIGNMENT capability. */
 export function isElearningAssignmentSurfaceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (
@@ -72,6 +86,16 @@ export function isElearningWatchSurfaceEnabled(env: NodeJS.ProcessEnv = process.
   return (
     isElearningContentSurfaceEnabled(env)
     && isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED, env)
+  )
+}
+
+/** L6 watch challenge requires the existing watch surface plus its own exact gate. */
+export function isElearningWatchChallengeSurfaceEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    isElearningWatchSurfaceEnabled(env)
+    && isElearningFlagEnabled(ELEARNING_WATCH_CHALLENGE_ENABLED, env)
   )
 }
 

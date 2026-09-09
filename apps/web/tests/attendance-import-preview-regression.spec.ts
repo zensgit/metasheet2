@@ -153,6 +153,7 @@ describe('Attendance import preview regression', () => {
     findButton(importSection, 'Preview').click()
     await flushUi(6)
 
+    await vi.waitFor(() => expect(container!.textContent).toContain('user-old'))
     expect(container!.textContent).toContain('user-old')
     expect(container!.textContent).toContain('CSV warnings: stale-csv-warning; stale-group-warning')
 
@@ -160,6 +161,7 @@ describe('Attendance import preview regression', () => {
     await flushUi(6)
 
     const setupState = (vm as any).$?.setupState as Record<string, unknown>
+    await vi.waitFor(() => expect(unwrapRef<boolean>(setupState.importLoading)).toBe(false))
     expect(importSection.textContent).toContain('No preview data.')
     expect(importSection.textContent).not.toContain('user-old')
     expect(importSection.textContent).not.toContain('stale-csv-warning')
@@ -175,6 +177,7 @@ describe('Attendance import preview regression', () => {
     findButton(container!, 'Retry preview').click()
     await flushUi(6)
 
+    await vi.waitFor(() => expect(unwrapRef<boolean>(setupState.importLoading)).toBe(false))
     expect(previewRequestCount).toBe(3)
     expect(importSection.textContent).toContain('No preview data.')
     expect(importSection.textContent).not.toContain('user-old')
@@ -337,6 +340,7 @@ describe('Attendance import preview regression', () => {
       // Server "No rows to preview…" → row-specific zh copy + Save-As-CSV hint.
       findButton(importSection, '预览').click()
       await flushUi(6)
+      await vi.waitFor(() => expect(container!.textContent).toContain('文件未解析出可导入的数据行'))
       expect(container!.textContent).toContain('文件未解析出可导入的数据行')
       expect(container!.textContent).toContain('另存为 → CSV')
       expect(container!.textContent).toContain('VALIDATION_ERROR')
@@ -344,6 +348,7 @@ describe('Attendance import preview regression', () => {
       // Server header-missing diagnostic → header-specific zh copy.
       findButton(importSection, '预览').click()
       await flushUi(6)
+      await vi.waitFor(() => expect(container!.textContent).toContain('CSV 表头缺少必需列'))
       expect(previewRequestCount).toBe(2)
       expect(container!.textContent).toContain('CSV 表头缺少必需列')
       expect(container!.textContent).toContain('VALIDATION_ERROR')

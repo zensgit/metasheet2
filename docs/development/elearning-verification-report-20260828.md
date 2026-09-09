@@ -186,3 +186,64 @@ plugin-tests.yml 与 vitest.config.ts 保留 current-main、Time Machine 和既�
 | production / real tenant data | 未触及 |
 
 本地候选可进入独立审阅与后续 Draft/HOLD 落地窗口；不能据此宣称云课堂 L0–L6 已完成。
+
+---
+
+## 8. 2026-09-05 successor verification：在线报名与 raster-v2
+
+> 本节验证 `#5426` code head `408e61411688bfd8f994f5e50998e2566b78ef4f`
+>（base `70dc72d7671cad9cea1925ed93f90d3d9c746aeb`，tree
+> `7591090a91e6f28fc9de54bf54970513e53880c2`）。上文 `15dccf...` 的历史证据不变。
+
+### 8.1 Code-head 远端终态
+
+- GitHub exact-head matrix：**49 SUCCESS + 1 expected SKIP / 0 pending / 0 bad**，共 50 contexts。
+- `elearning-web-guard`：run `33942439293` / job `101242333446`，SUCCESS。
+- `migration-replay`：run `33942439257` / job `101242333468`，SUCCESS。
+- `web-tests`：run `33942439249` / job `101242333247`，SUCCESS。
+- Plugin System `test (18.x)`：run `33942439382` / job `101242334219`，SUCCESS。
+- Plugin System `test (20.x)`：run `33942439382` / job `101242334275`，SUCCESS（完成时间 `2026-09-05T04:14:29Z`）。
+
+这是 code head 的终态。追加本节产生的提交是 report-only child，须单独等待其 exact-head CI；
+二者不能互相替代。
+
+### 8.2 本地 exact-tree 门
+
+| 验证面 | 结果 |
+|---|---:|
+| backend focused | 9 files / 85 tests PASS |
+| Web focused + 主线邻接 | 4 files / 154 tests PASS |
+| required-web | 422 files / 5461 tests PASS |
+| OpenAPI focused | 17/17 PASS；canonical build、validate、guard PASS |
+| e-learning wiring + global flag contract | 45/45 PASS |
+| core/Web typecheck、package-scoped source ESLint | PASS |
+| positive provenance + full sealed-export S5 | PASS；frozen/live differenceCount=0 |
+
+### 8.3 PostgreSQL 与判别 mutation
+
+PostgreSQL 15 实际执行对象是 `7e28ff30a449484522e536c319a1b7071a4eb749`：完整 fresh
+migration、第二次 replay 与 watch-challenge authority **13/13 PASS**，结束时 residual
+backends `0`、数据库前缀残留 `0`。`7e28ff...` 到 `408e...` 只合入主线四个备料/required-web
+文件；backend runtime、watch migration 与 integration test 字节一致。因此这里引用的是
+`7e28ff...` 的真库执行证据及其对 `408e...` 的字节等价证明，不冒称在 `408e...` 上重新跑库。
+
+- mutation：重新向公开响应加入 `targets` 时 backend closed-shape contract 精确 RED；恢复后 GREEN。
+- mutation：DOM 重新暴露 option UUID 时 learner-view 精确 RED；恢复后 GREEN。
+- 独立 Sol 对 raster fix exact range 复审：`P1/P2/P3 = 0/0/0`。
+- 合并后独立 Terra 对 `408e...` 复审：`P1/P2/P3 = 0/0/0`。
+
+### 8.4 视觉证据与诚实边界
+
+本地 ignored artifact 目录 `artifacts/elearning-watch-challenge-raster/` 包含：
+
+- `sample-a.png`、`sample-b.png`：两份不同选项排列的真实 renderer 输出；
+- `overlay-desktop.png`、`overlay-narrow.png`：桌面与窄屏叠层截图。
+
+人工检查确认 PNG 可见、六个点击矩形与图像选项对齐，窄屏无溢出。artifact 不进入发布包，
+截图也不替代服务端 authority 测试。该机制只消除公开结构化“目标 → 答案 id”连接；OCR、
+视觉 AI 与非视觉等价挑战仍是明确边界。
+
+### 8.5 发布状态
+
+`#5426` 的 code head 验证通过不等于 Ready、merge、启旗或部署。PR 继续 Draft/HOLD；所有
+相关 flags 保持默认 OFF，未触及 staging、production 或真实租户数据。

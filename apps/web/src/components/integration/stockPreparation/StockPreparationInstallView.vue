@@ -1,5 +1,41 @@
 <template>
-  <div class="stock-prep-install" data-testid="stock-prep-install">
+  <div class="stock-prep-install" data-testid="stock-prep-install" :data-mode="props.mode">
+    <!-- P0-4: the「开始使用」向导, mounted FIRST. Every deployment fact it renders comes down as a
+         prop this view already owns; since P1-3 it additionally issues ONE read of its own, the
+         platform role catalog for step⑤「谁能用」(`onboardingReadiness.ts`, a preload that degrades
+         to 「? 看不到」 and never to a banner). It re-emits its three actions onto this view's own
+         existing functions — nothing below it changes order, testid, or behaviour.
+
+         P1-1: 向导现在在左栏里有自己的一项(「开始使用」),所以这个挂载点变成了 CONDITIONAL —
+         但条件化的是位置,不是实现。壳把 SAME COMPONENT 挂两次:`getting-started` 这一项传
+         `mode="wizard"`(只出向导),`install`(数据来源与体检)传 `mode="review"`(不出向导)。
+         两个 key 因此共用这一份数据加载与这一套 run 编排 —— 把向导单独提到壳里去挂,就得把
+         defaults / preflight / sourcePreflight / binding / report / busy 与两条 run 全部再实现一遍。
+         DEFAULT IS 'full' — 直接挂载这个组件的既有 spec 一个字节都不受影响。 -->
+    <StockPreparationGettingStarted
+      v-if="props.mode !== 'review'"
+      :defaults="defaults"
+      :preflight="preflight"
+      :preflight-error-status="preflightErrorStatus"
+      :source-preflight="sourcePreflight"
+      :source-preflight-error-status="sourcePreflightErrorStatus"
+      :binding="sourceBinding"
+      :report="report"
+      :can-run-install="canRun"
+      :busy="busy"
+      :source-check-control="wizardSourceCheckControl"
+      @run-preflight-check="loadPreflight"
+      @run-source-preflight="loadSourcePreflight()"
+      @run-install="startInstall"
+      @navigate-stage="(viewKey) => emit('navigate-stage', viewKey)"
+    />
+
+    <!-- 数据来源与体检 — everything the wizard is NOT. `mode="wizard"` renders the wizard alone, so
+         the rail's 「开始使用」 and 「数据来源与体检」 are two views of ONE component and one data
+         load rather than two implementations. A `<template>` wrapper is used rather than a v-if per
+         card because the alternative is fourteen conditions that can drift apart; nothing inside
+         moves, and every testid keeps its position in document order. -->
+    <template v-if="props.mode !== 'wizard'">
     <p class="stock-prep-install__intro" data-testid="stock-prep-install-intro">
       {{ bi(
         '安装分三步:先看一遍这套部署还缺什么,再把该建的表建起来,最后回头再看一次确认建好了。这一页全是确认题,没有填空题 —— 下面列的都是默认值,您只要看一眼对不对。',
@@ -13,10 +49,32 @@
       ) }}
     </p>
 
+    </template>
+    <!-- ===================================================================
+         读不到就说读不到 — IN EVERY MODE, which is why the `mode !== 'wizard'`
+         wrapper is cut in two around this paragraph as well.
+
+         `errorStatus` is the ONE report this component makes about its own
+         reads (manifest / preflight / source preflight). The wizard is driven
+         entirely by those same reads: with them refused or 500-ing it renders
+         「? 看不到」 on every step and offers nothing to press. Left inside the
+         review-only wrapper, the mode D2 lands a brand-new deployment's admin
+         on was the one mode that never said WHY — no HTTP code, no next step,
+         and no 复制这条报错 to paste to us. Same posture as
+         StockPreparationSourceBindingPanel below: an error bar is not part of
+         a mode's content, it is the page telling the truth about itself.
+         =================================================================== -->
     <p v-if="errorStatus !== null" class="stock-prep-install__error" data-testid="stock-prep-install-error">
       {{ bi(readFailed.zh, readFailed.en) }}
       <code class="stock-prep-install__token">HTTP {{ errorStatus }}</code>
+      <span v-if="readFailed.zhNext" class="stock-prep-install__hint" data-testid="stock-prep-install-error-next">
+        {{ bi(readFailed.zhNext, readFailed.enNext ?? '') }}
+      </span>
+      <button type="button" data-testid="stock-prep-install-error-copy" @click="copyReadError(errorStatus)">
+        {{ readErrorCopyLabel === 'copy' ? bi('复制这条报错', 'Copy this error') : bi('已复制', 'Copied') }}
+      </button>
     </p>
+    <template v-if="props.mode !== 'wizard'">
 
     <!-- ===================================================================
          数据来源 — WHICH database 备料 reads, chosen here instead of in a
@@ -30,8 +88,30 @@
          renders its own gate (platform admin to change, read-only for a
          `stock-prep:admin` holder) and its own reads, so it neither depends on
          nor blocks the manifest/preflight panels beneath it.
+
+         P1-7 KEPT IT HERE ON PURPOSE. An earlier draft of this wave moved it
+         into region ③ 「装完之后回来复查」on the strength of design-ops-overview
+         P-5, which lists 源绑定 among the things you come back to. P-5 assigns
+         this panel to this PAGE; it says nothing about where on the page. The
+         wizard's step ③「告诉备料用这条源」has no button, no anchor and no
+         scroll of its own — this panel IS its only execution site — so putting
+         it below ②'s ~240 template lines would leave the wizard pointing at
+         something the reader has to go hunting for. `P1-7b` pins the ordering.
+
+         P1-1 FIX — IT RENDERS IN EVERY MODE, and that is why the `mode !== 'wizard'` wrapper is cut
+         in two around it. This panel is the ONLY thing on the page that answers 「哪条源、有几条可
+         选」, and the wizard's steps ①③ are derived from its `binding-read` envelope and from nothing
+         else (`gettingStarted.ts`: `binding === null` ⇒ 「? 看不到」). The first cut of the rail put
+         the wizard on its own item and left this panel behind on 数据来源与体检 — so a brand-new
+         deployment's admin, whom D2 lands on 开始使用, was shown 「? 看不到」 on the two steps that
+         were in fact done, with no control on screen and no link to one. That is 「看不到」 being
+         mistaken for 「没完成」, manufactured by us, which is exactly what G4 forbids.
          =================================================================== -->
-    <StockPreparationSourceBindingPanel :scope="scope" />
+    </template>
+    <!-- @binding-read hands the wizard above THIS panel's server answer (which source 备料 will read,
+         how many the server considers eligible) so steps ①③ project it rather than re-deriving it. -->
+    <StockPreparationSourceBindingPanel :scope="scope" @binding-read="onBindingRead" />
+    <template v-if="props.mode !== 'wizard'">
 
     <!-- ===================================================================
          §14 DEFAULTS FOR CONFIRMATION — rendered FROM the served manifest.
@@ -59,7 +139,16 @@
         {{ defaults.valueStatement }}
       </p>
 
-      <h4 class="stock-prep-install__h4">{{ bi('会建哪几张表', 'Which tables get created') }}</h4>
+      <!-- P1-7: the five subsections below split into native <details>, default-collapsed except the
+           first — the "五段一次性铺开" A13 named as the page's own five-minute-op-turned-reading-
+           comprehension problem. Splitting changes NOTHING about what is asserted: every row a spec
+           reads by testid stays in the DOM (a closed <details> hides visually, never structurally —
+           `.textContent` and `querySelector` do not care), and V-02's "zero buttons in this section"
+           holds because `<summary>` is not a `<button>`. Each summary keeps the section's `<h4>`
+           INSIDE it rather than replacing it: a disclosure control that is also a heading stays in
+           the screen-reader outline, so heading navigation through these five still works. -->
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="objects" open>
+        <summary><h4 class="stock-prep-install__h4">{{ bi('会建哪几张表', 'Which tables get created') }}</h4></summary>
       <table class="stock-prep-install__table">
         <thead>
           <tr>
@@ -97,8 +186,10 @@
           </tr>
         </tbody>
       </table>
+      </details>
 
-      <h4 class="stock-prep-install__h4">{{ bi('装好之后谁能做什么', 'Who can do what once it is installed') }}</h4>
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="permissions">
+        <summary><h4 class="stock-prep-install__h4">{{ bi('装好之后谁能做什么', 'Who can do what once it is installed') }}</h4></summary>
       <ul class="stock-prep-install__list stock-prep-install__list--plain" data-testid="stock-prep-install-permissions">
         <li v-for="code in defaults.permissions.codes" :key="code" data-testid="stock-prep-install-permission-row">
           <strong v-if="permissionPlain(code)">{{ bi(permissionPlain(code)!.zh, permissionPlain(code)!.en) }}</strong>
@@ -121,8 +212,10 @@
           ? bi(noHolders.zh + (noHolders.zhNext ?? ''), `${noHolders.en} ${noHolders.enNext ?? ''}`)
           : defaults.permissions.automaticHolders.join(', ') }}
       </p>
+      </details>
 
-      <h4 class="stock-prep-install__h4">{{ bi('需要在服务器上准备的东西', 'What has to be set up on the server') }}</h4>
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="config-surfaces">
+        <summary><h4 class="stock-prep-install__h4">{{ bi('需要在服务器上准备的东西', 'What has to be set up on the server') }}</h4></summary>
       <ul class="stock-prep-install__list stock-prep-install__list--plain">
         <li
           v-for="surface in defaults.configSurfaces"
@@ -143,8 +236,10 @@
           </span>
         </li>
       </ul>
+      </details>
 
-      <h4 class="stock-prep-install__h4">{{ bi('系统绝对不会做的事', 'What the system will never do') }}</h4>
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="posture">
+        <summary><h4 class="stock-prep-install__h4">{{ bi('系统绝对不会做的事', 'What the system will never do') }}</h4></summary>
       <p class="stock-prep-install__hint" data-testid="stock-prep-install-no-switch">
         {{ bi(
           '下面这几条是这套部署的硬性边界。本页只报告它们的状态,没有开关可以打开它们 —— 显示「未设」或「关闭」就是正确的,不是漏配。',
@@ -174,8 +269,10 @@
           </span>
         </li>
       </ul>
+      </details>
 
-      <h4 class="stock-prep-install__h4">{{ bi('怎么算装成功了', 'What counts as installed') }}</h4>
+      <details class="stock-prep-install__fold" data-testid="stock-prep-install-fold" data-fold="acceptance">
+        <summary><h4 class="stock-prep-install__h4">{{ bi('怎么算装成功了', 'What counts as installed') }}</h4></summary>
       <ul class="stock-prep-install__list stock-prep-install__list--plain" data-testid="stock-prep-install-acceptance">
         <li v-for="criterion in defaults.acceptance.criteria" :key="criterion.id">
           <strong v-if="acceptancePlain(criterion.id)">
@@ -191,6 +288,7 @@
           'Both are checked by the acceptance script that ships with the release, not by a button here — the script is named in the technical details below.',
         ) }}
       </p>
+      </details>
 
       <!-- Everything the page used to lead with, kept verbatim and one click away. -->
       <StockPrepTechnicalDetails testid="stock-prep-install-defaults-tech">
@@ -257,6 +355,27 @@
         </dl>
       </StockPrepTechnicalDetails>
     </section>
+
+    <!-- ===================================================================
+         P1-7 REGION ③ — 「装完之后回来复查」. Everything below used to render as five loose cards
+         with no shared frame; grouped here under one heading because every one of them answers the
+         SAME question an admin has after the first install run finishes, or weeks later when
+         something needs rechecking: "come back here, not to 「即将安装的内容」above, which is a
+         one-time confirmation read". testids on every card inside are UNCHANGED — this is a wrapper,
+         not a rewrite.
+
+         ZERO CARDS MOVE. Every panel below renders in the order it rendered on main; this region is
+         a wrapper plus a heading, nothing else. (An earlier draft of this wave DID move the source-
+         binding panel down into here — see the comment above that panel for why it was put back.)
+         =================================================================== -->
+    <section class="stock-prep-install__section-group" data-testid="stock-prep-install-review-section">
+      <h3 class="stock-prep-install__section-title">{{ bi('装完之后回来复查', 'Come back here to review, after installing') }}</h3>
+      <p class="stock-prep-install__intro" data-testid="stock-prep-install-review-intro">
+        {{ bi(
+          '这几张卡是您装完之后、或者以后要重新体检 / 重装时会回来看的地方 —— 装之前只要确认一次默认值就行,不用先读完这里。',
+          'These cards are where you come back — right after installing, or later to run another health check or reinstall. Before installing you only confirm the defaults once; you do not need to read this section first.',
+        ) }}
+      </p>
 
     <!-- ===================================================================
          PREFLIGHT — 查. Read tier, provisions nothing. Every blocker now
@@ -376,6 +495,15 @@
          run "succeeded" with zero rows), and an empty test database discovered
          many steps too late.
          =================================================================== -->
+    <!-- I-11 (P0-7): said ONCE, and physically BETWEEN the two cards, because the sentence uses the
+         words 上面/下面 and therefore only means what it says from here. Inside the card below it,
+         「上面」 read as that card's own heading and the sentence taught the split backwards. The
+         wording follows THIS page's order (deployment preflight above, source readiness below); if
+         P1-7 ever reorders the two cards, this sentence moves with them. -->
+    <p class="stock-prep-install__hint" data-testid="stock-prep-install-preflight-relation">
+      {{ bi(twoPreflightRelation.zh, twoPreflightRelation.en) }}
+    </p>
+
     <section class="stock-prep-install__card" data-testid="stock-prep-source-preflight">
       <h3 class="stock-prep-install__h3">{{ bi('源就绪预检:这家的库能不能接', 'Source readiness: can we connect to this customer’s database') }}</h3>
       <p class="stock-prep-install__hint">
@@ -394,7 +522,17 @@
       >
         {{ bi('检查这个源', 'Check this source') }}
       </button>
-      <p v-else class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-denied">
+      <!-- I-12 (P0-7): it never runs on page load (D6) — said out loud beside the one button that
+           runs it.
+
+           R12: this new <p> sits between the button and the denied line, which USED to be a
+           `v-if`/`v-else` pair. Rather than leave a chain an unrelated later insert could break in
+           silence, the denied line is now an explicit `v-if="!canCheckSource"`. Same two states,
+           no adjacency requirement. -->
+      <p v-if="canCheckSource" class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-button-note">
+        {{ bi(sourcePreflightButtonNote.zh, sourcePreflightButtonNote.en) }}
+      </p>
+      <p v-if="!canCheckSource" class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-denied">
         {{ bi(
           '这一步要读对方的库,所以只有对接权限的人能点。装配置的人看得到结果,点不了按钮。',
           'This reads the customer’s database, so only an integration role may run it. Everyone here can read the result; not everyone can press the button.',
@@ -408,14 +546,29 @@
       >
         {{ bi(readFailed.zh, readFailed.en) }}
         <code class="stock-prep-install__token">{{ sourcePreflightErrorStatus }}</code>
+        <span v-if="readFailed.zhNext" class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-error-next">
+          {{ bi(readFailed.zhNext, readFailed.enNext ?? '') }}
+        </span>
+        <button type="button" data-testid="stock-prep-source-preflight-error-copy" @click="copyReadError(sourcePreflightErrorStatus)">
+          {{ readErrorCopyLabel === 'copy' ? bi('复制这条报错', 'Copy this error') : bi('已复制', 'Copied') }}
+        </button>
       </p>
 
       <template v-if="sourcePreflight">
         <p class="stock-prep-install__ready" data-testid="stock-prep-source-preflight-verdict">
           <strong>{{ sourceVerdictText }}</strong>
         </p>
+        <!-- I-10 (P0-7, G5): a `no-go` reading is a diagnosis, never a gate — this line is the whole
+             point of that guarantee being visible rather than merely true in the code. -->
+        <p
+          v-if="sourcePreflight.verdict === 'no-go'"
+          class="stock-prep-install__hint"
+          data-testid="stock-prep-source-preflight-no-go-disclaimer"
+        >
+          {{ bi(sourceNoGoDisclaimer.zh, sourceNoGoDisclaimer.en) }}
+        </p>
 
-        <!-- The four lines, each a SERVER measurement rendered — never a judgement made here. -->
+        <!-- Each line a SERVER measurement rendered — never a judgement made here. -->
         <ul class="stock-prep-install__list stock-prep-install__list--plain">
           <li
             v-for="row in sourceCheckRows"
@@ -423,11 +576,17 @@
             data-testid="stock-prep-source-preflight-check"
             :data-check="row.id"
             :data-ok="row.ok ? 'yes' : 'no'"
+            :data-state="row.unknown ? 'unknown' : (row.ok ? 'yes' : 'no')"
           >
+            <!-- Three states, not two: a check the SERVER did not evaluate renders as 未评估 rather
+                 than borrowing either verdict. `data-ok` keeps its two values so existing selectors
+                 read unchanged; `data-state` is where the third one lives. -->
             <span
               class="stock-prep-install__status"
-              :class="row.ok ? 'stock-prep-install__status--ok' : 'stock-prep-install__status--fail'"
-            >{{ row.ok ? bi('是', 'yes') : bi('否', 'no') }}</span>
+              :class="row.unknown
+                ? 'stock-prep-install__status--pending'
+                : (row.ok ? 'stock-prep-install__status--ok' : 'stock-prep-install__status--fail')"
+            >{{ row.unknown ? bi('未评估', 'not checked') : (row.ok ? bi('是', 'yes') : bi('否', 'no')) }}</span>
             <span v-if="sourceCheckPlain(row.id)">{{ bi(sourceCheckPlain(row.id)!.zh, sourceCheckPlain(row.id)!.en) }}</span>
             <span v-else><code>{{ row.id }}</code></span>
             <code class="stock-prep-install__token">{{ row.token }}</code>
@@ -751,6 +910,22 @@
     <section v-if="canRun" class="stock-prep-install__section" data-testid="stock-prep-install-copilot">
       <SchemaMappingCopilotPanel :scope="props.scope" :signals="copilotSignals" />
     </section>
+
+      <!-- P1-6 / I-22: the error-code drawer's entry point THIS WAVE — a real, visible entry at the
+           foot of this region (NOT "暗装": the component is mounted AND reachable). It is a
+           self-contained, prop-free panel (codeHelp.ts's own contract), so mounting it here is the
+           whole feature — no wiring, no scope, no fetch. The next wave's 【帮助】rail group mounts
+           this SAME component rather than a second copy.
+
+           The panel renders its own collapsed `<details>`: it is a DRAWER (§2.4 P-7 / §6.2 P1-6 /
+           §4.1 I-22 all call it one), so it costs one line of page height until someone has a code to
+           look up. Folding ② and then unfolding 74 rows here would have made this page LONGER than
+           it was before P1-7, which is the exact A13 complaint the wave exists to answer. -->
+      <section class="stock-prep-install__card" data-testid="stock-prep-install-code-help">
+        <StockPreparationCodeHelpPanel />
+      </section>
+    </section>
+    </template>
   </div>
 </template>
 
@@ -789,13 +964,15 @@
 // reach it: the manifest is a committed file that names env VARS, and the preflight is the server's
 // own values-free evidence. The plain-language layer adds no new source of text — plainLanguage.ts
 // is a table of committed constants keyed by identifier.
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import { useAuth } from '../../../composables/useAuth'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationSourceBindingPanel from './StockPreparationSourceBindingPanel.vue'
+import StockPreparationGettingStarted from './StockPreparationGettingStarted.vue'
 import SchemaMappingCopilotPanel from './SchemaMappingCopilotPanel.vue'
+import StockPreparationCodeHelpPanel from './StockPreparationCodeHelpPanel.vue'
 import type { SchemaMappingColumnInput, SchemaMappingSignalsInput } from '../../../services/integration/stockPreparation/schemaMappingCopilot'
 import {
   buildStockPreparationInstallDefaults,
@@ -839,9 +1016,13 @@ import {
   STOCK_PREP_INSTALLER_MAY_NOT_MODIFY,
   STOCK_PREP_NO_AUTOMATIC_HOLDERS,
   STOCK_PREP_READ_FAILED,
+  STOCK_PREP_SOURCE_NO_GO_DISCLAIMER,
+  STOCK_PREP_SOURCE_PREFLIGHT_BUTTON_NOTE,
+  STOCK_PREP_TWO_PREFLIGHT_RELATION,
   stockPrepAcceptancePlain,
   stockPrepBlockerPlain,
   stockPrepConfigSurfacePlain,
+  stockPrepErrorCopyText,
   stockPrepObjectPlain,
   stockPrepPermissionPlain,
   stockPrepPosturePlain,
@@ -852,8 +1033,32 @@ import {
   stockPrepSourceWarningPlain,
   stockPrepStepOutcomeText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 
-const props = defineProps<{ scope: IntegrationScope }>()
+/**
+ * P1-1 — WHICH HALF OF THIS PAGE TO RENDER.
+ *
+ *   'full'    (default) wizard + everything below it. What every existing caller and every existing
+ *             spec that mounts this component directly gets, byte for byte.
+ *   'wizard'  the 「开始使用」 rail item — the wizard alone.
+ *   'review'  the 「数据来源与体检」 rail item — everything EXCEPT the wizard.
+ *
+ * The split is presentational only: the reads, the gates and the install-run orchestration are the
+ * same instance's, whichever half is on screen. That is the whole point of putting the switch here
+ * rather than lifting the wizard into the shell — the wizard needs seven derived deployment facts
+ * and two run entry points that this component already owns.
+ */
+const props = withDefaults(defineProps<{
+  scope: IntegrationScope
+  mode?: 'full' | 'wizard' | 'review'
+}>(), { mode: 'full' })
+
+// P0-4: the getting-started wizard's step ⑥ ("拿一个项目跑一遍") points at the project board tab,
+// which this view does not own. Re-emitted verbatim, the SAME event name/shape
+// `StockPreparationWorkspace.vue` already listens to from the dashboard tab's own stepper
+// (`handleNavigateStage`) — reusing that existing, already-tested handler rather than inventing a
+// second tab-navigation path.
+const emit = defineEmits<{ (event: 'navigate-stage', viewKey: string): void }>()
 
 const { locale } = useLocale()
 const auth = useAuth()
@@ -862,7 +1067,7 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-const canRun = computed(() => canRunStockPrepInstall((permission) => auth.hasPermission(permission)))
+const canRun = computed(() => canRunStockPrepInstall(auth.getAccessSnapshot()))
 
 const busy = ref(false)
 const errorStatus = ref<number | null>(null)
@@ -888,6 +1093,46 @@ const readFailed = STOCK_PREP_READ_FAILED
 const manifestRoute = STOCK_PREPARATION_MANIFEST_ROUTE
 const preflightRoute = STOCK_PREPARATION_PREFLIGHT_ROUTE
 
+// P0-7's five honest lines (I-10/I-11/I-12) — plain constants, no lookup, no server field.
+const sourceNoGoDisclaimer = STOCK_PREP_SOURCE_NO_GO_DISCLAIMER
+const twoPreflightRelation = STOCK_PREP_TWO_PREFLIGHT_RELATION
+const sourcePreflightButtonNote = STOCK_PREP_SOURCE_PREFLIGHT_BUTTON_NOTE
+
+/**
+ * WHAT THE SOURCE-BINDING PANEL BELOW ANSWERED, for the wizard's steps ①③ (see that panel's
+ * `binding-read` note). `null` = no answer on this page — never 「没绑」.
+ */
+const sourceBinding = ref<{ effectiveExternalSystemId: string | null; eligibleSourceCount: number } | null>(null)
+function onBindingRead(binding: { effectiveExternalSystemId: string | null; eligibleSourceCount: number } | null): void {
+  sourceBinding.value = binding
+}
+
+/** 「复制这条报错」(P0-5, I-21), shared by the two HTTP-status-only error lines on this page. */
+const readErrorCopyLabel = ref<'copy' | 'copied'>('copy')
+let readErrorCopyResetTimer: ReturnType<typeof setTimeout> | null = null
+async function copyReadError(status: number | null): Promise<void> {
+  // Guarded: see the identical note on the confirmation queue's `copyError` — some hosts (this
+  // project's jsdom test environment included) implement neither the Clipboard API nor
+  // `document.execCommand`, and the latter throws rather than answering `false`.
+  let ok = false
+  try {
+    ok = await copyTextToClipboard(stockPrepErrorCopyText(`HTTP_${status ?? 0}`, locale.value === 'zh-CN'))
+  } catch {
+    ok = false
+  }
+  if (!ok) return
+  readErrorCopyLabel.value = 'copied'
+  if (readErrorCopyResetTimer) clearTimeout(readErrorCopyResetTimer)
+  readErrorCopyResetTimer = setTimeout(() => { readErrorCopyLabel.value = 'copy' }, 3000)
+}
+
+// #3365「卸载即作废」: a timer that outlives the component writes into a dead ref. Harmless here, but
+// the rule is the rule — a callback scheduled by a view is cancelled when that view goes away.
+onBeforeUnmount(() => {
+  if (readErrorCopyResetTimer) clearTimeout(readErrorCopyResetTimer)
+  readErrorCopyResetTimer = null
+})
+
 // ---------------------------------------------------------------------------
 // 源就绪预检 — its own state, its own error slot, its own permission.
 //
@@ -899,6 +1144,26 @@ const sourcePreflight = ref<StockPrepSourcePreflight | null>(null)
 const sourcePreflightErrorStatus = ref<number | null>(null)
 const sourcePreflightRoute = STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE
 const canCheckSource = computed(() => canRunStockPrepSourcePreflight((permission) => auth.hasPermission(permission)))
+
+/**
+ * WHETHER THE WIZARD CARRIES STEP ②'s OWN RUN CONTROL — and it does so in `mode="wizard"` alone.
+ *
+ * 线框 B's step table says ②「证明它只能读」 is done 「本页」, and the only control that does it is the
+ * 源就绪预检 card's 「检查这个源」 button — which lives inside region ③ 「装完之后回来复查」, i.e. on
+ * 数据来源与体检, not on 开始使用. Rather than move that card (P1-7 pinned its position, and duplicating
+ * it would put one action on screen twice), the wizard gets a one-button entry point into the SAME
+ * `loadSourcePreflight()` this component already owns.
+ *
+ *   'none'    the card itself is on screen (`full` / `review`) — a second button would be the
+ *             「一个动作画两次」 confusion I-11 exists to prevent.
+ *   'run'     wizard, and this caller may press it.
+ *   'denied'  wizard, and this caller may not — R-11 the other way round: it says who can, instead
+ *             of showing a button that 403s or leaving ② silently un-runnable forever.
+ */
+const wizardSourceCheckControl = computed<'none' | 'run' | 'denied'>(() => {
+  if (props.mode !== 'wizard') return 'none'
+  return canCheckSource.value ? 'run' : 'denied'
+})
 const sourceBlockerPlain = stockPrepSourceBlockerPlain
 const sourceWarningPlain = stockPrepSourceWarningPlain
 const sourceCheckPlain = stockPrepSourceCheckPlain
@@ -978,6 +1243,17 @@ function recordError(error: unknown): void {
   errorStatus.value = error instanceof StockPreparationInstallReadError ? error.status : 0
 }
 
+/**
+ * THE DEPLOYMENT-PREFLIGHT READ'S OWN ERROR SLOT, separate from the page-wide `errorStatus` banner.
+ *
+ * `errorStatus` is shared by three actions (the manifest read on mount, the preflight read, the
+ * install run), which is right for a banner that says 「这一页有一次读失败了」 — and wrong for the
+ * wizard's ④ badge, which is a claim about the PREFLIGHT specifically. Feeding the shared slot to the
+ * wizard meant a manifest 500 on first paint repainted 「建表 + 装列」, and an install-run refusal
+ * repainted it again. This slot moves only when the preflight read itself moves.
+ */
+const preflightErrorStatus = ref<number | null>(null)
+
 async function run(task: () => Promise<void>): Promise<void> {
   busy.value = true
   errorStatus.value = null
@@ -997,8 +1273,16 @@ async function loadDefaults(): Promise<void> {
 }
 
 async function loadPreflight(): Promise<void> {
+  preflightErrorStatus.value = null
   await run(async () => {
-    preflight.value = await readStockPreparationPreflight(props.scope)
+    try {
+      preflight.value = await readStockPreparationPreflight(props.scope)
+    } catch (error) {
+      // Recorded here as well as by `run` — same clamping rule (status only, never a message), so the
+      // wizard's ④ badge can distinguish 「这次预检没读到」 from 「这一页别的地方读失败了」.
+      preflightErrorStatus.value = error instanceof StockPreparationInstallReadError ? error.status : 0
+      throw error
+    }
   })
 }
 
@@ -1218,6 +1502,72 @@ defineExpose({ loadDefaults, loadPreflight, loadSourcePreflight, startInstall })
   margin: var(--ms-space-3) 0 var(--ms-space-2);
   font-size: 13px;
   color: var(--ms-text-1);
+}
+
+/* P1-7 region ③'s own heading. It is an `<h3>` in the DOM — the SAME level as ②'s card heading and
+   the wizard's, because the three regions are peers — and carries only extra visual weight here, so
+   the page reads as ①向导 → ②即将安装的内容 → ③装完之后回来复查 without an h3→h2 level jump. */
+.stock-prep-install__section-title {
+  margin: 0 0 var(--ms-space-2);
+  font-size: 16px;
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
+}
+
+/* The wrapper for every "come back and recheck" card. A top border stands in for the page break a
+   heading alone would not give — without it, ②'s last card and ③'s first ran together visually. */
+.stock-prep-install__section-group {
+  padding-top: var(--ms-space-4);
+  border-top: 1px solid var(--ms-border-light);
+}
+
+/* The five "即将安装的内容" subsections (P1-7). Each `<summary>` wraps the section's own `<h4>` — the
+   heading stays a heading (screen-reader outline intact) and the disclosure gains only what a
+   disclosure needs: pointer cursor, a caret, and a focus ring. Same idiom StockPrepTechnicalDetails
+   .vue already uses elsewhere on this page, restated locally because these five are native
+   `<details>` with no shared component (each one is a plain-language subsection of a single served
+   manifest, not a reusable disclosure).
+
+   CLOSE EVERY COMMENT IN THIS BLOCK THE CSS WAY — star-slash. The HTML terminator is not one: PostCSS
+   reads straight past it to the next real terminator and silently deletes every rule in between. It
+   cost 12 rules here once, six of them pre-existing. P1-7d in StockPreparationInstallView.spec.ts
+   parses this block and fails if a named selector stops resolving, because neither vue-tsc nor jsdom
+   can see CSS at all. (Which is also why neither sequence appears literally in this comment.) */
+.stock-prep-install__fold {
+  margin: 0 0 var(--ms-space-3);
+}
+
+.stock-prep-install__fold > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+/* The heading inside the summary sits on the caret's line rather than opening a block of its own. */
+.stock-prep-install__fold > summary > .stock-prep-install__h4 {
+  display: inline;
+  margin: 0;
+}
+
+.stock-prep-install__fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.stock-prep-install__fold > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 1em;
+  color: var(--ms-text-3);
+  transition: transform 0.12s ease;
+}
+
+.stock-prep-install__fold[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.stock-prep-install__fold > summary:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .stock-prep-install__app {

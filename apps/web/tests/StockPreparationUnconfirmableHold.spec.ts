@@ -56,6 +56,9 @@ function realHasPermission(required: string): boolean {
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     hasPermission: (required: string) => realHasPermission(required),
+    // `workbenchAccess.ts` decides on the SNAPSHOT rather than on the expanding probe, so this
+    // double has to carry it or every stock-prep predicate reads an empty principal.
+    getAccessSnapshot: () => ({ isAdmin: h.roles.includes('admin'), email: '', roles: h.roles, permissions: h.permissions }),
     permissions: ref(h.permissions),
     roles: ref(h.roles),
   }),

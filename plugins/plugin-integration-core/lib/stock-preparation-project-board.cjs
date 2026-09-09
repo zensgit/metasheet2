@@ -110,16 +110,26 @@
 const {
   listOperatorProjectDirectory,
   StockPreparationOperatorDirectoryError,
+  // The per-project last-export reader. It lives in the directory module beside its whole-tenant
+  // sibling so the two normalize an audit `created_at` the one way; this file requires the directory
+  // module already, and the reverse require would be a cycle.
+  __internals: { lastExportAtFor },
 } = require('./stock-preparation-operator-project-directory.cjs')
 const { optionalString } = require('./stock-preparation-common.cjs')
-const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
+// THE PULL-TARGET READS LIVE IN ONE MODULE, SHARED WITH THE DIRECTORY. `resolveOwnBoundSheet` (the
+// tenant gate on `action.target`), `parsePlmRefreshTimestampMs` and `readPullTargetRowFacts` were
+// defined in THIS file until the operator project directory needed the same three facts out of the
+// same sheet. They MOVED to `stock-preparation-pull-target-scan.cjs` rather than being copied, so
+// the board and the directory cannot drift on which sheet is the caller's own, on how a
+// `lastPlmRefreshAt` cell is parsed, or on what a TRUNCATED scan is allowed to claim. Nothing about
+// this module's behaviour changed with the move, and the three are still re-exported under
+// `__internals` at the bottom of this file so the suite addresses them where it always did.
 const {
-  REQUIRED_EXPORT_FIELD_IDS,
-  __internals: EXPORT_INTERNALS,
-} = require('./stock-preparation-prep-line-export.cjs')
-
-/** The sheet the operator FILLS. Frozen here so the handle can never point at a different table. */
-const STOCK_PREPARATION_FILL_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
+  STOCK_PREPARATION_FILL_OBJECT_ID,
+  parsePlmRefreshTimestampMs,
+  readPullTargetRowFacts,
+  resolveOwnBoundSheet,
+} = require('./stock-preparation-pull-target-scan.cjs')
 
 /**
  * The logical view id the plugin's own default-view provisioning creates
@@ -153,6 +163,31 @@ const STOCK_PREPARATION_PROJECT_BOARD_KEYS = Object.freeze([
   'pulledRowCount',
   'activePulledRowCount',
   'pulledRowCountBounded',
+  // The max `lastPlmRefreshAt` seen across this project's rows in the SAME scan that produces the
+  // counts above — no second read, no new write. NAMED `lastChangedFromPlmAt`, deliberately NOT
+  // `lastPulledAt` / 「上次同步」: `lastPlmRefreshAt` is written ONLY by `runPatch`
+  // (stock-preparation-conflict-planner.cjs), which rides along an add/update/inactive DECISION
+  // (`makeAddDecision` / `makeUpdateDecision` / `makeInactiveDecision`). `makeSkipDecision` — the
+  // decision an UNCHANGED row gets on every ordinary re-pull — calls no `runPatch` at all, so a run
+  // that finds nothing new leaves this stamp exactly where the LAST run that changed something left
+  // it. A project whose BOM has been stable for a week, pulled successfully every single day since,
+  // shows a week-old timestamp here. That is why the exposed name and the frontend label both say
+  // "最近变更 / last CHANGE", never "最近同步 / last SYNC" — the true "when did we last pull, even if
+  // nothing changed" answer needs a dedicated audit action this PR does not add (owner decision).
+  // NULL when the bound target does not bind `lastPlmRefreshAt` (an OPTIONAL column, unlike the two
+  // SCOPE fields), has no rows yet, OR the scan hit `PULL_TARGET_MAX_PAGES` (see
+  // `lastChangedFromPlmBounded`) — never a thrown error.
+  'lastChangedFromPlmAt',
+  // TRUE exactly when `lastChangedFromPlmAt` is a max over a TRUNCATED subset rather than the whole
+  // project — the same `PULL_TARGET_MAX_PAGES` bound `pulledRowCountBounded` already reports for the
+  // row counts. A max computed over a prefix of an UNORDERED page scan is not a floor the way a
+  // truncated COUNT is: rows past the bound could easily carry a NEWER `lastPlmRefreshAt` than
+  // anything seen, so reporting the partial max as `lastChangedFromPlmAt` would silently understate
+  // how fresh the data is — the exact "cron ran fine, page just says it looks stale" failure this
+  // field exists to prevent. So the bounded case reports `lastChangedFromPlmAt: null` INSTEAD of a
+  // number that could quietly be wrong, and this flag is how a reader tells "we don't know" apart
+  // from "no row has ever changed".
+  'lastChangedFromPlmBounded',
   'pendingDecisionCount',
   'lastExportAt',
   'fillTarget',
@@ -198,41 +233,6 @@ function notFound() {
 }
 
 /**
- * The last time THIS project's materials workbook left the system, from the values-free audit trail.
- *
- * DEGRADES, never fails: an audit store without `list` (or one that throws) yields `null` and the
- * board still answers. The timestamp is a convenience on a status bar — a page that 500s because a
- * convenience is unavailable is a worse page.
- *
- * NOTE the `projectId` filter: the export route stamps the projectNo into the audit row's
- * `project_id` (it is that route's subject), which is what makes a per-project lookup possible here.
- * This module writes nothing there — see the route's own audit call, which keeps project_id NULL.
- *
- * NO WORKSPACE FILTER, deliberately. The board route no longer accepts the caller's `?workspaceId`
- * as a selector at all (it was the one reachable way to put a business value on the audit trail —
- * see the route's allowlist comment), so there is nothing here to narrow by; "the last time THIS
- * tenant exported THIS project" is the question the status bar asks, and it is the right one.
- */
-async function lastExportAtFor(audit, { tenantId, projectNo }) {
-  if (!audit || typeof audit.list !== 'function') return null
-  try {
-    const result = await audit.list({
-      tenantId,
-      projectId: projectNo,
-      action: 'prep_line_export',
-      limit: 1,
-    })
-    const entries = result && Array.isArray(result.entries) ? result.entries : []
-    const first = entries[0]
-    if (!first || !first.createdAt) return null
-    const createdAt = first.createdAt
-    return createdAt instanceof Date ? createdAt.toISOString() : String(createdAt)
-  } catch {
-    return null
-  }
-}
-
-/**
  * The deep-link handle, or null. See the header for the claim it does NOT make.
  *
  * IT IS BUILT FROM THE BOUND TABLE-ACTION TARGET, not from the canonical object id, because the
@@ -253,168 +253,12 @@ async function lastExportAtFor(audit, { tenantId, projectNo }) {
  * `getObjectViewId` are pure deterministic id derivations on the host side, treated as OPTIONAL
  * capabilities so a plugin newer than its host degrades to "no handle" rather than erroring.
  */
-/**
- * THE TENANT GATE ON THE BOUND TARGET, factored out because TWO things ride it — the fill handle and
- * the pull-target row counts — and they must never be able to disagree about whether the bound sheet
- * is the caller's own.
- *
- * Returns `{ sheetId, objectId }` when the bound sheet is PROVED to belong to the caller's own
- * staging project and to exist; otherwise null.
- *
- * ---------------------------------------------------------------------------
- * WHY THERE ARE TWO PROOFS, AND WHY THE FIRST ONE ALONE WAS WRONG
- * ---------------------------------------------------------------------------
- *
- * The first cut proved ownership by recomputing `getObjectSheetId(ourStagingProject, boundObjectId)`
- * and comparing it to the bound sheet id. That is sound as far as it goes — the hash is over
- * (projectId, objectId), so a match embeds our own project id and cannot be forged by a config that
- * names someone else's sheet. But it is a BINDING-SHAPE test, and it answers "no" to sheets we
- * genuinely own whenever the binding names a different objectId than the one the sheet was created
- * under. That is not a hypothetical: the sanctioned 222 deploy-window step (D1=B) rebinds the action
- * to a SANDBOX objectId while KEEPING the sheet the deployment already had, so on exactly the
- * configuration the runbook tells operators to use, the fill handle would never appear and the row
- * counts would report "table not ready" over a table full of their own rows. It also cannot speak at
- * all about a sheet an administrator bound by hand.
- *
- * So ownership is proved from the SHEET as well. `isSheetOwnedByProject` is the host's
- * provisioning-registry lookup — `plugin_multitable_object_registry` records which project owns each
- * sheet at provisioning time — and it answers a BOOLEAN about the project we name, so no other
- * tenant's project id is ever returned to this plugin in the first place.
- *
- * The two are a DISJUNCTION of independently sufficient proofs, not a replacement: either the
- * registry says the sheet is ours, or its id hashes from our own project. Both are sound, so their
- * disjunction is sound, and a host too old to expose the port keeps exactly the behaviour it had.
- *
- * `findObjectSheet` remains the EXISTENCE proof — but it is only usable on the hash path, where we
- * know the (project, objectId) the sheet was created under. On the registry path the registry row IS
- * the existence evidence: a sheet id is in it because provisioning put it there.
- */
-async function resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget) {
-  if (!provisioning) return null
-  const boundSheetId = optionalString(boundTarget && boundTarget.sheetId)
-  if (!boundSheetId) return null
-  const objectId = optionalString(boundTarget && boundTarget.objectId) || STOCK_PREPARATION_FILL_OBJECT_ID
-
-  // PROOF 1 — THE REGISTRY. Optional capability: a plugin newer than its host simply falls through.
-  // The port answers a yes/no about the project we ASK about, so it never hands back another
-  // tenant's project id — an id-returning form could not be made safe here, because plugin project
-  // namespaces are per-PLUGIN and every stock-prep tenant shares one.
-  if (typeof provisioning.isSheetOwnedByProject === 'function') {
-    let owned = false
-    try {
-      owned = await provisioning.isSheetOwnedByProject(boundSheetId, stagingProjectId) === true
-    } catch {
-      owned = false
-    }
-    // A "no" is not a refusal — an unclaimed sheet answers the same way — so it falls through to the
-    // second proof rather than ending the resolution.
-    if (owned) return { sheetId: boundSheetId, objectId }
-  }
-
-  // PROOF 2 — THE DETERMINISTIC ID, plus an existence check. Unchanged from the first cut.
-  if (typeof provisioning.getObjectSheetId !== 'function') return null
-  if (typeof provisioning.findObjectSheet !== 'function') return null
-  if (provisioning.getObjectSheetId(stagingProjectId, objectId) !== boundSheetId) return null
-  const sheet = await provisioning.findObjectSheet({ projectId: stagingProjectId, objectId })
-  const sheetId = sheet && sheet.id ? String(sheet.id) : ''
-  if (!sheetId || sheetId !== boundSheetId) return null
-  return { sheetId, objectId }
-}
-
 async function resolveFillTarget(provisioning, ownSheet, stagingProjectId) {
   if (!ownSheet) return null
   if (typeof provisioning.getObjectViewId !== 'function') return null
   const viewId = provisioning.getObjectViewId(stagingProjectId, ownSheet.objectId, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID)
   if (typeof viewId !== 'string' || viewId.length === 0) return null
   return { sheetId: ownSheet.sheetId, viewId }
-}
-
-/** Paging bounds for the pull-target count. The same shape the export uses, from the same module. */
-const PULL_TARGET_PAGE_LIMIT = EXPORT_INTERNALS.READ_PAGE_LIMIT
-const PULL_TARGET_MAX_PAGES = EXPORT_INTERNALS.READ_MAX_PAGES
-
-const PULL_TARGET_NOT_READY = Object.freeze({
-  ready: false,
-  rowCount: 0,
-  activeRowCount: 0,
-  bounded: false,
-})
-
-/**
- * HOW MANY ROWS DID THE PULL ACTUALLY PUT THERE — counted in the bound table-action target.
- *
- * WHY THIS EXISTS. Every other number on this board comes from the MVP snapshot tables, which are
- * written by `mvp-persist` — platform-admin, and deliberately left there by the operator pull split.
- * So on the flow this page exists for, a floor operator importing hundreds of rows saw a status bar
- * that still read 「还没从 PLM 拉过这个项目」. The rows were in the sheet the whole time; nothing was
- * reading them.
- *
- * IT READS THE SAME OBJECT THE EXPORT READS, through the export module's own target normalization and
- * its own two-mode field-binding rule (an EMPTY `fieldIdMap` means logical addressing and every id
- * passes through; a map with bindings is the explicit mode, where an absent id is a HOLE). That is
- * the coupling that matters: if the export can read this project's rows, the board can count them,
- * and neither can drift onto a different sheet or a different scoping column from the other.
- *
- * IT DEGRADES, NEVER FAILS. A target that is not bound, not the caller's own, not provisioned, or
- * does not bind the two scope columns yields `ready:false` and the page says the table is not ready —
- * the same posture the fill handle already takes. A status bar that 500s because a deployment has not
- * finished configuring itself is a worse status bar.
- *
- * THE TENANT GATE IS THE CALLER'S ALREADY-RESOLVED OWN SHEET (see `resolveOwnBoundSheet`), never
- * `action.target` unchecked. `action.target` is DEPLOY-TIME configuration shared by every tenant on
- * the deployment, so its sheet id is NOT derived from the caller's tenant; handing it to a records
- * query unchecked would be this route's one reachable way to count rows outside the caller's own
- * staging project — and, because the count feeds the existence decision below, to answer a question
- * about another tenant's project number. Gated, it cannot.
- */
-async function readPullTargetRowFacts(recordsApi, ownSheet, boundTarget, projectNo) {
-  if (!ownSheet) return PULL_TARGET_NOT_READY
-  if (!recordsApi || typeof recordsApi.queryRecords !== 'function') return PULL_TARGET_NOT_READY
-
-  let bindings
-  try {
-    const target = EXPORT_INTERNALS.normalizeExportTarget(boundTarget)
-    const explicit = EXPORT_INTERNALS.fieldIdMapHasExplicitBindings(target.fieldIdMap)
-    bindings = {}
-    for (const fieldId of REQUIRED_EXPORT_FIELD_IDS) {
-      const physical = target.fieldIdMap[fieldId]
-      if (physical) bindings[fieldId] = physical
-      else if (!explicit) bindings[fieldId] = fieldId
-      // An explicit map that does not bind a SCOPE column is a broken config: the export refuses it
-      // outright (PREP_LINE_EXPORT_FIELD_IDS_UNRESOLVED) rather than scoping by guesswork, and a
-      // count that cannot scope is worth exactly as little. Not ready.
-      else return PULL_TARGET_NOT_READY
-    }
-  } catch {
-    return PULL_TARGET_NOT_READY
-  }
-
-  let rowCount = 0
-  let activeRowCount = 0
-  try {
-    for (let page = 0; page < PULL_TARGET_MAX_PAGES; page += 1) {
-      const pageRows = await recordsApi.queryRecords({
-        sheetId: ownSheet.sheetId,
-        filters: { [bindings.projectNo]: projectNo },
-        limit: PULL_TARGET_PAGE_LIMIT,
-        offset: page * PULL_TARGET_PAGE_LIMIT,
-      })
-      if (!Array.isArray(pageRows)) return PULL_TARGET_NOT_READY
-      for (const row of pageRows) {
-        rowCount += 1
-        const data = row && typeof row === 'object' && row.data && typeof row.data === 'object' ? row.data : (row || {})
-        if (data[bindings.active] !== false) activeRowCount += 1
-      }
-      if (pageRows.length < PULL_TARGET_PAGE_LIMIT) {
-        return { ready: true, rowCount, activeRowCount, bounded: false }
-      }
-    }
-  } catch {
-    return PULL_TARGET_NOT_READY
-  }
-  // Past the scan bound. The numbers so far are a floor, not a total, and `bounded` says so rather
-  // than letting a truncated count read as an exact one.
-  return { ready: true, rowCount, activeRowCount, bounded: true }
 }
 
 /**
@@ -572,6 +416,8 @@ async function readOperatorProjectBoard({
     pulledRowCount: pullTarget.rowCount,
     activePulledRowCount: pullTarget.activeRowCount,
     pulledRowCountBounded: pullTarget.bounded,
+    lastChangedFromPlmAt: pullTarget.lastChangedFromPlmAt,
+    lastChangedFromPlmBounded: pullTarget.lastChangedFromPlmBounded === true,
     // KEYED BY THE BUSINESS NUMBER, so it survives an absent archive row. Reading this off the
     // archive row made the board answer 「没有要您拿主意的事」 for precisely the flow this page
     // exists for — an operator's own pull, which queues decisions but writes no MVP project row —
@@ -605,6 +451,7 @@ module.exports = {
   __internals: {
     lastExportAtFor,
     notFound,
+    parsePlmRefreshTimestampMs,
     readPullTargetRowFacts,
     resolveFillTarget,
     resolveOwnBoundSheet,

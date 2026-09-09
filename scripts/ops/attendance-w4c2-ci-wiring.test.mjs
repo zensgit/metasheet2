@@ -636,6 +636,12 @@ test('plugin-tests.yml attendance real-DB step (id: attendance-real-db-integrati
   assert.doesNotThrow(() => requireAttendanceRealDbStepExecutable())
 })
 
+test('ACP scratch database suite receives the same explicit synthetic database as its real-DB step', () => {
+  const step = requireAttendanceRealDbStepExecutable()
+  assert.equal(step.env.ATTENDANCE_TEST_DATABASE_URL, step.env.DATABASE_URL)
+  assert.match(step.run, /\$\{ATTENDANCE_TEST_DATABASE_URL:\?[^}]+\}/)
+})
+
 // ---------------------------------------------------------------------------------------------
 // Issue 4828 hole 2 (owner-ruled): "wired" must also mean "the command actually executes the
 // files it carries".
@@ -2196,6 +2202,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-outdoor-punch.test.ts',
   'tests/integration/attendance-plugin.test.ts',
   'tests/integration/attendance-punch-org-resolution.db.test.ts',
+  'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
   'tests/integration/attendance-result-edit.test.ts',
   'tests/integration/attendance-schedule-dispatch.test.ts',
   'tests/integration/attendance-settlement-table-v1-5a.db.test.ts',

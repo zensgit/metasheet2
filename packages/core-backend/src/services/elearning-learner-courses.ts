@@ -74,6 +74,11 @@ export interface ElearningLearnerAccess {
   required: boolean
 }
 
+export interface ElearningLearnerEnrollment {
+  status: 'enrolled'
+  enrolledAt: string
+}
+
 export interface ElearningLearnerVideo {
   itemId: string
   durationMs: number
@@ -106,6 +111,7 @@ export interface ElearningLearnerAssessmentCourse {
   title: string
   access: ElearningLearnerAccess
   assignment: ElearningLearnerAssignment | null
+  enrollment: ElearningLearnerEnrollment | null
   video: ElearningLearnerVideo
   exam: ElearningLearnerExam
   completed: boolean
@@ -125,6 +131,7 @@ export interface ElearningLearnerContentCourse {
   title: string
   access: ElearningLearnerAccess
   assignment: ElearningLearnerAssignment | null
+  enrollment: ElearningLearnerEnrollment | null
   items: ElearningLearnerContentItem[]
   completed: boolean
 }
@@ -151,6 +158,7 @@ SELECT
   c.id AS course_id,
   v.id AS course_version_id,
   c.title AS title,
+  enrollment.enrolled_at AS enrollment_enrolled_at,
   video.item_id AS video_item_id,
   video.duration_ms AS video_duration_ms,
   progress.status AS video_status,
@@ -183,6 +191,10 @@ JOIN elearning_course_versions v
   ON v.org_id = $1 AND v.id = access.course_version_id
 JOIN elearning_courses c
   ON c.org_id = v.org_id AND c.id = v.course_id
+LEFT JOIN elearning_course_enrollments enrollment
+  ON enrollment.org_id = $1
+ AND enrollment.user_id = $2
+ AND enrollment.course_id = c.id
 JOIN LATERAL (
   SELECT i.id AS item_id, media.duration_ms AS duration_ms
     FROM elearning_course_version_items i
@@ -288,6 +300,7 @@ SELECT
   c.id AS course_id,
   v.id AS course_version_id,
   c.title AS title,
+  enrollment.enrolled_at AS enrollment_enrolled_at,
   item.id AS item_id,
   item.item_type AS item_type,
   item.position AS item_position,
@@ -301,6 +314,10 @@ JOIN elearning_course_versions v
   ON v.org_id = $1 AND v.id = access.course_version_id
 JOIN elearning_courses c
   ON c.org_id = v.org_id AND c.id = v.course_id
+LEFT JOIN elearning_course_enrollments enrollment
+  ON enrollment.org_id = $1
+ AND enrollment.user_id = $2
+ AND enrollment.course_id = c.id
 JOIN elearning_course_version_items item
   ON item.org_id = v.org_id AND item.course_version_id = v.id
  AND item.item_type IN ('article', 'external_link')
@@ -642,6 +659,7 @@ function mapCourse(
       required: candidate.basis.required,
     },
     assignment,
+    enrollment: enrollmentFor(row),
     video,
     exam: {
       itemId: requireUuid(row.exam_item_id),
@@ -661,6 +679,14 @@ function assignmentFor(
         assignedAt: candidate.assignmentAssignedAt ?? fail('unavailable'),
       }
     : null
+}
+
+function enrollmentFor(row: Record<string, unknown>): ElearningLearnerEnrollment | null {
+  if (row.enrollment_enrolled_at == null) return null
+  return {
+    status: 'enrolled',
+    enrolledAt: requireIsoTimestamp(row.enrollment_enrolled_at),
+  }
 }
 
 function mapContentItem(row: Record<string, unknown>): ElearningLearnerContentItem {
@@ -729,6 +755,7 @@ function mapContentCourses(
         required: candidate.basis.required,
       },
       assignment: assignmentFor(candidate),
+      enrollment: enrollmentFor(first),
       items: items.map(({ item }) => item),
       completed: items.every(({ item }) => item.status === 'completed'),
     })

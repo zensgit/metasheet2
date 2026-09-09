@@ -9,6 +9,7 @@ const CAPABILITY_KEYS = Object.freeze([
   'incentive',
   'analytics',
   'media',
+  'enrollment',
 ])
 
 const CAPABILITY_FLAGS = Object.freeze({
@@ -18,6 +19,7 @@ const CAPABILITY_FLAGS = Object.freeze({
   incentive: 'ELEARNING_INCENTIVE_ENABLED',
   analytics: 'ELEARNING_ANALYTICS_ENABLED',
   media: 'ELEARNING_MEDIA_ENABLED',
+  enrollment: 'ELEARNING_ENROLLMENT_ENABLED',
 })
 
 const FLAG_NAMES = Object.freeze([
@@ -28,6 +30,7 @@ const FLAG_NAMES = Object.freeze([
   CAPABILITY_FLAGS.incentive,
   CAPABILITY_FLAGS.analytics,
   CAPABILITY_FLAGS.media,
+  CAPABILITY_FLAGS.enrollment,
 ])
 
 function isExactTrue(value) {
@@ -53,6 +56,7 @@ const CAPABILITY_PERMISSIONS = Object.freeze({
   incentive: Object.freeze(['elearning:read', 'elearning:write', 'elearning:admin']),
   analytics: Object.freeze(['elearning:stats', 'elearning:admin']),
   media: Object.freeze(['elearning:read', 'elearning:write', 'elearning:admin']),
+  enrollment: Object.freeze(['elearning:read', 'elearning:write', 'elearning:admin']),
 })
 
 function isHydratedCaller(caller) {

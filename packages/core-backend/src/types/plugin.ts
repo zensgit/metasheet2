@@ -577,7 +577,18 @@ export interface MultitableRecordsAPI {
   }>>
   queryRecords(input: {
     sheetId: string
-    filters?: Record<string, string | number | boolean | null>
+    /**
+     * W9: a value may be a LIST of candidates, which matches a row whose key equals ANY element —
+     * the set form of the single-value equality, answering in one statement what N single-value
+     * queries answer one at a time. An empty list matches nothing (and costs no query). A `null`
+     * ELEMENT is refused: `null` as the whole value means "the key is JSON null", which set
+     * equality cannot express, so the two are never mixed silently.
+     *
+     * ONLY use it when `supportsFilterValueLists` is true on this API — an older host rejects a
+     * list as an unsupported filter value, and there is no way to tell that apart from a real
+     * validation failure after the fact.
+     */
+    filters?: Record<string, string | number | boolean | null | Array<string | number | boolean>>
     search?: string
     orderBy?: {
       fieldId?: string
@@ -628,6 +639,37 @@ export interface MultitableRecordsAPI {
     sheetId: string
     version: number
   }>
+  /**
+   * W8-4 (L1) request-scoped table-metadata memo. Runs `operation` in a scope where the sheet row,
+   * the field list and the sheet-scope assertion for a given sheetId are loaded ONCE instead of
+   * once per records call — the shape a chunked bulk write needs (measured on 222: 2x `meta_fields`
+   * + 2x registry + 3x `meta_sheets` per created row). The scope holds schema metadata only, never
+   * record values, and is never shared with another request: it is not a process cache.
+   *
+   * READ THIS BEFORE CALLING IT. The scope's length is YOURS, not the host's, and inside it two
+   * things stop being re-derived per call:
+   *   - the sheet row and field list are FROZEN at first read, so a field added, dropped or
+   *     retyped, or the sheet soft-deleted, mid-scope is not seen until the scope ends;
+   *   - an ownership assertion that already PASSED for a `(plugin, sheet)` pair is not repeated,
+   *     so a registry change that revokes your access is not seen until the scope ends either.
+   * Keep `operation` no longer than one request — one chunk of a bulk write is the intended shape.
+   * The host caps it regardless (a scope older than its deadline silently stops memoizing and every
+   * call re-reads and re-asserts), but the cap is a backstop, not a licence to hold a scope open.
+   * Do not run schema changes or open a unit of work inside it.
+   *
+   * `MULTITABLE_ENABLE_REQUEST_METADATA_CACHE` gates the whole mechanism and is OFF by default:
+   * while it is off this call is a plain passthrough that memoizes nothing. Optional on the type,
+   * so a host that does not provide it simply is not memoized — call it only if it is present.
+   */
+  withMetadataCache?<T>(operation: () => Promise<T>): Promise<T>
+  /**
+   * W9 capability probe: `true` iff this host's `queryRecords` understands an ARRAY filter value
+   * (see `filters` above). Absent or `false` on every older host, and on any records surface that
+   * did not forward the declaration — a caller must then ask one key at a time. It is a plain
+   * declaration, not a switch: nothing turns it on, and a records surface that wraps another one
+   * may only forward it when the surface underneath declares it, never assert it on its own.
+   */
+  supportsFilterValueLists?: boolean
   /**
    * P4 stock-preparation persist hard cut. The host owns the transaction and lock order; the plugin
    * receives only the records methods needed by the existing persist algorithm.
@@ -1395,6 +1437,36 @@ export interface PluginServices {
       | { outcome: 'failed'; code: string }
       | { outcome: 'outcome_unknown'; code?: string }
     >
+  }
+  /** ACP-1B: attendance-only canonical anchor writer; never exposed to generic plugins. */
+  attendanceMultitableCleaningAuthority?: {
+    assertActor(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput): Promise<void>
+    cleanupProposal(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput,
+      seed: Awaited<ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>>,
+      reason: string,
+    ): Promise<{ version: number }>
+    readCompletedInTransaction(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput & { projectionRecordId: string; sourceRef: string },
+    ): Promise<unknown[]>
+    readCompleted(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningActorInput & {
+      projectionRecordId: string; sourceRef: string;
+    }): Promise<unknown[]>
+    readSeed(input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput):
+      ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>
+    lockSource(
+      trx: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+      input: import('../attendance/attendance-multitable-cleaning-authority').AttendanceCleaningSourceInput,
+      seed: Awaited<ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').readAttendanceCleaningSourceSeed>>,
+    ): ReturnType<typeof import('../attendance/attendance-multitable-cleaning-authority').lockAttendanceCleaningSource>
+    refresh(input: {
+      projectionRecordId: string
+      canonicalRecordId: string
+      sourceFingerprint: string
+    }): Promise<void>
+    withhold(projectionRecordIds: readonly string[]): Promise<void>
   }
   /**
    * W4C-2 (#4556 lock 12.2 last sentence; #4607 P3-4) — host→plugin, narrow,

@@ -150,7 +150,7 @@
 //
 // WHO SEES WHAT (R-11 — what is not permitted must not be visible):
 //   * a platform admin gets the current source, the candidate list, and Save;
-//   * a `stock-prep:admin` holder who can open the 安装/体检 tab gets the current source and is told
+//   * a `stock-prep:admin` holder who can open the 数据来源与体检 tab gets the current source and is told
 //     who changes it. They are NOT shown a Save that would 403, and the panel does not call the
 //     admin-tier routes on their behalf.
 // `canRunStockPrepInstall` is reused rather than a new predicate invented: it already means "this
@@ -188,6 +188,19 @@ import {
 
 const props = defineProps<{ scope: IntegrationScope }>()
 
+/**
+ * WHAT THE SERVER SAID ABOUT THE BINDING, handed upward so the getting-started wizard's steps ①③ can
+ * PROJECT this answer instead of re-deriving 「备料用哪条源」 out of the source preflight's topology
+ * check (R7). `null` means "no answer exists" — the read failed, or was never attempted because this
+ * caller may not run it — which the wizard renders as 「? 看不到」, never as 「没做」.
+ *
+ * This is a report, not a control: nothing here becomes a button, so the workbench capability mirror
+ * (`workbenchAccess.ts` ↔ the plugin's `.cjs`) is untouched by it.
+ */
+const emit = defineEmits<{
+  (event: 'binding-read', binding: { effectiveExternalSystemId: string | null; eligibleSourceCount: number } | null): void
+}>()
+
 const { locale } = useLocale()
 const auth = useAuth()
 
@@ -195,7 +208,7 @@ function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
 
-const canBind = computed(() => canRunStockPrepInstall((permission) => auth.hasPermission(permission)))
+const canBind = computed(() => canRunStockPrepInstall(auth.getAccessSnapshot()))
 
 const busy = ref(false)
 const errorStatus = ref<number | null>(null)
@@ -250,10 +263,25 @@ function recordError(error: unknown): void {
   refusalReason.value = null
 }
 
+/** The upward projection of whatever `view` now holds — or `null` for "this page has no answer". */
+function publishBinding(): void {
+  emit('binding-read', view.value
+    ? {
+        effectiveExternalSystemId: view.value.effectiveExternalSystemId,
+        eligibleSourceCount: Array.isArray(view.value.eligibleSources) ? view.value.eligibleSources.length : 0,
+      }
+    : null)
+}
+
 async function load(): Promise<void> {
   // A non-admin never calls the admin-tier route: the server would refuse, and rendering that
   // refusal as an error would tell them a control exists that does not exist for them.
-  if (!canBind.value) return
+  // Upward, that is NOT the same as "there is no binding" — it is "nobody asked", so the wizard is
+  // told `null` explicitly rather than being left at its own initial null by coincidence.
+  if (!canBind.value) {
+    publishBinding()
+    return
+  }
   busy.value = true
   errorStatus.value = null
   refusalReason.value = null
@@ -264,6 +292,7 @@ async function load(): Promise<void> {
     recordError(error)
   } finally {
     busy.value = false
+    publishBinding()
   }
 }
 
@@ -294,6 +323,7 @@ async function save(): Promise<void> {
     pending.value = null
   } finally {
     busy.value = false
+    publishBinding()
   }
 }
 

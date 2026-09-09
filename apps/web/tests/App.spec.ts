@@ -173,9 +173,14 @@ describe('App guest bootstrap', () => {
     window.localStorage.setItem('metasheet_product_mode', 'attendance')
     window.localStorage.setItem('user_permissions', '["attendance:admin"]')
     window.localStorage.setItem('user_roles', '["admin"]')
-    const authTokensSeenByLogoutFetch: Array<string | null> = []
-    vi.mocked(globalThis.fetch).mockImplementation(async () => {
-      authTokensSeenByLogoutFetch.push(window.localStorage.getItem('auth_token'))
+    // Every request the shell makes, with the token visible AT THE MOMENT it was issued. The
+    // previous form recorded only the token, so it doubled as an incidental "exactly one request"
+    // guard; recording the URL keeps that guard (the enumeration below is exhaustive) while letting
+    // the assertion say what it is actually about — that the logout POST is issued AFTER local
+    // state is cleared.
+    const fetchLog: Array<{ url: string; authToken: string | null }> = []
+    vi.mocked(globalThis.fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      fetchLog.push({ url: String(input), authToken: window.localStorage.getItem('auth_token') })
       return new Response('{}', { status: 200 })
     })
 
@@ -209,7 +214,15 @@ describe('App guest bootstrap', () => {
       },
     })
     expect(mocks.clearStoredAuthState).toHaveBeenCalledTimes(1)
-    expect(authTokensSeenByLogoutFetch).toEqual([null])
+    expect(fetchLog.filter((call) => call.url.includes('/api/auth/logout')).map((call) => call.authToken))
+      .toEqual([null])
+    // EXHAUSTIVE: every other request this shell issues, named. P1b round 2 added exactly one —
+    // the DB-backed approval-administrator capability read, issued once per page load and only for
+    // a principal the token gate already admits (`user_roles: ["admin"]` here), because the
+    // 批量转交 nav entry must not be shown off a predicate the approval list scope does not use.
+    // A stray request added later still reddens this line.
+    expect(fetchLog.map((call) => new URL(call.url).pathname))
+      .toEqual(['/api/approvals/admin/capability', '/api/auth/logout'])
     for (const key of [
       'auth_token',
       'jwt',

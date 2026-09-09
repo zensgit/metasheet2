@@ -18,6 +18,7 @@ export interface AttendanceAdminUserSearchItem {
 }
 
 interface UseAttendanceAdminUsersOptions {
+  isSessionCurrent?: () => boolean
   adminForbidden?: Ref<boolean>
   apiFetch?: ApiFetchFn
   tr?: Translate
@@ -62,6 +63,7 @@ function formatUserLabel(user: AttendanceAdminUserSearchItem, tr: Translate): st
 }
 
 export function useAttendanceAdminUsers({
+  isSessionCurrent = () => true,
   adminForbidden,
   apiFetch = defaultApiFetch,
   tr = defaultTranslate,
@@ -75,6 +77,7 @@ export function useAttendanceAdminUsers({
   const statusMessage = ref('')
 
   async function loadUsers(query = searchQuery.value) {
+    if (!isSessionCurrent()) return
     loading.value = true
     statusMessage.value = ''
     try {
@@ -97,6 +100,7 @@ export function useAttendanceAdminUsers({
         }
       }
       const response = await apiFetch(`${endpoint}${params.size ? `?${params.toString()}` : ''}`)
+      if (!isSessionCurrent()) return
       if (response.status === 403) {
         adminForbidden && (adminForbidden.value = true)
         users.value = []
@@ -104,6 +108,7 @@ export function useAttendanceAdminUsers({
         return
       }
       const data = await readJson(response)
+      if (!isSessionCurrent()) return
       if (!response.ok || data?.ok !== true) {
         throw new Error(String((data?.error as Record<string, unknown> | undefined)?.message || tr('Failed to load users', '加载用户失败')))
       }
@@ -113,11 +118,12 @@ export function useAttendanceAdminUsers({
         : []
       users.value = Array.isArray(items) ? items as AttendanceAdminUserSearchItem[] : []
     } catch (error: unknown) {
+      if (!isSessionCurrent()) return
       statusMessage.value = error instanceof Error && error.message
         ? error.message
         : tr('Failed to load users', '加载用户失败')
     } finally {
-      loading.value = false
+      if (isSessionCurrent()) loading.value = false
     }
   }
 

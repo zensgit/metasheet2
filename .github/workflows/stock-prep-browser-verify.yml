@@ -1,0 +1,221 @@
+name: Stock-prep Browser Verify
+
+# 备料工作台 (`/stock-prep`) real-browser acceptance lane —— 设计稿
+# `beiliao-ux-redesign-20260907.md` §6.1 (P0 十一条) 与 §6.2 (P1 七条).
+#
+# WHAT IT REPLACES: a person clicking through the workbench once per wave. Boots Vite through the
+# OWNED playwright.stock-prep-verification config (its own server on port 5176 — never a reused,
+# disappearing one), mounts the REAL StockPreparationWorkspace on a real router through
+# apps/web/verification/stock-prep-workbench-harness.html, and drives it against a synthetic,
+# values-free `page.route()` world (apps/web/verification/stock-prep-fixtures.ts).
+#
+# WHY A BROWSER AND NOT MORE jsdom. Three of the acceptance items are structurally invisible without
+# a cascade, and the jsdom suites cannot be fixed to see them:
+#   * 深度工具「默认收起」—— the fold's whole effect is one `[hidden] { display: none }` rule that has
+#     to out-specify the panel's own author-origin `display: flex`. This exact rule shipped broken
+#     once, and jsdom reported the attribute as present the entire time.
+#   * G1「每屏一个主操作位」—— counted from resolved `background-color`, i.e. from `--ms-color-primary`.
+#   * G4「未检查 ≠ 绿 ≠ 红」—— same, on the ops panel's badge colours.
+# Everything else in the two specs is asserted against real network ordering and the real clipboard.
+# Note what is NOT claimed: R-01 (the wizard-shape error strip) is a regression jsdom COULD have
+# caught and nobody wrote — see its own comment. It is here because this is where it got caught,
+# not because a cascade is required to see it.
+#
+# This lane is intended as a required context. Pull requests intentionally have NO top-level path
+# filter: a filtered required check never reports for an unrelated PR and blocks it forever. The
+# in-job classifier below is what keeps the context stable, and
+# scripts/ops/stock-prep-browser-ci-wiring.test.mjs EXECUTES that classifier against throwaway git
+# fixtures (rather than reading it) and pins both the job name and the `playwright test --list`
+# collection set, so neither a rename nor a deleted testMatch can turn this into a vacuous green.
+#
+# THE CLASSIFIER LIST IS DERIVED, NOT CURATED. A required check whose classifier misses a file the
+# lane actually reads is the SAME vacuous green as an empty `testMatch`, one layer up: the PR that
+# breaks an assertion goes green, and the red lands on the next, unrelated stock-prep PR. So the
+# wiring test does not merely check that the hand-written entries below survive — it WALKS the
+# harness's real relative-import closure (apps/web/verification/stock-prep-workbench-harness.ts +
+# stock-prep-fixtures.ts, transitively through `.ts`/`.vue`) and the paths the two specs read off
+# disk with `readFileSync`/`existsSync`, and runs this classifier against every one of them. A new
+# import that is not matched here is a failing test, not a comment.
+#
+# DELIBERATELY *NOT* IN THE LIST, and why — apps/web/src/main.ts, apps/web/src/router/appRoutes.ts
+# and apps/web/src/styles/form-layout-utilities.css. The harness mounts its own two-line router and
+# loads ONLY tokens.css (see its header), so none of the three is in this lane's import closure and
+# a change to them can neither redden nor green anything here. That is a real coverage LIMIT of the
+# harness — production's cascade is `element-plus/dist/index.css` → tokens.css → … and this lane
+# does not run it — and the honest way to record a limit is to name it, not to trigger a 20-minute
+# browser job that would prove nothing about the file that changed.
+
+on:
+  workflow_dispatch:
+  merge_group:
+  pull_request:
+
+# One PR, one run of this budget. A second push supersedes the first; merge_group runs are never
+# cancelled (the queue's whole contract is that the run it is waiting on finishes).
+concurrency:
+  group: stock-prep-browser-verify-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  browser-verify:
+    name: Stock-prep browser verify (chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect relevant stock-prep changes
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          relevant=false
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            relevant=true
+          else
+            if [[ -z "$BASE_SHA" || "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+              echo 'Stock-prep Browser Verify: unable to determine the changed-file base.' >&2
+              exit 1
+            fi
+
+            changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+            while IFS= read -r path; do
+              case "$path" in
+                apps/web/src/components/integration/stockPreparation/*|\
+                apps/web/src/services/integration/stockPreparation/*|\
+                apps/web/src/services/integration/workbench.ts|\
+                apps/web/src/components/layout/PageShell.vue|\
+                apps/web/src/components/layout/PageHeader.vue|\
+                apps/web/src/components/status/EmptyState.vue|\
+                apps/web/src/composables/useAuth.ts|\
+                apps/web/src/composables/useLocale.ts|\
+                apps/web/src/composables/useMobileViewport.ts|\
+                apps/web/src/composables/authPrincipal.ts|\
+                apps/web/src/styles/tokens.css|\
+                apps/web/src/utils/api.ts|\
+                apps/web/src/utils/explicitSessionOrg.ts|\
+                apps/web/src/utils/authRedirect.ts|\
+                apps/web/src/views/plm/plmClipboard.ts|\
+                apps/web/tests/StockPreparation*.spec.ts|\
+                apps/web/tests/stockPrep*.spec.ts|\
+                apps/web/verification/stock-prep-*|\
+                apps/web/playwright.stock-prep-verification.config.ts|\
+                apps/web/playwright.verification.config.ts|\
+                apps/web/vite.config.ts|\
+                apps/web/package.json|\
+                apps/web/tsconfig.verification-stock-prep.json|\
+                package.json|\
+                pnpm-lock.yaml|\
+                plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs|\
+                scripts/ops/stock-prep-browser-ci-wiring.test.mjs|\
+                .github/workflows/stock-prep-browser-verify.yml)
+                  relevant=true
+                  break
+                  ;;
+              esac
+            done <<< "$changed_files"
+          fi
+
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          if [[ "$relevant" == true ]]; then
+            echo "Stock-prep Browser Verify: relevant changes detected for $EVENT_NAME."
+          else
+            echo "Stock-prep Browser Verify: no relevant changes detected for $EVENT_NAME."
+          fi
+
+      - name: Report success for unrelated changes
+        if: steps.changes.outputs.relevant == 'false'
+        run: |
+          echo 'Stock-prep Browser Verify passed: no guarded stock-prep web files changed.'
+
+      - name: Setup Node.js 20.x
+        if: steps.changes.outputs.relevant == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        if: steps.changes.outputs.relevant == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        if: steps.changes.outputs.relevant == 'true'
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        if: steps.changes.outputs.relevant == 'true'
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        if: steps.changes.outputs.relevant == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm install --frozen-lockfile
+
+      # The browser binaries are ~130MB and were re-downloaded on every run (22s of the job). Keyed on
+      # the lockfile because that is what pins the @playwright/test version the binaries belong to;
+      # the install step below still runs, and is a no-op fetch when the cache hit.
+      - name: Cache Playwright browsers
+        if: steps.changes.outputs.relevant == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-ms-playwright-
+
+      - name: Install Playwright chromium (+ system deps)
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      # AFTER the browser install because this test runs `playwright test --list`, and keeping the two
+      # `--list` callers in the same order costs nothing. (It is NOT a hard requirement: the approval
+      # lane runs its own `--list` guard BEFORE `playwright install` and is green — the earlier claim
+      # here that a browser registry had to exist first was simply wrong.) Its job is to prove the
+      # lane below is not empty and that the classifier above still covers what the lane reads.
+      - name: Verify stock-prep browser CI ownership and collection
+        if: steps.changes.outputs.relevant == 'true'
+        run: node --test scripts/ops/stock-prep-browser-ci-wiring.test.mjs
+
+      # verification/ is outside tsconfig.app.json's `include`, so the repo's `vue-tsc -b` gate is
+      # blind to it — the FAIL-1 rot class the approval lane's own tsconfig was added to close. This
+      # standalone project type-checks the two specs, the harness and the fixtures against the real
+      # production import closure. It is also chained into `apps/web`'s `type-check` script, so the
+      # required web job catches the same drift even when this lane classifies a PR as irrelevant.
+      - name: Type-check the stock-prep verification sources
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm --filter @metasheet/web run type-check:verification-stock-prep
+
+      - name: Run stock-prep browser verification (boots Vite, renders the real workbench)
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm --filter @metasheet/web exec playwright test --config playwright.stock-prep-verification.config.ts
+
+      - name: Upload failure traces
+        if: failure() && steps.changes.outputs.relevant == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-prep-browser-verify-traces
+          path: apps/web/verification-output/_pw-stock-prep/**
+          if-no-files-found: ignore

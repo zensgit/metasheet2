@@ -52,6 +52,35 @@ function targetedRunCommand(source: string): string {
 }
 
 describe('attendance web guard workflow contract', () => {
+  const sessionSpecs = ['useAuth', 'useSessionOrg', 'AttendanceSessionOrgSwitcher', 'useAttendanceSessionGuard']
+  const sessionSources = [
+    'composables/authPrincipal.ts', 'composables/useAuth.ts', 'composables/useSessionOrg.ts',
+    'composables/useAttendanceSessionGuard.ts', 'utils/api.ts', 'utils/explicitSessionOrg.ts',
+    'services/attendance/effectiveCalendar.ts', 'services/attendance/teamAvailability.ts',
+  ].map(path => `apps/web/src/${path}`)
+
+  it.each([...sessionSources, ...sessionSpecs.map(spec => `apps/web/tests/${spec}.spec.ts`), 'apps/web/tests/api.spec.ts'])(
+    'selects explicit session change in both push and PR classifiers: %s', path => {
+      const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+      expect(doc.on.push.paths).toContain(path)
+      const cases = workflow.match(/case "\$path" in([\s\S]*?)\)\s*relevant=true/)?.[1]
+      expect(cases).toBeTruthy()
+      expect(cases!.split(/\|\\?\s*/).map(value => value.trim())).toContain(path)
+    },
+  )
+
+  it.each(sessionSpecs)('executes the exact session spec in domain and required commands: %s', spec => {
+    const doc = loadYaml(workflow) as { jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }> }
+    const step = Object.values(doc.jobs).flatMap(job => job.steps)
+      .find(item => item.name === 'Run explicit attendance session specs')
+    expect(step?.run).toMatch(/^pnpm --filter @metasheet\/web exec vitest run /)
+    expect(step!.run!.trim().split(/\s+/)).toContain(`tests/${spec}.spec.ts`)
+    const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
+    const command = required.split('\n').find(line => /^npx vitest run tests\/useAuth\.spec\.ts /.test(line))
+    expect(command).toBeTruthy()
+    expect(command!.split(/\s+/)).toContain(`tests/${spec}.spec.ts`)
+  })
+
   it('creates one stable check for every pull request', () => {
     const pullRequestStart = workflow.indexOf('\n  pull_request:')
     const pushStart = workflow.indexOf('\n  push:', pullRequestStart)

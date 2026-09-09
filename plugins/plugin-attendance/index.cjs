@@ -13,11 +13,19 @@ const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
 const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolver.cjs')
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
+const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
 const {
   buildAttendanceReportManagedContentPlan,
 } = require('./lib/attendance-report-managed-content-drift.cjs')
+const {
+  normalizeAttendanceMultitableCleaningPolicy,
+  createAttendanceCleaningApplyHandler,
+  readAttendanceCleaningReviewDescriptor,
+  createAttendanceCleaningOperationAdapter,
+  createAttendanceCleaningFingerprintReader,
+} = require('./lib/attendance-report-cleaning-proposal.cjs')
 // W6-1 (#4556): the fixed-schedule producer key has exactly one
 // implementation, in lib/, so the backend can inject the same function into
 // the FSER instance the /effective-policy route builds.
@@ -515,6 +523,10 @@ const DEFAULT_SETTINGS = {
     editWindowDays: 180,
     requireReason: true,
     notifyAffectedEmployee: true,
+  },
+  // ACP-1B stays separately fail-closed until an organization explicitly enables it.
+  attendanceMultitableCleaningPolicy: {
+    enabled: false,
   },
   // 自动对班 (auto shift matching) — A1 preview/manual apply plus A2 scheduler auto-write.
   // Runtime still requires env flags in addition to these org settings.
@@ -2550,6 +2562,8 @@ const ATTENDANCE_REPORT_RECORDS_FIELDS = Object.freeze({
   fieldFingerprint: 'field_fingerprint',
   sourceFingerprint: 'source_fingerprint',
   syncedAt: 'synced_at',
+  cleaningRequested: 'cleaning_requested',
+  cleaningReason: 'cleaning_reason',
 })
 
 function getAttendanceReportRecordsDescriptor() {
@@ -2568,6 +2582,8 @@ function getAttendanceReportRecordsDescriptor() {
       { id: ATTENDANCE_REPORT_RECORDS_FIELDS.fieldFingerprint, name: '字段配置指纹', type: 'string', order: 80, property: { width: 200 } },
       { id: ATTENDANCE_REPORT_RECORDS_FIELDS.sourceFingerprint, name: '源数据指纹', type: 'string', order: 90, property: { width: 200 } },
       { id: ATTENDANCE_REPORT_RECORDS_FIELDS.syncedAt, name: '同步时间', type: 'dateTime', order: 100 },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.cleaningRequested, name: '申请清洗', type: 'checkbox', order: 110 },
+      { id: ATTENDANCE_REPORT_RECORDS_FIELDS.cleaningReason, name: '清洗原因', type: 'string', order: 120, property: { width: 280 } },
     ],
   }
 }
@@ -3006,6 +3022,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
   }
   const records = context?.api?.multitable?.records
   const provisioning = context?.api?.multitable?.provisioning
+  const anchorAuthority = context?.services?.attendanceMultitableCleaningAuthority ?? null
   if (!records?.queryRecords || !records?.createRecord || !records?.patchRecord || !provisioning?.ensureObject) {
     return { degraded: true, reason: 'MULTITABLE_RECORDS_API_UNAVAILABLE', ...empty }
   }
@@ -3050,7 +3067,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
   const physical = logicalId => fieldIds?.[logicalId] || logicalId
 
   const rows = await db.query(
-    `SELECT ar.user_id, ar.org_id, ar.work_date, ar.timezone, ar.first_in_at, ar.last_out_at,
+    `SELECT ar.id AS canonical_record_id, ar.user_id, ar.org_id, ar.work_date, ar.timezone, ar.first_in_at, ar.last_out_at,
             ar.work_minutes, ar.late_minutes, ar.early_leave_minutes, ar.status, ar.is_workday,
             ar.meta, u.name AS user_name, u.username AS username,
             u.employee_no AS employee_no, u.department AS department,
@@ -3122,11 +3139,23 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
         limit: 50,
       })
       if (!Array.isArray(existing) || existing.length === 0) {
-        await records.createRecord({ sheetId: ensured.sheetId, data })
+        const created = await records.createRecord({ sheetId: ensured.sheetId, data })
+        if (anchorAuthority) {
+          await anchorAuthority.refresh({
+            projectionRecordId: created?.id,
+            canonicalRecordId: row.canonical_record_id,
+            sourceFingerprint,
+          })
+        }
         result.created += 1
         continue
       }
-      if (existing.length > 1) result.duplicateRowKeys += existing.length - 1
+      const duplicateRowKey = existing.length > 1
+      if (duplicateRowKey) {
+        result.duplicateRowKeys += existing.length - 1
+        if (anchorAuthority) await anchorAuthority.withhold(existing.map(record => record?.id))
+        continue
+      }
       const target = existing[0]
       const existingData = (target && target.data && typeof target.data === 'object') ? target.data : {}
       const existingSource = existingData[physical(ATTENDANCE_REPORT_RECORDS_FIELDS.sourceFingerprint)]
@@ -3139,6 +3168,13 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
         fingerprintsMatch: existingSource === sourceFingerprint && existingField === fieldFingerprint,
       })
       if (plan.action === 'skip') {
+        if (anchorAuthority && !duplicateRowKey) {
+          await anchorAuthority.refresh({
+            projectionRecordId: target?.id,
+            canonicalRecordId: row.canonical_record_id,
+            sourceFingerprint,
+          })
+        }
         result.skipped += 1
         continue
       }
@@ -3146,12 +3182,19 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
         throw new Error('ATTENDANCE_REPORT_MANAGED_CONTENT_VERSION_INVALID')
       }
       try {
-        await records.patchRecord({
+        const patched = await records.patchRecord({
           sheetId: ensured.sheetId,
           recordId: target.id,
           changes: plan.changes,
           expectedVersion: target.version,
         })
+        if (anchorAuthority && !duplicateRowKey) {
+          await anchorAuthority.refresh({
+            projectionRecordId: patched?.id,
+            canonicalRecordId: row.canonical_record_id,
+            sourceFingerprint,
+          })
+        }
       } catch (error) {
         if (error?.code !== 'VERSION_CONFLICT') throw error
         result.conflicts += 1
@@ -3164,7 +3207,7 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
     } catch (error) {
       result.failed += 1
       logger?.warn?.('attendance report record sync row failed', {
-        error: error instanceof Error ? error.message : String(error),
+        code: 'ATTENDANCE_REPORT_SYNC_ROW_FAILED',
       })
     }
   }
@@ -13673,6 +13716,7 @@ function normalizeSettings(raw) {
     attendanceReportDigestPolicy: normalizeAttendanceReportDigestPolicySetting(raw.attendanceReportDigestPolicy),
     makeupPunchPolicy: normalizeMakeupPunchPolicySetting(raw.makeupPunchPolicy),
     attendanceResultEditPolicy: normalizeAttendanceResultEditPolicySetting(raw.attendanceResultEditPolicy),
+    attendanceMultitableCleaningPolicy: normalizeAttendanceMultitableCleaningPolicy(raw.attendanceMultitableCleaningPolicy),
     autoShiftMatching: normalizeAutoShiftMatchingSetting(raw.autoShiftMatching),
     reportSync: normalizeAttendanceReportSyncSetting(raw.reportSync),
     workDateAttribution: normalizeWorkDateAttributionSetting(
@@ -14305,6 +14349,7 @@ const MAKEUP_REQUEST_TYPE_ANOMALY_TABLE = Object.freeze({
 let attendanceW4ActiveCurrentPort = null
 // W4C-3c record operation boundary — set at activate; routes resolve at call time.
 let w4RecordOperationBoundary = null
+let w4CleaningRecordOperationBoundary = null
 let attendanceW4SegmentCalculationPortRef = null
 
 // #4556 Gate A / Option B cutover: the ONE seam every reference-producing writer consults to
@@ -24772,6 +24817,7 @@ module.exports = {
     runAnnualLeaveAccrualScheduledTriggerForOrg,
     runAnnualLeaveAccrualScheduledTriggerOnce,
     normalizeAttendanceResultEditPolicySetting,
+    normalizeAttendanceMultitableCleaningPolicy,
     applyAttendanceResultEdit,
     applyResultEditMetricNormalization,
     buildManualResultEditFactFingerprint,
@@ -26527,6 +26573,9 @@ module.exports = {
         editWindowDays: z.number().int().min(1).max(366).optional(),
         requireReason: z.boolean().optional(),
         notifyAffectedEmployee: z.boolean().optional(),
+      }).optional(),
+      attendanceMultitableCleaningPolicy: z.object({
+        enabled: z.boolean().optional(),
       }).optional(),
       // 年假/法定假余额引擎 — L0 latent config (design-lock #2622). Round-trips through PUT/GET; no
       // runtime reads it until L2 (accrual). tiers = org-configurable statutory bands.
@@ -30495,6 +30544,8 @@ module.exports = {
     )
 
       const handleAttendanceRecordsGet = withPermission('attendance:read', async (req, res) => {
+        const identity = resolveAttendanceRecordReadIdentity(req, res)
+        if (!identity) return
         const schema = z.object({
           userId: z.string().optional(),
           orgId: z.string().optional(),
@@ -30514,13 +30565,8 @@ module.exports = {
           return
         }
 
-        const requesterId = getUserId(req)
-        if (!requesterId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
-
-        const orgId = getOrgId(req)
+        const requesterId = identity.actorId
+        const orgId = identity.orgId
         const targetUserId = parsed.data.userId ?? requesterId
         if (targetUserId !== requesterId) {
           const allowed = await canAccessOtherUsers(requesterId)
@@ -31373,6 +31419,14 @@ module.exports = {
 	        }
 	      })
 	    )
+
+      context.api.http.addRoute('POST', '/api/attendance/report-records/:recordId/cleaning-apply',
+        withPermission('attendance:admin', createAttendanceCleaningApplyHandler({
+          getUserId, getOrgId, getTokenSubject: getAuthenticatedTokenSubjectUserId,
+          loadSettings: () => loadSettings(db, { failClosed: true }),
+          getAuthority: () => context.services?.attendanceMultitableCleaningAuthority,
+          getBoundary: () => w4CleaningRecordOperationBoundary,
+        })))
 
 	    context.api.http.addRoute(
 	      'POST',
@@ -36442,6 +36496,26 @@ module.exports = {
           })
         : null
     attendanceW4SegmentCalculationPortRef = attendanceW4SegmentCalculationPort
+
+    const cleaningAdapter = createAttendanceCleaningOperationAdapter({
+      manualEditAdapter,
+      authority: context.services?.attendanceMultitableCleaningAuthority,
+      loadSettings: trx => loadSettings(trx, { failClosed: true }),
+      readManagedFingerprint: createAttendanceCleaningFingerprintReader({
+        fieldId: (orgId, objectId, code) => context.api.multitable.provisioning.getFieldId(`${orgId}:attendance`, objectId, code),
+        catalogFieldCodes: Object.values(ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS),
+        loadDynamic: loadAttendanceReportDynamicSubtypeContext,
+        mergeCatalog: mergeAttendanceReportFieldDefinitions,
+        buildColumns: buildAttendanceReportRecordsValueColumns,
+        fingerprint: buildAttendanceReportRecordSourceFingerprint,
+        extras: buildAttendanceRecordOvertimeSegmentationFingerprintInput,
+      }),
+    })
+    w4CleaningRecordOperationBoundary = attendanceW4SegmentCalculationPort?.createRecordOperationBoundary
+      && context.services?.attendanceMultitableCleaningAuthority
+      ? attendanceW4SegmentCalculationPort.createRecordOperationBoundary({
+        adapters: { manual_edit: cleaningAdapter, recompute: recomputeAdapter, ops_retirement: opsRetirementAdapter },
+      }) : null
 
     context.api.http.addRoute(
       'POST',
@@ -49497,6 +49571,12 @@ module.exports = {
         const data = await buildAttendanceReportFieldCatalogResponse(context, orgId, logger, {
           provision: false,
           ...formulaOptions,
+        })
+        data.cleaningReview = await readAttendanceCleaningReviewDescriptor({ orgId,
+          settings: await loadSettings(db, { failClosed: true }), provisioning: context.api.multitable?.provisioning,
+          authorize: () => context.services.attendanceMultitableCleaningAuthority.assertActor({
+            orgId, actorId: getUserId(req), tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req),
+          }),
         })
         res.json({ ok: true, data })
       })

@@ -135,7 +135,15 @@ describe('approvals routes', () => {
       name: 'Owner One',
       permissions: ['*:*'],
     }
+    // P0-A (A9): the pending list now resolves the caller's DB-derived roles before it builds its
+    // SQL, so `viewerRoles`'s TWO lookups (`users`, then `user_roles LEFT JOIN roles`) are the
+    // first two `pool.query` calls this handler makes. These `mockResolvedValueOnce`s are ordered,
+    // so without these two the page/count fixtures below would be consumed by the role lookups and
+    // the page query would fall through to the empty default. Both answer EMPTY, which is the
+    // honest shape here: this file's mocked identity has no `users` row and no `user_roles` rows.
     pgState.pool.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [
           {

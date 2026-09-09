@@ -45,7 +45,7 @@ on:
         required: false
         default: ''
       base_path:
-        description: 'Web base path → Vite VITE_BASE_PATH (e.g. /metasheet/ for a sub-path deploy). Path-only; default / (root).'
+        description: 'Web base path → Vite VITE_BASE_PATH (e.g. /metasheet/ for a sub-path deploy). Path-only, must match ^/(seg/)*$; default / (root). From Git Bash, export MSYS_NO_PATHCONV=1 first or omit this input — MSYS rewrites a bare / into a Windows path (the r12-r16 white-screen incident).'
         required: false
         default: '/'
       publish_release:
@@ -75,6 +75,49 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # GUARD 1/3 (r12-r16 white-screen incident, 2026-09-07): dispatching
+      # this workflow from Git Bash with `-f base_path=/` lets MSYS path
+      # conversion silently rewrite the bare '/' (or '/sub-path/') into a
+      # Windows path such as 'C:/Program Files/Git/', which then flows into
+      # VITE_BASE_PATH unquestioned. Five packages (r12-r16) shipped with
+      # every asset URL prefixed 'C:/Program Files/Git/assets/...' and sat
+      # broken a full day because nothing in this workflow ever looked at
+      # what it received. Reject anything but a clean root- or sub-path
+      # before a single byte gets built, regardless of which shell — or
+      # human — dispatched the run.
+      #
+      # DELIBERATE TIGHTENING: only the canonical form '^/(seg/)*$' is
+      # accepted from now on. Shapes apps/web/vite.config.ts's resolveBasePath
+      # used to silently repair — '/metasheet' (no trailing slash),
+      # 'metasheet/' (no leading slash), ' / ' (padded) — now fail loudly
+      # instead of building. No script or workflow in this repository
+      # dispatches a non-canonical value; the default is '/'.
+      - name: Validate base_path input
+        env:
+          BASE_PATH_INPUT: ${{ inputs.base_path }}
+        run: |
+          set -euo pipefail
+          raw="${BASE_PATH_INPUT}"
+          resolved="${raw:-/}"
+          base_path_ok=1
+          if [[ ! "$resolved" =~ ^/([A-Za-z0-9._-]+/)*$ ]]; then
+            base_path_ok=0
+          fi
+          # '.' and '..' are members of the [A-Za-z0-9._-] segment class, so the
+          # regex alone would accept '/../' and '/./'. Browsers normalize them
+          # away harmlessly, but "only safe characters" should mean it.
+          if [[ "$resolved" == *"/./"* || "$resolved" == *"/../"* ]]; then
+            base_path_ok=0
+          fi
+          if [[ "$base_path_ok" -ne 1 ]]; then
+            quoted_raw="$(printf '%q' "$raw")"
+            quoted_resolved="$(printf '%q' "$resolved")"
+            echo "::error::base_path input failed validation — received ${quoted_raw} (normalized: ${quoted_resolved}). Must match ^/([A-Za-z0-9._-]+/)*\$ with no '.' or '..' segment: start and end with '/', only [A-Za-z0-9._-] per path segment, no ':' '\\' or spaces. If you dispatched this from Git Bash, this is very likely MSYS path conversion rewriting a bare '/' (or '/sub-path/') into a Windows path such as 'C:/Program Files/Git/...' — export MSYS_NO_PATHCONV=1 before 'gh workflow run', or simply omit base_path to use the default '/' (this is the r12-r16 white-screen incident's exact shape)."
+            exit 1
+          fi
+          echo "WEB_BASE_PATH=${resolved}" >> "$GITHUB_ENV"
+          echo "base_path validated -> WEB_BASE_PATH=${resolved}"
 
       - name: Verify expected SHA + record build SHA
         env:
@@ -110,10 +153,68 @@ jobs:
         env:
           # Threads the dispatch input into the web build so sub-path deploys (e.g. /metasheet/)
           # emit correct asset + Vue Router bases. Default '/' = root (unchanged). See #2207.
-          VITE_BASE_PATH: ${{ inputs.base_path }}
+          # Uses the GUARD-1-normalized WEB_BASE_PATH (set by "Validate base_path
+          # input" above), never the raw ${{ inputs.base_path }} — behaviour for
+          # every legal input is unchanged, but a mangled input never reaches Vite.
+          VITE_BASE_PATH: ${{ env.WEB_BASE_PATH }}
         run: |
           pnpm --filter @metasheet/web build
           pnpm --filter @metasheet/core-backend build
+
+      # GUARD 2/3: assert the just-built apps/web/dist/index.html's own asset
+      # URLs actually carry the validated base path, before anything is
+      # packaged. Catches a mangled base reaching Vite by any other route
+      # than GUARD 1 (e.g. a future caller bypassing "Validate base_path
+      # input"), and proves the r12-r16 shape ('/C:/Program Files/Git/assets/...')
+      # cannot silently ship again.
+      #
+      # The hard-coded 'assets/' segment is Vite's default build.assetsDir.
+      # apps/web/vite.config.ts does not override it; if it ever does, this
+      # step and GUARD 3 must move with it or they will red a correct build.
+      #
+      # The node body below is byte-identical to GUARD 3's — only the argv
+      # label differs — and
+      # scripts/ops/multitable-onprem-package-no-node-modules.test.mjs asserts
+      # that equality, so the two copies cannot silently drift apart.
+      - name: Assert built web dist references use the validated base path
+        run: |
+          set -euo pipefail
+          : "${WEB_BASE_PATH:?GUARD 1 (Validate base_path input) did not run - refusing to assert an index.html against an unset base}"
+          index_html="apps/web/dist/index.html"
+          test -f "$index_html" || { echo "::error::${index_html} not found after web build" >&2; exit 1; }
+          node - "$index_html" "$index_html" <<'NODE'
+          const fs = require('node:fs')
+          const file = process.argv[2]
+          const label = process.argv[3] || process.argv[2]
+          const base = process.env.WEB_BASE_PATH
+          if (!base || !base.startsWith('/') || !base.endsWith('/')) {
+            console.error(`FATAL: WEB_BASE_PATH is ${JSON.stringify(base)}, not a validated base path -- GUARD 1 "Validate base_path input" must run before this step`)
+            process.exit(1)
+          }
+          const html = fs.readFileSync(file, 'utf8')
+          const refRe = /<(?:script[^>]*\ssrc|link[^>]*\shref)=["']([^"']+)["']/g
+          const refs = []
+          let m
+          while ((m = refRe.exec(html))) {
+            const ref = m[1]
+            if (/\.(js|css)(\?[^"'\s]*)?$/.test(ref)) refs.push(ref)
+          }
+          console.log(`asset references found in ${label}: ${refs.length}`)
+          for (const r of refs) console.log(`  ${r}`)
+          const jsRefs = refs.filter((r) => /\.js(\?[^"'\s]*)?$/.test(r))
+          if (jsRefs.length < 1) {
+            console.error(`FATAL: no .js asset references found in ${label} (an empty reference list is a failure, not a pass)`)
+            process.exit(1)
+          }
+          const prefix = `${base}assets/`
+          const bad = refs.filter((r) => !r.startsWith(prefix) || r.includes(':') || r.includes('\\'))
+          if (bad.length > 0) {
+            console.error(`FATAL: ${bad.length} asset reference(s) in ${label} do not start with "${prefix}" (WEB_BASE_PATH=${base}) or contain ':'/'\\' -- this is the r12-r16 white-screen shape:`)
+            for (const r of bad) console.error(`  ${r}`)
+            process.exit(1)
+          }
+          console.log(`OK: all ${refs.length} asset reference(s) in ${label} start with "${prefix}" and contain no ':' or '\\'`)
+          NODE
 
       - name: Build on-prem package
         env:
@@ -159,6 +260,66 @@ jobs:
           echo "PACKAGE_VERIFY_TGZ_MD=$verify_tgz_md" >> "$GITHUB_ENV"
           echo "PACKAGE_VERIFY_ZIP_JSON=$verify_zip_json" >> "$GITHUB_ENV"
           echo "PACKAGE_VERIFY_ZIP_MD=$verify_zip_md" >> "$GITHUB_ENV"
+
+      # GUARD 3/3: re-run GUARD 2's assertion — the node body below is
+      # byte-identical to GUARD 2's — against the index.html that actually
+      # made it INSIDE the built zip (via `unzip -p`), not the loose
+      # apps/web/dist/ copy GUARD 2 checked. Proves the bytes that would ship
+      # are the bytes that were asserted: a packaging step that somehow
+      # re-copied a stale or different dist tree cannot slip past.
+      #
+      # Only the .zip is opened, and that is sufficient for the .tgz released
+      # beside it: scripts/ops/multitable-onprem-package-build.sh:717-718 tars
+      # and zips the SAME staged $BUILD_ROOT/$PACKAGE_NAME tree back to back,
+      # so both archives carry the same index.html bytes.
+      - name: Assert packaged web dist references use the validated base path
+        run: |
+          set -euo pipefail
+          : "${WEB_BASE_PATH:?GUARD 1 (Validate base_path input) did not run - refusing to assert an index.html against an unset base}"
+          command -v unzip >/dev/null 2>&1 || { echo "::error::unzip is required to verify the packaged web dist" >&2; exit 1; }
+          packaged_index_html="$(mktemp)"
+          trap 'rm -f "$packaged_index_html"' EXIT
+          if ! unzip -p "$PACKAGE_FILE_ZIP" '*/apps/web/dist/index.html' > "$packaged_index_html"; then
+            echo "::error::could not read */apps/web/dist/index.html from ${PACKAGE_FILE_ZIP}" >&2
+            exit 1
+          fi
+          if [[ ! -s "$packaged_index_html" ]]; then
+            echo "::error::*/apps/web/dist/index.html inside ${PACKAGE_FILE_ZIP} is empty or missing" >&2
+            exit 1
+          fi
+          node - "$packaged_index_html" "the packaged */apps/web/dist/index.html inside $(basename "$PACKAGE_FILE_ZIP")" <<'NODE'
+          const fs = require('node:fs')
+          const file = process.argv[2]
+          const label = process.argv[3] || process.argv[2]
+          const base = process.env.WEB_BASE_PATH
+          if (!base || !base.startsWith('/') || !base.endsWith('/')) {
+            console.error(`FATAL: WEB_BASE_PATH is ${JSON.stringify(base)}, not a validated base path -- GUARD 1 "Validate base_path input" must run before this step`)
+            process.exit(1)
+          }
+          const html = fs.readFileSync(file, 'utf8')
+          const refRe = /<(?:script[^>]*\ssrc|link[^>]*\shref)=["']([^"']+)["']/g
+          const refs = []
+          let m
+          while ((m = refRe.exec(html))) {
+            const ref = m[1]
+            if (/\.(js|css)(\?[^"'\s]*)?$/.test(ref)) refs.push(ref)
+          }
+          console.log(`asset references found in ${label}: ${refs.length}`)
+          for (const r of refs) console.log(`  ${r}`)
+          const jsRefs = refs.filter((r) => /\.js(\?[^"'\s]*)?$/.test(r))
+          if (jsRefs.length < 1) {
+            console.error(`FATAL: no .js asset references found in ${label} (an empty reference list is a failure, not a pass)`)
+            process.exit(1)
+          }
+          const prefix = `${base}assets/`
+          const bad = refs.filter((r) => !r.startsWith(prefix) || r.includes(':') || r.includes('\\'))
+          if (bad.length > 0) {
+            console.error(`FATAL: ${bad.length} asset reference(s) in ${label} do not start with "${prefix}" (WEB_BASE_PATH=${base}) or contain ':'/'\\' -- this is the r12-r16 white-screen shape:`)
+            for (const r of bad) console.error(`  ${r}`)
+            process.exit(1)
+          }
+          console.log(`OK: all ${refs.length} asset reference(s) in ${label} start with "${prefix}" and contain no ':' or '\\'`)
+          NODE
 
       - name: Bind build SHA into package metadata
         run: |

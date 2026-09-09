@@ -360,7 +360,16 @@ const vitestConfigSrc = read('packages/core-backend/vitest.config.ts')
 const w5ExcludeArrayBody = extractTestExcludeArrayBody(vitestConfigSrc)
 const w5ExcludeEntries: Set<string> = new Set(w5ExcludeArrayBody ? quotedExcludeEntries(w5ExcludeArrayBody) : [])
 
-const pluginTestsSrc = read('.github/workflows/plugin-tests.yml')
+/**
+ * The ONE workflow whose approval real-DB coverage evidence is W6 (the in-repo required `test` job's
+ * real-DB steps), not W7. Named once and used at BOTH sites below — the `read()` on the next line and
+ * the `w7PopulationGaps` carve-out — so the two can never drift into disagreeing about which file is
+ * W6. (Replacing the old inline literal here is what keeps the completeness check from re-introducing
+ * a second one-off exception string of its own.)
+ */
+const W6_WORKFLOW_FILE = 'plugin-tests.yml'
+
+const pluginTestsSrc = read(`.github/workflows/${W6_WORKFLOW_FILE}`)
 // W6 evidence is the UNION of BOTH plugin-tests.yml real-DB steps, not just the "approval" one: a
 // primary-source read found ~10 approval-named suites (e.g. approval-attachment-gc-realdb,
 // approval-route-preview-api, approval-record-projection) actually run inside the SIBLING
@@ -375,10 +384,82 @@ const w6WholeFileArgs: Set<string> = new Set([
   ...(wholeFileVitestArgs(w6MultitableStep) as string[]),
 ])
 
-const w7WorkflowFileNames = readdirSync(join(repoRoot, '.github/workflows'))
-  .filter((name) => /^approval-realdb-.*\.yml$/.test(name))
-  .concat('approval-template-policy-carrier-realdb.yml')
-  .sort()
+// ---------------------------------------------------------------------------------------------
+// W7 POPULATION — the set of standalone real-DB evidence workflows this guard reads as coverage
+// evidence, expressed as DATA (one named pattern + one named exception list) instead of an inline
+// regex followed by a `.concat('<literal>')` one-off.
+//
+// THE ACCEPTED SET IS UNCHANGED by this refactor: `namePattern` is the same regex and `extraLanes`
+// holds the same single lane the `.concat()` held. Nothing was widened — a wider population can only
+// ever turn MORE files `covered: true` (w7CoveredFiles grows monotonically with it), i.e. it can only
+// make this guard LESS red, which is the wrong direction for a FAIL-0 coverage gate to move on its
+// own. Coverage for a new lane is earned by NAMING the lane to the convention, not by relaxing this.
+//
+// WHY THE CONVENTION IS NOW ENFORCED (`W7 population completeness` below): before, the convention was
+// tacit. A lane that genuinely runs approval integration suites but is named outside it is invisible
+// here, and its suites then classify as UNCOVERED "…this suite runs NOWHERE" — a false negative that
+// blames the SUITE for what is really a WORKFLOW-NAMING problem, and whose message points the reader
+// at the wrong file entirely. The completeness check reads substance (does this workflow actually run
+// a `tests/integration/approval-*` whole file against a real integration config?) and reds on the
+// workflow, with the fix in the message. It only ever ADDS a red, never removes one.
+// ---------------------------------------------------------------------------------------------
+
+const W7_POPULATION = {
+  /** Convention: a standalone approval real-DB evidence lane is named `approval-realdb-*.yml`. */
+  namePattern: /^approval-realdb-.*\.yml$/,
+  /**
+   * Lanes kept at a historical name that predates the convention. Each entry is a deliberate,
+   * reviewable exception — NOT a parking spot for new lanes. A NEW lane must be named to match
+   * `namePattern`; the completeness check below stays red until it is. (This entry is load-bearing,
+   * not vestigial: `tests/integration/approval-template-policy-carrier.db.test.ts` is in
+   * vitest.config.ts `test.exclude` and is NOT a W6 whole-file arg, so dropping this lane from the
+   * population reds that file's own T3 case — verified by deleting the entry and running this guard.)
+   */
+  extraLanes: ['approval-template-policy-carrier-realdb.yml'],
+} as const
+
+/** Pure so Half A can drive it with synthetic directory listings (no real files touched). */
+function deriveW7Population(workflowDirEntries: readonly string[]): string[] {
+  return workflowDirEntries
+    .filter((name) => W7_POPULATION.namePattern.test(name))
+    .concat(W7_POPULATION.extraLanes)
+    .sort()
+}
+
+/**
+ * Completeness of the W7 population, measured against SUBSTANCE rather than names: given every
+ * workflow's source keyed by filename, report the workflows that this guard's OWN job parser reads
+ * as running at least one `tests/integration/approval-*` whole-file arg against a real
+ * `--config vitest.integration.config.ts` invocation under a job-level DATABASE_URL, yet which sit
+ * outside the supplied population.
+ *
+ * It reuses `splitYamlTopLevelJobs` / `jobHasDatabaseUrl` / `jobWholeFileVitestArgs` deliberately, and
+ * therefore inherits exactly those parsers' narrowness. That coupling is the CORRECT one here, and it
+ * is not a blind spot: a lane whose wiring these parsers cannot read contributes nothing to
+ * `w7CoveredFiles` either, so its suites still red through the ordinary T3 "runs NOWHERE" path. The
+ * two checks are complementary — neither can be quietly satisfied by the other, and a lane must pass
+ * BOTH the parser and the naming convention to count.
+ */
+function w7PopulationGaps(
+  workflowSrcByName: ReadonlyMap<string, string>,
+  population: readonly string[],
+): string[] {
+  const inPopulation = new Set(population)
+  const gaps: string[] = []
+  for (const [name, src] of workflowSrcByName) {
+    if (inPopulation.has(name)) continue
+    if (name === W6_WORKFLOW_FILE) continue // W6 evidence, read separately above — single definition
+    const wiresApprovalSuite = splitYamlTopLevelJobs(src).some(
+      (job) =>
+        jobHasDatabaseUrl(job.body)
+        && jobWholeFileVitestArgs(job.body).some((arg) => arg.startsWith('tests/integration/approval-')),
+    )
+    if (wiresApprovalSuite) gaps.push(name)
+  }
+  return gaps.sort()
+}
+
+const w7WorkflowFileNames = deriveW7Population(readdirSync(join(repoRoot, '.github/workflows')))
 
 interface W7JobRecord {
   workflow: string
@@ -580,6 +661,50 @@ describe('self-exemption closure (§6) — this guard\'s own home cannot be sile
 })
 
 // =================================================================================================
+// §7 W7 population completeness — the naming convention is a mechanical invariant, not a habit.
+//
+// This is the enumerability half of the coverage contract. §2's T3 answers "is THIS SUITE run by
+// something?"; this answers "is every lane that runs an approval suite VISIBLE to the thing asking?".
+// Without it, a correctly-written evidence lane with a non-conforming FILENAME is silently outside
+// the closed world, and the resulting red lands on the suite with the misleading message "this suite
+// runs NOWHERE" — pointing the next reader at the wrong file. Adding this check only ever adds a red.
+// =================================================================================================
+
+describe('§7 W7 population completeness', () => {
+  const workflowDirEntries = readdirSync(join(repoRoot, '.github/workflows')).filter((name) => name.endsWith('.yml'))
+  const workflowSrcByName = new Map<string, string>(
+    workflowDirEntries.map((name) => [name, read(`.github/workflows/${name}`)]),
+  )
+
+  it('the workflow scan sees a non-trivial number of .yml files (scan negative control)', () => {
+    expect(workflowDirEntries.length).toBeGreaterThan(10)
+  })
+
+  it('the derived W7 population is non-empty (scan negative control — a broken pattern would silently empty it)', () => {
+    expect(w7WorkflowFileNames.length).toBeGreaterThan(0)
+  })
+
+  it('every W7_POPULATION.extraLanes entry still exists on disk (a rotted exception must not stay silently in the data)', () => {
+    for (const lane of W7_POPULATION.extraLanes) {
+      expect(existsSync(join(repoRoot, '.github/workflows', lane)), `extraLanes entry no longer on disk: ${lane}`).toBe(true)
+    }
+  })
+
+  it('no workflow runs a tests/integration/approval-* suite from OUTSIDE the W7 population', () => {
+    const gaps = w7PopulationGaps(workflowSrcByName, w7WorkflowFileNames)
+    expect(
+      gaps,
+      `W7 POPULATION GAP. These workflows run a tests/integration/approval-* suite against a real `
+      + `--config vitest.integration.config.ts invocation under a job-level DATABASE_URL, but sit OUTSIDE `
+      + `this guard's W7 population, so every suite they cover classifies as "runs NOWHERE": `
+      + `${gaps.join(', ')}. FIX: rename the workflow to match the approval-realdb-*.yml convention `
+      + `(W7_POPULATION.namePattern). Do NOT add it to W7_POPULATION.extraLanes — that list is only for `
+      + `lanes whose names predate the convention.`,
+    ).toEqual([])
+  })
+})
+
+// =================================================================================================
 // Half A — classifier + parser positive/negative controls (pure, no real files touched).
 // =================================================================================================
 
@@ -733,6 +858,83 @@ describe('Half A — parser decoy rejection', () => {
     ].join('\n')
     const jobs = splitYamlTopLevelJobs(workflow)
     expect(jobWholeFileVitestArgs(jobs[0].body)).toEqual([])
+  })
+})
+
+describe('Half A — W7 population derivation + completeness (synthetic fixtures, no real files)', () => {
+  const CONVENTION_LANE = 'approval-realdb-brand-new-lane.yml'
+  const NONCONFORMING_LANE = 'approval-brand-new-guard.yml'
+
+  /** A minimal but REAL-shaped W7 lane body, matching what jobWholeFileVitestArgs actually parses. */
+  function realDbLaneSrc(suiteArg: string, opts: { databaseUrl?: boolean; integrationConfig?: boolean } = {}): string {
+    return [
+      'jobs:',
+      '  lane:',
+      '    env:',
+      ...(opts.databaseUrl === false ? [] : ['      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/db']),
+      "      EXPECT_DB: '1'",
+      '    steps:',
+      '      - name: run',
+      '        run: >-',
+      '          pnpm exec vitest',
+      opts.integrationConfig === false ? '          run' : '          --config vitest.integration.config.ts run',
+      `          ${suiteArg}`,
+      '          --reporter=verbose',
+    ].join('\n')
+  }
+
+  it('POSITIVE CONTROL: a brand-new lane NAMED to the convention is picked up with no edit to this guard', () => {
+    const population = deriveW7Population(['approval-realdb-list-scope.yml', CONVENTION_LANE, 'web-tests.yml'])
+    expect(population).toContain(CONVENTION_LANE)
+  })
+
+  it('NEGATIVE CONTROL: a lane named outside the convention is NOT picked up by the pattern (this is exactly the trap §7 reports)', () => {
+    const population = deriveW7Population(['approval-realdb-list-scope.yml', NONCONFORMING_LANE])
+    expect(population).not.toContain(NONCONFORMING_LANE)
+  })
+
+  it('extraLanes entries enter the population even though they do not match the pattern (the data list is live, not decorative)', () => {
+    expect(deriveW7Population([])).toEqual([...W7_POPULATION.extraLanes].sort())
+  })
+
+  it('derivation is not vacuously permissive: an unrelated workflow name never enters the population', () => {
+    expect(deriveW7Population(['web-tests.yml', 'plugin-tests.yml'])).not.toContain('plugin-tests.yml')
+  })
+
+  it('completeness REPORTS a lane that conforms in substance but not in name', () => {
+    const srcByName = new Map([[NONCONFORMING_LANE, realDbLaneSrc('tests/integration/approval-synthetic.db.test.ts')]])
+    expect(w7PopulationGaps(srcByName, [])).toEqual([NONCONFORMING_LANE])
+  })
+
+  it('completeness goes SILENT for that same lane once it is named to the convention (proves the fix the message prescribes actually works)', () => {
+    const src = realDbLaneSrc('tests/integration/approval-synthetic.db.test.ts')
+    const srcByName = new Map([[CONVENTION_LANE, src]])
+    expect(w7PopulationGaps(srcByName, deriveW7Population([CONVENTION_LANE]))).toEqual([])
+  })
+
+  it('completeness decoy: a non-population workflow that names a NON-approval integration suite is not reported', () => {
+    const srcByName = new Map([[NONCONFORMING_LANE, realDbLaneSrc('tests/integration/multitable-synthetic.db.test.ts')]])
+    expect(w7PopulationGaps(srcByName, [])).toEqual([])
+  })
+
+  it('completeness decoy: a non-population workflow whose job has NO DATABASE_URL is not reported (it cannot be coverage evidence either)', () => {
+    const srcByName = new Map([
+      [NONCONFORMING_LANE, realDbLaneSrc('tests/integration/approval-synthetic.db.test.ts', { databaseUrl: false })],
+    ])
+    expect(w7PopulationGaps(srcByName, [])).toEqual([])
+  })
+
+  it('completeness decoy: a non-population workflow with no --config vitest.integration.config.ts is not reported', () => {
+    const srcByName = new Map([
+      [NONCONFORMING_LANE, realDbLaneSrc('tests/integration/approval-synthetic.db.test.ts', { integrationConfig: false })],
+    ])
+    expect(w7PopulationGaps(srcByName, [])).toEqual([])
+  })
+
+  it(`completeness carve-out is scoped to the single named W6 file: ${W6_WORKFLOW_FILE} is exempt, an identically-shaped sibling is NOT`, () => {
+    const src = realDbLaneSrc('tests/integration/approval-synthetic.db.test.ts')
+    expect(w7PopulationGaps(new Map([[W6_WORKFLOW_FILE, src]]), [])).toEqual([])
+    expect(w7PopulationGaps(new Map([['plugin-tests-sibling.yml', src]]), [])).toEqual(['plugin-tests-sibling.yml'])
   })
 })
 

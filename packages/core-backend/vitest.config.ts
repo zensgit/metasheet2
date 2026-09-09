@@ -67,6 +67,15 @@ export default defineConfig({
       // the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-node-operation-policy.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-node-operation-policy.db.test.ts',
+      // `canDecideCurrentNode` — the viewer-scoped decision affordance on the detail DTO, asserted
+      // together with what the decision endpoint actually does for the same viewer. Requires real
+      // PostgreSQL: the ROLE arm resolves through AuthService -> `user_roles` (the case is a
+      // false->true flip on one row, with the claim-trusting fast path off so the database is the
+      // only source of the role), and the door agreement is only meaningful against the real
+      // dispatch transaction. Excluded from the no-DB default job so `describeIfDatabase` cannot
+      // skip-green it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-can-decide-current-node.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-can-decide-current-node.db.test.ts',
       // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
       // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
       // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).
@@ -1069,6 +1078,7 @@ export default defineConfig({
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
       'tests/integration/attendance-result-edit.test.ts',
+      'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
@@ -1244,6 +1254,11 @@ export default defineConfig({
       // attachment scan_state + purge-intent storage_key unique upgrade path (real DB, isolated schema).
       // Two-point wiring — excluded HERE so it cannot skip-green in the no-DB lane.
       'tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts',
+      // Attachment round-trip guard (SLICE A, #4195 §11/§12): missing templateId/fieldId → 400,
+      // non-attachment fieldId → 400, and flag-OFF pins for upload+download+delete in ONE suite —
+      // real DB, booted server. Two-point wiring — standalone
+      // .github/workflows/approval-realdb-attachment-roundtrip-guard.yml lane, EXPECT_DB=1 sentinel.
+      'tests/integration/approval-attachment-roundtrip-guard.db.test.ts',
       // Lock-10 (S1) instance readability — canReadApprovalInstance, all 5 arms + org pin (G-S1-1,
       // G-S1-3, G-S1-6, G-S1-10, G-S1-11, G-S1-12 partial), real DB. Excluded here so
       // describeIfDatabase cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
@@ -1314,6 +1329,27 @@ export default defineConfig({
       // EXPECT_DB=1. As of #5095, also wired (whole file, no EXPECT_DB) into the required
       // plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect it.
       'tests/integration/approval-lock9-process-attachments-realdb.db.test.ts',
+      // P0-A list-scope acceptance — the server-determined visibility scope on GET /api/approvals
+      // (participant arms, the DB-backed admin arm, the org pin under its own flag, the tab default
+      // and the unknown-tab refusal). Needs real PostgreSQL: the scope is a SQL conjunct over
+      // approval_instances/approval_assignments/approval_records/users/user_orgs, which the no-DB
+      // job's fake pool does not interpret. Excluded here so describeIfDatabase cannot skip-green
+      // it; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-list-scope.yml lane, which arms EXPECT_DB=1.
+      // plugin-tests.yml is left byte-identical (it is an s6a sha256-pinned provenance input, so an
+      // allowlist entry there would force an s6a re-pin and a merge-serialisation race) — the same
+      // precedent the sibling approval-realdb-* lanes above cite.
+      'tests/integration/approval-list-scope-server-side.db.test.ts',
+      // P1b round 3 item 6 — the approval-administrator CAPABILITY predicate
+      // (`is_active = TRUE AND (is_admin = TRUE OR role = 'admin')`) executed against real
+      // PostgreSQL, plus its route and its agreement with the list scope's admin arm on one seeded
+      // row. Needs real PostgreSQL for the same reason its sibling above does: the no-DB job's fake
+      // pool answers rows the test wrote and never parses the SQL, so the inactive-row and
+      // NULL-column arms are unfalsifiable there. Excluded here so describeIfDatabase cannot
+      // skip-green it; wired as a WHOLE FILE into the same
+      // .github/workflows/approval-realdb-list-scope.yml lane, which arms EXPECT_DB=1.
+      // plugin-tests.yml is left byte-identical for the s6a re-pin reason cited above.
+      'tests/integration/approval-admin-capability-realdb.db.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.
@@ -1553,6 +1589,11 @@ export default defineConfig({
       // wired as a WHOLE FILE sibling of the content/assessment + watch-progress
       // schema gates in plugin-tests.yml after db:migrate on the 20.x leg.
       'tests/integration/elearning-watch-progress-service.db.test.ts',
+      // E-learning L6 watch-challenge authority. Requires real PostgreSQL for
+      // immutable schedules/events, request replay, timeout credit, exact
+      // challenge completion, concurrency, and migration drift. Excluded from
+      // the no-DB job and wired whole-file post-migrate in plugin-tests.yml.
+      'tests/integration/elearning-watch-challenge.db.test.ts',
       // E-learning V0.1 manual direct-assignment service gate. Requires real
       // PostgreSQL (idempotency, membership, course-head/version locks).
       // Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
@@ -1570,6 +1611,14 @@ export default defineConfig({
       // publish-shape triggers, replay conflicts, and migration drift.
       // Excluded from no-DB collection and wired whole-file post-migrate.
       'tests/integration/elearning-content-runtime.db.test.ts',
+      // E-learning online self-study registration requires real PostgreSQL
+      // for immutable intent, request replay, visibility snapshots, and races.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-course-enrollment.db.test.ts',
+      // Cross-service online training closure requires one real database for
+      // registration, watch evidence, objective grading, and score readback.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-online-training-loop.db.test.ts',
       // E-learning L4 credit-ledger authority. Requires real PostgreSQL for
       // effect identity, replay/hash conflicts, bucket locking, and balances.
       // Excluded from the no-DB job and wired as a whole-file post-migrate gate.

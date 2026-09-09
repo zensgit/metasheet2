@@ -82,6 +82,18 @@ describe('multitable access helper', () => {
     expect(isAdmin).not.toHaveBeenCalled()
   })
 
+  it('carries only the verified tenant claim into multitable access', async () => {
+    const result = await resolveRequestAccess({
+      authenticatedTenantId: 'org-verified',
+      user: {
+        id: 'user_3',
+        perms: ['elearning:admin'],
+        tenantId: 'org-header-fallback',
+      },
+    } as any)
+    expect(result.authenticatedTenantId).toBe('org-verified')
+  })
+
   // BEHAVIOUR TIGHTENING: `canManageFields` no longer rides on `multitable:write`. It needs its own
   // `multitable:manage-schema` code (src/multitable/manage-schema-permission.ts). Every OTHER key in
   // this object is unchanged — record writing, view management, export and notify still follow

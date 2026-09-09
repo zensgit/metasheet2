@@ -391,4 +391,119 @@ run('evidence is values-free (counts / field-key names / booleans only)', () => 
   assert.ok(!serialized.includes('PRJ-1'))
 })
 
+// ---------------------------------------------------------------------------
+// 5. D-C: the rowError cap makes `rowErrors` a SAMPLE, and this module reads it
+//
+// The cap (stock-preparation-bom-expansion.cjs ROW_ERROR_LIMIT) keeps counting past the limit but
+// stops appending. Everything in this module that reasons over the ARRAY therefore stopped being a
+// statement about the expansion: a project whose `missing_child_bom` entries all landed past the cap
+// yields no stamped incomplete line, `status` reads 'mapped', and the sync-run persists SUCCEEDED —
+// while the true count sits on `summary.rowErrorTypeCounts` in the same object, unread.
+// ---------------------------------------------------------------------------
+
+// The shape the expander produces when it truncated: a bounded array, plus the true totals.
+function truncatedExpansion({ rows = [], rowErrors = [], typeCounts, total }) {
+  return {
+    rows,
+    rowErrors,
+    summary: {
+      rowErrorsTruncated: true,
+      rowErrorsTotal: total,
+      rowErrorsRetained: rowErrors.length,
+      rowErrorTypeCounts: typeCounts,
+    },
+  }
+}
+
+run('a truncated expansion whose missing_child_bom entries were ALL dropped is never reported as mapped', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    truncatedExpansion({
+      rows: [expansionRow()],
+      // The retained sample is entirely a different type — exactly what a 5000-blank-part_id prefix
+      // followed by one missing_child_bom produces.
+      rowErrors: [{ type: 'missing_component_source_id', depth: 1 }],
+      typeCounts: { missing_component_source_id: 5000, [MISSING_CHILD_BOM_ROW_ERROR]: 3 },
+      total: 5003,
+    }),
+    { snapshotBatchId: 'batch-trunc' },
+  )
+  assert.equal(result.status, 'incomplete', 'the mapper refuses to call this batch complete')
+  assert.equal(
+    result.evidence.result.unstampedMissingChildBomRowErrors,
+    3,
+    'and says exactly how many incomplete lines it could not synthesize',
+  )
+  assert.equal(
+    result.evidence.input.missingChildBomRowErrors,
+    3,
+    'the input count is the TRUE total, not the zero the sampled array shows',
+  )
+  assert.equal(result.evidence.input.rowErrors, 5003, 'and so is the rowError count')
+  assert.equal(result.evidence.input.rowErrorsRetained, 1, 'with the sample size kept under its own key')
+  assert.equal(result.evidence.input.rowErrorsTruncated, true)
+})
+
+run('a truncated expansion that lost NO missing_child_bom keeps its ordinary verdict', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    truncatedExpansion({
+      rows: [expansionRow()],
+      rowErrors: [{ type: 'missing_component_source_id', depth: 1 }],
+      typeCounts: { missing_component_source_id: 5000 },
+      total: 5000,
+    }),
+    { snapshotBatchId: 'batch-trunc-clean' },
+  )
+  assert.equal(result.status, 'mapped', 'nothing this module maps was dropped, so nothing is forced')
+  assert.equal(result.evidence.result.unstampedMissingChildBomRowErrors, undefined, 'and no gap key is mounted')
+  // The counts still tell the truth about the input, which is what the persisted run row records.
+  assert.equal(result.evidence.input.rowErrors, 5000)
+  assert.equal(result.evidence.input.rowErrorsRetained, 1)
+})
+
+run('a truncated expansion counts the stamped entries against the true total', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    truncatedExpansion({
+      rows: [expansionRow()],
+      // Two survived the cap; the expander says four happened.
+      rowErrors: [
+        { type: MISSING_CHILD_BOM_ROW_ERROR, depth: 1 },
+        { type: MISSING_CHILD_BOM_ROW_ERROR, depth: 2 },
+      ],
+      typeCounts: { [MISSING_CHILD_BOM_ROW_ERROR]: 4 },
+      total: 4,
+    }),
+    { snapshotBatchId: 'batch-trunc-partial' },
+  )
+  assert.equal(result.status, 'incomplete')
+  assert.equal(result.evidence.result.stampedMissingChildLines, 2, 'two lines could be synthesized')
+  assert.equal(result.evidence.result.unstampedMissingChildBomRowErrors, 2, 'and two could not')
+  assert.equal(result.evidence.input.missingChildBomRowErrors, 4, 'against a true total of four')
+})
+
+run('an UNtruncated expansion mounts not one of the D-C evidence keys', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    { rows: [expansionRow()], rowErrors: [{ type: MISSING_CHILD_BOM_ROW_ERROR, depth: 1 }] },
+    { snapshotBatchId: 'batch-untruncated' },
+  )
+  assert.deepEqual(Object.keys(result.evidence.input), ['expansionRows', 'rowErrors', 'missingChildBomRowErrors'])
+  assert.equal('unstampedMissingChildBomRowErrors' in result.evidence.result, false)
+  assert.equal(result.status, 'incomplete', 'and the pre-D-C verdict is unchanged')
+})
+
+run('the D-C evidence stanza is values-free', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    truncatedExpansion({
+      rows: [expansionRow()],
+      rowErrors: [{ type: 'missing_component_source_id', depth: 1 }],
+      typeCounts: { missing_component_source_id: 5000, [MISSING_CHILD_BOM_ROW_ERROR]: 1 },
+      total: 5001,
+    }),
+    { snapshotBatchId: 'batch-trunc-vf' },
+  )
+  const serialized = JSON.stringify(summarizeExpansionSnapshotMappingForEvidence(result))
+  for (const value of ['DRW-CHILD', 'obj-child', 'PRJ-1', 'steel']) {
+    assert.ok(!serialized.includes(value), `truncation evidence hides ${value}`)
+  }
+})
+
 process.stdout.write('all stock-preparation-expansion-snapshot-mapper tests passed\n')

@@ -138,6 +138,10 @@ function makeDb({ seed = [], failInsertOnce = false } = {}) {
       calls.push({ op: 'selectOne', table, where })
       return rows.find((row) => row.__table === table && matches(row, where)) || null
     },
+    async select(table, { where } = {}) {
+      calls.push({ op: 'select', table, where })
+      return rows.filter((row) => row.__table === table && matches(row, where || {}))
+    },
     async insertOne(table, row) {
       calls.push({ op: 'insertOne', table, row })
       if (pendingInsertFailure) {
@@ -477,11 +481,20 @@ async function main() {
     const resave = await store.set({ tenantId: TENANT, actionId: ACTION_ID, externalSystemId: 'sys_other', actor: 'u_admin2' })
     assert.equal(resave.changed, false, 're-confirming the same source is recorded but not a change')
 
-    // Scope isolation: another tenant and another workspace are different rows.
+    // Scope isolation: another tenant is a different row and never widens.
     assert.equal(await store.get({ tenantId: 'tenant-b', actionId: ACTION_ID }), null)
-    assert.equal(await store.get({ tenantId: TENANT, workspaceId: 'ws_2', actionId: ACTION_ID }), null)
+    assert.equal(await store.get({ tenantId: 'tenant-b', workspaceId: 'ws_2', actionId: ACTION_ID }), null, "tenant-b's hinted miss never reads tenant-a's null row")
+    // A workspace with no row of its own reads THIS tenant's null-workspace row (direction A,
+    // fenced in stock-preparation-source-binding-scope-fallback.test.cjs F-04/F-12/F-13/F-16) —
+    // annotated, so it is distinguishable from the exact ws_2 hit that follows the ws_2 write.
+    const widened = await store.get({ tenantId: TENANT, workspaceId: 'ws_2', actionId: ACTION_ID })
+    assert.equal(widened.externalSystemId, 'sys_other', 'an unbound workspace reads the tenant-wide row')
+    assert.equal(widened.scopeFallback, 'tenant_null_row')
+    assert.equal(widened.matchedWorkspaceId, null)
     await store.set({ tenantId: TENANT, workspaceId: 'ws_2', actionId: ACTION_ID, externalSystemId: 'sys_ws2' })
-    assert.equal((await store.get({ tenantId: TENANT, workspaceId: 'ws_2', actionId: ACTION_ID })).externalSystemId, 'sys_ws2')
+    const exactWs2 = await store.get({ tenantId: TENANT, workspaceId: 'ws_2', actionId: ACTION_ID })
+    assert.equal(exactWs2.externalSystemId, 'sys_ws2', 'once ws_2 has its own row, that row wins')
+    assert.equal(exactWs2.scopeFallback, null)
     assert.equal((await store.get({ tenantId: TENANT, actionId: ACTION_ID })).externalSystemId, 'sys_other', 'the null-workspace row is untouched')
 
     // Fail-closed scope validation.

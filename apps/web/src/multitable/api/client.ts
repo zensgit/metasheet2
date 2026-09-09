@@ -3401,6 +3401,28 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson<AutomationRunView>(res)
   }
 
+  /**
+   * A5: whole-execution retry (admin-only; RE-RUNS REAL SIDE EFFECTS — record writes / webhook /
+   * email / DingTalk — using the CURRENT enabled rule + the ORIGINAL stored trigger event). Returns
+   * the NEW execution (linked back via `rerunOfExecutionId`); the original execution row is never
+   * mutated. `confirmSideEffects:true` is always sent — the UI confirm-gates this call (same
+   * contract as resumeAutomation). parseJson throws an Error with `.code` (NOT_FOUND /
+   * NOT_RETRYABLE / TEST_RUN_NOT_RETRYABLE / MISSING_TRIGGER_EVENT / RETRY_WINDOW_EXPIRED /
+   * START_APPROVAL_ALREADY_CREATED / RULE_MISSING_OR_DISABLED / RULE_CHANGED /
+   * RETRY_LEDGER_EVIDENCE_MISSING) so the caller can map it to an inline message.
+   */
+  async retryAutomationExecution(executionId: string): Promise<AutomationRunView> {
+    const res = await this.fetch(
+      `/api/multitable/automation-executions/${encodeURIComponent(executionId)}/retry`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmSideEffects: true }),
+      },
+    )
+    return this.parseJson<AutomationRunView>(res)
+  }
+
   async getAutomationDingTalkPersonDeliveries(sheetId: string, ruleId: string, limit?: number): Promise<DingTalkPersonDelivery[]> {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/automations/${encodeURIComponent(ruleId)}/dingtalk-person-deliveries${qs({ limit })}`,

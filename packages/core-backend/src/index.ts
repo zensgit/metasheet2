@@ -115,12 +115,18 @@ import {
   acquireStockPreparationPersistUnitOfWorkLocks,
   validateStockPreparationPersistUnitOfWorkInput,
 } from './multitable/stock-preparation-persist-unit-of-work'
-import { installMetrics, metrics as promMetrics, requestMetricsMiddleware } from './metrics/metrics'
+import {
+  installMetrics,
+  metrics as promMetrics,
+  recoveryArchiveObservability,
+  requestMetricsMiddleware,
+} from './metrics/metrics'
 import { APIGateway } from './gateway/APIGateway'
 import { getPoolStats } from './db/pg'
 import { getBuildInfo } from './config/build-info'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
+import { startAuditLogPartitionEnsure } from './audit/audit-partition-schedule'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
@@ -136,6 +142,15 @@ import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middl
 // `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
 import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
 import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
+import {
+  refreshAttendanceReportProjectionAnchor,
+  withholdAttendanceReportProjectionAnchors,
+  readAttendanceCleaningSourceSeed,
+  assertAttendanceCleaningActor,
+  readAttendanceCleaningCompletedOperations,
+  cleanupAttendanceCleaningProposal,
+  lockAttendanceCleaningSource,
+} from './attendance/attendance-multitable-cleaning-authority'
 import {
   buildAttendanceRequestCreationAttributionSnapshotV1,
   createAttendanceLiveScheduledBoundaryV1,
@@ -335,6 +350,10 @@ import {
   enqueueElearningStatsDailyJobs,
 } from './services/elearning-stats-daily-job-producer'
 import {
+  projectElearningStatsToMultitable,
+  reconcileElearningStatsMultitable,
+} from './services/elearning-stats-multitable-projection'
+import {
   cleanupElearningAnalyticsExport,
   ElearningAnalyticsExportError,
   materializeElearningAnalyticsExport,
@@ -532,6 +551,7 @@ export class MetaSheetServer {
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
+  private stopAuditPartitionEnsure?: () => void
   private stopMultitableAttachmentCleanup?: () => void
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
@@ -585,6 +605,8 @@ export class MetaSheetServer {
     this.recoveryArchiveApplication = createRecoveryArchiveApplication(
       options.createRecoveryArchiveComposition,
       resolveRecoveryArchiveMainPoolRuntime,
+      process.env,
+      recoveryArchiveObservability,
     )
 
     // 创建核心API
@@ -968,6 +990,13 @@ export class MetaSheetServer {
           },
         },
         records: {
+          // W9: this records surface routes `queryRecords` straight to the multitable query
+          // service, which builds `data ->> $k = ANY($v::text[])` for an array filter value. The
+          // declaration lives HERE, next to the implementation it describes, so a caller can tell
+          // "the host cannot do this" from "the query was invalid" without guessing from an error
+          // message. Wrapping surfaces (plugin-scope, the plugin's own target fence) forward it
+          // only when the surface underneath declares it.
+          supportsFilterValueLists: true,
           listRecords: async ({ sheetId, limit, offset }) => {
             const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -2149,6 +2178,11 @@ export class MetaSheetServer {
                   throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
                 }
               }
+              // W8-4 (L1). Reporting `registered` keeps the tolerated-unregistered case OUT of the
+              // request-scoped memo (`plugin-scope.ts`), so the warning above still fires once per
+              // records call rather than once per scope — it is the signal P0-S S4 reads to decide
+              // whether the registry backfill is complete enough to flip this mode to `enforce`.
+              return { registered: ownsSheet }
             },
             runStockPreparationPersistUnitOfWork: async (
               { pluginName, ...rawInput },
@@ -2432,6 +2466,9 @@ export class MetaSheetServer {
                   if (!isElearningAnalyticsSurfaceEnabled()) {
                     throw new ElearningStatsDailyJobProducerError('unavailable')
                   }
+                  await reconcileElearningStatsMultitable(poolManager.get()).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_reconcile_failed')
+                  })
                   return enqueueElearningStatsDailyJobs(poolManager.get())
                 },
                 project: async (
@@ -2440,7 +2477,11 @@ export class MetaSheetServer {
                   if (!isElearningAnalyticsSurfaceEnabled()) {
                     throw new ElearningStatsDailyProjectionError('unavailable')
                   }
-                  return projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                  const result = await projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                  await projectElearningStatsToMultitable(poolManager.get(), input).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_projection_failed')
+                  })
+                  return result
                 },
               }
             : undefined,
@@ -2480,6 +2521,81 @@ export class MetaSheetServer {
                   }
                   return checkElearningAssignmentReminderEligibility(poolManager.get(), input)
                 },
+              }
+            : undefined,
+        // ACP-1B: core owns the canonical anchor ledger. The attendance plugin only receives
+        // this narrow sync port; it cannot query or write the ledger generically.
+        attendanceMultitableCleaningAuthority:
+          manifest.name === 'plugin-attendance'
+            ? {
+                cleanupProposal: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof cleanupAttendanceCleaningProposal>[1],
+                  seed: Parameters<typeof cleanupAttendanceCleaningProposal>[2], reason: string) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return cleanupAttendanceCleaningProposal(async (statement, params) => ({ rows: await trx.query(statement, params) }), input, seed, reason)
+                },
+                readCompletedInTransaction: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof readAttendanceCleaningCompletedOperations>[1]) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return readAttendanceCleaningCompletedOperations(async (statement, params) => ({ rows: await trx.query(statement, params) }), input)
+                },
+                readCompleted: (input: Parameters<typeof readAttendanceCleaningCompletedOperations>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => readAttendanceCleaningCompletedOperations(
+                    async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input,
+                  )),
+                assertActor: (input: Parameters<typeof assertAttendanceCleaningActor>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => {
+                    await assertAttendanceCleaningActor(async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input)
+                  }),
+                readSeed: (input: Parameters<typeof readAttendanceCleaningSourceSeed>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => readAttendanceCleaningSourceSeed(
+                    async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input,
+                  )),
+                lockSource: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof lockAttendanceCleaningSource>[1],
+                  seed: Parameters<typeof lockAttendanceCleaningSource>[2]) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return lockAttendanceCleaningSource(async (statement, params) => ({ rows: await trx.query(statement, params) }), input, seed)
+                },
+                refresh: async (input: {
+                  projectionRecordId: string
+                  canonicalRecordId: string
+                  sourceFingerprint: string
+                }) => poolManager.get().transaction(async ({ query }) => {
+                  await refreshAttendanceReportProjectionAnchor(async (statement, params) => {
+                    const result = await query(statement, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: typeof (result as { rowCount?: unknown }).rowCount === 'number'
+                        ? (result as { rowCount: number }).rowCount
+                        : undefined,
+                    }
+                  }, input)
+                }),
+                withhold: async (projectionRecordIds: readonly string[]) => poolManager.get().transaction(async ({ query }) => {
+                  await withholdAttendanceReportProjectionAnchors(async (statement, params) => {
+                    const result = await query(statement, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: typeof (result as { rowCount?: unknown }).rowCount === 'number'
+                        ? (result as { rowCount: number }).rowCount
+                        : undefined,
+                    }
+                  }, projectionRecordIds)
+                }),
               }
             : undefined,
         // W4C-2 (#4556 lock §12.2 last sentence; #4607 P3-4): host-provided strict W4
@@ -2532,7 +2648,7 @@ export class MetaSheetServer {
                     adapters: config.adapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: () => client.release() }
+                      return { client, release: (error?: Error) => client.release(error) }
                     },
                   }),
                 appendOperatorRetirementCalculation: (input) =>
@@ -3153,6 +3269,13 @@ export class MetaSheetServer {
         this.stopOperationAuditRetention?.()
       } catch (err) {
         this.logger.warn(`Operation audit retention stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
+        this.stopAuditPartitionEnsure?.()
+      } catch (err) {
+        this.logger.warn(`Audit log partition ensure stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
@@ -4372,6 +4495,7 @@ export class MetaSheetServer {
     // Background tasks (after server starts listening)
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
+      this.stopAuditPartitionEnsure = startAuditLogPartitionEnsure({ logger: this.logger })
       this.stopMultitableAttachmentCleanup = startMultitableAttachmentCleanup({ logger: this.logger })
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
       this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })

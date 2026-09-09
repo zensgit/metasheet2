@@ -20,6 +20,21 @@
 # k3WiseSetup, platform-app-launcher, …) are deliberately OUT of this set until fixed; broaden
 # toward full-suite-minus-quarantine once they are triaged.
 #
+# CASING CONVENTION (备料, noted 2026-09-08 — no token added, no behaviour change): every 备料
+# vitest token below is CamelCase — `StockPreparation*` / `stockPrep*` (see the many `Stock
+# Preparation*` and `stockPrepPermissionMatrix` tokens further down). That is not incidental: this
+# script's filter is a vitest path-SUBSTRING match, and `apps/web/verification/stock-prep-*.spec.ts`
+# (`stock-prep-p0-acceptance.spec.ts`, `stock-prep-p1-acceptance.spec.ts`) are Playwright cases —
+# they `import { test } from '@playwright/test'` and run under `playwright.verification.config.ts`,
+# never under vitest. Vitest's own default include glob still COLLECTS them (see the `verification/`
+# note further down in this file), so the only thing keeping this gate from trying to run Playwright
+# specs under vitest is that no CamelCase `StockPreparation*`/`stockPrep*` token is a substring of
+# their lowercase, hyphenated `stock-prep-*` filenames. If a future 备料 change ever needs a NEW
+# vitest token that starts with the lowercase `stock-prep` prefix, it must first add an explicit
+# exclusion for these two Playwright files — both here and in the shared lane(s) this script's
+# tokens are mirrored into (approval-web-guard.yml / multitable-web-guard.yml, per the two-point
+# discipline above) — or a lowercase token risks silently sweeping a Playwright file into vitest.
+#
 # T3/T4/T5 post-hoc gate (2026-07-12): `mount-behind-flow` added — the harness self-test
 # (tests/helpers/mount-behind-flow.spec.ts) that proves the shared UI-P2-1c T4 mock-client mount
 # helper actually does what its own doc comments claim (real DOM mount/teardown, router dispatch +
@@ -420,6 +435,9 @@
 # not strictly load-bearing for coverage today — added anyway, explicit and named.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Explicit organization sessions: a separate small process, retaining existing
+# API/approval and attendance suite ownership below.
+npx vitest run tests/useAuth.spec.ts tests/useSessionOrg.spec.ts tests/AttendanceSessionOrgSwitcher.spec.ts tests/useAttendanceSessionGuard.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
 # #5012 (2026-08-19, human-tail finding): tests/api.spec.ts carries the omitHeaders
 # MECHANIC leg (SR-1 rules/me self-service contract) — it ran in NO workflow before, so
@@ -431,6 +449,7 @@ cd "$(dirname "$0")/.."
 # chosen for exactness (a future `*-api.spec.ts` would substring-collide with a bare
 # `api.spec.ts` token; today the bare token still selects exactly one file).
 npx vitest run \
+  tests/AttendanceReportFieldsSection.spec.ts \
   tests/api.spec.ts \
   tests/attendance-rules-me-contract-sync.spec.ts \
   approval-canvas-commands \
@@ -576,10 +595,91 @@ npx vitest run multitable-recovery-archive-client multitable-recovery-archive-mo
 # in either direction (checked the full token list in this file).
 npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
 
+# 审批详情实例一致性 (instance consistency), 2026-09-06: TWO new tokens.
+#   * `approval-detail-instance-consistency` — the mounted ApprovalDetailView + REAL approval store
+#     spec (route switch clears the outgoing instance, write verbs act on the displayed instance,
+#     failed load shows the error state with a retry).
+#   * `approval-store-detail-generation` — the approvals-store unit spec (out-of-order detail and
+#     history responses, switch/failure clearing, action-result publication).
+#
+# Both are BARE BASENAMES, as packages/core-backend/tests/unit/approval-ci-coverage-enumeration.ts
+# requires (its T1 tier reds any apps/web/tests/approval*.spec.ts whose basename is not an exact
+# token here — an incidental substring match is explicitly rejected). That constraint interacts with
+# vitest's default include glob, which DOES collect apps/web/verification/*.spec.ts (Playwright
+# files that fail to collect under vitest): the browser-lane sibling for this change is therefore
+# named `approval-instance-consistency-race.spec.ts`, which neither token matches as a substring —
+# verified by running each token in isolation ("Test Files 1 passed").
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against all 437 tokens already in
+# this file (counting rule, so the figure stays re-derivable rather than rotting into a bare digit:
+# join backslash continuations, drop comment lines, take every whitespace-separated argument of an
+# `npx vitest run` command that does not start with `-`; that yields 437 before this change and 439
+# after, with no duplicates). Neither new token contains, nor is contained by, any existing one.
+# In particular the three pre-existing `approval-detail-*` tokens (approval-detail-field,
+# approval-detail-record-table, approval-detail-column-row-key) are unrelated to
+# `approval-detail-instance-consistency` in both directions. Both verified green in isolation
+# (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") and in this batch before wiring.
+npx vitest run approval-detail-instance-consistency approval-store-detail-generation --reporter=dot
+
+# 视角化决策可用性 (viewer-scoped decision affordance), 2026-09-07: ONE token added —
+# `approval-detail-can-decide-current-node`, a NEW spec
+# (apps/web/tests/approval-detail-can-decide-current-node.spec.ts) over the mounted
+# ApprovalDetailView. It pins the six decision verbs against the server-resolved
+# `canDecideCurrentNode`: all six render on `true`, none on `false` (with `canAct` still true), all
+# six on ABSENT (older backend ⇒ today's behaviour, so absence never reads as deny), none when
+# `canAct` itself is false, and the #5528 instance-consistency gate still refusing on top of it.
+# It also pins the disclosed non-changes — 评论 / 撤回 / 催一下 keep their present reach — and
+# carries a fixture control proving the six verbs are otherwise eligible, so "no button" can only
+# be this field talking.
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
+# file (same counting rule as the paragraph above: join backslash continuations, drop comment lines,
+# take every non-flag positional of each `vitest run` command — 439 before this change, 440 after,
+# no duplicates): no existing token contains the new one, and the new one contains no existing
+# token. In particular the four pre-existing `approval-detail-*` tokens (approval-detail-field,
+# approval-detail-record-table, approval-detail-column-row-key, approval-detail-instance-consistency)
+# are unrelated to it in both directions. Verified green in isolation
+# (`npx vitest run approval-detail-can-decide-current-node --reporter=dot` → "Test Files 1 passed")
+# and in this batch before wiring.
+npx vitest run approval-detail-can-decide-current-node --reporter=dot
+
+# 审批可发现性 (approval discoverability), 2026-09-07. Tokens are BARE BASENAMES, as
+# packages/core-backend/tests/unit/approval-ci-coverage-enumeration.ts's T1 tier requires (each of
+# these files matches /^approval.*\.(test|spec)\.ts$/, and an incidental substring match is
+# explicitly rejected there).
+#   * `approvalNavTodoBadge` — the app-shell 待办 badge on the top-nav 审批中心 entry: it is bound to
+#     the fetched pending count, moves on a realtime push without a second read, keeps the nav
+#     link's own text unchanged, hides on zero/failure, and renders for approvals:read only.
+#   * `approvalNavDelegationEntry` — the non-admin /my-delegation entry in the account area of the
+#     nav, plus the tripwires that the ADMIN 委托管理 button and the self-service route's own
+#     requiresAuth-only meta were both left as they were.
+#   * `approvalBatchTransferView` — the admin 批量转交 page over the EXISTING bulk reassign
+#     endpoint: the route's admin gate (with both a positive and a negative control on the same
+#     guard helper), the pinned request path/query/body, the confirm-before-submit step, and the
+#     per-row outcomes including the "server answered about neither" case.
+#
+#   * `approvalNavBatchTransferEntry` (round 2) — the 批量转交 NAV ENTRY's gate: it renders only when
+#     the SERVER's DB-backed approval-administrator capability says so, is absent on `denied` AND on
+#     "could not determine", and an ordinary user's shell never issues the read at all.
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
+# file using this file's own counting rule (join backslash continuations, drop comment lines, take
+# every whitespace-separated argument of an `npx vitest run` command that does not start with `-`;
+# that yields 440 before this change and 444 after, with no duplicates). None of the four new
+# tokens contains, nor is contained by, any existing one — in particular the neighbouring
+# `approvalCenterRemindBadge` / `approvalCenterUnreadBadge` share only the `approval` prefix with
+# `approvalNavTodoBadge`, and `approvalDelegationForm` /
+# `approvalDelegationRoute` / `approvalDelegationStatus` / `approvalDelegationView` /
+# `myDelegationView` are unrelated to `approvalNavDelegationEntry` in both directions, and no
+# existing token is a prefix of `approvalBatchTransferView` nor it of one; `approvalBatchTransferView`
+# and `approvalNavBatchTransferEntry` do not contain each other either. Each verified green in
+# isolation (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") before wiring.
+npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry --reporter=dot
+
 # 源就绪预检 + 拓扑自测 (source readiness + topology self-test), 2026-09-01: ONE token added to the
 # batch below, StockPreparationSourcePreflight — a NEW spec
 # (apps/web/tests/StockPreparationSourcePreflight.spec.ts) over the same StockPreparationInstallView
-# component, because the source panel lives in the 安装/体检 page beside the deployment preflight. It
+# component, because the source panel lives in the 数据来源与体检 page beside the deployment preflight. It
 # pins the four measured lines, the topology-mismatch sentence (the one that names the zero-row
 # outcome the old behaviour produced silently), the gate on the run control, and the values-free
 # rendering. Substring collisions checked in BOTH directions, as this file requires: the token
@@ -605,4 +705,250 @@ npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
 #     StockPreparationSourceBinding are unique: none is a substring of any existing token, and no
 #     existing token is a substring of them (in particular StockPreparationProjectWorkspaceView and
 #     StockPreparationSourcePreflight neither contain nor are contained by any of them).
-exec npx vitest run StockPreparationProjectBoard StockPreparationProjectSync.spec.ts StockPreparationProjectSyncPanel.spec.ts StockPreparationLargeBomPull.spec.ts StockPreparationLargeBomPullPanel.spec.ts StockPreparationOperatorProjectDirectory StockPreparationSourceBinding amountAutoSum approval-amount-in-words approval-assignee-source approval-attachment-download approval-attachment-refs approval-attachment-upload approval-attachment-upload-process approval-process-attachment-dialog approvalNewView approval-center approval-center-master-detail approval-center-detail-pane-controller approval-common-template-presets approval-condition-summary approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-e2e-lifecycle approval-e2e-permissions approval-member-identity-coverage-enumeration approval-member-action-dialog-grammar approval-field-visibility approval-form-draft approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-graph-summary approval-graph-topology-edit approval-handler-node-authoring approval-handler-node-config approval-number-field-props approval-prefill-from-snapshot approval-route-preview-controller approval-route-preview-summary approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-cc-edit approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-template-authoring-condition-edit approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-linear-step-spine approval-template-authoring-parallel-edit approval-template-route-preview-api approval-upcoming-nodes approval-urge-button-state approvalCardDecisionView approvalCenterRemindBadge approvalCenterSourceFilter approvalCenterTable approvalCenterUnreadBadge approvalDelegationStatus approvalDelegationView approvalDetailPolish approvalMetricsTopnReport approvalMetricsView approvalMobileI18n approvalMobileResponsive approvalTemplateAuthoring approvalTemplateCenterCategory approvalTemplateGovernance approvalTemplateVersionHistory approval-template-version-diff asyncStateBlock automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView comment-affordance-color-consistency DirectoryDeprovisionEvidencePanel.spec.ts directoryManagementView lineDerivation meta-automation-labels meta-filter-group meta-grid-table meta-person-delivery-viewer-migration meta-record-drawer-history-diff meta-record-drawer-i18n meta-record-drawer-restore meta-toolbar-filter-builder migration mount-behind-flow multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-client multitable-comment-affordance multitable-comment-inbox-realtime multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-crossbase-workbench-wiring multitable-field-manager multitable-field-visibility multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-phase11 multitable-record-permission-manager multitable-record-restore-client multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-view-manager multitable-ui multitable-workbench-1672-1673 multitable-workbench-drawer-button-wiring multitable-workbench-history-field-scope-wiring multitable-workbench-import-flow multitable-workbench-manager-flow multitable-workbench-permission-wiring multitable-workbench-restore-wiring multitable-workbench-view multitable-yjs-cell-editor multitable-yjs-scalar-cell myDelegationView newTodoPill pageShell parallelBranchRunsView requesterPreviewFields routePreviewErrors statusTag templateArchiveConfirm templateGalleryFilter ui-foundation-style-guard uiFoundationTexture useAutoSumTotal workflowHubView automation-log-redact automation-log-support-packet automation-rule-concurrent-merge meta-ai-bulk-labels meta-api-error-labels meta-api-token-labels meta-automation-delivery-viewers-i18n meta-base-picker meta-bulk-edit-labels meta-cell-editor-i18n meta-comment-composer-i18n meta-comment-labels meta-comments-drawer-i18n meta-form-share-labels meta-form-view-i18n meta-link-picker-i18n meta-link-picker-labels meta-notification-bell meta-permission-labels meta-record-labels meta-toolbar-group-picker meta-view-render-labels meta-sheet-view-rail multitable-agg-footer-grid multitable-ai-bulk-fill-composable multitable-ai-bulk-fill-dialog multitable-ai-bulk-fill-job-composable multitable-ai-bulk-fill-job-dialog multitable-ai-shortcut-cell-editor multitable-ai-shortcut-client multitable-ai-shortcut-composable multitable-ai-shortcut-drawer multitable-ai-shortcut-field-manager multitable-alt-view-comment-chip-i18n multitable-api-token-manager multitable-attachment-editor multitable-attachment-list multitable-barcode-field multitable-base-local-state multitable-build-chart-option multitable-bulk-edit-dialog multitable-button-field-config multitable-button-run-client multitable-calendar-drag-reschedule multitable-calendar-view multitable-capabilities multitable-cell-button multitable-cell-visual-display multitable-cf-scale multitable-chart-load-error multitable-chart-renderer multitable-comment-composer multitable-comment-inbox.spec.ts multitable-comment-presence multitable-comment-reactions multitable-comment-realtime multitable-comments multitable-comments-drawer multitable-conflict-ux multitable-core-i18n multitable-crossbase-link-normalizer multitable-crossbase-link-picker multitable-dashboard-view multitable-datetime-field multitable-duration-field multitable-embed-host multitable-embed-route multitable-export-dialog multitable-field-config-i18n multitable-field-display-i18n multitable-field-validation-panel multitable-form-layout multitable-form-share-manager multitable-form-view multitable-formula-dryrun-panel multitable-formula-suggest-field-manager multitable-frozen-columns-grid multitable-frozen-columns-util multitable-gallery-view multitable-gantt-view multitable-hierarchy-view multitable-home-view multitable-import multitable-import-modal multitable-link-picker multitable-linked-record-chip multitable-linked-record-popover multitable-location-field multitable-longtext-cell multitable-manager-panels-i18n multitable-mention-inbox multitable-mention-popover multitable-mention-realtime multitable-multiselect-field multitable-nongrid-summary-rendering multitable-number-format multitable-people-import multitable-person-field multitable-personal-view-toggle multitable-phase10 multitable-phase12 multitable-phase13 multitable-phase14 multitable-phase15 multitable-phase3 multitable-phase4 multitable-phase5 multitable-phase6 multitable-phase7 multitable-phase8 multitable-phase9 multitable-qrcode-field multitable-record-drawer multitable-record-drawer-button multitable-record-drawer-duplicate multitable-record-drawer-t5-migration.spec.ts multitable-record-fields-panel multitable-record-history-panel multitable-record-history-client-restored-from multitable-record-inspector multitable-comments-panel multitable-record-attachments-panel multitable-record-permissions-composable multitable-richtext-editor-mention multitable-richtext-longtext multitable-richtext-mention multitable-richtext-wiring multitable-scoped-permissions multitable-sheet-presence multitable-sheet-realtime multitable-system-fields multitable-template-center-view multitable-template-detail-view multitable-timeline-view multitable-view-display-prefs-util multitable-workbench-i18n multitable-workbench.spec.ts multitable-yjs-cell-binding personal-view-client public-multitable-form view-manager-multitable-contract xlsx-mapping StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper StockPreparationProjectWorkspaceView StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationWorkspace StockPreparationInstallRun StockPreparationInstallView StockPreparationSourcePreflight StockPreparationPosturePlainLanguage stockPrepPermissionMatrix StockPreparationHandoff stockPreparationConfirmationQueue StockPreparationUnconfirmableHold IntegrationStockPrepPanel conditional-formatting-dialog-i18n dingtalk-internal-view-link-warnings dingtalk-recipient-field-warnings dingtalk-public-form-link-warnings meta-grid-table-i18n.spec.ts multitable-comment-inbox-view.spec.ts multitable-b4-field-always-readonly data-sources-ui data-sources-api-preview approval-template-authoring-policy-carrier useApprovalBatchActions approval-template-authoring-errors approval-template-authoring-field-permissions approvalApiErrorSurfacing approvalCountsRealtime approvalDelegationForm approvalDelegationRoute approvalQuickPhrases approvalRecentTemplates approvalRelativeWait approvalResubmitButton approvalTemplateRouteGuard approvalUserPicker featureFlagsApprovalMobile searchApprovalDirectoryUsers useApprovalDirectory shared-comments-stub-client attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation attendanceOverviewRequestReveal useAttendanceAdminConfig approval-comments-client approval-comments-panel multitable-record-inspector-resize multitable-grid-cell-edit-commit.spec.ts multitable-grid-cell-edit-commit-round2.spec.ts multitable-record-inspector-header multitable-grid-expand-record --reporter=dot
+#
+# 缺件清单 (W3a) added `StockPreparationMissingComponents` — the missingComponentsOf() clamp +
+# StockPreparationProjectSyncPanel's 缺件清单 disclosure (render/empty-state/truncated/复制/导出 CSV
+# with the CSV-injection guard). Substring-collision checked both ways per this file's own
+# discipline: `StockPreparationMissingComponents` is not a substring of, and does not contain, any
+# other token already in this list (in particular it shares only the common `StockPreparation`
+# prefix with the other stock-prep tokens above and below it, none of which extend into
+# "MissingComponents").
+#
+# 缺件清单's B3 fix (the CSV/formula-injection guard was made opt-in so it could not silently rewrite
+# the eight existing PLM CSV exports) added a pinning suite to `usePlmExportActions.spec.ts` — a file
+# that was NOT previously tokenized here at all and so ran in no required workflow. Token
+# `usePlmExportActions` added: verified a live substring check against every token already in this
+# list (358 at the time) turns up zero collisions in either direction, and it matches exactly one
+# file on disk (`usePlmExportActions.ts`, the source module, is not `*.spec.ts` and is never
+# collected as a test by vitest's default include glob regardless of this token).
+#
+# 接入向导「开始使用」(P0-4, 2026-09-08) added `StockPreparationGettingStarted` — a NEW spec for the
+# new six-step wizard component that mounts at the top of the install tab. Substring-collision
+# checked: `StockPreparationGettingStarted` shares only the common `StockPreparation` prefix with
+# every sibling token in this list, none of which extend into "GettingStarted", and it is not a
+# substring of any of them either; it matches exactly one file on disk. The install tab's own mount
+# point contract (the wizard renders, first, ahead of every existing card) is pinned in
+# `StockPreparationInstallView.spec.ts`, already tokenized above — not a new token, since the wizard's
+# OWN behaviour has the new file.
+#
+# 任务首页 + 下一步条 + 状态徽标 (P0-2/P0-3/P0-6, 2026-09-08): ONE token added,
+# `StockPreparationOperatorHome` — the NEW spec (apps/web/tests/StockPreparationOperatorHome.spec.ts)
+# covering operatorNextStep.ts's seven priority-ordered rules; the "三处同词一致" cross-component
+# posture check, parameterised over every posture key (home card / workspace title / composed sync
+# panel all rendering the SAME `stockPrepPosture()` string for the same state); G3 silent
+# predread-failure degradation and G4's "still in flight is not an empty state"; the three home
+# empty states' mutually exclusive copy; G1's filled-primary-button count (the falsifiable form of
+# 每屏一个主操作位, which had no witness before); the 本机记忆 module's storage contract (exactly
+# three fields, tenant+principal scoping, `running` never persisted, corrupt payload degrades); the
+# directory ∪ memory merge direction; and §4.2 rule 4 surviving the tab unmount that is the only way
+# to reach it. Substring collision checked in BOTH directions per this file's discipline: no existing
+# `StockPreparation*` token is a substring of `StockPreparationOperatorHome` (the closest neighbour,
+# `StockPreparationOperatorProjectDirectory`, diverges after `StockPreparationOperator`), and it is
+# not a substring of any of them either. Verified green in isolation
+# (`npx vitest run StockPreparationOperatorHome --reporter=dot`) and in this batch before wiring.
+#
+# 向导第⑤步真实授权检测 (P1-3, 2026-09-08): ONE token added,
+# `StockPreparationOnboardingReadiness` — the NEW spec
+# (apps/web/tests/StockPreparationOnboardingReadiness.spec.ts) for the service that reads the
+# PLATFORM role catalog and answers 「有没有角色同时持有 stock-prep:read 与 stock-prep:operate、里面
+# 有几个人」: the conjunction (a role holding one code does not count), 成员 0 人 landing on ⚠ rather
+# than ✔, every unanswerable read (403/401/500/network/HTML-for-JSON/envelope-not-ok/unrecognised
+# shape) collapsing to `unknown` and never to 「还没有这样的角色」, and the reverse assertion that the
+# projection carries role names and integers only — no user id, email or display name, whatever the
+# server sends. The wizard's four DOM verdicts live in `StockPreparationGettingStarted`, already
+# tokenized above. Substring collision checked in BOTH directions: no existing token is a substring
+# of `StockPreparationOnboardingReadiness` (the closest neighbours, `StockPreparationOperatorHome` /
+# `StockPreparationOperatorProjectDirectory`, diverge at `StockPreparationOp…`), and it is not a
+# substring of any of them; it matches exactly one file on disk.
+# 「记录与排查」面板 (P1-4/P1-5, 暗装, 2026-09-08) added `StockPreparationOpsPanel` — the NEW spec
+# (apps/web/tests/StockPreparationOpsPanel.spec.ts) for the audit-reverse-lookup + deployment-health
+# panel: 六格三态 (idle/ready/forbidden/unavailable, never a fourth colour), `allSettled` isolation
+# (one auto-cell's read failing leaves its siblings rendering fine), the 未检查 neutral state (no
+# success/warning class before a manual check runs), 计划任务's unconditional 未接入监控, the reverse
+# assertion that a raw `actor` handle / email never reaches the primary audit row (only the per-row
+# 技术详情 disclosure), the three-line disclaimer surviving every search branch, the empty-state and
+# 403 wording, and an anti-vacuity check that `STOCK_PREP_AUDIT_ACTION_PLAIN` covers all 14 actions
+# read directly off `stock-preparation-audit-store.cjs`'s own `STOCK_PREP_AUDIT_ACTIONS` (same
+# discipline as `StockPreparationPosturePlainLanguage.spec.ts`'s manifest read — that file is
+# text-scraped instead of required only because IT pulls a heavy dependency chain; the audit store
+# module requires nothing but `node:crypto`, so a direct `require` here is safe). This wave's panel
+# is NOT mounted anywhere yet — no rail exists (D3 is P1-1's job) — so it ships dark; the spec is the
+# whole coverage surface until the wiring PR lands. Substring collision checked in both directions
+# against every token above: `StockPreparationOpsPanel` shares only the common `StockPreparation`
+# prefix with its closest neighbours (`StockPreparationOperatorHome` / `...OperatorProjectDirectory`
+# diverge after `...Operator`; `StockPreparationProjectSyncPanel` / `...LargeBomPullPanel` diverge
+# before "Panel"), and it matches exactly one file on disk. Verified green in isolation
+# (`npx vitest run StockPreparationOpsPanel --reporter=dot`) and in this batch before wiring.
+#
+#
+# 错误码对照抽屉 + 安装页三分区重排 (P1-6/P1-7, 2026-09-08): ONE token added,
+# `StockPreparationCodeHelp` — the NEW spec (apps/web/tests/StockPreparationCodeHelp.spec.ts) for the
+# new `StockPreparationCodeHelpPanel.vue` / `codeHelp.ts` reverse-lookup drawer over six of
+# `plainLanguage.ts`'s code-keyed tables: H1 防漏 (rendered row count == an INDEPENDENTLY-imported sum
+# of the six raw tables' key counts, so a future silent drop is caught even if a table's own key count
+# later changes), H2 搜索 (code-substring and prose-substring narrowing, case-insensitive, empty query
+# = full list), H3 双语 (the same entry renders zh under zh-CN and en otherwise), H4 值面反向断言 (no
+# entry looks email- or part/drawing-number-shaped; the rendered panel never contains a realistic
+# planted business value). `StockPreparationInstallView.spec.ts` gained three P1-7 cases in the SAME
+# file (already tokenized) covering the three-region reorg this drawer's mount point is part of — no
+# new token needed for those. Substring-collision checked both directions: no existing
+# `StockPreparation*` token is a substring of `StockPreparationCodeHelp` (none extend into
+# "CodeHelp"), and it is not a substring of any of them either; it matches exactly one file on disk.
+# Verified green in isolation (`npx vitest run StockPreparationCodeHelp --reporter=dot`) and in this
+# batch before wiring.
+#
+#
+# 左栏 rail（工作 / 部署与接入 / 帮助）+ D2 落地页 (P1-1, 2026-09-08): ONE token added,
+# `StockPreparationRail` — the NEW spec (apps/web/tests/StockPreparationRail.spec.ts) for the grouped
+# vertical rail that replaced the horizontal tab strip, and for the D2=A landing that came with it:
+# R-01 it is STILL one tablist (same `stock-prep-tabs` container, role=tablist, the new
+# aria-orientation=vertical, every item still role=tab under its ORIGINAL `stock-prep-tab-<key>`, and
+# the role=tab count equals the testid count so a GROUP HEADING can never become a tab); R-02 per-item
+# filtering for four tiers asserted as the exact SET of visible keys (纯 read / operate∧read /
+# stock-prep:admin / 平台管理员) plus a group with no visible item disappearing WHOLE rather than
+# leaving an empty heading; R-03 深度工具 ▾ folds all seven legacy MVP tabs, starts `hidden`, opens on
+# click, and a folded tab still activates its panel (折叠不下线); R-04 the narrow-screen form is a media
+# query rather than a second, conditionally-rendered container (the R11 lesson from
+# ApprovalCenterView's no-op split div); the four D2 landing postures at the DOM level
+# (未装完→开始使用 / 装完→记录与排查 / 读不到→开始使用 / 一线→今天要处理, the last of which also
+# asserts the operator issues NO preflight read at all); `?tab=` accepting old and new keys; and the
+# 位置纪律 pin that `stock-prep-admin-action-notice` is still outside the whole v-if/v-else-if chain.
+# `StockPreparationWorkspace.spec.ts` / `StockPreparationProjectBoard.spec.ts` /
+# `stockPrepPermissionMatrix.spec.ts` all changed in the SAME wave and are already tokenized — no new
+# token needed for those. Substring-collision checked both directions: no existing `StockPreparation*`
+# token is a substring of `StockPreparationRail` (none extend into "Rail"), and it is not a substring
+# of any of them; the three other rail specs on disk (AttendanceAdminRail, IntegrationWorkbenchRail,
+# meta-sheet-view-rail) neither contain nor are contained by it, and `StockPreparationRail` matches
+# exactly one file. Verified green in isolation (`npx vitest run StockPreparationRail --reporter=dot`)
+# and in this batch before wiring.
+# Report item O-8 (approval UI locale consistency), 2026-09-08. Token `templateCenterI18n` added
+# for the NEW spec apps/web/tests/templateCenterI18n.spec.ts — TemplateCenterView.vue previously
+# never called useLocale() at all (every string was an unconditional Chinese literal); this pins
+# the en/zh mount assertions across the admin table, the requester gallery, the archive/unarchive
+# dialog + toasts, and the mechanical no-stray-CJK guard over the converted file. Inserted next to
+# the neighbouring `approvalTemplateCenterCategory`/`approvalTemplateGovernance` tokens (same
+# component, same directory) whose fixture Chinese it does not disturb — that spec was separately
+# updated to pin `useLocale().setLocale('zh-CN')` explicitly, since one of its assertions
+# (`visibilityScopeLabel()`'s "全员可见"/"角色 N" output) is now locale-conditional rather than an
+# unconditional literal (that pin also means the file no longer exercises an en path for
+# TemplateCenterView.vue — templateCenterI18n.spec.ts is the sole en coverage for that view).
+#
+# Same slice: token `approvalCenterDesktopEmptyTextI18n` for the NEW spec
+# apps/web/tests/approvalCenterDesktopEmptyTextI18n.spec.ts — ApprovalCenterView.vue's DESKTOP
+# `<ApprovalCenterTable>` `:empty-text` (5 tabs) was an unconditional Chinese-literal ternary even
+# though the MOBILE `<ApprovalMobileList>` path one prop over already read the same locale-aware
+# computed (renamed mobileEmptyText -> tabEmptyText, now feeding both). This is a FRESH COPY of
+# approval-center.spec.ts's own mock/stub harness (not an edit to that shared ~40-test file) with
+# one addition: the local `ElTable` stub renders `slots.empty` when `data` is empty, mirroring the
+# real el-table's `<template #empty>` — a slot the REQUIRED-lane `approvalCenterTable.spec.ts`'s
+# own stub does not render (it drives ApprovalCenterTable.vue with `empty-text` as an input prop
+# and never exercises the slot), so this new spec is the only required-lane coverage that actually
+# renders the empty state through a component tree. Inserted next to the neighbouring
+# `approvalCenterTable`/`approvalCenterUnreadBadge`/`approvalCenterSourceFilter`/
+# `approvalCenterRemindBadge` tokens (same view).
+#
+# SUBSTRING COLLISION, checked mechanically in BOTH directions against every token already in this
+# file (this file's own counting rule: join backslash continuations, drop comment lines, take every
+# non-flag positional of each `vitest run` command — 444 before `templateCenterI18n`, 445 after,
+# 446 after `approvalCenterDesktopEmptyTextI18n`, no duplicates): neither new token is contained by,
+# nor contains, any existing token (in particular `multitable-template-center-view` /
+# `multitable-template-detail-view` share only the unrelated hyphenated substring
+# "template-center-view"/"template-detail-view", not `templateCenterI18n`'s camelCase form; and
+# `approvalCenterTable`/`approvalCenterUnreadBadge`/`approvalCenterSourceFilter`/
+# `approvalCenterRemindBadge` share only the common `approvalCenter` prefix with
+# `approvalCenterDesktopEmptyTextI18n`, none extending into "DesktopEmptyTextI18n"). Each verified
+# green in isolation (`npx vitest run <token> --reporter=dot` → "Test Files 1 passed") and in this
+# batch before wiring.
+#
+# 项目查询 (P2-1, 设计稿 §6.3 第一行, 2026-09-08): ONE token added, `StockPreparationProjectQuery` —
+# the NEW spec (apps/web/tests/StockPreparationProjectQuery.spec.ts) for the query panel: the two
+# filter levels ANDed with the search box, the four URL state bits restored and mirrored back, the
+# 「只有 sel 变化才读看板、而且只读一次」 contract, the four empty states' mutually exclusive copy and
+# `data-empty-state` values, 「后端没答来源」 disabling the second level without emptying the list, the
+# chip counts being taken under the other two filters (a count is a promise about what pressing it
+# shows), the row-count cell's three branches worded exactly as 项目备料页 words them, and the
+# values-free reverse assertions on the search term (no storage, no request, no log).
+#
+# 收尾小修波 D4 共享常量 (hardening wave, 2026-09-08): ONE token added, `StockPreparationHomeQueryLabels`
+# — the NEW spec (apps/web/tests/StockPreparationHomeQueryLabels.spec.ts) for the shared status-chip
+# label map and pull-banner priority resolver that 今天要处理 and 项目查询 both now call
+# (`stockPrepHomeStatusLabel` / `resolveStockPrepPullBanner`, operatorHomeCards.ts / plainLanguage.ts)
+# instead of each carrying its own byte-identical copy. Covers: all five chip keys have a bilingual
+# pair and the frozen key order; the three-sentence pull-banner priority chain (unreadable > capped >
+# incomplete) plus the `undefined`-is-not-`false` guard; and a SOURCE-LEVEL guard (reads both `.vue`
+# files off disk) that neither view re-introduces a local `FILTER_LABELS`/`STATUS_LABELS` table or its
+# own `pullTargetReady === false` chain — a mount-based check would only prove today's wiring, not that
+# a later edit cannot quietly regrow the duplication this file exists to close.
+# Substring-collision checked both directions: no existing `StockPreparation*` token is a substring of
+# `StockPreparationHomeQueryLabels` (the two nearest, `StockPreparationOperatorHome` and
+# `StockPreparationProjectQuery`, diverge right after `StockPreparation` — "OperatorHome" and
+# "ProjectQuery" are neither prefixes nor suffixes of "HomeQueryLabels"), and it is not a substring of
+# any of them either. It matches exactly one file under apps/web/tests.
+#
+# WHY IT IS HERE AND NOT ONLY IN THE GUARD LANE. `web-tests` is the one required front-end context
+# with no path filter, so a stock-prep spec that is only tokenized in
+# scripts/ops/integration-guard-run-web-specs.sh runs at a WEAKER strength than every sibling
+# stock-prep spec. The enrolment pin
+# (packages/core-backend/tests/unit/stock-prep-web-ci-coverage-enumeration.test.ts) enforces exactly
+# that, sweeping apps/web/tests/StockPreparation*.spec.ts live on every `test (18.x)`/`test (20.x)`
+# run — this file's absence from the list below turned that guard RED, which is how it was caught.
+#
+# SUBSTRING COLLISIONS, checked in BOTH directions as this file requires: no token in the exec line
+# below is a substring of `StockPreparationProjectQuery`, and it is not a substring of any of them.
+# The four nearest neighbours are `StockPreparationProjectBoard`,
+# `StockPreparationProjectSync.spec.ts`, `StockPreparationProjectSyncPanel.spec.ts` and
+# `StockPreparationProjectWorkspaceView`, all of which diverge from it right after
+# `StockPreparationProject`. It matches exactly one file under apps/web/tests.
+# TemplateDetailView.vue i18n retrofit (report item O-8 continuation, PR #5545, 2026-09-08): ONE
+# token added, `templateDetailI18n` — the NEW spec (apps/web/tests/templateDetailI18n.spec.ts) for
+# TemplateDetailView.vue, which previously never called useLocale() at all (every string was an
+# unconditional Chinese literal, and the StatusTag carried `force-locale="zh"`) — the DETAIL-view
+# counterpart to TemplateCenterView.vue's own O-8 retrofit (`templateCenterI18n`, already in this
+# file). Covers: en/zh mount sweeps over the full page chrome (header/category/visibility/SLA
+# editors, form-fields + field-visibility-rules + approval-graph + version-history sections, meta
+# row), the status badge following the shell locale with `force-locale` removed, a POST-MOUNT
+# locale-flip assertion (mount zh -> flip the shell locale -> assert re-render, then back — the
+# property a `const t = isZh.value ? ZH : EN` evaluated once at setup cannot satisfy), category/
+# SLA/visibility save-toast and validation-error locale coverage, archive/unarchive dialog title +
+# buttons + toast, the restore-version confirm dialog/toast, the view-changes diff panel's
+# dynamic chrome (mode options, diff-summary labels), a label-table completeness assertion over
+# BOTH the flat `templateDetailLabels.ts` ZH/EN pair and its eight per-value MAP_PAIRS (field
+# type/node type/approval mode/empty-assignee policy/node-timeout effect/version status/version-
+# change kind/version-change entity), and a CJK guard over TemplateDetailView.vue itself that
+# extracts and vets every `isZh.value ? <zh> : <en>` inline ternary this slice added (12 today —
+# a dynamic count/sentence a table key would only awkwardly hold) plus two NAMED, pre-existing,
+# out-of-scope Chinese literals it does not touch (the `NON_ALL_SCOPE_UNIT_LABEL` constant pinned
+# verbatim by approval-member-identity-coverage-enumeration.spec.ts, and the two version-diff-
+# overlay node-label `'流程节点'` fallbacks shared with that unconverted module family) — anything
+# else CJK in the file still reds this guard.
+#
+# Two existing files touched in the SAME slice, already tokenized elsewhere in this file (no new
+# token needed): `approvalTemplateVersionHistory.spec.ts` gained an explicit
+# `useLocale().setLocale('zh-CN')` pin in its `beforeEach` (its own assertions are all Chinese-
+# literal and, before this slice, always ran under the view's only — hardcoded — output; the pin
+# PRESERVES that original intent now that the view is locale-aware, mirroring the same fix
+# templateCenterI18n.spec.ts's own header documents for approvalTemplateCenterCategory.spec.ts).
+# `approval-member-identity-coverage-enumeration.spec.ts` had ONE ALLOWLIST entry's pinned text
+# updated (`模板 Key: {{ template.key }}` -> `{{ t.metaKeyLabel }} {{ template.key }}`, same
+# disposition/group — the `.key` mustache itself is unchanged, only its label text became
+# bilingual) after that census's own mechanical scan caught the literal going stale.
+#
+# SUBSTRING COLLISION, checked mechanically in both directions against every token already on the
+# final exec line at the time (369 before, 370 after on that exec line only; join backslash
+# continuations, drop comment lines, take every non-flag positional of the exec line's `vitest
+# run` command — the union across all `vitest run` commands in this file was larger still): no
+# existing token is a substring of `templateDetailI18n`, and it is not a substring of
+# any of them — in particular `templateCenterI18n` shares only the `template` prefix and the
+# `I18n` suffix, diverging at `Center`/`Detail`; the hyphenated `multitable-template-detail-view`
+# shares only "template-detail-view", not `templateDetailI18n`'s camelCase form. Matches exactly
+# one file under apps/web/tests. Verified green in isolation (`npx vitest run templateDetailI18n
+# --reporter=dot` -> "Test Files 1 passed", 13/13 then; 14/14 after a later coverage-gap fix added
+# one more test to the same file) and in this batch before wiring.
+# P3-4 (2026-09-08): the whole-execution re-run button on AutomationExecutionsView added
+# `apps/web/tests/automation-rerun-execution.spec.ts` (view-level: admin/state gating, confirm-
+# dialog consequence enumeration, cancel/confirm/failure paths, i18n, and a pin on the untouched
+# load-failure Retry) plus two client wire-contract tests in the ALREADY-tokenized
+# `multitable-client.spec.ts` (no new token needed there). Token `automation-rerun-execution`
+# checked both directions against all 359 tokens then in this list: zero collisions, and it
+# matches exactly one file on disk.
+exec npx vitest run StockPreparationProjectBoard StockPreparationProjectSync.spec.ts StockPreparationProjectSyncPanel.spec.ts StockPreparationLargeBomPull.spec.ts StockPreparationLargeBomPullPanel.spec.ts StockPreparationOperatorProjectDirectory StockPreparationOperatorHome StockPreparationSourceBinding StockPreparationMissingComponents amountAutoSum approval-amount-in-words approval-assignee-source approval-attachment-download approval-attachment-refs approval-attachment-upload approval-attachment-upload-process approval-process-attachment-dialog approvalNewView approval-center approval-center-master-detail approval-center-detail-pane-controller approval-common-template-presets approval-condition-summary approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-e2e-lifecycle approval-e2e-permissions approval-member-identity-coverage-enumeration approval-member-action-dialog-grammar approval-field-visibility approval-form-draft approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-graph-summary approval-graph-topology-edit approval-handler-node-authoring approval-handler-node-config approval-number-field-props approval-prefill-from-snapshot approval-route-preview-controller approval-route-preview-summary approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-cc-edit approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-template-authoring-condition-edit approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-linear-step-spine approval-template-authoring-parallel-edit approval-template-route-preview-api approval-upcoming-nodes approval-urge-button-state approvalCardDecisionView approvalCenterRemindBadge approvalCenterSourceFilter approvalCenterTable approvalCenterUnreadBadge approvalDelegationStatus approvalDelegationView approvalDetailPolish approvalMetricsTopnReport approvalMetricsView approvalMobileI18n approvalMobileResponsive approvalTemplateAuthoring approvalTemplateCenterCategory approvalTemplateGovernance approvalTemplateVersionHistory approval-template-version-diff asyncStateBlock automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView comment-affordance-color-consistency DirectoryDeprovisionEvidencePanel.spec.ts directoryManagementView lineDerivation meta-automation-labels meta-filter-group meta-grid-table meta-person-delivery-viewer-migration meta-record-drawer-history-diff meta-record-drawer-i18n meta-record-drawer-restore meta-toolbar-filter-builder migration mount-behind-flow multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-client multitable-comment-affordance multitable-comment-inbox-realtime multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-crossbase-workbench-wiring multitable-field-manager multitable-field-visibility multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-phase11 multitable-record-permission-manager multitable-record-restore-client multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-view-manager multitable-ui multitable-workbench-1672-1673 multitable-workbench-drawer-button-wiring multitable-workbench-history-field-scope-wiring multitable-workbench-import-flow multitable-workbench-manager-flow multitable-workbench-permission-wiring multitable-workbench-restore-wiring multitable-workbench-view multitable-yjs-cell-editor multitable-yjs-scalar-cell myDelegationView newTodoPill pageShell parallelBranchRunsView requesterPreviewFields routePreviewErrors statusTag templateArchiveConfirm templateGalleryFilter ui-foundation-style-guard uiFoundationTexture useAutoSumTotal workflowHubView automation-log-redact automation-log-support-packet automation-rule-concurrent-merge meta-ai-bulk-labels meta-api-error-labels meta-api-token-labels meta-automation-delivery-viewers-i18n meta-base-picker meta-bulk-edit-labels meta-cell-editor-i18n meta-comment-composer-i18n meta-comment-labels meta-comments-drawer-i18n meta-form-share-labels meta-form-view-i18n meta-link-picker-i18n meta-link-picker-labels meta-notification-bell meta-permission-labels meta-record-labels meta-toolbar-group-picker meta-view-render-labels meta-sheet-view-rail multitable-agg-footer-grid multitable-ai-bulk-fill-composable multitable-ai-bulk-fill-dialog multitable-ai-bulk-fill-job-composable multitable-ai-bulk-fill-job-dialog multitable-ai-shortcut-cell-editor multitable-ai-shortcut-client multitable-ai-shortcut-composable multitable-ai-shortcut-drawer multitable-ai-shortcut-field-manager multitable-alt-view-comment-chip-i18n multitable-api-token-manager multitable-attachment-editor multitable-attachment-list multitable-barcode-field multitable-base-local-state multitable-build-chart-option multitable-bulk-edit-dialog multitable-button-field-config multitable-button-run-client multitable-calendar-drag-reschedule multitable-calendar-view multitable-capabilities multitable-cell-button multitable-cell-visual-display multitable-cf-scale multitable-chart-load-error multitable-chart-renderer multitable-comment-composer multitable-comment-inbox.spec.ts multitable-comment-presence multitable-comment-reactions multitable-comment-realtime multitable-comments multitable-comments-drawer multitable-conflict-ux multitable-core-i18n multitable-crossbase-link-normalizer multitable-crossbase-link-picker multitable-dashboard-view multitable-datetime-field multitable-duration-field multitable-embed-host multitable-embed-route multitable-export-dialog multitable-field-config-i18n multitable-field-display-i18n multitable-field-validation-panel multitable-form-layout multitable-form-share-manager multitable-form-view multitable-formula-dryrun-panel multitable-formula-suggest-field-manager multitable-frozen-columns-grid multitable-frozen-columns-util multitable-gallery-view multitable-gantt-view multitable-hierarchy-view multitable-home-view multitable-import multitable-import-modal multitable-link-picker multitable-linked-record-chip multitable-linked-record-popover multitable-location-field multitable-longtext-cell multitable-manager-panels-i18n multitable-mention-inbox multitable-mention-popover multitable-mention-realtime multitable-multiselect-field multitable-nongrid-summary-rendering multitable-number-format multitable-people-import multitable-person-field multitable-personal-view-toggle multitable-phase10 multitable-phase12 multitable-phase13 multitable-phase14 multitable-phase15 multitable-phase3 multitable-phase4 multitable-phase5 multitable-phase6 multitable-phase7 multitable-phase8 multitable-phase9 multitable-qrcode-field multitable-record-drawer multitable-record-drawer-button multitable-record-drawer-duplicate multitable-record-drawer-t5-migration.spec.ts multitable-record-fields-panel multitable-record-history-panel multitable-record-history-client-restored-from multitable-record-inspector multitable-comments-panel multitable-record-attachments-panel multitable-record-permissions-composable multitable-richtext-editor-mention multitable-richtext-longtext multitable-richtext-mention multitable-richtext-wiring multitable-scoped-permissions multitable-sheet-presence multitable-sheet-realtime multitable-system-fields multitable-template-center-view multitable-template-detail-view multitable-timeline-view multitable-view-display-prefs-util multitable-workbench-i18n multitable-workbench.spec.ts multitable-yjs-cell-binding personal-view-client public-multitable-form view-manager-multitable-contract xlsx-mapping StockPreparationDashboardView StockPreparationStageOverview StockPreparationStageStepper StockPreparationProjectWorkspaceView StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView StockPreparationPrepLineView StockPreparationExceptionQueueView StockPreparationWorkspace StockPreparationInstallRun StockPreparationInstallView StockPreparationSourcePreflight StockPreparationPosturePlainLanguage stockPrepPermissionMatrix StockPreparationHandoff stockPreparationConfirmationQueue StockPreparationUnconfirmableHold IntegrationStockPrepPanel conditional-formatting-dialog-i18n dingtalk-internal-view-link-warnings dingtalk-recipient-field-warnings dingtalk-public-form-link-warnings meta-grid-table-i18n.spec.ts multitable-comment-inbox-view.spec.ts multitable-b4-field-always-readonly data-sources-ui data-sources-api-preview approval-template-authoring-policy-carrier useApprovalBatchActions approval-template-authoring-errors approval-template-authoring-field-permissions approvalApiErrorSurfacing approvalCountsRealtime approvalDelegationForm approvalDelegationRoute approvalQuickPhrases approvalRecentTemplates approvalRelativeWait approvalResubmitButton approvalTemplateRouteGuard approvalUserPicker featureFlagsApprovalMobile searchApprovalDirectoryUsers useApprovalDirectory shared-comments-stub-client attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation attendanceOverviewRequestReveal useAttendanceAdminConfig approval-comments-client approval-comments-panel multitable-record-inspector-resize multitable-grid-cell-edit-commit.spec.ts multitable-grid-cell-edit-commit-round2.spec.ts usePlmExportActions StockPreparationRail StockPreparationGettingStarted StockPreparationOnboardingReadiness StockPreparationOpsPanel StockPreparationCodeHelp approvalCenterDesktopEmptyTextI18n templateCenterI18n StockPreparationProjectQuery StockPreparationHomeQueryLabels templateDetailI18n automation-rerun-execution multitable-record-inspector-header multitable-grid-expand-record --reporter=dot

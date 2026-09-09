@@ -399,6 +399,44 @@ export interface paths {
          *     both page/pageSize and the older limit/offset pagination fallback.
          *     Use `tab` for the current inbox lens, plus optional sourceSystem,
          *     workflowKey, businessKey, assignee, status, and search filters.
+         *
+         *     The visible set is determined server-side on every request. No query
+         *     parameter can make a response exceed it; adding a parameter can only
+         *     narrow the result, never reach a row the scope does not already admit.
+         *
+         *     The two halves of that set are NOT the same, and the difference is
+         *     stated rather than averaged over. PLATFORM rows are limited to the
+         *     caller's own participation -- instances they requested, hold a seat on
+         *     (user-, role- or queue-typed), recorded an action on, or were CC'd on.
+         *     NON-PLATFORM rows (phase-1 external mirrors, `sourceSystem` other than
+         *     `platform`) carry no participation condition at all: they are visible to
+         *     any caller holding `approvals:read` whose actor id the request resolves.
+         *     A request whose actor id does not resolve receives nothing, mirrors
+         *     included. Roles are read from the database, not from token claims; a
+         *     queue-typed seat is matched against the request's permission set.
+         *
+         *     The scope also carries a database-backed approval-administrator arm.
+         *     That arm is not observable through this endpoint: every `tab` is itself
+         *     limited to the caller's own participation and is ANDed with the scope,
+         *     so an administrator's response is the same as any other caller's. This
+         *     endpoint is not an administrative listing surface.
+         *
+         *     COMPATIBILITY: a request that omits `tab` is served the default
+         *     (`pending`) tab, which carries its own `status = 'pending'` condition --
+         *     UNLESS the request supplies a `status` filter of its own. In that case
+         *     no tab condition is applied at all, and the response is the
+         *     server-determined scope intersected with that status filter and nothing
+         *     else. So a tab-less `status=approved` returns the caller's own approved
+         *     rows, from both source systems, rather than an empty page. An EXPLICIT
+         *     tab is never overridden by this rule: `tab=pending&status=approved`
+         *     keeps both conditions and therefore returns nothing, because the caller
+         *     named both halves. An empty `status=` is absent, not a filter, and so
+         *     leaves the default tab in place. Measured change,
+         *     stated as a narrowing rather than as a preservation: a tab-less request
+         *     previously returned the whole `approval_instances` table to any caller;
+         *     it now returns that caller's own scoped feed, mixed across platform and
+         *     non-platform sources. What is preserved is the source-system axis of
+         *     that feed, not its size.
          */
         get: operations["listApprovals"];
         put?: never;
@@ -477,6 +515,25 @@ export interface paths {
          * Get pending approvals for current actor
          * @deprecated
          * @description Deprecated. Use GET /api/approvals with `tab=pending` instead.
+         *
+         *     The visible set is determined server-side, by the same scope
+         *     `GET /api/approvals` applies and in both this endpoint's queries -- the
+         *     page and the `total` alike. Because this endpoint is hard-filtered to
+         *     pending platform-owned rows, that scope reduces to the caller's own
+         *     participation: instances they requested, hold a seat on (user-, role- or
+         *     queue-typed), recorded an action on, or were CC'd on, plus the
+         *     database-backed approval-administrator arm. Roles are read from the
+         *     database, not from token claims. Measured change: this endpoint
+         *     previously returned every pending platform instance to any caller
+         *     holding `approvals:read`.
+         *
+         *     The administrator arm IS observable here, unlike on
+         *     GET /api/approvals where every `tab` narrows to the caller's own
+         *     participation: this endpoint applies no tab, so an identity the database
+         *     records as an approval administrator receives the pending platform rows
+         *     it has no participation in. That reach is bounded to the
+         *     administrator's own organisations only while the organisation pin is
+         *     enabled; the pin ships disabled.
          */
         get: operations["listPendingApprovalsLegacy"];
         put?: never;
@@ -8398,7 +8455,7 @@ export interface paths {
          * Report e-learning master and capability flags
          * @description Plugin route. JWT session is required by the global `/api` gate.
          *     Returns `{ enabled, capabilities }` with keys content, assignment,
-         *     assessment, incentive, analytics, media. V0.1 readiness is enabled
+         *     assessment, incentive, analytics, media, enrollment. V0.1 readiness is enabled
          *     plus content/assignment/assessment/media only; incentive and analytics
          *     stay parked. Secondary master-off after registration is a values-free
          *     404 FEATURE_DISABLED (no flag names, no capabilities object).
@@ -9444,6 +9501,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/me/courses/{courseId}/enrollments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register the current learner for one visible self-study course
+         * @description Requires master, content, and enrollment flags to each equal exact
+         *     `true`, plus learner read RBAC. Organization and learner are derived
+         *     from the authenticated session. Registration appends immutable audit
+         *     evidence only: it never creates an assignment, grants access, assigns
+         *     a deadline, awards credit, or records completion. Current active
+         *     visibility is rechecked by the existing course-access authority.
+         */
+        post: operations["enrollMyElearningCourse"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/watch/items/{itemId}/start": {
         parameters: {
             query?: never;
@@ -9480,6 +9562,33 @@ export interface paths {
          *     playing (boolean). Unknown keys are invalid_input. JSON limit 16 KiB.
          */
         post: operations["recordElearningWatchHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/watch/sessions/{sessionId}/challenges/{challengeId}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm an active or timed-out watch challenge
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires the master, content, media,
+         *     and watch-challenge flags to equal the exact literal `true`. The server derives organization and actor.
+         *     The server issues an immutable PNG prompt with six randomly bound hit regions. The response exposes only
+         *     raster pixels, region geometry, and opaque option identifiers; target symbols, option labels, and the
+         *     expected selection are never returned as structured fields. The client submits exactly two distinct opaque
+         *     option identifiers. An on-time correct acknowledgement commits only the provisional eligible watch interval; a late acknowledgement
+         *     discards that interval and resumes the existing watch session. Same requestId and logical payload replay
+         *     the stored result; a different payload with the same requestId returns a values-free conflict.
+         */
+        post: operations["acknowledgeElearningWatchChallenge"];
         delete?: never;
         options?: never;
         head?: never;
@@ -18196,6 +18305,21 @@ export interface components {
             fieldAccess?: {
                 [key: string]: "editable" | "readonly" | "hidden" | "required";
             } | null;
+            /**
+             * @description Would the decision endpoint's own authorization predicate let THIS viewer decide the
+             *     node the instance is currently stopped on? Resolved server-side per viewer by the
+             *     dispatch door's own seat predicate (user seats, role seats, delegated seats — a
+             *     delegatee is the assignee on a real assignment row — and, inside a parallel region,
+             *     the pending branch frontier). `false` when the instance is not pending or the viewer
+             *     holds no matching active seat at a decidable node key; `true` for a pending instance
+             *     whose decisions do not go through the seat-gated door (a legacy platform row with no
+             *     published definition, a `plm:` mirror, an after-sales row), because those dispatches do
+             *     not gate on assignments and `true` is what those surfaces already do today. Present on the detail read and on the action response. ABSENT means
+             *     the server does not compute it — clients must fall back to their prior behaviour, not
+             *     read absence as `false`. Presentation only: the 403 APPROVAL_ASSIGNMENT_REQUIRED
+             *     remains the authority.
+             */
+            canDecideCurrentNode?: boolean;
             currentNodeKey?: string | null;
             /**
              * @description Parallel gateway (并行分支) runtime frontier. Present only when
@@ -18567,6 +18691,8 @@ export interface components {
             /** @description Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness. */
             analytics: boolean;
             media: boolean;
+            /** @description Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration. */
+            enrollment: boolean;
         };
         /**
          * @description Plugin GET /api/elearning/capabilities payload. V0.1 readiness is enabled
@@ -19415,6 +19541,24 @@ export interface components {
             /** Format: date-time */
             assignedAt: string;
         };
+        ElearningLearnerEnrollment: {
+            /** @enum {string} */
+            status: "enrolled";
+            /** Format: date-time */
+            enrolledAt: string;
+        };
+        ElearningCourseEnrollmentRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningCourseEnrollmentResult: {
+            enrollmentId: components["schemas"]["ElearningUuid"];
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "enrolled";
+            /** Format: date-time */
+            enrolledAt: string;
+        };
         ElearningLearnerAccess: {
             /** @enum {string} */
             kind: "assignment" | "visibility";
@@ -19458,6 +19602,7 @@ export interface components {
             title: string;
             access: components["schemas"]["ElearningLearnerAccess"];
             assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
+            enrollment: components["schemas"]["ElearningLearnerEnrollment"] | null;
             video: components["schemas"]["ElearningLearnerVideo"];
             exam: components["schemas"]["ElearningLearnerExam"];
             completed: boolean;
@@ -19495,6 +19640,7 @@ export interface components {
             title: string;
             access: components["schemas"]["ElearningLearnerAccess"];
             assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
+            enrollment: components["schemas"]["ElearningLearnerEnrollment"] | null;
             items: components["schemas"]["ElearningLearnerContentItem"][];
             completed: boolean;
         };
@@ -19513,6 +19659,35 @@ export interface components {
             durationMs: number;
             creditedMs: number;
             duplicate: boolean;
+            challenge?: components["schemas"]["ElearningWatchChallenge"] | null;
+        };
+        ElearningWatchChallenge: {
+            challengeId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            deadlineAt: string;
+            ordinal: number;
+            /** @enum {string} */
+            status: "challenged" | "paused";
+            /** @enum {string} */
+            promptVersion: "raster-position-v2";
+            /** Format: byte */
+            imagePngBase64: string;
+            /** @enum {integer} */
+            imageWidth: 360;
+            /** @enum {integer} */
+            imageHeight: 260;
+            options: components["schemas"]["ElearningWatchChallengeOption"][];
+        };
+        ElearningWatchChallengeOption: {
+            optionId: components["schemas"]["ElearningUuid"];
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+        };
+        ElearningWatchChallengeAckRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            selections: components["schemas"]["ElearningUuid"][];
         };
         ElearningHeartbeatRequest: {
             sequence: number;
@@ -19831,7 +20006,15 @@ export interface operations {
                 workflowKey?: string;
                 businessKey?: string;
                 assignee?: string;
-                tab?: string;
+                /**
+                 * @description Inbox lens applied within the server-determined visible set. Omitted
+                 *     or empty selects the default, `pending`. Any other value outside the
+                 *     listed set is rejected with 400 APPROVAL_TAB_INVALID, and so is any
+                 *     non-single-valued form -- a repeated `tab=a&tab=b` or a bracketed
+                 *     `tab[]=a` -- which is refused rather than silently served the
+                 *     default.
+                 */
+                tab?: "pending" | "mine" | "cc" | "completed" | "processed";
                 search?: string;
                 page?: number;
                 pageSize?: number;
@@ -19853,6 +20036,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApprovalListResponse"];
                 };
             };
+            400: components["responses"]["ValidationError"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             503: components["responses"]["ServiceUnavailable"];
@@ -22677,6 +22861,44 @@ export interface operations {
             503: components["responses"]["ElearningError"];
         };
     };
+    enrollMyElearningCourse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                courseId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCourseEnrollmentRequest"];
+            };
+        };
+        responses: {
+            /** @description New registration, exact request replay, or existing course registration. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCourseEnrollmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, not_enrollable, or insufficient read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description Course not found or enrollment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description already_assigned or requestId conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
     startElearningWatch: {
         parameters: {
             query?: never;
@@ -22750,6 +22972,47 @@ export interface operations {
             /** @description not_found or watch flags off */
             404: components["responses"]["ElearningError"];
             /** @description course_withdrawn, conflict, sequence_gap, or session_inactive */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    acknowledgeElearningWatchChallenge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: components["schemas"]["ElearningUuid"];
+                challengeId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningWatchChallengeAckRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated server-derived watch state; challenge is null after acknowledgement. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningWatchState"];
+                };
+            };
+            /** @description invalid_input or unsupported policy */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch-challenge flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description challenge_incorrect, challenge_mismatch, challenge_stale, conflict, course_withdrawn, or session_inactive */
             409: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];

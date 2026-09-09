@@ -3,6 +3,8 @@
  */
 
 import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './authRedirect'
+import { explicitSessionOrg } from '../composables/authPrincipal'
+import { clearExplicitSessionOrg } from './explicitSessionOrg'
 
 // Vite environment type declaration
 declare global {
@@ -148,6 +150,7 @@ export function clearStoredAuthState(): void {
   for (const key of USER_STATE_KEYS) {
     localStorage.removeItem(key)
   }
+  clearExplicitSessionOrg()
 }
 
 /**
@@ -160,6 +163,7 @@ export function authHeaders(token?: string): Record<string, string> {
     headers.Authorization = `Bearer ${resolvedToken}`
   }
   const tenantHint =
+    explicitSessionOrg(resolvedToken) ||
     getStoredTenantHint() ||
     getLocationTenantHint() ||
     extractTenantHintFromPayload(decodeJwtPayload(resolvedToken))
