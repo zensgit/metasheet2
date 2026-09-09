@@ -17,7 +17,7 @@
         </div>
         <div class="platform-app-shell__hero-actions">
           <button
-            v-if="primaryAction?.route"
+            v-if="primaryAction?.route && !(app.id === 'elearning' && primaryAction.mutation)"
             class="platform-app-shell__primary"
             type="button"
             :disabled="actionPending"
@@ -30,6 +30,8 @@
           </RouterLink>
         </div>
       </header>
+
+      <ElearningAppInstallationSection v-if="app.id === 'elearning'" @changed="load" />
 
       <section class="platform-app-shell__grid">
         <article class="platform-app-shell__panel">
@@ -181,6 +183,7 @@ import {
   usePlatformApps,
 } from '../composables/usePlatformApps'
 import { apiGet, apiPost } from '../utils/api'
+import ElearningAppInstallationSection from './ElearningAppInstallationSection.vue'
 
 interface RuntimeInstallResultSnapshot {
   status: 'installed' | 'partial' | 'failed'
@@ -318,6 +321,8 @@ async function load(): Promise<void> {
 
 async function runPrimaryAction(): Promise<void> {
   if (!primaryAction.value) return
+  // Elearning writes belong to the capability- and session-bound section.
+  if (appId.value === 'elearning' && primaryAction.value.mutation) return
 
   if (primaryAction.value.mutation) {
     actionPending.value = true
@@ -333,7 +338,9 @@ async function runPrimaryAction(): Promise<void> {
         ? 'App reinstall completed and runtime state has been refreshed.'
         : 'App install completed and runtime state has been refreshed.'
     } catch (err: any) {
-      actionError.value = err?.message || 'Failed to execute app runtime action'
+      actionError.value = appId.value === 'elearning'
+        ? 'elearning_installation_request_failed'
+        : err?.message || 'Failed to execute app runtime action'
     } finally {
       actionPending.value = false
     }

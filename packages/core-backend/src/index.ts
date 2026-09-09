@@ -319,6 +319,8 @@ import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
+import { createElearningAppInstallationRouter, requireElearningAppInstallation } from './routes/elearning-app-installation'
+import { authenticate as authenticateElearningApp } from './middleware/auth'
 import {
   isElearningAssignmentSurfaceEnabled,
   isElearningAnalyticsSurfaceEnabled,
@@ -1599,6 +1601,12 @@ export class MetaSheetServer {
       : null
     if (elearningMediaPlaybackRouter) {
       this.app.use(elearningMediaPlaybackRouter)
+    }
+
+    this.app.use(createElearningAppInstallationRouter({ getDb: () => poolManager.get() }))
+    if (process.env.ELEARNING_ENABLED === 'true') {
+      this.app.use('/api/elearning', authenticateElearningApp,
+        requireElearningAppInstallation({ getDb: () => poolManager.get() }))
     }
 
     // E-learning V0.1 named-pilot HTTP surface. Flag OFF is a no-op (factory
