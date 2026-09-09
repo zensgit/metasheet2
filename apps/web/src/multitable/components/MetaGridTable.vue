@@ -186,7 +186,6 @@
               </td>
               <td class="meta-grid__row-num" :style="{ left: `${rowNumLeft}px` }">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? l('grid.collapseRow') : l('grid.expandRow')" @click.stop="toggleRowExpand(row.id)"><SheetCaretRight /></button>
-                <span class="meta-grid__row-num-cluster">
                 <span class="meta-grid__row-num-index">{{ startIndex + ri + 1 }}</span>
                 <span class="meta-grid__row-num-lock-slot">
                 <span
@@ -216,7 +215,6 @@
                     <path d="M5.5 7.25V5.4a2.5 2.5 0 0 1 5 0v1.85" />
                   </svg>
                 </button>
-                </span>
                 </span>
                 <button
                   v-if="resolveRowActions(row.id).canComment"
@@ -1423,23 +1421,40 @@ thead .meta-grid__check-col {
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: var(--ms-sheet-font-body, 13px); }
 .meta-grid__row-num {
   width: 56px; min-width: 56px; box-sizing: border-box;
-  display: flex; align-items: center; justify-content: center; gap: 2px;
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) 12px;
+  align-items: center;
+  justify-items: center;
+  column-gap: 2px;
   color: var(--ms-text-3, #9ca3af); font-size: var(--ms-sheet-font-header, 12px);
   background: var(--ms-bg-card, #fff);
   border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb);
   border-right: 1px solid var(--ms-sheet-hairline, #ebebeb);
-  padding: 8px 4px; position: sticky; left: 0; z-index: 1;
+  padding: 8px 2px; position: sticky; left: 0; z-index: 1;
 }
-.meta-grid__row-num-cluster { display: inline-flex; align-items: center; justify-content: center; gap: 2px; min-width: 0; }
-.meta-grid__row-num-index { display: inline-flex; align-items: center; justify-content: center; min-width: 1.1em; }
+.meta-grid__row-num-index {
+  grid-column: 2;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
 .meta-grid__row-num-lock-slot {
+  grid-column: 3;
   position: relative;
-  flex: 0 0 12px;
   width: 12px;
   height: 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+.meta-grid__row-num > .meta-grid__comment-action {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 0;
 }
 .meta-grid__lock-indicator,
 .meta-grid__lock-action {
@@ -1533,7 +1548,8 @@ thead .meta-grid__check-col {
 @keyframes meta-skeleton-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .meta-grid__check-col { width: 36px; min-width: 36px; text-align: center; padding: 4px; border-bottom: 1px solid var(--ms-sheet-hairline, #ebebeb); border-right: 1px solid var(--ms-sheet-hairline, #ebebeb); background: var(--ms-bg-card, #fff); position: sticky; left: 0; z-index: 1; }
 .meta-grid__expand-btn {
-  flex: 0 0 12px; width: 12px; height: 14px; box-sizing: border-box;
+  grid-column: 1;
+  width: 12px; height: 14px; box-sizing: border-box;
   border: none; background: transparent; cursor: pointer;
   color: var(--ms-sheet-icon-color, #6b7280);
   padding: 0; margin: 0; transition: transform 0.15s;

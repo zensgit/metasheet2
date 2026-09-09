@@ -73,6 +73,23 @@ describe('MetaGridTable record locking (LR-T9)', () => {
     expect(root.querySelector('.meta-grid__row-num-lock-slot')).toBeTruthy()
   })
 
+  it('keeps expand, index, and lock as sibling gutter slots on a locked row', () => {
+    const rows: MetaRecord[] = [{ id: 'r1', version: 1, data: { title: 'Locked' }, locked: true, lockedBy: 'u1', canUnlock: false }]
+    const root = mountGrid(rows)
+    const gutter = root.querySelector('tbody .meta-grid__row-num') as HTMLElement
+    const expand = gutter.querySelector('.meta-grid__expand-btn')
+    const index = gutter.querySelector('.meta-grid__row-num-index')
+    const lock = gutter.querySelector('.meta-grid__row-num-lock-slot')
+    const indicator = gutter.querySelector('[data-test="row-lock-indicator"]')
+    expect(expand?.parentElement).toBe(gutter)
+    expect(index?.parentElement).toBe(gutter)
+    expect(lock?.parentElement).toBe(gutter)
+    expect(index?.textContent?.trim()).toBe('1')
+    expect(lock?.contains(indicator)).toBe(true)
+    expect(index?.contains(indicator)).toBe(false)
+    expect(expand?.contains(indicator)).toBe(false)
+  })
+
   it('does NOT render a lock indicator on an unlocked row', () => {
     const rows: MetaRecord[] = [{ id: 'r1', version: 1, data: { title: 'Open' } }]
     const root = mountGrid(rows)
