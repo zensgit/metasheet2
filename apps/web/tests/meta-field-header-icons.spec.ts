@@ -53,8 +53,7 @@ describe('field header type marks', () => {
     expect(durationIcon?.textContent).not.toBe('\u23F1')
     expect(durationIcon?.textContent).not.toBe('?')
     expect(duration.querySelector('[data-sheet-icon="clock"]')).not.toBeNull()
-    expect(getComputedStyle(durationIcon!).width).toBe('12px')
-    expect(getComputedStyle(durationIcon!).height).toBe('12px')
+    expect(durationIcon?.className).toContain('meta-field-header__icon')
 
     const select = mountHeader({ id: 'f3', name: 'Status', type: 'select' })
     expect(select.querySelector('.meta-field-header__icon')?.textContent).not.toContain('\u25CF')

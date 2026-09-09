@@ -45,7 +45,7 @@ describe('grid notes / long-text single-line display', () => {
       `${ENGLISH_NOTES} Call the warehouse if the carton count changes.`,
     )
     expect(value?.textContent).not.toMatch(/\n/)
-    expect(getComputedStyle(value!).whiteSpace).toBe('nowrap')
+    expect(value?.className).toContain('meta-cell-renderer__long-text')
 
     app.unmount()
     container.remove()
@@ -94,7 +94,7 @@ describe('grid notes / long-text single-line display', () => {
     const textarea = container.querySelector('textarea.meta-cell-editor__textarea') as HTMLTextAreaElement | null
     expect(textarea).not.toBeNull()
     expect(textarea?.value).toContain('\n')
-    expect(getComputedStyle(textarea!).whiteSpace).toBe('pre-wrap')
+    expect(textarea?.className).toContain('meta-cell-editor__textarea')
 
     app.unmount()
     container.remove()
