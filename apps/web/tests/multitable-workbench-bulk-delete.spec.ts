@@ -101,6 +101,21 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { recordsDeleted } from '../src/multitable/utils/workbench-labels'
+import { useLocale } from '../src/composables/useLocale'
+
+// `selected-record-id` (kebab) is the raw template key: the capturing stub declares no props, so the
+// binding lands in `attrs` exactly as written at MultitableWorkbench.vue:292.
+function selectedRecordIdProp(): unknown {
+  return (capturedGridAttrs as Record<string, unknown>)['selected-record-id']
+}
+
+// The green toast copy is `recordsDeleted(n, isZh)`. Asserting the exact formatted string (rather
+// than 'does not contain 3') pins N itself: swapping deletedIds.length for failedIds.length, or for
+// a hard-coded 0/recordIds.length, changes this string and turns the test red.
+function expectDeletedToast(n: number): void {
+  expect(showSuccessSpy.mock.calls[0]?.[0]).toBe(recordsDeleted(n, useLocale().isZh.value))
+}
 
 async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) { await Promise.resolve(); await nextTick() }
@@ -210,7 +225,8 @@ describe('MultitableWorkbench bulk-delete: report actual per-record results, not
     await flushUi()
 
     expect(showSuccessSpy).toHaveBeenCalledTimes(1)
-    // exactly 2 (r1, r3) — not 3 (the pre-fix blanket count)
+    // exactly 2 (r1, r3) — not 3 (the pre-fix blanket count) and not 1 (the failed count)
+    expectDeletedToast(2)
     expect(showSuccessSpy.mock.calls[0][0]).not.toMatch(/3/)
     expect(showErrorSpy).toHaveBeenCalledTimes(1)
     expect(gridMock.reloadCurrentPage).toHaveBeenCalledTimes(1)
@@ -224,8 +240,41 @@ describe('MultitableWorkbench bulk-delete: report actual per-record results, not
     await flushUi()
 
     expect(showSuccessSpy).toHaveBeenCalledTimes(1)
+    expectDeletedToast(2)
     expect(showErrorSpy).not.toHaveBeenCalled()
     expect(gridMock.reloadCurrentPage).not.toHaveBeenCalled()
+  })
+
+  it('a selected record that FAILED to delete stays selected (the guard reads deletedIds, not the requested ids)', async () => {
+    // Pins the `deletedIds.includes(...)` half of the contract: with the pre-fix
+    // `recordIds.includes(...)` the inspector would close for a record the server still holds —
+    // the same "false success" class of bug as the blanket green toast.
+    gridMock.deleteRecord = vi.fn(async (rid: string) => rid !== 'r2')
+    const onBulkDelete = await mountAndGetBulkDelete()
+
+    ;(capturedGridAttrs!.onSelectRecord as (rid: string) => void)('r2')
+    await flushUi()
+    expect(selectedRecordIdProp()).toBe('r2')
+
+    await onBulkDelete(['r1', 'r2'])
+    await flushUi()
+
+    expect(selectedRecordIdProp()).toBe('r2')
+  })
+
+  it('a selected record that WAS deleted clears the selection', async () => {
+    // The other direction, so the test above cannot be satisfied by simply never clearing.
+    gridMock.deleteRecord = vi.fn().mockResolvedValue(true)
+    const onBulkDelete = await mountAndGetBulkDelete()
+
+    ;(capturedGridAttrs!.onSelectRecord as (rid: string) => void)('r2')
+    await flushUi()
+    expect(selectedRecordIdProp()).toBe('r2')
+
+    await onBulkDelete(['r1', 'r2'])
+    await flushUi()
+
+    expect(selectedRecordIdProp()).toBeNull()
   })
 
   it('a bulk delete with no grid.error set falls back to the generic bulk-delete-failed copy', async () => {

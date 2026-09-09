@@ -55,7 +55,11 @@ function makeRows(): MetaRecord[] {
   return [{ id: 'r0', version: 1, data: { owner: [], tags: [], visit: null } }]
 }
 
-function mountGrid(rows: MetaRecord[], onPatchCell: (...args: unknown[]) => void): HTMLDivElement {
+function mountGrid(
+  rows: MetaRecord[],
+  onPatchCell: (...args: unknown[]) => void,
+  extraListeners: Record<string, unknown> = {},
+): HTMLDivElement {
   container = document.createElement('div')
   document.body.appendChild(container)
   app = createApp({
@@ -72,6 +76,7 @@ function mountGrid(rows: MetaRecord[], onPatchCell: (...args: unknown[]) => void
         canEdit: true,
         canDelete: true,
         onPatchCell,
+        ...extraListeners,
       })
     },
   })
@@ -113,6 +118,57 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     // No plain text input rendered for this branch (would indicate the string fallback, not the
     // dedicated person branch).
     expect(root.querySelector('.meta-cell-editor__input')).toBeNull()
+  })
+
+  it('person: clicking the picker button forwards open-person-picker to the host as { recordId, field } (the grid-side wiring this PR first makes reachable)', async () => {
+    // Discriminator for MetaGridTable's own `@open-person-picker="openPersonPickerFromCell(...)"`
+    // forwarding (both the grouped-row and flat-row editor slots). The render-only person test above
+    // stays green if that forwarding is deleted — the button still renders, it just goes nowhere and
+    // the user can never actually pick a person, which is exactly the user-visible bug this PR fixes.
+    const patchSpy = vi.fn()
+    const pickerSpy = vi.fn()
+    const root = mountGrid(makeRows(), patchSpy, { onOpenPersonPicker: pickerSpy })
+    await flushUi()
+
+    clickThenDblclick(cellAt(root, 0, 0))
+    await flushUi()
+
+    const pickerBtn = root.querySelector('[data-test="person-picker-open"]') as HTMLButtonElement | null
+    expect(pickerBtn).toBeTruthy()
+    pickerBtn!.click()
+    await flushUi()
+
+    expect(pickerSpy).toHaveBeenCalledTimes(1)
+    expect(pickerSpy).toHaveBeenCalledWith({ recordId: 'r0', field: FIELDS[0] })
+    // openPersonPickerFromCell cancels the inline edit before emitting, so no editor is left dangling
+    // behind the picker dialog the host opens.
+    expect(root.querySelector('[data-test="person-picker-open"]')).toBeNull()
+    expect(patchSpy).not.toHaveBeenCalled()
+  })
+
+  it('person (GROUPED rows): the grouped render path forwards open-person-picker as well', async () => {
+    // MetaGridTable renders data rows through TWO independent template branches (`v-if="groupedRows"`
+    // and the flat `v-else` tbody), each with its own `@open-person-picker="openPersonPickerFromCell(...)"`.
+    // The flat-path test above stays green when the GROUPED forward is deleted, so grouping is asserted
+    // separately — otherwise "person is editable" would silently only hold for ungrouped views.
+    const patchSpy = vi.fn()
+    const pickerSpy = vi.fn()
+    const root = mountGrid(makeRows(), patchSpy, { groupFields: [FIELDS[2]], onOpenPersonPicker: pickerSpy })
+    await flushUi()
+    // Sanity: we really are on the grouped branch, not silently back on the flat one.
+    expect(root.querySelector('[data-test="group-header"]')).toBeTruthy()
+
+    clickThenDblclick(cellAt(root, 0, 0))
+    await flushUi()
+
+    const pickerBtn = root.querySelector('[data-test="person-picker-open"]') as HTMLButtonElement | null
+    expect(pickerBtn).toBeTruthy()
+    pickerBtn!.click()
+    await flushUi()
+
+    expect(pickerSpy).toHaveBeenCalledTimes(1)
+    expect(pickerSpy).toHaveBeenCalledWith({ recordId: 'r0', field: FIELDS[0] })
+    expect(patchSpy).not.toHaveBeenCalled()
   })
 
   it('multiSelect: dblclick opens a native multi-select <select multiple> with the field options', async () => {
