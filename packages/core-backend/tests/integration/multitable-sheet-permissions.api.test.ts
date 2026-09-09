@@ -3736,4 +3736,123 @@ describe('Multitable sheet-scoped permissions API', () => {
     expect(String(recordPermissionCalls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
     expect(String(recordPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
   })
+
+  // 边界(负向,与 tests/unit/multitable-permission-subject-hydration.test.ts 同形):
+  // 降级白名单只覆盖成员组目录(platform_member_groups 的表/name/description 列)。
+  // 主查询报的是别的标识符缺列(这里用 r.name)说明是查询本身/schema 另有问题,必须原样抛,
+  // 500 收场;绝不能静默改跑第二条降级 SQL 把问题掩盖掉。
+  test('does not degrade field-permission hydration when the missing column is NOT a member-group column', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM field_permissions fp')) throw undefinedColumnError('r.name')
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/field-permissions')
+      .expect(500)
+
+    expect(response.body.error.code).toBe('INTERNAL_ERROR')
+    const fieldPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM field_permissions fp'))
+    expect(fieldPermissionCalls).toHaveLength(1)
+  })
+
+  // 同上,中文 locale 的同一条边界:译文变了,标识符没变,判定结果也不能变。
+  test('does not degrade field-permission hydration for a Chinese-reported non-member-group missing column', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM field_permissions fp')) {
+          throw Object.assign(new Error('字段 r.name 不存在'), { code: '42703' })
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/field-permissions')
+      .expect(500)
+
+    expect(response.body.error.code).toBe('INTERNAL_ERROR')
+    const fieldPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM field_permissions fp'))
+    expect(fieldPermissionCalls).toHaveLength(1)
+  })
+
+  test('does not degrade view-permission hydration when the missing column is NOT a member-group column', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_ops'])
+          return { rows: [{ id: 'view_ops', sheet_id: 'sheet_ops' }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM meta_view_permissions vp')) throw undefinedColumnError('r.name')
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/views/view_ops/permissions')
+      .expect(500)
+
+    expect(response.body.error.code).toBe('INTERNAL_ERROR')
+    const viewPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM meta_view_permissions vp'))
+    expect(viewPermissionCalls).toHaveLength(1)
+  })
+
+  test('does not degrade record-permission hydration when the missing column is NOT a member-group column', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['record_1', 'sheet_ops'])
+          return { rows: [{ id: 'record_1' }] }
+        }
+        if (sql.includes('FROM record_permissions rp')) throw undefinedColumnError('r.name')
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/records/record_1/permissions')
+      .expect(500)
+
+    expect(response.body.error.code).toBe('INTERNAL_ERROR')
+    const recordPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM record_permissions rp'))
+    expect(recordPermissionCalls).toHaveLength(1)
+  })
 })
