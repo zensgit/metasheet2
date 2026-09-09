@@ -11,7 +11,14 @@ import {
   DATA_SOURCE_UNAVAILABLE_CODE,
   DATA_SOURCE_UNAVAILABLE_MESSAGE,
 } from '../../src/data-adapters/DataSourceManager'
-import { dataSourcesRouter, getDataSourceManager } from '../../src/routes/data-sources'
+import {
+  dataSourcesRouter,
+  getDataSourceManager,
+  SCHEMA_FAILURE_MESSAGE,
+  TABLE_INFO_FAILURE_MESSAGE,
+  CONNECT_FAILURE_MESSAGE,
+} from '../../src/routes/data-sources'
+import { auditLog } from '../../src/audit/audit'
 import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 
 // #2 VALUES-FREE CONNECT REFUSAL.
@@ -211,5 +218,107 @@ describe('data-source routes surface the connect refusal as 503 SOURCE_UNAVAILAB
     expect(res.status).toBe(503)
     expect(res.body.error.code).toBe(DATA_SOURCE_UNAVAILABLE_CODE)
     expectValuesFree(res.body)
+  })
+  // ── (g) the OTHER half: connect succeeded, the STATEMENT (or the audit write) failed ─────────
+  // These land in the very same catch blocks but on the NON-coded branch — the branch that used to
+  // answer `error.message` verbatim. It is the likeliest place for the leak to grow back, because
+  // nothing about it looks like a "connect" path: mssql answers `Invalid object name
+  // 'PLM.dbo.Bom_ExAttr1'` (database + schema + table), pg answers `relation ... does not exist`,
+  // and a failing audit write answers a full pg connection string. The client gets the fixed
+  // sentence and the pre-existing code (SCHEMA_ERROR / TABLE_INFO_ERROR / CONNECTION_ERROR); the
+  // cause goes to the server log only.
+  const MSSQL_OBJECT_TEXT =
+    "Invalid object name 'PLM.dbo.Bom_ExAttr1'. RequestError at Connection.tds 10.10.52.16:1433"
+  const PG_RELATION_TEXT =
+    'error: relation "plm_stage.stock_prep_orders" does not exist at Parser.parseErrorMessage (host 10.10.52.16:5432)'
+  const AUDIT_DB_TEXT =
+    'insert into "audit_logs" - connection to server at "10.10.52.16", port 5432 failed: password authentication failed for user "metasheet_rw"'
+
+  // A source whose adapter is CONNECTED — so the route skips connect-on-demand entirely and the
+  // failure can only come from the statement itself.
+  async function makeConnectedSource(): Promise<string> {
+    const id = `ds-stmt-${++seq}`
+    const created = await request(pinned.url()).post('/api/data-sources').send(sqlServerConfig(id))
+    expect(created.status).toBe(201)
+    const adapter = getDataSourceManager().getDataSource(id)
+    vi.spyOn(adapter, 'isConnected').mockReturnValue(true)
+    return id
+  }
+
+  it('(g1) GET /:id/schema — a connected adapter whose getSchema throws the driver text answers the fixed sentence', async () => {
+    const id = await makeConnectedSource()
+    vi.spyOn(getDataSourceManager().getDataSource(id), 'getSchema').mockRejectedValue(new Error(MSSQL_OBJECT_TEXT))
+
+    const res = await request(pinned.url()).get(`/api/data-sources/${id}/schema`)
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('SCHEMA_ERROR')
+    expect(res.body.error.message).toBe(SCHEMA_FAILURE_MESSAGE)
+    for (const leak of ['Invalid object name', 'PLM.dbo', 'Bom_ExAttr1', '10.10.52.16', '1433', 'RequestError']) {
+      expect(JSON.stringify(res.body)).not.toContain(leak)
+    }
+  })
+
+  it('(g2) GET /:id/tables/:table — a connected adapter whose getTableInfo throws the driver text answers the fixed sentence', async () => {
+    const id = await makeConnectedSource()
+    vi.spyOn(getDataSourceManager().getDataSource(id), 'getTableInfo').mockRejectedValue(new Error(PG_RELATION_TEXT))
+
+    const res = await request(pinned.url()).get(`/api/data-sources/${id}/tables/stock_prep_orders`)
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('TABLE_INFO_ERROR')
+    expect(res.body.error.message).toBe(TABLE_INFO_FAILURE_MESSAGE)
+    for (const leak of ['relation', 'plm_stage', 'does not exist', '10.10.52.16', '5432', 'Parser']) {
+      expect(JSON.stringify(res.body)).not.toContain(leak)
+    }
+  })
+
+  it("(g3) GET /:id/tables/:table — an adapter's own `not found` keeps 404 but no longer echoes its text", async () => {
+    // MongoDB's shape: `ns not found` names database.collection. The mapping to 404 is preserved;
+    // the body now repeats only the table the caller asked for.
+    const id = await makeConnectedSource()
+    vi.spyOn(getDataSourceManager().getDataSource(id), 'getTableInfo').mockRejectedValue(
+      new Error('ns not found: plm_stage.Bom_ExAttr1 (10.10.52.16:27017)'),
+    )
+
+    const res = await request(pinned.url()).get(`/api/data-sources/${id}/tables/Bom_ExAttr1`)
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+    expect(res.body.error.message).toBe("Table 'Bom_ExAttr1' not found")
+    for (const leak of ['ns not found', 'plm_stage', '10.10.52.16', '27017']) {
+      expect(JSON.stringify(res.body)).not.toContain(leak)
+    }
+  })
+
+  it('(g4) an unknown source keeps the source-level 404 wording on /tables (not the table-level one)', async () => {
+    // The two 404 branches must stay distinguishable in code but indistinguishable to a prober:
+    // assertAccess throws the SAME `Data source with id '<id>' not found` for a source that does not
+    // exist and for one owned by somebody else (DataSourceManager.ts:563-573), so both render this
+    // wording. The foreign-owner half is pinned for status by
+    // data-source-visibility-authority-matrix.test.ts:547; it cannot run here because a non-admin
+    // request never reaches the handler in this harness (rbacGuard needs a DB).
+    const unknown = await request(pinned.url()).get('/api/data-sources/ds-does-not-exist/tables/t')
+    expect(unknown.status).toBe(404)
+    expect(unknown.body.error.code).toBe('NOT_FOUND')
+    expect(unknown.body.error.message).toBe("Data source 'ds-does-not-exist' not found")
+  })
+
+  it('(g5) POST /:id/connect — a NON-coded failure (the cross-owner audit write) answers the fixed sentence', async () => {
+    // Reachable without touching the adapter: a platform admin connecting someone else's source
+    // writes a cross-owner audit row first, and that write talks to Postgres — whose failure text is
+    // a connection string. Before, it was echoed as the CONNECTION_ERROR body.
+    const id = await makeConnectedSource() // created by alice
+    currentUser = { id: 'root', role: 'admin' } // platform admin acting on alice's source
+    vi.mocked(auditLog).mockRejectedValueOnce(new Error(AUDIT_DB_TEXT))
+
+    const res = await request(pinned.url()).post(`/api/data-sources/${id}/connect`).send({})
+
+    expect(res.status).toBe(500)
+    expect(res.body.error.code).toBe('CONNECTION_ERROR')
+    expect(res.body.error.message).toBe(CONNECT_FAILURE_MESSAGE)
+    for (const leak of ['audit_logs', '10.10.52.16', '5432', 'password authentication', 'metasheet_rw']) {
+      expect(JSON.stringify(res.body)).not.toContain(leak)
+    }
   })
 })

@@ -56,11 +56,11 @@ function codedGateRefusal(error: unknown): { status: number; code: string; messa
 // tried (`Failed to connect to SQL Server: ConnectionError: Login failed for user 'x' ... 10.10.52.16:1433`).
 // The detail goes to the server log; the client gets a fixed, values-free sentence and can use
 // `POST /:id/test`, the one endpoint that deliberately reports the redacted cause.
-const SCHEMA_FAILURE_MESSAGE =
+export const SCHEMA_FAILURE_MESSAGE =
   '读取数据源结构失败，请先「测试连接」查看原因 / Failed to read the data source schema; run "Test connection" for details'
-const TABLE_INFO_FAILURE_MESSAGE =
+export const TABLE_INFO_FAILURE_MESSAGE =
   '读取数据表信息失败，请先「测试连接」查看原因 / Failed to read the table information; run "Test connection" for details'
-const CONNECT_FAILURE_MESSAGE =
+export const CONNECT_FAILURE_MESSAGE =
   '连接数据源失败，请先「测试连接」查看原因 / Could not connect the data source; run "Test connection" for details'
 
 // Zod schemas for request validation
@@ -1254,9 +1254,19 @@ export function dataSourcesRouter(): Router {
       })
     } catch (error) {
       if (error instanceof Error && error.message.includes('not found')) {
+        // Keep the 404 mapping, drop the verbatim echo: an ADAPTER's own not-found text carries
+        // server-side values (MongoDB answers `ns not found` naming database.collection). Both
+        // branches below repeat only what the caller already sent, and the missing-source wording
+        // stays byte-identical to the foreign-source refusal so 404 keeps hiding existence.
+        const missingSource = error.message.includes(`Data source with id '${req.params.id}' not found`)
         return res.status(404).json({
           ok: false,
-          error: { code: 'NOT_FOUND', message: error.message }
+          error: {
+            code: 'NOT_FOUND',
+            message: missingSource
+              ? `Data source '${req.params.id}' not found`
+              : `Table '${req.params.table}' not found`
+          }
         })
       }
       // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
