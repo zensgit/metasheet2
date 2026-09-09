@@ -13,6 +13,7 @@ const { DEFAULT_TEMPLATES } = require('./engine/template-library.cjs')
 const attendanceWorkDateResolverLib = require('./lib/attendance-work-date-resolver.cjs')
 const attendanceWorkDateAdaptersLib = require('./lib/attendance-work-date-adapters.cjs')
 const attendanceShiftServiceLib = require('./lib/attendance-shift-service.cjs')
+const { resolveAttendanceRecordReadIdentity } = require('./lib/attendance-record-read-identity.cjs')
 const attendanceGroupFixedScheduleConfigServiceLib = require('./lib/attendance-group-fixed-schedule-config-service.cjs')
 const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/attendance-group-fixed-schedule-effectiveness-service.cjs')
 const {
@@ -30543,6 +30544,8 @@ module.exports = {
     )
 
       const handleAttendanceRecordsGet = withPermission('attendance:read', async (req, res) => {
+        const identity = resolveAttendanceRecordReadIdentity(req, res)
+        if (!identity) return
         const schema = z.object({
           userId: z.string().optional(),
           orgId: z.string().optional(),
@@ -30562,13 +30565,8 @@ module.exports = {
           return
         }
 
-        const requesterId = getUserId(req)
-        if (!requesterId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
-
-        const orgId = getOrgId(req)
+        const requesterId = identity.actorId
+        const orgId = identity.orgId
         const targetUserId = parsed.data.userId ?? requesterId
         if (targetUserId !== requesterId) {
           const allowed = await canAccessOtherUsers(requesterId)

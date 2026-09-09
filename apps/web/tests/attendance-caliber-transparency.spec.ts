@@ -16,6 +16,7 @@ import AttendanceView from '../src/views/AttendanceView.vue'
 import AttendanceTeamAvailabilitySection from '../src/views/attendance/AttendanceTeamAvailabilitySection.vue'
 import { apiFetch } from '../src/utils/api'
 import { useLocale } from '../src/composables/useLocale'
+import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -272,6 +273,7 @@ describe('Attendance caliber transparency — team availability legend (G2)', ()
     const container = document.createElement('div')
     document.body.appendChild(container)
     const app = createApp(AttendanceTeamAvailabilitySection, { tr })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'synthetic-actor:org-1'))
     app.mount(container)
     return { container, app }
   }

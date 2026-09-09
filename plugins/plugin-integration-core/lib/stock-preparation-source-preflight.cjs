@@ -486,9 +486,13 @@ const SERVER_AUTHORED_LEAF_FIELDS = Object.freeze(new Set([
   'readPlanId', 'externalSystemId', 'presetId', 'matchedBy',
 ]))
 
-// 3. SCHEMA IDENTIFIERS — table and column names. Exempt ONLY when the leaf's value really is one of
-//    the identifiers this run observed (a table it probed, a column it saw), which is the same test
-//    the source-discovery probe uses to tell a dictionary's schema-naming row from its content.
+// 3. SCHEMA IDENTIFIERS — table and column names. Exempt on either of TWO grounds, both spelled out
+//    with their reasoning at the exemption itself in `assertSourcePreflightValuesFree`: (a) the
+//    LEAF'S OWN value really is one of the identifiers this run observed (a table it probed, a column
+//    it saw); or (b) — the second and pre-existing ground — the row value it reproduces is itself one,
+//    which is the same test the source-discovery probe uses to tell a dictionary's schema-naming row
+//    from its content. Neither ground is a pass for the FIELD: a leaf listed below whose value earns
+//    neither is refused like any other.
 //    RESIDUAL, stated honestly: a business value that is character-for-character a column name of the
 //    same catalog is indistinguishable from that column name here. That channel carries one token, is
 //    the same one the discovery probe accepts, and is review-gated.
@@ -2034,9 +2038,10 @@ function describeValuesFreeRefusal(error) {
  *   (2) CONTAINMENT. No leaf may reproduce — by equality, or by containing — a value observed in a
  *       sampled source row or a supplied secret. Exemptions are narrow and by CLASS, not by path
  *       prefix: closed-vocabulary and server-authored leaves cannot be sourced from a row at all;
- *       identifier leaves are exempt only when their value is genuinely one of the identifiers this
- *       run observed; and the liveness path is exempt for observed values only. Secrets are exempt
- *       NOWHERE, the liveness path included.
+ *       an identifier leaf is exempt when the LEAF'S OWN value is genuinely one of the identifiers
+ *       this run observed (or, on the second and pre-existing ground kept below, when the row value
+ *       it reproduces is itself such an identifier); and the liveness path is exempt for observed
+ *       values only. Secrets are exempt NOWHERE, the liveness path included.
  *
  * It never echoes the offending value: a refusal names the path, the class, the length and a mask.
  */
@@ -2115,11 +2120,36 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
       }
     }
     if (isClosed || isServerAuthored) continue
+    // Ground (a) of the identifier exemption, stated in full at the decision below. It is a property
+    // of the LEAF alone, so it is settled once per leaf rather than re-tested against every observed
+    // value. `leaf.value` is a string by construction — `collectStringLeaves` pushes nothing else.
+    const leafIsAnObservedIdentifier = isIdentifier && knownIdentifiers.has(leaf.value.toLowerCase())
     for (const entry of guarded) {
       const hit = leaf.value === entry.value
         || (entry.value.length >= 4 && leaf.value.includes(entry.value))
       if (!hit) continue
       if (isLiveness) continue
+      // THE IDENTIFIER EXEMPTION, on two independent grounds — either one alone is enough.
+      //
+      //   (a) THE LEAF IS ITSELF AN IDENTIFIER THIS RUN OBSERVED. This is the ground the header above
+      //       and the note on IDENTIFIER_LEAF_FIELDS have always described, and until 222 on
+      //       2026-09-08 it was NOT the one the code applied: the test read `entry.value` only, so a
+      //       leaf was refused for CONTAINING a four-character row value even when the leaf was a
+      //       column name this very run had read off the source. On the live customer PLM that is
+      //       unavoidable — a dictionary's labels eventually spell `Code` / `Name` / `Type` / `Unit`,
+      //       and a column called `FileCode` contains `Code` — so the route answered 500 for the
+      //       whole source, and WHICH run it broke on moved with the customer's data.
+      //       It opens no channel: a leaf whose value IS a table this run probed or a column it saw
+      //       is a name that already appears in the clear at `probes[].object` / `probes[].columns[]`,
+      //       so a row value that happens to sit inside that name tells a reader of the report
+      //       nothing the report did not already say.
+      //
+      //   (b) THE ROW VALUE IS ITSELF A KNOWN IDENTIFIER — the pre-existing test, kept verbatim. This
+      //       is the dictionary case the IDENTIFIER_LEAF_FIELDS note names: a row whose cell holds a
+      //       column name rather than content. It is the WIDER of the two, because it exempts an
+      //       identifier leaf that merely CONTAINS such a value; narrowing it is a separate
+      //       judgement with its own 500 risk, and is deliberately not made here.
+      if (leafIsAnObservedIdentifier) continue
       if (isIdentifier && knownIdentifiers.has(entry.value.toLowerCase())) continue
       refuse(leaf.path, entry.kind, entry.value)
     }

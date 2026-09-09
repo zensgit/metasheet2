@@ -425,6 +425,21 @@ export class AuthService {
     }
   }
 
+  // Reused from #5145's explicit membership selector; login resolution is unchanged.
+  async listActiveMembershipOrgIds(userId: string): Promise<string[]> {
+    const result = await poolManager.get().query(
+      `SELECT uo.org_id
+       FROM user_orgs uo
+       JOIN users u ON u.id = uo.user_id
+       WHERE uo.user_id = $1 AND uo.is_active = true AND u.is_active = true
+       ORDER BY uo.org_id ASC`,
+      [userId],
+    )
+    return result.rows
+      .map((row: { org_id?: unknown }) => row.org_id)
+      .filter((orgId: unknown): orgId is string => typeof orgId === 'string' && orgId.length > 0)
+  }
+
   /**
    * 用户注册
    */

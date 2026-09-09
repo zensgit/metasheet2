@@ -157,6 +157,19 @@ on:
   push:
     branches: [main]
     paths:
+      - 'apps/web/src/composables/authPrincipal.ts'
+      - 'apps/web/src/composables/useAuth.ts'
+      - 'apps/web/src/composables/useSessionOrg.ts'
+      - 'apps/web/src/composables/useAttendanceSessionGuard.ts'
+      - 'apps/web/src/utils/api.ts'
+      - 'apps/web/src/utils/explicitSessionOrg.ts'
+      - 'apps/web/src/services/attendance/effectiveCalendar.ts'
+      - 'apps/web/src/services/attendance/teamAvailability.ts'
+      - 'apps/web/tests/useAuth.spec.ts'
+      - 'apps/web/tests/useSessionOrg.spec.ts'
+      - 'apps/web/tests/AttendanceSessionOrgSwitcher.spec.ts'
+      - 'apps/web/tests/useAttendanceSessionGuard.spec.ts'
+      - 'apps/web/tests/api.spec.ts'
       - 'apps/web/src/views/AttendanceView.vue'
       - 'apps/web/src/views/attendance/**'
       - 'apps/web/src/router/attendanceGroupContextRoute.ts'
@@ -267,6 +280,19 @@ jobs:
           relevant=false
           while IFS= read -r path; do
             case "$path" in
+              apps/web/src/composables/authPrincipal.ts|\
+              apps/web/src/composables/useAuth.ts|\
+              apps/web/src/composables/useSessionOrg.ts|\
+              apps/web/src/composables/useAttendanceSessionGuard.ts|\
+              apps/web/src/utils/api.ts|\
+              apps/web/src/utils/explicitSessionOrg.ts|\
+              apps/web/src/services/attendance/effectiveCalendar.ts|\
+              apps/web/src/services/attendance/teamAvailability.ts|\
+              apps/web/tests/useAuth.spec.ts|\
+              apps/web/tests/useSessionOrg.spec.ts|\
+              apps/web/tests/AttendanceSessionOrgSwitcher.spec.ts|\
+              apps/web/tests/useAttendanceSessionGuard.spec.ts|\
+              apps/web/tests/api.spec.ts|\
               apps/web/src/views/AttendanceView.vue|\
               apps/web/src/views/attendance/*|\
               apps/web/src/router/attendanceGroupContextRoute.ts|\
@@ -402,6 +428,10 @@ jobs:
       - name: Install dependencies
         if: steps.changes.outputs.relevant == 'true'
         run: pnpm install --frozen-lockfile
+
+      - name: Run explicit attendance session specs
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm --filter @metasheet/web exec vitest run tests/useAuth.spec.ts tests/useSessionOrg.spec.ts tests/AttendanceSessionOrgSwitcher.spec.ts tests/useAttendanceSessionGuard.spec.ts --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
 
       - name: Run attendance web guard specs (targeted)
         if: steps.changes.outputs.relevant == 'true'
