@@ -766,6 +766,53 @@ describe('TemplateDetailView — i18n retrofit (report item O-8 continuation, PR
     expect(closeBtn?.getAttribute('aria-label')).toBe('Close version comparison')
   })
 
+  // `versionDiffModeOptions` is a `computed()`, not a plain array literal evaluated once at
+  // setup (see the comment on its declaration, TemplateDetailView.vue ~1273-1279). The mount
+  // test above opens the panel fresh under a fixed locale, so it cannot tell a `computed()` from
+  // a setup-time snapshot — both would show the right labels on first render. This test opens
+  // the panel, THEN flips the shell locale (same `setLocale()` + `nextTick()` pattern as
+  // "re-renders chrome AND the status badge when the shell locale flips after mount" above), and
+  // reads the already-mounted `[data-el-segmented] button` labels again: a setup-time array
+  // literal would keep showing the mount-time language.
+  it('version-diff mode options re-render when the shell locale flips after the panel is already open', async () => {
+    setLocale('zh-CN')
+    mockActiveTemplate.value = buildTemplate({ latestVersionId: 'v2' })
+    listTemplateVersionsSpy.mockResolvedValue([
+      { id: 'v2', templateId: 'tpl-1', version: 2, status: 'draft', publishNote: null, publishedDefinitionId: null, restoredFromVersionId: null, createdAt: '2026-02-01T00:00:00Z', updatedAt: '2026-02-01T00:00:00Z' },
+      { id: 'v1', templateId: 'tpl-1', version: 1, status: 'published', publishNote: null, publishedDefinitionId: 'pub-1', restoredFromVersionId: null, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+    ])
+    getTemplateVersionSpy.mockImplementation((_id: string, versionId: string) => Promise.resolve({
+      id: versionId,
+      templateId: 'tpl-1',
+      version: versionId === 'v2' ? 2 : 1,
+      status: versionId === 'v2' ? 'draft' : 'published',
+      formSchema: { fields: versionId === 'v2' ? [{ id: 'f1', type: 'text', label: '报销金额' }] : [] },
+      approvalGraph: { nodes: [], edges: [] },
+      runtimeGraph: null,
+      publishedDefinitionId: versionId === 'v2' ? null : 'pub-1',
+      publishNote: null,
+      restoredFromVersionId: null,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }))
+    const root = await mountView()
+    root.querySelector<HTMLButtonElement>('[data-testid^="template-version-compare-"]')!.click()
+    await flushUi()
+
+    const modeButtonLabels = () =>
+      Array.from(root.querySelectorAll('[data-el-segmented] button')).map((b) => b.textContent)
+
+    expect(modeButtonLabels()).toEqual(['变化列表', '流程画布', '双画布'])
+
+    setLocale('en')
+    await nextTick()
+    expect(modeButtonLabels()).toEqual(['Change list', 'Flow canvas', 'Side-by-side canvas'])
+
+    setLocale('zh-CN')
+    await nextTick()
+    expect(modeButtonLabels()).toEqual(['变化列表', '流程画布', '双画布'])
+  })
+
   // -------------------------------------------------------------------------
   // Label-table completeness. Loops the flat ZH/EN pair AND every MAP_PAIRS entry
   // (FIELD_TYPE/NODE_TYPE/APPROVAL_MODE/EMPTY_ASSIGNEE_POLICY/NODE_TIMEOUT_EFFECT/VERSION_STATUS/

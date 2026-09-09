@@ -916,7 +916,7 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # bilingual) after that census's own mechanical scan caught the literal going stale.
 #
 # SUBSTRING COLLISION, checked mechanically in both directions against every token already in this
-# file (374 before, 375 after; join backslash continuations, drop comment lines, take every
+# file (369 before, 370 after; join backslash continuations, drop comment lines, take every
 # non-flag positional of each `vitest run` command): no existing token is a substring of
 # `templateDetailI18n`, and it is not a substring of any of them — in particular
 # `templateCenterI18n` shares only the `template` prefix and the `I18n` suffix, diverging at
