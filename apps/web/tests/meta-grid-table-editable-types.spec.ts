@@ -6,6 +6,9 @@
  *   - EDITABLE gaining the type (dblclick now mounts MetaCellEditor with the matching DOM branch)
  *   - pasteFocusedCell's early-return for person/multiSelect (array-valued fields — raw clipboard text
  *     would 400 server-side; see record-write-service.ts field validation)
+ *   - the dateTime branch's D2 commit wiring, ONE handler per test: @keydown.tab (Tab case) and
+ *     @blur (the two blur cases) are asserted separately, because a test that only fires Tab stays
+ *     green when @blur alone is deleted, and vice versa
  *
  * Mirrors the mount helper from multitable-grid-cell-edit-commit.spec.ts (createApp + h, no
  * @vue/test-utils in this codebase).
@@ -160,6 +163,61 @@ describe('MetaGridTable EDITABLE whitelist: person / multiSelect / dateTime (矩
     expect(patchSpy).toHaveBeenCalledWith('r0', 'visit', dateTimeValueFromLocalInput('2026-05-06T10:30'), 1)
     // No dangling editor after Tab-commit.
     expect(root.querySelector('input[type="datetime-local"]')).toBeNull()
+  })
+
+  it('dateTime: a genuine blur to something outside the grid commits the pending draft (D2 — @blur was the OTHER half missing from this branch)', async () => {
+    // Discriminator for `@blur="onScalarBlur"` on the dateTime branch SPECIFICALLY. The Tab test
+    // above stays green if only @blur is deleted (it never fires a FocusEvent), so without this
+    // case the blur half of the D2 fix would be untested. A raw `blur` FocusEvent is dispatched at
+    // the <input> because jsdom's synthetic .click() never transfers real DOM focus — a
+    // click-another-cell test would pass via MetaGridTable's own onCellClick commit guard instead
+    // and stay green with blur-commit removed. `relatedTarget` is an element OUTSIDE the editor so
+    // MetaCellEditor's shouldIgnoreBlur (in-editor focus move) does not swallow it.
+    const patchSpy = vi.fn()
+    const root = mountGrid(makeRows(), patchSpy)
+    await flushUi()
+
+    clickThenDblclick(cellAt(root, 0, 2))
+    await flushUi()
+
+    const input = root.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    input.value = '2026-05-06T10:30'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+    await flushUi()
+
+    expect(patchSpy).toHaveBeenCalledTimes(1)
+    expect(patchSpy).toHaveBeenCalledWith('r0', 'visit', dateTimeValueFromLocalInput('2026-05-06T10:30'), 1)
+    // No dangling editor after blur-commit — the D2 symptom this PR fixes.
+    expect(root.querySelector('input[type="datetime-local"]')).toBeNull()
+    outside.remove()
+  })
+
+  it('dateTime: no patch-cell when the draft is unchanged on blur (editor still closes)', async () => {
+    const patchSpy = vi.fn()
+    const root = mountGrid(makeRows(), patchSpy)
+    await flushUi()
+
+    clickThenDblclick(cellAt(root, 0, 2))
+    await flushUi()
+    const input = root.querySelector('input[type="datetime-local"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    // no typing — the staged draft stays the row's original `null`
+
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    input.dispatchEvent(new FocusEvent('blur', { relatedTarget: outside, bubbles: true }))
+    await flushUi()
+
+    expect(patchSpy).not.toHaveBeenCalled()
+    // Closing on an unchanged blur is still the fix's job: without @blur the editor would hang open.
+    expect(root.querySelector('input[type="datetime-local"]')).toBeNull()
+    outside.remove()
   })
 
   it('person: Ctrl+V on the focused cell does NOT emit patch-cell (array-valued field — raw clipboard text would 400 server-side)', async () => {
