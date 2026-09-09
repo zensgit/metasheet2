@@ -51,6 +51,18 @@ function codedGateRefusal(error: unknown): { status: number; code: string; messa
   return null
 }
 
+// A generic (non-coded) data-plane failure must NOT forward the driver's own text to the client:
+// mssql / pg / mysql connect and query errors embed host:port, database name and the login that was
+// tried (`Failed to connect to SQL Server: ConnectionError: Login failed for user 'x' ... 10.10.52.16:1433`).
+// The detail goes to the server log; the client gets a fixed, values-free sentence and can use
+// `POST /:id/test`, the one endpoint that deliberately reports the redacted cause.
+const SCHEMA_FAILURE_MESSAGE =
+  '读取数据源结构失败，请先「测试连接」查看原因 / Failed to read the data source schema; run "Test connection" for details'
+const TABLE_INFO_FAILURE_MESSAGE =
+  '读取数据表信息失败，请先「测试连接」查看原因 / Failed to read the table information; run "Test connection" for details'
+const CONNECT_FAILURE_MESSAGE =
+  '连接数据源失败，请先「测试连接」查看原因 / Could not connect the data source; run "Test connection" for details'
+
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
 
@@ -900,11 +912,20 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
+      // 503 SOURCE_UNAVAILABLE (as do the arm-binding / provisioning / K3 gates). Surface it with its
+      // own status+code, exactly as /query and /select do, instead of collapsing it into a 500 that
+      // echoed the driver text.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
+      console.error(`[data-sources] connect failed for ${req.params.id}`, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'CONNECTION_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to connect'
+          message: CONNECT_FAILURE_MESSAGE
         }
       })
     }
@@ -1191,11 +1212,20 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
+      // 503 SOURCE_UNAVAILABLE (as do the arm-binding / provisioning / K3 gates). Surface it with its
+      // own status+code, exactly as /query and /select do, instead of collapsing it into a 500 that
+      // echoed the driver text.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
+      console.error(`[data-sources] getSchema failed for ${req.params.id}`, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'SCHEMA_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to get schema'
+          message: SCHEMA_FAILURE_MESSAGE
         }
       })
     }
@@ -1229,11 +1259,20 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: error.message }
         })
       }
+      // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
+      // 503 SOURCE_UNAVAILABLE (as do the arm-binding / provisioning / K3 gates). Surface it with its
+      // own status+code, exactly as /query and /select do, instead of collapsing it into a 500 that
+      // echoed the driver text.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
+      console.error(`[data-sources] getTableInfo failed for ${req.params.id}/${req.params.table}`, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'TABLE_INFO_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to get table info'
+          message: TABLE_INFO_FAILURE_MESSAGE
         }
       })
     }
