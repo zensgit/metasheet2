@@ -130,6 +130,11 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 - **P0 接口验收 PASS**:默认目录响应与 r19 一致;四个 opt-in 查询标志核对无误;传字面字符串 `"true"` 不会打开并集扫描。
 - 本波变化全部是前端:导航项改名、左栏键盘可用(方向键只移焦点,回车/空格切换)、无项目号时两入口高亮收敛、状态词表合一、matchMedia change;无迁移、无开关、无接口、权限口径不变。详见 §6.4 与 `48h-autonomous-run-record-20260906.md` 2026-09-08 时间线。
 
+**r21 / r22 升级验证记录(2026-09-08,222)**:
+
+- **r21(main `fd7cd2b28`,22:17)**:只含后端改动(#5569 源预检拒绝日志),前端包与 r20 相同;就地升级 8 步全过、迁移 0、health 200;U2/P0/P1/P2 及本波标记全部 True;web smoke PASS;P0 接口验收 PASS。重跑源预检仍 500,但后端日志给出了被拒叶子(`probes[10].columns[27]`,observed-row-value,length 4),据此定位根因(§7 ⑩)。
+- **r22(main `97dc5cefa`,23:37)**:含 #5570(源预检自检修复)与他人合入的 #5544(自动化整段重跑控制,与备料无关);就地升级 8 步全过、迁移 0、health 200;全部标记 True;租户声明硬门有效;操作员链与 r19 一致;web smoke PASS(资源文件 `index-DAx1hEIf.js`);P0 接口验收 PASS;**源预检 200、`verdict: go`、blockers 空**,pm2 无新的拒绝 warn;一线操作员与管理员试算均 200(`add 211 / manual_confirm 211`)。
+
 ### 2.2 全新安装(无既有部署)
 
 **2026-09-06 实测结论**:2026-09-06 05:23–05:30 在 222 上另开一个隔离目录(独立 RootDir、独立库名、独立端口)用包内 `scripts/ops/multitable-onprem-apply-package.ps1`(`-InstallDeps 1 -RunMigrations 1 -RestartService 0 -CheckNginx 0 -RunHealthcheck 0`)实跑了一次纯 Windows 全新安装。
@@ -187,7 +192,7 @@ PathExAttrInfo.FileCode(NodeType=2 项目节点) → PathInfo → OrderHeadInfo 
 | 2 | 外部系统绑定该连接 | 该连接对应的"外部系统"记录,`kind` 必须是 `data-source:sql-readonly`,且其 `connectionId` 必须非空并指向第 1 步新建的连接(#5452 起的约束)。若沿用一条历史遗留的外部系统记录(未打 `dataSourceOwnerId` 标记),source-preflight 会报 `CONNECTION_LEGACY_FALLBACK_DENIED`;修法:`GET /api/integration/external-systems/:id` 取出原样公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`),补上 `connectionId = config.dataSourceId` 后 `POST /api/integration/external-systems` 回写(需 admin token + `x-tenant-id` 请求头)。 |
 | 3 | 源绑定切换 | `POST /api/integration/stock-preparation/source-binding`,body 只能带一个字段:<br>`{ "externalSystemId": "<第 2 步的外部系统 id>" }`<br>需要 `integration:admin` 权限。响应 `takesEffectWithoutRestart: true`,**不需要 `pm2 restart`**,立即生效。 |
 | 4 | 验证绑定生效 | `GET /api/integration/stock-preparation/source-binding` 应读到新值;`GET /api/integration/stock-preparation/audit` 应能看到一条 `action: 'source_binding_set'` 的记录。 读审计时**不要带 `workspaceId`**:审计行的 workspace 一律为空,带了就按等值过滤成 0 行(界面本来就不带,只有手写探针会踩)。 |
-| 5 | 源预检 | `GET /api/integration/stock-preparation/source-preflight?externalSystemId=<同上>`。**对本客户的 PLM,预期就是 `verdict: 'no-go'` 且带一条 `bom_store_signals_conflict` —— 这不是故障,也不阻断拉取**,原因与处置见 §7 ⑤。其它拦截码(如 `source_unreachable`、`entry_table_missing`、`no_project_numbers`、`CONNECTION_LEGACY_FALLBACK_DENIED`)才是真问题,须逐条修掉。 |
+| 5 | 源预检 | `GET /api/integration/stock-preparation/source-preflight?externalSystemId=<同上>`。**对本客户的 PLM,预期就是 `verdict: 'no-go'` 且带一条 `bom_store_signals_conflict` —— 这不是故障,也不阻断拉取**,原因与处置见 §7 ⑤。其它拦截码(如 `source_unreachable`、`entry_table_missing`、`no_project_numbers`、`CONNECTION_LEGACY_FALLBACK_DENIED`)才是真问题,须逐条修掉。 **2026-09-08 更新**:客户补订单数据之后,222 上实测为 `verdict: go`、blockers 空(两套 BOM 存储的抽样信号不再冲突),所以"必然 no-go"这句已不再成立;`go` 与 `no-go+bom_store_signals_conflict` 都是正常结果,只有其它拦截码才是真问题。 |
 
 **source-binding 请求体的窄接口纪律**:body 只接受 `externalSystemId` 一个键,不能带 `kind`/`readPlan`/`target` 等字段(400 `SOURCE_BINDING_REQUEST_INVALID`)——选源只能换"读哪个源",不能顺带改"怎么读"。绑定目标必须是**已存在、kind 落在只读集合**(`data-source:sql-readonly` / `bridge:legacy-sql-readonly`)的外部系统。
 
@@ -627,7 +632,7 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 | ⑦ | **缺件行在确认队列里可见但当期无法确认,唯一解法是补源数据** | BOM 明细引用的零件不在物料表(`PartLibraryInfo`)时,这些行判为 `missing_component` 并挂起;跑一次对账后,它们会作为 `pending` 条目出现在确认队列里(多行同因会折叠成一条)。**但当期无法在界面上确认掉**:服务端的确认接口目前只实现了"同一键重复展开"这一种冲突的处理动作,对缺件类一律拒绝(409)。**已知缺陷:界面仍会对这些行显示"我来定…"按钮和三个下拉选项,操作员选任何一个都会失败,且错误提示会误导其更换选项——换哪个都一样。** 正确处置:**不要在队列里反复尝试**,去源端补齐缺失的零件(或修正其 `OBJ_ID`),补好后再拉取一次并对账,系统会自动关闭这些旧的挂起条目。前端按冲突类型收窄可选项/禁用按钮,已列入下一波。 |
 | ⑧ | 源绑定的读回受工作区作用域影响 | 切换源绑定后复核时,`GET /api/integration/stock-preparation/source-binding` 请**带上与写入时相同的 `workspaceId` 查询参数**。若写入与读回所带的工作区参数不一致,读回可能显示 `persistedBinding: null`、`origin: "deploy_default"`,看起来像"绑定没生效",实际已写入。以界面操作为准时两侧一致,不受影响。 |
 | ⑨ | **多租户共用一张部署级拉取目标表时,`includePullTargets=1` 会枚举到其他租户 apply 写入的项目号** | 备料主表(`plm_stock_preparation_main`)没有租户列,行级作用域只有 `projectNo`。此前只能"拿一个已知项目号去确认它存在";开启并集扫描后(见 §6.3、§7.1「操作员项目目录的两个查询参数」),**拥有**该目标表的租户在 `includePullTargets=1` 下会枚举出这张共享表里全部 distinct 项目号——包括**其他租户 `apply` 写入的项目号**。**非拥有者租户零查询,不受影响**;staging 项目所有权证明(注册表 / 确定性哈希)与 staging 前缀 tripwire 均不变,读不到任何行内容,只是"项目号本身"的枚举面变宽。**222 是单租户部署,今天无实际影响。** 长期修法是"每租户一个目标表"——导出路由与 carry 路由同样需要这个修法,未排期。 |
-| ⑩ | **源预检对客户 PLM 返回 500 `SOURCE_PREFLIGHT_FAILED`(reason `SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED`)** | 2026-09-08 在 222 上,绑定切到客户 PLM(客户已补订单数据)后,源预检不再是 §3 第 5 步说的 `no-go`+`bom_store_signals_conflict`,而是 500:报告的 values-free 自检拒绝了报告里某片叶子;路由按设计只回 reason、既不回也不记细节,现场无法定位是哪片叶子。**不阻断拉取**(试算 / 委派 / 计划任务均 200)。处置:让路由把自检细节(path / kind / length / mask,按构造不含值)记到后端 warn 日志,升级后再跑一次预检即可定位;在此之前向导第②步「源预检」会显示失败,可跳过继续。 |
+| ⑩ | ~~**源预检对客户 PLM 返回 500 `SOURCE_PREFLIGHT_FAILED`(reason `SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED`)**~~(**r22 起已修**) | 2026-09-08 在 222 上,绑定切到客户 PLM(客户已补订单数据)后源预检 500。根因(r21 加了拒绝日志后定位):报告的 values-free 自检对"标识符类叶子"(表名 / 列名)的包含检查查错了边——按"行值是否为标识符"豁免,而不是按设计与注释写的"叶子值本身是否为本轮观测到的标识符"豁免;列名只要包含一个 ≥4 字符的采样行值(字典表标签里的 Code / Name / Type / Unit 这类词几乎必然出现)就整份报告被拒,且客户数据一变就随机触发。**修法(#5570,r22)**:标识符类叶子按叶子值豁免(列名本身就是报告明文里的 schema,不增加信息面),原有按行值的豁免保留;复现用例修前红、修后绿,三个变异体均被既有断言抓住。**r22 实测**:同一 PLM 源预检 200,`verdict: go`,blockers 空,pm2 无新的拒绝 warn。附带:r21 起路由会把自检拒绝的 path / kind / length / mask(按构造不含值,<5 字符只打 `**`)记到后端 warn 日志,以后再有同类问题可直接定位。 |
 
 ---
 
