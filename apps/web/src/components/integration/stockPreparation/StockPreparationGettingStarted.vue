@@ -48,7 +48,11 @@
     <!-- ① 接一条只读连接 — off-page by construction; the one thing this page can do is link out. -->
     <p v-if="steps['source-connect'] !== 'done'" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-step-source-connect">
       {{ bi('还没登记连接?', 'No connection registered yet?') }}
-      <a href="/data-sources" data-testid="stock-prep-getting-started-link-data-sources">{{ bi('去外接数据源页 ↗', 'Go to the data-sources page ↗') }}</a>
+      <!-- 整合切片 (2026-09-09): 外接数据源 now lives in 数据工厂's 连接管理 section. A plain <a>,
+           not <router-link>: this component is mounted bare in its own spec (no router, no
+           router-link stub), where a <router-link> would silently resolve to nothing and take
+           the link — and the step it explains — off the page. -->
+      <a href="/integrations/workbench#int-sec-connection" data-testid="stock-prep-getting-started-link-data-sources">{{ bi('去数据工厂 · 连接管理 ↗', 'Open Data Factory · Connections ↗') }}</a>
     </p>
 
     <!-- ② 证明它只能读 — 线框 B says 「在哪做 = 本页」, and P1-1 is what made that need saying: when

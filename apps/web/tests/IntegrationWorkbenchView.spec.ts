@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 // integration-guard flake fix (#4614 prerequisite): IntegrationWorkbenchView.vue is a ~5100-line SFC
 // with ~20 imported subcomponents. A dynamic `await import(...)` INSIDE a test body pays that whole
 // module graph's first-time resolve/transform cost against THAT test's own `testTimeout` (5000ms) —
@@ -109,6 +110,18 @@ describe('IntegrationWorkbenchView', () => {
   let confirmMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
+    // 整合切片 (2026-09-09): 连接管理 now embeds the folded-in 外接数据源 panel
+    // (components/data-sources/DataSourcesPanel.vue), which owns a pinia store and lists sources
+    // on mount. These mounts use bare createApp(View) with no plugins, so the store is given an
+    // active pinia here instead of at all ~40 call sites; the list call gets a default empty
+    // answer so every case that does not care about it renders a clean empty panel (cases that
+    // DO care reset and re-implement apiGetMock themselves, exactly as before).
+    setActivePinia(createPinia())
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') return { ok: true, data: { items: [] } }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
     apiFetchMock.mockReset()
     if (typeof localStorage?.clear === 'function') localStorage.clear()
     originalCreateObjectURL = URL.createObjectURL
@@ -2594,6 +2607,83 @@ describe('IntegrationWorkbenchView', () => {
     expect(previewBodies.at(-1)!).not.toHaveProperty('referenceMappingSources')
   })
 
+  // 整合切片 (2026-09-09): 连接管理 now hosts BOTH halves — the 外接数据源 panel that registers a
+  // physical connection, and the connection-draft editor that references one by connectionId. The
+  // whole point of folding them together is that the second sees the first's result WITHOUT a
+  // reload. That only holds if the panel's `changed` emit reaches the view's refresh callback AND
+  // that callback defeats the picker's `bridgeDataSourcesLoaded` first-open short-circuit — this
+  // pins the end-to-end chain, not either half.
+  it('a source registered in the embedded 外接数据源 panel shows up in the bridge picker without a reload', async () => {
+    const registered: Array<{ id: string; name: string; type: string; connected: boolean }> = []
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') return { ok: true, data: { items: [...registered] } }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/hub/overview?tenantId=default') return jsonResponse(EMPTY_HUB_OVERVIEW)
+      if (url === '/api/data-sources' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as { id?: string; name?: string; type?: string }
+        registered.push({ id: String(body.id), name: String(body.name), type: String(body.type), connected: false })
+        return jsonResponse({ id: body.id })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('router-link', {
+      props: { to: { type: [String, Object], required: false, default: '' } },
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    // Open the picker first, so its list is already loaded (and therefore already STALE) before
+    // the new source is registered. Without the refresh wiring the short-circuit keeps it stale.
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(6)
+    const optionsBefore = Array.from(
+      (container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(optionsBefore).not.toContain('folded-pg')
+
+    // Register a source in the embedded panel, in this same section.
+    const panel = container.querySelector('[data-testid="connection-data-sources-panel"]') as HTMLElement
+    expect(panel).not.toBeNull()
+    ;(panel.querySelector('[data-testid="ds-new-button"]') as HTMLButtonElement).click()
+    await flushUi(2)
+    for (const [testid, value] of [['ds-field-id', 'folded-pg'], ['ds-field-name', 'Folded PG'], ['ds-field-host', 'db.internal'], ['ds-field-database', 'app']] as const) {
+      const input = panel.querySelector(`[data-testid="${testid}"]`) as HTMLInputElement
+      expect(input, testid).not.toBeNull()
+      input.value = value
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    await flushUi(2)
+    ;(panel.querySelector('[data-testid="ds-create-form"]') as HTMLFormElement)
+      .dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }))
+    await flushUi(10)
+
+    // The connection-draft editor's own picker now offers it — no remount, no reload.
+    const optionsAfter = Array.from(
+      (container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(optionsAfter).toContain('folded-pg')
+  })
+
   it('C2b: data-source:sql-readonly connection uses the structured picker and references a data source by id (no credentials)', async () => {
     const upsertBodies: Array<Record<string, unknown>> = []
     apiGetMock.mockReset()
@@ -2644,9 +2734,17 @@ describe('IntegrationWorkbenchView', () => {
     app.mount(container)
     await flushUi()
 
-    // Picker is hidden until the operator picks the bridge kind, and the data-source list is NOT fetched yet (lazy).
+    // Picker is hidden until the operator picks the bridge kind.
+    //
+    // 整合切片 (2026-09-09): the embedded 外接数据源 panel in this same section lists sources on
+    // mount, so "GET /api/data-sources was never issued" is no longer the right shape for the
+    // picker's laziness. What still has to hold — and is what this pinned — is that the PICKER
+    // issues no load of its own until the bridge kind is chosen: exactly one call at mount (the
+    // panel's), and the count goes up only after the kind select changes (asserted below).
     expect(container.querySelector('[data-testid="data-source-bridge-picker"]')).toBeNull()
-    expect(apiGetMock.mock.calls.some(([url]) => url === '/api/data-sources')).toBe(false)
+    const dataSourceListCalls = (): number =>
+      apiGetMock.mock.calls.filter(([url]) => url === '/api/data-sources').length
+    expect(dataSourceListCalls()).toBe(1)
 
     // data-source:sql-readonly is an advanced connector — reveal it via the advanced toggle first.
     const advancedToggle = container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement
@@ -2660,13 +2758,17 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
 
     // Picker appears + lists the data sources; the raw-JSON config is hidden for this kind.
+    // The picker's OWN load happens here, not at mount — one additional call, triggered by the
+    // kind selection.
+    expect(dataSourceListCalls()).toBe(2)
     expect(container.querySelector('[data-testid="data-source-bridge-picker"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="connection-draft-config"]')).toBeNull()
     const dsSelect = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
     const dsOptions = Array.from(dsSelect.options).map((option) => option.textContent?.trim())
     expect(dsOptions).toContain('Warehouse PG · postgres')
     expect(dsOptions).toContain('ERP MSSQL · sqlserver')
-    expect(container.querySelector('[data-testid="data-source-bridge-hint"]')?.textContent).toContain('凭据由 /data-sources 管理')
+    // 整合切片 (2026-09-09): the hint names the in-section panel now, not the retired bare path.
+    expect(container.querySelector('[data-testid="data-source-bridge-hint"]')?.textContent).toContain('凭据由上方「外接数据源」面板管理')
 
     const nameInput = container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement
     nameInput.value = 'Warehouse bridge'

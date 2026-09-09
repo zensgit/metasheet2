@@ -70,6 +70,7 @@
       :is-data-source-bridge-kind="isDataSourceBridgeKind"
       :on-bridge-data-source-change="onBridgeDataSourceChange"
       :bridge-data-sources="bridgeDataSources"
+      :on-data-sources-changed="refreshBridgeDataSourcesAfterPanelChange"
       :bridge-data-source-objects-loading="bridgeDataSourceObjectsLoading"
       :bridge-data-source-object-options="bridgeDataSourceObjectOptions"
       :bridge-data-source-objects-error="bridgeDataSourceObjectsError"
@@ -433,7 +434,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
 import PageShell from '../components/layout/PageShell.vue'
@@ -441,6 +443,7 @@ import PageHeader from '../components/layout/PageHeader.vue'
 import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../services/integration/errorCodeLabels'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { getDataSourceSchema, listDataSources } from '../data-sources/api'
+import { resolveWorkbenchLandingGroupId, WORKBENCH_SECTION_GROUP_IDS } from './integrationWorkbenchLanding'
 import type { DataSourceListItem, DataSourceTableInfo } from '../data-sources/types'
 import {
   canReadFromSystem,
@@ -680,20 +683,9 @@ const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
   { id: 'bridge-agent', label: bi('Bridge Agent 观测', 'Bridge Agent'), targetId: 'int-sec-bridge-agent' },
 ])
 
-const sectionGroupIds: Record<string, string> = {
-  'int-sec-hub-overview': 'hub-overview',
-  'int-sec-connection': 'connection',
-  'int-sec-read-source': 'read-source',
-  'int-sec-combination-config': 'combination',
-  'int-sec-combination-run': 'combination',
-  'int-sec-object-template': 'cleaning-mapping',
-  'int-sec-cleaning-dataset': 'cleaning-mapping',
-  'int-sec-cleaning-rules': 'cleaning-mapping',
-  'int-sec-run-push': 'run-push',
-  'int-sec-monitoring': 'monitoring',
-  'int-sec-preview': 'cleaning-mapping',
-  'int-sec-bridge-agent': 'bridge-agent',
-}
+// Shared with the deep-link landing resolver (views/integrationWorkbenchLanding.ts) so a new
+// section can never be observable-but-unlinkable, or linkable-but-unobservable.
+const sectionGroupIds: Readonly<Record<string, string>> = WORKBENCH_SECTION_GROUP_IDS
 
 const activeRailGroupId = ref('hub-overview')
 let workbenchSectionObserver: IntersectionObserver | null = null
@@ -703,6 +695,33 @@ function scrollToRailGroup(group: IntegrationWorkbenchRailGroup): void {
   if (typeof document === 'undefined') return
   document.getElementById(group.targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
+
+// Deep-link landing (整合切片 2026-09-09). `/data-sources` now redirects to
+// `/integrations/workbench#int-sec-connection`, so the workbench has to honour an incoming
+// anchor itself: the sections are all rendered at once, and a browser's native anchor jump is
+// unreliable here because the section content mounts across several async bootstrap ticks.
+//
+// `useRoute()` returns undefined when this view is mounted without a router (several unit
+// specs do exactly that), so every read of it is optional — no router means no deep link,
+// which is the same no-op as an unrecognised anchor.
+const route = useRoute()
+
+function applyWorkbenchLanding(): void {
+  const groupId = resolveWorkbenchLandingGroupId(route)
+  if (!groupId) return
+  const group = railGroups.value.find((candidate) => candidate.id === groupId)
+  if (!group) return
+  scrollToRailGroup(group)
+}
+
+// Re-run while already on the page: clicking a `#int-sec-...` link from inside the workbench
+// changes the hash without remounting, so onMounted alone would never fire again.
+watch(
+  () => [route?.hash, route?.query?.section] as const,
+  () => {
+    void nextTick(applyWorkbenchLanding)
+  },
+)
 
 // 对接总览 -> 连接管理. The overview builds NO editor of its own: it hands the system id back here,
 // and the existing `editConnection` (the same function the inventory row's "编辑" button calls)
@@ -719,6 +738,11 @@ function openConnectionFromOverview(systemId: string): void {
 }
 
 onMounted(() => {
+  // After nextTick so the target section element exists in the DOM to scroll to. Ordered
+  // BEFORE the observer setup below only for readability — the observer's own callback can
+  // still overwrite the highlight later, which is correct: once the operator scrolls, scroll
+  // position is the truth.
+  void nextTick(applyWorkbenchLanding)
   if (typeof document === 'undefined' || typeof IntersectionObserver === 'undefined') return
   const elements = Object.keys(sectionGroupIds)
     .map((id) => document.getElementById(id))
@@ -963,6 +987,16 @@ async function loadBridgeDataSources(): Promise<void> {
   } catch (error) {
     bridgeDataSourcesError.value = formatWorkbenchConnectionError(error, 'bridge-data-sources')
   }
+}
+
+// The embedded 外接数据源 panel (IntegrationConnectionSection) just created / updated / rotated
+// / deleted a source, so the picker's cached list is stale. `bridgeDataSourcesLoaded` is a
+// first-open optimisation, NOT a refresh policy — clear it so this reload actually happens,
+// and clear the previous attempt's error so a recovered load stops rendering a dead message.
+async function refreshBridgeDataSourcesAfterPanelChange(): Promise<void> {
+  bridgeDataSourcesLoaded.value = false
+  bridgeDataSourcesError.value = ''
+  await loadBridgeDataSources()
 }
 
 // Lazy: only fetch the data-source list when the operator actually picks the bridge kind.

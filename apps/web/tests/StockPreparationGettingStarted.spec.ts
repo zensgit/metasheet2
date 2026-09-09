@@ -979,6 +979,34 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // 整合切片 (2026-09-09): step①'s off-page link
+  // ---------------------------------------------------------------------------
+
+  it('step① links to the folded-in 连接管理 section of 数据工厂, not the retired standalone page', async () => {
+    // The standalone /data-sources page is gone (it now redirects). A link left on the bare
+    // path would still "work" via that redirect, so this pins the DIRECT target: the one step
+    // this wizard cannot perform itself must land the reader on the section that can.
+    const root = await mount()
+    const link = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]') as HTMLAnchorElement | null
+    expect(link).toBeTruthy()
+    const href = link?.getAttribute('href') ?? ''
+    expect(href).toContain('/integrations/workbench')
+    expect(href).toContain('int-sec-connection')
+    expect(href).not.toBe('/data-sources')
+    // The label has to name where it goes — an unchanged 「去外接数据源页」 would send the reader
+    // looking for a page that no longer exists.
+    expect(link?.textContent).toContain('数据工厂')
+  })
+
+  it('step① renders the English label for the same folded-in target', async () => {
+    h.locale = 'en'
+    const root = await mount()
+    const link = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]') as HTMLAnchorElement | null
+    expect(link?.getAttribute('href')).toBe('/integrations/workbench#int-sec-connection')
+    expect(link?.textContent).toContain('Data Factory')
+  })
+
+  // ---------------------------------------------------------------------------
   // English locale — the bilingual `bi()` seam
   // ---------------------------------------------------------------------------
 

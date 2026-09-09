@@ -184,9 +184,19 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Template Details', titleZh: '模板详情', requiresAuth: true },
   },
   {
+    // 整合切片 (2026-09-09): the standalone 外接数据源 page was folded into 数据工厂's 连接管理
+    // section, so this path is now a REDIRECT that keeps every existing bookmark, doc link and
+    // in-app hint working. The hash is the workbench's own section anchor — the view resolves it
+    // via resolveWorkbenchLandingGroupId() and scrolls there (views/integrationWorkbenchLanding.ts).
+    //
+    // The target carries the workbench's `integration:write` gate, which the old page did not.
+    // That is a TIGHTENING and deliberate: the nav entry for this page was already gated on
+    // integration:write, so no principal loses an entry point they could actually see. The
+    // target path also sits under the '/integrations' prefix that PLM_WORKBENCH_ALLOWED_PREFIXES
+    // already allows (router/guardPolicy.ts), so PLM-focused orgs are not bounced by the fold.
     path: '/data-sources',
     name: 'data-sources',
-    component: () => import('../views/DataSourcesView.vue'),
+    redirect: { path: '/integrations/workbench', hash: '#int-sec-connection' },
     meta: { title: 'Data Sources', titleZh: '外接数据源', requiresAuth: true },
   },
   buildPublicMultitableFormRoute(() => import('../views/PublicMultitableFormView.vue')),
