@@ -178,12 +178,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
+import { getAuthPrincipalKey, onAuthPrincipalChange } from '../composables/authPrincipal'
+import { authHeaders } from '../utils/api'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
-import type { AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
+import type { AutomationActionType, AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
 import { automationActionTypeLabel, automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 import StatusTag from '../components/status/StatusTag.vue'
@@ -220,6 +222,29 @@ const rerunTargetId = ref<string | null>(null)
 const rerunSuccessId = ref<string | null>(null)
 const rerunSuccessGeneric = ref(false)
 const rerunError = ref<string | null>(null)
+let detailRequestScope = ''
+let detailRequestGeneration = 0
+let rerunGeneration = 0
+let disposed = false
+const invalidateRerun = () => { rerunGeneration += 1 }
+const unsubscribeRerun = onAuthPrincipalChange(invalidateRerun)
+watch([expandedId, detail], invalidateRerun, { flush: 'sync' })
+onUnmounted(() => {
+  disposed = true
+  invalidateRerun()
+  unsubscribeRerun()
+})
+
+// Equality only, never logged or used as authorization. Includes the actual token (and its org
+// claims), effective tenant header and explicit session epoch from the shared auth resolvers.
+function executionRequestScope(): string | null {
+  try {
+    return JSON.stringify([getAuthPrincipalKey(), authHeaders()])
+  } catch {
+    // An explicit session-org transition is unreadable, not an empty scope.
+    return null
+  }
+}
 
 // A6-3-2b/A6-3-4 (read-only): surface branch lineage from the persisted C1 jobs.
 // Parent step's result carries { selectedBranchKey, matched }; nested branch-action jobs use a
@@ -284,6 +309,7 @@ async function loadData() {
 }
 
 async function toggleExpand(id: string) {
+  const requestGeneration = ++detailRequestGeneration
   resumeError.value = null
   rerunError.value = null
   rerunSuccessId.value = null
@@ -297,6 +323,8 @@ async function toggleExpand(id: string) {
   expandedId.value = id
   detail.value = null
   detailLoading.value = true
+  const requestScope = executionRequestScope()
+  const generation = rerunGeneration
   let run: AutomationRunView | null = null
   try {
     run = await client.getAutomationRun(id)
@@ -306,8 +334,15 @@ async function toggleExpand(id: string) {
   // Drop a STALE response: if a newer row was expanded while this fetch was in
   // flight, expandedId has moved on — that newer flow owns the state, so this
   // (older) response must not paint its detail under the wrong row.
-  if (expandedId.value !== id) return
+  if (expandedId.value !== id || requestGeneration !== detailRequestGeneration) return
+  if (disposed) return
+  if (requestScope === null || generation !== rerunGeneration || requestScope !== executionRequestScope()) {
+    expandedId.value = null
+    detailLoading.value = false
+    return
+  }
   if (run) {
+    detailRequestScope = requestScope
     detail.value = run
   } else {
     expandedId.value = null // detail failed for the still-current row → collapse
@@ -473,13 +508,16 @@ function rerunBlockedReason(run: AutomationRunView): string | null {
   return key ? automationLabel(key, isZh.value) : null
 }
 
-/**
- * The consequences of re-running, read from the already-loaded detail's ruleSnapshot (no extra
- * fetch). TWO states only (round-2 B3): either every action is nameable, or the enumeration is
- * refused as a whole. A missing/non-object snapshot, a non-array `actions`, an EMPTY action list,
- * or a single entry whose `type` is not a string all collapse to `unknown` — fail closed, because a
- * partial list read as a complete one is exactly the boilerplate this control must not show.
- */
+// Exhaustive over the current leaf vocabulary; a new action must acquire an explicit preview policy.
+const RERUN_LEAF_TYPES: Record<Exclude<AutomationActionType, 'condition_branch' | 'parallel_branch'>, true> = {
+  update_record: true, create_record: true, send_webhook: true, send_notification: true,
+  start_approval: true, send_email: true, send_dingtalk_group_message: true,
+  send_dingtalk_person_message: true, send_dingtalk_approval_card: true, delete_record: true,
+  lock_record: true, wait_for_callback: true, write_approval_form_values: true,
+  notify: true, update_field: true,
+}
+
+/** Enumerate all possible action kinds, including unselected branches, or refuse the whole list. */
 type RerunConsequences = { state: 'enumerated'; labels: string[] } | { state: 'unknown' }
 
 function rerunConsequences(): RerunConsequences {
@@ -487,25 +525,51 @@ function rerunConsequences(): RerunConsequences {
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return { state: 'unknown' }
   const actions = (snapshot as Record<string, unknown>).actions
   if (!Array.isArray(actions) || actions.length === 0) return { state: 'unknown' }
-  const seen = new Set<string>()
-  const kinds: string[] = []
-  for (const action of actions) {
-    if (!action || typeof action !== 'object') return { state: 'unknown' }
-    const type = (action as Record<string, unknown>).type
-    if (typeof type !== 'string' || !type) return { state: 'unknown' }
-    const label = automationActionTypeLabel(type, isZh.value)
-    if (!seen.has(label)) {
-      seen.add(label)
-      kinds.push(label)
+  const kinds = new Set<string>()
+  function visit(value: unknown, parent?: 'condition_branch' | 'parallel_branch'): boolean {
+    if (!Array.isArray(value)) return false
+    for (const action of value) {
+      if (!action || typeof action !== 'object' || Array.isArray(action)) return false
+      const type = action.type
+      if (typeof type !== 'string') return false
+      if (type === 'condition_branch' || type === 'parallel_branch') {
+        // The executor supports only top-level containers with leaf children. This also bounds
+        // traversal of malformed/deep/cyclic snapshots without inventing a nested-DAG contract.
+        if (parent) return false
+        const config = action.config
+        if (!config || typeof config !== 'object' || Array.isArray(config)) return false
+        if (!Array.isArray(config.branches) || config.branches.length === 0) return false
+        if (type === 'parallel_branch' && (config.joinMode !== 'all' || config.branches.length > 10)) return false
+        const branches = [...config.branches]
+        if (type === 'condition_branch' && config.defaultBranch != null) branches.push(config.defaultBranch)
+        const keys = new Set<string>()
+        let childCount = 0
+        for (const branch of branches) {
+          if (!branch || typeof branch !== 'object' || Array.isArray(branch)) return false
+          if (typeof branch.key !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(branch.key) || keys.has(branch.key)) return false
+          keys.add(branch.key)
+          const childActions = branch.actions ?? []
+          if (!Array.isArray(childActions)) return false
+          childCount += childActions.length
+          if (type === 'parallel_branch' && (childActions.length === 0 || childCount > 20)) return false
+          if (!visit(childActions, type)) return false
+        }
+      } else {
+        if (!Object.prototype.hasOwnProperty.call(RERUN_LEAF_TYPES, type)) return false
+        if (parent === 'condition_branch' && type === 'start_approval') return false
+        if (parent === 'parallel_branch' && type !== 'update_record' && type !== 'send_notification') return false
+      }
+      kinds.add(automationActionTypeLabel(type, isZh.value))
     }
+    return true
   }
-  return { state: 'enumerated', labels: kinds }
+  return visit(actions) ? { state: 'enumerated', labels: [...kinds] } : { state: 'unknown' }
 }
 
 // UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6). Enumerates the
 // consequences from data already on the row (rule/sheet) + the loaded detail (action kinds) —
 // req (2): the operator sees what will run again before confirming, not just a generic warning.
-async function confirmRerunExecution(run: AutomationRunView): Promise<boolean> {
+async function confirmRerunExecution(run: AutomationRunView, isCurrent: () => boolean): Promise<boolean> {
   const ruleName = run.ruleName || run.ruleId
   const sheetName = run.sheetName || run.sheetId || automationLabel('runs.rerunConfirmNoSheet', isZh.value)
   const consequences = rerunConsequences()
@@ -527,6 +591,7 @@ async function confirmRerunExecution(run: AutomationRunView): Promise<boolean> {
   } catch {
     return false
   }
+  if (!isCurrent()) return false
   // Round-2 B3 — when the consequences could NOT be enumerated, the first dialog showed an honest
   // "cannot be listed" line rather than an action list, so the operator has approved a side-effecting
   // run they were unable to preview. Require a SECOND, differently-worded acknowledgement before
@@ -566,21 +631,29 @@ async function rerunExecution(run: AutomationRunView) {
   // place only against a future refactor that drops `disabled`. Silent by design: the reason is
   // already on screen next to the button (`data-field="rerun-blocked-reason"`).
   if (rerunBlockedReasonKey(run) !== null) return
-  if (!(await confirmRerunExecution(run))) return
-  rerunTargetId.value = run.id
-  rerunError.value = null
-  rerunSuccessId.value = null
-  rerunSuccessGeneric.value = false
+  const generation = rerunGeneration
+  const requestScope = detailRequestScope
+  const isCurrent = () => !disposed && generation === rerunGeneration
+    && expandedId.value === run.id && detail.value?.id === run.id
+    && requestScope === executionRequestScope() && auth.hasAdminAccess()
+  if (!isCurrent()) return
+  // Reserve before awaiting either dialog so repeated clicks cannot queue duplicate executions.
   rerunning.value = run.id
   try {
+    if (!(await confirmRerunExecution(run, isCurrent)) || !isCurrent()) return
+    rerunTargetId.value = run.id
+    rerunError.value = null
+    rerunSuccessId.value = null
+    rerunSuccessGeneric.value = false
     const result = await client.retryAutomationExecution(run.id)
+    if (!isCurrent()) return
     if (typeof result?.id === 'string' && result.id) {
       rerunSuccessId.value = result.id
     } else {
       rerunSuccessGeneric.value = true
     }
   } catch (err) {
-    rerunError.value = mapRerunError(err)
+    if (isCurrent()) rerunError.value = mapRerunError(err)
   } finally {
     rerunning.value = null
   }
