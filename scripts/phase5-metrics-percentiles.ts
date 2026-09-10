@@ -104,99 +104,82 @@ async function fetchMetrics(url: string): Promise<string> {
 /**
  * Parse Prometheus text format and extract histograms
  */
+function parseHistogramNumber(value: string): number {
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value)) {
+    throw new Error('INVALID_HISTOGRAM_NUMBER');
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new Error('INVALID_HISTOGRAM_NUMBER');
+  return number;
+}
+
+function parseHistogramLabels(value: string): Record<string, string> {
+  const labels = new Map<string, string>();
+  const pattern = /\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"((?:[^"\\\n]|\\[\\n"])*)"\s*(?:,|$)/y;
+  let offset = 0;
+  while (offset < value.trimEnd().length) {
+    pattern.lastIndex = offset;
+    const match = pattern.exec(value);
+    if (!match || labels.has(match[1])) throw new Error('INVALID_HISTOGRAM_LABELS');
+    labels.set(match[1], match[2].replace(/\\([\\n"])/g, (_, escaped) => escaped === 'n' ? '\n' : escaped));
+    offset = pattern.lastIndex;
+  }
+  return Object.fromEntries([...labels].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+}
+
 function parsePrometheusMetrics(text: string): Histogram[] {
   const lines = text.split('\n');
-  const histograms: Map<string, Histogram> = new Map();
-
+  const histograms = new Map<string, Histogram>();
+  const sums = new Set<string>();
+  const counts = new Set<string>();
+  const bucketFamilies = new Set(lines.flatMap(line => {
+    const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)_bucket(?:\{|\s)/);
+    return match ? [match[1]] : [];
+  }));
+  // Sum/count samples can precede buckets and may omit an empty label set.
   for (const line of lines) {
-    // Skip comments and empty lines
-    if (line.startsWith('#') || line.trim() === '') {
-      continue;
+    const family = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)_(?:bucket|sum|count)(?:\{|\s)/);
+    if (!family || !bucketFamilies.has(family[1])) continue;
+    const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)_(bucket|sum|count)(?:\{(.*)\})?[ \t]+(\S+)(?:[ \t]+[+-]?\d+)?[ \t]*$/);
+    if (!match) throw new Error('INVALID_HISTOGRAM_SAMPLE');
+    const [, metric, kind, rawLabels = '', rawValue] = match;
+    const labels = parseHistogramLabels(rawLabels);
+    const value = parseHistogramNumber(rawValue);
+    let le = 0;
+    if (kind === 'bucket') {
+      if (!Object.hasOwn(labels, 'le')) throw new Error('INVALID_HISTOGRAM_BOUND');
+      le = labels.le === '+Inf' ? Infinity : parseHistogramNumber(labels.le);
+      delete labels.le;
     }
-
-    // Parse histogram bucket lines (e.g., metric_name_bucket{le="0.5"} 10)
-    const bucketMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*_bucket)\{(.+)\}\s+(\d+(?:\.\d+)?)/);
-    if (bucketMatch) {
-      const metricName = bucketMatch[1].replace('_bucket', '');
-      const labelsStr = bucketMatch[2];
-      const count = parseFloat(bucketMatch[3]);
-
-      // Parse labels
-      const labels: Record<string, string> = {};
-      const labelMatches = labelsStr.matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]+)"/g);
-      for (const match of labelMatches) {
-        labels[match[1]] = match[2];
-      }
-
-      const le = labels.le ? parseFloat(labels.le) : Infinity;
-      delete labels.le; // Remove 'le' from labels as it's stored separately
-
-      const key = `${metricName}:${JSON.stringify(labels)}`;
-
-      if (!histograms.has(key)) {
-        histograms.set(key, {
-          metric: metricName,
-          labels,
-          buckets: [],
-          sum: 0,
-          count: 0
-        });
-      }
-
-      histograms.get(key)!.buckets.push({ le, count });
-    }
-
-    // Parse sum lines (e.g., metric_name_sum{} 123.45)
-    const sumMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*_sum)\{(.+)?\}\s+(\d+(?:\.\d+)?)/);
-    if (sumMatch) {
-      const metricName = sumMatch[1].replace('_sum', '');
-      const labelsStr = sumMatch[2] || '';
-      const sum = parseFloat(sumMatch[3]);
-
-      const labels: Record<string, string> = {};
-      if (labelsStr) {
-        const labelMatches = labelsStr.matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]+)"/g);
-        for (const match of labelMatches) {
-          labels[match[1]] = match[2];
-        }
-      }
-
-      const key = `${metricName}:${JSON.stringify(labels)}`;
-
-      if (histograms.has(key)) {
-        histograms.get(key)!.sum = sum;
-      }
-    }
-
-    // Parse count lines (e.g., metric_name_count{} 100)
-    const countMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*_count)\{(.+)?\}\s+(\d+(?:\.\d+)?)/);
-    if (countMatch) {
-      const metricName = countMatch[1].replace('_count', '');
-      const labelsStr = countMatch[2] || '';
-      const count = parseFloat(countMatch[3]);
-
-      const labels: Record<string, string> = {};
-      if (labelsStr) {
-        const labelMatches = labelsStr.matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]+)"/g);
-        for (const match of labelMatches) {
-          labels[match[1]] = match[2];
-        }
-      }
-
-      const key = `${metricName}:${JSON.stringify(labels)}`;
-
-      if (histograms.has(key)) {
-        histograms.get(key)!.count = count;
-      }
+    if (kind !== 'sum' && (!Number.isSafeInteger(value) || value < 0)) throw new Error('INVALID_HISTOGRAM_COUNT');
+    const key = `${metric}:${JSON.stringify(labels)}`;
+    const histogram = histograms.get(key) ?? { metric, labels, buckets: [], sum: 0, count: 0 };
+    histograms.set(key, histogram);
+    if (kind === 'bucket') {
+      if (histogram.buckets.some(bucket => bucket.le === le)) throw new Error('DUPLICATE_HISTOGRAM_SAMPLE');
+      histogram.buckets.push({ le, count: value });
+    } else {
+      const seen = kind === 'sum' ? sums : counts;
+      if (seen.has(key)) throw new Error('DUPLICATE_HISTOGRAM_SAMPLE');
+      seen.add(key);
+      histogram[kind === 'sum' ? 'sum' : 'count'] = value;
     }
   }
-
-  // Sort buckets by 'le' value
-  for (const histogram of histograms.values()) {
+  const result: Histogram[] = [];
+  for (const [key, histogram] of histograms) {
+    if (!histogram.buckets.length) continue;
+    if (!sums.has(key) || !counts.has(key)) throw new Error('INCOMPLETE_HISTOGRAM');
+    if (!histogram.buckets.some(bucket => bucket.le === Infinity)) throw new Error('INCOMPLETE_HISTOGRAM');
+    if (!histogram.buckets.some(bucket => Number.isFinite(bucket.le))) throw new Error('INVALID_HISTOGRAM_BOUND');
     histogram.buckets.sort((a, b) => a.le - b.le);
+    for (let i = 0; i < histogram.buckets.length; i++) {
+      const bucket = histogram.buckets[i];
+      if (bucket.count > histogram.count || (i > 0 && bucket.count < histogram.buckets[i - 1].count)
+        || (bucket.le === Infinity && bucket.count !== histogram.count)) throw new Error('INVALID_HISTOGRAM_COUNT');
+    }
+    result.push(histogram);
   }
-
-  return Array.from(histograms.values());
+  return result;
 }
 
 /**
@@ -210,6 +193,7 @@ function calculatePercentile(buckets: HistogramBucket[], totalCount: number, per
   // Find the bucket containing the percentile
   for (let i = 0; i < buckets.length; i++) {
     if (buckets[i].count >= targetCount) {
+      if (buckets[i].le === Infinity) return i > 0 ? buckets[i - 1].le : 0;
       // Linear interpolation within bucket
       if (i === 0) {
         // First bucket: assume uniform distribution from 0 to le
@@ -295,7 +279,7 @@ async function main() {
     const thresholdsData = JSON.parse(thresholdsContent);
 
     // Extract unique prometheus_metric values from latency thresholds
-    const targetMetrics = Array.from(new Set(
+    const targetMetrics = Array.from(new Set<string>(
       thresholdsData.thresholds
         .filter((t: any) => t.kind === 'latency')
         .map((t: any) => t.prometheus_metric)
@@ -311,7 +295,7 @@ async function main() {
     for (const histogram of relevantHistograms) {
       // Create key with labels for labeled metrics (e.g., metric{operation="restore"})
       const labelStr = Object.keys(histogram.labels).length > 0
-        ? `{${Object.entries(histogram.labels).map(([k, v]) => `${k}="${v}"`).join(',')}}`
+        ? `{${Object.entries(histogram.labels).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(',')}}`
         : '';
       const key = `${histogram.metric}${labelStr}`;
       const result = calculatePercentiles(histogram);
