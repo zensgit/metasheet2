@@ -105,6 +105,10 @@ vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({
       visible: { type: Boolean, default: false },
       sheetId: { type: String, default: null },
       fields: { type: Array, default: () => [] },
+      // Declared (not just forwarded as a fallthrough attr) so the test can SEE what the workbench
+      // binds: `fields` is the filtered import surface, `existingFieldNames` must stay the unfiltered
+      // name list, otherwise the modal defaults a read-only/hidden column to "create new field".
+      existingFieldNames: { type: Array, default: () => [] },
       fieldResolvers: { type: Object, default: () => ({}) },
       importing: { type: Boolean, default: false },
       result: { type: Object, default: null },
@@ -118,6 +122,8 @@ vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({
       return () => {
         importModalProps = {
           visible: props.visible,
+          fields: props.fields,
+          existingFieldNames: props.existingFieldNames,
           canCreateFields: props.canCreateFields,
           createFieldsError: props.createFieldsError,
           createdFieldColumns: props.createdFieldColumns,
@@ -279,6 +285,30 @@ describe('MultitableWorkbench import → create missing fields', () => {
     container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
     await flushUi()
   }
+
+  /**
+   * Prop-plumbing pin for `:existing-field-names="importExistingFieldNames"` (MultitableWorkbench.vue).
+   * `fields` is the import surface — the workbench has already stripped the read-only (permission) and
+   * property-hidden columns — so it can NOT answer "does the sheet already have a column called X?".
+   * If the binding is dropped, or its source is narrowed from `workbench.fields` to
+   * `importSurfaceFields`, those names disappear and the modal defaults the header to "create a new
+   * text field", growing a shadow `Score (2)` column beside the real one.
+   */
+  it('hands the modal EVERY existing field name, not just the importable surface', async () => {
+    mountWorkbench([
+      { id: 'fld_name', name: 'Name', type: 'string' },
+      { id: 'fld_score', name: 'Score', type: 'number' },
+      { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+    ])
+    gridMock.fieldPermissions.value = { fld_score: { visible: true, readOnly: true } }
+
+    await openImportModal()
+
+    // The import surface really does drop both columns...
+    expect((importModalProps.fields as Array<{ id: string }>).map((field) => field.id)).toEqual(['fld_name'])
+    // ...and the separate name list really does keep them.
+    expect(importModalProps.existingFieldNames).toEqual(['Name', 'Score', 'Secret'])
+  })
 
   it('creates each requested field, reloads meta, and imports rows under the new field ids', async () => {
     mountWorkbench([{ id: 'fld_name', name: 'Name', type: 'string' }])
