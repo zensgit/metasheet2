@@ -78,16 +78,35 @@ function parseSeededCodes(migrationSource: string): string[] {
   return [...new Set(codes)].sort()
 }
 
-/** The codes `rbacGuard('<resource>', '<action>')` enforces in a route file. */
+/**
+ * The codes `rbacGuard` enforces in a route file, in BOTH supported call shapes:
+ * the two-argument `rbacGuard('data_sources', 'read')` and the one-argument
+ * `rbacGuard('data_sources:read')` — `src/rbac/rbac.ts:56-57` accepts either, and the repo already
+ * uses the one-argument form elsewhere (e.g. `rbacGuard('approvals:read')`), so a parser that saw
+ * only the two-argument form could be bypassed without noticing.
+ *
+ * SCOPE, stated plainly: this reads ONE file and matches quote-delimited literals (' " `) written
+ * inline. A gate whose code is assembled at runtime (concatenation, a variable, an interpolated
+ * template) or that lives in a file this suite does not read is NOT covered. See the note on
+ * `assertSeedMatchesEnforcement`.
+ */
 function parseRbacGuardCodes(routeSource: string, resource: string): string[] {
-  const pattern = new RegExp(`rbacGuard\\(\\s*'${resource}'\\s*,\\s*'([a-z_]+)'\\s*\\)`, 'g')
-  const codes = [...routeSource.matchAll(pattern)].map((match) => `${resource}:${match[1]}`)
+  const q = `['"\`]`
+  const twoArg = new RegExp(`rbacGuard\\(\\s*${q}${resource}${q}\\s*,\\s*${q}([a-z_]+)${q}`, 'g')
+  const oneArg = new RegExp(`rbacGuard\\(\\s*${q}${resource}:([a-z_]+)${q}`, 'g')
+  const codes = [
+    ...[...routeSource.matchAll(twoArg)].map((match) => `${resource}:${match[1]}`),
+    ...[...routeSource.matchAll(oneArg)].map((match) => `${resource}:${match[1]}`),
+  ]
   return [...new Set(codes)].sort()
 }
 
-/** The `'<namespace>:<action>'` string literals a gate file compares against. */
+/**
+ * The `<namespace>:<action>` string literals a gate file compares against, in any quote style.
+ * Same scope caveat as above: inline literals in the one file handed to it, nothing more.
+ */
 function parseQuotedCodes(gateSource: string, namespace: string): string[] {
-  const pattern = new RegExp(`'${namespace}:([a-z_]+)'`, 'g')
+  const pattern = new RegExp(`['"\`]${namespace}:([a-z_]+)['"\`]`, 'g')
   const codes = [...gateSource.matchAll(pattern)].map((match) => `${namespace}:${match[1]}`)
   return [...new Set(codes)].sort()
 }
@@ -119,6 +138,15 @@ function assertUpGrantsNothing(migrationSource: string): void {
  * THE reconciliation. Throws when the seed and the enforcement points disagree in either direction:
  * an enforced code that is ungrantable (the G09 bug), or a seeded code nothing enforces (dead
  * vocabulary that would quietly widen what an operator can hand out).
+ *
+ * WHAT THIS DOES AND DOES NOT CATCH. It catches drift in gates that are written as quote-delimited
+ * literals INSIDE the two files this suite reads (`src/routes/data-sources.ts` and
+ * `plugins/plugin-integration-core/lib/http-routes.cjs`), in either `rbacGuard` call shape. It does
+ * NOT catch a gate whose code is built at runtime (concatenated, held in a variable, interpolated),
+ * nor a gate added in any OTHER file — a new router mounting `rbacGuard('data_sources:purge')`
+ * somewhere else is invisible here and would reintroduce exactly the G09 bug. Closing that would
+ * take a repo-wide sweep of every `rbacGuard` call site, which is deliberately out of scope for this
+ * migration's suite; this is a tripwire on the known gates, not a proof about all gates.
  */
 function assertSeedMatchesEnforcement(seededCodes: string[], enforcedCodes: string[]): void {
   const seeded = [...new Set(seededCodes)].sort()
@@ -277,11 +305,15 @@ describe('integration/data_sources permission seed — vocabulary', () => {
     expect(self.startsWith('_') || self.startsWith('.')).toBe(false)
     expect(names.filter((name) => name === self)).toHaveLength(1)
 
-    const basename = self.replace(/\.ts$/, '')
-    const laterNames = names
-      .map((name) => name.replace(/\.ts$/, ''))
-      .filter((name) => name.startsWith('zzzz') && name > basename)
-    expect(laterNames, 'a newer migration exists; confirm ordering is still intended').toEqual([])
+    // Proof the glob above really is the migrations folder and not an empty/renamed directory —
+    // without this, `toContain(self)` could pass against a folder holding nothing else.
+    expect(names).toContain('20250924190000_create_rbac_tables.ts')
+
+    // NO ORDERING ASSERTION HERE, on purpose. `runMigrations` sets `allowUnorderedMigrations: true`
+    // (src/db/migrate.ts:32) and this migration's up() depends only on the `permissions` table
+    // existing, so relative position protects nothing. An "I must sort last" assertion would instead
+    // red on the next person's migration PR — `tests/unit/**` is collected by default and
+    // plugin-tests.yml runs core-backend tests unconditionally on any packages/core-backend/** change.
   })
 
   it('uses the repo seed shape: DO $$ table guard + ON CONFLICT (code) DO NOTHING', async () => {
@@ -358,6 +390,38 @@ describe('integration/data_sources permission seed — reconciliation with the g
 
     const seeded = parseSeededCodes(migrationSource).filter((code) => code.startsWith('integration:'))
     expect(() => assertSeedMatchesEnforcement(seeded, enforced)).not.toThrow()
+  })
+
+  it('the gate parsers see both rbacGuard shapes and every quote style', () => {
+    // `rbacGuard` accepts one argument OR two (src/rbac/rbac.ts:56-57) and the repo uses both forms.
+    // A parser that only understood `rbacGuard('x', 'y')` with single quotes could be bypassed by
+    // writing the gate any other legal way, which would make the reconciliation above quietly
+    // vacuous. This pins the widening in place.
+    const synthetic = [
+      "rbacGuard('data_sources', 'read')",
+      'rbacGuard("data_sources", "write")',
+      'rbacGuard(`data_sources`, `select`)',
+      "rbacGuard('data_sources:execute')",
+      'rbacGuard("data_sources:purge")',
+      'rbacGuard(`data_sources:vacuum`)',
+    ].join('\n')
+
+    expect(parseRbacGuardCodes(synthetic, 'data_sources')).toEqual([
+      'data_sources:execute',
+      'data_sources:purge',
+      'data_sources:read',
+      'data_sources:select',
+      'data_sources:vacuum',
+      'data_sources:write',
+    ])
+
+    expect(parseQuotedCodes(`'integration:read' "integration:write" \`integration:admin\``, 'integration'))
+      .toEqual(['integration:admin', 'integration:read', 'integration:write'])
+
+    // And the documented blind spot, asserted rather than merely claimed in a comment: a code built
+    // at runtime is invisible to both parsers. This is the residual risk §the docblock names.
+    const assembled = "const action = 'purge'\nrbacGuard('data_sources', action)"
+    expect(parseRbacGuardCodes(assembled, 'data_sources')).toEqual([])
   })
 
   it('MUTATION PROBE: dropping one seeded code makes the reconciliation throw', async () => {

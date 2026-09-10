@@ -210,13 +210,20 @@ for (const code of manifest.permissions) {
   )
 }
 // G09 — the LEGACY PLATFORM TIER this plugin's routes also gate on. Declared separately from the
-// app's own vocabulary (above) and derived here from the running gate rather than transcribed, so a
-// route that grows a fourth `integration:<action>` without a seed row reds this assertion. That is
-// the drift this suite exists to catch: an enforced-but-unseeded code cannot be granted at all,
-// because role_permissions/user_permissions carry a FOREIGN KEY onto permissions(code).
+// app's own vocabulary (above) and derived here from the running gate rather than transcribed. Why
+// it matters: an enforced-but-unseeded code cannot be granted at all, because
+// role_permissions/user_permissions carry a FOREIGN KEY onto permissions(code).
+//
+// SCOPE OF THIS TRIPWIRE, stated so nobody reads it as more than it is. It reds when a gate written
+// as a QUOTE-DELIMITED LITERAL (' " `) INSIDE lib/http-routes.cjs grows a new `integration:<action>`
+// that the manifest and the seed migration have not followed. It does NOT see a code assembled at
+// runtime (concatenation, variable, interpolated template), nor one added in any other file of this
+// plugin. Those routes remain possible and would reintroduce the G09 bug silently.
 const INTEGRATION_GATE_SOURCE = fs.readFileSync(path.join(PLUGIN_DIR, 'lib', 'http-routes.cjs'), 'utf8')
 const INTEGRATION_GATE_CODES = [
-  ...new Set([...INTEGRATION_GATE_SOURCE.matchAll(/'(integration:[a-z_]+)'/g)].map((match) => match[1])),
+  ...new Set(
+    [...INTEGRATION_GATE_SOURCE.matchAll(/['"`](integration:[a-z_]+)['"`]/g)].map((match) => match[1]),
+  ),
 ].sort()
 assert.ok(
   INTEGRATION_GATE_CODES.length > 0,

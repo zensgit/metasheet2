@@ -71,7 +71,15 @@
 与应用自身词表分开。该键不被 `PlatformAppManifestSchema` 收录(顶层非 `.strict()`,未知键被 zod 丢弃),
 所以对运行时零影响;它的价值在于被 `__tests__/app-manifest.test.cjs` 强制对账:
 `platformPermissions.codes` 必须**逐字等于**从 `lib/http-routes.cjs` 解析出的门字面量,
-且 `seededBy` 指向的迁移必须真的种了每一个码。多一个门少一个种子,测试立刻红。
+且 `seededBy` 指向的迁移必须真的种了每一个码。
+
+**这道对账的射程要说清楚**(它是已知门上的绊线,不是"所有门"的证明):只有**以引号字面量
+(`'` / `"` / 反引号)写在 `lib/http-routes.cjs` 或 `routes/data-sources.ts` 之内**的门会被看见。
+以下四种写法可以无声绕过:双引号/模板串以外的**运行时拼接**(变量、字符串相加、插值)、
+**单参形式** `rbacGuard('data_sources:purge')`(`src/rbac/rbac.ts:56-57` 支持,仓库已有多处先例;
+解析器现已同时匹配单参与双参,但仍限于上述两个文件)、以及**写在这两个文件之外**的任何门
+(例如另起一个 router 挂 `rbacGuard('data_sources:purge')`)。要真正封死需要对全仓 `rbacGuard`
+调用点做一次横扫,那超出本迁移套件的范围——见验证文档 §4 的后续单。
 
 `app.manifest.json` **不在** sealed-export 溯源 pin 覆盖内
 (`lib/sealed-export/vectors/s6a-package-provenance-pins.json` 全文不含 `app.manifest`),故无需重打 pin;

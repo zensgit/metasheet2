@@ -448,9 +448,13 @@ PATCH /api/admin/users/<用户 id>/namespaces/data_sources/admission    { "enabl
 PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission      { "enabled": true }
 ```
 
-**核对**:以该用户身份调 `GET /api/auth/me`,返回的 `permissions` 里必须逐字看到上表里给的每一个码。看不到就是**角色没挂上**或**那个命名空间的准入没开**——这两种情况在接口上都表现为 403,分不出来,所以两边都要查。
+**核对(先看这条前置,否则会白折腾)**:改完角色/准入后,**让该账号退出重新登录**再查。原因:RBAC 权限有进程内缓存(`rbac/service.ts:12-13`,`RBAC_CACHE_TTL_MS` 默认 **60 秒**),而**只有** `PATCH .../admission` 那半边会主动失效缓存(`invalidateUserPerms`);**直接写 SQL 建角色/挂码不会清缓存**。所以刚改完立刻查看不到属正常,等一分钟或重登即可。
 
-> **一个已知的门错配(不影响上面的做法)**:前端 `/data-sources` 路由的 meta 要求 `integration:write`,而左侧导航的显示谓词没设权限,两边口径不一致。**这一项由在飞的 #5587 处理**(该分支已把 `/data-sources` 改成重定向),合并后此错配自动消失,本节不需要因此调整。
+然后以该用户身份调 `GET /api/auth/me`,返回的 `permissions` 里应逐字看到上表里给的每一个码。看不到,通常是**角色没挂上**或**那个命名空间的准入没开**——这两种情况在接口上都表现为 403,分不出来,所以两边都要查。
+
+> **别把 `/api/auth/me` 当成权限门的唯一裁判。** 三个已知偏差:①上面说的 60 秒缓存;②**非生产**机器上如果开了 `RBAC_TOKEN_TRUST`,鉴权会直接采信 JWT 里的旧 `perms` 声明(`src/auth/AuthService.ts:171,199`),于是 `/me` 可能反映的是**发令牌那一刻**的权限而不是库里的现状——生产环境该开关被强制忽略(`security/auth-runtime-config.ts:84-85`);③`/me` 的返回里除了过滤后的权限码,还有由权限**派生**的能力位(如考勤自助 `attendance`/`attendanceAdmin`/`attendanceImport`,`routes/auth.ts:285-288`),它们不是权限码本身,别拿来反推授权。**最终判据是真正调一次目标接口看响应码**,`/me` 只用于快速定位。
+
+> **一个已知的门错配(不影响上面的做法,方向与早前记述相反)**:被 `integration:write` 挡住的是**导航链接**——`App.vue:70` 的 `/data-sources` 链接由 `canUseIntegration`(`App.vue:155-158`,判据 `hasPermission('integration:write')`)控制显示;而 **`/data-sources` 路由本身没有权限门**:它的 meta 只有 `title`/`titleZh`/`requiresAuth`,不带 `permissions` 键(`apps/web/src/router/appRoutes.ts:186-191`),而 `isRoutePermitted` 在没有 `permissions` 时直接放行(`routeAccess.ts:29-31`)。**实际后果**:没有 `integration:write` 的账号看不到入口,但直接敲地址仍能打开页面(页面内的数据仍受后端 `data_sources:*` 与属主判定约束)。**这一项由在飞的 #5587 处理**(该分支已把 `/data-sources` 改成重定向),合并后此错配自动消失,本节不需要因此调整。
 
 ---
 
