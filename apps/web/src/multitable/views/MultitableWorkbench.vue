@@ -165,7 +165,7 @@
             @click="railCollapsed = !railCollapsed"
           >{{ railCollapsed ? '›' : '‹' }}</button>
         </div>
-        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" />
+        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" />
       </aside>
       <div class="mt-workbench__main">
         <MetaDashboardView
@@ -641,6 +641,8 @@ import {
   duplicateRowsSkipped as fmtDuplicateRowsSkipped,
   recordsDeleted as fmtRecordsDeleted,
   recordNotFound as fmtRecordNotFound,
+  sheetDeleteConfirm as fmtSheetDeleteConfirm,
+  sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
 } from '../utils/workbench-labels'
 import { recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
@@ -870,6 +872,10 @@ const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workb
 // records; Reset may delete them and retains its typed confirmation. No wall-clock asOf crosses either wire.
 const pitResetEnabled = computed(() => capabilitySource.value?.pitResetEnabled === true)
 const sheetRevertEnabled = computed(() => capabilitySource.value?.sheetRevertEnabled === true)
+// Whole-sheet delete authority for the SELECTED sheet — the same server-derived, FE-read-only shape as
+// pitResetEnabled: read straight off the /context capabilities object (`=== true`), never a role fallback,
+// so an old backend, a legacy role-string source or a stale object all fail CLOSED (trash button hidden).
+const canDeleteSheet = computed(() => capabilitySource.value?.canDeleteSheet === true)
 const listHistoryEventsWire = (
   baseId: string,
   params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
@@ -3302,6 +3308,41 @@ async function onRenameSheet(sheetId: string, name: string) {
     await workbench.client.renameSheet(sheetId, name)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
   } catch (e: any) { showError(e.message ?? wb('toast.sheetRenameFailed', isZh.value)) }
+}
+
+// Whole-sheet soft delete (DELETE /api/multitable/sheets/:id). The rail only shows the trash button
+// for the SELECTED sheet when the server-derived `canDeleteSheet` bit is true, and this handler
+// re-checks that bit so a stale rail can never issue the request. Confirm first — the same
+// window.confirm idiom every other destructive prompt in this file uses — with copy that names the
+// sheet and states the consequence (records hidden with it; admin-only API restore, no UI yet).
+// Refusals are coded (409 SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED, 404 SHEET_DELETED) and get
+// plain-language toasts by CODE; anything else surfaces the server message or the generic toast.
+//
+// Refresh: if the deleted sheet is the ACTIVE one, re-pull the base with `loadBaseContext(baseId)`
+// — NOT `switchBase`, which short-circuits to `return true` for the same base with no sheetId
+// (useMultitableWorkbench.ts) and would leave the workbench pointing at a sheet that no longer
+// exists. /context with only baseId selects the first remaining readable sheet server-side, and
+// syncContextState falls back to the first listed sheet (or '' when the base is now empty — the
+// existing no-sheet state). If another sheet was deleted, `loadSheetMeta` re-pulls the list the way
+// onRenameSheet does.
+async function onDeleteSheet(sheetId: string) {
+  if (!canDeleteSheet.value) return
+  const target = workbench.sheets.value.find((s) => s.id === sheetId)
+  if (!window.confirm(fmtSheetDeleteConfirm(target?.name ?? sheetId, isZh.value))) return
+  try {
+    await workbench.client.deleteSheet(sheetId)
+  } catch (e: any) {
+    showError(fmtSheetDeleteErrorMessage(e, isZh.value))
+    if (e?.code === 'SHEET_DELETED') await workbench.loadSheetMeta(workbench.activeSheetId.value)
+    return
+  }
+  showSuccess(wb('toast.sheetDeleted', isZh.value))
+  if (sheetId === workbench.activeSheetId.value) {
+    const ok = await workbench.loadBaseContext(workbench.activeBaseId.value)
+    if (!ok) showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
+  } else {
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+  }
 }
 
 // --- Base management ---
