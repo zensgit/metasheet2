@@ -58,11 +58,22 @@ export interface DataSourceTableInfo {
   name: string
   schema?: string
   columns?: DataSourceColumnInfo[]
+  /**
+   * Backend marker for "were this entry's columns actually read?" (SchemaInfo/TableInfo.columnsLoaded).
+   * false = list-only entry, `columns` is empty BY CONSTRUCTION — NOT "this table has no fields".
+   * Absent = legacy/loaded shape, read `columns` as before.
+   */
+  columnsLoaded?: boolean
 }
 
 export interface DataSourceSchemaInfo {
   tables?: DataSourceTableInfo[]
   views?: DataSourceTableInfo[]
+  /**
+   * 'list' = names only (the default for GET /:id/schema without includeColumns);
+   * 'full' = per-table columns were read. Absent = adapters that never had an N+1 listing.
+   */
+  detail?: 'list' | 'full'
 }
 
 export interface DataSourceSelectPayload {
