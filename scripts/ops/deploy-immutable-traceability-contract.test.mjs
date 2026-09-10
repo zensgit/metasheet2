@@ -17,6 +17,23 @@ function assertContains(haystack, needle, label) {
   )
 }
 
+test('frontend build gets a bounded build-only heap budget', () => {
+  const raw = readRepoFile('Dockerfile.frontend')
+  const stages = raw.split(/^FROM nginx:[^\n]+$/m)
+  assert.equal(stages.length, 2)
+  assert.match(stages[0], /^RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm --filter @metasheet\/web build$/m)
+  assert.doesNotMatch(stages[0], /^(?:ENV|ARG) NODE_OPTIONS/m)
+  assert.doesNotMatch(stages[1], /NODE_OPTIONS|max-old-space-size/)
+})
+
+test('frontend heap fix retains typecheck before bundling', () => {
+  const pkg = JSON.parse(readRepoFile('apps', 'web', 'package.json'))
+  assert.equal(pkg.scripts.build, 'vue-tsc -b && vite build')
+  const raw = readRepoFile('Dockerfile.frontend')
+  assert.match(raw, /^RUN pnpm install --frozen-lockfile$/m)
+  assert.doesNotMatch(raw, /--noCheck|SKIP_TYPECHECK|\|\|\s*true/)
+})
+
 test('docker images carry commit trace metadata for backend and web', () => {
   const backendDockerfile = readRepoFile('Dockerfile.backend')
   const frontendDockerfile = readRepoFile('Dockerfile.frontend')
