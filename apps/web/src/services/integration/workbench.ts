@@ -336,8 +336,13 @@ export interface IntegrationExternalWriteApplyResult {
   [key: string]: unknown
 }
 
+// G34: `pipelineId` is OPTIONAL because both list routes make it optional — runsList
+// (http-routes.cjs:9639 → pipelines.cjs:698) and deadLettersList (http-routes.cjs:9674 →
+// dead-letter.cjs:121) only add the pipeline predicate when the value is truthy, and the
+// tenant/workspace scope predicate is applied either way. Omitting it is a CROSS-PIPELINE read
+// inside the caller's own scope, not a wider one.
 export interface IntegrationPipelineObservationQuery extends IntegrationScope {
-  pipelineId: string
+  pipelineId?: string
   status?: string
   limit?: number
   offset?: number

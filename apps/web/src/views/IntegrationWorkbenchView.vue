@@ -378,6 +378,9 @@
     <IntegrationMonitoringSection
       :observation-summary="observationSummary"
       :observing-pipeline="observingPipeline"
+      :monitoring-query="monitoringQuery"
+      :current-pipeline-id="savedPipelineId"
+      :apply-monitoring-query="applyMonitoringQuery"
       :pipeline-runs="pipelineRuns"
       :dead-letters="deadLetters"
       :bi="bi"
@@ -510,6 +513,15 @@ import {
   type IntegrationTemplatePreviewRequest,
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
+// G34 运行监控到达率: query/pagination construction for the 运行监控 section lives in a PURE
+// module (no IO), so the section's reach can be unit-tested without mounting this 5k-line view.
+import {
+  buildDeadLetterRequestParams,
+  buildRunsRequestParams,
+  createMonitoringQueryState,
+  createMonitoringResponseGate,
+  type MonitoringQueryState,
+} from '../services/integration/monitoringQuery'
 import MetaIntegrationFieldRuleAuthoring from '../components/integration/MetaIntegrationFieldRuleAuthoring.vue'
 import IntegrationReadSourceConfigPanel from '../components/integration/IntegrationReadSourceConfigPanel.vue'
 import IntegrationReadSourceCompositionPanel from '../components/integration/IntegrationReadSourceCompositionPanel.vue'
@@ -863,6 +875,12 @@ const stockPreparationOptionSyncResult = ref<IntegrationStockPreparationOptionSy
 const syncingStockPreparationOptions = ref(false)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
+// G34: the section's own filter/pagination cursor. The view holds it (the loader below is the
+// single place that reads it); IntegrationMonitoringSection renders the controls and hands back
+// a NEW state built by the pure module's transitions.
+const monitoringQuery = ref<MonitoringQueryState>(createMonitoringQueryState())
+// Last-write-wins gate for overlapping observation reads (5s polling + operator filter changes).
+const observationGate = createMonitoringResponseGate()
 // IU-1 (RATIFIED addendum): the raw `errorMessage` free-text field must NEVER reach the DOM — it is
 // scrubbed for secret-shaped values only at dead-letter *write* time (see
 // plugins/plugin-integration-core/lib/dead-letter.cjs scrubSecretStringValue), so rendering it here would
@@ -3253,32 +3271,38 @@ function buildPipelinePayload() {
   }
 }
 
-function buildObservationQuery(status?: string) {
-  const pipelineId = savedPipelineId.value.trim()
-  if (!pipelineId) throw new Error('请先保存 Pipeline，或粘贴已有 Pipeline ID')
-  return {
-    ...currentScope(),
-    pipelineId,
-    ...(status ? { status } : {}),
-    limit: 5,
+// G34: monitoring is no longer pinned to one saved pipeline. The pure module decides which
+// parameters the two list routes actually get (pipelineId omitted = cross-pipeline read INSIDE
+// the same tenant/workspace scope — the scope predicate is applied server-side either way).
+async function refreshPipelineObservation(silent = false): Promise<void> {
+  // Ticket FIRST: a slower earlier read must never repaint the list under a newer cursor.
+  const ticket = observationGate.issue()
+  observingPipeline.value = true
+  try {
+    const scope = currentScope()
+    const fallbackPipelineId = savedPipelineId.value
+    const [runs, letters] = await Promise.all([
+      listIntegrationPipelineRuns(buildRunsRequestParams(monitoringQuery.value, scope, fallbackPipelineId)),
+      listIntegrationDeadLetters(buildDeadLetterRequestParams(monitoringQuery.value, scope, fallbackPipelineId)),
+    ])
+    if (!observationGate.isCurrent(ticket)) return
+    pipelineRuns.value = runs
+    deadLetters.value = letters
+    if (!silent) setStatus('Pipeline 运行记录已刷新', 'success')
+  } catch (error) {
+    if (!observationGate.isCurrent(ticket)) return
+    if (!silent) setStatus(error instanceof Error ? error.message : String(error), 'error')
+  } finally {
+    // A superseded read must not clear the spinner the newer read is still using.
+    if (observationGate.isCurrent(ticket)) observingPipeline.value = false
   }
 }
 
-async function refreshPipelineObservation(silent = false): Promise<void> {
-  observingPipeline.value = true
-  try {
-    const [runs, openDeadLetters] = await Promise.all([
-      listIntegrationPipelineRuns(buildObservationQuery()),
-      listIntegrationDeadLetters(buildObservationQuery('open')),
-    ])
-    pipelineRuns.value = runs
-    deadLetters.value = openDeadLetters
-    if (!silent) setStatus('Pipeline 运行记录已刷新', 'success')
-  } catch (error) {
-    if (!silent) setStatus(error instanceof Error ? error.message : String(error), 'error')
-  } finally {
-    observingPipeline.value = false
-  }
+// The section's only write path into the cursor: it hands back a state the pure module built,
+// the view stores it and re-reads. Silent — filter changes are not a status-bar event.
+async function applyMonitoringQuery(next: MonitoringQueryState): Promise<void> {
+  monitoringQuery.value = next
+  await refreshPipelineObservation(true)
 }
 
 function runRowSummaries(run: IntegrationPipelineRun): IntegrationTargetWriteSummary[] {
