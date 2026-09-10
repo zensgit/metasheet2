@@ -634,7 +634,13 @@ export function createDataSourcePluginFacade(
     },
     async getSchema(dataSourceId, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)
-      return adapter.getSchema(schema)
+      // #5595: the listing is list-only by default at the adapter, but THIS facade's consumers
+      // read columns straight off the listing (plugin-integration-core's read-only source adapter
+      // maps every entry's `columns` into the object schema its listObjects() returns), so the
+      // facade asks for them EXPLICITLY. Silently handing those callers empty `columns` would
+      // read as "this table has no fields" — a wrong answer, not a slow one. The adapter bounds
+      // this path with the schema-detail budget (coded 504 instead of an open-ended hang).
+      return adapter.getSchema(schema, { includeColumns: true })
     },
     async getTableInfo(dataSourceId, object, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)
@@ -861,7 +867,13 @@ export function createDataSourceWritePluginFacade(
     },
     async getSchema(dataSourceId, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)
-      return adapter.getSchema(schema)
+      // #5595: the listing is list-only by default at the adapter, but THIS facade's consumers
+      // read columns straight off the listing (plugin-integration-core's read-only source adapter
+      // maps every entry's `columns` into the object schema its listObjects() returns), so the
+      // facade asks for them EXPLICITLY. Silently handing those callers empty `columns` would
+      // read as "this table has no fields" — a wrong answer, not a slow one. The adapter bounds
+      // this path with the schema-detail budget (coded 504 instead of an open-ended hang).
+      return adapter.getSchema(schema, { includeColumns: true })
     },
     async getTableInfo(dataSourceId, object, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)
