@@ -13,24 +13,62 @@
     STEP1B claimless token, same request                                  -> 401 AUTHENTICATED_TENANT_REQUIRED
     STEP2  owner: POST /api/integration/external-systems (sql-readonly)    -> 201, then GET echoes connectionId
     STEP2B owner: same body + credentials                                 -> 400 CONNECTION_BINDING_CREDENTIALS_FORBIDDEN
-    STEP3  owner: POST .../external-systems/:id/test                      -> 200, then GET shows lastTestedAt
-    STEP4  owner: GET  .../stock-preparation/source-preflight              -> 200 (records data.ready)
+    STEP3  owner: POST .../external-systems/:id/test                      -> 200 AND data.ok true,
+                                                                            then GET shows lastTestedAt,
+                                                                            status != 'error', empty lastError
+    STEP4  owner: GET  .../stock-preparation/source-binding                -> is the table action bound to
+                                                                            THIS run's source? (closed loop)
+           owner: GET  .../external-systems/:boundId                       -> connectionId of the bound source
+           owner: GET  .../stock-preparation/source-preflight              -> 200 AND data.ok/data.verdict=go
     STEP5  owner: DELETE /api/data-sources/:id (still referenced)          -> 409 DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS
     STEP6  operator: GET .../operator/projects, POST .../table-actions/:id/dry-run
     STEP7  claimless token + x-tenant-id header, create SQL binding        -> 403 OPERATOR_SCOPE_TENANT_REQUIRED
     STEP8  owner, create SQL binding with a foreign tenantId               -> 403 TENANT_MISMATCH
     STEP9  operator: POST /api/data-sources/:id/query                     -> refused (403 or 404)
 
+  CLOSED LOOP vs ENV PROBE. STEP4's preflight and STEP6's dry-run read
+  whatever source the deployed table action is bound to -- which is normally
+  NOT the throwaway source this run just created. This script never rebinds
+  production to close that gap. It READS the binding instead
+  (GET /api/integration/stock-preparation/source-binding ->
+  effectiveExternalSystemId -> that system's connectionId) and labels both
+  steps:
+    CLOSED_LOOP  the bound source IS this run's new data source; "new source
+                 -> front-line dry-run" was proven end to end.
+    ENV_PROBE    the bound source is a pre-existing one; STEP4/STEP6 are then
+                 independent probes of the deployment, and the summary says so
+                 in as many words. A run like that can never conclude
+                 CLOSED_LOOP_PASS.
+
   Every request is logged values-free: step id, HTTP status, error.code, and
   fixed booleans/counts only. Never the token, credentials, connection
-  string, or raw response body. Any FAIL exits 1. A step that expected a 4xx
-  refusal and got a 2xx is marked ISOLATION_BREACH and halts every step
-  after it immediately (best-effort cleanup still runs).
+  string, or raw response body -- the pre-existing bound source is named only
+  by `boundSourceDigest`, the first 12 hex of SHA-256(id).
+
+  Any FAIL exits 1. A step that expected a 4xx refusal and got a 2xx is
+  marked ISOLATION_BREACH and halts every step after it immediately
+  (best-effort cleanup still runs).
+
+  CREDENTIAL FILE CONVENTION. -SqlUsernameFile / -SqlPasswordFile are read
+  BYTE-EXACT except for ONE optional trailing newline (CRLF or LF): a
+  leading or trailing SPACE in a SQL password is part of the password and is
+  preserved. Token files (-OwnerTokenFile / -OperatorTokenFile /
+  -ClaimlessTokenFile) are whitespace-trimmed at both ends, because a bearer
+  token cannot contain whitespace. Write credential files as UTF-8 (BOM
+  optional) or ASCII; `Set-Content -NoNewline` and a single trailing newline
+  both round-trip identically.
+
+  -SelfTest runs the pure verdict/classifier functions plus the two file
+  readers against built-in fixtures, prints one values-free JSON document and
+  exits 0. It opens no socket and reads no real credential; the contract test
+  (scripts/ops/__tests__/stock-preparation-sql-source-onboarding-acceptance-contract.test.mjs)
+  drives it and grades the output.
 
   Reference reading for every expected status/code lives in:
     packages/core-backend/src/routes/data-sources.ts
     plugins/plugin-integration-core/lib/http-routes.cjs
     plugins/plugin-integration-core/lib/external-systems.cjs
+    plugins/plugin-integration-core/lib/stock-preparation-source-preflight.cjs
     plugins/plugin-integration-core/lib/stock-preparation-table-actions.cjs
 #>
 [CmdletBinding()]
@@ -51,6 +89,8 @@ param(
   [string]$ActionId = 'plm.stock-preparation.pull-bom.v1',
   [string]$ProjectNo,
   [switch]$DryRun,
+  [switch]$SelfTest,
+  [string]$SelfTestFixtureDir,
   [switch]$KeepFixtures,
   [string]$ReportPath = (Join-Path (Get-Location).Path (
     'sql-source-onboarding-acceptance-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') + '.json'
@@ -74,6 +114,8 @@ $script:Plan = @(
   [ordered]@{ Id = 'STEP2B-CREDENTIALS-FORBIDDEN';                 Method = 'POST';   Path = '/api/integration/external-systems';                        Description = 'owner replays the binding with a credentials document attached' }
   [ordered]@{ Id = 'STEP3-TEST-CONNECTION';                        Method = 'POST';   Path = '/api/integration/external-systems/{externalSystemId}/test'; Description = 'owner tests the bound connection' }
   [ordered]@{ Id = 'STEP3-GET-LAST-TESTED';                        Method = 'GET';    Path = '/api/integration/external-systems/{externalSystemId}';    Description = 'owner confirms lastTestedAt was persisted' }
+  [ordered]@{ Id = 'STEP4-ACTION-SOURCE-BINDING';                  Method = 'GET';    Path = '/api/integration/stock-preparation/source-binding';       Description = 'owner reads which source the table action is actually bound to' }
+  [ordered]@{ Id = 'STEP4-BOUND-SOURCE-CONNECTION';                Method = 'GET';    Path = '/api/integration/external-systems/{boundExternalSystemId}'; Description = 'owner reads the bound systems connectionId to compare it with this runs data source' }
   [ordered]@{ Id = 'STEP4-SOURCE-PREFLIGHT';                       Method = 'GET';    Path = '/api/integration/stock-preparation/source-preflight';     Description = 'owner reads the source-preflight report' }
   [ordered]@{ Id = 'STEP5-DELETE-REFERENCED-CONFLICT';             Method = 'DELETE'; Path = '/api/data-sources/{dataSourceId}';                         Description = 'owner tries to delete the still-referenced data source' }
   [ordered]@{ Id = 'STEP6A-OPERATOR-PROJECT-DIRECTORY';            Method = 'GET';    Path = '/api/integration/stock-preparation/operator/projects';    Description = 'operator reads the project directory' }
@@ -91,6 +133,128 @@ if ($DryRun) {
     Write-Host ("  {0,-6} {1,-58} {2}" -f $step.Method, $step.Path, $step.Id)
   }
   exit 0
+}
+
+# ---------------------------------------------------------------------------
+# PURE VERDICT FUNCTIONS -- no HTTP, no files, no script-scope state. They sit
+# HERE, above `Invoke-Api`, on purpose: PowerShell binds a function name only
+# when execution passes its definition, so `-SelfTest` below cannot reach a
+# network call even by accident.
+#
+# Every one of them returns [pscustomobject]@{ Result; Code } where Code comes
+# from a fixed vocabulary -- never a message, a lastError, or an id from the
+# server.
+# ---------------------------------------------------------------------------
+function New-Verdict {
+  param([string]$Result, [string]$Code)
+  return [pscustomobject]@{ Result = $Result; Code = $Code }
+}
+
+function Get-JsonField {
+  # `Set-StrictMode -Version Latest` turns `$obj.missing` into a TERMINATING
+  # PropertyNotFoundException on Windows PowerShell 5.1, so every response
+  # field on a payload whose shape is the server's business is read here.
+  param($Object, [string]$Name)
+  if ($null -eq $Object) { return $null }
+  if ($Object -is [System.Collections.IDictionary]) {
+    if ($Object.Contains($Name)) { return $Object[$Name] }
+    return $null
+  }
+  $property = $Object.PSObject.Properties[$Name]
+  if ($null -eq $property) { return $null }
+  return $property.Value
+}
+
+function Test-NonEmptyText {
+  param($Value)
+  if ($null -eq $Value) { return $false }
+  return ("$Value").Trim().Length -gt 0
+}
+
+# STEP3 leg 1 -- the business-success half. `externalSystemsTest`
+# (http-routes.cjs) answers 200 EVEN WHEN THE CONNECTION FAILED: the adapter
+# throw is caught, converted to `testConnectionErrorResult` ({ ok:false, code,
+# message }) and handed to `sendOk`. HTTP 200 alone therefore proves only that
+# the route ran. `data.ok` must be a REAL boolean true -- absent, "true" and 1
+# all fail closed.
+function Get-ConnectionTestCallVerdict {
+  param([int]$Status, $Data)
+  if ($Status -ne 200) { return New-Verdict 'FAIL' 'TEST_CALL_HTTP_NOT_200' }
+  $ok = Get-JsonField $Data 'ok'
+  if (-not ($ok -is [bool]) -or -not $ok) { return New-Verdict 'FAIL' 'TEST_RESULT_NOT_OK' }
+  return New-Verdict 'PASS' 'CONNECTION_TEST_OK'
+}
+
+# STEP3 leg 2 -- the persisted half. `persistExternalSystemTestResult` saves a
+# FAILED test too: `resolveTestedStatus` writes status='error' and
+# `resolveTestError` writes a non-null lastError. Asserting only that
+# `lastTestedAt` exists passes on exactly that row, which is the fake-PASS this
+# leg closes. status='inactive' is NOT a failure -- an intentionally inactive
+# system stays inactive after a good test. lastError is asserted EMPTY and
+# never echoed.
+function Get-ConnectionReadbackVerdict {
+  param([int]$Status, $Data)
+  if ($Status -ne 200) { return New-Verdict 'FAIL' 'READBACK_HTTP_NOT_200' }
+  if (-not (Test-NonEmptyText (Get-JsonField $Data 'lastTestedAt'))) { return New-Verdict 'FAIL' 'TESTED_AT_ABSENT' }
+  if (("$(Get-JsonField $Data 'status')") -eq 'error') { return New-Verdict 'FAIL' 'SOURCE_STATUS_ERROR' }
+  if (Test-NonEmptyText (Get-JsonField $Data 'lastError')) { return New-Verdict 'FAIL' 'LAST_ERROR_PRESENT' }
+  return New-Verdict 'PASS' 'CONNECTION_VERIFIED'
+}
+
+# STEP4 preflight. The real report is
+# `{ ok: blockers.length === 0, verdict: 'go' | 'no-go', ... }`
+# (stock-preparation-source-preflight.cjs). There is no `ready` key anywhere on
+# that route, so an assertion on one reads $null on every deployment and leaves
+# HTTP 200 as the only real gate.
+function Get-SourcePreflightVerdict {
+  param([int]$Status, $Data)
+  if ($Status -ne 200) { return New-Verdict 'FAIL' 'PREFLIGHT_HTTP_NOT_200' }
+  $ok = Get-JsonField $Data 'ok'
+  $verdict = "$(Get-JsonField $Data 'verdict')"
+  if (-not ($ok -is [bool]) -or -not (Test-NonEmptyText $verdict)) { return New-Verdict 'FAIL' 'PREFLIGHT_FIELDS_ABSENT' }
+  if ($verdict -eq 'no-go') { return New-Verdict 'FAIL' 'PREFLIGHT_VERDICT_NO_GO' }
+  if ($verdict -ne 'go') { return New-Verdict 'FAIL' 'PREFLIGHT_VERDICT_UNKNOWN' }
+  if (-not $ok) { return New-Verdict 'FAIL' 'PREFLIGHT_NOT_OK' }
+  return New-Verdict 'PASS' 'PREFLIGHT_GO'
+}
+
+# STEP4/STEP6 scope. READ-ONLY id arithmetic: it answers "is the table action
+# the front line will run bound to the source this run just created?" and never
+# rebinds anything to make the answer yes. Anything short of a proven match is
+# ENV_PROBE, so an unreadable binding degrades the CLAIM, never the gate.
+function Get-ActionSourceChainVerdict {
+  param(
+    [int]$BindingStatus,
+    $BindingData,
+    [string]$ExpectedActionId,
+    [int]$BoundSystemStatus,
+    $BoundSystemData,
+    [string]$ExpectedDataSourceId
+  )
+  if ($BindingStatus -eq 401 -or $BindingStatus -eq 403) { return New-Verdict 'ENV_PROBE' 'BINDING_READBACK_FORBIDDEN' }
+  if ($BindingStatus -ne 200) { return New-Verdict 'ENV_PROBE' 'BINDING_READBACK_UNAVAILABLE' }
+  if (("$(Get-JsonField $BindingData 'actionId')") -ne $ExpectedActionId) { return New-Verdict 'ENV_PROBE' 'ACTION_ID_MISMATCH' }
+  if (-not (Test-NonEmptyText (Get-JsonField $BindingData 'effectiveExternalSystemId'))) { return New-Verdict 'ENV_PROBE' 'NO_SOURCE_BOUND' }
+  if ($BoundSystemStatus -ne 200) { return New-Verdict 'ENV_PROBE' 'BOUND_SYSTEM_UNREADABLE' }
+  $connectionId = "$(Get-JsonField $BoundSystemData 'connectionId')"
+  if (-not (Test-NonEmptyText $connectionId)) { return New-Verdict 'ENV_PROBE' 'BOUND_SYSTEM_HAS_NO_CONNECTION' }
+  if ($connectionId -ne $ExpectedDataSourceId) { return New-Verdict 'ENV_PROBE' 'BOUND_TO_OTHER_SOURCE' }
+  return New-Verdict 'CLOSED_LOOP' 'BOUND_TO_THIS_RUNS_SOURCE'
+}
+
+function Get-IdDigest {
+  # The values-free way to name a pre-existing source in a report: enough to
+  # match against a known id (hash it the same way) and to tell two runs apart,
+  # never the id itself.
+  param([string]$Value)
+  if ([string]::IsNullOrEmpty($Value)) { return 'n/a' }
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Value))
+  } finally {
+    $sha256.Dispose()
+  }
+  return (-join ($bytes | ForEach-Object { $_.ToString('x2') })).Substring(0, 12)
 }
 
 # ---------------------------------------------------------------------------
@@ -136,11 +300,17 @@ function Add-AcceptanceResult {
 }
 
 # ---------------------------------------------------------------------------
-# Secrets — read from file, trimmed, never echoed. A missing REQUIRED file
-# throws; a missing OPTIONAL file (claimless token, operator token) is the
-# caller's own SKIP signal for the negative/operator checks that need it.
+# Secrets — read from file, never echoed. A missing REQUIRED file throws; a
+# missing OPTIONAL file (claimless token, operator token) is the caller's own
+# SKIP signal for the negative/operator checks that need it.
+#
+# TWO readers, not one. A bearer token cannot contain whitespace, so trimming
+# it is safe and forgiving. A SQL login or password CAN legitimately begin or
+# end with a space, and `.Trim()` silently rewrote it into a different
+# credential -- an authentication failure that looks exactly like a wrong
+# password. See the file convention in the header block.
 # ---------------------------------------------------------------------------
-function Read-AcceptanceSecret {
+function Read-AcceptanceFileText {
   param([string]$Path, [switch]$Required, [string]$Label)
   if (-not $Path -or $Path.Trim().Length -eq 0) {
     if ($Required) { throw [System.InvalidOperationException]::new("MISSING_REQUIRED_INPUT:$Label") }
@@ -150,9 +320,169 @@ function Read-AcceptanceSecret {
     if ($Required) { throw [System.InvalidOperationException]::new("FILE_NOT_FOUND:$Label") }
     return $null
   }
-  $raw = Get-Content -LiteralPath $Path -Raw
-  if ($null -eq $raw) { return '' }
+  # NOT `Get-Content -Raw`: Windows PowerShell 5.1 decodes a BOM-less file with
+  # the ANSI code page, which mangles a UTF-8 password on a zh-CN box.
+  # ReadAllText honours a BOM when there is one and decodes UTF-8 when there is
+  # not, and it returns the trailing newline instead of eating it.
+  $resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
+  return [System.IO.File]::ReadAllText($resolved, [System.Text.Encoding]::UTF8)
+}
+
+function Read-AcceptanceToken {
+  # Whitespace-trimmed at BOTH ends: no bearer token contains whitespace, so
+  # this can only ever remove an editor's stray newline or indent.
+  param([string]$Path, [switch]$Required, [string]$Label)
+  $raw = Read-AcceptanceFileText -Path $Path -Required:$Required -Label $Label
+  if ($null -eq $raw) { return $null }
   return $raw.Trim()
+}
+
+function Read-AcceptanceCredential {
+  # Byte-exact apart from ONE trailing newline (CRLF or LF) -- the one nearly
+  # every editor appends. Leading/trailing SPACES survive. A SECOND trailing
+  # newline also survives, so a double-newline file fails to authenticate
+  # loudly instead of being silently repaired into something that works here
+  # and nowhere else.
+  param([string]$Path, [switch]$Required, [string]$Label)
+  $raw = Read-AcceptanceFileText -Path $Path -Required:$Required -Label $Label
+  if ($null -eq $raw) { return $null }
+  if ($raw.EndsWith("`r`n")) { return $raw.Substring(0, $raw.Length - 2) }
+  if ($raw.EndsWith("`n")) { return $raw.Substring(0, $raw.Length - 1) }
+  return $raw
+}
+
+# ---------------------------------------------------------------------------
+# -SelfTest — drive the pure verdict functions above on fixed synthetic
+# payloads and the two readers above on caller-supplied FIXTURE files, print
+# one values-free JSON document, exit 0. No socket (`Invoke-Api` is not defined
+# yet at this point in the file), no server, no real credential:
+# -SelfTestFixtureDir is for throwaway probe files written by the contract
+# test, never for a real token or password file.
+#
+# The output says WHAT EACH CLASSIFIER DECIDED and deliberately never says what
+# the answer was supposed to be. The expectations live in
+# scripts/ops/__tests__/stock-preparation-sql-source-onboarding-acceptance-contract.test.mjs,
+# so this script cannot grade its own homework.
+# ---------------------------------------------------------------------------
+if ($SelfTest) {
+  $selfTestCases = New-Object System.Collections.ArrayList
+  $selfTestReaders = New-Object System.Collections.ArrayList
+
+  function Add-SelfTestCase {
+    param([string]$Id, [string]$Kind, $Verdict)
+    [void]$selfTestCases.Add([pscustomobject]([ordered]@{
+      id = $Id
+      kind = $Kind
+      result = $Verdict.Result
+      code = $Verdict.Code
+    }))
+  }
+
+  function ConvertFrom-SelfTestJson {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $null }
+    return ($Text | ConvertFrom-Json)
+  }
+
+  # --- STEP3 leg 1: the connection-test CALL -----------------------------
+  Add-SelfTestCase -Id 'connect-call-ok' -Kind 'connection-test-call' -Verdict (
+    Get-ConnectionTestCallVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"ok":true,"status":"connected"}'))
+  # The exact production shape the reviewer reproduced: HTTP 200, ok:false.
+  Add-SelfTestCase -Id 'connect-call-http200-ok-false' -Kind 'connection-test-call' -Verdict (
+    Get-ConnectionTestCallVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"ok":false,"code":"TEST_CONNECTION_FAILED","message":"login failed"}'))
+  Add-SelfTestCase -Id 'connect-call-ok-field-absent' -Kind 'connection-test-call' -Verdict (
+    Get-ConnectionTestCallVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"status":"connected"}'))
+  Add-SelfTestCase -Id 'connect-call-ok-string-true' -Kind 'connection-test-call' -Verdict (
+    Get-ConnectionTestCallVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"ok":"true"}'))
+  Add-SelfTestCase -Id 'connect-call-http-500' -Kind 'connection-test-call' -Verdict (
+    Get-ConnectionTestCallVerdict -Status 500 -Data $null)
+
+  # --- STEP3 leg 2: the persisted READBACK -------------------------------
+  Add-SelfTestCase -Id 'connect-readback-clean' -Kind 'connection-test-readback' -Verdict (
+    Get-ConnectionReadbackVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"status":"active","lastTestedAt":"2026-09-10T00:00:00.000Z","lastError":null}'))
+  # The saved failure: lastTestedAt IS there, and that used to be the whole test.
+  Add-SelfTestCase -Id 'connect-readback-status-error' -Kind 'connection-test-readback' -Verdict (
+    Get-ConnectionReadbackVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"status":"error","lastTestedAt":"2026-09-10T00:00:00.000Z","lastError":"connection test failed"}'))
+  Add-SelfTestCase -Id 'connect-readback-last-error-only' -Kind 'connection-test-readback' -Verdict (
+    Get-ConnectionReadbackVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"status":"active","lastTestedAt":"2026-09-10T00:00:00.000Z","lastError":"connection test failed"}'))
+  Add-SelfTestCase -Id 'connect-readback-inactive-is-not-a-failure' -Kind 'connection-test-readback' -Verdict (
+    Get-ConnectionReadbackVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"status":"inactive","lastTestedAt":"2026-09-10T00:00:00.000Z","lastError":null}'))
+  Add-SelfTestCase -Id 'connect-readback-no-tested-at' -Kind 'connection-test-readback' -Verdict (
+    Get-ConnectionReadbackVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"status":"active","lastError":null}'))
+  Add-SelfTestCase -Id 'connect-readback-http-404' -Kind 'connection-test-readback' -Verdict (
+    Get-ConnectionReadbackVerdict -Status 404 -Data $null)
+
+  # --- STEP4: source preflight ------------------------------------------
+  Add-SelfTestCase -Id 'preflight-go' -Kind 'source-preflight' -Verdict (
+    Get-SourcePreflightVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"ok":true,"verdict":"go","blockers":[]}'))
+  Add-SelfTestCase -Id 'preflight-no-go' -Kind 'source-preflight' -Verdict (
+    Get-SourcePreflightVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"ok":false,"verdict":"no-go","blockers":[{"code":"X"}]}'))
+  # The field that never existed: a `ready`-only body must not pass on 200.
+  Add-SelfTestCase -Id 'preflight-ready-field-only' -Kind 'source-preflight' -Verdict (
+    Get-SourcePreflightVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"ready":true}'))
+  Add-SelfTestCase -Id 'preflight-ok-false-verdict-go' -Kind 'source-preflight' -Verdict (
+    Get-SourcePreflightVerdict -Status 200 -Data (ConvertFrom-SelfTestJson '{"ok":false,"verdict":"go"}'))
+  Add-SelfTestCase -Id 'preflight-http-409' -Kind 'source-preflight' -Verdict (
+    Get-SourcePreflightVerdict -Status 409 -Data $null)
+
+  # --- STEP4/STEP6: is the action bound to THIS run's source? ------------
+  $chainBindingJson = '{"actionId":"plm.stock-preparation.pull-bom.v1","effectiveExternalSystemId":"es-1","origin":"persisted"}'
+  Add-SelfTestCase -Id 'chain-bound-to-this-run' -Kind 'action-source-chain' -Verdict (
+    Get-ActionSourceChainVerdict -BindingStatus 200 -BindingData (ConvertFrom-SelfTestJson $chainBindingJson) -ExpectedActionId 'plm.stock-preparation.pull-bom.v1' -BoundSystemStatus 200 -BoundSystemData (ConvertFrom-SelfTestJson '{"id":"es-1","connectionId":"acc-sql-20260910"}') -ExpectedDataSourceId 'acc-sql-20260910')
+  Add-SelfTestCase -Id 'chain-bound-to-other-source' -Kind 'action-source-chain' -Verdict (
+    Get-ActionSourceChainVerdict -BindingStatus 200 -BindingData (ConvertFrom-SelfTestJson $chainBindingJson) -ExpectedActionId 'plm.stock-preparation.pull-bom.v1' -BoundSystemStatus 200 -BoundSystemData (ConvertFrom-SelfTestJson '{"id":"es-1","connectionId":"legacy-plm-source"}') -ExpectedDataSourceId 'acc-sql-20260910')
+  Add-SelfTestCase -Id 'chain-binding-forbidden' -Kind 'action-source-chain' -Verdict (
+    Get-ActionSourceChainVerdict -BindingStatus 403 -BindingData $null -ExpectedActionId 'plm.stock-preparation.pull-bom.v1' -BoundSystemStatus 0 -BoundSystemData $null -ExpectedDataSourceId 'acc-sql-20260910')
+  Add-SelfTestCase -Id 'chain-action-id-mismatch' -Kind 'action-source-chain' -Verdict (
+    Get-ActionSourceChainVerdict -BindingStatus 200 -BindingData (ConvertFrom-SelfTestJson $chainBindingJson) -ExpectedActionId 'some.other.action.v1' -BoundSystemStatus 200 -BoundSystemData (ConvertFrom-SelfTestJson '{"id":"es-1","connectionId":"acc-sql-20260910"}') -ExpectedDataSourceId 'acc-sql-20260910')
+  Add-SelfTestCase -Id 'chain-nothing-bound' -Kind 'action-source-chain' -Verdict (
+    Get-ActionSourceChainVerdict -BindingStatus 200 -BindingData (ConvertFrom-SelfTestJson '{"actionId":"plm.stock-preparation.pull-bom.v1","effectiveExternalSystemId":null,"origin":"unconfigured"}') -ExpectedActionId 'plm.stock-preparation.pull-bom.v1' -BoundSystemStatus 0 -BoundSystemData $null -ExpectedDataSourceId 'acc-sql-20260910')
+  Add-SelfTestCase -Id 'chain-bound-system-unreadable' -Kind 'action-source-chain' -Verdict (
+    Get-ActionSourceChainVerdict -BindingStatus 200 -BindingData (ConvertFrom-SelfTestJson $chainBindingJson) -ExpectedActionId 'plm.stock-preparation.pull-bom.v1' -BoundSystemStatus 404 -BoundSystemData $null -ExpectedDataSourceId 'acc-sql-20260910')
+
+  # --- The two file readers, round-tripped through a real file ----------
+  # Reported structurally (length, space counts, "does it still end in a
+  # newline") so the proof needs no value in the output. `*.credential.probe`
+  # goes through Read-AcceptanceCredential, `*.token.probe` through
+  # Read-AcceptanceToken; the contract test writes the bytes and owns the
+  # expectations.
+  if ($SelfTestFixtureDir -and $SelfTestFixtureDir.Trim().Length -gt 0) {
+    if (-not (Test-Path -LiteralPath $SelfTestFixtureDir -PathType Container)) {
+      throw [System.InvalidOperationException]::new('FILE_NOT_FOUND:SelfTestFixtureDir')
+    }
+    $probeFiles = @(Get-ChildItem -LiteralPath $SelfTestFixtureDir -File | Sort-Object -Property Name)
+    foreach ($probeFile in $probeFiles) {
+      $reader = $null
+      if ($probeFile.Name -like '*.credential.probe') { $reader = 'credential' }
+      elseif ($probeFile.Name -like '*.token.probe') { $reader = 'token' }
+      if (-not $reader) { continue }
+      $text = if ($reader -eq 'credential') {
+        Read-AcceptanceCredential -Path $probeFile.FullName -Required -Label 'SelfTestFixture'
+      } else {
+        Read-AcceptanceToken -Path $probeFile.FullName -Required -Label 'SelfTestFixture'
+      }
+      $leadingSpaces = 0
+      while ($leadingSpaces -lt $text.Length -and $text[$leadingSpaces] -eq ' ') { $leadingSpaces++ }
+      $trailingSpaces = 0
+      while ($trailingSpaces -lt $text.Length -and $text[$text.Length - 1 - $trailingSpaces] -eq ' ') { $trailingSpaces++ }
+      [void]$selfTestReaders.Add([pscustomobject]([ordered]@{
+        file = $probeFile.Name
+        reader = $reader
+        length = $text.Length
+        leadingSpaces = $leadingSpaces
+        trailingSpaces = $trailingSpaces
+        endsWithNewline = ($text.EndsWith("`n") -or $text.EndsWith("`r"))
+      }))
+    }
+  }
+
+  $selfTestReport = [ordered]@{
+    schema = 'stock-preparation/sql-source-onboarding-acceptance/self-test/v1'
+    cases = @($selfTestCases)
+    readers = @($selfTestReaders)
+  }
+  Write-Output ($selfTestReport | ConvertTo-Json -Depth 6)
+  exit 0
 }
 
 # ---------------------------------------------------------------------------
@@ -268,11 +598,12 @@ function Join-ApiUri {
 # Input validation — required inputs throw before any HTTP call. Optional
 # inputs (claimless/operator tokens, ProjectNo) only gate individual SKIPs.
 # ---------------------------------------------------------------------------
-$ownerToken = Read-AcceptanceSecret -Path $OwnerTokenFile -Required -Label 'OwnerTokenFile'
-$claimlessToken = Read-AcceptanceSecret -Path $ClaimlessTokenFile -Label 'ClaimlessTokenFile'
-$operatorToken = Read-AcceptanceSecret -Path $OperatorTokenFile -Label 'OperatorTokenFile'
-$sqlUsername = Read-AcceptanceSecret -Path $SqlUsernameFile -Required -Label 'SqlUsernameFile'
-$sqlPassword = Read-AcceptanceSecret -Path $SqlPasswordFile -Required -Label 'SqlPasswordFile'
+$ownerToken = Read-AcceptanceToken -Path $OwnerTokenFile -Required -Label 'OwnerTokenFile'
+$claimlessToken = Read-AcceptanceToken -Path $ClaimlessTokenFile -Label 'ClaimlessTokenFile'
+$operatorToken = Read-AcceptanceToken -Path $OperatorTokenFile -Label 'OperatorTokenFile'
+# Credentials, NOT tokens: read byte-exact apart from one trailing newline.
+$sqlUsername = Read-AcceptanceCredential -Path $SqlUsernameFile -Required -Label 'SqlUsernameFile'
+$sqlPassword = Read-AcceptanceCredential -Path $SqlPasswordFile -Required -Label 'SqlPasswordFile'
 
 if (-not $TenantId -or $TenantId.Trim().Length -eq 0) {
   throw [System.InvalidOperationException]::new('MISSING_REQUIRED_INPUT:TenantId')
@@ -293,6 +624,11 @@ $script:ExternalSystemId7 = $null
 $script:ExternalSystemId8 = $null
 $script:DataSourceCreated = $false
 $script:ExternalSystemCreated = $false
+# STEP4/STEP6 scope, resolved by the chain readback below. Until it is proven
+# otherwise this run is NOT a closed loop -- fail-closed on the CLAIM.
+$script:ChainMode = 'ENV_PROBE'
+$script:ChainCode = 'CHAIN_NOT_CHECKED'
+$script:BoundSourceDigest = 'n/a'
 
 # ---------------------------------------------------------------------------
 # STEP1 — owner creates a read-only sqlserver data source.
@@ -397,48 +733,102 @@ if (-not $script:Halt -and $script:ExternalSystemCreated) {
 }
 
 # ---------------------------------------------------------------------------
-# STEP3 — owner tests the connection, then confirms lastTestedAt persisted
-# (the "read back after save" fix — #5534).
+# STEP3 — owner tests the connection, then reads the SAVED result back.
+#
+# HTTP 200 IS NOT SUCCESS HERE. `externalSystemsTest` catches the adapter's
+# throw, wraps it as { ok:false, ... } and still answers 200, and
+# `persistExternalSystemTestResult` then saves status='error' + a non-null
+# lastError WITH a fresh lastTestedAt. So a source that cannot be reached at
+# all produces: 200, lastTestedAt present -- the two things the first version
+# of this step asserted. Both legs now assert the business fields:
+#   leg 1  data.ok is boolean true
+#   leg 2  lastTestedAt present AND status != 'error' AND lastError empty
+# The readback runs even when leg 1 failed: it is a GET, and status/lastError
+# are the evidence that says WHICH kind of failure this was. lastError is
+# never echoed -- only a fixed classification code.
 # ---------------------------------------------------------------------------
 if (-not $script:Halt -and $script:ExternalSystemCreated) {
   $testUri = Join-ApiUri -Path "/api/integration/external-systems/$($script:ExternalSystemId)/test" -Query @{ workspaceId = $WorkspaceHint }
   $step3 = Invoke-Api -Method POST -Uri $testUri -Token $ownerToken -Body @{}
-  if ($step3.Status -eq 200) {
-    Add-AcceptanceResult -StepId 'STEP3-TEST-CONNECTION' -Description 'owner tests the bound connection' -Result 'PASS' -Status $step3.Status -Code $step3.Code
-    $getUri = Join-ApiUri -Path "/api/integration/external-systems/$($script:ExternalSystemId)"
-    $step3get = Invoke-Api -Method GET -Uri $getUri -Token $ownerToken
-    $lastTestedPresent = $step3get.Status -eq 200 -and $step3get.Json -and $step3get.Json.data -and $step3get.Json.data.lastTestedAt
-    if ($lastTestedPresent) {
-      Add-AcceptanceResult -StepId 'STEP3-GET-LAST-TESTED' -Description 'lastTestedAt persisted after test' -Result 'PASS' -Status $step3get.Status -Code $step3get.Code
-    } else {
-      Add-AcceptanceResult -StepId 'STEP3-GET-LAST-TESTED' -Description 'lastTestedAt persisted after test' -Result 'FAIL' -Status $step3get.Status -Code $step3get.Code
-    }
-  } else {
-    Add-AcceptanceResult -StepId 'STEP3-TEST-CONNECTION' -Description 'owner tests the bound connection' -Result 'FAIL' -Status $step3.Status -Code $step3.Code
-    Add-AcceptanceResult -StepId 'STEP3-GET-LAST-TESTED' -Description 'lastTestedAt persisted after test (skipped, test call failed)' -Result 'SKIP' -Status $null -Code $null
-  }
+  $step3Verdict = Get-ConnectionTestCallVerdict -Status $step3.Status -Data (Get-JsonField $step3.Json 'data')
+  Add-AcceptanceResult -StepId 'STEP3-TEST-CONNECTION' -Description 'owner tests the bound connection (HTTP 200 AND data.ok)' -Result $step3Verdict.Result -Status $step3.Status -Code $step3Verdict.Code
+
+  $getUri = Join-ApiUri -Path "/api/integration/external-systems/$($script:ExternalSystemId)"
+  $step3get = Invoke-Api -Method GET -Uri $getUri -Token $ownerToken
+  $step3getVerdict = Get-ConnectionReadbackVerdict -Status $step3get.Status -Data (Get-JsonField $step3get.Json 'data')
+  Add-AcceptanceResult -StepId 'STEP3-GET-LAST-TESTED' -Description 'saved test result: lastTestedAt present, status not error, lastError empty' -Result $step3getVerdict.Result -Status $step3get.Status -Code $step3getVerdict.Code
 } else {
   Add-AcceptanceResult -StepId 'STEP3-TEST-CONNECTION' -Description 'owner tests the bound connection (skipped, no binding)' -Result 'SKIP' -Status $null -Code $null
   Add-AcceptanceResult -StepId 'STEP3-GET-LAST-TESTED' -Description 'lastTestedAt persisted after test (skipped, no binding)' -Result 'SKIP' -Status $null -Code $null
 }
 
 # ---------------------------------------------------------------------------
-# STEP4 — source-preflight report. Only `data.ready` is RECORDED, not
-# asserted true: the configured table-action source may not be this run's
-# newly-created binding.
+# STEP4 — WHICH SOURCE IS THE FRONT LINE ACTUALLY GOING TO READ, and is that
+# source healthy?
+#
+# Legs 1+2 answer the first question by READING the deployment, never by
+# rewriting it: GET .../stock-preparation/source-binding reports
+# `effectiveExternalSystemId` -- literally "what the action will read on the
+# next request" -- and that system's `connectionId` is compared with the data
+# source this run created in STEP1. Equal => CLOSED_LOOP: STEP4/STEP6 measured
+# the new source and the "new source -> front-line dry-run" chain is proven.
+# Anything else => ENV_PROBE: STEP4/STEP6 are still worth running, but they
+# measured a PRE-EXISTING source, and the summary and the JSON report both say
+# so. The bound source is named only by a digest.
+#
+# The binding GET is `requireAccess(req, 'admin')`. A 401/403 there is a
+# permission fact about the token, not a product failure, so it is a WARN that
+# still forces ENV_PROBE. A 404/500 IS a product failure and stays a FAIL.
+#
+# Leg 3 is the preflight itself, and it asserts the fields the route really
+# returns: `{ ok: <bool>, verdict: 'go' | 'no-go' }`
+# (stock-preparation-source-preflight.cjs). There is no `ready` key on this
+# route; asserting one read $null forever and left HTTP 200 as the only gate.
 # ---------------------------------------------------------------------------
 if (-not $script:Halt) {
+  $bindingUri = Join-ApiUri -Path '/api/integration/stock-preparation/source-binding'
+  $step4a = Invoke-Api -Method GET -Uri $bindingUri -Token $ownerToken
+  $bindingData = Get-JsonField $step4a.Json 'data'
+  $boundExternalSystemId = "$(Get-JsonField $bindingData 'effectiveExternalSystemId')"
+  $script:BoundSourceDigest = Get-IdDigest $boundExternalSystemId
+
+  if ($step4a.Status -eq 200) {
+    Add-AcceptanceResult -StepId 'STEP4-ACTION-SOURCE-BINDING' -Description 'owner reads which source the table action is bound to' -Result 'PASS' -Status $step4a.Status -Code $step4a.Code
+  } elseif ($step4a.Status -eq 401 -or $step4a.Status -eq 403) {
+    Add-AcceptanceResult -StepId 'STEP4-ACTION-SOURCE-BINDING' -Description 'owner reads which source the table action is bound to -- refused, so this run cannot claim a closed loop' -Result 'WARN' -Status $step4a.Status -Code $step4a.Code
+  } else {
+    Add-AcceptanceResult -StepId 'STEP4-ACTION-SOURCE-BINDING' -Description 'owner reads which source the table action is bound to' -Result 'FAIL' -Status $step4a.Status -Code $step4a.Code
+  }
+
+  $step4bStatus = 0
+  $step4bData = $null
+  if ($step4a.Status -eq 200 -and (Test-NonEmptyText $boundExternalSystemId)) {
+    $boundSystemUri = Join-ApiUri -Path "/api/integration/external-systems/$boundExternalSystemId"
+    $step4b = Invoke-Api -Method GET -Uri $boundSystemUri -Token $ownerToken
+    $step4bStatus = $step4b.Status
+    $step4bData = Get-JsonField $step4b.Json 'data'
+    if ($step4b.Status -eq 200) {
+      Add-AcceptanceResult -StepId 'STEP4-BOUND-SOURCE-CONNECTION' -Description 'owner reads the bound systems connectionId' -Result 'PASS' -Status $step4b.Status -Code $step4b.Code
+    } else {
+      Add-AcceptanceResult -StepId 'STEP4-BOUND-SOURCE-CONNECTION' -Description 'owner reads the bound systems connectionId -- unreadable, so this run cannot claim a closed loop' -Result 'WARN' -Status $step4b.Status -Code $step4b.Code
+    }
+  } else {
+    Add-AcceptanceResult -StepId 'STEP4-BOUND-SOURCE-CONNECTION' -Description 'owner reads the bound systems connectionId (skipped, no bound source id)' -Result 'SKIP' -Status $null -Code $null
+  }
+
+  $chain = Get-ActionSourceChainVerdict -BindingStatus $step4a.Status -BindingData $bindingData -ExpectedActionId $ActionId -BoundSystemStatus $step4bStatus -BoundSystemData $step4bData -ExpectedDataSourceId $DataSourceId
+  $script:ChainMode = $chain.Result
+  $script:ChainCode = $chain.Code
+
   $preflightUri = Join-ApiUri -Path '/api/integration/stock-preparation/source-preflight'
   $step4 = Invoke-Api -Method GET -Uri $preflightUri -Token $ownerToken
-  if ($step4.Status -eq 200) {
-    $ready = $null
-    if ($step4.Json -and $step4.Json.data -and $step4.Json.data.PSObject.Properties['ready']) {
-      $ready = [bool]$step4.Json.data.ready
-    }
-    Add-AcceptanceResult -StepId 'STEP4-SOURCE-PREFLIGHT' -Description "source-preflight report (ready=$ready)" -Result 'PASS' -Status $step4.Status -Code $step4.Code
+  $step4Verdict = Get-SourcePreflightVerdict -Status $step4.Status -Data (Get-JsonField $step4.Json 'data')
+  $preflightDescription = if ($script:ChainMode -eq 'CLOSED_LOOP') {
+    'source-preflight on THIS runs source (data.ok true and verdict go)'
   } else {
-    Add-AcceptanceResult -StepId 'STEP4-SOURCE-PREFLIGHT' -Description 'source-preflight report' -Result 'FAIL' -Status $step4.Status -Code $step4.Code
+    'source-preflight on the PRE-EXISTING bound source, not this runs source (data.ok true and verdict go)'
   }
+  Add-AcceptanceResult -StepId 'STEP4-SOURCE-PREFLIGHT' -Description $preflightDescription -Result $step4Verdict.Result -Status $step4.Status -Code $step4Verdict.Code
 }
 
 # ---------------------------------------------------------------------------
@@ -457,8 +847,19 @@ if (-not $script:Halt -and $script:ExternalSystemCreated) {
 # STEP6 — the front-line operator: project directory read, then a dry-run
 # trial. Body shape read from stock-preparation-table-actions.cjs
 # normalizeActionParameters: { parameters: { projectNo } }, projectNo required.
+#
+# SCOPE: this dry-run runs whatever source STEP4's binding readback found. When
+# that is not this run's new data source the step is an ENV_PROBE of the
+# deployment, and both the step description and the summary say so -- the one
+# thing this script must never do is print "new source -> dry-run passed" for a
+# dry-run that never touched the new source.
 # ---------------------------------------------------------------------------
 if (-not $script:Halt) {
+  $dryRunScopeNote = if ($script:ChainMode -eq 'CLOSED_LOOP') {
+    'operator dry-runs the pull-bom table action against THIS runs source'
+  } else {
+    'operator dry-runs the pull-bom table action against the PRE-EXISTING bound source, not this runs source'
+  }
   if ($hasOperatorToken) {
     $projectsUri = Join-ApiUri -Path '/api/integration/stock-preparation/operator/projects'
     $step6a = Invoke-Api -Method GET -Uri $projectsUri -Token $operatorToken
@@ -473,11 +874,11 @@ if (-not $script:Halt) {
       $dryRunBody = @{ parameters = @{ projectNo = $ProjectNo } }
       $step6b = Invoke-Api -Method POST -Uri $dryRunUri -Token $operatorToken -Body $dryRunBody
       if ($step6b.Status -eq 200) {
-        Add-AcceptanceResult -StepId 'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN' -Description 'operator dry-runs the pull-bom table action' -Result 'PASS' -Status $step6b.Status -Code $step6b.Code
+        Add-AcceptanceResult -StepId 'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN' -Description $dryRunScopeNote -Result 'PASS' -Status $step6b.Status -Code $step6b.Code
       } elseif ($step6b.Status -eq 400 -and $step6b.Code -eq 'CONNECTION_CANONICAL_UNAVAILABLE') {
         Add-AcceptanceResult -StepId 'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN' -Description 'operator dry-runs the pull-bom table action -- binding is missing its owner stamp; re-save the binding and retry' -Result 'FAIL' -Status $step6b.Status -Code $step6b.Code
       } else {
-        Add-AcceptanceResult -StepId 'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN' -Description 'operator dry-runs the pull-bom table action' -Result 'FAIL' -Status $step6b.Status -Code $step6b.Code
+        Add-AcceptanceResult -StepId 'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN' -Description $dryRunScopeNote -Result 'FAIL' -Status $step6b.Status -Code $step6b.Code
       }
     } else {
       Add-AcceptanceResult -StepId 'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN' -Description 'operator dry-runs the pull-bom table action (no -ProjectNo provided)' -Result 'SKIP' -Status $null -Code $null
@@ -613,6 +1014,22 @@ foreach ($result in $script:Results) {
 }
 Write-Host ("EXIT CODE: $script:ExitCode  ISOLATION_BREACH: $script:IsolationBreach")
 
+# THE CONCLUSION, and the one sentence this script exists to keep honest. A
+# green run whose STEP4/STEP6 never touched the source STEP1 created is NOT a
+# closed-loop pass, and is never reported as one.
+$conclusion = if ($script:ExitCode -ne 0) {
+  'FAILED'
+} elseif ($script:ChainMode -eq 'CLOSED_LOOP') {
+  'CLOSED_LOOP_PASS'
+} else {
+  'ENV_PROBE_PASS'
+}
+Write-Host ("CHAIN: {0} ({1})" -f $script:ChainMode, $script:ChainCode)
+if ($script:ChainMode -ne 'CLOSED_LOOP') {
+  Write-Host ("  -> NOT A CLOSED LOOP: the table action is bound to a pre-existing source (boundSourceDigest={0}), not the source this run created. STEP4/STEP6 are independent probes of this deployment; they do NOT prove 'new source -> front-line dry-run'." -f $script:BoundSourceDigest)
+}
+Write-Host ("CONCLUSION: $conclusion")
+
 $reportSteps = @()
 foreach ($result in $script:Results) {
   $reportSteps += [ordered]@{
@@ -630,6 +1047,15 @@ $report = [ordered]@{
   keepFixtures = [bool]$KeepFixtures
   isolationBreach = $script:IsolationBreach
   exitCode = $script:ExitCode
+  # Scope of STEP4/STEP6, values-free. `closedLoop` false means those two steps
+  # measured a PRE-EXISTING source; `boundSourceDigest` is sha256(id) truncated
+  # to 12 hex, so a reader can match it against a known source id by hashing
+  # that id the same way, and can never read the id out of this report.
+  chainMode = $script:ChainMode
+  chainCode = $script:ChainCode
+  closedLoop = ($script:ChainMode -eq 'CLOSED_LOOP')
+  boundSourceDigest = $script:BoundSourceDigest
+  conclusion = $conclusion
   steps = $reportSteps
 }
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
