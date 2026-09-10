@@ -247,8 +247,7 @@ function syncMinutesFromRange(): void {
     props.requestForm.requestedInAt,
     props.requestForm.requestedOutAt,
   )
-  if (minutes === null) return
-  props.requestForm.minutes = String(minutes)
+  props.requestForm.minutes = minutes === null ? '' : String(minutes)
 }
 
 function onLeaveTypeChange(event: Event): void {
@@ -328,6 +327,7 @@ function toggleDurationUnit(): void {
 .leave-card__field select,
 .leave-card__field input,
 .leave-card__field textarea {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   padding: 8px 10px;

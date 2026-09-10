@@ -51,6 +51,30 @@ function codedGateRefusal(error: unknown): { status: number; code: string; messa
   return null
 }
 
+/**
+ * 2026-09-10 222 PLM 504 — opt-in for the EXPENSIVE schema listing (`?includeColumns=1` / `?detail=full`).
+ * Deliberately strict and default-OFF: anything unrecognised (including `includeColumns=0`,
+ * `detail=list`, or an array from a repeated query param) means the cheap list-only listing.
+ */
+export function wantsSchemaColumns(query: Record<string, unknown>): boolean {
+  const truthy = (value: unknown): boolean =>
+    typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+  if (truthy(query.includeColumns)) return true
+  return typeof query.detail === 'string' && query.detail.trim().toLowerCase() === 'full'
+}
+
+// A generic (non-coded) data-plane failure must NOT forward the driver's own text to the client:
+// mssql / pg / mysql connect and query errors embed host:port, database name and the login that was
+// tried (`Failed to connect to SQL Server: ConnectionError: Login failed for user 'x' ... 10.10.52.16:1433`).
+// The detail goes to the server log; the client gets a fixed, values-free sentence and can use
+// `POST /:id/test`, the one endpoint that deliberately reports the redacted cause.
+export const SCHEMA_FAILURE_MESSAGE =
+  '读取数据源结构失败，请先「测试连接」查看原因 / Failed to read the data source schema; run "Test connection" for details'
+export const TABLE_INFO_FAILURE_MESSAGE =
+  '读取数据表信息失败，请先「测试连接」查看原因 / Failed to read the table information; run "Test connection" for details'
+export const CONNECT_FAILURE_MESSAGE =
+  '连接数据源失败，请先「测试连接」查看原因 / Could not connect the data source; run "Test connection" for details'
+
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
 
@@ -900,11 +924,20 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
+      // 503 SOURCE_UNAVAILABLE (as do the arm-binding / provisioning / K3 gates). Surface it with its
+      // own status+code, exactly as /query and /select do, instead of collapsing it into a 500 that
+      // echoed the driver text.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
+      console.error(`[data-sources] connect failed for ${req.params.id}`, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'CONNECTION_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to connect'
+          message: CONNECT_FAILURE_MESSAGE
         }
       })
     }
@@ -1178,7 +1211,14 @@ export function dataSourcesRouter(): Router {
         await manager.connectDataSource(req.params.id)
       }
 
-      const schema = await adapter.getSchema(req.query.schema as string | undefined)
+      // 2026-09-10 222 PLM 504: LIST-ONLY by default. The UI's "库表结构" panel is a two-step flow (pick a table →
+      // read its fields), so the listing never needed every table's columns; on the customer PLM
+      // (several hundred tables) the old 4N+2 fan-out ran past nginx's proxy_read_timeout and the
+      // browser got a 504 HTML page instead of an answer. `?includeColumns=1` (or `?detail=full`)
+      // restores the old body for callers that consume columns off the listing; it is bounded by
+      // the schema-detail budget, which refuses with a coded 504 BEFORE the proxy gives up.
+      const includeColumns = wantsSchemaColumns(req.query)
+      const schema = await adapter.getSchema(req.query.schema as string | undefined, { includeColumns })
 
       return res.json({
         ok: true,
@@ -1191,11 +1231,20 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
+      // 503 SOURCE_UNAVAILABLE (as do the arm-binding / provisioning / K3 gates). Surface it with its
+      // own status+code, exactly as /query and /select do, instead of collapsing it into a 500 that
+      // echoed the driver text.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
+      console.error(`[data-sources] getSchema failed for ${req.params.id}`, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'SCHEMA_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to get schema'
+          message: SCHEMA_FAILURE_MESSAGE
         }
       })
     }
@@ -1224,16 +1273,35 @@ export function dataSourcesRouter(): Router {
       })
     } catch (error) {
       if (error instanceof Error && error.message.includes('not found')) {
+        // Keep the 404 mapping, drop the verbatim echo: an ADAPTER's own not-found text carries
+        // server-side values (MongoDB answers `ns not found` naming database.collection). Both
+        // branches below repeat only what the caller already sent, and the missing-source wording
+        // stays byte-identical to the foreign-source refusal so 404 keeps hiding existence.
+        const missingSource = error.message.includes(`Data source with id '${req.params.id}' not found`)
         return res.status(404).json({
           ok: false,
-          error: { code: 'NOT_FOUND', message: error.message }
+          error: {
+            code: 'NOT_FOUND',
+            message: missingSource
+              ? `Data source '${req.params.id}' not found`
+              : `Table '${req.params.table}' not found`
+          }
         })
       }
+      // A connect-on-demand refusal from DataSourceManager.connectDataSource arrives here as a coded
+      // 503 SOURCE_UNAVAILABLE (as do the arm-binding / provisioning / K3 gates). Surface it with its
+      // own status+code, exactly as /query and /select do, instead of collapsing it into a 500 that
+      // echoed the driver text.
+      const coded = codedGateRefusal(error)
+      if (coded) {
+        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+      }
+      console.error(`[data-sources] getTableInfo failed for ${req.params.id}/${req.params.table}`, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'TABLE_INFO_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to get table info'
+          message: TABLE_INFO_FAILURE_MESSAGE
         }
       })
     }

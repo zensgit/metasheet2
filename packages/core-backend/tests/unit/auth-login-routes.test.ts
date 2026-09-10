@@ -9,6 +9,7 @@ const authServiceMocks = vi.hoisted(() => ({
   createToken: vi.fn(),
   readTokenPayload: vi.fn(),
   resolveSessionTenantId: vi.fn(),
+  listActiveMembershipOrgIds: vi.fn(),
 }))
 
 const inviteTokenMocks = vi.hoisted(() => ({
@@ -228,6 +229,61 @@ async function invokeRoute(
 
   return res
 }
+
+describe('explicit session organization routes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    authServiceMocks.verifyToken.mockResolvedValue({ id: 'actor', tenantId: 'org-a' })
+    authServiceMocks.listActiveMembershipOrgIds.mockResolvedValue(['org-a', 'org-b'])
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue('org-b')
+    authServiceMocks.readTokenPayload.mockReturnValue({ sid: 'session', exp: 2000000000 })
+    authServiceMocks.createToken.mockReturnValue('signed-new-token')
+    sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+  })
+
+  it('lists only the authenticated actor memberships, ignoring submitted actor selectors', async () => {
+    const res = await invokeRoute('get', '/session-orgs', {
+      headers: { authorization: 'Bearer current', 'x-user-id': 'other' }, query: { userId: 'other' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(authServiceMocks.listActiveMembershipOrgIds).toHaveBeenCalledWith('actor')
+    expect(res.body).toEqual({ success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+  })
+
+  it('remints only after checking active membership for the authenticated actor', async () => {
+    const res = await invokeRoute('post', '/session-org', {
+      headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(authServiceMocks.resolveSessionTenantId).toHaveBeenCalledWith('actor', 'org-b')
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session' })
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['non-member', 'revoked-member'])('refuses %s without token or session writes', async () => {
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue(undefined)
+    const res = await invokeRoute('post', '/session-org', {
+      headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({ success: false, error: 'Not a member of the requested organization', code: 'SESSION_ORG_NOT_MEMBER' })
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it.each([{}, { orgId: '' }, { orgId: 'org-b', userId: 'other' }])('rejects a missing or expanded selector %j', async body => {
+    const res = await invokeRoute('post', '/session-org', { headers: { authorization: 'Bearer current' }, body })
+    expect(res.statusCode).toBe(400)
+    expect(authServiceMocks.resolveSessionTenantId).not.toHaveBeenCalled()
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+  })
+
+  it('requires a real bearer authentication result, not an actor header', async () => {
+    const res = await invokeRoute('post', '/session-org', { headers: { 'x-user-id': 'actor' }, body: { orgId: 'org-b' } })
+    expect(res.statusCode).toBe(401)
+    expect(authServiceMocks.resolveSessionTenantId).not.toHaveBeenCalled()
+  })
+})
 
 describe('auth login routes', () => {
   beforeEach(() => {

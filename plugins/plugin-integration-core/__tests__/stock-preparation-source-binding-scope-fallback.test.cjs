@@ -19,21 +19,35 @@
 // `workspace_id IS NULL` row is absent, look for this `(tenant_id, action_id)`'s OTHER
 // (`workspace_id IS NOT NULL`) rows. Exactly one -> return it, annotated. Zero or two-or-more ->
 // `null`, same as today: this is fail-closed, not "guess". A NON-null hint that misses is NEVER
-// widened — that behaviour is asserted independently by stock-preparation-source-binding.test.cjs's
-// R-08 scope-isolation case (`assert.equal(await store.get({ ... workspaceId: 'ws_2', ... }), null)`
-// on an unbound ws_2 scope — referenced by ASSERTION TEXT, not a line number, because a line number
-// drifts the moment an earlier line in that file changes; this exact drift is what moved that
-// assertion from :482 to :486 earlier in this same PR), and F-07 below is THIS file's own fence for it:
-// F-04 (a non-null miss with only a NULL-workspace row seeded) does NOT actually exercise the
-// `scope.workspaceId !== null` guard, because the sibling scan's own `IS NOT NULL` filter would
-// throw that row away regardless of whether the guard ran — deleting the guard leaves F-04 green.
-// F-07 seeds a SINGLE sibling under a DIFFERENT workspace than the one queried, which the guardless
-// code WOULD wrongly return; that is the mutation-resistant fence.
+// widened to ANOTHER WORKSPACE's row — F-07 below is the fence for that: it seeds a SINGLE sibling
+// under a DIFFERENT workspace than the one queried, which a guardless `get()` (one that let a
+// non-null hint reach the sibling scan) WOULD wrongly return. F-12 repeats the same fence with the
+// UI's own `'default'` hint.
 //
-// DIRECTION, not `external-systems.cjs`'s `selectScopedRow`. That helper widens a MISSING hint by
+// DIRECTION B, not `external-systems.cjs`'s `selectScopedRow`. That helper widens a MISSING hint by
 // falling back to the TENANT-WIDE (null) row when a SPECIFIC hint misses — the opposite shape. Here
 // the tenant-wide (null) row is the one nothing writes on its own; the workspace-scoped row is the
-// one an admin actually saved. Copying `selectScopedRow`'s direction would not close this gap.
+// one an admin actually saved. Copying `selectScopedRow`'s direction alone would not close this gap.
+//
+// DIRECTION A — THE THIRD QUADRANT (F-04, F-11..F-16). `selectScopedRow`'s own shape is ALSO
+// needed here, and was missing: the web workbench sends `workspaceId=default` on every request,
+// while a binding written by the delivery guide's §3 script (a bare POST carrying only
+// `x-tenant-id`) lands on the `workspace_id IS NULL` row. #5471 fixed the external-system table for
+// a non-null hint; the sibling scan above fixed the binding table for a NULL hint; the pairing
+// (binding on the null row, caller with a non-null hint) read `null`, fell through to the deploy
+// default, and 404'd the UI's dry-run while the script's own hint-less probe returned 200. Now a
+// non-null hint that misses falls back ONCE to the SAME tenant's null row, annotated
+// `matchedWorkspaceId: null, scopeFallback: 'tenant_null_row'`. The two directions never compose:
+// a non-null hint reaches the null row and NOTHING else (never the sibling scan — F-07/F-12, and
+// F-16 asserts `db.select` is not even called); the fallback query carries the caller's own
+// `tenant_id` (F-13, and F-16 on the literal where-clause); the exact row still wins (F-11/F-14);
+// and `set()` is not widened — a hint-carrying write lands on its own row (F-15).
+//
+// MUTATION EVIDENCE for direction A, both probed in memory and reverted:
+//   * drop `tenant_id` from the fallback's where-clause -> F-13 and F-16 go red (another tenant's
+//     null row is handed to this tenant);
+//   * drop `workspace_id: null` from that where-clause (any workspace) -> F-07, F-12 and F-16 go
+//     red (another workspace's single row is handed to a hint that never named it).
 //
 // SHAPE. A non-null `get()` result gains two keys on EVERY path, not only the fallback one, so the
 // shape is uniform regardless of which query answered it:
@@ -204,24 +218,24 @@ async function main() {
   })
 
   // -------------------------------------------------------------------------
-  // F-04 — mirrors stock-preparation-source-binding.test.cjs's R-08 scope-isolation assertion (a
-  // `get({ ..., workspaceId: 'ws_2', ... })` miss on an unbound scope returns `null`): a NON-null
-  // hint that misses stays null even with a null-workspace row present. NOTE this alone does NOT fence the
-  // `scope.workspaceId !== null` guard in `get()` — with only a null-workspace row seeded, the
-  // sibling scan's own `workspace_id IS NOT NULL` filter throws that row away regardless of whether
-  // the guard ran, so deleting the guard leaves this test green. F-07 below is the real fence: it
-  // seeds a SINGLE sibling under a DIFFERENT workspace, which a guardless `get()` would wrongly
-  // return.
+  // F-04 — DIRECTION A, THE THIRD QUADRANT. The binding sits on the `workspace_id IS NULL` row (the
+  // delivery guide's §3 script shape: a bare POST with only `x-tenant-id`), and the caller carries
+  // the UI's own `workspaceId=default` hint. Before this fallback the read was `null` and the
+  // action fell through to the deploy default. (This case used to assert the opposite — that a
+  // non-null miss stays null even with a null row present — which is exactly the hole being closed;
+  // stock-preparation-source-binding.test.cjs's R-08 `ws_2` assertion flipped with it.)
   // -------------------------------------------------------------------------
-  await run('F-04 a non-null hint miss stays null and is never widened, even with a null-workspace row present', async () => {
-    const { store } = newStore()
+  await run("F-04 a non-null hint miss falls back to the SAME tenant's null-workspace row, annotated", async () => {
+    const { store, db } = newStore()
     await bind(store, { workspaceId: null, externalSystemId: 'sys_null_row' })
 
-    assert.equal(
-      await store.get({ tenantId: TENANT, workspaceId: 'ws_2', actionId: ACTION_ID }),
-      null,
-      'a specific miss stays a miss; the null-workspace row is not offered in its place',
-    )
+    const result = await store.get({ tenantId: TENANT, workspaceId: 'default', actionId: ACTION_ID })
+    assert.ok(result, "the tenant-wide null row is offered to the 'default' hint")
+    assert.equal(result.externalSystemId, 'sys_null_row')
+    assert.equal(result.workspaceId, null, "rowToPublicBinding still names the row's own (null) workspace")
+    assert.equal(result.matchedWorkspaceId, null, 'matchedWorkspaceId names the null row actually returned, not the hint')
+    assert.equal(result.scopeFallback, 'tenant_null_row')
+    assert.equal(db.calls.filter((call) => call.op === 'select').length, 0, 'direction A never reaches the sibling scan')
   })
 
   // -------------------------------------------------------------------------
@@ -333,6 +347,139 @@ async function main() {
     const selectCalls = db.calls.filter((call) => call.op === 'select')
     assert.equal(selectCalls.length, 1, 'the fallback makes exactly one select() call')
     assert.equal(selectCalls[0].options.limit, 2, 'and caps it at 2 rows')
+  })
+
+  // -------------------------------------------------------------------------
+  // F-11 — direction A never shadows an exact hit: the 'default' row exists, the 'default' hint
+  // reads it, and the result is NOT annotated as a fallback.
+  // -------------------------------------------------------------------------
+  await run("F-11 a 'default' hint with its own 'default' row is an exact hit, not a fallback", async () => {
+    const { store, db } = newStore()
+    await bind(store, { workspaceId: 'default', externalSystemId: 'sys_default_row' })
+    db.calls.length = 0
+
+    const result = await store.get({ tenantId: TENANT, workspaceId: 'default', actionId: ACTION_ID })
+    assert.ok(result)
+    assert.equal(result.externalSystemId, 'sys_default_row')
+    assert.equal(result.workspaceId, 'default')
+    assert.equal(result.matchedWorkspaceId, 'default', 'an exact hit echoes the hint')
+    assert.equal(result.scopeFallback, null, 'an exact hit is never reported as a fallback')
+    const reads = db.calls.filter((call) => call.op === 'selectOne' && call.table === BINDING_TABLE)
+    assert.equal(reads.length, 1, 'an exact hit issues exactly one lookup — the null row is never consulted')
+  })
+
+  // -------------------------------------------------------------------------
+  // F-12 — direction A reaches the null row and NOTHING else. The only row is at 'ws_b' (another
+  // NON-null workspace); the 'default' hint must not be handed it. Same fence as F-07, stated with
+  // the UI's own hint. Dropping `workspace_id: null` from the fallback's where-clause turns this red.
+  // -------------------------------------------------------------------------
+  await run("F-12 a 'default' hint is never widened to another workspace's row when no null row exists", async () => {
+    const { store, db } = newStore()
+    await bind(store, { workspaceId: 'ws_b', externalSystemId: 'sys_b' })
+
+    assert.equal(
+      await store.get({ tenantId: TENANT, workspaceId: 'default', actionId: ACTION_ID }),
+      null,
+      "'default' must never resolve to ws_b's binding — the null row is the only fallback target",
+    )
+    assert.equal(db.calls.filter((call) => call.op === 'select').length, 0, 'and the sibling scan is not consulted for a non-null hint')
+  })
+
+  // -------------------------------------------------------------------------
+  // F-13 — TENANT ISOLATION on direction A. Tenant B's null row must never answer tenant A's hint.
+  // Dropping `tenant_id` from the fallback's where-clause turns this red.
+  // -------------------------------------------------------------------------
+  await run("F-13 another tenant's null-workspace row never answers this tenant's 'default' hint", async () => {
+    const { store } = newStore()
+    await bind(store, { tenantId: 'tenant-b', workspaceId: null, externalSystemId: 'sys_tenant_b' })
+
+    assert.equal(
+      await store.get({ tenantId: TENANT, workspaceId: 'default', actionId: ACTION_ID }),
+      null,
+      "tenant-b's tenant-wide row does not leak into tenant-a's fallback",
+    )
+    // And the same with the SAME tenant but another action: the fallback is keyed on action_id too.
+    await bind(store, { workspaceId: null, externalSystemId: 'sys_other_action', actionId: 'plm.other-action.v1' })
+    assert.equal(
+      await store.get({ tenantId: TENANT, workspaceId: 'default', actionId: ACTION_ID }),
+      null,
+      "another action's null row does not leak in either",
+    )
+  })
+
+  // -------------------------------------------------------------------------
+  // F-14 — PRECEDENCE with both rows present: the 'default' hint reads the 'default' row (exact),
+  // the null hint reads the null row (exact); neither is reported as a fallback and neither reads
+  // the other's row.
+  // -------------------------------------------------------------------------
+  await run("F-14 with both a null row and a 'default' row, each hint reads its own row exactly", async () => {
+    const { store } = newStore()
+    await bind(store, { workspaceId: null, externalSystemId: 'sys_null_row' })
+    await bind(store, { workspaceId: 'default', externalSystemId: 'sys_default_row' })
+
+    const hinted = await store.get({ tenantId: TENANT, workspaceId: 'default', actionId: ACTION_ID })
+    assert.equal(hinted.externalSystemId, 'sys_default_row', "the 'default' row wins for the 'default' hint")
+    assert.equal(hinted.scopeFallback, null)
+    assert.equal(hinted.matchedWorkspaceId, 'default')
+
+    const hintless = await store.get({ tenantId: TENANT, actionId: ACTION_ID })
+    assert.equal(hintless.externalSystemId, 'sys_null_row', 'the null row wins for the null hint')
+    assert.equal(hintless.scopeFallback, null)
+    assert.equal(hintless.matchedWorkspaceId, null)
+  })
+
+  // -------------------------------------------------------------------------
+  // F-15 — THE WRITE PATH IS NOT WIDENED. A null row exists; a `set()` carrying the 'default' hint
+  // must INSERT a 'default' row, not UPDATE the null row it would have read through the fallback.
+  // Afterwards the 'default' hint is an exact hit on the new row and the null row is untouched.
+  // -------------------------------------------------------------------------
+  await run("F-15 set() with a 'default' hint writes the 'default' row and leaves the null row untouched", async () => {
+    const { store, db } = newStore()
+    await bind(store, { workspaceId: null, externalSystemId: 'sys_null_row' })
+    const writesBefore = db.calls.filter((call) => call.op === 'insertOne' || call.op === 'updateRow').length
+
+    const written = await store.set({ tenantId: TENANT, workspaceId: 'default', actionId: ACTION_ID, externalSystemId: 'sys_default_row', actor: 'u_admin' })
+    assert.equal(written.previousExternalSystemId, null, 'the hinted write saw NO previous value — the null row is not its target')
+    assert.equal(written.changed, true)
+    assert.equal(written.binding.workspaceId, 'default')
+
+    const writes = db.calls.slice(0).filter((call) => call.op === 'insertOne' || call.op === 'updateRow').slice(writesBefore)
+    assert.deepEqual(writes.map((call) => call.op), ['insertOne'], 'a hinted first-bind INSERTS its own row rather than updating the null row')
+    assert.equal(writes[0].row.workspace_id, 'default')
+
+    const rows = db.rows.filter((row) => row.__table === BINDING_TABLE && row.tenant_id === TENANT && row.action_id === ACTION_ID)
+    assert.equal(rows.length, 2, 'two rows now coexist under the COALESCE unique index')
+    assert.equal(rows.find((row) => row.workspace_id === null).external_system_id, 'sys_null_row', 'the null row is byte-for-byte untouched')
+
+    const hinted = await store.get({ tenantId: TENANT, workspaceId: 'default', actionId: ACTION_ID })
+    assert.equal(hinted.externalSystemId, 'sys_default_row')
+    assert.equal(hinted.scopeFallback, null, "after the write, the 'default' hint is an exact hit")
+    const hintless = await store.get({ tenantId: TENANT, actionId: ACTION_ID })
+    assert.equal(hintless.externalSystemId, 'sys_null_row', 'and the null hint still reads the null row')
+  })
+
+  // -------------------------------------------------------------------------
+  // F-16 — THE LITERAL WHERE-CLAUSE of direction A, fenced structurally. The fallback must be one
+  // `selectOne` at exactly (this tenant, workspace_id null, this action) and must not touch
+  // `db.select` at all. A where-clause missing `tenant_id` (cross-tenant) or `workspace_id`
+  // (cross-workspace) fails here on the recorded call, independently of any seeded data.
+  // -------------------------------------------------------------------------
+  await run('F-16 direction A is exactly one selectOne at (tenant, null, action) and never the sibling scan', async () => {
+    const { store, db } = newStore()
+    await bind(store, { workspaceId: null, externalSystemId: 'sys_null_row' })
+    db.calls.length = 0
+
+    await store.get({ tenantId: TENANT, workspaceId: 'default', actionId: ACTION_ID })
+
+    const reads = db.calls.filter((call) => call.op === 'selectOne' && call.table === BINDING_TABLE)
+    assert.equal(reads.length, 2, 'exact lookup, then exactly one fallback lookup')
+    assert.deepEqual(reads[0].where, { tenant_id: TENANT, workspace_id: 'default', action_id: ACTION_ID })
+    assert.deepEqual(
+      reads[1].where,
+      { tenant_id: TENANT, workspace_id: null, action_id: ACTION_ID },
+      'the fallback carries the caller\'s tenant, a literal null workspace, and the action — nothing wider',
+    )
+    assert.equal(db.calls.filter((call) => call.op === 'select').length, 0, 'db.select (the sibling scan) is never reached for a non-null hint')
   })
 
   const total = passed + failed

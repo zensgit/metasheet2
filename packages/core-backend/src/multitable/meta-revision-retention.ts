@@ -19,6 +19,11 @@
 
 import { Logger } from '../core/logger'
 import { query as dbQuery } from '../db/pg'
+// 缺表/缺列守卫改用 utils/database-errors 的共享实现:SQLSTATE 主判 + 只用 message 核对
+// 标识符。原来的列守卫把 code 与英文散文 `message.startsWith('column ')` 做 AND,中文
+// locale(PG lc_messages=Chinese)下散文是「字段 x 不存在」,AND 恒为 false,pre-migration
+// 的清理任务会直接抛错而不是降级返回 0。
+import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 
 export type RetentionQueryFn = (
   sql: string,
@@ -198,25 +203,6 @@ export async function sweepConfigRevisionRetention(
 
 export const META_FIELD_VALUE_TOMBSTONE_RETENTION_TABLE = 'meta_field_value_tombstones'
 export const META_LINK_TOMBSTONE_RETENTION_TABLE = 'meta_link_tombstones'
-
-function isUndefinedTableError(err: unknown, tableName: string): boolean {
-  const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : null
-  const message = typeof (err as { message?: unknown })?.message === 'string' ? (err as { message: string }).message : ''
-  if (code === '42P01') return message.includes(tableName)
-  return message.includes(`relation "${tableName}" does not exist`)
-}
-
-function isUndefinedColumnError(err: unknown, columnName: string): boolean {
-  const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : null
-  const message = typeof (err as { message?: unknown })?.message === 'string' ? (err as { message: string }).message : ''
-  return (
-    code === '42703' &&
-    message.startsWith('column ') &&
-    (message === `column "${columnName}" does not exist` ||
-      message.endsWith(`.${columnName} does not exist`) ||
-      message.endsWith(`."${columnName}" does not exist`))
-  )
-}
 
 /**
  * 4c-2 C6 — prune old tombstone rows (`meta_field_value_tombstones` / `meta_link_tombstones`) under the

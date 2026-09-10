@@ -110,10 +110,35 @@ export interface QueryResult<T = Record<string, DbValue>> {
   error?: Error
 }
 
+/**
+ * Options for a schema LISTING (getSchema). Default (options omitted) = list only.
+ */
+export interface SchemaFetchOptions {
+  /**
+   * true = also read every table's columns/keys/indexes (one round trip set PER TABLE — the
+   * pre-2026-09-10 behaviour). Only for callers that consume `columns` off the listing itself.
+   */
+  includeColumns?: boolean
+  /**
+   * Wall-clock budget for the includeColumns fan-out, in ms. <= 0 disables the budget.
+   * Omitted = the deployment default (see resolveSchemaDetailBudgetMs). Ignored on the list-only
+   * path, which is a fixed, small number of queries.
+   */
+  budgetMs?: number
+}
+
 export interface SchemaInfo {
   tables: TableInfo[]
   views?: ViewInfo[]
   procedures?: ProcedureInfo[]
+  /**
+   * How much of this listing was actually read from the source.
+   *  - 'list': names/schemas only — every entry's `columns` is EMPTY BY CONSTRUCTION and
+   *    `columnsLoaded` is false. Read a single table's columns with getTableInfo().
+   *  - 'full': per-table columns/keys/indexes were read (the pre-2026-09-10 behaviour).
+   * Optional so adapters that never had an N+1 listing (HTTP/Redis/Elasticsearch) stay untouched.
+   */
+  detail?: 'list' | 'full'
 }
 
 export interface TableInfo {
@@ -123,6 +148,12 @@ export interface TableInfo {
   primaryKey?: string[]
   indexes?: IndexInfo[]
   foreignKeys?: ForeignKeyInfo[]
+  /**
+   * Explicit "were the columns read?" marker so an EMPTY `columns` can never be mistaken for
+   * "this table has no columns". false = list-only entry (getSchema without includeColumns).
+   * Absent = legacy/unknown (adapters that always load columns).
+   */
+  columnsLoaded?: boolean
 }
 
 export interface ColumnInfo {
@@ -156,6 +187,8 @@ export interface ViewInfo {
   schema?: string
   definition?: string
   columns: ColumnInfo[]
+  /** Same marker as TableInfo.columnsLoaded. Views never carried columns, so this is false. */
+  columnsLoaded?: boolean
 }
 
 export interface ProcedureInfo {
@@ -229,7 +262,12 @@ export abstract class BaseDataAdapter extends EventEmitter {
   abstract delete<T = Record<string, DbValue>>(table: string, where: WhereClause): Promise<QueryResult<T>>
 
   // Schema operations
-  abstract getSchema(schema?: string): Promise<SchemaInfo>
+  // `options` is optional everywhere: OMITTING it means the cheap list-only listing (2026-09-10 222 PLM 504 — a
+  // per-table fan-out on a several-hundred-table PLM/ERP database ran past nginx's
+  // proxy_read_timeout and answered 504). Callers that genuinely need every table's columns in one
+  // shot must ASK for it (`{ includeColumns: true }`) so no caller can silently receive empty
+  // `columns` and read that as "no columns".
+  abstract getSchema(schema?: string, options?: SchemaFetchOptions): Promise<SchemaInfo>
   abstract getTableInfo(table: string, schema?: string): Promise<TableInfo>
   abstract getColumns(table: string, schema?: string): Promise<ColumnInfo[]>
   abstract tableExists(table: string, schema?: string): Promise<boolean>
@@ -445,6 +483,16 @@ export abstract class BaseDataAdapter extends EventEmitter {
   // A3: the redacted cause of the most recent connect/test failure (null when healthy).
   get connectionError(): string | null {
     return this.lastConnectionError
+  }
+
+  // A3/#2: PUBLIC redaction of a cause that never passed through onError and is therefore NOT
+  // recorded in `connectionError`. Every adapter has such a branch — the driver-package-missing
+  // guard that throws BEFORE the try block (MSSQLAdapter :217, PostgresAdapter :74, MySQLAdapter
+  // :195, HTTPAdapter :134) — and DataSourceManager must still be able to LOG that cause when it
+  // turns a connect failure into the fixed values-free 503. Delegates to the very `redactSecrets`
+  // rules onError uses; it only removes text, so exposing it adds no new disclosure.
+  redactCause(message: string): string {
+    return this.redactSecrets(message)
   }
 
   // A3: scrub configured secret values + common secret patterns out of a message before it can be

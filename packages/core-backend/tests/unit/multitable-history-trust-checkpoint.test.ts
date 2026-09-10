@@ -126,6 +126,7 @@ describe('L5 server-owned system_kind predicate (non-forgeable authority) — P1
     expect(SYSTEM_SHEET_KINDS).toContain('people_directory')
     expect(isSystemSheetKind('people_directory')).toBe(true)
     expect(isSystemSheetKind('approval_projection')).toBe(true)
+    expect(isSystemSheetKind('elearning_projection')).toBe(true)
     expect(isSystemSheetKind('user')).toBe(false)
     expect(isSystemSheetKind('')).toBe(false)
     expect(isSystemSheetKind(undefined)).toBe(false)
@@ -134,6 +135,7 @@ describe('L5 server-owned system_kind predicate (non-forgeable authority) — P1
   test('a recognized systemKind makes isSystemSheet true', () => {
     expect(isSystemSheet({ systemKind: 'people_directory' })).toBe(true)
     expect(isSystemSheet({ systemKind: 'approval_projection' })).toBe(true)
+    expect(isSystemSheet({ systemKind: 'elearning_projection' })).toBe(true)
   })
 
   test('P1-a: the FORGEABLE signals (description sentinel + approval base id) are NO LONGER trusted', () => {

@@ -47,6 +47,7 @@ export type ResolvedRequestAccess = {
   userId: string
   permissions: string[]
   isAdminRole: boolean
+  authenticatedTenantId?: string
 }
 
 export async function resolveRequestAccess(
@@ -65,22 +66,27 @@ export async function resolveRequestAccess(
   const role = typeof req.user?.role === 'string' ? req.user.role.trim() : ''
   const isAdminRole = role === 'admin' || tokenRoles.includes('admin')
   const directPermissions = tokenPerms.length > 0 ? tokenPerms : resolvedPermissions
+  const authenticatedTenantId = typeof req.authenticatedTenantId === 'string'
+    ? req.authenticatedTenantId.trim()
+    : ''
+  const tenant = authenticatedTenantId ? { authenticatedTenantId } : {}
   if (!userId) {
-    return { userId, permissions: directPermissions, isAdminRole }
+    return { userId, permissions: directPermissions, isAdminRole, ...tenant }
   }
 
   if (isAdminRole) {
-    return { userId, permissions: directPermissions, isAdminRole: true }
+    return { userId, permissions: directPermissions, isAdminRole: true, ...tenant }
   }
 
   if (directPermissions.length > 0) {
-    return { userId, permissions: directPermissions, isAdminRole: false }
+    return { userId, permissions: directPermissions, isAdminRole: false, ...tenant }
   }
 
   return {
     userId,
     permissions: await listUserPermissions(userId),
     isAdminRole: await isAdmin(userId),
+    ...tenant,
   }
 }
 

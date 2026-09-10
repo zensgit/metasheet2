@@ -3,6 +3,7 @@ import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
 import type { AttendanceGroupRouteContext } from '../src/router/attendanceGroupContextRoute'
 import AttendanceGroupContextHost from '../src/views/attendance/AttendanceGroupContextHost.vue'
 import { apiFetch } from '../src/utils/api'
+import { useAuth } from '../src/composables/useAuth'
 
 vi.mock('../src/utils/api', () => ({ apiFetch: vi.fn() }))
 
@@ -39,6 +40,7 @@ describe('AttendanceGroupContextHost', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    localStorage.clear()
     vi.clearAllMocks()
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -49,6 +51,7 @@ describe('AttendanceGroupContextHost', () => {
     container?.remove()
     app = null
     container = null
+    localStorage.clear()
   })
 
   function mount(initialContext: AttendanceGroupRouteContext | null, onReady?: () => void) {
@@ -95,6 +98,23 @@ describe('AttendanceGroupContextHost', () => {
     expect(apiFetch).toHaveBeenNthCalledWith(2, `/api/attendance/groups/${GROUP_A}/members`)
     expect(apiFetch).toHaveBeenNthCalledWith(3, `/api/attendance/groups/${GROUP_A}/managers`)
     expect(container!.querySelector('[data-attendance-group-context="ready"]')).toBeTruthy()
+  })
+
+  it('does not deliver a group probe or retry after its session changes', async () => {
+    useAuth().setToken(`header.${btoa(JSON.stringify({ sub: 'synthetic-a' }))}.signature`)
+    let resolveProbe!: (value: Response) => void
+    vi.mocked(apiFetch).mockImplementationOnce(() => new Promise(resolve => { resolveProbe = resolve }))
+    const onReady = vi.fn()
+    const currentContext = mount(context(GROUP_A), onReady)
+    useAuth().setToken(`header.${btoa(JSON.stringify({ sub: 'synthetic-b' }))}.signature`)
+    resolveProbe(response(200, { id: GROUP_A, name: 'Old group', timezone: 'UTC' }))
+    await flushUi()
+    expect(onReady).not.toHaveBeenCalled()
+    expect(container!.querySelector('[data-attendance-group-context="ready"]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-group-session-stale]')).toBeTruthy()
+    currentContext.value = context(GROUP_B)
+    await flushUi()
+    expect(apiFetch).toHaveBeenCalledTimes(1)
   })
 
   it('maps denied and missing groups to the same unavailable posture', async () => {

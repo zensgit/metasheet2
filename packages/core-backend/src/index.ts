@@ -16,6 +16,8 @@ import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService, ICommentService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
+import { dispatchElearningNotification, isElearningNotificationDispatchEnabled } from './services/elearning-notification-dispatch'
+import { collectElearningNotificationEvents, checkElearningEventNotificationEligibility } from './services/elearning-notification-events'
 import {
   getWorkdayCalendarRegistry,
   type WorkdayCalendarPort,
@@ -142,6 +144,15 @@ import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middl
 // `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
 import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
 import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
+import {
+  refreshAttendanceReportProjectionAnchor,
+  withholdAttendanceReportProjectionAnchors,
+  readAttendanceCleaningSourceSeed,
+  assertAttendanceCleaningActor,
+  readAttendanceCleaningCompletedOperations,
+  cleanupAttendanceCleaningProposal,
+  lockAttendanceCleaningSource,
+} from './attendance/attendance-multitable-cleaning-authority'
 import {
   buildAttendanceRequestCreationAttributionSnapshotV1,
   createAttendanceLiveScheduledBoundaryV1,
@@ -310,6 +321,8 @@ import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
+import { createElearningAppInstallationRouter, requireElearningAppInstallation } from './routes/elearning-app-installation'
+import { authenticate as authenticateElearningApp } from './middleware/auth'
 import {
   isElearningAssignmentSurfaceEnabled,
   isElearningAnalyticsSurfaceEnabled,
@@ -340,6 +353,10 @@ import {
   ElearningStatsDailyJobProducerError,
   enqueueElearningStatsDailyJobs,
 } from './services/elearning-stats-daily-job-producer'
+import {
+  projectElearningStatsToMultitable,
+  reconcileElearningStatsMultitable,
+} from './services/elearning-stats-multitable-projection'
 import {
   cleanupElearningAnalyticsExport,
   ElearningAnalyticsExportError,
@@ -977,6 +994,13 @@ export class MetaSheetServer {
           },
         },
         records: {
+          // W9: this records surface routes `queryRecords` straight to the multitable query
+          // service, which builds `data ->> $k = ANY($v::text[])` for an array filter value. The
+          // declaration lives HERE, next to the implementation it describes, so a caller can tell
+          // "the host cannot do this" from "the query was invalid" without guessing from an error
+          // message. Wrapping surfaces (plugin-scope, the plugin's own target fence) forward it
+          // only when the surface underneath declares it.
+          supportsFilterValueLists: true,
           listRecords: async ({ sheetId, limit, offset }) => {
             const txQuery: MultitableRecordsQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -1581,6 +1605,12 @@ export class MetaSheetServer {
       this.app.use(elearningMediaPlaybackRouter)
     }
 
+    this.app.use(createElearningAppInstallationRouter({ getDb: () => poolManager.get() }))
+    if (process.env.ELEARNING_ENABLED === 'true') {
+      this.app.use('/api/elearning', authenticateElearningApp,
+        requireElearningAppInstallation({ getDb: () => poolManager.get() }))
+    }
+
     // E-learning V0.1 named-pilot HTTP surface. Flag OFF is a no-op (factory
     // returns null). Mount BEFORE the global 10 MB JSON parser so the router-local
     // 16 KiB limit stays effective. poolManager.get() is the DB handle only —
@@ -2158,6 +2188,11 @@ export class MetaSheetServer {
                   throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
                 }
               }
+              // W8-4 (L1). Reporting `registered` keeps the tolerated-unregistered case OUT of the
+              // request-scoped memo (`plugin-scope.ts`), so the warning above still fires once per
+              // records call rather than once per scope — it is the signal P0-S S4 reads to decide
+              // whether the registry backfill is complete enough to flip this mode to `enforce`.
+              return { registered: ownsSheet }
             },
             runStockPreparationPersistUnitOfWork: async (
               { pluginName, ...rawInput },
@@ -2441,6 +2476,9 @@ export class MetaSheetServer {
                   if (!isElearningAnalyticsSurfaceEnabled()) {
                     throw new ElearningStatsDailyJobProducerError('unavailable')
                   }
+                  await reconcileElearningStatsMultitable(poolManager.get()).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_reconcile_failed')
+                  })
                   return enqueueElearningStatsDailyJobs(poolManager.get())
                 },
                 project: async (
@@ -2449,7 +2487,11 @@ export class MetaSheetServer {
                   if (!isElearningAnalyticsSurfaceEnabled()) {
                     throw new ElearningStatsDailyProjectionError('unavailable')
                   }
-                  return projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                  const result = await projectElearningDepartmentStatsDaily(poolManager.get(), input)
+                  await projectElearningStatsToMultitable(poolManager.get(), input).catch(() => {
+                    this.logger.warn('elearning_stats_multitable_projection_failed')
+                  })
+                  return result
                 },
               }
             : undefined,
@@ -2482,13 +2524,118 @@ export class MetaSheetServer {
           manifest.name === 'plugin-elearning'
             ? {
                 check: async (
-                  input: import('./services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput,
+                  input: import('./services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput
+                    | { orgId: string; deliveryId: string; recipientUserId: string },
                 ) => {
+                  if ('deliveryId' in input) {
+                    if (!isElearningNotificationDispatchEnabled()) return false
+                    return checkElearningEventNotificationEligibility(poolManager.get(), input)
+                  }
                   if (!isElearningAssignmentSurfaceEnabled()) {
                     throw new ElearningAssignmentReminderError('unavailable')
                   }
                   return checkElearningAssignmentReminderEligibility(poolManager.get(), input)
                 },
+              }
+            : undefined,
+        elearningNotificationDispatch:
+          manifest.name === 'plugin-elearning' && isElearningNotificationDispatchEnabled()
+            ? {
+                dispatch: async (input: import('./services/elearning-notification-dispatch').ElearningNotificationDispatchInput) => {
+                  if (!isElearningNotificationDispatchEnabled()) {
+                    return { outcome: 'retryable' as const, code: 'NOTIFICATION_DISABLED' }
+                  }
+                  return dispatchElearningNotification(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        elearningNotificationSource:
+          manifest.name === 'plugin-elearning' && isElearningNotificationDispatchEnabled()
+            ? {
+                collect: () => {
+                  if (!isElearningNotificationDispatchEnabled()) return Promise.resolve({ inserted: 0 })
+                  return collectElearningNotificationEvents(poolManager.get(), {
+                    since: process.env.ELEARNING_NOTIFICATIONS_SINCE ?? '',
+                    assignments: isElearningAssignmentSurfaceEnabled(),
+                    enrollments: process.env.ELEARNING_ENROLLMENT_ENABLED === 'true',
+                    results: isElearningExamSurfaceEnabled(),
+                  })
+                },
+              }
+            : undefined,
+        // ACP-1B: core owns the canonical anchor ledger. The attendance plugin only receives
+        // this narrow sync port; it cannot query or write the ledger generically.
+        attendanceMultitableCleaningAuthority:
+          manifest.name === 'plugin-attendance'
+            ? {
+                cleanupProposal: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof cleanupAttendanceCleaningProposal>[1],
+                  seed: Parameters<typeof cleanupAttendanceCleaningProposal>[2], reason: string) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return cleanupAttendanceCleaningProposal(async (statement, params) => ({ rows: await trx.query(statement, params) }), input, seed, reason)
+                },
+                readCompletedInTransaction: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof readAttendanceCleaningCompletedOperations>[1]) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return readAttendanceCleaningCompletedOperations(async (statement, params) => ({ rows: await trx.query(statement, params) }), input)
+                },
+                readCompleted: (input: Parameters<typeof readAttendanceCleaningCompletedOperations>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => readAttendanceCleaningCompletedOperations(
+                    async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input,
+                  )),
+                assertActor: (input: Parameters<typeof assertAttendanceCleaningActor>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => {
+                    await assertAttendanceCleaningActor(async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input)
+                  }),
+                readSeed: (input: Parameters<typeof readAttendanceCleaningSourceSeed>[1]) =>
+                  poolManager.get().transaction(async ({ query }) => readAttendanceCleaningSourceSeed(
+                    async (statement, params) => {
+                      const result = await query(statement, params)
+                      return { rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [] }
+                    }, input,
+                  )),
+                lockSource: (trx: import('./attendance/w4c3c-record-operation-boundary').AttendanceRecordPluginTrxV1,
+                  input: Parameters<typeof lockAttendanceCleaningSource>[1],
+                  seed: Parameters<typeof lockAttendanceCleaningSource>[2]) => {
+                  if (trx.__w4CanonicalTrx !== true) throw new Error('ATTENDANCE_CLEANING_UNAVAILABLE')
+                  return lockAttendanceCleaningSource(async (statement, params) => ({ rows: await trx.query(statement, params) }), input, seed)
+                },
+                refresh: async (input: {
+                  projectionRecordId: string
+                  canonicalRecordId: string
+                  sourceFingerprint: string
+                }) => poolManager.get().transaction(async ({ query }) => {
+                  await refreshAttendanceReportProjectionAnchor(async (statement, params) => {
+                    const result = await query(statement, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: typeof (result as { rowCount?: unknown }).rowCount === 'number'
+                        ? (result as { rowCount: number }).rowCount
+                        : undefined,
+                    }
+                  }, input)
+                }),
+                withhold: async (projectionRecordIds: readonly string[]) => poolManager.get().transaction(async ({ query }) => {
+                  await withholdAttendanceReportProjectionAnchors(async (statement, params) => {
+                    const result = await query(statement, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: typeof (result as { rowCount?: unknown }).rowCount === 'number'
+                        ? (result as { rowCount: number }).rowCount
+                        : undefined,
+                    }
+                  }, projectionRecordIds)
+                }),
               }
             : undefined,
         // W4C-2 (#4556 lock §12.2 last sentence; #4607 P3-4): host-provided strict W4
@@ -2541,7 +2688,7 @@ export class MetaSheetServer {
                     adapters: config.adapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: () => client.release() }
+                      return { client, release: (error?: Error) => client.release(error) }
                     },
                   }),
                 appendOperatorRetirementCalculation: (input) =>

@@ -413,7 +413,12 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/TemplateAuthoringView.vue', "label: node.name?.trim() || '未命名节点',"],
     ['src/views/approval/TemplateDetailView.vue', "node?.name?.trim() || (node ? nodeTypeLabel(node.type) : '流程节点')"],
     ['src/views/approval/TemplateDetailView.vue', '{{ node.name ?? node.key }}'],
-    ['src/views/approval/TemplateDetailView.vue', '模板 Key: {{ template.key }}'],
+    // Report item O-8 continuation (PR #5545, TemplateDetailView.vue i18n retrofit): the label
+    // text moved from an inline "模板 Key:" literal to a locale-aware `t.metaKeyLabel` lookup —
+    // the `.key` mustache itself is unchanged (still a structural template key, not a member
+    // identity), only its surrounding label text became bilingual. Updated to match, same
+    // disposition.
+    ['src/views/approval/TemplateDetailView.vue', '{{ t.metaKeyLabel }} {{ template.key }}'],
     ['src/approvals/components/ApprovalCanvasNodeInspector.vue', '{{ graphNodeLabel(node.key) }}'],
     ['src/approvals/components/ApprovalFlowCanvas.vue', "nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval')"],
     ['src/approvals/components/ApprovalFlowCanvas.vue', '{{ canvasNodeSummary(pos.key) }}'],
@@ -445,6 +450,21 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/ApprovalCenterView.vue', 'approval-urge-${row.id}'],
     ['src/views/approval/ApprovalCenterView.vue', '{{ urgeState(row.id).label }}'],
     ['src/views/approval/ApprovalCenterView.vue', ':title="urgeState(row.id).title"'],
+  ]),
+  // P1b slice 3 (2026-09-07) — the admin 批量转交 page. Same class as the ApprovalCenterView entries
+  // directly above: an APPROVAL INSTANCE id (not a person identity) in a test hook or as the
+  // ARGUMENT to a helper whose own return is what renders. The one genuinely person-adjacent render
+  // this page could have had — a row title falling back to the raw instance id — was written as a
+  // values-free per-list ordinal instead (`rowLabel`), so it produces no hit here at all.
+  ...group('OUT-OF-SCOPE', 'an APPROVAL INSTANCE id (not a person id) on the admin 批量转交 page -- a data-testid test hook, or the argument to a helper whose OWN return is what renders', [
+    ['src/views/approval/ApprovalBatchTransferView.vue', 'batch-transfer-row-${row.id}'],
+    ['src/views/approval/ApprovalBatchTransferView.vue', 'batch-transfer-row-check-${row.id}'],
+    ['src/views/approval/ApprovalBatchTransferView.vue', 'batch-transfer-outcome-${row.id}'],
+    ['src/views/approval/ApprovalBatchTransferView.vue', '{{ outcomeText(outcomeFor(row.id)!) }}'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'a COUNT of the rows the operator selected, in the confirm copy -- the pattern fires on the local variable NAME (`submittedIds`), never on a rendered identifier', [
+    ['src/views/approval/ApprovalBatchTransferView.vue', '${submittedIds.length} 条待办转交给所选用户'],
+    ['src/views/approval/ApprovalBatchTransferView.vue', '${submittedIds.length} selected item(s) will be transferred'],
   ]),
   ...group('OUT-OF-SCOPE', 'a TEMPLATE/VERSION id (not a person id) used for navigation (route path) or a data-testid, never rendered as visible text', [
     ['src/views/approval/TemplateDetailView.vue', 'template-version-compare-${row.id}'],

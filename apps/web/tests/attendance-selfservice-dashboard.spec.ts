@@ -10,6 +10,8 @@ import { resolveMakeupPunchRequestStatusCopy } from '../src/views/attendance/mak
 
 const authMockState = vi.hoisted(() => ({
   currentUserId: 'swap-user-a',
+  identityPending: null as Promise<string> | null,
+  pluginsPending: null as Promise<void> | null,
 }))
 
 vi.mock('../src/composables/usePlugins', () => ({
@@ -24,13 +26,13 @@ vi.mock('../src/composables/usePlugins', () => ({
     navItems: ref([]),
     loading: ref(false),
     error: ref(null),
-    fetchPlugins: vi.fn().mockResolvedValue(undefined),
+    fetchPlugins: vi.fn(() => authMockState.pluginsPending ?? Promise.resolve()),
   }),
 }))
 
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
-    getCurrentUserId: vi.fn(async () => authMockState.currentUserId),
+    getCurrentUserId: vi.fn(() => authMockState.identityPending ?? Promise.resolve(authMockState.currentUserId)),
   }),
 }))
 
@@ -63,7 +65,23 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   return button as HTMLButtonElement
 }
 
-function installOverviewMock(): void {
+const DEFAULT_OVERVIEW_ANOMALY = {
+  recordId: 'record-today',
+  workDate: '2026-04-15',
+  status: 'late_early',
+  isWorkday: true,
+  firstInAt: '2026-04-15T09:18:00+08:00',
+  lastOutAt: '2026-04-15T17:42:00+08:00',
+  workMinutes: 444,
+  lateMinutes: 18,
+  earlyLeaveMinutes: 18,
+  warnings: ['missing punch review'],
+  state: 'open',
+  request: null,
+  suggestedRequestType: 'missed_check_in',
+}
+
+function installOverviewMock(options?: { anomalyItems?: Array<Record<string, unknown>> }): void {
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = typeof input === 'string' ? input : input.url
 
@@ -191,23 +209,7 @@ function installOverviewMock(): void {
       return jsonResponse(200, {
         ok: true,
         data: {
-          items: [
-            {
-              recordId: 'record-today',
-              workDate: '2026-04-15',
-              status: 'late_early',
-              isWorkday: true,
-              firstInAt: '2026-04-15T09:18:00+08:00',
-              lastOutAt: '2026-04-15T17:42:00+08:00',
-              workMinutes: 444,
-              lateMinutes: 18,
-              earlyLeaveMinutes: 18,
-              warnings: ['missing punch review'],
-              state: 'open',
-              request: null,
-              suggestedRequestType: 'missed_check_in',
-            },
-          ],
+          items: options?.anomalyItems ?? [DEFAULT_OVERVIEW_ANOMALY],
         },
       })
     }
@@ -676,6 +678,8 @@ describe('Attendance self-service dashboard', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-15T08:00:00Z'))
     authMockState.currentUserId = 'swap-user-a'
+    authMockState.identityPending = null
+    authMockState.pluginsPending = null
     HTMLElement.prototype.scrollIntoView = vi.fn()
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
@@ -868,7 +872,7 @@ describe('Attendance self-service dashboard', () => {
     // Positive control INSIDE the negative test: the refresh failure genuinely reached the shared
     // banner (its retry control renders the refresh-overview action label) — without this the leg
     // could pass vacuously with no error at all.
-    expect(container!.textContent).toContain('Retry refresh')
+    await vi.waitFor(() => expect(container!.textContent).toContain('Retry refresh'), { timeout: 1000 })
 
     const attention = container!.querySelector('[data-attendance-overview-attention]')
     expect(attention).toBeTruthy()
@@ -1028,6 +1032,115 @@ describe('Attendance self-service dashboard', () => {
     expect(requestTools.open).toBe(false)
     expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('leave')
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+  })
+
+  it('makeup tile opens the dedicated makeup card below 常用 and leaves the shared disclosure closed', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(requestTools.open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+
+    const card = container!.querySelector('[data-attendance-makeup-request-card]')
+    const common = container!.querySelector('[data-selfservice-card="actions"]')
+    expect(card).toBeTruthy()
+    expect(common?.nextElementSibling).toBe(card)
+    expect(card?.querySelector('#attendance-makeup-card-title')?.textContent).toContain('Makeup punch request')
+    expect(card?.querySelector<HTMLSelectElement>('[data-makeup-card-anomaly]')?.value).toBe('record-today::2026-04-15')
+    expect(card?.querySelector('[data-makeup-card-anomaly]')?.textContent).toContain('Today · Missing check-in')
+    expect(requestTools.open).toBe(false)
+    expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+  })
+
+  it.each([
+    { recordId: 'record-yesterday', workDate: '2026-04-14', label: 'date and type' },
+    { recordId: 'record-today-check-out', workDate: '2026-04-15', label: 'type only' },
+  ])('reopening the makeup card clears timestamps when its anomaly prefill changes by $label', async ({ recordId, workDate }) => {
+    installOverviewMock({
+      anomalyItems: [
+        DEFAULT_OVERVIEW_ANOMALY,
+        {
+          ...DEFAULT_OVERVIEW_ANOMALY,
+          recordId,
+          workDate,
+          suggestedRequestType: 'missed_check_out',
+        },
+      ],
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const openMakeupCard = async (): Promise<HTMLElement> => {
+      container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+      await flushUi(3)
+      return container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')!
+    }
+
+    let card = await openMakeupCard()
+    setFormValue(card, '[data-makeup-card-anomaly]', `${recordId}::${workDate}`)
+    await flushUi(2)
+    setFormValue(card, '[data-makeup-card-time]', `${workDate}T18:00`)
+    await flushUi(2)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-out')?.value).toBe(`${workDate}T18:00`)
+
+    card.querySelector<HTMLButtonElement>('[data-makeup-card-cancel="header"]')!.click()
+    await flushUi()
+    card = await openMakeupCard()
+
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(card.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-out')?.value).toBe('')
+
+    setFormValue(card, '[data-makeup-card-time]', '2026-04-15T09:00')
+    card.querySelector<HTMLButtonElement>('[data-makeup-card-cancel="header"]')!.click()
+    await flushUi()
+    card = await openMakeupCard()
+
+    expect(card.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('2026-04-15T09:00')
+  })
+
+  it('reopening the same makeup type on a different date clears its timestamp draft', async () => {
+    installOverviewMock({
+      anomalyItems: [
+        DEFAULT_OVERVIEW_ANOMALY,
+        {
+          ...DEFAULT_OVERVIEW_ANOMALY,
+          recordId: 'record-yesterday-check-in',
+          workDate: '2026-04-14',
+          suggestedRequestType: 'missed_check_in',
+        },
+      ],
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const openMakeupCard = async (): Promise<HTMLElement> => {
+      container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+      await flushUi(3)
+      return container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')!
+    }
+
+    let card = await openMakeupCard()
+    setFormValue(card, '[data-makeup-card-anomaly]', 'record-yesterday-check-in::2026-04-14')
+    await flushUi(2)
+    setFormValue(card, '[data-makeup-card-time]', '2026-04-14T09:00')
+    expect(card.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('2026-04-14T09:00')
+
+    card.querySelector<HTMLButtonElement>('[data-makeup-card-cancel="header"]')!.click()
+    await flushUi()
+    card = await openMakeupCard()
+
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-in')?.value).toBe('')
+    expect(card.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('')
   })
 
   it('below-fold overflow contract: history surfaces stay within 1440 and 390', async () => {
@@ -1129,6 +1242,7 @@ describe('Attendance self-service dashboard', () => {
     expect(primary!.querySelector('[data-selfservice-card="requests"]')).toBeTruthy()
     expect(primary!.querySelector('[data-selfservice-card="actions"]')).toBeNull()
     expect(primary!.querySelector('[data-attendance-history-filters]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
 
     const aside = container!.querySelector('[data-attendance-overview-header-aside]')
     expect(aside).toBeTruthy()
@@ -1675,12 +1789,14 @@ describe('Attendance self-service dashboard', () => {
     expect(requestType?.value).toBe('leave')
     expect(workDate?.value).toBe('2026-04-15')
     expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
 
     missingPunchButton!.click()
     await flushUi(3)
     expect(requestType?.value).toBe('missed_check_in')
     expect(workDate?.value).toBe('2026-04-15')
     expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
   })
 
   it('loads active leave and overtime policies into self-service request selectors', async () => {
@@ -1718,6 +1834,88 @@ describe('Attendance self-service dashboard', () => {
     expect(overtimeRule!.textContent).toContain('Standard Overtime')
   })
 
+  it('preserves a stale outdoor-note draft and sends nothing when punch is invoked programmatically', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    const state = app._instance!.setupState as unknown as {
+      attendanceSessionGuard: { invalidate: () => void }
+      punchOutdoorNoteDraft: string
+      punchOutdoorNoteRequired: boolean
+      punch: (event: string, note: string) => Promise<void>
+    }
+    state.punchOutdoorNoteDraft = 'Synthetic unsaved note'
+    state.punchOutdoorNoteRequired = true
+    state.attendanceSessionGuard.invalidate()
+    const before = vi.mocked(apiFetch).mock.calls.length
+    await state.punch('check_in', state.punchOutdoorNoteDraft)
+    expect(vi.mocked(apiFetch).mock.calls).toHaveLength(before)
+    expect(state.punchOutdoorNoteDraft).toBe('Synthetic unsaved note')
+    expect(state.punchOutdoorNoteRequired).toBe(true)
+  })
+
+  it.each(['identity', 'plugins-resolve', 'plugins-reject'])('ignores stale mount continuation: %s', async phase => {
+    let finishIdentity!: (id: string) => void
+    let finishPlugins!: () => void
+    let rejectPlugins!: (error: Error) => void
+    authMockState.identityPending = new Promise(resolve => { finishIdentity = resolve })
+    authMockState.pluginsPending = new Promise((resolve, reject) => { finishPlugins = resolve; rejectPlugins = reject })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    const state = app._instance!.setupState as unknown as {
+      attendanceSessionGuard: { invalidate: () => void }
+      currentUserId: string; committedCalendarUserId: string; pluginsLoaded: boolean
+    }
+    const before = [state.currentUserId, state.committedCalendarUserId, state.pluginsLoaded]
+    const sent = vi.mocked(apiFetch).mock.calls.length
+    state.attendanceSessionGuard.invalidate()
+    if (phase === 'identity') finishIdentity('late-synthetic-user')
+    else if (phase === 'plugins-resolve') finishPlugins()
+    else rejectPlugins(new Error('Synthetic plugin failure'))
+    await flushUi()
+    expect([state.currentUserId, state.committedCalendarUserId, state.pluginsLoaded]).toEqual(before)
+    expect(vi.mocked(apiFetch).mock.calls).toHaveLength(sent)
+    finishIdentity('late-synthetic-user')
+    finishPlugins()
+    await flushUi()
+  })
+
+  it.each(['resolve', 'reject'])('preserves the sent punch draft after session change and late body %s', async outcome => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    const state = app._instance!.setupState as unknown as {
+      attendanceSessionGuard: { invalidate: () => void }
+      punchOutdoorNoteDraft: string; punchOutdoorNoteRequired: boolean
+      statusMessage: string; punching: boolean
+      punch: (event: string, note: string) => Promise<void>
+    }
+    let resolveBody!: (value: unknown) => void
+    let rejectBody!: (error: Error) => void
+    vi.mocked(apiFetch).mockResolvedValueOnce({ ok: true, status: 200,
+      json: () => new Promise((resolve, reject) => { resolveBody = resolve; rejectBody = reject }),
+    } as Response)
+    state.punchOutdoorNoteDraft = 'Synthetic sent note'
+    state.punchOutdoorNoteRequired = true
+    const attempt = state.punch('check_in', state.punchOutdoorNoteDraft)
+    await flushUi()
+    expect(resolveBody).toBeTypeOf('function')
+    expect(vi.mocked(apiFetch).mock.lastCall?.[0]).toBe('/api/attendance/punch')
+    const sent = vi.mocked(apiFetch).mock.calls.length
+    const message = state.statusMessage
+    state.attendanceSessionGuard.invalidate()
+    if (outcome === 'reject') rejectBody(new Error('Synthetic body failure'))
+    else resolveBody({ ok: true, data: {} })
+    await attempt
+    await flushUi()
+    expect(state.punchOutdoorNoteDraft).toBe('Synthetic sent note')
+    expect(state.punchOutdoorNoteRequired).toBe(true)
+    expect(state.statusMessage).toBe(message)
+    expect(state.punching).toBe(false)
+    expect(vi.mocked(apiFetch).mock.calls).toHaveLength(sent)
+  })
+
   it('submits shift-swap requests through the dedicated route with exact assignment ids', async () => {
     authMockState.currentUserId = 'swap-user-a'
     const { createBodies } = installShiftSwapSelfServiceMock({ actorUserId: 'swap-user-a' })
@@ -1735,8 +1933,10 @@ describe('Attendance self-service dashboard', () => {
     const counterpartyAssignment = container!.querySelector<HTMLSelectElement>('#attendance-shift-swap-counterparty-assignment')
     expect(requesterAssignment).toBeTruthy()
     expect(counterpartyAssignment).toBeTruthy()
-    expect(requesterAssignment!.value).toBe('assignment-a')
-    expect(counterpartyAssignment!.value).toBe('assignment-b')
+    await vi.waitFor(() => {
+      expect(requesterAssignment!.value).toBe('assignment-a')
+      expect(counterpartyAssignment!.value).toBe('assignment-b')
+    }, { timeout: 1000 })
 
     const reason = container!.querySelector<HTMLInputElement>('#attendance-request-reason')
     expect(reason).toBeTruthy()
@@ -2077,6 +2277,79 @@ describe('Attendance self-service dashboard', () => {
     expect(createBodies[1].attachmentUrl).toBe('https://example.com/proof.png')
   })
 
+  it('dedicated makeup card recovers MAKEUP_PUNCH_ATTACHMENT_REQUIRED without opening the shared disclosure', async () => {
+    const { createBodies } = installMakeupRejectMock({
+      code: 'MAKEUP_PUNCH_ATTACHMENT_REQUIRED',
+      status: 422,
+      succeedAfter: 1,
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-attendance-overview-primary]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(requestTools.open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+
+    const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
+    expect(card).toBeTruthy()
+    expect(requestTools.open).toBe(false)
+    expect(card!.querySelector('#attendance-makeup-card-attachment')).toBeTruthy()
+    expect(card!.querySelector('#attendance-request-attachment')).toBeNull()
+    expect(container!.querySelectorAll('#attendance-makeup-card-attachment')).toHaveLength(1)
+    expect(container!.querySelectorAll('#attendance-request-attachment')).toHaveLength(1)
+
+    setFormValue(card!, '[data-makeup-card-time]', '2026-04-15T09:00')
+    card!.querySelector<HTMLButtonElement>('[data-makeup-card-submit]')!.click()
+    await flushUi(8)
+
+    const afterReject = container!.textContent ?? ''
+    expect(afterReject).toContain('An attachment is required by the makeup-punch policy.')
+    expect(afterReject).toContain('Code: MAKEUP_PUNCH_ATTACHMENT_REQUIRED')
+    expect(afterReject).not.toContain('Request submitted.')
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
+    expect(requestTools.open).toBe(false)
+    expect(createBodies).toEqual([
+      {
+        workDate: '2026-04-15',
+        requestType: 'missed_check_in',
+        requestedInAt: '2026-04-15T09:00',
+        leaveTypeId: 'leave-annual',
+        overtimeRuleId: 'ot-default',
+      },
+    ])
+
+    setFormValue(card!, '[data-makeup-card-attachment]', 'https://example.com/proof.png')
+    card!.querySelector<HTMLButtonElement>('[data-makeup-card-submit]')!.click()
+    await flushUi(8)
+
+    expect(createBodies).toEqual([
+      {
+        workDate: '2026-04-15',
+        requestType: 'missed_check_in',
+        requestedInAt: '2026-04-15T09:00',
+        leaveTypeId: 'leave-annual',
+        overtimeRuleId: 'ot-default',
+      },
+      {
+        workDate: '2026-04-15',
+        requestType: 'missed_check_in',
+        requestedInAt: '2026-04-15T09:00',
+        leaveTypeId: 'leave-annual',
+        overtimeRuleId: 'ot-default',
+        attachmentUrl: 'https://example.com/proof.png',
+      },
+    ])
+    await vi.waitFor(() => expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull())
+    expect(requestTools.open).toBe(false)
+    expect(container!.textContent).toContain('Request submitted.')
+  })
+
   it('MP-5 shared path: missing-punch quick action (with anomaly) posts exactly one request, none during prefill', async () => {
     const { createBodies } = installMakeupRejectMock({ code: 'IGNORED', succeedAfter: 0 })
     app = createApp(AttendanceView, { mode: 'overview' })
@@ -2085,16 +2358,21 @@ describe('Attendance self-service dashboard', () => {
 
     container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
     await flushUi(3)
+    const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
+    expect(card).toBeTruthy()
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
     expect(requestPostCount()).toBe(0)
 
-    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
-    findButton(container!, 'Submit request').click()
-    await flushUi(4)
+    setFormValue(card!, '[data-makeup-card-time]', '2026-04-15T09:00')
+    card!.querySelector<HTMLButtonElement>('[data-makeup-card-submit]')!.click()
+    await flushUi(8)
 
     expect(requestPostCount()).toBe(1)
     expect(createBodies).toHaveLength(1)
     expect(createBodies[0].requestType).toBe('missed_check_in')
+    expect(createBodies[0].requestedInAt).toBe('2026-04-15T09:00')
+    expect(createBodies[0].workDate).toBe('2026-04-15')
+    await vi.waitFor(() => expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull())
   })
 
   it('MP-5 shared path: missing-punch quick action with no anomaly still posts one request', async () => {
@@ -2116,16 +2394,23 @@ describe('Attendance self-service dashboard', () => {
 
     container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
     await flushUi(3)
+    const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
+    expect(card).toBeTruthy()
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
     expect(container!.querySelector<HTMLInputElement>('#attendance-request-work-date')?.value).toBeTruthy()
+    expect(card!.querySelector<HTMLSelectElement>('[data-makeup-card-anomaly]')?.disabled).toBe(true)
+    expect(card!.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('')
+    expect(card!.querySelector<HTMLInputElement>('[data-makeup-card-reason]')?.value).toBe('')
     expect(requestPostCount()).toBe(0)
 
-    setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
-    findButton(container!, 'Submit request').click()
+    setFormValue(card!, '[data-makeup-card-time]', '2026-04-15T09:00')
+    card!.querySelector<HTMLButtonElement>('[data-makeup-card-submit]')!.click()
     await flushUi(4)
 
     expect(requestPostCount()).toBe(1)
     expect(createBodies).toHaveLength(1)
+    expect(createBodies[0].requestType).toBe('missed_check_in')
+    expect(createBodies[0].requestedInAt).toBe('2026-04-15T09:00')
   })
 
   it('MP-5 no settings leak: the employee MP-5 flow makes no GET /api/attendance/settings', async () => {
@@ -2326,5 +2611,83 @@ describe('Attendance self-service dashboard', () => {
     const filterFields = container!.querySelectorAll('.attendance__filters .attendance__field')
     expect(filterFields.length, 'filter fields present').toBeGreaterThan(0)
     expect(container!.querySelector('.attendance__hero-timeline'), 'hero timeline present').toBeTruthy()
+  })
+
+  it('pending-only anomalies stay hand-fill and do not invent a makeup type', async () => {
+    installOverviewMock({
+      anomalyItems: [{
+        ...DEFAULT_OVERVIEW_ANOMALY,
+        state: 'pending',
+        suggestedRequestType: 'missed_check_out',
+        request: { id: 'req-pending', status: 'pending', requestType: 'missed_check_out' },
+      }],
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+
+    const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
+    expect(card).toBeTruthy()
+    expect(card!.querySelector<HTMLSelectElement>('[data-makeup-card-anomaly]')?.disabled).toBe(true)
+    expect(card!.querySelector<HTMLSelectElement>('[data-makeup-card-anomaly]')?.querySelectorAll('option:not([disabled])')).toHaveLength(0)
+    expect(card!.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('')
+    expect(card!.querySelector<HTMLInputElement>('[data-makeup-card-reason]')?.value).toBe('')
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(card!.querySelector('[data-makeup-card-hint]')?.textContent).toContain('Pending requests are not prefilled')
+  })
+
+  it('header cancel closes the makeup card without opening the shared disclosure', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
+    expect(requestTools.open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-makeup-card-cancel="header"]')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+    expect(requestTools.open).toBe(false)
+  })
+
+  it('opening leave or overtime closes the dedicated makeup card', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
+    setFormValue(container!, '[data-makeup-card-time]', '2026-04-15T09:00')
+    await flushUi(2)
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeTruthy()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('leave')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-in')?.value).toBe('')
+
+    setFormValue(container!, '[data-leave-card-start]', '2026-04-15T09:00')
+    setFormValue(container!, '[data-leave-card-end]', '2026-04-15T17:00')
+    await flushUi(2)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-minutes')?.value).toBe('480')
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="overtime"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(true)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('overtime')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-in')?.value).toBe('')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-out')?.value).toBe('')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-minutes')?.value).toBe('')
   })
 })

@@ -25,6 +25,9 @@
 //         refused outright when no audit store is wired.
 //   R-17  the GET picker: eligible-only, plain-language kind labels, effective source + origin, and
 //         the #5401 join drops a data source this principal does not own.
+//   R-24  the third quadrant: a binding written with NO workspace hint (the delivery guide's §3
+//         script shape, landing on the workspace_id IS NULL row) is read by the UI's own
+//         `workspaceId=default` dry-run and GET picker; another tenant's hinted caller never is.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -783,6 +786,88 @@ async function main() {
     assert.equal(res.body.ok, false, "a request hinting 'ws_b' must NOT be silently served the ws_a-only system")
     assert.equal(res.statusCode, 422, 'the SAME refusal a mismatched hint has always produced (TABLE_ACTION_SOURCE_INVALID) — nothing new')
     assert.deepEqual(mounted.adapterCalls.slice(before), [], 'no adapter is built for a system outside the requested scope')
+  })
+
+  // -------------------------------------------------------------------------
+  // R-24 — THE THIRD QUADRANT, END TO END. The binding is written the way the delivery guide's §3
+  // script writes it: a bare POST with NO workspace hint (the principal's tenant only), which lands
+  // on the `workspace_id IS NULL` row. The UI then drives the dry-run WITH its own
+  // `workspaceId=default` hint — the shape every web request carries (useAuth persists the tenant
+  // id as the workspace hint). Before the store's direction-A fallback the binding read `null`,
+  // `applyPersistedSourceBinding` fell through to the deploy default, and — on a customer
+  // deployment where that default does not exist — the read 404'd with ExternalSystemNotFound,
+  // while the same script's own hint-less probe returned 200. F3's re-query in
+  // `loadTableActionSourceAdapter` cannot help this caller: its `!resolveWorkspaceId(req, {})`
+  // precondition (R-23) is exactly what the UI never satisfies. So the fix has to be in the store's
+  // read, and this test drives the whole chain: store fallback -> resolver -> action ->
+  // `selectScopedRow`'s own non-null-hint widening for the external-system row -> adapter.
+  // Reverting the store's direction-A branch turns the adapter assertion red on the id.
+  // -------------------------------------------------------------------------
+  await run("R-24 a workspaceId=default caller reads a binding written on the tenant-wide null row", async () => {
+    // tenant-b owns SAME-ID systems of its own, so that the tenant fence at the end of this test
+    // observes the STORE's tenant_id and not the external-system registry's own tenant scoping
+    // (which would refuse tenant-b regardless — a first cut of this test stayed green with tenant_id
+    // dropped from the store's fallback lookup for exactly that reason).
+    const mounted = mount({ systems: [
+      system({ id: ENV_DEFAULT_SOURCE, workspaceId: null }),
+      system({ id: CUSTOMER_PLM, workspaceId: null }),
+      system({ id: ENV_DEFAULT_SOURCE, tenantId: 'tenant-b', workspaceId: null }),
+      system({ id: CUSTOMER_PLM, tenantId: 'tenant-b', workspaceId: null }),
+    ] })
+
+    // The §3 script shape: no `?workspaceId=` at all.
+    const saved = await call(mounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: CUSTOMER_PLM } })
+    assert.equal(saved.statusCode, 200)
+    assert.equal(saved.body.data.binding.workspaceId, null, 'the hint-less write lands on the null row')
+
+    // The UI shape: every request carries workspaceId=default.
+    const before = mounted.adapterCalls.length
+    const dryRun = await call(mounted.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: ADMIN,
+      params: { actionId: ACTION_ID },
+      query: { workspaceId: 'default' },
+      body: { parameters: { projectNo: 'P-1' } },
+    })
+    assert.deepEqual(
+      mounted.adapterCalls.slice(before),
+      [CUSTOMER_PLM],
+      "the UI's hinted dry-run reads the null-row binding, not the deploy default",
+    )
+    assert.ok(!(dryRun.body && dryRun.body.error && /NotFound/.test(String(dryRun.body.error.code || ''))), 'no ExternalSystemNotFound on the UI path')
+
+    // The GET picker under the same hint agrees, reports the row's OWN scope (null, not the hint),
+    // and still crosses the wire as the 7-field contract.
+    const view = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN, query: { workspaceId: 'default' } })
+    assert.equal(view.statusCode, 200)
+    assert.equal(view.body.data.origin, 'persisted', "the picker no longer says deploy_default for a null-row binding")
+    assert.equal(view.body.data.effectiveExternalSystemId, CUSTOMER_PLM)
+    assert.equal(view.body.data.persistedBinding.externalSystemId, CUSTOMER_PLM)
+    assert.equal(view.body.data.persistedBinding.workspaceId, null, "persistedBinding names the row's own scope, not the caller's hint")
+    assert.deepEqual(
+      Object.keys(view.body.data.persistedBinding).sort(),
+      ['actionId', 'createdAt', 'externalSystemId', 'tenantId', 'updatedAt', 'updatedBy', 'workspaceId'],
+    )
+    assert.ok(!('scopeFallback' in view.body.data.persistedBinding), 'scopeFallback never reaches the wire')
+
+    // TENANT FENCE, end to end: a tenant-b admin carrying the same hint has NO binding of its own,
+    // so it must read ITS deploy default — never tenant-a's null-row binding. Both ids exist as
+    // tenant-b systems (see the mount above), so the only thing standing between tenant-b and
+    // tenant-a's binding is the store's own tenant_id on the fallback lookup: drop it and the
+    // adapter built here is CUSTOMER_PLM, not ENV_DEFAULT_SOURCE.
+    const tenantBAdmin = { id: 'u_admin_b', roles: ['admin'], tenantId: 'tenant-b' }
+    const beforeB = mounted.adapterCalls.length
+    const resB = await call(mounted.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: tenantBAdmin,
+      params: { actionId: ACTION_ID },
+      query: { workspaceId: 'default' },
+      body: { parameters: { projectNo: 'P-1' } },
+    })
+    assert.deepEqual(
+      mounted.adapterCalls.slice(beforeB),
+      [ENV_DEFAULT_SOURCE],
+      "tenant-b's hinted caller reads its own deploy default, never tenant-a's null-row binding",
+    )
+    assert.notEqual(resB.body, undefined)
   })
 
   const total = passed + failed

@@ -1894,6 +1894,23 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson(res)
   }
 
+  // Soft-delete a whole sheet (DELETE /api/multitable/sheets/:id → `deleted_at = now()`; records and
+  // links are untouched and the sheet is restorable via restoreSheet). Server gate is
+  // hasSheetLifecycleAuthority; a 403 / 409 SHEET_PLUGIN_MANAGED / 409 SHEET_SYSTEM_MANAGED /
+  // 404 SHEET_DELETED all throw a MultitableApiError carrying `code`, so the caller can pick copy by code.
+  async deleteSheet(sheetId: string): Promise<{ deleted: string }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}`, { method: 'DELETE' })
+    return this.parseJson(res)
+  }
+
+  // Undo a soft delete (POST /api/multitable/sheets/:id/restore). API half only in this slice: there
+  // is no recycle-bin UI yet, so nothing in the workbench calls this — it exists so the follow-up
+  // (list soft-deleted sheets + restore) has its wire contract pinned now.
+  async restoreSheet(sheetId: string): Promise<{ restored: string; sheet: MetaSheet }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore`, { method: 'POST' })
+    return this.parseJson(res)
+  }
+
   async listSheetPermissions(sheetId: string): Promise<{ items: MetaSheetPermissionEntry[] }> {
     const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/permissions`)
     const data = await this.parseJson<{ items?: Array<Partial<MetaSheetPermissionEntry>> }>(res)
@@ -3398,6 +3415,28 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ resumeToken, confirmSideEffects: true }),
     })
+    return this.parseJson<AutomationRunView>(res)
+  }
+
+  /**
+   * A5: whole-execution retry (admin-only; RE-RUNS REAL SIDE EFFECTS — record writes / webhook /
+   * email / DingTalk — using the CURRENT enabled rule + the ORIGINAL stored trigger event). Returns
+   * the NEW execution (linked back via `rerunOfExecutionId`); the original execution row is never
+   * mutated. `confirmSideEffects:true` is always sent — the UI confirm-gates this call (same
+   * contract as resumeAutomation). parseJson throws an Error with `.code` (NOT_FOUND /
+   * NOT_RETRYABLE / TEST_RUN_NOT_RETRYABLE / MISSING_TRIGGER_EVENT / RETRY_WINDOW_EXPIRED /
+   * START_APPROVAL_ALREADY_CREATED / RULE_MISSING_OR_DISABLED / RULE_CHANGED /
+   * RETRY_LEDGER_EVIDENCE_MISSING) so the caller can map it to an inline message.
+   */
+  async retryAutomationExecution(executionId: string): Promise<AutomationRunView> {
+    const res = await this.fetch(
+      `/api/multitable/automation-executions/${encodeURIComponent(executionId)}/retry`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmSideEffects: true }),
+      },
+    )
     return this.parseJson<AutomationRunView>(res)
   }
 

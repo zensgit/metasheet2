@@ -486,9 +486,13 @@ const SERVER_AUTHORED_LEAF_FIELDS = Object.freeze(new Set([
   'readPlanId', 'externalSystemId', 'presetId', 'matchedBy',
 ]))
 
-// 3. SCHEMA IDENTIFIERS — table and column names. Exempt ONLY when the leaf's value really is one of
-//    the identifiers this run observed (a table it probed, a column it saw), which is the same test
-//    the source-discovery probe uses to tell a dictionary's schema-naming row from its content.
+// 3. SCHEMA IDENTIFIERS — table and column names. Exempt on either of TWO grounds, both spelled out
+//    with their reasoning at the exemption itself in `assertSourcePreflightValuesFree`: (a) the
+//    LEAF'S OWN value really is one of the identifiers this run observed (a table it probed, a column
+//    it saw); or (b) — the second and pre-existing ground — the row value it reproduces is itself one,
+//    which is the same test the source-discovery probe uses to tell a dictionary's schema-naming row
+//    from its content. Neither ground is a pass for the FIELD: a leaf listed below whose value earns
+//    neither is refused like any other.
 //    RESIDUAL, stated honestly: a business value that is character-for-character a column name of the
 //    same catalog is indistinguishable from that column name here. That channel carries one token, is
 //    the same one the discovery probe accepts, and is review-gated.
@@ -1953,6 +1957,74 @@ function refuse(path, kind, value) {
   })
 }
 
+// The exact four keys `refuse` mints above, in the order it builds them, each beside the scalar
+// shape it is declared to hold. Declared once so `refuse` and the picker below stay honest about
+// what "the values-free detail keys" means — and checked on BOTH axes, because whitelisting key
+// NAMES alone would carry whatever a future `refuse()` chose to put under one of them (an object, an
+// array of rows) straight into a log line. A key that is absent, or present with a value outside its
+// declared shape, means "not this refusal": the descriptor is refused whole, never partially. Same
+// fail-closed default the self-check applies to report leaves.
+const VALUES_FREE_REFUSAL_DETAIL_SHAPE = Object.freeze({
+  path: (value) => typeof value === 'string',
+  kind: (value) => typeof value === 'string',
+  length: (value) => Number.isInteger(value),
+  masked: (value) => typeof value === 'string',
+})
+
+// The floor under `maskForRefusal`'s first-and-last-character mask — applied ONLY where the mask
+// leaves this module through the picker below, NEVER to what `refuse` puts on the error.
+//
+// `maskForRefusal` already collapses length <= 2 to '**'. The gap is 3 and 4: `B****9` published
+// beside an exact `length: 3` pins two of three characters AND the width, which over a part-number
+// alphabet leaves a couple dozen candidates — that is the value, not a hint of it. From 5 up the
+// same pair is a coarse orientation aid and nothing more, which is the whole reason to log it at
+// all. So the picker republishes the mask only from 5 up and hands back '**' below that. `length`
+// survives either way: a length alone reveals no characters and is the coarse fact an operator on
+// site actually needs.
+const MASKED_FIRST_LAST_MIN_LENGTH = 5
+
+/**
+ * Pick the values-free self-check's own detail keys off a caught error, for a caller (the route)
+ * that wants to LOG them without inventing its own notion of "safe to log" and without spreading
+ * `error.details` wholesale — a future field added to `refuse()`'s payload must be classified here
+ * on purpose before it can reach a log line, the same fail-closed shape the self-check itself uses
+ * for report leaves.
+ *
+ * Returns `null` for anything that is not this exact refusal: a non-`SourcePreflightError`, or a
+ * `SourcePreflightError` whose message names a different failure (this module throws more than
+ * one). The message check is deliberate and not `instanceof` alone, because a different
+ * `SourcePreflightError` could carry a `details` object that happens to also be plain — matching by
+ * message is matching by what actually happened, not by shape.
+ *
+ * WHAT IT PUBLISHES IS NOT `error.details` VERBATIM. `error.details` never leaves the process; this
+ * projection does, into a server-side log. So two narrowings apply here and only here, both of them
+ * about the mask, neither of them a change to what the self-check refuses:
+ *
+ *   - a mask of a value shorter than {@link MASKED_FIRST_LAST_MIN_LENGTH} is republished as '**';
+ *   - a `kind: 'secret'` refusal publishes its path and class ONLY — no mask, no length — because
+ *     for that class the two characters and the width describe a CREDENTIAL. Unreachable from the
+ *     route today (the runner's only call site supplies observed values and identifiers, never
+ *     secrets), and written so it stays harmless the day secrets are wired in.
+ *
+ * Never changes what the self-check refuses or how — this is read-only over what `refuse()` already
+ * decided to put in `error.details`.
+ */
+function describeValuesFreeRefusal(error) {
+  if (!(error instanceof SourcePreflightError)) return null
+  if (error.message !== 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED') return null
+  const details = error.details
+  if (!isPlainObject(details)) return null
+  const described = {}
+  for (const [key, isDeclaredShape] of Object.entries(VALUES_FREE_REFUSAL_DETAIL_SHAPE)) {
+    if (!Object.prototype.hasOwnProperty.call(details, key)) return null
+    if (!isDeclaredShape(details[key])) return null
+    described[key] = details[key]
+  }
+  if (described.kind === 'secret') return { path: described.path, kind: described.kind }
+  if (described.length < MASKED_FIRST_LAST_MIN_LENGTH) described.masked = '**'
+  return described
+}
+
 /**
  * The independent second check, in the spirit of the discovery probe's H0 self-check.
  *
@@ -1966,9 +2038,10 @@ function refuse(path, kind, value) {
  *   (2) CONTAINMENT. No leaf may reproduce — by equality, or by containing — a value observed in a
  *       sampled source row or a supplied secret. Exemptions are narrow and by CLASS, not by path
  *       prefix: closed-vocabulary and server-authored leaves cannot be sourced from a row at all;
- *       identifier leaves are exempt only when their value is genuinely one of the identifiers this
- *       run observed; and the liveness path is exempt for observed values only. Secrets are exempt
- *       NOWHERE, the liveness path included.
+ *       an identifier leaf is exempt when the LEAF'S OWN value is genuinely one of the identifiers
+ *       this run observed (or, on the second and pre-existing ground kept below, when the row value
+ *       it reproduces is itself such an identifier); and the liveness path is exempt for observed
+ *       values only. Secrets are exempt NOWHERE, the liveness path included.
  *
  * It never echoes the offending value: a refusal names the path, the class, the length and a mask.
  */
@@ -2047,11 +2120,36 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
       }
     }
     if (isClosed || isServerAuthored) continue
+    // Ground (a) of the identifier exemption, stated in full at the decision below. It is a property
+    // of the LEAF alone, so it is settled once per leaf rather than re-tested against every observed
+    // value. `leaf.value` is a string by construction — `collectStringLeaves` pushes nothing else.
+    const leafIsAnObservedIdentifier = isIdentifier && knownIdentifiers.has(leaf.value.toLowerCase())
     for (const entry of guarded) {
       const hit = leaf.value === entry.value
         || (entry.value.length >= 4 && leaf.value.includes(entry.value))
       if (!hit) continue
       if (isLiveness) continue
+      // THE IDENTIFIER EXEMPTION, on two independent grounds — either one alone is enough.
+      //
+      //   (a) THE LEAF IS ITSELF AN IDENTIFIER THIS RUN OBSERVED. This is the ground the header above
+      //       and the note on IDENTIFIER_LEAF_FIELDS have always described, and until 222 on
+      //       2026-09-08 it was NOT the one the code applied: the test read `entry.value` only, so a
+      //       leaf was refused for CONTAINING a four-character row value even when the leaf was a
+      //       column name this very run had read off the source. On the live customer PLM that is
+      //       unavoidable — a dictionary's labels eventually spell `Code` / `Name` / `Type` / `Unit`,
+      //       and a column called `FileCode` contains `Code` — so the route answered 500 for the
+      //       whole source, and WHICH run it broke on moved with the customer's data.
+      //       It opens no channel: a leaf whose value IS a table this run probed or a column it saw
+      //       is a name that already appears in the clear at `probes[].object` / `probes[].columns[]`,
+      //       so a row value that happens to sit inside that name tells a reader of the report
+      //       nothing the report did not already say.
+      //
+      //   (b) THE ROW VALUE IS ITSELF A KNOWN IDENTIFIER — the pre-existing test, kept verbatim. This
+      //       is the dictionary case the IDENTIFIER_LEAF_FIELDS note names: a row whose cell holds a
+      //       column name rather than content. It is the WIDER of the two, because it exempts an
+      //       identifier leaf that merely CONTAINS such a value; narrowing it is a separate
+      //       judgement with its own 500 risk, and is deliberately not made here.
+      if (leafIsAnObservedIdentifier) continue
       if (isIdentifier && knownIdentifiers.has(entry.value.toLowerCase())) continue
       refuse(leaf.path, entry.kind, entry.value)
     }
@@ -2086,6 +2184,7 @@ module.exports = {
   SourcePreflightError,
   runStockPreparationSourcePreflight,
   assertSourcePreflightValuesFree,
+  describeValuesFreeRefusal,
   __internals: {
     buildProbeRoster,
     classifyReadError,

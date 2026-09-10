@@ -1222,6 +1222,65 @@ async function readConfirmationDecisionValueEntry({ recordsApi, provisioning, ta
   }
 }
 
+// THE SOFT LOOKUP: which project does this decision belong to? Nothing else.
+//
+// The confirm route needs one fact — the projectNo — BEFORE it appends its intent audit row, at a
+// point in the request where the only handle it holds is a decisionId. It cannot get that fact from
+// `readConfirmationDecisionValueEntry`: that one is the ONE value-content surface (see its header),
+// and reaching for it here would drag resolvedValue/resolvedAuxValue/notes into a path that has no
+// business holding them.
+//
+// SOFT, and deliberately so — this is a lookup for a NULLABLE audit column, never a gate:
+//   * 0 rows, >1 rows, a records API that answers with something other than an array, or a row whose
+//     projectNo cell is empty => `{ projectNo: null }`. The caller writes NULL and carries on; the
+//     module's own 404/409 for those same shapes still comes from the write path a moment later, so
+//     the request's answer is unchanged either way.
+//   * only INFRASTRUCTURE failures (no ledger sheet, a throwing records API) propagate — the caller
+//     decides what to do with them, and the confirm route swallows them for the same reason it keeps
+//     its audit append first: a multitable blip must not turn "audit row + 5xx" into "no row + 5xx".
+//
+// AND YES, `projectNo` IS ONE OF THE CELLS `readConfirmationDecisionValueEntry` CALLS "value-bearing
+// SYSTEM cells" twenty lines up. That exclusion is about a RESPONSE BODY — what the workbench detail
+// pane hands back to a browser — and it stands. This export feeds one place and one only: the
+// `project_id` column of the stock-prep audit trail, a column migration 066 named "business project
+// handle" and that `prep_line_export` (081), `handoff_advance` (085) and the whole MVP mapping /
+// unit / exception family already fill. The single route where it must stay NULL is the project
+// BOARD read, and 086 says why: there the trail's own hit/miss would become an existence oracle. So
+// the two rules are about different destinations, and neither is being bent here.
+//
+// THE SHAPE FLOOR is the one thing this export adds beyond the read. Unlike reconcile's projectNo —
+// which is the string the caller just put in its own request body — this one comes out of a ledger
+// CELL in a multitable that carries a `全部裁决` grid view, so anyone who can reach that view can
+// type anything into it, and `project_id` is one of the columns
+// stock-preparation-audit-store.cjs:20-22 deliberately does NOT shape-gate ("their discipline lives
+// at the ROUTES"). A project number is short and has no control characters; a paragraph somebody
+// pasted into the wrong cell is not a handle and does not belong on an audit trail. Over the floor
+// => null, exactly like an empty cell: this is a nullable column, so the floor costs a fact, never a
+// request.
+const CONFIRMATION_DECISION_PROJECT_NO_MAX_LENGTH = 64
+// Written as a code-point scan rather than a regex on purpose: a character class over control
+// characters has to be spelled with escapes, and an escape typed wrong lands the RAW byte in the
+// source file. This form cannot do that.
+function auditableProjectNo(value) {
+  const normalized = optionalString(value)
+  if (!normalized) return null
+  if (normalized.length > CONFIRMATION_DECISION_PROJECT_NO_MAX_LENGTH) return null
+  for (const character of normalized) {
+    const code = character.codePointAt(0)
+    if (code < 0x20 || code === 0x7f) return null
+  }
+  return normalized
+}
+
+async function readConfirmationDecisionProjectNo({ recordsApi, provisioning, targetProjectId, permission, decisionId } = {}) {
+  assertAdminPermission(permission)
+  const id = requiredString(decisionId, 'decisionId')
+  const scoped = await resolveScopedLedger(recordsApi, provisioning, targetProjectId, ['queryRecords'])
+  const matches = await scoped.queryRecords({ filters: { decisionId: id }, limit: 2, offset: 0 })
+  if (!Array.isArray(matches) || matches.length !== 1) return { decisionId: id, projectNo: null }
+  return { decisionId: id, projectNo: auditableProjectNo(readCell(matches[0], 'projectNo')) }
+}
+
 async function confirmConfirmationDecision({ recordsApi, provisioning, targetProjectId, permission, decisionId, inputFingerprint, resolutionAction, resolvedValue, resolvedAuxValue, notes, confirmedBy, now } = {}) {
   assertAdminPermission(permission)
   const id = requiredString(decisionId, 'decisionId')
@@ -1595,6 +1654,7 @@ module.exports = {
   confirmCarryConfirmationDecision,
   assertCarryConfirmDecisionBinding,
   readConfirmationDecisionValueEntry,
+  readConfirmationDecisionProjectNo,
   loadConfirmedDuplicatePolicyReview,
   __internals: {
     stableHash,

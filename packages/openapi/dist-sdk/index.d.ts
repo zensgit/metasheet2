@@ -399,6 +399,44 @@ export interface paths {
          *     both page/pageSize and the older limit/offset pagination fallback.
          *     Use `tab` for the current inbox lens, plus optional sourceSystem,
          *     workflowKey, businessKey, assignee, status, and search filters.
+         *
+         *     The visible set is determined server-side on every request. No query
+         *     parameter can make a response exceed it; adding a parameter can only
+         *     narrow the result, never reach a row the scope does not already admit.
+         *
+         *     The two halves of that set are NOT the same, and the difference is
+         *     stated rather than averaged over. PLATFORM rows are limited to the
+         *     caller's own participation -- instances they requested, hold a seat on
+         *     (user-, role- or queue-typed), recorded an action on, or were CC'd on.
+         *     NON-PLATFORM rows (phase-1 external mirrors, `sourceSystem` other than
+         *     `platform`) carry no participation condition at all: they are visible to
+         *     any caller holding `approvals:read` whose actor id the request resolves.
+         *     A request whose actor id does not resolve receives nothing, mirrors
+         *     included. Roles are read from the database, not from token claims; a
+         *     queue-typed seat is matched against the request's permission set.
+         *
+         *     The scope also carries a database-backed approval-administrator arm.
+         *     That arm is not observable through this endpoint: every `tab` is itself
+         *     limited to the caller's own participation and is ANDed with the scope,
+         *     so an administrator's response is the same as any other caller's. This
+         *     endpoint is not an administrative listing surface.
+         *
+         *     COMPATIBILITY: a request that omits `tab` is served the default
+         *     (`pending`) tab, which carries its own `status = 'pending'` condition --
+         *     UNLESS the request supplies a `status` filter of its own. In that case
+         *     no tab condition is applied at all, and the response is the
+         *     server-determined scope intersected with that status filter and nothing
+         *     else. So a tab-less `status=approved` returns the caller's own approved
+         *     rows, from both source systems, rather than an empty page. An EXPLICIT
+         *     tab is never overridden by this rule: `tab=pending&status=approved`
+         *     keeps both conditions and therefore returns nothing, because the caller
+         *     named both halves. An empty `status=` is absent, not a filter, and so
+         *     leaves the default tab in place. Measured change,
+         *     stated as a narrowing rather than as a preservation: a tab-less request
+         *     previously returned the whole `approval_instances` table to any caller;
+         *     it now returns that caller's own scoped feed, mixed across platform and
+         *     non-platform sources. What is preserved is the source-system axis of
+         *     that feed, not its size.
          */
         get: operations["listApprovals"];
         put?: never;
@@ -477,6 +515,25 @@ export interface paths {
          * Get pending approvals for current actor
          * @deprecated
          * @description Deprecated. Use GET /api/approvals with `tab=pending` instead.
+         *
+         *     The visible set is determined server-side, by the same scope
+         *     `GET /api/approvals` applies and in both this endpoint's queries -- the
+         *     page and the `total` alike. Because this endpoint is hard-filtered to
+         *     pending platform-owned rows, that scope reduces to the caller's own
+         *     participation: instances they requested, hold a seat on (user-, role- or
+         *     queue-typed), recorded an action on, or were CC'd on, plus the
+         *     database-backed approval-administrator arm. Roles are read from the
+         *     database, not from token claims. Measured change: this endpoint
+         *     previously returned every pending platform instance to any caller
+         *     holding `approvals:read`.
+         *
+         *     The administrator arm IS observable here, unlike on
+         *     GET /api/approvals where every `tab` narrows to the caller's own
+         *     participation: this endpoint applies no tab, so an identity the database
+         *     records as an approval administrator receives the pending platform rows
+         *     it has no participation in. That reach is bounded to the
+         *     administrator's own organisations only while the organisation pin is
+         *     enabled; the pin ships disabled.
          */
         get: operations["listPendingApprovalsLegacy"];
         put?: never;
@@ -8381,6 +8438,42 @@ export interface paths {
         };
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning-app/installation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read organization cloud-classroom installation
+         * @description Organization and actor come only from the authenticated session. Missing
+         *     instance means not-installed. canManage is server-derived from hydrated
+         *     global elearning administrator authority and active organization membership.
+         *     Administrative setup is available independently of the deployment master flag.
+         */
+        get: operations["getElearningAppInstallation"];
+        /**
+         * Enable or disable an installed cloud classroom
+         * @description Requires the same authority as installation. Deployment exact-true flags
+         *     remain an upper bound. Disabling forces notification opt-in OFF and retains
+         *     learning data. New business admission stops; admitted work and necessary
+         *     storage cleanup may drain. No production storage is provisioned.
+         */
+        put: operations["configureElearningAppInstallation"];
+        /**
+         * Install cloud classroom inactive, notifications OFF
+         * @description Requires elearning global administrator authority and active membership.
+         *     Repeated installation preserves existing state. Does not grant permissions,
+         *     enable deployment flags, provision storage, or send notifications.
+         */
+        post: operations["installElearningApp"];
         delete?: never;
         options?: never;
         head?: never;
@@ -18248,6 +18341,21 @@ export interface components {
             fieldAccess?: {
                 [key: string]: "editable" | "readonly" | "hidden" | "required";
             } | null;
+            /**
+             * @description Would the decision endpoint's own authorization predicate let THIS viewer decide the
+             *     node the instance is currently stopped on? Resolved server-side per viewer by the
+             *     dispatch door's own seat predicate (user seats, role seats, delegated seats — a
+             *     delegatee is the assignee on a real assignment row — and, inside a parallel region,
+             *     the pending branch frontier). `false` when the instance is not pending or the viewer
+             *     holds no matching active seat at a decidable node key; `true` for a pending instance
+             *     whose decisions do not go through the seat-gated door (a legacy platform row with no
+             *     published definition, a `plm:` mirror, an after-sales row), because those dispatches do
+             *     not gate on assignments and `true` is what those surfaces already do today. Present on the detail read and on the action response. ABSENT means
+             *     the server does not compute it — clients must fall back to their prior behaviour, not
+             *     read absence as `false`. Presentation only: the 403 APPROVAL_ASSIGNMENT_REQUIRED
+             *     remains the authority.
+             */
+            canDecideCurrentNode?: boolean;
             currentNodeKey?: string | null;
             /**
              * @description Parallel gateway (并行分支) runtime frontier. Present only when
@@ -18621,6 +18729,12 @@ export interface components {
             media: boolean;
             /** @description Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration. */
             enrollment: boolean;
+        };
+        ElearningAppInstallation: {
+            /** @enum {string} */
+            status: "not-installed" | "inactive" | "active";
+            notificationsEnabled: boolean;
+            canManage: boolean;
         };
         /**
          * @description Plugin GET /api/elearning/capabilities payload. V0.1 readiness is enabled
@@ -19934,7 +20048,15 @@ export interface operations {
                 workflowKey?: string;
                 businessKey?: string;
                 assignee?: string;
-                tab?: string;
+                /**
+                 * @description Inbox lens applied within the server-determined visible set. Omitted
+                 *     or empty selects the default, `pending`. Any other value outside the
+                 *     listed set is rejected with 400 APPROVAL_TAB_INVALID, and so is any
+                 *     non-single-valued form -- a repeated `tab=a&tab=b` or a bracketed
+                 *     `tab[]=a` -- which is refused rather than silently served the
+                 *     default.
+                 */
+                tab?: "pending" | "mine" | "cc" | "completed" | "processed";
                 search?: string;
                 page?: number;
                 pageSize?: number;
@@ -19956,6 +20078,7 @@ export interface operations {
                     "application/json": components["schemas"]["ApprovalListResponse"];
                 };
             };
+            400: components["responses"]["ValidationError"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             503: components["responses"]["ServiceUnavailable"];
@@ -21016,6 +21139,161 @@ export interface operations {
             };
             /** @description Unknown, cross-org, or inaccessible group, including a delegated admin without active target-org membership; one shared values-free shape (red line W6-R3). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getElearningAppInstallation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed installation state, without storage configuration or secrets. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAppInstallation"];
+                };
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authoritative organization context required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Installation authority unavailable; no fallback enablement. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    configureElearningAppInstallation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    enabled: boolean;
+                    notificationsEnabled: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated state; canManage true. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAppInstallation"];
+                };
+            };
+            /** @description Invalid closed command. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing organization, administrator authority, or active membership. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Application not installed. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Installation authority unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    installElearningApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Installed state; canManage true. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAppInstallation"];
+                };
+            };
+            /** @description Invalid closed command. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing organization, administrator authority, or active membership. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Installation authority unavailable. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -6,6 +6,7 @@ import {
 } from './DataSourceManager'
 import type { DataSourceConfig, DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
 import { parseSqlServerEndpoint } from '@metasheet/mssql-readonly-utils'
+import { SCHEMA_DETAIL_BUDGET_DISABLED } from './schema-detail-budget'
 
 /**
  * Narrow, READ-ONLY data-source surface handed to the integration plugin so the Data
@@ -634,7 +635,18 @@ export function createDataSourcePluginFacade(
     },
     async getSchema(dataSourceId, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)
-      return adapter.getSchema(schema)
+      // 2026-09-10 222 PLM 504: the listing is list-only by default at the adapter, but THIS
+      // facade's consumers read columns straight off the listing (plugin-integration-core's
+      // read-only source adapter maps every entry's `columns` into the object schema its
+      // listObjects() returns), so the facade asks for them EXPLICITLY. Silently handing those
+      // callers empty `columns` would read as "this table has no fields" — a wrong answer, not a
+      // slow one.
+      // budgetMs: 0 = KEEP THE PRE-CHANGE BEHAVIOUR on this path. The wall-clock budget is scoped
+      // to the opt-in `GET /:id/schema?includeColumns=1` route; this facade is the plugin
+      // listObjects() path, which was unbounded before and whose proxy allows 300s
+      // (docker/nginx.conf:63). Inheriting the 25s default here would turn listings that used to
+      // SUCCEED between 25s and the proxy timeout into hard SCHEMA_DETAIL_TIMEOUT failures.
+      return adapter.getSchema(schema, { includeColumns: true, budgetMs: SCHEMA_DETAIL_BUDGET_DISABLED })
     },
     async getTableInfo(dataSourceId, object, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)
@@ -861,7 +873,18 @@ export function createDataSourceWritePluginFacade(
     },
     async getSchema(dataSourceId, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)
-      return adapter.getSchema(schema)
+      // 2026-09-10 222 PLM 504: the listing is list-only by default at the adapter, but THIS
+      // facade's consumers read columns straight off the listing (plugin-integration-core's
+      // read-only source adapter maps every entry's `columns` into the object schema its
+      // listObjects() returns), so the facade asks for them EXPLICITLY. Silently handing those
+      // callers empty `columns` would read as "this table has no fields" — a wrong answer, not a
+      // slow one.
+      // budgetMs: 0 = KEEP THE PRE-CHANGE BEHAVIOUR on this path. The wall-clock budget is scoped
+      // to the opt-in `GET /:id/schema?includeColumns=1` route; this facade is the plugin
+      // listObjects() path, which was unbounded before and whose proxy allows 300s
+      // (docker/nginx.conf:63). Inheriting the 25s default here would turn listings that used to
+      // SUCCEED between 25s and the proxy timeout into hard SCHEMA_DETAIL_TIMEOUT failures.
+      return adapter.getSchema(schema, { includeColumns: true, budgetMs: SCHEMA_DETAIL_BUDGET_DISABLED })
     },
     async getTableInfo(dataSourceId, object, principal, schema) {
       const { adapter } = await authorize(dataSourceId, principal)

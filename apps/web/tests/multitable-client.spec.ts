@@ -1106,6 +1106,62 @@ describe('MultitableApiClient', () => {
     expect(error.code).toBe('FORBIDDEN')
   })
 
+  it('deleteSheet DELETEs the sheet endpoint (no body) and unwraps { deleted }', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { deleted: 'sheet_1' },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.deleteSheet('sheet_1')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/sheet_1')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('DELETE')
+    expect(init.body).toBeUndefined()
+    expect(result).toEqual({ deleted: 'sheet_1' })
+  })
+
+  it('deleteSheet URL-encodes the sheet id', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { deleted: 'a/b' } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+    await client.deleteSheet('a/b')
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/a%2Fb')
+  })
+
+  it('deleteSheet surfaces the coded 409 SHEET_PLUGIN_MANAGED refusal (code + message + status) so the caller can pick copy by code', async () => {
+    const message = 'This sheet is provisioned and owned by a plugin and cannot be deleted from the UI or the sheet API.'
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'SHEET_PLUGIN_MANAGED', message },
+    }), { status: 409 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.deleteSheet('sheet_1').catch((err) => err)
+
+    expect(error.name).toBe('MultitableApiError')
+    expect(error.status).toBe(409)
+    expect(error.code).toBe('SHEET_PLUGIN_MANAGED')
+    expect(error.message).toBe(message)
+  })
+
+  it('restoreSheet POSTs the restore endpoint and unwraps { restored, sheet } (API half only — no UI caller yet)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { restored: 'sheet_1', sheet: { id: 'sheet_1', baseId: 'base_1', name: 'Orders', description: null } },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.restoreSheet('sheet_1')
+
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/sheet_1/restore')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(result.restored).toBe('sheet_1')
+    expect(result.sheet.id).toBe('sheet_1')
+  })
+
   it('renameBase PATCHes the base endpoint with the given name, unwraps the base, and invalidates the bases cache', async () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
@@ -1153,5 +1209,42 @@ describe('MultitableApiClient', () => {
     expect(error.message).toBe(message)
     expect(error.status).toBe(403)
     expect(error.code).toBe('FORBIDDEN')
+  })
+
+  // P3-4: whole-execution re-run (A5 endpoint). The UI confirm-gates this call and always sends
+  // confirmSideEffects:true (never lets the caller omit it) — a component-level mock can only see
+  // `toHaveBeenCalledWith(id)`, so this wire-contract assertion is the one place that can go red if
+  // that flag is ever dropped from the request body.
+  it('retryAutomationExecution POSTs confirmSideEffects:true to the execution retry endpoint', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'axe_new', ruleId: 'rule-1', sheetId: 'sheet-a', status: 'running', statusLegacy: 'running',
+      triggeredBy: 'event', triggeredAt: '2026-05-28T00:00:02.000Z', finishedAt: null, duration: null,
+      error: null, schemaVersion: 1, steps: [], rerunOfExecutionId: 'axe_1', initiatedBy: 'user_1',
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.retryAutomationExecution('axe_1')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/automation-executions/axe_1/retry')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    // Exact deep-equal (not toContain): an extra field or confirmSideEffects:false must also fail.
+    expect(JSON.parse(init.body as string)).toEqual({ confirmSideEffects: true })
+    expect(result.id).toBe('axe_new')
+  })
+
+  it('retryAutomationExecution encodes the execution id and surfaces a discriminated 409 code', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'NOT_RETRYABLE', message: 'Only failed/skipped executions can be retried (got resolved)' },
+    }), { status: 409 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.retryAutomationExecution('axe with space').catch((err) => err)
+
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/automation-executions/axe%20with%20space/retry')
+    expect(error.code).toBe('NOT_RETRYABLE')
+    expect(error.status).toBe(409)
   })
 })

@@ -59,16 +59,23 @@ const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const {
   PLATFORM_ADMIN_GATE,
   STOCK_PREP_ADMIN,
+  STOCK_PREP_LANDING_KEYS,
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
   STOCK_PREP_PERMISSION_DESCRIPTORS,
+  STOCK_PREP_RAIL_GATES,
+  STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+  STOCK_PREP_RAIL_GATE_ROUTE,
+  STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
   STOCK_PREP_WORKBENCH_CAPABILITIES,
   grantedStockPrepCapabilities,
   requireAccessGateExpressionsInSource,
   satisfiesStockPrepAccess,
+  satisfiesStockPrepRailGate,
   stockPrepGateTokensInSource,
+  stockPrepWorkbenchLandingKey,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const {
   OBJECT_ID,
@@ -162,7 +169,14 @@ function pendingRow() {
 // `tenantPrincipalDirectory` is a PARAMETER because "the host cannot vouch" is a real deployment
 // state with its own fail-closed answer (501), and a suite that could only mount the vouching case
 // could never tell a route that requires the seam from one that merely happens to have it.
-function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } } } = {}) {
+// `ledgerReadFails` is the "multitable is down" deployment state, and it exists for exactly one
+// assertion: 对账/确认的审计行带项目号 inserted a ledger READ ahead of the confirm's intent audit
+// append, and a read that could take the append down with it would turn today's "audit row + 5xx"
+// into "no audit row + 5xx" — the very invariant the append's placement protects.
+function mount({
+  tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } },
+  ledgerReadFails = false,
+} = {}) {
   const routes = new Map()
   const provisioning = {
     ...makeFakeProvisioning({
@@ -201,6 +215,9 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
       if (typeof value !== 'function') return value
       return (...args) => {
         hostCalls += 1
+        if (ledgerReadFails && prop === 'queryRecords') {
+          throw new Error('records service unavailable')
+        }
         return value.apply(target, args)
       }
     },
@@ -552,6 +569,118 @@ async function authorizedOperatorGetsRealResponses() {
     // Attributable: the customer operator's own principal is stamped, exactly as an admin's was.
     assert.equal(auditAppends.length, 1)
     assert.equal(auditAppends[0].actor, OPERATOR_CONFIRM.id)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 对账/确认的审计行带项目号 — CONFIRM HALF
+// ---------------------------------------------------------------------------
+//
+// The confirm request carries a decisionId and NO projectNo, so the project handle on its audit row
+// can only come from the ledger row that decisionId names. That lookup was inserted ahead of the
+// intent append — the one place in this handler where an added read is dangerous — so these cases
+// are as much about what did NOT change as about the column that did:
+//
+//   (a) the happy path fills `project_id` from the LEDGER, not from anything the caller said;
+//   (b) an unknown decisionId leaves it NULL and still gets its original 404, with the intent row
+//       still on the trail (the "a malformed request still lands an audit row" invariant);
+//   (c) a ledger read that FAILS OUTRIGHT leaves it NULL and still lands the intent row FIRST —
+//       "audit row + error", never "no audit row + error".
+//
+// In all three the row stays values-free in every other respect: no resolvedValue, no notes, and no
+// second audit row (the vocabulary and the append count are untouched by this change).
+async function theConfirmAuditRowCarriesTheProjectFromTheLedger() {
+  // (a) THE HAPPY PATH. Note what the request body does not contain: a projectNo.
+  {
+    const { routes, auditAppends, hostCallCount } = mount()
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(res.statusCode, 200, `confirm projectId: the confirm still succeeds, got ${JSON.stringify(res.body)}`)
+    // THE COST, PINNED. The soft lookup is a SECOND trip to the same ledger row
+    // `confirmConfirmationDecision` reads a moment later: one `findObjectSheet` + one scoped
+    // `queryRecords` on top of the four calls this confirm made before. 4 -> 7 measured on this
+    // harness, and written down here so the number cannot drift silently — a route that fills one
+    // nullable column must not quietly grow a third or fourth ledger round trip.
+    //
+    // A TRIPWIRE, NOT A CONTRACT: if a legitimate change moves it, move the number and say so in the
+    // PR. If it moves and nobody noticed, that is exactly what this line is for.
+    assert.equal(hostCallCount(), 7, 'confirm projectId: the soft lookup costs exactly one extra sheet lookup + one query')
+
+    assert.equal(auditAppends.length, 1, 'confirm projectId: still exactly ONE audit row — no second row was added')
+    const [row] = auditAppends
+    assert.equal(row.projectId, PROJECT_NO, 'confirm projectId: taken from the ledger row the decisionId resolves to')
+    assert.equal(row.action, 'exception_resolve', 'confirm projectId: no new audit action')
+    assert.equal(row.mode, 'confirmation_decision_requested', 'confirm projectId: no new mode')
+    assert.equal(row.subjectId, DECISION_ID)
+    assert.deepEqual(
+      row.detail,
+      { operation: 'confirmation_decision_confirm', resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS },
+      'confirm projectId: detail is untouched — enum + fixed token, no entered value and no notes',
+    )
+  }
+
+  // (b) AN UNKNOWN decisionId. The soft lookup names no row, so the column stays NULL — and the
+  // request keeps the module's own 404 rather than acquiring a new failure mode from the lookup.
+  {
+    const { routes, auditAppends } = mount()
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: 'decision_that_does_not_exist',
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(res.statusCode, 404, `confirm projectId: an unknown decision still 404s, got ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.code, 'CONFIRMATION_DECISION_NOT_FOUND', JSON.stringify(res.body))
+    assert.equal(auditAppends.length, 1, 'confirm projectId: the intent row still lands for a request that then fails')
+    assert.equal(auditAppends[0].projectId, null, 'confirm projectId: NULL when the lookup names no single row')
+    assert.equal(auditAppends[0].subjectId, 'decision_that_does_not_exist')
+  }
+
+  // (c) THE LEDGER READ ITSELF FAILS. This is the case the lookup's placement makes dangerous, and
+  // the reason it is wrapped: the append must still be the FIRST thing that happens.
+  {
+    const { routes, auditAppends } = mount({ ledgerReadFails: true })
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(res.statusCode, 500, `confirm projectId: a dead records service still fails the request, got ${JSON.stringify(res.body)}`)
+    // The failure the CALLER sees is the downstream read's, verbatim — the soft lookup contributed
+    // no error of its own, which is the difference between "swallowed" and "hidden".
+    assert.equal(res.body.error.message, 'records service unavailable', JSON.stringify(res.body))
+    assert.equal(auditAppends.length, 1, 'confirm projectId: …and the intent row is STILL on the trail, which is the whole point')
+    assert.equal(auditAppends[0].projectId, null, 'confirm projectId: a failed lookup fills nothing rather than blocking')
+    assert.equal(auditAppends[0].actor, OPERATOR_CONFIRM.id, 'confirm projectId: the principal is stamped either way')
+  }
+
+  // (d) A REQUEST WITH NO decisionId AT ALL. No lookup is attempted, the intent row still lands
+  // (subjectId null, projectId null), and the module's own named validation error reaches the caller.
+  {
+    const { routes, auditAppends } = mount()
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: { inputFingerprint: FINGERPRINT, resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS },
+    })
+    assert.equal(res.statusCode, 422, `confirm projectId: a decisionId-less confirm still fails, got ${JSON.stringify(res.body)}`)
+    // Pinned to the MODULE's own named error, not just "some 4xx": the point of skipping the lookup
+    // when there is no decisionId is that the caller keeps exactly the answer main gave it.
+    assert.equal(res.body.error.code, 'CONFIRMATION_DECISION_INPUT_INVALID', JSON.stringify(res.body))
+    assert.equal(res.body.error.details.field, 'decisionId', JSON.stringify(res.body))
+    assert.equal(auditAppends.length, 1, 'confirm projectId: the malformed request still lands its audit row')
+    assert.equal(auditAppends[0].projectId, null)
+    assert.equal(auditAppends[0].subjectId, null)
   }
 }
 
@@ -1278,9 +1407,183 @@ async function theConfirmWriteProvesItsTenantLikeItsSiblings() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// P1-1 — THE RAIL MANIFEST AND THE D2 LANDING (mirror half)
+// ---------------------------------------------------------------------------
+//
+// `/stock-prep`'s tab strip became a grouped rail, and the landing became a rule. Both live in this
+// module as data + one pure function so the browser half can be asserted byte-equal to them
+// (apps/web/tests/stockPrepPermissionMatrix.spec.ts F-09). This function is the server-side half of
+// that pair: it pins the vocabulary as frozen, the gate resolver as REFUSING an unknown token, and
+// the landing rule's three postures — including the one that matters, 「读不到」.
+function theRailVocabularyAndTheLandingRuleHold() {
+  // The manifest is frozen, values-free structure: group ids, view keys, gate tokens. No labels, no
+  // copy, no route paths — a rail item is not a capability and must not look like one.
+  assert.ok(Object.isFrozen(STOCK_PREP_RAIL_GROUPS), 'rail: the manifest is frozen')
+  const seenKeys = new Set()
+  for (const group of STOCK_PREP_RAIL_GROUPS) {
+    assert.ok(Object.isFrozen(group), `rail: group ${group.group} is frozen`)
+    assert.equal(typeof group.group, 'string')
+    for (const item of group.items) {
+      assert.equal(typeof item.key, 'string', 'rail: every item has a key')
+      assert.ok(!seenKeys.has(item.key), `rail: ${item.key} appears once`)
+      seenKeys.add(item.key)
+      assert.ok(STOCK_PREP_RAIL_GATES.includes(item.gate), `rail: ${item.key} names a known gate`)
+      assert.deepEqual(Object.keys(item).sort(), ['gate', 'key'], `rail: ${item.key} carries nothing else`)
+    }
+    for (const key of group.advanced || []) {
+      assert.ok(!seenKeys.has(key), `rail: ${key} appears once`)
+      seenKeys.add(key)
+    }
+    if (group.advanced && group.advanced.length > 0) {
+      assert.ok(STOCK_PREP_RAIL_GATES.includes(group.advancedGate), 'rail: 深度工具 names a known gate')
+    }
+  }
+  // 【工作】 — its composition and ORDER, item by item. P2-1 put 项目查询 between 项目备料 and
+  // 确认队列 (设计稿 §2.2 / §6.3), and the rail renders the manifest's order verbatim, so the order
+  // is a contract rather than a detail. Its gate is the OPERATOR tier: the panel reads the same U2
+  // directory union 今天要处理 reads plus the selected project's own board, and a `stock-prep:read`
+  // queue watcher must not be handed a page of project numbers.
+  const work = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'work')
+  assert.deepEqual(
+    work.items.map((item) => item.key),
+    ['home', 'project-board', 'project-query', 'confirmation-queue'],
+    'rail: 【工作】 lists 项目查询 between 项目备料 and 确认队列',
+  )
+  assert.deepEqual(
+    work.items.map((item) => item.gate),
+    [
+      STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+      STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+      STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+      STOCK_PREP_RAIL_GATE_ROUTE,
+    ],
+    'rail: 项目查询 rides the operator tier, like the two items it sits beside',
+  )
+
+  // 不下线 — the seven legacy MVP keys are FOLDED into 深度工具, not removed, and they are still on
+  // the platform-admin gate they were always on.
+  const deploy = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'deploy')
+  assert.equal(deploy.advancedGate, 'platform-admin', 'rail: 深度工具 stays platform-admin')
+  assert.deepEqual([...deploy.advanced].sort(), [
+    'bom-snapshot-diff',
+    'dashboard',
+    'exception-queue',
+    'material-mapping',
+    'prep-line',
+    'project-workspace',
+    'unit-conversion',
+  ], 'rail: all seven legacy MVP tabs are folded, none dropped')
+
+  // THE GATE RESOLVER. Per actor, per token, plus the refusal an unknown token must produce for
+  // EVERYONE — a mistyped gate must hide a group, never open one.
+  const cases = [
+    { name: 'anonymous', permissions: [], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false } },
+    { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true } },
+  ]
+  for (const testCase of cases) {
+    for (const gate of STOCK_PREP_RAIL_GATES) {
+      assert.equal(
+        satisfiesStockPrepRailGate(testCase.permissions, gate),
+        testCase.expected[gate],
+        `rail gate: ${testCase.name} @ ${gate}`,
+      )
+    }
+    assert.equal(
+      satisfiesStockPrepRailGate(testCase.permissions, 'not-a-gate'),
+      false,
+      `rail gate: ${testCase.name} is refused an unknown token`,
+    )
+  }
+
+  // D2=A — THE LANDING RULE, all three postures.
+  assert.deepEqual([...STOCK_PREP_LANDING_KEYS], ['getting-started', 'ops', 'home', 'confirmation-queue'])
+  const admin = [STOCK_PREP_ADMIN]
+  assert.equal(stockPrepWorkbenchLandingKey(admin, true), 'ops', 'D2: 装完落总览')
+  assert.equal(stockPrepWorkbenchLandingKey(admin, false), 'getting-started', 'D2: 未装完落开始使用')
+  // THE ONE THAT MATTERS. An unreadable preflight is not a finished install, so it must never land
+  // on the health page — that would be the page telling an admin a deployment story nobody has.
+  assert.equal(stockPrepWorkbenchLandingKey(admin, null), 'getting-started', 'D2: 读不到也落开始使用')
+  assert.equal(stockPrepWorkbenchLandingKey(admin, undefined), 'getting-started', 'D2: absent is unreadable too')
+
+  // The operator tier lands on 今天要处理 and does not consult the deployment posture at all.
+  for (const posture of [true, false, null]) {
+    assert.equal(
+      stockPrepWorkbenchLandingKey([STOCK_PREP_READ, STOCK_PREP_OPERATE], posture),
+      'home',
+      `D2: 一线落 home @ ${String(posture)}`,
+    )
+    assert.equal(
+      stockPrepWorkbenchLandingKey([STOCK_PREP_READ], posture),
+      'confirmation-queue',
+      `D2: 只读档保持确认队列 @ ${String(posture)}`,
+    )
+    assert.equal(
+      stockPrepWorkbenchLandingKey([], posture),
+      'confirmation-queue',
+      `D2: no codes, no landing change @ ${String(posture)}`,
+    )
+  }
+
+  // A platform admin is caught by the workbench ceiling FIRST, which is what keeps this rule
+  // equivalent to the browser's (whose operator-landing fold excludes a platform admin explicitly).
+  assert.equal(stockPrepWorkbenchLandingKey(['role:admin'], true), 'ops')
+  assert.equal(stockPrepWorkbenchLandingKey(['role:admin'], null), 'getting-started')
+
+  // AND IT GRANTS NOTHING. The rail vocabulary is a layout contract; no route may consult it.
+  //
+  // THE SCAN IS THE WHOLE PLUGIN, not `http-routes.cjs` alone. Pinning one file made the guard's
+  // claim ("no route consults it") narrower than its wording: a helper, a middleware or a second
+  // route table importing `satisfiesStockPrepRailGate` would turn a LAYOUT decision into an
+  // AUTHORIZATION one — the thing this asserts cannot happen — with the pin still green. Two
+  // exclusions, both of them the point rather than holes in it: the module that DEFINES the
+  // vocabulary, and the tests (this file names all three tokens on nearly every line).
+  const RAIL_VOCABULARY_TOKENS = ['STOCK_PREP_RAIL_GROUPS', 'stockPrepWorkbenchLandingKey', 'satisfiesStockPrepRailGate']
+  const PLUGIN_ROOT = path.join(__dirname, '..')
+  const VOCABULARY_MODULE = path.join(PLUGIN_ROOT, 'lib', 'stock-preparation-workbench-access.cjs')
+  const scanned = []
+  const offenders = []
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        // `__tests__` states the vocabulary by name on purpose; `node_modules` is not ours.
+        if (entry.name === '__tests__' || entry.name === 'node_modules') continue
+        walk(full)
+        continue
+      }
+      if (!entry.name.endsWith('.cjs')) continue
+      if (path.resolve(full) === path.resolve(VOCABULARY_MODULE)) continue
+      scanned.push(full)
+      const source = fs.readFileSync(full, 'utf8')
+      for (const token of RAIL_VOCABULARY_TOKENS) {
+        if (source.includes(token)) offenders.push(`${path.relative(PLUGIN_ROOT, full)} :: ${token}`)
+      }
+    }
+  }
+  walk(PLUGIN_ROOT)
+  // The scan has to have LOOKED at something — an empty sweep would pass this vacuously, and
+  // http-routes.cjs is the file the guard has always been about.
+  assert.ok(scanned.length > 20, `rail: the vocabulary scan covered only ${scanned.length} files`)
+  assert.ok(
+    scanned.some((file) => path.basename(file) === 'http-routes.cjs'),
+    'rail: the vocabulary scan must still cover http-routes.cjs',
+  )
+  assert.deepEqual(
+    offenders,
+    [],
+    'rail: nothing in the plugin consults the rail vocabulary — it decides layout, never access',
+  )
+}
+
 async function main() {
   await matrixGoldenHolds()
   await authorizedOperatorGetsRealResponses()
+  await theConfirmAuditRowCarriesTheProjectFromTheLedger()
   await platformAdminLosesNothing()
   await nobodyGainsAnything()
   await visibleEqualsActionableForEveryActor()
@@ -1297,6 +1600,7 @@ async function main() {
   // corroborates it. Running the source check first would let it short-circuit a real relaxation.
   await projectSyncRefusesTheTiersItAlwaysRefused()
   projectSyncGatesAreUnchanged()
+  theRailVocabularyAndTheLandingRuleHold()
   console.log('stock-preparation permission matrix (O2/R-11): all assertions passed')
 }
 

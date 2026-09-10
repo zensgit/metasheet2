@@ -700,7 +700,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_LIB_TESTS=67
+          EXPECTED_LIB_TESTS=68
           if ! lib_out="$(pnpm exec tsx --test scripts/ops/attendance-w4c5-rollout-transition-lib.test.ts 2>&1)"; then
             printf '%s\n' "$lib_out"
             echo "W4C-5 tooling unit tests: tsx --test exited non-zero (output above)" >&2
@@ -948,6 +948,9 @@ jobs:
             tests/unit/elearning-assessment-admin-routes.test.ts \
             tests/unit/elearning-assessment-import.test.ts \
             tests/unit/elearning-notification-delivery.test.ts \
+            tests/unit/elearning-notification-dispatch.test.ts \
+            tests/unit/elearning-notification-dingtalk.test.ts \
+            tests/unit/elearning-notification-events.test.ts \
             tests/unit/elearning-open-completion-policy.test.ts \
             tests/unit/elearning-open-completion-postgres.test.ts \
             tests/unit/elearning-reminder-port-scoping.test.ts \
@@ -1011,6 +1014,7 @@ jobs:
             tests/unit/elearning-media-validation.test.ts \
             tests/unit/elearning-pilot-routes.test.ts \
             tests/unit/elearning-pilot-runtime.test.ts \
+            tests/unit/elearning-app-installation.test.ts \
             tests/unit/elearning-plugin-runtime.test.ts \
             tests/unit/elearning-portal-migration-contract.test.ts \
             tests/unit/elearning-portal-routes.test.ts \
@@ -1127,6 +1131,7 @@ jobs:
             tests/integration/elearning-portal-settings.db.test.ts \
             tests/integration/elearning-stats-daily-projection.db.test.ts \
             tests/integration/elearning-analytics-export.db.test.ts \
+            tests/integration/elearning-app-installation.db.test.ts \
             tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts \
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \
@@ -1747,7 +1752,9 @@ jobs:
           ATTENDANCE_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for attendance integration}"
+          : "${ATTENDANCE_TEST_DATABASE_URL:?ATTENDANCE_TEST_DATABASE_URL is required for attendance integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/attendance-report-cleaning-proposal.db.test.ts \
             tests/integration/attendance-plugin.test.ts \
             tests/integration/attendance-approval-action-authorization.db.test.ts \
             tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts \

@@ -19,8 +19,8 @@
   nodes in overview mode) do not break that adjacency.
 
   `afterCommon` is a layout-only slot immediately below the frozen 常用
-  band. The parent owns any dedicated request card (请假 first); this
-  component still fetches nothing and does not restyle the first viewport.
+  band. The parent owns any dedicated request card; this component still
+  fetches nothing and does not restyle the first viewport.
 
   Visual follow-up (owner, 2026-08-24): employee-workspace chrome only —
   DingTalk/Feishu employee-page tone. No punch, policy, approval, or API change.

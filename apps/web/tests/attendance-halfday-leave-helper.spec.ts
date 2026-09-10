@@ -683,7 +683,9 @@ describe('Attendance dedicated leave-request card (employee overview)', () => {
       requestedOutAt: '2026-04-15T18:00',
       reason: '家里有事',
     })
-    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
+    await vi.waitFor(() => {
+      expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
+    })
   })
 
   it('header cancel closes the card without opening the shared disclosure', async () => {

@@ -8,6 +8,11 @@ import { randomUUID } from 'node:crypto'
 
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { Pool, type PoolClient } from 'pg'
+import { Kysely, PostgresDialect, sql as kyselySql } from 'kysely'
+import { up as upDispatchFence, down as downDispatchFence } from '../../src/db/migrations/zzzz20260908160000_add_elearning_notification_dispatch_fence'
+import { up as upNotificationEvents, down as downNotificationEvents } from '../../src/db/migrations/zzzz20260908170000_extend_elearning_notification_events'
+import { dispatchElearningNotification } from '../../src/services/elearning-notification-dispatch'
+import { collectElearningNotificationEvents, checkElearningEventNotificationEligibility } from '../../src/services/elearning-notification-events'
 
 import { ELEARNING_V01_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import { ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
@@ -45,6 +50,20 @@ const pool = new Pool({ connectionString: DATABASE_URL, max: 8 })
 const NS = `el-notification-${process.pid}-${Date.now().toString(36)}`
 const MIGRATION_NAME = 'zzzz20260826210000_create_elearning_notification_deliveries'
 const committedOrgIds: string[] = []
+const notificationUsers: string[] = []
+
+async function installNotifications(orgId: string) {
+  await pool.query(`INSERT INTO platform_app_instances
+    (tenant_id,workspace_id,app_id,plugin_id,project_id,status,config_json)
+    VALUES ($1,$1,'elearning','plugin-elearning','Synthetic classroom','active',
+      '{"notificationsEnabled":true}'::jsonb)`, [orgId])
+}
+
+async function seedNotificationUser(orgId: string, userId: string) {
+  await pool.query("INSERT INTO users(id,password_hash) VALUES ($1,'synthetic-not-a-password')", [userId])
+  notificationUsers.push(userId)
+  await pool.query('INSERT INTO user_orgs(user_id,org_id) VALUES ($1,$2)', [userId, orgId])
+}
 
 type PgTarget = Pool | PoolClient
 
@@ -250,6 +269,7 @@ async function setCleanupTriggers(enabled: boolean): Promise<void> {
 }
 
 async function cleanupOrg(orgId: string): Promise<void> {
+  await pool.query("DELETE FROM platform_app_instances WHERE workspace_id=$1 AND app_id='elearning'", [orgId])
   await setCleanupTriggers(false)
   try {
     await pool.query(
@@ -281,6 +301,10 @@ async function cleanupOrg(orgId: string): Promise<void> {
 
 afterEach(async () => {
   for (const orgId of committedOrgIds.splice(0)) await cleanupOrg(orgId)
+  for (const userId of notificationUsers.splice(0)) {
+    await pool.query('DELETE FROM user_orgs WHERE user_id=$1', [userId])
+    await pool.query('DELETE FROM users WHERE id=$1', [userId])
+  }
 })
 
 afterAll(async () => {
@@ -288,6 +312,176 @@ afterAll(async () => {
 })
 
 describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
+  it('drains training events beyond the first batch and preserves empty private payloads', async () => {
+    const orgId = `${NS}-training-${randomUUID().slice(0, 8)}`
+    committedOrgIds.push(orgId)
+    const a = await seedAssignmentMember(orgId, `${NS}-training-a`)
+    const b = await seedAssignmentMember(orgId, `${NS}-training-b`)
+    await seedNotificationUser(orgId, a.userId)
+    await seedNotificationUser(orgId, b.userId)
+    const options = { since: '2026-01-01T00:00:00.000Z', assignments: true, limit: 1 }
+    // Retained business events must not produce new intents before installation/opt-in.
+    expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 0 })
+    await installNotifications(orgId)
+    for (const state of [
+      { status: 'inactive', config: { notificationsEnabled: true }, tenant: orgId },
+      { status: 'active', config: { notificationsEnabled: false }, tenant: orgId },
+      { status: 'active', config: { notificationsEnabled: 'true' }, tenant: orgId },
+      { status: 'active', config: { notificationsEnabled: true }, tenant: `${orgId}-foreign` },
+    ]) {
+      await pool.query(`UPDATE platform_app_instances SET status=$2,config_json=$3::jsonb,tenant_id=$4
+        WHERE workspace_id=$1 AND app_id='elearning'`, [orgId, state.status, JSON.stringify(state.config), state.tenant])
+      expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 0 })
+      expect((await pool.query('SELECT count(*)::int AS count FROM elearning_notification_deliveries WHERE org_id=$1', [orgId])).rows)
+        .toEqual([{ count: 0 }])
+    }
+    await pool.query(`UPDATE platform_app_instances SET tenant_id=$1,status='active',
+      config_json='{"notificationsEnabled":true}'::jsonb WHERE workspace_id=$1 AND app_id='elearning'`, [orgId])
+    expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 1 })
+    expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 1 })
+    expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 0 })
+    const rows = await pool.query('SELECT id,recipient_user_id,payload,kind FROM elearning_notification_deliveries WHERE org_id=$1', [orgId])
+    expect(rows.rows).toHaveLength(2)
+    const schema = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await expect(schema.transaction().execute((tx) => downNotificationEvents(tx)))
+      .rejects.toThrow('migration down refused: new event rows exist')
+    for (const row of rows.rows) {
+      expect(row.payload).toEqual({})
+      expect(row.kind).toBe('training_available')
+      expect(await checkElearningEventNotificationEligibility(db, {
+        orgId, deliveryId: row.id, recipientUserId: row.recipient_user_id,
+      })).toBe(true)
+      expect(await checkElearningEventNotificationEligibility(db, {
+        orgId: `${orgId}-other`, deliveryId: row.id, recipientUserId: row.recipient_user_id,
+      })).toBe(false)
+    }
+    await pool.query("UPDATE elearning_courses SET status='withdrawn' WHERE org_id=$1", [orgId])
+    expect(await checkElearningEventNotificationEligibility(db, {
+      orgId, deliveryId: rows.rows[0].id, recipientUserId: rows.rows[0].recipient_user_id,
+    })).toBe(false)
+  })
+
+  it('replays the dispatch schema, rejects trigger/default drift, and supports empty rollback/reapply', async () => {
+    const schema = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await upDispatchFence(schema)
+    await schema.transaction().execute(async (tx) => {
+      await downDispatchFence(tx)
+      await upDispatchFence(tx)
+      await upDispatchFence(tx)
+    })
+    for (const tamper of [
+      "ALTER TABLE elearning_notification_deliveries ALTER COLUMN dispatch_state SET DEFAULT 'claimed'",
+      'ALTER TABLE elearning_notification_deliveries DISABLE TRIGGER trg_elearning_notification_dispatch_guard',
+      `DROP TRIGGER trg_elearning_notification_dispatch_guard ON elearning_notification_deliveries;
+       CREATE TRIGGER trg_elearning_notification_dispatch_guard BEFORE INSERT OR UPDATE ON elearning_notification_deliveries
+       FOR EACH ROW WHEN (false) EXECUTE FUNCTION elearning_notification_dispatch_guard()`,
+    ]) {
+      await expect(schema.transaction().execute(async (tx) => {
+        await kyselySql.raw(tamper).execute(tx)
+        await upDispatchFence(tx)
+      })).rejects.toThrow('NOTIFICATION_DISPATCH_MIGRATION_DRIFT')
+      await upDispatchFence(schema)
+    }
+  })
+
+  it('rejects event CHECK, FK, column, function and trigger drift with canonical restore', async () => {
+    const schema = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await upNotificationEvents(schema)
+    await schema.transaction().execute(async (tx) => {
+      await downNotificationEvents(tx)
+      await upNotificationEvents(tx)
+      await upNotificationEvents(tx)
+    })
+    for (const tamper of [
+      "ALTER TABLE elearning_notification_deliveries ALTER COLUMN enrollment_id SET DEFAULT gen_random_uuid()",
+      `ALTER TABLE elearning_notification_deliveries DROP CONSTRAINT elearning_notification_deliveries_kind_basis_chk;
+       ALTER TABLE elearning_notification_deliveries ADD CONSTRAINT elearning_notification_deliveries_kind_basis_chk CHECK (true)`,
+      `ALTER TABLE elearning_notification_deliveries DROP CONSTRAINT elearning_notification_deliveries_enrollment_fk;
+       ALTER TABLE elearning_notification_deliveries ADD CONSTRAINT elearning_notification_deliveries_enrollment_fk
+       FOREIGN KEY(org_id,enrollment_id) REFERENCES elearning_course_enrollments(org_id,id) ON DELETE CASCADE`,
+      `CREATE OR REPLACE FUNCTION elearning_notification_deliveries_identity_guard() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END; $f$`,
+      `DROP TRIGGER trg_elearning_notification_deliveries_identity_guard ON elearning_notification_deliveries;
+       CREATE TRIGGER trg_elearning_notification_deliveries_identity_guard BEFORE UPDATE OR DELETE ON elearning_notification_deliveries
+       FOR EACH ROW WHEN (false) EXECUTE FUNCTION elearning_notification_deliveries_identity_guard()`,
+    ]) {
+      await expect(schema.transaction().execute(async (tx) => {
+        await kyselySql.raw(tamper).execute(tx)
+        await upNotificationEvents(tx)
+      })).rejects.toThrow('notification event migration drift')
+      await upNotificationEvents(schema)
+    }
+  })
+
+  it('fences a real two-connection external effect and refuses resetting its identity', async () => {
+    const orgId = `${NS}-effect-${randomUUID().slice(0, 8)}`
+    committedOrgIds.push(orgId)
+    const member = await seedAssignmentMember(orgId, `${NS}-effect-user`)
+    const delivery = await enqueueElearningNotificationDelivery(db, {
+      orgId, assignmentMemberId: member.memberId, recipientUserId: member.userId,
+      sourceKey: `${NS}:effect`, dueAt: '2026-08-27T00:00:00.000Z', payload: {},
+    })
+    await pool.query(`UPDATE elearning_notification_deliveries
+      SET status='sending', claimed_at=now(), claim_expires_at=now()+interval '1 minute',
+          claim_worker_id='synthetic-worker' WHERE id=$1`, [delivery.deliveryId])
+    let sends = 0
+    let arrived = 0
+    let release!: () => void
+    const barrier = new Promise<void>((resolve) => { release = resolve })
+    const options = {
+      env: { ELEARNING_ENABLED: 'true', ELEARNING_CONTENT_ENABLED: 'true',
+        ELEARNING_ASSIGNMENT_ENABLED: 'true', ELEARNING_NOTIFICATIONS_ENABLED: 'true',
+        ELEARNING_NOTIFICATIONS_SINCE: '2026-01-01T00:00:00.000Z' },
+      eligible: async () => true,
+      prepare: async () => {
+        arrived += 1
+        if (arrived === 2) release()
+        await barrier
+        return { outcome: 'prepared' as const, send: async () => {
+          sends += 1
+          return { outcome: 'sent' as const }
+        } }
+      },
+    }
+    const input = { orgId, assignmentMemberId: member.memberId, recipientUserId: member.userId,
+      deliveryId: delivery.deliveryId, idempotencyKey: `delivery:${delivery.deliveryId}`,
+      kind: 'assignment_reminder' as const, payload: {} }
+    const outcomes = await Promise.all([
+      dispatchElearningNotification(db, input, options), dispatchElearningNotification(db, input, options),
+    ])
+    expect(sends).toBe(1)
+    expect(outcomes).toContainEqual({ outcome: 'sent' })
+    expect(outcomes).toContainEqual({ outcome: 'outcome_unknown', code: 'NOTIFICATION_EFFECT_UNKNOWN' })
+    expect(await dispatchElearningNotification(db, input, options)).toEqual({ outcome: 'sent' })
+    expect(sends).toBe(1)
+    await pool.query(`UPDATE elearning_notification_deliveries
+      SET claim_worker_id='recovered-worker', attempt_count=attempt_count+1,
+          claim_expires_at=now()-interval '1 second' WHERE id=$1`, [delivery.deliveryId])
+    expect(await dispatchElearningNotification(new PgNotificationDb(), input, options)).toEqual({ outcome: 'sent' })
+    expect(sends).toBe(1)
+    const uncertain = await enqueueElearningNotificationDelivery(db, {
+      orgId, assignmentMemberId: member.memberId, recipientUserId: member.userId,
+      sourceKey: `${NS}:uncertain`, dueAt: '2026-08-27T00:00:00.000Z', payload: {},
+    })
+    await pool.query(`UPDATE elearning_notification_deliveries SET status='sending',
+      claimed_at=now(), claim_expires_at=now()-interval '1 second', claim_worker_id='lost-worker' WHERE id=$1`, [uncertain.deliveryId])
+    const uncertainInput = { ...input, deliveryId: uncertain.deliveryId, idempotencyKey: `delivery:${uncertain.deliveryId}` }
+    expect(await dispatchElearningNotification(db, uncertainInput, { ...options,
+      prepare: async () => ({ outcome: 'prepared' as const, send: async () => { throw new Error('synthetic transport failure') } }),
+    })).toEqual({ outcome: 'outcome_unknown', code: 'NOTIFICATION_EFFECT_UNKNOWN' })
+    await pool.query(`UPDATE elearning_notification_deliveries SET claim_worker_id='recovered-worker',
+      attempt_count=attempt_count+1, claim_expires_at=now()+interval '1 minute' WHERE id=$1`, [uncertain.deliveryId])
+    expect(await dispatchElearningNotification(new PgNotificationDb(), uncertainInput, options))
+      .toEqual({ outcome: 'outcome_unknown', code: 'NOTIFICATION_EFFECT_UNKNOWN' })
+    expect(sends).toBe(1)
+    const schema = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await expect(schema.transaction().execute((tx) => downDispatchFence(tx)))
+      .rejects.toThrow('NOTIFICATION_EFFECT_ROLLBACK_BLOCKED')
+    await expectPgError(() => pool.query(
+      `UPDATE elearning_notification_deliveries SET dispatch_state='idle' WHERE id=$1`,
+      [delivery.deliveryId],
+    ), 'P0001')
+  })
+
   it('is migration-backed, same-org constrained, indexed, and identity guarded', async () => {
     const migration = await pool.query(
       'SELECT name FROM kysely_migration WHERE name = $1',
@@ -309,7 +503,8 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
     const org = columns.rows.find((row) => row.column_name === 'org_id')
     const member = columns.rows.find((row) => row.column_name === 'assignment_member_id')
     expect(org).toEqual({ column_name: 'org_id', is_nullable: 'NO', column_default: null })
-    expect(member?.is_nullable).toBe('NO')
+    // New event kinds have their own FK basis; reminders still require member via CHECK.
+    expect(member?.is_nullable).toBe('YES')
 
     const constraints = await pool.query<{ name: string; definition: string }>(
       `SELECT constraint_info.conname AS name,
@@ -672,6 +867,7 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
     })).resolves.toBe(true)
 
     const attemptId = randomUUID()
+    await seedNotificationUser(orgA, a.userId)
     await pool.query(
       `INSERT INTO elearning_exam_attempts (
          id, org_id, exam_id, course_version_id, course_version_item_id,
@@ -685,6 +881,9 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
         WHERE org_id = $1 AND id = $2`,
       [orgA, attemptId],
     )
+    const eventOptions = { since: '2026-01-01T00:00:00.000Z', results: true }
+    await installNotifications(orgA)
+    expect(await collectElearningNotificationEvents(db, eventOptions)).toEqual({ inserted: 0 })
     await pool.query(
       `UPDATE elearning_exam_attempts
           SET status = 'graded', auto_score = 10, total_score = 10,
@@ -692,6 +891,14 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
         WHERE org_id = $1 AND id = $2`,
       [orgA, attemptId],
     )
+    expect(await collectElearningNotificationEvents(db, eventOptions)).toEqual({ inserted: 1 })
+    expect(await collectElearningNotificationEvents(db, eventOptions)).toEqual({ inserted: 0 })
+    const notices = await pool.query("SELECT id, payload FROM elearning_notification_deliveries WHERE org_id=$1 AND kind='result_published'", [orgA])
+    expect(notices.rows).toHaveLength(1)
+    expect(notices.rows[0].payload).toEqual({})
+    expect(await checkElearningEventNotificationEligibility(db, {
+      orgId: orgA, deliveryId: notices.rows[0].id, recipientUserId: a.userId,
+    })).toBe(true)
     await expect(produce(
       '2026-08-31T00:00:00.000Z',
       '2026-08-31T01:00:00.000Z',
@@ -735,6 +942,6 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
         WHERE org_id = $1`,
       [orgA],
     )
-    expect(intents.rows).toEqual([{ count: 3 }])
+    expect(intents.rows).toEqual([{ count: 4 }])
   })
 })

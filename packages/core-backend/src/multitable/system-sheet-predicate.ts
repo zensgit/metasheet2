@@ -32,11 +32,15 @@ export function isSystemPeopleSheetDescription(value: unknown): boolean {
 
 /**
  * W0-1 v3.7 §3/§8 — the server-owned `meta_sheets.system_kind` values. This column is set ONLY by internal
- * provisioning (People-sheet preset + approval-projection `ensureFamilySheet`) — the L5 migration performs NO
+ * provisioning (People preset plus approval/e-learning projection writers) — the L5 migration performs NO
  * backfill — and NEVER by a client create/update request, so it is the NON-FORGEABLE system-sheet signal. `isSystemSheet`
  * treats a recognized `system_kind` as the ONLY authoritative trust signal.
  */
-export const SYSTEM_SHEET_KINDS = ['people_directory', 'approval_projection'] as const
+export const SYSTEM_SHEET_KINDS = [
+  'people_directory',
+  'approval_projection',
+  'elearning_projection',
+] as const
 
 /** True iff `value` is a recognized server-owned system-sheet kind (non-forgeable). */
 export function isSystemSheetKind(value: unknown): boolean {

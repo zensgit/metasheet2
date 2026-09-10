@@ -35,7 +35,10 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getToken: () => 'session-token',
     clearToken: vi.fn(),
-    getAccessSnapshot: () => ({ isAdmin: false, email: '' }),
+    // `roles` / `permissions` are the shape `workbenchAccess.ts` decides on (it takes the SNAPSHOT,
+    // never the expanding probe), so this double has to carry them or every stock-prep predicate
+    // reads an empty principal.
+    getAccessSnapshot: () => ({ isAdmin: false, email: '', roles: [], permissions: h.permissions }),
     hasPermission: (permission: string) => h.permissions.includes(permission),
   }),
 }))

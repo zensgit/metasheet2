@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { up as registryUp } from '../../src/db/migrations/zzzz20260413130000_create_platform_app_instances'
 
 import {
   up as jobsUp,
@@ -13,6 +14,11 @@ import {
   up as statsDailyUp,
 } from '../../src/db/migrations/zzzz20260830190000_create_elearning_stats_daily'
 import {
+  assertElearningStatsMultitableSheetsSchema,
+  down as statsMultitableDown,
+  up as statsMultitableUp,
+} from '../../src/db/migrations/zzzz20260906100000_create_elearning_stats_multitable_sheets'
+import {
   projectElearningDepartmentStatsDaily,
   type ElearningStatsDailyDb,
   type ElearningStatsDailyQueryable,
@@ -21,6 +27,19 @@ import {
   enqueueElearningStatsDailyJobs,
   type ElearningStatsDailyJobProducerDb,
 } from '../../src/services/elearning-stats-daily-job-producer'
+import {
+  ELEARNING_STATS_MULTITABLE_METRIC_FIELDS,
+  projectElearningStatsToMultitable,
+  reconcileElearningStatsMultitable,
+  type ElearningStatsMultitableDb,
+  type ElearningStatsMultitableQueryable,
+} from '../../src/services/elearning-stats-multitable-projection'
+import {
+  deriveElearningProjectionBaseId,
+  deriveElearningProjectionFieldId,
+  deriveElearningProjectionRecordId,
+  deriveElearningProjectionSheetId,
+} from '../../src/multitable/elearning-projection-constants'
 import {
   assertSafeScratchDatabaseName,
   attachOwnedPoolTerminationHandler,
@@ -99,6 +118,40 @@ function producerDb(pool: Pool): ElearningStatsDailyJobProducerDb {
   }
 }
 
+function multitableProjectorDb(pool: Pool): ElearningStatsMultitableDb {
+  return {
+    async query(text, params) {
+      const result = await pool.query(text, params)
+      return {
+        rowCount: result.rowCount,
+        rows: result.rows as Array<Record<string, unknown>>,
+      }
+    },
+    async transaction<T>(run: (tx: ElearningStatsMultitableQueryable) => Promise<T>) {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const result = await run({
+          async query(text, params) {
+            const queryResult = await client.query(text, params)
+            return {
+              rowCount: queryResult.rowCount,
+              rows: queryResult.rows as Array<Record<string, unknown>>,
+            }
+          },
+        })
+        await client.query('COMMIT')
+        return result
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    },
+  }
+}
+
 function twoPartyTimedBarrier(marker: string, timeoutMs = 100): (text: string) => Promise<void> {
   let arrivals = 0
   let release: (() => void) | undefined
@@ -133,6 +186,7 @@ async function createPrerequisites(pool: Pool): Promise<void> {
       id uuid PRIMARY KEY,
       integration_id uuid NOT NULL,
       provider text NOT NULL,
+      name text NOT NULL,
       is_active boolean NOT NULL,
       CONSTRAINT uq_directory_departments_id_integration_provider
         UNIQUE (id, integration_id, provider)
@@ -213,6 +267,46 @@ async function createPrerequisites(pool: Pool): Promise<void> {
       user_id text NOT NULL,
       points integer NOT NULL,
       created_at timestamptz NOT NULL
+    );
+    CREATE TABLE meta_bases (
+      id text PRIMARY KEY,
+      name text NOT NULL,
+      icon text,
+      color text,
+      owner_id text,
+      workspace_id text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      deleted_at timestamptz
+    );
+    CREATE TABLE meta_sheets (
+      id text PRIMARY KEY,
+      base_id text REFERENCES meta_bases(id) ON DELETE SET NULL,
+      name text NOT NULL,
+      description text,
+      system_kind text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE meta_fields (
+      id text PRIMARY KEY,
+      sheet_id text NOT NULL REFERENCES meta_sheets(id) ON DELETE CASCADE,
+      name text NOT NULL,
+      type text NOT NULL,
+      property jsonb DEFAULT '{}'::jsonb,
+      "order" integer NOT NULL DEFAULT 0,
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now()
+    );
+    CREATE TABLE meta_records (
+      id text PRIMARY KEY,
+      sheet_id text NOT NULL REFERENCES meta_sheets(id) ON DELETE CASCADE,
+      data jsonb NOT NULL DEFAULT '{}'::jsonb,
+      version integer NOT NULL DEFAULT 1,
+      created_by text,
+      modified_by text,
+      created_at timestamptz DEFAULT now(),
+      updated_at timestamptz DEFAULT now()
     )
   `)
 }
@@ -221,6 +315,10 @@ async function seedDepartment(
   pool: Pool,
   options: { memberCount: number; orgId: string },
 ): Promise<{ departmentId: string; integrationId: string; userIds: string[] }> {
+  await pool.query(`INSERT INTO platform_app_instances
+    (tenant_id, workspace_id, app_id, plugin_id, project_id, status, config_json)
+    VALUES ($1,$1,'elearning','plugin-elearning',$1,'active','{"notificationsEnabled":false}')
+    ON CONFLICT (workspace_id,app_id,instance_key) DO NOTHING`, [options.orgId])
   const integrationId = randomUUID()
   const departmentId = randomUUID()
   await pool.query(
@@ -229,8 +327,8 @@ async function seedDepartment(
     [integrationId, options.orgId],
   )
   await pool.query(
-    `INSERT INTO directory_departments (id, integration_id, provider, is_active)
-     VALUES ($1, $2, 'dingtalk', true)`,
+    `INSERT INTO directory_departments (id, integration_id, provider, name, is_active)
+     VALUES ($1, $2, 'dingtalk', 'Department', true)`,
     [departmentId, integrationId],
   )
   const userIds: string[] = []
@@ -309,8 +407,10 @@ beforeAll(async () => {
   })
   await createPrerequisites(firstPool)
   database = new Kysely({ dialect: new PostgresDialect({ pool: firstPool }) })
+  await migrate(registryUp)
   await migrate(jobsUp)
   await migrate(statsDailyUp)
+  await migrate(statsMultitableUp)
 }, 30_000)
 
 afterAll(async () => {
@@ -357,6 +457,28 @@ afterAll(async () => {
 }, 30_000)
 
 describe('e-learning stats daily PostgreSQL authority', () => {
+  it('applies, replays and rejects drift in the multitable projection mapping', async () => {
+    if (!firstPool || !database) throw new Error('database unavailable')
+    await migrate(statsMultitableUp)
+    await assertElearningStatsMultitableSheetsSchema(database)
+    await firstPool.query(
+      'ALTER TABLE elearning_stats_multitable_sheets ALTER COLUMN updated_at DROP DEFAULT',
+    )
+    await expect(migrate(statsMultitableUp)).rejects.toThrow(
+      'elearning stats multitable migration drift: column set',
+    )
+    await firstPool.query(
+      'ALTER TABLE elearning_stats_multitable_sheets ALTER COLUMN updated_at SET DEFAULT now()',
+    )
+    await migrate(statsMultitableUp)
+    await migrate(statsMultitableDown)
+    await migrate(statsMultitableDown)
+    expect(await firstPool.query(
+      `SELECT to_regclass('elearning_stats_multitable_sheets') AS table_name`,
+    ).then((result) => result.rows)).toEqual([{ table_name: null }])
+    await migrate(statsMultitableUp)
+  })
+
   it('enqueues the previous UTC day once for active departments across two connections', async () => {
     if (!firstPool || !secondPool) throw new Error('database unavailable')
     const activeOrg = `org-stats-producer-${randomUUID()}`
@@ -553,6 +675,209 @@ describe('e-learning stats daily PostgreSQL authority', () => {
         WHERE org_id = $1 AND department_id = $2`,
       [orgId, seeded.departmentId],
     )).rejects.toMatchObject({ code: '23514' })
+  })
+
+  it('projects visible aggregates, omits suppressed metrics and reconciles only missing or stale rows', async () => {
+    if (!firstPool) throw new Error('database unavailable')
+    const visibleOrg = `org-stats-multitable-visible-${randomUUID()}`
+    const visible = await seedDepartment(firstPool, { memberCount: 5, orgId: visibleOrg })
+    const visibleInput = {
+      departmentId: visible.departmentId,
+      orgId: visibleOrg,
+      statsDate: '2026-08-30',
+    }
+    await projectElearningDepartmentStatsDaily(projectorDb(firstPool), visibleInput, ENABLED)
+    const visibleProjection = await projectElearningStatsToMultitable(
+      multitableProjectorDb(firstPool),
+      visibleInput,
+      ENABLED,
+    )
+    expect(visibleProjection).toEqual({
+      baseId: deriveElearningProjectionBaseId(visibleOrg),
+      outcome: 'projected',
+      recordId: deriveElearningProjectionRecordId(
+        visibleOrg,
+        visible.departmentId,
+        '2026-08-30',
+      ),
+      sheetId: deriveElearningProjectionSheetId(visibleOrg),
+      suppressed: false,
+    })
+    const visibleRow = await firstPool.query(
+      'SELECT data, version FROM meta_records WHERE id = $1',
+      [visibleProjection.recordId],
+    )
+    expect(visibleRow.rows[0]?.data).toMatchObject({
+      [deriveElearningProjectionFieldId(visibleOrg, 'memberCount')]: 5,
+      [deriveElearningProjectionFieldId(visibleOrg, 'suppressed')]: false,
+    })
+    expect(visibleRow.rows[0]?.version).toBe(1)
+    await expect(projectElearningStatsToMultitable(
+      multitableProjectorDb(firstPool),
+      visibleInput,
+      ENABLED,
+    )).resolves.toMatchObject({ outcome: 'noop' })
+    expect(await firstPool.query(
+      'SELECT version FROM meta_records WHERE id = $1',
+      [visibleProjection.recordId],
+    ).then((result) => result.rows)).toEqual([{ version: 1 }])
+
+    const suppressedOrg = `org-stats-multitable-suppressed-${randomUUID()}`
+    const suppressed = await seedDepartment(firstPool, { memberCount: 4, orgId: suppressedOrg })
+    const suppressedInput = {
+      departmentId: suppressed.departmentId,
+      orgId: suppressedOrg,
+      statsDate: '2026-08-30',
+    }
+    await projectElearningDepartmentStatsDaily(projectorDb(firstPool), suppressedInput, ENABLED)
+    const suppressedProjection = await projectElearningStatsToMultitable(
+      multitableProjectorDb(firstPool),
+      suppressedInput,
+      ENABLED,
+    )
+    const suppressedData = await firstPool.query(
+      'SELECT data FROM meta_records WHERE id = $1',
+      [suppressedProjection.recordId],
+    ).then((result) => result.rows[0]?.data as Record<string, unknown>)
+    expect(suppressedData[deriveElearningProjectionFieldId(suppressedOrg, 'suppressed')]).toBe(true)
+    for (const field of ELEARNING_STATS_MULTITABLE_METRIC_FIELDS) {
+      expect(suppressedData).not.toHaveProperty(
+        deriveElearningProjectionFieldId(suppressedOrg, field.key),
+      )
+    }
+
+    // Projection-time privacy must not trust a drifted SoR suppression bit.
+    await firstPool.query(
+      `UPDATE elearning_stats_daily
+          SET suppressed = false,
+              assigned_count = 4,
+              completed_count = 0,
+              completion_rate = 0,
+              credit_average = 0,
+              credit_total = 0,
+              exam_participant_count = 0,
+              learner_count = 4,
+              learning_seconds = 0,
+              member_count = 4,
+              overdue_count = 0
+        WHERE org_id = $1 AND department_id = $2`,
+      [suppressedOrg, suppressed.departmentId],
+    )
+    await projectElearningStatsToMultitable(
+      multitableProjectorDb(firstPool),
+      suppressedInput,
+      ENABLED,
+    )
+    const failClosedSuppressedData = await firstPool.query(
+      'SELECT data FROM meta_records WHERE id = $1',
+      [suppressedProjection.recordId],
+    ).then((result) => result.rows[0]?.data as Record<string, unknown>)
+    expect(failClosedSuppressedData[
+      deriveElearningProjectionFieldId(suppressedOrg, 'suppressed')
+    ]).toBe(true)
+    for (const field of ELEARNING_STATS_MULTITABLE_METRIC_FIELDS) {
+      expect(failClosedSuppressedData).not.toHaveProperty(
+        deriveElearningProjectionFieldId(suppressedOrg, field.key),
+      )
+    }
+
+    await firstPool.query('DELETE FROM meta_records WHERE id = $1', [visibleProjection.recordId])
+    const repaired = await reconcileElearningStatsMultitable(
+      multitableProjectorDb(firstPool),
+      200,
+      ENABLED,
+    )
+    expect(repaired.failed).toBe(0)
+    expect(repaired.projected).toBeGreaterThanOrEqual(1)
+    expect(await firstPool.query(
+      'SELECT count(*)::int AS count FROM meta_records WHERE id = $1',
+      [visibleProjection.recordId],
+    ).then((result) => result.rows)).toEqual([{ count: 1 }])
+    await expect(reconcileElearningStatsMultitable(
+      multitableProjectorDb(firstPool),
+      200,
+      ENABLED,
+    )).resolves.toEqual({ failed: 0, projected: 0, scanned: 0 })
+
+    await firstPool.query(
+      `INSERT INTO elearning_credit_decisions (
+         org_id, user_id, awarded_points, occurred_at
+       ) VALUES ($1, $2, 3, '2026-08-30T13:00:00.000Z')`,
+      [visibleOrg, visible.userIds[0]],
+    )
+    await projectElearningDepartmentStatsDaily(projectorDb(firstPool), visibleInput, ENABLED)
+    await expect(reconcileElearningStatsMultitable(
+      multitableProjectorDb(firstPool),
+      200,
+      ENABLED,
+    )).resolves.toEqual({ failed: 0, projected: 1, scanned: 1 })
+    expect(await firstPool.query(
+      'SELECT data, version FROM meta_records WHERE id = $1',
+      [visibleProjection.recordId],
+    ).then((result) => result.rows)).toEqual([{
+      data: expect.objectContaining({
+        [deriveElearningProjectionFieldId(visibleOrg, 'creditTotal')]: 3,
+        [deriveElearningProjectionFieldId(visibleOrg, 'projectedVersion')]: 2,
+      }),
+      version: 2,
+    }])
+  })
+
+  it('rotates a failed projection behind older unprocessed rows instead of blocking the queue', async () => {
+    if (!firstPool) throw new Error('database unavailable')
+    const blockedOrg = `org-stats-blocked-${randomUUID()}`
+    const healthyOrg = `org-stats-healthy-${randomUUID()}`
+    const blocked = await seedDepartment(firstPool, { memberCount: 5, orgId: blockedOrg })
+    const healthy = await seedDepartment(firstPool, { memberCount: 5, orgId: healthyOrg })
+    const blockedInput = {
+      departmentId: blocked.departmentId,
+      orgId: blockedOrg,
+      statsDate: '2026-08-30',
+    }
+    const healthyInput = {
+      departmentId: healthy.departmentId,
+      orgId: healthyOrg,
+      statsDate: '2026-08-30',
+    }
+    await projectElearningDepartmentStatsDaily(projectorDb(firstPool), blockedInput, ENABLED)
+    await projectElearningDepartmentStatsDaily(projectorDb(firstPool), healthyInput, ENABLED)
+    await firstPool.query(
+      `UPDATE elearning_stats_daily
+          SET updated_at = CASE org_id
+            WHEN $1 THEN '2026-08-01T00:00:00.000Z'::timestamptz
+            ELSE '2026-08-02T00:00:00.000Z'::timestamptz
+          END
+        WHERE org_id = ANY($2::text[])`,
+      [blockedOrg, [blockedOrg, healthyOrg]],
+    )
+
+    // Simulate a pre-hardening/manual collision. Runtime creation routes now
+    // reserve this namespace, but reconciliation must still make progress if
+    // historical drift already exists.
+    await firstPool.query(
+      `INSERT INTO meta_bases (id, name, owner_id)
+       VALUES ($1, 'Poisoned projection identity', 'unexpected-owner')`,
+      [deriveElearningProjectionBaseId(blockedOrg)],
+    )
+
+    await expect(reconcileElearningStatsMultitable(
+      multitableProjectorDb(firstPool),
+      1,
+      ENABLED,
+    )).resolves.toEqual({ failed: 1, projected: 0, scanned: 1 })
+    await expect(reconcileElearningStatsMultitable(
+      multitableProjectorDb(firstPool),
+      1,
+      ENABLED,
+    )).resolves.toEqual({ failed: 0, projected: 1, scanned: 1 })
+    expect(await firstPool.query(
+      'SELECT count(*)::int AS count FROM meta_records WHERE id = $1',
+      [deriveElearningProjectionRecordId(
+        healthyOrg,
+        healthy.departmentId,
+        healthyInput.statsDate,
+      )],
+    ).then((result) => result.rows)).toEqual([{ count: 1 }])
   })
 
   it('enforces same-org directory identity and one row per daily dataset key', async () => {

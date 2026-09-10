@@ -96,6 +96,10 @@ async function insertJob(input: {
   attempts?: number
   lastError?: string | null
 }): Promise<{ id: string }> {
+  await pool.query(`INSERT INTO platform_app_instances
+    (tenant_id, workspace_id, app_id, plugin_id, project_id, status, config_json)
+    VALUES ($1,$1,'elearning','plugin-elearning',$1,'active','{"notificationsEnabled":true}')
+    ON CONFLICT (workspace_id,app_id,instance_key) DO NOTHING`, [input.org])
   const result = await pool.query<{ id: string }>(
     `INSERT INTO elearning_jobs (
        org_id, kind, occurrence_key, ref, payload, due_at, status, attempts, last_error
@@ -137,6 +141,7 @@ async function expireLease(id: string): Promise<void> {
 }
 
 afterEach(async () => {
+  await pool.query("DELETE FROM platform_app_instances WHERE app_id='elearning' AND workspace_id LIKE $1", [`${NS}%`])
   jobs.clearJobHandlers()
   await pool.query('DELETE FROM elearning_jobs WHERE org_id LIKE $1', [`${NS}%`])
 })

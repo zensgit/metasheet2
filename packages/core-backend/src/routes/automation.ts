@@ -54,6 +54,18 @@ import {
 } from '../multitable/approval-fwb-activation'
 import { canReadApprovalTemplateForAutomation } from '../multitable/automation-approval-template-access'
 import { loadReadableAutomationSampleRecord } from './automation-test-run-sample'
+import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
+
+/**
+ * DB 未就绪(缺表 42P01 / 缺列 42703)= transient → 503,而不是 500。
+ *
+ * 这里必须先看 SQLSTATE:PG 的报错散文受 `lc_messages` 影响,222 测试机是中文,
+ * `does not exist` 正则永远匹配不到「关系 "x" 不存在」。SQLSTATE 与语言无关。
+ * 判定只影响 503/500 的选择,两条路都不放行任何能力 —— 权限解析失败依旧 fail-closed。
+ */
+function isDbNotReadySqlState(err: unknown): boolean {
+  return isUndefinedTableError(err) || isUndefinedColumnError(err)
+}
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -292,7 +304,10 @@ export function createAutomationRoutes(
       }
     } catch (err) {
       const raw = err instanceof Error ? err.message : ''
-      const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+      // SQLSTATE 先判:42P01 缺表 / 42703 缺列在中文 locale 下散文是「关系 x 不存在」/
+      // 「字段 x 不存在」,英文正则匹配不到,pre-migration 的 DB 会被误判成 500 而不是 503。
+      const transient = isDbNotReadySqlState(err)
+        || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
       return res.status(transient ? 503 : 500).json({
         ok: false,
         error: {
@@ -523,7 +538,10 @@ export function createAutomationRoutes(
       })
     } catch (err) {
       const raw = err instanceof Error ? err.message : ''
-      const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+      // SQLSTATE 先判:42P01 缺表 / 42703 缺列在中文 locale 下散文是「关系 x 不存在」/
+      // 「字段 x 不存在」,英文正则匹配不到,pre-migration 的 DB 会被误判成 500 而不是 503。
+      const transient = isDbNotReadySqlState(err)
+        || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
       return res.status(transient ? 503 : 500).json({
         ok: false,
         error: {
@@ -561,7 +579,10 @@ export function createAutomationRoutes(
       // host/port/user) — surface a generic, values-free message. A connection / not-ready error
       // is a transient 503; anything else is a 500. Either way the real run never fired.
       const raw = err instanceof Error ? err.message : ''
-      const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+      // SQLSTATE 先判:42P01 缺表 / 42703 缺列在中文 locale 下散文是「关系 x 不存在」/
+      // 「字段 x 不存在」,英文正则匹配不到,pre-migration 的 DB 会被误判成 500 而不是 503。
+      const transient = isDbNotReadySqlState(err)
+        || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
       return res.status(transient ? 503 : 500).json({
         ok: false,
         error: {
@@ -622,7 +643,9 @@ export function createAutomationRoutes(
         sampleRecord = loaded.sampleRecord
       } catch (err) {
         const raw = err instanceof Error ? err.message : ''
-        const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+        // 同上:SQLSTATE 先判,中文 locale 下英文正则匹配不到缺表/缺列。
+        const transient = isDbNotReadySqlState(err)
+          || /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
         return res.status(transient ? 503 : 500).json({
           ok: false,
           error: {
