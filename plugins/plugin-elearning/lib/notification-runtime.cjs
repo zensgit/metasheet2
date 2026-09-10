@@ -10,7 +10,7 @@
  */
 
 const { randomBytes } = require('node:crypto')
-const { isReminderProducerEnabled } = require('./reminder-producer.cjs')
+const { isCapabilityEnabled } = require('./feature-flags.cjs')
 const { resolveDatabasePort } = require('./jobs.cjs')
 const { runNotificationDeliveryBatch } = require('./notification-worker.cjs')
 
@@ -28,6 +28,11 @@ let activeEligibility = null
 let activeDispatch = null
 let activeLogger = null
 let activeWorkerId = null
+let activeSource = null
+
+function isNotificationRuntimeEnabled() {
+  return isCapabilityEnabled('content') && process.env.ELEARNING_NOTIFICATIONS_ENABLED === 'true'
+}
 
 function emptyResult(extra) {
   return {
@@ -107,26 +112,30 @@ function runtimeInputFromDelivery(row) {
   }
   const deliveryId = readUuid(row.id)
   const orgId = readText(row.org_id, 256)
-  const assignmentMemberId = readUuid(row.assignment_member_id)
+  const assignmentMemberId = row.assignment_member_id == null ? null : readUuid(row.assignment_member_id)
   const recipientUserId = readText(row.recipient_user_id, 256)
   if (
-    row.kind !== 'assignment_reminder'
+    !['assignment_reminder', 'training_available', 'result_published'].includes(row.kind)
     || row.recipient_role !== 'learner'
     || row.channel !== 'platform'
   ) {
     throw new Error('NOTIFICATION_ROW_INVALID')
   }
-  const payload = readPayload(row.payload)
-  if (payload.assignmentMemberId !== assignmentMemberId) {
+  const payload = row.kind === 'assignment_reminder' ? readPayload(row.payload) : row.payload
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || (row.kind !== 'assignment_reminder' && Object.keys(payload).length !== 0)
+    || (row.kind === 'assignment_reminder' && payload.assignmentMemberId !== assignmentMemberId)) {
     throw new Error('NOTIFICATION_ROW_INVALID')
   }
   return {
-    eligibility: { orgId, assignmentMemberId, recipientUserId },
+    eligibility: row.kind === 'assignment_reminder'
+      ? { orgId, assignmentMemberId, recipientUserId }
+      : { orgId, deliveryId, recipientUserId },
     dispatch: {
       assignmentMemberId,
       deliveryId,
       idempotencyKey: `delivery:${deliveryId}`,
-      kind: 'assignment_reminder',
+      kind: row.kind,
       orgId,
       payload,
       recipientUserId,
@@ -168,6 +177,7 @@ function stopNotificationRuntime() {
   activeDispatch = null
   activeLogger = null
   activeWorkerId = null
+  activeSource = null
 }
 
 async function runNotificationRuntimeTick(override) {
@@ -179,7 +189,7 @@ async function runNotificationRuntimeTick(override) {
   const generation = runtimeGeneration
   const enabled = typeof opts.isEnabled === 'function'
     ? opts.isEnabled
-    : () => runtimeGeneration === generation && isReminderProducerEnabled()
+    : () => runtimeGeneration === generation && isNotificationRuntimeEnabled()
   if (
     !database
     || !eligibility
@@ -194,6 +204,7 @@ async function runNotificationRuntimeTick(override) {
   if (runningGeneration === generation) return emptyResult({ skipped: true })
   runningGeneration = generation
   try {
+    if (enabled() && activeSource) await activeSource.collect()
     return await runNotificationDeliveryBatch({
       isEnabled: enabled,
       database,
@@ -217,7 +228,7 @@ async function runNotificationRuntimeTick(override) {
 
 function startNotificationRuntime(context, options) {
   stopNotificationRuntime()
-  if (!isReminderProducerEnabled()) return false
+  if (!isNotificationRuntimeEnabled()) return false
   const database = resolveDatabasePort(context)
   const ports = resolveNotificationRuntimePorts(context)
   if (!database || !ports) {
@@ -228,6 +239,8 @@ function startNotificationRuntime(context, options) {
   activeDatabase = database
   activeEligibility = ports.eligibility
   activeDispatch = ports.dispatch
+  const source = context.services && context.services.elearningNotificationSource
+  activeSource = source && typeof source.collect === 'function' ? source : null
   activeLogger = context && context.logger ? context.logger : null
   activeWorkerId = typeof opts.workerId === 'string' && opts.workerId.trim()
     ? opts.workerId.trim()

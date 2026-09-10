@@ -94,6 +94,22 @@ describe('AuthService.verifyToken', () => {
     sessionMocks.isUserSessionActive.mockResolvedValue(true)
   })
 
+  it('lists organization choices using only active memberships and an active authenticated actor', async () => {
+    poolMocks.query.mockResolvedValueOnce({ rows: [{ org_id: 'org-a' }, { org_id: 'org-b' }] })
+    const auth = new AuthService()
+    expect(await auth.listActiveMembershipOrgIds('actor')).toEqual(['org-a', 'org-b'])
+    const [sql, values] = poolMocks.query.mock.calls[0]
+    expect(sql).toContain('uo.user_id = $1')
+    expect(sql).toContain('uo.is_active = true')
+    expect(sql).toContain('u.is_active = true')
+    expect(values).toEqual(['actor'])
+  })
+
+  it('does not turn failed membership lookup into a successful empty organization list', async () => {
+    poolMocks.query.mockRejectedValueOnce(new Error('synthetic failure'))
+    await expect(new AuthService().listActiveMembershipOrgIds('actor')).rejects.toThrow('synthetic failure')
+  })
+
   it('sanitizes user and uses RBAC role/permissions', async () => {
     jwtMocks.verify.mockReturnValue({ userId: 'u1', email: 'admin@x', role: 'user', iat: 0, exp: 0 })
     poolMocks.query.mockResolvedValueOnce({

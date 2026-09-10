@@ -39,6 +39,7 @@ on:
       - 'apps/web/src/views/ElearningCertificateAdminSection.vue'
       - 'apps/web/src/views/ElearningCertificateWalletSection.vue'
       - 'apps/web/src/views/ElearningLearnerView.vue'
+      - 'apps/web/src/views/ElearningWatchChallengePrompt.vue'
       - 'apps/web/src/views/ElearningManualGradingView.vue'
       - 'apps/web/src/views/ElearningManualGradingAttempt.vue'
       - 'apps/web/src/views/ElearningLearningProfileSection.vue'
@@ -53,6 +54,12 @@ on:
       - 'apps/web/src/stores/featureFlags.ts'
       - 'plugins/plugin-elearning/app.manifest.json'
       - 'apps/web/tests/elearning-client.spec.ts'
+      - 'apps/web/tests/elearning-app-client.spec.ts'
+      - 'apps/web/tests/elearning-app-installation-section.spec.ts'
+      - 'apps/web/src/services/elearningApp.ts'
+      - 'apps/web/src/views/ElearningAppInstallationSection.vue'
+      - 'apps/web/src/views/MyAppsLandingView.vue'
+      - 'apps/web/src/views/PlatformAppShellView.vue'
       - 'apps/web/tests/elearning-analytics-admin.spec.ts'
       - 'apps/web/tests/elearning-analytics-client.spec.ts'
       - 'apps/web/tests/elearning-analytics-period.spec.ts'
@@ -126,6 +133,8 @@ jobs:
         run: |
           pnpm --filter @metasheet/web exec vitest run \
             tests/elearning-client.spec.ts \
+            tests/elearning-app-client.spec.ts \
+            tests/elearning-app-installation-section.spec.ts \
             tests/elearning-analytics-admin.spec.ts \
             tests/elearning-analytics-client.spec.ts \
             tests/elearning-analytics-period.spec.ts \

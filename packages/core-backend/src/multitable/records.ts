@@ -14,6 +14,7 @@ import {
 import { validateLongTextValue } from './field-codecs'
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
+import { getMultitableRequestMetadataCache } from './request-metadata-cache'
 import {
   MultitableRecordDeleteCapExceededError,
   MultitableRecordLockedError,
@@ -444,11 +445,17 @@ async function loadSheetAndFields(
   sheet: Awaited<ReturnType<typeof loadSheetRow>>
   fields: LoadedMultitableField[]
 }> {
-  const sheet = await loadSheetRow(query, sheetId)
+  // W8-4 (L1): the WRITE segment's copy of the same two constant reads the QUERY segment
+  // (`query-service.ts`) already did for this row — measured at 2x `meta_fields` + 2x `meta_sheets`
+  // per created row on 222. `getMultitableRequestMetadataCache()` is `undefined` unless a caller
+  // explicitly opened a request scope AND the flag is on, so the default path is the same two
+  // statements as before.
+  const cache = getMultitableRequestMetadataCache()
+  const sheet = await loadSheetRow(query, sheetId, cache?.sheets)
   if (!sheet) {
     throw new MultitableRecordNotFoundError(`Sheet not found: ${sheetId}`)
   }
-  const fields = await loadFieldsForSheet({ query }, sheetId)
+  const fields = await loadFieldsForSheet({ query }, sheetId, cache?.fields)
   if (fields.length === 0) {
     throw new MultitableRecordNotFoundError(`Sheet not found: ${sheetId}`)
   }

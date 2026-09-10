@@ -51,6 +51,23 @@
 //                           of each slot column on the BOM-carrying table.
 //   6. PRESET MATCH       — which vendor preset this source is, BY TABLE SIGNATURE (never by company
 //                           name), via the catalog's own `selectVendorPreset`.
+//   4b. ROOT DISCOVERY    — a SECOND, ADDITIVE axis: do this source's BOM heads hang off the project
+//                           FOLDER TREE (`checks.topology.subtree`)? Measured from the same bomHead
+//                           sample — does the folder-node column exist, and do enough sampled heads
+//                           populate it. It is NOT a third value for `detectedBridge`: that field
+//                           keeps its exclusive meaning ("which table holds the production BOM
+//                           lines"), and a deployment can take ROOTS from the folder tree while its
+//                           LINES still come from the measured carrier.
+//
+//                           WHAT DECLARING `project-subtree` CANNOT DO, said here because the
+//                           opposite belief costs a site visit: it does NOT clear
+//                           `bom_store_signals_conflict`, and it does NOT clear
+//                           `bridge_undecidable_at_cap` (the volume-undecidable-at-cap standoff).
+//                           Both are disagreements about which STORE is production; the folder tree
+//                           is not a third answer to that, so those two blockers keep advertising
+//                           only the two exclusive carriers as their way out. What it CAN do is be
+//                           refused: declaring it against BOM heads with no folder-node column
+//                           raises `declared_subtree_contradicts_measurement`.
 //   7. PLAN ALIGNMENT     — the self-validating hook: the configured read plan's assumed bridge and
 //                           quantity field, checked AGAINST 4 and 5. A mismatch is a BLOCKER whose
 //                           text says the thing INCIDENT A never said out loud: "configured for the
@@ -254,6 +271,13 @@ const BOM_STORE_DECISION_REASONS = Object.freeze([
 const BRIDGES = Object.freeze({
   ORDER_MODULE: 'order-module',
   DESIGN_BOM: 'design-bom',
+  // A ROOT-DISCOVERY axis, NOT a third BOM-line carrier. `order-module` and `design-bom` answer
+  // "which table holds the production BOM lines", and exactly one of them can be right.
+  // `project-subtree` answers a different question — "how does a project reach its TOP-LEVEL
+  // components" — and it is ADDITIVE: a deployment can pull roots from the order module and from the
+  // folder tree in the same run. That is why it is declarable but is NOT in
+  // `EXCLUSIVE_CARRIER_BRIDGES`, and why declaring it settles nothing on the carrier axis.
+  PROJECT_SUBTREE: 'project-subtree',
   AMBIGUOUS: 'ambiguous',
   NONE: 'none',
   UNKNOWN: 'unknown',
@@ -281,13 +305,54 @@ const CONNECTIVITY_ERROR_CODES = Object.freeze([
   READ_ERROR_CODES.TIMEOUT,
 ])
 
-// The bridges a HUMAN may declare when the bounded sample cannot decide. Deliberately only the two
-// real carriers: `ambiguous` / `none` / `unknown` are readings, not topologies, and nobody can declare
-// their source into one.
-const DECLARABLE_BRIDGES = Object.freeze([BRIDGES.ORDER_MODULE, BRIDGES.DESIGN_BOM])
+// THE EXCLUSIVE CARRIER AXIS — the two candidates for "which table holds the production BOM lines".
+// Exactly one of them can be true of a source, which is what makes a DECLARATION on this axis
+// capable of CONTRADICTING a measurement, and capable of RESOLVING a cap standoff between them.
+// `ambiguous` / `none` / `unknown` are readings, not topologies, and nobody can declare their source
+// into one.
+const EXCLUSIVE_CARRIER_BRIDGES = Object.freeze([BRIDGES.ORDER_MODULE, BRIDGES.DESIGN_BOM])
+
+// The bridges a HUMAN may declare. A superset of the exclusive axis: `project-subtree` is declarable
+// because it is a real, MEASURABLE topology fact about a source, but it lives on the ROOT-DISCOVERY
+// axis and therefore gets its own counter-evidence (`measureProjectSubtreeCarrier`) and its own
+// blocker rather than being folded into the carrier decision.
+//
+// WHAT DECLARING `project-subtree` DOES NOT DO — stated here because the opposite belief is the
+// expensive one: it does NOT clear `bom_store_signals_conflict`, and it does NOT clear
+// `bridge_undecidable_at_cap`. Those two are standoffs between BomDetails and DesignBom over which
+// store carries production lines; the folder tree is not a third answer to that question, so the two
+// blockers keep advertising only `EXCLUSIVE_CARRIER_BRIDGES` as their way out. Declaring
+// project-subtree against a source whose BOM heads carry no folder-node column is itself a blocker.
+const DECLARABLE_BRIDGES = Object.freeze([...EXCLUSIVE_CARRIER_BRIDGES, BRIDGES.PROJECT_SUBTREE])
+
+// The column that would carry the folder-node id on the BOM head when the configured read plan has
+// not declared one (i.e. the deployment has not enabled `readPlan.projectSubtree`). A candidate
+// ROSTER in the `DESIGN_BOM_BRIDGE_OBJECTS` spirit: presence is decided by READING the sampled
+// columns, never asserted, and an absent column simply reports absent. Matched case-insensitively,
+// so a SQL Server catalog's own spelling is what gets reported back.
+const PROJECT_SUBTREE_PATH_ID_CANDIDATES = Object.freeze(['path_id'])
+
+// THE BINDING SHAPES the pull's read-identity delegation has to work across. Values-free by
+// construction: a shape word, never the connection id or the data source's name.
+const BINDING_SHAPES = Object.freeze({
+  CANONICAL: 'canonical',
+  LEGACY: 'legacy',
+  UNBOUND: 'unbound',
+})
+const SOURCE_PREFLIGHT_BINDING_SHAPES = Object.freeze(Object.values(BINDING_SHAPES))
+
+// Why the delegation cannot be performed. One entry today, and it is a closed set so a second one
+// cannot arrive as free text.
+const PULL_DELEGATION_REASONS = Object.freeze(['binding_owner_unstamped'])
 
 const SOURCE_PREFLIGHT_BLOCKER_CODES = Object.freeze({
   SOURCE_UNREACHABLE: 'source_unreachable',
+  // 一线自助拉取 is a claim about WHOSE IDENTITY the pull reads under, and it is false unless the
+  // bound source carries a server-held owner stamp: `data-source:*` kinds are authorized by the
+  // host facade on STRICT OWNER EQUALITY, so with nothing to delegate to, every caller who is not
+  // the person who bound the connection gets a 400 and no screen anywhere says why. Measured from
+  // the BINDING, not from a read — which is why it is judged whether or not the source answered.
+  PULL_PRINCIPAL_DELEGATION_UNAVAILABLE: 'pull_principal_delegation_unavailable',
   ENTRY_TABLE_MISSING: 'entry_table_missing',
   NO_PROJECT_NUMBERS: 'no_project_numbers',
   NO_BOM_ROWS: 'no_bom_rows',
@@ -304,6 +369,12 @@ const SOURCE_PREFLIGHT_BLOCKER_CODES = Object.freeze({
   // A declaration may resolve what the sample could not. It may NEVER overrule what the sample did
   // decide — that would turn the one measurement this whole module exists to make into a formality.
   DECLARED_BRIDGE_CONTRADICTS_MEASUREMENT: 'declared_bridge_contradicts_measurement',
+  // The same rule as above, on the ROOT-DISCOVERY axis: an operator may declare that this source's
+  // projects reach their assemblies through the folder tree, but not against a BOM-head table that
+  // carries no folder-node column, or carries one nothing populates. Without this, adding
+  // `project-subtree` to the declarable vocabulary would have created the one thing this module
+  // refuses everywhere else — a declaration with no possible counter-evidence.
+  DECLARED_SUBTREE_CONTRADICTS_MEASUREMENT: 'declared_subtree_contradicts_measurement',
   TOPOLOGY_MISMATCH: 'topology_mismatch',
 })
 
@@ -332,6 +403,10 @@ const SOURCE_PREFLIGHT_WARNING_CODES = Object.freeze({
 // source — it is the finding you can only make once everything before it passed.
 const SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
   SOURCE_PREFLIGHT_BLOCKER_CODES.SOURCE_UNREACHABLE,
+  // Directly under it, and above every finding about the source's SHAPE: a source whose shape is
+  // perfect is still unusable by the tier the delivery promises it to. The report that measured a
+  // flawless catalog and said nothing about this is how "一线自助拉取" shipped as prose.
+  SOURCE_PREFLIGHT_BLOCKER_CODES.PULL_PRINCIPAL_DELEGATION_UNAVAILABLE,
   SOURCE_PREFLIGHT_BLOCKER_CODES.ENTRY_TABLE_MISSING,
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_PROJECT_NUMBERS,
   SOURCE_PREFLIGHT_BLOCKER_CODES.NO_BOM_ROWS,
@@ -344,6 +419,10 @@ const SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER = Object.freeze([
   SOURCE_PREFLIGHT_BLOCKER_CODES.DECLARED_BRIDGE_CONTRADICTS_MEASUREMENT,
   SOURCE_PREFLIGHT_BLOCKER_CODES.BRIDGE_AMBIGUOUS,
   SOURCE_PREFLIGHT_BLOCKER_CODES.BRIDGE_UNDECIDABLE_AT_CAP,
+  // After the whole carrier family: the root-discovery axis is a SECOND question about a source
+  // whose carrier question is settled, so a contradicted subtree declaration is worth reading only
+  // once the bridge findings above have been read.
+  SOURCE_PREFLIGHT_BLOCKER_CODES.DECLARED_SUBTREE_CONTRADICTS_MEASUREMENT,
   SOURCE_PREFLIGHT_BLOCKER_CODES.TOPOLOGY_MISMATCH,
 ])
 
@@ -371,6 +450,8 @@ const CLOSED_VOCABULARY_LEAF_FIELDS = Object.freeze(new Set([
   // CLOSED and not server-authored: it is validated against DECLARABLE_BRIDGES here too, so a request
   // cannot use it as a free-text channel into the report.
   'measuredBridge', 'declaredBridge', 'bridgeSource', 'declarableBridges',
+  // The read-identity delegation's one word. A SHAPE, never a connection id and never a principal.
+  'bindingShape',
   // The BOM-store decision's vocabulary: which store, which signal favoured which, what shape each
   // store's slots are in, and where the authority reading came from.
   'store', 'carrierStore', 'favours', 'signal', 'signals', 'strongSignals',
@@ -405,9 +486,13 @@ const SERVER_AUTHORED_LEAF_FIELDS = Object.freeze(new Set([
   'readPlanId', 'externalSystemId', 'presetId', 'matchedBy',
 ]))
 
-// 3. SCHEMA IDENTIFIERS — table and column names. Exempt ONLY when the leaf's value really is one of
-//    the identifiers this run observed (a table it probed, a column it saw), which is the same test
-//    the source-discovery probe uses to tell a dictionary's schema-naming row from its content.
+// 3. SCHEMA IDENTIFIERS — table and column names. Exempt on either of TWO grounds, both spelled out
+//    with their reasoning at the exemption itself in `assertSourcePreflightValuesFree`: (a) the
+//    LEAF'S OWN value really is one of the identifiers this run observed (a table it probed, a column
+//    it saw); or (b) — the second and pre-existing ground — the row value it reproduces is itself one,
+//    which is the same test the source-discovery probe uses to tell a dictionary's schema-naming row
+//    from its content. Neither ground is a pass for the FIELD: a leaf listed below whose value earns
+//    neither is refused like any other.
 //    RESIDUAL, stated honestly: a business value that is character-for-character a column name of the
 //    same catalog is indistinguishable from that column name here. That channel carries one token, is
 //    the same one the discovery probe accepts, and is review-gated.
@@ -423,6 +508,12 @@ const IDENTIFIER_LEAF_FIELDS = Object.freeze(new Set([
   // Store-shape identifiers: slot columns, the JSON blob column, and the VENDOR slot keys found in it
   // (only keys matching the family pattern are ever named; every other key is counted, not named).
   'familySlotColumns', 'numericSlotColumns', 'jsonSlotColumn', 'jsonFamilySlotKeys',
+  // The root-discovery reading (`checks.topology.subtree`) DELIBERATELY reuses `bomHeadObject` and
+  // `column` rather than minting names of its own, and reports everything else as a boolean or an
+  // integer. `assertSourcePreflightValuesFree` refuses any string leaf in no class, so a new block
+  // whose leaves were called `configured` / `declared` / `measured` and carried STRINGS would fail
+  // the self-check on EVERY preflight — including deployments that never heard of the subtree — and
+  // take the whole route to 500 with it. Booleans and integers are not leaves it inspects at all.
 ]))
 
 // 4. LIVENESS — matched by exact path, above.
@@ -687,6 +778,50 @@ function decideBridge(orderLines, designLines, bomStore) {
 /** The bridge the CONFIGURED plan assumes. The shipped plan reaches components through the order module. */
 function planAssumedBridge(plan) {
   return optionalString(plan.orderDetail.object) ? BRIDGES.ORDER_MODULE : BRIDGES.UNKNOWN
+}
+
+/** The BOM head's folder-node column, from the plan when it declares one, else the candidate. */
+function projectSubtreePathIdField(plan) {
+  const configured = plan.projectSubtree
+    && plan.projectSubtree.bomHead
+    && optionalString(plan.projectSubtree.bomHead.pathIdField)
+  return configured || PROJECT_SUBTREE_PATH_ID_CANDIDATES[0]
+}
+
+/**
+ * THE ROOT-DISCOVERY AXIS'S OWN COUNTER-EVIDENCE.
+ *
+ * `decideBridge` cannot answer this one: it ranks BOM-LINE VOLUME between two carriers, and "do this
+ * source's BOM heads hang off folder nodes" is not a volume question about either of them. So this
+ * is measured separately, from the SAME bounded bomHead sample the rest of the report already read —
+ * no extra probe, no new object, no widening of anything.
+ *
+ * Two readings, both column-level and both values-free:
+ *   PRESENCE   is the folder-node column among the sampled columns at all (case-insensitively, since
+ *              SQL Server preserves case and PostgreSQL folds it)?
+ *   POPULATION how many sampled head rows actually carry a value in it? A column that exists and is
+ *              empty everywhere is a schema leftover, not a topology — which is why the floor is
+ *              `BRIDGE_MIN_LINES`, the same "one row is not evidence" rule the bridge decision uses.
+ *
+ * It never reads a VALUE out: only whether each cell is non-empty.
+ */
+function measureProjectSubtreeCarrier(plan, bomHead, bomHeadRows) {
+  const wanted = projectSubtreePathIdField(plan)
+  const columns = Array.isArray(bomHead.columns) ? bomHead.columns : []
+  const column = columns.find((name) => String(name).toLowerCase() === wanted.toLowerCase()) || null
+  const rows = Array.isArray(bomHeadRows) ? bomHeadRows : []
+  const populatedRows = column
+    ? rows.filter((row) => isNonEmptyValue(readCell(row, column))).length
+    : 0
+  return {
+    // The catalog's own spelling when it has the column; otherwise the name we looked for, so the
+    // report says WHAT was not found instead of just that something was not.
+    column: column || wanted,
+    columnPresent: Boolean(column),
+    rowsSampled: rows.length,
+    populatedRows,
+    measured: Boolean(column) && populatedRows >= BRIDGE_MIN_LINES,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1168,33 @@ function blockerOrder(code) {
 }
 
 /**
+ * THE ONE FINDING THIS MODULE DOES NOT MEASURE ITSELF — and why it is still here.
+ *
+ * Every other check reads the customer's catalog through `readObject`. This one is about the
+ * BINDING: does the pull's read-identity delegation have a server-held owner to delegate to. The
+ * module holds no registry capability and must not grow one (its whole guarantee is that the only
+ * thing it can do is read), so the caller — which already loaded the binding to build the adapter —
+ * hands the answer in, pre-reduced to a boolean and two closed-vocabulary words.
+ *
+ * FAIL-QUIET, not fail-closed: an absent/garbled stanza means NOT EVALUATED, and an unevaluated
+ * check raises no blocker. A caller that never heard of this input gets byte-identical reports.
+ * That is the right default because the fact is the CALLER's to know: a source kind with no
+ * data-source binding has no owner to stamp and never needed one, and treating "no stanza" as a
+ * refusal would turn every such deployment no-go on a question that does not apply to it.
+ */
+function normalizePullDelegation(value) {
+  const absent = { evaluated: false, available: null, bindingShape: null, reason: null }
+  if (!isPlainObject(value)) return absent
+  if (typeof value.available !== 'boolean') return absent
+  const bindingShape = SOURCE_PREFLIGHT_BINDING_SHAPES.includes(value.bindingShape)
+    ? value.bindingShape
+    : null
+  const reason = PULL_DELEGATION_REASONS.includes(value.reason) ? value.reason : null
+  if (value.available) return { evaluated: true, available: true, bindingShape, reason: null }
+  return { evaluated: true, available: false, bindingShape, reason }
+}
+
+/**
  * Run the source preflight.
  *
  * @param {object}   input
@@ -1041,6 +1203,10 @@ function blockerOrder(code) {
  * @param {object}  [input.readPlan]   the deployment's configured plan; defaults to the shipped one.
  * @param {Array}   [input.presets]    vendor presets; defaults to the shipped catalog directory.
  * @param {string}  [input.externalSystemId] echoed for correlation. An id, never a connection.
+ * @param {object}  [input.pullDelegation] `{available, bindingShape, reason}` — the caller's already
+ *                                     computed answer to "can the pull delegate its read identity
+ *                                     to the server-held binding owner". See
+ *                                     `normalizePullDelegation`. Omitted = not evaluated.
  */
 async function runStockPreparationSourcePreflight(input = {}) {
   if (typeof input.readObject !== 'function') {
@@ -1053,6 +1219,8 @@ async function runStockPreparationSourcePreflight(input = {}) {
   const presets = Array.isArray(input.presets)
     ? input.presets
     : loadVendorPresetsFromDir(VENDOR_PRESETS_DIR).map((entry) => entry.preset)
+  // Normalized BEFORE any read, so a malformed stanza can never be mistaken for a measurement.
+  const pullDelegation = normalizePullDelegation(input.pullDelegation)
 
   const roster = buildProbeRoster(plan, presets)
   const observations = []
@@ -1283,14 +1451,31 @@ async function runStockPreparationSourcePreflight(input = {}) {
   const declaredBridge = DECLARABLE_BRIDGES.includes(optionalString(input.declaredBridge))
     ? optionalString(input.declaredBridge)
     : null
+  // NARROWED TO THE EXCLUSIVE CARRIER AXIS. Both powers a declaration has — contradicting a decisive
+  // measurement and resolving a cap standoff — are statements about WHICH OF TWO STORES carries the
+  // production lines. `project-subtree` makes no claim about that, so it can neither contradict nor
+  // resolve the carrier question, and is judged against its own measurement instead (below).
+  //
+  // For the two carrier values this is BYTE-EQUIVALENT to the previous expression: `declaredBridge`
+  // non-null and in EXCLUSIVE_CARRIER_BRIDGES is exactly `declaredBridge` non-null when those are
+  // the only two declarable values, which is what the pre-existing regressions pin.
+  const declarationIsExclusiveCarrier = Boolean(
+    declaredBridge && EXCLUSIVE_CARRIER_BRIDGES.includes(declaredBridge),
+  )
   const declarationContradicts = Boolean(
-    declaredBridge
+    declarationIsExclusiveCarrier
     && (measured.bridge === BRIDGES.ORDER_MODULE || measured.bridge === BRIDGES.DESIGN_BOM)
     && measured.bridge !== declaredBridge,
   )
-  const declarationResolves = Boolean(declaredBridge && measured.undecidableAtCap)
+  const declarationResolves = Boolean(declarationIsExclusiveCarrier && measured.undecidableAtCap)
   const detectedBridge = declarationResolves ? declaredBridge : measured.bridge
   const bridgeSource = declarationResolves ? 'declared' : 'measured'
+
+  // THE ROOT-DISCOVERY AXIS. Measured on every run — it costs no read, and a report that only
+  // measured it when someone declared it could not tell an operator the option existed.
+  const declaredSubtree = declaredBridge === BRIDGES.PROJECT_SUBTREE
+  const subtreeCarrier = measureProjectSubtreeCarrier(plan, bomHead, rowsOf('bomHead'))
+  const subtreeDeclarationContradicts = Boolean(declaredSubtree && !subtreeCarrier.measured)
 
   const topology = {
     detectedBridge,
@@ -1334,6 +1519,32 @@ async function runStockPreparationSourcePreflight(input = {}) {
         contributingObjects: contributorsOf('designBom'),
       },
     ],
+    // THE SECOND AXIS, reported separately and never folded into `detectedBridge`.
+    //
+    // `detectedBridge` keeps its exclusive meaning — WHICH TABLE HOLDS THE PRODUCTION BOM LINES —
+    // and a consumer that reads it as "where the rows came from" would be wrong here, because a run
+    // with `readPlan.projectSubtree` enabled takes its ROOTS from the folder tree while its LINES
+    // still come from the measured carrier. The two questions get two places in the report.
+    //
+    // EVERY LEAF IS A BOOLEAN, AN INTEGER, OR AN ALREADY-CLASSIFIED IDENTIFIER
+    // (`bomHeadObject`, `column`). See the note in IDENTIFIER_LEAF_FIELDS: a string leaf in no class
+    // fails `assertSourcePreflightValuesFree` and 500s the route for every source, subtree or not.
+    subtree: {
+      // Does the deployment's own read plan enable folder-tree root discovery?
+      configured: Boolean(plan.projectSubtree),
+      // Did this request declare it?
+      declared: declaredSubtree,
+      bomHeadObject: bomHead.object,
+      column: subtreeCarrier.column,
+      columnPresent: subtreeCarrier.columnPresent,
+      rowsSampled: subtreeCarrier.rowsSampled,
+      populatedRows: subtreeCarrier.populatedRows,
+      rowCap: SOURCE_PREFLIGHT_ROW_CAP,
+      minLines: BRIDGE_MIN_LINES,
+      // The measurement itself: the column exists AND enough sampled heads populate it.
+      measured: subtreeCarrier.measured,
+      declarationContradictsMeasurement: subtreeDeclarationContradicts,
+    },
   }
 
   // ---- CHECK 6: quantity slot ------------------------------------------------
@@ -1461,6 +1672,17 @@ async function runStockPreparationSourcePreflight(input = {}) {
   const B = SOURCE_PREFLIGHT_BLOCKER_CODES
   const W = SOURCE_PREFLIGHT_WARNING_CODES
 
+  // JUDGED OUTSIDE the reachability branch, deliberately. "Only the person who bound this
+  // connection can pull through it" is true of a source that answered every probe perfectly, and a
+  // report that hid it behind a successful read is exactly the report that let the delivery keep
+  // claiming 一线自助拉取.
+  if (pullDelegation.evaluated && pullDelegation.available === false) {
+    blockers.push({
+      code: B.PULL_PRINCIPAL_DELEGATION_UNAVAILABLE,
+      detail: { bindingShape: pullDelegation.bindingShape, reason: pullDelegation.reason },
+    })
+  }
+
   if (!reachable) {
     blockers.push({ code: B.SOURCE_UNREACHABLE, detail: { failureCode: reachability.failureCode } })
   } else {
@@ -1493,7 +1715,12 @@ async function runStockPreparationSourcePreflight(input = {}) {
             exact: entry.exact,
             shape: entry.shape,
           })),
-          declarableBridges: [...DECLARABLE_BRIDGES],
+          // ONLY THE EXCLUSIVE CARRIERS. This list is a repair instruction an operator reads off the
+          // screen, so it must name the declarations that can actually resolve THIS blocker. A
+          // store conflict is a question about which of two tables holds the production lines;
+          // `project-subtree` is declarable but answers a different question, and listing it here
+          // would advertise a fix that provably does not clear this code.
+          declarableBridges: [...EXCLUSIVE_CARRIER_BRIDGES],
         },
       })
     }
@@ -1523,7 +1750,9 @@ async function runStockPreparationSourcePreflight(input = {}) {
           orderLineObject: orderDetail.object,
           designBomLines: designBom.rowsObserved,
           designBomLineObject: designBom.object,
-          declarableBridges: [...DECLARABLE_BRIDGES],
+          // Same reason as the store conflict above: the way out of a CARRIER standoff is a
+          // declaration on the carrier axis, and only those two are on it.
+          declarableBridges: [...EXCLUSIVE_CARRIER_BRIDGES],
         },
       })
     } else if (detectedBridge === BRIDGES.AMBIGUOUS) {
@@ -1540,6 +1769,25 @@ async function runStockPreparationSourcePreflight(input = {}) {
           detectedBridge,
           configuredLineObject: plan.orderDetail.object,
           detectedLineObject: detectedBridge === BRIDGES.DESIGN_BOM ? designBom.object : orderDetail.object,
+        },
+      })
+    }
+
+    // The root-discovery axis is judged INDEPENDENTLY of the carrier chain above: it is an `if`, not
+    // another `else if`, because "your BOM heads carry no folder-node column" stays true whatever
+    // the carrier question came out as.
+    if (subtreeDeclarationContradicts) {
+      blockers.push({
+        code: B.DECLARED_SUBTREE_CONTRADICTS_MEASUREMENT,
+        detail: {
+          declaredBridge,
+          bomHeadObject: bomHead.object,
+          column: subtreeCarrier.column,
+          columnPresent: subtreeCarrier.columnPresent,
+          rowsSampled: subtreeCarrier.rowsSampled,
+          populatedRows: subtreeCarrier.populatedRows,
+          rowCap: SOURCE_PREFLIGHT_ROW_CAP,
+          minLines: BRIDGE_MIN_LINES,
         },
       })
     }
@@ -1621,6 +1869,8 @@ async function runStockPreparationSourcePreflight(input = {}) {
       topology,
       presetMatch,
       quantityField,
+      // The binding half. Every leaf is a boolean, a null, or a closed-vocabulary word.
+      pullDelegation,
     },
     blockers,
     warnings,
@@ -1643,7 +1893,13 @@ async function runStockPreparationSourcePreflight(input = {}) {
     if (entry.object) identifiers.add(entry.object)
     for (const column of entry.columns) identifiers.add(column)
   }
-  for (const name of [matchField, configuredQuantityField, plan.pathExAttr.pathIdField, plan.pathInfo.idField]) {
+  for (const name of [
+    matchField, configuredQuantityField, plan.pathExAttr.pathIdField, plan.pathInfo.idField,
+    // The folder-node column the subtree reading looked for. When the source HAS it, it is already
+    // an observed column; when it does not, the report names what was missing, and that name is
+    // plan-authored or module-declared — never read from a row.
+    subtreeCarrier.column,
+  ]) {
     if (name) identifiers.add(name)
   }
   if (matchedPreset) {
@@ -1701,6 +1957,74 @@ function refuse(path, kind, value) {
   })
 }
 
+// The exact four keys `refuse` mints above, in the order it builds them, each beside the scalar
+// shape it is declared to hold. Declared once so `refuse` and the picker below stay honest about
+// what "the values-free detail keys" means — and checked on BOTH axes, because whitelisting key
+// NAMES alone would carry whatever a future `refuse()` chose to put under one of them (an object, an
+// array of rows) straight into a log line. A key that is absent, or present with a value outside its
+// declared shape, means "not this refusal": the descriptor is refused whole, never partially. Same
+// fail-closed default the self-check applies to report leaves.
+const VALUES_FREE_REFUSAL_DETAIL_SHAPE = Object.freeze({
+  path: (value) => typeof value === 'string',
+  kind: (value) => typeof value === 'string',
+  length: (value) => Number.isInteger(value),
+  masked: (value) => typeof value === 'string',
+})
+
+// The floor under `maskForRefusal`'s first-and-last-character mask — applied ONLY where the mask
+// leaves this module through the picker below, NEVER to what `refuse` puts on the error.
+//
+// `maskForRefusal` already collapses length <= 2 to '**'. The gap is 3 and 4: `B****9` published
+// beside an exact `length: 3` pins two of three characters AND the width, which over a part-number
+// alphabet leaves a couple dozen candidates — that is the value, not a hint of it. From 5 up the
+// same pair is a coarse orientation aid and nothing more, which is the whole reason to log it at
+// all. So the picker republishes the mask only from 5 up and hands back '**' below that. `length`
+// survives either way: a length alone reveals no characters and is the coarse fact an operator on
+// site actually needs.
+const MASKED_FIRST_LAST_MIN_LENGTH = 5
+
+/**
+ * Pick the values-free self-check's own detail keys off a caught error, for a caller (the route)
+ * that wants to LOG them without inventing its own notion of "safe to log" and without spreading
+ * `error.details` wholesale — a future field added to `refuse()`'s payload must be classified here
+ * on purpose before it can reach a log line, the same fail-closed shape the self-check itself uses
+ * for report leaves.
+ *
+ * Returns `null` for anything that is not this exact refusal: a non-`SourcePreflightError`, or a
+ * `SourcePreflightError` whose message names a different failure (this module throws more than
+ * one). The message check is deliberate and not `instanceof` alone, because a different
+ * `SourcePreflightError` could carry a `details` object that happens to also be plain — matching by
+ * message is matching by what actually happened, not by shape.
+ *
+ * WHAT IT PUBLISHES IS NOT `error.details` VERBATIM. `error.details` never leaves the process; this
+ * projection does, into a server-side log. So two narrowings apply here and only here, both of them
+ * about the mask, neither of them a change to what the self-check refuses:
+ *
+ *   - a mask of a value shorter than {@link MASKED_FIRST_LAST_MIN_LENGTH} is republished as '**';
+ *   - a `kind: 'secret'` refusal publishes its path and class ONLY — no mask, no length — because
+ *     for that class the two characters and the width describe a CREDENTIAL. Unreachable from the
+ *     route today (the runner's only call site supplies observed values and identifiers, never
+ *     secrets), and written so it stays harmless the day secrets are wired in.
+ *
+ * Never changes what the self-check refuses or how — this is read-only over what `refuse()` already
+ * decided to put in `error.details`.
+ */
+function describeValuesFreeRefusal(error) {
+  if (!(error instanceof SourcePreflightError)) return null
+  if (error.message !== 'SOURCE_PREFLIGHT_VALUES_FREE_SELF_CHECK_FAILED') return null
+  const details = error.details
+  if (!isPlainObject(details)) return null
+  const described = {}
+  for (const [key, isDeclaredShape] of Object.entries(VALUES_FREE_REFUSAL_DETAIL_SHAPE)) {
+    if (!Object.prototype.hasOwnProperty.call(details, key)) return null
+    if (!isDeclaredShape(details[key])) return null
+    described[key] = details[key]
+  }
+  if (described.kind === 'secret') return { path: described.path, kind: described.kind }
+  if (described.length < MASKED_FIRST_LAST_MIN_LENGTH) described.masked = '**'
+  return described
+}
+
 /**
  * The independent second check, in the spirit of the discovery probe's H0 self-check.
  *
@@ -1714,9 +2038,10 @@ function refuse(path, kind, value) {
  *   (2) CONTAINMENT. No leaf may reproduce — by equality, or by containing — a value observed in a
  *       sampled source row or a supplied secret. Exemptions are narrow and by CLASS, not by path
  *       prefix: closed-vocabulary and server-authored leaves cannot be sourced from a row at all;
- *       identifier leaves are exempt only when their value is genuinely one of the identifiers this
- *       run observed; and the liveness path is exempt for observed values only. Secrets are exempt
- *       NOWHERE, the liveness path included.
+ *       an identifier leaf is exempt when the LEAF'S OWN value is genuinely one of the identifiers
+ *       this run observed (or, on the second and pre-existing ground kept below, when the row value
+ *       it reproduces is itself such an identifier); and the liveness path is exempt for observed
+ *       values only. Secrets are exempt NOWHERE, the liveness path included.
  *
  * It never echoes the offending value: a refusal names the path, the class, the length and a mask.
  */
@@ -1730,7 +2055,13 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
       ...Object.values(SOURCE_PREFLIGHT_BLOCKER_CODES),
       ...Object.values(SOURCE_PREFLIGHT_WARNING_CODES),
     ])],
-    ['reason', new Set([...BRIDGE_DECISION_REASONS, ...PRESET_SELECTION_REASONS, ...BOM_STORE_DECISION_REASONS])],
+    ['reason', new Set([
+      ...BRIDGE_DECISION_REASONS,
+      ...PRESET_SELECTION_REASONS,
+      ...BOM_STORE_DECISION_REASONS,
+      ...PULL_DELEGATION_REASONS,
+    ])],
+    ['bindingShape', new Set(SOURCE_PREFLIGHT_BINDING_SHAPES)],
     ['errorCode', new Set(SOURCE_PREFLIGHT_READ_ERROR_CODES)],
     ['failureCode', new Set(SOURCE_PREFLIGHT_READ_ERROR_CODES)],
     ['bridge', new Set(SOURCE_PREFLIGHT_BRIDGES)],
@@ -1789,11 +2120,36 @@ function assertSourcePreflightValuesFree(report, { observedValues = new Set(), i
       }
     }
     if (isClosed || isServerAuthored) continue
+    // Ground (a) of the identifier exemption, stated in full at the decision below. It is a property
+    // of the LEAF alone, so it is settled once per leaf rather than re-tested against every observed
+    // value. `leaf.value` is a string by construction — `collectStringLeaves` pushes nothing else.
+    const leafIsAnObservedIdentifier = isIdentifier && knownIdentifiers.has(leaf.value.toLowerCase())
     for (const entry of guarded) {
       const hit = leaf.value === entry.value
         || (entry.value.length >= 4 && leaf.value.includes(entry.value))
       if (!hit) continue
       if (isLiveness) continue
+      // THE IDENTIFIER EXEMPTION, on two independent grounds — either one alone is enough.
+      //
+      //   (a) THE LEAF IS ITSELF AN IDENTIFIER THIS RUN OBSERVED. This is the ground the header above
+      //       and the note on IDENTIFIER_LEAF_FIELDS have always described, and until 222 on
+      //       2026-09-08 it was NOT the one the code applied: the test read `entry.value` only, so a
+      //       leaf was refused for CONTAINING a four-character row value even when the leaf was a
+      //       column name this very run had read off the source. On the live customer PLM that is
+      //       unavoidable — a dictionary's labels eventually spell `Code` / `Name` / `Type` / `Unit`,
+      //       and a column called `FileCode` contains `Code` — so the route answered 500 for the
+      //       whole source, and WHICH run it broke on moved with the customer's data.
+      //       It opens no channel: a leaf whose value IS a table this run probed or a column it saw
+      //       is a name that already appears in the clear at `probes[].object` / `probes[].columns[]`,
+      //       so a row value that happens to sit inside that name tells a reader of the report
+      //       nothing the report did not already say.
+      //
+      //   (b) THE ROW VALUE IS ITSELF A KNOWN IDENTIFIER — the pre-existing test, kept verbatim. This
+      //       is the dictionary case the IDENTIFIER_LEAF_FIELDS note names: a row whose cell holds a
+      //       column name rather than content. It is the WIDER of the two, because it exempts an
+      //       identifier leaf that merely CONTAINS such a value; narrowing it is a separate
+      //       judgement with its own 500 risk, and is deliberately not made here.
+      if (leafIsAnObservedIdentifier) continue
       if (isIdentifier && knownIdentifiers.has(entry.value.toLowerCase())) continue
       refuse(leaf.path, entry.kind, entry.value)
     }
@@ -1806,11 +2162,15 @@ module.exports = {
   SOURCE_PREFLIGHT_ROW_CAP,
   IDENTITY_PROBE_MAX,
   SOURCE_PREFLIGHT_BRIDGES,
+  SOURCE_PREFLIGHT_BINDING_SHAPES,
+  PULL_DELEGATION_REASONS,
   SOURCE_PREFLIGHT_BOM_STORES,
   SOURCE_PREFLIGHT_CARRIER_SHAPES,
   BOM_STORE_SIGNALS,
   STRONG_BOM_STORE_SIGNALS,
   DECLARABLE_BRIDGES,
+  EXCLUSIVE_CARRIER_BRIDGES,
+  PROJECT_SUBTREE_PATH_ID_CANDIDATES,
   SOURCE_PREFLIGHT_BLOCKER_CODES,
   SOURCE_PREFLIGHT_BLOCKER_CODE_ORDER,
   SOURCE_PREFLIGHT_WARNING_CODES,
@@ -1824,6 +2184,7 @@ module.exports = {
   SourcePreflightError,
   runStockPreparationSourcePreflight,
   assertSourcePreflightValuesFree,
+  describeValuesFreeRefusal,
   __internals: {
     buildProbeRoster,
     classifyReadError,
@@ -1834,6 +2195,9 @@ module.exports = {
     bomLineQuantityFamily,
     decodeQuantitySlotFromDictionary,
     measureNumericSlots,
+    measureProjectSubtreeCarrier,
+    normalizePullDelegation,
+    projectSubtreePathIdField,
     planAssumedBridge,
     probeObject,
   },

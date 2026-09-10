@@ -16,11 +16,15 @@ const {
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
   normalizeStockPreparationActionConfig,
+  createTargetScopedRecordsApi,
   __internals: tableActionInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+const {
+  ROW_ERROR_LIMIT_CEILING,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
 const {
   DECISIONS,
   __internals: plannerInternals,
@@ -868,6 +872,47 @@ async function testLargeBomBoundedDryRunBlocksApplyToken() {
   assert.equal(JSON.stringify(dryRun.evidence).includes('PART-B'), false, 'bounded evidence hides component source id')
 }
 
+// THE INTERACTIVE LANE IS UNTOUCHED BY THE BACKGROUND CAPS. The `largeBom`
+// block only supplies numbers to the background full-expansion worker, so a
+// dry-run against an action that carries one must be byte-identical to a
+// dry-run against the same action without it — same status, same
+// `boundedPreview`, and the same `revision`, which is what an apply token is
+// bound to. If this ever drifts, adding a background cap would silently
+// invalidate every outstanding dry-run token.
+async function testLargeBomCapsDoNotMoveTheInteractiveDryRun() {
+  async function dryRunWith(actionOverrides) {
+    const source = createSourceAdapter(childBomPlmData())
+    const records = createRecordsApi()
+    return dryRunStockPreparationAction({
+      action: baseAction(actionOverrides),
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: createMemoryStorage(),
+      plannedAt: '2026-06-04T09:00:00.000Z',
+    })
+  }
+
+  const bounded = await dryRunWith({ maxRows: 1 })
+  const boundedWithCaps = await dryRunWith({
+    maxRows: 1,
+    largeBom: { maxRows: 200000, maxPages: 1000, maxReadCount: 600000, maxElapsedMs: 3600000 },
+  })
+  assert.equal(bounded.status, 'large_bom_bounded')
+  assert.deepEqual(boundedWithCaps, bounded, 'a background cap block does not move the bounded dry-run')
+
+  // And the same on the path that DOES issue a token: everything but the token
+  // itself (a fresh random string each call) must match.
+  const ready = await dryRunWith({})
+  const readyWithCaps = await dryRunWith({ largeBom: { maxRows: 200000 } })
+  assert.equal(ready.status, 'ready')
+  assert.equal(typeof ready.dryRunToken, 'string')
+  const { dryRunToken: _a, ...readyRest } = ready
+  const { dryRunToken: _b, ...readyWithCapsRest } = readyWithCaps
+  assert.deepEqual(readyWithCapsRest, readyRest, 'a background cap block does not move the ready dry-run')
+  assert.equal(readyWithCaps.revision, ready.revision, 'and it does not move the revision an apply token binds')
+}
+
 async function testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites() {
   const records = createRecordsApi()
   const storage = createMemoryStorage()
@@ -1185,6 +1230,70 @@ async function testApplyDetectsDataShiftAndManualConfirmHold() {
   )
 }
 
+// W8-4 (L1): the target fence builds a FRESH api object, so anything the host offers that is not
+// explicitly forwarded is invisible to every caller behind it. `withMetadataCache` carries no
+// sheetId and reads no row, so it is forwarded verbatim — and a host that does not offer it must
+// leave the scoped api without it rather than fabricating a stub.
+async function testTargetScopedApiForwardsTheHostMetadataCacheCapability() {
+  const seen = []
+  const hostApi = {
+    queryRecords: async () => [],
+    createRecord: async () => ({ id: 'rec_1' }),
+    patchRecord: async () => ({ id: 'rec_1' }),
+    withMetadataCache: async (operation) => {
+      seen.push('scope')
+      return operation()
+    },
+  }
+  const scoped = await createTargetScopedRecordsApi(hostApi, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal(typeof scoped.withMetadataCache, 'function', 'the memo capability survives the target fence')
+  assert.equal(await scoped.withMetadataCache(async () => 'inner'), 'inner', 'the operation result passes through')
+  assert.deepEqual(seen, ['scope'], 'the host capability, not a local stub, did the work')
+
+  // Read-only callers get it too: their queryRecords hits the same constant metadata reads.
+  const readOnly = await createTargetScopedRecordsApi(hostApi, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped', readOnly: true })
+  assert.equal(typeof readOnly.withMetadataCache, 'function', 'read-only scoped api also carries the memo')
+
+  const { withMetadataCache, ...hostWithout } = hostApi
+  const withoutCapability = await createTargetScopedRecordsApi(hostWithout, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal('withMetadataCache' in withoutCapability, false, 'never fabricated when the host lacks it')
+}
+
+// W9: the same fence, the same rule, for the array-filter DECLARATION. It is data, not a method,
+// so an unforwarded declaration silently turns the batch key lookup off forever; an INVENTED one
+// sends a list to a host that rejects it. Both spellings of `not declared` (absent, and an
+// explicit false) must leave the scoped api without it.
+async function testTargetScopedApiForwardsTheHostFilterValueListDeclaration() {
+  const hostApi = {
+    supportsFilterValueLists: true,
+    queryRecords: async () => [],
+    createRecord: async () => ({ id: 'rec_1' }),
+    patchRecord: async () => ({ id: 'rec_1' }),
+  }
+  const scoped = await createTargetScopedRecordsApi(hostApi, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal(scoped.supportsFilterValueLists, true, 'the declaration survives the target fence')
+
+  // Also in `logical` mode: `toPhysicalKeys` rewrites filter KEYS and never touches values, so a
+  // list value crosses the fence unchanged.
+  const logical = await createTargetScopedRecordsApi(
+    hostApi,
+    { sheetId: 'sheet_main', objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId },
+    { resolvedFieldIds: Object.fromEntries(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`])) },
+  )
+  assert.equal(logical.supportsFilterValueLists, true, 'forwarded in logical translation mode too')
+  await logical.queryRecords({ filters: { idempotencyKey: ['k1', 'k2'] } })
+
+  const readOnly = await createTargetScopedRecordsApi(hostApi, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped', readOnly: true })
+  assert.equal(readOnly.supportsFilterValueLists, true, 'read-only scoped api carries it as well')
+
+  const { supportsFilterValueLists, ...hostWithout } = hostApi
+  const absent = await createTargetScopedRecordsApi(hostWithout, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal('supportsFilterValueLists' in absent, false, 'never fabricated when the host is silent')
+
+  const denying = await createTargetScopedRecordsApi({ ...hostWithout, supportsFilterValueLists: false }, { sheetId: 'sheet_main' }, { fieldIdTranslation: 'pre_mapped' })
+  assert.equal('supportsFilterValueLists' in denying, false, 'an explicit false is not forwarded as true')
+}
+
 async function main() {
   await testRegistryListsConfiguredMetadataWithoutTargetSecrets()
   await testDryRunRequiresAllowlistedParametersAndStoresToken()
@@ -1197,6 +1306,7 @@ async function main() {
   await testStoredUnimplementedTableScopePolicyStillDryRunsAndApplies()
   await testStoredDryRunTokenPolicyIsNotRevalidatedAsASelection()
   await testLargeBomBoundedDryRunBlocksApplyToken()
+  await testLargeBomCapsDoNotMoveTheInteractiveDryRun()
   await testLargeBomBoundedApplyRejectsMatchingTokenBeforeWrites()
   await testMissingChildBomDryRunBlocksApplyTokenAndWrites()
   await testReadPageLimitBoundedDryRunAndDepthHardFailureStayDistinct()
@@ -1204,8 +1314,237 @@ async function main() {
   await testApplySurfacesTypedValuesFreeRowFailureDiagnostics()
   await testApplyDetectsDataShiftAndManualConfirmHold()
   await testApplySandboxGateFailsClosed()
+  await testTargetScopedApiForwardsTheHostMetadataCacheCapability()
+  await testTargetScopedApiForwardsTheHostFilterValueListDeclaration()
+  testRevisionCarriesTheRowErrorOverflowFacts()
+  testHardApplyBlockingRowErrorsSurviveTheCap()
+  testRowErrorLimitIsAConditionalActionConfigKey()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
+}
+
+// ---------------------------------------------------------------------------------------------
+// D-C: `rowErrors` is a BOUNDED SAMPLE now, so the revision and the apply gate must both stop
+// treating "what is in the array" as "what happened".
+// ---------------------------------------------------------------------------------------------
+const ROW_ERROR_REVISION_ACTION = Object.freeze({
+  actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+  source: { externalSystemId: 'ext_plm', workspaceId: null, readPlan: null },
+  target: { sheetId: 'sheet_main', objectId: 'stockPreparationMain', fieldIdMap: {} },
+})
+
+function expansionWithRowErrors(retained, truncation) {
+  const summary = { status: 'failed', errorTypes: ['missing_component_source_id'] }
+  if (truncation) Object.assign(summary, truncation)
+  return {
+    status: 'failed',
+    rows: [],
+    errors: [],
+    rowErrors: Array.from({ length: retained }, () => ({ type: 'missing_component_source_id', field: 'part_id', depth: 1 })),
+    summary,
+  }
+}
+
+function revisionFor(expansion) {
+  return tableActionInternals.buildRevision({
+    action: ROW_ERROR_REVISION_ACTION,
+    parameters: { projectNo: 'P-001' },
+    expansion,
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: null,
+  })
+}
+
+function testRevisionCarriesTheRowErrorOverflowFacts() {
+  // UNDER THE CAP the projection reads NOTHING from the summary — stated by hashing the same
+  // expansion with its summary deleted outright. Equal hashes means the revision is blind to
+  // everything the summary carries until an overflow actually happens, which is the byte-identity
+  // promise every stored revision and every pending hold depends on.
+  const underCap = expansionWithRowErrors(3, null)
+  const summaryless = clone(underCap)
+  delete summaryless.summary
+  assert.equal(
+    revisionFor(underCap),
+    revisionFor(summaryless),
+    'the revision reads nothing from the summary until an overflow happens',
+  )
+
+  // …and the stronger half: the under-cap hash equals the PRE-D-C projection written out by hand
+  // through the same hasher. Any key added unconditionally to `buildRevision`'s expansion stanza —
+  // even one whose value is `undefined`, which stableStringify emits — turns this red, which is the
+  // only assertion that keeps "no stored revision moves, no pending hold is superseded" honest.
+  assert.equal(
+    revisionFor(underCap),
+    tableActionInternals.hashJson({
+      actionId: ROW_ERROR_REVISION_ACTION.actionId,
+      parameters: { projectNo: 'P-001' },
+      source: {
+        externalSystemId: ROW_ERROR_REVISION_ACTION.source.externalSystemId,
+        workspaceId: ROW_ERROR_REVISION_ACTION.source.workspaceId,
+        readPlan: ROW_ERROR_REVISION_ACTION.source.readPlan,
+      },
+      target: ROW_ERROR_REVISION_ACTION.target,
+      expansion: {
+        status: underCap.status,
+        rows: underCap.rows,
+        errors: underCap.errors,
+        rowErrors: underCap.rowErrors,
+      },
+      existingRows: [],
+      conflictPolicyReview: null,
+      plan: null,
+    }),
+    'an expansion that lost nothing hashes exactly as it did before the cap existed',
+  )
+
+  // OVER THE CAP the facts are in the hash — and they have to be, because the retained sample is
+  // byte-identical between these two and only the totals differ.
+  const smaller = expansionWithRowErrors(5000, {
+    rowErrorsTotal: 5001,
+    rowErrorsRetained: 5000,
+    rowErrorsTruncated: true,
+    rowErrorTypeCounts: { missing_component_source_id: 5001 },
+  })
+  const bigger = expansionWithRowErrors(5000, {
+    rowErrorsTotal: 90210,
+    rowErrorsRetained: 5000,
+    rowErrorsTruncated: true,
+    rowErrorTypeCounts: { missing_component_source_id: 90210 },
+  })
+  assert.deepEqual(smaller.rowErrors, bigger.rowErrors, 'the two samples are indistinguishable…')
+  assert.notEqual(revisionFor(smaller), revisionFor(bigger), '…so only the overflow facts can separate their revisions')
+  assert.notEqual(revisionFor(smaller), revisionFor(expansionWithRowErrors(5000, null)),
+    'and a truncated expansion never collides with an untruncated one carrying the same array')
+
+  // The per-type counts are hashed too: same total, different composition, different revision —
+  // otherwise "5001 missing parts" and "5001 unparseable quantities" would share a dry-run token.
+  const otherTypes = clone(smaller)
+  otherTypes.summary.rowErrorTypeCounts = { invalid_quantity: 5001 }
+  assert.notEqual(revisionFor(smaller), revisionFor(otherTypes), 'the per-type composition is hashed as well')
+
+  // …AND EACH OF THE THREE KEYS IS PINNED INDIVIDUALLY, by the same hand-written-projection method
+  // the under-cap half uses. The pairwise tests above cannot do this: today every rowError carries a
+  // `type`, so `rowErrorsTotal === Σ rowErrorTypeCounts` and the three keys are mutually redundant —
+  // deleting `rowErrorsTotal` or `rowErrorsTruncated` from the projection left both suites green.
+  // The day someone adds a rowError with no type, total and typeCounts decouple, and this is the
+  // assertion that will be standing there.
+  const truncatedProjection = {
+    actionId: ROW_ERROR_REVISION_ACTION.actionId,
+    parameters: { projectNo: 'P-001' },
+    source: {
+      externalSystemId: ROW_ERROR_REVISION_ACTION.source.externalSystemId,
+      workspaceId: ROW_ERROR_REVISION_ACTION.source.workspaceId,
+      readPlan: ROW_ERROR_REVISION_ACTION.source.readPlan,
+    },
+    target: ROW_ERROR_REVISION_ACTION.target,
+    expansion: {
+      status: smaller.status,
+      rows: smaller.rows,
+      errors: smaller.errors,
+      rowErrors: smaller.rowErrors,
+      rowErrorsTruncated: true,
+      rowErrorsTotal: 5001,
+      rowErrorTypeCounts: { missing_component_source_id: 5001 },
+    },
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: null,
+  }
+  assert.equal(
+    revisionFor(smaller),
+    tableActionInternals.hashJson(truncatedProjection),
+    'a truncated expansion hashes EXACTLY these three overflow keys and no fourth',
+  )
+  for (const key of ['rowErrorsTruncated', 'rowErrorsTotal', 'rowErrorTypeCounts']) {
+    const without = clone(truncatedProjection)
+    delete without.expansion[key]
+    assert.notEqual(
+      revisionFor(smaller),
+      tableActionInternals.hashJson(without),
+      `${key} is load-bearing in the revision — dropping it must move the hash`,
+    )
+  }
+}
+
+// FAIL-CLOSED. The hard apply-blocking check used to read the array; past the cap the array can
+// contain none of the blocking type while the project is full of it.
+function testHardApplyBlockingRowErrorsSurviveTheCap() {
+  const { hasHardApplyBlockingRowErrors } = tableActionInternals
+  assert.equal(hasHardApplyBlockingRowErrors({ rowErrors: [] }), false, 'a clean expansion blocks nothing')
+  assert.equal(
+    hasHardApplyBlockingRowErrors({ rowErrors: [{ type: 'missing_child_bom' }] }),
+    true,
+    'the array is still authority when nothing was dropped',
+  )
+  assert.equal(
+    hasHardApplyBlockingRowErrors({
+      rowErrors: [{ type: 'missing_component_source_id' }],
+      summary: {
+        rowErrorsTruncated: true,
+        rowErrorsTotal: 5001,
+        rowErrorTypeCounts: { missing_component_source_id: 5000, missing_child_bom: 1 },
+      },
+    }),
+    true,
+    'a missing_child_bom the cap dropped still blocks apply — the totals are consulted first',
+  )
+  assert.equal(
+    hasHardApplyBlockingRowErrors({
+      rowErrors: [{ type: 'missing_component_source_id' }],
+      summary: {
+        rowErrorsTruncated: true,
+        rowErrorsTotal: 5001,
+        rowErrorTypeCounts: { missing_component_source_id: 5001 },
+      },
+    }),
+    false,
+    '…and a truncated expansion with no blocking type does not become blocked by the truncation itself',
+  )
+}
+
+// The cap override is deploy config, and CONDITIONAL: an action that never asked for it keeps the
+// exact normalized shape it had, because that shape is snapshotted and hashed elsewhere.
+function testRowErrorLimitIsAConditionalActionConfigKey() {
+  const base = {
+    actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    source: { externalSystemId: 'ext_plm', kind: 'bridge:legacy-sql-readonly' },
+    target: { sheetId: 'sheet_main', objectId: 'stockPreparationMain', fieldIdMap: {} },
+  }
+  const plain = normalizeStockPreparationActionConfig(clone(base))
+  assert.equal('rowErrorLimit' in plain, false, 'a config that never set it gains no key')
+
+  const configured = normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: 250 })
+  assert.equal(configured.rowErrorLimit, 250, 'a configured cap is carried on the normalized action')
+  assert.throws(
+    () => normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: -1 }),
+    (error) => error instanceof StockPreparationTableActionError && error.code === 'TABLE_ACTION_CONFIG_INVALID',
+    'a nonsense cap is refused at config time, not silently defaulted',
+  )
+
+  // THE CEILING IS ENFORCED AT CONFIG TIME TOO, and as a REFUSAL. The normalized config is what gets
+  // snapshotted and echoed back, so storing 20001 while the expander runs 20000 would make the stored
+  // config a lie about what ran — and the operator would get no feedback at all about a knob they
+  // demonstrably meant to move.
+  const atCeiling = normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: ROW_ERROR_LIMIT_CEILING })
+  assert.equal(atCeiling.rowErrorLimit, ROW_ERROR_LIMIT_CEILING, 'the ceiling itself is a legal cap')
+  assert.throws(
+    () => normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: ROW_ERROR_LIMIT_CEILING + 1 }),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && /must not exceed/.test(error.message),
+    'one past the ceiling is a 422, not a silent clamp',
+  )
+
+  // TYPE STRICTNESS. `Number()` reads `true` as 1, so a coercing parser would answer a config typo by
+  // cutting the operator's whole defect worklist down to one entry while every total stayed truthful.
+  for (const nonsense of [true, [3], '7', 5.5]) {
+    assert.throws(
+      () => normalizeStockPreparationActionConfig({ ...clone(base), rowErrorLimit: nonsense }),
+      (error) => error instanceof StockPreparationTableActionError && error.code === 'TABLE_ACTION_CONFIG_INVALID',
+      `rowErrorLimit: ${JSON.stringify(nonsense)} is refused rather than coerced`,
+    )
+  }
 }
 
 async function testApplySandboxGateFailsClosed() {

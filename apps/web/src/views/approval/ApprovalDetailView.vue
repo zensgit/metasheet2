@@ -75,17 +75,28 @@
       </template>
     </PageHeader>
 
+    <!-- Round 4 (B15): this banner and the read-only refusal below it are ONE fact with one
+         lifecycle. It renders while EITHER the shared error string is set (a rejected timeline
+         fetch, a rejected verb, a list load) OR the displayed instance's last detail read is known
+         to have failed — and while the latter holds it is NOT closable, so the refusal can never be
+         dismissed into a silently disabled page with no way back. `store.error` is nulled by many
+         writers (every loader's start, every verb's start, this alert's own dismiss); the latch is
+         released only by a successful re-read or by leaving the instance, which is exactly when the
+         controls come back. The 重新加载 inside it is the in-page recovery, and it is the ONLY retry
+         affordance in this state — the 未找到该审批 block below renders only with no instance at all,
+         which the latch state never is. -->
     <el-alert
-      v-if="store.error"
-      :title="store.error"
+      v-if="store.error || displayedInstanceLoadFailed"
+      :title="store.error ?? DETAIL_RELOAD_REQUIRED_MESSAGE"
       type="error"
       show-icon
-      :closable="true"
+      :closable="!displayedInstanceLoadFailed"
       class="approval-detail__error"
+      data-testid="approval-detail-error-banner"
       @close="store.error = null"
     >
       <template #default>
-        <el-button type="primary" link @click="retryLoad">重新加载</el-button>
+        <el-button type="primary" link data-testid="approval-detail-retry" @click="retryLoad">重新加载</el-button>
       </template>
     </el-alert>
 
@@ -95,7 +106,7 @@
            inline el-skeleton blocks (3-row form + 6-row timeline) moved verbatim into the shared
            AsyncStateBlock; same texture, one reusable renderer. -->
       <AsyncStateBlock
-        v-if="!approval && store.loading"
+        v-if="!approval && detailPending"
         state="loading"
         :skeleton-rows="[3, 6]"
         data-testid="detail-skeleton"
@@ -559,18 +570,20 @@
                (and a detail/history refresh no longer spins the whole bar). -->
           <div class="approval-detail__actions-primary">
             <el-button
-              v-if="canAct"
+              v-if="canDecide"
               type="success"
               :loading="inFlightAction === 'approve'"
+              :disabled="!actionsEnabled"
               data-testid="approval-approve-button"
               @click="openActionDialog('approve')"
             >
               通过
             </el-button>
             <el-button
-              v-if="canAct"
+              v-if="canDecide"
               type="danger"
               :loading="inFlightAction === 'reject'"
+              :disabled="!actionsEnabled"
               data-testid="approval-reject-button"
               @click="openActionDialog('reject')"
             >
@@ -584,18 +597,20 @@
                  control is additionally gated on `!isMobileLayout`. 评论 stays
                  visible on both surfaces. -->
             <el-button
-              v-if="canAct && !isMobileLayout && returnableNodes.length > 0 && allowReturn"
+              v-if="canDecide && !isMobileLayout && returnableNodes.length > 0 && allowReturn"
               type="warning"
               :loading="inFlightAction === 'return'"
+              :disabled="!actionsEnabled"
               data-testid="approval-return-button"
               @click="openReturnDialog"
             >
               退回
             </el-button>
             <el-button
-              v-if="canAct && !isMobileLayout && allowTransfer"
+              v-if="canDecide && !isMobileLayout && allowTransfer"
               type="warning"
               :loading="inFlightAction === 'transfer'"
+              :disabled="!actionsEnabled"
               data-testid="approval-transfer-button"
               @click="openTransferDialog"
             >
@@ -603,10 +618,11 @@
             </el-button>
             <!-- P1-B 加签: pull additional co-signer(s) into the current node. -->
             <el-button
-              v-if="canAct && !isMobileLayout && allowAddSign"
+              v-if="canDecide && !isMobileLayout && allowAddSign"
               type="primary"
               plain
               :loading="inFlightAction === 'add_sign'"
+              :disabled="!actionsEnabled"
               data-testid="approval-add-sign-button"
               @click="openAddSignDialog"
             >
@@ -615,10 +631,11 @@
             <!-- P1-B 减签: remove a previously add-signed co-signer at the
                  current node. Only shown when at least one such row exists. -->
             <el-button
-              v-if="canAct && !isMobileLayout && reducibleAssignees.length > 0 && allowReduceSign"
+              v-if="canDecide && !isMobileLayout && reducibleAssignees.length > 0 && allowReduceSign"
               type="primary"
               plain
               :loading="inFlightAction === 'reduce_sign'"
+              :disabled="!actionsEnabled"
               data-testid="approval-reduce-sign-button"
               @click="openReduceSignDialog"
             >
@@ -632,6 +649,7 @@
               type="primary"
               plain
               :loading="remindLoading"
+              :disabled="!actionsEnabled"
               data-testid="approval-remind-button"
               @click="handleRemind"
             >
@@ -654,6 +672,7 @@
                 <el-button
                   type="info"
                   :loading="inFlightAction === 'revoke'"
+                  :disabled="!actionsEnabled"
                   data-testid="approval-revoke-button"
                 >
                   撤回
@@ -663,6 +682,7 @@
             <el-button
               plain
               :loading="inFlightAction === 'comment'"
+              :disabled="!actionsEnabled"
               data-testid="approval-comment-button"
               @click="openCommentDialog"
             >
@@ -745,7 +765,7 @@
         <el-button
           :type="currentAction === 'approve' ? 'success' : 'danger'"
           :loading="inFlightAction === currentAction"
-          :disabled="actionConfirmDisabled"
+          :disabled="actionConfirmDisabled || !actionsEnabled"
           data-testid="approval-action-dialog-confirm"
           @click="submitAction"
         >
@@ -798,7 +818,7 @@
         <el-button
           type="warning"
           :loading="inFlightAction === 'transfer'"
-          :disabled="!transferUserId"
+          :disabled="!transferUserId || !actionsEnabled"
           data-testid="approval-transfer-submit"
           @click="submitTransfer"
         >
@@ -875,7 +895,7 @@
         <el-button
           type="primary"
           :loading="inFlightAction === 'add_sign'"
-          :disabled="addSignUserIds.length === 0"
+          :disabled="addSignUserIds.length === 0 || !actionsEnabled"
           data-testid="approval-add-sign-submit"
           @click="submitAddSign"
         >
@@ -936,7 +956,7 @@
         <el-button
           type="primary"
           :loading="inFlightAction === 'reduce_sign'"
-          :disabled="!reduceSignUserId"
+          :disabled="!reduceSignUserId || !actionsEnabled"
           data-testid="approval-reduce-sign-submit"
           @click="submitReduceSign"
         >
@@ -1026,7 +1046,7 @@
         <el-button
           type="primary"
           :loading="inFlightAction === 'comment'"
-          :disabled="!actionComment.trim() || commentAttachmentUploading"
+          :disabled="!actionComment.trim() || commentAttachmentUploading || !actionsEnabled"
           data-testid="approval-comment-submit"
           @click="submitComment"
         >
@@ -1084,7 +1104,7 @@
         <el-button
           type="warning"
           :loading="inFlightAction === 'return'"
-          :disabled="!returnTargetNodeKey"
+          :disabled="!returnTargetNodeKey || !actionsEnabled"
           data-testid="approval-return-submit"
           @click="submitReturn"
         >
@@ -1222,6 +1242,105 @@ const approval = computed(() => store.activeApproval)
 // PageHeader requires a non-optional title; before the detail loads (or on error) fall back to
 // the same generic copy the original hand-rolled `<h1 v-if="approval">` used.
 const headerTitle = computed(() => approval.value?.title ?? '审批详情')
+
+// ---------------------------------------------------------------------------
+// Instance consistency (2026-09-06)
+// ---------------------------------------------------------------------------
+// This component is REUSED across a params-only navigation (下一条 →, deep link, ApprovalCenter
+// row click) — see the `route.params.id` watcher at the bottom of this file. The detail load for
+// the incoming instance is asynchronous, so between the route change and its response there is a
+// window in which the route already says B. Every write verb used to read `route.params.id`
+// directly at submit time while the page still rendered whatever the store held, so a submit in
+// that window could be sent for an instance the reader was not looking at.
+//
+// The rule is now one predicate, defined once and reused by every consumer below: an action is
+// available only when the instance that is ACTUALLY DISPLAYED is the route's instance and no detail
+// request is in flight. `actionInstanceId()` is the single source of the id every write VERB sends —
+// no verb handler reads `route.params.id` any more.
+//
+// Two page-level helpers still read the route id, and both are correct to: `retryLoad` and the
+// comments panel key are reads about the route, and `loadDetailPage`'s `markApprovalRead(id)` is a
+// deliberate exception — it is an `apiPost` (a WRITE), fired at the ROUTE's instance on purpose,
+// because "the reader opened this URL" is a fact about the route, not about whichever instance
+// happens to be in the shared slot at that moment. It is presence data, not a flow-changing verb:
+// it takes no reader input, carries no payload, and its outcome is swallowed (see the call site).
+const routeInstanceId = computed(() => (typeof route.params.id === 'string' ? route.params.id : ''))
+const displayedInstanceId = computed(() => approval.value?.id ?? null)
+// `store.detailLoading` is the detail-scoped in-flight flag (the shared `store.loading` is also set
+// by history/list loads). `=== true` rather than a truthy read so a store double that predates the
+// flag behaves exactly as it did before it existed.
+const detailLoadInFlight = computed(() => store.detailLoading === true)
+// Round 3 (B11): the `routeInstanceId.value !== ''` conjunct this predicate used to carry was
+// REMOVED. It was inert — `displayedInstanceId` is `null` or a real instance id, never `''`, so an
+// empty route id already fails the equality on its own — and a mutation probe confirmed it: dropping
+// it reded nothing anywhere. What it was reaching for is still guaranteed, one layer down: every
+// write verb refuses a falsy id (`if (!id) return` after `actionInstanceId()`), which is now pinned
+// per verb by the eight-row table in approval-detail-instance-consistency.spec.ts.
+const instanceConsistent = computed(() => displayedInstanceId.value === routeInstanceId.value)
+// Round 3 (B12): an instance whose LAST detail read failed is still on screen (a same-id reload
+// failure deliberately keeps the reader's page, with the error above it), but the page beneath the
+// banner is data of unknown freshness — so the write verbs are refused until a retry succeeds. The
+// store answers this per instance (`detailErrorInstanceId`); the shared `error` string cannot,
+// because a failed TIMELINE fetch or a rejected verb writes it too. `=== null` short-circuit so a
+// store double that predates the field behaves exactly as it did before it existed.
+// The `displayedInstanceId.value !== null` conjunct is LOAD-BEARING, not defensive noise: the latch
+// can legitimately name an instance that is not displayed at all (a first-ever load that failed
+// leaves the slot empty), and without it `null === null` would read as "the displayed instance
+// failed" on a page with no instance, latching the banner open over the 未找到该审批 state.
+const displayedInstanceLoadFailed = computed(
+  () => displayedInstanceId.value !== null && store.detailErrorInstanceId === displayedInstanceId.value,
+)
+const actionsEnabled = computed(
+  () => instanceConsistent.value && !detailLoadInFlight.value && !displayedInstanceLoadFailed.value,
+)
+// Round 4 (B15): the banner's copy while the refusal is standing but no request has left an error
+// string behind — a same-id reload in flight, or another writer having nulled `store.error`. Fixed,
+// values-free copy: the page must never invent a message the server did not send.
+const DETAIL_RELOAD_REQUIRED_MESSAGE = '该审批的最新内容未能加载，请重新加载后再操作'
+
+/**
+ * The id every write verb acts on: the instance actually on screen, or `null` when the page is
+ * mid-switch / mid-load / showing an instance whose last refresh failed. Callers early-return on
+ * `null` — that is the defense-in-depth half of the same gate the disabled controls express in the
+ * template, and it also covers the affordances that cannot be disabled (the 撤回 popconfirm fires
+ * its own `@confirm`, not a button click).
+ */
+function actionInstanceId(): string | null {
+  if (!actionsEnabled.value) return null
+  return displayedInstanceId.value
+}
+
+/**
+ * Round 3 (B10/B13) — the POST-`await` half of the same rule.
+ *
+ * `actionInstanceId()` decides what a verb may be sent for; this decides what the page may still SAY
+ * about it once the response lands. Between the two there is a whole navigation's worth of time: the
+ * reader can be on another instance by the time an approve for the previous one resolves. Every view
+ * side effect that follows the await — the success/failure toasts (policy-denial ones included), the
+ * dialog close, the inline dialog error, the 下一条 offer — belongs to the instance the verb acted
+ * on, and must not be rendered over a different one. Failure and success are treated the SAME way:
+ * announcing one but not the other is what made a departed instance's rejection appear on the
+ * incoming instance's page as a bare toast with no page to explain it.
+ *
+ * Both halves of the identity are required, for the two different ways the page can have moved: the
+ * route (the reader navigated) and the displayed instance (the shared detail slot has been emptied
+ * or replaced). A verb that succeeded with no navigation satisfies both — the store publishes the
+ * action's own response for this id, so `displayedInstanceId` is still `id`.
+ *
+ * The two REFRESH helpers below deliberately keep their own copy of this refusal rather than being
+ * folded into the caller's `if`: they must stay independently observable (each has its own
+ * isolation test), and the store holds a third, state-based line of defence in `loadHistory`.
+ */
+function stillActingOn(id: string): boolean {
+  return id === routeInstanceId.value && displayedInstanceId.value === id
+}
+
+// First-paint / switching state. `store.detailLoading` when present, otherwise the pre-existing
+// shared flag, so a store double without the new field keeps today's exact skeleton behaviour.
+// This must NOT read the shared `store.loading` alone: `loadDetailPage` runs the detail and history
+// loads in parallel and whichever settles first clears it, which would flash the not-found state
+// while the detail request for the new instance is still outstanding.
+const detailPending = computed(() => store.detailLoading ?? store.loading)
 
 // ---------------------------------------------------------------------------
 // UI-6 (master §4 UI-6 / P5 "add detail tabs/record projection … only from
@@ -1539,6 +1658,31 @@ const allowRevoke = computed(() => approval.value?.policy?.allowRevoke === true)
 // ABSENT ≡ ALLOWED (OD-L5-3(a)), deliberately the OPPOSITE of `allowRevoke`'s `=== true`
 // fail-closed idiom above. Copying that idiom would hide all four verbs on every pre-Lock-5
 // instance, on every bridged instance with no runtime graph, and for every seatless viewer.
+// ---------------------------------------------------------------------------
+// Viewer-scoped decision affordance (2026-09-07)
+// ---------------------------------------------------------------------------
+// The action bar's verbs used to render on `canAct` alone. `canAct` is the COARSE global RBAC
+// grant `approvals:act` — "this reader may act on approvals somewhere" — not "the server will
+// accept a decision on THIS instance from this reader". The server's dispatch door additionally
+// requires an active seat at the node the instance is stopped on, so a requester (or any other
+// reader who holds the grant but no seat here) was shown 通过/驳回 that could only ever come back
+// 403.
+//
+// The obvious local fix — reuse `isMyTurn` (below) — is WRONG and is deliberately not taken:
+// `isMyTurn` matches `type === 'user'` seats only, while the server's door matches ROLE seats
+// too, so gating the buttons on it would take the whole action bar away from every role-seated
+// approver the server does accept. Instead the server now answers the question itself, with the
+// door's own predicate, and ships the answer as `canDecideCurrentNode`.
+//
+// `!== false`, not truthiness: `undefined` means the backend does not compute the field (an older
+// server), and must fall back to exactly today's behaviour rather than hiding the bar. Same idiom
+// as `allowTransfer`/`allowAddSign`/... below, for the same reason.
+//
+// This is a NARROWING of an affordance, never a permission: the 403 remains the authority, and the
+// separate instance-consistency gate (`actionsEnabled`) is untouched and still applies on top.
+const canDecideCurrentNode = computed(() => approval.value?.canDecideCurrentNode !== false)
+const canDecide = computed(() => canAct.value && canDecideCurrentNode.value)
+
 const nodeOperations = computed(() => approval.value?.nodeOperations ?? null)
 const allowTransfer = computed(() => nodeOperations.value?.allowTransfer !== false)
 const allowAddSign = computed(() => nodeOperations.value?.allowAddSign !== false)
@@ -1734,10 +1878,16 @@ const commentDialogVisible = ref(false)
 // close-watcher below only ever DELETEs uploads that were never submitted.
 const commentStagedAttachments = ref<Array<{ id: string; name: string }>>([])
 const commentAttachmentUploading = ref(false)
-const commentAttachmentContextCurrent = computed(() => {
-  const routeInstanceId = route.params.id
-  return typeof routeInstanceId === 'string' && routeInstanceId !== '' && approval.value?.id === routeInstanceId
-})
+// Round 4 (B17): this is the write gate itself (`actionsEnabled`, declared with the verbs above),
+// not a second copy of one of its conjuncts. Uploading a process attachment IS a write, so it is
+// refused in every state a verb is: the displayed instance is not the route's, a detail read for it
+// is still in flight, or its last read failed. It carried only `instanceConsistent` before, which
+// had already drifted from the gate twice (the in-flight conjunct, then the read-failed one) under
+// a comment claiming the two could not — so what makes drift impossible now is the SAME ref rather
+// than the assertion: a fourth conjunct added to `actionsEnabled` reaches this input with no edit
+// here. What is deliberately NOT shared is reachability — the 评论 button that opens this dialog is
+// itself gated, so this predicate governs a dialog that was already open when the state changed.
+const commentAttachmentContextCurrent = actionsEnabled
 // Captured at each pick; incremented (invalidated) by retract BEFORE staged cleanup so a later-
 // resolving upload cannot append into a closed/unmounted/switched context. Empty staged lists
 // still invalidate — that is the in-flight-pick case (nothing to retract yet).
@@ -2358,16 +2508,47 @@ function dialogErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback
 }
 
+/**
+ * Mobile-only: a 4xx on a member action usually means the instance moved on under the reader, so
+ * re-read it rather than leaving a stale card on screen.
+ *
+ * `id` is the instance CAPTURED when the submit started, which is not necessarily the route's
+ * instance by the time the failure lands. Round 2 makes this generation-aware in the only way that
+ * is meaningful for a captured id: if the reader has navigated away, the refresh is SKIPPED
+ * entirely — nothing at all is written into the shared detail slot for the outgoing instance.
+ * Refreshing it anyway had two effects, both wrong: it published the outgoing instance under the
+ * new route (and left it there — the route watcher only fires on a further change), and it took a
+ * newer detail generation, so the response the route's OWN load was still waiting for was then
+ * discarded as superseded and the page never repaired itself. The route's load owns the slot; the
+ * failure is still reported to the reader by the caller's dialog/toast either way.
+ */
 async function refreshAfterStaleMobileAction(id: string, error: unknown): Promise<void> {
   if (!isMobileLayout.value) return
   if (!is4xxConflict(error)) return
+  if (id !== routeInstanceId.value) return
   await Promise.all([store.loadDetail(id), store.loadHistory(id)]).catch(() => undefined)
+}
+
+/**
+ * Post-verb timeline refresh, for the instance the verb actually acted on — and only while that
+ * instance is still the route's. A verb whose response settles after the reader has navigated must
+ * not fetch (or publish) the outgoing instance's rows into the timeline rendered beside the new
+ * instance's detail. The store refuses the same thing on its own state as a second line of defence
+ * (`loadHistory` early-returns for a non-displayed instance); this site is what stops the request
+ * from being issued at all.
+ */
+async function refreshHistoryForActedInstance(id: string): Promise<void> {
+  if (id !== routeInstanceId.value) return
+  await store.loadHistory(id)
 }
 
 async function submitAction() {
   if (actionConfirmDisabled.value) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = currentAction.value
   try {
@@ -2375,15 +2556,22 @@ async function submitAction() {
       action: currentAction.value,
       comment: actionComment.value || undefined,
     })
-    ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
-    rememberQuickPhraseIfOffered(actionComment.value)
-    actionDialogVisible.value = false
-    showNextEntry.value = true
-    await store.loadHistory(id)
+    // Round 3 (B10/B13): everything the PAGE says or shows about this verb is scoped to the
+    // instance it acted on. The two refresh helpers below stay OUTSIDE this block on purpose —
+    // each keeps its own captured-id refusal so it remains independently observable.
+    if (stillActingOn(id)) {
+      ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
+      rememberQuickPhraseIfOffered(actionComment.value)
+      actionDialogVisible.value = false
+      showNextEntry.value = true
+    }
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
     // B1-04: keep the dialog open + show the server's own reason inline instead of a generic
     // toast (see `actionDialogError` above); non-dialog actions further down keep their toasts.
-    actionDialogError.value = dialogErrorMessage(error, '操作失败，请重试')
+    // Round 3 (B10): symmetric with the success branch — a failure for an instance the reader has
+    // left is not announced on the instance they are now on, in any grammar.
+    if (stillActingOn(id)) actionDialogError.value = dialogErrorMessage(error, '操作失败，请重试')
     await refreshAfterStaleMobileAction(id, error)
   } finally {
     inFlightAction.value = null
@@ -2429,7 +2617,10 @@ function handleMemberActionFailure(
 async function submitTransfer() {
   if (!transferUserId.value) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'transfer'
   try {
@@ -2438,11 +2629,15 @@ async function submitTransfer() {
       comment: actionComment.value || undefined,
       targetUserId: transferUserId.value,
     })
-    ElMessage.success('已成功转交')
-    transferDialogVisible.value = false
-    await store.loadHistory(id)
+    if (stillActingOn(id)) {
+      ElMessage.success('已成功转交')
+      transferDialogVisible.value = false
+    }
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
-    handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible, actionDialogError)
+    if (stillActingOn(id)) {
+      handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible, actionDialogError)
+    }
   } finally {
     inFlightAction.value = null
   }
@@ -2486,7 +2681,10 @@ function removeAddSignUser(id: string): void {
 async function submitAddSign() {
   if (addSignUserIds.value.length === 0) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'add_sign'
   try {
@@ -2496,11 +2694,15 @@ async function submitAddSign() {
       targetUserIds: addSignUserIds.value,
       addSignMode: CLIENT_ADD_SIGN_MODE,
     })
-    ElMessage.success('已成功加签')
-    addSignDialogVisible.value = false
-    await store.loadHistory(id)
+    if (stillActingOn(id)) {
+      ElMessage.success('已成功加签')
+      addSignDialogVisible.value = false
+    }
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
-    handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible, actionDialogError)
+    if (stillActingOn(id)) {
+      handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible, actionDialogError)
+    }
   } finally {
     inFlightAction.value = null
   }
@@ -2523,7 +2725,10 @@ async function submitReduceSign() {
   const target = reducibleAssignees.value.find((a) => a.assigneeId === reduceSignUserId.value)
   if (!target || target.disabled) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'reduce_sign'
   try {
@@ -2532,11 +2737,15 @@ async function submitReduceSign() {
       comment: actionComment.value || undefined,
       targetAssignmentUserId: reduceSignUserId.value,
     })
-    ElMessage.success('已成功减签')
-    reduceSignDialogVisible.value = false
-    await store.loadHistory(id)
+    if (stillActingOn(id)) {
+      ElMessage.success('已成功减签')
+      reduceSignDialogVisible.value = false
+    }
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
-    handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible, actionDialogError)
+    if (stillActingOn(id)) {
+      handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible, actionDialogError)
+    }
   } finally {
     inFlightAction.value = null
   }
@@ -2546,7 +2755,10 @@ async function submitComment() {
   if (!actionComment.value.trim()) return
   if (commentAttachmentUploading.value) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'comment'
   // Lock-9 OD-L9-10(a): key PRESENCE, not an empty array — mirrors the backend's own
@@ -2559,17 +2771,20 @@ async function submitComment() {
       comment: actionComment.value,
       ...(stagedIds.length > 0 ? { attachmentIds: stagedIds } : {}),
     })
-    ElMessage.success('评论已提交')
-    rememberQuickPhraseIfOffered(actionComment.value)
-    // Clear BEFORE closing the dialog — the close-watcher above DELETEs whatever is still in this
-    // list, and these ids are now server-bound (clearing after the flip would race a DELETE against
-    // an already-bound row).
-    commentStagedAttachments.value = []
-    commentDialogVisible.value = false
-    await store.loadHistory(id)
+    if (stillActingOn(id)) {
+      ElMessage.success('评论已提交')
+      rememberQuickPhraseIfOffered(actionComment.value)
+      // Clear BEFORE closing the dialog — the close-watcher above DELETEs whatever is still in this
+      // list, and these ids are now server-bound (clearing after the flip would race a DELETE
+      // against an already-bound row). On the OTHER branch (the reader has moved on) the switch
+      // watcher has already retracted and emptied this list, so there is nothing left to clear.
+      commentStagedAttachments.value = []
+      commentDialogVisible.value = false
+    }
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
     // B1-04: same dialog-scoped inline error as `submitAction` above.
-    actionDialogError.value = dialogErrorMessage(error, '评论提交失败，请重试')
+    if (stillActingOn(id)) actionDialogError.value = dialogErrorMessage(error, '评论提交失败，请重试')
     await refreshAfterStaleMobileAction(id, error)
   } finally {
     inFlightAction.value = null
@@ -2579,7 +2794,10 @@ async function submitComment() {
 async function submitReturn() {
   if (!returnTargetNodeKey.value) return
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   actionDialogError.value = null
   inFlightAction.value = 'return'
   try {
@@ -2588,11 +2806,15 @@ async function submitReturn() {
       comment: actionComment.value || undefined,
       targetNodeKey: returnTargetNodeKey.value,
     })
-    ElMessage.success('已退回审批')
-    returnDialogVisible.value = false
-    await store.loadHistory(id)
+    if (stillActingOn(id)) {
+      ElMessage.success('已退回审批')
+      returnDialogVisible.value = false
+    }
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
-    handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible, actionDialogError)
+    if (stillActingOn(id)) {
+      handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible, actionDialogError)
+    }
   } finally {
     inFlightAction.value = null
   }
@@ -2607,14 +2829,17 @@ async function submitReturn() {
 // still renders something instead of a blank toast.
 async function handleRevoke() {
   if (inFlightAction.value) return
-  const id = route.params.id as string
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   inFlightAction.value = 'revoke'
   try {
     await store.executeAction(id, { action: 'revoke' })
-    ElMessage.success('审批已撤回')
-    await store.loadHistory(id)
+    if (stillActingOn(id)) ElMessage.success('审批已撤回')
+    await refreshHistoryForActedInstance(id)
   } catch (error) {
-    ElMessage.error(dialogErrorMessage(error, '撤回失败，请重试'))
+    if (stillActingOn(id)) ElMessage.error(dialogErrorMessage(error, '撤回失败，请重试'))
   } finally {
     inFlightAction.value = null
   }
@@ -2679,17 +2904,20 @@ function formatRemindAgo(lastRemindedAt?: string): string {
 }
 
 async function handleRemind() {
-  const id = route.params.id as string
   if (remindLoading.value) return
+  // Instance-consistency gate: act on the instance actually displayed, never on whatever the
+  // route happens to say right now. `null` = mid-switch / mid-load, so this verb does nothing.
+  const id = actionInstanceId()
+  if (!id) return
   remindLoading.value = true
   try {
     const result = await remindApproval(id)
     if (result.ok) {
-      ElMessage.success('已催办')
-      await store.loadHistory(id)
+      if (stillActingOn(id)) ElMessage.success('已催办')
+      await refreshHistoryForActedInstance(id)
     } else if (result.status === 429) {
-      ElMessage.warning(`已在 ${formatRemindAgo(result.error.lastRemindedAt)}催办过`)
-    } else {
+      if (stillActingOn(id)) ElMessage.warning(`已在 ${formatRemindAgo(result.error.lastRemindedAt)}催办过`)
+    } else if (stillActingOn(id)) {
       ElMessage.error(result.error.message || '催办失败，请重试')
     }
   } finally {
@@ -2741,6 +2969,39 @@ async function loadDetailPage() {
 
 onMounted(loadDetailPage)
 
+/**
+ * Instance switch (round 2): drop every piece of per-instance DIALOG state.
+ *
+ * The component is reused across a params-only navigation, so a dialog opened on the outgoing
+ * instance — and everything typed or picked into it — survives the switch. The action gate refuses
+ * the confirm while the page is mid-switch, but it re-enables the moment the incoming instance
+ * lands, at which point the very same confirm submits the OUTGOING instance's payload (a comment
+ * written about A, a 退回 target node that belongs to A's graph, a 转交/加签/减签 target picked from
+ * A's assignees) against B. Closing the dialogs and clearing their payloads makes that impossible by
+ * construction rather than by gating: whatever the reader sends on B, they composed on B.
+ *
+ * `inFlightAction` is deliberately NOT reset here — it is the one-action-at-a-time guard and is
+ * owned by each submit's own `finally`; clearing it while a request is still outstanding would let a
+ * second submit through. `currentAction` is likewise left alone: every `open*` sets it, and no
+ * dialog is open to read it.
+ */
+function resetActionDialogState(): void {
+  actionDialogVisible.value = false
+  transferDialogVisible.value = false
+  addSignDialogVisible.value = false
+  reduceSignDialogVisible.value = false
+  commentDialogVisible.value = false
+  returnDialogVisible.value = false
+  actionComment.value = ''
+  actionDialogError.value = null
+  returnTargetNodeKey.value = ''
+  transferUserId.value = ''
+  addSignUserIds.value = []
+  addSignUserLabels.value = {}
+  addSignPickerValue.value = null
+  reduceSignUserId.value = ''
+}
+
 // Params-only navigation (下一条 →): reset the next-entry offer and reload for the new instance.
 watch(
   () => route.params.id,
@@ -2749,7 +3010,10 @@ watch(
       // Lock-9 FE fix round (gate P3-2): this component instance is REUSED across a params-only
       // navigation (no unmount), so any process attachment still staged on the OUTGOING instance's
       // comment dialog must be retracted here — `onBeforeUnmount` never fires for this transition.
+      // Retract FIRST, then close: the close-watcher's own retract then finds an emptied list and
+      // issues no second DELETE.
       retractStagedCommentAttachments()
+      resetActionDialogState()
       showNextEntry.value = false
       void loadDetailPage()
     }

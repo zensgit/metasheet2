@@ -27,6 +27,30 @@ function violationIds(flags) {
   return evaluateFlagRules(flags).map((v) => v.id)
 }
 
+test('watch-challenge manifest provenance names the canonical exported flag', () => {
+  const key = 'ELEARNING_WATCH_CHALLENGE_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec)
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_WATCH_CHALLENGE_ENABLED',
+  )
+})
+
+test('online-enrollment manifest provenance names the canonical exported flag', () => {
+  const key = 'ELEARNING_ENROLLMENT_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec)
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_ENROLLMENT_ENABLED',
+  )
+  assert.deepEqual(spec.dependsOn, [
+    'ELEARNING_ENABLED',
+    'ELEARNING_CONTENT_ENABLED',
+  ])
+})
+
 // NON-TAUTOLOGICAL completeness: derive the flag set from SOURCE (grep packages/core-backend/src), NOT from
 // a hand-copied list. A flag READ in source but MISSING from the manifest fails here — this is exactly how
 // the 19th flag (MULTITABLE_SHEET_REVERT_MAX_RECORDS) slipped through the earlier hardcoded-list test, which
@@ -53,12 +77,26 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_ENSURE_FIELDS_REFUSED', // P0-S S3 destructive-reconcile refusal error code, not a flag
   'MULTITABLE_PLUGIN_SHEET_SCOPE_MODE', // P0-S S4: plugin sheet-scope enforcement mode (observe|enforce) — not a Global-History/recovery flag
   'MULTITABLE_ENABLE_PERSONAL_VIEWS', // personal views (separate line)
+  'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE', // W8-4: per-request multitable metadata memo (perf, default off, 120s hard deadline) — not a Global-History/recovery flag
+  // W9: kill-switch for the stock-prep per-chunk batch idempotency-key lookup (perf, default ON; set
+  // to `false`/`0`/`off`/`no` to fall back to the per-row lookup). Not a Global-History/recovery
+  // flag, which is what this list means: NON_GH_EXACT is the EXCLUSION list for the grep below, so
+  // an entry here is a statement that the name must NOT be demanded in GLOBAL_HISTORY_FLAG_MANIFEST
+  // — it is not itself a registration. It is listed pre-emptively: the read lives in the PLUGIN
+  // (plugins/plugin-integration-core/lib/stock-preparation-apply-writer.cjs) and this grep only
+  // covers packages/core-backend/src, so today the entry is inert. It earns its place the day the
+  // read moves into core-backend, when it keeps the completeness check from demanding a
+  // Global-History entry this flag does not belong in.
+  'MULTITABLE_STOCK_PREP_BATCH_KEY_LOOKUP',
   'MULTITABLE_FIELD_INPUT_TYPES', // field-input-type registry
   'MULTITABLE_FIELD_TYPES', // field-type registry
+  'MULTITABLE_FIELDS', // e-learning projection field registry suffix, not a flag
   'MULTITABLE_FORMULA_BULK_RECOMPUTE_MAX_ROWS', // formula recompute cap
+  'MULTITABLE_METRIC_FIELDS', // e-learning projection metric-field registry suffix, not a flag
   'MULTITABLE_OBJECT_SCOPE_FORBIDDEN', // scope guards
   'MULTITABLE_PROJECT_NAMESPACE_FORBIDDEN',
   'MULTITABLE_SHARE_PERMISSIONS', // share permission registry
+  'MULTITABLE_SHEETS_TABLE', // e-learning projection mapping-table name suffix, not a flag
   // Schema-management permission split: these four are CONSTANT NAMES (permission codes and the
   // env-var name itself), not flags. The one real flag, MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA,
   // is registered in the manifest instead.

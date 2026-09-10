@@ -9,11 +9,15 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 
 const {
+  MISSING_COMPONENT_DETAIL_LIMIT,
+  ROW_ERROR_LIMIT,
+  ROW_ERROR_LIMIT_CEILING,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
   expandPlmProjectBom,
   summarizeBomExpansionForEvidence,
+  summarizeMissingComponents,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
 
 // The C3 planner, required HERE so one test can carry a declared source column the whole way:
@@ -21,6 +25,13 @@ const {
 // leg has its own suite; only an end-to-end assertion catches a value that is read and then dropped
 // at the hand-off, which is exactly what happened to 规格 before 备料主表 had a column for it.
 const { planStockPreparationConflicts } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'))
+
+// W3a: the revision builder, required HERE because the whole point of putting the missing-component
+// detail BESIDE `rowErrors` instead of inside them is that the revision cannot see it. Asserting
+// that against the REAL hasher is the only version of the claim worth making.
+const {
+  __internals: { buildRevision },
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value))
@@ -711,7 +722,589 @@ async function testDeclaredNativeSpecColumnReachesTheMainTableRow() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// W3a — THE MISSING-COMPONENT SIDE CHANNEL
+// ---------------------------------------------------------------------------
+//
+// A `missing_component` rowError blocks the ENTIRE project — one of them makes the plan invalid and
+// apply refuses without an explicit hold — so an operator has to be told WHICH part numbers to
+// create. Part numbers are real customer values, and `expansion.rowErrors` is the one place they
+// must never go: it is hashed whole into the dry-run revision, it derives the anonymous-hold
+// identity, and its projection is what the confirmation ledger stores. Putting a part number there
+// would move every revision, supersede every pending hold on an affected project (wiping the
+// human-entered values with it) and write a customer value into the ledger.
+//
+// Hence the split: `expansion.missingComponents`, a top-level array beside `rowErrors`, and a
+// rowError payload that did not change by one byte. M-01..M-05 are the five guards that make that a
+// property of the code rather than a paragraph.
+
+// PART-Z is wanted by TWO different parents (so `parentCount` has something to count), PART-Y by one,
+// and neither exists in the part library. PART-A and PART-C do.
+function missingComponentData() {
+  return {
+    DN_PDM_PathExAttrInfo: [{ FileCode: 'P-001', Parent_OBJ_ID: 'PATH-1' }],
+    DN_PDM_PathInfo: [{ OBJ_ID: 'PATH-1' }],
+    DN_PDM_OrderHeadInfo: [{ OBJ_ID: 'ORDER-1', path_id: 'PATH-1' }],
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'PART-C', quantity: '1', sort_id: 2 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Frame', Material: 'Steel', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-C', bom_id: 'BOM-C', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-Z', Bom_ExAttr1: '3', sort_id: 1 },
+      { bom_pid: 'BOM-A', part_id: 'PART-Y', Bom_ExAttr1: '1', sort_id: 2 },
+      { bom_pid: 'BOM-C', part_id: 'PART-Z', Bom_ExAttr1: '1', sort_id: 1 },
+    ],
+  }
+}
+
+const REVISION_ACTION = Object.freeze({
+  actionId: 'plm.stock-preparation.pull-bom.v1',
+  source: { externalSystemId: 'ext_plm', workspaceId: null, readPlan: null },
+  target: { sheetId: 'sheet_main', objectId: 'plm_stock_preparation_main', fieldIdMap: {} },
+})
+
+// M-01 / M-02 / M-05: the rowError shape, the revision, and the evidence.
+async function testMissingComponentDetailNeverReachesTheHashedSurfaces() {
+  const { adapter } = createAdapter(missingComponentData())
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+  assert.equal(result.valid, false, 'a missing component fails the expansion')
+  const missingRowErrors = result.rowErrors.filter((entry) => entry.type === 'missing_component')
+  assert.equal(missingRowErrors.length, 3, 'three probes found nothing (PART-Z twice, PART-Y once)')
+
+  // M-01 THE ROWERROR PAYLOAD IS FROZEN. Not "contains no part number" — the exact key set, so an
+  // added key of ANY name is red. This is the assertion that keeps the revision, the identity and
+  // the ledger safe all at once, which is why it is stated as an equality and not as an absence.
+  for (const rowError of missingRowErrors) {
+    assert.deepEqual(
+      Object.keys(rowError),
+      ['type', 'field', 'depth'],
+      'missing_component rowErrors carry {type, field, depth} and nothing else',
+    )
+  }
+  assert.equal(
+    JSON.stringify(result.rowErrors).includes('PART-Z'),
+    false,
+    'no part number reaches the rowError array by any route',
+  )
+
+  // The side channel itself, in the shape the response contract froze. ONE ENTRY PER PART NUMBER:
+  // the collector is keyed, so the counts are already aggregated when the detail leaves the expander.
+  assert.ok(Array.isArray(result.missingComponents), 'the side channel is a top-level array')
+  assert.equal(result.missingComponents.length, 2, 'one entry per distinct PART NUMBER, not per probe')
+  assert.equal(result.missingComponentDistinctCount, 2, 'and the uncapped id count agrees with it here')
+  const zed = result.missingComponents.find((entry) => entry.componentSourceId === 'PART-Z')
+  assert.equal(zed.occurrenceCount, 2, 'PART-Z was wanted by two BOM positions')
+  assert.equal(zed.parentCount, 2, '…under two different parents')
+  assert.equal(zed.parentSourceId, 'PART-A', 'the FIRST place it was wanted is what the entry names')
+  assert.equal(zed.bomId, 'BOM-A')
+  for (const entry of result.missingComponents) {
+    assert.deepEqual(
+      Object.keys(entry),
+      ['componentSourceId', 'parentSourceId', 'bomId', 'path', 'depth', 'occurrenceCount', 'parentCount'],
+      'the frozen detail shape',
+    )
+    assert.equal(entry.depth, 1, 'these are all first-level children')
+    assert.deepEqual(JSON.parse(entry.path)[1], entry.componentSourceId, 'path ends at the part that was wanted')
+  }
+
+  // M-02 THE REVISION DOES NOT MOVE. Compared against the SAME expansion with the keys deleted —
+  // which is exactly the object shape this module produced before W3a — through the real hasher.
+  const stripped = clone(result)
+  delete stripped.missingComponents
+  delete stripped.missingComponentDistinctCount
+  assert.equal(Object.prototype.hasOwnProperty.call(stripped, 'missingComponents'), false)
+  const revisionArgs = (expansion) => ({
+    action: REVISION_ACTION,
+    parameters: { projectNo: 'P-001' },
+    expansion,
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: null,
+  })
+  assert.equal(
+    buildRevision(revisionArgs(result)),
+    buildRevision(revisionArgs(stripped)),
+    'M-02: the dry-run revision is blind to the missing-component detail — no stored revision moves, no pending hold is superseded',
+  )
+
+  // M-05 THE EVIDENCE DOES NOT MOVE. Same clause as the values-free assertions above it in this file.
+  const evidence = summarizeBomExpansionForEvidence(result)
+  const evidenceJson = JSON.stringify(evidence)
+  for (const partNumber of ['PART-Z', 'PART-Y', 'BOM-A', 'BOM-C']) {
+    assert.equal(evidenceJson.includes(partNumber), false, `evidence hides ${partNumber}`)
+  }
+  assert.equal('missingComponents' in evidence, false, 'evidence gains no key at all')
+  // …and neither does the values-free summary the evidence is projected from.
+  assert.equal('missingComponents' in result.summary, false, 'summary gains no key at all')
+  assert.ok(result.summary.errorTypes.includes('missing_component'), 'the values-free half still SAYS there are missing components')
+}
+
+// The key is present on every return path, so no consumer has to ask.
+async function testMissingComponentsKeyIsPresentOnEveryReturnPath() {
+  const { adapter: emptyAdapter } = createAdapter({ DN_PDM_PathExAttrInfo: [] })
+  const notFound = await expandPlmProjectBom({ sourceAdapter: emptyAdapter, projectNo: 'P-404' })
+  assert.equal(notFound.status, 'not_found')
+  assert.deepEqual(notFound.missingComponents, [], 'not_found carries an empty array')
+
+  const failing = await expandPlmProjectBom({
+    sourceAdapter: { async read() { const error = new Error('driver down'); error.code = 'X'; throw error } },
+    projectNo: 'P-001',
+  })
+  assert.equal(failing.status, 'failed')
+  assert.deepEqual(failing.missingComponents, [], 'a failed root read carries an empty array')
+
+  const { adapter } = createAdapter(baseData())
+  const ok = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(ok.status, 'expanded')
+  assert.deepEqual(ok.missingComponents, [], 'a clean expansion carries an empty array')
+
+  // The bounded (large-BOM) path reaches the same return.
+  const { adapter: boundedAdapter } = createAdapter(missingComponentData())
+  const bounded = await expandPlmProjectBom({ sourceAdapter: boundedAdapter, projectNo: 'P-001', maxRows: 1 })
+  assert.ok(Array.isArray(bounded.missingComponents), 'the bounded path carries the key too')
+
+  // …and so does the companion count, on every one of them.
+  for (const [label, expansion] of [['not_found', notFound], ['failed root read', failing], ['clean', ok], ['bounded', bounded]]) {
+    assert.equal(typeof expansion.missingComponentDistinctCount, 'number', `${label} carries the distinct count`)
+  }
+}
+
+// A missing part named DIRECTLY by the order detail: depth 0, no parent, no BOM head.
+async function testMissingRootComponentCarriesNullParentAndBom() {
+  const data = missingComponentData()
+  data.DN_PDM_OrderDetailInfo = [{ order_id: 'ORDER-1', part_id: 'PART-ROOTLESS', quantity: '1', sort_id: 1 }]
+  const { adapter } = createAdapter(data)
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+  assert.deepEqual(result.missingComponents, [{
+    componentSourceId: 'PART-ROOTLESS',
+    parentSourceId: null,
+    bomId: null,
+    path: JSON.stringify(['PART-ROOTLESS']),
+    depth: 0,
+    occurrenceCount: 1,
+    parentCount: 1,
+  }])
+  const summary = summarizeMissingComponents(result)
+  assert.equal(summary.items[0].parentCount, 1, '"wanted directly by the order" is one place it is wanted')
+}
+
+// `ambiguous_component` gets no side channel — see readPart's header for why.
+async function testAmbiguousComponentOpensNoValueChannel() {
+  const data = missingComponentData()
+  data.DN_PDM_PartLibraryInfo.push({ OBJ_ID: 'PART-A', IdentityNo: 'A-002', IdentityName: 'Assembly (dup)', SysVer: 'V1' })
+  const { adapter } = createAdapter(data)
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+  assert.ok(result.rowErrors.some((entry) => entry.type === 'ambiguous_component'), 'the duplicate is reported')
+  assert.equal(
+    JSON.stringify(result.missingComponents).includes('PART-A'),
+    false,
+    'an ambiguous component contributes nothing to the value channel',
+  )
+}
+
+// M-03/M-04 live in stock-preparation-conflict-planner.test.cjs (identity + ledger projection).
+// Here: what the summary itself promises the frontend.
+async function testMissingComponentSummaryContract() {
+  const { adapter } = createAdapter(missingComponentData())
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  const summary = summarizeMissingComponents(result)
+
+  assert.deepEqual(Object.keys(summary), ['distinctCount', 'probeCount', 'truncated', 'items'], 'the frozen response shape')
+  assert.equal(summary.distinctCount, 2, 'ONE ROW PER PART NUMBER — creating a part is a per-part job')
+  assert.equal(summary.probeCount, 3, 'three BOM positions wanted a part that does not exist')
+  assert.equal(summary.truncated, false)
+  assert.deepEqual(
+    summary.items.map((item) => item.componentSourceId),
+    ['PART-Z', 'PART-Y'],
+    'occurrenceCount descending: the part blocking the most positions is first',
+  )
+  assert.deepEqual(summary.items[0], {
+    componentSourceId: 'PART-Z',
+    parentSourceId: 'PART-A',
+    bomId: 'BOM-A',
+    path: JSON.stringify(['PART-A', 'PART-Z']),
+    depth: 1,
+    occurrenceCount: 2,
+    parentCount: 2,
+  }, 'parent/bom/path/depth are the FIRST place it was wanted; parentCount says how many wanted it')
+  assert.equal(summary.items[1].parentCount, 1)
+
+  // The tie-break is total, so the same expansion always summarizes identically.
+  const tied = summarizeMissingComponents({
+    missingComponents: [
+      { componentSourceId: 'PART-B', parentSourceId: 'P1', bomId: 'B1', path: 'x', depth: 1 },
+      { componentSourceId: 'PART-A', parentSourceId: 'P1', bomId: 'B1', path: 'x', depth: 1 },
+    ],
+  })
+  assert.deepEqual(tied.items.map((item) => item.componentSourceId), ['PART-A', 'PART-B'], 'equal counts break by part number ascending')
+
+  // A caller-supplied limit truncates the ITEMS and says so, while the totals stay true.
+  const clipped = summarizeMissingComponents(result, { limit: 1 })
+  assert.equal(clipped.items.length, 1)
+  assert.equal(clipped.truncated, true)
+  assert.equal(clipped.distinctCount, 2, 'distinctCount is the real total, not the page size')
+  assert.equal(clipped.probeCount, 3)
+
+  // An expansion that never had the key (a stored artifact from before W3a) summarizes to empty
+  // rather than throwing.
+  assert.deepEqual(summarizeMissingComponents({}), { distinctCount: 0, probeCount: 0, truncated: false, items: [] })
+}
+
+/** A BOM under PART-A whose child positions are `[partId, howManyPositions]`, none of them in stock. */
+function bomOfMissingParts(spec) {
+  const data = missingComponentData()
+  data.DN_PDM_OrderDetailInfo = [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }]
+  const details = []
+  for (const [partId, count] of spec) {
+    for (let i = 0; i < count; i += 1) {
+      details.push({ bom_pid: 'BOM-A', part_id: partId, Bom_ExAttr1: '1', sort_id: details.length })
+    }
+  }
+  data.DN_PDM_BomDetailsInfo = details
+  return data
+}
+
+// THE COLLECTOR IS CAPPED BY DISTINCT PART NUMBER, not by probe — and the difference is correctness,
+// not list length. An empty part library against a wide BOM must not accumulate an unbounded pile of
+// part numbers on a read whose whole contract is that it is bounded; but the cap must cost the list
+// a WHOLE PART, never a wrong count for a part that IS on it.
+async function testMissingComponentCollectionIsCappedByDistinctPart() {
+  const overflow = MISSING_COMPONENT_DETAIL_LIMIT + 37
+  const data = bomOfMissingParts(
+    Array.from({ length: overflow }, (_unused, index) => [`PART-GONE-${String(index).padStart(4, '0')}`, 1]),
+  )
+  const { adapter } = createAdapter(data)
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+
+  assert.equal(result.missingComponents.length, MISSING_COMPONENT_DETAIL_LIMIT, 'the collector stops carrying DETAIL at the cap')
+  assert.equal(result.missingComponentDistinctCount, overflow, 'but it keeps counting distinct part numbers past it')
+  assert.equal(
+    result.rowErrors.filter((entry) => entry.type === 'missing_component').length,
+    overflow,
+    'every probe past the cap is still REPORTED — it just stops carrying a value',
+  )
+
+  const summary = summarizeMissingComponents(result)
+  assert.equal(summary.distinctCount, overflow, 'distinctCount is the TRUE total, not the page size')
+  assert.equal(summary.items.length, MISSING_COMPONENT_DETAIL_LIMIT, 'while the items stay bounded')
+  assert.equal(summary.probeCount, overflow, 'the probe total is the truth, taken from the uncapped rowErrors')
+  assert.equal(summary.truncated, true, 'and the caller is told the list is not the whole story')
+}
+
+/**
+ * THE COUNTING BUG THE PER-PROBE CAP HAD, as two witnesses. Both were RED before the collector was
+ * keyed by part number, and the second is the one that would have cost an operator a whole day:
+ *
+ *   199 positions want A, then 300 want B  ->  the list said [A:199, B:1]
+ *   200 positions want A, then 300 want B  ->  B WAS NOT IN THE LIST AT ALL
+ *
+ * The operator creates every part the list names, re-runs, and the project is still held — by the
+ * part the list dropped. And the ordering ("create the most-blocking part first") inverted in
+ * exactly the wide-BOM case the ordering exists for.
+ */
+async function testTheCapCostsAWholePartNeverAWrongCount() {
+  for (const [label, aPositions] of [['under the cap', 199], ['exactly at the cap', MISSING_COMPONENT_DETAIL_LIMIT]]) {
+    const { adapter } = createAdapter(bomOfMissingParts([['PART-A-MISSING', aPositions], ['PART-B-MISSING', 300]]))
+    const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+    const summary = summarizeMissingComponents(result)
+
+    assert.equal(summary.distinctCount, 2, `${label}: two parts are missing, however many positions want them`)
+    assert.equal(summary.probeCount, aPositions + 300, `${label}: every position is counted`)
+    assert.equal(summary.truncated, false, `${label}: nothing was dropped — two parts fit in any cap`)
+    assert.deepEqual(
+      summary.items.map((item) => [item.componentSourceId, item.occurrenceCount]),
+      [['PART-B-MISSING', 300], ['PART-A-MISSING', aPositions]],
+      `${label}: B is present with its REAL count, and sorts first because it blocks the most`,
+    )
+    assert.equal(summary.items[0].parentCount, 1, `${label}: all 300 positions are under the one parent`)
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// D-C: the `rowErrors` cap.
+//
+// The cheapest possible rowError generator, on purpose: a BOM detail row whose component id is
+// blank fails at `toKey` and never reaches `readPart`, so N rowErrors cost N array entries and zero
+// extra source reads. That keeps a 6001-position fixture a sub-second test.
+// ---------------------------------------------------------------------------------------------
+function bomOfBlankComponentIds(count, { badQuantityPositions = 0 } = {}) {
+  const data = baseData()
+  data.DN_PDM_OrderDetailInfo = [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }]
+  const details = []
+  for (let i = 0; i < count; i += 1) {
+    details.push({ bom_pid: 'BOM-A', part_id: '', Bom_ExAttr1: '1', sort_id: details.length })
+  }
+  // A SECOND type, appended after the first block, so the per-type totals have something to be wrong
+  // about and the retained prefix demonstrably drops a whole type when the first block overflows.
+  for (let i = 0; i < badQuantityPositions; i += 1) {
+    details.push({ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: 'not-a-number', sort_id: details.length })
+  }
+  data.DN_PDM_BomDetailsInfo = details
+  return data
+}
+
+async function expandBlankComponentBom(count, options = {}) {
+  const { adapter } = createAdapter(bomOfBlankComponentIds(count, options))
+  return expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', ...(options.expand || {}) })
+}
+
+const ROW_ERROR_TRUNCATION_KEYS = ['rowErrorsTotal', 'rowErrorsRetained', 'rowErrorsTruncated', 'rowErrorTypeCounts']
+
+function revisionOf(expansion) {
+  return buildRevision({
+    action: REVISION_ACTION,
+    parameters: { projectNo: 'P-001' },
+    expansion,
+    existingRows: [],
+    conflictPolicyReview: null,
+    plan: null,
+  })
+}
+
+// (a) THE BOUNDARY. 4999 / 5000 / 5001 — the last two are the ones that matter, because "at the cap"
+// must still be an untruncated expansion or the stanza would appear on a project that lost nothing.
+async function testRowErrorCapBoundary() {
+  for (const [count, expected] of [
+    [ROW_ERROR_LIMIT - 1, { length: ROW_ERROR_LIMIT - 1, truncated: false }],
+    [ROW_ERROR_LIMIT, { length: ROW_ERROR_LIMIT, truncated: false }],
+    [ROW_ERROR_LIMIT + 1, { length: ROW_ERROR_LIMIT, truncated: true }],
+  ]) {
+    const result = await expandBlankComponentBom(count)
+    const label = `${count} rowErrors`
+    assert.equal(result.status, 'failed', `${label}: rowErrors still fail the expansion`)
+    assert.equal(result.rowErrors.length, expected.length, `${label}: the ARRAY is bounded by the cap`)
+
+    if (!expected.truncated) {
+      for (const key of ROW_ERROR_TRUNCATION_KEYS) {
+        assert.equal(key in result.summary, false, `${label}: an expansion that lost nothing mounts no ${key}`)
+      }
+      continue
+    }
+    assert.equal(result.summary.rowErrorsTruncated, true, `${label}: and the summary says so`)
+    assert.equal(result.summary.rowErrorsTotal, count, `${label}: the TOTAL is the truth, not the array length`)
+    assert.equal(result.summary.rowErrorsRetained, ROW_ERROR_LIMIT, `${label}: alongside what was kept`)
+    assert.deepEqual(
+      result.summary.rowErrorTypeCounts,
+      { missing_component_source_id: count },
+      `${label}: per-type counts accumulate past the cap too`,
+    )
+  }
+
+  // THE COUNTS ARE PER TYPE, and a type whose every occurrence was dropped still has to be named.
+  // 5000 blanks fill the array exactly; the 7 unparseable quantities that follow are all refused a
+  // slot, so `rowErrors` contains not one `invalid_quantity` — and the summary must still report it.
+  const mixed = await expandBlankComponentBom(ROW_ERROR_LIMIT, { badQuantityPositions: 7 })
+  assert.equal(mixed.rowErrors.length, ROW_ERROR_LIMIT)
+  assert.equal(
+    mixed.rowErrors.some((entry) => entry.type === 'invalid_quantity'),
+    false,
+    'the retained sample contains no invalid_quantity at all',
+  )
+  assert.deepEqual(mixed.summary.rowErrorTypeCounts, {
+    invalid_quantity: 7,
+    missing_component_source_id: ROW_ERROR_LIMIT,
+  }, 'but the per-type totals count the seven the array never saw')
+  assert.ok(
+    mixed.summary.errorTypes.includes('invalid_quantity'),
+    'and errorTypes names the type whose every occurrence the cap dropped — otherwise the summary would say the project has no such defect',
+  )
+
+  // Evidence stays values-free: integers, a boolean, and the type tokens `errorTypes` already
+  // publishes. Nothing customer-shaped can ride the stanza.
+  const evidence = summarizeBomExpansionForEvidence(mixed)
+  assert.equal(evidence.rowErrorsTruncated, true)
+  assert.equal(evidence.rowErrorsTotal, ROW_ERROR_LIMIT + 7)
+  assert.equal(evidence.rowErrorsRetained, ROW_ERROR_LIMIT)
+  assert.deepEqual(evidence.rowErrorTypeCounts, mixed.summary.rowErrorTypeCounts)
+  const evidenceJson = JSON.stringify(evidence)
+  for (const value of ['P-001', 'PART-A', 'PART-B', 'not-a-number']) {
+    assert.equal(evidenceJson.includes(value), false, `truncation evidence hides ${value}`)
+  }
+}
+
+// (b) THE BASELINE. Under the cap, the capped expander and an effectively-uncapped one must produce
+// the SAME OBJECT — not "the same modulo the new keys". Stated as a deepEqual against a run with the
+// limit raised to the ceiling, plus an equality through the REAL revision hasher, because "no
+// revision moves" is the only version of the promise a deployment can act on.
+async function testUnderTheCapIsByteIdenticalToAnUncappedExpansion() {
+  const count = ROW_ERROR_LIMIT - 1
+  const capped = await expandBlankComponentBom(count)
+  const uncapped = await expandBlankComponentBom(count, { expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING } })
+
+  assert.deepEqual(capped.rowErrors, uncapped.rowErrors, 'the array is untouched below the cap')
+  assert.deepEqual(capped.summary, uncapped.summary, 'so is the whole values-free summary')
+  assert.deepEqual(
+    summarizeBomExpansionForEvidence(capped),
+    summarizeBomExpansionForEvidence(uncapped),
+    'so is the evidence projection',
+  )
+  assert.equal(revisionOf(capped), revisionOf(uncapped), 'and the dry-run revision does not move')
+
+  // The stanza is CONDITIONAL, so an under-cap summary's key set is the pre-cap one exactly. Stated
+  // as a key-set equality rather than four absences: a fifth key of any name is red too.
+  assert.deepEqual(
+    Object.keys(capped.summary).filter((key) => key.startsWith('rowError')),
+    [],
+    'an under-cap summary mounts no rowError* key whatsoever',
+  )
+
+  // The clean path — the overwhelmingly common one — is the same claim with zero rowErrors.
+  const { adapter } = createAdapter(baseData())
+  const clean = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(clean.status, 'expanded')
+  assert.deepEqual(Object.keys(clean.summary).filter((key) => key.startsWith('rowError')), [])
+  assert.deepEqual(
+    Object.keys(summarizeBomExpansionForEvidence(clean)).filter((key) => key.startsWith('rowError')),
+    [],
+    'and the evidence stanza a clean expansion produces is the pre-cap one, key for key',
+  )
+}
+
+// (c) OVER THE CAP: deterministic, and NOT confusable with a different overflowing project.
+//
+// The second half is the reason the revision had to learn about the truncation at all. 5001 blanks
+// and 6001 blanks produce byte-identical `rows`, `errors` AND retained `rowErrors` — the sample
+// cannot tell them apart. Without the overflow facts in the hash they would share a revision, and
+// one project's dry-run token would validate against the other's plan.
+async function testOverTheCapIsDeterministicAndDistinguishable() {
+  const first = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1)
+  const again = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1)
+  assert.deepEqual(first.rowErrors, again.rowErrors, 'the retained prefix is the same prefix every time')
+  assert.deepEqual(first.summary, again.summary, 'and so is the summary')
+  assert.equal(revisionOf(first), revisionOf(again), 'so the same input yields the same revision')
+
+  const bigger = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1001)
+  assert.deepEqual(bigger.rowErrors, first.rowErrors, 'the two projects share their retained sample exactly…')
+  assert.deepEqual(bigger.rows, first.rows, '…and their rows…')
+  assert.deepEqual(bigger.errors, first.errors, '…and their global errors')
+  assert.notEqual(bigger.summary.rowErrorsTotal, first.summary.rowErrorsTotal, 'only the totals differ')
+  assert.notEqual(
+    revisionOf(bigger),
+    revisionOf(first),
+    'and that alone must move the revision — otherwise two different overflowing projects share a dry-run token',
+  )
+}
+
+// Configuration may move the cap, and only within reach of the ceiling. Enforcement lives in the
+// expander (the only thing that reads the cap), and it REFUSES rather than clamps: a silent
+// `Math.min` would let a deploy config say 2000000 while 20000 ran, with nothing anywhere to tell
+// the operator which number was in force.
+async function testRowErrorLimitIsConfigurableUnderACeiling() {
+  const lowered = await expandBlankComponentBom(120, { expand: { rowErrorLimit: 50 } })
+  assert.equal(lowered.rowErrors.length, 50, 'a lower configured cap is honoured')
+  assert.equal(lowered.summary.rowErrorsTotal, 120, 'and the total is still the truth')
+
+  const atCeiling = await expandBlankComponentBom(ROW_ERROR_LIMIT + 1, {
+    expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING },
+  })
+  assert.equal(
+    atCeiling.rowErrors.length,
+    ROW_ERROR_LIMIT + 1,
+    'the ceiling itself is a legal cap, and this fixture is under it',
+  )
+  assert.ok(ROW_ERROR_LIMIT_CEILING >= ROW_ERROR_LIMIT, 'the ceiling is not below the default')
+
+  await assert.rejects(
+    () => expandBlankComponentBom(1, { expand: { rowErrorLimit: ROW_ERROR_LIMIT_CEILING + 1 } }),
+    /rowErrorLimit must not exceed/,
+    'one past the ceiling is a refusal, not a silent clamp',
+  )
+  await assert.rejects(
+    () => expandBlankComponentBom(1, { expand: { rowErrorLimit: 0 } }),
+    /rowErrorLimit/,
+    'a nonsense cap is refused rather than silently defaulted',
+  )
+
+  // TYPE STRICTNESS, and it is not pedantry. `Number()` turns `true` into 1, so a coercing parser
+  // would answer a config typo by cutting the retained defect list — the operator's whole worklist —
+  // down to a single entry, while every total stayed truthful and nothing looked wrong.
+  for (const nonsense of [true, [3], '7', 5.5]) {
+    await assert.rejects(
+      () => expandBlankComponentBom(1, { expand: { rowErrorLimit: nonsense } }),
+      /rowErrorLimit must be a positive integer/,
+      `rowErrorLimit: ${JSON.stringify(nonsense)} is refused rather than coerced`,
+    )
+  }
+}
+
+/**
+ * THE MISSING-PARTS LIST MUST NOT SHRINK WHEN THE ROWERROR CAP FIRES — and the failure was not
+ * merely a low number, it was an ARITHMETICALLY IMPOSSIBLE pair on the W3a operator panel:
+ *
+ *   `distinctCount` comes off the expander's uncapped id set.
+ *   `probeCount` was counted off the `rowErrors` ARRAY, which D-C made a bounded sample.
+ *
+ * So a truncated expansion rendered "缺件 240 种(共 50 处引用)" — more distinct missing parts than
+ * references to them, which cannot happen for real data (a part is missing because it was probed).
+ * The truth was sitting in the same summary object the whole time as
+ * `rowErrorTypeCounts.missing_component`; it just was not read. Same fail-open shape as
+ * `hasHardApplyBlockingRowErrors`, in the values-BEARING projection.
+ *
+ * The fixture lowers the cap rather than building 5000 absent parts, because the cap is the cap
+ * whatever its value and 240 part reads keeps this test sub-second.
+ */
+async function testMissingComponentProbeCountSurvivesTheRowErrorCap() {
+  const distinct = MISSING_COMPONENT_DETAIL_LIMIT + 40
+  const positionsPerPart = 2
+  const retained = 50
+  const probes = distinct * positionsPerPart
+  const { adapter } = createAdapter(bomOfMissingParts(
+    Array.from({ length: distinct }, (_unused, index) => [`PART-GONE-${String(index).padStart(4, '0')}`, positionsPerPart]),
+  ))
+  const result = await expandPlmProjectBom({
+    sourceAdapter: adapter,
+    projectNo: 'P-001',
+    rowErrorLimit: retained,
+  })
+
+  assert.equal(result.rowErrors.length, retained, 'the rowError array really is a sample here')
+  assert.equal(result.summary.rowErrorsTruncated, true)
+  assert.equal(result.summary.rowErrorTypeCounts.missing_component, probes, 'and the true total is on the summary')
+
+  const summary = summarizeMissingComponents(result)
+  assert.equal(summary.distinctCount, distinct, 'distinctCount still comes off the uncapped id set')
+  assert.equal(summary.probeCount, probes, 'and probeCount is the TRUE probe total, not the retained sample')
+  // Two positions per part on purpose: the detail collector retains 200 parts carrying 2 occurrences
+  // each, so a fix that only clamped probeCount up to the DETAIL total would answer 400 here and
+  // 480 is the only right answer. The bound below would accept 400; this equality does not.
+  assert.ok(
+    summary.probeCount >= summary.distinctCount,
+    'a part cannot be missing without having been probed — this pair may never invert',
+  )
+  assert.equal(summary.truncated, true)
+
+  // The structural floor holds even for an expansion that carries no summary at all (a stored W3a
+  // artifact from before D-C, or a hand-built object): distinctCount is never allowed to exceed
+  // probeCount, whatever any upstream cap did to the array.
+  const floor = summarizeMissingComponents({ missingComponentDistinctCount: 9, missingComponents: [], rowErrors: [] })
+  assert.equal(floor.distinctCount, 9)
+  assert.equal(floor.probeCount, 9, 'the floor answers with the distinct count rather than an impossible 0')
+}
+
 async function main() {
+  await testRowErrorCapBoundary()
+  await testUnderTheCapIsByteIdenticalToAnUncappedExpansion()
+  await testOverTheCapIsDeterministicAndDistinguishable()
+  await testRowErrorLimitIsConfigurableUnderACeiling()
+  await testMissingComponentProbeCountSurvivesTheRowErrorCap()
+  await testMissingComponentDetailNeverReachesTheHashedSurfaces()
+  await testMissingComponentsKeyIsPresentOnEveryReturnPath()
+  await testMissingRootComponentCarriesNullParentAndBom()
+  await testAmbiguousComponentOpensNoValueChannel()
+  await testMissingComponentSummaryContract()
+  await testMissingComponentCollectionIsCappedByDistinctPart()
+  await testTheCapCostsAWholePartNeverAWrongCount()
   await testSpecAndCreateTimeAreDeclaredNotGuessed()
   await testDeclaredNativeSpecColumnReachesTheMainTableRow()
   await testSuccessfulExpansion()

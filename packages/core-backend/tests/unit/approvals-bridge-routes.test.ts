@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
 
 import type { ApprovalBridgePlmAdapter } from '../../src/services/approval-bridge-types'
+import { APPROVAL_LIST_SCOPE_NO_MATCH } from '../../src/services/ApprovalBridgeService'
 
 type ApprovalFixture = {
   id: string
@@ -130,6 +131,18 @@ const routeState = vi.hoisted(() => {
     // B3-02 (行级未读): `${userId} ${instanceId}` membership set standing in for an
     // `approval_reads` row — presence means "read".
     reads: new Set<string>(),
+    // P0-A: the list scope reads the viewer's roles from the DB (`viewerRoles` in
+    // `approval-instance-readability.ts`) rather than from the request's claims, so the fake pool
+    // has to answer that lookup's two queries. Both default to EMPTY, which is the honest shape
+    // here: this file's mocked identity has no `users` row and no `user_roles` rows, so its
+    // DB-derived role set is empty and the scope's role-typed arms match nothing — exactly what a
+    // claim-only identity gets in production.
+    users: new Map<string, { role: string | null; is_active: boolean }>(),
+    userRoles: [] as Array<{ user_id: string; role_id: string; name: string | null }>,
+    // P0-A (A15): when true, BOTH `viewerRoles` lookups reject. The list surfaces wrap that call in
+    // `viewerRolesFailClosed`, so the failure must narrow the role arms (an empty role set, bound
+    // as the no-match sentinel) instead of surfacing as a list 500.
+    failViewerRoles: false,
   }
 
   const now = () => new Date('2026-04-04T08:00:00.000Z')
@@ -195,15 +208,6 @@ const routeState = vi.hoisted(() => {
     if (sql.includes('business_key = $')) {
       rows = rows.filter((row) => row.business_key === String(params[index++]))
     }
-    if (sql.includes('SELECT instance_id FROM approval_assignments')) {
-      const assigneeId = String(params[index++])
-      const assignedInstanceIds = new Set(
-        Array.from(state.assignments.values())
-          .filter((row) => row.assignee_id === assigneeId && row.is_active)
-          .map((row) => row.instance_id),
-      )
-      rows = rows.filter((row) => assignedInstanceIds.has(row.id))
-    }
     // B3-03 (模板/时间筛选)
     if (sql.includes('template_id = $')) {
       const value = String(params[index++])
@@ -216,6 +220,21 @@ const routeState = vi.hoisted(() => {
     if (sql.includes('created_at <= $')) {
       const cutoff = new Date(String(params[index++])).getTime()
       rows = rows.filter((row) => row.created_at.getTime() <= cutoff)
+    }
+    // ORDER IS LOAD-BEARING: `index` walks the bind array positionally, so the blocks here must
+    // follow the SERVICE's push order, not the order the conditions happen to appear in the SQL
+    // text. The service pushes `templateId` / `createdFrom` / `createdTo` BEFORE the tab block's
+    // actor parameters, so these two tab-driven subquery readers must come after the three above.
+    // (They used to sit before them; nothing caught it because no test combined a template/date
+    // filter with a tab — P0-A's tab default made every tab-less request combine them.)
+    if (sql.includes('SELECT instance_id FROM approval_assignments')) {
+      const assigneeId = String(params[index++])
+      const assignedInstanceIds = new Set(
+        Array.from(state.assignments.values())
+          .filter((row) => row.assignee_id === assigneeId && row.is_active)
+          .map((row) => row.instance_id),
+      )
+      rows = rows.filter((row) => assignedInstanceIds.has(row.id))
     }
     // B3-01 (我已处理): reverse lookup on approval_records.actor_id, ANY status.
     if (sql.includes('SELECT instance_id FROM approval_records WHERE actor_id = $')) {
@@ -236,16 +255,29 @@ const routeState = vi.hoisted(() => {
       return { rows: [], rowCount: 0 }
     }
 
-    if (normalized.startsWith('SELECT ai.* FROM approval_instances ai WHERE ai.status = \'pending\'')) {
-      const limit = Number(params[0])
-      const offset = Number(params[1])
+    // P0-A (A9): `GET /api/approvals/pending` now conjoins the SAME server-determined scope the
+    // list feed applies, so its SQL lost the `ai` alias (the shipped scope condition qualifies its
+    // columns with `approval_instances.`, and PostgreSQL forbids qualifying by table name once the
+    // table is aliased) and gained three leading bind parameters (actor, DB-derived roles,
+    // permissions) ahead of LIMIT/OFFSET. LIMIT/OFFSET are therefore read off the SQL TEXT's own
+    // `$N` placeholders — the same shape the dynamic-instance handler below already uses — rather
+    // than off fixed positions 0/1, which is what made this handler positional and brittle.
+    //
+    // DISCLOSED, so a green run here is not over-read: this fake pool does NOT interpret the scope
+    // condition's SQL, exactly as it does not interpret the list query's. Mutating the scope
+    // condition therefore leaves this file green; the real gate for A9 is the real-PostgreSQL
+    // suite `tests/integration/approval-list-scope-server-side.db.test.ts`.
+    if (normalized.startsWith('SELECT approval_instances.* FROM approval_instances WHERE approval_instances.status = \'pending\'')) {
+      const limitOffsetMatch = normalized.match(/LIMIT \$(\d+) OFFSET \$(\d+)/)
       const rows = Array.from(state.instances.values())
         .filter((row) => row.status === 'pending' && row.source_system === 'platform')
-        .slice(offset, offset + limit)
-      return { rows, rowCount: rows.length }
+      const limit = limitOffsetMatch ? Number(params[Number(limitOffsetMatch[1]) - 1]) : rows.length
+      const offset = limitOffsetMatch ? Number(params[Number(limitOffsetMatch[2]) - 1]) : 0
+      const sliced = rows.slice(offset, offset + limit)
+      return { rows: sliced, rowCount: sliced.length }
     }
 
-    if (normalized.startsWith('SELECT COUNT(*)::text AS count FROM approval_instances WHERE status = \'pending\'')) {
+    if (normalized.startsWith('SELECT COUNT(*)::text AS count FROM approval_instances WHERE approval_instances.status = \'pending\'')) {
       const count = Array.from(state.instances.values())
         .filter((row) => row.status === 'pending' && row.source_system === 'platform').length
       return { rows: [{ count: String(count) }], rowCount: 1 }
@@ -560,6 +592,33 @@ const routeState = vi.hoisted(() => {
       return { rows, rowCount: rows.length }
     }
 
+    // P0-A: `viewerRoles(db, viewerId)`'s two lookups, keyed on the FULL predicate text for the
+    // same reason the `approval_reads` handler above is — a prefix-only match would let the mock
+    // re-implement the predicate and shadow the real SQL. An `is_active = FALSE` user contributes
+    // no `users.role`, and `user_roles` rows contribute both `role_id` and the joined `roles.name`,
+    // mirroring the real function including its deliberate is_active asymmetry.
+    if (
+      normalized.startsWith('SELECT role FROM users')
+      && normalized.includes('WHERE id = $1')
+      && normalized.includes('is_active = TRUE')
+    ) {
+      if (state.failViewerRoles) throw new Error('viewer role lookup unavailable')
+      const user = state.users.get(String(params[0]))
+      const rows = user && user.is_active ? [{ role: user.role }] : []
+      return { rows, rowCount: rows.length }
+    }
+    if (
+      normalized.startsWith('SELECT ur.role_id, r.name FROM user_roles ur')
+      && normalized.includes('LEFT JOIN roles r ON r.id = ur.role_id')
+      && normalized.includes('WHERE ur.user_id = $1')
+    ) {
+      if (state.failViewerRoles) throw new Error('viewer role lookup unavailable')
+      const rows = state.userRoles
+        .filter((row) => row.user_id === String(params[0]))
+        .map((row) => ({ role_id: row.role_id, name: row.name }))
+      return { rows, rowCount: rows.length }
+    }
+
     throw new Error(`Unhandled SQL in approvals bridge test: ${normalized}`)
   })
 
@@ -577,6 +636,9 @@ const routeState = vi.hoisted(() => {
     state.records = []
     state.recordId = 1
     state.reads.clear()
+    state.users.clear()
+    state.userRoles = []
+    state.failViewerRoles = false
     plmApprovals.splice(1)
     plmHistory.splice(1)
     plmApprovals[0].status = 'pending'
@@ -689,6 +751,35 @@ function createApp(plmAdapter?: ApprovalBridgePlmAdapter) {
 }
 
 const pinned = usePinnedServer()
+
+/**
+ * P0-A re-pin helper. `GET /api/approvals` now (a) serves a request carrying NO `tab` on the
+ * documented default tab (`pending`) instead of applying no tab condition at all, and (b) conjoins
+ * a server-determined scope condition into every list query. The mocked identity in this file is
+ * `test-user`, so a platform fixture row is reachable by a tab-less request only when it carries
+ * that identity's ACTIVE seat. Every test below that previously relied on a seat-less row being
+ * returned for a tab-less request seeds the seat explicitly through this helper.
+ *
+ * SCOPE OF THE EVIDENCE THIS FILE CAN CARRY, stated so a green run here is not over-read: the
+ * fake pool interprets the query by matching SQL substrings, and it does not implement the scope
+ * condition at all — so the scope's own behaviour is neither exercised nor gated here. The real-DB
+ * suite `tests/integration/approval-list-scope-server-side.db.test.ts` is where that lives; these
+ * assertions only pin the tab-defaulting half.
+ */
+function seedActorSeatForDefaultTab(instanceId: string, assigneeId = 'test-user'): void {
+  const timestamp = new Date('2026-04-04T08:00:00.000Z')
+  routeState.state.assignments.set(`${instanceId}:${assigneeId}`, {
+    id: `assign-${instanceId}-${assigneeId}`,
+    instance_id: instanceId,
+    assignment_type: 'user',
+    assignee_id: assigneeId,
+    source_step: 0,
+    is_active: true,
+    metadata: {},
+    created_at: timestamp,
+    updated_at: timestamp,
+  })
+}
 
 describe('approval bridge routes', () => {
   beforeEach(() => {
@@ -844,7 +935,15 @@ describe('approval bridge routes', () => {
     expect(response.body.error.code).toBe('PLM_APPROVAL_BRIDGE_UNAVAILABLE')
   })
 
+  // RE-PINNED (P0-A). This test used to prove that a tab-less list read returns a platform row the
+  // caller has no relationship to — which is exactly the behaviour being removed: the scope is now
+  // decided server-side and a tab-less request is served the default (`pending`) tab. Its SUBJECT is
+  // unchanged and still worth pinning: the platform feed answers without a PLM adapter attached, and
+  // returns platform rows rather than 503ing on the missing bridge. What changed is the fixture —
+  // `local-1` now carries the mocked identity's own active seat, so the row is reachable on the
+  // default tab.
   it('lists platform approvals without requiring a PLM adapter', async () => {
+    seedActorSeatForDefaultTab('local-1')
     pinned.setApp(createApp())
     const response = await request(pinned.url())
       .get('/api/approvals')
@@ -856,6 +955,123 @@ describe('approval bridge routes', () => {
       id: 'local-1',
       sourceSystem: 'platform',
     })
+  })
+
+  // ---------------------------------------------------------------------------
+  // P0-A (A15): `viewerRoles` is TWO queries (`users`, then `user_roles LEFT JOIN roles`), and both
+  // list surfaces now depend on two tables they did not previously read. `viewerRolesFailClosed`
+  // wraps that call so a lookup failure NARROWS the role-typed arms instead of answering 500.
+  // ---------------------------------------------------------------------------
+  it('P0-A: a failing viewer-role lookup denies the role arms instead of failing the list', async () => {
+    // CONTROL FIRST, on the same fixture: with the lookups healthy the list answers 200 and the
+    // role parameter carries the (empty ⇒ sentinel) DB-derived set. Establishes that the 200 below
+    // is not "this request would have been 200 anyway for some unrelated reason".
+    seedActorSeatForDefaultTab('local-1')
+    pinned.setApp(createApp())
+    await request(pinned.url()).get('/api/approvals').expect(200)
+
+    routeState.pool.query.mockClear()
+    routeState.state.failViewerRoles = true
+
+    // BOTH halves are asserted, because either alone is weak: a status check alone cannot tell a
+    // fail-closed 200 from a `degraded` fallback rendering as 200, and a parameter check alone
+    // cannot tell the request completed.
+    const listResponse = await request(pinned.url()).get('/api/approvals').expect(200)
+    expect(listResponse.body.degraded).toBeUndefined()
+
+    // The list page query's own SQL names the roles placeholder inside the scope condition's seat
+    // arm. Read the number out of the SQL TEXT and check what was bound at that position, so the
+    // assertion follows the shipped condition rather than a hand-counted offset.
+    const listCall = routeState.pool.query.mock.calls.find(([sql]) => (
+      String(sql).includes('SELECT * FROM approval_instances')
+      && String(sql).includes('scope_seat.assignee_id = ANY($')
+    ))
+    expect(listCall, 'the list page query must have been issued').toBeTruthy()
+    const rolesPlaceholder = String(listCall![0]).match(/scope_seat\.assignee_id = ANY\(\$(\d+)::text\[\]\)/)
+    expect(rolesPlaceholder, 'the scope condition must bind a roles parameter').toBeTruthy()
+    expect((listCall![1] as unknown[])[Number(rolesPlaceholder![1]) - 1])
+      .toEqual([APPROVAL_LIST_SCOPE_NO_MATCH])
+
+    // The SAME property on the other list-shaped read of this router, whose scope condition binds
+    // the roles array at $2.
+    routeState.pool.query.mockClear()
+    const pendingResponse = await request(pinned.url()).get('/api/approvals/pending').expect(200)
+    expect(pendingResponse.body.degraded).toBeUndefined()
+    const pendingCall = routeState.pool.query.mock.calls.find(([sql]) => (
+      String(sql).includes('SELECT approval_instances.* FROM approval_instances')
+    ))
+    expect(pendingCall, 'the pending page query must have been issued').toBeTruthy()
+    expect((pendingCall![1] as unknown[])[1]).toEqual([APPROVAL_LIST_SCOPE_NO_MATCH])
+  })
+
+  // ---------------------------------------------------------------------------
+  // P0-A (A19): ABSENT TAB ⇒ PENDING SEMANTICS UNLESS A STATUS FILTER IS GIVEN. The tab default is
+  // what closes the tab-less family, but `pending` carries its own `status = 'pending'` conjunct,
+  // so a tab-less request that also named `status=approved` reached the query with a contradictory
+  // status pair and answered an empty page — the caller's OWN approved rows included. The default
+  // tab is therefore not applied when the request supplies a status filter of its own.
+  //
+  // NO-DB GATE, on the emitted SQL rather than on rows, because this fake pool does not interpret
+  // the scope condition (see the query mock's own note): the property under test is which
+  // CONJUNCTS the statement carries. The real-PostgreSQL gate is test (6b) in
+  // tests/integration/approval-list-scope-server-side.db.test.ts.
+  // ---------------------------------------------------------------------------
+  it('P0-A (A19): an absent tab plus a status filter drops the default tab conjunct and keeps the scope', async () => {
+    routeState.state.instances.set('local-approved', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-approved',
+      status: 'approved',
+    })
+    seedActorSeatForDefaultTab('local-1')
+    pinned.setApp(createApp())
+
+    const listPageSql = (): string => {
+      const call = routeState.pool.query.mock.calls.find(([sql]) => (
+        String(sql).includes('SELECT * FROM approval_instances')
+      ))
+      expect(call, 'the list page query must have been issued').toBeTruthy()
+      return String(call![0]).replace(/\s+/g, ' ')
+    }
+
+    // (a) TAB-LESS + STATUS: no tab conjunct at all — neither the `pending` tab's literal status
+    // condition nor its ACTIVE-seat subquery — but the caller's own status filter is bound and THE
+    // SCOPE IS STILL THERE. That last assertion is the one that keeps this a filter change: the
+    // scope condition is conjoined by `listApprovals` independently of `tab`, so dropping the tab
+    // must not drop it.
+    routeState.pool.query.mockClear()
+    const withStatus = await request(pinned.url()).get('/api/approvals?status=approved').expect(200)
+    const withStatusSql = listPageSql()
+    expect(withStatusSql).not.toContain("status = 'pending'")
+    expect(withStatusSql).not.toContain('SELECT instance_id FROM approval_assignments')
+    expect(withStatusSql).toContain('scope_seat.assignee_id = ANY($')
+    expect(withStatusSql).toMatch(/status = \$\d+/)
+    expect(withStatus.body.data.map((row: { id: string }) => row.id)).toEqual(['local-approved'])
+
+    // (b) POSITIVE CONTROL — the same request WITHOUT a status filter still gets the default tab,
+    // so (a) is the status filter suppressing it and not the tab default having been removed.
+    routeState.pool.query.mockClear()
+    const tabless = await request(pinned.url()).get('/api/approvals').expect(200)
+    const tablessSql = listPageSql()
+    expect(tablessSql).toContain("status = 'pending'")
+    expect(tablessSql).toContain('SELECT instance_id FROM approval_assignments')
+    expect(tabless.body.data.map((row: { id: string }) => row.id)).toEqual(['local-1'])
+
+    // (c) AN EMPTY `status=` IS ABSENT, NOT A FILTER — `listApprovals` pushes its status conjunct
+    // under a truthiness check, so suppressing the default tab on an empty value would widen a
+    // cleared chip's request while adding no filter in its place.
+    routeState.pool.query.mockClear()
+    await request(pinned.url()).get('/api/approvals?status=').expect(200)
+    expect(listPageSql()).toContain("status = 'pending'")
+
+    // (d) AN EXPLICIT TAB IS NEVER SUPPRESSED: both conditions survive, which is the merge-base
+    // semantics for a caller that named both halves itself.
+    routeState.pool.query.mockClear()
+    const explicit = await request(pinned.url()).get('/api/approvals?tab=pending&status=approved').expect(200)
+    const explicitSql = listPageSql()
+    expect(explicitSql).toContain("status = 'pending'")
+    expect(explicitSql).toMatch(/status = \$\d+/)
+    expect(explicitSql).toContain('SELECT instance_id FROM approval_assignments')
+    expect(explicit.body.data).toEqual([])
   })
 
   it('filters non-PLM approvals by active assignee assignments', async () => {
@@ -1369,6 +1585,11 @@ describe('approval bridge routes', () => {
       id: 'local-3',
       template_id: 'tpl-b',
     })
+    // RE-PINNED (P0-A): a tab-less read is now served the default (`pending`) tab, so BOTH
+    // candidate rows get the mocked identity's seat — `local-3` must be excluded by the
+    // `templateId` filter, which is this test's subject, and not by the scope or the tab.
+    seedActorSeatForDefaultTab('local-2')
+    seedActorSeatForDefaultTab('local-3')
 
     const app = createApp(createPlmAdapterMock())
     pinned.setApp(app)
@@ -1390,6 +1611,12 @@ describe('approval bridge routes', () => {
       id: 'local-3',
       created_at: new Date('2026-08-01T00:00:00.000Z'),
     })
+    // RE-PINNED (P0-A): same reason as the templateId test above — all three rows carry the mocked
+    // identity's seat so the created-at window is the only thing that can exclude `local-1` and
+    // `local-3`.
+    seedActorSeatForDefaultTab('local-1')
+    seedActorSeatForDefaultTab('local-2')
+    seedActorSeatForDefaultTab('local-3')
 
     const app = createApp(createPlmAdapterMock())
     pinned.setApp(app)

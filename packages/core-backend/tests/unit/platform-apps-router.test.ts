@@ -340,14 +340,15 @@ describe('platform apps router catalog feature predicate', () => {
     }
   }
 
-  async function invoke(routePath: string, params?: Record<string, string>) {
+  async function invoke(routePath: string, params?: Record<string, string>, admin = false) {
     const router = createPlatformAppsRouter(createCatalogLoader())
     const handler = getRouteHandler(router, 'get', routePath)
     const response = createMockResponse()
     await handler({
       params: params ?? {},
       headers: {},
-      user: undefined,
+      user: admin ? { id: 'app-admin', role: 'admin' } : undefined,
+      authenticatedTenantId: admin ? 'app-org' : undefined,
     }, response)
     return response
   }
@@ -388,16 +389,16 @@ describe('platform apps router catalog feature predicate', () => {
     expect((attendance.body as { id: string }).id).toBe('attendance')
   })
 
-  it('exposes elearning in list and detail when master is exact true', async () => {
+  it('exposes installation to an authenticated administrator', async () => {
     process.env.ELEARNING_ENABLED = 'true'
 
-    const list = await invoke('/')
+    const list = await invoke('/', undefined, true)
     expect(list.statusCode).toBe(200)
     const ids = ((list.body as { list: Array<{ id: string; displayName: string }> }).list ?? []).map((item) => item.id).sort()
     expect(ids).toEqual(['after-sales', 'attendance', 'elearning'])
     expect(JSON.stringify(list.body)).toContain('学习中心')
 
-    const detail = await invoke('/:appId', { appId: 'elearning' })
+    const detail = await invoke('/:appId', { appId: 'elearning' }, true)
     expect(detail.statusCode).toBe(200)
     expect(detail.body).toMatchObject({
       id: 'elearning',

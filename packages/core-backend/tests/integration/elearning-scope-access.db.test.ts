@@ -35,6 +35,14 @@ import {
   down as downScopeAccess,
   up as upScopeAccess,
 } from '../../src/db/migrations/zzzz20260826150000_add_elearning_scope_access'
+import {
+  down as downCourseEnrollments,
+  up as upCourseEnrollments,
+} from '../../src/db/migrations/zzzz20260901120000_create_elearning_course_enrollments'
+import {
+  down as downNotificationEvents,
+  up as upNotificationEvents,
+} from '../../src/db/migrations/zzzz20260908170000_extend_elearning_notification_events'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -1262,9 +1270,16 @@ describe('elearning L1 scope/access gate (real DB)', () => {
       })).rejects.toBe(rollback)
 
       await expect(migrationDb.transaction().execute(async (trx) => {
+        await downNotificationEvents(trx)
+        await downCourseEnrollments(trx)
         await downScopeAccess(trx)
-        const removed = await sql<{ scope_table: string | null; scope_column: number }>`
+        const removed = await sql<{
+          enrollment_table: string | null
+          scope_table: string | null
+          scope_column: number
+        }>`
           SELECT
+            to_regclass('elearning_course_enrollments')::text AS enrollment_table,
             to_regclass('elearning_scopes')::text AS scope_table,
             (
               SELECT count(*)::integer
@@ -1274,11 +1289,22 @@ describe('elearning L1 scope/access gate (real DB)', () => {
                  AND column_name = 'scope_id'
             ) AS scope_column
         `.execute(trx)
-        expect(removed.rows).toEqual([{ scope_table: null, scope_column: 0 }])
+        expect(removed.rows).toEqual([{
+          enrollment_table: null,
+          scope_table: null,
+          scope_column: 0,
+        }])
 
         await upScopeAccess(trx)
-        const restored = await sql<{ scope_table: string | null; scope_column: number }>`
+        await upCourseEnrollments(trx)
+        await upNotificationEvents(trx)
+        const restored = await sql<{
+          enrollment_table: string | null
+          scope_table: string | null
+          scope_column: number
+        }>`
           SELECT
+            to_regclass('elearning_course_enrollments')::text AS enrollment_table,
             to_regclass('elearning_scopes')::text AS scope_table,
             (
               SELECT count(*)::integer
@@ -1289,6 +1315,7 @@ describe('elearning L1 scope/access gate (real DB)', () => {
             ) AS scope_column
         `.execute(trx)
         expect(restored.rows).toEqual([{
+          enrollment_table: 'elearning_course_enrollments',
           scope_table: 'elearning_scopes',
           scope_column: 1,
         }])

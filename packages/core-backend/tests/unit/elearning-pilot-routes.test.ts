@@ -24,6 +24,7 @@ import {
   type ElearningCoursePublishDb,
   type ElearningCoursePublishErrorCode,
   type ElearningCoursePublishResult,
+  type PublishElearningCourseOptions,
   type PublishElearningCourseInput,
 } from '../../src/services/elearning-course-publish'
 import {
@@ -446,6 +447,7 @@ function makeApp(
   const examSubmitCalls: SubmitElearningExamInput[] = []
   const examReviewCalls: GetElearningExamReviewInput[] = []
   const publishCalls: PublishElearningCourseInput[] = []
+  const publishOptions: PublishElearningCourseOptions[] = []
   const learnerCalls: ListElearningLearnerCoursesInput[] = []
   const scopeCalls: SetElearningCourseScopeInput[] = []
   const order: string[] = []
@@ -530,8 +532,9 @@ function makeApp(
       if (over.examReviewError) throw over.examReviewError
       return over.examReviewResult ?? EXAM_REVIEW_RESULT
     },
-    publishElearningCourse: async (_db, input) => {
+    publishElearningCourse: async (_db, input, options) => {
       publishCalls.push(input)
+      publishOptions.push(options)
       order.push('service')
       if (over.publishError) throw over.publishError
       return over.publishResult ?? PUBLISH_RESULT
@@ -563,6 +566,7 @@ function makeApp(
     examSubmitCalls,
     examReviewCalls,
     publishCalls,
+    publishOptions,
     learnerCalls,
     scopeCalls,
     order,
@@ -1278,8 +1282,21 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
         questions: PUBLISH_BODY.questions,
       },
     ])
+    expect(publishApp.publishOptions).toEqual([{ watchChallengeEnabled: false }])
     expect(publishApp.adminCalls).toBe(1)
     expect(publishApp.readCalls).toBe(0)
+
+    const challengePublishApp = makeApp({
+      env: {
+        ...FLAG_EXAM_ON,
+        ELEARNING_WATCH_CHALLENGE_ENABLED: 'true',
+      } as NodeJS.ProcessEnv,
+    })
+    const challengePublish = await serve(challengePublishApp.app)
+      .post('/api/elearning/courses/publish')
+      .send(PUBLISH_BODY)
+    expect(challengePublish.status).toBe(201)
+    expect(challengePublishApp.publishOptions).toEqual([{ watchChallengeEnabled: true }])
 
     const learnerApp = makeApp({ env: FLAG_EXAM_ON })
     const learner = await serve(learnerApp.app)

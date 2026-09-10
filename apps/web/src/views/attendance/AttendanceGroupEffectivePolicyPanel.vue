@@ -166,7 +166,8 @@
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
-import { apiFetch } from '../../utils/api'
+import { apiFetch as sendApiFetch } from '../../utils/api'
+import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
 import {
   attendanceGroupEffectivePolicyCalculationPostureText,
   attendanceGroupEffectivePolicyConflictCodeText,
@@ -196,6 +197,8 @@ const props = defineProps<{
 const { isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 const router = useRouter()
+const sessionGuard = useAttendanceSessionGuard()
+const apiFetch = sessionGuard.wrapFetch(sendApiFetch)
 
 type PanelStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
 
@@ -203,6 +206,7 @@ const status = ref<PanelStatus>('idle')
 const aggregate = ref<AttendanceGroupEffectivePolicyAggregateRawV1 | null>(null)
 
 async function load(): Promise<void> {
+  try { sessionGuard.assertCurrent() } catch { return }
   status.value = 'loading'
   aggregate.value = null
   try {
@@ -224,6 +228,7 @@ async function load(): Promise<void> {
     aggregate.value = parsed
     status.value = 'ready'
   } catch {
+    if (!sessionGuard.isCurrent()) return
     status.value = 'error'
   }
 }

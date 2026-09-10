@@ -77,6 +77,73 @@ const consoleLogger: ILogger = {
   debug: (...args: unknown[]) => console.debug(...args),
 }
 
+// ── On-demand connect refusal (#2, values-free) ───────────────────────────────────────────
+// Every adapter's connect() catch rethrows the RAW driver text — MSSQLAdapter `Failed to connect to
+// SQL Server: ${error}`, PostgresAdapter / MySQLAdapter / MongoDBAdapter likewise — and that text
+// embeds host:port, database name and the login it tried. connectDataSource is the ONE chokepoint
+// every on-demand connect passes through (/schema, /tables/:table, /query, /select,
+// insert/update/delete, copyData, federated query, the plugin facade), so translating here covers
+// all of them at once. The client gets a fixed sentence + a coded 503; the cause stays in the server
+// log. The single place an operator still learns WHY is `POST /:id/test` (testConnection), which
+// calls adapter.connect() directly — deliberately NOT routed through here — and returns the
+// redactSecrets'd `adapter.connectionError`.
+export const DATA_SOURCE_UNAVAILABLE_CODE = 'SOURCE_UNAVAILABLE'
+export const DATA_SOURCE_UNAVAILABLE_MESSAGE =
+  '数据源当前无法连接，请先「测试连接」查看原因 / Data source is currently unreachable; run "Test connection" for details'
+
+// The cause as it may be LOGGED: never the raw message when a redacted one exists.
+// `connectionError` is only populated by BaseAdapter.onError, and every adapter has a connect()
+// branch that throws BEFORE reaching it — the driver-package-missing guard (MSSQLAdapter.ts:217,
+// PostgresAdapter.ts:74, MySQLAdapter.ts:195, HTTPAdapter.ts:134). On that branch `connectionError`
+// is null, so logging shape-only would leave the failure explainable NOWHERE: the client gets a
+// fixed sentence and the 「测试连接」 the sentence points at reads the same null `connectionError`.
+// Fall back to the cause's own message, put through the adapter's OWN redactSecrets (via the public
+// `redactCause`), so an adapter that embeds a secret in a pre-onError throw still cannot log it.
+function loggableCause(
+  adapter: Pick<BaseDataAdapter, 'connectionError' | 'redactCause'>,
+  cause: unknown
+): string | null {
+  const recorded = adapter.connectionError
+  if (recorded) return recorded
+  const raw = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : null
+  if (!raw) return null
+  try {
+    return adapter.redactCause(raw)
+  } catch {
+    // A logging helper must never break the refusal itself: a broken redactor costs the log line,
+    // not the 503. Returning null also guarantees an unredacted message can never be logged.
+    return null
+  }
+}
+
+function sourceUnavailableError(
+  id: string,
+  cause: unknown,
+  adapter: Pick<BaseDataAdapter, 'connectionError' | 'redactCause'>
+): Error {
+  // A deliberate coded refusal (arm-binding / provisioning / K3 fence) already carries its own
+  // status+code and is values-free by construction — never downgrade it to a generic 503.
+  if (cause instanceof Error) {
+    const status = (cause as { status?: unknown }).status
+    const code = (cause as { code?: unknown }).code
+    if (typeof status === 'number' && status >= 400 && status < 600 && typeof code === 'string') {
+      return cause
+    }
+  }
+  // Log the cause: name + driver code + a REDACTED message (onError's `connectionError` when it
+  // exists, else the cause's message through the same redaction — see loggableCause above).
+  // Never the raw message.
+  consoleLogger.error(`[DataSourceManager] Connect failed for ${id}`, {
+    name: cause instanceof Error ? cause.name : typeof cause,
+    driverCode: (cause as { code?: unknown } | null | undefined)?.code,
+    redactedCause: loggableCause(adapter, cause),
+  })
+  return Object.assign(new Error(DATA_SOURCE_UNAVAILABLE_MESSAGE), {
+    status: 503,
+    code: DATA_SOURCE_UNAVAILABLE_CODE,
+  })
+}
+
 class ManagedPLMAdapter extends PLMAdapter {
   constructor(config: DataSourceConfig) {
     super(emptyConfigService, consoleLogger, config)
@@ -803,7 +870,12 @@ export class DataSourceManager extends EventEmitter {
     // Reuse existing connection promise if connecting
     let connectionPromise = this.connectionPool.get(id)
     if (connectionPromise) {
-      return connectionPromise
+      // A piggy-backing caller shares the in-flight connect, so it must receive the SAME values-free
+      // refusal as the originator — otherwise a /schema landing while /select connects would still
+      // surface the raw driver text this translation exists to suppress.
+      return connectionPromise.catch((error: unknown) => {
+        throw sourceUnavailableError(id, error, adapter)
+      })
     }
 
     connectionPromise = adapter.connect()
@@ -811,6 +883,11 @@ export class DataSourceManager extends EventEmitter {
 
     try {
       await connectionPromise
+    } catch (error) {
+      // VALUES-FREE REFUSAL (#2). See sourceUnavailableError above: a fixed 503 SOURCE_UNAVAILABLE
+      // for the client, the cause to the log only. The callers that used to forward `error.message`
+      // verbatim (routes /schema, /tables/:table, /:id/connect) now forward this fixed sentence.
+      throw sourceUnavailableError(id, error, adapter)
     } finally {
       this.connectionPool.delete(id)
     }

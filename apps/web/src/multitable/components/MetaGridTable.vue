@@ -436,7 +436,7 @@ import {
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 
-const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link', 'attachment'])
+const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link', 'attachment', 'person', 'multiSelect', 'dateTime'])
 
 interface EditingCell { recordId: string; fieldId: string; value: unknown }
 
@@ -1493,6 +1493,11 @@ async function pasteFocusedCell() {
   const row = displayRows.value[focusRow.value]
   const field = props.visibleFields[focusCol.value]
   if (!row || !field || !isEditable(row.id, field)) return
+  // person/multiSelect store array values server-side; pasting raw clipboard
+  // text would be rejected by record-write-service's field validation (400).
+  // dateTime is left to fall through — validateDateTimeValue on the server
+  // is the backstop for whatever text lands there.
+  if (field.type === 'person' || field.type === 'multiSelect') return
   try {
     const text = await navigator.clipboard.readText()
     const value = field.type === 'number' && text !== '' ? Number(text) : text
@@ -1608,7 +1613,7 @@ function onKeydown(e: KeyboardEvent) {
   //     remain fully editable via dblclick, or by continuing to type after
   //     the digit seed (onNumberInput re-parses the whole field each
   //     keystroke, same as always).
-  //   - boolean/date/select/link/attachment (the rest of EDITABLE): NOT
+  //   - boolean/date/select/link/attachment/person/multiSelect/dateTime (the rest of EDITABLE): NOT
   //     seeded — a checkbox/date/dropdown/picker has no meaningful "replace
   //     with one printable character" semantics.
   //

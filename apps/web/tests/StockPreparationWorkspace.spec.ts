@@ -82,7 +82,10 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getToken: () => 'session-token',
     clearToken: vi.fn(),
-    getAccessSnapshot: () => ({ isAdmin: false, email: '' }),
+    // `roles` / `permissions` are the shape `workbenchAccess.ts` decides on (it takes the SNAPSHOT,
+    // never the expanding probe), so this double has to carry them or every stock-prep predicate
+    // reads an empty principal.
+    getAccessSnapshot: () => ({ isAdmin: false, email: '', roles: [], permissions: h.permissions }),
     hasPermission: (permission: string) => h.permissions.includes(permission),
   }),
 }))
@@ -508,6 +511,26 @@ describe('StockPreparationWorkspace shell', () => {
     return container!
   }
 
+  /**
+   * Mount the shell and put 确认队列 on screen.
+   *
+   * THE CLICK IS NOT DECORATION. Since PR #5555 this file's default actor (`integration:admin` +
+   * `stock-prep:read`) is a PLATFORM ADMIN on the workbench, exactly as it always was on the server:
+   * `workbenchAccess.ts` now decides on a `{ roles, permissions }` snapshot with the server's own
+   * literal ladder instead of on this file's exact-code `hasPermission` double. D2 therefore lands
+   * them on 开始使用 (nothing here answers the preflight, and 「读不到」 lands on the wizard). The
+   * queue is one click away and still theirs; the cases below are about what 建立确认账本 / 对账 do
+   * once it is open, and the landing itself is asserted in its own case above.
+   */
+  async function mountShellOnTheQueue(): Promise<HTMLDivElement> {
+    const root = await mountShell()
+    const tab = root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement | null
+    expect(tab, '确认队列 must still be a tab this actor can open').not.toBeNull()
+    tab!.click()
+    await flushUi()
+    return root
+  }
+
   it('renders the tablist with the confirmation queue plus every legacy MVP tab (platform admin)', async () => {
     const root = await mountShell()
     const tablist = root.querySelector('[data-testid="stock-prep-tabs"]')
@@ -516,7 +539,14 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`)).not.toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
+    // P1-1 (设计稿 §2.2, D3=A): 8 -> 9 -> 14 -> 15. 14 was PR #5555's alignment, not a new tab:
+    // this actor holds a bare `integration:admin`, which the SERVER has always counted as a platform
+    // admin (`PLATFORM_ADMIN_PERMISSIONS`) while the browser's `hasPermission` did not.
+    // `workbenchAccess.ts` now uses the server's own literal ladder over the auth SNAPSHOT, so this
+    // principal is a platform admin here too and sees the whole rail. 14 -> 15 IS a new tab: P2-1's
+    // 项目查询, in 【工作】 after 项目备料 — 4 【工作】 + 3 【部署与接入】 + 7 深度工具 (folded, still
+    // rendered) + 1 【帮助】.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
   })
 
   // O2 / R-11: the operator tier. The tab strip is itself a control surface, so a tab whose panel
@@ -529,8 +559,17 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of LEGACY_MVP_VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be hidden`).toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(1)
+    // P1-1: 1 -> 2, and P2-1 leaves it at 2. 【帮助】 joined, and only 【帮助】: a `stock-prep:read`
+    // holder is still refused 今天要处理 / 项目备料 / 项目查询 (all value-bearing, operate tier) and
+    // the whole 【部署与接入】 group.
+    expect(root.querySelector('[data-testid="stock-prep-tab-project-query"]'), '项目查询 is operate-tier').toBeNull()
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(2)
+    expect(root.querySelector('[data-testid="stock-prep-tab-help"]')).not.toBeNull()
     // ...and the panel really is the confirmation queue, not a legacy panel wearing its title.
+    //
+    // D2=A LEAVES THIS ONE ALONE, and that is the ruling working rather than an omission: this actor
+    // is below the workbench-admin ceiling (so no 开始使用 / 记录与排查 landing) and below the
+    // operator tier (so no 今天要处理). 确认队列 is what is left, which is where they landed before.
     const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
     expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
     expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
@@ -552,15 +591,32 @@ describe('StockPreparationWorkspace shell', () => {
     h.permissions = ['stock-prep:read', 'stock-prep:admin']
     const adminRoot = await mountShell()
     expect(adminRoot.querySelector('[data-testid="stock-prep-tab-install"]')).not.toBeNull()
-    // Exactly two: the confirmation queue this page was adopted for, plus install. The seven legacy
-    // MVP tabs stay platform-admin and did NOT come along with the workbench-admin code.
-    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(2)
+    // P1-1: 2 -> 5 -> 7. The workbench-admin code opens the WHOLE 【部署与接入】 group, not just the
+    // install page: 开始使用 (the wizard, promoted off the install page's first screen) and
+    // 记录与排查 (the ops panel, which shipped mounted-but-unreachable) ride exactly the same
+    // `canOpenStockPrepInstallView` gate the install tab always did. Plus 确认队列 and 【帮助】.
+    // 5 -> 7 is PR #5555: `stock-prep:admin` satisfies read AND operate on the server's ladder, and
+    // the workbench now uses that ladder rather than this file's exact-code double — so 今天要处理
+    // and 项目备料 come with the code, which is what StockPreparationRail.spec.ts's own
+    // `stock-prep:admin` actor (already on the real ladder) always expected.
+    // The seven legacy MVP tabs stay platform-admin and did NOT come along with this code.
+    // 7 -> 8 is P2-1's 项目查询: same operate tier as 今天要处理 / 项目备料, which this code satisfies.
+    expect(adminRoot.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(8)
+    for (const key of ['home', 'project-board', 'project-query', 'getting-started', 'install', 'ops', 'confirmation-queue', 'help']) {
+      expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must be visible`).not.toBeNull()
+    }
     for (const key of LEGACY_MVP_VIEW_KEYS) {
       expect(adminRoot.querySelector(`[data-testid="stock-prep-tab-${key}"]`), `${key} must stay hidden`).toBeNull()
     }
-    // ...and the landing tab is unchanged: install is reachable, not imposed.
+    // D2=A: 'confirmation-queue' -> 'getting-started'. THIS IS THE RULING, and this is the actor it
+    // is about — a workbench admin. Landing them on an empty confirmation queue was the dead end the
+    // whole redesign opened with (设计稿 §2.3 A1): the page never said "you have to install this
+    // first". They now land on 开始使用 because the preflight could not be read here (this test's
+    // apiFetch is reset, so the read rejects) — and 「读不到」 lands on the wizard, never on the health
+    // page, since 「看不到」 is not 「装完了」. The installed case lands on 记录与排查; both are
+    // asserted directly against the predicate in the D2 block further down this file.
     const panel = adminRoot.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
-    expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(panel.getAttribute('data-active')).toBe('getting-started')
   })
 
   it('opens the install tab and badges it as a manifest read plus an idempotent ensure', async () => {
@@ -573,8 +629,13 @@ describe('StockPreparationWorkspace shell', () => {
     }), { status: 200 }))
 
     const root = await mountShell()
-    // Nine tabs now: the queue, install, and the seven legacy MVP tabs.
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(9)
+    // P1-1: 9 -> 12. The queue, the whole 【部署与接入】 group (开始使用 / 安装 · 体检 / 记录与排查),
+    // 【帮助】, and the seven legacy MVP tabs — now folded into 深度工具 ▾ but still rendered, so
+    // still counted. This actor holds no `stock-prep:operate`, so 今天要处理 and 项目备料 stay hidden.
+    // 12 -> 14 (PR #5555): this actor holds `stock-prep:admin` AND a bare `integration:admin`, and
+    // both satisfy operate on the server's ladder — the ladder the workbench now uses — so 今天要处理
+    // and 项目备料 join the twelve. 14 -> 15 (P2-1): 项目查询 rides that same operate tier.
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(15)
     ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
     await flushUi()
 
@@ -593,11 +654,16 @@ describe('StockPreparationWorkspace shell', () => {
   it('renders Chinese labels + the readonly-boundary copy when locale is zh-CN', async () => {
     h.locale = 'zh-CN'
     const root = await mountShell()
-    const tabs = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
-    expect(tabs.textContent).toContain('项目工作台')
+    // THE WHOLE RAIL, not just `[data-testid="stock-prep-tabs"]` (hardening wave, 2026-09-08): 深度工具
+    // moved outside the tablist witness element (R-05 in StockPreparationRail.spec.ts has the full
+    // reasoning), so the seven legacy labels these three lines check now live in a NAV-level sibling of
+    // it, `.sp-rail__advanced`. `.sp-rail` is the outer container both live inside, unaffected by that
+    // internal move.
+    const rail = root.querySelector('.sp-rail') as HTMLElement
+    expect(rail.textContent).toContain('项目工作台')
     // NAMING: snapshot uses 快照批次 / batch vocabulary (collision-avoidance requirement).
-    expect(tabs.textContent).toContain('BOM 快照批次与差异')
-    expect(tabs.textContent).toContain('异常队列')
+    expect(rail.textContent).toContain('BOM 快照批次与差异')
+    expect(rail.textContent).toContain('异常队列')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toContain('只读')
     expect(boundary.textContent).toMatch(/K3 Save/)
@@ -606,10 +672,11 @@ describe('StockPreparationWorkspace shell', () => {
   it('renders English labels when locale is not zh-CN', async () => {
     h.locale = 'en'
     const root = await mountShell()
-    const tabs = root.querySelector('[data-testid="stock-prep-tabs"]') as HTMLElement
-    expect(tabs.textContent).toContain('Project Workspace')
-    expect(tabs.textContent).toContain('BOM Snapshot Batch & Diff')
-    expect(tabs.textContent).toContain('Exception Queue')
+    // See the zh-CN case above for why `.sp-rail` rather than the tablist testid.
+    const rail = root.querySelector('.sp-rail') as HTMLElement
+    expect(rail.textContent).toContain('Project Workspace')
+    expect(rail.textContent).toContain('BOM Snapshot Batch & Diff')
+    expect(rail.textContent).toContain('Exception Queue')
     const boundary = root.querySelector('[data-testid="stock-prep-boundary"]') as HTMLElement
     expect(boundary.textContent).toMatch(/readonly/i)
   })
@@ -617,7 +684,29 @@ describe('StockPreparationWorkspace shell', () => {
   // O1' §附 moved the landing tab: this page is now the confirmation-queue workbench, so the queue —
   // not the MVP dashboard — is what an operator sees on arrival. The dashboard remains reachable for
   // a platform admin via its tab, asserted immediately below.
-  it('lands on the confirmation queue (O1\': the page this workbench was adopted to be)', async () => {
+  //
+  // D2=A DOES MOVE THIS ONE, as of PR #5555. The actor holds a bare `integration:admin`, which the
+  // SERVER has always counted as a platform admin; the workbench now counts it the same way instead
+  // of through this file's exact-code `hasPermission` double, so D2's posture rule applies to them.
+  // Nothing here answers the preflight, and 「读不到」 lands on 开始使用, never on 记录与排查.
+  // THE QUEUE IS STILL THEIRS — one click away — which is the second half of this case rather than
+  // an assertion dropped.
+  it('lands where D2 sends a platform admin (开始使用), with the queue one click away', async () => {
+    const root = await mountShell()
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('getting-started')
+    const queueTab = root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement
+    expect(queueTab).not.toBeNull()
+    queueTab.click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-queue"]')).not.toBeNull()
+  })
+
+  // O1' §附's claim itself, kept and pointed at the tier it is actually about: the values-free
+  // `stock-prep:read` queue watcher, whose landing neither D2 nor this PR touched.
+  it('lands on the confirmation queue for the read-only tier (O1\': the page this workbench was adopted to be)', async () => {
+    h.permissions = ['stock-prep:read']
     const root = await mountShell()
     const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
     expect(panel.getAttribute('data-active')).toBe('confirmation-queue')
@@ -1023,6 +1112,256 @@ describe('StockPreparationWorkspace shell', () => {
     for (const call of batchListCalls) {
       expect(call).toContain('projectId=proj-alpha')
     }
+  })
+
+  // -------------------------------------------------------------------------
+  // 确认队列's two PLATFORM-ADMIN buttons — the wiring, and what it may say
+  // -------------------------------------------------------------------------
+  //
+  // THE BUG THESE PIN. `StockPreparationConfirmationQueueView` rendered 建立确认账本 and
+  // 重新扫描待确认的事 and emitted `admin-action` for both. This shell is the component's ONLY mount
+  // point and declared no listener, so both clicks were swallowed entirely: no request left the
+  // browser, no error appeared, and the admin who pressed 建账本 had every reason to believe the
+  // ensure had run. Every assertion below is about a request that must now be made and a sentence
+  // that must now appear.
+
+  /** The queue tab's own on-mount reads answered with empty, valid envelopes. */
+  function answerQueueReads(): void {
+    h.apiFetch.mockImplementation(async (url: string) => new Response(JSON.stringify({
+      ok: true,
+      data: String(url).includes('/operator/projects')
+        ? { tenantId: 't1', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+        : {},
+    }), { status: 200 }))
+  }
+
+  function postCalls(pathFragment: string): string[] {
+    return h.apiFetch.mock.calls
+      .filter((call) => String((call[1] as RequestInit | undefined)?.method ?? 'GET').toUpperCase() === 'POST')
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes(pathFragment))
+  }
+
+  it('the ensure button really calls the confirmation-ledger ensure route and says what happened', async () => {
+    answerQueueReads()
+    const root = await mountShellOnTheQueue()
+    const ensure = root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement
+    expect(ensure).not.toBeNull()
+    ensure.click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(postCalls('/stock-preparation/confirmation-decisions/ensure').length).toBe(1)
+    expect(notice.textContent).toContain('确认账本已经就位')
+    // A SUCCESS carries no error token — the code element renders only on a failure.
+    expect(notice.querySelector('code')).toBeNull()
+  })
+
+  it('the reconcile button calls the table-action reconcile route for the number on screen', async () => {
+    answerQueueReads()
+    const root = await mountShellOnTheQueue()
+    const input = root.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
+    input.value = '230920006'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    const calls = postCalls('/confirmation-decisions/reconcile')
+    expect(calls.length).toBe(1)
+    expect(calls[0]).toContain('/api/integration/table-actions/plm.stock-preparation.pull-bom.v1/')
+    expect(notice.textContent).toContain('已经重新扫描过一遍')
+  })
+
+  it('reconcile with no project number asks for one instead of firing a request that cannot succeed', async () => {
+    answerQueueReads()
+    const root = await mountShellOnTheQueue()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(postCalls('/confirmation-decisions/reconcile').length).toBe(0)
+    expect(notice.textContent).toContain('请先填一个项目号')
+  })
+
+  // A REFUSED RECONCILE. It reaches the shell as an ordinary clamped code, so the notice must be the
+  // code's OWN sentence — not the generic "did not save" — and must carry no project number of its
+  // own.
+  //
+  // THE CODE HERE USED TO BE `STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE`, the project gate
+  // #5516 put on the server. The owner ruled on 2026-09-06 that stock-prep will not do project
+  // ownership; the gate and its copy were deleted, so no server path can produce that code any more
+  // and a test that kept asserting its sentence would have been witnessing dead copy. This case is
+  // what it was always really about — the notice renders the refusal's own words plus the code —
+  // repointed at a refusal this button can genuinely receive: the 403 `FORBIDDEN` that
+  // `requireTableActionAccess` raises.
+  it('a refused reconcile shows the plain-language refusal plus its code, values-free', async () => {
+    h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(init?.method ?? 'GET').toUpperCase() === 'POST') {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: { code: 'FORBIDDEN', message: 'nope' },
+        }), { status: 403 })
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        data: String(url).includes('/operator/projects')
+          ? { tenantId: 't1', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+          : {},
+      }), { status: 200 })
+    })
+    const root = await mountShellOnTheQueue()
+    const input = root.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
+    input.value = '230920006'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(notice.textContent).toContain('当前账号没有做这件事的权限')
+    expect(notice.querySelector('code')?.textContent).toBe('FORBIDDEN')
+    // The wording is the CODE's own, not the write-generic every unknown code falls back to.
+    expect(notice.textContent).not.toContain('这一步没有保存成功')
+    // ...and the number the admin typed is not echoed back into the notice.
+    expect(notice.textContent).not.toContain('230920006')
+  })
+
+  // -------------------------------------------------------------------------
+  // THE NOTICE IS A NOTICE, NOT A BRANCH — the v-else-if chain must stay whole
+  // -------------------------------------------------------------------------
+  //
+  // Vue attaches `v-else-if` to its immediately preceding sibling branch. An element carrying its own
+  // `v-if`, dropped BETWEEN two branches of the panel's chain, therefore splits that chain in two —
+  // silently, with no compiler warning. The first cut of the admin notice sat between the queue and
+  // the install branch, and the two observable consequences are exactly what these cases pin:
+  //   * chain 1 (project-board, confirmation-queue) lost its `v-else`, so the "container placeholder"
+  //     paragraph — the fallback for a tab with no view — rendered UNDER both of the only two tabs an
+  //     operator ever sees, with no admin action involved at all;
+  //   * chain 2 began at the notice, so the moment one appeared, install / dashboard / every legacy
+  //     panel stopped rendering.
+  // Neither shows up in an assertion about the notice text or the request, which is why the five
+  // cases above all passed while this was broken.
+
+  // D2 lands this actor on 开始使用 (see the landing case above), so the queue is opened explicitly —
+  // the claim is about the CHAIN under a real tab, and 确认队列 is the tab whose branch lost its
+  // `v-else` when this broke.
+  it('the container placeholder never renders under a real tab (the notice must not split the chain)', async () => {
+    answerQueueReads()
+    const root = await mountShellOnTheQueue()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+  })
+
+  it('...including the operator landing tab, which is the other half of the split chain', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    answerQueueReads()
+    const root = await mountShell()
+    // P1-1 / D2=A: 'project-board' -> 'home'. WHAT THE OPERATOR SEES IS THE SAME PIXELS. P0 shipped
+    // the task home INSIDE the board view, keyed on 「?projectNo= 无值即首页」, so a bare landing on
+    // 项目备料 already painted 今天要处理. P1-1 gives that page its own rail item and lands on it by
+    // name; the branch is literally the same component with the number withheld, which is why this
+    // is a key rename in the assertion rather than a behaviour change under it.
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('home')
+    expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+  })
+
+  // P2-1's URL contract, the half the SHELL owns. 项目查询 is the one panel that mirrors `?tab=`
+  // itself, so the shell is the only thing that can clean the bit up when the reader leaves — and a
+  // staleness test that looked only at `q`/`status`/`source`/`sel` called a bare `?tab=project-query`
+  // clean. Two clicks reach that state (filter once, press the same chip again: every filter key
+  // deletes itself at its default and `tab` is what is left), and the next reload then threw the
+  // reader back into a panel they had already walked away from.
+  it('leaving 项目查询 clears a bare `?tab=project-query` — the four filter keys being absent is not "clean"', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    h.route.query = { tab: 'project-query' }
+    answerQueueReads()
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('project-query')
+    expect(h.router.replace, '深链进来本身不发 replace').not.toHaveBeenCalled()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.router.replace).toHaveBeenCalledTimes(1)
+    expect(h.router.replace.mock.calls[0][0]).toEqual({ query: {} })
+  })
+
+  // The same guard, keyed off `effectiveKey` rather than the raw `activeKey`: `tabFromQuery()`
+  // accepts a key by NAME without asking whether this principal may see it, so a 纯 read 主体 can
+  // arrive with `activeKey === 'project-query'` while `activeView` folds them back to their landing.
+  // Reading `activeKey` would call that reader's panel "active" and keep five keys belonging to a
+  // screen they never saw — forever, and carried forward by every later replace.
+  it('a principal who cannot open 项目查询 does not carry its five keys around after a deep link', async () => {
+    h.permissions = ['stock-prep:read']
+    h.route.query = { tab: 'project-query', status: 'ready', source: 'mvp', q: 'x', sel: 'PRJ-1' }
+    answerQueueReads()
+    const root = await mountShell()
+    // Folded back to their landing, and the panel they cannot see never mounted.
+    expect(root.querySelector('[data-testid="stock-prep-panel"]')?.getAttribute('data-active')).toBe('confirmation-queue')
+    expect(root.querySelector('[data-testid="stock-prep-project-query"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-help"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.router.replace).toHaveBeenCalledTimes(1)
+    expect(h.router.replace.mock.calls[0][0]).toEqual({ query: {} })
+  })
+
+  it('a notice never replaces the panel, and does not follow the admin onto the next tab', async () => {
+    // The install tab is the nearest branch BELOW the notice in the panel's chain, so it is the one
+    // that disappeared; it needs the workbench-admin code to be on screen at all.
+    h.permissions = ['integration:admin', 'stock-prep:read', 'stock-prep:admin']
+    answerQueueReads()
+    const root = await mountShell()
+    // NOT one of the nine: a NAVIGATION step, added because D2 moved this actor's landing off the
+    // queue and onto 开始使用. The claim under test (a notice sits beside its panel and dies with the
+    // tab) is about the queue's two admin buttons, so the test has to be ON the queue to press one.
+    // Nothing was weakened — every assertion below is the one that was there.
+    ;(root.querySelector('[data-testid="stock-prep-tab-confirmation-queue"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+    // The panel it was pressed on is still the panel — the notice sits beside the view, not instead
+    // of it, and the placeholder is still absent.
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-panel-pending"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-install"]') as HTMLButtonElement).click()
+    await flushUi()
+    // The install view really renders (it was swallowed whole while a notice was showing) ...
+    expect(root.querySelector('[data-testid="stock-prep-install"]')).not.toBeNull()
+    // ... and the sentence about the OTHER tab is gone rather than stale-hanging over this one.
+    expect(root.querySelector('[data-testid="stock-prep-admin-action-notice"]')).toBeNull()
+  })
+
+  // The install client's error type carries a status and no `code` (by design — it never surfaces a
+  // server message), so an ensure failure has no token to quote. It must still say something, and it
+  // must not invent a code.
+  it('a failed ensure says so with the generic sentence and no invented error code', async () => {
+    h.apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(init?.method ?? 'GET').toUpperCase() === 'POST') {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'SOMETHING', message: 'nope' } }), { status: 500 })
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        data: String(url).includes('/operator/projects')
+          ? { tenantId: 't1', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+          : {},
+      }), { status: 200 })
+    })
+    const root = await mountShellOnTheQueue()
+    ;(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]') as HTMLButtonElement).click()
+    const notice = await waitForSelector(root, '[data-testid="stock-prep-admin-action-notice"]')
+
+    expect(notice.textContent).toContain('这一步没有保存成功')
+    expect(notice.querySelector('code')).toBeNull()
+  })
+
+  // R-11's other half, restated for the newly-live buttons: wiring them must not have made them
+  // reachable by anyone who could not see them before.
+  it('a stock-prep operator sees neither admin button, so neither can be pressed', async () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    answerQueueReads()
+    const root = await mountShell()
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-ensure"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]')).toBeNull()
+    expect(postCalls('/confirmation-decisions/').length).toBe(0)
   })
 
   it('shell copy is values-free (no secrets, no long numeric runs) in both locales', async () => {

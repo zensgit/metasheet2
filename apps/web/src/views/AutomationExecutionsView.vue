@@ -112,6 +112,60 @@
             <!-- A6-2: resume failures map the discriminated code to an INLINE message (never a generic toast). -->
             <div v-if="resumeError" class="automation-runs__step-error" data-field="resume-error" role="alert">{{ resumeError }}</div>
 
+            <!--
+              P3-4: whole-EXECUTION re-run (distinct from per-step Resume above), state-gated on the
+              SAME status the backend's retryExecution() enforces (failed/skipped only). TWO admin
+              gates are in force here and BOTH are load-bearing: the outer `<template v-else>` wrapper
+              (nothing below it renders for a non-admin) and the `isAdmin &&` conjunct on this block.
+              Round-2 B2 replaced the previous claim that the conjunct is "observably a no-op" — that
+              was only true while the wrapper held; the gate spec now removes BOTH in one mutation and
+              reddens, so neither may be dropped as redundant.
+
+              Round-2 B1: rows the backend REFUSES using data this view has already loaded render the
+              button DISABLED with the refusal reason (rerunBlockedReasonKey) instead of sending a
+              request that is deterministically 409'd.
+            -->
+            <div v-if="isAdmin && canRerunExecution(run)" class="automation-runs__rerun" data-field="rerun-panel">
+              <button
+                class="automation-runs__btn automation-runs__btn--rerun"
+                type="button"
+                data-action="rerun"
+                :disabled="rerunning === run.id || rerunBlockedReason(run) !== null"
+                :title="rerunBlockedReason(run) ?? undefined"
+                :aria-describedby="rerunBlockedReason(run) ? `rerun-blocked-${run.id}` : undefined"
+                @click.stop="rerunExecution(run)"
+              >{{ automationLabel('runs.rerun', isZh) }}</button>
+              <!--
+                The reason is a VISIBLE sibling, not only the button's `title`: a disabled button is
+                dropped from the accessibility tree by some assistive tech, which would hide a
+                title-only reason from exactly the readers who need it. `aria-describedby` points at
+                this span for the tech that does expose it.
+              -->
+              <span
+                v-if="rerunBlockedReason(run)"
+                :id="`rerun-blocked-${run.id}`"
+                class="automation-runs__rerun-blocked"
+                data-field="rerun-blocked-reason"
+                role="note"
+              >{{ rerunBlockedReason(run) }}</span>
+              <span
+                v-if="rerunTargetId === run.id && rerunSuccessId !== null"
+                class="automation-runs__rerun-success"
+                data-field="rerun-success"
+              >{{ automationLabel('runs.rerunSuccessPrefix', isZh) }} {{ rerunSuccessId }}</span>
+              <span
+                v-else-if="rerunTargetId === run.id && rerunSuccessGeneric"
+                class="automation-runs__rerun-success"
+                data-field="rerun-success"
+              >{{ automationLabel('runs.rerunSuccessGeneric', isZh) }}</span>
+            </div>
+            <div
+              v-if="rerunTargetId === run.id && rerunError"
+              class="automation-runs__step-error"
+              data-field="rerun-error"
+              role="alert"
+            >{{ rerunError }}</div>
+
             <h2 class="automation-runs__detail-h">{{ automationLabel('runs.triggerEvent', isZh) }}</h2>
             <pre class="automation-runs__json" data-field="trigger-event">{{ jsonView(detail.triggerEvent) }}</pre>
             <h2 class="automation-runs__detail-h">{{ automationLabel('runs.ruleSnapshot', isZh) }}</h2>
@@ -124,13 +178,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
+import { getAuthPrincipalKey, onAuthPrincipalChange } from '../composables/authPrincipal'
+import { authHeaders } from '../utils/api'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
-import type { AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
-import { automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
+import type { AutomationActionType, AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
+import { automationActionTypeLabel, automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 import StatusTag from '../components/status/StatusTag.vue'
 import EmptyState from '../components/status/EmptyState.vue'
@@ -157,6 +213,38 @@ const detail = ref<AutomationRunView | null>(null)
 const detailLoading = ref(false)
 const resuming = ref<string | null>(null)
 const resumeError = ref<string | null>(null)
+
+// P3-4: whole-execution re-run state. `rerunTargetId` scopes success/error display to the run
+// that was actually re-run (only one row can be expanded at a time, but this stays explicit
+// rather than relying on that coincidence).
+const rerunning = ref<string | null>(null)
+const rerunTargetId = ref<string | null>(null)
+const rerunSuccessId = ref<string | null>(null)
+const rerunSuccessGeneric = ref(false)
+const rerunError = ref<string | null>(null)
+let detailRequestScope = ''
+let detailRequestGeneration = 0
+let rerunGeneration = 0
+let disposed = false
+const invalidateRerun = () => { rerunGeneration += 1 }
+const unsubscribeRerun = onAuthPrincipalChange(invalidateRerun)
+watch([expandedId, detail], invalidateRerun, { flush: 'sync' })
+onUnmounted(() => {
+  disposed = true
+  invalidateRerun()
+  unsubscribeRerun()
+})
+
+// Equality only, never logged or used as authorization. Includes the actual token (and its org
+// claims), effective tenant header and explicit session epoch from the shared auth resolvers.
+function executionRequestScope(): string | null {
+  try {
+    return JSON.stringify([getAuthPrincipalKey(), authHeaders()])
+  } catch {
+    // An explicit session-org transition is unreadable, not an empty scope.
+    return null
+  }
+}
 
 // A6-3-2b/A6-3-4 (read-only): surface branch lineage from the persisted C1 jobs.
 // Parent step's result carries { selectedBranchKey, matched }; nested branch-action jobs use a
@@ -221,7 +309,12 @@ async function loadData() {
 }
 
 async function toggleExpand(id: string) {
+  const requestGeneration = ++detailRequestGeneration
   resumeError.value = null
+  rerunError.value = null
+  rerunSuccessId.value = null
+  rerunSuccessGeneric.value = false
+  rerunTargetId.value = null
   if (expandedId.value === id) {
     expandedId.value = null
     detail.value = null
@@ -230,6 +323,8 @@ async function toggleExpand(id: string) {
   expandedId.value = id
   detail.value = null
   detailLoading.value = true
+  const requestScope = executionRequestScope()
+  const generation = rerunGeneration
   let run: AutomationRunView | null = null
   try {
     run = await client.getAutomationRun(id)
@@ -239,8 +334,15 @@ async function toggleExpand(id: string) {
   // Drop a STALE response: if a newer row was expanded while this fetch was in
   // flight, expandedId has moved on — that newer flow owns the state, so this
   // (older) response must not paint its detail under the wrong row.
-  if (expandedId.value !== id) return
+  if (expandedId.value !== id || requestGeneration !== detailRequestGeneration) return
+  if (disposed) return
+  if (requestScope === null || generation !== rerunGeneration || requestScope !== executionRequestScope()) {
+    expandedId.value = null
+    detailLoading.value = false
+    return
+  }
   if (run) {
+    detailRequestScope = requestScope
     detail.value = run
   } else {
     expandedId.value = null // detail failed for the still-current row → collapse
@@ -302,6 +404,261 @@ async function resumeStep(step: AutomationRunStepView) {
   }
 }
 
+// P3-4 — whole-execution re-run (A5 `POST /automation-executions/:id/retry`, mirrored from
+// packages/core-backend/src/multitable/automation-service.ts retryExecution()). CONFIRM_SIDE_EFFECTS_REQUIRED
+// is deliberately NOT mapped here: this client always sends confirmSideEffects:true, so that code
+// firing means the request stopped sending it — let it fall through to the raw message instead of
+// dressing up a real defect as a normal rejection reason.
+const RERUN_ERROR_LABELS: Record<string, AutomationLabelKey> = {
+  NOT_FOUND: 'runs.rerunError.notFound',
+  NOT_RETRYABLE: 'runs.rerunError.notRetryable',
+  TEST_RUN_NOT_RETRYABLE: 'runs.rerunError.testRunNotRetryable',
+  MISSING_TRIGGER_EVENT: 'runs.rerunError.missingTriggerEvent',
+  RETRY_WINDOW_EXPIRED: 'runs.rerunError.retryWindowExpired',
+  START_APPROVAL_ALREADY_CREATED: 'runs.rerunError.approvalAlreadyCreated',
+  RULE_MISSING_OR_DISABLED: 'runs.rerunError.ruleMissingOrDisabled',
+  RULE_CHANGED: 'runs.rerunError.ruleChanged',
+  RETRY_LEDGER_EVIDENCE_MISSING: 'runs.rerunError.ledgerEvidenceMissing',
+  // Round-2 B5 — the route guard's 403 body is `{ error: 'AccessDenied', code: 'ADMIN_REQUIRED',
+  // message: '<English>' }` (routes/automation.ts:793 requireAdminRole). The SHARED normalizer
+  // (multitable/api/client.ts normalizeApiErrorPayload) only reads a top-level `code` when `error`
+  // is an OBJECT; for the string-`error` shape it keys the thrown error as `AccessDenied` and drops
+  // `ADMIN_REQUIRED`, so without this entry the raw English server string renders in a zh session.
+  // Both keys are mapped: `AccessDenied` is what the client actually throws today, `ADMIN_REQUIRED`
+  // is the code the backend documents. Widening the shared normalizer instead would change
+  // `error.code` for EVERY endpoint returning `{error:'<string>', code:'<X>'}` — an unbounded
+  // caller set for a one-button slice; that is the right long-term home, not this change.
+  AccessDenied: 'runs.rerunError.adminRequired',
+  ADMIN_REQUIRED: 'runs.rerunError.adminRequired',
+}
+
+/** Map the retry endpoint's discriminated code → an inline localized message (never a generic toast). */
+function mapRerunError(err: unknown): string {
+  const code = (err as { code?: string })?.code
+  if (code && RERUN_ERROR_LABELS[code]) return automationLabel(RERUN_ERROR_LABELS[code], isZh.value)
+  const msg = err instanceof Error ? err.message : String(err)
+  return redactString(msg) || automationLabel('runs.rerunError.generic', isZh.value)
+}
+
+/**
+ * COMPLETE enumeration of the refusals `retryExecution()` can return
+ * (packages/core-backend/src/multitable/automation-service.ts), and which of them this view can
+ * predict from data it has ALREADY loaded. Nothing here guesses at state the client cannot see.
+ *
+ *  PREDICTABLE (mirrored below — never sent):
+ *   1. 409 NOT_RETRYABLE            automation-service.ts:2723-2729 — status ∉ {failed, skipped}.
+ *      Mirrored by `canRerunExecution` on the list row's `status`; the C1 `status` field is
+ *      identity-mapped to the legacy status for exactly those two values
+ *      (routes/automation.ts toRunView + workflow-job-contract.ts legacyAutomationStatusToJobStatus),
+ *      so the mirror is neither wider nor narrower. → the button is NOT RENDERED (see below).
+ *   2. 409 TEST_RUN_NOT_RETRYABLE   automation-service.ts:2733-2739 — `triggeredBy === 'manual_test'`.
+ *      The list row carries the same field (routes/automation.ts:139 `triggeredBy:
+ *      execution.triggeredBy`) and renders it as `data-field="triggeredBy"`; the value is stamped
+ *      server-side (automation-executor.ts:1599 from `_triggeredBy`, set by testRun at
+ *      automation-service.ts:3774). → button DISABLED + reason.
+ *   3. 409 MISSING_TRIGGER_EVENT    automation-service.ts:2740-2743, predicate at :903-908 — the
+ *      stored trigger event must be a NON-EMPTY, non-array plain object. The detail GET serializes
+ *      the SAME persisted object the retry guard reads (`svc.logs.getById` → toRunView
+ *      `triggerEvent: execution.triggerEvent ?? null`, routes/automation.ts:152), so
+ *      `hasUsableStoredTriggerEvent` below restates the same predicate. Claim scope: the mirror is
+ *      asserted equal to :903 for the values the spec exercises — null, `[]`, `{}`, a populated
+ *      event, and a record-less `{ _triggeredBy: 'schedule' }` — not proven equivalent over all
+ *      inputs. It fails CLOSED on `undefined`/absent, which the current detail path cannot produce.
+ *      → button DISABLED + reason.
+ *
+ *  NOT PREDICTABLE (still sent; the server's refusal is surfaced verbatim-by-code via mapRerunError):
+ *   4. 404 NOT_FOUND                     :2721 — the row can be deleted between list and click.
+ *   5. 409 RETRY_WINDOW_EXPIRED          :2748-2753 — measured on the LINEAGE ROOT's triggeredAt
+ *      (a row this view may never have loaded) against a backend-only window
+ *      (multitable/automation-retry-eligibility.ts:111, not imported by apps/web).
+ *   6. 409 START_APPROVAL_ALREADY_CREATED :2757-2760 — approval-bridge query over the lineage.
+ *   7. 409 RULE_MISSING_OR_DISABLED      :2764-2765 — CURRENT rule state; the run only carries a
+ *      historical snapshot.
+ *   8. 409 RULE_CHANGED                  :2775-2781 — fingerprint of the CURRENT rule vs the one
+ *      stored at run time; the stored fingerprint is not on the run view at all.
+ *   9. 409 RETRY_LEDGER_EVIDENCE_MISSING :2790-2795 — retry-ledger evidence query.
+ *  (400 CONFIRM_SIDE_EFFECTS_REQUIRED is not a row property — this client always sends the flag;
+ *   403 ADMIN_REQUIRED is mirrored by `isAdmin`, an approximation — see the B4 disclosure.)
+ */
+function canRerunExecution(run: AutomationRunView): boolean {
+  return run.status === 'failed' || run.status === 'skipped'
+}
+
+/** Byte-faithful mirror of automation-service.ts:903 `isRetryableStoredTriggerEvent`. */
+function hasUsableStoredTriggerEvent(value: unknown): boolean {
+  return typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && Object.keys(value as Record<string, unknown>).length > 0
+}
+
+/**
+ * Round-2 B1 — the refusal this row would deterministically get, or null when the request is worth
+ * sending. Only classes 2 and 3 above; `detail` is always THIS run's detail where the button
+ * renders (toggleExpand nulls it before each fetch and drops stale responses).
+ */
+function rerunBlockedReasonKey(run: AutomationRunView): AutomationLabelKey | null {
+  if (run.triggeredBy === 'manual_test') return 'runs.rerunError.testRunNotRetryable'
+  if (!hasUsableStoredTriggerEvent(detail.value?.triggerEvent)) return 'runs.rerunError.missingTriggerEvent'
+  return null
+}
+
+function rerunBlockedReason(run: AutomationRunView): string | null {
+  const key = rerunBlockedReasonKey(run)
+  return key ? automationLabel(key, isZh.value) : null
+}
+
+// Exhaustive over the current leaf vocabulary; a new action must acquire an explicit preview policy.
+const RERUN_LEAF_TYPES: Record<Exclude<AutomationActionType, 'condition_branch' | 'parallel_branch'>, true> = {
+  update_record: true, create_record: true, send_webhook: true, send_notification: true,
+  start_approval: true, send_email: true, send_dingtalk_group_message: true,
+  send_dingtalk_person_message: true, send_dingtalk_approval_card: true, delete_record: true,
+  lock_record: true, wait_for_callback: true, write_approval_form_values: true,
+  notify: true, update_field: true,
+}
+
+/** Enumerate all possible action kinds, including unselected branches, or refuse the whole list. */
+type RerunConsequences = { state: 'enumerated'; labels: string[] } | { state: 'unknown' }
+
+function rerunConsequences(): RerunConsequences {
+  const snapshot = detail.value?.ruleSnapshot
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return { state: 'unknown' }
+  const actions = (snapshot as Record<string, unknown>).actions
+  if (!Array.isArray(actions) || actions.length === 0) return { state: 'unknown' }
+  const kinds = new Set<string>()
+  function visit(value: unknown, parent?: 'condition_branch' | 'parallel_branch'): boolean {
+    if (!Array.isArray(value)) return false
+    for (const action of value) {
+      if (!action || typeof action !== 'object' || Array.isArray(action)) return false
+      const type = action.type
+      if (typeof type !== 'string') return false
+      if (type === 'condition_branch' || type === 'parallel_branch') {
+        // The executor supports only top-level containers with leaf children. This also bounds
+        // traversal of malformed/deep/cyclic snapshots without inventing a nested-DAG contract.
+        if (parent) return false
+        const config = action.config
+        if (!config || typeof config !== 'object' || Array.isArray(config)) return false
+        if (!Array.isArray(config.branches) || config.branches.length === 0) return false
+        if (type === 'parallel_branch' && (config.joinMode !== 'all' || config.branches.length > 10)) return false
+        const branches = [...config.branches]
+        if (type === 'condition_branch' && config.defaultBranch != null) branches.push(config.defaultBranch)
+        const keys = new Set<string>()
+        let childCount = 0
+        for (const branch of branches) {
+          if (!branch || typeof branch !== 'object' || Array.isArray(branch)) return false
+          if (typeof branch.key !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(branch.key) || keys.has(branch.key)) return false
+          keys.add(branch.key)
+          const childActions = branch.actions ?? []
+          if (!Array.isArray(childActions)) return false
+          childCount += childActions.length
+          if (type === 'parallel_branch' && (childActions.length === 0 || childCount > 20)) return false
+          if (!visit(childActions, type)) return false
+        }
+      } else {
+        if (!Object.prototype.hasOwnProperty.call(RERUN_LEAF_TYPES, type)) return false
+        if (parent === 'condition_branch' && type === 'start_approval') return false
+        if (parent === 'parallel_branch' && type !== 'update_record' && type !== 'send_notification') return false
+      }
+      kinds.add(automationActionTypeLabel(type, isZh.value))
+    }
+    return true
+  }
+  return visit(actions) ? { state: 'enumerated', labels: [...kinds] } : { state: 'unknown' }
+}
+
+// UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6). Enumerates the
+// consequences from data already on the row (rule/sheet) + the loaded detail (action kinds) —
+// req (2): the operator sees what will run again before confirming, not just a generic warning.
+async function confirmRerunExecution(run: AutomationRunView, isCurrent: () => boolean): Promise<boolean> {
+  const ruleName = run.ruleName || run.ruleId
+  const sheetName = run.sheetName || run.sheetId || automationLabel('runs.rerunConfirmNoSheet', isZh.value)
+  const consequences = rerunConsequences()
+  const kindsText = consequences.state === 'enumerated'
+    ? consequences.labels.join(', ')
+    : automationLabel('runs.rerunConfirmUnknownActions', isZh.value)
+  const message = [
+    `${automationLabel('runs.rerunConfirmRuleLabel', isZh.value)} ${ruleName}`,
+    `${automationLabel('runs.rerunConfirmSheetLabel', isZh.value)} ${sheetName}`,
+    `${automationLabel('runs.rerunConfirmActionsLabel', isZh.value)} ${kindsText}`,
+    automationLabel('runs.rerunConfirmFooter', isZh.value),
+  ].join('\n')
+  try {
+    await ElMessageBox.confirm(
+      message,
+      automationLabel('runs.rerunConfirmTitle', isZh.value),
+      { type: 'warning', confirmButtonText: automationLabel('runs.rerun', isZh.value), cancelButtonText: automationLabel('editor.cancel', isZh.value) },
+    )
+  } catch {
+    return false
+  }
+  if (!isCurrent()) return false
+  // Round-2 B3 — when the consequences could NOT be enumerated, the first dialog showed an honest
+  // "cannot be listed" line rather than an action list, so the operator has approved a side-effecting
+  // run they were unable to preview. Require a SECOND, differently-worded acknowledgement before
+  // sending. (Chosen over refusing the re-run outright: an unusable ruleSnapshot is NOT one of the
+  // backend's refusals — retryExecution() never reads it — so refusing here would withdraw a
+  // capability the server still grants, and would do it silently.)
+  if (consequences.state === 'unknown') {
+    try {
+      await ElMessageBox.confirm(
+        automationLabel('runs.rerunUnknownActionsAckMessage', isZh.value),
+        automationLabel('runs.rerunUnknownActionsAckTitle', isZh.value),
+        {
+          type: 'warning',
+          confirmButtonText: automationLabel('runs.rerunUnknownActionsAckConfirm', isZh.value),
+          cancelButtonText: automationLabel('editor.cancel', isZh.value),
+        },
+      )
+    } catch {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * P3-4: re-run a whole execution through the EXISTING A5 retry endpoint (never a new one).
+ * Confirm-gated; on success shows the new execution id inline (never auto-reloads the list, which
+ * would collapse this just-confirmed row); on failure the discriminated code maps to an INLINE
+ * message next to the button that was clicked (per-row, honest — never a generic toast, never
+ * silently swallowed into the existing list).
+ */
+async function rerunExecution(run: AutomationRunView) {
+  if (rerunning.value || !canRerunExecution(run)) return
+  // Round-2 B1: belt-and-braces only, and stated as such — the rendered `disabled` attribute is the
+  // gate that the spec actually pins. Removing THIS line alone leaves all 22 specs green (mutation
+  // run in round 2), because a disabled button swallows the click before the handler; it earns its
+  // place only against a future refactor that drops `disabled`. Silent by design: the reason is
+  // already on screen next to the button (`data-field="rerun-blocked-reason"`).
+  if (rerunBlockedReasonKey(run) !== null) return
+  const generation = rerunGeneration
+  const requestScope = detailRequestScope
+  const isCurrent = () => !disposed && generation === rerunGeneration
+    && expandedId.value === run.id && detail.value?.id === run.id
+    && requestScope === executionRequestScope() && auth.hasAdminAccess()
+  if (!isCurrent()) return
+  // Reserve before awaiting either dialog so repeated clicks cannot queue duplicate executions.
+  rerunning.value = run.id
+  try {
+    if (!(await confirmRerunExecution(run, isCurrent)) || !isCurrent()) return
+    rerunTargetId.value = run.id
+    rerunError.value = null
+    rerunSuccessId.value = null
+    rerunSuccessGeneric.value = false
+    const result = await client.retryAutomationExecution(run.id)
+    if (!isCurrent()) return
+    if (typeof result?.id === 'string' && result.id) {
+      rerunSuccessId.value = result.id
+    } else {
+      rerunSuccessGeneric.value = true
+    }
+  } catch (err) {
+    if (isCurrent()) rerunError.value = mapRerunError(err)
+  } finally {
+    rerunning.value = null
+  }
+}
+
 function formatTime(ts: string): string {
   try {
     return new Date(ts).toLocaleString()
@@ -337,6 +694,14 @@ if (isAdmin) void loadData()
 .automation-runs__toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .automation-runs__select, .automation-runs__input { border: 1px solid var(--ms-border); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--ms-bg-card); }
 .automation-runs__btn { border: 1px solid var(--ms-border); border-radius: 8px; padding: 6px 14px; background: var(--ms-bg-card); color: var(--ms-text-1); font-size: 13px; cursor: pointer; }
+/* P3-4: visually distinct from the plain `.automation-runs__btn` load-failure Retry (req 1) —
+   warning-toned border/text, same family as the destructive/side-effect affordances elsewhere. */
+.automation-runs__btn--rerun { border-color: var(--el-color-warning); color: var(--el-color-warning-dark-2); }
+.automation-runs__rerun { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 4px 0; }
+.automation-runs__rerun-success { font-size: 12px; color: var(--el-color-success); }
+/* Round-2 B1: the reason a deterministically-refused row's button is disabled, shown next to it. */
+.automation-runs__rerun-blocked { font-size: 12px; color: var(--ms-text-2); }
+.automation-runs__btn--rerun:disabled { cursor: not-allowed; opacity: 0.6; }
 .automation-runs__empty { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: var(--ms-bg-page); color: var(--ms-text-2); }
 .automation-runs__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .automation-runs__item { border: 1px solid var(--ms-border-light); border-radius: 8px; padding: 10px 12px; cursor: pointer; margin-bottom: 8px; }

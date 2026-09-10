@@ -358,12 +358,12 @@
         <p v-else-if="annualSelfBalanceError" class="attendance__error" data-annual-self-balance-error>{{ annualSelfBalanceError }}</p>
         <div v-else-if="annualSelfBalanceSummary" class="attendance__selfbalance" data-annual-self-balance>
           <div class="attendance__selfbalance-remaining">
-            <strong>{{ annualSelfBalanceSummary.remainingMinutes }}</strong> {{ tr('min remaining', '分钟剩余') }}
+            <strong>{{ remainingBalanceLabel }}</strong> {{ tr('remaining', '剩余') }}
           </div>
           <small class="attendance__field-hint">
-            {{ tr('Granted', '已发放') }} {{ annualSelfBalanceSummary.grantedMinutes }} ·
-            {{ tr('Used', '已用') }} {{ annualSelfBalanceSummary.exhaustedMinutes }} ·
-            {{ tr('Expired', '已过期') }} {{ annualSelfBalanceSummary.expiredMinutes }}
+            {{ tr('Granted', '已发放') }} {{ grantedBalanceLabel }} ·
+            {{ tr('Used', '已用') }} {{ usedBalanceLabel }} ·
+            {{ tr('Expired', '已过期') }} {{ expiredBalanceLabel }}
           </small>
         </div>
         <p v-else class="attendance__field-hint">
@@ -466,6 +466,7 @@ import {
 } from './attendanceEmployeeWorkspaceCommonIcons'
 import {
   formatLateEarlyPair,
+  formatLeaveBalanceMinutes,
   formatWorkDurationMinutes,
   greetingHeadline,
   isClockedIn,
@@ -685,6 +686,19 @@ const clockStatusLine = computed(() => {
 })
 
 const workDurationLabel = computed(() => formatWorkDurationMinutes(props.workbenchWorkMinutes, props.tr))
+
+const remainingBalanceLabel = computed(() =>
+  formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.remainingMinutes, props.tr),
+)
+const grantedBalanceLabel = computed(() =>
+  formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.grantedMinutes, props.tr),
+)
+const usedBalanceLabel = computed(() =>
+  formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.exhaustedMinutes, props.tr),
+)
+const expiredBalanceLabel = computed(() =>
+  formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.expiredMinutes, props.tr),
+)
 
 const lateEarlyDisplay = computed(() => formatLateEarlyPair(props.workbenchLateEarlyLabel, props.tr))
 

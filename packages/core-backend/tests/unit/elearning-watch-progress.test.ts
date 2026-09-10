@@ -138,6 +138,7 @@ interface EvidenceRow {
 interface Mem {
   now: number
   item: ItemRow | null
+  scheduledChallengeAuthority: unknown
   members: MemberRow[]
   sessions: SessionRow[]
   events: EventRow[]
@@ -166,6 +167,7 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
       mediaStatus: 'ready',
       durationMs: 10_000,
     },
+    scheduledChallengeAuthority: false,
     members: [{ id: MEMBER, userId: USER, versionId: VERSION, revokedAt: null }],
     sessions: [],
     events: [],
@@ -307,6 +309,12 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
     }
     if (tag === 'elearning-watch:lock-session') {
       expect(sql).toContain('FOR SHARE OF c')
+      expect(sql).toContain('challenge_schedule.org_id = s.org_id')
+      expect(sql).toContain('challenge_schedule.session_id = s.id')
+      expect(sql).toContain('challenge_schedule.course_version_id = s.course_version_id')
+      expect(sql).toContain('challenge_schedule.course_version_item_id = s.course_version_item_id')
+      expect(sql).toContain('challenge_schedule.user_id = s.user_id')
+      expect(sql).toContain("challenge_schedule.mode = 'scheduled'")
       const row = mem.sessions.find((s) => s.id === params[1])
       if (!row || !item) return { rows: [], rowCount: 0 }
       const elapsed = Math.max(0, mem.now - row.lastEventAt)
@@ -321,6 +329,7 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
           course_status: item.courseStatus,
           media_status: item.mediaStatus,
           duration_ms: String(item.durationMs),
+          scheduled_challenge_authority: mem.scheduledChallengeAuthority,
           elapsed_ms: String(elapsed),
         }],
         rowCount: 1,
@@ -1401,6 +1410,47 @@ describe('recordElearningHeartbeat', () => {
     })
     await expect(recordElearningHeartbeat(db, { ...baseInput, sequence: 2 }))
       .rejects.toMatchObject({ code: 'sequence_gap' })
+  })
+
+  it('fails closed before access or progress writes when scheduled authority outlives the flag', async () => {
+    const { db, mem } = createMemoryDb({
+      scheduledChallengeAuthority: true,
+      sessions: [seededSession({ lastEventAt: 980_000 })],
+      events: [seededEvent()],
+      progress: [seededProgress()],
+    })
+
+    await expect(recordElearningHeartbeat(db, baseInput))
+      .rejects.toMatchObject({ code: 'unavailable' })
+    expect(mem.queries.map(tagOf)).toEqual([
+      'elearning-watch:peek-session',
+      'elearning-watch:lock',
+      'elearning-watch:lock-course',
+      'elearning-watch:lock-session',
+    ])
+    expect(mem.sessions).toEqual([seededSession({ lastEventAt: 980_000 })])
+    expect(mem.progress).toEqual([seededProgress()])
+    expect(mem.events).toEqual([seededEvent()])
+    expect(mem.evidence).toEqual([])
+  })
+
+  it('rejects a non-boolean scheduled-authority projection before writes', async () => {
+    const { db, mem } = createMemoryDb({
+      scheduledChallengeAuthority: 'false',
+      sessions: [seededSession({ lastEventAt: 980_000 })],
+      events: [seededEvent()],
+      progress: [seededProgress()],
+    })
+
+    await expect(recordElearningHeartbeat(db, baseInput))
+      .rejects.toMatchObject({ code: 'unavailable' })
+    expect(mem.queries.map(tagOf)).toEqual([
+      'elearning-watch:peek-session',
+      'elearning-watch:lock',
+      'elearning-watch:lock-course',
+      'elearning-watch:lock-session',
+    ])
+    expect(mem.events).toEqual([seededEvent()])
   })
 
   it('credits zero while paused and still records the clamped position', async () => {
