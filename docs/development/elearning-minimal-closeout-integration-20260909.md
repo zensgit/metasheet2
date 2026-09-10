@@ -25,14 +25,32 @@ acceptance. No new L0-L6 features are implied or authorized by this closeout.
 - Full sealed-export S5 chain, including provenance positive control, passed.
 - Diff check passed; local integration commit clean.
 
-These results do not replace combined-tree real-DB, remote CI or staging acceptance.
+These results do not replace remote CI or staging acceptance.
 Earlier parent evidence remains recorded in the installation and notification reports.
+
+## Combined database closeout — 2026-09-10
+
+- Tested exact code head `e134701a7e984856234d3b2a829229e649e16699`, which
+  true-merges installation test-only fix `24453acc82d8218ca885862f226b374e3605174d`
+  into the integration checkpoint. Original PR branches remain separate.
+- PostgreSQL 15.17: no competing active client work observed before the run;
+  a new isolated database was created for this verification.
+- CI-exact MIGRATION_EXCLUDE stream: 395 migrations passed, second replay passed.
+- Combined installation, notification-delivery and notification-worker whole files:
+  3 files / 21 tests passed. This includes organization collision, opt-in admission,
+  membership serialization, delivery fencing and worker eligibility coverage.
+- Official scratch drain/drop: drained=true, forced=false, residualBackends=0;
+  owned database prefix residue=0 and backend residue=0. DB window released.
+- No live provider credentials or external sends were used. These are database
+  authority tests, not staging notification receipt evidence.
 
 ## Remaining acceptance gates
 
-1. Finish #5579 exact-head remote CI, then reconcile then-current main without losing
-   either workflow union. Main advanced to an unrelated automation change during review.
-2. Run combined-tree installation/notification database gates in an isolated database.
+1. Installation #5579 exact `24453acc8` remote CI was verified on 2026-09-10:
+   52 SUCCESS / 1 SKIPPED, no failure or pending. Reconcile then-current main and
+   verify the final integration head without losing either workflow union.
+2. Combined-tree database gates are complete at the exact head recorded above;
+   repeat affected gates if the final integration changes their code or dependencies.
 3. Obtain the remaining merge/environment authorization; no Ready or main merge has
    been performed by this checkpoint.
 4. Deploy an approved exact candidate to staging only. Use a synthetic organization,
