@@ -27,6 +27,7 @@ import type {
   RotateDataSourceCredentialsPayload,
   UpdateDataSourcePayload,
 } from '../data-sources/types'
+import { describeDeleteFailure } from '../data-sources/deleteRefusalCopy'
 
 function tableDetailKey(id: string, table: string, schema?: string): string {
   return `${id}:${schema ? `${schema}.` : ''}${table}`
@@ -125,7 +126,9 @@ export const useDataSourcesStore = defineStore('dataSources', () => {
       await fetchAll()
       return true
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to delete data source'
+      // The referential 409 is rewritten into the count + where to go clear it; every other
+      // failure keeps the server's own message, exactly as before.
+      error.value = describeDeleteFailure(e)
       return false
     }
   }
