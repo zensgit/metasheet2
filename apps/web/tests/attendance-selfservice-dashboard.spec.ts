@@ -1037,6 +1037,54 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
   })
 
+  it.each([
+    { recordId: 'record-yesterday', workDate: '2026-04-14', label: 'date and type' },
+    { recordId: 'record-today-check-out', workDate: '2026-04-15', label: 'type only' },
+  ])('reopening the makeup card clears timestamps when its anomaly prefill changes by $label', async ({ recordId, workDate }) => {
+    installOverviewMock({
+      anomalyItems: [
+        DEFAULT_OVERVIEW_ANOMALY,
+        {
+          ...DEFAULT_OVERVIEW_ANOMALY,
+          recordId,
+          workDate,
+          suggestedRequestType: 'missed_check_out',
+        },
+      ],
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const openMakeupCard = async (): Promise<HTMLElement> => {
+      container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+      await flushUi(3)
+      return container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')!
+    }
+
+    let card = await openMakeupCard()
+    setFormValue(card, '[data-makeup-card-anomaly]', `${recordId}::${workDate}`)
+    await flushUi(2)
+    setFormValue(card, '[data-makeup-card-time]', `${workDate}T18:00`)
+    await flushUi(2)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-out')?.value).toBe(`${workDate}T18:00`)
+
+    card.querySelector<HTMLButtonElement>('[data-makeup-card-cancel="header"]')!.click()
+    await flushUi()
+    card = await openMakeupCard()
+
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(card.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-out')?.value).toBe('')
+
+    setFormValue(card, '[data-makeup-card-time]', '2026-04-15T09:00')
+    card.querySelector<HTMLButtonElement>('[data-makeup-card-cancel="header"]')!.click()
+    await flushUi()
+    card = await openMakeupCard()
+
+    expect(card.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('2026-04-15T09:00')
+  })
+
   it('below-fold overflow contract: history surfaces stay within 1440 and 390', async () => {
     // jsdom does not paint CSS grid, so this is a layout-contract pin (classes + source
     // rules), not a browser screenshot of scrollWidth. A real 1440/390 paint check

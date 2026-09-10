@@ -89,6 +89,34 @@ async function assertFits(page: Page) {
 }
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`${viewport.width}x${viewport.height}: reopening clears a different-date draft before submitting`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport)
+    const { posts, unexpected } = await mockAttendance(page)
+    await page.goto('/verification/attendance-makeup-request-harness.html')
+    const open = page.locator('[data-selfservice-action="missing-punch"]')
+    const card = page.locator(cardSelector)
+    await open.click()
+    await card.locator('[data-makeup-card-anomaly]').selectOption('yesterday-in::2026-04-14')
+    await card.locator('[data-makeup-card-time]').fill('2026-04-14T09:00')
+    await card.locator('[data-makeup-card-attachment]').fill(proof)
+    await card.locator('[data-makeup-card-cancel="footer"]').click()
+    await open.click()
+    await expect(card.locator('[data-makeup-card-anomaly]')).toHaveValue('today-in::2026-04-15')
+    await expect(card.locator('[data-makeup-card-time]')).toHaveValue('')
+    await card.locator('[data-makeup-card-submit]').click()
+    await expect(page.locator('body')).toContainText('补签上班时间为必填项')
+    expect(posts).toEqual([])
+    await card.locator('[data-makeup-card-time]').fill('2026-04-15T09:00')
+    await assertFits(page)
+    await card.screenshot({ path: testInfo.outputPath(`reopen-${viewport.width}.png`) })
+    await card.locator('[data-makeup-card-submit]').click()
+    await expect(card).toHaveCount(0)
+    expect(posts).toEqual([
+      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T09:00', attachmentUrl: proof, orgId: 'synthetic-org' },
+    ])
+    expect(unexpected).toEqual([])
+  })
+
   test(`${viewport.width}x${viewport.height}: real parent attachment retry and anomaly date reset`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport)
     const { posts, unexpected } = await mockAttendance(page)

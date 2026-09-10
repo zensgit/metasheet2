@@ -17253,8 +17253,14 @@ async function openDedicatedMakeupRequestCard(): Promise<void> {
   clearRequestSubmitStatus()
   const fallbackWorkDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
   const draft = resolveMakeupCardPrefill(anomalies.value, fallbackWorkDate)
+  const prefillChanged = requestForm.workDate !== draft.workDate
+    || requestForm.requestType !== draft.requestType
   requestForm.workDate = draft.workDate
   requestForm.requestType = draft.requestType
+  if (prefillChanged) {
+    requestForm.requestedInAt = ''
+    requestForm.requestedOutAt = ''
+  }
   makeupRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
