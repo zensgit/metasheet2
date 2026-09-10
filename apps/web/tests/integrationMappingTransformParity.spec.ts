@@ -37,6 +37,9 @@ const require = createRequire(import.meta.url)
 const pluginLib = path.resolve(__dirname, '../../../plugins/plugin-integration-core/lib')
 const { SUPPORTED_TRANSFORMS, transformRecord } = require(path.join(pluginLib, 'transform-engine.cjs'))
 const { SUPPORTED_RULES, validateRecord } = require(path.join(pluginLib, 'validator.cjs'))
+// The API-layer normalizer the save route runs before anything reaches storage. Required (not
+// re-implemented) so the "store -> read back -> engine" leg is the real one.
+const { __internals: { normalizeFieldMappings } } = require(path.join(pluginLib, 'pipelines.cjs'))
 
 const sorted = (values: Iterable<string>): string[] => Array.from(values).sort()
 
@@ -388,5 +391,163 @@ describe('G27 cleaning-rules parity: editor round trip (G08 pre-work)', () => {
     expect(parsed.transformFn).toBe('trim')
     expect(parsed.extraSteps).toEqual([])
     expect(buildTransformPayload(parsed)).toEqual({ fn: 'trim' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #5596 adversarial review follow-ups. Each test below pins a behavior the review found either
+// UNSTATED (so a later reader could only guess) or MIRRORED-BY-EYE (so it could drift silently).
+// Where the claim is "we behave like the engine", the ENGINE runs in the test — a hand-written
+// expectation would only prove we still agree with our own reading of it.
+// ---------------------------------------------------------------------------
+describe('G27 cleaning-rules parity: #5596 final-review fixes', () => {
+  it('F07: a build error names the row and keeps the original message verbatim', () => {
+    const broken = mapping({ targetField: 'FQty', transformFn: 'concat' })
+    expect(() => buildFieldMappingPayload(broken, 4)).toThrow('第 5 条清洗规则（FQty）：')
+    expect(() => buildFieldMappingPayload(broken, 4)).toThrow('concat 至少需要选择一个拼接字段')
+    // The regex message keeps its substring too (the §3 test matches on it).
+    expect(() => buildFieldMappingPayload(mapping({ patternText: '[' }), 0)).toThrow('pattern 正则无效')
+    // A row with neither target nor source still gets a usable label instead of "（）".
+    expect(() => buildFieldMappingPayload(
+      createEditableMapping({ id: 'x', transformFn: 'defaultValue' }),
+      0,
+    )).toThrow('第 1 条清洗规则（未命名字段）：')
+  })
+
+  it('F02: a step carrying BOTH args.* and top-level keys is read the way the engine reads it', () => {
+    // normalizeTransformStep: `isPlainObject(step.args) ? { ...step.args } : { ...step }` — a
+    // plain `args` object REPLACES the top level. The engine therefore uses format 'date' here.
+    const step = { fn: 'toDate', args: { format: 'date' }, format: 'iso' }
+    const engineResult = transformRecord({ d: '2024-01-31' }, [
+      { sourceField: 'd', targetField: 'FDate', transform: step },
+    ])
+    expect(engineResult.value.FDate).toBe('2024-01-31')
+
+    const parsed = editableMappingFromPayload(
+      { sourceField: 'd', targetField: 'FDate', transform: step } as never,
+      'rt',
+    )
+    expect(parsed.transformArgs.dateFormat).toBe('date')
+    // ...and re-emitting it keeps the engine's answer identical.
+    const rebuilt = transformRecord({ d: '2024-01-31' }, [buildFieldMappingPayload(parsed, 0)])
+    expect(rebuilt.value.FDate).toBe(engineResult.value.FDate)
+
+    // THE DISCRIMINATING CASE (a merge and a replace disagree only here): `args` exists but does
+    // NOT carry `format`, while the top level does. The engine IGNORES the top-level one, so the
+    // output is a full ISO timestamp — an editor that merged would have shown "仅日期" for a
+    // pipeline that emits date-times.
+    const shadowed = { fn: 'toDate', args: { unrelated: 1 }, format: 'date' }
+    const shadowedEngine = transformRecord({ d: '2024-01-31' }, [
+      { sourceField: 'd', targetField: 'FDate', transform: shadowed },
+    ])
+    expect(shadowedEngine.value.FDate).toBe('2024-01-31T00:00:00.000Z')
+    const shadowedParsed = editableMappingFromPayload(
+      { sourceField: 'd', targetField: 'FDate', transform: shadowed } as never,
+      'rt',
+    )
+    expect(shadowedParsed.transformArgs.dateFormat).toBe('iso')
+    expect(transformRecord({ d: '2024-01-31' }, [buildFieldMappingPayload(shadowedParsed, 0)]).value.FDate)
+      .toBe(shadowedEngine.value.FDate)
+  })
+
+  it('F02: a rule carrying BOTH a top-level and a params value is read the way the validator reads it', () => {
+    // normalizeRule copies rule.params first and THEN folds stray top-level keys in, so on a
+    // collision the TOP LEVEL wins (validator.cjs:42-46).
+    const rule = { type: 'pattern', regex: '^TOP$', params: { regex: '^NESTED$' } }
+    const engineMappings = [{ targetField: 'FNumber', validation: [rule] }]
+    expect(validateRecord({ FNumber: 'TOP' }, engineMappings).ok).toBe(true)
+    expect(validateRecord({ FNumber: 'NESTED' }, engineMappings).ok).toBe(false)
+
+    const parsed = editableMappingFromPayload(
+      { sourceField: 'code', targetField: 'FNumber', validation: [rule] } as never,
+      'rt',
+    )
+    expect(parsed.patternText).toBe('^TOP$')
+    const rebuilt = [buildFieldMappingPayload(parsed, 0)]
+    expect(validateRecord({ FNumber: 'TOP' }, rebuilt).ok).toBe(true)
+    expect(validateRecord({ FNumber: 'NESTED' }, rebuilt).ok).toBe(false)
+  })
+
+  it('F01/F11: pattern flags and custom messages are DROPPED on read — the loss is asserted, not hidden', () => {
+    const authored = {
+      sourceField: 'code',
+      targetField: 'FNumber',
+      validation: [{ type: 'pattern', params: { regex: '^mat-\\d+$', flags: 'i' }, message: '编码不合规' }],
+    }
+    // As authored, the engine is case-INsensitive and uses the custom message.
+    const asAuthored = validateRecord({ FNumber: 'MAT-1' }, [authored])
+    expect(asAuthored.ok).toBe(true)
+    expect(validateRecord({ FNumber: 'X' }, [authored]).errors[0].message).toBe('编码不合规')
+
+    const reemitted = buildFieldMappingPayload(editableMappingFromPayload(authored as never, 'rt'), 0)
+    expect(reemitted.validation).toEqual([{ type: 'pattern', params: { regex: '^mat-\\d+$' } }])
+    // KNOWN LOSS, pinned: flags gone -> case-sensitive now; message gone -> engine default text.
+    expect(validateRecord({ FNumber: 'MAT-1' }, [reemitted]).ok).toBe(false)
+    expect(validateRecord({ FNumber: 'X' }, [reemitted]).errors[0].message).not.toBe('编码不合规')
+  })
+
+  it('F04/F08: the mapping-level default does NOT fire on a whitespace-only source value', () => {
+    const record = { blank: '   ', empty: '' }
+    const result = transformRecord(record, [
+      // mapping-level default: isBlank() is undefined/null/'' ONLY.
+      buildFieldMappingPayload(mapping({ sourceField: 'blank', targetField: 'FKeepsSpaces', defaultValueText: 'N/A' }), 0),
+      buildFieldMappingPayload(mapping({ sourceField: 'empty', targetField: 'FFromEmpty', defaultValueText: 'N/A' }), 1),
+      buildFieldMappingPayload(mapping({ sourceField: 'absent', targetField: 'FFromMissing', defaultValueText: 'N/A' }), 2),
+      // the defaultValue STEP additionally treats a whitespace-only string as blank.
+      buildFieldMappingPayload(mapping({
+        sourceField: 'blank',
+        targetField: 'FFromStep',
+        transformFn: 'defaultValue',
+        transformArgs: createTransformArgs({ defaultValueText: 'N/A' }),
+      }), 3),
+    ])
+    expect(result.errors).toEqual([])
+    expect(result.value.FKeepsSpaces).toBe('   ')
+    expect(result.value.FFromEmpty).toBe('N/A')
+    expect(result.value.FFromMissing).toBe('N/A')
+    expect(result.value.FFromStep).toBe('N/A')
+  })
+
+  it('survives the API layer: normalizeFieldMappings -> transformRecord keeps chains and pins null defaults', () => {
+    const uiPayloads = [
+      buildFieldMappingPayload(mapping({
+        sourceField: 'code',
+        targetField: 'FUpper',
+        transformFn: 'trim',
+        extraSteps: [createTransformStep('s1', { fn: 'upper' })],
+      }), 0),
+      buildFieldMappingPayload(mapping({ sourceField: 'missing', targetField: 'FPlain', transformFn: 'trim' }), 1),
+      buildFieldMappingPayload(mapping({
+        sourceField: 'missing',
+        targetField: 'FDefaulted',
+        transformFn: 'upper',
+        defaultValueText: 'n/a',
+      }), 2),
+    ]
+
+    const stored = normalizeFieldMappings(uiPayloads)
+
+    // The array chain survives the registry's optionalJson() untouched...
+    expect(stored[0].transform).toEqual([{ fn: 'trim' }, { fn: 'upper' }])
+    // ...and an un-authored default becomes an OWN key holding null (pipelines.cjs:201), which is
+    // NOT the same thing as the key being absent: transformRecord's hasOwnProperty check then
+    // substitutes null for a missing source value.
+    expect(Object.prototype.hasOwnProperty.call(uiPayloads[1], 'defaultValue')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(stored[1], 'defaultValue')).toBe(true)
+    expect(stored[1].defaultValue).toBeNull()
+    expect(stored[2].defaultValue).toBe('n/a')
+    expect(stored[1].validation).toBeNull()
+
+    const record = { code: '  mat-001  ' }
+    const beforeStore = transformRecord(record, uiPayloads)
+    const afterStore = transformRecord(record, stored)
+
+    expect(afterStore.errors).toEqual([])
+    expect(afterStore.value.FUpper).toBe('MAT-001')
+    expect(afterStore.value.FDefaulted).toBe('N/A')
+    // The one observable difference the round trip introduces, pinned rather than discovered in
+    // production: undefined before the store, null after it.
+    expect(beforeStore.value.FPlain).toBeUndefined()
+    expect(afterStore.value.FPlain).toBeNull()
   })
 })

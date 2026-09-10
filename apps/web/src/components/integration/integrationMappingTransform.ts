@@ -228,19 +228,28 @@ export function buildValidationPayload(mapping: EditableMapping): Array<Record<s
   return validation.length > 0 ? validation : undefined
 }
 
+// F07: build errors name the ROW. buildMappings() maps over every row inside one try-block, so a
+// bare `concat 至少需要选择一个拼接字段` used to leave the operator hunting for which of a dozen
+// rows it came from. The original message is kept verbatim after the prefix (tests and humans
+// both match on it).
 export function buildFieldMappingPayload(mapping: EditableMapping, index: number): IntegrationFieldMapping {
-  const payload: IntegrationFieldMapping = {
-    sourceField: mapping.sourceField.trim(),
-    targetField: mapping.targetField.trim(),
-    transform: buildTransformPayload(mapping),
-    validation: buildValidationPayload(mapping),
-    sortOrder: index,
+  try {
+    const payload: IntegrationFieldMapping = {
+      sourceField: mapping.sourceField.trim(),
+      targetField: mapping.targetField.trim(),
+      transform: buildTransformPayload(mapping),
+      validation: buildValidationPayload(mapping),
+      sortOrder: index,
+    }
+    // Mapping-level default: substituted by transformRecord() when the SOURCE value is blank, i.e.
+    // BEFORE the chain runs (transform-engine.cjs:232-235). Only emitted when authored, so an
+    // untouched row is byte-identical to the pre-G27 payload.
+    if ((mapping.defaultValueText || '').trim()) payload.defaultValue = mapping.defaultValueText
+    return payload
+  } catch (error) {
+    const label = mapping.targetField.trim() || mapping.sourceField.trim() || '未命名字段'
+    throw new Error(`第 ${index + 1} 条清洗规则（${label}）：${error instanceof Error ? error.message : String(error)}`)
   }
-  // Mapping-level default: substituted by transformRecord() when the SOURCE value is blank, i.e.
-  // BEFORE the chain runs (transform-engine.cjs:232-235). Only emitted when authored, so an
-  // untouched row is byte-identical to the pre-G27 payload.
-  if ((mapping.defaultValueText || '').trim()) payload.defaultValue = mapping.defaultValueText
-  return payload
 }
 
 // ---------------------------------------------------------------------------
@@ -249,9 +258,16 @@ export function buildFieldMappingPayload(mapping: EditableMapping, index: number
 // must come back unchanged. It is also liberal about shapes the ENGINE accepts but the UI never
 // writes (string steps, { steps: [...] }, flat `regex`/`values`, `type` instead of `fn`), so a
 // hand-written or older pipeline still loads.
-// KNOWN LOSS (documented, not silent): dictMap's optional `defaultValue` arg and concat's
-// `values`/`includeCurrent` args have no editor control; a payload carrying them round-trips
-// without them.
+// KNOWN LOSS (documented, not silent — every item below has a parity test asserting the loss):
+//   1. dictMap's optional `defaultValue` arg;
+//   2. concat's `values` / `includeCurrent` args;
+//   3. F01 — a pattern rule's `params.flags` (the validator compiles `new RegExp(pattern, flags)`,
+//      validator.cjs:85-97), so a case-insensitive `flags: 'i'` rule comes back case-SENSITIVE;
+//   4. F11 — any rule's custom `message` (the validator prefers it over its own text,
+//      validator.cjs:59), so a re-saved rule falls back to the engine's default message.
+// None of these has an editor control. They are dropped on READ, which is the safe direction: the
+// editor never claims to hold something it cannot show, and it never re-emits a half-understood
+// rule. Authoring them stays a hand-written-payload capability until they get controls.
 // ---------------------------------------------------------------------------
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -280,8 +296,11 @@ function formatDictionaryMap(map: unknown): string {
 function transformStepFromPayload(raw: Record<string, unknown> | string, id: string): MappingTransformStep | null {
   const step = typeof raw === 'string' ? { fn: raw } : raw
   if (!isPlainObject(step)) return null
-  const nested = isPlainObject(step.args) ? step.args : {}
-  const args: Record<string, unknown> = { ...step, ...nested }
+  // F02: EXACTLY the engine's rule (normalizeTransformStep, transform-engine.cjs:131) — a plain
+  // `args` object REPLACES the top level, it does not merge with it. Merging made us read a
+  // top-level `format` that the engine would have ignored, i.e. the editor would have shown an
+  // argument the pipeline never used.
+  const args: Record<string, unknown> = isPlainObject(step.args) ? step.args : step
   const fnRaw = readString(step.fn || step.type).trim()
   if (!UI_TRANSFORM_FNS.includes(fnRaw)) return null
   const fn = fnRaw as TransformFn
@@ -299,11 +318,14 @@ function transformStepFromPayload(raw: Record<string, unknown> | string, id: str
   return editable
 }
 
+// F02: the validator folds stray TOP-LEVEL keys into params AFTER copying `rule.params`
+// (validator.cjs:42-46), so on a collision the top level wins. Read in that same order, or the
+// editor would show the losing value.
 function ruleParam(rule: Record<string, unknown>, names: string[]): unknown {
   const params = isPlainObject(rule.params) ? rule.params : {}
   for (const name of names) {
-    if (Object.prototype.hasOwnProperty.call(params, name)) return params[name]
     if (Object.prototype.hasOwnProperty.call(rule, name)) return rule[name]
+    if (Object.prototype.hasOwnProperty.call(params, name)) return params[name]
   }
   return undefined
 }

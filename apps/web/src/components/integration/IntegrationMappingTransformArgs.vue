@@ -34,9 +34,12 @@
           {{ fieldOptionText(option) }}
         </option>
       </select>
+      <!-- F06: bound to the LOCAL draft, never to `args.concatFields.join()` — see the script
+           block. Binding to the derived string made every re-render patch the trailing comma
+           away mid-typing. -->
       <input
         v-else
-        :value="args.concatFields.join(', ')"
+        :value="concatFieldsDraft"
         :data-testid="`${testidPrefix}-concat-fields`"
         placeholder="拼接字段，逗号分隔，例如 spec,color"
         @input="onConcatFieldsText(($event.target as HTMLInputElement).value)"
@@ -64,7 +67,7 @@
 // nested `v-model` writes land in the view's `ref` with no extra plumbing. `dictMap`'s textarea
 // stays in the parent because its testid (`dict-map-${index}`) predates this component and is
 // asserted by IntegrationWorkbenchView.spec.ts.
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { DATE_FORMAT_OPTIONS, parseCommaSeparatedList } from './integrationMappingTransform'
 import type { MappingTransformArgs, SourceFieldOption, TransformFn } from './integrationWorkbenchSectionTypes'
 
@@ -83,9 +86,36 @@ const dateFormatOptions = DATE_FORMAT_OPTIONS
 // entirely for them (and for the empty "no transform"选项).
 const showsAnyControl = computed(() => props.fn === 'toDate' || props.fn === 'defaultValue' || props.fn === 'concat')
 
+// F06 — the no-schema concat fallback is a CONTROLLED input over a LOCAL draft string.
+//
+// The bug it fixes: binding `:value` to `args.concatFields.join(', ')` made the DOM value a
+// DERIVED view of the parsed array. `parseCommaSeparatedList` drops the empty tail, so the moment
+// the operator typed `spec,` the array was still `['spec']`, the derived string was still `spec`,
+// and the very next re-render (deep reactivity — any sibling write on the same mapping triggers
+// one) patched the trailing comma back out from under the cursor. It reproduced for real whenever
+// the source schema was unavailable (e.g. the source DB answering 503), which is exactly when
+// this fallback is the ONLY way to author a concat.
+//
+// Now: the draft holds what the operator typed, `args.concatFields` holds the parsed array, and
+// the watcher only re-syncs the draft when an EXTERNAL change made the two disagree (round-trip
+// load, a different step's args object arriving on this instance) — never on our own keystroke,
+// because our own keystroke leaves `parse(draft)` equal to the array we just wrote.
+const concatFieldsDraft = ref(props.args.concatFields.join(', '))
+
+function sameFieldList(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
 function onConcatFieldsText(text: string): void {
+  concatFieldsDraft.value = text
   props.args.concatFields = parseCommaSeparatedList(text)
 }
+
+watch(() => props.args.concatFields, (fields) => {
+  const current = Array.isArray(fields) ? fields : []
+  if (sameFieldList(parseCommaSeparatedList(concatFieldsDraft.value), current)) return
+  concatFieldsDraft.value = current.join(', ')
+}, { deep: true })
 </script>
 
 <style scoped>

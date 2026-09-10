@@ -7,7 +7,10 @@ Branch: `feat/integration-mapping-transform-ui-parity`（基于 `origin/main` a2
 
 后端零改动：`plugins/`、`packages/` 未出现在 `git status` 里，全部改动落在 `apps/web/` 与 `docs/`。
 
-## 1. 命令与退出码
+## 1. 命令与退出码（第一轮，#5596 终审修复之前）
+
+> 终审修复后的最终一轮命令与计数见 §5.7；本节保留第一轮记录，两轮都跑过。
+
 
 | # | 命令（cwd） | 退出码 | 结果 |
 | --- | --- | --- | --- |
@@ -24,7 +27,7 @@ Branch: `feat/integration-mapping-transform-ui-parity`（基于 `origin/main` a2
 
 ## 2. 测试清单（新增/修改的测试名）
 
-### 2.1 `apps/web/tests/integrationMappingTransformParity.spec.ts`（新，21 条）
+### 2.1 `apps/web/tests/integrationMappingTransformParity.spec.ts`（新，第一轮 21 条 → 终审后 27 条）
 
 `G27 cleaning-rules parity: UI list vs engine whitelist`
 - `offers exactly the engine SUPPORTED_TRANSFORMS set`
@@ -59,6 +62,14 @@ Branch: `feat/integration-mapping-transform-ui-parity`（基于 `origin/main` a2
 - `also reads engine-legal shapes this UI never writes`
 - `drops a transform the UI cannot author instead of pretending it round-tripped`
 
+`G27 cleaning-rules parity: #5596 final-review fixes`（终审新增，见 §5）
+- `F07: a build error names the row and keeps the original message verbatim`
+- `F02: a step carrying BOTH args.* and top-level keys is read the way the engine reads it`
+- `F02: a rule carrying BOTH a top-level and a params value is read the way the validator reads it`
+- `F01/F11: pattern flags and custom messages are DROPPED on read — the loss is asserted, not hidden`
+- `F04/F08: the mapping-level default does NOT fire on a whitespace-only source value`
+- `survives the API layer: normalizeFieldMappings -> transformRecord keeps chains and pins null defaults`
+
 两条「引擎实跑」的测试通过 `createRequire()` 直接 `require` 服务端模块（与 `tests/k3-endpoint-vocab-mirror.spec.ts` 同一套反漂移做法），不是复述一份服务端常量：
 
 ```ts
@@ -70,7 +81,7 @@ const { SUPPORTED_RULES, validateRecord } = require(path.join(pluginLib, 'valida
 引擎对 UI 产出的 9 条映射实跑后的值（断言原样）：`FNumber: 'mat-001'`、`FUpper: 'MAT-001'`（链）、`FQty: 1234`、`FDateOnly: '2024-01-31'`、`FDateTime: '2024-01-31T00:00:00.000Z'`、`FName: 'UNKNOWN'`、`FSyncKey: 'mat-001-M8-red'`（trim→concat 链）、`FBaseUnitID: 'Pcs'`、`FModel: 'N/A'`（映射级默认值先顶上、再被链上的 `upper` 处理），`errors: []`。
 校验实跑：合法记录 `errors: []`；违规记录错误码顺序 `['PATTERN', 'ENUM', 'MIN']`，且既无 `UNSUPPORTED_RULE` 也无 `INVALID_RULE`——即我们下发的规则形状引擎全认。
 
-### 2.2 `apps/web/tests/IntegrationMappingRulesSection.spec.ts`（+8 条，共 10 条）
+### 2.2 `apps/web/tests/IntegrationMappingRulesSection.spec.ts`（第一轮 +8 条共 10 条 → 终审后 12 条）
 
 - `renders the section id and one mapping card per mapping`（既有，改用共享工厂构造 mapping）
 - `forwards add-mapping and remove-mapping clicks to their prop functions`（既有，同上）
@@ -82,6 +93,8 @@ const { SUPPORTED_RULES, validateRecord } = require(path.join(pluginLib, 'valida
 - `renders one chained-step editor per extra step, with its own fn and argument controls`
 - `forwards the chain add/remove clicks to their prop functions with the mapping`
 - `writes the pattern, enum and mapping-level default inputs back onto the mapping`
+- `keeps a trailing comma the operator just typed in the concat fallback input`（终审新增，F06 回归）
+- `re-syncs the concat fallback input when the field list changes from OUTSIDE the input`（终审新增）
 
 ### 2.3 未改动但必须绿的既有测试
 
@@ -125,7 +138,73 @@ const { SUPPORTED_RULES, validateRecord } = require(path.join(pluginLib, 'valida
 - 新组件的 CSS 是从同一个（已在清单内、已 token 化的）`IntegrationMappingRulesSection.vue` 抄来的，天生只用 `var(--ms-*)`，所以入列即绿，`STATIC_STYLE_ALLOWLIST` / `HEX_COLOR_ALLOWLIST` **保持为空**（没有为了让它过而开豁免）。
 - 这是**收紧**：不入列的话，这个新文件永远不会被该门禁看住；入列后它跟其它 21+ 个文件受同一条规则约束。`107 passed` 里就包含它的两条（静态 style / hex 字面量各一条）。
 
-## 5. 环境噪声（与本次改动无关）
+## 5. 终审修复（2026-09-10，#5596 对抗复核终审「修完 F06 再转正式」）
+
+终审结论：三条核心保证成立、守卫接线复核通过，需先修 F06 与四项低成本后续。以下逐项落地，全部仍是**后端零改动**。
+
+### 5.1 必修 F06 — concat 无 schema 回退框吞掉尾随逗号
+
+- 现象：回退输入 `:value` 绑的是 `args.concatFields.join(', ')` 这个**派生值**，而 `parseCommaSeparatedList` 会丢掉空尾项，所以敲下 `spec,` 之后数组仍是 `['spec']`、派生串仍是 `spec`，下一次深层响应重渲染就把逗号无条件 patch 掉——源库 503、拿不到 schema 时这是**唯一**的 concat 编辑入口，等于第二个字段名根本敲不进去。
+- 修法：`IntegrationMappingTransformArgs.vue:103`（`concatFieldsDraft = ref(...)`）+ `:109-112`（`onConcatFieldsText` 先写草稿再写数组）+ `:114-118`（`watch(() => props.args.concatFields, { deep: true })` 只在「外部改动使 `parse(draft)` 与数组不再相等」时回填），模板 `:38-47` 改绑草稿。
+- 补测（`IntegrationMappingRulesSection.spec.ts`，用 `reactive()` mapping）：
+  - `keeps a trailing comma the operator just typed in the concat fallback input` — 连发 `spec`、`spec,` 后断言 `input.value === 'spec,'`，再写一次兄弟字段 `concatSeparator` 强制重渲染，仍是 `spec,`，最后 `spec,color` 解析成两项。
+  - `re-syncs the concat fallback input when the field list changes from OUTSIDE the input` — 外部把数组换成 `['color','size']` 后草稿跟着变成 `color, size`（证明修法没有把外部变更也锁死）。
+
+### 5.2 F01 + F11 — 有损项补登记
+
+- `integrationMappingTransform.ts:261-270` 的 KNOWN LOSS 注释从 2 项扩到 4 项，新增 `pattern.params.flags`（`validator.cjs:85-97` 用它 `new RegExp(pattern, flags)`）与任意规则的 `message`（`validator.cjs:59` 优先用它）。
+- 设计文档 §5 同步这四项，并写明「有损方向是安全的那一侧」。
+- 用例 `F01/F11: pattern flags and custom messages are DROPPED on read — the loss is asserted, not hidden`：先用真校验器证明**原始** payload 是大小写不敏感且用自定义文案，再证明**读回重发**后变成大小写敏感、退回引擎默认文案。有损行为被钉住而不是被描述。
+
+### 5.3 F02 — 参数优先级严格照抄引擎
+
+- `integrationMappingTransform.ts:298-303`：`isPlainObject(step.args) ? step.args : step`（原为 `{ ...step, ...nested }` 合并）。引擎 `normalizeTransformStep`（`transform-engine.cjs:131`）是**整体替换**。
+- `integrationMappingTransform.ts:321-331`：`ruleParam` 改成顶层优先、params 其次，与 `normalizeRule`（`validator.cjs:42-46`「先复制 params 再用顶层覆盖」）同序。
+- 两条对照用例都**跑真引擎**取期望值：
+  - `F02: a step carrying BOTH args.* and top-level keys is read the way the engine reads it`（含判别用例 `{ args:{unrelated:1}, format:'date' }` → 引擎给整条 ISO，编辑器必须显示 iso）
+  - `F02: a rule carrying BOTH a top-level and a params value is read the way the validator reads it`（`regex:'^TOP$'` vs `params.regex:'^NESTED$'` → 顶层赢）
+
+### 5.4 F04 / F08 — 映射级默认值文案与语义
+
+- `IntegrationMappingRulesSection.vue:155`（placeholder）与 `:157-163`（帮助文案）改为「来源为缺失/null/空字符串时生效；纯空格不算，需要请改用 defaultValue 转换步骤；值按字符串写入」。
+- 用例 `F04/F08: the mapping-level default does NOT fire on a whitespace-only source value` 用真引擎钉住四种取值：`'   '` 保持原样、`''` 与缺失字段被顶上、纯空格经 `defaultValue` **步骤**才会被顶上。
+- 说明：这条用例钉的是引擎语义（`isBlank` 与 `isBlankAfterTrim` 的差别），属于「引擎变了就红」的对照件，不是我方守卫，因此没有对应的变异探针——文案与它一致就是全部主张。
+
+### 5.5 F07 — build 报错带行号
+
+- `integrationMappingTransform.ts:231-253`：`buildFieldMappingPayload` 外层 try/catch，前缀 `第 N 条清洗规则（目标字段）：`，原文完整保留；目标/来源都空时用「未命名字段」。
+- 用例 `F07: a build error names the row and keeps the original message verbatim`，同时断言 `pattern 正则无效` 子串仍在（§3 那条用例因此不红）。
+
+### 5.6 终审指出的盲区 — 存库→回读→引擎整链
+
+- 用例 `survives the API layer: normalizeFieldMappings -> transformRecord keeps chains and pins null defaults`：直接 `require` 注册层的 `pipelines.cjs` `__internals.normalizeFieldMappings`（不改 `plugins/`），把 UI payload 过一遍再喂 `transformRecord`。
+- 钉住两件事：数组形转换链原样透传；**未填默认值的行在存库后变成 `defaultValue: null` 自有键**，于是同一行的缺值结果从存前的 `undefined` 变成存后的 `null`。设计文档新增 §5.1 记录这一跳。
+
+### 5.7 本轮命令与退出码
+
+| 命令（cwd） | 退出码 | 结果 |
+| --- | --- | --- |
+| `npx vitest run tests/integrationMappingTransformParity.spec.ts`（`apps/web`） | 0 | `27 passed (27)`（原 21 + 新 6） |
+| `npx vitest run tests/IntegrationMappingRulesSection.spec.ts`（`apps/web`） | 0 | `12 passed (12)`（原 10 + 新 2） |
+| 四个 spec 一次跑（`apps/web`） | 0 | `Test Files 4 passed (4) / Tests 198 passed (198)` |
+| `pnpm --filter web run type-check`（worktree 根） | 0 | 三个 tsconfig 全过 |
+| `pnpm --filter web run lint`（worktree 根） | 0 | 同 §1 说明：改动文件不在该脚本的显式清单内 |
+
+`tests/IntegrationWorkbenchView.spec.ts` 仍是一行未改的 52 条全绿，`tests/ui-foundation-style-guard.spec.ts` 107 条全绿。
+
+### 5.8 本轮变异探针（同样是内存改写 + 逐字节还原）
+
+| 探针 | 改坏了什么 | spec | 退出码 | 变红的测试 |
+| --- | --- | --- | --- | --- |
+| F06 | 回退输入改回绑派生值 `args.concatFields.join(', ')` + 不写草稿（**即修复前的原始实现**） | section | 1 | `keeps a trailing comma the operator just typed in the concat fallback input` |
+| F02a | 步骤参数改回 `{ ...step, ...args }` 合并 | parity | 1 | `F02: a step carrying BOTH args.* and top-level keys is read the way the engine reads it` |
+| F02b | 规则参数改回 params 优先 | parity | 1 | `F02: a rule carrying BOTH a top-level and a params value is read the way the validator reads it` |
+| F07 | 去掉行号前缀，直接 `throw error` | parity | 1 | `F07: a build error names the row and keeps the original message verbatim` |
+| API 层 | 映射级默认值无条件下发（去掉「只在填了才发」） | parity | 1 | `is byte-identical to the pre-G27 payload for an untouched row` / `adds the mapping-level defaultValue only when authored` / `survives the API layer: normalizeFieldMappings -> transformRecord keeps chains and pins null defaults` |
+
+F06 那条探针值得单独说：它把代码改成的正是**修复前的实现**，红的正是新增的回归用例——即「这个 bug 如果再回来，测试会抓住」。还原后 `git status --porcelain` 与改之前一致，随后四个 spec 重跑 198 passed。
+
+## 6. 环境噪声（与本次改动无关）
 
 - vitest 启动时的 `WebSocket server error: Port is already in use` 每次都有，与本机另一个 vite 进程抢端口有关，不影响用例结果。
 - `IntegrationWorkbenchView.spec.ts` 的 stderr 里有大量 `Failed to resolve component: el-icon / el-tooltip` 与 `SQLSERVER_TEST_FAILED: TLS/SSL ...` 字样，都是该 spec 既有的 mock 数据与未注册的 Element Plus 全局组件产生的，改动前后一致，用例本身 52/52 绿。

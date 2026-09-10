@@ -152,10 +152,14 @@
               <input
                 v-model="mapping.defaultValueText"
                 :data-testid="`mapping-default-value-${index}`"
-                placeholder="缺值默认值（转换前生效）"
+                placeholder="缺值默认值（来源缺失/null/空字符串时生效）"
               />
+              <!-- F04/F08: the engine's isBlank() is undefined/null/'' ONLY — a whitespace-only
+                   source value does NOT trigger the mapping-level default (the defaultValue
+                   STEP does, because it also checks isBlankAfterTrim). Say so instead of the
+                   ambiguous "取到空值". -->
               <small class="integration-workbench__field-help" :data-testid="`mapping-rules-help-${index}`">
-                正则与枚举只在填写时才下发；默认值在来源取到空值时先顶上，再进入转换链。
+                正则与枚举只在填写时才下发；默认值在来源为缺失/null/空字符串时生效，纯空格不算，需要请改用 defaultValue 转换步骤；值按字符串写入，随后仍会进入转换链。
               </small>
             </div>
           </div>

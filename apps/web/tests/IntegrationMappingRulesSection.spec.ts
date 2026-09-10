@@ -193,6 +193,53 @@ describe('IntegrationMappingRulesSection (unit)', () => {
     expect(mapping.transformArgs.concatFields).toEqual(['spec', 'color'])
   })
 
+  // F06 regression (#5596): the fallback input used to bind `:value` to
+  // `args.concatFields.join(', ')`. Because the parse drops the empty tail, typing `spec,` left
+  // the derived string at `spec`, and the next deep-reactive re-render patched the comma away
+  // mid-typing — i.e. you could not type a second field name at all. This is the ONLY concat
+  // authoring path when the source schema is unavailable (source DB 503), so it had to be a
+  // controlled draft, not a derived value.
+  it('keeps a trailing comma the operator just typed in the concat fallback input', async () => {
+    const mapping = reactive(editable({ transformFn: 'concat' })) as EditableMapping
+    await mountSection(baseProps({ mappings: [mapping], transformOptions: TRANSFORM_OPTIONS, hasSourceFieldOptions: false }))
+    const input = testid<HTMLInputElement>('transform-args-0-concat-fields')!
+    input.value = 'spec'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(mapping.transformArgs.concatFields).toEqual(['spec'])
+
+    input.value = 'spec,'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    // The array is unchanged (the tail is empty), and that must NOT wipe the typed comma.
+    expect(mapping.transformArgs.concatFields).toEqual(['spec'])
+    expect(input.value).toBe('spec,')
+
+    // A sibling write on the same reactive mapping forces another render — still no wipe.
+    mapping.transformArgs.concatSeparator = '-'
+    await nextTick()
+    expect(input.value).toBe('spec,')
+
+    input.value = 'spec,color'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(mapping.transformArgs.concatFields).toEqual(['spec', 'color'])
+    expect(input.value).toBe('spec,color')
+  })
+
+  it('re-syncs the concat fallback input when the field list changes from OUTSIDE the input', async () => {
+    const mapping = reactive(editable({ transformFn: 'concat' })) as EditableMapping
+    await mountSection(baseProps({ mappings: [mapping], transformOptions: TRANSFORM_OPTIONS, hasSourceFieldOptions: false }))
+    const input = testid<HTMLInputElement>('transform-args-0-concat-fields')!
+    input.value = 'spec,'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    // e.g. a round-trip load replacing the parsed list — the draft must follow.
+    mapping.transformArgs.concatFields = ['color', 'size']
+    await nextTick()
+    expect(input.value).toBe('color, size')
+  })
+
   it('renders one chained-step editor per extra step, with its own fn and argument controls', async () => {
     // `reactive` because this test changes a step's fn AFTER mount and asserts the arg control
     // follows — in the view the array lives in a `ref`, which is deeply reactive the same way.

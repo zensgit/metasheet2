@@ -48,7 +48,7 @@ Scope: 前端到达率，**后端零改动**（`plugins/`、`packages/` 未触�
 
 | UI 输入 | payload 片段 | 引擎读法 |
 | --- | --- | --- |
-| 缺值默认值（行右侧） | `"defaultValue": "N/A"`，**只在填了才出现**，排在 `sortOrder` 之后 | `transformRecord` 在取到空值时先替换，**再**跑转换链（所以 `N/A` 还会被后续 `upper` 处理） |
+| 缺值默认值（行右侧） | `"defaultValue": "N/A"`，**只在填了才出现**，排在 `sortOrder` 之后 | `transformRecord` 在来源值 `isBlank`（**只有** `undefined` / `null` / `''`）时先替换，**再**跑转换链（所以 `N/A` 还会被后续 `upper` 处理） |
 | 必填 | `{ "type": "required" }` | 不变 |
 | 正则 | `{ "type": "pattern", "params": { "regex": "^MAT-\\d+$" } }` | `compilePattern` 读 `params.regex`（`validator.cjs:84-101`） |
 | 枚举 | `{ "type": "enum", "params": { "values": ["active","inactive"] } }` | `enumValues` 读 `params.values`；值保持字符串，`includesEnumValue` 会把数字 `10` 与字符串 `'10'` 视为相等 |
@@ -102,15 +102,35 @@ Scope: 前端到达率，**后端零改动**（`plugins/`、`packages/` 未触�
 
 （`dictMap` 空文本的旧守卫原样保留。）
 
+错误信息带行号（#5596 F07）：`buildMappings()` 是在一个 try 块里遍历所有行的，光看「concat 至少需要选择一个拼接字段」没法知道是哪一行。现在统一加前缀 `第 N 条清洗规则（目标字段）：`，原文完整保留在后面；目标字段与来源字段都空时退化成「未命名字段」。
+
 ## 5. 编辑器内往返（G08 的前置件）
 
 工作台目前**没有**从已保存 pipeline 回读映射的路径（视图里只有 `savedPipelineId`，没有把 `fieldMappings` 塞回 `mappings.value` 的地方），所以本次只做**纯函数级往返**：`editableMappingFromPayload(payload, id)`（`integrationMappingTransform.ts:311`）是 `buildFieldMappingPayload` 的逆。
 
 - 强方向（已断言）：任何 UI 能产出的 payload，`build(parse(payload)) === payload`。
 - 读入时**故意比写出时宽**：`{ steps: [...] }`、裸字符串步骤、`{ type: 'upper' }`、`{ fn, args: {...} }` 嵌套、扁平 `regex` / `allowedValues` / `min` 都能解析——这些是引擎合法但 UI 不写的形状，手写或旧数据也能载入。
-- 已知有损（写在测试里，不是静默）：`dictMap` 的可选 `defaultValue` 参数、`concat` 的 `values` / `includeCurrent` 没有控件，往返后会丢；UI 不认识的 `fn`（例如脏数据里的 `evalScript`）在读入时被**丢弃**，绝不带着一个 UI 编不出来的步骤继续存回去。
+- 读入时的**优先级严格照抄引擎**（#5596 F02 修正）：
+  - 步骤参数——`normalizeTransformStep`（`transform-engine.cjs:131`）里 `isPlainObject(step.args)` 为真时 `args` **整体替换**顶层，不是合并。所以 `{ fn:'toDate', args:{ unrelated:1 }, format:'date' }` 的 `format` 引擎根本不看，编辑器也必须显示「ISO 日期时间」。
+  - 规则参数——`normalizeRule`（`validator.cjs:42-46`）先复制 `rule.params` 再把顶层散键覆盖进去，冲突时**顶层赢**。所以 `{ type:'pattern', regex:'^TOP$', params:{ regex:'^NESTED$' } }` 取 `^TOP$`。
+  两条都有拿真引擎/真校验器跑出来的对照用例（不是照着我的理解写的期望值）。
+- 已知有损（每一条都有断言，不是静默）：
+  1. `dictMap` 的可选 `defaultValue` 参数；
+  2. `concat` 的 `values` / `includeCurrent`；
+  3. **`pattern` 的 `params.flags`**（#5596 F01）——校验器是 `new RegExp(pattern, flags)`（`validator.cjs:85-97`），所以一条 `flags:'i'` 的规则读回再存就变成大小写敏感；
+  4. **任意规则的自定义 `message`**（#5596 F11）——`makeError` 优先用 `rule.message`（`validator.cjs:59`），读回再存就退回引擎默认文案。
+  以上四项都没有编辑器控件，读入时**丢弃**；UI 不认识的 `fn`（例如脏数据里的 `evalScript`）同样被丢弃，绝不带着一个 UI 编不出来的步骤继续存回去。要保留它们，目前只能不经编辑器直接写 payload。
 
-这是刻意的方向性：读得宽只影响编辑器里显示什么，**写口没有放宽**——写出去的永远是上面第 3 节那张表里的形状，且经过白名单与 build 期守卫。
+这是刻意的方向性：读得宽只影响编辑器里显示什么，**写口没有放宽**——写出去的永远是上面第 3 节那张表里的形状，且经过白名单与 build 期守卫。有损的方向也是安全的那一侧：编辑器绝不声称自己拿着一个显示不出来的东西，也绝不把一条只理解了一半的规则再发回去。
+
+### 5.1 存库这一跳会改变什么（#5596 终审补测）
+
+UI 的 payload 不是直接进引擎的，中间还有注册层 `normalizeFieldMappings`（`pipelines.cjs:181`）。它做两件对语义有影响的事：
+
+- **没填默认值的行会被写成 `defaultValue: null` 自有键**（`pipelines.cjs:201`）。而 `transformRecord` 判的是 `hasOwnProperty`（`transform-engine.cjs:233`），所以「存之前」缺值得到 `undefined`，「存回来之后」同一行缺值得到 `null`。这条差异现在被钉在测试里，而不是留给生产环境去发现。
+- **数组形的转换链原样透传**（`optionalJson` 对数组走 `value.slice()`），存回来后 `transformRecord` 仍按链执行。
+
+对应用例：`survives the API layer: normalizeFieldMappings -> transformRecord keeps chains and pins null defaults`（直接 `require` 注册层，不改 `plugins/`）。
 
 ## 6. 改了哪些文件
 
@@ -129,6 +149,8 @@ Scope: 前端到达率，**后端零改动**（`plugins/`、`packages/` 未触�
 
 ## 7. 存疑 / 后续
 
-- 视图侧仍无「打开已保存 pipeline → 回填编辑器」的入口（G08）。逆函数已经就位并有测试，接上只差一个读接口调用。
+- 视图侧仍无「打开已保存 pipeline → 回填编辑器」的入口（G08）。逆函数已经就位并有测试，接上只差一个读接口调用。**接上之前**，§5 那四项有损只是「编辑器里看不见」；接上之后它们会变成「读一次再存一次就真丢了」，所以 G08 落地时应当先给 `pattern.flags` / `rule.message` 控件，或在回填时对带有这两项的规则加只读提示。
 - `concat` 的 `values`（字面量）与 `includeCurrent=false` 没有控件；`dictMap` 的 `defaultValue` 兜底同理。要不要给控件，取决于现场是否真的有人手写过这些形状。
+- 无 schema 时 concat 只能用逗号分隔的回退输入（#5596 F06 已修成受控草稿，尾随逗号不再被抹）。更好的做法是让源库 503 时也能手动补一份字段名清单，但那属于 schema 获取链路，不在本次范围。
+- 映射级默认值的 `null` 语义（§5.1）目前只是被钉住，没有 UI 呈现：编辑器无法区分「这一行从没设过默认值」和「设成了 null」。真做回填时要决定是否把 `null` 显示成空。
 - 映射级默认值目前按**字符串**下发（需要数字就在链上接一步 `toNumber`）。`pipelines.cjs` 的 `normalizeFieldMappings` 对该字段不做类型收敛（`mapping.defaultValue === undefined ? null : mapping.defaultValue`），所以将来要支持数字/布尔只是 UI 侧的事。
