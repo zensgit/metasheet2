@@ -140,7 +140,9 @@ POST /api/integration/stock-preparation/sandbox-target/ensure
 { "plm.stock-preparation.pull-bom.v1": { "target": "<把 data.targetBinding 整段贴在这里>" } }
 ```
 
-> r7 订正:若装了 customer pack,**不要真的"整段"覆盖**——ensure 只返回 33 个 TEMPLATE 字段(20 个 `plm_system` + 13 个人工列),不带 pack 的 21 个 `ext_` 列,直接整段贴会静默丢掉 `ext_` 映射。正确做法是**合并**:ensure 的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId,旧物理列 id 依然有效),动手前先备份 `app.env`。
+> r7 订正:若装了 customer pack,**不要真的"整段"覆盖**——ensure 只返回 33 个 TEMPLATE 字段(20 个 `plm_system` + 13 个人工列),不带 pack 的 21 个 `ext_` 列,直接整段贴会静默丢掉 `ext_` 映射。正确做法是**合并**:ensure 的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId,旧物理列 id 依然有效),动手前先备份 `app.env`。**不想手工拼 JSON**的话,ensure 建完表后用 `node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> --pack <packFile> --pack-id <id> --action-fragment` 离线算出已经合并好的 `{ target, extensionFieldIds }`,直接贴它的 `target`。
+>
+> **2026-09-10 订正**:补充上面这条脚本指向,并把下面§「排障速查」表里对应行的"整段贴回去"同步改成同一口径,避免速查表脱离本节上下文时误导操作员整段覆盖。
 
 **`objectId` 改了,`sheetId` 必须一起重算,不能留用既有那个。** 沙箱门(`assertStockPrepApplySandboxAllowed`)**只读 objectId**,而 apply 写哪张表、导出读哪张表**只看 `target.sheetId`** —— 两者互相独立。「objectId 换成沙箱、sheetId 留正式表那个」会让门放行、行却写进**正式主表**,正是 D1=B 要避免的那件事。`fieldIdMap` 同理(列 id = `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变整张表的列 id 全变),且**必须是完整一整份(含 13 个人工列)**。
 
@@ -295,7 +297,7 @@ POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/mvp-persis
 | **打开页面就 500** | 审计 CHECK 缺 `project_board_read` | 跑 §1-3 那条查询;缺就补 086 迁移。**这是本次最可能踩的雷**,且**不会**降级成友好的 503(脚注 [1]) |
 | 503 `STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE` | 数据库还不接受某个审计动作(目前只有接力链路由带这道友好守卫) | 报错体 `details.migration` 直接写了该跑哪支迁移,跑它 |
 | 403 `STOCK_PREP_APPLY_SANDBOX_ONLY` | 看 `reason`:`prod_canonical` = action 绑定还是 canonical;`sandbox_disabled` = env 没读到 `STOCK_PREP_SANDBOX_MODE=true`(`--update-env` 过没?);`target_not_allowlisted` = 三处 objectId 不一致 | 回 §2 |
-| `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` / `_NOT_OWNED` / `_HUMAN_FIELDS_UNBOUND` / `_NOT_PROVISIONED` / `_OWNER_UNKNOWN` / `_FIELDS_UNRESOLVED` / `_INVALID` | 结转目标表不属于本部署项目,或人工列没绑全 | **修法都是重跑 §2-2 的 ensure**,再把返回的 `targetBinding` 整段贴回去 |
+| `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` / `_NOT_OWNED` / `_HUMAN_FIELDS_UNBOUND` / `_NOT_PROVISIONED` / `_OWNER_UNKNOWN` / `_FIELDS_UNRESOLVED` / `_INVALID` | 结转目标表不属于本部署项目,或人工列没绑全 | **修法都是重跑 §2-2 的 ensure**——装了 customer pack 时**不要**把返回的 `targetBinding` 整段贴回去,按 §2-2 的「r7 订正」与 `targetBinding` 合并(或用 `stock-preparation-derive-target-binding.mjs --pack` 直接算出合并结果);没装 pack 才能整段贴回去 |
 | `TARGET_SCHEMA_INCOMPLETE` | 表在,但 `ext_` 列没装齐 | 照预检 `fix.run` 装列;装列和写行是**两道独立授权** |
 | 页面显示「**当前账号没有做这件事的权限。**」 | 服务端回的是 `FORBIDDEN`(大 BOM 通道里最常见) | 多半 `stock-prep:read` 没给全或准入没开 → §3;大 BOM 八条路由已随 #5460 开到一线层,还 403 就是权限没配对 |
 | 403 `LARGE_BOM_JOB_ACTOR_MISMATCH`(只在「技术详情(排障用)」里能看到) | 大 BOM 任务属于另一个人 | 用**建任务的那个账号**继续,别换人接手 |

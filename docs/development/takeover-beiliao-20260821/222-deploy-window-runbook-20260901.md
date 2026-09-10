@@ -105,7 +105,9 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 3. **Step 1-2 订正**:222 上 PATH 里没有 `pg_dump`/`psql`,需要用完整路径 `C:\Program Files\PostgreSQL\17\bin\pg_dump.exe`(本地 Postgres 17,监听 5432 端口;`postgresql-x64-17` 服务在服务列表里显示 Stopped,但服务器实际在监听——不要去"启动"它)。今天的 DB 快照:`C:\metasheet\output\backups\upgrade-backup-20260903-135009\pre-upgrade-db.dump`(2.0 MB);脚本自带的代码备份:`upgrade-backup-20260903-140619`(docker/config/dist/web dist/plugins)。
 4. **时间线与验收**:停机 14:06:18 → 健康检查 OK 14:08:55(约 2.5 分钟);F22 must-exist 清单 OK,插件 hash 校验 OK(436 个文件),node_modules 泄漏检查 OK;执行的迁移:`079`、`080`、`081`、`082`、`084`、`085`、`086`,以及 `zzzz20260830200000`/`211000`/`220000`/`230000`、`zzzz20260831090000`、`zzzz20260902120000`;audit CHECK 现在列出 `handoff_advance` 和 `project_board_read`;`integration_stock_prep_handoff` 表存在;`attendance_records`/`approval_instances` 行数不变(0/0)。**in-place 脚本不会刷新 `C:\metasheet\BUILD_PROVENANCE.json`**——升级完成后要手动从包根目录把新的 `BUILD_PROVENANCE.json` 拷过去(旧的已存到备份目录,存为 `BUILD_PROVENANCE.r6.json`),否则 Step 3-1 读到的还是旧提交。
 5. **远程执行注意事项**:一次性 `ssh 192.168.1.222 powershell -Command "..."` 遇到引号会出问题;改用 `powershell -NoProfile -EncodedCommand <脚本的 UTF-16LE base64>`(例如用 Node 生成:`Buffer.from(script,'utf16le').toString('base64')`)。
-6. **升级完成后待办(需要 admin Bearer token;preflight 路由在没有 token 时返回 401 UNAUTHORIZED)**:针对**已存在**的 objectId `plm_stock_preparation_sandbox_r6_trial` 重新推导沙箱绑定——调用 `POST /api/integration/stock-preparation/sandbox-target/ensure`(当前绑定的 `sheet_32df959afa3cecfa564e5486` 缺少 #5447 新增的五个部门列 `makeOrBuy`/`procurementDone`/`procurementReplyDate`/`warehouseDone`/`actualArrivalDate`),把返回的 `data.targetBinding` 贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`,`pm2 restart metasheet-backend --update-env`,再用 `GET /api/integration/stock-preparation/preflight` 确认 `ready:true`。222 上已有一个做这件事的辅助脚本(token 从文件读取,不会回显):`C:\metasheet\output\releases\incoming\222-rebind-sandbox-target.ps1`。
+6. **升级完成后待办(需要 admin Bearer token;preflight 路由在没有 token 时返回 401 UNAUTHORIZED)**:针对**已存在**的 objectId `plm_stock_preparation_sandbox_r6_trial` 重新推导沙箱绑定——调用 `POST /api/integration/stock-preparation/sandbox-target/ensure`(当前绑定的 `sheet_32df959afa3cecfa564e5486` 缺少 #5447 新增的五个部门列 `makeOrBuy`/`procurementDone`/`procurementReplyDate`/`warehouseDone`/`actualArrivalDate`),**不要**把返回的 `data.targetBinding` 直接整段贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`——它只有 33 个 TEMPLATE 字段,不含 customer pack 的 `ext_` 列,直接贴会替换掉旧配置里的 `ext_*` 条目(见下面第 8 条的订正,合并口径 33+21=54),要先按第 8 条合并再贴,再 `pm2 restart metasheet-backend --update-env`,用 `GET /api/integration/stock-preparation/preflight` 确认 `ready:true`。222 上已有一个做这件事的辅助脚本(token 从文件读取,不会回显):`C:\metasheet\output\releases\incoming\222-rebind-sandbox-target.ps1`(**该脚本当天没有做 ext_ 合并**,今天是靠第 8 条另外的一次性合并脚本补上的,下一窗口用它前先确认它是否已经把合并逻辑接进去)。
+
+   > **2026-09-10 订正**:本条此前只写"把返回的 `data.targetBinding` 贴进"配置,未提示会丢 `ext_` 列,与本节第 8 条的订正矛盾——已补上合并口径的指向。
 7. **管理员 token 怎么来的**:用仓库自带的 `scripts/ops/attendance-window-runner-mint-token.mjs`(需复制到 `C:\metasheet\packages\core-backend\scripts\` 下,`import('pg')` 才能解析)——先 `node <它> --find-admin` 找到已存在的活跃 admin 账号,再 `node <它> --mint --user-id <id> --roles admin --expires-in 3600 --tenant-id default` 用宿主机自己的 `JWT_SECRET` 现签一份 HS256 token(用完删掉这个脚本副本);全程不碰密码,secret 也不离开宿主机。**用 `--tenant-id default` 签发后,令牌自带 tenant claim**(本次部署的唯一 org id);请求头 `x-tenant-id` 仍可以继续带,但不再是租户来源。等 flag 开启后,不带 tenant claim 的令牌会被备料相关 admin 路由直接 403。
 8. **Step 0-7 订正**:`POST /api/integration/stock-preparation/sandbox-target/ensure` 返回的 `targetBinding` **只有 33 个 TEMPLATE 字段**(20 个 `plm_system` + 13 个人工列,含 #5447 的部门列),**不带** customer pack 的 21 个 `ext_` 列。把它"整段"贴进去会**替换掉**原有 action 配置里的 `fieldIdMap`,`ext_` 列(领料节点/备料日期/毛胚尺寸等)静默变成无法解析。**正确做法是合并**:ensure 返回的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId ⇒ 旧的物理列 id 依然有效;今天是 33 + 21 = 54)。今天用了一次性 node 脚本做合并(`output/releases/incoming/tools-r7/merge-ext.cjs`);动手前先备份 `app.env`(今天存了两份:`app.env.before-rebind-20260903-143232` 与 `app.env.before-extmerge-20260903063616`)。合并后:`pm2 restart --update-env`,预检确认 `ready:true`、`checks.carryTargetBinding.ownershipState=owned_by_this_project`、没有 `missingHumanFields`。
 9. **#5452(统一 SQL 连接绑定,2026-09-03 已合入)带来一个新 blocker**:`data-source:sql-readonly` 外部系统现在要求 `integration_external_systems.connection_id` 非空;该迁移只回填了 `config` 里带服务端打上的 `dataSourceOwnerId` 那些行——r6 时代的两条(`Customer PLM readonly` `104e9bad`、`Synthetic PLM readonly` `7130b124`)都没有这个标记,于是 source-preflight 报 `CONNECTION_LEGACY_FALLBACK_DENIED`。**修法(走认可路径,带 admin token + `x-tenant-id`)**:先 `GET /api/integration/external-systems/:id`,再用同样的公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`)加上 `connectionId = config.dataSourceId`(分别是 `customer-plm-test` / `synthetic-plm`)调 `POST /api/integration/external-systems`。用 `select id, connection_id from integration_external_systems` 核验。
@@ -182,22 +184,25 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
      两者是**互相独立的字段**。于是"objectId 换成沙箱、sheetId 留着正式表那个"的组合会让沙箱门放行,然后**把行写进正式主表**——挂着沙箱的名,干着正式表的事,正好是 D1=B 要避免的那件事。
 
-     **正确做法,一条路,别的都别走**:调 ensure,把它**返回的 `targetBinding` 整段**贴进 action 配置。这个接口就是本仓库认可的绑定生成器——它建表(或确认表已在)、写好所有权登记行,然后把该贴的东西原样给你。
+     **正确做法**:调 ensure 建表(或确认表已在)、写好所有权登记行;它返回的 `data.targetBinding` **只有 33 个 TEMPLATE 字段**(20 个 `plm_system` + 13 个人工列),**不含 customer pack 的 `ext_` 列**——**不能把它整段贴进 action 配置去替换原有的 `fieldIdMap`**,那会让 `ext_` 列(领料节点/备料日期/毛坯尺寸等)静默变成无法解析。若这次窗口没装 customer pack,ensure 的输出就是完整的,可以直接贴;**若装了 pack,必须合并**再贴。
 
      ```
      POST /api/integration/stock-preparation/sandbox-target/ensure
      { "objectId": "<本窗口沙箱 objectId>", "label": "<表名>" }
      ```
-     响应里的 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`,**整段**贴进:
+     响应里的 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`。**合并口径**:`sheetId`/`objectId`/`keyField` 与 33 列 `fieldIdMap` 一律用这次 ensure 的输出(objectId 一变,`fld_+sha1(projectId:objectId:fieldId)` 全变,旧的 33 列条目不能沿用);但**同一 sheet/objectId 下旧配置里的 `ext_*` 条目物理列 id 依然有效**,必须把它们并进新的 `fieldIdMap`,不能丢。合并后贴:
      ```json
-     { "plm.stock-preparation.pull-bom.v1": { "target": "<把 data.targetBinding 整段贴在这里>" } }
+     { "plm.stock-preparation.pull-bom.v1": { "target": "<合并后的 targetBinding,而非 ensure 原始输出>" } }
      ```
+     **推荐做法是不要手工做 JSON 合并**:装了 pack 时,ensure 建完表之后,用 `scripts/ops/stock-preparation-derive-target-binding.mjs` 带上 `--pack <packFile>`(见下面的离线段落)离线算出**已经合并好**的 `{ target, extensionFieldIds }`,把它的 `target` 整段贴进 action 配置——这份输出的 `fieldIdMap` 是脚本按同一套哈希公式重算的 33 + pack 的 `ext_` 列全集,不是"ensure 输出 + 手工拼接",不会漏列也不会贴错物理列 id。
 
-     两件事都必须来自这次输出,不能手改:
+     两件事都必须来自这次(合并后的)输出,不能手改:
      - `sheetId` —— apply 写哪张表、导出读哪张表都只看它;
-     - `fieldIdMap` —— 物理列 id 是 `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变**整张表的列 id 全变**,沿用旧 map 会让写入落到不存在的列上。而且**必须是完整的一整份**(含 13 个人工列),少一列结转会在部署期被 `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` 拦下。
+     - `fieldIdMap` —— 必须是完整的一整份(33 个 TEMPLATE 列 + 已装 pack 的全部 `ext_` 列;含 13 个人工列),少一列结转会在部署期被 `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` 拦下。
 
-     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> --action-fragment` 能算出**同样**的绑定。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒。)
+     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> [--pack <packFile> --pack-id <id>] --action-fragment` 能算出**同样**的绑定;带上 `--pack` 时输出已经是与 customer pack 的 `ext_` 列合并好的完整映射,不带 `--pack` 只算 33 列 TEMPLATE 部分。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒。)
+
+     > **2026-09-10 订正**:本节此前写的是"调 ensure,把它返回的 `targetBinding` 整段贴进 action 配置,一条路,别的都别走",与文末 r7 实际执行记录第 8 条(:110 附近)矛盾且会丢客户 pack 的 21 个 `ext_` 列——已按第 8 条的合并口径改写为上面这版,并补充指向 `stock-preparation-derive-target-binding.mjs --pack` 这个可以直接产出合并结果的脚本,避免手工 JSON 拼接出错。依据:该脚本已支持 `--pack`/`--pack-id`(`scripts/ops/stock-preparation-derive-target-binding.mjs`),以及本文件 :110 的 r7 实际记录(33+21=54)。
 
      不写 `target.objectId`(或写错)会默认成 canonical(`stock-preparation-table-actions.cjs:147-157`),导致 Step 6-2 在 `assertStockPrepApplySandboxAllowed` 那一步被无条件拒绝(`reason: prod_canonical`)。
   3. 若这次窗口装了 customer pack,确认 pack 配置(`INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH` 指向的文件)里的 `targetObjectId` 是**同一个**沙箱 objectId——这条本来就只允许沙箱命名空间(`stock-preparation-customer-pack.cjs:269-285` 的 `normalizePackTargetObjectId`),不需要为 D1=B 额外改,只需要核对三处(env 允许清单、action 绑定、pack 目标)用的是同一个字符串,不是三个不同的沙箱 objectId。
