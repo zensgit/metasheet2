@@ -52,7 +52,7 @@ function codedGateRefusal(error: unknown): { status: number; code: string; messa
 }
 
 /**
- * #5595 — opt-in for the EXPENSIVE schema listing (`?includeColumns=1` / `?detail=full`).
+ * 2026-09-10 222 PLM 504 — opt-in for the EXPENSIVE schema listing (`?includeColumns=1` / `?detail=full`).
  * Deliberately strict and default-OFF: anything unrecognised (including `includeColumns=0`,
  * `detail=list`, or an array from a repeated query param) means the cheap list-only listing.
  */
@@ -1211,7 +1211,7 @@ export function dataSourcesRouter(): Router {
         await manager.connectDataSource(req.params.id)
       }
 
-      // #5595: LIST-ONLY by default. The UI's "库表结构" panel is a two-step flow (pick a table →
+      // 2026-09-10 222 PLM 504: LIST-ONLY by default. The UI's "库表结构" panel is a two-step flow (pick a table →
       // read its fields), so the listing never needed every table's columns; on the customer PLM
       // (several hundred tables) the old 4N+2 fan-out ran past nginx's proxy_read_timeout and the
       // browser got a 504 HTML page instead of an answer. `?includeColumns=1` (or `?detail=full`)

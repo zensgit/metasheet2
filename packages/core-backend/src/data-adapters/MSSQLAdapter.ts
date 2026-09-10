@@ -482,7 +482,7 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   /**
-   * LIST-ONLY BY DEFAULT (#5595). Two INFORMATION_SCHEMA queries (tables + views), issued in
+   * LIST-ONLY BY DEFAULT (2026-09-10 222 PLM 504). Two INFORMATION_SCHEMA queries (tables + views), issued in
    * parallel — no per-table fan-out. Each entry carries name/schema with `columns: []` and the
    * explicit `columnsLoaded: false` marker; columns come from getTableInfo()/`GET /:id/tables/:t`
    * for the ONE table the operator picked. `includeColumns: true` restores the old 4N+2 shape for

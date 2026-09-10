@@ -1,7 +1,7 @@
 /**
  * Wall-clock budget for the EXPENSIVE schema listing (getSchema({ includeColumns: true })).
  *
- * Background (#5595): `getSchema()` used to read every table's columns/keys/indexes, i.e. 4N+2
+ * Background (2026-09-10 222 PLM 504): `getSchema()` used to read every table's columns/keys/indexes, i.e. 4N+2
  * round trips. On the customer PLM SQL Server (222, 2026-09-10) `GET /api/data-sources/plm/schema`
  * ran past nginx's proxy_read_timeout four times in a row — `upstream timed out (10060)` → 504 with
  * an HTML error body the UI cannot explain. The listing itself is now list-only by default; the
@@ -14,8 +14,26 @@
 
 export const SCHEMA_DETAIL_BUDGET_ENV = 'DATA_SOURCE_SCHEMA_DETAIL_BUDGET_MS'
 
-/** Kept comfortably under a typical nginx proxy_read_timeout (60s) and the 222 deployment's own. */
+/**
+ * Default budget for the OPT-IN route path (`?includeColumns=1` / `?detail=full`).
+ *
+ * Sizing, stated as what is actually checkable: the proxy configs IN THIS REPO are
+ * `proxy_read_timeout 300s` (docker/nginx.conf:63, ops/nginx/multitable-onprem.conf.example:20).
+ * The 222 deployment's effective value has NOT been read off that machine — do not treat 25s as
+ * "just under the proxy". It is a deliberately small default for a route nothing in-tree calls:
+ * a caller that opts into the several-hundred-round-trip listing gets a coded, explainable refusal
+ * quickly instead of holding a pooled connection for minutes. Raise it per deployment with
+ * DATA_SOURCE_SCHEMA_DETAIL_BUDGET_MS (or pass budgetMs explicitly; <= 0 disables it, which is what
+ * the plugin facade does to keep its pre-existing unbounded behaviour — see data-source-plugin-facade.ts).
+ */
 export const DEFAULT_SCHEMA_DETAIL_BUDGET_MS = 25_000
+
+/**
+ * Explicit "no budget" value. Passing this is how a caller says "I am NOT behind the /schema route
+ * and I keep the pre-change unbounded behaviour" — an in-range (25s–300s) listing that used to
+ * succeed must not start hard-failing just because a budget was introduced elsewhere.
+ */
+export const SCHEMA_DETAIL_BUDGET_DISABLED = 0
 
 export const SCHEMA_DETAIL_TIMEOUT_CODE = 'SCHEMA_DETAIL_TIMEOUT'
 

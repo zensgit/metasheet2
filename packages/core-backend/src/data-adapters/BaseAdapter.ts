@@ -116,7 +116,7 @@ export interface QueryResult<T = Record<string, DbValue>> {
 export interface SchemaFetchOptions {
   /**
    * true = also read every table's columns/keys/indexes (one round trip set PER TABLE — the
-   * pre-#5595 behaviour). Only for callers that consume `columns` off the listing itself.
+   * pre-2026-09-10 behaviour). Only for callers that consume `columns` off the listing itself.
    */
   includeColumns?: boolean
   /**
@@ -135,7 +135,7 @@ export interface SchemaInfo {
    * How much of this listing was actually read from the source.
    *  - 'list': names/schemas only — every entry's `columns` is EMPTY BY CONSTRUCTION and
    *    `columnsLoaded` is false. Read a single table's columns with getTableInfo().
-   *  - 'full': per-table columns/keys/indexes were read (the pre-#5595 behaviour).
+   *  - 'full': per-table columns/keys/indexes were read (the pre-2026-09-10 behaviour).
    * Optional so adapters that never had an N+1 listing (HTTP/Redis/Elasticsearch) stay untouched.
    */
   detail?: 'list' | 'full'
@@ -262,7 +262,7 @@ export abstract class BaseDataAdapter extends EventEmitter {
   abstract delete<T = Record<string, DbValue>>(table: string, where: WhereClause): Promise<QueryResult<T>>
 
   // Schema operations
-  // `options` is optional everywhere: OMITTING it means the cheap list-only listing (#5595 — a
+  // `options` is optional everywhere: OMITTING it means the cheap list-only listing (2026-09-10 222 PLM 504 — a
   // per-table fan-out on a several-hundred-table PLM/ERP database ran past nginx's
   // proxy_read_timeout and answered 504). Callers that genuinely need every table's columns in one
   // shot must ASK for it (`{ includeColumns: true }`) so no caller can silently receive empty

@@ -279,7 +279,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     return this.query<T>(sql, whereClause.params)
   }
 
-  /** LIST-ONLY BY DEFAULT (#5595) — see MSSQLAdapter.getSchema for the full rationale. */
+  /** LIST-ONLY BY DEFAULT (2026-09-10 222 PLM 504) — see MSSQLAdapter.getSchema for the full rationale. */
   async getSchema(schema: string = 'public', options?: SchemaFetchOptions): Promise<SchemaInfo> {
     const includeColumns = options?.includeColumns === true
     // Started BEFORE the listing queries — the budget bounds the WHOLE call (see MSSQLAdapter).

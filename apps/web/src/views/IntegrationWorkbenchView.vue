@@ -441,7 +441,7 @@ import PageHeader from '../components/layout/PageHeader.vue'
 import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../services/integration/errorCodeLabels'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { getDataSourceSchema, listDataSources } from '../data-sources/api'
-import type { DataSourceListItem, DataSourceTableInfo } from '../data-sources/types'
+import type { DataSourceListItem, DataSourceSchemaInfo, DataSourceTableInfo } from '../data-sources/types'
 import {
   canReadFromSystem,
   canWriteToSystem,
@@ -983,23 +983,38 @@ function qualifiedBridgeObjectName(item: DataSourceTableInfo): string {
   return `${schema}.${name}`
 }
 
-function bridgeObjectLabel(item: DataSourceTableInfo, kind: 'table' | 'view'): string {
+/**
+ * 「N 列」只有在真的读过列时才允许显示。GET /api/data-sources/:id/schema 默认只列名字
+ * (SchemaInfo.detail==='list' / 每项 columnsLoaded===false),`columns` 是空数组 BY
+ * CONSTRUCTION;把 `[]` 当成 length=0 会把「没读」显示成「这张表没有字段」——错信息,
+ * 不是慢信息。返回 null 时下面两个消费点走的是既有的「不显示列数」分支。
+ */
+function bridgeObjectColumnCount(item: DataSourceTableInfo, detail?: DataSourceSchemaInfo['detail']): number | null {
+  if (item.columnsLoaded === false || detail === 'list') return null
+  return Array.isArray(item.columns) ? item.columns.length : null
+}
+
+function bridgeObjectLabel(item: DataSourceTableInfo, kind: 'table' | 'view', detail?: DataSourceSchemaInfo['detail']): string {
   const value = qualifiedBridgeObjectName(item)
   const prefix = kind === 'view' ? '视图' : '表'
-  const columnCount = Array.isArray(item.columns) ? item.columns.length : null
+  const columnCount = bridgeObjectColumnCount(item, detail)
   return columnCount === null ? `${prefix} · ${value}` : `${prefix} · ${value} · ${columnCount} 列`
 }
 
-function buildBridgeObjectOptions(tables: DataSourceTableInfo[] | undefined, kind: 'table' | 'view'): BridgeDataSourceObjectOption[] {
+function buildBridgeObjectOptions(
+  tables: DataSourceTableInfo[] | undefined,
+  kind: 'table' | 'view',
+  detail?: DataSourceSchemaInfo['detail'],
+): BridgeDataSourceObjectOption[] {
   return (Array.isArray(tables) ? tables : [])
     .map((item) => {
       const value = qualifiedBridgeObjectName(item)
       if (!value) return null
       return {
         value,
-        label: bridgeObjectLabel(item, kind),
+        label: bridgeObjectLabel(item, kind, detail),
         kind,
-        columnCount: Array.isArray(item.columns) ? item.columns.length : null,
+        columnCount: bridgeObjectColumnCount(item, detail),
       }
     })
     .filter((item): item is BridgeDataSourceObjectOption => item !== null)
@@ -1019,8 +1034,8 @@ async function loadBridgeDataSourceObjects(connectionId: string): Promise<void> 
     const schema = await getDataSourceSchema(id)
     if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.connectionId.trim() !== id) return
     bridgeDataSourceObjectOptions.value = [
-      ...buildBridgeObjectOptions(schema.tables, 'table'),
-      ...buildBridgeObjectOptions(schema.views, 'view'),
+      ...buildBridgeObjectOptions(schema.tables, 'table', schema.detail),
+      ...buildBridgeObjectOptions(schema.views, 'view', schema.detail),
     ]
   } catch (error) {
     if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.connectionId.trim() !== id) return

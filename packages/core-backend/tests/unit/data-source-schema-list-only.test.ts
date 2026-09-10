@@ -1,5 +1,5 @@
 /**
- * #5595 — 「库表结构」listing is LIST-ONLY by default.
+ * 2026-09-10 222 PLM 504 — 「库表结构」listing is LIST-ONLY by default.
  *
  * Evidence this exists (222 nginx error.log, 2026-09-10): a tester clicked 「结构」 on the customer
  * PLM (SQL Server) and `GET /api/data-sources/plm/schema` answered nginx 504 FOUR times in a row —
@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
 
 import { MSSQLAdapter } from '../../src/data-adapters/MSSQLAdapter'
+import { MongoDBAdapter } from '../../src/data-adapters/MongoDBAdapter'
 import { MySQLAdapter } from '../../src/data-adapters/MySQLAdapter'
 import { PostgresAdapter } from '../../src/data-adapters/PostgresAdapter'
 import {
@@ -34,6 +35,7 @@ import {
 import type { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 import {
   DEFAULT_SCHEMA_DETAIL_BUDGET_MS,
+  SCHEMA_DETAIL_BUDGET_DISABLED,
   SCHEMA_DETAIL_BUDGET_ENV,
   SCHEMA_DETAIL_TIMEOUT_CODE,
   resolveSchemaDetailBudgetMs,
@@ -98,6 +100,42 @@ function mssqlAdapter(fp: ReturnType<typeof routingMssqlPool>): MSSQLAdapter {
   return adapter
 }
 
+/**
+ * Fake Mongo db: every per-collection read (getColumns' 100-document sample, getIndexes) is
+ * recorded, so a test can prove the default listing issues NONE of them — and that the
+ * includeColumns path walks the collections SEQUENTIALLY (the budget needs a checkpoint between
+ * collections; a Promise.all fan-out would have none).
+ */
+function fakeMongoAdapter(collections: string[]) {
+  const calls: string[] = []
+  const db = {
+    listCollections() {
+      calls.push('listCollections')
+      return { async toArray() { return collections.map(name => ({ name })) } }
+    },
+    collection(name: string) {
+      const cursor = {
+        limit() { return cursor },
+        async toArray() { calls.push(`sample:${name}`); return [{ _id: 1, code: 'A' }] },
+      }
+      return {
+        find() { return cursor },
+        async indexes() { calls.push(`indexes:${name}`); return [{ name: '_id_', key: { _id: 1 }, unique: true }] },
+      }
+    },
+  }
+  const adapter = new MongoDBAdapter({
+    id: 'mongo', name: 'mongo', type: 'mongodb',
+    connection: { database: 'plm' } as DataSourceConfig['connection'],
+    options: { autoConnect: false },
+  })
+  const internal = adapter as unknown as { client: unknown; db: unknown; connected: boolean }
+  internal.db = db
+  internal.client = { db: () => db }
+  internal.connected = true
+  return { adapter, calls }
+}
+
 const perTableQueries = (calls: string[]) =>
   calls.filter(sql =>
     sql.includes('INFORMATION_SCHEMA.COLUMNS') ||
@@ -105,7 +143,7 @@ const perTableQueries = (calls: string[]) =>
     sql.includes('sys.indexes') ||
     sql.includes('sys.foreign_keys'))
 
-describe('(A) getSchema default — list only, no per-table fan-out (#5595)', () => {
+describe('(A) getSchema default — list only, no per-table fan-out (2026-09-10 222 PLM 504)', () => {
   it('MSSQL: exactly TWO listing queries and ZERO per-table queries, whatever the table count', async () => {
     const fp = routingMssqlPool()
     const schema = await mssqlAdapter(fp).getSchema('dbo')
@@ -138,6 +176,35 @@ describe('(A) getSchema default — list only, no per-table fan-out (#5595)', ()
     expect(schema.tables[0].columns.map(c => c.name)).toEqual(['FItemID'])
     // `columnsLoaded` is left unset on the full path — absent means "legacy/loaded", and every
     // pre-existing consumer keeps reading `columns` exactly as before.
+    expect(schema.tables[0].columnsLoaded).toBeUndefined()
+  })
+
+  it('Mongo: default samples ZERO documents — listCollections only (its per-item cost is 100 docs)', async () => {
+    const { adapter, calls } = fakeMongoAdapter(['bom', 'item'])
+
+    const schema = await adapter.getSchema()
+
+    // getColumns() samples up to 100 documents PER collection and getIndexes() is another round
+    // trip; the default listing must issue neither.
+    expect(calls).toEqual(['listCollections'])
+    expect(schema.detail).toBe('list')
+    expect(schema.tables).toEqual([
+      { name: 'bom', columns: [], columnsLoaded: false, primaryKey: ['_id'] },
+      { name: 'item', columns: [], columnsLoaded: false, primaryKey: ['_id'] },
+    ])
+  })
+
+  it('Mongo: includeColumns:true samples every collection, SEQUENTIALLY (so the budget has a checkpoint)', async () => {
+    const { adapter, calls } = fakeMongoAdapter(['bom', 'item'])
+
+    const schema = await adapter.getSchema(undefined, { includeColumns: true })
+
+    // Interleaved (sample→indexes→sample→indexes), not batched: proves the per-collection work is
+    // serial, which is what lets assertWithinBudget() refuse between collections.
+    expect(calls).toEqual(['listCollections', 'sample:bom', 'indexes:bom', 'sample:item', 'indexes:item'])
+    expect(schema.detail).toBe('full')
+    expect(schema.tables.map(t => t.name)).toEqual(['bom', 'item'])
+    expect(schema.tables[0].columns.map(c => c.name)).toContain('code')
     expect(schema.tables[0].columnsLoaded).toBeUndefined()
   })
 
@@ -198,7 +265,7 @@ describe('(A) getSchema default — list only, no per-table fan-out (#5595)', ()
   })
 })
 
-describe('(B) includeColumns budget — the server refuses before the proxy does (#5595)', () => {
+describe('(B) includeColumns budget — the server refuses before the proxy does (2026-09-10 222 PLM 504)', () => {
   it('a fan-out that outruns the budget throws a coded 504, values-free', async () => {
     // 10ms per round trip vs a 5ms budget: the two listing queries alone spend the budget, so the
     // check fires before the FIRST table's detail queries. No fake clock, no flakiness window.
@@ -242,7 +309,7 @@ describe('(B) includeColumns budget — the server refuses before the proxy does
   })
 })
 
-describe('(C) GET /api/data-sources/:id/schema — lazy by default, full only on request (#5595)', () => {
+describe('(C) GET /api/data-sources/:id/schema — lazy by default, full only on request (2026-09-10 222 PLM 504)', () => {
   const pinned = usePinnedServer()
   let currentUser: { id: string; role?: string } | undefined
   const app = express()
@@ -382,17 +449,49 @@ describe('(D) plugin facades ask for columns EXPLICITLY — no caller gets a sil
   // plugin-integration-core's read-only source adapter maps EVERY listing entry's `columns` into the
   // object schema its listObjects() returns. A lazy listing would hand it empty field lists — a
   // WRONG answer ("no fields"), not merely a slow one. So the facade opts in.
-  it('read facade forwards { includeColumns: true }', async () => {
+  it('read facade forwards { includeColumns: true } and OPTS OUT of the route budget', async () => {
     const { adapter, manager } = facadeRig()
     const facade = createDataSourcePluginFacade(() => manager)
     await facade.getSchema('pg', 'owner-1', 'public')
-    expect(adapter.getSchema).toHaveBeenCalledWith('public', { includeColumns: true })
+    expect(adapter.getSchema).toHaveBeenCalledWith('public', {
+      includeColumns: true,
+      budgetMs: SCHEMA_DETAIL_BUDGET_DISABLED,
+    })
   })
 
-  it('write facade forwards { includeColumns: true }', async () => {
+  it('write facade forwards { includeColumns: true } and OPTS OUT of the route budget', async () => {
     const { adapter, manager } = facadeRig(false)
     const facade = createDataSourceWritePluginFacade(() => manager)
     await facade.getSchema('pg', 'owner-1', 'public')
-    expect(adapter.getSchema).toHaveBeenCalledWith('public', { includeColumns: true })
+    expect(adapter.getSchema).toHaveBeenCalledWith('public', {
+      includeColumns: true,
+      budgetMs: SCHEMA_DETAIL_BUDGET_DISABLED,
+    })
+  })
+
+  // The behavioural half of the assertion above: the budget is scoped to the opt-in
+  // GET /:id/schema?includeColumns=1 route. This facade is the plugin listObjects() path, which was
+  // unbounded before and sits behind a proxy configured for 300s (docker/nginx.conf:63) — a listing
+  // that used to SUCCEED must not start failing SCHEMA_DETAIL_TIMEOUT. Drop `budgetMs` in the
+  // facade and this goes red (the deployment default / env value would apply instead).
+  it('a facade listing slower than the configured default budget still SUCCEEDS (no new hard failure)', async () => {
+    const previous = process.env[SCHEMA_DETAIL_BUDGET_ENV]
+    process.env[SCHEMA_DETAIL_BUDGET_ENV] = '5'
+    try {
+      const { adapter, manager } = facadeRig()
+      // 10ms per round trip against a 5ms deployment budget: the listing queries alone outrun it.
+      const real = mssqlAdapter(routingMssqlPool(10))
+      adapter.getSchema = vi.fn((schema?: string, options?: unknown) =>
+        real.getSchema(schema, options as { includeColumns?: boolean; budgetMs?: number })) as never
+
+      const schema = await createDataSourcePluginFacade(() => manager).getSchema('pg', 'owner-1', 'dbo')
+
+      expect((schema as { detail?: string }).detail).toBe('full')
+      expect(schema.tables).toHaveLength(TABLE_ROWS.length)
+      expect(schema.tables[0].columns.map((c: { name: string }) => c.name)).toEqual(['FItemID'])
+    } finally {
+      if (previous === undefined) delete process.env[SCHEMA_DETAIL_BUDGET_ENV]
+      else process.env[SCHEMA_DETAIL_BUDGET_ENV] = previous
+    }
   })
 })

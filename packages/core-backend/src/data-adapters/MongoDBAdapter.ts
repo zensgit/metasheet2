@@ -364,7 +364,7 @@ export class MongoDBAdapter extends BaseDataAdapter {
   }
 
   /**
-   * LIST-ONLY BY DEFAULT (#5595) — see MSSQLAdapter.getSchema. Mongo's per-collection cost is even
+   * LIST-ONLY BY DEFAULT (2026-09-10 222 PLM 504) — see MSSQLAdapter.getSchema. Mongo's per-collection cost is even
    * higher than SQL's: getColumns() SAMPLES 100 documents per collection to infer fields, so a
    * listing of N collections used to read up to 100N documents before answering.
    * The includeColumns path is now sequential (was Promise.all) so the budget has a checkpoint —
