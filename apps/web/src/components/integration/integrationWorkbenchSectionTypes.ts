@@ -15,7 +15,38 @@
 // unnoticed silently.
 import type { WorkbenchExternalSystem } from '../../services/integration/workbench'
 
-export type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
+// G27 (docs/development/integration-mapping-transform-ui-parity-design-20260910.md): the UI
+// transform list is the FULL engine whitelist — `SUPPORTED_TRANSFORMS` in
+// plugins/plugin-integration-core/lib/transform-engine.cjs:10-19. The parity is enforced by
+// apps/web/tests/integrationMappingTransformParity.spec.ts, which `require`s that Set directly
+// (same anti-drift discipline as k3-endpoint-vocab-mirror.spec.ts) — adding an engine transform
+// without adding it here (or vice versa) is a RED, never a silent half-exposed engine.
+export type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'toDate' | 'defaultValue' | 'concat' | 'dictMap'
+
+// G27: `toDate` takes exactly ONE meaningful argument shape — the engine branches on
+// `args.format === 'date'` (date-only ISO slice) and treats every other value as "full ISO
+// timestamp" (transform-engine.cjs:158-168). It is NOT a strftime-style pattern, so the UI offers
+// the two reachable outcomes instead of a free-text box that would silently mean "iso".
+export type MappingDateFormat = 'iso' | 'date'
+
+// G27: the per-step argument draft. One flat object per step keeps the editor state serializable
+// and lets `buildTransformStepPayload` stay a pure function of (fn, dictMapText, args).
+export interface MappingTransformArgs {
+  dateFormat: MappingDateFormat
+  defaultValueText: string
+  concatFields: string[]
+  concatSeparator: string
+}
+
+// G27: steps 2..n of a transform CHAIN. Step 1 stays on `EditableMapping.transformFn` /
+// `.dictMapText` / `.transformArgs` so that a single-step row keeps producing the exact legacy
+// payload (`{ fn }` / `{ fn: 'dictMap', map }`) byte-for-byte.
+export interface MappingTransformStep {
+  id: string
+  fn: TransformFn
+  dictMapText: string
+  args: MappingTransformArgs
+}
 
 export interface EditableMapping {
   id: string
@@ -23,9 +54,14 @@ export interface EditableMapping {
   targetField: string
   transformFn: TransformFn
   dictMapText: string
+  transformArgs: MappingTransformArgs
+  extraSteps: MappingTransformStep[]
   required: boolean
   minValueText: string
   maxValueText: string
+  patternText: string
+  enumText: string
+  defaultValueText: string
 }
 
 export interface SourceFieldOption {
