@@ -535,8 +535,9 @@ function nonStringScalarsBecomeTextLosslessly() {
   }
 
   // Through the REAL apply surface: the numeric cell now LANDS instead of
-  // costing the row its PLM data, and the still-refused cell is reported
-  // values-free (schema ids and a frozen token only).
+  // costing that CELL its PLM value and parking a hold no page can drain (the
+  // ROW was never dropped -- see the module header), and the still-refused cell
+  // is reported values-free (schema ids and a frozen token only).
   const mapping = normalize([
     { sourceColumn: 'Bom_ExAttr7', target: 'ext_spec' },
     { sourceColumn: 'Bom_ExAttr8', target: 'ext_parentDrawingNo' },

@@ -502,9 +502,33 @@ function coerceBoolean(value) {
 // sense that matters here — the text is exactly what `Number`/`BigInt`/
 // `Boolean` round-trips from — so nothing about the cell is reinterpreted,
 // only re-typed. Real customer PLM extension columns come back from the
-// mssql driver as `number` (numeric ExAttr / size / quantity columns), and
-// refusing them cost the whole row its PLM data behind a per-cell conflict
-// no operator can clear.
+// mssql driver as `number` (numeric ExAttr / size / quantity columns).
+//
+// WHAT REFUSING THEM ACTUALLY COST — stated precisely, because this comment is
+// customer-facing evidence and the earlier draft overstated it. It did NOT drop
+// the row: the expander records the ext error and pushes the row anyway
+// (stock-preparation-bom-expansion.cjs:1357 `extErrors.forEach(addRowError)`
+// then `pushRow(rowResult.row)`), exactly as :61-62 above promises. What it cost
+// was (a) that ONE CELL's PLM value, and (b) one `manual_confirm` HOLD per
+// refused cell, riding beside the row's own add/update decision as a keyless
+// entry (stock-preparation-conflict-planner.cjs:1312 the `c2_row_error`
+// umbrella, :86 "WITHOUT an idempotencyKey"). The hold writes nothing itself
+// (stock-preparation-apply-writer.cjs:755 MANUAL_CONFIRM => `held`) and the
+// confirmation page cannot clear it, since the one confirmable conflict type is
+// `duplicate_expanded_key`
+// (apps/web/src/services/integration/stockPreparation/confirmationQueue.ts:59).
+//
+// An unclearable hold is not cosmetic, because apply is gated on the HOLD COUNT,
+// not on which rows hold: `counts[MANUAL_CONFIRM] > 0` without an explicit
+// `acceptManualConfirmHold` is a 409 for the WHOLE RUN
+// (stock-preparation-table-actions.cjs:1960, and the large-BOM twin at
+// stock-preparation-large-bom-jobs.cjs:1143), and the unattended project-sync
+// path deliberately never sends that flag (projectSync.ts:760 "Deliberately NOT
+// applying with acceptManualConfirmHold"). So on 2026-09-10 six unparseable
+// cells did not lose six rows: they parked six undrainable holds, and any apply
+// that does not explicitly opt into holds then refuses ALL 1137 planned rows
+// behind them. (Which apply route the customer took that day is not recorded
+// here — the field report covers the queue, not the write attempt.)
 //
 // A `Date`, object, array, symbol or function is still REFUSED: their
 // textual form is a guess (which timezone? which format?), and guessing is
