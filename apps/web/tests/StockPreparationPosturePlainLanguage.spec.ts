@@ -216,6 +216,28 @@ describe('stock-prep posture plain language', () => {
   })
 
   // -------------------------------------------------------------------------
+  // SOURCE_UNAVAILABLE — the 503 DataSourceManager.connectDataSource raises when the source library
+  // itself (PLM / K3's SQL Server, etc.) cannot be reached (#5586). Source precheck, an operator's
+  // dry-run and a pull all read through that one chokepoint, so this code reaches the stock-prep
+  // surfaces too, not just the raw data-sources routes.
+  // -------------------------------------------------------------------------
+  it('SOURCE_UNAVAILABLE has a dedicated row naming the 503 and the source library, not the driver text', () => {
+    const plain = STOCK_PREP_ERROR_PLAIN.SOURCE_UNAVAILABLE
+    expect(plain, 'SOURCE_UNAVAILABLE must have a row in the shipped plain-language table').toBeTruthy()
+    // 「发生了什么」: the status and what kind of thing is down — never the driver's raw connect text.
+    expect(plain.zh).toContain('503')
+    expect(plain.zh).toContain('源库')
+    expect(plain.en).toContain('503')
+    // 「该怎么办」: not a permission fix, and never hand the raw driver error to a frontline reader.
+    expect(plain.zhNext, 'zhNext').toBeTruthy()
+    expect(plain.zhNext).not.toContain('权限')
+    expect(plain.enNext, 'enNext').toBeTruthy()
+    // The lookup function a caller actually uses agrees with the table read directly.
+    expect(stockPrepErrorPlain('SOURCE_UNAVAILABLE').zh).toBe(plain.zh)
+    expect(stockPrepErrorPlain('SOURCE_UNAVAILABLE')).not.toEqual(STOCK_PREP_ERROR_GENERIC)
+  })
+
+  // -------------------------------------------------------------------------
   // P0-5 (second half): THE BOARD'S OWN TABLE — the one the FLOOR reads.
   //
   // The confirmation queue is where an administrator looks; the project board is where an operator

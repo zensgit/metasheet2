@@ -704,6 +704,20 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '这不是您能修的;管理员升级完数据库,您再点一次就行。',
     enNext: 'This is not something you can fix — once an administrator finishes the upgrade, click again.',
   }),
+  // The 503 the on-demand connect chokepoint raises when the SOURCE library itself cannot be reached
+  // (#5586). DataSourceManager.connectDataSource is the one place every on-demand connect passes
+  // through — source precheck, an operator's dry-run, and a pull all read through it — and it
+  // translates the raw driver text (which would otherwise carry host:port, the database name and the
+  // login it tried) into this fixed sentence + status before the response ever leaves the server.
+  // The sentence below must stay that discipline: name what class of thing is wrong, never the driver
+  // text, and say plainly that this is not a permission refusal — 「谁来处理」 is an implementer
+  // checking the source, not a role change.
+  SOURCE_UNAVAILABLE: Object.freeze({
+    zh: '源库(比如 PLM、K3 用的那台 SQL Server)现在连不上,服务器答的是 503。常见原因是网络、端口、账号被禁,或者源库正在维护——不是权限问题,重试也不会自己好。',
+    en: 'The source database (for example the SQL Server behind PLM or K3) cannot be reached right now — the server answered 503. Usual causes are the network, a port, a disabled account, or the source being under maintenance; this is not a permission problem and retrying will not fix it on its own.',
+    zhNext: '请找实施去源库那边查网络、端口、账号、维护状态;不要把驱动报错原文抄给一线看。',
+    enNext: 'This is not something a permission change fixes — ask an implementer to check the source database’s network, port, account and maintenance status; do not copy the raw driver error to a frontline reader.',
+  }),
 })
 
 export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
