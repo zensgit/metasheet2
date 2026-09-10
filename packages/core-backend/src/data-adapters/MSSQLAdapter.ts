@@ -271,17 +271,29 @@ export class MSSQLAdapter extends BaseDataAdapter {
   // leaves the helper inside brackets with `]` doubled — the total escape T-SQL defines for a delimited
   // identifier — and the helper re-parses its own output before returning it.
   //
-  // The message quotes the identifier with JSON.stringify and TRUNCATES it. An identifier that failed
-  // validation is by definition arbitrary text (that is why it failed), so pasting it raw into an error
-  // string, and from there into a log line, would let a rejected newline split the record; truncation
-  // bounds the same channel for a multi-kilobyte name. The helper's `code` is preserved so callers can
-  // branch on SQLSERVER_IDENTIFIER_INVALID instead of on message text.
+  // The message quotes the identifier with JSON.stringify, ESCAPES WHAT JSON.stringify DOES NOT, and
+  // TRUNCATES the result. An identifier that failed validation is by definition arbitrary text (that is
+  // why it failed), so pasting it raw into an error string — and from there into a log line — would let
+  // a rejected newline split the record; truncation bounds the same channel for a multi-kilobyte name.
+  //
+  // JSON.stringify alone does NOT close that channel. It escapes C0 controls (`\n`, `\r`, NUL) but
+  // leaves U+0085 NEL, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+FEFF and the bidi/format
+  // marks RAW — and U+2028/U+2029 terminate a line for a JSON/JS log consumer exactly like `\n` does.
+  // Every one of those is REFUSED by the identifier rule, which is precisely why they can appear here:
+  // this message only ever renders values that failed. So the remaining `\p{C}` / `\p{Zl}` / `\p{Zp}`
+  // code points are escaped explicitly, leaving nothing unprintable in the string.
+  //
+  // The helper's `code` is preserved so callers can branch on SQLSERVER_IDENTIFIER_INVALID instead of
+  // on message text.
   private quoteIdent(identifier: string): string {
     try {
       return quoteSqlServerIdentifier(identifier)
     } catch (error) {
       if ((error as { code?: string }).code === 'SQLSERVER_IDENTIFIER_INVALID') {
-        const shown = JSON.stringify(String(identifier))
+        const shown = JSON.stringify(String(identifier)).replace(
+          /[\p{C}\p{Zl}\p{Zp}]/gu,
+          (ch) => `\\u${(ch.codePointAt(0) ?? 0).toString(16).padStart(4, '0')}`,
+        )
         const safe = shown.length > 160 ? `${shown.slice(0, 160)}…"` : shown
         const reason = (error as { details?: { reason?: string } }).details?.reason
         throw Object.assign(
@@ -294,8 +306,10 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   /**
-   * WHERE identifiers are BRACKETED, exactly like every other clause this adapter emits (projection,
-   * table, JOIN target, ORDER BY all go through `quoteIdent` already). The base class emits them bare
+   * WHERE identifiers are BRACKETED, exactly like every other IDENTIFIER this adapter emits (projection,
+   * table, JOIN TARGET, ORDER BY all go through `quoteIdent` already — note that is the join's TARGET,
+   * not its ON expression, which `select()` still splices in verbatim; see the note at that line and
+   * design §9.1). The base class emits them bare
    * because it has no dialect quoting; MSSQL must not, and the reason is specific to THIS adapter:
    *
    * `query()` below applies `isPureReadStatement` to the finished SQL TEXT. A bare identifier that
@@ -391,6 +405,14 @@ export class MSSQLAdapter extends BaseDataAdapter {
     if (options.joins?.length) {
       for (const join of options.joins) {
         const joinType = join.type?.toUpperCase() || 'INNER'
+        // G52 SCOPE NOTE — the join TARGET is quoted; `join.on` is NOT. It is a caller-supplied raw SQL
+        // EXPRESSION concatenated verbatim, which is why quoting it is not the fix (it is not an
+        // identifier) and why the identifier hardening in `quoteIdent` above does not reach it. It sits
+        // inside the same function that hardening lives in, so state it here rather than leave a reader
+        // to infer coverage: everything a caller puts in `on` is in the raw-SQL lane the write gate in
+        // `query()` is designed for, and nothing repo-wide passes `options.joins` to this adapter
+        // today. Closing it means refusing `joins` here or giving `on` a structured shape — tracked in
+        // docs/development/mssql-unicode-identifiers-design-20260910.md §9.1, not done in that PR.
         sql += ` ${joinType} JOIN ${this.quoteIdent(join.table)} ON ${join.on}`
       }
     }

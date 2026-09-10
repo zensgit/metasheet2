@@ -125,6 +125,22 @@ const MATRIX = [
   ['INJECTION: bracket + write verb', 'a] DROP TABLE x', 'quoted', '[a]] DROP TABLE x]'],
   ['INJECTION: bracket + batch separator attempt', `${CJK}] SELECT 1`, 'quoted', `[${CJK}]] SELECT 1]`],
 
+  // OUTER TRIM — DISCARDED, NOT REFUSED. The rules are per SEGMENT, and `requiredString` ->
+  // `String#trim()` runs on the whole value before it is split, so at the two OUTER edges every JS
+  // WhiteSpace/LineTerminator — spaces, tab, LF, CR, U+2028, U+2029 and U+FEFF — is dropped silently.
+  // Inherited from main (`'orders '` has always been accepted); newly REACHABLE here because a
+  // Unicode/spaced name now gets far enough to be trimmed at all. Pinned so it cannot drift: the
+  // segment-level rule and the M5 probe both look only INSIDE a segment and would stay green if the
+  // outer behaviour changed.
+  ['OUTER TRIM: trailing space discarded', `${CJK} `, 'quoted', `[${CJK}]`],
+  ['OUTER TRIM: trailing newline discarded', 'a\n', 'quoted', '[a]'],
+  ['OUTER TRIM: leading BOM discarded', '\ufefforders', 'quoted', '[orders]'],
+  ['OUTER TRIM: leading spaces discarded', '  a', 'quoted', '[a]'],
+  // …and the contrast that proves the trim is JS-whitespace, not "anything invisible": a NUL at the
+  // very same edge is NOT whitespace, so it is still refused.
+  ['OUTER EDGE NUL is not whitespace — still refused', '\u0000a', 'refused'],
+  ['OUTER EDGE BEL is not whitespace — still refused', 'a\u0007', 'refused'],
+
   // Refused.
   ['INJECTION: bracket + write verb + line comment', 'a] DROP TABLE x --', 'refused'],
   ['INJECTION: semicolon batch', 'a;DROP TABLE x', 'refused'],
@@ -241,15 +257,22 @@ function testSegmentPrimitive() {
   )
   assert.equal(helper.assertSqlServerIdentifierPart(`销售 ${CJK}`), `销售 ${CJK}`)
 
-  // normalizeIdentifier enforces the SAME rule as the quoter — one gate, two exits, no seam where a
-  // value could be "validated" by one and rejected only by the other.
+  // `assertSqlServerIdentifier` enforces the SAME rule as the quoter — one gate, two exits, no seam
+  // where a value could be "validated" by one and rejected only by the other.
   for (const [, input, expected] of MATRIX) {
-    let normalized = null
-    try { normalized = helper.normalizeIdentifier(input) } catch { normalized = null }
+    let asserted = true
+    try { helper.assertSqlServerIdentifier(input) } catch { asserted = false }
     let quotedOk = true
     try { helper.quoteSqlServerIdentifier(input) } catch { quotedOk = false }
-    assert.equal(normalized !== null, quotedOk, `normalizeIdentifier and quoteSqlServerIdentifier disagree on ${JSON.stringify(input)} (${expected})`)
+    assert.equal(asserted, quotedOk, `assertSqlServerIdentifier and quoteSqlServerIdentifier disagree on ${JSON.stringify(input)} (${expected})`)
   }
+
+  // …and it hands back NOTHING. The removed `normalizeIdentifier` returned the trimmed original, which
+  // under the G52 rule may carry spaces, `]` and whole SQL keyword sequences — a string shaped like a
+  // sanitized value but safe only inside brackets. Nothing to interpolate is the guarantee.
+  assert.equal(helper.assertSqlServerIdentifier(`dbo.${CJK}`), undefined)
+  assert.equal(helper.assertSqlServerIdentifier('a]b'), undefined)
+  assert.equal('normalizeIdentifier' in helper, false, 'the value-returning entry point must be gone, not shadowed')
 
   // The strict reader refuses anything that is not well-formed bracketed text.
   for (const bad of ['orders', '[a', 'a]', '[a]b', '[a].', '[a]..[b]', '', '[a]x[b]']) {

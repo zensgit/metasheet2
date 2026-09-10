@@ -94,7 +94,12 @@ describe('G52 — MSSQLAdapter emits Unicode identifiers bracketed, in every cla
     expect(fp.calls[0]).not.toContain('FROM [a] DROP TABLE x]')
   })
 
-  it('select(): join target and offset paging quote the same way', async () => {
+  // SCOPE: this covers the join TARGET and the paging clause. It does NOT cover `join.on`, which
+  // `select()` splices in verbatim as a caller-supplied SQL expression (see the note at that line and
+  // design §9.1) — `on: '1 = 1'` below is an inert placeholder needed to build the clause, not a
+  // certification of the ON path. Naming that here so a future reader does not read this test as
+  // "JOINs are covered".
+  it('select(): join TARGET and offset paging quote the same way (ON expression NOT covered)', async () => {
     const fp = fakePool()
     await adapterWithPool(fp).select(CJK_TABLE, {
       joins: [{ table: `${CJK_SCHEMA}.物料`, type: 'inner', on: '1 = 1' }],
@@ -123,6 +128,25 @@ describe('G52 — MSSQLAdapter emits Unicode identifiers bracketed, in every cla
     expect(message).not.toContain('\n')
     expect(message).toContain('\\n') // escaped, so the text is still diagnosable
     expect((thrown as { code?: string }).code).toBe('SQLSERVER_IDENTIFIER_INVALID')
+
+    // JSON.stringify escapes C0 controls but leaves U+0085 / U+2028 / U+2029 / U+FEFF / bidi marks
+    // RAW, and U+2028-9 end a line for a JSON/JS log consumer exactly like `\n`. Every one of them is
+    // REFUSED by the rule, which is why they can reach this message at all — so the message must carry
+    // none of them. One assertion over the whole class, not one per code point.
+    for (const hostile of [
+      'evil\u2028DELETE FROM t',
+      'evil\u2029DELETE FROM t',
+      'evil\u0085DELETE FROM t',
+      'evil\ufeffDELETE FROM t',
+      'evil\u202eDELETE FROM t',
+      'evil\u0007DELETE FROM t',
+    ]) {
+      let hostileThrown: unknown
+      try { quote(hostile) } catch (error) { hostileThrown = error }
+      const rendered = String((hostileThrown as Error).message)
+      expect(rendered).toMatch(/Invalid identifier/)
+      expect(/[\p{C}\p{Zl}\p{Zp}]/u.test(rendered), `${JSON.stringify(hostile)} left an unprintable code point in the message`).toBe(false)
+    }
 
     // …and it is bounded, so a multi-kilobyte name cannot flood the log through this channel.
     let longThrown: unknown

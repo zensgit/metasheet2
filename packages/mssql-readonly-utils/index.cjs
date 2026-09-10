@@ -31,23 +31,27 @@
 //     UCS-2/UTF-16 units — NOT bytes and NOT code points: a supplementary character (𠮷, an emoji)
 //     costs TWO. JavaScript's `String#length` counts exactly those units, so `part.length` is the
 //     server's own unit, not an approximation of it.
-//   • A leading/trailing space separator — invisible in every UI, so an operator cannot tell the name
-//     apart from the trimmed one, and SQL Server's own trailing-blank handling for identifiers is not
-//     uniform across contexts. Refusing says so instead of silently reading a different object.
+//   • A space separator at the START or END OF A SEGMENT. Read the OUTER TRIM note below before this
+//     one: the rule can only ever fire on a segment boundary INSIDE a qualified name (`dbo. 订单`),
+//     because the whole value has already been trimmed by the time segments exist. An edge space is
+//     invisible in every UI, so an operator cannot tell the name apart from the trimmed one, and SQL
+//     Server's own trailing-blank handling for identifiers is not uniform across contexts.
 //   • `[`. Its only realistic appearance in operator input is a name someone ALREADY bracketed in SSMS
 //     (`[dbo].[订单]`). We cannot tell that apart from a name whose characters really are `[dbo]`, and
 //     guessing would mean shipping a bracket parser — new attack surface for a formatting convenience.
 //     Refusing catches 100% of pre-bracketed input (every such form contains `[`) with an actionable
 //     error. `]` alone cannot be a pre-bracketing artefact, which is why the two differ.
-//   • Everything else: control characters and newlines (`\p{Cc}`), format/bidi/zero-width characters
-//     and BOM (`\p{Cf}`), lone surrogates (`\p{Cs}`), private-use and unassigned code points, line and
-//     paragraph separators (U+2028/U+2029), and ASCII punctuation — `;` `'` `"` `-` `/` `*` `%` `(` `)`
-//     `\` `,` `+` `=` … They are not refused because they could inject (they could not, see THE ONE
-//     RULE) but because none of them is needed to NAME something, several are invisible or
-//     script-spoofing, newlines break every log line and error message that carries the value, and a
-//     narrow set keeps this adapter's rule consistent with the Postgres/MySQL adapters' own. Admitting
-//     one later is a one-character edit to ALLOWED_PART_CHARACTERS plus a test — deliberately not done
-//     speculatively here.
+//   • Everything else, ANYWHERE INSIDE A SEGMENT (again: see OUTER TRIM — at the two outer edges of the
+//     whole value the whitespace-ish members of this list are discarded, not refused): control
+//     characters and newlines (`\p{Cc}`), format/bidi/zero-width characters and BOM (`\p{Cf}`), lone
+//     surrogates (`\p{Cs}`), private-use and unassigned code points, line and paragraph separators
+//     (U+2028/U+2029), and ASCII punctuation — `;` `'` `"` `-` `/` `*` `%` `(` `)` `\` `,` `+` `=` …
+//     They are not refused because they could inject (they could not, see THE ONE RULE) but because
+//     none of them is needed to NAME something, several are invisible or script-spoofing, newlines
+//     break every log line and error message that carries the value, and a narrow set keeps this
+//     adapter's rule consistent with the Postgres/MySQL adapters' own. Admitting one later is a
+//     one-character edit to ALLOWED_PART_CHARACTERS plus a test — deliberately not done speculatively
+//     here.
 //   • `$` falls out of that list, and that is load-bearing rather than incidental: MSSQLAdapter.query
 //     rewrites `$N` placeholders over FINISHED statement text, so a `$1` inside an identifier would be
 //     silently rewritten into `@p0`. Refusing `$` removes the class instead of the instance.
@@ -56,6 +60,31 @@
 //     part name (`server.db.schema.object`) is a LINKED SERVER reference — it leaves the configured
 //     server entirely, under the linked server's credentials, so this data source's read-only
 //     guarantee simply does not reach it. That is a different boundary, and it is closed here.
+//
+// OUTER TRIM — WHAT THIS MODULE DISCARDS RATHER THAN REFUSES.
+// Every rule above is a rule about a SEGMENT, and the whole value goes through `requiredString` ->
+// `optionalString` -> `String#trim()` BEFORE it is split into segments. `trim()` strips JS WhiteSpace
+// AND LineTerminators, which is a wider set than it looks: spaces (including U+3000 and NBSP), tab, LF,
+// CR, U+2028, U+2029 and U+FEFF. So at the two OUTER edges of the whole value those characters are
+// silently DISCARDED, not refused — the rules above do not get to see them:
+//
+//     '订单 ' -> [订单]      'a\n' -> [a]      '\ufefforders' -> [orders]      '  a' -> [a]
+//
+// Characters that are NOT JS whitespace are untouched by the trim and stay refused wherever they sit:
+// '\u0000a' and 'a\u0007' are still refused, and every one of these characters is still refused INSIDE
+// a segment ('a\nb', 'a\ufeffb', 'dbo. 订单').
+//
+// The trim is INHERITED from main — `requiredString` has always done it and `'orders '` has always been
+// accepted — so this is not a widening introduced here. What IS new is that a name with non-ASCII
+// letters or spaces now gets far enough to be trimmed at all (main refused those outright on the
+// character rule), which makes the silent normalisation newly REACHABLE for that class of name. It is
+// left as-is deliberately: refusing an untrimmed value would turn `'orders '`, accepted on main today,
+// into a NEW refusal — a behaviour narrowing nobody has assessed, and not something to slip into a PR
+// whose subject is the opposite direction. The stricter alternative already exists in this repo, if a
+// later PR wants it: `data-source-sql-readonly-source-adapter.cjs`'s `requiredSqlIdentifier` refuses
+// `value !== value.trim()` outright, because there the value is also compared for equality later.
+// The four examples above are pinned as tests ("OUTER TRIM" rows in `identifier-unicode.test.cjs`) so
+// the discard cannot drift unnoticed — the segment-level rule alone does not cover it.
 //
 // KNOWN, DELIBERATE LIMITATION: a segment whose literal name contains a dot is unrepresentable —
 // `a.b` is read as two parts. Making it representable means accepting pre-bracketed input, see `[`.
@@ -199,9 +228,26 @@ function splitIdentifierParts(value, field) {
   return { normalized, parts }
 }
 
-/** Validate a (possibly dot-qualified) identifier and return it unchanged — no quoting. */
-function normalizeIdentifier(value, field = 'identifier') {
-  return splitIdentifierParts(value, field).normalized
+/**
+ * Assert that a (possibly dot-qualified, at most three-part) identifier passes the rule. Returns
+ * NOTHING, and that is the point.
+ *
+ * Its predecessor `normalizeIdentifier` returned the trimmed ORIGINAL string. Under main's ASCII-only
+ * rule that was harmless BY ACCIDENT: a value that passed `/^[A-Za-z0-9_]+$/` could not contain a
+ * quote, a space, a `]` or a keyword boundary, so bare interpolation of the return value was safe
+ * whether or not the caller knew it. G52 removes that accident — `a]b` and
+ * `a UNION ALL SELECT name FROM sys.objects` now come back verbatim — while the name of the function
+ * still reads as "normalised, therefore safe to use". A void assertion cannot be misread that way and
+ * hands back nothing to interpolate. THE ONE RULE is unchanged: text becomes SQL only through
+ * `quoteSqlServerIdentifier` / `quoteSqlServerIdentifierPart`.
+ *
+ * Safe to change shape rather than to document: there were ZERO production callers repo-wide at the
+ * time (the two `normalizeIdentifier`s in the K3 lane — `k3-wise-sqlserver-executor.cjs` and
+ * `k3-wise-sqlserver-channel.cjs` — are that lane's OWN local functions with their own ASCII patterns,
+ * not this export).
+ */
+function assertSqlServerIdentifier(value, field = 'identifier') {
+  splitIdentifierParts(value, field)
 }
 
 /** Validate + bracket-quote per segment: `dbo.销 售` -> `[dbo].[销 售]`, `a]b` -> `[a]]b]`. */
@@ -540,12 +586,12 @@ function buildSimpleSelectQuery(input = {}) {
 module.exports = {
   SqlServerReadonlyHelperError,
   VALID_TLS_MIN_VERSIONS,
+  assertSqlServerIdentifier,
   assertSqlServerIdentifierPart,
   buildGenericWhereClause,
   buildLegacyTlsOptions,
   buildSimpleSelectQuery,
   coerceBoolean,
-  normalizeIdentifier,
   normalizeLimit,
   normalizeScalar,
   normalizeTimeout,

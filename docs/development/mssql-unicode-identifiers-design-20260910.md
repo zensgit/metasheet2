@@ -27,8 +27,8 @@ escaped by doubling. Nothing else inside a delimited identifier can end it or st
 the injection defence is that escape, not the character set. Widening the character set does not touch
 it.
 
-Three properties hold this together, and each one is separately falsifiable (see §6 of the verification
-doc):
+Three properties hold this together. Each is separately falsifiable (see §6 of the verification doc),
+but they are NOT independent in coverage — read (2)'s scope limit before relying on it:
 
 1. **Validation and quoting are halves of one function.** `assertSqlServerIdentifierPart` is called BY
    the quoter. There is no "checked here, emitted over there" seam in which a value could pass a check
@@ -37,6 +37,10 @@ doc):
    Server's own end-of-token rule (`scanBracketToken`: a token ends at the first `]` NOT followed by
    another `]`) and refuses unless the result is byte-identical to the input. A missing or wrong escape
    becomes a THROW instead of a statement.
+   **Scope, stated so it is not over-read:** this proves the ESCAPE, and only the escape. It is blind to
+   every non-escape defect — a caller that never calls the quoter, a `quoteIdentifier` option swapped
+   out by a caller (see §9 follow-ups), a raw SQL fragment concatenated elsewhere, a rule that admits a
+   character it should not. Property (2) is a tight proof of a narrow thing, not a general safety net.
 3. **The write gate agrees with the quoter.** `outbound-sql-write-gate.ts`'s `scanSqlNoise` strips
    bracketed identifiers using the SAME `]]` rule before it classifies a statement. Quoter, SQL Server
    parser and classifier therefore agree on where an identifier ends, so a hostile-looking object name
@@ -93,9 +97,31 @@ non-ASCII letters and spaces, and `[a] DROP TABLE x --` staying refused is worth
 **Known limitation:** a segment whose literal name contains a dot is unrepresentable — `a.b` is read as
 two parts. Making it representable means accepting pre-bracketed input; see the `[` row.
 
-**Pre-existing behaviour kept:** the whole value is trimmed before splitting (`requiredString`), so a
-leading/trailing space on the OUTER edge is silently dropped rather than refused. Only inner-segment
-edges hit the rule above. This is unchanged from before the PR.
+**OUTER TRIM — discarded, not refused.** Every row above is a rule about a SEGMENT, and the whole value
+goes through `requiredString` → `optionalString` → `String#trim()` BEFORE it is split. `trim()` strips
+JS WhiteSpace *and* LineTerminators, a wider set than it looks: spaces (incl. U+3000/NBSP), tab, LF, CR,
+U+2028, U+2029 **and U+FEFF**. So at the two OUTER edges of the whole value all of those are silently
+DISCARDED, not refused — the refusal rows above never see them:
+
+| Input | Result |
+| --- | --- |
+| `'订单 '` | `[订单]` |
+| `'a\n'` | `[a]` |
+| `'\ufefforders'` | `[orders]` |
+| `'  a'` | `[a]` |
+| `'\u0000a'`, `'a\u0007'` | still **refused** — not JS whitespace |
+| `'a\nb'`, `'a\ufeffb'`, `'dbo. 订单'` | still **refused** — inside a segment |
+
+The trim is INHERITED from main (`requiredString` has always done it; `'orders '` has always been
+accepted), so it is not a widening introduced here. What IS new is that a Unicode/space-bearing name now
+gets far enough to be trimmed at all — main refused those on the character rule — which makes the silent
+normalisation newly REACHABLE for that class of name. Kept as-is on purpose: refusing an untrimmed value
+would turn `'orders '` into a NEW refusal, a narrowing nobody has assessed and the opposite of this PR's
+subject. The four discards are pinned as "OUTER TRIM" rows in `identifier-unicode.test.cjs` — the
+segment rule and mutation M5 both look only INSIDE a segment, so without those rows a change to the
+outer behaviour would go unnoticed. The stricter alternative already exists in-repo if a later PR wants
+it: `data-source-sql-readonly-source-adapter.cjs`'s `requiredSqlIdentifier` refuses
+`value !== value.trim()` outright. See §9.6.
 
 ## 4. The 128 limit is in UTF-16 code units, and that matters
 
@@ -155,10 +181,23 @@ front of the quoter cannot drift from the quoter.
 table name is not ASCII". Changes:
 
 - Every refusal carries `details.reason` (a fixed enum string; never the value).
+- **`normalizeIdentifier` is replaced by a VOID `assertSqlServerIdentifier`.** The old export returned
+  the trimmed ORIGINAL string. Under main's ASCII-only rule that was safe by accident — the value could
+  not contain a quote, a space or a `]`, so bare interpolation was harmless whether or not the caller
+  knew it. G52 removes the accident (`a]b` and `a UNION ALL SELECT name FROM sys.objects` come back
+  verbatim) while the name still reads as "normalised, therefore safe". Returning nothing removes the
+  misuse. Zero production callers repo-wide at the time — the two `normalizeIdentifier`s in the K3 lane
+  (`k3-wise-sqlserver-executor.cjs`, `k3-wise-sqlserver-channel.cjs`) are that lane's own local
+  functions with their own ASCII patterns — so this is a latent contract fix, not a live one.
 - `MSSQLAdapter.quoteIdent` re-throws with the `code` preserved (it used to be dropped) and renders the
-  offending identifier with `JSON.stringify`, truncated to 160 characters. A rejected identifier is
-  arbitrary text by definition, so pasting it raw into an error string — and from there into a log
-  line — would let a newline in a table name split the log record.
+  offending identifier with `JSON.stringify`, then escapes what `JSON.stringify` does not, then
+  truncates to 160 characters. A rejected identifier is arbitrary text by definition, so pasting it raw
+  into an error string — and from there into a log line — would let a newline in a table name split the
+  log record. `JSON.stringify` alone does not close that channel: it escapes C0 controls but leaves
+  U+0085 NEL, U+2028, U+2029, U+FEFF and the bidi marks RAW, and U+2028/U+2029 end a line for a JSON/JS
+  log consumer exactly like `\n`. All of those are REFUSED by the identifier rule, which is precisely
+  why they can reach this message — so the remaining `\p{C}`/`\p{Zl}`/`\p{Zp}` code points are escaped
+  explicitly.
 - `apps/web/src/services/integration/errorCodeLabels.ts` gains ONE entry (append-only, no existing
   entry touched — #5597 is in flight on that file) whose hint states the new rule and points at the
   two ways out: a legal object name from the DBA, or an ASCII-aliased view.
@@ -181,14 +220,50 @@ affordances, no parent state, no service call, no wire change:
 
 Values-free: only schema METADATA is rendered or copied, never a row value.
 
-## 9. Not done here
+## 9. Follow-ups this PR deliberately does not close
 
-- Postgres / MySQL identifiers stay ASCII (`BaseAdapter.sanitizeIdentifier`,
-  `MySQLAdapter.sanitizeMySQLIdentifier`). The same customer story exists for a Chinese-named Postgres
-  schema; the fix is the same shape (quote + escape `"` by doubling) but a different escape, a different
-  set of consumers, and its own test matrix.
+Found while hardening this path; each is pre-existing (none introduced here), each is latent (no
+production caller reaches it today), and each is a separate change with its own blast radius.
+
+1. **`MSSQLAdapter.select()`'s `join.on` is concatenated raw** —
+   `sql += \` ${joinType} JOIN ${this.quoteIdent(join.table)} ON ${join.on}\``. The JOIN *target* goes
+   through the quoter; the ON *expression* is a caller-supplied SQL string spliced in verbatim, inside
+   the very function this PR hardened. It is an expression rather than an identifier, so quoting it is
+   not the fix — the fix is either refusing `options.joins` on this adapter or giving `on` a structured
+   shape. **Correction to this PR's own prose:** the comment above `whereIdentifier()` says "projection,
+   table, JOIN target, ORDER BY all go through `quoteIdent` already", which is true as written but reads
+   as "the JOIN clause is covered" — it is not, and the source comment now says so. The new test's
+   `on: '1 = 1'` likewise exercises only the hardened half (the target), so treat that row as covering
+   the target, not the JOIN path. Repo-wide there is no production caller passing `joins` to this
+   adapter.
+2. **`buildGenericWhereClause`'s `options.quoteIdentifier` can replace THE ONE RULE.** A caller may pass
+   any function, including `(field) => field` — which two in-repo tests already do, legitimately, to
+   assert unquoted shapes. So the module's own guarantee has a caller-supplied hole in it by design.
+   Pre-existing on main and untested. The fix is to make the override refuse anything that does not
+   round-trip, or to remove it and let callers post-process.
+3. **`routes/data-sources.ts`'s `codedGateRefusal` requires a numeric `status`**, so a
+   `SQLSERVER_IDENTIFIER_INVALID` (a USER-INPUT error) surfaces on `/select` as a 500 rather than a 400.
+   Misclassification, not a security hole, and not introduced here — but it is the HTTP face of the
+   error code this PR just gave a human label to, so the label lands under a "server error" banner.
+4. **The plugin gate lost its first-character-must-be-a-letter rule.** `requiredSqlIdentifier` used
+   `/^[A-Za-z_][A-Za-z0-9_]*/`; the shared rule it now calls allows a leading digit (the generic path
+   always did — `2024_orders` is pinned green on main). Consistent, and safe because everything is
+   bracketed, but it is a second small widening on that surface and is recorded rather than hidden.
+5. **Postgres / MySQL still interpolate their own way and stay ASCII.** Same customer story exists for a
+   Chinese-named Postgres schema; the fix is the same shape with a different escape (`"` doubled), a
+   different set of consumers, and its own matrix.
+6. **The outer trim silently normalises** (design §3, `index.cjs` OUTER TRIM block). Tightening it to
+   refuse untrimmed values would turn `'orders '` — accepted on main today — into a new refusal, so it
+   needs its own assessment. `data-source-sql-readonly-source-adapter.cjs`'s `requiredSqlIdentifier` is
+   the in-repo precedent for the stricter behaviour.
+
+## 10. Not done here
+
+- Everything in §9 above.
 - Punctuation (`-`, `%`, `(`, `)`) stays refused; see §3.
-- The K3 lane stays ASCII; see §6.
+- The K3 lane stays ASCII; see §6. Its executor now carries an in-source note on the two patterns
+  themselves saying the lane has no write gate and that one must be added before either is relaxed —
+  the §6 constraint was previously only prose in this document.
 - A live SQL Server round-trip. The bracket/escape behaviour asserted here is grammar, not server
   configuration, so it is provable offline; a real-instance read of a 中文-named table belongs to the
   222 smoke window (`docs/operations/data-source-system-integration-c5-k3-mssql-smoke-runbook-20260615.md`).
