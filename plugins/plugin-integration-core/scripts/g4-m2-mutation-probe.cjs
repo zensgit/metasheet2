@@ -19,6 +19,13 @@
  * exit 2. A probe that silently no-ops is worse than no probe: it reports "the test still passed"
  * for a mutation that never happened, which is exactly the fake-green shape §4 rules out.
  *
+ * THAT PROMISE ONLY HOLDS WHEN THIS FILE IS ACTUALLY LOADED. `G4_M2_MUTATION=route-fallback:3 node
+ * __tests__/…test.cjs` — the same command WITHOUT `-r` — used to print a clean pass for a mutation
+ * that never happened, because nothing here ran. Loading this module therefore plants a marker on
+ * `globalThis`, and the suites read it: an env request with no probe behind it is a hard error at
+ * the top of the test file, not a green run. The marker is planted on load, before the catalogue /
+ * mutation branch below, so `G4_M2_MUTATION=list` and an unknown id are equally covered.
+ *
  * TWO SEAMS ARE PATCHED, on purpose:
  *   1. `Module.prototype._compile` — so the RUNTIME behaviour of the mutated module changes.
  *   2. `fs.readFileSync` — so the STATIC guard (which reads the production source off disk) sees the
@@ -225,6 +232,14 @@ function eolOf(text) {
 }
 
 const requested = String(process.env.G4_M2_MUTATION || '').trim()
+
+/**
+ * THE "I WAS ACTUALLY PRELOADED" MARKER. Read by
+ * `__tests__/integration-g4-m2-adapter-load-hard-dependency.test.cjs`, which refuses to run at all
+ * when `G4_M2_MUTATION` is set and this is absent. Set unconditionally on load — including for
+ * `list` and for an empty request — because the thing it witnesses is the PRELOAD, not the mutation.
+ */
+globalThis[Symbol.for('metasheet.g4.m2.mutation-probe')] = { requested, pid: process.pid }
 
 if (requested === 'list') {
   for (const line of CATALOGUE) console.log(line)

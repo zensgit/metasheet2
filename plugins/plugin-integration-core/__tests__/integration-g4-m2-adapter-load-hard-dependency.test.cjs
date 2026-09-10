@@ -24,10 +24,25 @@
  *
  *   M2-b  CALL SITES.  Every adapter load must actually read the decrypting accessor. Two guards:
  *         a STRUCTURAL one (an allowlist of the exact expression forms the two production modules
- *         may use, so restoring a fallback at ANY ONE point is a red), and RUNTIME ones (the object
- *         handed to `createAdapter` is the one the decrypting accessor returned, not the public
- *         projection). Mutation: restore the ternary at one site -> the runtime test for that site
- *         and the structural test both go red.
+ *         may use) and RUNTIME ones (the object handed to `createAdapter` is the one the decrypting
+ *         accessor returned, not the public projection). The two catch DIFFERENT mutations, and
+ *         saying so precisely is the whole point:
+ *
+ *           restore the ternary at one site  -> the STRUCTURAL test goes red; the runtime tests
+ *                                               CANNOT see it (with the accessor present the ternary
+ *                                               and the direct call behave identically).
+ *           swap one site to the public one  -> that site's RUNTIME test goes red (and the
+ *                                               structural test too, because the line changed).
+ *
+ *         WHAT THE STRUCTURAL GUARD IS AND IS NOT. It is line-oriented: it audits every physical
+ *         source line that MENTIONS one of the accessor names, and every such line must be verbatim
+ *         on the roster below. So any rewrite whose text still names an accessor — a ternary, a
+ *         `||` coalesce, `?.`, a bracket read, a quoted name, a destructuring alias — is red at the
+ *         line that names it. It is NOT an AST analysis: a call made through a binding created
+ *         somewhere the name never appears literally (a computed string, a re-export from a third
+ *         module) is outside its reach, and the `route-swap:*` runtime half is what covers that
+ *         direction. The anti-fake-green control below pins the three rewrites an earlier version of
+ *         this file could not see.
  *
  * The design also rules out a NON-discriminating report: once the hard dependency exists, "restore
  * the ternary AND use a stub that omits the accessor" fails registration in the original too, so it
@@ -45,6 +60,26 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
+/**
+ * PROBE TRAP — `G4_M2_MUTATION` without `-r ./scripts/g4-m2-mutation-probe.cjs` is a FAKE GREEN.
+ *
+ * The env var alone does nothing: the probe only patches `Module._compile` / `fs.readFileSync` when
+ * it is PRELOADED. Running `G4_M2_MUTATION=route-fallback:3 node <this file>` therefore used to
+ * print a clean 14/14 for a mutation that never happened — the exact shape the probe's own header
+ * claims to rule out. The probe now plants `globalThis[Symbol.for('metasheet.g4.m2.mutation-probe')]`
+ * at load; a request with no probe behind it dies here instead of reporting a pass.
+ */
+const MUTATION_PROBE_MARKER = Symbol.for('metasheet.g4.m2.mutation-probe')
+const REQUESTED_MUTATION = String(process.env.G4_M2_MUTATION || '').trim()
+if (REQUESTED_MUTATION.length > 0 && !globalThis[MUTATION_PROBE_MARKER]) {
+  throw new Error(
+    `G4_M2_MUTATION=${JSON.stringify(REQUESTED_MUTATION)} is set but scripts/g4-m2-mutation-probe.cjs `
+      + 'was never preloaded, so NOTHING was mutated. A pass here would be evidence for a mutation '
+      + 'that did not happen. Re-run as: '
+      + 'G4_M2_MUTATION=<id> node -r ./scripts/g4-m2-mutation-probe.cjs <test file>',
+  )
+}
+
 const httpRoutes = require('../lib/http-routes.cjs')
 const { createPipelineRunner } = require('../lib/pipeline-runner.cjs')
 
@@ -61,33 +96,71 @@ const READER = Object.freeze({ id: 'u_read', tenantId: TENANT_ID, permissions: [
 // ============================================================================================
 
 /**
- * Physical source lines, with whole-line comments dropped.
+ * Physical source lines, with WHOLE-LINE `//` comments dropped and nothing else dropped.
  *
- * Deliberately NOT a comment-stripping parser: a line that merely STARTS a comment is dropped, and
- * anything else is treated as code in full. A trailing `// …` appended to one of the allowlisted
- * lines therefore turns this suite red and has to be added to the allowlist on purpose. That is the
- * fail-closed direction; a cleverer stripper would be the other one.
+ * Deliberately NOT a comment-stripping parser, and deliberately no longer a comment-line SKIPPER
+ * either. An earlier version also dropped every line whose trimmed text started with `*` or `/*`,
+ * which discarded the WHOLE line rather than the comment on it — so a line that OPENS with a closed
+ * inline block comment and then carries a real statement (see the `inline block comment` case in the
+ * anti-fake-green control below, which spells the sequence out in a string literal because a block
+ * comment cannot contain one) was invisible to this guard. Now the only line that disappears is one
+ * that is a comment from its first non-blank character to its end (`//`), which cannot hide an
+ * expression. The cost is that a doc-comment line naming one of these accessors is audited like code
+ * and has to be on the roster (see the `*_DOC_MENTIONS` blocks): re-wording prose next to a
+ * credential accessor turns this suite red and has to be re-approved. That is the fail-closed
+ * direction; a cleverer stripper — one that has to decide whether a `/*` inside a string or a regex
+ * opens a comment — is the other one.
  *
  * `\r?\n` because `lib/pipeline-runner.cjs` is not `eol=lf` in `.gitattributes` and is CRLF on a
  * `core.autocrlf=true` Windows checkout.
  */
-function codeLines(file) {
-  return fs.readFileSync(file, 'utf8')
+function codeLinesFrom(text) {
+  return String(text)
     .split(/\r?\n/)
     .map((line, index) => ({ number: index + 1, text: line.trim() }))
-    .filter(({ text }) => text.length > 0)
-    .filter(({ text }) => !text.startsWith('//') && !text.startsWith('*') && !text.startsWith('/*'))
+    .filter(({ text: line }) => line.length > 0)
+    .filter(({ text: line }) => !line.startsWith('//'))
 }
 
-/** Mentions the DECRYPTING accessor. */
-const DECRYPTING = /getExternalSystemForAdapter/
+function codeLines(file) {
+  return codeLinesFrom(fs.readFileSync(file, 'utf8'))
+}
 
 /**
- * Mentions the CREDENTIAL-STRIPPED public accessor. The negative lookahead keeps the three sibling
- * accessors out: `…ForAdapter` (decrypting), `…AdapterConfig` (non-decrypting guard read),
- * `…ForSealedSnapshot` and `…InstanceDigest`.
+ * Mentions the DECRYPTING accessor. `\b` on both ends so the match is on the IDENTIFIER, however it
+ * is written: `.getExternalSystemForAdapter`, `'getExternalSystemForAdapter'`,
+ * `registry["getExternalSystemForAdapter"]`, `const { getExternalSystemForAdapter: load } = …`.
  */
-const PUBLIC_PROJECTION = /(?:\.getExternalSystem(?![A-Za-z])|'getExternalSystem')/
+const DECRYPTING = /\bgetExternalSystemForAdapter\b/
+
+/**
+ * Mentions the CREDENTIAL-STRIPPED public accessor — again on the identifier, not on `.name` and
+ * `'name'` only, which is what let a bracket read and a destructuring alias slip past.
+ *
+ * The trailing `\b` already excludes the four sibling accessors (`…ForAdapter`, `…AdapterConfig`,
+ * `…ForSealedSnapshot`, `…InstanceDigest`): a suffix is a word character, so there is no boundary
+ * to match. The negative lookahead is redundant with it ON PURPOSE — it states which siblings exist
+ * and which roster they belong to, so removing a sibling accessor from the codebase does not quietly
+ * widen this pattern. The quoted alternative is likewise redundant with `\b…\b`; it is kept so that
+ * `registry["getExternalSystem"]` is visibly, not incidentally, in scope.
+ */
+const PUBLIC_PROJECTION = /\bgetExternalSystem\b(?!ForAdapter|AdapterConfig|ForSealedSnapshot|InstanceDigest)|["'`]getExternalSystem["'`]/
+
+/**
+ * The OTHER two credential-free reads of the registry, audited by the same roster.
+ *
+ * `listExternalSystems` returns public projections (`publicRow()` per row) and
+ * `getExternalSystemAdapterConfig` returns `{ id, kind, config }` WITHOUT decrypting. Either result
+ * has the shape `createAdapter` accepts, so either could be fed to an adapter build without any
+ * line of it naming `getExternalSystem` — which is exactly why they belong on the reviewed
+ * non-adapter roster rather than outside the guard's field of view.
+ */
+const OTHER_PUBLIC_READS = /\blistExternalSystems\b|\bgetExternalSystemAdapterConfig\b/
+
+/** The roster a line belongs to: decrypting wins, so each line is audited exactly once. */
+const PUBLIC_READ = Object.freeze({
+  test: (text) => (PUBLIC_PROJECTION.test(text) || OTHER_PUBLIC_READS.test(text)) && !DECRYPTING.test(text),
+})
 
 /**
  * THE ONLY FORMS AN ADAPTER LOAD MAY TAKE in `lib/http-routes.cjs`.
@@ -121,6 +194,20 @@ const ROUTE_DECRYPTING_FORMS = Object.freeze([
     why: 'the C6 target credential RELOAD, reached only through the kind check above it',
   },
 ])
+
+/**
+ * BLOCK-COMMENT lines of `lib/http-routes.cjs` that name the decrypting accessor.
+ *
+ * They are here because `codeLinesFrom` no longer skips a line for starting with `*`: skipping was
+ * what let a statement hide behind an inline block comment. A doc line carries no expression, so the
+ * `why` on each is the same one; what the entry buys is that re-wording prose that sits next to a
+ * credential accessor is a deliberate, re-reviewed change rather than a silent one.
+ */
+const ROUTE_DECRYPTING_DOC_MENTIONS = Object.freeze([
+  '* called BEFORE the first credential reload (`getExternalSystemForAdapter` decrypts), which is',
+  '* the route, and it calls `getExternalSystemForAdapter`, which DECRYPTS the source system\'s',
+  '* `getExternalSystemForAdapter` resolves the canonical/legacy Connection ITSELF, inside the load,',
+].map((exact) => Object.freeze({ exact, count: 1, why: 'doc-comment prose; carries no expression' })))
 
 /**
  * EVERY REMAINING PUBLIC-PROJECTION READ in `lib/http-routes.cjs`, each with the reason it is not an
@@ -169,7 +256,57 @@ const ROUTE_PUBLIC_PROJECTION_FORMS = Object.freeze([
     count: 1,
     why: 'source-binding admission check: kind + accessibility of a candidate row. Nothing downstream builds an adapter from it.',
   },
+  {
+    exact: 'function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf }) {',
+    count: 1,
+    why: 'the PARAMETER that receives the `getExternalSystem: (input) => …` seam rostered above (K3 B4 same-INSTANCE comparison: kind + baseUrl, no adapter). On the roster because the match is on the IDENTIFIER, not on `.name` / `\'name\'` — a binding created by destructuring is exactly the form that used to be invisible.',
+  },
+  {
+    exact: "if (typeof externalSystems.getExternalSystemAdapterConfig !== 'function') return null",
+    count: 1,
+    why: 'b2aSourceSystemConfigLoader: the NON-DECRYPTING config read for the B2a object-scope fence. Returns `{ id, kind, config }` with no credentials and never reaches createAdapter; `null` is not a pass — resolveB2aSourceObjects refuses fail-closed. (This optional-accessor shape is the H-3 one the M2 review flagged as OUT OF SCOPE here; see the M2 implementation record §7.)',
+  },
+  {
+    exact: 'return () => externalSystems.getExternalSystemAdapterConfig(scopedInput(req, { ...scope, id: systemId }))',
+    count: 1,
+    why: 'the same loader, continued.',
+  },
+  {
+    exact: "const peek = typeof externalSystems.getExternalSystemAdapterConfig === 'function'",
+    count: 1,
+    why: 'peekTableActionSourceBinding FIRST preference — the non-decrypting config accessor. Same peek as the two public-projection lines below it, same consumer (read-PRINCIPAL resolution), builds no adapter.',
+  },
+  {
+    exact: '? externalSystems.getExternalSystemAdapterConfig.bind(externalSystems)',
+    count: 1,
+    why: 'the same peek, continued.',
+  },
+  {
+    exact: 'externalSystems.listExternalSystems({ ...listScope, limit: HUB_OVERVIEW_SYSTEM_LIMIT }),',
+    count: 1,
+    why: 'hub overview: a LIST of public projections (publicRow() per row) rendered as counts/labels. Listed here because a list of public rows is as feedable to createAdapter as a single one.',
+  },
+  {
+    exact: 'return sendOk(res, await externalSystems.listExternalSystems(scopedInput(req, {',
+    count: 1,
+    why: 'the public LIST route — the projections ARE the response body.',
+  },
+  {
+    exact: 'externalSystems.listExternalSystems({ ...listScope, limit: SOURCE_BINDING_CANDIDATE_LIMIT }),',
+    count: 1,
+    why: 'source-binding CANDIDATES: kind + accessibility filtering of rows the operator may bind. Nothing downstream builds an adapter from a candidate.',
+  },
 ])
+
+/** Block-comment lines of `lib/http-routes.cjs` that name a credential-free accessor. */
+const ROUTE_PUBLIC_DOC_MENTIONS = Object.freeze([
+  '* `getExternalSystemAdapterConfig` reads the row and returns its config WITHOUT touching the',
+  '* `getExternalSystem` (no connection resolution at all), so it measured the hand-off to',
+  '* (`getExternalSystemAdapterConfig`), and then drives BOTH halves — the connection resolution',
+  '* Preference order is deliberate: `getExternalSystemAdapterConfig` is the accessor built for',
+  '* config without decrypting. `getExternalSystem` is the fallback because its public projection',
+  '* TWO FILTERS, and both matter. `listExternalSystems` is already tenant/workspace scoped, and',
+].map((exact) => Object.freeze({ exact, count: 1, why: 'doc-comment prose; carries no expression' })))
 
 const RUNNER_DECRYPTING_FORMS = Object.freeze([
   {
@@ -190,18 +327,40 @@ const RUNNER_PUBLIC_PROJECTION_FORMS = Object.freeze([
     count: 1,
     why: 'B2a: the source system KIND for the registration key, same contract as the route half — before any credential reload.',
   },
+  {
+    exact: "loadSourceSystemConfig: typeof externalSystemRegistry.getExternalSystemAdapterConfig === 'function'",
+    count: 1,
+    why: 'H-3: the NON-DECRYPTING config read the B2a object-scope resolver needs for a config-bound second read (`lookupProjection`). No credentials, no adapter. Its `: null` leg is the optional-guard shape the M2 review flagged as the SAME failure shape — out of M2 scope, recorded in the implementation record §7.',
+  },
+  {
+    exact: 'const loaded = await externalSystemRegistry.getExternalSystemAdapterConfig({',
+    count: 1,
+    why: 'the same loader, continued.',
+  },
 ])
 
-function assertOnlyAllowedForms({ file, label, mentions, forms }) {
-  const lines = codeLines(file).filter(({ text }) => mentions.test(text))
+/** Block-comment lines of `lib/pipeline-runner.cjs` that name a credential-free accessor. */
+const RUNNER_PUBLIC_DOC_MENTIONS = Object.freeze([
+  '* comes through `getExternalSystem` — the credential-STRIPPED accessor, which never decrypts — so',
+].map((exact) => Object.freeze({ exact, count: 1, why: 'doc-comment prose; carries no expression' })))
+
+/**
+ * The audit itself, over already-parsed lines so that the SAME code can be run against an in-memory
+ * rewrite (the anti-fake-green control below) and not only against a file on disk.
+ *
+ * `counts` is a property of the real modules, not of a snippet, so the control runs with it off; the
+ * per-line allowlist — the half that decides whether a rewrite is VISIBLE at all — runs in both.
+ */
+function auditForms({ lines, source, label, mentions, forms, counts = true }) {
+  const mentioned = lines.filter(({ text }) => mentions.test(text))
   const allowed = new Map(forms.map((form) => [form.exact, form]))
   const seen = new Map()
 
-  for (const { number, text } of lines) {
+  for (const { number, text } of mentioned) {
     const form = allowed.get(text)
     assert.ok(
       form,
-      `${label}: ${path.basename(file)}:${number} is not one of the allowed forms.\n`
+      `${label}: ${source}:${number} is not one of the allowed forms.\n`
         + `  line: ${text}\n`
         + '  If this is a NEW adapter load, use the existing unconditional form. If it is a new\n'
         + '  non-adapter read of the public projection, add it to the allowlist in this file WITH\n'
@@ -210,6 +369,7 @@ function assertOnlyAllowedForms({ file, label, mentions, forms }) {
     seen.set(text, (seen.get(text) || 0) + 1)
   }
 
+  if (!counts) return
   for (const form of forms) {
     assert.equal(
       seen.get(form.exact) || 0,
@@ -220,27 +380,39 @@ function assertOnlyAllowedForms({ file, label, mentions, forms }) {
   }
 }
 
+function assertOnlyAllowedForms({ file, label, mentions, forms }) {
+  auditForms({ lines: codeLines(file), source: path.basename(file), label, mentions, forms })
+}
+
+function assertOnlyAllowedFormsInText({ text, source, label, mentions, forms }) {
+  auditForms({ lines: codeLinesFrom(text), source, label, mentions, forms, counts: false })
+}
+
+const ROUTE_DECRYPTING_ROSTER = Object.freeze([...ROUTE_DECRYPTING_FORMS, ...ROUTE_DECRYPTING_DOC_MENTIONS])
+const ROUTE_PUBLIC_ROSTER = Object.freeze([...ROUTE_PUBLIC_PROJECTION_FORMS, ...ROUTE_PUBLIC_DOC_MENTIONS])
+const RUNNER_PUBLIC_ROSTER = Object.freeze([...RUNNER_PUBLIC_PROJECTION_FORMS, ...RUNNER_PUBLIC_DOC_MENTIONS])
+
 test('G4/M2-b structural: every getExternalSystemForAdapter expression in http-routes.cjs is an UNCONDITIONAL adapter load', () => {
   assertOnlyAllowedForms({
     file: HTTP_ROUTES_FILE,
     label: 'route decrypting-accessor forms',
     mentions: DECRYPTING,
-    forms: ROUTE_DECRYPTING_FORMS,
+    forms: ROUTE_DECRYPTING_ROSTER,
   })
 })
 
-test('G4/M2-b structural: every public-projection read in http-routes.cjs is on the reviewed non-adapter allowlist', () => {
+test('G4/M2-b structural: every credential-free registry read in http-routes.cjs is on the reviewed non-adapter allowlist', () => {
   assertOnlyAllowedForms({
     file: HTTP_ROUTES_FILE,
     label: 'route public-projection forms',
     // A line that mentions BOTH (the requireService dependency list) is covered by the decrypting
     // allowlist above; excluding it here keeps each line under exactly one roster.
-    mentions: { test: (text) => PUBLIC_PROJECTION.test(text) && !DECRYPTING.test(text) },
-    forms: ROUTE_PUBLIC_PROJECTION_FORMS,
+    mentions: PUBLIC_READ,
+    forms: ROUTE_PUBLIC_ROSTER,
   })
 })
 
-test('G4/M2-b structural: pipeline-runner.cjs expresses one unconditional adapter load and one non-adapter kind read', () => {
+test('G4/M2-b structural: pipeline-runner.cjs expresses one unconditional adapter load and its credential-free reads are rostered', () => {
   assertOnlyAllowedForms({
     file: PIPELINE_RUNNER_FILE,
     label: 'runner decrypting-accessor forms',
@@ -250,8 +422,93 @@ test('G4/M2-b structural: pipeline-runner.cjs expresses one unconditional adapte
   assertOnlyAllowedForms({
     file: PIPELINE_RUNNER_FILE,
     label: 'runner public-projection forms',
-    mentions: { test: (text) => PUBLIC_PROJECTION.test(text) && !DECRYPTING.test(text) },
-    forms: RUNNER_PUBLIC_PROJECTION_FORMS,
+    mentions: PUBLIC_READ,
+    forms: RUNNER_PUBLIC_ROSTER,
+  })
+})
+
+/**
+ * ANTI-FAKE-GREEN CONTROL for the structural half — the three rewrites an earlier version of this
+ * file could NOT see, each restated as text and each required to be a red.
+ *
+ * All three keep every allowlisted line of `lib/http-routes.cjs` exactly as it is, so a guard that
+ * only re-read the roster would report green. What makes them visible is the two fixes this control
+ * pins: matching on the IDENTIFIER (`\b…\b`) instead of `.name` / `'name'`, and dropping only lines
+ * that are `//` comments end to end instead of every line that starts with `*` or an inline block
+ * comment. Delete either fix and the corresponding case below stops throwing.
+ *
+ * The `.catch(() => loadPublic(x))` line in case (a) is deliberately NOT the line that fails: a
+ * call through an alias names nothing. The alias has to be MADE somewhere, and that is the line the
+ * roster catches. A binding produced without ever spelling the name (a computed property key, a
+ * re-export) is still outside this guard — the `route-swap:*` runtime half is what covers it, and
+ * the verification record says so rather than claiming otherwise.
+ */
+const STRUCTURAL_ESCAPE_REWRITES = Object.freeze([
+  {
+    name: 'destructuring alias + appended .catch fallback',
+    text: [
+      'const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)',
+      'const { getExternalSystem: loadPublic } = externalSystems',
+      'const system = await loadSystem(scope).catch(() => loadPublic(scope))',
+    ].join('\n'),
+    roster: 'public',
+    offending: 'const { getExternalSystem: loadPublic } = externalSystems',
+  },
+  {
+    name: 'bracket read with a quoted accessor name',
+    text: [
+      'const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)',
+      'const system = await externalSystems["getExternalSystem"](scope)',
+    ].join('\n'),
+    roster: 'public',
+    offending: 'const system = await externalSystems["getExternalSystem"](scope)',
+  },
+  {
+    name: 'inline block comment in front of the statement',
+    // Assembled from pieces because a block comment cannot contain the sequence that ends one.
+    text: `${'/*'} x ${'*/'} const loadSystem = externalSystems.getExternalSystem.bind(externalSystems)`,
+    roster: 'public',
+    offending: `${'/*'} x ${'*/'} const loadSystem = externalSystems.getExternalSystem.bind(externalSystems)`,
+  },
+])
+
+test('G4/M2-b structural CONTROL: three rewrites that leave every allowlisted line intact are still red', () => {
+  for (const rewrite of STRUCTURAL_ESCAPE_REWRITES) {
+    const audit = () => assertOnlyAllowedFormsInText({
+      text: rewrite.text,
+      source: `rewrite<${rewrite.name}>`,
+      label: 'control',
+      mentions: rewrite.roster === 'public' ? PUBLIC_READ : DECRYPTING,
+      forms: rewrite.roster === 'public' ? ROUTE_PUBLIC_ROSTER : ROUTE_DECRYPTING_ROSTER,
+    })
+    assert.throws(
+      audit,
+      (error) => {
+        assert.match(error.message, /is not one of the allowed forms/)
+        assert.ok(
+          error.message.includes(rewrite.offending),
+          `${rewrite.name}: the refusal must name the offending line, got:\n${error.message}`,
+        )
+        return true
+      },
+      `${rewrite.name}: this rewrite must NOT be expressible without a roster change`,
+    )
+  }
+})
+
+test('G4/M2-b structural CONTROL: the control harness passes text that IS on the roster', () => {
+  // The other half of the control: `assertOnlyAllowedFormsInText` is not a function that throws at
+  // everything. Two real allowlisted lines, verbatim, must go through.
+  assertOnlyAllowedFormsInText({
+    text: [
+      'const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)',
+      '// a whole-line comment naming getExternalSystem, which is dropped as a comment',
+      'const candidate = await externalSystems.getExternalSystem({ ...listScope, id: externalSystemId })',
+    ].join('\n'),
+    source: 'rewrite<positive control>',
+    label: 'control',
+    mentions: PUBLIC_READ,
+    forms: ROUTE_PUBLIC_ROSTER,
   })
 })
 

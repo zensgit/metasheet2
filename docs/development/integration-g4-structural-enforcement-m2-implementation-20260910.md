@@ -90,13 +90,27 @@
 - 代码：上表 13 + 2 处，以及 `lib/pipeline-runner.cjs:385-387`。
 - 结构测试（同一文件）：
   - `G4/M2-b structural: every getExternalSystemForAdapter expression in http-routes.cjs is an UNCONDITIONAL adapter load`
-  - `G4/M2-b structural: every public-projection read in http-routes.cjs is on the reviewed non-adapter allowlist`
-  - `G4/M2-b structural: pipeline-runner.cjs expresses one unconditional adapter load and one non-adapter kind read`
-- 结构测试是**正向 allowlist**，不是负向禁模式：两个生产模块里每一行提到这两个访问器的**代码行**，
+  - `G4/M2-b structural: every credential-free registry read in http-routes.cjs is on the reviewed non-adapter allowlist`
+  - `G4/M2-b structural: pipeline-runner.cjs expresses one unconditional adapter load and its credential-free reads are rostered`
+  - `G4/M2-b structural CONTROL: three rewrites that leave every allowlisted line intact are still red`
+  - `G4/M2-b structural CONTROL: the control harness passes text that IS on the roster`
+- 结构测试是**正向 allowlist**，不是负向禁模式：两个生产模块里每一行提到这几个访问器的**代码行**，
   去掉首尾空白后必须**逐字**等于 allowlist 里的某一条，并且出现次数必须等于登记的条数。因此
   「恢复三元」「`|| getExternalSystem` 兜底」「`?.` 可选调用」「换成公共访问器」都不需要各写一条禁令
-  ——它们都不在 allowlist 里，一律红。新增一个公共投影读点必须在 allowlist 里补一条并写明
-  「为什么它不会进 `createAdapter`」，这就是把 #5538 的「靠人记得」换成「靠评审签字」。
+  ——**只要那一行的文本里出现了访问器名，它就不在 allowlist 里，一律红**。新增一个公共读点必须在
+  allowlist 里补一条并写明「为什么它不会进 `createAdapter`」，这就是把 #5538 的「靠人记得」换成
+  「靠评审签字」。
+- **它的边界必须说准：这是逐行的标识符匹配，不是 AST 分析。** 只有「同一行里提到访问器名」的写法才在
+  射程内；一个从别处（拼出来的属性名、第三个模块的再导出）拿到的绑定，这一层看不见——那一半由
+  `route-swap:*` 的运行时见证覆盖。初版还有三个**本该在射程内却漏掉**的形状，本轮收口，并各写了一条
+  反假绿 control（`STRUCTURAL_ESCAPE_REWRITES`，在内存里构造代码文本，断言必 throw 且报错必须点名那一行）：
+
+  | 逃逸面 | 初版为什么看不见 | 收口方式 |
+  |---|---|---|
+  | `/*…*/ const loadSystem = externalSystems.getExternalSystem.bind(…)` | `codeLines` 把 `*` / `/*` 开头的行**整行丢弃**，丢的是行而不是注释 | 只丢 `//` 起头的整行注释；块注释里提到访问器名的散文行改为**进名册**（`*_DOC_MENTIONS`），改措辞也要重新签字 |
+  | `const { getExternalSystem: loadPublic } = externalSystems` + `.catch(() => loadPublic(x))` | 正则只认 `.getExternalSystem` 与 `'getExternalSystem'` 两种词形 | 改标识符边界匹配 `\bgetExternalSystem\b`；**别名必须先被造出来，造它那一行提到了名字**（`.catch(…)` 那一行本身仍然看不见，control 里写明了这一点） |
+  | `externalSystems["getExternalSystem"]`（含双引号） | 同上 | 同上；另在正则里显式写出「被单引号 / 双引号 / 反引号包住的访问器名」一支，让方括号读法是**明写**在射程内而不是碰巧命中 |
+  | `listExternalSystems` / `getExternalSystemAdapterConfig` 的结果喂给 `createAdapter` | 两者根本不在匹配范围里 | 纳入公共读名册（`OTHER_PUBLIC_READS`）：两者都是无凭据投影，形状同样能喂 `createAdapter`，因此每一处也要写明「为什么不进 `createAdapter`」 |
 - 运行时测试（断言的是**性质**，不是访问器名字）：
   - `G4/M2-b runtime (HTTP kind): externalSystemsTest builds its adapter from the DECRYPTING accessor`
     —— 断言交给 `createAdapter` 的对象带 `credentials`（公共投影删掉该字段）。
@@ -157,3 +171,57 @@
 - 不改 `MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED` 默认值，不动 K3 写栅栏与 Bridge 无写通道，
   不改迁移，不改被钉的 `scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1`。
 - 不宣称所有 HTTP/K3/PLM 公共对象在任意 `createAdapter` 调用上都被打标拒绝（设计 §2 I2 的原话）。
+
+## 7. 终审指出、留给 M1/M3 的相邻路径（本刀不改，只登记）
+
+以下两条来自 M2 终审。**都不阻断本 PR**：第一条是同一失效形状但目标不是 adapter 凭据，属于 H-3 的
+二读快照，按设计不在 M2 范围；第二条是测试见证的盘点。写在这里，是为了下一刀不必重新发现它们。
+
+### 7.1 `getExternalSystemAdapterConfig` 上的同形可选守卫（H-3 二读快照）
+
+- `plugins/plugin-integration-core/lib/pipeline-runner.cjs:615-617`
+  ```
+  loadSourceSystemConfig: typeof externalSystemRegistry.getExternalSystemAdapterConfig === 'function'
+    ? async () => { … capturedSourceConfig = loaded … }
+    : null,
+  ```
+- `plugins/plugin-integration-core/lib/http-routes.cjs:4149-4150`（`b2aSourceSystemConfigLoader`）
+  ```
+  if (typeof externalSystems.getExternalSystemAdapterConfig !== 'function') return null
+  ```
+
+形状与 M2 之前的三元**一模一样**：访问器缺席 → 走 `null` 分支 → 不报错、不打日志。差别在后果：
+runner 侧缺席时 `capturedSourceConfig` 恒为 `null`，`sourceConfigSnapshot` 因此为 `null`，
+`loadPipelineContext` 里 H-3 的「授权时看到的 config-bound 二读对象」与「adapter 实际读到的那份」
+**不比较**——不是比较失败，是静默不比较。路由侧 `null` 相对好一些：`resolveB2aSourceObjects`
+对「能藏对象的 kind」是 fail-closed 拒绝的。
+
+本刀不动它，因为 M2 的不变式是「adapter 加载不得降级到 credential-stripped 投影」，这两处读的是
+**不解密**的 config、且不建 adapter；把它们改成硬依赖会同时改变 B2a 围栏的可用性判定，属于另一刀
+（H-3 / M1 的范围）。已做的事只有一件：把这两处**纳入结构名册**，理由栏里点名「这是终审指出的同形
+可选守卫，超出 M2 范围」，所以下次有人改这几行会看见这段话。
+
+### 7.2 「生产装配通过构造期门」的测试见证：终审的说法要修正
+
+终审说「`__tests__` 下无测试 `require('../index.cjs')`，生产装配通过构造期门无测试见证」。**前半句按
+字面写法成立、按事实不成立**：两个套件加载的就是真 `index.cjs`，只是写成 `path.join`——
+
+- `__tests__/b2a-trial-registry-wiring.test.cjs:2300`
+- `__tests__/stock-preparation-operator-scope-tripwires.test.cjs:408`（S-01 `activateRealPlugin`）
+
+后半句本机实测也不成立，但**成立的方式与预期不同**。把 `lib/external-systems.cjs:1014` 返回对象里的
+`getExternalSystemForAdapter,` 一行在内存里删掉（`-r` 预载改源，不落盘）再跑 tripwires：
+
+```
+基线                     node __tests__/stock-preparation-operator-scope-tripwires.test.cjs        -> exit 0
+删掉访问器（内存）        同上                                                                      -> exit 1
+   not ok - S-01a the plugin passes the HOST-injected seam through to the route, and the read answers
+   not ok - S-01b a host that injects NO seam yields the named 501 — never a read on req.user.tenantId
+   Error: createPipelineRunner: externalSystemRegistry.getExternalSystemForAdapter is required
+```
+
+即：真装配确实被构造期门拦住，**但拦住它的是 runner 那道门**——`index.cjs:397` 先构造 runner，
+`:467` 才注册路由（`index.cjs:392` 的注释本来就写着「畸形 registry 现在挂在这一行，而不是几行之后的
+路由注册」），所以路由侧 `requireService` 的门在真装配路径上被 runner 的门**挡在后面**，
+没有独立见证。要给路由那道门补一条真装配见证，得让 runner 先构造成功而路由的 registry 缺访问器，
+这在 `index.cjs` 里是同一个对象，做不到——它需要的是 M1 的接线级测试，不是再加一条断言。
