@@ -261,14 +261,33 @@ export class MSSQLAdapter extends BaseDataAdapter {
     }
   }
 
-  // A2: bracket-quote PER SEGMENT so a schema-qualified name becomes [schema].[table]. The base
-  // sanitizer validates each segment and throws on illegal input.
+  // A2: bracket-quote PER SEGMENT so a schema-qualified name becomes [schema].[table]. The shared
+  // helper validates each segment AND escapes it in the same call, and throws on illegal input.
+  //
+  // G52: the helper's segment rule is Unicode now (letters/marks/digits/underscore/space separators
+  // plus a literal `]`, at most three dot-separated parts, <=128 UTF-16 units), so a customer DBA's
+  // 中文表名 or a name containing spaces READS instead of failing SQLSERVER_IDENTIFIER_INVALID before it
+  // ever reaches the server. Injection defence is NOT the character set and never was: every segment
+  // leaves the helper inside brackets with `]` doubled — the total escape T-SQL defines for a delimited
+  // identifier — and the helper re-parses its own output before returning it.
+  //
+  // The message quotes the identifier with JSON.stringify and TRUNCATES it. An identifier that failed
+  // validation is by definition arbitrary text (that is why it failed), so pasting it raw into an error
+  // string, and from there into a log line, would let a rejected newline split the record; truncation
+  // bounds the same channel for a multi-kilobyte name. The helper's `code` is preserved so callers can
+  // branch on SQLSERVER_IDENTIFIER_INVALID instead of on message text.
   private quoteIdent(identifier: string): string {
     try {
       return quoteSqlServerIdentifier(identifier)
     } catch (error) {
       if ((error as { code?: string }).code === 'SQLSERVER_IDENTIFIER_INVALID') {
-        throw new Error(`Invalid identifier: ${identifier}`)
+        const shown = JSON.stringify(String(identifier))
+        const safe = shown.length > 160 ? `${shown.slice(0, 160)}…"` : shown
+        const reason = (error as { details?: { reason?: string } }).details?.reason
+        throw Object.assign(
+          new Error(`Invalid identifier: ${safe}${reason ? ` (${reason})` : ''}`),
+          { code: 'SQLSERVER_IDENTIFIER_INVALID' },
+        )
       }
       throw error
     }
@@ -287,9 +306,13 @@ export class MSSQLAdapter extends BaseDataAdapter {
    * instance: `[key]` is unambiguously an identifier, so no column name — reserved today, reserved by
    * a future SQL Server version, or merely odd — can ever again be mistaken for a verb.
    *
-   * Validation is unchanged: `quoteSqlServerIdentifier` enforces `/^[A-Za-z0-9_]+$/` per dot-segment,
-   * the same rule `sanitizeIdentifier` already applied, so nothing that used to be accepted is now
-   * rejected. Qualified keys quote per segment (`t.col` -> `[t].[col]`), preserving their meaning.
+   * Validation and quoting are ONE call: `quoteSqlServerIdentifier` checks each dot-segment and emits it
+   * bracketed with `]` doubled, so there is no state in which a key passed the check but reached SQL
+   * unescaped. Its character rule is a SUPERSET of the old `/^[A-Za-z0-9_]+$/` (G52 — Unicode
+   * letters/marks/digits/underscore/space separators), so nothing that used to be accepted is now
+   * rejected; the only narrowings are the <=128-UTF-16-unit segment cap SQL Server itself imposes and
+   * the refusal of four-part LINKED-SERVER names. Qualified keys quote per segment (`t.col` ->
+   * `[t].[col]`), preserving their meaning.
    */
   protected override whereIdentifier(key: string): string {
     return this.quoteIdent(key)

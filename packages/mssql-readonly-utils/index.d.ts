@@ -16,7 +16,18 @@ export function optionalString(value: unknown): string | undefined
 export function requiredString(value: unknown, field: string, code?: string): string
 export function coerceBoolean(value: unknown, fallback: boolean): boolean
 export function normalizeIdentifier(value: unknown, field?: string): string
+/**
+ * Validate + bracket-quote a (possibly dot-qualified, at most three-part) SQL Server identifier.
+ * Unicode letters/marks/digits/underscore/space separators and a literal `]` are accepted; `]` is
+ * doubled on the way out, which is the total escape T-SQL defines for delimited identifiers.
+ */
 export function quoteSqlServerIdentifier(value: unknown, field?: string): string
+/** The same rule for ONE segment (no dot splitting) — validation and quoting in one call. */
+export function quoteSqlServerIdentifierPart(part: unknown, field?: string): string
+/** The character/length/shape rule for ONE segment; returns the segment or throws. */
+export function assertSqlServerIdentifierPart(part: unknown, field?: string): string
+/** Inverse of `quoteSqlServerIdentifier` for well-formed bracketed text; strict, throws otherwise. */
+export function unquoteSqlServerIdentifier(quoted: unknown, field?: string): string
 
 export interface SqlServerEndpointInput {
   host?: unknown
