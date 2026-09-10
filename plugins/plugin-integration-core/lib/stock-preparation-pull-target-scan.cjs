@@ -36,7 +36,9 @@
 // `action.target` is DEPLOY-TIME configuration shared by every tenant on the deployment, so the
 // sheet id it names is NOT derived from the caller's tenant. Every read here therefore goes through
 // `resolveOwnBoundSheet`, which hands back a sheet id ONLY when the caller's own staging project is
-// proved to own it — by the provisioning registry, or by the deterministic (project, object) hash.
+// proved to own it — by the provisioning registry, or by the deterministic (project, object) hash —
+// and, whenever the host's ports can decide it at all, only when that sheet has not since been
+// DELETED (`proveBoundSheetIsAlive`: the registry goes on claiming a soft-deleted sheet forever).
 // A caller who is not the owner never reads that sheet at all. This module adds no new way to name a
 // sheet and takes no tenant id of its own: it is handed an already-proved `ownSheet` or it reads
 // nothing.
@@ -166,6 +168,57 @@ function createPullTargetScanCache({
 }
 
 /**
+ * DOES THE BOUND SHEET STILL EXIST — `'alive'`, `'deleted'` or `'unprovable'`.
+ *
+ * WHY IT IS A THREE-STATE AND NOT A BOOLEAN. The only existence read this plugin has is
+ * `findObjectSheet({ projectId, objectId })`, which on the host side is
+ * `loadActiveSheet(getObjectSheetId(projectId, objectId))` — i.e. `SELECT ... FROM meta_sheets WHERE
+ * id = $1 AND deleted_at IS NULL` over a DERIVED id. It can therefore answer about a sheet ONLY when
+ * we can name a (project, objectId) pair whose derived id IS the bound sheet id. When no such pair
+ * is available the honest answer is "cannot say", and collapsing that into `false` would refuse the
+ * hand-bound sheets PROOF 1 exists to admit — a regression dressed up as a guard.
+ *
+ * THE TWO CANDIDATE OBJECT IDS, AND WHY THE SECOND ONE MATTERS. The binding's own objectId is tried
+ * first (the ordinary deployment: the action names the canonical fill object and the sheet was
+ * created under it). The canonical fill object is tried second, because that is exactly the D1=B
+ * deploy-window shape the runbook sanctions: the action is rebound to a SANDBOX objectId while the
+ * sheetId stays the one the deployment already had — created under the canonical object. Without the
+ * second candidate that configuration would be permanently `'unprovable'`, i.e. the one shape a live
+ * deployment actually runs would get no liveness check at all.
+ *
+ * WHAT STAYS UNPROVABLE, said out loud: a sheet an administrator bound BY HAND, whose id hashes from
+ * neither candidate. Nothing on the plugin side can name it to the host's existence read, so it
+ * keeps the behaviour it has always had (the registry's ownership answer alone). Closing that needs a
+ * host port that takes a SHEET ID — `findSheetById`/`isSheetActive` — and that is a host change, not
+ * one this plugin can fake. It is named in the PR body as the remaining gap rather than left implied.
+ *
+ * WHAT IT COSTS: at most ONE provisioning read, and only when a candidate id actually matches — the
+ * pure hash comparison is what decides whether any IO happens at all. It is the SAME read PROOF 2
+ * already paid on the same configuration (a registry hit now answers before PROOF 2 is reached, so
+ * the two never both run), so the ordinary deployment's query budget is unchanged; what is new is one
+ * read on the registry path, per resolution, and the resolution happens once per request.
+ *
+ * IT ADDS NO WAY TO NAME A SHEET. Every read here is `(the caller's OWN staging project, an objectId)`
+ * and the result is only ever compared against the ALREADY-BOUND sheet id; a mismatch is `'deleted'`
+ * — the sheet whose id we hold is not the live sheet that pair resolves to — never an invitation to
+ * follow the id that came back.
+ */
+async function proveBoundSheetIsAlive(provisioning, stagingProjectId, boundSheetId, boundObjectId) {
+  if (typeof provisioning.getObjectSheetId !== 'function') return 'unprovable'
+  if (typeof provisioning.findObjectSheet !== 'function') return 'unprovable'
+  const candidateObjectIds = boundObjectId === STOCK_PREPARATION_FILL_OBJECT_ID
+    ? [boundObjectId]
+    : [boundObjectId, STOCK_PREPARATION_FILL_OBJECT_ID]
+  for (const candidateObjectId of candidateObjectIds) {
+    if (provisioning.getObjectSheetId(stagingProjectId, candidateObjectId) !== boundSheetId) continue
+    const sheet = await provisioning.findObjectSheet({ projectId: stagingProjectId, objectId: candidateObjectId })
+    const sheetId = sheet && sheet.id ? String(sheet.id) : ''
+    return sheetId === boundSheetId ? 'alive' : 'deleted'
+  }
+  return 'unprovable'
+}
+
+/**
  * THE TENANT GATE ON THE BOUND TARGET, factored out because THREE things ride it — the board's fill
  * handle, the board's pull-target row counts, and now the directory's distinct-project scan — and
  * they must never be able to disagree about whether the bound sheet is the caller's own.
@@ -197,9 +250,23 @@ function createPullTargetScanCache({
  * registry says the sheet is ours, or its id hashes from our own project. Both are sound, so their
  * disjunction is sound, and a host too old to expose the port keeps exactly the behaviour it had.
  *
- * `findObjectSheet` remains the EXISTENCE proof — but it is only usable on the hash path, where we
- * know the (project, objectId) the sheet was created under. On the registry path the registry row IS
- * the existence evidence: a sheet id is in it because provisioning put it there.
+ * ---------------------------------------------------------------------------
+ * OWNERSHIP IS NOT EXISTENCE — WHY THE REGISTRY PATH ALSO HAS TO ASK `proveBoundSheetIsAlive`
+ * ---------------------------------------------------------------------------
+ *
+ * The first cut of PROOF 1 returned the sheet id the moment the registry said "yours", on the
+ * reasoning that a sheet id is in `plugin_multitable_object_registry` because provisioning put it
+ * there. That is evidence the sheet was CREATED. It is not evidence it still exists: deleting a
+ * table is `UPDATE meta_sheets SET deleted_at = now()` (routes/univer-meta.ts), and NOTHING in the
+ * product ever deletes the registry row — so after a delete the registry still answers "yours" about
+ * a sheet that is gone, and the gate handed out a deep link into a deleted table plus a scan against
+ * it. That contradicted this module's own claim that the gate proves the sheet "belongs to the
+ * caller's own staging project AND exists", and the cost grew with this pass's second caller: the
+ * handle went from 项目备料页 alone to the operator home page and the project workbench as well.
+ *
+ * So liveness is proved SEPARATELY, and only ever NARROWS: a sheet the registry does not claim is
+ * still refused exactly as before, and a sheet proved DELETED is now refused too.
+ * `proveBoundSheetIsAlive` explains what it can and cannot decide with the ports a host exposes.
  */
 async function resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget) {
   if (!provisioning) return null
@@ -220,7 +287,15 @@ async function resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget)
     }
     // A "no" is not a refusal — an unclaimed sheet answers the same way — so it falls through to the
     // second proof rather than ending the resolution.
-    if (owned) return { sheetId: boundSheetId, objectId }
+    if (owned) {
+      // OWNED, BUT IS IT STILL THERE? The registry never forgets a deleted sheet, so ownership alone
+      // would keep pointing operators at a table that was dropped. `'unprovable'` keeps the answer
+      // this path already gave (a hand-bound sheet's liveness cannot be decided with today's ports —
+      // see the helper); `'deleted'` is a hard refusal.
+      const liveness = await proveBoundSheetIsAlive(provisioning, stagingProjectId, boundSheetId, objectId)
+      if (liveness === 'deleted') return null
+      return { sheetId: boundSheetId, objectId }
+    }
   }
 
   // PROOF 2 — THE DETERMINISTIC ID, plus an existence check. Unchanged from the first cut.
@@ -512,6 +587,7 @@ module.exports = {
   STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
   createPullTargetScanCache,
   parsePlmRefreshTimestampMs,
+  proveBoundSheetIsAlive,
   readPullTargetRowFacts,
   resolveFillTarget,
   resolveOwnBoundSheet,

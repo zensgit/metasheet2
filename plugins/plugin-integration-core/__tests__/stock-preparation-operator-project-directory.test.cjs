@@ -241,6 +241,16 @@ function mount({
   // Which sheet the action is bound to. Defaults to the caller's OWN deterministic id, which is what
   // the tenant gate demands; a scenario that models a foreign binding overrides it.
   boundSheetIdOverride = null,
+  // Which OBJECT the action names. Defaults to the canonical fill object. The 222 deploy-window shape
+  // (D1=B) rebinds the action to a SANDBOX objectId while KEEPING the sheet the deployment already
+  // had, so this is how that configuration is modelled — see N7-g.
+  boundObjectIdOverride = null,
+  // THE TABLE WAS DELETED, and the provisioning registry has not forgotten it. Dropping a table is
+  // `UPDATE meta_sheets SET deleted_at = now()`; no code path ever deletes the registry row. So this
+  // keeps the rows in the records API and keeps `isSheetOwnedByProject` answering YES, and only makes
+  // the host's existence read (`findObjectSheet`, which is `deleted_at IS NULL`) stop finding it —
+  // exactly the state a real delete leaves behind (N7-f).
+  mainTableSheetDeleted = false,
   // `null` = the audit store has no `list` at all (the default). An ARRAY = what one descending
   // window over `prep_line_export` returns, newest first, as the store would return it.
   auditEntries = null,
@@ -263,6 +273,9 @@ function mount({
   const missingA = new Set()
   if (!ledgerProvisioned) missingA.add(DECISION_OBJECT_ID)
   if (!directoryProvisioned) missingA.add(PROJECT_OBJECT_ID)
+  // A DELETED table is "the existence read no longer finds it" and NOTHING else: the rows stay, the
+  // registry keeps claiming it, and only `findObjectSheet` goes quiet.
+  if (mainTableSheetDeleted) missingA.add(MAIN_OBJECT_ID)
 
   const provisioningA = makeFakeProvisioning({
     stagingProjectId: STAGING_A,
@@ -439,7 +452,7 @@ function mount({
             source: { kind: 'data-source:sql-readonly', externalSystemId: 'ext_demo' },
             target: {
               sheetId: MAIN_SHEET,
-              objectId: MAIN_OBJECT_ID,
+              objectId: boundObjectIdOverride || MAIN_OBJECT_ID,
               // THE EXPLICIT MODE, which is what a real deployment configures: logical id -> the
               // PHYSICAL fieldId provisioning materialized.
               fieldIdMap: MAIN_FIELD_ID_MAP,
@@ -1130,7 +1143,13 @@ async function main() {
       },
     }
     const provisioning = {
-      async findObjectSheet() { return null },
+      // THE BOUND SHEET IS LIVE, said by BOTH ports the gate consults. A fixture where the registry
+      // claims a sheet the host's existence read cannot find is a DELETED table (N7-f/N7-g), and the
+      // gate refuses that — so a scan fixture that left this null would be asserting over a refused
+      // read rather than over the scan it is about.
+      async findObjectSheet({ projectId, objectId } = {}) {
+        return projectId === STAGING_A && objectId === MAIN_OBJECT_ID ? { id: MAIN_SHEET_A } : null
+      },
       getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
       async isSheetOwnedByProject(sheetId, projectId) { return sheetId === MAIN_SHEET_A && projectId === STAGING_A },
     }
@@ -1171,7 +1190,13 @@ async function main() {
       },
     }
     const provisioning = {
-      async findObjectSheet() { return null },
+      // THE BOUND SHEET IS LIVE, said by BOTH ports the gate consults. A fixture where the registry
+      // claims a sheet the host's existence read cannot find is a DELETED table (N7-f/N7-g), and the
+      // gate refuses that — so a scan fixture that left this null would be asserting over a refused
+      // read rather than over the scan it is about.
+      async findObjectSheet({ projectId, objectId } = {}) {
+        return projectId === STAGING_A && objectId === MAIN_OBJECT_ID ? { id: MAIN_SHEET_A } : null
+      },
       getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
       async isSheetOwnedByProject(sheetId, projectId) { return sheetId === MAIN_SHEET_A && projectId === STAGING_A },
     }
@@ -1208,7 +1233,13 @@ async function main() {
   // question is answered from: N1-c pins {pullTargetReady:false, directoryMayBeIncomplete:false} for
   // "nothing bound", and this pins {false, true} for "the read broke". Those are the two signatures.
   const breakingScanProvisioning = {
-    async findObjectSheet() { return null },
+    // THE BOUND SHEET IS LIVE, said by BOTH ports the gate consults. A fixture where the registry
+    // claims a sheet the host's existence read cannot find is a DELETED table (N7-f/N7-g), and the
+    // gate refuses that — so a scan fixture that left this null would be asserting over a refused
+    // read rather than over the scan it is about.
+    async findObjectSheet({ projectId, objectId } = {}) {
+      return projectId === STAGING_A && objectId === MAIN_OBJECT_ID ? { id: MAIN_SHEET_A } : null
+    },
     getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
     async isSheetOwnedByProject(sheetId, projectId) { return sheetId === MAIN_SHEET_A && projectId === STAGING_A },
   }
@@ -1864,6 +1895,55 @@ async function main() {
     const asked = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
     assert.ok(asked.body.data.fillTarget)
   })
+  await run('N7-f A DELETED fill table yields NO handle, even though the registry still claims it', async () => {
+    // THE GAP THIS CLOSES, and why it is worth a route-level guard rather than a note. Ownership is
+    // recorded in `plugin_multitable_object_registry`, written at provisioning time; dropping a table
+    // is `UPDATE meta_sheets SET deleted_at = now()` and NO code path ever deletes the registry row.
+    // So after a delete the registry still answers 「是你的」 about a table that is gone, and the gate's
+    // first proof — which took that answer as sufficient — pointed the operator at it. This PR is what
+    // put that handle on the home page and the project workbench as well as 项目备料页, so it is also
+    // what makes the gap worth three surfaces instead of one.
+    //
+    // THE FIXTURE IS THE REAL POST-DELETE STATE, not a rigged one: the rows are still in the records
+    // API, `isSheetOwnedByProject` still says YES, the hash still derives — the ONLY difference from
+    // N7-a is that the host's `deleted_at IS NULL` read no longer finds the sheet.
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }], mainTableSheetDeleted: true })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200, 'a deleted table is a deployment state, not a directory failure')
+    assert.equal(res.body.data.fillTarget, null, 'no live sheet, no handle — a link into a deleted table is worse than no button')
+    assert.equal(res.body.data.pullTargetReady, false, 'and the deleted sheet is not scanned for project numbers either')
+    assert.equal(JSON.stringify(res.body).includes(MAIN_SHEET_A), false, 'the dead sheet id is not echoed in any form')
+    // THE POSITIVE CONTROL on the same substrate, so the null above is the delete and not a mount
+    // that never had a handle to give (N7-a is the same assertion from the other end).
+    const live = await call(mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }] }).routes, 'GET', DIRECTORY_PATH,
+      { user: OPERATOR_A, query: UNION_QUERY })
+    assert.ok(live.body.data.fillTarget, 'the identical mount WITHOUT the delete does hand out the handle')
+  })
+
+  await run('N7-g the D1=B sandbox rebinding is checked for liveness too — against the CANONICAL object', async () => {
+    // The sanctioned 222 deploy-window step rebinds the action to a SANDBOX objectId while KEEPING
+    // the sheet the deployment already had — a sheet created under the CANONICAL object. Its id
+    // therefore hashes from the canonical object, not from the bound one, so a liveness read that
+    // only ever tried the bound objectId would answer 「无法判断」 on the ONE configuration a live
+    // deployment actually runs, and the whole guard would be decorative there.
+    const SANDBOX_OBJECT_ID = 'plm_stock_preparation_sandbox_main'
+    const live = await call(mount({
+      mainTableRows: [{ projectNo: PROJECT_A3_NO }],
+      boundObjectIdOverride: SANDBOX_OBJECT_ID,
+    }).routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(live.statusCode, 200)
+    assert.ok(live.body.data.fillTarget, 'the sandbox rebinding of a sheet we own must STILL yield a handle')
+    assert.equal(live.body.data.fillTarget.sheetId, MAIN_SHEET_A)
+
+    const deleted = await call(mount({
+      mainTableRows: [{ projectNo: PROJECT_A3_NO }],
+      boundObjectIdOverride: SANDBOX_OBJECT_ID,
+      mainTableSheetDeleted: true,
+    }).routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(deleted.statusCode, 200)
+    assert.equal(deleted.body.data.fillTarget, null, '…and the same rebinding over a DELETED sheet yields none')
+  })
+
   // -------------------------------------------------------------------------
   // 项目备料页 PAYS NOTHING FOR ANY OF THIS
   // -------------------------------------------------------------------------
