@@ -448,6 +448,39 @@ describe('MultitableWorkbench import → create missing fields', () => {
     }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
+  it('still reports the created column (and the create error) when the meta reload fails too', async () => {
+    // Worst case of the partial-failure path: the create blew up AND the follow-up sheet-meta
+    // refresh blew up. The user must still see WHICH create failed (not a reload error), and the
+    // modal must still learn about the column that was created — that map is the only thing
+    // stopping the retry from creating a second field with the same name.
+    mountWorkbench([{ id: 'fld_name', name: 'Name', type: 'string' }])
+    workbenchMock.client.createField
+      .mockResolvedValueOnce({ field: { id: 'fld_warehouse', name: 'Warehouse', type: 'string' } })
+      .mockRejectedValueOnce(new Error('Temporary outage'))
+    workbenchMock.client.createRecord.mockResolvedValue({ record: { id: 'rec_1', version: 1, data: {} } })
+
+    await openImportModal()
+    workbenchMock.loadSheetMeta.mockRejectedValue(new Error('meta reload exploded'))
+
+    emitImportPayload!({
+      records: [{ fld_name: 'Alpha', [createFieldPlaceholderId(1)]: 'A1', [createFieldPlaceholderId(2)]: 'B1' }],
+      rowIndexes: [0],
+      failures: [],
+      createFields: [
+        { header: 'Warehouse', columnIndex: 1 },
+        { header: 'Batch', columnIndex: 2 },
+      ],
+    })
+    await flushUi(20)
+
+    expect(importModalProps.createdFieldColumns).toEqual({ 1: 'fld_warehouse' })
+    expect(showErrorSpy).toHaveBeenCalledWith(
+      'Failed to create field "Batch": Temporary outage No records were imported.',
+    )
+    expect(showErrorSpy).not.toHaveBeenCalledWith(expect.stringContaining('meta reload exploded'))
+    expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
+  })
+
   it('refuses to create fields (and to import) when the caller has no manage-fields capability', async () => {
     canManageFields = ref(false)
     mountWorkbench([{ id: 'fld_name', name: 'Name', type: 'string' }])

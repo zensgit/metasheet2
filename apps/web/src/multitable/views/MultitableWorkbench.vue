@@ -3696,7 +3696,13 @@ async function applyImportCreateFields(payload: ImportSubmitPayload): Promise<bo
       // only for the column that actually failed. Dropping createdColumns here (the previous
       // behaviour) left orphans behind AND made the retry create a SECOND field with the same name
       // — meta_fields has no (sheet_id, name) unique index to stop it.
-      await publishCreatedImportFields(payload, sheetId, createdColumns)
+      try {
+        await publishCreatedImportFields(payload, sheetId, createdColumns)
+      } catch {
+        // A failed sheet-meta refresh must NOT mask the create error the user has to act on; the
+        // column → id map is published regardless (see the finally inside), which is what stops the
+        // retry from duplicating.
+      }
       return false
     }
   }
@@ -3729,11 +3735,12 @@ async function publishCreatedImportFields(
   }
   try {
     await workbench.loadSheetMeta(sheetId)
-  } catch {
-    // A failed refresh must not swallow the create error nor hide the created ids from the modal:
-    // the rebind below is what keeps a retry from creating duplicates.
+  } finally {
+    // Published even when the refresh threw: the modal must learn which columns now exist, or the
+    // retry asks for them again and a second same-named field appears. The throw still propagates
+    // on the success path, where a stale grid was already treated as a reason to abort.
+    importCreatedFieldColumns.value = { ...createdColumns }
   }
-  importCreatedFieldColumns.value = { ...createdColumns }
 }
 
 async function onBulkImport(payload: ImportSubmitPayload) {
