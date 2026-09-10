@@ -64,6 +64,8 @@ import type {
   DashboardUpdateInput,
   FormShareConfig,
   FormShareConfigUpdate,
+  CreateTemplateFromBaseInput,
+  CreateTemplateFromBaseResult,
   InstallTemplateInput,
   InstallTemplateResult,
   TemplateDryRunResult,
@@ -1836,6 +1838,31 @@ export class MultitableApiClient implements CommentsApiClient {
       },
     )
     return this.parseJson(res)
+  }
+
+  /**
+   * 把一个 Base 的**结构**存成模板(服务端只读 meta_sheets/meta_fields/meta_views,
+   * 不碰任何记录)。成功后模板列表缓存必须作废,否则模板中心刷不出刚建的模板。
+   */
+  async createTemplateFromBase(input: CreateTemplateFromBaseInput): Promise<CreateTemplateFromBaseResult> {
+    const res = await this.fetch('/api/multitable/templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    const data = await this.parseJson<CreateTemplateFromBaseResult>(res)
+    this.invalidateTemplatesCache()
+    return data
+  }
+
+  /** 删除自定义模板(软删)。内置模板服务端会 403 —— 前端也不给入口。 */
+  async deleteTemplate(templateId: string): Promise<{ templateId: string }> {
+    const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}`, {
+      method: 'DELETE',
+    })
+    const data = await this.parseJson<{ templateId: string }>(res)
+    this.invalidateTemplatesCache()
+    return data
   }
 
   async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {

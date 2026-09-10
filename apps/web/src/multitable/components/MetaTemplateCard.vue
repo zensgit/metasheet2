@@ -9,6 +9,12 @@
         {{ template.icon || template.name.slice(0, 1).toUpperCase() }}
       </span>
       <span class="meta-template-card__category">{{ categoryDisplay }}</span>
+      <!-- 自定义模板角标:内置模板(常量表里的 8 张)不带 custom,所以永远不显示。 -->
+      <span
+        v-if="template.custom"
+        class="meta-template-card__custom-badge"
+        data-testid="template-card-custom-badge"
+      >{{ workbenchLabel('card.customBadge', isZh) }}</span>
     </div>
     <h3 class="meta-template-card__name">{{ template.name }}</h3>
     <p class="meta-template-card__description">{{ template.description }}</p>
@@ -26,6 +32,16 @@
         @click="emit('detail', template)"
       >
         {{ workbenchLabel('card.viewDetail', isZh) }}
+      </MtButton>
+      <!-- 删除只对自定义模板开放,且要调用方显式打开(模板中心开,首页/工作台不开)。
+           服务端才是真正的门:内置模板 403,别的租户的模板 404。 -->
+      <MtButton
+        v-if="deletable && template.custom"
+        class="meta-template-card__delete"
+        data-testid="template-card-delete"
+        @click="emit('delete', template)"
+      >
+        {{ workbenchLabel('card.delete', isZh) }}
       </MtButton>
       <MtButton
         variant="primary"
@@ -56,11 +72,13 @@ const props = defineProps<{
   template: MetaTemplate
   installing?: boolean
   showDetail?: boolean
+  deletable?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'install', template: MetaTemplate): void
   (e: 'detail', template: MetaTemplate): void
+  (e: 'delete', template: MetaTemplate): void
 }>()
 
 // useLocale().isZh is already a ComputedRef<boolean>; template auto-unwraps it,
@@ -117,6 +135,15 @@ const viewCount = computed(() => {
   background: #f1f5f9;
   border-radius: 999px;
   padding: 0.125rem 0.625rem;
+  white-space: nowrap;
+}
+
+.meta-template-card__custom-badge {
+  font-size: 0.75rem;
+  color: #0f766e;
+  background: #ccfbf1;
+  border-radius: 999px;
+  padding: 0.125rem 0.5rem;
   white-space: nowrap;
 }
 

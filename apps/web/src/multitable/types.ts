@@ -788,6 +788,27 @@ export interface MetaTemplate {
   icon: string
   color: string
   sheets: MetaTemplateSheet[]
+  /**
+   * 用户自定义模板(「把这张 Base 存为模板」存下来的)。内置模板不带这个字段。
+   * 服务端按租户过滤后才返回,前端只用它做「自定义」角标与删除入口的显隐。
+   */
+  custom?: boolean
+  createdBy?: string | null
+  createdAt?: string | null
+}
+
+/** POST /api/multitable/templates —— 从一个 Base 抽结构存成模板(不含任何记录数据)。 */
+export interface CreateTemplateFromBaseInput {
+  baseId: string
+  name?: string
+  description?: string
+  category?: string
+}
+
+export interface CreateTemplateFromBaseResult {
+  template: MetaTemplate
+  /** 服务端的降级说明(比如关联字段被转成文本),原样展示给用户。 */
+  warnings: string[]
 }
 
 export interface InstallTemplateInput {
