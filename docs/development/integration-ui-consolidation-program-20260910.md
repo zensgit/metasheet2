@@ -1,20 +1,35 @@
 # 集成层页面整合与差距收敛 —— 24h 自主开发程序报告（2026-09-09 18:30 → 2026-09-10 18:30）
 
-> 用户离机 24 小时前授权："自动规划并计划开发，完成后给出设计及验证 MD，根据代码难度自动规划模型，遇额度问题暂停到期后自动继续"。本文是程序总报告：计划、模型分派、每项的交付物与验证证据、对抗复核裁决、额度中断记录、遗留与合并顺序。**终态（09-10 15:07）：10 个 PR 全部正式、CI 全绿、各带设计/验证文档。****所有 PR 均未合并**（合并只认用户明说）；222 未动。
+> 用户离机 24 小时前授权："自动规划并计划开发，完成后给出设计及验证 MD，根据代码难度自动规划模型，遇额度问题暂停到期后自动继续"。本文是程序总报告：计划、模型分派、每项的交付物与验证证据、对抗复核裁决、额度中断记录、遗留与合并顺序。**09-10 15:07 状态：10 个 PR 全部正式、CI 全绿、各带设计/验证文档；17:00 用户审阅后 #5576 / #5588 返修中（见 §1.1）。** **所有 PR 均未合并**（合并只认用户明说）；222 未动。
 
 ## 1. 结果一览
 
 | # | 项 | PR | 状态 | 复核形态与裁决 | 设计 / 验证文档 |
 |---|---|---|---|---|---|
 | A | 外接数据源页并入数据工厂「连接管理」分区；`/data-sources` 改重定向；工作台 `#分区` / `?section=` 落点；导航删项；向导①链接按 `integration:write` 门渲染 | **#5587** | 正式，CI 全绿（25 项，补文档后复跑亦绿） | 3 查找 → 每条 2 反驳 → 终审（44 代理）："修完 4 项再转正式" → 已修（注释诚实性、向导①门、标题接缝、同页删源清悬挂草稿）+ 3 项后续 | `data-sources-fold-into-workbench-{design,verification}-20260910.md` |
-| B | 备料错误码目录补 `SOURCE_UNAVAILABLE`（503 源库不可达）+ 交付指南一行 | **#5588** | 正式，CI 全绿 | 我直接复核 diff（目录条目 + 文档，低风险） | `stock-prep-codehelp-source-unavailable-{design,verification}-20260909.md` |
+| B | 备料错误码目录补 `SOURCE_UNAVAILABLE`（503 源库不可达）+ 交付指南一行 | **#5588** | 正式，CI 全绿；**审阅返修中**（文案与覆盖声明收窄，见 §1.1 第 5 项） | 我直接复核 diff；用户审阅指出文案过度承诺 | `stock-prep-codehelp-source-unavailable-{design,verification}-20260909.md` |
 | C | 数据源列表「被引用 N」列 + 删除前提示；后端列表/详情带 `referenceCount`（一次分组计数，不 N+1） | **#5593**（base = #5587） | 正式，CI 全绿（14 项） | 2 查找 → 双反驳 → 终审（19 代理）："修完 3 小项再转正式" → 已修（文案去绝对化、计数失败记 SQLSTATE 的 warn、文档基线） | `data-sources-reference-count-{design,verification}-20260910.md` |
 | D | 备料向导①拆 ①a 登记外接数据源 / ①b SQL 绑定；`/stock-prep` 导航与路由门改走工作台谓词（修掉双向分歧） | **#5594**（base = #5587） | 正式，CI 全绿（14 项，含浏览器验证） | 2 查找 → 双反驳 → security-judge（23 代理）："修完再转正式" → 已修（必过 spec 六步→七步、浏览器夹具补新读、F06 旧式桥接部署不误导、DataSourceRegistry 进必过清单、①a 对无 `data_sources:read` 指明缺码） | `stock-prep-wizard-split-and-gate-alignment-{design,verification}-20260910.md` |
 | E | G4 结构化强制第一刀 M2：适配器装载去掉 credential-stripped 公共投影回退，硬依赖 `getExternalSystemForAdapter` | **#5590** | 正式，CI 全绿（28 项） | 3 查找 → 双反驳 → security-judge（24 代理）："生产代码严格强于 main；修完测试/脚本/文档再合" → 已修（结构 allowlist 边界匹配 + 名册扩到 `listExternalSystems`/`getExternalSystemAdapterConfig` + 反假绿 control + 探针加载自检；`lib/` 未动） | `integration-g4-structural-enforcement-m2-{implementation,verification}-20260910.md` |
-| F | SQL 源接入验收脚本（九步正例 + 负例）+ 交付指南「升级后必查」挂脚本 | **#5576** | 正式，CI 全绿（27 项） | 两次 CI 红都是 pin：`EXPECTED_OPS_TESTS_COUNT` 48→62、`pluginTestsWorkflow` 溯源 pin 重算 | 契约测试 + 交付指南段落（脚本本身早于本程序） |
+| F | SQL 源接入验收脚本（九步正例 + 负例）+ 交付指南「升级后必查」挂脚本 | **#5576** | **审阅返修中（2 P1 + 2 P2，见 §1.1）**；已变基到 main（此前 CONFLICTING） | 两次 CI 红都是 pin；用户审阅发现两条 P1（连接失败仍 PASS；"新源→dry-run"未连成一条链） | 契约测试 + 交付指南段落（脚本本身早于本程序） |
 | G | 数据工厂页面布局与功能差距分析（对标飞书 aPaaS 连接器 / n8n / 数环通） | **#5592** | 正式，CI 全绿 | 5 读图 → 9 视角（75 原始）→ 去重 58 → 46 条各过反驳者 → 批评者补 4 → 综合（71 代理）：**37 条成立、17 条驳回**，原 10 条 P0 只剩 G02 | `docs/research/data-factory-page-and-capability-gap-analysis-20260910.md` |
-| I | 差距 G27：清洗映射转换/校验 UI 对齐引擎全集（toDate / defaultValue / concat / 转换链 / 映射级默认值 / pattern / enum），后端零改动 | **#5596** | 正式，CI 全绿（24 项） | 2 查找 → 双反驳 → 终审（25 代理）："修完 F06 再转正式" → 已修（concat 无 schema 回退框改绑本地草稿）+ 后续 5 项（有损项登记、参数优先级照抄引擎、默认值文案、行号报错、存库→回读→引擎整链用例） | `integration-mapping-transform-ui-parity-{design,verification}-20260910.md` |
+| I | 差距 G27：清洗映射转换/校验 UI 对齐引擎全集（toDate / defaultValue / concat / 转换链 / 映射级默认值 / pattern / enum），后端零改动 | **#5596** | 正式，CI 全绿（24 项；审阅追加的 dictMap 逆函数保真已修，CI 复跑绿） | 2 查找 → 双反驳 → 终审（25 代理）："修完 F06 再转正式" → 已修（concat 无 schema 回退框改绑本地草稿）+ 后续 5 项（有损项登记、参数优先级照抄引擎、默认值文案、行号报错、存库→回读→引擎整链用例） | `integration-mapping-transform-ui-parity-{design,verification}-20260910.md` |
 | J | 差距 G10：主链路不再推销 K3 写回——文案改口、写禁码进人话码表、K3 目标不渲染 Save-only | **#5597** | 正式，CI 全绿（考勤守卫因 runner 的 vitest worker RPC 超时红过三次，第四次重跑绿；本地按 CI 同款命令对拍 main 与分支同为 Windows 既有 5 条噪音、其余 1285 例绿） | 2 查找 → 双反驳 → 终审（29 代理）："修完再转正式"，含一条 blocker → 已修（/run 路径写禁码实际在 `error.details.code`，前端兜底并用服务端真实形状重写测试；K3 预设页执行控件按栅栏门撤掉、dry-run 保留；私有解析器改共享；`K3_WISE_REPLAY_DISABLED` 登记；文档绝对句撤回） | `integration-k3-writeback-copy-and-codes-{design,verification}-20260910.md` |
+
+
+### 1.1 用户审阅（09-10 17:00）的返修与合并门
+
+审阅结论：不建议按清单连续合并；#5576 需要修改，其余代码 PR 未发现阻断。五项返修：
+
+1. **[P1] #5576 STEP3 连接失败仍 PASS**——只看 HTTP 200 与 `lastTestedAt`，生产接口连接失败也返回 200。修法：同时断言 `data.ok`、读回 `status≠error`、`lastError` 为空；补失败响应负例。
+2. **[P1] #5576 "新源→一线 dry-run"未连成一条链**——STEP4/STEP6 作用于部署既有来源，未证明指向本次新建源；预检读 `ready` 而真实返回 `ok/verdict`。修法：读回动作的源绑定比对 `connectionId`，相等标 CLOSED_LOOP，否则降级 ENV_PROBE 并撤回"闭环"结论；不静默改生产 action；预检断言改读真实字段。
+3. **[P2] #5576 脚本不在交付包**——补 `REQUIRED_PATHS`、包校验、缺件负例。
+4. **[P2] #5576 凭据被 `.Trim()`**——拆 token 规范化与凭据原样读取（只剥一个结尾换行），写明换行约定。
+5. **[P2] #5588 文案过度承诺**——503 不能证明"非权限/重试无效"；预检页把它折叠成 no-go/unknown_error，覆盖声明收窄。
+
+另：#5596 dictMap 逆函数保真（键含 `=`、值含换行/首尾空格）已修（d7918ece0）。
+
+合并门（审阅人）：#5576 变基后需重跑并解决冲突（已变基，返修后重跑）；#5593 / #5594 当前只有 14 项检查（缺仅对 main 触发的 web-tests、插件测试），**父 PR #5587 合入后必须确认目标分支、重基并重跑**，不能沿用旧绿灯；无技术依赖的 PR 不必陪等。
 
 **建议合并顺序**：#5576 → #5588 → #5592 → #5590 → **#5587 → #5593 → #5594**（后两支以 #5587 为 base，GitHub 会在 #5587 合并后自动改 base）→ #5596 → #5597（两支与 #5587 都碰 `IntegrationWorkbenchView.vue` 的不同区域，合并第二支时可能要 rebase 解小冲突）。
 
@@ -37,13 +52,14 @@
 - "后端有、前端锁死"一族（约 8 条）是 S/M 工作量、零后端改动的最高性价比——本程序第三波的 I（G27）、J（G10）即取自此。
 - 不追：连接器广度 / SaaS 目录、通用写回、n8n 式画布、Bridge 远程 fleet（维持 2026-07-03 对标结论）。
 
-## 4. 额度中断记录（三次，均自动恢复）
+## 4. 额度中断记录（四次，均自动恢复）
 
 | 时刻（本地） | 现象 | 处理 |
 |---|---|---|
 | 09-09 19:40 | sonnet/opus/Fable 子代理全部 429（reset 21:00） | 主循环也被限，心跳到 09-10 08:14 才醒；醒后 resume 两个工作流、SendMessage 恢复中断代理 |
 | 09-10 09:35 | opus 429（reset 13:00） | 主循环仍可用：自己写差距报告初稿、提交 fold 修复、推 PR；13:00 前 sonnet 探针成功即提前恢复 |
 | 09-10 13:10 | opus 429（reset 14:20） | D 由 sonnet 收尾（不再恢复 opus 上下文，避免两套上下文打架）；I、J 等用户在线告知恢复后 SendMessage 续做 |
+| 09-10 17:10 | opus + sonnet 429（reset 18:00） | #5588 返修由我自己验证提交；#5576 返修代理（已变基、脚本头部改到一半）18:00 后续做 |
 
 教训：中断代理的"最后一句话"不代表进度（E 的通知写"刚开始读"，工作区已有 15 文件改动）——先看 `git status` 再决定恢复方式。
 
