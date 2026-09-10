@@ -11,6 +11,8 @@
 | `pnpm --filter web run lint` | 0 | 项目 lint glob（含 `src/App.vue`）0 error 0 warning |
 | `npx eslint`（我改到的、glob 外的 10 个文件） | 1 | **0 error**；5 warning 全在 `StockPreparationWorkspace.spec.ts:1547-1550` 的 `router-view`/`router-link` 桩，`git show 7eff1e8d2:` 里已存在，非本波引入 |
 | 下述 10 个 spec（两个分支改到的文件全覆盖） | 0 | 全部通过 |
+| `playwright test --config playwright.stock-prep-verification.config.ts` | 0 | **29 passed**（本机装了 chromium，真跑） |
+| `node --test scripts/ops/stock-prep-browser-ci-wiring.test.mjs` | 0 | 6/6，含 classifier 对导入闭包的游走 |
 
 单跑（退出码均 0）：`StockPreparationGettingStarted` **63**（拆分 60 + 基分支 denied 三例）/ `StockPreparationDataSourceRegistry`（新增）**33** / `StockPreparationOnboardingReadiness` 40 / `stockPrepPermissionMatrix` 24 / `StockPreparationWorkspace` 53 / `IntegrationWorkbenchView` 55 / `dataSourcesPanelEmbedded` 4 / `dataSourcesRouteRedirect` 11 / `integrationWorkbenchSectionLanding` 12 / `StockPreparationCodeHelp` 13。（`StockPreparationHelpCard` 无自有 spec，单跑 exit=1 是 "no test files found"；其文案由整壳渲染覆盖。全量 web 测试本机有既有噪音，以 CI 为准。）
 
@@ -34,6 +36,8 @@
 | M4 放开 ①a 链接的 `canOpenDataFactory` 门（`v-if="true"`） | 1 | 5：denied 四例 + fail-closed |
 | M5 守卫适配器改回 `deps.auth.hasPermission` | 1 | 2：门 pin + F-03 |
 | M6 导航谓词改回 `hasPermission('stock-prep:read')` | 1 | 1：F-07 |
+| L1 P0-05 步数断言改回 6 | 1 | P0-05（浏览器道） |
+| L2 `/api/data-sources` 夹具路径指向不可达值 | 1 | P0-05 的 `expectNoUnmockedRoutes` |
 
 M2/M4 第一版删 `<a>` 导致 `v-else` 失配、模板编译失败（"no tests"）—— 那是编译错误不是断言证据；上表是改成可编译变体后的重跑结果。
 
@@ -56,5 +60,7 @@ M2/M4 第一版删 `<a>` 导致 `v-else` 失配、模板编译失败（"no tests
 - **GettingStarted.vue**：prop 声明取基分支那份（删掉我的重复声明）；①a 的 denied 节点改用基分支的 `<span>` 与文案（点名 `integration:write` + 找实施）；①b 保留我的 testid，文案改成同一句式以成对；两套注释理由合并。
 - **InstallView.vue**：git 自动合并出了**重复**的模板绑定与重复的 `const canOpenDataFactory`（会编译失败），人工去重，保留基分支那一处，并把它注释里单数的「向导① 的 LINK」改口为两条。
 - **GettingStarted.spec.ts**：`Props` 与 `defaultProps` 同样自动合并出重复键，去重后采用基分支的 `canOpenDataFactory: false` 默认（比我原本的 `true` 诚实：`true` 会让一个丢掉整个门的组件在所有不提这个 prop 的用例里看起来都对），我那几个需要链接的用例改为显式传 `true`；两边用例全保留，断言按合并后的 DOM 改写（①a denied 改成断言 `integration:write`/`实施`）。基分支的 fail-closed 例（传 `false`）与我的（真的把键删掉）并存，后者严格更强。
+
+**浏览器验收道（CI #5594 红的那项）**：两类失败都是 ① 拆分的直接后果。一是夹具没覆盖 `GET /api/data-sources`（①a 的新读），而夹具的 catch-all 把未模拟路由当失败而不是放行，所以每条 `expectNoUnmockedRoutes` 都红；已在 `ROUTES` 表（它就是这条道的「已覆盖路由清单」）里补上，并按场景分三态（`fresh` 0 条 / `readerOnly` 403 / 其余 1 条 sqlserver），让 ①a 的 done/held/unknown 三个分支都有人走。二是 P0-05 还期望 6 个步骤元素与「/6」进度，改为 7 与「/7」。未增删任何用例：`--list` 仍是 29 tests in 2 files；workflow 的 classifier 也无需改，新文件 `dataSourceRegistry.ts` 落在已有的 `services/integration/stockPreparation/*` 通配里。
 
 **pin 文件**：未触碰任何被 `sealed-export-package-provenance` 钉住的文件：该清单只覆盖 `plugins/plugin-integration-core/lib/**` 的 `.cjs` 与 `migrations`，本波改动全在 `apps/web/**` 与 `docs/**`，故无需重打 pin、无需 66 项 LF 字节校验。
