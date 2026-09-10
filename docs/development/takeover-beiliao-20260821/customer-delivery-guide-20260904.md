@@ -95,6 +95,8 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 3. 浏览器打开首页,Ctrl+F5 强刷一次,看到登录页才算通过。
 包侧的兜底:打包工作流的 `base_path` 参数默认就是 `/`,**不要在 Git Bash 里显式传 `-f base_path=/`**(MSYS 会把它改写成 Git 安装目录);打包完成后先解开 `apps/web/dist/index.html` 检查资源前缀,再上传。
 
+**升级后必查:SQL 源接入链路验收(2026-09-10 新增,PR #5576)**:前端 smoke 之后,再跑一遍 SQL 源接入的九步链路,证明"建源→绑定→测连接→源预检→删除保护→一线 dry-run"在这个包上仍然通,并且租户/权限门没被升级放开。脚本 `scripts/ops/stock-preparation-sql-source-onboarding-acceptance.ps1`(Windows PowerShell 5.1 可跑,values-free,凭据与 token 只从文件读、永不回显):先 `-DryRun` 打印计划不发请求,再正式跑:`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ops\stock-preparation-sql-source-onboarding-acceptance.ps1 -BaseUrl http://127.0.0.1 -OwnerTokenFile <owner.token> -OperatorTokenFile <operator.token> -ClaimlessTokenFile <claimless.token> -TenantId <租户id> -SqlHost <源库地址> -SqlDatabase <库名> -SqlUsernameFile <user.txt> -SqlPasswordFile <pass.txt> -ProjectNo <项目号>`。正例九步全部 PASS、负例(无租户声明 403、跨租户 404/403、被引用源删除 409)全部按预期拒绝、且报告里没有 `ISOLATION_BREACH` 才算通过;任一 ISOLATION_BREACH 立即停止并回滚,那是跨租户泄漏,不是环境问题。报告默认写到当前目录(`-ReportPath` 可改),留档到 `output\releases\incoming\tools-rNN\`。第 6 步源预检若答 503 `SOURCE_UNAVAILABLE`,是源库不可达而不是脚本或权限问题(见 §7 ⑪)。
+
 **r17 升级验证记录(2026-09-08,222,main `61ecc67d1`,包 12.49 MB)**:
 
 - **04:55 就地升级**:pg_dump 备份完成、442 个文件哈希核对通过、迁移 0 条(无新增迁移)、health 200。
