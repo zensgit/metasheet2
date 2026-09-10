@@ -1,6 +1,6 @@
 # 外接数据源「被引用 N」列 — 设计 (2026-09-10)
 
-叠加在「外接数据源并入数据工厂」(PR #5587, `feat/data-sources-fold-into-workbench` @ 7eff1e8d2) 之上。
+叠加在「外接数据源并入数据工厂」(PR #5587, `feat/data-sources-fold-into-workbench` @ afcf9e374,终审修复后) 之上。
 
 ## 1. 为什么
 
