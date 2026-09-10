@@ -513,6 +513,8 @@ npx vitest run tests/App.spec.ts attendance-date-only-format accountIdentityDisp
 # queue/detail/submit UI added over the pre-existing manual-grading endpoints.
 npx vitest run \
   tests/elearning-client.spec.ts \
+  tests/elearning-app-client.spec.ts \
+  tests/elearning-app-installation-section.spec.ts \
   tests/elearning-analytics-admin.spec.ts \
   tests/elearning-analytics-client.spec.ts \
   tests/elearning-analytics-period.spec.ts \
