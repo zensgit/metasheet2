@@ -1237,6 +1237,50 @@ async function tenancyIsProvedFromTheSheetNotTheBindingShape() {
     assert.ok(res.body.data.fillTarget, 'B-12: the deterministic proof still stands on a host without the port')
     assert.equal(res.body.data.pullTargetReady, true)
   }
+
+  // 6. THE SHEET WAS DELETED, AND THE REGISTRY STILL CLAIMS IT. `plugin_multitable_object_registry`
+  //    is written at provisioning time and NOTHING in the product ever deletes a row from it;
+  //    dropping a table is `UPDATE meta_sheets SET deleted_at = now()`. So "the registry says yours"
+  //    outlives the table, and PROOF 1 on its own kept handing out a deep link into a table that is
+  //    gone — the board's oldest form of this gap, now closed for every surface at once because both
+  //    the board and the operator directory ride the same `resolveOwnBoundSheet`.
+  //
+  //    OWNERSHIP IS UNTOUCHED HERE: the registry answer is still `true`, the hash still derives, and
+  //    the ONLY thing that changed is that `findObjectSheet` — the host's `deleted_at IS NULL` read —
+  //    no longer finds it. Refusing is therefore strictly a NARROWING.
+  {
+    const harness = mount({
+      mainTableProvisioned: false,
+      sheetOwners: { [CANONICAL_SHEET]: STAGING_A },
+    })
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, 'B-12: a deleted fill table is a deployment state, not a board failure')
+    assert.equal(res.body.data.fillTarget, null, 'B-12: a sheet the registry claims but that no longer EXISTS yields no handle')
+    assert.equal(res.body.data.pullTargetReady, false, 'B-12: and it is not read for row counts either')
+    assert.equal(res.body.data.pulledRowCount, 0)
+  }
+
+  // 7. THE D1=B WINDOW, WITH THAT SAME SHEET DELETED. The runbook's sandbox rebinding names an
+  //    objectId the sheet was never created under, so the liveness read has to be tried against the
+  //    CANONICAL object as well — otherwise the one configuration a live deployment actually runs
+  //    would be the one that never gets checked. Case 1 above is this case's live twin: same
+  //    binding, same registry answer, and it still yields a handle.
+  {
+    const sandboxBinding = {
+      sheetId: CANONICAL_SHEET,
+      objectId: 'plm_stock_preparation_sandbox_main',
+      fieldIdMap: MAIN_FIELD_ID_MAP,
+    }
+    const harness = mount({
+      boundTarget: sandboxBinding,
+      mainTableProvisioned: false,
+      sheetOwners: { [CANONICAL_SHEET]: STAGING_A },
+    })
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.fillTarget, null, 'B-12: a sandbox-rebound binding over a DELETED sheet yields no handle')
+    assert.equal(res.body.data.pullTargetReady, false)
+  }
 }
 
 // ---------------------------------------------------------------------------
