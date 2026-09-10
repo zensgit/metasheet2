@@ -376,8 +376,14 @@ describe('Stock Preparation route registration (source drift pin)', () => {
   // WHAT THIS PINS. ONE verdict per principal, read three different ways: the nav predicate, the
   // REAL `/stock-prep` route meta driven through the REAL guard adapter, and the workbench-internal
   // predicate. They must be EQUAL, not merely each individually plausible. Reverting
-  // `buildRouteGuardContext` to `deps.auth.hasPermission`, or `App.vue` to
-  // `hasPermission(STOCK_PREP_ROUTE_PERMISSION)`, reddens this.
+  // `buildRouteGuardContext` to `deps.auth.hasPermission` reddens this.
+  //
+  // WHAT IT DOES *NOT* PIN, said plainly because an earlier draft of this comment claimed it did:
+  // reverting `App.vue` to the expanding probe does NOT redden this block. Nothing here mounts the
+  // shell — `canReachStockPrepWorkbench` is called directly — so a nav link wired to a different
+  // predicate would still leave every assertion below green. The pin for THAT is F-07 in
+  // `stockPrepPermissionMatrix.spec.ts`, which reads `App.vue`'s source, and it is where a mutation
+  // probe of that revert actually lands.
   //
   // The app-wide probe handed to the adapter below is deliberately EXTREME — `() => true` in one
   // half, `() => false` in the other — because that is what makes the assertion mean anything: the
@@ -1592,6 +1598,39 @@ describe('App nav entry for Stock Preparation', () => {
     const link = findStockPrepLink(container as HTMLElement)
     expect(link).toBeTruthy()
     expect(link!.textContent).toContain('Stock Preparation')
+  })
+
+  // Review item 7 — THE ROW THE GATE-ALIGNMENT CHANGE EXISTS FOR, asserted on the real shell.
+  //
+  // The `describe` above this one pins the three predicates as pure functions. This pins the
+  // rendered LINK, which is the only thing a user can actually see, for the principal the old gate
+  // got wrong in the dangerous direction: a bare `integration:admin` is a platform admin to the
+  // server and to every predicate in `workbenchAccess.ts`, yet `useAuth().hasPermission` derives no
+  // `stock-prep:read` from it, so the link used to be absent and the guard used to redirect. Mount
+  // the shell, hold only that code, and the link has to be there.
+  it('renders the /stock-prep nav link for a bare integration:admin — the principal the old gate hid', async () => {
+    h.permissions = ['integration:admin']
+    mountApp()
+    await flushUi()
+    const link = findStockPrepLink(container as HTMLElement)
+    expect(link, 'a platform admin on this surface must not be hidden from the page it may fully use').toBeTruthy()
+    expect(link!.textContent).toContain('备料工作台')
+  })
+
+  // ...and the other direction, on the same surface: a code the SERVER refuses must not render a
+  // link, however the app-wide probe would expand it. Without this row, widening the nav predicate
+  // back to something permissive would still pass the row above.
+  it('hides the /stock-prep nav link for stock-prep:* and *:* — codes the server refuses literally', async () => {
+    for (const held of [['stock-prep:*'], ['*:*'], ['stock-prep:write'], ['users:write']]) {
+      h.permissions = [...held]
+      mountApp()
+      await flushUi()
+      expect(findStockPrepLink(container as HTMLElement), `${held[0]} must not render the link`).toBeFalsy()
+      if (app) app.unmount()
+      if (container) container.remove()
+      app = null
+      container = null
+    }
   })
 
   it('hides the /stock-prep nav link when the user lacks stock-prep:read', async () => {

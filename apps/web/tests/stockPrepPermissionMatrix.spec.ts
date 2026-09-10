@@ -198,8 +198,14 @@ function asActor(actor: Actor): void {
  * permissions }`, which is what the browser mirror computes its literal ladder over.
  *
  * `probe()` (the expanding `hasPermission`) is deliberately NOT what these predicates receive any
- * more, and the two are kept separate here on purpose: `probe()` still drives the ROUTE GUARD in
- * F-03, which is app-wide machinery this wave did not change, so the file needs both.
+ * more, and the two are kept separate here on purpose — but NOT for the reason an earlier version
+ * of this comment gave. It said `probe()` "still drives the ROUTE GUARD in F-03, which is app-wide
+ * machinery this wave did not change", and as of the gate-alignment change that is simply false:
+ * `buildStockPrepAwarePermissionProbe` now answers the three `stock-prep:*` codes from the
+ * PRINCIPAL, so in F-03 `probe()` is handed to the adapter and then deliberately BYPASSED for
+ * exactly the code that route declares. The file still needs both because `probe()` is what every
+ * OTHER permission on every other route still goes through, and F-03 passes it in to prove that the
+ * bypass is scoped rather than total.
  */
 function principal(): { roles: string[]; permissions: string[] } {
   return { roles: [...h.roles], permissions: [...h.permissions] }

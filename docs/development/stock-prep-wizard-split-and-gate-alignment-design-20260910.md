@@ -49,7 +49,9 @@
 
 - `canReachStockPrepWorkbench(snapshot) = satisfiesStockPrepAccess(snapshot, STOCK_PREP_ROUTE_PERMISSION)`，零新语义；
 - `buildStockPrepAwarePermissionProbe`：**只有** `STOCK_PREP_PERMISSION_CODES` 三个码改由字面阶梯回答，其余权限逐字节仍走 `hasPermission`；取不到 principal 时 fail-closed，绝不回退到更宽的探针；
-- `RouteGuardRuntimeDeps.auth` 增加**必填** `getAccessSnapshot`，漏传是类型错误而不是静默放宽；
+- `RouteGuardRuntimeDeps.auth` 增加**必填** `getAccessSnapshot`：这让**两个有类型的 src 调用点**（`main.ts:129`、`MyAppsLandingView.vue:149`）漏传时编译不过。这是对那两处的保证，不是对所有调用者的：测试里手搭的 deps 字面量、任何无类型的 JS 调用都不受它管——所以探针**另外**在运行时对读不到 principal 的情况 fail-closed，而不是指望类型拦住；
 - `App.vue` 导航链接改用同一谓词。
+
+**对齐的是四面，不是三面。** 除了导航链接、路由守卫、页面内部谓词，`MyAppsLandingView.vue:149` 的卡片可达性判定也走 `buildRouteGuardContext`，因此跟着这次改动一起对齐了（它自己的失败路径是 fail-OPEN 显卡，目标页自己的守卫仍然权威）。这一面**没有 pin**：本波的门 pin 只盖了前三面，卡片面是靠共用 `buildRouteGuardContext` “顺带”对齐的，有人给卡片另写一套判定不会被任何现有用例拦住。
 
 `/stock-prep` 是 `appRoutes.ts` 里唯一在 meta 里声明这三个码的路由，所以别的路由行为不变。四种展开主体严格收紧（服务端本来就拒绝他们），`integration:admin` 那行不再遮住服务端已经在服务的页面——路由守卫只是外壳的可视性开关，它后面每条路由仍由服务端同一套阶梯把门，没有任何主体因此多拿到一个字节。

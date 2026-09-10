@@ -47,6 +47,17 @@ export const STOCK_PREPARATION_PULL_ACTION_ID = 'plm.stock-preparation.pull-bom.
  */
 export const STOCK_PREPARATION_DATA_SOURCE_BRIDGE_KIND = 'data-source:sql-readonly'
 
+/**
+ * The OTHER BOM read kind: a bridge that carries its own connection details rather than pointing at
+ * a row in `data_sources`.
+ *
+ * A deployment wired for this kind cannot use an external data source at all — the server narrows
+ * `eligibleSources` to the action's own frozen `source.kind`, so a `data-source:sql-readonly`
+ * system would never be offered to it and registering one would be pure busywork. The wizard reads
+ * this to stop sending such a deployment down ①a/①b, which is work it must not do.
+ */
+export const STOCK_PREPARATION_LEGACY_BRIDGE_KIND = 'bridge:legacy-sql-readonly'
+
 /** The 对接总览 register's bilingual label for a connector kind, served rather than re-tabled here. */
 export interface StockPreparationSourceKindLabel {
   zh: string

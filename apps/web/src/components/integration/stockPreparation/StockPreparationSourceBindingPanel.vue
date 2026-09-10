@@ -275,6 +275,11 @@ function publishBinding(): void {
         // WHICH ROAD, for the wizard's (1b) evidence line. A subset of the count above, over the
         // `kind` token the server already decided — the page adds no eligibility rule of its own.
         dataSourceBackedSourceCount: countDataSourceBackedCandidates(view.value.eligibleSources),
+        // THE ACTION'S OWN FROZEN KIND, as the server resolved it. The wizard needs it to know
+        // whether ①a/①b APPLY AT ALL: a `bridge:legacy-sql-readonly` deployment can never be
+        // offered a `data-source:sql-readonly` system, so telling it to go register a data source
+        // is telling it to do work that cannot help. Projected, never re-derived (R7).
+        requiredKind: view.value.effectiveSourceKind,
       }
     : null)
 }
