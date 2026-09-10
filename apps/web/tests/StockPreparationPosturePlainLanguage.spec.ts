@@ -228,10 +228,17 @@ describe('stock-prep posture plain language', () => {
     expect(plain.zh).toContain('503')
     expect(plain.zh).toContain('源库')
     expect(plain.en).toContain('503')
-    // 「该怎么办」: not a permission fix, and never hand the raw driver error to a frontline reader.
+    // 「该怎么办」: #5588 review — a bare 503 cannot prove "not a permission problem" or "retrying
+    // never helps" (a source-account permission refusal and a transient fault both land on this same
+    // code), so the copy must not make either claim. What it CAN say, and what these assertions pin,
+    // is the narrower and provable half: adding a permission to the MetaSheet account will not fix
+    // this, because the account this route touches is on the source side.
+    expect(plain.zh).toContain('不是直接给 MetaSheet 账号加权限')
+    expect(plain.en).toContain('This is not fixed by adding a permission')
     expect(plain.zhNext, 'zhNext').toBeTruthy()
-    expect(plain.zhNext).not.toContain('权限')
+    expect(plain.zhNext).toContain('不是给账号加权限')
     expect(plain.enNext, 'enNext').toBeTruthy()
+    expect(plain.enNext).toContain('This is not fixed by adding a permission')
     // The lookup function a caller actually uses agrees with the table read directly.
     expect(stockPrepErrorPlain('SOURCE_UNAVAILABLE').zh).toBe(plain.zh)
     expect(stockPrepErrorPlain('SOURCE_UNAVAILABLE')).not.toEqual(STOCK_PREP_ERROR_GENERIC)
