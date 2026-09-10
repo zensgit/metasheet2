@@ -466,6 +466,7 @@ describe('項目接入 — the pure helpers', () => {
     const archiveFailed = { index: 4, id: 'archive' as const, status: 'fail' as const, reason: 'BATCH_ARCHIVE_FAILED' as const, detail: {} }
     const report = summarizeProjectSync([write, archiveFailed], {
       pendingConfirmCount: 0, queuedDecisionCount: 0, planned: null, written: null,
+      missingComponents: null, missingComponentsUnavailableReason: null,
     })
     // pass is false (something failed) yet imported is true (the rows are in the sheet). Collapsing
     // the two would tell an operator to re-run an import that already succeeded.
@@ -477,6 +478,7 @@ describe('項目接入 — the pure helpers', () => {
   it('summarizeProjectSync reports not_run for an empty run', () => {
     const report = summarizeProjectSync([], {
       pendingConfirmCount: 0, queuedDecisionCount: 0, planned: null, written: null,
+      missingComponents: null, missingComponentsUnavailableReason: null,
     })
     expect(report.verdict).toBe('not_run')
     expect(report.pass).toBe(true)

@@ -1,4 +1,5 @@
 import type { ColumnType, Generated, JSONColumnType } from 'kysely'
+import type { AttendanceProjectionOwnerV1 } from '../attendance/w7-provenance-domain'
 
 /**
  * Timestamp type aliases for Kysely columns
@@ -84,6 +85,8 @@ export interface Database {
   // Attendance tables
   attendance_events: AttendanceEventsTable
   attendance_records: AttendanceRecordsTable
+  attendance_record_calculations: AttendanceRecordCalculationsTable
+  attendance_report_projection_anchors: AttendanceReportProjectionAnchorsTable
   attendance_requests: AttendanceRequestsTable
   attendance_shift_swap_requests: AttendanceShiftSwapRequestsTable
   attendance_schedule_dispatch_requests: AttendanceScheduleDispatchRequestsTable
@@ -1069,6 +1072,33 @@ export interface AttendanceRecordsTable {
   status: 'normal' | 'late' | 'early_leave' | 'late_early' | 'partial' | 'absent' | 'adjusted' | 'off'
   is_workday: boolean
   meta: JSONColumnType<Record<string, unknown> | null>
+  current_calculation_id: ColumnType<string | null, string | null | undefined, string | null>
+  projection_owner: ColumnType<AttendanceProjectionOwnerV1, AttendanceProjectionOwnerV1 | undefined, AttendanceProjectionOwnerV1>
+  visibility_state: ColumnType<'active' | 'retired', 'active' | 'retired' | undefined, 'active' | 'retired'>
+  visibility_reason: ColumnType<string, string | undefined, string>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceRecordCalculationsTable {
+  id: string
+  org_id: string
+  attendance_record_id: string
+  version: number
+  mode: 'shadow' | 'authoritative'
+  outcome: 'baseline' | 'completed' | 'reversed' | 'review_required'
+  created_at: CreatedAt
+}
+
+export interface AttendanceReportProjectionAnchorsTable {
+  projection_record_id: string
+  org_id: string
+  canonical_record_id: string
+  source_selector: 'current_calculation' | 'latest_completed_calculation'
+  source_calculation_id: string
+  source_calculation_version: number
+  canonical_source_digest: string
+  source_fingerprint: string
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

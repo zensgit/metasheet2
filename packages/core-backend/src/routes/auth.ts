@@ -1201,6 +1201,55 @@ authRouter.post('/logout', async (req: Request, res: Response) => {
   }
 })
 
+// Explicit organization selection from #5145, separated from its unapproved
+// default-login hint changes. Authentication/signing remain server-owned.
+authRouter.get('/session-orgs', async (req: Request, res: Response) => {
+  try {
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+    const { user } = authResult
+    const orgs = await authService.listActiveMembershipOrgIds(user.id)
+    const currentOrgId = typeof user.tenantId === 'string' && orgs.includes(user.tenantId)
+      ? user.tenantId : null
+    return res.json({ success: true, data: { orgs, currentOrgId } })
+  } catch {
+    return res.status(503).json({ success: false, error: 'Organization list unavailable', code: 'SESSION_ORGS_UNAVAILABLE' })
+  }
+})
+
+authRouter.post('/session-org', async (req: Request, res: Response) => {
+  try {
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+    const { token, user } = authResult
+    const body = req.body
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || Object.keys(body).length !== 1 || typeof body.orgId !== 'string' || !body.orgId.trim()) {
+      return res.status(400).json({ success: false, error: 'An explicit organization is required', code: 'SESSION_ORG_REQUIRED' })
+    }
+    const orgId = body.orgId.trim()
+    const chosen = await authService.resolveSessionTenantId(user.id, orgId)
+    if (chosen !== orgId) {
+      return res.status(403).json({ success: false, error: 'Not a member of the requested organization', code: 'SESSION_ORG_NOT_MEMBER' })
+    }
+    const payload = authService.readTokenPayload(token)
+    const sessionId = typeof payload?.sid === 'string' && payload.sid.trim() ? payload.sid : randomUUID()
+    const tokenUser = { ...user, tenantId: chosen }
+    const nextToken = authService.createToken(tokenUser, { sid: sessionId })
+    const nextPayload = authService.readTokenPayload(nextToken)
+    if (!nextPayload?.exp) {
+      return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
+    }
+    await createUserSession(user.id, {
+      sessionId, expiresAt: new Date(nextPayload.exp * 1000).toISOString(),
+      ipAddress: getClientIP(req), userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+    })
+    return res.json({ success: true, data: { token: nextToken, user: tokenUser, currentOrgId: chosen } })
+  } catch {
+    return res.status(503).json({ success: false, error: 'Organization switch unavailable', code: 'SESSION_ORG_SWITCH_UNAVAILABLE' })
+  }
+})
+
 /**
  * 列出当前账号的会话
  */

@@ -27,6 +27,11 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //   F-07 the nav link follows the route's gate, not integration:write (source pin)
 //   F-08 `/stock-prep` declares NO requiredFeature — a feature flag would be a second gate that
 //        redirects admins too, which this change must not introduce
+//   F-09 the RAIL manifest and the D2 landing mirror the plugin, and the two resolvers agree for
+//        EVERY actor — a universal equality, not a table with a footnote
+//   F-10 两侧同形,不吃通配: the four principals that used to separate the sides (a bare
+//        `integration:admin`, `stock-prep:*`, `*:*` without an admin role, `stock-prep:write`) are
+//        answered identically by both, value by value
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -78,14 +83,28 @@ vi.mock('../src/utils/api', async () => {
 
 import {
   PLATFORM_ADMIN_GATE,
+  PLATFORM_ADMIN_PERMISSIONS,
   STOCK_PREP_ADMIN,
+  STOCK_PREP_LANDING_KEYS,
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
+  STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
   STOCK_PREP_WORKBENCH_CAPABILITIES,
+  canOpenStockPrepGettingStarted,
+  canOpenStockPrepHelp,
+  canOpenStockPrepHome,
+  canOpenStockPrepInstallView,
+  canOpenStockPrepOpsPanel,
+  canOpenStockPrepProjectQuery,
+  canOpenStockPrepRailItem,
   canUseLegacyMvpTabs,
   grantedStockPrepCapabilities,
+  holdsPlatformAdmin,
+  landsOnStockPrepGettingStarted,
+  satisfiesStockPrepAccess,
+  stockPrepLandingKey,
   visibleStockPrepControls,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import {
@@ -145,11 +164,50 @@ const ACTORS: Actor[] = [
   { name: 'orphan operate (no read)', roles: [], permissions: [STOCK_PREP_OPERATE] },
   { name: 'workbench admin', roles: [], permissions: [STOCK_PREP_ADMIN] },
   { name: 'platform admin', roles: ['admin'], permissions: ['integration:admin'] },
+  // THE FOUR PRINCIPALS THAT USED TO SIT OUTSIDE THIS TABLE, now inside it — which is the whole
+  // point of the change that put them here. Each one separates 「the code the server matches」 from
+  // 「the code `useAuth().hasPermission` would expand to」, and the browser predicates are now
+  // computed from a literal, server-shaped ladder, so every loop below holds for them too:
+  //   · a BARE `integration:admin` — a platform admin to the server, and now to the browser as well;
+  //     StockPreparationWorkspace.spec.ts stands its admin up in exactly this shape.
+  //   · `stock-prep:*` — a real thing to grant a role, expanded by `hasPermission`, refused by the
+  //     server. It must therefore be refused here, or the page renders controls that 403.
+  //   · `*:*` WITHOUT the admin role — members get the wildcard in their permission list but not the
+  //     `role:admin` pseudo-code, so the server refuses them.
+  //   · `stock-prep:write` — `hasPermission` derives `:read` from `:write`; the server does not.
+  { name: 'integration:admin without role', roles: [], permissions: ['integration:admin'] },
+  { name: 'stock-prep:* wildcard', roles: [], permissions: ['stock-prep:*'] },
+  { name: '*:* without the admin role', roles: [], permissions: ['*:*'] },
+  { name: 'stock-prep:write holder', roles: [], permissions: ['stock-prep:write'] },
 ]
+
+/** The seam principals, by name, for the tests that quote them one at a time. */
+function actorNamed(name: string): Actor {
+  const hit = ACTORS.find((actor) => actor.name === name)
+  if (!hit) throw new Error(`no such actor: ${name}`)
+  return hit
+}
 
 function asActor(actor: Actor): void {
   h.roles = [...actor.roles]
   h.permissions = [...actor.permissions]
+}
+
+/**
+ * THE PRINCIPAL the workbench predicates take — `useAuth().getAccessSnapshot()`'s `{ roles,
+ * permissions }`, which is what the browser mirror computes its literal ladder over.
+ *
+ * `probe()` (the expanding `hasPermission`) is deliberately NOT what these predicates receive any
+ * more, and the two are kept separate here on purpose: `probe()` still drives the ROUTE GUARD in
+ * F-03, which is app-wide machinery this wave did not change, so the file needs both.
+ */
+function principal(): { roles: string[]; permissions: string[] } {
+  return { roles: [...h.roles], permissions: [...h.permissions] }
+}
+
+/** The same principal in the SERVER's shape — the flattened list `listUserPermissions` produces. */
+function flattened(): string[] {
+  return [...h.permissions, ...h.roles.map((role) => `role:${role}`)]
 }
 
 function probe(): (permission: string) => boolean {
@@ -230,8 +288,8 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   }
 
   /** What this actor may see ON THIS VIEW — the granted set, minus the controls that live elsewhere. */
-  function grantedQueueViewControls(probe: (permission: string) => boolean): string[] {
-    return visibleStockPrepControls(probe)
+  function grantedQueueViewControls(): string[] {
+    return visibleStockPrepControls(principal())
       .filter((control) => !CONTROLS_NOT_ON_THE_QUEUE_VIEW.includes(control))
       .sort()
   }
@@ -285,11 +343,29 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   })
 
   it('F-01: the mirrored capability resolver agrees with the server for every actor', () => {
+    // UNIVERSAL, not bounded. The table now includes the four principals that used to be excluded
+    // from it precisely because they broke this equality (see ACTORS), so passing here is the claim
+    // 「the browser grants exactly what the server grants」 with no footnote attached.
     for (const actor of ACTORS) {
       asActor(actor)
-      const flattened = [...actor.permissions, ...actor.roles.map((role) => `role:${role}`)]
-      expect(grantedStockPrepCapabilities(probe()).sort())
-        .toEqual([...backendAccess.grantedStockPrepCapabilities(flattened)].sort())
+      expect(grantedStockPrepCapabilities(principal()).sort(), `${actor.name} capabilities`)
+        .toEqual([...backendAccess.grantedStockPrepCapabilities(flattened())].sort())
+    }
+  })
+
+  it('F-01: the browser transcribes the two server decisions, not a second reading of them', () => {
+    // The mirror is now a mirror of the DECISIONS as well as of the vocabulary: the platform-admin
+    // list is byte-equal, and the ladder answers identically for every actor and every code —
+    // including the codes outside the frozen set, which must fail closed on both sides.
+    expect([...PLATFORM_ADMIN_PERMISSIONS]).toEqual([...backendAccess.PLATFORM_ADMIN_PERMISSIONS])
+    for (const actor of ACTORS) {
+      asActor(actor)
+      expect(holdsPlatformAdmin(principal()), `${actor.name} platform admin`)
+        .toBe(backendAccess.holdsPlatformAdmin(flattened()))
+      for (const code of [...STOCK_PREP_PERMISSION_CODES, 'stock-prep:*', 'stock-prep:write', '*:*', 'integration:admin', '']) {
+        expect(satisfiesStockPrepAccess(principal(), code), `${actor.name} @ ${code || '(empty)'}`)
+          .toBe(backendAccess.satisfiesStockPrepAccess(flattened(), code))
+      }
     }
   })
 
@@ -333,6 +409,16 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       'orphan operate (no read)': 'redirect',
       'workbench admin': 'allow',
       'platform admin': 'allow',
+      // THE ROUTE GUARD IS NOT THIS WAVE'S TO CHANGE, and these four rows say so out loud. It runs on
+      // `useAuth().hasPermission`, which expands `*:*`, `stock-prep:*` and `stock-prep:write` → read
+      // — so three of the four reach `/stock-prep` while the workbench (now literal) shows them
+      // nothing, and the bare `integration:admin` is refused the route while the workbench opens
+      // everything. Both residues are named in the PR body's 「没做/偏离」; narrowing the app-wide
+      // guard is a platform change, not a stock-prep one.
+      'integration:admin without role': 'redirect',
+      'stock-prep:* wildcard': 'allow',
+      '*:* without the admin role': 'allow',
+      'stock-prep:write holder': 'allow',
     }
     for (const actor of ACTORS) {
       asActor(actor)
@@ -358,7 +444,7 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     asActor({ name: 'x', roles: [], permissions: ['integration:write'] })
     expect(realHasPermission('integration:write')).toBe(true)
     expect(realHasPermission(STOCK_PREP_ROUTE_PERMISSION)).toBe(false)
-    expect(grantedStockPrepCapabilities(probe())).toEqual([])
+    expect(grantedStockPrepCapabilities(principal())).toEqual([])
   })
 
   // ---------------------------------------------------------------------------
@@ -371,7 +457,7 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       const root = await renderFullySettled()
 
       const rendered = renderedControls(root)
-      const granted = grantedQueueViewControls(probe())
+      const granted = grantedQueueViewControls()
 
       const visibleButNotPermitted = rendered.filter((control) => !granted.includes(control))
       expect(visibleButNotPermitted, `${actor.name}: control rendered without the permission behind it`).toEqual([])
@@ -409,7 +495,7 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       const held = codes.filter((_, index) => (mask & (1 << index)) !== 0)
       asActor({ name: `subset-${mask}`, roles: [], permissions: held })
       const root = await renderFullySettled()
-      expect(renderedControls(root), `subset {${held.join(', ')}}`).toEqual(grantedQueueViewControls(probe()))
+      expect(renderedControls(root), `subset {${held.join(', ')}}`).toEqual(grantedQueueViewControls())
       resetMount()
     }
   })
@@ -419,7 +505,7 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     const root = mountQueueView()
     await nextTick()
     expect(renderedControls(root)).toEqual([])
-    expect(grantedStockPrepCapabilities(probe())).toEqual([])
+    expect(grantedStockPrepCapabilities(principal())).toEqual([])
   })
 
   // ---------------------------------------------------------------------------
@@ -436,7 +522,7 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     ]
     for (const [actor, expected] of cases) {
       asActor(actor)
-      expect(canUseLegacyMvpTabs(probe()), `${actor.name} legacy tabs`).toBe(expected)
+      expect(canUseLegacyMvpTabs(principal()), `${actor.name} legacy tabs`).toBe(expected)
     }
   })
 
@@ -445,13 +531,282 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationWorkspace.vue'),
       'utf8',
     )
+    const rail = readFileSync(
+      resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationRail.vue'),
+      'utf8',
+    )
     // The tab strip iterates the FILTERED list, and the panel keys off the effective (visible) key —
     // both halves are needed, since either alone leaves a reachable admin-only panel.
-    expect(workspace).toContain('v-for="view in visibleViews"')
+    //
+    // P1-1 SPLIT THE FIRST HALF ACROSS TWO FILES, so the pin follows it rather than being dropped:
+    // the shell still computes `visibleViews` (and still computes it from `canUseLegacyMvpTabs`), and
+    // the rail iterates ONLY what the shell hands it. What must not exist is a rail that reaches for
+    // the unfiltered list or re-derives permissions of its own — hence the two negative assertions.
+    expect(workspace).toContain('const visibleViews = computed(')
+    expect(rail).toContain('v-for="item in group.items"')
+    // 深度工具 MOVED OUT OF THE TABLIST (hardening wave, 2026-09-08 — see StockPreparationRail.vue's
+    // own top-of-file comment and R-05 in StockPreparationRail.spec.ts), so its `v-for` is no longer
+    // written inline inside the SAME `v-for="group in groups"` loop `group.items` sits in — the
+    // template loops a single `advancedGroup` computed instead, since only one group (`deploy`) ever
+    // carries a non-empty `advanced` list and the disclosure now renders once, as a nav-level sibling
+    // of the tablist rather than once per group. The GUARANTEE this line exists to pin is unchanged:
+    // `advancedGroup.advanced` still traces straight back to the SAME prop-derived `groups` array (see
+    // `advancedGroup = computed(() => props.groups.find(...))` a few lines above the template in that
+    // file) — nothing here re-derives or re-filters permissions of its own, which is exactly what the
+    // two negative assertions below still hold down.
+    expect(rail).toContain('v-for="item in advancedGroup.advanced"')
+    expect(rail).toContain('advancedGroup = computed')
+    expect(rail).not.toContain('hasPermission')
+    expect(rail).not.toContain('workbenchAccess')
+    // ...AND THE WIRE BETWEEN THEM. The three above pin each end — the shell filters, the rail
+    // iterates what it is handed — and say nothing about whether the list handed over is the
+    // filtered one. These two are that link: `railGroups` is assembled FROM `visibleViews.value`,
+    // and `railGroups` is what the template passes. Without them, re-pointing the assembly at the
+    // unfiltered `views` array leaves every assertion in this test green.
+    expect(workspace).toContain('const visible = visibleViews.value')
+    expect(workspace).toContain(':groups="railGroups"')
     expect(workspace).toContain('canUseLegacyMvpTabs')
     expect(workspace).toContain("effectiveKey === 'confirmation-queue'")
     expect(workspace).not.toContain("v-if=\"activeKey === 'dashboard'\"")
     // Exactly the seven legacy MVP tabs are marked; the confirmation queue is not.
     expect(workspace.split('legacyMvp: true').length - 1).toBe(7)
+  })
+  // ---------------------------------------------------------------------------
+  // F-09 the RAIL manifest and the D2 landing — the second thing the mirror pins
+  // ---------------------------------------------------------------------------
+  //
+  // P1-1 turned the tab strip into a grouped rail and P1-1's D2=A moved the landing. Both are now
+  // DATA (`STOCK_PREP_RAIL_GROUPS`) plus one pure decision (`stockPrepLandingKey`), and both are
+  // mirrored by the plugin module, so this block is F-01's shape applied to them: byte-equality of
+  // the manifest, then per-actor agreement of the resolvers.
+
+  it('F-09: the rail manifest is byte-equal to the plugin module, gate token for gate token', () => {
+    const flatten = (groups: readonly unknown[]): unknown => JSON.parse(JSON.stringify(groups))
+    expect(flatten(STOCK_PREP_RAIL_GROUPS)).toEqual(flatten(backendAccess.STOCK_PREP_RAIL_GROUPS))
+    expect([...STOCK_PREP_LANDING_KEYS]).toEqual([...backendAccess.STOCK_PREP_LANDING_KEYS])
+    // Every gate token used by the manifest is one the resolver knows. An unknown token resolves to
+    // a REFUSAL on both sides, so a typo would hide a whole group rather than open one — but it
+    // would still be a silent outage, and this is what catches it.
+    const tokens = new Set<string>()
+    for (const group of STOCK_PREP_RAIL_GROUPS) {
+      for (const item of group.items) tokens.add(item.gate)
+      if (group.advancedGate) tokens.add(group.advancedGate)
+    }
+    expect([...tokens].sort()).toEqual([...backendAccess.STOCK_PREP_RAIL_GATES].sort())
+  })
+
+  it('F-09: every rail item names a view the shell actually renders, and no key was dropped', () => {
+    const workspace = readFileSync(
+      resolve(REPO_ROOT, 'apps/web/src/components/integration/stockPreparation/StockPreparationWorkspace.vue'),
+      'utf8',
+    )
+    const keys: string[] = []
+    for (const group of STOCK_PREP_RAIL_GROUPS) {
+      for (const item of group.items) keys.push(item.key)
+      for (const key of group.advanced ?? []) keys.push(key)
+    }
+    // 15 today: 4 【工作】 + 3 【部署与接入】 + 7 深度工具 + 1 【帮助】. Stated as a number so that
+    // adding a rail item without a view — or a view without a rail item — has to be deliberate.
+    // 14 -> 15 是 P2-1 的 项目查询(设计稿 §6.3 第一行),【工作】里排在 项目备料 之后。
+    expect(keys.length).toBe(15)
+    expect(new Set(keys).size).toBe(keys.length)
+    for (const key of keys) {
+      expect(workspace, `${key} must be a view key in the shell`).toContain(`key: '${key}',`)
+    }
+    // 不下线: every legacy MVP key is still in the manifest, folded rather than removed.
+    for (const key of ['dashboard', 'project-workspace', 'bom-snapshot-diff', 'material-mapping', 'unit-conversion', 'prep-line', 'exception-queue']) {
+      expect(keys, `${key} must still be reachable`).toContain(key)
+    }
+  })
+
+  it('F-09: the rail gate resolver agrees with the server for EVERY actor and every gate', () => {
+    // UNBOUNDED. This loop used to carry a named exception — `integration:admin` without an admin
+    // role — because the two sides spelled 「platform admin」 differently. They no longer do: the
+    // browser computes this from its own transcription of `satisfiesStockPrepAccess` /
+    // `holdsPlatformAdmin` over the same flattened principal, so the equality is universal and the
+    // four seam principals are ordinary rows of ACTORS.
+    for (const actor of ACTORS) {
+      asActor(actor)
+      for (const gate of backendAccess.STOCK_PREP_RAIL_GATES as string[]) {
+        expect(
+          canOpenStockPrepRailItem(gate as never, principal()),
+          `${actor.name} @ ${gate}`,
+        ).toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), gate))
+      }
+      // An unknown token refuses on both sides, for everyone — including the platform admin.
+      expect(canOpenStockPrepRailItem('not-a-gate' as never, principal())).toBe(false)
+      expect(backendAccess.satisfiesStockPrepRailGate(flattened(), 'not-a-gate')).toBe(false)
+    }
+  })
+
+  it('F-09: the named rail predicates are exactly the gates the manifest assigns them', () => {
+    for (const actor of ACTORS) {
+      asActor(actor)
+      // 【工作】's two value-bearing items ride the operator tier; 【部署与接入】 rides the workbench
+      // ceiling; 【帮助】 rides reachability. Asserted through the NAMED predicates, because that is
+      // what the rest of the app calls and a manifest that agreed with nothing would prove nothing.
+      // The right-hand sides are the SERVER's answers, so this is a cross-side equality as well
+      // rather than the browser agreeing with itself.
+      expect(canOpenStockPrepHome(principal()), `${actor.name} home`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'operator-board'))
+      // 项目查询 (P2-1) rides the SAME operator tier, through its own named predicate: the shell asks
+      // this one, the manifest names `operator-board`, and this line is what stops the two from ever
+      // meaning different things.
+      expect(canOpenStockPrepProjectQuery(principal()), `${actor.name} project-query`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'operator-board'))
+      expect(canOpenStockPrepInstallView(principal()), `${actor.name} install view`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'workbench-admin'))
+      expect(canOpenStockPrepGettingStarted(principal()), `${actor.name} getting-started`)
+        .toBe(canOpenStockPrepInstallView(principal()))
+      expect(canOpenStockPrepOpsPanel(principal()), `${actor.name} ops`)
+        .toBe(canOpenStockPrepInstallView(principal()))
+      expect(canOpenStockPrepHelp(principal()), `${actor.name} help`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'route'))
+      expect(canUseLegacyMvpTabs(principal()), `${actor.name} 深度工具`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'platform-admin'))
+    }
+  })
+
+  it('F-09 / D2=A: the landing key agrees with the server for EVERY actor and all three postures', () => {
+    // Same universality as the gate loop above: no bound, no enumerated exception.
+    for (const actor of ACTORS) {
+      asActor(actor)
+      for (const ready of [true, false, null]) {
+        expect(
+          stockPrepLandingKey(principal(), ready),
+          `${actor.name} @ deploymentReady=${String(ready)}`,
+        ).toBe(backendAccess.stockPrepWorkbenchLandingKey(flattened(), ready))
+      }
+    }
+  })
+
+  it('F-09 / D2=A: 装完落总览,未装完落开始使用,读不到也落开始使用', () => {
+    // The workbench admin — the tier the ruling is about.
+    asActor({ name: 'workbench admin', roles: [], permissions: [STOCK_PREP_ADMIN] })
+    expect(stockPrepLandingKey(principal(), true)).toBe('ops')
+    expect(stockPrepLandingKey(principal(), false)).toBe('getting-started')
+    // 「看不到」 IS NOT 「装完了」. An unreadable preflight must not send anyone to the health page.
+    expect(stockPrepLandingKey(principal(), null)).toBe('getting-started')
+    expect(landsOnStockPrepGettingStarted(principal(), null)).toBe(true)
+    expect(landsOnStockPrepGettingStarted(principal(), true)).toBe(false)
+
+    // 一线 (operate ∧ read) lands on 今天要处理, and the preflight argument is not consulted for them
+    // at all — their landing cannot depend on a read their tier does not make.
+    asActor({ name: 'operator', roles: [], permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
+    for (const ready of [true, false, null]) {
+      expect(stockPrepLandingKey(principal(), ready)).toBe('home')
+    }
+
+    // The values-free queue watcher keeps today's landing, in all three postures.
+    asActor({ name: 'read only', roles: [], permissions: [STOCK_PREP_READ] })
+    for (const ready of [true, false, null]) {
+      expect(stockPrepLandingKey(principal(), ready)).toBe('confirmation-queue')
+    }
+  })
+
+  it('F-09: 确认队列 —— the manifest gate and the shell fallback for a BARE operate grant, stated', () => {
+    // THE ONE PLACE THE MANIFEST AND THE SHELL DO NOT SAY THE SAME THING, written down with its
+    // expected values rather than left to be rediscovered.
+    //
+    // `confirmation-queue`'s rail gate is `route` (= `stock-prep:read`), so for an orphan
+    // `stock-prep:operate` grant the manifest answers FALSE. The shell's `views` entry carries none
+    // of the four gate flags, so `visibleViews` keeps it unconditionally and the landing resolver's
+    // last line names it — i.e. the shell's fallback WOULD render a tab this principal's gate refuses.
+    //
+    // IT IS NOT REACHABLE, and that is the answer rather than an excuse: `/stock-prep`'s route meta is
+    // `['stock-prep:read']`, F-03 above asserts this exact principal is REDIRECTED, and the queue view
+    // itself renders no control for them (F-05: 「the orphan operate grant renders nothing at all」).
+    // So the divergence cannot produce a visible-but-403 control. Closing it properly means giving the
+    // shell's `views` a route-gate flag, which is a shell change this wave did not take; it is listed
+    // in the PR body's 「没做/偏离」 with this test as its record.
+    asActor(actorNamed('orphan operate (no read)'))
+    expect(canOpenStockPrepRailItem('route', principal()), 'manifest gate: refused').toBe(false)
+    expect(backendAccess.satisfiesStockPrepRailGate(flattened(), 'route'), 'server agrees: refused').toBe(false)
+    expect(stockPrepLandingKey(principal(), null), 'the fallback still NAMES the queue').toBe('confirmation-queue')
+    expect(backendAccess.stockPrepWorkbenchLandingKey(flattened(), null)).toBe('confirmation-queue')
+    // ...and nothing behind it is granted, on either side.
+    expect(grantedStockPrepCapabilities(principal())).toEqual([])
+    expect([...backendAccess.grantedStockPrepCapabilities(flattened())]).toEqual([])
+  })
+
+  // ---------------------------------------------------------------------------
+  // F-10 — 两侧同形,不吃通配
+  // ---------------------------------------------------------------------------
+  //
+  // The loops above are universal quantifiers, and a universal quantifier over a table is only as
+  // strong as the table. This block is the table's teeth: the four principals that separate 「the
+  // code the server matches」 from 「the code `useAuth().hasPermission` would expand to」, each with
+  // LITERAL expected values on BOTH sides. They are rows of ACTORS too, so the loops already cover
+  // them; what these add is a statement of WHAT the shared answer is, so that changing either
+  // algebra reddens here with the new answer visible in the diff.
+
+  it('F-10: a BARE `integration:admin` is a platform admin on BOTH sides', () => {
+    asActor(actorNamed('integration:admin without role'))
+    // The browser's `holdsPlatformAdmin` accepts the literal code, exactly as the server's does, so
+    // every gate opens and D2's posture rule applies. This is the principal
+    // StockPreparationWorkspace.spec.ts stands its admin up as, so it is not a hypothetical.
+    expect(holdsPlatformAdmin(principal())).toBe(true)
+    for (const gate of ['route', 'operator-board', 'workbench-admin', 'platform-admin'] as const) {
+      expect(canOpenStockPrepRailItem(gate, principal()), `browser @ ${gate}`).toBe(true)
+      expect(backendAccess.satisfiesStockPrepRailGate(flattened(), gate), `server @ ${gate}`).toBe(true)
+    }
+    expect(stockPrepLandingKey(principal(), true)).toBe('ops')
+    expect(stockPrepLandingKey(principal(), false)).toBe('getting-started')
+    expect(stockPrepLandingKey(principal(), null)).toBe('getting-started')
+    expect(backendAccess.stockPrepWorkbenchLandingKey(flattened(), true)).toBe('ops')
+    expect(backendAccess.stockPrepWorkbenchLandingKey(flattened(), false)).toBe('getting-started')
+    expect(backendAccess.stockPrepWorkbenchLandingKey(flattened(), null)).toBe('getting-started')
+    // ...and the WHOLE capability manifest, on both sides — the assertion that used to record the
+    // fork's widest consequence now records its closure.
+    const everything = STOCK_PREP_WORKBENCH_CAPABILITIES.map((capability) => capability.capability).sort()
+    expect(grantedStockPrepCapabilities(principal()).sort()).toEqual(everything)
+    expect([...backendAccess.grantedStockPrepCapabilities(flattened())].sort()).toEqual(everything)
+    // An unknown token still refuses on both sides — being a platform admin is not being exempt.
+    expect(canOpenStockPrepRailItem('not-a-gate' as never, principal())).toBe(false)
+    expect(backendAccess.satisfiesStockPrepRailGate(flattened(), 'not-a-gate')).toBe(false)
+  })
+
+  it('F-10: the three WILDCARD / DERIVED grants open NOTHING, on either side', () => {
+    // `useAuth().hasPermission` says yes to all three; the server says no to all three; the workbench
+    // now says no as well, which is the only answer that keeps 「visible == actionable」 true — the
+    // page would otherwise render the queue, the board and their controls straight into a 403.
+    for (const name of ['stock-prep:* wildcard', '*:* without the admin role', 'stock-prep:write holder']) {
+      const actor = actorNamed(name)
+      asActor(actor)
+      // The expanding probe really would have admitted them — the positive control that makes the
+      // refusals below a decision rather than an empty permission list.
+      expect(realHasPermission(STOCK_PREP_READ), `${name}: hasPermission expands`).toBe(true)
+
+      expect(holdsPlatformAdmin(principal()), `${name} platform admin`).toBe(false)
+      for (const gate of ['route', 'operator-board', 'workbench-admin', 'platform-admin'] as const) {
+        expect(canOpenStockPrepRailItem(gate, principal()), `${name} browser @ ${gate}`).toBe(false)
+        expect(backendAccess.satisfiesStockPrepRailGate(flattened(), gate), `${name} server @ ${gate}`).toBe(false)
+      }
+      for (const ready of [true, false, null]) {
+        expect(stockPrepLandingKey(principal(), ready), `${name} browser landing`).toBe('confirmation-queue')
+        expect(backendAccess.stockPrepWorkbenchLandingKey(flattened(), ready), `${name} server landing`)
+          .toBe('confirmation-queue')
+      }
+      expect(grantedStockPrepCapabilities(principal()), `${name} browser capabilities`).toEqual([])
+      expect([...backendAccess.grantedStockPrepCapabilities(flattened())], `${name} server capabilities`).toEqual([])
+    }
+  })
+
+  it('F-10: the browser refuses the wildcards BY MATCHING LITERALLY, not by accident of the table', () => {
+    // The MECHANISM, pinned at source level: swapping the literal ladder back for the expanding probe
+    // reddens here even if some future edit to ACTORS stopped exercising it.
+    const source = readFileSync(
+      resolve(REPO_ROOT, 'apps/web/src/services/integration/stockPreparation/workbenchAccess.ts'),
+      'utf8',
+    )
+    // No predicate in the module may consult the expanding probe, and no predicate may take one.
+    // COMMENTS ARE STRIPPED FIRST: the module's header argues at length about `hasPermission`, and
+    // matching that prose would make this pin pass on the explanation rather than on the code.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(code).not.toContain('hasPermission')
+    expect(code).not.toContain('(permission: string) => boolean')
+    // ...and the platform-admin list is the server's, verbatim.
+    expect(source).toContain("Object.freeze(['role:admin', INTEGRATION_ADMIN])")
+    expect([...PLATFORM_ADMIN_PERMISSIONS]).toEqual([...backendAccess.PLATFORM_ADMIN_PERMISSIONS])
   })
 })

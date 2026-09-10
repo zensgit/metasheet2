@@ -616,6 +616,33 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     const disabled = container!.querySelector('[data-testid="approval-attachment-disabled"]')
     expect(disabled).toBeTruthy()
     expect(disabled?.textContent).toContain('附件上传功能即将支持')
+    // Slice A (approval-attachment-roundtrip-guard, #4195 §7/§11 G1): pin the OFF-path placeholder
+    // BYTE-IDENTICALLY, not just via the loose textContent/data-testid checks above — a rung-4 change
+    // ("flip authorability + retire B2-28") is only allowed once the flag is ratified ON and rungs
+    // 1-3 have landed (design-lock §7); this exact string is the tripwire that a rung-4-shaped edit
+    // touched the OFF markup ahead of that ratify. `data-v-*` is Vue's scoped-style attribute:
+    // @vitejs/plugin-vue hashes `path.relative(root, filename)` alone in dev/test mode (source is
+    // folded in only when `isProduction`, per its `createDescriptor` — checked in this repo's
+    // installed dist, not assumed), so the id is ROOT-RELATIVE, not absolute-path- or
+    // content-dependent (verified stable against an unrelated same-file edit) — stable across any
+    // checkout location as long as `apps/web` stays vitest's root and this file's path is unchanged.
+    //
+    // IF THIS ASSERTION REDS ON A DEPENDENCY BUMP, THAT IS EXPECTED, NOT A REGRESSION. The hash is
+    // produced by @vitejs/plugin-vue, so it is a function of the INSTALLED PLUGIN VERSION as well as
+    // the file path: that package is free to change its id derivation (what it hashes, or the digest
+    // it truncates) across releases, and a legitimate bump can therefore change `data-v-7078a16d`
+    // while the markup under test is untouched. Recognising this case: the diff is the hash ALONE —
+    // class, data-testid, tag and text all still match, and `git log` shows a lockfile/plugin change
+    // rather than a change to ApprovalNewView.vue.
+    // WHAT A MAINTAINER SHOULD DO THEN: re-derive the id by running THIS spec and copying the hash
+    // out of the received `outerHTML`, then update the literal below — after confirming the rest of
+    // the string is byte-identical. Do NOT delete or loosen this assertion to make it pass: its
+    // discriminating power over the `data-testid` + `textContent` checks above was measured (a
+    // markup-only attribute added to the placeholder reds THIS assertion and nothing else in the
+    // file), and it is the tripwire for a rung-4-shaped edit landing ahead of the owner ratify.
+    expect(disabled?.outerHTML).toBe(
+      '<div data-v-7078a16d="" class="approval-new__attachment-disabled" data-testid="approval-attachment-disabled"> 附件上传功能即将支持，请先在其他字段中注明附件信息。 </div>',
+    )
 
     expect(container!.querySelector('[data-el-upload]')).toBeNull()
 

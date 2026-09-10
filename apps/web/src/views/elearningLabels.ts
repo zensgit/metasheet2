@@ -29,10 +29,25 @@ export type ElearningLabelKey =
   | 'learner.deadlineNone'
   | 'learner.videoProgress'
   | 'learner.courseCompletion'
+  | 'learner.enrollment'
+  | 'learner.notEnrolled'
+  | 'learner.enrollAndStart'
+  | 'learner.enrolledContinue'
+  | 'learner.continueLearning'
   | 'learner.startWatch'
   | 'learner.startExam'
   | 'learner.continueExam'
   | 'learner.videoUnsupported'
+  | 'learner.challengeTitle'
+  | 'learner.challengePrompt'
+  | 'learner.challengePaused'
+  | 'learner.challengeConfirm'
+  | 'learner.challengeReset'
+  | 'learner.challengeResume'
+  | 'learner.challengeConfirming'
+  | 'learner.challengeAcknowledged'
+  | 'learner.challengePlaybackResumed'
+  | 'learner.challengeResumeManual'
   | 'learner.examTimeRemaining'
   | 'learner.examExpired'
   | 'learner.submitExam'
@@ -236,12 +251,42 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'learner.deadlineNone': { en: 'None', zh: '无' },
   'learner.videoProgress': { en: 'Video progress', zh: '视频进度' },
   'learner.courseCompletion': { en: 'Course completion', zh: '课程完成' },
+  'learner.enrollment': { en: 'Registration', zh: '课程报名' },
+  'learner.notEnrolled': { en: 'Not registered', zh: '未报名' },
+  'learner.enrollAndStart': { en: 'Register and start', zh: '报名并开始学习' },
+  'learner.enrolledContinue': { en: 'Registered · continue learning', zh: '已报名 · 继续学习' },
+  'learner.continueLearning': { en: 'Continue learning', zh: '继续学习' },
   'learner.startWatch': { en: 'Start learning', zh: '开始学习' },
   'learner.startExam': { en: 'Start exam', zh: '开始考试' },
   'learner.continueExam': { en: 'Continue exam', zh: '继续考试' },
   'learner.videoUnsupported': {
     en: 'Your browser does not support video playback.',
     zh: '您的浏览器不支持视频播放。',
+  },
+  'learner.challengeTitle': { en: 'Learning check', zh: '学习验证' },
+  'learner.challengePrompt': {
+    en: 'Select the two requested symbols in order before the countdown ends.',
+    zh: '请在倒计时结束前，按顺序选择指定的两个符号。',
+  },
+  'learner.challengePaused': {
+    en: 'The check timed out. Unverified watch time was discarded; complete the check to resume.',
+    zh: '本次验证已超时，未验证的观看时长不会计入；完成验证后可继续学习。',
+  },
+  'learner.challengeConfirm': { en: 'Submit check', zh: '提交验证' },
+  'learner.challengeReset': { en: 'Clear selection', zh: '清除选择' },
+  'learner.challengeResume': { en: 'Confirm and resume', zh: '确认并继续' },
+  'learner.challengeConfirming': { en: 'Confirming...', zh: '正在确认…' },
+  'learner.challengeAcknowledged': {
+    en: 'Learning check acknowledged.',
+    zh: '学习验证已确认。',
+  },
+  'learner.challengePlaybackResumed': {
+    en: 'Learning check acknowledged. Playback resumed.',
+    zh: '学习验证已确认，视频已继续播放。',
+  },
+  'learner.challengeResumeManual': {
+    en: 'Learning check acknowledged. Resume playback manually.',
+    zh: '学习验证已确认，请手动继续播放。',
   },
   'learner.examTimeRemaining': { en: 'Time remaining', zh: '剩余时间' },
   'learner.examExpired': {
@@ -684,6 +729,13 @@ export function elearningExamCountdown(remainingMs: number, isZh: boolean): stri
     .map((part) => String(part).padStart(2, '0'))
     .join(':')
   return `${elearningLabel('learner.examTimeRemaining', isZh)} ${clock}`
+}
+
+export function elearningChallengeCountdown(remainingMs: number, isZh: boolean): string {
+  const seconds = Number.isFinite(remainingMs)
+    ? Math.max(0, Math.ceil(remainingMs / 1000))
+    : 0
+  return isZh ? `剩余 ${seconds} 秒` : `${seconds}s remaining`
 }
 
 export function elearningCorrectOptionAria(optionId: string, isZh: boolean): string {

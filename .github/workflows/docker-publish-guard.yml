@@ -1,0 +1,36 @@
+name: Docker Publish Guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/docker-build.yml'
+      - '.github/workflows/docker-publish-guard.yml'
+      - 'scripts/ops/docker-publish-*.mjs'
+      - 'scripts/ops/deploy-immutable-traceability-contract.test.mjs'
+      - 'scripts/ops/integration-erp-plm-deploy-readiness*.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install the workflow parser only
+        run: npm install --prefix "$RUNNER_TEMP/docker-publish-contract" --ignore-scripts --no-package-lock js-yaml@4.1.1
+      - name: Test publication and deployment contracts
+        env:
+          NODE_PATH: ${{ runner.temp }}/docker-publish-contract/node_modules
+        run: >-
+          node --test
+          scripts/ops/docker-publish-preflight.test.mjs
+          scripts/ops/docker-publish-workflow-contract.test.mjs
+          scripts/ops/deploy-immutable-traceability-contract.test.mjs
+          scripts/ops/integration-erp-plm-deploy-readiness.test.mjs

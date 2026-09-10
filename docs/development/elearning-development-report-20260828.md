@@ -148,3 +148,37 @@ C replay 新增的 12 个 unit 文件已作为纯并集写入既有 elearning-v0
 4. replacement ancestry 清晰后再处理旧 PR；
 5. 下一实现只开纵向能力：优先 L4 rules + wallet，再做 adjustment/title/certificate；
 6. flag、部署和 production 仍需单独 owner 授权。
+
+---
+
+## 9. 2026-09-05 successor addendum：在线报名与 raster-v2 观看验证
+
+> 本节是后续实现的增量记录。上文绑定的 `15dccfbbecc79b90fc9dc4437f382377d936f71e`
+> 历史 checkpoint、测试数字与当时边界保持原样，不由本节追溯改写。
+
+### 9.1 产品增量
+
+- 在线报名只为当前可见的自学课程追加不可变报名意图与范围快照；不产生指派、截止、催学、学分或完成状态。
+- 观看验证仍由服务端调度与确认。挑战题升级为 `raster-position-v2`：服务端使用固定 `360×260` 画布生成 PNG，六个选项随每次挑战重新排列；客户端只接收 PNG、固定尺寸、opaque option id 与点击矩形。
+- 目标、标签与正确顺序仅保存在服务端不可变事件快照中。公开 DTO、OpenAPI 和 DOM 不再包含可直接连接的“目标文本 → 答案 id”结构化映射。
+- 前端以六个原生按钮覆盖点击区域，桌面与窄屏均完成真实图片与点击矩形对齐验证。
+- 这只证明消除了公开的结构化答案连接，并提高固定坐标脚本的成本；不宣称抵抗 OCR、视觉模型或所有自动化，也不宣称本切片提供了非视觉等价挑战。
+- `ELEARNING_ENROLLMENT_ENABLED` 与 `ELEARNING_WATCH_CHALLENGE_ENABLED` 继续默认 OFF。本节不授权 Ready、merge、启旗、dispatch 或部署。
+
+### 9.2 Exact topology
+
+| 项目 | Exact 值 |
+|---|---|
+| PR | `#5426`（Draft/HOLD） |
+| code base | `70dc72d7671cad9cea1925ed93f90d3d9c746aeb` |
+| code head | `408e61411688bfd8f994f5e50998e2566b78ef4f` |
+| code tree | `7591090a91e6f28fc9de54bf54970513e53880c2` |
+| true-merge parents | first `7e28ff30a449484522e536c319a1b7071a4eb749`；second `70dc72d7671cad9cea1925ed93f90d3d9c746aeb` |
+
+first-parent 到 merge 的四个文件是主线新增的备料/required-web 增量；second-parent 到
+merge 是完整的 53 文件云课堂候选。required-web 路径 token 对两个父提交均为严格并集，
+`missing=0`；sealed-export provenance 的 frozen/live `differenceCount=0`。
+
+本节随后以独立 report-only child 提交。该文档提交不改变上述 code head 的产品、测试、迁移、
+OpenAPI 或 shared selector 字节；文档 child 的 CI 只验证“报告载体 + 同一代码树”，不能把其
+SHA 冒称为新的产品实现 checkpoint。

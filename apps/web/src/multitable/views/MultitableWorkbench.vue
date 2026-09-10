@@ -4175,11 +4175,15 @@ function startDialogMetaRefresh() {
 // --- Bulk delete ---
 async function onBulkDelete(recordIds: string[]) {
   if (recordIds.some((recordId) => !ensureCanDeleteRecord(recordId))) return
-  try {
-    await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
-    if (selectedRecordId.value && recordIds.includes(selectedRecordId.value)) selectedRecordId.value = null
-    showSuccess(fmtRecordsDeleted(recordIds.length, isZh.value))
-  } catch (e: any) { showError(e.message ?? wb('toast.bulkDeleteFailed', isZh.value)) }
+  const results = await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
+  const deletedIds = recordIds.filter((_, i) => results[i])
+  const failedIds = recordIds.filter((_, i) => !results[i])
+  if (selectedRecordId.value && deletedIds.includes(selectedRecordId.value)) selectedRecordId.value = null
+  if (deletedIds.length > 0) showSuccess(fmtRecordsDeleted(deletedIds.length, isZh.value))
+  if (failedIds.length > 0) {
+    showError(grid.error.value || wb('toast.bulkDeleteFailed', isZh.value))
+    await grid.reloadCurrentPage()
+  }
 }
 
 const bulkEditDialog = reactive<{

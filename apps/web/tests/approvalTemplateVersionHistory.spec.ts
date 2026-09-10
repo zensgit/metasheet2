@@ -26,6 +26,7 @@ import {
   type Slot,
 } from 'vue'
 import { GRAPH_LAYOUT_NODE_HEIGHT } from '../src/approvals/graphLayout'
+import { useLocale } from '../src/composables/useLocale'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const confirmSpy = vi.fn().mockResolvedValue(undefined)
@@ -332,6 +333,15 @@ async function mountView() {
 
 describe('B3-09 template version history (TemplateDetailView)', () => {
   beforeEach(() => {
+    // Report item O-8 continuation (PR #5545): TemplateDetailView.vue now routes every chrome
+    // string through useLocale() instead of unconditional Chinese literals. This spec's own
+    // assertions are all Chinese-literal (当前生效/发布说明/表单字段 N/已恢复为草稿 …), matching
+    // the same fix templateCenterI18n.spec.ts's header documents for
+    // approvalTemplateCenterCategory.spec.ts — pinning the locale here PRESERVES this spec's
+    // original intent (it always ran under Chinese output, back when that was the view's only
+    // output) rather than loosening it; TemplateDetailView.vue's own dedicated
+    // templateDetailI18n.spec.ts carries the English-locale coverage.
+    useLocale().setLocale('zh-CN')
     mockActiveTemplate.value = baseTemplate()
     mockLoading.value = false
     mockErrorRef.value = null

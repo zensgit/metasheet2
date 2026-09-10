@@ -6,9 +6,11 @@ vi.mock('../src/utils/api', () => ({
 }))
 
 import {
+  acknowledgeElearningWatchChallenge,
   assignElearningDirect,
   elearningPlaybackSourceUrl,
   ElearningApiError,
+  enrollElearningCourse,
   getElearningCapabilities,
   isElearningV01Ready,
   isElearningLearnerReady,
@@ -46,6 +48,20 @@ const Q2 = '99999999-9999-4999-8999-999999999999'
 const ASSIGNMENT = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const MEMBER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const REQUEST = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const CHALLENGE = 'abababab-abab-4bab-8bab-abababababab'
+const CHALLENGE_OPTIONS = [
+  { optionId: '10101010-1010-4010-8010-101010101010', x: 24, y: 112, width: 92, height: 62 },
+  { optionId: '20202020-2020-4020-8020-202020202020', x: 134, y: 112, width: 92, height: 62 },
+  { optionId: '30303030-3030-4030-8030-303030303030', x: 244, y: 112, width: 92, height: 62 },
+  { optionId: '40404040-4040-4040-8040-404040404040', x: 24, y: 186, width: 92, height: 62 },
+  { optionId: '50505050-5050-4050-8050-505050505050', x: 134, y: 186, width: 92, height: 62 },
+  { optionId: '60606060-6060-4060-8060-606060606060', x: 244, y: 186, width: 92, height: 62 },
+] as const
+const CHALLENGE_IMAGE = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
+const CHALLENGE_SELECTIONS = [
+  CHALLENGE_OPTIONS[1].optionId,
+  CHALLENGE_OPTIONS[4].optionId,
+] as const
 const BANK = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
 const PAPER_ID = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
 const SHA256 = 'ab'.repeat(32)
@@ -90,6 +106,21 @@ function watchState(over: Record<string, unknown> = {}) {
   }
 }
 
+function watchChallenge(over: Record<string, unknown> = {}) {
+  return {
+    challengeId: CHALLENGE,
+    deadlineAt: CREATED_AT,
+    ordinal: 2,
+    status: 'challenged',
+    promptVersion: 'raster-position-v2',
+    imagePngBase64: CHALLENGE_IMAGE,
+    imageWidth: 360,
+    imageHeight: 260,
+    options: CHALLENGE_OPTIONS,
+    ...over,
+  }
+}
+
 function learnerCourse(over: Record<string, unknown> = {}) {
   return {
     courseId: COURSE,
@@ -97,6 +128,7 @@ function learnerCourse(over: Record<string, unknown> = {}) {
     title: '示范课',
     access: { kind: 'assignment', required: true },
     assignment: { deadline: null, assignedAt: '2026-01-02T03:04:05.000Z' },
+    enrollment: null,
     video: {
       itemId: VIDEO,
       durationMs: 5000,
@@ -196,6 +228,7 @@ function capabilitiesDto(over: Record<string, unknown> = {}, flags: Record<strin
       incentive: false,
       analytics: false,
       media: true,
+      enrollment: false,
       ...flags,
     },
     ...over,
@@ -316,6 +349,49 @@ describe('elearning client transport', () => {
     const result = await listMyElearningCourses()
     expect(result.courses[0]?.access).toEqual({ kind: 'visibility', required: false })
     expect(result.courses[0]?.assignment).toBeNull()
+  })
+
+  it('registers a visible course with the caller request id and parses the closed result', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(201, {
+      enrollmentId: MEMBER,
+      courseId: COURSE,
+      courseVersionId: VERSION,
+      status: 'enrolled',
+      enrolledAt: CREATED_AT,
+    }))
+    await expect(enrollElearningCourse(COURSE, REQUEST)).resolves.toEqual({
+      enrollmentId: MEMBER,
+      courseId: COURSE,
+      courseVersionId: VERSION,
+      status: 'enrolled',
+      enrolledAt: CREATED_AT,
+    })
+    expect(lastCall().path).toBe(`/api/elearning/me/courses/${COURSE}/enrollments`)
+    expect(lastJson()).toEqual({ requestId: REQUEST })
+    assertNoIdentityOverrides(lastJson())
+  })
+
+  it('rejects enrollment response drift, course mismatch, and noncanonical timestamps', async () => {
+    const result = (over: Record<string, unknown> = {}) => ({
+      enrollmentId: MEMBER,
+      courseId: COURSE,
+      courseVersionId: VERSION,
+      status: 'enrolled',
+      enrolledAt: CREATED_AT,
+      ...over,
+    })
+    for (const body of [
+      result({ actorId: 'forbidden' }),
+      result({ courseId: VERSION }),
+      result({ status: 'pending' }),
+      result({ enrolledAt: IMPOSSIBLE_AT }),
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(201, body))
+      await expect(enrollElearningCourse(COURSE, REQUEST)).rejects.toMatchObject({
+        code: 'invalid_response',
+        status: 201,
+      })
+    }
   })
 
   it('accepts an awaiting-manual latest attempt without fabricating a final score', async () => {
@@ -473,6 +549,53 @@ describe('elearning client transport', () => {
     expect(lastCall().path).toBe(`/api/elearning/watch/sessions/${SESSION}/heartbeat`)
     expect(lastJson()).toEqual({ sequence: 2, positionMs: 1000, playing: true })
     assertNoIdentityOverrides(lastJson())
+  })
+
+  it('parses the closed challenge prompt and acks with ordered selections', async () => {
+    const challenge = watchChallenge()
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse(200, watchState({ challenge })))
+      .mockResolvedValueOnce(jsonResponse(200, watchState({
+        challenge: null,
+        duplicate: false,
+      })))
+    await expect(sendElearningHeartbeat(SESSION, {
+      sequence: 2,
+      positionMs: 1000,
+      playing: true,
+    })).resolves.toMatchObject({ challenge })
+    await expect(acknowledgeElearningWatchChallenge(
+      SESSION,
+      CHALLENGE,
+      REQUEST,
+      CHALLENGE_SELECTIONS,
+    )).resolves.toMatchObject({ challenge: null })
+    expect(lastCall().path).toBe(
+      `/api/elearning/watch/sessions/${SESSION}/challenges/${CHALLENGE}/ack`,
+    )
+    expect(lastJson()).toEqual({ requestId: REQUEST, selections: CHALLENGE_SELECTIONS })
+    assertNoIdentityOverrides(lastJson())
+  })
+
+  it.each([
+    ['extra challenge key', { challenge: watchChallenge({ extra: true }) }],
+    ['invalid challenge timestamp', { challenge: watchChallenge({ deadlineAt: IMPOSSIBLE_AT }) }],
+    ['invalid challenge ordinal', { challenge: watchChallenge({ ordinal: 0 }) }],
+    ['invalid challenge status', { challenge: watchChallenge({ status: 'unknown' }) }],
+    ['unknown prompt version', { challenge: watchChallenge({ promptVersion: 'unknown' }) }],
+    ['duplicate option id', { challenge: watchChallenge({ options: CHALLENGE_OPTIONS.map((option, index) => index === 5 ? { ...option, optionId: CHALLENGE_OPTIONS[0].optionId } : option) }) }],
+    ['machine-readable target leak', { challenge: watchChallenge({ targets: ['▲2', '★5'] }) }],
+    ['machine-readable label leak', { challenge: watchChallenge({ options: CHALLENGE_OPTIONS.map((option, index) => ({ ...option, label: `leak-${index}` })) }) }],
+    ['invalid image payload', { challenge: watchChallenge({ imagePngBase64: 'not-a-png' }) }],
+    ['out-of-bounds option', { challenge: watchChallenge({ options: CHALLENGE_OPTIONS.map((option, index) => index === 5 ? { ...option, x: 359 } : option) }) }],
+    ['overlapping options', { challenge: watchChallenge({ options: CHALLENGE_OPTIONS.map((option, index) => index === 5 ? { ...option, x: 24, y: 112 } : option) }) }],
+    ['challenge on completed watch', { status: 'completed', challenge: watchChallenge() }],
+  ])('rejects %s in a watch response', async (_label, over) => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, watchState(over)))
+    await expect(startElearningWatch(VIDEO)).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
   })
 
   it('starts an exam and submits answers without identity overrides', async () => {
@@ -1126,6 +1249,7 @@ describe('elearning capabilities client', () => {
         incentive: false,
         analytics: false,
         media: true,
+        enrollment: false,
       },
     })
     assertNoIdentityOverrides(lastCall())
@@ -1160,6 +1284,7 @@ describe('elearning capabilities client', () => {
         incentive: boolean
         analytics: boolean
         media: boolean
+        enrollment: boolean
       }
     }
     expect(isElearningV01Ready(parkedOff)).toBe(true)

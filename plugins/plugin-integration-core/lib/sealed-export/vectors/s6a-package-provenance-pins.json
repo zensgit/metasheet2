@@ -70,7 +70,7 @@
     "pluginPackageJson": "4cd227957910381d06701bdbd95a33b2276c4c735f364ab415efdf8d4d113dc9",
     "pnpmLock": "95f095233951bbe488cb70da25cc3c9a0a25c1354bfd861b4ee999ccc857019b",
     "pluginIndex": "eb8ab7b0cbcb2df6845d74c743350803d0c082144f3b53c4b9904b881781301b",
-    "pluginHttpRoutes": "6a50d41b1008658fbcd17f49e1b4d1b01a304c756b8ed555ad728e49540f84ae",
+    "pluginHttpRoutes": "7dcb06a74e672dd336b089eab4eb7eb5ce16a02ca2bdb3cad7eff8c401ad3c3d",
     "testChainRunner": "c6ce4f00b412038b7f4473802f9d0b0df408d693c0b117f5b9dd23e0a7b1b82d",
     "s6aProvisioningCli": "d3320b27da7ab358ca068a3766a375e669fb6922f24ba0186ba0828c3e1d9da8",
     "s6aAcceptanceRunner": "eb58824cba1ab03361a6a4fba409f3f7a120dcda61d4c3d6cad2b82311d62624",
@@ -87,6 +87,6 @@
     "s6aAcceptancePs51Test": "835c7c6ce943d82e0378a40a27c7fd1e8b79b526faa8ca4c8066e4231a4bfb0f",
     "s6aProductRuntimeTest": "1bd015f35eb30e4bc59894abab8d226d871eb06d4838c5d602ddf9af1eae1330",
     "multitableOnpremPackageBuild": "1b76a342e5b947faf271132a5ae246b225439fbace13a4ff90e1209f7fb6b6d6",
-    "pluginTestsWorkflow": "b3eb82480fc51974de93d629bdaa44365c5360722d4e20b3c2e3547174b80ad3"
+    "pluginTestsWorkflow": "0f0f2f1c855b0666e8a857914089db99b8916cedb001e6d2571f7cc537c5d78b"
   }
 }

@@ -144,12 +144,54 @@ export async function viewerRoles(db: Queryable, viewerId: string): Promise<stri
 }
 
 /**
+ * `viewerRoles` with the LIST surfaces' fail-closed posture, and the reason it exists as a named
+ * export rather than an inline `try`/`catch` at each call site.
+ *
+ * COST, stated exactly: `viewerRoles` issues TWO queries — `SELECT role FROM users …` and
+ * `SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r …`. So every list call that
+ * resolves an actor pays two lookups, and depends on two tables (`user_roles`, `roles`) the list
+ * queries did not previously read.
+ *
+ * FAIL CLOSED. `canReadApprovalInstance` below wraps its own `viewerRoles` call in a `try` whose
+ * `catch` DENIES; the list surfaces had no equivalent, so a failure of either lookup surfaced as a
+ * list 500 (`APPROVAL_LIST_FAILED` / `APPROVAL_PENDING_LIST_FAILED`) instead of a narrower feed.
+ * Returning an EMPTY role set on failure is the fail-closed answer for both callers: they bind the
+ * empty set as a no-match sentinel, so the role-typed seat and role-typed CC arms match nothing
+ * while the actor's own requester / user-seat / past-actor / admin arms still resolve. It can only
+ * ever REMOVE rows from a response, never add one.
+ *
+ * OBSERVABLE. `canReadApprovalInstance`'s own `catch` below is silent, but it hands a boolean to a
+ * caller that renders a 404 — a visible outcome. This one silently NARROWS a list, which nothing
+ * downstream can tell apart from "the caller genuinely holds no role", so a missing `user_roles` /
+ * `roles` table or a revoked grant would degrade every list response with no signal anywhere. It
+ * therefore logs; the log line is the only trace this path leaves.
+ */
+export async function viewerRolesFailClosed(db: Queryable, viewerId: string): Promise<string[]> {
+  try {
+    return await viewerRoles(db, viewerId)
+  } catch (error) {
+    // Same shape as `canReadApprovalInstance`'s own catch below: the Error itself, no request
+    // values, no row content.
+    logger.warn(
+      'viewerRoles lookup failed — list scope role arms denied (fail-closed)',
+      error instanceof Error ? error : new Error(String(error)),
+    )
+    return []
+  }
+}
+
+/**
  * The viewer's ACTIVE `user_orgs` memberships (OD-S1-17(c) arm (c-i): UNION over active
  * memberships). DB-derived only — no request context, matching the predicate's fixed
  * `(db, viewerId, instanceId)` signature (OD-S1-9(f)). Empty when the viewer holds no active
  * membership; conjoined via `= ANY(...)`, so an empty array denies (never "no constraint").
+ *
+ * EXPORTED (additive; this module's own behaviour is unchanged) so the list feed's scope condition
+ * reads the viewer's orgs from THIS definition rather than minting a second one — the list mirrors
+ * the same `APPROVAL_S1_ORG_PIN_ENABLED` gate, so the two must agree on what "the viewer's orgs"
+ * means or the pin would mean different things on the feed and on the instance.
  */
-async function viewerActiveOrgIds(db: Queryable, viewerId: string): Promise<string[]> {
+export async function viewerActiveOrgIds(db: Queryable, viewerId: string): Promise<string[]> {
   const result = await db.query(`SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = TRUE`, [viewerId])
   return (result.rows as Array<{ org_id?: string | null }>)
     .map((row) => row.org_id)

@@ -1,6 +1,18 @@
 import { getApiBase } from '../utils/api'
+import { getCurrentScope, onScopeDispose } from 'vue'
+import { beginExplicitSessionOrgChange, clearExplicitSessionOrg, EXPLICIT_SESSION_ORG_KEY, installExplicitSessionOrg, ownsExplicitSessionOrgChange, restoreExplicitSessionOrg } from '../utils/explicitSessionOrg'
+// Single definitions, in a module with no dependencies of its own so a leaf that caches a
+// per-principal answer can import them without importing this whole surface. See
+// `authPrincipal.ts` for why that separation exists.
+import {
+  TOKEN_KEYS,
+  explicitSessionOrg,
+  getAuthPrincipalKey,
+  notifyAuthPrincipalChange,
+  parseJwtPayload,
+  readStoredToken,
+} from './authPrincipal'
 
-const TOKEN_KEYS = ['auth_token', 'jwt', 'devToken'] as const
 const USER_SNAPSHOT_KEYS = ['user_permissions', 'user_roles'] as const
 const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
 
@@ -24,6 +36,55 @@ type SessionBootstrapResult = {
 let sessionPromise: Promise<SessionBootstrapResult> | null = null
 let sessionToken: string | null = null
 let sessionCache: SessionBootstrapResult | null = null
+let explicitSessionRevision = 0
+let sessionIdentity: string | null = null
+let sessionWasExplicit = false
+const observedScopes = new WeakSet<object>()
+let storageSubscribers = 0
+let storageListener: ((event: StorageEvent) => void) | null = null
+let observedToken: string | null = null
+let observedMarker: string | null = null
+
+function readMarker(): string | null {
+  try { return localStorage.getItem(EXPLICIT_SESSION_ORG_KEY) } catch { return 'unavailable' }
+}
+
+function rememberSessionStorage(): void {
+  observedToken = readStoredToken()
+  observedMarker = readMarker()
+}
+
+function observeExplicitSessionStorage(): void {
+  const scope = getCurrentScope()
+  if (!scope || observedScopes.has(scope) || typeof window === 'undefined') return
+  observedScopes.add(scope)
+  storageSubscribers++
+  if (!storageListener) {
+    rememberSessionStorage()
+    storageListener = (event) => {
+      if (event.storageArea && event.storageArea !== localStorage) return
+      if (event.key !== null && event.key !== EXPLICIT_SESSION_ORG_KEY
+        && !(TOKEN_KEYS as readonly string[]).includes(event.key)) return
+      const token = readStoredToken()
+      const marker = readMarker()
+      const explicitTransition = observedMarker !== null || marker !== null
+        || (event.key === EXPLICIT_SESSION_ORG_KEY && Boolean(event.oldValue || event.newValue))
+      if (!explicitTransition || (token === observedToken && marker === observedMarker)) return
+      explicitSessionRevision++
+      // Notification and local cache invalidation, not a write lock. The
+      // principal/header guards detect changes synchronously before this event.
+      resetSessionBootstrap(true, false, true)
+    }
+    window.addEventListener('storage', storageListener)
+  }
+  onScopeDispose(() => {
+    storageSubscribers--
+    if (storageSubscribers === 0 && storageListener) {
+      window.removeEventListener('storage', storageListener)
+      storageListener = null
+    }
+  })
+}
 
 function clearStoredUserSnapshot() {
   try {
@@ -58,16 +119,26 @@ function persistUserSnapshot(user: unknown): void {
   }
 }
 
-function resetSessionBootstrap(clearUserSnapshot = false, clearTenantHint = false) {
+function resetSessionBootstrap(clearUserSnapshot = false, clearTenantHint = false, preserveExplicitSession = false) {
+  if (!preserveExplicitSession) clearExplicitSessionOrg()
   sessionPromise = null
   sessionToken = null
   sessionCache = null
+  sessionIdentity = null
+  sessionWasExplicit = false
   if (clearUserSnapshot) {
     clearStoredUserSnapshot()
   }
   if (clearTenantHint) {
     clearStoredTenantHint()
   }
+  // THE app's single "the principal may have changed" announcement. Every transition routes here:
+  // `setToken` (login, invite acceptance, DingTalk callback, forced password change, dev-token
+  // refresh), `clearToken` (sign-out, and `bootstrapSession`'s 401 branch, which clears with NO
+  // navigation), and `bootstrapSession`'s no-token branch. Subscribers can only drop their own
+  // per-principal state; see `authPrincipal.ts`.
+  rememberSessionStorage()
+  notifyAuthPrincipalChange()
 }
 
 function extractSessionUser(payload: SessionBootstrapPayload | null): unknown {
@@ -108,21 +179,7 @@ function clearStoredTenantHint(): void {
 }
 
 export function useAuth() {
-  function readStoredToken(): string | null {
-    try {
-      if (typeof localStorage === 'undefined') return null
-      for (const key of TOKEN_KEYS) {
-        const value = localStorage.getItem(key)
-        if (typeof value === 'string' && value.trim().length > 0) {
-          return value
-        }
-      }
-      return null
-    } catch {
-      return null
-    }
-  }
-
+  observeExplicitSessionStorage()
   function readStoredTenantHint(): string | null {
     try {
       if (typeof localStorage === 'undefined') return null
@@ -173,43 +230,75 @@ export function useAuth() {
   }
 
   function setToken(token: string) {
-    resetSessionBootstrap()
+    resetSessionBootstrap(false, false, true)
     try {
       if (typeof localStorage === 'undefined') return
       localStorage.setItem('auth_token', token)
       localStorage.setItem('jwt', token)
       clearStoredTenantHint()
       persistTenantHint(extractTenantHint(parseJwtPayload(token)) || readLocationTenantHint())
+      clearExplicitSessionOrg()
+      rememberSessionStorage()
     } catch (err) {
       console.warn('[auth] failed to persist token in localStorage', err)
     }
   }
 
   function clearToken() {
-    resetSessionBootstrap(true, true)
+    resetSessionBootstrap(true, true, true)
     try {
       if (typeof localStorage === 'undefined') return
       for (const key of TOKEN_KEYS) {
         localStorage.removeItem(key)
       }
+      clearExplicitSessionOrg()
+      rememberSessionStorage()
     } catch (err) {
       console.warn('[auth] failed to clear token from localStorage', err)
     }
   }
 
-  function parseJwtPayload(token: string): Record<string, unknown> | null {
+  // Only the explicit, authenticated organization-switch response uses this
+  // hook. Payload checks are consistency checks, not signature verification.
+  // Login hints and login/logout behavior are intentionally unchanged.
+  function setExplicitSessionOrg(token: string, orgId: string, expectedToken: string): boolean {
+    if (!expectedToken || getToken() !== expectedToken || !orgId
+      || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) return false
+    const previous = parseJwtPayload(expectedToken)
+    const next = parseJwtPayload(token)
+    const actor = previous?.userId ?? previous?.sub ?? previous?.id
+    if (typeof actor !== 'string' || !actor
+      || (next?.userId ?? next?.sub ?? next?.id) !== actor
+      || next?.tenantId !== orgId || typeof next?.exp !== 'number'
+      || !Number.isFinite(next.exp) || next.exp <= Date.now() / 1000
+      || typeof localStorage === 'undefined') return false
+    const originalAuth = localStorage.getItem('auth_token')
+    const originalJwt = localStorage.getItem('jwt')
+    const change = beginExplicitSessionOrgChange(expectedToken)
+    if (!change) return false
     try {
-      const parts = token.split('.')
-      if (parts.length < 2) return null
-      const normalized = parts[1]
-        .replace(/-/g, '+')
-        .replace(/_/g, '/')
-        .padEnd(Math.ceil(parts[1].length / 4) * 4, '=')
-      const json = atob(normalized)
-      return JSON.parse(json) as Record<string, unknown>
+      if (!ownsExplicitSessionOrgChange(change) || getToken() !== expectedToken) throw new Error('SESSION_ORG_SUPERSEDED')
+      localStorage.setItem('auth_token', token)
+      if (!ownsExplicitSessionOrgChange(change) || getToken() !== token) throw new Error('SESSION_ORG_SUPERSEDED')
+      localStorage.setItem('jwt', token)
+      if (!installExplicitSessionOrg(token, orgId, next, change)) throw new Error('EXPLICIT_SESSION_STORAGE_FAILED')
     } catch {
-      return null
+      if (!ownsExplicitSessionOrgChange(change)) return false
+      try {
+        for (const [key, value] of [['auth_token', originalAuth], ['jwt', originalJwt]]) {
+          if (!ownsExplicitSessionOrgChange(change)
+            || ![originalAuth, token].includes(localStorage.getItem('auth_token'))
+            || ![originalJwt, token].includes(localStorage.getItem('jwt'))) return false
+          if (value === null) localStorage.removeItem(key!)
+          else localStorage.setItem(key!, value!)
+        }
+        restoreExplicitSessionOrg(change)
+      } catch { /* Keep the barrier if rollback storage itself is unavailable. */ }
+      return false
     }
+    explicitSessionRevision++
+    resetSessionBootstrap(true, false, true)
+    return true
   }
 
   function parseStringArray(raw: unknown): string[] {
@@ -302,6 +391,9 @@ export function useAuth() {
 
   async function bootstrapSession(force = false): Promise<SessionBootstrapResult> {
     const existingToken = getToken()
+    const startedExplicitRevision = explicitSessionRevision
+    const startedExplicit = Boolean(explicitSessionOrg(existingToken))
+    const startedIdentity = getAuthPrincipalKey()
     if (!existingToken) {
       resetSessionBootstrap(true)
       return {
@@ -311,22 +403,30 @@ export function useAuth() {
       }
     }
 
-    if (!force && sessionCache && sessionToken === existingToken) {
+    const matchingIdentity = (!startedExplicit && !sessionWasExplicit) || sessionIdentity === startedIdentity
+    if (!force && sessionCache && sessionToken === existingToken && matchingIdentity) {
       return sessionCache
     }
 
-    if (!force && sessionPromise && sessionToken === existingToken) {
+    if (!force && sessionPromise && sessionToken === existingToken && matchingIdentity) {
       return sessionPromise
     }
 
     sessionToken = existingToken
+    sessionIdentity = startedIdentity
+    sessionWasExplicit = startedExplicit
     sessionPromise = (async (): Promise<SessionBootstrapResult> => {
       let resolvedToken = existingToken
+      const staleExplicitSession = () => startedExplicitRevision !== explicitSessionRevision
+        || ((startedExplicit || Boolean(explicitSessionOrg(getToken())))
+          && (resolvedToken !== getToken() || startedIdentity !== getAuthPrincipalKey()))
+      const staleResult = (): SessionBootstrapResult => ({ ok: false, status: 0, payload: null })
       let response = await fetch(`${getApiBase()}/api/auth/me`, {
         headers: buildAuthHeaders(resolvedToken),
       }).catch(() => null)
 
-      if (response?.status === 401) {
+      if (staleExplicitSession()) return staleResult()
+      if (response?.status === 401 && !startedExplicit) {
         const refreshedToken = await refreshDevToken()
         if (refreshedToken && refreshedToken !== resolvedToken) {
           resolvedToken = refreshedToken
@@ -337,6 +437,7 @@ export function useAuth() {
         }
       }
 
+      if (staleExplicitSession()) return staleResult()
       if (!response) {
         sessionCache = {
           ok: false,
@@ -353,6 +454,7 @@ export function useAuth() {
         payload = null
       }
 
+      if (staleExplicitSession()) return staleResult()
       if (!response.ok) {
         if (response.status === 401) {
           clearToken()
@@ -366,7 +468,7 @@ export function useAuth() {
       }
 
       persistUserSnapshot(extractSessionUser(payload))
-      persistTenantHint(extractTenantHint(extractSessionUser(payload)))
+      if (!explicitSessionOrg(resolvedToken)) persistTenantHint(extractTenantHint(extractSessionUser(payload)))
       sessionCache = {
         ok: true,
         status: response.status,
@@ -375,16 +477,22 @@ export function useAuth() {
       return sessionCache
     })()
 
+    const pending = sessionPromise
     try {
-      return await sessionPromise
+      return await pending
     } finally {
-      sessionPromise = null
+      if (sessionPromise === pending) sessionPromise = null
     }
   }
 
   function primeSession(payload: SessionBootstrapPayload | null) {
     const token = getToken()
+    const explicitOrg = explicitSessionOrg(token)
+    if (explicitOrg && (extractTenantHint(extractSessionUser(payload)) !== explicitOrg
+      || extractUserId(extractSessionUser(payload)) !== extractUserId(parseJwtPayload(token!)))) return
     sessionToken = token
+    sessionIdentity = getAuthPrincipalKey()
+    sessionWasExplicit = Boolean(explicitOrg)
     sessionCache = {
       ok: true,
       status: 200,
@@ -392,14 +500,14 @@ export function useAuth() {
     }
     sessionPromise = null
     persistUserSnapshot(extractSessionUser(payload))
-    persistTenantHint(extractTenantHint(extractSessionUser(payload)))
+    if (!explicitOrg) persistTenantHint(extractTenantHint(extractSessionUser(payload)))
   }
 
   function buildAuthHeaders(tokenOverride?: string | null): Record<string, string> {
     const headers: Record<string, string> = {}
     const token = tokenOverride || getToken()
     if (token) headers['Authorization'] = `Bearer ${token}`
-    const tenantHint = readStoredTenantHint() || readLocationTenantHint() || extractTenantHint(parseJwtPayload(token || ''))
+    const tenantHint = explicitSessionOrg(token) || readStoredTenantHint() || readLocationTenantHint() || extractTenantHint(parseJwtPayload(token || ''))
     if (tenantHint) headers['x-tenant-id'] = tenantHint
     // Dev/test fallback aligns with backend flag behaviour
     if (!headers['Authorization']) headers['x-user-id'] = 'dev-user'
@@ -429,6 +537,9 @@ export function useAuth() {
   }
 
   function getCurrentUser(): SessionUserRecord | null {
+    try {
+      if ((sessionWasExplicit || Boolean(explicitSessionOrg(getToken()))) && sessionIdentity !== getAuthPrincipalKey()) return null
+    } catch { return null }
     return (extractSessionUser(sessionCache?.payload ?? null) as SessionUserRecord | null) ?? null
   }
 
@@ -442,6 +553,7 @@ export function useAuth() {
   return {
     getToken,
     setToken,
+    setExplicitSessionOrg,
     clearToken,
     bootstrapSession,
     primeSession,

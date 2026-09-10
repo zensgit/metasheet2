@@ -130,6 +130,7 @@ const ALL_FLAGS_ON = Object.freeze({
   ELEARNING_INCENTIVE_ENABLED: 'true',
   ELEARNING_ANALYTICS_ENABLED: 'true',
   ELEARNING_MEDIA_ENABLED: 'true',
+  ELEARNING_ENROLLMENT_ENABLED: 'true',
 })
 
 function allCapabilities(value) {
@@ -140,6 +141,7 @@ function allCapabilities(value) {
     incentive: value,
     analytics: value,
     media: value,
+    enrollment: value,
   }
 }
 

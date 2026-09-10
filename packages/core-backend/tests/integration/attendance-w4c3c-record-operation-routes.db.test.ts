@@ -6,7 +6,7 @@
  * Uses a dynamic free port (MetaSheetServer port: 0) — never hard-collides on 7778.
  * Tests fail closed when database/loopback is unavailable (no silent skip-after-start).
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
@@ -14,7 +14,7 @@ import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Pool } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
 import { appendOperatorRetirementCalculationV1 } from '../../src/attendance/w4c3c-ops-retirement'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
@@ -221,6 +221,8 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     recordId: string,
     workDate: string,
     mode: 'shadow' | 'authoritative' = 'authoritative',
+    version = 1,
+    transactionClient?: PoolClient,
   ) {
     const calculationId = randomUUID()
     const operationId = randomUUID()
@@ -295,9 +297,9 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
     const sourceDefinitionFingerprint = computeAttendanceSourceDefinitionFingerprintV1({ attribution, context })
     if (!sourceDefinitionFingerprint) throw new Error('W4C3C_ROUTE_TEST_SOURCE_DEFINITION_MISSING')
 
-    const client = await pool.connect()
+    const client = transactionClient ?? await pool.connect()
     try {
-      await client.query('BEGIN')
+      if (!transactionClient) await client.query('BEGIN')
       await client.query(
         `INSERT INTO attendance_record_calculations (
             id, org_id, attendance_record_id, version, calculation_kind, mode, entrypoint,
@@ -310,7 +312,7 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
             projected_work_minutes, projected_late_minutes, projected_early_leave_minutes,
             projected_daily_fingerprint, actor_id, correlation_id
           ) VALUES (
-            $1::uuid, $2, $3::uuid, 1, 'calculation', $19, 'live',
+            $1::uuid, $2, $3::uuid, $22, 'calculation', $19, 'live',
             $4, 1, $5::uuid, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb,
             '[]'::jsonb, $13::jsonb, 'append', $20,
             'completed', 'calculated', $21, 1,
@@ -339,6 +341,7 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
           mode,
           mode === 'authoritative' ? 'segment_authoritative' : 'legacy_shadow',
           mode === 'authoritative' ? 'set_active' : 'none',
+          version,
         ],
       )
       await client.query(
@@ -365,13 +368,13 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
           [calculationId, recordId, orgId],
         )
       }
-      await client.query('COMMIT')
-      return { calculationId, calculationVersion: 1 }
+      if (!transactionClient) await client.query('COMMIT')
+      return { calculationId, calculationVersion: version }
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined)
+      if (!transactionClient) await client.query('ROLLBACK').catch(() => undefined)
       throw error
     } finally {
-      client.release()
+      if (!transactionClient) client.release()
     }
   }
 
@@ -682,6 +685,312 @@ describeIfDatabase('W4C-3c record operation routes (real plugin, real PostgreSQL
       [recordId],
     )
     expect(still.rows[0]?.visibility_state).not.toBe('retired')
+  })
+
+  it.each(['authoritative', 'shadow'] as const)('ACP %s applies one canonical correction and consumes only its proposal through HTTP', async (mode) => {
+    requireServer()
+    const { refreshAttendanceReportProjectionAnchor } = await import('../../src/attendance/attendance-multitable-cleaning-authority')
+    const { getObjectFieldId, getObjectSheetId } = await import('../../src/multitable/provisioning')
+    const fixture = await seedUser()
+    await seedOrgRollout(fixture.orgId, fixture.userId, mode)
+    const { recordId, workDate } = await seedRecord(fixture.orgId, fixture.userId)
+    await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate, mode)
+    await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin'), ($1, 'multitable:write') ON CONFLICT DO NOTHING", [fixture.userId])
+    await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'attendance_admin') ON CONFLICT DO NOTHING", [fixture.userId])
+    await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, 'attendance', true) ON CONFLICT DO NOTHING", [fixture.userId])
+    const projectionId = `rec_${randomUUID()}`
+    const cleanupFault = `acp_cleanup_${randomUUID().replaceAll('-', '')}`
+    const sheetId = getObjectSheetId(`${fixture.orgId}:attendance`, 'attendance_report_records')
+    const catalogId = `acp_catalog_${randomUUID()}`
+    const projectId = `${fixture.orgId}:attendance`
+    const physical = (code: string) => getObjectFieldId(projectId, 'attendance_report_records', code)
+    const helpers = pluginRequire('../../../../plugins/plugin-attendance/index.cjs').__attendanceReportFieldCatalogForTests
+    const items = helpers.mergeAttendanceReportFieldDefinitions([], {}, { rawAliasesAllowed: false })
+    const logical: Record<string, unknown> = Object.fromEntries(helpers.buildAttendanceReportRecordsValueColumns(items).map((column: { id: string }) => [column.id, null]))
+    Object.assign(logical, { row_key: `${fixture.orgId}:${fixture.userId}:${workDate}`, org_id: fixture.orgId,
+      user_id: fixture.userId, employee_name: 'Synthetic employee', department: '', attendance_group: '', work_date: workDate })
+    const fingerprint = helpers.buildAttendanceReportRecordSourceFingerprint(logical, { overtimeSegmentation: null })
+    const data = Object.fromEntries(Object.entries(logical).map(([code, value]) => [physical(code), value]))
+    Object.assign(data, { [physical('source_fingerprint')]: fingerprint, [physical('cleaning_requested')]: true,
+      [physical('cleaning_reason')]: 'synthetic verified correction', custom_keep: 'retained' })
+    const settings = await pool.query("SELECT value FROM system_configs WHERE key = 'attendance.settings'")
+    const previousBypass = process.env.RBAC_BYPASS
+    try {
+      await pool.query('INSERT INTO meta_sheets (id, name) VALUES ($1, $1), ($2, $2)', [sheetId, catalogId])
+      await pool.query(`INSERT INTO plugin_multitable_object_registry (sheet_id, project_id, plugin_name, object_id)
+        VALUES ($1, $3, 'plugin-attendance', 'attendance_report_records'), ($2, $3, 'plugin-attendance', 'attendance_report_field_catalog')`, [sheetId, catalogId, projectId])
+      const codes = [...Object.keys(logical), 'source_fingerprint', 'cleaning_requested', 'cleaning_reason']
+      for (const code of codes) await pool.query('INSERT INTO meta_fields (id, sheet_id, name, type) VALUES ($1, $2, $3, $4)',
+        [physical(code), sheetId, code, code === 'cleaning_requested' ? 'boolean' : 'string'])
+      await pool.query('INSERT INTO meta_records (id, sheet_id, data) VALUES ($1, $2, $3::jsonb)', [projectionId, sheetId, JSON.stringify(data)])
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await refreshAttendanceReportProjectionAnchor((statement, params) => client.query(statement, params), {
+          projectionRecordId: projectionId, canonicalRecordId: recordId, sourceFingerprint: fingerprint,
+        })
+        await client.query('COMMIT')
+      } finally { await client.query('ROLLBACK'); client.release() }
+      await pool.query(`INSERT INTO system_configs (key, value) VALUES ('attendance.settings', $1)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [JSON.stringify({ attendanceMultitableCleaningPolicy: { enabled: true } })])
+      process.env.RBAC_BYPASS = 'false'
+      const catalogResponse = await requestJson(`${baseUrl}/api/attendance/report-fields`, {
+        headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      })
+      expect(catalogResponse.status).toBe(200)
+      expect(catalogResponse.body?.data.cleaningReview).toMatchObject({ enabled: true, orgId: fixture.orgId, sheetId,
+        fieldIds: { cleaning_requested: physical('cleaning_requested'), cleaning_reason: physical('cleaning_reason') } })
+      const foreignAdmin = await seedUser()
+      await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin') ON CONFLICT DO NOTHING", [foreignAdmin.userId])
+      const foreignMetadata = await requestJson(`${baseUrl}/api/attendance/report-fields?orgId=${encodeURIComponent(fixture.orgId)}`, {
+        headers: { Authorization: `Bearer ${foreignAdmin.token}`, 'X-Org-Id': foreignAdmin.orgId },
+      })
+      if (foreignMetadata.status === 200) expect(foreignMetadata.body?.data.cleaningReview).toEqual({ enabled: false })
+      else expect([401, 403]).toContain(foreignMetadata.status)
+      const listQuery = new URLSearchParams({ sheetId, limit: '50', [`filter.${physical('cleaning_requested')}`]: 'true' })
+      const listResponse = await requestJson(`${baseUrl}/api/multitable/records?${listQuery}`, {
+        headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+      })
+      expect(listResponse.status, JSON.stringify(listResponse.body)).toBe(200)
+      expect(listResponse.body?.data.records).toEqual([expect.objectContaining({ id: projectionId, version: 1,
+        data: expect.objectContaining({ [physical('cleaning_requested')]: true, [physical('cleaning_reason')]: 'synthetic verified correction' }) })])
+      const hiddenPermission = randomUUID()
+      try {
+        await pool.query(`INSERT INTO field_permissions (id, sheet_id, field_id, subject_type, subject_id, visible, read_only)
+          VALUES ($1, $2, $3, 'user', $4, false, false)`, [hiddenPermission, sheetId, physical('cleaning_reason'), fixture.userId])
+        const maskedList = await requestJson(`${baseUrl}/api/multitable/records?${listQuery}`, {
+          headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+        })
+        expect(maskedList.status).toBe(200)
+        expect(maskedList.body?.data.records[0].data).not.toHaveProperty(physical('cleaning_reason'))
+        await pool.query('UPDATE field_permissions SET field_id = $1 WHERE id = $2', [physical('cleaning_requested'), hiddenPermission])
+        const forbiddenFilter = await requestJson(`${baseUrl}/api/multitable/records?${listQuery}`, {
+          headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId },
+        })
+        expect(forbiddenFilter.status).toBe(400)
+        expect(forbiddenFilter.raw).not.toContain(physical('cleaning_requested'))
+      } finally { await pool.query('DELETE FROM field_permissions WHERE id = $1', [hiddenPermission]) }
+      // A stored fingerprint is not proof of current managed content. Preserve
+      // it while tampering with a physical managed value, then exercise HTTP.
+      await pool.query('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2',
+        [JSON.stringify({ [physical('employee_name')]: 'Synthetic managed drift' }), projectionId])
+      const drifted = await requestJson(`${baseUrl}/api/attendance/report-records/${projectionId}/cleaning-apply`, {
+        method: 'POST', headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId }, body: { expectedVersion: 1 },
+      })
+      expect(drifted.status).toBe(409)
+      expect((await pool.query('SELECT status FROM attendance_records WHERE id = $1', [recordId])).rows[0].status).toBe('late')
+      expect((await pool.query('SELECT count(*)::int AS n FROM attendance_record_result_edits WHERE record_id = $1', [recordId])).rows[0].n).toBe(0)
+      expect((await pool.query("SELECT count(*)::int AS n FROM attendance_result_operations WHERE org_id = $1 AND source_ref LIKE 'attendance-cleaning-source-v1:%'", [fixture.orgId])).rows[0].n).toBe(0)
+      await pool.query('UPDATE meta_records SET data = $1::jsonb WHERE id = $2', [JSON.stringify(data), projectionId])
+      for (const concurrentTarget of ['proposal', 'canonical', 'calculation'] as const) {
+        const proposalWriter = await pool.connect()
+        let concurrentApply: Promise<JsonResponse> | undefined
+        try {
+          await proposalWriter.query('BEGIN')
+          await proposalWriter.query(concurrentTarget === 'proposal'
+            ? 'SELECT id FROM meta_records WHERE id = $1 FOR UPDATE'
+            : 'SELECT id FROM attendance_records WHERE id = $1 FOR UPDATE',
+          [concurrentTarget === 'proposal' ? projectionId : recordId])
+          const writerPid = (await proposalWriter.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+          concurrentApply = requestJson(`${baseUrl}/api/attendance/report-records/${projectionId}/cleaning-apply`, {
+            method: 'POST', headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId }, body: { expectedVersion: 1 },
+          })
+          await vi.waitFor(async () => {
+            const blocked = await pool.query(`SELECT pid FROM pg_stat_activity
+              WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))`, [writerPid])
+            expect(blocked.rows.length).toBeGreaterThan(0)
+          }, { timeout: 3000, interval: 20 })
+          if (concurrentTarget === 'proposal') await proposalWriter.query('UPDATE meta_records SET data = data || $1::jsonb, version = version + 1 WHERE id = $2',
+            [JSON.stringify({ [physical('cleaning_reason')]: 'Concurrent user proposal' }), projectionId])
+          else if (concurrentTarget === 'canonical') await proposalWriter.query("UPDATE attendance_records SET timezone = 'Asia/Taipei' WHERE id = $1", [recordId])
+          else await seedAuthoritativePrior(fixture.orgId, fixture.userId, recordId, workDate, mode, 2, proposalWriter)
+          await proposalWriter.query('COMMIT')
+          expect((await concurrentApply).status).toBe(409)
+          const preserved = (await pool.query('SELECT data, version FROM meta_records WHERE id = $1', [projectionId])).rows[0]
+          expect(preserved.version).toBe(concurrentTarget === 'proposal' ? 2 : 1)
+          expect(preserved.data[physical('cleaning_reason')]).toBe(concurrentTarget === 'proposal' ? 'Concurrent user proposal' : 'synthetic verified correction')
+          const canonical = (await pool.query('SELECT status, timezone FROM attendance_records WHERE id = $1', [recordId])).rows[0]
+          expect(canonical.status).toBe('late')
+          expect(canonical.timezone).toBe(concurrentTarget === 'canonical' ? 'Asia/Taipei' : 'UTC')
+          expect((await pool.query('SELECT count(*)::int AS n FROM attendance_record_result_edits WHERE record_id = $1', [recordId])).rows[0].n).toBe(0)
+          expect((await pool.query("SELECT count(*)::int AS n FROM attendance_result_operations WHERE org_id = $1 AND source_ref LIKE 'attendance-cleaning-source-v1:%'", [fixture.orgId])).rows[0].n).toBe(0)
+        } finally {
+          await proposalWriter.query('ROLLBACK')
+          proposalWriter.release()
+          await concurrentApply
+        }
+        // Restore only this synthetic fixture before the independent success path.
+        await pool.query('UPDATE meta_records SET data = $1::jsonb, version = 1 WHERE id = $2', [JSON.stringify(data), projectionId])
+        await pool.query("UPDATE attendance_records SET timezone = 'UTC' WHERE id = $1", [recordId])
+      }
+      // Accept the newly selected calculation only through a fresh trusted
+      // projection sync/anchor refresh before the independent success path.
+      const reseed = await pool.connect()
+      try {
+        await reseed.query('BEGIN')
+        await refreshAttendanceReportProjectionAnchor((statement, params) => reseed.query(statement, params), {
+          projectionRecordId: projectionId, canonicalRecordId: recordId, sourceFingerprint: fingerprint,
+        })
+        await reseed.query('COMMIT')
+      } finally { await reseed.query('ROLLBACK'); reseed.release() }
+      if (mode === 'authoritative') {
+        // Exact synthetic row only; induce a genuine post-canonical cleanup error.
+        await pool.query(`CREATE FUNCTION ${cleanupFault}() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN RAISE EXCEPTION 'ACP_SYNTHETIC_CLEANUP_FAILURE'; END $$`)
+        await pool.query(`CREATE TRIGGER ${cleanupFault} BEFORE UPDATE ON meta_records FOR EACH ROW
+          WHEN (OLD.id = '${projectionId}' AND NEW.data->>'${physical('cleaning_requested')}' = 'false')
+          EXECUTE FUNCTION ${cleanupFault}()`)
+      }
+      let response = await requestJson(`${baseUrl}/api/attendance/report-records/${projectionId}/cleaning-apply`, {
+        method: 'POST', headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId }, body: { expectedVersion: 1 },
+      })
+      expect(response.status, JSON.stringify(response.body)).toBe(200)
+      let finalVersion = 2
+      if (mode === 'authoritative') {
+        expect(response.body.data.cleaningState).toBe('applied_pending_cleanup')
+        expect((await pool.query('SELECT status FROM attendance_records WHERE id = $1', [recordId])).rows[0].status).toBe('normal')
+        expect((await pool.query('SELECT version FROM meta_records WHERE id = $1', [projectionId])).rows[0].version).toBe(1)
+        await pool.query(`DROP TRIGGER ${cleanupFault} ON meta_records`)
+        await pool.query(`DROP FUNCTION ${cleanupFault}()`)
+        const retry = (version: number, token = fixture.token) => requestJson(`${baseUrl}/api/attendance/report-records/${projectionId}/cleaning-apply`, {
+          method: 'POST', headers: { Authorization: `Bearer ${token}`, 'X-Org-Id': fixture.orgId }, body: { expectedVersion: version },
+        })
+        const cleanupWriter = await pool.connect()
+        let racingCleanup: Promise<JsonResponse> | undefined
+        try {
+          await cleanupWriter.query('BEGIN')
+          await cleanupWriter.query('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE', [projectionId])
+          const writerPid = (await cleanupWriter.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+          racingCleanup = retry(1)
+          await vi.waitFor(async () => {
+            const blocked = await pool.query(`SELECT pid FROM pg_stat_activity
+              WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))`, [writerPid])
+            expect(blocked.rows.length).toBeGreaterThan(0)
+          }, { timeout: 3000, interval: 20 })
+          await cleanupWriter.query(`UPDATE meta_records SET data = data || '{"custom_keep":"concurrent user edit"}'::jsonb,
+            version = version + 1 WHERE id = $1`, [projectionId])
+          await cleanupWriter.query('COMMIT')
+          expect((await racingCleanup).status).toBe(409)
+          const preserved = (await pool.query('SELECT data, version FROM meta_records WHERE id = $1', [projectionId])).rows[0]
+          expect(preserved.version).toBe(2)
+          expect(preserved.data).toEqual({ ...data, custom_keep: 'concurrent user edit' })
+          expect((await pool.query('SELECT count(*)::int AS n FROM attendance_record_result_edits WHERE record_id = $1', [recordId])).rows[0].n).toBe(1)
+          expect((await pool.query("SELECT count(*)::int AS n FROM attendance_record_calculations WHERE attendance_record_id = $1 AND entrypoint = 'manual_override'", [recordId])).rows[0].n).toBe(1)
+        } finally {
+          await cleanupWriter.query('ROLLBACK')
+          cleanupWriter.release()
+          await racingCleanup
+        }
+        // Restore this synthetic proposal fixture for independent recovery negatives.
+        await pool.query('UPDATE meta_records SET data = $1::jsonb, version = 1 WHERE id = $2', [JSON.stringify(data), projectionId])
+        const originalAnchor = (await pool.query('SELECT to_jsonb(anchor) AS value FROM attendance_report_projection_anchors anchor WHERE projection_record_id = $1', [projectionId])).rows[0].value
+        try {
+          await pool.query('DELETE FROM attendance_report_projection_anchors WHERE projection_record_id = $1', [projectionId])
+          await pool.query(`INSERT INTO attendance_report_projection_anchors
+            SELECT (jsonb_populate_record(NULL::attendance_report_projection_anchors, $1::jsonb || jsonb_build_object(
+              'created_at', operation.created_at + interval '1 microsecond'))).*
+            FROM attendance_result_operations operation WHERE org_id = $2 AND resolved_record_id = $3
+              AND source_ref LIKE 'attendance-cleaning-source-v1:%'`, [JSON.stringify(originalAnchor), fixture.orgId, recordId])
+          expect((await retry(1)).status).toBe(409)
+          const retained = (await pool.query('SELECT data, version FROM meta_records WHERE id = $1', [projectionId])).rows[0]
+          expect(retained).toEqual({ data, version: 1 })
+          expect((await pool.query('SELECT count(*)::int AS n FROM attendance_record_result_edits WHERE record_id = $1', [recordId])).rows[0].n).toBe(1)
+        } finally {
+          await pool.query('DELETE FROM attendance_report_projection_anchors WHERE projection_record_id = $1', [projectionId])
+          await pool.query(`INSERT INTO attendance_report_projection_anchors
+            SELECT (jsonb_populate_record(NULL::attendance_report_projection_anchors, $1::jsonb)).*`, [JSON.stringify(originalAnchor)])
+        }
+        const other = await seedUser({ orgId: fixture.orgId })
+        await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'attendance_admin') ON CONFLICT DO NOTHING", [other.userId])
+        await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin'), ($1, 'multitable:write') ON CONFLICT DO NOTHING", [other.userId])
+        await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, 'attendance', true) ON CONFLICT DO NOTHING", [other.userId])
+        expect((await retry(1, other.token)).status).toBe(409)
+        await pool.query('UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2', [fixture.userId, fixture.orgId])
+        expect([401, 403]).toContain((await retry(1)).status)
+        await pool.query('UPDATE user_orgs SET is_active = true WHERE user_id = $1 AND org_id = $2', [fixture.userId, fixture.orgId])
+        await pool.query('UPDATE meta_records SET data = data || $1::jsonb, version = version + 1 WHERE id = $2',
+          [JSON.stringify({ [physical('cleaning_reason')]: 'later proposal' }), projectionId])
+        expect((await retry(2)).status).toBe(409)
+        expect((await pool.query('SELECT data FROM meta_records WHERE id = $1', [projectionId])).rows[0].data[physical('cleaning_reason')]).toBe('later proposal')
+        await pool.query('UPDATE meta_records SET data = data || $1::jsonb, version = version + 1 WHERE id = $2',
+          [JSON.stringify({ [physical('cleaning_requested')]: false }), projectionId])
+        expect((await retry(3)).status).toBe(409)
+        await pool.query('UPDATE meta_records SET data = data || $1::jsonb, version = version + 1 WHERE id = $2',
+          [JSON.stringify({ [physical('cleaning_requested')]: true, [physical('cleaning_reason')]: 'synthetic verified correction' }), projectionId])
+        expect((await pool.query('SELECT count(*)::int AS n FROM attendance_record_result_edits WHERE record_id = $1', [recordId])).rows[0].n).toBe(1)
+        // Simulate the legitimate sync refresh before cleanup retry: changed
+        // managed fingerprint must locate the ORIGINAL completed operation.
+        logical.employee_name = 'Synthetic refreshed name'
+        const refreshedFingerprint = helpers.buildAttendanceReportRecordSourceFingerprint(logical, { overtimeSegmentation: null })
+        Object.assign(data, { [physical('employee_name')]: logical.employee_name, [physical('source_fingerprint')]: refreshedFingerprint })
+        await pool.query('UPDATE meta_records SET data = $1::jsonb, version = version + 1 WHERE id = $2', [JSON.stringify(data), projectionId])
+        const refreshClient = await pool.connect()
+        try {
+          await refreshClient.query('BEGIN')
+          await refreshAttendanceReportProjectionAnchor((statement, params) => refreshClient.query(statement, params), {
+            projectionRecordId: projectionId, canonicalRecordId: recordId, sourceFingerprint: refreshedFingerprint,
+          })
+          await refreshClient.query('COMMIT')
+        } finally { await refreshClient.query('ROLLBACK'); refreshClient.release() }
+        response = await requestJson(`${baseUrl}/api/attendance/report-records/${projectionId}/cleaning-apply`, {
+          method: 'POST', headers: { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId }, body: { expectedVersion: 5 },
+        })
+        expect(response.status, JSON.stringify(response.body)).toBe(200)
+        finalVersion = 6
+      }
+      expect(response.body.data.cleaningState).toBe('consumed')
+      const projected = (await pool.query('SELECT data, version FROM meta_records WHERE id = $1', [projectionId])).rows[0]
+      expect(projected.version).toBe(finalVersion)
+      expect(projected.data).toEqual({ ...data, [physical('cleaning_requested')]: false, [physical('cleaning_reason')]: null })
+      expect((await pool.query('SELECT status FROM attendance_records WHERE id = $1', [recordId])).rows[0].status).toBe('normal')
+      expect((await pool.query('SELECT count(*)::int AS n FROM attendance_record_result_edits WHERE record_id = $1', [recordId])).rows[0].n).toBe(1)
+      expect((await pool.query("SELECT count(*)::int AS n FROM attendance_result_operations WHERE org_id = $1 AND source_ref LIKE 'attendance-cleaning-source-v1:%' AND state = 'completed'", [fixture.orgId])).rows[0].n).toBe(1)
+      const effects = (await pool.query(`SELECT
+        (SELECT count(*)::int FROM attendance_record_calculations WHERE attendance_record_id = $1 AND entrypoint = 'manual_override') AS calculations,
+        (SELECT count(*)::int FROM attendance_result_event_outbox WHERE org_id = $2) AS events,
+        (SELECT count(*)::int FROM attendance_record_result_edits WHERE record_id = $1 AND notification_delivery_id IS NOT NULL) AS notified`, [recordId, fixture.orgId])).rows[0]
+      expect(effects).toEqual({ calculations: 1, events: 1, notified: 0 })
+    } finally {
+      if (previousBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousBypass
+      if (settings.rows.length) await pool.query("UPDATE system_configs SET value = $1 WHERE key = 'attendance.settings'", [settings.rows[0].value])
+      else await pool.query("DELETE FROM system_configs WHERE key = 'attendance.settings'")
+      await pool.query(`DROP TRIGGER IF EXISTS ${cleanupFault} ON meta_records`)
+      await pool.query(`DROP FUNCTION IF EXISTS ${cleanupFault}()`)
+      await pool.query('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[sheetId, catalogId]])
+      await pool.query('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[sheetId, catalogId]])
+      await pool.query('DELETE FROM plugin_multitable_object_registry WHERE sheet_id = ANY($1::text[])', [[sheetId, catalogId]])
+      await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[sheetId, catalogId]])
+    }
+  })
+
+  it('ACP apply is default-off with RBAC bypass disabled and accepts no client authority fields', async () => {
+    requireServer()
+    const fixture = await seedAdmin()
+    await pool.query("INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin') ON CONFLICT DO NOTHING", [fixture.userId])
+    await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'attendance_admin') ON CONFLICT DO NOTHING", [fixture.userId])
+    await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, 'attendance', true) ON CONFLICT DO NOTHING", [fixture.userId])
+    const previous = process.env.RBAC_BYPASS
+    process.env.RBAC_BYPASS = 'false'
+    try {
+      const endpoint = `${baseUrl}/api/attendance/report-records/rec_synthetic_unavailable/cleaning-apply`
+      const headers = { Authorization: `Bearer ${fixture.token}`, 'X-Org-Id': fixture.orgId }
+      const disabled = await requestJson(endpoint, { method: 'POST', headers, body: { expectedVersion: 1 } })
+      expect(disabled.status).toBe(403)
+      expect(disabled.body.error.code).toBe('ATTENDANCE_CLEANING_DISABLED')
+      for (const field of ['orgId', 'canonicalRecordId', 'userId', 'workDate', 'reason', 'status', 'operationId', 'sourceFingerprint', 'overrideMetrics']) {
+        const rejected = await requestJson(endpoint, { method: 'POST', headers,
+          body: { expectedVersion: 1, [field]: 'SYNTHETIC_VALUE_MUST_NOT_ECHO' } })
+        expect(rejected.status).toBe(400)
+        expect(rejected.body.error.code).toBe('ATTENDANCE_CLEANING_REQUEST_INVALID')
+        expect(JSON.stringify(rejected.body)).not.toContain('SYNTHETIC_VALUE_MUST_NOT_ECHO')
+      }
+      const writes = await pool.query("SELECT count(*)::int AS count FROM attendance_result_operations WHERE org_id = $1 AND source_ref LIKE 'attendance-cleaning-source-v1:%'", [fixture.orgId])
+      expect(writes.rows[0].count).toBe(0)
+    } finally {
+      if (previous === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previous
+    }
   })
 
   it('manual edit without complete prior fails closed (zero fabricated current write)', async () => {

@@ -99,6 +99,10 @@ import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 // from a pack's — but the stamp itself is about THIS route owning what it writes.
 import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
+import {
+  isElearningProjectionBaseIdCandidate,
+  isElearningProjectionSheetIdCandidate,
+} from '../multitable/elearning-projection-constants'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   checkExactAnchorRecoveryTrust,
@@ -131,6 +135,7 @@ import {
   type RecoveryArchivePreviewRuntime,
 } from '../multitable/recovery-archive-preview'
 import { executeRecoveryArchiveSync } from '../multitable/recovery-archive-sync-execute'
+import { isUndefinedColumnError } from '../utils/database-errors'
 import { acceptFrozenRecoveryArchiveRestoreJob } from '../multitable/recovery-archive-async-plan'
 import {
   cancelRecoveryArchiveRestoreJob,
@@ -769,6 +774,7 @@ function buildPublicFormToken(): string {
 
 function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined, publicToken: string): boolean {
   if (!view || !publicToken) return false
+  if (isElearningProjectionSheetIdCandidate(view.sheetId)) return false
   const publicForm = getPublicFormConfig(view)
   if (!publicForm || publicForm.enabled !== true) return false
   const configuredToken = typeof publicForm.publicToken === 'string' ? publicForm.publicToken.trim() : ''
@@ -776,6 +782,13 @@ function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined
   const expiryMs = parsePublicFormExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
   if (expiryMs !== null && Date.now() >= expiryMs) return false
   return true
+}
+
+function canManageFormShareForSheet(
+  capabilities: { canManageViews: boolean },
+  sheetId: string,
+): boolean {
+  return capabilities.canManageViews && !isElearningProjectionSheetIdCandidate(sheetId)
 }
 
 async function loadPublicFormAllowedSubjectSummaries(
@@ -2119,27 +2132,18 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   return msg.includes(`relation "${tableName}" does not exist`)
 }
 
-const OPTIONAL_PERMISSION_SUBJECT_HYDRATION_COLUMN_ERROR_HINTS = [
-  'column r.description does not exist',
-  'column "r"."description" does not exist',
-  'column roles.description does not exist',
-  'column "roles"."description" does not exist',
-  'column g.name does not exist',
-  'column g.description does not exist',
-  'column "g"."name" does not exist',
-  'column "g"."description" does not exist',
-  'column platform_member_groups.name does not exist',
-  'column platform_member_groups.description does not exist',
-  'column "platform_member_groups"."name" does not exist',
-  'column "platform_member_groups"."description" does not exist',
-]
-
+// 权限主体水合的可选目录降级:只针对 platform_member_groups(成员组目录)。
+// roles 一律不参与 —— roles 表没有 description 列,主查询也已不再引用它。
+// 判定以 SQLSTATE 为主:42P01 缺表 / 42703 缺列,message 只用来核对标识符,
+// 这样中文 locale(222 测试机 lc_messages=Chinese)下也不会漏判。
 function isOptionalPermissionSubjectHydrationError(err: unknown): boolean {
   if (isUndefinedTableError(err, 'platform_member_groups')) return true
-  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
-  if (code !== '42703') return false
-  const msg = typeof (err as any)?.message === 'string' ? (err as any).message.toLowerCase() : ''
-  return OPTIONAL_PERMISSION_SUBJECT_HYDRATION_COLUMN_ERROR_HINTS.some((hint) => msg.includes(hint))
+  return (
+    isUndefinedColumnError(err, 'g.name') ||
+    isUndefinedColumnError(err, 'g.description') ||
+    isUndefinedColumnError(err, 'platform_member_groups.name') ||
+    isUndefinedColumnError(err, 'platform_member_groups.description')
+  )
 }
 
 function mapFieldType(type: string): UniverMetaField['type'] {
@@ -4249,8 +4253,19 @@ function toDashboardMetricNumber(value: unknown): number | null {
 
 function getDbNotReadyMessage(err: unknown): string | null {
   const msg = err instanceof Error ? err.message : String(err ?? '')
-  const relationMissing = msg.includes('relation') && msg.includes('does not exist')
-  const columnMissing = msg.includes('column') && msg.includes('does not exist')
+  // SQLSTATE 为主信号:42P01 缺表 / 42703 缺列。中文 locale 下 PG 的散文被翻译成
+  // 「关系 "x" 不存在」/「字段 x 不存在」,英文整句匹配会漏判 → 原来会退化成 500。
+  // 只有在错误完全没有 code 时(手工构造的错误)才回落到散文,并同时认中文译文。
+  const code = typeof (err as { code?: unknown } | null | undefined)?.code === 'string'
+    ? (err as { code: string }).code
+    : null
+  const relationMissing = code !== null
+    ? code === '42P01'
+    : (msg.includes('relation') && msg.includes('does not exist')) || (msg.includes('关系') && msg.includes('不存在'))
+  const columnMissing = code !== null
+    ? code === '42703'
+    : (msg.includes('column') && msg.includes('does not exist'))
+      || ((msg.includes('字段') || msg.includes('列')) && msg.includes('不存在'))
   if (!relationMissing && !columnMissing) return null
 
   if (
@@ -4430,6 +4445,19 @@ const DISPLAY_RENAME_FORBIDDEN_MESSAGE =
 
 const SHEET_DELETE_FORBIDDEN_MESSAGE =
   'Deleting or restoring a sheet requires whole-sheet authority: an admin role, the multitable:manage-schema permission, or a sheet-scoped admin grant on this sheet. multitable:write — global or sheet-scoped — is not sufficient.'
+
+const ELEARNING_PROJECTION_IDENTITY_FORBIDDEN_MESSAGE =
+  'E-learning statistics projection identities are system-managed read models.'
+
+function sendElearningProjectionIdentityForbidden(res: Response) {
+  return res.status(403).json({
+    ok: false,
+    error: {
+      code: 'FORBIDDEN',
+      message: ELEARNING_PROJECTION_IDENTITY_FORBIDDEN_MESSAGE,
+    },
+  })
+}
 
 /**
  * Authority to DESTROY or RESURRECT a whole sheet.
@@ -7165,6 +7193,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     const baseId = parsed.data.id ?? buildId('base').slice(0, 50)
     const ownerId = parsed.data.ownerId ?? req.user?.id?.toString() ?? null
+    if (isElearningProjectionBaseIdCandidate(baseId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
 
     try {
       const pool = poolManager.get()
@@ -7208,6 +7239,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const baseId = typeof req.params.baseId === 'string' ? req.params.baseId.trim() : ''
     if (!baseId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'baseId is required' } })
+    }
+    if (isElearningProjectionBaseIdCandidate(baseId)) {
+      return sendElearningProjectionIdentityForbidden(res)
     }
     const parsed = parseDisplayRenamePayload(req.body)
     if (!parsed.ok) return sendInvalidDisplayName(res)
@@ -8138,6 +8172,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!capabilities.canManageViews) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
+      // roles 表从 zzzz20260208100000_create_roles_table 起就只有 id/name/created_at/updated_at
+      // (后续唯一的 ALTER 只加了 approval_usable),从来没有 description 列。以前主查询选
+      // r.description,每次都必然抛 42703 走降级分支,连带把 platform_member_groups JOIN 也丢了,
+      // 成员组主体因此只能显示裸 UUID。这里直接选 NULL::text,降级分支只留给成员组目录缺失。
       let result: { rows: any[] }
       try {
         result = await pool.query(
@@ -8153,7 +8191,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               g.name AS group_name,
               g.description AS group_description
            FROM meta_view_permissions vp
@@ -8354,6 +8392,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
+      // roles 表从 zzzz20260208100000_create_roles_table 起就只有 id/name/created_at/updated_at
+      // (后续唯一的 ALTER 只加了 approval_usable),从来没有 description 列。以前主查询选
+      // r.description,每次都必然抛 42703 走降级分支,连带把 platform_member_groups JOIN 也丢了,
+      // 成员组主体因此只能显示裸 UUID。这里直接选 NULL::text,降级分支只留给成员组目录缺失。
       let result: { rows: any[] }
       try {
         result = await pool.query(
@@ -8370,7 +8412,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               g.name AS group_name,
               g.description AS group_description
            FROM field_permissions fp
@@ -8631,6 +8673,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
 
+      // roles 表从 zzzz20260208100000_create_roles_table 起就只有 id/name/created_at/updated_at
+      // (后续唯一的 ALTER 只加了 approval_usable),从来没有 description 列。以前主查询选
+      // r.description,每次都必然抛 42703 走降级分支,连带把 platform_member_groups JOIN 也丢了,
+      // 成员组主体因此只能显示裸 UUID。这里直接选 NULL::text,降级分支只留给成员组目录缺失。
       let result: { rows: any[] }
       try {
         result = await pool.query(
@@ -8647,7 +8693,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               g.name AS group_name,
               g.description AS group_description
            FROM record_permissions rp
@@ -13311,7 +13357,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const view: UniverMetaViewConfig = {
@@ -13378,7 +13424,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
@@ -13586,7 +13632,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const beforeView = viewConfigSnapshotFromRow(row)
@@ -13682,7 +13728,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
-      if (!capabilities.canManageViews) return sendForbidden(res)
+      if (!canManageFormShareForSheet(capabilities, sheetId)) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
       const candidates = (await listSheetPermissionCandidates(pool.query.bind(pool), sheetId, { q, limit }))
@@ -13912,6 +13958,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     if (!sheetId || typeof sheetId !== 'string') {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
+    if (isElearningProjectionSheetIdCandidate(sheetId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
 
     try {
       const pool = poolManager.get()
@@ -13964,6 +14013,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
+    }
+    if (isElearningProjectionSheetIdCandidate(sheetId)) {
+      return sendElearningProjectionIdentityForbidden(res)
     }
 
     try {
@@ -14049,6 +14101,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     if (!sheetId) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     }
+    if (isElearningProjectionSheetIdCandidate(sheetId)) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
     const parsed = parseDisplayRenamePayload(req.body)
     if (!parsed.ok) return sendInvalidDisplayName(res)
     const hygieneRefusal = sendDisplayNameHygieneRefusal(res, parsed.name)
@@ -14132,6 +14187,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const description = parsed.data.description ?? null
     const requestedBaseId = parsed.data.baseId?.trim()
     const seed = parsed.data.seed === true
+    if (
+      isElearningProjectionSheetIdCandidate(sheetId)
+      || (requestedBaseId !== undefined && isElearningProjectionBaseIdCandidate(requestedBaseId))
+    ) {
+      return sendElearningProjectionIdentityForbidden(res)
+    }
 
     try {
       const pool = poolManager.get()

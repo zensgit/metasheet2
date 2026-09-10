@@ -25,17 +25,26 @@
 //   M-04 ALIGNMENT, both directions, per actor: rendered-capability set == answered-route set
 //   M-05 the degenerate grant `stock-prep:operate` WITHOUT `stock-prep:read` confers NOTHING on
 //        either side — the conjunction is what makes M-04 hold for every subset, not just tidy ones
-//   M-06 reconcile and ensure did NOT move: both still refuse every stock-prep code holder
+//   M-06 IN THIS MANIFEST, reconcile and ensure did NOT move: both still refuse every stock-prep
+//        code holder through the confirmation-queue control set. (The reconcile ROUTE gained a
+//        second, additive tier under the operator pull split — round-2 C13, see M-10 — but that is
+//        a different request shape than the one this manifest governs.)
 //   M-07 the gate refuses BEFORE any host work (no provisioning/records call on a refused request)
 //   M-08 every `stock-prep:*` token appearing in a requireAccess() call in http-routes.cjs is a
 //        member of the frozen vocabulary, and every manifest route is really registered
 //   M-09 the value-entry read is on OPERATE, not READ: a read-only actor is refused it, and the
 //        values-free queue stays readable to them (the deliberate split, pinned)
 //   M-10 项目接入 + THE OPERATOR PULL SPLIT: the four table-action routes the project-sync entry
-//        drives keep their LEGACY gates; dry-run and apply additionally admit the stock-prep operator
-//        tier for ONE frozen action id; reconcile and mvp-persist did not move and refuse it; the
-//        split is not a wildcard over the table-action namespace; and every refusal still costs no
-//        host work
+//        drives keep their LEGACY gates; dry-run, apply and reconcile additionally admit the
+//        stock-prep operator tier for ONE frozen action id (reconcile joined in round-2 C13); only
+//        mvp-persist did not move and still refuses it; the split is not a wildcard over the
+//        table-action namespace; and every refusal still costs no host work
+//   M-11 W4 THE TENANT-CLAIM HARD DOOR, over the whole manifest: with
+//        MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED armed, the capabilities whose tenancy the shared
+//        helpers decide refuse a CARRIED tenant (403 OPERATOR_SCOPE_TENANT_REQUIRED, zero host work,
+//        zero audit rows), the capabilities already on the host-vouched operator scope are unchanged,
+//        and the DIFFERENCE between armed and disarmed is exactly that pinned split — which is also
+//        the F3 witness, since converting the confirm write moved it from one side to the other
 //
 // Hermetic: no DB, no network. Every service the route module requires that these routes must NOT
 // touch is stubbed to throw.
@@ -50,16 +59,23 @@ const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const {
   PLATFORM_ADMIN_GATE,
   STOCK_PREP_ADMIN,
+  STOCK_PREP_LANDING_KEYS,
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
   STOCK_PREP_PERMISSION_DESCRIPTORS,
+  STOCK_PREP_RAIL_GATES,
+  STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+  STOCK_PREP_RAIL_GATE_ROUTE,
+  STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
   STOCK_PREP_WORKBENCH_CAPABILITIES,
   grantedStockPrepCapabilities,
   requireAccessGateExpressionsInSource,
   satisfiesStockPrepAccess,
+  satisfiesStockPrepRailGate,
   stockPrepGateTokensInSource,
+  stockPrepWorkbenchLandingKey,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const {
   OBJECT_ID,
@@ -150,7 +166,17 @@ function pendingRow() {
   return row
 }
 
-function mount() {
+// `tenantPrincipalDirectory` is a PARAMETER because "the host cannot vouch" is a real deployment
+// state with its own fail-closed answer (501), and a suite that could only mount the vouching case
+// could never tell a route that requires the seam from one that merely happens to have it.
+// `ledgerReadFails` is the "multitable is down" deployment state, and it exists for exactly one
+// assertion: 对账/确认的审计行带项目号 inserted a ledger READ ahead of the confirm's intent audit
+// append, and a read that could take the append down with it would turn today's "audit row + 5xx"
+// into "no audit row + 5xx" — the very invariant the append's placement protects.
+function mount({
+  tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } },
+  ledgerReadFails = false,
+} = {}) {
   const routes = new Map()
   const provisioning = {
     ...makeFakeProvisioning({
@@ -189,6 +215,9 @@ function mount() {
       if (typeof value !== 'function') return value
       return (...args) => {
         hostCalls += 1
+        if (ledgerReadFails && prop === 'queryRecords') {
+          throw new Error('records service unavailable')
+        }
         return value.apply(target, args)
       }
     },
@@ -219,11 +248,7 @@ function mount() {
   // project-directory route reaches its READ for a permitted actor — otherwise every 'pass' cell for
   // that capability would be a 501 for a reason unrelated to the permission gate, and the matrix
   // would be measuring the wrong thing. The gate cells are unaffected: they refuse before this.
-  services.tenantPrincipalDirectory = {
-    async verifyTenantMembership() {
-      return { member: true }
-    },
-  }
+  if (tenantPrincipalDirectory) services.tenantPrincipalDirectory = tenantPrincipalDirectory
   services.stockPreparationConfirmationReconcileLease = {
     async acquire() {
       return { leaseId: 'lease_1' }
@@ -260,7 +285,14 @@ async function call(routes, method, routePath, req = {}) {
   const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
   assert.ok(handler, `route ${method} ${routePath} is registered`)
   const res = createResponse()
-  await handler({ user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }, res)
+  // `authenticatedTenantId` is the host's VERIFIED token claim, and it is set ONLY when a case asks
+  // for one. Every actor above therefore models the deployment this plugin actually ships to: tokens
+  // with no tenant claim, whose `user.tenantId` the auth middleware filled from the `x-tenant-id`
+  // REQUEST HEADER. That is not a convenience of the harness — it is the condition under which the
+  // tenancy assertions below mean anything.
+  const request = { user: req.user, body: req.body || {}, query: req.query || {}, params: req.params || {} }
+  if (req.authenticatedTenantId !== undefined) request.authenticatedTenantId = req.authenticatedTenantId
+  await handler(request, res)
   assert.notEqual(res.body, undefined, `${method} ${routePath} produced a body`)
   return res
 }
@@ -316,10 +348,10 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   'confirmationQueue.projectBoard': () => ({ params: { projectNo: PROJECT_NO } }),
 })
 
-async function callCapability(routes, capability, user) {
+async function callCapability(routes, capability, user, extra = {}) {
   const build = REQUEST_BY_CAPABILITY[capability.capability]
   assert.ok(build, `capability ${capability.capability} has a request shape`)
-  return call(routes, capability.method, capability.path, { ...build(), user })
+  return call(routes, capability.method, capability.path, { ...build(), user, ...extra })
 }
 
 /** The capability ids the BACK END actually answers for this user (i.e. does not refuse at the gate). */
@@ -537,6 +569,118 @@ async function authorizedOperatorGetsRealResponses() {
     // Attributable: the customer operator's own principal is stamped, exactly as an admin's was.
     assert.equal(auditAppends.length, 1)
     assert.equal(auditAppends[0].actor, OPERATOR_CONFIRM.id)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 对账/确认的审计行带项目号 — CONFIRM HALF
+// ---------------------------------------------------------------------------
+//
+// The confirm request carries a decisionId and NO projectNo, so the project handle on its audit row
+// can only come from the ledger row that decisionId names. That lookup was inserted ahead of the
+// intent append — the one place in this handler where an added read is dangerous — so these cases
+// are as much about what did NOT change as about the column that did:
+//
+//   (a) the happy path fills `project_id` from the LEDGER, not from anything the caller said;
+//   (b) an unknown decisionId leaves it NULL and still gets its original 404, with the intent row
+//       still on the trail (the "a malformed request still lands an audit row" invariant);
+//   (c) a ledger read that FAILS OUTRIGHT leaves it NULL and still lands the intent row FIRST —
+//       "audit row + error", never "no audit row + error".
+//
+// In all three the row stays values-free in every other respect: no resolvedValue, no notes, and no
+// second audit row (the vocabulary and the append count are untouched by this change).
+async function theConfirmAuditRowCarriesTheProjectFromTheLedger() {
+  // (a) THE HAPPY PATH. Note what the request body does not contain: a projectNo.
+  {
+    const { routes, auditAppends, hostCallCount } = mount()
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(res.statusCode, 200, `confirm projectId: the confirm still succeeds, got ${JSON.stringify(res.body)}`)
+    // THE COST, PINNED. The soft lookup is a SECOND trip to the same ledger row
+    // `confirmConfirmationDecision` reads a moment later: one `findObjectSheet` + one scoped
+    // `queryRecords` on top of the four calls this confirm made before. 4 -> 7 measured on this
+    // harness, and written down here so the number cannot drift silently — a route that fills one
+    // nullable column must not quietly grow a third or fourth ledger round trip.
+    //
+    // A TRIPWIRE, NOT A CONTRACT: if a legitimate change moves it, move the number and say so in the
+    // PR. If it moves and nobody noticed, that is exactly what this line is for.
+    assert.equal(hostCallCount(), 7, 'confirm projectId: the soft lookup costs exactly one extra sheet lookup + one query')
+
+    assert.equal(auditAppends.length, 1, 'confirm projectId: still exactly ONE audit row — no second row was added')
+    const [row] = auditAppends
+    assert.equal(row.projectId, PROJECT_NO, 'confirm projectId: taken from the ledger row the decisionId resolves to')
+    assert.equal(row.action, 'exception_resolve', 'confirm projectId: no new audit action')
+    assert.equal(row.mode, 'confirmation_decision_requested', 'confirm projectId: no new mode')
+    assert.equal(row.subjectId, DECISION_ID)
+    assert.deepEqual(
+      row.detail,
+      { operation: 'confirmation_decision_confirm', resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS },
+      'confirm projectId: detail is untouched — enum + fixed token, no entered value and no notes',
+    )
+  }
+
+  // (b) AN UNKNOWN decisionId. The soft lookup names no row, so the column stays NULL — and the
+  // request keeps the module's own 404 rather than acquiring a new failure mode from the lookup.
+  {
+    const { routes, auditAppends } = mount()
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: 'decision_that_does_not_exist',
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(res.statusCode, 404, `confirm projectId: an unknown decision still 404s, got ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.code, 'CONFIRMATION_DECISION_NOT_FOUND', JSON.stringify(res.body))
+    assert.equal(auditAppends.length, 1, 'confirm projectId: the intent row still lands for a request that then fails')
+    assert.equal(auditAppends[0].projectId, null, 'confirm projectId: NULL when the lookup names no single row')
+    assert.equal(auditAppends[0].subjectId, 'decision_that_does_not_exist')
+  }
+
+  // (c) THE LEDGER READ ITSELF FAILS. This is the case the lookup's placement makes dangerous, and
+  // the reason it is wrapped: the append must still be the FIRST thing that happens.
+  {
+    const { routes, auditAppends } = mount({ ledgerReadFails: true })
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(res.statusCode, 500, `confirm projectId: a dead records service still fails the request, got ${JSON.stringify(res.body)}`)
+    // The failure the CALLER sees is the downstream read's, verbatim — the soft lookup contributed
+    // no error of its own, which is the difference between "swallowed" and "hidden".
+    assert.equal(res.body.error.message, 'records service unavailable', JSON.stringify(res.body))
+    assert.equal(auditAppends.length, 1, 'confirm projectId: …and the intent row is STILL on the trail, which is the whole point')
+    assert.equal(auditAppends[0].projectId, null, 'confirm projectId: a failed lookup fills nothing rather than blocking')
+    assert.equal(auditAppends[0].actor, OPERATOR_CONFIRM.id, 'confirm projectId: the principal is stamped either way')
+  }
+
+  // (d) A REQUEST WITH NO decisionId AT ALL. No lookup is attempted, the intent row still lands
+  // (subjectId null, projectId null), and the module's own named validation error reaches the caller.
+  {
+    const { routes, auditAppends } = mount()
+    const res = await call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: { inputFingerprint: FINGERPRINT, resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS },
+    })
+    assert.equal(res.statusCode, 422, `confirm projectId: a decisionId-less confirm still fails, got ${JSON.stringify(res.body)}`)
+    // Pinned to the MODULE's own named error, not just "some 4xx": the point of skipping the lookup
+    // when there is no decisionId is that the caller keeps exactly the answer main gave it.
+    assert.equal(res.body.error.code, 'CONFIRMATION_DECISION_INPUT_INVALID', JSON.stringify(res.body))
+    assert.equal(res.body.error.details.field, 'decisionId', JSON.stringify(res.body))
+    assert.equal(auditAppends.length, 1, 'confirm projectId: the malformed request still lands its audit row')
+    assert.equal(auditAppends[0].projectId, null)
+    assert.equal(auditAppends[0].subjectId, null)
   }
 }
 
@@ -905,20 +1049,23 @@ async function valueEntryIsOperateNotRead() {
  *
  * WHAT THE OWNER THEN CHANGED, AND WHAT THEY DID NOT. 项目备料页 carries a ruling that a floor
  * operator may SELF-SERVE the pull: without it the page opens on a project whose BOM nobody on the
- * floor can bring in, and 「找平台管理员」 is not an answer at 07:00 on a shop floor. Two of the four
- * routes therefore gained a SECOND admitted tier. Two did not — and the pair that did not is exactly
- * the pair R-11(b) names as owner-level. So this block pins the SPLIT rather than the old uniform
- * refusal. Same job, sharper claim:
+ * floor can bring in, and 「找平台管理员」 is not an answer at 07:00 on a shop floor. Round-1 gave
+ * dry-run and apply a SECOND admitted tier; round-2 (decision C13) additionally moved reconcile,
+ * because leaving it admin-only put an operator whose plan had human-confirm rows into a closed
+ * loop. mvp-persist alone did not move — the one route R-11(b) still names as owner-level. So this
+ * block pins the SPLIT rather than the old uniform refusal. Same job, sharper claim:
  *
- *   M-10a the four routes keep their LEGACY gates unchanged, read out of the SOURCE. dry-run and
- *         apply reach them through `requireTableActionAccess`, which consults the operator tier ONLY
- *         after the legacy gate has already refused — so a gate quietly relaxed the other way (a bare
- *         `requireAccess(req, STOCK_PREP_OPERATE)`, which would widen these GENERIC routes to every
- *         table action on the deployment) still reddens here.
- *   M-10b THE TWO THAT STAYED, STAYED. The operator tier is refused at the gate on reconcile (a
- *         SOURCE READ that consumes a B2a claim when armed) and on mvp-persist, and neither handler
- *         may even mention the split helper. Everything below the operator tier is still refused on
- *         all four — including an operate-WITHOUT-read grant, because the tier is a CONJUNCTION.
+ *   M-10a the four routes keep their LEGACY gates unchanged, read out of the SOURCE. dry-run, apply
+ *         and reconcile reach them through `requireTableActionAccess`, which consults the operator
+ *         tier ONLY after the legacy gate has already refused — so a gate quietly relaxed the other
+ *         way (a bare `requireAccess(req, STOCK_PREP_OPERATE)`, which would widen these GENERIC
+ *         routes to every table action on the deployment) still reddens here.
+ *   M-10b THE ONE THAT STAYED, STAYED. The operator tier is refused at the gate on mvp-persist alone,
+ *         and its handler may not even mention the split helper. Everything below the operator tier
+ *         is still refused on all four — including an operate-WITHOUT-read grant, because the tier is
+ *         a CONJUNCTION. (Reconcile's manifest-rendered capability — the confirmation-queue admin
+ *         button, a SOURCE READ that consumes a B2a claim when armed — is a separate request shape
+ *         governed by STOCK_PREP_WORKBENCH_CAPABILITIES and did not move; see M-06.)
  *   M-10c THE SPLIT IS SCOPED TO ONE ACTION ID. The same operator on any other actionId is refused
  *         on all four: the widening is not a wildcard over the table-action namespace.
  *   M-10d and every refusal still costs nothing — no provisioning or records call is made on the way
@@ -963,10 +1110,10 @@ const NON_STOCK_PREP_ACTION_ID = 'k3.material.pull.v1'
 function projectSyncGatesAreUnchanged() {
   for (const route of PROJECT_SYNC_ROUTES) {
     // The gate is the FIRST gate call in the handler body. Matching on the handler name keeps the
-    // assertion attached to the route rather than to a line number. The two split routes name their
-    // legacy token as the third argument of `requireTableActionAccess`; the two that stayed name it
-    // as the second argument of `requireAccess`. Either way the TOKEN must be the one the route has
-    // always used.
+    // assertion attached to the route rather than to a line number. The three split routes name
+    // their legacy token as the third argument of `requireTableActionAccess`; the one that stayed
+    // names it as the second argument of `requireAccess`. Either way the TOKEN must be the one the
+    // route has always used.
     const pattern = route.operatorMayRun
       ? new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?await requireTableActionAccess\\(req, [A-Za-z]+, '([a-z]+)'`)
       : new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}?requireAccess\\(req, '([a-z]+)'\\)`)
@@ -983,7 +1130,7 @@ function projectSyncGatesAreUnchanged() {
       `M-10a: ${route.path} is registered in the route table`,
     )
   }
-  // The two that stayed must not have acquired the split helper at all.
+  // The one that stayed (mvp-persist) must not have acquired the split helper at all.
   for (const route of PROJECT_SYNC_ROUTES.filter((entry) => !entry.operatorMayRun)) {
     const body = new RegExp(`async ${route.handler}\\(req, res\\) \\{[\\s\\S]{0,400}`).exec(HTTP_ROUTES_SOURCE)
     assert.ok(body, `M-10b: ${route.handler} body is readable`)
@@ -1056,9 +1203,387 @@ async function projectSyncRefusesTheTiersItAlwaysRefused() {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// M-11 — W4: THE TENANT-CLAIM HARD DOOR, ACROSS THE WHOLE MANIFEST
+// ---------------------------------------------------------------------------
+//
+// NUMBERING: M-09 and M-10 are taken above, so this is M-11.
+//
+// THE CONDITION EVERY OTHER ASSERTION IN THIS FILE RUNS UNDER. `call()` sets no
+// `authenticatedTenantId`, i.e. every actor in this suite models a token with NO tenant claim, whose
+// `user.tenantId` the host's auth middleware filled from the `x-tenant-id` REQUEST HEADER. That is
+// the real 222 deployment, and it is the hole W4 closes: on such a deployment the tenant a route acts
+// under is a value the caller wrote.
+//
+// WHAT THIS PINS, AND THE PART THAT IS NOT A SLOGAN. "Arming the flag refuses everything" is not
+// true and must not be asserted, because it would be asserting something the code does not do. The
+// manifest splits in two, and the SPLIT is the interesting fact:
+//
+//   * The capabilities whose tenancy runs through the shared helpers (`resolveTenantId`,
+//     `resolveAuthUserTenantId`, `requireTableActionAccess`'s legacy branch) are refused once the
+//     door is armed, with OPERATOR_SCOPE_TENANT_REQUIRED, before any host work and before any audit
+//     row. These are the ones a header could steer today.
+//   * The capabilities already on `resolveOperatorValueScope` are UNCHANGED by the flag, because the
+//     scope already answers the question the door asks — it prefers the verified claim, refuses a
+//     contradicting carrier, refuses a tenantless principal, and makes the host vouch for the
+//     pairing. A claimless principal with a tenant of its own and a vouching host is admitted there
+//     BY DESIGN, and the flag must not quietly change that: if it did, the door would be shadowing
+//     the scope instead of backing it.
+//
+// The membership of those two sets is written out, not derived, so moving a route from one to the
+// other is a visible edit here. That is also what makes this block the F3 witness: before this PR
+// `confirmationQueue.confirm` derived its tenant with `resolveAuthUserTenantId` and belonged in the
+// FIRST set; converting it to the operator scope moved it to the second, and the move cannot happen
+// silently.
+const TENANT_CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+
+async function withTenantClaimFlag(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, TENANT_CLAIM_FLAG)
+  const previous = process.env[TENANT_CLAIM_FLAG]
+  if (value === null) delete process.env[TENANT_CLAIM_FLAG]
+  else process.env[TENANT_CLAIM_FLAG] = value
+  try {
+    return await fn()
+  } finally {
+    if (had) process.env[TENANT_CLAIM_FLAG] = previous
+    else delete process.env[TENANT_CLAIM_FLAG]
+  }
+}
+
+/** The capabilities whose tenancy the shared helpers decide — the ones the door closes. */
+const TENANT_CLAIM_DOOR_CLOSES = Object.freeze([
+  'confirmationQueue.readiness',   // resolveTenantId
+  'confirmationQueue.list',        // resolveTenantId
+  'confirmationQueue.ensure',      // resolveAuthUserTenantId
+  'confirmationQueue.reconcile',   // requireTableActionAccess, legacy branch
+])
+
+/** The capabilities the host-vouched operator scope already decides — the door adds nothing. */
+const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
+  'confirmationQueue.valueEntry',
+  // F3, this PR. It was in the list ABOVE until now.
+  'confirmationQueue.confirm',
+  'confirmationQueue.export',
+  'confirmationQueue.projectDirectory',
+  'confirmationQueue.projectBoard',
+  'handoff.read',
+  'handoff.advance',
+])
+
+function outcomeOf(res) {
+  return `${res.statusCode}:${(res.body && res.body.error && res.body.error.code) || 'ok'}`
+}
+
+async function theTenantClaimDoorClosesTheHelperPlaneAndOnlyThat() {
+  // Anti-vacuity: the two pinned sets must together be EXACTLY the manifest. A capability added to
+  // the workbench and forgotten here would otherwise be asserted about by neither half.
+  assert.deepEqual(
+    [...TENANT_CLAIM_DOOR_CLOSES, ...TENANT_CLAIM_DOOR_LEAVES_ALONE].sort(),
+    STOCK_PREP_WORKBENCH_CAPABILITIES.map((capability) => capability.capability).sort(),
+    'M-11: every workbench capability must be on exactly one side of the door',
+  )
+
+  // THE ACTOR: a platform admin whose tenant was CARRIED, not proven — which is every admin on a
+  // claimless deployment, including the 222 ops runner before it learned `--tenant-id`.
+  const HEADER_FILLED_ADMIN = PLATFORM_ADMIN
+
+  const disarmed = new Map()
+  const armed = new Map()
+  for (const capability of STOCK_PREP_WORKBENCH_CAPABILITIES) {
+    await withTenantClaimFlag(null, async () => {
+      const { routes } = mount()
+      disarmed.set(capability.capability, outcomeOf(await callCapability(routes, capability, HEADER_FILLED_ADMIN)))
+    })
+    await withTenantClaimFlag('true', async () => {
+      // A fresh mount per call: confirm mutates the seeded row, and the audit assertion below must
+      // be about THIS request only.
+      const harness = mount()
+      const res = await callCapability(harness.routes, capability, HEADER_FILLED_ADMIN)
+      armed.set(capability.capability, outcomeOf(res))
+      if (TENANT_CLAIM_DOOR_CLOSES.includes(capability.capability)) {
+        assert.equal(
+          outcomeOf(res),
+          '403:OPERATOR_SCOPE_TENANT_REQUIRED',
+          `M-11: ${capability.capability} must refuse a tenant that was carried rather than proven`,
+        )
+        assert.equal(
+          harness.hostCallCount(),
+          0,
+          `M-11: ${capability.capability} must refuse BEFORE any host work — no sheet, no record`,
+        )
+        assert.deepEqual(
+          harness.auditAppends,
+          [],
+          `M-11: ${capability.capability} must write no audit row for a refused request`,
+        )
+      }
+    })
+  }
+
+  // The DIFFERENCE between the two runs is exactly the pinned set. Asserting the difference rather
+  // than each half separately is what makes "the flag changes nothing else" checkable: a route that
+  // started refusing as a side effect shows up here even though nobody wrote an expectation for it.
+  const changed = STOCK_PREP_WORKBENCH_CAPABILITIES
+    .map((capability) => capability.capability)
+    .filter((id) => disarmed.get(id) !== armed.get(id))
+    .sort()
+  assert.deepEqual(
+    changed,
+    [...TENANT_CLAIM_DOOR_CLOSES].sort(),
+    'M-11: arming the flag changes exactly the helper-plane capabilities and nothing else',
+  )
+  for (const id of TENANT_CLAIM_DOOR_LEAVES_ALONE) {
+    assert.equal(
+      disarmed.get(id),
+      armed.get(id),
+      `M-11: ${id} already proves its tenant through the host-vouched scope, so the door must not change it`,
+    )
+  }
+  // …and the four it closes really were OPEN before, or "the door closed them" would be a claim about
+  // a door that was never in front of anything.
+  for (const id of TENANT_CLAIM_DOOR_CLOSES) {
+    assert.notEqual(
+      disarmed.get(id),
+      '403:OPERATOR_SCOPE_TENANT_REQUIRED',
+      `M-11: ${id} admits this principal today — that is the hole, and it is why the flag exists`,
+    )
+  }
+}
+
+// ── F3, dynamically ──────────────────────────────────────────────────────────────────────────────
+// The confirm is the WRITE half of the value-entry read and kept `resolveAuthUserTenantId` when
+// #5445 converted its two siblings. These two witnesses are FLAG-INDEPENDENT: they are true with the
+// door shut, which is the point — F3 is a fix, not a staged narrowing.
+async function theConfirmWriteProvesItsTenantLikeItsSiblings() {
+  // (a) A header that CONTRADICTS the verified claim is refused. Before F3 this request confirmed a
+  // row in the header's tenant and stamped the header's tenant on the audit trail, with a 200.
+  {
+    const harness = mount()
+    const res = await call(harness.routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,               // user.tenantId === TENANT_ID, header-filled
+      authenticatedTenantId: 'tenant-other', // …and the VERIFIED claim says otherwise
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(outcomeOf(res), '403:OPERATOR_SCOPE_TENANT_CONTRADICTED', 'F3: a contradicted tenant cannot confirm')
+    assert.deepEqual(harness.auditAppends, [], 'F3: and the refusal precedes the audit append, so it leaves no trace claiming otherwise')
+    assert.equal(harness.hostCallCount(), 0, 'F3: nor does it touch the ledger')
+  }
+
+  // (b) A TENANTLESS platform admin — the principal the value face has refused since #5445 — is now
+  // refused the write too. It used to answer 400 TENANT_REQUIRED from `resolveAuthUserTenantId`,
+  // which was the right outcome for the wrong reason: a 400 says "you forgot something", and this is
+  // a 403 that says "there is no tenant whose queue is yours".
+  {
+    const harness = mount()
+    const res = await call(harness.routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: { id: 'u_tenantless_admin', roles: ['admin'], permissions: ['integration:admin'] },
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(outcomeOf(res), '403:OPERATOR_SCOPE_TENANT_REQUIRED', 'F3: a tenantless principal has no queue to confirm')
+    assert.deepEqual(harness.auditAppends, [], 'F3: and writes no audit row')
+  }
+
+  // (c) The host must vouch: no membership seam is a fail-CLOSED 501, exactly as on the sibling read.
+  {
+    const harness = mount({ tenantPrincipalDirectory: null })
+    const res = await call(harness.routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: OPERATOR_CONFIRM,
+      body: {
+        decisionId: DECISION_ID,
+        inputFingerprint: FINGERPRINT,
+        resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      },
+    })
+    assert.equal(outcomeOf(res), '501:OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE', 'F3: no seam, no write')
+    assert.deepEqual(harness.auditAppends, [], 'F3: and no audit row')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P1-1 — THE RAIL MANIFEST AND THE D2 LANDING (mirror half)
+// ---------------------------------------------------------------------------
+//
+// `/stock-prep`'s tab strip became a grouped rail, and the landing became a rule. Both live in this
+// module as data + one pure function so the browser half can be asserted byte-equal to them
+// (apps/web/tests/stockPrepPermissionMatrix.spec.ts F-09). This function is the server-side half of
+// that pair: it pins the vocabulary as frozen, the gate resolver as REFUSING an unknown token, and
+// the landing rule's three postures — including the one that matters, 「读不到」.
+function theRailVocabularyAndTheLandingRuleHold() {
+  // The manifest is frozen, values-free structure: group ids, view keys, gate tokens. No labels, no
+  // copy, no route paths — a rail item is not a capability and must not look like one.
+  assert.ok(Object.isFrozen(STOCK_PREP_RAIL_GROUPS), 'rail: the manifest is frozen')
+  const seenKeys = new Set()
+  for (const group of STOCK_PREP_RAIL_GROUPS) {
+    assert.ok(Object.isFrozen(group), `rail: group ${group.group} is frozen`)
+    assert.equal(typeof group.group, 'string')
+    for (const item of group.items) {
+      assert.equal(typeof item.key, 'string', 'rail: every item has a key')
+      assert.ok(!seenKeys.has(item.key), `rail: ${item.key} appears once`)
+      seenKeys.add(item.key)
+      assert.ok(STOCK_PREP_RAIL_GATES.includes(item.gate), `rail: ${item.key} names a known gate`)
+      assert.deepEqual(Object.keys(item).sort(), ['gate', 'key'], `rail: ${item.key} carries nothing else`)
+    }
+    for (const key of group.advanced || []) {
+      assert.ok(!seenKeys.has(key), `rail: ${key} appears once`)
+      seenKeys.add(key)
+    }
+    if (group.advanced && group.advanced.length > 0) {
+      assert.ok(STOCK_PREP_RAIL_GATES.includes(group.advancedGate), 'rail: 深度工具 names a known gate')
+    }
+  }
+  // 【工作】 — its composition and ORDER, item by item. P2-1 put 项目查询 between 项目备料 and
+  // 确认队列 (设计稿 §2.2 / §6.3), and the rail renders the manifest's order verbatim, so the order
+  // is a contract rather than a detail. Its gate is the OPERATOR tier: the panel reads the same U2
+  // directory union 今天要处理 reads plus the selected project's own board, and a `stock-prep:read`
+  // queue watcher must not be handed a page of project numbers.
+  const work = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'work')
+  assert.deepEqual(
+    work.items.map((item) => item.key),
+    ['home', 'project-board', 'project-query', 'confirmation-queue'],
+    'rail: 【工作】 lists 项目查询 between 项目备料 and 确认队列',
+  )
+  assert.deepEqual(
+    work.items.map((item) => item.gate),
+    [
+      STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+      STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+      STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
+      STOCK_PREP_RAIL_GATE_ROUTE,
+    ],
+    'rail: 项目查询 rides the operator tier, like the two items it sits beside',
+  )
+
+  // 不下线 — the seven legacy MVP keys are FOLDED into 深度工具, not removed, and they are still on
+  // the platform-admin gate they were always on.
+  const deploy = STOCK_PREP_RAIL_GROUPS.find((group) => group.group === 'deploy')
+  assert.equal(deploy.advancedGate, 'platform-admin', 'rail: 深度工具 stays platform-admin')
+  assert.deepEqual([...deploy.advanced].sort(), [
+    'bom-snapshot-diff',
+    'dashboard',
+    'exception-queue',
+    'material-mapping',
+    'prep-line',
+    'project-workspace',
+    'unit-conversion',
+  ], 'rail: all seven legacy MVP tabs are folded, none dropped')
+
+  // THE GATE RESOLVER. Per actor, per token, plus the refusal an unknown token must produce for
+  // EVERYONE — a mistyped gate must hide a group, never open one.
+  const cases = [
+    { name: 'anonymous', permissions: [], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'read', permissions: [STOCK_PREP_READ], expected: { route: true, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'orphan operate', permissions: [STOCK_PREP_OPERATE], expected: { route: false, 'operator-board': false, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'confirm', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE], expected: { route: true, 'operator-board': true, 'workbench-admin': false, 'platform-admin': false } },
+    { name: 'workbench admin', permissions: [STOCK_PREP_ADMIN], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': false } },
+    { name: 'platform admin', permissions: ['role:admin', 'integration:admin'], expected: { route: true, 'operator-board': true, 'workbench-admin': true, 'platform-admin': true } },
+  ]
+  for (const testCase of cases) {
+    for (const gate of STOCK_PREP_RAIL_GATES) {
+      assert.equal(
+        satisfiesStockPrepRailGate(testCase.permissions, gate),
+        testCase.expected[gate],
+        `rail gate: ${testCase.name} @ ${gate}`,
+      )
+    }
+    assert.equal(
+      satisfiesStockPrepRailGate(testCase.permissions, 'not-a-gate'),
+      false,
+      `rail gate: ${testCase.name} is refused an unknown token`,
+    )
+  }
+
+  // D2=A — THE LANDING RULE, all three postures.
+  assert.deepEqual([...STOCK_PREP_LANDING_KEYS], ['getting-started', 'ops', 'home', 'confirmation-queue'])
+  const admin = [STOCK_PREP_ADMIN]
+  assert.equal(stockPrepWorkbenchLandingKey(admin, true), 'ops', 'D2: 装完落总览')
+  assert.equal(stockPrepWorkbenchLandingKey(admin, false), 'getting-started', 'D2: 未装完落开始使用')
+  // THE ONE THAT MATTERS. An unreadable preflight is not a finished install, so it must never land
+  // on the health page — that would be the page telling an admin a deployment story nobody has.
+  assert.equal(stockPrepWorkbenchLandingKey(admin, null), 'getting-started', 'D2: 读不到也落开始使用')
+  assert.equal(stockPrepWorkbenchLandingKey(admin, undefined), 'getting-started', 'D2: absent is unreadable too')
+
+  // The operator tier lands on 今天要处理 and does not consult the deployment posture at all.
+  for (const posture of [true, false, null]) {
+    assert.equal(
+      stockPrepWorkbenchLandingKey([STOCK_PREP_READ, STOCK_PREP_OPERATE], posture),
+      'home',
+      `D2: 一线落 home @ ${String(posture)}`,
+    )
+    assert.equal(
+      stockPrepWorkbenchLandingKey([STOCK_PREP_READ], posture),
+      'confirmation-queue',
+      `D2: 只读档保持确认队列 @ ${String(posture)}`,
+    )
+    assert.equal(
+      stockPrepWorkbenchLandingKey([], posture),
+      'confirmation-queue',
+      `D2: no codes, no landing change @ ${String(posture)}`,
+    )
+  }
+
+  // A platform admin is caught by the workbench ceiling FIRST, which is what keeps this rule
+  // equivalent to the browser's (whose operator-landing fold excludes a platform admin explicitly).
+  assert.equal(stockPrepWorkbenchLandingKey(['role:admin'], true), 'ops')
+  assert.equal(stockPrepWorkbenchLandingKey(['role:admin'], null), 'getting-started')
+
+  // AND IT GRANTS NOTHING. The rail vocabulary is a layout contract; no route may consult it.
+  //
+  // THE SCAN IS THE WHOLE PLUGIN, not `http-routes.cjs` alone. Pinning one file made the guard's
+  // claim ("no route consults it") narrower than its wording: a helper, a middleware or a second
+  // route table importing `satisfiesStockPrepRailGate` would turn a LAYOUT decision into an
+  // AUTHORIZATION one — the thing this asserts cannot happen — with the pin still green. Two
+  // exclusions, both of them the point rather than holes in it: the module that DEFINES the
+  // vocabulary, and the tests (this file names all three tokens on nearly every line).
+  const RAIL_VOCABULARY_TOKENS = ['STOCK_PREP_RAIL_GROUPS', 'stockPrepWorkbenchLandingKey', 'satisfiesStockPrepRailGate']
+  const PLUGIN_ROOT = path.join(__dirname, '..')
+  const VOCABULARY_MODULE = path.join(PLUGIN_ROOT, 'lib', 'stock-preparation-workbench-access.cjs')
+  const scanned = []
+  const offenders = []
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        // `__tests__` states the vocabulary by name on purpose; `node_modules` is not ours.
+        if (entry.name === '__tests__' || entry.name === 'node_modules') continue
+        walk(full)
+        continue
+      }
+      if (!entry.name.endsWith('.cjs')) continue
+      if (path.resolve(full) === path.resolve(VOCABULARY_MODULE)) continue
+      scanned.push(full)
+      const source = fs.readFileSync(full, 'utf8')
+      for (const token of RAIL_VOCABULARY_TOKENS) {
+        if (source.includes(token)) offenders.push(`${path.relative(PLUGIN_ROOT, full)} :: ${token}`)
+      }
+    }
+  }
+  walk(PLUGIN_ROOT)
+  // The scan has to have LOOKED at something — an empty sweep would pass this vacuously, and
+  // http-routes.cjs is the file the guard has always been about.
+  assert.ok(scanned.length > 20, `rail: the vocabulary scan covered only ${scanned.length} files`)
+  assert.ok(
+    scanned.some((file) => path.basename(file) === 'http-routes.cjs'),
+    'rail: the vocabulary scan must still cover http-routes.cjs',
+  )
+  assert.deepEqual(
+    offenders,
+    [],
+    'rail: nothing in the plugin consults the rail vocabulary — it decides layout, never access',
+  )
+}
+
 async function main() {
   await matrixGoldenHolds()
   await authorizedOperatorGetsRealResponses()
+  await theConfirmAuditRowCarriesTheProjectFromTheLedger()
   await platformAdminLosesNothing()
   await nobodyGainsAnything()
   await visibleEqualsActionableForEveryActor()
@@ -1069,10 +1594,13 @@ async function main() {
   await refusedRequestsPerformNoHostWork()
   vocabularyIsFrozenAndRoutesAreRegistered()
   await valueEntryIsOperateNotRead()
+  await theTenantClaimDoorClosesTheHelperPlaneAndOnlyThat()
+  await theConfirmWriteProvesItsTenantLikeItsSiblings()
   // The RUNTIME refusal first: it is the claim that matters, and the source check below only
   // corroborates it. Running the source check first would let it short-circuit a real relaxation.
   await projectSyncRefusesTheTiersItAlwaysRefused()
   projectSyncGatesAreUnchanged()
+  theRailVocabularyAndTheLandingRuleHold()
   console.log('stock-preparation permission matrix (O2/R-11): all assertions passed')
 }
 

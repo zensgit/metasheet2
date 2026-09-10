@@ -51,6 +51,14 @@ import {
   isApprovalProjectionBaseId,
 } from './approval-projection-constants'
 import {
+  canAccessElearningProjectionBase,
+  canAccessElearningProjectionSheet,
+  loadElearningProjectionBaseOrg,
+  loadElearningProjectionSheetOrgMap,
+} from './elearning-projection-access'
+import { restrictElearningProjectionCapabilities } from './elearning-projection-constants'
+import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
+import {
   parseConditionalRules,
   parseConditionalRulesCached,
   evaluateRecordDenied,
@@ -216,19 +224,9 @@ export const PUBLIC_FORM_CAPABILITIES: MultitableCapabilities = {
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
-function isUndefinedTableError(err: unknown, tableName: string): boolean {
-  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
-  const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
-  if (code === '42P01') return msg.includes(tableName)
-  return msg.includes(`relation "${tableName}" does not exist`)
-}
-
-function isUndefinedColumnError(err: unknown, columnName: string): boolean {
-  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
-  const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
-  if (code === '42703') return msg.includes(columnName)
-  return msg.includes(`column "${columnName}" does not exist`)
-}
+// 缺表/缺列守卫统一到 utils/database-errors。有 code 时判据不变(42P01/42703 + message 提到
+// 该标识符),差别只在两处放宽:标识符比对会先去掉引号/空白(认 `column "g"."name"` 这种形态),
+// 以及无 code 的散文兜底同时认中文译文(「关系 x 不存在」/「字段 x 不存在」)。
 
 export function isSheetPermissionSubjectType(
   value: unknown,
@@ -1449,7 +1447,9 @@ export async function loadRecordCreatorMap(
       ]),
     )
   } catch (err) {
-    if (err instanceof Error && err.message.includes('column') && err.message.includes('created_by')) {
+    // 只对「meta_records 还没有 created_by 列」降级;散文匹配在中文 locale 下失效,
+    // 这里换成 SQLSTATE 主判的共享守卫(无 code 的英文错误仍走散文兜底)。
+    if (isUndefinedColumnError(err, 'created_by')) {
       return new Map()
     }
     throw err
@@ -1691,13 +1691,26 @@ export async function filterReadableSheetRowsForAccess<T extends { id: string }>
   const participantSheetIds = projectionSheetIds.size > 0
     ? await loadApprovalProjectionParticipantSheetIds(query, Array.from(projectionSheetIds), access.userId)
     : new Set<string>()
+  const elearningProjectionOrgBySheet = await loadElearningProjectionSheetOrgMap(
+    query,
+    sheetRows.map((row) => String(row.id)),
+  )
   return sheetRows.filter((row) =>
-    (!projectionSheetIds.has(String(row.id)) || participantSheetIds.has(String(row.id))) &&
-    canReadWithSheetGrant(
-      effectiveCapabilities,
-      scopeMap.get(String(row.id)),
-      access.isAdminRole,
-    ),
+    elearningProjectionOrgBySheet.has(String(row.id))
+      ? canAccessElearningProjectionSheet(
+          access,
+          String(row.id),
+          elearningProjectionOrgBySheet.get(String(row.id)) ?? null,
+        )
+      : (
+          (!projectionSheetIds.has(String(row.id)) || access.isAdminRole
+            || participantSheetIds.has(String(row.id)))
+          && canReadWithSheetGrant(
+            effectiveCapabilities,
+            scopeMap.get(String(row.id)),
+            access.isAdminRole,
+          )
+        ),
   )
 }
 
@@ -1774,6 +1787,18 @@ export async function resolveSheetCapabilitiesForAccess(
     const isParticipant = (await loadApprovalProjectionParticipantSheetIds(query, [sheetId], access.userId)).has(sheetId)
     capabilities = restrictApprovalProjectionCapabilitiesPerRow(capabilities, true, false, isParticipant)
   }
+  const elearningProjectionOrg = await loadElearningProjectionSheetOrgMap(query, [sheetId])
+  if (elearningProjectionOrg.has(sheetId)) {
+    capabilities = restrictElearningProjectionCapabilities(
+      capabilities,
+      true,
+      canAccessElearningProjectionSheet(
+        access,
+        sheetId,
+        elearningProjectionOrg.get(sheetId) ?? null,
+      ),
+    )
+  }
   return {
     access,
     capabilities,
@@ -1816,7 +1841,6 @@ export async function resolveReadableSheetIds(
   if (access.isAdminRole) {
     return new Set(uniqueSheetIds)
   }
-
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const scopeMap = await loadSheetPermissionScopeMap(query, uniqueSheetIds, access.userId)
   const readableSheetIds = new Set<string>()
@@ -1827,7 +1851,14 @@ export async function resolveReadableSheetIds(
   }
   // A: filter approval projection sheets out of a non-admin's readable/listing set (admins returned above).
   const projectionSheetIds = await loadApprovalProjectionSheetIds(query, Array.from(readableSheetIds))
-  for (const id of projectionSheetIds) readableSheetIds.delete(id)
+  if (!access.isAdminRole) {
+    for (const id of projectionSheetIds) readableSheetIds.delete(id)
+  }
+  const elearningProjectionOrgBySheet = await loadElearningProjectionSheetOrgMap(query, uniqueSheetIds)
+  for (const [sheetId, orgId] of elearningProjectionOrgBySheet) {
+    if (canAccessElearningProjectionSheet(access, sheetId, orgId)) readableSheetIds.add(sheetId)
+    else readableSheetIds.delete(sheetId)
+  }
   return readableSheetIds
 }
 
@@ -1870,6 +1901,15 @@ export async function resolveBaseReadable(
   const row = (res.rows as Array<{ owner_id: unknown }>)[0]
   if (!row) return false // missing / soft-deleted base → not readable, even for admin / grant
 
+  const elearningProjection = await loadElearningProjectionBaseOrg(query, normalizedBaseId)
+  if (elearningProjection.isProjection) {
+    return canAccessElearningProjectionBase(
+      access,
+      normalizedBaseId,
+      elearningProjection.orgId,
+    )
+  }
+
   if (access.isAdminRole) return true
   if (access.permissions.some((code) => BASE_READ_PERMISSION_CODES.has(code))) return true
 
@@ -1911,6 +1951,8 @@ export async function resolveBaseWritable(
   )
   const baseRow = (baseRes.rows as Array<{ owner_id: unknown }>)[0]
   if (!baseRow) return false // missing / soft-deleted target base → fail-closed (even for an admin)
+
+  if ((await loadElearningProjectionBaseOrg(query, normalizedBaseId)).isProjection) return false
 
   // Effective permission codes (user_permissions ∪ role_permissions), narrowed by namespace admission so
   // the write gate is never MORE permissive than the codebase's effective-permission resolution.

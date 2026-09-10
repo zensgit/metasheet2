@@ -10,9 +10,16 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 const buildScriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-build.sh')
 const verifyScriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-verify.sh')
 const packageWorkflowPath = path.join(repoRoot, '.github/workflows/multitable-onprem-package-build.yml')
+// The second, parallel lane that builds an on-prem package from a dispatch and
+// hands the resulting zip to a human as a downloadable artifact. It inlines
+// multitable-onprem-package-build.yml's build steps (its own header says so),
+// so the front-end base-path guards have to hold on both lanes or the weaker
+// one is the whole story.
+const mainVerifyWorkflowPath = path.join(repoRoot, '.github/workflows/stock-prep-main-package-verify.yml')
 const buildScript = fs.readFileSync(buildScriptPath, 'utf8')
 const verifyScript = fs.readFileSync(verifyScriptPath, 'utf8')
 const packageWorkflow = fs.readFileSync(packageWorkflowPath, 'utf8')
+const mainVerifyWorkflow = fs.readFileSync(mainVerifyWorkflowPath, 'utf8')
 
 test('on-prem verifier requires the superseded audit migration marker', () => {
   assert.match(
@@ -604,5 +611,381 @@ test('package build workflow runs this contract test and emits the paste-ready f
     workflow,
     /output\/releases\/multitable-onprem\/freeze-block\.txt/,
     'the freeze block must ship inside the uploaded artifact',
+  )
+})
+
+// --- shared scaffolding for the front-end base-path guard tests below ------
+// A guard step's "body" is its text up to the next `- name:` at step
+// indentation, so a keyword that happens to appear elsewhere in the file
+// cannot launder a deleted or gutted guard step.
+const nextStepBoundaryIn = (workflow, fromIdx) => {
+  const next = workflow.indexOf('\n      - name:', fromIdx + 1)
+  return next === -1 ? workflow.length : next
+}
+// The literal shell script a step runs, with the `run: |` header and any
+// trailing whitespace stripped -- the unit two lanes must agree on byte for
+// byte. Comparing whole step bodies instead would let YAML comments (which
+// are lane-specific prose) create false drift.
+const stepRunBody = (stepBody, label) => {
+  const marker = '\n        run: |\n'
+  const at = stepBody.indexOf(marker)
+  assert.ok(at > -1, `${label} must run an inline \`run: |\` script`)
+  return stepBody.slice(at + marker.length).replace(/\s+$/, '')
+}
+
+test('package build workflow validates and asserts the front-end base path before build, package, and release (r12-r16 white-screen guard)', () => {
+  // 2026-09-07 incident: dispatching this workflow from Git Bash with
+  // `-f base_path=/` let MSYS path conversion silently rewrite the bare '/'
+  // into a Windows path ('C:/Program Files/Git/'), which flowed unchecked
+  // into VITE_BASE_PATH. Five packages (r12-r16) shipped with every asset
+  // URL prefixed 'C:/Program Files/Git/assets/...' and sat broken a full day
+  // because nothing in this workflow ever looked at what it received. This
+  // test pins the three-guard fix: reject the input, then prove twice (once
+  // on the loose dist tree, once on the bytes actually inside the archive)
+  // that what was built matches what was validated -- all three BEFORE the
+  // package can reach a GitHub Release or the uploaded artifact.
+  const workflow = packageWorkflow.replace(/\r\n/g, '\n')
+
+  const checkoutStep = workflow.indexOf('- name: Checkout')
+  const validateStep = workflow.indexOf('- name: Validate base_path input')
+  const buildWebStep = workflow.indexOf('- name: Build web/backend dist')
+  const postBuildAssertStep = workflow.indexOf(
+    '- name: Assert built web dist references use the validated base path',
+  )
+  const buildPackageStep = workflow.indexOf('- name: Build on-prem package')
+  const postPackageAssertStep = workflow.indexOf(
+    '- name: Assert packaged web dist references use the validated base path',
+  )
+  const uploadStep = workflow.indexOf('- name: Upload package artifacts')
+  const releaseStep = workflow.indexOf('- name: Publish GitHub Release')
+
+  assert.ok(checkoutStep > -1, 'sanity: Checkout step should exist')
+  assert.ok(
+    validateStep > -1,
+    'GUARD 1 missing: the workflow must validate inputs.base_path (a new "Validate base_path input" step) before it can reach Vite',
+  )
+  assert.ok(
+    postBuildAssertStep > -1,
+    'GUARD 2 missing: the workflow must assert apps/web/dist/index.html asset references immediately after the web build',
+  )
+  assert.ok(
+    postPackageAssertStep > -1,
+    'GUARD 3 missing: the workflow must assert the packaged archive\'s index.html asset references after "Build on-prem package"',
+  )
+
+  // Keyword contracts, scoped to each guard step's own body (up to the next
+  // "- name:" step) so a keyword appearing elsewhere in the file cannot
+  // launder a deleted or gutted guard step.
+  const nextStepBoundary = (fromIdx) => nextStepBoundaryIn(workflow, fromIdx)
+  const validateBody = workflow.slice(validateStep, nextStepBoundary(validateStep))
+  const postBuildBody = workflow.slice(postBuildAssertStep, nextStepBoundary(postBuildAssertStep))
+  const postPackageBody = workflow.slice(postPackageAssertStep, nextStepBoundary(postPackageAssertStep))
+
+  assert.ok(
+    validateBody.includes('WEB_BASE_PATH'),
+    'GUARD 1 must normalize the validated value into WEB_BASE_PATH via GITHUB_ENV',
+  )
+  assert.ok(
+    validateBody.includes('^/([A-Za-z0-9._-]+/)*$'),
+    'GUARD 1 must pin the canonical base-path shape ^/([A-Za-z0-9._-]+/)*$',
+  )
+  assert.ok(
+    validateBody.includes('/../') && validateBody.includes('/./'),
+    "GUARD 1 must additionally reject '.' and '..' segments -- both are members of the [A-Za-z0-9._-] class, so the regex alone would let '/../' through",
+  )
+  assert.match(
+    workflow,
+    /VITE_BASE_PATH:\s*\$\{\{\s*env\.WEB_BASE_PATH\s*\}\}/,
+    'the web build step must consume the GUARD-1-validated WEB_BASE_PATH, never the raw inputs.base_path',
+  )
+  assert.ok(
+    !/VITE_BASE_PATH:\s*\$\{\{\s*inputs\.base_path\s*\}\}/.test(workflow),
+    'no step may feed Vite the raw inputs.base_path -- that is the exact line the r12-r16 incident came through',
+  )
+
+  // The guards' teeth, not just their names. A step that still says
+  // "assets/" but no longer exits non-zero is worse than no step at all, so
+  // pin the whole failing contract: the validated prefix, the empty-list
+  // rejection, and a real non-zero exit.
+  for (const [label, body] of [['GUARD 2', postBuildBody], ['GUARD 3', postPackageBody]]) {
+    assert.ok(
+      body.includes('${base}assets/'),
+      `${label} must build its expected prefix from the validated base, i.e. \`\${base}assets/\``,
+    )
+    assert.ok(
+      body.includes('jsRefs.length < 1'),
+      `${label} must treat an empty .js reference list as a failure, not a pass`,
+    )
+    assert.ok(
+      body.includes('process.exit(1)'),
+      `${label} must actually exit non-zero when the assertion fails`,
+    )
+    assert.ok(
+      body.includes('WEB_BASE_PATH:?'),
+      `${label} must fail closed with a named cause when GUARD 1 never ran and WEB_BASE_PATH is unset`,
+    )
+  }
+  assert.ok(
+    postPackageBody.includes('unzip -p'),
+    'GUARD 3 must read the packaged index.html out of the built zip with `unzip -p`, proving the bytes that would ship are the bytes that were asserted',
+  )
+
+  // GUARD 3's entire value rests on running GUARD 2's *same* assertion over
+  // the packaged bytes. The two node bodies are duplicated inline (a workflow
+  // step cannot import), so pin them byte-identical: whoever edits one is
+  // forced to edit the other.
+  const nodeBody = (body, label) => {
+    const m = body.match(/<<'NODE'\n([\s\S]*?)\n {10}NODE\n/)
+    assert.ok(m, `${label} must run its assertion as an inline node heredoc`)
+    return m[1]
+  }
+  assert.equal(
+    nodeBody(postBuildBody, 'GUARD 2'),
+    nodeBody(postPackageBody, 'GUARD 3'),
+    "GUARD 2 and GUARD 3 must run byte-identical assertion scripts (only the argv label differs) -- GUARD 3's whole point is that the packaged bytes clear the same bar as the built ones, and two hand-maintained copies drift",
+  )
+
+  // Neutered-but-present guards: `continue-on-error: true` or `if: false` on
+  // any of the three leaves every step name and keyword in place while the
+  // job stays green. Step-level keys sit at 8-space indentation; the shell
+  // and JS `if (` / `if [[` inside a run block are indented deeper, so this
+  // cannot false-positive on the guard logic itself.
+  for (const [label, body] of [
+    ['GUARD 1', validateBody],
+    ['GUARD 2', postBuildBody],
+    ['GUARD 3', postPackageBody],
+  ]) {
+    assert.ok(
+      !/\n {8}continue-on-error:/.test(body),
+      `${label} must not carry continue-on-error -- a guard that cannot fail the job is not a guard`,
+    )
+    assert.ok(
+      !/\n {8}if:/.test(body),
+      `${label} must not be conditional -- it has to run on every dispatch, from every shell, by every human`,
+    )
+  }
+
+  // Ordering: validate before the value can reach Vite; each build-then-
+  // assert pair stays adjacent; and every guard sits before both places a
+  // package can leave this job (upload artifact, GitHub Release).
+  assert.ok(
+    checkoutStep < validateStep,
+    'GUARD 1 must run after Checkout (it needs the repository) and therefore cannot be hoisted above it',
+  )
+  assert.ok(validateStep < buildWebStep, 'GUARD 1 must run before the web build consumes base_path')
+  assert.ok(
+    buildWebStep < postBuildAssertStep && postBuildAssertStep < buildPackageStep,
+    'GUARD 2 must run directly between the web build and the on-prem package build',
+  )
+  assert.ok(
+    buildPackageStep < postPackageAssertStep,
+    'GUARD 3 must run after "Build on-prem package" produced the archive',
+  )
+  assert.ok(uploadStep > -1 && releaseStep > -1, 'sanity: upload and release steps should still exist')
+  assert.ok(
+    postPackageAssertStep < uploadStep && postPackageAssertStep < releaseStep,
+    'GUARD 3 must run before the package can be uploaded as an artifact or published to a GitHub Release',
+  )
+})
+
+test('both packaging lanes carry the same front-end base-path guards, byte for byte (r12-r16 white-screen guard)', () => {
+  // A guard is only worth what the WEAKEST lane enforces. Two workflows build
+  // an on-prem package from a dispatched base_path and hand the result to a
+  // human: multitable-onprem-package-build.yml (the lane r12-r16 shipped out
+  // of) and stock-prep-main-package-verify.yml, which inlines its build steps,
+  // takes the same input, calls the same
+  // scripts/ops/multitable-onprem-package-build.sh, and uploads the resulting
+  // zip as a downloadable artifact. Guarding one and not the other would only
+  // move the incident one dispatch to the left -- "whoever dispatches it, from
+  // whatever shell, a white-screen package reds the run" has to be true on
+  // both. So this test holds each lane to the same bar and then pins their
+  // guard scripts byte-identical: whoever edits one is forced to edit the
+  // other, because two hand-maintained copies drift and the drifted one ships.
+  const lanes = [
+    ['multitable-onprem-package-build.yml', packageWorkflow],
+    ['stock-prep-main-package-verify.yml', mainVerifyWorkflow],
+  ]
+  const guardScripts = new Map()
+
+  for (const [lane, rawWorkflow] of lanes) {
+    const workflow = rawWorkflow.replace(/\r\n/g, '\n')
+    const checkoutStep = workflow.indexOf('- name: Checkout')
+    const validateStep = workflow.indexOf('- name: Validate base_path input')
+    const buildWebStep = workflow.indexOf('- name: Build web/backend dist')
+    const postBuildAssertStep = workflow.indexOf(
+      '- name: Assert built web dist references use the validated base path',
+    )
+    const buildPackageStep = workflow.indexOf('- name: Build on-prem package')
+    const postPackageAssertStep = workflow.indexOf(
+      '- name: Assert packaged web dist references use the validated base path',
+    )
+
+    assert.ok(checkoutStep > -1, `${lane}: sanity -- a Checkout step should exist`)
+    assert.ok(buildWebStep > -1, `${lane}: sanity -- a "Build web/backend dist" step should exist`)
+    assert.ok(
+      buildPackageStep > -1,
+      `${lane}: sanity -- a "Build on-prem package" step should exist`,
+    )
+    assert.ok(
+      validateStep > -1,
+      `${lane}: GUARD 1 missing -- this lane builds a package from inputs.base_path, so it must validate that input ("Validate base_path input") before the value can reach Vite`,
+    )
+    assert.ok(
+      postBuildAssertStep > -1,
+      `${lane}: GUARD 2 missing -- this lane must assert apps/web/dist/index.html's asset references right after the web build`,
+    )
+    assert.ok(
+      postPackageAssertStep > -1,
+      `${lane}: GUARD 3 missing -- this lane hands a human an archive, so it must re-assert the index.html that is actually INSIDE that archive`,
+    )
+
+    const validateBody = workflow.slice(validateStep, nextStepBoundaryIn(workflow, validateStep))
+    const postBuildBody = workflow.slice(
+      postBuildAssertStep,
+      nextStepBoundaryIn(workflow, postBuildAssertStep),
+    )
+    const postPackageBody = workflow.slice(
+      postPackageAssertStep,
+      nextStepBoundaryIn(workflow, postPackageAssertStep),
+    )
+
+    // The guards' teeth, not just their names -- on BOTH lanes.
+    assert.ok(
+      validateBody.includes('^/([A-Za-z0-9._-]+/)*$'),
+      `${lane}: GUARD 1 must pin the canonical base-path shape ^/([A-Za-z0-9._-]+/)*$`,
+    )
+    assert.ok(
+      validateBody.includes('/../') && validateBody.includes('/./'),
+      `${lane}: GUARD 1 must additionally reject '.' and '..' segments -- both are members of the [A-Za-z0-9._-] class, so the regex alone would let '/../' through`,
+    )
+    assert.ok(
+      validateBody.includes('WEB_BASE_PATH'),
+      `${lane}: GUARD 1 must normalize the validated value into WEB_BASE_PATH via GITHUB_ENV`,
+    )
+    for (const [label, body] of [['GUARD 2', postBuildBody], ['GUARD 3', postPackageBody]]) {
+      for (const keyword of ['${base}assets/', 'jsRefs.length < 1', 'process.exit(1)', 'WEB_BASE_PATH:?']) {
+        assert.ok(
+          body.includes(keyword),
+          `${lane}: ${label} must keep its teeth -- missing \`${keyword}\`. A step that still says "assets/" but no longer exits non-zero is worse than no step at all`,
+        )
+      }
+    }
+    assert.ok(
+      postPackageBody.includes('unzip -p'),
+      `${lane}: GUARD 3 must read the packaged index.html back out of the built zip with \`unzip -p\`, proving the bytes that would ship are the bytes that were asserted`,
+    )
+
+    // Neutered-but-present guards: `continue-on-error: true` or `if: false`
+    // leaves every step name and keyword in place while the job stays green.
+    // Step-level keys sit at 8-space indentation; the shell and JS `if (` /
+    // `if [[` inside a run block are indented deeper, so this cannot
+    // false-positive on the guard logic itself.
+    for (const [label, body] of [
+      ['GUARD 1', validateBody],
+      ['GUARD 2', postBuildBody],
+      ['GUARD 3', postPackageBody],
+    ]) {
+      assert.ok(
+        !/\n {8}continue-on-error:/.test(body),
+        `${lane}: ${label} must not carry continue-on-error -- a guard that cannot fail the job is not a guard`,
+      )
+      assert.ok(
+        !/\n {8}if:/.test(body),
+        `${lane}: ${label} must not be conditional -- it has to run on every dispatch, from every shell, by every human`,
+      )
+    }
+
+    assert.match(
+      workflow,
+      /VITE_BASE_PATH:\s*\$\{\{\s*env\.WEB_BASE_PATH\s*\}\}/,
+      `${lane}: the web build step must consume the GUARD-1-validated WEB_BASE_PATH, never the raw dispatch input`,
+    )
+
+    // Ordering: validate after Checkout and before the build consumes the
+    // value; assert after the build, and before anything in this job can hand
+    // the package to a human.
+    assert.ok(
+      checkoutStep < validateStep,
+      `${lane}: GUARD 1 must run after Checkout (it needs the repository) and therefore cannot be hoisted above it`,
+    )
+    assert.ok(
+      validateStep < buildWebStep,
+      `${lane}: GUARD 1 must run before the web build consumes base_path`,
+    )
+    assert.ok(
+      buildWebStep < postBuildAssertStep && postBuildAssertStep < buildPackageStep,
+      `${lane}: GUARD 2 must run between the web build and the on-prem package build`,
+    )
+    assert.ok(
+      buildPackageStep < postPackageAssertStep,
+      `${lane}: GUARD 3 must run after "Build on-prem package" produced the archive`,
+    )
+
+    // Scope the "before any exit" check to GUARD 3's OWN job: these files
+    // carry several jobs, and an upload in a later job is not this job's exit.
+    // Job keys are the only 2-space-indented keys with no inline value.
+    let jobStart = 0
+    let jobEnd = workflow.length
+    for (const jobKey of workflow.matchAll(/\n {2}[A-Za-z0-9_-]+:\n/g)) {
+      if (jobKey.index < postPackageAssertStep) jobStart = jobKey.index
+      else {
+        jobEnd = jobKey.index
+        break
+      }
+    }
+    const jobText = workflow.slice(jobStart, jobEnd)
+    const guard3InJob = postPackageAssertStep - jobStart
+    const exitSteps = [...jobText.matchAll(/\n {6}- name: (.+)/g)].filter(([, name]) =>
+      /^Upload |^Publish GitHub Release/.test(name),
+    )
+    assert.ok(
+      exitSteps.length > 0,
+      `${lane}: sanity -- the job that builds the package must have at least one step that uploads or publishes it`,
+    )
+    for (const exitStep of exitSteps) {
+      assert.ok(
+        guard3InJob < exitStep.index,
+        `${lane}: GUARD 3 must run before "${exitStep[1]}" -- once the package leaves this job, a white-screen build is downloadable`,
+      )
+    }
+
+    guardScripts.set(lane, {
+      'GUARD 1': stepRunBody(validateBody, `${lane}: GUARD 1`),
+      'GUARD 2': stepRunBody(postBuildBody, `${lane}: GUARD 2`),
+      'GUARD 3': stepRunBody(postPackageBody, `${lane}: GUARD 3`),
+    })
+  }
+
+  const [laneA, laneB] = lanes.map(([name]) => name)
+  for (const guard of ['GUARD 1', 'GUARD 2', 'GUARD 3']) {
+    assert.equal(
+      guardScripts.get(laneA)[guard],
+      guardScripts.get(laneB)[guard],
+      `${guard} must be byte-identical in ${laneA} and ${laneB}. A workflow step cannot import, so the script is duplicated inline; pinning the copies equal is the only thing that stops the two lanes drifting into "one of them still catches it". Copy the run body verbatim and keep only the YAML comments lane-specific`,
+    )
+  }
+
+  // Repo-wide, nobody may feed Vite the raw dispatch input again.
+  const workflowsDir = path.join(repoRoot, '.github/workflows')
+  const workflowFiles = fs
+    .readdirSync(workflowsDir)
+    .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+    .sort()
+  const readWorkflow = (name) => fs.readFileSync(path.join(workflowsDir, name), 'utf8')
+  const rawInputConsumers = workflowFiles.filter((name) =>
+    /VITE_BASE_PATH:\s*\$\{\{\s*inputs\.base_path\s*\}\}/.test(readWorkflow(name)),
+  )
+  assert.deepEqual(
+    rawInputConsumers,
+    [],
+    "no workflow may feed Vite the raw inputs.base_path -- that is the exact line the r12-r16 white screen came through. Validate the input into WEB_BASE_PATH first (GUARD 1), then use ${{ env.WEB_BASE_PATH }}",
+  )
+
+  // ...and a THIRD lane cannot appear unguarded and unnoticed.
+  const viteBaseConsumers = workflowFiles.filter((name) => readWorkflow(name).includes('VITE_BASE_PATH'))
+  assert.deepEqual(
+    viteBaseConsumers,
+    lanes.map(([name]) => name).sort(),
+    'a workflow that feeds Vite a base path can ship a white-screen package. Exactly two exist and this test holds both to the same guards. If this list changed, guard the new lane the same way (GUARD 1 + GUARD 2 + GUARD 3, run bodies copied verbatim) and add it to the lanes list above -- deliberately, not by editing this inventory until the red goes away',
   )
 })

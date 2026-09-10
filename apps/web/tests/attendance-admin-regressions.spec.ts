@@ -1573,7 +1573,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(10)
     const card = container!.querySelector('[data-selfservice-card="annual-balance"]')
     expect(card).toBeTruthy()
-    expect(card!.querySelector('[data-annual-self-balance]')?.textContent).toContain('1800') // remaining
+    expect(card!.querySelector('[data-annual-self-balance]')?.textContent).toContain('3 days 6h') // remaining 1800 min → 3d 6h
     // the request hits the token-locked /me endpoint and carries NO userId param (self-service, server-forced subject)
     const meCall = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).find(u => u.includes('/leave-balances/me'))
     expect(meCall).toBeTruthy()
@@ -2664,7 +2664,7 @@ describe('Attendance admin regressions', () => {
     expect(card.querySelector('[data-attendance-annual-bulk-adjust-summary]')?.textContent).toContain('1 applied, 1 failed')
 
     const retryButton = card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-retry]')!
-    expect(retryButton.disabled).toBe(false)
+    await vi.waitFor(() => expect(retryButton.disabled).toBe(false), { timeout: 1000 })
     retryButton.click()
     await flushUi(8)
 
@@ -3076,7 +3076,7 @@ describe('Attendance admin regressions', () => {
     expect(deletes).toHaveLength(1)
     expect(deletes[0]).toContain('/api/attendance/scheduler-scopes/scope-d') // the specific id, not just "a DELETE"
     // reactivation / an inactive view is a follow-up slice — the deactivated row is gone here.
-    expect(section.querySelector('[data-attendance-scheduler-scope-item]')).toBeNull()
+    await vi.waitFor(() => expect(section.querySelector('[data-attendance-scheduler-scope-item]')).toBeNull(), { timeout: 1000 })
     confirmSpy.mockRestore()
   })
 
@@ -3231,7 +3231,7 @@ describe('Attendance admin regressions', () => {
 
     const loadSummaryButton = Array.from(payrollCyclesSection!.querySelectorAll<HTMLButtonElement>('button'))
       .find(button => button.textContent?.includes('Load summary'))
-    expect(loadSummaryButton?.disabled).toBe(false)
+    await vi.waitFor(() => expect(loadSummaryButton?.disabled).toBe(false), { timeout: 1000 })
     loadSummaryButton!.click()
     await flushUi(6)
 
@@ -6637,6 +6637,7 @@ describe('Attendance admin regressions', () => {
       const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
         .find(button => button.textContent?.includes('Export CSV'))
       expect(exportButton).toBeTruthy()
+      await vi.waitFor(() => expect(exportButton!.disabled).toBe(false), { timeout: 1000 })
       exportButton!.click()
       await flushUi(6)
 
@@ -6675,6 +6676,7 @@ describe('Attendance admin regressions', () => {
       const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
         .find(button => button.textContent?.includes('Export CSV'))
       expect(exportButton).toBeTruthy()
+      await vi.waitFor(() => expect(exportButton!.disabled).toBe(false), { timeout: 1000 })
       exportButton!.click()
       await flushUi(6)
 
@@ -6712,6 +6714,7 @@ describe('Attendance admin regressions', () => {
       const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
         .find(button => button.textContent?.includes('Export CSV'))
       expect(exportButton).toBeTruthy()
+      await vi.waitFor(() => expect(exportButton!.disabled).toBe(false), { timeout: 1000 })
       exportButton!.click()
       await flushUi(6)
 
@@ -6747,6 +6750,7 @@ describe('Attendance admin regressions', () => {
       const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
         .find(button => button.textContent?.includes('Export CSV'))
       expect(exportButton).toBeTruthy()
+      await vi.waitFor(() => expect(exportButton!.disabled).toBe(false), { timeout: 1000 })
       exportButton!.click()
       await flushUi(6)
 
@@ -6785,6 +6789,7 @@ describe('Attendance admin regressions', () => {
       const exportButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
         .find(button => button.textContent?.includes('Export CSV'))
       expect(exportButton).toBeTruthy()
+      await vi.waitFor(() => expect(exportButton!.disabled).toBe(false), { timeout: 1000 })
       exportButton!.click()
       await flushUi(6)
 
@@ -7642,7 +7647,7 @@ describe('Attendance admin regressions', () => {
     expect(previewBody).not.toHaveProperty('allUsers')
     expect(section!.querySelector('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')?.textContent)
       .toContain('Saving is still allowed')
-    expect(container!.textContent).toContain('Assignment created.')
+    await vi.waitFor(() => expect(container!.textContent?.includes('Assignment created.')).toBe(true), { timeout: 1000 })
   })
 
   it('saves a shift assignment draft through the draft route without the immediate-save preview', async () => {
@@ -8393,7 +8398,7 @@ describe('Attendance admin regressions', () => {
     expect(previewBody).not.toHaveProperty('allUsers')
     expect(section!.querySelector('[data-attendance-comprehensive-hours-assignment-advisory="rotation"]')?.textContent)
       .toContain('Saving is still allowed')
-    expect(container!.textContent).toContain('Rotation assignment created.')
+    await vi.waitFor(() => expect(container!.textContent?.includes('Rotation assignment created.')).toBe(true), { timeout: 1000 })
   })
 
   it('keeps shift assignment save available when the weak comprehensive-hours advisory preview fails', async () => {
@@ -8458,7 +8463,7 @@ describe('Attendance admin regressions', () => {
     )).toBe(true)
     expect(section!.querySelector('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')?.textContent)
       .toContain('saving is still allowed')
-    expect(container!.textContent).toContain('Assignment created.')
+    await vi.waitFor(() => expect(container!.textContent?.includes('Assignment created.')).toBe(true), { timeout: 1000 })
   })
 
   it('PR5 strong-control blocks shift assignment save when preview returns violation', async () => {
@@ -8686,7 +8691,7 @@ describe('Attendance admin regressions', () => {
       String(input) === '/api/attendance/assignments' && init?.method === 'POST'
     )
     expect(savePosted).toBe(true)
-    expect(container!.textContent).toContain('Assignment created.')
+    await vi.waitFor(() => expect(container!.textContent?.includes('Assignment created.')).toBe(true), { timeout: 1000 })
 
     const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
     expect(advisory?.dataset.attendanceComprehensiveHoursAssignmentAdvisoryKind).toBe('warn')
@@ -8785,7 +8790,7 @@ describe('Attendance admin regressions', () => {
     expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
       String(input) === '/api/attendance/assignments' && init?.method === 'POST'
     )).toBe(true)
-    expect(container!.textContent).toContain('Assignment created.')
+    await vi.waitFor(() => expect(container!.textContent?.includes('Assignment created.')).toBe(true), { timeout: 1000 })
 
     const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
     expect(advisory?.textContent || '').toBe('')
@@ -8853,7 +8858,7 @@ describe('Attendance admin regressions', () => {
     expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
       String(input) === '/api/attendance/assignments' && init?.method === 'POST'
     )).toBe(true)
-    expect(container!.textContent).toContain('Assignment created.')
+    await vi.waitFor(() => expect(container!.textContent?.includes('Assignment created.')).toBe(true), { timeout: 1000 })
 
     const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
     expect(advisory?.dataset.attendanceComprehensiveHoursAssignmentAdvisoryKind).toBe('error')
@@ -9059,7 +9064,7 @@ describe('Attendance admin regressions', () => {
     expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
       String(input) === '/api/attendance/assignments' && init?.method === 'POST'
     )).toBe(true)
-    expect(container!.textContent).toContain('Assignment created.')
+    await vi.waitFor(() => expect(container!.textContent?.includes('Assignment created.')).toBe(true), { timeout: 1000 })
 
     const advisory = section!.querySelector<HTMLElement>('[data-attendance-comprehensive-hours-assignment-advisory="shift"]')
     expect(advisory?.dataset.attendanceComprehensiveHoursAssignmentAdvisoryKind).toBe('warn')
@@ -9193,6 +9198,7 @@ describe('Attendance admin regressions', () => {
 
     const mappingProfileSelect = container!.querySelector<HTMLSelectElement>('#attendance-import-profile')
     expect(mappingProfileSelect).toBeTruthy()
+    await vi.waitFor(() => expect(Array.from(mappingProfileSelect!.options).some(option => option.value === 'default-profile')).toBe(true), { timeout: 1000 })
     mappingProfileSelect!.value = 'default-profile'
     mappingProfileSelect!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
@@ -9221,7 +9227,7 @@ describe('Attendance admin regressions', () => {
     viewVersionButton!.click()
     await flushUi(2)
 
-    expect(container!.textContent).toContain('Selected version')
+    await vi.waitFor(() => expect(container!.textContent?.includes('Selected version')).toBe(true), { timeout: 1000 })
     expect(container!.textContent).toContain('ops-admin')
     expect(container!.textContent).toContain('Night Shift')
 

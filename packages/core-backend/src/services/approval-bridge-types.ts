@@ -64,6 +64,25 @@ export interface UnifiedApprovalDTO {
    */
   nodeOperations?: EffectiveNodeOperations | null
   /**
+   * Would the decision endpoint's own authorization predicate let THIS viewer decide the node the
+   * instance is currently stopped on? Server-resolved per viewer, by the door's OWN predicate
+   * (`approval-seat-authorization.ts`: `assignmentMatchesActor` over `decidableNodeKeysForInstance`),
+   * so the client renders rather than re-derives and cannot drift from the server's answer.
+   *
+   * `false` when the instance is not pending, when the viewer holds no matching active seat at a
+   * decidable node key, and when no viewer identity was supplied. `true` for a pending instance
+   * whose decisions do NOT go through the seat-gated door (a legacy platform row with no published
+   * definition, a `plm:` mirror, an after-sales row): those dispatches do not gate on assignments,
+   * so `false` would hide controls the server accepts — and `true` is what those surfaces already
+   * do today.
+   *
+   * Presentation only — the 403 `APPROVAL_ASSIGNMENT_REQUIRED` remains the authority, and hiding a
+   * button is never the guard. ABSENT means "this backend does not compute it" (an older server),
+   * and clients must fall back to their pre-existing behaviour rather than reading absence as
+   * `false`.
+   */
+  canDecideCurrentNode?: boolean
+  /**
    * Parallel gateway (并行分支) — populated only when the instance is in a
    * parallel region (length ≥ 2). Absent on linear state; callers that don't
    * care about parallelism keep using `currentNodeKey` unchanged.
@@ -126,6 +145,32 @@ export interface UnifiedApprovalHistoryDTO {
 
 // ── Query Options ──
 
+/**
+ * The list feed's tab values, as ONE definition. The route's admission check and the query
+ * option's own type are both derived from this tuple, so a tab added here cannot be accepted by
+ * one and rejected by the other, and a hand-typed array in the route can no longer drift from the
+ * union the service branches on.
+ *
+ * `tab` is a FILTER WITHIN the server-determined visibility scope, never the thing that decides
+ * whether a scope is applied at all — see `buildApprovalListScopeCondition` in
+ * `ApprovalBridgeService.ts`, which is conjoined into every list query regardless of this value.
+ */
+export const APPROVAL_LIST_TABS = ['pending', 'mine', 'cc', 'completed', 'processed'] as const
+
+export type ApprovalListTab = (typeof APPROVAL_LIST_TABS)[number]
+
+export function isApprovalListTab(value: string): value is ApprovalListTab {
+  return (APPROVAL_LIST_TABS as readonly string[]).includes(value)
+}
+
+/**
+ * The tab a list request with NO `tab` parameter is served with. `pending` (待我处理) is the
+ * inbox's own landing tab — `apps/web/src/approvals/store.ts` never issues a tab-less request, and
+ * its first fetch is `fetchPending` — so the documented default matches what the only in-repo
+ * client already asks for on load, rather than inventing an "everything" mode with no UI behind it.
+ */
+export const APPROVAL_LIST_DEFAULT_TAB: ApprovalListTab = 'pending'
+
 export interface ApprovalQueryOptions {
   sourceSystem?: string
   status?: string
@@ -147,7 +192,16 @@ export interface ApprovalQueryOptions {
    * for (a reverse lookup on `actor_id`), regardless of the instance's CURRENT status — unlike
    * `completed`, which is scoped to non-pending instances.
    */
-  tab?: 'pending' | 'mine' | 'cc' | 'completed' | 'processed'
+  tab?: ApprovalListTab
+  /**
+   * TRUE when `tab` carries `APPROVAL_LIST_DEFAULT_TAB` because the request supplied none, as
+   * opposed to naming that same value explicitly. The ONLY thing it changes is the legacy "a tab
+   * implies the platform feed" source conjunct in `listApprovals`: a request that named no tab
+   * keeps the mixed platform+plm feed it has always been served, instead of being narrowed to
+   * platform rows as a side effect of the tab defaulting. Absent/false ⇒ the legacy rule applies,
+   * so every existing caller (including a direct service call naming a tab) is unaffected.
+   */
+  tabDefaulted?: boolean
   includeExternalTabSources?: boolean
   actorId?: string
   actorRoles?: string[]
@@ -190,6 +244,10 @@ export const APPROVAL_ERROR_CODES = {
   INVALID_STATUS_TRANSITION: 'INVALID_STATUS_TRANSITION',
   REJECT_COMMENT_REQUIRED: 'REJECT_COMMENT_REQUIRED',
   APPROVAL_NOT_FOUND: 'APPROVAL_NOT_FOUND',
+  /** A non-empty `tab` value that is not in `APPROVAL_LIST_TABS`. An EMPTY `tab` is absent, not
+   *  invalid — matching how `sourceSystem` / `templateId` / `createdFrom` / `createdTo` already
+   *  treat a cleared filter chip, so clearing a tab degrades to the default rather than 400ing. */
+  TAB_INVALID: 'APPROVAL_TAB_INVALID',
 } as const
 
 // ── DB Row Types (internal, not exposed via API) ──

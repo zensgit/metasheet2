@@ -667,6 +667,8 @@ export function diffProvenanceWideningV1(
  * edits above a site do not churn this list.
  */
 export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Object.freeze([
+  { file: 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', text: 'if (isAttendanceProjectionOwnerWithCalculationPointerV1(record.projection_owner)) {', rule: 'widened_predicate' },
+  { file: 'packages/core-backend/src/db/types.ts', text: 'projection_owner: ColumnType<AttendanceProjectionOwnerV1, AttendanceProjectionOwnerV1 | undefined, AttendanceProjectionOwnerV1>', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'audit\',', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'group_policy_snapshot\',', rule: 'closed_set_member_list' },
   { file: 'apps/web/src/views/attendance/attendanceDecisionTrace.ts', text: '\'ledger\',', rule: 'closed_set_member_list' },

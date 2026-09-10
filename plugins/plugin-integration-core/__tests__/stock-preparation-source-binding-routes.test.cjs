@@ -25,6 +25,9 @@
 //         refused outright when no audit store is wired.
 //   R-17  the GET picker: eligible-only, plain-language kind labels, effective source + origin, and
 //         the #5401 join drops a data source this principal does not own.
+//   R-24  the third quadrant: a binding written with NO workspace hint (the delivery guide's §3
+//         script shape, landing on the workspace_id IS NULL row) is read by the UI's own
+//         `workspaceId=default` dry-run and GET picker; another tenant's hinted caller never is.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -112,6 +115,19 @@ function createDataSourceDirectory() {
   }
 }
 
+// Mirrors external-systems.cjs's own `selectScopedRow`: exact (tenant, workspace, id) first; a
+// NON-null hint that misses falls back ONCE to the tenant-wide (workspace_id null) row; a NULL hint
+// that misses never widens. F3/R-22 need this fidelity — the whole point of that test is that
+// `loadTableActionSourceAdapter` must hand this lookup the RIGHT hint, and a fake that ignored
+// workspace entirely (as this one used to) could never fail that test even with the fix reverted.
+function selectScopedSystem(systems, { tenantId, workspaceId = null, id }) {
+  const hint = workspaceId ?? null
+  const exact = systems.find((entry) => entry.id === id && entry.tenantId === tenantId && (entry.workspaceId ?? null) === hint)
+  if (exact) return exact
+  if (hint === null) return null
+  return systems.find((entry) => entry.id === id && entry.tenantId === tenantId && (entry.workspaceId ?? null) === null) || null
+}
+
 function createExternalSystemRegistry(systems = DEFAULT_SYSTEMS) {
   const calls = []
   return {
@@ -120,14 +136,14 @@ function createExternalSystemRegistry(systems = DEFAULT_SYSTEMS) {
       calls.push({ op: 'list', tenantId })
       return systems.filter((entry) => entry.tenantId === tenantId).map((entry) => ({ ...entry }))
     },
-    async getExternalSystem({ tenantId, id }) {
-      calls.push({ op: 'get', tenantId, id })
-      const found = systems.find((entry) => entry.id === id && entry.tenantId === tenantId)
+    async getExternalSystem({ tenantId, workspaceId = null, id }) {
+      calls.push({ op: 'get', tenantId, workspaceId, id })
+      const found = selectScopedSystem(systems, { tenantId, workspaceId, id })
       return found ? { ...found } : null
     },
-    async getExternalSystemForAdapter({ tenantId, id }) {
-      calls.push({ op: 'getForAdapter', tenantId, id })
-      const found = systems.find((entry) => entry.id === id && entry.tenantId === tenantId)
+    async getExternalSystemForAdapter({ tenantId, workspaceId = null, id }) {
+      calls.push({ op: 'getForAdapter', tenantId, workspaceId, id })
+      const found = selectScopedSystem(systems, { tenantId, workspaceId, id })
       return found ? { ...found } : null
     },
     async upsertExternalSystem() { throw new Error('unexpected upsertExternalSystem') },
@@ -652,6 +668,206 @@ async function main() {
     const ok = await call(healthy.routes, 'GET', GET_ROUTE, { user: ADMIN })
     assert.equal(ok.body.data.effectiveSourceProblem, null)
     assert.equal(ok.body.data.takesEffectWithoutRestart, true)
+  })
+
+  // -------------------------------------------------------------------------
+  // R-22 — F3: the scope-fallback's real consumer, AND F2: the wire shape stays 7 fields even when
+  // the store resolved the binding via that fallback.
+  //
+  // `store.get()`'s null-workspace scope fallback can resolve `externalSystemId` to a source bound
+  // only under SOME OTHER workspace — reconcile/mvp-persist/carry/export/handoff/the project board
+  // all call the table-action registry with no workspace hint at all, exactly the shape a dry-run
+  // driven the same way exercises here. Without `loadTableActionSourceAdapter`'s own fix, the
+  // external-SYSTEM load that follows would still carry the null hint, `selectScopedRow` would refuse
+  // to widen it, and the read would 404 even though the binding step just found the source a moment
+  // earlier. This is why `createExternalSystemRegistry`'s fake above is workspace-strict now — a fake
+  // that ignored workspace (as it used to) could never fail this test even with the fix reverted.
+  // -------------------------------------------------------------------------
+  await run('R-22 a null-hint caller still loads a source bound only under another workspace', async () => {
+    // The external system itself lives at workspace 'default' — never at null. Bind it the way the
+    // UI does (POST with the workspaceId=default query hint) and then drive the dry-run with NO
+    // workspace hint at all — exactly the reconcile/mvp-persist/carry/export/handoff/project-board
+    // shape.
+    const wsScopedSystem = system({ id: CUSTOMER_PLM, workspaceId: 'default' })
+    const mounted = mount({ systems: [system({ id: ENV_DEFAULT_SOURCE, workspaceId: null }), wsScopedSystem] })
+
+    const saved = await call(mounted.routes, 'POST', SET_ROUTE, {
+      user: ADMIN,
+      query: { workspaceId: 'default' },
+      body: { externalSystemId: CUSTOMER_PLM },
+    })
+    assert.equal(saved.statusCode, 200, 'the bind itself succeeds')
+
+    assert.equal(
+      await sourceUsedByNextDryRun(mounted),
+      CUSTOMER_PLM,
+      'the null-hint caller still resolves AND LOADS the workspace-scoped binding — this is the line F3 fixes',
+    )
+
+    // F2: the GET picker's `persistedBinding` stays the 7-field wire contract even though THIS
+    // binding was resolved via the scope fallback (matchedWorkspaceId/scopeFallback are non-null
+    // internally, on the very same `store.get()` call the GET route makes). Replacing
+    // `publicPersistedBinding` with a passthrough would fail this on the key set, not merely the id.
+    const view = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN })
+    assert.equal(view.statusCode, 200)
+    assert.equal(view.body.data.persistedBinding.externalSystemId, CUSTOMER_PLM)
+    assert.deepEqual(
+      Object.keys(view.body.data.persistedBinding).sort(),
+      ['actionId', 'createdAt', 'externalSystemId', 'tenantId', 'updatedAt', 'updatedBy', 'workspaceId'],
+      'the wire shape is the 7-field contract even when the store answered via its scope fallback',
+    )
+    assert.ok(!('matchedWorkspaceId' in view.body.data.persistedBinding), 'matchedWorkspaceId never reaches the wire')
+    assert.ok(!('scopeFallback' in view.body.data.persistedBinding), 'scopeFallback never reaches the wire')
+
+    // The SAME fix, the OTHER layout: the external system lives at workspace NULL instead of the
+    // binding's own workspace. `selectScopedRow`'s non-null-hint-miss widening covers this side too.
+    const nullSystem = system({ id: SECOND_PLM, workspaceId: null })
+    const mountedNull = mount({ systems: [system({ id: ENV_DEFAULT_SOURCE, workspaceId: null }), nullSystem] })
+    await call(mountedNull.routes, 'POST', SET_ROUTE, {
+      user: ADMIN,
+      query: { workspaceId: 'default' },
+      body: { externalSystemId: SECOND_PLM },
+    })
+    assert.equal(
+      await sourceUsedByNextDryRun(mountedNull),
+      SECOND_PLM,
+      "and when the system row lives at workspace NULL instead of the binding's own workspace",
+    )
+
+    // UNAFFECTED: a caller that DOES carry a workspace hint takes the pre-F3 path exactly as before
+    // (R-10 covers this continuously; re-asserted here under the SAME mount as the fallback above so
+    // one test shows both are true at once).
+    const before = mounted.adapterCalls.length
+    await call(mounted.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: ADMIN,
+      params: { actionId: ACTION_ID },
+      query: { workspaceId: 'default' },
+      body: { parameters: { projectNo: 'P-1' } },
+    })
+    assert.deepEqual(mounted.adapterCalls.slice(before), [CUSTOMER_PLM], 'an explicit workspace hint is unaffected by the fallback fix')
+  })
+
+  // -------------------------------------------------------------------------
+  // R-23 — the `!resolveWorkspaceId(req, {})` precondition on F3's re-query, fenced. F3's fix in
+  // `loadTableActionSourceAdapter` re-queries the binding store for the null-workspace scope fallback
+  // ONLY when the caller itself carries no workspace hint — deleting that precondition (keeping the
+  // rest of the fix) stayed green under R-22 alone, because R-22 never drives a request that BOTH
+  // carries its own hint AND happens to produce a fallback whose externalSystemId coincides with what
+  // that hint's own (unrelated) resolution already settled on.
+  //
+  // Constructed here: the external system lives ONLY at workspace 'ws_a' (never at null), and its id
+  // IS the deploy-time default (`ENV_DEFAULT_SOURCE`) — the coincidence the guard has to survive. A
+  // request hinting 'ws_b' misses its OWN binding lookup (no ws_b row exists) and so degrades to that
+  // SAME-id deploy default — and if the precondition is gone, the re-query's null-hint fallback (one
+  // sibling, at 'ws_a', same id) reads as "confirmed", overriding the caller's OWN 'ws_b' hint with
+  // 'ws_a'. That would let a request scoped to 'ws_b' be silently served a system that lives only at
+  // 'ws_a' — a cross-workspace leak this specific caller never asked to widen. With the precondition
+  // intact, 'ws_b' governs, the system genuinely is not there, and the read refuses exactly as any
+  // mismatched-hint request always has (TABLE_ACTION_SOURCE_INVALID) — nothing new, nothing silent.
+  // -------------------------------------------------------------------------
+  await run("R-23 a caller's own workspace hint is never overridden by the fallback, even when it coincides with the deploy default", async () => {
+    const wsAOnlySystem = system({ id: ENV_DEFAULT_SOURCE, workspaceId: 'ws_a' })
+    const mounted = mount({ systems: [wsAOnlySystem] })
+
+    const saved = await call(mounted.routes, 'POST', SET_ROUTE, {
+      user: ADMIN,
+      query: { workspaceId: 'ws_a' },
+      body: { externalSystemId: ENV_DEFAULT_SOURCE },
+    })
+    assert.equal(saved.statusCode, 200, 'the bind at ws_a succeeds (same id as the deploy default, by construction)')
+
+    const before = mounted.adapterCalls.length
+    const res = await call(mounted.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: ADMIN,
+      params: { actionId: ACTION_ID },
+      query: { workspaceId: 'ws_b' },
+      body: { parameters: { projectNo: 'P-1' } },
+    })
+    assert.equal(res.body.ok, false, "a request hinting 'ws_b' must NOT be silently served the ws_a-only system")
+    assert.equal(res.statusCode, 422, 'the SAME refusal a mismatched hint has always produced (TABLE_ACTION_SOURCE_INVALID) — nothing new')
+    assert.deepEqual(mounted.adapterCalls.slice(before), [], 'no adapter is built for a system outside the requested scope')
+  })
+
+  // -------------------------------------------------------------------------
+  // R-24 — THE THIRD QUADRANT, END TO END. The binding is written the way the delivery guide's §3
+  // script writes it: a bare POST with NO workspace hint (the principal's tenant only), which lands
+  // on the `workspace_id IS NULL` row. The UI then drives the dry-run WITH its own
+  // `workspaceId=default` hint — the shape every web request carries (useAuth persists the tenant
+  // id as the workspace hint). Before the store's direction-A fallback the binding read `null`,
+  // `applyPersistedSourceBinding` fell through to the deploy default, and — on a customer
+  // deployment where that default does not exist — the read 404'd with ExternalSystemNotFound,
+  // while the same script's own hint-less probe returned 200. F3's re-query in
+  // `loadTableActionSourceAdapter` cannot help this caller: its `!resolveWorkspaceId(req, {})`
+  // precondition (R-23) is exactly what the UI never satisfies. So the fix has to be in the store's
+  // read, and this test drives the whole chain: store fallback -> resolver -> action ->
+  // `selectScopedRow`'s own non-null-hint widening for the external-system row -> adapter.
+  // Reverting the store's direction-A branch turns the adapter assertion red on the id.
+  // -------------------------------------------------------------------------
+  await run("R-24 a workspaceId=default caller reads a binding written on the tenant-wide null row", async () => {
+    // tenant-b owns SAME-ID systems of its own, so that the tenant fence at the end of this test
+    // observes the STORE's tenant_id and not the external-system registry's own tenant scoping
+    // (which would refuse tenant-b regardless — a first cut of this test stayed green with tenant_id
+    // dropped from the store's fallback lookup for exactly that reason).
+    const mounted = mount({ systems: [
+      system({ id: ENV_DEFAULT_SOURCE, workspaceId: null }),
+      system({ id: CUSTOMER_PLM, workspaceId: null }),
+      system({ id: ENV_DEFAULT_SOURCE, tenantId: 'tenant-b', workspaceId: null }),
+      system({ id: CUSTOMER_PLM, tenantId: 'tenant-b', workspaceId: null }),
+    ] })
+
+    // The §3 script shape: no `?workspaceId=` at all.
+    const saved = await call(mounted.routes, 'POST', SET_ROUTE, { user: ADMIN, body: { externalSystemId: CUSTOMER_PLM } })
+    assert.equal(saved.statusCode, 200)
+    assert.equal(saved.body.data.binding.workspaceId, null, 'the hint-less write lands on the null row')
+
+    // The UI shape: every request carries workspaceId=default.
+    const before = mounted.adapterCalls.length
+    const dryRun = await call(mounted.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: ADMIN,
+      params: { actionId: ACTION_ID },
+      query: { workspaceId: 'default' },
+      body: { parameters: { projectNo: 'P-1' } },
+    })
+    assert.deepEqual(
+      mounted.adapterCalls.slice(before),
+      [CUSTOMER_PLM],
+      "the UI's hinted dry-run reads the null-row binding, not the deploy default",
+    )
+    assert.ok(!(dryRun.body && dryRun.body.error && /NotFound/.test(String(dryRun.body.error.code || ''))), 'no ExternalSystemNotFound on the UI path')
+
+    // The GET picker under the same hint agrees, reports the row's OWN scope (null, not the hint),
+    // and still crosses the wire as the 7-field contract.
+    const view = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN, query: { workspaceId: 'default' } })
+    assert.equal(view.statusCode, 200)
+    assert.equal(view.body.data.origin, 'persisted', "the picker no longer says deploy_default for a null-row binding")
+    assert.equal(view.body.data.effectiveExternalSystemId, CUSTOMER_PLM)
+    assert.equal(view.body.data.persistedBinding.externalSystemId, CUSTOMER_PLM)
+    assert.equal(view.body.data.persistedBinding.workspaceId, null, "persistedBinding names the row's own scope, not the caller's hint")
+    assert.deepEqual(
+      Object.keys(view.body.data.persistedBinding).sort(),
+      ['actionId', 'createdAt', 'externalSystemId', 'tenantId', 'updatedAt', 'updatedBy', 'workspaceId'],
+    )
+    assert.ok(!('scopeFallback' in view.body.data.persistedBinding), 'scopeFallback never reaches the wire')
+
+    // TENANT FENCE, end to end: a tenant-b admin carrying the same hint has NO binding of its own,
+    // so it must read ITS deploy default — never tenant-a's null-row binding. Both ids exist as
+    // tenant-b systems (see the mount above), so the only thing standing between tenant-b and
+    // tenant-a's binding is the store's own tenant_id on the fallback lookup: drop it and the
+    // adapter built here is CUSTOMER_PLM, not ENV_DEFAULT_SOURCE.
+    const tenantBAdmin = { id: 'u_admin_b', roles: ['admin'], tenantId: 'tenant-b' }
+    const beforeB = mounted.adapterCalls.length
+    const resB = await call(mounted.routes, 'POST', '/api/integration/table-actions/:actionId/dry-run', {
+      user: tenantBAdmin,
+      params: { actionId: ACTION_ID },
+      query: { workspaceId: 'default' },
+      body: { parameters: { projectNo: 'P-1' } },
+    })
+    assert.deepEqual(
+      mounted.adapterCalls.slice(beforeB),
+      [ENV_DEFAULT_SOURCE],
+      "tenant-b's hinted caller reads its own deploy default, never tenant-a's null-row binding",
+    )
+    assert.notEqual(resB.body, undefined)
   })
 
   const total = passed + failed

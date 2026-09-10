@@ -258,8 +258,8 @@ flowchart LR
     <thead><tr><th>Tab</th><th>谁能看</th><th>读</th><th>写</th><th>出不出值</th></tr></thead>
     <tbody>
       <tr><td><b>确认队列</b></td><td><b>操作员唯一可见的 Tab</b>(stock-prep:read)</td><td>账本(队列/就绪/状态枚举)· 主表(值回读、按项目导出)· 项目台账目录(号+名 datalist)</td><td>confirm → 账本人列</td><td>队列值无关;值回读/导出/目录<b>出值</b>,需 stock-prep:operate 且租户经宿主背书</td></tr>
-      <tr><td><b>安装 / 体检</b></td><td>stock-prep:admin 开 Tab;里面几乎每个按钮要 integration:admin</td><td>应用清单、部署预检、源预检</td><td>建账本表、建沙箱目标、装客户包、选源、列映射副驾确认</td><td>预检出列名(客户值),其余值无关</td></tr>
-      <tr><td><b>项目工作台</b></td><td>平台管理员(四个路由里最宽的门说了算)</td><td>项目台账</td><td>"同步这个项目"依次:dry-run(read)→ reconcile(admin,账本)→ apply(write,主表/沙箱)→ mvp-persist(admin + env,快照四表)</td><td>值无关</td></tr>
+      <tr><td><b>数据来源与体检</b>(tab key <code>install</code>)</td><td>stock-prep:admin 开 Tab;里面几乎每个按钮要 integration:admin</td><td>应用清单、部署预检、源预检</td><td>建账本表、建沙箱目标、装客户包、选源、列映射副驾确认</td><td>预检出列名(客户值),其余值无关</td></tr>
+      <tr><td><b>项目工作台</b></td><td>平台管理员(四个路由里最宽的门说了算)</td><td>项目台账</td><td>"同步这个项目"依次:dry-run(read)→ reconcile(双门:legacy admin 或复用读侧委派档的操作员,账本)→ apply(write,主表/沙箱)→ mvp-persist(admin + env,快照四表)</td><td>值无关</td></tr>
       <tr><td>总览</td><td>管理员</td><td>五个阶段读并行(计数)</td><td>—</td><td>值无关</td></tr>
       <tr><td>快照对比</td><td>管理员</td><td>批次 + 快照行(14 种变化类型,含材质/图号具名)</td><td>—</td><td>值无关(只出 token)</td></tr>
       <tr><td>物料映射 · 单位换算</td><td>管理员</td><td>映射表 / 规则表 + 快照行</td><td>候选同步、确认、退役</td><td>值无关摘要</td></tr>

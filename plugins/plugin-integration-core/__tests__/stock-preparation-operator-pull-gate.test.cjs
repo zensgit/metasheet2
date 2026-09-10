@@ -1,24 +1,27 @@
 'use strict'
 
-// 一线自己拉数据 — THE OPERATOR PULL GATE SPLIT, and the four things it must not widen.
+// 一线自己拉数据 — THE OPERATOR PULL GATE SPLIT, across the four routes it touches.
 //
 // THE RULING. The owner ruled that a floor operator may self-serve the PLM pull: without it the
 // 项目备料页 opens on a project whose BOM nobody on the floor can bring in, and "ask a platform
-// administrator" is not an answer at 07:00 on a shop floor. What the ruling did NOT move is the
-// pair of routes R-11(b) names as owner-level:
+// administrator" is not an answer at 07:00 on a shop floor. Round-1 moved dry-run and apply only;
+// round-2 (decision C13, #5460) additionally moved reconcile, because leaving it admin-only put an
+// operator whose plan had human-confirm rows into a closed loop (see below). What NEITHER round
+// moved is mvp-persist, which R-11(b) names as owner-level:
 //
-//   dry-run     was integration:read   -> ALSO stock-prep operate ∧ read, for ONE action id
-//   apply       was integration:write  -> ALSO stock-prep operate ∧ read, for ONE action id
-//   reconcile   requireAccess(req, 'admin')  UNCHANGED — a SOURCE READ that consumes a B2a claim
+//   dry-run     was integration:read        -> ALSO stock-prep operate ∧ read, for ONE action id
+//   apply       was integration:write       -> ALSO stock-prep operate ∧ read, for ONE action id
+//   reconcile   requireAccess(req, 'admin') -> ALSO stock-prep operate ∧ read, for ONE action id (round-2 C13)
 //   mvp-persist requireAccess(req, 'admin')  UNCHANGED
 //
 // WHAT THIS SUITE EXISTS TO CATCH. A gate split is the easiest change in this repository to get
-// silently wrong, because the two routes it touches are GENERIC — `/table-actions/:actionId/...`
+// silently wrong, because the routes it touches are GENERIC — `/table-actions/:actionId/...`
 // serves every table action there is. So the assertions below are not "the operator can pull"; they
 // are:
 //
 //   P-01 the operator reaches dry-run and apply, for the pull-bom action id.
-//   P-02 the operator is REFUSED reconcile and mvp-persist. The two that stayed, stayed.
+//   P-02 the operator is ADMITTED for reconcile (round-2 C13) and REFUSED mvp-persist — the one
+//        route that stayed admin-only, stayed.
 //   P-03 the split is SCOPED TO ONE ACTION ID. The same operator, on any other actionId, is refused
 //        exactly as before — the widening is not a wildcard over the table-action namespace.
 //   P-04 NOBODY ELSE GAINS ANYTHING. The legacy tiers admit exactly whom they admitted; a caller
@@ -36,6 +39,14 @@
 //        (verified claim preferred, contradicting header refused, tenantless refused, steering
 //        refused, HOST vouches for the pairing) — and the legacy branch returns before any of it, so
 //        no existing caller changes shape.
+//   P-10 W4 THE TENANT-CLAIM HARD DOOR, both halves: with
+//        MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED armed, a tenant that was carried rather than
+//        PROVEN is refused before any host work; with it unset (the default) every one of those same
+//        request shapes behaves exactly as it does today. P-10g additionally pins that arming it
+//        changes NONE of P-06's operator-scope refusals — the door backs that scope, it does not
+//        shadow it — and states, rather than leaving to be discovered, the one thing it does cost:
+//        a claimless operator, admitted today, is refused until their token carries the claim.
+//        (P-09 is above, on the data plane; this block is P-10 because that number was taken.)
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -257,9 +268,49 @@ function mountWithSource({
   sourceKind = 'data-source:sql-readonly',
   dataSourceOwnerId = DATA_SOURCE_OWNER,
   actionId = STOCK_PREP_OPERATOR_PULL_ACTION_ID,
+  // THE HALF THE ORIGINAL HARNESS DID NOT MODEL, and therefore could not see (P-12).
+  //
+  // A real `data-source:sql-readonly` registry does not hand back a row: `getExternalSystemForAdapter`
+  // RESOLVES the bound Connection first, under whatever principal it is given, and the host facade
+  // refuses anyone but the owner. Set `connectionOwner` to model that refusal; leave it null to keep
+  // the original no-connection stub (which is what every case before P-12 exercises).
+  connectionOwner = null,
+  // `canonical` -> the row names its Connection in `connection_id` and its config carries no legacy
+  // pointer, which is the 222 shape. `legacy` -> the pre-cutover `config.dataSourceId` shape.
+  bindingShape = 'canonical',
+  // 对账不做按项目限制 (P-13). `null` keeps the original doubles — no MVP project sheet at all. An
+  // ARRAY provisions the project sheet and fills it with exactly these project numbers, which is what
+  // lets a test say "this number is in the caller's directory and that one is not".
+  //
+  // WHAT IT IS FOR NOW THAT THE GATE IS GONE, since "reconcile ignores the directory" could be
+  // tested with no directory at all. Two things, and the second is the load-bearing one:
+  //   - P-13 asserts the difference makes NO difference to RECONCILE, which is a claim about a
+  //     distinction that has to exist to be ignored. With the fixture at `null` the two arms would
+  //     be identical for a second reason (no sheet), and the experiment would prove less.
+  //   - it is what makes the P-13 CALIBRATION run possible: the directory route only reaches its
+  //     project-table read and its audit append when this sheet resolves, and that run is the only
+  //     thing in this file proving the `objectSheetLookups` / `auditAppends` counters can be
+  //     non-zero at all.
+  // `[]` is the third state and the one the field actually starts in: the sheet EXISTS (mvp/ensure
+  // provisions it) and holds no archived project, because the project row is written by mvp-persist
+  // alone — platform-admin and flag-gated.
+  directoryProjectNos = null,
 } = {}) {
   const routes = new Map()
   const adapterPrincipals = []
+  // The principal the CONNECTION RESOLUTION ran under — the thing the delegation has to reach, and
+  // the thing the first cut never changed.
+  const loadPrincipals = []
+  // The scopes the pre-load identity peek asked for, so "it does not peek for other actions" is
+  // observable rather than asserted by reading the source.
+  const peeks = []
+  // P-13's "and it did nothing on the way out" instrument.
+  const auditAppends = []
+  // P-13's OTHER instrument: every objectId the route asked the provisioning facade to resolve, in
+  // order. Reconcile must never look the PROJECT table up at all — that, not merely "it was not
+  // refused", is what "there is no project gate on this route" is asserted on. It measured the
+  // default-off flag while #5516's gate existed; with the gate deleted it measures the route.
+  const objectSheetLookups = []
   const context = {
     api: {
       http: {
@@ -269,10 +320,42 @@ function mountWithSource({
       },
       multitable: {
         provisioning: {
-          async findObjectSheet() { return null },
-          async resolveFieldIds() { return {} },
+          // Only the PROJECT table is ever provisioned here, and only when a test asked for it. The
+          // confirmation ledger stays absent on purpose: the directory degrades to `ledgerReady:false`
+          // there, which keeps this harness about VISIBILITY and nothing else.
+          async findObjectSheet({ objectId } = {}) {
+            objectSheetLookups.push(objectId)
+            if (Array.isArray(directoryProjectNos) && objectId === 'plm_stock_preparation_project') {
+              return { id: 'sheet_project' }
+            }
+            return null
+          },
+          // Identity mapping: the frozen template's logical field ids ARE the physical ids in this
+          // double, so the rows below can be written in the same vocabulary the module reads.
+          async resolveFieldIds({ fieldIds } = {}) {
+            const map = {}
+            for (const fieldId of Array.isArray(fieldIds) ? fieldIds : []) map[fieldId] = fieldId
+            return map
+          },
         },
-        records: { async queryRecords() { return [] } },
+        records: {
+          async queryRecords({ sheetId, filters } = {}) {
+            if (sheetId !== 'sheet_project' || !Array.isArray(directoryProjectNos)) return []
+            const wanted = filters && typeof filters.sourceProjectNo === 'string' ? filters.sourceProjectNo : null
+            return directoryProjectNos
+              .filter((projectNo) => wanted === null || projectNo === wanted)
+              .map((projectNo, index) => ({
+                id: `rec_${index}`,
+                sheetId: 'sheet_project',
+                data: {
+                  projectId: `proj_${index}`,
+                  sourceProjectNo: projectNo,
+                  projectName: `项目 ${index}`,
+                  projectStatus: 'active',
+                },
+              }))
+          },
+        },
       },
     },
     // The large-BOM channel refuses a non-durable store outright (it drives a job across requests),
@@ -291,26 +374,51 @@ function mountWithSource({
       }],
     },
   }
+  // The SERVER-STAMPED binding owner. external-systems.cjs writes this on every upsert that asserts
+  // a binding — legacy `config.dataSourceId` and canonical `connection_id` alike — discarding
+  // whatever the client sent, so it is the one trustworthy answer to "who may read through this
+  // connection".
+  const storedConfig = {
+    ...(bindingShape === 'legacy' ? { dataSourceId: 'ds_1' } : { schema: 'dbo' }),
+    ...(dataSourceOwnerId ? { dataSourceOwnerId } : {}),
+  }
+  const storedRow = {
+    id: SOURCE_SYSTEM_ID,
+    kind: sourceKind,
+    status: 'active',
+    connectionId: bindingShape === 'legacy' ? null : 'conn_1',
+    config: storedConfig,
+  }
+  const registry = {
+    async getExternalSystem() { return storedRow },
+    async upsertExternalSystem() { throw new Error('unexpected') },
+    async deleteExternalSystem() { throw new Error('unexpected') },
+    async listExternalSystems() { return { items: [] } },
+  }
+  if (connectionOwner) {
+    // The NON-DECRYPTING guard accessor the identity peek is contracted to use. It resolves no
+    // connection, so it answers for every caller — which is the whole reason the peek can precede
+    // the load.
+    registry.getExternalSystemAdapterConfig = async (input) => {
+      peeks.push(input)
+      return { id: storedRow.id, kind: storedRow.kind, connectionId: storedRow.connectionId, config: storedRow.config }
+    }
+    // The REAL accessor's shape: resolve the Connection under the supplied principal, and refuse
+    // anyone but its owner exactly the way the host facade does.
+    registry.getExternalSystemForAdapter = async (input) => {
+      loadPrincipals.push(input && input.principal !== undefined ? input.principal : null)
+      if (!input || input.principal !== connectionOwner) {
+        const error = new Error('canonical connection is unavailable')
+        error.name = 'ExternalSystemValidationError'
+        error.code = bindingShape === 'legacy' ? 'CONNECTION_LEGACY_UNAVAILABLE' : 'CONNECTION_CANONICAL_UNAVAILABLE'
+        error.details = { field: 'connectionId', code: error.code }
+        throw error
+      }
+      return storedRow
+    }
+  }
   const services = {
-    externalSystemRegistry: {
-      async getExternalSystem() {
-        return {
-          id: SOURCE_SYSTEM_ID,
-          kind: sourceKind,
-          status: 'active',
-          // The SERVER-STAMPED binding owner. external-systems.cjs writes this on every upsert that
-          // asserts a dataSourceId binding, discarding whatever the client sent, so it is the one
-          // trustworthy answer to "who may read through this connection".
-          config: {
-            dataSourceId: 'ds_1',
-            ...(dataSourceOwnerId ? { dataSourceOwnerId } : {}),
-          },
-        }
-      },
-      async upsertExternalSystem() { throw new Error('unexpected') },
-      async deleteExternalSystem() { throw new Error('unexpected') },
-      async listExternalSystems() { return { items: [] } },
-    },
+    externalSystemRegistry: registry,
     // RECORDS the principal each adapter is built for, then refuses the read — this suite is about
     // WHOSE identity the read runs as, not about what the source returns.
     adapterRegistry: {
@@ -331,15 +439,36 @@ function mountWithSource({
     readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     bridgeAgentChecklistStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForApply']),
-    stockPreparationAuditStore: { async append() { return { ok: true } } },
+    // COUNTED, not merely stubbed (P-13): "the refusal left no trail" is a claim about this store,
+    // and a stub that swallows appends silently cannot support it.
+    stockPreparationAuditStore: { async append(row) { auditAppends.push(row); return { ok: true } } },
+    // reconcile is refused outright (501) without a lease service, so the route needs one before any
+    // of its later behaviour is measurable at all.
+    stockPreparationConfirmationDecisionLease: {
+      async acquire() { return { leaseId: 'lease_1', held: true } },
+      async release() { return true },
+      async renew() { return { held: true } },
+    },
     tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
   }
+  // The values-free delegation record. It carries a boolean and the frozen action id and NOTHING
+  // else — naming either identity here would hand the operator the owner id the delegation exists
+  // to keep from them.
+  const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
     services,
-    logger: { info() {}, warn() {}, error() {} },
+    logger: { info(message, detail) { logLines.push({ message, detail }) }, warn() {}, error() {} },
   })
-  return { routes, adapterPrincipals }
+  return {
+    routes,
+    adapterPrincipals,
+    loadPrincipals,
+    peeks,
+    logLines,
+    auditAppends,
+    objectSheetLookups,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +668,120 @@ async function theOperatorPullReadsAsTheBindingOwner() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// P-12 — THE DELEGATION HAS TO REACH THE CONNECTION RESOLUTION, NOT JUST THE ADAPTER
+// ---------------------------------------------------------------------------
+//
+// WHAT P-09 PROVED, AND WHAT IT COULD NOT. P-09 asserts the principal handed to
+// `adapterRegistry.createAdapter`. Its registry stub exposes only `getExternalSystem`, which returns
+// a row and resolves nothing — so the step that actually refuses a non-owner was not in the harness
+// at all. In production `getExternalSystemForAdapter` RESOLVES the bound Connection itself, inside
+// the load, under whatever principal it is handed, and the host facade refuses anyone but the owner
+// (`DataSourceManager.assertAccess`, strict equality, no admin bypass on the data plane). The first
+// cut resolved the delegated identity AFTER that load. So on the default source kind the sequence
+// was: load as the OPERATOR -> `CONNECTION_CANONICAL_UNAVAILABLE` -> 400 -> the delegated principal
+// handed to an adapter that was never constructed. The delegation was inert in BOTH binding shapes,
+// for every caller who was not the binder, from the day it shipped.
+//
+// So this case models the resolving accessor and asserts the identity at the step that refuses.
+async function theDelegationReachesTheConnectionResolution() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+
+  // 1. CANONICAL BINDING (`connection_id`, no legacy pointer — the 222 shape), requester is NOT the
+  //    owner. The connection resolution must run as the owner, and so must the adapter.
+  {
+    const { routes, adapterPrincipals, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    assert.deepEqual(
+      loadPrincipals,
+      [DATA_SOURCE_OWNER],
+      'P-12: the CONNECTION RESOLUTION runs as the binding owner — resolving it as the requester is '
+      + 'the 400 every operator got',
+    )
+    assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-12: and so does the adapter, as one value')
+    assert.notEqual(DATA_SOURCE_OWNER, OPERATOR.id, 'P-12: the case is only meaningful while the two differ')
+  }
+
+  // 2. THE LEGACY POINTER SHAPE BEHAVES IDENTICALLY — it was equally broken, for the same reason,
+  //    and it is fixed by the same ordering rather than by a second code path.
+  {
+    const { routes, adapterPrincipals, loadPrincipals } = mountWithSource({
+      connectionOwner: DATA_SOURCE_OWNER,
+      bindingShape: 'legacy',
+    })
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    assert.deepEqual(loadPrincipals, [DATA_SOURCE_OWNER], 'P-12: legacy pointer, same resolution identity')
+    assert.deepEqual(adapterPrincipals, [DATA_SOURCE_OWNER], 'P-12: legacy pointer, same adapter identity')
+  }
+
+  // 3. APPLY re-expands the source in its own right, so it takes the same path.
+  {
+    const { routes, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
+    await gateVerdict(routes, { ...APPLY, user: OPERATOR, actionId: pull })
+    assert.deepEqual(loadPrincipals, [DATA_SOURCE_OWNER], 'P-12: apply too')
+  }
+
+  // 4. NO STAMP -> NOTHING TO DELEGATE TO, and the behaviour is byte-identical to before: the load
+  //    runs as the requester and the facade refuses them. The fix removes a guaranteed failure; it
+  //    never invents an identity to remove one.
+  {
+    const { routes, adapterPrincipals, loadPrincipals } = mountWithSource({
+      connectionOwner: DATA_SOURCE_OWNER,
+      dataSourceOwnerId: null,
+    })
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    assert.deepEqual(loadPrincipals, [OPERATOR.id], 'P-12: with no stamp the load is the requester`s, as before')
+    assert.deepEqual(adapterPrincipals, [], 'P-12: and the refusal happens in the load, so no adapter is built')
+  }
+
+  // 5. THE OWNER READS AS THEMSELVES. Identical value, so identical behaviour — the delegation is
+  //    invisible on the one path that already worked.
+  {
+    const { routes, loadPrincipals } = mountWithSource({
+      connectionOwner: PLATFORM_ADMIN.id,
+      dataSourceOwnerId: PLATFORM_ADMIN.id,
+    })
+    await gateVerdict(routes, { ...DRY_RUN, user: PLATFORM_ADMIN, actionId: pull })
+    assert.deepEqual(loadPrincipals, [PLATFORM_ADMIN.id], 'P-12: the owner still reads as themselves')
+  }
+
+  // 6. NO OTHER ACTION ID PAYS FOR THIS — not even the extra row read. The peek is inside the
+  //    equality check, so a request naming another action never asks the registry anything.
+  {
+    const { routes, peeks, loadPrincipals } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
+    await gateVerdict(routes, { ...DRY_RUN, user: INTEGRATION_READER, actionId: OTHER_ACTION_ID })
+    assert.deepEqual(peeks, [], 'P-12: another action id costs no identity peek')
+    assert.deepEqual(loadPrincipals, [], 'P-12: and never reaches a source load in this harness')
+  }
+
+  // 7. THE DELEGATION IS RECORDED, VALUES-FREE. A boolean and the frozen action id — never the
+  //    operator's id and never the owner's, because the operator must not learn who the owner is.
+  {
+    const { routes, logLines } = mountWithSource({ connectionOwner: DATA_SOURCE_OWNER })
+    await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull })
+    const delegated = logLines.filter((entry) => entry.detail && entry.detail.delegated === true)
+    assert.equal(delegated.length, 1, 'P-12: the delegation is logged exactly once per read')
+    assert.deepEqual(delegated[0].detail, { actionId: pull, delegated: true })
+    const serialized = JSON.stringify(logLines)
+    assert.equal(serialized.includes(DATA_SOURCE_OWNER), false, 'P-12: the owner id is not in the record')
+    assert.equal(serialized.includes(OPERATOR.id), false, 'P-12: nor the operator id')
+  }
+
+  // 8. …AND NOTHING IS LOGGED WHEN NOTHING IS DELEGATED.
+  {
+    const { routes, logLines } = mountWithSource({
+      connectionOwner: PLATFORM_ADMIN.id,
+      dataSourceOwnerId: PLATFORM_ADMIN.id,
+    })
+    await gateVerdict(routes, { ...DRY_RUN, user: PLATFORM_ADMIN, actionId: pull })
+    assert.deepEqual(
+      logLines.filter((entry) => entry.detail && entry.detail.delegated === true),
+      [],
+      'P-12: reading as yourself is not a delegation and is not recorded as one',
+    )
+  }
+}
+
 const DRY_RUN = { method: 'POST', routePath: '/api/integration/table-actions/:actionId/dry-run' }
 const APPLY = { method: 'POST', routePath: '/api/integration/table-actions/:actionId/apply' }
 const RECONCILE = { method: 'POST', routePath: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile' }
@@ -558,10 +801,10 @@ const ALL_MOVED_ROUTES = STOCK_PREP_OPERATOR_PULL_STEPS
   .map((step) => ({ method: step.method, routePath: step.path, step: step.step }))
 
 // ---------------------------------------------------------------------------
-// P-01 / P-02 — what moved, and what did not
+// P-01 / P-02 — what moved (dry-run, apply, reconcile), and what did not (mvp-persist)
 // ---------------------------------------------------------------------------
 
-async function theOperatorPullsButNeitherReconcilesNorArchives() {
+async function theOperatorPullsAndReconcilesButDoesNotArchive() {
   const routes = mount()
   const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
 
@@ -649,6 +892,209 @@ async function theLegacyTiersAreExactlyWhatTheyWere() {
   assert.equal(await gateVerdict(routes, { ...APPLY, user: WORKBENCH_ADMIN, actionId: pull }), 'admitted')
   assert.equal(await gateVerdict(routes, { ...RECONCILE, user: WORKBENCH_ADMIN, actionId: pull }), 'admitted')
   assert.equal(await gateVerdict(routes, { ...MVP_PERSIST, user: WORKBENCH_ADMIN, actionId: pull }), 'refused')
+}
+
+// ---------------------------------------------------------------------------
+// P-13 — 对账不做按项目限制: reconcile admits ANY projectNo of the caller's own tenant,
+//        and a malformed projectNo is still 400
+// ---------------------------------------------------------------------------
+//
+// WHAT THIS SECTION USED TO BE, so the change is legible rather than a silent shrinkage. #5516 put a
+// project-visibility gate on reconcile behind `MULTITABLE_STOCK_PREP_RECONCILE_PROJECT_DIRECTORY_GATE`
+// (default off) and this section asserted both halves of it: armed, the narrowing behaved as designed
+// (cases 1-5); off, the route was byte-for-byte the one main had (P-13f). The owner ruled on
+// 2026-09-06 that stock-prep will NOT do project ownership and that the gate be DELETED rather than
+// left as a switch nobody would turn on. Two structural reasons, both established in the design's
+// falsification round: the operator project directory is TENANT-WIDE by construction, so the
+// strongest thing the gate could prove was 限本租户的项目 — it cannot tell two operators of one
+// factory apart, which is the complaint that motivated it — and its only pass-through ("this tenant
+// has archived nothing") inverts into "a never-archived project is refused its FIRST reconcile" the
+// moment the tenant archives anything, while archiving is `mvp-persist`, which the operator's own
+// four-step pull SKIPs. See docs/development/takeover-beiliao-20260821/
+// design-project-ownership-20260906.md §2 方案 B.
+//
+// SO THIS IS NOW THE OPPOSITE ASSERTION, AND IT IS DELIBERATE RATHER THAN AN ABSENCE. A suite that
+// merely stopped mentioning the gate would leave the next reader unable to tell "ruled out" from
+// "forgotten", and the first person to notice that one operator can supersede another project's
+// PENDING rows would file it as a bug. It is not a bug; it is the boundary this route has, and the
+// answer to "who reconciled someone else's project" is the audit trail. What is pinned:
+//
+//   1. NOT NARROWED BY PROJECT. An operator reconciling a number its own directory does NOT list is
+//      not refused, reaches the source read, and gets the SAME outcome as it does for a number the
+//      directory DOES list — the projectNo does not change the answer, which is the claim, stated as
+//      an equality rather than as the absence of one refusal code.
+//   2. THE PROJECT TABLE IS NEVER LOOKED UP. Zero `findObjectSheet` calls for it: the route does not
+//      read a directory and admit, it does not read one at all. That is the difference between "same
+//      answer" and "same code path", and only the second says the gate is gone.
+//   3. THE OPERATOR'S WHOLE HOST-CALL TRACE EQUALS THE PLATFORM ADMIN'S on the identical request —
+//      same outcome, same adapter builds, same connection resolutions, same object lookups in the
+//      same order, same audit rows. The admin branch returns from `requireTableActionAccess` before
+//      anything operator-specific, so it is the baseline, carried in the same process rather than
+//      quoted from memory. (Inherited verbatim from P-13f, which measured exactly this while the flag
+//      was off; deleting the flag makes it unconditional, not obsolete.)
+//   4. THE MALFORMED-projectNo 400 SURVIVED THE GATE. A `projectNo` that is PRESENT but not a usable
+//      string — {"projectNo": 230920006}, the shape this domain hands out constantly — is refused
+//      400 with the downstream validator's own code and field, before the action lookup, the B2a
+//      fence and the source adapter: no external read, no credential decrypt, no audit row. It was
+//      never part of the narrowing (it is the malformed-request answer the request was going to get
+//      anyway) and it did not go with it.
+//   5. DRY-RUN AND APPLY ARE UNCHANGED, as they always were.
+// ---------------------------------------------------------------------------
+
+const VISIBLE_PROJECT_NO = '2-20231625'
+const FOREIGN_PROJECT_NO = '9-99999999'
+const PROJECT_OBJECT_ID = 'plm_stock_preparation_project'
+// The deleted gate's refusal code, kept as a NAMED constant with no producer anywhere in the tree:
+// the assertions below use it to say "this must never come back", which reads as an intention rather
+// than as a stale string somebody forgot to delete.
+const RECONCILE_PROJECT_GATE_CODE = 'STOCK_PREPARATION_RECONCILE_PROJECT_NOT_VISIBLE'
+
+function reconcileBody(projectNo) {
+  return { parameters: { projectNo } }
+}
+
+/** How many times the run asked the provisioning facade for the PROJECT table. */
+function projectSheetLookups(harness) {
+  return harness.objectSheetLookups.filter((objectId) => objectId === PROJECT_OBJECT_ID).length
+}
+
+async function reconcileIsNotNarrowedByProject() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+  const foreign = { ...RECONCILE, actionId: pull, body: reconcileBody(FOREIGN_PROJECT_NO) }
+
+  // (1) + (2): one directory listing exactly one number, and a reconcile of a DIFFERENT one.
+  const operator = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const operatorCode = await refusalCode(operator.routes, { ...foreign, user: OPERATOR })
+  assert.notEqual(
+    operatorCode,
+    RECONCILE_PROJECT_GATE_CODE,
+    `P-13: reconcile does not narrow by project — a number outside the caller's directory is admitted (got ${operatorCode})`,
+  )
+  assert.ok(
+    operator.adapterPrincipals.length > 0,
+    `P-13: ...and the run really went on to the source read (got ${operatorCode})`,
+  )
+  assert.equal(
+    projectSheetLookups(operator),
+    0,
+    'P-13: ...having never looked the project table up at all — this route reads no directory, rather than reading one that admits',
+  )
+
+  // (2') THE INSTRUMENTS, CALIBRATED — the positive control the armed half of P-13f used to be.
+  //
+  // While #5516's gate existed, this file had a branch that asserted the SAME counter was NON-zero
+  // for a refused reconcile ("...and the refusal came from an actual directory read, so P-13f's
+  // 'zero lookups' measures the flag"). Deleting the gate deleted that branch — and a zero-count
+  // assertion with nothing proving the counter can ever be non-zero is an assertion about a stopped
+  // clock. Both of P-13's own instruments were in that state, and both were measured to be, by
+  // disabling each recorder in turn and watching this suite stay green:
+  //   - `objectSheetLookups` — carries (2) above and the two deepEquals below;
+  //   - `auditAppends` — carries "appended no audit row" at (4) and "same audit rows" at (3).
+  // (`loadPrincipals`, the third, is NOT in that state: P-09/P-12 drive it off zero, and disabling
+  // its recorder turns this suite red. It needs nothing here.)
+  //
+  // So both are exercised against a route that MUST do the thing they count: the operator project
+  // directory, which reads the project table and writes a `project_directory_read` audit row, on the
+  // same harness with the same mount options and the same caller. This is not a claim about
+  // reconcile — it is the calibration that makes the reconcile claims falsifiable.
+  const directoryReader = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  await rawCall(directoryReader.routes, {
+    method: 'GET',
+    routePath: '/api/integration/stock-preparation/operator/projects',
+    user: OPERATOR,
+  })
+  assert.ok(
+    projectSheetLookups(directoryReader) > 0,
+    `P-13: the zeroes above are measurements, not a broken instrument — the directory route drives this same counter off zero (got ${JSON.stringify(directoryReader.objectSheetLookups)})`,
+  )
+  assert.ok(
+    directoryReader.auditAppends.length > 0,
+    `P-13: ...and the same for the audit recorder, so "appended no audit row" below is a measurement too (got ${JSON.stringify(directoryReader.auditAppends.map((row) => row && row.action))})`,
+  )
+
+  // ...and the number itself changes nothing: the SAME request with a number the directory DOES list
+  // gets the SAME answer. This is the positive form of "not narrowed by project"; the notEqual above
+  // alone would keep passing if the route grew a different refusal code for the same reason.
+  const listed = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const listedCode = await refusalCode(listed.routes, {
+    ...RECONCILE,
+    user: OPERATOR,
+    actionId: pull,
+    body: reconcileBody(VISIBLE_PROJECT_NO),
+  })
+  assert.equal(
+    operatorCode,
+    listedCode,
+    'P-13: a projectNo the directory lists and one it does not are the same request to this route',
+  )
+  assert.deepEqual(
+    operator.objectSheetLookups,
+    listed.objectSheetLookups,
+    'P-13: ...down to the object-sheet lookups, in the same order',
+  )
+
+  // (3) the platform admin is the main baseline: same request, same everything.
+  const admin = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const adminCode = await refusalCode(admin.routes, { ...foreign, user: PLATFORM_ADMIN })
+  assert.equal(
+    operatorCode,
+    adminCode,
+    "P-13: the operator's outcome is the platform admin's, whose branch returns before anything operator-specific",
+  )
+  assert.equal(operator.adapterPrincipals.length, admin.adapterPrincipals.length, 'P-13: ...same adapter builds')
+  assert.equal(operator.loadPrincipals.length, admin.loadPrincipals.length, 'P-13: ...same connection resolutions')
+  assert.deepEqual(operator.objectSheetLookups, admin.objectSheetLookups, 'P-13: ...same object-sheet lookups, in the same order')
+  assert.equal(operator.auditAppends.length, admin.auditAppends.length, 'P-13: ...same audit rows')
+
+  // (4) the malformed projectNo: a JSON NUMBER. STATUS AND CODE BOTH — the code alone would keep
+  // passing if the thrown error's 400 became a 500 or a 200.
+  const numeric = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const numericResponse = await rawCall(numeric.routes, {
+    ...RECONCILE,
+    user: OPERATOR,
+    actionId: pull,
+    body: { parameters: { projectNo: 99999999 } },
+  })
+  assert.equal(
+    numericResponse.body && numericResponse.body.error && numericResponse.body.error.code,
+    'TABLE_ACTION_PARAMETERS_INVALID',
+    'P-13: a non-string projectNo is refused as the malformed request it is',
+  )
+  assert.equal(numericResponse.statusCode, 400, 'P-13: ...with the same 400 the downstream validator would have used')
+  assert.equal(numeric.adapterPrincipals.length, 0, 'P-13: ...and it reached no source adapter')
+  assert.equal(numeric.loadPrincipals.length, 0, 'P-13: ...no connection resolution / credential decrypt')
+  assert.deepEqual(numeric.auditAppends, [], 'P-13: ...and appended no audit row')
+
+  // (5) the other two steps of the operator's own four-step run: unchanged, as they always were. The
+  // notEqual is kept deliberately — the gate's code has no producer left in the tree, so it now
+  // guards against the narrowing reappearing on the wrong route, while the equality beside it is what
+  // actually measures "the projectNo does not narrow these".
+  const untouchedForeign = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  const untouchedListed = mountWithSource({ directoryProjectNos: [VISIBLE_PROJECT_NO] })
+  for (const route of [DRY_RUN, APPLY]) {
+    const foreignCode = await refusalCode(untouchedForeign.routes, {
+      ...route,
+      user: OPERATOR,
+      actionId: pull,
+      body: reconcileBody(FOREIGN_PROJECT_NO),
+    })
+    assert.notEqual(
+      foreignCode,
+      RECONCILE_PROJECT_GATE_CODE,
+      'P-13: dry-run and apply keep the behaviour they had',
+    )
+    const listedStepCode = await refusalCode(untouchedListed.routes, {
+      ...route,
+      user: OPERATOR,
+      actionId: pull,
+      body: reconcileBody(VISIBLE_PROJECT_NO),
+    })
+    assert.equal(
+      foreignCode,
+      listedStepCode,
+      `P-13: ...and neither is narrowed by which project the number belongs to (${route.routePath})`,
+    )
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -950,14 +1396,321 @@ function everyLargeBomRouteIsInTheSplit() {
   )
 }
 
+// ---------------------------------------------------------------------------
+// P-10 — W4: THE TENANT-CLAIM HARD DOOR (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED)
+// ---------------------------------------------------------------------------
+//
+// NUMBERING. P-09 above is already taken (the pull's data-plane identity), so this block is P-10.
+//
+// WHAT IT PINS. `auth/jwt-middleware.ts` copies the `x-tenant-id` REQUEST HEADER onto `user.tenantId`
+// whenever the verified token carries no tenant claim. Every tenancy check in http-routes.cjs that
+// reads `user.tenantId` is therefore, on a claimless deployment, comparing a request header against
+// itself — which is why the operator plane was moved to `resolveOperatorValueScope` in #5445. The
+// LEGACY `integration:*` tiers were left where they were, because narrowing them is a deployment
+// decision rather than a code one. W4 makes the narrowing available and leaves it OFF: with the flag
+// set, the tenant a route acts under must have come from the VERIFIED TOKEN PAYLOAD.
+//
+// The two halves of the claim, and both are asserted below:
+//   ON  — a principal whose tenant is only carried (or absent) is refused, before any host work.
+//   OFF — every one of those same requests behaves exactly as it does today. That half is the one
+//         that makes the flag safe to merge, so it is asserted request-shape for request-shape
+//         rather than in the abstract.
+const TENANT_CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+
+/** Run `fn` with the flag in a known state, and leave the environment exactly as it was found. */
+async function withTenantClaimFlag(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, TENANT_CLAIM_FLAG)
+  const previous = process.env[TENANT_CLAIM_FLAG]
+  if (value === null) delete process.env[TENANT_CLAIM_FLAG]
+  else process.env[TENANT_CLAIM_FLAG] = value
+  try {
+    return await fn()
+  } finally {
+    if (had) process.env[TENANT_CLAIM_FLAG] = previous
+    else delete process.env[TENANT_CLAIM_FLAG]
+  }
+}
+
+// THE PRINCIPAL THE FLAG EXISTS FOR: a platform admin on a claimless deployment, whose `tenantId`
+// the middleware filled from the header they themselves sent. Indistinguishable, today, from an
+// admin whose token really does say `tenant-b`.
+const HEADER_FILLED_ADMIN = Object.freeze({ id: 'u_hdr_adm', tenantId: 'tenant-evil', roles: ['admin'], permissions: ['integration:admin'] })
+// The same admin with NO tenant at all — `isTenantlessPlatformAdmin`, the one principal
+// `resolveTenantId` still lets steer the tenant from the request.
+const TENANTLESS_ADMIN = Object.freeze({ id: 'u_tl_adm', roles: ['admin'], permissions: ['integration:admin'] })
+
+/** The five request shapes the flag is about, named once and replayed under ON and OFF. */
+const TENANT_CLAIM_CASES = Object.freeze([
+  {
+    id: 'P-10a',
+    what: 'a header-filled admin with NO verified claim',
+    call: { user: HEADER_FILLED_ADMIN },
+    on: 'OPERATOR_SCOPE_TENANT_REQUIRED',
+  },
+  {
+    id: 'P-10b',
+    what: 'the same admin naming the header tenant explicitly on the query string',
+    // The explicit tenant is not what decides this: provenance is checked FIRST, so a caller with no
+    // claim is refused for having no claim, whatever else the request says.
+    call: { user: HEADER_FILLED_ADMIN, query: { tenantId: 'tenant-evil' } },
+    on: 'OPERATOR_SCOPE_TENANT_REQUIRED',
+  },
+  {
+    id: 'P-10c',
+    what: 'a legacy integration:read holder whose token DOES carry its tenant',
+    // Read-only tier, so this one is asserted on DRY-RUN alone: `integration:read` is refused APPLY
+    // today for want of the write half (P-04), and replaying it there would measure that, not this.
+    routes: [DRY_RUN],
+    call: { user: INTEGRATION_READER, authenticatedTenantId: TENANT },
+    on: null, // admitted — the flag narrows provenance, not permission
+  },
+  {
+    id: 'P-10c2',
+    what: 'a legacy integration:write holder whose token DOES carry its tenant',
+    routes: [APPLY],
+    call: { user: INTEGRATION_WRITER, authenticatedTenantId: TENANT },
+    on: null,
+  },
+  {
+    id: 'P-10d',
+    what: 'a tenantless platform admin steering to another tenant from the query string',
+    call: { user: TENANTLESS_ADMIN, authenticatedTenantId: TENANT, query: { tenantId: TENANT_B } },
+    on: 'OPERATOR_SCOPE_TENANT_MISMATCH',
+  },
+  {
+    id: 'P-10e',
+    what: 'a carried tenant that contradicts the verified claim',
+    call: { user: HEADER_FILLED_ADMIN, authenticatedTenantId: TENANT },
+    on: 'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+  },
+])
+
+async function theTenantClaimDoorRefusesUnprovenTenantsWhenArmed() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+
+  // P-10a..e — ARMED. Each shape gets its own named refusal, and none of them costs a host call:
+  // the door is inside the gate helpers every one of these routes calls first.
+  await withTenantClaimFlag('true', async () => {
+    const routes = mount()
+    for (const testCase of TENANT_CLAIM_CASES) {
+      for (const route of testCase.routes || [DRY_RUN, APPLY]) {
+        routes.resetHostCalls()
+        const code = await refusalCode(routes, { ...route, ...testCase.call, actionId: pull })
+        if (testCase.on === null) {
+          assert.notEqual(
+            code,
+            'OPERATOR_SCOPE_TENANT_REQUIRED',
+            `${testCase.id}: ${testCase.what} keeps its access — the flag narrows PROVENANCE, not permission`,
+          )
+          assert.equal(
+            await gateVerdict(routes, { ...route, ...testCase.call, actionId: pull }),
+            'admitted',
+            `${testCase.id}: ${testCase.what} is admitted with the door armed`,
+          )
+          continue
+        }
+        assert.equal(code, testCase.on, `${testCase.id}: ${testCase.what} is refused on ${route.routePath}`)
+        assert.equal(
+          routes.hostCallCount(),
+          0,
+          `${testCase.id}: …and reaches no host API doing it — the refusal precedes every sheet and record touch`,
+        )
+      }
+    }
+  })
+
+  // P-10f — DISARMED IS TODAY, request shape for request shape. All five walk through right now,
+  // which is the fact that makes the flag necessary and the default that makes it safe to merge.
+  await withTenantClaimFlag(null, async () => {
+    const routes = mount()
+    for (const testCase of TENANT_CLAIM_CASES) {
+      for (const route of testCase.routes || [DRY_RUN, APPLY]) {
+        assert.equal(
+          await gateVerdict(routes, { ...route, ...testCase.call, actionId: pull }),
+          'admitted',
+          `${testCase.id}: with the flag unset, ${testCase.what} behaves exactly as it does today`,
+        )
+      }
+    }
+  })
+
+  // …and an explicitly falsy value is the same as unset. A gate whose OFF state depended on the var
+  // being absent would arm itself the first time someone wrote `=false` into an env file.
+  for (const value of ['false', '', 'TRUE_ISH', '1', 'yes']) {
+    await withTenantClaimFlag(value, async () => {
+      const routes = mount()
+      assert.equal(
+        await gateVerdict(routes, { ...DRY_RUN, user: HEADER_FILLED_ADMIN, actionId: pull }),
+        'admitted',
+        `P-10f: ${JSON.stringify(value)} is not 'true', so the door stays open`,
+      )
+    })
+  }
+  // Only the exact token arms it (trimmed and case-folded, same idiom as every other MULTITABLE_ gate).
+  for (const value of ['true', ' TRUE ', 'True']) {
+    await withTenantClaimFlag(value, async () => {
+      const routes = mount()
+      assert.equal(
+        await refusalCode(routes, { ...DRY_RUN, user: HEADER_FILLED_ADMIN, actionId: pull }),
+        'OPERATOR_SCOPE_TENANT_REQUIRED',
+        `P-10f: ${JSON.stringify(value)} arms the door`,
+      )
+    })
+  }
+}
+
+// P-10h — P1 HAS ITS OWN FENCE, WHICH P2 CANNOT STAND IN FOR.
+//
+// WHY THIS EXISTS. P-10a..f above all reach `resolveTenantId` eventually, so DELETING the P1 call in
+// `requireTableActionAccess`'s legacy branch left every one of them green — P2 caught the same
+// requests one statement later and answered the same code. A guard whose removal no test notices is
+// not a guard, so this pins the thing that is true of P1 ALONE: it is part of the GATE, and the gate
+// runs before the route touches the request at all.
+//
+// THE PROPERTY, STATED PLAINLY: a caller whose tenant is not proven may not probe this route's
+// REQUEST VALIDATION. `tableActionDryRun` reads its body one line after the gate
+// (`normalizeTableActionBody`, then W3a's `includeMissingComponents` type check), so with P1 in place
+// a malformed body from an unproven caller is never even parsed — the answer is the tenancy refusal.
+// Delete P1 and the same request answers 400 instead, because it now gets to run the validator first
+// and only meets the door afterwards, inside `resolveTenantId`.
+//
+// That difference is not cosmetic. The gate's whole contract in this file is "401/403 precedes every
+// other validation and every IO" (see the handler's own opening comment); an unproven caller who can
+// learn which body keys a route accepts, and which types it wants, has been told something by a route
+// that was supposed to have refused them.
+async function theLegacyBranchDoorPrecedesTheRoutesOwnValidation() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+
+  await withTenantClaimFlag('true', async () => {
+    const routes = mount()
+    // (a) A body the route would reject as malformed. With the door in the gate this is a tenancy
+    //     refusal; without it, a 400 that describes the route's own schema.
+    for (const body of [
+      { includeMissingComponents: 'yes' },  // right key, wrong type — W3a's own check, one line later
+      { notARealKey: true },                // unknown key — normalizeTableActionBody, immediately after the gate
+    ]) {
+      routes.resetHostCalls()
+      assert.equal(
+        await refusalCode(routes, { ...DRY_RUN, user: INTEGRATION_READER, actionId: pull, body }),
+        'OPERATOR_SCOPE_TENANT_REQUIRED',
+        `P-10h: an unproven caller is refused at the GATE, before ${JSON.stringify(body)} is ever parsed`,
+      )
+      assert.equal(routes.hostCallCount(), 0, 'P-10h: and reaches no host API')
+    }
+
+    // (b) The value-bearing opt-in, which the legacy branch is deliberately NOT entitled to. Without
+    //     P1 this answers OPERATOR_SCOPE_TIER_REQUIRED (the W3a scope refusing a caller with no
+    //     stock-prep tier) — a true statement about permission that says nothing about provenance,
+    //     and one that would arrive AFTER the body was parsed. With P1 the provenance answer comes
+    //     first, which is the correct order: we do not tell an unproven caller which tier they lack.
+    routes.resetHostCalls()
+    assert.equal(
+      await refusalCode(routes, { ...DRY_RUN, user: INTEGRATION_READER, actionId: pull, body: { includeMissingComponents: true } }),
+      'OPERATOR_SCOPE_TENANT_REQUIRED',
+      'P-10h: provenance is decided before tier, because the gate runs before the handler',
+    )
+    assert.equal(routes.hostCallCount(), 0, 'P-10h: still no host work')
+  })
+
+  // DISARMED, the same three requests behave exactly as they do today — a 400 for each malformed
+  // body, and the W3a tier refusal for the opt-in. This is the half that proves the assertions above
+  // are measuring the DOOR and not merely restating what the route already did.
+  await withTenantClaimFlag(null, async () => {
+    const routes = mount()
+    assert.equal(
+      await refusalCode(routes, { ...DRY_RUN, user: INTEGRATION_READER, actionId: pull, body: { includeMissingComponents: 'yes' } }),
+      'TABLE_ACTION_REQUEST_INVALID',
+      'P-10h: with the door shut the route validates the body, exactly as today',
+    )
+    assert.equal(
+      await refusalCode(routes, { ...DRY_RUN, user: INTEGRATION_READER, actionId: pull, body: { notARealKey: true } }),
+      'TABLE_ACTION_REQUEST_INVALID',
+      'P-10h: …including the unknown-key refusal',
+    )
+    assert.equal(
+      await refusalCode(routes, { ...DRY_RUN, user: INTEGRATION_READER, actionId: pull, body: { includeMissingComponents: true } }),
+      'OPERATOR_SCOPE_TIER_REQUIRED',
+      'P-10h: …and W3a still refuses the legacy tier the value-bearing opt-in',
+    )
+  })
+}
+
+// P-10g — THE OPERATOR TIER'S OWN REFUSALS ARE UNCHANGED BY THE FLAG.
+//
+// The operator branch already resolves the host-vouched scope, and it does so BEFORE the route
+// reaches `resolveTenantId`. So the five refusals P-06 pins must answer with the same code whether
+// the door is armed or not: if arming it changed any of them, the door would be shadowing the scope
+// rather than backing it, and P-06's assurance would have quietly moved to a flagged code path.
+async function theOperatorScopeRefusalsAreIdenticalArmedAndDisarmed() {
+  const pull = STOCK_PREP_OPERATOR_PULL_ACTION_ID
+  const tenantless = { id: 'u_op_tenantless', permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] }
+  const combinations = [
+    { what: 'a steered tenant', mountOptions: undefined, call: { user: OPERATOR, query: { tenantId: TENANT_B } }, expected: 'OPERATOR_SCOPE_TENANT_MISMATCH' },
+    { what: 'a contradicted tenant', mountOptions: undefined, call: { user: OPERATOR, authenticatedTenantId: TENANT_B }, expected: 'OPERATOR_SCOPE_TENANT_CONTRADICTED' },
+    { what: 'a non-member', mountOptions: { tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: false } } } }, call: { user: OPERATOR }, expected: 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED' },
+    { what: 'no membership seam', mountOptions: { tenantPrincipalDirectory: null }, call: { user: OPERATOR }, expected: 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE' },
+    { what: 'a tenantless operator', mountOptions: undefined, call: { user: tenantless }, expected: 'OPERATOR_SCOPE_TENANT_REQUIRED' },
+  ]
+  for (const flag of [null, 'true']) {
+    await withTenantClaimFlag(flag, async () => {
+      for (const combination of combinations) {
+        const routes = mount(combination.mountOptions)
+        for (const route of [DRY_RUN, APPLY]) {
+          routes.resetHostCalls()
+          assert.equal(
+            await refusalCode(routes, { ...route, ...combination.call, actionId: pull }),
+            combination.expected,
+            `P-10g: ${combination.what} answers the same with the door ${flag === 'true' ? 'ARMED' : 'disarmed'}`,
+          )
+          assert.equal(routes.hostCallCount(), 0, 'P-10g: and costs no host work either way')
+        }
+      }
+    })
+  }
+
+  // WHAT THE FLAG *DOES* COST THE OPERATOR TIER, STATED RATHER THAN LEFT TO BE DISCOVERED IN 222.
+  // An operator whose token carries no tenant claim is admitted TODAY (the host membership check is
+  // what makes that safe) and is REFUSED once the door is armed — not by the scope, but by
+  // `resolveTenantId` downstream of it. That is the whole blast radius of the flag on this plane,
+  // and it is why the rollout order in the delivery guide re-issues tokens before setting the var.
+  await withTenantClaimFlag(null, async () => {
+    const routes = mount()
+    assert.equal(
+      await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull }),
+      'admitted',
+      'P-10g: a claimless operator is admitted today',
+    )
+  })
+  await withTenantClaimFlag('true', async () => {
+    const routes = mount()
+    routes.resetHostCalls()
+    assert.equal(
+      await refusalCode(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull }),
+      'OPERATOR_SCOPE_TENANT_REQUIRED',
+      'P-10g: …and refused once the door is armed, because their tenant was never proven',
+    )
+    assert.equal(routes.hostCallCount(), 0, 'P-10g: with no host work')
+    assert.equal(
+      await gateVerdict(routes, { ...DRY_RUN, user: OPERATOR, actionId: pull, authenticatedTenantId: TENANT }),
+      'admitted',
+      'P-10g: the SAME operator, once their token carries the claim, is admitted again — the fix is a token, not a grant',
+    )
+  })
+}
+
 async function main() {
-  await theOperatorPullsButNeitherReconcilesNorArchives()
+  await theOperatorPullsAndReconcilesButDoesNotArchive()
   await theHumanConfirmLoopIsReachableByTheOperator()
   await theOperatorPullReadsAsTheBindingOwner()
+  await theDelegationReachesTheConnectionResolution()
   await aStoredLargeBomJobIsRunOnlyByItsCreator()
   await theOperatorReachesTheBoundedBackgroundChannel()
   everyLargeBomRouteIsInTheSplit()
+  await reconcileIsNotNarrowedByProject()
   await theOperatorBranchCannotBeSteeredAcrossTenants()
+  await theTenantClaimDoorRefusesUnprovenTenantsWhenArmed()
+  await theLegacyBranchDoorPrecedesTheRoutesOwnValidation()
+  await theOperatorScopeRefusalsAreIdenticalArmedAndDisarmed()
   await theWideningIsNotAWildcardOverTheTableActionNamespace()
   await theLegacyTiersAreExactlyWhatTheyWere()
   theRuleIsDeclaredOnceAndTheSplitIsNamed()

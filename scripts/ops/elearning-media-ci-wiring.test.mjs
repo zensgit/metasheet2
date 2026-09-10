@@ -42,6 +42,8 @@ const DB_SUITES = readdirSync(INTEGRATION_DIR)
 
 const WEB_SPECS = [
   'tests/elearning-client.spec.ts',
+  'tests/elearning-app-client.spec.ts',
+  'tests/elearning-app-installation-section.spec.ts',
   'tests/elearning-analytics-admin.spec.ts',
   'tests/elearning-analytics-client.spec.ts',
   'tests/elearning-analytics-period.spec.ts',
@@ -91,6 +93,7 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/views/ElearningCertificateAdminSection.vue',
   'apps/web/src/views/ElearningCertificateWalletSection.vue',
   'apps/web/src/views/ElearningLearnerView.vue',
+  'apps/web/src/views/ElearningWatchChallengePrompt.vue',
   'apps/web/src/views/ElearningManualGradingView.vue',
   'apps/web/src/views/ElearningManualGradingAttempt.vue',
   'apps/web/src/views/ElearningLearningProfileSection.vue',
@@ -105,6 +108,12 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/stores/featureFlags.ts',
   'plugins/plugin-elearning/app.manifest.json',
   'apps/web/tests/elearning-client.spec.ts',
+  'apps/web/tests/elearning-app-client.spec.ts',
+  'apps/web/tests/elearning-app-installation-section.spec.ts',
+  'apps/web/src/services/elearningApp.ts',
+  'apps/web/src/views/ElearningAppInstallationSection.vue',
+  'apps/web/src/views/MyAppsLandingView.vue',
+  'apps/web/src/views/PlatformAppShellView.vue',
   'apps/web/tests/elearning-analytics-admin.spec.ts',
   'apps/web/tests/elearning-analytics-client.spec.ts',
   'apps/web/tests/elearning-analytics-period.spec.ts',
@@ -138,8 +147,10 @@ const SCHEMA_DB_FILES = [
   'tests/integration/elearning-v01-content-assessment-schema.db.test.ts',
   'tests/integration/elearning-v01-watch-progress-schema.db.test.ts',
   'tests/integration/elearning-watch-progress-service.db.test.ts',
+  'tests/integration/elearning-watch-challenge.db.test.ts',
   'tests/integration/elearning-direct-assignment.db.test.ts',
   'tests/integration/elearning-course-publish.db.test.ts',
+  'tests/integration/elearning-course-enrollment.db.test.ts',
   'tests/integration/elearning-title-runtime.db.test.ts',
   'tests/integration/elearning-certificate-runtime.db.test.ts',
   'tests/integration/elearning-learning-profile.db.test.ts',
@@ -184,6 +195,11 @@ const V01_REQUIRED_FLAGS = [
 const V01_PARKED_FLAGS = [
   'ELEARNING_INCENTIVE_ENABLED',
   'ELEARNING_ANALYTICS_ENABLED',
+]
+
+const L6_EXTENSION_FLAGS = [
+  'ELEARNING_WATCH_CHALLENGE_ENABLED',
+  'ELEARNING_ENROLLMENT_ENABLED',
 ]
 
 const MEDIA_CLAIM_UNIT_FILES = [
@@ -550,6 +566,18 @@ test('env example documents the seven canonical flags default false and V0.1 req
       env,
       new RegExp(`^#\\s*${key}=false\\s*$`, 'm'),
       `.env.example must keep the canonical ${key}=false line`,
+    )
+  }
+  for (const key of L6_EXTENSION_FLAGS) {
+    assert.match(
+      env,
+      new RegExp(`^#\\s*${key}=false\\s*$`, 'm'),
+      `.env.example must keep the L6 extension ${key}=false line`,
+    )
+    assert.equal(
+      CANONICAL_ELEARNING_FLAGS.includes(key),
+      false,
+      `${key} is an extension gate, not a canonical V0.1 capability`,
     )
   }
   const requiredBlock = commentBlockStarting(env, /V0\.1 required flags/, 'V0.1 required flags')
