@@ -44,7 +44,7 @@
         <h3>外接数据源（物理连接与凭据）</h3>
         <p>先在这里登记源库连接并测试连通，再在下方新增连接草稿时用 connectionId 引用它；凭据只存这里，不会复制到绑定里。</p>
       </div>
-      <DataSourcesPanel embedded @changed="handleDataSourcesChanged" />
+      <DataSourcesPanel embedded @changed="handleDataSourcesChanged" @show-bindings="revealBindings" />
     </div>
 
     <button
@@ -301,7 +301,7 @@
 // `scope.workspaceId`) rather than a plain `ref` — Vue's `v-model` binds to any ref-like target,
 // so `v-model:workspace-input="workspaceInput"` at the call site works identically whether the
 // parent hands over a `ref` or a writable `computed`.
-import { computed } from 'vue'
+import { computed, nextTick } from 'vue'
 import type { DataSourceListItem } from '../../data-sources/types'
 import type { IntegrationAdapterMetadata, WorkbenchExternalSystem } from '../../services/integration/workbench'
 import type {
@@ -369,6 +369,22 @@ const props = defineProps<{
 // the panel already reported its own success/failure, and this section owns no refresh state.
 function handleDataSourcesChanged(): void {
   void props.onDataSourcesChanged?.()
+}
+
+// The panel's 被引用 column asked to show the bindings that hold a source. Those bindings are the
+// 已配置连接 inventory below, which starts COLLAPSED — an anchor jump alone would land the
+// operator on a section whose answer is hidden. Expanding is presentation only: this list is
+// already rendered from the systems the host fetched for this caller, so revealing it grants
+// nothing that was not already loaded for them.
+async function revealBindings(): Promise<void> {
+  inventoryExpanded.value = true
+  await nextTick()
+  const inventory = typeof document === 'undefined'
+    ? null
+    : document.querySelector('[data-testid="inventory-overview"]')
+  if (inventory && typeof (inventory as HTMLElement).scrollIntoView === 'function') {
+    (inventory as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 }
 
 const inventoryExpanded = defineModel<boolean>('inventoryExpanded', { default: false })
