@@ -246,6 +246,7 @@ import {
   isCustomTemplateId,
   isUndefinedTableError as isCustomTemplateTableMissing,
   listCustomTemplates,
+  normalizeCustomTemplateVisibility,
   softDeleteCustomTemplate,
 } from '../multitable/custom-template-store'
 import { Logger } from '../core/logger'
@@ -7317,20 +7318,23 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
   /**
    * 模板列表 = 内置常量表(只读,来自 template-library.ts 的 TEMPLATE_LIBRARY)
-   *          + 本租户的用户自定义模板(custom: true,来自 meta_multitable_custom_templates)。
+   *          + 本租户里**这个人看得见的**自定义模板(共享给租户的 + 他自己建的私有模板)。
    *
    * 降级口径:内置模板本来零 DB 依赖。自定义模板读失败(表还没迁移 / 库没起来 / 其它)时
    * 不能把整个模板中心打成 500 —— 回内置模板并显式带上 customTemplatesUnavailable:true,
-   * 前端据此明说「自定义模板暂不可用」,而不是假装用户没建过模板。
+   * 前端(MultitableTemplateCenterView 的 template-custom-unavailable 提示条)据此明说
+   * 「自定义模板暂不可用」,而不是假装用户没建过模板。
    * 注意方向:这个回退只让**读**的结果更少,写入口(POST/DELETE)没有任何对应回退。
    */
   router.get('/templates', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
     const builtin = listMultitableTemplates()
     try {
       const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
       const custom = await listCustomTemplates(
         (sql, params) => pool.query(sql, params),
         resolveTemplateTenantId(req),
+        access.userId,
       )
       return res.json({ ok: true, data: { templates: [...custom, ...builtin] } })
     } catch (err) {
@@ -7349,9 +7353,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    * 完成(property 白名单、视图只留结构位、所有 id 重编号成模板内局部 id),
    * 所以模板 JSON 里既没有记录值,也没有源库的 sheet/field/view id。
    *
-   * 可见性:源 Base 的表要先过 filterReadableSheetRowsForAccess —— 与 GET /bases 同一个
-   * 可读过滤器。看不见的表不会被抽进模板;一张都看不见就按「Base 不存在」回 404
+   * 可见性(抽取侧):源 Base 的表要先过 filterReadableSheetRowsForAccess —— 与 GET /bases
+   * 同一个可读过滤器。看不见的表不会被抽进模板;一张都看不见就按「Base 不存在」回 404
    * (不告诉调用方这个 id 是否存在)。
+   *
+   * 可见性(发布侧):模板默认 private —— 只有建它的人看得见。理由是抽取侧的闸只保证
+   * 「建模板的人读得到这些表」,并不保证租户里**别人**读得到:管理员一路放行
+   * (filterReadableSheetRowsForAccess 对 isAdminRole 直接全量通过),他把带「内部成本」表的
+   * Base 存成模板后,若默认全租户可见,表名与全部字段名就绕过表级权限漏给了每个只读用户。
+   * 要当组织资产用,建模板的人显式传 visibility:'tenant'(前端是一个默认不勾的复选框)。
    */
   router.post('/templates', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
@@ -7362,6 +7372,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       icon: z.string().min(1).max(64).optional(),
       color: z.string().min(1).max(32).optional(),
       workspaceId: z.string().min(1).max(100).optional(),
+      // 省略 = private。只有显式的 'tenant' 才会把模板发布给整个租户。
+      visibility: z.enum(['private', 'tenant']).optional(),
     })
     const parsed = schema.safeParse(req.body ?? {})
     if (!parsed.success) {
@@ -7444,6 +7456,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         color: parsed.data.color?.trim() || (typeof baseRow.color === 'string' && baseRow.color ? baseRow.color : '#2563eb'),
         sheets: extracted.sheets,
         createdBy: access.userId,
+        visibility: normalizeCustomTemplateVisibility(parsed.data.visibility),
       })
 
       templateInstallLogger.info('[multitable.template.save-as]', {
@@ -7451,6 +7464,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         ok: true,
         userId: access.userId,
         sheetCount: extracted.sheets.length,
+        visibility: template.visibility,
       })
       return res.status(201).json({ ok: true, data: { template, warnings: extracted.warnings } })
     } catch (err) {
@@ -7490,6 +7504,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         (sql, params) => pool.query(sql, params),
         resolveTemplateTenantId(req),
         templateId,
+        access.userId,
       )
       if (!deleted) {
         return res.status(404).json({
@@ -7546,6 +7561,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           (sql, params) => pool.query(sql, params),
           resolveTemplateTenantId(req),
           templateId,
+          access.userId,
         )
         if (!found) throw new MultitableTemplateNotFoundError(templateId)
         resolvedTemplate = found
@@ -7661,6 +7677,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           (sql, params) => pool.query(sql, params),
           resolveTemplateTenantId(req),
           templateId,
+          userId ?? '',
         )
       } catch (err) {
         if (isCustomTemplateTableMissing(err)) {

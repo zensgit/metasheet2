@@ -6,7 +6,9 @@
  *  - 表单校验(没选 Base / 没填名字 → 提交禁用);
  *  - 提交调 client.createTemplateFromBase 并把服务端的降级 warnings 原样展示,列表强制刷新;
  *  - 自定义模板卡片带「自定义」角标与删除入口,内置模板两者都没有;
- *  - 删除走 client.deleteTemplate 并刷新列表。
+ *  - 删除走 client.deleteTemplate 并刷新列表;
+ *  - 可见性:「共享给本租户」默认不勾,提交的 visibility 是 'private';勾了才是 'tenant';
+ *  - 服务端的 customTemplatesUnavailable 降级标志位必须在页面上明说(而不是表现成「你没建过模板」)。
  *
  * 隐藏只是 UX,服务端才是门 —— 路由级证明在
  * packages/core-backend/tests/unit/multitable-custom-template-routes.test.ts。
@@ -49,7 +51,13 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
-function makeTemplate(overrides: { id: string; name: string; custom?: boolean; category?: string }) {
+function makeTemplate(overrides: {
+  id: string
+  name: string
+  custom?: boolean
+  category?: string
+  visibility?: 'private' | 'tenant'
+}) {
   return {
     id: overrides.id,
     name: overrides.name,
@@ -58,7 +66,7 @@ function makeTemplate(overrides: { id: string; name: string; custom?: boolean; c
     icon: 'T',
     color: '#2563eb',
     sheets: [{ id: 's1', name: 'Sheet', fields: [{ id: 'f1' }], views: [{ id: 'v1', name: 'Grid', type: 'grid' }] }],
-    ...(overrides.custom ? { custom: true } : {}),
+    ...(overrides.custom ? { custom: true, visibility: overrides.visibility ?? 'private' } : {}),
   }
 }
 
@@ -165,11 +173,14 @@ describe('模板中心 —— 把 Base 存为模板', () => {
     root.querySelector<HTMLButtonElement>('[data-testid="template-create-submit"]')!.click()
     await flushUi(10)
 
+    // 精确 deep-equal:多一个键、少一个键、或 visibility 变成 'tenant' 都要红 ——
+    // 默认必须是 private(模板携带表名与全部字段名,发布给整租户得是显式动作)。
     expect(mocks.createTemplateFromBase).toHaveBeenCalledWith({
       baseId: 'base_ops',
       name: '订单模板',
       description: '订单跟进',
       category: '运营',
+      visibility: 'private',
     })
     // 列表强制刷新(否则客户端缓存会让刚建的模板不出现)
     expect(mocks.listTemplates).toHaveBeenLastCalledWith({ force: true })
@@ -234,5 +245,72 @@ describe('模板中心 —— 把 Base 存为模板', () => {
     await flushUi()
     expect(root.querySelector('[data-testid="template-card-custom-badge"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="template-card-delete"]')).toBeNull()
+  })
+
+  it('勾了「共享给本租户」才提交 visibility:tenant,提示按服务端返回的可见性说话', async () => {
+    localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_shared', name: '共享模板', custom: true, visibility: 'tenant' }),
+      warnings: [],
+    })
+    const root = mountView()
+    await flushUi()
+    root.querySelector<HTMLButtonElement>('[data-testid="template-create-open"]')!.click()
+    await flushUi()
+    setValue(root.querySelector<HTMLSelectElement>('[data-testid="template-create-base"]')!, 'base_ops')
+    await flushUi()
+
+    const share = root.querySelector<HTMLInputElement>('[data-testid="template-create-shared"]')!
+    // 默认不勾:发布给整租户必须是一次显式动作
+    expect(share.checked).toBe(false)
+    share.checked = true
+    share.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="template-create-submit"]')!.click()
+    await flushUi(10)
+
+    expect(mocks.createTemplateFromBase.mock.calls[0]?.[0]?.visibility).toBe('tenant')
+    expect(root.querySelector('[data-testid="template-create-notice"]')?.textContent).toContain('已共享给本租户')
+  })
+
+  it('服务端说自定义模板暂不可用时页面必须明说(不能表现成「你没建过模板」)', async () => {
+    mocks.listTemplates.mockResolvedValue({
+      templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })],
+      customTemplatesUnavailable: true,
+    })
+    const root = mountView()
+    await flushUi()
+
+    const banner = root.querySelector('[data-testid="template-custom-unavailable"]')
+    expect(banner).not.toBeNull()
+    expect(banner!.textContent).toContain('自定义模板暂不可用')
+    // 内置模板照常列出来
+    expect(root.querySelector('[data-template-id="project-tracker"]')).not.toBeNull()
+  })
+
+  it('服务端没有降级标志位时不显示那条提示', async () => {
+    mocks.listTemplates.mockResolvedValue({
+      templates: [makeTemplate({ id: 'project-tracker', name: 'Project Tracker' })],
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="template-custom-unavailable"]')).toBeNull()
+  })
+
+  it('私有模板卡片带「仅自己可见」角标;共享给租户的没有', async () => {
+    mocks.listTemplates.mockResolvedValue({
+      templates: [
+        makeTemplate({ id: 'mtpl_priv', name: '私有模板', custom: true }),
+        makeTemplate({ id: 'mtpl_shared', name: '共享模板', custom: true, visibility: 'tenant' }),
+        makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+      ],
+    })
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-template-id="mtpl_priv"] [data-testid="template-card-private-badge"]')).not.toBeNull()
+    expect(root.querySelector('[data-template-id="mtpl_shared"] [data-testid="template-card-private-badge"]')).toBeNull()
+    expect(root.querySelector('[data-template-id="project-tracker"] [data-testid="template-card-private-badge"]')).toBeNull()
   })
 })

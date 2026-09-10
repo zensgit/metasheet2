@@ -15,6 +15,9 @@ import { sql } from 'kysely'
  * 影响的 `req.user.tenantId`)。读写两侧统一用 `tenant_id IS NOT DISTINCT FROM $n`,
  * 所以 NULL(单租户部署)与具体租户互不可见。故意允许 NULL:多维表现有的
  * meta_bases/meta_sheets 本来就没有租户列,这里强制 NOT NULL 会让无租户声明的部署一条也存不进来。
+ *
+ * visibility:'private'(默认)或 'tenant'。模板带着表名与全部字段名,而多维表的读面是按
+ * 表级权限的 —— 所以默认只有建模板的人看得见,「共享给本租户」必须显式勾选。
  */
 
 export const MULTITABLE_CUSTOM_TEMPLATES_TABLE = 'meta_multitable_custom_templates'
@@ -32,10 +35,18 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       color text,
       definition jsonb NOT NULL,
       created_by text,
+      visibility text NOT NULL DEFAULT 'private',
       created_at timestamptz DEFAULT now() NOT NULL,
       updated_at timestamptz DEFAULT now() NOT NULL,
       deleted_at timestamptz
     )
+  `.execute(db)
+
+  // visibility 是这张表**自己的**列,补加语句只为「CREATE TABLE IF NOT EXISTS 跳过了
+  // (表在加这列之前就被建过)」的开发库准备;IF NOT EXISTS → 可重复执行,不碰任何既有表。
+  await sql`
+    ALTER TABLE meta_multitable_custom_templates
+    ADD COLUMN IF NOT EXISTS visibility text NOT NULL DEFAULT 'private'
   `.execute(db)
 
   await sql`

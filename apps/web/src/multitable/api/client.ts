@@ -66,6 +66,7 @@ import type {
   FormShareConfigUpdate,
   CreateTemplateFromBaseInput,
   CreateTemplateFromBaseResult,
+  ListTemplatesResult,
   InstallTemplateInput,
   InstallTemplateResult,
   TemplateDryRunResult,
@@ -1669,8 +1670,11 @@ export class MultitableApiClient implements CommentsApiClient {
   private basesGeneration = 0
   private basesInflight: { promise: Promise<{ bases: MetaBase[] }>; generation: number } | null = null
   private templatesCache: MetaTemplate[] | null = null
+  // 服务端说「自定义模板这一段读不出来」(未迁移 / 库没起来)时带回来的标志位。
+  // 跟着缓存一起存:缓存命中的那次调用也必须把它一起还给调用方,否则提示条会闪一下就消失。
+  private templatesCacheCustomUnavailable = false
   private templatesGeneration = 0
-  private templatesInflight: { promise: Promise<{ templates: MetaTemplate[] }>; generation: number } | null = null
+  private templatesInflight: { promise: Promise<ListTemplatesResult>; generation: number } | null = null
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
@@ -1699,6 +1703,7 @@ export class MultitableApiClient implements CommentsApiClient {
 
   invalidateTemplatesCache(): void {
     this.templatesCache = null
+    this.templatesCacheCustomUnavailable = false
     this.templatesGeneration++
     this.templatesInflight = null
   }
@@ -1763,25 +1768,42 @@ export class MultitableApiClient implements CommentsApiClient {
     return data
   }
 
-  async listTemplates(opts?: { force?: boolean }): Promise<{ templates: MetaTemplate[] }> {
+  /**
+   * customTemplatesUnavailable:服务端在自定义模板那一段读失败时(表没迁移 / 库没起来)
+   * 回退成「只有内置模板」并带上这个标志位。**必须原样透传** —— 丢掉它,未迁移环境看到的
+   * 就是一个「只有 8 张内置模板」的正常页面,恰恰是「假装用户没建过模板」。
+   */
+  async listTemplates(opts?: { force?: boolean }): Promise<ListTemplatesResult> {
     if (opts?.force) {
       this.invalidateTemplatesCache()
     } else {
-      if (this.templatesCache) return { templates: [...this.templatesCache] }
+      if (this.templatesCache) {
+        return {
+          templates: [...this.templatesCache],
+          ...(this.templatesCacheCustomUnavailable ? { customTemplatesUnavailable: true } : {}),
+        }
+      }
       if (this.templatesInflight) {
-        return this.templatesInflight.promise.then((data) => (Array.isArray(data?.templates) ? { templates: [...data.templates] } : data))
+        return this.templatesInflight.promise.then((data) => (Array.isArray(data?.templates) ? { ...data, templates: [...data.templates] } : data))
       }
     }
     const generation = this.templatesGeneration
     const promise = (async () => {
       const res = await this.fetch('/api/multitable/templates')
-      const data = await this.parseJson<{ templates?: MetaTemplate[] }>(res)
+      const data = await this.parseJson<{ templates?: MetaTemplate[]; customTemplatesUnavailable?: boolean }>(res)
+      const customTemplatesUnavailable = data?.customTemplatesUnavailable === true
       // Same passthrough + generation contract as listBases.
       if (Array.isArray(data?.templates)) {
-        if (generation === this.templatesGeneration) this.templatesCache = data.templates
-        return { templates: [...data.templates] }
+        if (generation === this.templatesGeneration) {
+          this.templatesCache = data.templates
+          this.templatesCacheCustomUnavailable = customTemplatesUnavailable
+        }
+        return {
+          templates: [...data.templates],
+          ...(customTemplatesUnavailable ? { customTemplatesUnavailable: true } : {}),
+        }
       }
-      return data as { templates: MetaTemplate[] }
+      return data as ListTemplatesResult
     })()
     this.templatesInflight = { promise, generation }
     try {

@@ -32,6 +32,20 @@
       </div>
     </header>
 
+    <!--
+      服务端在自定义模板那一段读失败(表没迁移 / 库没起来)时会回退成「只有内置模板」并带
+      customTemplatesUnavailable:true。这里必须明说,否则页面看起来就是「你没建过模板」——
+      用户会以为自己刚存的模板丢了。
+    -->
+    <p
+      v-if="customTemplatesUnavailable"
+      class="multitable-templates__warning"
+      role="status"
+      data-testid="template-custom-unavailable"
+    >
+      自定义模板暂不可用(服务端读取用户模板失败),下面只列出内置模板。已保存的自定义模板不会丢失,请联系管理员检查数据库迁移。
+    </p>
+
     <section
       v-if="canAuthorTemplates && showCreateForm"
       class="multitable-templates__create-panel"
@@ -87,6 +101,18 @@
           :disabled="creating"
           placeholder="这个模板适合什么场景"
         />
+      </label>
+      <label class="multitable-templates__create-share">
+        <input
+          v-model="createShared"
+          type="checkbox"
+          data-testid="template-create-shared"
+          :disabled="creating"
+        />
+        <span>
+          共享给本租户(同事都能看到并使用)。不勾选时只有你自己看得见 ——
+          模板会带上表名与全部字段名,共享等于把这些名字给整个租户看。
+        </span>
       </label>
       <div class="multitable-templates__create-actions">
         <MtButton
@@ -211,12 +237,15 @@ const auth = useAuth()
 const canAuthorTemplates = computed(() => auth.hasPermission('multitable:manage-schema'))
 
 const showCreateForm = ref(false)
+const customTemplatesUnavailable = ref(false)
 const createBases = ref<MetaBase[]>([])
 const createBaseId = ref('')
 const createName = ref('')
 const createDescription = ref('')
 const createCategory = ref('')
 const creating = ref(false)
+// 默认不勾:模板携带表名与全部字段名,发布给整租户必须是一次显式动作(服务端默认也是 private)。
+const createShared = ref(false)
 const createError = ref('')
 const createNotice = ref('')
 const createWarnings = ref<string[]>([])
@@ -246,6 +275,7 @@ function closeCreateForm(): void {
   createName.value = ''
   createDescription.value = ''
   createCategory.value = ''
+  createShared.value = false
   createError.value = ''
   createWarnings.value = []
 }
@@ -268,13 +298,17 @@ async function submitCreate(): Promise<void> {
       name: createName.value.trim(),
       description: createDescription.value.trim() || undefined,
       category: createCategory.value.trim() || undefined,
+      visibility: createShared.value ? 'tenant' : 'private',
     })
     createWarnings.value = Array.isArray(result.warnings) ? result.warnings : []
-    createNotice.value = `已保存模板「${result.template.name}」。`
+    // 可见性以**服务端返回的那份**为准(不是本地勾选框),免得前后端默认值不一致时骗人。
+    const shared = result.template.visibility === 'tenant'
+    createNotice.value = `已保存模板「${result.template.name}」(${shared ? '已共享给本租户' : '仅自己可见'})。`
     createBaseId.value = ''
     createName.value = ''
     createDescription.value = ''
     createCategory.value = ''
+    createShared.value = false
     await loadTemplates({ force: true })
   } catch (error) {
     createError.value = error instanceof Error ? error.message : '保存模板失败'
@@ -342,6 +376,7 @@ async function loadTemplates(opts?: { force?: boolean }): Promise<void> {
   try {
     const data = await multitableClient.listTemplates(opts?.force ? { force: true } : undefined)
     templates.value = data.templates ?? []
+    customTemplatesUnavailable.value = data.customTemplatesUnavailable === true
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '加载模板失败'
   } finally {
@@ -460,6 +495,14 @@ onMounted(() => {
 .multitable-templates__create-actions {
   display: flex;
   gap: 0.5rem;
+}
+
+.multitable-templates__create-share {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  color: #334155;
 }
 
 .multitable-templates__create-warnings {

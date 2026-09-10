@@ -795,6 +795,20 @@ export interface MetaTemplate {
   custom?: boolean
   createdBy?: string | null
   createdAt?: string | null
+  /**
+   * 自定义模板的可见性:'private' = 只有建它的人看得见(默认),'tenant' = 共享给本租户。
+   * 服务端才是执行者(list/get/delete 三处 SQL 都带这个谓词),前端只用它显示角标。
+   */
+  visibility?: 'private' | 'tenant'
+}
+
+/**
+ * GET /api/multitable/templates 的返回。customTemplatesUnavailable = 服务端读不出自定义模板
+ * 那一段(表没迁移 / 库没起来)时的降级标志位 —— 前端必须显式提示,不能表现成「你没建过模板」。
+ */
+export interface ListTemplatesResult {
+  templates: MetaTemplate[]
+  customTemplatesUnavailable?: boolean
 }
 
 /** POST /api/multitable/templates —— 从一个 Base 抽结构存成模板(不含任何记录数据)。 */
@@ -803,6 +817,8 @@ export interface CreateTemplateFromBaseInput {
   name?: string
   description?: string
   category?: string
+  /** 省略 = private(只有自己看得见)。只有显式 'tenant' 才把模板发布给整个租户。 */
+  visibility?: 'private' | 'tenant'
 }
 
 export interface CreateTemplateFromBaseResult {

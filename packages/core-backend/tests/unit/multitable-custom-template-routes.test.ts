@@ -10,6 +10,10 @@
  *   C4 授权:只有 multitable:write 的用户建/删都 403;带 multitable:manage-schema 才 201。
  *   C5 可读性:源 Base 里读不到的表不会被抽进模板;一张都读不到按 Base 不存在回 404。
  *   C6 未迁移(SQLSTATE 42P01):GET /templates 退化成只有内置模板 + customTemplatesUnavailable。
+ *   C7 x-tenant-id 兼容头:租户只认 req.authenticatedTenantId。
+ *   C8 可见性:模板默认 private —— 同租户另一个 manage-schema 用户列不到/装不了/删不掉;
+ *      显式 visibility:'tenant' 才全租户可见。
+ *   C9 选项形状:生产落库形状是 {value,color}(见 C1),老的 {id,name} 脏数据仍兼容。
  *
  * Harness 沿用 multitable-template-dryrun-routes.test.ts 的 mock-pool 路由precedent:
  * 真 express + 真 univerMetaRouter,poolManager.get() 打桩成内存 store。
@@ -86,11 +90,11 @@ function createStore(opts: StoreOptions = {}) {
     if (normalized.includes('meta_multitable_custom_templates')) {
       if (opts.customTemplateTableMissing) undefinedTable('meta_multitable_custom_templates')
       if (normalized.startsWith('INSERT INTO meta_multitable_custom_templates')) {
-        const [id, tenantId, workspaceId, name, description, category, icon, color, definition, createdBy] =
-          params as [string, string | null, string | null, string, string, string, string, string, string, string | null]
+        const [id, tenantId, workspaceId, name, description, category, icon, color, definition, createdBy, visibility] =
+          params as [string, string | null, string | null, string, string, string, string, string, string, string | null, string]
         const row = {
           id, tenant_id: tenantId, workspace_id: workspaceId, name, description, category, icon, color,
-          definition: JSON.parse(definition), created_by: createdBy,
+          definition: JSON.parse(definition), created_by: createdBy, visibility,
           created_at: new Date().toISOString(), deleted_at: null,
         }
         customTemplates.push(row)
@@ -101,23 +105,28 @@ function createStore(opts: StoreOptions = {}) {
       // 时才照做。把守卫从 SQL 里删掉,这些用例就会红,而不是被 fake 兜住。
       const scopedByTenant = normalized.includes('tenant_id IS NOT DISTINCT FROM')
       const scopedByLive = normalized.includes('deleted_at IS NULL')
-      const matches = (item: Record<string, unknown>, tenantId: string | null): boolean =>
+      // 可见性谓词同样 wire-vs-fixture:被测 SQL 里真写了
+      // `(visibility = 'tenant' OR created_by = $n)` 时 fake 才照做。把谓词从 SQL 删掉,
+      // C8 就会红 —— 而不是被 fake 兜住。
+      const scopedByVisibility = normalized.includes("(visibility = 'tenant' OR created_by =")
+      const matches = (item: Record<string, unknown>, tenantId: string | null, viewerId?: string | null): boolean =>
         (!scopedByLive || item.deleted_at === null)
         && (!scopedByTenant || (item.tenant_id ?? null) === (tenantId ?? null))
+        && (!scopedByVisibility || item.visibility === 'tenant' || item.created_by === viewerId)
 
       if (normalized.startsWith('UPDATE meta_multitable_custom_templates')) {
-        const [id, tenantId] = params as [string, string | null]
-        const row = customTemplates.find((item) => item.id === id && matches(item, tenantId))
+        const [id, tenantId, viewerId] = params as [string, string | null, string | undefined]
+        const row = customTemplates.find((item) => item.id === id && matches(item, tenantId, viewerId))
         if (!row) return { rows: [], rowCount: 0 }
         row.deleted_at = new Date().toISOString()
         return { rows: [], rowCount: 1 }
       }
       if (normalized.includes('WHERE id = $1')) {
-        const [id, tenantId] = params as [string, string | null]
-        return { rows: customTemplates.filter((item) => item.id === id && matches(item, tenantId)) }
+        const [id, tenantId, viewerId] = params as [string, string | null, string | undefined]
+        return { rows: customTemplates.filter((item) => item.id === id && matches(item, tenantId, viewerId)) }
       }
-      const [tenantId] = params as [string | null]
-      return { rows: customTemplates.filter((item) => matches(item, tenantId)) }
+      const [tenantId, viewerId] = params as [string | null, string | undefined]
+      return { rows: customTemplates.filter((item) => matches(item, tenantId, viewerId)) }
     }
 
     // ── 源 Base 结构表 ─────────────────────────────────────────────────
@@ -268,14 +277,23 @@ const OPS_SHEETS: SeedSheet[] = [
     fields: [
       { id: 'fld_title', name: '订单号', type: 'string', order: 0 },
       {
+        // 生产形状:所有写入口都过 sanitizeFieldProperty → extractSelectOptions,
+        // 落库的 option 只有 {value,color} —— name/label 在入库那一刻就被丢掉了。
+        // 用假形状写 fixture 会给一个「选项存下来了」的假绿。
         id: 'fld_status', name: '状态', type: 'select', order: 1,
-        property: { options: [{ id: 'opt_1', name: '待处理' }, { id: 'opt_2', name: '已完成' }], defaultValue: '待处理' },
+        property: {
+          options: [{ value: '待处理', color: '#f97316' }, { value: '已完成' }],
+          defaultValue: '待处理',
+        },
       },
       { id: 'fld_amount', name: '金额', type: 'number', order: 2, property: { precision: 2, defaultValue: 8888 } },
       {
         id: 'fld_link', name: '关联客户', type: 'link', order: 3,
         property: { foreignSheetId: 'sheet_customers_in_source_db', limitSingleRecord: true },
       },
+      // 模板系统装不下的生产类型(27 种字段里有 11 种进不了 16 种白名单)。必须出声。
+      { id: 'fld_owner', name: '负责人', type: 'person', order: 4, property: { multiple: false } },
+      { id: 'fld_score', name: '评分', type: 'rating', order: 5, property: { max: 5 } },
     ],
     views: [
       {
@@ -318,9 +336,22 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
     // link 字段依赖源库另一张表 → 降级成文本并给人话说明
     expect(created.body.data.warnings.join('\n')).toContain('关联客户')
     const orders = template.sheets.find((sheet: any) => sheet.name === '订单')
-    expect(orders.fields.map((f: any) => f.name)).toEqual(['订单号', '状态', '金额', '关联客户'])
+    expect(orders.fields.map((f: any) => f.name)).toEqual(['订单号', '状态', '金额', '关联客户', '负责人', '评分'])
     expect(orders.fields.find((f: any) => f.name === '关联客户').type).toBe('string')
+    // 生产形状 {value,color} 的下拉选项必须原样存下来(值是结构,不是记录值),颜色也保住
     expect(orders.fields.find((f: any) => f.name === '状态').options).toEqual(['待处理', '已完成'])
+    expect(orders.fields.find((f: any) => f.name === '状态').property.options).toEqual([
+      { value: '待处理', color: '#f97316' },
+      { value: '已完成' },
+    ])
+    // 白名单外的类型(person/rating)降级成文本,并且**出声**
+    expect(orders.fields.find((f: any) => f.name === '负责人').type).toBe('string')
+    expect(orders.fields.find((f: any) => f.name === '评分').type).toBe('string')
+    const warningText = created.body.data.warnings.join('\n')
+    expect(warningText).toContain('负责人')
+    expect(warningText).toContain('person')
+    expect(warningText).toContain('评分')
+    expect(warningText).toContain('rating')
     // 视图结构位按局部 id 重挂
     const board = orders.views.find((v: any) => v.name === '状态看板')
     expect(board.groupByFieldId).toBe(orders.fields[1].id)
@@ -329,7 +360,7 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
     expect(store.sqlLog.filter((entry) => entry.sql.includes('meta_records'))).toEqual([])
     // VALUES-FREE 2:落库 JSON 里没有源库 id、没有 defaultValue 这类值、没有外表指针
     const persisted = JSON.stringify(store.customTemplates[0].definition)
-    for (const leak of ['sheet_orders', 'fld_title', 'fld_status', 'viw_grid', 'sheet_customers_in_source_db', '8888', 'defaultValue', 'foreignSheetId', 'opt_1']) {
+    for (const leak of ['sheet_orders', 'fld_title', 'fld_status', 'viw_grid', 'sheet_customers_in_source_db', '8888', 'defaultValue', 'foreignSheetId', 'multiple']) {
       expect(persisted).not.toContain(leak)
     }
     // 白名单保留了真正的结构位
@@ -349,8 +380,14 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
     expect(installed.status).toBe(201)
     expect(installed.body.data.base.name).toBe('九月订单')
     expect(installed.body.data.fields.map((f: any) => f.name)).toEqual(
-      expect.arrayContaining(['订单号', '状态', '金额', '关联客户']),
+      expect.arrayContaining(['订单号', '状态', '金额', '关联客户', '负责人', '评分']),
     )
+    // 装出来的表:下拉选项 + 颜色都在(provisioning 按 value 把颜色对回去)
+    const statusField = store.fields.find((f: any) => f.name === '状态' && f.sheet_id !== 'sheet_orders') as any
+    expect(statusField.property.options).toEqual([
+      { value: '待处理', color: '#f97316' },
+      { value: '已完成' },
+    ])
     expect(installed.body.data.views.map((v: any) => v.name)).toEqual(
       expect.arrayContaining(['全部订单', '状态看板']),
     )
@@ -516,5 +553,81 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
       .post('/api/multitable/templates/project-tracker/install')
       .send({ baseName: '内置仍可用' })
     expect(installed.status).toBe(201)
+  })
+
+  it('C8: 模板默认只有建它的人可见 —— 同租户另一个 manage-schema 用户列不到/装不了/删不掉;勾了共享才全租户可见', async () => {
+    const store = createStore({ baseSheets: OPS_SHEETS })
+    const author = await createApp(store.handler, { tenantId: 'tenant_a', userId: 'user_author' })
+    pinned.setApp(author.app)
+
+    // 不传 visibility → private(服务端默认收紧,不靠前端)
+    const priv = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '私有模板' })
+    expect(priv.status).toBe(201)
+    expect(priv.body.data.template.visibility).toBe('private')
+    const privateId = priv.body.data.template.id
+
+    const shared = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '共享模板', visibility: 'tenant' })
+    expect(shared.status).toBe(201)
+    expect(shared.body.data.template.visibility).toBe('tenant')
+    const sharedId = shared.body.data.template.id
+
+    // 作者自己两张都看得见
+    const listedAuthor = await request(pinned.url()).get('/api/multitable/templates')
+    const authorIds = listedAuthor.body.data.templates.map((tpl: any) => tpl.id)
+    expect(authorIds).toContain(privateId)
+    expect(authorIds).toContain(sharedId)
+
+    // 同租户的另一个人(同样有 manage-schema):只看得见共享的那张
+    const colleague = await createApp(store.handler, { tenantId: 'tenant_a', userId: 'user_colleague' })
+    pinned.setApp(colleague.app)
+    const listedColleague = await request(pinned.url()).get('/api/multitable/templates')
+    const colleagueIds = listedColleague.body.data.templates.map((tpl: any) => tpl.id)
+    expect(colleagueIds).toContain(sharedId)
+    expect(colleagueIds).not.toContain(privateId)
+    // 表名/字段名也没有从别的渠道漏出去
+    expect(JSON.stringify(listedColleague.body.data.templates)).not.toContain('私有模板')
+
+    // 猜到 id 也装不了、dry-run 不了、删不掉(一律 404,不区分「不存在」和「不是你的」)
+    expect((await request(pinned.url()).post(`/api/multitable/templates/${privateId}/install`).send({})).status).toBe(404)
+    expect((await request(pinned.url()).post(`/api/multitable/templates/${privateId}/dry-run`).send({})).status).toBe(404)
+    expect((await request(pinned.url()).delete(`/api/multitable/templates/${privateId}`)).status).toBe(404)
+    expect(store.customTemplates.find((row) => row.id === privateId)?.deleted_at).toBeNull()
+
+    // 共享的那张同事装得了
+    const installShared = await request(pinned.url())
+      .post(`/api/multitable/templates/${sharedId}/install`)
+      .send({ baseName: '同事的库' })
+    expect(installShared.status).toBe(201)
+  })
+
+  it('C9: 历史脏数据里的 {id,name} 老形状仍能兼容读出选项(生产形状是 {value,color})', async () => {
+    const store = createStore({
+      baseSheets: [{
+        id: 'sheet_legacy',
+        name: '老表',
+        fields: [
+          {
+            id: 'fld_legacy', name: '状态', type: 'select', order: 0,
+            property: { options: [{ id: 'opt_1', name: '待处理' }, { id: 'opt_2', label: '已完成' }, '直接是字符串'] },
+          },
+        ],
+        views: [{ id: 'viw_legacy', name: '表格', type: 'grid' }],
+      }],
+    })
+    const { app } = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(app)
+
+    const created = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '老形状' })
+    expect(created.status).toBe(201)
+    const field = created.body.data.template.sheets[0].fields[0]
+    expect(field.options).toEqual(['待处理', '已完成', '直接是字符串'])
+    // 老形状里的源库 option id 不进模板
+    expect(JSON.stringify(store.customTemplates[0].definition)).not.toContain('opt_1')
   })
 })

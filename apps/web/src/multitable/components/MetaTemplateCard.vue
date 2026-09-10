@@ -15,6 +15,13 @@
         class="meta-template-card__custom-badge"
         data-testid="template-card-custom-badge"
       >{{ workbenchLabel('card.customBadge', isZh) }}</span>
+      <!-- 私有角标:自定义模板默认只有建它的人看得见(visibility='private'),
+           共享给租户的(visibility='tenant')不显示这个角标。 -->
+      <span
+        v-if="template.custom && template.visibility !== 'tenant'"
+        class="meta-template-card__private-badge"
+        data-testid="template-card-private-badge"
+      >{{ workbenchLabel('card.privateBadge', isZh) }}</span>
     </div>
     <h3 class="meta-template-card__name">{{ template.name }}</h3>
     <p class="meta-template-card__description">{{ template.description }}</p>
@@ -142,6 +149,15 @@ const viewCount = computed(() => {
   font-size: 0.75rem;
   color: #0f766e;
   background: #ccfbf1;
+  border-radius: 999px;
+  padding: 0.125rem 0.5rem;
+  white-space: nowrap;
+}
+
+.meta-template-card__private-badge {
+  font-size: 0.75rem;
+  color: #7c2d12;
+  background: #ffedd5;
   border-radius: 999px;
   padding: 0.125rem 0.5rem;
   white-space: nowrap;

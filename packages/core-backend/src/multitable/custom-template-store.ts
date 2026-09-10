@@ -22,6 +22,11 @@
  * 声明的 token 上可能来自调用方可控的 x-tenant-id 兼容头。读写两侧都用
  * `tenant_id IS NOT DISTINCT FROM $n`:有租户的只看得见本租户,无租户的只看得见无租户行,
  * NULL 与具体租户互不可见。
+ *
+ * ── 可见性(租户内的第二道) ────────────────────────────────────────────
+ * 模板携带表名与全部字段名,而多维表既有读面是**按表级权限**的。所以默认 `private`
+ * (只有建它的人看得见/装得了/删得掉),要变成组织资产必须由建模板的人显式勾选
+ * 「共享给本租户」(visibility='tenant')。list/get/softDelete 三处共用同一个谓词。
  */
 import type { MultitableProvisioningFieldType } from './contracts'
 import type {
@@ -141,23 +146,42 @@ function asObject(value: unknown): Record<string, unknown> {
   return {}
 }
 
-/** 选项名是结构(下拉的可选值),不是记录值;只取名字与颜色,丢掉源库 option id。 */
-function extractSelectOptionNames(property: Record<string, unknown>): string[] {
+/**
+ * 下拉可选值是结构(不是记录值),取值 + 颜色,丢掉源库 option id。
+ *
+ * 形状口径按**生产写侧**来定,不按 fixture:meta_fields.property.options 唯一的落库形状是
+ * `{ value, color? }` —— 所有写入口都过 univer-meta.ts 的 sanitizeFieldProperty →
+ * extractSelectOptions,那里只认 `item.value`(name/label 键在入库那一刻就被丢掉),
+ * provisioning.ts 的 buildFieldProperty 也只写 `{ value }`。所以这里必须先读 `value`;
+ * `name`/`label` 只作为历史脏数据/外部导入的兼容回落(读得到就用,读不到不报错)。
+ */
+export type TemplateSelectOption = { value: string; color?: string }
+
+export function extractSelectOptions(property: Record<string, unknown>): TemplateSelectOption[] {
   const raw = Array.isArray(property.options) ? property.options : []
-  const names: string[] = []
+  const options: TemplateSelectOption[] = []
+  const seen = new Set<string>()
   for (const option of raw) {
-    if (typeof option === 'string') {
-      const name = option.trim()
-      if (name) names.push(name)
+    if (typeof option === 'string' || typeof option === 'number') {
+      const value = String(option).trim()
+      if (value && !seen.has(value)) {
+        seen.add(value)
+        options.push({ value })
+      }
       continue
     }
     if (option && typeof option === 'object') {
-      const name = asText((option as Record<string, unknown>).name)
+      const rawValue = (option as Record<string, unknown>).value
+      const value = (typeof rawValue === 'number' ? String(rawValue) : asText(rawValue))
+        || asText((option as Record<string, unknown>).name)
         || asText((option as Record<string, unknown>).label)
-      if (name) names.push(name)
+      if (!value || seen.has(value)) continue
+      seen.add(value)
+      const color = asText((option as Record<string, unknown>).color)
+      options.push(color ? { value, color } : { value })
     }
   }
-  return names
+  return options
 }
 
 function pickSafeProperty(type: string, property: Record<string, unknown>): Record<string, unknown> {
@@ -201,10 +225,23 @@ export function extractTemplateSheets(input: ExtractTemplateInput): ExtractTempl
 
       const rawType = asText(fieldRow.type)
       const property = asObject(fieldRow.property)
-      let type: string = TEMPLATE_FIELD_TYPES.has(rawType) ? rawType : 'string'
-      if (DOWNGRADED_FIELD_TYPES.has(type)) {
-        warnings.push(`字段「${name}」是 ${type} 类型,依赖当前 Base 的其它表/字段,模板里已转为文本列。`)
+      let type: string
+      if (!TEMPLATE_FIELD_TYPES.has(rawType)) {
+        // 生产字段类型联合有 27 种(univer-meta.ts 的 UniverMetaField['type']),模板系统
+        // (= provisioning 的 MultitableProvisioningFieldType)只装得下 16 种。person /
+        // rating / autoNumber / phone / currency 这些在真表里很常见 —— 静默降级会让用户
+        // 以为「结构存下来了」,所以这里必须出声,和 link/lookup 那条降级一个待遇。
         type = 'string'
+        if (rawType) {
+          warnings.push(
+            `字段「${name}」是 ${rawType} 类型,模板系统目前只支持 ${TEMPLATE_FIELD_TYPES.size} 种字段类型,模板里已转为文本列。`,
+          )
+        }
+      } else if (DOWNGRADED_FIELD_TYPES.has(rawType)) {
+        warnings.push(`字段「${name}」是 ${rawType} 类型,依赖当前 Base 的其它表/字段,模板里已转为文本列。`)
+        type = 'string'
+      } else {
+        type = rawType
       }
 
       const field: MultitableTemplateField = {
@@ -215,7 +252,14 @@ export function extractTemplateSheets(input: ExtractTemplateInput): ExtractTempl
         property: pickSafeProperty(type, property),
       }
       if (type === 'select' || type === 'multiSelect') {
-        field.options = extractSelectOptionNames(property)
+        const options = extractSelectOptions(property)
+        field.options = options.map((option) => option.value)
+        // 色板也是结构。descriptor.options 是 string[](共享契约,不为模板一个人加宽),
+        // 所以颜色随 property.options 走 —— provisioning 的 buildFieldProperty 按 value
+        // 把颜色对回去;没有颜色就不写这个键,装出来的表与改动前逐字一致。
+        if (options.some((option) => option.color)) {
+          field.property = { ...field.property, options }
+        }
       }
       fields.push(field)
     })
@@ -274,10 +318,25 @@ export function extractTemplateSheets(input: ExtractTemplateInput): ExtractTempl
 
 // ── 存储 ────────────────────────────────────────────────────────────────────
 
+/**
+ * 可见性。默认 `private` —— 模板里装着表名与全部字段名(比如「内部成本」表的列),
+ * 而多维表既有的读面是**按表级权限**的:管理员看得见的表,普通只读用户不一定看得见。
+ * 存模板如果一律 tenant 可见,就等于给整租户开了一条绕过表级权限的元数据读面。
+ * 所以「共享给本租户」必须由建模板的人显式勾选(收紧优先,放开是一次显式动作)。
+ */
+export type CustomTemplateVisibility = 'private' | 'tenant'
+
+export const CUSTOM_TEMPLATE_DEFAULT_VISIBILITY: CustomTemplateVisibility = 'private'
+
+export function normalizeCustomTemplateVisibility(value: unknown): CustomTemplateVisibility {
+  return value === 'tenant' ? 'tenant' : CUSTOM_TEMPLATE_DEFAULT_VISIBILITY
+}
+
 export type CustomTemplateRecord = MultitableTemplate & {
   custom: true
   createdBy: string | null
   createdAt: string | null
+  visibility: CustomTemplateVisibility
 }
 
 export type CreateCustomTemplateInput = {
@@ -292,6 +351,7 @@ export type CreateCustomTemplateInput = {
   color: string
   sheets: MultitableTemplateSheet[]
   createdBy: string | null
+  visibility: CustomTemplateVisibility
 }
 
 function normalizeRow(row: Record<string, unknown>): CustomTemplateRecord {
@@ -309,16 +369,28 @@ function normalizeRow(row: Record<string, unknown>): CustomTemplateRecord {
     custom: true,
     createdBy: typeof row.created_by === 'string' ? row.created_by : null,
     createdAt: createdAt instanceof Date ? createdAt.toISOString() : (typeof createdAt === 'string' ? createdAt : null),
+    visibility: normalizeCustomTemplateVisibility(row.visibility),
   }
 }
 
-const SELECT_COLUMNS = 'id, name, description, category, icon, color, definition, created_by, created_at'
+const SELECT_COLUMNS = 'id, name, description, category, icon, color, definition, created_by, created_at, visibility'
+
+/**
+ * 可见性谓词。`visibility = 'tenant'` 是共享模板;否则只有建它的人看得见。
+ * `created_by = $n` 用普通等值(不是 IS NOT DISTINCT FROM):viewerId 为空串时
+ * 不会去匹配 created_by IS NULL 的历史行 —— 匿名/无身份的调用者拿不到任何私有模板。
+ */
+const VISIBILITY_PREDICATE = `(visibility = 'tenant' OR created_by = $VIEWER)`
+
+function visibilityPredicate(paramIndex: number): string {
+  return VISIBILITY_PREDICATE.replace('$VIEWER', `$${paramIndex}`)
+}
 
 export async function createCustomTemplate(input: CreateCustomTemplateInput): Promise<CustomTemplateRecord> {
   const result = await input.query(
     `INSERT INTO ${CUSTOM_TEMPLATE_TABLE}
-       (id, tenant_id, workspace_id, name, description, category, icon, color, definition, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+       (id, tenant_id, workspace_id, name, description, category, icon, color, definition, created_by, visibility)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
      RETURNING ${SELECT_COLUMNS}`,
     [
       input.id,
@@ -331,6 +403,7 @@ export async function createCustomTemplate(input: CreateCustomTemplateInput): Pr
       input.color,
       JSON.stringify({ sheets: input.sheets }),
       input.createdBy,
+      normalizeCustomTemplateVisibility(input.visibility),
     ],
   )
   const row = (result.rows as Record<string, unknown>[])[0]
@@ -339,21 +412,23 @@ export async function createCustomTemplate(input: CreateCustomTemplateInput): Pr
 }
 
 /**
- * 列出本租户的用户模板。租户维度写死在 SQL 里(`IS NOT DISTINCT FROM`),调用方给不出
- * 「看全部」的开关 —— 没有跨租户读的入口可言。
+ * 列出**本租户里这个人看得见的**用户模板:共享给租户的 + 他自己建的。租户维度和可见性
+ * 维度都写死在 SQL 里,调用方给不出「看全部」的开关 —— 没有跨租户读、也没有跨人读的入口。
  */
 export async function listCustomTemplates(
   query: CustomTemplateQueryFn,
   tenantId: string | null,
+  viewerId: string,
 ): Promise<CustomTemplateRecord[]> {
   const result = await query(
     `SELECT ${SELECT_COLUMNS}
      FROM ${CUSTOM_TEMPLATE_TABLE}
      WHERE deleted_at IS NULL
        AND tenant_id IS NOT DISTINCT FROM $1
+       AND ${visibilityPredicate(2)}
      ORDER BY created_at DESC
      LIMIT 200`,
-    [tenantId],
+    [tenantId, viewerId],
   )
   return (result.rows as Record<string, unknown>[]).map(normalizeRow)
 }
@@ -362,32 +437,39 @@ export async function getCustomTemplate(
   query: CustomTemplateQueryFn,
   tenantId: string | null,
   templateId: string,
+  viewerId: string,
 ): Promise<CustomTemplateRecord | null> {
   const result = await query(
     `SELECT ${SELECT_COLUMNS}
      FROM ${CUSTOM_TEMPLATE_TABLE}
      WHERE id = $1
        AND deleted_at IS NULL
-       AND tenant_id IS NOT DISTINCT FROM $2`,
-    [templateId, tenantId],
+       AND tenant_id IS NOT DISTINCT FROM $2
+       AND ${visibilityPredicate(3)}`,
+    [templateId, tenantId, viewerId],
   )
   const row = (result.rows as Record<string, unknown>[])[0]
   return row ? normalizeRow(row) : null
 }
 
-/** 软删除。同样带租户维度:别的租户即使猜到 id 也删不掉(rowCount = 0 → 路由回 404)。 */
+/**
+ * 软删除。租户维度 + 可见性维度都带上:别的租户即使猜到 id 也删不掉,同租户里
+ * 看不见(别人的私有模板)的也删不掉 —— 两种情况都 rowCount = 0 → 路由回 404。
+ */
 export async function softDeleteCustomTemplate(
   query: CustomTemplateQueryFn,
   tenantId: string | null,
   templateId: string,
+  viewerId: string,
 ): Promise<boolean> {
   const result = await query(
     `UPDATE ${CUSTOM_TEMPLATE_TABLE}
      SET deleted_at = now(), updated_at = now()
      WHERE id = $1
        AND deleted_at IS NULL
-       AND tenant_id IS NOT DISTINCT FROM $2`,
-    [templateId, tenantId],
+       AND tenant_id IS NOT DISTINCT FROM $2
+       AND ${visibilityPredicate(3)}`,
+    [templateId, tenantId, viewerId],
   )
   return (result.rowCount ?? 0) > 0
 }
