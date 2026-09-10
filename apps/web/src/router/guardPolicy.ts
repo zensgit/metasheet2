@@ -124,8 +124,14 @@ export interface RouteGuardRuntimeDeps {
      * REQUIRED, and required for a reason. The three `stock-prep:*` codes are answered by the
      * server's own literal ladder rather than by `hasPermission` (see
      * `buildStockPrepAwarePermissionProbe`), and that ladder needs the `{ roles, permissions }`
-     * principal, not a yes/no probe. Declaring it non-optional means a call site that forgets it is
-     * a TYPE error rather than a silent, quieter-in-the-wrong-direction fallback.
+     * principal, not a yes/no probe. Declaring it non-optional makes the TWO TYPED src call sites
+     * (`main.ts`, `MyAppsLandingView.vue`) a compile error if they forget it, rather than a silent,
+     * quieter-in-the-wrong-direction fallback.
+     *
+     * SCOPED CLAIM, said out loud: that is a guarantee about those call sites, NOT about every
+     * caller. A spec assembling a deps literal, or any untyped JS caller, is not reached by the
+     * type at all — which is why `buildStockPrepAwarePermissionProbe` ALSO fails closed at runtime
+     * when the snapshot cannot be read, instead of trusting the type to have prevented it.
      */
     getAccessSnapshot: () => StockPrepAccessSnapshot
   }

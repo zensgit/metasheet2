@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
 
-// BOM备料 接入向导「开始使用」(P0-4) — the six-step map's DOM half.
+// BOM备料 接入向导「开始使用」(P0-4) — the seven-step map's DOM half.
 //
 // PURELY PRESENTATIONAL — this component issues no fetch of its own. Every prop here is exactly what
 // `StockPreparationInstallView.vue` already owns and passes down.
@@ -144,7 +144,15 @@ function preflight(overrides: Partial<StockPreparationPreflight> = {}): StockPre
 }
 
 function binding(overrides: Partial<StockPrepGettingStartedBinding> = {}): StockPrepGettingStartedBinding {
-  return { effectiveExternalSystemId: 'plm-1', eligibleSourceCount: 1, dataSourceBackedSourceCount: 1, ...overrides }
+  return {
+    effectiveExternalSystemId: 'plm-1',
+    eligibleSourceCount: 1,
+    dataSourceBackedSourceCount: 1,
+    // The DATA-SOURCE road by default — what ①a/①b are written for. The legacy road has its own
+    // case below, and it is the one F06 was about.
+    requiredKind: 'data-source:sql-readonly',
+    ...overrides,
+  }
 }
 
 /** The step①a registry projection, as `dataSourceRegistry.ts` returns it. */
@@ -326,7 +334,7 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
   }
 
   // ---------------------------------------------------------------------------
-  // The six-step map itself
+  // The seven-step map itself
   // ---------------------------------------------------------------------------
 
   it('renders all seven steps, in order, before any button is pressed', async () => {
@@ -424,17 +432,111 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     if (app) app.unmount()
     app = null
 
-    // A deployment whose eligible bindings are ALL legacy bridges still reads done on ①b, and the
-    // evidence says which road — badging it 「没完成」 would tell an administrator to redo working work.
+    // A data-source-road deployment with no data-source-backed candidate YET still reads done on
+    // ①b — badging it 「没完成」 would tell an administrator to redo working work. The wording is
+    // 「尚未」, not 「都是旧式桥接」: F06 was that the old sentence described a legacy deployment's
+    // correct configuration as a shortfall, and the legacy case has its own wording now.
     root = await mountWithRegistry(registry(), { binding: binding({ eligibleSourceCount: 1, dataSourceBackedSourceCount: 0 }) })
     expect(badgeOf(root, 'source-connect')).toBe('done')
-    expect(evidence(root, 'source-connect')).toContain('旧式桥接')
+    expect(evidence(root, 'source-connect')).toContain('尚未有一条走外接数据源')
     if (app) app.unmount()
     app = null
 
     // ①a says NOTHING when it cannot tell — the badge already says 「? 看不到」.
     root = await mountWithRegistry(registry({ state: 'unknown', sqlCount: 0, status: 500 }))
     expect(evidence(root, 'source-register')).toBe('')
+  })
+
+  // F06 (2026-09-10 对抗复核) — THE FIFTH COMBINATION. A `bridge:legacy-sql-readonly` deployment
+  // can never be offered a `data-source:sql-readonly` system (the server narrows `eligibleSources`
+  // to the action's own frozen kind), so ①a/①b are not its steps at all. Before the fix this
+  // deployment was told to go register a data source the action cannot use, and ①b's evidence
+  // described its working configuration as a shortfall.
+  it('a legacy-bridge deployment is told ①a/①b do not apply — not told to go register a data source', async () => {
+    const legacy = binding({ requiredKind: 'bridge:legacy-sql-readonly', dataSourceBackedSourceCount: 0 })
+    // The registry says `absent` — which, on the data-source road, would be 「需要别人做」. Here it
+    // must NOT be: the action cannot use a data source, so there is nothing outstanding.
+    const root = await mountWithRegistry(registry({ state: 'absent', sqlCount: 0, totalCount: 0 }), { binding: legacy })
+
+    expect(badgeOf(root, 'source-register')).toBe('done')
+    expect(badgeOf(root, 'source-connect')).toBe('done')
+
+    // ONE sentence replaces BOTH instructions...
+    const notice = root.querySelector('[data-testid="stock-prep-getting-started-step-source-legacy-bridge"]')
+    expect(notice, 'the legacy deployment must be told which road it is on').toBeTruthy()
+    expect(notice?.textContent).toContain('不适用')
+    expect(notice?.textContent).toContain('bridge:legacy-sql-readonly')
+    // ...and neither instruction, nor either link, is on screen to be followed.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-register"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-connect"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-connection-draft"]')).toBeNull()
+
+    // G5: the MAP is untouched — seven rows, and the ✔ on ①a is never bare.
+    expect(root.querySelectorAll('[data-testid="stock-prep-getting-started-step"]').length).toBe(7)
+    const evidence = (step: string) => (root.querySelector(
+      `[data-testid="stock-prep-getting-started-step"][data-step="${step}"] [data-testid="stock-prep-getting-started-step-evidence"]`,
+    ) as HTMLElement | null)?.textContent ?? ''
+    expect(evidence('source-register')).toContain('不适用')
+    // ①b's evidence names the road WITHOUT calling it a shortfall — the exact wording F06 objected to.
+    expect(evidence('source-connect')).toContain('本部署就是走旧式桥接')
+    expect(evidence('source-connect')).not.toContain('不经外接数据源')
+  })
+
+  it('the data-source road is unaffected: requiredKind data-source:sql-readonly still drives ①a/①b', async () => {
+    // The negative half of the case above — without it, hard-coding `legacyBridge = true` would pass.
+    const root = await mountWithRegistry(registry({ state: 'absent', sqlCount: 0, totalCount: 0 }), { binding: binding() })
+    expect(badgeOf(root, 'source-register')).toBe('held')
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-legacy-bridge"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-register"]')).toBeTruthy()
+  })
+
+  // Review item 5 — THE PATH NOBODY WAS LOOKING AT. `stock-prep:admin` is the documented reader of
+  // 「开始使用」 and holds no `data_sources:read`, so ①a's read 403s EVERY time for them: the badge
+  // is permanently 「? 看不到」 and progress tops out at 6/7. That is honest, but an unexplained
+  // permanent shrug on the page's primary audience is not. The 403 gets a REASON; other failures
+  // keep the bare badge, because for those the page genuinely does not know why.
+  it('①a’s 403 says which permission is missing; a 500 stays a bare 「? 看不到」', async () => {
+    const evidence = (root: HTMLElement) => (root.querySelector(
+      '[data-testid="stock-prep-getting-started-step"][data-step="source-register"] [data-testid="stock-prep-getting-started-step-evidence"]',
+    ) as HTMLElement | null)?.textContent ?? ''
+
+    let root = await mountWithRegistry(registry({ state: 'unknown', sqlCount: 0, totalCount: 0, status: 403 }))
+    expect(badgeOf(root, 'source-register')).toBe('unknown')
+    expect(evidence(root)).toContain('data_sources:read')
+    expect(evidence(root)).toContain('实施')
+    if (app) app.unmount()
+    app = null
+
+    root = await mountWithRegistry(registry({ state: 'unknown', sqlCount: 0, totalCount: 0, status: 500 }))
+    expect(badgeOf(root, 'source-register')).toBe('unknown')
+    expect(evidence(root), 'a 500 is not a permission story — the page must not invent one').toBe('')
+  })
+
+  it('unknown + denied: the ①a card reads as ONE story — why it cannot tell, and who to ask', async () => {
+    // The real `stock-prep:admin` combination, both halves at once: the registry read 403s AND the
+    // 数据工厂 link is withheld. Asserted on the WHOLE card text, because the failure mode this
+    // guards is two correct sentences that contradict each other on one screen.
+    const root = await mountWithRegistry(
+      registry({ state: 'unknown', sqlCount: 0, totalCount: 0, status: 403 }),
+      { canOpenDataFactory: false },
+    )
+    const row = root.querySelector('[data-testid="stock-prep-getting-started-step"][data-step="source-register"]') as HTMLElement
+    const hint = root.querySelector('[data-testid="stock-prep-getting-started-step-source-register"]') as HTMLElement
+    expect(row).toBeTruthy()
+    expect(hint).toBeTruthy()
+
+    const card = `${row.textContent ?? ''}\n${hint.textContent ?? ''}`
+    // ① what the badge says, ② why it says it, ③ what to do about it, ④ who to ask.
+    expect(card).toContain('看不到')
+    expect(card).toContain('data_sources:read')
+    expect(card).toContain('integration:write')
+    expect(card).toContain('实施')
+    // ...and NOT a link the reader cannot open, nor a claim that the step is unfinished.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
+    expect(card).not.toContain('还没登记')
+    // Progress is honestly capped, never inflated to hide the hole.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-progress"]')?.textContent).toContain('/7')
   })
 
   it('①a’s read is issued once on mount and never auto-probes the customer database (D6)', async () => {
