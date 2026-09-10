@@ -1004,6 +1004,101 @@ describe('StockPreparationWorkspace shell', () => {
     await flushUi()
     expect(directoryCalls().length).toBe(1)
   })
+
+  // ---- 打开备料多维表 on 项目工作台: THE DEEP LINK, END TO END -----------------------------------
+  //
+  // WHY THE COST ASSERTION ABOVE IS NOT ENOUGH. The button is three hops away from a route: the SHELL
+  // fetches the handle, `StockPreparationProjectWorkspaceView` hands it back UP on the emit, and the
+  // shell composes the path. Drop the emit's payload (`emit('open-multitable', props.fillTarget ?? null)`
+  // -> `emit('open-multitable')`) or stop passing `:fill-target` down, and the button still renders
+  // and still says 「打开备料多维表」 — it just lands on the table chooser again, which is the exact
+  // bug this PR exists to remove. Only a click that ends in a ROUTE can catch that, so these two
+  // drive a real run and assert on `router.push`, the same shape 项目备料页's own spec asserts.
+  const SYNC_ACTION_BASE = '/api/integration/table-actions/plm.stock-preparation.pull-bom.v1'
+
+  /** Directory (the handle) + the two sync calls a PLAN_READY -> IMPORTED run makes. Values-free. */
+  function mockWorkspaceSyncReads(fillTarget: { sheetId: string; viewId: string } | null): void {
+    h.apiFetch.mockImplementation(async (url: string) => {
+      const target = String(url)
+      if (target.includes('/operator/projects')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            tenantId: 'tenant-a',
+            directoryReady: true,
+            ledgerReady: true,
+            projectCount: 0,
+            pendingProjectCount: 0,
+            projects: [],
+            fillTarget,
+          },
+        }), { status: 200 })
+      }
+      if (target.includes(`${SYNC_ACTION_BASE}/dry-run`)) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            status: 'ready',
+            canApply: true,
+            dryRunToken: 'tok_ws',
+            counts: { add: 1, update: 0, skip: 0, inactive: 0, manualConfirm: 0 },
+          },
+        }), { status: 200 })
+      }
+      if (target.includes(`${SYNC_ACTION_BASE}/apply`)) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { status: 'succeeded', apply: { counts: { created: 1 } } },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+  }
+
+  /** 项目工作台 -> type a number -> 同步 -> the link the run puts on screen. */
+  async function openMultitableLinkOnProjectWorkspace(root: HTMLDivElement): Promise<HTMLButtonElement> {
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
+    const input = (await waitForSelector(root, '[data-testid="stock-prep-project-sync-project-no"]')) as HTMLInputElement
+    input.value = 'PRJ-WS-1'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(root.querySelector('[data-testid="stock-prep-project-sync-run"]') as HTMLButtonElement).click()
+    return (await waitForSelector(root, '[data-testid="stock-prep-project-sync-open-multitable"]')) as HTMLButtonElement
+  }
+
+  it('打开备料多维表: 项目工作台 routes the click to the BOUND 备料主表, not the chooser', async () => {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    mockWorkspaceSyncReads({ sheetId: 'sheet_x', viewId: 'view_x' })
+    const root = await mountShell()
+
+    const link = await openMultitableLinkOnProjectWorkspace(root)
+    expect(link.getAttribute('data-fill-target')).toBe('bound')
+    expect(link.textContent).toContain('打开备料多维表')
+
+    link.click()
+    await flushUi()
+    // THE ASSERTION THIS PR IS ABOUT: the same route shape 项目备料页's board button produces.
+    expect(h.router.push).toHaveBeenCalledWith({ path: '/multitable/sheet_x/view_x' })
+    expect(h.router.push).not.toHaveBeenCalledWith({ path: '/multitable' })
+  })
+
+  it('打开备料多维表: with NO handle 项目工作台 keeps the old destination, and the label says so', async () => {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    mockWorkspaceSyncReads(null)
+    const root = await mountShell()
+
+    const link = await openMultitableLinkOnProjectWorkspace(root)
+    expect(link.getAttribute('data-fill-target')).toBe('none')
+    expect(link.textContent).toContain('打开多维表工作台')
+
+    link.click()
+    await flushUi()
+    expect(h.router.push).toHaveBeenCalledWith({ path: '/multitable' })
+    // No handle must never be turned into a fabricated deep link.
+    const pushed = h.router.push.mock.calls.map((call: unknown[]) => String((call[0] as { path?: string })?.path ?? ''))
+    expect(pushed.some((path: string) => path.startsWith('/multitable/'))).toBe(false)
+  })
   it('shares the projectId selected in view 1 with view 2 — no re-select needed', async () => {
     mockStockPrepReads()
     const root = await mountShell()
