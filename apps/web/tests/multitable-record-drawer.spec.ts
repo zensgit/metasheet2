@@ -8,6 +8,15 @@ async function flushUi(cycles = 4) {
     await nextTick()
   }
 }
+// Record inspector v3 (2026-09-05, PR-A §1.2): watch/workflow/permissions/duplicate/delete moved
+// from standalone header buttons into the kebab menu, which Teleports its open content to
+// `document.body` — NOT a descendant of `container` — so a test that needs one of those rows opens
+// the kebab first and queries `document.body`.
+async function openKebabMenu(root: HTMLElement) {
+  const trigger = root.querySelector<HTMLButtonElement>('[data-testid="record-inspector-menu"]')
+  trigger?.click()
+  await flushUi()
+}
 
 describe('MetaRecordDrawer', () => {
   it('edits longText values with a textarea in the drawer', async () => {
@@ -246,8 +255,9 @@ describe('MetaRecordDrawer', () => {
 
     app.mount(container)
     await flushUi()
+    await openKebabMenu(container)
 
-    const watchButton = Array.from(container.querySelectorAll('button')).find((button) =>
+    const watchButton = Array.from(document.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Watch'),
     ) as HTMLButtonElement | undefined
     expect(getRecordSubscriptionStatus).toHaveBeenCalledWith('sheet_orders', 'rec_watch_1')
@@ -256,9 +266,11 @@ describe('MetaRecordDrawer', () => {
     watchButton?.click()
     await flushUi()
     expect(subscribeRecord).toHaveBeenCalledWith('sheet_orders', 'rec_watch_1')
-    expect(container.textContent).toContain('Watching')
+    // Selecting the item auto-closes the menu; reopen to read the post-click "Watching" label.
+    await openKebabMenu(container)
+    expect(document.body.textContent).toContain('Watching')
 
-    ;(Array.from(container.querySelectorAll('button')).find((button) =>
+    ;(Array.from(document.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Watching'),
     ) as HTMLButtonElement | undefined)?.click()
     await flushUi()
@@ -309,11 +321,14 @@ describe('MetaRecordDrawer', () => {
     await flushUi()
 
     expect(container.querySelector('.meta-record-drawer__input')).toBeNull()
-    expect(container.textContent).not.toContain('Delete')
-    expect(container.textContent).toContain('Workflow')
+    await openKebabMenu(container)
+    // Delete is gated on `resolvedCanDelete` (rowActions.canDelete ?? canDelete) — rowActions here
+    // sets canDelete:false, overriding the sheet-level canDelete:true prop.
+    expect(document.body.textContent).not.toContain('Delete')
+    expect(document.body.textContent).toContain('Workflow')
 
     ;(container.querySelector('button[title="Comments"]') as HTMLButtonElement | null)?.click()
-    ;(container.querySelector('button[title="Open workflow designer"]') as HTMLButtonElement | null)?.click()
+    ;(document.querySelector('button[title="Open workflow designer"]') as HTMLButtonElement | null)?.click()
     await flushUi()
 
     expect(toggleCommentsSpy).toHaveBeenCalledTimes(1)

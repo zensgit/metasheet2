@@ -211,6 +211,30 @@ function jsonSchemaAt(
 }
 
 describe('elearning V0.1 OpenAPI paths', () => {
+  it('keeps optional application installation commands and result closed', () => {
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      paths: Record<string, Record<string, {
+        security: unknown[]
+        requestBody?: { content: { 'application/json': { schema: JsonSchema } } }
+      }>>
+      components: { schemas: Record<string, JsonSchema> }
+    }
+    const path = doc.paths['/api/elearning-app/installation']
+    for (const method of ['get', 'post', 'put']) expect(path[method].security).toEqual([{ bearerAuth: [] }])
+    expect(path.post.requestBody?.content['application/json'].schema).toEqual({
+      type: 'object', additionalProperties: false, maxProperties: 0,
+    })
+    const command = path.put.requestBody?.content['application/json'].schema
+    expect(command?.additionalProperties).toBe(false)
+    expect(command?.required).toEqual(['enabled', 'notificationsEnabled'])
+    expect(Object.keys(command?.properties ?? {}).sort()).toEqual(['enabled', 'notificationsEnabled'])
+    const result = doc.components.schemas.ElearningAppInstallation
+    expect(result.additionalProperties).toBe(false)
+    expect(result.required).toEqual(['status', 'notificationsEnabled', 'canManage'])
+    expect(Object.keys(result.properties ?? {}).sort()).toEqual(['canManage', 'notificationsEnabled', 'status'])
+    expect(result.properties?.status.enum).toEqual(['not-installed', 'inactive', 'active'])
+    expectTypeOf<paths['/api/elearning-app/installation']['post']>().not.toBeNever()
+  })
   it('exposes the live named-pilot routes in generated SDK types', () => {
     expectTypeOf<paths['/api/elearning/capabilities']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/admin/credit-titles']['get']>().not.toBeNever()

@@ -1587,7 +1587,7 @@ const ATTENDANCE_REPORT_FIELD_DEFINITIONS = Object.freeze([
     name: '入职日期',
     category: 'fixed',
     source: 'system',
-    unit: 'date',
+    unit: 'text',
     dingtalkFieldName: '入职日期',
     description: '员工入职日期。',
     internalKey: 'user.hireDate',
@@ -2840,6 +2840,8 @@ async function ensureAttendanceReportPeriodSummaries(context, orgId, logger) {
 // ── attendance_report_records sync writer (PR2) ──
 // 复用既有 per-user export 构建路径; 不重写聚合; 全程经 multitable 插件 API; attendance_* 仍是唯一事实源.
 function mapReportFieldToMultitableType(field) {
+  // The fixed hire-date column stays date-only, independent of its catalog display unit.
+  if (field?.code === 'hire_date' && !field?.formulaEnabled) return 'date'
   const t = field?.formulaEnabled ? field.formulaOutputType : field?.unit
   if (['number', 'duration_minutes', 'count', 'days', 'hours', 'minutes'].includes(t)) return 'number'
   if (t === 'date') return 'date'

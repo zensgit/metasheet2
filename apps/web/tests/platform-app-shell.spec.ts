@@ -10,6 +10,11 @@ const fetchAppByIdMock = vi.fn()
 const apiGetMock = vi.fn()
 const apiPostMock = vi.fn()
 const pushMock = vi.fn()
+const installationGetMock = vi.fn()
+
+vi.mock('../src/services/elearningApp', () => ({
+  getElearningAppInstallation: (...args: unknown[]) => installationGetMock(...args),
+}))
 
 vi.mock('vue-router', async () => {
   const vue = await import('vue')
@@ -118,6 +123,7 @@ describe('PlatformAppShellView', () => {
     apiGetMock.mockReset()
     apiPostMock.mockReset()
     pushMock.mockReset()
+    installationGetMock.mockReset()
   })
 
   afterEach(() => {
@@ -126,6 +132,39 @@ describe('PlatformAppShellView', () => {
     app = null
     container = null
     setPlatformAppRuntimeInstallState('after-sales', null)
+  })
+
+  it('mounts the optional installation section only for elearning', async () => {
+    currentAppId = 'elearning'
+    const target = createInstanceApp({ id: 'elearning', runtimeBindings: undefined })
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+    installationGetMock.mockResolvedValue({ status: 'not-installed', notificationsEnabled: false, canManage: true })
+    const component = (await import('../src/views/PlatformAppShellView.vue')).default
+    container = document.createElement('div')
+    app = createApp(component as Component)
+    app.mount(container)
+    await flushUi(8)
+    expect(container.querySelector('[aria-label="Cloud classroom installation"]')).not.toBeNull()
+    expect(installationGetMock).toHaveBeenCalledTimes(1)
+    expect(apiPostMock).not.toHaveBeenCalled()
+  })
+
+  it('does not expose the generic mutation path to readonly elearning users', async () => {
+    currentAppId = 'elearning'
+    const target = createInstanceApp({ id: 'elearning' })
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+    apiGetMock.mockResolvedValue({ status: 'not-installed' })
+    installationGetMock.mockResolvedValue({ status: 'not-installed', notificationsEnabled: false, canManage: false })
+    const component = (await import('../src/views/PlatformAppShellView.vue')).default
+    container = document.createElement('div')
+    app = createApp(component as Component)
+    app.mount(container)
+    await flushUi(8)
+    expect(container.querySelector('button')).toBeNull()
+    expect(container.textContent).toContain('not-installed')
+    expect(apiPostMock).not.toHaveBeenCalled()
   })
 
   it('renders runtime diagnostics from the bound current endpoint', async () => {
