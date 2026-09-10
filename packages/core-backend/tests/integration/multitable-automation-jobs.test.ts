@@ -8,6 +8,13 @@
  * (lifecycleFor onStart→onSettled→onSkipped → listByExecution + raw-SQL confirm).
  * Runs only with DATABASE_URL (plugin-tests.yml real-DB job).
  */
+/**
+ * G05 note: the rule-driven `send_webhook` action is now SSRF-gated, and the gate RESOLVES a target name.
+ * These specs use a TEST-NET-3 literal (RFC 5737, documentation-only and not routable) because the gate
+ * accepts a public IP literal WITHOUT any DNS lookup — so the run stays deterministic offline. The previous
+ * `example.test` host is RFC 6761 guaranteed-NXDOMAIN: the gate would fail closed on it (and stall for the
+ * resolver timeout first). The stubbed fetchFn still means no packet is ever sent.
+ */
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -193,12 +200,12 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
             key: 'vip',
             label: 'VIP',
             conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
-            actions: [{ type: 'send_webhook', config: { url: 'https://example.test/vip' } }],
+            actions: [{ type: 'send_webhook', config: { url: 'https://203.0.113.10/vip' } }],
           },
           {
             key: 'standard',
             conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'standard' }] },
-            actions: [{ type: 'send_webhook', config: { url: 'https://example.test/standard' } }],
+            actions: [{ type: 'send_webhook', config: { url: 'https://203.0.113.10/standard' } }],
           },
         ],
       },
@@ -228,7 +235,7 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
           trigger: { type: 'record.created', config: {} },
           actions: [
             branchAction,
-            { type: 'send_webhook', config: { url: 'https://example.test/after' } },
+            { type: 'send_webhook', config: { url: 'https://203.0.113.10/after' } },
           ],
           enabled: true,
           createdBy: 'u1',
@@ -244,7 +251,7 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
         status: 'success',
         output: { selectedBranchKey: 'vip', selectedBranchLabel: 'VIP', matched: true },
       })
-      expect(urls).toEqual(['https://example.test/vip', 'https://example.test/after'])
+      expect(urls).toEqual(['https://203.0.113.10/vip', 'https://203.0.113.10/after'])
 
       const raw = await q(
         `SELECT id, step_index, step_key, action_type, status, upstream_job_id

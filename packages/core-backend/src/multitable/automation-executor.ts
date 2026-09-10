@@ -62,6 +62,8 @@ import {
 } from '../services/approval-record-link-txn-auth'
 import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
 import { redactString, redactValue } from './automation-log-redact'
+import { checkWebhookTargetUrl, type SsrfLookupFn } from './webhook-ssrf-guard'
+import { classifyWebhookRefusal, WEBHOOK_TARGET_REJECTED } from './webhook-refusal-class'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
@@ -1526,6 +1528,13 @@ export interface AutomationDeps {
     handler: (client: { query: AutomationDeps['queryFn'] }) => Promise<T>,
   ) => Promise<T>
   fetchFn?: typeof fetch
+  /**
+   * DNS seam for the `send_webhook` SSRF gate (G05). OMITTED ⇒ the real resolver, so production is
+   * gated by actual DNS; a test injects a deterministic resolver instead of reaching the network.
+   * This is a RESOLVER seam only — it cannot disable the gate: `checkWebhookTargetUrl` still judges
+   * every returned address, and a seam that returns an internal address is refused like any other.
+   */
+  ssrfLookupFn?: SsrfLookupFn
   notificationService?: Pick<NotificationService, 'send'>
   /** Optional cross-base write quota override (limit/window/store). Omit → process-global default. */
   crossBaseWriteQuota?: CrossBaseWriteQuotaConfig
@@ -4114,6 +4123,53 @@ export class AutomationExecutor {
     const url = config.url as string | undefined
     if (!url) {
       return { actionType: 'send_webhook', status: 'failed', error: 'Webhook URL is required' }
+    }
+
+    // ── G05 SSRF gate (#5615 "刀 0") ─────────────────────────────────────────
+    // `config.url` comes from an automation rule's JSON, i.e. from anyone who can EDIT A RULE — a much
+    // wider set than the deploy operator, and the rule row also stores a long-lived `Authorization`
+    // header verbatim. Ungated, that made the server a request-forgery proxy that replays stored
+    // credentials at the internal network. The identical control has guarded the button-field egress
+    // path since B1-S2 (`routes/multitable-button.ts`); this is the same guard on the rule-driven path.
+    //
+    // PLACEMENT is load-bearing, three ways:
+    //  1. BEFORE the header/HMAC assembly below — a refused target never gets a signature computed over
+    //     the body, and the caller-supplied headers (Authorization/Cookie/…) are never even materialised.
+    //  2. BEFORE `classBOutboundIdentity` / `executeSendWebhookTwoPhase` — so BOTH the legacy retry loop
+    //     and the two-phase path are gated by this ONE call, and a refusal consumes NO outbound-intent
+    //     claim (Tx A never runs), exactly as the button route refuses before its dedup transaction.
+    //  3. BEFORE any `fetchFn` call — refusal means the request is never made, so nothing can leak by
+    //     being sent. That is the whole "strip Authorization pointed at localhost" property: we do not
+    //     scrub the header, we never dispatch it.
+    //
+    // Refusal is FINAL for this attempt: no retry loop, no fallback, no env override (see the design
+    // doc — neither egress path has an internal-target allowlist, by deliberate omission).
+    const ssrf = await checkWebhookTargetUrl(url, this.deps.ssrfLookupFn)
+    if (!ssrf.ok) {
+      // `strict: false` in this package disables discriminated-union narrowing (same reason as the
+      // button route); read `reason` off the rejection variant explicitly.
+      const guardReason = (ssrf as { reason?: string }).reason
+      // VALUES-FREE: the guard's `reason` is NOT logged — it is only mapped to a closed-set label. The
+      // URL (which may carry userinfo/query credentials) and every header value stay out of the log and
+      // out of the persisted step result; only the code + host SHAPE are recorded.
+      const refusal = classifyWebhookRefusal(url, guardReason)
+      logger.warn('[automation.send_webhook.refused]', {
+        code: refusal.code,
+        refusalClass: refusal.refusalClass,
+        hostFamily: refusal.hostFamily,
+        sheetId: context.sheetId, // an identifier, so the offending rule is findable; never a value
+      })
+      return {
+        actionType: 'send_webhook',
+        status: 'failed',
+        error: `${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`,
+        output: {
+          code: refusal.code,
+          refusalClass: refusal.refusalClass,
+          hostFamily: refusal.hostFamily,
+          dispatched: false,
+        },
+      }
     }
 
     const method = (config.method as string) ?? 'POST'
