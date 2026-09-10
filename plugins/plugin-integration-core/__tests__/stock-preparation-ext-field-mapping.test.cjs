@@ -52,6 +52,10 @@ const {
   planStockPreparationConflicts,
 } = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
 
+// The REAL secret detector the mapper itself uses, so the proof below (a
+// rendered scalar is never secret-shaped) cannot drift from the live patterns.
+const { __internals: { isSecretShaped } } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+
 const {
   applyStockPreparationPlan,
   StockPreparationApplyWriterError,
@@ -369,15 +373,16 @@ function typeCoercionSucceedsAndRefuses() {
     )
   }
 
-  // STRING — a number arriving for a string column is REFUSED, not String()-ed.
-  // Silent stringification is the same class of bug as silent truncation.
+  // STRING — a SCALAR (number/boolean/bigint) is rendered as text losslessly;
+  // the full battery lives in nonStringScalarsBecomeTextLosslessly() below.
+  // Anything whose textual form would be a GUESS is still refused.
   assert.deepEqual(coerceSourceValue('DWG-1', 'string'), { ok: true, value: 'DWG-1' })
   assert.deepEqual(coerceSourceValue('  padded  ', 'string'), { ok: true, value: 'padded' })
-  for (const input of [12, true, {}, []]) {
+  for (const input of [{}, [], new Date('2026-08-23T00:00:00.000Z'), Number.NaN, Number.POSITIVE_INFINITY]) {
     assert.deepEqual(
       coerceSourceValue(input, 'string'),
       { ok: false, reason: 'SOURCE_VALUE_NOT_A_STRING' },
-      `string refuses ${JSON.stringify(input)}`,
+      `string refuses ${String(input)}`,
     )
   }
 
@@ -392,7 +397,12 @@ function typeCoercionSucceedsAndRefuses() {
   )
   // Without one, any non-empty label is as much as this module can check.
   assert.deepEqual(coerceSourceValue('anything', 'select'), { ok: true, value: 'anything' })
-  assert.deepEqual(coerceSourceValue(7, 'select'), { ok: false, reason: 'SOURCE_VALUE_NOT_AN_OPTION' })
+  // A numeric option key is rendered as text and THEN judged by the
+  // dictionary: being a number buys exemption from the TYPE wall only, never
+  // from the vocabulary.
+  assert.deepEqual(coerceSourceValue(7, 'select', dictionary), { ok: false, reason: 'SOURCE_VALUE_NOT_AN_OPTION' })
+  assert.deepEqual(coerceSourceValue(7, 'select'), { ok: true, value: '7' })
+  assert.deepEqual(coerceSourceValue(new Date(0), 'select'), { ok: false, reason: 'SOURCE_VALUE_NOT_AN_OPTION' })
 
   // A secret-shaped cell never reaches a sheet, whatever the declared type.
   const secret = coerceSourceValue('AKIAIOSFODNN7EXAMPLE1234', 'string')
@@ -423,6 +433,130 @@ function typeCoercionSucceedsAndRefuses() {
   }])
   // The refusal is values-free: the offending cell is never in the report.
   assert.equal(JSON.stringify(applied.errors).includes('10件'), false)
+}
+
+// ── 5b. a non-string SCALAR becomes text losslessly ──────────────────────────
+//
+// 现场（2026-09-10 客户 PLM 真实数据）：项目 2-20241722.1723 试算 1137 行，6 行进确认队列，
+// 冲突类型全为 SOURCE_VALUE_NOT_A_STRING —— 客户 PLM 的扩展属性列（数量/尺寸类）经 mssql
+// 驱动回来是 number，落到 pack 声明为 string/select 的 ext_ 列上整格被拒；而确认页只开放
+// duplicate_expanded_key，这几行永远清不掉。转换只改类型不改语义：不本地化、不加千分位、
+// 不四舍五入；语义不明的（Date/对象）仍然拒绝，不猜。
+
+function nonStringScalarsBecomeTextLosslessly() {
+  const { coerceSourceValue } = mappingInternals
+
+  // The exact literal and NOTHING else: no locale, no thousands separator, no
+  // padding, no rounding, no unit.
+  const lossless = [
+    [12, '12'],
+    [12.5, '12.5'],
+    [0, '0'],
+    [-0, '0'],
+    [-3, '-3'],
+    [0.1, '0.1'],
+    [1234567, '1234567'],
+    [1e21, '1e+21'],
+    [true, 'true'],
+    [false, 'false'],
+    [12n, '12'],
+    [9007199254740993n, '9007199254740993'],
+  ]
+  for (const [input, expected] of lossless) {
+    assert.deepEqual(
+      coerceSourceValue(input, 'string'),
+      { ok: true, value: expected },
+      `string accepts ${String(input)}`,
+    )
+    // Round-trip: the rendered text reads back as the SAME value, which is what
+    // makes this a re-typing rather than a reinterpretation.
+    // `===` not `assert.equal`: -0 renders as '0' and reads back as +0, which is
+    // the same quantity to every consumer (a source cell cannot mean -0).
+    if (typeof input === 'number') assert.ok(Number(expected) === input, `round-trip ${String(input)}`)
+    if (typeof input === 'bigint') assert.equal(BigInt(expected), input)
+  }
+  // A locale-aware path would have smuggled a separator in here.
+  assert.equal(coerceSourceValue(1234567, 'string').value.includes(','), false)
+  // 9007199254740993n is NOT representable as a double: had the branch gone
+  // through Number() the last digit would have changed.
+  assert.equal(coerceSourceValue(9007199254740993n, 'string').value, '9007199254740993')
+
+  // Not-a-value scalars stay refused, and the reason token is UNCHANGED.
+  for (const input of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.deepEqual(
+      coerceSourceValue(input, 'string'),
+      { ok: false, reason: 'SOURCE_VALUE_NOT_A_STRING' },
+      `string refuses ${String(input)}`,
+    )
+  }
+  // A Date is refused: which timezone, which format? That answer is a guess,
+  // and guessing is the class of bug this module exists to prevent.
+  for (const input of [new Date('2026-08-23T01:02:03.000Z'), new Date(0), {}, [], Symbol('s'), () => {}]) {
+    assert.deepEqual(
+      coerceSourceValue(input, 'string'),
+      { ok: false, reason: 'SOURCE_VALUE_NOT_A_STRING' },
+      `string refuses ${String(input)}`,
+    )
+  }
+
+  // SELECT: rendered first, then the installed dictionary decides.
+  const dictionary = ['10', '12', '20 - 示例节点乙']
+  assert.deepEqual(coerceSourceValue(12, 'select', dictionary), { ok: true, value: '12' })
+  assert.deepEqual(coerceSourceValue(10, 'select', dictionary), { ok: true, value: '10' })
+  assert.deepEqual(coerceSourceValue(99, 'select', dictionary), { ok: false, reason: 'SOURCE_VALUE_NOT_AN_OPTION' })
+  assert.deepEqual(coerceSourceValue(true, 'select', ['true']), { ok: true, value: 'true' })
+  assert.deepEqual(coerceSourceValue(Number.NaN, 'select', dictionary), { ok: false, reason: 'SOURCE_VALUE_NOT_AN_OPTION' })
+
+  // NUMBER / DATE / BOOLEAN columns are untouched by this change: they judge
+  // the RAW value, and a rendered-text shortcut into them would be exactly the
+  // reinterpretation this module refuses (`true` is still not a number).
+  assert.deepEqual(coerceSourceValue(true, 'number'), { ok: false, reason: 'SOURCE_VALUE_NOT_A_NUMBER' })
+  assert.deepEqual(coerceSourceValue(20260823, 'date'), { ok: false, reason: 'SOURCE_VALUE_NOT_A_DATE' })
+  assert.deepEqual(coerceSourceValue(1, 'boolean'), { ok: false, reason: 'SOURCE_VALUE_NOT_A_BOOLEAN' })
+
+  // The secret gate reads the COERCED value, so the new branch does not bypass
+  // it. Two halves, because a rendered scalar can never itself be
+  // secret-shaped: (a) the gate still bites on text ...
+  assert.deepEqual(
+    coerceSourceValue('token=synthetic-not-a-real-secret', 'string'),
+    { ok: false, reason: 'SOURCE_VALUE_SECRET_SHAPED' },
+  )
+  assert.deepEqual(
+    coerceSourceValue('token=synthetic-not-a-real-secret', 'select'),
+    { ok: false, reason: 'SOURCE_VALUE_SECRET_SHAPED' },
+  )
+  // ... and (b) every scalar this branch can accept renders to a numeric or
+  // true/false literal that no secret pattern can match — PROVED over the same
+  // bank against the real detector, not asserted in prose.
+  for (const [input] of lossless) {
+    const out = coerceSourceValue(input, 'string')
+    assert.equal(out.ok, true)
+    assert.equal(isSecretShaped(out.value), false, `rendered scalar must not be secret-shaped: ${String(input)}`)
+  }
+
+  // Through the REAL apply surface: the numeric cell now LANDS instead of
+  // costing the row its PLM data, and the still-refused cell is reported
+  // values-free (schema ids and a frozen token only).
+  const mapping = normalize([
+    { sourceColumn: 'Bom_ExAttr7', target: 'ext_spec' },
+    { sourceColumn: 'Bom_ExAttr8', target: 'ext_parentDrawingNo' },
+  ])
+  const applied = applyExtFieldMapping(mapping, {
+    Bom_ExAttr7: 12.5,
+    Bom_ExAttr8: new Date('2026-08-23T01:02:03.000Z'),
+  })
+  assert.deepEqual(applied.values, { ext_spec: '12.5' })
+  assert.deepEqual(applied.errors, [{
+    type: 'SOURCE_VALUE_NOT_A_STRING',
+    target: 'ext_parentDrawingNo',
+    sourceColumn: 'Bom_ExAttr8',
+    expectedType: 'string',
+  }])
+  // values-free: neither the accepted nor the refused cell appears in a reason.
+  const reported = JSON.stringify(applied.errors)
+  assert.equal(reported.includes('12.5'), false)
+  assert.equal(reported.includes('2026-08-23'), false)
+  assert.equal(reported.includes('Aug'), false)
 }
 
 // ── 6. the row-production boundary carries the mapped values ──────────────────
@@ -980,6 +1114,7 @@ async function main() {
   humanOwnedTargetIsRefused()
   canonicalTargetIsRefused()
   typeCoercionSucceedsAndRefuses()
+  nonStringScalarsBecomeTextLosslessly()
   await rowProductionCarriesMappedValues()
   await mappedValueReachesTheRecordThroughTheRealPlanner()
   await unmappedExtKeyFailsLoud()
