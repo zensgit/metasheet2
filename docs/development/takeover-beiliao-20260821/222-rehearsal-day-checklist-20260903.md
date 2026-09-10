@@ -134,10 +134,10 @@ POST /api/integration/stock-preparation/sandbox-target/ensure
 { "objectId": "<同上 objectId>", "label": "<表名>" }
 ```
 
-响应 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`。把它**整段**贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`:
+响应 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`。**没有装 customer pack 时**,把它整段贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`;**装了 pack 时不能直接整段贴,要先合并——见紧接着的"r7 订正"**:
 
 ```json
-{ "plm.stock-preparation.pull-bom.v1": { "target": "<把 data.targetBinding 整段贴在这里>" } }
+{ "plm.stock-preparation.pull-bom.v1": { "target": "<未装 pack 时把 data.targetBinding 整段贴在这里;装了 pack 时贴合并后的结果,见下面 r7 订正>" } }
 ```
 
 > r7 订正:若装了 customer pack,**不要真的"整段"覆盖**——ensure 只返回 33 个 TEMPLATE 字段(20 个 `plm_system` + 13 个人工列),不带 pack 的 21 个 `ext_` 列,直接整段贴会静默丢掉 `ext_` 映射。正确做法是**合并**:ensure 的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId,旧物理列 id 依然有效),动手前先备份 `app.env`。**不想手工拼 JSON**的话,ensure 建完表后用 `node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> --pack <packFile> --pack-id <id> --action-fragment` 离线算出已经合并好的 `{ target, extensionFieldIds }`,直接贴它的 `target`。
@@ -344,7 +344,7 @@ pg_restore --clean --if-exists -d $env:DATABASE_URL "$backupDir\pre-upgrade-db.d
 
 **[4] Runbook 没有「项目备料页」这一节。** #5460 **完全没有改** Runbook(`git diff` 对其 merge-base 为空),所以 Runbook 的 Step 6/7 仍写成「管理员用 curl 跑 dry-run + apply」。§4 的四步是**一线在页面上自己点**的等价流程,依据是 #5460 的路由与门(`requireAccess(req, STOCK_PREP_OPERATE)` + 一线拉取门拆分),不是 Runbook。两者都真,彩排走 §4。
 
-**[5] `main` 上的 Runbook Step 0-7 仍是错的。** 它写「`sheetId`:既有值,不变」——照做会顶着沙箱的名把行写进正式主表。#5459 已订正为「调 ensure、整段贴 `targetBinding`」。**#5459 合入前不要照 main 版本操作**;§2-2 用的是订正后的写法。
+**[5] `main` 上的 Runbook Step 0-7 仍是错的。** 它写「`sheetId`:既有值,不变」——照做会顶着沙箱的名把行写进正式主表。#5459 已订正为「调 ensure、整段贴 `targetBinding`」。**#5459 合入前不要照 main 版本操作**;§2-2 用的是订正后的写法(**2026-09-10 补注**:「整段贴」这个说法本身在没装 customer pack 时才成立——装了 pack 要按§2-2 的「r7 订正」先合并再贴,不能整段覆盖,详见上面§2-2)。
 
 **[6] 未覆盖项。** #5455(字段权限 reconcile + 回填,Runbook 的 3-3a)不在本次发布内,已整步略去 —— 后果是既有表上的字段级权限行不会被本次对账,人工列的可写性以当前部署现状为准。
 
