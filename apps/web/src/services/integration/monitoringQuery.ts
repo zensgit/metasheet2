@@ -8,7 +8,7 @@
 //
 //   - runs      → plugins/plugin-integration-core/lib/http-routes.cjs:9639 `runsList`
 //                 (pipelineId | status | limit | offset), implemented by
-//                 plugins/plugin-integration-core/lib/pipelines.cjs:698 `listPipelineRuns`
+//                 plugins/plugin-integration-core/lib/pipelines.cjs:699 `listPipelineRuns`
 //                 (pipelineId OPTIONAL, status validated against VALID_RUN_STATUSES).
 //   - dead      → http-routes.cjs:9674 `deadLettersList` (pipelineId | runId | status | limit |
 //     letters     offset), implemented by dead-letter.cjs:121 `listDeadLetters`.
@@ -94,7 +94,7 @@ function normalizePipelineScope(value: unknown): MonitoringPipelineScope {
 
 /**
  * Clamps/drops every field to what the backend accepts. An unknown status becomes '' (no filter)
- * rather than being forwarded — pipelines.cjs:703 would 400 on it, and a 400 here would blank the
+ * rather than being forwarded — pipelines.cjs:706-707 would 400 on it, and a 400 here would blank the
  * whole section.
  */
 export function normalizeMonitoringQueryState(input: Partial<MonitoringQueryState> = {}): MonitoringQueryState {
@@ -126,8 +126,12 @@ export function createMonitoringQueryState(overrides: Partial<MonitoringQuerySta
 /**
  * The pipelineId that will actually be sent, or '' for a cross-pipeline read. '' is a legitimate
  * answer on EVERY branch: the backend treats a missing pipelineId as "this scope's pipelines"
- * (pipelines.cjs:702 only adds the predicate when the value is truthy) and applies the
- * tenant/workspace predicate regardless — dropping pipelineId never widens past the caller's scope.
+ * (pipelines.cjs:703 only adds the predicate when the value is truthy) and applies its OWN scope
+ * predicate either way. That scope is NOT uniformly proven: `tenantId` is verified against the
+ * caller's claim (http-routes.cjs:1028 resolveTenantId — 403 on mismatch), while `workspaceId` is
+ * taken from the request as-is with no membership check (http-routes.cjs:1248-1250
+ * resolveWorkspaceId). Dropping pipelineId therefore does not widen anything BEYOND what the same
+ * caller could already read by pasting another pipeline id — it only removes a step.
  */
 export function resolveMonitoringPipelineId(state: MonitoringQueryState, fallbackPipelineId = ''): string {
   const normalized = normalizeMonitoringQueryState(state)

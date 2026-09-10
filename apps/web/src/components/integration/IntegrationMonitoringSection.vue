@@ -14,10 +14,17 @@
       </template>
 
 
-    <div class="integration-workbench__monitoring-filters" data-testid="monitoring-filters">
+    <!-- X1: `:data-filter-epoch` is not decoration — it makes this subtree re-render after EVERY
+         apply attempt, so v-model's updated hook snaps each control back to the cursor that
+         actually produced the rows below when a read failed and the cursor did not move. -->
+    <div
+      class="integration-workbench__monitoring-filters"
+      data-testid="monitoring-filters"
+      :data-filter-epoch="filterEpoch"
+    >
       <label>
         <span>管道范围</span>
-        <select data-testid="monitoring-pipeline-scope" :value="monitoringQuery.pipelineScope" @change="onPipelineScopeChange">
+        <select data-testid="monitoring-pipeline-scope" v-model="pipelineScopeModel">
           <option value="current">{{ currentPipelineId ? `当前 Pipeline（${currentPipelineId}）` : '当前 Pipeline（未设置 → 跨管道）' }}</option>
           <option value="all">全部管道（跨管道）</option>
           <option value="custom">指定 Pipeline ID</option>
@@ -26,29 +33,28 @@
       <label v-if="monitoringQuery.pipelineScope === 'custom'">
         <span>Pipeline ID</span>
         <input
+          v-model.lazy="pipelineIdModel"
           data-testid="monitoring-pipeline-id"
-          :value="monitoringQuery.pipelineId"
           placeholder="留空 = 跨管道"
-          @change="onPipelineIdChange"
         />
       </label>
       <label>
         <span>运行状态</span>
-        <select data-testid="monitoring-run-status" :value="monitoringQuery.runStatus" @change="onRunStatusChange">
+        <select data-testid="monitoring-run-status" v-model="runStatusModel">
           <option value="">全部状态</option>
           <option v-for="status in runStatusOptions" :key="status" :value="status">{{ status }}</option>
         </select>
       </label>
       <label>
         <span>死信状态</span>
-        <select data-testid="monitoring-dead-letter-status" :value="monitoringQuery.deadLetterStatus" @change="onDeadLetterStatusChange">
+        <select data-testid="monitoring-dead-letter-status" v-model="deadLetterStatusModel">
           <option value="">全部状态</option>
           <option v-for="status in deadLetterStatusOptions" :key="status" :value="status">{{ status }}</option>
         </select>
       </label>
       <label>
         <span>每页</span>
-        <select data-testid="monitoring-page-size" :value="String(monitoringQuery.pageSize)" @change="onPageSizeChange">
+        <select data-testid="monitoring-page-size" v-model="pageSizeModel">
           <option v-for="size in pageSizeOptions" :key="size" :value="String(size)">{{ size }}</option>
         </select>
       </label>
@@ -70,6 +76,12 @@
         >下一页</button>
         <span v-if="pollingActive" class="integration-workbench__badge" data-testid="monitoring-polling">运行中 · 每 5 秒自动刷新</span>
       </div>
+      <p
+        v-if="monitoringError"
+        class="integration-workbench__hint integration-workbench__hint--strong"
+        data-testid="monitoring-error"
+        role="alert"
+      >{{ monitoringError }}</p>
       <p class="integration-workbench__hint" data-testid="monitoring-reach-hint">
         后端 <code>GET /runs</code> 与 <code>GET /dead-letters</code> 只接受 pipelineId / status / limit / offset，
         既没有时间窗参数也不返回总数：所以这里没有起止时间筛选，"下一页"按"本页取满 = 可能还有下一页"判断，
@@ -170,8 +182,11 @@
             <strong :data-testid="`dead-letter-label-${deadLetter.id}`">{{ deadLetterErrorLabel(deadLetter) }}</strong>
             <span v-if="deadLetterErrorHint(deadLetter)">{{ deadLetterErrorHint(deadLetter) }}</span>
             <small :data-testid="`dead-letter-code-${deadLetter.id}`">errorCode: {{ deadLetter.errorCode }}</small>
-            <small>
-              {{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }}<template v-if="deadLetter.retryCount"> · retries {{ deadLetter.retryCount }}</template><template v-if="deadLetter.idempotencyKey"> · key {{ deadLetter.idempotencyKey }}</template>
+            <!-- X2: the dead-letter list is the only surface here that can trigger a REAL write
+                 (replay), and G34 made its default scope cross-pipeline — so the row must say
+                 which pipeline it belongs to, and so must the confirm button's title. -->
+            <small :data-testid="`dead-letter-meta-${deadLetter.id}`">
+              {{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }} · pipeline {{ deadLetter.pipelineId }}<template v-if="deadLetter.retryCount"> · retries {{ deadLetter.retryCount }}</template><template v-if="deadLetter.idempotencyKey"> · key {{ deadLetter.idempotencyKey }}</template>
             </small>
             <div class="integration-workbench__dead-letter-actions">
               <span
@@ -193,6 +208,7 @@
                     class="integration-workbench__button integration-workbench__button--danger"
                     :data-testid="`confirm-replay-dead-letter-${deadLetter.id}`"
                     :disabled="replayingDeadLetterId === deadLetter.id"
+                    :title="`将重放 dead letter ${deadLetter.id}（pipeline ${deadLetter.pipelineId}）— 会向目标系统真实写入`"
                     @click="replayDeadLetter(deadLetter)"
                   >{{ replayingDeadLetterId === deadLetter.id ? 'Replay 中…' : '确认 Replay（会真实写入）' }}</button>
                   <button
@@ -320,6 +336,8 @@ const props = defineProps<{
   observingPipeline: boolean
   /** The section's filter/pagination cursor (owned by the view, built by the pure module). */
   monitoringQuery: MonitoringQueryState
+  /** X1: non-empty when the last read FAILED — rendered here because filter reads are silent. */
+  monitoringError: string
   /** The workbench's saved pipeline id — the fallback the 'current' scope resolves to. */
   currentPipelineId: string
   /** Store the next cursor and re-read. The ONLY way this component changes the query. */
@@ -380,39 +398,64 @@ const loadedPageCount = computed(() => Math.max(props.pipelineRuns.length, props
 const canGoNextPage = computed(() => hasNextMonitoringPage(props.monitoringQuery, loadedPageCount.value))
 const canGoPreviousPage = computed(() => hasPreviousMonitoringPage(props.monitoringQuery))
 
-function eventValue(event: Event): string {
-  const target = event.target as HTMLSelectElement | HTMLInputElement | null
-  return target ? target.value : ''
+// X1: every control writes through here. The view commits the new cursor ONLY together with the
+// rows it produced, so after a failed read `props.monitoringQuery` is still the old cursor while
+// the DOM control holds the value the operator just picked. Bumping the epoch forces a re-render,
+// and v-model's updated hook then resets the control to the cursor the visible rows belong to —
+// no control may ever claim a filter that is not the one on screen.
+const filterEpoch = ref(0)
+
+async function applyQuery(next: MonitoringQueryState): Promise<void> {
+  try {
+    await props.applyMonitoringQuery(next)
+  } finally {
+    filterEpoch.value += 1
+  }
 }
 
-function onPipelineScopeChange(event: Event): void {
-  void props.applyMonitoringQuery(withMonitoringPipelineScope(props.monitoringQuery, eventValue(event) as MonitoringPipelineScope))
-}
+const pipelineScopeModel = computed<MonitoringPipelineScope>({
+  get: () => props.monitoringQuery.pipelineScope,
+  set: (value) => {
+    void applyQuery(withMonitoringPipelineScope(props.monitoringQuery, value))
+  },
+})
 
-function onPipelineIdChange(event: Event): void {
-  void props.applyMonitoringQuery(withMonitoringPipelineId(props.monitoringQuery, eventValue(event)))
-}
+const pipelineIdModel = computed<string>({
+  get: () => props.monitoringQuery.pipelineId,
+  set: (value) => {
+    void applyQuery(withMonitoringPipelineId(props.monitoringQuery, value))
+  },
+})
 
-function onRunStatusChange(event: Event): void {
-  void props.applyMonitoringQuery(withMonitoringRunStatus(props.monitoringQuery, eventValue(event)))
-}
+const runStatusModel = computed<string>({
+  get: () => props.monitoringQuery.runStatus,
+  set: (value) => {
+    void applyQuery(withMonitoringRunStatus(props.monitoringQuery, value))
+  },
+})
 
-function onDeadLetterStatusChange(event: Event): void {
-  void props.applyMonitoringQuery(withMonitoringDeadLetterStatus(props.monitoringQuery, eventValue(event)))
-}
+const deadLetterStatusModel = computed<string>({
+  get: () => props.monitoringQuery.deadLetterStatus,
+  set: (value) => {
+    void applyQuery(withMonitoringDeadLetterStatus(props.monitoringQuery, value))
+  },
+})
 
-function onPageSizeChange(event: Event): void {
-  void props.applyMonitoringQuery(withMonitoringPageSize(props.monitoringQuery, Number(eventValue(event))))
-}
+const pageSizeModel = computed<string>({
+  get: () => String(props.monitoringQuery.pageSize),
+  set: (value) => {
+    void applyQuery(withMonitoringPageSize(props.monitoringQuery, Number(value)))
+  },
+})
 
 function goNextPage(): void {
   if (!canGoNextPage.value) return
-  void props.applyMonitoringQuery(nextMonitoringPage(props.monitoringQuery, loadedPageCount.value))
+  void applyQuery(nextMonitoringPage(props.monitoringQuery, loadedPageCount.value))
 }
 
 function goPreviousPage(): void {
   if (!canGoPreviousPage.value) return
-  void props.applyMonitoringQuery(previousMonitoringPage(props.monitoringQuery))
+  void applyQuery(previousMonitoringPage(props.monitoringQuery))
 }
 
 // Run detail is LOCAL state on purpose: there is no GET /runs/:id (the route table stops at

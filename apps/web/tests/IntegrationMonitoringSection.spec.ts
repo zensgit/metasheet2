@@ -77,6 +77,7 @@ describe('IntegrationMonitoringSection (unit)', () => {
       observationSummary: '0 runs / 0 open dead letters',
       observingPipeline: false,
       monitoringQuery: createMonitoringQueryState(),
+      monitoringError: '',
       currentPipelineId: 'pipe_1',
       applyMonitoringQuery: vi.fn(noopFn),
       pipelineRuns: [] as IntegrationPipelineRun[],
@@ -306,6 +307,54 @@ describe('IntegrationMonitoringSection (unit)', () => {
     expect(detail.textContent).toContain('2 rows failed')
     expect(container?.querySelector('[data-testid="run-dead-letter-count-run-9"]')?.textContent).toContain('2')
     expect(container?.querySelector('[data-testid="run-detail-source-run-9"]')?.textContent).toContain('GET /runs/:id')
+  })
+
+  it('X1: a filter change that did NOT commit snaps the control back and surfaces the error', async () => {
+    // The view commits the cursor only together with the rows, so a FAILED read leaves
+    // `monitoringQuery` on the old value. The control must not keep claiming the filter the
+    // operator picked — that is the "new label, old rows" bug this guards.
+    const applyMonitoringQuery = vi.fn(noopFn)
+    await mountSection(baseProps({
+      applyMonitoringQuery,
+      deadLetters: [deadLetter({ id: 'dl-open', status: 'open' })],
+    }))
+    await chooseOption('monitoring-dead-letter-status', 'discarded')
+    expect(applyMonitoringQuery).toHaveBeenCalledTimes(1)
+    // Cursor did not move (the mock never changed the prop) → the select is back on open.
+    expect(select('monitoring-dead-letter-status').value).toBe('open')
+    expect(container?.querySelector('[data-testid="dead-letter-dl-open"]')).not.toBeNull()
+    expect(container?.textContent).not.toContain('Dead Letters（discarded）')
+
+    await updateProps({ monitoringError: '监控读取失败，筛选/翻页未生效：boom' })
+    const error = container?.querySelector('[data-testid="monitoring-error"]')
+    expect(error).not.toBeNull()
+    expect(error?.textContent).toContain('未生效')
+  })
+
+  it('X1: a page turn that did NOT commit leaves the page indicator on the page that is showing', async () => {
+    const applyMonitoringQuery = vi.fn(noopFn)
+    await mountSection(baseProps({
+      applyMonitoringQuery,
+      pipelineRuns: Array.from({ length: 5 }, (_value, index) => run({ id: `run-${index}` })),
+    }))
+    const next = container?.querySelector('[data-testid="monitoring-next-page"]') as HTMLButtonElement
+    next.click()
+    await nextTick()
+    expect(applyMonitoringQuery).toHaveBeenCalledTimes(1)
+    expect(container?.querySelector('[data-testid="monitoring-page-indicator"]')?.textContent).toContain('第 1 页')
+    expect(container?.querySelector('[data-testid="monitoring-page-indicator"]')?.textContent).toContain('offset 0')
+  })
+
+  it('X2: every dead-letter row names its pipeline, and so does the real-write confirm button', async () => {
+    await mountSection(baseProps({
+      deadLetters: [deadLetter({ id: 'dl-x', pipelineId: 'pipe_other', status: 'open' })],
+      isDeadLetterReplayable: () => true,
+      confirmReplayDeadLetterId: 'dl-x',
+    }))
+    expect(container?.querySelector('[data-testid="dead-letter-meta-dl-x"]')?.textContent).toContain('pipeline pipe_other')
+    const confirm = container?.querySelector('[data-testid="confirm-replay-dead-letter-dl-x"]') as HTMLButtonElement
+    expect(confirm.getAttribute('title')).toContain('pipe_other')
+    expect(confirm.getAttribute('title')).toContain('真实写入')
   })
 
   it('G34: polls every 5s while a run is running, and stops as soon as none is', async () => {

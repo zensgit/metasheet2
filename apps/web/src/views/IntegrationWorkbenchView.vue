@@ -379,6 +379,7 @@
       :observation-summary="observationSummary"
       :observing-pipeline="observingPipeline"
       :monitoring-query="monitoringQuery"
+      :monitoring-error="monitoringError"
       :current-pipeline-id="savedPipelineId"
       :apply-monitoring-query="applyMonitoringQuery"
       :pipeline-runs="pipelineRuns"
@@ -879,6 +880,9 @@ const deadLetters = ref<IntegrationDeadLetter[]>([])
 // single place that reads it); IntegrationMonitoringSection renders the controls and hands back
 // a NEW state built by the pure module's transitions.
 const monitoringQuery = ref<MonitoringQueryState>(createMonitoringQueryState())
+// X1: a filter/page read that FAILS must not leave the section silent. The status bar is not
+// enough (filter reads are silent by design), so the section renders this string itself.
+const monitoringError = ref('')
 // Last-write-wins gate for overlapping observation reads (5s polling + operator filter changes).
 const observationGate = createMonitoringResponseGate()
 // IU-1 (RATIFIED addendum): the raw `errorMessage` free-text field must NEVER reach the DOM — it is
@@ -3272,37 +3276,50 @@ function buildPipelinePayload() {
 }
 
 // G34: monitoring is no longer pinned to one saved pipeline. The pure module decides which
-// parameters the two list routes actually get (pipelineId omitted = cross-pipeline read INSIDE
-// the same tenant/workspace scope — the scope predicate is applied server-side either way).
-async function refreshPipelineObservation(silent = false): Promise<void> {
+// parameters the two list routes actually get (pipelineId omitted = cross-pipeline read inside
+// the SAME scope the server resolves — tenant is proven from the token, workspace is
+// self-declared, exactly as before this change).
+//
+// X1: `nextQuery` is the CANDIDATE cursor, not the committed one. It is written into
+// `monitoringQuery` only together with the rows it produced, so the section can never label a
+// list with a filter/page that did not actually load — the failure mode that would let an
+// operator hit 「确认 Replay（会真实写入）」 on a row from the PREVIOUS filter.
+async function refreshPipelineObservation(silent = false, nextQuery?: MonitoringQueryState): Promise<void> {
   // Ticket FIRST: a slower earlier read must never repaint the list under a newer cursor.
   const ticket = observationGate.issue()
+  const query = nextQuery ?? monitoringQuery.value
   observingPipeline.value = true
   try {
     const scope = currentScope()
     const fallbackPipelineId = savedPipelineId.value
     const [runs, letters] = await Promise.all([
-      listIntegrationPipelineRuns(buildRunsRequestParams(monitoringQuery.value, scope, fallbackPipelineId)),
-      listIntegrationDeadLetters(buildDeadLetterRequestParams(monitoringQuery.value, scope, fallbackPipelineId)),
+      listIntegrationPipelineRuns(buildRunsRequestParams(query, scope, fallbackPipelineId)),
+      listIntegrationDeadLetters(buildDeadLetterRequestParams(query, scope, fallbackPipelineId)),
     ])
     if (!observationGate.isCurrent(ticket)) return
+    // Cursor + rows commit together, in this order, under the same ticket.
+    monitoringQuery.value = query
     pipelineRuns.value = runs
     deadLetters.value = letters
+    monitoringError.value = ''
     if (!silent) setStatus('Pipeline 运行记录已刷新', 'success')
   } catch (error) {
     if (!observationGate.isCurrent(ticket)) return
-    if (!silent) setStatus(error instanceof Error ? error.message : String(error), 'error')
+    const message = error instanceof Error ? error.message : String(error)
+    // ALWAYS visible, silent or not: a failed filter/page read leaves the OLD rows on screen,
+    // and an operator must be told the filter they picked is not the one they are looking at.
+    monitoringError.value = `监控读取失败，筛选/翻页未生效（仍显示上一次成功的结果）：${message}`
+    if (!silent) setStatus(message, 'error')
   } finally {
     // A superseded read must not clear the spinner the newer read is still using.
     if (observationGate.isCurrent(ticket)) observingPipeline.value = false
   }
 }
 
-// The section's only write path into the cursor: it hands back a state the pure module built,
-// the view stores it and re-reads. Silent — filter changes are not a status-bar event.
+// The section's only write path into the cursor: it hands back a state the pure module built.
+// Silent (filter changes are not a status-bar event) — the section renders `monitoringError`.
 async function applyMonitoringQuery(next: MonitoringQueryState): Promise<void> {
-  monitoringQuery.value = next
-  await refreshPipelineObservation(true)
+  await refreshPipelineObservation(true, next)
 }
 
 function runRowSummaries(run: IntegrationPipelineRun): IntegrationTargetWriteSummary[] {

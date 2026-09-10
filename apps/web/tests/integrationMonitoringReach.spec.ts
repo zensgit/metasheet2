@@ -88,7 +88,7 @@ describe('G34 运行监控到达率 (view → request)', () => {
    */
   function installFetchMock(
     runsFor: (url: string) => unknown | Promise<Response> | null = () => null,
-    deadLettersFor: (url: string) => unknown | null = () => null,
+    deadLettersFor: (url: string) => unknown | Promise<Response> | Response | null = () => null,
   ): void {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url.startsWith('/api/integration/runs?')) {
@@ -99,7 +99,10 @@ describe('G34 运行监控到达率 (view → request)', () => {
       }
       if (url.startsWith('/api/integration/dead-letters?')) {
         deadLetterUrls.push(url)
-        return jsonResponse(deadLettersFor(url) ?? [])
+        const answer = deadLettersFor(url)
+        if (answer instanceof Promise) return answer
+        if (answer instanceof Response) return answer
+        return jsonResponse(answer ?? [])
       }
       // Bootstrap + every other section: an empty answer is enough for this spec.
       return jsonResponse([])
@@ -234,5 +237,93 @@ describe('G34 运行监控到达率 (view → request)', () => {
     await flushUi()
     expect(container?.querySelector('[data-testid="pipeline-run-run_stale"]')).toBeNull()
     expect(container?.querySelector('[data-testid="pipeline-run-run_fresh"]')).not.toBeNull()
+  })
+
+  // X1: the failure path. A silent filter read that fails used to leave a NEW label (heading,
+  // page number, dropdown) over the PREVIOUS page's rows with nothing in the status bar — an
+  // operator could then hit 「确认 Replay（会真实写入）」 believing the row matched the filter.
+  it('X1: a filter read that REJECTS shows an error and never relabels the previous rows', async () => {
+    installFetchMock(
+      () => [pipelineRun({ id: 'run_ok' })],
+      (url) => {
+        if (url.includes('status=discarded')) return Promise.reject(new Error('network down'))
+        return [{
+          id: 'dl_open',
+          tenantId: 'default',
+          workspaceId: null,
+          runId: 'run_ok',
+          pipelineId: 'pipe_g34',
+          errorCode: 'VALIDATION_FAILED',
+          errorMessage: 'x',
+          status: 'open',
+        }]
+      },
+    )
+    await mountView()
+    await setPipelineId('pipe_g34')
+    await clickRefresh()
+    expect(container?.querySelector('[data-testid="dead-letter-dl_open"]')).not.toBeNull()
+
+    await chooseOption('monitoring-dead-letter-status', 'discarded')
+
+    // 1) The failure is VISIBLE even though filter reads are silent.
+    const error = container?.querySelector('[data-testid="monitoring-error"]')
+    expect(error).not.toBeNull()
+    expect(error?.textContent).toContain('network down')
+
+    // 2) The label never moved ahead of the data: still the open list, still labelled open.
+    expect(container?.querySelector('[data-testid="dead-letter-dl_open"]')).not.toBeNull()
+    expect(container?.textContent).not.toContain('Dead Letters（discarded）')
+    const statusSelect = container?.querySelector('[data-testid="monitoring-dead-letter-status"]') as HTMLSelectElement
+    expect(statusSelect.value).toBe('open')
+    // ...and the request that DID produce the visible rows is still the open one.
+    expect(deadLetterUrls.at(-1)).toContain('status=discarded')
+    expect(container?.querySelector('[data-testid="monitoring-summary"]')?.textContent).not.toContain('discarded')
+  })
+
+  it('X1: a page turn that FAILS keeps the page indicator and rows on the page that is showing', async () => {
+    installFetchMock((url) => {
+      if (url.includes('offset=')) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: false, error: { message: 'RUNS_READ_FAILED' } }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      }
+      return Array.from({ length: 5 }, (_value, index) => pipelineRun({ id: `run_p1_${index}` }))
+    })
+    await mountView()
+    await setPipelineId('pipe_g34')
+    await clickRefresh()
+    expect(container?.querySelector('[data-testid="pipeline-run-run_p1_0"]')).not.toBeNull()
+
+    const next = container?.querySelector('[data-testid="monitoring-next-page"]') as HTMLButtonElement
+    next.click()
+    await flushUi()
+
+    expect(runUrls.at(-1)).toBe('/api/integration/runs?tenantId=default&pipelineId=pipe_g34&limit=5&offset=5')
+    expect(container?.querySelector('[data-testid="monitoring-error"]')?.textContent).toContain('RUNS_READ_FAILED')
+    // The rows on screen are page 1 — so the indicator must still say page 1.
+    expect(container?.querySelector('[data-testid="pipeline-run-run_p1_0"]')).not.toBeNull()
+    const indicator = container?.querySelector('[data-testid="monitoring-page-indicator"]')?.textContent ?? ''
+    expect(indicator).toContain('第 1 页')
+    expect(indicator).toContain('offset 0')
+  })
+
+  it('X1: a later SUCCESSFUL read clears the error banner', async () => {
+    let failNext = true
+    installFetchMock((url) => {
+      if (url.includes('status=failed') && failNext) {
+        failNext = false
+        return Promise.reject(new Error('boom'))
+      }
+      return [pipelineRun({ id: 'run_ok' })]
+    })
+    await mountView()
+    await setPipelineId('pipe_g34')
+    await chooseOption('monitoring-run-status', 'failed')
+    expect(container?.querySelector('[data-testid="monitoring-error"]')).not.toBeNull()
+
+    await clickRefresh()
+    expect(container?.querySelector('[data-testid="monitoring-error"]')).toBeNull()
   })
 })

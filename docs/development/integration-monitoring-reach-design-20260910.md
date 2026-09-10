@@ -7,8 +7,8 @@
 
 | 参数 | runs (`GET /api/integration/runs`) | dead-letters (`GET /api/integration/dead-letters`) | 出处 |
 | --- | --- | --- | --- |
-| `pipelineId` | 可选 | 可选 | `plugins/plugin-integration-core/lib/http-routes.cjs:9639` / `:9674`；`pipelines.cjs:702`、`dead-letter.cjs:129` 都只在值为真时才加谓词 |
-| `status` | 可选，闭集 `pending / running / succeeded / partial / failed / cancelled` | 可选，闭集 `open / replayed / discarded` | `pipelines.cjs:27` VALID_RUN_STATUSES；`dead-letter.cjs:7` VALID_STATUSES |
+| `pipelineId` | 可选 | 可选 | `plugins/plugin-integration-core/lib/http-routes.cjs:9639` / `:9674`；`pipelines.cjs:703`、`dead-letter.cjs:129` 都只在值为真时才加谓词 |
+| `status` | 可选，闭集 `pending / running / succeeded / partial / failed / cancelled` | 可选，闭集 `open / replayed / discarded` | `pipelines.cjs:27` VALID_RUN_STATUSES（校验在 `:706-707`）；`dead-letter.cjs:7` VALID_STATUSES |
 | `limit` | 可选，`asListLimit` 截到 500 | 同左 | `http-routes.cjs:1436` MAX_LIST_LIMIT=500，`:1479` asListLimit |
 | `offset` | 可选，`asListOffset` 截到 10000 | 同左 | `http-routes.cjs:1437` MAX_LIST_OFFSET=10000，`:1485` asListOffset |
 | `runId` | 无 | 可选（本期未用） | `http-routes.cjs:9679` |
@@ -17,9 +17,15 @@
 | 总数 / 分页元信息 | **不返回**（`sendOk(res, 数组)`） | **不返回**（同样是数组） | `http-routes.cjs:9641`、`:9684` |
 | 单条运行详情 `GET /runs/:id` | **不存在**（路由表只有 `GET /api/integration/runs`） | — | `http-routes.cjs:270-273` |
 
-两个列表都在 `scopedInput` 里带上 tenant/workspace 谓词（`pipelines.cjs:700`、`dead-letter.cjs:125`），
-**省掉 `pipelineId` 不会越过调用方自己的租户/工作区作用域**——它只是把"某一条管道"放宽成"本作用域内的全部管道"。
-这也是本 PR 唯一一处"读取变宽"，写入口一行没动。
+两个列表都在 `scopedInput`（`http-routes.cjs:1252-1258`）里带上服务端解析的作用域谓词
+（`pipelines.cjs:702`、`dead-letter.cjs:125-128`）。这个作用域**并非两维都经过证明**：
+`tenantId` 经过校验（`http-routes.cjs:1028` `resolveTenantId`，不匹配 403 TENANT_MISMATCH / `assertVerifiedTenantClaim`），
+而 `workspaceId` 是**客户端自报**（`http-routes.cjs:1248-1250` `resolveWorkspaceId` 直取请求值，无成员校验）——
+这是 main 上已有的形状，本 PR 未改变它。
+
+因此“省掉 `pipelineId`”**不是越权放宽**：读取集合仍由服务端 `scopeWhere` 决定，本 PR 之前把任意
+pipelineId 粘进输入框就能读到同一批数据，变的只是少一步（已经 29 代理对抗复核终审裁定：不加权限位）。
+写入口一行没动。
 
 ## 2. 改前的到达率
 
@@ -54,6 +60,29 @@
 `applyMonitoringQuery`；组件自己不发请求。筛选控件在读取进行中**不禁用**（改错了筛选不该等一次请求），
 安全性由票据兜底。
 
+### 3.2.1 X1（对抗复核必修）：游标与数据不分家，且失败必须可见
+
+初版的 `applyMonitoringQuery` 先写 `monitoringQuery.value = next` 再 silent 地去读，而 silent 分支的 catch
+不写状态栏——于是筛选/翻页失败时：标题已变成「Dead Letters（discarded）」、页码已变成第 1 页，
+列表里却还是上一批 open 死信，而且**一个字都不说**。操作员据此对其中一行点「确认 Replay（会真实写入）」，
+就会 replay 到一条其实还是 open 的死信上。切管道范围与翻页两条路径行内没有任何反证（行不显示 pipelineId、
+不带序号），所以不能靠“行自己渲染 status”兼顾。修法三处：
+
+1. `refreshPipelineObservation(silent, nextQuery?)`：`nextQuery` 是**候选**游标，只在读取成功、且通过
+   票据后，才与 rows 在同一个 tick 里一起提交（`monitoringQuery.value = query` 紧跟 `pipelineRuns/deadLetters`）。
+   失败时游标根本不动，标题/页码/下拉全部停在“屏上这批行”对应的那个查询上。
+2. 新增 `monitoringError` ref（视图）+ `data-testid="monitoring-error"`（section）：**无论 silent 与否**都写，
+   成功时清空。文案直说“筛选/翻页未生效（仍显示上一次成功的结果）”。
+3. 控件回弹：筛选控件改用 `v-model` + 可写 computed，并在每次 apply 后 `filterEpoch += 1` 强制重渲染，
+   让 v-model 的 `updated` 钩子把 DOM 值拉回到“真正产出当前行”的那个值（否则下拉框会独自停在
+   discarded，同样是一句谎）。
+
+### 3.2.2 X2（对抗复核必修）：唯一会真实写入的那张表不得匿名
+
+跨管道是本 PR 自造的默认作用域变更，而死信行是本区唯一能触发真实写入（replay）的地方，
+所以死信行的 `<small>` 补上 `· pipeline {{ deadLetter.pipelineId }}`（类型早就有：`workbench.ts:391`），
+「确认 Replay（会真实写入）」按钮的 `title` 同步带上 pipelineId。run 行已有 `<dt>pipeline</dt>`，两边持平。
+
 ### 3.3 视图侧只留最小接线
 
 `IntegrationWorkbenchView.vue` 只动了 4 处（导入、一个 `monitoringQuery` ref + 一个 gate、
@@ -72,7 +101,21 @@
 5. **`runId` 筛选、`includePayload`**：后端支持但本期用不上（前者要先有运行详情入口，后者涉及脱敏面）。
 6. **每页默认仍是 5**：既保持首屏 URL 与既有断言逐字节不变，也让这次改动可回滚为纯 UI 增量。
 
-## 5. 兼容性
+## 5. 后续（本波不做，对抗复核终审明确记账）
+
+1. **跨端 parity spec**：把前端三个常量（run 状态闭集 / 死信状态闭集 / limit・offset 上限）钉到后端导出上。
+   三个源头都已导出：`pipelines.cjs:815 __internals`（`VALID_RUN_STATUSES` 在 `:826`）、`dead-letter.cjs:193`、`http-routes.cjs:9752-9753`（MAX_LIST_LIMIT / MAX_LIST_OFFSET）；
+   仓内有同形先例 `apps/web/tests/composition-vocab-mirror.spec.ts`。做了之后，后端改闭集会直接把前端拖红。
+2. **轮询与手动读取分离 spinner / 分页禁用**：今天轮询也会把 `observingPipeline` 置 true，刷新按钮会闪。
+   要分开得改 `refreshPipelineObservation` 签名并回归全部调用点（dry-run / save-only / replay），不适合本波。
+3. **换管道不重置 offset**：`IntegrationWorkbenchView.vue:4116`（本波前为 :4098）的 `watch(savedPipelineId)` 只调
+   `resetExternalWriteReview()`，不碰 `monitoringQuery.offset`。停在第 5 页时换管道，会用 offset 20 去读新管道
+   （很可能直接空页）。修法是在那个 watch 里把游标归零并重读——但那行在在飞 PR 的落点附近，本波不碰。
+4. **排序不稳定**：两个列表都只按 `created_at DESC` 排（`pipelines.cjs:713`、`dead-letter.cjs:135`），
+   同一毫秒多行时翻页可能重复/漏行；要稳定得后端加次级排序键。
+5. **trim**：自定义 Pipeline ID 输入框只在纯模块里 `trim()`，UI 上不回写被 trim 后的值。
+
+## 6. 兼容性
 
 首屏（scope=current + 已保存管道 + 默认页大小）产出的 URL 与改前逐字节相同：
 `/api/integration/runs?tenantId=default&pipelineId=pipe_x&limit=5` 和

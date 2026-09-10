@@ -1,6 +1,10 @@
 # 数据工厂「运行监控」到达率补齐 — 验证 (G34, 2026-09-10)
 
 设计见 `docs/development/integration-monitoring-reach-design-20260910.md`。
+
+本文档已含 **#5612 对抗复核（29 代理）终审**后的两项必修：X1（游标与数据不分家 + 失败可见）、
+X2（死信行与真实写入按钮必须写明 pipeline）。两个待裁决点已裁：省 pipelineId **不**算越权放宽、不加权限位；
+轮询期间**不**禁用筛选维持现状。
 本机：Windows 11 / Node 20 / pnpm 9.15.9 / vitest 1.6.1，worktree `metasheet-wt-g34`，分支
 `feat/integration-monitoring-reach`（基于 origin/main 11dddc18b）。**后端零改动**（`plugins/`、`packages/` 未触碰）。
 
@@ -13,15 +17,15 @@
 | `apps/web/src/views/IntegrationWorkbenchView.vue` | 4 处最小接线：导入、`monitoringQuery` ref + gate、`refreshPipelineObservation` 重写、3 个新 prop |
 | `apps/web/src/services/integration/workbench.ts` | `IntegrationPipelineObservationQuery.pipelineId` 由必填改为可选（后端本来就可选） |
 | `apps/web/tests/integrationMonitoringQuery.spec.ts` | 新增，17 测试 |
-| `apps/web/tests/IntegrationMonitoringSection.spec.ts` | 既有 2 测试保留 + 11 个 G34 测试 = 13 |
-| `apps/web/tests/integrationMonitoringReach.spec.ts` | 新增，6 测试（挂真视图，钉 URL 与票据） |
+| `apps/web/tests/IntegrationMonitoringSection.spec.ts` | 既有 2 测试保留 + 14 个 G34/X1/X2 测试 = 16 |
+| `apps/web/tests/integrationMonitoringReach.spec.ts` | 新增，9 测试（挂真视图：URL / 票据 / X1 失败路径） |
 
 ## 2. 命令与退出码
 
 | 命令（cwd） | 退出码 | 结果 |
 | --- | --- | --- |
 | `pnpm install --frozen-lockfile --offline`（worktree 根） | 0 | 6m3s |
-| `npx vitest run tests/integrationMonitoringQuery.spec.ts tests/IntegrationMonitoringSection.spec.ts tests/integrationMonitoringReach.spec.ts`（apps/web） | 0 | 3 files / **36 passed** (17 + 13 + 6) |
+| `npx vitest run tests/integrationMonitoringQuery.spec.ts tests/IntegrationMonitoringSection.spec.ts tests/integrationMonitoringReach.spec.ts`（apps/web） | 0 | 3 files / **42 passed** (17 + 16 + 9) |
 | `npx vitest run tests/IntegrationWorkbenchView.spec.ts tests/integrationWorkbench.spec.ts tests/IntegrationK3WiseSetupView.spec.ts tests/IntegrationWorkbenchRail.spec.ts`（apps/web） | 0 | 4 files / **106 passed**（既有回归，未改这些文件） |
 | `pnpm --filter web run type-check`（worktree 根） | 0 | vue-tsc -b + 两个 verification tsconfig |
 | `npx eslint src/services/integration/monitoringQuery.ts tests/integrationMonitoringQuery.spec.ts` | 0 | 0 problems |
@@ -50,6 +54,45 @@ expect test() to be called here"）、approvals api mock 导出漂移、以及 8
 | P7 | `normalizeStatus` 不再校验闭集 | 红 | 1 | `integrationMonitoringQuery`: forwards only backend-valid statuses… / normalizes junk… |
 
 P5 额外证明了"首屏 URL 逐字节不变"这条兼容性保证是被既有测试守住的，不只是被新测试守住。
+
+## 3.1 X1 / X2 必修项的证据
+
+**X1（新标签配旧数据、且完全静默）**——三处修法均有测试，且都有变异探针：
+
+- `IntegrationWorkbenchView.vue:3290-3306`：`refreshPipelineObservation(silent, nextQuery?)`，游标只在
+  票据仍为最新且读取成功时才与 rows 一起提交；`:3308-3313` catch 里**无条件**写 `monitoringError`。
+- `IntegrationMonitoringSection.vue:78-83` 渲染 `data-testid="monitoring-error"`（role=alert）。
+- `IntegrationMonitoringSection.vue:405-414`：`applyQuery` 在 finally 里 `filterEpoch += 1`，配合 `v-model`
+  的 `updated` 钩子把控件拉回到屏上那批行对应的值。
+
+新增失败路径用例（本波之前三个 spec grep `mockRejected|reject|throw` 零命中）：
+
+- reach: `X1: a filter read that REJECTS shows an error and never relabels the previous rows`
+  （死信路由 reject → 错误可见、dl_open 仍在、标题不是 `Dead Letters（discarded）`、下拉回弹到 open）
+- reach: `X1: a page turn that FAILS keeps the page indicator and rows on the page that is showing`
+  （offset 请求返 500 + 错误体 → 页码仍为第 1 页 / offset 0，行仍是第 1 页）
+- reach: `X1: a later SUCCESSFUL read clears the error banner`
+- section: `X1: a filter change that did NOT commit snaps the control back and surfaces the error`
+- section: `X1: a page turn that did NOT commit leaves the page indicator on the page that is showing`
+
+**X2**：`IntegrationMonitoringSection.vue:188-190` 死信行 `<small>` 写 `· pipeline {{ deadLetter.pipelineId }}`（
+`data-testid="dead-letter-meta-<id>"`），`:211` 确认按钮 `:title` 带 pipelineId + “会向目标系统真实写入”；
+用例 `X2: every dead-letter row names its pipeline, and so does the real-write confirm button`。
+
+### 变异探针（X1/X2 追加 5 条，均 `restored=True`）
+
+| # | 变异 | exit | 变红的测试 |
+| --- | --- | --- | --- |
+| X1a | 游标回到“乐观提交”（读前就写 `monitoringQuery.value = query`） | 1 | reach: `a filter read that REJECTS…`、`a page turn that FAILS…`（2 tests） |
+| X1b | 删掉 catch 里的 `monitoringError.value = …`（回到完全静默） | 1 | reach: 上面两条 + `a later SUCCESSFUL read clears the error banner`（3 tests） |
+| X1c | 删掉 `filterEpoch += 1`（控件不回弹） | 1 | section: `a filter change that did NOT commit snaps the control back…` |
+| X2a | 死信行拿掉 `· pipeline …` | 1 | section: `every dead-letter row names its pipeline…` |
+| X2b | 确认按钮拿掉 `:title` | 1 | section: 同上 |
+| P2b | 重跑票据探针（X1 把游标提交挪到它旁边后，原 P2 的锚点失效）：删 `if (!observationGate.isCurrent(ticket)) return` | 1 | reach: `a slow EARLIER read cannot repaint the list after a newer read has landed (response gate)`（1 failed / 8 passed） |
+
+X1c 只把 section 层用例拖红：reach 层那条断言下拉回弹的用例，因为 `monitoringError` 本身变了也会触发重渲染，
+所以在那个场景里 v-model 的 updated 钩子依然能拉回。`filterEpoch` 是为“两次失败错误文字完全相同 → 无 prop 变化”
+那一支准备的保险，已在 section 层单独钉住。
 
 ## 4. 手动核对的行为
 
