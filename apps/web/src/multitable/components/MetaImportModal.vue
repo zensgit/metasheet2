@@ -277,7 +277,7 @@ const props = defineProps<{
   createdFieldColumns?: Record<number, string> | null
   /**
    * EVERY field name that already exists on the target sheet — including the ones this modal can
-   * not map onto (formula/lookup/rollup, readonly, hidden by field permissions), which `fields` has
+   * not map onto (formula/lookup/rollup, read-only, or not visible under field permissions), which `fields` has
    * already been filtered past. Used ONLY to answer "is this header missing from the sheet?": with
    * `fields` alone, a header matching a formula column looks missing and would DEFAULT to "create a
    * new field", silently producing an `X (2)` shadow text column (export → re-import round trip).
