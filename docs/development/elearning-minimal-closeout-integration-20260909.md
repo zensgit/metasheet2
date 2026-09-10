@@ -46,6 +46,16 @@ Earlier parent evidence remains recorded in the installation and notification re
 
 ## Remaining acceptance gates
 
+Current-main replay checkpoint: `799d82704a392a8ba020803c5ad012f46d6ae8f2`
+(tree `2eebdf5806969c12a6bef57b6a69276add6a56d9`) true-merges main
+`1e6e138af0750062d7237b1dab88e80cb57d3745` locally. There were no conflicts
+or manual product edits. Required-Web selectors are a superset of both parents;
+official provenance differenceCount=0. Focused backend/security neighbors passed
+9 files / 184 tests, core typecheck passed, and media/publication wiring passed
+21/21. Final required-Web/typecheck execution is still pending at this record.
+The prior combined database proof remains pinned to `e134701a7`; it is not relabeled
+as a fresh database run on this newer tree. No deployment/flag changes occurred.
+
 1. Installation #5579 exact `24453acc8` remote CI was verified on 2026-09-10:
    52 SUCCESS / 1 SKIPPED, no failure or pending. Reconcile then-current main and
    verify the final integration head without losing either workflow union.
