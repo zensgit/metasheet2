@@ -52,6 +52,13 @@ const MIGRATION_NAME = 'zzzz20260826210000_create_elearning_notification_deliver
 const committedOrgIds: string[] = []
 const notificationUsers: string[] = []
 
+async function installNotifications(orgId: string) {
+  await pool.query(`INSERT INTO platform_app_instances
+    (tenant_id,workspace_id,app_id,plugin_id,project_id,status,config_json)
+    VALUES ($1,$1,'elearning','plugin-elearning','Synthetic classroom','active',
+      '{"notificationsEnabled":true}'::jsonb)`, [orgId])
+}
+
 async function seedNotificationUser(orgId: string, userId: string) {
   await pool.query("INSERT INTO users(id,password_hash) VALUES ($1,'synthetic-not-a-password')", [userId])
   notificationUsers.push(userId)
@@ -262,6 +269,7 @@ async function setCleanupTriggers(enabled: boolean): Promise<void> {
 }
 
 async function cleanupOrg(orgId: string): Promise<void> {
+  await pool.query("DELETE FROM platform_app_instances WHERE workspace_id=$1 AND app_id='elearning'", [orgId])
   await setCleanupTriggers(false)
   try {
     await pool.query(
@@ -312,6 +320,23 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
     await seedNotificationUser(orgId, a.userId)
     await seedNotificationUser(orgId, b.userId)
     const options = { since: '2026-01-01T00:00:00.000Z', assignments: true, limit: 1 }
+    // Retained business events must not produce new intents before installation/opt-in.
+    expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 0 })
+    await installNotifications(orgId)
+    for (const state of [
+      { status: 'inactive', config: { notificationsEnabled: true }, tenant: orgId },
+      { status: 'active', config: { notificationsEnabled: false }, tenant: orgId },
+      { status: 'active', config: { notificationsEnabled: 'true' }, tenant: orgId },
+      { status: 'active', config: { notificationsEnabled: true }, tenant: `${orgId}-foreign` },
+    ]) {
+      await pool.query(`UPDATE platform_app_instances SET status=$2,config_json=$3::jsonb,tenant_id=$4
+        WHERE workspace_id=$1 AND app_id='elearning'`, [orgId, state.status, JSON.stringify(state.config), state.tenant])
+      expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 0 })
+      expect((await pool.query('SELECT count(*)::int AS count FROM elearning_notification_deliveries WHERE org_id=$1', [orgId])).rows)
+        .toEqual([{ count: 0 }])
+    }
+    await pool.query(`UPDATE platform_app_instances SET tenant_id=$1,status='active',
+      config_json='{"notificationsEnabled":true}'::jsonb WHERE workspace_id=$1 AND app_id='elearning'`, [orgId])
     expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 1 })
     expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 1 })
     expect(await collectElearningNotificationEvents(db, options)).toEqual({ inserted: 0 })
@@ -857,6 +882,7 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       [orgA, attemptId],
     )
     const eventOptions = { since: '2026-01-01T00:00:00.000Z', results: true }
+    await installNotifications(orgA)
     expect(await collectElearningNotificationEvents(db, eventOptions)).toEqual({ inserted: 0 })
     await pool.query(
       `UPDATE elearning_exam_attempts

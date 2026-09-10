@@ -51,6 +51,12 @@ describe('e-learning event notification collector', () => {
       expect(sql).toContain('candidate.org_id ASC')
       expect(sql).toContain('delivery.org_id = candidate.org_id')
       expect(sql).toContain('delivery.source_key = candidate.source_key')
+      expect(sql).toContain('app.tenant_id = candidate.org_id')
+      expect(sql).toContain('app.workspace_id = candidate.org_id')
+      expect(sql).toContain("app.app_id = 'elearning' AND app.plugin_id = 'plugin-elearning'")
+      expect(sql).toContain("app.instance_key = 'primary' AND app.status = 'active'")
+      expect(sql).toContain("app.config_json->'notificationsEnabled' = 'true'::jsonb")
+      expect(sql.indexOf('FROM platform_app_instances app')).toBeLessThan(sql.indexOf('LIMIT $2'))
       return result()
     })
 

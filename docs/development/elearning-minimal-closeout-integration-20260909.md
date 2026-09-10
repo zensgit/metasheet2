@@ -52,9 +52,26 @@ Current-main replay checkpoint: `799d82704a392a8ba020803c5ad012f46d6ae8f2`
 or manual product edits. Required-Web selectors are a superset of both parents;
 official provenance differenceCount=0. Focused backend/security neighbors passed
 9 files / 184 tests, core typecheck passed, and media/publication wiring passed
-21/21. Final required-Web/typecheck execution is still pending at this record.
+21/21. Final required-Web passed (last invocation: 441 files / 6116 tests),
+and full Web typecheck passed.
 The prior combined database proof remains pinned to `e134701a7`; it is not relabeled
 as a fresh database run on this newer tree. No deployment/flag changes occurred.
+
+### Independent review correction
+
+The fresh read-only review found P1=0/P2=1/P3=0: the event collector could queue
+new deliveries for an organization whose application or notification opt-in was off,
+even though worker admission blocked sending. The collector now filters canonical
+same-org active installation and exact JSON boolean opt-in before LIMIT.
+
+The owning real-DB test covers missing installation, inactive installation, opt-out,
+string lookalike and foreign tenant, followed by enabled positive and batch draining.
+Removing the predicate returned inserted=1 instead of 0 (RED); restored combined
+installation/delivery/worker suites passed 21/21. Fresh CI-exclude migration stream
+and second replay passed on this fix; test fixture initially used a nonexistent name
+column, corrected to canonical project_id before the final passing run. Scratch
+drain was clean, forced=false, database/backend prefix residue=0. No external send.
+Final independent re-review remains required before the authorized merge.
 
 1. Installation #5579 exact `24453acc8` remote CI was verified on 2026-09-10:
    52 SUCCESS / 1 SKIPPED, no failure or pending. Reconcile then-current main and

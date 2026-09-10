@@ -237,6 +237,14 @@ export async function collectElearningNotificationEvents(
          WHERE delivery.org_id = candidate.org_id
            AND delivery.source_key = candidate.source_key
       )
+        AND EXISTS (
+          SELECT 1 FROM platform_app_instances app
+           WHERE app.tenant_id = candidate.org_id
+             AND app.workspace_id = candidate.org_id
+             AND app.app_id = 'elearning' AND app.plugin_id = 'plugin-elearning'
+             AND app.instance_key = 'primary' AND app.status = 'active'
+             AND app.config_json->'notificationsEnabled' = 'true'::jsonb
+        )
       ORDER BY candidate.occurred_at ASC,
                candidate.org_id ASC,
                candidate.source_key ASC
