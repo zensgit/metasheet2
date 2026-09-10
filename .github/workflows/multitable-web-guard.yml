@@ -46,11 +46,6 @@ on:
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
-      # r4 item 4/5: field-config panel empty-state copy + scroll container. Own spec
-      # file (not appended to multitable-field-manager.spec.ts) to avoid a merge
-      # hunk collision with the parallel #5602 hint/palette/retype branch's own
-      # 800-line append to that same file.
-      - 'apps/web/tests/multitable-field-config-panel.spec.ts'
       - 'apps/web/src/multitable/composables/useMultitableGrid.ts'
       - 'apps/web/src/multitable/composables/useTrash.ts'
       - 'apps/web/src/multitable/components/TrashModal.vue'
@@ -310,6 +305,13 @@ on:
       - 'apps/web/tests/multitable-embed-route.spec.ts'
       - 'apps/web/tests/multitable-export-dialog.spec.ts'
       - 'apps/web/tests/multitable-field-config-i18n.spec.ts'
+      # r4 item 4/5: field-config panel empty-state copy + scroll container. Own spec file
+      # (not appended to multitable-field-manager.spec.ts) — the parallel #5602 hint/
+      # palette/retype branch appends ~800 lines to the end of that same file. Placed here
+      # (not beside the MetaFieldManager.vue path trigger above) because #5602 also edits
+      # this file right after that exact line, and two insertions at the same anchor
+      # conflict under a 3-way merge regardless of content; this spot is untouched by it.
+      - 'apps/web/tests/multitable-field-config-panel.spec.ts'
       - 'apps/web/tests/multitable-field-display-i18n.spec.ts'
       - 'apps/web/tests/multitable-field-validation-panel.spec.ts'
       - 'apps/web/tests/multitable-form-layout.spec.ts'
@@ -415,11 +417,6 @@ on:
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
-      # r4 item 4/5: field-config panel empty-state copy + scroll container. Own spec
-      # file (not appended to multitable-field-manager.spec.ts) to avoid a merge
-      # hunk collision with the parallel #5602 hint/palette/retype branch's own
-      # 800-line append to that same file.
-      - 'apps/web/tests/multitable-field-config-panel.spec.ts'
       - 'apps/web/src/multitable/composables/useMultitableGrid.ts'
       - 'apps/web/src/multitable/composables/useTrash.ts'
       - 'apps/web/src/multitable/components/TrashModal.vue'
@@ -679,6 +676,13 @@ on:
       - 'apps/web/tests/multitable-embed-route.spec.ts'
       - 'apps/web/tests/multitable-export-dialog.spec.ts'
       - 'apps/web/tests/multitable-field-config-i18n.spec.ts'
+      # r4 item 4/5: field-config panel empty-state copy + scroll container. Own spec file
+      # (not appended to multitable-field-manager.spec.ts) — the parallel #5602 hint/
+      # palette/retype branch appends ~800 lines to the end of that same file. Placed here
+      # (not beside the MetaFieldManager.vue path trigger above) because #5602 also edits
+      # this file right after that exact line, and two insertions at the same anchor
+      # conflict under a 3-way merge regardless of content; this spot is untouched by it.
+      - 'apps/web/tests/multitable-field-config-panel.spec.ts'
       - 'apps/web/tests/multitable-field-display-i18n.spec.ts'
       - 'apps/web/tests/multitable-field-validation-panel.spec.ts'
       - 'apps/web/tests/multitable-form-layout.spec.ts'

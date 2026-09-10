@@ -2754,7 +2754,29 @@ onBeforeUnmount(() => {
 .meta-field-mgr__action--ok { color: #67c23a; }
 .meta-field-mgr__action--danger:hover { color: #f56c6c; }
 .meta-field-mgr__empty { text-align: center; padding: 20px; color: #999; font-size: 13px; }
+/* No-configurable-options fallback copy (r4 item 4) — same muted treatment as this
+   file's __empty class above, kept as a distinct class so tests can target it precisely
+   without also matching the (unrelated) "no fields defined" empty state. */
+.meta-field-mgr__no-config { margin: 0; padding: 4px 0; color: #909399; font-size: 12px; }
 .meta-field-mgr__config { padding: 14px 16px; border-top: 1px solid #eee; background: #fbfdff; display: flex; flex-direction: column; gap: 12px; }
+/* r4 item 5: the formula config panel (expression box + AI generate + insert-field chips +
+   formula reference catalog) has no bound on its own, so — inside a modal whose OUTER box
+   merely caps at max-height:84vh with default (visible) overflow — it was free to grow past
+   the modal, pushing the save/cancel row (__config-actions, the LAST child inside this same
+   container) below the viewport with no scrollbar to reach it. Bounding height here
+   (relative to the viewport, not a fixed px) turns this panel into its own scroll region
+   for every field type, not just formula. */
+.meta-field-mgr__config--scrollable { max-height: min(52vh, calc(84vh - 160px)); overflow-y: auto; }
+/* Keeps Save/Cancel reachable without scrolling to the very bottom of a long panel (e.g.
+   formula, button+notification). Sits inside the scrollable container above, so it rides
+   along with it rather than escaping to the fixed-size row of buttons elsewhere. */
+.meta-field-mgr__config--scrollable .meta-field-mgr__config-actions {
+  position: sticky;
+  bottom: 0;
+  padding-top: 8px;
+  margin-top: 4px;
+  background: #fbfdff;
+}
 .meta-field-mgr__config-header { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #666; }
 .meta-field-mgr__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #666; }
 .meta-field-mgr__toggle { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #444; }
@@ -2835,25 +2857,4 @@ onBeforeUnmount(() => {
 .meta-field-mgr__rename--invalid { border-color: #f56c6c; }
 .meta-field-mgr__input--invalid { border-color: #f56c6c; }
 .meta-field-mgr__inline-error { color: #f56c6c; font-size: 11px; margin-top: 4px; }
-/* r4 item 5: the formula config panel (expression box + AI generate + insert-field
-   chips + formula reference catalog) has no bound on its own, so — inside a modal
-   whose OUTER box merely caps at max-height:84vh with default (visible) overflow — it
-   was free to grow past the modal, pushing the save/cancel row (__config-actions,
-   the LAST child inside this same container) below the viewport with no scrollbar to
-   reach it. Bounding height here (relative to the viewport, not a fixed px) turns this
-   panel into its own scroll region for every field type, not just formula. */
-.meta-field-mgr__config--scrollable { max-height: min(52vh, calc(84vh - 160px)); overflow-y: auto; }
-/* Keeps Save/Cancel reachable without scrolling to the very bottom of a long panel
-   (e.g. formula, button+notification). Sits inside the scrollable container above, so
-   it rides along with it rather than escaping to the fixed-size row of buttons elsewhere. */
-.meta-field-mgr__config--scrollable .meta-field-mgr__config-actions {
-  position: sticky;
-  bottom: 0;
-  padding-top: 8px;
-  margin-top: 4px;
-  background: #fbfdff;
-}
-/* No-configurable-options fallback copy (r4 item 4) — same muted treatment as
-   field.empty's sibling __empty class, kept distinct so tests can target it precisely. */
-.meta-field-mgr__no-config { margin: 0; padding: 4px 0; color: #909399; font-size: 12px; }
 </style>
