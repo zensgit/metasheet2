@@ -658,6 +658,14 @@ jobs:
           name: install-log-${{ matrix.node-version }}
           path: install.log
 
+      - name: Install Phase 5 offline contract tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bc jq curl
+
+      - name: Phase 5 offline required-samples contract
+        run: node --test scripts/ops/phase5-required-samples-contract.test.mjs
+
       - name: Time Machine D2 archive real-DB fail-not-skip behavior
         run: node --test scripts/ops/multitable-d2-archive-fail-not-skip.test.mjs
 

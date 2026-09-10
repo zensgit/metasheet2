@@ -6,9 +6,41 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import yaml from 'js-yaml';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../..');
+
+test('keeps the whole-file offline contract in both plugin test lanes after dependencies', async () => {
+  const workflow = yaml.load(await readFile(path.join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8'));
+  assert.ok(Object.hasOwn(workflow.on, 'pull_request'));
+  assert.equal(workflow.on.pull_request.paths, undefined);
+  assert.equal(workflow.on.pull_request['paths-ignore'], undefined);
+  assert.ok(Object.hasOwn(workflow.on, 'merge_group'));
+  for (const requiredPath of ['scripts/**', 'packages/core-backend/**', 'package.json', 'pnpm-lock.yaml', '.github/workflows/*.yml']) {
+    assert.ok(workflow.on.push.paths.includes(requiredPath), `missing Phase 5 trigger coverage: ${requiredPath}`);
+  }
+  const job = workflow.jobs.test;
+  assert.equal(job.if, undefined);
+  assert.equal(job['continue-on-error'], undefined);
+  assert.deepEqual(job.strategy.matrix['node-version'], ['18.x', '20.x']);
+  assert.equal(job.strategy.matrix.exclude, undefined);
+  const steps = job.steps;
+  const install = steps.findIndex(step => step.name === 'Install dependencies (with log)');
+  const tools = steps.findIndex(step => step.name === 'Install Phase 5 offline contract tools');
+  const contracts = steps.filter(step => step.name === 'Phase 5 offline required-samples contract');
+  assert.equal(contracts.length, 1);
+  assert.deepEqual(contracts[0], {
+    name: 'Phase 5 offline required-samples contract',
+    run: 'node --test scripts/ops/phase5-required-samples-contract.test.mjs',
+  });
+  assert.ok(install >= 0 && tools > install && steps.indexOf(contracts[0]) > tools);
+  assert.match(steps[install].run, /pnpm install --frozen-lockfile/);
+  assert.deepEqual(steps[tools], {
+    name: 'Install Phase 5 offline contract tools',
+    run: 'sudo apt-get update\nsudo apt-get install --no-install-recommends -y bc jq curl\n',
+  });
+});
 
 function execFileResult(file, args, options) {
   return new Promise((resolve) => {
