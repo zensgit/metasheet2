@@ -62,6 +62,10 @@ export interface EditableMapping {
   patternText: string
   enumText: string
   defaultValueText: string
+  // Set by `editableMappingFromPayload` when a loaded payload carried something this editor cannot
+  // represent (see the KNOWN LOSS block in integrationMappingTransform.ts). Optional because rows
+  // authored in the UI never have one; it is editor-only state and is never sent to the server.
+  loadWarnings?: string[]
 }
 
 export interface SourceFieldOption {

@@ -508,6 +508,71 @@ describe('G27 cleaning-rules parity: #5596 final-review fixes', () => {
     expect(result.value.FFromStep).toBe('N/A')
   })
 
+  // dictMap serialize/parse convention (#5596 follow-up). ONE convention, obeyed by both halves:
+  // split at the FIRST `=` (so a key may not contain one, a value may), one entry per line, both
+  // sides trimmed, neither empty. Everything outside it is skipped WITH a warning instead of being
+  // silently written back as a different dictionary.
+  it('round-trips a dictMap VALUE containing "=" (only the first "=" splits)', () => {
+    const payload = {
+      sourceField: 'unit',
+      targetField: 'FBaseUnitID',
+      transform: { fn: 'dictMap', map: { EA: 'a=b', KG: 'Kg' } },
+    }
+    const parsed = editableMappingFromPayload(payload as never, 'rt')
+    expect(parsed.dictMapText).toBe('EA=a=b\nKG=Kg')
+    expect(parsed.loadWarnings).toBeUndefined()
+    const rebuilt = buildFieldMappingPayload(parsed, 0)
+    expect(rebuilt.transform).toEqual({ fn: 'dictMap', map: { EA: 'a=b', KG: 'Kg' } })
+    // ...and the engine still maps EA to the full value, `=` and all.
+    expect(transformRecord({ unit: 'EA' }, [rebuilt]).value.FBaseUnitID).toBe('a=b')
+  })
+
+  it('skips (and reports) a dictMap entry the textarea convention cannot express', () => {
+    const payload = {
+      sourceField: 'unit',
+      targetField: 'FBaseUnitID',
+      transform: {
+        fn: 'dictMap',
+        map: {
+          'A=B': 'keyHasEquals',   // a key may not contain '=' — the parser would split it there
+          multi: 'line1\nline2',   // a newline IS the record separator
+          blank: '   ',            // trims to empty, which the parser rejects
+          KG: 'Kg',                // the only representable entry
+        },
+      },
+    }
+    const parsed = editableMappingFromPayload(payload as never, 'rt')
+    expect(parsed.dictMapText).toBe('KG=Kg')
+    expect(parsed.loadWarnings).toHaveLength(3)
+    expect(parsed.loadWarnings?.join(' ')).toContain('A=B')
+    expect(parsed.loadWarnings?.join(' ')).toContain('multi')
+    expect(parsed.loadWarnings?.join(' ')).toContain('blank')
+    // The re-emitted payload carries ONLY what the editor could show — never a corrupted entry
+    // like { A: 'B=keyHasEquals' }, which is what the old serializer produced.
+    expect(buildFieldMappingPayload(parsed, 0).transform).toEqual({ fn: 'dictMap', map: { KG: 'Kg' } })
+  })
+
+  it('pins the dictMap trim loss: parse(serialize(map)) equals the TRIMMED map, and says so', () => {
+    const map = { ' EA ': ' Pcs ', KG: 'Kg' }
+    const parsed = editableMappingFromPayload(
+      { sourceField: 'unit', targetField: 'FBaseUnitID', transform: { fn: 'dictMap', map } } as never,
+      'rt',
+    )
+    const rebuilt = buildFieldMappingPayload(parsed, 0)
+    expect(rebuilt.transform).toEqual({ fn: 'dictMap', map: { EA: 'Pcs', KG: 'Kg' } })
+    expect(parsed.loadWarnings).toHaveLength(1)
+    expect(parsed.loadWarnings?.[0]).toContain('首尾空格')
+    // Why it is a real loss and not cosmetics: the engine looks the key up by String(value), so
+    // the padded key matched ' EA ' before and matches 'EA' after.
+    const before = [{ sourceField: 'unit', targetField: 'FBaseUnitID', transform: { fn: 'dictMap', map } }]
+    expect(transformRecord({ unit: ' EA ' }, before).value.FBaseUnitID).toBe(' Pcs ')
+    expect(transformRecord({ unit: ' EA ' }, [rebuilt]).value.FBaseUnitID).toBe(' EA ')
+    expect(transformRecord({ unit: 'EA' }, [rebuilt]).value.FBaseUnitID).toBe('Pcs')
+    // Second pass is stable — the canonical form round-trips exactly.
+    expect(buildFieldMappingPayload(editableMappingFromPayload(rebuilt, 'rt2'), 0).transform)
+      .toEqual(rebuilt.transform)
+  })
+
   it('survives the API layer: normalizeFieldMappings -> transformRecord keeps chains and pins null defaults', () => {
     const uiPayloads = [
       buildFieldMappingPayload(mapping({

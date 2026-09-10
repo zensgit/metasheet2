@@ -9,7 +9,7 @@ Branch: `feat/integration-mapping-transform-ui-parity`（基于 `origin/main` a2
 
 ## 1. 命令与退出码（第一轮，#5596 终审修复之前）
 
-> 终审修复后的最终一轮命令与计数见 §5.7；本节保留第一轮记录，两轮都跑过。
+> 终审修复后的最终一轮命令与计数见 §5.8；本节保留第一轮记录，各轮都跑过。
 
 
 | # | 命令（cwd） | 退出码 | 结果 |
@@ -27,7 +27,7 @@ Branch: `feat/integration-mapping-transform-ui-parity`（基于 `origin/main` a2
 
 ## 2. 测试清单（新增/修改的测试名）
 
-### 2.1 `apps/web/tests/integrationMappingTransformParity.spec.ts`（新，第一轮 21 条 → 终审后 27 条）
+### 2.1 `apps/web/tests/integrationMappingTransformParity.spec.ts`（新，第一轮 21 条 → 终审后 30 条）
 
 `G27 cleaning-rules parity: UI list vs engine whitelist`
 - `offers exactly the engine SUPPORTED_TRANSFORMS set`
@@ -69,6 +69,9 @@ Branch: `feat/integration-mapping-transform-ui-parity`（基于 `origin/main` a2
 - `F01/F11: pattern flags and custom messages are DROPPED on read — the loss is asserted, not hidden`
 - `F04/F08: the mapping-level default does NOT fire on a whitespace-only source value`
 - `survives the API layer: normalizeFieldMappings -> transformRecord keeps chains and pins null defaults`
+- `round-trips a dictMap VALUE containing "=" (only the first "=" splits)`
+- `skips (and reports) a dictMap entry the textarea convention cannot express`
+- `pins the dictMap trim loss: parse(serialize(map)) equals the TRIMMED map, and says so`
 
 两条「引擎实跑」的测试通过 `createRequire()` 直接 `require` 服务端模块（与 `tests/k3-endpoint-vocab-mirror.spec.ts` 同一套反漂移做法），不是复述一份服务端常量：
 
@@ -178,21 +181,48 @@ const { SUPPORTED_RULES, validateRecord } = require(path.join(pluginLib, 'valida
 ### 5.6 终审指出的盲区 — 存库→回读→引擎整链
 
 - 用例 `survives the API layer: normalizeFieldMappings -> transformRecord keeps chains and pins null defaults`：直接 `require` 注册层的 `pipelines.cjs` `__internals.normalizeFieldMappings`（不改 `plugins/`），把 UI payload 过一遍再喂 `transformRecord`。
-- 钉住两件事：数组形转换链原样透传；**未填默认值的行在存库后变成 `defaultValue: null` 自有键**，于是同一行的缺值结果从存前的 `undefined` 变成存后的 `null`。设计文档新增 §5.1 记录这一跳。
+- 钉住两件事：数组形转换链原样透传；**未填默认值的行在存库后变成 `defaultValue: null` 自有键**，于是同一行的缺值结果从存前的 `undefined` 变成存后的 `null`。设计文档新增 §5.2 记录这一跳。
 
-### 5.7 本轮命令与退出码
+### 5.7 追加（非阻断，但 G08 接线前必修）— dictMap 逆函数会损坏「键含 `=`」「值含换行」
+
+审阅人追加的问题：`integrationMappingTransform.ts` 的 dictMap 逆函数是直白的 `` `${key}=${value}` ``，与正向 `parseDictionaryMap` 的约定对不上。
+
+- **静默改写**：键为 `A=B` 的条目，序列化成 `A=B=<值>`，解析侧按第一个 `=` 切分 → 变成键 `A`、值 `B=<值>`。一次读回再保存，字典就悄悄换了一本。
+- **要么炸要么裂**：值里含换行的条目，序列化后跨两行 → 下一次保存抛「dictMap 每行必须使用 source=target 格式」，或者第二行恰好含 `=` 时裂成一条伪条目。
+- **首尾空格**：解析侧一律 trim，所以原 map 的 `' EA '` 读回来变成 `'EA'`——引擎按 `String(value)` 精确查键，能匹配的来源值因此变了。
+
+修法（`integrationMappingTransform.ts:291-329` 的 `dictionaryMapToText`）：序列化只输出**解析侧能原样读回**的条目——键去 `=`、去换行、去空判断，键值先 trim 再拼；表示不了的条目整条跳过，并把原因写进 `EditableMapping.loadWarnings`（`:432` 挂载，`integrationWorkbenchSectionTypes.ts:74-77` / `IntegrationWorkbenchView.vue:585-586` 声明为可选、编辑器内部状态，永不下发）。trim 真的改动了键或值时也报一条 warning。极端情况下整本字典都不可表示 → 文本为空 → 下一次保存**响亮地**失败在「dictMap 字典映射不能为空」，而不是静默存成另一本。
+
+三条往返用例（parity spec）：
+
+| 用例名 | 钉住什么 |
+| --- | --- |
+| `round-trips a dictMap VALUE containing "=" (only the first "=" splits)` | 值里的 `=` **可以**保真：`{EA:'a=b'}` → 文本 `EA=a=b` → 原样回来，且引擎仍映射出 `a=b` |
+| `skips (and reports) a dictMap entry the textarea convention cannot express` | 键含 `=`、值含换行、值纯空格三条各自被跳过并各产一条 warning，重发的 payload 只剩可表示的那条——**绝不**出现旧实现那种 `{ A: 'B=keyHasEquals' }` |
+| `pins the dictMap trim loss: parse(serialize(map)) equals the TRIMMED map, and says so` | `parse(serialize(map))` 深等于 **trim 后**的 map；warning 里含「首尾空格」；并用真引擎对比 trim 前后 `' EA '` / `'EA'` 的匹配差异；第二遍往返稳定 |
+
+本轮变异探针：
+
+| 探针 | 改坏了什么 | 退出码 | 变红的测试 |
+| --- | --- | --- | --- |
+| dictMap-1 | 逆函数改回原始的 `` `${key}=${value}` ``（去掉 `=`/换行守卫与 trim 规范化） | 1 | `skips (and reports) a dictMap entry the textarea convention cannot express` |
+| dictMap-2 | 条目照跳，但不再挂 `loadWarnings`（静默丢弃） | 1 | `skips (and reports) a dictMap entry the textarea convention cannot express` / `pins the dictMap trim loss: parse(serialize(map)) equals the TRIMMED map, and says so` |
+
+dictMap-1 只打红一条是对的：值含 `=` 那条在新旧实现下都保真，trim 那条在旧实现下也仍然等于 trim 后的 map（差别只在有没有守卫），真正被旧实现破坏的是「键含 `=` / 值含换行」这条。还原后 `git status --porcelain` 与改之前一致。
+
+### 5.8 本轮命令与退出码
 
 | 命令（cwd） | 退出码 | 结果 |
 | --- | --- | --- |
-| `npx vitest run tests/integrationMappingTransformParity.spec.ts`（`apps/web`） | 0 | `27 passed (27)`（原 21 + 新 6） |
+| `npx vitest run tests/integrationMappingTransformParity.spec.ts`（`apps/web`） | 0 | `30 passed (30)`（原 21 + 终审 6 + dictMap 3） |
 | `npx vitest run tests/IntegrationMappingRulesSection.spec.ts`（`apps/web`） | 0 | `12 passed (12)`（原 10 + 新 2） |
-| 四个 spec 一次跑（`apps/web`） | 0 | `Test Files 4 passed (4) / Tests 198 passed (198)` |
+| 四个 spec 一次跑（`apps/web`） | 0 | `Test Files 4 passed (4) / Tests 201 passed (201)` |
 | `pnpm --filter web run type-check`（worktree 根） | 0 | 三个 tsconfig 全过 |
 | `pnpm --filter web run lint`（worktree 根） | 0 | 同 §1 说明：改动文件不在该脚本的显式清单内 |
 
 `tests/IntegrationWorkbenchView.spec.ts` 仍是一行未改的 52 条全绿，`tests/ui-foundation-style-guard.spec.ts` 107 条全绿。
 
-### 5.8 本轮变异探针（同样是内存改写 + 逐字节还原）
+### 5.9 本轮变异探针（同样是内存改写 + 逐字节还原）
 
 | 探针 | 改坏了什么 | spec | 退出码 | 变红的测试 |
 | --- | --- | --- | --- | --- |

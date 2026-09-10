@@ -265,9 +265,19 @@ export function buildFieldMappingPayload(mapping: EditableMapping, index: number
 //      validator.cjs:85-97), so a case-insensitive `flags: 'i'` rule comes back case-SENSITIVE;
 //   4. F11 — any rule's custom `message` (the validator prefers it over its own text,
 //      validator.cjs:59), so a re-saved rule falls back to the engine's default message.
+//   5. a dictMap entry the textarea convention cannot express — key containing `=`, key/value
+//      containing a newline, key/value empty (or whitespace-only). Such entries are SKIPPED and
+//      each one pushes a message onto `EditableMapping.loadWarnings`.
+//   6. leading/trailing whitespace inside dictMap keys/values: canonicalized away (the parser
+//      trims), so `parse(serialize(map))` equals the TRIMMED map, not the original one. This one
+//      also raises a `loadWarnings` entry, because trimming a key changes which source values it
+//      matches (the engine looks keys up by `String(value)`, transform-engine.cjs:191-196).
 // None of these has an editor control. They are dropped on READ, which is the safe direction: the
 // editor never claims to hold something it cannot show, and it never re-emits a half-understood
 // rule. Authoring them stays a hand-written-payload capability until they get controls.
+// Note the failure mode this buys: if EVERY dictMap entry is unrepresentable the text comes back
+// empty, and the next save fails loudly on `dictMap 字典映射不能为空` instead of quietly writing a
+// different dictionary.
 // ---------------------------------------------------------------------------
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -288,12 +298,50 @@ export function normalizeTransformPayloadSteps(transform: unknown): Array<Record
   return [transform as Record<string, unknown> | string]
 }
 
-function formatDictionaryMap(map: unknown): string {
-  if (!isPlainObject(map)) return ''
-  return Object.entries(map).map(([key, value]) => `${key}=${readString(value)}`).join('\n')
+// The dictMap textarea convention, stated once and obeyed by BOTH directions
+// (parseDictionaryMap above is the forward half):
+//   - one entry per line, split at the FIRST `=`; a key may therefore NOT contain `=`, a value MAY;
+//   - keys and values are trimmed, so neither can carry leading/trailing whitespace;
+//   - neither can contain a newline (the line IS the record separator);
+//   - neither can be empty.
+// The serializer used to ignore all of that (`${key}=${value}`), which silently CORRUPTED any
+// entry outside the convention: a key `A=B` came back as key `A` / value `B=<value>`, and a value
+// containing a newline either threw at the next save or split into a bogus extra entry.
+// Now it emits only entries the parser can read back verbatim and REPORTS the rest, so the loss is
+// visible instead of being written back as a different dictionary.
+function dictionaryMapToText(map: unknown): { text: string, warnings: string[] } {
+  if (!isPlainObject(map)) return { text: '', warnings: [] }
+  const lines: string[] = []
+  const warnings: string[] = []
+  for (const [rawKey, rawValue] of Object.entries(map)) {
+    const rawValueText = readString(rawValue)
+    const key = rawKey.trim()
+    const value = rawValueText.trim()
+    if (key.includes('=')) {
+      warnings.push(`dictMap 条目 “${rawKey}” 的键包含 =，编辑器的一行一条约定无法表示，已跳过该条`)
+      continue
+    }
+    if (/[\r\n]/.test(rawKey) || /[\r\n]/.test(rawValueText)) {
+      warnings.push(`dictMap 条目 “${rawKey}” 的键或值包含换行，编辑器的一行一条约定无法表示，已跳过该条`)
+      continue
+    }
+    if (!key || !value) {
+      warnings.push(`dictMap 条目 “${rawKey}” 的键或值为空（或只有空格），编辑器无法表示，已跳过该条`)
+      continue
+    }
+    if (key !== rawKey || value !== rawValueText) {
+      warnings.push(`dictMap 条目 “${rawKey}” 的首尾空格已被去掉（编辑器按行读取时一律 trim），匹配范围可能变化`)
+    }
+    lines.push(`${key}=${value}`)
+  }
+  return { text: lines.join('\n'), warnings }
 }
 
-function transformStepFromPayload(raw: Record<string, unknown> | string, id: string): MappingTransformStep | null {
+function transformStepFromPayload(
+  raw: Record<string, unknown> | string,
+  id: string,
+  warnings: string[] = [],
+): MappingTransformStep | null {
   const step = typeof raw === 'string' ? { fn: raw } : raw
   if (!isPlainObject(step)) return null
   // F02: EXACTLY the engine's rule (normalizeTransformStep, transform-engine.cjs:131) — a plain
@@ -305,7 +353,11 @@ function transformStepFromPayload(raw: Record<string, unknown> | string, id: str
   if (!UI_TRANSFORM_FNS.includes(fnRaw)) return null
   const fn = fnRaw as TransformFn
   const editable = createTransformStep(id, { fn })
-  if (fn === 'dictMap') editable.dictMapText = formatDictionaryMap(args.map)
+  if (fn === 'dictMap') {
+    const dictionary = dictionaryMapToText(args.map)
+    editable.dictMapText = dictionary.text
+    warnings.push(...dictionary.warnings)
+  }
   if (fn === 'toDate') editable.args.dateFormat = args.format === 'date' ? 'date' : 'iso'
   if (fn === 'defaultValue') {
     const value = Object.prototype.hasOwnProperty.call(args, 'value') ? args.value : args.defaultValue
@@ -337,8 +389,13 @@ export function editableMappingFromPayload(payload: IntegrationFieldMapping, id:
     targetField: readString(payload?.targetField),
   })
 
+  // Anything the editor could not represent faithfully is reported here rather than silently
+  // re-emitted in a changed form. G08 (the not-yet-wired "load a saved pipeline" path) must show
+  // these before letting the operator save the row back.
+  const warnings: string[] = []
+
   const steps = normalizeTransformPayloadSteps(payload?.transform)
-    .map((raw, index) => transformStepFromPayload(raw, `${id}:${index}`))
+    .map((raw, index) => transformStepFromPayload(raw, `${id}:${index}`, warnings))
     .filter((step): step is MappingTransformStep => step !== null)
   const [firstStep, ...rest] = steps
   if (firstStep) {
@@ -366,6 +423,8 @@ export function editableMappingFromPayload(payload: IntegrationFieldMapping, id:
   if (payload?.defaultValue !== undefined && payload?.defaultValue !== null) {
     mapping.defaultValueText = readString(payload.defaultValue)
   }
+
+  if (warnings.length > 0) mapping.loadWarnings = warnings
 
   return mapping
 }

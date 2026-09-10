@@ -119,11 +119,26 @@ Scope: 前端到达率，**后端零改动**（`plugins/`、`packages/` 未触�
   2. `concat` 的 `values` / `includeCurrent`；
   3. **`pattern` 的 `params.flags`**（#5596 F01）——校验器是 `new RegExp(pattern, flags)`（`validator.cjs:85-97`），所以一条 `flags:'i'` 的规则读回再存就变成大小写敏感；
   4. **任意规则的自定义 `message`**（#5596 F11）——`makeError` 优先用 `rule.message`（`validator.cjs:59`），读回再存就退回引擎默认文案。
-  以上四项都没有编辑器控件，读入时**丢弃**；UI 不认识的 `fn`（例如脏数据里的 `evalScript`）同样被丢弃，绝不带着一个 UI 编不出来的步骤继续存回去。要保留它们，目前只能不经编辑器直接写 payload。
+  5. **dictMap 里编辑器约定表示不了的条目**（见 §5.1）：键含 `=`、键或值含换行、键或值为空/纯空格——整条**跳过**，并各产一条 `loadWarnings`。
+  6. **dictMap 键值的首尾空格**（同 §5.1）：解析侧一律 trim，所以 `parse(serialize(map))` 等于 **trim 后**的 map，不是原 map；这一条同样产 `loadWarnings`，因为引擎是按 `String(value)` 精确查键（`transform-engine.cjs:191-196`），trim 改变了它能匹配到的来源值。
+  以上六项都没有编辑器控件，读入时**丢弃/规范化**；UI 不认识的 `fn`（例如脏数据里的 `evalScript`）同样被丢弃，绝不带着一个 UI 编不出来的步骤继续存回去。要保留它们，目前只能不经编辑器直接写 payload。丢弃信号统一挂在 `EditableMapping.loadWarnings`（编辑器内部状态，永不下发）。
+
+### 5.1 dictMap 文本约定（序列化与解析同一套）
+
+这套约定由**正向解析** `parseDictionaryMap` 定义，逆函数必须照它来写，否则就会静默改写字典：
+
+- 一行一条，按**第一个** `=` 切分 → **键不能含 `=`，值可以**（`EA=a=b` 读作 `EA` → `a=b`）；
+- 键、值都会被 trim → 两侧都不能带首尾空格；
+- 键、值都不能含换行（换行就是记录分隔符）；
+- 键、值都不能为空。
+
+修复前逆函数是直白的 `` `${key}=${value}` ``，完全不管这套约定：键为 `A=B` 的条目读回来变成键 `A`、值 `B=<原值>`（**静默改写**），值里带换行的条目要么让下一次保存抛「每行必须使用 source=target 格式」，要么裂成一条伪条目。现在逆函数只输出解析侧能原样读回的条目，其余**跳过并报告**；如果一个 dictMap 的条目全部不可表示，文本为空，下一次保存会响亮地失败在「dictMap 字典映射不能为空」，而不是悄悄存成另一本字典。
+
+对应用例三条：`round-trips a dictMap VALUE containing "=" (only the first "=" splits)`、`skips (and reports) a dictMap entry the textarea convention cannot express`、`pins the dictMap trim loss: parse(serialize(map)) equals the TRIMMED map, and says so`（后者还用真引擎对比了 trim 前后 `' EA '` 与 `'EA'` 的匹配差异）。
 
 这是刻意的方向性：读得宽只影响编辑器里显示什么，**写口没有放宽**——写出去的永远是上面第 3 节那张表里的形状，且经过白名单与 build 期守卫。有损的方向也是安全的那一侧：编辑器绝不声称自己拿着一个显示不出来的东西，也绝不把一条只理解了一半的规则再发回去。
 
-### 5.1 存库这一跳会改变什么（#5596 终审补测）
+### 5.2 存库这一跳会改变什么（#5596 终审补测）
 
 UI 的 payload 不是直接进引擎的，中间还有注册层 `normalizeFieldMappings`（`pipelines.cjs:181`）。它做两件对语义有影响的事：
 
@@ -149,7 +164,7 @@ UI 的 payload 不是直接进引擎的，中间还有注册层 `normalizeFieldM
 
 ## 7. 存疑 / 后续
 
-- 视图侧仍无「打开已保存 pipeline → 回填编辑器」的入口（G08）。逆函数已经就位并有测试，接上只差一个读接口调用。**接上之前**，§5 那四项有损只是「编辑器里看不见」；接上之后它们会变成「读一次再存一次就真丢了」，所以 G08 落地时应当先给 `pattern.flags` / `rule.message` 控件，或在回填时对带有这两项的规则加只读提示。
+- 视图侧仍无「打开已保存 pipeline → 回填编辑器」的入口（G08）。逆函数已经就位并有测试，接上只差一个读接口调用。**接上之前**，§5 那六项有损只是「编辑器里看不见」；接上之后它们会变成「读一次再存一次就真丢了」，所以 G08 落地时应当先给 `pattern.flags` / `rule.message` 控件，或在回填时对带有这两项的规则加只读提示。
 - `concat` 的 `values`（字面量）与 `includeCurrent=false` 没有控件；`dictMap` 的 `defaultValue` 兜底同理。要不要给控件，取决于现场是否真的有人手写过这些形状。
 - 无 schema 时 concat 只能用逗号分隔的回退输入（#5596 F06 已修成受控草稿，尾随逗号不再被抹）。更好的做法是让源库 503 时也能手动补一份字段名清单，但那属于 schema 获取链路，不在本次范围。
 - 映射级默认值的 `null` 语义（§5.1）目前只是被钉住，没有 UI 呈现：编辑器无法区分「这一行从没设过默认值」和「设成了 null」。真做回填时要决定是否把 `null` 显示成空。

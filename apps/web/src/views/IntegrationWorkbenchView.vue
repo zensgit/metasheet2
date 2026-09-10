@@ -580,6 +580,8 @@ interface EditableMapping {
   patternText: string
   enumText: string
   defaultValueText: string
+  // Editor-only: what a loaded payload carried but this editor cannot represent. Never sent.
+  loadWarnings?: string[]
 }
 
 interface SourceFieldOption {
