@@ -57,7 +57,7 @@
               <select class="meta-import__field-select" :value="fieldMapping[i] ?? ''" @change="fieldMapping[i] = ($event.target as HTMLSelectElement).value">
                 <option value="">{{ l('import.skip') }}</option>
                 <option v-for="f in importableFields" :key="f.id" :value="f.id">{{ f.name }}</option>
-                <option v-if="canOfferCreateField(header)" :value="CREATE_FIELD_SENTINEL">{{ createFieldOption(header, isZh) }}</option>
+                <option v-if="canOfferCreateField(header)" :value="CREATE_FIELD_SENTINEL">{{ createFieldOption(plannedCreateFieldName(header), isZh) }}</option>
               </select>
             </div>
           </div>
@@ -66,6 +66,9 @@
           </p>
           <p v-if="skippedColumnCount > 0" class="meta-import__hint meta-import__skip-summary">
             {{ columnsSkippedNoField(skippedColumnCount, isZh) }}
+          </p>
+          <p v-if="existingFieldSkippedColumnCount > 0" class="meta-import__hint meta-import__existing-skip-summary">
+            {{ columnsSkippedExistingField(existingFieldSkippedColumnCount, isZh) }}
           </p>
           <div v-if="createFieldsErrorText" class="meta-import__error meta-import__create-error">{{ createFieldsErrorText }}</div>
           <div v-if="parsedRows.length" class="meta-import__preview-table">
@@ -192,12 +195,14 @@ import { XLSX_MAX_BYTES, XLSX_MAX_ROWS, mapXlsxColumnsToFields, parseXlsxBuffer 
 import {
   CREATE_FIELD_SENTINEL,
   createFieldPlaceholderId,
+  planCreateFieldNames,
   type ImportCreateFieldRequest,
   type ImportSubmitPayload,
 } from '../import/create-fields'
 import { isLinkField, isPersonField, linkActionLabel } from '../utils/link-fields'
 import {
   columnLabel,
+  columnsSkippedExistingField,
   columnsSkippedNoField,
   createFieldOption,
   createFieldsPlanned,
@@ -270,6 +275,15 @@ const props = defineProps<{
   createFieldsError?: string | null
   /** columnIndex → newly created field id; rebinds the sentinel so a re-import never re-creates it. */
   createdFieldColumns?: Record<number, string> | null
+  /**
+   * EVERY field name that already exists on the target sheet — including the ones this modal can
+   * not map onto (formula/lookup/rollup, readonly, hidden by field permissions), which `fields` has
+   * already been filtered past. Used ONLY to answer "is this header missing from the sheet?": with
+   * `fields` alone, a header matching a formula column looks missing and would DEFAULT to "create a
+   * new field", silently producing an `X (2)` shadow text column (export → re-import round trip).
+   * Names only, never values. Falls back to `fields` when the caller does not supply it.
+   */
+  existingFieldNames?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -319,6 +333,68 @@ function isActiveCreateColumn(columnIndex: number | string): boolean {
 function canOfferCreateField(header: string): boolean {
   return canCreateFields.value && header.trim().length > 0
 }
+/**
+ * Names of every field that already exists on the sheet, NOT just the importable ones.
+ * `props.fields` is the import surface (workbench strips formula/lookup/rollup, readonly and
+ * permission-hidden fields before it gets here), so it can not answer "does the sheet already have
+ * a column called X?" — `existingFieldNames` can. Fall back to the import surface when the caller
+ * predates the prop; the write side (planCreateFieldNames) still de-duplicates either way.
+ */
+const existingFieldNameKeys = computed(() => {
+  const source = props.existingFieldNames ?? props.fields.map((field) => field.name)
+  const keys = new Set<string>()
+  for (const name of source) {
+    const key = String(name ?? '').trim().toLowerCase()
+    if (key) keys.add(key)
+  }
+  return keys
+})
+const importableFieldNameKeys = computed(() => {
+  const keys = new Set<string>()
+  for (const field of importableFields.value) {
+    const key = String(field.name ?? '').trim().toLowerCase()
+    if (key) keys.add(key)
+  }
+  return keys
+})
+/**
+ * True when the sheet already has a field with this header's name (case-insensitive) that this
+ * modal can NOT map onto — formula/lookup/rollup, readonly, or hidden by field permissions.
+ *
+ * The "and not importable" half matters: two columns that both normalize to one importable field
+ * are a different story (the matcher gives the field to the first and the second legitimately wants
+ * its own new column), so those must keep defaulting to create.
+ */
+function headerMatchesUnmappableField(header: string): boolean {
+  const key = header.trim().toLowerCase()
+  if (!key) return false
+  return existingFieldNameKeys.value.has(key) && !importableFieldNameKeys.value.has(key)
+}
+/**
+ * The option label must show the name that would ACTUALLY be created: when the header collides with
+ * an existing (unmappable) field the planner suffixes it to `X (2)`, and promising 「X」 there would
+ * be a lie. Same planner as the write side, so the two can not drift.
+ */
+function plannedCreateFieldName(header: string): string {
+  const plan = planCreateFieldNames({
+    requests: [{ header, columnIndex: 0 }],
+    existingNames: [...existingFieldNameKeys.value],
+  })
+  return plan.ok ? plan.names[0] : header.trim()
+}
+/**
+ * Columns skipped because the sheet ALREADY has a field of that name that this modal can not write
+ * into (formula/lookup/rollup, readonly, or hidden by field permissions). Reported separately from
+ * `skippedColumnCount` so "the sheet has no such column" and "the sheet has it but it is read-only"
+ * do not collapse into one misleading sentence.
+ */
+const existingFieldSkippedColumnCount = computed(() => parsedHeaders.value.filter((header, index) => {
+  if (!header.trim()) return false
+  const mapped = fieldMapping.value[index]
+  if (mapped && mapped !== CREATE_FIELD_SENTINEL) return false
+  if (mapped === CREATE_FIELD_SENTINEL && isActiveCreateColumn(index)) return false
+  return headerMatchesUnmappableField(header)
+}).length)
 const createFieldRequests = computed<ImportCreateFieldRequest[]>(() =>
   Object.keys(fieldMapping.value)
     .map((columnIndex) => Number(columnIndex))
@@ -328,6 +404,8 @@ const createFieldRequests = computed<ImportCreateFieldRequest[]>(() =>
 )
 const skippedColumnCount = computed(() => parsedHeaders.value.filter((header, index) => {
   if (!header.trim()) return false
+  // Counted by existingFieldSkippedColumnCount instead — different cause, different sentence.
+  if (headerMatchesUnmappableField(header)) return false
   const mapped = fieldMapping.value[index]
   if (!mapped) return true
   return mapped === CREATE_FIELD_SENTINEL && !isActiveCreateColumn(index)
@@ -679,7 +757,14 @@ function buildDefaultFieldMapping(headers: string[]): Record<number, string> {
   const mapping = { ...mapXlsxColumnsToFields(headers, importableFields.value).mapping }
   headers.forEach((header, index) => {
     if (mapping[index]) return
-    mapping[index] = canOfferCreateField(header) ? CREATE_FIELD_SENTINEL : ''
+    // "Missing from the sheet" is decided against EVERY existing field name, not just the mappable
+    // ones. A header matching a formula/readonly/hidden field is left on skip: defaulting it to
+    // create would build an `X (2)` shadow text column behind the user's back (the export →
+    // re-import round trip hits exactly this). The option stays in the dropdown for anyone who
+    // deliberately wants the extra column.
+    mapping[index] = canOfferCreateField(header) && !headerMatchesUnmappableField(header)
+      ? CREATE_FIELD_SENTINEL
+      : ''
   })
   return mapping
 }

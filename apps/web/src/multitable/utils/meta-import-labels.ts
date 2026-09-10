@@ -219,6 +219,17 @@ export function createFieldsPlanned(count: number, isZh: boolean): string {
     : `${count} column(s) will be created as new text fields.`
 }
 
+/**
+ * Distinct from columnsSkippedNoField: the sheet DOES have a column of that name, it just can not be
+ * imported into (formula/lookup/rollup, readonly, or hidden by field permissions). Saying "does not
+ * exist" there would push the user toward creating a duplicate shadow column.
+ */
+export function columnsSkippedExistingField(count: number, isZh: boolean): string {
+  return isZh
+    ? `${count} 列与目标表既有字段同名，但该字段不可导入（只读/公式或无权限），已跳过。`
+    : `${count} column(s) match an existing field that cannot be imported into (read-only, formula, or not permitted) and were skipped.`
+}
+
 export function columnsSkippedNoField(count: number, isZh: boolean): string {
   return isZh
     ? `${count} 列在目标表不存在，已跳过。`

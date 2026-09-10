@@ -1326,6 +1326,185 @@ describe('MetaImportModal', () => {
     container.remove()
   })
 
+  it('leaves a header on skip when the sheet already has a same-name field it cannot import into', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const importCalls: any[] = []
+
+    const app = createApp({
+      render() {
+        return h(MetaImportModal, {
+          visible: true,
+          // Production shape: the workbench strips formula / readonly / permission-hidden fields
+          // before they reach `fields`, so ONLY the name list still knows Score and Locked exist.
+          // Without that list "Score" looks missing and would default to create → shadow column.
+          fields: [{ id: 'fld_name', name: 'Name', type: 'string' }],
+          existingFieldNames: ['Name', 'Score', 'Locked'],
+          importing: false,
+          result: null,
+          canCreateFields: true,
+          onClose: vi.fn(),
+          onImport: (payload: any) => { importCalls.push(payload) },
+        })
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    // Exactly the "export → re-import" round trip: the export writes every column header, formulas
+    // and readonly columns included.
+    textarea.value = 'Name\tScore\tLocked\tWarehouse\nAlpha\t42\tyes\tA1'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    const selects = Array.from(document.body.querySelectorAll('.meta-import__field-select')) as HTMLSelectElement[]
+    expect(selects[0]?.value).toBe('fld_name')
+    expect(selects[1]?.value).toBe('')
+    expect(selects[2]?.value).toBe('')
+    // Only the header with no counterpart at all defaults to "create".
+    expect(selects[3]?.value).toBe('__create__')
+    expect(document.body.textContent).toContain('2 column(s) match an existing field that cannot be imported into')
+    expect(document.body.textContent).toContain('1 column(s) will be created as new text fields.')
+    // "does not exist in the target sheet" would be a lie for Score/Locked.
+    expect(document.body.textContent).not.toContain('do not exist in the target sheet')
+    // The option is still offered for a deliberate choice, but it promises the name that would
+    // ACTUALLY be created rather than the colliding one.
+    expect(Array.from(selects[1].options).map((option) => option.textContent))
+      .toContain('Create field "Score (2)" (text)')
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Import 1 record'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(importCalls).toHaveLength(1)
+    expect(importCalls[0].createFields).toEqual([{ header: 'Warehouse', columnIndex: 3 }])
+    expect(importCalls[0].records).toEqual([{ fld_name: 'Alpha', '__create__:3': 'A1' }])
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('falls back to the visible field names when the caller supplies no existingFieldNames', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaImportModal, {
+          visible: true,
+          // No existingFieldNames prop: the formula field is visible here but NOT importable, and it
+          // still has to block the create default.
+          fields: [
+            { id: 'fld_name', name: 'Name', type: 'string' },
+            { id: 'fld_score', name: 'Score', type: 'formula' },
+          ],
+          importing: false,
+          result: null,
+          canCreateFields: true,
+          onClose: vi.fn(),
+          onImport: vi.fn(),
+        })
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Name\tscore\nAlpha\t42'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    const selects = Array.from(document.body.querySelectorAll('.meta-import__field-select')) as HTMLSelectElement[]
+    // Case-insensitive: header 'score' vs field 'Score'.
+    expect(selects[1]?.value).toBe('')
+    expect(document.body.textContent).toContain('1 column(s) match an existing field that cannot be imported into')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('asks only for the fields that were not created when a partial create failure comes back', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const importCalls: any[] = []
+
+    const Harness = defineComponent({
+      setup() {
+        const fields = ref([{ id: 'fld_name', name: 'Name', type: 'string' }])
+        const createdFieldColumns = ref<Record<number, string> | null>(null)
+        const createFieldsError = ref<string | null>(null)
+        return { fields, createdFieldColumns, createFieldsError }
+      },
+      render() {
+        return h(MetaImportModal, {
+          visible: true,
+          fields: this.fields,
+          importing: false,
+          result: null,
+          canCreateFields: true,
+          createdFieldColumns: this.createdFieldColumns,
+          createFieldsError: this.createFieldsError,
+          onClose: vi.fn(),
+          onImport: (payload: any) => { importCalls.push(payload) },
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Name\tWarehouse\tBatch\nAlpha\tA1\tB1'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Import 1 record'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(importCalls[0].createFields).toEqual([
+      { header: 'Warehouse', columnIndex: 1 },
+      { header: 'Batch', columnIndex: 2 },
+    ])
+
+    // The caller created Warehouse, then Batch blew up. It reports BOTH facts: the error and the
+    // column it did create. Nothing was written, so the modal is back on mapping.
+    vm.fields = [
+      { id: 'fld_name', name: 'Name', type: 'string' },
+      { id: 'fld_warehouse', name: 'Warehouse', type: 'string' },
+    ]
+    vm.createdFieldColumns = { 1: 'fld_warehouse' }
+    vm.createFieldsError = 'Failed to create field "Batch": boom No records were imported.'
+    await flushUi()
+
+    const selects = Array.from(document.body.querySelectorAll('.meta-import__field-select')) as HTMLSelectElement[]
+    expect(selects[1]?.value).toBe('fld_warehouse')
+    expect(selects[2]?.value).toBe('__create__')
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Import 1 record'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi()
+
+    expect(importCalls).toHaveLength(2)
+    // Warehouse is NOT requested again — that is what stops the second 'Warehouse' field.
+    expect(importCalls[1].createFields).toEqual([{ header: 'Batch', columnIndex: 2 }])
+    expect(importCalls[1].records).toEqual([{ fld_name: 'Alpha', fld_warehouse: 'A1', '__create__:2': 'B1' }])
+
+    app.unmount()
+    container.remove()
+  })
+
   it('rebinds the sentinel to the created field id so a re-import cannot create it twice', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

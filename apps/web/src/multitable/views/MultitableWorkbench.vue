@@ -412,6 +412,7 @@
       :visible="showImportModal"
       :sheet-id="workbench.activeSheetId.value"
       :fields="importSurfaceFields"
+      :existing-field-names="importExistingFieldNames"
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
@@ -1570,6 +1571,15 @@ const importSurfaceFields = computed(() =>
     return permission?.visible !== false && permission?.readOnly !== true
   }),
 )
+/**
+ * Names of EVERY field on the sheet, including the ones importSurfaceFields strips (formula /
+ * lookup / rollup / readonly / permission-hidden). The modal needs them to tell "this header is
+ * missing from the sheet" apart from "this header exists but is not writable" — otherwise a header
+ * matching a formula column defaults to "create a new field" and a shadow `X (2)` text column
+ * appears. Same source list applyImportCreateFields plans against, so read side and write side can
+ * not disagree. Names only; no values leave the sheet through this prop.
+ */
+const importExistingFieldNames = computed(() => workbench.fields.value.map((field) => field.name))
 const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
   const resolvers: Record<string, ImportValueResolver> = {}
   for (const field of importSurfaceFields.value) {
@@ -3680,11 +3690,33 @@ async function applyImportCreateFields(payload: ImportSubmitPayload): Promise<bo
         e?.message ?? wb('toast.fieldCreateFailed', isZh.value),
         isZh.value,
       )
+      // A create can not be rolled back (there is no transaction across these calls), so the fields
+      // built before the failure are already on the sheet. Publish them: the modal rebinds those
+      // columns from the sentinel to their real ids, so the retry the user is about to make asks
+      // only for the column that actually failed. Dropping createdColumns here (the previous
+      // behaviour) left orphans behind AND made the retry create a SECOND field with the same name
+      // — meta_fields has no (sheet_id, name) unique index to stop it.
+      await publishCreatedImportFields(payload, sheetId, createdColumns)
       return false
     }
   }
 
-  await workbench.loadSheetMeta(sheetId)
+  await publishCreatedImportFields(payload, sheetId, createdColumns)
+  return true
+}
+
+/**
+ * Adopt the fields that were actually created: rewrite the modal's placeholder keys to the real
+ * field ids, refresh the sheet meta (so a retry plans names against the CURRENT field list instead
+ * of a stale one), and hand the column → id map to the modal. Used on both the success path and the
+ * partial-failure path; on the failure path it must not clobber importCreateFieldsError.
+ */
+async function publishCreatedImportFields(
+  payload: ImportSubmitPayload,
+  sheetId: string,
+  createdColumns: Record<number, string>,
+): Promise<void> {
+  if (!Object.keys(createdColumns).length) return
   // Rewrite IN PLACE: the modal keeps these same record objects for "retry failed rows", so the
   // placeholder key must disappear everywhere, not just in this attempt's copy.
   for (const record of payload.records) {
@@ -3695,8 +3727,13 @@ async function applyImportCreateFields(payload: ImportSubmitPayload): Promise<bo
       delete record[placeholder]
     }
   }
-  importCreatedFieldColumns.value = createdColumns
-  return true
+  try {
+    await workbench.loadSheetMeta(sheetId)
+  } catch {
+    // A failed refresh must not swallow the create error nor hide the created ids from the modal:
+    // the rebind below is what keeps a retry from creating duplicates.
+  }
+  importCreatedFieldColumns.value = { ...createdColumns }
 }
 
 async function onBulkImport(payload: ImportSubmitPayload) {

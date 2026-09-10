@@ -377,6 +377,75 @@ describe('MultitableWorkbench import → create missing fields', () => {
     // The modal is told to go back to mapping; it is NOT left on the importing spinner.
     expect(importModalProps.createFieldsError).toContain('Failed to create field "Batch"')
     expect(importModalProps.visible).toBe(true)
+    // A createField can not be rolled back, so "Warehouse" is now really on the sheet. The handler
+    // must SAY SO: the modal rebinds that column to the real id, which is the only thing stopping
+    // the user's retry from creating a second field called "Warehouse" (meta_fields has no
+    // (sheet_id, name) unique index). Dropping createdColumns here leaves an orphan + a duplicate.
+    expect(importModalProps.createdFieldColumns).toEqual({ 1: 'fld_warehouse' })
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
+  })
+
+  it('does not re-create the already-created field when the user retries after a partial failure', async () => {
+    // The modal half of this loop (sentinel → real id rebind, so the retry payload only asks for the
+    // column that failed) is pinned in multitable-import-modal.spec.ts
+    // "asks only for the fields that were not created when a partial create failure comes back";
+    // here we feed the workbench the payload that modal produces and check nothing gets built twice.
+    mountWorkbench([{ id: 'fld_name', name: 'Name', type: 'string' }])
+    const createdFields: Array<Record<string, unknown>> = []
+    let batchFails = true
+    workbenchMock.client.createField.mockImplementation(async ({ name }: { name: string }) => {
+      if (name.startsWith('Batch') && batchFails) throw new Error('Temporary outage')
+      const field = { id: `fld_${name.toLowerCase()}`, name, type: 'string' }
+      createdFields.push(field)
+      return { field }
+    })
+    // Production loadSheetMeta republishes the sheet's field list; the retry plans names against it,
+    // so a mock that never refreshes would hide a stale-existingNames bug.
+    workbenchMock.loadSheetMeta.mockImplementation(async () => {
+      for (const field of createdFields) {
+        if (workbenchMock.fields.value.some((known: any) => known.id === field.id)) continue
+        workbenchMock.fields.value = [...workbenchMock.fields.value, field]
+      }
+      return true
+    })
+    workbenchMock.client.createRecord.mockResolvedValue({ record: { id: 'rec_1', version: 1, data: {} } })
+
+    await openImportModal()
+    emitImportPayload!({
+      records: [{ fld_name: 'Alpha', [createFieldPlaceholderId(1)]: 'A1', [createFieldPlaceholderId(2)]: 'B1' }],
+      rowIndexes: [0],
+      failures: [],
+      createFields: [
+        { header: 'Warehouse', columnIndex: 1 },
+        { header: 'Batch', columnIndex: 2 },
+      ],
+    })
+    await flushUi(20)
+
+    expect(importModalProps.createdFieldColumns).toEqual({ 1: 'fld_warehouse' })
+    expect(workbenchMock.fields.value.map((field: any) => field.name)).toEqual(['Name', 'Warehouse'])
+    expect(workbenchMock.client.createRecord).not.toHaveBeenCalled()
+
+    // Retry: the outage cleared and the modal now maps column 1 onto the real field id.
+    batchFails = false
+    workbenchMock.client.createField.mockClear()
+    emitImportPayload!({
+      records: [{ fld_name: 'Alpha', fld_warehouse: 'A1', [createFieldPlaceholderId(2)]: 'B1' }],
+      rowIndexes: [0],
+      failures: [],
+      createFields: [{ header: 'Batch', columnIndex: 2 }],
+    })
+    await flushUi(20)
+
+    expect(workbenchMock.client.createField).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.createField).toHaveBeenCalledWith({ sheetId: 'sheet_orders', name: 'Batch', type: 'string' })
+    // No second "Warehouse", and no "Warehouse (2)" either.
+    expect(workbenchMock.fields.value.map((field: any) => field.name)).toEqual(['Name', 'Warehouse', 'Batch'])
+    expect(workbenchMock.client.createRecord).toHaveBeenCalledWith({
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+      data: { fld_name: 'Alpha', fld_warehouse: 'A1', fld_batch: 'B1' },
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
 
   it('refuses to create fields (and to import) when the caller has no manage-fields capability', async () => {

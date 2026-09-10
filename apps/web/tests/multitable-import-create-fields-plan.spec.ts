@@ -25,6 +25,29 @@ describe('planCreateFieldNames', () => {
     expect(plan).toEqual({ ok: true, names: ['score (2)'] })
   })
 
+  // The two cases below are the ONLY ones that can tell `taken.has(candidate.toLowerCase())` /
+  // `taken.add(candidate.toLowerCase())` apart from their case-SENSITIVE mutants: every other case
+  // in this file feeds a header whose lower-cased form equals itself (already-lowercase ASCII or
+  // CJK), which makes the toLowerCase() calls identity functions.
+  it('suffixes when the header differs from the existing field only by case', () => {
+    const plan = planCreateFieldNames({
+      requests: [{ header: 'Score', columnIndex: 0 }],
+      existingNames: ['score'],
+    })
+    expect(plan).toEqual({ ok: true, names: ['Score (2)'] })
+  })
+
+  it('suffixes same-batch headers that differ only by case', () => {
+    const plan = planCreateFieldNames({
+      requests: [
+        { header: 'Warehouse', columnIndex: 0 },
+        { header: 'WAREHOUSE', columnIndex: 1 },
+      ],
+      existingNames: [],
+    })
+    expect(plan).toEqual({ ok: true, names: ['Warehouse', 'WAREHOUSE (2)'] })
+  })
+
   it('suffixes duplicates inside the same batch', () => {
     const plan = planCreateFieldNames({
       requests: [
