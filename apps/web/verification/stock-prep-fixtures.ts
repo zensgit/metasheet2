@@ -37,6 +37,9 @@ export const SYN_PROJECT_B = 'SYN-PROJ-0002'
 export const SYN_PROJECT_A_NAME = '示例项目 A'
 export const SYN_PROJECT_B_NAME = '示例项目 B'
 export const SYN_DECISION_ID = 'syn-decision-0001'
+/** The registered external data source ①a asks about. A NAME, never a host — see synDataSources. */
+export const SYN_DATA_SOURCE_ID = 'syn-datasource-0001'
+export const SYN_DATA_SOURCE_NAME = '示例数据源 A'
 export const SYN_FINGERPRINT = 'synfingerprint0001'
 
 /**
@@ -44,11 +47,14 @@ export const SYN_FINGERPRINT = 'synfingerprint0001'
  *
  *   fresh        —— 未装完. Preflight NOT ready with exactly one `http` blocker and one `env`
  *                   blocker (the pair I-8/I-9 splits on), a provisioned project directory whose
- *                   confirmation LEDGER is missing (the `ledger_missing` dead end P0-4 closes).
+ *                   confirmation LEDGER is missing (the `ledger_missing` dead end P0-4 closes),
+ *                   and NO registered data source — so 向导①a reads 「需要别人做」 rather than ✔.
  *   ready        —— 装完. Preflight ready, two projects, one of them carrying three pending
  *                   decisions, a board with missing components, and audit rows to read back.
  *   readerOnly   —— the values-free `stock-prep:read` queue watcher's world: the directory read is
- *                   refused the way the server refuses a principal with no tenant of its own.
+ *                   refused the way the server refuses a principal with no tenant of its own, and
+ *                   `/api/data-sources` is refused the way `rbacGuard('data_sources','read')`
+ *                   refuses a principal holding no such code — ①a's 「? 看不到」, not 「没登记」.
  *   defaults500  —— the manifest/defaults read 500s. Everything else answers, so the spec can tell
  *                   「这一页读不到清单」 apart from 「整页坏了」.
  *   noProjects   —— 装完, but the operator's directory is empty: the `no_projects` home empty state.
@@ -95,6 +101,36 @@ function envelope(data: unknown): string {
 
 function refusal(code: string, reason?: string): string {
   return JSON.stringify({ ok: false, error: { code, details: reason ? { reason } : undefined } })
+}
+
+/**
+ * `GET /api/data-sources`'s list projection, as `DataSourceManager.listDataSources` shapes it:
+ * `{ id, name, type, connected }` plus `ownerId` (management metadata a platform admin sees).
+ *
+ * NO `connection` subtree and no credential of any kind — not because this fixture is being careful,
+ * but because the production route does not return one either (credentials are write-only across the
+ * wire, A1). `type` is the only field the wizard's ①a actually reads: `dataSourceRegistry.ts`
+ * projects the list down to a state and two integers before anything renders, so a NAME planted here
+ * has no path to the DOM — which is exactly what the spec's values-free assertions rely on.
+ */
+function synDataSources(state: ScenarioState): Record<string, unknown> {
+  return {
+    items: state.dataSources,
+    total: state.dataSources.length,
+  }
+}
+
+function synDataSourceRow(): Record<string, unknown> {
+  return {
+    id: SYN_DATA_SOURCE_ID,
+    name: SYN_DATA_SOURCE_NAME,
+    // A RELATIONAL type on purpose: `STOCK_PREP_SQL_DATA_SOURCE_TYPES` counts postgres/postgresql/
+    // sqlserver/mysql and skips `http`/`plm`, so an `http` row here would leave ①a reading
+    // 「需要别人做」 and quietly turn every ✔ assertion into a vacuous one.
+    type: 'sqlserver',
+    ownerId: 'syn-owner-0001',
+    connected: true,
+  }
 }
 
 function synManifest(): Record<string, unknown> {
@@ -461,6 +497,10 @@ interface ScenarioState {
   roleCatalog: 'ok' | 'forbidden'
   sourceVerdict: 'go' | 'no-go'
   manifestStatus: number
+  /** What `GET /api/data-sources` lists — 向导①a's only evidence. */
+  dataSources: Array<Record<string, unknown>>
+  /** Non-null makes that route refuse, which is ①a's 「? 看不到」 third state. */
+  dataSourceRefusal: string | null
 }
 
 function createScenarioState(scenario: StockPrepScenario, options: StockPrepRouteOptions): ScenarioState {
@@ -475,6 +515,8 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
     roleCatalog: options.roleCatalog ?? 'ok',
     sourceVerdict: options.sourceVerdict ?? 'go',
     manifestStatus: 200,
+    dataSources: [synDataSourceRow()],
+    dataSourceRefusal: null,
   }
 
   if (scenario === 'fresh') {
@@ -483,6 +525,9 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
       ...base,
       preflightReady: false,
       ledgerReady: false,
+      // 未装完 —— nothing registered under 数据工厂 · 连接管理 yet. This is the branch that makes
+      // ①a a REAL assertion rather than a constant ✔ in every scenario.
+      dataSources: [],
       projects: [
         synProjectRow({ projectNo: SYN_PROJECT_A, projectName: SYN_PROJECT_A_NAME, pendingDecisionCount: 0, heldLineCount: 0, readyLineCount: 0 }),
         synProjectRow({ projectNo: SYN_PROJECT_B, projectName: SYN_PROJECT_B_NAME, pendingDecisionCount: 0, heldLineCount: 0, readyLineCount: 0 }),
@@ -492,7 +537,16 @@ function createScenarioState(scenario: StockPrepScenario, options: StockPrepRout
   }
 
   if (scenario === 'readerOnly') {
-    return { ...base, directoryRefusal: 'OPERATOR_SCOPE_TENANT_REQUIRED', projects: [], queueRows: [] }
+    return {
+      ...base,
+      directoryRefusal: 'OPERATOR_SCOPE_TENANT_REQUIRED',
+      // A `stock-prep:read` watcher holds no `data_sources:read`, so the registry route refuses
+      // them exactly like the server does. ①a reads 「? 看不到」 — never 「还没登记」.
+      dataSourceRefusal: 'FORBIDDEN',
+      dataSources: [],
+      projects: [],
+      queueRows: [],
+    }
   }
 
   if (scenario === 'defaults500') {
@@ -708,6 +762,17 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
       },
       body: 'SYNTHETIC-XLSX',
     }),
+  },
+  {
+    // 向导①a「登记外接数据源」(2026-09-10). A CORE-BACKEND route, so the envelope is the core
+    // `{ ok, data }` shape and `data.items` is what `data-sources/api.ts` `listDataSources` reads.
+    // Refused rather than empty in `readerOnly`: the two are different answers to ①a, and a fixture
+    // that collapsed them would let the 「看不到≠没完成」 branch rot untested.
+    method: 'GET',
+    path: '/api/data-sources',
+    respond: ({ route, state }) => (state.dataSourceRefusal
+      ? json(route, 403, refusal(state.dataSourceRefusal))
+      : json(route, 200, envelope(synDataSources(state)))),
   },
   {
     method: 'GET',
