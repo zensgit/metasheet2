@@ -527,6 +527,60 @@ describe('三处徽标同词一致 (P0-6) — home card / workspace title / sync
   })
 })
 
+describe('打开备料多维表 — 首页那一个入口', () => {
+  // WHY THE HOME PAGE CARRIES IT. 项目备料页 has had this button since it shipped, but it needs a
+  // project number in hand and 404s without one — so before anything was pulled, nothing on the
+  // operator's landing page could reach the sheet they fill. The handle comes from the directory
+  // this page is already rendered from; this component fetches nothing for it.
+
+  it('renders ONLY when the directory carried a handle', () => {
+    const withHandle = mountIsolated(StockPreparationOperatorHome, {
+      directory: { ...directoryWith({}), fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' } },
+      directoryLoaded: true,
+    })
+    const entry = withHandle.root.querySelector('[data-testid="stock-prep-operator-home-open-multitable"]') as HTMLButtonElement
+    expect(entry).not.toBeNull()
+    expect(entry.textContent).toContain('打开备料多维表')
+    withHandle.unmount()
+
+    // `null` — the server looked and could prove nothing for this tenant.
+    const nullHandle = mountIsolated(StockPreparationOperatorHome, {
+      directory: { ...directoryWith({}), fillTarget: null },
+      directoryLoaded: true,
+    })
+    expect(nullHandle.root.querySelector('[data-testid="stock-prep-operator-home-open-multitable"]')).toBeNull()
+    nullHandle.unmount()
+
+    // ABSENT — nobody asked (no opt-in), or the backend predates the key. Same silence, and it must
+    // not become a button that opens the chooser under a label promising the 备料主表.
+    const absent = mountIsolated(StockPreparationOperatorHome, { directory: directoryWith({}), directoryLoaded: true })
+    expect(absent.root.querySelector('[data-testid="stock-prep-operator-home-open-multitable"]')).toBeNull()
+    absent.unmount()
+  })
+
+  it('a HALF-SHAPED handle is no handle — the button never routes at a blank id', () => {
+    for (const target of [{ sheetId: '', viewId: 'view_x' }, { sheetId: 'sheet_x', viewId: '' }, { sheetId: 'sheet_x' }]) {
+      const mounted = mountIsolated(StockPreparationOperatorHome, {
+        directory: { ...directoryWith({}), fillTarget: target },
+        directoryLoaded: true,
+      })
+      expect(mounted.root.querySelector('[data-testid="stock-prep-operator-home-open-multitable"]')).toBeNull()
+      mounted.unmount()
+    }
+  })
+
+  it('the click asks the PARENT to open it — this component composes no route', () => {
+    const onOpenMultitable = vi.fn()
+    const mounted = mountIsolated(StockPreparationOperatorHome, {
+      directory: { ...directoryWith({}), fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' } },
+      directoryLoaded: true,
+      onOpenMultitable,
+    })
+    ;(mounted.root.querySelector('[data-testid="stock-prep-operator-home-open-multitable"]') as HTMLButtonElement).click()
+    expect(onOpenMultitable).toHaveBeenCalledTimes(1)
+    mounted.unmount()
+  })
+})
 describe('预读失败静默 (G3) + 空态三值互不共享文案 (P0-2)', () => {
   beforeEach(() => {
     h.locale = 'zh-CN'
