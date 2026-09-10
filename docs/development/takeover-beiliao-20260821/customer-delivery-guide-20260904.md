@@ -398,6 +398,60 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 **开了之后一线会看到什么**:如果某个账号的令牌仍然没有租户声明,页面上是一句专门写给它的话——「当前账号不属于任何一家工厂,所以看不到具体项目的数据。这不是故障,再试也一样 —— 请用您工厂的账号登录。」——**不要让人反复刷新**,重试不会变好,要么补 `user_orgs` 要么换账号重登。
 
+**5-6 三类角色的权限码模板(`integration:*` / `data_sources:*` / `stock-prep:*`)**
+
+> **2026-09-10 新增。** 在此之前 `integration:read/write/admin` 与 `data_sources:read/write/execute` 这六个码**从来没有被任何迁移种子化**:`permissions` 表里没有它们的行,而 `role_permissions` / `user_permissions` 都有指向 `permissions(code)` 的**外键**——所以这六个码同时处于「在门上能拦人」和「在库里授不出去」两种状态,非管理员要走通主旅程,只能有人在生产库上手写 `INSERT INTO permissions`。迁移 `zzzz20260910120000_add_integration_permissions.ts` 把这六个码**补成可授予项**。
+>
+> **它只补定义,不发权限**:六个码种子化之后**持有者为零**,也**没有预绑任何角色**(与 `stock-prep:*` 同一套「零自动」口径)。平台管理员不受影响——`role:admin` 在查表之前就短路放行,本来就不靠这些码。
+
+**先读这一条(和 5-2 是同一个坑)**:这六个码同样受**命名空间准入**约束,而且准入过滤器判定「这个用户受控于哪个命名空间」时**只看角色**(`user_roles` → `role_permissions`)。所以:
+
+- **必须建角色、把码挂到角色上、再把角色分配给人。** 直接对个人 `POST /api/permissions/grant` 的码会入库、也会被读出来,但随后被准入过滤器丢掉,该账号在相关接口上一律 403。
+- 命名空间名就是码的冒号前半段,**逐字**:`integration`、`data_sources`(下划线,不是中划线)、`stock-prep`。
+- 这两个命名空间**故意没有**被放进免准入名单(`packages/core-backend/src/rbac/namespace-admission.ts` 的 `NON_NAMESPACED_PERMISSION_RESOURCES`)。把它们放进去确实能省掉开准入这一步,但代价是**所有已持有和将来持有这些码的人一律绕过准入**——这两个命名空间通向客户数据库口令和原始 SQL 执行,所以维持「授了码还要再开一次准入」的 fail-closed 方向。**顺带一提**:真放进免准入名单,下面那条开准入的接口反而会开始回 `400 NAMESPACE_NOT_SUPPORTED`,因为它只接受受准入管控的命名空间。
+
+**三类角色 = 哪些码**(按最小必要给;一格写「—」就是**不要给**):
+
+| 角色 | `integration:*` | `data_sources:*` | `stock-prep:*` | 要开的命名空间准入 |
+|---|---|---|---|---|
+| **实施工程师**(装机、接源、装表,通常是我方或客户 IT) | `read` + `write` + `admin` | `read` + `write`(`execute` 按需,见下) | `read` + `operate` + `admin` | `integration`、`data_sources`、`stock-prep` |
+| **顾问 / 业务管理员**(配置与日常运营,不装机) | `read` + `write` | `read` | `read` + `operate` | `integration`、`data_sources`、`stock-prep` |
+| **一线操作员**(拉取、确认、导出) | **—** | **—** | `read` + `operate` | 只要 `stock-prep` |
+
+四条必须知道的口径:
+
+1. **一线不需要任何 `integration:*` 或 `data_sources:*` 码。** 备料自己的路由由 `stock-prep:*` 独占判定(`lib/http-routes.cjs` 的 `hasPermission` 先判备料码再落到旧门),而一线拉取读 PLM 走的是外接源上的**归属戳委派**(见 §5 ②),用的不是一线自己的数据源权限。2026-09-08 在 222 上按角色 `stock-prep-operator`(只有两个 `stock-prep` 码)实测:目录 200、确认队列 200、试算 200。**多给 `integration:write` 不会让一线多做成一件事,只会把权限面无谓地扩大。**
+2. **`integration:admin` 约等于插件内的管理员。** `lib/http-routes.cjs` 的 `isAdmin()` 对 `role:admin` 和 `integration:admin` 一视同仁,持有它就能过插件里所有 admin 档的门(选源 `source-binding`、装表 `sandbox-target/ensure`、装 pack)。**只给实施工程师**,不要给顾问。
+3. **`data_sources:execute` 是原始 SQL 执行**(`POST /api/data-sources/:id/query`)。装机排障时才需要,**默认不给**;顾问和一线都不该有。
+4. **有码不等于看得见某个源。** 数据源本身还有一层属主判定(`DataSourceManager.assertAccess`:**属主或平台管理员二选一**),`data_sources:read` 是必要条件不是充分条件——顾问拿到 `data_sources:read` 也读不到别人建的源。谁建的源谁是属主,这一点没有因为本次补种子而改变。
+
+**怎么做(以「顾问」为例,角色名可自定)**:
+
+```sql
+-- 一次性:建角色并挂权限码
+INSERT INTO roles (id, name) VALUES ('beiliao_consultant', '备料顾问') ON CONFLICT (id) DO NOTHING;
+INSERT INTO role_permissions (role_id, permission_code) VALUES
+  ('beiliao_consultant', 'integration:read'),
+  ('beiliao_consultant', 'integration:write'),
+  ('beiliao_consultant', 'data_sources:read'),
+  ('beiliao_consultant', 'stock-prep:read'),
+  ('beiliao_consultant', 'stock-prep:operate') ON CONFLICT DO NOTHING;
+-- 每个人:指派角色
+INSERT INTO user_roles (user_id, role_id) VALUES ('<用户 id>', 'beiliao_consultant') ON CONFLICT DO NOTHING;
+```
+
+然后**逐个命名空间**开准入(三次调用,少一次就少一半权限,而且是静默被过滤):
+
+```
+PATCH /api/admin/users/<用户 id>/namespaces/integration/admission     { "enabled": true }
+PATCH /api/admin/users/<用户 id>/namespaces/data_sources/admission    { "enabled": true }
+PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission      { "enabled": true }
+```
+
+**核对**:以该用户身份调 `GET /api/auth/me`,返回的 `permissions` 里必须逐字看到上表里给的每一个码。看不到就是**角色没挂上**或**那个命名空间的准入没开**——这两种情况在接口上都表现为 403,分不出来,所以两边都要查。
+
+> **一个已知的门错配(不影响上面的做法)**:前端 `/data-sources` 路由的 meta 要求 `integration:write`,而左侧导航的显示谓词没设权限,两边口径不一致。**这一项由在飞的 #5587 处理**(该分支已把 `/data-sources` 改成重定向),合并后此错配自动消失,本节不需要因此调整。
+
 ---
 
 ## 6. 验收路径(客户自测)
