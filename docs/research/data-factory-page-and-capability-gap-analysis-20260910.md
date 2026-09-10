@@ -1,222 +1,319 @@
 # 数据工厂页面布局与功能差距分析 —— 对标飞书 aPaaS 连接器 / n8n / 数环通 iPaaS（2026-09-10）
 
-> 内部研究，非 committed design。对象是 `/integrations/workbench`（数据工厂）及其周边：`/data-sources`（外接数据源，正由 PR #5587 并入连接管理分区）、`/integrations/k3-wise`（K3 预设页）、`/help/integration`、以及 `/stock-prep`（备料操作员壳，只作对照）。
+> 内部研究，非 committed design。对象是 `/integrations/workbench`（数据工厂）及其周边：`/data-sources`（外接数据源，PR #5587 起并入连接管理分区）、`/integrations/k3-wise`、`/help/integration`，以及 `/stock-prep`（备料操作员壳，只作对照）。
 >
-> **产出方式**：5 个只读读图代理（页面结构 / 后端能力 / 对标特性 / 用户旅程 / 已知缺口）→ 9 个视角各自找差距（75 条原始）→ 语义去重合并成 58 条 → 每条一个对抗反驳者（"其实已有？"+"重要吗、对标证据真吗？"）→ 本文综合。反驳者核验因额度中断，**已核验 9 条、待核验 49 条**（表中"核验"列）；待核验条目的 file:line 由查找者给出、未经第二人复核，读者按"待证"看待。对标材料：飞书 aPaaS 帮助中心 7 篇（MySQL/Postgres/SQL Server/TiDB 连接器、MySQL 动态 SQL 操作说明、各类集成凭证的配置说明、第三方集成使用指南，2026-09-01 下载）；n8n / 数环通只有一般知识，条目里标 **[一般知识]**。
+> **产出方式**：5 个只读读图代理（页面结构 / 后端能力 / 对标特性 / 用户旅程 / 已知缺口）→ 9 个视角各自找差距（75 条原始）→ 语义去重合并成 58 条 → 46 条 P0/P1 各过一个对抗反驳者（"其实已有？"+"重要吗、对标证据真吗？"，任一视角推翻即驳回）→ 完整性批评者补漏（4 条新增，同样过反驳）→ 综合。结果：**33 条幸存 + 4 条补充 = 37 条成立，17 条被驳回**（§6.2 列出编号与理由）；12 条 P2（G47–G58）未过反驳者，正文按查找者原表述列出并标"未核验"。所有幸存条目的严重度与表述都是反驳者修正后的——原始 10 条 P0 中 9 条被降为 P1，只剩 G02。
 >
-> 行号取自 2026-09-09 的 `main`（e89f3e15e 前后），与 PR #5587 合并后的行号会有偏移。
+> 对标材料：飞书 aPaaS 帮助中心 7 篇（MySQL / Postgres / SQL Server / TiDB 连接器、MySQL 动态 SQL 操作说明、各类集成凭证的配置说明、第三方集成使用指南，2026-09-01 下载）；其"权限 / 应用发布 / 运维监控 / 自定义连接器 / Open API"五个域只有导航条目无正文。n8n / 数环通只有一般知识，条目里标 **[一般知识，未核对]**。
+>
+> 行号取自 2026-09-09 的 `main`（e89f3e15e 前后）；PR #5587 合并后前端行号会偏移。
 
-## 0. 一句话结论
+> 证据规则：我方现状全部给 `file:line`；对标引用给文档名与原句；n8n / 数环通只用一般知识并标 `[一般知识，未核对]`。对标语料为飞书 aPaaS 帮助中心抽取的 7 份文本（MySQL/Postgres/SQL Server/TiDB 连接器、MySQL 动态 SQL、各类集成凭证的配置说明、第三方集成使用指南），其"权限 / 应用发布 / 运维监控 / 自定义连接器 / Open API"五个域只有导航条目、无正文，结论不能到能力细节。
+> 差距编号沿用 G/X；所有条目均已过反驳者修正，本报告采用修正后的表述与定级。
 
-**后端已经是"受治理的企业级集成"骨架（凭据加密、values-free、租户门、K3 写栅栏、引用守卫、溯源与死信），但页面把这副骨架摆成了一张 5000 行的长卷：能力有一半到不了 UI，到得了的也散在 12 个常驻分区里，术语不收口、失败不可见、触发接不上。** 差距不在"连接器不够多"，在"把已有能力交到实施工程师手里"。
+---
 
-五条要点：
+## 1. 一句话结论
 
-1. **不差的地方**：治理与安全（加密凭据、只读账号 + K3 永久栅栏、租户声明门 W4、删除引用守衛、内容寻址读取源审批、死信 + provenance）在对标里找不到同等深度；2026-07-03 的判断"护城河 = 治理不是连接器广度"仍然成立。
-2. **最大单点**：**平台触发器（定时 / webhook / 记录事件）与数据工厂管道之间没有绑定端口**（G04），管道还在 HTTP 请求内同步跑完（G06），失败零告警（G07）。"每天早上从 PLM 拉一遍"在产品内做不到，只能靠客户机计划任务 + 长期 token，而这条旁路本身又没有 SSRF/自环守卫（G05）。
-3. **第二单点**：**连接只有 owner 私有一种作用域**（G02）。实施工程师建的源，顾问和一线看不到、选不到；离职后管道仍以其身份读源。这是 minimal-plan PR-2 的正题。
-4. **UI 到达率**：转换引擎 8 种、校验 5 种，UI 只露一半（G27）；后端 `GET /runs` 支持筛选分页，前端锁死"最近 5 条"（G34）；模板 CRUD/instantiate 9 条路由前端零调用（G33）；`GET /api/data-sources/health` 零调用（G49）。**这些是 S/M 工作量的"零后端改动"收益**。
-5. **页面本身**：长卷 + 左 rail、12 分区常驻、全局状态条不粘不滚（G01）、三套步骤模型互斥（G12）、同一概念 9 种叫法（G41）、主链路 9 个文件零双语（G42）。#5587 已补上 hash/`?section=` 落点，剩下的是"列表-详情"与"分区级折叠"两刀。
+**在"读得安全、写得可证"这条护城河上我们没有落后，甚至在增量水位、分页兜底、只读围栏、values-free 证据上领先对标；真正的差距集中在三处：连接资产不能共享（唯一 P0）、运行时是同步且哑的（无后台作业/无告警/失败原因不可见）、以及前端把后端已有能力锁在 API 里（映射回读、运行列表、参数化过滤、副驾落库都只差一层接线）。**
 
-## 1. 记分卡（我们 vs 对标最好者，1–10）
+要点：
 
-| 视角 | 我们 | 对标 | 一行理由 |
+1. **不差的地方**：增量水位线 + tiebreaker（`plugins/plugin-integration-core/lib/watermark.cjs:5-6`、`pipeline-runner.cjs:988-1170`）对标语料里根本没有——飞书把分页与一致性全推给用户（《MySQL 连接器》:172「SQL 结果超过 10,000 条时会导致执行失败；若需查询更多数据，可在配置时使用 OFFSET 循环调用」）；K3 四层永久写围栏（`lib/k3-external-write-permanent-fence.cjs:3-11`）与对标劝客户"给平台加读写权限"（《各类集成凭证的配置说明》:218）方向相反，是可宣讲的立场。连接引用计数与 409 拒删在服务端已实现（`packages/core-backend/src/routes/data-sources.ts:820-839`），对标同款（《第三方集成使用指南》:127「有引用关系的连接配置，无法被删除」）。
+2. **唯一 P0：连接是创建者私有**。`routes/data-sources.ts:486` 硬编码 `scopeKind:'private'`，`DataSourceManager.ts:593` 非 owner 一律 404，`pipeline-runner.cjs:413,420,520,526` 运行主体永远是 `pipeline.createdBy`。顾问 A 建的源顾问 B 看不到、绑不上、离职后管道仍以 A 身份读源。对标：《第三方集成使用指南》:84「每种连接的服务可创建多个不同的连接配置，每个连接配置也支持在应用内复用」。
+3. **运行时是同步且哑的**：管道在 HTTP 请求内 `await runner.runPipeline` 后才回 202（`lib/http-routes.cjs:5420,5443`），无取消、无进度；`finishRun` 后零通知，`plugin.json:15-16` 申报的 `events.emit` 全插件零调用；死信只渲染码表标签 + 裸码，主链路 27 处 `error.message` 原样进状态条。平台已有可抄的 durable 作业（`services/ai-bulk-job-service.ts:10-15`）与 QueueService，不必从零造。
+4. **后端有、前端锁死**的一族（合计约 8 条）：GET pipeline / runs 列表 / `options.source.filters` / `/query`、`/select` 的 where·orderBy / `maxPagesReached` 已入 `run.details` / 副驾 confirm 的 preset 在 201 响应体里——全部前端零调用或零渲染。这类是 S/M 工作量、零后端改动的性价比最高的一波。
+5. **对标不能拿来当压力源的地方**：飞书在 SQL Server 上是薄的（《SQL Server 连接器》:97 只有「鉴权、运行 SQL 语句功能」，全文 137 行 vs MySQL 378 行）；"后台执行可 Stop / 错误工作流 / 执行历史列表页"在语料里无原句，只剩 n8n/数环通 `[一般知识，未核对]`。这些方向要做，理由必须来自我们自己的用户场景（备料无人值守、47 列宽表），不是"对标有"。
+
+---
+
+## 2. 记分卡（1–10，我们 vs 对标最好者）
+
+| 视角 | 我们 | 对标最好 | 一行理由 |
 |---|---|---|---|
-| 信息架构与布局 | 4 | 8 | 单页长卷 + 12 分区常驻、状态条不粘（G01/G13/G15）；rail 与分区抽取已做，落点 #5587 已补 |
-| 连接器与凭据管理 | 5 | 8 | 加密落库、测试、轮换齐；但 owner 私有（G02）、HTTP 只有 X-API-Key（G16）、无 SSL 项（G17）、测试与保存脱钩（G18） |
-| 数据操作能力 | 4 | 8 | 只读源只有"整表 + 等值过滤"（G03）；页预算固定（G21）；增量只在 pipeline 一线（G22）；类型转换矩阵缺（G24） |
-| 触发与编排 | 3 | 9 | 触发器到不了管道（G04）、同步运行无取消（G06）、直线管道无条件/串联（G26）；平台 Automation 已有 11 种触发器，缺的是端口 |
-| 转换与映射 | 4 | 8 | 引擎能力 UI 只露一半（G27）、目标字段裸文本框（G28）、保存覆盖无 diff（G08） |
-| 运行、监控与可观测 | 5 | 8 | run-log/provenance/死信后端强；UI 锁"最近 5 条"（G34）、零告警（G07）、失败原因不可见（G36） |
-| 治理、权限与发布 | 6 | 7 | 加密/租户门/写栅栏/引用守卫领先；权限码未种子化（G09）、无 maker-checker（G38）、外部系统零审计（G20）、无环境与导入导出（G39/G40） |
-| 上手、文案与帮助 | 3 | 8 | 三套步骤模型（G12）、9 种叫法（G41）、双语两极（G42）、K3 文案与围栏打架（G10） |
-| 可扩展与生态 | 3 | 8 | kind 编译期封闭（G45）、113 条路由不在 OpenAPI/token scope（G44）、Bridge 只能 localhost（G46）；对标 SaaS 连接器目录是刻意不追（G58） |
+| 治理（权限/审计/发布） | 6 | 6（飞书） | 我们：只读围栏、values-free、读取源审批 fail-closed（`read-source-config-store.cjs:347-357`）领先；但连接私有（G02）、六个权限码未种子化（G09）、外部系统/管道零审计（G20）、沙箱→生产靠改部署文件（G39）。对标：连接配置 CRUD 审计 + 引用不可删 + 双环境发布语义明写（《第三方集成使用指南》:117-118、:127、:131-132）。 |
+| 连接与凭据 | 5 | 7（飞书） | 我们凭据加密、轮换路由齐全（`lib/credential-store.cjs:1-33`），但测试与保存脱钩（G18）、HTTP 只有 X-API-Key 一种形态且 Bearer 被静默剥掉（G16）、SQL 表单无任何高级项（G17）。对标：「提交并测试」通过才落库（:106）、HTTP 四种鉴权（《各类集成凭证的配置说明》:145-154）、多环境连接信息（:95）。 |
+| 数据操作 | 5 | 6（飞书 MySQL 线） | 我们水位/分页/等值下推领先，但参数化/投影/联表能力分散在后端接不进主旅程（G03）、类型转换矩阵无（G24）。对标：动态 SQL `#{}` 预编译 + `<sql>/<include>` 复用（《MySQL 动态 SQL》:279、:435-454）——但仅 MySQL 1.5+（:124），SQL Server 线拿不到。 |
+| 触发与编排 | 3 | 7（飞书） | 我们只有"人点 + API"（`pipelines.cjs:28` 的 `'cron'` 无生产者），唯一产品内定时通路是 Automation `send_webhook` 转发且无 SSRF/自环守卫（G05）。对标：连接器是流程节点，任何触发器可驱动（《MySQL 连接器》:119、:217、:226）。 |
+| 可观测与错误处理 | 6 | 5（飞书，语料内） | 我们 run-log/provenance 11 事件/死信 replay 是企业级形态（2026-07-03 对标 :21 已判 strong），但监控 UI 锁死 5 条单管道（G34）、失败原因不可见（G36）、零告警（G07）。语料内飞书只有「在 flow 运行日志中返回错误信息」（《MySQL 动态 SQL》:483）与 TiDB 重试/超时三项（:148-159）；n8n Executions/Error Workflow `[一般知识，未核对]` 会高于此分。 |
+| 转换与映射 | 4 | 6（飞书） | 引擎 8 种转换 + 校验 5 种，UI 只露 5 种单步（G27）；映射编辑器只写不读（G08）；副驾确认不落库且 UI 文案假成功（G31）。对标：「预览并测试 → 使用输出」自动维护出参 schema（《MySQL 连接器》:178）、类型转换表公开（:245-355）。 |
+| 上手与文案 | 4 | 7（飞书） | 主链路仍推销「Save-only 写回 K3」而运行时已永久禁（G10）；术语 9 种叫法（G41）；帮助页无 SQL 主旅程。对标：固定文档骨架 + 端到端案例（《MySQL 连接器》:207-238、:362-377）。 |
+| 信息架构与布局 | 4 | 7（飞书） | 单页长滚动 12 分区常驻、rail 只锚点、零 URL 状态、连接是"列表+共享草稿"（G01/G11/G13/G15）。对标：列表筛选→点行进详情→编辑弹窗→引用数可点（《第三方集成使用指南》:108、:116、:123-124）。 |
+| 扩展面 | 3 | 6（飞书，仅导航条目） | 9 个 kind 编译期封闭、无 config/credential schema、113 条路由不在 OpenAPI、不接受作用域 token（G44/G45）。对标只证明存在「自定义连接器」「Open API 使用指南」文档域（《MySQL 连接器》:33-34），细节未核。 |
 
-## 2. 差距总表（58 条）
+---
 
-核验列：**✓** = 反驳者核验后成立（括号为修正后的严重度）；**✗** = 被驳回；**待** = 反驳者未跑。工作量 S/M/L 为查找者估计。
+## 3. 差距清单
 
-### P0（10 条）
+工作量：S ≤ 3 人日，M ≈ 1–2 周，L ≥ 3 周。"已知？"列引用团队文档或记忆。
 
-| 编号 | 差距 | 工作量 | 核验 | 已知 |
-|---|---|---|---|---|
-| G01 | 全局状态条钉在页首且不粘：深处分区的保存/运行失败在视口之外，本地不留痕 | S | ✓（→P1） | — |
-| G02 | 连接只有 owner 私有一种作用域：无 workspace 共享、无 use/manage/rotate 分权，运行主体永远是创建者 | L | ✓ | minimal-plan PR-2 |
-| G03 | SQL 只读源没有参数化/多表/投影查询面：只能"整表或整视图 + 等值过滤"，等值过滤在 UI 也不可达 | L | 待 | — |
-| G04 | 定时 / 入站 webhook / 记录事件三类触发器都到不了数据工厂管道：无受治理的绑定端口 | L | 待 | minimal-plan §3.1/§6.1 |
-| G05 | Automation `send_webhook` 无 SSRF/自环守卫，是当前唯一的"产品内定时跑管道"旁路，且要把长期 Bearer 明文塞进规则配置 | M | ✓（→P1） | — |
-| G06 | 管道在 HTTP 请求内同步跑完：无后台作业、无取消、无进度；卡死 running 只在下次触发按 4h 阈值被动清理 | L | ✓（→P1） | 48h 记录 :50、appendix G3 |
-| G07 | 失败零告警：failed/partial、死信产生、无人值守拉取失败都不通知任何人；events.emit 申报了但从未使用 | M | ✓（→P1） | minimal-plan §3.1 |
-| G08 | 保存清洗流程会用编辑器里的种子猜测静默覆盖已有 pipeline 的映射；映射无法从已保存 pipeline 回读 | M | ✓（→P1） | — |
-| G09 | 数据工厂与外接数据源的六个权限码从未种子化：非管理员要进主旅程必须手写 SQL 建码、绑角色、开命名空间准入 | S | 待 | 记忆"直接授予被过滤成 403" |
-| G10 | 主链路文案仍推销"Save-only 写回 K3"，运行时自 2026-08-29 永久禁止；撞上的错误码前端无人话 | M | 待 | 记忆"K3 写边界裁决=A" |
+### P0
 
-### P1（36 条）
+| 编号 | 差距 | 对标怎么做 | 我们现状（file:line） | 用户影响 | 工作量 | 建议 | 已知？ |
+|---|---|---|---|---|---|---|---|
+| G02 | 连接/数据源只有 owner 私有一种作用域；RBAC 层虽有 read/write/execute 切分（`routes/data-sources.ts:324/451/1025`）但在 owner 闸门之下形同虚设，轮换与改配共用同一 write（:704 vs :451）；运行主体固定为创建者 | 《第三方集成使用指南》:83-84 连接配置是应用级资产，「连接配置创建好之后便可在其他模块中引用…支持在应用内复用」；`[一般知识，未核对]` n8n 凭据 owner + share 给 user/project | `routes/data-sources.ts:486`（`scopeKind:'private'` 硬编码）；`DataSourceManager.ts:589-603`（注释自认 workspace_id 未被消费，assertAccess 只看 ownerId）、:1246-1252；`scope_kind='workspace'` 生产路径零写入（仅迁移 CHECK `zzzz20260902120000:67` 与测试 `data-source-scope.test.ts:218,225`）；`DataSourcesView.vue` 全文无共享控件；`data-source-plugin-facade.ts:490-524`（runAs=service 也先过 assertAccess，无服务身份旁路）；`pipeline-runner.cjs:413,420,520,526`；`directory/*.ts` grep data_source = 0（离职账本零联动） | 实施工程师建好只读源后顾问/一线看不到选不到；唯一绕法是共用账号或平台管理员；A 离职后管道仍以 A 身份读源，无收回语义 | L | 按 minimal-plan PR-2：`PUT /:id/scope` 落 workspace 共享；权限拆 read/use/manage/rotate；表单加「共享到当前工作区」；facade `assertReferenceable` 与绑定按 use 判定；运行主体改触发者并在 run 记录写 createdBy+triggeredBy；创建者停用时预检报 OWNER_INACTIVE | 是：`integration-consolidation-plan-20260901.md:102-105`、minimal-plan PR-2；known §E「use vs manage/rotate 尚未见独立权限枚举」 |
 
-| 编号 | 差距 | 视角 | 工作量 | 核验 |
-|---|---|---|---|---|
-| G11 | 分区零深链、零 URL 状态（**#5587 已补 hash/?section 落点；连接/死信级寻址仍无**） | 布局 | M | ✓（→P2） |
-| G12 | 零首次上手引导：三套互斥步骤模型、DOM 顺序 ≠ rail 顺序、rail 不标"对 SQL 源不适用"、帮助中心不讲 SQL 源主旅程 | 布局/文案 | M | 待 |
-| G14 | 租户/工作区作用域由 localStorage 与连接分区底部两个裸输入框决定：改后半页刷新半页不刷新 | 布局/治理 | M | ✓ |
-| G15 | 连接管理是"列表 + 共享草稿"而非"列表-详情"：编辑即覆盖草稿无脏检查，界面看不到引用数（引用数列在 C 分支做） | 布局 | M | 待 |
-| G16 | HTTP 凭据只有固定头名 X-API-Key 一种形态：Bearer 被 Zod 静默剥掉、Basic 只在后端、无自定义头/Query | 连接器 | M | 待 |
-| G17 | SQL 连接表单无 SSL/证书信任/默认 schema/超时；SQL Server 默认 trustServerCertificate=true 对用户不可见 | 连接器 | S | 待 |
-| G18 | 测试与保存脱钩且编辑态不能测；工作台连接草稿区没有测试按钮；列表把"未拨号"渲染成"未连接" | 连接器/文案 | M | 待 |
-| G19 | 引用关系不可见、删除拒绝以英文原句回显；外部系统删除只查 pipeline，不查读取源/组合/备料源绑定 | 连接器/治理 | M | 待 |
-| G20 | 外部系统、凭据与管道的增删改零审计；管道原地覆盖无版本/无 updated_by | 连接器/治理 | M | 待 |
-| G21 | 分页预算固定且 UI 不可调：备料只读源 10 页×1000 行硬顶直接 422；pipeline 100 页后标 partial 且水位不推进 | 数据操作 | S | 待 |
-| G22 | 增量/水位线只覆盖 pipeline 一条线：读取源、组合、备料 readonly-source-run 全部全量重读 | 数据操作 | L | 待 |
-| G23 | 没有节点级"先跑一遍看结果"：dry-run 必须先保存 pipeline；SQL 预览固定 100 行在另一页；执行过的 SQL 不回吐 | 数据操作/映射 | M | 待 |
-| G24 | 没有源类型→JSON→目标类型转换矩阵：二进制列经 JSON 变 `{type:'Buffer'}`，契约无处可查 | 数据操作/映射 | M | 待 |
-| G25 | 重试、超时、背压三项无用户面：源读一抖整 run failed 且水位不推进；行写失败只能人工逐条 replay | 数据操作/触发 | M | 待 |
-| G26 | 编排原语缺失：管道是单源→单目标直线，无条件/过滤/循环/多目标/串联；组合硬限两跳 | 触发编排 | L | 待 |
-| G27 | 转换/校验引擎只有一小半能从 UI 到达：toDate/defaultValue/concat/转换链/pattern/enum 全部不可配 | 映射 | S | 待 |
-| G28 | 目标字段是裸文本框、无自动匹配、不校验存在性/类型；目标 schema 只用来种前 8 行 K3 猜测 | 映射 | M | 待 |
-| G29 | 映射保存无编辑期硬门：非法转换直到运行期逐行落死信；dictMap 未命中键静默透传原值 | 映射 | S | 待 |
-| G30 | 读取源 fieldMap 要手打响应路径，探测证据不回吐字段清单——没有"预览并测试 → 使用输出" | 映射 | M | 待 |
-| G31 | 列映射副驾确认后的 preset 只回到浏览器：不落库、不进目录、不可下载 | 映射 | M | 待 |
-| G32 | 备料源列→ext_ 字段映射是部署机上的 JSON 文件，没有任何 UI、预览或审计；写错整个插件起不来 | 映射 | L | 待 |
-| G33 | 模板目录三套互不相通：后端 CRUD/instantiate 前端零调用；前端 4 条种子全是 HTTP 向导，无 SQL 只读源主链路模板 | 映射/文案/扩展 | M | 待 |
-| G34 | 运行监控锁死在"一个 pipeline 的最近 5 条 run + 5 条 open 死信"：无跨管道列表、无分页筛选、无详情、无轮询（后端已支持） | 可观测 | M | 待 |
-| G35 | 死信只有单条 replay：无 discard、无批量、无按原因分组；replay 再失败复制出一条新死信 | 可观测 | M | 待 |
-| G36 | 失败原因对用户不可见：死信 errorMessage 永不进 DOM 只剩泛化码，run.errorSummary 又原样直出；码表 50 条 vs 后端 86 个码 | 可观测/文案 | M | 待 |
-| G37 | 备料真实写路径（表动作 dry-run/apply、大 BOM 作业）不进 integration_runs、不产生 provenance/死信/审计 | 可观测 | L | 待 |
-| G38 | 读取源/组合/Bridge 清单的"审批"与"保存"同为 integration:write，同一人自存自批，无 maker-checker | 治理 | M | 待 |
-| G39 | 沙箱→生产没有产品化发布通道：靠 env 与服务端配置文件切换，无 UI/API/版本/发布人 | 治理 | L | 待 |
-| G40 | 配置不能导出/导入：跨环境复制"连接+读取源版本+组合+映射+管道"要手写 JSON | 治理 | M | 待 |
-| G41 | 术语不收口：同一个"外部系统连接"9 种叫法，空选项写"请选择 adapter"，两个同型下拉无区分说明 | 文案 | M | 待 |
-| G42 | 双语两极分化 + 默认 locale 为 en：主链路 9 个文件 0 处 bi()，中文用户看到英文枚举 | 文案 | M | 待 |
-| G43 | 跨页/跨分区断链（**#5587 已改口三处、向导链接改指连接分区；K3/帮助页仍不在导航，工作台与 /stock-prep 零互指**） | 文案 | S | 待 |
-| G44 | 数据工厂 113 条路由不在 OpenAPI、不接受作用域 API token、SDK 不覆盖：无受治理的机器调用面 | 扩展 | M | 待 |
-| G45 | 没有自定义连接器扩展面：kind 编译期封闭、无按 kind 的 config/credential schema、HTTP 连接只能手写两段 JSON | 扩展 | L | 待 |
-| G46 | Bridge Agent 只能是后端同机 localhost 单库只读旁路，不是客户内网侧的连接器宿主 | 扩展 | L | 待 |
+### P1
 
-### P2（12 条）
+| 编号 | 差距 | 对标怎么做 | 我们现状（file:line） | 用户影响 | 工作量 | 建议 | 已知？ |
+|---|---|---|---|---|---|---|---|
+| G01 | 保存/运行等 API 失败路径无分区级落点：唯一出口是页首非 sticky 状态条（91 处 setStatus），成功才写 `pipelineResultText`，无 toast、无 scroll-to-status | 《第三方集成使用指南》:106「提交并测试…就地反馈」；《MySQL 动态 SQL》:483 错误在运行日志返回、:478 编辑期拦截 | `IntegrationWorkbenchView.vue:27-29`（状态条）、:1965-1968（setStatus）、:4359-4365（无 sticky）、:3412-3414/:3454-3455/:2294-2296（失败只 setStatus）、:3411/:3443/:3497/:3557（结果区只在成功路径写）；`IntegrationWorkbenchRail.vue:60`（唯一 sticky 且无状态）；仓内 ElMessage 已在 `WorkflowHubView.vue`、`MetaAutomationManager.vue` 使用；分区级错误已有先例（`IntegrationConnectionSection.vue:190-191,234`、`IntegrationPipelineRunSection.vue:61-62`）但只覆盖加载/校验类 | 长页底部 Dry-run 失败眼前无变化，重复点击或带错进入推送；连接草稿保存失败以为已存 | S | 状态条 sticky 或改 toast；setStatus 增加 sectionId 同时写发起分区；dry-run/保存失败必须同时写分区结果区 | 否 |
+| G03 | 参数化/投影/受控联表能力在后端分散存在但一条都接不进主旅程：门面丢列投影、适配器只收等值原语、工作台不发 `options.source.filters`、前端零调用 `/query`、`lookupProjection` 冻结为 FNumber/FName × ≤3 行一跳 | 《MySQL 连接器》:167-168「WHERE id = :variable」；《MySQL 动态 SQL》:98-99、:279（`#{}` 预编译）、:435-454（`<sql>/<include>`）；`[一般知识，未核对]` n8n Postgres/MySQL 节点以 Execute Query + 占位符为主动作 | `routes/data-sources.ts:174-177`（QuerySchema sql+params）、:179-189（SelectSchema 含 select/where/orderBy）、:1025-1068（SELECT-only 分类器）；`data-source-plugin-facade.ts:643-663`（列投影被丢弃）；`data-source-sql-readonly-source-adapter.cjs:40,49,113-158`（lookupProjection 别名冻结、maxRows≤3）、:284-297、:608-616；`IntegrationWorkbenchView.vue:1048-1057`（只 PATCH 保留不可编辑）、:3211-3238（保存 payload 无 filters）；`apps/web/src/data-sources/types.ts:68-73`；设计史 `data-factory-sql-data-source-bridge-execution-plan-todo-20260601.md:79` | PLM 列零语义、含义在三张字典表、数量藏在 Bom_ExAttr1，BOM 行必须 JOIN；今天唯一出路是客户 DBA 建视图而只读账号无 DDL 权限 | L | 不做自由 SQL 编辑器；做「受治理的保存查询即对象」：管理员登记 SELECT 模板（复用 SELECT-only 分类器 + 只读账号双保险），命名占位符声明、审批后作为虚拟对象进来源下拉。第一刀（S）：把 `options.source.filters` 接到运行与推送表单 | 部分：seam A/E 设计史记载门面窄化 |
+| G05 | Automation 规则驱动的 `send_webhook` 无 SSRF/自环守卫，可对回环/内网发带任意 header 的请求；长期凭据明文进 `automation_rules` JSON；调用者不可归因（`triggeredBy` 硬编码 'api'）。注：写围栏在已武装部署下是关着的（`assertPipelineRunAllowed` 403），"永久 Bearer"是配置选择（api-tokens 支持 expiresAt） | 《各类集成凭证的配置说明》:126「Access Token 的有效时间为 2 小时，Bearer Token 永久有效」、:133-135「IP 白名单…如不配置，表示对 IP 地址不做限制」——对标自身也允许永久 Bearer 与不限 IP，故不足以支撑 P0 | `multitable/automation-executor.ts:4114-4123,4145-4170,4236-4262`；`webhook-ssrf-guard.ts:1-15` 仅被 `routes/multitable-button.ts:57-58` 引用；`automation-service.ts:595-604`（零校验）；`egress-guard.ts:149` 仅 BPMN 引用；`lib/http-routes.cjs:5404`（triggeredBy='api'）、:4214-4238（写围栏）；`b2a-trial-registry.cjs:842-844`（dormant 时返回 null）；`routes/api-tokens.ts:43,253` | 实施顾问为定时拉 PLM 走此旁路：token 明文躺在规则里，能编辑规则的人可冒用；run 显示 by api 无法区分 | M | ① 规则驱动 send_webhook 也走 `checkWebhookTargetUrl`（拒 loopback/私网 + 剥离指向本机的 Authorization），日志记 refusal code；② run 路由识别自家 Automation 来源并标 `triggeredBy='automation-bypass'` 进审计 | 部分：minimal-plan:298-299 写明「Automation 不能通过 self-webhook 绕过围栏」 |
+| G06 | 管道运行在 HTTP 请求内同步跑完：`await runner.runPipeline` 后才 202，无排队/取消/进度；崩溃留下的 running 只在下次触发按 4h 阈值被动清理，期间被唯一索引挡成 409；无节点级重试/超时。（大 BOM 侧已是 durable 作业含 cancel，真正缺的只是 list/回捞路由，前端 jobId 只在 reactive state） | 《TiDB 连接器》:148-159「重试间隔…默认 5000 ms／重试次数…默认 0 次／超时时间…默认 5000ms」（唯一有原句的部分）；"后台 Execution 可看进度可 Stop"仅 `[一般知识，未核对]` n8n Executions / 数环通流程实例 | `lib/http-routes.cjs:5420,5443`；`pipeline-runner.cjs:1016,933-944,1218-1219`，全文 grep retry|timeout 仅死信 :1344；`pipelines.cjs:27,32,646,674,760-766`；大 BOM：`stock-preparation-large-bom-jobs.cjs:487-507`（durable 硬性要求）、:576-624、:646-670（cancel）、路由 :68/:73；`StockPreparationLargeBomPullPanel.vue:115`；平台先例 `services/QueueService.ts:1-38`、`ai-bulk-job-service.ts:10-15,408-411` | 47 列宽表全量拉取时浏览器/nginx 先超时服务端仍在跑；再点撞 409；重启后 run 永远 running 4 小时谁都跑不了 | M（照抄 ai-bulk-job 形状） | run 路由落 pending 立即 202（含 runId）；runs 表加 cancel_requested/progress；补 `POST /runs/:id/cancel` 与 GET 轮询；`abandonStaleRuns` 挂 SchedulerService 每 10 分钟；大 BOM 加 `GET expansion-jobs?status=running` 按 actionId+projectNo 回捞 | 部分：`48h-autonomous-run-record-20260906.md:50`、`design-review-appendix-20260906.md` G3；pipeline 同步/取消未记录 |
+| G07 | 失败零告警：runner `finishRun` 后无 notifier；`events.emit` 死申报；触发面只认 4 个 multitable 事件；钉钉 seam 仅供 handoff；定时脚本只有非零 exitCode 可被外部感知，产品内零通知且「成功但有变化」无信号 | 语料内无「失败→通知人」原句（《MySQL 动态 SQL》:483 只说落运行日志；「运维监控」仅导航项 :43/:85）；`[一般知识，未核对]` n8n Error Workflow、数环通阈值告警到钉钉/邮件 | `pipeline-runner.cjs:336-341,1163-1212`；`plugin.json:15-16`；index.cjs grep events 为空；`automation-triggers.ts:87-92`；`automation-actions.ts:34-51`；`index.ts:3093-3100` + `http-routes.cjs:3695-3706`（钉钉 seam 仅 handoff）；`scripts/ops/stock-preparation-scheduled-pull.mjs:722`；`plainLanguage.ts:1863-1868`（页面自认「计划任务未接入监控」）；`stock-prep-p1-acceptance.spec.ts:404,428-430` | 夜里定时 dry-run 撞 503 或 BOM 有变化没人收到消息，采购按旧快照下单；「只试算、人来按 apply」靠有人被提醒才成立 | M | ① finishRun 后按 status∈{failed,partial} 与死信新增 emit `integration.run.finished` values-free 载荷；② automation-triggers 加该触发器，复用 send_webhook(HMAC) 与钉钉群消息；③ 定时脚本非 2xx 或有变化时 POST 通知 + heartbeat 路由 | 部分：触发面断开（minimal-plan §3.1）；「未接入监控」是已裁决口径 |
+| G08 | 映射编辑器只写不读：前端无 GET pipeline/列表调用（后端已就绪），mappings 只来自目标 schema 前 8 字段 + K3 硬编码猜测，刷新即丢；粘回 ID 再保存 → `replaceFieldMappings` delete-then-insert 整表替换，无 diff/版本/审计。直接保存不粘 ID 则新建重复 pipeline | 《MySQL 连接器》:178「使用输出…自动维护为输出的 schema」只支撑输出 schema 随节点维护；"重开即回填"仅 `[一般知识，未核对]` | `IntegrationWorkbenchView.vue:813,897,2832,2988,3021-3048,3405-3412`；`IntegrationPipelineRunSection.vue:81-82`（「也可粘贴已有 ID」）；`pipelines.cjs:458-472,528-531,575-590`（getPipeline 已带 loadFieldMappings）；`http-routes.cjs:55,57,5296-5325`（upsert 无审计）；备料 ext_ 映射为服务端部署期配置 :3617-3621，不受此影响 | 配好 47 列映射，第二天想改一条，页面是种子猜测，一按保存换成 8 条猜测；run 记录不会告知映射变了 | M | ① 服务层补 `getIntegrationPipeline(id)`，加载时回填 fieldMappings/水位/幂等；② 种子映射打标，id 非空且映射全为种子时拒绝保存或弹 diff；③「粘贴已有 ID」改为下拉选已保存 pipeline（GET 列表路由已存在） | 否 |
+| G09 | `integration:read/write/admin` 与 `data_sources:read/write/execute` 六码在迁移/seed/清单中不存在；`permissions.ts:156-164` 拒绝未知码；`access-presets.ts:29-118` 七个预设无此二族；导航按 `integration:write` 显示 `/data-sources` 而后端要 `data_sources:*` | 《第三方集成使用指南》:83 把建连接定位成应用管理员/开发者的常规菜单操作；未证明其为内置可授予角色 | `20250924190000_create_rbac_tables.ts:96-113`；`rbac/namespace-admission.ts:10-34`；`zzzz20260830100000_add_stock_prep_permissions.ts:33-35`（只种子 stock-prep）；`app.manifest.json:29-33`；`admin-users.ts:3563,3838-3855`（preset 直授 + 同事务开准入，机制已具雏形）；`http-routes.cjs:897-911`；`App.vue:64,70,155-158`；`router/appRoutes.ts:186-191` | 上线时只有 role:admin 能走通主旅程；给顾问/一线分权每个部署要手写 SQL，错一步 403 | S | 照 `zzzz20260830100000` 形状补迁移种子化六码；`app.manifest.json` 声明；加一个 data-source/integration 预设；`/data-sources` 路由 meta 与导航门统一到 `data_sources:read`；交付说明给「三个角色 = 哪些码」模板 | 部分：记忆「备料权限码必须经角色授予」 |
+| G10 | 主链路文案（页头/第 4 步/运行与推送/目标选择器/K3 预设页 lead）仍把 Save-only 推送当终点，`targetSelectorExplanation` 甚至肯定性错误陈述「当前只有 K3 WISE WebAPI 目标连接可写入」；而 K3 两 kind 自 2026-08-29 起永久拒绝；前端无 `K3_WISE_*_DISABLED`/`OUTBOUND_HTTP_WRITE_DISABLED` 标签，也不在目标为 K3 时禁用勾选；后端 WebAPI 分支还把用户指向一条走不通的 C6 apply | 《第三方集成使用指南》:116「弹窗内会提示编辑后连接配置生效的时机」、《各类集成凭证的配置说明》:101 不可见原因写在文档——支撑「约束写在用户动手那一屏」的一般原则，非强对标 | `IntegrationWorkbenchView.vue:5,222,642,1155-1158,1168-1170,1568,3426-3429,3455,2065-2081`；`IntegrationPipelineRunSection.vue:100-101,107-110`；`IntegrationK3WiseSetupView.vue:7,38`；`errorCodeLabels.ts:59-67,268-304`（无 *_DISABLED）；`k3-external-write-permanent-fence.cjs:99-100,111-121`（8fa71ce26 = #5247，2026-08-29）；`pipeline-runner.cjs:446-451` vs `external-write-dry-run.cjs:875-880`（canApply=false）；`integration-hub-overview.cjs:139-142`；可复用文案 `stockPreparation/plainLanguage.ts:177-181` | K3 用户按 4 步走到最后得到一句英文异常，不知是永久设计还是配错；总览「只读·永不写入」与运行区打架 | M | ① 三个码进 errorCodeLabels，hint 复用 plainLanguage:177-181；② 副标题/flowSteps/K3 lead 改「dry-run 后导出或写入多维表；K3/通用 HTTP 目标只读」；③ :1168-1170 改引 hub-overview writeCapability.notice；④ 目标命中 K3 kind 时 Save-only 勾选直接禁用；⑤ 顺带修 pipeline-runner:446-451 的重定向语 | 部分：记忆「K3 外部写边界裁决=A」记围栏；文案矛盾未记录 |
+| G18 | 测试与保存脱钩：`/data-sources` 两按钮、`submitDisabled` 不看 draftTest；编辑态隐藏测试（凭据轮换模式可测，:426）；工作台连接草稿区无测试入口，第一次真实测试在对象模板分区；列表只投影 `isConnected()`，`auto_connect` 默认 false 且 UI 不设置 → 重启后整列「未连接」；`last_connected_at/last_error` 已落库但 list/get 不投影 | 《第三方集成使用指南》:106「点击「提交并测试」，会自动测试连接配置的有效性，当连接配置有效验证通过后，该连接配置新建完成」、:120；《Postgres 连接器》:102 / 《SQL Server 连接器》:102「测试并创建」 | `DataSourcesView.vue:98-111,412-414,421-428,430-448`；`IntegrationConnectionSection.vue:10-31,237-244`；`IntegrationObjectTemplateSection.vue:95-97`；`DataSourceManager.ts:317-320,419,710-724,800-806,904-914,917-1010`；`20251206000001_create_data_sources_table.ts:35-36,41-43`；`routes/data-sources.ts:336/427/502/676/771/905` | 现场可把 host 填错的连接存下来、绑到草稿、到清洗映射分区才发现连不上；重启后整列「未连接」让一线误判源坏了 | M | 编辑态允许「用已存凭据测试」（扩展现有 credentials 通道）；按钮改「测试并保存」（失败强提示，按设计锁不阻断）；`IntegrationConnectionSection:238` 旁加「测试此连接」复用 `testSourceSystem`；列表投影 last_connected_at/last_error，状态词改「未拨号/最近测试通过/失败」 | 部分：`data-source-connection-test-before-save-design-lock-20260617.md:40`（不硬门控） |
+| G20 | 插件路由未接审计：`externalSystemsUpsert/Delete/test`、`pipelinesUpsert` 全无 `context.audit`（宿主能力与同插件 values-free 审计存储都已可用，备料写入无审计即 501）；`integration_external_systems` 连 created_by 都没有；管道原地覆盖无 updated_by/version；data_sources 有审计但 `/admin/audit` 筛不出该类型 | 《第三方集成使用指南》:131-132「在「应用管理」-「审计日志」页签内，可以看到应用内第三方集成列表内，对连接配置进行增删改查的操作日志」；`[一般知识，未核对]` n8n 企业版 Workflow History 回滚 | `routes/data-sources.ts:489,562,658,752,847`；`AdminAuditView.vue:29-31,188-198,206,260,390`；`types/plugin.ts:2670`；插件 grep `.audit(` 仅 `http-routes.cjs:3501,8687`；:4740-4768、:3522（AUDIT_STORE_UNAVAILABLE）；`migrations/057:19-34,51-70`；`pipelines.cjs:302,304,511-522`；对照 `read-source-config-store.cjs:187` | 上线门 G-3「凭据轮换」无法举证：K3/PLM 密码何时被谁换过、连接 role 被改成 bidirectional、目标表被换，事后查不到也回不去 | M | 三条插件路由成功后调 `context.audit`（resourceType `integration_external_system`/`integration_pipeline`，meta 只含 id/kind/changedKeys/hasCredentials）；external_systems 加 created_by/updated_by，pipelines 加 updated_by+version 并留上一版快照；AdminAuditView 加过滤项；连接行加「变更记录」抽屉 | 部分：consolidation-plan:64 目标态陈述 |
+| G23 | 没有节点级「先跑一遍看结果」：dry-run 必须先保存 pipeline；唯一行级预览在 `/data-sources` 固定 100 行无条件（`/select` 与 raw `/query` 路由本身支持，前端零调用）；执行过的 SQL 从不回吐；dry-run 结果整段 JSON `<pre>`；样例记录硬编码 mat-001/Bolt；Payload 预览机制通用但占位符带 K3 味 | 《TiDB 连接器》:139-141「支持对当前连接器进行单独执行测试…在调试配置中可以对变量进行赋值」；《MySQL 连接器》:178「预览并测试→使用输出」；《MySQL 动态 SQL》:117、:484「根据出参中的 "sql" 字段来判断最终生成的可执行 SQL」；`[一般知识，未核对]` n8n 节点 Input/Output 表格 | `IntegrationWorkbenchView.vue:374,908-913,2632-2643,3420-3425,3443-3448`；`DataSourcesView.vue:365,713-720`；`routes/data-sources.ts:178-189,292,1022`；`data-source-sql-readonly-source-adapter.cjs:660-676`；`MSSQLAdapter.ts:340-347,363-411`；`pipeline-runner.cjs:846-855`（后端已逐行产出 {source,transformed}）；`IntegrationPayloadPreviewSection.vue:17,163-167` | 面对 47 列零语义宽表，想看「这个对象排出来前几行长什么样」必须先填完映射保存；排查 STEP_FAILED 看不到实际 SELECT…OFFSET…FETCH | M | (1) 选择系统与数据集分区加「试读 N 行」直接走 `/select`；(2) 适配器返回 `metadata.statement`（脱敏、参数占位）随 dry-run 与 run 展示；(3) 清洗映射分区「取样 N 行并预览」渲染成 源列|转换|清洗后 三列表格；(4)「从来源取一行」；(5) 试读列名一键作映射源字段；(6) Payload 预览占位符按目标系统动态给 | 否 |
+| G24 | 源类型→JSON→目标类型无契约：HTTP 面 Date 经 res.json 自动 ISO，但进程内门面路径到达映射层的是原生 Date；默认映射给非数字字段种 `transformFn='trim'` → datetime 列以 `Date.toString()` 而非 ISO 落目标；binary 以 `{type:'Buffer',data:[…]}` 进预览/dry-run；`toDate` 引擎有而 UI 不可达；无任何类型映射文档。写入侧 apply 是失败关闭（typeMismatch），垃圾只出现在展示面 | 《MySQL 连接器》:245-355「附录：数据格式转换」（date→epoch 毫秒、binary→base64、json→字符串） | `BaseAdapter.ts:10`；`MSSQLAdapter.ts:340-347,574-581,650-660`；`routes/data-sources.ts:1160-1163`；`DataSourcesView.vue:727-730`；`IntegrationWorkbenchView.vue:536,777-783,3042`；`data-source-sql-readonly-source-adapter.cjs:304-319,389,412,645-651`；`transform-engine.cjs:14-15,146-180`；`stock-preparation-apply-writer.cjs:182-212`；`IntegrationHelpView.vue`（228 行仅错误码 FAQ） | rowversion/varbinary 列进预览变字节数组；datetime 预览 ISO、清洗里另一口径；实施工程师没有一张表能告诉客户「你的 X 类型到我们这会变成什么」 | M | facade/select 出口统一归一化（Buffer→base64 并在 metadata.columns 标 binary、Date→ISO 8601、decimal 显式策略）；默认种子按 data_type 选 toDate/toNumber 而非一律 trim；帮助页加「类型转换矩阵」按 mssql/pg/mysql；写进交付说明 | 否 |
+| G31 | 列映射副驾 confirm 的 preset 只存在于一次性 201 响应体：不落库、不进目录、UI 不渲染不给下载；运行时目录只从服务器 `*.preset.json` 加载（仅 1 份）；UI 文案主动假成功（「写入中…」「已生成确定的 preset(权威产物)」），PR #5422 提交信息亦自述 confirm writes preset | 语料无 AI 内容；`[一般知识，未核对]` 数环通/n8n 映射配置产品内持久化并被下次运行使用 | `http-routes.cjs:255-256,3873-3887,9272-9309`；`schema-mapping-copilot.cjs:558-633`（纯函数）；`preset-schema.cjs:1225-1246`；`dn-pdm-family.preset.json`；`SchemaMappingCopilotPanel.vue:108,113-121`；`schemaMappingCopilot.ts:190-200`；唯一生效路径 = 提交文件重部署（`222-deploy-window-runbook-20260901.md:141,322`） | 实施工程师逐列确认得到「已生成权威 preset」，下一次预检与 BOM 展开仍只认磁盘那 1 份；确认既没生效也没法交给运维——这是误导 | M | confirm 结果落 integration_* 治理表（租户/系统作用域 + confirmedBy/At + 版本），`loadVendorPresetCatalog` 合并「文件目录 + 已确认表」；面板加「下载 preset JSON」与「应用到当前源绑定」；先把假成功文案改真 | 否；`metasheet-ai-strategy-and-boundary-20260901.md:124` 的承诺今天不成立 |
+| G36 | 失败原因对用户不可见：死信只渲染码表标签+裸码、无结构化 reason、无 admin 门后「看原文」；run 级 errorSummary 已服务端脱敏但绕过码表直出（口径不一致，非泄漏）；主链路 27 处 `error.message` 原样进状态条；`stores/dataSources.ts` 10 条英文兜底渲进中文页；K3 预设页已接码表但 run 行不落 errorCode 故恒显固定兜底；码表 55 键/10 hint 只覆盖读取源/组合/死信/Bridge | 《MySQL 连接器》:241-243 FAQ「原因+最常见成因+怎么修」；《MySQL 动态 SQL》:483-484、:117（出参 sql 字段） | `IntegrationWorkbenchView.vue:866-873`、27 处直出（:2295/:2694/:3455…）、:1977-2004；`errorCodeLabels.ts`（55 键）；`IntegrationMonitoringSection.vue:45,71`；`lib/http-routes.cjs:2829,2836`；`run-log.cjs:31-42,119`；`pipelines.cjs` grep errorCode 零命中；`stores/dataSources.ts:56-224` → `DataSourcesView.vue:20-22`；`IntegrationK3WiseSetupView.vue:1063-1072,1089-1095`；`IntegrationHelpView.vue:37,113`（对照表已存在，缺搜索） | 一行 TARGET_WRITE_FAILED 是必填缺失、类型不符还是唯一键冲突分不出来，只能 curl includePayload（需 admin）或上服务器翻日志；业务用户在 K3 页只得「见服务端日志」 | M | 不推翻 values-free：① 死信入库归一成结构化 reason {kind, field?}；② `integration:admin` 显式点「展开原文（已脱敏）」；③ run.errorSummary 改走码表（服务端补 errorCode 是前置）；④ 主链路与 dataSources 兜底中文化 + 按 code 映射；⑤ 码表扩到连接/对象/pipeline 家族；⑥ 帮助页码表加搜索 | 部分：journey 地图 §1.5、IU-1 设计锁限定码表范围 |
+| G39 | 沙箱→生产没有发布动作/版本/发布历史：备料 apply 沙箱门由 env 决定，生产策略只认 `context.config.stockPrepApplyProduction` 而 `plugin-runtime-config.ts:184-198` 七键 return 中无此键（生产不可达，仅测试可注入）；external systems 无 environment 维度；K3 页 environment 只是标签。Ops 面板已能显示「生产/沙箱主表就绪态」，缺的是动作 | 《第三方集成使用指南》:102「连接信息：支持多环境配置线上环境和开发环境所需的连接信息」、:117-118「开发环境…立即更新并生效／线上环境需要重新发布应用后才会使编辑内容生效」；《各类集成凭证的配置说明》:95 | `stock-preparation-table-actions.cjs:1821-1843,1871-1884`；`stock-preparation-preflight.cjs:90,120`；`index.ts:3113` → `plugin-runtime-config.ts:184-198`；`external-systems.cjs` grep environment = 0；`k3WiseSetup.ts:152,1091-1094`；`http-routes.cjs:6191-6196`；平台同形先例 `routes/snapshot-labels.ts:109-137`、`routes/snapshots.ts:173`（release-channel，requireAdminRole + userId）、`routes/canary-routes.ts:112-124`（promote）；`plainLanguage.ts:1876-1879`、`deploymentHealth.ts:109-110` | D1=B 沙箱跑通后切生产要登机改配置重启并回头证明沙箱与生产同一份映射；上线门 G-1…G-8 靠人工台账 | M–L | 先补 `stockPrepApplyProduction` 加载器（已知 P4），再把「环境」做成 external system/备料绑定显式列（sandbox|production），照 release-channel 形状提供 admin 层 `POST …/release`：校验 dry-run 证据 + releasedBy/at + audit；Ops 面板显示「当前生效环境/发布历史」 | 部分：known §G「P4 生产写配置加载器无加载路径」 |
+| X02 | 源侧 schema 漂移静默：映射引用的源字段在记录里不存在时 `getPath` 返回 undefined，无 defaultValue 就 setPath undefined，不进 errors、rowsFailed=0、水位照推。范围：非键、非水位、未配 required 的数据列（键字段由 `assertKeyValues` 挡、水位字段改名在库侧报错） | 《MySQL 连接器》:171 / 《TiDB 连接器》:130「SQL 中使用的数据表名、字段名需在开发环境、线上环境中保持一致」——对标把一致性推给用户，我们做成运行前守卫即差异化 | `transform-engine.cjs:33-39,232-246`；`pipeline-runner.cjs:1149-1158`；`IntegrationWorkbenchView.vue:3107-3115`（默认不勾 required）；`metasheet-multitable-target-adapter.cjs:257-265`；`data-source-sql-readonly-source-adapter.cjs:589-599`（getSchema 已提供）、:601-612 | PLM 厂商改列名后下一次增量 run 把改名的列全写成空并覆盖上一版正确值，run 绿色、无死信、水位已推进 | S | ① runner 读第一页前先用 `adapter.getSchema` 比对 `fieldMappings.sourceField`（首条记录键集合为兜底），缺失即 `finishRun('failed', SOURCE_FIELD_MISSING)`，水位不推；② transformRecord 区分「路径不存在」与「值为 null」，前者记 SOURCE_FIELD_ABSENT；③ 监控显示缺失字段清单；④ 与 b2a schema contract digest 对齐 | 否（记忆「目标表漂移检测是死代码」只记目标侧） |
 
-| 编号 | 差距 | 工作量 | 核验 |
-|---|---|---|---|
-| G47 | 无页面级加载态：bootstrap 期间空态引导先闪现；映射规则区无空态；多处结果是裸 `<pre>` JSON | S | 待 |
-| G48 | 窄屏下 rail 失去 sticky 变页首横排按钮，且两套断点（960/900）不一致 | S | 待 |
-| G49 | 连接健康只有手动测试：无后台探测、无失效提醒；`/health` 端点前端不调 | M | 待 |
-| G50 | 凭据轮换无时间戳与提醒；加密主密钥无轮换/重加密路径 | M | 待 |
-| G51 | 连接器目录元数据薄：plm 后端可用前端不可建；ID 手写无重名预检；无环境维度 | M | 待 |
-| G52 | SQL Server 标识符只接受 ASCII：中文表/列名直接 Invalid identifier；字段列表无搜索/复制/类型 | M | 待 |
-| G53 | 写操作：对标同节点可跑 INSERT/UPDATE/DELETE；我们只读源不写、K3 永久禁、HTTP 默认拒（**设计裁决，不追**） | L | 待 |
-| G54 | 触发身份不可辨：runs 无 actor 列，triggeredBy 恒 'api'，定时脚本与顾问手点在监控里长得一样 | S | 待 |
-| G55 | 无统计面板与 SLA：无成功率/耗时/失败趋势；总览五源 JOIN 不含运行健康 | M | 待 |
-| G56 | 插件侧连接测试失败原文（含内网拓扑与登录名）持久化到 last_error 并被 read 层回读；core `/api/data-sources` 已在 #5586 收口，插件未对齐 | S | 待 |
-| G57 | 转换层封闭 8 个函数：无沙箱表达式、无条件分支、无片段复用 | M | 待 |
-| G58 | 与飞书/钉钉/宜搭的数据连接器为零（**有意延期，对外叙事须如实降级**） | L | 待 |
+### P2
 
-### 被反驳者驳回（1 条）
+| 编号 | 差距 | 对标怎么做 | 我们现状（file:line） | 用户影响 | 工作量 | 建议 | 已知？ |
+|---|---|---|---|---|---|---|---|
+| G11 | 工作台整页零 URL 状态：rail 仅 scrollIntoView、IntersectionObserver 只改本地高亮、router 无 scrollBehavior；帮助页返回链接无 hash 必落页首。同仓 `StockPreparationWorkspace.vue` 已有 `?tab=/?projectId=` 镜像范式 | 《第三方集成使用指南》:107、:123 连接配置有独立详情页、引用数可点（未言明 URL 可分享）；`[一般知识，未核对]` n8n 每条 workflow/execution 有独立 URL | `IntegrationWorkbenchView.vue:701-705,721-738`；grep useRoute/route.hash/replaceState 零命中；`router/` 无 scrollBehavior；`IntegrationHelpView.vue:6`；`IntegrationMonitoringSection.vue:68-75`（死信已有稳定 id）；`components/integration/stockPreparation/StockPreparationWorkspace.vue:1009/1017/1025`；`appRoutes.ts:339`（其它模块本就走可寻址路由） | 无法把「看这条死信」以链接发给运维；帮助与错误文案只能写「回到上方」 | M | rail 点击 `router.replace({hash/query})`，onMounted 按 URL 滚到分区；连接行/死信行加 `?connection=/?deadLetter=` | 部分：`integration-tc1-template-catalog-dev-verification-20260708.md:170` TC-2 设想 |
+| G13 | 渐进披露只到卡内/条目级（高级 JSON 折叠、连接清单默认收起、高级连接默认隐藏、总览 details），缺分区级：12 分区常驻、rail 不做 active-section 切换（IU-2b 原计划）；运行与推送堆 5 子面板 | 《TiDB 连接器》:145「（四）高级配置」独立节、:132 结构面板按需打开；《MySQL 连接器》:131「点击「详情」预览」 | `IntegrationWorkbenchView.vue:216-376,655-660,667-681`；`IntegrationWorkbenchRail.vue:26-29`；`IntegrationConnectionSection.vue:36-44,118-126,199`；`IntegrationHubOverviewSection.vue:82`；备料工作台已有单视图切换 + 默认折叠（`StockPreparationWorkspace.vue:142-200`、`StockPreparationRail.vue:130-165`、`StockPreparationInstallView.vue:142-274`）；git 74f38c8d0（#3794）、ba868ba10（#3800）以「zero behavior change」合入 | 实施工程师每次面对约 60 个常驻按钮/表单区，找 Dry-run 要越过三块无关面板 | S–M | 照搬备料工作台 v-if 单视图 + rail 切换（其余 v-show 保留状态），或至少每个 el-card 加 collapsible header 默认折叠读取源/组合/Bridge/表动作/外部写/字段选项同步 | 是：design-lock 原则 2；rail 注释记录 IU-2b 未按此合入 |
+| G14 | 页面级作用域 UI 与刷新不一致：Tenant/Workspace 两个自由输入框在连接分区末尾，scope 变化后总览自动重拉而 systems 清单不重拉（有手动刷新按钮、无自动联动）；框里是 JWT 预填的可覆盖值；改框与头不一致会 403 TENANT_MISMATCH，跨租户写入不由该框引发（那是已记录的 #5445 请求头洞）；W4 默认 OFF | 《第三方集成使用指南》:79、:84、:102 作用域/环境是连接配置属性按应用隔离；《各类集成凭证的配置说明》:101 | `workbench.ts:771-779`；`IntegrationConnectionSection.vue:10,247-256`；`IntegrationWorkbenchView.vue:50,787-796,2037-2042,4064-4066`（37 处 currentScope）；`IntegrationHubOverviewSection.vue:178`；`useAuth.ts:198-203,510-511`；`utils/api.ts:165-172`；`http-routes.cjs:1041-1043,1318`；`stock-preparation-source-binding-store.cjs:140-151` | 沙箱与生产或两租户间切换时连接清单是旧租户的、子面板已是新租户；单租户上 Workspace 填错就 404（源绑定面已有回退，别处未覆盖） | M | 租户框改只读/删掉，工作区改下拉并上提为页头作用域徽标；`watch(scope)` 调 refreshBootstrap 并清空草稿；W4 翻 ON 的前置（所有部署令牌带租户声明）列入上线门 | 部分：记忆 #5445、#5472；known §F W4 |
+| G15 | 连接管理是「列表 + 唯一共享草稿」：editConnection/copyConnection 无 dirty 检查（载入会 setStatus 与改标题，缺的是"未保存将丢失"确认）；引用数后端已有（删除 409 + referenceCount）但 UI 只是 tooltip 不预先展示；无任一连接的独立视图；`DataSourcesView.vue:586-626` 同形态，属全站模式 | 《第三方集成使用指南》:108「点击连接配置列表的行，即可进入连接配置的详情页」、:116、:94「选择连接配置的类型…点击下一步」、:123-127 | `IntegrationConnectionSection.vue:59-82,77,129-133`；`IntegrationWorkbenchView.vue:715-719,926-939,1279-1283,2138-2166`；全仓 grep dirty/未保存 零命中；`routes/data-sources.ts:799-839` | 草稿改到一半点另一行「编辑」未保存内容无提示丢失；无法判断删除某连接会不会打断备料绑定 | M | 清单行点开详情抽屉（复用 hub overview 五源 JOIN 显示引用数与状态）；edit/copy 前 dirty 确认；新建改「选类型→填信息→测试并保存」三步向导（复用 el-steps） | 部分：known §E PR-2 记后端引用计数守卫 |
+| G16 | `/data-sources` HTTP 凭据只有固定头名 X-API-Key 一种可用形态：Bearer 走 `credentials.bearerToken` 但 create schema 未声明被静默剥掉、rotate strict 同样没有（收下即丢，是正确性/可观测缺陷）；Basic 只能后端构造；自定义头名/Query 参数不可达。数据工厂侧凭据入口在 API 与 K3/PLM 预设向导上有，kind='http' 通用系统在工作台无凭据子表单（按 `read-source-config.cjs:59-62` 设计禁内联，非遗漏） | 《各类集成凭证的配置说明》:145-154 HTTP 连接四种鉴权（No/Basic/Header/Query Auth）及其字段；`[一般知识，未核对]` n8n HTTP Request 预置多种鉴权 + Generic Credential | `DataSourcesView.vue:63-68`；`buildPayload.ts:44-45`；`routes/data-sources.ts:97-102,165-172`；`HTTPAdapter.ts:141,151-166`；`http-adapter.cjs:143-159`（支持 bearer/apiKey 可配头名/Basic）；`external-systems.cjs:126,129,168-169,270-279,539,647`；`k3WiseSetup.ts:1481-1492,2011`；`IntegrationWorkbenchView.vue:1319-1321,2264-2284` | PLM 厂商包装接口要 Bearer 或非 X-API-Key 头名时 UI 配不出来；走 API 时 Bearer 被静默丢弃，测试 401 却无提示凭据未落库 | M（其中"静默剥 bearerToken 改显式 400 或落库"是 S） | 表单加「鉴权方式」下拉 None/API Key(可配头名)/Bearer/Basic/Query；后端 credentials schema 显式声明 bearerToken/apiKeyHeader，rotation 同步；工作台 http 系统给同形凭据子表单（只回 hasCredentials） | 否 |
+| G17 | SQL 连接表单无任何高级项（加密/信任证书/TLS 下限/默认 schema/超时/端口范围）；MSSQL 默认 encrypt=true+trustServerCertificate=true 与 legacy TLS 逃生阀只能经 connection JSON；后端能力齐全、默认值已在 `docs/DATA_SOURCE_ADAPTERS.md:84-85` 记录、PUT 深合并保证不被 UI 擦除；`tls-downgrade` 事件只有单测消费 | 《MySQL 连接器》:156-161 把 UseSSL/CharacterEncoding/ZeroDateTimeBehavior 列为可配项并写默认值；《各类集成凭证的配置说明》:204-206 | `DataSourcesView.vue:40-59`；`buildPayload.ts:34-42`；`routes/data-sources.ts:67,643-646`；`data-sources/types.ts:90-91`（半接线）；`MSSQLAdapter.ts:126-137,175,194-203`；`PostgresAdapter.ts:78-85`；`MySQLAdapter.ts:205-212`（字符集连 API 侧都设不了，options 白名单剥掉） | 安全审查方从界面看不出「加密但信任自签证书」；老实例需 legacy TLS 时必须绕开 UI | S | SQL 表单加「高级」折叠：加密、信任证书（默认开带风险提示）、TLS 最低版本、默认 schema、超时、端口 0-65535 校验；列表行显示「已降级 TLS」徽标 | 否 |
+| G21 | 分页预算固定且工作台不可调：只读源路径 10×1000 硬顶 422（恰等于对标 10,000 硬顶与 `BaseAdapter.ts:89` 平台硬顶，差在无「继续下一页」）；pipeline 默认 100 页后 partial 且水位不推，`maxPagesReached/pagesProcessed` 已入 `run.details` 但 Web 零渲染；maxPages/batchSize API 可调至极大，工作台保存整体覆盖 options 不含此二键；只读路径页大小 >1000 触及可信执行层硬上限，不能简单提到 UI | 《MySQL 连接器》:172、《TiDB 连接器》:131「超过 10,000 条…可用 OFFSET 循环调用」；`[一般知识，未核对]` n8n Split In Batches | `stock-preparation-readonly-source-run.cjs:17,24,310,541-547`；`pipeline-runner.cjs:63-66,994-1004,1148-1163,1177-1178`；`pipelines.cjs:506,510-517`；`read-source-read-runtime.cjs:45-46,211-213,223-228`；`BaseAdapter.ts:80-90`；`routes/data-sources.ts:1083-1085`；设计文档 `integration-core-maxpages-reached-signal-design-20260427.md:15-17`（自承「Tuning maxPages/batchSize requires guessing」） | 超 1 万行运行直接 422 无参数可调；pipeline 拉全量超 10 万行永远 partial，监控看到 partial 找不到开关 | S–M | (1) 运行与推送暴露 batchSize/maxPages，保存时合并不覆盖 options；(2) 422 文案携带 maxPages/pageSize/receivedRows 并进 codeHelp；(3) 监控分区渲染 maxPagesReached 为「因页预算截断」；cursor 分页 kind 的 SOURCE_MAX_PAGES 提成部署级配置 | 是：设计文档已自认 |
+| G25 | 无节点级重试/退避（15 个适配器零 retry；任一页 read 抛异常即 failed）；死信只能逐条 replay；`:1149` 把水位推进与 rowsFailed===0 绑死，一次瞬时失败冻结增量；超时有默认值真实生效但只能改 config JSON；读路径无按数据源速率限制。平台出站 webhook 线已有完整用户面重试策略可复用 | 《TiDB 连接器》:146-159「重试间隔 默认 5000 ms／重试次数 默认 0 次／超时时间 默认 5000ms」（唯一有官方原句支撑的部分）；`[一般知识，未核对]` n8n Retry On Fail / Continue On Fail | `lib/adapters/*` grep retry = 0；`http-adapter.cjs:238,282`；`pipeline-runner.cjs:712-714,995-1005,1148-1163,1183,1330-1348`；`http-routes.cjs:272-273,9690-9714`；`MSSQLAdapter.ts:204-206`；限流仅 `routes/automation.ts:93`、`multitable-ai.ts:207`；先例 `MetaApiTokenManager.vue:130-141`、`webhook-service.ts:445-482`；`BPMNWorkflowEngine.ts:70,1434,1614`（属性面板 timeout/retries 引擎从不递减，死配置） | 内网链路抖动一次让当天 run 整个 failed、水位不动、第二天全量重读；200 行有 3 行锁失败进死信要点 6 次 | M | ① `pipeline.options.retry {maxAttempts, backoffMs, timeoutMs, retryOn}`，只对幂等读与带 idempotencyKey 的 upsert 有界重试，UI 暴露三项；② 表单露出超时（零后端改动）；③ 死信 replay-batch；④ 区分瞬时失败与数据失败，只有后者阻止水位推进；⑤ `/select|/query` 与 run 挂 createRateLimiter 按 data source id | 部分：DF-N3 批量重试/背压延后 Gate A 后 |
+| G27 | UI 映射面板只暴露引擎 8 种转换中 5 种、单步、无映射级 defaultValue、校验只到 required/min/max；dictMap 的 defaultValue 参数也丢；映射编辑器只写不读（走 API 建的富转换在 UI 一保存整体抹掉——与 G08 同根） | 语料无「可配字段转换函数/映射默认值」原句（`<bind>` 是 SQL 模板变量，raw SQL 是我方禁止项）；仅 `[一般知识，未核对]` 数环通映射面板常量/默认值 | `integrationWorkbenchSectionTypes.ts:18,20-29`；`IntegrationWorkbenchView.vue:777-784,3038,3088-3097,3107-3115`；`IntegrationMappingRulesSection.vue:56`（5 项是明示的刻意收窄）；`transform-engine.cjs:10-19,107-112,158-190,233-235`；`validator.cjs:12`；`pipelines.cjs:190-204` | PLM Bom_ExAttr1 空值补 0 无路；单位缺失补 EA 用 dictMap 也做不到（key 非空要求）；其余可在 staging 侧补 | S | 优先只补 defaultValue（映射级 + 行内一个输入框）与 dictMap 兜底值；toDate/concat/转换链/pattern/enum 待真实需求再开；后端零改动 | 否 |
+| G30 | 读取源向导缺「把探测到的字段一键填进 fieldMap」：probe 契约只回 `{type,arrayLength}`；源就绪预检已真读并回吐列名（values-free）且喂给副驾，但与读取源 probe/fieldMap 不打通，且绑定 stock-prep 读取计划 | 《MySQL 连接器》:178、《TiDB 连接器》:167「使用输出」维护出参 schema（属输出变量，非入参映射填充） | `IntegrationReadSourceConfigPanel.vue:200-219,492`；`IntegrationReadSourceWizard.vue:176-186`；`readSourceConfigs.ts:304-316`；`read-source-probe-contract.cjs:144-149,245-266`；`read-smoke.cjs:160-168`；`stock-preparation-source-preflight.cjs:611-643`；`StockPreparationInstallView.vue:1181-1208` | 向导第③步探测通过后第②步 fieldMap 仍要自己知道 `data.items[].Bom_ExAttr1` 路径 | M | probe 契约加可选 values-free「字段清单」（路径 + 推断类型）；探测成功后「用探测到的字段填充 fieldMap」；复用预检的 probeObject 列名逻辑 | 否 |
+| G34 | 通用工作台运行监控前端只取 5 条且强制单 pipeline；无 `GET /runs/:id`（注册表侧有实现未接线）、无轮询；K3 页另一份 runs 客户端。后端 `/runs` 已支持 pipelineId 可选 + status + limit≤500 + offset；备料线运行历史落受管表可在多维表里筛；`/admin/automation-executions` 是同形成熟页面 | 语料内无独立执行历史列表页原句（:483 只是「flow 运行日志」）；`[一般知识，未核对]` n8n Executions 列表、数环通运行监控台 | `IntegrationWorkbenchView.vue:3241-3260`（limit:5）、全文无 setInterval；`IntegrationMonitoringSection.vue:8`；`IntegrationK3WiseSetupView.vue:1693-1694`；`http-routes.cjs:270-273,1425-1438,9639-9648`；`pipelines.cjs:685-717`；`stock-preparation-templates.cjs:1130-1152`；`appRoutes.ts:270`、`AutomationExecutionsView.vue:15,296-300` | 想知道「昨晚哪些管道失败了」在通用工作台必须逐个粘 ID；200 行失败只看得见 5 条死信；跑 10 分钟无进度感 | M | ① pipelineId 改可选筛选，加 status/时间窗/offset 翻页（零后端改动）；② 死信按 errorCode 分组计数；③ 接线 `GET /runs/:id`；④ running 时 5s 轮询 | 部分：DF-N1 设计有意只做只读首片 |
+| G35 | 死信侧只有「单条 replay」：`discarded` 在 DDL 与常量里存在但无生产者无路由；replay 失败原死信保持 open 且失败行另插一条新 open 死信（idempotency_key 无唯一约束）；UI 空态承诺「按原因分组」但平铺。粗粒度恢复（整链重跑）与备料 resolve/bulk-resolve 已存在 | 《TiDB 连接器》:148-156 只讲自动重试参数，不涉丢弃/批量/分组；`[一般知识，未核对]` n8n 失败可 Retry | `dead-letter.cjs:7,90-198`；`http-routes.cjs:272-273` vs :170-171；`pipeline-runner.cjs:711-714,1226,1266-1287,1312-1333`；`migrations/057:150,159`；`IntegrationMonitoringSection.vue:57-105`；`IntegrationK3WiseSetupView.vue:392-404` | 积压不可见、永久 open 占住 5 条可见窗口、同一行出现重复死信 | M | ① `POST /dead-letters/:id/discard` 与批量 discard（按 id 列表或 runId+errorCode）；② replay 失败时原死信 retryCount+1 并写 lastReplayRunId，按 pipelineId+idempotencyKey 去重；③ UI 按 errorCode 分组 + 组级操作 | 部分：DF-N3 已冻结 |
+| G38 | 读取源/组合/Bridge 清单的 save/approve/retire 同为 `integration:write`，`transition()` 只写 actor 不比较 created_by → 同一人可自存自批；追责链已存在（created_by 与每次 status_change actor 落盘），缺的是流程上拦；「编辑与生效分开」已用 draft→approved fail-closed 满足；前端不隐藏按钮不是独立缺口（整条路由已按 write 拦） | 《第三方集成使用指南》:116-118 只证明编辑与生效分开；maker-checker 无出处，仅 `[一般知识，未核对]` 数环通发布审批 | `http-routes.cjs:895-911,4880-4884,4934-4949,5095,5227,6485-6494,7834-7840`（同文件已有 requireAccess(req,'admin') 与 approver 语义先例）；`read-source-config-store.cjs:275,347-357,359-399`；`bridge-agent-change-checklist-store.cjs:30-31,311-315`；`appRoutes.ts:282-285` | 顾问一人两下把草稿变生产读取契约；出事故审计里 actor 全是同一人，无法在流程上拦 | M | approve/retire 抬到 `requireAccess(req,'admin')`（49 处现成用法）；maker-checker 做成默认关闭的租户开关（approver ≠ created_by，平台管理员豁免），避免卡死单顾问演示；前端随后按码隐藏按钮 | 否 |
+| G41 | 术语不收口且仓内无术语表：「外接数据源 / 连接系统·数据源 / 连接草稿 / 外部系统(systemId) / 已保存系统」并存；label「连接类型」空项「请选择 adapter」；状态选项裸 active/inactive/error（角色选项已是中文主）；读取源专家表单 18 个英文标识 label 解释只在 tooltip；`pipelineMode`/`pipelineRunMode` 同型双下拉后者无 help；清洗数据集区运维口吻 | 《第三方集成使用指南》:76「「第三方集成」是集中管理…「连接配置」的管理菜单」、:84、:100-101「名称…／API 名称：连接配置的唯一标识」；《各类集成凭证的配置说明》:90-92（分层术语：连接器=服务类型／连接配置=实例） | `App.vue:192,194`；`DataSourcesView.vue:5`；`IntegrationConnectionSection.vue:7,28,140,142,159-161`；`IntegrationWorkbenchView.vue:890-891,2267`；`IntegrationPipelineRunSection.vue:12-19,86-93`；`IntegrationReadSourceConfigPanel.vue:60-201`；`fieldHints.ts:20-22`；`IntegrationK3WiseSetupView.vue:69`；`IntegrationCleaningDatasetSection.vue:102-103` | 顾问在「外接数据源」建好源回到数据工厂找不到这个词；交付说明与工单里每个人名词都不一样 | M | ① 术语表（连接=外接数据源上的登记；数据集=表/视图/对象；清洗表=staging 多维表）写进 /help/integration 首节；② 状态文案中文主英文码次；③ 读取源 label 中文主词，fieldHints 常显；④ 合并或明确区分两个 mode；⑤ :2267 改人话 | 部分：journey 地图 §5 |
+| G44 | integration 113 条路由不在 OpenAPI（297 条路径 0 条 integration，api-tokens/automation 同样缺）、不接受 `mst_` 作用域 token（6 个 scope 全在 multitable/comments）、SDK 不覆盖；机器调用只能持 JWT——但 RBAC 层 `integration:read/write/admin` 最小权限已具备，可用只持 read 的租户绑定服务账号；平台已有免会话 HMAC 入站 webhook（缺 IP 白名单、动作里无 integration） | 《MySQL 连接器》:34「Open API 使用指南」仅导航条目；《各类集成凭证的配置说明》:125-135 说的是入站触发凭据（对应我们 automation 入站 webhook），用它论证出口契约属错配；`[一般知识，未核对]` n8n Public REST API + API Key | `packages/openapi/src/paths/`（17 文件无 integration）；`dist-sdk/client.ts`；`multitable/api-tokens.ts:24-38`；`oapi-read-allowlist.ts:29-47,78-91`；`auth/api-path-policy.ts`；`http-routes.cjs:13-273,905-912,5746,6152,6214,6383`；`automation-inbound-webhook.ts:1-11,30-46`；`scripts/ops/stock-preparation-scheduled-pull.mjs` 头注释（admin Bearer，已强制租户 claim、默认 dry-run） | 客户 IT 想从自家调度平台触发拉取、轮询 run、拉死信，没有作用域 token 与可读契约 | M | ① ROUTES 表机械导出到 `packages/openapi/src/paths/integration.yml`（先只读）；② ApiTokenScope 加 `integration:read/run`，oapi 允许表加锚定 GET runs/dead-letters 与 POST run(dry-run 先)；③ 定时脚本改 scoped token | 部分：minimal-plan:320 只记 Connector SDK 延期 |
+| G45 | 无面向第三方的连接器扩展面：9 个 kind 与 core 6 键编译期冻结（`routes/data-sources.ts:72` z.enum 使 `registerAdapterType` 形同虚设）；adapter metadata 无 config/credential schema；凭据整份加密不校验键名；HTTP 端点接进管道只能在两个 textarea 手写 JSON；插件可热 reload 但无上传安装口与 SDK；HTTP 鉴权两份实现优先级与落位不同。宿主 PluginCommunication 已有通用 register，缺的是 integration-core 命名空间里受门的 registerAdapter；`/data-sources` http 已有结构化表单与存前测连 | 《各类集成凭证的配置说明》:145-154、:90-92；《MySQL 连接器》:32-33 仅导航行；`[一般知识，未核对]` n8n 社区节点声明式注册；Airbyte connectionSpecification（`data-sources-oss-references-20260528.md:77,82`） | `index.cjs:183-300,358-367,543`；`contracts.cjs:197`；`http-adapter.cjs:143-160,503-507`；`http-routes.cjs:28,2878-2888,4779`；`IntegrationConnectionSection.vue:199-232,354-366`；`external-systems.cjs:129,270-281`；`DataSourceManager.ts:165-181,433`；`HttpAdapter.ts:151-168`；`index.ts:1341-1353,2362-2396`；`PluginManifestValidator.ts:168,554`（已有 configSchema 校验器可复用）；`plugin-loader.ts:486-495` | 第二家客户 PLM 不是 yuantus 或要接内网 OA HTTP 时只能手写 config/capabilities JSON（键名靠看源码）；加新 kind 必须改 index.cjs 发版 | L | ① adapter metadata 加 configSchema/credentialSchema（复用 manifest 校验器形状），`describeAdapterKind` 透传，前端按 schema 渲染表单替换 textarea，后端 upsert 按 schema 校验；② 通信 API 加受门 registerAdapter（白名单插件名，参照 :2385-2396 先例）；③ data_sources http 与插件 http 二选一收敛；运行时安装与第三方 SDK 继续延期 | 是：minimal-plan:305-309、:320；oss-references:80-83 |
+| G46 | Bridge Agent 只支持与后端同机的 localhost 只读旁路，无客户内网侧代理宿主形态——这是显式里程碑门（adapter:133 报错原文 "for BA-M2"），分机部署/源 IP 限制/shared-secret 前置早已在设计文档，shared-secret header 已落地；变更建议/审批/审计已是产品能力，只有最后 apply 走 runbook（后端写 Agent config 是 WONTFIX by design） | 《MySQL 连接器》:141-145「如果数据库部署于企业内网：可以选择 本地代理服务 中配置的代理集群（集群内需要包含"数据通道代理"）」、:243——对标是 SaaS，代理集群是其云端部署的结构性必需；我们是 on-prem 随客户内网交付 | `bridge-agent-readonly-adapter.cjs:43,49,131-136`；`scripts/ops/fixtures/bridge-agent-readonly/config.example.json:6-10`；`http-routes.cjs:45-52`；`migrations/065`；`data-factory-legacy-sql-readonly-bridge-agent-plan-20260520.md:189-198,631`；`bridge-agent-controlled-apply-design-lock-20260708.md` §3/§4；`w4c0-source-commands.ts:441,446`（transportKind 命中于考勤，与本域无关） | 当前同机不痛；一旦部署在客户 DMZ/云或第二家客户 K3 在另一网段，只能后端直连 SQL（凭据搬出内网）或再部署整套后端 | L（需 owner ratify 扩安全模型） | ① 去掉 localhost 硬限制改「Agent 证书/共享密钥 + 后端侧目标主机 allowlist(env)」——与 design-lock §4「无 host-allowlist 放宽」硬锁冲突，须 owner 裁决；② 沿 PR-3 把 bridge 降为 data_sources 的 transport_kind；远程 fleet 继续延期 | 是：minimal-plan:323；BA plan 早已写明远程形态 |
+| X03 | 行值预览无审计、结构/表元数据读取亦无审计：同一路由文件 raw `/query` 成功后写 auditLog，`/select`（`DataSourcesView` 预览 100 行、唯一调用方）、`/schema`、`/tables/:table` 不写；该数据面 owner-only，缩小但不消除台账缺口 | 《第三方集成使用指南》:131-132 对标审计止于连接配置 CRUD——数据访问审计属超出对标的治理差异化 | `routes/data-sources.ts:1025,1088` vs :1131,1191,1238（auditLog 仅 :281,489,562,658,752,847,1088）、:1043-1047,1146,1195,1242；`data-sources/api.ts:179`；`DataSourcesView.vue:365,712-719` | 客户安全审查问「谁看过我们 PLM 的物料表」只能答「查过 SQL 的有记录，点预览的没有」；上线门 G 系列与只读窗口授权 O-2 需要访问台账 | S | 三条读路由成功后写 values-free auditLog（meta 只含 dataSourceId/table/rowCount/limit）；AdminAuditView 过滤加 data_source（并入 G20） | 否 |
+| X07 | 连接器目录缺租户维度可见性：`adaptersList` 对所有租户返回全部 9 个 kind；已有 `advanced` 标记 + 前端「显示高级连接」开关（客户端受众开关），缺服务端按租户/部署允许清单的 fail-closed 过滤与 upsert 403 | 《各类集成凭证的配置说明》:101「若你的应用内没有以下介绍的某个连接配置，说明该连接配置对当前应用不可见，或仅支持部分租户使用」、:175 灰度 | `http-routes.cjs:4630-4636`；`index.cjs:358-367`；`IntegrationConnectionSection.vue:118-126,140-147`；`b2a-trial-registry.cjs`（只在读路径生效） | 单租户不痛；接第二租户后对方顾问会看到并尝试建 K3/PLM 连接，得到运行时拒绝而非「未开放」；客户定制 kind 名称泄露其他客户接入形态 | S | adapter metadata 加 `visibility: 'platform' | 'tenant-allowlist'`，adaptersList 按 req 租户与部署级允许清单过滤（与 customer-pack 目录同姿态）；`externalSystemsUpsert` 对不可见 kind 403 KIND_NOT_AVAILABLE_FOR_TENANT | 否；多租户 SaaS 排阶段四 |
+| X08 | AI 列映射副驾只挂在备料安装页（全仓唯一挂载点）；通用工作台清洗映射分区无副驾、按名派生不与已加载来源 schema 对齐；处理器逻辑通用但 URL 在 stock-preparation 命名空间；即便在唯一宿主上 dictionaryRows 也恒为空 | 语料无 AI 内容；本条依据内部承诺 `metasheet-ai-strategy-and-boundary-20260901.md:124` | `StockPreparationInstallView.vue:911,1181-1208`；`IntegrationWorkbenchView.vue:814,3020-3048`；`http-routes.cjs:255-258,9238-9264`；`schema-mapping-copilot.cjs:1-17` | 走通用工作台接第二家 PLM/SQL 源的实施工程师拿不到副驾；交付说明里「AI 辅助接入」只能演示备料线 | M | 先做 G31（confirm 落库）再复用：清洗映射分区加「让副驾建议映射」，信号来自已加载源/目标 schema，确认写回 EditableMapping 并打 provenance；沿用 field-options/sync 的「通用路由 + stock-prep alias」先例；先解决字典信号来源 | 否 |
 
-| 编号 | 原断言 | 驳回理由（摘） |
-|---|---|---|
-| G13 | "渐进披露只做到字段级，12 分区常驻无折叠" | 抽取后的分区组件已带默认折叠 `<details>`（连接分区高级 JSON、总览技术详情、向导证据、映射卡）；"active-section 只渲染当前组"已在备料壳 `StockPreparationWorkspace.vue` 落地一份；对标"高级配置折叠节"证据是帮助文档章节标题而非产品 UI。**真核**只剩"数据工厂管理员壳内无区块级折叠/切换"，且只对 integration:write 管理员成立——并入 G12/G15 的布局提案，不单列。 |
-
-## 3. P0 详解（含证据与建议）
-
-**G01 状态条不粘不滚（✓，修正为 P1）**。`IntegrationWorkbenchView.vue:27-29` 状态条、`:1965-1968` `setStatus` 是全页 91 处写入的唯一出口，CSS 无 sticky；`savePipeline`/`executePipeline`/`saveConnectionDraft` 失败只写它（`:3413`、`:3455`、`:2294`）。反驳者修正：分区级错误出口在仓内已有先例（`IntegrationConnectionSection.vue:19`），所以是"保存与运行等 API 失败路径无分区级落点"，不是"全页唯一出口"。**建议**：状态条 sticky；`setStatus` 加 `sectionId` 同时写入发起分区的 status slot；dry-run/保存失败必须写入分区结果区。
-
-**G02 连接只有 owner 私有（✓）**。`routes/data-sources.ts:486` 是全仓唯一 `addDataSource` 调用点，硬编码 `scopeKind:'private'`；`DataSourceManager.ts:593 assertAccess` 只比 owner，注释自认"workspace_id is stored but NOT consulted (phase-2 lever)"；`scope_kind='workspace'` 生产路径零写入。反驳者补充：RBAC 层其实有 read/write/execute 切分（`:324/:451/:1025`），但在 owner 闸门之下形同虚设——非 owner 无论持何码都 404；轮换与改配共用 write。**建议**：按 minimal-plan PR-2：`PUT /:id/scope` 共享到工作区；权限拆 read/use/manage/rotate；facade `assertReferenceable` 与绑定按 use 判定；run 记录 `createdBy + triggeredBy`，创建者停用时预检报 `OWNER_INACTIVE`。
-
-**G03 无参数化/多表查询面（待）**。`data-source-sql-readonly-source-adapter.cjs:284-297` 只允许等值原语、两段 ASCII 对象名、noRawSql；工作台保存 pipeline 不发 `options.source.filters`（`IntegrationWorkbenchView.vue:3225-3236`）；后端 `/query` 前端零调用。对标：`:variable` / `#{}` 绑参、`if/choose/foreach/include` 动态 SQL。用户影响是硬的：PLM 列零语义、含义在三张字典表、数量藏在 `Bom_ExAttr1`，BOM 行必须 JOIN，而只读账号无 DDL 权限建不了视图。**建议**：不做自由 SQL 编辑器，做"受治理的保存查询即对象"：管理员登记 SELECT 模板（复用 SELECT-only 分类器 + 只读账号双保险）、命名占位符声明、审批后作为"虚拟对象"出现在来源数据集下拉。第一刀（S）：把 `options.source.filters` 接到运行与推送表单。
-
-**G04 触发器到不了管道（待）**。Automation 有 11 种触发器（`automation-triggers.ts:6-31`），16 种动作里无"运行集成管道"（`automation-actions.ts:33-50`）；插件 `triggeredBy` 留了 `'cron'` 槽位却无生产者（`pipelines.cjs:28`，路由恒 `'api'`：`http-routes.cjs:5403,5437`）；`integration_schedules` 是死表；`plugin.json` 未申报 scheduler。**建议**（= minimal-plan §6.1）：宿主 `IntegrationRunPort.request()` + `integration_run_requests` 表（唯一键 triggerId+scheduledFor / providerEventId）+ 独立 Integration Worker；Automation 新增 `run_integration_pipeline` 动作（只发请求、不携写授权、默认 dry-run）；`integration_schedules` 要么删要么由 Worker 接活。
-
-**G05 send_webhook 旁路无守卫（✓，修正为 P1）**。规则驱动的 `send_webhook`（`automation-executor.ts:4114-4123`、两阶段 `:4247-4254`）对 `config.url/headers` 零校验直接 fetch；完备的 `webhook-ssrf-guard.ts` 只接在按钮字段路由（`routes/multitable-button.ts:57,358`）。反驳者修正：run 路由的 C6 多表写生命周期门不会被绕过，所以是"凭据暴露 + 触发身份不可辨"而非"绕过写入围栏"。**建议**：规则驱动 `send_webhook` 也走 `checkWebhookTargetUrl`（拒绝 loopback/私网 + 剥离指向本机的 Authorization）；run 路由识别自家 Automation 来源并标 `triggeredBy='automation'` 进审计。
-
-**G06 同步运行、无取消（✓，修正为 P1）**。`pipelinesRun` 是 `await runner.runPipeline` 后回 202（`http-routes.cjs:5420`）；runner 同步分页循环（`pipeline-runner.cjs:936`）；状态词表含 `'cancelled'` 但无 cancel 路由、无 `cancel_requested` 列；`abandonStaleRuns` 默认 4h 且唯一调用点在 `runPipeline` 开头。反驳者修正：大 BOM 作业已是持久化存储，不属此差距。**建议**：`runPipeline` 拆 enqueue + worker：run 路由落 pending 立即 202；runs 表加 `cancel_requested` 与 `progress`；补 `POST /runs/:id/cancel` 与 GET 轮询；`abandonStaleRuns` 挂 SchedulerService；与 G04 的 Worker 同一实现。
-
-**G07 失败零告警（✓，修正为 P1）**。runner 依赖清单无 notifier/events（`pipeline-runner.cjs:336-345`），失败路径 `:1200-1212` finishRun 后直接 throw；`plugin.json:15-16` 申报 `events.emit/listen` 但全插件零调用。反驳者修正："通知零件齐全却未接线"——Automation 已有 `send_webhook/send_notification/send_email/send_dingtalk_group_message`，宿主有 dingtalk-group-destination-service 并已按 destination id 注入插件（`http-routes.cjs:3696-3706`）。**建议**：runner 按 `status∈{failed,partial}` 与死信新增数 `context.events.emit('integration.run.finished' / 'integration.dead_letter.created')`（values-free 载荷）；automation-triggers 加这两个触发器，复用现有动作。
-
-**G08 映射静默覆盖（✓，修正为 P1）**。前端对 pipeline 只有 upsert/run 六处调用，无按 id 回读；`mappings` 唯一赋值源是前 8 字段 + K3 硬编码猜测的种子（`IntegrationWorkbenchView.vue:3021-3048`）；带 id 保存携全量 `fieldMappings`，后端 `replaceFieldMappings` 先 DELETE 再 INSERT（`pipelines.cjs:528-531`）；无审计、runs 不快照映射。反驳者修正：触发要用户显式粘贴 ID，8 条种子行保存前可见，所以是"无防护的可逆性缺失"，定 P1。**建议**：服务层补 `getIntegrationPipeline(id)` 回填；种子映射打标，id 非空且全为种子时拒绝保存或弹 diff；"粘贴已有 ID"改下拉选。
-
-**G09 权限码未种子化（待）**。`integration:read/write/admin` 与 `data_sources:read/write/execute` 六码在 migration/seed/插件清单里都不存在（对照 `zzzz20260830100000_add_stock_prep_permissions.ts:33-35` 只种子 stock-prep），而 `role_permissions` 外键到 `permissions(code)`，两个资源都不在免准入名单（`rbac/namespace-admission.ts:11-40`）。**建议**：照 stock-prep 迁移形状种子化六码；`app.manifest.json` 声明；交付说明给"三个角色 = 哪些码"模板。这是 S 工作量却决定非管理员能否进主旅程。
-
-**G10 K3 写回文案与围栏打架（待）**。页头副标题（`IntegrationWorkbenchView.vue:5`）、4 步流程第 4 步（`:642`）、运行与推送标题（`:222`）、K3 预设页 lead 都把 Save-only 推送当终点；后端自 2026-08-29 用 `K3_WISE_PIPELINE_RUN_DISABLED` / `K3_WISE_EXTERNAL_WRITE_DISABLED` 四层拒绝（`k3-external-write-permanent-fence.cjs:3-11`），码表 50 条无此键，`executePipeline` catch 把英文原文塞状态条（`:3455`）；同屏总览卡写"只读·永不写入"。**建议**：两个 DISABLED 码进 `errorCodeLabels` 并复用备料 `plainLanguage.ts:178` 的表述；副标题/流程条/标题改"dry-run 后导出或写入多维表；K3/通用 HTTP 目标只读"；目标命中 `isK3ExternalWriteTargetKind` 时 Save-only 按钮直接不渲染。
+---
 
 ## 4. 目标页面布局提案
 
-**现状**：`PageShell wide` → 4 步流程条 → 操作路径一行 → 全局状态条 → 左 rail（8 组，纯锚点滚动 + IntersectionObserver）+ 12 个常驻分区（含运行与推送里 5 个子面板），DOM 顺序 ≠ rail 顺序（payload 预览属清洗映射组却排在监控后），5210 行单文件、95 个 ref / 124 个 computed；`/data-sources` 独立页（#5587 起并入连接管理分区）；K3 预设页与帮助页是独立路由但不在导航。
+### 4.1 现状问题的根
 
-**目标信息架构**（改布局 vs 补功能分开标）：
+单页长滚动（`IntegrationWorkbenchView.vue` 5210 行）+ 8 组 rail 只做锚点 + 12 分区常驻，把三种不同节奏的工作混在一屏：**资产管理**（连接/数据集/读取源，低频、需列表-详情）、**编排作者**（映射/流程，中频、需向导与预览）、**运行操作**（运行/监控/死信，高频、需列表-筛选-详情-轮询）。全页唯一状态出口、零 URL 状态、连接是共享草稿，都是这个混合的后果。
+
+### 4.2 提议的信息架构
 
 ```
-数据工厂（一级导航，integration:write）
-├─ 总览            [改布局] 保留 hub-overview；卡片加运行健康（G55，补功能）
-├─ 连接            [改布局] 列表-详情：行 = 一条外接数据源或外部系统，
-│                   列：类型 / 状态(最近测试) / 被引用 N / 凭据更新于；点行进详情抽屉
-│                   (基本信息 · 测试 · 凭据 · 引用方 · 审计)；新建 = 选类型→填信息→测试并保存
-│                   （G15/G18/G19/G20 补功能；外接数据源面板 #5587 已并入，先作为该列表的一个来源）
-├─ 数据集与查询    [改布局] 原「读取源 / 组合 / 选择系统与数据集」三组合一：
-│                   按连接分组列出对象；「试读 N 行」（G23）；受治理的保存查询（G03，补功能）
-├─ 清洗与映射      [改布局] 原「清洗数据集 / 映射规则 / 样例·目标模板·Payload 预览」合一，
-│                   Payload 预览只在 K3 目标时展开；目标字段下拉 + 自动匹配（G28）；
-│                   转换/校验 UI 与引擎对齐（G27）；保存前校验（G29）
-├─ 运行            [改布局] 原「运行与推送」拆两层：主区 = dry-run / 推送 / 导出；
-│                   「高级动作」折叠 = 表动作 / 外部写 / 字段选项同步（admin）
-│                   （异步运行 + 取消 + 进度 = G06 补功能；触发绑定 = G04 补功能）
-├─ 监控            [改布局] 跨管道运行列表（状态/时间筛选、翻页、详情）+ 死信按原因分组 +
-│                   7 天成功率（G34/G35/G55 补功能；告警 G07 补功能）
-├─ Bridge Agent    不动（PR-3 之前）
-└─ 帮助 / K3 预设  [改布局] 进二级导航；帮助加「SQL 只读源→多维表」端到端案例（G12）
+数据工厂（一级导航，integration:read 可见）
+├─ 总览                      ← 现 ① 保留；成为落地页
+├─ 连接                      ← ② + /data-sources 并入（PR-1 在做）+ ⑫ Bridge 观测收进 transport 详情
+│   ├─ 列表（筛选 kind/状态/作用域/引用数，行点开）
+│   └─ 详情抽屉/路由 ?connection=<id>
+│       ├─ 基本信息 · 作用域徽标（私有/工作区）· 环境（sandbox|production）
+│       ├─ 凭据（写入即隐，轮换；鉴权方式下拉）
+│       ├─ 高级（SSL/TLS/schema/超时；Bridge transport 时显示 Agent 观测）
+│       ├─ 测试（编辑态可测；「测试并保存」）
+│       ├─ 引用（消费方列表 = hub overview 五源 JOIN）
+│       └─ 变更记录（审计抽屉）
+├─ 数据集                    ← ③ 读取源 + ④⑤ 组合 + ⑥ 选择系统与数据集
+│   ├─ 列表（对象/视图/读取源版本/组合，按连接分组，状态 draft/approved/retired）
+│   └─ 向导（选类型→选连接→定形状→探测→审批）；「试读 N 行」在此
+├─ 流程                      ← ⑦⑧⑪ + ⑨.1 保存部分
+│   ├─ 列表（已保存 pipeline，回读）
+│   └─ 详情：来源/目标 → 映射（三列预览表格）→ 水位/幂等/分页 → 保存
+├─ 运行                      ← ⑨.1 Dry-run/推送 + ⑩ 监控
+│   ├─ 运行列表（跨 pipeline，status/时间窗/翻页，running 轮询）
+│   ├─ 运行详情 ?run=<id>（进度、截断原因、语句形状、死信按 errorCode 分组、血缘）
+│   └─ 死信（分组、批量 replay/discard）
+└─ 管理（integration:admin）  ← ⑨.2 备料标准表 ⑨.3 外部写 ⑨.4 表动作 ⑨.5 字段选项同步
+    └─ 发布：沙箱→生产 release 动作与历史
 ```
 
-**页面级规则**（改布局，全部 S/M）：
-- rail 点击 = 路由切换（`?section=` 已由 #5587 支持），**每次只渲染当前组**（其余 `v-show` 保留状态）；分区内再用 `<details>` 做二级折叠。这就是 IU-2b 原计划的 active-section 模式，备料壳已有范本（`StockPreparationWorkspace.vue:66+`）。
-- 状态条 sticky + 分区级 status slot（G01）；bootstrap 期间 `v-loading`，空态只在 `!bootstrapping` 后出现（G47）。
-- 三套步骤模型收敛为一套，与 rail 组一一对应，每组标"第 N 步 / 适用连接类型"（G12）。
-- 术语表进帮助首节：连接 = 外接数据源上的登记；数据集 = 表/视图/对象；清洗表 = staging 多维表（G41）。
-- 租户/工作区从页面输入框改为页头作用域徽标，值只从会话取（G14）。
+页头常驻：作用域徽标（租户只读、工作区下拉）+ 全局 sticky 状态条；每个分区自带 status slot。
 
-## 5. 三波路线图（与现有计划对齐）
+### 4.3 与现状的差别：哪些是"改布局"，哪些是"补功能"
 
-**第一波（进行中，本周）**：#5587 外接数据源并入连接管理 + hash/?section 落点（G11/G43 部分）；#5588 备料错误码补 `SOURCE_UNAVAILABLE`；#5590 G4 M2 去公共投影回退；C 分支「被引用 N」列 + 删除前提示（G19 前端半）；D 分支向导①拆分 + 门对齐；#5576 验收脚本。
+| 变化 | 性质 | 对应差距 |
+|---|---|---|
+| 长滚动 → 五个二级视图（v-if 单视图，照搬备料工作台） | 改布局 | G13 |
+| rail 锚点 → 路由/`?tab=`、连接与死信可寻址 | 改布局 | G11 |
+| 连接「列表+共享草稿」→ 列表-详情抽屉 + dirty 确认 + 引用数前置 | 改布局（引用数后端已有） | G15 |
+| `/data-sources` 并入连接列表，一套表单、一套测试 | 改布局（PR-1 在做） | G18 前半 |
+| 作用域徽标上提页头、租户框只读 | 改布局 | G14 |
+| 状态条 sticky + 分区 status slot | 改布局 | G01 |
+| 运行列表跨 pipeline + 筛选翻页 | 改布局（后端已支持） | G34 |
+| 映射三列预览表格、试读 N 行 | 改布局（`/select`、dry-run 逐行数据已有） | G23 |
+| 流程列表回读 | 补功能（前端 service 补 GET） | G08 |
+| 连接详情「变更记录」抽屉 | 补功能（插件路由先接审计） | G20 |
+| 连接「作用域」控件 | 补功能（PR-2） | G02 |
+| 连接「环境」列 + 管理页「发布」动作 | 补功能 | G39 |
+| 鉴权方式下拉、高级折叠 | 补功能（后端大多已有） | G16/G17 |
+| 运行详情的进度/取消/轮询 | 补功能（enqueue+worker） | G06 |
+| 死信分组/批量/discard | 补功能 | G35 |
+| 术语表进帮助首节 | 文案 | G41 |
 
-**第二波（零/少后端改动的 UI 到达率，S/M，2–3 周）**：
-1. G09 六个权限码种子化 + 交付说明角色模板（S）
-2. G01 状态条 sticky + 分区级 status（S）
-3. G27 转换/校验 UI 对齐引擎全集（S，后端零改动）
-4. G29 映射保存门 + dictMap 未命中三选一（S）
-5. G34 监控筛选/翻页/详情（M，后端已支持）+ G35 discard/批量（M）
-6. G10 K3 文案改口 + 两个 DISABLED 码进码表（M）
-7. G36 死信结构化 reason + admin 门后"展开原文"（M）
-8. G21 batchSize/maxPages 暴露 + 422 文案进 codeHelp（S）
-9. G18 编辑态"用已存凭据测试" + 工作台草稿区测试按钮（M）
-10. G17 SQL 高级折叠（SSL/信任证书/超时/默认 schema）（S）
-11. G54 runs 加 actor/trigger_source（S）
-12. G56 插件测试失败路径对齐 #5586 的分类码（S）
-13. G42 主链路 9 个文件补 bi() + CI tripwire（M）
-14. 布局第一刀：active-section 模式 + DOM 顺序改成 rail 顺序 + 三套步骤模型收敛（M）
+原则：先做"改布局"里后端已就绪的（G13/G11/G15/G34/G23 的前半），它们零后端改动；"补功能"按第 5 节三波排。
 
-**第三波（结构性，L，按 minimal-plan 顺序）**：
-1. PR-2：G02 工作区共享 + use/manage/rotate 分权；G19 外部系统删除引用扩到读取源/组合/备料绑定；G20 外部系统与管道审计 + `updated_by`
-2. G04 + G06 + G07：触发端口 + `integration_run_requests` + Integration Worker + 异步运行/取消 + 失败事件→Automation 通知（同一实现）
-3. G03 受治理保存查询即对象；G22 读取源水位；G26 filter / next 串联
-4. G39/G40 环境维度 + 发布动作 + 配置包导出/导入
-5. G44 OpenAPI 只读契约 + `integration:read/run` token scope；G45 adapter configSchema/credentialSchema 驱动表单
-6. PR-3：G46 Bridge 降为 data_sources 的 transport_kind，去 localhost 硬限制
+---
 
-## 6. 明确不追的方向与伪差距
+## 5. 三波路线图
 
-- **连接器广度 / SaaS 目录（G58）**、**通用写回（G53）**、**n8n 式画布（G26 的画布部分）**、**Bridge 远程 fleet（G46 的集群部分）**、**运行时安装第三方连接器（G45 的 SDK 部分）**：维持 2026-07-03 对标结论与 minimal-plan §6.2/§6.3 的延期裁决。对外材料相应降级："支持钉钉/飞书/宜搭对接"不能写；写回边界（只读账号是可证明保证、K3 永久禁、HTTP/DB 写逐目标授权）作为差异化写进帮助与交付说明。
-- **移动端适配（G48）**：design-lock §6 已排除，只以"窄桌面窗口"名义做 sticky 横向 rail。
-- **伪差距 G13**："渐进披露只到字段级"被驳回，见 §2 末表。
-- 反驳者对 6 条 P0 的共同修正：**"其实已有，只是在 API / 别的模块 / 需要配置"** 是本仓最常见的形态（G05 SSRF 守卫、G07 通知动作、G34 runs 筛选、G33 模板 instantiate、G49 health 端点）。这些差距的正确表述是"UI 到达率"，工作量也相应是 S/M，不要按 L 立项。
+与现有计划对齐：PR-1（外接数据源并入连接管理分区，进行中）→ PR-2（权限/引用/安全删除）→ PR-3（Bridge 作为 transport）→ G4 结构化强制。
+
+### 第一波：与 PR-1 同期，"接线与止血"（约 3–4 周，全部 S/M，零或极少后端改动）
+
+| 项 | 工作量 | 说明 |
+|---|---|---|
+| G09 六码种子化 + 一个 integration/data-source 预设 + 导航门统一 | S | 上线分权的硬前置，照 `zzzz20260830100000` 形状 |
+| G10 文案纠偏 + 三个 *_DISABLED 码进标签 + K3 目标禁用 Save-only + 修 pipeline-runner 重定向语 | M | 现在界面是在反着说 |
+| G01 sticky 状态条 + 分区 status slot | S | |
+| X02 源侧漂移守卫（getSchema 比对 + SOURCE_FIELD_ABSENT） | S | 唯一会静默写空覆盖正确值的正确性缺陷 |
+| G18 工作台连接草稿区「测试此连接」+ `/data-sources`「测试并保存」+ 列表投影 last_connected_at/last_error | M | 与 PR-1 表单合并同一刀 |
+| G16 中"create schema 静默剥 bearerToken"改显式 400 或落库 | S | 收下即丢必须先止 |
+| G31 先把副驾假成功文案改真（落库放第二波） | S | |
+
+### 第二波：PR-2 治理（约 6–8 周）
+
+| 项 | 工作量 | 说明 |
+|---|---|---|
+| **G02 连接共享与 use/manage/rotate 分权，运行主体改触发者** | L | PR-2 主刀；唯一 P0 |
+| G20 插件路由接 `context.audit` + external_systems/pipelines 加 created_by/updated_by/version + AdminAuditView 过滤 | M | 上线门 G-3 举证前提 |
+| X03 `/select`、`/schema`、`/tables` values-free 审计 | S | 并入 G20 |
+| G05 send_webhook 走 SSRF 守卫 + run 路由标 automation-bypass | M | |
+| G38 approve/retire 抬 admin + 可选 maker-checker 开关 | M | |
+| G31 confirm 落治理表 + 目录合并 + 下载/应用 | M | AI 卖点闭环 |
+| G08 pipeline 回读 + 种子映射打标 + 下拉选已保存 | M | 与 G27 的 defaultValue 同一刀 |
+| 布局：G13 分区级折叠/单视图、G11 深链、G15 列表-详情抽屉 + dirty 确认 | S–M | 后端零改动 |
+
+### 第三波：PR-3 + G4 + 运行时（约 8–10 周）
+
+| 项 | 工作量 | 说明 |
+|---|---|---|
+| G06 enqueue + worker + cancel + progress（照 ai-bulk-job 形状）+ abandonStaleRuns 挂调度 | M | |
+| G07 run.finished 事件 → automation 触发器 → 钉钉/webhook；定时脚本 heartbeat | M | 依赖 G06 的状态终态 |
+| G34/G35/G36 运行列表跨管道 + `GET /runs/:id` + 死信分组/批量/discard + 结构化 reason + admin 看原文 | M | 三条同一屏 |
+| G39 `stockPrepApplyProduction` 加载器 + 环境列 + release 动作（照 release-channel 形状） | M–L | |
+| G23/G24 试读 N 行 + `metadata.statement` + 三列预览 + 类型归一化与矩阵 | M | |
+| PR-3：Bridge 降为 transport_kind；G46 远程形态需 owner ratify 后才动 | L | |
+| G4：M2 去回退硬依赖 `getExternalSystemForAdapter`（`http-routes.cjs:3496`、`pipeline-runner.cjs:337`）、M1/M3 | 按设计稿 | |
+| G03 受治理的保存查询即对象（第一刀 filters 接表单可提前到第一波） | L | 客户 DBA 不配合时主旅程才卡死，按真实需求触发 |
+
+延后待需求：G25 重试策略（复用 webhook 线形状）、G21 预算可调、G44 OpenAPI/scoped token、G45 configSchema、G30 探测填 fieldMap、X07 租户可见性、X08 通用副驾、G41 术语表、G17 高级项。
+
+---
+
+## 6. 明确不追的方向与被驳回的"伪差距"
+
+### 6.1 不追的方向（团队 2026-07-03 对标结论）
+
+`docs/research/integration-capability-benchmark-vs-dingtalk-feishu-yida-20260703.md:9` 原句：「**护城河 = 集成的安全与治理,不是连接器广度。** 应打我们赢的轴:可安全、可审计、可回滚地接入并写回关键业务系统」；:71「定位「企业级受治理集成」而非「连接器市场」」。据此以下不追：
+
+- n8n 式自由画布、条件/循环/多目标编排原语、用户脚本与 raw SQL 编辑器（`transform-engine.cjs:5-7`、`IntegrationMappingRulesSection.vue:55` 是刻意焊死；minimal-plan §6.3 明确延期）
+- 连接器市场 / 模板市场 / SaaS 连接器广度（Oracle、TiDB、飞书连接器等按真实需求逐条 opt-in，`data-sources-oss-references-20260528.md:80-83`）
+- K3 外部写（永久围栏，非开关）、通用 C6 apply 解冻（known §C C6）
+- Bridge Agent 远程 fleet 管理、前端写 Agent config（BA design-lock WONTFIX）
+- 备料 ext_ 映射改成产品内可编辑（部署期文件是明写裁决，`stock-preparation-ext-field-mapping-config.cjs:11-49`）
+- 客户配置包入库（`stock-preparation-customer-pack-catalog.cjs:24-40` 硬锁，#5074 泄漏后加守卫）
+- 移动端、暗色模式、导航 IA 全局重排（IU design-lock §6）
+- 对标那条"给平台服务加读写权限以避免后续负担"（《各类集成凭证的配置说明》:218）——与我们「只读账号才是可证明保证」裁决相反，交付说明里要显式区分立场
+
+### 6.2 被驳回的条目（编号 + 一句为什么）
+
+| 编号 | 为什么不成立（残核若有，已归入他处） |
+|---|---|
+| G04 | 「三类触发器到不了管道」为假：Automation `schedule.cron` → `send_webhook` → 管道运行路由是产品内现成通路（`automation-service.ts:1015-1035`、`automation-executor.ts:4107-4160`）；残核「无受治理的绑定端口」已在 known §E 记录，SSRF 部分归 G05 |
+| G12 | 「零首次上手引导」「SQL 主旅程一字未提」为假：连接分区已有 onboarding 卡（`IntegrationConnectionSection.vue:17-31`）、K3 预设页就是四步线性引导（`IntegrationK3WiseSetupView.vue:23-40`）、读取源默认是向导；残余是三套步骤模型不一致与帮助页无 SQL 章，属打磨 |
+| G19 | 「引用关系不可见」为假：hub overview `collectConsumers` 汇总四类消费方并以「在用」渲染在同一页（`integration-hub-overview.cjs:279-325`、`IntegrationHubOverviewSection.vue:63-64`）；残核「外部系统删除只查 pipeline 不查读取源/组合/绑定」（`external-systems.cjs:928-968`）归 PR-2 安全删除 |
+| G22 | 对标证据被误读：《MySQL 连接器》:226-228 是表单填 ID 的按键窄读、:172 是硬失败上限，语料内根本没有增量能力；我们在增量维度领先而非落后；备料线无水位是有意边界（Bridge fail-closed 声明） |
+| G26 | 三条载重断言被证伪：行级过滤已下推到 WHERE（`pipeline-runner.cjs:146-163`）、二表 join 富化已存在（`data-source-sql-readonly-source-adapter.cjs:113-268`）、BOM 递归展开已是有预算的循环（`stock-preparation-bom-expansion.cjs`）；对标"条件/多目标/串联"无原句，飞书的循环逃生口是用户 JS——正是我们刻意焊死的 |
+| G28 | 对标证据不实：语料内无可视化映射面板/自动配对，TiDB :132 是 SQL 结构面板（我们已有等价物 `IntegrationObjectTemplateSection.vue:150-155`）；必填已两处可见；missingRequiredFields 服务端已算（`http-routes.cjs:3168-3244`）只是未接线 |
+| G29 | 编辑面是白名单闭集非法 fn 不可达；dictMap 已有编辑期语法门（`IntegrationWorkbenchView.vue:3067-3086`）；运行时错误点名 fn（`transform-engine.cjs:143-145`）；dry-run 已回吐 transformed；对标 :482-485 自己也把语义错留到运行期；残核 dictMap 未命中透传归 G27 |
+| G32 | 「没有任何 UI/预览/审计」三个绝对词被证伪：`app.manifest.json:97-113` 配置面已渲染在安装页、预检有 EXT_FIELD_MAPPING_NOT_CONFIGURED 与可粘修复行、mappingId+version 进 b2a digest；部署期文件是明写裁决 |
+| G33 | 「4 条种子目录全为 HTTP」为假（实为 8 条，含两条 SQL 只读源）；「客户包为 0」是硬锁不是缺口且前端已接；残核「templates CRUD/instantiate 前端零调用 + bridge 条目无宿主永不可见」属 P2 小项 |
+| G37 | 备料行已有 `lastPlmRefreshRunId/At` 两列（`stock-preparation-templates.cjs:739-740`）；大 BOM 可分块续跑；审计 store 支持 projectId 过滤；「两套台账」是明写架构决定（`http-routes.cjs:3497-3500`）；残核 `tableActionApply` 零 runLogger/审计（:6150-6207）待 owner 决 |
+| G40 | K3 预设页已有导出/导入且占位符纪律（`IntegrationK3WiseSetupView.vue:249-260,1376-1404`）；integration_templates 就是无凭据可搬迁配置件（`integration-templates.cjs:6-18`）；contentKey 内容派生随 JSON 迁移；服务端持有 pack 白名单是治理立场 |
+| G42 | 对标 :100/:91「名称支持双语」是数据字段多语值，不是 UI 双语；`bi()` 是各文件局部 helper，K3 页实际 locale 感知（`useLocale` :936/:996）；8 个文件是中文硬编码，受害者是英文 locale 用户，目标用户几乎不触发；首屏已有语言切换 |
+| G43 | `/stock-prep` 已是一级导航（`App.vue:69`）；K3 页被四处 router-link 指向；引用计数后端已实现；残余（`/data-sources` 纯文本路径、帮助页零入站链接、S1 面板不提 /stock-prep）是超链接卫生，S 工作量顺手做 |
+| X01 | 对标 :318-326 epoch 换算证明飞书自己就把无时区列当 UTC；我们全程 ISO/UTC 墙钟数字与源库逐位相同；差距建议的 `useUTC=false` 反而会把交期变前一天 |
+| X04 | 列级允许清单机制已在 K3 SQL Server 通道存在且 SQL 级 fail-closed（`k3-wise-sqlserver-channel.cjs:120-121,336-343`、`mssql-readonly-utils:357-368`）；`/select` owner-only；残核「sql-readonly kind 未接线」S 级 |
+| X05 | 语料 grep「注释」零命中，对标不支持；客户 PLM 语义在字典表且已接线（`schema-mapping-copilot.cjs:167-183`）；`ColumnInfo.comment` 全仓无读取方，PG/MySQL 同样看不到；ES/Mongo/HTTP 也不填 |
+| X06 | `integration_provenance` 表不存在（血缘是 `integration_runs.provenance_events` JSONB 列 + 视图）；宿主已有 `LedgerRetentionScheduler` 范式；已是 DF-N2-2 设计明写推迟项；备料定时 dry-run 不写 run 表；插件无定时器，增速等于人点按钮 |
+
+---
 
 ## 7. 与 2026-07-03 对标相比，两个月变了什么
 
-| 2026-07-03 判断 | 现在 |
+**当时判定"领先"的治理轴（:31-39）今天仍成立并加厚了：**
+- K3 四层永久写围栏 2026-08-29 落地（#5247，`k3-external-write-permanent-fence.cjs`）——当时是"sandbox-first 阶梯"，现在 K3 方向连阶梯都撤了，只剩只读
+- PR-1 Binding↔Connection 正式关联合入（#5452，`zzzz20260902120000_add_integration_connection_binding.ts`、`connection-resolver.cjs`）
+- 作用域洞连补四刀（#5471/#5497/#5534/#5581）、x-tenant-id 请求头洞（#5445）、PG 中文 locale 守卫横扫（#5583）、源不可达 503 SOURCE_UNAVAILABLE 不回显驱动原文（#5586）
+- data_sources 删除引用计数 409（`routes/data-sources.ts:820-839`）、hub overview 五源 JOIN 消费方视图——对标 :123-127 那两条今天已有服务端等价物
+- 备料 `stock-prep:*` 权限词表种子化、`ext_` mapper 接线与 ensure 守卫（known §G 三条文档记缺口、代码已修）
+- C3 增量/keyset watermark 已落（#2628/#2265），IU-3/IU-4 向导、BA-UI-1…4 全部合入
+
+**当时列的差距（:50、:51、:62）今天状态：**
+- :50「事件驱动入站同步——缺外部事件/webhook→multitable 通用入站」：**仍开**。唯一进展是通过 Automation send_webhook 的非受治理绕路（G04 驳回理由）与运维定时脚本（#5493）；`integration_run_requests`/`run_integration_pipeline` 全仓零命中
+- :51/:62「可视化数据准备/transform 授权面」：**部分**。映射面板有了白名单转换（5 种），但只写不读（G08）、引擎另一半不可达（G27）、副驾确认不落库（G31）
+
+**当时没看、这两个月暴露出来的新问题：**
+- 运行时"同步且哑"这一族（G06/G07/G36）——是备料无人值守定时拉取这个真实场景把它逼出来的，2026-07-03 对标时没有夜间无人值守用例
+- 主链路文案与围栏打架（G10）——是 08-29 围栏落地后的新矛盾
+- 源侧漂移静默（X02）——记忆里只记了目标侧探针是死代码（#5475）
+- 前端把后端能力锁死的一族（G03/G08/G23/G34 前半）——IU-2 分区抽取以「zero behavior change」合入后，后端在这期间长出的能力没有跟着接线
+
+**当时的对标口径本身需要修正的一点：** 2026-07-03 文档是与钉钉/飞书/宜搭比"连接器广度"；本次飞书语料实读证明**飞书在 SQL Server/Postgres 线上只有「鉴权 + 运行 SQL」两句**，动态 SQL 仅 MySQL 1.5+、重试/超时仅 TiDB 文档、代理集群是其 SaaS 结构性必需。"对标在广度赢"对我们的主源（SQL Server）这一格并不成立——这是可以正面宣讲的差异化面，不是需要追赶的落差。
+
+---
+
+## 附录 A · 核验统计
+
+| 阶段 | 数量 |
 |---|---|
-| "连接器/适配器：K3、PLM、通用 SQL、Bridge，partial→strong" | 未变；但外接数据源登记表成了唯一连接真源（PR-1 #5452：`connection_id` 绑定、`tenant_id`/`scope_kind`、双读 resolver），G4 M2（#5590）去掉了公共投影回退 |
-| "治理 = 护城河" | 加固：W4 租户声明门、作用域洞三象限修复（#5471/#5497/#5581）、503 `SOURCE_UNAVAILABLE` 不回显（#5586）、S6-A 溯源 pin 体系 |
-| "可观测 strong（DF-N 运行监控、provenance、死信）" | 后端未变；本次发现 UI 只暴露"最近 5 条"、零告警、备料写路径不进台账（G34/G07/G37）——**后端强、前端弱**是新结论 |
-| "UI 未来：IU-2 rail + 分区抽取" | IU-2a/2b/2c 已合（rail、8 组、分区组件化），但 active-section 模式没做；#5587 补了落点与外接数据源并入 |
-| 未提及 | 触发端口缺失（G04）与同步运行（G06）在 07-03 文档没有被识别为主线阻塞，本次定为最大单点 |
+| 原始差距（9 视角） | 75 |
+| 合并后 | 58（其中 46 条 P0/P1 进入核验，12 条 P2 未核验） |
+| 核验后幸存 | 33 |
+| 批评者补充并核验通过 | 4 |
+| 被驳回 | 17 |
 
-## 8. 本文的局限
+## 附录 B · 批评者指出的「无人看的维度」
 
-- 49 条未经反驳者核验，file:line 可能有偏差或"其实已有"的漏判；额度恢复后会补跑并更新本文（核验列会改）。
-- n8n / 数环通条目全部是一般知识，未核对当前版本。
-- 未做真实浏览器走查，布局结论来自代码与 jsdom 结构；分区高度、首屏密度等视觉判断以实际截图为准。
+这些维度没有进入九视角，批评者在综合前点名；有的已作为 X 条目补入正文，其余留作下一轮：
+
+- 时区/日期语义：五张地图都没看 SQL Server datetime 的时区解释。仓库内 useUTC 零命中（packages/ + plugins/ 全量 grep），MSSQLAdapter.ts:199-206 只设 encrypt/trust/timeout；K3/PLM 源存的是本地时间，回读形状未被任何一处定义（见 extra_findings #1）。
+- 源 schema 漂移（源侧列改名/删列）：backend 地图讲了目标表漂移探针，journey/backend 都没看源侧漂移——transform-engine.cjs:232-236 对缺失 sourceField 静默产出空值、run 仍 succeeded（见 #3）。对标只把「开发/线上表名字段名保持一致」推给用户（MySQL_连接器.txt:171），这是可正面差异化的点。
+- 数据安全的两个子面没人看：(a) 数据访问审计——/data-sources 的 /query 有 auditLog（routes/data-sources.ts:1025/1088），/select、/schema、/tables/:table（:1131/:1191/:1238）零审计；(b) 列级限制——sql-readonly 源只有对象级允许清单，facade 丢弃列投影（data-source-plugin-facade.ts:643-663），无法把含敏感列的表只开放部分列（见 #4、#5）。字段级权限在多维表侧存在，但集成读侧不存在。
+- 数据保留/成本：integration_runs / integration_dead_letters / integration_provenance 无任何 purge/retention（plugin lib 与 core-backend 全量 grep 零命中）；只有 run-log 2000 字截断与每 run 事件数上限。每晚定时 dry-run 的部署会无界增长（见 #6）。
+- 连接器目录的租户可见性：adaptersList 对所有租户返回全部 9 个 kind（http-routes.cjs:4630-4636），无 per-tenant 可见性；对标明写「仅支持部分租户使用」（各类集成凭证的配置说明.txt:101）（见 #7）。
+- AI 辅助：只有 backend 地图提了一句 copilot；SchemaMappingCopilotPanel 仅挂载在 StockPreparationInstallView.vue（全仓唯一挂载点），通用数据工厂映射面板零 AI 也零自动匹配（见 #8）。
+- 可测试性/回归：结论是覆盖尚可，不构成缺口——apps/web/tests 下 28 个 Integration*/data-sources spec 覆盖了几乎每个分区组件（含 IntegrationWorkbenchView.spec.ts、integrationWorkbench.spec.ts）；但 apps/web/verification 只有 stock-prep-p0/p1-acceptance 两条旅程级验收，旅程①（36 步 SQL 源接入）没有端到端 spec。列为观察，不另立差距。
+- 无障碍（a11y）：完全没人看。IntegrationMappingRulesSection.vue、IntegrationPipelineRunSection.vue 的 aria-/role= 计数为 0，Rail 仅 2 处；未做键盘走查，故不立差距，只标维度空白。
+- 移动端：known 地图 §A 已记 design-lock §6「不做、需另立项」，属显式排除，不是遗漏。
+- 多租户 SaaS 化：G02/G14/known §F 已覆盖作用域与跨插件租户协议；未覆盖的是「按租户/按数据源的配额」——G25 只讲速率限制，无人讲行数/运行次数配额。因缺乏对标原文与明确用户场景，只标维度空白，不立差距。
+- 国际化：G42 被驳回但驳回理由本身承认 8 个组件中文硬编码；维度已被看过，不重复。
+- 性能/大表：G21、G06 覆盖分页预算与同步运行；对象列表 1000 条上限有截断标记（payload-redaction.cjs:189 追加「[N more items truncated]」），不构成静默截断，不另立。
+
+## 附录 C · 被驳回条目的完整驳回理由
+
+- **G04** 定时 / 入站 webhook / 记录事件三类触发器都到不了数据工厂管道：平台触发器与插件运行器之间没有受治理的绑定端口 — 视角 A 找到一条产品内、零代码改动的既有通路，推翻了「三类触发器都到不了数据工厂管道」这一硬可达性断言，也推翻了「替代品是仓外 OS 计划任务脚本」的唯一性：  1) 平台调度器是活的且真的会执行动作。packages/core-backend/src/multitable/automation-scheduler.ts:334,351,484（ScheduleCallback 到点回调）+ automation-service.ts:1015-1035（回调体先查 sheet liveness，再走 executor 执行该规则的动作，注释里明说「sending webhooks, emails and DingTalk messages」）。  2) send_webhook 动作接受任意 URL + 任意 headers，且仓内未见任何 SSRF/内网/允许清单守卫。packages/core-backend/src/multitable/automation-actions.ts:143-151（SendWebhookConfig {url, method, headers, body, secret}）；automation-executor.ts:4107-4160（url 直取 config.url，headers 直接展开 config.headers，只补 Content-Type；grep 'ssrf|isPrivate|localhost|127.0.0.1|allowlist' 在 automation-executor.ts 零命中）。因此一条 schedule.cron 规则可以直接 POST 到插件自己的 pipeline 运行路由（同一产品的一等路由，http-routes.cjs:5403/5437/5673/9711 所在的那组），Authorization 头写在动作配置里即可。  3) 入站 webhook 触发器不是空槽，是已接线的端点：packages/core-backend/src/routes/automation.t…
+- **G12** 零首次上手引导：首屏三套互斥步骤模型、DOM 顺序 ≠ rail 顺序、rail 不标「此分区对 SQL 源不适用」、帮助中心只讲 HTTP 读取源/组合，对 SQL 只读源→多维表主旅程一字未提 — 视角 A 推翻了标题里的两处绝对断言（"零首次上手引导"、"SQL 只读源→多维表主旅程一字未提"），底层的三处具体缺陷则核对属实，因此判"需修正+降级"，而非整条不成立。  一、"零首次上手引导"为假——数据工厂首屏已有 4 处上手引导，其中一处正是差距里"建议新建"的那种引导卡： 1. apps/web/src/components/integration/IntegrationConnectionSection.vue:17-31 已有 data-testid="connection-onboarding" 引导卡，正文"业务用户可从 K3 WISE 预设开始，实施人员再展开 SQL / 高级连接"，并给三个动作按钮（K3 预设 / 新增连接草稿 / 展开 SQL 高级连接）。这与推荐 ④"加对标 StockPreparationHelpCard 形态的引导卡"形态一致，只是不在 DOM 最顶而在连接分区内。 2. 同文件 :49-57 systems.length === 0 时的空状态，文案明确写"第一步：使用 K3 WISE 预设快速开始，或点击上方'新增连接草稿'创建一个连接。"——差距里"systems.length===0 时展开"的条件式引导已经存在。 3. IntegrationHubOverviewSection.vue:33-35 总览分区零系统时的空状态"尚未接入任何系统，右上角新增"。 4. 读取源不是裸表单：IntegrationReadSourceConfigPanel.vue:40-48 默认渲染 IntegrationReadSourceWizard（IU-3 设计锁，"wizard is the DEFAULT surface"，专家平表单是折叠备选），:16-24 之上还有 TC-1 模板目录选卡 IntegrationTemplateCatalogPicker。  二、"对 SQL 只读源→多维表主旅程一字未提"为假（只对 /help/integration 这一页成立）：apps/web/src/views/Integrat…
+- **G19** 引用关系不可见、删除拒绝以英文原句回显；外部系统删除只查 pipeline，不查已审批读取源、组合与备料源绑定引用 — 视角 A 推翻了差距的前半句「引用关系不可见」。仓库里已有对标那张图的等价物,而且覆盖面比差距说的还宽:plugins/plugin-integration-core/lib/integration-hub-overview.cjs:279-325 的 collectConsumers 对每个外部系统汇总四类消费方——备料 table-action 绑定(:282-292,即 stock_prep_source_binding)、pipeline 源/目标两端(:294-297)、已审批 read_source_configs 计数(:300-309)、已审批 compositions 去重计数(:311-320,经 indexCompositionsBySystemId 两跳解析);路由已挂 GET /api/integration/hub/overview(http-routes.cjs:23、:4639);前端 IntegrationHubOverviewSection.vue:63-64 以中文「在用 / Used by」渲染,consumerText(:222-231)带名称与 ×N 计数,无引用时显示「暂无」;该组件已挂载在 IntegrationWorkbenchView.vue:42——与 IntegrationConnectionSection.vue:77 的删除按钮同一页面。所以「顾问不知道是哪几条引用」在集成工作台侧不成立,evidence_ours 只列了 IntegrationConnectionSection.vue:76 的 tooltip 而漏了同页的总览卡片。另外 user_impact 的「悬空」被设计文档明确接住:packages/core-backend/migrations/079_create_integration_stock_prep_source_binding.sql:16-23 写明刻意不做外键,悬空 id 在 loadTableActionSourceAdapter 读时 fail-closed 报 TABLE_…
+- **G22** 增量/水位线只覆盖 pipeline 一条线：读取源配置、组合运行、备料 readonly-source-run 全部是全量重读 — 视角 B 直接推翻。(1) evidence_benchmark 被误读。我读了被引的原文：MySQL_连接器.txt:226-228 是「配置『填写表单』触发器，填写待查询记录的 ID / 数据库连接器查询数据 / SELECT * FROM ext_join_test_class WHERE id = $variable;」——这是**表单填 ID 的按键窄读**，不是增量/水位线；:172 是「SQL 结果超过 10,000 条时会导致执行失败；若需查询更多数据，可在配置时使用 OFFSET 循环调用」——这是对标自己的**硬失败上限 + 要求人手写 OFFSET 循环**，是缺陷不是能力。把这两条拼成「对标等价形态是按参数窄读 + OFFSET 循环 ≈ 增量」是把两个不同的东西缝在一起。(2) 对标语料里根本没有增量能力。对 benchmark 目录全部 7 个文件 grep「增量|水位|watermark|上次|updated_at|定时|轮询|OFFSET|offset」，只命中 MySQL_连接器.txt:172 与 TiDB_连接器.txt:131 两行、且都是那句 OFFSET 提示；没有任何一处描述「记住上次运行位置」。所以在增量维度我们（integration_watermarks 两种类型 + tiebreaker 校验 + 适配器侧 WHERE 窄读，plugins/plugin-integration-core/lib/watermark.cjs:6/16-49、adapters/data-source-sql-readonly-source-adapter.cjs:325-436、adapters/k3-wise-sqlserver-executor.cjs:218-234、pipeline-runner.cjs:988-1028）是**领先**对标，不是落后。(3) 视角 A 也部分成立：对标那句「WHERE id = :variable 窄读」我们本来就有，且是配置驱动而非手写 SQL——plugins/plugin-integrat…
+- **G26** 编排原语缺失：管道是「单源→单目标一条直线」，无条件/过滤/循环/多目标/管道串联；组合链硬限两跳 — 视角 A 推翻了这条差距的三条载重断言（user_impact 全部四句里有三句半是错的），结构性事实虽然属实但已不足以支撑 P1。  【A-1 "「只要已发布」做不到只能拉全量让目标端删" —— 明确证伪】 管道**已经有**行级条件过滤，且是下推到源端 WHERE，比 gap 建议的 ①「transform 白名单加 filter」（先拉回来再丢）严格更好： - plugins/plugin-integration-core/lib/pipeline-runner.cjs:146-163 `resolveSourceReadOptions` 解析 `pipeline.options.source.filters`（校验必须是对象，并剥掉 limit/cursor/watermark 等保留键）； - 同文件 :1029-1031 把 `filters` 连同 watermark 一起塞进本页读请求； - plugins/plugin-integration-core/lib/adapters/data-source-sql-readonly-source-adapter.cjs:610-612 `normalizeEqualityFilters(request.filters)` → `combineWhereClauses(where, watermarkPlan.where)` → `selectOptions.where`，即等值谓词进 SQL WHERE；:284-296 限制为等值标量（治理选择，非缺失）。 - Bridge 通道同构：adapters/bridge-agent-readonly-adapter.cjs:243-250、:420-423、:469-470（还回传 `filtersApplied` 供审计）。 所以「status='published'」这类条件是配置得出来的，且不过网。真正缺的只是 UI 没暴露这个字段（apps/web 全仓 grep 无 `options.source.filters` 编辑入口）——这是"只在 API"…
+- **G28** 目标字段是裸文本框、无自动匹配、不校验存在性/类型；已加载的目标 schema 只用来种前 8 行 K3 猜测 — 视角 B 直接推翻：对标证据不实。benchmark 目录（飞书 aPaaS 帮助中心抽取，7 个文本）全文 grep「映射/匹配/高亮/字段映射/自动匹配」只有两处命中，都不是可视化映射面板：(1) TiDB_连接器.txt:132「支持 SQL 窗口 放大、缩小，点击编辑窗口右上按钮打开「数据表结构面板」…单击数据表名和字段名，即可进行快速复制，支持刷新和搜索」——SQL 编辑器旁的结构参考面板 + 点名复制；(2) MySQL_连接器_动态_SQL_操作使用说明.txt:109「编辑器提供了语法高亮、自动补全、纠错提示等功能」——针对 SQL 模板，不是字段映射。差距断言的「对标可视化映射面板按名称自动配对、类型不匹配高亮」在给定语料里不存在，是把 SQL 结构面板放大成映射面板；剩下支撑只有 n8n/数环通[一般知识，未核对]，而这两家正是「连接器广度/连线易用性」赛道，与团队 2026-07-03「护城河=治理而非连接器广度」的定位相反，不构成对标压力。更反讽的是对标那条「结构面板可查可复制字段名」我们已有等价物——apps/web/src/components/integration/IntegrationObjectTemplateSection.vue:150-155 就在映射区上方列出全部目标字段名 + 必填徽标。  视角 A 部分成立、部分推翻。成立部分：目标字段确为裸输入框，IntegrationMappingRulesSection.vue:45-48 `<input v-model="mapping.targetField" placeholder="例如 FNumber">`，与源字段 schema 下拉（同文件 :26-40，选项文本带 type）不对称；种子映射确实 slice 前 8 且只在 mappings 为空时跑（IntegrationWorkbenchView.vue:3038-3048），guessSourceField 是 K3 硬编码 9 条词典 + 去 F 前缀启发（:3020-3035）——方向是「由目标猜源」，不是「…
+- **G29** 映射保存时无编辑期硬门：非法转换/校验类型直到运行期才逐行落死信；dictMap 未命中键静默透传原值 — 视角 A（其实已经有了）——差距的第一半（"非法转换/校验类型直到运行期才落死信"）在产品面上不成立，且多处事实陈述有误：  1) 编辑面本身就是白名单闭集，非法 fn 从 UI 不可达。转换是 `<select>`，选项由 `transformOptions` 供给：apps/web/src/components/integration/IntegrationMappingRulesSection.vue:47-53（含帮助文案"只允许 trim、upper、lower、toNumber、dictMap；不允许用户脚本或 raw SQL"），选项定义 apps/web/src/views/IntegrationWorkbenchView.vue:777，类型联合 IntegrationWorkbenchView.vue:536 与 apps/web/src/components/integration/integrationWorkbenchSectionTypes.ts:18。校验类型同样是闭集：只有 required 复选框 + min/max 两个数字框（IntegrationMappingRulesSection.vue:60-70 → buildValidationRules IntegrationWorkbenchView.vue:3107-3115），用户无法输入任意 rule.type。也就是说"非法转换/校验类型"只能由直连 API 的调用方构造，不是目标用户（备料/PLM/K3 只读源接入）路径上的风险。  2) 我们已经有一个"编辑期硬门"，正是对标那句话的同类物。dictMap 字典文本在保存前由 parseDictionaryMap 抛错阻断（IntegrationWorkbenchView.vue:3067-3086：空字典、非 `source=target` 行、缺 key/value、非对象 JSON 全部 throw），throw 发生在 buildMappings（:3117-3129）里，即请求发出之前——等价于对标的"编辑器提示…
+- **G32** 备料线的源列 → ext_ 字段映射是部署机上的 JSON 文件（env 指路径），没有任何 UI、预览或审计 — 视角 A（其实已经有了）——「没有任何 UI、预览或审计」这三个绝对断言里，两个被证伪、一个被削弱：  1) 有 UI，而且是挂载了的。app.manifest.json:97-113 把 extFieldMapping 声明成一条 configSurface（id/name「源列 → ext_ 字段映射」/envVar/serverConfigKey/note）；StockPreparationInstallView.vue:218-237 用 v-for="surface in defaults.configSurfaces" 渲染这一条，配 plainLanguage.ts:232-237 的白话（「源系统的字段对应到哪一列 / 同样按客户放在部署机上。没对应上的字段不会被写入。」）和「装在服务器上,不存进本系统」标签（plainLanguage.ts:251-254）；技术详情折叠里还逐条打印 surface.id / serverConfigKey / envVar / note（同文件 :316-325）。断言 "apps/web/src 无 extFieldMapping 编辑入口" 成立，但 evidence_ours 只查了 StockPreparationWorkspace.vue:399-570（那段是 rail 菜单项定义，本来就不会有配置面），漏掉了真正承载配置面的 InstallView。  2) 有「缺没缺」的产品内预检与可粘修复行，不是纯运维盲配。stock-preparation-preflight.cjs:576-587 产出 checks.extFieldMapping = { configured: … } 与 blocker EXT_FIELD_MAPPING_NOT_CONFIGURED，what 里直接点名 env 变量、fix 给出可粘的 env 行；InstallView.vue:386-467 有「检查」按钮、逐条渲染 blocker（:427-442）并在技术详情里输出 blocker.fix.run 可粘行（:46…
+- **G33** 模板目录三套互不相通、名存实亡：后端 templates CRUD/instantiate 与 2 条参考模板前端零调用，前端 4 条种子目录零后端且全为 HTTP 读取源/组合向导、无 SQL 只读源→多维表主链路模板，客户包目录仓库为 0 — 视角A：G33 标题里三条可证伪的事实断言中有两条半是错的。(1)「前端 4 条种子目录」——apps/web/src/services/integration/readSourceTemplateCatalog.ts:148-211 实际是 8 条（k3-wise-webapi-single-record、k3-wise-sqlserver-list-page、bridge-legacy-sql-readonly、4 条 http-read-*、two-hop-composition），差距自己引的行段 :148-212 就否掉了自己的计数。(2)「全为 HTTP 读取源/组合向导」「没有一条对应 SQL 只读源」——:154-159 是「K3 WISE SQL 读取通道（高级）」erp:k3-wise-sqlserver + list_page，:161-172 是「遗留 SQL 库（Bridge-Agent 只读）」，两条都是 SQL 只读源种子；真正剩下的只是「没有端到端 pipeline 模板」，不是「没有 SQL 条目」。(3)「客户包目录仓库为 0」被当成缺口，但 stock-preparation-customer-pack-catalog.cjs:24-40 是明写的硬锁（客户字典永不入库，#5074 泄漏后加了 __tests__/customer-dictionary-leak-guard.test.cjs），仓库里仍有 lib/customer-packs/factory-a.sample.cjs 与 factory-a.rehearsal.cjs 两份形状样例；而且这套目录前端是接了的：apps/web/src/services/integration/stockPreparation/deploymentHealth.ts:45-46 + StockPreparationOpsPanel.vue:819 读 customer-packs 与 installs（http-routes.cjs:243-247 四条路由含 dry-run/inst…
+- **G37** 备料真实写路径（表动作 dry-run/apply、大 BOM 作业）不进 integration_runs、不产生 provenance、不产生死信、不进审计台账；运行台账是多维表 run_record 行，批次列表连时间都隐成「已记录」——两套台账无统一视图 — 四条子断言被证伪。(1)「备料行无 provenance / 采购问不出这行是哪次拉取何时写入」不成立：stock-preparation-templates.cjs:739-740 声明 lastPlmRefreshRunId(最近刷新RunID)/lastPlmRefreshAt(最近刷新时间) 两列,stock-preparation-conflict-planner.cjs:1077-1082 的 runPatch 在每条 add/update/inactive 决策上写入,行上就有答案;stock-preparation-project-board.cjs:160-190 还把它聚合成项目级 lastChangedFromPlmAt 呈现。缺的只是记录侧栏那块 UI 与事件流,不是「无 provenance」。(2)「写入出错只能整项目重拉」不成立于大 BOM 路径:stock-preparation-large-bom-jobs.cjs:38-46 有 partial/failed 等终态,:1181-1194 持久化 checkpoint 作业,:1326-1332 从 nextDecisionIndex 续跑——分块可续,不必整项目重拉。(3)「管理员按项目号查看不到任何写入动作」过头:stock-preparation-audit-store.cjs:237-252 支持 projectId 过滤,词表 :51-95 已含 generation_run(备料行生成写入)、persist_repair_once、prep_line_export、source_binding_set;真正缺的只有 table-action 的 dry-run/apply 与拉取本身。(4)「两套台账」不是漂移而是明写的架构决定:http-routes.cjs:3497-3500「System-sync persists instead carry their immutable run record inside the same unit of work」、stock-…
+- **G40** 配置只能点出来，不能导出/导入：跨环境复制「连接+读取源版本+组合+映射+管道」要手写 JSON — 视角 A 推翻两条绝对断言。(1)「唯一『导出』是 Bridge 清单与备料行数据」为假：K3 预设页本身就有一对导出按钮 —— apps/web/src/views/IntegrationK3WiseSetupView.vue:249-251 复制、:258-260 下载，实现在 :1376-1404（downloadGateDraft 生成 Blob 'application/json'，落 k3-wise-live-poc-gate.json）；:650 明写「只作为导入客户 GATE 后的本地草稿；导出 JSON 永远使用占位符」，:271 明写「导入后会清空输入框和密码字段」。也就是说「可搬迁的配置 JSON + 敏感信息置占位符 + 落地端重配」这条纪律在 K3 连接这一层已经端到端存在，正是对标 :121 描述的形态，差距把它只记成「唯一导入」，漏了配对的导出与占位符纪律。(2)「无任何 pipelines 的导出/导入端点」为假：integration_templates 注册表就是无凭据、无具体连接的可搬迁声明式配置件。integration-templates.cjs:6-18 自述「stores a reusable composition of source + target (by adapter KIND) + key fields + field mappings + orchestration config … stores NO credentials, NO concrete sheet/connection」，落地端 instantiate「BINDING to caller-supplied, already-provisioned source/target systems (kind-validated, fail-closed)」——即差距 recommendation 里「凭据与 connectionId 置空、落地重绑」那条已经实现。路由齐全：http-routes.cjs:259 GET 列表（导出）、:260 POS…
+- **G42** 双语覆盖两极分化 + 默认 locale 为 en：rail/总览/帮助/向导是双语，主链路 9 个文件 0 处 bi()，非中文浏览器看到英文导航夹中文正文，中文用户看到英文枚举 — 视角 B 先推翻了对标依据。evidence_benchmark 两条原句都不是"UI 双语覆盖"，而是"用户填写的连接配置名称这一数据字段支持多语值"：《第三方集成使用指南》:100「名称：连接配置的名称，支持双语」（上下文 :99-102 是"配置连接配置信息。名称/API 名称/连接信息"三个表单字段的说明），《各类集成凭证的配置说明》:91「名称：支持多语」（同样紧跟「API 名称：是在代码中的唯一标识」）。这是"业务对象命名支持多语言值"的数据层能力，与"产品界面文案是否双语化"是两件事；用它论证"对标做到了主链路双语覆盖"属于证据错配。且两份对标文本本身是纯中文帮助页，文本内没有任何关于其集成页 UI 英文化程度的陈述可引。  视角 A 又推翻了度量方式与"9 文件皆零本地化"的推论。bi() 不是共享工具函数，而是各文件各自定义的本地 helper（apps/web/src/components/integration/IntegrationBridgeAgentSection.vue:647 `function bi(zh: string, en: string)`；stockPreparation/StockPreparationOperatorHome.vue:232 同名重复定义；全仓无 export 版本）。因此 `grep -c 'bi('` = 0 只说明"没有用这个名字的局部 helper"，不等于"没有本地化"。九个文件里体量最大、也正是 A 级抱怨集中处的 IntegrationK3WiseSetupView.vue（2557 行）实际是 locale 感知的：:936 `import { useLocale }`、:996 `const { locale } = useLocale()`、:1033/:1036 按 locale 取死信错误码文案、:1047-1053 自带 `{zh, en}` 文案对、:1068-1075 `locale.value === 'zh-CN' ? ... : ...` 分支，并复用共享双语封闭词表 a…
+- **G43** 跨页/跨分区断链：/data-sources 在工作台里只作为路径字面量出现无链接；/data-sources 页零回链；K3 预设页与帮助页不在导航；工作台「标准备料表 S1」面板不告诉管理员还有完整的 /stock-prep 工作台 — 视角 A 推翻了标题里四条断言中的两条半，以及一条核心建议。  (1) 「导航仅『数据工厂』『外接数据源』」= 假。apps/web/src/App.vue:69 有 `<router-link v-if="canUseStockPreparation" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>`，紧接着 :70 才是 /data-sources。备料工作台是一级导航项，不是靠工作台面板才能发现。因此「工作台与 /stock-prep 零互指」只在页面内成立，在 shell 层不成立；「管理员以为 S1 面板就是备料功能全部」只对持 integration:write 但无 stock-prep:read 的主体成立——那是权限模型问题（App.vue:66-68 的注释明确说这条链接跟 stock-prep:read 而非 integration:write），不是断链问题。  (2) already_known 引的 known 地图 §A「孤儿路由 /data-sources 未挂导航」= 已过时/假，见 App.vue:70。用一条已被证伪的旧结论给本条背书，削弱了整条 gap 的可信度。  (3) 「K3 预设页…不在导航」→ 断链结论不成立。K3 预设页在工作台内被四处 router-link 指向：views/IntegrationWorkbenchView.vue:8（页头 `to="/integrations/k3-wise"` K3 WISE 预设模板）、components/integration/IntegrationConnectionSection.vue:23（`data-testid="k3-preset-entry"`）与 :203（选到 erp:k3-wise-webapi 时的「该类型有专页配置」）、components/integration/IntegrationObjectTemplateSection.vu…
+- **X01** SQL Server datetime 时区解释未定义：mssql 驱动 useUTC 全仓未设置，K3/PLM 本地时间列回读/预览/toDate 全部按 UTC 解释 — 视角 B 直接推翻：gap 的核心断言"我们按 UTC 解释 → 用户看到早 8 小时、date 变前一天"与对标口径和我们实际行为都相反。对标 MySQL_连接器.txt:318-326 的 epoch 换算证明飞书 aPaaS 自己就是把无时区列当 UTC 解释（datetime 11:14:20 与同日 date 相差正好 11h14m20s），所以驱动默认 useUTC=true 与对标契约一致而非偏离；我们的输出路径（transform-engine.cjs:158-167 toISOString、DataSourcesView.vue:727-739 formatCell）全程 ISO/UTC，插件层 grep 不到任何本地时区格式化，墙钟数字与源库逐位相同。gap 建议的"默认 useUTC=false"才会在 UTC+8 主机上真的把交期变成前一天，建议 ④ 的单测更会把错误行为写死。视角 A 部分成立但不足以救回严重度：代码事实（两处 options 均无 useUTC、表单无时区项）核对无误，残余风险只剩"口径未显式钉死 + JSON 日期形状未文档化"（对标 SQL Server 页本身也没有该契约表，136 行内零命中），属于加固/文档项，且用户不可见、无数据错误，按"护城河=治理而非连接器广度"的定位应降到 P2。
+- **X04** 只读源没有列级允许清单：对象级授权后整表所有列可读，敏感列只能靠客户 DBA 建视图 — 视角A推翻两条关键断言。(1)「external_systems 配置键里没有任何列级允许/排除项」不成立：同一插件的 SQL Server 只读通道已有服务端列级允许清单，且是 SQL 级 fail-closed 的——plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-channel.cjs:120-121 对 config.objects.<obj>.columns 逐项做标识符规范化；:336-343 read() 只把 objectConfig.columns 传给执行器（请求侧 request.object/filters/options 都到不了 columns 参数）；plugins/plugin-integration-core/lib/adapters/k3-wise-sqlserver-executor.cjs:218-233 再规范化一次；packages/mssql-readonly-utils/index.cjs:357-368 `const columnSql = Array.isArray(input.columns) && input.columns.length>0 ? …join(', ') : '*'` → `SELECT TOP n <columnSql> FROM …`。即差距建议的三条（服务端配置、请求不可提供、SQL 层生效）在仓库里已有可复制的先例，只是 sql-readonly kind 没接线。(2)「唯一手段是客户 DBA 建视图」不成立：SQL Server 只读源可以走 erp:k3-wise-sqlserver kind 落列清单（同时还带 allowedTables 对象允许清单，k3-wise-sqlserver-channel.cjs:147-162,336）；且 sql-readonly 自身的 lookupProjection 对 lookup 对象已经是列级输出限制——data-source-sql-readonly-sou…
+- **X05** SQL Server 列注释（MS_Description）从不拉取，而 PG/MySQL 适配器都拉：对零语义 PLM 列，唯一免费的语义线索被丢掉 — 视角 B 直接推翻「对标有 X」这一半，视角 A 推翻「用户影响」这一半；只剩一条无下游后果的代码不对称。  【B-1 对标证据不支持本条差距（决定性）】引文本身属实：C:/Users/zhou/AppData/Local/Temp/claude/C--Users-zhou-Downloads-dev-metasheet/5691483c-86cd-455b-a556-03918552e220/scratchpad/benchmark/TiDB_连接器.txt:132-133 原句「支持 SQL 窗口 放大、缩小 ，点击编辑窗口右上按钮打开 「数据表结构面板」。」「单击数据表名和字段名，即可进行快速复制，支持刷新和搜索」。但它讲的是 SQL 编辑器旁一个**表名/字段名的复制+搜索+刷新**面板，通篇未提列注释/描述。对 benchmark 目录全部 7 个 txt（MySQL_连接器 / MySQL_动态SQL / Postgres_连接器 / SQL_Server_连接器 / TiDB_连接器 / 各类集成凭证 / 第三方集成使用指南）grep「注释」命中 **0 次**，「结构面板」仅上述 1 次，SQL_Server_连接器.txt 中「注释|描述|comment」命中 0。也就是说：**对标文本无法证明飞书 aPaaS 会拉/显示 MS_Description 或任何列注释**，更没有「MSSQL 与 PG/MySQL 一视同仁拉注释」的证据。以「对标有、我们缺」立论的这条差距，对标那一端是空的。  【B-2 「唯一免费的语义线索」与事实相反】记忆 plm-source-schema-exattr-dictionary 记录了 2026-08-30 / 09-03 / 09-05 对客户 PLM（SQL Server 2019）多轮列级只读实测（DN_PDM_BomDetailsInfo 36 列、PartLibraryInfo 95 列、三张字典表 DN_PM_BomExAttrInfo / _header / DN_PM_PartExAttrInfo 逐行…
+- **X06** 运行记录 / 死信 / 血缘无保留策略与清理路径：每晚定时 dry-run 的部署上三张表无界增长 — 核心「没有 prune 作业」这一点属实（我没能找到任何针对这两张表的 DELETE/purge），但差距条目里四条承重表述有两条是错的，且第三条把已知已设计的东西写成了未知，所以按写法应判推翻+重写。  视角 A（其实已经有了？） 1) **`integration_provenance` 这张表不存在**。血缘不是第三张表，而是 `integration_runs` 的一个 JSONB 列 + 一个派生视图：`plugins/plugin-integration-core/__tests__/migration-sql.test.cjs:120-122` 断言 060 迁移是 `ALTER TABLE integration_runs ADD COLUMN IF NOT EXISTS provenance_events JSONB NOT NULL DEFAULT '[]'::jsonb;`，:125-127 断言 `CREATE OR REPLACE VIEW integration_provenance_by_row AS`，:129-131 断言 `FROM integration_runs r CROSS JOIN LATERAL jsonb_array_elements(...)`；`plugins/plugin-integration-core/lib/pipelines.cjs:20` 也只有 `const PROVENANCE_VIEW = 'integration_provenance_by_row'`（无 `integration_provenance` 表常量）。`migration-sql.test.cjs:19-26` 的 `expectedTables` 全表清单里也没有它。后果：血缘不会独立增长，删 run 行即删血缘；"三张表"实为两张，工作量与恢复边界都比条目描述小，`recommendation` 里的 `provenanceDays` 是个不存在的旋钮（同一行不可能有两套保留期）。`plugins/plugin-integrat…
