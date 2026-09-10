@@ -691,6 +691,11 @@ describe('2026-09-10: export failure names the actual reason, not the generic wr
 
     const errorNode = q('stock-prep-confirmation-error')
     expect(errorNode, 'the export failure must surface on the shared error line').not.toBeNull()
+    // PINNED AS A LITERAL, deliberately. Asserting `stockPrepErrorPlain(code).zh` only proved the
+    // view called the same lookup this line did — reword the vocabulary entry into anything at all,
+    // including an engineering enum, and the assertion still passed. This is the sentence the
+    // operator has to be able to act on.
+    expect(errorNode!.textContent).toContain('这个项目还没有写入过备料行')
     expect(errorNode!.textContent).toContain(stockPrepErrorPlain('PREP_LINE_EXPORT_PROJECT_NOT_FOUND').zh)
     expect(errorNode!.textContent, 'the read-shaped, actionable sentence — not the generic write fallback').not.toContain('导出没有做完')
     expect(errorNode!.textContent).toContain('PREP_LINE_EXPORT_PROJECT_NOT_FOUND')

@@ -330,15 +330,24 @@
          page cannot decide, the per-row hints below are each individually true but the page as a
          whole never SAID that — an operator had to open every row to learn the same fact six times.
          values-free on purpose: names counts and points at the per-row 「什么情况」 column, never a
-         cell's content. -->
+         cell's content.
+
+         IT NAMES NO CAUSE (2026-09-10, second cut). The first cut said "the problem is in the source
+         data" and offered the source fix as THE way out. That is true of the coercion family and of
+         missing_component — and false of the carry family (`carry_reattach_requires_confirm` and its
+         two siblings), which is a question about OUR reattachment to a previous version, with
+         nothing in the source system to go change; its confirmation surface is the K2 carry route
+         (anonymous-hold-identity-spec-20260829.md:258), not this page. A banner covering a mixed set
+         cannot diagnose it, so this one only routes: the reasons differ, they are per-row, and the
+         source fix is offered CONDITIONALLY ("能在源系统修正的") rather than as the diagnosis. -->
     <p
       v-if="queue && allPendingRowsUnconfirmable"
       class="stock-prep-confirm__hint"
       data-testid="stock-prep-confirmation-all-unconfirmable-banner"
     >
       {{ bi(
-        `这 ${pendingUnconfirmableCount} 条目前都不能在这里确认——它们的问题出在源数据(见每行「什么情况」)。请到源系统修正后重新同步,修正后这些行会自动关闭;确实需要人工处理请联系管理员。`,
-        `None of these ${pendingUnconfirmableCount} rows can be confirmed here right now — the problem is in the source data (see "What happened" on each row). Fix it in the source system and sync again; these rows close on their own once fixed. Contact an administrator if one genuinely needs manual handling.`,
+        `这 ${pendingUnconfirmableCount} 条目前都在这里确认不了,原因各不相同,请看每行「什么情况」;能在源系统修正的,修正后重新同步会自动关闭;其余请联系管理员。`,
+        `None of these ${pendingUnconfirmableCount} rows can be confirmed here right now, and the reasons differ — see "What happened" on each row. The ones a source-system fix covers close on their own after the next sync; for the rest, contact an administrator.`,
       ) }}
     </p>
 
@@ -599,6 +608,7 @@ import {
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
   type StockPreparationResolutionAction,
+  isCarryConflictType,
   isConfirmableConflictType,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import {
@@ -1263,9 +1273,34 @@ function rowUnconfirmableReason(row: StockPreparationDecisionRow): string {
       'This one cannot be settled here: the BOM line points at a part that is not in the source system\'s parts library. Add the part there (or correct its id) and the next sync closes this entry by itself.',
     )
   }
-  // Any conflict type this vocabulary knows about gets the same "what it means, what would work"
-  // shape as the missing_component branch above; anything it does NOT know about (a genuinely future
-  // type) degrades to the conservative sentence that follows — still refused, still explained.
+  // THE CARRY FAMILY IS NOT A SOURCE-DATA DEFECT (2026-09-10, second cut). Splicing the source-fix
+  // remedy onto every mapped type produced sentences that contradicted their own first half:
+  // 「这一行要不要接上一版数据,需要有人确认。请到源系统修正数据后重新同步」 — the customer's source
+  // system holds nothing to correct, and the next sync leaves the row exactly where it is. A carry
+  // hold asks whether THIS new ADD row continues from an earlier version; its confirmation surface
+  // is the K2 carry route (`applyCarryViaConfirm` / `carry_via_confirm`, see
+  // docs/development/takeover-beiliao-20260821/anonymous-hold-identity-spec-20260829.md:258), which
+  // this queue does not drive. So: describe it, refuse it, route it to a human who can — and claim
+  // no cause. MUST stay ahead of the mapped branch below, which is the one that offers the fix.
+  if (isCarryConflictType(row.conflictType)) {
+    // Fail-soft exactly like every other lookup on this page: a carry type the vocabulary somehow
+    // lacks still gets the refusal, with its raw token standing in for the description.
+    const carryPlain = stockPrepConflictTypePlain(row.conflictType)
+    const carryZh = carryPlain ? carryPlain.zh : (row.conflictType || '')
+    const carryEn = carryPlain ? carryPlain.en : (row.conflictType || '')
+    return bi(
+      `这条在这一页处理不了:${carryZh}。这一类不是源数据问题,本页还没有对应的确认入口,请联系管理员。`,
+      `This one cannot be settled here: ${carryEn}. This kind is not a source-data problem — this page has no place to confirm it yet; contact an administrator.`,
+    )
+  }
+  // Any OTHER conflict type this vocabulary knows about — today exactly the per-cell coercion family
+  // (`SOURCE_VALUE_*`), the carry family having been routed above and `missing_component` having
+  // returned already — gets the same "what it means, what would work" shape as the missing_component
+  // branch; anything it does NOT know about (a genuinely future type) degrades to the conservative
+  // sentence that follows — still refused, still explained.
+  // ADDING A KEY TO `STOCK_PREP_CONFLICT_TYPE_PLAIN` MEANS CHOOSING A BRANCH HERE: landing in this
+  // one asserts a person can fix the row in the source system. `StockPreparationUnconfirmableHold`
+  // pins the vocabulary's key set for that reason — a new family turns it red until it is routed.
   const plain = stockPrepConflictTypePlain(row.conflictType)
   if (plain) {
     return bi(

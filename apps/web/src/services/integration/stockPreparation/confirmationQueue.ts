@@ -63,6 +63,36 @@ export function isConfirmableConflictType(conflictType: string | null | undefine
   return conflictType === STOCK_PREPARATION_CONFIRMABLE_CONFLICT_TYPE
 }
 
+/**
+ * The CARRY-POLICY conflict family — refused by THIS page, but NOT a source-data defect.
+ *
+ * Mirrors `CARRY_CONFLICT_TYPES` in
+ * `plugins/plugin-integration-core/lib/stock-preparation-carry-policy.cjs:97` (whose order and
+ * membership are themselves pinned by `stock-preparation-carry-policy.test.cjs:70`). Kept as a
+ * separate list from the confirmable type because the two answer different questions: "can this
+ * page decide it" (no, for every type but `duplicate_expanded_key`) versus "is there anything in
+ * the source system a person could go fix" (no, for exactly these three).
+ *
+ * WHY THE UI NEEDS THIS. A carry hold means the planner found a previous-version row that this new
+ * ADD row may or may not continue from — the decision is about OUR reattachment, not about a cell
+ * the customer typed wrong. Its confirmation surface is the K2 carry route (`applyCarryViaConfirm`
+ * + the reserved `carry_via_confirm` token — see
+ * docs/development/takeover-beiliao-20260821/anonymous-hold-identity-spec-20260829.md:258), which
+ * this queue does not drive. So telling an operator to "fix it in the source system and sync
+ * again" sends them to look for something that is not there, and the row would still be here after
+ * the sync. Naming the family lets the page refuse it WITHOUT inventing a cause.
+ */
+export const STOCK_PREPARATION_CARRY_CONFLICT_TYPES: readonly string[] = Object.freeze([
+  'carry_ambiguous_component_source',
+  'carry_reattach_requires_confirm',
+  'carry_conflicting_source_content',
+])
+
+/** Whether this row is a carry-policy hold (refused here, and NOT fixable in the source system). */
+export function isCarryConflictType(conflictType: string | null | undefined): boolean {
+  return typeof conflictType === 'string' && STOCK_PREPARATION_CARRY_CONFLICT_TYPES.includes(conflictType)
+}
+
 /** One values-free queue row. Value/notes are PRESENCE booleans; contents never cross here. */
 export interface StockPreparationDecisionRow {
   decisionId: string | null
