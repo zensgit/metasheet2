@@ -201,6 +201,8 @@ describe('Multitable context API', () => {
       pitResetEnabled: false,
       sheetRevertEnabled: false,
       personalViewsEnabled: false,
+      // whole-sheet delete authority (mirrors DELETE /sheets/:sheetId): a reader has none
+      canDeleteSheet: false,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -399,6 +401,8 @@ describe('Multitable context API', () => {
       pitResetEnabled: false,
       sheetRevertEnabled: false,
       personalViewsEnabled: false,
+      // admin role = global schema authority => may delete the selected sheet
+      canDeleteSheet: true,
     })
     // Route-level contract lock for the new FE signal: flag ON + sheet-admin → pitResetEnabled true (its only true source).
     // The flag-off cases (false for both admin and non-admin) are locked by the two capabilities exact-matches above.
@@ -1086,6 +1090,16 @@ describe('Multitable context API', () => {
         if (sql.includes('UPDATE meta_sheets SET deleted_at = now()')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [], rowCount: 1 }
+        }
+        // Managed-sheet guard (src/multitable/sheet-delete-guard.ts), asked AFTER the authority gate and
+        // BEFORE the write: an ordinary sheet has no plugin registry row and no server-owned system_kind.
+        if (sql.includes('FROM plugin_multitable_object_registry')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [] }
+        }
+        if (sql.includes('SELECT system_kind, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ system_kind: null, description: null }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
