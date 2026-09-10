@@ -10,6 +10,8 @@
 // of that same file, and a second concurrent append to the same anchor line risks an avoidable
 // merge hunk collision. Registered in .github/workflows/multitable-web-guard.yml (paths + vitest
 // filter token `multitable-field-config-panel`) and apps/web/scripts/run-required-web-tests.sh.
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaFieldManager from '../src/multitable/components/MetaFieldManager.vue'
@@ -169,5 +171,57 @@ describe('MetaFieldManager — field-config panel: no-options fallback + scroll 
     } finally {
       app.unmount()
     }
+  })
+})
+
+// --- item 5, source-level half ---------------------------------------------------------------
+// The mount tests above can only prove the CLASS is applied and that Save/Cancel is a descendant
+// of the container; jsdom parses no <style scoped> block and computes no layout, so the two CSS
+// rules that ARE the actual fix could be deleted and every mount test would still pass. This
+// block pins the rules themselves at source level — same mechanism as
+// apps/web/tests/ui-foundation-style-guard.spec.ts:1-3, which is already a CI gate that reads
+// .vue sources with readFileSync. Delete either rule from MetaFieldManager.vue and this reddens.
+const SFC_SOURCE = readFileSync(
+  join(__dirname, '../src/multitable/components/MetaFieldManager.vue'),
+  'utf8',
+)
+
+// `[^}]*` is safe for both rules: neither declaration body contains a closing brace, and the
+// single-selector pattern cannot swallow the descendant rule because it requires `{` right after
+// the class name. Written as RegExp literals (not string concat) so the escapes are unambiguous.
+const SCROLLABLE_RULE = /\.meta-field-mgr__config--scrollable\s*\{([^}]*)\}/
+const STICKY_ACTIONS_RULE =
+  /\.meta-field-mgr__config--scrollable\s+\.meta-field-mgr__config-actions\s*\{([^}]*)\}/
+
+/** Body text of a `selector { ... }` rule (declarations only, braces stripped). */
+function ruleBody(rule: RegExp): string {
+  return SFC_SOURCE.match(rule)?.[1] ?? ''
+}
+
+describe('MetaFieldManager <style> — the config panel scroll rules (item 5 is 100% CSS)', () => {
+  it('bounds .meta-field-mgr__config--scrollable and makes it scroll', () => {
+    const body = ruleBody(SCROLLABLE_RULE)
+    expect(body).not.toBe('')
+    expect(body).toMatch(/overflow-y:\s*auto/)
+    expect(body).toMatch(/max-height:\s*[^;]+/)
+  })
+
+  it('keeps that max-height viewport-relative, never a hardcoded px ceiling', () => {
+    const body = ruleBody(SCROLLABLE_RULE)
+    const maxHeight = body.match(/max-height:\s*([^;]+)/)?.[1]?.trim() ?? ''
+    expect(maxHeight).not.toBe('')
+    // A fixed px cap would clip the panel on short screens and waste space on tall ones —
+    // the spec explicitly requires "相对弹窗可用高度，不要写死 px".
+    expect(/^\d+(\.\d+)?px$/.test(maxHeight)).toBe(false)
+    expect(maxHeight).toMatch(/vh|%/)
+  })
+
+  it('pins Save/Cancel to the bottom of that scroll region (sticky footer)', () => {
+    const body = ruleBody(STICKY_ACTIONS_RULE)
+    expect(body).not.toBe('')
+    expect(body).toMatch(/position:\s*sticky/)
+    expect(body).toMatch(/bottom:\s*0/)
+    // Sticky over transparent background would let scrolled content show through the row.
+    expect(body).toMatch(/background:\s*\S+/)
   })
 })
