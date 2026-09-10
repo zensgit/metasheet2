@@ -8,8 +8,10 @@
 // This file is intentionally separate from multitable-field-manager.spec.ts: the parallel
 // #5602 branch (feat/multitable-field-manager-hint-palette-retype) appends ~800 lines to the end
 // of that same file, and a second concurrent append to the same anchor line risks an avoidable
-// merge hunk collision. Registered in .github/workflows/multitable-web-guard.yml (paths + vitest
-// filter token `multitable-field-config-panel`) and apps/web/scripts/run-required-web-tests.sh.
+// merge hunk collision. Registered in .github/workflows/multitable-web-guard.yml (two `paths`
+// lists + its own `Run field-config panel spec` step — deliberately NOT one more token on that
+// workflow's single ~10KB `vitest run` line, which every concurrent web-spec branch also edits)
+// and apps/web/scripts/run-required-web-tests.sh (own `npx vitest run` line, same reason).
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
