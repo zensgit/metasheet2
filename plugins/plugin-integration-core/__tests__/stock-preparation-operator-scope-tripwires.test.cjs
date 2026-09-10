@@ -601,6 +601,18 @@ async function main() {
     //       indistinguishable from one that has never been exported — and 「从未导出」 is a claim,
     //       not an absence.
     //
+    //   `fillTarget`                 THE DEEP-LINK HANDLE FOR THE 备料主表 (this PR) — `{ sheetId,
+    //       viewId }` or null, and those two ids are the ONLY thing it carries. 项目备料页 has returned
+    //       exactly this object since it shipped, from exactly this gate (`resolveOwnBoundSheet` — the
+    //       bound sheet must be PROVED to belong to the caller's own staging project), but that page
+    //       404s until a project number is in hand, so the home page's and the panels' 「到多维表」
+    //       buttons had no sheet to route to and dropped the operator on the multitable chooser.
+    //       IT RIDES THIS OPT-IN AND NO OTHER because `ownSheet` does: a caller that did not ask for
+    //       the union resolved no bound sheet, and `fillTarget: null` would then claim
+    //       「没有备料主表」 where the truth is 「没人问过」. It is NOT a permission decision — the plugin
+    //       has no user-aware multitable ACL seam and multitable enforces access on landing — and it
+    //       is values-free: no projectNo, no project name, no row.
+    //
     // The row keys are reviewed at OPERATOR_PROJECT_ROW_WITH_PULL_TARGETS' own definition.
     // ─────────────────────────────────────────────────────────────────────────
     const { routes } = mount()
@@ -612,6 +624,7 @@ async function main() {
     assert.deepEqual(Object.keys(asked.body.data).sort(), [
       'directoryMayBeIncomplete',
       'directoryReady',
+      'fillTarget',
       'lastExportAtMayBeIncomplete',
       'ledgerReady',
       'pendingProjectCount',
@@ -620,7 +633,14 @@ async function main() {
       'pullTargetReady',
       'pullTargetScanCapped',
       'tenantId',
-    ], 'the opt-in adds EXACTLY four keys and changes nothing else')
+    ], 'the opt-in adds EXACTLY five keys and changes nothing else')
+    // PRESENT-BUT-NULL IS THE ANSWER ON THIS SUBSTRATE, and it is the one that matters here: nothing
+    // is bound in this harness, so no sheet can be proved to be the caller's own and the handle must
+    // be null rather than a link composed from a deterministic hash into a table that may not exist.
+    // The populated shape and the cross-tenant refusal are pinned in
+    // stock-preparation-operator-project-directory.test.cjs (N7-a / N7-b / N7-c).
+    assert.equal(asked.body.data.fillTarget, null,
+      'no bound table action ⇒ no handle, never a hash-composed link into the dark')
     assert.ok(asked.body.data.projects.length > 0, 'precondition: there is a row to pin')
     for (const project of asked.body.data.projects) {
       assert.deepEqual(Object.keys(project).sort(), OPERATOR_PROJECT_ROW_WITH_PULL_TARGETS,

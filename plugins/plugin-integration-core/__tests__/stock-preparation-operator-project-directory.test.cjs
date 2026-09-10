@@ -246,6 +246,11 @@ function mount({
   auditEntries = null,
   // MVP-side rows. `false` models the self-service main line: nobody ever ran mvp-persist here.
   archivePersisted = true,
+  // THE HOST'S PURE VIEW-ID DERIVATION (`getObjectViewId`), which composes the deep-link handle's
+  // second half. It is an OPTIONAL host capability — a plugin newer than its host has no port to
+  // call — so it is a knob rather than a constant: `false` models that host and must degrade to
+  // 「no handle」, never to a throw or to a half-built link (N7-d).
+  viewIdPort = true,
   // THE PERSISTED SOURCE-BINDING STORE, which `getTableAction` resolves through and whose throws the
   // registry deliberately lets PROPAGATE. `undefined` = no such store (the default). A function
   // models a deployment where that table is missing or unreachable — the half-migrated upgrade — and
@@ -378,6 +383,13 @@ function mount({
     getObjectSheetId(projectId, objectId) {
       return `sheet__${projectId}__${objectId}`
     },
+    // The host's SECOND pure derivation — the view half of the fill handle. Same shape the board's
+    // own suite uses, so the two suites cannot disagree about what a handle looks like.
+    ...(viewIdPort ? {
+      getObjectViewId(projectId, objectId, viewId) {
+        return `view_${projectId}_${objectId}_${viewId}`
+      },
+    } : {}),
     // The host's OWNERSHIP question, a BOOLEAN about the project we name. ONLY tenant A's own
     // staging project owns the main sheet; tenant B asking about it gets `false` and therefore never
     // reads a row of it, which is what makes the cross-tenant guard below non-vacuous.
@@ -1774,6 +1786,84 @@ async function main() {
     assert.equal(queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length, 0)
   })
 
+  // -------------------------------------------------------------------------
+  // N7 — 「打开备料多维表」: THE DEEP-LINK HANDLE ON THE DIRECTORY
+  // -------------------------------------------------------------------------
+  //
+  // WHY IT IS HERE AT ALL. 项目备料页 has returned this handle since it shipped, but that page 404s
+  // until an operator has a project number in hand — so on the landing page, the sync panel and the
+  // large-BOM panel, 「到多维表」 had no sheet id to route with and dropped the operator on the
+  // multitable chooser. The directory is the read those surfaces already make.
+  //
+  // WHAT IT MAY NOT BECOME. It is the SAME `resolveFillTarget` over the SAME `resolveOwnBoundSheet`
+  // gate the board uses (one implementation, moved to stock-preparation-pull-target-scan.cjs rather
+  // than copied), it carries TWO IDS AND NOTHING ELSE, and it is not a permission decision: this
+  // plugin has no user-aware multitable ACL seam, and multitable enforces access when the operator
+  // lands. N7-c is the assertion that the handle cannot become a way to name another tenant's sheet.
+
+  await run('N7-a a bound, provably-own fill table yields the handle — two ids, nothing else', async () => {
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }] })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200)
+    const target = res.body.data.fillTarget
+    assert.ok(target, 'the deployment binds a sheet this caller is proved to own, so there IS a handle')
+    assert.deepEqual(Object.keys(target).sort(), ['sheetId', 'viewId'],
+      'the handle is exactly sheetId + viewId — a values-free pair of ids')
+    assert.equal(target.sheetId, MAIN_SHEET_A, 'and it names the BOUND target, not the canonical table')
+    assert.equal(target.viewId, `view_${STAGING_A}_${MAIN_OBJECT_ID}_default`,
+      'the view is the one the plugin\'s own default-view provisioning creates')
+    // VALUES-FREE: the handle is ids, and adding it must not have put a customer number on the
+    // surface by another route.
+    assert.equal(JSON.stringify(target).includes(PROJECT_A3_NO), false)
+  })
+
+  await run('N7-b nothing bound -> NO handle: a link into the dark is worse than an absent button', async () => {
+    const { routes } = mount()
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200)
+    assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'fillTarget'), true,
+      'the KEY is present — the caller asked for the union, and 「没绑」 is an answer')
+    assert.equal(res.body.data.fillTarget, null,
+      'but the VALUE is null: no sheet was proved to exist, so there is no handle to hand out')
+  })
+
+  await run('N7-c the handle is TENANT-GATED: tenant B is never handed tenant A\'s sheet id', async () => {
+    // `action.target` is deploy-time configuration shared by every tenant on the deployment, so
+    // tenant B's operator is handed the SAME target — naming tenant A's sheet. This is the one
+    // reachable way this response could name a sheet outside the caller's own staging project, and
+    // `resolveOwnBoundSheet` is what stops it. Same gate as the union scan beside it (N1-d): if this
+    // ever answers non-null, the fill button becomes a cross-tenant door.
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }] })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_B, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.tenantId, TENANT_B)
+    assert.equal(res.body.data.fillTarget, null, 'not tenant B\'s own sheet, so no handle')
+    assert.equal(JSON.stringify(res.body).includes(MAIN_SHEET_A), false,
+      'and the foreign sheet id is not echoed back in any form')
+    assert.equal(JSON.stringify(res.body).includes(STAGING_A), false)
+  })
+
+  await run('N7-d a host with no getObjectViewId port DEGRADES to no handle, never to a throw', async () => {
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }], viewIdPort: false })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200, 'an older host is a deployment state, not a directory failure')
+    assert.equal(res.body.data.fillTarget, null)
+    assert.equal(res.body.data.pullTargetReady, true, 'and the rest of the union still answers')
+  })
+
+  await run('N7-e no opt-in -> the key is ABSENT, because nobody asked and null would be a claim', async () => {
+    // `fillTarget` rides `includePullTargets` because `ownSheet` does — the un-opted-in read resolves
+    // no bound sheet at all. A `fillTarget: null` on that response would say 「这台系统没有备料主表」
+    // where the truth is 「没人问过」, which is the same conflation the four union flags are absent for.
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }] })
+    const plain = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(plain.statusCode, 200)
+    assert.equal(Object.prototype.hasOwnProperty.call(plain.body.data, 'fillTarget'), false)
+    // THE POSITIVE CONTROL on the same substrate, so the absence above is the opt-in and not a
+    // build where the handle was never computed.
+    const asked = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.ok(asked.body.data.fillTarget)
+  })
   // -------------------------------------------------------------------------
   // 项目备料页 PAYS NOTHING FOR ANY OF THIS
   // -------------------------------------------------------------------------

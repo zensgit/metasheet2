@@ -234,6 +234,50 @@ async function resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget)
 }
 
 /**
+ * The logical view id the plugin's own default-view provisioning creates
+ * (`ensureManagedTableDefaultView` -> host `ensureObjectDefaultView` -> `DEFAULT_OBJECT_VIEW_LOGICAL_ID`).
+ * Kept as a constant rather than inlined so the two stay greppable together.
+ */
+const STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID = 'default'
+
+/**
+ * THE DEEP-LINK HANDLE — `{ sheetId, viewId }` for the 备料主表 — or null.
+ *
+ * IT LIVES HERE, BESIDE `resolveOwnBoundSheet`, BECAUSE TWO READS NOW HAND IT OUT: 项目备料页's board
+ * (which has always returned it) and the operator DIRECTORY (this pass, so the workbench's
+ * 「打开备料多维表」 lands on the right sheet before any project has been opened). It was defined in
+ * stock-preparation-project-board.cjs until the second caller appeared; it MOVED rather than being
+ * copied, because two implementations of "which sheet may this caller be pointed at" are exactly the
+ * pair that drifts. The board still re-exports it under `__internals`, so its suite addresses it
+ * where it always did.
+ *
+ * IT IS NOT A PERMISSION DECISION and must never be read as one. This plugin has no user-aware
+ * multitable ACL seam: every read here runs on the service-account records API with the plugin's own
+ * authority, and the multitable ACL domain is deliberately separate from `integration:*` /
+ * `stock-prep:*`. So the plugin CANNOT pre-check whether this operator may open that sheet, and does
+ * not pretend to. Multitable enforces access when the operator lands.
+ *
+ * THE TENANT GATE IS `resolveOwnBoundSheet`'s, AND IT IS THE WHOLE SAFETY STORY. `ownSheet` is
+ * non-null only when the caller's OWN staging project is proved to own the bound sheet, so this
+ * function adds no new way to name a sheet: it takes an already-proved sheet or it returns null.
+ * `getObjectViewId` is a pure deterministic id derivation on the host side, treated as an OPTIONAL
+ * capability so a plugin newer than its host degrades to "no handle" rather than erroring — and it
+ * costs NO IO, which is why a caller that already resolved `ownSheet` pays nothing for the handle.
+ *
+ * `viewId` is the id the plugin's own default-view provisioning uses. If a deployment's table carries
+ * hand-made views instead, the workbench falls back to the sheet's first view
+ * (useMultitableWorkbench's `preferredViewId` fold), so the handle degrades to "open this sheet"
+ * rather than breaking.
+ */
+async function resolveFillTarget(provisioning, ownSheet, stagingProjectId) {
+  if (!ownSheet) return null
+  if (typeof provisioning.getObjectViewId !== 'function') return null
+  const viewId = provisioning.getObjectViewId(stagingProjectId, ownSheet.objectId, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID)
+  if (typeof viewId !== 'string' || viewId.length === 0) return null
+  return { sheetId: ownSheet.sheetId, viewId }
+}
+
+/**
  * Best-effort timestamp parse for a `lastPlmRefreshAt` cell. The planner writes an ISO string
  * (`normalizeIsoTime`), but a row is somebody else's data by the time this reads it back, so this
  * accepts a `Date` too and rejects everything else — never throws, since one unparsable cell must not
@@ -465,9 +509,11 @@ module.exports = {
   PULL_TARGET_SCAN_CACHE_TTL_MS,
   SCAN_WHOLE_SHEET,
   STOCK_PREPARATION_FILL_OBJECT_ID,
+  STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
   createPullTargetScanCache,
   parsePlmRefreshTimestampMs,
   readPullTargetRowFacts,
+  resolveFillTarget,
   resolveOwnBoundSheet,
   resolvePullTargetBindings,
   scanPullTargetProjects,

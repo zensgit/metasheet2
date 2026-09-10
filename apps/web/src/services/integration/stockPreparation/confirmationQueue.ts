@@ -15,6 +15,10 @@
 import { apiFetch } from '../../../utils/api'
 import { buildQuerySuffix, type IntegrationApiEnvelope, type IntegrationScope } from '../workbench'
 import { StockPreparationConfirmApiError, parseStockPreparationConfirmResponse } from './confirmApi'
+// TYPE-ONLY, so it is erased at compile time and cannot create a module cycle. The handle has ONE
+// definition on this surface — the board's — because the board and this directory return the very
+// same server-side object, and a second interface would be free to drift from it.
+import type { StockPreparationFillTarget } from './projectBoard'
 
 /** Frozen server status vocabulary (stock-preparation-confirmation-decisions.cjs STATUSES). */
 export type StockPreparationDecisionStatus = 'pending' | 'confirmed' | 'superseded'
@@ -203,6 +207,16 @@ export interface StockPreparationOperatorDirectory {
   /** True when the `lastExportAt` window could not be read, or came back full (so a `null` on a row
    *  may mean "never exported" or "outside the window we could see" — not "never", unconditionally). */
   lastExportAtMayBeIncomplete?: boolean
+  /**
+   * 「打开备料多维表」 — THE DEEP-LINK HANDLE FOR THE SHEET THE OPERATOR FILLS, or `null` when the
+   * server could not prove one exists for THIS tenant. Present only under `includePullTargets=1`,
+   * like every key above it, and absent (never `null`) on an older backend — `null` means 「这台系统
+   * 上没有能证明属于您的备料主表」, which is a different sentence from 「没人问过」.
+   *
+   * IT IS THE SAME OBJECT 项目备料页 RETURNS, from the same server-side tenant gate. It is NOT a
+   * permission decision: multitable enforces access when the operator lands there.
+   */
+  fillTarget?: StockPreparationFillTarget | null
 }
 
 const EXPORT_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/

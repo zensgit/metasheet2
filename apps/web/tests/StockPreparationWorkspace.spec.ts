@@ -109,6 +109,7 @@ import {
 } from '../src/services/integration/stockPreparation/bomSnapshotDiff'
 import { getStockPreparationMaterialMappingSummary } from '../src/services/integration/stockPreparation/materialMapping'
 import { getStockPreparationUnitConversionSummary } from '../src/services/integration/stockPreparation/unitConversion'
+import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
 
 // Values-free forbidden-substring guard: rendered shell copy must never surface any of these.
 const FORBIDDEN_SUBSTRINGS = [
@@ -957,6 +958,52 @@ describe('StockPreparationWorkspace shell', () => {
     })
   }
 
+  // ---- 打开备料多维表 on 项目工作台 (this PR) ---------------------------------------------------
+  //
+  // The legacy tab's 到多维表 buttons had no sheet to name, so the shell could only ever open the
+  // multitable chooser. The operator directory now returns the tenant-gated handle, and the SHELL
+  // fetches it — lazily, once, and only for the tab that has a button for it, because the read it
+  // rides (`?includePullTargets=1`) is the scan the owner ruled may not be charged on every open.
+  it('打开备料多维表: the shell asks for the handle ONLY once 项目工作台 is on screen', async () => {
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    h.apiFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/operator/projects')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            tenantId: 'tenant-a',
+            directoryReady: true,
+            ledgerReady: true,
+            projectCount: 0,
+            pendingProjectCount: 0,
+            projects: [],
+            fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' },
+          },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+    const directoryCalls = (): string[] => h.apiFetch.mock.calls
+      .map((call: unknown[]) => String(call[0]))
+      .filter((url: string) => url.includes('/operator/projects'))
+
+    const root = await mountShell()
+    // THE COST ASSERTION: the tab this actor lands on pays nothing for a handle it has no button for.
+    expect(directoryCalls()).toHaveLength(0)
+
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
+    const asked = directoryCalls()
+    expect(asked.length).toBe(1)
+    expect(asked[0]).toContain('includePullTargets=1')
+
+    // ONCE PER MOUNT: leaving the tab and coming back must not re-run the scan.
+    ;(root.querySelector('[data-testid="stock-prep-tab-dashboard"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(directoryCalls().length).toBe(1)
+  })
   it('shares the projectId selected in view 1 with view 2 — no re-select needed', async () => {
     mockStockPrepReads()
     const root = await mountShell()
