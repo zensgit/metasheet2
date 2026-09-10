@@ -118,6 +118,10 @@ describe('attendance web guard workflow contract', () => {
     expect(workflow).toContain("if: steps.changes.outputs.relevant == 'true'")
     expect(targetedStep).toContain('NODE_OPTIONS: --max-old-space-size=8192')
     expect(workflow.match(/NODE_OPTIONS: --max-old-space-size=8192/g)).toHaveLength(1)
+    // Bound concurrent AttendanceView transforms without removing any regression specs.
+    const args = targetedRunCommand(workflow).trim().split(/\s+/)
+    expect(args).toContain('--maxWorkers=2')
+    expect(args).toContain('--minWorkers=1')
   })
 
   it('keeps the group-context route host proof in the classifier and targeted run list', () => {
