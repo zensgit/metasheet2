@@ -91,6 +91,24 @@
             :title="railLabel('rail.renameSheet', isZh)"
             @click.stop="startRenameSheet(s)"
           >&#x270E;</button>
+          <!--
+            Delete affordance. Rendered for the SELECTED sheet only: `canDeleteSheet` is the
+            server-derived, single-sheet authority bit /context computes for the current sheet
+            (hasSheetLifecycleAuthority — NOT canManageFields), so it says nothing about the rail's
+            other rows and must not be applied to them. Hidden while that row is being renamed.
+            Hiding is UX only — DELETE /api/multitable/sheets/:id re-gates and refuses managed
+            sheets regardless. Click only emits; the confirm lives in MultitableWorkbench.vue.
+            Reuses the pencil button's class (no new <style> rules in this file).
+          -->
+          <button
+            v-if="canDeleteSheet && s.id === activeSheetId && renamingSheetId !== s.id"
+            type="button"
+            class="meta-view-rail__sheet-rename-btn"
+            data-testid="rail-sheet-delete"
+            :title="railLabel('rail.deleteSheet', isZh)"
+            :aria-label="railLabel('rail.deleteSheet', isZh)"
+            @click.stop="emit('delete-sheet', s.id)"
+          >&#x1F5D1;</button>
         </div>
         <ul v-if="s.id === activeSheetId && views.length" role="group" class="meta-view-rail__views">
           <li v-for="v in views" :key="v.id" class="meta-view-rail__view-row">
@@ -167,6 +185,9 @@ const props = defineProps<{
   // role or multitable:manage-schema). Hiding the pencil button when false is UX only — the
   // server re-checks on PATCH /api/multitable/sheets/:id and 403s regardless.
   canManageFields?: boolean
+  // Delete affordance: the server-derived MetaCapabilities.canDeleteSheet bit for the CURRENT sheet
+  // (single-sheet by construction — see /context). Absent/false hides the trash button (fail-closed).
+  canDeleteSheet?: boolean
   // Slice 3: flag-derived session capability (MetaCapabilities.personalViewsEnabled) — absent/false hides
   // the toggle entirely (G-FE-4). NOT a client-side env const.
   personalViewsEnabled?: boolean
@@ -179,6 +200,7 @@ const emit = defineEmits<{
   (e: 'create-sheet', name: string): void
   (e: 'toggle-personal', viewId: string): void
   (e: 'rename-sheet', id: string, name: string): void
+  (e: 'delete-sheet', id: string): void
 }>()
 
 const { isZh } = useLocale()
