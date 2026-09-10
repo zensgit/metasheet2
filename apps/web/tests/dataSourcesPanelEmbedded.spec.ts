@@ -290,7 +290,7 @@ describe('DataSourcesPanel delete confirmation and the 409 refusal', () => {
     }
   }
 
-  it('a REFERENCED source: the confirm names the count and says the server will refuse', async () => {
+  it('a REFERENCED source: the confirm names the count and says the server will most likely refuse', async () => {
     confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     const el = await mountWith([
       { id: 'a', name: '客户 ERP', type: 'postgres', connected: true, referenceCount: 3 },
@@ -301,6 +301,10 @@ describe('DataSourcesPanel delete confirmation and the 409 refusal', () => {
     expect(text).toContain('3 个绑定')
     expect(text).toContain('409')
     expect(text).toContain('客户 ERP')
+    // "as of the last read", not a guaranteed outcome: the list's count can go stale within a
+    // session, so the copy predicts ("很可能") rather than asserts.
+    expect(text).toContain('最近一次读取')
+    expect(text).toContain('很可能')
     // No force affordance is advertised: force=true is a platform-admin API action this UI
     // deliberately does not expose.
     expect(text).not.toContain('force')

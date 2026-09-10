@@ -52,8 +52,13 @@ function errorReferenceCount(error: unknown): number | undefined {
 
 /**
  * Confirm-dialog text shown BEFORE the request, when the list already knows the source is
- * referenced. It states the outcome (the server will refuse) instead of pretending the click might
- * work, and points at the bindings below rather than at a flag the UI does not send.
+ * referenced. It states the likely outcome, as of the last read (the server will most likely
+ * refuse) instead of pretending the click might work, and points at the bindings below rather
+ * than at a flag the UI does not send.
+ *
+ * The count is a snapshot from the list's last fetch, not a live read: bindings added or removed
+ * elsewhere on this page since then are not reflected here, so this is a prediction, not a
+ * guarantee — hence "most likely", not "will".
  *
  * `referenceCount` undefined means the server could not count (the list shows 未知) — in that case
  * the caller uses the plain confirm, because claiming a refusal we cannot predict is its own lie.
@@ -61,7 +66,7 @@ function errorReferenceCount(error: unknown): number | undefined {
 export function deleteConfirmMessage(name: string, referenceCount?: number): string {
   if (referenceCount !== undefined && referenceCount > 0) {
     return (
-      `数据源「${name}」正被 ${referenceCount} 个绑定引用，删除会被服务器拒绝（409）。\n` +
+      `数据源「${name}」按最近一次读取，正被 ${referenceCount} 个绑定引用，删除很可能被服务器拒绝（409）。\n` +
       `请先到下方「已配置连接」里解除这 ${referenceCount} 个引用，再回来删除。\n\n` +
       '仍要发起一次删除请求吗？'
     )

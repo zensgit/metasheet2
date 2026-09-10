@@ -64,6 +64,7 @@ import {
 } from '../../src/data-adapters/DataSourceManager'
 import { dataSourcesRouter, initializeDataSourceManager } from '../../src/routes/data-sources'
 import { auditLog } from '../../src/audit/audit'
+import { Logger } from '../../src/core/logger'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const auditMock = vi.mocked(auditLog)
@@ -873,6 +874,34 @@ describe('data_sources listing reference counts (batched, values-free)', () => {
       }
     } finally {
       spy.mockRestore()
+    }
+  })
+
+  it('on failure, logs ONLY the SQLSTATE and the id count — never the driver message', async () => {
+    // The driver message can embed host, database and login (see SCHEMA_FAILURE_MESSAGE's own
+    // rationale) — the exact thing values-free forbids reaching a log line for this surface.
+    const warnSpy = vi.spyOn(Logger.prototype, 'warn')
+    const dbError = Object.assign(new Error('connection reset by peer at 10.10.52.16:5432 login failed'), {
+      code: '57P01',
+    })
+    const spy = vi
+      .spyOn(DataSourceManager.prototype, 'countExternalSystemReferencesByIds')
+      .mockRejectedValue(dbError)
+    try {
+      const res = await as(OWNER).get('/api/data-sources')
+      expect(res.status).toBe(200)
+      const referenceCountWarnings = warnSpy.mock.calls.filter(
+        ([message]) => typeof message === 'string' && message.includes('reference count')
+      )
+      expect(referenceCountWarnings).toHaveLength(1)
+      const [, payload] = referenceCountWarnings[0]
+      expect(Object.keys(payload as object).sort()).toEqual(['ids', 'sqlstate'])
+      expect((payload as { sqlstate: string }).sqlstate).toBe('57P01')
+      expect(typeof (payload as { ids: number }).ids).toBe('number')
+      expect(JSON.stringify(payload)).not.toContain('connection reset by peer')
+    } finally {
+      spy.mockRestore()
+      warnSpy.mockRestore()
     }
   })
 

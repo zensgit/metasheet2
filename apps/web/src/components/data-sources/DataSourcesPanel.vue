@@ -807,9 +807,11 @@ function goToBindings(event: MouseEvent): void {
 }
 
 async function confirmRemove(id: string, name: string, referenceCount?: number): Promise<void> {
-  // The count is the SAME server fact the delete guard enforces, so when it is > 0 the dialog says
-  // the request will be refused instead of implying it might work. Deliberately no force
-  // affordance: force=true is a platform-admin API action this UI does not expose.
+  // The count is the most recent snapshot of the SAME server fact the delete guard enforces —
+  // not a live one. This panel fetches once on mount (below); adding or removing a binding on
+  // this same page only mutates local `systems`, so the snapshot can go stale within a session.
+  // When it is > 0 the dialog names it as a likely refusal, not a guaranteed one. Deliberately no
+  // force affordance: force=true is a platform-admin API action this UI does not expose.
   if (typeof window !== 'undefined' && !window.confirm(deleteConfirmMessage(name, referenceCount))) return
   if (await store.remove(id)) emit('changed')
 }

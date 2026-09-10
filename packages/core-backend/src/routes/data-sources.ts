@@ -16,6 +16,7 @@ import type { Kysely } from 'kysely'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
+import { Logger } from '../core/logger'
 import {
   c6WriteTargetQueryDisabledMessage,
   DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE,
@@ -33,6 +34,8 @@ import {
   K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE,
 } from '../data-adapters/k3-destination-write-fence'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
+
+const logger = new Logger('DataSourcesRouter')
 
 // A deliberate gate refusal — the outbound-SQL-write arm/provisioning guard, the K3 destination fence —
 // throws an Error carrying a numeric `status` and a fixed `code`. Surface those verbatim so the refusal
@@ -328,8 +331,9 @@ function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'crede
  *   recomputes the count server-side and fails closed on the same error.
  *
  * values-free: the result carries integers only — never the name, tenant,
- * owner or config of any referencing external system, and nothing about the
- * failure is logged (an error message here could name referencing rows).
+ * owner or config of any referencing external system, and on failure only
+ * the SQLSTATE and the id count are logged (an error message here could name
+ * referencing rows).
  */
 async function referenceCountsForDisplay(
   manager: { countExternalSystemReferencesByIds(ids: readonly string[]): Promise<Map<string, number>> },
@@ -338,7 +342,11 @@ async function referenceCountsForDisplay(
   if (ids.length === 0) return new Map()
   try {
     return await manager.countExternalSystemReferencesByIds(ids)
-  } catch {
+  } catch (err) {
+    logger.warn('reference count query failed; degrading to unknown for every listed id', {
+      sqlstate: (err as { code?: string } | null)?.code ?? 'unknown',
+      ids: ids.length,
+    })
     return new Map()
   }
 }
