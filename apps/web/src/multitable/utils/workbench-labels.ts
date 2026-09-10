@@ -28,6 +28,8 @@ export type WorkbenchLabelKey =
   | 'kbd.title' | 'kbd.navigateCells' | 'kbd.editCell' | 'kbd.cancelClose'
   | 'kbd.nextCell' | 'kbd.copy' | 'kbd.paste' | 'kbd.undo' | 'kbd.redo'
   | 'kbd.toggleHelp'
+  // --- Record inspector v3 (design 2026-09-05, PR-A §1.5): prev/next record chord ---
+  | 'kbd.recordPrev' | 'kbd.recordNext'
   // §3.5 static (non-interpolated) toast subset
   | 'toast.recordCreateBlocked' | 'toast.recordEditBlocked' | 'toast.recordDeleteBlocked'
   | 'toast.datesUpdated' | 'toast.hierarchyUpdated' | 'toast.recordDeleted' | 'toast.recordDuplicated'
@@ -122,6 +124,8 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'kbd.undo': { en: 'Undo', zh: '撤销' },
   'kbd.redo': { en: 'Redo', zh: '重做' },
   'kbd.toggleHelp': { en: 'Toggle this help', zh: '切换此帮助' },
+  'kbd.recordPrev': { en: 'Previous record (inspector open)', zh: '上一条记录（检查器打开时）' },
+  'kbd.recordNext': { en: 'Next record (inspector open)', zh: '下一条记录（检查器打开时）' },
 
   'toast.recordCreateBlocked': {
     en: 'Record creation is not allowed in this view.',
