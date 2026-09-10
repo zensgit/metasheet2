@@ -24,6 +24,7 @@
       :can-run-install="canRun"
       :busy="busy"
       :source-check-control="wizardSourceCheckControl"
+      :can-open-data-factory="canOpenDataFactory"
       @run-preflight-check="loadPreflight"
       @run-source-preflight="loadSourcePreflight()"
       @run-install="startInstall"
@@ -1144,6 +1145,20 @@ const sourcePreflight = ref<StockPrepSourcePreflight | null>(null)
 const sourcePreflightErrorStatus = ref<number | null>(null)
 const sourcePreflightRoute = STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE
 const canCheckSource = computed(() => canRunStockPrepSourcePreflight((permission) => auth.hasPermission(permission)))
+
+/**
+ * 整合切片 (2026-09-09) — whether 向导①'s 「去数据工厂 · 连接管理」 LINK may render at all.
+ *
+ * 外接数据源 is now a section of the 数据工厂 workbench, whose route declares
+ * `permissions: ['integration:write']` (router/appRoutes.ts). This is the SAME probe the router
+ * guard runs (`auth.hasPermission`, via routeAccess.isRoutePermitted), so a reader who gets the
+ * link is a reader the guard lets through. A `stock-prep:admin` holder does not hold
+ * integration:write — for them the wizard prints who to ask instead of a link that redirects.
+ *
+ * NOT a permission of its own: it decides only what step ① says. Nothing on the other side of
+ * the link is gated by this computed.
+ */
+const canOpenDataFactory = computed(() => auth.hasPermission('integration:write'))
 
 /**
  * WHETHER THE WIZARD CARRIES STEP ②'s OWN RUN CONTROL — and it does so in `mode="wizard"` alone.

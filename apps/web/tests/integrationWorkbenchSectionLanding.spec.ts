@@ -131,6 +131,18 @@ describe('IntegrationWorkbenchView wiring (source pin)', () => {
     expect(viewSrc.slice(watchIndex, watchIndex + 220)).toContain('void nextTick(applyWorkbenchLanding)')
   })
 
+  it('re-applies the landing once the bootstrap read settles (F01)', () => {
+    // The mount-tick pass runs while the sections are still empty: their content arrives with the
+    // bootstrap fan-out, so a section measured on that tick can move under the scroll and the
+    // reader lands short. The bootstrap's own onMounted therefore chains ONE more pass.
+    const index = viewSrc.indexOf('refreshBootstrap().finally(')
+    expect(index, 'the bootstrap mount hook must chain a landing re-apply').toBeGreaterThanOrEqual(0)
+    expect(viewSrc.slice(index, index + 200)).toContain('nextTick(applyWorkbenchLanding)')
+    // Exactly one compensation, not a scroll state machine: `applyWorkbenchLanding` is a no-op
+    // unless the route names a landing (pinned above), so an ordinary visit still never scrolls.
+    expect(viewSrc.split('refreshBootstrap().finally(').length - 1).toBe(1)
+  })
+
   it('reads the route defensively (no router => no landing, not a crash)', () => {
     expect(viewSrc).toContain("import { useRoute } from 'vue-router'")
     expect(viewSrc).toContain('const route = useRoute()')

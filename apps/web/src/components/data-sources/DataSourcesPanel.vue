@@ -2,8 +2,12 @@
   <section class="data-sources" :class="{ 'data-sources--embedded': embedded }">
     <header class="data-sources__header">
       <div>
-        <h3 v-if="embedded">外接数据源</h3>
-        <h1 v-else>外接数据源 <span class="data-sources__sub">Data Sources</span></h1>
+        <!-- 整合切片 (2026-09-09) 终审: EMBEDDED RENDERS NO TITLE OF ITS OWN. The host section
+             (IntegrationConnectionSection.vue) already prints 「外接数据源（物理连接与凭据）」
+             immediately above this component, so a second 外接数据源 heading read as two nested
+             surfaces with the same name. The lead sentence STAYS — it says what the host's
+             one-liner does not (which drivers, and that credentials are encrypted at rest). -->
+        <h1 v-if="!embedded">外接数据源 <span class="data-sources__sub">Data Sources</span></h1>
         <p class="data-sources__lead">
           连接外部 PostgreSQL / SQL Server / MySQL / HTTP 数据源(只读优先,凭据加密落库)。
         </p>
@@ -209,7 +213,9 @@
       <section v-if="activeSchemaId" class="data-sources__preview" data-testid="ds-schema-panel">
         <header class="data-sources__preview-header">
           <div>
-            <h2>库表结构</h2>
+            <!-- Heading LEVEL follows the mounting: h2 under the standalone page's h1, h4 under the
+                 host section's h3 when embedded. Same words either way. -->
+            <component :is="embedded ? 'h4' : 'h2'">库表结构</component>
             <p class="data-sources__muted">只读浏览 schema / table / columns,不读取业务数据。</p>
           </div>
           <button type="button" class="data-sources__btn" @click="closeSchemaBrowser">关闭</button>
@@ -279,7 +285,7 @@
       <section v-if="activePreviewId" class="data-sources__preview" data-testid="ds-preview-panel">
         <header class="data-sources__preview-header">
           <div>
-            <h2>只读数据预览</h2>
+            <component :is="embedded ? 'h4' : 'h2'">只读数据预览</component>
             <p class="data-sources__muted">只读预览 · 最多 {{ PREVIEW_ROW_LIMIT }} 行。</p>
           </div>
           <button type="button" class="data-sources__btn" @click="closePreview">关闭</button>
@@ -770,7 +776,6 @@ onMounted(() => {
 .data-sources { padding: 24px; max-width: 1180px; margin: 0 auto; }
 .data-sources__header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .data-sources__header h1 { font-size: 22px; margin: 0 0 4px; }
-.data-sources__header h3 { font-size: 15px; margin: 0 0 4px; }
 /* Embedded: the host section already supplies page chrome, so drop this component's own. */
 .data-sources--embedded { padding: 0; max-width: none; margin: 0; }
 .data-sources__sub { font-size: 13px; color: #8a8f99; font-weight: 400; }

@@ -48,11 +48,25 @@
     <!-- ① 接一条只读连接 — off-page by construction; the one thing this page can do is link out. -->
     <p v-if="steps['source-connect'] !== 'done'" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-step-source-connect">
       {{ bi('还没登记连接?', 'No connection registered yet?') }}
-      <!-- 整合切片 (2026-09-09): 外接数据源 now lives in 数据工厂's 连接管理 section. A plain <a>,
-           not <router-link>: this component is mounted bare in its own spec (no router, no
-           router-link stub), where a <router-link> would silently resolve to nothing and take
+      <!-- 整合切片 (2026-09-09): 外接数据源 now lives in 数据工厂's 连接管理 section, behind the
+           workbench route's own `integration:write` gate. So the LINK renders only when the host
+           says this principal can actually open 数据工厂 (`canOpenDataFactory`). A
+           `stock-prep:admin` holder — the audience 交付指南 lists for 「开始使用」 — holds no
+           integration:write and would be bounced to the home path by the router guard: a link that
+           redirects is not an entry point, it is the R-11 「看得见点不动」 failure. Denied readers
+           get the same fact in words instead — which permission, and who to ask.
+           A plain <a>, not <router-link>: this component is mounted bare in its own spec (no router,
+           no router-link stub), where a <router-link> would silently resolve to nothing and take
            the link — and the step it explains — off the page. -->
-      <a href="/integrations/workbench#int-sec-connection" data-testid="stock-prep-getting-started-link-data-sources">{{ bi('去数据工厂 · 连接管理 ↗', 'Open Data Factory · Connections ↗') }}</a>
+      <a
+        v-if="props.canOpenDataFactory"
+        href="/integrations/workbench#int-sec-connection"
+        data-testid="stock-prep-getting-started-link-data-sources"
+      >{{ bi('去数据工厂 · 连接管理 ↗', 'Open Data Factory · Connections ↗') }}</a>
+      <span v-else data-testid="stock-prep-getting-started-link-data-sources-denied">{{ bi(
+        '登记外接数据源需要数据工厂权限(integration:write),请联系实施在数据工厂 · 连接管理里登记。',
+        'Registering an external data source needs Data Factory permission (integration:write) — ask your implementer to register it under Data Factory · Connections.',
+      ) }}</span>
     </p>
 
     <!-- ② 证明它只能读 — 线框 B says 「在哪做 = 本页」, and P1-1 is what made that need saying: when
@@ -507,6 +521,18 @@ const props = defineProps<{
    * every spec that mounts this component directly renders byte-for-byte what it did before.
    */
   sourceCheckControl?: 'none' | 'run' | 'denied'
+  /**
+   * 整合切片 (2026-09-09) — whether this reader can actually OPEN 数据工厂, i.e. whether they
+   * pass the workbench route's own `integration:write` gate. The host resolves it through the
+   * shared `useAuth().hasPermission`, the same probe the router guard uses, so the link and the
+   * guard cannot drift.
+   *
+   * Optional and DEFAULTING TO FALSE (fail closed — Vue casts an absent Boolean prop to false):
+   * a host that forgets to pass it renders the 「找实施」 sentence, never a link that the guard
+   * bounces. It grants nothing either way: this prop decides what step ① SAYS, and the server's
+   * own /api/data-sources gate decides what anyone can do there.
+   */
+  canOpenDataFactory?: boolean
 }>()
 
 const emit = defineEmits<{

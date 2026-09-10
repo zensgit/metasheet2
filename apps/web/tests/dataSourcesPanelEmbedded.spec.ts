@@ -7,6 +7,7 @@ import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
 // the only difference between the two mountings, and it is PRESENTATION ONLY — this pins both
 // halves of that claim: the chrome does change, and the controls do not.
 const listDataSourcesMock = vi.hoisted(() => vi.fn())
+const getSchemaMock = vi.hoisted(() => vi.fn())
 vi.mock('../src/data-sources/api', () => ({
   listDataSources: listDataSourcesMock,
   getDataSource: vi.fn(),
@@ -16,7 +17,7 @@ vi.mock('../src/data-sources/api', () => ({
   deleteDataSource: vi.fn(),
   testDataSourceConnection: vi.fn(),
   testDataSourceDraftConnection: vi.fn(),
-  getDataSourceSchema: vi.fn(),
+  getDataSourceSchema: getSchemaMock,
   getDataSourceTableInfo: vi.fn(),
   previewDataSourceRows: vi.fn(),
 }))
@@ -29,10 +30,12 @@ describe('DataSourcesPanel embedded presentation', () => {
 
   beforeEach(() => {
     listDataSourcesMock.mockResolvedValue([])
+    getSchemaMock.mockResolvedValue({ tables: [], views: [] })
   })
 
   afterEach(() => {
     listDataSourcesMock.mockReset()
+    getSchemaMock.mockReset()
     if (app) app.unmount()
     if (container) container.remove()
     app = null
@@ -52,6 +55,21 @@ describe('DataSourcesPanel embedded presentation', () => {
     return container
   }
 
+  async function flush(turns = 4): Promise<void> {
+    for (let i = 0; i < turns; i += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+  }
+
+  /** Drop the current mounting so a second one can be made inside the same test. */
+  function unmountPanel(): void {
+    if (app) app.unmount()
+    container?.remove()
+    app = null
+    container = null
+  }
+
   it('defaults to the standalone page presentation (h1 + English sub-title, page chrome class absent)', async () => {
     const el = await mountPanel()
     const root = el.querySelector('section.data-sources')
@@ -62,13 +80,45 @@ describe('DataSourcesPanel embedded presentation', () => {
     expect(el.querySelector('h3')).toBeNull()
   })
 
-  it('demotes the heading and drops the English sub-title when embedded', async () => {
+  // 终审 (2026-09-09): the embedded mounting prints NO title of its own. Its host section already
+  // renders 「外接数据源（物理连接与凭据）」 directly above it, and two headings with the same
+  // name read as two nested surfaces. The lead sentence stays: it carries facts the host's
+  // one-liner does not.
+  it('renders no title of its own when embedded (the host section supplies it), and keeps the lead', async () => {
     const el = await mountPanel({ embedded: true })
     const root = el.querySelector('section.data-sources')
     expect(root?.classList.contains('data-sources--embedded')).toBe(true)
     expect(el.querySelector('h1')).toBeNull()
-    expect(el.querySelector('h3')?.textContent).toContain('外接数据源')
+    expect(el.querySelector('h2')).toBeNull()
+    expect(el.querySelector('h3')).toBeNull()
     expect(el.querySelector('.data-sources__sub')).toBeNull()
+    expect(el.querySelector('.data-sources__lead')?.textContent).toContain('凭据加密落库')
+  })
+
+  // The in-panel section headings are the other half of the seam: under the standalone page's h1
+  // they are h2s, under the host section's h3 they must not outrank their own container.
+  it('demotes the in-panel section headings to h4 when embedded, and leaves them h2 standalone', async () => {
+    listDataSourcesMock.mockResolvedValue([{ id: 'pg', name: 'PG', type: 'postgres', connected: true }])
+
+    const standalone = await mountPanel()
+    ;(standalone.querySelector('[data-testid="ds-schema"]') as HTMLButtonElement).click()
+    await flush()
+    ;(standalone.querySelector('[data-testid="ds-preview"]') as HTMLButtonElement).click()
+    await flush()
+    expect(standalone.querySelector('[data-testid="ds-schema-panel"] h2')?.textContent).toContain('库表结构')
+    expect(standalone.querySelector('[data-testid="ds-preview-panel"] h2')?.textContent).toContain('只读数据预览')
+    expect(standalone.querySelectorAll('h4').length).toBe(0)
+    unmountPanel()
+
+    const embedded = await mountPanel({ embedded: true })
+    ;(embedded.querySelector('[data-testid="ds-schema"]') as HTMLButtonElement).click()
+    await flush()
+    ;(embedded.querySelector('[data-testid="ds-preview"]') as HTMLButtonElement).click()
+    await flush()
+    expect(embedded.querySelector('[data-testid="ds-schema-panel"] h4')?.textContent).toContain('库表结构')
+    expect(embedded.querySelector('[data-testid="ds-preview-panel"] h4')?.textContent).toContain('只读数据预览')
+    // The words are unchanged — only the level moved.
+    expect(embedded.querySelectorAll('h2').length).toBe(0)
   })
 
   it('hides no control when embedded — same testids as the standalone mounting', async () => {

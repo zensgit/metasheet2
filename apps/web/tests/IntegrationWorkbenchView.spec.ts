@@ -2684,6 +2684,167 @@ describe('IntegrationWorkbenchView', () => {
     expect(optionsAfter).toContain('folded-pg')
   })
 
+  // 终审 (2026-09-09) 第 5 节: the mirror image of the case above — the panel can DELETE the source
+  // the draft below is referencing. Refreshing the list alone left a DANGLING draft: the <select>
+  // keeps a value that no longer has an <option>, the object list underneath it still shows the
+  // dead source's tables, and 「保存」 would post a connectionId the server cannot resolve. This
+  // pins all three consequences of the delete at once (picker cleared, objects cleared, save
+  // refused), because clearing only one of them still leaves a saveable dangling draft.
+  it('deleting the referenced source in the embedded panel clears the draft picker, its object list and the save button', async () => {
+    let registered = [{ id: 'doomed-pg', name: 'Doomed PG', type: 'postgres', connected: true }]
+    const upsertBodies: Array<Record<string, unknown>> = []
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') return { ok: true, data: { items: [...registered] } }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default' && init?.method === 'POST') {
+        upsertBodies.push(JSON.parse(String(init.body || '{}')) as Record<string, unknown>)
+        return jsonResponse({ id: 'sys_1', name: 'x', kind: 'data-source:sql-readonly', role: 'source', status: 'active' })
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/hub/overview?tenantId=default') return jsonResponse(EMPTY_HUB_OVERVIEW)
+      if (url === '/api/data-sources/doomed-pg/schema') {
+        return jsonResponse({ tables: [{ name: 'orders', schema: 'dbo', columns: [{ name: 'id' }] }], views: [] })
+      }
+      if (url === '/api/data-sources/doomed-pg' && init?.method === 'DELETE') {
+        registered = registered.filter((item) => item.id !== 'doomed-pg')
+        return jsonResponse({ deleted: true })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('router-link', {
+      props: { to: { type: [String, Object], required: false, default: '' } },
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    // Author a draft that REFERENCES the source: name + bridge kind + connectionId + object.
+    const nameInput = container.querySelector('[data-testid="connection-draft-name"]') as HTMLInputElement
+    nameInput.value = 'Bridge draft'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(6)
+    const picker = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
+    picker.value = 'doomed-pg'
+    picker.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+    const objectSelect = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
+    expect(Array.from(objectSelect.options).map((option) => option.value)).toContain('dbo.orders')
+    objectSelect.value = 'dbo.orders'
+    objectSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(4)
+    const saveButton = container.querySelector('[data-testid="save-connection-draft"]') as HTMLButtonElement
+    expect(saveButton.disabled, 'a complete bridge draft must be saveable before the delete').toBe(false)
+
+    // Delete THAT source from the embedded panel (window.confirm is stubbed true in beforeEach).
+    const panel = container.querySelector('[data-testid="connection-data-sources-panel"]') as HTMLElement
+    ;(panel.querySelector('[data-testid="ds-delete"]') as HTMLButtonElement).click()
+    await flushUi(10)
+
+    // 1. the reference is gone from the picker (not merely un-listed while still selected)
+    expect((container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).value).toBe('')
+    expect(Array.from((container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).options)
+      .map((option) => option.value)).not.toContain('doomed-pg')
+    // 2. the dead source's object list went with it (only the placeholder <option> is left)
+    const objectsAfter = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
+    expect(objectsAfter.value).toBe('')
+    expect(Array.from(objectsAfter.options).map((option) => option.value)).toEqual([''])
+    // 3. and the draft cannot be saved into a dangling reference
+    expect(saveButton.disabled).toBe(true)
+    saveButton.click()
+    await flushUi(4)
+    expect(upsertBodies).toHaveLength(0)
+    // The operator is told why their picker just emptied, without naming the deleted source.
+    expect(container.textContent || '').toContain('草稿引用的外接数据源已不在列表里')
+  })
+
+  // F04: two data-source list reads can be in flight at once (the picker's first-open load and a
+  // refresh fired by the embedded panel, or two kind switches). Whoever lands LAST used to win,
+  // so a slow FIRST read would paint its already-superseded list over the newer one — and set the
+  // `bridgeDataSourcesLoaded` short-circuit, freezing it there until the next panel change.
+  it('F04: a superseded data-source list read cannot overwrite a newer one', async () => {
+    type ListItem = { id: string; name: string; type: string; connected: boolean }
+    let queueing = false
+    const pendingListReads: Array<(items: ListItem[]) => void> = []
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url !== '/api/data-sources') throw new Error(`unexpected apiGet ${url}`)
+      if (!queueing) return { ok: true, data: { items: [] as ListItem[] } }
+      return new Promise((resolve) => {
+        pendingListReads.push((items) => resolve({ ok: true, data: { items } }))
+      })
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http:generic', label: 'HTTP', roles: ['source'], supports: ['read'], advanced: false, guardrails: { write: { supported: false } } },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: false, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/integration/table-actions?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/hub/overview?tenantId=default') return jsonResponse(EMPTY_HUB_OVERVIEW)
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('router-link', {
+      props: { to: { type: [String, Object], required: false, default: '' } },
+      setup(_props, { slots }) { return () => h('a', slots.default?.()) },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    // From here on the list read hangs until this test releases it, one read at a time.
+    queueing = true
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    const selectKind = async (kind: string) => {
+      kindSelect.value = kind
+      kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi(2)
+    }
+    await selectKind('data-source:sql-readonly')   // read #1 — hangs
+    await selectKind('http:generic')
+    await selectKind('data-source:sql-readonly')   // read #2 — hangs alongside it
+    expect(pendingListReads).toHaveLength(2)
+
+    // The NEWER read lands first, then the older one — the exact interleaving that used to leave
+    // the picker showing a list the page had already moved past.
+    pendingListReads[1]([{ id: 'fresh-pg', name: 'Fresh PG', type: 'postgres', connected: true }])
+    await flushUi(4)
+    pendingListReads[0]([{ id: 'stale-pg', name: 'Stale PG', type: 'postgres', connected: true }])
+    await flushUi(4)
+
+    const options = Array.from(
+      (container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(options).toContain('fresh-pg')
+    expect(options).not.toContain('stale-pg')
+  })
+
   it('C2b: data-source:sql-readonly connection uses the structured picker and references a data source by id (no credentials)', async () => {
     const upsertBodies: Array<Record<string, unknown>> = []
     apiGetMock.mockReset()
@@ -3173,7 +3334,9 @@ describe('IntegrationWorkbenchView', () => {
 
     const statusText = container.textContent || ''
     expect(statusText).toContain('引用的连接或数据源不存在、已删除')
-    expect(statusText).toContain('重新选择 /data-sources')
+    // F09/F14: the guidance names the in-page panel now that /data-sources is a redirect.
+    expect(statusText).toContain('上方「外接数据源」面板里确认后重新选择连接')
+    expect(statusText).not.toContain('重新选择 /data-sources')
     expect(apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/integration/external-systems/ds_bridge_1/objects'))).toBe(true)
     expect(statusText).not.toContain('当前账号无权')
     expect(statusText).not.toContain('ds-403-gone')
@@ -3293,7 +3456,9 @@ describe('IntegrationWorkbenchView', () => {
 
     const statusText = container.textContent || ''
     expect(statusText).toContain('当前账号无权读取该连接或 schema')
-    expect(statusText).toContain('/data-sources 权限')
+    // F09/F14: the copy names the in-page panel now that /data-sources is a redirect, not a page.
+    expect(statusText).toContain('上方「外接数据源」面板的权限')
+    expect(statusText).not.toContain('以及 /data-sources 权限')
     expect(statusText).not.toContain('owner principal')
     expect(statusText).not.toContain('none provided')
   })

@@ -36,7 +36,14 @@ describe("/data-sources route declaration", () => {
     expect((dataSourcesRoute as { component?: unknown }).component).toBeUndefined()
   })
 
-  it('keeps its title meta so the shell can still name the destination', () => {
+  // WHAT THIS PINS, AND WHAT IT DOES NOT. vue-router consumes a `redirect` record while it
+  // RESOLVES a location — before `beforeEach` runs — so the navigation the shell's guard and
+  // title logic actually see is the TARGET's, meta and all. Nothing reads the meta below at
+  // runtime. It is asserted as a property of the RECORD only: the route table stays
+  // self-describing, and a future un-fold would find the title still there. Read the companion
+  // case in the behaviour block ('does not carry ... meta onto the landed route') for the other
+  // half of this claim.
+  it('keeps titleZh on the RECORD (record-level only — no guard ever reads a redirect record’s meta)', () => {
     expect(dataSourcesRoute.meta).toMatchObject({ requiresAuth: true, titleZh: '外接数据源' })
   })
 
@@ -84,6 +91,16 @@ describe('/data-sources redirect behavior (isolated vue-router over the REAL rou
     await router.push('/data-sources')
     expect(router.currentRoute.value.name).not.toBe('not-found')
     expect(router.currentRoute.value.path).not.toBe('/')
+  })
+
+  it('does not carry the redirect record’s meta onto the landed route', async () => {
+    // The falsifying half of the record-level meta assertion above: the landed route is the
+    // TARGET's, so `titleZh: '外接数据源'` is NOT what a beforeEach guard (or the shell title)
+    // would read after this navigation. Anyone tempted to gate on that meta gets a red here.
+    const router = buildRouter()
+    await router.push('/data-sources')
+    expect(router.currentRoute.value.name).toBe('integration-workbench')
+    expect(router.currentRoute.value.meta.titleZh).toBeUndefined()
   })
 })
 
