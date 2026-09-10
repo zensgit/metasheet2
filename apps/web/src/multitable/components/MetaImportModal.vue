@@ -39,6 +39,9 @@
           <div v-if="restoredDraft" class="meta-import__warning">
             <span>{{ l('import.recoveredDraft') }}</span>
           </div>
+          <div v-if="createFieldsDropped" class="meta-import__warning meta-import__create-dropped">
+            <span>{{ l('import.createFieldsDropped') }}</span>
+          </div>
           <div v-if="parseWarning" class="meta-import__warning">
             <span>{{ parseWarning }}</span>
           </div>
@@ -54,9 +57,17 @@
               <select class="meta-import__field-select" :value="fieldMapping[i] ?? ''" @change="fieldMapping[i] = ($event.target as HTMLSelectElement).value">
                 <option value="">{{ l('import.skip') }}</option>
                 <option v-for="f in importableFields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                <option v-if="canOfferCreateField(header)" :value="CREATE_FIELD_SENTINEL">{{ createFieldOption(header, isZh) }}</option>
               </select>
             </div>
           </div>
+          <p v-if="createFieldRequests.length" class="meta-import__hint meta-import__create-summary">
+            {{ createFieldsPlanned(createFieldRequests.length, isZh) }}
+          </p>
+          <p v-if="skippedColumnCount > 0" class="meta-import__hint meta-import__skip-summary">
+            {{ columnsSkippedNoField(skippedColumnCount, isZh) }}
+          </p>
+          <div v-if="createFieldsErrorText" class="meta-import__error meta-import__create-error">{{ createFieldsErrorText }}</div>
           <div v-if="parsedRows.length" class="meta-import__preview-table">
             <table>
               <thead><tr><th v-for="(h, i) in parsedHeaders" :key="i">{{ h }}</th></tr></thead>
@@ -178,9 +189,18 @@ import type { LinkedRecordSummary, MetaField } from '../types'
 import { buildImportedRecords, parseDelimitedText } from '../import/delimited'
 import type { ImportBuildFailure, ImportBuildResult, ImportFieldOverrides, ImportValueResolver } from '../import/delimited'
 import { XLSX_MAX_BYTES, XLSX_MAX_ROWS, mapXlsxColumnsToFields, parseXlsxBuffer } from '../import/xlsx-mapping'
+import {
+  CREATE_FIELD_SENTINEL,
+  createFieldPlaceholderId,
+  type ImportCreateFieldRequest,
+  type ImportSubmitPayload,
+} from '../import/create-fields'
 import { isLinkField, isPersonField, linkActionLabel } from '../utils/link-fields'
 import {
   columnLabel,
+  columnsSkippedNoField,
+  createFieldOption,
+  createFieldsPlanned,
   detectedRows,
   fieldNoLongerImportable,
   fileTooLarge,
@@ -240,12 +260,22 @@ const props = defineProps<{
   importing?: boolean
   result?: ImportResult | null
   fieldResolvers?: Record<string, ImportValueResolver>
+  /**
+   * Whether the CALLER may create fields on this sheet (workbench passes `caps.canManageFields`).
+   * This modal only offers/defaults the "create new field" mapping when it is true; the actual write
+   * is still gated in the workbench AND by the server's 403 on POST /api/multitable/fields.
+   */
+  canCreateFields?: boolean
+  /** Set by the caller when field creation failed — sends the modal back to mapping, no rows written. */
+  createFieldsError?: string | null
+  /** columnIndex → newly created field id; rebinds the sentinel so a re-import never re-creates it. */
+  createdFieldColumns?: Record<number, string> | null
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'cancel-import'): void
-  (e: 'import', payload: ImportBuildResult): void
+  (e: 'import', payload: ImportSubmitPayload): void
   (e: 'update:dirty', dirty: boolean): void
 }>()
 
@@ -268,8 +298,46 @@ const manualOverrideSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const pickerTarget = ref<{ rowIndex: number; fieldId: string } | null>(null)
 const pickerVisible = ref(false)
 const restoredDraft = ref(false)
+const createFieldsDropped = ref(false)
 
-const hasMappedFields = computed(() => Object.values(fieldMapping.value).some((value) => value))
+const canCreateFields = computed(() => props.canCreateFields === true)
+const createFieldsErrorText = computed(() => props.createFieldsError ?? '')
+/**
+ * A sentinel only counts while the caller still holds manage-fields AND the header is non-empty.
+ *
+ * The manage-fields half is deliberately REDUNDANT with the `props.canCreateFields` watch below,
+ * which already rewrites every sentinel to '' the moment the capability is lost, and with
+ * `restoreImportDraft`, which degrades a restored sentinel the same way. No single-guard mutation
+ * can turn it red for that reason — it is kept as the fail-closed last line in case a future caller
+ * introduces a fourth way for a sentinel to coexist with a missing capability.
+ */
+function isActiveCreateColumn(columnIndex: number | string): boolean {
+  if (!canCreateFields.value) return false
+  if (fieldMapping.value[Number(columnIndex)] !== CREATE_FIELD_SENTINEL) return false
+  return (parsedHeaders.value[Number(columnIndex)] ?? '').trim().length > 0
+}
+function canOfferCreateField(header: string): boolean {
+  return canCreateFields.value && header.trim().length > 0
+}
+const createFieldRequests = computed<ImportCreateFieldRequest[]>(() =>
+  Object.keys(fieldMapping.value)
+    .map((columnIndex) => Number(columnIndex))
+    .filter((columnIndex) => Number.isInteger(columnIndex) && isActiveCreateColumn(columnIndex))
+    .sort((a, b) => a - b)
+    .map((columnIndex) => ({ columnIndex, header: (parsedHeaders.value[columnIndex] ?? '').trim() })),
+)
+const skippedColumnCount = computed(() => parsedHeaders.value.filter((header, index) => {
+  if (!header.trim()) return false
+  const mapped = fieldMapping.value[index]
+  if (!mapped) return true
+  return mapped === CREATE_FIELD_SENTINEL && !isActiveCreateColumn(index)
+}).length)
+
+const hasMappedFields = computed(() => Object.entries(fieldMapping.value).some(([columnIndex, value]) => {
+  if (!value) return false
+  if (value === CREATE_FIELD_SENTINEL) return isActiveCreateColumn(columnIndex)
+  return true
+}))
 function isImportReadOnlyField(field: MetaField): boolean {
   const property = field.property ?? {}
   return property.readonly === true || property.readOnly === true
@@ -345,6 +413,10 @@ const importDraftIssues = computed<ImportDraftIssue[]>(() => {
   const issues = new Map<string, ImportDraftIssue>()
   for (const [columnIndex, fieldId] of Object.entries(fieldMapping.value)) {
     if (!fieldId) continue
+    // A "create this column as a new field" sentinel is NOT a stale mapping: there is no field to
+    // look up yet. It is dropped elsewhere (restore / permission-loss) when it can no longer be
+    // honoured, so it must never raise a mapping-missing draft issue here.
+    if (fieldId === CREATE_FIELD_SENTINEL) continue
     const field = fieldsById.value.get(fieldId)
     const header = parsedHeaders.value[Number(columnIndex)] || columnLabel(Number(columnIndex), isZh.value)
     if (!field) {
@@ -462,9 +534,19 @@ function restoreImportDraft() {
     parsedRows.value = Array.isArray(snapshot.parsedRows)
       ? snapshot.parsedRows.map((row) => Array.isArray(row) ? row.map((cell) => typeof cell === 'string' ? cell : '') : [])
       : []
+    // Drafts persist the create-field sentinel, but permissions can change between sessions: when the
+    // caller no longer holds manage-fields the sentinel DEGRADES to skip (never to a silent create),
+    // and the modal says so.
+    const restoredMapping = Object.entries(snapshot.fieldMapping ?? {}).filter(([, fieldId]) => typeof fieldId === 'string')
+    const droppedCreateColumns = restoredMapping.filter(([, fieldId]) => fieldId === CREATE_FIELD_SENTINEL).length
     fieldMapping.value = Object.fromEntries(
-      Object.entries(snapshot.fieldMapping ?? {}).filter(([, fieldId]) => typeof fieldId === 'string'),
+      restoredMapping.map(([columnIndex, fieldId]) => (
+        fieldId === CREATE_FIELD_SENTINEL && !canCreateFields.value
+          ? [columnIndex, '']
+          : [columnIndex, fieldId]
+      )),
     ) as Record<number, string>
+    createFieldsDropped.value = droppedCreateColumns > 0 && !canCreateFields.value
     manualFieldOverrides.value = (snapshot.manualFieldOverrides && typeof snapshot.manualFieldOverrides === 'object')
       ? snapshot.manualFieldOverrides
       : {}
@@ -533,6 +615,40 @@ watch(() => props.result, (result) => {
   }
 })
 
+// Manage-fields revoked while the modal is open → every sentinel degrades to skip immediately.
+// Tightening only: this watch never turns a skip into a create.
+watch(() => props.canCreateFields, (canCreate) => {
+  if (canCreate) return
+  const entries = Object.entries(fieldMapping.value)
+  if (!entries.some(([, fieldId]) => fieldId === CREATE_FIELD_SENTINEL)) return
+  fieldMapping.value = Object.fromEntries(
+    entries.map(([columnIndex, fieldId]) => [columnIndex, fieldId === CREATE_FIELD_SENTINEL ? '' : fieldId]),
+  ) as Record<number, string>
+  createFieldsDropped.value = true
+})
+
+// Field creation failed in the caller: no records were written, so return to mapping instead of
+// leaving the modal spinning on the importing step (props.result stays null in that case).
+watch(() => props.createFieldsError, (message) => {
+  if (!message) return
+  if (step.value === 'importing' || step.value === 'result') step.value = 'preview'
+})
+
+// Fields were created: rebind those columns from the sentinel to the real field ids so a second
+// import attempt maps onto the new fields instead of creating duplicates.
+watch(() => props.createdFieldColumns, (created) => {
+  if (!created || !Object.keys(created).length) return
+  const next = { ...fieldMapping.value }
+  let changed = false
+  for (const [columnIndex, fieldId] of Object.entries(created)) {
+    if (typeof fieldId !== 'string' || !fieldId) continue
+    if (next[Number(columnIndex)] !== CREATE_FIELD_SENTINEL) continue
+    next[Number(columnIndex)] = fieldId
+    changed = true
+  }
+  if (changed) fieldMapping.value = next
+}, { deep: true })
+
 function parseAndPreview() {
   parseError.value = ''
   const parsed = parseDelimitedText(rawText.value)
@@ -548,13 +664,24 @@ function parseAndPreview() {
     return
   }
 
-  fieldMapping.value = {}
-  parsedHeaders.value.forEach((header, index) => {
-    const normalizedHeader = header.toLowerCase().trim()
-    const match = importableFields.value.find((field) => field.name.toLowerCase() === normalizedHeader)
-    if (match) fieldMapping.value[index] = match.id
-  })
+  // Paste and file paths now share ONE matcher (mapXlsxColumnsToFields): it trims both sides and
+  // refuses to map two headers onto the same field, which the old inline paste matcher did not.
+  fieldMapping.value = buildDefaultFieldMapping(parsedHeaders.value)
   step.value = 'preview'
+}
+
+/**
+ * Default column → field mapping: exact (case-insensitive, trimmed, de-duplicated) name match first;
+ * every remaining non-empty header defaults to "create a new text field" WHEN the caller holds
+ * manage-fields, otherwise to skip (the pre-existing behaviour).
+ */
+function buildDefaultFieldMapping(headers: string[]): Record<number, string> {
+  const mapping = { ...mapXlsxColumnsToFields(headers, importableFields.value).mapping }
+  headers.forEach((header, index) => {
+    if (mapping[index]) return
+    mapping[index] = canOfferCreateField(header) ? CREATE_FIELD_SENTINEL : ''
+  })
+  return mapping
 }
 
 async function readAndSetText(file: File) {
@@ -594,7 +721,7 @@ async function readAndSetXlsx(file: File) {
     rawText.value = ''
     parsedHeaders.value = result.headers
     parsedRows.value = result.rows
-    fieldMapping.value = mapXlsxColumnsToFields(result.headers, importableFields.value).mapping
+    fieldMapping.value = buildDefaultFieldMapping(result.headers)
     if (result.truncated) {
       parseWarning.value = xlsxTruncated(parsedRows.value.length, XLSX_MAX_ROWS, isZh.value)
     }
@@ -627,10 +754,28 @@ watch([() => props.importing, () => props.result, () => props.visible], ([import
   if (result) step.value = 'result'
 }, { immediate: true })
 
+/**
+ * Mapping handed to `buildImportedRecords`: the sentinel is replaced by a per-column PLACEHOLDER key
+ * (`__create__:<columnIndex>`) that cannot collide with a real field id, so the raw cell text is
+ * carried through the build untouched. The workbench rewrites those keys to the ids of the fields it
+ * creates before any record is written. Sentinels that are no longer honourable become skip.
+ */
+function effectiveFieldMapping(): Record<number, string> {
+  const mapping: Record<number, string> = {}
+  for (const [columnIndex, fieldId] of Object.entries(fieldMapping.value)) {
+    if (fieldId !== CREATE_FIELD_SENTINEL) {
+      mapping[Number(columnIndex)] = fieldId
+      continue
+    }
+    mapping[Number(columnIndex)] = isActiveCreateColumn(columnIndex) ? createFieldPlaceholderId(Number(columnIndex)) : ''
+  }
+  return mapping
+}
+
 async function buildRecords(): Promise<ImportBuildResult> {
   return buildImportedRecords({
     parsedRows: parsedRows.value,
-    fieldMapping: fieldMapping.value,
+    fieldMapping: effectiveFieldMapping(),
     fields: props.fields,
     fieldResolvers: props.fieldResolvers,
     fieldOverrides: manualFieldOverrides.value,
@@ -720,6 +865,10 @@ function reconcileImportDraft() {
   const nextFieldMapping = { ...fieldMapping.value }
   for (const [columnIndex, fieldId] of Object.entries(nextFieldMapping)) {
     if (!fieldId || importableFieldIds.value.has(fieldId)) continue
+    // Keep live create-field sentinels: reconcile exists to drop mappings whose FIELD vanished, and
+    // a sentinel has no field yet. Without this guard reconcile would silently reset the column to
+    // "skip" and the import would drop that column's data.
+    if (fieldId === CREATE_FIELD_SENTINEL && isActiveCreateColumn(columnIndex)) continue
     delete nextFieldMapping[Number(columnIndex)]
   }
 
@@ -759,7 +908,7 @@ async function applyFixesAndRetry() {
   }, {})
   const rebuilt = await buildImportedRecords({
     parsedRows: manualRowIndexes.map((rowIndex) => [...(parsedRows.value[rowIndex] ?? [])]),
-    fieldMapping: fieldMapping.value,
+    fieldMapping: effectiveFieldMapping(),
     fields: props.fields,
     fieldResolvers: props.fieldResolvers,
     fieldOverrides: subsetOverrides,
@@ -834,7 +983,12 @@ function emitImport(payload: ImportBuildResult) {
   pendingRecordCount.value = payload.records.length
   lastAttemptRecords.value = payload.records
   lastAttemptRowIndexes.value = payload.rowIndexes
-  emit('import', payload)
+  // Every emit path (first import, retry, apply-fixes) carries the CURRENT create requests: once the
+  // caller reports the created ids back via `createdFieldColumns` the sentinels are gone, so a retry
+  // can never create the same field twice.
+  const createFields = createFieldRequests.value
+  const submitPayload: ImportSubmitPayload = createFields.length ? { ...payload, createFields } : payload
+  emit('import', submitPayload)
 }
 
 function resetState() {
@@ -853,6 +1007,7 @@ function resetState() {
   parseError.value = ''
   parseWarning.value = ''
   restoredDraft.value = false
+  createFieldsDropped.value = false
 }
 
 onBeforeUnmount(() => {
@@ -914,4 +1069,8 @@ onBeforeUnmount(() => {
 .meta-import__fix-selected { font-size: 12px; color: #0f5ba7; }
 .meta-import__spinner { width: 32px; height: 32px; border: 3px solid #eee; border-top-color: #409eff; border-radius: 50%; animation: meta-import-spin 0.8s linear infinite; }
 @keyframes meta-import-spin { to { transform: rotate(360deg); } }
+/* Create-missing-fields summaries (appended; no existing rule changed). */
+.meta-import__create-summary { margin: 8px 0 0; color: #0f5ba7; }
+.meta-import__skip-summary { margin: 8px 0 0; }
+.meta-import__create-error { margin-top: 8px; }
 </style>

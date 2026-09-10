@@ -768,4 +768,50 @@ describe('MultitableWorkbench import flow', () => {
     expect(showErrorSpy).toHaveBeenCalledWith('Import cancelled')
     expect(document.body.querySelector('.meta-import-modal')).toBeNull()
   })
+  it('creates the unmatched column as a text field and imports the row under the new field id', async () => {
+    // End-to-end through the REAL import modal: an unmatched header defaults to "create new field"
+    // (the workbench reports manage-fields = true), the field is created BEFORE any record write, and
+    // the placeholder key the modal used is rewritten to the created field id.
+    mountWorkbench([
+      { id: 'fld_name', name: 'Name', type: 'string' },
+    ])
+    workbenchMock.client.createField.mockResolvedValue({ field: { id: 'fld_warehouse', name: 'Warehouse', type: 'string' } })
+    workbenchMock.client.createRecord.mockResolvedValue({ record: { id: 'rec_1', version: 1, data: {} } })
+
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Name\tWarehouse\nAlpha\tA1'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    const selects = Array.from(document.body.querySelectorAll('.meta-import__field-select')) as HTMLSelectElement[]
+    expect(selects.map((select) => select.value)).toEqual(['fld_name', '__create__'])
+    expect(document.body.textContent).toContain('1 column(s) will be created as new text fields.')
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Import 1 record'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(20)
+
+    expect(workbenchMock.client.createField).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.createField).toHaveBeenCalledWith({
+      sheetId: 'sheet_orders',
+      name: 'Warehouse',
+      type: 'string',
+    })
+    expect(workbenchMock.client.createRecord).toHaveBeenCalledWith({
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+      data: { fld_name: 'Alpha', fld_warehouse: 'A1' },
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(showSuccessSpy).toHaveBeenCalledWith('1 record imported', undefined)
+    expect(document.body.querySelector('.meta-import-modal')).toBeNull()
+  })
 })

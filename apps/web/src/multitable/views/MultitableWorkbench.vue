@@ -415,6 +415,9 @@
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
+      :can-create-fields="caps.canManageFields.value"
+      :create-fields-error="importCreateFieldsError"
+      :created-field-columns="importCreatedFieldColumns"
       @update:dirty="importDirty = $event"
       @close="closeImportModal"
       @cancel-import="cancelImport"
@@ -735,8 +738,22 @@ import MetaDashboardView from '../components/MetaDashboardView.vue'
 import { MtButton } from '../ui'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
-import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
+import { extractImportTokens, type ImportBuildFailure, type ImportValueResolver } from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
+import {
+  MAX_FIELD_NAME_LENGTH,
+  MAX_SHEET_FIELDS,
+  createFieldPlaceholderId,
+  planCreateFieldNames,
+  type ImportSubmitPayload,
+} from '../import/create-fields'
+import {
+  importLabel,
+  createFieldFailed as fmtCreateFieldFailed,
+  createFieldLimitReached as fmtCreateFieldLimitReached,
+  createFieldNameInvalid as fmtCreateFieldNameInvalid,
+  createFieldNameTooLong as fmtCreateFieldNameTooLong,
+} from '../utils/meta-import-labels'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
 import {
@@ -1291,6 +1308,11 @@ type ImportResult = {
   failures: ImportFailure[]
 }
 const importResult = ref<ImportResult | null>(null)
+// Import → "create the missing columns as new text fields": the modal only ASKS (payload.createFields);
+// the write happens here, behind the same manage-fields capability that gates the field manager, and
+// behind the server's own 403 on POST /api/multitable/fields.
+const importCreateFieldsError = ref<string | null>(null)
+const importCreatedFieldColumns = ref<Record<number, string> | null>(null)
 // --- Display prefs (column width / row density / group collapse): server-persisted in view.config
 // (persist-display-prefs arc 2026-06-16). Each is OPTIMISTIC-LOCAL: a writable ref updates the UI
 // instantly, then `persistDisplayPref` writes the merged config in the background (no row refetch).
@@ -3208,6 +3230,8 @@ function onSelectView(viewId: string) {
 }
 
 function onOpenImportModal() {
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
   showImportModal.value = true
 }
 
@@ -3605,12 +3629,87 @@ function onReorderField(fromId: string, toId: string) {
 }
 
 // --- Bulk import ---
-async function onBulkImport(payload: ImportBuildResult) {
+/**
+ * Create the fields the import modal asked for, then rewrite the placeholder keys the modal used for
+ * those columns to the new field ids. Fail-closed: any refusal or backend error aborts BEFORE a
+ * single record is written (records are only rewritten after every create succeeded).
+ *
+ * Returns false when the caller must abort the import.
+ */
+async function applyImportCreateFields(payload: ImportSubmitPayload): Promise<boolean> {
+  const requests = payload.createFields ?? []
+  if (!requests.length) return true
+  // WRITE-SIDE GATE. The modal's `canCreateFields` prop only controls what it OFFERS; a stale prop,
+  // a revoked role, or a hand-built payload must not reach `createField` from here.
+  if (!caps.canManageFields.value) {
+    importCreateFieldsError.value = importLabel('import.createFieldsForbidden', isZh.value)
+    return false
+  }
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) {
+    importCreateFieldsError.value = wb('toast.fieldCreateFailed', isZh.value)
+    return false
+  }
+  const existingFields = workbench.fields.value
+  const plan = planCreateFieldNames({
+    requests,
+    existingNames: existingFields.map((field) => field.name),
+    existingFieldCount: existingFields.length,
+  })
+  if (!plan.ok) {
+    importCreateFieldsError.value = plan.reason === 'field-limit'
+      ? fmtCreateFieldLimitReached(MAX_SHEET_FIELDS, isZh.value)
+      : plan.reason === 'name-too-long'
+        ? fmtCreateFieldNameTooLong(plan.header, MAX_FIELD_NAME_LENGTH, isZh.value)
+        : fmtCreateFieldNameInvalid(plan.header, isZh.value)
+    return false
+  }
+
+  const createdColumns: Record<number, string> = {}
+  for (const [index, request] of requests.entries()) {
+    try {
+      const created = await workbench.client.createField({
+        sheetId,
+        name: plan.names[index],
+        type: 'string' as MetaFieldType,
+      })
+      createdColumns[request.columnIndex] = created.field.id
+    } catch (e: any) {
+      importCreateFieldsError.value = fmtCreateFieldFailed(
+        request.header,
+        e?.message ?? wb('toast.fieldCreateFailed', isZh.value),
+        isZh.value,
+      )
+      return false
+    }
+  }
+
+  await workbench.loadSheetMeta(sheetId)
+  // Rewrite IN PLACE: the modal keeps these same record objects for "retry failed rows", so the
+  // placeholder key must disappear everywhere, not just in this attempt's copy.
+  for (const record of payload.records) {
+    for (const [columnIndex, fieldId] of Object.entries(createdColumns)) {
+      const placeholder = createFieldPlaceholderId(Number(columnIndex))
+      if (!(placeholder in record)) continue
+      record[fieldId] = record[placeholder]
+      delete record[placeholder]
+    }
+  }
+  importCreatedFieldColumns.value = createdColumns
+  return true
+}
+
+async function onBulkImport(payload: ImportSubmitPayload) {
   const controller = new AbortController()
   importAbortController.value = controller
   importSubmitting.value = true
   importResult.value = null
+  importCreateFieldsError.value = null
   try {
+    if (!(await applyImportCreateFields(payload))) {
+      showError(importCreateFieldsError.value ?? wb('toast.fieldCreateFailed', isZh.value))
+      return
+    }
     const recordsToImport = payload.records
     const rowIndexesToImport = payload.rowIndexes
     const skippedRows: ImportFailure[] = []
@@ -3716,6 +3815,8 @@ function closeImportModal() {
   importSubmitting.value = false
   importResult.value = null
   importAbortController.value = null
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
 }
 
 // --- CSV export ---

@@ -32,6 +32,8 @@ export type MetaImportLabelKey =
   | 'import.errorReadFile'
   | 'import.errorSpreadsheetEmpty'
   | 'import.errorReadExcel'
+  | 'import.createFieldsDropped'
+  | 'import.createFieldsForbidden'
 
 const META_IMPORT_LABELS: Record<MetaImportLabelKey, { en: string; zh: string }> = {
   'import.title': { en: 'Import Records', zh: '导入记录' },
@@ -99,6 +101,17 @@ const META_IMPORT_LABELS: Record<MetaImportLabelKey, { en: string; zh: string }>
     zh: '电子表格中未找到可导入的行',
   },
   'import.errorReadExcel': { en: 'Failed to read Excel file', zh: '读取 Excel 文件失败' },
+  // Draft restore AND mid-session revoke both land here, so the wording must not claim a draft was
+  // recovered. The sentinel is dropped to "skip" rather than kept and silently failing at import
+  // time (the server would 403 the field create anyway).
+  'import.createFieldsDropped': {
+    en: 'You can no longer create fields on this sheet, so the "create new field" columns were switched to skip.',
+    zh: '你已无此数据表的建字段权限，原本要「新建字段」的列已改为跳过。',
+  },
+  'import.createFieldsForbidden': {
+    en: 'Creating fields is not allowed on this sheet, so no records were imported.',
+    zh: '当前没有此数据表的建字段权限，未导入任何记录。',
+  },
 }
 
 export function importLabel(key: MetaImportLabelKey, isZh: boolean): string {
@@ -194,6 +207,46 @@ export function xlsxTruncated(importedRows: number, maxRows: number, isZh: boole
   return isZh
     ? `已导入前 ${importedRows} 行；其余行已跳过（上限 ${maxRows}）。`
     : `Imported the first ${importedRows} rows; remaining rows were skipped (limit ${maxRows}).`
+}
+
+export function createFieldOption(header: string, isZh: boolean): string {
+  return isZh ? `新建字段「${header}」（文本）` : `Create field "${header}" (text)`
+}
+
+export function createFieldsPlanned(count: number, isZh: boolean): string {
+  return isZh
+    ? `${count} 列将作为新文本字段创建。`
+    : `${count} column(s) will be created as new text fields.`
+}
+
+export function columnsSkippedNoField(count: number, isZh: boolean): string {
+  return isZh
+    ? `${count} 列在目标表不存在，已跳过。`
+    : `${count} column(s) do not exist in the target sheet and were skipped.`
+}
+
+export function createFieldFailed(header: string, message: string, isZh: boolean): string {
+  return isZh
+    ? `创建字段「${header}」失败：${message} 未导入任何记录。`
+    : `Failed to create field "${header}": ${message} No records were imported.`
+}
+
+export function createFieldNameInvalid(header: string, isZh: boolean): string {
+  return isZh
+    ? `列名「${header}」不能作为字段名。未导入任何记录。`
+    : `Column name "${header}" cannot be used as a field name. No records were imported.`
+}
+
+export function createFieldNameTooLong(header: string, maxLength: number, isZh: boolean): string {
+  return isZh
+    ? `列名「${header}」超过 ${maxLength} 个字符，无法创建字段。未导入任何记录。`
+    : `Column name "${header}" exceeds ${maxLength} characters, so the field cannot be created. No records were imported.`
+}
+
+export function createFieldLimitReached(maxFields: number, isZh: boolean): string {
+  return isZh
+    ? `新建这些字段会让本表字段数超过 ${maxFields} 个上限。请先减少列或手动映射。未导入任何记录。`
+    : `Creating these fields would push this sheet past the ${maxFields}-field limit. Reduce columns or map them manually. No records were imported.`
 }
 
 export function importResolverMissing(fieldName: string, kind: 'person' | 'link', isZh: boolean): string {
