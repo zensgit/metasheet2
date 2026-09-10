@@ -76,6 +76,7 @@ const { optionalString } = require('./stock-preparation-common.cjs')
 // timestamp parse, one rule about what a truncated scan may claim.
 const {
   SCAN_WHOLE_SHEET,
+  resolveFillTarget,
   resolveOwnBoundSheet,
   scanPullTargetProjects,
 } = require('./stock-preparation-pull-target-scan.cjs')
@@ -369,8 +370,9 @@ async function pendingDecisionCountsByProjectNo(recordsApi, provisioning, target
  *                               the pre-N1 response byte for byte: no query against the bound sheet,
  *                               no audit window, no `sources` / `lastChangedFromPlm*` / `lastExportAt`
  *                               on a row, no `pullTargetReady` / `directoryMayBeIncomplete` /
- *                               `lastExportAtMayBeIncomplete` / `pullTargetScanCapped` on the
- *                               response, and no pull-target-only rows. See the cost section above
+ *                               `lastExportAtMayBeIncomplete` / `pullTargetScanCapped` /
+ *                               `fillTarget` on the response, and no pull-target-only rows. See the
+ *                               cost section above
  *                               for why the owner made this the default. 项目备料页 does not opt in —
  *                               it runs its own NARROWED scan and must not also pay an unnarrowed
  *                               one — so this whole feature costs that route exactly zero queries.
@@ -487,6 +489,24 @@ async function listOperatorProjectDirectory({
   const exportTimes = unioned
     ? await lastExportAtByProjectNo(audit, { tenantId: scope.tenantId })
     : { ready: false, bounded: false, byProjectNo: new Map() }
+  // THE DEEP-LINK HANDLE FOR THE SHEET THE OPERATOR FILLS — 「打开备料多维表」, and the reason this
+  // directory carries it at all.
+  //
+  // 项目备料页 has returned this handle since it shipped, but that page 404s until a project number is
+  // in hand, so every OTHER 「到多维表」 button on this workbench (the home page, the sync panel, the
+  // large-BOM panel) had no sheet id to route with and fell back to the plain multitable workbench —
+  // i.e. the operator landed on a table chooser instead of their own 备料主表.
+  //
+  // IT COSTS NO EXTRA IO AND OPENS NO NEW DOOR. `ownSheet` is the ALREADY-RESOLVED result of
+  // `resolveOwnBoundSheet` above — the same tenant gate, the same proof, the same object — and
+  // `resolveFillTarget` on top of it is a pure host-side id derivation. So this is the board's handle,
+  // from the board's gate, not a second answer to "which sheet may this caller be pointed at".
+  //
+  // AND IT IS TIED TO THE UNION OPT-IN because `ownSheet` is: a caller that did not ask for the
+  // pull-target union never resolved a bound sheet, and a `fillTarget: null` on that response would
+  // claim 「这台系统没有备料主表」 when the truth is 「没人问过」 — the same "absent, not false" rule the
+  // four union flags below are built on. VALUES-FREE: two ids, no customer row content.
+  const fillTarget = unioned ? await resolveFillTarget(provisioning, ownSheet, stagingProjectId) : null
 
   /**
    * ONE ROW, BUILT KEY BY KEY. Never a spread of a stored record — that is what S-02b pins, and it
@@ -652,6 +672,11 @@ async function listOperatorProjectDirectory({
       // into a closed enum is a new top-level key and therefore a new S-02a contract review; it is
       // named in the PR body as the follow-up rather than smuggled in here.
       pullTargetReady: pullScan.ready,
+      // THE DEEP-LINK HANDLE, `{ sheetId, viewId }` or null — see its own note above the computation.
+      // It is NOT a permission decision and this module cannot make one: multitable enforces access
+      // when the operator lands. Null means "no bound sheet this caller is proved to own", which the
+      // front end renders as 「打开多维表工作台」 rather than as a dead button.
+      fillTarget,
       // THE ANTI-SILENT-TRUNCATION FLAG (设计稿 N1). True when the union may be missing project
       // numbers, in all THREE ways that can happen: the pull-target scan hit `PULL_TARGET_MAX_PAGES`,
       // the scan broke mid-flight (`failed` — the pages already read are discarded, so the pull

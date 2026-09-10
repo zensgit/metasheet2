@@ -54,6 +54,18 @@ function codedGateRefusal(error: unknown): { status: number; code: string; messa
   return null
 }
 
+/**
+ * 2026-09-10 222 PLM 504 — opt-in for the EXPENSIVE schema listing (`?includeColumns=1` / `?detail=full`).
+ * Deliberately strict and default-OFF: anything unrecognised (including `includeColumns=0`,
+ * `detail=list`, or an array from a repeated query param) means the cheap list-only listing.
+ */
+export function wantsSchemaColumns(query: Record<string, unknown>): boolean {
+  const truthy = (value: unknown): boolean =>
+    typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+  if (truthy(query.includeColumns)) return true
+  return typeof query.detail === 'string' && query.detail.trim().toLowerCase() === 'full'
+}
+
 // A generic (non-coded) data-plane failure must NOT forward the driver's own text to the client:
 // mssql / pg / mysql connect and query errors embed host:port, database name and the login that was
 // tried (`Failed to connect to SQL Server: ConnectionError: Login failed for user 'x' ... 10.10.52.16:1433`).
@@ -1250,7 +1262,14 @@ export function dataSourcesRouter(): Router {
         await manager.connectDataSource(req.params.id)
       }
 
-      const schema = await adapter.getSchema(req.query.schema as string | undefined)
+      // 2026-09-10 222 PLM 504: LIST-ONLY by default. The UI's "库表结构" panel is a two-step flow (pick a table →
+      // read its fields), so the listing never needed every table's columns; on the customer PLM
+      // (several hundred tables) the old 4N+2 fan-out ran past nginx's proxy_read_timeout and the
+      // browser got a 504 HTML page instead of an answer. `?includeColumns=1` (or `?detail=full`)
+      // restores the old body for callers that consume columns off the listing; it is bounded by
+      // the schema-detail budget, which refuses with a coded 504 BEFORE the proxy gives up.
+      const includeColumns = wantsSchemaColumns(req.query)
+      const schema = await adapter.getSchema(req.query.schema as string | undefined, { includeColumns })
 
       return res.json({
         ok: true,

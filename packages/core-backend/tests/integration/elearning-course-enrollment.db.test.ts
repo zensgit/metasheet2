@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { Kysely, PostgresDialect } from 'kysely'
+import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
@@ -7,6 +7,10 @@ import {
   down as enrollmentDown,
   up as enrollmentUp,
 } from '../../src/db/migrations/zzzz20260901120000_create_elearning_course_enrollments'
+import {
+  down as notificationEventsDown,
+  up as notificationEventsUp,
+} from '../../src/db/migrations/zzzz20260908170000_extend_elearning_notification_events'
 import {
   ElearningCourseEnrollmentError,
   enrollElearningCourse,
@@ -367,7 +371,14 @@ describe('online course enrollment PostgreSQL authority', () => {
       'DELETE FROM elearning_course_enrollments WHERE org_id = $1',
       [first.orgId],
     )).rejects.toThrow('is immutable')
-    await expect(pool.query('TRUNCATE elearning_course_enrollments')).rejects.toThrow('is immutable')
+    // The latest schema rejects the parent truncate before its own trigger runs.
+    await expect(pool.query('TRUNCATE elearning_course_enrollments')).rejects.toMatchObject({ code: '0A000' })
+    // Prove the enrollment trigger itself still rejects truncation without its child FK.
+    // The rejected transaction restores the child migration automatically.
+    await expect(kysely.transaction().execute(async (tx) => {
+      await notificationEventsDown(tx)
+      await sql.raw('TRUNCATE elearning_course_enrollments').execute(tx)
+    })).rejects.toThrow('is immutable')
   })
 
   it('detects schema drift and refuses populated down while empty down/reapply stays valid', async () => {
@@ -389,8 +400,12 @@ describe('online course enrollment PostgreSQL authority', () => {
       'ALTER TABLE elearning_course_enrollments ALTER COLUMN course_version_id SET NOT NULL',
     )
     await kysely.transaction().execute((tx) => enrollmentUp(tx))
-    await kysely.transaction().execute((tx) => enrollmentDown(tx))
-    await kysely.transaction().execute((tx) => enrollmentUp(tx))
+    await kysely.transaction().execute(async (tx) => {
+      await notificationEventsDown(tx)
+      await enrollmentDown(tx)
+      await enrollmentUp(tx)
+      await notificationEventsUp(tx)
+    })
     await kysely.transaction().execute((tx) => enrollmentUp(tx))
   })
 })

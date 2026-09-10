@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { up as registryUp } from '../../src/db/migrations/zzzz20260413130000_create_platform_app_instances'
 
 import {
   up as jobsUp,
@@ -314,6 +315,10 @@ async function seedDepartment(
   pool: Pool,
   options: { memberCount: number; orgId: string },
 ): Promise<{ departmentId: string; integrationId: string; userIds: string[] }> {
+  await pool.query(`INSERT INTO platform_app_instances
+    (tenant_id, workspace_id, app_id, plugin_id, project_id, status, config_json)
+    VALUES ($1,$1,'elearning','plugin-elearning',$1,'active','{"notificationsEnabled":false}')
+    ON CONFLICT (workspace_id,app_id,instance_key) DO NOTHING`, [options.orgId])
   const integrationId = randomUUID()
   const departmentId = randomUUID()
   await pool.query(
@@ -402,6 +407,7 @@ beforeAll(async () => {
   })
   await createPrerequisites(firstPool)
   database = new Kysely({ dialect: new PostgresDialect({ pool: firstPool }) })
+  await migrate(registryUp)
   await migrate(jobsUp)
   await migrate(statsDailyUp)
   await migrate(statsMultitableUp)

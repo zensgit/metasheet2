@@ -130,6 +130,7 @@ async function setTriggers(enabled: boolean): Promise<void> {
 }
 
 async function cleanupOrg(org: string): Promise<void> {
+  await pool.query("DELETE FROM platform_app_instances WHERE app_id='elearning' AND workspace_id=$1", [org])
   await setTriggers(false)
   try {
     await pool.query(
@@ -282,6 +283,10 @@ async function seedPublishedAssignment(input: {
   org: string
   sizeBytes?: number
 }): Promise<Seed> {
+  await pool.query(`INSERT INTO platform_app_instances
+    (tenant_id, workspace_id, app_id, plugin_id, project_id, status, config_json)
+    VALUES ($1,$1,'elearning','plugin-elearning',$1,'active','{"notificationsEnabled":false}')
+    ON CONFLICT (workspace_id,app_id,instance_key) DO NOTHING`, [input.org])
   const sizeBytes = input.sizeBytes ?? 1024
   const userId = actor(`learner-${randomUUID().slice(0, 8)}`)
   const courseId = randomUUID()
