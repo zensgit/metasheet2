@@ -40,11 +40,20 @@
 // TYPE COERCION IS DERIVED, NEVER AUTHORED. The coercion for a target is read
 // off the pack's own `type` — exactly the discipline the pack itself uses for
 // `preserveOnRefresh`. A config cannot declare a coercion that disagrees with
-// the column it writes into. Legacy 备料 source data is all-string (the customer
-// system stores 总数量 / 毛胚* as `String` on purpose, so a user can type a unit
-// into the box), so the string->number and string->date conversion has to happen
-// SOMEWHERE; it belongs here and not in the pack, because a pack is schema and
-// performs no value work.
+// the column it writes into. Legacy 备料 source data is MOSTLY string (the
+// customer system stores 总数量 / 毛胚* as `String` on purpose, so a user can type
+// a unit into the box), so the string->number and string->date conversion has to
+// happen SOMEWHERE; it belongs here and not in the pack, because a pack is schema
+// and performs no value work.
+//
+// "MOSTLY", not "all": the 2026-09-10 field data falsified the original
+// all-string assumption. A customer PLM's numeric extension columns come back
+// from the mssql driver as JS `number`, and the first version of this module
+// refused every one of them into a per-cell conflict the confirmation page
+// cannot clear. A non-string SCALAR is therefore rendered as text for a
+// text-shaped column (see `scalarToText`) — a re-typing, not a
+// reinterpretation. Everything whose textual form would be a GUESS is still
+// refused.
 //
 // FAIL-CLOSED ON VALUES, NOT JUST ON SHAPE. A well-formed `"10"` becomes `10`.
 // A `"10件"` is REFUSED with a typed, values-free reason — it is never truncated
@@ -487,17 +496,70 @@ function coerceBoolean(value) {
   return { ok: false }
 }
 
+// A NON-string SCALAR arriving for a text-shaped column is rendered with the
+// JS default textual form and NOTHING else: no locale, no thousands
+// separator, no rounding, no padding, no unit. That is lossless in the only
+// sense that matters here — the text is exactly what `Number`/`BigInt`/
+// `Boolean` round-trips from — so nothing about the cell is reinterpreted,
+// only re-typed. Real customer PLM extension columns come back from the
+// mssql driver as `number` (numeric ExAttr / size / quantity columns).
+//
+// WHAT REFUSING THEM ACTUALLY COST — stated precisely, because this comment is
+// customer-facing evidence and the earlier draft overstated it. It did NOT drop
+// the row: the expander records the ext error and pushes the row anyway
+// (stock-preparation-bom-expansion.cjs:1357 `extErrors.forEach(addRowError)`
+// then `pushRow(rowResult.row)`), exactly as :61-62 above promises. What it cost
+// was (a) that ONE CELL's PLM value, and (b) one `manual_confirm` HOLD per
+// refused cell, riding beside the row's own add/update decision as a keyless
+// entry (stock-preparation-conflict-planner.cjs:1312 the `c2_row_error`
+// umbrella, :86 "WITHOUT an idempotencyKey"). The hold writes nothing itself
+// (stock-preparation-apply-writer.cjs:755 MANUAL_CONFIRM => `held`) and the
+// confirmation page cannot clear it, since the one confirmable conflict type is
+// `duplicate_expanded_key`
+// (apps/web/src/services/integration/stockPreparation/confirmationQueue.ts:59).
+//
+// An unclearable hold is not cosmetic, because apply is gated on the HOLD COUNT,
+// not on which rows hold: `counts[MANUAL_CONFIRM] > 0` without an explicit
+// `acceptManualConfirmHold` is a 409 for the WHOLE RUN
+// (stock-preparation-table-actions.cjs:1960, and the large-BOM twin at
+// stock-preparation-large-bom-jobs.cjs:1143), and the unattended project-sync
+// path deliberately never sends that flag (projectSync.ts:760 "Deliberately NOT
+// applying with acceptManualConfirmHold"). So on 2026-09-10 six unparseable
+// cells did not lose six rows: they parked six undrainable holds, and any apply
+// that does not explicitly opt into holds then refuses ALL 1137 planned rows
+// behind them. (Which apply route the customer took that day is not recorded
+// here — the field report covers the queue, not the write attempt.)
+//
+// A `Date`, object, array, symbol or function is still REFUSED: their
+// textual form is a guess (which timezone? which format?), and guessing is
+// what this module exists to prevent. `NaN`/`Infinity` are refused for the
+// same reason — they are not a value a source cell can mean.
+function scalarToText(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? { ok: true, value: String(value) } : { ok: false }
+  }
+  if (typeof value === 'boolean') return { ok: true, value: value ? 'true' : 'false' }
+  if (typeof value === 'bigint') return { ok: true, value: value.toString() }
+  return { ok: false }
+}
+
 function coerceString(value) {
-  // A `number` or `boolean` arriving for a `string` column is REFUSED rather
-  // than String()-ed: stringifying is exactly the silent reinterpretation this
-  // module exists to prevent, and legacy 备料 source data is all-string anyway.
-  if (typeof value !== 'string') return { ok: false }
-  return { ok: true, value: value.trim() }
+  if (typeof value === 'string') return { ok: true, value: value.trim() }
+  return scalarToText(value)
 }
 
 function coerceSelect(value, allowedValues) {
-  if (typeof value !== 'string') return { ok: false }
-  const text = value.trim()
+  let text
+  if (typeof value === 'string') {
+    text = value.trim()
+  } else {
+    // Same textual rendering as `string`, THEN the dictionary decides: a
+    // numeric option key must still be IN the installed vocabulary; being a
+    // number buys no exemption from the option check.
+    const scalar = scalarToText(value)
+    if (!scalar.ok) return { ok: false }
+    text = scalar.value
+  }
   if (!text) return { ok: false }
   // No installed dictionary for this column => any non-empty label is as much
   // as this module can check.

@@ -502,6 +502,12 @@ export interface MetaCapabilities {
   canDeleteRecord: boolean
   canManageFields: boolean
   canManageSheetAccess: boolean
+  /** Whole-sheet delete authority for the SELECTED sheet, server-derived by /context from the same gate
+   *  `DELETE /sheets/:sheetId` enforces (hasSheetLifecycleAuthority: global schema authority OR sheet-scoped
+   *  admin). Deliberately NOT a mirror of canManageFields, which a sheet-scoped full-write holder also has while
+   *  the route refuses them. Optional — absent/false ⇒ the delete entry is HIDDEN (fail-closed, same discipline as
+   *  pitResetEnabled). Single-sheet by construction: it describes the current sheet only, never the rail's others. */
+  canDeleteSheet?: boolean
   /** T8-2 Reset flag-visibility signal (#3239): flag-derived (MULTITABLE_ENABLE_PIT_RESET ∧ sheet-admin), set by
    *  /context. Optional — absent/false ⇒ the Reset entry is HIDDEN (the FE half of "inert until enabled"). */
   pitResetEnabled?: boolean

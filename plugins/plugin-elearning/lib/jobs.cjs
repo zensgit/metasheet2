@@ -22,6 +22,15 @@ WITH due AS (
   SELECT id, status, attempts
     FROM elearning_jobs
    WHERE kind = ANY($1::text[])
+     AND (kind = 'analytics_export_cleanup' OR EXISTS (
+       SELECT 1 FROM platform_app_instances app
+        WHERE app.tenant_id = elearning_jobs.org_id AND app.workspace_id = elearning_jobs.org_id
+          AND app.app_id = 'elearning' AND app.plugin_id = 'plugin-elearning'
+          AND app.instance_key = 'primary' AND app.status = 'active'
+          AND jsonb_typeof(app.config_json->'notificationsEnabled') = 'boolean'
+          AND (elearning_jobs.kind <> 'assignment_reminder'
+            OR app.config_json->'notificationsEnabled' = 'true'::jsonb)
+     ))
      AND status IN ('pending', 'running', 'failed')
      AND due_at <= now()
      AND (lease_until IS NULL OR lease_until < now())

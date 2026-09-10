@@ -1413,8 +1413,12 @@ export interface PluginServices {
    */
   elearningNotificationEligibility?: {
     check(
-      input: import('../services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput,
+      input: import('../services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput
+        | { orgId: string; deliveryId: string; recipientUserId: string },
     ): Promise<boolean>
+  }
+  elearningNotificationSource?: {
+    collect(): Promise<unknown>
   }
   /**
    * Optional L2 platform-channel provider. The provider MUST deduplicate the
@@ -1424,10 +1428,10 @@ export interface PluginServices {
    */
   elearningNotificationDispatch?: {
     dispatch(input: {
-      assignmentMemberId: string
+      assignmentMemberId: string | null
       deliveryId: string
       idempotencyKey: string
-      kind: 'assignment_reminder'
+      kind: 'assignment_reminder' | 'training_available' | 'result_published'
       orgId: string
       payload: Record<string, unknown>
       recipientUserId: string

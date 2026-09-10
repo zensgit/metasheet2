@@ -664,7 +664,7 @@ describe('the real app assembly (index.ts) registers this route behind the globa
     ])
   })
 
-  it('A5 — pre-gate prefix: the 14 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
+  it('A5 — pre-gate prefix: the 16 sites that run before the gate, inside setupMiddleware, are exactly this frozen list (the pre-authentication surface)', () => {
     const gateOrdinal = inSetup.findIndex((s) => s.start === subjectState(model, 'jwtAuthMiddleware').sites[0].start)
     const prefix = inSetup.slice(0, gateOrdinal).map((s) => ({ verb: s.verb, unconditional: s.unconditional, args: s.argProjection }))
     expect(prefix).toEqual([
@@ -677,6 +677,8 @@ describe('the real app assembly (index.ts) registers this route behind the globa
       { verb: 'use', unconditional: true, args: ['"/api/multitable/automation/webhooks"', 'automationWebhookJsonParser'] },
       { verb: 'post', unconditional: false, args: ['"/api/approval/attachments/refs"', 'approvalAttachmentRefsJsonParser'] },
       { verb: 'use', unconditional: false, args: ['elearningMediaPlaybackRouter'] },
+      { verb: 'use', unconditional: true, args: ['createElearningAppInstallationRouter()'] },
+      { verb: 'use', unconditional: false, args: ['"/api/elearning"', 'authenticateElearningApp', 'requireElearningAppInstallation()'] },
       { verb: 'use', unconditional: false, args: ['elearningPilotRuntime.router'] },
       { verb: 'use', unconditional: true, args: ['express.json()'] },
       { verb: 'use', unconditional: true, args: ['express.urlencoded()'] },
