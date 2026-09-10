@@ -140,9 +140,9 @@ POST /api/integration/stock-preparation/sandbox-target/ensure
 { "plm.stock-preparation.pull-bom.v1": { "target": "<未装 pack 时把 data.targetBinding 整段贴在这里;装了 pack 时贴合并后的结果,见下面 r7 订正>" } }
 ```
 
-> r7 订正:若装了 customer pack,**不要真的"整段"覆盖**——ensure 只返回 33 个 TEMPLATE 字段(20 个 `plm_system` + 13 个人工列),不带 pack 的 21 个 `ext_` 列,直接整段贴会静默丢掉 `ext_` 映射。正确做法是**合并**:ensure 的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId,旧物理列 id 依然有效),动手前先备份 `app.env`。**不想手工拼 JSON**的话,ensure 建完表后用 `node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> --pack <packFile> --pack-id <id> --action-fragment` 离线算出已经合并好的 `{ target, extensionFieldIds }`,直接贴它的 `target`。
+> r7 订正:若装了 customer pack,**不要真的"整段"覆盖**——ensure 只返回 33 个 TEMPLATE 字段(20 个 `plm_system` + 13 个人工列),不带 pack 的 21 个 `ext_` 列,直接整段贴会静默丢掉 `ext_` 映射。正确做法是**合并**:ensure 的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId,旧物理列 id 依然有效),动手前先备份 `app.env`。**不想手工拼 JSON**的话,ensure 建完表后用 `node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> --pack <packFile> --pack-id <id> --action-fragment` 离线算出已经合并好的 `{ target, extensionFieldIds }`,**这两半都要贴**:`target` 贴到 `target` 键,`extensionFieldIds` 贴到与 `target` 同级的 `extensionFieldIds` 键(只贴 `target` 会让完整性门 `assertTargetFieldMapCompleteness` 与一致性门 `assertExtFieldMappingAgreesWithAction` 继续按旧的 `extensionFieldIds` 校验,`stock-preparation-table-actions.cjs:529-532`/`:564-580`,新映射对不上会 422 `TARGET_SCHEMA_INCOMPLETE`);沿用同一批 `ext_` 列时,直接用这次输出的 `extensionFieldIds` 整体替换旧配置里的那个键,不要两次输出手工拼接。
 >
-> **2026-09-10 订正**:补充上面这条脚本指向,并把下面§「排障速查」表里对应行的"整段贴回去"同步改成同一口径,避免速查表脱离本节上下文时误导操作员整段覆盖。
+> **2026-09-10 订正**:补充上面这条脚本指向,并把下面§「排障速查」表里对应行的"整段贴回去"同步改成同一口径,避免速查表脱离本节上下文时误导操作员整段覆盖。**2026-09-10 二次订正**:上一版本条仍只教"直接贴它的 `target`",漏了 `extensionFieldIds` 这一半——已按脚本自述"the two halves an action config needs"(`stock-preparation-derive-target-binding.mjs:50-51`)与两道校验门补全。
 
 **`objectId` 改了,`sheetId` 必须一起重算,不能留用既有那个。** 沙箱门(`assertStockPrepApplySandboxAllowed`)**只读 objectId**,而 apply 写哪张表、导出读哪张表**只看 `target.sheetId`** —— 两者互相独立。「objectId 换成沙箱、sheetId 留正式表那个」会让门放行、行却写进**正式主表**,正是 D1=B 要避免的那件事。`fieldIdMap` 同理(列 id = `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变整张表的列 id 全变),且**必须是完整一整份(含 13 个人工列)**。
 

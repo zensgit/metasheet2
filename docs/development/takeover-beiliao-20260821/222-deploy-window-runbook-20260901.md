@@ -194,11 +194,14 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
      ```json
      { "plm.stock-preparation.pull-bom.v1": { "target": "<合并后的 targetBinding,而非 ensure 原始输出>" } }
      ```
-     **推荐做法是不要手工做 JSON 合并**:装了 pack 时,ensure 建完表之后,用 `scripts/ops/stock-preparation-derive-target-binding.mjs` 带上 `--pack <packFile>`(见下面的离线段落)离线算出**已经合并好**的 `{ target, extensionFieldIds }`,把它的 `target` 整段贴进 action 配置——这份输出的 `fieldIdMap` 是脚本按同一套哈希公式重算的 33 + pack 的 `ext_` 列全集,不是"ensure 输出 + 手工拼接",不会漏列也不会贴错物理列 id。
+     **推荐做法是不要手工做 JSON 合并**:装了 pack 时,ensure 建完表之后,用 `scripts/ops/stock-preparation-derive-target-binding.mjs` 带上 `--pack <packFile>`(见下面的离线段落)离线算出**已经合并好**的 `{ target, extensionFieldIds }`——**把这两半都贴进 action 配置,不能只贴 `target`**:`target` 贴到 `target` 键,`extensionFieldIds` 贴到与 `target` 同级的 `extensionFieldIds` 键。脚本自己的注释把这两半叫作"the two halves an action config needs"(`stock-preparation-derive-target-binding.mjs:50-51`)不是修辞——`action.extensionFieldIds` 是这份配置的 DURABLE 半边,完整性门(`assertTargetFieldMapCompleteness`,`stock-preparation-table-actions.cjs:529-532`)按它(而不是 `fieldIdMap` 的键)算"哪些 ext 列是必须绑的",只贴 `target` 而不换这个键,会让它继续读旧配置里的旧值(或空数组);旧值缺列时该门读不到新列就静默放过、留到 apply 时才在 `assertExtFieldMappingAgreesWithAction`(`:564-580`)撞上 422 `TARGET_SCHEMA_INCOMPLETE`。若这次要用的 `ext_` 列集合与旧配置一致,直接用脚本这次输出的 `extensionFieldIds` **整体替换**旧配置里的那个键即可,不要把两次输出的 `extensionFieldIds` 再手工拼接。这份输出的 `fieldIdMap` 是脚本按同一套哈希公式重算的 33 + pack 的 `ext_` 列全集,不是"ensure 输出 + 手工拼接",不会漏列也不会贴错物理列 id。
 
-     两件事都必须来自这次(合并后的)输出,不能手改:
+     三件事都必须来自这次(合并后的)输出,不能手改:
      - `sheetId` —— apply 写哪张表、导出读哪张表都只看它;
      - `fieldIdMap` —— 必须是完整的一整份(33 个 TEMPLATE 列 + 已装 pack 的全部 `ext_` 列;含 13 个人工列),少一列结转会在部署期被 `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` 拦下。
+     - `extensionFieldIds`(与 `target` 同级、单独一个键)—— 完整性门与运行期一致性门(见上一段)都只认它,不认 `fieldIdMap` 里出现过哪些 ext 键。
+
+     > **2026-09-10 订正**:上面这段此前只教"把 `target` 整段贴进 action 配置",漏了 `--action-fragment` 输出的另一半 `extensionFieldIds`——已按脚本自述与 `assertExtFieldMappingAgreesWithAction`/`assertTargetFieldMapCompleteness` 的实际校验补全。
 
      （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> [--pack <packFile> --pack-id <id>] --action-fragment` 能算出**同样**的绑定;带上 `--pack` 时输出已经是与 customer pack 的 `ext_` 列合并好的完整映射,不带 `--pack` 只算 33 列 TEMPLATE 部分。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒。)
 
