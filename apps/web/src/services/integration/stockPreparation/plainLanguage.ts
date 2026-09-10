@@ -643,6 +643,17 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '先把「确认队列」里待确认的行处理完,再回「项目接入」同步一次写入,然后再导出。',
     enNext: 'Clear the pending rows in the confirmation queue first, then go back to project onboarding and sync once to write the rows, and export again.',
   }),
+  // The SAME 404, read off the status line instead of the body — raised by the export client when a
+  // 404 comes back with no readable `error.code` (a proxy's own HTML 404, a stripped body). It cannot
+  // claim the project-has-no-rows reading as fact, so it names it as the usual cause and names the
+  // other one too; what it must NOT do is repeat 「稍后再点一次」, which is the one instruction that is
+  // wrong under both readings. Still values-free, still claims nothing about a write.
+  STOCK_PREPARATION_EXPORT_NOT_FOUND: Object.freeze({
+    zh: '没有找到可以导出的清单,文件没有下载,数据也没有变化。',
+    en: 'There was no list to export; no file was downloaded and nothing in your data changed.',
+    zhNext: '最常见的原因是这个项目还没有写入过备料行:先把「确认队列」里待确认的行处理完,再回「项目接入」同步一次写入,然后再导出。如果这个项目确实已经写入过行,请把这条报错给管理员(可能是服务地址没通),重复点击不会有变化。',
+    enNext: 'The usual cause is that this project has never had stock-preparation rows written to it: clear the pending rows in the confirmation queue, sync once from project onboarding, then export again. If this project definitely has rows already, give an administrator this error — the export address may not be reachable — and note that pressing the button again will not change the answer.',
+  }),
   // 通知下一步. Each one says what happened to the CHAIN, because that is the only thing at stake —
   // none of these four touched a single prep row.
   STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER: Object.freeze({

@@ -27,6 +27,9 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //   U-04 a CONFIRMABLE row is untouched — button enabled, no hint, form opens
 //   U-05 an unknown future conflict type degrades to the conservative branch: still disabled, still
 //        explained, never silently confirmable
+//   U-06 a KNOWN conflict type's hint actually says what is wrong (2026-09-10 field report (b))
+//   B-01..B-06 the 「全部不可确认」 banner: when it appears, what it counts, and the two ways a row
+//        fails to be 「still waiting on a person」 (settled status / no decisionId)
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -80,11 +83,17 @@ const SCOPE = { tenantId: 'default', workspaceId: 'default' }
 let app: VueApp<Element> | null = null
 let container: HTMLDivElement | null = null
 
-function row(conflictType: string, decisionId = 'decision_1') {
+/**
+ * `status` and a nullable `decisionId` are parameters, not constants, because the banner's whole
+ * scope is 「still waiting on a human」: `queue.rows` carries confirmed/superseded rows too whenever
+ * the status filter is set to 全部, and a row with no decisionId cannot be acted on at all. A helper
+ * that could only make `pending` rows with ids is a helper that cannot observe either rule.
+ */
+function row(conflictType: string, decisionId: string | null = 'decision_1', status = 'pending') {
   return {
     decisionId,
     conflictType,
-    status: 'pending',
+    status,
     resolutionAction: null,
     inputFingerprint: 'sha16:0123456789abcdef',
     sourceRevisionPresent: true,
@@ -203,7 +212,29 @@ describe('缺件行不该邀请操作员走进死胡同 — unconfirmable holds 
     const root = await loadQueueWith([row('some_future_conflict_type')])
 
     expect((q(root, 'stock-prep-confirmation-select') as HTMLButtonElement).disabled).toBe(true)
-    expect(q(root, 'stock-prep-confirmation-unconfirmable-hint')).not.toBeNull()
+    const hint = q(root, 'stock-prep-confirmation-unconfirmable-hint')
+    expect(hint).not.toBeNull()
+    // The CONSERVATIVE branch, verbatim: an unmapped type may not be described, only refused and
+    // routed. If a future edit made the mapped shape ("这条在这一页处理不了:…") the default, this page
+    // would be inventing a diagnosis for a code it has never seen.
+    expect(hint!.textContent).toContain('这一类目前还不能在这一页确认')
+    expect(hint!.textContent).not.toContain('这条在这一页处理不了')
+  })
+
+  // U-06 (2026-09-10 field report (b)): the six rows the materials admin was looking at were
+  // SOURCE_VALUE_NOT_A_STRING, and the row hint said only 「这一类目前还不能在这一页确认」 — true, and
+  // useless: it never said WHAT was wrong with the row. U-05 above pins that the conservative
+  // sentence is still what an UNKNOWN type gets; this pins that a KNOWN one is actually described,
+  // in the same words the 「什么情况」 column uses, plus the remedy that closes it.
+  it('U-06: a KNOWN conflict type is described in the row hint, in words, not just refused', async () => {
+    const root = await loadQueueWith([row('SOURCE_VALUE_NOT_A_STRING')])
+
+    const hint = q(root, 'stock-prep-confirmation-unconfirmable-hint')
+    expect(hint, 'the row is still refused, so the hint must still be there').not.toBeNull()
+    expect(hint!.textContent, 'the plain sentence for THIS conflict type').toContain('源值不是文本')
+    expect(hint!.textContent, 'and what would actually close it').toContain('源系统')
+    // The raw enum stays out of the sentence (it is on the 什么情况 cell's title instead).
+    expect(hint!.textContent).not.toContain('SOURCE_VALUE_NOT_A_STRING')
   })
 
   // 顶部一句话 (2026-09-10 field report): six SOURCE_VALUE_NOT_A_STRING rows, all pending, all
@@ -240,5 +271,50 @@ describe('缺件行不该邀请操作员走进死胡同 — unconfirmable holds 
     const root = await loadQueueWith([])
 
     expect(q(root, 'stock-prep-confirmation-all-unconfirmable-banner')).toBeNull()
+  })
+
+  // B-04..B-06 pin the banner's SCOPE, which B-01..B-03 could not observe because every row they
+  // build is `pending` with an id. The queue's status filter defaults to 全部, so `queue.rows`
+  // routinely holds confirmed/superseded rows next to the pending ones — and 「都不能在这里确认」 is a
+  // claim about the rows still waiting on a person, nothing else.
+  it('B-04: a CONFIRMED confirmable row neither hides the banner nor is counted by it', async () => {
+    const root = await loadQueueWith([
+      row('SOURCE_VALUE_NOT_A_STRING', 'decision_1'),
+      row('SOURCE_VALUE_NOT_A_STRING', 'decision_2'),
+      // Already handled — and of the one type this page CAN confirm. If the banner looked at every
+      // row instead of the pending ones, this single row would silence it and the operator would be
+      // back to opening two dead-end rows to learn why nothing works.
+      row('duplicate_expanded_key', 'decision_3', 'confirmed'),
+    ])
+
+    const banner = q(root, 'stock-prep-confirmation-all-unconfirmable-banner')
+    expect(banner, 'both rows still waiting are unconfirmable — a settled row does not change that').not.toBeNull()
+    expect(banner!.textContent, 'the count is the rows still waiting, not every row on screen').toContain('这 2 条')
+    expect(banner!.textContent).not.toContain('这 3 条')
+  })
+
+  it('B-05: a queue with rows but NOTHING pending shows no banner', async () => {
+    const root = await loadQueueWith([
+      row('SOURCE_VALUE_NOT_A_STRING', 'decision_1', 'confirmed'),
+      row('missing_component', 'decision_2', 'superseded'),
+    ])
+
+    expect(
+      q(root, 'stock-prep-confirmation-all-unconfirmable-banner'),
+      'nobody is waiting on anything here — 「这 2 条目前都不能确认」 would be a false alarm',
+    ).toBeNull()
+  })
+
+  it('B-06: a pending row with no decisionId is not counted — it is not a row anyone can act on', async () => {
+    const root = await loadQueueWith([
+      row('SOURCE_VALUE_NOT_A_STRING', 'decision_1'),
+      row('SOURCE_VALUE_NOT_A_STRING', 'decision_2'),
+      row('SOURCE_VALUE_NOT_A_STRING', null),
+    ])
+
+    const banner = q(root, 'stock-prep-confirmation-all-unconfirmable-banner')
+    expect(banner).not.toBeNull()
+    expect(banner!.textContent, 'a row without an id is not one of "these N rows"').toContain('这 2 条')
+    expect(banner!.textContent).not.toContain('这 3 条')
   })
 })

@@ -254,7 +254,20 @@ export async function exportStockPreparationPrepLines(
     }
     const code = typeof payload?.error?.code === 'string' && EXPORT_ERROR_CODE_PATTERN.test(payload.error.code)
       ? payload.error.code
-      : 'STOCK_PREPARATION_EXPORT_REQUEST_FAILED'
+      // THE BODY IS NOT ALWAYS OURS. The route answers a standard envelope
+      // (`{ok:false,error:{code}}`), so the branch above is the normal path — but a 404 that never
+      // reached the route (a reverse proxy's own HTML 404, a stripped body, a non-JSON gateway page)
+      // arrives here with nothing to read, and the generic fallback then tells a person
+      // 「稍后再点一次」 about a state that retrying will never change. The 2026-09-10 field report (a)
+      // has exactly that shape: the screen showed this client-side generic even though the server had
+      // answered 404 PREP_LINE_EXPORT_PROJECT_NOT_FOUND, which means the body the browser read did
+      // not carry the code. So a status-404 miss gets its own code, whose words cover BOTH readings
+      // (nothing has been written yet / the request never reached the export route) without asserting
+      // either as fact. Every other status keeps the pre-existing generic, byte for byte, and a 404
+      // that DOES carry a code still forwards that code untouched.
+      : response.status === 404
+        ? 'STOCK_PREPARATION_EXPORT_NOT_FOUND'
+        : 'STOCK_PREPARATION_EXPORT_REQUEST_FAILED'
     throw new StockPreparationConfirmApiError(response.status, code, null)
   }
   const blob = await response.blob()

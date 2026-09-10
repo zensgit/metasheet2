@@ -287,6 +287,26 @@ describe('stock-prep posture plain language', () => {
     expect(plain.zh).not.toBe(STOCK_PREP_ERROR_GENERIC.zh)
   })
 
+  // The status-derived twin of the entry above, for the 404 that reaches the client with no readable
+  // `error.code` — which is what field report (a) actually observed (the screen showed the client's
+  // own generic, a code no server sends). It may not claim the project-has-no-rows reading as fact,
+  // but it must not repeat 「稍后再点一次」 either: retrying is wrong under BOTH readings.
+  it('STOCK_PREPARATION_EXPORT_NOT_FOUND names both readings and never invites a retry', () => {
+    const plain = stockPrepErrorPlain('STOCK_PREPARATION_EXPORT_NOT_FOUND')
+    expect(plain).not.toBe(STOCK_PREP_ERROR_GENERIC)
+    expect(plain.zh).not.toBe(STOCK_PREP_ERROR_GENERIC.zh)
+    // Reading 1 — nothing written yet — with the same next step as the code-carrying 404.
+    expect(plain.zhNext).toContain('确认队列')
+    expect(plain.zhNext).toContain('项目接入')
+    // Reading 2 — the request never reached the export route — which only an admin can settle.
+    expect(plain.zhNext).toContain('管理员')
+    // The one instruction that is wrong either way.
+    expect(String(plain.zhNext), 'retrying changes nothing under either reading').not.toContain('稍后再点一次')
+    // Still a READ answer: it must claim nothing moved, and carry no value.
+    expect(plain.zh).toContain('数据也没有变化')
+    expect(`${plain.zh}${plain.zhNext ?? ''}`).not.toMatch(/\d{6,}/)
+  })
+
   // -------------------------------------------------------------------------
   // 2026-09-10 field report (b): the confirmation queue's 「什么情况」 column used to render
   // `row.conflictType` verbatim — a materials admin saw six `SOURCE_VALUE_NOT_A_STRING` rows with no

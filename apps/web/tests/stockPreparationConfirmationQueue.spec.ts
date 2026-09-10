@@ -52,10 +52,12 @@ vi.mock('vue-router', () => ({
 }))
 
 import {
+  exportStockPreparationPrepLines,
   listStockPreparationDecisions,
   readStockPreparationDecisionReadiness,
   readStockPreparationValueEntry,
 } from '../src/services/integration/stockPreparation/confirmationQueue'
+import { StockPreparationConfirmApiError } from '../src/services/integration/stockPreparation/confirmApi'
 import StockPreparationWorkspace from '../src/components/integration/stockPreparation/StockPreparationWorkspace.vue'
 import StockPreparationConfirmationQueueView from '../src/components/integration/stockPreparation/StockPreparationConfirmationQueueView.vue'
 import { STOCK_PREP_ADMIN_ACTION_PLAIN, stockPrepErrorPlain } from '../src/services/integration/stockPreparation/plainLanguage'
@@ -730,5 +732,82 @@ describe('2026-09-10: export failure names the actual reason, not the generic wr
     const cell = q('stock-prep-confirmation-conflict-type')
     expect(cell!.textContent).toBe('some_future_conflict_type')
     expect(cell!.getAttribute('title')).toBe('some_future_conflict_type')
+  })
+  // -------------------------------------------------------------------------
+  // THE OTHER HALF OF FIELD REPORT (a), and the one the first cut could not explain: the browser
+  // showed `STOCK_PREPARATION_EXPORT_REQUEST_FAILED` — a code NOTHING on the server ever sends; it
+  // exists only as this client's fallback (confirmationQueue.ts). So on 222 the body that reached
+  // the page had no readable `error.code`, and adding a plain sentence for
+  // PREP_LINE_EXPORT_PROJECT_NOT_FOUND alone would have left the observed screen unchanged. These
+  // four pin the fallback by STATUS: a 404 no longer degrades to the retry-shaped generic, whatever
+  // the body turns out to be, while every other status and every body that DOES carry a code are
+  // byte-for-byte what they were.
+  // -------------------------------------------------------------------------
+  it('a 404 whose body carries no error.code falls back to STOCK_PREPARATION_EXPORT_NOT_FOUND, not the retry-shaped generic', async () => {
+    apiFetchMock.mockImplementation(async () => new Response(
+      '<html><head><title>404 Not Found</title></head><body>nginx</body></html>',
+      { status: 404, headers: { 'Content-Type': 'text/html' } },
+    ))
+
+    const raised = await exportStockPreparationPrepLines({ tenantId: 'default', projectNo: PROJECT_NO })
+      .then(() => null, (error: unknown) => error)
+    expect(raised, 'a non-2xx export must reject, never resolve to an empty download').toBeInstanceOf(StockPreparationConfirmApiError)
+    expect((raised as StockPreparationConfirmApiError).status).toBe(404)
+    expect(
+      (raised as StockPreparationConfirmApiError).code,
+      'the code the operator saw on 222 was the generic — a 404 must not produce it',
+    ).toBe('STOCK_PREPARATION_EXPORT_NOT_FOUND')
+  })
+
+  it('a 404 that DOES carry error.code still forwards the server code untouched', async () => {
+    apiFetchMock.mockImplementation(async () => new Response(
+      JSON.stringify({ ok: false, error: { code: 'PREP_LINE_EXPORT_PROJECT_NOT_FOUND', message: 'no stock-preparation rows exist for this project' } }),
+      { status: 404 },
+    ))
+
+    const raised = await exportStockPreparationPrepLines({ tenantId: 'default', projectNo: PROJECT_NO })
+      .then(() => null, (error: unknown) => error)
+    expect((raised as StockPreparationConfirmApiError).code).toBe('PREP_LINE_EXPORT_PROJECT_NOT_FOUND')
+  })
+
+  it('a NON-404 failure keeps the pre-existing generic fallback, unchanged', async () => {
+    apiFetchMock.mockImplementation(async () => new Response('upstream exploded', {
+      status: 500,
+      headers: { 'Content-Type': 'text/plain' },
+    }))
+
+    const raised = await exportStockPreparationPrepLines({ tenantId: 'default', projectNo: PROJECT_NO })
+      .then(() => null, (error: unknown) => error)
+    expect((raised as StockPreparationConfirmApiError).status).toBe(500)
+    expect(
+      (raised as StockPreparationConfirmApiError).code,
+      'only 404 was re-shaped — a 5xx really is "try again shortly"',
+    ).toBe('STOCK_PREPARATION_EXPORT_REQUEST_FAILED')
+  })
+
+  it('the page turns a code-less 404 into words that do NOT invite an endless retry', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload())
+      if (path.includes('/prep-lines/export')) {
+        return new Response('<html>404</html>', { status: 404, headers: { 'Content-Type': 'text/html' } })
+      }
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-export') as HTMLButtonElement).click()
+    await flush()
+
+    const errorNode = q('stock-prep-confirmation-error')
+    expect(errorNode).not.toBeNull()
+    expect(errorNode!.textContent).toContain(stockPrepErrorPlain('STOCK_PREPARATION_EXPORT_NOT_FOUND').zh)
+    // THE SENTENCE THE OPERATOR ACTUALLY SAW ON 222 — it must be gone.
+    expect(errorNode!.textContent, 'retrying cannot fix either reading of this 404').not.toContain('稍后再点一次')
+    // Both readings are named, neither is asserted as fact.
+    expect(errorNode!.textContent).toContain('确认队列')
+    expect(errorNode!.textContent).toContain('管理员')
   })
 })
