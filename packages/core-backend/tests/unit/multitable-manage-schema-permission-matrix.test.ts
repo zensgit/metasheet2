@@ -51,6 +51,8 @@ import {
 
 const SHEET_ID = 'sheet_ms'
 const PEOPLE_SHEET_ID = 'sheet_ms_people'
+/** A plugin-provisioned sheet: has a `plugin_multitable_object_registry` row (the managed-sheet signal). */
+const MANAGED_SHEET_ID = 'sheet_ms_managed'
 const BASE_ID = 'base_ms'
 const FLD_QTY = 'fld_qty'
 const REVISION_ID = 'rev_field_update_1'
@@ -106,6 +108,7 @@ function freshFields(): Map<string, Field> {
 
 const SHEET_ROW = { id: SHEET_ID, base_id: BASE_ID, name: 'Stock prep', description: null }
 const PEOPLE_SHEET_ROW = { id: PEOPLE_SHEET_ID, base_id: BASE_ID, name: 'People', description: '__metasheet_system:people__' }
+const MANAGED_SHEET_ROW = { id: MANAGED_SHEET_ID, base_id: BASE_ID, name: 'Stock prep target (plugin)', description: null }
 const BASE_ROW = { id: BASE_ID, name: 'Ops', icon: 'table', color: '#1677ff', owner_id: 'owner_1', workspace_id: 'ws_1' }
 
 // A recorded FIELD revision — routes the config-restore preview/execute gate onto canManageFields
@@ -124,7 +127,7 @@ const FIELD_REVISION = {
   created_at: '2026-08-30T00:00:00.000Z',
 }
 
-function createMockPool(fields: Map<string, Field>) {
+function createMockPool(fields: Map<string, Field>, scopedCodes: string[] = []) {
   const fieldsForSheet = (sheetId: string) =>
     Array.from(fields.values())
       .filter((f) => f.sheet_id === sheetId)
@@ -133,8 +136,16 @@ function createMockPool(fields: Map<string, Field>) {
   const query = vi.fn(async (sql: string, params?: unknown[]): Promise<QueryResult> => {
     const p = (i: number) => String(params?.[i] ?? '')
 
-    // No sheet-scoped assignments anywhere: isolates the GLOBAL capability derivation.
-    if (sql.includes('FROM spreadsheet_permissions')) return { rows: [] }
+    // No sheet-scoped assignments by default: isolates the GLOBAL capability derivation. The
+    // `canDeleteSheet` section opts into scoped `spreadsheet_permissions` rows on SHEET_ID (as a
+    // direct user grant), because that is where delete authority and canManageFields diverge.
+    if (sql.includes('FROM spreadsheet_permissions')) {
+      return { rows: scopedCodes.map((code) => ({ sheet_id: SHEET_ID, perm_code: code, subject_type: 'user' })) }
+    }
+    // Managed-sheet guard (DELETE /sheets/:sheetId): only the plugin-provisioned sheet has a registry row.
+    if (sql.includes('FROM plugin_multitable_object_registry')) {
+      return { rows: p(0) === MANAGED_SHEET_ID ? [{ '?column?': 1 }] : [] }
+    }
     if (sql.includes('FROM field_permissions')) return { rows: [] }
     if (sql.includes('FROM record_permissions')) return { rows: [] }
     if (sql.includes('FROM meta_view_permissions')) return { rows: [] }
@@ -145,7 +156,7 @@ function createMockPool(fields: Map<string, Field>) {
     if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
 
     if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL')) {
-      return { rows: p(0) === SHEET_ID ? [{ id: SHEET_ID }] : [] }
+      return { rows: [SHEET_ID, PEOPLE_SHEET_ID, MANAGED_SHEET_ID].includes(p(0)) ? [{ id: p(0) }] : [] }
     }
     if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
       return { rows: p(0) === SHEET_ID ? [{ ...SHEET_ROW }] : [] }
@@ -164,6 +175,7 @@ function createMockPool(fields: Map<string, Field>) {
     if (/FROM meta_sheets\b/.test(sql) && sql.includes('WHERE id = $1')) {
       if (p(0) === SHEET_ID) return { rows: [{ ...SHEET_ROW }] }
       if (p(0) === PEOPLE_SHEET_ID) return { rows: [{ ...PEOPLE_SHEET_ROW }] }
+      if (p(0) === MANAGED_SHEET_ID) return { rows: [{ ...MANAGED_SHEET_ROW }] }
       return { rows: [] }
     }
 
@@ -239,13 +251,14 @@ function createMockPool(fields: Map<string, Field>) {
 
 // ── app harness ────────────────────────────────────────────────────────────────
 
-async function buildApp(tier: TierId, fields: Map<string, Field>): Promise<Express> {
-  return (await buildAppWithPool(tier, fields)).app
+async function buildApp(tier: TierId, fields: Map<string, Field>, scopedCodes: string[] = []): Promise<Express> {
+  return (await buildAppWithPool(tier, fields, scopedCodes)).app
 }
 
 async function buildAppWithPool(
   tier: TierId,
   fields: Map<string, Field>,
+  scopedCodes: string[] = [],
 ): Promise<{ app: Express; pool: ReturnType<typeof createMockPool> }> {
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
@@ -257,7 +270,7 @@ async function buildAppWithPool(
 
   const { poolManager } = await import('../../src/integration/db/connection-pool')
   const { univerMetaRouter } = await import('../../src/routes/univer-meta')
-  const pool = createMockPool(fields)
+  const pool = createMockPool(fields, scopedCodes)
   vi.spyOn(poolManager, 'get').mockReturnValue(pool as any)
 
   const app = express()
@@ -507,22 +520,28 @@ describe('multitable:manage-schema — actor x route matrix', () => {
         canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
         canManageFields: true, canManageSheetAccess: true, canManageViews: true,
         canComment: true, canManageAutomation: true, canExport: true, canSendNotification: true,
+        canDeleteSheet: true,
       },
       // THE DEFECT, PINNED: every record capability stays true, canManageFields flips to false.
+      // canDeleteSheet follows the DELETE route's own gate (hasSheetLifecycleAuthority): the
+      // operator holds neither global schema authority nor a sheet-admin grant.
       T2_write_only: {
         canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
         canManageFields: false, canManageSheetAccess: false, canManageViews: true,
         canComment: false, canManageAutomation: false, canExport: true, canSendNotification: true,
+        canDeleteSheet: false,
       },
       T3_write_and_schema: {
         canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
         canManageFields: true, canManageSheetAccess: false, canManageViews: true,
         canComment: false, canManageAutomation: false, canExport: true, canSendNotification: true,
+        canDeleteSheet: true,
       },
       T4_read_only: {
         canRead: true, canCreateRecord: false, canEditRecord: false, canDeleteRecord: false,
         canManageFields: false, canManageSheetAccess: false, canManageViews: false,
         canComment: false, canManageAutomation: false, canExport: true, canSendNotification: false,
+        canDeleteSheet: false,
       },
     }
 
@@ -535,7 +554,10 @@ describe('multitable:manage-schema — actor x route matrix', () => {
       })
     }
 
-    it('T2 vs T3 differ in EXACTLY one capability key — the change widens nothing else', async () => {
+    // canDeleteSheet is DERIVED from the same global schema authority the DELETE route gates on, so it
+    // moves together with canManageFields here (T3 holds multitable:manage-schema; T2 does not). It is a
+    // projection of an existing authority, not a new one — the record plane is still untouched.
+    it('T2 vs T3 differ in EXACTLY the schema-authority keys — the change widens nothing else', async () => {
       const t2 = await on(await buildApp('T2_write_only', freshFields()))
         .get('/api/multitable/context').query({ sheetId: SHEET_ID })
       vi.resetModules()
@@ -544,7 +566,7 @@ describe('multitable:manage-schema — actor x route matrix', () => {
       const a = t2.body.data.capabilities as Record<string, unknown>
       const b = t3.body.data.capabilities as Record<string, unknown>
       const changed = Object.keys(b).filter((k) => a[k] !== b[k])
-      expect(changed).toEqual(['canManageFields'])
+      expect(changed).toEqual(['canManageFields', 'canDeleteSheet'])
     })
   })
 
@@ -687,7 +709,9 @@ describe('multitable:manage-schema — actor x route matrix', () => {
       }
     })
 
-    it('flag=true widens NOTHING else — only canManageFields changes for T2, and T4 stays untouched', async () => {
+    // The flag re-opens the legacy FUSED behaviour, and R14 (sheet delete) is one of the routes it
+    // re-opens (asserted above) — so the delete projection follows canManageFields under the flag too.
+    it('flag=true widens NOTHING else — only the schema-authority keys change for T2, and T4 stays untouched', async () => {
       const flagOff = await on(await buildApp('T2_write_only', freshFields()))
         .get('/api/multitable/context').query({ sheetId: SHEET_ID })
       process.env[LEGACY_FLAG] = 'true'
@@ -696,7 +720,7 @@ describe('multitable:manage-schema — actor x route matrix', () => {
         .get('/api/multitable/context').query({ sheetId: SHEET_ID })
       const a = flagOff.body.data.capabilities as Record<string, unknown>
       const b = flagOn.body.data.capabilities as Record<string, unknown>
-      expect(Object.keys(b).filter((k) => a[k] !== b[k])).toEqual(['canManageFields'])
+      expect(Object.keys(b).filter((k) => a[k] !== b[k])).toEqual(['canManageFields', 'canDeleteSheet'])
 
       // A read-only actor gains nothing from the flag: it never held multitable:write.
       vi.resetModules()
@@ -733,4 +757,89 @@ describe('the second derivation (Yjs bridge / OAPI) obeys the same rule', () => 
     expect(derive([], true).canManageFields).toBe(true)
     expect(derive(['multitable:read'], false).canManageFields).toBe(false)
   })
+})
+
+// ── managed-sheet guard on DELETE /sheets/:sheetId ────────────────────────────
+// A plugin-provisioned sheet has a DETERMINISTIC id that `ensureObject` re-inserts with
+// ON CONFLICT DO NOTHING and reads back with `deleted_at IS NULL` (provisioning.ts). Soft-deleting
+// it therefore does not hide a table — it breaks that plugin's provisioning until someone finds the
+// UI-less restore endpoint. The route refuses such a delete with a coded 409 AFTER the authority
+// gate (an unauthorised actor never learns that a sheet is plugin-owned) and BEFORE the write.
+// The signal is the `plugin_multitable_object_registry` row (src/multitable/sheet-delete-guard.ts).
+describe('DELETE /sheets/:sheetId — managed sheets are refused even for whole-sheet authority', () => {
+  const softDeleteWrites = (pool: ReturnType<typeof createMockPool>) =>
+    pool.query.mock.calls.filter((c) => /^\s*UPDATE\s+meta_sheets\s+SET\s+deleted_at\s*=\s*now\(\)/i.test(String(c[0])))
+
+  it('plugin-provisioned sheet (registry row) => 409 SHEET_PLUGIN_MANAGED for T1 admin, and NO soft-delete is issued', async () => {
+    const { app, pool } = await buildAppWithPool('T1_admin', freshFields())
+    const res = await on(app).delete(`/api/multitable/sheets/${MANAGED_SHEET_ID}`)
+    expect(res.status).toBe(409)
+    expect(res.body.ok).toBe(false)
+    expect(res.body.error.code).toBe('SHEET_PLUGIN_MANAGED')
+    // values-free: the refusal names no plugin, project or sheet id
+    expect(res.body.error.message).not.toContain(MANAGED_SHEET_ID)
+    expect(softDeleteWrites(pool)).toEqual([])
+  })
+
+  it('system People sheet (description sentinel) => 409 SHEET_SYSTEM_MANAGED for T1 admin, and NO soft-delete is issued', async () => {
+    const { app, pool } = await buildAppWithPool('T1_admin', freshFields())
+    const res = await on(app).delete(`/api/multitable/sheets/${PEOPLE_SHEET_ID}`)
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('SHEET_SYSTEM_MANAGED')
+    expect(softDeleteWrites(pool)).toEqual([])
+  })
+
+  // Positive control: the guard is not "everything is 409" — an ordinary sheet still soft-deletes.
+  it('ordinary sheet (no registry row, no sentinel) => 200 for T1 admin, and the soft-delete IS issued', async () => {
+    const { app, pool } = await buildAppWithPool('T1_admin', freshFields())
+    const res = await on(app).delete(`/api/multitable/sheets/${SHEET_ID}`)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, data: { deleted: SHEET_ID } })
+    expect(softDeleteWrites(pool)).toHaveLength(1)
+  })
+
+  // AUTHZ-FIRST: the managed-ness of a sheet is not disclosed to an actor who could not delete it anyway.
+  it('T2 write-only operator on the managed sheet => 403 (authority first), never 409', async () => {
+    const { app, pool } = await buildAppWithPool('T2_write_only', freshFields())
+    const res = await on(app).delete(`/api/multitable/sheets/${MANAGED_SHEET_ID}`)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual(SHEET_DELETE_FORBIDDEN_BODY)
+    expect(softDeleteWrites(pool)).toEqual([])
+  })
+
+  it('restore is NOT guarded: resurrecting a managed sheet is what repairs the broken state (T1 => 404 here: nothing is deleted)', async () => {
+    const app = await buildApp('T1_admin', freshFields())
+    const res = await on(app).post(`/api/multitable/sheets/${MANAGED_SHEET_ID}/restore`)
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+})
+
+// ── canDeleteSheet (GET /context) mirrors the DELETE route's own gate ────────────
+// The FE affordance reads this bit and nothing else. It must equal hasSheetLifecycleAuthority
+// (global schema authority OR sheet-scoped ADMIN) — NOT the post-grant canManageFields, which a
+// sheet-scoped full-write holder also has while the route refuses them (§7 of
+// multitable-display-rename-authority.test.ts). Regressing the derivation to canManageFields
+// turns the first cell below red.
+describe('GET /context capabilities.canDeleteSheet — same gate as DELETE /sheets/:sheetId', () => {
+  it('sheet-scoped FULL WRITE (spreadsheet:write), no global schema authority => canManageFields true BUT canDeleteSheet false', async () => {
+    const app = await buildApp('T4_read_only', freshFields(), ['spreadsheet:read', 'spreadsheet:write'])
+    const res = await on(app).get('/api/multitable/context').query({ sheetId: SHEET_ID })
+    expect(res.status).toBe(200)
+    expect(res.body.data.capabilities.canManageFields).toBe(true)
+    expect(res.body.data.capabilities.canDeleteSheet).toBe(false)
+    // and the route agrees with its own projection
+    const del = await on(app).delete(`/api/multitable/sheets/${SHEET_ID}`)
+    expect(del.status).toBe(403)
+  })
+
+  it('sheet-scoped ADMIN (spreadsheet:admin), no global schema authority => canDeleteSheet true, and the route agrees', async () => {
+    const app = await buildApp('T4_read_only', freshFields(), ['spreadsheet:read', 'spreadsheet:admin'])
+    const res = await on(app).get('/api/multitable/context').query({ sheetId: SHEET_ID })
+    expect(res.status).toBe(200)
+    expect(res.body.data.capabilities.canDeleteSheet).toBe(true)
+    const del = await on(app).delete(`/api/multitable/sheets/${SHEET_ID}`)
+    expect(del.status).toBe(200)
+  })
+
 })

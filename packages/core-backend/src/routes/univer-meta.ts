@@ -99,6 +99,7 @@ import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 // from a pack's — but the stamp itself is about THIS route owning what it writes.
 import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
+import { resolveSheetDeleteRefusal, sheetDeleteRefusalBody } from '../multitable/sheet-delete-guard'
 import {
   isElearningProjectionBaseIdCandidate,
   isElearningProjectionSheetIdCandidate,
@@ -7690,6 +7691,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // sheet-admin, mirroring revert-preview/-execute's own canManageSheetAccess (D2) floor exactly.
             sheetRevertEnabled: (String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true,
             personalViewsEnabled: isPersonalViewsEnabled(),
+            // Whole-sheet delete authority for the SELECTED sheet — the same server-derived, FE-read-only
+            // pattern as pitResetEnabled. Deliberately NOT `capabilities.canManageFields`: that is
+            // post-scope-grant and true for a sheet-scoped full-write holder, who
+            // `DELETE /sheets/:sheetId` refuses (hasSheetLifecycleAuthority = GLOBAL schema authority
+            // OR sheet-scoped ADMIN). Mirroring the route's own gate here is what keeps the FE delete
+            // affordance from being shown to an actor the server will 403. Single-sheet by construction
+            // (`selectedSheetScope` is resolved for `effectiveSheetId` only), so the FE may show a
+            // delete entry for the CURRENT sheet only, never for the rail's other rows.
+            canDeleteSheet: effectiveSheetId ? hasSheetLifecycleAuthority(access, selectedSheetScope) : false,
           },
           capabilityOrigin,
           fieldPermissions,
@@ -13971,6 +13981,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const { access, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!hasSheetLifecycleAuthority(access, sheetScope)) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // MANAGED-SHEET GUARD (after the authority gate, so an unauthorised actor never learns that a
+      // sheet is plugin-owned; before the write). A plugin-provisioned sheet has a deterministic id
+      // that `ensureObject` re-inserts with ON CONFLICT DO NOTHING and reads back with
+      // `deleted_at IS NULL` — soft-deleting it does not "hide a table", it breaks that plugin's
+      // provisioning until someone finds the UI-less restore endpoint. System sheets (People
+      // directory, projections) are refused on the same path. See multitable/sheet-delete-guard.ts
+      // for why the registry row is the authoritative signal.
+      const deleteRefusal = await resolveSheetDeleteRefusal(pool.query.bind(pool), sheetId)
+      if (deleteRefusal) return res.status(409).json(sheetDeleteRefusalBody(deleteRefusal))
       const sheetDeleteFencePlan = await prepareSheetLinkDeleteFencePlan(
         pool.query.bind(pool),
         sheetId,
