@@ -33,12 +33,14 @@
 //     (e.g. a custom allowlist/validation code from scripts/ops/bridge-agent-readonly.ps1), and that
 //     is DELIBERATELY left unregistered so it degrades to the generic unknown-error label rather than
 //     rendering dynamic, agent-supplied text.
-//   - External-write fence (3): the three permanent/closed WRITE refusals the data factory's own
+//   - External-write fence (4): the closed WRITE refusals the data factory's own
 //     run & push surface can receive. `K3_WISE_PIPELINE_RUN_DISABLED` is thrown by
 //     plugins/plugin-integration-core/lib/pipeline-runner.cjs at target resolution;
 //     `K3_WISE_EXTERNAL_WRITE_DISABLED` is the single closed token of
 //     plugins/plugin-integration-core/lib/k3-external-write-permanent-fence.cjs (E4 / HG v1.2 §10.1),
-//     raised at four independent layers; `OUTBOUND_HTTP_WRITE_DISABLED` is the shut-gate code of
+//     raised at four independent layers; `K3_WISE_REPLAY_DISABLED` refuses dead-letter replay for a K3
+//     target (pipeline-runner.cjs, same file, ahead of the run gate); `OUTBOUND_HTTP_WRITE_DISABLED` is
+//     the shut-gate code of
 //     plugins/plugin-integration-core/lib/outbound-http-write-gate.cjs. These are DESIGN POSTURE,
 //     not faults a caller can fix by retrying — the labels say so, because the un-labeled fallback
 //     ("未知错误") reads like a transient outage and sends operators hunting for a switch that does
@@ -91,13 +93,20 @@ export const BRIDGE_AGENT_ERROR_CODES = [
   'BRIDGE_AGENT_TEST_FAILED',
 ] as const
 
-// External-write fence — the closed WRITE refusals. Local mirror of three server constants that live
-// in three different modules (there is no single server-exported array spanning them), kept in ONE
-// list here so tests/integrationErrorCodeLabels.spec.ts can require each owning module and fail RED if
-// a token is ever renamed on the server without this table following.
+// External-write fence — WRITE refusals reachable from the data factory surface. Local mirror of
+// constants that live in three different server modules (there is no single server-exported array
+// spanning them), kept in ONE list here so tests/integrationErrorCodeLabels.spec.ts can require each
+// owning module and fail RED if a token is renamed server-side without this table following.
+//
+// NOT the complete set of write-refusal codes in the runtime, and this comment must not be read as
+// claiming that. `C6_WRITE_APPLY_DISABLED` (http-routes.cjs, a per-deployment env switch —
+// INTEGRATION_C6_WRITE_APPLY_DISABLED — not the permanent fence) is knowingly LEFT OUT: labelling it
+// with this family's "permanent, by design" voice would misdescribe a setting an operator's own
+// deployment can change. It degrades to the generic unknown label, which is honest for it.
 export const EXTERNAL_WRITE_FENCE_ERROR_CODES = [
   'K3_WISE_PIPELINE_RUN_DISABLED',
   'K3_WISE_EXTERNAL_WRITE_DISABLED',
+  'K3_WISE_REPLAY_DISABLED',
   'OUTBOUND_HTTP_WRITE_DISABLED',
 ] as const
 
@@ -153,7 +162,7 @@ export type IntegrationErrorCode =
   | (typeof K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES)[number]
   // Bridge Agent readonly adapter (4) — see BRIDGE_AGENT_ERROR_CODES above
   | (typeof BRIDGE_AGENT_ERROR_CODES)[number]
-  // External-write fence (3) — see EXTERNAL_WRITE_FENCE_ERROR_CODES above
+  // External-write fence (4) — see EXTERNAL_WRITE_FENCE_ERROR_CODES above
   | (typeof EXTERNAL_WRITE_FENCE_ERROR_CODES)[number]
   // Dead-letter known mainline (10) — see DEAD_LETTER_MAINLINE_ERROR_CODES above
   | (typeof DEAD_LETTER_MAINLINE_ERROR_CODES)[number]
@@ -353,7 +362,7 @@ export const INTEGRATION_ERROR_CODE_LABELS: Record<IntegrationErrorCode, Integra
     en: 'The connection test failed to execute.',
   },
 
-  // --- External-write fence (3) ---
+  // --- External-write fence (4) ---
   // Wording is deliberately aligned with services/integration/stockPreparation/plainLanguage.ts
   // (STOCK_PREP_POSTURE_PLAIN.k3ExternalWrite / .outboundHttpWrite), so the install page and the run
   // surface tell an operator the same story. Every hint names the REMEDY that exists (export, or write
@@ -364,6 +373,14 @@ export const INTEGRATION_ERROR_CODE_LABELS: Record<IntegrationErrorCode, Integra
     hint: {
       zh: 'K3 目标永久只读，不接受写回。dry-run 预览仍然可用；请把清洗结果导出，或改用多维表目标。',
       en: 'K3 targets are permanently read-only and accept no write-back. Dry-run preview still works; export the cleansed result, or switch to a Metasheet table target.',
+    },
+  },
+  K3_WISE_REPLAY_DISABLED: {
+    zh: '这条死信不能重放到 K3 目标',
+    en: 'This dead letter cannot be replayed to its K3 target.',
+    hint: {
+      zh: 'K3 目标永久只读，重放同样是写入，所以一并关闭。请把这条记录导出或落到多维表后人工处理。',
+      en: 'K3 targets are permanently read-only, and a replay is still a write, so it is closed too. Export the record or land it in a Metasheet table and handle it there.',
     },
   },
   K3_WISE_EXTERNAL_WRITE_DISABLED: {
@@ -479,6 +496,30 @@ export function integrationErrorCodeHint(
   const label = integrationErrorCodeLabel(code, locale)
   if (!label?.hint) return null
   return locale === 'zh-CN' ? label.hint.zh : label.hint.en
+}
+
+/**
+ * The status-line string for a FAILURE: the registered label (plus its hint) when `code` is registered,
+ * otherwise the caller-supplied fallback verbatim.
+ *
+ * Lives here, and takes the code as a plain argument, so both data-factory surfaces (the workbench view
+ * and the K3 preset page) humanize failures through ONE implementation without this module having to
+ * import the API-error class — the call sites resolve the code themselves.
+ *
+ * Narrows what is shown; never invents it. An unregistered code yields the fallback unchanged, which is
+ * the pre-existing behaviour at every call site.
+ */
+export function integrationErrorCodeMessageOr(
+  code: string | undefined | null,
+  fallback: string,
+  locale: AppLocale,
+): string {
+  const label = integrationErrorCodeLabel(code, locale)
+  if (!label) return fallback
+  const isZh = locale === 'zh-CN'
+  const text = isZh ? label.zh : label.en
+  const hint = label.hint ? (isZh ? label.hint.zh : label.hint.en) : ''
+  return hint ? `${text}｜${hint}` : text
 }
 
 export type IntegrationErrorCodeEntry = { code: IntegrationErrorCode } & IntegrationErrorLabel

@@ -675,6 +675,39 @@ export function integrationApiErrorCode(error: unknown): string | null {
   return error instanceof IntegrationApiError ? error.code : null
 }
 
+// F01 — WHERE THE PRODUCT CODE ACTUALLY IS.
+//
+// The envelope's top-level `error.code` is NOT reliably the product code. plugin-integration-core's
+// `sendError` (http-routes.cjs) derives it through `inferErrorCode`, which is
+// `error.code || error.name || 'INTERNAL_ERROR'` — so any thrown error WITHOUT an own `.code` reports
+// its CLASS NAME there. `PipelineRunnerError` (pipeline-runner.cjs) is exactly that shape: it sets
+// `this.details = details` and nothing else, and every one of its refusals puts the product code in
+// `details.code`. A K3 `/run` refusal therefore arrives as
+//
+//   422 { ok:false, error:{ code:'PipelineRunnerError',
+//                           details:{ code:'K3_WISE_PIPELINE_RUN_DISABLED', pipelineId } } }
+//
+// (pinned server-side by plugins/plugin-integration-core/__tests__/http-routes-plm-k3wise-poc.test.cjs,
+// which asserts that exact status + pair). Reading only the top level made every such code unlookup-able.
+//
+// Errors that DO carry their own code — `HttpRouteError`, `ExternalWriteDryRunError` — are unaffected:
+// the top level keeps winning for them. The class-name shape is recognised by its `Error` SUFFIX rather
+// than by an allowlist of class names, so a future typed error with no own `.code` is handled without
+// another edit here. The test is case-sensitive and registered codes are SCREAMING_SNAKE, so a real
+// code can never be mistaken for a class name (`UNKNOWN_ERROR` ends in 'ERROR', not 'Error').
+//
+// This only ever changes WHICH string is used to look up a humanized label. It cannot widen a scope,
+// relax a guard, or make a failed response look successful.
+function integrationEnvelopeErrorCode(payload: IntegrationApiEnvelope<unknown> | null): string | undefined {
+  const rawEnvelopeCode = payload?.error?.code
+  const envelopeCode = typeof rawEnvelopeCode === 'string' && rawEnvelopeCode.trim() ? rawEnvelopeCode : undefined
+  const rawDetailsCode = (payload?.error?.details as { code?: unknown } | undefined)?.code
+  const detailsCode = typeof rawDetailsCode === 'string' && rawDetailsCode.trim() ? rawDetailsCode : undefined
+  if (!detailsCode) return envelopeCode
+  if (!envelopeCode) return detailsCode
+  return /Error$/.test(envelopeCode) ? detailsCode : envelopeCode
+}
+
 export async function parseIntegrationResponse<T>(response: Response): Promise<T> {
   let payload: IntegrationApiEnvelope<T> | null = null
   try {
@@ -684,7 +717,7 @@ export async function parseIntegrationResponse<T>(response: Response): Promise<T
   }
   if (!response.ok || payload?.ok === false) {
     const message = payload?.error?.message || `${response.status} ${response.statusText}`.trim()
-    throw new IntegrationApiError(message || 'Integration API request failed', payload?.error?.code, response.status)
+    throw new IntegrationApiError(message || 'Integration API request failed', integrationEnvelopeErrorCode(payload), response.status)
   }
   return payload?.data as T
 }

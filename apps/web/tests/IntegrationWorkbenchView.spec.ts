@@ -1323,11 +1323,19 @@ describe('IntegrationWorkbenchView', () => {
         return jsonResponse([])
       }
       if (url.endsWith('/run')) {
-        // The shape pipeline-runner.cjs actually returns at its K3 target-resolution gate: the closed
-        // token, a values-free English message, and a status the caller cannot fix by retrying.
+        // The shape the SERVER actually emits, not a convenient one. `PipelineRunnerError` has no own
+        // `.code`, so http-routes `inferErrorCode` reports its CLASS NAME at the top of the envelope and
+        // the product code rides in `details.code`; `inferHttpStatus` maps /PipelineRunner/ to 422.
+        // Pinned server-side by
+        // plugins/plugin-integration-core/__tests__/http-routes-plm-k3wise-poc.test.cjs, which asserts
+        // exactly statusCode 422 + error.code 'PipelineRunnerError' + error.details.code
+        // 'K3_WISE_PIPELINE_RUN_DISABLED'.
         return new Response(
-          JSON.stringify({ ok: false, error: { code: 'K3_WISE_PIPELINE_RUN_DISABLED', message: englishRefusal } }),
-          { status: 403, headers: { 'Content-Type': 'application/json' } },
+          JSON.stringify({
+            ok: false,
+            error: { code: 'PipelineRunnerError', message: englishRefusal, details: { code: 'K3_WISE_PIPELINE_RUN_DISABLED', pipelineId: 'pipe_pasted_k3' } },
+          }),
+          { status: 422, headers: { 'Content-Type': 'application/json' } },
         )
       }
       throw new Error(`unexpected URL ${url}`)

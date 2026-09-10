@@ -439,7 +439,7 @@ import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
 import PageShell from '../components/layout/PageShell.vue'
 import PageHeader from '../components/layout/PageHeader.vue'
-import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint, integrationErrorCodeLabel } from '../services/integration/errorCodeLabels'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint, integrationErrorCodeMessageOr } from '../services/integration/errorCodeLabels'
 import { isK3ExternalWriteTargetKind } from '../services/integration/writeFence'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { getDataSourceSchema, listDataSources } from '../data-sources/api'
@@ -3406,7 +3406,9 @@ async function replayDeadLetter(deadLetter: IntegrationDeadLetter): Promise<void
       setStatus(`Replay 成功：dead letter ${deadLetter.id} 已重放${warning}`, 'success')
     }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    // Replay against a K3 target is refused with K3_WISE_REPLAY_DISABLED — a PipelineRunnerError, so the
+    // code rides in details.code and only reaches here because parseIntegrationResponse now reads it.
+    setStatus(integrationFailureMessage(error), 'error')
   } finally {
     replayingDeadLetterId.value = ''
     confirmReplayDeadLetterId.value = ''
@@ -3437,18 +3439,15 @@ async function savePipeline(): Promise<void> {
 // accurate, English, and reads to an operator like an outage they should escalate. The label says the
 // same thing in the product's own voice and names the remedy.
 //
-// Exact-key lookup only (integrationErrorCodeLabel own-key access), so an UNREGISTERED code falls
-// through to the pre-existing message text rather than to a guessed label — narrowing what is shown,
-// never inventing it.
+// Exact-key lookup only (integrationErrorCodeMessageOr -> integrationErrorCodeLabel own-key access), so
+// an UNREGISTERED code falls through to the pre-existing message text rather than to a guessed label —
+// narrowing what is shown, never inventing it. The K3 preset page calls the same shared helper.
 function integrationFailureMessage(error: unknown): string {
-  const label = integrationErrorCodeLabel(integrationApiErrorCode(error), locale.value)
-  if (label) {
-    const isZh = locale.value === 'zh-CN'
-    const text = isZh ? label.zh : label.en
-    const hint = label.hint ? (isZh ? label.hint.zh : label.hint.en) : ''
-    return hint ? `${text}｜${hint}` : text
-  }
-  return error instanceof Error ? error.message : String(error)
+  return integrationErrorCodeMessageOr(
+    integrationApiErrorCode(error),
+    error instanceof Error ? error.message : String(error),
+    locale.value,
+  )
 }
 
 async function executePipeline(dryRun: boolean): Promise<void> {

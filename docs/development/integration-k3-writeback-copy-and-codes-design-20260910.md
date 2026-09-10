@@ -70,6 +70,11 @@ selectedTargetSystem.kind
 
 原本 `throw new Error(message)`，code 被丢掉，所以前端根本没有查表的钥匙。改为抛 `IntegrationApiError extends Error`：
 
+> **终审更正（F01，2026-09-10）**：信封顶层的 `error.code` **不一定是产品码**。`sendError` 经 `inferErrorCode`
+> 回落 `error.name`，而 `PipelineRunnerError` 没有自己的 `.code` —— 它把码放在 `details.code`。所以
+> `/run` 与死信重放的拒绝，顶层是**类名**。取码改由 `integrationEnvelopeErrorCode` 负责：details.code 只在顶层缺失或
+> 顶层是类名形状（`/Error$/`，大小写敏感）时顶上，自带 `.code` 的错误类不受影响。详见验证记录 §7。
+
 - `instanceof Error` 仍然成立，`error.message` **逐字节不变**——约 50 个既有调用点行为不动。
 - code 是**附加元数据**，不放宽、不重派生、不洗 message；调用方拿不到响应里原本没有的任何东西。
 - 配套导出 `integrationApiErrorCode(error)`：只有真的收到非空 code 的 `IntegrationApiError` 才回答非 null，绝不猜。
@@ -91,6 +96,11 @@ selectedTargetSystem.kind
 - **不是 disabled**：禁用态读起来是「还不行」——像是某个权限或设置能打开的东西；而这是「永远不行」。同理去掉勾选框：为一个永远不会发生的推送征求同意不是一个值得提供的选择。
 - 未命中 -> 与 G10 之前逐字节相同。
 - **Dry-run 不受影响**（栅栏禁的是写，不是预览；砍掉预览是 §15.2 E4-05 的失败模式）。
+
+> **终审补（F05，2026-09-10）**：同一处理也施加到 K3 预设页 `IntegrationK3WiseSetupView.vue` —— 初稿只改了它的口，
+> 没动它的「执行物料」「执行 BOM」按钮和「允许真实执行 Pipeline」勾选，等于把工作台刚消除的矛盾原样搬到了另一页。
+> 并且那页有自己的私有 `parseIntegrationResponse`（抛裸 `Error`），本 PR 的 `IntegrationApiError` 不流经它，
+> 所以在它的 catch 上接人话化本来会是 no-op；副本已删除，改用 `workbench.ts` 的唯一实现。
 
 ## 4. 绝对断言的边界
 

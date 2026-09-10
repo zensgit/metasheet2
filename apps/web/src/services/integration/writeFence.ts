@@ -51,7 +51,8 @@ export function isK3ExternalWriteTargetKind(kind: string | null | undefined): bo
  * The one-line posture badge. Byte-identical to K3_FENCE_NOTICE in
  * plugins/plugin-integration-core/lib/integration-hub-overview.cjs, which is what the 对接总览 panel on
  * the same screen already renders for these kinds — the run panel must not invent a second phrasing for
- * the same fact.
+ * the same fact. tests/integrationErrorCodeLabels.spec.ts requires that server constant and asserts the
+ * two are equal, so "byte-identical" is a checked property rather than a comment.
  */
 export const K3_WRITE_FENCE_NOTICE = Object.freeze({
   zh: '只读·永不写入',
@@ -66,18 +67,4 @@ export const K3_WRITE_FENCE_NOTICE = Object.freeze({
 export const K3_WRITE_FENCE_EXPLANATION = Object.freeze({
   zh: 'K3 目标永久只读（只读·永不写入），不提供 Save-only 推送。dry-run 预览后请导出清洗结果，或把它写入多维表。',
   en: 'K3 targets are permanently read-only (read-only · never writes) and offer no Save-only push. Preview with dry-run, then export the cleansed result or write it into a Metasheet table.',
-})
-
-/**
- * The mainline "what this page delivers" sentence, shared by the page subtitle and the 运行与推送 panel.
- *
- * SCOPED ON PURPOSE. It says K3 is permanently read-only (an absolute the fence actually enforces) but
- * only that generic HTTP outbound write is OFF BY DEFAULT — not that it never writes. `http` really does
- * have an upsert path behind outbound-http-write-gate.cjs, and a deployment that authorizes a target in
- * the server-side allowlist makes it write. The hub-overview register refuses to call `http` 只读 for
- * exactly this reason, and this copy must not overclaim where that register would not.
- */
-export const WRITE_TARGET_POSTURE_COPY = Object.freeze({
-  zh: '先 dry-run，再导出或写入多维表。K3 目标永久只读、不写回；通用 HTTP 外发默认关闭。',
-  en: 'Dry-run first, then export or write into a Metasheet table. K3 targets are permanently read-only and never written back; generic outbound HTTP write is off by default.',
 })

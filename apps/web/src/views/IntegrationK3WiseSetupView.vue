@@ -196,7 +196,7 @@
         <details class="k3-setup__panel k3-setup__collapsible-panel">
           <summary class="k3-setup__panel-summary">
             <span>执行 Pipeline</span>
-            <small>{{ form.allowLivePipelineRun ? 'run enabled' : 'dry-run first' }}</small>
+            <small>{{ k3WriteFenced ? '仅 dry-run' : (form.allowLivePipelineRun ? 'run enabled' : 'dry-run first') }}</small>
           </summary>
           <button
             class="k3-setup__btn k3-setup__btn--full"
@@ -207,6 +207,7 @@
             {{ runningPipeline === 'material:dry-run' ? 'Dry-run 中' : 'Dry-run 物料' }}
           </button>
           <button
+            v-if="!k3WriteFenced"
             class="k3-setup__btn k3-setup__btn--full"
             type="button"
             :disabled="isPipelineRunDisabled('material', false)"
@@ -223,6 +224,7 @@
             {{ runningPipeline === 'bom:dry-run' ? 'Dry-run 中' : 'Dry-run BOM' }}
           </button>
           <button
+            v-if="!k3WriteFenced"
             class="k3-setup__btn k3-setup__btn--full"
             type="button"
             :disabled="isPipelineRunDisabled('bom', false)"
@@ -230,6 +232,13 @@
           >
             {{ runningPipeline === 'bom:run' ? '执行中' : '执行 BOM' }}
           </button>
+          <!-- G10 终审 F05: the page header already says K3 is never written to. Leaving 执行物料 /
+               执行 BOM next to it was the same contradiction the workbench had — an operator would only
+               find out at the 422. Dry-run stays: it is a read the frozen ruling deliberately keeps
+               (external-write-dry-run.cjs), so hiding it would break the one thing this page can do. -->
+          <p v-if="k3WriteFenced" class="k3-setup__hint" data-testid="k3-live-run-fenced-notice">
+            {{ k3WriteFenceExplanation }}
+          </p>
           <ul v-if="materialRunIssues.length || bomRunIssues.length" class="k3-setup__issues k3-setup__issues--compact">
             <li v-for="issue in [...materialRunIssues, ...bomRunIssues]" :key="`run:${issue.field}:${issue.message}`">
               {{ issue.message }}
@@ -893,7 +902,7 @@
         <details class="k3-setup__section k3-setup__details">
           <summary class="k3-setup__section-summary">
             <span>Pipeline 执行参数</span>
-            <small>创建 pipeline 后会回填 ID；真实执行默认关闭</small>
+            <small>{{ k3WriteFenced ? '创建 pipeline 后会回填 ID；K3 目标只能 dry-run' : '创建 pipeline 后会回填 ID；真实执行默认关闭' }}</small>
           </summary>
           <div class="k3-setup__grid">
             <label class="k3-setup__field">
@@ -920,7 +929,7 @@
               <span>Cursor</span>
               <input v-model.trim="form.pipelineCursor" autocomplete="off" />
             </label>
-            <label class="k3-setup__check">
+            <label v-if="!k3WriteFenced" class="k3-setup__check">
               <input v-model="form.allowLivePipelineRun" type="checkbox" />
               <span>允许真实执行 Pipeline</span>
             </label>
@@ -934,7 +943,13 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
-import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint, integrationErrorCodeLabel } from '../services/integration/errorCodeLabels'
+import {
+  integrationErrorCodeDisplayLabel,
+  integrationErrorCodeHint,
+  integrationErrorCodeLabel,
+  integrationErrorCodeMessageOr,
+} from '../services/integration/errorCodeLabels'
+import { K3_WRITE_FENCE_EXPLANATION, isK3ExternalWriteTargetKind } from '../services/integration/writeFence'
 import {
   K3_WISE_SQLSERVER_KIND,
   K3_WISE_WEBAPI_KIND,
@@ -989,11 +1004,30 @@ import {
   type K3WiseReferenceCompletenessPreview,
 } from '../services/integration/k3WiseSetup'
 import {
+  integrationApiErrorCode,
   isIntegrationScopedProjectId,
   normalizeIntegrationProjectId,
 } from '../services/integration/workbench'
 
 const { locale } = useLocale()
+
+// G10 终审 F05: this page's entire subject is the K3 WISE WebAPI target, and that kind sits inside the
+// permanent external-write fence. Asked through the SHARED predicate rather than written as a literal
+// `false`, so the day a superseding ADR lifts the ban these controls come back with the fence itself,
+// instead of waiting for someone to remember this file. Constant for the lifetime of the page — the
+// kind is not user-selectable here.
+const k3WriteFenced = isK3ExternalWriteTargetKind(K3_WISE_WEBAPI_KIND)
+const k3WriteFenceExplanation = K3_WRITE_FENCE_EXPLANATION.zh
+
+// Same shared humanizer the workbench view uses. Reaches a registered label only because
+// k3WiseSetup.ts's calls now go through workbench.ts's parser and therefore throw IntegrationApiError.
+//
+// `fallback` is REQUIRED to be supplied by the caller on this page rather than defaulting to
+// `error.message`: this surface is values-free (its lane-F specs assert the server's free text never
+// renders), so an unregistered failure must fall back to fixed copy, not to server prose.
+function integrationFailureMessage(error: unknown, fallback: string): string {
+  return integrationErrorCodeMessageOr(integrationApiErrorCode(error), fallback, locale.value)
+}
 
 const form = reactive(createDefaultK3WiseSetupForm())
 const webApiSystems = ref<IntegrationExternalSystem[]>([])
@@ -1290,7 +1324,7 @@ const STAGING_OPEN_TARGET_COPY: Record<string, { name: string; description: stri
   },
   integration_run_log: {
     name: '运行日志',
-    description: '查看 dry-run、Save-only 推送和回写结果。',
+    description: '查看 dry-run 预览与导出记录。',
   },
 }
 
@@ -1673,7 +1707,9 @@ async function createPipelineTemplates(): Promise<void> {
 
 function isPipelineRunDisabled(target: K3WisePipelineTarget, dryRun: boolean): boolean {
   const issues = target === 'material' ? materialRunIssues.value : bomRunIssues.value
-  return Boolean(runningPipeline.value || issues.length > 0 || (!dryRun && !form.allowLivePipelineRun))
+  // The fence term is defence in depth behind the v-if above: it can only ever DISABLE, and it keeps a
+  // live run unreachable even if a future template change re-renders the button.
+  return Boolean(runningPipeline.value || issues.length > 0 || (!dryRun && (k3WriteFenced || !form.allowLivePipelineRun)))
 }
 
 function isPipelineObservationDisabled(target: K3WisePipelineTarget): boolean {
@@ -1711,6 +1747,10 @@ async function executePipeline(target: K3WisePipelineTarget, dryRun: boolean): P
     setStatus(issues[0].message, 'error')
     return
   }
+  if (!dryRun && k3WriteFenced) {
+    setStatus(k3WriteFenceExplanation, 'error')
+    return
+  }
   if (!dryRun && !form.allowLivePipelineRun) {
     setStatus('真实执行前需要勾选允许真实执行 Pipeline', 'error')
     return
@@ -1728,8 +1768,11 @@ async function executePipeline(target: K3WisePipelineTarget, dryRun: boolean): P
     })
     await refreshPipelineObservation(target, true)
     setStatus(`${target === 'material' ? '物料' : 'BOM'} Pipeline ${dryRun ? 'dry-run' : 'run'} 已提交`, 'success')
-  } catch {
-    setStatus('提交 Pipeline 运行失败，详情见服务端日志。', 'error')
+  } catch (error) {
+    // Was a bare `catch` printing a fixed sentence, so a K3 refusal was indistinguishable from a network
+    // blip. A REGISTERED code now renders its label + remedy; anything else keeps the old fixed copy
+    // rather than leaking server prose onto this values-free page.
+    setStatus(integrationFailureMessage(error, '提交 Pipeline 运行失败，详情见服务端日志。'), 'error')
   } finally {
     runningPipeline.value = ''
   }

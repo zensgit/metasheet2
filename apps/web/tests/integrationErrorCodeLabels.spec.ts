@@ -19,8 +19,10 @@ import {
 } from '../src/services/integration/errorCodeLabels'
 import {
   K3_EXTERNAL_WRITE_TARGET_KINDS,
+  K3_WRITE_FENCE_NOTICE,
   isK3ExternalWriteTargetKind,
 } from '../src/services/integration/writeFence'
+import { integrationApiErrorCode, parseIntegrationResponse } from '../src/services/integration/workbench'
 import { readFileSync } from 'node:fs'
 
 const require = createRequire(import.meta.url)
@@ -41,6 +43,16 @@ const {
 } = require(path.join(pluginLib, 'k3-external-write-permanent-fence.cjs'))
 const { OUTBOUND_HTTP_WRITE_DISABLED: SERVER_OUTBOUND_HTTP_WRITE_DISABLED } =
   require(path.join(pluginLib, 'outbound-http-write-gate.cjs'))
+const { K3_FENCE_NOTICE: SERVER_K3_FENCE_NOTICE } =
+  require(path.join(pluginLib, 'integration-hub-overview.cjs'))
+
+// A JSON error envelope exactly as plugin-integration-core `sendError` emits it.
+function envelopeResponse(status: number, error: Record<string, unknown>): Response {
+  return new Response(JSON.stringify({ ok: false, error }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
 
 function expectLabeled(code: string): void {
   const label = integrationErrorCodeLabel(code, 'en')
@@ -56,8 +68,8 @@ function expectLabeled(code: string): void {
 // server's English refusal prose), which reads like an outage and sends an operator hunting for a
 // switch that does not exist. Every assertion below is about that being impossible again.
 describe('external-write fence codes (G10)', () => {
-  it('mirrors the exact server tokens for all three fence codes', () => {
-    expect(EXTERNAL_WRITE_FENCE_ERROR_CODES.length).toBe(3)
+  it('mirrors the exact server tokens for the fence codes', () => {
+    expect(EXTERNAL_WRITE_FENCE_ERROR_CODES.length).toBe(4)
     // Two of the three are exported constants — required, never text-parsed, like every other family.
     expect(EXTERNAL_WRITE_FENCE_ERROR_CODES).toContain(SERVER_K3_EXTERNAL_WRITE_DISABLED)
     expect(EXTERNAL_WRITE_FENCE_ERROR_CODES).toContain(SERVER_OUTBOUND_HTTP_WRITE_DISABLED)
@@ -71,6 +83,72 @@ describe('external-write fence codes (G10)', () => {
       'pipeline-runner.cjs no longer spells K3_WISE_PIPELINE_RUN_DISABLED — resync errorCodeLabels.ts',
     ).toContain("code: 'K3_WISE_PIPELINE_RUN_DISABLED'")
     expect(EXTERNAL_WRITE_FENCE_ERROR_CODES).toContain('K3_WISE_PIPELINE_RUN_DISABLED')
+    // Same story for the replay refusal — also an inline literal, also in a PipelineRunnerError detail.
+    expect(
+      runnerSource,
+      'pipeline-runner.cjs no longer spells K3_WISE_REPLAY_DISABLED — resync errorCodeLabels.ts',
+    ).toContain("code: 'K3_WISE_REPLAY_DISABLED'")
+    expect(EXTERNAL_WRITE_FENCE_ERROR_CODES).toContain('K3_WISE_REPLAY_DISABLED')
+  })
+
+  it('the fenced-kind badge is byte-identical to the server notice the same screen renders', () => {
+    // The 对接总览 panel on the workbench renders writeCapability.notice straight from the server for these
+    // kinds. Two different sentences for one fact on one screen is how a reader learns to distrust both.
+    expect(K3_WRITE_FENCE_NOTICE.zh).toBe(SERVER_K3_FENCE_NOTICE.zh)
+    expect(K3_WRITE_FENCE_NOTICE.en).toBe(SERVER_K3_FENCE_NOTICE.en)
+  })
+
+  // F01 — the code an operator needs is NOT at the top of the envelope for the whole
+  // PipelineRunnerError family. `inferErrorCode` falls back to `error.name`, so /run refusals report the
+  // CLASS there and carry the product code in details.code. Reading only the top level meant
+  // K3_WISE_PIPELINE_RUN_DISABLED could never be looked up, and the label was dead weight.
+  it('parseIntegrationResponse recovers the product code from details.code for the /run refusal shape', async () => {
+    // The exact shape pinned server-side by
+    // plugins/plugin-integration-core/__tests__/http-routes-plm-k3wise-poc.test.cjs.
+    const response = envelopeResponse(422, {
+      code: 'PipelineRunnerError',
+      message: 'K3 WISE live writes are C6-only: use external-write dry-run + apply',
+      details: { code: 'K3_WISE_PIPELINE_RUN_DISABLED', pipelineId: 'pipe_1' },
+    })
+
+    const error = await parseIntegrationResponse(response).then(
+      () => { throw new Error('expected parseIntegrationResponse to reject') },
+      (thrown: unknown) => thrown,
+    )
+
+    expect(integrationApiErrorCode(error)).toBe('K3_WISE_PIPELINE_RUN_DISABLED')
+    // The message is still carried verbatim — this change adds a code, it does not rewrite text.
+    expect((error as Error).message).toBe('K3 WISE live writes are C6-only: use external-write dry-run + apply')
+    // …and that code is registered, so a call site renders人话 rather than the English prose above.
+    expect(integrationErrorCodeDisplayLabel('K3_WISE_PIPELINE_RUN_DISABLED', 'zh-CN')).not.toBe('未知错误')
+  })
+
+  it('a real top-level product code still wins over a details.code', async () => {
+    // HttpRouteError / ExternalWriteDryRunError DO carry their own `.code`; the details fallback must not
+    // shadow them. The class-name test is case-sensitive, so SCREAMING_SNAKE codes are never mistaken for
+    // a class (note UNKNOWN_ERROR ends in 'ERROR', not 'Error').
+    const response = envelopeResponse(403, {
+      code: 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+      message: 'K3 external write-back is permanently disabled',
+      details: { code: 'SOMETHING_ELSE', targetKind: 'erp:k3-wise-webapi' },
+    })
+
+    const error = await parseIntegrationResponse(response).then(
+      () => { throw new Error('expected parseIntegrationResponse to reject') },
+      (thrown: unknown) => thrown,
+    )
+    expect(integrationApiErrorCode(error)).toBe('K3_WISE_EXTERNAL_WRITE_DISABLED')
+
+    const unknownTop = envelopeResponse(500, {
+      code: 'UNKNOWN_ERROR',
+      message: 'boom',
+      details: { code: 'NOT_THIS_ONE' },
+    })
+    const unknownError = await parseIntegrationResponse(unknownTop).then(
+      () => { throw new Error('expected parseIntegrationResponse to reject') },
+      (thrown: unknown) => thrown,
+    )
+    expect(integrationApiErrorCode(unknownError)).toBe('UNKNOWN_ERROR')
   })
 
   it('every fence code renders a humanized label plus a 只读 hint, never the unknown fallback', () => {

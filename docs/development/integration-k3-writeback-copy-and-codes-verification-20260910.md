@@ -6,17 +6,21 @@
 
 ## 1. 改动文件
 
+（相对基线 `a22955f83`，含 2026-09-10 终审修复；数字取自 `git diff a22955f83 --numstat`。）
+
 | 文件 | +/- |
 | --- | --- |
-| `apps/web/src/services/integration/writeFence.ts`（新增） | +83 |
-| `apps/web/src/services/integration/errorCodeLabels.ts` | +58 / -1 |
-| `apps/web/src/services/integration/workbench.ts` | +28 / -1 |
-| `apps/web/src/views/IntegrationWorkbenchView.vue` | +46 / -12 |
+| `apps/web/src/services/integration/writeFence.ts`（新增） | +70 |
+| `apps/web/src/services/integration/errorCodeLabels.ts` | +99 / -1 |
+| `apps/web/src/services/integration/workbench.ts` | +61 / -1 |
+| `apps/web/src/services/integration/k3WiseSetup.ts` | +11 / -16 |
+| `apps/web/src/views/IntegrationWorkbenchView.vue` | +46 / -13 |
 | `apps/web/src/components/integration/IntegrationPipelineRunSection.vue` | +24 / -3 |
-| `apps/web/src/views/IntegrationK3WiseSetupView.vue` | +3 / -3 |
-| `apps/web/tests/integrationErrorCodeLabels.spec.ts` | +67 |
+| `apps/web/src/views/IntegrationK3WiseSetupView.vue` | +54 / -11 |
+| `apps/web/tests/integrationErrorCodeLabels.spec.ts` | +145 |
 | `apps/web/tests/IntegrationPipelineRunSection.spec.ts` | +33 |
-| `apps/web/tests/IntegrationWorkbenchView.spec.ts` | +105 / -18 |
+| `apps/web/tests/IntegrationWorkbenchView.spec.ts` | +113 / -18 |
+| `apps/web/tests/IntegrationK3WiseSetupView.spec.ts` | +104 |
 
 `plugins/`、`packages/` 零改动。全部文件保持 CRLF 工作树行尾（`core.autocrlf=true`，blob 仍是 LF），`git diff --numstat` 无整文件行尾漂移。
 
@@ -40,9 +44,19 @@
 | --- | --- | --- |
 | `K3_WISE_EXTERNAL_WRITE_DISABLED` | `k3-external-write-permanent-fence.cjs`（导出常量） | `require` |
 | `OUTBOUND_HTTP_WRITE_DISABLED` | `outbound-http-write-gate.cjs`（导出常量） | `require` |
-| `K3_WISE_PIPELINE_RUN_DISABLED` | `pipeline-runner.cjs:448` **内联字面量，未导出** | 定向源码扫描（见设计 §6.1） |
+| `K3_WISE_PIPELINE_RUN_DISABLED` | `pipeline-runner.cjs` **内联字面量，未导出** | 定向源码扫描（见设计 §6.1） |
+| `K3_WISE_REPLAY_DISABLED` | `pipeline-runner.cjs` **内联字面量，未导出** | 定向源码扫描 |
 
-`grep` 全仓确认这三个是运行时实际抛出的全部写禁类码名；`OUTBOUND_HTTP_WRITE_TARGET_NOT_AUTHORIZED` / `OUTBOUND_HTTP_WRITE_ALLOWLIST_INVALID` 存在但按设计 §3.2 有意不登记。
+**（F12 更正，2026-09-10 终审）** 本节初稿写的是「`grep` 全仓确认这三个是运行时实际抛出的全部写禁类码名」。
+这是一句被证伪的绝对断言，撤回。运行时还有下列写禁/写拒类码，初稿没查到：
+
+| 码 | 出处 | 本次处置 |
+| --- | --- | --- |
+| `K3_WISE_REPLAY_DISABLED` | `pipeline-runner.cjs` 死信重放闸门（`PipelineRunnerError.details.code`） | **已登记**（终审补） |
+| `C6_WRITE_APPLY_DISABLED` | `http-routes.cjs`，`HttpRouteError`，由部署级 env `INTEGRATION_C6_WRITE_APPLY_DISABLED` 触发 | **有意不登记**：它是部署可改的开关，不是永久栅栏，用本 family「设计如此、永久」的口吻描述它会误导；退化为通用未知标签对它是诚实的 |
+| `OUTBOUND_HTTP_WRITE_TARGET_NOT_AUTHORIZED` / `OUTBOUND_HTTP_WRITE_ALLOWLIST_INVALID` | `outbound-http-write-gate.cjs` | **有意不登记**：部署侧 allowlist 事实，面向运维日志而非数据工厂操作员 |
+
+正确的表述是：**已登记的 4 条 = 数据工厂操作员在本 PR 接线的路径上会撞到的写禁码**，不是运行时写禁码的全集。
 
 ## 3. 命令与退出码
 
@@ -104,4 +118,101 @@
 1. 客户端隐藏按钮**不是保证**，是止损。可证明的保证仍然只有 `plugins/plugin-integration-core` 里的四层栅栏；本次未在客户端新增任何「代替」它的守卫，也未削弱它。
 2. 「粘贴已有 pipeline ID」场景下前端看不见目标 kind，Save-only 按钮照常渲染 —— 这正是新增的 code 人话化所覆盖的那条路（用例 6 就是这个场景）。两个机制互补，缺一不可。
 3. `K3_WISE_PIPELINE_RUN_DISABLED` 的守卫是源码扫描而非 `require`，强度弱于其他两条（见设计 §6.1）。
-4. 与在飞 PR #5587 的冲突面：本次在 `IntegrationWorkbenchView.vue` 触及 `:5`、`:642` 一带、`:222`、`:1155-1172`、`:441-445`、`:3420` 一带，均避开 #5587 声明的 `:700-1000` 与 `:2014-2049`。
+4. 与在飞 PR #5587 的冲突面：本次在 `IntegrationWorkbenchView.vue` 只触及页头副标题、四步流程条、运行与推送面板标题、来源/目标选择器说明这三组 computed、import 区，以及 `executePipeline` / 两个外部写 / 死信重放这四个 catch。均不在 #5587 声明的落点/刷新与「/data-sources」文案区域内。（行号在两边都在漂，这里按**函数与区块**描述，不按行号。）
+
+## 7. 终审修复（2026-09-10）
+
+#5597 对抗复核（29 代理）判「修完再转正式」。以下逐条对应。
+
+### F01（blocker）——写禁码在 `error.details.code`，前端读不到
+
+**证实**。`PipelineRunnerError`（`pipeline-runner.cjs`）只设 `this.name` 与 `this.details`，没有自己的 `.code`；
+`http-routes.cjs` 的 `inferErrorCode` 是 ``error.code || error.name || 'INTERNAL_ERROR'``，于是 `/run` 拒绝的信封是
+
+```
+422 { ok:false, error:{ code:'PipelineRunnerError',
+                        message:'K3 WISE live writes are C6-only: use external-write dry-run + apply',
+                        details:{ code:'K3_WISE_PIPELINE_RUN_DISABLED', pipelineId } } }
+```
+
+（`inferHttpStatus` 用 `/PipelineRunner/` 映射 422；服务端由
+`plugins/plugin-integration-core/__tests__/http-routes-plm-k3wise-poc.test.cjs` 钉住这三项。）
+初稿只读顶层 `error.code`，所以 `K3_WISE_PIPELINE_RUN_DISABLED` **永远查不到表**，标签是死代码；
+并且初稿新加的用例 mock 了一个「403 + 顶层写禁码」的形状 —— 服务端从不发出，属于自证。
+
+修法：`workbench.ts` 新增 `integrationEnvelopeErrorCode(payload)`。details.code 只在顶层 code 缺失、或顶层 code 是
+**类名形状**（`/Error$/`，大小写敏感）时才顶上；自带 `.code` 的 `HttpRouteError` / `ExternalWriteDryRunError` 不受影响。
+注册码一律 SCREAMING_SNAKE，`UNKNOWN_ERROR` 结尾是 `ERROR` 不是 `Error`，不会被误判 —— 并有用例钉住这一点。
+
+### F05（major）——K3 预设页只改口没改控件
+
+**证实**。页头已写「K3 目标永久只读、不写回」，同页仍有「执行物料」「执行 BOM」按钮与「允许真实执行 Pipeline」勾选。
+现按 `isK3ExternalWriteTargetKind(K3_WISE_WEBAPI_KIND)` 门掉这三个控件，替换为一行 `K3_WRITE_FENCE_EXPLANATION.zh`；
+面板摘要改「仅 dry-run」，Pipeline 参数摘要改「K3 目标只能 dry-run」，部署闸门条目文案同步。
+`isPipelineRunDisabled` 与 `executePipeline` 各加一道**只会拒绝**的纵深守卫。
+
+**dry-run 保留**。这是冻结裁决保留的合法只读动作（`external-write-dry-run.cjs`），也是这页唯一还能做的事；
+顺手藏掉它就是 §15.2 E4-05 的失败模式，不是更安全。用例正面断言 `Dry-run 物料` / `Dry-run BOM` 仍在。
+
+### 无人看的路径——K3 预设页的私有解析器
+
+**证实**。`k3WiseSetup.ts` 曾有一份与 `workbench.ts` 逐字相同、但抛裸 `Error` 的 `parseIntegrationResponse`。
+本 PR 的 `IntegrationApiError` 根本不流经它，所以那页的 catch 接上人话化会是 no-op。
+已删除该副本，改为 import `workbench.ts` 的同名导出（无环：该模块本来就 import `./workbench`）；
+`:1731` 的裸 `catch` 改为绑定 error 并走共享 `integrationFailureMessage`。
+
+该页的 fallback **强制由调用方给固定文案**（函数签名要求 `fallback: string`），不默认 `error.message`：
+这是 values-free 面，lane F 用例断言服务端自由文本永不渲染，退回服务端散文会破坏它。新用例正反两面都钉住了。
+
+### F12 / F13 / F09 / F08
+
+- F12：见上文 §2.2 的更正段，绝对句已撤回并明列两条未登记码及理由；`K3_WISE_REPLAY_DISABLED` 已登记，死信重放 catch 已接线。
+- F13：§6.4 改为按函数/区块描述，不再引用会漂的行号。
+- F09：`integration_run_log` 说明改「查看 dry-run 预览与导出记录。」
+- F08：删掉真正没人用的 `WRITE_TARGET_POSTURE_COPY`；`K3_WRITE_FENCE_NOTICE` 保留，并加断言 `require` 后端
+  `integration-hub-overview.cjs` 的 `K3_FENCE_NOTICE` 比对 zh/en —— 「与总览同一句话」从注释变成被检查的性质。
+
+### 终审后的测试
+
+| spec | 用例 |
+| --- | --- |
+| `integrationErrorCodeLabels.spec.ts` | `parseIntegrationResponse recovers the product code from details.code for the /run refusal shape` |
+| | `a real top-level product code still wins over a details.code` |
+| | `the fenced-kind badge is byte-identical to the server notice the same screen renders` |
+| | `mirrors the exact server tokens for the fence codes`（4 条，含 replay） |
+| `IntegrationK3WiseSetupView.spec.ts` | `G10: the K3 preset page offers no live-run control, only dry-run plus the read-only notice` |
+| | `G10: a dry-run failure carrying a registered code renders its label; an unregistered one keeps values-free copy` |
+| `IntegrationWorkbenchView.spec.ts` | 既有 `G10: a run refused by the K3 fence…` 的 mock 改为服务端真实形状（422 + `PipelineRunnerError` + `details.code`） |
+
+### 终审后的变异探针（内存，不落盘）
+
+| # | 变异 | 用例 | 结果 |
+| --- | --- | --- | --- |
+| 1 | 四条码表条目改名 | labels spec | **红** 2 failed |
+| 2 | 共享人话化 `label = null` | K3 setup spec / view G10 | **红** / **红** |
+| 3 | 镜像谓词改前缀匹配 | labels spec kind 用例 | **红** |
+| 4 | **F01 守卫**：`integrationEnvelopeErrorCode` 不再回落 details.code | labels spec | **红** `expected 'PipelineRunnerError' to be 'K3_WISE_PIPELINE_RUN_DISABLED'` |
+| 4b | 同上 | K3 setup spec / view G10 | **红** / **红** |
+| 5 | `parseIntegrationResponse` 完全不带 code | labels spec | **红** 2 failed |
+| 6 | **F05 守卫**：去掉 K3 预设页的 `v-if` 门 | K3 setup spec | **红** `to not include '执行物料'` |
+| 7 | K3 预设页 catch 不再人话化 | K3 setup spec | **红** |
+| 8 | 去掉工作台 Save-only 门 | run-section spec / view 主链路 | **红** / **红** |
+| 9 | 流程条第 4 步回滚旧文案 | view 主链路 | **红** |
+
+基线（同 harness、无变异）：labels + run-section + K3 setup 37 passed，退出码 0。
+
+### 终审后的命令与退出码
+
+| 命令 | 退出码 |
+| --- | --- |
+| `pnpm --filter web run type-check` | 0 |
+| `pnpm --filter web run lint` | 0 |
+| `vitest run integrationErrorCodeLabels.spec.ts` | 0（20 passed） |
+| `vitest run IntegrationK3WiseSetupView.spec.ts` | 0（12 passed） |
+| `vitest run IntegrationWorkbenchView.spec.ts` | 0（53 passed） |
+
+**一条与本 PR 无关的既有红**：`k3WiseSetup.spec.ts > keeps the K3 WISE setup route behind integration write permission`
+断言 `src/main.ts` 源码含 `to.meta?.permissions`，而该文件里已经没有这串（路由守卫在更早的重构里搬走了）。
+`apps/web/src/main.ts` 与基线 `a22955f83` **逐字节相同**（`git diff a22955f83 -- apps/web/src/main.ts` 为空），
+所以它在未改动的基线上同样红。本 PR 不碰它 —— 改 `main.ts` 去迎合断言等于动路由权限守卫，超出范围。
+
