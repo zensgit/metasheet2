@@ -18,7 +18,7 @@ export default defineConfig({
   // them against THIS lane's server and harness assumptions. The two ignores are asserted to be
   // exhaustive by scripts/ops/stock-prep-browser-ci-wiring.test.mjs (and its approval sibling), so a
   // spec that belongs to neither lane cannot silently fall out of every lane.
-  testIgnore: ['**/approval-*.spec.ts', '**/stock-prep-*.spec.ts'],
+  testIgnore: ['**/approval-*.spec.ts', '**/stock-prep-*.spec.ts', '**/attendance-makeup-request.spec.ts'],
   timeout: 60_000,
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,

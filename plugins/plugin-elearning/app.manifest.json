@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "displayName": "学习中心",
   "pluginId": "plugin-elearning",
-  "runtimeModel": "direct",
+  "runtimeModel": "instance",
+  "runtimeBindings": {
+    "currentPath": "/api/elearning-app/installation",
+    "installPath": "/api/elearning-app/installation",
+    "installPayload": {}
+  },
   "boundedContext": {
     "code": "elearning",
     "owner": "learning",

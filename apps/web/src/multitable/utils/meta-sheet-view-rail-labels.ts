@@ -11,6 +11,9 @@ export type MetaSheetViewRailLabelKey =
   // Rename affordance (feat/multitable-rename): pencil button + inline confirm/cancel, gated
   // server-side on canManageFields — see MultitableWorkbench.vue's onRenameSheet.
   | 'rail.renameSheet' | 'rail.confirmRenameSheet' | 'rail.cancelRenameSheet'
+  // Delete affordance: trash button on the SELECTED sheet row only, gated on the server-derived
+  // canDeleteSheet bit — see MultitableWorkbench.vue's onDeleteSheet (confirm lives there, not here).
+  | 'rail.deleteSheet'
 
 const META_SHEET_VIEW_RAIL_LABELS: Record<MetaSheetViewRailLabelKey, { en: string; zh: string }> = {
   'rail.treeLabel': { en: 'Tables and views', zh: '数据表与视图' },
@@ -18,6 +21,7 @@ const META_SHEET_VIEW_RAIL_LABELS: Record<MetaSheetViewRailLabelKey, { en: strin
   'rail.renameSheet': { en: 'Rename', zh: '重命名' },
   'rail.confirmRenameSheet': { en: 'Confirm rename', zh: '确认重命名' },
   'rail.cancelRenameSheet': { en: 'Cancel rename', zh: '取消重命名' },
+  'rail.deleteSheet': { en: 'Delete table', zh: '删除数据表' },
 }
 
 export function railLabel(key: MetaSheetViewRailLabelKey, isZh: boolean): string {

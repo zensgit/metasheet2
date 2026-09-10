@@ -35,7 +35,12 @@ assert.ok(Array.isArray(pluginManifest.contributes.views))
 assert.equal(appManifest.id, 'elearning')
 assert.equal(appManifest.pluginId, 'plugin-elearning')
 assert.equal(appManifest.displayName, '学习中心')
-assert.equal(appManifest.runtimeModel, 'direct')
+assert.equal(appManifest.runtimeModel, 'instance')
+assert.deepEqual(appManifest.runtimeBindings, {
+  currentPath: '/api/elearning-app/installation',
+  installPath: '/api/elearning-app/installation',
+  installPayload: {},
+})
 assert.equal(appManifest.boundedContext.code, 'elearning')
 assert.deepEqual(appManifest.featureFlags, ['elearning'])
 assert.equal(appManifest.featureFlags.length, 1)
