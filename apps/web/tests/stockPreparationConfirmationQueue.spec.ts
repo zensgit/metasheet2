@@ -733,6 +733,65 @@ describe('2026-09-10: export failure names the actual reason, not the generic wr
     expect(cell!.textContent).toBe('some_future_conflict_type')
     expect(cell!.getAttribute('title')).toBe('some_future_conflict_type')
   })
+
+  // -------------------------------------------------------------------------
+  // 2026-09-10 field report (b), second half: 「看我填过什么」 used to print the WIRE name next to each
+  // plain label (填的值 `resolvedValue` / 附带的值 `resolvedAuxValue` / 备注 `notes`), and the operator
+  // read the grey word as the thing being shown. Nothing in the repo asserted this pane's copy, so
+  // the whole change was silently revertible. This is that guard: the readback pane carries the plain
+  // labels ONLY, while the three names stay verbatim one disclosure away for whoever needs to match a
+  // request body against them. Both halves are asserted — the fix is a MOVE, not a deletion.
+  // -------------------------------------------------------------------------
+  it('「看我填过什么」 shows plain labels only — the request-body field names live in 技术详情, not next to the values', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      // MUST precede the bare-list branch: the value-entry route is a suffix of the list path.
+      if (path.includes('/confirmation-decisions/value-entry')) {
+        return ok({
+          decisionId: 'decision_1',
+          conflictType: 'SOURCE_VALUE_NOT_A_STRING',
+          status: 'pending',
+          resolutionAction: null,
+          inputFingerprint: 'sha16:0123456789abcdef',
+          // Deliberately free of the three wire names, so the negative assertions below can only
+          // fail on the LABELS — never on a value that happened to echo one.
+          valueEntry: { resolvedValue: '12.5', resolvedAuxValue: '千克', notes: '按图纸取整' },
+        })
+      }
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload([row('SOURCE_VALUE_NOT_A_STRING')]))
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+    ;(q('stock-prep-confirmation-value-entry') as HTMLButtonElement).click()
+    await flush()
+
+    const pane = q('stock-prep-confirmation-value-entry-pane')
+    expect(pane, 'the readback pane opens for an operator-tier actor').not.toBeNull()
+    const paneText = pane!.textContent ?? ''
+    // The plain labels are what a reader is left with.
+    expect(paneText).toContain('填的值')
+    expect(paneText).toContain('附带的值')
+    expect(paneText).toContain('备注')
+    // …and NOT one of the three wire names, which is what the field report tripped over.
+    expect(paneText, 'the grey wire name next to 填的值 is what was misread as the value itself').not.toContain('resolvedValue')
+    expect(paneText).not.toContain('resolvedAuxValue')
+    expect(paneText).not.toContain('notes')
+    // The values themselves are untouched — this is a copy change, not a narrowing of the readback.
+    expect(q('stock-prep-confirmation-value-entry-value')?.textContent).toBe('12.5')
+    expect(q('stock-prep-confirmation-value-entry-aux')?.textContent).toBe('千克')
+    expect(q('stock-prep-confirmation-value-entry-notes')?.textContent).toBe('按图纸取整')
+    // THE OTHER HALF: an implementer still gets the names verbatim, one disclosure away. (The
+    // disclosure keeps its content in the DOM while collapsed — StockPrepTechnicalDetails.vue.)
+    const tech = q('stock-prep-confirmation-tech')?.textContent ?? ''
+    expect(tech, 'the names moved to 技术详情 — deleting them outright would strip what a support thread matches on').toContain('resolvedValue')
+    expect(tech).toContain('resolvedAuxValue')
+    expect(tech).toContain('notes')
+  })
   // -------------------------------------------------------------------------
   // THE OTHER HALF OF FIELD REPORT (a), and the one the first cut could not explain: the browser
   // showed `STOCK_PREPARATION_EXPORT_REQUEST_FAILED` — a code NOTHING on the server ever sends; it
