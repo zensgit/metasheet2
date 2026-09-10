@@ -71,6 +71,18 @@
       />
     </label>
 
+    <label class="makeup-card__field" for="attendance-makeup-card-attachment">
+      <span>{{ tr('Attachment URL', '附件链接') }}</span>
+      <input
+        id="attendance-makeup-card-attachment"
+        name="makeupCardAttachment"
+        v-model="requestForm.attachmentUrl"
+        type="text"
+        data-makeup-card-attachment
+        :placeholder="tr('Optional', '可选')"
+      />
+    </label>
+
     <p class="makeup-card__hint" data-makeup-card-hint>
       {{
         tr(
@@ -121,6 +133,7 @@ interface MakeupRequestFormFields {
   requestedInAt: string
   requestedOutAt: string
   reason: string
+  attachmentUrl: string
 }
 
 const props = defineProps<{
@@ -162,8 +175,14 @@ function onAnomalyChange(event: Event): void {
   const nextType = resolveMakeupRequestType(item)
   const nextField = makeupTimeFieldForRequestType(nextType)
   const existingTime = props.requestForm[previousField]
+  const workDateChanged = item.workDate !== props.requestForm.workDate
   props.requestForm.workDate = item.workDate
   props.requestForm.requestType = nextType
+  if (workDateChanged) {
+    props.requestForm.requestedInAt = ''
+    props.requestForm.requestedOutAt = ''
+    return
+  }
   if (previousField !== nextField && existingTime) {
     props.requestForm[nextField] = existingTime
     props.requestForm[previousField] = ''
@@ -225,6 +244,7 @@ function onTimeInput(event: Event): void {
 
 .makeup-card__field select,
 .makeup-card__field input {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   padding: 8px 10px;

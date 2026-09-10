@@ -52,6 +52,23 @@ function targetedRunCommand(source: string): string {
 }
 
 describe('attendance web guard workflow contract', () => {
+  it('runs makeup regressions in both unit gates and the dedicated browser lane', () => {
+    const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
+    const requiredCommand = required.split('\n').find(line => line.startsWith('exec npx vitest run ')) ?? ''
+    for (const spec of ['attendanceEmployeeMakeupRequestCard', 'attendance-selfservice-dashboard']) {
+      expect(requiredCommand.split(/\s+/)).toContain(spec)
+      expect(targetedRunCommand(workflow).split(/\s+/)).toContain(spec)
+    }
+    const doc = loadYaml(workflow) as { jobs: Record<string, { steps: Array<{ name?: string; run?: string; if?: string }> }> }
+    const steps = Object.values(doc.jobs).flatMap(job => job.steps)
+    const browser = steps.find(step => step.name === 'Verify makeup request in real AttendanceView at desktop and mobile sizes')
+    expect(browser?.run).toBe('pnpm --filter @metasheet/web exec playwright test --config playwright.attendance-makeup.config.ts')
+    expect(browser?.if).toBe("steps.changes.outputs.relevant == 'true'")
+    for (const path of ['apps/web/verification/attendance-makeup-request*', 'apps/web/playwright.attendance-makeup.config.ts']) {
+      expect(workflow.split(path)).toHaveLength(3)
+    }
+  })
+
   it('creates one stable check for every pull request', () => {
     const pullRequestStart = workflow.indexOf('\n  pull_request:')
     const pushStart = workflow.indexOf('\n  push:', pullRequestStart)
@@ -133,6 +150,7 @@ describe('attendance web guard workflow contract', () => {
       'attendanceEmployeeWorkspacePresentation',
       'useAttendanceAdminConfig',
       'attendanceOverviewRequestReveal',
+      'attendanceEmployeeMakeupRequestCard',
     ]) {
       expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
       expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))

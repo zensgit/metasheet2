@@ -2081,6 +2081,79 @@ describe('Attendance self-service dashboard', () => {
     expect(createBodies[1].attachmentUrl).toBe('https://example.com/proof.png')
   })
 
+  it('dedicated makeup card recovers MAKEUP_PUNCH_ATTACHMENT_REQUIRED without opening the shared disclosure', async () => {
+    const { createBodies } = installMakeupRejectMock({
+      code: 'MAKEUP_PUNCH_ATTACHMENT_REQUIRED',
+      status: 422,
+      succeedAfter: 1,
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-attendance-overview-primary]')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(requestTools.open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+
+    const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
+    expect(card).toBeTruthy()
+    expect(requestTools.open).toBe(false)
+    expect(card!.querySelector('#attendance-makeup-card-attachment')).toBeTruthy()
+    expect(card!.querySelector('#attendance-request-attachment')).toBeNull()
+    expect(container!.querySelectorAll('#attendance-makeup-card-attachment')).toHaveLength(1)
+    expect(container!.querySelectorAll('#attendance-request-attachment')).toHaveLength(1)
+
+    setFormValue(card!, '[data-makeup-card-time]', '2026-04-15T09:00')
+    card!.querySelector<HTMLButtonElement>('[data-makeup-card-submit]')!.click()
+    await flushUi(8)
+
+    const afterReject = container!.textContent ?? ''
+    expect(afterReject).toContain('An attachment is required by the makeup-punch policy.')
+    expect(afterReject).toContain('Code: MAKEUP_PUNCH_ATTACHMENT_REQUIRED')
+    expect(afterReject).not.toContain('Request submitted.')
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
+    expect(requestTools.open).toBe(false)
+    expect(createBodies).toEqual([
+      {
+        workDate: '2026-04-15',
+        requestType: 'missed_check_in',
+        requestedInAt: '2026-04-15T09:00',
+        leaveTypeId: 'leave-annual',
+        overtimeRuleId: 'ot-default',
+      },
+    ])
+
+    setFormValue(card!, '[data-makeup-card-attachment]', 'https://example.com/proof.png')
+    card!.querySelector<HTMLButtonElement>('[data-makeup-card-submit]')!.click()
+    await flushUi(8)
+
+    expect(createBodies).toEqual([
+      {
+        workDate: '2026-04-15',
+        requestType: 'missed_check_in',
+        requestedInAt: '2026-04-15T09:00',
+        leaveTypeId: 'leave-annual',
+        overtimeRuleId: 'ot-default',
+      },
+      {
+        workDate: '2026-04-15',
+        requestType: 'missed_check_in',
+        requestedInAt: '2026-04-15T09:00',
+        leaveTypeId: 'leave-annual',
+        overtimeRuleId: 'ot-default',
+        attachmentUrl: 'https://example.com/proof.png',
+      },
+    ])
+    expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
+    expect(requestTools.open).toBe(false)
+    expect(container!.textContent).toContain('Request submitted.')
+  })
+
   it('MP-5 shared path: missing-punch quick action (with anomaly) posts exactly one request, none during prefill', async () => {
     const { createBodies } = installMakeupRejectMock({ code: 'IGNORED', succeedAfter: 0 })
     app = createApp(AttendanceView, { mode: 'overview' })

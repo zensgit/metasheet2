@@ -15,6 +15,7 @@ export default defineConfig({
   // approval-form-builder-mounted-matrix.spec.ts to that same disjoint lane —
   // ignored here for the same reason.
   testIgnore: [
+    '**/attendance-makeup-request.spec.ts', // Dedicated real-parent attendance lane.
     '**/approval-form-builder-parity.spec.ts',
     '**/approval-form-builder-mounted-matrix.spec.ts',
   ],
