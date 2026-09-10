@@ -39,6 +39,10 @@ import {
   down as downCourseEnrollments,
   up as upCourseEnrollments,
 } from '../../src/db/migrations/zzzz20260901120000_create_elearning_course_enrollments'
+import {
+  down as downNotificationEvents,
+  up as upNotificationEvents,
+} from '../../src/db/migrations/zzzz20260908170000_extend_elearning_notification_events'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -1266,6 +1270,7 @@ describe('elearning L1 scope/access gate (real DB)', () => {
       })).rejects.toBe(rollback)
 
       await expect(migrationDb.transaction().execute(async (trx) => {
+        await downNotificationEvents(trx)
         await downCourseEnrollments(trx)
         await downScopeAccess(trx)
         const removed = await sql<{
@@ -1292,6 +1297,7 @@ describe('elearning L1 scope/access gate (real DB)', () => {
 
         await upScopeAccess(trx)
         await upCourseEnrollments(trx)
+        await upNotificationEvents(trx)
         const restored = await sql<{
           enrollment_table: string | null
           scope_table: string | null

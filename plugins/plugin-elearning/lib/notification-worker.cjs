@@ -28,7 +28,14 @@ const CLAIM_SQL = `
 WITH due AS (
   SELECT id
     FROM elearning_notification_deliveries
-   WHERE (
+   WHERE EXISTS (
+       SELECT 1 FROM platform_app_instances app
+        WHERE app.tenant_id = elearning_notification_deliveries.org_id
+          AND app.workspace_id = elearning_notification_deliveries.org_id
+          AND app.app_id = 'elearning' AND app.plugin_id = 'plugin-elearning'
+          AND app.instance_key = 'primary' AND app.status = 'active'
+          AND app.config_json->'notificationsEnabled' = 'true'::jsonb
+     ) AND ((
            status IN ('pending', 'retrying')
        AND next_attempt_at <= now()
          )
@@ -36,7 +43,7 @@ WITH due AS (
            status = 'sending'
        AND claim_expires_at IS NOT NULL
        AND claim_expires_at <= now()
-         )
+         ))
    ORDER BY next_attempt_at ASC, id ASC
    LIMIT $1::int
    FOR UPDATE SKIP LOCKED

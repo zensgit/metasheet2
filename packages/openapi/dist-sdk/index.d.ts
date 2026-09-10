@@ -8444,6 +8444,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning-app/installation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read organization cloud-classroom installation
+         * @description Organization and actor come only from the authenticated session. Missing
+         *     instance means not-installed. canManage is server-derived from hydrated
+         *     global elearning administrator authority and active organization membership.
+         *     Administrative setup is available independently of the deployment master flag.
+         */
+        get: operations["getElearningAppInstallation"];
+        /**
+         * Enable or disable an installed cloud classroom
+         * @description Requires the same authority as installation. Deployment exact-true flags
+         *     remain an upper bound. Disabling forces notification opt-in OFF and retains
+         *     learning data. New business admission stops; admitted work and necessary
+         *     storage cleanup may drain. No production storage is provisioned.
+         */
+        put: operations["configureElearningAppInstallation"];
+        /**
+         * Install cloud classroom inactive, notifications OFF
+         * @description Requires elearning global administrator authority and active membership.
+         *     Repeated installation preserves existing state. Does not grant permissions,
+         *     enable deployment flags, provision storage, or send notifications.
+         */
+        post: operations["installElearningApp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/capabilities": {
         parameters: {
             query?: never;
@@ -18694,6 +18730,12 @@ export interface components {
             /** @description Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration. */
             enrollment: boolean;
         };
+        ElearningAppInstallation: {
+            /** @enum {string} */
+            status: "not-installed" | "inactive" | "active";
+            notificationsEnabled: boolean;
+            canManage: boolean;
+        };
         /**
          * @description Plugin GET /api/elearning/capabilities payload. V0.1 readiness is enabled
          *     plus content, assignment, assessment, and media all true. Incentive and
@@ -21097,6 +21139,161 @@ export interface operations {
             };
             /** @description Unknown, cross-org, or inaccessible group, including a delegated admin without active target-org membership; one shared values-free shape (red line W6-R3). */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getElearningAppInstallation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed installation state, without storage configuration or secrets. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAppInstallation"];
+                };
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authoritative organization context required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Installation authority unavailable; no fallback enablement. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    configureElearningAppInstallation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    enabled: boolean;
+                    notificationsEnabled: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated state; canManage true. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAppInstallation"];
+                };
+            };
+            /** @description Invalid closed command. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing organization, administrator authority, or active membership. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Application not installed. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Installation authority unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    installElearningApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Installed state; canManage true. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAppInstallation"];
+                };
+            };
+            /** @description Invalid closed command. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authentication required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing organization, administrator authority, or active membership. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Installation authority unavailable. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

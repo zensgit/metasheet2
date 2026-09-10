@@ -46,6 +46,10 @@ describe('attendance report field catalog multitable foundation', () => {
     const fieldIds = Object.fromEntries(
       Object.values(helpers.ATTENDANCE_REPORT_FIELD_CATALOG_FIELDS).map((fieldId) => [fieldId, `fld_${fieldId}`]),
     )
+    const selectFields = helpers.getAttendanceReportFieldCatalogDescriptor().fields.filter(
+      (field: { type: string }) => field.type === 'select',
+    )
+    const logger = { warn: vi.fn() }
     const context = {
       api: {
         multitable: {
@@ -75,18 +79,31 @@ describe('attendance report field catalog multitable foundation', () => {
           },
           records: {
             queryRecords: vi.fn().mockResolvedValue([]),
-            createRecord: vi.fn().mockImplementation(async (input) => ({
-              id: 'rec-1',
-              sheetId: input.sheetId,
-              version: 1,
-              data: input.data,
-            })),
+            createRecord: vi.fn().mockImplementation(async (input) => {
+              for (const field of selectFields) {
+                const value = input.data[fieldIds[field.id]]
+                if (value != null && value !== '' && !field.options.includes(value)) {
+                  throw new Error('Invalid select option')
+                }
+              }
+              return { id: 'rec-1', sheetId: input.sheetId, version: 1, data: input.data }
+            }),
           },
         },
       },
     }
 
-    const result = await helpers.ensureAttendanceReportFieldCatalog(context, 'org-a', { warn: vi.fn() })
+    const result = await helpers.ensureAttendanceReportFieldCatalog(context, 'org-a', logger)
+
+    expect(logger.warn).not.toHaveBeenCalled()
+    expect(result.seeded).toBe(helpers.cloneAttendanceReportFieldDefinitions().length)
+    const hireDate = context.api.multitable.records.createRecord.mock.calls
+      .map(([input]) => input.data)
+      .find(data => data.fld_field_code === 'hire_date')
+    expect(hireDate).toMatchObject({ fld_unit: 'text', fld_internal_key: 'user.hireDate' })
+    const hireDateDefinition = helpers.cloneAttendanceReportFieldDefinitions()
+      .find((field: { code: string }) => field.code === 'hire_date')
+    expect(helpers.mapReportFieldToMultitableType(hireDateDefinition)).toBe('date')
 
     expect(result.projectId).toBe('org-a:attendance')
     expect(result.sheetId).toBe('sheet-1')

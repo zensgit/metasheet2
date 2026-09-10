@@ -66,6 +66,10 @@ export type MetaCoreLabelKey =
   | 'grid.aggregateTooLarge'
   | 'grid.noMatchingTitle' | 'grid.noMatchingHint'
   | 'grid.collapseRow' | 'grid.expandRow'
+  // --- Record inspector v3 (design 2026-09-05, §1.1 explicit-open): row-number expand icon that
+  //     opens the record inspector — distinct from grid.expandRow above, which toggles the
+  //     pre-existing inline row-detail preview and is unrelated to the inspector panel.
+  | 'grid.openRecord'
   // --- Record locking (design #2278 follow-up) ---
   | 'grid.lockRow' | 'grid.unlockRow' | 'grid.lockedIndicator'
   | 'grid.errorLockRow' | 'grid.errorUnlockRow'
@@ -208,6 +212,7 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'grid.noMatchingHint': { en: 'Try a different search term', zh: '试试其他搜索词' },
   'grid.collapseRow': { en: 'Collapse row', zh: '收起行' },
   'grid.expandRow': { en: 'Expand row', zh: '展开行' },
+  'grid.openRecord': { en: 'Open record', zh: '打开记录' },
   'grid.lockRow': { en: 'Lock row', zh: '锁定此行' },
   'grid.unlockRow': { en: 'Unlock row', zh: '解锁此行' },
   'grid.lockedIndicator': { en: 'Row is locked', zh: '该行已锁定' },

@@ -16,6 +16,8 @@ import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService, ICommentService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
+import { dispatchElearningNotification, isElearningNotificationDispatchEnabled } from './services/elearning-notification-dispatch'
+import { collectElearningNotificationEvents, checkElearningEventNotificationEligibility } from './services/elearning-notification-events'
 import {
   getWorkdayCalendarRegistry,
   type WorkdayCalendarPort,
@@ -319,6 +321,8 @@ import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
+import { createElearningAppInstallationRouter, requireElearningAppInstallation } from './routes/elearning-app-installation'
+import { authenticate as authenticateElearningApp } from './middleware/auth'
 import {
   isElearningAssignmentSurfaceEnabled,
   isElearningAnalyticsSurfaceEnabled,
@@ -1601,6 +1605,12 @@ export class MetaSheetServer {
       this.app.use(elearningMediaPlaybackRouter)
     }
 
+    this.app.use(createElearningAppInstallationRouter({ getDb: () => poolManager.get() }))
+    if (process.env.ELEARNING_ENABLED === 'true') {
+      this.app.use('/api/elearning', authenticateElearningApp,
+        requireElearningAppInstallation({ getDb: () => poolManager.get() }))
+    }
+
     // E-learning V0.1 named-pilot HTTP surface. Flag OFF is a no-op (factory
     // returns null). Mount BEFORE the global 10 MB JSON parser so the router-local
     // 16 KiB limit stays effective. poolManager.get() is the DB handle only —
@@ -2514,12 +2524,42 @@ export class MetaSheetServer {
           manifest.name === 'plugin-elearning'
             ? {
                 check: async (
-                  input: import('./services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput,
+                  input: import('./services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput
+                    | { orgId: string; deliveryId: string; recipientUserId: string },
                 ) => {
+                  if ('deliveryId' in input) {
+                    if (!isElearningNotificationDispatchEnabled()) return false
+                    return checkElearningEventNotificationEligibility(poolManager.get(), input)
+                  }
                   if (!isElearningAssignmentSurfaceEnabled()) {
                     throw new ElearningAssignmentReminderError('unavailable')
                   }
                   return checkElearningAssignmentReminderEligibility(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        elearningNotificationDispatch:
+          manifest.name === 'plugin-elearning' && isElearningNotificationDispatchEnabled()
+            ? {
+                dispatch: async (input: import('./services/elearning-notification-dispatch').ElearningNotificationDispatchInput) => {
+                  if (!isElearningNotificationDispatchEnabled()) {
+                    return { outcome: 'retryable' as const, code: 'NOTIFICATION_DISABLED' }
+                  }
+                  return dispatchElearningNotification(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        elearningNotificationSource:
+          manifest.name === 'plugin-elearning' && isElearningNotificationDispatchEnabled()
+            ? {
+                collect: () => {
+                  if (!isElearningNotificationDispatchEnabled()) return Promise.resolve({ inserted: 0 })
+                  return collectElearningNotificationEvents(poolManager.get(), {
+                    since: process.env.ELEARNING_NOTIFICATIONS_SINCE ?? '',
+                    assignments: isElearningAssignmentSurfaceEnabled(),
+                    enrollments: process.env.ELEARNING_ENROLLMENT_ENABLED === 'true',
+                    results: isElearningExamSurfaceEnabled(),
+                  })
                 },
               }
             : undefined,
