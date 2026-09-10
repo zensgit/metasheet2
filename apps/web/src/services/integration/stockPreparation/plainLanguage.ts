@@ -631,6 +631,18 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '文件没有下载成功,数据没有变化。稍后再点一次;还是不行就把这条报错给管理员。',
     enNext: 'No file was downloaded and nothing in your data changed. Try again shortly; if it still fails, give an administrator this error.',
   }),
+  // The 404 the export route raises when the project table itself has never had a stock-preparation
+  // row written into it — a project that was pulled but never synced, or one whose 1137 rows are
+  // still all sitting in the confirmation queue (2026-09-10 field report). This is a READ answer, not
+  // a write failure: nothing was attempted and nothing changed. The generic export sentence above
+  // ("导出没有做完") is a retry invitation that would never resolve here, so this gets its own words
+  // naming the actual next step — clear the queue, then resync — instead of "try again".
+  PREP_LINE_EXPORT_PROJECT_NOT_FOUND: Object.freeze({
+    zh: '这个项目还没有写入过备料行,所以没有可导出的清单。',
+    en: 'This project has never had a stock-preparation row written to it, so there is nothing to export yet.',
+    zhNext: '先把「确认队列」里待确认的行处理完,再回「项目接入」同步一次写入,然后再导出。',
+    enNext: 'Clear the pending rows in the confirmation queue first, then go back to project onboarding and sync once to write the rows, and export again.',
+  }),
   // 通知下一步. Each one says what happened to the CHAIN, because that is the only thing at stake —
   // none of these four touched a single prep row.
   STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER: Object.freeze({
@@ -715,6 +727,78 @@ export const STOCK_PREP_ERROR_GENERIC: StockPrepPlainEntry = Object.freeze({
 
 export function stockPrepErrorPlain(code: string): StockPrepPlainEntry {
   return lookup(STOCK_PREP_ERROR_PLAIN, code) ?? STOCK_PREP_ERROR_GENERIC
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation-queue conflict types — 什么情况 (2026-09-10 field report).
+//
+// The queue's 「什么情况」 column used to render `row.conflictType` verbatim — a server enum an
+// operator has never been taught (`SOURCE_VALUE_NOT_A_STRING`, `carry_reattach_requires_confirm`)
+// sitting next to a row whose 「我来定…」 button is greyed out for a reason the page never explained.
+// Observed 2026-09-10: a materials admin saw six `SOURCE_VALUE_NOT_A_STRING` rows, all "等您确认",
+// all undecidable, and no words on screen for why.
+//
+// Covers the full per-cell COERCION reason vocabulary (stock-preparation-ext-field-mapping.cjs
+// STOCK_PREPARATION_EXT_FIELD_MAPPING_ERROR_REASONS' coercion slice, lines ~160-167), the one
+// conflict type the confirm endpoint actually implements (`duplicate_expanded_key` —
+// confirmable, kept here anyway so the column reads the same plain sentence whether or not the row
+// happens to be actionable), the missing-component hold, and the carry-policy conflict family
+// (`stock-preparation-carry-policy.cjs` CARRY_CONFLICT_TYPES) — every one of those is also refused by
+// the confirm endpoint today (FIRST_CUT_CONFLICT_TYPE is the only accepted type) and so needed the
+// same "what happened" treatment. EVERY LOOKUP FAILS SOFT: an unmapped/future conflict type renders
+// as its raw token, exactly as before this map existed — never a blank cell.
+// ---------------------------------------------------------------------------
+
+export const STOCK_PREP_CONFLICT_TYPE_PLAIN: Record<string, StockPrepPlainText> = Object.freeze({
+  duplicate_expanded_key: Object.freeze({
+    zh: '同一个物料在这个项目里展开成了不止一行,系统认不出该保留哪一行',
+    en: 'The same material expanded into more than one row for this project, and the system cannot tell which to keep',
+  }),
+  missing_component: Object.freeze({
+    zh: 'BOM 里引用的零件在源系统的物料表里找不到',
+    en: 'The BOM references a part that is missing from the source system\'s parts library',
+  }),
+  SOURCE_VALUE_NOT_A_STRING: Object.freeze({
+    zh: '源值不是文本(多为数字型属性)',
+    en: 'The source value is not text (often a numeric-looking field)',
+  }),
+  SOURCE_VALUE_NOT_A_NUMBER: Object.freeze({
+    zh: '源值不是数字',
+    en: 'The source value is not a number',
+  }),
+  SOURCE_VALUE_NOT_A_DATE: Object.freeze({
+    zh: '源值不是日期',
+    en: 'The source value is not a date',
+  }),
+  SOURCE_VALUE_NOT_A_BOOLEAN: Object.freeze({
+    zh: '源值不是"是/否"这种类型',
+    en: 'The source value is not a yes/no value',
+  }),
+  SOURCE_VALUE_NOT_AN_OPTION: Object.freeze({
+    zh: '源值不在这个字段允许的选项里',
+    en: 'The source value is not one of this field\'s allowed options',
+  }),
+  SOURCE_VALUE_SECRET_SHAPED: Object.freeze({
+    zh: '源值形似密钥或密码,系统拒绝把它写进表里',
+    en: 'The source value looks like a secret or password, and the system refused to write it into the sheet',
+  }),
+  carry_ambiguous_component_source: Object.freeze({
+    zh: '这一行有不止一个可能延续的来源零件,分不清该接上哪一个',
+    en: 'This row has more than one possible source component to carry forward from, and it is unclear which one',
+  }),
+  carry_reattach_requires_confirm: Object.freeze({
+    zh: '这一行要不要接上一版数据,需要有人确认',
+    en: 'Whether this row continues from the previous version needs a person to confirm',
+  }),
+  carry_conflicting_source_content: Object.freeze({
+    zh: '这一行的内容和上一版的数据对不上',
+    en: 'This row\'s content conflicts with the previous version\'s data',
+  }),
+})
+
+/** `null` for anything outside the map — the caller falls back to the raw token, never a blank cell. */
+export function stockPrepConflictTypePlain(conflictType: string | null | undefined): StockPrepPlainText | null {
+  return lookup(STOCK_PREP_CONFLICT_TYPE_PLAIN, conflictType)
 }
 
 // ---------------------------------------------------------------------------

@@ -205,4 +205,40 @@ describe('缺件行不该邀请操作员走进死胡同 — unconfirmable holds 
     expect((q(root, 'stock-prep-confirmation-select') as HTMLButtonElement).disabled).toBe(true)
     expect(q(root, 'stock-prep-confirmation-unconfirmable-hint')).not.toBeNull()
   })
+
+  // 顶部一句话 (2026-09-10 field report): six SOURCE_VALUE_NOT_A_STRING rows, all pending, all
+  // unconfirmable, and nothing on the page said so as a WHOLE — an operator had to open each row to
+  // learn the same fact six times. values-free: names counts and points at the per-row column, never
+  // a cell's content.
+  it('B-01: EVERY pending row unconfirmable shows the values-free "next step" banner', async () => {
+    const root = await loadQueueWith([
+      row('SOURCE_VALUE_NOT_A_STRING', 'decision_1'),
+      row('SOURCE_VALUE_NOT_A_STRING', 'decision_2'),
+      row('missing_component', 'decision_3'),
+    ])
+
+    const banner = q(root, 'stock-prep-confirmation-all-unconfirmable-banner')
+    expect(banner, 'all three pending rows are unconfirmable — the banner must say so').not.toBeNull()
+    expect(banner!.textContent).toContain('3')
+    expect(banner!.textContent).toContain('源数据')
+    expect(banner!.textContent).toContain('什么情况')
+  })
+
+  it('B-02: ONE confirmable row among the pending set suppresses the banner', async () => {
+    const root = await loadQueueWith([
+      row('SOURCE_VALUE_NOT_A_STRING', 'decision_1'),
+      row('duplicate_expanded_key', 'decision_2'),
+    ])
+
+    expect(
+      q(root, 'stock-prep-confirmation-all-unconfirmable-banner'),
+      'a confirmable row is on screen — its own controls are the more useful thing here',
+    ).toBeNull()
+  })
+
+  it('B-03: an empty queue (nothing pending) shows no banner — there is nothing to say', async () => {
+    const root = await loadQueueWith([])
+
+    expect(q(root, 'stock-prep-confirmation-all-unconfirmable-banner')).toBeNull()
+  })
 })

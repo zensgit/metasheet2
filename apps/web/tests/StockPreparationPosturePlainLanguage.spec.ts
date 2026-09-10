@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import {
   STOCK_PREP_BOARD_ERROR_GENERIC,
   STOCK_PREP_BOARD_ERROR_PLAIN,
+  STOCK_PREP_CONFLICT_TYPE_PLAIN,
   STOCK_PREP_ERROR_COPY_SENTENCE,
   STOCK_PREP_ERROR_GENERIC,
   STOCK_PREP_ERROR_PLAIN,
@@ -14,6 +15,7 @@ import {
   STOCK_PREP_SOURCE_BLOCKER_PLAIN,
   STOCK_PREP_SOURCE_WARNING_PLAIN,
   stockPrepBoardErrorPlain,
+  stockPrepConflictTypePlain,
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
   stockPrepPosturePlain,
@@ -267,5 +269,56 @@ describe('stock-prep posture plain language', () => {
     // An absent/blank code degrades to a placeholder rather than emitting a dangling separator.
     expect(stockPrepErrorCopyText('', true)).toContain('UNKNOWN')
     expect(stockPrepErrorCopyText(null, true)).toContain('UNKNOWN')
+  })
+
+  // -------------------------------------------------------------------------
+  // 2026-09-10 field report (a): 确认队列的导出按钮在 1137 行全在确认队列、尚未写入任何备料行时答
+  // 404 PREP_LINE_EXPORT_PROJECT_NOT_FOUND — a READ answer with a specific, actionable next step,
+  // which the generic write-shaped `STOCK_PREPARATION_EXPORT_REQUEST_FAILED` sentence ("导出没有
+  // 做完...稍后再点一次") would have misdescribed (retrying changes nothing until the queue clears).
+  // -------------------------------------------------------------------------
+  it('PREP_LINE_EXPORT_PROJECT_NOT_FOUND names the actual next step, not "try again"', () => {
+    const plain = stockPrepErrorPlain('PREP_LINE_EXPORT_PROJECT_NOT_FOUND')
+    expect(plain.zh).toContain('没有写入过备料行')
+    expect(plain.zhNext).toContain('确认队列')
+    expect(plain.zhNext).toContain('项目接入')
+    // It must NOT be the generic write-shaped fallback — that would be the bug this entry closes.
+    expect(plain).not.toBe(STOCK_PREP_ERROR_GENERIC)
+    expect(plain.zh).not.toBe(STOCK_PREP_ERROR_GENERIC.zh)
+  })
+
+  // -------------------------------------------------------------------------
+  // 2026-09-10 field report (b): the confirmation queue's 「什么情况」 column used to render
+  // `row.conflictType` verbatim — a materials admin saw six `SOURCE_VALUE_NOT_A_STRING` rows with no
+  // words for what that meant or why 「我来定…」 was greyed out. `stockPrepConflictTypePlain` covers
+  // the full per-cell coercion vocabulary (stock-preparation-ext-field-mapping.cjs lines ~160-167)
+  // plus `duplicate_expanded_key` / `missing_component` / the carry-conflict family, and fails soft
+  // (`null`) for anything outside that set so an unmapped/future token still renders as itself.
+  // -------------------------------------------------------------------------
+  it('stockPrepConflictTypePlain covers the full COERCION_REASON set plus duplicate_expanded_key/missing_component', () => {
+    const required = [
+      'SOURCE_VALUE_NOT_A_STRING',
+      'SOURCE_VALUE_NOT_A_NUMBER',
+      'SOURCE_VALUE_NOT_A_DATE',
+      'SOURCE_VALUE_NOT_A_BOOLEAN',
+      'SOURCE_VALUE_NOT_AN_OPTION',
+      'SOURCE_VALUE_SECRET_SHAPED',
+      'duplicate_expanded_key',
+      'missing_component',
+    ]
+    for (const conflictType of required) {
+      const plain = stockPrepConflictTypePlain(conflictType)
+      expect(plain, conflictType).not.toBeNull()
+      expect(String(plain?.zh ?? '').trim().length, `${conflictType}.zh`).toBeGreaterThan(0)
+      expect(String(plain?.en ?? '').trim().length, `${conflictType}.en`).toBeGreaterThan(0)
+    }
+    // The one sentence the field report actually quoted, pinned verbatim.
+    expect(STOCK_PREP_CONFLICT_TYPE_PLAIN.SOURCE_VALUE_NOT_A_STRING.zh).toBe('源值不是文本(多为数字型属性)')
+    // EVERY LOOKUP FAILS SOFT: a future/unknown conflict type degrades to null, never a thrown error
+    // or a fabricated sentence — the caller is what falls back to the raw token.
+    expect(stockPrepConflictTypePlain('some_future_conflict_type')).toBeNull()
+    expect(stockPrepConflictTypePlain(null)).toBeNull()
+    expect(stockPrepConflictTypePlain(undefined)).toBeNull()
+    expect(stockPrepConflictTypePlain('')).toBeNull()
   })
 })

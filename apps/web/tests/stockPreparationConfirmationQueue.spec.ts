@@ -58,7 +58,7 @@ import {
 } from '../src/services/integration/stockPreparation/confirmationQueue'
 import StockPreparationWorkspace from '../src/components/integration/stockPreparation/StockPreparationWorkspace.vue'
 import StockPreparationConfirmationQueueView from '../src/components/integration/stockPreparation/StockPreparationConfirmationQueueView.vue'
-import { STOCK_PREP_ADMIN_ACTION_PLAIN } from '../src/services/integration/stockPreparation/plainLanguage'
+import { STOCK_PREP_ADMIN_ACTION_PLAIN, stockPrepErrorPlain } from '../src/services/integration/stockPreparation/plainLanguage'
 
 function jsonResponse(body: unknown, init: { status?: number; ok?: boolean } = {}): Response {
   const status = init.status ?? 200
@@ -590,5 +590,145 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
     await flush()
     expect(standaloneNavigateSpy).toHaveBeenCalledWith('project-board', PROJECT_NO)
     expect(standaloneResyncSpy).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2026-09-10 field report (a): 确认队列点「导出物料清单(Excel)」→ the export route answers 404
+// PREP_LINE_EXPORT_PROJECT_NOT_FOUND when the project table has never had a stock-preparation row
+// written to it (e.g. all 1137 rows still sitting in the confirmation queue). The export client
+// already forwards `error.code` from the response body (confirmationQueue.ts's
+// `exportStockPreparationPrepLines`); this closes the OTHER half — the view must resolve that code
+// through `stockPrepErrorPlain`, not the generic write-shaped `STOCK_PREPARATION_EXPORT_REQUEST_FAILED`
+// fallback its own `recordError` used before this code had a row in the table.
+// ---------------------------------------------------------------------------
+describe('2026-09-10: export failure names the actual reason, not the generic write-shaped fallback', () => {
+  let app: VueApp | null = null
+  let container: HTMLDivElement | null = null
+  const PROJECT_NO = '230920006'
+
+  function ok(data: unknown): Response {
+    return new Response(JSON.stringify({ ok: true, data }), { status: 200 })
+  }
+
+  function directoryPayload(): Record<string, unknown> {
+    return { tenantId: 'default', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+  }
+
+  function queuePayload(rows: unknown[] = []): Record<string, unknown> {
+    return { rowCount: rows.length, byStatus: {}, byResolutionAction: {}, parkedCount: 0, rows }
+  }
+
+  function row(conflictType: string, decisionId = 'decision_1'): Record<string, unknown> {
+    return {
+      decisionId,
+      conflictType,
+      status: 'pending',
+      resolutionAction: null,
+      inputFingerprint: 'sha16:0123456789abcdef',
+      sourceRevisionPresent: true,
+      confirmedByPresent: false,
+      confirmedAtPresent: false,
+      notesPresent: false,
+      resolvedValuePresent: false,
+      resolvedAuxValuePresent: false,
+    }
+  }
+
+  async function flush(cycles = 8): Promise<void> {
+    for (let turn = 0; turn < cycles; turn += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  function q(testid: string): HTMLElement | null {
+    return container!.querySelector(`[data-testid="${testid}"]`)
+  }
+
+  beforeEach(() => {
+    shellState.locale = 'zh-CN'
+    shellState.permissions = ['stock-prep:read', 'stock-prep:operate']
+    apiFetchMock.mockReset()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  function mount(): HTMLDivElement {
+    app = createApp(StockPreparationConfirmationQueueView as Component, { scope: { tenantId: 'default' }, projectNo: PROJECT_NO })
+    app.mount(container!)
+    return container!
+  }
+
+  it('a 404 PREP_LINE_EXPORT_PROJECT_NOT_FOUND renders its own plain-language sentence, never the generic export fallback', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload())
+      if (path.includes('/prep-lines/export')) {
+        return new Response(
+          JSON.stringify({ ok: false, error: { code: 'PREP_LINE_EXPORT_PROJECT_NOT_FOUND', message: 'no stock-preparation rows exist for this project' } }),
+          { status: 404 },
+        )
+      }
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-export') as HTMLButtonElement).click()
+    await flush()
+
+    const errorNode = q('stock-prep-confirmation-error')
+    expect(errorNode, 'the export failure must surface on the shared error line').not.toBeNull()
+    expect(errorNode!.textContent).toContain(stockPrepErrorPlain('PREP_LINE_EXPORT_PROJECT_NOT_FOUND').zh)
+    expect(errorNode!.textContent, 'the read-shaped, actionable sentence — not the generic write fallback').not.toContain('导出没有做完')
+    expect(errorNode!.textContent).toContain('PREP_LINE_EXPORT_PROJECT_NOT_FOUND')
+  })
+
+  it('「什么情况」renders the plain-language conflict type, with the raw server token kept in `title`', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload([row('SOURCE_VALUE_NOT_A_STRING')]))
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+
+    const cell = q('stock-prep-confirmation-conflict-type')
+    expect(cell, '什么情况 cell renders for the row').not.toBeNull()
+    expect(cell!.textContent).toBe('源值不是文本(多为数字型属性)')
+    expect(cell!.textContent).not.toContain('SOURCE_VALUE_NOT_A_STRING')
+    expect(cell!.getAttribute('title')).toBe('SOURCE_VALUE_NOT_A_STRING')
+  })
+
+  it('an unknown/future conflict type keeps rendering its raw token (fail-soft), title matches the visible text', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload([row('some_future_conflict_type')]))
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+
+    const cell = q('stock-prep-confirmation-conflict-type')
+    expect(cell!.textContent).toBe('some_future_conflict_type')
+    expect(cell!.getAttribute('title')).toBe('some_future_conflict_type')
   })
 })

@@ -326,6 +326,22 @@
       <span>{{ bi('先挂起的', 'Parked for later') }}: {{ queue.parkedCount }}</span>
     </div>
 
+    <!-- 顶部一句话 (2026-09-10 field report): when every row still waiting on a human is a kind this
+         page cannot decide, the per-row hints below are each individually true but the page as a
+         whole never SAID that — an operator had to open every row to learn the same fact six times.
+         values-free on purpose: names counts and points at the per-row 「什么情况」 column, never a
+         cell's content. -->
+    <p
+      v-if="queue && allPendingRowsUnconfirmable"
+      class="stock-prep-confirm__hint"
+      data-testid="stock-prep-confirmation-all-unconfirmable-banner"
+    >
+      {{ bi(
+        `这 ${pendingUnconfirmableCount} 条目前都不能在这里确认——它们的问题出在源数据(见每行「什么情况」)。请到源系统修正后重新同步,修正后这些行会自动关闭;确实需要人工处理请联系管理员。`,
+        `None of these ${pendingUnconfirmableCount} rows can be confirmed here right now — the problem is in the source data (see "What happened" on each row). Fix it in the source system and sync again; these rows close on their own once fixed. Contact an administrator if one genuinely needs manual handling.`,
+      ) }}
+    </p>
+
     <table v-if="queue && queue.rows.length > 0" class="stock-prep-confirm__table" data-testid="stock-prep-confirmation-rows">
       <thead>
         <tr>
@@ -340,7 +356,7 @@
       <tbody>
         <tr v-for="row in queue.rows" :key="row.decisionId || ''" data-testid="stock-prep-confirmation-row">
           <td><code class="stock-prep-confirm__token">{{ row.decisionId }}</code></td>
-          <td>{{ row.conflictType }}</td>
+          <td :title="row.conflictType || undefined" data-testid="stock-prep-confirmation-conflict-type">{{ conflictTypeLabel(row.conflictType) }}</td>
           <td>
             <span>{{ decisionStatusLabel(row.status) }}</span>
             <code v-if="row.status" class="stock-prep-confirm__token">{{ row.status }}</code>
@@ -462,12 +478,17 @@
       data-testid="stock-prep-confirmation-value-entry-pane"
     >
       <h3>{{ bi('您在这一条上填过的内容', 'What you entered on this one') }}</h3>
+      <!-- 2026-09-10 field report: the raw request-body field name (`resolvedValue` etc.) used to sit
+           right next to the plain label here, and a reader who is not the person who built this page
+           read it as "the grey word is what I'm looking at" — it is not, it is the wire name. The
+           same three names are still on screen, verbatim, in 技术详情 below (「请求体字段名」), which
+           is where an implementer actually needs them; this readback keeps only the plain label. -->
       <dl>
-        <dt>{{ bi('填的值', 'The value you entered') }} <code class="stock-prep-confirm__token">resolvedValue</code></dt>
+        <dt>{{ bi('填的值', 'The value you entered') }}</dt>
         <dd data-testid="stock-prep-confirmation-value-entry-value">{{ valueEntry.valueEntry.resolvedValue }}</dd>
-        <dt>{{ bi('附带的值', 'The extra value') }} <code class="stock-prep-confirm__token">resolvedAuxValue</code></dt>
+        <dt>{{ bi('附带的值', 'The extra value') }}</dt>
         <dd data-testid="stock-prep-confirmation-value-entry-aux">{{ valueEntry.valueEntry.resolvedAuxValue }}</dd>
-        <dt>{{ bi('备注', 'Your note') }} <code class="stock-prep-confirm__token">notes</code></dt>
+        <dt>{{ bi('备注', 'Your note') }}</dt>
         <dd data-testid="stock-prep-confirmation-value-entry-notes">{{ valueEntry.valueEntry.notes }}</dd>
       </dl>
     </section>
@@ -597,6 +618,7 @@ import {
   STOCK_PREP_QUEUE_RESYNC_ACTION_EMBEDDED,
   STOCK_PREP_RECONCILE_BUTTON_NOTE,
   STOCK_PREP_TOOLTIP_PENDING_CONFIRM,
+  stockPrepConflictTypePlain,
   stockPrepDirectoryEmptyPlain,
   stockPrepDirectoryEmptyState,
   stockPrepEnumPlain,
@@ -1241,11 +1263,49 @@ function rowUnconfirmableReason(row: StockPreparationDecisionRow): string {
       'This one cannot be settled here: the BOM line points at a part that is not in the source system\'s parts library. Add the part there (or correct its id) and the next sync closes this entry by itself.',
     )
   }
+  // Any conflict type this vocabulary knows about gets the same "what it means, what would work"
+  // shape as the missing_component branch above; anything it does NOT know about (a genuinely future
+  // type) degrades to the conservative sentence that follows — still refused, still explained.
+  const plain = stockPrepConflictTypePlain(row.conflictType)
+  if (plain) {
+    return bi(
+      `这条在这一页处理不了:${plain.zh}。请到源系统修正数据后重新同步;确实需要人工处理请联系管理员。`,
+      `This one cannot be settled here: ${plain.en}. Fix the data in the source system and sync again; contact an administrator if it genuinely needs manual handling.`,
+    )
+  }
   return bi(
     '这一类目前还不能在这一页确认,系统会拒绝。请联系我们,或先到源系统修正数据后重新同步。',
     'This kind cannot be confirmed here yet — the server refuses it. Contact us, or fix the data in the source system and sync again.',
   )
 }
+
+/** 「什么情况」column text — the plain sentence when the vocabulary knows this conflict type, the raw
+ *  server token otherwise (EVERY LOOKUP FAILS SOFT — see plainLanguage.ts). The raw code stays on
+ *  screen either way via the cell's `title`. */
+function conflictTypeLabel(conflictType: string | null): string {
+  const plain = stockPrepConflictTypePlain(conflictType)
+  if (plain) return bi(plain.zh, plain.en)
+  return conflictType || ''
+}
+
+/**
+ * 顶部一句话 (2026-09-10). True only when there is at least one row still waiting on a human AND
+ * every one of them is a conflict type this page cannot act on — never true on an empty queue (there
+ * is nothing to say), never true while a single confirmable row remains (that row's own controls are
+ * the more useful thing on screen). Scoped to `status === 'pending'`: a `confirmed`/`superseded` row
+ * is not "waiting", whatever its conflict type, and `queue.rows` can hold all three statuses at once
+ * once the status filter above is set to "all".
+ */
+const pendingQueueRows = computed<StockPreparationDecisionRow[]>(() =>
+  (queue.value?.rows ?? []).filter((row) => row.status === 'pending' && Boolean(row.decisionId)),
+)
+/** Only meaningful while `allPendingRowsUnconfirmable` is true — every pending row counted here IS
+ *  one of the unconfirmable ones, because at that point they are the same set. */
+const pendingUnconfirmableCount = computed<number>(() => pendingQueueRows.value.length)
+const allPendingRowsUnconfirmable = computed<boolean>(() =>
+  pendingQueueRows.value.length > 0
+  && pendingQueueRows.value.every((row) => !isConfirmableConflictType(row.conflictType)),
+)
 
 function selectRow(row: StockPreparationDecisionRow): void {
   if (!isConfirmableConflictType(row.conflictType)) return
