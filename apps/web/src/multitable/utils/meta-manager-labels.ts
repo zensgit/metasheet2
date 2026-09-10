@@ -77,6 +77,12 @@ export type MetaManagerLabelKey =
   | 'field.buttonNotifyRecipients' | 'field.buttonNotifyRecipientsHint'
   | 'field.error.buttonNotifyConfig'
   | 'field.autoNumberHint' | 'field.saveSettings' | 'field.applyDefaults'
+  // r4 item 4: "配置" panel for field types with no configurable options (dateTime,
+  // checkbox/boolean, url/email/phone/barcode/qrcode/location, and the read-only
+  // createdTime/modifiedTime/createdBy/modifiedBy system fields) previously rendered
+  // a blank body between the header and the save/cancel buttons — indistinguishable
+  // from a rendering bug. This key is the sole fallback copy for that state.
+  | 'field.noConfigurableOptions'
   | 'field.namePlaceholder' | 'field.addButton'
   | 'field.changedTypeBlocking' | 'field.changedWarning'
   | 'field.latestMetadataLoaded'
@@ -361,6 +367,10 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.autoNumberHint': {
     en: 'Existing records are backfilled once when the field is created or converted.',
     zh: '字段创建或转换时，会对已有记录一次性回填。',
+  },
+  'field.noConfigurableOptions': {
+    en: 'This field type has no configurable options. To change how it displays, use view settings instead.',
+    zh: '这一类型暂无可配置项；要改显示方式请到视图设置调整。',
   },
   'field.saveSettings': { en: 'Save field settings', zh: '保存字段设置' },
   'field.applyDefaults': { en: 'Apply defaults', zh: '应用默认值' },

@@ -56,7 +56,7 @@
         <div v-if="!fields.length" class="meta-field-mgr__empty">{{ ml('field.empty') }}</div>
       </div>
 
-      <div v-if="configTargetType" class="meta-field-mgr__config">
+      <div v-if="configTargetType" class="meta-field-mgr__config meta-field-mgr__config--scrollable">
         <div class="meta-field-mgr__config-header">
           <strong>{{ configTarget ? configureField(configTarget.name, isZh) : configureNewField(newFieldType, isZh) }}</strong>
           <span>{{ fieldTypeLabel(configTargetType, isZh) }}</span>
@@ -595,6 +595,15 @@
           <div class="meta-field-mgr__hint">
             {{ ml('field.autoNumberHint') }}
           </div>
+        </template>
+
+        <!-- r4 item 4: types with no branch above AND no AI-shortcut section below (that
+             section covers string/longText) previously left this space blank between the
+             header and the save/cancel buttons — indistinguishable from a broken render. -->
+        <template v-else-if="!aiShortcutSectionVisible">
+          <p class="meta-field-mgr__no-config" data-test="field-config-no-options">
+            {{ ml('field.noConfigurableOptions') }}
+          </p>
         </template>
 
         <!-- A3 §2.1: AI shortcut config section (string/longText targets only) -->
@@ -2826,4 +2835,25 @@ onBeforeUnmount(() => {
 .meta-field-mgr__rename--invalid { border-color: #f56c6c; }
 .meta-field-mgr__input--invalid { border-color: #f56c6c; }
 .meta-field-mgr__inline-error { color: #f56c6c; font-size: 11px; margin-top: 4px; }
+/* r4 item 5: the formula config panel (expression box + AI generate + insert-field
+   chips + formula reference catalog) has no bound on its own, so — inside a modal
+   whose OUTER box merely caps at max-height:84vh with default (visible) overflow — it
+   was free to grow past the modal, pushing the save/cancel row (__config-actions,
+   the LAST child inside this same container) below the viewport with no scrollbar to
+   reach it. Bounding height here (relative to the viewport, not a fixed px) turns this
+   panel into its own scroll region for every field type, not just formula. */
+.meta-field-mgr__config--scrollable { max-height: min(52vh, calc(84vh - 160px)); overflow-y: auto; }
+/* Keeps Save/Cancel reachable without scrolling to the very bottom of a long panel
+   (e.g. formula, button+notification). Sits inside the scrollable container above, so
+   it rides along with it rather than escaping to the fixed-size row of buttons elsewhere. */
+.meta-field-mgr__config--scrollable .meta-field-mgr__config-actions {
+  position: sticky;
+  bottom: 0;
+  padding-top: 8px;
+  margin-top: 4px;
+  background: #fbfdff;
+}
+/* No-configurable-options fallback copy (r4 item 4) — same muted treatment as
+   field.empty's sibling __empty class, kept distinct so tests can target it precisely. */
+.meta-field-mgr__no-config { margin: 0; padding: 4px 0; color: #909399; font-size: 12px; }
 </style>
