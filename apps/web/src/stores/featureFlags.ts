@@ -46,6 +46,12 @@ export interface ProductFeatures {
    * inference: OFF keeps `AttendanceGroupContextHost.vue` byte-identical to before this slice.
    */
   attendanceGroupEffectivePolicyPanel: boolean
+  /**
+   * E-learning V0.1 named-pilot navigation/route gate. Default OFF. True only when
+   * the backend session payload (or the existing authorized dev override) supplies
+   * an explicit boolean — never inferred from admin role, product mode, or plugin state.
+   */
+  elearning: boolean
   mode: ProductMode
 }
 
@@ -81,6 +87,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalCanvasV2: false,
   approvalFwbWriteback: false,
   attendanceGroupEffectivePolicyPanel: false,
+  elearning: false,
   mode: 'platform',
 }
 
@@ -267,6 +274,7 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
         : typeof featuresNode.attendance_group_effective_policy_panel === 'boolean'
           ? featuresNode.attendance_group_effective_policy_panel
           : undefined,
+    elearning: typeof featuresNode.elearning === 'boolean' ? featuresNode.elearning : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -395,6 +403,13 @@ function resolveFeatures(
     backend.attendanceGroupEffectivePolicyPanel,
   )
 
+  // E-learning V0.1: default OFF. Only an explicit backend/override boolean enables
+  // it — no inference from admin role, product mode, or plugin state.
+  const elearning = boolOrDefault(
+    override.elearning,
+    backend.elearning,
+  )
+
   return {
     attendance,
     workflow,
@@ -406,6 +421,7 @@ function resolveFeatures(
     approvalCanvasV2,
     approvalFwbWriteback,
     attendanceGroupEffectivePolicyPanel,
+    elearning,
     mode,
   }
 }
@@ -483,11 +499,22 @@ function isPlmWorkbenchFocused(): boolean {
   return state.features.mode === 'plm-workbench' && state.features.plm
 }
 
+/**
+ * Post-login / fallback landing path. #5392: the owner's finding was that logging in — and any
+ * unknown or partial deep link — dropped every user onto the attendance clock-in page, with 14
+ * flat nav items and no starting point. `/home` (MyAppsLandingView) is now that starting point
+ * for the ordinary multi-app deployment.
+ *
+ * The two FOCUSED product modes are deliberately UNCHANGED: a tenant explicitly configured as
+ * attendance-only or plm-workbench-only (App.vue's attendanceFocused/plmWorkbenchFocused, which
+ * also drive a different nav chrome — see guardPolicy's focus-mode allowlists) is a distinct,
+ * single-product deployment where that one surface IS the whole product; that nav-chrome
+ * question is out of scope here (full nav IA restructure is a separate, deferred item).
+ */
 function resolveHomePath(): string {
   if (isAttendanceFocused()) return '/attendance'
   if (isPlmWorkbenchFocused()) return '/plm'
-  if (state.features.attendance && !state.features.plm) return '/attendance'
-  return '/multitable'
+  return '/home'
 }
 
 export function useFeatureFlags() {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   MultitableObjectScopeError,
@@ -12,7 +12,12 @@ import {
   claimPluginObjectScope,
   createPluginScopedMultitableApi,
   getPluginProjectNamespaces,
+  isSheetOwnedByProject,
 } from '../../src/multitable/plugin-scope'
+import {
+  REQUEST_METADATA_SCOPE_MAX_AGE_MS,
+  runWithMultitableRequestMetadataCache,
+} from '../../src/multitable/request-metadata-cache'
 
 function createScopeQuery() {
   const rows: Array<{
@@ -80,6 +85,91 @@ describe('multitable plugin scope helper', () => {
     ).toThrow(MultitableProjectNamespaceError)
   })
 
+  // ---------------------------------------------------------------------------
+  // THE SHEET-OWNERSHIP PORT. It is what the stock-prep carry wall refuses on, and it is the one
+  // provisioning method whose ANSWER is a tenancy fact rather than a schema id — so its narrowing is
+  // load-bearing rather than tidy. Until these cases existed, deleting the wrapper's guard AND
+  // deleting the whole wrapper both stayed green.
+  // ---------------------------------------------------------------------------
+
+  it('isSheetOwnedByProject asks the registry for the (sheet, project) PAIR, never for the owner', async () => {
+    const rows: Array<{ sheet_id: string; project_id: string }> = [
+      { sheet_id: 'sheet_ours', project_id: 'tenant_42:after-sales' },
+      { sheet_id: 'sheet_theirs', project_id: 'tenant_99:after-sales' },
+    ]
+    const query = vi.fn(async (_sql: string, params: unknown[]) => ({
+      rows: rows.filter((row) => row.sheet_id === params[0] && row.project_id === params[1]).map(() => ({})),
+      rowCount: 0,
+    }))
+
+    await expect(isSheetOwnedByProject(query as any, 'sheet_ours', 'tenant_42:after-sales')).resolves.toBe(true)
+    // A sheet that exists but belongs to ANOTHER tenant is false — and the SQL never asked "whose is
+    // it", so there is no owner id anywhere in the answer to leak.
+    await expect(isSheetOwnedByProject(query as any, 'sheet_theirs', 'tenant_42:after-sales')).resolves.toBe(false)
+    // No row at all is the same false: "not registered" and "someone else's" are one answer here.
+    await expect(isSheetOwnedByProject(query as any, 'sheet_absent', 'tenant_42:after-sales')).resolves.toBe(false)
+
+    for (const call of query.mock.calls) {
+      expect(String(call[0])).toContain('project_id = $2')
+      expect(String(call[0])).not.toContain('SELECT project_id')
+    }
+  })
+
+  it('the scoped ownership port narrows on the projectId ARGUMENT, before any query', async () => {
+    const delegate = vi.fn(async () => true)
+    const multitable = { provisioning: { isSheetOwnedByProject: delegate }, records: {} }
+    const scoped = createPluginScopedMultitableApi(multitable as any, 'plugin-after-sales')
+
+    // (a) inside the plugin's own namespace -> delegated and answered
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:after-sales'),
+    ).resolves.toBe(true)
+    expect(delegate).toHaveBeenCalledTimes(1)
+
+    // (b) a FOREIGN plugin namespace -> refused, and the registry is never touched. This is the
+    // assertion that reds if the guard is deleted from the wrapper.
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:attendance'),
+    ).rejects.toThrow(MultitableProjectNamespaceError)
+    expect(delegate).toHaveBeenCalledTimes(1)
+  })
+
+  it('the scoped provisioning surface exposes EVERY method the delegate has', () => {
+    // Deleting a wrapper entirely used to be invisible: the hardcoded fake below only names the
+    // methods someone remembered. In production a missing wrapper is not a missing feature but a
+    // hard failure — the carry wall answers 501 on every click — so the surface is compared as a
+    // SET, and the next method added to MultitableProvisioningAPI cannot ship unwrapped.
+    // The COMPLETE provisioning surface as of this commit. Kept as a literal on purpose: a method
+    // added to the host API and forgotten in the wrapper is caught by adding it here, which is the
+    // same edit the author is already making.
+    const delegateProvisioning = {
+      getObjectSheetId: () => 'sheet_1',
+      getFieldId: () => 'fld_1',
+      getObjectField: async () => null,
+      findObjectSheet: async () => null,
+      isSheetOwnedByProject: async () => false,
+      resolveFieldIds: async () => ({}),
+      resolveExistingObjectFieldIds: async () => ({}),
+      readObjectFieldsContent: async () => ({}),
+      ensureMissingObjectFields: async () => ({}),
+      runObjectFieldsRepairTransaction: async () => ({}),
+      ensureObject: async () => ({}),
+      ensureObjectDefaultView: async () => ({}),
+      ensureView: async () => ({}),
+      patchObjectFieldProperty: async () => ({}),
+    }
+    const scoped = createPluginScopedMultitableApi(
+      { provisioning: delegateProvisioning, records: {} } as any,
+      'plugin-after-sales',
+    )
+    for (const method of Object.keys(delegateProvisioning)) {
+      expect(
+        typeof (scoped.provisioning as Record<string, unknown>)[method],
+        `plugin-scoped provisioning must wrap ${method}`,
+      ).toBe('function')
+    }
+  })
+
   it('wraps provisioning methods with namespace checks', async () => {
     const ensureObjectInScope = vi.fn(async () => ({
       baseId: 'base_legacy',
@@ -91,6 +181,14 @@ describe('multitable plugin scope helper', () => {
     const multitable = {
       provisioning: {
         getObjectSheetId: vi.fn(() => 'sheet_1'),
+        // 项目备料页's fill deep link derives its view id through this seam, so it is guarded by
+        // assertProjectIdAllowedForPlugin exactly like its sheet-id sibling — and therefore has to
+        // be exercised on BOTH sides here, or dropping that guard stays green.
+        getObjectViewId: vi.fn(() => 'view_1'),
+        // The sheet-ownership question. A BOOLEAN: the owning project id never leaves the host.
+        isSheetOwnedByProject: vi.fn(async (sheetId: string, projectId: string) => (
+          sheetId === 'sheet_1' && projectId === 'tenant_42:after-sales'
+        )),
         getFieldId: vi.fn(() => 'fld_1'),
         findObjectSheet: vi.fn(async () => ({
           id: 'sheet_1',
@@ -145,6 +243,15 @@ describe('multitable plugin scope helper', () => {
     })
 
     expect(scoped.provisioning.getObjectSheetId('tenant_42:after-sales', 'serviceTicket')).toBe('sheet_1')
+    expect(scoped.provisioning.getObjectViewId('tenant_42:after-sales', 'serviceTicket', 'default')).toBe('view_1')
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:after-sales'),
+    ).resolves.toBe(true)
+    // A sheet this project does not own is a plain no — the same answer an unclaimed sheet gets, so
+    // the port cannot be used to find out whose it actually is.
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_of_another_tenant', 'tenant_42:after-sales'),
+    ).resolves.toBe(false)
     expect(scoped.provisioning.getFieldId('tenant_42:after-sales', 'serviceTicket', 'status')).toBe('fld_1')
     await expect(
       scoped.provisioning.findObjectSheet({
@@ -218,8 +325,23 @@ describe('multitable plugin scope helper', () => {
       scoped.provisioning.getObjectSheetId('tenant_42:attendance', 'serviceTicket'),
     ).toThrow(MultitableProjectNamespaceError)
     expect(() =>
+      scoped.provisioning.getObjectViewId('tenant_42:attendance', 'serviceTicket', 'default'),
+    ).toThrow(MultitableProjectNamespaceError)
+    expect(() =>
       scoped.provisioning.getFieldId('tenant_42:attendance', 'serviceTicket', 'status'),
     ).toThrow(MultitableProjectNamespaceError)
+    // The ownership question names a PROJECT, so it narrows on the projectId ARGUMENT, before the
+    // registry is touched — a plugin may not ask about a project outside its own namespace. There is
+    // no answer to narrow afterwards: the port returns a boolean, so it can never hand back another
+    // tenant's project id — which is what an earlier id-returning cut did, since plugin namespaces
+    // are per-PLUGIN, not per-tenant, and within one namespace the guard cannot separate tenants.
+    await expect(
+      scoped.provisioning.isSheetOwnedByProject('sheet_1', 'tenant_42:attendance'),
+    ).rejects.toThrow(MultitableProjectNamespaceError)
+    expect(multitable.provisioning.isSheetOwnedByProject).not.toHaveBeenCalledWith(
+      'sheet_1',
+      'tenant_42:attendance',
+    )
     await expect(
       scoped.provisioning.findObjectSheet({
         projectId: 'tenant_42:attendance',
@@ -612,4 +734,295 @@ describe('multitable plugin scope helper', () => {
     }
   })
 
+})
+
+// W8-4 (L1): `assertSheetScope` is the plugin/sheet ownership gate and it fired once per records
+// call — twice per written row on the measured 222 run (`plugin_multitable_object_registry`
+// +26305 seq_scan for 13151 created rows). Memoizing it is only defensible if the memo is scoped
+// to one request and cannot turn a denial into a pass, which is what these tests pin.
+describe('multitable plugin scope request-scoped sheet-scope memo', () => {
+  const FLAG = 'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE'
+
+  function buildScoped(assertSheetScope: ReturnType<typeof vi.fn>) {
+    const records = {
+      queryRecords: vi.fn(async () => []),
+      createRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_target', version: 1, data: {} })),
+    }
+    const scoped = createPluginScopedMultitableApi(
+      { provisioning: {}, records } as any,
+      'plugin-integration-core',
+      { assertSheetScope } as any,
+    )
+    return { records, scoped }
+  }
+
+  async function writeRows(scoped: ReturnType<typeof buildScoped>['scoped'], count: number) {
+    for (let index = 0; index < count; index += 1) {
+      await scoped.records.queryRecords({ sheetId: 'sheet_target', filters: {} } as any)
+      await scoped.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+    }
+  }
+
+  // Save/restore rather than delete: a CI runner that sets this flag globally would otherwise have
+  // it wiped by the first case here, silently changing the premise of every later case in the file.
+  const flagBefore = process.env[FLAG]
+  afterEach(() => {
+    if (flagBefore === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = flagBefore
+    vi.restoreAllMocks()
+  })
+
+  it('asserts once per (plugin, sheet) inside a scope and once per call outside one', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const { records, scoped } = buildScoped(assertSheetScope)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(scoped, 6)
+    })
+    expect(assertSheetScope).toHaveBeenCalledTimes(1)
+    // The delegate still ran for every call — only the ownership probe was memoized.
+    expect(records.queryRecords).toHaveBeenCalledTimes(6)
+    expect(records.createRecord).toHaveBeenCalledTimes(6)
+
+    assertSheetScope.mockClear()
+    await writeRows(scoped, 6)
+    expect(assertSheetScope).toHaveBeenCalledTimes(12)
+  })
+
+  it('re-asserts in a second scope, so ownership is re-derived per request', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const { scoped } = buildScoped(assertSheetScope)
+
+    await runWithMultitableRequestMetadataCache(async () => { await writeRows(scoped, 3) })
+    await runWithMultitableRequestMetadataCache(async () => { await writeRows(scoped, 3) })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(2)
+  })
+
+  it('never memoizes a REFUSAL: a throwing assertion throws on every call', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {
+      throw new MultitableSheetScopeError('plugin-integration-core', 'sheet_target', 'plugin-other')
+    })
+    const { records, scoped } = buildScoped(assertSheetScope)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      for (let index = 0; index < 3; index += 1) {
+        await expect(
+          scoped.records.createRecord({ sheetId: 'sheet_target', data: {} } as any),
+        ).rejects.toBeInstanceOf(MultitableSheetScopeError)
+      }
+    })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(3)
+    expect(records.createRecord).not.toHaveBeenCalled()
+  })
+
+  it('memoizes per (plugin, sheet) pair, never per sheet alone', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const first = buildScoped(assertSheetScope)
+    const second = createPluginScopedMultitableApi(
+      { provisioning: {}, records: first.records } as any,
+      'plugin-after-sales',
+      { assertSheetScope } as any,
+    )
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await first.scoped.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+      await second.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+      await first.scoped.records.createRecord({ sheetId: 'sheet_other', data: {} } as any)
+      // Repeats of all three, none of which may re-assert.
+      await first.scoped.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+      await second.records.createRecord({ sheetId: 'sheet_target', data: {} } as any)
+      await first.scoped.records.createRecord({ sheetId: 'sheet_other', data: {} } as any)
+    })
+
+    // One assertion per DISTINCT pair: two plugins x sheet_target is two, plus sheet_other.
+    expect(assertSheetScope).toHaveBeenCalledTimes(3)
+    expect(assertSheetScope.mock.calls.map((call) => call[0])).toEqual([
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_target' },
+      { pluginName: 'plugin-after-sales', sheetId: 'sheet_target' },
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_other' },
+    ])
+  })
+
+  it('withMetadataCache is a passthrough while the flag is off (no memo at all)', async () => {
+    delete process.env[FLAG]
+    const assertSheetScope = vi.fn(async () => {})
+    const { scoped } = buildScoped(assertSheetScope)
+
+    const result = await scoped.records.withMetadataCache!(async () => {
+      await writeRows(scoped, 4)
+      return 'returned-through'
+    })
+
+    expect(result).toBe('returned-through')
+    expect(assertSheetScope).toHaveBeenCalledTimes(8)
+  })
+
+  // W9: the scope layer adds an ownership assertion, not SQL, so whether a list filter works is a
+  // property of the surface underneath. It may FORWARD that declaration and must never invent it —
+  // a plugin that trusts an invented `true` sends a list to a host that rejects it.
+  it('forwards supportsFilterValueLists only when the wrapped host declares it', async () => {
+    const records = {
+      listRecords: vi.fn(async () => []),
+      queryRecords: vi.fn(async () => []),
+      createRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_1', version: 1, data: {} })),
+      getRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_1', version: 1, data: {} })),
+      patchRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_1', version: 2, data: {} })),
+      deleteRecord: vi.fn(async () => ({ id: 'rec_1', sheetId: 'sheet_1', version: 2 })),
+    }
+
+    const declaring = createPluginScopedMultitableApi(
+      { provisioning: {}, records: { ...records, supportsFilterValueLists: true } } as any,
+      'plugin-integration-core',
+      {} as any,
+    )
+    expect(declaring.records.supportsFilterValueLists).toBe(true)
+
+    const silent = createPluginScopedMultitableApi(
+      { provisioning: {}, records } as any,
+      'plugin-integration-core',
+      {} as any,
+    )
+    expect(silent.records.supportsFilterValueLists).toBeUndefined()
+
+    const denying = createPluginScopedMultitableApi(
+      { provisioning: {}, records: { ...records, supportsFilterValueLists: false } } as any,
+      'plugin-integration-core',
+      {} as any,
+    )
+    expect(denying.records.supportsFilterValueLists).toBeUndefined()
+  })
+
+  it('withMetadataCache rejects a non-function operation', async () => {
+    process.env[FLAG] = 'true'
+    const { scoped } = buildScoped(vi.fn(async () => {}))
+
+    await expect(
+      (scoped.records.withMetadataCache as (op: unknown) => Promise<unknown>)('not-a-function'),
+    ).rejects.toBeInstanceOf(TypeError)
+  })
+
+  // "Two concurrent requests each get their own store" is the entire reason memoizing a security
+  // hook is defensible here, and a serial test cannot tell AsyncLocalStorage apart from a
+  // module-level `let store` with save/restore. This one interleaves: each scope must re-assert a
+  // pair the OTHER scope already passed, in both directions, while both are still open.
+  it('never lets one open scope inherit a concurrent scope’s passed assertion', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const { scoped } = buildScoped(assertSheetScope)
+
+    const gate = () => {
+      let open = (): void => {}
+      const passed = new Promise<void>((resolve) => { open = resolve })
+      return { passed, open }
+    }
+    const aAsserted = gate()
+    const bAsserted = gate()
+    const aCrossed = gate()
+    const bCrossed = gate()
+
+    const scopeA = runWithMultitableRequestMetadataCache(async () => {
+      await scoped.records.createRecord({ sheetId: 'sheet_a', data: {} } as any) // assert #1
+      aAsserted.open()
+      await bAsserted.passed
+      // B has just passed sheet_b. A has not, and must not inherit it.
+      await scoped.records.createRecord({ sheetId: 'sheet_b', data: {} } as any) // assert #3
+      aCrossed.open()
+      await bCrossed.passed
+      // A's own pair is still memoized inside A.
+      await scoped.records.createRecord({ sheetId: 'sheet_a', data: {} } as any) // no assert
+    })
+
+    const scopeB = runWithMultitableRequestMetadataCache(async () => {
+      await aAsserted.passed
+      await scoped.records.createRecord({ sheetId: 'sheet_b', data: {} } as any) // assert #2
+      bAsserted.open()
+      await aCrossed.passed
+      // A passed sheet_a while B was open. B must still assert it for itself.
+      await scoped.records.createRecord({ sheetId: 'sheet_a', data: {} } as any) // assert #4
+      bCrossed.open()
+    })
+
+    await Promise.all([scopeA, scopeB])
+
+    // 4, not 3: a shared store would let A skip sheet_b (B already passed it in the same store).
+    expect(assertSheetScope).toHaveBeenCalledTimes(4)
+    expect(assertSheetScope.mock.calls.map((call) => (call as any[])[0])).toEqual([
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_a' },
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_b' },
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_b' },
+      { pluginName: 'plugin-integration-core', sheetId: 'sheet_a' },
+    ])
+  })
+
+  // The caller chooses how long a scope lasts, so the ownership re-check interval is capped by the
+  // mechanism rather than by the apply writer's "one scope = one chunk" convention.
+  it('re-asserts once the scope is older than the max age', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => {})
+    const { scoped } = buildScoped(assertSheetScope)
+
+    let clock = 1_757_000_000_000
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(scoped, 3)
+      expect(assertSheetScope).toHaveBeenCalledTimes(1)
+
+      clock += REQUEST_METADATA_SCOPE_MAX_AGE_MS + 1
+      // Same scope; the memo simply stops serving, so ownership is re-derived on every call again.
+      await writeRows(scoped, 3)
+    })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(7)
+  })
+
+  // P0-S S4: in the DEFAULT `observe` mode the host does not throw for an UNREGISTERED sheet — it
+  // logs "plugin X accessed unregistered sheet Y" and returns. From this layer that return looks
+  // exactly like a pass, so memoizing it would thin that warning from one line per records call to
+  // one line per scope, which is the signal used to decide whether the registry backfill is far
+  // enough along to flip the mode to `enforce`. The host reports `registered: false`; it must not
+  // be memoized.
+  it('does not memoize a tolerated UNREGISTERED sheet (observe mode keeps warning per call)', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => ({ registered: false }))
+    const { scoped } = buildScoped(assertSheetScope as any)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(scoped, 4)
+    })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(8)
+  })
+
+  it('memoizes an explicitly REGISTERED pass', async () => {
+    process.env[FLAG] = 'true'
+    const assertSheetScope = vi.fn(async () => ({ registered: true }))
+    const { scoped } = buildScoped(assertSheetScope as any)
+
+    await runWithMultitableRequestMetadataCache(async () => {
+      await writeRows(scoped, 4)
+    })
+
+    expect(assertSheetScope).toHaveBeenCalledTimes(1)
+  })
+
+  // The host hook is the only implementation of this contract and it lives inline in the server
+  // bootstrap, where a behavioural mock cannot reach it: if it stopped returning `registered`, the
+  // observe-mode tolerance above would start being memoized again and no unit test would notice.
+  it('the host assertSheetScope hook reports registration status (source contract)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { fileURLToPath } = await import('node:url')
+    const indexPath = fileURLToPath(new URL('../../src/index.ts', import.meta.url))
+    const source = readFileSync(indexPath, 'utf8')
+
+    const hook = source.slice(source.indexOf('assertSheetScope: async ('))
+    const body = hook.slice(0, hook.indexOf('runStockPreparationPersistUnitOfWork'))
+    expect(body).toContain('return { registered: ownsSheet }')
+  })
 })

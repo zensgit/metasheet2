@@ -68,6 +68,7 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
  * is the half that carries meaning.
  */
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
+  'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',
   'packages/core-backend/src/attendance/w4c0-authorization.ts',
   'packages/core-backend/src/attendance/w4c0-fingerprints.ts',
   'packages/core-backend/src/attendance/w4c0-identity.ts',
@@ -167,6 +168,11 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   // WRITES a calculation itself (only an out-of-band audit row).
   'plugins/plugin-attendance/lib/attendance-org-resolution-shadow.cjs',
   'plugins/plugin-attendance/lib/attendance-punch-org-resolution.cjs',
+  // Records/calendar pre-read identity boundary, not a calculation engine.
+  // Keep the stricter partition: both W6 aggregate bans apply, with no carve-out.
+  'plugins/plugin-attendance/lib/attendance-record-read-identity.cjs',
+  'plugins/plugin-attendance/lib/attendance-report-managed-content-drift.cjs',
+  'plugins/plugin-attendance/lib/attendance-report-cleaning-proposal.cjs',
   'plugins/plugin-attendance/lib/attendance-shift-service.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-adapters.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-resolver.cjs',

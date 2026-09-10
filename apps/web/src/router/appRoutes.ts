@@ -17,6 +17,7 @@ import PlatformAppLauncherView from '../views/PlatformAppLauncherView.vue'
 import PlatformAppShellView from '../views/PlatformAppShellView.vue'
 import DingTalkAuthCallbackView from '../views/DingTalkAuthCallbackView.vue'
 import HomeRedirect from '../views/HomeRedirect.vue'
+import MyAppsLandingView from '../views/MyAppsLandingView.vue'
 import LoginView from '../views/LoginView.vue'
 
 // Route-level code split: AttendanceExperienceView chains in the attendance
@@ -32,6 +33,17 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'home',
     component: HomeRedirect,
     meta: { title: 'Home', hideNavbar: true, requiresAuth: true }
+  },
+  {
+    // #5392: the post-login / unknown-deep-link default landing page (see
+    // featureFlags.ts#resolveHomePath and the '/:pathMatch(.*)*' catch-all below, which both
+    // route here now instead of '/attendance'). App cards from the platform apps catalog +
+    // 最近打开的 Base — deliberately NOT a nav-IA change: no top-nav entry points here, it is
+    // reached only as the default/fallback destination.
+    path: '/home',
+    name: 'my-apps-landing',
+    component: MyAppsLandingView,
+    meta: { title: 'My Apps', titleZh: '我的应用', requiresAuth: true }
   },
   {
     path: ROUTE_PATHS.LOGIN,
@@ -297,14 +309,25 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'K3 WISE Preset', titleZh: 'K3 WISE 预设', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
-    // Stock Preparation MVP (#3751, docs/development/stock-preparation-mvp-design-20260707.md):
-    // readonly-first, tabbed operator workspace. Deliberately a SEPARATE routed shell (not crammed
-    // into the admin IntegrationWorkbenchView) so the six MVP views land later in disjoint files.
-    // Reuses the integration:write gate (same as the Data Factory workbench) — no broader access.
+    // Stock Preparation (#3751; narrowed by the O1' ruling of 2026-08-29 to THE CONFIRMATION-QUEUE
+    // WORKBENCH). Deliberately a SEPARATE routed shell (not crammed into the admin
+    // IntegrationWorkbenchView).
+    //
+    // O2 / R-11 — the gate is the workbench's own code, not integration:write.
+    //
+    // It used to reuse the Data Factory's integration:write gate, and that was the live
+    // front/back misalignment this route change closes: every endpoint the page reads is gated
+    // server-side ABOVE integration:write, so an integration:write holder could reach the page and
+    // then 403 on everything in it — "visible but not actionable", exactly what R-11 forbids.
+    //
+    // stock-prep:read is STRICTLY NARROWER than what stood here: R-11's mapping is zero-automatic, so
+    // integration:write does not become a stock-prep code and no one gains reachability from this
+    // edit. Platform admin keeps it (useAuth's admin short-circuit), and a customer operator gets it
+    // by being granted the code explicitly. See services/integration/stockPreparation/workbenchAccess.ts.
     path: '/stock-prep',
     name: AppRouteNames.INTEGRATION_STOCK_PREPARATION,
     component: () => import('../components/integration/stockPreparation/StockPreparationWorkspace.vue'),
-    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['integration:write'] }
+    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['stock-prep:read'] }
   },
   {
     path: '/workflows',
@@ -393,10 +416,47 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Approval Metrics', titleZh: '审批耗时与 SLA', requiresAuth: true, requiresAdmin: true }
   },
   {
+    // P1b slice 3: the web surface for the existing POST /api/approvals/admin/reassign endpoint.
+    // Gated exactly like its sibling admin approval route above (`requiresAdmin`, resolved by
+    // `resolveAdminRouteRedirect` → `resolveHomePath()`), whose backend counterpart is likewise
+    // `rbacGuard('approvals:admin')`. No extra `permissions` conjunct: adding one would make this
+    // route stricter than that sibling and could lock out an admin principal whose permission set
+    // does not carry the literal code.
+    path: '/approvals/batch-transfer',
+    name: 'approval-batch-transfer',
+    component: () => import('../views/approval/ApprovalBatchTransferView.vue'),
+    meta: { title: 'Batch Transfer', titleZh: '批量转交', requiresAuth: true, requiresAdmin: true }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,
     meta: { title: 'Plugins', requiresAuth: true, requiresAdmin: true, requiredFeature: 'attendanceAdmin' }
+  },
+  // E-learning V0.1 named pilot. Learner is elearning:read (never admin-only).
+  // Admin is elearning:admin only — do not infer requiresAdmin from /admin/.
+  {
+    path: '/learn',
+    name: 'elearning-learner',
+    component: () => import('../views/ElearningLearnerView.vue'),
+    meta: { title: 'Learning Center', titleZh: '学习中心', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:read'] }
+  },
+  {
+    path: '/admin/elearning',
+    name: 'elearning-admin',
+    component: () => import('../views/ElearningAdminView.vue'),
+    meta: { title: 'Cloud Classroom Admin', titleZh: '云课堂管理', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:admin'] }
+  },
+  // L3 initial manual-grading queue/detail/submit UI over the already-present
+  // manual-grading endpoints. Standalone surface gated ONLY by elearning:grade —
+  // deliberately NOT nested under /admin/elearning and NOT permissions:
+  // ['elearning:admin'], so a grader without admin access can still reach it
+  // (backend gradeGuard accepts elearning:grade OR elearning:admin).
+  {
+    path: '/elearning/grading',
+    name: 'elearning-manual-grading',
+    component: () => import('../views/ElearningManualGradingView.vue'),
+    meta: { title: 'Manual Grading', titleZh: '人工阅卷', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:grade'] }
   },
   {
     path: '/:pathMatch(.*)*',

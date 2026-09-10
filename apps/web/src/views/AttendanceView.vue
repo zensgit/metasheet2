@@ -1,5 +1,9 @@
 <template>
-  <div class="attendance" :class="{ 'attendance--overview': showOverview }">
+  <section v-if="attendanceSessionStale" role="alert" data-attendance-session-stale>
+    <p>{{ tr('Your session changed. This page belongs to the previous session; actions are disabled and unsaved drafts remain here until you reload.', '会话已变化。本页面属于原会话，操作已停用；未保存草稿保留在此，直到您重新加载。') }}</p>
+    <button type="button" @click="reloadAttendanceSession">{{ tr('Discard unsaved drafts and reload', '放弃未保存草稿并重新加载') }}</button>
+  </section>
+  <div class="attendance" :class="{ 'attendance--overview': showOverview }" :inert="attendanceSessionStale || undefined" :aria-hidden="attendanceSessionStale || undefined">
     <div v-if="pluginLoading" class="attendance__card attendance__card--empty">
       <h3>{{ tr('Checking attendance module...', '正在检查考勤模块...') }}</h3>
       <p class="attendance__empty">{{ tr('Loading plugin status.', '正在加载插件状态。') }}</p>
@@ -24,16 +28,22 @@
             }}
           </p>
         </div>
-        <!--
-          Trailing slot on overview: reserved for a compact session-org switcher
-          (#5145 Draft). Keep this node empty on main so that PR can land a
-          control here without fighting first-viewport layout.
-        -->
         <div
           v-if="showOverview"
           class="attendance__header-aside"
           data-attendance-overview-header-aside
-        />
+        >
+          <AttendanceSessionOrgSwitcher
+            :tr="tr"
+            :orgs="sessionOrgIds"
+            :model-value="sessionOrgId ?? ''"
+            :loading="sessionOrgLoading"
+            :switching="sessionOrgSwitching"
+            :error-message="sessionOrgError"
+            :has-usable-claim="Boolean(sessionOrgId)"
+            @change="switchSessionOrg"
+          />
+        </div>
         <div v-if="showReports" class="attendance__chip-list attendance__chip-list--header">
           <span class="attendance__status-chip">
             {{ tr('Records', '记录') }} {{ recordsTotal }}
@@ -10267,6 +10277,9 @@ import {
 } from './attendance/useAttendanceAdminPayroll'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
+import { useSessionOrg } from '../composables/useSessionOrg'
+import AttendanceSessionOrgSwitcher from './attendance/AttendanceSessionOrgSwitcher.vue'
+
 import { getCalendarVisibleRange } from '../composables/useCalendarDays'
 import {
   EffectiveCalendarFetchError,
@@ -10307,7 +10320,8 @@ import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from './attendance/rulesMeContract'
 import { canReviewAttendanceRequestRow } from './attendance/attendanceRequestReviewEntitlement'
 import { shouldRevealOverviewRequestTools } from './attendance/attendanceOverviewRequestReveal'
 import { usePlugins } from '../composables/usePlugins'
-import { apiFetch } from '../utils/api'
+import { apiFetch as sendApiFetch } from '../utils/api'
+import { provideAttendanceSessionGuard } from '../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../utils/error'
 import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
 
@@ -12277,6 +12291,12 @@ let calendarEffectiveCacheKey: string | null = null
 // overwrite newer chip data.
 let calendarEffectiveLoadVersion = 0
 const auth = useAuth()
+const attendanceSessionGuard = provideAttendanceSessionGuard(
+  String(typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders()['x-tenant-id'] || '' : ''),
+)
+const attendanceSessionStale = attendanceSessionGuard.stale
+const apiFetch = attendanceSessionGuard.wrapFetch(sendApiFetch)
+function reloadAttendanceSession() { window.location.reload() }
 const attendanceAdminGlobalUserScope = computed(() => (
   typeof auth.getAccessSnapshot === 'function' && auth.getAccessSnapshot().isAdmin
 ))
@@ -12595,7 +12615,8 @@ function scheduleDispatchGroupLabel(groupId: string): string {
 function scheduleDispatchShiftLabel(item: AttendanceScheduleDispatchRequest): string {
   if (item.targetShiftLabel) return item.targetShiftLabel
   if (item.targetShiftId) {
-    return shifts.value.find(shift => shift.id === item.targetShiftId)?.name ?? item.targetShiftId
+    return shifts.value.find(shift => shift.id === item.targetShiftId)?.name
+      ?? tr('Deleted or unavailable shift', '班次已删除或不可用')
   }
   return tr('Deleted or unavailable shift', '班次已删除或不可用')
 }
@@ -14774,6 +14795,11 @@ const importPreviewSummaryCards = computed(() => [
 
 const initialAuthHeaders = typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders() : {}
 const orgId = ref(String(initialAuthHeaders['x-tenant-id'] || '').trim())
+const {
+  loading: sessionOrgLoading, switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError, orgs: sessionOrgIds, currentOrgId: sessionOrgId,
+  loadSessionOrgs, switchSessionOrg,
+} = useSessionOrg()
 const targetUserId = ref('')
 
 const {
@@ -14979,7 +15005,7 @@ const {
   needsAttention: setupReadinessNeedsAttention,
   lastOrgId: setupReadinessLastOrgId,
   loadReadiness: loadSetupReadiness,
-} = useAttendanceSetupReadiness()
+} = useAttendanceSetupReadiness({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 
 // §3① role contract (W4-1 强制): the step① remediation branches on the viewer being a PLATFORM
 // admin (the /api/admin/users surface is ensurePlatformAdmin-gated). Same client-side signal as
@@ -15043,7 +15069,7 @@ function decisionTraceTargetKind(category: AttendanceDecisionTraceCategory): 'wo
 }
 
 // --- admin face (consumes GET /api/attendance-admin/decision-trace) ---
-const adminTrace = useAttendanceDecisionTrace()
+const adminTrace = useAttendanceDecisionTrace({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 const adminTraceCategory = ref<AttendanceDecisionTraceCategory>('today_status')
 const adminTraceUserId = ref('')
 const adminTraceWorkDate = ref(new Date().toISOString().slice(0, 10))
@@ -15070,7 +15096,7 @@ function loadAdminDecisionTrace(): void {
 // --- self face (consumes GET /api/attendance/decision-trace; subject = token, NEVER a userId
 // parameter — §4.1; multi-org members pick an org only after the endpoint answers
 // 400 ORG_ID_REQUIRED, self four-leg contract P2-d) ---
-const selfTrace = useAttendanceDecisionTrace()
+const selfTrace = useAttendanceDecisionTrace({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 const selfTraceCategory = ref<AttendanceDecisionTraceCategory>('today_status')
 const selfTraceWorkDate = ref(new Date().toISOString().slice(0, 10))
 const selfTraceRequestId = ref('')
@@ -15775,6 +15801,7 @@ async function loadEffectiveCalendarForOverview(
   range: { from: string; to: string },
   options?: { force?: boolean },
 ): Promise<void> {
+  if (!attendanceSessionGuard.isCurrent()) return
   const from = String(range.from || '').trim()
   const to = String(range.to || '').trim()
   if (!from || !to) return
@@ -15794,11 +15821,11 @@ async function loadEffectiveCalendarForOverview(
       to,
       userId,
       suppressUnauthorizedRedirect: true,
-    })
+    }, apiFetch)
     // Stale-response guard (Codex Blocking #2): if another call started after
     // this one (e.g. user switched months or clicked Refresh during await),
     // drop this result so the newer one wins.
-    if (loadVersion !== calendarEffectiveLoadVersion) return
+    if (loadVersion !== calendarEffectiveLoadVersion || !attendanceSessionGuard.isCurrent()) return
     const items = Array.isArray(result?.items) ? result.items : []
     calendarEffectiveChips.value = items
       .filter(isCalendarEffectiveItemNoteworthy)
@@ -15807,6 +15834,7 @@ async function loadEffectiveCalendarForOverview(
     // Failure must not block calendar grid rendering — clear chips, bust the
     // cache key so a later auth/retry succeeds. Only the most recent failed
     // version mutates state so older failures cannot blank a newer success.
+    if (!attendanceSessionGuard.isCurrent()) return
     if (loadVersion === calendarEffectiveLoadVersion) {
       calendarEffectiveChips.value = []
       calendarEffectiveCacheKey = null
@@ -15826,6 +15854,7 @@ watch(committedCalendarUserId, (next) => {
 async function loadEffectiveCalendarForRotationAssignment(
   range: { userId: string; from: string; to: string },
 ): Promise<void> {
+  if (!attendanceSessionGuard.isCurrent()) return
   const userId = range.userId.trim()
   const from = range.from.trim()
   const to = range.to.trim()
@@ -15840,13 +15869,14 @@ async function loadEffectiveCalendarForRotationAssignment(
       to,
       userId,
       suppressUnauthorizedRedirect: true,
-    })
-    if (loadVersion !== rotationAssignmentEffectiveCalendarLoadVersion) return
+    }, apiFetch)
+    if (loadVersion !== rotationAssignmentEffectiveCalendarLoadVersion || !attendanceSessionGuard.isCurrent()) return
     const items = Array.isArray(result?.items) ? result.items : []
     rotationAssignmentEffectiveCalendarChips.value = items
       .filter(isCalendarEffectiveItemNoteworthy)
       .map(effectiveCalendarItemToChip)
   } catch (error) {
+    if (!attendanceSessionGuard.isCurrent()) return
     if (loadVersion === rotationAssignmentEffectiveCalendarLoadVersion) {
       rotationAssignmentEffectiveCalendarChips.value = []
       rotationAssignmentEffectiveCalendarCacheKey = null
@@ -15860,6 +15890,7 @@ async function loadEffectiveCalendarForRotationAssignment(
 async function loadEffectiveCalendarForShiftAssignment(
   range: { userId: string; from: string; to: string },
 ): Promise<void> {
+  if (!attendanceSessionGuard.isCurrent()) return
   const userId = range.userId.trim()
   const from = range.from.trim()
   const to = range.to.trim()
@@ -15874,13 +15905,14 @@ async function loadEffectiveCalendarForShiftAssignment(
       to,
       userId,
       suppressUnauthorizedRedirect: true,
-    })
-    if (loadVersion !== shiftAssignmentEffectiveCalendarLoadVersion) return
+    }, apiFetch)
+    if (loadVersion !== shiftAssignmentEffectiveCalendarLoadVersion || !attendanceSessionGuard.isCurrent()) return
     const items = Array.isArray(result?.items) ? result.items : []
     shiftAssignmentEffectiveCalendarChips.value = items
       .filter(isCalendarEffectiveItemNoteworthy)
       .map(effectiveCalendarItemToChip)
   } catch (error) {
+    if (!attendanceSessionGuard.isCurrent()) return
     if (loadVersion === shiftAssignmentEffectiveCalendarLoadVersion) {
       shiftAssignmentEffectiveCalendarChips.value = []
       shiftAssignmentEffectiveCalendarCacheKey = null
@@ -16427,7 +16459,7 @@ const {
   hasLinkedDirectoryAccounts: approvalDirectoryHasLinked,
   maxManagerChainLevels: approvalMaxManagerChainLevels,
   loadReadiness: loadApprovalDirectoryReadiness,
-} = useAttendanceApprovalDirectoryReadiness()
+} = useAttendanceApprovalDirectoryReadiness({ apiFetch, isSessionCurrent: attendanceSessionGuard.isCurrent })
 const approvalFlowStepWarnings = computed(() => collectAuthoringWarnings(approvalFlowSteps.value, {
   hasLinkedDirectoryAccounts: approvalDirectoryHasLinked.value,
 }))
@@ -21824,6 +21856,8 @@ async function runPostPunchRefresh(task: () => Promise<unknown>): Promise<void> 
 }
 
 async function punch(eventType: PunchEventType, retryNote?: string) {
+  // Check before touching the unsaved note as well as at the final HTTP send.
+  try { attendanceSessionGuard.assertCurrent() } catch { return }
   punching.value = true
   // A fresh direct punch (not a G2 note retry) starts clean; the retry call
   // itself (retryNote set) must NOT clear the form it is trying to resolve.
@@ -21874,6 +21908,7 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
     }
   } catch (error: any) {
     const apiError = error as { status?: number; code?: string } | null
+    if (!attendanceSessionGuard.isCurrent()) return
     const errorOutcome = classifyPunchErrorOutcome({ status: apiError?.status, code: apiError?.code }, tr)
     if (errorOutcome?.kind === 'noteRequired') {
       // G2: enum-strict — only this exact code opens the inline note form.
@@ -22125,7 +22160,8 @@ function employeeScheduleDispatchTargetShift(item: AttendanceRequest): string {
   if (label) return label
   const shiftId = String(dispatch.targetShiftId ?? dispatch.target_shift_id ?? '').trim()
   if (!shiftId) return tr('Deleted or unavailable shift', '班次已删除或不可用')
-  return shifts.value.find(shift => shift.id === shiftId)?.name ?? shiftId
+  return shifts.value.find(shift => shift.id === shiftId)?.name
+    ?? tr('Deleted or unavailable shift', '班次已删除或不可用')
 }
 
 function employeeScheduleDispatchSlot(item: AttendanceRequest): number {
@@ -29494,8 +29530,9 @@ onMounted(() => {
   // already typed a targetUserId — refreshAll will commit that the next
   // time it runs.
   auth.getCurrentUserId().then((id) => {
-    if (!id) return
+    if (!attendanceSessionGuard.isCurrent() || !id) return
     currentUserId.value = id
+    if (showOverview.value) void loadSessionOrgs()
     if (!committedCalendarUserId.value && !normalizedUserId()) {
       committedCalendarUserId.value = id
     }
@@ -29505,6 +29542,7 @@ onMounted(() => {
   })
   fetchPlugins()
     .then(() => {
+      if (!attendanceSessionGuard.isCurrent()) return
       pluginsLoaded.value = true
       if (attendancePluginActive.value) {
         refreshAll()
@@ -29517,6 +29555,7 @@ onMounted(() => {
       }
     })
     .catch(() => {
+      if (!attendanceSessionGuard.isCurrent()) return
       pluginsLoaded.value = true
     })
 })

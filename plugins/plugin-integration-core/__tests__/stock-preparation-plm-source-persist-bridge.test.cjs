@@ -133,6 +133,34 @@ run('builds the closed persist input and preserves every line through the existi
     assert.equal('unknownBusinessField' in row, false)
   }
 
+  // The projection is a HARD WALL — a snapshot-line field missing from EXPANSION_ROW_KEYS is
+  // silently dropped here even though the template has a column for it. The seven fields a 备料
+  // pull must carry have to survive it, or the T3b auto-persist path quietly re-creates the exact
+  // loss this change exists to close. `material` was already in this hole before the four new ones.
+  const carried = buildPlmSourcePersistInput({
+    request: request(),
+    intake: {
+      ...sourceIntake,
+      bomSnapshotLines: [{
+        ...sourceIntake.bomSnapshotLines[0],
+        parentName: '筒体组件B',
+        childName: '标准封头D',
+        material: 'S30408',
+        spec: 'EHA-DN1200x12',
+        totalQuantity: 12,
+      }],
+    },
+  })
+  for (const [fieldId, value] of Object.entries({
+    parentName: '筒体组件B',
+    childName: '标准封头D',
+    material: 'S30408',
+    spec: 'EHA-DN1200x12',
+    totalQuantity: 12,
+  })) {
+    assert.equal(carried.expansionResult[0][fieldId], value, `${fieldId} survives the closed projection`)
+  }
+
   const remapped = mapExpansionRowsToSnapshotLines(result.expansionResult, { snapshotBatchId: result.snapshotBatchId })
   assert.equal(remapped.lines.length, sourceIntake.bomSnapshotLines.length)
   for (let index = 0; index < remapped.lines.length; index += 1) {

@@ -208,7 +208,14 @@ async function main() {
     'sandbox sync without config_info still seeds the contract decision options only',
   )
   assert.equal(sandboxDefaultCalls.patchObjectFieldProperty[0].fieldId, 'lastPlmRefreshDecision')
-  assert.equal(sandboxDefaultResult.evidence.skipped.length, 3, 'sandbox sync records config_info fields as skipped when not supplied')
+  // 3 -> 4: `makeOrBuy` (自制/外购) joined the template's config_info-backed selects
+  // beside materialType / blankType / stockPreparationStatus. Nothing was added to the
+  // option-sync CONTRACT to make that happen — the sync derives its option fields from
+  // the template's own `optionSource` declarations, so a deployment that has not supplied
+  // a 自制/外购 dictionary gets `config_info_not_supplied` rather than a vocabulary the
+  // platform invented for it. That is the whole reason no default option set is frozen
+  // into the template.
+  assert.equal(sandboxDefaultResult.evidence.skipped.length, 4, 'sandbox sync records config_info fields as skipped when not supplied')
   assert.ok(
     sandboxDefaultResult.evidence.skipped.every((entry) => entry.reason === 'config_info_not_supplied'),
     'sandbox sync skip evidence is reason/count metadata only',

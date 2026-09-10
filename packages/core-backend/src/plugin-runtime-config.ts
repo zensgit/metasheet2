@@ -5,6 +5,8 @@ const INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_ENV = 'INTEGRATION_CORE_C6_TEST
 const C6_TEST_FAILURE_INJECTION_ENABLED_ENV = 'METASHEET_C6_TEST_FAILURE_INJECTION_ENABLED'
 const INTEGRATION_CORE_CUSTOMER_PACKS_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH'
 const INTEGRATION_CORE_EXT_FIELD_MAPPING_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH'
+const INTEGRATION_CORE_B2A_REGISTRY_PATH_ENV = 'INTEGRATION_CORE_B2A_REGISTRY_PATH'
+const INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH'
 
 function parsePluginJsonEnv(env: NodeJS.ProcessEnv, key: string): unknown {
   const raw = env[key]
@@ -126,12 +128,64 @@ export function resolvePluginRuntimeConfig(
     INTEGRATION_CORE_EXT_FIELD_MAPPING_PATH_ENV,
     'a JSON object'
   )
+  // B2a TRIAL REGISTRATION — the third artifact on this reader, and the one that ARMS a gate rather
+  // than supplying data to one.
+  //
+  // The other two are inputs to a capability: without a pack there are no `ext_` columns, without a
+  // mapping no `ext_` values. This one is the reverse. Unset -> the key is omitted -> the plugin's
+  // registry is `null` -> the B2a gate is DORMANT and every stock-prep source read behaves exactly
+  // as it did before this key existed (synthetic fixtures, local demos and the whole existing test
+  // corpus are untouched). SET -> the gate is ARMED and every gated stock-prep read must match a
+  // live, in-scope, unexpired registration or be refused before the source adapter is invoked.
+  //
+  // So "unreadable/malformed -> THROW" matters even more here than it does for the other two: a typo
+  // in this path must never be indistinguishable from "no registry configured", because that
+  // difference is the difference between a gate and no gate. The throw names the ENV KEY and never
+  // echoes the path, same as its siblings.
+  //
+  // A registration file carries owner names, expiry dates and a customer's project numbers. It is a
+  // reviewed, signed-off artifact that belongs in a file on the deployment's own machine — never
+  // inline in a process environment where it cannot be diffed.
+  const b2aTrialRegistry = readDeployJsonObjectFile(
+    env,
+    INTEGRATION_CORE_B2A_REGISTRY_PATH_ENV,
+    'a JSON object with registryId, registryVersion and registrations'
+  )
+  // 通知下一步 (light 备料 handoff): the ordered chain of steps, WHO handles each one, and which
+  // DingTalk group destinations get told. Fourth artifact on this reader, and the same posture as
+  // its siblings for the same reason — a chain names a tenant's own people and their group robots,
+  // which is reviewable deployment data, not a setting you can sensibly inline in an environment
+  // variable.
+  //
+  // UNSET -> the key is omitted -> the plugin's chain is unconfigured -> the advance route refuses
+  // with a named 501 before it touches the store, the notifier or the audit trail, and the whole
+  // deployment is byte-identical to one that never heard of this feature. There is no partially-on
+  // state and no default chain: nobody gets an implied approval route.
+  //
+  // SET-but-malformed -> THROW. This matters more here than anywhere else on this reader, because
+  // the failure being prevented is SILENCE. For a catalog, a typo'd path degrades to "no extension
+  // columns" and someone notices the missing columns; for a NOTIFICATION CHAIN, a typo'd path would
+  // degrade to "notify nobody", which looks exactly like a correctly-configured deployment right up
+  // until the day someone asks why the warehouse never heard about a finished 备料. "Typo" and
+  // "nothing configured" must never be indistinguishable when the difference is whether anyone gets
+  // told anything at all. The throw names the ENV KEY and never echoes the path, same as its
+  // siblings.
+  //
+  // This file only reads the artifact and shape-checks that it is a JSON object; the plugin owns
+  // validating the steps array, the handler ids and the destination ids inside it.
+  const stockPreparationHandoff = readDeployJsonObjectFile(
+    env,
+    INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH_ENV,
+    'a JSON object with an ordered steps array'
+  )
 
   return {
     ...(tableActions !== undefined ? { tableActions } : {}),
     ...(stockPreparationTableActions !== undefined ? { stockPreparationTableActions } : {}),
     ...(stockPreparationCustomerPacks !== undefined ? { stockPreparationCustomerPacks } : {}),
     ...(stockPreparationExtFieldMapping !== undefined ? { stockPreparationExtFieldMapping } : {}),
+    ...(b2aTrialRegistry !== undefined ? { b2aTrialRegistry } : {}),
+    ...(stockPreparationHandoff !== undefined ? { stockPreparationHandoff } : {}),
     ...(c6TestFailureInjection !== undefined || c6TestFailureInjectionDeployEnabled
       ? {
           c6TestFailureInjection: {

@@ -10,6 +10,9 @@ function entry(relPath, enclosingSymbol, count, role) {
 }
 
 const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
+  // ACP seed is an authority precondition, revalidated under the canonical lock, never a public list.
+  entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'readAttendanceCleaningSourceSeed', 1, 'canonical_authority_seed'),
+  entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'loadCanonicalRow', 1, 'write_lock'),
   entry('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', 'lockShadowParentRecord', 1, 'write_lock'),
   // #4556 W4C-2 Gate D2 (#4844): the authoritative live-punch branch re-reads the parent row it
   // has held `FOR UPDATE` since `lockShadowParentRecord`, AFTER the core's pointer UPDATE, to

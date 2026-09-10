@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   ApprovalRoutingPolicyError,
+  captureApprovalDepartureManagerContexts,
+  resolveApprovalDepartureManagerFromContext,
   resolveApprovalRequesterOrgRelations,
 } from '../../src/services/ApprovalDirectoryOrg'
 
@@ -47,6 +49,7 @@ type FakeDbWithTrace = FakeDb & {
   lastOrgIdParam?: string | null
   lastRequesterSql?: string
   lastPolicySql?: string
+  lastDirectManagerSql?: string
   lastPolicyOrgIdParam?: string | null
   lastPolicyCanonicalParam?: string | null
 }
@@ -102,6 +105,7 @@ function makeQuery(db: FakeDbWithTrace) {
       return { rows: (db.normalizedDeptManagers ?? []) as Row[] }
     }
     if (text.includes('JOIN directory_account_departments ad') && text.includes('d.external_department_id = $2')) {
+      db.lastDirectManagerSql = text
       // Mirror the production self-exclusion `AND a.external_user_id <> $3` so a
       // leader-requester is never a candidate for their own manager.
       const selfExternal = params?.[2]
@@ -584,5 +588,106 @@ describe('resolveApprovalRequesterOrgRelations', () => {
     expect(db.lastPolicySql).toBeTruthy()
     expect(db.lastPolicySql).not.toContain('p.org_id = $2')
     expect(db.lastPolicyOrgIdParam).toBeNull()
+  })
+})
+
+describe('F4-E departure manager context', () => {
+  it('captures one unambiguous primary department per departed account before membership rebuild', async () => {
+    let capturedIds: unknown
+    const contexts = await captureApprovalDepartureManagerContexts(
+      [' account-a ', 'account-a', 'account-b'],
+      async <Row>(_text: string, params?: unknown[]) => {
+        capturedIds = params?.[0]
+        return {
+          rows: [
+            {
+              directory_account_id: 'account-a',
+              integration_id: 'integration-a',
+              requester_external_id: 'external-a',
+              primary_department_external_id: 'dept-a',
+              primary_department_count: 1,
+            },
+            {
+              directory_account_id: 'account-b',
+              integration_id: 'integration-a',
+              requester_external_id: 'external-b',
+              primary_department_external_id: 'dept-b',
+              primary_department_count: 2,
+            },
+          ] as Row[],
+        }
+      },
+    )
+
+    expect(capturedIds).toEqual(['account-a', 'account-b'])
+    expect(contexts).toEqual(new Map([
+      ['account-a', {
+        integrationId: 'integration-a',
+        requesterExternalId: 'external-a',
+        primaryDepartmentExternalId: 'dept-a',
+      }],
+      ['account-b', {
+        integrationId: 'integration-a',
+        requesterExternalId: 'external-b',
+        primaryDepartmentExternalId: null,
+      }],
+    ]))
+  })
+
+  it('does not query when no departed account id remains after normalization', async () => {
+    let called = false
+    const contexts = await captureApprovalDepartureManagerContexts([' ', ''], async () => {
+      called = true
+      return { rows: [] }
+    })
+    expect(contexts.size).toBe(0)
+    expect(called).toBe(false)
+  })
+
+  it('resolves the current active direct manager from the captured source position', async () => {
+    const db: FakeDb = {
+      normalizedDeptManagers: [{ account_id: 'account-manager', external_user_id: 'external-manager' }],
+      localByAccountId: { 'account-manager': 'local-manager' },
+    }
+    const managerId = await resolveApprovalDepartureManagerFromContext({
+      integrationId: 'integration-a',
+      requesterExternalId: 'external-departed',
+      primaryDepartmentExternalId: 'dept-a',
+    }, makeQuery(db))
+    expect(managerId).toBe('local-manager')
+  })
+
+  it('binds the legacy direct-manager account and department to the captured integration', async () => {
+    const db: FakeDbWithTrace = {
+      deptCandidates: [{
+        account_id: 'account-manager',
+        external_user_id: 'external-manager',
+        raw: { leader_in_dept: [{ dept_id: 'dept-a', leader: true }] },
+      }],
+      localByAccountId: { 'account-manager': 'local-manager' },
+    }
+    const managerId = await resolveApprovalDepartureManagerFromContext({
+      integrationId: 'integration-a',
+      requesterExternalId: 'external-departed',
+      primaryDepartmentExternalId: 'dept-a',
+    }, makeQuery(db))
+
+    expect(managerId).toBe('local-manager')
+    expect(db.lastDirectManagerSql).toContain('a.integration_id = $1::uuid')
+    expect(db.lastDirectManagerSql).toContain('d.integration_id = $1::uuid')
+  })
+
+  it('fails closed without a single captured primary department', async () => {
+    let called = false
+    const managerId = await resolveApprovalDepartureManagerFromContext({
+      integrationId: 'integration-a',
+      requesterExternalId: 'external-departed',
+      primaryDepartmentExternalId: null,
+    }, async () => {
+      called = true
+      return { rows: [] }
+    })
+    expect(managerId).toBeUndefined()
+    expect(called).toBe(false)
   })
 })

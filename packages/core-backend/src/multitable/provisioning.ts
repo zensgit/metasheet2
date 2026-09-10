@@ -123,6 +123,20 @@ export type CreateViewResult =
   | { created: true; view: MultitableProvisioningView }
   | { created: false; view: null }
 
+export type EnsureObjectDefaultViewInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  name: string
+  type?: string
+}
+
+export type EnsureObjectDefaultViewResult = {
+  created: boolean
+  viewId: string | null
+  existingViewCount: number
+}
+
 export const DEFAULT_BASE_ID = 'base_legacy'
 export const DEFAULT_BASE_NAME = 'Migrated Base'
 
@@ -585,6 +599,65 @@ export async function createView(
     throw new Error(`Failed to create view: ${input.viewId}`)
   }
   return { created: true, view }
+}
+
+// DEFAULT-VIEW primitive. A multitable base renders each sheet's default view, so a
+// sheet with ZERO views cannot be opened — and one unopenable sheet blocks the whole
+// base. Provisioning creates a sheet and its fields; nothing created a view, which is
+// why the first real deployment had to have three grid views inserted by hand.
+//
+// The guarantee this primitive is shaped around: a sheet that already has ANY view is
+// left COMPLETELY alone. Not merged, not renamed, not reordered, not added to — a pack
+// that created role views owns that sheet's view list, and this must never append a
+// fourth. That is why this is NOT `ensureView` (INSERT ... ON CONFLICT DO UPDATE by a
+// deterministic id, which WOULD append next to pack-created views): the decision is
+// taken on the sheet's view COUNT, and the write happens only from zero. Existing view
+// rows are CONSTRUCTIVELY untouchable — there is no UPDATE and no DELETE statement in
+// this function body, and the single INSERT is ON CONFLICT DO NOTHING (via createView),
+// so two concurrent ensures cannot produce two views either.
+//
+// Additive and idempotent: a re-ensure on a sheet this created a view for sees count 1
+// and writes nothing. Returns values-free evidence (an id and counts only).
+export const DEFAULT_OBJECT_VIEW_LOGICAL_ID = 'default'
+
+export async function ensureObjectDefaultView(
+  input: EnsureObjectDefaultViewInput,
+): Promise<EnsureObjectDefaultViewResult> {
+  const sheetId = getObjectSheetId(input.projectId, input.objectId)
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  if (!name) {
+    throw new Error('ensureObjectDefaultView requires a non-empty view name')
+  }
+  const counted = await input.query(
+    `SELECT count(*)::int AS view_count
+     FROM meta_views
+     WHERE sheet_id = $1`,
+    [sheetId],
+  )
+  const countRow = (counted.rows as any[])[0]
+  const existingViewCount = Number(countRow?.view_count ?? 0)
+  if (existingViewCount > 0) {
+    return { created: false, viewId: null, existingViewCount }
+  }
+
+  const sheet = await loadActiveSheet(input.query, sheetId)
+  if (!sheet) {
+    throw new Error(`Cannot ensure a default view for a missing sheet: ${sheetId}`)
+  }
+
+  const viewId = getObjectViewId(input.projectId, input.objectId, DEFAULT_OBJECT_VIEW_LOGICAL_ID)
+  const result = await createView({
+    query: input.query,
+    viewId,
+    sheetId,
+    name,
+    type: input.type || 'grid',
+  })
+  return {
+    created: result.created,
+    viewId: result.created ? viewId : null,
+    existingViewCount: 0,
+  }
 }
 
 export type EnsureMissingObjectFieldsInput = {

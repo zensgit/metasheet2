@@ -7,6 +7,7 @@ import { createHash, randomUUID } from 'crypto'
 import { createRequire } from 'module'
 import { Pool } from 'pg'
 import http from 'http'
+import * as bcrypt from 'bcryptjs'
 import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
 import { AttendanceScheduler } from '../../src/services/AttendanceScheduler'
 import {
@@ -303,6 +304,28 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
   })
+}
+
+async function waitForImportUploadCleanup(
+  paths: readonly string[],
+  { attempts = 80, intervalMs = 25 }: { attempts?: number; intervalMs?: number } = {},
+): Promise<void> {
+  let remainingCount = paths.length
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const present = await Promise.all(paths.map(async (filePath) => {
+      try {
+        await fs.stat(filePath)
+        return true
+      } catch (error) {
+        if ((error as { code?: unknown }).code === 'ENOENT') return false
+        throw error
+      }
+    }))
+    remainingCount = present.filter(Boolean).length
+    if (remainingCount === 0) return
+    await delay(intervalMs)
+  }
+  throw new Error(`ATTENDANCE_IMPORT_UPLOAD_CLEANUP_NOT_OBSERVED:${remainingCount}`)
 }
 
 async function fetchImportJob(baseUrl: string, token: string, jobId: string): Promise<any> {
@@ -7397,7 +7420,7 @@ attendanceIntegrationDescribe(
     let overtimeRuleId: string | undefined
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -9853,7 +9876,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-test&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9876,11 +9899,216 @@ attendanceIntegrationDescribe(
     expect(Array.isArray(body.data?.items)).toBe(true)
   })
 
+  it('pins attendance records and calendar reads to the authenticated tenant and subject authority', async () => {
+    if (!baseUrl) return
+
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    expect(dbUrl).toBeTruthy()
+    if (!dbUrl) return
+
+    const suffix = randomUUID()
+    const orgA = `records-tenant-a-${suffix}`
+    const orgB = `records-tenant-b-${suffix}`
+    const selfId = `records-self-${suffix}`
+    const sameOrgOtherId = `records-other-${suffix}`
+    const foreignId = `records-foreign-${suffix}`
+    const unauthorizedId = `records-unauthorized-${suffix}`
+    const workDate = '2031-04-17'
+    const password = `Records-${suffix}`
+    const selfRecordId = randomUuidV4()
+    const sameOrgOtherRecordId = randomUuidV4()
+    const foreignRecordId = randomUuidV4()
+    const pool = new Pool({ connectionString: dbUrl })
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const verificationErrors: unknown[] = []
+
+    const tokenFor = async (userId: string, tenantId?: string, perms = 'attendance:read') => {
+      const query = new URLSearchParams({ userId, roles: 'user', perms })
+      if (tenantId) query.set('tenantId', tenantId)
+      const response = await requestJson(`${baseUrl}/api/auth/dev-token?${query.toString()}`)
+      const token = (response.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      return token || ''
+    }
+    const itemsOf = (response: HttpResponse): Array<Record<string, unknown>> =>
+      (response.body as { data?: { items?: Array<Record<string, unknown>> } } | undefined)?.data?.items ?? []
+    const assertOnlyCanary = (response: HttpResponse, recordId: string, status: string) => {
+      expect(response.status, response.raw).toBe(200)
+      const items = itemsOf(response)
+      expect(items).toHaveLength(1)
+      expect(String(items[0]?.id ?? '')).toBe(recordId)
+      expect(String(items[0]?.status ?? '')).toBe(status)
+    }
+
+    try {
+      process.env.RBAC_BYPASS = 'false'
+      const passwordHash = await bcrypt.hash(password, 4)
+      for (const [userId, orgId, email] of [
+        [selfId, orgA, `${selfId}@example.test`],
+        [sameOrgOtherId, orgA, `${sameOrgOtherId}@example.test`],
+        [foreignId, orgB, `${foreignId}@example.test`],
+        [unauthorizedId, orgA, `${unauthorizedId}@example.test`],
+      ] as const) {
+        await pool.query(
+          `INSERT INTO users
+             (id, email, username, name, password_hash, role, permissions, is_active, is_admin,
+              activation_status, local_password_set, must_change_password, created_at, updated_at)
+           VALUES ($1, $2, $1, $1, $3, 'user', '[]'::jsonb, true, false,
+                   'activated', true, false, now(), now())`,
+          [userId, email, userId === selfId ? passwordHash : 'no-login'],
+        )
+        await pool.query(
+          `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+          [userId, orgId],
+        )
+        await pool.query(
+          `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:read')
+           ON CONFLICT DO NOTHING`,
+          [userId],
+        )
+      }
+      await pool.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ($1, 'attendance:approve') ON CONFLICT DO NOTHING`,
+        [selfId],
+      )
+      for (const [recordId, userId, orgId, status] of [
+        [selfRecordId, selfId, orgA, 'normal'],
+        [sameOrgOtherRecordId, sameOrgOtherId, orgA, 'adjusted'],
+        [foreignRecordId, foreignId, orgB, 'absent'],
+      ] as const) {
+        await pool.query(
+          `INSERT INTO attendance_records
+             (id, user_id, org_id, work_date, timezone, work_minutes, late_minutes,
+              early_leave_minutes, status, is_workday, meta, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'UTC', 480, 0, 0, $5, true, '{}'::jsonb, now(), now())`,
+          [recordId, userId, orgId, workDate, status],
+        )
+      }
+
+      const login = await requestJson(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: `${selfId}@example.test`, password }),
+      })
+      expect(login.status, login.raw).toBe(200)
+      const realToken = (login.body as { token?: string; data?: { token?: string } } | undefined)?.token
+        ?? (login.body as { data?: { token?: string } } | undefined)?.data?.token
+      expect(realToken).toBeTruthy()
+      if (!realToken) return
+
+      const unauthorizedToken = await tokenFor(unauthorizedId, orgA)
+      const noTenantToken = await tokenFor(selfId)
+      const baseQuery = `from=${workDate}&to=${workDate}`
+      for (const route of ['records', 'calendar'] as const) {
+        const self = await requestJson(`${baseUrl}/api/attendance/${route}?${baseQuery}`, {
+          headers: { Authorization: `Bearer ${realToken}` },
+        })
+        assertOnlyCanary(self, selfRecordId, 'normal')
+
+        const sameOrgOther = await requestJson(
+          `${baseUrl}/api/attendance/${route}?${baseQuery}&userId=${encodeURIComponent(sameOrgOtherId)}`,
+          { headers: { Authorization: `Bearer ${realToken}` } },
+        )
+        assertOnlyCanary(sameOrgOther, sameOrgOtherRecordId, 'adjusted')
+
+        const deniedOther = await requestJson(
+          `${baseUrl}/api/attendance/${route}?${baseQuery}&userId=${encodeURIComponent(selfId)}`,
+          { headers: { Authorization: `Bearer ${unauthorizedToken}` } },
+        )
+        expect(deniedOther.status, deniedOther.raw).toBe(403)
+
+        const foreignUrl = `${baseUrl}/api/attendance/${route}?${baseQuery}&userId=${encodeURIComponent(foreignId)}`
+        const foreignAttempts = [
+          requestJson(`${foreignUrl}&orgId=${encodeURIComponent(orgB)}`, { headers: { Authorization: `Bearer ${realToken}` } }),
+          requestJson(foreignUrl, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${realToken}`,
+              'Content-Type': 'application/json',
+              'Content-Length': String(Buffer.byteLength(JSON.stringify({ orgId: orgB }))),
+            },
+            body: JSON.stringify({ orgId: orgB }),
+          }),
+          requestJson(foreignUrl, { headers: { Authorization: `Bearer ${realToken}`, 'x-org-id': orgB } }),
+          requestJson(foreignUrl, { headers: { Authorization: `Bearer ${realToken}`, 'x-tenant-id': orgB } }),
+          requestJson(`${foreignUrl}&orgId=${encodeURIComponent(orgA)}&orgId=${encodeURIComponent(orgB)}`, {
+            headers: { Authorization: `Bearer ${realToken}` },
+          }),
+          requestJson(foreignUrl, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${realToken}`,
+              'Content-Type': 'application/json',
+              'Content-Length': String(Buffer.byteLength(JSON.stringify({ orgId: [orgA, orgB] }))),
+            },
+            body: JSON.stringify({ orgId: [orgA, orgB] }),
+          }),
+        ]
+        for (const attempt of await Promise.all(foreignAttempts)) {
+          expect(attempt.status, attempt.raw).toBe(403)
+          expect(itemsOf(attempt).some((item) => item.id === foreignRecordId)).toBe(false)
+        }
+
+        const missingTenant = await requestJson(`${baseUrl}/api/attendance/${route}?${baseQuery}`, {
+          headers: { Authorization: `Bearer ${noTenantToken}` },
+        })
+        expect(missingTenant.status, missingTenant.raw).toBe(403)
+
+        const spoofedIdentity = await requestJson(`${baseUrl}/api/attendance/${route}?${baseQuery}`, {
+          headers: { 'x-user-id': selfId, 'x-tenant-id': orgA },
+        })
+        expect(spoofedIdentity.status, spoofedIdentity.raw).toBe(401)
+      }
+    } catch (error) {
+      verificationErrors.push(error)
+    } finally {
+      const cleanupErrors = verificationErrors
+      const userIds = [selfId, sameOrgOtherId, foreignId, unauthorizedId]
+      for (const cleanup of [
+        () => pool.query('DELETE FROM attendance_records WHERE org_id = ANY($1::text[])', [[orgA, orgB]]),
+        () => pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [userIds]),
+        () => pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds]),
+        () => pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds]),
+      ]) {
+        try {
+          await cleanup()
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+      }
+      try {
+        const residue = await pool.query(
+          `SELECT
+             (SELECT count(*)::int FROM attendance_records WHERE org_id = ANY($1::text[])) AS records,
+             (SELECT count(*)::int FROM user_permissions WHERE user_id = ANY($2::text[])) AS permissions,
+             (SELECT count(*)::int FROM user_orgs WHERE user_id = ANY($2::text[])) AS memberships,
+             (SELECT count(*)::int FROM users WHERE id = ANY($2::text[])) AS users`,
+          [[orgA, orgB], userIds],
+        )
+        const counts = residue.rows[0] as Record<string, number>
+        if (Object.values(counts).some((count) => Number(count) !== 0)) {
+          cleanupErrors.push(new Error(`attendance record tenant test residue: ${JSON.stringify(counts)}`))
+        }
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+      try {
+        await pool.end()
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+    if (verificationErrors.length > 0) throw new AggregateError(verificationErrors, 'attendance record tenant test verification or cleanup failed')
+  })
+
   it('rejects invalid attendance calendar date ranges with 400', async () => {
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-invalid-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-invalid-test&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -12649,7 +12877,7 @@ attendanceIntegrationDescribe(
     const userId = randomUUID()
     await ensureActiveImportIdentitiesForTest(userId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -12785,7 +13013,7 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -12856,7 +13084,7 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -15843,8 +16071,7 @@ attendanceIntegrationDescribe(
 
     const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
     const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
-    await expect(fs.stat(csvPath)).rejects.toBeTruthy()
-    await expect(fs.stat(metaPath)).rejects.toBeTruthy()
+    await waitForImportUploadCleanup([csvPath, metaPath])
 
     const { commitToken: _commitToken, ...retryPayload } = commitPayload
     const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {

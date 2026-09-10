@@ -54,7 +54,10 @@ describe('#4196 §2.1 rule action-set fingerprint', () => {
     const rule = [
       A('update_record', { a: 1 }),
       A('parallel_branch', { branches: [{ key: 'p0', actions: [A('send_notification', {}), A('update_record', {})] }] }),
-      A('condition_branch', { branches: [{ key: 'c0', actions: [A('update_record', {})] }] }),
+      A('condition_branch', {
+        branches: [{ key: 'c0', actions: [A('update_record', {})] }],
+        defaultBranch: { key: 'default', actions: [A('send_webhook', {})] },
+      }),
     ]
     const paths = [...enumerateRuleActions(rule)].map((e) => e.structuralPath)
     expect(paths).toEqual([
@@ -64,10 +67,12 @@ describe('#4196 §2.1 rule action-set fingerprint', () => {
       branchChildStepKey(1, 'parallel', 'p0', 1), // "1.parallel.p0.1"
       topLevelStepKey(2), // "2"
       branchChildStepKey(2, 'branch', 'c0', 0), // "2.branch.c0.0"
+      branchChildStepKey(2, 'branch', 'default', 0), // "2.branch.default.0"
     ])
     // spot-check the literal executor format
     expect(paths).toContain('1.parallel.p0.1')
     expect(paths).toContain('2.branch.c0.0')
+    expect(paths).toContain('2.branch.default.0')
   })
 
   it('a nested branch action CONFIG edit changes the fingerprint (walk recurses into branch actions)', () => {
@@ -81,6 +86,17 @@ describe('#4196 §2.1 rule action-set fingerprint', () => {
     ]
     expect(deriveRuleActionSetFingerprint(mk(1)).hash).not.toBe(deriveRuleActionSetFingerprint(mk(2)).hash)
     expect(deriveRuleActionSetFingerprint(mk(1)).count).toBe(3) // parent + 2 branch actions
+  })
+
+  it('a condition default-branch action edit changes the fingerprint', () => {
+    const mk = (value: number) => [
+      A('condition_branch', {
+        branches: [],
+        defaultBranch: { key: 'default', actions: [A('update_record', { fields: { value } })] },
+      }),
+    ]
+    expect(deriveRuleActionSetFingerprint(mk(1)).hash).not.toBe(deriveRuleActionSetFingerprint(mk(2)).hash)
+    expect(deriveRuleActionSetFingerprint(mk(1)).count).toBe(2)
   })
 
   it('branch CHILD identity binds to the KEY, not the array index (#4420 P1)', () => {

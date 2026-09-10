@@ -21,6 +21,25 @@ const MISSING_INTERNAL_VIEW_ID = 'view_internal_missing'
 const RULE_ID = 'rule_dingtalk_links'
 const ACTOR_ID = 'admin_1'
 
+/**
+ * The sheets this fixture's views and fields belong to.
+ *
+ * These rows used to be MISSING. The fixture modelled `meta_views` and `meta_fields` but never
+ * `meta_sheets`, so every sheet it referenced was, in the database it simulated, a sheet that did not
+ * exist. The automation routes proceeded anyway — they never asked — and the fixture passed while
+ * describing a substrate that cannot occur: a form view and a rule on a sheet with no sheet row.
+ *
+ * `DELETE /sheets/:sheetId` becoming a SOFT delete forced the routes to start asking. Sheet liveness
+ * is now established before any sheet-addressed work (multitable/sheet-liveness.ts), and an absent
+ * sheet is refused 404 — which is the point of that change, not a casualty of it: an automation rule
+ * must not be written against a sheet that isn't there.
+ *
+ * So the fixture is corrected rather than the guard weakened: these sheets now exist and are live,
+ * every test keeps its original intent, and the validation cases still reach their 400 AFTER passing
+ * liveness. Only sheets declared here resolve — an unmodelled sheet id still (correctly) 404s.
+ */
+const LIVE_SHEET_IDS = new Set([SHEET_ID, OTHER_SHEET_ID])
+
 type ViewRow = {
   id: string
   sheet_id: string
@@ -128,6 +147,14 @@ function createMockPool(queryHandler: QueryHandler) {
       || sql.includes('FROM formula_dependencies')
     ) {
       return { rows: [], rowCount: 0 }
+    }
+    // meta_sheets: served here, ahead of the per-test handler, so every case in this file gets the
+    // same substrate (the permission tables above are short-circuited the same way). Covers both the
+    // liveness read (`SELECT deleted_at ...`) and the plain existence reads other routes use.
+    if (sql.includes('FROM meta_sheets') && sql.includes('WHERE id = $1')) {
+      const sheetId = typeof params?.[0] === 'string' ? params[0] : ''
+      const rows = LIVE_SHEET_IDS.has(sheetId) ? [{ id: sheetId, deleted_at: null }] : []
+      return { rows, rowCount: rows.length }
     }
     return queryHandler(sql, params)
   })

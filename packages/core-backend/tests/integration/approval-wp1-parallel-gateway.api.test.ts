@@ -7,6 +7,7 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
 type JsonRecord = Record<string, unknown>
+const DYNAMIC_APPROVER_ID = 'dup-user'
 
 type ApprovalAssignmentRow = {
   assignee_id: string
@@ -161,6 +162,13 @@ describeIfDatabase('Approval Wave 2 WP1 parallel-gateway (并行分支) API', ()
     expect(canListen).toBe(true)
 
     await ensureApprovalSchemaReady()
+    const pool = poolManager.get()
+    await pool.query(
+      `INSERT INTO users (id, email, password_hash, is_active)
+       VALUES ($1, $2, 'x', TRUE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+      [DYNAMIC_APPROVER_ID, `${DYNAMIC_APPROVER_ID}@x.test`],
+    )
 
     server = new MetaSheetServer({
       port: 0,
@@ -188,6 +196,7 @@ describeIfDatabase('Approval Wave 2 WP1 parallel-gateway (并行分支) API', ()
         await pool.query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool.query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
       }
+      await pool.query('DELETE FROM users WHERE id = $1', [DYNAMIC_APPROVER_ID])
     } catch {
       // Ignore cleanup failures — the top-level describe restart clears everything on rerun.
     }
@@ -234,7 +243,7 @@ describeIfDatabase('Approval Wave 2 WP1 parallel-gateway (并行分支) API', ()
   // DISTINCT assignment TYPES so the runtime parallel-dynamic-conflict (key `${assignmentType}:
   // ${assigneeId}`, gated to dynamically-resolved assignments — ApprovalProductService.ts:4142-4168)
   // cannot fire. These two cases lock that AT THE ENFORCEMENT LAYER using form_field_user (a dynamic
-  // source resolving from form data — no directory needed): the OLD shape (two user-resolving branches
+  // source resolving from form data): the OLD shape (two user-resolving branches
   // → same user) is hard-rejected; the FIXED shape (user + role) forks cleanly.
   function buildForkGraph(branchBConfig: Record<string, unknown>) {
     return {
@@ -254,22 +263,24 @@ describeIfDatabase('Approval Wave 2 WP1 parallel-gateway (并行分支) API', ()
       ],
     }
   }
-  const forkFormSchema = {
-    fields: [
-      { id: 'approver_a_field', type: 'user', label: '审批人A', required: true },
-      { id: 'approver_b_field', type: 'user', label: '审批人B', required: false },
-    ],
+  function buildForkFormSchema(requireBranchB: boolean) {
+    return {
+      fields: [
+        { id: 'approver_a_field', type: 'user', label: '审批人A', required: true },
+        { id: 'approver_b_field', type: 'user', label: '审批人B', required: requireBranchB },
+      ],
+    }
   }
 
   it('parallel conflict: two USER-resolving branches that resolve to the SAME user are hard-rejected (APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT) — the bug the amount-tier preset must avoid', async () => {
     const adminToken = await authToken(baseUrl, 'conflict-admin')
     const requesterToken = await authToken(baseUrl, 'conflict-req')
     const graph = buildForkGraph({ assigneeSources: [{ kind: 'form_field_user', fieldId: 'approver_b_field' }], approvalMode: 'single', emptyAssigneePolicy: 'error' })
-    const tpl = await (await jsonRequest(baseUrl, '/api/approval-templates', adminToken, { method: 'POST', body: { key: `conflict-${Date.now()}`, name: 'Conflict', formSchema: forkFormSchema, approvalGraph: graph } })).json() as { id: string }
+    const tpl = await (await jsonRequest(baseUrl, '/api/approval-templates', adminToken, { method: 'POST', body: { key: `conflict-${Date.now()}`, name: 'Conflict', formSchema: buildForkFormSchema(true), approvalGraph: graph } })).json() as { id: string }
     createdTemplateIds.add(tpl.id)
     expect((await jsonRequest(baseUrl, `/api/approval-templates/${tpl.id}/publish`, adminToken, { method: 'POST', body: { policy: { allowRevoke: true } } })).status).toBe(200)
     // both form fields point at the same user → user:dup-user on BOTH branches → conflict at fork
-    const createResponse = await jsonRequest(baseUrl, '/api/approvals', requesterToken, { method: 'POST', body: { templateId: tpl.id, formData: { approver_a_field: 'dup-user', approver_b_field: 'dup-user' } } })
+    const createResponse = await jsonRequest(baseUrl, '/api/approvals', requesterToken, { method: 'POST', body: { templateId: tpl.id, formData: { approver_a_field: DYNAMIC_APPROVER_ID, approver_b_field: DYNAMIC_APPROVER_ID } } })
     expect(createResponse.status).toBe(409)
     expect(await createResponse.text()).toContain('APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT')
   })
@@ -278,11 +289,11 @@ describeIfDatabase('Approval Wave 2 WP1 parallel-gateway (并行分支) API', ()
     const adminToken = await authToken(baseUrl, 'userrole-admin')
     const requesterToken = await authToken(baseUrl, 'userrole-req')
     const graph = buildForkGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['some-approval-role'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' })
-    const tpl = await (await jsonRequest(baseUrl, '/api/approval-templates', adminToken, { method: 'POST', body: { key: `userrole-${Date.now()}`, name: 'UserRole', formSchema: forkFormSchema, approvalGraph: graph } })).json() as { id: string }
+    const tpl = await (await jsonRequest(baseUrl, '/api/approval-templates', adminToken, { method: 'POST', body: { key: `userrole-${Date.now()}`, name: 'UserRole', formSchema: buildForkFormSchema(false), approvalGraph: graph } })).json() as { id: string }
     createdTemplateIds.add(tpl.id)
     expect((await jsonRequest(baseUrl, `/api/approval-templates/${tpl.id}/publish`, adminToken, { method: 'POST', body: { policy: { allowRevoke: true } } })).status).toBe(200)
     // branch A user_field → user:dup-user; branch B static_role → role:some-approval-role. Different key prefix → no conflict.
-    const createResponse = await jsonRequest(baseUrl, '/api/approvals', requesterToken, { method: 'POST', body: { templateId: tpl.id, formData: { approver_a_field: 'dup-user' } } })
+    const createResponse = await jsonRequest(baseUrl, '/api/approvals', requesterToken, { method: 'POST', body: { templateId: tpl.id, formData: { approver_a_field: DYNAMIC_APPROVER_ID } } })
     expect(createResponse.status, await createResponse.clone().text()).toBe(201)
     const approval = await createResponse.json() as { id: string; currentNodeKeys?: string[] | null }
     createdApprovalIds.add(approval.id)

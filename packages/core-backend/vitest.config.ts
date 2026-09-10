@@ -67,6 +67,15 @@ export default defineConfig({
       // the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into
       // .github/workflows/approval-realdb-node-operation-policy.yml, which arms EXPECT_DB=1.
       'tests/integration/approval-node-operation-policy.db.test.ts',
+      // `canDecideCurrentNode` — the viewer-scoped decision affordance on the detail DTO, asserted
+      // together with what the decision endpoint actually does for the same viewer. Requires real
+      // PostgreSQL: the ROLE arm resolves through AuthService -> `user_roles` (the case is a
+      // false->true flip on one row, with the claim-trusting fast path off so the database is the
+      // only source of the role), and the door agreement is only meaningful against the real
+      // dispatch transaction. Excluded from the no-DB default job so `describeIfDatabase` cannot
+      // skip-green it; wired as a WHOLE FILE into
+      // .github/workflows/approval-realdb-can-decide-current-node.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-can-decide-current-node.db.test.ts',
       // Lock-5 B-2 (`'before'` honesty pin + the B-3 deferral evidence) and §1.3 commentRequired
       // (CR-1/CR-2 + the A-2 DTO carrier). Both need real PostgreSQL (the B-3 evidence test
       // constructs a mixed-epoch state and asserts the shipped structural invariant refuses it).
@@ -388,6 +397,15 @@ export default defineConfig({
       // rationale as the L6-A lane immediately above — plugin-tests.yml is an s6a sha256-pinned
       // provenance input, deliberately not extended). Two-point wiring, same commit.
       'tests/integration/approval-departure-transfer.db.test.ts',
+      // Lock-1 K6 sequential approval real-DB acceptance. DATABASE_URL-gated; excluded here so
+      // the no-DB default job cannot collect-and-skip-green it, and carried by the dedicated
+      // .github/workflows/approval-realdb-sequential-mode.yml PG15/16 lane. Two-point wiring.
+      'tests/integration/approval-sequential-mode.db.test.ts',
+      // Lock-2 §L2-A department field and directory routing real-DB acceptance. DATABASE_URL-gated;
+      // excluded here so the no-DB default job cannot collect-and-skip-green it, and carried by
+      // approval-realdb-acceptance.yml (sibling job approval-realdb-lock2-department-field).
+      // Two-point wiring, same commit.
+      'tests/integration/approval-department-field.db.test.ts',
       // Lock-1 §K4 continuous_dept_heads real-DB acceptance (G-1/G-2/G-13, continue-past-empty,
       // freeze purity). DATABASE_URL-gated; excluded here so the no-DB default job cannot
       // collect-and-skip-green it, and carried by the SAME dedicated
@@ -1060,6 +1078,7 @@ export default defineConfig({
       // suite. Keep it out of the no-DB lane so describeDb cannot report skipped green;
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
       'tests/integration/attendance-result-edit.test.ts',
+      'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
@@ -1235,6 +1254,11 @@ export default defineConfig({
       // attachment scan_state + purge-intent storage_key unique upgrade path (real DB, isolated schema).
       // Two-point wiring — excluded HERE so it cannot skip-green in the no-DB lane.
       'tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts',
+      // Attachment round-trip guard (SLICE A, #4195 §11/§12): missing templateId/fieldId → 400,
+      // non-attachment fieldId → 400, and flag-OFF pins for upload+download+delete in ONE suite —
+      // real DB, booted server. Two-point wiring — standalone
+      // .github/workflows/approval-realdb-attachment-roundtrip-guard.yml lane, EXPECT_DB=1 sentinel.
+      'tests/integration/approval-attachment-roundtrip-guard.db.test.ts',
       // Lock-10 (S1) instance readability — canReadApprovalInstance, all 5 arms + org pin (G-S1-1,
       // G-S1-3, G-S1-6, G-S1-10, G-S1-11, G-S1-12 partial), real DB. Excluded here so
       // describeIfDatabase cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
@@ -1305,6 +1329,27 @@ export default defineConfig({
       // EXPECT_DB=1. As of #5095, also wired (whole file, no EXPECT_DB) into the required
       // plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect it.
       'tests/integration/approval-lock9-process-attachments-realdb.db.test.ts',
+      // P0-A list-scope acceptance — the server-determined visibility scope on GET /api/approvals
+      // (participant arms, the DB-backed admin arm, the org pin under its own flag, the tab default
+      // and the unknown-tab refusal). Needs real PostgreSQL: the scope is a SQL conjunct over
+      // approval_instances/approval_assignments/approval_records/users/user_orgs, which the no-DB
+      // job's fake pool does not interpret. Excluded here so describeIfDatabase cannot skip-green
+      // it; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-list-scope.yml lane, which arms EXPECT_DB=1.
+      // plugin-tests.yml is left byte-identical (it is an s6a sha256-pinned provenance input, so an
+      // allowlist entry there would force an s6a re-pin and a merge-serialisation race) — the same
+      // precedent the sibling approval-realdb-* lanes above cite.
+      'tests/integration/approval-list-scope-server-side.db.test.ts',
+      // P1b round 3 item 6 — the approval-administrator CAPABILITY predicate
+      // (`is_active = TRUE AND (is_admin = TRUE OR role = 'admin')`) executed against real
+      // PostgreSQL, plus its route and its agreement with the list scope's admin arm on one seeded
+      // row. Needs real PostgreSQL for the same reason its sibling above does: the no-DB job's fake
+      // pool answers rows the test wrote and never parses the SQL, so the inactive-row and
+      // NULL-column arms are unfalsifiable there. Excluded here so describeIfDatabase cannot
+      // skip-green it; wired as a WHOLE FILE into the same
+      // .github/workflows/approval-realdb-list-scope.yml lane, which arms EXPECT_DB=1.
+      // plugin-tests.yml is left byte-identical for the s6a re-pin reason cited above.
+      'tests/integration/approval-admin-capability-realdb.db.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.
@@ -1457,6 +1502,14 @@ export default defineConfig({
       // P4 Option C repair proof constructs legacy partial writes against real Postgres and is wired
       // as a whole file in plugin-tests.yml. Keep it out of the no-DB default run so it cannot skip-green.
       'tests/integration/stock-preparation-p4-repair-once-realdb.test.ts',
+      // 备料按部门列写权限 — the ONLY end-to-end proof that the rows
+      // StockPreparationFieldPermissionsService writes are actually enforced by
+      // POST /api/multitable/patch. It seeds real meta_sheets/meta_fields/roles rows and asserts a
+      // cross-department write is REFUSED while the read stays shared, so it needs real Postgres.
+      // Excluded here (its `describeIfDatabase` would otherwise skip-green in the no-DB job, which is
+      // how it went un-run entirely) and wired as a WHOLE FILE into plugin-tests.yml's multitable
+      // real-DB step, where DATABASE_URL is set and the in-suite sentinel fails-not-skips.
+      'tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts',
       // multitable-view-config.api.test.ts uses an in-file MOCK pool (no live DB) and
       // self-contains its RBAC mocking — it runs under the default config + setup.ts, so
       // it stays IN the standard `test` job (runs on every PR, Node 18 + 20). Excluding it
@@ -1516,6 +1569,193 @@ export default defineConfig({
       // .github/workflows/multitable-recovery-schema-drift.yml lane as the drift guard above (NOT
       // plugin-tests.yml — that file is s6a sha256-pinned and kept byte-identical to main).
       'tests/integration/recovery-authority-search-path.db.test.ts',
+      // E-learning V0.1 L0-F3A content/assessment schema gate. Requires real PostgreSQL
+      // (named composite FKs, CHECKs, append-only triggers). Excluded from the no-DB job
+      // so a missing DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into
+      // plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-v01-content-assessment-schema.db.test.ts',
+      'tests/integration/elearning-app-installation.db.test.ts',
+      'tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts',
+      'tests/integration/elearning-exam-attempt-item-migration.db.test.ts',
+      // E-learning V0.1 watch-progress schema gate. Requires real PostgreSQL
+      // (assignment/member/session/event/progress/evidence composite FKs,
+      // CHECKs, append-only + point-in-time triggers). Excluded from the
+      // no-DB job so a missing DATABASE_URL cannot skip-green it; wired as
+      // a WHOLE FILE sibling of the content/assessment schema gate in
+      // plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-v01-watch-progress-schema.db.test.ts',
+      // E-learning V0.1 watch-progress service gate. Requires real PostgreSQL
+      // (advisory xact lock, heartbeat credit, completion evidence). Excluded
+      // from the no-DB job so a missing DATABASE_URL cannot skip-green it;
+      // wired as a WHOLE FILE sibling of the content/assessment + watch-progress
+      // schema gates in plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-watch-progress-service.db.test.ts',
+      // E-learning L6 watch-challenge authority. Requires real PostgreSQL for
+      // immutable schedules/events, request replay, timeout credit, exact
+      // challenge completion, concurrency, and migration drift. Excluded from
+      // the no-DB job and wired whole-file post-migrate in plugin-tests.yml.
+      'tests/integration/elearning-watch-challenge.db.test.ts',
+      // E-learning V0.1 manual direct-assignment service gate. Requires real
+      // PostgreSQL (idempotency, membership, course-head/version locks).
+      // Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
+      // it; wired as a WHOLE FILE sibling of the content/assessment + watch
+      // gates in plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-direct-assignment.db.test.ts',
+      // E-learning V0.1 course-publish service gate. Requires real PostgreSQL
+      // (composite publish). Excluded from the no-DB job so a missing
+      // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE sibling of
+      // the content/assessment + watch gates in plugin-tests.yml after
+      // db:migrate on the 20.x leg.
+      'tests/integration/elearning-course-publish.db.test.ts',
+      // E-learning content revision/publish/open authority. Requires real
+      // PostgreSQL for exact item-revision FKs, append-only completion,
+      // publish-shape triggers, replay conflicts, and migration drift.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-content-runtime.db.test.ts',
+      // E-learning online self-study registration requires real PostgreSQL
+      // for immutable intent, request replay, visibility snapshots, and races.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-course-enrollment.db.test.ts',
+      // Cross-service online training closure requires one real database for
+      // registration, watch evidence, objective grading, and score readback.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-online-training-loop.db.test.ts',
+      // E-learning L4 credit-ledger authority. Requires real PostgreSQL for
+      // effect identity, replay/hash conflicts, bucket locking, and balances.
+      // Excluded from the no-DB job and wired as a whole-file post-migrate gate.
+      'tests/integration/elearning-credit-ledger-authority.db.test.ts',
+      // E-learning L4 credit-rule versioning and wallet authority. Requires
+      // real PostgreSQL for two-connection serialization, migration drift,
+      // immutable commands, membership isolation, and stable keyset reads.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-credit-rules-wallet.db.test.ts',
+      // E-learning L4 manual credit adjustment authority. Requires real
+      // PostgreSQL for replay/conflict, balance locking, and migration drift.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-credit-adjustment.db.test.ts',
+      // E-learning L4 title and certificate authorities require real PostgreSQL
+      // for immutable/versioned ledgers, exact replay, drift, and concurrency.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-title-runtime.db.test.ts',
+      'tests/integration/elearning-certificate-runtime.db.test.ts',
+      // E-learning learner profile is derived from immutable completion and
+      // graded-attempt authorities and requires exact real PostgreSQL joins.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-learning-profile.db.test.ts',
+      // E-learning portal settings and daily analytics projections require real
+      // PostgreSQL for immutable revisions, same-org FKs, drift, and serialization.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-portal-settings.db.test.ts',
+      'tests/integration/elearning-stats-daily-projection.db.test.ts',
+      // E-learning L5 aggregate analytics export authority requires real PostgreSQL
+      // for immutable snapshots, request replay, claim fencing, expiry cleanup, and
+      // management-scope rechecks. Excluded from no-DB collection and wired whole-file
+      // post-migrate in plugin-tests.yml.
+      'tests/integration/elearning-analytics-export.db.test.ts',
+      // E-learning L3.5 objective practice authority requires real PostgreSQL
+      // for immutable sessions/answers, request replay, and wrong-book projection.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-question-practice.db.test.ts',
+      // E-learning V0.1 exam service gate. Requires real PostgreSQL (start/
+      // submit + advisory lock). Excluded from the no-DB job so a missing
+      // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE sibling of
+      // the content/assessment + watch gates in plugin-tests.yml after
+      // db:migrate on the 20.x leg.
+      'tests/integration/elearning-exam-service.db.test.ts',
+      // E-learning V0.1 learner assigned-course list gate. Requires real
+      // PostgreSQL. Excluded from the no-DB job so a missing DATABASE_URL
+      // cannot skip-green it; wired as a WHOLE FILE sibling of the
+      // content/assessment + watch gates in plugin-tests.yml after
+      // db:migrate on the 20.x leg.
+      'tests/integration/elearning-learner-courses.db.test.ts',
+      // E-learning L1 normalized scope/access gate. Requires real PostgreSQL
+      // for immutable revisions plus same-org/same-parent/XOR/RESTRICT FKs.
+      // Wired as a whole file into plugin-tests.yml after db:migrate.
+      'tests/integration/elearning-scope-access.db.test.ts',
+      // E-learning L2 batch assignment + target-snapshot migration gates.
+      // Both require real PostgreSQL and are wired as whole-file arguments
+      // into plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-assignment-target-snapshot-migration.db.test.ts',
+      'tests/integration/elearning-batch-assignment.db.test.ts',
+      // E-learning L2 B1 assignment progress + explicit revocation. Requires
+      // real PostgreSQL (advisory lock, UUID keyset, persistence preservation).
+      // Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
+      // it; wired as a WHOLE FILE sibling of the batch-assignment gate in
+      // plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-assignment-lifecycle.db.test.ts',
+      // E-learning V0.1 protected-playback service gate. Requires real
+      // PostgreSQL (ticket/authorize). Excluded from the no-DB job so a
+      // missing DATABASE_URL cannot skip-green it; wired as a WHOLE FILE
+      // sibling of the content/assessment + watch gates in plugin-tests.yml
+      // after db:migrate on the 20.x leg.
+      'tests/integration/elearning-media-playback.db.test.ts',
+      // E-learning L0 canonical role-template migration gate. Requires real
+      // PostgreSQL (exact grants, idempotent repair, assignment-safe rollback).
+      // Excluded from the no-DB job and wired as a WHOLE FILE into the same
+      // post-migrate schema/service step in plugin-tests.yml.
+      'tests/integration/elearning-role-templates.db.test.ts',
+      // E-learning L0 plugin-owned jobs claim-lease gate. Requires real
+      // PostgreSQL (UNIQUE identity, FOR UPDATE SKIP LOCKED, fenced finalize).
+      // Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
+      // it; wired as a WHOLE FILE sibling of the schema/service gates in
+      // plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-jobs.db.test.ts',
+      // E-learning L2 training-plan version pinning. Requires real PostgreSQL
+      // for same-org composite FKs, publish guards, immutable items, and the
+      // append-only request ledger. Wired as a whole-file post-migrate gate.
+      'tests/integration/elearning-training-plan.db.test.ts',
+      // E-learning L2 atomic plan assignment. Requires real PostgreSQL for
+      // same-org composite FKs, deferred completeness, concurrency, and
+      // transaction rollback. Wired as a whole-file post-migrate gate.
+      'tests/integration/elearning-training-plan-assignment.db.test.ts',
+      // E-learning L2 delegated administration + object collaboration ACL.
+      // Requires real PostgreSQL for same-org FK chains, recursive directory
+      // scope evaluation, closed actions, and one-way historical revocation.
+      // Wired as a whole-file post-migrate gate in plugin-tests.yml.
+      'tests/integration/elearning-admin-access.db.test.ts',
+      // E-learning L2 durable notification intent. Requires real PostgreSQL
+      // for same-org FK isolation, concurrent source-key idempotency, and the
+      // identity guard. Wired as a whole-file post-migrate gate.
+      'tests/integration/elearning-notification-delivery.db.test.ts',
+      // E-learning L2 notification claim-lease worker. Requires real PostgreSQL
+      // (FOR UPDATE SKIP LOCKED, expired-lease reclaim, fenced finalize).
+      // Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
+      // it; wired as a WHOLE FILE sibling of the ledger gate in plugin-tests.yml
+      // after db:migrate on the 20.x leg.
+      'tests/integration/elearning-notification-worker.db.test.ts',
+      // E-learning L3 question-bank + fixed-paper revision pinning. Requires
+      // real PostgreSQL for same-org composite FKs, publish-time dense-order
+      // validation, and published-paper immutability. Wired as a whole-file
+      // post-migrate gate in plugin-tests.yml.
+      'tests/integration/elearning-assessment-catalog.db.test.ts',
+      // E-learning L3 paper-bound exam rules. Requires real PostgreSQL for
+      // same-org paper binding, source XOR, rule checks, and publish/retire
+      // immutability. Wired as a whole-file post-migrate gate.
+      'tests/integration/elearning-paper-exam.db.test.ts',
+      // E-learning L3 manual-grading schema preparation. Requires real
+      // PostgreSQL for state checks, same-org FKs, partial unique indexes,
+      // append-only records, and guarded rollback. Wired as a whole-file
+      // post-migrate gate in plugin-tests.yml.
+      'tests/integration/elearning-manual-grading-schema.db.test.ts',
+      'tests/integration/elearning-manual-grading-service.db.test.ts',
+      'tests/integration/elearning-manual-grading-read.db.test.ts',
+      // E-learning V0.1 M1 media quota reservation. Requires real PostgreSQL (advisory-lock
+      // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
+      // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.
+      'tests/integration/elearning-media-quota.db.test.ts',
+      // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
+      // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
+      // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml
+      // after Start Postgres + db:migrate (same step as the quota suite).
+      'tests/integration/elearning-media-reconciler.db.test.ts',
+      // O1-C: real-Postgres proof that migration 078's claim_key PRIMARY KEY is what makes
+      // createB2aOperationClaim's exactly-one-winner property real (two independent connections
+      // racing INSERTs). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it.
+      // NOT YET wired into a named real-DB step in any workflow — see this file's own header for why
+      // (every real-DB step in this repo enumerates whole files explicitly; there is no glob-covered
+      // CI-executed lane to land in without a workflow edit, which this change deliberately does not
+      // make). That wiring is a disclosed follow-up, not a silent gap.
+      'tests/integration/b2a-operation-claim-078-realdb.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

@@ -311,6 +311,13 @@ export async function assertTrustCheckpointSheetExists(
   query: QueryFn,
   sheetId: string,
 ): Promise<void> {
-  const exists = await query('SELECT 1 FROM meta_sheets WHERE id = $1', [sheetId])
+  // `deleted_at IS NULL` (sheet soft delete): a soft-deleted sheet still HAS its row, so an unfiltered
+  // existence read would let an activation mint a durable trust anchor on a sheet the product treats as
+  // gone. Refused HERE rather than earlier in the route: this is the one point in the gate order where a
+  // differentiated existence answer is allowed to be observable — after the authority lease, the
+  // post-lease final authorization, and the allowlist — so adding liveness here inherits that ordering
+  // instead of re-opening the pre-lease oracle those gates exist to close (see the route's own note, and
+  // the ORACLE-AFTER-LEASE / GATE-ORDER goldens).
+  const exists = await query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
   if (exists.rows.length === 0) throw new TrustCheckpointSheetMissingError()
 }

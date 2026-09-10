@@ -5,6 +5,20 @@ import { describe, expect, it, vi } from 'vitest'
 // auditLog writes to the DB; in these in-memory tests it must be a no-op so the
 // create/update/delete handlers don't fail on a missing connection.
 vi.mock('../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
+// The route tests below exercise NON-ADMIN users (platform admins now legitimately
+// see every source — tests/unit/data-source-visibility-authority-matrix.test.ts).
+// rbacGuard resolves non-admin grants from req.user.permissions; stub its DB-backed
+// fallbacks so the guard is deterministic without a pool.
+vi.mock('../../src/rbac/service', () => ({
+  isAdmin: vi.fn(async () => false),
+  userHasPermission: vi.fn(async () => false),
+  listUserPermissions: vi.fn(async () => []),
+  invalidateUserPerms: vi.fn(),
+  getPermCacheStatus: vi.fn(),
+}))
+vi.mock('../../src/rbac/namespace-admission', () => ({
+  isPermissionAllowedByNamespaceAdmission: vi.fn(async () => true),
+}))
 
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
 import { dataSourcesRouter } from '../../src/routes/data-sources'
@@ -112,7 +126,14 @@ function statefulFakeDb() {
   }
 }
 
-function dbRecord(id: string, ownerId: string, workspaceId: string | null, type = 'postgres') {
+function dbRecord(
+  id: string,
+  ownerId: string,
+  workspaceId: string | null,
+  type = 'postgres',
+  tenantId: string | null | undefined = undefined,
+  scopeKind: string | null | undefined = undefined,
+) {
   return {
     id,
     name: id,
@@ -124,6 +145,8 @@ function dbRecord(id: string, ownerId: string, workspaceId: string | null, type 
     last_error: null,
     owner_id: ownerId,
     workspace_id: workspaceId,
+    ...(tenantId !== undefined ? { tenant_id: tenantId } : {}),
+    ...(scopeKind !== undefined ? { scope_kind: scopeKind } : {}),
     is_active: true,
     auto_connect: false,
     metadata: null,
@@ -138,7 +161,7 @@ describe('DataSourceManager ownership scope (A0.1)', () => {
   it('addDataSource records the owner; workspace defaults to null', async () => {
     const m = new DataSourceManager()
     await m.addDataSource(pgConfig('ds1'), { ownerId: 'alice' })
-    expect(m.getScope('ds1')).toEqual({ ownerId: 'alice', workspaceId: null })
+    expect(m.getScope('ds1')).toEqual({ ownerId: 'alice', workspaceId: null, tenantId: null, scopeKind: 'private' })
   })
 
   it('assertAccess allows the owner and rejects others / missing / anonymous', async () => {
@@ -180,10 +203,46 @@ describe('DataSourceManager ownership scope (A0.1)', () => {
   it('loadFromDatabase populates per-record ownership from the DB row', async () => {
     const m = new DataSourceManager()
     await m.initialize(fakeDb([dbRecord('a1', 'alice', null), dbRecord('b1', 'bob', 'ws-b')]) as never)
-    expect(m.getScope('a1')).toEqual({ ownerId: 'alice', workspaceId: null })
-    expect(m.getScope('b1')).toEqual({ ownerId: 'bob', workspaceId: 'ws-b' })
+    expect(m.getScope('a1')).toEqual({ ownerId: 'alice', workspaceId: null, tenantId: null, scopeKind: 'legacy_private' })
+    expect(m.getScope('b1')).toEqual({ ownerId: 'bob', workspaceId: 'ws-b', tenantId: null, scopeKind: 'legacy_private' })
     expect(() => m.assertAccess('a1', 'bob')).toThrow(/not found/)
     expect(m.listDataSources({ ownerId: 'bob' }).map((s) => s.id)).toEqual(['b1'])
+  })
+
+  it('stores tenant scope, defaults new sources to private, and preserves it on update', async () => {
+    const { db, rows } = statefulFakeDb()
+    const m = new DataSourceManager({ db: db as never })
+    await m.addDataSource(pgConfig('tenant-scoped'), {
+      ownerId: 'alice',
+      tenantId: 'tenant-a',
+      scopeKind: 'workspace',
+      workspaceId: 'workspace-a',
+    })
+    expect(m.getScope('tenant-scoped')).toEqual({
+      ownerId: 'alice',
+      workspaceId: 'workspace-a',
+      tenantId: 'tenant-a',
+      scopeKind: 'workspace',
+    })
+    expect(rows.get('tenant-scoped')).toMatchObject({ tenant_id: 'tenant-a', scope_kind: 'workspace' })
+
+    await m.updateDataSource('tenant-scoped', { ...pgConfig('tenant-scoped'), name: 'renamed' }, { ownerId: 'alice' })
+    expect(m.getScope('tenant-scoped')).toMatchObject({
+      tenantId: 'tenant-a',
+      scopeKind: 'workspace',
+      workspaceId: 'workspace-a',
+    })
+    expect(rows.get('tenant-scoped')).toMatchObject({ tenant_id: 'tenant-a', scope_kind: 'workspace' })
+  })
+
+  it('loads missing or malformed scope columns fail-safe as tenantless legacy_private', async () => {
+    const m = new DataSourceManager()
+    await m.initialize(fakeDb([
+      dbRecord('old-missing', 'alice', null),
+      dbRecord('old-invalid', 'alice', null, 'postgres', '   ', 'not-a-scope'),
+    ]) as never)
+    expect(m.getScope('old-missing')).toMatchObject({ tenantId: null, scopeKind: 'legacy_private' })
+    expect(m.getScope('old-invalid')).toMatchObject({ tenantId: null, scopeKind: 'legacy_private' })
   })
 
   it('skips persisted rows whose type is no longer in the supported runtime set', async () => {
@@ -200,40 +259,52 @@ describe('DataSourceManager ownership scope (A0.1)', () => {
 })
 
 describe('data-sources route ownership scope (A0.1)', () => {
-  let currentUser: { id: string; role?: string } | undefined
+  let currentUser: { id: string; tenantId?: string; roles?: string[]; permissions?: string[] } | undefined
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
     req.user = currentUser as never
+    // Simulate the trusted JWT middleware claim. Route creation must not use
+    // req.user.tenantId as a fallback for this value.
+    req.authenticatedTenantId = currentUser?.tenantId
     next()
   })
   app.use(dataSourcesRouter())
 
-  const admin = (id: string) => ({ id, role: 'admin' })
+  // NON-ADMIN users holding the data_sources permission codes: under the
+  // authority model these are the tier for whom ownership scoping is the
+  // boundary (platform admins now see every source by design — the admin
+  // matrix lives in data-source-visibility-authority-matrix.test.ts).
+  const member = (id: string) => ({
+    id,
+    tenantId: `tenant-${id}`,
+    roles: ['member'],
+    permissions: ['data_sources:read', 'data_sources:write', 'data_sources:execute'],
+  })
 
   it('a non-owner gets 404 on another user’s data source; the owner gets 200', async () => {
-    currentUser = admin('alice')
+    currentUser = member('alice')
     pinned.setApp(app)
     const create = await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-get-1'))
     expect(create.status).toBe(201)
 
-    currentUser = admin('bob')
+    currentUser = member('bob')
     const asBob = await request(pinned.url()).get('/api/data-sources/ds-get-1')
     expect(asBob.status).toBe(404)
 
-    currentUser = admin('alice')
+    currentUser = member('alice')
     const asAlice = await request(pinned.url()).get('/api/data-sources/ds-get-1')
     expect(asAlice.status).toBe(200)
   })
 
   it('list returns only the caller’s own data sources', async () => {
-    currentUser = admin('alice2')
+    currentUser = member('alice2')
     pinned.setApp(app)
     await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-list-a'))
-    currentUser = admin('bob2')
+    currentUser = member('bob2')
     await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-list-b'))
 
-    currentUser = admin('alice2')
+    currentUser = member('alice2')
     const list = await request(pinned.url()).get('/api/data-sources')
     expect(list.status).toBe(200)
     const ids = (list.body.data.items as Array<{ id: string }>).map((i) => i.id)
@@ -242,13 +313,13 @@ describe('data-sources route ownership scope (A0.1)', () => {
   })
 
   it('health route is reachable and returns only the caller’s own data sources', async () => {
-    currentUser = admin('alice-health')
+    currentUser = member('alice-health')
     pinned.setApp(app)
     await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-health-a'))
-    currentUser = admin('bob-health')
+    currentUser = member('bob-health')
     await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-health-b'))
 
-    currentUser = admin('alice-health')
+    currentUser = member('alice-health')
     const res = await request(pinned.url()).get('/api/data-sources/health')
     expect(res.status).toBe(200)
     const ids = (res.body.data.items as Array<{ id: string }>).map((i) => i.id)
@@ -257,7 +328,7 @@ describe('data-sources route ownership scope (A0.1)', () => {
   })
 
   it('PUT preserves the owner — a non-owner still gets 404 after the update', async () => {
-    currentUser = admin('alice3')
+    currentUser = member('alice3')
     pinned.setApp(app)
     const create = await request(pinned.url()).post('/api/data-sources').send(pgConfig('ds-put-1'))
     expect(create.status).toBe(201)
@@ -266,10 +337,10 @@ describe('data-sources route ownership scope (A0.1)', () => {
     expect(put.status).toBe(200)
 
     // Without owner preservation the re-add would revert to 'system' and leak
-    currentUser = admin('bob3')
+    currentUser = member('bob3')
     expect((await request(pinned.url()).get('/api/data-sources/ds-put-1')).status).toBe(404)
 
-    currentUser = admin('alice3')
+    currentUser = member('alice3')
     expect((await request(pinned.url()).get('/api/data-sources/ds-put-1')).status).toBe(200)
   })
 
@@ -280,8 +351,34 @@ describe('data-sources route ownership scope (A0.1)', () => {
     expect(res.status).toBe(401)
   })
 
+  it('rejects create without a verified JWT tenant, even when user/header-compatible tenant data is present', async () => {
+    const headerBackfilledApp = express()
+    headerBackfilledApp.use(express.json())
+    headerBackfilledApp.use((req, _res, next) => {
+      // Exact post-jwt-middleware attack shape for a tenantless legacy token:
+      // x-tenant-id may backfill req.user.tenantId, but the JWT-only field stays absent.
+      req.user = {
+        ...member('tenantless-user'),
+        tenantId: 'attacker-tenant',
+      } as never
+      req.authenticatedTenantId = undefined
+      next()
+    })
+    headerBackfilledApp.use(dataSourcesRouter())
+    pinned.setApp(headerBackfilledApp)
+    const res = await request(pinned.url())
+      .post('/api/data-sources')
+      .set('x-tenant-id', 'attacker-tenant')
+      .send({
+        ...pgConfig('ds-no-authenticated-tenant'),
+        options: { autoConnect: false, tenantId: 'attacker-tenant' },
+      })
+    expect(res.status).toBe(401)
+    expect(res.body.error.code).toBe('AUTHENTICATED_TENANT_REQUIRED')
+  })
+
   it('rejects unsupported create types at validation time', async () => {
-    currentUser = admin('alice4')
+    currentUser = member('alice4')
     // mysql is now supported (#2227); mongodb/redis/elasticsearch remain out of the verified runtime set.
     pinned.setApp(app)
     for (const unsupportedType of ['mongodb', 'redis', 'elasticsearch']) {
@@ -296,7 +393,7 @@ describe('data-sources route ownership scope (A0.1)', () => {
 
   it('accepts a mysql create type and constructs a read-only MySQLAdapter (#2227)', async () => {
     // Route accepts type=mysql (no longer "Unsupported data source type").
-    currentUser = admin('alice-mysql')
+    currentUser = member('alice-mysql')
     pinned.setApp(app)
     const res = await request(pinned.url())
       .post('/api/data-sources')
@@ -365,7 +462,7 @@ describe('DataSourceManager persistence round-trip (A0)', () => {
     // restart: a fresh manager loading the same table must still see the source
     const m2 = new DataSourceManager()
     await m2.initialize(db as never)
-    expect(m2.getScope('ds-x')).toEqual({ ownerId: 'alice', workspaceId: null })
+    expect(m2.getScope('ds-x')).toEqual({ ownerId: 'alice', workspaceId: null, tenantId: null, scopeKind: 'private' })
     expect(m2.listDataSources().map((s) => s.id)).toContain('ds-x')
   })
 
@@ -377,7 +474,7 @@ describe('DataSourceManager persistence round-trip (A0)', () => {
 
     const m2 = new DataSourceManager()
     await m2.initialize(db as never)
-    expect(m2.getScope('ds-u')).toEqual({ ownerId: 'alice', workspaceId: null })
+    expect(m2.getScope('ds-u')).toEqual({ ownerId: 'alice', workspaceId: null, tenantId: null, scopeKind: 'private' })
     expect(m2.listDataSources().map((s) => s.id)).toContain('ds-u')
   })
 
@@ -393,7 +490,7 @@ describe('DataSourceManager persistence round-trip (A0)', () => {
 
     // the rejected create must not have overwritten config or owner
     expect(rows.get('ds-dup')).toEqual(rowBefore)
-    expect(m.getScope('ds-dup')).toEqual({ ownerId: 'alice', workspaceId: null })
+    expect(m.getScope('ds-dup')).toEqual({ ownerId: 'alice', workspaceId: null, tenantId: null, scopeKind: 'private' })
   })
 
   it('a failed persist during update leaves the original source intact (atomic update)', async () => {
@@ -409,7 +506,7 @@ describe('DataSourceManager persistence round-trip (A0)', () => {
 
     // source survives in memory and the DB row is unchanged
     expect(() => m.getDataSource('ds-z')).not.toThrow()
-    expect(m.getScope('ds-z')).toEqual({ ownerId: 'alice', workspaceId: null })
+    expect(m.getScope('ds-z')).toEqual({ ownerId: 'alice', workspaceId: null, tenantId: null, scopeKind: 'private' })
     expect(rows.get('ds-z')).toEqual(rowBefore)
   })
 

@@ -68,11 +68,17 @@ const FLD_TARGET = `fld_s1_target_${TS}`
 const ACTOR = `u_s1_actor_${TS}`
 const OTHER = `u_s1_other_${TS}`
 
+import { armLocalAiRoutingPolicy } from '../utils/ai-routing-policy-fixture'
+
 const AI_ENV_KEYS = [
   'MULTITABLE_AI_ENABLED',
   'MULTITABLE_AI_PROVIDER',
   'MULTITABLE_AI_API_KEY',
   'MULTITABLE_AI_BASE_URL',
+
+  // data-class routing gate: simulate a COMPLIANT (local) deployment
+
+  'MULTITABLE_AI_ROUTING_POLICY',
   'MULTITABLE_AI_MODEL',
   'MULTITABLE_AI_REQUEST_TIMEOUT_MS',
   'MULTITABLE_AI_MAX_OUTPUT_TOKENS',
@@ -178,6 +184,8 @@ describeIfDatabase('AI-fields S1 — write provenance + commit-action batch grou
     process.env.MULTITABLE_AI_API_KEY = 'sk-s1-test-key'
     process.env.MULTITABLE_AI_MODEL = 'claude-sonnet-4-6'
     process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS = '1'
+
+    armLocalAiRoutingPolicy()
 
     jobService = new BulkFillJobService({ pool: poolManager.get() as unknown as PoolLike, fetchFn: fetchStub })
 

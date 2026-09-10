@@ -2,11 +2,13 @@
  * Cross-base / link referential integrity — dangling-link repair (real DB). `meta_links.foreign_record_id` has
  * NO FK (record_id does: ON DELETE CASCADE), so an inbound edge to a since-deleted record DANGLES and would
  * surface as a GHOST foreign id on read.
- *   (i) repair-on-read: loadLinkValuesByRecord filters edges whose foreign record no longer exists.
- *   (ii) sheet-delete cascade: DELETE /sheets/:id cleans inbound edges (foreign_record_id IN the sheet's records)
- *        in the SAME transaction before the records vanish.
+ *   (i) repair-on-read: loadLinkValuesByRecord filters edges whose foreign record no longer exists —
+ *       and (F21) edges whose foreign record lives in a SOFT-DELETED sheet.
+ *   (ii) sheet delete: DELETE /sheets/:id is now a SOFT delete. It keeps the sheet's records and every
+ *        inbound edge (so POST /sheets/:id/restore is complete) and relies on (i) to hide them.
  * Goldens: (a) a manually-inserted dangling edge is NOT surfaced as a ghost link id (repair-on-read; RED before);
- * (b) deleting the foreign sheet removes the inbound edges (cascade; RED before) and the source reads no ghost.
+ * (b) deleting the foreign sheet hides the inbound link from the source while the edge and records survive;
+ * (c) restoring the sheet makes the link readable again.
  * Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
@@ -40,7 +42,11 @@ const U = `u_dl_${TS}`
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const buildApp = (): Express => {
   const a = express(); a.use(express.json())
-  a.use((req, _res, next) => { ;(req as { user?: unknown }).user = { id: U, roles: ['member'], perms: ['multitable:read', 'multitable:write'], permissions: ['multitable:read', 'multitable:write'] }; next() })
+  // F21: deleting a sheet now takes SCHEMA authority (`canManageFields` = admin or
+  // multitable:manage-schema), not the record-write tier — a write-only operator is refused
+  // (pinned in tests/integration/multitable-context.api.test.ts). This suite is about link
+  // referential integrity, not about the gate, so its actor holds the schema code.
+  a.use((req, _res, next) => { ;(req as { user?: unknown }).user = { id: U, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'], permissions: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }; next() })
   a.use('/api/multitable', univerMetaRouter()); return a
 }
 const linkValue = async (recId: string): Promise<unknown[]> => {
@@ -51,8 +57,14 @@ const linkValue = async (recId: string): Promise<unknown[]> => {
 }
 const inboundEdgeCount = async (foreignId: string): Promise<number> =>
   Number(((await q('SELECT count(*)::int AS n FROM meta_links WHERE foreign_record_id=$1', [foreignId])).rows[0] as { n: number }).n)
-const sheetExists = async (sheetId: string): Promise<boolean> =>
+// F21: `DELETE /sheets/:id` is now a SOFT delete (`deleted_at`), so the row survives on purpose —
+// "deleted" is a deleted_at fact, not an absent row. Every product listing filters the same way.
+const sheetIsLive = async (sheetId: string): Promise<boolean> =>
+  (await q('SELECT 1 FROM meta_sheets WHERE id=$1 AND deleted_at IS NULL', [sheetId])).rows.length === 1
+const sheetRowSurvives = async (sheetId: string): Promise<boolean> =>
   (await q('SELECT 1 FROM meta_sheets WHERE id=$1', [sheetId])).rows.length === 1
+const recordCount = async (sheetId: string): Promise<number> =>
+  Number(((await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id=$1', [sheetId])).rows[0] as { n: number }).n)
 const setBlock = (sheetId: string, state: 'applying' | null) =>
   q('UPDATE meta_sheets SET recovery_writer_state=$2 WHERE id=$1', [sheetId, state])
 
@@ -153,12 +165,44 @@ describeIfDatabase('multitable dangling-link referential integrity (real DB)', (
     expect(v).not.toContain(GHOST) // the dangling edge is filtered (RED before the repair-on-read fix)
   })
 
-  test('(b) sheet-delete cascade: deleting the foreign sheet cleans inbound edges + the source reads no ghost', async () => {
+  // F21 — this golden's MECHANISM changed deliberately; its OBSERVABLE contract did not.
+  //
+  // Before: the delete destroyed the sheet's records, so the inbound edge had to be destroyed too
+  // (`foreign_record_id` carries no FK) or it would dangle and surface as a ghost.
+  // Now: the delete is SOFT, so nothing is destroyed and there is nothing to dangle. The edge is KEPT
+  // on purpose — that is what makes `POST /sheets/:sheetId/restore` complete — and the READ path hides
+  // it instead (repair-on-read now also requires the foreign record's sheet to be live).
+  //
+  // So the assertion that MATTERS — "the source reads no ghost" — is unchanged and still enforced.
+  // The row-level assertion is inverted, and its inversion is the recoverability guarantee.
+  test('(b) sheet delete: the source reads no link into a deleted sheet, and the edge + records survive for a restore', async () => {
     expect(await inboundEdgeCount(RB)).toBe(1) // RA → RB edge exists pre-delete
+    expect(await linkValue(RA)).toContain(RB) // ... and it is visible pre-delete (this leg is not vacuous)
     const del = await request(buildApp()).delete(`/api/multitable/sheets/${SB}`)
     expect(del.status).toBe(200)
-    expect(await inboundEdgeCount(RB)).toBe(0) // (ii) cascade physically cleaned the inbound edge (RED before: stays 1)
-    expect(await linkValue(RA)).not.toContain(RB) // RA no longer shows the gone record
+    expect(await linkValue(RA)).not.toContain(RB) // the source shows no link into the deleted sheet
+    expect(await inboundEdgeCount(RB)).toBe(1) // the edge SURVIVES (soft delete — restorable)
+    expect(await recordCount(SB)).toBeGreaterThan(0) // the records survive too
+    expect(await sheetRowSurvives(SB)).toBe(true)
+    expect(await sheetIsLive(SB)).toBe(false)
+  })
+
+  test('restore brings the sheet, its records and its inbound links back', async () => {
+    expect((await request(buildApp()).delete(`/api/multitable/sheets/${SB}`)).status).toBe(200)
+    expect(await sheetIsLive(SB)).toBe(false)
+    expect(await linkValue(RA)).not.toContain(RB)
+
+    const restore = await request(buildApp()).post(`/api/multitable/sheets/${SB}/restore`)
+    expect(restore.status).toBe(200)
+    expect(restore.body.data.restored).toBe(SB)
+    expect(await sheetIsLive(SB)).toBe(true)
+    expect(await inboundEdgeCount(RB)).toBe(1)
+    expect(await linkValue(RA)).toContain(RB) // the link is readable again — the restore is complete
+
+    // Restoring a live sheet is not a no-op success: there is nothing to restore.
+    const again = await request(buildApp()).post(`/api/multitable/sheets/${SB}/restore`)
+    expect(again.status).toBe(404)
+    expect(again.body.error.code).toBe('NOT_FOUND')
   })
 
   test('writer-fence ON preserves the successful sheet-delete contract when every participant is available', async () => {
@@ -166,8 +210,10 @@ describeIfDatabase('multitable dangling-link referential integrity (real DB)', (
     const response = await request(buildApp()).delete(`/api/multitable/sheets/${SB}`)
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ ok: true, data: { deleted: SB } })
-    expect(await sheetExists(SB)).toBe(false)
-    expect(await inboundEdgeCount(RB)).toBe(0)
+    expect(await sheetIsLive(SB)).toBe(false)
+    // Soft delete: the edge is retained for the restore; the read path is what hides it.
+    expect(await inboundEdgeCount(RB)).toBe(1)
+    expect(await linkValue(RA)).not.toContain(RB)
   })
 
   test('sheet delete refuses a blocked inbound source before deleting the target or its edge', async () => {
@@ -184,7 +230,7 @@ describeIfDatabase('multitable dangling-link referential integrity (real DB)', (
     })
     expect(JSON.stringify(response.body)).not.toContain(SA)
     expect(JSON.stringify(response.body)).not.toContain(SB)
-    expect(await sheetExists(SB)).toBe(true)
+    expect(await sheetIsLive(SB)).toBe(true)
     expect(await inboundEdgeCount(RB)).toBe(1)
   })
 
@@ -197,7 +243,7 @@ describeIfDatabase('multitable dangling-link referential integrity (real DB)', (
       code: 'RECOVERY_IN_PROGRESS',
       message: 'Another recovery operation is in progress on this sheet; retry shortly.',
     })
-    expect(await sheetExists(SB)).toBe(true)
+    expect(await sheetIsLive(SB)).toBe(true)
     expect(await inboundEdgeCount(RB)).toBe(1)
   })
 
@@ -210,7 +256,7 @@ describeIfDatabase('multitable dangling-link referential integrity (real DB)', (
       code: 'RECOVERY_IN_PROGRESS',
       message: 'Another recovery operation is in progress on this sheet; retry shortly.',
     })
-    expect(await sheetExists(SC)).toBe(true)
+    expect(await sheetIsLive(SC)).toBe(true)
   })
 
   test('sheet delete fails closed instead of waiting behind a concurrent sheet-row owner', async () => {
@@ -227,7 +273,7 @@ describeIfDatabase('multitable dangling-link referential integrity (real DB)', (
         code: 'LINK_WRITER_FENCE_PLAN_CHANGED',
         message: 'Sheet link participants changed concurrently; retry the write',
       })
-      expect(await sheetExists(SB)).toBe(true)
+      expect(await sheetIsLive(SB)).toBe(true)
       expect(await inboundEdgeCount(RB)).toBe(1)
     } finally {
       await blocker.query('ROLLBACK').catch(() => {})
@@ -262,7 +308,7 @@ describeIfDatabase('multitable dangling-link referential integrity (real DB)', (
       })
       expect(JSON.stringify(response.body)).not.toContain(SB)
       expect(JSON.stringify(response.body)).not.toContain(SD)
-      expect(await sheetExists(SB)).toBe(true)
+      expect(await sheetIsLive(SB)).toBe(true)
       expect(await inboundEdgeCount(RB)).toBe(2)
     } finally {
       await blocker.query('ROLLBACK').catch(() => {})

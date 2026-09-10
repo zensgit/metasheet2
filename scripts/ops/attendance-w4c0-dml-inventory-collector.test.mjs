@@ -48,9 +48,11 @@ const {
 } = require(path.join(toolDir, 'p25-call-path-classification.cjs'))
 const {
   classifyAttendanceRecordReadSites,
+  ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS,
 } = require(path.join(toolDir, 'current-record-read-classification.cjs'))
 const {
   classifyAttendanceCalculationReadSites,
+  ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS,
 } = require(path.join(toolDir, 'calculation-read-classification.cjs'))
 const {
   assertP26ActionAndFixtureContract,
@@ -63,6 +65,7 @@ const {
   P25_OPERATIONAL_TABLE_SPECS,
   classifyP25Use,
   assertP25Use,
+  W4_EXACT_CANONICAL_SITES,
 } = require(path.join(toolDir, 'table-classification.cjs'))
 
 const PINNED_REF = PINNED_BASELINE_REF
@@ -85,6 +88,7 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
   const { sites } = buildRawCensus(source)
   const classified = classifyCensus(sites)
   const { unclaimed } = classifyTrackedSites(classified.trackedSites)
+  assert.deepEqual(classified.exactCanonicalCountDrift, [], 'exact canonical descriptors must match every site count, including missing/stale sites')
 
   assert.deepEqual(
     unclaimed.map((s) => `${s.relPath} :: ${s.enclosingSymbol} :: ${s.table}:${s.verb}`),
@@ -101,6 +105,54 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
     [],
     'w4_canonical-bucket tables may only be written from the canonical adapter path prefix',
   )
+})
+
+test('ACP canonical grants bind exact site identity and multiplicity, never a path-wide exception', () => {
+  const relPath = 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts'
+  const raw = scanFileForDmlSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8'))
+  assert.equal(raw.length, 2)
+  assert.equal(W4_EXACT_CANONICAL_SITES.length, 2)
+  const positive = classifyCensus(raw)
+  assert.equal(positive.canonicalSites.length, 2)
+  assert.deepEqual(positive.exactCanonicalCountDrift, [])
+  assert.deepEqual(positive.outsideBoundarySites, [])
+  for (const site of raw) {
+    const duplicate = classifyCensus([...raw, site])
+    assert.equal(duplicate.exactCanonicalCountDrift.length, 1)
+    assert.equal(duplicate.outsideBoundarySites.length, 2)
+    const missing = classifyCensus(raw.filter(candidate => candidate !== site))
+    assert.equal(missing.exactCanonicalCountDrift.length, 1)
+    assert.equal(missing.exactCanonicalCountDrift[0].actual, 0)
+    for (const change of [
+      { table: 'attendance_result_operations' }, { verb: 'update' },
+      { enclosingSymbol: 'unreviewedWriter' }, { relPath: relPath + '.extra.ts' },
+      { relPath: 'packages/core-backend/src/attendance/w4c0-unreviewed.ts' },
+    ]) {
+      const wrong = classifyCensus([...raw, { ...site, ...change }])
+      assert.equal(wrong.outsideBoundarySites.length, 1)
+    }
+  }
+})
+
+test('ACP read decisions require each reviewed symbol and exact count', () => {
+  const relPath = 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts'
+  const content = fs.readFileSync(path.join(rootDir, relPath), 'utf8')
+  for (const [scan, classify, entries] of [
+    [scanFileForAttendanceRecordReadSites, classifyAttendanceRecordReadSites, ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS],
+    [scanFileForAttendanceCalculationReadSites, classifyAttendanceCalculationReadSites, ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS],
+  ]) {
+    const sites = scan(relPath, content)
+    const decisions = entries.filter(entry => entry.relPath === relPath)
+    assert.equal(decisions.length, 2)
+    const positive = classify(sites, decisions)
+    assert.deepEqual(positive.unclassified, [])
+    assert.deepEqual(positive.countDrift, [])
+    assert.deepEqual(positive.stale, [])
+    for (const decision of decisions) {
+      assert.ok(classify(sites, decisions.filter(entry => entry !== decision)).unclassified.length > 0)
+    }
+    assert.ok(classify([...sites, sites[0]], decisions).countDrift.length > 0)
+  }
 })
 
 test('W4C-3a: generated SELECT inventory classifies every attendance-record read', () => {
@@ -636,6 +688,7 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
       'attendance_record_calculations',
       'attendance_record_segments',
       'attendance_record_target_revisions',
+      'attendance_report_projection_anchors',
       'attendance_request_calculation_snapshots',
       'attendance_result_event_outbox',
       'attendance_result_operation_batches',

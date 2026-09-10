@@ -38,6 +38,9 @@ async function mockAttendance(page: Page) {
       return reply({ ok: true, data: { user: { id: 'synthetic-employee', tenantId: 'synthetic-org', roles: ['user'], permissions: ['attendance:read', 'attendance:write'] } } })
     }
     if (path === '/api/plugins') return reply([{ name: 'plugin-attendance', status: 'active' }])
+    if (path === '/api/auth/session-orgs') {
+      return reply({ success: true, data: { orgs: ['synthetic-org'], currentOrgId: 'synthetic-org' } })
+    }
     if (path === '/api/attendance/anomalies') {
       return reply({ ok: true, data: { items: [
         { recordId: 'today-in', workDate: '2026-04-15', state: 'open', status: 'partial', suggestedRequestType: 'missed_check_in', request: null },

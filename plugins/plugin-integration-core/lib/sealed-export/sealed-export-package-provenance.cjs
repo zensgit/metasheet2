@@ -220,6 +220,16 @@ const PINNED_RUNTIME_FILES = Object.freeze([
     id: 'pluginHttpRoutes',
     relativePath: 'plugins/plugin-integration-core/lib/http-routes.cjs',
   }),
+  // The test-chain runner is the ENFORCEMENT POINT for the plugin's suite list: it holds the
+  // command-shape allowlist and executes the chain without a shell. The chain list itself
+  // (`test-chain.txt`) is deliberately NOT pinned — it is high-churn developer bookkeeping, and
+  // pinning it would recreate the per-PR re-pin that made `pluginPackageJson` unreadable as a
+  // signal. But the code that polices the list must not be weakenable without moving a pin, or
+  // "loosen the allowlist, then smuggle a command into the unpinned list" is an open channel.
+  Object.freeze({
+    id: 'testChainRunner',
+    relativePath: 'plugins/plugin-integration-core/scripts/test-chain.cjs',
+  }),
   Object.freeze({
     id: 's6aProvisioningCli',
     relativePath:

@@ -52,11 +52,17 @@ const USER_STALE = `u_a2_stale_${TS}`
 
 const API_KEY_SENTINEL = `sk-${'realdbleak0'.repeat(3)}`
 
+import { armLocalAiRoutingPolicy } from '../utils/ai-routing-policy-fixture'
+
 const AI_ENV_KEYS = [
   'MULTITABLE_AI_ENABLED',
   'MULTITABLE_AI_PROVIDER',
   'MULTITABLE_AI_API_KEY',
   'MULTITABLE_AI_BASE_URL',
+
+  // data-class routing gate: simulate a COMPLIANT (local) deployment
+
+  'MULTITABLE_AI_ROUTING_POLICY',
   'MULTITABLE_AI_MODEL',
   'MULTITABLE_AI_REQUEST_TIMEOUT_MS',
   'MULTITABLE_AI_MAX_OUTPUT_TOKENS',
@@ -121,6 +127,8 @@ describeIfDatabase('A2 shortcut run (real DB)', () => {
     process.env.MULTITABLE_AI_API_KEY = API_KEY_SENTINEL
     process.env.MULTITABLE_AI_MODEL = 'claude-sonnet-4-6'
     process.env.MULTITABLE_AI_CONFIRM_LIVE_REQUESTS = '1'
+
+    armLocalAiRoutingPolicy()
 
     setYjsInvalidatorForRoutes(async (recordIds) => {
       invalidatedBatches.push([...recordIds])

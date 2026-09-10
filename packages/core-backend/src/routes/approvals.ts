@@ -18,7 +18,12 @@ import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 // mirrored `scope-templates/:templateId/member-groups/:action` route uses.
 import { ensurePlatformAdmin } from './admin-users'
 import { REFUND_WORKFLOW_KEY, type AfterSalesApprovalBridgeService } from '../services/AfterSalesApprovalBridgeService'
-import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
+import {
+  APPROVAL_LIST_SCOPE_NO_MATCH,
+  ApprovalBridgeService,
+  ServiceError,
+  buildApprovalListScopeCondition,
+} from '../services/ApprovalBridgeService'
 import {
   assertAttendanceCentralMutationFailClosed,
   attendanceCentralApprovalErrorToServiceFields,
@@ -32,8 +37,14 @@ import {
   resolveApprovalListPaging,
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
+import { isApprovalAdministrator } from '../services/approval-admin-capability'
 import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
-import { canReadApprovalInstance } from '../services/approval-instance-readability'
+import {
+  canReadApprovalInstance,
+  isOrgPinEnabled,
+  viewerActiveOrgIds,
+  viewerRolesFailClosed,
+} from '../services/approval-instance-readability'
 import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
 import {
   ApprovalConditionFormulaError,
@@ -43,7 +54,11 @@ import {
 } from '../services/ApprovalConditionFormula'
 import {
   APPROVAL_ERROR_CODES,
+  APPROVAL_LIST_DEFAULT_TAB,
+  APPROVAL_LIST_TABS,
+  isApprovalListTab,
   type ApprovalBridgePlmAdapter,
+  type ApprovalListTab,
 } from '../services/approval-bridge-types'
 import { publishApprovalCountsUpdate } from '../services/approval-realtime'
 import {
@@ -55,7 +70,9 @@ import {
   bindApprovalUsableMemberGroup,
   unbindApprovalUsableMemberGroup,
   resolveDirectoryUsersByIds,
+  listApprovalDepartments,
 } from '../services/approval-directory'
+import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import {
@@ -265,6 +282,41 @@ function getBridgeService(options?: ApprovalRouterOptions): ApprovalBridgeServic
 
 function getProductService(): ApprovalProductService {
   return new ApprovalProductService()
+}
+
+/**
+ * The SHAPES a `code` is allowed to have before it may be written to a log. Everything a real
+ * failure puts there fits: a PostgreSQL SQLSTATE (`42P01`, `23505`, `08006`), a Node/libpq errno
+ * (`ECONNREFUSED`, `ETIMEDOUT`, `ERR_INVALID_ARG_TYPE`), an error `name` (`TypeError`,
+ * `ServiceError`). Leading digits are permitted deliberately — SQLSTATE is the code an operator
+ * acting on this route's failures actually reads, and a class that excluded it would classify every
+ * genuine database failure as unclassified, which is the same as logging nothing at all.
+ */
+const RESTRICTED_ERROR_CODE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_]{0,31}$/
+/** Emitted in place of anything that is not one of those shapes. Never a fragment of the input. */
+const UNCLASSIFIED_ERROR_CODE = 'UNCLASSIFIED'
+
+/**
+ * A log-safe identifier for a failure. Same hazard `services/approval-attachment-gc.ts:68`
+ * (`safeErrCode`) addresses — NEVER the `message`, which is free text the driver composes out of
+ * whatever it was holding — but a DIFFERENT mechanism, and the difference is the point:
+ *
+ *   * `safeErrCode` SANITIZES: it strips the disallowed characters out and keeps the remainder, so
+ *     free text that reaches `.code` survives with its separators removed. `connect ECONNREFUSED
+ *     10.0.0.1:5432` becomes `connectECONNREFUSED10005432` — shorter, still the same disclosure.
+ *     A length cap does not close that; it only truncates it.
+ *   * this WHITELISTS: the value is tested WHOLE against the allowed shapes and is either emitted
+ *     unchanged or replaced, in full, by a constant. Nothing is ever manufactured out of a value
+ *     that failed the test, so there is no residue to bound.
+ *
+ * It is not returned to the client either: the response keeps the existing generic envelope, so
+ * this narrows what is written to logs without opening a new channel in its place.
+ */
+function restrictedErrorCode(error: unknown): string {
+  const raw = (error as { code?: unknown; name?: unknown } | null | undefined)?.code
+    ?? (error as { name?: unknown } | null | undefined)?.name
+  if (typeof raw !== 'string') return UNCLASSIFIED_ERROR_CODE
+  return RESTRICTED_ERROR_CODE_SHAPE.test(raw) ? raw : UNCLASSIFIED_ERROR_CODE
 }
 
 function handleApprovalsError(
@@ -894,6 +946,82 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // Lock-2 L2-A: filler-facing department picker. The server derives the canonical directory
+  // integration from the authenticated actor; callers cannot choose an org or integration.
+  r.get('/api/approvals/directory/departments', authenticate, approvalParticipantDirectoryGuard, async (req: Request, res: Response) => {
+    try {
+      const queryKeys = Object.keys(req.query)
+      if (queryKeys.some((key) => key !== 'q' && key !== 'limit' && key !== 'mode' && key !== 'parentId')) {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      if (req.query.q !== undefined && typeof req.query.q !== 'string') {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      if (
+        req.query.limit !== undefined
+        && (
+          typeof req.query.limit !== 'string'
+          || !/^\d+$/.test(req.query.limit)
+          || Number(req.query.limit) < 1
+          || Number(req.query.limit) > 50
+        )
+      ) {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      const mode = req.query.mode === undefined ? 'search' : req.query.mode
+      if (mode !== 'search' && mode !== 'tree') {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      const parentId = req.query.parentId
+      if (
+        parentId !== undefined
+        && (
+          mode !== 'tree'
+          || typeof parentId !== 'string'
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parentId)
+        )
+      ) {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+      if (q.length > 200) {
+        throw new ServiceError('Invalid department directory query', 400, 'VALIDATION_ERROR')
+      }
+      const rawLimit = req.query.limit
+      const limit = rawLimit === undefined ? 20 : Number.parseInt(rawLimit as string, 10)
+      const actorId = resolveApprovalActorId(req)
+      const relations = await resolveApprovalRequesterOrgRelations(actorId, query, {
+        includeDepartmentFieldContext: true,
+      })
+      if (!relations.canonicalIntegrationId) {
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          422,
+          'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
+      const departments = await listApprovalDepartments(
+        relations.canonicalIntegrationId,
+        q,
+        limit,
+        mode === 'tree' ? (typeof parentId === 'string' ? parentId : null) : undefined,
+      )
+      res.json({
+        departments,
+        ...(relations.primaryDepartmentId
+          ? { requesterDepartmentId: relations.primaryDepartmentId }
+          : {}),
+      })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_DEPARTMENT_DIRECTORY_FAILED',
+        'Failed to list approval departments',
+      )
+    }
+  })
+
   // member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
   // stays admin-only): authorized-scope EXACT id->name batch resolver, for every viewer-facing
   // display/selector that only has an assigneeId and needs a human name (not a search box). USERS
@@ -1003,7 +1131,83 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const workflowKey = typeof req.query.workflowKey === 'string' ? req.query.workflowKey : undefined
       const businessKey = typeof req.query.businessKey === 'string' ? req.query.businessKey : undefined
       const assignee = typeof req.query.assignee === 'string' ? req.query.assignee : undefined
-      const tab = typeof req.query.tab === 'string' ? req.query.tab as 'pending' | 'mine' | 'cc' | 'completed' | 'processed' : undefined
+      // `tab` is a FILTER WITHIN the server-determined scope, never the switch that decides
+      // whether a scope applies — `ApprovalBridgeService.listApprovals` conjoins
+      // `buildApprovalListScopeCondition` into every query regardless of what arrives here.
+      //   - absent / empty  → APPROVAL_LIST_DEFAULT_TAB ('pending', the inbox's landing tab). An
+      //                       EMPTY value is absent, not invalid, matching how `sourceSystem`,
+      //                       `templateId` and the created-at window already treat a cleared chip.
+      //                       ONE EXCEPTION, below: an absent tab on a request that carries its own
+      //                       `status` filter is served no tab conjunct at all.
+      //   - a known value   → honoured verbatim.
+      //   - anything else   → 400 in the existing error envelope, instead of silently degrading to
+      //                       "no tab condition" (which is what an unrecognised value used to do).
+      //
+      // A NON-STRING `tab` IS INVALID, NOT ABSENT. Express 4's default query parser is `extended`
+      // (qs) and this server never overrides it (`MetaSheetServer` calls no `app.set('query
+      // parser', …)`), so `?tab=a&tab=b`, `?tab[]=a` and `?tab[0]=a` all arrive as an ARRAY under
+      // the key `tab` — measured against the shipped express version, not assumed. `typeof x ===
+      // 'string'` rejects an array, so each of those shapes used to fall through to `rawTab = ''`
+      // and be served the DEFAULT tab silently: a request that named a tab (twice, or in bracket
+      // form) was answered on a different tab than the one it asked for, with no 400 and no
+      // indication. The published contract says an unrecognised value is refused; refusing the
+      // repeated / bracketed forms is that same rule applied to the shapes that were slipping
+      // past it. An absent key stays absent (`undefined` → the documented default) and an empty
+      // value stays empty (`?tab=` → `''` → the default), so no cleared filter chip becomes a 400.
+      if (req.query.tab !== undefined && typeof req.query.tab !== 'string') {
+        return res.status(400).json(
+          approvalErrorResponse(
+            APPROVAL_ERROR_CODES.TAB_INVALID,
+            `tab must be a single value, one of ${APPROVAL_LIST_TABS.join(', ')}`,
+          ),
+        )
+      }
+      const rawTab = typeof req.query.tab === 'string' ? req.query.tab.trim() : ''
+      let tab: ApprovalListTab = APPROVAL_LIST_DEFAULT_TAB
+      let tabProvided = false
+      if (rawTab) {
+        if (!isApprovalListTab(rawTab)) {
+          return res.status(400).json(
+            approvalErrorResponse(
+              APPROVAL_ERROR_CODES.TAB_INVALID,
+              `tab must be one of ${APPROVAL_LIST_TABS.join(', ')}`,
+            ),
+          )
+        }
+        tab = rawTab
+        tabProvided = true
+      }
+      // ABSENT TAB ⇒ PENDING SEMANTICS UNLESS A STATUS FILTER IS GIVEN, in which case only the
+      // server scope and the status filter apply.
+      //
+      // The tab default above is what closes the tab-LESS family (absent / empty / repeated /
+      // bracketed), and it closes them by serving those requests the `pending` tab. `pending`
+      // carries its OWN `status = 'pending'` conjunct plus an ACTIVE-seat subquery, so a tab-less
+      // request that also named `status=approved` reached the query with a contradictory status
+      // pair and answered 200 with an EMPTY page — the caller's OWN approved rows included, not
+      // merely other people's. That is a previously working request shape silently returning
+      // nothing rather than being served or refused, so the DEFAULT tab is not applied to a request
+      // that supplies a status filter of its own: such a request is answered on the server-
+      // determined SCOPE plus its own `status` filter (and whatever other filters it carries), with
+      // no tab conjunct at all.
+      //
+      // THE SCOPE IS UNAFFECTED EITHER WAY. `ApprovalBridgeService.listApprovals` conjoins
+      // `buildApprovalListScopeCondition` into every query independently of `tab` — that is what
+      // this fix is — so dropping the tab conjunct here removes a FILTER, never the scope: the
+      // response is still the caller's own scoped feed, now intersected with the status they asked
+      // for instead of with a status they did not.
+      //
+      // `Boolean(status)`, NOT `status !== undefined`, on purpose: `listApprovals` pushes its own
+      // status conjunct under `if (options?.status)`, so `?status=` (a cleared chip) pushes
+      // nothing. Suppressing the default tab on an empty value would widen a tab-less cleared-chip
+      // request from the pending inbox to the caller's whole scope while adding no filter in its
+      // place — the empty value stays ABSENT here exactly as it does above.
+      //
+      // AN EXPLICIT TAB IS NEVER SUPPRESSED. `?tab=pending&status=approved` keeps the semantics it
+      // had at the merge-base (the tab's `status = 'pending'` ANDed with the caller's
+      // `status = 'approved'`, i.e. an empty page), because that caller named both halves itself.
+      const statusFilterProvided = Boolean(status)
+      const defaultTabSuppressedByStatusFilter = !tabProvided && statusFilterProvided
       const search = typeof req.query.search === 'string' ? req.query.search : undefined
       // B3-03 (模板/时间筛选): optional template + created-at window. Empty strings are treated as
       // absent so a cleared filter chip degrades to the unfiltered feed rather than a 400.
@@ -1063,9 +1267,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       //   - Explicit 'platform' | 'plm'  → honour it verbatim
       //   - Explicit 'all'               → unified feed (sourceSystem is undefined here)
       //   - Not provided                 → preserve legacy default (tabs imply platform)
+      // `tabProvided`, not `tab`: `tab` is now always set (it defaults), so branching on it here
+      // would make every tab-less request ask for the platform feed. The legacy rule is unchanged —
+      // an explicitly-supplied tab implies `platform` here, an absent one does not.
+      //
+      // THIS EXPRESSION ALONE IS NOT ENOUGH, and saying otherwise was a defect in its own right:
+      // `listApprovals`'s non-external branch used to push its own
+      // `COALESCE(source_system, 'platform') = 'platform'` conjunct for ANY tab, so leaving
+      // `effectiveSourceSystem` undefined still produced a platform-only feed once `tab` always had
+      // a value. `tabDefaulted` below is what actually keeps the tab-less request on the mixed
+      // platform+plm feed; measured at the merge-base, a tab-less request returned both source
+      // systems and an explicit `?tab=pending` returned platform rows only, and both still do.
       const effectiveSourceSystem = sourceSystemProvided
         ? sourceSystem
-        : (tab ? 'platform' : undefined)
+        : (tabProvided ? 'platform' : undefined)
 
       const result = await bridgeService.listApprovals({
         sourceSystem: effectiveSourceSystem,
@@ -1077,7 +1292,10 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         templateId,
         createdFrom,
         createdTo,
-        tab,
+        // See `defaultTabSuppressedByStatusFilter` above: an absent tab on a request carrying its
+        // own status filter is served NO tab, so the query is the scope plus that filter.
+        tab: defaultTabSuppressedByStatusFilter ? undefined : tab,
+        tabDefaulted: !tabProvided,
         includeExternalTabSources: rawSourceSystem === 'all',
         actorId: actorId || undefined,
         actorRoles,
@@ -1368,6 +1586,22 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   })
 
   // Legacy endpoint: keep scoped to platform-owned approvals only.
+  //
+  // P0-A (A9). This handler is the SAME router and the SAME `rbacGuard('approvals','read')` as
+  // `GET /api/approvals`, and it is list-shaped — full `approval_instances` rows plus a total. It
+  // carried NO per-caller condition: `status = 'pending'` and the platform-only filter were the
+  // whole `WHERE`, so every holder of `approvals:read` received the same rows, other people's
+  // requests, seats and second-org rows included. It now applies the SAME server-determined scope
+  // the list feed applies — `buildApprovalListScopeCondition` with DB-derived roles
+  // (`viewerRolesFailClosed`) and the resolved actor — conjoined into BOTH queries, the page and
+  // the count. Scoping only the page would leave `total` reporting a set the caller cannot read,
+  // which is the same "the count half is ungated" defect in a different place.
+  //
+  // The table alias is gone on purpose: `buildApprovalListScopeCondition` qualifies its columns
+  // with `approval_instances.`, and PostgreSQL forbids qualifying by table name once the table is
+  // aliased. Reusing the shipped condition BYTE-IDENTICALLY (rather than parameterising it with a
+  // table qualifier, or hand-copying a variant) is what keeps the list feed and this endpoint
+  // provably the same predicate — a second, narrower copy is how the two would drift.
   r.get('/api/approvals/pending', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
       if (!pool) {
@@ -1386,20 +1620,64 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const limit = parsePaging(req.query.limit, 50)
       const offset = parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER)
 
+      // Roles from the DATABASE, never from the token's claims — the same `viewerRoles` definition
+      // `canReadApprovalInstance` and the list feed use (OD-S1-17(a)). Fail closed: a lookup
+      // failure yields an empty set, bound below as the no-match sentinel, so the role-typed arms
+      // deny instead of the whole endpoint answering 500.
+      const pendingScopeRoles = await viewerRolesFailClosed(pool, userId)
+      const pendingScopePermissions = resolveApprovalActorPermissions(req)
+      const pendingScopeParams: unknown[] = [
+        userId,
+        pendingScopeRoles.length > 0 ? pendingScopeRoles : [APPROVAL_LIST_SCOPE_NO_MATCH],
+        pendingScopePermissions.length > 0 ? pendingScopePermissions : [APPROVAL_LIST_SCOPE_NO_MATCH],
+      ]
+      const pendingScopeConditions = [
+        `approval_instances.status = 'pending'`,
+        `COALESCE(approval_instances.source_system, 'platform') = 'platform'`,
+        buildApprovalListScopeCondition({
+          actorParam: 1,
+          rolesParam: 2,
+          permissionsParam: 3,
+          // The 401 above guarantees a usable actor id here, so arm 6 is emitted — and is inert on
+          // this endpoint anyway, because the platform-only conjunct already excludes every
+          // non-platform row.
+          actorResolved: true,
+        }),
+      ]
+
+      // ORG PIN, written in the SAME shape as `listApprovals`'s (non-platform exempt OR org match),
+      // reading the same dormant `APPROVAL_S1_ORG_PIN_ENABLED` flag and the same
+      // `viewerActiveOrgIds` definition. The non-platform half is inert here (see above), and is
+      // kept verbatim so the two conjuncts read identically: scoping this endpoint while leaving
+      // the pin off it would make one flag mean two different things on two GETs of the same
+      // router the day it is switched on. As in the canonical predicate, `org_id` is named in the
+      // SQL text only while the pin is on.
+      if (isOrgPinEnabled()) {
+        const pendingOrgIds = await viewerActiveOrgIds(pool, userId)
+        pendingScopeParams.push(pendingOrgIds.length > 0 ? pendingOrgIds : [APPROVAL_LIST_SCOPE_NO_MATCH])
+        pendingScopeConditions.push(
+          `(
+            COALESCE(approval_instances.source_system, 'platform') <> 'platform'
+            OR approval_instances.org_id = ANY($${pendingScopeParams.length}::text[])
+          )`,
+        )
+      }
+
+      const pendingWhereClause = pendingScopeConditions.join(' AND ')
+
       const result = await pool.query<ApprovalInstance>(
-        `SELECT ai.* FROM approval_instances ai
-         WHERE ai.status = 'pending'
-           AND COALESCE(ai.source_system, 'platform') = 'platform'
-         ORDER BY ai.created_at DESC
-         LIMIT $1 OFFSET $2`,
-        [limit, offset],
+        `SELECT approval_instances.* FROM approval_instances
+         WHERE ${pendingWhereClause}
+         ORDER BY approval_instances.created_at DESC
+         LIMIT $${pendingScopeParams.length + 1} OFFSET $${pendingScopeParams.length + 2}`,
+        [...pendingScopeParams, limit, offset],
       )
 
       const countResult = await pool.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count
          FROM approval_instances
-         WHERE status = 'pending'
-           AND COALESCE(source_system, 'platform') = 'platform'`,
+         WHERE ${pendingWhereClause}`,
+        pendingScopeParams,
       )
 
       res.json({
@@ -1944,6 +2222,62 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_ADMIN_JUMP_FAILED',
         'Failed to jump approval',
+      )
+    }
+  })
+
+  /**
+   * Read-only: "is the CALLER an approval administrator by the same DB-backed predicate the
+   * approval list scope binds?" — see `services/approval-admin-capability.ts` for why the three
+   * existing admin predicates disagree and which one this answers.
+   *
+   * `authenticate` ONLY, deliberately no `rbacGuard`. A guard here would answer 403 for a caller
+   * without the `approvals:admin` PERMISSION, folding the permission axis back into a question that
+   * is about the `users`-table columns — and 403 is not distinguishable, client-side, from the
+   * transport failing. The three answers a client needs are `true`, `false`, and "could not
+   * determine", so this route returns the first two as data and the third as a non-200.
+   *
+   * It grants nothing. `rbacGuard('approvals:admin')` still gates every admin mutation and the list
+   * scope still gates the projection; a client that lies about this value gains no access.
+   *
+   * IT ANSWERS THE SCOPE'S ADMIN ARM, NOT THE WHOLE SCOPE. `listApprovals` conjoins a SECOND
+   * condition when `APPROVAL_S1_ORG_PIN_ENABLED` is true (default OFF): a platform row is admitted
+   * only if its `org_id` is one of the viewer's active orgs. That is a per-ROW relation with no
+   * caller-level counterpart, so it is deliberately not mirrored in this boolean — see
+   * `services/approval-admin-capability.ts` for the rejected reuse and the reasoning. CONSEQUENCE,
+   * disclosed rather than discovered: with the pin ON, a client told `true` here may still be served
+   * fewer rows than that answer implies, and a client that renders "this approver has nothing
+   * pending" off an empty list is making a claim this endpoint does not support. Not reachable on
+   * the shipped default.
+   */
+  r.get('/api/approvals/admin/capability', authenticate, async (req: Request, res: Response) => {
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+      const isApprovalAdmin = await isApprovalAdministrator(pool, userId)
+      return res.json({ ok: true, data: { isApprovalAdmin } })
+    } catch (error) {
+      // NOT folded into `false`. A lookup failure must reach the client as "could not determine",
+      // never as a statement about the caller's rights.
+      //
+      // VALUES-FREE BY CONSTRUCTION (round-4 item 4). The earlier revision interpolated the driver's
+      // `message` into this line. A driver message is not a diagnostic string an operator writes —
+      // it is assembled from whatever the driver was holding: hosts, ports, connection URIs with
+      // credentials, and for a constraint violation the offending ROW. Written to a log that is
+      // shipped and retained, that is a disclosure channel opened by an error path nobody exercises
+      // in review. The bounded code below is what an operator can actually act on.
+      logger.error(`approval admin capability lookup failed (${restrictedErrorCode(error)})`)
+      return res.status(500).json(
+        approvalErrorResponse('APPROVAL_ADMIN_CAPABILITY_FAILED', 'Failed to resolve approval administrator capability'),
       )
     }
   })

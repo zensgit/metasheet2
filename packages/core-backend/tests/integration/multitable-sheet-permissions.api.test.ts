@@ -16,6 +16,24 @@ function createMockPool(
   userPermissionMap: Record<string, string[]> = {},
 ) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // SHEET LIVENESS (soft delete). `resolveSheetCapabilities` now reads `meta_sheets.deleted_at`
+    // before any sheet-addressed work, and these fixtures predate that query — they answer only the
+    // EXISTENCE form. Rather than enumerate sheet ids here (which would let a fixture drift out of
+    // sync with what its own handler declares), translate the liveness read into the existence read
+    // each test already answers, so every test keeps EXACTLY its original notion of which sheets are
+    // there — including the cases that deliberately declare a sheet ABSENT and expect a 404.
+    //
+    // A handler that answers neither is treated as live: that is precisely the pre-change behaviour
+    // (the routes did not ask), so those tests keep their original intent too.
+    if (sql.includes('SELECT deleted_at FROM meta_sheets WHERE id = $1')) {
+      try {
+        const existing = await queryHandler('SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', params)
+        const found = (existing?.rows ?? []).length > 0
+        return { rows: found ? [{ deleted_at: null }] : [], rowCount: found ? 1 : 0 }
+      } catch {
+        return { rows: [{ deleted_at: null }], rowCount: 1 }
+      }
+    }
     if (
       sql.includes('FROM meta_view_permissions')
       && !(sql.includes('FROM meta_view_permissions vp') && sql.includes('LEFT JOIN platform_member_groups g'))
@@ -1130,7 +1148,6 @@ describe('Multitable sheet-scoped permissions API', () => {
       await request(app).post('/api/multitable/views').send({ sheetId: 'sheet_ops', name: 'Blocked View', type: 'grid' }),
       await request(app).patch('/api/multitable/views/view_grid').send({ name: 'Blocked view rename' }),
       await request(app).delete('/api/multitable/views/view_grid'),
-      await request(app).delete('/api/multitable/sheets/sheet_ops'),
     ]
 
     for (const response of responses) {
@@ -1140,6 +1157,13 @@ describe('Multitable sheet-scoped permissions API', () => {
         error: { code: 'FORBIDDEN', message: 'Insufficient permissions' },
       })
     }
+
+    // The sheet delete is refused too — split out only because its refusal now NAMES the authority
+    // that would be accepted instead of the generic 'Insufficient permissions'. Same 403, more useful.
+    const sheetDelete = await request(app).delete('/api/multitable/sheets/sheet_ops')
+    expect(sheetDelete.status).toBe(403)
+    expect(sheetDelete.body.error.code).toBe('FORBIDDEN')
+    expect(sheetDelete.body.error.message).toContain('multitable:manage-schema')
   })
 
   test('lists fields and views when sheet permission is read-only without global multitable permission', async () => {
@@ -2489,7 +2513,19 @@ describe('Multitable sheet-scoped permissions API', () => {
     })
   })
 
-  test('allows sheet delete when sheet permission is admin without global multitable write', async () => {
+  // F21 deletion half — the AUTHORITY here is unchanged, only the MECHANISM is.
+  //
+  // The route's gate moved from `canManageViews` to `canManageFields`, which closes the GLOBAL
+  // `multitable:write` operator's hole. It does not close this one, deliberately: a sheet-scoped FULL
+  // WRITE grant already confers `canManageFields` ON THAT SHEET through
+  // `applyContextSheetSchemaWriteGrant` (sheet-capabilities.ts) — sheet-scoped full write IS schema
+  // authority for that sheet, and #5357 left that intact. So a sheet-scoped admin still deletes, as
+  // before, and this test still asserts a 200.
+  //
+  // What DID change is the write: `deleted_at` instead of `DELETE FROM meta_sheets`, with the sheet's
+  // records and inbound links left in place for `POST /sheets/:sheetId/restore`.
+  test('allows sheet delete when sheet permission is admin without global multitable write, and the delete is soft', async () => {
+    const softDeleteParams: unknown[][] = []
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],
       queryHandler: async (sql, params) => {
@@ -2501,10 +2537,12 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
           return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
         }
-        if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
-          expect(params).toEqual(['sheet_ops'])
+        if (sql.includes('UPDATE meta_sheets SET deleted_at = now()')) {
+          softDeleteParams.push([...(params ?? [])])
           return { rows: [], rowCount: 1 }
         }
+        // Nothing may be destroyed: an unhandled SQL throws in this harness, so a route that still
+        // issued `DELETE FROM meta_sheets` / `DELETE FROM meta_links` would fail here rather than pass.
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
@@ -2520,6 +2558,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       ok: true,
       data: { deleted: 'sheet_ops' },
     })
+    expect(softDeleteParams).toEqual([['sheet_ops']])
   })
 
   test('rejects records summary when sheet permission has no read access', async () => {
@@ -3283,7 +3322,10 @@ describe('Multitable sheet-scoped permissions API', () => {
     expect(String(fieldPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
   })
 
-  test('lists field permissions when the roles directory schema lacks descriptions', async () => {
+  // roles 表没有 description 列（zzzz20260208100000 起只有 id/name/created_at/updated_at，
+  // 后续唯一的 ALTER 只加 approval_usable）。主查询不得再探它：一次查询就要拿到结果，
+  // 且必须保留 platform_member_groups JOIN，成员组主体才会显示组名而不是裸 UUID。
+  test('lists field permissions in one query and labels member groups by name', async () => {
     const { app, mockPool } = await createApp({
       tokenPerms: ['multitable:read'],
       queryHandler: async (sql, params) => {
@@ -3295,11 +3337,84 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
           return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
         }
-        if (sql.includes('FROM field_permissions fp') && sql.includes('r.description AS role_description')) {
-          throw undefinedColumnError('r.description')
+        if (sql.includes('FROM field_permissions fp')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              {
+                id: 'fp_1',
+                sheet_id: 'sheet_ops',
+                field_id: 'fld_amount',
+                subject_type: 'member-group',
+                subject_id: '11111111-2222-3333-4444-555555555555',
+                visible: true,
+                read_only: false,
+                created_at: new Date('2026-09-01T00:00:00.000Z'),
+                user_name: null,
+                user_email: null,
+                user_is_active: null,
+                role_name: null,
+                role_description: null,
+                group_name: '备料组',
+                group_description: '备料一线',
+              },
+            ],
+          }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
-        // A: approval-projection read-guard lookup — no projection sheet in this test
+        // A: approval-projection read-guard lookup - no projection sheet in this test
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/field-permissions')
+      .expect(200)
+
+    expect(response.body.data.items).toEqual([
+      {
+        id: 'fp_1',
+        sheetId: 'sheet_ops',
+        fieldId: 'fld_amount',
+        subjectType: 'member-group',
+        subjectId: '11111111-2222-3333-4444-555555555555',
+        subjectLabel: '备料组',
+        subjectSubtitle: '备料一线',
+        isActive: true,
+        visible: true,
+        readOnly: false,
+      },
+    ])
+    const fieldPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM field_permissions fp'))
+    expect(fieldPermissionCalls).toHaveLength(1)
+    expect(String(fieldPermissionCalls[0]?.[0])).not.toContain('r.description')
+    expect(String(fieldPermissionCalls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
+  })
+
+  // 中文 locale（222 测试机 lc_messages=Chinese (Simplified)_China.936）下 PG 的散文是
+  // 「字段 g.description 不存在」，英文整句匹配不到，守卫必须靠 SQLSTATE 42703 判定。
+  test('falls back for member-group hydration when PostgreSQL reports the missing column in Chinese', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM field_permissions fp') && sql.includes('LEFT JOIN platform_member_groups g')) {
+          throw Object.assign(new Error('字段 g.description 不存在'), { code: '42703' })
+        }
+        if (sql.includes('FROM field_permissions fp')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [] }
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        // A: approval-projection read-guard lookup - no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -3312,9 +3427,30 @@ describe('Multitable sheet-scoped permissions API', () => {
     expect(response.body.data.items).toEqual([])
     const fieldPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM field_permissions fp'))
     expect(fieldPermissionCalls).toHaveLength(2)
-    expect(String(fieldPermissionCalls[0]?.[0])).toContain('r.description AS role_description')
-    expect(String(fieldPermissionCalls[1]?.[0])).not.toContain('r.description AS role_description')
+    expect(String(fieldPermissionCalls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
     expect(String(fieldPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
+  })
+
+  // getDbNotReadyMessage 也必须先看 SQLSTATE:中文 locale 下缺表的散文是「关系 "x" 不存在」,
+  // 英文匹配漏判会把 pre-migration 的 DB 变成 500(而不是可自愈的 503 DB_NOT_READY)。
+  test('answers 503 DB_NOT_READY when the missing meta table is reported in Chinese', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql) => {
+        if (sql.includes('FROM meta_sheets WHERE id = $1')) {
+          throw Object.assign(new Error('关系 "meta_sheets" 不存在'), { code: '42P01' })
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/field-permissions')
+      .expect(503)
+
+    expect(response.body.error.code).toBe('DB_NOT_READY')
   })
 
   test('lists view permissions when the optional member-group directory table is absent', async () => {
@@ -3383,7 +3519,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     expect(String(viewPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
   })
 
-  test('lists view permissions when the roles directory schema lacks descriptions', async () => {
+  test('lists view permissions in one query and labels member groups by name', async () => {
     const { app, mockPool } = await createApp({
       tokenPerms: ['multitable:read'],
       queryHandler: async (sql, params) => {
@@ -3395,11 +3531,31 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
           return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
         }
-        if (sql.includes('FROM meta_view_permissions vp') && sql.includes('r.description AS role_description')) {
-          throw undefinedColumnError('r.description')
+        if (sql.includes('FROM meta_view_permissions vp')) {
+          expect(params).toEqual(['view_ops'])
+          return {
+            rows: [
+              {
+                id: 'vp_1',
+                view_id: 'view_ops',
+                subject_type: 'member-group',
+                subject_id: '11111111-2222-3333-4444-555555555555',
+                permission: 'read',
+                created_at: new Date('2026-09-01T00:00:00.000Z'),
+                created_by: 'user_sheet_acl_1',
+                user_name: null,
+                user_email: null,
+                user_is_active: null,
+                role_name: null,
+                role_description: null,
+                group_name: '备料组',
+                group_description: '备料一线',
+              },
+            ],
+          }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
-        // A: approval-projection read-guard lookup — no projection sheet in this test
+        // A: approval-projection read-guard lookup - no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -3409,12 +3565,23 @@ describe('Multitable sheet-scoped permissions API', () => {
       .get('/api/multitable/views/view_ops/permissions')
       .expect(200)
 
-    expect(response.body.data.items).toEqual([])
+    expect(response.body.data.items).toEqual([
+      {
+        id: 'vp_1',
+        viewId: 'view_ops',
+        subjectType: 'member-group',
+        subjectId: '11111111-2222-3333-4444-555555555555',
+        subjectLabel: '备料组',
+        subjectSubtitle: '备料一线',
+        isActive: true,
+        permission: 'read',
+        createdAt: '2026-09-01T00:00:00.000Z',
+      },
+    ])
     const viewPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM meta_view_permissions vp'))
-    expect(viewPermissionCalls).toHaveLength(2)
-    expect(String(viewPermissionCalls[0]?.[0])).toContain('r.description AS role_description')
-    expect(String(viewPermissionCalls[1]?.[0])).not.toContain('r.description AS role_description')
-    expect(String(viewPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
+    expect(viewPermissionCalls).toHaveLength(1)
+    expect(String(viewPermissionCalls[0]?.[0])).not.toContain('r.description')
+    expect(String(viewPermissionCalls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
   })
 
   test('lists record permissions when the optional member-group directory table is absent', async () => {
@@ -3458,7 +3625,7 @@ describe('Multitable sheet-scoped permissions API', () => {
     expect(String(recordPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
   })
 
-  test('lists record permissions when the roles directory schema lacks descriptions', async () => {
+  test('lists record permissions in one query and labels member groups by name', async () => {
     const { app, mockPool } = await createApp({
       tokenPerms: ['multitable:read'],
       queryHandler: async (sql, params) => {
@@ -3474,15 +3641,32 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['record_1', 'sheet_ops'])
           return { rows: [{ id: 'record_1' }] }
         }
-        if (sql.includes('FROM record_permissions rp') && sql.includes('r.description AS role_description')) {
-          throw undefinedColumnError('r.description')
-        }
-        if (sql.includes('FROM record_permissions rp') && !sql.includes('r.description AS role_description')) {
+        if (sql.includes('FROM record_permissions rp')) {
           expect(params).toEqual(['sheet_ops', 'record_1'])
-          return { rows: [] }
+          return {
+            rows: [
+              {
+                id: 'rp_1',
+                sheet_id: 'sheet_ops',
+                record_id: 'record_1',
+                subject_type: 'member-group',
+                subject_id: '11111111-2222-3333-4444-555555555555',
+                access_level: 'read',
+                created_at: new Date('2026-09-01T00:00:00.000Z'),
+                created_by: 'user_sheet_acl_1',
+                user_name: null,
+                user_email: null,
+                user_is_active: null,
+                role_name: null,
+                role_description: null,
+                group_name: '备料组',
+                group_description: '备料一线',
+              },
+            ],
+          }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
-        // A: approval-projection read-guard lookup — no projection sheet in this test
+        // A: approval-projection read-guard lookup - no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
@@ -3492,12 +3676,24 @@ describe('Multitable sheet-scoped permissions API', () => {
       .get('/api/multitable/sheets/sheet_ops/records/record_1/permissions')
       .expect(200)
 
-    expect(response.body.data.items).toEqual([])
+    expect(response.body.data.items).toEqual([
+      {
+        id: 'rp_1',
+        sheetId: 'sheet_ops',
+        recordId: 'record_1',
+        subjectType: 'member-group',
+        subjectId: '11111111-2222-3333-4444-555555555555',
+        accessLevel: 'read',
+        label: '备料组',
+        subtitle: '备料一线',
+        isActive: true,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      },
+    ])
     const recordPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM record_permissions rp'))
-    expect(recordPermissionCalls).toHaveLength(2)
-    expect(String(recordPermissionCalls[0]?.[0])).toContain('r.description AS role_description')
-    expect(String(recordPermissionCalls[1]?.[0])).not.toContain('r.description AS role_description')
-    expect(String(recordPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
+    expect(recordPermissionCalls).toHaveLength(1)
+    expect(String(recordPermissionCalls[0]?.[0])).not.toContain('r.description')
+    expect(String(recordPermissionCalls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
   })
 
   test('lists record permissions when the optional member-group directory schema is older', async () => {
@@ -3539,5 +3735,124 @@ describe('Multitable sheet-scoped permissions API', () => {
     expect(recordPermissionCalls).toHaveLength(2)
     expect(String(recordPermissionCalls[0]?.[0])).toContain('LEFT JOIN platform_member_groups g')
     expect(String(recordPermissionCalls[1]?.[0])).not.toContain('LEFT JOIN platform_member_groups g')
+  })
+
+  // 边界(负向,与 tests/unit/multitable-permission-subject-hydration.test.ts 同形):
+  // 降级白名单只覆盖成员组目录(platform_member_groups 的表/name/description 列)。
+  // 主查询报的是别的标识符缺列(这里用 r.name)说明是查询本身/schema 另有问题,必须原样抛,
+  // 500 收场;绝不能静默改跑第二条降级 SQL 把问题掩盖掉。
+  test('does not degrade field-permission hydration when the missing column is NOT a member-group column', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM field_permissions fp')) throw undefinedColumnError('r.name')
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/field-permissions')
+      .expect(500)
+
+    expect(response.body.error.code).toBe('INTERNAL_ERROR')
+    const fieldPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM field_permissions fp'))
+    expect(fieldPermissionCalls).toHaveLength(1)
+  })
+
+  // 同上,中文 locale 的同一条边界:译文变了,标识符没变,判定结果也不能变。
+  test('does not degrade field-permission hydration for a Chinese-reported non-member-group missing column', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM field_permissions fp')) {
+          throw Object.assign(new Error('字段 r.name 不存在'), { code: '42703' })
+        }
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/field-permissions')
+      .expect(500)
+
+    expect(response.body.error.code).toBe('INTERNAL_ERROR')
+    const fieldPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM field_permissions fp'))
+    expect(fieldPermissionCalls).toHaveLength(1)
+  })
+
+  test('does not degrade view-permission hydration when the missing column is NOT a member-group column', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_ops'])
+          return { rows: [{ id: 'view_ops', sheet_id: 'sheet_ops' }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('FROM meta_view_permissions vp')) throw undefinedColumnError('r.name')
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/views/view_ops/permissions')
+      .expect(500)
+
+    expect(response.body.error.code).toBe('INTERNAL_ERROR')
+    const viewPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM meta_view_permissions vp'))
+    expect(viewPermissionCalls).toHaveLength(1)
+  })
+
+  test('does not degrade record-permission hydration when the missing column is NOT a member-group column', async () => {
+    const { app, mockPool } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('FROM spreadsheet_permissions') && sql.includes('sheet_id = ANY')) {
+          return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
+        }
+        if (sql.includes('SELECT id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['record_1', 'sheet_ops'])
+          return { rows: [{ id: 'record_1' }] }
+        }
+        if (sql.includes('FROM record_permissions rp')) throw undefinedColumnError('r.name')
+        { const cr = configRevisionNoop(sql); if (cr) return cr }
+        if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/sheets/sheet_ops/records/record_1/permissions')
+      .expect(500)
+
+    expect(response.body.error.code).toBe('INTERNAL_ERROR')
+    const recordPermissionCalls = mockPool.query.mock.calls.filter(([sql]) => String(sql).includes('FROM record_permissions rp'))
+    expect(recordPermissionCalls).toHaveLength(1)
   })
 })

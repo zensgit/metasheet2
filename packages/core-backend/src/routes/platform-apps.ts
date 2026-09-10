@@ -1,9 +1,11 @@
 import { Router, type Request, type Response } from 'express'
 import { poolManager } from '../integration/db/connection-pool'
 import { tenantContext } from '../db/sharding/tenant-context'
+import { isElearningGlobalAdminRequest } from './elearning-admin-access'
 import type { PluginLoader } from '../core/plugin-loader'
 import {
   collectPlatformApps,
+  type PlatformAppCatalogFeaturePredicate,
   type PlatformAppPluginState,
   type PlatformAppSummary,
 } from '../platform/app-registry'
@@ -16,10 +18,21 @@ import {
 export interface PlatformAppsRouterOptions {
   pluginLoader: PluginLoader
   pluginStatus?: Map<string, PlatformAppPluginState>
+  isCatalogFeatureEnabled?: PlatformAppCatalogFeaturePredicate
 }
 
 type PlatformAppResponse = PlatformAppSummary & {
   instance: PlatformAppInstanceRecord | null
+}
+
+function visibleInstallation(req: Request, app: PlatformAppResponse): boolean {
+  if (app.id !== 'elearning') return true
+  const orgId = req.authenticatedTenantId
+  if (typeof orgId !== 'string' || !orgId) return false
+  if (isElearningGlobalAdminRequest(req)) return true
+  return app.instance?.tenantId === orgId && app.instance.workspaceId === orgId
+    && app.instance.status === 'active'
+    && typeof app.instance.config.notificationsEnabled === 'boolean'
 }
 
 function resolveTenantId(req: Request): string {
@@ -81,6 +94,8 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
       const apps = await collectPlatformApps({
         loadedPlugins: options.pluginLoader.getPlugins().values(),
         pluginStatus: options.pluginStatus,
+        isCatalogFeatureEnabled: (flag) => flag === 'elearning' && isElearningGlobalAdminRequest(req)
+          ? true : options.isCatalogFeatureEnabled?.(flag),
       })
       const tenantId = resolveTenantId(req)
       if (!tenantId) {
@@ -88,7 +103,7 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
           list: apps.map((item) => ({
             ...item,
             instance: null,
-          })),
+          })).filter((app) => visibleInstallation(req, app)),
         })
       }
 
@@ -104,7 +119,7 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
         list: apps.map((item) => ({
           ...item,
           instance: instanceByAppId.get(item.id) ?? null,
-        })),
+        })).filter((app) => visibleInstallation(req, app)),
       })
     } catch (error) {
       return res.status(500).json({
@@ -118,12 +133,16 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
       const apps = await collectPlatformApps({
         loadedPlugins: options.pluginLoader.getPlugins().values(),
         pluginStatus: options.pluginStatus,
+        isCatalogFeatureEnabled: (flag) => flag === 'elearning' && isElearningGlobalAdminRequest(req)
+          ? true : options.isCatalogFeatureEnabled?.(flag),
       })
       const app = apps.find((item) => item.id === req.params.appId)
       if (!app) {
         return res.status(404).json({ error: 'Platform app not found' })
       }
-      return res.json(await attachInstance(req, app))
+      const attached = await attachInstance(req, app)
+      if (!visibleInstallation(req, attached)) return res.status(404).json({ error: 'Platform app not found' })
+      return res.json(attached)
     } catch (error) {
       return res.status(500).json({
         error: error instanceof Error ? error.message : 'Failed to load platform app',

@@ -232,11 +232,16 @@ async function testDefaultHoldDeleteAndValidation() {
 // Every rejection assertion is paired with a POSITIVE CONTROL on the three working policies —
 // without it, a guard that rejected everything would pass just as happily.
 //
-// These live in THIS file, which is already in the plugin `scripts.test` chain, rather than in a
-// new suite: `plugins/plugin-integration-core/package.json` is a PINNED FROZEN INPUT of the
-// sealed-export package-provenance manifest, so appending a new suite to `scripts.test` would
-// break that digest pin. Reusing an already-chained file gets the same CI coverage while leaving
-// every frozen input untouched.
+// These live in THIS file, which was already chained, rather than in a new suite. The original
+// reason no longer applies and should NOT be copied: the chain used to live in `scripts.test`
+// inside `package.json`, a PINNED FROZEN INPUT of the sealed-export package-provenance manifest,
+// so adding a suite meant breaking and re-computing that digest pin — which is why assertions got
+// crammed into already-chained files instead.
+//
+// The chain now lives in `../test-chain.txt`, which is deliberately NOT pinned; adding a suite
+// touches only that file and no frozen input. So prefer a new, well-named suite when the subject
+// differs — grouping assertions by convenience rather than by subject was a workaround for a
+// constraint that is gone.
 // =============================================================================================
 
 // The three tokens the ruling refuses, and the three that must keep working. Written out as

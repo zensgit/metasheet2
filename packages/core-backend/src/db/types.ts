@@ -1,4 +1,5 @@
 import type { ColumnType, Generated, JSONColumnType } from 'kysely'
+import type { AttendanceProjectionOwnerV1 } from '../attendance/w7-provenance-domain'
 
 /**
  * Timestamp type aliases for Kysely columns
@@ -84,6 +85,8 @@ export interface Database {
   // Attendance tables
   attendance_events: AttendanceEventsTable
   attendance_records: AttendanceRecordsTable
+  attendance_record_calculations: AttendanceRecordCalculationsTable
+  attendance_report_projection_anchors: AttendanceReportProjectionAnchorsTable
   attendance_requests: AttendanceRequestsTable
   attendance_shift_swap_requests: AttendanceShiftSwapRequestsTable
   attendance_schedule_dispatch_requests: AttendanceScheduleDispatchRequestsTable
@@ -1069,6 +1072,33 @@ export interface AttendanceRecordsTable {
   status: 'normal' | 'late' | 'early_leave' | 'late_early' | 'partial' | 'absent' | 'adjusted' | 'off'
   is_workday: boolean
   meta: JSONColumnType<Record<string, unknown> | null>
+  current_calculation_id: ColumnType<string | null, string | null | undefined, string | null>
+  projection_owner: ColumnType<AttendanceProjectionOwnerV1, AttendanceProjectionOwnerV1 | undefined, AttendanceProjectionOwnerV1>
+  visibility_state: ColumnType<'active' | 'retired', 'active' | 'retired' | undefined, 'active' | 'retired'>
+  visibility_reason: ColumnType<string, string | undefined, string>
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface AttendanceRecordCalculationsTable {
+  id: string
+  org_id: string
+  attendance_record_id: string
+  version: number
+  mode: 'shadow' | 'authoritative'
+  outcome: 'baseline' | 'completed' | 'reversed' | 'review_required'
+  created_at: CreatedAt
+}
+
+export interface AttendanceReportProjectionAnchorsTable {
+  projection_record_id: string
+  org_id: string
+  canonical_record_id: string
+  source_selector: 'current_calculation' | 'latest_completed_calculation'
+  source_calculation_id: string
+  source_calculation_version: number
+  canonical_source_digest: string
+  source_fingerprint: string
   created_at: CreatedAt
   updated_at: UpdatedAt
 }
@@ -1394,6 +1424,9 @@ export interface MultitableAutomationJobsTable {
 export interface MultitableAutomationSuspensionsTable {
   id: string
   execution_id: string
+  // #4196 §6.1 continuation identity. NULL only for rows created before the migration.
+  root_execution_id: ColumnType<string | null, string | null | undefined, string | null>
+  ledger_kind: ColumnType<'execution' | 'test_run', 'execution' | 'test_run' | undefined, 'execution' | 'test_run'>
   rule_id: string
   sheet_id: string | null
   record_id: string | null
@@ -1414,6 +1447,7 @@ export interface MultitableAutomationApprovalBridgesTable {
   id: string
   execution_id: string
   root_execution_id: string
+  ledger_kind: ColumnType<'execution' | 'test_run', 'execution' | 'test_run' | undefined, 'execution' | 'test_run'>
   rule_id: string
   sheet_id: string | null
   record_id: string | null
@@ -1458,6 +1492,8 @@ export interface MultitableAutomationExecutionsTable {
   // A5 retry provenance columns (nullable; set only on a retry-created execution).
   rerun_of_execution_id: string | null
   initiated_by: string | null
+  // #4196 V5: lineage-root compare-and-set marker that distinguishes a genuine first retry.
+  first_retry_attempted_at: Date | string | null
   created_at: CreatedAt
 }
 

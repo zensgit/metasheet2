@@ -7,7 +7,7 @@
       data-testid="stock-prep-unit-no-project"
       role="status"
     >
-      {{ bi('请选择一个项目以查看单位换算确认。', 'Select a project to see unit-conversion confirmation.') }}
+      {{ bi('请选择一个项目,这里会列出还没定单位的行。', 'Select a project and this page lists what still has no unit settled.') }}
     </p>
 
     <!-- Loading: values-free spinner copy only. -->
@@ -17,7 +17,7 @@
       data-testid="stock-prep-unit-loading"
       role="status"
     >
-      {{ bi('正在加载单位换算确认状态…', 'Loading unit-conversion confirmation state…') }}
+      {{ bi('正在读取单位换算情况…', 'Reading the unit conversions…') }}
     </p>
 
     <!-- Summary error / endpoint-not-ready: neutral, never the raw body. -->
@@ -46,23 +46,23 @@
       <!-- Summary header card: the six values-free summary indicators. -->
       <header class="sp-unit__summary" data-testid="stock-prep-unit-summary">
         <div class="sp-unit__metric" data-testid="stock-prep-unit-metric" data-kind="total">
-          <span class="sp-unit__metric-label">{{ bi('规则总数', 'Total rules') }}</span>
+          <span class="sp-unit__metric-label">{{ bi('一共记了多少条换算规则', 'Conversion rules on record') }}</span>
           <span class="sp-unit__metric-value">{{ summary.totalRuleCount }}</span>
         </div>
         <div class="sp-unit__metric" data-testid="stock-prep-unit-metric" data-kind="active">
-          <span class="sp-unit__metric-label">{{ bi('生效规则', 'Active rules') }}</span>
+          <span class="sp-unit__metric-label">{{ bi('正在用的', 'In use') }}</span>
           <span class="sp-unit__metric-value">{{ summary.activeRuleCount }}</span>
         </div>
         <div class="sp-unit__metric" data-testid="stock-prep-unit-metric" data-kind="requires-confirmation">
-          <span class="sp-unit__metric-label">{{ bi('待确认规则', 'Rules pending confirmation') }}</span>
+          <span class="sp-unit__metric-label">{{ bi('等您确认的规则', 'Rules waiting for you') }}</span>
           <span class="sp-unit__metric-value">{{ summary.requiresConfirmationCount }}</span>
         </div>
         <div class="sp-unit__metric" data-testid="stock-prep-unit-metric" data-kind="pending-lines">
-          <span class="sp-unit__metric-label">{{ bi('待处理单位行', 'Pending unit lines') }}</span>
+          <span class="sp-unit__metric-label">{{ bi('本项目还没定单位的行', 'Rows on this project with no unit yet') }}</span>
           <span class="sp-unit__metric-value">{{ summary.pendingUnitLineCount }}</span>
         </div>
         <div class="sp-unit__metric sp-unit__metric--chips" data-testid="stock-prep-unit-metric" data-kind="scope-type">
-          <span class="sp-unit__metric-label">{{ bi('按作用域', 'By scope type') }}</span>
+          <span class="sp-unit__metric-label">{{ bi('规则管多大范围', 'How wide each rule reaches') }}</span>
           <span class="sp-unit__chips">
             <span
               v-for="entry in summaryScopeEntries"
@@ -70,11 +70,12 @@
               class="sp-unit__chip"
               data-testid="stock-prep-unit-scope-count"
               :data-scope="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ scopeLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
         <div class="sp-unit__metric sp-unit__metric--chips" data-testid="stock-prep-unit-metric" data-kind="rounding-rule">
-          <span class="sp-unit__metric-label">{{ bi('按取整规则', 'By rounding rule') }}</span>
+          <span class="sp-unit__metric-label">{{ bi('算出零头怎么处理', 'What happens to a fraction') }}</span>
           <span class="sp-unit__chips">
             <span
               v-for="entry in summaryRoundingEntries"
@@ -82,7 +83,8 @@
               class="sp-unit__chip"
               data-testid="stock-prep-unit-rounding-count"
               :data-rounding="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ roundingLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
       </header>
@@ -94,27 +96,29 @@
            one exception: it IS computed over this project's latest complete snapshot batch. -->
       <p class="sp-unit__scope-note" data-testid="stock-prep-unit-scope-note" role="note">
         {{ bi(
-          '换算规则为租户级、跨项目复用资产:除「待处理单位行」外,以上计数统计当前租户内的全部规则,不按此处已选项目过滤。',
-          'Conversion rules are a tenant-level, cross-project reuse asset: except "Pending unit lines", the counts above cover all rules in this tenant, not filtered to the project selected here.',
+          '换算规则是全公司共用的:定好一次,别的项目也能直接用。所以除了「本项目还没定单位的行」,上面的数统计的是全部规则,不只是当前选中的项目。',
+          'Conversion rules are shared company-wide: settle one and other projects reuse it. So apart from “rows on this project with no unit yet”, the counts above cover every rule, not just the project selected here.',
         ) }}
       </p>
 
       <!-- Stale-candidate notice (409 CONFIRM_UNIT_CANDIDATE_NOT_FOUND): the computed view drifted
            (snapshot changed / a rule landed meanwhile) — the operator must re-read before confirming. -->
       <p v-if="staleCandidates" class="sp-unit__state sp-unit__state--warn" data-testid="stock-prep-unit-stale" role="alert">
-        {{ bi('候选已过期(快照或规则已变化),请刷新重读后再确认。', 'Candidates are stale (snapshot or rules changed) — refresh and re-read before confirming.') }}
+        {{ bi('您看的这份建议已经过期了(期间数据变过),请刷新后重看再确认。', 'The suggestions you are looking at are out of date — the data changed while you were reading. Refresh and look again before confirming.') }}
         <button type="button" class="sp-unit__action" data-testid="stock-prep-unit-stale-refresh" @click="refreshCandidates">
-          {{ bi('刷新重读', 'Refresh') }}
+          {{ bi('刷新重看', 'Refresh and look again') }}
         </button>
       </p>
 
       <!-- Action feedback (values-free: clamped code / field NAME / mode enums only). -->
       <p v-if="actionNotice" class="sp-unit__state sp-unit__state--ok" data-testid="stock-prep-unit-action-notice">
-        {{ bi('操作完成', 'Action done') }}: {{ actionNotice.mode }}
+        {{ bi('保存好了。', 'Saved.') }}
+        <code class="sp-unit__token">{{ actionNotice.mode }}</code>
         <code v-if="actionNotice.handle" class="sp-unit__handle">{{ actionNotice.handle }}</code>
       </p>
       <p v-if="actionError" class="sp-unit__state sp-unit__state--warn" data-testid="stock-prep-unit-action-error" role="alert">
-        {{ bi('操作失败', 'Action failed') }} ({{ actionError.code }}<template v-if="actionError.field">/{{ actionError.field }}</template>)
+        {{ bi(errorPlain(actionError.code).zh, errorPlain(actionError.code).en) }}
+        <code class="sp-unit__token">{{ actionError.code }}<template v-if="actionError.field">/{{ actionError.field }}</template></code>
       </p>
 
       <!-- Computed candidate list (server recomputes per read; candidate values never cross). -->
@@ -123,7 +127,7 @@
         class="sp-unit__state sp-unit__state--muted"
         data-testid="stock-prep-unit-no-batch"
       >
-        {{ bi('该项目尚无完整快照批次,无法计算单位候选。', 'No complete snapshot batch for this project yet — unit candidates cannot be computed.') }}
+        {{ bi('这个项目还没有一批完整的同步数据,算不出单位建议 —— 请先同步一次。', 'This project has no complete sync yet, so no unit suggestions can be worked out — sync it first.') }}
       </p>
       <div
         v-else-if="candidatesErrored"
@@ -156,13 +160,13 @@
       <div v-else-if="candidates" class="sp-unit__candidates">
         <div class="sp-unit__queue-head">
           <span class="sp-unit__queue-count" data-testid="stock-prep-unit-queue-count">
-            {{ bi('计算候选行', 'Computed rows') }}: {{ candidates.rowCount }}
+            {{ bi('这次算出来的建议', 'Suggestions from this pass') }}: {{ candidates.rowCount }}
           </span>
-          <span class="sp-unit__badge" data-testid="stock-prep-unit-status" :data-status="candidates.status">
+          <span class="sp-unit__token" data-testid="stock-prep-unit-status" :data-status="candidates.status">
             {{ candidates.status }}
           </span>
           <span class="sp-unit__batch" data-testid="stock-prep-unit-batch-handle">
-            {{ bi('快照批次', 'Snapshot batch') }}: <code class="sp-unit__handle">{{ candidates.snapshotBatchId }}</code>
+            {{ bi('算的是这一批同步的数据', 'Computed over this sync') }} <code class="sp-unit__handle">{{ candidates.snapshotBatchId }}</code>
           </span>
           <span class="sp-unit__chips">
             <span
@@ -171,12 +175,13 @@
               class="sp-unit__chip"
               data-testid="stock-prep-unit-outcome-count"
               :data-outcome="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ outcomeLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
 
         <p v-if="candidates.rowCount === 0" class="sp-unit__state sp-unit__state--muted" data-testid="stock-prep-unit-empty">
-          {{ bi('当前批次没有需要单位换算的上下文。', 'No unit-conversion contexts in this batch.') }}
+          {{ bi('这一批数据里没有需要换算单位的行。', 'Nothing in this batch needs a unit converted.') }}
         </p>
         <!-- H4-3 keyboard: the Confirm button only renders (v-if, not just :disabled) for
              candidate+hasCandidate rows — a filter/view with no such row leaves NO focusable content
@@ -191,11 +196,11 @@
           <table class="sp-unit__table" data-testid="stock-prep-unit-queue">
             <thead>
               <tr>
-                <th scope="col">{{ bi('上下文指纹', 'Context fingerprint') }}</th>
-                <th scope="col">{{ bi('结果', 'Outcome') }}</th>
-                <th scope="col">{{ bi('原因', 'Reason') }}</th>
-                <th scope="col">{{ bi('复用规则', 'Reused rule') }}</th>
-                <th scope="col">{{ bi('有候选', 'Has candidate') }}</th>
+                <th scope="col">{{ bi('编号', 'Reference') }}</th>
+                <th scope="col">{{ bi('算出什么结果', 'What came out') }}</th>
+                <th scope="col">{{ bi('为什么', 'Why') }}</th>
+                <th scope="col">{{ bi('用的哪条规则', 'Which rule was used') }}</th>
+                <th scope="col">{{ bi('有建议吗', 'Is there a suggestion') }}</th>
                 <th scope="col" class="sp-unit__col-action">{{ bi('操作', 'Actions') }}</th>
               </tr>
             </thead>
@@ -208,16 +213,21 @@
                 :data-outcome="row.outcome ?? 'unknown'"
               >
                 <td><code class="sp-unit__handle" data-testid="stock-prep-unit-row-fingerprint">{{ row.contextFingerprint ?? '—' }}</code></td>
+                <!-- PLAIN FIRST, TOKEN KEPT: the badge carries the words, the testid'd element keeps
+                     the engine's own enum byte-exact for grepping and for the values-free suites. -->
                 <td>
-                  <span class="sp-unit__badge" data-testid="stock-prep-unit-row-outcome" :data-outcome="row.outcome ?? 'unknown'">
-                    {{ row.outcome ?? '—' }}
-                  </span>
+                  <span v-if="row.outcome" class="sp-unit__badge">{{ outcomeLabel(row.outcome) }}</span>
+                  <code class="sp-unit__token" data-testid="stock-prep-unit-row-outcome" :data-outcome="row.outcome ?? 'unknown'">{{ row.outcome ?? '—' }}</code>
                 </td>
-                <td data-testid="stock-prep-unit-row-reason">{{ row.reason ?? '—' }}</td>
+                <td data-testid="stock-prep-unit-row-reason">
+                  <span v-if="row.reason">{{ reasonLabel(row.reason) }}</span>
+                  <code v-if="row.reason" class="sp-unit__token">{{ row.reason }}</code>
+                  <template v-else>—</template>
+                </td>
                 <!-- reused rows: READ-ONLY display of the covering rule's handle. -->
                 <td><code class="sp-unit__handle" data-testid="stock-prep-unit-row-rule-handle">{{ row.conversionRuleId ?? '—' }}</code></td>
                 <td data-testid="stock-prep-unit-row-candidate" :data-flag="String(row.hasCandidate)">
-                  {{ row.hasCandidate ? bi('有', 'yes') : bi('无', 'no') }}
+                  {{ row.hasCandidate ? bi('有', 'yes') : bi('没有', 'no') }}
                 </td>
                 <td class="sp-unit__col-action">
                   <!-- Fingerprint confirm: only a computed 1:1 candidate row is confirmable — the
@@ -230,7 +240,7 @@
                     :disabled="busy"
                     @click="confirmCandidate(row)"
                   >
-                    {{ bi('确认', 'Confirm') }}
+                    {{ bi('就按这个算', 'Use this one') }}
                   </button>
                 </td>
               </tr>
@@ -242,7 +252,7 @@
       <!-- Rule retire entry: required before re-creating a same-scope rule with a different factor. -->
       <div class="sp-unit__retire" data-testid="stock-prep-unit-retire-block">
         <label class="sp-unit__field sp-unit__field--inline">
-          <span class="sp-unit__field-label">{{ bi('退役规则(规则标识)', 'Retire rule (rule handle)') }}</span>
+          <span class="sp-unit__field-label">{{ bi('停用一条规则(填它的编号)', 'Stop using a rule (enter its reference)') }}</span>
           <input v-model.trim="retireRuleId" type="text" data-testid="stock-prep-unit-retire-input" />
         </label>
         <button
@@ -252,50 +262,50 @@
           :disabled="!retireRuleId || busy"
           @click="retireRule"
         >
-          {{ bi('退役', 'Retire') }}
+          {{ bi('停用', 'Stop using it') }}
         </button>
       </div>
 
       <!-- Manual rule form (rule mode): fully user-entered (OD3/OD4). Client validation MIRRORS the
            server rules, but the server's {field} error stays authoritative. -->
       <form class="sp-unit__form" data-testid="stock-prep-unit-rule-form" @submit.prevent="submitRule">
-        <h3 class="sp-unit__form-title">{{ bi('手工新建换算规则', 'Create a conversion rule manually') }}</h3>
+        <h3 class="sp-unit__form-title">{{ bi('没有合适的规则?自己定一条', 'No suitable rule? Set one yourself') }}</h3>
         <div class="sp-unit__form-grid">
           <label class="sp-unit__field">
-            <span class="sp-unit__field-label">{{ bi('PLM 设计单位(必填)', 'PLM design unit (required)') }}</span>
+            <span class="sp-unit__field-label">{{ bi('图纸上的单位(必填)', 'The unit on the drawing (required)') }}</span>
             <input v-model.trim="form.plmUnit" type="text" data-testid="stock-prep-unit-form-plm-unit" />
           </label>
           <label class="sp-unit__field">
-            <span class="sp-unit__field-label">{{ bi('ERP 领用单位(必填)', 'ERP issue unit (required)') }}</span>
+            <span class="sp-unit__field-label">{{ bi('实际领用的单位(必填)', 'The unit it is issued in (required)') }}</span>
             <input v-model.trim="form.erpIssueUnit" type="text" data-testid="stock-prep-unit-form-erp-unit" />
           </label>
           <label class="sp-unit__field">
-            <span class="sp-unit__field-label">{{ bi('换算系数(必填,>0)', 'Conversion factor (required, >0)') }}</span>
+            <span class="sp-unit__field-label">{{ bi('一个图纸单位等于几个领用单位(必填,大于 0)', 'One drawing unit equals how many issue units (required, above zero)') }}</span>
             <input v-model.trim="form.conversionFactor" type="text" inputmode="decimal" data-testid="stock-prep-unit-form-factor" />
           </label>
           <label class="sp-unit__field">
-            <span class="sp-unit__field-label">{{ bi('作用域(必选)', 'Scope type (required)') }}</span>
+            <span class="sp-unit__field-label">{{ bi('这条规则管多大范围(必选)', 'How wide this rule reaches (required)') }}</span>
             <select v-model="form.scopeType" data-testid="stock-prep-unit-form-scope-type">
-              <option value="" disabled>{{ bi('请选择作用域', 'Select a scope type') }}</option>
-              <option v-for="scope in scopeTypes" :key="scope" :value="scope">{{ scope }}</option>
+              <option value="" disabled>{{ bi('请先选一个', 'Pick one first') }}</option>
+              <option v-for="scope in scopeTypes" :key="scope" :value="scope">{{ scopeLabel(scope) }}</option>
             </select>
           </label>
           <label v-if="form.scopeType !== 'generic'" class="sp-unit__field">
-            <span class="sp-unit__field-label">{{ bi('作用域键(material/category 必填)', 'Scope key (required for material/category)') }}</span>
+            <span class="sp-unit__field-label">{{ bi('管哪个物料 / 哪一类(必填)', 'Which material or category (required)') }}</span>
             <input v-model.trim="form.scopeKey" type="text" data-testid="stock-prep-unit-form-scope-key" />
           </label>
           <label class="sp-unit__field">
-            <span class="sp-unit__field-label">{{ bi('损耗率(≥0,可选)', 'Loss rate (≥0, optional)') }}</span>
+            <span class="sp-unit__field-label">{{ bi('损耗率(可不填)', 'Wastage allowance (optional)') }}</span>
             <input v-model.trim="form.lossRate" type="text" inputmode="decimal" data-testid="stock-prep-unit-form-loss" />
           </label>
           <label class="sp-unit__field">
-            <span class="sp-unit__field-label">{{ bi('取整规则', 'Rounding rule') }}</span>
+            <span class="sp-unit__field-label">{{ bi('算出零头怎么处理', 'What to do with a fraction') }}</span>
             <select v-model="form.roundingRule" data-testid="stock-prep-unit-form-rounding">
-              <option v-for="rule in roundingRules" :key="rule" :value="rule">{{ rule }}</option>
+              <option v-for="rule in roundingRules" :key="rule" :value="rule">{{ roundingLabel(rule) }}</option>
             </select>
           </label>
           <label class="sp-unit__field">
-            <span class="sp-unit__field-label">{{ bi('最小领用量(≥0,可选)', 'Minimum issue qty (≥0, optional)') }}</span>
+            <span class="sp-unit__field-label">{{ bi('最少领多少(可不填)', 'Minimum to issue (optional)') }}</span>
             <input v-model.trim="form.minimumIssueQty" type="text" inputmode="decimal" data-testid="stock-prep-unit-form-min-qty" />
           </label>
           <label class="sp-unit__field">
@@ -309,12 +319,42 @@
         </div>
         <!-- Field error: the offending field NAME only — never a submitted value. -->
         <p v-if="formErrorField" class="sp-unit__state sp-unit__state--warn" data-testid="stock-prep-unit-form-error" role="alert">
-          {{ bi('字段无效', 'Invalid field') }}: {{ formErrorField }}
+          {{ bi('这一项还没填对,请检查:', 'One field still needs attention:') }} <code class="sp-unit__token">{{ formErrorField }}</code>
         </p>
         <button type="submit" class="sp-unit__action" data-testid="stock-prep-unit-form-submit" :disabled="busy">
-          {{ bi('新建并确认规则', 'Create confirmed rule') }}
+          {{ bi('保存这条规则', 'Save this rule') }}
         </button>
       </form>
+
+      <StockPrepTechnicalDetails testid="stock-prep-unit-tech">
+        <dl>
+          <dt>{{ bi('计算结果枚举', 'Outcome vocabulary') }}</dt>
+          <dd>
+            <span v-for="outcome in ['reused', 'candidate', 'held']" :key="outcome">
+              <code>{{ outcome }}</code> = {{ outcomeLabel(outcome) }};
+            </span>
+          </dd>
+          <dt>{{ bi('作用域与取整枚举', 'Scope and rounding vocabularies') }}</dt>
+          <dd>
+            <span v-for="scope in scopeTypes" :key="scope"><code>{{ scope }}</code> = {{ scopeLabel(scope) }}; </span>
+            <span v-for="rule in roundingRules" :key="rule"><code>{{ rule }}</code> = {{ roundingLabel(rule) }}; </span>
+          </dd>
+          <dt>{{ bi('候选是算出来的,不是存下来的', 'Candidates are computed, never stored') }}</dt>
+          <dd>
+            {{ bi(
+              '候选每次读取时重新推导,所以一次确认可能撞上快照/规则变化 —— 服务端答 409 CONFIRM_UNIT_CANDIDATE_NOT_FOUND,本页转成「已过期,请刷新重看」而不是盲目重试。',
+              'The candidate list is re-derived on every read, so a confirm can race a snapshot or rule change. The server answers 409 CONFIRM_UNIT_CANDIDATE_NOT_FOUND and this page turns that into "out of date, refresh and look again" rather than a blind retry.',
+            ) }}
+          </dd>
+          <dt>{{ bi('作用范围', 'Scope') }}</dt>
+          <dd>
+            {{ bi(
+              '换算规则表没有 projectId 字段(服务端 R8):它是租户级、跨项目复用资产;只有「本项目还没定单位的行」是按本项目最新完整快照批次计算的。',
+              'The rule table has no projectId field (server R8): it is a tenant-level, cross-project reuse asset. Only "rows on this project with no unit yet" is computed over this project\'s latest complete snapshot batch.',
+            ) }}
+          </dd>
+        </dl>
+      </StockPrepTechnicalDetails>
     </div>
   </div>
 </template>
@@ -353,6 +393,15 @@ import {
   type StockPreparationUnitConversionSummary,
   type StockPreparationUnitScopeType,
 } from '../../../services/integration/stockPreparation/unitConversion'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import {
+  STOCK_PREP_ROUNDING_PLAIN,
+  STOCK_PREP_UNIT_OUTCOME_PLAIN,
+  STOCK_PREP_UNIT_REASON_PLAIN,
+  STOCK_PREP_UNIT_SCOPE_PLAIN,
+  stockPrepEnumPlain,
+  stockPrepErrorPlain,
+} from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
   defineProps<{
@@ -373,6 +422,29 @@ function bi(zh: string, en: string): string {
 
 const scopeTypes = STOCK_PREPARATION_UNIT_SCOPE_TYPES
 const roundingRules = STOCK_PREPARATION_ROUNDING_RULES
+
+/** The four engine vocabularies in words; each falls back to the raw token it does not know. */
+function outcomeLabel(outcome: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_UNIT_OUTCOME_PLAIN, outcome)
+  return plain ? bi(plain.zh, plain.en) : (outcome ?? '—')
+}
+
+function reasonLabel(reason: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_UNIT_REASON_PLAIN, reason)
+  return plain ? bi(plain.zh, plain.en) : (reason ?? '—')
+}
+
+function scopeLabel(scope: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_UNIT_SCOPE_PLAIN, scope)
+  return plain ? bi(plain.zh, plain.en) : (scope ?? '—')
+}
+
+function roundingLabel(rule: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_ROUNDING_PLAIN, rule)
+  return plain ? bi(plain.zh, plain.en) : (rule ?? '—')
+}
+
+const errorPlain = stockPrepErrorPlain
 
 const hasProject = computed(() => Boolean(props.projectId))
 
@@ -807,6 +879,15 @@ watch(() => props.projectId, loadAll)
   background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
+}
+
+/* The server token, kept beside the words it means — subordinate, still copyable. */
+.sp-unit__token {
+  display: inline-block;
+  margin-left: var(--ms-space-1);
+  color: var(--ms-text-3);
+  font-size: 11px;
+  word-break: break-all;
 }
 
 .sp-unit__handle {

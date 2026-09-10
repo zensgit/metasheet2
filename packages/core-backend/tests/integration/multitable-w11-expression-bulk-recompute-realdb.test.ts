@@ -106,7 +106,8 @@ function buildApp(userId: string): Express {
   const a = express()
   a.use(express.json())
   a.use((req, _res, next) => {
-    ;(req as any).user = { id: userId, roles: ['member'], perms: ['multitable:write'], permissions: ['multitable:write'] }
+    // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+    ;(req as any).user = { id: userId, roles: ['member'], perms: ['multitable:write', 'multitable:manage-schema'], permissions: ['multitable:write', 'multitable:manage-schema'] }
     next()
   })
   a.use('/api/multitable', univerMetaRouter())
@@ -155,7 +156,7 @@ describeIfDatabase('W1-1 LOCK-B golden matrix — expression-change bulk recompu
       await q(
         `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
          VALUES ($1,$2,$1,'x','member',$3::jsonb, TRUE, FALSE) ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
-        [id, `${id}@t.local`, JSON.stringify(['multitable:read', 'multitable:write'])],
+        [id, `${id}@t.local`, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:manage-schema'])],
       )
     }
 

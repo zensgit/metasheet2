@@ -52,11 +52,28 @@ plugins/plugin-integration-core/lib/stock-preparation-readonly-intake.cjs text e
 plugins/plugin-integration-core/lib/stock-preparation-plm-source-persist-bridge.cjs text eol=lf
 plugins/plugin-integration-core/lib/stock-preparation-sync-run-persist.cjs text eol=lf
 
+# The plugin's test chain. NOT a digest-pinned input — deliberately. It used to live inside
+# package.json's `scripts.test`, which meant every test-adding PR moved the pinned
+# `runtimeFiles.pluginPackageJson` hash; two concurrent plugin PRs then conflicted both on that
+# one 14 KB line and on the recomputed pin. The list is guarded semantically instead (shape
+# allowlist + no shell + bidirectional completeness — see
+# plugins/plugin-integration-core/scripts/test-chain.cjs), which is what a digest that legitimately
+# moved in every PR could never do.
+#
+#   eol=lf     — the guards compare chain lines by exact equality; a CRLF checkout would break
+#                every one of them. (The parser also strips \r; belt and braces.)
+#   merge=union — this is an append-only list, so union is exactly right: two PRs each adding a
+#                suite auto-merge and BOTH lines survive, instead of conflicting. A duplicate or a
+#                mis-placed line that union could produce is caught by the guards (each suite must
+#                appear exactly once; the sealed-export stage tail must remain last).
+plugins/plugin-integration-core/test-chain.txt text eol=lf merge=union
+
 # PINNED_RUNTIME_FILES
 plugins/plugin-integration-core/package.json text eol=lf
 pnpm-lock.yaml text eol=lf
 plugins/plugin-integration-core/index.cjs text eol=lf
 plugins/plugin-integration-core/lib/http-routes.cjs text eol=lf
+plugins/plugin-integration-core/scripts/test-chain.cjs text eol=lf
 plugins/plugin-integration-core/scripts/provision-stock-preparation-sqlserver-sealed-snapshot.cjs text eol=lf
 scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1 text eol=lf
 docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md text eol=lf

@@ -12,8 +12,10 @@
  *   1. required-feature gate  → redirect home
  *   2. route permission gate  → redirect home
  *   3. attendance focus mode  → exact-path allowlist + '/attendance/admin/groups/' prefix
- *      (#4711 R0, reachability only), else redirect /attendance
- *   4. plm-workbench focus    → prefix allowlist, else redirect /plm
+ *      (#4711 R0) + exact /learn and /admin/elearning (reachability only),
+ *      else redirect /attendance
+ *   4. plm-workbench focus    → prefix allowlist + exact /learn and /admin/elearning,
+ *      else redirect /plm
  *   5. allow
  */
 import { isRoutePermitted } from './routeAccess'
@@ -29,6 +31,25 @@ export const ATTENDANCE_FOCUS_ALLOWED_PATHS: readonly string[] = Object.freeze([
   '/p/plugin-attendance/attendance',
   '/settings',
 ])
+
+/**
+ * Cloud-classroom exact paths reachable inside attendance and plm-workbench focus
+ * modes. Reachability only — required-feature and route permission gates still run
+ * first. Sibling and prefix-neighbor paths stay redirected.
+ * '/elearning/grading': the L3 manual-grading surface — without this entry a
+ * grader working inside an attendance- or plm-focused org would be silently
+ * bounced to that focus mode's home instead of reaching a route they hold
+ * elearning:grade permission for.
+ */
+export const ELEARNING_FOCUS_EXACT_PATHS: readonly string[] = Object.freeze([
+  '/learn',
+  '/admin/elearning',
+  '/elearning/grading',
+])
+
+export function isElearningFocusExactPath(path: string): boolean {
+  return ELEARNING_FOCUS_EXACT_PATHS.includes(path)
+}
 
 /**
  * Attendance-focus reachability predicate (design lock §3.3, #4711 R0). The exact legacy
@@ -47,6 +68,11 @@ export function isAttendanceFocusAllowedPath(path: string): boolean {
  * audience (#4468, owner-confirmed gap). Routes keep their own permission gates — this list only
  * governs reachability inside the focus mode. Every entry must be a non-empty absolute path: an
  * empty string would prefix-match EVERY route (behavior-tested).
+ *
+ * O2 / R-11: '/stock-prep' stays here unchanged. Focus-mode reachability confers NO permission — step
+ * 2 of resolveRouteGuardDecision has already run by the time this list is consulted, so the route's
+ * own `stock-prep:read` gate decides access and this entry only keeps the page from being bounced to
+ * /plm for someone who already passed it.
  */
 export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
   '/plm',
@@ -56,7 +82,17 @@ export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
   '/stock-prep',
 ])
 
-const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm'] as const
+/**
+ * Exported since O2 / R-11 so a suite can pin what is NOT here as well as what is.
+ *
+ * `/stock-prep` deliberately declares no `requiredFeature`, and the O2 permission work deliberately
+ * did not add one. A product-feature flag is a SECOND, independent gate: with the flag off, step 1
+ * redirects everyone — platform admins included — before the permission gate is ever consulted. That
+ * would be a privilege regression on every deployment that has not turned the flag on, in a change
+ * whose whole point is that admins lose nothing. The workbench's access story is therefore carried
+ * entirely by the permission gate (step 2) and the shared vocabulary behind it.
+ */
+export const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning'] as const
 type KnownRequiredFeature = (typeof KNOWN_REQUIRED_FEATURES)[number]
 
 export type RouteGuardDecision = { action: 'allow' } | { action: 'redirect'; target: string }
@@ -131,16 +167,21 @@ export function resolveRouteGuardDecision(
 
   const path = String(input.path || '')
 
-  // 3. attendance focus: exact-path set + bounded #4711 group-context prefix.
-  if (ctx.attendanceFocused && !isAttendanceFocusAllowedPath(path)) {
+  // 3. attendance focus: exact-path set + bounded #4711 group-context prefix
+  //    + exact cloud-classroom paths.
+  if (
+    ctx.attendanceFocused
+    && !isAttendanceFocusAllowedPath(path)
+    && !isElearningFocusExactPath(path)
+  ) {
     return { action: 'redirect', target: '/attendance' }
   }
 
-  // 4. plm-workbench focus: prefix allowlist.
+  // 4. plm-workbench focus: prefix allowlist + exact cloud-classroom paths.
   if (ctx.plmWorkbenchFocused) {
     const allowed = PLM_WORKBENCH_ALLOWED_PREFIXES.some(
       (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-    )
+    ) || isElearningFocusExactPath(path)
     if (!allowed) {
       return { action: 'redirect', target: '/plm' }
     }

@@ -1,0 +1,163 @@
+name: Approval sequential mode real-DB acceptance (Lock-1 K6)
+
+# Dedicated whole-file PostgreSQL gate for Lock-1 K6 sequential approval. The suite is excluded
+# from the default no-DB Vitest job in the same commit, and its top-level EXPECT_DB sentinel makes
+# a missing DATABASE_URL fail loudly instead of skip-green.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'packages/core-backend/package.json'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
+      - 'packages/core-backend/src/services/ApprovalGraphExecutor.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/services/approval-effective-node-operations.ts'
+      - 'packages/core-backend/src/services/approval-sequential-mode.ts'
+      - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/tests/globalTeardown.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts'
+      - 'packages/core-backend/tests/setup.integration.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - 'packages/core-backend/vitest.integration.config.ts'
+      - '.github/workflows/approval-realdb-sequential-mode.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'packages/core-backend/package.json'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/services/ApprovalAssigneeResolver.ts'
+      - 'packages/core-backend/src/services/ApprovalGraphExecutor.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/services/approval-effective-node-operations.ts'
+      - 'packages/core-backend/src/services/approval-sequential-mode.ts'
+      - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/tests/globalTeardown.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts'
+      - 'packages/core-backend/tests/setup.integration.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - 'packages/core-backend/vitest.integration.config.ts'
+      - '.github/workflows/approval-realdb-sequential-mode.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-realdb-sequential-mode:
+    name: approval-realdb-sequential-mode (pg${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['15', '16']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # The repository-wide coverage census requires job-level DB ownership. The real DSN replaces
+      # this values-free marker through GITHUB_ENV only after GitHub's log masker is armed.
+      DATABASE_URL: 'configured-after-masking'
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Configure values-free database connection
+        shell: bash
+        run: |
+          db_host="$(getent ahostsv4 localhost | awk 'NR == 1 { print $1 }')"
+          test -n "$db_host"
+          database_url="postgresql://postgres:postgres@${db_host}:5432/postgres"
+          echo "::add-mask::${database_url}"
+          printf 'DATABASE_URL=%s\n' "$database_url" >> "$GITHUB_ENV"
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify no-DB exclusion and suite sentinel wiring
+        run: |
+          grep -Fq "'tests/integration/approval-sequential-mode.db.test.ts'," packages/core-backend/vitest.config.ts
+          grep -Fq "sentinel: EXPECT_DB lane must have DATABASE_URL" packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts
+          grep -Fq "it('sentinel: EXPECT_DB lane must have DATABASE_URL" packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts
+          ! grep -Fq "it.skip('sentinel: EXPECT_DB lane must have DATABASE_URL" packages/core-backend/tests/integration/approval-sequential-mode.db.test.ts
+          expect_key=EXPECT_DB
+          grep -Eq "^      ${expect_key}: '1'$" .github/workflows/approval-realdb-sequential-mode.yml
+          grep -Fq "      DATABASE_URL: 'configured-after-masking'" .github/workflows/approval-realdb-sequential-mode.yml
+          test "$(grep -Ec '^          echo "::add-mask::\$\{database_url\}"$' .github/workflows/approval-realdb-sequential-mode.yml)" -eq 1
+          ! grep -Eq '^      DATABASE_URL: .*postgresql://' .github/workflows/approval-realdb-sequential-mode.yml
+          for path in \
+            packages/core-backend/src/services/ApprovalAssigneeResolver.ts \
+            packages/core-backend/tests/globalTeardown.ts \
+            packages/core-backend/tests/setup.integration.ts \
+            packages/core-backend/vitest.integration.config.ts
+          do
+            test "$(grep -Fc "      - '$path'" .github/workflows/approval-realdb-sequential-mode.yml)" -eq 2
+          done
+
+      - name: Assert fail-loud DB contract
+        run: |
+          test "${EXPECT_DB:-}" = '1'
+          test -n "${DATABASE_URL:-}"
+          test "${DATABASE_URL}" != 'configured-after-masking'
+          case "${DATABASE_URL}" in postgresql://*) ;; *) exit 1 ;; esac
+
+      - name: Run DB migrations
+        env:
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run Lock-1 K6 sequential approval real-DB acceptance (whole file)
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-sequential-mode.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suite=approval-sequential-mode.db.test.ts"
+            echo "lock=approval-lock1-assignee-catalog-20260817 K6"
+            echo "postgres=${{ matrix.postgres }}"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

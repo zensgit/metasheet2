@@ -634,7 +634,7 @@ function asyncPlanObject<T>(
 function mintToken(
   fixture: Fixture,
   plan: RecoveryArchiveRestorePlan,
-  expiresIn: '1s' | '10m' = '10m',
+  expiresIn: '5s' | '10m' = '10m',
 ): string {
   const claims: ExactArchiveRecoveryIdentityClaims = {
     sheetId: fixture.sheetId,
@@ -873,7 +873,8 @@ async function runOneChunk(
 }
 
 async function waitUntil(timestamp: string): Promise<void> {
-  const deadline = Date.now() + 10_000
+  // Ten-second fixture deadlines need a separate allowance for polling and scheduling.
+  const deadline = Date.now() + 15_000
   while (Date.now() < deadline) {
     const result = await q(`SELECT clock_timestamp() >= $1::timestamptz AS reached`, [timestamp])
     if ((result.rows[0] as { reached?: unknown } | undefined)?.reached === true) return
@@ -890,6 +891,16 @@ async function databaseFuture(milliseconds: number): Promise<string> {
   const value = (result.rows[0] as { at?: unknown } | undefined)?.at
   if (typeof value !== 'string') throw new Error('recovery_archive_restore_job_db_clock_missing')
   return value
+}
+
+async function waitForTokenBurnRetention(token: string): Promise<void> {
+  const result = await q(
+    `SELECT retain_until::text AS retain_until
+       FROM public.meta_recovery_token_burns WHERE token_sha256=$1`,
+    [sha(token)],
+  )
+  expect(result.rows).toHaveLength(1)
+  await waitUntil(String((result.rows[0] as { retain_until: string }).retain_until))
 }
 
 function transactionWithApplicationName(
@@ -1538,8 +1549,10 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
 
     const expiringFixture = await seedVerifiedArchive('prepared_plan_expiry')
     const expiringPlan = compilePlan(expiringFixture)
-    const expiringToken = mintToken(expiringFixture, expiringPlan, '1s')
+    // JWT expiry is second-granular; leave time for the real database fences and locks.
+    const expiringToken = mintToken(expiringFixture, expiringPlan, '5s')
     await preparePlan(expiringFixture, expiringPlan, expiringToken)
+    expect(await sweepExpiredRecoveryArchiveRestorePlans(transaction)).toBe(0)
     const expiry = await q(
       `SELECT token_expires_at::text AS token_expires_at
          FROM public.meta_recovery_archive_restore_plans
@@ -3111,7 +3124,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
   test('refuses archive expiry with live jobs and sweeps expired zero-write and partial jobs', async () => {
     const partialFixture = await seedVerifiedArchive('sweep_partial')
     const partialPlan = compilePlan(partialFixture)
-    const partialDeadline = await databaseFuture(2_500)
+    const partialDeadline = await databaseFuture(10_000)
     const partialToken = mintToken(partialFixture, partialPlan)
     await preparePlan(partialFixture, partialPlan, partialToken)
     const partial = await acceptRecoveryArchiveRestoreJob(transaction, {
@@ -3125,23 +3138,25 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     expect(partialCandidate?.jobId).toBe(partial.id)
     const partialClaim = await claimRecoveryArchiveRestoreJob(transaction, partialCandidate!, {
       workerOwnerId: `${PREFIX}_sweep_worker`,
-      leaseUntil: await databaseFuture(2_000),
+      leaseUntil: partialDeadline,
     })
     await runOneChunk(partialClaim, [])
 
-    const archiveExpiry = await databaseFuture(4_000)
+    const archiveExpiry = await databaseFuture(10_000)
     const zeroFixture = await seedVerifiedArchive('sweep_zero', archiveExpiry)
     const zeroPlan = compilePlan(zeroFixture, new Date(archiveExpiry).toISOString())
-    const zeroToken = mintToken(zeroFixture, zeroPlan, '1s')
+    const zeroToken = mintToken(zeroFixture, zeroPlan, '5s')
     await preparePlan(zeroFixture, zeroPlan, zeroToken)
     const zero = await acceptRecoveryArchiveRestoreJob(transaction, {
       token: zeroToken,
       plan: zeroPlan,
       identity: restoreRequestIdentity(zeroFixture),
-      resumeDeadline: await databaseFuture(2_500),
+      resumeDeadline: zeroPlan.planObjectExpiresAt,
       recheckAuthority: async () => true,
     })
 
+    await waitUntil(partial.resumeDeadline)
+    await waitUntil(zero.resumeDeadline)
     await waitUntil(archiveExpiry)
     await expect(transaction((query) => expireRecoveryArchiveAfterLegalHoldCheck(query, {
       workspaceId: zeroFixture.workspaceId,
@@ -3188,14 +3203,15 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         recovery_writer_state: null,
       }),
     ]))
+    await waitForTokenBurnRetention(zeroToken)
     expect(await pruneEligibleRecoveryTokenBurns(transaction)).toBe(1)
   })
 
   test('keeps legacy and held burns, then prunes only a terminal provenance-complete burn', async () => {
     const fixture = await seedVerifiedArchive('prune')
     const plan = compilePlan(fixture)
-    const token = mintToken(fixture, plan, '1s')
-    const resumeDeadline = future(1_500)
+    const token = mintToken(fixture, plan, '5s')
+    const resumeDeadline = await databaseFuture(10_000)
     await preparePlan(fixture, plan, token)
     const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
       token,
@@ -3220,7 +3236,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
        VALUES ($1, $2, $3, '2000-01-01T00:00:00.000Z'::timestamptz)`,
       [legacyToken, fixture.sheetId, fixture.actorId],
     )
-    await waitUntil(resumeDeadline)
+    await waitForTokenBurnRetention(token)
     const holdId = randomUUID()
     let markGenerationLocked!: () => void
     const generationLocked = new Promise<void>((resolve) => {

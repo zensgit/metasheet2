@@ -23,6 +23,53 @@ function stubComponent(name: string) {
   })
 }
 
+// Rename affordance (feat/multitable-rename): unlike the other mocked children above, these two
+// stubs need to actually EMIT (rename-sheet / rename) so the tests below can drive
+// MultitableWorkbench.vue's onRenameSheet/onRenameBase wiring — a bare stubComponent() has no way
+// to trigger an emit. They also surface the canManageFields prop they were passed via a data
+// attribute, as a cheap positive proof that the workbench threads caps.canManageFields.value down
+// (the negative case — the affordance actually disappearing when the capability is false — is
+// exhaustively covered at the component level in meta-sheet-view-rail.spec.ts / meta-base-picker.spec.ts).
+function stubMetaSheetViewRail() {
+  return defineComponent({
+    name: 'MetaSheetViewRail',
+    props: { canManageFields: { type: Boolean, default: false } },
+    emits: ['select-sheet', 'select-view', 'create-sheet', 'toggle-personal', 'rename-sheet'],
+    setup(props, { emit }) {
+      return () => h('div', {
+        'data-stub-MetaSheetViewRail': 'true',
+        'data-can-manage-fields': String(props.canManageFields === true),
+      }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-rename-sheet',
+          onClick: () => emit('rename-sheet', 'sheet_orders', 'Orders Renamed'),
+        }, 'rename-sheet'),
+      ])
+    },
+  })
+}
+
+function stubMetaBasePicker() {
+  return defineComponent({
+    name: 'MetaBasePicker',
+    props: { canManageFields: { type: Boolean, default: false } },
+    emits: ['select', 'create', 'toggle-favorite', 'rename'],
+    setup(props, { emit }) {
+      return () => h('div', {
+        'data-stub-MetaBasePicker': 'true',
+        'data-can-manage-fields': String(props.canManageFields === true),
+      }, [
+        h('button', {
+          type: 'button',
+          'data-testid': 'stub-rename-base',
+          onClick: () => emit('rename', 'base_ops', 'Ops Base Renamed'),
+        }, 'rename-base'),
+      ])
+    },
+  })
+}
+
 let workbenchMock: any
 let gridMock: any
 
@@ -97,7 +144,7 @@ vi.mock('../src/multitable/import/bulk-import', () => ({
   bulkImportRecords: vi.fn(),
 }))
 
-vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubComponent('MetaSheetViewRail') }))
+vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubMetaSheetViewRail() }))
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
@@ -112,7 +159,7 @@ vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: st
 vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
 vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({ default: stubComponent('MetaTimelineView') }))
 vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({ default: stubComponent('MetaImportModal') }))
-vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubComponent('MetaBasePicker') }))
+vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubMetaBasePicker() }))
 
 vi.mock('../src/multitable/components/MetaToast.vue', () => ({
   default: defineComponent({
@@ -162,6 +209,8 @@ function createWorkbenchMock() {
       deleteView: vi.fn(),
       patchRecords: vi.fn(),
       submitForm: vi.fn(),
+      renameSheet: vi.fn().mockResolvedValue({ sheet: { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders Renamed', description: null } }),
+      renameBase: vi.fn().mockResolvedValue({ base: { id: 'base_ops', name: 'Ops Base Renamed' } }),
     },
     sheets: ref([{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]),
     fields: ref([
@@ -333,5 +382,102 @@ describe('MultitableWorkbench manager-driven config flow', () => {
     // `msg` still records `action === undefined` explicitly as the 2nd arg.
     expect(showSuccessSpy).toHaveBeenCalledWith('View settings saved', undefined)
     expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+})
+
+// Rename affordance (feat/multitable-rename). Both PATCH routes gate server-side on
+// canManageFields — these tests cover the workbench-level wiring: (a) the emit reaches
+// workbench.client.rename*, refreshes via the same paths onUpdateField/onCreateBase use, and (b) a
+// rejected client call (simulating the server's 403) surfaces through showError rather than a
+// silent success, with NO refresh performed on failure.
+describe('MultitableWorkbench rename affordance wiring', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    showErrorSpy.mockReset()
+    showSuccessSpy.mockReset()
+    vi.clearAllMocks()
+  })
+
+  function mountWorkbench(): HTMLDivElement {
+    const Host = defineComponent({
+      setup() {
+        return () => h(MultitableWorkbench as Component)
+      },
+    })
+    app = createApp(Host)
+    app.mount(container!)
+    return container!
+  }
+
+  it('threads caps.canManageFields.value into both the sheet rail and the base picker', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+
+    expect(root.querySelector('[data-stub-MetaSheetViewRail]')?.getAttribute('data-can-manage-fields')).toBe('true')
+    expect(root.querySelector('[data-stub-MetaBasePicker]')?.getAttribute('data-can-manage-fields')).toBe('true')
+  })
+
+  it('wires rename-sheet to client.renameSheet and refreshes sheet meta via loadSheetMeta', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-rename-sheet"]')?.click()
+    await flushUi()
+
+    expect(workbenchMock.client.renameSheet).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.renameSheet).toHaveBeenCalledWith('sheet_orders', 'Orders Renamed')
+    expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('a rejected client.renameSheet (simulating the server 403) surfaces through showError, not a silent success, and skips the refresh', async () => {
+    const message = 'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+    workbenchMock.client.renameSheet.mockRejectedValueOnce(new Error(message))
+    const root = mountWorkbench()
+    await flushUi()
+    workbenchMock.loadSheetMeta.mockClear() // drop the mount-time call so we assert only the post-click behavior
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-rename-sheet"]')?.click()
+    await flushUi()
+
+    expect(showErrorSpy).toHaveBeenCalledWith(message)
+    expect(workbenchMock.loadSheetMeta).not.toHaveBeenCalled()
+  })
+
+  it('wires rename to client.renameBase', async () => {
+    const root = mountWorkbench()
+    await flushUi()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-rename-base"]')?.click()
+    await flushUi()
+
+    expect(workbenchMock.client.renameBase).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.renameBase).toHaveBeenCalledWith('base_ops', 'Ops Base Renamed')
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('a rejected client.renameBase (simulating the server 403) surfaces through showError, not a silent success', async () => {
+    const message = 'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+    workbenchMock.client.renameBase.mockRejectedValueOnce(new Error(message))
+    const root = mountWorkbench()
+    await flushUi()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="stub-rename-base"]')?.click()
+    await flushUi()
+
+    expect(showErrorSpy).toHaveBeenCalledWith(message)
   })
 })

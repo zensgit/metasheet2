@@ -3,6 +3,7 @@ import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { configRevisionNoop } from './config-revision-mock'
+import { answerSheetLiveness, isSheetLivenessQuery } from './sheet-liveness-mock'
 
 // ---------------------------------------------------------------------------
 // MOCK-POOL CONTRACT (read before editing — this is a hand-rolled SQL matcher).
@@ -84,6 +85,9 @@ const SHEET_OPS_FIELDS: FieldRow[] = [
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    // SHEET LIVENESS (soft delete) — see ./sheet-liveness-mock.ts. Translated, not enumerated, so
+    // this fixture keeps its own notion of which sheets exist.
+    if (isSheetLivenessQuery(sql)) return answerSheetLiveness(queryHandler, params)
     const cr = configRevisionNoop(sql); if (cr) return cr // narrowed INSERT-only match (shared helper)
     return queryHandler(sql, params)
   })

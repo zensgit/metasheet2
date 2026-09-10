@@ -6,6 +6,7 @@ vi.mock('../../src/rbac/service', () => ({
 }))
 
 import { deriveCapabilities } from '../../src/multitable/access'
+import { deriveElearningProjectionSheetId } from '../../src/multitable/elearning-projection-constants'
 import { isAdmin, listUserPermissions } from '../../src/rbac/service'
 import {
   applyContextSheetReadGrant,
@@ -600,6 +601,9 @@ describe('permission-service: request-keyed resolvers', () => {
     vi.mocked(listUserPermissions).mockResolvedValue(['multitable:read'])
     vi.mocked(isAdmin).mockResolvedValue(false)
     const { query } = makeQuery([
+      // The resolver now establishes SHEET LIVENESS first (soft delete): a deleted sheet must not be
+      // invisible to a path that only ever asked "may this actor?". This sheet is live.
+      () => ({ rows: [{ deleted_at: null }] }),
       () => ({
         rows: [
           { sheet_id: 'sheet_1', perm_code: 'multitable:admin', subject_type: 'user' },
@@ -608,9 +612,54 @@ describe('permission-service: request-keyed resolvers', () => {
     ])
     const req = { user: { id: 'user_1', roles: ['user'] } } as any
     const res = await resolveSheetCapabilities(req, query, 'sheet_1')
+    expect(res.sheetLiveness).toBe('live')
     expect(res.capabilities.canManageFields).toBe(true)
     expect(res.capabilities.canManageSheetAccess).toBe(true)
     expect(res.capabilityOrigin.source).toBe('sheet-grant')
     expect(res.sheetScope?.canAdmin).toBe(true)
+  })
+
+  it('resolves the e-learning aggregate sheet as same-org admin read-only', async () => {
+    const orgId = 'org-elearning-stats'
+    const sheetId = deriveElearningProjectionSheetId(orgId)
+    const query = vi.fn(async (sql: string) => {
+      if (sql === 'SELECT deleted_at FROM meta_sheets WHERE id = $1') {
+        return { rows: [{ deleted_at: null }] }
+      }
+      if (sql.includes("to_jsonb(sheet) ->> 'system_kind'")) {
+        return { rows: [{ id: sheetId }] }
+      }
+      if (sql.includes('FROM elearning_stats_multitable_sheets')) {
+        return { rows: [{ org_id: orgId, sheet_id: sheetId }] }
+      }
+      return { rows: [] }
+    }) as QueryFn
+    const req = {
+      authenticatedTenantId: orgId,
+      user: { id: 'elearning-admin', perms: ['elearning:admin'], roles: ['user'] },
+    } as any
+    const result = await resolveSheetCapabilities(req, query, sheetId)
+    expect(result.sheetLiveness).toBe('live')
+    expect(result.capabilities).toMatchObject({
+      canRead: true,
+      canExport: true,
+      canManageViews: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageSheetAccess: false,
+      canComment: false,
+      canManageAutomation: false,
+      canSendNotification: false,
+    })
+
+    const crossOrg = await resolveSheetCapabilities(
+      { ...req, authenticatedTenantId: 'org-other' } as any,
+      query,
+      sheetId,
+    )
+    expect(crossOrg.capabilities.canRead).toBe(false)
+    expect(crossOrg.capabilities.canManageViews).toBe(false)
   })
 })

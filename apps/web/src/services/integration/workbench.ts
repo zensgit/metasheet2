@@ -33,6 +33,8 @@ export interface WorkbenchExternalSystem {
   id: string
   tenantId: string
   workspaceId: string | null
+  /** Opaque data_sources.id for canonical data-source:sql-readonly bindings. */
+  connectionId?: string | null
   name: string
   kind: string
   role: 'source' | 'target' | 'bidirectional'
@@ -169,6 +171,8 @@ export type PlmBomEcoRevisionIntentResult =
 export interface WorkbenchExternalSystemUpsertRequest extends IntegrationScope {
   id?: string
   projectId?: string | null
+  /** Opaque data_sources.id; only used by data-source:sql-readonly. */
+  connectionId?: string | null
   name: string
   kind: string
   role: 'source' | 'target' | 'bidirectional'
@@ -742,6 +746,17 @@ export function buildQueryString(input: Record<string, unknown>): string {
   return params.toString()
 }
 
+// buildQueryString returns a BARE `a=1&b=2` — no leading `?` — so every call site must remember to
+// guard it in with `query ? `?${query}` : ''` before appending it to a path (get this wrong and the
+// query string merges straight into the path with no separator, e.g.
+// `/api/foo${query}` → `/api/fooa=1&b=2`, a guaranteed 404; see confirmationQueue.ts's O1 fix).
+// buildQuerySuffix makes that guard the caller's ONLY option: it always returns either `''` or a
+// leading-`?` string, so there is no bare form left to misuse.
+export function buildQuerySuffix(input: Record<string, unknown>): string {
+  const query = buildQueryString(input)
+  return query ? `?${query}` : ''
+}
+
 function buildObservationQueryString(query: IntegrationPipelineObservationQuery): string {
   return buildQueryString({
     tenantId: query.tenantId,
@@ -803,6 +818,95 @@ export async function listWorkbenchExternalSystems(scope: IntegrationScope = {})
   const response = await apiFetch(`/api/integration/external-systems${query ? `?${query}` : ''}`)
   const data = await parseIntegrationResponse<WorkbenchExternalSystem[]>(response)
   return Array.isArray(data) ? data : []
+}
+
+// ---------------------------------------------------------------------------
+// 对接总览 (GET /api/integration/hub/overview)
+//
+// ONE read-tier call answering "对接了哪些系统、各用哪个连接、谁在用、状态如何". The backend does the
+// join and enforces the values-free boundary; these types mirror its response EXACTLY, and
+// deliberately have no field for a host, port, connection string, credential or error text —
+// if such a field ever appeared here it would mean the backend regressed.
+// ---------------------------------------------------------------------------
+export interface IntegrationHubBilingualLabel {
+  zh: string
+  en: string
+}
+
+export type IntegrationHubConnectionModel = 'data-source' | 'self-contained' | 'internal'
+export type IntegrationHubConnectionUnresolvedReason = 'not_bound' | 'not_visible' | 'directory_unavailable' | null
+export type IntegrationHubWriteCapability = 'none' | 'internal' | 'gated' | 'fenced' | 'unregistered'
+export type IntegrationHubConsumerType = 'table-action' | 'pipeline' | 'read-source-config' | 'read-source-composition'
+
+export interface IntegrationHubConnection {
+  model: IntegrationHubConnectionModel
+  bound: boolean
+  dataSourceId: string | null
+  resolved: boolean
+  name: string | null
+  type: string | null
+  status: string | null
+  unresolvedReason: IntegrationHubConnectionUnresolvedReason
+}
+
+export interface IntegrationHubConsumer {
+  type: IntegrationHubConsumerType
+  id: string | null
+  name: string | null
+  label: IntegrationHubBilingualLabel
+  role: string
+  count: number
+}
+
+export interface IntegrationHubSystem {
+  id: string
+  name: string | null
+  kind: string
+  kindLabel: IntegrationHubBilingualLabel
+  kindRegistered: boolean
+  role: string | null
+  status: string | null
+  lastTestedAt: string | null
+  /** A BOOLEAN, never the failure text — the backend refuses to send the string. */
+  hasLastError: boolean
+  connection: IntegrationHubConnection
+  writeCapability: {
+    reads: string
+    writes: IntegrationHubWriteCapability
+    fenced: boolean
+    notice: IntegrationHubBilingualLabel
+  }
+  consumers: IntegrationHubConsumer[]
+  technical: {
+    systemId: string
+    kind: string
+    role: string | null
+    status: string | null
+    dataSourceId: string | null
+    workspaceId: string | null
+    createdAt: string | null
+    updatedAt: string | null
+  }
+}
+
+export interface IntegrationHubOverview {
+  systemCount: number
+  systems: IntegrationHubSystem[]
+  dataSourceDirectory: { available: boolean }
+}
+
+export async function fetchIntegrationHubOverview(scope: IntegrationScope = {}): Promise<IntegrationHubOverview> {
+  const query = buildQueryString({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+  })
+  const response = await apiFetch(`/api/integration/hub/overview${query ? `?${query}` : ''}`)
+  const data = await parseIntegrationResponse<IntegrationHubOverview>(response)
+  return {
+    systemCount: typeof data?.systemCount === 'number' ? data.systemCount : 0,
+    systems: Array.isArray(data?.systems) ? data.systems : [],
+    dataSourceDirectory: { available: data?.dataSourceDirectory?.available === true },
+  }
 }
 
 export async function getPlmDataSourceCapabilities(dataSourceId: string): Promise<PlmIntegrationCapabilitiesResult> {

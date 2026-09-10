@@ -37,6 +37,14 @@
         />
         <div class="integration-workbench__sections">
 
+    <!-- 对接总览: the FIRST screen. Read-only summary; both actions are navigation into the
+         existing 连接管理 affordances below, never a second editor. -->
+    <IntegrationHubOverviewSection
+      :scope="currentScope()"
+      @open-connection="openConnectionFromOverview"
+      @open-connections="scrollToConnections"
+    />
+
     <IntegrationConnectionSection
       :bi="bi"
       :refresh-bootstrap="refreshBootstrap"
@@ -516,6 +524,7 @@ import IntegrationMappingRulesSection from '../components/integration/Integratio
 import IntegrationObjectTemplateSection from '../components/integration/IntegrationObjectTemplateSection.vue'
 import IntegrationPayloadPreviewSection from '../components/integration/IntegrationPayloadPreviewSection.vue'
 import IntegrationConnectionSection from '../components/integration/IntegrationConnectionSection.vue'
+import IntegrationHubOverviewSection from '../components/integration/IntegrationHubOverviewSection.vue'
 import IntegrationBridgeAgentSection from '../components/integration/IntegrationBridgeAgentSection.vue'
 import IntegrationPipelineRunSection from '../components/integration/IntegrationPipelineRunSection.vue'
 import IntegrationStockPrepPanel from '../components/integration/IntegrationStockPrepPanel.vue'
@@ -592,9 +601,9 @@ interface ConnectionDraft {
   status: ConnectionDraftStatus
   configText: string
   capabilitiesText: string
-  // C2b: structured config for the read-only data-source bridge (kind 'data-source:sql-readonly').
-  // The connection only ever references a data_sources id — credentials stay in /data-sources.
-  dataSourceId: string
+  // PR-1: canonical binding for the read-only data-source bridge. The connection only ever
+  // references a data_sources id at top level — credentials stay in /data-sources.
+  connectionId: string
   dataSourceObject: string
 }
 
@@ -656,6 +665,9 @@ function bi(zh: string, en: string): string {
 // button scrolls to the FIRST section id in its group; `sectionGroupIds` below drives the active
 // highlight for every section id that belongs to a group, regardless of DOM position.
 const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
+  // 对接总览: 8th group, prepended — the first screen an operator should land on. ADD-ONLY, exactly
+  // like the BA-UI-1 group below: every existing group keeps its id, label and target anchor.
+  { id: 'hub-overview', label: bi('总览', 'Overview'), targetId: 'int-sec-hub-overview' },
   { id: 'connection', label: bi('连接管理', 'Connections'), targetId: 'int-sec-connection' },
   { id: 'read-source', label: bi('读取源', 'Read Sources'), targetId: 'int-sec-read-source' },
   { id: 'combination', label: bi('组合', 'Composition'), targetId: 'int-sec-combination-config' },
@@ -669,6 +681,7 @@ const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
 ])
 
 const sectionGroupIds: Record<string, string> = {
+  'int-sec-hub-overview': 'hub-overview',
   'int-sec-connection': 'connection',
   'int-sec-read-source': 'read-source',
   'int-sec-combination-config': 'combination',
@@ -682,13 +695,27 @@ const sectionGroupIds: Record<string, string> = {
   'int-sec-bridge-agent': 'bridge-agent',
 }
 
-const activeRailGroupId = ref('connection')
+const activeRailGroupId = ref('hub-overview')
 let workbenchSectionObserver: IntersectionObserver | null = null
 
 function scrollToRailGroup(group: IntegrationWorkbenchRailGroup): void {
   activeRailGroupId.value = group.id
   if (typeof document === 'undefined') return
   document.getElementById(group.targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+// 对接总览 -> 连接管理. The overview builds NO editor of its own: it hands the system id back here,
+// and the existing `editConnection` (the same function the inventory row's "编辑" button calls)
+// loads it into the connection draft. A card naming a system this page has not loaded yet — a
+// stale overview after a delete elsewhere — scrolls without selecting rather than throwing.
+function scrollToConnections(): void {
+  scrollToRailGroup({ id: 'connection', label: bi('连接管理', 'Connections'), targetId: 'int-sec-connection' })
+}
+
+function openConnectionFromOverview(systemId: string): void {
+  const system = systems.value.find((candidate) => candidate.id === systemId)
+  if (system) editConnection(system)
+  scrollToConnections()
 }
 
 onMounted(() => {
@@ -904,7 +931,7 @@ const connectionDraft = reactive<ConnectionDraft>({
   status: 'active',
   configText: '{}',
   capabilitiesText: '{}',
-  dataSourceId: '',
+  connectionId: '',
   dataSourceObject: '',
 })
 const connectionDraftMode = ref<'new' | 'edit' | 'copy'>('new')
@@ -942,7 +969,7 @@ async function loadBridgeDataSources(): Promise<void> {
 watch(() => connectionDraft.kind, (kind) => {
   if (kind === DATA_SOURCE_BRIDGE_KIND) {
     void loadBridgeDataSources()
-    if (connectionDraft.dataSourceId.trim()) void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+    if (connectionDraft.connectionId.trim()) void loadBridgeDataSourceObjects(connectionDraft.connectionId)
   } else {
     clearBridgeDataSourceObjects()
   }
@@ -978,8 +1005,8 @@ function buildBridgeObjectOptions(tables: DataSourceTableInfo[] | undefined, kin
     .filter((item): item is BridgeDataSourceObjectOption => item !== null)
 }
 
-async function loadBridgeDataSourceObjects(dataSourceId: string): Promise<void> {
-  const id = dataSourceId.trim()
+async function loadBridgeDataSourceObjects(connectionId: string): Promise<void> {
+  const id = connectionId.trim()
   const requestId = ++bridgeDataSourceObjectRequestId
   bridgeDataSourceObjectOptions.value = []
   bridgeDataSourceObjectsError.value = ''
@@ -990,13 +1017,13 @@ async function loadBridgeDataSourceObjects(dataSourceId: string): Promise<void> 
   bridgeDataSourceObjectsLoading.value = true
   try {
     const schema = await getDataSourceSchema(id)
-    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.dataSourceId.trim() !== id) return
+    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.connectionId.trim() !== id) return
     bridgeDataSourceObjectOptions.value = [
       ...buildBridgeObjectOptions(schema.tables, 'table'),
       ...buildBridgeObjectOptions(schema.views, 'view'),
     ]
   } catch (error) {
-    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.dataSourceId.trim() !== id) return
+    if (requestId !== bridgeDataSourceObjectRequestId || connectionDraft.connectionId.trim() !== id) return
     bridgeDataSourceObjectsError.value = formatWorkbenchConnectionError(error, 'bridge-schema')
   } finally {
     if (requestId === bridgeDataSourceObjectRequestId) bridgeDataSourceObjectsLoading.value = false
@@ -1012,15 +1039,22 @@ function clearBridgeDataSourceObjects(): void {
 
 function onBridgeDataSourceChange(): void {
   connectionDraft.dataSourceObject = ''
-  void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+  void loadBridgeDataSourceObjects(connectionDraft.connectionId)
 }
 
 function buildDataSourceBridgeConfig(): Record<string, unknown> {
   const object = connectionDraft.dataSourceObject.trim()
-  // Only the data_sources reference + object — NO credentials are ever entered for this kind.
+  // Only the semantic object config — the data_sources reference is sent as top-level connectionId.
+  // NO credentials are ever entered for this kind.
+  //
+  // This picker renders the connection's object config key; a stored bridge can carry more
+  // (config.schema, a lookupProjection, paging hints). The registry treats a supplied config as a
+  // PATCH, so the keys absent here are preserved rather than erased — which is what stops a rename
+  // from silently dropping config.schema. The corollary is that this object must NAME every key it
+  // means to control: `object` is emitted even when empty, because omitting it would now read as
+  // "keep the stored one" instead of "there is no object selected".
   return {
-    dataSourceId: connectionDraft.dataSourceId.trim(),
-    ...(object ? { object } : {}),
+    object: object || null,
   }
 }
 
@@ -1031,7 +1065,7 @@ function bridgeConfigString(config: unknown, key: string): string {
 
 function bridgeDataSourceIdForSystem(system: WorkbenchExternalSystem | null): string {
   if (!system || system.kind !== DATA_SOURCE_BRIDGE_KIND) return ''
-  return bridgeConfigString(system.config, 'dataSourceId').trim()
+  return (system.connectionId || bridgeConfigString(system.config, 'dataSourceId')).trim()
 }
 
 function prunePlmCapabilities(systemList: WorkbenchExternalSystem[]): void {
@@ -1300,7 +1334,7 @@ const canSaveConnectionDraft = computed(() => {
   if (isDataSourceBridgeKind.value) {
     const selectedObject = connectionDraft.dataSourceObject.trim()
     const knownObject = bridgeDataSourceObjectOptions.value.some((item) => item.value === selectedObject)
-    if (!connectionDraft.dataSourceId.trim() || !selectedObject || bridgeDataSourceObjectsLoading.value || bridgeDataSourceObjectsError.value || !knownObject) return false
+    if (!connectionDraft.connectionId.trim() || !selectedObject || bridgeDataSourceObjectsLoading.value || bridgeDataSourceObjectsError.value || !knownObject) return false
   }
   return Boolean(
     connectionDraft.name.trim()
@@ -2095,7 +2129,7 @@ function resetConnectionDraft(): void {
   connectionDraft.status = 'active'
   connectionDraft.configText = '{}'
   connectionDraft.capabilitiesText = '{}'
-  connectionDraft.dataSourceId = ''
+  connectionDraft.connectionId = ''
   connectionDraft.dataSourceObject = ''
   clearBridgeDataSourceObjects()
   connectionDraftMode.value = 'new'
@@ -2109,9 +2143,9 @@ function editConnection(system: WorkbenchExternalSystem): void {
   connectionDraft.status = system.status
   connectionDraft.configText = stringifyConnectionDraftJson(system.config)
   connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
-  connectionDraft.dataSourceId = bridgeConfigString(system.config, 'dataSourceId')
+  connectionDraft.connectionId = (system.connectionId || bridgeConfigString(system.config, 'dataSourceId')).trim()
   connectionDraft.dataSourceObject = bridgeConfigString(system.config, 'object')
-  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.connectionId)
   connectionDraftMode.value = 'edit'
   inventoryExpanded.value = true
   setStatus(`已载入连接草稿：${system.name}`, 'idle')
@@ -2125,9 +2159,9 @@ function copyConnection(system: WorkbenchExternalSystem): void {
   connectionDraft.status = 'inactive'
   connectionDraft.configText = stringifyConnectionDraftJson(system.config)
   connectionDraft.capabilitiesText = stringifyConnectionDraftJson(system.capabilities)
-  connectionDraft.dataSourceId = bridgeConfigString(system.config, 'dataSourceId')
+  connectionDraft.connectionId = (system.connectionId || bridgeConfigString(system.config, 'dataSourceId')).trim()
   connectionDraft.dataSourceObject = bridgeConfigString(system.config, 'object')
-  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.dataSourceId)
+  if (system.kind === DATA_SOURCE_BRIDGE_KIND) void loadBridgeDataSourceObjects(connectionDraft.connectionId)
   connectionDraftMode.value = 'copy'
   inventoryExpanded.value = true
   setStatus(`已复制 ${system.name} 为新连接草稿；保存前请改名并确认用途。`, 'idle')
@@ -2242,6 +2276,7 @@ async function saveConnectionDraft(): Promise<void> {
       kind: connectionDraft.kind,
       role: connectionDraft.role,
       status: connectionDraft.status,
+      ...(isDataSourceBridgeKind.value ? { connectionId: connectionDraft.connectionId.trim() } : {}),
       config: isDataSourceBridgeKind.value
         ? buildDataSourceBridgeConfig()
         : parseConnectionDraftJson(connectionDraft.configText, 'config JSON'),

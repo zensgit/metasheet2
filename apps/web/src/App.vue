@@ -12,14 +12,32 @@
             <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
-            <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <!-- P1b slice 1: the 待办 badge is a SIBLING of the link, never a child of it, so the
+                 nav link's own text stays exactly the label (see approvalNavTodoBadge.spec.ts).
+                 The two are wrapped in ONE flex item so `.nav-links`' 8px gap falls between this
+                 pair and the NEXT entry, not between the label and its own badge.
+                 Round 2: the badge mounts inside ShellChromeBoundary (a failure there renders the
+                 nav WITHOUT the badge instead of blanking the shell) and only off a public route
+                 (item 5 — mirroring this component's own onMounted network suppression). Neither
+                 wrapper is a DOM element, so the badge's parent is still this flex item. -->
+            <span v-if="canUseApprovals" class="nav-approvals">
+              <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+              <ShellChromeBoundary>
+                <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
+              </ShellChromeBoundary>
+            </span>
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
             <router-link to="/apps" class="nav-link">{{ navLabels.apps }}</router-link>
             <router-link to="/multitable" class="nav-link">{{ navLabels.multitable }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
-            <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <span v-if="canUseApprovals" class="nav-approvals">
+              <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+              <ShellChromeBoundary>
+                <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
+              </ShellChromeBoundary>
+            </span>
             <router-link
               v-for="item in pluginNavItems"
               :key="item.id"
@@ -34,8 +52,21 @@
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
+            <!-- P1b slice 3 / round-2 item 1: the admin 批量转交 page. The gate is CONJUNCTIVE —
+                 `canManageUsers` (token-derived, the same gate its sibling admin entries use, and
+                 what keeps an ordinary user's shell from issuing the read at all) AND the SERVER's
+                 own DB-backed approval-administrator capability, which the entry component
+                 resolves. The two predicates genuinely differ; the list scope binds the second, so
+                 the second is what decides whether this page can show another approver's queue. -->
+            <ShellChromeBoundary v-if="canManageUsers && !isPublicRoute">
+              <ApprovalBatchTransferNavEntry :label="navLabels.approvalBatchTransfer" />
+            </ShellChromeBoundary>
             <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-link">{{ navLabels.systemIntegration }}</router-link>
-            <router-link v-if="canUseIntegration" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
+            <!-- O2 / R-11: the nav link is a control like any other — it follows the route's own gate
+                 (stock-prep:read), not the Data Factory's integration:write. Left on canUseIntegration
+                 it would be a link that renders for a principal the guard immediately redirects: the
+                 "visible but not actionable" failure moved from the page into the navigation. -->
+            <router-link v-if="canUseStockPreparation" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
             <router-link v-if="canUseIntegration" to="/data-sources" class="nav-link">{{ navLabels.dataSources }}</router-link>
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
@@ -59,6 +90,16 @@
         </label>
         <template v-if="isLoggedIn">
           <span v-if="accountEmail" class="nav-user" :title="accountEmail">{{ accountEmailDisplay }}</span>
+          <!-- P1b slice 2: the SELF-SERVICE delegation entry. `/my-delegation` is requiresAuth-only
+               (the delegator is forced to the actor server-side), but until now its only entry point
+               in the whole app was TemplateCenterView's 委托管理 button — which is gated on
+               `approval-templates:manage` and points at the ADMIN surface `/approval-delegations`.
+               An ordinary approver therefore had no way to reach their own delegation page except by
+               typing the URL. This is the account-area (user menu) counterpart; the admin button is
+               left exactly as it was. Deliberately narrowed to approvals:read holders — the same
+               gate the 审批中心 link uses — so the account area stays quiet for principals who
+               cannot see approvals at all. -->
+          <router-link v-if="canUseApprovals" to="/my-delegation" class="nav-link" data-testid="nav-my-delegation">{{ navLabels.myDelegation }}</router-link>
           <router-link to="/settings" class="nav-link">{{ navLabels.mySessions }}</router-link>
           <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
         </template>
@@ -77,8 +118,12 @@ import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
+import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
+import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchTransferNavEntry.vue'
+import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
+import { STOCK_PREP_ROUTE_PERMISSION } from './services/integration/stockPreparation/workbenchAccess'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
 import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
@@ -111,6 +156,13 @@ const canUseIntegration = computed(() => {
   void route.fullPath
   return hasPermission('integration:write')
 })
+// O2 / R-11: `/stock-prep` reachability is exactly STOCK_PREP_ROUTE_PERMISSION, the same code the
+// route meta declares and the same one the plugin gates the queue read with. Imported from the
+// shared vocabulary rather than typed inline so the nav link cannot drift from the guard.
+const canUseStockPreparation = computed(() => {
+  void route.fullPath
+  return hasPermission(STOCK_PREP_ROUTE_PERMISSION)
+})
 const canUseApprovals = computed(() => {
   void route.fullPath
   return hasPermission('approvals:read')
@@ -127,6 +179,8 @@ const navLabels = computed(() => {
       multitable: '多维表',
       workflows: '流程',
       approvals: '审批中心',
+      // Values-free: names the surface, never the count or any row content.
+      approvalTodo: '待办审批',
       apps: '应用',
       users: '用户',
       roles: '角色',
@@ -134,6 +188,7 @@ const navLabels = computed(() => {
       adminAudit: '管理审计',
       automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
+      approvalBatchTransfer: '批量转交',
       systemIntegration: '数据工厂',
       stockPreparation: '备料工作台',
       dataSources: '外接数据源',
@@ -141,6 +196,7 @@ const navLabels = computed(() => {
       plm: 'PLM',
       audit: '审计',
       plmWorkbench: 'PLM 工作台',
+      myDelegation: '我的委托',
       mySessions: '我的会话',
       signOut: '退出登录',
       language: '语言',
@@ -151,6 +207,7 @@ const navLabels = computed(() => {
     multitable: 'Multitable',
     workflows: 'Workflows',
     approvals: 'Approvals',
+    approvalTodo: 'Pending approvals',
     apps: 'Apps',
     users: 'Users',
     roles: 'Roles',
@@ -158,6 +215,7 @@ const navLabels = computed(() => {
     adminAudit: 'Admin Audit',
     automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
+    approvalBatchTransfer: 'Batch Transfer',
     systemIntegration: 'Data Factory',
     stockPreparation: 'Stock Preparation',
     dataSources: 'Data Sources',
@@ -165,6 +223,7 @@ const navLabels = computed(() => {
     plm: 'PLM',
     audit: 'Audit',
     plmWorkbench: 'PLM Workbench',
+    myDelegation: 'My Delegation',
     mySessions: 'My Sessions',
     signOut: 'Sign out',
     language: 'Language',
@@ -297,6 +356,15 @@ html, body {
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
+}
+
+/* P1b slice 1: groups the 审批中心 link with its 待办 badge into a single `.nav-links` flex item.
+   Without it the badge is a peer entry — `.nav-links` puts its 8px gap on BOTH sides of it, so the
+   badge sits as far from its own label as from the next nav entry. */
+.nav-approvals {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
 }
 
 .nav-links::-webkit-scrollbar {

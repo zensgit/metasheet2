@@ -28,6 +28,8 @@ export type WorkbenchLabelKey =
   | 'kbd.title' | 'kbd.navigateCells' | 'kbd.editCell' | 'kbd.cancelClose'
   | 'kbd.nextCell' | 'kbd.copy' | 'kbd.paste' | 'kbd.undo' | 'kbd.redo'
   | 'kbd.toggleHelp'
+  // --- Record inspector v3 (design 2026-09-05, PR-A §1.5): prev/next record chord ---
+  | 'kbd.recordPrev' | 'kbd.recordNext'
   // §3.5 static (non-interpolated) toast subset
   | 'toast.recordCreateBlocked' | 'toast.recordEditBlocked' | 'toast.recordDeleteBlocked'
   | 'toast.datesUpdated' | 'toast.hierarchyUpdated' | 'toast.recordDeleted' | 'toast.recordDuplicated'
@@ -54,6 +56,9 @@ export type WorkbenchLabelKey =
   | 'toast.baseLoadFailed' | 'toast.contextSyncFailed'
   | 'toast.externalContextBusy' | 'toast.externalContextUnsaved'
   | 'toast.baseCreateBlocked' | 'toast.baseCreateFailed'
+  // feat/multitable-rename: sheet/base rename failure toasts (server e.message takes priority —
+  // these are only the generic fallback when the response carried no message).
+  | 'toast.sheetRenameFailed' | 'toast.baseRenameFailed'
   | 'toast.importCancelled' | 'toast.importFailed'
   | 'toast.excelExportFailed' | 'toast.csvExportFailed' | 'toast.bulkDeleteFailed'
   | 'toast.workbenchInitFailed'
@@ -119,6 +124,8 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'kbd.undo': { en: 'Undo', zh: '撤销' },
   'kbd.redo': { en: 'Redo', zh: '重做' },
   'kbd.toggleHelp': { en: 'Toggle this help', zh: '切换此帮助' },
+  'kbd.recordPrev': { en: 'Previous record (inspector open)', zh: '上一条记录（检查器打开时）' },
+  'kbd.recordNext': { en: 'Next record (inspector open)', zh: '下一条记录（检查器打开时）' },
 
   'toast.recordCreateBlocked': {
     en: 'Record creation is not allowed in this view.',
@@ -203,6 +210,8 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
     zh: '创建工作区需要多维表写入权限。',
   },
   'toast.baseCreateFailed': { en: 'Failed to create base', zh: '创建工作区失败' },
+  'toast.sheetRenameFailed': { en: 'Failed to rename sheet', zh: '重命名数据表失败' },
+  'toast.baseRenameFailed': { en: 'Failed to rename base', zh: '重命名工作区失败' },
   'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
   'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
   'toast.excelExportFailed': { en: 'Excel export failed', zh: 'Excel 导出失败' },

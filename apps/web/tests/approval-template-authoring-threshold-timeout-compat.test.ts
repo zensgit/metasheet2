@@ -301,11 +301,12 @@ describe('P1-C deleted flatten branch (gate P2-3, master lock §P1-C verbatim)',
     expect(draft.steps[0].approvalMode).toBe('bogus')
   })
 
-  it('positive control: every legitimate mode (all/any/threshold/single) plus an ABSENT approvalMode still hydrates correctly', () => {
-    const cases: Array<{ approvalMode?: 'all' | 'any' | 'threshold' | 'single'; expected: string }> = [
+  it('positive control: every legitimate mode (all/any/threshold/sequential/single) plus an ABSENT approvalMode still hydrates correctly', () => {
+    const cases: Array<{ approvalMode?: 'all' | 'any' | 'threshold' | 'sequential' | 'single'; expected: string }> = [
       { approvalMode: 'all', expected: 'all' },
       { approvalMode: 'any', expected: 'any' },
       { approvalMode: 'threshold', expected: 'threshold' },
+      { approvalMode: 'sequential', expected: 'sequential' },
       { approvalMode: 'single', expected: 'single' },
       { approvalMode: undefined, expected: 'single' }, // ABSENT key -> documented single-approver default
     ]
@@ -329,6 +330,11 @@ describe('P1-C deleted flatten branch (gate P2-3, master lock §P1-C verbatim)',
       const draft = draftFromTemplate(template)
       expect(draft.steps).toHaveLength(1)
       expect(draft.steps[0].approvalMode).toBe(expected)
+      const rebuiltConfig = buildApprovalGraph(draft).nodes.find((node) => node.key === 'approval_1')!.config
+      expect(rebuiltConfig.approvalMode).toBe(expected)
+      if (approvalMode === 'sequential') {
+        expect(rebuiltConfig).not.toHaveProperty('approvalThreshold')
+      }
     }
   })
 })
@@ -514,6 +520,15 @@ describe('P1-C linear-only fail-closed (complex path) + positive control', () =>
       join: { nodeKey: 'join', assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'threshold', approvalThreshold: 1 },
     }, undefined, region)
     expect(errors).toEqual([])
+  })
+  it('rejects approvalMode:sequential inside a parallel region and accepts it outside', () => {
+    const region = collectParallelRegionNodeKeys(PARALLEL_GRAPH)
+    expect(validateApprovalNodeEdits({
+      inner_approval: { nodeKey: 'inner_approval', assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'sequential' },
+    }, undefined, region).some((error) => error.includes('并行分支内') && error.includes('依次审批'))).toBe(true)
+    expect(validateApprovalNodeEdits({
+      join: { nodeKey: 'join', assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'sequential' },
+    }, undefined, region)).toEqual([])
   })
   it('rejects a timeout on a node INSIDE a parallel region', () => {
     const region = collectParallelRegionNodeKeys(PARALLEL_GRAPH)

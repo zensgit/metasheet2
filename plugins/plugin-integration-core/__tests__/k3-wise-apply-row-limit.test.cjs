@@ -100,17 +100,42 @@ test('over-limit upsert is refused BEFORE login — zero network calls', async (
   assert.deepEqual(fetchPair.calls, [], 'a refused batch must produce zero HTTP calls, login included')
 })
 
-test('POSITIVE CONTROL: a 3-row batch under the same profile proceeds and writes', async () => {
+test('G-4: a 3-row batch — UNDER the cap — is permanently refused; 0 login, 0 Save', async () => {
+  // CONVERTED (G-4, go-live gate: K3 Save/Submit/Audit external write-back is permanently banned,
+  // "即使出现通用写开关或普通 owner 审批也保持不可达"). This was the POSITIVE CONTROL proving that a
+  // batch at exactly the cap still reached the network — i.e. that the over-limit refusal above
+  // refused for the row count and not for some unrelated reason. That control cannot survive a
+  // permanent fence, and its ATTRIBUTION duty is discharged differently now: the two tests still
+  // return DIFFERENT closed tokens, so the cap guard is demonstrably still reached and still
+  // load-bearing rather than shadowed by a blanket refusal.
+  //   4 rows  -> K3_WISE_APPLY_ROW_LIMIT_EXCEEDED       (the cap fires first — see the test above)
+  //   3 rows  -> K3_WISE_EXTERNAL_WRITE_DISABLED  (past the cap, the G-4 fence fires)
+  // Both still produce ZERO HTTP calls, which is the property that actually matters.
   const fetchPair = countingFetch()
   const adapter = adapterWith({ profile: PROFILE_ID }, fetchPair)
 
-  const result = await adapter.upsert({ object: 'material', records: records(3), keyFields: ['FNumber'] })
-  assert.equal(result.written, 3, 'exactly the cap must still be allowed (limit is >, not >=)')
-  assert.equal(result.failed, 0)
-  assert.ok(fetchPair.calls.length > 0, 'the allowed batch DID reach the network — proves the refusal test refused for the right reason')
-  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Login')).length, 1, 'one login for the batch')
-  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Material/Save')).length, 3, 'one Save per record')
-  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Submit') || p.endsWith('/Audit')).length, 0, 'save-only stays save-only')
+  await assert.rejects(
+    adapter.upsert({ object: 'material', records: records(3), keyFields: ['FNumber'] }),
+    (error) => {
+      assert.equal(error.details && error.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED')
+      assert.equal(error.details.targetKind, 'erp:k3-wise-webapi')
+      return true
+    },
+    'a compliant, under-cap, profile-armed batch is STILL refused — the ban is not a limit',
+  )
+  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Login')).length, 0, 'ZERO login calls')
+  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Material/Save')).length, 0, 'ZERO Save calls')
+  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Submit') || p.endsWith('/Audit')).length, 0, 'ZERO Submit/Audit calls')
+  assert.deepEqual(fetchPair.calls, [], 'the refusal precedes login — K3 has no trace this call happened')
+})
+
+test('G-4 POSITIVE CONTROL for the recorder: the counting fetch really does record', async () => {
+  // The zero-call assertions above are absence checks. An unwired or broken recorder would make
+  // every one of them vacuously pass, so drive one deliberate call through the SAME mock and
+  // require it to show up. (Same discipline as e2e-plm-k3wise-writeback.test.cjs's own control.)
+  const fetchPair = countingFetch()
+  await fetchPair.impl('https://k3.example.test/K3API/Login')
+  assert.deepEqual(fetchPair.calls, ['/K3API/Login'], 'the recorder must record — otherwise every zero-call assertion is vacuous')
 })
 
 test('an operator overlay can neither raise nor remove the pinned cap', async () => {
@@ -157,14 +182,30 @@ test('OWNER REVIEW P1: an overlay cannot re-point savePath at the Submit endpoin
   // effective object whose "Save" call POSTed to Submit while lifecycle still said
   // save-only — save-only subverted by endpoint substitution. The Save ENDPOINT is now
   // pinned from the profile literal post-merge, like the lifecycle marker.
+  //
+  // CONVERTED (G-4): the endpoint pin used to be observed on the WIRE — drive a real upsert and
+  // read the recorded pathname. `upsert` is now permanently refused before login, so the wire
+  // observation is structurally impossible. The pin itself is unchanged and lives in the merged
+  // objectConfig, which `previewUpsert` resolves through the SAME
+  // `assertRelativePath(objectConfig.savePath || objectConfig.path)` call the Save leg used — so
+  // the overlay-substitution property is still proven at the layer that owns it, and the wire is
+  // additionally proven to stay silent (a stronger claim than the original made).
   const fetchPair = countingFetch()
   const adapter = adapterWith({ profile: PROFILE_ID, savePath: '/K3API/Material/Submit' }, fetchPair)
-  const result = await adapter.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })
-  assert.equal(result.written, 1)
-  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Material/Save')).length, 1,
-    'the write must land on the PROFILE\'S Save endpoint')
-  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Submit')).length, 0,
-    'the overlay-substituted endpoint must never be reached')
+  const preview = await adapter.previewUpsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })
+  assert.equal(preview.records.length, 1)
+  assert.match(preview.records[0].path, /\/Material\/Save$/,
+    'the write endpoint must be the PROFILE\'S Save endpoint')
+  assert.equal(/\/Submit$/.test(preview.records[0].path), false,
+    'the overlay-substituted endpoint must never be reachable')
+  assert.deepEqual(fetchPair.calls, [], 'resolving the endpoint touches no network')
+
+  // And the write leg itself: permanently refused, zero calls of any kind.
+  await assert.rejects(
+    adapter.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] }),
+    (error) => error.details && error.details.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+  )
+  assert.deepEqual(fetchPair.calls, [], 'G-4: 0 login, 0 Save, 0 Submit')
 })
 
 test('ADVERSARIAL P1-1: an overlay cannot author the READ request either (the wider channel)', async () => {
@@ -190,29 +231,23 @@ test('ADVERSARIAL P2-4: the Save body is exactly the projection — no smuggled 
   // Coverage regression the reviewer caught: the byte-exact Save-body deepEqual was dropped in
   // a flip, so an extra field smuggled into every Save body passed chain-wide. Restored here
   // against the real adapter, at the layer that actually composes the body.
+  //
+  // CONVERTED (G-4): the byte-exact body used to be captured off the wire during a real Save.
+  // With `upsert` permanently refused, the body is read from the adapter's own preview leg, which
+  // calls the SAME `buildSaveBody(record, request, objectConfig)` on the SAME merged objectConfig
+  // — so the anti-smuggling deepEqual still runs against the composer that would have produced
+  // the wire bytes. Nothing about the projection is being taken on trust.
   const fetchPair = countingFetch()
   const adapter = adapterWith({ profile: PROFILE_ID }, fetchPair)
-  const captured = []
-  const wrapped = {
-    impl: async (url, init) => {
-      const parsed = new URL(url)
-      if (parsed.pathname.endsWith('/Material/Save')) {
-        captured.push(init && init.body ? JSON.parse(init.body) : null)
-      }
-      return fetchPair.impl(url, init)
-    },
-    calls: fetchPair.calls,
-  }
-  const adapter2 = adapterWith({ profile: PROFILE_ID }, wrapped)
-  await adapter2.upsert({
+  const preview = await adapter.previewUpsert({
     object: 'material',
     records: [{ FNumber: 'MAT-EXACT-1', FName: 'Exact body', FSmuggled: 'must-not-appear' }],
     keyFields: ['FNumber'],
   })
-  assert.equal(captured.length, 1, 'exactly one Save body captured')
-  assert.deepEqual(captured[0], { Data: { FNumber: 'MAT-EXACT-1', FName: 'Exact body' } },
+  assert.equal(preview.records.length, 1, 'exactly one composed body')
+  assert.deepEqual(preview.records[0].body, { Data: { FNumber: 'MAT-EXACT-1', FName: 'Exact body' } },
     'the body must be BYTE-EXACT the schema projection — a smuggled field is a failure')
-  void adapter
+  assert.deepEqual(fetchPair.calls, [], 'composing the body touches no network')
 })
 
 test('ADVERSARIAL P1-1b: an overlay cannot author the read BODY either (endpoint pin alone is not enough)', async () => {
@@ -536,9 +571,21 @@ test('PREVIEW == WRITE: a save-only profile forces the preview\'s auto-flags off
   const preview = await adapter.previewUpsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })
   assert.equal(preview.metadata.autoSubmit, false, 'the preview must not promise a Submit the write will refuse')
   assert.equal(preview.metadata.autoAudit, false)
-  const written = await adapter.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })
-  assert.equal(written.metadata.autoSubmit, preview.metadata.autoSubmit, 'preview and write must agree')
-  assert.equal(written.metadata.autoAudit, preview.metadata.autoAudit)
+  // CONVERTED (G-4): the second half used to run the real write and compare its
+  // `metadata.autoSubmit/autoAudit` against the preview's. The write leg is now permanently
+  // refused, so "preview == write" is satisfied in the strongest possible way — the write does
+  // not happen at all, with zero Submit/Audit and zero login. The Submit/Audit HARD LOCK itself
+  // is NOT weakened by this conversion and stays pinned on the live upsert path by
+  // k3-wise-adapters.test.cjs ('save-only profile HARD LOCK …', which mutating `autoSubmit` to
+  // true still turns red).
+  await assert.rejects(
+    adapter.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] }),
+    (error) => error.details && error.details.code === 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+    'a preview that promises no Submit is now backed by a write that cannot happen at all',
+  )
+  assert.equal(fetchPair.calls.filter((p) => p.endsWith('/Submit') || p.endsWith('/Audit')).length, 0,
+    'ZERO Submit/Audit calls — with config.autoSubmit AND config.autoAudit both true')
+  assert.deepEqual(fetchPair.calls, [], 'ZERO calls of any kind, login included')
 })
 
 test('ADVERSARIAL P1-C1: a read path may never target a write endpoint — WITHOUT any profile', () => {
@@ -1030,8 +1077,36 @@ test('REVIEW P2-D4/P2-E3: the profile arm is UNFORGEABLE — a JSON config canno
 
   // POSITIVE CONTROL: the genuine selection still arms — otherwise a guard refusing everything
   // would satisfy the assertions above.
+  //
+  // CONVERTED (G-4). The control used to read `written === 1` off a real Save. `upsert` is now
+  // permanently refused for every K3 config, armed or not, so "the write succeeded" can no longer
+  // discriminate. The control's DUTY — proving the forgery assertions above are not satisfied by
+  // a guard that refuses unconditionally — is preserved by discriminating on the closed token
+  // instead: a forged arm still fails with K3_WISE_MATERIAL_PROFILE_REQUIRED (the profile guard
+  // fired), while a genuine arm gets PAST that guard and fails with the G-4 fence's own token.
+  // Two different codes from the same call shape is exactly the discrimination that was needed.
   const armed = adapterWith({ profile: PROFILE_ID }, fetchPair)
-  assert.equal((await armed.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })).written, 1)
+  await assert.rejects(
+    armed.upsert({ object: 'material', records: records(1), keyFields: ['FNumber'] }),
+    (error) => {
+      assert.equal(error.details && error.details.code, 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+        'a GENUINE arm must clear the profile guard and be stopped by the G-4 fence instead')
+      return true
+    },
+  )
+  assert.deepEqual(fetchPair.calls, [], 'and the armed path reaches the network no more than a forged one does')
+
+  // Independent, network-free confirmation that the genuine selection really does arm the profile
+  // (the fact the old positive control inferred from a successful write). previewUpsert applies
+  // the SAME `K3_PROFILE_ARMED` check and refuses a forged config identically.
+  await assert.rejects(
+    adapterWith({ savePath: '/K3API/Material/Save', keyField: 'FNumber', schema: [{ name: 'FNumber', required: true }], profileArmed: true }, fetchPair)
+      .previewUpsert({ object: 'material', records: records(1), keyFields: ['FNumber'] }),
+    (error) => error.details && error.details.code === 'K3_WISE_MATERIAL_PROFILE_REQUIRED',
+    'a forged arm is refused by the preview leg too',
+  )
+  const armedPreview = await armed.previewUpsert({ object: 'material', records: records(1), keyFields: ['FNumber'] })
+  assert.equal(armedPreview.records.length, 1, 'the GENUINE arm passes the same profile guard')
 })
 
 test('REVIEW P1-E1: query/fragment spellings of a write endpoint are refused (axis 5)', () => {

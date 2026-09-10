@@ -67,6 +67,11 @@ on:
       - 'apps/web/src/approvals/templateArchiveConfirm.ts'
       - 'apps/web/tests/templateArchiveConfirm.spec.ts'
       - 'apps/web/tests/approvalTemplateGovernance.spec.ts'
+      # Report item O-8 (approval UI locale consistency): TemplateCenterView's new label table +
+      # its i18n mount/guard spec.
+      - 'apps/web/src/views/approval/templateCenterLabels.ts'
+      - 'apps/web/tests/templateCenterI18n.spec.ts'
+      - 'apps/web/tests/approvalTemplateCenterCategory.spec.ts'
       - 'apps/web/tests/approvalTemplateVersionHistory.spec.ts'
       - 'apps/web/src/views/approval/TemplateCenterView.vue'
       - 'apps/web/src/views/approval/ApprovalDetailView.vue'
@@ -220,6 +225,8 @@ on:
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
       - 'apps/web/tests/approvalCenterTable.spec.ts'
+      # Report item O-8 (approval UI locale consistency): the desktop empty-text i18n spec.
+      - 'apps/web/tests/approvalCenterDesktopEmptyTextI18n.spec.ts'
       # UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail pane —
       # the presentational pane, its pure generation-counter race-guard controller, and both specs.
       - 'apps/web/src/views/approval/ApprovalCenterDetailPane.vue'
@@ -295,6 +302,13 @@ on:
       - 'apps/web/src/components/status/AsyncStateBlock.vue'
       - 'apps/web/tests/asyncStateBlock.spec.ts'
       - 'apps/web/tests/approvalDetailPolish.spec.ts'
+      # 详情实例一致性 (2026-09-06): the approvals store's detail/history request generation and
+      # the mounted detail view's action gate.
+      - 'apps/web/src/approvals/store.ts'
+      - 'apps/web/tests/approval-store-detail-generation.spec.ts'
+      - 'apps/web/tests/approval-detail-instance-consistency.spec.ts'
+      # Viewer-scoped decision affordance (canDecideCurrentNode) over the mounted detail view.
+      - 'apps/web/tests/approval-detail-can-decide-current-node.spec.ts'
       - 'apps/web/tests/helpers/approval-test-fixtures.ts'
       # B3-03 (看板钻取): metrics drill-down + approvals-list filter-bar specs. ApprovalMetricsView/
       # ApprovalCenterView sources are guarded above; these spec files themselves had no paths
@@ -316,6 +330,10 @@ on:
       - 'apps/web/tests/approval-explanation-field.test.ts'
       - 'apps/web/tests/approval-explanation-inline-editor.spec.ts'
       - 'apps/web/tests/approval-lock8-field-type-census.test.ts'
+      - 'apps/web/src/approvals/components/ApprovalDepartmentPicker.vue'
+      - 'apps/web/tests/approval-department-field.test.ts'
+      - 'apps/web/tests/approvalDepartmentPicker.spec.ts'
+      - 'apps/web/tests/searchApprovalDirectoryDepartments.spec.ts'
       # Lock-5 (approval-lock5-node-operation-policy-20260817.md §1.1/§2.2) — per-node 操作权限.
       - 'apps/web/src/approvals/nodeOperationPolicyEdit.ts'
       - 'apps/web/src/approvals/approvalCapabilityRegistry.ts'
@@ -340,6 +358,52 @@ on:
       - 'apps/web/tests/approval-attachment-upload-process.test.ts'
       - 'apps/web/tests/approvalApiErrorSurfacing.spec.ts'
       - 'apps/web/tests/approval-process-attachment-dialog.spec.ts'
+      # 审批可发现性 slice 1 (2026-09-07): the app-shell 待办 badge on the top-nav 审批中心 entry.
+      # App.vue had NO path entry in this guard before — a nav-only edit to the approval surface
+      # never triggered it. The badge component reuses useApprovalCountsRealtime.ts (also unlisted
+      # until now) and api.ts's getPendingCount (api.ts is already listed above).
+      - 'apps/web/src/App.vue'
+      - 'apps/web/src/approvals/components/ApprovalTodoBadge.vue'
+      - 'apps/web/src/approvals/useApprovalCountsRealtime.ts'
+      - 'apps/web/tests/approvalNavTodoBadge.spec.ts'
+      # 审批可发现性 slice 2 (2026-09-07): the non-admin /my-delegation entry in the account area of
+      # the nav. appRoutes.ts had no path entry in this guard either, and this spec tripwires the
+      # self-service route's requiresAuth-only meta.
+      - 'apps/web/src/router/appRoutes.ts'
+      - 'apps/web/tests/approvalNavDelegationEntry.spec.ts'
+      # 审批可发现性 slice 3 (2026-09-07): the admin 批量转交 page — the first web caller for the
+      # existing POST /api/approvals/admin/reassign endpoint. adminAccess.ts is the guard helper the
+      # route's admin gate is proven through, and had no path entry here either.
+      - 'apps/web/src/views/approval/ApprovalBatchTransferView.vue'
+      - 'apps/web/src/approvals/batchTransfer.ts'
+      - 'apps/web/src/router/adminAccess.ts'
+      - 'apps/web/tests/approvalBatchTransferView.spec.ts'
+      # 审批可发现性 round 2 (2026-09-07): the page's admin gate is now the SERVER's DB-backed
+      # approval-administrator capability, not the token-derived admin flag. The client module, the
+      # nav entry that consumes it, its spec, and the app-shell error boundary that keeps either
+      # nav component from taking the shell down all belong to this surface. The BACKEND half
+      # (routes/approvals.ts, services/approval-admin-capability.ts and its unit test) is NOT
+      # listed: every path in this workflow is under apps/web, the job it triggers runs web specs
+      # only, and the backend half is collected by plugin-tests.yml's core-backend vitest run —
+      # which is required, and which approval-ci-coverage-enumeration's T1 tier pins.
+      - 'apps/web/src/approvals/adminCapability.ts'
+      # Round 3: the capability cache is per-PRINCIPAL, and both halves of that (the principal
+      # key and the auth-transition subscription it invalidates on) live in `authPrincipal.ts`,
+      # with `useAuth` calling the notifier from its session-reset funnel. A change to either
+      # can serve one account's answer to the next, which is the defect this surface exists to
+      # prevent — so both belong in this filter alongside the module that consumes them.
+      - 'apps/web/src/composables/authPrincipal.ts'
+      - 'apps/web/src/composables/useAuth.ts'
+      # Round 4: both consumers hold the answer through ONE composable, which re-reads on an auth
+      # transition and guards a late answer with a generation. A change to it can leave a mounted
+      # page or a rendered nav entry describing the previous principal's rights — the defect this
+      # surface exists to remove — so it belongs in this filter alongside the module it consumes.
+      - 'apps/web/src/approvals/useApprovalAdminCapability.ts'
+      - 'apps/web/src/approvals/components/ApprovalBatchTransferNavEntry.vue'
+      - 'apps/web/src/components/ShellChromeBoundary.vue'
+      - 'apps/web/tests/approvalNavBatchTransferEntry.spec.ts'
+      # App.spec.ts now enumerates every request the shell issues, including this capability read.
+      - 'apps/web/tests/App.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -385,6 +449,11 @@ on:
       - 'apps/web/src/approvals/templateArchiveConfirm.ts'
       - 'apps/web/tests/templateArchiveConfirm.spec.ts'
       - 'apps/web/tests/approvalTemplateGovernance.spec.ts'
+      # Report item O-8 (approval UI locale consistency): TemplateCenterView's new label table +
+      # its i18n mount/guard spec.
+      - 'apps/web/src/views/approval/templateCenterLabels.ts'
+      - 'apps/web/tests/templateCenterI18n.spec.ts'
+      - 'apps/web/tests/approvalTemplateCenterCategory.spec.ts'
       - 'apps/web/tests/approvalTemplateVersionHistory.spec.ts'
       - 'apps/web/src/views/approval/DelegationSettingsView.vue'
       - 'apps/web/src/views/approval/MyDelegationView.vue'
@@ -529,6 +598,8 @@ on:
       - 'apps/web/tests/approvalMobileI18n.spec.ts'
       - 'apps/web/tests/approvalMobileResponsive.spec.ts'
       - 'apps/web/tests/approvalCenterTable.spec.ts'
+      # Report item O-8 (approval UI locale consistency): the desktop empty-text i18n spec.
+      - 'apps/web/tests/approvalCenterDesktopEmptyTextI18n.spec.ts'
       # UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7): desktop master-detail pane —
       # the presentational pane, its pure generation-counter race-guard controller, and both specs.
       - 'apps/web/src/views/approval/ApprovalCenterDetailPane.vue'
@@ -604,6 +675,13 @@ on:
       - 'apps/web/src/components/status/AsyncStateBlock.vue'
       - 'apps/web/tests/asyncStateBlock.spec.ts'
       - 'apps/web/tests/approvalDetailPolish.spec.ts'
+      # 详情实例一致性 (2026-09-06): the approvals store's detail/history request generation and
+      # the mounted detail view's action gate.
+      - 'apps/web/src/approvals/store.ts'
+      - 'apps/web/tests/approval-store-detail-generation.spec.ts'
+      - 'apps/web/tests/approval-detail-instance-consistency.spec.ts'
+      # Viewer-scoped decision affordance (canDecideCurrentNode) over the mounted detail view.
+      - 'apps/web/tests/approval-detail-can-decide-current-node.spec.ts'
       - 'apps/web/tests/helpers/approval-test-fixtures.ts'
       # B3-03 (看板钻取): metrics drill-down + approvals-list filter-bar specs (same set as the
       # pull_request block above).
@@ -622,6 +700,10 @@ on:
       - 'apps/web/tests/approval-explanation-field.test.ts'
       - 'apps/web/tests/approval-explanation-inline-editor.spec.ts'
       - 'apps/web/tests/approval-lock8-field-type-census.test.ts'
+      - 'apps/web/src/approvals/components/ApprovalDepartmentPicker.vue'
+      - 'apps/web/tests/approval-department-field.test.ts'
+      - 'apps/web/tests/approvalDepartmentPicker.spec.ts'
+      - 'apps/web/tests/searchApprovalDirectoryDepartments.spec.ts'
       # Lock-5 (approval-lock5-node-operation-policy-20260817.md §1.1/§2.2) — per-node 操作权限.
       - 'apps/web/src/approvals/nodeOperationPolicyEdit.ts'
       - 'apps/web/src/approvals/approvalCapabilityRegistry.ts'
@@ -642,6 +724,52 @@ on:
       - 'apps/web/tests/approval-attachment-upload-process.test.ts'
       - 'apps/web/tests/approvalApiErrorSurfacing.spec.ts'
       - 'apps/web/tests/approval-process-attachment-dialog.spec.ts'
+      # 审批可发现性 slice 1 (2026-09-07): the app-shell 待办 badge on the top-nav 审批中心 entry.
+      # App.vue had NO path entry in this guard before — a nav-only edit to the approval surface
+      # never triggered it. The badge component reuses useApprovalCountsRealtime.ts (also unlisted
+      # until now) and api.ts's getPendingCount (api.ts is already listed above).
+      - 'apps/web/src/App.vue'
+      - 'apps/web/src/approvals/components/ApprovalTodoBadge.vue'
+      - 'apps/web/src/approvals/useApprovalCountsRealtime.ts'
+      - 'apps/web/tests/approvalNavTodoBadge.spec.ts'
+      # 审批可发现性 slice 2 (2026-09-07): the non-admin /my-delegation entry in the account area of
+      # the nav. appRoutes.ts had no path entry in this guard either, and this spec tripwires the
+      # self-service route's requiresAuth-only meta.
+      - 'apps/web/src/router/appRoutes.ts'
+      - 'apps/web/tests/approvalNavDelegationEntry.spec.ts'
+      # 审批可发现性 slice 3 (2026-09-07): the admin 批量转交 page — the first web caller for the
+      # existing POST /api/approvals/admin/reassign endpoint. adminAccess.ts is the guard helper the
+      # route's admin gate is proven through, and had no path entry here either.
+      - 'apps/web/src/views/approval/ApprovalBatchTransferView.vue'
+      - 'apps/web/src/approvals/batchTransfer.ts'
+      - 'apps/web/src/router/adminAccess.ts'
+      - 'apps/web/tests/approvalBatchTransferView.spec.ts'
+      # 审批可发现性 round 2 (2026-09-07): the page's admin gate is now the SERVER's DB-backed
+      # approval-administrator capability, not the token-derived admin flag. The client module, the
+      # nav entry that consumes it, its spec, and the app-shell error boundary that keeps either
+      # nav component from taking the shell down all belong to this surface. The BACKEND half
+      # (routes/approvals.ts, services/approval-admin-capability.ts and its unit test) is NOT
+      # listed: every path in this workflow is under apps/web, the job it triggers runs web specs
+      # only, and the backend half is collected by plugin-tests.yml's core-backend vitest run —
+      # which is required, and which approval-ci-coverage-enumeration's T1 tier pins.
+      - 'apps/web/src/approvals/adminCapability.ts'
+      # Round 3: the capability cache is per-PRINCIPAL, and both halves of that (the principal
+      # key and the auth-transition subscription it invalidates on) live in `authPrincipal.ts`,
+      # with `useAuth` calling the notifier from its session-reset funnel. A change to either
+      # can serve one account's answer to the next, which is the defect this surface exists to
+      # prevent — so both belong in this filter alongside the module that consumes them.
+      - 'apps/web/src/composables/authPrincipal.ts'
+      - 'apps/web/src/composables/useAuth.ts'
+      # Round 4: both consumers hold the answer through ONE composable, which re-reads on an auth
+      # transition and guards a late answer with a generation. A change to it can leave a mounted
+      # page or a rendered nav entry describing the previous principal's rights — the defect this
+      # surface exists to remove — so it belongs in this filter alongside the module it consumes.
+      - 'apps/web/src/approvals/useApprovalAdminCapability.ts'
+      - 'apps/web/src/approvals/components/ApprovalBatchTransferNavEntry.vue'
+      - 'apps/web/src/components/ShellChromeBoundary.vue'
+      - 'apps/web/tests/approvalNavBatchTransferEntry.spec.ts'
+      # App.spec.ts now enumerates every request the shell issues, including this capability read.
+      - 'apps/web/tests/App.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -715,6 +843,9 @@ jobs:
             approval-explanation-field \
             approval-explanation-inline-editor \
             approval-lock8-field-type-census \
+            approval-department-field \
+            approvalDepartmentPicker \
+            searchApprovalDirectoryDepartments \
             approval-node-operation-policy \
             --reporter=dot
 
@@ -783,4 +914,16 @@ jobs:
         # FIRST time — the mounted comment-dialog/timeline-render spec for the new process-attachment
         # upload path. `approval-attachment-upload` above already substring-covers the sibling
         # client-logic spec (approval-attachment-upload-process.test.ts) — no separate token needed.
-        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-member-bar-operation-policy approval-member-action-dialog-grammar approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel --reporter=dot
+        # Report item O-8 (approval UI locale consistency), 2026-09-08: `templateCenterI18n` added
+        # for the new apps/web/tests/templateCenterI18n.spec.ts — TemplateCenterView.vue previously
+        # never called useLocale() at all (unconditional Chinese literals throughout); this pins
+        # en/zh mount assertions over the admin table, requester gallery, archive/unarchive
+        # dialog + toasts, plus a mechanical no-stray-CJK guard on the converted file. Inserted
+        # next to the neighbouring `approvalTemplateGovernance` token (same component/directory).
+        # Same slice: `approvalCenterDesktopEmptyTextI18n` for the new
+        # apps/web/tests/approvalCenterDesktopEmptyTextI18n.spec.ts — the DESKTOP
+        # ApprovalCenterTable's `:empty-text` (5 tabs) was unconditionally Chinese even though the
+        # mobile path one prop over already read the same locale-aware computed (renamed
+        # mobileEmptyText -> tabEmptyText). Inserted next to the neighbouring `approvalCenterTable`
+        # token (same view).
+        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-member-bar-operation-policy approval-member-action-dialog-grammar approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-save-minimum approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approvalCenterDesktopEmptyTextI18n approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateCenterI18n templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel approval-detail-instance-consistency approval-detail-can-decide-current-node approval-store-detail-generation approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTransferView approvalNavBatchTransferEntry --reporter=dot

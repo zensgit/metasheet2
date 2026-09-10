@@ -70,6 +70,12 @@ export interface QueryOptions {
     type?: 'inner' | 'left' | 'right' | 'full'
   }>
   raw?: boolean
+  // W-5: a PER-CALL override, consumed only by MSSQLAdapter. Undefined/false is byte-identical to
+  // this field never having existed — it ORs into the same connection.strictOffsetOrdering check
+  // #5243 already added (MSSQLAdapter.ts `select()`), it does not replace it. A caller that needs
+  // an offset>0 read to be refused without an orderBy for THIS one call — regardless of what the
+  // connection itself is configured with — sets this; every other adapter ignores it.
+  strictOffsetOrdering?: boolean
 }
 
 /**
@@ -305,6 +311,30 @@ export abstract class BaseDataAdapter extends EventEmitter {
     return limit
   }
 
+  /**
+   * How this dialect writes a COLUMN IDENTIFIER into a WHERE clause.
+   *
+   * Split out from `sanitizeIdentifier` because the two answer different questions: sanitize asks
+   * "is this a legal identifier?" (and throws if not), while this asks "how do I EMIT it?". Every
+   * other clause an adapter builds — projection, table, JOIN target, ORDER BY — already goes through
+   * the adapter's own quoting; the WHERE clause was the one place that emitted a BARE identifier,
+   * because `buildWhereConditions` lives here in the base and the base has no dialect quoting.
+   *
+   * That gap was not cosmetic. A bare identifier means an ordinary column named after a reserved
+   * word (`key`, `plan`, `file`, `check`, `open`, `set`, …) lands in the SQL as a naked keyword, and
+   * anything downstream that READS the statement as text — notably the default-deny write gate's
+   * `isPureReadStatement` — can no longer tell the column from the keyword. A pure `SELECT … WHERE
+   * key = $1` was classified a WRITE and refused. Quoting removes that whole class at the source:
+   * a quoted identifier is unambiguously an identifier, to every reader of the statement.
+   *
+   * DEFAULT IS UNCHANGED BEHAVIOUR (validated, unquoted) so PostgreSQL/MySQL emit byte-identically
+   * to before; an adapter opts in by overriding. MSSQL overrides it, because MSSQL is the dialect
+   * whose adapter carries the statement-classifying gate.
+   */
+  protected whereIdentifier(key: string): string {
+    return this.sanitizeIdentifier(key)
+  }
+
   protected buildWhereClause(where: WhereClause): { sql: string; params: DbValue[] } {
     const result = this.buildWhereConditions(where, 1)
     return {
@@ -345,11 +375,11 @@ export abstract class BaseDataAdapter extends EventEmitter {
         }
         conditions.push(`(${nestedParts.join(key === '$or' ? ' OR ' : ' AND ')})`)
       } else if (value === null) {
-        conditions.push(`${this.sanitizeIdentifier(key)} IS NULL`)
+        conditions.push(`${this.whereIdentifier(key)} IS NULL`)
       } else if (Array.isArray(value)) {
         const list = value as DbValue[]
         const placeholders = list.map(() => `$${paramIndex++}`).join(', ')
-        conditions.push(`${this.sanitizeIdentifier(key)} IN (${placeholders})`)
+        conditions.push(`${this.whereIdentifier(key)} IN (${placeholders})`)
         params.push(...list)
       } else if (isWhereOperator(value)) {
         // Handle operators like { $gt: 5, $lt: 10 }
@@ -361,26 +391,26 @@ export abstract class BaseDataAdapter extends EventEmitter {
                 throw new Error(`${op} must be a non-empty array`)
               }
               const placeholders = val.map(() => `$${paramIndex++}`).join(', ')
-              conditions.push(`${this.sanitizeIdentifier(key)} ${operator} (${placeholders})`)
+              conditions.push(`${this.whereIdentifier(key)} ${operator} (${placeholders})`)
               params.push(...val)
             } else if (op === '$between') {
               if (!Array.isArray(val) || val.length !== 2) {
                 throw new Error('$between must be a two-value array')
               }
-              conditions.push(`${this.sanitizeIdentifier(key)} BETWEEN $${paramIndex++} AND $${paramIndex++}`)
+              conditions.push(`${this.whereIdentifier(key)} BETWEEN $${paramIndex++} AND $${paramIndex++}`)
               params.push(...val)
             } else {
-              conditions.push(`${this.sanitizeIdentifier(key)} ${operator} $${paramIndex++}`)
+              conditions.push(`${this.whereIdentifier(key)} ${operator} $${paramIndex++}`)
               params.push(val)
             }
           }
         }
       } else if (typeof value === 'object' && value !== null) {
         // Handle nested objects as JSON equality
-        conditions.push(`${this.sanitizeIdentifier(key)} = $${paramIndex++}`)
+        conditions.push(`${this.whereIdentifier(key)} = $${paramIndex++}`)
         params.push(value)
       } else {
-        conditions.push(`${this.sanitizeIdentifier(key)} = $${paramIndex++}`)
+        conditions.push(`${this.whereIdentifier(key)} = $${paramIndex++}`)
         params.push(value)
       }
     }
@@ -415,6 +445,16 @@ export abstract class BaseDataAdapter extends EventEmitter {
   // A3: the redacted cause of the most recent connect/test failure (null when healthy).
   get connectionError(): string | null {
     return this.lastConnectionError
+  }
+
+  // A3/#2: PUBLIC redaction of a cause that never passed through onError and is therefore NOT
+  // recorded in `connectionError`. Every adapter has such a branch — the driver-package-missing
+  // guard that throws BEFORE the try block (MSSQLAdapter :217, PostgresAdapter :74, MySQLAdapter
+  // :195, HTTPAdapter :134) — and DataSourceManager must still be able to LOG that cause when it
+  // turns a connect failure into the fixed values-free 503. Delegates to the very `redactSecrets`
+  // rules onError uses; it only removes text, so exposing it adds no new disclosure.
+  redactCause(message: string): string {
+    return this.redactSecrets(message)
   }
 
   // A3: scrub configured secret values + common secret patterns out of a message before it can be

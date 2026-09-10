@@ -3,9 +3,14 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
 
-// Controllable DataSourceManager.getDataSource mock (configured per test).
+// Controllable DataSourceManager mock (configured per test).
+// `assertAccess` models the real manager's per-user ownership gate; the default no-op stands for
+// "the authenticated fixture user owns this source", which is the premise of every test here.
+// Ownership DENIAL itself is proven against the REAL DataSourceManager in
+// plm-workbench-datasource-ownership.test.ts, not against this stub.
 const dsMocks = vi.hoisted(() => ({
   getDataSource: vi.fn(),
+  assertAccess: vi.fn(),
 }))
 
 // plm-workbench.ts pulls in db/pg/auth/validation/validator at module load; stub them so
@@ -40,7 +45,10 @@ vi.mock('../../src/types/validator', () => ({
   },
 }))
 vi.mock('../../src/routes/data-sources', () => ({
-  getDataSourceManager: () => ({ getDataSource: dsMocks.getDataSource }),
+  getDataSourceManager: () => ({
+    getDataSource: dsMocks.getDataSource,
+    assertAccess: dsMocks.assertAccess,
+  }),
 }))
 
 import plmWorkbenchRouter from '../../src/routes/plm-workbench'
@@ -61,6 +69,7 @@ describe('plm-workbench capabilities route (PLM-COLLAB P2.5 C2)', () => {
 
   beforeEach(() => {
     dsMocks.getDataSource.mockReset()
+    dsMocks.assertAccess.mockReset()
   })
 
   it('passes through the adapter capability manifest (success)', async () => {

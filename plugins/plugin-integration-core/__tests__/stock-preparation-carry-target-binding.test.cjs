@@ -1,0 +1,1200 @@
+'use strict'
+
+// THE CARRY EXECUTOR MUST WRITE THE TABLE APPLY WROTE — the same disease the 按项目导出物料 Excel
+// export had in #5437 and #5446 fixed, now on the write side.
+//
+// applyCarryViaConfirm used to locate its sheet by hardcoding the CANONICAL objectId
+// (`plm_stock_preparation_main`) and resolving it through provisioning, while the apply writer
+// (stock-preparation-apply-writer.cjs, target normalized in stock-preparation-table-actions.cjs) and
+// the export (stock-preparation-prep-line-export.cjs) both write/read the DEPLOYMENT-BOUND
+// `action.target.sheetId`. On a default install those are DIFFERENT TABLES: apply is sandbox-only
+// unless an owner configured a time-boxed production policy, and `assertStockPrepApplySandboxAllowed`
+// rejects the canonical objectId outright on that path — so the operator's rows live in the sandbox
+// twin and the canonical table is empty forever. Carry therefore either 409'd
+// CONFIRM_CARRY_TARGET_NOT_PROVISIONED, or 404'd on a source row that plainly exists, or — the worst
+// of the three — quietly operated on the EMPTY canonical table while the human work it exists to
+// preserve sat in the twin, reporting `carried` for a write nobody would ever see.
+//
+// The fix is not a smarter table lookup. It is to stop having a rule at all: the carry executor now
+// takes the BOUND `target` ({ sheetId, fieldIdMap }) — the same object the writer writes through and
+// the export reads through — and the route derives it SERVER-SIDE from the bound table action
+// (getTableAction + assertStockPreparationTargetReady, exactly as the export route does). Nothing new
+// is taken from the client; the closed body allowlist is unchanged.
+//
+// EVERY EXISTING CARRY GUARD IS RE-WITNESSED HERE against a sandbox-bound deployment, so "the carry
+// moved tables" can never be read as "the carry got weaker": whitelist subset, source active===false,
+// componentSourceId AND projectNo agreement, no-overwrite, replay no-op, optimistic concurrency,
+// server-stamped carriedBy/carriedAt.
+//
+// FIXTURE LIMITATION, stated rather than hidden (same one #5446's export suite states):
+// makeStrictRecordsApi validates physical field ids against a FROZEN template looked up by objectId,
+// and a real sandbox twin's restamped objectId has no entry in that registry. So both sheets are
+// registered under the canonical objectId here. That is faithful on the point under test — the twin
+// IS the canonical template restamped, and the thing that differs between the two deployments is the
+// SHEET the action is bound to, which is exactly what `target.sheetId` selects and exactly what the
+// defect got wrong.
+
+const assert = require('node:assert/strict')
+const { createHash } = require('node:crypto')
+const path = require('node:path')
+
+const LIB = path.join(__dirname, '..', 'lib')
+
+const {
+  applyCarryViaConfirm,
+  StockPreparationConfirmWriteError,
+} = require(path.join(LIB, 'stock-preparation-confirm-writes.cjs'))
+const {
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  HUMAN_PRESERVED_FIELD_IDS,
+} = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+const { OBJECT_ID: LEDGER_OBJECT_ID } = require(path.join(LIB, 'stock-preparation-confirmation-decisions.cjs'))
+const {
+  makeFakeProvisioning,
+  makeStrictRecordsApi,
+  physicalFieldId,
+  physicalRow,
+  logicalData,
+} = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
+const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
+const {
+  __internals: { inspectCarryTargetBinding },
+} = require(path.join(LIB, 'stock-preparation-preflight.cjs'))
+
+const MAIN_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
+const STAGING = 'tenant-a:integration-core'
+const TENANT_ID = 'tenant-a'
+// The canonical table a default install provisions and NEVER writes.
+const MAIN_SHEET = 'sheet_plm_stock_preparation_main'
+// The sandbox twin a default install's apply actually writes.
+const SANDBOX_SHEET = 'sheet_stock_prep_sandbox_twin'
+// ...and its OWN objectId. The twin is the canonical template RESTAMPED under a sandbox id
+// (stock-preparation-target-provisioning.cjs SANDBOX_OBJECT_ID_NAMESPACE), which is exactly why the
+// canonical-objectId lookup could never find it. Giving the two bindings DIFFERENT objectIds is what
+// lets T7-j witness its own headline: while both said `plm_stock_preparation_main`, an executor that
+// reported a hardcoded canonical id satisfied the assertion identically.
+const SANDBOX_OBJECT_ID = 'plm_stock_preparation_sandbox_m0'
+// The sheet the ATTACKER's tenant provisioned for the same objectId under its own project. Its
+// existence is what makes the wall's comparison the deciding clause rather than a presence check.
+const FOREIGN_TWIN_SHEET = 'sheet_stock_prep_sandbox_twin_of_tenant_zzz'
+// The sheet id a correctly-DERIVED binding would carry for (staging project, sandbox objectId).
+let DERIVED_SANDBOX_SHEET = ''
+
+/** The platform's own pure sheet-id derivation (provisioning.ts getObjectSheetId). */
+function derivedSheetId(projectId, objectId) {
+  const digest = createHash('sha1').update([projectId, objectId].join(':')).digest('hex').slice(0, 24)
+  return `sheet_${digest}`.slice(0, 50)
+}
+DERIVED_SANDBOX_SHEET = derivedSheetId(STAGING, SANDBOX_OBJECT_ID)
+const LEDGER_SHEET = 'sheet_confirmation_decisions'
+const OPERATOR = 'user_admin_1'
+
+const NEW_KEY = JSON.stringify({ projectNo: 'P-9', componentSourceId: 'COMP-X', parentSourceId: null, path: ['NEW', 'COMP-X'] })
+const OLD_KEY = JSON.stringify({ projectNo: 'P-9', componentSourceId: 'COMP-X', parentSourceId: null, path: ['OLD', 'COMP-X'] })
+const HUMAN_NOTE = '仓库已下单 2026-08-01 供应商确认'
+const HUMAN_REPLY = '在途,预计 09-10'
+// Content that must NEVER reach the bound sheet: it lives in whichever table the action is NOT
+// bound to. A regression that reintroduces a hardcoded table cannot pass by accident — it carries
+// THIS text, and the assertion names it.
+const DECOY_NOTE = 'DECOY-NOTE-FROM-THE-WRONG-TABLE'
+const DECOY_REPLY = 'DECOY-REPLY-FROM-THE-WRONG-TABLE'
+
+let passed = 0
+let failed = 0
+const failures = []
+
+function run(name, fn) {
+  return Promise.resolve()
+    .then(fn)
+    .then(() => { passed += 1 })
+    .catch((error) => {
+      failed += 1
+      failures.push(name)
+      console.error(`FAIL: ${name}`)
+      console.error(error && error.stack ? error.stack : error)
+    })
+}
+
+function decisionFixture(overrides = {}) {
+  return {
+    decision: 'carry_via_confirm',
+    idempotencyKey: NEW_KEY,
+    sourceIdempotencyKey: OLD_KEY,
+    componentSourceId: 'COMP-X',
+    carryKey: 'component_source_id',
+    manualRowReattach: 'propose_confirm',
+    carryFields: ['notes', 'procurementReply'],
+    writeVia: 'k2_confirm',
+    requiresConfirm: true,
+    carry: true,
+    ...overrides,
+  }
+}
+
+function mainRow(logical, id) {
+  return physicalRow(STAGING, MAIN_OBJECT_ID, logical, id)
+}
+
+function sourceRowFixture(overrides = {}, id = 'row_source') {
+  return mainRow({
+    projectNo: 'P-9',
+    idempotencyKey: OLD_KEY,
+    componentSourceId: 'COMP-X',
+    path: JSON.stringify(['OLD', 'COMP-X']),
+    totalQuantity: 2,
+    active: false,
+    notes: HUMAN_NOTE,
+    procurementReply: HUMAN_REPLY,
+    ...overrides,
+  }, id)
+}
+
+function targetRowFixture(overrides = {}, id = 'row_target') {
+  return mainRow({
+    projectNo: 'P-9',
+    idempotencyKey: NEW_KEY,
+    componentSourceId: 'COMP-X',
+    path: JSON.stringify(['NEW', 'COMP-X']),
+    totalQuantity: 2,
+    active: true,
+    ...overrides,
+  }, id)
+}
+
+/** The operator's real rows: an inactive predecessor holding the human band + its re-keyed successor. */
+function operatorRows() {
+  return [sourceRowFixture(), targetRowFixture()]
+}
+
+/**
+ * A COMPLETE, carry-eligible pair in the table the action is NOT bound to, carrying DECOY content.
+ *
+ * Deliberately carry-eligible rather than merely present: if it were absent or malformed, a
+ * regression that goes back to the hardcoded canonical objectId would surface as a plain 404 and
+ * could be mistaken for an unrelated fixture problem. Because it IS eligible, such a regression
+ * SUCCEEDS against the wrong table — writing DECOY_NOTE onto a row the operator never sees while
+ * the real target keeps its blank cells — which is precisely the silent failure this suite exists
+ * to make loud.
+ */
+function decoyRows() {
+  return [
+    sourceRowFixture({ notes: DECOY_NOTE, procurementReply: DECOY_REPLY }, 'row_decoy_source'),
+    targetRowFixture({}, 'row_decoy_target'),
+  ]
+}
+
+// A target as real provisioning builds it: EVERY frozen template column bound to its derived
+// physical id. The deploy-time completeness gate (assertTargetFieldMapCompleteness) independently
+// REQUIRES an explicit map to bind the whole plm_system band, so a route-level mount with anything
+// less is refused before the executor is reached.
+const ALL_TEMPLATE_FIELD_IDS = Object.freeze(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id))
+
+function targetFor(sheetId, { without = [] } = {}) {
+  const fieldIdMap = {}
+  for (const fieldId of ALL_TEMPLATE_FIELD_IDS) {
+    if (without.includes(fieldId)) continue
+    fieldIdMap[fieldId] = physicalFieldId(STAGING, MAIN_OBJECT_ID, fieldId)
+  }
+  // The objectId is the BINDING's own — canonical for the production sheet, the restamped sandbox id
+  // for the twin. The physical field ids stay derived from MAIN_OBJECT_ID: that is the stated fixture
+  // limitation above (the strict records fake validates against a frozen template looked up by
+  // objectId), and it is inert here because `pre_mapped` mode never consults the objectId at all.
+  return { sheetId, objectId: sheetId === SANDBOX_SHEET ? SANDBOX_OBJECT_ID : MAIN_OBJECT_ID, fieldIdMap }
+}
+
+/**
+ * Both sheets are ALWAYS seeded, with different content: whichever the action does not name holds
+ * the decoys. `boundSheet` decides which deployment this models —
+ *   SANDBOX_SHEET — a DEFAULT install: apply is sandbox-only, so the twin holds the operator's rows.
+ *   MAIN_SHEET    — an owner-configured PRODUCTION install: the canonical table holds them.
+ * Neither is named inside the executor; both are the same code path with a different binding.
+ */
+function substrate({ boundSheet = SANDBOX_SHEET, mainRows, sandboxRows, ledgerRows = [], extraSheetOwners = {}, seedDerivedSheet = false } = {}) {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: {
+      [MAIN_SHEET]: MAIN_OBJECT_ID,
+      [SANDBOX_SHEET]: MAIN_OBJECT_ID,
+      [DERIVED_SANDBOX_SHEET]: MAIN_OBJECT_ID,
+      [LEDGER_SHEET]: LEDGER_OBJECT_ID,
+    },
+    rowsBySheet: {
+      [MAIN_SHEET]: mainRows || (boundSheet === MAIN_SHEET ? operatorRows() : decoyRows()),
+      [SANDBOX_SHEET]: sandboxRows || (boundSheet === SANDBOX_SHEET ? operatorRows() : decoyRows()),
+      [LEDGER_SHEET]: ledgerRows,
+      // The sheet a DERIVED binding would name. Seeded only for the legacy-install case, so every
+      // other fixture keeps exactly the two sheets it had.
+      ...(seedDerivedSheet ? { [DERIVED_SANDBOX_SHEET]: operatorRows() } : {}),
+    },
+  })
+  // Provisioning still resolves the CANONICAL objectId to the canonical sheet — exactly as a real
+  // deployment's provisioning does. It is present in every fixture on purpose: the executor must
+  // reach the bound sheet even though the old lookup is right there and would answer.
+  const provisioning = makeFakeProvisioning({
+    stagingProjectId: STAGING,
+    sheetIdByObjectId: { [MAIN_OBJECT_ID]: MAIN_SHEET, [SANDBOX_OBJECT_ID]: SANDBOX_SHEET, [LEDGER_OBJECT_ID]: LEDGER_SHEET },
+  })
+  // ---------------------------------------------------------------------------------------------
+  // THE SHEET-OWNERSHIP REGISTRY — a TWO-PROJECT stub, which is what the wall is actually decided by.
+  //
+  // The single-project fake above answers null for any project that is not the deployment's, so a
+  // foreign-tenant case resolved to "no sheet" and the wall's comparison was never the deciding
+  // clause: weakening it to a presence check kept every suite green while re-opening the
+  // cross-tenant write. This models the ordinary multi-tenant shape instead — the attacker tenant
+  // has ALSO provisioned its own stock-prep twin, so ownership really has to be COMPARED.
+  //
+  // Ownership is keyed by SHEET, exactly as `plugin_multitable_object_registry` keys it, and is
+  // deliberately independent of whether the sheet id is the derived one: that decoupling is the
+  // whole point of the fix (the 222 window keeps a hand-bound sheetId under a new objectId).
+  const sheetOwner = new Map([
+    [MAIN_SHEET, STAGING],
+    [SANDBOX_SHEET, STAGING],
+    [LEDGER_SHEET, STAGING],
+    // The attacker's own, separately-provisioned twin. Same objectId, different sheet, their project.
+    [FOREIGN_TWIN_SHEET, `${FOREIGN_TENANT}:integration-core`],
+  ])
+  for (const [sheetId, projectId] of Object.entries(extraSheetOwners)) sheetOwner.set(sheetId, projectId)
+  const provisioningCalls = { isSheetOwnedByProject: [] }
+  // A BOOLEAN port: it answers "is this sheet that project's", never "whose is it". The stub keeps
+  // the full owner map so a case can still assert the attacker really owns something, but the route
+  // only ever learns yes/no about the project it named.
+  provisioning.isSheetOwnedByProject = async (sheetId, projectId) => {
+    provisioningCalls.isSheetOwnedByProject.push({ sheetId, projectId })
+    return sheetOwner.has(sheetId) && sheetOwner.get(sheetId) === projectId
+  }
+  provisioning.getObjectSheetId = (projectId, objectId) => derivedSheetId(projectId, objectId)
+  provisioning.sheetOwner = sheetOwner
+  provisioning.ownerCalls = provisioningCalls.isSheetOwnedByProject
+  return { records, provisioning, target: targetFor(boundSheet), boundSheet, sheetOwner }
+}
+
+function callInput(env, overrides = {}) {
+  return {
+    permission: 'admin',
+    recordsApi: env.records,
+    // Still supplied, exactly as the route has them for its LEDGER work — so a failure here can
+    // never be "the test forgot to pass provisioning". The carry executor must ignore them.
+    provisioning: env.provisioning,
+    targetProjectId: STAGING,
+    target: env.target,
+    decision: decisionFixture(),
+    confirmedBy: OPERATOR,
+    ...overrides,
+  }
+}
+
+function rowsOf(env, sheetId) {
+  return env.records.rows(sheetId).map((row) => ({ id: row.id, version: row.version, data: logicalData(STAGING, MAIN_OBJECT_ID, row.data) }))
+}
+
+function rowByKey(env, sheetId, key) {
+  const found = rowsOf(env, sheetId).filter((row) => row.data.idempotencyKey === key)
+  assert.equal(found.length, 1, `exactly one row with that key in ${sheetId}`)
+  return found[0]
+}
+
+async function expectError(promise, { status, code }) {
+  let caught = null
+  try {
+    await promise
+  } catch (error) {
+    caught = error
+  }
+  assert.ok(caught, `expected an error (${code})`)
+  assert.ok(caught instanceof StockPreparationConfirmWriteError,
+    `expected confirm-write error, got ${caught.name}: ${caught.message}`)
+  assert.equal(caught.status, status)
+  assert.equal(caught.code, code)
+  return caught
+}
+
+// ---------------------------------------------------------------------------
+// Route harness — mirrors the carry-confirm suite's mount, plus the deploy-time
+// table action the route now reads its target off.
+// ---------------------------------------------------------------------------
+function inertService(methods) {
+  const out = {}
+  for (const method of methods) {
+    out[method] = async () => { throw new Error(`unexpected ${method}`) }
+  }
+  return out
+}
+
+function createFakeAuditDb() {
+  const rows = []
+  return {
+    rows,
+    async insertOne(table, row) {
+      rows.push({ __table: table, ...JSON.parse(JSON.stringify(row)) })
+      return [row]
+    },
+    async select(table) {
+      return rows.filter((row) => row.__table === table)
+    },
+  }
+}
+
+function tableActionConfigFor(target) {
+  return {
+    actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' },
+    target: { sheetId: target.sheetId, objectId: target.objectId, fieldIdMap: target.fieldIdMap },
+  }
+}
+
+function mountCarryRoute({ boundSheet = SANDBOX_SHEET, configured = true, targetOverride, memberVerdict = true, extraSheetOwners, seedDerivedSheet = false, dropOwnershipPort = false } = {}) {
+  const env = substrate({ boundSheet, extraSheetOwners, seedDerivedSheet })
+  if (dropOwnershipPort) delete env.provisioning.isSheetOwnedByProject
+  // The host capability #5445 requires of every tenant-scoped operator surface: the plugin submits
+  // two identity strings and receives one boolean. Injected exactly as the host injects it
+  // (packages/core-backend/src/index.ts), so the carry route is exercised through the real seam.
+  const directoryCalls = []
+  env.tenantPrincipalDirectory = {
+    async verifyTenantMembership(pair) {
+      directoryCalls.push({ ...pair })
+      return { member: memberVerdict }
+    },
+  }
+  env.directoryCalls = directoryCalls
+  if (targetOverride) env.target = targetOverride(env.target)
+  const routes = new Map()
+  const auditDb = createFakeAuditDb()
+  const auditStore = createStockPreparationAuditStore({ db: auditDb, idGenerator: () => `audit_${auditDb.rows.length + 1}` })
+  const context = {
+    api: {
+      http: {
+        addRoute(method, routePath, handler) {
+          routes.set(`${method.toUpperCase()} ${routePath}`, handler)
+        },
+      },
+      multitable: { provisioning: env.provisioning, records: env.records },
+    },
+    storage: new Map(),
+    config: configured ? { stockPreparationTableActions: [tableActionConfigFor(env.target)] } : {},
+  }
+  const services = {
+    externalSystemRegistry: {
+      ...inertService(['upsertExternalSystem', 'deleteExternalSystem']),
+      async getExternalSystem() { return null },
+      async getExternalSystemForAdapter() { return null },
+      async listExternalSystems() { return [] },
+    },
+    adapterRegistry: { listAdapterKinds() { return [] }, createAdapter() { throw new Error('unexpected adapter') } },
+    pipelineRegistry: { ...inertService(['upsertPipeline', 'getPipeline', 'listPipelineRuns']), async listPipelines() { return [] } },
+    pipelineRunner: inertService(['runPipeline']),
+    deadLetterStore: inertService(['listDeadLetters']),
+    stagingInstaller: inertService(['installStaging', 'listStagingDescriptors']),
+    templateRegistry: inertService(['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate', 'instantiateTemplate']),
+    readSourceConfigStore: { ...inertService(['saveVersion', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']), async list() { return [] } },
+    readSourceCompositionConfigStore: { ...inertService(['saveVersion', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']), async list() { return [] } },
+    bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
+    stockPreparationAuditStore: auditStore,
+    tenantPrincipalDirectory: env.tenantPrincipalDirectory,
+  }
+  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  return { routes, auditDb, env, context }
+}
+
+const ADMIN = Object.freeze({ id: OPERATOR, roles: ['admin'], tenantId: TENANT_ID })
+// A real admin OF ANOTHER TENANT. Not unauthenticated and not under-privileged: every permission
+// gate on this route says yes to them, which is exactly what makes the sheet wall the load-bearing
+// one.
+const FOREIGN_TENANT = 'tenant-zzz-attacker'
+const FOREIGN_ADMIN = Object.freeze({ id: 'u_admin_zzz', roles: ['admin'], tenantId: FOREIGN_TENANT })
+const TENANTLESS_ADMIN = Object.freeze({ id: 'u_platform_admin', roles: ['admin'] })
+const CARRY_ROUTE = '/api/integration/stock-preparation/carry/confirm'
+
+function createResponse() {
+  return {
+    statusCode: 200,
+    body: undefined,
+    status(code) { this.statusCode = code; return this },
+    json(body) { this.body = body; return this },
+  }
+}
+
+async function call(routes, method, routePath, req = {}) {
+  const handler = routes.get(`${method.toUpperCase()} ${routePath}`)
+  assert.ok(handler, `route ${method} ${routePath} is registered`)
+  const res = createResponse()
+  await handler({
+    user: req.user,
+    // `req.authenticatedTenantId` is the host's VERIFIED token claim (absent when the token carried
+    // none, in which case the middleware may have filled `user.tenantId` from the x-tenant-id HEADER).
+    authenticatedTenantId: req.authenticatedTenantId,
+    body: req.body || {},
+    query: req.query || {},
+    params: req.params || {},
+  }, res)
+  return res
+}
+
+async function main() {
+  // =========================================================================
+  // T1 — the default install: canonical EMPTY, the operator's rows in the twin.
+  // =========================================================================
+  await run('T1: default (sandbox-bound) install — the human fields land on the TWIN row', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET, mainRows: [] })
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.equal(result.persisted, true)
+    assert.equal(result.mode, 'carried')
+    assert.deepEqual(result.carriedFields.slice().sort(), ['notes', 'procurementReply'])
+    const carried = rowByKey(env, SANDBOX_SHEET, NEW_KEY)
+    assert.equal(carried.data.notes, HUMAN_NOTE, 'T1: the carried note landed on the row the operator actually has')
+    assert.equal(carried.data.procurementReply, HUMAN_REPLY)
+    assert.deepEqual(rowsOf(env, MAIN_SHEET), [], 'T1: the empty canonical table stayed empty')
+  })
+
+  await run('T1b: canonical table not provisioned at all — carry no longer 409s on a table it never needed', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET, mainRows: [] })
+    // A default install may not have the canonical table provisioned under the staging project at
+    // all. That used to be a hard 409 CONFIRM_CARRY_TARGET_NOT_PROVISIONED even though the rows the
+    // carry addresses were sitting right there in the bound sheet.
+    env.provisioning = makeFakeProvisioning({
+      stagingProjectId: STAGING,
+      sheetIdByObjectId: { [LEDGER_OBJECT_ID]: LEDGER_SHEET },
+    })
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.equal(result.mode, 'carried')
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE)
+  })
+
+  // =========================================================================
+  // T2 — the SILENT one: both tables carry an eligible pair. Only the bound one may move.
+  // =========================================================================
+  await run('T2: canonical holds a stale eligible pair — the carry writes the BOUND twin, never the canonical', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.equal(result.mode, 'carried')
+    const carried = rowByKey(env, SANDBOX_SHEET, NEW_KEY)
+    assert.equal(carried.data.notes, HUMAN_NOTE)
+    assert.equal(carried.data.procurementReply, HUMAN_REPLY)
+    const canonicalTarget = rowByKey(env, MAIN_SHEET, NEW_KEY)
+    assert.equal(canonicalTarget.data.notes, undefined, 'T2: the unbound canonical row was never patched')
+    assert.equal(canonicalTarget.data.procurementReply, undefined)
+    assert.equal(canonicalTarget.version, 1, 'T2: the unbound canonical row did not even move a version')
+    const flat = JSON.stringify(rowsOf(env, SANDBOX_SHEET))
+    assert.ok(!flat.includes(DECOY_NOTE), 'T2: the wrong table\'s content never reached the bound sheet')
+  })
+
+  // =========================================================================
+  // T3 — the production-policy deployment still works, unchanged.
+  // =========================================================================
+  await run('T3: owner-configured production install (canonical is the bound target) still carries', async () => {
+    const env = substrate({ boundSheet: MAIN_SHEET })
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.equal(result.mode, 'carried')
+    const carried = rowByKey(env, MAIN_SHEET, NEW_KEY)
+    assert.equal(carried.data.notes, HUMAN_NOTE)
+    assert.equal(carried.data.procurementReply, HUMAN_REPLY)
+    const twinTarget = rowByKey(env, SANDBOX_SHEET, NEW_KEY)
+    assert.equal(twinTarget.data.notes, undefined, 'T3: the unbound twin was never patched')
+    assert.equal(twinTarget.version, 1)
+  })
+
+  // =========================================================================
+  // T4 — the two never cross, in EITHER direction, at the host-call level.
+  // =========================================================================
+  await run('T4: every host records call names the BOUND sheet — both bindings, reads and writes', async () => {
+    for (const boundSheet of [SANDBOX_SHEET, MAIN_SHEET]) {
+      const other = boundSheet === SANDBOX_SHEET ? MAIN_SHEET : SANDBOX_SHEET
+      const env = substrate({ boundSheet })
+      await applyCarryViaConfirm(callInput(env))
+      const touched = [...env.records.queryCalls, ...env.records.patchCalls].map((c) => c.sheetId)
+      assert.ok(touched.length > 0, 'T4: the carry did reach the host')
+      assert.deepEqual([...new Set(touched)], [boundSheet], `T4: only ${boundSheet} was addressed`)
+      assert.ok(!touched.includes(other), `T4: ${other} was never addressed`)
+      assert.equal(env.records.patchCalls.length, 1, 'T4: exactly ONE patch, on the bound sheet')
+      assert.equal(env.records.patchCalls[0].sheetId, boundSheet)
+    }
+  })
+
+  await run('T4b: a scoped records call cannot leave the bound sheet even if it tries', async () => {
+    // The scope wall is createTargetScopedRecordsApi's (TABLE_ACTION_TARGET_SCOPE_VIOLATION); this
+    // asserts the carry executor is genuinely behind it rather than calling the raw records API.
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    const leaks = []
+    const spying = {
+      ...env.records,
+      async queryRecords(input) { leaks.push(input.sheetId); return env.records.queryRecords(input) },
+      async patchRecord(input) { leaks.push(input.sheetId); return env.records.patchRecord(input) },
+      async createRecord(input) { leaks.push(input.sheetId); return env.records.createRecord(input) },
+    }
+    await applyCarryViaConfirm(callInput(env, { recordsApi: spying }))
+    assert.deepEqual([...new Set(leaks)], [SANDBOX_SHEET])
+  })
+
+  // =========================================================================
+  // T5 — the mutation witness: the executor may not resolve a sheet of its own.
+  // =========================================================================
+  await run('T5: carry needs NO provisioning and NO staging projectId — it cannot look a sheet up at all', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    const result = await applyCarryViaConfirm({
+      permission: 'admin',
+      recordsApi: env.records,
+      target: env.target,
+      decision: decisionFixture(),
+      confirmedBy: OPERATOR,
+    })
+    assert.equal(result.mode, 'carried')
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE)
+  })
+
+  await run('T5b: when provisioning IS supplied, the carry never consults it', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    await applyCarryViaConfirm(callInput(env))
+    assert.deepEqual(env.provisioning.calls.findObjectSheet, [],
+      'T5b: a carry that resolves a sheet through provisioning is the defect')
+    assert.deepEqual(env.provisioning.calls.resolveFieldIds, [],
+      'T5b: field ids ride the bound target\'s own map, not an objectId-keyed registry lookup')
+  })
+
+  // =========================================================================
+  // T6 — the target is mandatory, validated, and fails CLOSED on an unbound field.
+  // =========================================================================
+  await run('T6: an absent / sheetId-less target is refused 422 before any host IO', async () => {
+    for (const target of [undefined, null, {}, { sheetId: '  ' }, 'sheet_x', { sheetId: MAIN_SHEET, fieldIdMap: 'nope' }]) {
+      const env = substrate({ boundSheet: SANDBOX_SHEET })
+      await expectError(
+        applyCarryViaConfirm(callInput(env, { target })),
+        { status: 422, code: 'CONFIRM_CARRY_TARGET_INVALID' },
+      )
+      assert.equal(env.records.queryCalls.length, 0, 'T6: refused before any read')
+      assert.equal(env.records.patchCalls.length, 0)
+    }
+  })
+
+  await run('T6b: a target that does not bind a CARRIED human column refuses by field NAME, and writes nothing', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    const error = await expectError(
+      applyCarryViaConfirm(callInput(env, { target: targetFor(SANDBOX_SHEET, { without: ['procurementReply'] }) })),
+      { status: 409, code: 'CONFIRM_CARRY_FIELD_NOT_BOUND' },
+    )
+    assert.deepEqual(error.details.fields, ['procurementReply'])
+    assert.equal(JSON.stringify(error.details).includes(HUMAN_NOTE), false, 'T6b: refusals stay values-free')
+    assert.equal(env.records.patchCalls.length, 0, 'T6b: nothing was written')
+  })
+
+  await run('T6b-pos: an UNCARRIED human column left unbound is NOT a refusal — carry binds only what it writes', async () => {
+    // The POSITIVE CONTROL for T6b. T6b alone cannot witness the narrowing it names: widening the
+    // required-binding set from `decision.carryFields` to every HUMAN_PRESERVED id keeps T6b green
+    // (it removes a CARRIED field) while falsely 409-ing legal deployments on the 11 columns this
+    // decision does not touch. Only a case that leaves an UNCARRIED human column unbound can tell
+    // the two apart.
+    const uncarried = HUMAN_PRESERVED_FIELD_IDS.filter((field) => !['notes', 'procurementReply'].includes(field))
+    assert.ok(uncarried.length >= 2, 'the whitelist has human columns this decision does not carry')
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    const result = await applyCarryViaConfirm(callInput(env, {
+      target: targetFor(SANDBOX_SHEET, { without: uncarried }),
+    }))
+    assert.equal(result.mode, 'carried')
+    assert.deepEqual(result.carriedFields.slice().sort(), ['notes', 'procurementReply'])
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE,
+      'T6b-pos: a deployment that binds only the columns it uses still carries')
+  })
+
+  await run('T6c: a target that does not bind a SCOPE column is a broken config, not a best effort', async () => {
+    for (const fieldId of ['idempotencyKey', 'active', 'componentSourceId', 'projectNo']) {
+      const env = substrate({ boundSheet: SANDBOX_SHEET })
+      const error = await expectError(
+        applyCarryViaConfirm(callInput(env, { target: targetFor(SANDBOX_SHEET, { without: [fieldId] }) })),
+        { status: 500, code: 'CONFIRM_CARRY_TARGET_FIELDS_UNRESOLVED' },
+      )
+      assert.deepEqual(error.details.missingFields, [fieldId])
+      assert.equal(env.records.patchCalls.length, 0)
+    }
+  })
+
+  await run('T6d: an EMPTY fieldIdMap is the logical-addressing mode, not an unbound target', async () => {
+    // The same two modes the writer (apply-writer fieldIdMapHasExplicitBindings) and the export
+    // (prep-line-export) decide with the same predicate: an empty map means the sheet is addressed
+    // by logical id and every key passes through untranslated.
+    const rows = operatorRows().map((row) => ({ ...row, data: logicalData(STAGING, MAIN_OBJECT_ID, row.data) }))
+    const patched = []
+    const logicalRecords = {
+      async queryRecords({ sheetId, filters = {} }) {
+        assert.equal(sheetId, SANDBOX_SHEET)
+        return rows.filter((row) => Object.entries(filters).every(([k, v]) => row.data[k] === v)).map((row) => ({ ...row, data: { ...row.data } }))
+      },
+      async patchRecord({ sheetId, recordId, changes, expectedVersion }) {
+        assert.equal(sheetId, SANDBOX_SHEET)
+        patched.push({ recordId, changes, expectedVersion })
+        const row = rows.find((r) => r.id === recordId)
+        Object.assign(row.data, changes)
+        row.version += 1
+        return { ...row, data: { ...row.data } }
+      },
+      async createRecord() { throw new Error('carry never creates a row') },
+    }
+    const result = await applyCarryViaConfirm({
+      permission: 'admin',
+      recordsApi: logicalRecords,
+      target: { sheetId: SANDBOX_SHEET, fieldIdMap: {} },
+      decision: decisionFixture(),
+      confirmedBy: OPERATOR,
+    })
+    assert.equal(result.mode, 'carried')
+    assert.deepEqual(Object.keys(patched[0].changes).sort(), ['notes', 'procurementReply'],
+      'T6d: logical keys crossed the boundary untranslated')
+  })
+
+  // =========================================================================
+  // T7 — EVERY pre-existing guard, re-witnessed against the sandbox-bound target.
+  // =========================================================================
+  await run('T7-a: admin gate still fires FIRST, before any host IO', async () => {
+    for (const permission of ['write', 'read', undefined, 'ADMIN']) {
+      const env = substrate({ boundSheet: SANDBOX_SHEET })
+      await expectError(
+        applyCarryViaConfirm(callInput(env, { permission })),
+        { status: 403, code: 'CONFIRM_PERMISSION_DENIED' },
+      )
+      assert.equal(env.records.queryCalls.length, 0)
+      assert.equal(env.records.patchCalls.length, 0)
+    }
+  })
+
+  await run('T7-b: carryFields must stay a non-empty subset of the human-preserved whitelist', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    for (const carryFields of [[], ['componentCode'], ['notes', 'active'], ['projectNo']]) {
+      await expectError(
+        applyCarryViaConfirm(callInput(env, { decision: decisionFixture({ carryFields }) })),
+        { status: 422, code: 'CONFIRM_CARRY_DECISION_INVALID' },
+      )
+    }
+    assert.equal(env.records.patchCalls.length, 0)
+    for (const field of ['notes', 'procurementReply']) {
+      assert.ok(HUMAN_PRESERVED_FIELD_IDS.includes(field))
+    }
+  })
+
+  await run('T7-c: the source row must be INACTIVE on the bound sheet', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET, sandboxRows: [sourceRowFixture({ active: true }), targetRowFixture()] })
+    await expectError(applyCarryViaConfirm(callInput(env)), { status: 409, code: 'CONFIRM_CARRY_SOURCE_ACTIVE' })
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T7-d: componentSourceId must agree across decision, source row and target row', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET, sandboxRows: [sourceRowFixture({ componentSourceId: 'COMP-OTHER' }), targetRowFixture()] })
+    await expectError(applyCarryViaConfirm(callInput(env)), { status: 409, code: 'CONFIRM_CARRY_COMPONENT_SOURCE_MISMATCH' })
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T7-e: projectNo must agree — one project\'s human band never reaches another\'s row', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET, sandboxRows: [sourceRowFixture({ projectNo: 'P-OTHER' }), targetRowFixture()] })
+    await expectError(applyCarryViaConfirm(callInput(env)), { status: 409, code: 'CONFIRM_CARRY_PROJECT_MISMATCH' })
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T7-f: no-overwrite — a differing non-blank target cell refuses, and NOTHING is written', async () => {
+    const env = substrate({
+      boundSheet: SANDBOX_SHEET,
+      sandboxRows: [sourceRowFixture(), targetRowFixture({ procurementReply: '仓库自己写的答复' })],
+    })
+    const error = await expectError(applyCarryViaConfirm(callInput(env)), { status: 409, code: 'CONFIRM_CARRY_TARGET_ALREADY_SET' })
+    assert.deepEqual(error.details.fields, ['procurementReply'])
+    assert.equal(env.records.patchCalls.length, 0, 'T7-f: not even the clean field was half-carried')
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T7-g: full replay is a no-op skip on the bound sheet', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    await applyCarryViaConfirm(callInput(env))
+    assert.equal(env.records.patchCalls.length, 1)
+    const replay = await applyCarryViaConfirm(callInput(env))
+    assert.equal(replay.persisted, false)
+    assert.equal(replay.mode, 'skipped_already_carried')
+    assert.equal(env.records.patchCalls.length, 1, 'T7-g: the replay wrote nothing')
+  })
+
+  await run('T7-h: the patch carries expectedVersion — optimistic concurrency survives the move', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    const before = rowByKey(env, SANDBOX_SHEET, NEW_KEY)
+    await applyCarryViaConfirm(callInput(env))
+    assert.equal(env.records.patchCalls[0].expectedVersion, before.version)
+    // ...and a row that moved between the read and the write is REFUSED, not clobbered.
+    const racing = substrate({ boundSheet: SANDBOX_SHEET })
+    const raced = {
+      ...racing.records,
+      async queryRecords(input) {
+        const rows = await racing.records.queryRecords(input)
+        return rows.map((row) => ({ ...row, version: (row.version || 1) - 1 }))
+      },
+    }
+    await expectError(
+      applyCarryViaConfirm(callInput(racing, { recordsApi: raced })),
+      { status: 409, code: 'CONFIRM_CARRY_TARGET_VERSION_CONFLICT' },
+    )
+    assert.equal(rowByKey(racing, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T7-i: carriedBy/carriedAt are server-stamped, never decision- or body-sourced', async () => {
+    const env = substrate({ boundSheet: SANDBOX_SHEET })
+    for (const key of ['carriedBy', 'carriedAt', 'confirmedBy', 'confirmedAt']) {
+      await expectError(
+        applyCarryViaConfirm(callInput(env, { decision: decisionFixture({ [key]: 'attacker' }) })),
+        { status: 422, code: 'CONFIRM_CARRY_DECISION_INVALID' },
+      )
+    }
+    const result = await applyCarryViaConfirm(callInput(env))
+    assert.equal(result.carriedBy, OPERATOR)
+    assert.match(result.carriedAt, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/)
+    // The stamps live in the RESULT, never as columns on the row.
+    const carried = rowByKey(env, SANDBOX_SHEET, NEW_KEY)
+    assert.equal(Object.prototype.hasOwnProperty.call(carried.data, 'carriedBy'), false)
+    assert.deepEqual(Object.keys(env.records.patchCalls[0].changes).length, 2, 'T7-i: exactly the two carried columns were written')
+  })
+
+  await run('T7-j: evidence stays values-free and names the BOUND target, not a hardcoded one', async () => {
+    for (const boundSheet of [SANDBOX_SHEET, MAIN_SHEET]) {
+      const env = substrate({ boundSheet })
+      const result = await applyCarryViaConfirm(callInput(env))
+      assert.equal(result.evidence.valuesFree, true)
+      assert.equal(JSON.stringify(result.evidence).includes(HUMAN_NOTE), false)
+      assert.equal(JSON.stringify(result.evidence).includes(DECOY_NOTE), false)
+      assert.equal(result.evidence.target.keyField, 'idempotencyKey')
+      // The BOUND binding's own objectId — canonical here, the restamped sandbox id there. An
+      // executor that reported a hardcoded canonical constant fails this on the sandbox binding.
+      assert.equal(result.evidence.target.objectId, env.target.objectId)
+      assert.deepEqual(result.evidence.carriedFields.slice().sort(), ['notes', 'procurementReply'])
+    }
+  })
+
+  // =========================================================================
+  // T8 — the ROUTE derives the target server-side and takes nothing new from the client.
+  // =========================================================================
+  await run('T8: POST carry/confirm on a default (sandbox-bound) deployment carries the TWIN row', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, { user: ADMIN, body: { decision: decisionFixture() } })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(res.body.ok, true)
+    assert.equal(res.body.data.mode, 'carried')
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE)
+    assert.equal(rowByKey(env, MAIN_SHEET, NEW_KEY).data.notes, undefined, 'T8: the canonical table was not touched')
+  })
+
+  await run('T8b: POST carry/confirm on an owner-configured production deployment carries the canonical row', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: MAIN_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, { user: ADMIN, body: { decision: decisionFixture() } })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(rowByKey(env, MAIN_SHEET, NEW_KEY).data.notes, HUMAN_NOTE)
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T8c: the client cannot name the table — the closed body allowlist still refuses every target key', async () => {
+    for (const key of ['target', 'sheetId', 'objectId', 'actionId', 'targetProjectId', 'fieldIdMap']) {
+      const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+      const res = await call(routes, 'POST', CARRY_ROUTE, {
+        user: ADMIN,
+        body: { decision: decisionFixture(), [key]: MAIN_SHEET },
+      })
+      assert.equal(res.statusCode, 400, `T8c: body key ${key} must be refused`)
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_CARRY_CONFIRM_REQUEST_INVALID')
+      assert.equal(env.records.patchCalls.length, 0)
+    }
+  })
+
+  await run('T8d: a deployment with NO configured stock-prep action refuses rather than guessing a table', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET, configured: false })
+    const res = await call(routes, 'POST', CARRY_ROUTE, { user: ADMIN, body: { decision: decisionFixture() } })
+    assert.equal(res.statusCode, 422)
+    assert.equal(res.body.error.code, 'TABLE_ACTION_NOT_CONFIGURED')
+    assert.equal(env.records.patchCalls.length, 0, 'T8d: nothing was written anywhere')
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+    assert.equal(rowByKey(env, MAIN_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T8d-order: unconfigured deployment + a LEDGER pair => refused with ZERO host reads', async () => {
+    // T8d alone cannot witness the handler's "resolve the target BEFORE the ledger pre-flight"
+    // ordering: it sends no decisionId/inputFingerprint, so the pre-flight never runs and moving the
+    // resolution after it stays green. With a ledger pair in the body the ordering becomes
+    // observable — and it is behavioural, not cosmetic: resolving late turns an actionable 422
+    // TABLE_ACTION_NOT_CONFIGURED into a misleading 404 about a ledger row, after a host read on a
+    // deployment that can never carry.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET, configured: false })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      body: { decision: decisionFixture(), decisionId: 'dec_1', inputFingerprint: 'fp_1' },
+    })
+    assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'TABLE_ACTION_NOT_CONFIGURED')
+    assert.equal(env.records.queryCalls.length, 0, 'T8d-order: not one host read before the refusal')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T8f: the route runs the READINESS gate on the bound target, not merely getTableAction', async () => {
+    // `assertStockPreparationTargetReady` is the second half of the seam — without it an
+    // incompletely-bound deployment would reach the executor and surface as its own 500 instead of
+    // the deploy-time 422 an admin can act on. Dropping the assertion from the handler therefore
+    // changes the code this case sees, which is what makes it mutation-sensitive rather than
+    // decorative. A plm_system column is chosen because that is exactly the band the completeness
+    // gate covers.
+    const { routes, env } = mountCarryRoute({
+      boundSheet: SANDBOX_SHEET,
+      targetOverride(target) {
+        const fieldIdMap = { ...target.fieldIdMap }
+        delete fieldIdMap.componentSourceId
+        return { ...target, fieldIdMap }
+      },
+    })
+    const res = await call(routes, 'POST', CARRY_ROUTE, { user: ADMIN, body: { decision: decisionFixture() } })
+    assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+    assert.deepEqual(res.body.error.details.missingFields, ['componentSourceId'])
+    assert.equal(env.records.patchCalls.length, 0, 'T8f: nothing was written')
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  // =========================================================================
+  // T9 — THE TENANT WALL. Binding the target to the deploy-time action answers
+  // "which sheet", but `getTableAction` is keyed by actionId ALONE, so on its own
+  // it answers the same sheet to EVERY tenant. Before this wall a foreign-tenant
+  // admin's carry returned 200 and patched the deployment's one bound sheet,
+  // where the canonical-lookup version had refused because the sheet was resolved
+  // under the CALLER's staging project. The binding decides which sheet the
+  // deployment writes; the wall decides whether it is the caller's to write.
+  // =========================================================================
+  await run('T9-a: a FOREIGN-tenant admin is refused, with ZERO records calls and ZERO ledger reads', async () => {
+    const { routes, env, auditDb } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: FOREIGN_ADMIN,
+      authenticatedTenantId: FOREIGN_TENANT,
+      // A ledger pair too: the refusal must land before the pre-flight, so approval bookkeeping in
+      // the caller's project can never be consulted for a write into someone else's sheet.
+      body: { decision: decisionFixture(), decisionId: 'dec_1', inputFingerprint: 'fp_1' },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.equal(env.records.queryCalls.length, 0, 'T9-a: no host read — ledger included')
+    assert.equal(env.records.patchCalls.length, 0, 'T9-a: nothing written')
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined,
+      'T9-a: the bound row of the deployment is untouched by a tenant that does not own it')
+    // The membership check DID pass for this principal — they are a genuine admin of a genuine
+    // tenant. The refusal is the sheet wall, not an identity failure, which is the point.
+    assert.deepEqual(env.directoryCalls, [{ userId: FOREIGN_ADMIN.id, tenantId: FOREIGN_TENANT }])
+    assert.equal(auditDb.rows.filter((row) => row.action === 'exception_resolve').length, 0)
+  })
+
+  await run('T9-a2: the headline — a FOREIGN-tenant admin carrying with NO ledger pair is refused, not served', async () => {
+    // T9-a sends a ledger pair, so on an unwalled build it can trip a ledger refusal first and hide
+    // the hole. This is the bare shape the adversarial repro used: `decisionId` is OPTIONAL, so an
+    // admin may carry with no approval row at all. Unwalled, this returned 200 `carried` and patched
+    // the sheet of a tenant the caller has nothing to do with.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: FOREIGN_ADMIN,
+      authenticatedTenantId: FOREIGN_TENANT,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.equal(env.records.patchCalls.length, 0)
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T9-b: the OWN tenant of the caller still carries, and the audit records the scoped tenant', async () => {
+    const { routes, env, auditDb } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE)
+    const entry = auditDb.rows.find((row) => row.action === 'exception_resolve')
+    assert.ok(entry, 'the carry was audited')
+    assert.equal(entry.tenant_id || entry.tenantId, TENANT_ID,
+      'T9-b: the audit tenant is the one that owns the sheet the write landed in')
+  })
+
+  await run('T9-c: a header tenant that CONTRADICTS the verified claim is refused 403', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      // The host middleware copies x-tenant-id onto `user.tenantId` when the token carries no claim;
+      // here a claim EXISTS and the carried value disagrees with it. There is no reading of that
+      // which is a legitimate caller.
+      user: { id: 'u_spoof', roles: ['admin'], tenantId: TENANT_ID },
+      authenticatedTenantId: FOREIGN_TENANT,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 403, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_CONTRADICTED')
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-d: a principal with NO tenant of its own is refused 403, not served the bound sheet', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: TENANTLESS_ADMIN,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 403, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_REQUIRED')
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-e: a body tenantId steering to another tenant is refused 403', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture(), tenantId: FOREIGN_TENANT },
+    })
+    assert.equal(res.statusCode, 403, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_MISMATCH')
+    assert.equal(env.records.queryCalls.length, 0)
+  })
+
+  await run('T9-f: the host must VOUCH for the (principal, tenant) pairing — a denial refuses 403', async () => {
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET, memberVerdict: false })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 403, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED')
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T8g: an unbound CARRIED human column is a per-decision refusal, not a shared-gate outage', async () => {
+    // WHERE THIS IS ENFORCED, AND WHY NOT IN THE SHARED GATE.
+    //
+    // An earlier revision of this PR widened assertTargetFieldMapCompleteness to require the whole
+    // human band. That gate is shared by fifteen handlers, so it turned a config apply, dry-run,
+    // mvp-persist, reconcile, the large-BOM jobs and the export all accept into a deployment-wide
+    // 422 — six working paths taken down to pre-empt a refusal on a seventh. The gate is back to
+    // main's exact text.
+    //
+    // Deploy-time discovery lives in the preflight instead (STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_
+    // UNBOUND, swept across all 13 ids by stock-preparation-preflight.test.cjs), and click-time the
+    // carry route refuses ONLY the columns THIS decision carries — which is what keeps T6b-pos
+    // reachable and the executor's own comment true.
+    const { routes, env } = mountCarryRoute({
+      boundSheet: SANDBOX_SHEET,
+      targetOverride(target) {
+        const fieldIdMap = { ...target.fieldIdMap }
+        delete fieldIdMap.notes
+        return { ...target, fieldIdMap }
+      },
+    })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_FIELD_NOT_BOUND')
+    assert.deepEqual(res.body.error.details.fields, ['notes'],
+      'T8g: the refusal names the carried column that is unbound, and only it')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-g: the attacker OWNS a sheet of their own for the same objectId - ownership is COMPARED', async () => {
+    // THE SHAPE THE SUITE PREVIOUSLY OMITTED. The old fixture answered null for any project that was
+    // not the deployment's, so `!owner` alone decided every foreign-tenant case and the comparison
+    // was never exercised: weakening it to a presence check kept all 16 suites green while
+    // re-opening the cross-tenant write. Here the attacker's tenant has ALSO provisioned the twin,
+    // so the registry answers a project for BOTH sides and only the comparison can refuse.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    assert.equal(env.sheetOwner.get(FOREIGN_TWIN_SHEET), FOREIGN_TENANT + ':integration-core',
+      'T9-g: the attacker really does own a sheet - the registry is not answering null for them')
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: FOREIGN_ADMIN,
+      authenticatedTenantId: FOREIGN_TENANT,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.deepEqual(env.provisioning.ownerCalls, [{ sheetId: SANDBOX_SHEET, projectId: FOREIGN_TENANT + ':integration-core' }],
+      'T9-g: the wall asked whether the BOUND sheet is the CALLER of this request own, and refused on the answer')
+    assert.equal(env.records.queryCalls.length, 0)
+    assert.equal(env.records.patchCalls.length, 0)
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, undefined)
+  })
+
+  await run('T9-h: the 222 window shape - a HAND-BOUND sheetId owned by the caller carries', async () => {
+    // A sheet this tenant really provisioned, bound under an objectId whose derived id is a
+    // different string - the shape every pre-registry install is in, and one the writer, the export
+    // and the conflict policies all accept because sheetId and objectId are independent fields.
+    // Ownership is what decides, so it must carry. The earlier derived-id rule refused exactly this.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    assert.notEqual(SANDBOX_SHEET, DERIVED_SANDBOX_SHEET,
+      'T9-h: the bound sheetId really is NOT the derived one - otherwise this case proves nothing')
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(rowByKey(env, SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE,
+      'T9-h: the human fields landed on the hand-bound sheet the deployment actually uses')
+  })
+
+  await run('T9-i: a sheet owned by ANOTHER project is refused even under the objectId of this caller', async () => {
+    const { routes, env } = mountCarryRoute({
+      boundSheet: SANDBOX_SHEET,
+      extraSheetOwners: { [SANDBOX_SHEET]: FOREIGN_TENANT + ':integration-core' },
+    })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-j: an UNREGISTERED sheet is not a pass - it falls back to the derived id, then refuses', async () => {
+    // A registry "no" means "not proven yours", never "yours". For a write that lands human work in
+    // a customer table, an unprovable owner must not be permission. The fallback lets a pre-registry
+    // legacy install whose binding IS derived through (T9-k); anything else is refused.
+    //
+    // WHY THE CODE IS TENANT_MISMATCH AND NOT OWNER_UNKNOWN. The port is a boolean by design (it
+    // must not hand this caller another tenant's project id), so "owned by someone else" and "not
+    // in the registry at all" arrive as the SAME answer. Claiming to tell them apart in the refusal
+    // would be inventing a distinction the server can no longer observe. OWNER_UNKNOWN is kept for
+    // the one case that really is undecidable - see T9-j2.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    env.provisioning.sheetOwner.delete(SANDBOX_SHEET)
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-j2: a host that can answer NEITHER question refuses as UNDECIDABLE, not as denied', async () => {
+    // The registry says no and there is no id derivation to fall back on. That is genuinely
+    // "ownership cannot be established" rather than "this is not yours", and it keeps
+    // CONFIRM_CARRY_TARGET_OWNER_UNKNOWN a reachable, witnessed code rather than dead vocabulary.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    env.provisioning.sheetOwner.delete(SANDBOX_SHEET)
+    delete env.provisioning.getObjectSheetId
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_TARGET_OWNER_UNKNOWN')
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T9-k: an unregistered but DERIVED binding still carries (the pre-registry legacy install)', async () => {
+    const { routes, env } = mountCarryRoute({
+      boundSheet: SANDBOX_SHEET,
+      seedDerivedSheet: true,
+      targetOverride(target) { return { ...target, sheetId: DERIVED_SANDBOX_SHEET } },
+    })
+    env.provisioning.sheetOwner.delete(DERIVED_SANDBOX_SHEET)
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(rowByKey(env, DERIVED_SANDBOX_SHEET, NEW_KEY).data.notes, HUMAN_NOTE)
+  })
+
+  await run('T9-l: a host with no ownership port fails with the code that NAMES the missing port', async () => {
+    // E4: the wall is handed the RAW host surface, not a helper that has already refused on its own
+    // terms, so this branch is reachable and says which capability is absent instead of surfacing as
+    // a generic provisioning 503 about a different method.
+    const { routes, env } = mountCarryRoute({ boundSheet: SANDBOX_SHEET, dropOwnershipPort: true })
+    const res = await call(routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    assert.equal(res.statusCode, 501, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE')
+    assert.deepEqual(res.body.error.details.requiredMethods, ['isSheetOwnedByProject'])
+    assert.equal(env.records.patchCalls.length, 0)
+  })
+
+  await run('T8e: the route still audits values-free, and the audit rides the same exception_resolve vocabulary', async () => {
+    const { routes, auditDb } = mountCarryRoute({ boundSheet: SANDBOX_SHEET })
+    const res = await call(routes, 'POST', CARRY_ROUTE, { user: ADMIN, body: { decision: decisionFixture() } })
+    assert.equal(res.statusCode, 200)
+    const entries = auditDb.rows.filter((row) => row.action === 'exception_resolve')
+    assert.equal(entries.length, 1)
+    const flat = JSON.stringify(entries[0])
+    assert.equal(flat.includes(HUMAN_NOTE), false, 'T8e: the audit never carries a human value')
+    assert.equal(flat.includes(DECOY_NOTE), false)
+  })
+
+  // =========================================================================
+  // T10 — THE PREFLIGHT AND THE ROUTE MUST DECIDE THE SAME THING.
+  //
+  // The wall refuses on ONE fact: registry ownership of the bound sheet, with the derived id as the
+  // only fallback. A deploy-time preflight that does not ask that fact cannot predict the refusal —
+  // and the version this PR first shipped did not ask it, reported such a binding as mere `posture`,
+  // and told the operator in as many words that "nothing refuses it" while every carry click 409'd.
+  // These cases drive BOTH surfaces over the SAME fixtures and require them to agree.
+  // =========================================================================
+  async function preflightVerdict(mounted) {
+    // The preflight's OWN gathering + verdict for this binding. Driven directly rather than through
+    // the whole preflight route, so the case measures the agreement under test and not the other
+    // inspections' fixture needs. The blocker is a pure mapping of this verdict, asserted in
+    // stock-preparation-preflight.test.cjs.
+    const action = mounted.context.config.stockPreparationTableActions
+    return inspectCarryTargetBinding({
+      context: mounted.context,
+      projectId: STAGING,
+      target: action ? action[0].target : null,
+    })
+  }
+
+  async function routeVerdict(mounted) {
+    const res = await call(mounted.routes, 'POST', CARRY_ROUTE, {
+      user: ADMIN,
+      authenticatedTenantId: TENANT_ID,
+      body: { decision: decisionFixture() },
+    })
+    return { ok: res.statusCode === 200, code: res.statusCode === 200 ? null : res.body.error.code }
+  }
+
+  for (const shape of [
+    { name: 'owned by this project (the ordinary deployment)', mount: {} },
+    { name: 'owned by ANOTHER project', mount: { extraSheetOwners: { [SANDBOX_SHEET]: FOREIGN_TENANT + ':integration-core' } } },
+    { name: 'unregistered AND not derived (the hand-bound legacy shape)', mount: {}, unregister: SANDBOX_SHEET },
+    { name: 'unregistered BUT derived (the pre-registry install)', mount: { seedDerivedSheet: true, targetOverride: (t) => ({ ...t, sheetId: DERIVED_SANDBOX_SHEET }) }, unregister: 'DERIVED' },
+  ]) {
+    await run(`T10 [${shape.name}]: the preflight predicts exactly what the carry route does`, async () => {
+      const mounted = mountCarryRoute({ boundSheet: SANDBOX_SHEET, ...shape.mount })
+      if (shape.unregister === 'DERIVED') mounted.env.provisioning.sheetOwner.delete(DERIVED_SANDBOX_SHEET)
+      else if (shape.unregister) mounted.env.provisioning.sheetOwner.delete(shape.unregister)
+
+      const pre = await preflightVerdict(mounted)
+      const route = await routeVerdict(mounted)
+
+      assert.ok(pre.ownership, `T10 [${shape.name}]: the preflight reached a verdict at all`)
+      assert.equal(pre.ownership.ok, route.ok,
+        `T10 [${shape.name}]: preflight says ok=${pre.ownership.ok}, the route says ok=${route.ok}`)
+      if (!route.ok) {
+        assert.equal(pre.ownership.refusalCode, route.code,
+          `T10 [${shape.name}]: the preflight must name the EXACT code the route returns`)
+      }
+    })
+  }
+
+  console.log(`carry-target-binding: ${passed} passed, ${failed} failed`)
+  if (failed > 0) {
+    console.error(`failing: ${failures.join(', ')}`)
+    process.exitCode = 1
+  }
+}
+
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'eventemitter3'
+import { sql } from 'kysely'
 import type { Kysely } from 'kysely'
 import type { BaseDataAdapter, DataSourceConfig, QueryOptions, QueryResult, DbValue, WhereClause, ConnectionConfig, Credentials, AdapterOptions } from './BaseAdapter'
 import { PostgresAdapter } from './PostgresAdapter'
@@ -7,7 +8,16 @@ import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
 import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
+import { assertNotK3Destination, preserveK3Marker } from './k3-destination-write-fence'
+import { assertSqlWriteAllowed, assertSqlSourceProvisionableAtRuntime, pinSqlSourceConnection } from './sql-write-arm-binding'
 import type { IConfigService, ILogger } from '../di/identifiers'
+
+// PostgreSQL SQLSTATE for undefined_table. The referential delete guard trusts
+// ONLY this code for its "integration schema not installed → zero references"
+// short-circuit — never the message-prose fallback of isDatabaseSchemaError,
+// which would let any error worded like a missing table silently PERMIT a
+// delete (P2-B).
+const UNDEFINED_TABLE_SQLSTATE = '42P01'
 
 // Credential fields that hold secrets and are encrypted at rest. Identifiers
 // like `username` are left as-is (matching the codebase's encrypt-secrets-only
@@ -15,6 +25,40 @@ import type { IConfigService, ILogger } from '../di/identifiers'
 const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
 export const DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED'
 export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED'
+// Referential delete guard (see countExternalSystemReferences): a source referenced by an
+// integration external system's canonical connection_id or attributable legacy
+// config.dataSourceId refuses a plain delete with this code.
+export const DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE = 'DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS'
+export const DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY_CODE = 'DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY'
+
+/**
+ * Actor context for data-source access decisions (the authority model).
+ *
+ * Two call shapes, two tiers of meaning:
+ * - a plain user-id string (or undefined) is the DATA-PLANE shape: strictly
+ *   owner-scoped, no admin bypass. This is what adapter/facade/workbench call
+ *   sites pass — reading customer data THROUGH a connection stays owner-only.
+ * - a {@link DataSourceActorContext} object is the MANAGEMENT shape resolved
+ *   from the request: `platformAdmin: true` (the rbac global-admin tier that
+ *   already bypasses every `data_sources:*` rbacGuard) grants management
+ *   access to every source. It never grants credential readback — credentials
+ *   are write-only for every tier at the response-sanitization layer.
+ *
+ * Because the scoping semantics live HERE (not in individual routes), every
+ * assertAccess call site inherits the model — including ones added on other
+ * branches that pass a bare user id.
+ */
+export interface DataSourceActorContext {
+  userId?: string
+  platformAdmin?: boolean
+}
+export type DataSourceActor = string | DataSourceActorContext | undefined
+
+function normalizeActor(actor: DataSourceActor): DataSourceActorContext {
+  if (actor === undefined) return {}
+  if (typeof actor === 'string') return { userId: actor }
+  return actor
+}
 
 type AdapterConstructor = new (config: DataSourceConfig) => BaseDataAdapter
 
@@ -31,6 +75,73 @@ const consoleLogger: ILogger = {
   warn: (...args: unknown[]) => console.warn(...args),
   error: (...args: unknown[]) => console.error(...args),
   debug: (...args: unknown[]) => console.debug(...args),
+}
+
+// ── On-demand connect refusal (#2, values-free) ───────────────────────────────────────────
+// Every adapter's connect() catch rethrows the RAW driver text — MSSQLAdapter `Failed to connect to
+// SQL Server: ${error}`, PostgresAdapter / MySQLAdapter / MongoDBAdapter likewise — and that text
+// embeds host:port, database name and the login it tried. connectDataSource is the ONE chokepoint
+// every on-demand connect passes through (/schema, /tables/:table, /query, /select,
+// insert/update/delete, copyData, federated query, the plugin facade), so translating here covers
+// all of them at once. The client gets a fixed sentence + a coded 503; the cause stays in the server
+// log. The single place an operator still learns WHY is `POST /:id/test` (testConnection), which
+// calls adapter.connect() directly — deliberately NOT routed through here — and returns the
+// redactSecrets'd `adapter.connectionError`.
+export const DATA_SOURCE_UNAVAILABLE_CODE = 'SOURCE_UNAVAILABLE'
+export const DATA_SOURCE_UNAVAILABLE_MESSAGE =
+  '数据源当前无法连接，请先「测试连接」查看原因 / Data source is currently unreachable; run "Test connection" for details'
+
+// The cause as it may be LOGGED: never the raw message when a redacted one exists.
+// `connectionError` is only populated by BaseAdapter.onError, and every adapter has a connect()
+// branch that throws BEFORE reaching it — the driver-package-missing guard (MSSQLAdapter.ts:217,
+// PostgresAdapter.ts:74, MySQLAdapter.ts:195, HTTPAdapter.ts:134). On that branch `connectionError`
+// is null, so logging shape-only would leave the failure explainable NOWHERE: the client gets a
+// fixed sentence and the 「测试连接」 the sentence points at reads the same null `connectionError`.
+// Fall back to the cause's own message, put through the adapter's OWN redactSecrets (via the public
+// `redactCause`), so an adapter that embeds a secret in a pre-onError throw still cannot log it.
+function loggableCause(
+  adapter: Pick<BaseDataAdapter, 'connectionError' | 'redactCause'>,
+  cause: unknown
+): string | null {
+  const recorded = adapter.connectionError
+  if (recorded) return recorded
+  const raw = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : null
+  if (!raw) return null
+  try {
+    return adapter.redactCause(raw)
+  } catch {
+    // A logging helper must never break the refusal itself: a broken redactor costs the log line,
+    // not the 503. Returning null also guarantees an unredacted message can never be logged.
+    return null
+  }
+}
+
+function sourceUnavailableError(
+  id: string,
+  cause: unknown,
+  adapter: Pick<BaseDataAdapter, 'connectionError' | 'redactCause'>
+): Error {
+  // A deliberate coded refusal (arm-binding / provisioning / K3 fence) already carries its own
+  // status+code and is values-free by construction — never downgrade it to a generic 503.
+  if (cause instanceof Error) {
+    const status = (cause as { status?: unknown }).status
+    const code = (cause as { code?: unknown }).code
+    if (typeof status === 'number' && status >= 400 && status < 600 && typeof code === 'string') {
+      return cause
+    }
+  }
+  // Log the cause: name + driver code + a REDACTED message (onError's `connectionError` when it
+  // exists, else the cause's message through the same redaction — see loggableCause above).
+  // Never the raw message.
+  consoleLogger.error(`[DataSourceManager] Connect failed for ${id}`, {
+    name: cause instanceof Error ? cause.name : typeof cause,
+    driverCode: (cause as { code?: unknown } | null | undefined)?.code,
+    redactedCause: loggableCause(adapter, cause),
+  })
+  return Object.assign(new Error(DATA_SOURCE_UNAVAILABLE_MESSAGE), {
+    status: 503,
+    code: DATA_SOURCE_UNAVAILABLE_CODE,
+  })
 }
 
 class ManagedPLMAdapter extends PLMAdapter {
@@ -94,6 +205,17 @@ export function c6WriteTargetCopyUnsupportedMessage(dataSourceId: string): strin
 }
 
 // Database record types
+export const DATA_SOURCE_SCOPE_KINDS = ['legacy_private', 'private', 'workspace'] as const
+export type DataSourceScopeKind = typeof DATA_SOURCE_SCOPE_KINDS[number]
+
+function isDataSourceScopeKind(value: unknown): value is DataSourceScopeKind {
+  return typeof value === 'string' && (DATA_SOURCE_SCOPE_KINDS as readonly string[]).includes(value)
+}
+
+function normalizeTenantId(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+}
+
 interface DataSourceRecord {
   id: string
   name: string
@@ -105,6 +227,8 @@ interface DataSourceRecord {
   last_error: string | null
   owner_id: string
   workspace_id: string | null
+  tenant_id?: string | null
+  scope_kind?: string | null
   is_active: boolean
   auto_connect: boolean
   metadata: unknown | null
@@ -125,7 +249,12 @@ export class DataSourceManager extends EventEmitter {
   private connectionPool: Map<string, Promise<void>> = new Map()
   // Per-source ownership for scope enforcement (A0.1). Owner is the enforced
   // boundary this slice; workspace is stored for a future workspace-shared model.
-  private scopes: Map<string, { ownerId: string; workspaceId: string | null }> = new Map()
+  private scopes: Map<string, {
+    ownerId: string
+    workspaceId: string | null
+    tenantId: string | null
+    scopeKind: DataSourceScopeKind
+  }> = new Map()
   private db?: Kysely<unknown>
   private initialized = false
 
@@ -175,11 +304,15 @@ export class DataSourceManager extends EventEmitter {
             throw new Error(`Unsupported persisted data source type: ${record.type}`)
           }
           const config = this.recordToConfig(record)
-          await this.addDataSourceInternal(config, false) // Don't persist again
+          await this.addDataSourceInternal(config, false, 'load') // Don't persist again; LOAD phase pins
           // Ownership lives on the DB record, not in config (recordToConfig strips it)
           this.scopes.set(record.id, {
             ownerId: record.owner_id,
-            workspaceId: record.workspace_id ?? null
+            workspaceId: record.workspace_id ?? null,
+            // Older databases do not have these columns. Treat absent or
+            // malformed scope metadata as the narrowest legacy posture.
+            tenantId: normalizeTenantId(record.tenant_id),
+            scopeKind: isDataSourceScopeKind(record.scope_kind) ? record.scope_kind : 'legacy_private'
           })
 
           if (record.auto_connect) {
@@ -262,7 +395,9 @@ export class DataSourceManager extends EventEmitter {
   private configToRecord(
     config: DataSourceConfig,
     ownerId: string,
-    workspaceId?: string
+    workspaceId: string | null | undefined,
+    tenantId: string | null,
+    scopeKind: DataSourceScopeKind
   ): Omit<DataSourceRecord, 'created_at' | 'updated_at' | 'deleted_at' | 'last_connected_at' | 'last_error'> {
     return {
       id: config.id,
@@ -278,6 +413,8 @@ export class DataSourceManager extends EventEmitter {
       status: 'disconnected',
       owner_id: ownerId,
       workspace_id: workspaceId || null,
+      tenant_id: tenantId,
+      scope_kind: scopeKind,
       is_active: true,
       auto_connect: config.options?.autoConnect === true,
       metadata: null,
@@ -302,7 +439,13 @@ export class DataSourceManager extends EventEmitter {
    */
   async addDataSource(
     config: DataSourceConfig,
-    options?: { ownerId?: string; workspaceId?: string; persist?: boolean }
+    options?: {
+      ownerId?: string
+      workspaceId?: string
+      tenantId?: string | null
+      scopeKind?: DataSourceScopeKind
+      persist?: boolean
+    }
   ): Promise<BaseDataAdapter> {
     // Reject duplicates BEFORE persisting — otherwise a create that will be
     // rejected still runs the upsert and overwrites the existing row's config
@@ -314,14 +457,35 @@ export class DataSourceManager extends EventEmitter {
     const persist = options?.persist !== false && this.db !== undefined
     const ownerId = options?.ownerId || 'system'
     const workspaceId = options?.workspaceId
+    const tenantId = normalizeTenantId(options?.tenantId)
+    const scopeKind = options?.scopeKind ?? 'private'
+    if (!isDataSourceScopeKind(scopeKind)) {
+      throw new Error(`Invalid data source scope kind: ${String(scopeKind)}`)
+    }
+
+    // FIX 2: refuse — BEFORE any persistence — to provision an id that a deploy file has armed for SQL
+    // write but that was not pinned at allowlist-load time. This is the arm-ahead-of-provisioning
+    // attack: an armed-but-never-provisioned id created at the API tier would otherwise be trusted into
+    // a fresh pin (and, once persisted, pinned again at the next restart). Refusing before persist
+    // means no such row is ever written. An unarmed id, or an armed id already pinned at load (a
+    // revival), passes untouched.
+    assertSqlSourceProvisionableAtRuntime(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      config.id,
+    )
 
     // Persist to database first (if enabled)
     if (persist && this.db) {
-      await this.persistDataSource(config, ownerId, workspaceId)
+      await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind)
     }
 
     const adapter = await this.addDataSourceInternal(config, false)
-    this.scopes.set(config.id, { ownerId, workspaceId: workspaceId ?? null })
+    this.scopes.set(config.id, {
+      ownerId,
+      workspaceId: workspaceId ?? null,
+      tenantId,
+      scopeKind
+    })
     return adapter
   }
 
@@ -335,7 +499,12 @@ export class DataSourceManager extends EventEmitter {
   async updateDataSource(
     id: string,
     config: DataSourceConfig,
-    options?: { ownerId?: string; workspaceId?: string }
+    options?: {
+      ownerId?: string
+      workspaceId?: string
+      tenantId?: string | null
+      scopeKind?: DataSourceScopeKind
+    }
   ): Promise<BaseDataAdapter> {
     const existing = this.adapters.get(id)
     if (!existing) {
@@ -344,15 +513,39 @@ export class DataSourceManager extends EventEmitter {
     const priorScope = this.scopes.get(id)
     const ownerId = options?.ownerId ?? priorScope?.ownerId ?? 'system'
     const workspaceId = options?.workspaceId ?? priorScope?.workspaceId ?? undefined
+    const tenantId = options && Object.prototype.hasOwnProperty.call(options, 'tenantId')
+      ? normalizeTenantId(options.tenantId)
+      : (priorScope?.tenantId ?? null)
+    const scopeKind = options?.scopeKind ?? priorScope?.scopeKind ?? 'private'
+    if (!isDataSourceScopeKind(scopeKind)) {
+      throw new Error(`Invalid data source scope kind: ${String(scopeKind)}`)
+    }
+
+    // G-4 MARKER DURABILITY (P1). The k3Destination marker is SET-ONCE: once a source is a declared
+    // K3 destination, no later update — from any caller, through any merge — may clear or unset it.
+    // This is the manager chokepoint that makes the marker immutable; the route additionally returns a
+    // coded refusal for an explicit clear attempt. Forcing it here means even a silent/buggy path that
+    // dropped the key cannot re-open writes on a K3 connection.
+    if (existing.getConfig().options?.k3Destination === true) {
+      config = { ...config, options: preserveK3Marker(existing.getConfig().options, config.options) }
+    }
 
     // Validate the target type before touching anything live.
     if (!this.adapterTypes.get(config.type.toLowerCase())) {
       throw new Error(`Unsupported data source type: ${config.type}`)
     }
 
+    // FIX 2 (defense-in-depth): a redirect must not be the FIRST observation that binds an armed id. A
+    // source pinned at load passes here (it is already bound); an armed id with no load pin is refused
+    // before persistence, exactly as a runtime create is.
+    assertSqlSourceProvisionableAtRuntime(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      config.id,
+    )
+
     // Persist first — if this throws, the live source is untouched.
     if (this.db !== undefined) {
-      await this.persistDataSource(config, ownerId, workspaceId)
+      await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind)
     }
 
     // Persist succeeded: swap the in-memory adapter (no further failure-prone I/O).
@@ -368,33 +561,139 @@ export class DataSourceManager extends EventEmitter {
     this.connectionPool.delete(id)
 
     const adapter = await this.addDataSourceInternal(config, false)
-    this.scopes.set(id, { ownerId, workspaceId: workspaceId ?? null })
+    this.scopes.set(id, {
+      ownerId,
+      workspaceId: workspaceId ?? null,
+      tenantId,
+      scopeKind
+    })
     return adapter
   }
 
   /**
-   * Assert the requester owns this data source (A0.1 scope enforcement).
-   * Throws the same "not found" wording as getDataSource so callers return a
-   * uniform 404 — a non-owner must not learn that someone else's source exists.
+   * Assert the actor may access this data source (A0.1 scope enforcement).
+   *
+   * Semantics by actor shape (see {@link DataSourceActor}):
+   * - bare user-id string / undefined: OWNER-ONLY — unchanged legacy behavior
+   *   for data-plane call sites (facade, workbench).
+   * - actor context with `platformAdmin: true`: passes for any EXISTING
+   *   source — the management tier that already holds the rbac global-admin
+   *   bypass over `data_sources:*` codes is no longer stopped here.
+   * - actor context without platformAdmin: owner equality on `userId`.
+   *
+   * Throws the same "not found" wording as getDataSource in every refusal so
+   * callers return a uniform 404 — a non-admin non-owner must not learn that
+   * someone else's source exists. A platform admin probing a nonexistent id
+   * gets the identical not-found.
+   *
+   * workspace_id is stored but NOT consulted (phase-2 lever: workspace-shared
+   * access would extend this single choke point, and every call site would
+   * inherit it).
    */
-  assertAccess(id: string, ownerId: string | undefined): void {
+  assertAccess(id: string, actor: DataSourceActor): void {
     const scope = this.scopes.get(id)
-    if (!this.adapters.has(id) || !scope || scope.ownerId !== ownerId) {
+    if (!this.adapters.has(id) || !scope) {
+      throw new Error(`Data source with id '${id}' not found`)
+    }
+    const { userId, platformAdmin } = normalizeActor(actor)
+    if (platformAdmin === true) return
+    if (userId === undefined || scope.ownerId !== userId) {
       throw new Error(`Data source with id '${id}' not found`)
     }
   }
 
   /** Stored ownership scope for a data source, if present. */
-  getScope(id: string): { ownerId: string; workspaceId: string | null } | undefined {
+  getScope(id: string): {
+    ownerId: string
+    workspaceId: string | null
+    tenantId: string | null
+    scopeKind: DataSourceScopeKind
+  } | undefined {
     return this.scopes.get(id)
   }
 
   /**
-   * Internal method to add data source to memory
+   * COUNT of integration_external_systems rows that reference this source (the
+   * referential delete guard's input), across BOTH migration-time shapes:
+   * - canonical rows whose connection_id equals the id; and
+   * - legacy-only rows whose connection_id is NULL, config->>'dataSourceId'
+   *   equals the id, and server-stamped config->>'dataSourceOwnerId' equals the
+   *   source's OWNER.
+   *
+   * The explicit connection_id IS NULL predicate prevents a migrated row that
+   * retains its rollback pointer from being counted twice.
+   *
+   * WHY owner-attributed, not raw (P2-A): the raw dataSourceId match let any
+   * integration:write holder in ANY tenant pin a foreign user's source id and
+   * make it permanently un-deletable by its owner, and the count aggregated
+   * across tenants. data_sources carries no tenant column — owner_id is its
+   * only authority key, and the integration read path already authorizes
+   * per-owner (the plugin facade refuses non-owner principals at every read,
+   * and a pipeline's runtime principal is its creator) — so owner-attribution
+   * is the join the model actually supports. The stamp is written server-side
+   * at bind time by the external-system registry AFTER the facade's
+   * assertReferenceable validated principal == owner; a client cannot forge
+   * it. Unstamped rows (legacy, or written past the API) do not count: their
+   * attribution is unknowable, and an unattributable reference must not deny
+   * the owner their delete — its read path already fails closed per-owner at
+   * runtime, exactly as before this guard existed.
+   *
+   * Failure posture:
+   * - No bound db: the manager is memory-only, nothing persisted can hold a
+   *   reference — 0 is exact, not fail-open.
+   * - SQLSTATE 42P01 (undefined_table): the integration schema is not
+   *   installed, the referencing layer does not exist — 0 is exact. STRICTLY
+   *   the code, never message prose (P2-B): a non-schema failure worded like
+   *   a missing table must fail the delete CLOSED, and if these tables ever
+   *   move to a separate DB a message heuristic would become genuinely
+   *   fail-open.
+   * - Any OTHER query failure propagates — the delete does not happen.
+   */
+  async countExternalSystemReferences(id: string): Promise<number> {
+    if (!this.db) return 0
+    const ownerId = this.scopes.get(id)?.ownerId
+    // No known owner scope → nothing can be attributed to it. (Route callers
+    // sit behind assertAccess, so the scope exists on every real delete path.)
+    if (ownerId === undefined) return 0
+    let canonicalCount: number
+    try {
+      const canonicalRows = await this.db
+        .selectFrom('integration_external_systems' as never)
+        .select(sql<number>`count(*)::int`.as('count') as never)
+        .where('connection_id' as never, '=', id as never)
+        .execute() as Array<{ count: number }>
+      canonicalCount = canonicalRows[0]?.count ?? 0
+    } catch (err) {
+      // Only the FIRST observation may prove that the referencing layer does
+      // not exist. Once the table has been observed, a later 42P01 is a DDL
+      // race/failure and must propagate rather than discarding a canonical
+      // count that may already be non-zero.
+      if ((err as { code?: string } | null)?.code === UNDEFINED_TABLE_SQLSTATE) return 0
+      throw err
+    }
+
+    const legacyRows = await this.db
+      .selectFrom('integration_external_systems' as never)
+      .select(sql<number>`count(*)::int`.as('count') as never)
+      .where('connection_id' as never, 'is', null as never)
+      .where(sql`config->>'dataSourceId'` as never, '=', id as never)
+      .where(sql`config->>'dataSourceOwnerId'` as never, '=', ownerId as never)
+      .execute() as Array<{ count: number }>
+    return canonicalCount + (legacyRows[0]?.count ?? 0)
+  }
+
+  /**
+   * Internal method to add data source to memory.
+   *
+   * `phase` distinguishes the DEPLOY-controlled LOAD path (`loadFromDatabase`, which re-observes the
+   * sources that existed at process start) from the RUNTIME (API) path (`addDataSource` /
+   * `updateDataSource`). Only the load path may PIN an armed source's connection (FIX 2); the runtime
+   * path never pins here — its arm-provisioning refusal happens earlier, before persistence.
    */
   private async addDataSourceInternal(
     config: DataSourceConfig,
-    autoConnect = true
+    autoConnect = true,
+    phase: 'load' | 'runtime' = 'runtime'
   ): Promise<BaseDataAdapter> {
     if (this.adapters.has(config.id)) {
       throw new Error(`Data source with id '${config.id}' already exists`)
@@ -427,6 +726,16 @@ export class DataSourceManager extends EventEmitter {
 
     this.adapters.set(config.id, adapter)
 
+    // SQL WRITE ARM-BINDING (P1 + FIX 2): pin this source's connection fingerprint — but ONLY on the
+    // DEPLOY-controlled LOAD path. FIRST-SEEN-WINS, so a later redirect does NOT move the pin, and a
+    // revival after removeDataSource re-enters here but the pin persists. The RUNTIME (API) create /
+    // redirect path does NOT pin: an armed id that was never provisioned at load cannot be pinned by an
+    // API-tier create (that is refused before persistence in addDataSource/updateDataSource), and an
+    // unarmed source runtime-pinning itself and then being armed-without-restart is likewise closed.
+    if (phase === 'load') {
+      pinSqlSourceConnection(config.id, config.connection as Record<string, unknown> | undefined)
+    }
+
     // Auto-connect if specified
     if (autoConnect && config.options?.autoConnect !== false) {
       await this.connectDataSource(config.id)
@@ -441,11 +750,13 @@ export class DataSourceManager extends EventEmitter {
   private async persistDataSource(
     config: DataSourceConfig,
     ownerId: string,
-    workspaceId?: string
+    workspaceId: string | null | undefined,
+    tenantId: string | null,
+    scopeKind: DataSourceScopeKind
   ): Promise<void> {
     if (!this.db) return
 
-    const record = this.configToRecord(config, ownerId, workspaceId)
+    const record = this.configToRecord(config, ownerId, workspaceId, tenantId, scopeKind)
 
     await this.db
       .insertInto('data_sources' as never)
@@ -457,6 +768,8 @@ export class DataSourceManager extends EventEmitter {
           config: record.config,
           owner_id: record.owner_id,
           workspace_id: record.workspace_id,
+          tenant_id: record.tenant_id,
+          scope_kind: record.scope_kind,
           status: record.status,
           auto_connect: record.auto_connect,
           // Revive a previously soft-deleted row (remove() sets these) so an
@@ -557,7 +870,12 @@ export class DataSourceManager extends EventEmitter {
     // Reuse existing connection promise if connecting
     let connectionPromise = this.connectionPool.get(id)
     if (connectionPromise) {
-      return connectionPromise
+      // A piggy-backing caller shares the in-flight connect, so it must receive the SAME values-free
+      // refusal as the originator — otherwise a /schema landing while /select connects would still
+      // surface the raw driver text this translation exists to suppress.
+      return connectionPromise.catch((error: unknown) => {
+        throw sourceUnavailableError(id, error, adapter)
+      })
     }
 
     connectionPromise = adapter.connect()
@@ -565,6 +883,11 @@ export class DataSourceManager extends EventEmitter {
 
     try {
       await connectionPromise
+    } catch (error) {
+      // VALUES-FREE REFUSAL (#2). See sourceUnavailableError above: a fixed 503 SOURCE_UNAVAILABLE
+      // for the client, the cause to the log only. The callers that used to forward `error.message`
+      // verbatim (routes /schema, /tables/:table, /:id/connect) now forward this fixed sentence.
+      throw sourceUnavailableError(id, error, adapter)
     } finally {
       this.connectionPool.delete(id)
     }
@@ -695,9 +1018,22 @@ export class DataSourceManager extends EventEmitter {
     params?: DbValue[]
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
+    // The C6 write-gated marker refuses the RAW query path outright and predates this gate; it keeps
+    // precedence because it is the more specific diagnosis for that source (and it refuses reads too,
+    // which the capability gate deliberately does not).
     if (isGenericQueryDisabledConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
     }
+    // W-1(c) DEFAULT-DENY SQL WRITE GATE, fail-early before connect. A pure read passes free; anything
+    // else requires this data source to be an ARMED target. The adapter's own query() re-checks at the
+    // true chokepoint, so a caller who skips this wrapper is still refused; this layer only saves a
+    // connect. The gate never inspects what the statement writes TO. The arm-binding additionally
+    // revokes an armed source whose connection has been redirected since it was pinned.
+    assertSqlWriteAllowed(
+      (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+      sql,
+      { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType(), connection: adapter.getConfig().connection },
+    )
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -727,6 +1063,10 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    // G-4 DESTINATION FENCE (insert). Refuse a K3 destination — declared (marker) or betrayed by a
+    // K3 business-table target — before connecting or touching the driver. This is the chokepoint the
+    // by-kind fences leak past: a sql-write-gated source pointed at K3 arrives here as a generic write.
+    assertNotK3Destination(adapter.getConfig())
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -743,6 +1083,9 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    // G-4 DESTINATION FENCE (update). Same refusal as insert — a K3 destination is a K3 destination
+    // whichever mutation verb reaches it.
+    assertNotK3Destination(adapter.getConfig())
 
     if (!adapter.isConnected()) {
       await this.connectDataSource(dataSourceId)
@@ -758,6 +1101,8 @@ export class DataSourceManager extends EventEmitter {
   ): Promise<QueryResult<T>> {
     const adapter = this.getDataSource(dataSourceId)
     adapter.assertWritable() // defense-in-depth: reject mutations on a read-only source
+    // G-4 DESTINATION FENCE (delete). A delete against a K3 destination is an external write-back too.
+    assertNotK3Destination(adapter.getConfig())
     if (isC6WriteTargetConfig(adapter.getConfig())) {
       throw new Error(c6WriteTargetDeleteUnsupportedMessage(dataSourceId))
     }
@@ -784,6 +1129,11 @@ export class DataSourceManager extends EventEmitter {
     const startTime = Date.now()
     const sourceAdapter = this.getDataSource(sourceId)
     const targetAdapter = this.getDataSource(targetId)
+    // G-4 DESTINATION FENCE (copy target). copyData ends in `targetAdapter.insert(targetTable, ...)`,
+    // so the target side is a write into `targetTable`. Refuse a K3 destination here, before the
+    // first source read — a copy TO K3 is a K3 external write-back regardless of where the rows come
+    // from. The source side is a READ and is deliberately not fenced.
+    assertNotK3Destination(targetAdapter.getConfig())
     if (isGenericQueryDisabledConfig(sourceAdapter.getConfig())) {
       throw new Error(c6WriteTargetQueryDisabledMessage(sourceId))
     }
@@ -850,9 +1200,17 @@ export class DataSourceManager extends EventEmitter {
     // Execute queries in parallel
     const promises = queries.map(async ({ dataSourceId, sql, params, alias }) => {
       const adapter = this.getDataSource(dataSourceId)
+      // The C6 write-gated marker keeps precedence on the raw path, as in `query()` above.
       if (isGenericQueryDisabledConfig(adapter.getConfig())) {
         throw new Error(c6WriteTargetQueryDisabledMessage(dataSourceId))
       }
+      // W-1(c) DEFAULT-DENY SQL WRITE GATE. A federated leg runs raw SQL: a pure read passes, a write
+      // needs an armed target (and its connection must still match the pinned one).
+      assertSqlWriteAllowed(
+        (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+        sql,
+        { id: adapter.getConfig().id, name: adapter.getConfig().name, type: adapter.getType(), connection: adapter.getConfig().connection },
+      )
 
       if (!adapter.isConnected()) {
         await this.connectDataSource(dataSourceId)
@@ -877,40 +1235,65 @@ export class DataSourceManager extends EventEmitter {
     return allResults
   }
 
+  /**
+   * True when this id is visible to the scoping filter. Two filter shapes:
+   * - `{ actor }`: the authority model — platformAdmin sees every source;
+   *   a plain actor sees only its own (an actor with no userId sees NOTHING —
+   *   fail closed, unlike the legacy unfiltered call).
+   * - `{ ownerId }` (legacy): owner equality, unchanged.
+   * - no filter: unscoped (internal/ops callers only).
+   */
+  private scopePermitsListing(id: string, filter?: { ownerId?: string; actor?: DataSourceActor }): boolean {
+    if (filter && 'actor' in filter) {
+      const { userId, platformAdmin } = normalizeActor(filter.actor)
+      if (platformAdmin === true) return true
+      if (userId === undefined) return false
+      const scope = this.scopes.get(id)
+      return scope !== undefined && scope.ownerId === userId
+    }
+    if (filter?.ownerId !== undefined) {
+      const scope = this.scopes.get(id)
+      return scope !== undefined && scope.ownerId === filter.ownerId
+    }
+    return true
+  }
+
   // Management methods
-  listDataSources(filter?: { ownerId?: string }): Array<{
+  listDataSources(filter?: { ownerId?: string; actor?: DataSourceActor }): Array<{
     id: string
     name: string
     type: string
     connected: boolean
+    ownerId?: string
   }> {
     const sources: Array<{
       id: string
       name: string
       type: string
       connected: boolean
+      ownerId?: string
     }> = []
 
     for (const [id, adapter] of this.adapters) {
-      // A0.1: when an owner filter is supplied, only that owner's sources are listed
-      if (filter?.ownerId !== undefined) {
-        const scope = this.scopes.get(id)
-        if (!scope || scope.ownerId !== filter.ownerId) {
-          continue
-        }
+      // A0.1: scope the listing (owner filter, or the actor-tier model)
+      if (!this.scopePermitsListing(id, filter)) {
+        continue
       }
       sources.push({
         id,
         name: adapter.getName(),
         type: adapter.getType(),
-        connected: adapter.isConnected()
+        connected: adapter.isConnected(),
+        // Owner is management metadata (name/type/status/owner) — NEVER part
+        // of config/credentials. Lets an admin listing attribute each source.
+        ownerId: this.scopes.get(id)?.ownerId
       })
     }
 
     return sources
   }
 
-  async healthCheck(filter?: { ownerId?: string }): Promise<Map<string, {
+  async healthCheck(filter?: { ownerId?: string; actor?: DataSourceActor }): Promise<Map<string, {
     connected: boolean
     responsive: boolean
     latency?: number
@@ -924,11 +1307,8 @@ export class DataSourceManager extends EventEmitter {
     for (const [id, adapter] of this.adapters) {
       // A0.1: health is a read surface too; keep it scoped with list/get so
       // fixing the /health route shadow does not leak cross-owner source ids.
-      if (filter?.ownerId !== undefined) {
-        const scope = this.scopes.get(id)
-        if (!scope || scope.ownerId !== filter.ownerId) {
-          continue
-        }
+      if (!this.scopePermitsListing(id, filter)) {
+        continue
       }
 
       const startTime = Date.now()

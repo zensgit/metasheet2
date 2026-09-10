@@ -115,6 +115,11 @@ const ALLOWLIST: Record<
     disposition: 'SAFE',
     reason: 'W7-1 approval-result backwrite writes ONLY system outcome values (status enum / approver id / ISO timestamp) — never user-supplied longText',
   },
+  'services/elearning-stats-multitable-projection.ts': {
+    disposition: 'SAFE',
+    reason:
+      'writes only the fixed aggregate projection columns (department identity/date/counts/rates/credits/timestamps); suppressed groups contain no metric values and no rich-longText field exists in the system-owned schema',
+  },
   'multitable/side-door-delete-trash.ts': {
     disposition: 'SAFE',
     reason:

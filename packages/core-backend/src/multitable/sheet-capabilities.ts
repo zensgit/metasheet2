@@ -6,6 +6,13 @@
 
 import { listUserPermissions, isAdmin } from '../rbac/service'
 import { APPROVAL_PROJECTION_BASE_ID, restrictApprovalProjectionCapabilitiesPerRow } from './approval-projection-constants'
+import { loadElearningProjectionSheetOrgMap } from './elearning-projection-access'
+import {
+  deriveElearningProjectionSheetId,
+  hasElearningProjectionAdminAuthority,
+  restrictElearningProjectionCapabilities,
+} from './elearning-projection-constants'
+import { deriveCanManageFields } from './manage-schema-permission'
 
 // ── Permission code sets ────────────────────────────────────────────
 
@@ -75,6 +82,10 @@ export function hasPermission(permissions: string[], code: string): boolean {
 export function deriveCapabilities(permissions: string[], isAdminRole: boolean): MultitableCapabilities {
   const canRead = isAdminRole || hasPermission(permissions, 'multitable:read') || hasPermission(permissions, 'multitable:write')
   const canWrite = isAdminRole || hasPermission(permissions, 'multitable:write')
+  // Kept byte-for-byte in policy with multitable/access.ts's derivation (this file is that file's
+  // Yjs-bridge / OAPI-token clone): schema management needs `multitable:manage-schema`, not
+  // `multitable:write`. Both call the SAME helper so the two clones cannot drift apart.
+  const canManageFields = deriveCanManageFields(permissions, isAdminRole, hasPermission)
   const canManageSheetAccess = isAdminRole || hasPermission(permissions, 'multitable:share')
   const canComment = isAdminRole || hasPermission(permissions, 'comments:write') || hasPermission(permissions, 'comments:read')
   const canManageAutomation =
@@ -89,7 +100,7 @@ export function deriveCapabilities(permissions: string[], isAdminRole: boolean):
     canCreateRecord: canWrite,
     canEditRecord: canWrite,
     canDeleteRecord: canWrite,
-    canManageFields: canWrite,
+    canManageFields,
     canManageSheetAccess,
     canManageViews: canWrite,
     canComment,
@@ -233,6 +244,7 @@ export async function resolveSheetCapabilitiesForUser(
   query: QueryFn,
   sheetId: string,
   userId: string,
+  authenticatedTenantId?: string,
 ): Promise<{
   capabilities: MultitableCapabilities
   sheetScope?: SheetPermissionScope
@@ -273,6 +285,33 @@ export async function resolveSheetCapabilitiesForUser(
       capabilities = restrictApprovalProjectionCapabilitiesPerRow(capabilities, true, false, isParticipant)
     }
   }
+  const elearningProjectionOrgBySheet = await loadElearningProjectionSheetOrgMap(query, [sheetId])
+  if (elearningProjectionOrgBySheet.has(sheetId)) {
+    const orgId = elearningProjectionOrgBySheet.get(sheetId) ?? null
+    const projectionIdentityValid = Boolean(
+      orgId && sheetId === deriveElearningProjectionSheetId(orgId),
+    )
+    // Context-less callers (collab/Yjs/API-token helpers) cannot substitute
+    // user_orgs membership for the authenticated session tenant.
+    const tenantId = typeof authenticatedTenantId === 'string'
+      ? authenticatedTenantId.trim()
+      : ''
+    const authorized = Boolean(
+      projectionIdentityValid
+      && (
+        isAdminRole
+        || (
+          tenantId === orgId
+          && hasElearningProjectionAdminAuthority(permissions, false)
+        )
+      ),
+    )
+    capabilities = restrictElearningProjectionCapabilities(
+      capabilities,
+      true,
+      authorized,
+    )
+  }
   return {
     capabilities,
     ...(sheetScope ? { sheetScope } : {}),
@@ -311,8 +350,6 @@ export function ensureRecordWriteAllowed(
   createdBy: string | null | undefined,
   action: 'edit' | 'delete',
 ): boolean {
-  if (access.isAdminRole) return true
-
   if (!requiresOwnWriteRowPolicy(scope, access.isAdminRole)) {
     // No own-write restriction: just check capability
     return action === 'edit' ? capabilities.canEditRecord : capabilities.canDeleteRecord
@@ -335,7 +372,6 @@ export function canWriteRecord(
   userId: string,
   recordCreatedBy: string | null | undefined,
 ): boolean {
-  if (isAdminRole) return true
   if (!requiresOwnWriteRowPolicy(scope, isAdminRole)) {
     return capabilities.canEditRecord
   }

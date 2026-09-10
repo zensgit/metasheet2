@@ -164,8 +164,8 @@
       </div>
       <div v-if="isDataSourceBridgeKind" class="integration-workbench__grid integration-workbench__grid--compact" data-testid="data-source-bridge-picker">
         <label>
-          <span>数据源(只读)</span>
-          <select v-model="connectionDraft.dataSourceId" data-testid="data-source-bridge-id" @change="onBridgeDataSourceChange">
+          <span>connectionId（只读数据源）</span>
+          <select v-model="connectionDraft.connectionId" data-testid="data-source-bridge-id" @change="onBridgeDataSourceChange">
             <option value="">请选择已配置的数据源</option>
             <option v-for="ds in bridgeDataSources" :key="ds.id" :value="ds.id">{{ ds.name }} · {{ ds.type }}</option>
           </select>
@@ -175,7 +175,7 @@
           <select
             v-model="connectionDraft.dataSourceObject"
             data-testid="data-source-bridge-object"
-            :disabled="bridgeDataSourceObjectsLoading || !connectionDraft.dataSourceId || bridgeDataSourceObjectOptions.length === 0"
+            :disabled="bridgeDataSourceObjectsLoading || !connectionDraft.connectionId || bridgeDataSourceObjectOptions.length === 0"
           >
             <option value="">{{ bridgeDataSourceObjectOptions.length > 0 ? '请选择表 / 视图' : '请先加载表 / 视图列表' }}</option>
             <option v-for="object in bridgeDataSourceObjectOptions" :key="object.value" :value="object.value">
@@ -184,9 +184,9 @@
           </select>
         </label>
         <p v-if="bridgeDataSourceObjectsLoading" class="integration-workbench__hint" data-testid="data-source-bridge-object-loading">正在加载表 / 视图列表...</p>
-        <p v-if="!bridgeDataSourceObjectsLoading && connectionDraft.dataSourceId && bridgeDataSourceObjectOptions.length === 0 && !bridgeDataSourceObjectsError" class="integration-workbench__hint" data-testid="data-source-bridge-object-empty">没有可选表 / 视图；请回 /data-sources 检查权限或 schema。</p>
+        <p v-if="!bridgeDataSourceObjectsLoading && connectionDraft.connectionId && bridgeDataSourceObjectOptions.length === 0 && !bridgeDataSourceObjectsError" class="integration-workbench__hint" data-testid="data-source-bridge-object-empty">没有可选表 / 视图；请回 /data-sources 检查权限或 schema。</p>
         <p v-if="selectedBridgeObjectSummary" class="integration-workbench__hint" data-testid="data-source-bridge-object-summary">{{ selectedBridgeObjectSummary }}</p>
-        <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由 /data-sources 管理,这里只引用 dataSourceId,不复制账号密码。</p>
+        <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由 /data-sources 管理,这里只在 connectionId 中引用数据源 ID，不复制账号密码。</p>
         <p v-if="bridgeDataSourcesError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-error">{{ bridgeDataSourcesError }}</p>
         <p v-if="bridgeDataSourceObjectsError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-object-error">{{ bridgeDataSourceObjectsError }}</p>
       </div>
@@ -203,6 +203,12 @@
           <router-link to="/integrations/k3-wise" data-testid="connection-draft-k3-setup-link">
             {{ bi('前往 K3 WISE 设置向导', 'Open the K3 WISE setup wizard') }}
           </router-link>
+        </p>
+        <p class="integration-workbench__hint" data-testid="connection-draft-config-patch-hint">
+          {{ bi(
+            '保存时 config 按“补丁”合并：这里没写的键会保留原值,写了的键覆盖原值,要清除某个键请显式写成 null。',
+            'On save, config is merged as a PATCH: keys you leave out keep their stored value, keys you write replace it, and clearing one means writing it as null.',
+          ) }}
         </p>
         <div class="integration-workbench__grid integration-workbench__grid--compact">
           <label>

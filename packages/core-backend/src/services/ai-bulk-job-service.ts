@@ -37,10 +37,13 @@
  *
  * SCOPE (Slice 1): crash coverage is the IN-PROCESS exception path — runJob wraps the
  * worker body after the claim and maps any unexpected throw to `errored` (see runJob). A
- * HARD process restart is NOT auto-reconciled here: the in-memory queue + plan registry are
- * gone, so runJob is never re-invoked, and a job left `queued`/`running` stays active until
- * reconciled. That startup/poll reconciliation (stale `queued`/`running` → `errored`) is a
- * B-4 follow-up, not implemented in Slice 1.
+ * HARD process restart is NOT auto-reconciled in-process: the in-memory queue + plan registry
+ * are gone, so runJob is never re-invoked, and a job left `queued`/`running` would stay active
+ * until reconciled. That reconciliation is implemented (B-4 follow-up, `reconcileOrphanedBulkJobs`
+ * below) and wired to run once at boot (see packages/core-backend/src/index.ts, ~:3758-3768).
+ * Residual gap: only the STARTUP sweep exists — there is no periodic sweep, so a long-lived
+ * instance never re-sweeps between restarts; a job orphaned mid-uptime stays stuck until the
+ * next process restart.
  */
 
 import { randomUUID, createHash } from 'crypto'
@@ -459,8 +462,10 @@ export const DEFAULT_BULK_JOB_RECONCILE_STALE_MS = 10 * 60 * 1000
  * `suspended` jobs are EXCLUDED — they are intentionally paused awaiting review,
  * not orphaned. The `staleAfterMs` age guard avoids racing a just-claimed job in a
  * multi-instance deploy: only jobs whose `updated_at` has been quiet longer than
- * the guard are reconciled (a live worker advances `updated_at` per row). Run at
- * startup and/or on a periodic sweep. Returns the number of jobs reconciled.
+ * the guard are reconciled (a live worker advances `updated_at` per row). Wired to run at
+ * startup (see packages/core-backend/src/index.ts, ~:3758-3768); there is no periodic sweep,
+ * so a long-lived instance never re-sweeps between restarts. Returns the number of jobs
+ * reconciled.
  */
 export async function reconcileOrphanedBulkJobs(
   query: AiUsageQueryFn,
@@ -644,7 +649,8 @@ export class BulkFillJobService {
       // runJob was invoked with NO registered plan (an in-process plan loss) → mark errored;
       // the persisted partial (any seeded/generated rows) stays committable (BJ-5). NOTE: this
       // does NOT fire on a hard process restart — the queue is empty then, so runJob is never
-      // re-invoked; reconciling stale queued/running jobs is a B-4 follow-up (startup/poll sweep).
+      // re-invoked; reconciling stale queued/running jobs after a restart is instead handled by
+      // reconcileOrphanedBulkJobs, wired at boot (B-4 follow-up, implemented — no periodic sweep).
       await markErroredIfRunning(query, jobId)
       return
     }

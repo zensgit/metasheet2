@@ -30,7 +30,12 @@ import type {
 // ---------------------------------------------------------------------------
 // Mock-mode flag
 // ---------------------------------------------------------------------------
-const USE_MOCK = import.meta.env.DEV || (globalThis as any).__APPROVAL_MOCK__ === true
+const APPROVAL_MOCK_OVERRIDE = (globalThis as { __APPROVAL_MOCK__?: boolean }).__APPROVAL_MOCK__
+// DEV keeps its existing mock-by-default behavior. A mounted browser harness may explicitly set
+// the override to false before dynamically importing the approval surface so Playwright can drive
+// the real fetch path; production has no override and remains network-backed as before.
+const USE_MOCK = APPROVAL_MOCK_OVERRIDE === true
+  || (import.meta.env.DEV && APPROVAL_MOCK_OVERRIDE !== false)
 
 // ---------------------------------------------------------------------------
 // Mock data factories
@@ -1093,10 +1098,10 @@ export async function previewApprovalRoute(req: CreateApprovalRequest): Promise<
  * allows an org-structure probe on — guarded server-side by `canManageTemplates`). Same output
  * shape as `previewApprovalRoute` (shared substrate, no parallel impl).
  *
- * `templateRoutePreviewPath` is split out purely so the templateId URL-encoding is independently
- * unit-testable: `USE_MOCK` is `import.meta.env.DEV || ...` and DEV is always `true` under this
- * project's Vitest run (see `approvalApiErrorSurfacing.spec.ts`), so calling
- * `previewTemplateRoute` itself in a test can only ever exercise the mock branch below.
+ * `templateRoutePreviewPath` is split out so the templateId URL-encoding remains independently
+ * unit-testable. Normal Vitest DEV runs retain the mock-by-default path; the mounted browser
+ * harness may explicitly disable that mock before module initialization to exercise the real
+ * network branch.
  */
 export function templateRoutePreviewPath(templateId: string): string {
   return `/api/approval-templates/${encodeURIComponent(templateId)}/route-preview`
@@ -1356,6 +1361,74 @@ export async function searchApprovalDirectoryUsers(
   }
 }
 
+export interface ApprovalDirectoryDepartment {
+  id: string
+  name: string
+  fullPath: string
+  parentId?: string
+  hasChildren: boolean
+}
+
+export interface ApprovalDepartmentDirectoryResult {
+  departments: ApprovalDirectoryDepartment[]
+  requesterDepartmentId?: string
+}
+
+export async function searchApprovalDirectoryDepartments(
+  q: string,
+  limit = 20,
+  treeParentId?: string | null,
+): Promise<ApprovalDepartmentDirectoryResult> {
+  try {
+    const params = new URLSearchParams()
+    const normalized = q.trim()
+    if (normalized) params.set('q', normalized)
+    params.set('limit', String(limit))
+    if (treeParentId !== undefined) {
+      params.set('mode', 'tree')
+      if (treeParentId) params.set('parentId', treeParentId)
+    }
+    const response = await apiFetch(`/api/approvals/directory/departments?${params.toString()}`)
+    if (!response.ok) return { departments: [] }
+    const payload = await response.json().catch(() => null) as {
+      departments?: unknown
+      requesterDepartmentId?: unknown
+    } | null
+    if (!payload || !Array.isArray(payload.departments)) return { departments: [] }
+    const departments: ApprovalDirectoryDepartment[] = []
+    for (const entry of payload.departments) {
+      if (!entry || typeof entry !== 'object') continue
+      const record = entry as Record<string, unknown>
+      if (
+        typeof record.id !== 'string'
+        || !record.id.trim()
+        || typeof record.name !== 'string'
+        || !record.name.trim()
+        || typeof record.fullPath !== 'string'
+        || !record.fullPath.trim()
+        || typeof record.hasChildren !== 'boolean'
+      ) continue
+      departments.push({
+        id: record.id,
+        name: record.name.trim(),
+        fullPath: record.fullPath.trim(),
+        ...(typeof record.parentId === 'string' && record.parentId.trim()
+          ? { parentId: record.parentId }
+          : {}),
+        hasChildren: record.hasChildren,
+      })
+    }
+    return {
+      departments,
+      ...(typeof payload.requesterDepartmentId === 'string' && payload.requesterDepartmentId.trim()
+        ? { requesterDepartmentId: payload.requesterDepartmentId }
+        : {}),
+    }
+  } catch {
+    return { departments: [] }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
 // stays admin-only) — authorized-scope EXACT batch id->name resolver, wrapping GET
@@ -1520,4 +1593,115 @@ export async function listApprovalRecordLinkOptions(params: {
   } catch {
     return { ok: false, status: 0, code: 'NETWORK_ERROR', message: 'Network error' }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Admin 批量转交 (P1b slice 3) — the web caller for the ALREADY-SHIPPED bulk
+// reassign endpoint. No backend behaviour is added or changed here.
+// ---------------------------------------------------------------------------
+
+/**
+ * The approver-scoped pending read the 批量转交 page lists before it acts.
+ *
+ * WIRE SHAPE, pinned deliberately (see approvalBatchTransferView.spec.ts):
+ *   - `assignee` is the existing GET /api/approvals filter (an active
+ *     approval_assignments row for that id) — no new parameter.
+ *   - `status=pending` is sent WITHOUT `tab`. That combination is what the
+ *     route serves on the server-determined scope plus the status filter
+ *     alone; sending `tab=pending` instead would conjoin the tab's own
+ *     ACTIVE-SEAT subquery, which binds the CALLING actor's seats — the page
+ *     would then list the admin's own queue while claiming to show the picked
+ *     approver's.
+ *   - `sourceSystem=platform` matches the domain `bulkReassignApprovals` acts
+ *     on (`COALESCE(source_system,'platform') = 'platform'`), so a PLM mirror
+ *     can never be listed as transferable and then skipped as `not-found`.
+ *   - `limit=200` is the endpoint's own MAX_APPROVAL_PAGE_SIZE and the same
+ *     cap the service applies to an explicit `instanceIds` array.
+ *
+ * PERMISSIONS ARE NOT RELAXED by this call. It reads through the same
+ * projection every approvals:read caller uses; an admin sees another
+ * approver's rows only because the list scope already admits every row for an
+ * admin principal. A non-admin calling this simply gets their own scope.
+ */
+export const APPROVAL_BATCH_TRANSFER_PAGE_LIMIT = 200
+
+export async function listPendingApprovalsForApprover(
+  approverUserId: string,
+): Promise<{ data: UnifiedApprovalDTO[]; total: number }> {
+  const params = new URLSearchParams()
+  params.set('sourceSystem', 'platform')
+  params.set('status', 'pending')
+  params.set('assignee', approverUserId)
+  params.set('limit', String(APPROVAL_BATCH_TRANSFER_PAGE_LIMIT))
+  params.set('offset', '0')
+  return apiGet(`/api/approvals?${params.toString()}`)
+}
+
+/**
+ * Mirrors the backend's `ApprovalBulkReassignSkipReason` union verbatim. A
+ * value outside this set is rendered through the unknown-code fallback rather
+ * than being dropped, so a future server-side addition surfaces instead of
+ * silently disappearing from the per-row report.
+ */
+export type ApprovalBulkReassignSkipReason =
+  | 'not-found'
+  | 'not-pending'
+  | 'not-assigned'
+  | 'target-is-requester'
+  | 'target-already-assignee'
+  | 'target-user-invalid'
+  | 'error'
+
+export interface ApprovalBulkReassignPayload {
+  fromUserId: string
+  toUserId: string
+  reason: string
+  instanceIds: string[]
+}
+
+export interface ApprovalBulkReassignResultDTO {
+  succeeded: string[]
+  skipped: Array<{ id: string; reason: ApprovalBulkReassignSkipReason | string }>
+  affectedRequesterIds: string[]
+}
+
+/**
+ * POST /api/approvals/admin/reassign — the existing endpoint, guarded by
+ * `rbacGuard('approvals:admin')` server-side.
+ *
+ * The response is ENVELOPED (`{ ok: true, data: <result> }`), so the envelope
+ * is unwrapped here rather than in the view — returning the raw fetch typed as
+ * the result is the defect `normalizeApprovalHistoryEnvelope` above exists to
+ * document.
+ *
+ * NO MOCK BRANCH, unlike most of this module: a `USE_MOCK` short-circuit is
+ * true under vitest (`import.meta.env.DEV`), which would make every payload
+ * assertion in the spec vacuously green — the request would never be built.
+ */
+export async function bulkReassignApprovals(
+  payload: ApprovalBulkReassignPayload,
+): Promise<ApprovalBulkReassignResultDTO> {
+  const response = await apiPost<unknown>('/api/approvals/admin/reassign', payload)
+  return normalizeBulkReassignEnvelope(response)
+}
+
+export function normalizeBulkReassignEnvelope(payload: unknown): ApprovalBulkReassignResultDTO {
+  const root = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {}
+  const data = root.data && typeof root.data === 'object' ? root.data as Record<string, unknown> : root
+  const succeeded = Array.isArray(data.succeeded)
+    ? data.succeeded.filter((id): id is string => typeof id === 'string')
+    : []
+  const skipped = Array.isArray(data.skipped)
+    ? data.skipped
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object')
+        .map((entry) => ({
+          id: typeof entry.id === 'string' ? entry.id : '',
+          reason: typeof entry.reason === 'string' ? entry.reason : 'error',
+        }))
+        .filter((entry) => entry.id.length > 0)
+    : []
+  const affectedRequesterIds = Array.isArray(data.affectedRequesterIds)
+    ? data.affectedRequesterIds.filter((id): id is string => typeof id === 'string')
+    : []
+  return { succeeded, skipped, affectedRequesterIds }
 }

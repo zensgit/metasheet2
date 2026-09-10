@@ -54,7 +54,8 @@ const STRICT_FLAG = 'MULTITABLE_HISTORY_CONTIGUITY_STRICT'
 type Actor = { id: string; roles: string[]; perms: string[] }
 // 'multitable:share' is what `canManageSheetAccess` actually keys on (sheet-capabilities.ts) — needed for
 // the revert-preview positive control (D2: a sheet-wide revert needs a sheet-admin cap, above plain write).
-const MANAGER: Actor = { id: `u_tfrr_mgr_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+const MANAGER: Actor = { id: `u_tfrr_mgr_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema'] }
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 let app: Express

@@ -17,7 +17,25 @@ const { STOCK_PREP_AUDIT_ACTIONS, AUDIT_TABLE } = require(path.join(__dirname, '
 const repoRoot = path.resolve(__dirname, '..', '..', '..')
 const migrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '066_create_integration_stock_prep_audit.sql')
 const rawSql = fs.readFileSync(migrationPath, 'utf8')
-const vocabularyMigrationPath = path.join(repoRoot, 'packages', 'core-backend', 'migrations', '067_extend_stock_prep_audit_repair_action.sql')
+// THE VOCABULARY MIGRATION IS THE *LATEST* ONE, DISCOVERED — not a name typed here.
+//
+// The set-equality assertion below is only load-bearing if it reads the constraint the database
+// actually ends up with. Pinning the filename to `067` made that true for exactly as long as 067
+// was last: adding `source_binding_set` to the store plus an `080` that widens the CHECK would have
+// left this file asserting 067's nine-action list against a ten-action constant and reading RED for
+// the wrong reason — or, had someone "fixed" it by editing the constant back, left a store action
+// the DB rejects. So the effective vocabulary is resolved the way Postgres resolves it: the
+// highest-numbered migration that replaces this constraint wins.
+const MIGRATIONS_DIR = path.join(repoRoot, 'packages', 'core-backend', 'migrations')
+const VOCABULARY_CONSTRAINT_RE = /ADD CONSTRAINT integration_stock_prep_audit_action_check CHECK \(action IN \(/
+const vocabularyMigrationFile = fs
+  .readdirSync(MIGRATIONS_DIR)
+  .filter((name) => name.endsWith('.sql'))
+  .filter((name) => VOCABULARY_CONSTRAINT_RE.test(fs.readFileSync(path.join(MIGRATIONS_DIR, name), 'utf8')))
+  .sort()
+  .pop()
+assert.ok(vocabularyMigrationFile, 'at least one migration must install the closed action CHECK vocabulary')
+const vocabularyMigrationPath = path.join(MIGRATIONS_DIR, vocabularyMigrationFile)
 const rawVocabularySql = fs.readFileSync(vocabularyMigrationPath, 'utf8')
 // Strip full-line SQL comments BEFORE matching so an assertion can never be satisfied by
 // commented-out DDL.
@@ -44,14 +62,15 @@ for (const column of ['id', 'tenant_id', 'workspace_id', 'project_id', 'action',
 assert.match(block, /tenant_id\s+TEXT NOT NULL/, 'tenant_id is required')
 assert.match(block, /detail\s+JSONB NOT NULL DEFAULT '\{\}'::jsonb/, 'detail is values-free JSONB with an empty default')
 
-// The effective CHECK vocabulary after 067 is SET-EQUAL to the store constant.
+// The effective CHECK vocabulary after the LATEST vocabulary migration is SET-EQUAL to the store
+// constant.
 assert.match(
   vocabularySql,
   /DROP CONSTRAINT IF EXISTS integration_stock_prep_audit_action_check/,
-  '067 replaces the original inline action check',
+  `${vocabularyMigrationFile} replaces the preceding action check`,
 )
 const checkMatch = vocabularySql.match(/ADD CONSTRAINT integration_stock_prep_audit_action_check CHECK \(action IN \(([\s\S]*?)\)\)/)
-assert.ok(checkMatch, '067 installs the expanded closed CHECK vocabulary')
+assert.ok(checkMatch, `${vocabularyMigrationFile} installs the expanded closed CHECK vocabulary`)
 const checkActions = [...checkMatch[1].matchAll(/'([a-z_]+)'/g)].map((entry) => entry[1]).sort()
 assert.deepEqual(checkActions, [...STOCK_PREP_AUDIT_ACTIONS].sort(), 'CHECK vocabulary must stay set-equal to STOCK_PREP_AUDIT_ACTIONS')
 

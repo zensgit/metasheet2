@@ -12,10 +12,16 @@ const mocks = vi.hoisted(() => ({
   createBase: vi.fn(),
   createSheet: vi.fn(),
   installTemplate: vi.fn(),
+  renameBase: vi.fn(),
 }))
 
 const FAVORITE_BASES_KEY = 'metasheet:multitable:favorite-base-ids:v1'
 const RECENT_BASES_KEY = 'metasheet:multitable:recent-base-opens:v1'
+// Rename affordance (feat/multitable-rename): this view has no per-base capability from
+// listBases(), so canRenameBase mirrors the server's canManageFields gate via the REAL
+// useAuth().hasPermission() (no useAuth mock here — see tests/useAuth.spec.ts for the same
+// user_permissions -> hasPermission() wiring this exercises end-to-end).
+const USER_PERMISSIONS_KEY = 'user_permissions'
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -35,6 +41,7 @@ vi.mock('../src/multitable/api/client', () => ({
     createBase: mocks.createBase,
     createSheet: mocks.createSheet,
     installTemplate: mocks.installTemplate,
+    renameBase: mocks.renameBase,
   },
 }))
 
@@ -89,6 +96,7 @@ describe('MultitableHomeView', () => {
     container = null
     localStorage.removeItem(FAVORITE_BASES_KEY)
     localStorage.removeItem(RECENT_BASES_KEY)
+    localStorage.removeItem(USER_PERMISSIONS_KEY)
     useLocale().setLocale('en')
     vi.clearAllMocks()
   })
@@ -336,5 +344,121 @@ describe('MultitableHomeView', () => {
     expect(link).not.toBeNull()
     expect(link?.textContent?.trim()).toContain('查看全部模板')
     expect(link?.getAttribute('data-router-link-to')).toContain(AppRouteNames.MULTITABLE_TEMPLATES)
+  })
+
+  // Rename affordance (feat/multitable-rename). Hiding is UX only: the server is the real
+  // enforcement (PATCH /api/multitable/bases/:id gates on canManageFields — an admin role or the
+  // multitable:manage-schema permission). This view has no per-base capability, so it mirrors that
+  // gate via the REAL useAuth().hasPermission(), driven end-to-end through the same
+  // user_permissions localStorage key useAuth.spec.ts exercises directly.
+  describe('base rename affordance', () => {
+    it('hides the rename affordance by default (no multitable:manage-schema permission)', async () => {
+      mocks.listBases.mockResolvedValue({
+        bases: [{ id: 'base_ops', name: 'Ops Base', color: '#0f766e' }],
+      })
+      mocks.listTemplates.mockResolvedValue({ templates: [] })
+
+      const root = mountView()
+      await flushUi()
+
+      expect(root.querySelector('[data-testid="home-base-rename"]')).toBeNull()
+    })
+
+    it('shows the rename affordance with multitable:manage-schema and renames via client.renameBase with the TRIMMED name', async () => {
+      localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+      mocks.listBases.mockResolvedValue({
+        bases: [{ id: 'base_ops', name: 'Ops Base', color: '#0f766e' }],
+      })
+      mocks.listTemplates.mockResolvedValue({ templates: [] })
+      mocks.renameBase.mockResolvedValue({ base: { id: 'base_ops', name: 'Ops Base Renamed' } })
+
+      const root = mountView()
+      await flushUi()
+
+      const renameBtn = root.querySelector<HTMLButtonElement>('[data-testid="home-base-rename"]')
+      expect(renameBtn).not.toBeNull()
+      renameBtn!.click()
+      await flushUi()
+
+      const input = root.querySelector<HTMLInputElement>('[data-testid="home-base-rename-input"]')
+      expect(input).not.toBeNull()
+      input!.value = '  Ops Base Renamed  '
+      input!.dispatchEvent(new Event('input'))
+      await flushUi()
+
+      root.querySelector<HTMLButtonElement>('[data-testid="home-base-rename-confirm"]')?.click()
+      await flushUi()
+
+      expect(mocks.renameBase).toHaveBeenCalledWith('base_ops', 'Ops Base Renamed')
+      expect(readBaseCardNames(root)).toEqual(['Ops Base Renamed'])
+      expect(root.querySelector('.multitable-home__error')).toBeNull()
+    })
+
+    it('a rejected client.renameBase (simulating the server 403) surfaces as an error message, not a silent success, and the card name is unchanged', async () => {
+      const message = 'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+      localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+      mocks.listBases.mockResolvedValue({
+        bases: [{ id: 'base_ops', name: 'Ops Base', color: '#0f766e' }],
+      })
+      mocks.listTemplates.mockResolvedValue({ templates: [] })
+      mocks.renameBase.mockRejectedValue(new Error(message))
+
+      const root = mountView()
+      await flushUi()
+
+      root.querySelector<HTMLButtonElement>('[data-testid="home-base-rename"]')?.click()
+      await flushUi()
+      const input = root.querySelector<HTMLInputElement>('[data-testid="home-base-rename-input"]')!
+      input.value = 'Ops Base Renamed'
+      input.dispatchEvent(new Event('input'))
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('[data-testid="home-base-rename-confirm"]')?.click()
+      await flushUi()
+
+      expect(mocks.renameBase).toHaveBeenCalledWith('base_ops', 'Ops Base Renamed')
+      expect(root.querySelector('.multitable-home__error')?.textContent).toBe(message)
+      expect(readBaseCardNames(root)).toEqual(['Ops Base']) // name unchanged on failure
+    })
+
+    it('confirming with an unchanged name does NOT call client.renameBase', async () => {
+      localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+      mocks.listBases.mockResolvedValue({
+        bases: [{ id: 'base_ops', name: 'Ops Base', color: '#0f766e' }],
+      })
+      mocks.listTemplates.mockResolvedValue({ templates: [] })
+
+      const root = mountView()
+      await flushUi()
+
+      root.querySelector<HTMLButtonElement>('[data-testid="home-base-rename"]')?.click()
+      await flushUi()
+      root.querySelector<HTMLButtonElement>('[data-testid="home-base-rename-confirm"]')?.click()
+      await flushUi()
+
+      expect(mocks.renameBase).not.toHaveBeenCalled()
+    })
+
+    it('Escape cancels the rename without calling client.renameBase', async () => {
+      localStorage.setItem(USER_PERMISSIONS_KEY, JSON.stringify(['multitable:manage-schema']))
+      mocks.listBases.mockResolvedValue({
+        bases: [{ id: 'base_ops', name: 'Ops Base', color: '#0f766e' }],
+      })
+      mocks.listTemplates.mockResolvedValue({ templates: [] })
+
+      const root = mountView()
+      await flushUi()
+
+      root.querySelector<HTMLButtonElement>('[data-testid="home-base-rename"]')?.click()
+      await flushUi()
+      const input = root.querySelector<HTMLInputElement>('[data-testid="home-base-rename-input"]')!
+      input.value = 'Should not be saved'
+      input.dispatchEvent(new Event('input'))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      await flushUi()
+
+      expect(mocks.renameBase).not.toHaveBeenCalled()
+      expect(root.querySelector('[data-testid="home-base-rename-input"]')).toBeNull()
+      expect(readBaseCardNames(root)).toEqual(['Ops Base'])
+    })
   })
 })

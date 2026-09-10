@@ -19,8 +19,13 @@ const COMMUNICATION_NAMESPACE = 'integration-core'
 const { createCredentialStore } = require('./lib/credential-store.cjs')
 const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
+const { createConnectionResolver } = require('./lib/connection-resolver.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
+const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
+const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
+const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
+const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
 } = require('./lib/stock-preparation-pack-install-store.cjs')
@@ -47,6 +52,14 @@ const { createWatermarkStore } = require('./lib/watermark.cjs')
 const { createRunLogger } = require('./lib/run-log.cjs')
 const { createErpFeedbackWriter } = require('./lib/erp-feedback.cjs')
 const { createPipelineRunner } = require('./lib/pipeline-runner.cjs')
+// W-2: the B2a read-authorization registry, built HERE as well as in http-routes so the pipeline
+// runner carries the fence too. The cross-plugin communication API below enters the runner directly
+// — no route, no `requireAccess` — so a fence that lived only in the HTTP layer left that door open.
+const {
+  createB2aRegistry,
+  B2A_AUTHORIZED_RUN_ID,
+  C6_WRITE_LIFECYCLE_CONTEXT,
+} = require('./lib/b2a-trial-registry.cjs')
 const { installStaging, listStagingDescriptors } = require('./lib/staging-installer.cjs')
 const { registerIntegrationRoutes } = require('./lib/http-routes.cjs')
 const {
@@ -71,7 +84,11 @@ let credentialStore = null
 let externalSystemRegistry = null
 let readSourceConfigStore = null
 let stockPreparationAuditStore = null
+let stockPreparationSourceBindingStore = null
+let stockPreparationHandoffStore = null
 let stockPreparationPackInstallStore = null
+let stockPreparationConfirmationDecisionLease = null
+let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
 let adapterRegistry = null
@@ -127,6 +144,34 @@ function redactDeadLetterForCommunication(deadLetter) {
   }
 }
 
+/**
+ * W-2 + R-wave. Strip BOTH server-only markers off cross-plugin input.
+ *
+ *   `B2A_AUTHORIZED_RUN_ID`        — decides whether the runner CONTINUES an existing operation
+ *                                    claim or takes its own. A caller able to set it could ride an
+ *                                    authorization somebody else was granted.
+ *   `C6_WRITE_LIFECYCLE_CONTEXT`   — asserts that a live write already passed the governed C6 write
+ *                                    lifecycle at an HTTP route. A caller able to set it would be
+ *                                    asserting that about itself, which is the whole bypass.
+ *
+ * Both are SYMBOLS, so neither can be expressed in JSON and neither can arrive over a cross-plugin
+ * call as things stand. Stripping them anyway costs two `hasOwnProperty` calls and removes the
+ * assumption: "not expressible in JSON" is a property of today's transport, not a fence.
+ *
+ * Returns the input UNCHANGED — same object, not a copy — when neither marker is present, which is
+ * every real call. The dormant path therefore hands the runner exactly what it handed it before.
+ */
+function withoutServerOnlyRunMarkers(input) {
+  if (!input || typeof input !== 'object') return input
+  const hasRunId = Object.prototype.hasOwnProperty.call(input, B2A_AUTHORIZED_RUN_ID)
+  const hasWriteContext = Object.prototype.hasOwnProperty.call(input, C6_WRITE_LIFECYCLE_CONTEXT)
+  if (!hasRunId && !hasWriteContext) return input
+  const sanitized = { ...input }
+  delete sanitized[B2A_AUTHORIZED_RUN_ID]
+  delete sanitized[C6_WRITE_LIFECYCLE_CONTEXT]
+  return sanitized
+}
+
 function redactReplayResultForCommunication(result) {
   if (!result || typeof result !== 'object') return result
   return {
@@ -164,7 +209,9 @@ function buildCommunicationApi() {
     },
     async upsertExternalSystem(input) {
       return requireInitialized(externalSystemRegistry, 'external system registry is not initialized')
-        .upsertExternalSystem(input)
+        // Cross-plugin calls carry no host-authenticated user context. Do not
+        // let a self-reported principal authorize a canonical Connection bind.
+        .upsertExternalSystem({ ...input, principal: undefined, runAs: 'service' })
     },
     async getExternalSystem(input) {
       return requireInitialized(externalSystemRegistry, 'external system registry is not initialized')
@@ -196,7 +243,17 @@ function buildCommunicationApi() {
       return requireInitialized(pipelineRegistry, 'pipeline registry is not initialized').listPipelineRuns(input)
     },
     async runPipeline(input) {
-      return requireInitialized(pipelineRunner, 'pipeline runner is not initialized').runPipeline(input)
+      // W-2: this is an IN-PROCESS source read. It reaches the runner without passing a route, so the
+      // B2a fence it meets is the runner's own — see `assertB2aPipelineSourceReadAuthorized`. On an
+      // armed deployment an unregistered caller is refused here before any credential reload.
+      //
+      // R-wave (finding 4): it is also an in-process WRITE whenever `dryRun` is not set, and it runs
+      // none of the C6 write lifecycle the HTTP routes run. With the marker stripped below, the
+      // runner's own `assertC6WriteLifecycleContext` refuses such a call on an armed deployment. The
+      // intended posture, stated plainly: cross-plugin DRY RUNS work; cross-plugin WRITES do not —
+      // a plugin that needs to write drives the governed HTTP surface, which owns the lifecycle.
+      return requireInitialized(pipelineRunner, 'pipeline runner is not initialized')
+        .runPipeline({ ...withoutServerOnlyRunMarkers(input), runAs: 'service' })
     },
     async listDeadLetters(input) {
       const rows = await requireInitialized(deadLetterStore, 'dead-letter store is not initialized')
@@ -213,7 +270,15 @@ function buildCommunicationApi() {
       if (typeof runner.replayDeadLetter !== 'function') {
         throw new Error('dead-letter replay is not implemented')
       }
-      return redactReplayResultForCommunication(await runner.replayDeadLetter(input))
+      // W-2: replay's source-read leg is `runPipeline`, which carries the runner's B2a fence, so this
+      // in-process door is gated on the same footing as the route.
+      //
+      // R-wave (finding 4): a replay is ALWAYS a live write — it re-enters `runPipeline` with no
+      // `dryRun` — so on an armed deployment this door is refused outright without the governed
+      // route's write-lifecycle context, which the stripper below guarantees it cannot forge.
+      return redactReplayResultForCommunication(
+        await runner.replayDeadLetter({ ...withoutServerOnlyRunMarkers(input), runAs: 'service' }),
+      )
     },
     async listStagingDescriptors() {
       return requireInitialized(stagingInstaller, 'staging installer is not initialized').listStagingDescriptors()
@@ -237,18 +302,53 @@ module.exports = {
       logger,
     })
     const sqlServerQueryExecutor = createK3WiseSqlServerReadOnlyExecutor({ logger })
+    const dataSourceFacade = (context.api && context.api.dataSources) || undefined
+    const sealedSnapshotFacade = context.services
+      && context.services.dataSourceSealedSnapshotConnections
+    const connectionResolver = createConnectionResolver({
+      facade: dataSourceFacade,
+      // Secret-bearing and deliberately separate from context.api.dataSources.
+      // The host injects it only for this plugin; ordinary Connection resolution
+      // remains values-free and never receives this capability's projection.
+      sealedSnapshotFacade,
+    })
     externalSystemRegistry = createExternalSystemRegistry({
       db,
       credentialStore,
+      // P2-A: bind-time validation of config.dataSourceId — the host read-only facade's
+      // assertReferenceable proves the authenticated principal OWNS the referenced core data
+      // source before the binding persists (and the registry stamps the owner server-side for
+      // the core delete guard's attributed count). Absent facade → dataSourceId binds fail closed.
+      dataSourceBinder: dataSourceFacade,
+      connectionResolver,
     })
     // S2-c (#1709): content-keyed read-source config versions + values-free audit.
     readSourceConfigStore = createReadSourceConfigStore({ db })
     // W5b (#3751/#3890): values-free audit trail for the stock-preparation write surface.
     stockPreparationAuditStore = createStockPreparationAuditStore({ db })
+    // 工作台里选源 (migration 079): the persisted per-(tenant,workspace,action) source pointer that
+    // overrides the deploy-time INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON default. Built
+    // here so the route layer can hand the table-action registry a per-REQUEST resolver — which is
+    // the whole mechanism by which changing the source stops needing a backend restart. Absent (no
+    // SQL db) → no resolver is wired → the action resolves the env default exactly as before.
+    stockPreparationSourceBindingStore = createStockPreparationSourceBindingStore({ db })
+    // 通知下一步 (migration 084): the per-(tenant,projectNo) cursor saying whose turn it is
+    // on a 备料 project. Built here so both handoff routes can compare-and-set it in one transaction —
+    // which is what makes a double click a detectable replay instead of a second advance. Absent (no
+    // SQL db) → the routes fail closed with a named 501, never with a plausible-but-volatile turn.
+    stockPreparationHandoffStore = createStockPreparationHandoffStore({ db })
     // Customer-pack install LEDGER (migration 076). Terminal-state rows only; it is what makes a
     // pack's `ext_` columns enumerable, which is what lets a PLM refresh honour their ownership
     // bands instead of falling back to the frozen-template ones.
     stockPreparationPackInstallStore = createStockPreparationPackInstallStore({ db })
+    // HG v1.2 PR-A: DB-backed single-active-reconciler lease (migration 077) for the
+    // confirmation-decision ledger. The reconcile route fails closed without it.
+    stockPreparationConfirmationDecisionLease = createConfirmationDecisionReconcileLease({ db })
+    // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
+    // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
+    // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
+    // processes. An ARMED deployment that cannot reach it refuses; a DORMANT one never calls it.
+    b2aOperationClaim = createB2aOperationClaim({ db })
     // C-R4-1 (#1709): the composition config store validates each step's read config is approved at
     // save time via readSourceConfigStore.getForRuntime, and the run route re-loads them at runtime.
     readSourceCompositionConfigStore = createReadSourceCompositionConfigStore({ db, readSourceConfigStore })
@@ -287,6 +387,13 @@ module.exports = {
         })
       },
     }
+    // W-2: the B2a registry, built ONCE here at activation from server config, exactly as
+    // http-routes builds its own copy — `createB2aRegistry` is pure in its config, so the two cannot
+    // disagree, and a malformed registry now fails activation at this line instead of a few lines
+    // later at route registration (still activation, still loudly, still before any request).
+    // Unset env -> the host omits the key -> `null` -> the runner's fence is DORMANT and costs
+    // nothing.
+    const b2aTrialRegistry = createB2aRegistry({ config: context.config })
     pipelineRunner = createPipelineRunner({
       pipelineRegistry,
       externalSystemRegistry,
@@ -295,6 +402,17 @@ module.exports = {
       watermarkStore,
       runLogger,
       erpFeedbackWriter,
+      b2aTrialRegistry,
+      // The SAME durable store the routes hand the guard. The one-time operation claim is a record
+      // in it, so route and runner must look at one store or "one operation" would mean two.
+      b2aClaimStore: context.storage,
+      // MERGE-TRAIN (W-3 x W-2). The SAME DB-enforced one-shot claim the routes are handed above.
+      // Migration 078 made it mandatory for every ARMED read, and the runner's fence (W-2) landed on
+      // a branch that predated it — so without this line an armed HTTP-initiated run would be
+      // authorized by the route and then refused by the runner with `operation_claim_unavailable`.
+      // Assigned earlier in this same activation, before this call. Null on a DORMANT deployment,
+      // where the runner's fence returns before it is ever read.
+      b2aOperationClaim,
     })
 
     try {
@@ -350,10 +468,63 @@ module.exports = {
       context,
       logger,
       services: {
+        // 列映射副驾: the governed AI boundary (packages/core-backend GovernedAiService), injected by
+        // the host for this plugin only. OPTIONAL — absent → the copilot fail-opens to manual mapping.
+        // Duck-typed to { suggest(request, env?) }; the plugin never reaches a provider any other way.
+        governedAi: (context.services && context.services.governedAi) || null,
+        // 按项目导出物料 Excel: the xlsx buffer builder (packages/core-backend xlsx-service.ts
+        // buildXlsxBuffer), injected by the host for this plugin only — same INJECTED-per-plugin shape
+        // as governedAi above, and for the same reason: the plugin has no `xlsx` dependency of its own
+        // and must not add one. OPTIONAL — absent → the export route 501s instead of a 500 crash.
+        // Duck-typed to { buildWorkbookBuffer({ sheetName, headers, rows }) => Promise<Buffer> }.
+        stockPreparationXlsxExport: (context.services && context.services.stockPreparationXlsxExport) || null,
+    // 一线看得见自己工厂的项目: the tenant PRINCIPAL DIRECTORY (packages/core-backend
+    // tenant-principal-directory-boundary.ts), injected by the host for this plugin only — same
+    // INJECTED-per-plugin shape as the two above. Unlike them it is NOT fail-open: the operator
+    // project directory is the plugin's first tenant-scoped VALUE-BEARING read, and absent this port
+    // it 501s rather than deciding tenancy from `req.user.tenantId` (which the auth middleware may
+    // have filled from the `x-tenant-id` header). Duck-typed to
+    // { verifyTenantMembership({ userId, tenantId }) => Promise<{ member }> }.
+    tenantPrincipalDirectory: (context.services && context.services.tenantPrincipalDirectory) || null,
+        // 列级写权限: the narrow port that writes the PLATFORM's own `field_permissions` rows
+        // (packages/core-backend StockPreparationFieldPermissionsService), injected by the host for
+        // this plugin only — same INJECTED-per-plugin shape as the two above. It scopes WRITE ONLY:
+        // it takes no visibility argument, so it cannot hide a column from a department that needs to
+        // read it. OPTIONAL — absent → a pack with no fieldWritePolicies installs exactly as today,
+        // and a pack WITH them fails closed rather than silently skipping enforcement.
+        // Duck-typed to { applyRoleWriteScopes({ sheetId, entries, packId?, reconcile?,
+        //   legacyAdoptable? }) => Promise<{ applied, entries, removed?, operatorHeld?,
+        //   governedByOtherPacks? }> } plus FOUR optional read-only siblings the installer
+        // feature-detects rather than assumes: classifyRoleWriteScopeRegion (the rehearsal of the
+        // reconcile's whole invariant), listRoleWriteScopes, findMissingRoleIds and
+        // findMissingFieldIds. `reconcile` names the (columns x roles) region the pack re-declares
+        // in full, and is what lets a revision that MOVES a column's owner retire the old denial
+        // instead of leaving the column read-only for both departments; a host that ignores it
+        // returns no `removed` and the installer reports 'unsupported_port'. `legacyAdoptable` is
+        // the installer's PROOF, from the pack-install ledger, that a pack-less row on this sheet
+        // can have no other owner — without it such a row refuses the install rather than being
+        // adopted.
+        stockPreparationFieldPermissions:
+          (context.services && context.services.stockPreparationFieldPermissions) || null,
+        // 通知下一步: the DingTalk seam, injected by the host for this plugin only — the same
+        // INJECTED-per-plugin shape as governedAi and stockPreparationXlsxExport above, and for the
+        // same reason: the plugin has no DingTalk client of its own and must not grow one. The host
+        // wraps the EXISTING group-destination machinery (packages/core-backend
+        // dingtalk-group-destination-service.ts), which is why this seam speaks in DESTINATION IDs.
+        //
+        // OPTIONAL — absent → every advance reports notifyOutcome 'not_configured' and still moves the
+        // turn. Turn state and notification are separate concerns; a deployment may want only the
+        // first. Duck-typed to
+        //   { sendToDestinations({ destinationIds, title, body }) => Promise<{ delivered, failed }> }.
+        stockPreparationHandoffNotifier: (context.services && context.services.stockPreparationHandoffNotifier) || null,
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,
+        stockPreparationSourceBindingStore,
+        stockPreparationHandoffStore,
         stockPreparationPackInstallStore,
+        stockPreparationConfirmationDecisionLease,
+        b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
         adapterRegistry,

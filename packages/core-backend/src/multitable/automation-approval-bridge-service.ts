@@ -20,6 +20,7 @@ import { isAdmin } from '../rbac/service'
 import { filterPermissionCodesByNamespaceAdmission } from '../rbac/namespace-admission'
 import { redactValue } from './automation-log-redact'
 import { AutomationJobService } from './automation-job-service'
+import type { ExecutionLedgerKind } from './automation-execution-ledger'
 import { computeActionFingerprint, type ActionFingerprint } from './automation-suspension-service'
 import {
   lookupTemplateValue,
@@ -43,6 +44,7 @@ export interface AutomationApprovalBridgeRow {
   id: string
   executionId: string
   rootExecutionId: string
+  ledgerKind: ExecutionLedgerKind
   ruleId: string
   sheetId: string | null
   recordId: string | null
@@ -144,6 +146,11 @@ function rootIdFor(execution: Pick<AutomationExecution, 'id' | 'rerunOfExecution
   return execution.rootExecutionId || execution.rerunOfExecutionId || execution.id
 }
 
+function readLedgerKind(value: unknown): ExecutionLedgerKind {
+  if (value === 'execution' || value === 'test_run') return value
+  throw new Error('automation approval bridge has an invalid ledger_kind')
+}
+
 function buildTemplateData(context: ExecutionContext): Record<string, unknown> {
   return {
     ...context.recordData,
@@ -216,7 +223,10 @@ export class AutomationApprovalBridgeService {
   }
 
   async startApproval(input: {
-    execution: Pick<AutomationExecution, 'id' | 'rerunOfExecutionId'> & { rootExecutionId?: string }
+    execution: Pick<AutomationExecution, 'id' | 'rerunOfExecutionId'> & {
+      rootExecutionId?: string
+      ledgerKind?: ExecutionLedgerKind
+    }
     rule: { id: string; sheetId?: string; actions: ReadonlyArray<AutomationAction>; createdBy?: string }
     context: ExecutionContext
     stepIndex: number
@@ -250,6 +260,7 @@ export class AutomationApprovalBridgeService {
         id: bridgeId,
         execution_id: input.execution.id,
         root_execution_id: rootExecutionId,
+        ledger_kind: input.execution.ledgerKind ?? 'execution',
         rule_id: input.rule.id,
         sheet_id: input.rule.sheetId ?? null,
         record_id: input.context.recordId || null,
@@ -527,6 +538,7 @@ export class AutomationApprovalBridgeService {
       id: row.id as string,
       executionId: row.execution_id as string,
       rootExecutionId: row.root_execution_id as string,
+      ledgerKind: readLedgerKind(row.ledger_kind),
       ruleId: row.rule_id as string,
       sheetId: (row.sheet_id as string) ?? null,
       recordId: (row.record_id as string) ?? null,

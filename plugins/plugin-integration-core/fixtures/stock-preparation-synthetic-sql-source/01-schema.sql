@@ -37,7 +37,9 @@
 --     orderDetail.{object,orderIdField,componentIdField,quantityField,sortField},
 --     part.{object,idField,codeField,nameField,materialField,versionField},
 --     bomHead.{object,parentPartField,bomIdField,versionField,activeField},
---     bomDetail.{object,bomParentField,componentIdField,quantityField,sortField}.
+--     bomDetail.{object,bomParentField,componentIdField,quantityField,sortField},
+--     and — only when the OPTIONAL block is present —
+--     projectSubtree.pathInfo.parentIdField / projectSubtree.bomHead.pathIdField.
 --     Rename the columns here and mirror the rename in the plan and the pull
 --     still works.
 --   STRUCTURAL (NOT configurable — changing these needs a code change):
@@ -61,6 +63,10 @@
 --                  ->  03-seed-pull-2.sql  ->  (pull #2)
 --   04-optional-duplicate-expanded-key.sql is applied ON TOP of 02 only when
 --   you deliberately want the duplicate-key hold. See README.md.
+--   05-seed-subtree-roots.sql is applied ON TOP of 02 only when you want the
+--   OPTIONAL readPlan.projectSubtree path exercised. It is INERT for the
+--   default plan: the order pull over 02 + 05 still returns the same 7 rows,
+--   because nothing in the default plan reads Parent_OBJ_ID or path_id.
 -- ============================================================================
 
 DROP TABLE IF EXISTS DN_PDM_BomDetailsInfo;
@@ -80,8 +86,15 @@ CREATE TABLE DN_PDM_PathExAttrInfo (
 
 -- readPlan.pathInfo — existence/uniqueness check on the path the project
 -- points at. More than one match => rowError 'ambiguous_path' (…:780-783).
+--
+-- Parent_OBJ_ID is the folder tree's self-reference and is read ONLY by the
+-- OPTIONAL readPlan.projectSubtree block (projectSubtree.pathInfo.parentIdField).
+-- Column name verified read-only against the customer test PLM on 2026-09-05
+-- (`SELECT OBJ_ID, Parent_OBJ_ID FROM DN_PDM_PathInfo` succeeds); it is spelled
+-- here exactly as it is there. NULL on a project (top) node.
 CREATE TABLE DN_PDM_PathInfo (
-  OBJ_ID varchar(64) NOT NULL
+  OBJ_ID        varchar(64) NOT NULL,
+  Parent_OBJ_ID varchar(64)
 );
 
 -- readPlan.orderHead — the order(s) hanging off that path.
@@ -116,11 +129,19 @@ CREATE TABLE DN_PDM_PartLibraryInfo (
 -- bom_able is the optional activeField: '0' / 'false' / 'n' / 'no' /
 -- 'disabled' / 'inactive' / false / 0 mean inactive; anything else (including
 -- NULL/empty) means active (isActiveBomHead, …:385-395).
+--
+-- path_id is the folder node this head hangs off, read ONLY by the OPTIONAL
+-- readPlan.projectSubtree block (projectSubtree.bomHead.pathIdField). Column
+-- name verified read-only against the customer test PLM on 2026-09-05
+-- (`SELECT bom_id, part_id, path_id, SysVer FROM DN_PDM_BomHeadInfo` succeeds);
+-- spelled here exactly as it is there. NULL on a head the folder tree does not
+-- reference — the ORDER path never reads this column at all.
 CREATE TABLE DN_PDM_BomHeadInfo (
   part_id  varchar(64) NOT NULL,
   bom_id   varchar(64) NOT NULL,
   SysVer   varchar(32),
-  bom_able varchar(8)
+  bom_able varchar(8),
+  path_id  varchar(64)
 );
 
 -- readPlan.bomDetail — BOM lines. Bom_ExAttr1 is the quantity column (yes,
@@ -141,4 +162,7 @@ CREATE INDEX ix_syn_orderhead_pathid ON DN_PDM_OrderHeadInfo (path_id);
 CREATE INDEX ix_syn_orderdetail_orderid ON DN_PDM_OrderDetailInfo (order_id);
 CREATE INDEX ix_syn_part_objid ON DN_PDM_PartLibraryInfo (OBJ_ID);
 CREATE INDEX ix_syn_bomhead_partid_sysver ON DN_PDM_BomHeadInfo (part_id, SysVer);
+-- Only the OPTIONAL projectSubtree block filters by these two.
+CREATE INDEX ix_syn_pathinfo_parentobjid ON DN_PDM_PathInfo (Parent_OBJ_ID);
+CREATE INDEX ix_syn_bomhead_pathid ON DN_PDM_BomHeadInfo (path_id);
 CREATE INDEX ix_syn_bomdetail_bompid ON DN_PDM_BomDetailsInfo (bom_pid);

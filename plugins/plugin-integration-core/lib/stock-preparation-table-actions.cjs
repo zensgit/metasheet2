@@ -3,15 +3,43 @@
 // #2253 C5-1: backend parameterized table action contract for PLM project BOM
 // -> stock-preparation. This module wires the already-landed C2/C3/C4 helpers
 // without adding UI, migrations, external DB writes, or K3 paths.
+//
+// ---------------------------------------------------------------------------
+// THE ONE VALUE-BEARING KEY IN THIS MODULE'S RESPONSES (W3a) — register it here
+// ---------------------------------------------------------------------------
+//
+// The dry-run response is otherwise values-free by construction: statuses, counts, hashes, frozen
+// error-type tokens and field ids, and an `evidence` stanza whose every branch is a projection that
+// drops customer cells. This module is NOT covered by the `assertValuesFree*` self-checks (those
+// live on the audit store, the pack-install store and the GIP read observability seam), so the
+// registration is this comment plus the tests that pin it.
+//
+//   `missingComponents` — the ONLY key in any response this module produces that carries real
+//   customer values (PLM part numbers, their parents, their BOM ids and paths). It is:
+//     * OPT-IN: `dryRunStockPreparationAction({ includeMissingComponents: true })`, and nothing else
+//       in this module sets it — the large-BOM lane and the confirmation-decision lane never do.
+//     * CONDITIONAL: absent entirely when the flag is off OR the list is empty, so a caller that did
+//       not ask, and a project with nothing missing, get byte-identical responses to before W3a.
+//     * GATED at the route: operate ∧ a PROVEN tenant. `http-routes.cjs`'s dry-run handler calls
+//       `resolveOperatorValueScope` before it will pass the flag down — the legacy `integration:read`
+//       tier and the tenantless platform admin are refused there, 403.
+//     * OUT of everything durable: it is not in `buildRevision`'s expansion projection, not in
+//       `evidenceForDryRun`, not in the dry-run token, not in the ledger, not in the audit row.
+//       Four negative guards pin those four.
 
 const crypto = require('node:crypto')
 
 const {
+  DEFAULT_MAX_PAGES,
+  DEFAULT_MAX_ROWS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+  ROW_ERROR_LIMIT_CEILING,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
+  // Values-BEARING (see the module header). The only import in this file that is.
+  summarizeMissingComponents,
 } = require('./stock-preparation-bom-expansion.cjs')
 const {
   DECISIONS,
@@ -25,8 +53,13 @@ const {
   normalizeRunOnlyConflictPolicyReview,
   POLICY_BOUNDARY_STORED,
 } = require('./stock-preparation-conflict-policies.cjs')
+// W4 carry opt-in: the deploy-time carryPolicy knob is validated through the
+// carry module's OWN closed vocabulary (configuration-not-code: the config can
+// only say what the policy module can mean).
+const { normalizeCarryPolicy } = require('./stock-preparation-carry-policy.cjs')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
@@ -53,6 +86,17 @@ const {
   normalizeStockPrepApplyProductionPolicy,
   assertProductionPolicyNotExpired,
 } = require('./stock-preparation-production-policy.cjs')
+const {
+  B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
+  B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+  assertB2aReadAuthorization,
+  assertB2aFullBatchComplete,
+  assertB2aSchemaContract,
+  assertB2aSourceUnchangedAfterRead,
+  b2aSchemaContractEvidence,
+  runB2aGuardedSourceRead,
+  readPlanSourceObjects,
+} = require('./b2a-trial-registry.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
@@ -217,6 +261,178 @@ function normalizeActionExtensionFieldIds(input, template) {
   return out
 }
 
+/**
+ * W4 carry opt-in (execution-plan W4a; adjudication Layer 3). Deploy-time config
+ * (the INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON world), validated
+ * through the carry module's OWN closed vocabulary so config and runtime can
+ * never disagree about what a policy means. Absent => null => the key is not
+ * added to the normalized action at all (conditional spread, like
+ * extensionFieldIds), so every existing config snapshot/hash is byte-identical
+ * and the planner runs exactly the pre-wiring path. The normalized object is
+ * plain JSON, so it survives the cloneJson ride into a large-BOM job's
+ * actionSnapshot unchanged.
+ */
+function normalizeActionCarryPolicy(input) {
+  if (input === undefined || input === null) return null
+  try {
+    return normalizeCarryPolicy(input)
+  } catch (error) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'carryPolicy is not a valid carry policy', {
+      field: 'carryPolicy',
+      carryPolicyReason: error && error.reason ? error.reason : 'UNKNOWN',
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Large-BOM BACKGROUND caps (C0 "Cap policy", third row).
+//
+// The C0 design asks for THREE independent caps — smoke / reviewed synchronous
+// dry-run / background full expansion — and only ONE was ever implemented: the
+// background worker was handed the SAME `action.maxRows` the interactive
+// dry-run uses. That made the whole large-BOM lane unreachable BY
+// CONSTRUCTION: the only way to enter it is to exceed the interactive cap, and
+// the background job then re-hit the identical cap, failed with
+// `max_rows_exceeded`, and left `authoritative: false` — so the plan route
+// refused with LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE and no large project could
+// ever be planned. Measured end to end on the 222 box, 2026-09-05, on a 13151-
+// row synthetic project.
+//
+// THE INTERACTIVE LANE IS NOT TOUCHED. `computeDryRun` still reads
+// `action.maxRows` / `action.maxPages` / `action.maxReadCount` /
+// `action.maxElapsedMs` directly, so a dry-run response is byte-identical
+// whether or not a `largeBom` block exists. This block supplies the background
+// lane's own numbers and nothing else.
+//
+// Precedence, per cap:
+//   1. explicit `action.largeBom.<cap>` (deploy-time config), clamped to the
+//      ceiling below;
+//   2. otherwise the INTERACTIVE cap x the multiplier below, clamped to the
+//      ceiling. For `maxRows`/`maxPages` the interactive cap is the expander's
+//      own default when config named none (10000 / 100), because that default
+//      is what the dry-run actually enforced.
+//   3. `maxReadCount`/`maxElapsedMs` have NO expander default: absent in the
+//      interactive lane means "no bound at all", and the background lane
+//      INHERITS that rather than inventing one. A deployer who wants the
+//      background lane bounded on those says so in the `largeBom` block.
+//
+// The ceilings are the "config cannot say infinite" half: a `largeBom` value
+// above one is a 422 at config-load time (not a silent clamp — a deployer who
+// typed 10_000_000 should be told), and a DERIVED value is clamped silently
+// because it is arithmetic, not a statement of intent.
+//
+// There is deliberately NO floor tying a `largeBom` value to its interactive
+// sibling: a block MAY name a value BELOW the interactive cap, which makes the
+// background lane STRICTER than the dry-run that sends callers into it and
+// reproduces exactly the failure this whole block exists to remove. That is a
+// legitimate thing for a deployer to want (a deliberately small background
+// budget on a shared box) and refusing it would be this module inventing
+// policy, so it is allowed and documented in the customer delivery guide
+// instead — unless intended, every `largeBom` value should be >= its
+// interactive sibling.
+//
+// `maxArtifactChunks` is deliberately NOT a member of this family — see
+// stock-preparation-large-bom-jobs.cjs `LARGE_BOM_ARTIFACT_CHUNK_COUNT`.
+const LARGE_BOM_BACKGROUND_CAP_FIELDS = Object.freeze(['maxRows', 'maxPages', 'maxReadCount', 'maxElapsedMs'])
+
+const LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS = Object.freeze({
+  maxRows: 20,
+  maxPages: 10,
+  maxReadCount: 20,
+  maxElapsedMs: 6,
+})
+
+const LARGE_BOM_BACKGROUND_CAP_CEILINGS = Object.freeze({
+  maxRows: 1000000,
+  maxPages: 100000,
+  maxReadCount: 5000000,
+  maxElapsedMs: 21600000,
+})
+
+/**
+ * Deploy-time `largeBom` cap block. STRICTER than the sibling `maxRows` family
+ * above on purpose: those coerce (`Number(value)`) because legacy configs ship
+ * numeric strings and moving them would be a behaviour change, while this block
+ * is new and can refuse a string outright. Absent => null => the key is not
+ * added to the normalized action at all (conditional spread, like
+ * `carryPolicy`), so every existing config snapshot and hash stays
+ * byte-identical.
+ */
+function normalizeActionLargeBomCaps(input) {
+  if (input === undefined || input === null) return null
+  if (!isPlainObject(input)) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'largeBom must be an object', { field: 'largeBom' })
+  }
+  for (const key of Object.keys(input)) {
+    if (!LARGE_BOM_BACKGROUND_CAP_FIELDS.includes(key)) {
+      throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', `unsupported largeBom cap: ${key}`, { field: `largeBom.${key}` })
+    }
+  }
+  const caps = {}
+  for (const field of LARGE_BOM_BACKGROUND_CAP_FIELDS) {
+    const value = input[field]
+    if (value === undefined || value === null || value === '') continue
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new StockPreparationTableActionError(
+        422,
+        'TABLE_ACTION_CONFIG_INVALID',
+        `largeBom.${field} must be a positive integer`,
+        { field: `largeBom.${field}` },
+      )
+    }
+    const ceiling = LARGE_BOM_BACKGROUND_CAP_CEILINGS[field]
+    if (value > ceiling) {
+      throw new StockPreparationTableActionError(
+        422,
+        'TABLE_ACTION_CONFIG_INVALID',
+        `largeBom.${field} exceeds the background expansion ceiling`,
+        { field: `largeBom.${field}`, ceiling },
+      )
+    }
+    caps[field] = value
+  }
+  return Object.keys(caps).length ? caps : null
+}
+
+// An interactive cap only counts as a scaling base if it is a usable positive
+// integer. The sibling `maxRows`/`maxDepth` keys are raw pass-throughs on the
+// normalized action, so this has to tolerate whatever config wrote there.
+function backgroundCapBase(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const number = Number(value)
+  return Number.isInteger(number) && number > 0 ? number : undefined
+}
+
+/**
+ * THE ONE definition of what the background full-expansion lane is allowed to
+ * read. Returns only the four scale caps; `pageLimit` (a page SIZE, not a
+ * bound) and `maxDepth` (a structural property of the BOM tree, not a scale
+ * budget) stay on the interactive values, because widening them would change
+ * WHAT is read rather than HOW MUCH.
+ */
+function largeBomBackgroundExpansionCaps(action = {}) {
+  const configured = isPlainObject(action) && isPlainObject(action.largeBom) ? action.largeBom : {}
+  const interactiveBase = {
+    maxRows: backgroundCapBase(action && action.maxRows) || DEFAULT_MAX_ROWS,
+    maxPages: backgroundCapBase(action && action.maxPages) || DEFAULT_MAX_PAGES,
+    maxReadCount: backgroundCapBase(action && action.maxReadCount),
+    maxElapsedMs: backgroundCapBase(action && action.maxElapsedMs),
+  }
+  const caps = {}
+  for (const field of LARGE_BOM_BACKGROUND_CAP_FIELDS) {
+    const ceiling = LARGE_BOM_BACKGROUND_CAP_CEILINGS[field]
+    const explicit = configured[field]
+    if (Number.isInteger(explicit) && explicit > 0) {
+      caps[field] = Math.min(explicit, ceiling)
+      continue
+    }
+    const base = interactiveBase[field]
+    if (base === undefined) continue
+    caps[field] = Math.min(base * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS[field], ceiling)
+  }
+  return caps
+}
+
 function normalizeStockPreparationActionConfig(input = {}) {
   if (!isPlainObject(input)) {
     throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'action config must be an object', { field: 'action' })
@@ -231,6 +447,9 @@ function normalizeStockPreparationActionConfig(input = {}) {
   }
   const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
   const extensionFieldIds = normalizeActionExtensionFieldIds(input.extensionFieldIds, template)
+  const carryPolicy = normalizeActionCarryPolicy(input.carryPolicy)
+  const largeBom = normalizeActionLargeBomCaps(input.largeBom)
+  const rowErrorLimit = normalizeActionRowErrorLimit(input.rowErrorLimit)
   return {
     actionId,
     kind,
@@ -243,6 +462,10 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // several places, and an unconditional key would move every legacy shape
     // for a feature that config did not ask for.
     ...(extensionFieldIds.length ? { extensionFieldIds } : {}),
+    ...(carryPolicy ? { carryPolicy } : {}),
+    // Background-lane caps only. Read by `largeBomBackgroundExpansionCaps`
+    // (route -> background worker); `computeDryRun` never looks at it.
+    ...(largeBom ? { largeBom } : {}),
     conflictStrategy: isPlainObject(input.conflictStrategy) ? cloneJson(input.conflictStrategy) : {},
     pageLimit: positiveInteger(input.pageLimit, 'pageLimit', undefined),
     maxPages: positiveInteger(input.maxPages, 'maxPages', undefined),
@@ -250,7 +473,38 @@ function normalizeStockPreparationActionConfig(input = {}) {
     maxElapsedMs: positiveInteger(input.maxElapsedMs, 'maxElapsedMs', undefined),
     maxDepth: input.maxDepth,
     maxRows: input.maxRows,
+    // D-C `rowErrors` cap override. Spread CONDITIONALLY for the same reason the block above is:
+    // an action config is snapshotted and hashed, and an unconditional key would move every legacy
+    // config's shape for a knob it never set.
+    ...(rowErrorLimit ? { rowErrorLimit } : {}),
   }
+}
+
+// D-C. The config-time half of the cap override, and it REFUSES rather than clamps for two reasons
+// the module already knows: a normalized action config is what gets snapshotted, echoed back and
+// hashed, so silently storing 100000 while the expander runs 20000 makes the stored config a lie
+// about what ran; and the operator gets no feedback at all about a knob they demonstrably meant to
+// move. Type strictness matches `ceilingBoundedPositiveInteger` in the expander — `true` and `[3]`
+// coerce to 1 and 3 under `Number()`, and a typo that silently cuts the retained defect list to one
+// entry is exactly the shape of failure this key exists to bound.
+//
+// The expander still enforces the same ceiling (it is the only thing that reads the cap, so it has
+// to). This is a second gate at the earlier boundary, not the only one.
+function normalizeActionRowErrorLimit(input) {
+  if (input === undefined || input === null || input === '') return undefined
+  if (!Number.isInteger(input)) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'rowErrorLimit must be a positive integer', { field: 'rowErrorLimit' })
+  }
+  const value = positiveInteger(input, 'rowErrorLimit', undefined)
+  if (value > ROW_ERROR_LIMIT_CEILING) {
+    throw new StockPreparationTableActionError(
+      422,
+      'TABLE_ACTION_CONFIG_INVALID',
+      `rowErrorLimit must not exceed ${ROW_ERROR_LIMIT_CEILING}`,
+      { field: 'rowErrorLimit', ceiling: ROW_ERROR_LIMIT_CEILING },
+    )
+  }
+  return value
 }
 
 function targetFieldMapHasExplicitBindings(fieldIdMap = {}) {
@@ -380,15 +634,95 @@ function normalizeActionList(actions) {
   throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'table actions config must be an array/object')
 }
 
-function createStockPreparationTableActionRegistry({ actions } = {}) {
+/**
+ * The registry, and THE ONE SEAM THAT MAKES REBINDING A SOURCE A RUNTIME ACT.
+ *
+ * `actions` is still the deploy-time config, still drained into a Map ONCE at construction (which
+ * happens inside `createHandlers`, i.e. at plugin activation). That is correct for everything in it
+ * — the target sheet, the template, the read plan, the bounds — because all of those are decisions
+ * a deployment makes about ITSELF and a restart is a fine cadence for changing them.
+ *
+ * `source.externalSystemId` is not that kind of fact, and treating it as one is the single biggest
+ * onboarding cost this product has. It is a foreign key into a table the customer's own admin
+ * already manages from the same workbench, and "point us at your PLM instead of the demo source"
+ * was a change that required an implementer to SSH in, edit
+ * INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON, and `pm2 restart` — because the value was
+ * captured in this Map at activation and every later request read the snapshot.
+ *
+ * `resolveSourceBinding` is how that stops being true, and WHERE it sits is the whole design:
+ *
+ *   * it is consulted INSIDE `getTableAction`, which every stock-prep route already calls per
+ *     request (dry-run, apply, mvp-persist, large-BOM start/run, reconcile, readiness, the hub
+ *     overview join). So a binding written at 10:00 is read by the 10:00:01 request. No restart, no
+ *     plugin reload, no cache to invalidate — because there is no cache: the override was never
+ *     read until the request asked for it.
+ *   * it is consulted AFTER `cloneJson`, so the override mutates this request's private copy and
+ *     the deploy-time snapshot in `configs` is never written to. Two tenants resolving different
+ *     sources concurrently cannot see each other's.
+ *   * it overrides EXACTLY ONE FIELD. `kind`, `readPlan`, `workspaceId`, target, template and bounds
+ *     all stay deploy-time. A persisted value that could move `kind` or `readPlan` would let a
+ *     workbench click change WHAT IS READ and HOW, not merely WHERE FROM, and would put a
+ *     request-reachable path into the B2a registration's `sourceSystemType` / `objectScope`
+ *     matching. It cannot: this assigns to `externalSystemId` and nothing else.
+ *   * the override is then RE-NORMALIZED through `normalizeSource`, so a stored empty string, a
+ *     stored non-string, or a stored value that would fail `requiredString` is refused HERE rather
+ *     than reaching `loadTableActionSourceAdapter` as a malformed lookup.
+ *
+ * FAIL-CLOSED, in both of its directions:
+ *   * a resolver that THROWS propagates. It does not fall back to the env default — "the binding
+ *     table is unreachable" and "no binding exists" are different facts, and quietly serving the
+ *     synthetic demo source because a query failed is exactly the silent-wrong-source failure this
+ *     whole line exists to prevent.
+ *   * a resolver that returns null/undefined means NO OVERRIDE, and the env default stands. That is
+ *     the pre-migration state and it is byte-identical to the behaviour before this seam existed —
+ *     which is what lets an existing deployment upgrade without touching anything.
+ *   * a wired resolver invoked WITHOUT a tenant scope is refused, not skipped. Silently declining to
+ *     look up an override because the caller forgot to pass a tenant would resolve the env default
+ *     while an admin's chosen source sat unread in the table, and it would do so invisibly. Every
+ *     stock-prep call site passes a scope; a future one that forgets gets a 500 naming the omission.
+ *
+ * NOTE WHAT THIS DOES NOT RELAX. `loadTableActionSourceAdapter` still re-checks the resolved system:
+ * it must exist in the caller's tenant, and `system.kind` must equal `action.source.kind`, or the
+ * read is refused with TABLE_ACTION_SOURCE_INVALID before any adapter is built. So a binding row
+ * left dangling by a later delete, or one written against a system whose kind no longer matches,
+ * fails loudly at read time rather than reading the wrong place.
+ */
+function createStockPreparationTableActionRegistry({ actions, resolveSourceBinding } = {}) {
   const configs = new Map()
   for (const action of normalizeActionList(actions)) {
     const normalized = normalizeStockPreparationActionConfig(action)
     configs.set(normalized.actionId, normalized)
   }
+  const sourceBindingResolver = typeof resolveSourceBinding === 'function' ? resolveSourceBinding : null
+
+  async function applyPersistedSourceBinding(action, input) {
+    if (!sourceBindingResolver) return action
+    const tenantId = optionalString(input.tenantId)
+    if (!tenantId) {
+      throw new StockPreparationTableActionError(
+        500,
+        'TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED',
+        'a persisted source binding is configured but this table-action lookup carried no tenant scope',
+        { actionId: action.actionId },
+      )
+    }
+    const bound = optionalString(await sourceBindingResolver({
+      tenantId,
+      workspaceId: optionalString(input.workspaceId),
+      actionId: action.actionId,
+    }))
+    if (!bound) return action
+    // Re-normalize rather than assigning in place: `normalizeSource` is the ONE definition of what a
+    // valid source is, and a stored value has to clear the same bar a configured one does.
+    return { ...action, source: normalizeSource({ ...action.source, externalSystemId: bound }) }
+  }
+
   return {
     async listTableActions() {
       const action = configs.get(PLM_STOCK_PREPARATION_ACTION_ID)
+      // Deliberately NOT binding-resolved: `publicActionMetadata` projects the action's SHAPE
+      // (parameters, permissions, labels, whether it is configured at all) and names no source, so
+      // resolving one here would be a per-request lookup nothing reads.
       return [publicActionMetadata(action)]
     },
     async getTableAction(input = {}) {
@@ -400,7 +734,7 @@ function createStockPreparationTableActionRegistry({ actions } = {}) {
       if (!action) {
         throw new StockPreparationTableActionError(422, 'TABLE_ACTION_NOT_CONFIGURED', `table action is not configured: ${actionId}`, { actionId })
       }
-      return cloneJson(action)
+      return applyPersistedSourceBinding(cloneJson(action), input)
     },
   }
 }
@@ -498,7 +832,22 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
 //                  Both of its call sites pass the mode EXPLICITLY — an opt-out you cannot fall into.
 const FIELD_ID_TRANSLATION_MODES = Object.freeze(['logical', 'pre_mapped'])
 const MVP_TEMPLATE_BY_OBJECT_ID = new Map(
-  STOCK_PREPARATION_MVP_TABLE_TEMPLATES.map((template) => [template.objectId, template]),
+  // The confirmation-decision LEDGER template rides the same registry so its
+  // scoped records API translates logical keys exactly like the MVP tables'.
+  // It is NOT thereby part of the frozen nine-table MVP surface.
+  //
+  // The CANONICAL main-table template rides it too. It was added for ONE consumer
+  // — confirm-writes' applyCarryViaConfirm, whose K2 confirm write used to address
+  // a provisioning-resolved canonical sheet by logical field keys — and that
+  // consumer NO LONGER USES IT: the carry executor now takes the bound table
+  // action's `target` and translates through the target's own `fieldIdMap`,
+  // because this registry is keyed by objectId and a sandbox twin's restamped
+  // objectId is not in it (see that module's carry header). The entry is retained
+  // rather than removed: membership grants TRANSLATION only, never authorization,
+  // and each module's own guard (confirm-writes MVP_OBJECT_ID_SET, the ledger's
+  // pinned OBJECT_ID, the carry executor's bound target) stays the wall.
+  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE]
+    .map((template) => [template.objectId, template]),
 )
 
 // Resolve the target objectId's frozen logical field ids to physical ids. Fail-closed on every step:
@@ -621,6 +970,25 @@ async function createTargetScopedRecordsApi(recordsApi, target, options = {}) {
   }
 
   const scopedApi = { queryRecords }
+  // W8-4 (L1): forward the host's request-scoped metadata memo. It carries no sheetId, reads no
+  // row and grants nothing, so there is nothing here for withTargetSheet to fence — but the scoped
+  // api is a FRESH object, so anything not forwarded is invisible to every caller behind this
+  // fence, and the memo would silently never engage. Absent on a host that does not offer it.
+  // Placed BEFORE the read-only return on purpose: a read-only caller may also open a scope. That
+  // widens the surface that can open one beyond the write path, which is accepted because opening a
+  // scope authorizes nothing — a read-only api still cannot write, and every records call inside a
+  // scope still runs its own first-time ownership assertion.
+  if (typeof api.withMetadataCache === 'function') {
+    scopedApi.withMetadataCache = (operation) => api.withMetadataCache(operation)
+  }
+  // W9: forward the host's array-filter-value declaration across the fence. Like the memo above it
+  // is a FRESH object, so an unforwarded declaration is invisible and the batch key lookup would
+  // never engage. Honest in BOTH translation modes: `toPhysicalKeys` rewrites filter KEYS only and
+  // never touches values, so a list value crosses the fence byte-identical to a scalar one. Only
+  // ever copied from the surface underneath — this fence asserts nothing on its own.
+  if (api.supportsFilterValueLists === true) {
+    scopedApi.supportsFilterValueLists = true
+  }
   if (readOnly) return scopedApi
 
   scopedApi.createRecord = async function createRecord(input = {}) {
@@ -671,6 +1039,19 @@ function emptyPlan() {
   }
 }
 
+// The D-C overflow facts, read off the expansion's OWN summary (the expander is the only thing in a
+// position to count what it dropped) and reduced to the three that change what will be written.
+// `{}` — and therefore no key at all — for every expansion under the cap.
+function rowErrorTruncationRevisionKeys(expansion = {}) {
+  const summary = isPlainObject(expansion.summary) ? expansion.summary : {}
+  if (summary.rowErrorsTruncated !== true) return {}
+  return {
+    rowErrorsTruncated: true,
+    rowErrorsTotal: Number(summary.rowErrorsTotal || 0),
+    rowErrorTypeCounts: isPlainObject(summary.rowErrorTypeCounts) ? { ...summary.rowErrorTypeCounts } : {},
+  }
+}
+
 function buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan }) {
   return hashJson({
     actionId: action.actionId,
@@ -686,6 +1067,15 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
       rows: expansion.rows,
       errors: expansion.errors,
       rowErrors: expansion.rowErrors,
+      // D-C. `rowErrors` is now a BOUNDED SAMPLE, so hashing it alone stopped being enough: two
+      // projects that overflow the cap with the same first 5000 entries and different totals would
+      // hash identically, and one project's dry-run token would then validate against the other's
+      // plan. The overflow facts go into the hash so they cannot.
+      //
+      // Spread CONDITIONALLY — stableStringify emits explicitly-undefined keys, so an unconditional
+      // key would move every revision ever computed. Under the cap this contributes nothing and the
+      // hash is byte-identical to the pre-cap one.
+      ...rowErrorTruncationRevisionKeys(expansion),
     },
     existingRows,
     conflictPolicyReview: conflictPolicyReview || null,
@@ -706,6 +1096,54 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
         }
       : null,
   })
+}
+
+// Confirmation-ledger readback merge (FIRST CUT: duplicate_expanded_key x
+// keep_multiple_rows only). The ledger review arrives in the SAME shape the
+// stored table-scope review uses ({ policies: [{ fingerprint, policy }] }), so
+// the planner consumes ONE review vocabulary. When the stored table-scope
+// policy and a confirmed ledger decision disagree on a fingerprint, NEITHER
+// wins: the selection is dropped and the planner holds the group.
+function mergeTableScopeConflictPolicyReviews(tableScopeReview, confirmationDecisionReview) {
+  const existingRows = isPlainObject(tableScopeReview) && Array.isArray(tableScopeReview.policies)
+    ? tableScopeReview.policies
+    : []
+  const confirmedRows = isPlainObject(confirmationDecisionReview) && Array.isArray(confirmationDecisionReview.policies)
+    ? confirmationDecisionReview.policies
+    : []
+  const byFingerprint = new Map()
+  const conflicts = new Set()
+  for (const row of existingRows) {
+    if (!isPlainObject(row) || typeof row.fingerprint !== 'string' || typeof row.policy !== 'string') continue
+    byFingerprint.set(row.fingerprint, { ...row })
+  }
+  for (const row of confirmedRows) {
+    if (!isPlainObject(row) || typeof row.fingerprint !== 'string' || typeof row.policy !== 'string') continue
+    const existing = byFingerprint.get(row.fingerprint)
+    if (existing && existing.policy !== row.policy) {
+      // Two durable sources disagree. Removing the selection makes the planner
+      // hold the group; neither source silently wins.
+      byFingerprint.delete(row.fingerprint)
+      conflicts.add(row.fingerprint)
+      continue
+    }
+    if (!conflicts.has(row.fingerprint)) byFingerprint.set(row.fingerprint, { ...row })
+  }
+  return {
+    scope: 'table_scope',
+    policies: Array.from(byFingerprint.values()),
+    confirmationDecisionPolicyCount: confirmedRows.length,
+    conflictingPolicyCount: conflicts.size,
+  }
+}
+
+function confirmationDecisionEvidence(review, inputRevision) {
+  if (!isPlainObject(review)) return undefined
+  return {
+    inputRevision,
+    matchedPolicyCount: Number(review.confirmationDecisionPolicyCount || 0),
+    conflictingPolicyCount: Number(review.conflictingPolicyCount || 0),
+  }
 }
 
 function duplicateReviewEffectSummary(resolution) {
@@ -859,9 +1297,122 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 // So wiring this is threading two existing runtime parameters plus stamping the mapping id into the
 // job for evidence; it is not migration-shaped. It is out of scope here only because it needs its
 // own route-level tests for the stale-artifact case.
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping }) {
+/**
+ * THE B2a SEAM for every stock-preparation path that reads an external source through this module.
+ *
+ * WHERE IT SITS AND WHY. Each caller invokes this AFTER `normalizeActionParameters` (which is where
+ * `projectNo` becomes a validated string) and BEFORE `computeDryRun` (which is the first thing that
+ * touches `sourceAdapter` — `expandPlmProjectBom` is its first statement). Nothing between those two
+ * points performs a source read, so a refusal here means the external system was never contacted.
+ * That is asserted, not asserted-by-reading: the RED suite drives every refusal through a
+ * call-recording fake adapter and requires `read` to have been called exactly zero times.
+ *
+ * It is deliberately NOT inside `computeDryRun`. That function is also the large-BOM planner's
+ * compute path and takes no tenant; putting the gate there would either need a tenant plumbed into a
+ * pure planning function or would silently skip when one was absent — a gate that is easy to omit is
+ * not a gate.
+ *
+ * EVERY INPUT IS SERVER-RESOLVED. `registry` is built once at route registration from server config;
+ * `tenantId` is the route's own resolved tenant (the SAME value `loadTableActionSourceAdapter` scopes
+ * the external-system lookup with, so the gate and the adapter can never be talking about different
+ * tenants); `externalSystemId`/`systemKind` come off the normalized action config; `purpose` is a
+ * frozen module constant per call site. The request body's key allowlist
+ * (`normalizeTableActionBody`) does not contain any of them, and `normalizeActionParameters` accepts
+ * exactly one key (`projectNo`), so none of this is request-supplied.
+ *
+ * Returns `null` when the registry is dormant — callers then add nothing to their evidence, which is
+ * what keeps a dormant deployment byte-identical.
+ */
+async function assertB2aTrialForStockPreparationRead({ registry, store, operationClaim, tenantId, action, parameters, purpose, runId, now }) {
+  const source = (action && action.source) || {}
+  return assertB2aReadAuthorization({
+    registry,
+    store,
+    // Migration 078: the DB-enforced one-shot claim. Threaded, never defaulted — an armed read that
+    // arrives here without it is refused by the guard, not quietly given the kv-only path.
+    operationClaim,
+    tenantScope: tenantId,
+    // The system TYPE the runtime can actually verify is the adapter kind
+    // (`data-source:sql-readonly` / `bridge:legacy-sql-readonly`). Naming it here rather than a
+    // human product label means a binding repointed at a different adapter kind stops matching a
+    // registration written for the old one — which is the property worth having. The product name a
+    // human would use lives in the reviewed file's prose fields, not in anything code can check.
+    sourceSystemType: source.kind,
+    sourceBindingRef: source.externalSystemId,
+    dataScopeRef: parameters ? parameters.projectNo : null,
+    // The plan's OWN object list, so a plan repointed at one extra table stops matching a
+    // registration that did not enumerate it.
+    sourceObjects: readPlanSourceObjects(source.readPlan),
+    purpose,
+    runId,
+    now,
+  })
+}
+
+/**
+ * THE READ-HARDENING AND FULL-BATCH SEAM, for every stock-preparation path that expands a BOM.
+ *
+ * All three entry points (dry-run, apply, MVP-persist) funnel through `computeDryRun`, so this is
+ * the one place the four properties can be enforced once rather than three times:
+ *
+ *   R-05  a source timeout or a row/page bound surfaces as the FIXED B2a code, mapped from the
+ *         underlying cause class at the seam — `runB2aGuardedSourceRead` for a throw,
+ *         `assertB2aFullBatchComplete` for the bounds the expander catches and returns as data.
+ *   R-06  the schema contract is pinned on the first armed read and compared on every one after,
+ *         BEFORE the source is touched and therefore before any plan, row, revision or evidence.
+ *   E3-02 an incomplete batch refuses BEFORE the plan is built, rather than planning off a partial
+ *         read that merely cannot be applied. WHICH fixed code depends on what explains the
+ *         shortfall: a hardened bound names itself (`B2A_SOURCE_TIMEOUT` / `B2A_PAGE_LIMIT_EXCEEDED`,
+ *         which is what R-05 asks for and what a caller can act on), and everything else — a broken
+ *         cursor, an unclassifiable read failure, a source that moved mid-read — names the property
+ *         (`C6_FULL_BATCH_INCOMPLETE`). All of them carry `fullBatch: false` and produce no plan.
+ *   E3-05 the source schema is re-read after the batch and must not have moved under it.
+ *
+ * ALL FOUR ARE ARMED-ONLY. `b2aTrialRegistration` is `null` on a dormant deployment and every one of
+ * these calls returns immediately, so the dormant path performs the same reads, builds the same
+ * plan, and produces the same evidence keys it did before this seam existed.
+ *
+ * BOUNDED PAGING AND THE REGISTRATION SCOPE — CHECKED, AND THE ANSWER IS NO. §6.1's record carries
+ * `sourceReadOperationLimit` (fixed at 1, and about OPERATIONS, not pages) and `artifactReplayLimit`
+ * (fixed at 0). There is no page-, row- or time-bound field in the registration schema, so an armed
+ * read's paging limits are the ACTION's (`action.maxPages`/`maxRows`/`maxReadCount`/`maxElapsedMs`),
+ * exactly as they are when dormant. Adding such a field was explicitly out of scope, and inventing
+ * one to clamp against would be a new schema key, not a use of an existing one.
+ */
+async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2aClaimStore, action, sourceAdapter, extFieldMapping, now }) {
+  if (!b2aTrialRegistration) return null
+  return assertB2aSchemaContract({
+    store: b2aClaimStore,
+    authorization: b2aTrialRegistration,
+    sourceAdapter,
+    // The PLAN's own objects — the same list the guard matched against `objectScope`, so the contract
+    // covers exactly what the read will touch and not a hardcoded roster that would keep passing
+    // when the plan grew a section.
+    sourceObjects: readPlanSourceObjects(action.source.readPlan),
+    extFieldMapping,
+    now,
+  })
+}
+// `confirmationDecisionResolver` (OPTIONAL) is the FOURTH member of the same
+// server-held input family as `installedFieldProperties` / `extFieldMapping`:
+// resolved by the route module at request time from server-side context (the
+// staging ledger sheet), threaded here as a parameter, and NEVER
+// request-supplied — the route body allowlists cannot even name it. Absent, the
+// plan is byte-identical to the pre-ledger behaviour. Present, it is consulted
+// ONLY when the first plan holds manual-confirm rows: it recomputes nothing
+// itself and returns confirmed duplicate_expanded_key x keep_multiple_rows
+// decisions for the CURRENT input revision as a table-scope policy review,
+// which is merged and the plan recomputed once. A confirmed decision therefore
+// downgrades a hold ONLY when its stored fingerprint matches today's input —
+// any stale confirmation leaves the hold standing.
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aNow }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
-  const expansion = await expandPlmProjectBom({
+  // R-06, BEFORE the first source row. A drifted schema refuses here, which is before `expansion`,
+  // before `plan`, before `revision` and before any evidence exists to be produced.
+  const b2aSchemaContract = await assertB2aReadHardeningBeforeExpansion({
+    b2aTrialRegistration, b2aClaimStore, action, sourceAdapter, extFieldMapping, now: b2aNow,
+  })
+  const expansion = await runB2aGuardedSourceRead(b2aTrialRegistration, () => expandPlmProjectBom({
     sourceAdapter,
     projectNo: parameters.projectNo,
     readPlan: action.source.readPlan,
@@ -871,6 +1422,24 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     maxElapsedMs: action.maxElapsedMs,
     maxDepth: action.maxDepth,
     maxRows: action.maxRows,
+    // D-C. Absent on every existing config => the expander's default cap, which is the whole point:
+    // the bound arrives without a deployment having to ask for it.
+    rowErrorLimit: action.rowErrorLimit,
+    extFieldMapping,
+    // E3-02's 断游标 half. Armed only: a page that claims `done: false` and offers no cursor stops
+    // being a silent truncation and becomes a refusal.
+    requireCompleteBatch: Boolean(b2aTrialRegistration),
+  }))
+  // R-05 + E3-02, result side: the expander CATCHES its own bounds and returns them as global error
+  // entries, so a truncated batch arrives as data rather than as a throw. Classified here, before
+  // the plan.
+  assertB2aFullBatchComplete(b2aTrialRegistration, expansion.errors)
+  // E3-05: the source must not have changed shape while the batch was being read.
+  await assertB2aSourceUnchangedAfterRead({
+    authorization: b2aTrialRegistration,
+    contract: b2aSchemaContract,
+    sourceAdapter,
+    sourceObjects: readPlanSourceObjects(action.source.readPlan),
     extFieldMapping,
   })
   const hasGlobalErrors = Array.isArray(expansion.errors) && expansion.errors.length > 0
@@ -881,26 +1450,55 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // vanish according to whether the PROJECT exists in the source, which is a property of the data;
     // whether a mapping is configured is a property of the deployment, and evidence should only ever
     // report the second.
-    return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors, extFieldMapping }
+    return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors, extFieldMapping, b2aSchemaContract }
   }
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
   const duplicateDiagnostics = duplicateExpandedKeyDiagnosticsForRows(expansion.rows)
-  const conflictPolicyReview = buildConflictPolicyReview({
+  let conflictPolicyReview = buildConflictPolicyReview({
     diagnostics: duplicateDiagnostics,
     runOnlyReview,
     tableScopeReview,
   })
-  const plan = planStockPreparationConflicts({
-    template: action.template,
-    conflictStrategy: action.conflictStrategy,
-    expandedRows: expansion.rows,
-    existingRows,
-    rowErrors: expansion.rowErrors,
-    runId: runId || `table-action:${action.actionId}`,
-    plannedAt: plannedAt || new Date().toISOString(),
-    duplicatePolicyReview: conflictPolicyReview,
-    installedFieldProperties,
-  })
+  function planWithReview(review) {
+    return planStockPreparationConflicts({
+      template: action.template,
+      conflictStrategy: action.conflictStrategy,
+      expandedRows: expansion.rows,
+      existingRows,
+      rowErrors: expansion.rowErrors,
+      runId: runId || `table-action:${action.actionId}`,
+      plannedAt: plannedAt || new Date().toISOString(),
+      duplicatePolicyReview: review,
+      installedFieldProperties,
+      // W4 carry: threaded from the deploy-time action config (undefined when the
+      // config never opted in — the planner is then byte-identical to pre-wiring).
+      carryPolicy: action.carryPolicy,
+    })
+  }
+  let plan = planWithReview(conflictPolicyReview)
+  // The revision the LEDGER binds its decisions to is the PRE-MERGE one: it is
+  // what reconcile stores (prepareStockPreparationConfirmationDecisions calls
+  // computeDryRun WITHOUT a resolver) and it stays stable across dry-run ->
+  // reconcile -> confirm -> dry-run as long as the actual inputs are unchanged.
+  const confirmationInputRevision = buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan })
+  let confirmationReview
+  if (typeof confirmationDecisionResolver === 'function' && plan.counts[DECISIONS.MANUAL_CONFIRM] > 0) {
+    const resolved = await confirmationDecisionResolver({
+      projectNo: parameters.projectNo,
+      plan,
+      sourceRevision: confirmationInputRevision,
+    })
+    const mergedTableScopeReview = mergeTableScopeConflictPolicyReviews(tableScopeReview, resolved)
+    if (mergedTableScopeReview.confirmationDecisionPolicyCount > 0 || mergedTableScopeReview.conflictingPolicyCount > 0) {
+      conflictPolicyReview = buildConflictPolicyReview({
+        diagnostics: duplicateDiagnostics,
+        runOnlyReview,
+        tableScopeReview: mergedTableScopeReview,
+      })
+      plan = planWithReview(conflictPolicyReview)
+      confirmationReview = mergedTableScopeReview
+    }
+  }
   const revision = buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan })
   return {
     expansion,
@@ -910,15 +1508,18 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     canApply: !hasGlobalErrors && !hasHardRowErrors,
     hasGlobalErrors,
     conflictPolicyReview,
+    confirmationDecision: confirmationDecisionEvidence(confirmationReview, confirmationInputRevision),
     // Returned so evidence can name WHICH mapping produced the `ext_` half of these rows. It is not
     // an input to `buildRevision`: the revision already covers the expansion the mapping produced,
     // and hashing the mapping as well would move every stored revision for deployments that have
     // none.
     extFieldMapping,
+    // `null` when dormant, so a caller merging it into evidence adds no key at all.
+    b2aSchemaContract,
   }
 }
 
-function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview, extFieldMapping }) {
+function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview, extFieldMapping, confirmationDecision }) {
   const planEvidence = summarizeConflictPlanForEvidence(plan)
   if (planEvidence && conflictPolicyReview) planEvidence.conflictPolicyReview = conflictPolicyReviewForEvidence(conflictPolicyReview, plan)
   return {
@@ -928,6 +1529,10 @@ function evidenceForDryRun({ action, parameters, expansion, plan, revision, canA
     canApply: canApply === true,
     expansion: summarizeBomExpansionForEvidence(expansion),
     plan: planEvidence,
+    // CONDITIONAL like extFieldMapping below: no ledger consultation, no key —
+    // deployments without the ledger produce byte-identical evidence. The
+    // stanza itself is values-free (a revision hash and two counts).
+    ...(confirmationDecision ? { confirmationDecision: cloneJson(confirmationDecision) } : {}),
     // CONDITIONAL, so a deployment with no mapping produces byte-identical evidence to the one it
     // produced before this key existed. With a mapping the projection is the module's own
     // values-free one: schema ids, coercion types and counts, never a source cell.
@@ -948,7 +1553,18 @@ function dryRunStatus(dryRun) {
   return 'failed'
 }
 
+// D-C FAIL-CLOSED. Once `rowErrors` is a bounded SAMPLE, "no hard-blocking entry in the array" stops
+// being the same claim as "no hard-blocking rowError happened": a project whose every
+// `missing_child_bom` landed past the cap would look applicable. The per-type TOTALS the expander
+// publishes when it truncated are the authority, and they are consulted first.
 function hasHardApplyBlockingRowErrors(expansion) {
+  const summary = isPlainObject(expansion && expansion.summary) ? expansion.summary : {}
+  if (summary.rowErrorsTruncated === true) {
+    const counts = isPlainObject(summary.rowErrorTypeCounts) ? summary.rowErrorTypeCounts : {}
+    for (const type of Object.keys(counts)) {
+      if (HARD_APPLY_BLOCKING_ROW_ERROR_TYPES.has(type) && Number(counts[type]) > 0) return true
+    }
+  }
   const rowErrors = Array.isArray(expansion && expansion.rowErrors) ? expansion.rowErrors : []
   return rowErrors.some((entry) => isPlainObject(entry) && HARD_APPLY_BLOCKING_ROW_ERROR_TYPES.has(entry.type))
 }
@@ -956,6 +1572,18 @@ function hasHardApplyBlockingRowErrors(expansion) {
 async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
+  // B2a: BEFORE the source is read. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set.
+  const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
+    registry: input.b2aTrialRegistry,
+    store: input.b2aClaimStore,
+    operationClaim: input.b2aOperationClaim,
+    tenantId: input.tenantId,
+    action,
+    parameters,
+    runId: input.b2aRunId,
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+    now: input.now,
+  })
   const runOnlyReview = normalizeRunOnlyConflictPolicyReview(input.conflictPolicyReview)
   const tableScopeReview = input.policyStore
     ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore })
@@ -976,6 +1604,13 @@ async function dryRunStockPreparationAction(input = {}) {
     // row shape exactly; `computeDryRun` reconciles a present one against `action.extensionFieldIds`
     // before a single row is read.
     extFieldMapping: input.extFieldMapping,
+    // Confirmation-ledger readback, same server-held family (see computeDryRun).
+    confirmationDecisionResolver: input.confirmationDecisionResolver,
+    // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
+    // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
+    b2aTrialRegistration,
+    b2aClaimStore: input.b2aClaimStore,
+    b2aNow: input.now,
   })
   let dryRunToken = null
   if (dryRun.canApply) {
@@ -986,6 +1621,13 @@ async function dryRunStockPreparationAction(input = {}) {
       conflictPolicyReview: runOnlyReview,
     })
   }
+  // W3a. Computed ONLY when the caller explicitly asked and the route's operator-scope gate let the
+  // flag through (http-routes.cjs `tableActionDryRun`) — see the module header. Note the position:
+  // AFTER the token was minted from `dryRun.revision`, so it is structurally impossible for this to
+  // influence what the token promises.
+  const missingComponents = input.includeMissingComponents === true
+    ? summarizeMissingComponents(dryRun.expansion)
+    : null
   return {
     action: publicActionMetadata(action),
     status: dryRunStatus(dryRun),
@@ -995,16 +1637,77 @@ async function dryRunStockPreparationAction(input = {}) {
     revision: dryRun.revision,
     canApply: dryRun.canApply,
     counts: cloneJson(dryRun.plan.counts),
-    evidence: evidenceForDryRun({
-      action,
-      parameters,
-      expansion: dryRun.expansion,
-      plan: dryRun.plan,
-      revision: dryRun.revision,
-      canApply: dryRun.canApply,
-      conflictPolicyReview: dryRun.conflictPolicyReview,
-      extFieldMapping: dryRun.extFieldMapping,
-    }),
+    evidence: {
+      ...evidenceForDryRun({
+        action,
+        parameters,
+        expansion: dryRun.expansion,
+        plan: dryRun.plan,
+        revision: dryRun.revision,
+        canApply: dryRun.canApply,
+        conflictPolicyReview: dryRun.conflictPolicyReview,
+        extFieldMapping: dryRun.extFieldMapping,
+        confirmationDecision: dryRun.confirmationDecision,
+      }),
+      // CONDITIONAL, and merged HERE rather than inside `evidenceForDryRun`, for two reasons: the
+      // dormant payload then has provably not one extra key (the ext-field-mapping wiring suite
+      // compares route evidence against a recomputed baseline by deepEqual and would catch a stray
+      // one), and `evidenceForDryRun` stays a pure function of the plan, which the large-BOM path
+      // also calls without ever having a tenant.
+      ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
+      // R-06's values-free half: one digest, three integers and two booleans — no column name, no
+      // object name. Conditional for the same reason as the stanza above: a dormant deployment adds
+      // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
+      ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
+    },
+    // W3a — THE VALUE-BEARING KEY, and the only one. Top-level and AFTER `evidence`, never inside
+    // it: `evidence` is what gets stored, compared and shipped to an audit row, and this must not
+    // ride along into any of that. Conditional in the same style as the two stanzas above, on BOTH
+    // the opt-in and a non-empty list, so:
+    //   * a caller that did not ask gets a byte-identical response to the pre-W3a one, and
+    //   * a project with nothing missing gets no key either, so the frontend's "render no node when
+    //     the list is empty" rule needs no special case.
+    ...(missingComponents && missingComponents.distinctCount > 0 ? { missingComponents } : {}),
+  }
+}
+
+// Internal handoff for the confirmation-decision RECONCILE route. It repeats
+// the readonly table-action plan SERVER-SIDE — the request contributes only
+// parameters and the (validated) run-only policy review, never a plan or
+// revision — and returns exactly the values-free trio the ledger needs. It is
+// deliberately called WITHOUT confirmationDecisionResolver so the revision it
+// yields is the ledger's stable PRE-MERGE input revision (see computeDryRun).
+async function prepareStockPreparationConfirmationDecisions(input = {}) {
+  const action = assertStockPreparationTargetReady(input.action)
+  const parameters = normalizeActionParameters(input.parameters)
+  const runOnlyReview = normalizeRunOnlyConflictPolicyReview(input.conflictPolicyReview)
+  const tableScopeReview = input.policyStore
+    ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore })
+    : null
+  const dryRun = await computeDryRun({
+    action,
+    parameters,
+    sourceAdapter: input.sourceAdapter,
+    recordsApi: input.recordsApi,
+    plannedAt: input.plannedAt,
+    runId: input.runId,
+    runOnlyReview,
+    tableScopeReview,
+    installedFieldProperties: input.installedFieldProperties,
+    extFieldMapping: input.extFieldMapping,
+  })
+  if (dryRun.expansion.status === 'not_found') {
+    throw new StockPreparationTableActionError(404, 'CONFIRMATION_DECISION_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
+  }
+  if (isLargeBomBoundedExpansion(dryRun.expansion)) {
+    throw new StockPreparationTableActionError(409, 'CONFIRMATION_DECISION_SOURCE_EXPANSION_BOUNDED', 'source expansion requires the large-BOM workflow')
+  }
+  return {
+    action,
+    parameters,
+    plan: dryRun.plan,
+    revision: dryRun.revision,
+    canApply: dryRun.canApply,
   }
 }
 
@@ -1015,6 +1718,22 @@ async function dryRunStockPreparationAction(input = {}) {
 async function prepareStockPreparationMvpSnapshot(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
+  // B2a: this handoff RE-READS the external source (it recomputes a full dry-run), so it is gated on
+  // the same footing as the visible dry-run — before `computeDryRun`, before any adapter call. It
+  // carries its OWN purpose: a registration written for the refresh action does not implicitly
+  // authorize committing that customer's BOM into the MVP snapshot tables, and an entry with
+  // `forbidReuse: true` will say so.
+  const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
+    registry: input.b2aTrialRegistry,
+    store: input.b2aClaimStore,
+    operationClaim: input.b2aOperationClaim,
+    tenantId: input.tenantId,
+    action,
+    parameters,
+    runId: input.b2aRunId,
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
+    now: input.now,
+  })
   const dryRun = await computeDryRun({
     action,
     parameters,
@@ -1032,6 +1751,11 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     // coerce values that the very next function drops — production for no consumer, which is the
     // defect this change exists to remove, not to reproduce. Carrying `ext_` into a snapshot line is
     // a snapshot-schema change with its own migration.
+    // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
+    // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
+    b2aTrialRegistration,
+    b2aClaimStore: input.b2aClaimStore,
+    b2aNow: input.now,
   })
   if (dryRun.expansion.status === 'not_found') {
     throw new StockPreparationTableActionError(404, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
@@ -1047,16 +1771,24 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     parameters,
     expansionResult: dryRun.expansion.rows,
     revision: dryRun.revision,
-    evidence: evidenceForDryRun({
-      action,
-      parameters,
-      expansion: dryRun.expansion,
-      plan: dryRun.plan,
-      revision: dryRun.revision,
-      canApply: dryRun.canApply,
-      conflictPolicyReview: dryRun.conflictPolicyReview,
-      extFieldMapping: dryRun.extFieldMapping,
-    }),
+    evidence: {
+      ...evidenceForDryRun({
+        action,
+        parameters,
+        expansion: dryRun.expansion,
+        plan: dryRun.plan,
+        revision: dryRun.revision,
+        canApply: dryRun.canApply,
+        conflictPolicyReview: dryRun.conflictPolicyReview,
+        extFieldMapping: dryRun.extFieldMapping,
+        confirmationDecision: dryRun.confirmationDecision,
+      }),
+      ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
+      // R-06's values-free half: one digest, three integers and two booleans — no column name, no
+      // object name. Conditional for the same reason as the stanza above: a dormant deployment adds
+      // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
+      ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
+    },
   }
 }
 
@@ -1164,6 +1896,23 @@ async function applyStockPreparationAction(input = {}) {
     actionId: action.actionId,
   })
   const parameters = normalizeActionParameters(input.parameters)
+  // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume
+  // on purpose — a refusal must not burn a single-use dry-run token, or an operator who is simply
+  // outside their registered scope would also lose the artifact that proves what they planned.
+  const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
+    registry: input.b2aTrialRegistry,
+    store: input.b2aClaimStore,
+    operationClaim: input.b2aOperationClaim,
+    tenantId: input.tenantId,
+    action,
+    parameters,
+    runId: input.b2aRunId,
+    // The SAME purpose the dry-run used. Apply re-expands the identical source read; splitting them
+    // into two purposes would mean a deployment could register a customer for planning and then find
+    // apply refused with a valid token in hand, which is a worse failure than the gate prevents.
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+    now: input.now,
+  })
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
     parametersHash: hashJson(parameters),
@@ -1190,6 +1939,17 @@ async function applyStockPreparationAction(input = {}) {
     // expand with the SAME mapping the dry-run used. Passing it on one path and not the other would
     // turn every apply into a TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
     extFieldMapping: input.extFieldMapping,
+    // Same token-parity requirement for the ledger readback: a dry-run whose
+    // plan a confirmed decision downgraded minted its token on the MERGED
+    // revision, so apply must consult the same server-held resolver. A decision
+    // confirmed or superseded between the two calls changes the recomputed
+    // revision and fails the token check — fail-closed, never fail-open.
+    confirmationDecisionResolver: input.confirmationDecisionResolver,
+    // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
+    // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
+    b2aTrialRegistration,
+    b2aClaimStore: input.b2aClaimStore,
+    b2aNow: input.now,
   })
   if (tokenRecord.revision !== dryRun.revision) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current dry-run revision')
@@ -1241,6 +2001,11 @@ async function applyStockPreparationAction(input = {}) {
         extFieldMapping: dryRun.extFieldMapping,
       }),
       apply: summarizeApplyResultForEvidence(applyResult),
+      ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
+      // R-06's values-free half: one digest, three integers and two booleans — no column name, no
+      // object name. Conditional for the same reason as the stanza above: a dormant deployment adds
+      // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
+      ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
     },
   }
 }
@@ -1248,6 +2013,9 @@ async function applyStockPreparationAction(input = {}) {
 module.exports = {
   DEFAULT_DRY_RUN_TOKEN_TTL_MS,
   GENERIC_TABLE_ACTION_KIND,
+  LARGE_BOM_BACKGROUND_CAP_CEILINGS,
+  LARGE_BOM_BACKGROUND_CAP_FIELDS,
+  LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS,
   PLM_STOCK_PREPARATION_ACTION_ID,
   TABLE_ACTION_KIND,
   StockPreparationTableActionError,
@@ -1262,14 +2030,21 @@ module.exports = {
   resolveTargetFieldIds,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  largeBomBackgroundExpansionCaps,
+  prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,
   normalizeActionParameters,
   normalizeStockPreparationActionConfig,
   publicActionMetadata,
   __internals: {
+    assertB2aTrialForStockPreparationRead,
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,
     buildRevision,
+    confirmationDecisionEvidence,
+    hasHardApplyBlockingRowErrors,
+    mergeTableScopeConflictPolicyReviews,
+    normalizeActionLargeBomCaps,
     consumeDryRunToken,
     createDryRunToken,
     hashJson,

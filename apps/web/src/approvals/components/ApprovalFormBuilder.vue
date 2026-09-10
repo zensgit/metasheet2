@@ -398,7 +398,8 @@ const visibilityOptions = computed(() => {
         field.id.trim().length > 0 &&
         field.type !== 'record-link' &&
         field.type !== 'detail' &&
-        field.type !== 'explanation',
+        field.type !== 'explanation' &&
+        field.type !== 'department',
     )
     .map((field) => ({
       id: field.id.trim(),

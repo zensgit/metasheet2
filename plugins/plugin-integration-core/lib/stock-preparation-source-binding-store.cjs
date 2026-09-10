@@ -1,0 +1,343 @@
+'use strict'
+
+// 工作台里选源 — the DURABLE half. One row per (tenant, workspace, action) naming the external
+// system the stock-preparation pull action reads from.
+//
+// WHY A TABLE AND NOT A CONFIG FILE. Its three sibling deploy-time surfaces (customer packs, the
+// `ext_` field mapping, the B2a registry) are REVIEWED ARTIFACTS — objects a human authors, signs
+// off and diffs, which is exactly why plugin-runtime-config.ts reads them off the deployment's own
+// disk and refuses to let an env var carry them. This is the opposite kind of fact: a single
+// foreign key into a table the same admin already manages from the same workbench, changed by
+// clicking a name in a dropdown. Putting it in a file would mean the customer's admin still cannot
+// change it — they have no shell — and that is the whole cost this line exists to remove.
+//
+// WHAT IT IS NOT. It is not a version ledger. read-source-config-store.cjs mints content-keyed
+// versions and runs a draft->approved->retired lifecycle because a read CONFIG is a document whose
+// history matters and whose runtime consumption must be gated on approval. A source binding is a
+// POINTER: there is exactly one live answer, the previous answer has no readers, and a
+// draft/approved split would mean an admin could "save" a binding that silently kept reading the
+// old source — the precise confusion this change exists to end. The CHANGE is what is worth
+// keeping, and that goes to the stock-prep audit trail (`source_binding_set`), which is append-only
+// and already the place a reviewer looks.
+//
+// SCOPE. `(tenant_id, workspace_id, action_id)` — the same triple the action is resolved under, so
+// two workspaces in one tenant can point at different PLMs and neither can read the other's
+// pointer. `workspace_id` is NULLable and, exactly as migrations 057/062/066 do, its NULL is
+// collapsed with COALESCE in the unique index rather than relying on PG14 NULLS NOT DISTINCT. A
+// `workspace_id IS NULL` row is the TENANT-WIDE pointer: it is what a caller with no workspace hint
+// reads, and (since the third-quadrant fix in `get()`) what a caller with a workspace hint that has
+// no row of its own falls back to — inside the same tenant, never across one.
+//
+// VALUES-FREE. Every column is a handle: two scope ids, a frozen action id, an external-system row
+// id, an actor id, and two server clocks. No credential, no host, no connection string, no customer
+// business value can reach this table — the thing being stored is a reference to a row in
+// integration_external_systems, which is itself where connection material is (encrypted) held.
+//
+// NO DELETE SURFACE. Unbinding is not modelled, deliberately: "no override" is the state a
+// deployment starts in, and the fallback it degrades to is the env default. An admin who wants a
+// different source picks a different source. A store that could clear a row would need its own
+// audit action, its own confirmation and its own answer to "what does the action read now?", and
+// none of those has a caller.
+
+const crypto = require('node:crypto')
+
+const BINDING_TABLE = 'integration_stock_prep_source_binding'
+
+// The unique index from migration 079 — (tenant_id, COALESCE(workspace_id,''), action_id).
+const SCOPE_CONSTRAINT = 'uniq_integration_stock_prep_source_binding_scope'
+const MAX_SET_ATTEMPTS = 3
+
+// Postgres unique-violation routing, same idiom as read-source-config-store.cjs.
+function isUniqueViolation(error, constraint) {
+  return Boolean(error) && error.code === '23505' && error.constraint === constraint
+}
+
+class StockPreparationSourceBindingStoreError extends Error {
+  constructor(status, code, message, details = {}) {
+    super(message)
+    this.name = 'StockPreparationSourceBindingStoreError'
+    this.status = status
+    this.code = code
+    this.details = details
+  }
+}
+
+function requiredString(value, field) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new StockPreparationSourceBindingStoreError(422, 'SOURCE_BINDING_SCOPE_INVALID', `${field} is required`, { field })
+  }
+  return value.trim()
+}
+
+function optionalString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function scopeWhere({ tenantId, workspaceId, actionId }) {
+  return {
+    tenant_id: tenantId,
+    workspace_id: workspaceId ?? null,
+    action_id: actionId,
+  }
+}
+
+function rowToPublicBinding(row) {
+  if (!row) return null
+  return {
+    tenantId: row.tenant_id,
+    workspaceId: row.workspace_id ?? null,
+    actionId: row.action_id,
+    externalSystemId: row.external_system_id,
+    updatedBy: row.updated_by ?? null,
+    createdAt: row.created_at ?? null,
+    updatedAt: row.updated_at ?? null,
+  }
+}
+
+function firstRow(result) {
+  if (Array.isArray(result)) return result[0] || null
+  if (result && Array.isArray(result.rows)) return result.rows[0] || null
+  return null
+}
+
+function allRows(result) {
+  if (Array.isArray(result)) return result
+  if (result && Array.isArray(result.rows)) return result.rows
+  return []
+}
+
+function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.randomUUID } = {}) {
+  if (
+    !db ||
+    typeof db.selectOne !== 'function' ||
+    typeof db.select !== 'function' ||
+    typeof db.insertOne !== 'function' ||
+    typeof db.updateRow !== 'function' ||
+    typeof db.transaction !== 'function'
+  ) {
+    // `transaction` is REQUIRED, not nice-to-have: read-then-write on a single row races, and the
+    // caller needs the PREVIOUS value back to audit the change. Reading it in one statement and
+    // writing in another would let a concurrent rebind make the audit trail name a source that was
+    // never actually replaced. `select` (plural) is required too: `get()`'s null-workspace scope
+    // fallback below has to enumerate this (tenant, action)'s OTHER rows, which a single-row
+    // `selectOne` cannot do.
+    throw new Error('createStockPreparationSourceBindingStore: scoped db helper (incl. transaction) is required')
+  }
+
+  function normalizeScope(input = {}) {
+    return {
+      tenantId: requiredString(input.tenantId, 'tenantId'),
+      workspaceId: optionalString(input.workspaceId),
+      actionId: requiredString(input.actionId, 'actionId'),
+    }
+  }
+
+  /**
+   * The persisted override, or `null` when this scope has never bound one.
+   *
+   * TWO SCOPE FALLBACKS, one per direction, and they never compose:
+   *
+   *   * DIRECTION A — a NON-null workspace hint that misses falls back ONCE to the SAME tenant's
+   *     `workspace_id IS NULL` row. This is the exact shape of external-systems.cjs's
+   *     `selectScopedRow` (#5471) and closes the third quadrant of the workspace-scope hole: the web
+   *     workbench sends `workspaceId=default` on every request (useAuth persists the tenant id as
+   *     the workspace hint), while a binding written by the delivery-guide §3 script — a bare POST
+   *     with only `x-tenant-id` and no `?workspaceId=` — lands on the null row. Before this, that
+   *     pairing read `null`, `applyPersistedSourceBinding` fell through to the deploy default, and
+   *     the UI's dry-run 404'd with ExternalSystemNotFound while the same script's probe returned
+   *     200. The result is annotated `matchedWorkspaceId: null, scopeFallback: 'tenant_null_row'`.
+   *     WHAT IT MUST NOT DO, and what the tests fence: it never crosses `tenant_id` (the fallback
+   *     query carries the caller's tenant — F-13 and F-16 go red without it), and it never reaches
+   *     ANOTHER non-null workspace's row (the fallback is a point lookup at `workspace_id IS NULL`,
+   *     not the sibling scan below — F-07/F-12/F-16 go red if that filter is loosened). It is a
+   *     single `selectOne`, so there is no multi-candidate ambiguity to refuse: the unique scope
+   *     index admits at most one null row per (tenant, action). The exact row still wins outright
+   *     when it exists (F-11/F-14). Writes (`set`) are NOT widened: a hint-carrying write lands on
+   *     its own workspace row and leaves the null row untouched (F-15). End to end (the UI's
+   *     `workspaceId=default` dry-run reading a script-written null-row binding):
+   *     `stock-preparation-source-binding-routes.test.cjs` R-24.
+   *
+   *   * DIRECTION B — a null-workspace caller (the mirror image of `selectScopedRow`, deliberately:
+   *     that helper widens a MISSING hint by falling back to the tenant-wide row when a SPECIFIC
+   *     hint misses; this widens the opposite way, because here the specific (workspace-scoped) row
+   *     is the one an admin actually wrote via the workbench picker, and `workspace_id IS NULL` is
+   *     the row nothing writes on its own).
+   *
+   * Several call sites (reconcile, mvp-persist, carry, export, handoff, the project board) invoke
+   * this WITHOUT a `workspaceId` at all, so their lookup is always `workspace_id IS NULL` — and a
+   * binding an admin saved under the UI's own `workspaceId=default` query hint is invisible to them
+   * even though it is the only binding that exists. That is BINDING RESOLUTION only — knowing which
+   * `externalSystemId` is bound. Of those six, only reconcile and mvp-persist go on to actually LOAD
+   * that external system (through `loadTableActionSourceAdapter`, alongside dry-run/apply/the
+   * large-BOM run — none of which need THIS fallback themselves, since they carry their own
+   * workspace hint); carry/export/handoff/the project board never load it, so F3's separate fix in
+   * `loadTableActionSourceAdapter` (see its own comment) is not theirs to benefit from either way.
+   * (`stockPreparationSourcePreflight` at
+   * `http-routes.cjs:6163` calls `getTableAction({ actionId })` with NO `tenantId` at all, so
+   * `applyPersistedSourceBinding` throws `TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED` and the route's
+   * own `catch` swallows it — it never reaches this fallback, before or after this change. That is a
+   * separate, pre-existing bug this PR does not fix.) When the exact null-workspace row is ABSENT and
+   * there is EXACTLY ONE workspace-scoped row for this `(tenant_id, action_id)`, that row is the only
+   * thing a human could have meant, so it is returned — annotated with `matchedWorkspaceId` (the
+   * workspace the returned row actually belongs to) and `scopeFallback: 'single_workspace_binding'`,
+   * so a caller that cares can tell a resolved fallback from an exact hit. An EXACT hit
+   * (null-workspace row present, or a non-null hint that matched) is annotated too, with
+   * `matchedWorkspaceId` echoing the input and `scopeFallback: null`, so the returned shape is
+   * uniform regardless of which path produced it — a caller that does not care about either key can
+   * ignore them, and both currently DO: the `resolveSourceBinding` closure `http-routes.cjs` wires
+   * into the table-action registry extracts only `.externalSystemId`, and `stockPreparationSourceBindingGet`
+   * strips both keys before they reach the wire (`publicPersistedBinding`). The one real consumer is
+   * `loadTableActionSourceAdapter` (`http-routes.cjs`), which needs `matchedWorkspaceId` to find the
+   * external-system row a fallback-resolved id lives under — see its own comment for why.
+   *
+   * FAIL-CLOSED, THREE WAYS:
+   *   * Two or more workspace-scoped rows is refused exactly like zero — `null` — rather than
+   *     guessed: "pick the newest" or "pick alphabetically first" is a decision this store does not
+   *     get to make quietly. NOTE: this means a SECOND workspace ever binding this action's source
+   *     makes the fallback go silently inert again for every hint-less caller — back to exactly
+   *     today's (pre-fallback) behaviour, with no error and no log line, because there is no
+   *     logger/event hook wired into this store to raise one. An operator who binds a second
+   *     workspace and does not also rebind (or delete) the first will not be told.
+   *   * A caller that named a SPECIFIC non-null workspace and missed gets direction A ONLY — the
+   *     tenant-wide null row — and never the sibling scan: only the caller that supplied no hint is
+   *     asking "what does this tenant actually have", so only that caller's miss is worth widening
+   *     to another workspace's row. TESTED as its own fence, not merely implied by the null-hint
+   *     tests: `stock-preparation-source-binding-scope-fallback.test.cjs` F-07 seeds a SINGLE
+   *     sibling under a workspace OTHER than the one queried and asserts the miss stays a miss —
+   *     letting a non-null hint reach the sibling scan below fails THAT test on the resolved id, not
+   *     merely a red suite total (a bare null-hint test cannot tell the two apart: with only a
+   *     null-workspace row seeded, the sibling scan's own `workspace_id IS NOT NULL` filter throws
+   *     it away regardless of whether the guard ran).
+   *   * READ-READ RACE: the `exact` lookup and the sibling scan below are two separate statements,
+   *     not one snapshot. If a null-workspace row is inserted between them, the sibling scan can see
+   *     it even though `exact` just reported it absent. Resolving to some OTHER workspace's row in
+   *     that instant would risk overriding the very row precedence says should have won — so this
+   *     refuses (`null`, unlabelled) rather than trusting whichever statement happened to run first.
+   */
+  async function get(input = {}) {
+    const scope = normalizeScope(input)
+    const exact = await db.selectOne(BINDING_TABLE, scopeWhere(scope))
+    if (exact) {
+      return { ...rowToPublicBinding(exact), matchedWorkspaceId: scope.workspaceId, scopeFallback: null }
+    }
+    if (scope.workspaceId !== null) {
+      // DIRECTION A. A point lookup at this tenant's null row and nothing wider: `tenant_id` is the
+      // caller's own, `workspace_id` is literally null, and `db.select` (the sibling scan) is never
+      // reached from here — so a hint-carrying caller can be handed the tenant-wide pointer and
+      // nothing else. The exact row and this one are two statements, not one snapshot; a concurrent
+      // first write of the exact row between them is answered with the null row that WAS the truth
+      // a statement ago — the same posture `selectScopedRow` takes, and never a cross-scope answer.
+      const tenantWide = await db.selectOne(
+        BINDING_TABLE,
+        scopeWhere({ tenantId: scope.tenantId, workspaceId: null, actionId: scope.actionId }),
+      )
+      if (!tenantWide) return null
+      return { ...rowToPublicBinding(tenantWide), matchedWorkspaceId: null, scopeFallback: 'tenant_null_row' }
+    }
+
+    // `limit: 2` — the unique scope index guarantees at most one null-workspace row, so two rows
+    // back is already enough to prove "more than one workspace-scoped candidate" without fetching a
+    // deployment's entire (tenant, action) row set just to refuse it.
+    const raw = allRows(await db.select(BINDING_TABLE, {
+      where: { tenant_id: scope.tenantId, action_id: scope.actionId },
+      limit: 2,
+    }))
+    // The read-read race guard: if a null-workspace row shows up here despite `exact` just reporting
+    // it absent, do not fall through to the sibling scan below at all.
+    if (raw.some((row) => row && (row.workspace_id === null || row.workspace_id === undefined))) return null
+
+    const siblings = raw.filter((row) => row && row.workspace_id !== null && row.workspace_id !== undefined)
+    if (siblings.length !== 1) return null
+    const [only] = siblings
+    return {
+      ...rowToPublicBinding(only),
+      matchedWorkspaceId: only.workspace_id,
+      scopeFallback: 'single_workspace_binding',
+    }
+  }
+
+  /**
+   * Bind (or rebind) this scope's source.
+   *
+   * Returns `{ binding, previousExternalSystemId, changed }` — the caller needs all three to write
+   * the audit row, and they are produced INSIDE one transaction with the write so the "old" value
+   * reported is provably the one this write replaced.
+   *
+   * Idempotent: rebinding to the same id still touches `updated_at`/`updated_by` (someone did
+   * re-confirm it) and reports `changed: false`, so the audit trail can distinguish a real repoint
+   * from a re-save without inventing a second action token.
+   *
+   * WHY A RETRY LOOP AND NOT A BARE UPSERT. `db.upsertOne` would make the write itself atomic, but
+   * its `RETURNING *` yields the NEW row — and this caller's whole reason for existing is to report
+   * the row it REPLACED, so the audit trail can say what the source used to be. Reading the old
+   * value therefore has to happen, and a read-then-write is not made race-free by a transaction:
+   * under READ COMMITTED two concurrent first-binds both see "absent" and the second INSERT dies on
+   * the unique index. So the index is allowed to arbitrate and the loser RE-ENTERS with a fresh
+   * transaction, where it now sees the winner's row and takes the UPDATE path — reporting the
+   * winner's id as the previous one, which is the truth. Bounded, because an unbounded retry on a
+   * violation we may have misdiagnosed is a spin.
+   */
+  async function set(input = {}) {
+    const scope = normalizeScope(input)
+    const externalSystemId = requiredString(input.externalSystemId, 'externalSystemId')
+    const actor = optionalString(input.actor)
+    const where = scopeWhere(scope)
+
+    for (let attempt = 1; attempt <= MAX_SET_ATTEMPTS; attempt += 1) {
+      try {
+        return await db.transaction(async (trx) => {
+          const existing = await trx.selectOne(BINDING_TABLE, where)
+          const previousExternalSystemId = existing ? existing.external_system_id : null
+          const row = existing
+            ? firstRow(await trx.updateRow(
+                BINDING_TABLE,
+                { external_system_id: externalSystemId, updated_by: actor, updated_at: new Date() },
+                where,
+              ))
+            : firstRow(await trx.insertOne(BINDING_TABLE, {
+                id: idGenerator(),
+                tenant_id: scope.tenantId,
+                workspace_id: scope.workspaceId,
+                action_id: scope.actionId,
+                external_system_id: externalSystemId,
+                updated_by: actor,
+              }))
+          if (!row) {
+            // The row moved between the read and the write, or the helper returned nothing. Fail
+            // CLOSED rather than reporting a binding we cannot prove landed — an admin told "saved"
+            // whose source did not move is the worst outcome this surface has.
+            throw new StockPreparationSourceBindingStoreError(409, 'SOURCE_BINDING_WRITE_CONFLICT', 'source binding write did not land', {
+              actionId: scope.actionId,
+            })
+          }
+          return {
+            binding: rowToPublicBinding(row),
+            previousExternalSystemId,
+            changed: previousExternalSystemId !== externalSystemId,
+          }
+        })
+      } catch (error) {
+        // A 23505 aborts the PG transaction, so a retry must start a NEW one rather than continue
+        // inside the aborted one — which is why the loop wraps `db.transaction` instead of sitting
+        // inside it.
+        if (isUniqueViolation(error, SCOPE_CONSTRAINT) && attempt < MAX_SET_ATTEMPTS) continue
+        throw error
+      }
+    }
+    throw new StockPreparationSourceBindingStoreError(409, 'SOURCE_BINDING_WRITE_CONFLICT', 'source binding write conflicted', {
+      actionId: scope.actionId,
+    })
+  }
+
+  return { get, set }
+}
+
+module.exports = {
+  BINDING_TABLE,
+  StockPreparationSourceBindingStoreError,
+  createStockPreparationSourceBindingStore,
+  __internals: {
+    rowToPublicBinding,
+    scopeWhere,
+  },
+}

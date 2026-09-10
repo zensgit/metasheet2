@@ -231,6 +231,21 @@ const KNOWN_SITES: KnownSite[] = [
   // display-only interpolation. Every non-exception entry MUST NOT carry `hour:`.
   // ---------------------------------------------------------------------------------
   {
+    // elearning-credit-policy.ts `normalizeElearningCreditTimeZone()` — the formatter
+    // output is never formatted or parsed; resolvedOptions() only canonicalizes the
+    // validated IANA timezone. No hour option is requested.
+    file: 'packages/core-backend/src/services/elearning-credit-policy.ts',
+    lineText: "return new Intl.DateTimeFormat('en-US', { timeZone: value.trim() })",
+    kind: 'display',
+  },
+  {
+    // elearning-credit-policy.ts `elearningCreditDay()` — formatToParts consumes only
+    // year/month/day to build the local credit-day key. No hour option is requested.
+    file: 'packages/core-backend/src/services/elearning-credit-policy.ts',
+    lineText: "const parts = new Intl.DateTimeFormat('en-US', {",
+    kind: 'display',
+  },
+  {
     // automation-timezone.ts `isValidIanaTimeZone()` — `.format(0)` return value discarded,
     // used only to force the RangeError on an unknown zone. No hour option at all.
     file: 'packages/core-backend/src/multitable/automation-timezone.ts',
@@ -646,9 +661,9 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     expect(files).toContain('plugins/plugin-intelligent-restore/src/IntelligentRestoreView.vue')
     const candidates = findCandidateSites(files)
     expect(candidates.length).toBe(KNOWN_SITES.length)
-    // 22 = the original 20 (#4927) + the 2 display-class sites in the combined-soak load
-    // generator (#4556 soak, PR #4929): its tz-validity probe and its en-CA date-key idiom.
-    expect(KNOWN_SITES.length).toBe(23)
+    // 25 = the previously audited 23 sites + the two display-class credit-policy sites
+    // above: IANA canonicalization and the hour-free local credit-day key.
+    expect(KNOWN_SITES.length).toBe(25)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

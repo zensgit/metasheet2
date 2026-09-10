@@ -23,6 +23,7 @@ import { db } from '../db/db'
 import { toJsonValue } from '../db/type-helpers'
 import { redactValue } from './automation-log-redact'
 import { AutomationJobService } from './automation-job-service'
+import type { ExecutionLedgerKind } from './automation-execution-ledger'
 import type { AutomationAction } from './automation-actions'
 import {
   parseResumeCursor,
@@ -39,6 +40,8 @@ export interface ActionFingerprint {
 export interface SuspensionRow {
   id: string
   executionId: string
+  rootExecutionId: string | null
+  ledgerKind: ExecutionLedgerKind
   ruleId: string
   sheetId: string | null
   recordId: string | null
@@ -62,6 +65,11 @@ export function computeActionFingerprint(actions: ReadonlyArray<{ type: string }
   return { count: actions.length, hash }
 }
 
+function readLedgerKind(value: unknown): ExecutionLedgerKind {
+  if (value === 'execution' || value === 'test_run') return value
+  throw new Error('automation suspension has an invalid ledger_kind')
+}
+
 export class AutomationSuspensionService {
   constructor(private readonly jobService: AutomationJobService) {}
 
@@ -72,6 +80,8 @@ export class AutomationSuspensionService {
    */
   async create(input: {
     executionId: string
+    rootExecutionId: string
+    ledgerKind: ExecutionLedgerKind
     rule: { id: string; sheetId?: string; actions: ReadonlyArray<AutomationAction> }
     recordId: string
     triggerEvent: unknown
@@ -91,6 +101,8 @@ export class AutomationSuspensionService {
         .values({
           id: `asp_${randomUUID()}`,
           execution_id: input.executionId,
+          root_execution_id: input.rootExecutionId,
+          ledger_kind: input.ledgerKind,
           rule_id: input.rule.id,
           sheet_id: input.rule.sheetId ?? null,
           record_id: input.recordId || null,
@@ -125,6 +137,8 @@ export class AutomationSuspensionService {
    */
   async createBranchLocal(input: {
     executionId: string
+    rootExecutionId: string
+    ledgerKind: ExecutionLedgerKind
     rule: { id: string; sheetId?: string; actions: ReadonlyArray<AutomationAction> }
     recordId: string
     triggerEvent: unknown
@@ -139,6 +153,8 @@ export class AutomationSuspensionService {
         .values({
           id: `asp_${randomUUID()}`,
           execution_id: input.executionId,
+          root_execution_id: input.rootExecutionId,
+          ledger_kind: input.ledgerKind,
           rule_id: input.rule.id,
           sheet_id: input.rule.sheetId ?? null,
           record_id: input.recordId || null,
@@ -197,6 +213,8 @@ export class AutomationSuspensionService {
     return {
       id: row.id as string,
       executionId: row.execution_id as string,
+      rootExecutionId: (row.root_execution_id as string) ?? null,
+      ledgerKind: readLedgerKind(row.ledger_kind),
       ruleId: row.rule_id as string,
       sheetId: (row.sheet_id as string) ?? null,
       recordId: (row.record_id as string) ?? null,

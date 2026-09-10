@@ -132,7 +132,7 @@ async function createApp(handler: QueryHandler) {
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
     userHasPermission: vi.fn().mockResolvedValue(false),
-    listUserPermissions: vi.fn().mockResolvedValue(['multitable:write']),
+    listUserPermissions: vi.fn().mockResolvedValue(['multitable:write', 'multitable:manage-schema']),
     invalidateUserPerms: vi.fn(),
     getPermCacheStatus: vi.fn(),
   }))
@@ -148,7 +148,9 @@ async function createApp(handler: QueryHandler) {
     req.user = {
       id: 'user_wiring',
       roles: [],
-      perms: ['multitable:read', 'multitable:write'],
+      // `multitable:manage-schema` is REQUIRED for the field PATCH surface: schema management no
+      // longer rides on `multitable:write` (src/multitable/manage-schema-permission.ts).
+      perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'],
     }
     next()
   })

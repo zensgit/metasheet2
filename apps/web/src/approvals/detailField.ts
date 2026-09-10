@@ -499,6 +499,17 @@ function formatDisplayValue(field: FormField, value: unknown): string {
     }
     case 'attachment':
       return formatLegacyAttachmentValue(value)
+    case 'department': {
+      if (!Array.isArray(value)) return '-'
+      const showFullPath = field.props?.display === 'full_path'
+      const labels = value.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return []
+        const record = entry as Record<string, unknown>
+        const candidate = showFullPath ? record.fullPath : record.name
+        return typeof candidate === 'string' && candidate.trim() ? [candidate.trim()] : []
+      })
+      return labels.length > 0 ? labels.join('、') : '-'
+    }
     case 'record-link': {
       // FWB-0 Layer 2: never echo raw recordId (no id oracle). Detail snapshots have no
       // human summary channel here — generic selected-record label when present.

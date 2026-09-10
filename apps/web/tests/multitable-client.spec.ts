@@ -1070,4 +1070,125 @@ describe('MultitableApiClient', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/records/rec_1')
   })
+
+  // Sheet/base rename affordances (feat/multitable-rename). Both PATCH endpoints gate
+  // server-side on canManageFields — these tests cover the wire contract (URL/method/body,
+  // envelope unwrap) and the 403 -> MultitableApiError surfacing the exact server message.
+  it('renameSheet PATCHes the sheet endpoint with the given name and unwraps the sheet', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { sheet: { id: 'sheet_1', baseId: 'base_1', name: 'Renamed', description: null } },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.renameSheet('sheet_1', 'Renamed')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/sheet_1')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'Renamed' })
+    expect(result).toEqual({ sheet: { id: 'sheet_1', baseId: 'base_1', name: 'Renamed', description: null } })
+  })
+
+  it('renameSheet surfaces the server FORBIDDEN message on a 403 (schema-authority gate)', async () => {
+    const message = 'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'FORBIDDEN', message },
+    }), { status: 403 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.renameSheet('sheet_1', 'Renamed').catch((err) => err)
+
+    expect(error.message).toBe(message)
+    expect(error.status).toBe(403)
+    expect(error.code).toBe('FORBIDDEN')
+  })
+
+  it('renameBase PATCHes the base endpoint with the given name, unwraps the base, and invalidates the bases cache', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: { bases: [{ id: 'base_1', name: 'Old name' }] },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: { base: { id: 'base_1', name: 'New name', icon: null, color: null, ownerId: 'u1', workspaceId: 'w1' } },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: { bases: [{ id: 'base_1', name: 'New name' }] },
+      }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    // Warm the bases cache.
+    await client.listBases()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+
+    const result = await client.renameBase('base_1', 'New name')
+    expect(fetchFn.mock.calls[1]?.[0]).toBe('/api/multitable/bases/base_1')
+    const init = fetchFn.mock.calls[1]?.[1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'New name' })
+    expect(result).toEqual({ base: { id: 'base_1', name: 'New name', icon: null, color: null, ownerId: 'u1', workspaceId: 'w1' } })
+
+    // The cache warmed above must NOT be served after the rename — a subsequent listBases()
+    // must hit the network again and return the renamed base.
+    const after = await client.listBases()
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(after.bases[0]?.name).toBe('New name')
+  })
+
+  it('renameBase surfaces the server FORBIDDEN message on a 403 (schema-authority gate)', async () => {
+    const message = 'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'FORBIDDEN', message },
+    }), { status: 403 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.renameBase('base_1', 'New name').catch((err) => err)
+
+    expect(error.message).toBe(message)
+    expect(error.status).toBe(403)
+    expect(error.code).toBe('FORBIDDEN')
+  })
+
+  // P3-4: whole-execution re-run (A5 endpoint). The UI confirm-gates this call and always sends
+  // confirmSideEffects:true (never lets the caller omit it) — a component-level mock can only see
+  // `toHaveBeenCalledWith(id)`, so this wire-contract assertion is the one place that can go red if
+  // that flag is ever dropped from the request body.
+  it('retryAutomationExecution POSTs confirmSideEffects:true to the execution retry endpoint', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'axe_new', ruleId: 'rule-1', sheetId: 'sheet-a', status: 'running', statusLegacy: 'running',
+      triggeredBy: 'event', triggeredAt: '2026-05-28T00:00:02.000Z', finishedAt: null, duration: null,
+      error: null, schemaVersion: 1, steps: [], rerunOfExecutionId: 'axe_1', initiatedBy: 'user_1',
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.retryAutomationExecution('axe_1')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/automation-executions/axe_1/retry')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    // Exact deep-equal (not toContain): an extra field or confirmSideEffects:false must also fail.
+    expect(JSON.parse(init.body as string)).toEqual({ confirmSideEffects: true })
+    expect(result.id).toBe('axe_new')
+  })
+
+  it('retryAutomationExecution encodes the execution id and surfaces a discriminated 409 code', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'NOT_RETRYABLE', message: 'Only failed/skipped executions can be retried (got resolved)' },
+    }), { status: 409 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.retryAutomationExecution('axe with space').catch((err) => err)
+
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/automation-executions/axe%20with%20space/retry')
+    expect(error.code).toBe('NOT_RETRYABLE')
+    expect(error.status).toBe(409)
+  })
 })

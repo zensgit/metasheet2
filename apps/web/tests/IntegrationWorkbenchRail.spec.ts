@@ -49,6 +49,9 @@ async function flushUi(cycles = 5): Promise<void> {
 const bi = (zh: string, _en: string): string => zh
 
 const railGroups: IntegrationWorkbenchRailGroup[] = [
+  // 对接总览: 8th group, PREPENDED — mirrors the view's `railGroups`, where the overview is the
+  // first screen. Add-only: the seven groups below keep their ids, labels and anchors.
+  { id: 'hub-overview', label: '总览', targetId: 'int-sec-hub-overview' },
   { id: 'connection', label: '连接管理', targetId: 'int-sec-connection' },
   { id: 'read-source', label: '读取源', targetId: 'int-sec-read-source' },
   { id: 'combination', label: '组合', targetId: 'int-sec-combination-config' },
@@ -89,10 +92,11 @@ describe('IntegrationWorkbenchRail (unit)', () => {
     await flushUi(1)
   }
 
-  it('renders all seven groups (six IU-2a design-lock groups + the BA-UI-1 bridge-agent group)', async () => {
+  it('renders all eight groups (六 IU-2a + BA-UI-1 bridge-agent + 对接总览)', async () => {
     await mountRail()
     const items = container!.querySelectorAll('.integration-workbench-rail__item')
-    expect(items.length).toBe(7)
+    expect(items.length).toBe(8)
+    expect(container!.textContent).toContain('总览')
     expect(container!.textContent).toContain('连接管理')
     expect(container!.textContent).toContain('读取源')
     expect(container!.textContent).toContain('组合')
@@ -169,6 +173,8 @@ describe('IntegrationWorkbenchView — IU-2a chrome integration', () => {
   }
 
   const sectionIds = [
+    // 对接总览: 12th anchor — add-only extension of the eleven below.
+    'int-sec-hub-overview',
     'int-sec-connection',
     'int-sec-read-source',
     'int-sec-combination-config',
@@ -184,13 +190,13 @@ describe('IntegrationWorkbenchView — IU-2a chrome integration', () => {
     'int-sec-bridge-agent',
   ]
 
-  it('renders PageShell (wide) + PageHeader chrome, the rail, and all eleven section anchors', async () => {
+  it('renders PageShell (wide) + PageHeader chrome, the rail, and all twelve section anchors', async () => {
     await mountView()
     expect(container!.querySelector('.ms-page-shell')).toBeTruthy()
     expect(container!.querySelector('.ms-page-shell--wide')).toBeTruthy()
     expect(container!.querySelector('.ms-page-header__title')?.textContent).toBe('数据工厂')
     expect(container!.querySelector('[data-testid="integration-help-link"]')).toBeTruthy()
-    for (const groupId of ['connection', 'read-source', 'combination', 'cleaning-mapping', 'run-push', 'monitoring', 'bridge-agent']) {
+    for (const groupId of ['hub-overview', 'connection', 'read-source', 'combination', 'cleaning-mapping', 'run-push', 'monitoring', 'bridge-agent']) {
       expect(container!.querySelector(`[data-testid="integration-rail-${groupId}"]`)).toBeTruthy()
     }
     for (const id of sectionIds) {

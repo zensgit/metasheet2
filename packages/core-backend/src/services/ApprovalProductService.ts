@@ -57,6 +57,11 @@ import {
   type NodeOperationGraphView,
 } from './approval-effective-node-operations'
 import {
+  assignmentMatchesActor,
+  readParallelBranchStates,
+  resolveCanDecideCurrentNode,
+} from './approval-seat-authorization'
+import {
   ACTION_POLICY_KEYS,
   APPROVAL_POLICY_DENIED_ACTION,
   APPROVAL_TERMINAL_STATUSES,
@@ -84,7 +89,21 @@ import {
   isEmptyValue,
 } from './ApprovalGraphExecutor'
 import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
-import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValue } from './ApprovalAssigneeResolver'
+import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValues } from './ApprovalAssigneeResolver'
+import { isPriorNodeApproverHistoryDedupExempt } from './approval-prior-node-dedup-exemption'
+import {
+  buildApprovalDesignatedFallbackResolver,
+  loadApprovalDesignatedFallbackEligibility,
+  readApprovalDesignatedFallbackEligibilitySnapshot,
+  serializeApprovalDesignatedFallbackEligibility,
+  type ApprovalDesignatedFallbackEligibilitySnapshot,
+} from './approval-designated-fallback-eligibility'
+import {
+  inheritSequentialQueueMetadata,
+  isSequentialQueueActive,
+  promoteNextSequentialQueueAssignment,
+  readSequentialQueueMetadata,
+} from './approval-sequential-mode'
 import { validateAmountTotalConsistency } from './amount-total-check'
 import { isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
 import {
@@ -108,6 +127,10 @@ import {
   extractApprovalConditionFormulaFieldIds,
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import {
+  ApprovalDepartmentUnavailableError,
+  canonicalizeApprovalDepartmentFormData,
+} from './approval-department-field'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
 import { fetchCuratedApprovalRoleIds, fetchCuratedApprovalMemberGroupIds, fetchMemberGroupSnapshot } from './approval-directory'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
@@ -489,6 +512,16 @@ export interface ApprovalDepartureTransferResult {
 }
 
 /**
+ * F4-E signal-consumer override. The directory consumer resolves the manager from the departed
+ * account's captured org position after the deprovision transaction commits. The writer still
+ * rechecks that supplied local user is active before moving any seat. Omit the whole options object
+ * to retain the direct/test entry point's legacy live requester resolution.
+ */
+export interface ApprovalDepartureTransferOptions {
+  resolvedManagerId: string | null
+}
+
+/**
  * P1#2e producer family 1 — wrap an in-transaction pg client (the connection that has BEGUN and not yet
  * COMMITted) as the durable seam's `TransactionalQueryable`. The `isTransaction: true` marker documents intent
  * but proves nothing on its own; `produceAutomationEvent`'s `pg_current_xact_id()` probe (pg-transaction-guard)
@@ -543,6 +576,8 @@ export const FORM_FIELD_TYPES = new Set([
   'select',
   'multi-select',
   'user',
+  // Lock-2 L2-A: top-level directory-backed department selector.
+  'department',
   'attachment',
   'detail',
   // FWB-0 Layer 2: top-level only (explicitly excluded from DETAIL_LEAF below).
@@ -594,6 +629,25 @@ export const DATE_RANGE_FIELD_ALLOWED_PROP_KEYS = new Set([
 // fail-closed shape (§0.4): unknown keys fail publish, canonicalized props never spread residually.
 export const EXPLANATION_FIELD_ALLOWED_PROP_KEYS = new Set(['text'])
 
+export const DEPARTMENT_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'selection',
+  'display',
+  'defaultMode',
+  'defaultDepartmentIds',
+  'maxSelections',
+])
+
+// Lock-2 §L2-B. `maxSelections` is the carrier required by ratified OD-L2-3's publish-time cap;
+// the prose list in §L2-B names only the other four keys, while the owner record explicitly binds
+// this fifth key. Unknown keys fail rather than riding through as semantic free text.
+export const USER_FIELD_ALLOWED_PROP_KEYS = new Set([
+  'allowSelf',
+  'selection',
+  'defaultMode',
+  'defaultUserIds',
+  'maxSelections',
+])
+
 // Leaf sub-field types allowed inside a `detail` group's columns. The attachment pipeline narrows
 // this set only while its feature flag is enabled; flag OFF preserves the pre-feature authoring
 // contract for existing templates. `record-link` is v1-excluded from detail (FWB-0 Layer 2:
@@ -619,10 +673,14 @@ export const EXPLANATION_FIELD_ALLOWED_PROP_KEYS = new Set(['text'])
 // nested explanation column — no pre-emption ambiguity to correct later.
 //
 // EXPORTED (mirrors FORM_FIELD_TYPES) so a census test can assert this DERIVED set is exactly
-// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation} rather than re-declaring it.
+// FORM_FIELD_TYPES minus {detail, record-link, date_range, explanation, department} rather than re-declaring it.
 export const DETAIL_LEAF_FIELD_TYPES = new Set(
   [...FORM_FIELD_TYPES].filter(
-    (type) => type !== 'detail' && type !== 'record-link' && type !== 'date_range' && type !== 'explanation',
+    (type) => type !== 'detail'
+      && type !== 'record-link'
+      && type !== 'date_range'
+      && type !== 'explanation'
+      && type !== 'department',
   ),
 )
 
@@ -631,7 +689,7 @@ export const DETAIL_LEAF_FIELD_TYPES = new Set(
 // `ApprovalNodeType` union and the FE `apps/web/src/types/approval.ts` node-type list.
 const APPROVAL_NODE_TYPES = new Set(['start', 'approval', 'cc', 'condition', 'parallel', 'end', 'handler'])
 const CONDITION_OPERATORS = new Set(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
-const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold'])
+const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold', 'sequential'])
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
 // Lock-4 §3 F4-B — 'designated' joins the enum. §1.3 four-allowlist arithmetic tracks the FE side.
 const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve', 'designated'])
@@ -709,6 +767,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function handoverAssignmentMetadata(
+  sourceAssignments: readonly Pick<ApprovalAssignmentRow, 'metadata'>[],
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const inherited = inheritSequentialQueueMetadata(
+    sourceAssignments.map((assignment) => assignment.metadata),
+    metadata,
+  )
+  if (!inherited) {
+    throw new ServiceError(
+      'Sequential approval queue handover metadata is invalid',
+      409,
+      'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+    )
+  }
+  return inherited
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
 }
@@ -716,7 +792,7 @@ function isNonEmptyString(value: unknown): value is string {
 function normalizeApprovalMode(value: unknown, context: ValidationContext, path: string): ApprovalMode | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || !APPROVAL_MODES.has(value as ApprovalMode)) {
-    failValidation(context, `${path} must be single, all, any, or threshold`)
+    failValidation(context, `${path} must be single, all, any, threshold, or sequential`)
   }
   return value as ApprovalMode
 }
@@ -1098,16 +1174,6 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
     if (node.type !== 'approval' && node.type !== 'handler') return
     const config = node.config as { assigneeSources?: ApprovalAssigneeSource[] }
     for (const source of config.assigneeSources ?? []) {
-      if (source.kind === 'form_field_user') {
-        const field = fieldById.get(source.fieldId)
-        if (!field || field.type !== 'user') {
-          failValidation(
-            context,
-            `approvalGraph node ${node.key} assigneeSources form_field_user must reference a user field`,
-          )
-        }
-        continue
-      }
       // Lock-2 §L2-C publish pins for the form-field contact extensions — closing the silent-skip
       // this loop otherwise carries for every non-form_field_user kind (the kind-axis twin of
       // Lock-3 R-10's node-type axis on this same function). Pins, in order:
@@ -1122,19 +1188,18 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
       //       so neither door covers for the other);
       //   (5) `level` in range — enforced by `normalizeApprovalAssigneeSources`, which runs on
       //       every save/publish/restore path ahead of this validator;
-      //   (6) the field must not declare `selection: 'multi'` until OD-L2-7's array support lands
-      //       in the SAME slice as the prop (props are unvalidated free text today, so the pin
-      //       reads the key defensively rather than trusting a typed carrier).
-      // NOTE (OD-L2-4, deliberately deferred): the ratified required-pin RETROFIT onto the shipped
-      // `form_field_user` arm above applies "to all four kinds at the next save/publish" and lands
-      // in its own slice with the authoring-copy disclosure — this slice pins only the kinds it
-      // ships, and the shipped arm keeps its shipped acceptance until that slice lands.
-      if (source.kind === 'form_field_user_manager' || source.kind === 'form_field_user_dept_head') {
+      //   (6) multi-select is admitted only with a positive publish-time maxSelections cap. Runtime
+      //       never truncates; all selected principals are unioned by the resolver (OD-L2-3/7).
+      if (
+        source.kind === 'form_field_user'
+        || source.kind === 'form_field_user_manager'
+        || source.kind === 'form_field_user_dept_head'
+      ) {
         const field = fieldById.get(source.fieldId)
         if (!field || field.type !== 'user') {
           failValidation(
             context,
-            `approvalGraph node ${node.key} assigneeSources ${source.kind} must reference a top-level user field`,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} must reference a user field`,
           )
         }
         if (field.required !== true) {
@@ -1149,10 +1214,16 @@ function validateApprovalAssigneeSourcesAgainstFormSchema(
             `approvalGraph node ${node.key} assigneeSources ${source.kind} must not reference a field with a visibility rule`,
           )
         }
-        if (isRecord(field.props) && field.props.selection === 'multi') {
+        if (
+          isRecord(field.props)
+          && field.props.selection === 'multi'
+          && (typeof field.props.maxSelections !== 'number'
+            || !Number.isInteger(field.props.maxSelections)
+            || field.props.maxSelections < 1)
+        ) {
           failValidation(
             context,
-            `approvalGraph node ${node.key} assigneeSources ${source.kind} must not reference a multi-select user field`,
+            `approvalGraph node ${node.key} assigneeSources ${source.kind} requires maxSelections for a multi-select user field`,
           )
         }
         continue
@@ -1431,6 +1502,151 @@ function normalizeFormField(
     dateRangeProps = canonical
   }
 
+  let departmentProps: Record<string, unknown> | undefined
+  if (value.type === 'department') {
+    if (nested) {
+      failValidation(context, `formSchema.fields[${index}] department cannot nest inside a detail group (v1)`)
+    }
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !DEPARTMENT_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(context, `formSchema.fields[${index}] department props contain unknown keys`)
+    }
+    const selection = props?.selection
+    const display = props?.display
+    if (selection !== 'single' && selection !== 'multi') {
+      failValidation(context, `formSchema.fields[${index}] department props.selection must be single or multi`)
+    }
+    if (display !== 'leaf_only' && display !== 'full_path') {
+      failValidation(context, `formSchema.fields[${index}] department props.display must be leaf_only or full_path`)
+    }
+    const defaultMode = props?.defaultMode
+    if (
+      defaultMode !== undefined
+      && defaultMode !== 'requester_department'
+      && defaultMode !== 'designated'
+    ) {
+      failValidation(context, `formSchema.fields[${index}] department props.defaultMode is invalid`)
+    }
+    const defaultDepartmentIds = props?.defaultDepartmentIds
+    let normalizedDefaultDepartmentIds: string[] | undefined
+    if (defaultDepartmentIds !== undefined) {
+      if (!Array.isArray(defaultDepartmentIds)) {
+        failValidation(context, `formSchema.fields[${index}] department props.defaultDepartmentIds must be an array`)
+      }
+      normalizedDefaultDepartmentIds = defaultDepartmentIds.map((id) => (
+        typeof id === 'string' ? id.trim() : ''
+      ))
+      if (
+        normalizedDefaultDepartmentIds.some((id) => !id)
+        || new Set(normalizedDefaultDepartmentIds).size !== normalizedDefaultDepartmentIds.length
+      ) {
+        failValidation(
+          context,
+          `formSchema.fields[${index}] department props.defaultDepartmentIds must contain unique non-blank ids`,
+        )
+      }
+    }
+    const maxSelections = props?.maxSelections
+    if (
+      maxSelections !== undefined
+      && (typeof maxSelections !== 'number' || !Number.isInteger(maxSelections) || maxSelections < 1)
+    ) {
+      failValidation(context, `formSchema.fields[${index}] department props.maxSelections must be a positive integer`)
+    }
+    if (selection === 'single') {
+      if (maxSelections !== undefined && maxSelections !== 1) {
+        failValidation(context, `formSchema.fields[${index}] single department fields require maxSelections 1 when present`)
+      }
+      if (normalizedDefaultDepartmentIds && normalizedDefaultDepartmentIds.length > 1) {
+        failValidation(context, `formSchema.fields[${index}] single department fields allow at most one default department`)
+      }
+    }
+    if (
+      typeof maxSelections === 'number'
+      && normalizedDefaultDepartmentIds
+      && normalizedDefaultDepartmentIds.length > maxSelections
+    ) {
+      failValidation(context, `formSchema.fields[${index}] department defaults exceed maxSelections`)
+    }
+    departmentProps = {
+      selection,
+      display,
+      ...(defaultMode !== undefined ? { defaultMode } : {}),
+      ...(normalizedDefaultDepartmentIds ? { defaultDepartmentIds: normalizedDefaultDepartmentIds } : {}),
+      ...(maxSelections !== undefined ? { maxSelections } : {}),
+    }
+  }
+
+  let userProps: Record<string, unknown> | undefined
+  if (value.type === 'user') {
+    const props = isRecord(value.props) ? value.props : null
+    const extraKeys = props
+      ? Object.keys(props).filter((key) => !USER_FIELD_ALLOWED_PROP_KEYS.has(key))
+      : []
+    if (extraKeys.length > 0) {
+      failValidation(context, `formSchema.fields[${index}] user props contain unknown keys`)
+    }
+    if (props) {
+      const allowSelf = props.allowSelf
+      if (allowSelf !== undefined && typeof allowSelf !== 'boolean') {
+        failValidation(context, `formSchema.fields[${index}] user props.allowSelf must be a boolean`)
+      }
+      const selection = props.selection
+      if (selection !== undefined && selection !== 'single' && selection !== 'multi') {
+        failValidation(context, `formSchema.fields[${index}] user props.selection must be single or multi`)
+      }
+      const defaultMode = props.defaultMode
+      if (defaultMode !== undefined && defaultMode !== 'requester' && defaultMode !== 'designated') {
+        failValidation(context, `formSchema.fields[${index}] user props.defaultMode is invalid`)
+      }
+      let defaultUserIds: string[] | undefined
+      if (props.defaultUserIds !== undefined) {
+        if (!Array.isArray(props.defaultUserIds)) {
+          failValidation(context, `formSchema.fields[${index}] user props.defaultUserIds must be an array`)
+        }
+        defaultUserIds = props.defaultUserIds.map((id) => typeof id === 'string' ? id.trim() : '')
+        if (defaultUserIds.some((id) => !id) || new Set(defaultUserIds).size !== defaultUserIds.length) {
+          failValidation(context, `formSchema.fields[${index}] user props.defaultUserIds must contain unique non-blank ids`)
+        }
+      }
+      const maxSelections = props.maxSelections
+      if (
+        maxSelections !== undefined
+        && (typeof maxSelections !== 'number' || !Number.isInteger(maxSelections) || maxSelections < 1)
+      ) {
+        failValidation(context, `formSchema.fields[${index}] user props.maxSelections must be a positive integer`)
+      }
+      const effectiveSelection = selection === 'multi' ? 'multi' : 'single'
+      if (effectiveSelection === 'single') {
+        if (maxSelections !== undefined && maxSelections !== 1) {
+          failValidation(context, `formSchema.fields[${index}] single user fields require maxSelections 1 when present`)
+        }
+        if (defaultUserIds && defaultUserIds.length > 1) {
+          failValidation(context, `formSchema.fields[${index}] single user fields allow at most one default user`)
+        }
+      }
+      if (typeof maxSelections === 'number' && defaultUserIds && defaultUserIds.length > maxSelections) {
+        failValidation(context, `formSchema.fields[${index}] user defaults exceed maxSelections`)
+      }
+      if (defaultMode === 'requester' && defaultUserIds && defaultUserIds.length > 0) {
+        failValidation(context, `formSchema.fields[${index}] requester defaults cannot carry defaultUserIds`)
+      }
+      if (defaultMode === 'requester' && allowSelf !== true) {
+        failValidation(context, `formSchema.fields[${index}] requester defaults require allowSelf`)
+      }
+      userProps = {
+        ...(allowSelf !== undefined ? { allowSelf } : {}),
+        ...(selection !== undefined ? { selection } : {}),
+        ...(defaultMode !== undefined ? { defaultMode } : {}),
+        ...(defaultUserIds !== undefined ? { defaultUserIds } : {}),
+        ...(maxSelections !== undefined ? { maxSelections } : {}),
+      }
+    }
+  }
+
   // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3, A-1): explanation is DISPLAY-ONLY — no submitted value, so
   // `required`/`defaultValue`/`options`/`placeholder` are each refused OUTRIGHT at publish (nothing
   // to require, default, choose among, or prompt for). The generic shape checks above only reject a
@@ -1497,9 +1713,13 @@ function normalizeFormField(
           ? { props: dateRangeProps }
           : explanationProps
             ? { props: explanationProps }
-            : isRecord(value.props)
-              ? { props: { ...value.props } }
-              : {}),
+            : departmentProps
+              ? { props: departmentProps }
+              : userProps !== undefined
+                ? { props: userProps }
+                : isRecord(value.props)
+                  ? { props: { ...value.props } }
+                  : {}),
     ...(visibilityRule ? { visibilityRule } : {}),
     ...detail,
   } as FormSchema['fields'][number]
@@ -1717,6 +1937,12 @@ function validateFormFieldVisibilityRules(
         failValidation(
           context,
           `formSchema.fields[${index}].visibilityRule.fieldId cannot reference an explanation field (it carries no value)`,
+        )
+      }
+      if (target.type === 'department') {
+        failValidation(
+          context,
+          `formSchema.fields[${index}].visibilityRule.fieldId cannot reference a department field as a scalar value (v1)`,
         )
       }
       return
@@ -2901,6 +3127,7 @@ function validateNonScalarFieldsNotUsedInConditions(
     { type: 'record-link', label: 'record-link' },
     { type: 'date_range', label: 'date_range' },
     { type: 'explanation', label: 'explanation' },
+    { type: 'department', label: 'department' },
   ]
   const fieldTypeById = new Map((formSchema.fields ?? []).map((field) => [field.id, field.type]))
   const nonScalarFieldIds = new Set(
@@ -3594,6 +3821,13 @@ function collectBranchAssignees(
           'APPROVAL_THRESHOLD_IN_PARALLEL',
         )
       }
+      if (config.approvalMode === 'sequential') {
+        throw new ServiceError(
+          "approvalGraph approvalMode 'sequential' is not supported inside a parallel region",
+          400,
+          'APPROVAL_SEQUENTIAL_IN_PARALLEL',
+        )
+      }
       config.assigneeIds?.forEach((assignee) => assignees.add(assignee))
       for (const source of config.assigneeSources ?? []) {
         if (source.kind === 'static_user') source.userIds.forEach((assignee) => assignees.add(assignee))
@@ -3643,6 +3877,13 @@ function collectAllBranchAssignees(
         `approvalGraph node ${node.key} uses approvalMode 'threshold' inside a parallel region — threshold mode is linear-only in v1`,
         400,
         'APPROVAL_THRESHOLD_IN_PARALLEL',
+      )
+    }
+    if (approvalConfig.approvalMode === 'sequential') {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} uses approvalMode 'sequential' inside a parallel region — sequential mode is linear-only in v1`,
+        400,
+        'APPROVAL_SEQUENTIAL_IN_PARALLEL',
       )
     }
     const local: string[] = []
@@ -3928,25 +4169,15 @@ function toUnifiedApprovalDTO(
 }
 
 /**
- * D-5 (Lock-9 implementation brief): exported (was module-private) so the process-attachment
- * upload route (§5.2) can re-derive the acting seat WITHOUT reimplementing the user/role match
- * rule. `dispatchAction`'s own inline uses (currentNodeAssignments.filter(...)) are unaffected —
- * this is a pure widening of visibility, not a behavior change.
+ * D-5 (Lock-9 implementation brief): exported so the process-attachment upload route (§5.2) can
+ * re-derive the acting seat WITHOUT reimplementing the user/role match rule.
+ *
+ * The BODY now lives in `./approval-seat-authorization` (moved unchanged) so the detail DTO
+ * builders can call the door's own predicate without importing this module — `ApprovalProductService`
+ * imports `ApprovalBridgeService`, so the other direction would be a cycle. Re-exported from here so
+ * every existing importer and `path:line` reference keeps resolving.
  */
-export function assignmentMatchesActor(
-  assignment: ApprovalAssignmentRow,
-  actorId: string,
-  actorRoles: string[],
-): boolean {
-  if (!assignment.is_active) return false
-  if (assignment.assignment_type === 'user') {
-    return assignment.assignee_id === actorId
-  }
-  if (assignment.assignment_type === 'role') {
-    return actorRoles.includes(assignment.assignee_id)
-  }
-  return false
-}
+export { assignmentMatchesActor } from './approval-seat-authorization'
 
 /**
  * Lock-9 OD-L9-3(a) §5.2 — a FAIL-FAST-ONLY seat check for the process-attachment upload route,
@@ -4288,37 +4519,6 @@ function buildPersistableParallelState(state: ParallelInstanceState): Record<str
         },
       ]),
     ),
-  }
-}
-
-function readParallelBranchStates(metadata: unknown): ParallelInstanceState | null {
-  if (!isRecord(metadata)) return null
-  const states = (metadata as { parallelBranchStates?: unknown }).parallelBranchStates
-  if (!isRecord(states)) return null
-  if (typeof states.parallelNodeKey !== 'string'
-    || typeof states.joinNodeKey !== 'string'
-    || (states.joinMode !== 'all' && states.joinMode !== 'any')
-    || !isRecord(states.branches)) {
-    return null
-  }
-  const branches: Record<string, ParallelInstanceState['branches'][string]> = {}
-  for (const [edgeKey, entryRaw] of Object.entries(states.branches)) {
-    if (!isRecord(entryRaw)) return null
-    const entry = entryRaw as { edgeKey?: unknown; currentNodeKey?: unknown; complete?: unknown }
-    if (typeof entry.edgeKey !== 'string') return null
-    if (entry.currentNodeKey !== null && typeof entry.currentNodeKey !== 'string') return null
-    if (typeof entry.complete !== 'boolean') return null
-    branches[edgeKey] = {
-      edgeKey: entry.edgeKey,
-      currentNodeKey: entry.currentNodeKey as string | null,
-      complete: entry.complete,
-    }
-  }
-  return {
-    parallelNodeKey: states.parallelNodeKey as string,
-    joinNodeKey: states.joinNodeKey as string,
-    joinMode: states.joinMode as 'all' | 'any',
-    branches,
   }
 }
 
@@ -4922,6 +5122,11 @@ function evaluateAutoApprovalAssignment(
     }
   }
 
+  // Lock-4 F4-D / OD-L4-7(a): a K3 seat exists specifically so the prior node's ACTUAL
+  // decider reviews again. It remains subject to mergeWithRequester above, but neither
+  // history-derived flag may consume it merely because that same decider appears in history.
+  if (isPriorNodeApproverHistoryDedupExempt(assignment.metadata)) return null
+
   if (effectivePolicy.policy.mergeAdjacentApprover) {
     const adjacent = findLatestApprovalHistory(
       history,
@@ -5223,7 +5428,23 @@ export class ApprovalProductService {
         return resolution
       }
 
-      const evaluations = resolution.assignments
+      const currentNode = runtimeGraph.nodes.find((node) => node.key === nodeKey)
+      if (currentNode?.type === 'handler') {
+        return resolution
+      }
+
+      const approvalMode = executor.getApprovalMode(nodeKey)
+      const evaluationCandidates = approvalMode === 'sequential'
+        ? resolution.assignments.filter((assignment) => isSequentialQueueActive(assignment.metadata))
+        : resolution.assignments
+      if (approvalMode === 'sequential' && evaluationCandidates.length !== 1) {
+        throw new ServiceError(
+          'Sequential approval queue has no unique active head',
+          409,
+          'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+        )
+      }
+      const evaluations = evaluationCandidates
         .filter((assignment) =>
           !blockedAutoAssignmentKeys.has(`${assignment.nodeKey}:${assignment.assignmentType}:${assignment.assigneeId}`))
         .map((assignment) => evaluateAutoApprovalAssignment(runtimeGraph, executor, assignment, requesterId, history))
@@ -5261,7 +5482,21 @@ export class ApprovalProductService {
         appendAutoApprovalHistory(history, evaluation.event)
       }
 
-      const approvalMode = executor.getApprovalMode(nodeKey)
+      if (approvalMode === 'sequential' && remainingAssignments.length > 0) {
+        const promotedAssignments = promoteNextSequentialQueueAssignment(remainingAssignments)
+        if (!promotedAssignments) {
+          throw new ServiceError(
+            'Sequential approval queue metadata is invalid',
+            409,
+            'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+          )
+        }
+        resolution = {
+          ...resolution,
+          assignments: promotedAssignments,
+        }
+        continue
+      }
       if (approvalMode === 'all' && remainingAssignments.length > 0) {
         return {
           ...resolution,
@@ -6643,10 +6878,10 @@ export class ApprovalProductService {
     // value. The publish pins ((3) required + (4) no visibilityRule) make absence unreachable for
     // templates published on this contract; this door is deliberately independent of them (§2.2).
     const anchorNeeds = new Map<string, { includeManagerChain: boolean; includeDeptHeadChain: boolean }>()
-    const anchorBySourceKey = new Map<string, string>()
+    const anchorsBySourceKey = new Map<string, string[]>()
     for (const [key, occurrence] of sources) {
-      const anchorId = resolveFormUserValue(formData[occurrence.source.fieldId])
-      if (!anchorId) {
+      const anchorIds = resolveFormUserValues(formData[occurrence.source.fieldId])
+      if (anchorIds.length === 0) {
         throw new ServiceError(
           `Approval node ${occurrence.nodeKey} routes on form field ${occurrence.source.fieldId}, which is empty`,
           422,
@@ -6654,11 +6889,13 @@ export class ApprovalProductService {
           { nodeKey: occurrence.nodeKey, fieldId: occurrence.source.fieldId },
         )
       }
-      anchorBySourceKey.set(key, anchorId)
-      const needs = anchorNeeds.get(anchorId) ?? { includeManagerChain: false, includeDeptHeadChain: false }
-      if (occurrence.source.kind === 'form_field_user_manager') needs.includeManagerChain = true
-      else needs.includeDeptHeadChain = true
-      anchorNeeds.set(anchorId, needs)
+      anchorsBySourceKey.set(key, anchorIds)
+      for (const anchorId of anchorIds) {
+        const needs = anchorNeeds.get(anchorId) ?? { includeManagerChain: false, includeDeptHeadChain: false }
+        if (occurrence.source.kind === 'form_field_user_manager') needs.includeManagerChain = true
+        else needs.includeDeptHeadChain = true
+        anchorNeeds.set(anchorId, needs)
+      }
     }
 
     // ONE read per distinct anchor, walking only the chain(s) the referencing sources need.
@@ -6696,13 +6933,16 @@ export class ApprovalProductService {
 
     const frozen: Record<string, string[]> = {}
     for (const [key, occurrence] of sources) {
-      const anchorId = anchorBySourceKey.get(key)
-      const relations = (anchorId ? relationsByAnchor.get(anchorId) : undefined) ?? {}
-      const chain = occurrence.source.kind === 'form_field_user_manager'
-        ? (relations.managerChainIds ?? [])
-        : (relations.deptHeadChainIds ?? [])
-      const resolved = chain[occurrence.source.level - 1]
-      frozen[key] = typeof resolved === 'string' && resolved.trim().length > 0 ? [resolved.trim()] : []
+      const resolvedIds = new Set<string>()
+      for (const anchorId of anchorsBySourceKey.get(key) ?? []) {
+        const relations = relationsByAnchor.get(anchorId) ?? {}
+        const chain = occurrence.source.kind === 'form_field_user_manager'
+          ? (relations.managerChainIds ?? [])
+          : (relations.deptHeadChainIds ?? [])
+        const resolved = chain[occurrence.source.level - 1]
+        if (typeof resolved === 'string' && resolved.trim().length > 0) resolvedIds.add(resolved.trim())
+      }
+      frozen[key] = [...resolvedIds]
     }
     return frozen
   }
@@ -6864,6 +7104,94 @@ export class ApprovalProductService {
     return frozen
   }
 
+  /** Lock-2 §L2-B: active-user and allow-self enforcement for every submitted contact value. */
+  private async assertUserFormValuesAtSubmit(
+    formSchema: FormSchema,
+    formData: Record<string, unknown>,
+    requesterId: string,
+    fieldDerivedSources: ReturnType<typeof collectRuntimeGraphFieldDerivedSources>,
+  ): Promise<void> {
+    if (!pool) throw new Error('Database not available')
+    const routedFieldIds = new Set(
+      [...fieldDerivedSources.values()].map((entry) => entry.source.fieldId),
+    )
+    const values: Array<{ fieldId: string; allowSelf: boolean; ids: string[] }> = []
+    for (const field of formSchema.fields) {
+      if (field.type === 'user') {
+        const rawValue = formData[field.id]
+        if (field.required === true && typeof rawValue === 'string' && rawValue.trim().length === 0) {
+          if (!routedFieldIds.has(field.id)) {
+            throw new ServiceError(
+              'Approval form data is invalid',
+              400,
+              'VALIDATION_ERROR',
+              { errors: [`${field.id} must contain a user id`] },
+            )
+          }
+          continue
+        }
+        const ids = resolveFormUserValues(formData[field.id])
+        if (ids.length > 0) values.push({ fieldId: field.id, allowSelf: field.props?.allowSelf === true, ids })
+        continue
+      }
+      if (field.type !== 'detail' || !Array.isArray(formData[field.id])) continue
+      const rows = formData[field.id] as Array<Record<string, unknown>>
+      for (const column of field.columns ?? []) {
+        if (column.type !== 'user') continue
+        for (const row of rows) {
+          const rawValue = row?.[column.id]
+          if (column.required === true && typeof rawValue === 'string' && rawValue.trim().length === 0) {
+            throw new ServiceError(
+              'Approval form data is invalid',
+              400,
+              'VALIDATION_ERROR',
+              { errors: [`${field.id}.${column.id} must contain a user id`] },
+            )
+          }
+          const ids = resolveFormUserValues(row?.[column.id])
+          if (ids.length > 0) values.push({ fieldId: `${field.id}.${column.id}`, allowSelf: column.props?.allowSelf === true, ids })
+        }
+      }
+    }
+    if (values.length === 0) return
+
+    const normalizedRequesterId = requesterId.trim()
+    const selfViolation = values.find((entry) => !entry.allowSelf && entry.ids.includes(normalizedRequesterId))
+    if (selfViolation) {
+      throw new ServiceError(
+        'The requester cannot be selected in this contact field',
+        422,
+        'APPROVAL_FORM_USER_SELF_NOT_ALLOWED',
+        { fieldId: selfViolation.fieldId },
+      )
+    }
+
+    const ids = [...new Set(values.flatMap((entry) => entry.ids))]
+    let activeResult: { rows: Array<{ id: string }> }
+    try {
+      activeResult = await pool.query<{ id: string }>(
+        `SELECT id FROM users WHERE id = ANY($1::varchar[]) AND is_active = TRUE`,
+        [ids],
+      )
+    } catch {
+      throw new ServiceError(
+        'Could not verify the selected contacts. Please retry.',
+        503,
+        'APPROVAL_FORM_USER_DIRECTORY_UNRESOLVED',
+      )
+    }
+    const activeIds = new Set(activeResult.rows.map((row) => row.id))
+    const unavailable = values.find((entry) => entry.ids.some((id) => !activeIds.has(id)))
+    if (unavailable) {
+      throw new ServiceError(
+        'A selected contact is unavailable',
+        422,
+        'APPROVAL_FORM_USER_UNAVAILABLE',
+        { fieldId: unavailable.fieldId },
+      )
+    }
+  }
+
   /**
    * RP-1 (route-preview lock, RATIFIED — RP-0): the SINGLE assembly shared by createApproval and
    * the read-only route preview. Everything from template-bundle load through executor
@@ -6909,6 +7237,7 @@ export class ApprovalProductService {
     requesterSnapshot: ApprovalRequesterSnapshot
     executor: ApprovalGraphExecutor
     attachmentsEnabled: boolean
+    designatedFallbackEligibilitySnapshot: ApprovalDesignatedFallbackEligibilitySnapshot | undefined
   }> {
     if (!pool) throw new Error('Database not available')
 
@@ -7041,10 +7370,21 @@ export class ApprovalProductService {
       // the sample requester's org data can never be client-supplied (owner order ③).
       ? { userId: options.requesterOverride.userId, userName: options.requesterOverride.userName || options.requesterOverride.userId }
       : { userId: actor.userId, userName: actor.userName, email: actor.email, department: actor.department, roles: actor.roles, permissions: actor.permissions }
+    const fieldDerivedSources = collectRuntimeGraphFieldDerivedSources(runtimeGraph)
+    await this.assertUserFormValuesAtSubmit(
+      formSchema,
+      normalizedFormData,
+      effectiveRequester.userId,
+      fieldDerivedSources,
+    )
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
     // Lock-1 §K4 — separate opt-in gate for the department-head chain (a different snapshot field,
     // a different walk, a different ApprovalDirectoryOrg option); see runtimeGraphUsesDeptHeadChain.
     const needsDeptHeadChain = runtimeGraphUsesDeptHeadChain(runtimeGraph)
+    const needsDepartmentDirectory = formSchema.fields.some((field) => {
+      const value = normalizedFormData[field.id]
+      return field.type === 'department' && Array.isArray(value) && value.length > 0
+    })
     let orgRelations: ApprovalRequesterOrgRelations = {}
     let orgReadFailed = false
     // B5-b: a routing-POLICY config error (policy points at a missing/inactive integration, or the
@@ -7058,6 +7398,7 @@ export class ApprovalProductService {
       orgRelations = await resolveApprovalRequesterOrgRelations(effectiveRequester.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
         includeDeptHeadChain: needsDeptHeadChain,
+        ...(needsDepartmentDirectory ? { includeDepartmentFieldContext: true } : {}),
       })
     } catch (error) {
       orgReadFailed = true
@@ -7067,6 +7408,47 @@ export class ApprovalProductService {
           error instanceof Error ? error.message : 'unknown error'
         }`,
       )
+    }
+
+    if (needsDepartmentDirectory) {
+      if (orgReadFailed) {
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          orgPolicyMisconfigured ? 422 : 503,
+          orgPolicyMisconfigured
+            ? 'APPROVAL_ROUTING_POLICY_MISCONFIGURED'
+            : 'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
+      const integrationId = orgRelations.canonicalIntegrationId
+      if (!integrationId) {
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          422,
+          'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
+      try {
+        await canonicalizeApprovalDepartmentFormData(
+          formSchema,
+          normalizedFormData,
+          integrationId,
+          pool.query.bind(pool),
+        )
+      } catch (error) {
+        if (error instanceof ApprovalDepartmentUnavailableError) {
+          throw new ServiceError(
+            'Approval department selection is unavailable',
+            422,
+            'APPROVAL_DEPARTMENT_UNRESOLVED',
+          )
+        }
+        throw new ServiceError(
+          'Approval department directory is unavailable',
+          503,
+          'APPROVAL_DEPARTMENT_DIRECTORY_UNRESOLVED',
+        )
+      }
     }
 
     // RA-1b: `requester.role in [...]` routes on the requester's CURRENT role membership. Resolve it with a
@@ -7194,7 +7576,6 @@ export class ApprovalProductService {
     // leaves zero rows. Its own detector + wedge, deliberately NOT `runtimeGraphUsesOrgAssigneeSource`
     // (§2.3): the requester wedge above stays requester-scoped, and a field-derived-only template
     // never pays a requester org read it does not need. OPT-IN — an empty collection does no work.
-    const fieldDerivedSources = collectRuntimeGraphFieldDerivedSources(runtimeGraph)
     let frozenFieldDerivedAssigneeIds: Record<string, string[]> | undefined
     if (fieldDerivedSources.size > 0) {
       frozenFieldDerivedAssigneeIds = await this.resolveAndFreezeFieldDerivedAssignees(
@@ -7299,15 +7680,24 @@ export class ApprovalProductService {
     // the attributable decider is not re-materialized from an unpersisted round either — the
     // fail-closed arm, never a silent wrong approver). Route previews show the honest
     // EMPTY_ASSIGNEES marker for such nodes (the §K2 pre-choice precedent).
+    const assignmentResolver = buildApprovalAssignmentResolver({
+      formSchema,
+      formSnapshot: normalizedFormData,
+      requesterSnapshot,
+      // Lock-4 F4-C — see buildApprovalAssignmentResolver's doc comment; identical provider shape
+      // at every assignmentResolver call site in this file.
+      getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+    })
+    const designatedFallbackEligibility = await loadApprovalDesignatedFallbackEligibility(pool, runtimeGraph)
+    const designatedFallbackEligibilitySnapshot = serializeApprovalDesignatedFallbackEligibility(
+      designatedFallbackEligibility,
+    )
     const executor = new ApprovalGraphExecutor(runtimeGraph, normalizedFormData, {
-      assignmentResolver: buildApprovalAssignmentResolver({
-        formSchema,
-        formSnapshot: normalizedFormData,
-        requesterSnapshot,
-        // Lock-4 F4-C — see buildApprovalAssignmentResolver's doc comment; identical provider shape
-        // at every assignmentResolver call site in this file.
-        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
-      }),
+      assignmentResolver,
+      designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+        assignmentResolver,
+        designatedFallbackEligibility,
+      ),
       requesterContext: {
         department: requesterSnapshot.directoryDepartment ?? null,
         title: requesterSnapshot.directoryTitle ?? null,
@@ -7323,6 +7713,7 @@ export class ApprovalProductService {
       requesterSnapshot,
       executor,
       attachmentsEnabled,
+      designatedFallbackEligibilitySnapshot,
     }
   }
 
@@ -7485,6 +7876,7 @@ export class ApprovalProductService {
       requesterSnapshot,
       executor,
       attachmentsEnabled,
+      designatedFallbackEligibilitySnapshot,
     } =
       await this.assembleCreationContext(request, actor)
     const instanceId = crypto.randomUUID()
@@ -7495,6 +7887,9 @@ export class ApprovalProductService {
     const requestNo = await this.allocateRequestNo()
 
     const instanceMetadata: Record<string, unknown> = { templateKey: bundle.template.key }
+    if (designatedFallbackEligibilitySnapshot) {
+      instanceMetadata.designatedFallbackEligibility = designatedFallbackEligibilitySnapshot
+    }
     if (initial.parallelState) {
       instanceMetadata.parallelBranchStates = buildPersistableParallelState(initial.parallelState)
     }
@@ -7784,7 +8179,14 @@ export class ApprovalProductService {
       emitApprovalCompletionEvent(completionEvent)
     }
 
-    const approval = await this.getApproval(instanceId, actor.userId)
+    // VIEWER ROLES, not just the id — the same pair every dispatch-verb call site passes. The
+    // creation response is a viewer-scoped read like any other, and `canDecideCurrentNode` filters
+    // the seat rows by BOTH: a requester who is themselves a ROLE-seated approver at the entry node
+    // (`assigneeType: 'role'` on node 1) would otherwise be told `false` on this one response while
+    // a fresh detail GET says `true` and the door accepts them. Harmless before this field existed
+    // (`nodeOperations` fails OPEN on a missing carrier); the new field fails CLOSED, so the
+    // omission now costs a truthful answer.
+    const approval = await this.getApproval(instanceId, actor.userId, actor.roles)
     if (!approval) {
       throw new ServiceError('Approval not found after creation', 500, 'APPROVAL_CREATE_FAILED')
     }
@@ -7916,13 +8318,22 @@ export class ApprovalProductService {
       const jumpPriorNodeApprovers = jumpReferencedPriorNodeKeys.size > 0
         ? await this.loadPriorNodeApproverDeciders(client, id, jumpReferencedPriorNodeKeys)
         : undefined
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSnapshot,
+        requesterSnapshot,
+        getPriorNodeApprovers: () => jumpPriorNodeApprovers,
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+      })
+      const designatedFallbackEligibility = readApprovalDesignatedFallbackEligibilitySnapshot(
+        runtimeGraph,
+        instance.metadata,
+      )
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
-        assignmentResolver: buildApprovalAssignmentResolver({
-          formSnapshot,
-          requesterSnapshot,
-          getPriorNodeApprovers: () => jumpPriorNodeApprovers,
-          getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
-        }),
+        assignmentResolver,
+        designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+          assignmentResolver,
+          designatedFallbackEligibility,
+        ),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
@@ -8262,11 +8673,11 @@ export class ApprovalProductService {
             assigneeId: toUserId,
             sourceStep: assignment.source_step ?? 0,
             nodeKey: assignment.node_key || '',
-            metadata: {
+            metadata: handoverAssignmentMetadata([assignment], {
               reassignedFrom: fromUserId,
               adminReassign: true,
               previousAssignmentId: assignment.id,
-            },
+            }),
           })
           reassignmentsByEpoch.set(epoch, bucket)
         }
@@ -8374,9 +8785,10 @@ export class ApprovalProductService {
    * `mark_inactive` + `globallyClear` emit, consumed via `directory-sync.ts`'s
    * `usersDeactivatedCount`), which is gated behind `DIRECTORY_DEPROVISION_ENABLED` —
    * **default OFF per org** (`isDirectoryDeprovisionEnabled()`). 离职自动转上级 therefore does NOT
-   * fire for every org; this method is deliberately NOT wired to that consumer in this slice (P3-A
-   * scope — the wiring + operator-warning surface is a separate slice per the Lock-4 P3-A briefs).
-   * Any authoring/disclosure copy describing this feature MUST carry that limit and MUST NOT claim
+   * fire for every org. `syncDirectoryIntegration` now consumes the committed `user_changed`
+   * evidence through the post-commit departure dispatcher; infrastructure failures remain
+   * values-free manual-recovery signals because automatic retry is outside this slice. Any
+   * authoring/disclosure copy describing this feature MUST carry those limits and MUST NOT claim
    * universal coverage.
    *
    * Contract:
@@ -8435,7 +8847,10 @@ export class ApprovalProductService {
    *   is the test-only seam that pauses here, held-locked, so a test can construct that race for real
    *   rather than argue it.
    */
-  async applyApprovalDepartureTransfer(departedUserId: string): Promise<ApprovalDepartureTransferResult> {
+  async applyApprovalDepartureTransfer(
+    departedUserId: string,
+    options?: ApprovalDepartureTransferOptions,
+  ): Promise<ApprovalDepartureTransferResult> {
     if (!pool) throw new Error('Database not available')
     const userId = departedUserId.trim()
     if (!userId) throw new ServiceError('departedUserId is required', 400, 'VALIDATION_ERROR')
@@ -8445,14 +8860,16 @@ export class ApprovalProductService {
       result.skipped.push({ id, reason: reasonCode })
     }
 
-    // ONE live directory read for this departure signal (not per-instance, not inside the pure
-    // resolver — Lock-1 §2.1). A multi-org routing ambiguity / policy misconfig / transient read
-    // failure all collapse to the SAME "manager unresolved" fail-closed outcome below — OD-L4-9(a)
-    // treats every unresolved case identically, never distinguishing by cause.
+    // ONE manager resolution for this departure signal (not per-instance, not inside the pure
+    // resolver — Lock-1 §2.1). The production directory consumer supplies its post-commit live
+    // resolution because the departed source account is already inactive; the direct/test entry
+    // point keeps the legacy requester lookup. Both paths converge on the same active-user recheck.
+    // A routing ambiguity / transient read failure collapses to the SAME fail-closed outcome below.
     let resolvedManagerId: string | null = null
     try {
-      const orgRelations = await resolveApprovalRequesterOrgRelations(userId, pool.query.bind(pool), {})
-      const candidate = orgRelations.managerId ? orgRelations.managerId.trim() : ''
+      const candidate = options === undefined
+        ? (await resolveApprovalRequesterOrgRelations(userId, pool.query.bind(pool), {})).managerId?.trim() ?? ''
+        : options.resolvedManagerId?.trim() ?? ''
       if (candidate && candidate !== userId) {
         const activeManager = await pool.query<{ id: string }>(
           `SELECT id FROM users WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE LIMIT 1`,
@@ -8460,10 +8877,10 @@ export class ApprovalProductService {
         )
         if (activeManager.rows.length > 0) resolvedManagerId = candidate
       }
-    } catch (error) {
+    } catch {
       approvalProductLogger.warn(
-        `approval departure transfer: manager resolution failed for ${userId}: ${error instanceof Error ? error.message : String(error)}`,
-        error instanceof Error ? error : undefined,
+        'approval departure transfer: manager resolution failed; using fail-closed no-manager outcome',
+        { reason: 'manager_resolution_failed' },
       )
     }
 
@@ -8686,11 +9103,11 @@ export class ApprovalProductService {
             assigneeId: resolvedManagerId,
             sourceStep: assignment.source_step ?? 0,
             nodeKey: assignment.node_key || '',
-            metadata: {
+            metadata: handoverAssignmentMetadata([assignment], {
               departureTransfer: true,
               reassignedFrom: userId,
               previousAssignmentId: assignment.id,
-            },
+            }),
           })
           reassignmentsByEpoch.set(epoch, bucket)
         }
@@ -8739,8 +9156,8 @@ export class ApprovalProductService {
       } catch (error) {
         await rollbackQuietly(client)
         approvalProductLogger.warn(
-          `approval departure transfer error for instance ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
-          error instanceof Error ? error : undefined,
+          'approval departure transfer failed; manual recovery required',
+          { reason: 'departure_transfer_instance_failed' },
         )
         skipDepartureTransfer(instanceId, 'error')
       } finally {
@@ -8876,13 +9293,22 @@ export class ApprovalProductService {
       const timeoutPriorNodeApprovers = timeoutReferencedPriorNodeKeys.size > 0
         ? await this.loadPriorNodeApproverDeciders(client, id, timeoutReferencedPriorNodeKeys)
         : undefined
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSnapshot,
+        requesterSnapshot,
+        getPriorNodeApprovers: () => timeoutPriorNodeApprovers,
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+      })
+      const designatedFallbackEligibility = readApprovalDesignatedFallbackEligibilitySnapshot(
+        runtimeGraph,
+        instance.metadata,
+      )
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
-        assignmentResolver: buildApprovalAssignmentResolver({
-          formSnapshot,
-          requesterSnapshot,
-          getPriorNodeApprovers: () => timeoutPriorNodeApprovers,
-          getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
-        }),
+        assignmentResolver,
+        designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+          assignmentResolver,
+          designatedFallbackEligibility,
+        ),
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
           title: typeof t === 'string' && t ? t : null,
@@ -8899,6 +9325,15 @@ export class ApprovalProductService {
         // Read the current epoch BEFORE the node-wide deactivate below (afterwards the node is empty)
         // and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
         const timeoutTransferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        const timeoutTransferSources = await client.query<ApprovalAssignmentRow>(
+          `SELECT *
+             FROM approval_assignments
+            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE
+            ORDER BY created_at ASC
+            FOR UPDATE`,
+          [id, currentNodeKey],
+        )
+        const timeoutTransferMetadata = handoverAssignmentMetadata(timeoutTransferSources.rows, {})
         // Hand the WHOLE node over: every active assignment at the node is deactivated and the
         // static target takes it (mode semantics reset to the single handed-over approver).
         await client.query(
@@ -8907,7 +9342,9 @@ export class ApprovalProductService {
            WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE`,
           [id, currentNodeKey],
         )
-        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, targetUserId), timeoutTransferEntryEpoch)
+        const timeoutTransferAssignments = executor.buildTransferAssignments(currentNodeKey, targetUserId)
+          .map((assignment) => ({ ...assignment, metadata: timeoutTransferMetadata }))
+        const createdTaskEvents = await this.insertAssignments(client, id, timeoutTransferAssignments, timeoutTransferEntryEpoch)
         // Parity with the dispatch transfer: an in-place handover does not bump the instance version.
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
@@ -9121,13 +9558,22 @@ export class ApprovalProductService {
       // because the executor is constructed here, earlier than that point. Stays undefined when
       // the graph carries no such source (OPT-IN — zero extra reads for unrelated approvals).
       let priorNodeApprovers: Record<string, string[]> | undefined
+      const assignmentResolver = buildApprovalAssignmentResolver({
+        formSnapshot,
+        requesterSnapshot,
+        getPriorNodeApprovers: () => priorNodeApprovers,
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
+      })
+      const designatedFallbackEligibility = readApprovalDesignatedFallbackEligibilitySnapshot(
+        runtimeGraph,
+        instance.metadata,
+      )
       const executor = new ApprovalGraphExecutor(runtimeGraph, formSnapshot, {
-        assignmentResolver: buildApprovalAssignmentResolver({
-          formSnapshot,
-          requesterSnapshot,
-          getPriorNodeApprovers: () => priorNodeApprovers,
-          getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
-        }),
+        assignmentResolver,
+        designatedFallbackResolver: buildApprovalDesignatedFallbackResolver(
+          assignmentResolver,
+          designatedFallbackEligibility,
+        ),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
@@ -9558,8 +10004,11 @@ export class ApprovalProductService {
         // current epoch BEFORE deactivating the actor's seat (a single-approver node would be EMPTY at
         // the read otherwise) and stamp the handed-to assignee with it; NEVER bump node_activation_seq.
         const transferEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+        const transferMetadata = handoverAssignmentMetadata(actorAssignments, {})
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
-        const createdTaskEvents = await this.insertAssignments(client, id, executor.buildTransferAssignments(currentNodeKey, request.targetUserId), transferEntryEpoch)
+        const transferAssignments = executor.buildTransferAssignments(currentNodeKey, request.targetUserId)
+          .map((assignment) => ({ ...assignment, metadata: transferMetadata }))
+        const createdTaskEvents = await this.insertAssignments(client, id, transferAssignments, transferEntryEpoch)
         await this.insertApprovalRecord(client, id, {
           action: 'transfer',
           actorId: actor.userId,
@@ -10256,13 +10705,64 @@ export class ApprovalProductService {
         ? await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         : null
       // Approval aggregation semantics:
+      //   'sequential': complete only the active head and promote exactly one queued successor.
       //   'all'    (会签): deactivate only the actor's assignment, short-circuit if siblings remain.
       //   'any'    (或签): first approver wins — deactivate siblings with an audit trail
       //                    (aggregateCancelledBy/aggregateCancelledAt metadata) + one 'sign' record.
       //   'single' / default: exactly one assignee expected; blanket-deactivate all active rows.
       let aggregateCancelledAssigneeIds: string[] = []
       let parallelCancelledAssigneeIds: string[] = []
-      if (approvalMode === 'all') {
+      if (approvalMode === 'sequential') {
+        if (actorAssignments.length !== 1) {
+          throw new ServiceError(
+            'Sequential approval queue has no unique actor head',
+            409,
+            'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+          )
+        }
+        const queueAdvance = await this.advanceSequentialQueue(
+          client,
+          id,
+          currentNodeKey,
+          actorAssignments[0],
+          currentNodeEpoch,
+        )
+        if (queueAdvance.remainingAssignments > 0) {
+          await client.query(
+            `UPDATE approval_instances
+             SET version = $2,
+                 updated_at = now()
+             WHERE id = $1`,
+            [id, nextVersion],
+          )
+          await this.insertApprovalRecord(client, id, {
+            action: 'approve',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: {
+              nodeKey: currentNodeKey,
+              nextNodeKey: currentNodeKey,
+              approvalMode,
+              aggregateComplete: false,
+              remainingAssignments: queueAdvance.remainingAssignments,
+              ...(request.channelOrigin
+                ? { channel: request.channelOrigin.channel, cardDeliveryId: request.channelOrigin.cardDeliveryId }
+                : {}),
+              ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
+            },
+          }, actor)
+          await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, queueAdvance.createdTasks)
+          await client.query('COMMIT')
+          await this.emitApprovalTaskCreatedEventsPostCommit(id, queueAdvance.createdTasks)
+          this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+          return (await this.getApproval(id, actor.userId, actor.roles))!
+        }
+      } else if (approvalMode === 'all') {
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
         if (remainingAssignments > 0) {
@@ -10889,6 +11389,19 @@ export class ApprovalProductService {
         if (nodeOperations) dto.nodeOperations = nodeOperations
       }
     }
+
+    // Viewer-scoped decision affordance — the SAME predicate this service's own `dispatchAction`
+    // gate uses (`assignmentMatchesActor` over the door's decidable node keys), answered here so
+    // the client renders rather than re-derives. Shipped on the ACTION response too, not only the
+    // detail read: the FE store publishes an action response into the slot the detail read fills,
+    // so omitting it here would flip the field to `undefined` (its older-backend fallback) the
+    // moment an approver acts.
+    dto.canDecideCurrentNode = resolveCanDecideCurrentNode({
+      instance: row,
+      assignments: assignmentsResult.rows,
+      viewerUserId: viewerUserId ?? null,
+      viewerRoles: viewerRoles ?? null,
+    })
     return dto
   }
 
@@ -11078,27 +11591,60 @@ export class ApprovalProductService {
     assignments: Array<{ assignmentType: 'user' | 'role'; assigneeId: string; nodeKey: string; sourceStep: number; metadata?: unknown }>,
     entryEpoch: number | null,
   ): Promise<ApprovalTaskCreatedTaskSnapshot[]> {
-    await this.assertNoActiveAssignmentConflicts(client, instanceId, assignments)
+    const preparedAssignments = assignments.map((assignment) => {
+      const queue = readSequentialQueueMetadata(assignment.metadata)
+      if (isRecord(assignment.metadata) && 'sequentialQueue' in assignment.metadata && !queue) {
+        throw new ServiceError(
+          'Sequential approval queue metadata is invalid',
+          409,
+          'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+        )
+      }
+      return { assignment, queue }
+    })
+    const activeAssignments = preparedAssignments
+      .filter(({ queue }) => queue ? queue.state === 'active' : true)
+      .map(({ assignment }) => assignment)
+    await this.assertNoActiveAssignmentConflicts(client, instanceId, activeAssignments)
     // A-2a: every USER-typed row is one new actionable pending item — collected by the caller
     // (still inside its transaction) and emitted as approval.task_created AFTER commit, mirroring
     // the completion-event discipline. Role-typed rows do not fire v1 recipient events.
     const createdTasks: ApprovalTaskCreatedTaskSnapshot[] = []
-    for (const assignment of assignments) {
-      await client.query(
-        `INSERT INTO approval_assignments
-         (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7::jsonb, now(), now())`,
-        [
-          instanceId,
-          assignment.assignmentType,
-          assignment.assigneeId,
-          assignment.sourceStep,
-          assignment.nodeKey,
-          entryEpoch,
-          JSON.stringify(assignment.metadata ?? {}),
-        ],
-      )
-      if (assignment.assignmentType === 'user') {
+    for (const { assignment, queue } of preparedAssignments) {
+      const isActive = queue ? queue.state === 'active' : true
+      if (queue) {
+        await client.query(
+          `INSERT INTO approval_assignments
+           (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, now(), now())`,
+          [
+            instanceId,
+            assignment.assignmentType,
+            assignment.assigneeId,
+            assignment.sourceStep,
+            assignment.nodeKey,
+            isActive,
+            entryEpoch,
+            JSON.stringify(assignment.metadata ?? {}),
+          ],
+        )
+      } else {
+        await client.query(
+          `INSERT INTO approval_assignments
+           (instance_id, assignment_type, assignee_id, source_step, node_key, entry_epoch, metadata, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), now())`,
+          [
+            instanceId,
+            assignment.assignmentType,
+            assignment.assigneeId,
+            assignment.sourceStep,
+            assignment.nodeKey,
+            entryEpoch,
+            JSON.stringify(assignment.metadata ?? {}),
+          ],
+        )
+      }
+      if (isActive && assignment.assignmentType === 'user') {
         createdTasks.push({
           nodeKey: assignment.nodeKey,
           entryEpoch,
@@ -11108,6 +11654,133 @@ export class ApprovalProductService {
       }
     }
     return createdTasks
+  }
+
+  private async advanceSequentialQueue(
+    client: ApprovalDbClient,
+    instanceId: string,
+    nodeKey: string,
+    activeAssignment: ApprovalAssignmentRow,
+    entryEpoch: number | null,
+  ): Promise<{ createdTasks: ApprovalTaskCreatedTaskSnapshot[]; remainingAssignments: number }> {
+    const activeQueue = readSequentialQueueMetadata(activeAssignment.metadata)
+    if (!activeQueue || activeQueue.state !== 'active') {
+      throw new ServiceError(
+        'Sequential approval queue head metadata is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    const completed = await client.query<{ id: string }>(
+      `UPDATE approval_assignments
+          SET is_active = FALSE,
+              metadata = jsonb_set(metadata, '{sequentialQueue,state}', to_jsonb('completed'::text), false),
+              updated_at = now()
+        WHERE id = $1
+          AND instance_id = $2
+          AND node_key = $3
+          AND is_active = TRUE
+          AND entry_epoch IS NOT DISTINCT FROM $4
+        RETURNING id`,
+      [activeAssignment.id, instanceId, nodeKey, entryEpoch],
+    )
+    if (completed.rows.length !== 1) {
+      throw new ServiceError(
+        'Sequential approval queue head could not be completed',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+
+    const queued = await client.query<ApprovalAssignmentRow>(
+      `SELECT *
+         FROM approval_assignments
+        WHERE instance_id = $1
+          AND node_key = $2
+          AND is_active = FALSE
+          AND entry_epoch IS NOT DISTINCT FROM $3
+          AND metadata->'sequentialQueue'->>'state' = 'queued'
+        ORDER BY id ASC
+        FOR UPDATE`,
+      [instanceId, nodeKey, entryEpoch],
+    )
+    if (queued.rows.length === 0) {
+      if (activeQueue.position !== activeQueue.length) {
+        throw new ServiceError(
+          'Sequential approval queue ended before its declared length',
+          409,
+          'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+        )
+      }
+      return { createdTasks: [], remainingAssignments: 0 }
+    }
+
+    const parsedQueued = queued.rows.map((row) => ({
+      row,
+      queue: readSequentialQueueMetadata(row.metadata),
+    }))
+    if (parsedQueued.some(({ queue }) => queue === null)) {
+      throw new ServiceError(
+        'Sequential approval queue ordering is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    const orderedQueued = parsedQueued
+      .map(({ row, queue }) => ({ row, queue: queue! }))
+      .sort((left, right) => left.queue.position - right.queue.position)
+    const expectedRemaining = activeQueue.length - activeQueue.position
+    if (
+      orderedQueued.length !== expectedRemaining
+      || orderedQueued.some(({ queue }, index) => (
+        queue.state !== 'queued'
+        || queue.length !== activeQueue.length
+        || queue.position !== activeQueue.position + index + 1
+      ))
+    ) {
+      throw new ServiceError(
+        'Sequential approval queue ordering is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    const next = orderedQueued[0].row
+    if (next.assignment_type !== 'user' && next.assignment_type !== 'role') {
+      throw new ServiceError(
+        'Sequential approval queue assignment type is invalid',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    await this.assertNoActiveAssignmentConflicts(client, instanceId, [{
+      assignmentType: next.assignment_type,
+      assigneeId: next.assignee_id,
+      nodeKey,
+      metadata: next.metadata,
+    }])
+    const activated = await client.query<{ id: string }>(
+      `UPDATE approval_assignments
+          SET is_active = TRUE,
+              metadata = jsonb_set(metadata, '{sequentialQueue,state}', to_jsonb('active'::text), false),
+              updated_at = now()
+        WHERE id = $1
+          AND is_active = FALSE
+        RETURNING id`,
+      [next.id],
+    )
+    if (activated.rows.length !== 1) {
+      throw new ServiceError(
+        'Sequential approval queue head could not be activated',
+        409,
+        'APPROVAL_SEQUENTIAL_QUEUE_INVALID',
+      )
+    }
+    return {
+      createdTasks: next.assignment_type === 'user'
+        ? [{ nodeKey, entryEpoch, assigneeUserId: next.assignee_id, sourceStep: next.source_step }]
+        : [],
+      remainingAssignments: activeQueue.length - activeQueue.position,
+    }
   }
 
   /**
@@ -11559,7 +12232,7 @@ export class ApprovalProductService {
         // `readonly` ⇒ non-editable; `hidden` ⇒ not even visible. Both refuse WITHOUT echoing a value.
         throw new ServiceError('Field write is not permitted at this node', 403, 'APPROVAL_FIELD_WRITE_FORBIDDEN', { nodeKey, fieldId })
       }
-      // v1 fail-closed (DEFERRED, OD-L7-3): `record-link` / `attachment` writes need binding+authz
+      // v1 fail-closed (DEFERRED, OD-L7-3): `record-link` / `attachment` / `department` writes need binding+authz
       // that Lock-7's named validators (validateFieldType/Constraints/Detail) do NOT cover —
       // create-time record-link confused-deputy authz (projectRecordLinkFormSnapshotForViewer) and
       // attachment-id binding into the immutable snapshot. Rejected here, not silently dropped; the
@@ -11577,7 +12250,12 @@ export class ApprovalProductService {
       // field type A-1 declares is contractually absent from formSnapshot. The payload this closes is
       // necessarily `null`-only — any non-null value is independently refused by `validateFieldType`'s
       // arm above, unaffected by this change.
-      if (field.type === 'record-link' || field.type === 'attachment' || field.type === 'explanation') {
+      if (
+        field.type === 'record-link'
+        || field.type === 'attachment'
+        || field.type === 'department'
+        || field.type === 'explanation'
+      ) {
         throw new ServiceError('Field type is not writable at a handler node yet', 400, 'APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE', { nodeKey, fieldId })
       }
       // Re-run the FROZEN-schema validators (L7-C / G-6). MS-3 fail-open is INHERITED, not fixed: a

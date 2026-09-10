@@ -9,6 +9,7 @@ const authServiceMocks = vi.hoisted(() => ({
   createToken: vi.fn(),
   readTokenPayload: vi.fn(),
   resolveSessionTenantId: vi.fn(),
+  listActiveMembershipOrgIds: vi.fn(),
 }))
 
 const inviteTokenMocks = vi.hoisted(() => ({
@@ -229,6 +230,61 @@ async function invokeRoute(
   return res
 }
 
+describe('explicit session organization routes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    authServiceMocks.verifyToken.mockResolvedValue({ id: 'actor', tenantId: 'org-a' })
+    authServiceMocks.listActiveMembershipOrgIds.mockResolvedValue(['org-a', 'org-b'])
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue('org-b')
+    authServiceMocks.readTokenPayload.mockReturnValue({ sid: 'session', exp: 2000000000 })
+    authServiceMocks.createToken.mockReturnValue('signed-new-token')
+    sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
+  })
+
+  it('lists only the authenticated actor memberships, ignoring submitted actor selectors', async () => {
+    const res = await invokeRoute('get', '/session-orgs', {
+      headers: { authorization: 'Bearer current', 'x-user-id': 'other' }, query: { userId: 'other' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(authServiceMocks.listActiveMembershipOrgIds).toHaveBeenCalledWith('actor')
+    expect(res.body).toEqual({ success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: 'org-a' } })
+  })
+
+  it('remints only after checking active membership for the authenticated actor', async () => {
+    const res = await invokeRoute('post', '/session-org', {
+      headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(authServiceMocks.resolveSessionTenantId).toHaveBeenCalledWith('actor', 'org-b')
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith({ id: 'actor', tenantId: 'org-b' }, { sid: 'session' })
+    expect(sessionRegistryMocks.createUserSession).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['non-member', 'revoked-member'])('refuses %s without token or session writes', async () => {
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue(undefined)
+    const res = await invokeRoute('post', '/session-org', {
+      headers: { authorization: 'Bearer current' }, body: { orgId: 'org-b' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({ success: false, error: 'Not a member of the requested organization', code: 'SESSION_ORG_NOT_MEMBER' })
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+    expect(sessionRegistryMocks.createUserSession).not.toHaveBeenCalled()
+  })
+
+  it.each([{}, { orgId: '' }, { orgId: 'org-b', userId: 'other' }])('rejects a missing or expanded selector %j', async body => {
+    const res = await invokeRoute('post', '/session-org', { headers: { authorization: 'Bearer current' }, body })
+    expect(res.statusCode).toBe(400)
+    expect(authServiceMocks.resolveSessionTenantId).not.toHaveBeenCalled()
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
+  })
+
+  it('requires a real bearer authentication result, not an actor header', async () => {
+    const res = await invokeRoute('post', '/session-org', { headers: { 'x-user-id': 'actor' }, body: { orgId: 'org-b' } })
+    expect(res.statusCode).toBe(401)
+    expect(authServiceMocks.resolveSessionTenantId).not.toHaveBeenCalled()
+  })
+})
+
 describe('auth login routes', () => {
   beforeEach(() => {
     vi.unstubAllEnvs()
@@ -304,6 +360,66 @@ describe('auth login routes', () => {
       workflow: expect.any(Boolean),
       attendanceAdmin: true,
     })
+  })
+
+  function stubAllElearningCapabilitiesOn() {
+    vi.stubEnv('ELEARNING_CONTENT_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_ASSIGNMENT_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_ASSESSMENT_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_INCENTIVE_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_ANALYTICS_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_MEDIA_ENABLED', 'true')
+  }
+
+  async function loginAdminForElearningPayload() {
+    authServiceMocks.login.mockResolvedValue({
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+        name: 'Admin',
+        role: 'admin',
+        permissions: ['attendance:admin', 'elearning:admin'],
+        created_at: new Date('2026-03-13T00:00:00.000Z'),
+        updated_at: new Date('2026-03-13T00:00:00.000Z'),
+      },
+      token: 'jwt-login-token',
+    })
+    return invokeRoute('post', '/login', {
+      body: {
+        email: 'admin@example.com',
+        password: 'WelcomePass9A',
+      },
+    })
+  }
+
+  it.each([
+    ['absent', undefined],
+    ['empty', ''],
+    ['TRUE', 'TRUE'],
+    ['1', '1'],
+    ['yes', 'yes'],
+    ['true-with-trailing-space', 'true '],
+    ['true-with-leading-space', ' true'],
+  ] as const)(
+    'admin + all capability flags on + master %s keeps elearning false',
+    async (_label, master) => {
+      stubAllElearningCapabilitiesOn()
+      if (master !== undefined) vi.stubEnv('ELEARNING_ENABLED', master)
+      else delete process.env.ELEARNING_ENABLED
+      const response = await loginAdminForElearningPayload()
+      expect(response.statusCode).toBe(200)
+      expect((response.body as Record<string, any>).data.features.elearning).toBe(false)
+      expect((response.body as Record<string, any>).data.features.attendanceAdmin).toBe(true)
+    },
+  )
+
+  it('admin + all capability flags on + exact master true yields elearning true', async () => {
+    stubAllElearningCapabilitiesOn()
+    vi.stubEnv('ELEARNING_ENABLED', 'true')
+    const response = await loginAdminForElearningPayload()
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features.elearning).toBe(true)
+    expect((response.body as Record<string, any>).data.features.attendanceAdmin).toBe(true)
   })
 
   it('accepts a generic identifier payload for login', async () => {

@@ -4,6 +4,8 @@
     filterable
     remote
     clearable
+    :multiple="multiple"
+    :multiple-limit="multiple ? maxSelections ?? 0 : 0"
     :remote-method="handleSearch"
     :loading="loading"
     :disabled="disabled"
@@ -33,11 +35,9 @@
 //
 // Modeled on the AUTHOR picker (TemplateAuthoringView's `approval-step-user-picker`, backed by
 // `useApprovalDirectory`): same filterable+remote+remote-method el-select shape, same
-// `visible-change` re-search-on-open, same "name · email" label fallback-to-id formatting. This
-// component is deliberately simpler (no composable, no ensure-visible-after-page reconciliation)
-// since it is single-select and none of its 4 call sites currently need to preserve a
-// prior-page selection across a re-search — the `initialOption` prop covers the one case that
-// legitimately needs a pre-existing label (a preselected id with a known display name).
+// `visible-change` re-search-on-open and values-free display labels. This component is deliberately
+// simpler than the author picker (no store coupling); `initialOption` / `initialOptions` preserve
+// pre-existing single or multi selections across paged re-searches.
 //
 // Kept dumb/pure: no store coupling, no side effects beyond the directory fetch. Emits the
 // picked id via standard v-model (`update:modelValue`) plus a richer `select` event carrying the
@@ -49,20 +49,30 @@ import { searchApprovalDirectoryUsers, type ApprovalDirectoryUser } from '../api
 export type ApprovalUserPickerOption = ApprovalDirectoryUser
 
 const props = withDefaults(defineProps<{
-  modelValue?: string | null
+  modelValue?: string | string[] | null
   placeholder?: string
   disabled?: boolean
+  multiple?: boolean
+  maxSelections?: number
+  excludedUserIds?: readonly string[]
   /** Seeds a display label for a pre-existing modelValue before/without a matching fetched page (edit/preselected case). */
   initialOption?: ApprovalUserPickerOption | null
+  /** Multi-select counterpart of initialOption; selected ids stay values-free before batch resolution completes. */
+  initialOptions?: readonly ApprovalUserPickerOption[]
 }>(), {
   modelValue: null,
   placeholder: '搜索用户名 / 邮箱 / ID',
   disabled: false,
+  multiple: false,
+  maxSelections: undefined,
+  excludedUserIds: () => [],
   initialOption: null,
+  initialOptions: () => [],
 })
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string | null): void
+  (e: 'update:multipleModelValue', value: string[]): void
   (e: 'select', option: ApprovalUserPickerOption | null): void
 }>()
 
@@ -73,11 +83,16 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 // Keeps `initialOption` visible even after a search page that doesn't happen to include its id —
 // without this, a preselected value would render as a blank/id-only chip once any search runs.
 const displayOptions = computed<ApprovalUserPickerOption[]>(() => {
-  const initial = props.initialOption
-  if (!initial || !initial.id || fetchedOptions.value.some((option) => option.id === initial.id)) {
+  const initial = [
+    ...(props.initialOption ? [props.initialOption] : []),
+    ...props.initialOptions,
+  ]
+  const seen = new Set(fetchedOptions.value.map((option) => option.id))
+  const missing = initial.filter((option) => option.id && !seen.has(option.id))
+  if (missing.length === 0) {
     return fetchedOptions.value
   }
-  return [initial, ...fetchedOptions.value]
+  return [...missing, ...fetchedOptions.value]
 })
 
 // raw-id-exposure-fix (20260819) follow-up: this used to fall back to the raw directory
@@ -107,7 +122,11 @@ function optionLabel(option: ApprovalUserPickerOption, index: number): string {
 // (typically surfaced via `initialOption`) is exempt: a caller must never render its OWN existing
 // selection as unselectable, or the field would appear to reject its own current value.
 function isUnidentifiable(option: ApprovalUserPickerOption): boolean {
-  if (option.id === props.modelValue) return false
+  if (props.excludedUserIds.includes(option.id)) return true
+  const selected = Array.isArray(props.modelValue)
+    ? props.modelValue.includes(option.id)
+    : option.id === props.modelValue
+  if (selected) return false
   return !option.name?.trim()
 }
 
@@ -140,6 +159,14 @@ function onVisibleChange(visible: boolean): void {
 }
 
 function onSelect(value: unknown): void {
+  if (props.multiple) {
+    const ids = Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+      : []
+    emit('update:multipleModelValue', ids)
+    emit('select', null)
+    return
+  }
   const id = typeof value === 'string' && value.length > 0 ? value : null
   emit('update:modelValue', id)
   emit('select', id ? displayOptions.value.find((option) => option.id === id) ?? null : null)

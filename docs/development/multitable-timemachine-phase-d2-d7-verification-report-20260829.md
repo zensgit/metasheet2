@@ -1,15 +1,22 @@
 # Time Machine Phase D2-D7 verification report
 
-**Status:** DRAFT / HOLD. Local exact-worktree and Draft PR verification. No
-merge, staging, flag, deployment, or production acceptance claim.
+**Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 is
+merged. Local code/test candidate `9c5c082a53a26e4ae55f02b1724b99826e9abb95`
+and its report lineage are carried by the current true merge onto main
+`da1057141a8c4ee7f41fe7f55c32700f1e46a5ff` at
+`f95eadaf5d972316279cfd7ae5e151c12fc73e6a` and locally verified, but not
+pushed or remotely verified. No staging, flag, deployment, or production
+acceptance claim.
 
 ## 1. Verification subject
 
 | Item | Value |
 |---|---|
 | source worktree | `/private/tmp/codex-tm-d55-runtime-api-20260828` |
-| current-main worktree | `/private/tmp/codex-tm-d2-d7-current-main-20260829` |
-| Draft PR | `#5305` |
+| original current-main worktree | `/private/tmp/codex-tm-d2-d7-current-main-20260829` |
+| merged PR | `#5305` |
+| merged PR head | `beeff6b3765cff463f8887d58f6b3fb11b8a5a61` |
+| merge commit | `fac252067ab1c22d910266ac2ba29016c2b5fe43` |
 | D2-D6 head before D7 evidence | `d0fc5a5a2be412500604f70cba172536cb40f086` |
 | D7 test + runbook evidence | `70b5e53f2144dc09a2aa46d7af94adffcbac7de8` |
 | final source evidence head | `def68afe85d759f130656882c3bf5de2e98dbb8a` |
@@ -23,14 +30,32 @@ merge, staging, flag, deployment, or production acceptance claim.
 | product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
 | key-registry scratch-drain hardening | `e19b65041d9fd79a556bb58b0c40734b2066c874` |
 | final code/test tree before report refresh | `6ac12d5efa2849faecdd4de32f4414574b90bb82` |
+| post-merge closeout worktree | `/private/tmp/codex-tm-closeout-hardening-20260829` |
+| post-merge closeout original base | `3f30d8eb4f27f9972b640e2d69e2c3dab2837ae5` |
+| then-current main replay parent | `5eb83055937ebecc9be690bcf721a8cc89ca27d0` |
+| local true-merge replay | `c1863ea288f4a23a0736b6984c51d8dfa867b714` |
+| first Opus fix-forward | `a9835b0efa1af52408b5a8848af2247f05715e4d` |
+| post-merge closeout code head | `7fcc57d9ec31e5d8735105a3cccabdec181db06d` |
+| final mutation-locked code/test head | `9c5c082a53a26e4ae55f02b1724b99826e9abb95` |
+| post-merge closeout code/test tree | `3831f7c62a13e296715dbfb1f18becfacba82fb2` |
+| prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7`, `332b13efd87e3352250c6ffa39be0a95ef01b5c4` |
+| prior local report carrier before prior replay | `b8893e6b860d09b2b5518adbdbffbadb74073d8d` |
+| prior then-current main replay parent | `9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` |
+| prior local true-merge replay | `0464d551d829ac020a6504e49c54f64a8d17c03a` |
+| prior local replay tree | `c8574f916171d50f0fc8fe9e9426bc3f41aa29b1` |
+| current closeout source parent | `d49bc9b07f5a192d857e5bb849a2e888a1e74874` |
+| current then-current main parent | `da1057141a8c4ee7f41fe7f55c32700f1e46a5ff` |
+| current local true-merge replay | `f95eadaf5d972316279cfd7ae5e151c12fc73e6a` |
+| current local replay tree | `a64f5c9c1c60448c4193d2d935cd98d080f08136` |
+| post-merge closeout remote CI | not run |
 | flags | unchanged and OFF |
 | production | not accessed |
 
 The integration merge is a true two-parent merge of the final source evidence and
 current `origin/main`; both are ancestors. Durable rediscovery, application
 runtime wiring, exact-head CI fix-forwards, and closed job-list validation were
-then added as bounded commits. Draft PR #5305 supplies remote review evidence but
-does not authorize merge or runtime enablement.
+then added as bounded commits. PR #5305 was merged through `fac252067a`; that
+merge still does not authorize runtime enablement.
 
 ### Current-main integration checks
 
@@ -53,6 +78,43 @@ does not authorize merge or runtime enablement.
   0 skipped** inside the full multitable real-DB step.
 - shared full-schema cleanup regression set: **10 files / 182 tests PASS**;
   catalog **41/41**, lease/PIT focused **13/13**, and lease whole-file **10/10**.
+
+### Post-merge local closeout checks
+
+Candidate `9c5c082a53` closes the later review residuals without changing a
+migration, workflow, flag, writer, archive format, or provider contract:
+
+- pre-fix catalog test: **17 failures / 48 tests**, each malformed successful
+  response resolved instead of rejecting; fixed client: **48/48 PASS**;
+- pre-fix application test: **1 failure / 10 tests**, because a never-resolving
+  in-flight worker had no ten-second failure; fixed application: **10/10 PASS**;
+- final archive client: **1 file / 78 tests PASS**;
+- client plus mounted modal neighbor: **2 files / 95 tests PASS**;
+- application and server wiring neighbors: **2 files / 17 tests PASS**;
+- current-main D5-D7 unit set: **18 files / 210 tests PASS**;
+- Required Web: **406 files / 5,150 tests PASS**. This required selector does
+  not include the archive client spec; the direct **78/78** run is its evidence;
+- Time Machine archive CI wiring and fail-not-skip: **6/6 + 1/1 PASS**;
+- web and core-backend typecheck: **PASS**;
+- diff-check: **PASS**;
+- `src/index.ts` package-scoped ESLint exits zero with existing warnings;
+- whole-file web client ESLint still reports the pre-existing unused
+  `MultitableCommentReaction` import at line 40; origin/main blame predates this
+  closeout and the unrelated import was not edited.
+
+The discriminating evidence for this local closeout is the exact pre-fix
+RED-to-fixed-GREEN run above. No temporary production-guard neutralization is
+claimed: the local safety reviewer refused the attempted weakening, and it was
+not bypassed.
+
+The current true-merge replay at `f95eadaf5d` has ordered parents
+`d49bc9b07f` and `da1057141a8c`, no manual conflict resolution, and a nine-file
+Time Machine delta relative to its main parent. On that exact tree, the archive
+client and modal passed **2 files / 95 tests**, application plus server wiring
+passed **2 files / 17 tests**, web typecheck passed, and diff-check was clean.
+The broader D5-D7 evidence remains attached to the carried source lineage; it
+was not silently reclassified as an exact-head remote matrix. Remote exact-head
+CI remains unrun.
 
 ### Draft PR exact-head progression
 
@@ -225,6 +287,18 @@ outside this change. It was not edited or misreported as fixed.
 | reduce positive-decimal validation to string-only | client spec RED at malformed total-count error shape and zero row version acceptance |
 | omit restore-plan child from full-schema cleanup | catalog real-DB suite RED at FK-protected cleanup; **40 tests RED** in the selected file |
 | omit test-only trigger bypass for immutable token burns | lease suite RED at immutable burn cleanup; **6 tests RED** |
+| remove the catalog null-body guard | both 204 and empty-200 cases RED with raw `TypeError`; restored **53/53 PASS** |
+| remove the job-list null-body guard | both 204 and empty-200 cases RED with raw `TypeError`; restored **53/53 PASS** |
+| remove the exact preview validator | preview case RED by resolving `data: null`; restored client **59/59 PASS** |
+| remove the exact execute validator | execute case RED by resolving malformed success; restored client **59/59 PASS** |
+| remove the shared job-snapshot validator | accept/read/resume/cancel each RED by resolving malformed success; restored client **59/59 PASS** |
+| remove stop-promise memoization | reentrant stop is no longer the same rejected promise; shutdown wiring RED |
+| route SIGTERM/SIGINT around `stopForSignal` | static runtime-registration contract RED; restored backend neighbors **17/17 PASS** |
+| remove exact preview/execute key equality | extra-key preview and execute cases both RED |
+| accept arbitrary preview/execute mode strings | both invalid-mode cases RED |
+| accept any numeric count | preview negative count plus execute negative/fractional counts RED |
+| skip preview revert-row validation | malformed `fieldIds` case RED |
+| ignore executable/blocked/identity coherence | both incoherent preview cases RED |
 
 The lease-reclaim mutation was restored with `apply_patch`; the same two focused
 real-DB legs then passed **2/2**. Runtime source is byte-restored; only tests and
@@ -258,7 +332,7 @@ owner action has not occurred.
 | Attachments | PASS (implementation) | source pin, immutable version/hash, archive-object reference, and deletion authority suites are wired |
 | Links/config/tombstones | PASS (implementation) | section causality, operation binding, reconstruction, and link authority are present |
 | Permissions | PASS (implementation) | preview/execute fresh authority and zero-write refusal tests pass; staging UAT remains HOLD |
-| Runtime composition | PASS (implementation) | canonical main-pool transaction/query/depth, route identity, worker start/stop, and exact-OFF gates pass; production provider selection remains HOLD |
+| Runtime composition | PASS (implementation) | canonical main-pool transaction/query/depth, route identity, exact-OFF gates, worker start, normal drain, and bounded stop failure pass; production provider selection remains HOLD |
 | Values-free | PASS (local) | route/worker/crypto/provider errors use closed codes; ordinary evidence contains no raw identities |
 
 ## 5. Database cleanup
@@ -319,12 +393,57 @@ runtime and by the RED/restore mutation above. That review returned
 **0 P1 / 0 P2 / 0 P3** for its bounded delta.
 
 A later Kimi read-only review of the published hardening returned **0 P1 / 0 P2**
-and three P3 observations: the sheet-ID comparison overlaps stronger stale
-response guards; the canonical worker loop contains tick failures, so the mocked
-drain-rejection branch is not production-discriminating and a genuinely stuck
-stop remains unbounded; and the older read-only catalog list still maps malformed
-successful data to an empty catalog. These are disclosed residuals, not evidence
-for flag enablement.
+and three P3 observations at that exact review head: the sheet-ID comparison
+overlaps stronger stale response guards; the canonical worker loop contains tick
+failures, so the mocked drain-rejection branch was not production-discriminating
+and a genuinely stuck stop remained unbounded; and the older read-only catalog
+list mapped malformed successful data to an empty catalog. Those findings were
+not evidence for flag enablement.
+
+Post-merge checkpoint `6cf88c0e84` closes the latter two observations with
+pre-fix RED evidence. A Sonnet 5 review of the later empty-catalog fix found
+**0 P1 / 1 P2 / 0 P3**: the adjacent durable job-list method retained the same
+204/empty-body raw `TypeError`. `0767a3781e` closes that finding with the second
+RED/restore mutation above. The overlapping sheet-ID comparison remains the
+disclosed P3.
+
+An Opus 5 refute-first review of the resulting closeout found **0 P1 / 2 P2 /
+4 P3**. Its two P2 findings were accepted: six adjacent archive operations could
+still resolve `undefined` on 204/empty success, and the SIGTERM/SIGINT path could
+exit 0 after a worker-drain failure. `a9835b0efa` closes both with the four
+initial RED/restore mutations.
+
+Opus 5 then re-reviewed the report-bound candidate and found **0 P1 / 3 P2 /
+5 P3**. The three P2 findings were accepted: `data: null` or missing `data`
+could still pass the object-only preview/execute check; a second signal during a
+failed first shutdown could resolve through the old early return; and the tests
+called the private mapper without pinning real signal registration. `7fcc57d9ec`
+closes all three with exact response validators, one memoized stop promise, six
+independent operation cases, and the runtime-registration source contract. The
+retained P3 boundaries are the fixed ten-second stop policy, the
+non-discriminating canonical-loop rejection branch, the redundant catalog
+key-order clause, the overlapping sheet-ID guard, and the distinction between
+direct client evidence and the Required Web selector. This report names the
+prior report carriers.
+
+Sol's exact review then found **0 P1 / 1 P2 / 0 P3**: the validators were exact,
+but the tests only exercised null, missing-data, 204, and empty-body successes.
+`9c5c082a53` adds 11 truthy malformed preview objects and eight truthy malformed
+execute objects. They reach the validators and cover missing/extra keys, every
+preview enum plus execute mode, invalid UUID/decimal/identity/count shapes,
+malformed summary rows, and both executable-state incoherencies. The five
+category mutations above turned the intended cases red. Sol reran the final
+**78/78** client file and returned **0 P1 / 0 P2 / 0 P3**. The landing remains
+HOLD for current-main replay, exact-head remote CI, and the provider/staging
+boundaries; the local refute-first gate is closed.
+
+A fresh Sol high review of exact range `da1057141a8c..f95eadaf5d` returned
+product **0 P1 / 0 P2 / 0 P3** and report-only **0 P1 / 1 P2 / 0 P3**. It
+independently refuted both unproven shutdown hypotheses: rejecting the memoized
+`stop()` promise is the intended fail-closed result when worker drain cannot be
+proved, and the worker-stop deadline must remain referenced so the promised
+failure is delivered. The report-only P2 was the stale exact-replay binding;
+this amendment closes that evidence defect.
 
 The same review cycle exposed malformed job-list elements and led to
 `4d3a50c627`. Sol then reviewed that exact two-file delta, ran the focused spec at
@@ -339,8 +458,7 @@ and web typecheck and returned **0 P1 / 0 P2 / 0 P3**.
 
 ## 7. Final verdict
 
-**CURRENT-MAIN DRAFT D2-D7 IMPLEMENTATION: PASS WITH
-PROVIDER / STAGING HOLD.**
+**MERGED D2-D7 FOUNDATION + LOCAL CLOSEOUT: PASS WITH PROVIDER / STAGING HOLD.**
 
 The D7 fault/scale evidence, durable job rediscovery, and provider-neutral runtime
 composition are implemented and locally verified. They do not close the
@@ -352,10 +470,11 @@ owner/provider or staging/production proof:
 - staging fault/storage/KMS runbook execution: not performed;
 - true OS-process restart: not performed;
 - current-main local integration and exact-worktree gates: passed;
-- Draft PR #5305 product-code matrix: `48 SUCCESS / 1 intentional SKIPPED /
-  0 failure` at `73d3187c8b`;
-- the post-cleanup report carrier must independently pass its exact-head checks
-  before owner review;
+- PR #5305 merged at `fac252067a`; its product-code matrix reached `48 SUCCESS /
+  1 intentional SKIPPED / 0 failure` at `73d3187c8b` before the report carrier;
+- local closeout code/test checkpoint `9c5c082a53` is carried through the report
+  lineage by current-main replay `f95eadaf5d` over `da1057141a8c`, but has no
+  remote matrix or landing authorization;
 - flags: OFF;
 - production: untouched.
 
@@ -363,5 +482,5 @@ D1 explicitly leaves KMS/key custody and the production object backend to the
 owner. Reusing the approval attachment S3 implementation or inventing a KMS
 choice would therefore be a new product decision, not mechanical runtime wiring.
 
-Therefore no statement in this report authorizes merge, deployment, staging flag
-enablement, or production recovery.
+Therefore no statement in this report authorizes the local closeout landing,
+deployment, staging flag enablement, or production recovery.

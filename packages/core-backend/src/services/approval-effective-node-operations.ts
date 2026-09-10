@@ -1,4 +1,5 @@
 import type { NodeOperationPolicy, NodeOperationPolicyActionKey } from '../types/approval-product'
+import { assignmentMatchesActor } from './approval-seat-authorization'
 
 /**
  * Lock-5 §1.3 / §2.3 — the ONE resolver both doors share.
@@ -70,6 +71,15 @@ export function nodeOperationPolicyAt(
   return undefined
 }
 
+function approvalModeAt(
+  graph: NodeOperationGraphView | null | undefined,
+  nodeKey: string | null | undefined,
+): unknown {
+  if (!graph?.nodes || !nodeKey) return undefined
+  const node = graph.nodes.find((candidate) => candidate?.key === nodeKey)
+  return node && isRecord(node.config) ? node.config.approvalMode : undefined
+}
+
 /**
  * Lock-5 §1.3 / OD-L5-8(a) — the effective comment requirement at ONE node.
  *
@@ -107,6 +117,10 @@ export function isOperationAllowedAtNode(
   nodeKey: string | null | undefined,
   policyKey: NodeOperationPolicyActionKey,
 ): boolean {
+  if (
+    approvalModeAt(graph, nodeKey) === 'sequential'
+    && (policyKey === 'allowAddSign' || policyKey === 'allowReduceSign')
+  ) return false
   return nodeOperationPolicyAt(graph, nodeKey)?.[policyKey] !== false
 }
 
@@ -128,24 +142,25 @@ export interface ViewerSeatAssignment {
  * claimed to mirror the choke while being strictly wider (gate finding NIT-R1). It is exported and
  * shared precisely so the two DTO builders and the choke cannot drift into three predicates — the
  * failure this slice already hit once with the four hand-copied error handlers.
+ *
+ * The match rule itself is no longer restated here. This function used to carry its own copy of it,
+ * documented as mirroring `assignmentMatchesActor` "exactly" — a claim that only a reader could
+ * check. It now CALLS that function (`approval-seat-authorization.ts`, where the body was moved so
+ * both DTO builders can reach it without an import cycle), so the mirroring is true by construction
+ * rather than by assertion. What stays here is the part that is this function's own: keeping only
+ * non-empty `node_key`s of the matched seats.
  */
 export function seatNodeKeysForViewer(
   assignments: readonly ViewerSeatAssignment[],
   viewerUserId: string,
   viewerRoles?: readonly string[] | null,
 ): string[] {
-  const roleSet = new Set(
-    (viewerRoles ?? []).filter((role): role is string => typeof role === 'string' && role.length > 0),
+  const roles = (viewerRoles ?? []).filter(
+    (role): role is string => typeof role === 'string' && role.length > 0,
   )
   const keys: string[] = []
   for (const assignment of assignments) {
-    if (!assignment.is_active) continue
-    const matches = assignment.assignment_type === 'user'
-      ? assignment.assignee_id === viewerUserId
-      : assignment.assignment_type === 'role'
-        ? roleSet.has(assignment.assignee_id)
-        : false
-    if (!matches) continue
+    if (!assignmentMatchesActor(assignment, viewerUserId, roles)) continue
     if (typeof assignment.node_key === 'string' && assignment.node_key.length > 0) {
       keys.push(assignment.node_key)
     }
@@ -180,6 +195,10 @@ export function resolveEffectiveNodeOperations(
   let sawAny = false
   for (const nodeKey of seatNodeKeys) {
     const policy = nodeOperationPolicyAt(graph, nodeKey)
+    if (approvalModeAt(graph, nodeKey) === 'sequential') {
+      allowAddSign = false
+      allowReduceSign = false
+    }
     if (policy?.allowTransfer === false) allowTransfer = false
     if (policy?.allowAddSign === false) allowAddSign = false
     if (policy?.allowReduceSign === false) allowReduceSign = false

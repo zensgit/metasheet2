@@ -21,6 +21,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -363,6 +364,15 @@ describe('TemplateCenterView — WP4 slice 1 category filter + clone', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // Report item O-8 — TemplateCenterView is now locale-aware (useLocale()/isZh) instead of a
+    // hardcoded-Chinese-always template, including `visibilityScopeLabel()`'s "全员可见"/"角色 N"
+    // output this spec's "renders visibility scope summary per row" test asserts on. Pin the
+    // locale explicitly rather than relying on jsdom's default `navigator.language` (same fix as
+    // approval-e2e-permissions.spec.ts's and approval-e2e-lifecycle.spec.ts's UF-3 pins) — this
+    // spec's fixtures/assertions are Chinese, and templateCenterI18n.spec.ts is what actually
+    // covers the "en" locale for this view.
+    useLocale().setLocale('zh-CN')
+
     mockTemplates.value = [
       buildTemplate({ id: 'tpl_a', name: '出差申请', category: '请假' }),
       buildTemplate({ id: 'tpl_b', name: '采购申请', category: '采购' }),

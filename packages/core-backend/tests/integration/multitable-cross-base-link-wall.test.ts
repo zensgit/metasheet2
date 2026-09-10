@@ -49,8 +49,9 @@ function buildApp(userId: string): Express {
     ;(req as { user?: unknown }).user = {
       id: userId,
       roles: ['member'],
-      perms: ['multitable:read', 'multitable:write'],
-      permissions: ['multitable:read', 'multitable:write'],
+      // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+      perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'],
+      permissions: ['multitable:read', 'multitable:write', 'multitable:manage-schema'],
     }
     next()
   })

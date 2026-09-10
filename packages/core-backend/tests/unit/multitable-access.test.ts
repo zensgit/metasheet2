@@ -82,19 +82,59 @@ describe('multitable access helper', () => {
     expect(isAdmin).not.toHaveBeenCalled()
   })
 
-  it('derives full write capability set from multitable:write', () => {
+  it('carries only the verified tenant claim into multitable access', async () => {
+    const result = await resolveRequestAccess({
+      authenticatedTenantId: 'org-verified',
+      user: {
+        id: 'user_3',
+        perms: ['elearning:admin'],
+        tenantId: 'org-header-fallback',
+      },
+    } as any)
+    expect(result.authenticatedTenantId).toBe('org-verified')
+  })
+
+  // BEHAVIOUR TIGHTENING: `canManageFields` no longer rides on `multitable:write`. It needs its own
+  // `multitable:manage-schema` code (src/multitable/manage-schema-permission.ts). Every OTHER key in
+  // this object is unchanged — record writing, view management, export and notify still follow
+  // `multitable:write`. The exhaustive per-tier table lives in
+  // tests/unit/multitable-manage-schema-permission-matrix.test.ts.
+  it('derives the record-write capability set from multitable:write, WITHOUT schema management', () => {
     expect(deriveCapabilities(['multitable:write'], false)).toEqual({
       canRead: true,
       canCreateRecord: true,
       canEditRecord: true,
       canDeleteRecord: true,
-      canManageFields: true,
+      canManageFields: false,
       canManageSheetAccess: false,
       canManageViews: true,
       canComment: false,
       canManageAutomation: false,
       canExport: true,
       canSendNotification: true,
+    })
+  })
+
+  it('adds ONLY canManageFields when multitable:manage-schema is granted alongside multitable:write', () => {
+    expect(deriveCapabilities(['multitable:write', 'multitable:manage-schema'], false)).toEqual({
+      ...deriveCapabilities(['multitable:write'], false),
+      canManageFields: true,
+    })
+  })
+
+  it('does not let multitable:manage-schema alone imply record writing', () => {
+    expect(deriveCapabilities(['multitable:manage-schema'], false)).toEqual({
+      canRead: false,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: true,
+      canManageSheetAccess: false,
+      canManageViews: false,
+      canComment: false,
+      canManageAutomation: false,
+      canExport: false,
+      canSendNotification: false,
     })
   })
 

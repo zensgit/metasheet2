@@ -8,6 +8,24 @@ on:
       - 'output/**'
   workflow_dispatch:
     inputs:
+      publish_images:
+        description: 'Explicitly authorize publishing images for publish_sha'
+        required: true
+        type: boolean
+        default: false
+      publish_sha:
+        description: 'Full commit SHA to publish; must match this run on main'
+        required: false
+        type: string
+      expected_visibility:
+        description: 'Expected visibility of both existing image packages'
+        required: true
+        type: choice
+        default: unselected
+        options:
+          - unselected
+          - public
+          - private
       deploy_production:
         description: 'Explicit authorization required to deploy the built commit to production'
         required: true
@@ -24,6 +42,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.publish_images.outputs.published }}
     permissions:
       contents: read
       packages: write
@@ -31,14 +51,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/setup-node@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          node-version: 20
+
+      - name: Test publication guards
+        run: node --test scripts/ops/docker-publish-preflight.test.mjs
+
+      - name: Validate publication authorization
+        id: publish_authorization
+        run: node scripts/ops/docker-publish-preflight.mjs authorize
       
-      - name: Build and push backend
+      - name: Build backend
         run: |
           BUILD_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "Building backend image for commit ${GITHUB_SHA} at ${BUILD_CREATED}"
@@ -50,10 +74,8 @@ jobs:
             -t ghcr.io/zensgit/metasheet2-backend:latest \
             -t ghcr.io/zensgit/metasheet2-backend:${{ github.sha }} \
             .
-          docker push ghcr.io/zensgit/metasheet2-backend:latest
-          docker push ghcr.io/zensgit/metasheet2-backend:${{ github.sha }}
       
-      - name: Build and push frontend
+      - name: Build frontend
         env:
           VITE_ENABLE_YJS_COLLAB: ${{ vars.VITE_ENABLE_YJS_COLLAB || 'false' }}
         run: |
@@ -68,19 +90,36 @@ jobs:
             -t ghcr.io/zensgit/metasheet2-web:latest \
             -t ghcr.io/zensgit/metasheet2-web:${{ github.sha }} \
             .
-          docker push ghcr.io/zensgit/metasheet2-web:latest
-          docker push ghcr.io/zensgit/metasheet2-web:${{ github.sha }}
-      
-      - name: Set packages to private
-        run: |
-          gh api --method PATCH /user/packages/container/metasheet2-backend -f visibility=private || true
-          gh api --method PATCH /user/packages/container/metasheet2-web -f visibility=private || true
+
+      - name: Verify both package identities and visibility
+        id: publish_preflight
+        if: ${{ steps.publish_authorization.outputs.publish_requested == 'true' }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/ops/docker-publish-preflight.mjs visibility
+
+      - name: Login to GHCR
+        if: ${{ steps.publish_preflight.outputs.verified == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish approved commit images
+        id: publish_images
+        if: ${{ steps.publish_preflight.outputs.verified == 'true' }}
+        run: |
+          set -euo pipefail
+          docker push "ghcr.io/zensgit/metasheet2-backend:${GITHUB_SHA}"
+          docker push "ghcr.io/zensgit/metasheet2-web:${GITHUB_SHA}"
+          docker push ghcr.io/zensgit/metasheet2-backend:latest
+          docker push ghcr.io/zensgit/metasheet2-web:latest
+          echo "published=true" >> "$GITHUB_OUTPUT"
 
   deploy:
     needs: build
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_production == true && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_production == true && github.ref == 'refs/heads/main' && needs.build.outputs.published == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

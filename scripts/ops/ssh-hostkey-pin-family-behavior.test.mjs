@@ -108,7 +108,7 @@ const SCRIPTS = [
   {
     script: 'resolve-attendance-smoke-token.sh',
     requiredVar: 'ATTENDANCE_TOKEN_RESOLVE_REQUIRED',
-    fallbackEnv: {},
+    fallbackEnv: { ATTENDANCE_SMOKE_ORG_ID: 'synthetic-attendance-org' },
     hasStdoutToken: (r) => r.stdout.includes('stubheader.stubpayload.stubsig'),
   },
   {
@@ -184,6 +184,7 @@ for (const { script, requiredVar, fallbackEnv, hasStdoutToken } of SCRIPTS) {
 test('base64-encoded DEPLOY_KNOWN_HOSTS decodes to the same pinned behaviour (attendance)', () => {
   const r = runScript('resolve-attendance-smoke-token.sh', {
     ATTENDANCE_TOKEN_RESOLVE_REQUIRED: 'true',
+    ATTENDANCE_SMOKE_ORG_ID: 'synthetic-attendance-org',
     DEPLOY_KNOWN_HOSTS: LEGAL_PIN_B64,
   })
   assert.equal(r.status, 0, `stderr: ${r.stderr}`)

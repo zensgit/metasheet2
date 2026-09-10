@@ -10,6 +10,10 @@ export type MetaBasePickerLabelKey =
   | 'basePicker.recentBadge'
   | 'basePicker.empty'
   | 'basePicker.newBasePlaceholder'
+  // Rename affordance (feat/multitable-rename): gated server-side on canManageFields — see
+  // MultitableWorkbench.vue's onRenameBase.
+  | 'basePicker.confirmRename'
+  | 'basePicker.cancelRename'
 
 const META_BASE_PICKER_LABELS: Record<MetaBasePickerLabelKey, { en: string; zh: string }> = {
   // W1 G-10 (docs/development/… terminology dictionary, ratified 2026-07-13): Base = 工作区.
@@ -20,6 +24,8 @@ const META_BASE_PICKER_LABELS: Record<MetaBasePickerLabelKey, { en: string; zh: 
   'basePicker.recentBadge': { en: 'Recent', zh: '最近打开' },
   'basePicker.empty': { en: 'No bases found', zh: '未找到工作区' },
   'basePicker.newBasePlaceholder': { en: 'New base name...', zh: '新工作区名称...' },
+  'basePicker.confirmRename': { en: 'Confirm rename', zh: '确认重命名' },
+  'basePicker.cancelRename': { en: 'Cancel rename', zh: '取消重命名' },
 }
 
 export function basePickerLabel(key: MetaBasePickerLabelKey, isZh: boolean): string {
@@ -30,4 +36,8 @@ export function basePickerLabel(key: MetaBasePickerLabelKey, isZh: boolean): str
 export function favoriteAriaLabel(baseName: string, isFavorite: boolean, isZh: boolean): string {
   if (isZh) return isFavorite ? `取消收藏 ${baseName}` : `收藏 ${baseName}`
   return isFavorite ? `Remove ${baseName} from favorites` : `Add ${baseName} to favorites`
+}
+
+export function renameAriaLabel(baseName: string, isZh: boolean): string {
+  return isZh ? `重命名 ${baseName}` : `Rename ${baseName}`
 }

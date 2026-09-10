@@ -1,9 +1,11 @@
 import type { DataSourceManager } from './DataSourceManager'
+import type { DataSourceScopeKind } from './DataSourceManager'
 import {
   isC6WriteTargetConfig,
   isGenericQueryDisabledConfig,
 } from './DataSourceManager'
-import type { DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
+import type { DataSourceConfig, DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
+import { parseSqlServerEndpoint } from '@metasheet/mssql-readonly-utils'
 
 /**
  * Narrow, READ-ONLY data-source surface handed to the integration plugin so the Data
@@ -24,7 +26,101 @@ export interface DataSourceReadOnlyFacadeTestResult {
   success: boolean
 }
 
+/**
+ * The DISPLAY descriptor of one data source: what an operator needs to recognize a connection on
+ * a summary screen, and nothing else.
+ *
+ * Exactly four fields, and none of them is a connection detail: no host, port, database, schema,
+ * username, connection string, options or credential state. `status` is the LIVE connection state
+ * (`adapter.isConnected()`), not the `data_sources.status` column — the column is written once at
+ * creation and does not track reality.
+ */
+export interface DataSourceDescriptor {
+  id: string
+  name: string
+  type: string
+  status: 'connected' | 'disconnected'
+}
+
+/** Values-free registration metadata used by the integration binding resolver. */
+export interface DataSourceConnectionRegistration {
+  id: string
+  type: string
+  tenantId: string | null
+  scopeKind: DataSourceScopeKind
+}
+
+export interface ResolveConnectionRegistrationOptions {
+  tenantId: string
+  workspaceId?: string | null
+  principal: string | undefined
+  runAs?: 'user' | 'owner' | 'service'
+}
+
+/** The only connection material the sealed SQL Server snapshot runtime may receive. */
+export interface DataSourceSealedSnapshotConnection {
+  connection: {
+    database: string
+    encrypt: boolean
+    instanceName: string | null
+    port: number
+    server: string
+    trustServerCertificate: boolean
+  }
+  credentials: {
+    password: string
+    user: string
+  }
+}
+
+/** Separate from DataSourceReadOnlyFacade because this surface carries secrets. */
+export interface DataSourceSealedSnapshotConnectionFacade {
+  resolveSqlServerConnection(
+    dataSourceId: string,
+    options: ResolveConnectionRegistrationOptions
+  ): Promise<DataSourceSealedSnapshotConnection>
+}
+
 export interface DataSourceReadOnlyFacade {
+  /**
+   * Resolve canonical connection registration metadata without opening the
+   * adapter or touching its config/credentials. This is owner-only and exact
+   * tenant scoped; legacy tenantless rows are usable only by a user/owner run.
+   */
+  resolveConnectionRegistration(
+    dataSourceId: string,
+    options: ResolveConnectionRegistrationOptions
+  ): Promise<DataSourceConnectionRegistration>
+  /**
+   * Resolve a data source id to its display descriptor, for the 对接总览 hub screen.
+   *
+   * AUTHORITY (aligned with #5401's visibility model): OWNER-ONLY. `principal` is passed to
+   * `assertAccess` as a bare user-id string, which `normalizeActor` treats as the DATA-PLANE shape
+   * — strictly owner-scoped, NO platform-admin bypass. This is deliberate and load-bearing: the
+   * overview shows a NON-admin the connection name a system points at, and #5401 made non-admin
+   * data-plane access owner-only, so `describe` must NOT become a side channel that reveals a
+   * connection name the same non-admin could not see on `/data-sources`. A non-owner (admin or not)
+   * gets the uniform DataSourceUnavailableError — deleted vs not-yours indistinguishable, no
+   * existence leak — and the hub card renders 连接:已配置(他人管理) instead of a name. Management
+   * visibility (an admin listing every source) stays on the management routes, never here.
+   *
+   * Read-only in the strongest sense available: it does NOT connect (no `connectDataSource`), does
+   * NOT decrypt, and never touches `adapter.getConfig()` — the only object in this layer that
+   * carries `connection` and `credentials`. Returns only {id, name, type, status}.
+   */
+  describe(dataSourceId: string, principal: string | undefined): Promise<DataSourceDescriptor>
+  /**
+   * BIND-TIME ownership probe (referential-delete guard, P2-A): asserts that
+   * `principal` may reference this data source in a persisted binding
+   * (integration_external_systems.config.dataSourceId) — i.e. the source
+   * exists AND the principal OWNS it, the exact authorization every later
+   * read through this facade enforces at runtime. Throws the facade's uniform
+   * DataSourceUnavailableError (deleted vs not-yours indistinguishable — no
+   * existence leak). Deliberately does NOT connect, and does NOT require the
+   * source to be read-only: write-gated target bindings reference writable
+   * sources.
+   */
+  assertReferenceable(dataSourceId: string, principal: string | undefined): Promise<void>
   test(dataSourceId: string, principal: string | undefined): Promise<DataSourceReadOnlyFacadeTestResult>
   getSchema(dataSourceId: string, principal: string | undefined, schema?: string): Promise<SchemaInfo>
   getTableInfo(
@@ -37,7 +133,15 @@ export interface DataSourceReadOnlyFacade {
     dataSourceId: string,
     table: string,
     options: Pick<QueryOptions, 'limit' | 'offset' | 'where' | 'orderBy'>,
-    principal: string | undefined
+    principal: string | undefined,
+    // W-5: OMITTED (or false) is byte-identical to this parameter never having existed — every
+    // caller that predates it, and every caller that never passes it, behaves exactly as before.
+    // `true` is a per-call, B2a-agnostic request for this facade's own hardened-read floors (see
+    // `authorize`/`select` below): refuse a sqlserver source configured with requestTimeoutMs=0
+    // before opening any connection, and force the existing (#5243) strict-offset-ordering check on
+    // for this one read. The facade decides nothing about WHO gets to ask for `true` — that policy
+    // lives at the integration-core seam that resolves an armed B2a read's source config.
+    strict?: boolean
   ): Promise<QueryResult<Record<string, DbValue>>>
 }
 
@@ -99,9 +203,26 @@ export const DATA_SOURCE_NOT_READ_ONLY_CODE = 'DATA_SOURCE_NOT_READ_ONLY'
 export const DATA_SOURCE_NOT_WRITABLE_CODE = 'DATA_SOURCE_NOT_WRITABLE'
 export const DATA_SOURCE_NOT_C6_WRITE_TARGET_CODE = 'DATA_SOURCE_NOT_C6_WRITE_TARGET'
 export const DATA_SOURCE_QUERY_INVALID_CODE = 'DATA_SOURCE_QUERY_INVALID'
+export const DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE =
+  'DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID'
+// W-5: thrown only when a caller opts into `select(..., strict=true)` (see `DataSourceReadOnlyFacade`
+// above) AND the resolved source is a `sqlserver` data source configured with
+// `connection.requestTimeoutMs=0` ("no timeout" — a legitimate, deliberate mssql convention for the
+// general adapter; MSSQLAdapter.ts's `?? 30000` deliberately does not override an explicit 0). This
+// facade stays B2a-agnostic: it knows only "a caller demanded a bounded-timeout read and this source
+// cannot give it one", never why. The integration-core seam that sets `strict=true` is the one that
+// maps this generic code onto its own fixed B2a error vocabulary.
+export const DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE = 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED'
 
 export function writableSourceMessage(dataSourceId: string): string {
   return `data source '${dataSourceId}' is writable; the read-only bridge refuses a writable binding`
+}
+
+export function requestTimeoutDisabledMessage(dataSourceId: string): string {
+  return (
+    `data source '${dataSourceId}' has connection.requestTimeoutMs=0 (no timeout); ` +
+    'this read requires a bounded request timeout and refuses to connect'
+  )
 }
 
 export function writeTargetReadOnlyMessage(dataSourceId: string): string {
@@ -366,7 +487,45 @@ function normalizeWriteRows(
 export function createDataSourcePluginFacade(
   getManager: () => DataSourceManager
 ): DataSourceReadOnlyFacade {
-  async function authorize(dataSourceId: string, principal: string | undefined) {
+  async function resolveRegistration(
+    dataSourceId: string,
+    options: ResolveConnectionRegistrationOptions | undefined
+  ) {
+    const principal = requirePrincipal(options?.principal)
+    const requestedTenant = typeof options?.tenantId === 'string' ? options.tenantId.trim() : ''
+    if (!requestedTenant) {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    const runAs = options?.runAs ?? 'service'
+    if (runAs !== 'user' && runAs !== 'owner' && runAs !== 'service') {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    const manager = getManager()
+    let scope
+    let adapter
+    try {
+      manager.assertAccess(dataSourceId, principal)
+      scope = manager.getScope(dataSourceId)
+      adapter = manager.getDataSource(dataSourceId)
+    } catch (err) {
+      throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+    }
+    if (!scope) {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    if (scope.tenantId !== null && scope.tenantId !== requestedTenant) {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    if (scope.tenantId === null && scope.scopeKind !== 'legacy_private') {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    if (scope.tenantId === null && runAs === 'service') {
+      throw new DataSourceUnavailableError(`Data source with id '${dataSourceId}' not found`)
+    }
+    return { adapter, manager, scope }
+  }
+
+  async function authorize(dataSourceId: string, principal: string | undefined, strict = false) {
     const owner = requirePrincipal(principal)
     const manager = getManager()
     // A dangling / not-visible binding (deleted row OR owner mismatch) is a CONFIG error, not a
@@ -392,6 +551,24 @@ export function createDataSourcePluginFacade(
         'DataSourceNotReadOnlyError'
       )
     }
+    // W-5 floor 1, `strict` only (default false — byte-identical to before this parameter existed):
+    // a sqlserver source with requestTimeoutMs=0 refuses BEFORE the connect a few lines below, so no
+    // connection is ever opened for a read that demanded a bounded timeout and cannot get one. Scoped
+    // to `type === 'sqlserver'` — MSSQLAdapter's `?? 30000` no-override-on-0 convention is the only
+    // place this exposure exists; every other dialect is unaffected regardless of `strict`.
+    if (strict) {
+      const config = adapter.getConfig()
+      if (config.type === 'sqlserver') {
+        const requestTimeoutMs = config.connection?.requestTimeoutMs
+        if (requestTimeoutMs === 0 || requestTimeoutMs === '0') {
+          throw new DataSourceBridgeConfigError(
+            DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE,
+            requestTimeoutDisabledMessage(dataSourceId),
+            'DataSourceRequestTimeoutDisabledError'
+          )
+        }
+      }
+    }
     if (!adapter.isConnected()) {
       await manager.connectDataSource(dataSourceId)
     }
@@ -399,6 +576,56 @@ export function createDataSourcePluginFacade(
   }
 
   return {
+    async resolveConnectionRegistration(dataSourceId, options) {
+      const { adapter, scope } = await resolveRegistration(dataSourceId, options)
+      return {
+        id: dataSourceId,
+        type: adapter.getType(),
+        tenantId: scope.tenantId,
+        scopeKind: scope.scopeKind,
+      }
+    },
+    async describe(dataSourceId, principal) {
+      // OWNER-ONLY (see the interface doc): `owner` is a bare principal string, so #5401's
+      // normalizeActor treats this as the data-plane shape — no platform-admin bypass. A non-owner
+      // gets the uniform not-found and the hub renders 已配置(他人管理); describe is never a side
+      // channel for a connection name the caller could not see on /data-sources.
+      //
+      // Deliberately NOT routed through `authorize`: that helper connects the adapter and enforces
+      // the read-only-source guard, both of which are wrong here. Describing a connection must not
+      // open one (a summary screen listing ten bridges would otherwise dial ten databases), and a
+      // WRITABLE data source bound to a `data-source:sql-write-gated` target is a legitimate thing
+      // for that screen to name — refusing it would blank out exactly the row an operator most
+      // needs to see. Ownership is still enforced, by the same assertAccess every read uses.
+      const owner = requirePrincipal(principal)
+      const manager = getManager()
+      let adapter
+      try {
+        manager.assertAccess(dataSourceId, owner)
+        adapter = manager.getDataSource(dataSourceId)
+      } catch (err) {
+        throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      }
+      return {
+        id: dataSourceId,
+        name: adapter.getName(),
+        type: adapter.getType(),
+        status: adapter.isConnected() ? 'connected' : 'disconnected',
+      }
+    },
+    async assertReferenceable(dataSourceId, principal) {
+      // Existence + ownership ONLY — the same two throws authorize() wraps, with the same uniform
+      // message. No read-only requirement (write-gated target bindings use writable sources), no
+      // connect (binding metadata must not dial the customer system).
+      const owner = requirePrincipal(principal)
+      const manager = getManager()
+      try {
+        manager.assertAccess(dataSourceId, owner)
+        manager.getDataSource(dataSourceId)
+      } catch (err) {
+        throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      }
+    },
     async test(dataSourceId, principal) {
       const { adapter } = await authorize(dataSourceId, principal)
       const healthy = await adapter.testConnection()
@@ -413,8 +640,8 @@ export function createDataSourcePluginFacade(
       const { adapter } = await authorize(dataSourceId, principal)
       return adapter.getTableInfo(object, schema)
     },
-    async select(dataSourceId, table, options, principal) {
-      const { manager } = await authorize(dataSourceId, principal)
+    async select(dataSourceId, table, options, principal, strict) {
+      const { manager } = await authorize(dataSourceId, principal, strict === true)
       // manager.select enforces the A5 row caps and is read-only; no write path is reachable here.
       const queryOptions: QueryOptions = {
         limit: options.limit,
@@ -427,7 +654,159 @@ export function createDataSourcePluginFacade(
       if (orderBy) {
         queryOptions.orderBy = orderBy
       }
+      // W-5 floor 2, `strict` only: forces MSSQLAdapter's own (#5243) strict-offset-ordering check
+      // on for this one call, regardless of what connection.strictOffsetOrdering is configured to.
+      // A no-op for every other dialect (nothing else reads this field) and a no-op whenever orderBy
+      // is already set or offset is absent/0 — it only ever narrows an offset>0, no-orderBy read.
+      if (strict === true) {
+        queryOptions.strictOffsetOrdering = true
+      }
       return manager.select<Record<string, DbValue>>(dataSourceId, table, queryOptions)
+    },
+  }
+}
+
+const SEALED_SQL_CONNECTION_FIELDS = new Set([
+  'database',
+  'encrypt',
+  'host',
+  'instanceName',
+  'port',
+  'server',
+  'trustServerCertificate',
+])
+const SEALED_SQL_CREDENTIAL_FIELDS = new Set(['password', 'username'])
+
+function sealedSnapshotConnectionInvalid(field: string): never {
+  throw new DataSourceBridgeConfigError(
+    DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE,
+    `data source sealed snapshot SQL Server connection field '${field}' is not representable`,
+    'DataSourceSealedSnapshotConnectionError'
+  )
+}
+
+function requiredSealedString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.trim() === '') sealedSnapshotConnectionInvalid(field)
+  // Match BaseAdapter/getStringConfig: preserve the configured string verbatim. The trim above
+  // is only an emptiness check; in particular, credentials may intentionally contain whitespace.
+  return value
+}
+
+function projectSealedSnapshotConnection(config: DataSourceConfig): DataSourceSealedSnapshotConnection {
+  if (!isPlainObject(config)) sealedSnapshotConnectionInvalid('config')
+  if (!isPlainObject(config.connection)) sealedSnapshotConnectionInvalid('connection')
+  if (!isPlainObject(config.credentials)) sealedSnapshotConnectionInvalid('credentials')
+  for (const field of Object.keys(config.connection)) {
+    if (!SEALED_SQL_CONNECTION_FIELDS.has(field)) sealedSnapshotConnectionInvalid(`connection.${field}`)
+  }
+  for (const field of Object.keys(config.credentials)) {
+    if (!SEALED_SQL_CREDENTIAL_FIELDS.has(field)) sealedSnapshotConnectionInvalid(`credentials.${field}`)
+  }
+
+  const connection = config.connection as Record<string, unknown>
+  const credentials = config.credentials as Record<string, unknown>
+  const database = requiredSealedString(connection.database, 'connection.database')
+  const username = requiredSealedString(credentials.username, 'credentials.username')
+  const password = requiredSealedString(credentials.password, 'credentials.password')
+  if (connection.encrypt !== undefined && typeof connection.encrypt !== 'boolean') {
+    sealedSnapshotConnectionInvalid('connection.encrypt')
+  }
+  if (
+    connection.trustServerCertificate !== undefined
+    && typeof connection.trustServerCertificate !== 'boolean'
+  ) {
+    sealedSnapshotConnectionInvalid('connection.trustServerCertificate')
+  }
+  // MSSQLAdapter does not consume instanceName when it builds its actual pool endpoint. Returning
+  // one here would therefore describe a different server than the adapter uses, so fail closed.
+  if (
+    Object.prototype.hasOwnProperty.call(connection, 'instanceName')
+    && connection.instanceName !== null
+    && connection.instanceName !== undefined
+  ) {
+    sealedSnapshotConnectionInvalid('connection.instanceName')
+  }
+  const instanceName = null
+
+  // Match MSSQLAdapter/getNumberConfig exactly. The shared endpoint parser deliberately coerces
+  // numeric strings, but the real adapter ignores them; accepting one here could make sealed and
+  // ordinary reads use different ports.
+  if (
+    Object.prototype.hasOwnProperty.call(connection, 'port')
+    && connection.port !== undefined
+    && typeof connection.port !== 'number'
+  ) {
+    sealedSnapshotConnectionInvalid('connection.port')
+  }
+
+  let endpoint: { server: string; port?: number }
+  try {
+    endpoint = parseSqlServerEndpoint({
+      host: connection.host,
+      server: connection.server,
+      port: connection.port,
+    })
+  } catch {
+    sealedSnapshotConnectionInvalid('connection.server/port')
+  }
+  // A named instance may also be encoded directly in the server string (host\\instance).
+  // MSSQLAdapter leaves that form to the driver, while the sealed runtime requires an explicit
+  // port-or-instance projection. Defaulting it to TCP 1433 could therefore target a different
+  // endpoint, so keep the two paths equivalent by refusing the ambiguous form.
+  if (endpoint.server.includes('\\')) {
+    sealedSnapshotConnectionInvalid('connection.server')
+  }
+  const port = endpoint.port ?? 1433
+  return Object.freeze({
+    connection: Object.freeze({
+      database,
+      encrypt: connection.encrypt === undefined ? true : connection.encrypt as boolean,
+      instanceName,
+      port,
+      server: endpoint.server,
+      trustServerCertificate:
+        connection.trustServerCertificate === undefined
+          ? true
+          : connection.trustServerCertificate as boolean,
+    }),
+    credentials: Object.freeze({ password, user: username }),
+  })
+}
+
+/**
+ * Secret-bearing capability for the sealed SQL Server snapshot runtime. This is intentionally a
+ * separate surface from DataSourceReadOnlyFacade: callers receive only the exact temporary
+ * connection projection required by the sealed runtime, never the adapter/config object.
+ */
+export function createDataSourceSealedSnapshotConnectionFacade(
+  getManager: () => DataSourceManager
+): DataSourceSealedSnapshotConnectionFacade {
+  const registrationFacade = createDataSourcePluginFacade(getManager)
+  return {
+    async resolveSqlServerConnection(dataSourceId, options) {
+      if (options?.runAs !== 'user') sealedSnapshotConnectionInvalid('runAs')
+      const registration = await registrationFacade.resolveConnectionRegistration(dataSourceId, options)
+      if (typeof registration.type !== 'string' || registration.type.toLowerCase() !== 'sqlserver') {
+        sealedSnapshotConnectionInvalid('type')
+      }
+      let adapter
+      try {
+        adapter = getManager().getDataSource(dataSourceId)
+      } catch (err) {
+        throw new DataSourceUnavailableError(err instanceof Error ? err.message : String(err))
+      }
+      const adapterType = adapter.getType()
+      if (typeof adapterType !== 'string' || adapterType.toLowerCase() !== 'sqlserver') {
+        sealedSnapshotConnectionInvalid('type')
+      }
+      if (!adapter.isReadOnly()) sealedSnapshotConnectionInvalid('readOnly')
+      let config: DataSourceConfig
+      try {
+        config = adapter.getConfig()
+      } catch {
+        sealedSnapshotConnectionInvalid('connection')
+      }
+      return projectSealedSnapshotConnection(config)
     },
   }
 }

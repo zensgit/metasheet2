@@ -63,6 +63,7 @@ const MS5_DETAIL_LEAF_ADMITTED: Readonly<Record<string, boolean>> = {
   'record-link': false,
   date_range: false,
   explanation: false,
+  department: false,
 }
 
 // MS-9 expectation table — the FE selectable condition/visibility dependency predicate.
@@ -79,6 +80,7 @@ const MS9_SELECTABLE_DEPENDENCY: Readonly<Record<string, boolean>> = {
   'record-link': false,
   date_range: false,
   explanation: false,
+  department: false,
 }
 
 describe('Lock-8 L8-A field-type census (N-1) — frontend sites', () => {

@@ -17,7 +17,10 @@ function publicTargetView(system) {
 const HTTP_ROUTES_PATH = path.join(__dirname, '..', 'lib', 'http-routes.cjs')
 const httpRoutes = require(HTTP_ROUTES_PATH)
 const { MAX_LIST_LIMIT } = httpRoutes
-const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+const {
+  LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS,
+  PLM_STOCK_PREPARATION_ACTION_ID,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
 const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'lib', 'read-smoke-marker.cjs'))
@@ -539,7 +542,10 @@ function mountRoutes(services, contextOptions = {}) {
   const registered = registerRoutes({
     context,
     services,
-    logger: {
+    // `contextOptions.logger` lets a test observe what `routeLogger` (http-routes.cjs ~:3545) is
+    // actually WIRED INTO downstream modules with — a no-op default here would make that wiring
+    // untestable by construction. See `testLargeBomJobRunWiresRouteLoggerIntoFailedRunWarn`.
+    logger: contextOptions.logger || {
       warn() {},
       error() {},
       info() {},
@@ -547,6 +553,18 @@ function mountRoutes(services, contextOptions = {}) {
   })
 
   return { routes, registered }
+}
+
+function createRecordingLogger() {
+  const warnCalls = []
+  return {
+    warnCalls,
+    warn(message, payload) {
+      warnCalls.push([message, payload])
+    },
+    error() {},
+    info() {},
+  }
 }
 
 function clone(value) {
@@ -578,12 +596,21 @@ function createResponse() {
 async function invoke(routes, method, routePath, req = {}) {
   const route = getRoute(routes, method, routePath)
   const res = createResponse()
+  // `req.authenticatedTenantId` is the host's VERIFIED token claim, set by jwt-middleware ONLY when
+  // the token actually carries a tenant. It is passed through VERBATIM — absent means "claimless
+  // token". There is deliberately NO default derived from `user.tenantId`: two readers of this field
+  // are enforcement inputs (`resolveVerifiedClaimTenantId`, which is not flag-gated, and
+  // `resolveOperatorValueScope`), so a fabricated default would let a future test in this file pass
+  // a verified-claim gate it never actually satisfied. Tests that model a claim-bearing token name
+  // the claim explicitly.
+  const authenticatedTenantId = req.authenticatedTenantId
   await route.handler({
     user: req.user,
     authUser: req.authUser,
     body: req.body || {},
     query: req.query || {},
     params: req.params || {},
+    authenticatedTenantId,
   }, res)
   assert.notEqual(res.body, undefined, `${method} ${routePath} produced a JSON body`)
   return res
@@ -812,7 +839,57 @@ async function testExternalSystemRoutes() {
     role: 'target',
     status: 'active',
     credentials: { token: 'secret' },
+    // P2-A: the route attaches the AUTHENTICATED principal (never a body value) so the
+    // registry can validate + attribute a config.dataSourceId binding.
+    principal: 'user_write',
+    runAs: 'user',
   })
+
+  const canonicalSqlBody = {
+    id: 'sys_sql_canonical',
+    workspaceId: 'workspace_1',
+    name: 'Canonical SQL source',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    connectionId: 'connection_1',
+    config: { schema: 'dbo' },
+  }
+  const canonicalSqlCallCount = findCalls(calls, 'upsertExternalSystem').length
+  res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+    user: WRITE_USER,
+    body: canonicalSqlBody,
+  })
+  assertOkResponse(res, 201)
+  assert.deepEqual(findCalls(calls, 'upsertExternalSystem')[canonicalSqlCallCount][1], {
+    ...canonicalSqlBody,
+    principal: 'user_write',
+    runAs: 'user',
+    tenantId: 'tenant_1',
+  }, 'integration:write may author a canonical SQL binding in its authenticated tenant')
+
+  const readOnlyCanonicalSql = await invoke(routes, 'POST', '/api/integration/external-systems', {
+    user: READ_USER,
+    body: canonicalSqlBody,
+  })
+  assertErrorResponse(readOnlyCanonicalSql, [403])
+  assert.equal(
+    findCalls(calls, 'upsertExternalSystem').length,
+    canonicalSqlCallCount + 1,
+    'integration:read never reaches canonical SQL binding persistence',
+  )
+
+  const crossTenantCanonicalSql = await invoke(routes, 'POST', '/api/integration/external-systems', {
+    user: WRITE_USER,
+    body: { ...canonicalSqlBody, tenantId: 'tenant_other' },
+  })
+  assertErrorResponse(crossTenantCanonicalSql, [403])
+  assert.equal(crossTenantCanonicalSql.body.error.code, 'TENANT_MISMATCH')
+  assert.equal(
+    findCalls(calls, 'upsertExternalSystem').length,
+    canonicalSqlCallCount + 1,
+    'request-body tenant steering never reaches canonical SQL binding persistence',
+  )
 
   res = await invoke(routes, 'GET', '/api/integration/external-systems/:id', {
     user: READ_USER,
@@ -850,6 +927,8 @@ async function testExternalSystemRoutes() {
   assertOkResponse(res, 200)
   assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
     id: 'sys_2',
+    principal: 'user_write',
+    runAs: 'user',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
   })
@@ -859,8 +938,9 @@ async function testExternalSystemRoutes() {
   assert.equal(res.body.data.system.credentials, undefined, 'test response system does not leak credentials')
   assert.equal(res.body.data.system.credentialsEncrypted, undefined, 'test response system does not leak ciphertext')
   const statusUpdates = findCalls(calls, 'upsertExternalSystem')
-  assert.equal(statusUpdates.length, 2, 'external system create plus test status update were persisted')
-  assert.deepEqual(statusUpdates[1][1], {
+  assert.equal(statusUpdates.length, 3, 'two external system creates plus test status update were persisted')
+  const testStatusUpdate = statusUpdates[statusUpdates.length - 1][1]
+  assert.deepEqual(testStatusUpdate, {
     id: 'sys_2',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
@@ -869,10 +949,10 @@ async function testExternalSystemRoutes() {
     kind: 'erp',
     role: 'target',
     status: 'active',
-    lastTestedAt: statusUpdates[1][1].lastTestedAt,
+    lastTestedAt: testStatusUpdate.lastTestedAt,
     lastError: null,
   })
-  assert.ok(!Number.isNaN(Date.parse(statusUpdates[1][1].lastTestedAt)), 'test status update stores ISO timestamp')
+  assert.ok(!Number.isNaN(Date.parse(testStatusUpdate.lastTestedAt)), 'test status update stores ISO timestamp')
 
   calls.length = 0
   const { routes: conflictRoutes } = mountRoutes(createMockServices({
@@ -1092,6 +1172,8 @@ async function testExternalSystemTestRequiresSavedSystem() {
   assertErrorResponse(res, [404])
   assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
     id: 'missing_sys',
+    principal: 'user_write',
+    runAs: 'user',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
   })
@@ -1247,11 +1329,16 @@ async function testDiscoveryRoutes() {
       requiresTableAllowlist: true,
       allowlistKeys: ['readTables', 'allowedTables'],
     },
+    // E4 / G-4 PARITY (20260901). This used to publish `requiresMiddleTableMode: true` plus a
+    // `middle-table` write mode and a write allowlist — i.e. the public adapter listing told an
+    // integrator that configuring the channel a particular way made K3 SQL writes work. It did,
+    // and that was the doctrine gap. `erp:k3-wise-sqlserver` is now a subject of the permanent
+    // K3 external-write ban, so the listing states a refusal instead of a recipe. The READ
+    // guardrail above is deliberately unchanged: the read path is legitimate and in use.
     write: {
-      requiresMiddleTableMode: true,
-      requiresTableAllowlist: true,
-      allowlistKeys: ['writeTables', 'allowedTables'],
-      writeModes: ['middle-table'],
+      permanentlyRefused: true,
+      refusalCode: 'K3_WISE_EXTERNAL_WRITE_DISABLED',
+      authority: 'E4',
     },
     ui: {
       hiddenByDefault: true,
@@ -1335,6 +1422,8 @@ async function testDiscoveryRoutes() {
   assertOkResponse(res, 200)
   assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
     id: 'crm_1',
+    principal: 'user_read',
+    runAs: 'user',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
   })
@@ -1448,6 +1537,8 @@ async function testDiscoveryRoutesRejectUnknownSystem() {
   assert.equal(res.body.error.code, 'ExternalSystemNotFoundError')
   assert.deepEqual(findCall(calls, 'getExternalSystemForAdapter')[1], {
     id: 'missing_sys',
+    principal: 'user_read',
+    runAs: 'user',
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
   })
@@ -1673,6 +1764,7 @@ async function testPipelineRoutes() {
     mode: 'manual',
     pipelineId: 'pipe_1',
     triggeredBy: 'api',
+    runAs: 'user',
   })
   assert.equal('allowInactive' in runCall[1], false)
   assert.equal('sourceRecords' in runCall[1], false)
@@ -1692,6 +1784,7 @@ async function testPipelineRoutes() {
   const dryRunCall = findCalls(calls, 'runPipeline')[1]
   assert.equal(dryRunCall[1].pipelineId, 'pipe_1')
   assert.equal(dryRunCall[1].triggeredBy, 'api')
+  assert.equal(dryRunCall[1].runAs, 'user')
   assert.equal(dryRunCall[1].dryRun, true)
   assert.equal(dryRunCall[1].sampleLimit, 2)
   assert.equal(res.body.data.metrics.rowsWritten, 0, 'dry-run response does not report target writes')
@@ -3260,6 +3353,7 @@ async function testRunAndDeadLetterRoutes() {
     mode: 'replay',
     id: 'dl_1',
     triggeredBy: 'api',
+    runAs: 'user',
   })
   assert.equal('allowInactive' in findCall(calls, 'replayDeadLetter')[1], false)
   assert.equal('sourceRecords' in findCall(calls, 'replayDeadLetter')[1], false)
@@ -4250,7 +4344,31 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(res.body.data.ready, true)
   assert.equal(res.body.data.mode, 'sandbox_create')
   assert.equal(res.body.data.targetBindingAvailable, true)
-  assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'targetBinding'), false, 'sandbox route never exposes target binding')
+  // THE BINDING THE DEPLOYER MUST PASTE. This route is the sanctioned generator: the 222 window
+  // runbook tells an operator to run it and paste the resulting `target` into the table-action
+  // config, and until it returned one that instruction dead-ended.
+  //
+  // WHY RETURNING IT IS NOT A LEAK, given this route used to hide it:
+  //   * `objectId` is the caller's OWN request body (see the call above) — handing back an input is
+  //     not disclosure;
+  //   * `sheetId` and every `fieldIdMap` entry are pure functions of (projectId, objectId), both
+  //     caller-supplied, and scripts/ops/stock-preparation-derive-target-binding.mjs prints all 33
+  //     of them offline with no authentication at all;
+  //   * the canonical sibling route already returns exactly this shape, at exactly this admin tier
+  //     (publicStockPreparationTargetResult). The asymmetry was the anomaly.
+  // The values-free EVIDENCE channel is untouched below — still hashed, still carrying no option
+  // values or labels — because that channel travels further than this response does.
+  assert.ok(res.body.data.targetBinding, 'sandbox ensure returns the binding it created')
+  assert.equal(res.body.data.targetBinding.sheetId, 'sheet_stock_canonical_created')
+  assert.equal(res.body.data.targetBinding.objectId, sandboxObjectId)
+  assert.equal(res.body.data.targetBinding.keyField, 'idempotencyKey')
+  assert.ok(
+    Object.keys(res.body.data.targetBinding.fieldIdMap).length >= 33,
+    'sandbox ensure returns the WHOLE fieldIdMap, human columns included — a partial map is what the carry blocker exists to catch',
+  )
+  for (const humanField of ['notes', 'procurementReply', 'warehouseDone', 'actualArrivalDate']) {
+    assert.ok(res.body.data.targetBinding.fieldIdMap[humanField], `sandbox ensure binds ${humanField}`)
+  }
   assert.equal(res.body.data.evidence.fieldMapMode, 'sandbox')
   assert.equal(res.body.data.evidence.target.fieldIdMapEmpty, false)
   assert.ok(res.body.data.evidence.objectIdHash, 'sandbox route returns object hash evidence')
@@ -4258,8 +4376,10 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.ok(res.body.data.optionSync.target.objectIdHash, 'sandbox option sync returns target hash evidence')
   assert.equal(Object.prototype.hasOwnProperty.call(res.body.data.optionSync.target, 'objectId'), false)
   assert.equal(res.body.data.optionSync.evidence.fields.length, 4, 'sandbox route seeds contract + three config_info option fields')
-  assert.equal(JSON.stringify(res.body.data).includes(sandboxObjectId), false, 'sandbox route response hides object id')
-  assert.equal(JSON.stringify(res.body.data).includes('sheet_stock_canonical_created'), false, 'sandbox route response hides sheet id')
+  // The EVIDENCE half stays values-free and identifier-free: it is the half that ends up in issue
+  // reports and support threads, and it still hashes the objectId rather than naming it.
+  assert.equal(JSON.stringify(res.body.data.evidence).includes(sandboxObjectId), false, 'sandbox evidence hides object id')
+  assert.equal(JSON.stringify(res.body.data.evidence).includes('sheet_stock_canonical_created'), false, 'sandbox evidence hides sheet id')
   assert.equal(JSON.stringify(res.body.data).includes('plate'), false, 'sandbox route response hides option values')
   assert.equal(JSON.stringify(res.body.data).includes('Casting'), false, 'sandbox route response hides option labels')
   const sandboxEnsureCall = findCalls(sandboxProvisioning.calls, 'ensureObject')[0]
@@ -5276,8 +5396,24 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.statusCode, 400)
   assert.equal(res.body.error.code, 'TABLE_ACTION_REQUEST_INVALID', 'run rejects browser-supplied source scope')
 
+  // A STORED JOB IS RUN BY ITS OWN CREATOR (#5460 round-2 C4). Every scope this route uses comes
+  // from the stored artifact — including the identity the customer-source read is performed under —
+  // so letting any caller who can reach the route drive somebody else's job meant driving it under
+  // somebody else's data-source ownership. That was latent while only `integration:*` holders could
+  // reach it; the stock-prep operator split admitted a new tier and made it reachable. The scope
+  // guarantee below is UNCHANGED and still asserted — the run still reads as the job's stored
+  // principal, never as the triggering request user — it is now simply also true that the triggering
+  // user must BE the creator.
   res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
     user: OTHER_READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assert.equal(res.statusCode, 403, 'a stored large-BOM job is not runnable by another user')
+  assert.equal(res.body.error.code, 'LARGE_BOM_JOB_ACTOR_MISMATCH')
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'and it is refused before any adapter is created')
+
+  res = await invoke(mount.routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: READ_USER,
     params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
   })
   assertOkResponse(res, 200)
@@ -5285,6 +5421,22 @@ async function testLargeBomBackgroundExpansionJobRoutes() {
   assert.equal(res.body.data.authoritative, true)
   assert.equal(res.body.data.artifactRevisionPresent, true)
   assert.equal(res.body.data.progress.rowsExpanded, 1)
+  // THE BACKGROUND LANE GOT ITS OWN CAPS. This action names no caps, so the
+  // background numbers are the expander's interactive defaults (10000 rows /
+  // 100 pages) times the background multipliers — NOT the interactive defaults
+  // themselves, which is what shipped before and made every project large
+  // enough to need this lane fail inside it.
+  assert.deepEqual(res.body.data.budgets, {
+    maxRows: 10000 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxRows,
+    maxPages: 100 * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS.maxPages,
+    // `null`, not 0: this action bounds neither reads nor elapsed time
+    // interactively, so the background lane inherits "no bound" — and a 0 here
+    // would read as "the bound is zero".
+    maxReadCount: null,
+    maxElapsedMs: null,
+    maxDepth: 20,
+    maxArtifactChunks: 1,
+  }, 'the run route hands the worker the background caps, not the interactive ones')
   assert.equal(JSON.stringify(res.body.data).includes('P-001'), false, 'run response is values-free')
   assert.equal(JSON.stringify(res.body.data).includes('A-001'), false, 'run response hides component code')
   const adapterCall = findCalls(calls, 'createAdapter').at(-1)
@@ -5553,6 +5705,84 @@ async function testLargeBomDurableStorageFailureIsValuesFree() {
   assert.equal(responseText.includes('stock-preparation:large-bom'), false, 'durable storage failure hides storage keys')
   assert.equal(calls.length, 0, 'durable storage failure fails before source adapter work')
   assert.equal(records.calls.length, 0, 'durable storage failure fails before target reads/writes')
+}
+
+// #5514 adversarial review: `stock-preparation-large-bom-jobs.test.cjs` proves `logLargeBomJobFailure`
+// itself end to end, but every one of those tests calls the module directly with a hand-built
+// `logger` — none of them touch http-routes.cjs at all. Nothing anywhere asserted that the ROUTE
+// actually forwards `routeLogger` into the module's `logger` option (http-routes.cjs's
+// `runLargeBomBackgroundExpansionJob` call site, `logger: routeLogger,`). Deleting that one line
+// left every other suite in the repo green — this test is the guard: it fails the moment that
+// wiring goes missing, because with no logger reaching the module `logLargeBomJobFailure` returns
+// before calling `warn` at all.
+async function testLargeBomJobRunWiresRouteLoggerIntoFailedRunWarn() {
+  const records = createTableActionRecordsApi()
+  const leakyMessage = 'mssql read failed for PART_VALUE_SHOULD_NOT_APPEAR'
+  const { services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: input.workspaceId,
+          name: 'Readonly PLM SQL',
+          kind: 'data-source:sql-readonly',
+          role: 'source',
+          status: 'active',
+          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        return {
+          async read() {
+            const error = new Error(leakyMessage)
+            error.code = 'ECONNRESET'
+            throw error
+          },
+        }
+      },
+    },
+  })
+  const logger = createRecordingLogger()
+  const { routes } = mountRoutes(services, {
+    recordsApi: records.recordsApi,
+    storage: createDurableMemoryStorage(),
+    config: { stockPreparationTableActions: [tableActionConfig()] },
+    logger,
+  })
+
+  let res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID },
+    body: { parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' } },
+  })
+  assertOkResponse(res, 202)
+  const jobId = res.body.data.jobId
+  assert.equal(logger.warnCalls.length, 0, 'queuing a job does not warn')
+
+  res = await invoke(routes, 'POST', '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run', {
+    user: READ_USER,
+    params: { actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(res.body.data.status, 'failed', 'the adapter throw fails the run')
+
+  assert.equal(logger.warnCalls.length, 1, 'the route-wired logger receives exactly one warn for the failed run')
+  const [message, payload] = logger.warnCalls[0]
+  assert.equal(typeof message, 'string')
+  assert.equal(message.includes('failed'), true)
+  assert.equal(payload.jobId, jobId)
+  assert.equal(payload.actionId, PLM_STOCK_PREPARATION_ACTION_ID)
+  assert.equal(payload.status, 'failed')
+  assert.deepEqual(payload.errorTypes, ['read_failed'])
+
+  const serialized = JSON.stringify(payload)
+  assert.equal(serialized.includes('PROJECT_VALUE_SHOULD_NOT_APPEAR'), false, 'the project number never reaches the routed warn payload')
+  assert.equal(serialized.includes(leakyMessage), false, 'the driver message text never reaches the routed warn payload')
+  assert.equal(serialized.includes('cursor'), false)
+  assert.equal('message' in payload, false, 'no key named message ever mounts')
 }
 
 async function testTableActionConflictPolicyRoutes() {
@@ -9017,6 +9247,7 @@ async function main() {
   await testLargeBomBackgroundExpansionJobRoutes()
   await testLargeBomBackgroundExpansionJobsSurviveDurableRouteRemount()
   await testLargeBomDurableStorageFailureIsValuesFree()
+  await testLargeBomJobRunWiresRouteLoggerIntoFailedRunWarn()
   await testTableActionConflictPolicyRoutes()
   await testTableActionRoutesSupportExplicitBridgeSource()
   await testTableActionRoutesUseConfiguredSourceWorkspaceScope()
@@ -9050,6 +9281,9 @@ async function main() {
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
+  await testExternalSystemTestSavesUnderMatchedScope()
+  await testSqlBindingUpsertRequiresVerifiedTenantClaimWhenFlagOn()
+  await testSqlBindingUpsertDerivesTenantFromPrincipalOnly()
   await testExternalSystemTestRequiresSavedSystem()
   await testExternalSystemTestRedactsAdapterResultSecrets()
   await testDiscoveryRoutes()
@@ -9351,3 +9585,337 @@ main().catch((err) => {
   console.error(err)
   process.exit(1)
 })
+
+// --- test-connection persists under the ROW's scope, not the caller's workspace hint ------------
+//
+// #5471 let the by-id reads fall back from a workspace hint to the same tenant's tenant-wide row.
+// The test-connection route then wrote its status update under the REQUEST scope, missed
+// `findExisting` (writes are exact-scope by design) and took the INSERT branch: "connectionId is
+// required" for a canonical SQL binding, a duplicate-id insert for everything else. The write must
+// land on the row that was actually read.
+async function testExternalSystemTestSavesUnderMatchedScope() {
+  // (a) Mock registry: the loaded system is tenant-wide (workspaceId null) while the request
+  //     carries a workspace hint. The write must use the row's scope.
+  const { calls, services } = createMockServices({
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        calls.push(['getExternalSystemForAdapter', input])
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          workspaceId: null,
+          projectId: null,
+          name: 'Tenant-wide ERP',
+          kind: 'erp',
+          role: 'target',
+          status: 'error',
+          credentials: { bearerToken: 'secret-token' },
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(input) {
+        calls.push(['createAdapter', input])
+        return {
+          async testConnection() {
+            calls.push(['testConnection'])
+            return { ok: true, status: 200 }
+          },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+  const res = await invoke(routes, 'POST', '/api/integration/external-systems/:id/test', {
+    user: WRITE_USER,
+    params: { id: 'sys_tenant_wide' },
+    query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(res, 200)
+  assert.equal(findCall(calls, 'getExternalSystemForAdapter')[1].workspaceId, 'workspace_1',
+    'the read still carries the caller hint — the registry owns the fallback decision')
+  const saved = findCall(calls, 'upsertExternalSystem')[1]
+  assert.equal(saved.workspaceId, null, 'the status write targets the row\'s own (tenant-wide) scope, not the hint')
+  assert.equal(saved.tenantId, 'tenant_1')
+  assert.equal(saved.id, 'sys_tenant_wide')
+  assert.equal(saved.status, 'active')
+
+  // (b) Real registry round trip over an in-memory db: read via hint -> test -> save lands on the
+  //     SAME row, with no duplicate insert, for both failure shapes the bug produced (an HTTP row and
+  //     a canonical SQL binding).
+  const { createExternalSystemRegistry } = require(path.join(__dirname, '..', 'lib', 'external-systems.cjs'))
+  const { createConnectionResolver } = require(path.join(__dirname, '..', 'lib', 'connection-resolver.cjs'))
+  const rows = []
+  const matchesWhere = (row, where) => Object.entries(where || {}).every(([key, value]) => {
+    if (value === null || value === undefined) return row[key] === null || row[key] === undefined
+    return row[key] === value
+  })
+  const db = {
+    async selectOne(table, where) { return rows.find((row) => matchesWhere(row, where)) || null },
+    async insertOne(table, row) { const stored = { ...row, created_at: '2026-09-01T00:00:00.000Z', updated_at: '2026-09-01T00:00:00.000Z' }; rows.push(stored); return [stored] },
+    async updateRow(table, set, where) { const row = rows.find((candidate) => matchesWhere(candidate, where)); if (!row) return []; Object.assign(row, set, { updated_at: '2026-09-01T01:00:00.000Z' }); return [row] },
+    async select(table, options = {}) { return rows.filter((row) => matchesWhere(row, options.where || {})) },
+    async countRows(table, where) { return rows.filter((row) => matchesWhere(row, where)).length },
+    async deleteRows(table, where) { const before = rows.length; for (let i = rows.length - 1; i >= 0; i -= 1) { if (matchesWhere(rows[i], where)) rows.splice(i, 1) } return before - rows.length },
+  }
+  const credentialStore = {
+    source: 'host-security',
+    format: 'enc',
+    async encrypt(value) { return `enc:${Buffer.from(value, 'utf8').toString('base64')}` },
+    async decrypt(value) { return Buffer.from(value.slice(4), 'base64').toString('utf8') },
+    async fingerprint(value) { return `fp_${Buffer.from(value).toString('hex').slice(0, 13)}` },
+  }
+  const registry = createExternalSystemRegistry({
+    db,
+    credentialStore,
+    idGenerator: () => 'unused',
+    // The REAL resolver over a stub host facade, so the canonical SQL binding takes the production
+    // producer path (cloneBinding/adapterBinding spreads) before the route persists the result.
+    connectionResolver: createConnectionResolver({
+      facade: {
+        async resolveConnectionRegistration(id, context) {
+          return { id, tenantId: context.tenantId, type: 'sqlserver', scopeKind: 'private' }
+        },
+      },
+    }),
+  })
+  const base = {
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    project_id: null,
+    role: 'source',
+    credentials_encrypted: null,
+    capabilities: {},
+    status: 'error',
+    last_tested_at: null,
+    last_error: 'previous failure',
+    created_at: '2026-09-01T00:00:00.000Z',
+    updated_at: '2026-09-01T00:00:00.000Z',
+  }
+  rows.push(
+    { ...base, id: 'sys_http_tw', name: 'Tenant-wide HTTP', kind: 'http', config: { baseUrl: 'https://tenant-wide.example.test' } },
+    { ...base, id: 'sys_sql_tw', name: 'Tenant-wide SQL', kind: 'data-source:sql-readonly', connection_id: 'connection_1', legacy_connection_fallback_eligible: false, config: { schema: 'dbo' } },
+  )
+  const { services: realServices } = createMockServices({
+    externalSystemRegistry: registry,
+    adapterRegistry: {
+      createAdapter() {
+        return { async testConnection() { return { ok: true, status: 200 } } }
+      },
+    },
+  })
+  const { routes: realRoutes } = mountRoutes(realServices)
+  for (const id of ['sys_http_tw', 'sys_sql_tw']) {
+    const roundTrip = await invoke(realRoutes, 'POST', '/api/integration/external-systems/:id/test', {
+      user: WRITE_USER,
+      params: { id },
+      query: { workspaceId: 'workspace_1' },
+    })
+    assertOkResponse(roundTrip, 200)
+    assert.equal(roundTrip.body.data.ok, true, `${id}: the connection test itself succeeds`)
+    const stored = rows.filter((row) => row.id === id)
+    assert.equal(stored.length, 1, `${id}: no duplicate row was inserted under the hint scope`)
+    assert.equal(stored[0].workspace_id, null, `${id}: the row keeps its tenant-wide scope`)
+    assert.equal(stored[0].status, 'active', `${id}: the tested status landed on the row that was read`)
+    assert.equal(stored[0].last_error, null, `${id}: a successful test clears the previous error`)
+    assert.ok(typeof stored[0].last_tested_at === 'string' && !Number.isNaN(Date.parse(stored[0].last_tested_at)), `${id}: last_tested_at was recorded`)
+  }
+  assert.equal(rows.find((row) => row.id === 'sys_sql_tw').connection_id, 'connection_1',
+    'the canonical SQL binding keeps its connection_id through a status-only update')
+  assert.equal(rows.length, 2, 'exactly the two seeded rows remain')
+}
+
+// W4 (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED) applied to the canonical SQL-binding write path:
+// `POST /api/integration/external-systems` with `kind: 'data-source:sql-readonly'` calls
+// `scopedAuthenticatedWriteInput` -> `resolveAuthenticatedWriteTenantId` -> `resolveAuthUserTenantId`,
+// which resolves the tenant from `user.tenantId` and then hands it to `assertVerifiedTenantClaim`.
+// With the flag OFF (default, tested in (d) below) that assertion is a no-op and `user.tenantId` is
+// trusted outright — including a value the jwt-middleware only put there because a claimless-token
+// caller sent an `x-tenant-id` header. With the flag ON (a)-(c) below, a write whose tenant cannot be
+// traced to `req.authenticatedTenantId` (the VERIFIED token claim) is refused before
+// `upsertExternalSystem` is ever called.
+// Shared by the W4 tests below: run `fn` with the flag in a known state and restore it exactly.
+const TENANT_CLAIM_FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+
+/** Run `fn` with the flag in a known state, and leave the environment exactly as it was found. */
+async function withTenantClaimFlag(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, TENANT_CLAIM_FLAG)
+  const previous = process.env[TENANT_CLAIM_FLAG]
+  if (value === null) delete process.env[TENANT_CLAIM_FLAG]
+  else process.env[TENANT_CLAIM_FLAG] = value
+  try {
+    return await fn()
+  } finally {
+    if (had) process.env[TENANT_CLAIM_FLAG] = previous
+    else delete process.env[TENANT_CLAIM_FLAG]
+  }
+}
+
+async function testSqlBindingUpsertRequiresVerifiedTenantClaimWhenFlagOn() {
+
+  // Same shape as the `canonicalSqlBody` fixture above — no credentials in the body. `config` carries
+  // no private key (the only one for this kind is `lookupProjection`), so `hasPrivateConfigMutation`
+  // returns FALSE and the route takes the integration:write `data-source:sql-readonly` branch, not the
+  // admin private-config branch.
+  const SQL_BINDING_BODY = {
+    id: 'sys_sql_tenant_claim_probe',
+    workspaceId: 'workspace_1',
+    name: 'Tenant claim probe SQL source',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    connectionId: 'connection_1',
+    config: { schema: 'dbo' },
+  }
+
+  // (a) Flag ON. `user.tenantId` is header-filled ('attacker-tenant', simulating a claimless token
+  //     whose x-tenant-id header the middleware copied onto the user object) and the request also
+  //     echoes that tenant on the query string. `authenticatedTenantId` is named explicitly as
+  //     `undefined` so `invoke()` passes NO verified claim through, rather than applying its
+  //     claim-bearing-token default. The write must be refused before the registry is ever reached.
+  await withTenantClaimFlag('true', async () => {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: { ...TENANTLESS_ADMIN, tenantId: 'attacker-tenant' },
+      authenticatedTenantId: undefined,
+      query: { tenantId: 'attacker-tenant' },
+      body: SQL_BINDING_BODY,
+    })
+    assertErrorResponse(res, [403])
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_REQUIRED',
+      'a sql-readonly binding write from a claimless caller is refused once the tenant-claim door is on')
+    assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0,
+      'the write never reaches the registry when the tenant claim is missing')
+  })
+
+  // (b) Flag ON. A real verified token: `authenticatedTenantId` names the claim explicitly and it
+  //     agrees with the carried `user.tenantId` (which is what jwt-middleware produces for a
+  //     claim-bearing token). The write proceeds and persists under that tenant.
+  await withTenantClaimFlag('true', async () => {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: { ...ADMIN_USER },
+      authenticatedTenantId: 'tenant_1',
+      body: SQL_BINDING_BODY,
+    })
+    assertOkResponse(res, 201)
+    const saved = findCall(calls, 'upsertExternalSystem')[1]
+    assert.equal(saved.tenantId, 'tenant_1', 'a verified-claim caller authors the binding under its own tenant')
+  })
+
+  // (c) Flag ON. `authenticatedTenantId` ('tenant_2') is named explicitly and disagrees with
+  //     `user.tenantId` ('tenant_1'). Traced against `assertVerifiedTenantClaim`: its SECOND check
+  //     (`carried && carried !== claimed`) refuses with OPERATOR_SCOPE_TENANT_CONTRADICTED. The third
+  //     check (resolved tenant vs. claim, OPERATOR_SCOPE_TENANT_MISMATCH) is structurally UNREACHABLE
+  //     from this call site — `resolveAuthUserTenantId` passes the very `user.tenantId` the second
+  //     check already compared. Note the repo's own jwt-middleware cannot produce carried != claimed
+  //     (it derives the claim from `user.tenantId` BEFORE the header fill, which only runs when that
+  //     field is empty); this sub-case pins the guard's defense in depth against any other producer.
+  await withTenantClaimFlag('true', async () => {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: { ...ADMIN_USER },
+      authenticatedTenantId: 'tenant_2',
+      body: SQL_BINDING_BODY,
+    })
+    assertErrorResponse(res, [403])
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+      'a carried tenant that disagrees with the verified claim is refused before any mismatch check runs')
+    assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0,
+      'the write never reaches the registry when the carried tenant contradicts the claim')
+  })
+
+  // (d) Flag OFF (the default). THE SAME claimless + header-echoed request as (a) — but this records
+  //     the CURRENT, deliberately staged pre-cutover posture: with the door shut, `user.tenantId` is
+  //     trusted outright and the write succeeds under the header-filled tenant. This is exactly what
+  //     the flag exists to narrow (see its own comment in http-routes.cjs). If this assertion ever
+  //     needs to change — i.e. the default flips to ON — that must be a DELIBERATE edit to this test,
+  //     not a silent side effect of some other change.
+  await withTenantClaimFlag(null, async () => {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: { ...TENANTLESS_ADMIN, tenantId: 'attacker-tenant' },
+      authenticatedTenantId: undefined,
+      query: { tenantId: 'attacker-tenant' },
+      body: SQL_BINDING_BODY,
+    })
+    assertOkResponse(res, 201)
+    const saved = findCall(calls, 'upsertExternalSystem')[1]
+    assert.equal(saved.tenantId, 'attacker-tenant',
+      'W4 OFF (default staged posture): a header-filled tenant is trusted outright — narrowing this is the flag\'s entire purpose')
+  })
+}
+
+// --- SQL-binding upsert derives its tenant from the PRINCIPAL on both branches ------------------
+//
+// Independent of the W4 door: the two branches that persist a `data-source:sql-readonly` row (the
+// admin private-config branch and the integration:write canonical branch) both go through
+// `scopedAuthenticatedWriteInput`, never `scopedInput`. The difference is load-bearing:
+// `resolveTenantId` (behind `scopedInput`) honors a REQUEST-supplied tenant for a tenantless platform
+// admin, while `resolveAuthUserTenantId` fail-closes on it. A mutant that downgrades either branch to
+// `scopedInput` would let a tenantless platform admin author a SQL binding into any tenant it names.
+async function testSqlBindingUpsertDerivesTenantFromPrincipalOnly() {
+  const body = {
+    id: 'sys_sql_principal_probe',
+    workspaceId: 'workspace_1',
+    name: 'Principal-only tenant probe SQL source',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    connectionId: 'connection_1',
+    config: { schema: 'dbo' },
+  }
+
+  // (e) Flag OFF (default). A tenantless platform admin names a target tenant on the body AND the
+  //     query. The canonical (integration:write) branch must refuse 400 TENANT_REQUIRED with no
+  //     write — this is the assertion that pins `scopedAuthenticatedWriteInput` on that branch.
+  {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: TENANTLESS_ADMIN,
+      query: { tenantId: 'tenant_other' },
+      body: { ...body, tenantId: 'tenant_other' },
+    })
+    assertErrorResponse(res, [400])
+    assert.equal(res.body.error.code, 'TENANT_REQUIRED',
+      'a tenantless platform admin cannot steer a canonical SQL binding into a request-named tenant')
+    assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'no write reaches the registry')
+  }
+
+  // (e2) A tenant-bound admin carrying a DIFFERENT explicit tenant is refused as a mismatch, not
+  //      silently re-scoped.
+  {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: ADMIN_USER,
+      authenticatedTenantId: 'tenant_1',
+      body: { ...body, tenantId: 'tenant_other' },
+    })
+    assertErrorResponse(res, [403])
+    assert.equal(res.body.error.code, 'TENANT_MISMATCH', 'an explicit tenant that contradicts the principal is refused')
+    assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'no write reaches the registry')
+  }
+
+  // (f) The OTHER entry to the same row: a body whose config carries the private `lookupProjection`
+  //     key takes the admin private-config branch first. With the W4 door ON and a claimless caller,
+  //     that branch must refuse exactly like the canonical one.
+  await withTenantClaimFlag('true', async () => {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/external-systems', {
+      user: { ...TENANTLESS_ADMIN, tenantId: 'attacker-tenant' },
+      authenticatedTenantId: undefined,
+      body: { ...body, config: { schema: 'dbo', lookupProjection: { object: 'dbo.Item', keyFields: ['id'] } } },
+    })
+    assertErrorResponse(res, [403])
+    assert.equal(res.body.error.code, 'OPERATOR_SCOPE_TENANT_REQUIRED',
+      'the private-config branch is behind the same tenant-claim door')
+    assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'no write reaches the registry')
+  })
+}

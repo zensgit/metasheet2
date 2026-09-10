@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceGroupEffectivePolicyPanel from '../src/views/attendance/AttendanceGroupEffectivePolicyPanel.vue'
 import { apiFetch } from '../src/utils/api'
+import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 
 const pushSpy = vi.fn()
 vi.mock('vue-router', async () => {
@@ -133,8 +134,9 @@ describe('AttendanceGroupEffectivePolicyPanel', () => {
     container = null
   })
 
-  function mount(): void {
+  function mount(guard = createAttendanceSessionGuard('synthetic-org', () => 'synthetic-epoch')): void {
     app = createApp(AttendanceGroupEffectivePolicyPanel, { groupId: GROUP_ID, returnTo: RETURN_TO })
+    app.provide(attendanceSessionGuardKey, guard)
     app.mount(container!)
   }
 
@@ -149,6 +151,45 @@ describe('AttendanceGroupEffectivePolicyPanel', () => {
     expect(container!.querySelector('[data-attendance-w6-effective-policy-panel][data-attendance-w6-effective-policy-status="idle"]')).toBeTruthy()
     expect(apiFetch).not.toHaveBeenCalled()
     expect(container!.querySelector('[data-attendance-w6-effective-policy-open]')).toBeTruthy()
+  })
+
+  it('preserves idle state and sends nothing when an old page opens the panel', async () => {
+    const guard = createAttendanceSessionGuard('synthetic-org', () => 'synthetic-epoch')
+    mount(guard)
+    guard.invalidate()
+    click('[data-attendance-w6-effective-policy-open]')
+    await flushUi()
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-status="idle"]')).toBeTruthy()
+  })
+
+  it('does not render a late body or overwrite state from a stale catch', async () => {
+    const guard = createAttendanceSessionGuard('synthetic-org', () => 'synthetic-epoch')
+    let finish!: (value: unknown) => void
+    const json = vi.fn(() => new Promise(resolve => { finish = resolve }))
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, status: 200, json } as unknown as Response)
+    mount(guard)
+    click('[data-attendance-w6-effective-policy-open]')
+    await vi.waitFor(() => expect(json).toHaveBeenCalledTimes(1))
+    guard.invalidate()
+    finish(fullFixture())
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-content]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-status="loading"]')).toBeTruthy()
+  })
+
+  it('does not apply a late transport error before an identity-change notification arrives', async () => {
+    let identity = 'synthetic-first'
+    const guard = createAttendanceSessionGuard('synthetic-org', () => identity)
+    let reject!: (error: Error) => void
+    vi.mocked(apiFetch).mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
+    mount(guard)
+    click('[data-attendance-w6-effective-policy-open]')
+    identity = 'synthetic-second'
+    reject(new Error('synthetic transport failure'))
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-w6-effective-policy-status="loading"]')).toBeTruthy()
+    expect(guard.stale.value).toBe(true)
   })
 
   it('fetches exactly once per explicit open click and renders the fixture 1:1 from the closed unions', async () => {

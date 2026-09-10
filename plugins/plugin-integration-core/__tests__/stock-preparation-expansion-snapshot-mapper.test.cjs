@@ -9,6 +9,7 @@ const path = require('node:path')
 const {
   LINE_STATUSES,
   MISSING_CHILD_BOM_ROW_ERROR,
+  SPEC_KEYS,
   StockPreparationExpansionSnapshotMapperError,
   mapExpansionRowsToSnapshotLines,
   summarizeExpansionSnapshotMappingForEvidence,
@@ -87,6 +88,116 @@ run('maps expansion field vocabulary to snapshot-line vocabulary', () => {
   assert.ok(childLine.sourceFingerprint, 'sourceFingerprint stamped')
   // plan declares no unit field -> designUnit absent unless caller supplies a default
   assert.ok(!('designUnit' in childLine))
+  // material is persisted as a first-class snapshot-line field (adjudication design 20260901:
+  // fingerprint decomposition) — no longer only baked into the sourceFingerprint hash.
+  assert.equal(childLine.material, 'steel')
+})
+
+run('material is persisted when present and omitted when the expansion row lacks it', () => {
+  const withMaterial = mapExpansionRowsToSnapshotLines([expansionRow()], { snapshotBatchId: 'batch-m1' })
+  assert.equal(withMaterial.lines[0].material, 'steel')
+  const withoutMaterial = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ material: null })],
+    { snapshotBatchId: 'batch-m2' },
+  )
+  assert.ok(!('material' in withoutMaterial.lines[0]), 'absent material stays absent (no invented field)')
+})
+
+run('persisting material does not change the sourceFingerprint computation (old batches stay comparable)', () => {
+  // sourceIdentity already hashed material before it became a persisted field; the fingerprint for the
+  // SAME source row must be byte-identical, so pre-change batches do not all fingerprint-differ.
+  const a = mapExpansionRowsToSnapshotLines([expansionRow({ idempotencyKey: 'fp-fixed' })], { snapshotBatchId: 'bfp' })
+  const b = mapExpansionRowsToSnapshotLines([expansionRow({ idempotencyKey: 'fp-fixed' })], { snapshotBatchId: 'bfp' })
+  assert.equal(a.lines[0].sourceFingerprint, b.lines[0].sourceFingerprint)
+})
+
+// ---------------------------------------------------------------------------
+// THE SEVEN FIELDS A 备料 PULL MUST CARRY (owner spec):
+//   父组件图号 / 父组件名称 / 当前组件图号 / 当前组件名称 / 规格 / 材料 / 总数量.
+// The audit found only the drawing numbers, versions and per-level quantity reached the PERSISTED
+// line: 材料 survived only inside the fingerprint hash, 当前组件名称 was read by the expansion and
+// dropped here, 总数量 was traded for the per-level quantity, 父组件名称 was never emitted, and 规格
+// was never read from the source at all. Each assertion below fails on the pre-change mapper.
+// ---------------------------------------------------------------------------
+run('the seven fields all reach the persisted snapshot line', () => {
+  const parent = expansionRow({
+    componentSourceId: 'obj-parent',
+    parentSourceId: null,
+    path: '["obj-parent"]',
+    depth: 0,
+    componentCode: 'DRW-PARENT',
+    componentName: 'parent assembly',
+    sourceVersion: 'A',
+    rawQuantity: 1,
+    totalQuantity: 1,
+  })
+  const child = expansionRow({ spec: 'DN1200x12' })
+  const line = mapExpansionRowsToSnapshotLines([parent, child], { snapshotBatchId: 'batch-7' })
+    .lines.find((entry) => entry.childDrawingNo === 'DRW-CHILD')
+
+  assert.equal(line.parentDrawingNo, 'DRW-PARENT', '父组件图号')
+  // 父组件名称: the expansion emits NO parentName key — the parent is only an OBJ_ID on the child
+  // row — so it resolves through the same in-batch parentIndex join the drawing no already used.
+  assert.equal(line.parentName, 'parent assembly', '父组件名称')
+  assert.equal(line.childDrawingNo, 'DRW-CHILD', '当前组件图号')
+  assert.equal(line.childName, 'child part', '当前组件名称')
+  assert.equal(line.spec, 'DN1200x12', '规格')
+  assert.equal(line.material, 'steel', '材料')
+  assert.equal(line.totalQuantity, 6, '总数量 — the rollup, kept alongside the per-level quantity')
+  assert.equal(line.designQty, 2, '逐层数量 — resolution unchanged')
+})
+
+run('each new field is ABSENT, not empty, when the source did not carry it', () => {
+  // A deployment whose read plan declares no specField, whose parent is outside the batch, and
+  // whose source has no name: every one of the four must simply not be on the line. `clean()` drops
+  // null/undefined, so a downstream reader can tell "not read" from "read as blank".
+  const bare = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ componentName: null, totalQuantity: null, parentSourceId: null })],
+    { snapshotBatchId: 'batch-bare' },
+  )
+  const line = bare.lines[0]
+  for (const fieldId of ['parentName', 'childName', 'spec', 'totalQuantity']) {
+    assert.ok(!(fieldId in line), `absent ${fieldId} stays absent (no invented field, no empty string)`)
+  }
+})
+
+run('the seven fields do NOT change the sourceFingerprint (existing batches are not mass re-diffed)', () => {
+  // THE backward-compatibility property. `sourceIdentity` is deliberately UNTOUCHED: childName and
+  // spec are persisted but never hashed. Had they been added to the hash, the first refresh after
+  // this change would have fingerprint-differed EVERY line of EVERY existing batch and held a whole
+  // BOM for review of a change that never happened.
+  const PINNED = 'sha16:522bdc6c334323bb'
+  const withoutNewFields = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ idempotencyKey: 'fp-fixed' })],
+    { snapshotBatchId: 'bfp' },
+  )
+  assert.equal(
+    withoutNewFields.lines[0].sourceFingerprint,
+    PINNED,
+    'the fingerprint of a row with no spec/createTime is the pre-change value, byte for byte',
+  )
+  const withNewFields = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ idempotencyKey: 'fp-fixed', spec: 'DN1200x12', createTime: '2026-08-30T09:15:00' })],
+    { snapshotBatchId: 'bfp' },
+  )
+  assert.equal(
+    withNewFields.lines[0].sourceFingerprint,
+    PINNED,
+    'adding spec/createTime to the SOURCE row must not move the fingerprint either',
+  )
+  // ...and therefore not the derived snapshotLineId, which seeds off the same identity.
+  assert.equal(withNewFields.lines[0].snapshotLineId, withoutNewFields.lines[0].snapshotLineId)
+  // createTime is consumed by the batch-identity mint, never persisted onto a line.
+  assert.ok(!('createTime' in withNewFields.lines[0]), 'createTime is not a snapshot-line field')
+})
+
+run('spec accepts the readonly-intake spelling so both intake paths agree', () => {
+  const viaSpecification = mapExpansionRowsToSnapshotLines(
+    [expansionRow({ specification: 'DN800' })],
+    { snapshotBatchId: 'batch-spec-alias' },
+  )
+  assert.equal(viaSpecification.lines[0].spec, 'DN800')
+  assert.deepEqual([...SPEC_KEYS], ['spec', 'specification'], 'the spec vocabulary is CLOSED')
 })
 
 run('designQty prefers rawQuantity over the totalQuantity rollup', () => {
@@ -278,6 +389,121 @@ run('evidence is values-free (counts / field-key names / booleans only)', () => 
   assert.ok(!serialized.includes('DRW-CHILD'))
   assert.ok(!serialized.includes('obj-child'))
   assert.ok(!serialized.includes('PRJ-1'))
+})
+
+// ---------------------------------------------------------------------------
+// 5. D-C: the rowError cap makes `rowErrors` a SAMPLE, and this module reads it
+//
+// The cap (stock-preparation-bom-expansion.cjs ROW_ERROR_LIMIT) keeps counting past the limit but
+// stops appending. Everything in this module that reasons over the ARRAY therefore stopped being a
+// statement about the expansion: a project whose `missing_child_bom` entries all landed past the cap
+// yields no stamped incomplete line, `status` reads 'mapped', and the sync-run persists SUCCEEDED —
+// while the true count sits on `summary.rowErrorTypeCounts` in the same object, unread.
+// ---------------------------------------------------------------------------
+
+// The shape the expander produces when it truncated: a bounded array, plus the true totals.
+function truncatedExpansion({ rows = [], rowErrors = [], typeCounts, total }) {
+  return {
+    rows,
+    rowErrors,
+    summary: {
+      rowErrorsTruncated: true,
+      rowErrorsTotal: total,
+      rowErrorsRetained: rowErrors.length,
+      rowErrorTypeCounts: typeCounts,
+    },
+  }
+}
+
+run('a truncated expansion whose missing_child_bom entries were ALL dropped is never reported as mapped', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    truncatedExpansion({
+      rows: [expansionRow()],
+      // The retained sample is entirely a different type — exactly what a 5000-blank-part_id prefix
+      // followed by one missing_child_bom produces.
+      rowErrors: [{ type: 'missing_component_source_id', depth: 1 }],
+      typeCounts: { missing_component_source_id: 5000, [MISSING_CHILD_BOM_ROW_ERROR]: 3 },
+      total: 5003,
+    }),
+    { snapshotBatchId: 'batch-trunc' },
+  )
+  assert.equal(result.status, 'incomplete', 'the mapper refuses to call this batch complete')
+  assert.equal(
+    result.evidence.result.unstampedMissingChildBomRowErrors,
+    3,
+    'and says exactly how many incomplete lines it could not synthesize',
+  )
+  assert.equal(
+    result.evidence.input.missingChildBomRowErrors,
+    3,
+    'the input count is the TRUE total, not the zero the sampled array shows',
+  )
+  assert.equal(result.evidence.input.rowErrors, 5003, 'and so is the rowError count')
+  assert.equal(result.evidence.input.rowErrorsRetained, 1, 'with the sample size kept under its own key')
+  assert.equal(result.evidence.input.rowErrorsTruncated, true)
+})
+
+run('a truncated expansion that lost NO missing_child_bom keeps its ordinary verdict', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    truncatedExpansion({
+      rows: [expansionRow()],
+      rowErrors: [{ type: 'missing_component_source_id', depth: 1 }],
+      typeCounts: { missing_component_source_id: 5000 },
+      total: 5000,
+    }),
+    { snapshotBatchId: 'batch-trunc-clean' },
+  )
+  assert.equal(result.status, 'mapped', 'nothing this module maps was dropped, so nothing is forced')
+  assert.equal(result.evidence.result.unstampedMissingChildBomRowErrors, undefined, 'and no gap key is mounted')
+  // The counts still tell the truth about the input, which is what the persisted run row records.
+  assert.equal(result.evidence.input.rowErrors, 5000)
+  assert.equal(result.evidence.input.rowErrorsRetained, 1)
+})
+
+run('a truncated expansion counts the stamped entries against the true total', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    truncatedExpansion({
+      rows: [expansionRow()],
+      // Two survived the cap; the expander says four happened.
+      rowErrors: [
+        { type: MISSING_CHILD_BOM_ROW_ERROR, depth: 1 },
+        { type: MISSING_CHILD_BOM_ROW_ERROR, depth: 2 },
+      ],
+      typeCounts: { [MISSING_CHILD_BOM_ROW_ERROR]: 4 },
+      total: 4,
+    }),
+    { snapshotBatchId: 'batch-trunc-partial' },
+  )
+  assert.equal(result.status, 'incomplete')
+  assert.equal(result.evidence.result.stampedMissingChildLines, 2, 'two lines could be synthesized')
+  assert.equal(result.evidence.result.unstampedMissingChildBomRowErrors, 2, 'and two could not')
+  assert.equal(result.evidence.input.missingChildBomRowErrors, 4, 'against a true total of four')
+})
+
+run('an UNtruncated expansion mounts not one of the D-C evidence keys', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    { rows: [expansionRow()], rowErrors: [{ type: MISSING_CHILD_BOM_ROW_ERROR, depth: 1 }] },
+    { snapshotBatchId: 'batch-untruncated' },
+  )
+  assert.deepEqual(Object.keys(result.evidence.input), ['expansionRows', 'rowErrors', 'missingChildBomRowErrors'])
+  assert.equal('unstampedMissingChildBomRowErrors' in result.evidence.result, false)
+  assert.equal(result.status, 'incomplete', 'and the pre-D-C verdict is unchanged')
+})
+
+run('the D-C evidence stanza is values-free', () => {
+  const result = mapExpansionRowsToSnapshotLines(
+    truncatedExpansion({
+      rows: [expansionRow()],
+      rowErrors: [{ type: 'missing_component_source_id', depth: 1 }],
+      typeCounts: { missing_component_source_id: 5000, [MISSING_CHILD_BOM_ROW_ERROR]: 1 },
+      total: 5001,
+    }),
+    { snapshotBatchId: 'batch-trunc-vf' },
+  )
+  const serialized = JSON.stringify(summarizeExpansionSnapshotMappingForEvidence(result))
+  for (const value of ['DRW-CHILD', 'obj-child', 'PRJ-1', 'steel']) {
+    assert.ok(!serialized.includes(value), `truncation evidence hides ${value}`)
+  }
 })
 
 process.stdout.write('all stock-preparation-expansion-snapshot-mapper tests passed\n')

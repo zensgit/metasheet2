@@ -707,7 +707,473 @@ function testUnimplementedDuplicatePoliciesRemainHeldAsUnsupported() {
   }
 }
 
+// ── O1-B: identity for the ANONYMOUS hold families ──────────────────────────
+//
+// RED-witnessed guards (mutation table in the landing commit body):
+//   O1B-P1  every identity-capable anonymous family gets a derived identity,
+//           at the granularity its emitter actually supports
+//   O1B-P2  the identity is a pure function of the plan input (repeat-plan
+//           reproducibility, the property supersede/reopen leans on)
+//   O1B-P3  the reserved namespace is enforced at the planner too: an
+//           idempotencyKey may not impersonate a derived identity
+//   O1B-P4  a hold whose emitter attached nothing stable gets NO identity
+//           (honest deferral, never a hash of nothing)
+//   O1B-P5  keyed holds are untouched — no identity field appears on them
+
+const ANONYMOUS_IDENTITY_PREFIX = 'anon-hold:v1:'
+
+function anonymousPlanInput() {
+  // Every identity-capable family shape at once, plus both deferral shapes.
+  return {
+    expandedRows: [
+      row({ componentSourceId: 'PART-OK', pathTokens: ['PART-OK'] }),
+      // keyless expanded row WITH lineage -> `row` granularity
+      { projectNo: 'P-001', componentSourceId: 'PART-NOKEY', path: '["PART-NOKEY"]', depth: 0 },
+    ],
+    existingRows: [
+      // keyless existing row WITH lineage -> `row` granularity
+      { projectNo: 'P-001', componentSourceId: 'PART-OLD', parentSourceId: null, path: '["PART-OLD"]', depth: 0, active: true },
+      // keyless existing row with NO discriminator at all -> deferral
+      { active: true },
+    ],
+    rowErrors: [
+      // two errors on the SAME locus -> one identity, deliberately
+      { type: 'missing_component', field: 'OBJ_ID', depth: 2 },
+      { type: 'missing_component', field: 'OBJ_ID', depth: 2 },
+      // same type, different depth -> different locus
+      { type: 'missing_component', field: 'OBJ_ID', depth: 3 },
+      // depth 0 is a REAL discriminator, not a blank
+      { type: 'missing_order_id', field: 'OrderNo', depth: 0 },
+      { type: 'invalid_quantity', field: 'Qty', depth: 0, relation: 'root' },
+      { type: 'invalid_quantity', field: 'Qty', depth: 0, relation: 'child' },
+      // ext-mapping coercion refusal -> `cell` granularity
+      { type: 'SOURCE_VALUE_NOT_A_NUMBER', target: 'ext_weight', sourceColumn: 'WGT', expectedType: 'number', depth: 0 },
+      { type: 'SOURCE_VALUE_SECRET_SHAPED', target: 'ext_token', sourceColumn: 'TOK', expectedType: 'string', depth: 0 },
+      // the unvalidated umbrella fallback: no type, no context -> deferral
+      { message: 'only a message' },
+    ],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  }
+}
+
+function anonymousHolds(plan) {
+  return plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM && !entry.idempotencyKey)
+}
+
+function testO1bAnonymousFamiliesGetGranularityCorrectIdentities() {
+  const plan = planStockPreparationConflicts(anonymousPlanInput())
+  const holds = anonymousHolds(plan)
+  const identified = holds.filter((entry) => entry.derivedRowIdentity)
+  const deferred = holds.filter((entry) => !entry.derivedRowIdentity)
+
+  // O1B-P1: identity present exactly where the emitter carries stable context.
+  assert.equal(holds.length, 12, 'every keyless hold is an anonymous hold')
+  assert.equal(identified.length, 10)
+  assert.deepEqual(
+    deferred.map((entry) => entry.conflictSummary.type).sort(),
+    ['c2_row_error', 'missing_existing_idempotency_key'],
+    'O1B-P4: the contextless umbrella fallback and the discriminator-less row defer',
+  )
+
+  const identityByType = {}
+  for (const hold of identified) {
+    const type = hold.conflictSummary.type
+    identityByType[type] = identityByType[type] || new Set()
+    identityByType[type].add(hold.derivedRowIdentity)
+  }
+
+  // Granularity is encoded in the identity itself, so a reviewer can read it
+  // off a ledger row without re-deriving anything.
+  const granularityOf = (identity) => identity.slice(ANONYMOUS_IDENTITY_PREFIX.length).split(':')[0]
+  for (const hold of identified) {
+    assert.ok(hold.derivedRowIdentity.startsWith(ANONYMOUS_IDENTITY_PREFIX), 'identities are namespaced')
+    assert.match(hold.derivedRowIdentity, /:sha256:[0-9a-f]{32}$/, 'identities are HASHES, never plaintext context')
+  }
+  assert.equal(granularityOf([...identityByType.missing_expanded_idempotency_key][0]), 'row')
+  assert.equal(granularityOf([...identityByType.missing_existing_idempotency_key][0]), 'row')
+  assert.equal(granularityOf([...identityByType.missing_component][0]), 'locus')
+  assert.equal(granularityOf([...identityByType.missing_order_id][0]), 'locus')
+  assert.equal(granularityOf([...identityByType.SOURCE_VALUE_NOT_A_NUMBER][0]), 'cell')
+  assert.equal(granularityOf([...identityByType.SOURCE_VALUE_SECRET_SHAPED][0]), 'cell')
+
+  // Locus semantics, stated as an assertion: same (type, field, depth) folds to
+  // ONE identity; a different depth or relation is a DIFFERENT locus.
+  assert.equal(identityByType.missing_component.size, 2, 'depth separates loci; same depth folds')
+  assert.equal(identityByType.invalid_quantity.size, 2, 'relation separates loci')
+
+  // No collision across families, granularities or loci.
+  const all = identified.map((entry) => entry.derivedRowIdentity)
+  assert.equal(new Set(all).size, 9, 'exactly 9 distinct identities behind 10 identified holds')
+
+  // A source id that went INTO a hash must not come back OUT of the plan.
+  for (const identity of new Set(all)) {
+    for (const secret of ['PART-NOKEY', 'PART-OLD', 'OBJ_ID', 'ext_weight', 'WGT', 'P-001']) {
+      assert.equal(identity.includes(secret), false, `identity must not leak ${secret}`)
+    }
+  }
+}
+
+function testO1bIdentityIsReproducibleFromTheSameInput() {
+  // O1B-P2. Two independent planner runs over equal (not shared) input must
+  // produce identical identities — without this, every reconcile would
+  // supersede its own ledger rows and no confirmation could ever stick.
+  const first = planStockPreparationConflicts(clone(anonymousPlanInput()))
+  const second = planStockPreparationConflicts(clone(anonymousPlanInput()))
+  const identitiesOf = (plan) => anonymousHolds(plan).map((entry) => entry.derivedRowIdentity || null)
+  assert.deepEqual(identitiesOf(first), identitiesOf(second), 'identity must be a pure function of the input')
+
+  // Key order in the source object must not move the identity either.
+  const reordered = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [],
+    rowErrors: [{ depth: 2, type: 'missing_component', field: 'OBJ_ID' }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const straight = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [],
+    rowErrors: [{ type: 'missing_component', field: 'OBJ_ID', depth: 2 }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  assert.equal(
+    anonymousHolds(reordered)[0].derivedRowIdentity,
+    anonymousHolds(straight)[0].derivedRowIdentity,
+    'stable stringification makes key order irrelevant',
+  )
+
+  // A canonical read that hands `depth` back as a string must NOT re-key the row.
+  const numericDepth = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [{ projectNo: 'P-001', componentSourceId: 'PART-OLD', depth: 2, active: true }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const stringDepth = planStockPreparationConflicts({
+    expandedRows: [],
+    existingRows: [{ projectNo: 'P-001', componentSourceId: 'PART-OLD', depth: '2', active: true }],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  assert.equal(
+    anonymousHolds(numericDepth)[0].derivedRowIdentity,
+    anonymousHolds(stringDepth)[0].derivedRowIdentity,
+    'scalar normalisation survives the records-API round trip',
+  )
+}
+
+function testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched() {
+  // O1B-P5: a keyed hold carries no identity field at all — the decision object
+  // of every pre-O1-B class is unchanged, so no existing fingerprint moves.
+  const duplicate = row({ componentSourceId: 'PART-DUP', pathTokens: ['PART-DUP'] })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [duplicate, { ...duplicate }],
+    existingRows: [],
+    runId: 'run-o1b',
+    plannedAt: '2026-06-04T09:00:00.000Z',
+  })
+  const keyed = plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM && entry.idempotencyKey)
+  assert.equal(keyed.length, 1)
+  assert.equal(Object.prototype.hasOwnProperty.call(keyed[0], 'derivedRowIdentity'), false)
+
+  // O1B-P3: the reserved namespace is fenced at the planner, not only at the
+  // ledger. A HOLD whose idempotencyKey impersonates a derived identity is
+  // refused rather than keyed under somebody else's addressing scheme — this is
+  // the ledger-relevant surface, since only holds ever reach the ledger.
+  const forgedKey = `${ANONYMOUS_IDENTITY_PREFIX}row:sha256:${'0'.repeat(32)}`
+  const forged = row({ idempotencyKey: forgedKey })
+  assert.throws(
+    () => planStockPreparationConflicts({
+      expandedRows: [forged, { ...forged }],
+      existingRows: [],
+      rowErrors: [],
+      runId: 'run-o1b',
+      plannedAt: '2026-06-04T09:00:00.000Z',
+    }),
+    StockPreparationConflictPlannerError,
+    'a forged anonymous-namespace idempotencyKey must be refused',
+  )
+
+  // THE WALL IS UNTOUCHED: a hold never carries a record or a patch, so adding
+  // identity added no write capability anywhere.
+  for (const hold of plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM)) {
+    assert.equal(Object.prototype.hasOwnProperty.call(hold, 'record'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(hold, 'patch'), false)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 备料主表 gains 父组件图号 / 父组件名称 / 规格
+//
+// RED WITNESSES for the three PLM columns the WORKING SHEET was missing. They are
+// composed at record construction, from the SAME expansion batch the snapshot line
+// is built from:
+//   * the parent pair through the in-batch parent index (the expansion emits the
+//     parent as an OBJ_ID only), and
+//   * 规格 from the expansion row's `spec`, which exists ONLY where the deployment
+//     DECLARED readPlan.part.specField — undeclared means an empty column, never a
+//     guessed source column and never a throw.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A two-level batch: one root and one child of it, as the expander emits them.
+function parentChildBatch(childOverrides = {}) {
+  const parent = row({ componentSourceId: 'PART-ROOT', componentCode: 'TZ-0001', componentName: '主体组件' })
+  const child = row({
+    componentSourceId: 'PART-CHILD',
+    parentSourceId: 'PART-ROOT',
+    pathTokens: ['PART-ROOT', 'PART-CHILD'],
+    componentCode: 'GJ-0007',
+    componentName: '筒体',
+    ...childOverrides,
+  })
+  return { parent, child }
+}
+
+function testDenormalizedParentAndSpecReachTheMainRow() {
+  const { parent, child } = parentChildBatch({ spec: 'DN1200' })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-parent-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const adds = byDecision(plan, DECISIONS.ADD)
+  assert.equal(adds.length, 2, 'both rows are added')
+
+  const childAdd = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD')
+  assert.equal(childAdd.record.parentComponentCode, 'TZ-0001', '父组件图号 lands on the child row')
+  assert.equal(childAdd.record.parentComponentName, '主体组件', '父组件名称 lands on the child row')
+  assert.equal(childAdd.record.componentSpec, 'DN1200', '规格 lands on the row')
+  // ALL SEVEN on one record — the claim the project export depends on.
+  for (const [fieldId, expected] of [
+    ['parentComponentCode', 'TZ-0001'],
+    ['parentComponentName', '主体组件'],
+    ['componentCode', 'GJ-0007'],
+    ['componentName', '筒体'],
+    ['componentSpec', 'DN1200'],
+    ['material', 'Steel'],
+    ['totalQuantity', 2],
+  ]) {
+    assert.equal(childAdd.record[fieldId], expected, `the seven fields are all on the main row: ${fieldId}`)
+  }
+  assertNoHumanFields(childAdd.record, 'parent/spec add record')
+
+  // A ROOT row has no parent: absence, not an empty string. `spec` still rides.
+  const rootAdd = adds.find((decision) => decision.record.componentSourceId === 'PART-ROOT')
+  assert.equal(Object.prototype.hasOwnProperty.call(rootAdd.record, 'parentComponentCode'), false, 'a root row carries no 父组件图号 key at all')
+  assert.equal(Object.prototype.hasOwnProperty.call(rootAdd.record, 'parentComponentName'), false, 'a root row carries no 父组件名称 key at all')
+}
+
+function testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError() {
+  // The DEFAULT read plan declares no part.specField, so the expansion row has no `spec` key at
+  // all. That must be an empty column, never a crash and never a guessed source column.
+  const { parent, child } = parentChildBatch()
+  assert.equal(Object.prototype.hasOwnProperty.call(child, 'spec'), false, 'the fixture models an undeclared spec slot')
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-no-spec',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(plan.valid, true, 'a deployment with no declared spec slot plans cleanly')
+  for (const decision of byDecision(plan, DECISIONS.ADD)) {
+    assert.equal(Object.prototype.hasOwnProperty.call(decision.record, 'componentSpec'), false, 'no 规格 key is invented')
+  }
+  // The parent join is unaffected by the missing spec slot.
+  const childAdd = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+  assert.equal(childAdd.record.parentComponentCode, 'TZ-0001')
+
+  // A blank spec is the same as an absent one — no empty-string cell.
+  for (const blank of ['', '   ', null, undefined]) {
+    const blanked = parentChildBatch({ spec: blank })
+    const blankPlan = planStockPreparationConflicts({
+      expandedRows: [blanked.parent, blanked.child],
+      existingRows: [],
+      runId: 'run-blank-spec',
+      plannedAt: '2026-09-02T00:00:00.000Z',
+    })
+    const add = byDecision(blankPlan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+    assert.equal(Object.prototype.hasOwnProperty.call(add.record, 'componentSpec'), false, `blank spec ${JSON.stringify(blank)} writes no cell`)
+  }
+}
+
+function testUnresolvableParentIsAbsenceNotAGuess() {
+  // The child's parent is NOT in this batch (a partial expansion). Nothing may be invented from
+  // the OBJ_ID, and the plan must not fail.
+  const { child } = parentChildBatch()
+  const plan = planStockPreparationConflicts({
+    expandedRows: [child],
+    existingRows: [],
+    runId: 'run-orphan',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(plan.valid, true)
+  const add = byDecision(plan, DECISIONS.ADD)[0]
+  assert.equal(Object.prototype.hasOwnProperty.call(add.record, 'parentComponentCode'), false, 'an unresolvable parent writes no 父组件图号')
+  assert.equal(Object.prototype.hasOwnProperty.call(add.record, 'parentComponentName'), false, 'an unresolvable parent writes no 父组件名称')
+  assert.equal(add.record.parentSourceId, 'PART-ROOT', 'the OBJ_ID lineage column itself is untouched')
+}
+
+function testExistingRowsAreBackfilledByAReRun() {
+  // The migration answer for rows written BEFORE this change: an ordinary re-pull. The row is
+  // otherwise unchanged, so before this change it was a SKIP; the three empty columns make it a
+  // plm_system refresh like any other — no migration, no backfill script.
+  const { parent, child } = parentChildBatch({ spec: 'DN1200' })
+  const stale = { ...child, notes: 'human note that must survive' }
+  delete stale.spec
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [{ ...parent }, stale],
+    runId: 'run-backfill',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const updates = byDecision(plan, DECISIONS.UPDATE)
+  assert.equal(updates.length, 1, 'only the child row needs a refresh')
+  const patch = updates[0].patch
+  assert.equal(patch.parentComponentCode, 'TZ-0001', 're-pull backfills 父组件图号')
+  assert.equal(patch.parentComponentName, '主体组件', 're-pull backfills 父组件名称')
+  assert.equal(patch.componentSpec, 'DN1200', 're-pull backfills 规格')
+  assert.deepEqual(
+    updates[0].changedFields.slice().sort(),
+    ['componentSpec', 'parentComponentCode', 'parentComponentName'],
+    'the three empty columns are exactly what changed — nothing else was touched',
+  )
+  assertNoHumanFields(patch, 'backfill patch')
+
+  // Idempotent: a SECOND run over the already-backfilled sheet is a SKIP again.
+  const backfilled = { ...stale, parentComponentCode: 'TZ-0001', parentComponentName: '主体组件', componentSpec: 'DN1200' }
+  const second = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [{ ...parent }, backfilled],
+    runId: 'run-backfill-2',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  assert.equal(byDecision(second, DECISIONS.UPDATE).length, 0, 'a re-run over a backfilled sheet writes nothing')
+  assert.equal(byDecision(second, DECISIONS.SKIP).length, 2)
+}
+
+function testTheHumanFieldWallIsUnaffected() {
+  const humanBand = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields
+    .filter((field) => field.ownership === 'human_preserved')
+    .map((field) => field.id)
+  const { parent, child } = parentChildBatch({ spec: 'DN1200' })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-wall',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  // The band is reported exactly as the template declares it, in template order. It is 13
+  // today: the original 8 plus 自制/外购 and the departmental response band (makeOrBuy /
+  // procurementDone / procurementReplyDate / warehouseDone / actualArrivalDate), which grew
+  // it through the design gate — NOT through the three plm_system columns this test is about.
+  assert.deepEqual(
+    plan.summary.humanPreservedFields,
+    humanBand,
+    'the human-preserved band is untouched by three new plm_system columns',
+  )
+  assert.equal(plan.summary.humanPreservedFields.length, 13)
+  assert.deepEqual(plan.summary.humanPreservedFields.slice(0, 8), [
+    'materialType', 'blankType', 'stockPreparationStatus', 'demandDate', 'leadTimeDays', 'notes',
+    'procurementReply', 'warehouseConfirmation',
+  ], 'the original eight are first and unchanged')
+  // The three newcomers are on the PLM side of the wall, and only there.
+  for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentSpec']) {
+    assert.ok(plan.summary.plmSystemFields.includes(fieldId), `${fieldId} is refreshable`)
+    assert.equal(plan.summary.humanPreservedFields.includes(fieldId), false, `${fieldId} is never human-preserved`)
+  }
+  // MUTATION CONTROL: the guard still bites. Feed a human field into a record the way a mis-scoped
+  // projection would, and the planner must refuse — if this passes silently the wall is decorative.
+  let refused = null
+  try {
+    __internals.assertNoHumanFields({ componentSpec: 'DN1200', notes: 'smuggled' }, humanBand, 'add record')
+  } catch (error) {
+    refused = error
+  }
+  assert.ok(refused instanceof StockPreparationConflictPlannerError, 'the human-field wall still throws')
+  assert.equal(refused.details.field, 'notes')
+  // ...and it does NOT fire on the three new columns.
+  __internals.assertNoHumanFields(
+    { parentComponentCode: 'TZ-0001', parentComponentName: '主体组件', componentSpec: 'DN1200' },
+    humanBand,
+    'add record',
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W3a M-03 / M-04 — THE MISSING-COMPONENT SIDE CHANNEL DOES NOT REACH THE PLANNER
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// W3a gives the expander a second, VALUE-BEARING output — `expansion.missingComponents`, carrying
+// real PLM part numbers — so an operator can be told which parts to create. The planner's two
+// durable surfaces must not be able to see it:
+//
+//   M-03 THE ANONYMOUS-HOLD IDENTITY. `ANONYMOUS_LOCUS_IDENTITY_FIELDS` reads {field, depth,
+//        relation} off the ROWERROR, and the rowError did not change. Pinned against HARD-CODED
+//        baselines rather than against a re-derivation: a re-derivation moves with the recipe and
+//        would stay green through exactly the change that supersedes every pending hold in the
+//        customer's ledger.
+//   M-04 THE LEDGER PROJECTION. `details` is {field, depth, relation}, and `conflictSummary` is what
+//        the confirmation ledger's `inputFingerprint` is computed over. Asserted as an absence of the
+//        part-number literals over the WHOLE plan, not just over `details`.
+function testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger() {
+  // M-03: the recipe, frozen. These two strings were computed on the pre-W3a tree.
+  assert.equal(
+    __internals.anonymousRowErrorIdentity('missing_component', { type: 'missing_component', field: 'OBJ_ID', depth: 2 }),
+    'anon-hold:v1:locus:sha256:71f697ebef98612c8b12ef96093b7e01',
+    'M-03: the missing_component locus identity is byte-for-byte what it was before W3a',
+  )
+  assert.equal(
+    __internals.anonymousRowErrorIdentity('missing_component', { type: 'missing_component', field: 'OBJ_ID', depth: 0 }),
+    'anon-hold:v1:locus:sha256:6cbfb57eb7057856c257b2012e73796e',
+    'M-03: depth 0 (the BOM root) too',
+  )
+
+  // The expansion the route would hold at this point: BOTH arrays populated, exactly as
+  // `expandPlmProjectBom` now returns them. The planner is handed `expansion.rowErrors` — which is
+  // the only thing table-actions passes it — so the side channel is structurally out of reach.
+  const expansion = {
+    rowErrors: [
+      { type: 'missing_component', field: 'OBJ_ID', depth: 1 },
+      { type: 'missing_component', field: 'OBJ_ID', depth: 1 },
+    ],
+    missingComponents: [
+      { componentSourceId: 'ZZPARTZZ', parentSourceId: 'ZZPARENTZZ', bomId: 'ZZBOMZZ', path: '["ZZPARENTZZ","ZZPARTZZ"]', depth: 1 },
+      { componentSourceId: 'ZZPARTZZ', parentSourceId: 'ZZOTHERPARENTZZ', bomId: 'ZZBOM2ZZ', path: '["ZZOTHERPARENTZZ","ZZPARTZZ"]', depth: 1 },
+    ],
+  }
+  const plan = planStockPreparationConflicts({
+    expandedRows: [row({ componentSourceId: 'PART-OK' })],
+    existingRows: [],
+    rowErrors: expansion.rowErrors,
+    runId: 'run-w3a',
+    plannedAt: '2026-09-05T00:00:00.000Z',
+  })
+
+  const holds = plan.decisions.filter((entry) => entry.decision === DECISIONS.MANUAL_CONFIRM)
+  assert.equal(holds.length, 2, 'both missing-component rowErrors still hold the run')
+  for (const hold of holds) {
+    assert.deepEqual(
+      Object.keys(hold.conflictSummary),
+      ['type', 'field', 'depth'],
+      'M-04: the ledger projection is the same key set it always was',
+    )
+  }
+
+  // M-04, stated the way it matters: not one of these literals appears ANYWHERE in the plan — not in
+  // details, not in a summary, not in an identity, not in the evidence projection.
+  const planText = JSON.stringify(plan)
+  const evidenceText = JSON.stringify(summarizeConflictPlanForEvidence(plan))
+  for (const literal of ['ZZPARTZZ', 'ZZPARENTZZ', 'ZZOTHERPARENTZZ', 'ZZBOMZZ', 'ZZBOM2ZZ']) {
+    assert.equal(planText.includes(literal), false, `M-04: the plan carries no ${literal}`)
+    assert.equal(evidenceText.includes(literal), false, `M-04: the plan evidence carries no ${literal}`)
+  }
+}
+
 function main() {
+  testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger()
   testAddUpdateSkipInactive()
   testRowErrorsDoNotAbortGoodRows()
   testDuplicatesAndConflictsFailClosed()
@@ -724,6 +1190,14 @@ function main() {
   testKeepMultipleRowsWithoutStableDiscriminatorHolds()
   testSourceCorrectionRequiredHoldsWithExplicitReason()
   testUnimplementedDuplicatePoliciesRemainHeldAsUnsupported()
+  testO1bAnonymousFamiliesGetGranularityCorrectIdentities()
+  testO1bIdentityIsReproducibleFromTheSameInput()
+  testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched()
+  testDenormalizedParentAndSpecReachTheMainRow()
+  testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
+  testUnresolvableParentIsAbsenceNotAGuess()
+  testExistingRowsAreBackfilledByAReRun()
+  testTheHumanFieldWallIsUnaffected()
 
   console.log('stock-preparation-conflict-planner.test.cjs OK')
 }

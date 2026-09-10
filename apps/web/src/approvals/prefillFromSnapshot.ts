@@ -53,6 +53,14 @@ function isCompatibleValue(type: FormFieldType, value: unknown): boolean {
       return typeof value === 'string' || typeof value === 'number'
     case 'multi-select':
       return Array.isArray(value)
+    case 'department':
+      return Array.isArray(value) && value.length > 0 && value.every((entry) => (
+        entry !== null
+        && typeof entry === 'object'
+        && !Array.isArray(entry)
+        && typeof (entry as { id?: unknown }).id === 'string'
+        && (entry as { id: string }).id.trim().length > 0
+      ))
     case 'detail':
       return Array.isArray(value)
     case 'record-link':
@@ -130,7 +138,9 @@ export function prefillFromSnapshot(
     // Dropped-from-current-schema fields never reach this loop at all (it only iterates the
     // CURRENT schema's fields); a RETYPED field is caught here instead, by shape.
     if (!isCompatibleValue(field.type, value)) continue
-    result[field.id] = value
+    result[field.id] = field.type === 'department'
+      ? (value as Array<{ id: string }>).map((entry) => ({ id: entry.id }))
+      : value
   }
   return result
 }

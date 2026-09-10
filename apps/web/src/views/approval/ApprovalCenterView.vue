@@ -254,7 +254,7 @@
           v-if="isMobileLayout"
           :approvals="store.pendingApprovals"
           :loading="store.loading"
-          :empty-text="mobileEmptyText.pending"
+          :empty-text="tabEmptyText.pending"
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
@@ -266,7 +266,7 @@
           ref="pendingTableRef"
           :rows="store.pendingApprovals"
           :loading="store.loading"
-          :empty-text="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
+          :empty-text="tabEmptyText.pending"
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'pending' ? selectedApprovalId : null"
           show-selection
@@ -330,7 +330,7 @@
           v-if="isMobileLayout"
           :approvals="store.myApprovals"
           :loading="store.loading"
-          :empty-text="mobileEmptyText.mine"
+          :empty-text="tabEmptyText.mine"
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
@@ -341,7 +341,7 @@
           v-else
           :rows="store.myApprovals"
           :loading="store.loading"
-          :empty-text="searchText ? '未找到匹配的审批' : '暂无我发起的审批'"
+          :empty-text="tabEmptyText.mine"
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'mine' ? selectedApprovalId : null"
           :actions-width="170"
@@ -385,7 +385,7 @@
           v-if="isMobileLayout"
           :approvals="store.ccApprovals"
           :loading="store.loading"
-          :empty-text="mobileEmptyText.cc"
+          :empty-text="tabEmptyText.cc"
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
@@ -396,7 +396,7 @@
           v-else
           :rows="store.ccApprovals"
           :loading="store.loading"
-          :empty-text="searchText ? '未找到匹配的审批' : '暂无抄送我的审批'"
+          :empty-text="tabEmptyText.cc"
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'cc' ? selectedApprovalId : null"
           @row-click="handleRowClick"
@@ -417,7 +417,7 @@
           v-if="isMobileLayout"
           :approvals="store.completedApprovals"
           :loading="store.loading"
-          :empty-text="mobileEmptyText.completed"
+          :empty-text="tabEmptyText.completed"
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
@@ -428,7 +428,7 @@
           v-else
           :rows="store.completedApprovals"
           :loading="store.loading"
-          :empty-text="searchText ? '未找到匹配的审批' : '暂无已完成审批'"
+          :empty-text="tabEmptyText.completed"
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'completed' ? selectedApprovalId : null"
           @row-click="handleRowClick"
@@ -453,7 +453,7 @@
           v-if="isMobileLayout"
           :approvals="store.processedApprovals"
           :loading="store.loading"
-          :empty-text="mobileEmptyText.processed"
+          :empty-text="tabEmptyText.processed"
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
@@ -464,7 +464,7 @@
           v-else
           :rows="store.processedApprovals"
           :loading="store.loading"
-          :empty-text="searchText ? '未找到匹配的审批' : '暂无已处理审批'"
+          :empty-text="tabEmptyText.processed"
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'processed' ? selectedApprovalId : null"
           @row-click="handleRowClick"
@@ -814,12 +814,18 @@ function handleDetailPaneKeydown(event: KeyboardEvent): void {
   selectApprovalRow(rows[nextIdx]!.id)
 }
 
-// i18n follow-up (ballot T3-1 build-contract must-fix): the mobile card
-// list's per-tab empty-state copy shipped in #3517 as hardcoded Chinese
-// literals. Localize via the app's established `useLocale()` / `isZh`
-// pattern instead of a hardcoded string per tab.
+// i18n follow-up (ballot T3-1 build-contract must-fix): the mobile card list's per-tab
+// empty-state copy shipped in #3517 as hardcoded Chinese literals. Localize via the app's
+// established `useLocale()` / `isZh` pattern instead of a hardcoded string per tab.
+//
+// Report item O-8 (approval UI locale consistency): this computed was ONLY wired into the
+// mobile `<ApprovalMobileList>` empty-text prop below — the desktop `<ApprovalCenterTable>`'s
+// `:empty-text` for the very same five tabs stayed an unconditional Chinese literal, so an
+// operator on a desktop browser (the majority case) saw Chinese here regardless of locale even
+// though the mobile-layout path was already correct. Renamed (was `mobileEmptyText`) and reused
+// for both paths — one source, not two copies that can drift again.
 const { isZh } = useLocale()
-const mobileEmptyText = computed(() => {
+const tabEmptyText = computed(() => {
   if (isZh.value) {
     return {
       pending: searchText.value ? '未找到匹配的审批' : '暂无待处理审批',

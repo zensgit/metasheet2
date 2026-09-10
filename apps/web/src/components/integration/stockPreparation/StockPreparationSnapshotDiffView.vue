@@ -7,7 +7,7 @@
       data-testid="stock-prep-snapshot-no-project"
       role="status"
     >
-      {{ bi('请选择一个项目以查看其快照批次。', 'Select a project to see its snapshot batches.') }}
+      {{ bi('请选择一个项目,这里会列出它历次同步存下的数据。', 'Select a project and this page lists each copy stored by its syncs.') }}
     </p>
 
     <!-- Loading: values-free spinner copy only. -->
@@ -48,7 +48,7 @@
       class="sp-snap__state sp-snap__state--muted"
       data-testid="stock-prep-snapshot-empty"
     >
-      {{ bi('尚无快照批次。', 'No snapshot batches yet.') }}
+      {{ bi('这个项目还没同步过 —— 先同步一次,这里就会有记录。', 'This project has never synced — run one and a copy will appear here.') }}
     </p>
 
     <!-- Data: values-free batches table + a diff-summary panel for the selected batch. -->
@@ -72,12 +72,12 @@
         <table class="sp-snap__table">
           <thead>
             <tr>
-              <th scope="col">{{ bi('版本', 'Version') }}</th>
-              <th scope="col">{{ bi('状态', 'Status') }}</th>
-              <th scope="col">{{ bi('批次行数', 'Line count') }}</th>
-              <th scope="col">{{ bi('同步运行', 'Sync run') }}</th>
-              <th scope="col">{{ bi('创建时间', 'Recorded') }}</th>
-              <th scope="col" class="sp-snap__col-action">{{ bi('差异', 'Diff') }}</th>
+              <th scope="col">{{ bi('第几次同步', 'Which sync') }}</th>
+              <th scope="col">{{ bi('这一份还在用吗', 'Still the current one') }}</th>
+              <th scope="col">{{ bi('这一份有多少行', 'Rows in this copy') }}</th>
+              <th scope="col">{{ bi('哪次同步存的', 'Which run stored it') }}</th>
+              <th scope="col">{{ bi('存下时间', 'Time recorded') }}</th>
+              <th scope="col" class="sp-snap__col-action">{{ bi('和上一份比', 'Compare with the previous') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -100,7 +100,7 @@
                   class="sp-snap__incomplete"
                   data-testid="stock-prep-snapshot-incomplete-badge"
                 >
-                  {{ bi('不完整', 'incomplete') }}
+                  {{ bi('不完整(这次没存全)', 'incomplete — this one did not finish saving') }}
                 </span>
               </td>
               <td class="sp-snap__num">{{ batch.lineCount }}</td>
@@ -124,12 +124,12 @@
                   :disabled="batch.incomplete"
                   :title="
                     batch.incomplete
-                      ? bi('批次不完整(缺批次行或缺同步运行),差异不可用。', 'Batch incomplete (no lines or missing sync run) — diff unavailable.')
+                      ? bi('这一份没存全,拿它作比较会得出错的结论,所以不能比。', 'This copy did not finish saving; comparing against it would give a wrong answer, so it is not offered.')
                       : undefined
                   "
                   @click="selectBatch(batch)"
                 >
-                  {{ bi('查看差异', 'View diff') }}
+                  {{ bi('看改了什么', 'See what changed') }}
                 </button>
               </td>
             </tr>
@@ -145,7 +145,7 @@
           class="sp-snap__state sp-snap__state--muted"
           data-testid="stock-prep-snapshot-diff-hint"
         >
-          {{ bi('选择一个批次以查看其差异。', 'Select a batch to see its diff.') }}
+          {{ bi('上面选一份,这里会显示它和上一份比改了什么。', 'Pick one above and this shows what changed since the previous copy.') }}
         </p>
 
         <!-- Diff loading. -->
@@ -184,14 +184,14 @@
         <div v-else-if="diff" class="sp-snap__diff" data-testid="stock-prep-snapshot-diff">
           <header class="sp-snap__diff-head">
             <span class="sp-snap__diff-base" data-testid="stock-prep-snapshot-diff-base">
-              {{ bi('对比基准批次', 'Base batch') }}:
+              {{ bi('拿来作比较的那一份', 'Compared against') }}
               <code v-if="diff.baseSnapshotBatchId" class="sp-snap__handle">{{
                 diff.baseSnapshotBatchId
               }}</code>
-              <span v-else>{{ bi('无前序批次', 'no predecessor') }}</span>
+              <span v-else>{{ bi('无前序批次(这是第一次同步,没得比)', 'no predecessor — this is the first sync, so there is nothing to compare with') }}</span>
             </span>
             <span class="sp-snap__diff-blocking" data-testid="stock-prep-snapshot-diff-blocking">
-              {{ bi('阻断级异常', 'Blocking exceptions') }}: {{ diff.blockingExceptionCount }}
+              {{ bi('这次改动带出几件卡住的事', 'Things this change left stuck') }}: {{ diff.blockingExceptionCount }}
             </span>
           </header>
 
@@ -203,7 +203,7 @@
               data-testid="stock-prep-snapshot-diff-count"
               :data-kind="entry.key"
             >
-              <dt class="sp-snap__count-label">{{ bi(entry.zh, entry.en) }}</dt>
+              <dt class="sp-snap__count-label">{{ entry.label }}</dt>
               <dd class="sp-snap__count-value">{{ entry.value }}</dd>
             </div>
           </dl>
@@ -218,7 +218,7 @@
               :aria-expanded="rowDetailOpen"
               @click="toggleRowDetail"
             >
-              {{ rowDetailOpen ? bi('收起逐行明细', 'Hide row detail') : bi('查看逐行明细', 'View row detail') }}
+              {{ rowDetailOpen ? bi('收起逐行明细', 'Hide the row-by-row list') : bi('看逐行明细', 'See it row by row') }}
             </button>
 
             <template v-if="rowDetailOpen">
@@ -274,12 +274,12 @@
                   <table class="sp-snap__rows-table" data-testid="stock-prep-snapshot-diff-rows-table">
                     <thead>
                       <tr>
-                        <th>{{ bi('差异句柄', 'Diff') }}</th>
-                        <th>{{ bi('类型', 'Type') }}</th>
-                        <th>{{ bi('复核状态', 'Review') }}</th>
-                        <th>{{ bi('变更类别', 'Changes') }}</th>
-                        <th>{{ bi('行数', 'Rows') }}</th>
-                        <th>{{ bi('键指纹', 'Key fp') }}</th>
+                        <th>{{ bi('编号', 'Reference') }}</th>
+                        <th>{{ bi('怎么变的', 'How it changed') }}</th>
+                        <th>{{ bi('看过了吗', 'Reviewed yet') }}</th>
+                        <th>{{ bi('变了哪些方面', 'What changed about it') }}</th>
+                        <th>{{ bi('涉及几行', 'Rows affected') }}</th>
+                        <th>{{ bi('内部标识', 'Internal identifier') }}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -291,9 +291,21 @@
                         :data-review-status="row.reviewStatus"
                       >
                         <td><code class="sp-snap__handle">{{ row.diffId }}</code></td>
-                        <td>{{ row.diffType }}</td>
-                        <td>{{ row.reviewStatus }}</td>
-                        <td>{{ row.changeTypes.length ? row.changeTypes.join(', ') : '—' }}</td>
+                        <!-- PLAIN FIRST, TOKEN KEPT: the words say what happened, the code beside
+                             them is the engine's own enum, unchanged. -->
+                        <td>
+                          <span>{{ diffKindLabel(row.diffType) }}</span>
+                          <code class="sp-snap__token">{{ row.diffType }}</code>
+                        </td>
+                        <td>
+                          <span>{{ reviewLabel(row.reviewStatus) }}</span>
+                          <code class="sp-snap__token">{{ row.reviewStatus }}</code>
+                        </td>
+                        <td>
+                          <span v-if="row.changeTypes.length">{{ row.changeTypes.map(diffKindLabel).join('、') }}</span>
+                          <template v-else>—</template>
+                          <code v-if="row.changeTypes.length" class="sp-snap__token">{{ row.changeTypes.join(', ') }}</code>
+                        </td>
                         <td>{{ row.rowCount }}</td>
                         <td><code class="sp-snap__handle">{{ fingerprintLabel(row.keyFingerprint) }}</code></td>
                       </tr>
@@ -305,6 +317,31 @@
           </div>
         </div>
       </div>
+
+      <StockPrepTechnicalDetails testid="stock-prep-snapshot-tech">
+        <dl>
+          <dt>{{ bi('变更类别枚举', 'Change-kind vocabulary') }}</dt>
+          <dd>
+            <span v-for="entry in changeCountEntries" :key="entry.key">
+              <code>{{ entry.key }}</code> = {{ entry.label }};
+            </span>
+          </dd>
+          <dt>{{ bi('「不完整」是什么意思', 'What “incomplete” means') }}</dt>
+          <dd>
+            {{ bi(
+              '批次不完整 = 零行,或缺同步运行记录 —— 持久化没走完。此类批次的差异入口保持可见但禁用:拿半份数据比出来的结论会误导人。',
+              'A batch is incomplete when it has zero lines or no sync-run row — the persist path did not finish. Its diff entry stays visible but disabled: a comparison against half a batch would mislead.',
+            ) }}
+          </dd>
+          <dt>{{ bi('这些编号是什么', 'What those references are') }}</dt>
+          <dd>
+            {{ bi(
+              '句柄与 sha16 指纹是内部导航标识,不是业务值 —— 原始路径键、图号、数量、单位从不越过这一层。',
+              'The handles and sha16 fingerprints are internal navigation identifiers, not business values — raw path keys, drawing numbers, quantities and units never cross this boundary.',
+            ) }}
+          </dd>
+        </dl>
+      </StockPrepTechnicalDetails>
     </div>
   </div>
 </template>
@@ -335,6 +372,12 @@ import {
   type StockPreparationSnapshotDiffSummary,
   type StockPreparationSnapshotDiffRowsResult,
 } from '../../../services/integration/stockPreparation/bomSnapshotDiff'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import {
+  STOCK_PREP_DIFF_KIND_PLAIN,
+  STOCK_PREP_DIFF_REVIEW_PLAIN,
+  stockPrepEnumPlain,
+} from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
   defineProps<{
@@ -351,6 +394,17 @@ const { locale } = useLocale()
 // Same synchronous locale idiom as the shell / view 1 / the rest of the integration surface.
 function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
+}
+
+/** The two diff vocabularies in words; each falls back to the raw token it does not know. */
+function diffKindLabel(kind: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_DIFF_KIND_PLAIN, kind)
+  return plain ? bi(plain.zh, plain.en) : (kind ?? '—')
+}
+
+function reviewLabel(status: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_DIFF_REVIEW_PLAIN, status)
+  return plain ? bi(plain.zh, plain.en) : (status ?? '—')
 }
 
 const hasProject = computed(() => Boolean(props.projectId))
@@ -395,15 +449,18 @@ const changeCountEntries = computed(() => {
   const counts = diff.value?.changeCounts
   if (!counts) return []
   return [
-    { key: 'added', zh: '新增', en: 'Added', value: counts.added },
-    { key: 'removed', zh: '删除', en: 'Removed', value: counts.removed },
-    { key: 'quantityChanged', zh: '数量变化', en: 'Quantity changed', value: counts.quantityChanged },
-    { key: 'unitChanged', zh: '单位变化', en: 'Unit changed', value: counts.unitChanged },
-    { key: 'versionChanged', zh: '版本变化', en: 'Version changed', value: counts.versionChanged },
-    { key: 'pathChanged', zh: '路径变化', en: 'Path changed', value: counts.pathChanged },
-    { key: 'missingChildBom', zh: '缺失子 BOM', en: 'Missing child BOM', value: counts.missingChildBom },
-    { key: 'fingerprintChanged', zh: '指纹变化', en: 'Fingerprint changed', value: counts.fingerprintChanged },
-  ]
+    { key: 'added', value: counts.added },
+    { key: 'removed', value: counts.removed },
+    { key: 'quantityChanged', value: counts.quantityChanged },
+    { key: 'unitChanged', value: counts.unitChanged },
+    { key: 'versionChanged', value: counts.versionChanged },
+    { key: 'pathChanged', value: counts.pathChanged },
+    { key: 'missingChildBom', value: counts.missingChildBom },
+    { key: 'fingerprintChanged', value: counts.fingerprintChanged },
+  ].map((entry) => {
+    const plain = stockPrepEnumPlain(STOCK_PREP_DIFF_KIND_PLAIN, entry.key)
+    return { ...entry, label: plain ? bi(plain.zh, plain.en) : entry.key }
+  })
 })
 
 function resetRowDetail(): void {
@@ -697,6 +754,15 @@ watch(() => props.projectId, loadBatches)
 .sp-snap__handle {
   color: var(--ms-text-3);
   font-size: 12px;
+}
+
+/* The engine's own enum, kept beside the words it means — subordinate, still copyable. */
+.sp-snap__token {
+  display: inline-block;
+  margin-left: var(--ms-space-1);
+  color: var(--ms-text-3);
+  font-size: 11px;
+  word-break: break-all;
 }
 
 .sp-snap__recorded {

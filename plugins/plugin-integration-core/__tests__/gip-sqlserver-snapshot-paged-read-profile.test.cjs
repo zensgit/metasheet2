@@ -565,7 +565,11 @@ function packageTestChainIncludesBothSuites() {
     'node __tests__/gip-sqlserver-snapshot-paged-read-profile.test.cjs'
   const executorCommand =
     'node __tests__/gip-sqlserver-snapshot-page-sequence-executor.test.cjs'
-  const mainChain = packageJson.scripts.test.split(' && ')
+  // Chain source is `test-chain.txt` (moved out of the digest-pinned package.json); the commands
+  // and their order are unchanged, so the contiguity assertion below still means what it did.
+  const mainChain = require(
+    path.join(__dirname, '..', 'scripts', 'test-chain.cjs'),
+  ).loadChain(path.join(__dirname, '..'))
 
   const strategyIndex = mainChain.indexOf(strategyCommand)
   assert.notEqual(strategyIndex, -1)

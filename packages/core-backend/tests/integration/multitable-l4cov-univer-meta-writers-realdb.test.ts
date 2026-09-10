@@ -106,7 +106,8 @@ const seedRecord = async (id: string, data: Record<string, unknown> = { [F_STR]:
 // ── HTTP harness (real univerMetaRouter). A mutable actor + middleware, per the sibling config-restore suites.
 let app: Express
 let actor: { id: string; roles: string[]; perms: string[] }
-const MEMBER = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }
+// canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+const MEMBER = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema'] }
 const submit = (body: Record<string, unknown>) => {
   actor = MEMBER
   return request(app).post(`/api/multitable/views/${VIEW}/submit`).send(body)

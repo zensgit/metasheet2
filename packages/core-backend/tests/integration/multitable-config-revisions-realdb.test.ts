@@ -52,7 +52,8 @@ describeIfDatabase('multitable config-revisions recording — T9-R1 (real DB)', 
   beforeAll(async () => {
     app = express()
     app.use(express.json())
-    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['owner'], perms: ['multitable:read', 'multitable:write', 'multitable:manage'] }; next() })
+    // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
+    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['owner'], perms: ['multitable:read', 'multitable:write', 'multitable:manage', 'multitable:manage-schema'] }; next() })
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'CR Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'CR Sheet'])

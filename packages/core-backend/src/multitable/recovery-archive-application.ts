@@ -4,6 +4,10 @@ import type {
 } from '../routes/univer-meta'
 import type { RecoveryArchiveKeyCustodyAdapter } from './recovery-archive-crypto'
 import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
+import type {
+  RecoveryArchiveObservability,
+  RecoveryArchiveWorkerLifecycle,
+} from './recovery-archive-observability'
 import type { RecoveryArchivePreviewRuntime } from './recovery-archive-preview'
 import {
   bootRecoveryArchiveRestoreWorker,
@@ -49,11 +53,13 @@ const COMPOSITION_FACTORY_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FAC
 const DATABASE_RUNTIME_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_DATABASE_RUNTIME_FAILED'
 const WORKER_BOOT_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_BOOT_FAILED'
 const WORKER_STOP_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED'
+const WORKER_STOP_TIMEOUT_MS = 10_000
 
 export function createRecoveryArchiveApplication(
   factory: RecoveryArchiveApplicationCompositionFactory | undefined,
   resolveDatabaseRuntime: () => RecoveryArchiveApplicationDatabaseRuntime,
   env: Readonly<Record<string, string | undefined>> = process.env,
+  observability?: RecoveryArchiveObservability,
 ): RecoveryArchiveApplication {
   const activationEnv = Object.freeze({
     MULTITABLE_RECOVERY_ARCHIVE_ENABLED: env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED,
@@ -120,25 +126,62 @@ export function createRecoveryArchiveApplication(
           env: activationEnv,
           intervalMs: composition.workerIntervalMs,
           createWorker: () => createRecoveryArchiveRestoreWorker(workerInput),
+          onResult: (result) => observability?.recordRun(result),
         })
       } catch {
         throw new Error(WORKER_BOOT_FAILED)
       }
       if (!workerLoop) throw new Error(WORKER_BOOT_FAILED)
+      recordLifecycleSafely(observability, 'started')
     },
     async stopWorker() {
       if (workerStop) return workerStop
       if (!workerLoop) return
       const loop = workerLoop
-      workerStop = loop.stop().catch(() => {
-        throw new Error(WORKER_STOP_FAILED)
-      })
+      workerStop = stopRecoveryArchiveWorkerLoop(loop).then(
+        () => {
+          recordLifecycleSafely(observability, 'drained')
+        },
+        (error: unknown) => {
+          recordLifecycleSafely(observability, 'drain_failed')
+          throw error
+        },
+      )
       try {
         await workerStop
       } finally {
         workerLoop = null
       }
     },
+  })
+}
+
+function recordLifecycleSafely(
+  observability: RecoveryArchiveObservability | undefined,
+  event: RecoveryArchiveWorkerLifecycle,
+): void {
+  try {
+    observability?.recordLifecycle(event)
+  } catch {
+    // Observability cannot change worker lifecycle state.
+  }
+}
+
+function stopRecoveryArchiveWorkerLoop(loop: RecoveryArchiveRestoreWorkerLoop): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(WORKER_STOP_FAILED))
+    }, WORKER_STOP_TIMEOUT_MS)
+    void loop.stop().then(
+      () => {
+        clearTimeout(timer)
+        resolve()
+      },
+      () => {
+        clearTimeout(timer)
+        reject(new Error(WORKER_STOP_FAILED))
+      },
+    )
   })
 }
 

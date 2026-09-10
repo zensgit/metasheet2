@@ -843,6 +843,31 @@ describe('ApprovalFormInlineEditor extraction (F0, Gate F0)', () => {
     expect(operatorSelect()).toBeNull()
   })
 
+  it('(n2) clears a stale visibility dependency when the depended-on field is retyped to department (Lock-2 L2-A)', async () => {
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-field-palette-text"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const dependentRow = focusedFieldRow()
+    const dependsSelect = dependentRow.querySelector('[data-testid="approval-field-visibility-depends"]') as HTMLSelectElement
+    const dependencyOption = dependsSelect.querySelector('option:not([value=""])') as HTMLOptionElement
+    const dependencyValue = dependencyOption.value
+    dependsSelect.value = dependencyValue
+    dependsSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    const operatorSelect = () => dependentRow.querySelector('[data-testid="approval-field-visibility-operator"]')
+    expect(operatorSelect()).not.toBeNull()
+
+    const targetRow = Array.from(container!.querySelectorAll('[data-testid="approval-template-field-row"]'))
+      .find((row) => row !== dependentRow) as HTMLElement
+    const typeSelect = targetRow.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement
+    typeSelect.value = 'department'
+    typeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(operatorSelect()).toBeNull()
+  })
+
   // Lock-8 L8-A gate P2-1 hardening: `fieldPaletteGroups` (TemplateAuthoringView.vue) is a SECOND,
   // independent copy of the F2 `APPROVAL_FORM_PALETTE_GROUPS` membership (approval-form-palette-
   // chips.spec.ts:107 already forces THAT array's completeness against `AUTHORABLE_FIELD_TYPES`,

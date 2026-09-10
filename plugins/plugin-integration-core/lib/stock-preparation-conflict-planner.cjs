@@ -14,6 +14,19 @@ const {
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
 const { isTenantExtensionField } = require('./stock-preparation-extension-namespace.cjs')
+// 父组件图号 / 父组件名称 for the WORKING SHEET. The expansion row carries the parent only as an
+// OBJ_ID (`parentSourceId`), so the readable parent columns have to be resolved by an in-batch
+// join. That join already exists — the immutable snapshot line resolves parentDrawingNo /
+// parentVersion / parentName through it — and it is REUSED here rather than reimplemented, so the
+// working sheet and the snapshot can never disagree about who a row's parent is.
+//
+// Direction is safe: the mapper pulls in bom-expansion / readonly-intake / common only, none of
+// which reaches back into this module, so this is a plain edge and not a load-order cycle (unlike
+// stock-preparation-carry-policy.cjs, which does require this module and is therefore lazy below).
+const {
+  SPEC_KEYS: EXPANSION_SPEC_KEYS,
+  __internals: { buildParentIndex: buildExpansionParentIndex },
+} = require('./stock-preparation-expansion-snapshot-mapper.cjs')
 
 const DECISIONS = Object.freeze({
   ADD: 'add',
@@ -67,6 +80,54 @@ const DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY = 'keep_multiple_rows'
 // no named handling for. A policy that lands here is inert: selecting it is accepted, changes
 // nothing, and the rows hold anonymously.
 const DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON = 'unsupported_policy'
+
+// ── O1-B: identity for the ANONYMOUS hold families ──────────────────────────
+//
+// Three planner emitters produce manual_confirm holds WITHOUT an idempotencyKey
+// (:1023 expanded-keyless, :1029 existing-keyless, :1035 the c2_row_error
+// UMBRELLA — which is `rowError.type || 'c2_row_error'`, an unvalidated
+// passthrough covering 10 real BOM-expander types plus the ext-mapping coercion
+// codes). The confirmation-decision ledger keys every row on `rowIdentity`, so
+// without an identity these holds can only ever be counted, never ledgered.
+//
+// This block derives a values-free identity from the context the emitters
+// ACTUALLY carry — see docs/development/takeover-beiliao-20260821/
+// anonymous-hold-identity-spec-20260829.md for the per-family audit. The
+// identity is a HASH: component refs, paths and order ids go IN, nothing comes
+// back OUT. It is a pure function of the plan input, so the same source state
+// reproduces the same identity — the property supersede/reopen leans on.
+//
+// The prefix is a RESERVED NAMESPACE. A real idempotencyKey is
+// `JSON.stringify({projectNo, componentSourceId, parentSourceId, path})`
+// (stock-preparation-bom-expansion.cjs makeIdempotencyKey), so it always starts
+// with '{' and can never produce this prefix. The ledger fences both directions.
+const ANONYMOUS_HOLD_IDENTITY_PREFIX = 'anon-hold:v1:'
+
+// Row-granularity context for the two keyless-ROW families. projectNo is folded
+// in but does NOT count as a discriminator: a row carrying nothing but the
+// project number addresses nothing, and an identity that addresses nothing is
+// worse than an honest refusal (see ANONYMOUS_HOLD_IDENTITY_UNAVAILABLE).
+const ANONYMOUS_ROW_IDENTITY_FIELDS = Object.freeze([
+  'componentSourceId',
+  'parentSourceId',
+  'path',
+  'depth',
+])
+
+// Locus-granularity context for the 10 expander rowError types. Read every one
+// of the 12 emit sites before changing this: NONE of them attaches an order id,
+// a component ref or a path — `field` (a frozen read-plan source column name),
+// `depth` and, for invalid_quantity only, `relation` is the whole of it.
+const ANONYMOUS_LOCUS_IDENTITY_FIELDS = Object.freeze(['field', 'depth', 'relation'])
+
+// Cell-granularity context for the ext-mapping coercion codes. The mapper emits
+// { type, target, sourceColumn, expectedType } and the expander adds `depth`;
+// all four are CONFIG identifiers (an ext_ field id, a source column name, a
+// pack-derived type token), never customer values. The planner's `details`
+// projection drops target/sourceColumn/expectedType, so the identity reads the
+// raw rowError instead of the conflictSummary — deliberately, so conflictSummary
+// (which feeds the ledger's inputFingerprint) is left untouched.
+const ANONYMOUS_CELL_IDENTITY_FIELDS = Object.freeze(['target', 'sourceColumn', 'expectedType', 'depth'])
 
 const DUPLICATE_SOURCE_DETAIL_FIELDS = Object.freeze([
   'sourceDetailId',
@@ -503,6 +564,66 @@ function stableFingerprint(value) {
     .slice(0, 16)}`
 }
 
+// ── O1-B identity derivation (pure; see the constant block near the top) ─────
+
+// Scalars are String()-normalised before hashing: the canonical records API can
+// hand `depth` back as "2" where the expander produced 2, and an identity that
+// flips on that round trip would supersede its own ledger row on every other
+// reconcile. Non-scalars go through the key-sorted stringifier.
+function anonymousIdentityScalar(value) {
+  return value !== null && typeof value === 'object' ? stableStringify(value) : String(value)
+}
+
+function anonymousIdentityContext(source, fields) {
+  const context = {}
+  for (const field of fields) {
+    const value = source ? source[field] : undefined
+    // isBlank() treats numeric 0 as PRESENT — depth 0 (the BOM root) is a real
+    // discriminator and must never be dropped here.
+    if (isBlank(value)) continue
+    context[field] = anonymousIdentityScalar(value)
+  }
+  return context
+}
+
+function anonymousHoldIdentity(granularity, context) {
+  return `${ANONYMOUS_HOLD_IDENTITY_PREFIX}${granularity}:sha256:${crypto
+    .createHash('sha256')
+    .update(`stock-preparation-anonymous-hold-identity:${granularity}:v1\0`)
+    .update(stableStringify(context))
+    .digest('hex')
+    .slice(0, 32)}`
+}
+
+// A keyless expanded/existing row. `undefined` (no identity) when the row
+// carries no lineage discriminator at all beyond its project number — that row
+// addresses nothing, and a ledger row nothing could ever be matched back to is
+// worse than an honest deferral.
+function anonymousRowIdentity(conflictType, row, projectNo) {
+  const context = anonymousIdentityContext(row, ANONYMOUS_ROW_IDENTITY_FIELDS)
+  if (Object.keys(context).length === 0) return undefined
+  context.conflictType = conflictType
+  if (!isBlank(projectNo)) context.projectNo = anonymousIdentityScalar(projectNo)
+  return anonymousHoldIdentity('row', context)
+}
+
+// A C2 rowError. Coercion refusals name the mapped CELL they refused (ext
+// target x source column x declared type x depth) and get `cell` granularity;
+// every other rowError gets `locus` granularity — the (field, depth, relation)
+// position, which is genuinely all its emitter attaches. `undefined` when the
+// error carries nothing but its type (the unvalidated `c2_row_error` fallback).
+function anonymousRowErrorIdentity(conflictType, rowError) {
+  const cell = anonymousIdentityContext(rowError, ANONYMOUS_CELL_IDENTITY_FIELDS)
+  if (cell.target !== undefined && cell.sourceColumn !== undefined) {
+    cell.conflictType = conflictType
+    return anonymousHoldIdentity('cell', cell)
+  }
+  const locus = anonymousIdentityContext(rowError, ANONYMOUS_LOCUS_IDENTITY_FIELDS)
+  if (Object.keys(locus).length === 0) return undefined
+  locus.conflictType = conflictType
+  return anonymousHoldIdentity('locus', locus)
+}
+
 function firstPresent(row, fields) {
   for (const field of fields) {
     const value = row && row[field]
@@ -876,6 +997,63 @@ function pickFields(row, fields) {
   return out
 }
 
+// ── 父组件图号 / 父组件名称 / 规格: denormalized onto the working sheet ──────────
+//
+// The three columns the 备料 working sheet was missing, resolved HERE — at the point the add
+// record / update patch is built — and NOT by rewriting the expansion rows, because everything
+// upstream of this point keys, groups, fingerprints and adjudicates on those rows: `keyOf`,
+// `groupByKey`, `duplicateGroupDiscriminator`'s `stableFingerprint`, and the persisted
+// duplicate-resolution key derived from it. Enriching a row before any of that would move
+// persisted identities for values nobody adjudicates on. Deriving it here moves nothing.
+//
+// PARENT (父组件图号/父组件名称): the expansion emits the parent as an OBJ_ID only, so these
+// come from the in-batch parent join — the SAME index the immutable snapshot line resolves its
+// own parentDrawingNo/parentName through, reused rather than reimplemented.
+//
+// 规格: the expansion row already carries `spec`, and ONLY where the deployment DECLARED
+// readPlan.part.specField (stock-preparation-bom-expansion.cjs). The read is the mapper's own
+// closed SPEC_KEYS vocabulary, so the working sheet and the snapshot line accept exactly the
+// same keys. It needs a line here at all only because the frozen column id is `componentSpec`
+// (the `spec` id belongs to the `ext_` namespace — see the template) — never because the source
+// column is guessed. Undeclared => no `spec` key => no `componentSpec` written => empty column.
+//
+// GRACEFUL ABSENCE throughout: a root row (no parentSourceId), a row whose parent is not in this
+// batch, and a deployment with no declared spec slot each add NO key at all. pickFields then
+// writes nothing for that column, so an UPDATE never blanks a value that is already there.
+const DENORMALIZED_PLM_FIELD_IDS = Object.freeze(['parentComponentCode', 'parentComponentName', 'componentSpec'])
+
+function firstPresentValue(row, keys) {
+  for (const key of keys) {
+    if (row && !isBlank(row[key])) return row[key]
+  }
+  return undefined
+}
+
+function denormalizedPlmFields(row, parentIndex) {
+  const out = {}
+  const parentSourceId = row && row.parentSourceId
+  // buildParentIndex keys on `optionalString(componentSourceId)`, i.e. trimmed non-empty STRINGS
+  // only. The lookup mirrors that exactly rather than coercing, so the two can never disagree
+  // about which ids are joinable.
+  if (parentIndex && typeof parentSourceId === 'string' && parentSourceId.trim() !== '') {
+    const parent = parentIndex.get(parentSourceId.trim())
+    if (parent) {
+      if (!isBlank(parent.componentCode)) out.parentComponentCode = parent.componentCode
+      if (!isBlank(parent.componentName)) out.parentComponentName = parent.componentName
+    }
+  }
+  const spec = firstPresentValue(row, EXPANSION_SPEC_KEYS)
+  if (spec !== undefined) out.componentSpec = spec
+  return Object.keys(out).length > 0 ? out : null
+}
+
+// Returns the row unchanged (same object identity) when nothing resolves, so a plan over a batch
+// with no resolvable parents and no declared spec slot is byte-identical to the pre-change one.
+function withDenormalizedPlmFields(row, parentIndex) {
+  const derived = denormalizedPlmFields(row, parentIndex)
+  return derived ? { ...row, ...derived } : row
+}
+
 function assertNoHumanFields(payload, humanFields, context) {
   for (const field of humanFields) {
     if (Object.prototype.hasOwnProperty.call(payload, field)) {
@@ -919,13 +1097,26 @@ function addDecision(decisions, counts, decision) {
 }
 
 function manualConfirm(decisions, counts, input) {
-  addDecision(decisions, counts, {
+  const decision = {
     decision: DECISIONS.MANUAL_CONFIRM,
     idempotencyKey: input.idempotencyKey,
     conflictSummary: makeConflictSummary(input.type, input.details),
     changedFields: Array.isArray(input.changedFields) ? input.changedFields.slice() : [],
     source: input.source || 'planner',
-  })
+  }
+  // O1-B. The reserved namespace is enforced HERE too, not only at the ledger:
+  // a keyed hold whose key looks like a derived anonymous identity would let a
+  // forged plan claim a ledger row that belongs to a different addressing
+  // scheme. Fail closed rather than key it.
+  if (typeof decision.idempotencyKey === 'string' && decision.idempotencyKey.startsWith(ANONYMOUS_HOLD_IDENTITY_PREFIX)) {
+    throw new StockPreparationConflictPlannerError('idempotencyKey must not use the reserved anonymous-hold identity namespace', {
+      field: 'idempotencyKey',
+    })
+  }
+  // Added LAST and only when present, so every keyed hold's decision object is
+  // byte-identical to the pre-O1-B one.
+  if (input.derivedRowIdentity) decision.derivedRowIdentity = input.derivedRowIdentity
+  addDecision(decisions, counts, decision)
 }
 
 function makeAddDecision(row, runId, plannedAt, plmFields, humanFields) {
@@ -965,6 +1156,75 @@ function makeSkipDecision(row) {
   }
 }
 
+// ── W4 carry wiring (execution-plan W4a; adjudication Layer 3) ───────────────
+//
+// The carry-policy module is required LAZILY, inside the plan pass, because it
+// imports THIS module for the frozen DECISIONS vocabulary — a top-level require
+// here would be a load-order cycle. By first call both modules are fully loaded.
+let lazyCarryPolicyModule = null
+function carryPolicyModule() {
+  if (!lazyCarryPolicyModule) lazyCarryPolicyModule = require('./stock-preparation-carry-policy.cjs')
+  return lazyCarryPolicyModule
+}
+
+// Map ONE planCarry outcome for an ADD row into plan artifacts. The write
+// semantics are deliberately layered, never rewritten (adjudication §3.1: 接线
+// + 存在性判定, not new decision logic):
+//   * NO_CARRY            → nothing rides the plan; counted in the summary.
+//   * CARRY_VIA_CONFIRM   → the ADD stays (human-free — the wall still asserts)
+//       and a manual_confirm HOLD rides beside it under the closed
+//       carry_reattach_requires_confirm type, CARRYING the proposal object.
+//       manual_confirm is DELIBERATELY the planner literal so the apply-writer
+//       routes the hold to `held` unchanged, while the proposal itself (decision
+//       'carry_via_confirm') can NEVER enter the apply path — the writer's
+//       unsupported_decision throw stands between it and any write. The carried
+//       write happens ONLY via the K2 applyCarryViaConfirm executor.
+//   * MANUAL_CONFIRM      → the carry module's own hold object rides verbatim
+//       (carry_ambiguous_component_source / carry_reattach_requires_confirm /
+//       carry_conflicting_source_content), again beside the human-free ADD:
+//       holding row CREATION would wedge the later K2 carry (its target row
+//       must exist), and the thing the hold protects — the human context —
+//       cannot leak through an ADD the wall already strips.
+// The proposal hold's conflict type and its EXACT emitted conflictSummary, defined ONCE.
+//
+// The ledger's carry confirm path RECOMPUTES the proposal fingerprint from the submitted decision
+// rather than trusting the client's `inputFingerprint` (the P1 fix). That recomputation must use
+// byte-identically the same summary this emitter puts on the hold, so both sides read it from here
+// and a drift breaks a test instead of silently making every carry confirm unverifiable.
+const CARRY_PROPOSAL_CONFLICT_TYPE = 'carry_reattach_requires_confirm'
+const CARRY_PROPOSAL_CONFLICT_SUMMARY = Object.freeze(makeConflictSummary(CARRY_PROPOSAL_CONFLICT_TYPE, { proposed: true }))
+// The proposal hold's `changedFields`, likewise shared with the verifier.
+const CARRY_PROPOSAL_CHANGED_FIELDS = Object.freeze([])
+
+function emitCarryOutcome({ decisions, counts, carryDecision, carryStats }) {
+  const carry = carryPolicyModule()
+  if (carryDecision.decision === carry.CARRY_DECISIONS.NO_CARRY) {
+    carryStats.counts.noCarry += 1
+    carryStats.noCarryByReason[carryDecision.reason] = (carryStats.noCarryByReason[carryDecision.reason] || 0) + 1
+    return
+  }
+  if (carryDecision.decision === carry.CARRY_DECISIONS.CARRY_VIA_CONFIRM) {
+    carryStats.counts.carryViaConfirm += 1
+    carryStats.holdsByConflictType[CARRY_PROPOSAL_CONFLICT_TYPE] =
+      (carryStats.holdsByConflictType[CARRY_PROPOSAL_CONFLICT_TYPE] || 0) + 1
+    addDecision(decisions, counts, {
+      decision: DECISIONS.MANUAL_CONFIRM,
+      idempotencyKey: carryDecision.idempotencyKey,
+      conflictSummary: { ...CARRY_PROPOSAL_CONFLICT_SUMMARY },
+      changedFields: CARRY_PROPOSAL_CHANGED_FIELDS.slice(),
+      source: 'carry_policy',
+      carryProposal: carryDecision,
+    })
+    return
+  }
+  // planCarry's closed vocabulary leaves exactly MANUAL_CONFIRM; its builder
+  // already validated the conflictType against the frozen carry set.
+  carryStats.counts.manualConfirm += 1
+  const holdType = carryDecision.conflictSummary && carryDecision.conflictSummary.type
+  if (holdType) carryStats.holdsByConflictType[holdType] = (carryStats.holdsByConflictType[holdType] || 0) + 1
+  addDecision(decisions, counts, carryDecision)
+}
+
 function makeInactiveDecision(existing, runId, plannedAt, humanFields) {
   const patch = {
     active: false,
@@ -987,6 +1247,12 @@ function planStockPreparationConflicts(input = {}) {
   const expandedRows = normalizeRows(input.expandedRows, 'expandedRows')
   const existingRows = normalizeRows(input.existingRows, 'existingRows')
   const rowErrors = normalizeRows(input.rowErrors, 'rowErrors')
+  // W4 carry opt-in. Absent/null => null => the plan below is BYTE-IDENTICAL to
+  // the pre-wiring planner (invariant (i)); present => validated through the
+  // carry module's own closed vocabulary (fail-closed on any unknown key/value).
+  const carryPolicy = input.carryPolicy === undefined || input.carryPolicy === null
+    ? null
+    : carryPolicyModule().normalizeCarryPolicy(input.carryPolicy)
 
   const templateHumanFields = fieldIdsByOwnership(template, 'human_preserved')
   if (!sameStringSet(HUMAN_PRESERVED_FIELD_IDS.slice(), templateHumanFields)) {
@@ -1012,6 +1278,10 @@ function planStockPreparationConflicts(input = {}) {
   }
   const decisions = []
 
+  // Built over the WHOLE batch as read, before dedup/resolution, exactly as the snapshot mapper
+  // builds it — a parent is a parent whether or not its own row later lands in a duplicate group.
+  const parentIndex = buildExpansionParentIndex(expandedRows)
+
   const expanded = groupByKey(expandedRows)
   const existing = groupByKey(existingRows)
   const resolvedExpanded = resolveDuplicateExpandedRows({
@@ -1020,27 +1290,36 @@ function planStockPreparationConflicts(input = {}) {
     duplicatePolicyReview: input.duplicatePolicyReview,
   })
 
+  // O1-B: the three ANONYMOUS emitters. Each hold now carries a derived,
+  // values-free identity when its row/error offers one — the loop variables
+  // used to be discarded outright, which is exactly why these classes could
+  // never be ledgered. `details` and `conflictSummary` are UNCHANGED: the
+  // identity rides beside them so no existing fingerprint moves.
   for (const row of expanded.missing) {
     manualConfirm(decisions, counts, {
       type: 'missing_expanded_idempotency_key',
       source: 'expanded_row',
+      derivedRowIdentity: anonymousRowIdentity('missing_expanded_idempotency_key', row, row.projectNo),
     })
   }
   for (const row of existing.missing) {
     manualConfirm(decisions, counts, {
       type: 'missing_existing_idempotency_key',
       source: 'existing_row',
+      derivedRowIdentity: anonymousRowIdentity('missing_existing_idempotency_key', row, row.projectNo),
     })
   }
   for (const rowError of rowErrors) {
+    const rowErrorType = rowError.type || 'c2_row_error'
     manualConfirm(decisions, counts, {
-      type: rowError.type || 'c2_row_error',
+      type: rowErrorType,
       source: 'c2_row_error',
       details: {
         field: rowError.field,
         depth: rowError.depth,
         relation: rowError.relation,
       },
+      derivedRowIdentity: anonymousRowErrorIdentity(rowErrorType, rowError),
     })
   }
 
@@ -1069,14 +1348,54 @@ function planStockPreparationConflicts(input = {}) {
     }
   }
 
+  // W4 carry: the pool of carry SOURCES is exactly the prior-batch rows this
+  // plan's missing-from-PLM sweep treats as inactive — the already-inactive ones
+  // (SKIP already_inactive below) as they stand, and the ones the sweep is ABOUT
+  // to mark, annotated active:false so planCarry's precondition reads the state
+  // the plan itself establishes. The membership condition mirrors the sweep's
+  // own, byte for byte. Built only under opt-in — a no-config plan never touches
+  // this path.
+  let carrySources = null
+  let carryStats = null
+  if (carryPolicy) {
+    carrySources = []
+    carryStats = {
+      counts: { noCarry: 0, carryViaConfirm: 0, manualConfirm: 0 },
+      noCarryByReason: {},
+      holdsByConflictType: {},
+    }
+    for (const [key, rows] of existing.keyed.entries()) {
+      if (expanded.keyed.has(key) || resolvedExpanded.keyed.has(key) || duplicateExistingKeys.has(key)) continue
+      const existingRow = rows[0]
+      carrySources.push(existingRow.active === false ? existingRow : { ...existingRow, active: false })
+    }
+  }
+
   for (const [key, rows] of resolvedExpanded.keyed.entries()) {
     if (duplicateExpandedKeys.has(key) || duplicateExistingKeys.has(key)) continue
-    const row = rows[0]
+    // The ONE place the working sheet's row is composed. Everything below — the add record, the
+    // refresh comparison that decides UPDATE vs SKIP, and the update patch — sees the same
+    // derived parent columns, which is also why a re-pull BACKFILLS them onto rows written
+    // before this change: an existing row with no parentDrawing and a resolvable parent is a
+    // plm_system-field change like any other.
+    const row = withDenormalizedPlmFields(rows[0], parentIndex)
     const existingGroup = existing.keyed.get(key)
     const existingRow = existingGroup && existingGroup[0]
     if (!existingRow) {
       if (strategy.addMissing) {
         addDecision(decisions, counts, makeAddDecision(row, runId, plannedAt, plmFields, humanFields))
+        if (carryPolicy) {
+          // planCarry BEFORE anything can write (adjudication §3.1): one closed
+          // decision per candidate ADD, mapped to plan artifacts — never a
+          // silent field write. Its errors (e.g. a sourceless row under a
+          // cross-key policy) propagate fail-closed rather than degrade.
+          emitCarryOutcome({
+            decisions,
+            counts,
+            carryDecision: carryPolicyModule().planCarry(carrySources, row, carryPolicy, { template }),
+            carryStats,
+          })
+        }
       } else {
         manualConfirm(decisions, counts, {
           idempotencyKey: key,
@@ -1137,6 +1456,18 @@ function planStockPreparationConflicts(input = {}) {
   // legacy (pack-unaware) call still produces a byte-identical plan object.
   const packAwareOwnership = ownership.packAware ? packAwareOwnershipEvidence(ownership) : undefined
 
+  // W4 carry summary stanza — values-free (policy tokens, counts, closed reason
+  // and conflict-type vocabularies), and ADDED ONLY under opt-in so a no-config
+  // plan stays byte-identical (invariant (i)).
+  const carrySummary = carryPolicy
+    ? {
+        carryPolicy: { ...carryPolicy },
+        counts: { ...carryStats.counts },
+        noCarryByReason: { ...carryStats.noCarryByReason },
+        holdsByConflictType: { ...carryStats.holdsByConflictType },
+      }
+    : undefined
+
   return {
     valid: counts[DECISIONS.MANUAL_CONFIRM] === 0,
     runId,
@@ -1156,6 +1487,7 @@ function planStockPreparationConflicts(input = {}) {
       duplicateExpandedKeyDiagnostics: duplicateExpandedKeyDiagnostics(expanded.keyed),
       duplicateExpandedKeyResolution: resolvedExpanded.resolution,
       ...(packAwareOwnership ? { packAwareOwnership } : {}),
+      ...(carrySummary ? { carry: carrySummary } : {}),
     },
   }
 }
@@ -1182,6 +1514,9 @@ function summarizeConflictPlanForEvidence(plan = {}) {
     packAwareOwnership: isPlainObject(summary.packAwareOwnership)
       ? JSON.parse(JSON.stringify(summary.packAwareOwnership))
       : undefined,
+    // W4 carry: values-free stanza, passed through ONLY when present so
+    // no-config evidence stays byte-identical.
+    ...(isPlainObject(summary.carry) ? { carry: JSON.parse(JSON.stringify(summary.carry)) } : {}),
   }
 }
 
@@ -1190,6 +1525,11 @@ module.exports = {
   RUN_FIELD_IDS,
   LINEAGE_FIELD_IDS,
   IDENTITY_FIELD_IDS,
+  DENORMALIZED_PLM_FIELD_IDS,
+  ANONYMOUS_HOLD_IDENTITY_PREFIX,
+  CARRY_PROPOSAL_CONFLICT_TYPE,
+  CARRY_PROPOSAL_CONFLICT_SUMMARY,
+  CARRY_PROPOSAL_CHANGED_FIELDS,
   DUPLICATE_EXPANDED_KEY_POLICIES,
   DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
   DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON,
@@ -1202,8 +1542,13 @@ module.exports = {
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
   __internals: {
+    anonymousHoldIdentity,
+    anonymousRowErrorIdentity,
+    anonymousRowIdentity,
     assertNoHumanFields,
     changedFields,
+    denormalizedPlmFields,
+    withDenormalizedPlmFields,
     normalizeInstalledFieldProperties,
     packAwareOwnershipEvidence,
     pickFields,

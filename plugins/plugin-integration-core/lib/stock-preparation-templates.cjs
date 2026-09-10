@@ -13,6 +13,82 @@ const STOCK_PREPARATION_FIELD_OWNERSHIPS = Object.freeze(['plm_system', 'human_p
 const STOCK_PREPARATION_OWNERSHIP_SET = new Set(STOCK_PREPARATION_FIELD_OWNERSHIPS)
 const STOCK_PREPARATION_TYPE_SET = new Set(STOCK_PREPARATION_FIELD_TYPES)
 
+// ---------------------------------------------------------------------------
+// DISPLAY LANGUAGE of the tables provisioned from these templates.
+//
+// The first customer-facing deployment created every managed sheet with the
+// English template names below. The operator could not read them, so 66 field
+// headers and 4 sheet names were renamed BY HAND, directly against that
+// deployment's database. That cost repeats at every customer until the
+// templates carry the names themselves -- which is what the additive `labelZh`
+// on each field and on each template's own sheet name is for.
+//
+// This product has no server-side deployment language: locale lives entirely in
+// the web app (`apps/web/src/composables/useLocale.ts`, the `metasheet_locale`
+// localStorage key), and the backend has never known which one a deployment
+// speaks. So ONE narrow setting is introduced here, in the plugin's existing
+// `MULTITABLE_STOCK_PREP_*` env style, and it is read in exactly one place.
+//
+// UNSET -- the state every deployment that exists today is in -- resolves to
+// `en`, and every structure built from these templates is byte-for-byte what it
+// is today.
+const TEMPLATE_LABEL_LOCALE_ENV = 'MULTITABLE_STOCK_PREP_TABLE_LABEL_LOCALE'
+const DEFAULT_TEMPLATE_LABEL_LOCALE = 'en'
+const TEMPLATE_LABEL_LOCALES = Object.freeze(['en', 'zh-CN'])
+
+// Accepts the spellings a human actually types into an env file, mirroring the
+// web app's own normalization. Anything else -- including a typo -- resolves to
+// English rather than throwing: a mis-spelled DISPLAY LANGUAGE must never be
+// able to block provisioning of the tables themselves.
+function normalizeTemplateLabelLocale(value) {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase().replace(/_/g, '-') : ''
+  if (raw === 'zh' || raw === 'zh-cn' || raw === 'zh-hans' || raw === 'zh-hans-cn') return 'zh-CN'
+  return DEFAULT_TEMPLATE_LABEL_LOCALE
+}
+
+// THE one place the deployment's table-display language is read. Every builder
+// below takes an explicit `locale` option that DEFAULTS to this, so a caller (or
+// a test) can drive either leg without touching process.env while production
+// keeps a single authority.
+function resolveTemplateLabelLocale(env = process.env) {
+  return normalizeTemplateLabelLocale(env ? env[TEMPLATE_LABEL_LOCALE_ENV] : undefined)
+}
+
+// Pick the display name of one labelled thing -- a field, or a template's own
+// sheet name. `label` is always present and is the fallback; `labelZh` is purely
+// additive and is used only when the deployment asked for Chinese.
+function pickTemplateLabel(labelled, locale) {
+  if (!labelled) return undefined
+  if (normalizeTemplateLabelLocale(locale) === 'zh-CN' && typeof labelled.labelZh === 'string' && labelled.labelZh) {
+    return labelled.labelZh
+  }
+  return labelled.label
+}
+
+// DEFAULT VIEW NAMES, beside the labels they belong with. A managed table is created
+// with one grid view (a sheet with zero views cannot be opened, and blocks its base),
+// and that view needs a human name in the SAME language the sheet and its columns got.
+// These are labelled things exactly like a template or a field, so they go through the
+// same `pickTemplateLabel` + `resolveTemplateLabelLocale` mechanism -- there is no second
+// locale reader anywhere. With the locale unset, both resolve to the English name.
+const STOCK_PREPARATION_DEFAULT_VIEW_LABELS = Object.freeze({
+  // The canonical main table and every sandbox target.
+  records: Object.freeze({ label: 'All Records', labelZh: '全部记录' }),
+  // The confirmation-decision ledger.
+  decisions: Object.freeze({ label: 'All Decisions', labelZh: '全部裁决' }),
+})
+
+// `options.locale` is the creation-time display language, defaulting -- like every other
+// builder here -- to the deployment setting.
+function pickDefaultViewName(kind, options = {}) {
+  const labelled = STOCK_PREPARATION_DEFAULT_VIEW_LABELS[kind]
+  if (!labelled) {
+    throw new StockPreparationTemplateError(`unknown default view kind: ${String(kind)}`)
+  }
+  const locale = options.locale === undefined ? resolveTemplateLabelLocale() : options.locale
+  return pickTemplateLabel(labelled, locale)
+}
+
 const REQUIRED_SYSTEM_FIELDS = Object.freeze([
   'projectNo',
   'idempotencyKey',
@@ -25,6 +101,15 @@ const REQUIRED_SYSTEM_FIELDS = Object.freeze([
   'lastPlmConflictSummary',
 ])
 
+// THE HUMAN WHITELIST -- the load-bearing vocabulary. Growing it is an INDEPENDENT
+// DESIGN GATE (general-prep-execution-plan-20260722.md §3): every id listed here is
+// simultaneously (a) refused to the apply-writer, so a PLM refresh can never write it
+// (assertNoHumanFields, stock-preparation-apply-writer.cjs), (b) carried across a
+// re-import by the carry policy, (c) required by the conflict-planner's drift check to
+// equal the template's human band exactly, and (d) the only fields a suggestion operator
+// may propose into. Adding an id here is therefore not a label change -- it is a
+// simultaneous statement about four subsystems, which is why it may never be done by a
+// repair verb or any other runtime path.
 const HUMAN_PRESERVED_FIELD_IDS = Object.freeze([
   'materialType',
   'blankType',
@@ -34,6 +119,17 @@ const HUMAN_PRESERVED_FIELD_IDS = Object.freeze([
   'notes',
   'procurementReply',
   'warehouseConfirmation',
+  // 备料-time human decision: 自制 or 外购. See the field declaration on the main
+  // template for why this is neither a PLM column nor an ERP column.
+  'makeOrBuy',
+  // The DEPARTMENTAL RESPONSE BAND. The legacy 备料 system carried purchasing and
+  // warehouse as two separate 1:1 tables, each with its own typed completion flag and
+  // real dates; that collapsed into one sheet, and only the two free-text remarks
+  // survived. These four restore the machine-readable half.
+  'procurementDone',
+  'procurementReplyDate',
+  'warehouseDone',
+  'actualArrivalDate',
 ])
 
 const FEASIBILITY_FORBIDDEN_MECHANISMS = Object.freeze([
@@ -109,6 +205,18 @@ function assertSafeSchemaString(value, field) {
   return str
 }
 
+// Additive Chinese display name, for a field or for a template's own sheet name.
+// It NEVER replaces `label`: every reader that uses `label` today keeps seeing
+// exactly the same string, and `labelZh` is consulted only by pickTemplateLabel.
+function optionalLabelZh(input, field) {
+  const labelZh = optionalString(input ? input.labelZh : undefined, field)
+  if (!labelZh) return undefined
+  if (isSecretShaped(labelZh)) {
+    throw new StockPreparationTemplateError(`${field} must not be secret-shaped`, { field })
+  }
+  return labelZh
+}
+
 function assertNoContentKeys(input, field) {
   if (!isPlainObject(input)) return
   for (const key of FORBIDDEN_CONTENT_KEYS) {
@@ -163,7 +271,9 @@ function normalizeField(field, index) {
       { field: `${at}.ownership`, value: ownership },
     )
   }
+  const labelZh = optionalLabelZh(field, `${at}.labelZh`)
   const out = { id, label, type, ownership }
+  if (labelZh) out.labelZh = labelZh
   if (field.required !== undefined) out.required = requiredBoolean(field.required, `${at}.required`)
   if (field.key !== undefined) out.key = requiredBoolean(field.key, `${at}.key`)
   const optionSource = normalizeOptionSource(field.optionSource, `${at}.optionSource`)
@@ -345,10 +455,12 @@ function normalizeStockPreparationTemplate(input) {
   if (!keyFields.includes('idempotencyKey')) {
     throw new StockPreparationTemplateError('keyFields must include idempotencyKey', { field: 'keyFields' })
   }
+  const labelZh = optionalLabelZh(input, 'labelZh')
   return {
     id: assertSafeSchemaString(input.id, 'id'),
     objectId: assertSafeSchemaString(input.objectId || input.id, 'objectId'),
     label: assertSafeSchemaString(input.label || input.name || input.id, 'label'),
+    ...(labelZh ? { labelZh } : {}),
     version: optionalString(input.version, 'version') || 'v1',
     keyFields,
     feasibilityGate: normalizeBomReadFeasibilityGate(input.feasibilityGate),
@@ -357,16 +469,22 @@ function normalizeStockPreparationTemplate(input) {
   }
 }
 
-function buildSheetStructureFromTemplate(template) {
+// `options.locale` is the CREATION-TIME display language. Omitted, it resolves to
+// the deployment setting, which is `en` unless a deployment opted in -- so the
+// structure this returns is unchanged for every deployment that exists today.
+// Field IDS, order, types and required-ness never depend on it; only the human
+// display names do.
+function buildSheetStructureFromTemplate(template, options = {}) {
   const normalized = normalizeStockPreparationTemplate(template)
+  const locale = options.locale === undefined ? resolveTemplateLabelLocale() : options.locale
   return {
     objectId: normalized.objectId,
-    label: normalized.label,
+    label: pickTemplateLabel(normalized, locale),
     keyFields: normalized.keyFields.slice(),
     fields: normalized.fields.map((field, order) => {
       const out = {
         id: field.id,
-        name: field.label,
+        name: pickTemplateLabel(field, locale),
         type: field.type,
         order,
       }
@@ -452,10 +570,12 @@ function normalizeStockPreparationMvpTableTemplate(input) {
       })
     }
   }
+  const labelZh = optionalLabelZh(input, 'labelZh')
   return {
     id: assertSafeSchemaString(input.id, 'id'),
     objectId: assertSafeSchemaString(input.objectId || input.id, 'objectId'),
     label: assertSafeSchemaString(input.label || input.name || input.id, 'label'),
+    ...(labelZh ? { labelZh } : {}),
     version: optionalString(input.version, 'version') || 'v1',
     role: optionalString(input.role, 'role') || 'supporting',
     keyFields,
@@ -464,16 +584,20 @@ function normalizeStockPreparationMvpTableTemplate(input) {
   }
 }
 
-function buildSheetStructureFromMvpTableTemplate(template) {
+// Same locale contract as buildSheetStructureFromTemplate. The nine frozen MVP
+// templates carry no `labelZh`, so they are unaffected in either leg; the
+// confirmation-decision LEDGER, which does carry one, is created readable.
+function buildSheetStructureFromMvpTableTemplate(template, options = {}) {
   const normalized = normalizeStockPreparationMvpTableTemplate(template)
+  const locale = options.locale === undefined ? resolveTemplateLabelLocale() : options.locale
   return {
     objectId: normalized.objectId,
-    label: normalized.label,
+    label: pickTemplateLabel(normalized, locale),
     keyFields: normalized.keyFields.slice(),
     fields: normalized.fields.map((field, order) => {
       const out = {
         id: field.id,
-        name: field.label,
+        name: pickTemplateLabel(field, locale),
         type: field.type,
         order,
       }
@@ -515,6 +639,10 @@ function summarizeMvpTableTemplatesForEvidence(templates) {
   }
 }
 
+// `extra` carries the optional per-field flags -- `required`, `key`, `optionSource`
+// -- and `labelZh`, the field's Chinese display name. `labelZh` is ADDITIVE: `label`
+// stays the English/fallback name every existing reader already uses, and only a
+// deployment that asked for Chinese ever creates the column with `labelZh`.
 function field(id, label, type, ownership, extra = {}) {
   return { id, label, type, ownership, ...extra }
 }
@@ -523,6 +651,7 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
   id: 'plm.stock-preparation.main.v1',
   objectId: 'plm_stock_preparation_main',
   label: 'PLM Stock Preparation Main',
+  labelZh: '备料主表',
   version: 'v1',
   keyFields: ['idempotencyKey'],
   feasibilityGate: {
@@ -557,39 +686,187 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
     deleteByDefault: false,
   },
   fields: [
-    field('projectNo', 'Project No', 'string', 'plm_system', { required: true }),
-    field('idempotencyKey', 'Idempotency Key', 'string', 'plm_system', { required: true, key: true }),
-    field('componentSourceId', 'Component Source ID', 'string', 'plm_system', { required: true }),
-    field('parentSourceId', 'Parent Source ID', 'string', 'plm_system'),
-    field('path', 'BOM Path', 'string', 'plm_system', { required: true }),
-    field('depth', 'BOM Depth', 'number', 'plm_system'),
-    field('componentCode', 'Component Code', 'string', 'plm_system'),
-    field('componentName', 'Component Name', 'string', 'plm_system'),
-    field('material', 'Material', 'string', 'plm_system'),
-    field('sourceVersion', 'PLM Source Version', 'string', 'plm_system'),
-    field('rawQuantity', 'Raw Quantity', 'number', 'plm_system'),
-    field('totalQuantity', 'Total Quantity', 'number', 'plm_system', { required: true }),
-    field('active', 'Active', 'boolean', 'plm_system', { required: true }),
-    field('lastPlmRefreshRunId', 'Last PLM Refresh Run ID', 'string', 'plm_system'),
-    field('lastPlmRefreshAt', 'Last PLM Refresh At', 'date', 'plm_system'),
+    field('projectNo', 'Project No', 'string', 'plm_system', { required: true, labelZh: '项目号' }),
+    field('idempotencyKey', 'Idempotency Key', 'string', 'plm_system', { required: true, key: true, labelZh: '唯一键' }),
+    field('componentSourceId', 'Component Source ID', 'string', 'plm_system', { required: true, labelZh: '部件源ID' }),
+    field('parentSourceId', 'Parent Source ID', 'string', 'plm_system', { labelZh: '父件源ID' }),
+    // 父组件图号 / 父组件名称. The WORKING SHEET has always denormalized the PLM columns a human
+    // needs in front of their eyes (图号/名称/材料/总用量 below); the parent was the exception —
+    // only ever an OBJ_ID (`parentSourceId` above), which nobody can read. These two close that
+    // gap on EXACTLY the terms the snapshot line's own parentName was added on (#5436): OPTIONAL
+    // and plm_system-owned, so rows written before this change simply carry no such column and
+    // nothing downstream may require one, and EXISTING INSTALLS gain the columns through the
+    // additive W2 repair verb (repairStockPreparationCanonicalTarget) rather than a migration.
+    //
+    // They are DENORMALIZED, not authoritative: the immutable versioned record of what PLM said
+    // remains plm_stock_preparation_bom_snapshot_line. Both sides resolve the parent through the
+    // same in-batch parent index (stock-preparation-expansion-snapshot-mapper.cjs buildParentIndex,
+    // reused by stock-preparation-conflict-planner.cjs), so they cannot disagree about who the
+    // parent is. A root row has no parent and therefore no value — absence, not an empty string.
+    //
+    // THE IDS ARE NOT `parentDrawing`/`parentName`/`spec` — deliberately, and not a style choice.
+    // `ext_` extension ids are governed as a DISJOINT namespace whose suffix may never equal a
+    // frozen template field id (stock-preparation-extension-namespace.cjs, FIELD_ID_TEMPLATE_
+    // COLLISION — the rule exists precisely for "a NEW frozen template field added under the same
+    // bare name"). Until today these three columns reached the sheet ONLY as pack columns, and the
+    // shipped pack owns `ext_parentDrawingNo`, `ext_parentName` and `ext_spec`
+    // (lib/customer-packs/factory-a.rehearsal.cjs). Freezing `parentName` or `spec` would make
+    // every install carrying that pack fail its own pack validation. So the ids follow the main
+    // table's OWN vocabulary instead — `componentCode` is 图号 here, therefore 父组件图号 is
+    // `parentComponentCode` — which collides with nothing and reads as a first-class column.
+    field('parentComponentCode', 'Parent Component Code', 'string', 'plm_system', { labelZh: '父组件图号' }),
+    field('parentComponentName', 'Parent Component Name', 'string', 'plm_system', { labelZh: '父组件名称' }),
+    field('path', 'BOM Path', 'string', 'plm_system', { required: true, labelZh: 'BOM路径' }),
+    field('depth', 'BOM Depth', 'number', 'plm_system', { labelZh: 'BOM层级' }),
+    // 图号, deliberately NOT a translation of "Component Code". The customer's own
+    // PLM calls this column `IdentityNo` 图号 and the legacy 备料 system used the
+    // same word -- the table speaks the customer's vocabulary, not ours.
+    field('componentCode', 'Component Code', 'string', 'plm_system', { labelZh: '图号' }),
+    field('componentName', 'Component Name', 'string', 'plm_system', { labelZh: '名称' }),
+    // 规格 — one of the seven fields a 备料 pull must carry, and until now reaching the working
+    // sheet ONLY as a customer-pack extension column (`ext_spec`). Native here, on the same terms
+    // as the two parent columns above (id likewise not `spec`, for the namespace reason spelled
+    // out there), and fed from the same DECLARED read-plan slot the snapshot line's `spec` is fed
+    // from (readPlan.part.specField, absent by default — stock-preparation-bom-expansion.cjs).
+    // A deployment that declares no spec column persists no spec: an empty column, never a
+    // guessed source column.
+    field('componentSpec', 'Component Specification', 'string', 'plm_system', { labelZh: '规格' }),
+    field('material', 'Material', 'string', 'plm_system', { labelZh: '材料' }),
+    field('sourceVersion', 'PLM Source Version', 'string', 'plm_system', { labelZh: '源版本' }),
+    field('rawQuantity', 'Raw Quantity', 'number', 'plm_system', { labelZh: '单层用量' }),
+    field('totalQuantity', 'Total Quantity', 'number', 'plm_system', { required: true, labelZh: '总用量' }),
+    field('active', 'Active', 'boolean', 'plm_system', { required: true, labelZh: '有效' }),
+    field('lastPlmRefreshRunId', 'Last PLM Refresh Run ID', 'string', 'plm_system', { labelZh: '最近刷新RunID' }),
+    field('lastPlmRefreshAt', 'Last PLM Refresh At', 'date', 'plm_system', { labelZh: '最近刷新时间' }),
     field('lastPlmRefreshDecision', 'Last PLM Refresh Decision', 'select', 'plm_system', {
+      labelZh: '最近刷新决定',
       optionSource: { type: 'contract', key: 'plm_stock_preparation_decision_v1' },
     }),
-    field('lastPlmConflictSummary', 'Last PLM Conflict Summary', 'string', 'plm_system'),
+    field('lastPlmConflictSummary', 'Last PLM Conflict Summary', 'string', 'plm_system', { labelZh: '冲突摘要' }),
     field('materialType', 'Material Type', 'select', 'human_preserved', {
+      labelZh: '材料类型',
       optionSource: { type: 'config_info', key: 'material_type' },
     }),
     field('blankType', 'Blank Type', 'select', 'human_preserved', {
+      labelZh: '毛胚类型',
       optionSource: { type: 'config_info', key: 'blank_type' },
     }),
     field('stockPreparationStatus', 'Stock Preparation Status', 'select', 'human_preserved', {
+      labelZh: '备料状态',
       optionSource: { type: 'config_info', key: 'stock_preparation_status' },
     }),
-    field('demandDate', 'Demand Date', 'date', 'human_preserved'),
-    field('leadTimeDays', 'Lead Time Days', 'number', 'human_preserved'),
-    field('notes', 'Notes', 'string', 'human_preserved'),
-    field('procurementReply', 'Procurement Reply', 'string', 'human_preserved'),
-    field('warehouseConfirmation', 'Warehouse Confirmation', 'string', 'human_preserved'),
+    field('demandDate', 'Demand Date', 'date', 'human_preserved', { labelZh: '需求日期' }),
+    field('leadTimeDays', 'Lead Time Days', 'number', 'human_preserved', { labelZh: '提前周期(天)' }),
+    field('notes', 'Notes', 'string', 'human_preserved', { labelZh: '备注' }),
+    field('procurementReply', 'Procurement Reply', 'string', 'human_preserved', { labelZh: '采购回复' }),
+    field('warehouseConfirmation', 'Warehouse Confirmation', 'string', 'human_preserved', { labelZh: '仓库确认' }),
+
+    // ------------------------------------------------------------------
+    // 自制/外购 -- THE FORK. Appended, never interleaved: every column above keeps
+    // the order value it has today, so an existing deployment's grid does not move.
+    //
+    // WHY IT IS HUMAN-OWNED AND NOT SOURCED. It was investigated as an upstream
+    // attribute first: the customer's PLM part dictionary (DN_PM_PartExAttrInfo, 73
+    // rows / 21 active) carries 客户名称 / 产品编号 / 设备规格 / 重量 / 总重 / 备注 /
+    // 名称 / 图号 / 材料 / 型号 / 品牌 / 描述 / 技术要求 / 物料编码 / 旧编码 / 供货范围 /
+    // 表面处理 / 包装运输 / 特殊要求 / 制造·检验验收标准 / 规格 -- and no make-or-buy
+    // attribute at all. It is a 备料-time decision a human makes, so it is
+    // human_preserved and a PLM refresh may never write it.
+    //
+    // WHY IT MATTERS STRUCTURALLY. Every row today unconditionally carries BOTH
+    // `procurementReply` and `warehouseConfirmation`, so the model cannot express
+    // WHICH follow-up a given row concerns. This column is the fork that makes
+    // 采购跟进 and 仓库跟进 separable. It is a FIELD, not a router: nothing in this
+    // module or its callers branches on it, and no auto-assignment reads it.
+    //
+    // NO VOCABULARY IS FROZEN HERE, deliberately -- and that is the codebase
+    // convention, not a shortcut. `normalizeField` above REFUSES `options` /
+    // `values` / `value` / `default` on any field descriptor ("schema only, no
+    // customer values"), so a select column names a SOURCE and never a literal set.
+    // The customer's real 自制/外购 vocabulary lives in their own `config_info`
+    // dictionary and reaches the column two supported ways, exactly as
+    // `materialType` / `blankType` / `stockPreparationStatus` do: the option-sync
+    // preset (field-option-sync-contract.cjs, `make_or_buy` → `makeOrBuy`), or a
+    // customer pack's `optionSets` entry. A platform-side default list would be a
+    // vocabulary we cannot justify for any specific factory.
+    field('makeOrBuy', 'Make or Buy', 'select', 'human_preserved', {
+      labelZh: '自制/外购',
+      optionSource: { type: 'config_info', key: 'make_or_buy' },
+    }),
+
+    // ------------------------------------------------------------------
+    // THE DEPARTMENTAL RESPONSE BAND.
+    //
+    // The legacy 备料 system had three 1:1 tables (`stock_info` + `purchase_info` +
+    // `warehouse_info`); purchasing and warehouse each had a typed `is_done`
+    // completion flag and real dates. That collapsed into ONE sheet, and only the
+    // two free-text remarks (`procurementReply` / `warehouseConfirmation`, kept
+    // above unchanged) survived the collapse. With no machine-readable completion
+    // state, a handoff/notification flow has nothing to advance on.
+    //
+    // `boolean` is the platform's checkbox-shaped type and is in
+    // STOCK_PREPARATION_FIELD_TYPES, so the completion markers are booleans rather
+    // than a select over a two-value vocabulary nobody has to maintain.
+    //
+    // These are FIELDS, NOT A WORKFLOW ENGINE. There is no state machine, no
+    // ordering constraint between the flag and the date, and nothing that clears
+    // one when the other changes -- a sibling PR owns the turn signal.
+    //
+    // All four are human_preserved, so `preserveOnRefresh: true` is DERIVED by
+    // normalizeField (never authored) and the apply-writer's `assertNoHumanFields`
+    // wall refuses them to every PLM refresh the moment they join
+    // HUMAN_PRESERVED_FIELD_IDS above.
+    field('procurementDone', 'Procurement Done', 'boolean', 'human_preserved', { labelZh: '采购完成' }),
+    field('procurementReplyDate', 'Procurement Reply Date', 'date', 'human_preserved', { labelZh: '采购回复日期' }),
+    field('warehouseDone', 'Warehouse Done', 'boolean', 'human_preserved', { labelZh: '仓库完成' }),
+    // 实际到货日期 -- what actually arrived and when, deliberately NOT a second
+    // demand date. `demandDate` (需求日期) stays production-owned above.
+    field('actualArrivalDate', 'Actual Arrival Date', 'date', 'human_preserved', { labelZh: '实际到货日期' }),
+  ],
+}))
+
+// B-stage takeover decision ledger (FIRST CUT). This is deliberately NOT part of the frozen
+// nine-table MVP surface: canonical stock-preparation remains the only business fact table,
+// while this one supporting object stores revision-bound human decisions only. Customer-entered
+// resolution values stay strings; no customer dictionary is frozen into a contract select.
+// The field vocabulary is the full converged shape (kept identical to the agreed cross-checkout
+// reference so future slices need no schema migration), even though the first cut only ever
+// writes the subset that the duplicate_expanded_key x keep_multiple_rows flow needs.
+const STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE = Object.freeze(normalizeStockPreparationMvpTableTemplate({
+  id: 'plm.stock-preparation.confirmation-decision.v1',
+  objectId: 'plm_stock_preparation_confirmation_decision',
+  label: 'Stock Preparation Confirmation Decision',
+  labelZh: '备料确认账本',
+  version: 'v1',
+  role: 'confirmation_decision',
+  keyFields: ['decisionId'],
+  requiredFields: [
+    'decisionId',
+    'stableDecisionKey',
+    'projectNo',
+    'rowIdentity',
+    'conflictType',
+    'inputFingerprint',
+    'status',
+    'openedAt',
+  ],
+  fields: [
+    field('decisionId', 'Decision ID', 'string', 'plm_system', { required: true, key: true, labelZh: '裁决ID' }),
+    field('stableDecisionKey', 'Stable Decision Key', 'string', 'plm_system', { required: true, labelZh: '稳定裁决键' }),
+    field('projectNo', 'Project No', 'string', 'plm_system', { required: true, labelZh: '项目号' }),
+    field('rowIdentity', 'Row Identity', 'string', 'plm_system', { required: true, labelZh: '行身份' }),
+    field('conflictType', 'Conflict Type', 'string', 'plm_system', { required: true, labelZh: '冲突类型' }),
+    field('inputFingerprint', 'Input Fingerprint', 'string', 'plm_system', { required: true, labelZh: '输入指纹' }),
+    field('sourceRevision', 'Source Revision', 'string', 'plm_system', { labelZh: '源修订' }),
+    field('status', 'Status', 'string', 'plm_system', { required: true, labelZh: '状态' }),
+    field('openedAt', 'Opened At', 'date', 'plm_system', { required: true, labelZh: '开启时间' }),
+    field('resolutionAction', 'Resolution Action', 'string', 'human_preserved', { labelZh: '处理动作' }),
+    field('resolvedValue', 'Resolved Value', 'string', 'human_preserved', { labelZh: '录入值' }),
+    field('resolvedAuxValue', 'Resolved Auxiliary Value', 'string', 'human_preserved', { labelZh: '录入辅助值' }),
+    field('notes', 'Notes', 'string', 'human_preserved', { labelZh: '备注' }),
+    field('confirmedBy', 'Confirmed By', 'string', 'plm_system', { labelZh: '确认人' }),
+    field('confirmedAt', 'Confirmed At', 'date', 'plm_system', { labelZh: '确认时间' }),
+    field('supersededAt', 'Superseded At', 'date', 'plm_system', { labelZh: '作废时间' }),
   ],
 }))
 
@@ -648,14 +925,36 @@ const STOCK_PREPARATION_MVP_TABLE_TEMPLATES = Object.freeze([
     fields: [
       field('snapshotLineId', 'Snapshot Line ID', 'string', 'plm_system', { required: true, key: true }),
       field('snapshotBatchId', 'Snapshot Batch ID', 'string', 'plm_system', { required: true }),
+      // THE SEVEN FIELDS A 备料 PULL MUST CARRY (owner spec): 父组件图号 / 父组件名称 / 当前组件图号 /
+      // 当前组件名称 / 规格 / 材料 / 总数量. Drawing numbers, versions and per-level quantity landed with
+      // the MVP; `material` landed with the fingerprint decomposition; `parentName` / `childName` /
+      // `spec` / `totalQuantity` land here. Every one of them is OPTIONAL and plm_system-owned, on the
+      // same terms `material` was added: batches persisted before this change simply carry no such
+      // column, nothing downstream may require one, and EXISTING INSTALLS heal via the W2 repair verb
+      // (repairStockPreparationMvpTargets) rather than a migration.
       field('parentDrawingNo', 'Parent Drawing No', 'string', 'plm_system'),
       field('parentVersion', 'Parent Version', 'string', 'plm_system'),
+      field('parentName', 'Parent Name', 'string', 'plm_system'),
       field('childDrawingNo', 'Child Drawing No', 'string', 'plm_system'),
       field('childVersion', 'Child Version', 'string', 'plm_system'),
+      field('childName', 'Child Name', 'string', 'plm_system'),
+      // Fingerprint decomposition (stock-prep-change-adjudication-20260901): persisted so the diff can
+      // raise material_changed by name. Optional — historical batches carry no material field, and the
+      // diff engine falls back to the sourceFingerprint for that dimension when either side lacks it.
+      // Existing installs gain the column via the W2 repair verb (repairStockPreparationMvpTargets).
+      field('material', 'Material', 'string', 'plm_system'),
+      // 规格. Only present when the deployment DECLARED a spec column on its read plan
+      // (readPlan.part.specField, defaulted to absent — see stock-preparation-bom-expansion.cjs);
+      // a deployment without one persists no spec, which is absence, not emptiness.
+      field('spec', 'Specification', 'string', 'plm_system'),
       field('bomLevel', 'BOM Level', 'number', 'plm_system'),
       field('pathKey', 'Path Key', 'string', 'plm_system', { required: true }),
       field('designQty', 'Design Quantity', 'number', 'plm_system'),
       field('designUnit', 'Design Unit', 'string', 'plm_system'),
+      // 总数量 — the per-level `designQty` multiplied down the path. The MVP kept ONLY the per-level
+      // quantity, so the rollup the warehouse actually orders against was computed by the expansion
+      // and then dropped at persist. Both are kept now; neither replaces the other.
+      field('totalQuantity', 'Total Quantity', 'number', 'plm_system'),
       field('lineStatus', 'Line Status', 'select', 'plm_system', {
         optionSource: { type: 'contract', key: 'stock_preparation_bom_line_status_v1' },
       }),
@@ -865,7 +1164,16 @@ module.exports = {
   REQUIRED_SYSTEM_FIELDS,
   HUMAN_PRESERVED_FIELD_IDS,
   FEASIBILITY_FORBIDDEN_MECHANISMS,
+  TEMPLATE_LABEL_LOCALE_ENV,
+  TEMPLATE_LABEL_LOCALES,
+  DEFAULT_TEMPLATE_LABEL_LOCALE,
+  normalizeTemplateLabelLocale,
+  resolveTemplateLabelLocale,
+  pickTemplateLabel,
+  STOCK_PREPARATION_DEFAULT_VIEW_LABELS,
+  pickDefaultViewName,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
   StockPreparationTemplateError,
@@ -880,6 +1188,7 @@ module.exports = {
     isPlainObject,
     assertNoContentKeys,
     normalizeField,
+    optionalLabelZh,
     normalizeOptionSource,
     normalizeConflictStrategy,
     normalizeFeasibilityRelation,

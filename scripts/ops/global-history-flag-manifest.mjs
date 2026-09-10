@@ -48,6 +48,17 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'TRANSITION ONLY, and a REGRESSION while on. Schema management (rename/retype/delete a field, 11 gated routes) was split out of multitable:write into multitable:manage-schema, because an operator who may fill a cell must not be able to delete the column. With this flag true, multitable:write is ALSO accepted for canManageFields -- the old fused behaviour returns. Default OFF is the intended end state; the flag exists only so a deployment can stage granting the new code before tightening.',
+    source: 'packages/core-backend/src/multitable/manage-schema-permission.ts',
+  },
+  {
     key: 'MULTITABLE_ENABLE_SHEET_CONFIG_REVERT',
     type: 'boolean',
     activationValue: 'true',
@@ -435,6 +446,122 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'packages/core-backend/src/multitable/history-trust-precondition.ts (RECONSTRUCTION_CAUSALITY_LANDED, evaluateStrictEnablementPrecondition, checkStrictEnablementPrecondition)',
     enablementEnforcedVia:
       'packages/core-backend/src/multitable/history-integrity-precheck.ts precheckSheetHistoryIntegrity (strict branch) — refuses strict_enablement_unmet UNCONDITIONALLY when canEnable is false (no no-checkpoint exemption)',
+  },
+  {
+    key: 'ELEARNING_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'Master gate for the elearning V0.1 named pilot (video upload → viewing verification → objective exam → automatic grading). Default OFF; exact literal \'true\' only. Session feature `elearning` is this flag and is never inferred from admin role, product mode, or plugin state.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:28-30',
+  },
+  {
+    key: 'ELEARNING_NOTIFICATIONS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED', 'ELEARNING_CONTENT_ENABLED'],
+    conflictsWith: [],
+    danger: 'high',
+    purpose: 'Opt-in personal learning reminders. Default OFF; exact true only. Unknown external outcomes are fenced, never blindly retried.',
+    source: 'packages/core-backend/src/services/elearning-notification-dispatch.ts#isElearningNotificationDispatchEnabled',
+  },
+  {
+    key: 'ELEARNING_CONTENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning content capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ASSIGNMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning assignment capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ASSESSMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning assessment capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_INCENTIVE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning incentive capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ANALYTICS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning analytics capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_MEDIA_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning media capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_WATCH_CHALLENGE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [
+      'ELEARNING_ENABLED',
+      'ELEARNING_CONTENT_ENABLED',
+      'ELEARNING_MEDIA_ENABLED',
+    ],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'L6 watch-challenge gate. Default OFF; exact literal \'true\' only. The route and runtime additionally require the master, content, and media gates, and disabled mode remains byte-compatible with ordinary verified watch progress.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_WATCH_CHALLENGE_ENABLED',
+  },
+  {
+    key: 'ELEARNING_ENROLLMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [
+      'ELEARNING_ENABLED',
+      'ELEARNING_CONTENT_ENABLED',
+    ],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Online self-study enrollment gate. Default OFF; exact literal \'true\' only. Enrollment records learner intent but never grants course access or creates assignment effects.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_ENROLLMENT_ENABLED',
   },
 ])
 

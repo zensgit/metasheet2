@@ -60,6 +60,73 @@ function main() {
     assert.equal(byId[id].preserveOnRefresh, true, `${id} preserves on PLM refresh`)
   }
 
+  // ── THE SEVEN FIELDS A 备料 PULL MUST CARRY, on the WORKING SHEET ───────────────────────────
+  //
+  // 父组件图号 / 父组件名称 / 当前组件图号 / 当前组件名称 / 规格 / 材料 / 总数量. 备料主表 has
+  // always denormalized the child half (componentCode / componentName / material / totalQuantity);
+  // the parent was only ever an OBJ_ID and 规格 only ever arrived as a customer-pack `ext_spec`.
+  // These three close the gap, on EXACTLY the terms the snapshot line's own columns were added on
+  // (#5436): plm_system-owned, OPTIONAL (rows persisted before this change carry no such column, so
+  // nothing may require one), not part of the row identity, and healed onto existing installs by
+  // the additive repair verb (repairStockPreparationCanonicalTarget) rather than a migration.
+  for (const [fieldId, labelZh] of [
+    ['parentComponentCode', '父组件图号'],
+    ['parentComponentName', '父组件名称'],
+    ['componentSpec', '规格'],
+  ]) {
+    assert.ok(byId[fieldId], `备料主表 persists ${fieldId}`)
+    assert.equal(byId[fieldId].type, 'string', `${fieldId} is a string`)
+    assert.equal(byId[fieldId].ownership, 'plm_system', `${fieldId} is PLM-owned, never human-filled`)
+    assert.notEqual(byId[fieldId].required, true, `rows written before this change carry no ${fieldId} — never required`)
+    assert.notEqual(byId[fieldId].key, true, `${fieldId} is not part of the row identity`)
+    assert.equal(template.keyFields.includes(fieldId), false, `${fieldId} is not a key field`)
+    assert.equal(byId[fieldId].labelZh, labelZh, `${fieldId} carries its agreed Chinese header`)
+    assert.notEqual(byId[fieldId].preserveOnRefresh, true, `${fieldId} is refreshed by the pull, not preserved`)
+  }
+  // THE WALL: adding PLM columns must be invisible to the human band. The band itself grew
+  // 8 -> 13 in a SEPARATE, design-gated step (自制/外购 + the departmental response band:
+  // makeOrBuy / procurementDone / procurementReplyDate / warehouseDone / actualArrivalDate);
+  // what this pin defends is that the ORIGINAL eight are untouched and that the three PLM
+  // columns above did not leak into the whitelist. Both are asserted explicitly.
+  assert.equal(HUMAN_PRESERVED_FIELD_IDS.length, 13, 'the human-preserved whitelist is exactly 13 columns')
+  assert.deepEqual(HUMAN_PRESERVED_FIELD_IDS.slice(0, 8), [
+    'materialType', 'blankType', 'stockPreparationStatus', 'demandDate', 'leadTimeDays', 'notes',
+    'procurementReply', 'warehouseConfirmation',
+  ], 'the original eight human columns are unchanged, in order')
+  for (const plmId of ['parentComponentCode', 'parentComponentName', 'componentSpec']) {
+    assert.equal(HUMAN_PRESERVED_FIELD_IDS.includes(plmId), false, `${plmId} must never enter the human whitelist`)
+  }
+  for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentSpec']) {
+    assert.equal(HUMAN_PRESERVED_FIELD_IDS.includes(fieldId), false, `${fieldId} is not on the human whitelist`)
+  }
+  // All seven, present together on ONE table — the claim the export depends on.
+  for (const fieldId of ['parentComponentCode', 'parentComponentName', 'componentCode', 'componentName', 'componentSpec', 'material', 'totalQuantity']) {
+    assert.ok(byId[fieldId], `the seven-field roster is complete: ${fieldId}`)
+    assert.equal(byId[fieldId].ownership, 'plm_system', `${fieldId} is PLM-owned`)
+  }
+
+  // NAMESPACE DISJOINTNESS, both directions. `ext_` extension ids are governed so their SUFFIX may
+  // never equal a frozen template field id (stock-preparation-extension-namespace.cjs,
+  // FIELD_ID_TEMPLATE_COLLISION) — the rule exists for exactly this case, "a NEW frozen template
+  // field added under the same bare name". The shipped pack owns ext_parentDrawingNo /
+  // ext_parentName / ext_spec, which is why the three ids above are NOT parentDrawing / parentName
+  // / spec: freezing those would make every install carrying that pack fail its own pack
+  // validation. Pinned here so the next frozen column cannot silently take a suffix a pack owns.
+  const shippedPackFieldIds = require(path.join(__dirname, '..', 'lib', 'customer-packs', 'factory-a.rehearsal.cjs'))
+    .FACTORY_A_REHEARSAL_PACK.extensionFields.map((field) => field.id)
+  const templateIdSet = new Set(template.fields.map((field) => field.id.toLowerCase()))
+  for (const packFieldId of shippedPackFieldIds) {
+    const suffix = packFieldId.slice('ext_'.length).toLowerCase()
+    assert.equal(
+      templateIdSet.has(suffix),
+      false,
+      `frozen template id must not collide with shipped pack field ${packFieldId} — the pack would stop installing`,
+    )
+  }
+  for (const field of template.fields) {
+    assert.equal(field.id.startsWith('ext_'), false, `frozen template id ${field.id} must not use the reserved extension prefix`)
+  }
+
   // config_info option sources are schema references only, not option values.
   assert.deepEqual(byId.materialType.optionSource, { type: 'config_info', key: 'material_type' })
   assert.deepEqual(byId.blankType.optionSource, { type: 'config_info', key: 'blank_type' })
@@ -143,6 +210,33 @@ function main() {
   const bomLineFields = Object.fromEntries(bomLine.fields.map((field) => [field.id, field]))
   assert.notEqual(bomLineFields.designQty.required, true, 'snapshot lines can preserve invalid or missing source quantity')
   assert.notEqual(bomLineFields.designUnit.required, true, 'snapshot lines can preserve missing source unit for exception handling')
+  // Adjudication design 20260901 (fingerprint decomposition): material is a persisted snapshot-line
+  // field so an in-place substitution can diff by name — optional, because historical batches lack it.
+  assert.ok(bomLineFields.material, 'snapshot lines persist material')
+  assert.equal(bomLineFields.material.type, 'string')
+  assert.equal(bomLineFields.material.ownership, 'plm_system')
+  assert.notEqual(bomLineFields.material.required, true, 'historical batches carry no material — never required')
+
+  // THE SEVEN FIELDS A 备料 PULL MUST CARRY (owner spec). Drawing numbers, versions and per-level
+  // quantity were already columns; `material` arrived with the fingerprint decomposition. These four
+  // close the gap. Each is added on EXACTLY the terms `material` was: plm_system-owned, OPTIONAL
+  // (batches persisted before this change carry no such column, so nothing may require one), and
+  // healed onto existing installs by the W2 repair verb rather than by a migration.
+  for (const [fieldId, type] of [
+    ['parentName', 'string'], // 父组件名称
+    ['childName', 'string'], // 当前组件/零件名称
+    ['spec', 'string'], // 规格
+    ['totalQuantity', 'number'], // 总数量
+  ]) {
+    assert.ok(bomLineFields[fieldId], `snapshot lines persist ${fieldId}`)
+    assert.equal(bomLineFields[fieldId].type, type, `${fieldId} is a ${type}`)
+    assert.equal(bomLineFields[fieldId].ownership, 'plm_system', `${fieldId} is PLM-owned, never human-filled`)
+    assert.notEqual(bomLineFields[fieldId].required, true, `historical batches carry no ${fieldId} — never required`)
+    assert.equal(bomLine.requiredFields.includes(fieldId), false, `${fieldId} is not in requiredFields`)
+    assert.equal(bomLine.keyFields.includes(fieldId), false, `${fieldId} is not part of the line identity`)
+  }
+  // 总数量 does not displace the per-level quantity — both are persisted.
+  assert.ok(bomLineFields.designQty, 'the per-level quantity column stays')
 
   const unitRule = byObjectId.plm_stock_preparation_unit_conversion_rule
   const unitFields = Object.fromEntries(unitRule.fields.map((field) => [field.id, field]))

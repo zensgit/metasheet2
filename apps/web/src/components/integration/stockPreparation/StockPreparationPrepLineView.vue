@@ -7,7 +7,7 @@
       data-testid="stock-prep-line-no-project"
       role="status"
     >
-      {{ bi('请选择一个项目以查看备料明细。', 'Select a project to see the prep lines.') }}
+      {{ bi('请选择一个项目,这里会列出它的备料明细。', 'Select a project and this page lists its prep lines.') }}
     </p>
 
     <!-- Loading: values-free spinner copy only. -->
@@ -17,7 +17,7 @@
       data-testid="stock-prep-line-loading"
       role="status"
     >
-      {{ bi('正在加载备料明细…', 'Loading prep lines…') }}
+      {{ bi('正在读取备料明细…', 'Reading the prep lines…') }}
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, never the raw body. -->
@@ -46,11 +46,11 @@
       <!-- Header cards: total + the three values-free status count groups. -->
       <header class="sp-line__summary" data-testid="stock-prep-line-summary">
         <div class="sp-line__metric" data-testid="stock-prep-line-metric" data-kind="total">
-          <span class="sp-line__metric-label">{{ bi('备料行数', 'Prep lines') }}</span>
+          <span class="sp-line__metric-label">{{ bi('备料明细行数', 'Prep lines') }}</span>
           <span class="sp-line__metric-value">{{ list.rowCount }}</span>
         </div>
         <div class="sp-line__metric sp-line__metric--chips" data-testid="stock-prep-line-metric" data-kind="prep-status">
-          <span class="sp-line__metric-label">{{ bi('按备料状态', 'By prep status') }}</span>
+          <span class="sp-line__metric-label">{{ bi('能不能用', 'Usable or not') }}</span>
           <span class="sp-line__chips">
             <span
               v-for="entry in prepStatusEntries"
@@ -58,11 +58,12 @@
               class="sp-line__chip"
               data-testid="stock-prep-line-prep-status-count"
               :data-status="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ prepStatusLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
         <div class="sp-line__metric sp-line__metric--chips" data-testid="stock-prep-line-metric" data-kind="mapping-status">
-          <span class="sp-line__metric-label">{{ bi('按映射状态', 'By mapping status') }}</span>
+          <span class="sp-line__metric-label">{{ bi('物料对上了吗', 'Materials matched') }}</span>
           <span class="sp-line__chips">
             <span
               v-for="entry in mappingStatusEntries"
@@ -70,11 +71,12 @@
               class="sp-line__chip"
               data-testid="stock-prep-line-mapping-status-count"
               :data-status="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ mappingStatusLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
         <div class="sp-line__metric sp-line__metric--chips" data-testid="stock-prep-line-metric" data-kind="unit-status">
-          <span class="sp-line__metric-label">{{ bi('按单位状态', 'By unit status') }}</span>
+          <span class="sp-line__metric-label">{{ bi('单位定了吗', 'Units settled') }}</span>
           <span class="sp-line__chips">
             <span
               v-for="entry in unitStatusEntries"
@@ -82,7 +84,8 @@
               class="sp-line__chip"
               data-testid="stock-prep-line-unit-status-count"
               :data-status="entry.key"
-            >{{ entry.key }}: {{ entry.count }}</span>
+              :title="entry.key"
+            >{{ unitStatusLabel(entry.key) }}: {{ entry.count }}</span>
           </span>
         </div>
       </header>
@@ -97,19 +100,18 @@
           :disabled="busy"
           @click="runGeneration"
         >
-          {{ bi('生成备料行', 'Run generation') }}
+          {{ bi('生成备料明细', 'Build the prep lines') }}
         </button>
         <span class="sp-line__note">
-          {{ bi('仅写 multitable 内部表;不写 ERP/K3。', 'Multitable-internal tables only; no ERP/K3 write.') }}
+          {{ bi('只写本系统自己的表,不会写到 ERP/K3。', 'Writes only into this system\'s own tables — nothing goes to ERP/K3.') }}
         </span>
       </div>
       <p v-if="runResult" class="sp-line__state sp-line__state--ok" data-testid="stock-prep-line-generate-result">
-        {{ bi('生成完成', 'Generation done') }}: {{ runResult.status }} ·
-        {{ bi('就绪', 'ready') }} {{ runResult.ready ? bi('是', 'yes') : bi('否', 'no') }} ·
-        {{ bi('未解决阻断异常', 'unresolved blocking') }} {{ runResult.unresolvedBlockingExceptionCount }} ·
-        {{ bi('新建行', 'lines created') }} {{ runResult.created.lines }} ·
-        {{ bi('刷新行', 'lines patched') }} {{ runResult.patched.lines }} ·
-        {{ bi('新建异常', 'exceptions created') }} {{ runResult.created.exceptions }}
+        {{ runResult.ready
+          ? bi('生成完成,结果可以用了。', 'Built, and the result is usable.')
+          : bi('生成完成,但结果还不能用 —— 见下面一行。', 'Built, but the result is not usable yet — see the line below.') }}
+        {{ bi('新增', 'added') }} {{ runResult.created.lines }} {{ bi('行、更新', 'row(s), updated') }} {{ runResult.patched.lines }} {{ bi('行,新记下', 'row(s), and noted') }} {{ runResult.created.exceptions }} {{ bi('件待处理的事。', 'new thing(s) to handle.') }}
+        <code class="sp-line__token">{{ runResult.status }} · ready={{ runResult.ready ? bi('是', 'yes') : bi('否', 'no') }} · unresolvedBlocking={{ runResult.unresolvedBlockingExceptionCount }}</code>
       </p>
       <p
         v-if="runResult && !runResult.ready"
@@ -118,12 +120,13 @@
         role="alert"
       >
         {{ bi(
-          '存在未解决的阻断级异常,不会产出就绪行——请到「异常队列」视图逐条确认处理。',
-          'Unresolved blocking exceptions remain, so no ready lines are produced — resolve them in the Exception Queue view.',
+          '还有事卡着没处理,所以这次没能产出可用的行 —— 请到「异常队列」把它们逐条处理掉,再生成一次。',
+          'Some things are still stuck, so no usable line came out of this run — clear them on the exception page, then build again.',
         ) }}
       </p>
       <p v-if="actionError" class="sp-line__state sp-line__state--warn" data-testid="stock-prep-line-action-error" role="alert">
-        {{ bi('操作失败', 'Action failed') }} ({{ actionError.code }}<template v-if="actionError.field">/{{ actionError.field }}</template>)
+        {{ bi(errorPlain(actionError.code).zh, errorPlain(actionError.code).en) }}
+        <code class="sp-line__token">{{ actionError.code }}<template v-if="actionError.field">/{{ actionError.field }}</template></code>
       </p>
 
       <!-- Line table: prepStatus filter + values-free rows. -->
@@ -132,16 +135,16 @@
           {{ bi('明细行', 'Rows') }}: {{ list.rowCount }}
         </span>
         <label class="sp-line__field sp-line__field--inline">
-          <span class="sp-line__field-label">{{ bi('备料状态过滤', 'Prep-status filter') }}</span>
+          <span class="sp-line__field-label">{{ bi('只看', 'Show only') }}</span>
           <select v-model="statusFilter" data-testid="stock-prep-line-filter">
             <option value="">{{ bi('全部', 'all') }}</option>
-            <option v-for="status in prepLineStatuses" :key="status" :value="status">{{ status }}</option>
+            <option v-for="status in prepLineStatuses" :key="status" :value="status">{{ prepStatusLabel(status) }}</option>
           </select>
         </label>
       </div>
 
       <p v-if="list.rowCount === 0" class="sp-line__state sp-line__state--muted" data-testid="stock-prep-line-empty">
-        {{ bi('当前无备料行。', 'No prep lines.') }}
+        {{ bi('还没有备料明细 —— 点上面的「生成备料明细」开始。', 'No prep lines yet — use “Build the prep lines” above to start.') }}
       </p>
       <!-- VALUES-FREE rows: handles + status enums + counts + presence booleans ONLY. The drawing
            number, design/issue quantity, and unit columns are OWNER-GATED value surfaces (OD-W3-1)
@@ -160,14 +163,14 @@
         <table class="sp-line__table" data-testid="stock-prep-line-table">
           <thead>
             <tr>
-              <th scope="col">{{ bi('行标识', 'Line handle') }}</th>
-              <th scope="col">{{ bi('备料状态', 'Prep status') }}</th>
-              <th scope="col">{{ bi('映射状态', 'Mapping status') }}</th>
-              <th scope="col">{{ bi('单位状态', 'Unit status') }}</th>
-              <th scope="col">{{ bi('异常数', 'Exceptions') }}</th>
-              <th scope="col">{{ bi('领用量已定', 'Issue qty') }}</th>
-              <th scope="col">{{ bi('ERP 目标齐备', 'ERP target') }}</th>
-              <th scope="col">{{ bi('生成运行', 'Run handle') }}</th>
+              <th scope="col">{{ bi('编号', 'Reference') }}</th>
+              <th scope="col">{{ bi('能不能用', 'Usable') }}</th>
+              <th scope="col">{{ bi('物料对上了吗', 'Material matched') }}</th>
+              <th scope="col">{{ bi('单位定了吗', 'Unit settled') }}</th>
+              <th scope="col">{{ bi('几件事卡着', 'Things stuck') }}</th>
+              <th scope="col">{{ bi('领用数量定了吗', 'Issue quantity set') }}</th>
+              <th scope="col">{{ bi('ERP 物料齐了吗', 'ERP material complete') }}</th>
+              <th scope="col">{{ bi('哪次生成的', 'Which run built it') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -178,33 +181,56 @@
               data-testid="stock-prep-line-row"
             >
               <td><code class="sp-line__handle" data-testid="stock-prep-line-row-handle">{{ row.stockPrepLineId ?? '—' }}</code></td>
+              <!-- PLAIN FIRST, TOKEN KEPT. The badge says it in words; the element carrying the
+                   testid still holds the server enum byte-exact, for grepping and for the
+                   values-free suites that pin exactly what leaks into these cells. -->
               <td>
-                <span class="sp-line__badge" data-testid="stock-prep-line-row-prep-status" :data-status="row.prepStatus ?? 'unknown'">
-                  {{ row.prepStatus ?? '—' }}
-                </span>
+                <span v-if="row.prepStatus" class="sp-line__badge">{{ prepStatusLabel(row.prepStatus) }}</span>
+                <code class="sp-line__token" data-testid="stock-prep-line-row-prep-status" :data-status="row.prepStatus ?? 'unknown'">{{ row.prepStatus ?? '—' }}</code>
               </td>
               <td>
-                <span class="sp-line__badge" data-testid="stock-prep-line-row-mapping-status" :data-status="row.mappingStatus ?? 'unknown'">
-                  {{ row.mappingStatus ?? '—' }}
-                </span>
+                <span v-if="row.mappingStatus" class="sp-line__badge">{{ mappingStatusLabel(row.mappingStatus) }}</span>
+                <code class="sp-line__token" data-testid="stock-prep-line-row-mapping-status" :data-status="row.mappingStatus ?? 'unknown'">{{ row.mappingStatus ?? '—' }}</code>
               </td>
               <td>
-                <span class="sp-line__badge" data-testid="stock-prep-line-row-unit-status" :data-status="row.unitStatus ?? 'unknown'">
-                  {{ row.unitStatus ?? '—' }}
-                </span>
+                <span v-if="row.unitStatus" class="sp-line__badge">{{ unitStatusLabel(row.unitStatus) }}</span>
+                <code class="sp-line__token" data-testid="stock-prep-line-row-unit-status" :data-status="row.unitStatus ?? 'unknown'">{{ row.unitStatus ?? '—' }}</code>
               </td>
               <td class="sp-line__num" data-testid="stock-prep-line-row-exceptions">{{ row.exceptionCount }}</td>
               <td data-testid="stock-prep-line-row-issue-qty" :data-flag="String(row.hasIssueQty)">
-                {{ row.hasIssueQty ? bi('已定', 'present') : bi('未定', 'absent') }}
+                {{ row.hasIssueQty ? bi('已定', 'yes') : bi('还没定', 'not yet') }}
               </td>
               <td data-testid="stock-prep-line-row-erp-target" :data-flag="String(row.hasErpTarget)">
-                {{ row.hasErpTarget ? bi('齐备', 'complete') : bi('缺失', 'missing') }}
+                {{ row.hasErpTarget ? bi('齐了', 'yes') : bi('还差', 'not yet') }}
               </td>
               <td><code class="sp-line__handle" data-testid="stock-prep-line-row-run">{{ row.createdFromRunId ?? '—' }}</code></td>
             </tr>
           </tbody>
         </table>
       </div>
+
+      <StockPrepTechnicalDetails testid="stock-prep-line-tech">
+        <dl>
+          <dt>{{ bi('备料状态枚举', 'Prep-status vocabulary') }}</dt>
+          <dd>
+            <span v-for="status in prepLineStatuses" :key="status"><code>{{ status }}</code> = {{ prepStatusLabel(status) }}; </span>
+          </dd>
+          <dt>{{ bi('生成写入的范围', 'What generation writes') }}</dt>
+          <dd>
+            {{ bi(
+              '生成运行只做 multitable 内部表操作(备料行 upsert + 仅新建异常 + 运行台账),从不写 ERP/K3。',
+              'A generation run performs multitable-internal table operations only (prep-line upsert, create-only exceptions, a run ledger). It never writes to ERP/K3.',
+            ) }}
+          </dd>
+          <dt>{{ bi('这张表为什么没有图号 / 数量 / 单位列', 'Why there is no drawing / quantity / unit column here') }}</dt>
+          <dd>
+            {{ bi(
+              '那三列是值面,受 OD-W3-1 单独授权,MVP 有意不在此展示。本表只显示句柄、状态枚举、计数与存在性布尔。',
+              'Those three are value surfaces under their own authorisation (OD-W3-1) and are deliberately not shown in the MVP. This table carries handles, status enums, counts and presence booleans only.',
+            ) }}
+          </dd>
+        </dl>
+      </StockPrepTechnicalDetails>
     </div>
   </div>
 </template>
@@ -231,6 +257,14 @@ import {
   type StockPreparationPrepLineList,
   type StockPreparationPrepLineStatus,
 } from '../../../services/integration/stockPreparation/prepLine'
+import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
+import {
+  STOCK_PREP_LINE_MAPPING_STATUS_PLAIN,
+  STOCK_PREP_LINE_STATUS_PLAIN,
+  STOCK_PREP_LINE_UNIT_STATUS_PLAIN,
+  stockPrepEnumPlain,
+  stockPrepErrorPlain,
+} from '../../../services/integration/stockPreparation/plainLanguage'
 
 const props = withDefaults(
   defineProps<{
@@ -250,6 +284,24 @@ function bi(zh: string, en: string): string {
 }
 
 const prepLineStatuses = STOCK_PREPARATION_PREP_LINE_STATUSES
+
+/** The three row vocabularies in words; each falls back to the raw token it does not know. */
+function prepStatusLabel(status: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_LINE_STATUS_PLAIN, status)
+  return plain ? bi(plain.zh, plain.en) : (status ?? '—')
+}
+
+function mappingStatusLabel(status: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_LINE_MAPPING_STATUS_PLAIN, status)
+  return plain ? bi(plain.zh, plain.en) : (status ?? '—')
+}
+
+function unitStatusLabel(status: string | null): string {
+  const plain = stockPrepEnumPlain(STOCK_PREP_LINE_UNIT_STATUS_PLAIN, status)
+  return plain ? bi(plain.zh, plain.en) : (status ?? '—')
+}
+
+const errorPlain = stockPrepErrorPlain
 
 const hasProject = computed(() => Boolean(props.projectId))
 
@@ -455,6 +507,15 @@ watch(statusFilter, reloadList)
   display: flex;
   flex-wrap: wrap;
   gap: var(--ms-space-1);
+}
+
+/* The server token, kept beside the words it means — subordinate, still copyable. */
+.sp-line__token {
+  display: inline-block;
+  margin-left: var(--ms-space-1);
+  color: var(--ms-text-3);
+  font-size: 11px;
+  word-break: break-all;
 }
 
 .sp-line__chip,

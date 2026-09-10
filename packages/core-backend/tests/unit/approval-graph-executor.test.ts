@@ -726,8 +726,8 @@ describe('ApprovalGraphExecutor', () => {
   // ── Lock-1 §K6 precondition (landed by the K3 slice): normalizeApprovalMode fails CLOSED ──
   // The executor's mode normalizer previously mapped ANY unrecognized mode silently to 'single'
   // (fail-open). Contract-valid data never reached that arm (the authoring choke + the stored-graph
-  // re-normalize both reject unknown modes), but deploy skew / rollback around a future mode (e.g.
-  // 'sequential') would degrade it silently to first-approver-wins. These tests pin the closure:
+  // re-normalize both reject unknown modes), but deploy skew / rollback around a future mode would
+  // degrade it silently to first-approver-wins. These tests pin the closure:
   // the MUTATION "revert normalizeApprovalMode to fail-open" must red the first test below.
   it('fails CLOSED: an unrecognized approvalMode reaching the executor throws APPROVAL_MODE_UNSUPPORTED instead of running as single (G-14 arm; mutation: revert to fail-open reds THIS test)', () => {
     const unknownModeGraph = (approvalMode: unknown): RuntimeGraph => ({
@@ -749,7 +749,7 @@ describe('ApprovalGraphExecutor', () => {
       policy: { allowRevoke: true },
     })
 
-    for (const unknown of ['sequential', 'SINGLE', 'or_sign', null, 42]) {
+    for (const unknown of ['SINGLE', 'or_sign', null, 42]) {
       const executor = new ApprovalGraphExecutor(unknownModeGraph(unknown), {})
       // Accessor path (getApprovalMode) and resolution path (resolveInitialState) both fail
       // closed — under the OLD fail-open arm both would have run the node as 'single'.
@@ -772,7 +772,7 @@ describe('ApprovalGraphExecutor', () => {
     }
   })
 
-  it('positive controls per mode: every LEGITIMATE shipped approvalMode — absent (≡ single), single, all, any, threshold — still executes (the rejection is unknown-selected, not blanket)', () => {
+  it('positive controls per mode: every LEGITIMATE shipped approvalMode — absent (≡ single), single, all, any, threshold, sequential — still executes (G-14)', () => {
     const modeGraph = (config: Record<string, unknown>): RuntimeGraph => ({
       nodes: [
         { key: 'start', type: 'start', config: {} },
@@ -800,6 +800,61 @@ describe('ApprovalGraphExecutor', () => {
     const thresholdExecutor = new ApprovalGraphExecutor(modeGraph({ approvalMode: 'threshold', approvalThreshold: 2 }), {})
     expect(thresholdExecutor.getApprovalMode('node-m')).toBe('threshold')
     expect(thresholdExecutor.resolveInitialState().assignments).toHaveLength(2)
+
+    const sequentialExecutor = new ApprovalGraphExecutor(modeGraph({ approvalMode: 'sequential' }), {})
+    expect(sequentialExecutor.getApprovalMode('node-m')).toBe('sequential')
+    expect(sequentialExecutor.resolveInitialState().assignments).toEqual([
+      expect.objectContaining({
+        assigneeId: 'approver-a',
+        metadata: { sequentialQueue: { position: 1, length: 2, state: 'active' } },
+      }),
+      expect.objectContaining({
+        assigneeId: 'approver-b',
+        metadata: { sequentialQueue: { position: 2, length: 2, state: 'queued' } },
+      }),
+    ])
+  })
+
+  it('sequential order follows assigneeSources order, resolver emission order, and first-occurrence dedup', () => {
+    const graph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'ordered',
+          type: 'approval',
+          config: {
+            assigneeSources: [
+              { kind: 'static_user', userIds: ['u-b', 'u-a'] },
+              { kind: 'static_user', userIds: ['u-a', 'u-c'] },
+            ],
+            approvalMode: 'sequential',
+          },
+        },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'start-ordered', source: 'start', target: 'ordered' },
+        { key: 'ordered-end', source: 'ordered', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+    const executor = new ApprovalGraphExecutor(graph, {}, {
+      assignmentResolver: ({ nodeKey, sourceStep, config }) => resolveApprovalAssignees({
+        nodeKey,
+        sourceStep,
+        config,
+        formSnapshot: {},
+        requesterSnapshot: { id: 'requester' },
+      }),
+    })
+    expect(executor.resolveInitialState().assignments.map((assignment) => ({
+      id: assignment.assigneeId,
+      queue: assignment.metadata?.sequentialQueue,
+    }))).toEqual([
+      { id: 'u-b', queue: { position: 1, length: 3, state: 'active' } },
+      { id: 'u-a', queue: { position: 2, length: 3, state: 'queued' } },
+      { id: 'u-c', queue: { position: 3, length: 3, state: 'queued' } },
+    ])
   })
 
   // ── Lock-1 §K3 prior_node_approver — REAL resolver + REAL executor oracle ──
@@ -1785,6 +1840,93 @@ describe('validateApprovalFormData — record-link value shape (FWB-0 Layer 2)',
 
   it('required empty still surfaces required (not a type error)', () => {
     expect(validateApprovalFormData(schema, {})).toEqual(['linked is required'])
+  })
+})
+
+describe('validateApprovalFormData — department value shape (Lock-2 L2-A)', () => {
+  const single: FormSchema = {
+    fields: [{
+      id: 'dept',
+      type: 'department',
+      label: '部门',
+      required: true,
+      props: { selection: 'single', display: 'full_path' },
+    }],
+  }
+  const multi: FormSchema = {
+    fields: [{
+      id: 'dept',
+      type: 'department',
+      label: '部门',
+      props: { selection: 'multi', display: 'leaf_only', maxSelections: 2 },
+    }],
+  }
+
+  it('accepts exact local-id objects and preserves required handling', () => {
+    expect(validateApprovalFormData(single, { dept: [{ id: 'd1' }] })).toEqual([])
+    expect(validateApprovalFormData(single, {})).toEqual(['dept is required'])
+    expect(validateApprovalFormData(single, { dept: [] })).toEqual(['dept is required'])
+    expect(validateApprovalFormData(multi, { dept: [] })).toEqual([])
+    expect(validateApprovalFormData(multi, { dept: [{ id: 'd1' }, { id: 'd2' }] })).toEqual([])
+  })
+
+  it('rejects free text, extra keys, duplicates, single overflow, and maxSelections overflow', () => {
+    expect(validateApprovalFormData(single, { dept: ['d1'] })).toEqual([
+      'dept must contain only exact { id } department values',
+    ])
+    expect(validateApprovalFormData(single, { dept: [{ id: 'd1', name: 'spoof' }] })).toEqual([
+      'dept must contain only exact { id } department values',
+    ])
+    expect(validateApprovalFormData(multi, { dept: [{ id: 'd1' }, { id: 'd1' }] })).toEqual([
+      'dept must not contain duplicate departments',
+    ])
+    expect(validateApprovalFormData(single, { dept: [{ id: 'd1' }, { id: 'd2' }] })).toEqual([
+      'dept must contain exactly one department',
+    ])
+    expect(validateApprovalFormData(multi, { dept: [{ id: 'd1' }, { id: 'd2' }, { id: 'd3' }] })).toEqual([
+      'dept exceeds the configured department selection limit',
+    ])
+  })
+})
+
+describe('validateApprovalFormData — contact value shape (Lock-2 L2-B)', () => {
+  const single: FormSchema = {
+    fields: [{ id: 'contact', type: 'user', label: '联系人', required: true }],
+  }
+  const multi: FormSchema = {
+    fields: [{
+      id: 'contacts',
+      type: 'user',
+      label: '联系人',
+      props: { selection: 'multi', maxSelections: 2 },
+    }],
+  }
+
+  it('accepts legacy single values and capped multi values', () => {
+    expect(validateApprovalFormData(single, { contact: 'u1' })).toEqual([])
+    expect(validateApprovalFormData(single, { contact: { id: 'u1' } })).toEqual([])
+    expect(validateApprovalFormData(single, { contact: { id: 'u1', name: 'display-only' } })).toEqual([])
+    expect(validateApprovalFormData(single, { contact: '   ' })).toEqual([])
+    expect(validateApprovalFormData(multi, { contacts: ['u1', { id: 'u2' }] })).toEqual([])
+    expect(validateApprovalFormData(multi, { contacts: [] })).toEqual([])
+  })
+
+  it('rejects malformed, duplicate, wrong-cardinality, and over-limit values', () => {
+    expect(validateApprovalFormData(multi, { contacts: 'u1' })).toEqual([
+      'contacts must be an array of users',
+    ])
+    expect(validateApprovalFormData(single, { contact: ['u1', 'u2'] })).toEqual([
+      'contact must contain exactly one user',
+    ])
+    expect(validateApprovalFormData(multi, { contacts: [{ name: 'missing-id' }] })).toEqual([
+      'contacts must contain only user ids or objects with an id',
+    ])
+    expect(validateApprovalFormData(multi, { contacts: ['u1', 'u1'] })).toEqual([
+      'contacts must not contain duplicate users',
+    ])
+    expect(validateApprovalFormData(multi, { contacts: ['u1', 'u2', 'u3'] })).toEqual([
+      'contacts exceeds the configured user selection limit',
+    ])
   })
 })
 
