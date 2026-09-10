@@ -20,6 +20,11 @@
  */
 import { isRoutePermitted } from './routeAccess'
 import { isAttendanceGroupContextPath } from './attendanceGroupContextRoute'
+import {
+  STOCK_PREP_PERMISSION_CODES,
+  satisfiesStockPrepAccess,
+  type StockPrepAccessSnapshot,
+} from '../services/integration/stockPreparation/workbenchAccess'
 
 /**
  * Attendance focus mode allows these EXACT paths, plus — since #4711 R0 — paths exactly
@@ -113,7 +118,17 @@ export interface RouteGuardPolicyContext {
  * adapter tests pin), and the plm-focus typeof tolerance lives here, not inline in main.ts.
  */
 export interface RouteGuardRuntimeDeps {
-  auth: { hasPermission: (permission: string) => boolean }
+  auth: {
+    hasPermission: (permission: string) => boolean
+    /**
+     * REQUIRED, and required for a reason. The three `stock-prep:*` codes are answered by the
+     * server's own literal ladder rather than by `hasPermission` (see
+     * `buildStockPrepAwarePermissionProbe`), and that ladder needs the `{ roles, permissions }`
+     * principal, not a yes/no probe. Declaring it non-optional means a call site that forgets it is
+     * a TYPE error rather than a silent, quieter-in-the-wrong-direction fallback.
+     */
+    getAccessSnapshot: () => StockPrepAccessSnapshot
+  }
   flags: {
     hasFeature: (feature: KnownRequiredFeature) => boolean
     isAttendanceFocused: () => boolean
@@ -132,10 +147,48 @@ export function buildRouteGuardInput(to: { path?: unknown; meta?: unknown }): { 
   return { path: String((to && to.path) || ''), meta: to ? to.meta : undefined }
 }
 
+/**
+ * THE ROUTE PROBE, with the three stock-prep codes answered by the workbench's own gate.
+ *
+ * `useAuth().hasPermission` is the app-wide probe and it EXPANDS: `stock-prep:*` and `*:*` both
+ * satisfy `stock-prep:read`, `:write` implies `:read`, and `users:write` counts as admin. The
+ * stock-prep server gate (`stock-preparation-workbench-access.cjs`, mirrored expression-for-
+ * expression by `satisfiesStockPrepAccess`) matches LITERALLY and does none of that — so before this
+ * wrapper, `/stock-prep` admitted three principals every panel behind it then refused, and
+ * redirected one (a bare `integration:admin`) the server serves in full.
+ *
+ * SCOPE IS EXACTLY THREE CODES. Every other permission on every other route still goes to
+ * `hasPermission`, byte for byte; `/stock-prep` is the only route in `appRoutes.ts` whose
+ * `meta.permissions` names one of these, so nothing else changes behaviour. FAIL-CLOSED on a
+ * snapshot that cannot be read: an unreadable principal is an empty one, and an empty principal
+ * satisfies nothing.
+ */
+export function buildStockPrepAwarePermissionProbe(
+  hasPermission: (permission: string) => boolean,
+  getAccessSnapshot: () => StockPrepAccessSnapshot,
+): (permission: string) => boolean {
+  return (permission) => {
+    if (!STOCK_PREP_PERMISSION_CODES.includes(permission)) return hasPermission(permission)
+    let snapshot: StockPrepAccessSnapshot
+    try {
+      snapshot = getAccessSnapshot()
+    } catch {
+      // No principal readable -> no stock-prep code held. Never falls through to the wider probe:
+      // a fallback that widens on failure is how a gate quietly stops being one.
+      return false
+    }
+    return satisfiesStockPrepAccess(snapshot, permission)
+  }
+}
+
 export function buildRouteGuardContext(deps: RouteGuardRuntimeDeps): RouteGuardPolicyContext {
+  const permissionProbe = buildStockPrepAwarePermissionProbe(
+    (permission) => deps.auth.hasPermission(permission),
+    () => deps.auth.getAccessSnapshot(),
+  )
   return {
     hasFeature: (feature) => deps.flags.hasFeature(feature),
-    hasPermission: (permission) => deps.auth.hasPermission(permission),
+    hasPermission: (permission) => permissionProbe(permission),
     attendanceFocused: deps.flags.isAttendanceFocused(),
     plmWorkbenchFocused:
       typeof deps.flags.isPlmWorkbenchFocused === 'function' &&

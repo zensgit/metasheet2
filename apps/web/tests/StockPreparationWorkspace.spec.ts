@@ -6,8 +6,15 @@ import {
   PLM_WORKBENCH_ALLOWED_PREFIXES,
   buildRouteGuardContext,
   buildRouteGuardInput,
+  buildStockPrepAwarePermissionProbe,
   resolveRouteGuardDecision,
 } from '../src/router/guardPolicy'
+import {
+  STOCK_PREP_PERMISSION_CODES,
+  STOCK_PREP_ROUTE_PERMISSION,
+  canReachStockPrepWorkbench,
+  satisfiesStockPrepAccess,
+} from '../src/services/integration/stockPreparation/workbenchAccess'
 import { join } from 'node:path'
 
 // Stock Preparation MVP (#3751 — docs/development/stock-preparation-mvp-design-20260707.md).
@@ -278,7 +285,10 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     it('buildRouteGuardContext delegates hasPermission to auth.hasPermission and keeps the typeof tolerance', () => {
       const seen: string[] = []
       const deps = {
-        auth: { hasPermission: (p: string) => { seen.push(p); return p === 'integration:write' } },
+        auth: {
+          hasPermission: (p: string) => { seen.push(p); return p === 'integration:write' },
+          getAccessSnapshot: () => ({ roles: [], permissions: [] }),
+        },
         flags: {
           hasFeature: () => true,
           isAttendanceFocused: () => false,
@@ -295,7 +305,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       expect(buildRouteGuardContext({ ...deps, flags: { ...deps.flags, isPlmWorkbenchFocused: undefined } }).plmWorkbenchFocused).toBe(false)
       expect(buildRouteGuardContext({ ...deps, flags: { ...deps.flags, isPlmWorkbenchFocused: 42 } }).plmWorkbenchFocused).toBe(false)
       // end-to-end: adapter-built context + real policy = real deny behavior.
-      const denyDeps = { ...deps, auth: { hasPermission: () => false } }
+      const denyDeps = { ...deps, auth: { ...deps.auth, hasPermission: () => false } }
       expect(resolveRouteGuardDecision({ path: '/stock-prep', meta: { permissions: ['integration:write'] } }, buildRouteGuardContext(denyDeps)))
         .toEqual({ action: 'redirect', target: '/HOME' })
     })
@@ -311,7 +321,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       expect(buildRouteGuardInput({ path: 123 as unknown as string, meta }).path).toBe('123')
       // end-to-end: real route meta flows through input adapter + ctx adapter into the policy.
       const deps = {
-        auth: { hasPermission: () => false },
+        auth: { hasPermission: () => false, getAccessSnapshot: () => ({ roles: [], permissions: [] }) },
         flags: {
           hasFeature: () => true,
           isAttendanceFocused: () => false,
@@ -328,7 +338,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     it('buildRouteGuardContext delegates hasFeature / attendanceFocused / resolveHomePath faithfully', () => {
       const featureSeen: string[] = []
       const deps = {
-        auth: { hasPermission: () => true },
+        auth: { hasPermission: () => true, getAccessSnapshot: () => ({ roles: [], permissions: [] }) },
         flags: {
           hasFeature: (f: string) => { featureSeen.push(f); return f === 'plm' },
           isAttendanceFocused: () => true,
@@ -347,6 +357,152 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       const denyFeature = { ...deps, flags: { ...deps.flags, hasFeature: () => false, isAttendanceFocused: () => false } }
       expect(resolveRouteGuardDecision({ path: '/plm', meta: { requiredFeature: 'plm' } }, buildRouteGuardContext(denyFeature)))
         .toEqual({ action: 'redirect', target: '/HOME-LAZY' })
+    })
+  })
+
+  // ---------------------------------------------------------------------------
+  // GATE ALIGNMENT PIN (2026-09-10) — nav predicate == route gate == workbench predicate.
+  //
+  // WHAT WENT WRONG BEFORE. Three surfaces answered the same question and only two of them agreed.
+  // The nav link (`App.vue`) and the route guard both ran `useAuth().hasPermission`, which EXPANDS
+  // (`stock-prep:*` and `*:*` satisfy `stock-prep:read`, `:write` implies `:read`, `users:write`
+  // counts as admin); everything INSIDE the page ran `satisfiesStockPrepAccess`, which matches
+  // LITERALLY, exactly as the server does. The gap was documented rather than closed
+  // (`stockPrepPermissionMatrix.spec.ts` F-03 carried four annotated rows for it) and it failed both
+  // ways at once: three principals reached a page whose every panel refused them, and a bare
+  // `integration:admin` — a platform admin to the server AND to every predicate in
+  // `workbenchAccess.ts` — was redirected away from a page it may use in full.
+  //
+  // WHAT THIS PINS. ONE verdict per principal, read three different ways: the nav predicate, the
+  // REAL `/stock-prep` route meta driven through the REAL guard adapter, and the workbench-internal
+  // predicate. They must be EQUAL, not merely each individually plausible. Reverting
+  // `buildRouteGuardContext` to `deps.auth.hasPermission`, or `App.vue` to
+  // `hasPermission(STOCK_PREP_ROUTE_PERMISSION)`, reddens this.
+  //
+  // The app-wide probe handed to the adapter below is deliberately EXTREME — `() => true` in one
+  // half, `() => false` in the other — because that is what makes the assertion mean anything: the
+  // verdict has to come from the PRINCIPAL, not from the probe. A wrapper that quietly delegated
+  // would answer 'allow' for everyone in the first half and 'redirect' for everyone in the second.
+  // ---------------------------------------------------------------------------
+  describe('gate alignment: nav, route and workbench answer with ONE predicate', () => {
+    interface Subject {
+      name: string
+      roles: string[]
+      permissions: string[]
+      /** The single verdict all three surfaces must reach. */
+      reachable: boolean
+    }
+
+    const SUBJECTS: Subject[] = [
+      { name: 'plain read holder', roles: [], permissions: ['stock-prep:read'], reachable: true },
+      { name: 'operator (read + operate)', roles: [], permissions: ['stock-prep:read', 'stock-prep:operate'], reachable: true },
+      // `stock-prep:admin` WITHOUT an explicit `:read`. The server's ladder answers read from it, so
+      // all three surfaces must — this row is why the nav gate cannot be a literal `includes`.
+      { name: 'workbench admin only (stock-prep:admin, no explicit read)', roles: [], permissions: ['stock-prep:admin'], reachable: true },
+      { name: 'platform admin (admin role + integration:admin)', roles: ['admin'], permissions: ['integration:admin'], reachable: true },
+      // THE ROW THAT WAS BROKEN IN THE DANGEROUS DIRECTION: permitted everywhere inside, hidden by
+      // the shell. `integration:admin` is half of PLATFORM_ADMIN_PERMISSIONS, and `hasPermission`
+      // derives nothing at all from it.
+      { name: 'bare integration:admin (no admin role)', roles: [], permissions: ['integration:admin'], reachable: true },
+      { name: 'no codes at all', roles: [], permissions: [], reachable: false },
+      // THE THREE EXPANSION ROWS, now strictly narrower. Each was admitted by the shell and refused
+      // by the server, so each used to land on a page with nothing on it.
+      { name: 'stock-prep:* wildcard', roles: [], permissions: ['stock-prep:*'], reachable: false },
+      { name: '*:* without the admin role', roles: [], permissions: ['*:*'], reachable: false },
+      { name: 'stock-prep:write holder', roles: [], permissions: ['stock-prep:write'], reachable: false },
+      // `users:write` is what makes `useAuth().getAccessSnapshot().isAdmin` true, and isAdmin
+      // short-circuits `hasPermission` to true for EVERY code. The server has no such rule.
+      { name: 'users:write (isAdmin to the shell, nobody to the server)', roles: [], permissions: ['users:write'], reachable: false },
+      { name: 'integration:write holder (the pre-O2 gate)', roles: [], permissions: ['integration:write'], reachable: false },
+    ]
+
+    /** The permission list the REAL route declares, read out of appRoutes.ts source (see above). */
+    function declaredRoutePermissions(): string[] {
+      const block = routeBlockByPath('/stock-prep')
+      expect(block, '/stock-prep must be registered').toBeTruthy()
+      const match = /permissions:\s*\[([^\]]*)\]/.exec(block as string)
+      expect(match, '/stock-prep must declare meta.permissions').toBeTruthy()
+      return Array.from((match as RegExpExecArray)[1].matchAll(/'([^']+)'/g)).map((m) => m[1])
+    }
+
+    function guardAllows(subject: Subject, appWideProbe: (permission: string) => boolean): boolean {
+      const decision = resolveRouteGuardDecision(
+        buildRouteGuardInput({ path: '/stock-prep', meta: { requiresAuth: true, permissions: declaredRoutePermissions() } }),
+        buildRouteGuardContext({
+          auth: {
+            hasPermission: appWideProbe,
+            getAccessSnapshot: () => ({ roles: subject.roles, permissions: subject.permissions }),
+          },
+          flags: {
+            hasFeature: () => true,
+            isAttendanceFocused: () => false,
+            isPlmWorkbenchFocused: () => false,
+            resolveHomePath: () => '/HOME',
+          },
+        }),
+      )
+      return decision.action === 'allow'
+    }
+
+    it('the route meta still declares exactly the workbench read code', () => {
+      expect(declaredRoutePermissions()).toEqual([STOCK_PREP_ROUTE_PERMISSION])
+      expect(STOCK_PREP_ROUTE_PERMISSION).toBe('stock-prep:read')
+    })
+
+    it('nav predicate, route gate and workbench predicate give ONE answer per principal', () => {
+      for (const subject of SUBJECTS) {
+        const snapshot = { roles: subject.roles, permissions: subject.permissions }
+
+        const nav = canReachStockPrepWorkbench(snapshot)
+        const workbench = satisfiesStockPrepAccess(snapshot, STOCK_PREP_ROUTE_PERMISSION)
+        const routeUnderPermissiveProbe = guardAllows(subject, () => true)
+        const routeUnderDenyingProbe = guardAllows(subject, () => false)
+
+        expect(nav, `${subject.name}: nav predicate`).toBe(subject.reachable)
+        expect(workbench, `${subject.name}: workbench predicate`).toBe(subject.reachable)
+        expect(routeUnderPermissiveProbe, `${subject.name}: route gate (permissive app-wide probe)`).toBe(subject.reachable)
+        expect(routeUnderDenyingProbe, `${subject.name}: route gate (denying app-wide probe)`).toBe(subject.reachable)
+        // Stated as an equality as well: "all three happen to be right" and "all three are the same
+        // predicate" are different properties, and only the second one cannot drift.
+        expect(
+          [nav, workbench, routeUnderPermissiveProbe, routeUnderDenyingProbe],
+          `${subject.name}: one verdict, three surfaces`,
+        ).toEqual([subject.reachable, subject.reachable, subject.reachable, subject.reachable])
+      }
+    })
+
+    it('the probe answers the three stock-prep codes from the principal and delegates everything else', () => {
+      const held = { roles: [] as string[], permissions: ['stock-prep:read'] }
+      const empty = { roles: [] as string[], permissions: [] as string[] }
+
+      // A probe that says yes to everything cannot grant a stock-prep code...
+      const yesProbe = buildStockPrepAwarePermissionProbe(() => true, () => empty)
+      for (const code of STOCK_PREP_PERMISSION_CODES) {
+        expect(yesProbe(code), `${code} must not come from the app-wide probe`).toBe(false)
+      }
+      // ...and a probe that says no to everything cannot withhold one.
+      const noProbe = buildStockPrepAwarePermissionProbe(() => false, () => held)
+      expect(noProbe(STOCK_PREP_ROUTE_PERMISSION)).toBe(true)
+
+      // Everything that is NOT a stock-prep code still goes to the app-wide probe, unchanged.
+      const seen: string[] = []
+      const delegating = buildStockPrepAwarePermissionProbe(
+        (permission) => { seen.push(permission); return permission === 'integration:write' },
+        () => empty,
+      )
+      expect(delegating('integration:write')).toBe(true)
+      expect(delegating('approvals:read')).toBe(false)
+      expect(seen).toEqual(['integration:write', 'approvals:read'])
+      expect(seen.some((permission) => STOCK_PREP_PERMISSION_CODES.includes(permission))).toBe(false)
+    })
+
+    it('a snapshot that cannot be read fails CLOSED — it never falls back to the wider probe', () => {
+      const probe = buildStockPrepAwarePermissionProbe(() => true, () => { throw new Error('no principal') })
+      for (const code of STOCK_PREP_PERMISSION_CODES) {
+        expect(probe(code)).toBe(false)
+      }
+      // The non-stock-prep half is untouched by the throwing snapshot getter.
+      expect(probe('integration:write')).toBe(true)
     })
   })
 

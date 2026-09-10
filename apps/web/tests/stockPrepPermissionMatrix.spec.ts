@@ -381,10 +381,12 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(STOCK_PREP_ROUTE_PERMISSION).toBe('stock-prep:read')
   })
 
-  it('F-07: the nav link is gated on the route permission, not on integration:write', () => {
+  it('F-07: the nav link is gated on the workbench gate itself, not on integration:write and not on the expanding probe', () => {
     expect(APP_VUE_SOURCE).toContain('v-if="canUseStockPreparation" to="/stock-prep"')
     expect(APP_VUE_SOURCE).not.toContain('v-if="canUseIntegration" to="/stock-prep"')
-    expect(APP_VUE_SOURCE).toContain('hasPermission(STOCK_PREP_ROUTE_PERMISSION)')
+    expect(APP_VUE_SOURCE).toContain('canReachStockPrepWorkbench(getAccessSnapshot())')
+    // The expanding app-wide probe must not be what decides this link — that was the divergence.
+    expect(APP_VUE_SOURCE).not.toContain('hasPermission(STOCK_PREP_ROUTE_PERMISSION)')
   })
 
   it('F-08: /stock-prep declares NO requiredFeature (a flag would be a second gate on admins too)', () => {
@@ -409,23 +411,26 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       'orphan operate (no read)': 'redirect',
       'workbench admin': 'allow',
       'platform admin': 'allow',
-      // THE ROUTE GUARD IS NOT THIS WAVE'S TO CHANGE, and these four rows say so out loud. It runs on
-      // `useAuth().hasPermission`, which expands `*:*`, `stock-prep:*` and `stock-prep:write` → read
-      // — so three of the four reach `/stock-prep` while the workbench (now literal) shows them
-      // nothing, and the bare `integration:admin` is refused the route while the workbench opens
-      // everything. Both residues are named in the PR body's 「没做/偏离」; narrowing the app-wide
-      // guard is a platform change, not a stock-prep one.
-      'integration:admin without role': 'redirect',
-      'stock-prep:* wildcard': 'allow',
-      '*:* without the admin role': 'allow',
-      'stock-prep:write holder': 'allow',
+      // THE FOUR ROWS THAT USED TO DIVERGE, now closed. They used to read
+      // redirect/allow/allow/allow, because the guard ran on `useAuth().hasPermission`, which
+      // expands `*:*`, `stock-prep:*` and `stock-prep:write` → read and treats `users:write` as
+      // admin — so three principals reached `/stock-prep` and found every panel refusing them,
+      // while a bare `integration:admin` (a platform admin to the server) was redirected away from
+      // a page it may use in full. `buildStockPrepAwarePermissionProbe` now answers the three
+      // stock-prep codes with `satisfiesStockPrepAccess`, so the guard and the workbench give ONE
+      // answer per principal. Three of the four moved STRICTLY NARROWER; the fourth stopped hiding
+      // a page the server already serves.
+      'integration:admin without role': 'allow',
+      'stock-prep:* wildcard': 'redirect',
+      '*:* without the admin role': 'redirect',
+      'stock-prep:write holder': 'redirect',
     }
     for (const actor of ACTORS) {
       asActor(actor)
       const decision = resolveRouteGuardDecision(
         buildRouteGuardInput({ path: '/stock-prep', meta }),
         buildRouteGuardContext({
-          auth: { hasPermission: probe() },
+          auth: { hasPermission: probe(), getAccessSnapshot: () => principal() },
           flags: {
             hasFeature: () => true,
             isAttendanceFocused: () => false,
