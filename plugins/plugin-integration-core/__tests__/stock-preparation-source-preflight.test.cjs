@@ -1202,7 +1202,9 @@ function boundSystem(id, overrides = {}) {
     id,
     kind: 'data-source:sql-readonly',
     connectionId: `conn_${id}`,
-    config: { schema: 'dbo', dataSourceOwnerId: 'u_binding_owner' },
+    // `lookupProjection` is the PRIVATE subtree for this kind: present on the adapter-ready row,
+    // deleted from the public projection. It is what makes the two accessors distinguishable.
+    config: { schema: 'dbo', dataSourceOwnerId: 'u_binding_owner', lookupProjection: { table: 'dbo.parts' } },
     ...overrides,
   }
 }
@@ -1211,20 +1213,33 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
   const routes = new Map()
   const reader = catalog ? createReader(catalog) : null
   const loaded = []
+  const storedSystem = (input) => {
+    const system = (systems || { [SYSTEM_ID]: boundSystem(SYSTEM_ID) })[input.id]
+    if (!system) {
+      const error = new Error('external system not found')
+      error.name = 'ExternalSystemNotFoundError'
+      throw error
+    }
+    return system
+  }
+  // G4/M2 (#5553 §3). These used to be ONE function under two names, which is the shape the design
+  // rules out: with an alias, a call site that degraded from the decrypting accessor back to the
+  // public projection returns the identical object and every assertion here still passes. They are
+  // now distinct — `getExternalSystem` deletes the private config subtree that `publicRow()` deletes
+  // for this kind (external-systems.cjs PRIVATE_CONFIG_KEYS_BY_KIND: `lookupProjection`) — and
+  // `loaded` counts the DECRYPTING loads only.
   const registry = {
     ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
     async getExternalSystem(input) {
+      const system = storedSystem(input)
+      const { lookupProjection, ...publicConfig } = system.config || {}
+      return { ...system, config: publicConfig }
+    },
+    async getExternalSystemForAdapter(input) {
       loaded.push(input)
-      const system = (systems || { [SYSTEM_ID]: boundSystem(SYSTEM_ID) })[input.id]
-      if (!system) {
-        const error = new Error('external system not found')
-        error.name = 'ExternalSystemNotFoundError'
-        throw error
-      }
-      return system
+      return storedSystem(input)
     },
   }
-  registry.getExternalSystemForAdapter = registry.getExternalSystem
   const adapterRegistry = {
     listAdapterKinds() { return ['data-source:sql-readonly'] },
     createAdapter() {
