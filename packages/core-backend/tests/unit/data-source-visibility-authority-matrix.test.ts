@@ -94,6 +94,10 @@ const POISON_VALUES = Object.values(POISON)
 //    COUNT queries used during migration (canonical; then connection_id IS NULL + legacy). ─────
 const externalRefRows: Array<{ connectionId?: string | null; dataSourceId: string; ownerId: string }> = []
 const refCountQueriedIds: string[] = []
+// Every GROUPED (batch) reference-count query this fake served, in order. The
+// listing surface must issue exactly ONE canonical + ONE legacy grouped query
+// per request no matter how many sources are listed — this is the N+1 probe.
+const groupedRefQueries: Array<{ kind: 'canonical' | 'legacy'; ids: string[] }> = []
 
 function fakeDb() {
   return {
@@ -102,6 +106,7 @@ function fakeDb() {
         const captured: Array<{ lhs: unknown; op: unknown; value: unknown }> = []
         const b = {
           select: () => b,
+          groupBy: () => b,
           where: (lhs: unknown, op: unknown, value: unknown) => {
             captured.push({ lhs, op, value })
             return b
@@ -115,8 +120,39 @@ function fakeDb() {
               return [{ count }]
             }
 
+            if (first?.lhs === 'connection_id' && first.op === 'in') {
+              // BATCH canonical: ONE grouped query covering every requested id.
+              const ids = (first.value as string[]).map(String)
+              groupedRefQueries.push({ kind: 'canonical', ids: [...ids] })
+              const grouped = new Map<string, number>()
+              for (const r of externalRefRows) {
+                if (r.connectionId == null || !ids.includes(r.connectionId)) continue
+                grouped.set(r.connectionId, (grouped.get(r.connectionId) ?? 0) + 1)
+              }
+              return [...grouped].map(([reference_id, count]) => ({ reference_id, count }))
+            }
+
             expect(first).toMatchObject({ lhs: 'connection_id', op: 'is', value: null })
-            // The legacy query must retain BOTH attribution predicates after its
+
+            if (captured[1]?.op === 'in') {
+              // BATCH legacy: connection_id IS NULL + dataSourceId IN (...), grouped by the
+              // (dataSourceId, dataSourceOwnerId) PAIR. This fake deliberately does NOT filter
+              // by owner — it hands back every pair — so a batch implementation that dropped the
+              // owner attribution would visibly over-count a foreign pin (P2-A stays observable).
+              expect(captured.length).toBe(2)
+              const ids = (captured[1]?.value as string[]).map(String)
+              groupedRefQueries.push({ kind: 'legacy', ids: [...ids] })
+              const grouped: Array<{ reference_id: string; reference_owner_id: string; count: number }> = []
+              for (const r of externalRefRows) {
+                if (r.connectionId != null || !ids.includes(r.dataSourceId)) continue
+                const hit = grouped.find((g) => g.reference_id === r.dataSourceId && g.reference_owner_id === r.ownerId)
+                if (hit) hit.count += 1
+                else grouped.push({ reference_id: r.dataSourceId, reference_owner_id: r.ownerId, count: 1 })
+              }
+              return grouped
+            }
+
+            // The SINGULAR legacy query must retain BOTH attribution predicates after its
             // connection_id IS NULL discriminator.
             expect(captured.length).toBe(3)
             const id = String(captured[1]?.value ?? '')
@@ -755,5 +791,240 @@ describe('DataSourceManager.countExternalSystemReferences (owner-attributed, P2-
     const m = new DataSourceManager({ db: ddlRaceDb as never })
     await m.addDataSource(countCfg('ddl-race-src'), { ownerId: 'alice' })
     await expect(m.countExternalSystemReferences('ddl-race-src')).rejects.toThrow(/disappeared/)
+  })
+})
+
+// ── the LIST surface's reference counter ──────────────────────────────────────
+// The same fact the delete guard enforces, shown BEFORE a delete is attempted:
+// "how many integration bindings point at this source". Two properties are
+// load-bearing and both are pinned here — it is BATCHED (not N+1), and it is a
+// COUNT and nothing else (no referencing system's name, tenant, owner, config).
+
+describe('data_sources listing reference counts (batched, values-free)', () => {
+  const FREE = 'dsv-rc-free'
+  const CANON = 'dsv-rc-canonical'
+  const BOTH = 'dsv-rc-both'
+
+  it('each item carries an integer referenceCount: canonical + owner-attributed legacy, foreign pins excluded', async () => {
+    await createAsOwner(FREE)
+    await createAsOwner(CANON)
+    await createAsOwner(BOTH)
+    externalRefRows.push(
+      { connectionId: CANON, dataSourceId: '', ownerId: '' },
+      { connectionId: BOTH, dataSourceId: '', ownerId: '' },
+      { dataSourceId: BOTH, ownerId: OWNER.id },
+      // P2-A on the READ side: a stranger's pin must not inflate the number the
+      // owner is shown, exactly as it does not inflate what the delete enforces.
+      { dataSourceId: BOTH, ownerId: 'u_hostile_other_tenant' },
+      { dataSourceId: FREE, ownerId: 'u_hostile_other_tenant' },
+    )
+
+    const res = await as(OWNER).get('/api/data-sources')
+    expect(res.status).toBe(200)
+    const items = res.body.data.items as Array<{ id: string; referenceCount?: number }>
+    const byId = new Map(items.map((i) => [i.id, i]))
+    expect(byId.get(FREE)?.referenceCount).toBe(0)
+    expect(byId.get(CANON)?.referenceCount).toBe(1)
+    expect(byId.get(BOTH)?.referenceCount).toBe(2)
+  })
+
+  it('ONE grouped canonical + ONE grouped legacy query for the WHOLE page — not one pair per row (N+1 probe)', async () => {
+    const before = groupedRefQueries.length
+    const res = await as(OWNER).get('/api/data-sources')
+    const items = res.body.data.items as Array<{ id: string }>
+    // Several rows on the page...
+    expect(items.length).toBeGreaterThan(2)
+    // ...and exactly two queries served the whole page.
+    const served = groupedRefQueries.slice(before)
+    expect(served.map((q) => q.kind)).toEqual(['canonical', 'legacy'])
+    // Both asked about every listed id AT ONCE, which is why two is enough.
+    for (const q of served) {
+      expect(q.ids).toEqual(expect.arrayContaining(items.map((i) => i.id)))
+    }
+  })
+
+  it('values-free: an item carries the COUNT and nothing about the referencing systems', async () => {
+    const res = await as(OWNER).get('/api/data-sources')
+    const item = (res.body.data.items as Array<{ id: string }>).find((i) => i.id === BOTH) as Record<string, unknown>
+    expect(Object.keys(item).sort()).toEqual(['connected', 'id', 'name', 'ownerId', 'referenceCount', 'type'])
+    expect(typeof item.referenceCount).toBe('number')
+  })
+
+  it('detail (GET /:id) reports the same count through the same batched call', async () => {
+    const res = await as(OWNER).get(`/api/data-sources/${BOTH}`)
+    expect(res.status).toBe(200)
+    expect(res.body.data.referenceCount).toBe(2)
+    expectNoPoison(res.body)
+  })
+
+  it('DEGRADES TO UNKNOWN, never to a reassuring 0, when the count query fails', async () => {
+    // A failed count must not paint "0 references / safe to delete" on a page
+    // whose delete would still be refused. The field is dropped instead.
+    const spy = vi
+      .spyOn(DataSourceManager.prototype, 'countExternalSystemReferencesByIds')
+      .mockRejectedValue(new Error('connection reset by peer'))
+    try {
+      const res = await as(OWNER).get('/api/data-sources')
+      expect(res.status).toBe(200)
+      const items = res.body.data.items as Array<Record<string, unknown>>
+      expect(items.length).toBeGreaterThan(0)
+      for (const item of items) {
+        expect(item).not.toHaveProperty('referenceCount')
+      }
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('THE BINDING: the count the listing shows is the count the DELETE guard enforces', async () => {
+    const listed = (
+      (await as(OWNER).get('/api/data-sources')).body.data.items as Array<{ id: string; referenceCount?: number }>
+    ).find((i) => i.id === BOTH)?.referenceCount
+    const refusal = await as(OWNER).delete(`/api/data-sources/${BOTH}`)
+    expect(refusal.status).toBe(409)
+    expect(refusal.body.error.details.referenceCount).toBe(listed)
+    expect(listed).toBe(2)
+  })
+
+  it('an admin listing gets counts too, attributed to the SOURCE owner rather than the caller', async () => {
+    const res = await as(ADMIN).get('/api/data-sources')
+    expect(res.status).toBe(200)
+    const byId = new Map(
+      (res.body.data.items as Array<{ id: string; referenceCount?: number }>).map((i) => [i.id, i.referenceCount]),
+    )
+    // The admin sees 2, not 3: the foreign pin stays uncounted for everyone.
+    expect(byId.get(BOTH)).toBe(2)
+    expect(byId.get(FREE)).toBe(0)
+  })
+})
+
+describe('DataSourceManager.countExternalSystemReferencesByIds (batched; same semantics as the singular guard)', () => {
+  function batchCfg(id: string): DataSourceConfig {
+    return {
+      id,
+      name: id,
+      type: 'postgres',
+      connection: { host: 'localhost', port: 5432, database: 'x' },
+      options: { autoConnect: false },
+    }
+  }
+
+  it('no bound db => every requested id maps to 0 (exact: nothing persisted can reference a memory-only source)', async () => {
+    const m = new DataSourceManager()
+    const counts = await m.countExternalSystemReferencesByIds(['a', 'b'])
+    expect([...counts]).toEqual([['a', 0], ['b', 0]])
+  })
+
+  it('empty id list => empty map, no query at all', async () => {
+    const before = groupedRefQueries.length
+    const m = new DataSourceManager({ db: fakeDb() as never })
+    expect((await m.countExternalSystemReferencesByIds([])).size).toBe(0)
+    expect(groupedRefQueries.length).toBe(before)
+  })
+
+  it('AGREES WITH THE SINGULAR GUARD for every id — drift would make the list page lie about the delete', async () => {
+    const m = new DataSourceManager({ db: fakeDb() as never })
+    for (const id of ['eq-canonical', 'eq-legacy', 'eq-mixed', 'eq-foreign', 'eq-none']) {
+      await m.addDataSource(batchCfg(id), { ownerId: 'alice' })
+    }
+    externalRefRows.push(
+      { connectionId: 'eq-canonical', dataSourceId: '', ownerId: '' },
+      { dataSourceId: 'eq-legacy', ownerId: 'alice' },
+      { dataSourceId: 'eq-legacy', ownerId: 'alice' },
+      // a migrated row keeping its rollback pointer is counted ONCE, canonically
+      { connectionId: 'eq-mixed', dataSourceId: 'eq-mixed', ownerId: 'alice' },
+      { dataSourceId: 'eq-mixed', ownerId: 'alice' },
+      // foreign-attributed and unstamped pins are invisible to BOTH methods
+      { dataSourceId: 'eq-foreign', ownerId: 'mallory' },
+      { dataSourceId: 'eq-foreign', ownerId: '' },
+    )
+
+    const ids = ['eq-canonical', 'eq-legacy', 'eq-mixed', 'eq-foreign', 'eq-none', 'eq-never-registered']
+    const batch = await m.countExternalSystemReferencesByIds(ids)
+    for (const id of ids) {
+      expect([id, batch.get(id)]).toEqual([id, await m.countExternalSystemReferences(id)])
+    }
+    expect(ids.map((id) => batch.get(id))).toEqual([1, 2, 2, 0, 0, 0])
+  })
+
+  it('an id with no owner scope => 0, and it is not even asked about', async () => {
+    const m = new DataSourceManager({ db: fakeDb() as never })
+    await m.addDataSource(batchCfg('scoped-src'), { ownerId: 'alice' })
+    const before = groupedRefQueries.length
+    const counts = await m.countExternalSystemReferencesByIds(['scoped-src', 'unscoped-src'])
+    expect(counts.get('unscoped-src')).toBe(0)
+    const served = groupedRefQueries.slice(before)
+    expect(served.length).toBe(2)
+    for (const q of served) {
+      expect(q.ids).toEqual(['scoped-src'])
+    }
+  })
+
+  it('returns exactly the requested keys — a returned row for an unrequested id cannot widen the answer', async () => {
+    const m = new DataSourceManager({
+      db: {
+        selectFrom: () => {
+          const b = {
+            select: () => b,
+            groupBy: () => b,
+            where: () => b,
+            execute: async () => [
+              { reference_id: 'asked', reference_owner_id: 'alice', count: 1 },
+              { reference_id: 'never-asked', reference_owner_id: 'alice', count: 99 },
+            ],
+          }
+          return b
+        },
+        insertInto: () => {
+          const b = { values: () => b, onConflict: () => b, execute: async () => [] }
+          return b
+        },
+        updateTable: () => {
+          const b = { set: () => b, where: () => b, execute: async () => [] }
+          return b
+        },
+      } as never,
+    })
+    await m.addDataSource(batchCfg('asked'), { ownerId: 'alice' })
+    const counts = await m.countExternalSystemReferencesByIds(['asked'])
+    expect([...counts.keys()]).toEqual(['asked'])
+    // one canonical row + one legacy row for 'asked'; the unrequested id is dropped
+    expect(counts.get('asked')).toBe(2)
+  })
+
+  it('P2-B posture is inherited: exact-zero ONLY on SQLSTATE 42P01, prose propagates', async () => {
+    const throwingDb = (err: Error) => ({
+      selectFrom: () => {
+        const b = { select: () => b, groupBy: () => b, where: () => b, execute: async () => { throw err } }
+        return b
+      },
+      insertInto: () => {
+        const b = { values: () => b, onConflict: () => b, execute: async () => [] }
+        return b
+      },
+      updateTable: () => {
+        const b = { set: () => b, where: () => b, execute: async () => [] }
+        return b
+      },
+    })
+    const withSource = async (db: unknown) => {
+      const m = new DataSourceManager({ db: db as never })
+      await m.addDataSource(batchCfg('batch-err-src'), { ownerId: 'alice' })
+      return m
+    }
+
+    const coded = Object.assign(new Error('anything at all'), { code: '42P01' })
+    const zeroes = await (await withSource(throwingDb(coded))).countExternalSystemReferencesByIds(['batch-err-src'])
+    expect(zeroes.get('batch-err-src')).toBe(0)
+
+    const prose = new Error('relation "integration_external_systems" does not exist')
+    await expect(
+      (await withSource(throwingDb(prose))).countExternalSystemReferencesByIds(['batch-err-src']),
+    ).rejects.toThrow(/does not exist/)
+
+    const broken = new Error('connection reset by peer')
+    await expect(
+      (await withSource(throwingDb(broken))).countExternalSystemReferencesByIds(['batch-err-src']),
+    ).rejects.toThrow(/connection reset/)
   })
 })

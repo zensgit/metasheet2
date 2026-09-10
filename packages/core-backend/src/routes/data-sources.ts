@@ -314,6 +314,35 @@ function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'crede
   }
 }
 
+/**
+ * Reference counts for a whole READ surface, in ONE pair of grouped queries.
+ *
+ * Two properties this wrapper exists to hold:
+ * - NOT N+1: the counts for every listed source come from a single batched
+ *   call, so adding a source adds rows to a GROUP BY, not a round trip.
+ * - "unknown" is not "zero": if the count query fails, the listing still
+ *   answers (it is the management surface for these sources, and its own data
+ *   is intact) but referenceCount is OMITTED for every item. A displayed 0
+ *   would read as "safe to delete" — a claim we cannot make when the reference
+ *   table did not answer. The authoritative refusal is the DELETE guard, which
+ *   recomputes the count server-side and fails closed on the same error.
+ *
+ * values-free: the result carries integers only — never the name, tenant,
+ * owner or config of any referencing external system, and nothing about the
+ * failure is logged (an error message here could name referencing rows).
+ */
+async function referenceCountsForDisplay(
+  manager: { countExternalSystemReferencesByIds(ids: readonly string[]): Promise<Map<string, number>> },
+  ids: readonly string[]
+): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map()
+  try {
+    return await manager.countExternalSystemReferencesByIds(ids)
+  } catch {
+    return new Map()
+  }
+}
+
 export function dataSourcesRouter(): Router {
   const router = Router()
 
@@ -334,11 +363,20 @@ export function dataSourcesRouter(): Router {
       // Authority model: owners see their own sources; platform admins see
       // every source (management metadata only — never credentials).
       const sources = manager.listDataSources({ actor: resolveActor(req) })
+      // ONE grouped count for the whole page (never one query per row). The
+      // integer is management metadata like `connected`/`ownerId`: it says HOW
+      // MANY integration bindings point here, never WHICH ones.
+      const referenceCounts = await referenceCountsForDisplay(manager, sources.map((s) => s.id))
+      const items = sources.map((source) => {
+        const referenceCount = referenceCounts.get(source.id)
+        // Omitted, not 0, when unknown — see referenceCountsForDisplay.
+        return referenceCount === undefined ? source : { ...source, referenceCount }
+      })
       return res.json({
         ok: true,
         data: {
-          items: sources,
-          total: sources.length
+          items,
+          total: items.length
         }
       })
     } catch (error) {
@@ -419,12 +457,17 @@ export function dataSourcesRouter(): Router {
         await auditCrossOwnerAdminAction(req, 'read', req.params.id, ownerId)
       }
 
+      // Same batched helper with a single id, so detail and listing can never
+      // disagree about what "referenced" means.
+      const referenceCount = (await referenceCountsForDisplay(manager, [req.params.id])).get(req.params.id)
+
       return res.json({
         ok: true,
         data: {
           ...sanitizeConfig(config),
           ownerId,
-          connected: adapter.isConnected()
+          connected: adapter.isConnected(),
+          ...(referenceCount === undefined ? {} : { referenceCount })
         }
       })
     } catch (error) {
