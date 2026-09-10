@@ -60,6 +60,13 @@ LEFT JOIN meta_records record
        'sha256'
      ), 'hex'), 1, 32)
 WHERE stats.dataset = 'department_overview'
+  AND EXISTS (
+    SELECT 1 FROM platform_app_instances app
+     WHERE app.tenant_id = stats.org_id AND app.workspace_id = stats.org_id
+       AND app.app_id = 'elearning' AND app.plugin_id = 'plugin-elearning'
+       AND app.instance_key = 'primary' AND app.status = 'active'
+       AND jsonb_typeof(app.config_json->'notificationsEnabled') = 'boolean'
+  )
   AND (
     record.id IS NULL
     OR record.data ->> (
