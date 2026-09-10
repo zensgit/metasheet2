@@ -2748,6 +2748,16 @@ function confirmDelete() {
 
 const fieldConfigDirty = computed(() => {
   if (!configTarget.value) return false
+  // A user retype is a pending draft in its own right. serializeFieldDraft is keyed by
+  // type and string/longText serialize IDENTICALLY (:1924 both return
+  // {validation, aiShortcut}, and both are in VALIDATION_PANEL_TYPES), so string ->
+  // longText would otherwise read as NOT dirty — and the 1.2s metadata poll in
+  // MultitableWorkbench (:3971 setInterval -> any upstream rename changes the source
+  // signature) would take the `else` branch below at :2834 and re-hydrate, silently
+  // resetting configDraftType back to the stored type under the user's cursor.
+  // It also keeps hasPendingDrafts/update:dirty honest, so closing the dialog or
+  // switching fields asks before dropping the pick.
+  if (userRetypeRequested.value) return true
   return serializeFieldDraft(configDraftType.value) !== fieldConfigBaseline.value
 })
 

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import MetaFieldManager from '../src/multitable/components/MetaFieldManager.vue'
+import { LOSSLESS_RETYPE, RETYPE_EXCLUDED_TARGET_TYPES, losslessRetypeTargets } from '../src/multitable/utils/field-retype'
 
 describe('MetaFieldManager', () => {
   afterEach(() => {
@@ -1591,5 +1592,171 @@ describe('MetaFieldManager — user retype vs background drift', () => {
 
     app.unmount()
     container.remove()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The string -> longText direction is the one retype the draft serializer CANNOT
+// see: serializeFieldDraft returns the identical {validation, aiShortcut} bytes for
+// both types (MetaFieldManager.vue:1924), so before `userRetypeRequested` was wired
+// into `fieldConfigDirty` the 1.2s metadata poll re-hydrated the panel on any
+// upstream change and reset the dropdown to `string` — after which Save took the
+// string/longText no-op skip and closed the dialog with nothing emitted.
+// ---------------------------------------------------------------------------
+describe('MetaFieldManager — retype survives the background metadata refresh', () => {
+  it('string -> longText is kept when an unrelated field is renamed upstream', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+
+    const Harness = defineComponent({
+      setup() {
+        const fields = ref([
+          { id: 'fld_note', name: 'Note', type: 'string', property: {} },
+          { id: 'fld_owner', name: 'Owner', type: 'string', property: {} },
+        ])
+        return { fields }
+      },
+      render() {
+        return h(MetaFieldManager, {
+          visible: true, sheetId: 'sheet_1', sheets: [], fields: this.fields, onUpdateField: updateSpy,
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    try {
+      await nextTick()
+      ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement).click()
+      await nextTick()
+
+      const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+      select.value = 'longText'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await nextTick()
+
+      // the workbench poll delivers a fresh props.fields where a DIFFERENT field was renamed
+      vm.fields = [
+        { id: 'fld_note', name: 'Note', type: 'string', property: {} },
+        { id: 'fld_owner', name: 'Owners', type: 'string', property: {} },
+      ]
+      await nextTick()
+
+      // the pick survives, and the panel says "outdated" rather than silently reloading
+      const selectAfter = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+      expect(selectAfter.value).toBe('longText')
+      expect(container.textContent).not.toContain('Latest field metadata loaded')
+      // …and it is still savable (only a STORED type move blocks)
+      expect(container.textContent).not.toContain('Reload latest before saving')
+
+      const saveButton = (Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+        .find((b) => b.textContent?.includes('Save field settings')) as HTMLButtonElement
+      expect(saveButton.disabled).toBe(false)
+      saveButton.click()
+      await nextTick()
+
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy.mock.calls[0][1].type).toBe('longText')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a pending retype counts as an unsaved draft (dirty + discard confirm)', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const dirtySpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [
+            { id: 'fld_note', name: 'Note', type: 'string', property: {} },
+            { id: 'fld_owner', name: 'Owner', type: 'string', property: {} },
+          ],
+          'onUpdate:dirty': dirtySpy,
+        })
+      },
+    })
+    app.mount(container)
+    try {
+      await nextTick()
+      const configureButtons = Array.from(
+        container.querySelectorAll('.meta-field-mgr__action[title="Configure"]'),
+      ) as HTMLButtonElement[]
+      configureButtons[0].click()
+      await nextTick()
+
+      const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+      select.value = 'longText'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await nextTick()
+
+      expect(dirtySpy).toHaveBeenCalledWith(true)
+
+      // switching to another field asks first, and the declined switch keeps the pick
+      configureButtons[1].click()
+      await nextTick()
+      expect(confirmSpy).toHaveBeenCalled()
+      expect((container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement).value)
+        .toBe('longText')
+    } finally { app.unmount(); container.remove() }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Whole-table golden for the retype whitelist. The per-type assertions above only
+// prove the rows they name, so a careless ADD to LOSSLESS_RETYPE (multiSelect, date,
+// longText -> string …) used to land with every test still green. The table IS the
+// safety boundary — the backend PATCH does a raw UPDATE with no value migration — so
+// widening it must require editing this golden.
+// ---------------------------------------------------------------------------
+describe('LOSSLESS_RETYPE table shape', () => {
+  it('contains exactly the owner-approved source rows and targets', () => {
+    expect(LOSSLESS_RETYPE).toEqual({
+      number: ['string'],
+      currency: ['number', 'string'],
+      percent: ['number', 'string'],
+      rating: ['number', 'string'],
+      select: ['string'],
+      url: ['string'],
+      email: ['string'],
+      phone: ['string'],
+      barcode: ['string'],
+      string: ['longText'],
+    })
+    expect(Object.keys(LOSSLESS_RETYPE).sort()).toEqual([
+      'barcode', 'currency', 'email', 'number', 'percent', 'phone', 'rating', 'select', 'string', 'url',
+    ])
+    // every offered target is itself a plain scalar the raw UPDATE keeps readable
+    const targets = new Set(Object.values(LOSSLESS_RETYPE).flat())
+    expect(Array.from(targets).sort()).toEqual(['longText', 'number', 'string'])
+  })
+
+  it('offers nothing for the directions the module documents as excluded', () => {
+    // array <-> scalar, rich-HTML exposure, display-semantics changes
+    expect(losslessRetypeTargets('multiSelect')).toEqual([])
+    expect(losslessRetypeTargets('date')).toEqual([])
+    expect(losslessRetypeTargets('dateTime')).toEqual([])
+    expect(losslessRetypeTargets('longText')).toEqual([])
+    // computed / structural types are never a source either
+    for (const excluded of RETYPE_EXCLUDED_TARGET_TYPES) {
+      expect(losslessRetypeTargets(excluded)).toEqual([])
+    }
+    expect(losslessRetypeTargets(null)).toEqual([])
+    expect(losslessRetypeTargets('nope')).toEqual([])
+  })
+
+  it('never surfaces a backend-excluded type as a target, even if the table says so', () => {
+    for (const [source, declared] of Object.entries(LOSSLESS_RETYPE)) {
+      for (const target of declared) {
+        expect(RETYPE_EXCLUDED_TARGET_TYPES.has(target)).toBe(false)
+      }
+      expect(losslessRetypeTargets(source)).not.toContain(source)
+    }
   })
 })
