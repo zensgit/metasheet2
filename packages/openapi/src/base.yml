@@ -4717,6 +4717,14 @@ components:
         enrollment:
           type: boolean
           description: Reported from ELEARNING_ENROLLMENT_ENABLED. Requires content and gates audit-only self-study registration.
+    ElearningAppInstallation:
+      type: object
+      additionalProperties: false
+      required: [status, notificationsEnabled, canManage]
+      properties:
+        status: { type: string, enum: [not-installed, inactive, active] }
+        notificationsEnabled: { type: boolean }
+        canManage: { type: boolean }
     ElearningCapabilities:
       type: object
       additionalProperties: false
