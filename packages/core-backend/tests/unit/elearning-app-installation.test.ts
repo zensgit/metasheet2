@@ -6,6 +6,9 @@ import { resolve } from 'node:path'
 import { createElearningAppInstallationRouter, requireElearningAppInstallation } from '../../src/routes/elearning-app-installation'
 import { changeElearningAppInstallation, readElearningAppInstallation } from '../../src/services/elearning-app-installation'
 import type { ElearningAdminAccessDb } from '../../src/services/elearning-admin-access'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const pinned = usePinnedServer()
 
 function database() {
   let state: { status: string; config_json: { notificationsEnabled: boolean } } | null = null
@@ -83,17 +86,18 @@ const PATH = '/api/elearning-app/installation'
 
 test('HTTP requires authenticated authority and closed command; installed inactive cannot bypass business gate', async () => {
   const { app, business } = http()
-  expect((await request(app).post(PATH).send({})).status).toBe(401)
-  expect((await request(app).post(PATH).set('Authorization', 'tenantless').set('x-tenant-id', 'org-a').send({})).status).toBe(403)
-  expect((await request(app).post(PATH).set('Authorization', 'user').send({})).status).toBe(403)
-  expect((await request(app).post(PATH).set('Authorization', 'admin').send({ orgId: 'other' })).status).toBe(400)
-  expect((await request(app).post(PATH).set('Authorization', 'admin').send({})).body).toEqual({ status: 'inactive', notificationsEnabled: false, canManage: true })
-  expect((await request(app).get(PATH).set('Authorization', 'user')).body).toEqual({ status: 'inactive', notificationsEnabled: false, canManage: false })
-  expect((await request(app).get('/api/elearning/me/courses').set('Authorization', 'admin')).body).toEqual({ error: 'app_not_enabled' })
+  pinned.setApp(app)
+  expect((await request(pinned.url()).post(PATH).send({})).status).toBe(401)
+  expect((await request(pinned.url()).post(PATH).set('Authorization', 'tenantless').set('x-tenant-id', 'org-a').send({})).status).toBe(403)
+  expect((await request(pinned.url()).post(PATH).set('Authorization', 'user').send({})).status).toBe(403)
+  expect((await request(pinned.url()).post(PATH).set('Authorization', 'admin').send({ orgId: 'other' })).status).toBe(400)
+  expect((await request(pinned.url()).post(PATH).set('Authorization', 'admin').send({})).body).toEqual({ status: 'inactive', notificationsEnabled: false, canManage: true })
+  expect((await request(pinned.url()).get(PATH).set('Authorization', 'user')).body).toEqual({ status: 'inactive', notificationsEnabled: false, canManage: false })
+  expect((await request(pinned.url()).get('/api/elearning/me/courses').set('Authorization', 'admin')).body).toEqual({ error: 'app_not_enabled' })
   expect(business).not.toHaveBeenCalled()
-  expect((await request(app).put(PATH).set('Authorization', 'admin').send({ enabled: 'true', notificationsEnabled: false })).status).toBe(400)
-  expect((await request(app).put(PATH).set('Authorization', 'admin').send({ enabled: true, notificationsEnabled: false })).status).toBe(200)
-  expect((await request(app).get('/api/elearning/me/courses').set('Authorization', 'admin')).body).toEqual({ ok: true })
+  expect((await request(pinned.url()).put(PATH).set('Authorization', 'admin').send({ enabled: 'true', notificationsEnabled: false })).status).toBe(400)
+  expect((await request(pinned.url()).put(PATH).set('Authorization', 'admin').send({ enabled: true, notificationsEnabled: false })).status).toBe(200)
+  expect((await request(pinned.url()).get('/api/elearning/me/courses').set('Authorization', 'admin')).body).toEqual({ ok: true })
   expect(business).toHaveBeenCalledTimes(1)
 })
 
@@ -101,7 +105,8 @@ test('master OFF stays closed without querying installation', async () => {
   const { db, query } = database()
   const app = express()
   app.use(requireElearningAppInstallation({ getDb: () => db, env: {} }))
-  expect((await request(app).get('/')).status).toBe(404)
+  pinned.setApp(app)
+  expect((await request(pinned.url()).get('/')).status).toBe(404)
   expect(query).not.toHaveBeenCalled()
 })
 
