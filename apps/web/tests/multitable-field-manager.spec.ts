@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import MetaFieldManager from '../src/multitable/components/MetaFieldManager.vue'
-import { LOSSLESS_RETYPE, RETYPE_EXCLUDED_TARGET_TYPES, losslessRetypeTargets } from '../src/multitable/utils/field-retype'
+import { LOSSLESS_RETYPE, RETYPE_EXCLUDED_TARGET_TYPES, losslessRetypeTargets, retainedRetypeValidationRules, validationPanelTypeFor } from '../src/multitable/utils/field-retype'
 
 describe('MetaFieldManager', () => {
   afterEach(() => {
@@ -1758,5 +1758,213 @@ describe('LOSSLESS_RETYPE table shape', () => {
       }
       expect(losslessRetypeTargets(source)).not.toContain(source)
     }
+  })
+
+  // The golden above only proves the CURRENT table has no excluded target, so the
+  // filter inside losslessRetypeTargets has no execution point there (deleting the
+  // `!RETYPE_EXCLUDED_TARGET_TYPES.has(target)` clause used to leave every test green).
+  // This drives the filter directly, with a table row that DOES name excluded targets.
+  it('the exclusion filter itself rejects excluded targets a widened table would offer', () => {
+    const originalNumber = LOSSLESS_RETYPE.number
+    const originalSelect = LOSSLESS_RETYPE.select
+    try {
+      LOSSLESS_RETYPE.number = ['string', 'link', 'formula', 'autoNumber', 'number']
+      expect(losslessRetypeTargets('number')).toEqual(['string'])
+      LOSSLESS_RETYPE.select = ['attachment', 'rollup', 'lookup', 'createdBy', 'string']
+      expect(losslessRetypeTargets('select')).toEqual(['string'])
+      // a row that is nothing BUT excluded targets collapses to a read-only span
+      LOSSLESS_RETYPE.number = ['link', 'button', 'modifiedTime']
+      expect(losslessRetypeTargets('number')).toEqual([])
+    } finally {
+      LOSSLESS_RETYPE.number = originalNumber
+      LOSSLESS_RETYPE.select = originalSelect
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// "Lossless" is only about the stored VALUES staying readable. `property.validation`
+// is a typed contract and must NOT ride along: number `min: 10` left on a text column
+// makes the engine coerce -> null -> reject (field-validation-engine.ts:76-80) and
+// record-service.ts:725-731 turns EVERY later write into RecordValidationFailedError.
+// The server keeps whatever the FE sends (field-codecs.ts:552 default branch), so the
+// filtering has to happen on the emit side.
+// ---------------------------------------------------------------------------
+describe('retainedRetypeValidationRules — the per-type rule catalogue', () => {
+  const types = (rules: unknown[]) => rules.map((rule) => (rule as { type: string }).type)
+  const mixed = [
+    { type: 'min', params: { value: 10 } },
+    { type: 'max', params: { value: 99 } },
+    { type: 'required' },
+    { type: 'maxLength', params: { value: 5 } },
+    { type: 'minLength', params: { value: 1 } },
+    { type: 'pattern', params: { regex: 'abc' } },
+    { type: 'enum', params: { values: ['a'] } },
+  ]
+
+  it('keeps exactly the rules the target type panel could have authored', () => {
+    expect(types(retainedRetypeValidationRules(mixed, 'string')))
+      .toEqual(['required', 'maxLength', 'minLength', 'pattern'])
+    expect(types(retainedRetypeValidationRules(mixed, 'longText')))
+      .toEqual(['required', 'maxLength', 'minLength', 'pattern'])
+    expect(types(retainedRetypeValidationRules(mixed, 'number'))).toEqual(['min', 'max', 'required'])
+    expect(types(retainedRetypeValidationRules(mixed, 'select'))).toEqual(['required', 'enum'])
+    // rule bodies travel intact — this is a filter, not a rewrite
+    expect(retainedRetypeValidationRules(mixed, 'number')[0]).toEqual({ type: 'min', params: { value: 10 } })
+  })
+
+  it('fails closed on types with no validation surface and on junk input', () => {
+    expect(retainedRetypeValidationRules(mixed, 'link')).toEqual([])
+    expect(retainedRetypeValidationRules(mixed, 'attachment')).toEqual([])
+    expect(retainedRetypeValidationRules(mixed, null)).toEqual([])
+    expect(retainedRetypeValidationRules(mixed, undefined)).toEqual([])
+    expect(retainedRetypeValidationRules('not-an-array', 'string')).toEqual([])
+    expect(retainedRetypeValidationRules(undefined, 'string')).toEqual([])
+    expect(retainedRetypeValidationRules([null, 'min', 42, {}, { type: 7 }], 'string')).toEqual([])
+  })
+
+  it('validationPanelTypeFor mirrors the panel templates (and only those)', () => {
+    expect(validationPanelTypeFor('string')).toBe('text')
+    expect(validationPanelTypeFor('longText')).toBe('text')
+    expect(validationPanelTypeFor('number')).toBe('number')
+    expect(validationPanelTypeFor('select')).toBe('select')
+    expect(validationPanelTypeFor('multiSelect')).toBe('select')
+    expect(validationPanelTypeFor('currency')).toBeNull()
+    expect(validationPanelTypeFor('link')).toBeNull()
+    expect(validationPanelTypeFor('')).toBeNull()
+  })
+})
+
+describe('MetaFieldManager — a retype leaves the old type validation behind', () => {
+  function mountWithField(field: Record<string, unknown>) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true, sheetId: 'sheet_1', sheets: [], fields: [field], onUpdateField: updateSpy,
+        })
+      },
+    })
+    app.mount(container)
+    return { container, app, updateSpy }
+  }
+
+  async function openConfig(container: HTMLElement) {
+    await nextTick()
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+  }
+
+  async function pickType(container: HTMLElement, value: string) {
+    const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+    select.value = value
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+  }
+
+  function clickSave(container: HTMLElement) {
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((b) => b.textContent?.includes('Save field settings'))
+      ?.click()
+  }
+
+  const emittedRuleTypes = (payload: any) =>
+    ((payload.property.validation ?? []) as Array<{ type: string }>).map((rule) => rule.type)
+
+  it('number(min 10 / max 99) -> text: the numeric rules do not travel, `required` does', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container, app, updateSpy } = mountWithField({
+      id: 'fld_qty',
+      name: 'Qty',
+      type: 'number',
+      property: {
+        validation: [
+          { type: 'min', params: { value: 10 } },
+          { type: 'max', params: { value: 99 } },
+          { type: 'required' },
+        ],
+      },
+    })
+    try {
+      await openConfig(container)
+      await pickType(container, 'string')
+      // the notice names the consequence before the save, not only in the confirm
+      const notice = container.querySelector('[data-test="retype-notice"]') as HTMLElement
+      expect(notice.textContent).toContain('validation rule the new type cannot enforce')
+
+      clickSave(container)
+      await nextTick()
+
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      const [, payload] = updateSpy.mock.calls[0]
+      expect(payload.type).toBe('string')
+      expect(emittedRuleTypes(payload)).toEqual(['required'])
+      expect(JSON.stringify(payload)).not.toContain('"min"')
+    } finally { app.unmount(); container.remove(); vi.restoreAllMocks() }
+  })
+
+  it('select(enum) -> text drops the validation key entirely when nothing survives', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container, app, updateSpy } = mountWithField({
+      id: 'fld_stage',
+      name: 'Stage',
+      type: 'select',
+      property: {
+        options: [{ value: 'A', color: '#409eff' }],
+        validation: [{ type: 'enum', params: { values: ['A'] } }],
+      },
+    })
+    try {
+      await openConfig(container)
+      await pickType(container, 'string')
+      clickSave(container)
+      await nextTick()
+
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      const [, payload] = updateSpy.mock.calls[0]
+      expect(payload.type).toBe('string')
+      expect('validation' in payload.property).toBe(false)
+    } finally { app.unmount(); container.remove(); vi.restoreAllMocks() }
+  })
+
+  it('text -> long text keeps the text rules (the filter is not a blanket wipe)', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container, app, updateSpy } = mountWithField({
+      id: 'fld_note',
+      name: 'Note',
+      type: 'string',
+      property: { validation: [{ type: 'maxLength', params: { value: 120 } }] },
+    })
+    try {
+      await openConfig(container)
+      await pickType(container, 'longText')
+      clickSave(container)
+      await nextTick()
+
+      const [, payload] = updateSpy.mock.calls[0]
+      expect(payload.type).toBe('longText')
+      expect(payload.property.validation).toEqual([{ type: 'maxLength', params: { value: 120 } }])
+    } finally { app.unmount(); container.remove(); vi.restoreAllMocks() }
+  })
+
+  it('a plain settings save (no retype) still persists the type-native rules untouched', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container, app, updateSpy } = mountWithField({
+      id: 'fld_qty',
+      name: 'Qty',
+      type: 'number',
+      property: { decimals: 2, validation: [{ type: 'min', params: { value: 10 } }] },
+    })
+    try {
+      await openConfig(container)
+      clickSave(container)
+      await nextTick()
+
+      const [, payload] = updateSpy.mock.calls[0]
+      expect('type' in payload).toBe(false)
+      expect(payload.property.validation).toEqual([{ type: 'min', params: { value: 10 } }])
+    } finally { app.unmount(); container.remove(); vi.restoreAllMocks() }
   })
 })

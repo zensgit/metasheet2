@@ -53,3 +53,50 @@ export function losslessRetypeTargets(sourceType: string | null | undefined): st
   if (!targets) return []
   return targets.filter((target) => target !== sourceType && !RETYPE_EXCLUDED_TARGET_TYPES.has(target))
 }
+
+/**
+ * "Lossless" above is only about the STORED CELL VALUES staying readable. A field's
+ * `property.validation` is a *typed contract*, and it does NOT travel: carrying a
+ * number field's `min: 10` into a text field would make every non-numeric write fail
+ * forever, because the engine's numeric predicates coerce first and reject on
+ * `null` (core-backend/src/multitable/field-validation-engine.ts:76-80 →
+ * record-service.ts:725-731 throws RecordValidationFailedError). The server does not
+ * strip it either — `sanitizeFieldProperty` returns unknown keys as-is for text types
+ * (multitable/field-codecs.ts:552) — so the FE must not send them.
+ *
+ * The catalogue below mirrors, one for one, the rule rows MetaFieldValidationPanel.vue
+ * renders per panel type (`data-rule-type=` at :9/:32/:62/:92/:136/:165/:197): a rule
+ * survives a retype only if the target type's own panel could have authored it.
+ */
+export type ValidationPanelType = 'text' | 'number' | 'select'
+
+const VALIDATION_RULES_BY_PANEL_TYPE: Record<ValidationPanelType, ReadonlySet<string>> = {
+  // `required` is rendered outside the per-type templates → valid everywhere.
+  text: new Set(['required', 'minLength', 'maxLength', 'pattern']),
+  number: new Set(['required', 'min', 'max']),
+  select: new Set(['required', 'enum']),
+}
+
+/** Which validation panel a field type uses, or null when it has no validation surface. */
+export function validationPanelTypeFor(fieldType: string | null | undefined): ValidationPanelType | null {
+  if (fieldType === 'string' || fieldType === 'longText') return 'text'
+  if (fieldType === 'number') return 'number'
+  if (fieldType === 'select' || fieldType === 'multiSelect') return 'select'
+  return null
+}
+
+/**
+ * Rules from the pre-retype draft that the TARGET type may keep. Fail-closed: an
+ * unknown/valueless target type keeps nothing, and any non-rule entry is dropped.
+ * Engine shape in, engine shape out (`{ type, params?, message? }`).
+ */
+export function retainedRetypeValidationRules(rules: unknown, targetType: string | null | undefined): unknown[] {
+  const panelType = validationPanelTypeFor(targetType)
+  if (!panelType || !Array.isArray(rules)) return []
+  const allowed = VALIDATION_RULES_BY_PANEL_TYPE[panelType]
+  return rules.filter((rule) => {
+    if (!rule || typeof rule !== 'object') return false
+    const ruleType = (rule as { type?: unknown }).type
+    return typeof ruleType === 'string' && allowed.has(ruleType)
+  })
+}

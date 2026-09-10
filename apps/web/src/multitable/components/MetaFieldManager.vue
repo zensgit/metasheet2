@@ -897,7 +897,7 @@ import {
   managerLabel,
 } from '../utils/meta-manager-labels'
 import { SELECT_OPTION_PALETTE, expandHex, isHexColor, nextPaletteColor } from '../utils/select-option-palette'
-import { losslessRetypeTargets } from '../utils/field-retype'
+import { losslessRetypeTargets, retainedRetypeValidationRules, validationPanelTypeFor } from '../utils/field-retype'
 import { aiTokensConsumed, fieldTypeLabel } from '../utils/meta-core-labels'
 import { aiShortcutErrorMessage } from '../utils/meta-api-error-labels'
 import { aiBulkLabel } from '../utils/meta-ai-bulk-labels'
@@ -920,10 +920,12 @@ import { MtButton, MtIconButton } from '../ui'
 /** Field types where the validation panel is configurable. */
 const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'longText', 'number', 'select', 'multiSelect'])
 
+// Single source of truth with the retype rule filter (utils/field-retype.ts): the panel
+// that authors a rule is the panel that decides whether the rule may survive a retype.
+// The `?? 'select'` only ever fires for types the panel is not rendered for at all
+// (validationPanelVisible gates on VALIDATION_PANEL_TYPES) — kept for the old behaviour.
 function mapTypeForValidationPanel(fieldType: string): 'text' | 'number' | 'select' {
-  if (fieldType === 'string' || fieldType === 'longText') return 'text'
-  if (fieldType === 'number') return 'number'
-  return 'select'
+  return validationPanelTypeFor(fieldType) ?? 'select'
 }
 
 /**
@@ -2691,6 +2693,21 @@ function saveConfig() {
   const storedProperty = (configTarget.value.property ?? {}) as Record<string, unknown>
   if (storedProperty.hidden === true) carried.hidden = true
   if (storedProperty.visible === false) carried.visible = false
+  // #9 retype, part 2: `currentDraftProperty` was just called with the NEW type, but the
+  // validation draft it serialises was authored under the OLD one — and both number and
+  // string/longText/select sit in VALIDATION_PANEL_TYPES, so a number field's `min`/`max`
+  // (or a select's `enum`) would ride along into a text column. That is not lossless: the
+  // engine coerces before comparing (field-validation-engine.ts:76-80 `toNumber` → null →
+  // false) and record-service.ts:725-731 turns every subsequent write into
+  // RecordValidationFailedError — a text column no non-numeric value can ever enter again.
+  // The server keeps whatever we send (field-codecs.ts:552 default branch returns the
+  // object as-is), so the filter has to happen HERE. Keep only what the target type's own
+  // validation panel could have authored; drop the key entirely when nothing survives.
+  if (retyping) {
+    const keptRules = retainedRetypeValidationRules(carried.validation, fieldType)
+    if (keptRules.length) carried.validation = keptRules
+    else delete carried.validation
+  }
   // Skip no-op saves for types that only expose validation + aiShortcut: if
   // the user touched neither surface there is nothing to persist, and
   // emitting an empty `property: {}` would otherwise clobber existing values

@@ -535,9 +535,13 @@ export function duplicateFieldName(name: string, isZh: boolean): string {
  * they are (the forward retype migrates nothing).
  */
 export function fieldRetypeNotice(targetTypeLabel: string, isZh: boolean): string {
+  // Says BOTH consequences on purpose: the server re-sanitises `property` under the new
+  // type (format settings), and the FE drops validation rules the new type cannot enforce
+  // (utils/field-retype.ts retainedRetypeValidationRules) — a number `min` left on a text
+  // column would reject every later write.
   return isZh
-    ? `改为${targetTypeLabel}后，现有格式设置会被清除；已有数据不转换。`
-    : `Changing to ${targetTypeLabel} clears the current format settings; existing data is not converted.`
+    ? `改为${targetTypeLabel}后，现有格式设置、以及新类型无法执行的校验规则会被清除；已有数据不转换。`
+    : `Changing to ${targetTypeLabel} clears the current format settings and any validation rule the new type cannot enforce; existing data is not converted.`
 }
 
 export function deleteFieldConfirm(name: string, isZh: boolean): string {
