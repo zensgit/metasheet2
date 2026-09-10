@@ -34,6 +34,19 @@ export const STOCK_PREPARATION_SOURCE_BINDING_ROUTE = '/api/integration/stock-pr
 /** The frozen table action whose source this binds. Shown so an implementer can grep for it. */
 export const STOCK_PREPARATION_PULL_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 
+/**
+ * The DATA-SOURCE-BACKED BOM read kind — the one 数据工厂's 「新增连接草稿」 produces, whose
+ * config carries a `connectionId` into `data_sources` instead of its own host and credentials.
+ *
+ * Mirrored from `STOCK_PREPARATION_BOM_SOURCE_KINDS[0]`
+ * (`plugins/plugin-integration-core/lib/stock-preparation-bom-expansion.cjs`). The OTHER member of
+ * that pair, `bridge:legacy-sql-readonly`, is equally readable by the BOM expander and equally
+ * bindable here — this constant is NOT an eligibility rule and must never become one. It exists so
+ * the wizard can say WHICH ROAD a deployment took, in the one place that has to distinguish
+ * 「登记外接数据源 + 引用它」 from 「旧式桥接自带连接信息」.
+ */
+export const STOCK_PREPARATION_DATA_SOURCE_BRIDGE_KIND = 'data-source:sql-readonly'
+
 /** The 对接总览 register's bilingual label for a connector kind, served rather than re-tabled here. */
 export interface StockPreparationSourceKindLabel {
   zh: string
@@ -89,6 +102,18 @@ export interface StockPreparationSourceBindingView {
    */
   takesEffectWithoutRestart: boolean
   eligibleSources: StockPreparationSourceCandidate[]
+}
+
+/**
+ * How many of the server's eligible candidates are data-source-backed. A COUNT, computed over the
+ * `kind` token the server already put on each row — not a second eligibility judgement: every row
+ * handed here has already passed `listEligibleSources`, and this only asks which road each took.
+ */
+export function countDataSourceBackedCandidates(
+  candidates: readonly StockPreparationSourceCandidate[] | null | undefined,
+): number {
+  if (!Array.isArray(candidates)) return 0
+  return candidates.filter((candidate) => candidate?.kind === STOCK_PREPARATION_DATA_SOURCE_BRIDGE_KIND).length
 }
 
 export interface StockPreparationSourceBindingSaveResult {
