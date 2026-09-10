@@ -648,6 +648,33 @@ export function summarizeFieldProvenance(
   return { entries, stats }
 }
 
+// G10: the envelope carries `error.code` from a small REGISTERED vocabulary, and this function used
+// to drop it on the floor — every failure reached the UI as backend English prose with no key to look
+// up a humanized label. Subclassing Error (rather than changing what is thrown) keeps every existing
+// call site intact: `instanceof Error` still holds and `error.message` is byte-identical to before.
+// The code is ADDITIONAL metadata only; nothing here widens, re-derives or scrubs the message, and no
+// caller gains access to anything the response did not already contain.
+export class IntegrationApiError extends Error {
+  readonly code: string | null = null
+  readonly status: number = 0
+
+  constructor(message: string, code?: string | null, status = 0) {
+    super(message)
+    this.name = 'IntegrationApiError'
+    this.code = typeof code === 'string' && code.trim() ? code.trim() : null
+    this.status = typeof status === 'number' ? status : 0
+  }
+}
+
+/**
+ * The envelope error code an integration API failure carried, or `null` for anything else (a network
+ * TypeError, a JSON parse failure, a thrown string). Never guesses: only an `IntegrationApiError` that
+ * actually received a non-blank code answers non-null.
+ */
+export function integrationApiErrorCode(error: unknown): string | null {
+  return error instanceof IntegrationApiError ? error.code : null
+}
+
 export async function parseIntegrationResponse<T>(response: Response): Promise<T> {
   let payload: IntegrationApiEnvelope<T> | null = null
   try {
@@ -657,7 +684,7 @@ export async function parseIntegrationResponse<T>(response: Response): Promise<T
   }
   if (!response.ok || payload?.ok === false) {
     const message = payload?.error?.message || `${response.status} ${response.statusText}`.trim()
-    throw new Error(message || 'Integration API request failed')
+    throw new IntegrationApiError(message || 'Integration API request failed', payload?.error?.code, response.status)
   }
   return payload?.data as T
 }

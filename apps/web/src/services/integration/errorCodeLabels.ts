@@ -33,6 +33,18 @@
 //     (e.g. a custom allowlist/validation code from scripts/ops/bridge-agent-readonly.ps1), and that
 //     is DELIBERATELY left unregistered so it degrades to the generic unknown-error label rather than
 //     rendering dynamic, agent-supplied text.
+//   - External-write fence (3): the three permanent/closed WRITE refusals the data factory's own
+//     run & push surface can receive. `K3_WISE_PIPELINE_RUN_DISABLED` is thrown by
+//     plugins/plugin-integration-core/lib/pipeline-runner.cjs at target resolution;
+//     `K3_WISE_EXTERNAL_WRITE_DISABLED` is the single closed token of
+//     plugins/plugin-integration-core/lib/k3-external-write-permanent-fence.cjs (E4 / HG v1.2 §10.1),
+//     raised at four independent layers; `OUTBOUND_HTTP_WRITE_DISABLED` is the shut-gate code of
+//     plugins/plugin-integration-core/lib/outbound-http-write-gate.cjs. These are DESIGN POSTURE,
+//     not faults a caller can fix by retrying — the labels say so, because the un-labeled fallback
+//     ("未知错误") reads like a transient outage and sends operators hunting for a switch that does
+//     not exist. The other two outbound-HTTP codes (TARGET_NOT_AUTHORIZED / ALLOWLIST_INVALID) are
+//     deliberately NOT labeled here: they are deployment-side allowlist facts, surfaced to ops
+//     through server logs, not to the data-factory operator this table serves.
 //   - Dead-letter mainline (10): plugins/plugin-integration-core/lib/pipeline-runner.cjs (the mainline
 //     pipeline path) plus generic fallbacks used there and in external-write-dry-run.cjs. Dead-letter
 //     `errorCode` is fed from multiple origins and is NOT one closed server-exported array, so only the
@@ -43,7 +55,10 @@
 // plugins/plugin-integration-core/lib/external-write-dry-run.cjs (AdapterValidationError,
 // DATA_SOURCE_*, DataSource*Error, DUPLICATE_KEY, and the test-injection code). Those belong to the
 // still-W1-gated external-write self-service ladder, not the mainline read/monitor flow this slice
-// touches — inventing zh/en semantics for a not-yet-shipped write surface would be scope creep.
+// touches — inventing zh/en semantics for a not-yet-shipped write surface would be scope creep. That
+// exclusion still holds for the C6 ladder's per-record write FAULTS. It never covered the fence
+// family added below, which is the opposite kind of fact: not "this write attempt failed" but "this
+// write is permanently not offered", raised BEFORE any adapter, credential or network call.
 
 import type { AppLocale } from '../../composables/useLocale'
 
@@ -74,6 +89,16 @@ export const BRIDGE_AGENT_ERROR_CODES = [
   'BRIDGE_AGENT_TIMEOUT',
   'BRIDGE_AGENT_REQUEST_FAILED',
   'BRIDGE_AGENT_TEST_FAILED',
+] as const
+
+// External-write fence — the closed WRITE refusals. Local mirror of three server constants that live
+// in three different modules (there is no single server-exported array spanning them), kept in ONE
+// list here so tests/integrationErrorCodeLabels.spec.ts can require each owning module and fail RED if
+// a token is ever renamed on the server without this table following.
+export const EXTERNAL_WRITE_FENCE_ERROR_CODES = [
+  'K3_WISE_PIPELINE_RUN_DISABLED',
+  'K3_WISE_EXTERNAL_WRITE_DISABLED',
+  'OUTBOUND_HTTP_WRITE_DISABLED',
 ] as const
 
 // Dead-letter "known mainline" codes — not a single server-exported array (dead-letter `errorCode` is
@@ -128,6 +153,8 @@ export type IntegrationErrorCode =
   | (typeof K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES)[number]
   // Bridge Agent readonly adapter (4) — see BRIDGE_AGENT_ERROR_CODES above
   | (typeof BRIDGE_AGENT_ERROR_CODES)[number]
+  // External-write fence (3) — see EXTERNAL_WRITE_FENCE_ERROR_CODES above
+  | (typeof EXTERNAL_WRITE_FENCE_ERROR_CODES)[number]
   // Dead-letter known mainline (10) — see DEAD_LETTER_MAINLINE_ERROR_CODES above
   | (typeof DEAD_LETTER_MAINLINE_ERROR_CODES)[number]
 
@@ -324,6 +351,36 @@ export const INTEGRATION_ERROR_CODE_LABELS: Record<IntegrationErrorCode, Integra
   BRIDGE_AGENT_TEST_FAILED: {
     zh: '连接测试执行失败',
     en: 'The connection test failed to execute.',
+  },
+
+  // --- External-write fence (3) ---
+  // Wording is deliberately aligned with services/integration/stockPreparation/plainLanguage.ts
+  // (STOCK_PREP_POSTURE_PLAIN.k3ExternalWrite / .outboundHttpWrite), so the install page and the run
+  // surface tell an operator the same story. Every hint names the REMEDY that exists (export, or write
+  // into a Metasheet table) instead of implying a setting to hunt for.
+  K3_WISE_PIPELINE_RUN_DISABLED: {
+    zh: '这条链路不能直接推送到 K3 目标',
+    en: 'This pipeline cannot push to its K3 target.',
+    hint: {
+      zh: 'K3 目标永久只读，不接受写回。dry-run 预览仍然可用；请把清洗结果导出，或改用多维表目标。',
+      en: 'K3 targets are permanently read-only and accept no write-back. Dry-run preview still works; export the cleansed result, or switch to a Metasheet table target.',
+    },
+  },
+  K3_WISE_EXTERNAL_WRITE_DISABLED: {
+    zh: 'K3 写回已永久关闭（这是设计，不是配置错）',
+    en: 'Write-back to K3 is permanently off (by design, not a misconfiguration).',
+    hint: {
+      zh: 'K3 目标永久只读：开关、审批和请求参数都打不开它。可以读 K3 做对照，但一个字也不会写回去；请导出清洗结果，或把它落到多维表。',
+      en: 'K3 targets are permanently read-only: no flag, approval or request parameter can open them. K3 data can be read for comparison, but not one field is ever written back — export the cleansed result, or land it in a Metasheet table.',
+    },
+  },
+  OUTBOUND_HTTP_WRITE_DISABLED: {
+    zh: '通用 HTTP 外发写入未开启',
+    en: 'Generic outbound HTTP write is not enabled.',
+    hint: {
+      zh: '本部署没有授权任何外发目标，这个只读状态是正确的，不是漏配。确需外发要由运维在服务端目标清单里逐个授权。',
+      en: 'This deployment authorizes no outbound target; that read-only state is correct, not a missing setting. Enabling one is an ops change to the server-side outbound target file.',
+    },
   },
 
   // --- Dead-letter known mainline (10) ---

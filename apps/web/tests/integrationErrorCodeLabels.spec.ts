@@ -11,10 +11,17 @@ import { describe, expect, it } from 'vitest'
 import {
   BRIDGE_AGENT_ERROR_CODES,
   DEAD_LETTER_MAINLINE_ERROR_CODES,
+  EXTERNAL_WRITE_FENCE_ERROR_CODES,
   K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES,
   integrationErrorCodeDisplayLabel,
+  integrationErrorCodeHint,
   integrationErrorCodeLabel,
 } from '../src/services/integration/errorCodeLabels'
+import {
+  K3_EXTERNAL_WRITE_TARGET_KINDS,
+  isK3ExternalWriteTargetKind,
+} from '../src/services/integration/writeFence'
+import { readFileSync } from 'node:fs'
 
 const require = createRequire(import.meta.url)
 const pluginLib = path.resolve(__dirname, '../../../plugins/plugin-integration-core/lib')
@@ -28,6 +35,12 @@ const { K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES: SERVER_BOM_LIST_ERROR_CODES } 
   require(path.join(pluginLib, 'read-source-bom-list-by-material-contract.cjs'))
 const { BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES: SERVER_BRIDGE_AGENT_ERROR_CODES } =
   require(path.join(pluginLib, 'adapters', 'bridge-agent-readonly-adapter.cjs'))
+const {
+  K3_WISE_EXTERNAL_WRITE_DISABLED: SERVER_K3_EXTERNAL_WRITE_DISABLED,
+  K3_EXTERNAL_WRITE_TARGET_KINDS: SERVER_K3_FENCED_KINDS,
+} = require(path.join(pluginLib, 'k3-external-write-permanent-fence.cjs'))
+const { OUTBOUND_HTTP_WRITE_DISABLED: SERVER_OUTBOUND_HTTP_WRITE_DISABLED } =
+  require(path.join(pluginLib, 'outbound-http-write-gate.cjs'))
 
 function expectLabeled(code: string): void {
   const label = integrationErrorCodeLabel(code, 'en')
@@ -35,6 +48,60 @@ function expectLabeled(code: string): void {
   expect(label?.zh, `${code} zh must be non-empty`).toBeTruthy()
   expect(label?.en, `${code} en must be non-empty`).toBeTruthy()
 }
+
+// G10 — the external-write FENCE family.
+//
+// These three codes are not faults; they are the runtime saying "this write is permanently not
+// offered". Unlabeled, they rendered as the generic 未知错误 fallback (or, at the status bar, as the
+// server's English refusal prose), which reads like an outage and sends an operator hunting for a
+// switch that does not exist. Every assertion below is about that being impossible again.
+describe('external-write fence codes (G10)', () => {
+  it('mirrors the exact server tokens for all three fence codes', () => {
+    expect(EXTERNAL_WRITE_FENCE_ERROR_CODES.length).toBe(3)
+    // Two of the three are exported constants — required, never text-parsed, like every other family.
+    expect(EXTERNAL_WRITE_FENCE_ERROR_CODES).toContain(SERVER_K3_EXTERNAL_WRITE_DISABLED)
+    expect(EXTERNAL_WRITE_FENCE_ERROR_CODES).toContain(SERVER_OUTBOUND_HTTP_WRITE_DISABLED)
+    // The third is NOT exported: pipeline-runner.cjs spells K3_WISE_PIPELINE_RUN_DISABLED as an inline
+    // literal at its target-resolution gate, and this slice is not allowed to edit plugins/. A scoped
+    // source scan is the only tripwire available — it still fails RED if the token is ever renamed
+    // server-side without this table following, which is the property that matters.
+    const runnerSource = readFileSync(path.join(pluginLib, 'pipeline-runner.cjs'), 'utf8')
+    expect(
+      runnerSource,
+      'pipeline-runner.cjs no longer spells K3_WISE_PIPELINE_RUN_DISABLED — resync errorCodeLabels.ts',
+    ).toContain("code: 'K3_WISE_PIPELINE_RUN_DISABLED'")
+    expect(EXTERNAL_WRITE_FENCE_ERROR_CODES).toContain('K3_WISE_PIPELINE_RUN_DISABLED')
+  })
+
+  it('every fence code renders a humanized label plus a 只读 hint, never the unknown fallback', () => {
+    for (const code of EXTERNAL_WRITE_FENCE_ERROR_CODES) {
+      expectLabeled(code)
+      const zhHint = integrationErrorCodeHint(code, 'zh-CN')
+      expect(zhHint, `${code} must carry a zh hint`).toBeTruthy()
+      // The one word an operator needs: this target is READ-ONLY, by design.
+      expect(zhHint, `${code} hint must say 只读`).toContain('只读')
+      expect(integrationErrorCodeHint(code, 'en'), `${code} must carry an en hint`).toBeTruthy()
+      expect(integrationErrorCodeDisplayLabel(code, 'zh-CN')).not.toBe('未知错误')
+      expect(integrationErrorCodeDisplayLabel(code, 'en')).not.toBe('Unknown error')
+    }
+  })
+
+  it('the client fence-kind mirror equals the server fence subject set, exact-match only', () => {
+    expect([...K3_EXTERNAL_WRITE_TARGET_KINDS]).toEqual([...SERVER_K3_FENCED_KINDS])
+    for (const kind of SERVER_K3_FENCED_KINDS) {
+      expect(isK3ExternalWriteTargetKind(kind), `${kind} must be fenced client-side`).toBe(true)
+    }
+    // Not a prefix/regex match: a K3-ADJACENT kind the server has not banned must stay unfenced, or the
+    // mirror would be inventing policy of its own and hiding a button that should render.
+    expect(isK3ExternalWriteTargetKind('erp:k3-wise-webapi-v2')).toBe(false)
+    expect(isK3ExternalWriteTargetKind('erp:k3')).toBe(false)
+    expect(isK3ExternalWriteTargetKind('metasheet:multitable')).toBe(false)
+    expect(isK3ExternalWriteTargetKind('http')).toBe(false)
+    expect(isK3ExternalWriteTargetKind('')).toBe(false)
+    expect(isK3ExternalWriteTargetKind(null)).toBe(false)
+    expect(isK3ExternalWriteTargetKind(undefined)).toBe(false)
+  })
+})
 
 describe('errorCodeLabels coverage (mirror tripwire)', () => {
   it('every server resolver code (9) has a label', () => {

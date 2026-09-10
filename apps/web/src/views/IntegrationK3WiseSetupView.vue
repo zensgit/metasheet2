@@ -4,7 +4,7 @@
       <div>
         <p class="k3-setup__eyebrow">Data Factory Preset</p>
         <h1>K3 WISE 预设配置</h1>
-        <p class="k3-setup__lead">K3 WISE 是数据工厂里的物料 / BOM 预设模板；数据仍在多维表中清洗，dry-run 后再 Save-only 推送。</p>
+        <p class="k3-setup__lead">K3 WISE 是数据工厂里的物料 / BOM 预设模板；数据仍在多维表中清洗。K3 目标永久只读、不写回（只读·永不写入）：dry-run 预览后请导出，或把清洗结果写入多维表。</p>
       </div>
       <div class="k3-setup__header-actions">
         <router-link class="k3-setup__btn" data-testid="generic-workbench-link" to="/integrations/workbench">
@@ -35,8 +35,8 @@
         <span>生成物料和 BOM pipeline</span>
       </div>
       <div class="k3-setup__journey-step">
-        <strong>4. Dry-run 后推送</strong>
-        <span>先验证，再打开真实执行</span>
+        <strong>4. Dry-run 后交付</strong>
+        <span>预览无误后导出或写入多维表</span>
       </div>
     </nav>
 
