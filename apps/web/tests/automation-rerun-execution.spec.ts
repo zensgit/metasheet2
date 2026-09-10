@@ -13,6 +13,9 @@ import { ElMessageBox } from 'element-plus'
 import { createApp, h, nextTick } from 'vue'
 import AutomationExecutionsView from '../src/views/AutomationExecutionsView.vue'
 import { useLocale } from '../src/composables/useLocale'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
+import { beginExplicitSessionOrgChange, installExplicitSessionOrg } from '../src/utils/explicitSessionOrg'
+import { authHeaders } from '../src/utils/api'
 import type { AutomationRunView } from '../src/multitable/types'
 
 let mockIsAdmin = true
@@ -91,6 +94,7 @@ async function settle() {
 let mounted: { container: HTMLElement; app: any } | null = null
 beforeEach(() => {
   mockIsAdmin = true
+  localStorage.clear()
   useLocale().setLocale('en')
 })
 afterEach(() => {
@@ -99,11 +103,26 @@ afterEach(() => {
     mounted.container.remove()
     mounted = null
   }
+  vi.restoreAllMocks()
+  localStorage.clear()
 })
 
 async function expandRow(container: HTMLElement, runId: string) {
   ;(container.querySelector(`[data-run-id="${runId}"]`) as HTMLElement).click()
   await settle()
+}
+
+function selectSyntheticOrg(tenantId: string) {
+  const payload = { userId: 'synthetic-admin', tenantId, exp: 4_000_000_000 }
+  const token = `synthetic.${btoa(JSON.stringify(payload))}.unsigned`
+  const previousToken = localStorage.getItem('auth_token') ?? token
+  localStorage.setItem('auth_token', previousToken)
+  const change = beginExplicitSessionOrgChange(previousToken)
+  expect(change).not.toBeNull()
+  localStorage.setItem('auth_token', token)
+  localStorage.setItem('jwt', token)
+  expect(installExplicitSessionOrg(token, tenantId, payload, change!)).toBe(true)
+  return token
 }
 
 describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
@@ -328,6 +347,22 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     { name: 'a null ruleSnapshot', ruleSnapshot: null },
     { name: 'a ruleSnapshot with no actions array', ruleSnapshot: { id: 'rule-1', name: 'Notify Customers' } },
     { name: 'an action whose type is unreadable', ruleSnapshot: { actions: [{ type: 'lock_record' }, { config: {} }] } },
+    { name: 'an unknown action type', ruleSnapshot: { actions: [{ type: 'lock_record' }, { type: 'future_action' }] } },
+    { name: 'a prototype property as an action type', ruleSnapshot: { actions: [{ type: 'toString' }] } },
+    { name: 'an unknown default-branch action', ruleSnapshot: { actions: [{ type: 'condition_branch', config: {
+      branches: [{ key: 'matched', actions: [{ type: 'lock_record' }] }],
+      defaultBranch: { key: 'fallback', actions: [{ type: 'future_action' }] },
+    } }] } },
+    { name: 'malformed default-branch actions', ruleSnapshot: { actions: [{ type: 'condition_branch', config: {
+      branches: [{ key: 'matched', actions: [{ type: 'lock_record' }] }],
+      defaultBranch: { key: 'fallback', actions: 'unreadable' },
+    } }] } },
+    { name: 'a container with no config', ruleSnapshot: { actions: [{ type: 'parallel_branch' }] } },
+    { name: 'a too-deep container', ruleSnapshot: { actions: [{ type: 'condition_branch', config: {
+      branches: [{ key: 'matched', actions: [{ type: 'condition_branch', config: {
+        branches: [{ key: 'nested', actions: [{ type: 'lock_record' }] }],
+      } }] }],
+    } }] } },
   ]) {
     it(`B3: ${snapshotCase.name} shows "cannot be listed" and requires a second acknowledgement`, async () => {
       const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
@@ -386,6 +421,294 @@ describe('AutomationExecutionsView — whole-execution re-run (P3-4)', () => {
     expect(confirmSpy.mock.calls[0]?.[0] as string).toContain('Lock record')
     expect(client.retryAutomationExecution).toHaveBeenCalledTimes(1)
     confirmSpy.mockRestore()
+  })
+
+  it('lists condition children AND default-branch side effects before one confirmation', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const client = makeClient({ getAutomationRun: vi.fn().mockResolvedValue({
+      ...FAILED_DETAIL,
+      ruleSnapshot: { actions: [{ type: 'condition_branch', config: {
+        branches: [{ key: 'matched', conditions: { conjunction: 'AND', conditions: [] }, actions: [{ type: 'lock_record', config: {} }] }],
+        defaultBranch: { key: 'fallback', actions: [{ type: 'send_email', config: {} }] },
+      } }] },
+    }) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    const message = confirmSpy.mock.calls[0]?.[0] as string
+    expect(message).toContain('Lock record')
+    expect(message).toContain('Send email')
+    expect(message).not.toContain('CANNOT BE LISTED')
+    expect(client.retryAutomationExecution.mock.calls).toEqual([['axe_f']])
+  })
+
+  it('lists both parallel branches, not just the container label', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const client = makeClient({ getAutomationRun: vi.fn().mockResolvedValue({
+      ...FAILED_DETAIL,
+      ruleSnapshot: { actions: [{ type: 'parallel_branch', config: { joinMode: 'all', branches: [
+        { key: 'update', actions: [{ type: 'update_record', config: {} }] },
+        { key: 'notify', actions: [{ type: 'send_notification', config: {} }] },
+      ] } }] },
+    }) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(confirmSpy.mock.calls[0]?.[0]).toContain('Update record')
+    expect(confirmSpy.mock.calls[0]?.[0]).toContain('Send notification')
+    expect(client.retryAutomationExecution.mock.calls).toEqual([['axe_f']])
+  })
+
+  it('accepts supported empty condition branches while listing the nonempty fallback', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const client = makeClient({ getAutomationRun: vi.fn().mockResolvedValue({
+      ...FAILED_DETAIL,
+      ruleSnapshot: { actions: [{ type: 'condition_branch', config: {
+        branches: [{ key: 'empty' }, { key: 'null', actions: null }],
+        defaultBranch: { key: 'fallback', actions: [{ type: 'send_email' }] },
+      } }] },
+    }) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(confirmSpy.mock.calls[0]?.[0]).toContain('Send email')
+    expect(client.retryAutomationExecution.mock.calls).toEqual([['axe_f']])
+  })
+
+  for (const transition of ['unchanged', 'other-org', 'org-cycle', 'changing'] as const) {
+    it(`binds pending confirmation to explicit session org and epoch: ${transition}`, async () => {
+      const token = selectSyntheticOrg('synthetic-org-a')
+      localStorage.setItem('tenantId', 'unrelated-login-hint')
+      const originalHeaders = authHeaders()
+      expect(originalHeaders['x-tenant-id']).toBe('synthetic-org-a')
+      let confirm!: (value: never) => void
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm')
+        .mockImplementationOnce(() => new Promise((resolve) => { confirm = resolve }))
+      const client = makeClient()
+      mounted = mount(client)
+      await settle()
+      await expandRow(mounted.container, 'axe_f')
+      ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+      await settle()
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      // Model another tab: no local auth notification is delivered.
+      if (transition === 'other-org' || transition === 'org-cycle') selectSyntheticOrg('synthetic-org-b')
+      if (transition === 'org-cycle') {
+        expect(selectSyntheticOrg('synthetic-org-a')).toBe(token)
+        expect(authHeaders()).toEqual(originalHeaders)
+      }
+      if (transition === 'changing') expect(beginExplicitSessionOrgChange(token)).not.toBeNull()
+      confirm('confirm' as never)
+      await settle()
+      expect(client.retryAutomationExecution.mock.calls).toEqual(transition === 'unchanged' ? [['axe_f']] : [])
+      expect((mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement).disabled).toBe(false)
+    })
+  }
+
+  for (const transition of ['unmount', 'principal', 'tenant', 'auth-cycle', 'execution', 'admin-revoked'] as const) {
+    it(`pending confirmation is invalidated by ${transition} without sending an old execution`, async () => {
+      let confirm!: (value: never) => void
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm')
+        .mockImplementation(() => new Promise((resolve) => { confirm = resolve }))
+      localStorage.setItem('auth_token', 'synthetic-session-a')
+      localStorage.setItem('tenantId', 'synthetic-org-a')
+      const client = makeClient({
+        listAutomationRuns: vi.fn().mockResolvedValue([FAILED_LIST, SKIPPED_LIST]),
+        getAutomationRun: vi.fn((id: string) => Promise.resolve(id === 'axe_sk' ? SKIPPED_DETAIL : FAILED_DETAIL)),
+      })
+      mounted = mount(client)
+      await settle()
+      await expandRow(mounted.container, 'axe_f')
+      ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+      await settle()
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      if (transition === 'unmount') {
+        mounted.app.unmount()
+        mounted.container.remove()
+        mounted = null
+      } else if (transition === 'principal') {
+        // Cross-tab storage changes do not broadcast through useAuth.
+        localStorage.setItem('auth_token', 'synthetic-session-b')
+      } else if (transition === 'tenant') {
+        localStorage.setItem('tenantId', 'synthetic-org-b')
+      } else if (transition === 'auth-cycle') {
+        // Broadcast precedes storage writes; even an A -> B -> A cycle voids this confirmation.
+        notifyAuthPrincipalChange()
+        localStorage.setItem('auth_token', 'synthetic-session-b')
+        notifyAuthPrincipalChange()
+        localStorage.setItem('auth_token', 'synthetic-session-a')
+      } else if (transition === 'execution') {
+        await expandRow(mounted.container, 'axe_sk')
+        await expandRow(mounted.container, 'axe_f')
+      } else {
+        mockIsAdmin = false
+      }
+      confirm('confirm' as never)
+      await settle()
+      expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      if (mounted) expect(mounted.container.querySelector('[data-field="rerun-success"]')).toBeNull()
+    })
+  }
+
+  it('unmount during the second acknowledgement cannot send after it resolves', async () => {
+    let confirm!: (value: never) => void
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm')
+      .mockResolvedValueOnce('confirm' as never)
+      .mockImplementationOnce(() => new Promise((resolve) => { confirm = resolve }))
+    const client = makeClient({ getAutomationRun: vi.fn().mockResolvedValue({ ...FAILED_DETAIL, ruleSnapshot: null }) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(2)
+    mounted.app.unmount()
+    mounted.container.remove()
+    mounted = null
+    confirm('confirm' as never)
+    await settle()
+    expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+  })
+
+  it('does not open the unknown-action acknowledgement after the component unmounts', async () => {
+    let confirm!: (value: never) => void
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm')
+      .mockImplementationOnce(() => new Promise((resolve) => { confirm = resolve }))
+      .mockResolvedValue('confirm' as never)
+    const client = makeClient({ getAutomationRun: vi.fn().mockResolvedValue({ ...FAILED_DETAIL, ruleSnapshot: null }) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    mounted.app.unmount()
+    mounted.container.remove()
+    mounted = null
+    confirm('confirm' as never)
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+  })
+
+  it('refuses stale loaded detail after tenant changes before clicking', async () => {
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    localStorage.setItem('tenantId', 'synthetic-org-a')
+    const client = makeClient()
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    localStorage.setItem('tenantId', 'synthetic-org-b')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+  })
+
+  it('reserves a pending confirmation, then sends exactly once when context stays current', async () => {
+    let confirm!: (value: never) => void
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm')
+      .mockImplementationOnce(() => new Promise((resolve) => { confirm = resolve }))
+    const client = makeClient()
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    const button = mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement
+    button.click()
+    button.click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+    confirm('confirm' as never)
+    await settle()
+    expect(client.retryAutomationExecution.mock.calls).toEqual([['axe_f']])
+    expect(button.disabled).toBe(false)
+  })
+
+  it('does not offer rerun from detail loaded across a tenant change', async () => {
+    let resolveDetail!: (value: AutomationRunView) => void
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    localStorage.setItem('tenantId', 'synthetic-org-a')
+    const client = makeClient({ getAutomationRun: vi.fn(() => new Promise<AutomationRunView>((resolve) => {
+      resolveDetail = resolve
+    })) })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    expect(client.getAutomationRun.mock.calls).toEqual([['axe_f']])
+    localStorage.setItem('tenantId', 'synthetic-org-b')
+    resolveDetail(FAILED_DETAIL)
+    await settle()
+    expect(mounted.container.querySelector('[data-action="rerun"]')).toBeNull()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(client.retryAutomationExecution).not.toHaveBeenCalled()
+  })
+
+  it('drops an earlier same-row detail response after collapse and re-open', async () => {
+    let resolveDetail!: (value: AutomationRunView) => void
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const client = makeClient({ getAutomationRun: vi.fn()
+      .mockImplementationOnce(() => new Promise<AutomationRunView>((resolve) => { resolveDetail = resolve }))
+      .mockResolvedValueOnce(FAILED_DETAIL),
+    })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    await expandRow(mounted.container, 'axe_f')
+    await expandRow(mounted.container, 'axe_f')
+    resolveDetail({ ...FAILED_DETAIL, ruleSnapshot: null })
+    await settle()
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(confirmSpy.mock.calls[0]?.[0]).toContain('Lock record')
+    expect(client.retryAutomationExecution.mock.calls).toEqual([['axe_f']])
+  })
+
+  it.each([
+    ['success', 'execution'], ['failure', 'execution'],
+    ['success', 'principal'], ['failure', 'principal'],
+  ] as const)('does not paint an old rerun %s after changing %s and releases loading', async (outcome, transition) => {
+    let resolveRetry!: (value: AutomationRunView) => void
+    let rejectRetry!: (reason: Error) => void
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([FAILED_LIST, SKIPPED_LIST]),
+      getAutomationRun: vi.fn((id: string) => Promise.resolve(id === 'axe_sk' ? SKIPPED_DETAIL : FAILED_DETAIL)),
+      retryAutomationExecution: vi.fn(() => new Promise<AutomationRunView>((resolve, reject) => {
+        resolveRetry = resolve
+        rejectRetry = reject
+      })),
+    })
+    mounted = mount(client)
+    await settle()
+    await expandRow(mounted.container, 'axe_f')
+    ;(mounted.container.querySelector('[data-action="rerun"]') as HTMLElement).click()
+    await settle()
+    expect(client.retryAutomationExecution.mock.calls).toEqual([['axe_f']])
+    if (transition === 'execution') await expandRow(mounted.container, 'axe_sk')
+    else {
+      notifyAuthPrincipalChange()
+      localStorage.setItem('auth_token', 'synthetic-new-principal')
+    }
+    if (outcome === 'success') resolveRetry({ ...FAILED_DETAIL, id: 'axe_old_result' })
+    else rejectRetry(new Error('synthetic-old-error'))
+    await settle()
+    expect(mounted.container.querySelector('[data-field="rerun-success"]')).toBeNull()
+    expect(mounted.container.querySelector('[data-field="rerun-error"]')).toBeNull()
+    expect(mounted.container.textContent).not.toContain('axe_old_result')
+    expect(mounted.container.textContent).not.toContain('synthetic-old-error')
+    expect((mounted.container.querySelector('[data-action="rerun"]') as HTMLButtonElement).disabled).toBe(false)
   })
 
   // ── Round-2 B4/B5: the UI admin mirror is NOT the backend's admin predicate ──

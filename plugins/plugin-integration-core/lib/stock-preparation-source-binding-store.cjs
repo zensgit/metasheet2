@@ -23,7 +23,10 @@
 // SCOPE. `(tenant_id, workspace_id, action_id)` — the same triple the action is resolved under, so
 // two workspaces in one tenant can point at different PLMs and neither can read the other's
 // pointer. `workspace_id` is NULLable and, exactly as migrations 057/062/066 do, its NULL is
-// collapsed with COALESCE in the unique index rather than relying on PG14 NULLS NOT DISTINCT.
+// collapsed with COALESCE in the unique index rather than relying on PG14 NULLS NOT DISTINCT. A
+// `workspace_id IS NULL` row is the TENANT-WIDE pointer: it is what a caller with no workspace hint
+// reads, and (since the third-quadrant fix in `get()`) what a caller with a workspace hint that has
+// no row of its own falls back to — inside the same tenant, never across one.
 //
 // VALUES-FREE. Every column is a handle: two scope ids, a frozen action id, an external-system row
 // id, an actor id, and two server clocks. No credential, no host, no connection string, no customer
@@ -132,11 +135,33 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
   /**
    * The persisted override, or `null` when this scope has never bound one.
    *
-   * SCOPE FALLBACK for a null-workspace caller (direction B — the mirror image of
-   * external-systems.cjs's `selectScopedRow`, deliberately: that helper widens a MISSING hint by
-   * falling back to the tenant-wide row when a SPECIFIC hint misses; this widens the opposite way,
-   * because here the specific (workspace-scoped) row is the one an admin actually wrote via the
-   * workbench picker, and `workspace_id IS NULL` is the row nothing writes on its own).
+   * TWO SCOPE FALLBACKS, one per direction, and they never compose:
+   *
+   *   * DIRECTION A — a NON-null workspace hint that misses falls back ONCE to the SAME tenant's
+   *     `workspace_id IS NULL` row. This is the exact shape of external-systems.cjs's
+   *     `selectScopedRow` (#5471) and closes the third quadrant of the workspace-scope hole: the web
+   *     workbench sends `workspaceId=default` on every request (useAuth persists the tenant id as
+   *     the workspace hint), while a binding written by the delivery-guide §3 script — a bare POST
+   *     with only `x-tenant-id` and no `?workspaceId=` — lands on the null row. Before this, that
+   *     pairing read `null`, `applyPersistedSourceBinding` fell through to the deploy default, and
+   *     the UI's dry-run 404'd with ExternalSystemNotFound while the same script's probe returned
+   *     200. The result is annotated `matchedWorkspaceId: null, scopeFallback: 'tenant_null_row'`.
+   *     WHAT IT MUST NOT DO, and what the tests fence: it never crosses `tenant_id` (the fallback
+   *     query carries the caller's tenant — F-13 and F-16 go red without it), and it never reaches
+   *     ANOTHER non-null workspace's row (the fallback is a point lookup at `workspace_id IS NULL`,
+   *     not the sibling scan below — F-07/F-12/F-16 go red if that filter is loosened). It is a
+   *     single `selectOne`, so there is no multi-candidate ambiguity to refuse: the unique scope
+   *     index admits at most one null row per (tenant, action). The exact row still wins outright
+   *     when it exists (F-11/F-14). Writes (`set`) are NOT widened: a hint-carrying write lands on
+   *     its own workspace row and leaves the null row untouched (F-15). End to end (the UI's
+   *     `workspaceId=default` dry-run reading a script-written null-row binding):
+   *     `stock-preparation-source-binding-routes.test.cjs` R-24.
+   *
+   *   * DIRECTION B — a null-workspace caller (the mirror image of `selectScopedRow`, deliberately:
+   *     that helper widens a MISSING hint by falling back to the tenant-wide row when a SPECIFIC
+   *     hint misses; this widens the opposite way, because here the specific (workspace-scoped) row
+   *     is the one an admin actually wrote via the workbench picker, and `workspace_id IS NULL` is
+   *     the row nothing writes on its own).
    *
    * Several call sites (reconcile, mvp-persist, carry, export, handoff, the project board) invoke
    * this WITHOUT a `workspaceId` at all, so their lookup is always `workspace_id IS NULL` — and a
@@ -173,15 +198,16 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
    *     today's (pre-fallback) behaviour, with no error and no log line, because there is no
    *     logger/event hook wired into this store to raise one. An operator who binds a second
    *     workspace and does not also rebind (or delete) the first will not be told.
-   *   * A caller that named a SPECIFIC non-null workspace and missed still gets `null` with no
-   *     widening at all: only the caller that supplied no hint is asking "what does this tenant
-   *     actually have", so only that caller's miss is worth widening. TESTED as its own fence, not
-   *     merely implied by the null-hint tests: `stock-preparation-source-binding-scope-fallback.test.cjs`
-   *     F-07 seeds a SINGLE sibling under a workspace OTHER than the one queried and asserts the miss
-   *     stays a miss — deleting the `scope.workspaceId !== null` guard below fails THAT test on the
-   *     resolved id, not merely a red suite total (a bare null-hint test cannot tell the two apart:
-   *     with only a null-workspace row seeded, the sibling scan's own `workspace_id IS NOT NULL`
-   *     filter throws it away regardless of whether the guard ran).
+   *   * A caller that named a SPECIFIC non-null workspace and missed gets direction A ONLY — the
+   *     tenant-wide null row — and never the sibling scan: only the caller that supplied no hint is
+   *     asking "what does this tenant actually have", so only that caller's miss is worth widening
+   *     to another workspace's row. TESTED as its own fence, not merely implied by the null-hint
+   *     tests: `stock-preparation-source-binding-scope-fallback.test.cjs` F-07 seeds a SINGLE
+   *     sibling under a workspace OTHER than the one queried and asserts the miss stays a miss —
+   *     letting a non-null hint reach the sibling scan below fails THAT test on the resolved id, not
+   *     merely a red suite total (a bare null-hint test cannot tell the two apart: with only a
+   *     null-workspace row seeded, the sibling scan's own `workspace_id IS NOT NULL` filter throws
+   *     it away regardless of whether the guard ran).
    *   * READ-READ RACE: the `exact` lookup and the sibling scan below are two separate statements,
    *     not one snapshot. If a null-workspace row is inserted between them, the sibling scan can see
    *     it even though `exact` just reported it absent. Resolving to some OTHER workspace's row in
@@ -194,7 +220,20 @@ function createStockPreparationSourceBindingStore({ db, idGenerator = crypto.ran
     if (exact) {
       return { ...rowToPublicBinding(exact), matchedWorkspaceId: scope.workspaceId, scopeFallback: null }
     }
-    if (scope.workspaceId !== null) return null
+    if (scope.workspaceId !== null) {
+      // DIRECTION A. A point lookup at this tenant's null row and nothing wider: `tenant_id` is the
+      // caller's own, `workspace_id` is literally null, and `db.select` (the sibling scan) is never
+      // reached from here — so a hint-carrying caller can be handed the tenant-wide pointer and
+      // nothing else. The exact row and this one are two statements, not one snapshot; a concurrent
+      // first write of the exact row between them is answered with the null row that WAS the truth
+      // a statement ago — the same posture `selectScopedRow` takes, and never a cross-scope answer.
+      const tenantWide = await db.selectOne(
+        BINDING_TABLE,
+        scopeWhere({ tenantId: scope.tenantId, workspaceId: null, actionId: scope.actionId }),
+      )
+      if (!tenantWide) return null
+      return { ...rowToPublicBinding(tenantWide), matchedWorkspaceId: null, scopeFallback: 'tenant_null_row' }
+    }
 
     // `limit: 2` — the unique scope index guarantees at most one null-workspace row, so two rows
     // back is already enough to prove "more than one workspace-scoped candidate" without fetching a

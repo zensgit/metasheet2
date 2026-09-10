@@ -447,6 +447,16 @@ export abstract class BaseDataAdapter extends EventEmitter {
     return this.lastConnectionError
   }
 
+  // A3/#2: PUBLIC redaction of a cause that never passed through onError and is therefore NOT
+  // recorded in `connectionError`. Every adapter has such a branch — the driver-package-missing
+  // guard that throws BEFORE the try block (MSSQLAdapter :217, PostgresAdapter :74, MySQLAdapter
+  // :195, HTTPAdapter :134) — and DataSourceManager must still be able to LOG that cause when it
+  // turns a connect failure into the fixed values-free 503. Delegates to the very `redactSecrets`
+  // rules onError uses; it only removes text, so exposing it adds no new disclosure.
+  redactCause(message: string): string {
+    return this.redactSecrets(message)
+  }
+
   // A3: scrub configured secret values + common secret patterns out of a message before it can be
   // returned to a client or logged. Defense-in-depth: a connection error must never carry a password.
   protected redactSecrets(message: string): string {

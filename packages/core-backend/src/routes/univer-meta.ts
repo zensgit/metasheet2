@@ -135,6 +135,7 @@ import {
   type RecoveryArchivePreviewRuntime,
 } from '../multitable/recovery-archive-preview'
 import { executeRecoveryArchiveSync } from '../multitable/recovery-archive-sync-execute'
+import { isUndefinedColumnError } from '../utils/database-errors'
 import { acceptFrozenRecoveryArchiveRestoreJob } from '../multitable/recovery-archive-async-plan'
 import {
   cancelRecoveryArchiveRestoreJob,
@@ -2131,27 +2132,18 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   return msg.includes(`relation "${tableName}" does not exist`)
 }
 
-const OPTIONAL_PERMISSION_SUBJECT_HYDRATION_COLUMN_ERROR_HINTS = [
-  'column r.description does not exist',
-  'column "r"."description" does not exist',
-  'column roles.description does not exist',
-  'column "roles"."description" does not exist',
-  'column g.name does not exist',
-  'column g.description does not exist',
-  'column "g"."name" does not exist',
-  'column "g"."description" does not exist',
-  'column platform_member_groups.name does not exist',
-  'column platform_member_groups.description does not exist',
-  'column "platform_member_groups"."name" does not exist',
-  'column "platform_member_groups"."description" does not exist',
-]
-
+// 权限主体水合的可选目录降级:只针对 platform_member_groups(成员组目录)。
+// roles 一律不参与 —— roles 表没有 description 列,主查询也已不再引用它。
+// 判定以 SQLSTATE 为主:42P01 缺表 / 42703 缺列,message 只用来核对标识符,
+// 这样中文 locale(222 测试机 lc_messages=Chinese)下也不会漏判。
 function isOptionalPermissionSubjectHydrationError(err: unknown): boolean {
   if (isUndefinedTableError(err, 'platform_member_groups')) return true
-  const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
-  if (code !== '42703') return false
-  const msg = typeof (err as any)?.message === 'string' ? (err as any).message.toLowerCase() : ''
-  return OPTIONAL_PERMISSION_SUBJECT_HYDRATION_COLUMN_ERROR_HINTS.some((hint) => msg.includes(hint))
+  return (
+    isUndefinedColumnError(err, 'g.name') ||
+    isUndefinedColumnError(err, 'g.description') ||
+    isUndefinedColumnError(err, 'platform_member_groups.name') ||
+    isUndefinedColumnError(err, 'platform_member_groups.description')
+  )
 }
 
 function mapFieldType(type: string): UniverMetaField['type'] {
@@ -4261,8 +4253,19 @@ function toDashboardMetricNumber(value: unknown): number | null {
 
 function getDbNotReadyMessage(err: unknown): string | null {
   const msg = err instanceof Error ? err.message : String(err ?? '')
-  const relationMissing = msg.includes('relation') && msg.includes('does not exist')
-  const columnMissing = msg.includes('column') && msg.includes('does not exist')
+  // SQLSTATE 为主信号:42P01 缺表 / 42703 缺列。中文 locale 下 PG 的散文被翻译成
+  // 「关系 "x" 不存在」/「字段 x 不存在」,英文整句匹配会漏判 → 原来会退化成 500。
+  // 只有在错误完全没有 code 时(手工构造的错误)才回落到散文,并同时认中文译文。
+  const code = typeof (err as { code?: unknown } | null | undefined)?.code === 'string'
+    ? (err as { code: string }).code
+    : null
+  const relationMissing = code !== null
+    ? code === '42P01'
+    : (msg.includes('relation') && msg.includes('does not exist')) || (msg.includes('关系') && msg.includes('不存在'))
+  const columnMissing = code !== null
+    ? code === '42703'
+    : (msg.includes('column') && msg.includes('does not exist'))
+      || ((msg.includes('字段') || msg.includes('列')) && msg.includes('不存在'))
   if (!relationMissing && !columnMissing) return null
 
   if (
@@ -8169,6 +8172,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!capabilities.canManageViews) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
+      // roles 表从 zzzz20260208100000_create_roles_table 起就只有 id/name/created_at/updated_at
+      // (后续唯一的 ALTER 只加了 approval_usable),从来没有 description 列。以前主查询选
+      // r.description,每次都必然抛 42703 走降级分支,连带把 platform_member_groups JOIN 也丢了,
+      // 成员组主体因此只能显示裸 UUID。这里直接选 NULL::text,降级分支只留给成员组目录缺失。
       let result: { rows: any[] }
       try {
         result = await pool.query(
@@ -8184,7 +8191,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               g.name AS group_name,
               g.description AS group_description
            FROM meta_view_permissions vp
@@ -8385,6 +8392,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
 
+      // roles 表从 zzzz20260208100000_create_roles_table 起就只有 id/name/created_at/updated_at
+      // (后续唯一的 ALTER 只加了 approval_usable),从来没有 description 列。以前主查询选
+      // r.description,每次都必然抛 42703 走降级分支,连带把 platform_member_groups JOIN 也丢了,
+      // 成员组主体因此只能显示裸 UUID。这里直接选 NULL::text,降级分支只留给成员组目录缺失。
       let result: { rows: any[] }
       try {
         result = await pool.query(
@@ -8401,7 +8412,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               g.name AS group_name,
               g.description AS group_description
            FROM field_permissions fp
@@ -8662,6 +8673,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Record not found: ${recordId}` } })
       }
 
+      // roles 表从 zzzz20260208100000_create_roles_table 起就只有 id/name/created_at/updated_at
+      // (后续唯一的 ALTER 只加了 approval_usable),从来没有 description 列。以前主查询选
+      // r.description,每次都必然抛 42703 走降级分支,连带把 platform_member_groups JOIN 也丢了,
+      // 成员组主体因此只能显示裸 UUID。这里直接选 NULL::text,降级分支只留给成员组目录缺失。
       let result: { rows: any[] }
       try {
         result = await pool.query(
@@ -8678,7 +8693,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
               u.email AS user_email,
               u.is_active AS user_is_active,
               r.name AS role_name,
-              r.description AS role_description,
+              NULL::text AS role_description,
               g.name AS group_name,
               g.description AS group_description
            FROM record_permissions rp
