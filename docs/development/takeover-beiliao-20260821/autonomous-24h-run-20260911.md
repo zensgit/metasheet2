@@ -148,7 +148,9 @@ nginx 三天日志:502/reset 只在四个升级窗口成簇,窗口外一条都�
 - r28/r29 两次上机:8 步全过、迁移正常、health 200、web smoke PASS、计划任务试算 `LastTaskResult=0`、升级后错误 0 行;标记用真实文案/testid 复核。
 - wave6 七支:40 agents / 0 error;7 树逐一核对(HEAD 匹配、干净、merge-tree 0、无禁改文件、零控制字符);6 支末轮 0 blocker,F1a 终审 MERGE(三处正文订正)。CI 在跑。
 
-(本节在窗口结束前补全:各 PR 的 CI/合并、r30 上机与标记复核、F4A / X2c / F1c / F8A 的裁决。)
+- **r30(`f1a5073ee`,09-11 19:26,222 本地)**:备份 `pre-r30-20260911-192625.dump` 2.26 MB;445 文件哈希 OK;迁移 exit 0;health OK(attempt 3);upgrade exit 0;web smoke PASS;计划任务试算 `LastTaskResult=0`;标记 #5640 / #5641 / #5642 / #5643 / #5644 / #5646 全 True(#5645 False = 尚未合入,预期);当前 bundle `index-BcPttObh.js`;`MULTITABLE_STOCK_PREP_TABLE_LABEL_LOCALE=zh-CN` 仍在 pm2 环境;18:00 后后端错误 0 行。这次没举维护 flag(客户工作时段外,且 F4A 未合),脚本自身的 nginx 探测前两次 502(后端重启中)第三次 200。
+
+(本节在窗口结束前继续补:#5645 / #5651 的 CI 与合并、F4A / F1c / F8A 的裁决与 r31。)
 
 ---
 
