@@ -272,6 +272,16 @@ export function buildFieldMappingPayload(mapping: EditableMapping, index: number
 //      trims), so `parse(serialize(map))` equals the TRIMMED map, not the original one. This one
 //      also raises a `loadWarnings` entry, because trimming a key changes which source values it
 //      matches (the engine looks keys up by `String(value)`, transform-engine.cjs:191-196).
+// SCOPE CORRECTION (2026-09-10, review follow-up, no logic changed): the 2026-09-10 dictMap fix
+// (items 5-6 above) is a LOSSY conversion that WARNS, not a lossless/faithful one — do not call it
+// "保真"/"无损"/"不丢失" fixed. parseDictionaryMap() above already accepts a JSON object as dictMap
+// text (the `trimmed.startsWith('{')` branch, line ~117); dictionaryMapToText() below still
+// serializes to the line-based `key=value` convention, which is exactly why items 5-6 exist. Making
+// dictionaryMapToText() emit JSON instead — parseDictionaryMap() already reads that back — would
+// make dictMap round-trip losslessly through the SAME parser; that change is NOT made in this PR.
+// G08 (wiring "load a saved pipeline" into the editor) MUST NOT ship before this is resolved, or
+// every item 5-6 loss turns from "invisible in the editor" into "silently dropped on save". This PR
+// does not claim lossless completion for dictMap.
 // None of these has an editor control. They are dropped on READ, which is the safe direction: the
 // editor never claims to hold something it cannot show, and it never re-emits a half-understood
 // rule. Authoring them stays a hand-written-payload capability until they get controls.

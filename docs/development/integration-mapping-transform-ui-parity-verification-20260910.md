@@ -210,6 +210,8 @@ const { SUPPORTED_RULES, validateRecord } = require(path.join(pluginLib, 'valida
 
 dictMap-1 只打红一条是对的：值含 `=` 那条在新旧实现下都保真，trim 那条在旧实现下也仍然等于 trim 后的 map（差别只在有没有守卫），真正被旧实现破坏的是「键含 `=` / 值含换行」这条。还原后 `git status --porcelain` 与改之前一致。
 
+**口径订正（本次订正，不改逻辑、不改测试断言语义）**：§5.7 这套修法的净效果是**有损转换并告警**，不是保真/无损修复——键含 `=`、值含换行、trim 后为空的条目仍然被整条跳过，只是跳过时会经 `loadWarnings` 说话，不再静默改写。dictMap 的正向解析器 `parseDictionaryMap`（`apps/web/src/components/integration/integrationMappingTransform.ts:114-123`）本就支持 JSON 对象文本（`trimmed.startsWith('{')` 分支直接 `JSON.parse`），逆函数 `dictionaryMapToText` 若改成输出 JSON 而不是逐行 `key=value`，即可经同一个解析器无损往返；本次未做这一步。**G08（存库→回读→引擎）接线前必须先解决 dictMap 的无损表示**，否则回填编辑器会让「编辑器里看不见的丢失」变成「读一次存一次就真丢了」。本 PR 不宣称无损完成。
+
 ### 5.8 本轮命令与退出码
 
 | 命令（cwd） | 退出码 | 结果 |
