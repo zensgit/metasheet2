@@ -185,8 +185,16 @@ async function main() {
   assert.equal(adapterSystem.credentialsEncrypted, undefined, 'adapter load never exposes ciphertext')
   assert.equal(adapterSystem.credentialFingerprint, undefined, 'adapter load omits public fingerprint fields')
 
+  // `sys_1` is a TENANT-WIDE row (workspace_id IS NULL). Since the list gained `selectScopedRow`'s
+  // own non-null-hint fallback, a hinted caller of the SAME tenant sees it — this assertion used to
+  // read `length === 0` ("workspace scope isolates rows"), which described the very gap that made
+  // 工作台里选源 report 源不可用 for a source its own dry-run could read. What still isolates —
+  // another TENANT's rows, and another non-null WORKSPACE's rows — is proved in
+  // external-systems-list-workspace-fallback.test.cjs (L-04/L-05).
   const isolated = await registry.listExternalSystems({ tenantId: 'tenant_1', workspaceId: 'other' })
-  assert.equal(isolated.length, 0, 'workspace scope isolates rows')
+  assert.deepEqual(isolated.map((system) => system.id), ['sys_1'],
+    'a non-null workspace hint falls back to the same tenant\'s tenant-wide rows')
+  assert.equal(isolated[0].workspaceId, null, 'the fallback row keeps its own (null) scope in the projection')
 
   // --- 4. Public config is redacted while adapter config stays raw -------
   const configDb = createMockDb()

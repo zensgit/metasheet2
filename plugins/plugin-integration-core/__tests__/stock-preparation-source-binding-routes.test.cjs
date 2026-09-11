@@ -28,6 +28,9 @@
 //   R-24  the third quadrant: a binding written with NO workspace hint (the delivery guide's §3
 //         script shape, landing on the workspace_id IS NULL row) is read by the UI's own
 //         `workspaceId=default` dry-run and GET picker; another tenant's hinted caller never is.
+//   R-25  the LIST half of that same quadrant: under the UI's `workspaceId=default` hint the picker
+//         offers the tenant-wide sources and stops reporting `not_found` / 源不可用 for a source its
+//         own dry-run reads — while another workspace's and another tenant's rows stay invisible.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -132,9 +135,25 @@ function createExternalSystemRegistry(systems = DEFAULT_SYSTEMS) {
   const calls = []
   return {
     calls,
-    async listExternalSystems({ tenantId }) {
-      calls.push({ op: 'list', tenantId })
-      return systems.filter((entry) => entry.tenantId === tenantId).map((entry) => ({ ...entry }))
+    // Mirrors external-systems.cjs's `listExternalSystems` AS IT NOW IS: the caller's own workspace
+    // ∪ the SAME tenant's tenant-wide (workspace_id IS NULL) rows for a non-null hint, deduped; a
+    // null hint keeps its exact null scope and never widens. This fake used to return EVERY row of
+    // the tenant regardless of scope, which endorsed the picker no matter what the registry did —
+    // precisely why the list half of this screen could answer `not_found` / 源不可用 in production
+    // (exact workspace match, zero candidates) with every route test green. R-25 is the case that
+    // fake could not fail.
+    async listExternalSystems({ tenantId, workspaceId = null }) {
+      calls.push({ op: 'list', tenantId, workspaceId })
+      const hint = workspaceId ?? null
+      const seen = new Set()
+      return systems
+        .filter((entry) => entry.tenantId === tenantId)
+        .filter((entry) => {
+          const scope = entry.workspaceId ?? null
+          return scope === hint || (hint !== null && scope === null)
+        })
+        .filter((entry) => (seen.has(entry.id) ? false : Boolean(seen.add(entry.id))))
+        .map((entry) => ({ ...entry }))
     },
     async getExternalSystem({ tenantId, workspaceId = null, id }) {
       calls.push({ op: 'get', tenantId, workspaceId, id })
@@ -868,6 +887,70 @@ async function main() {
       "tenant-b's hinted caller reads its own deploy default, never tenant-a's null-row binding",
     )
     assert.notEqual(resB.body, undefined)
+  })
+
+  // -------------------------------------------------------------------------
+  // R-25 — THE PICKER'S OWN HALF of the third quadrant. R-24 proves the BINDING resolves for a
+  // `workspaceId=default` caller; this proves the LIST does too, which is what the screen renders.
+  //
+  // The gap it pins: sources are provisioned tenant-wide (`workspace_id IS NULL`) while every web
+  // request carries a workspace hint, and `listExternalSystems` used to match the hint EXACTLY. So
+  // the picker listed zero candidates and reported `effectiveSourceProblem: 'not_found'` ("源不可用")
+  // for the very source the same screen's dry-run — a BY-ID read, fallback-enabled since #5471 —
+  // read without complaint. Revert the registry's list fallback and the two assertions on
+  // `effectiveSourceProblem` / `eligibleSources` go red together.
+  //
+  // The route is unchanged by that fix and this test says so: it still passes its own hint straight
+  // through (asserted on the recorded call), and the widening happens inside the registry, once, for
+  // every list caller — not here.
+  // -------------------------------------------------------------------------
+  await run('R-25 the picker under a workspaceId=default hint lists the tenant-wide sources and stops saying 源不可用', async () => {
+    const SIBLING_WS_SOURCE = 'sys_other_workspace_plm'
+    const mounted = mount({ systems: [
+      system({ id: ENV_DEFAULT_SOURCE, name: '内置演示源', workspaceId: null, config: { dataSourceId: 'ds_demo' } }),
+      system({ id: CUSTOMER_PLM, workspaceId: null }),
+      // Same tenant, a DIFFERENT non-null workspace: the fallback is null-only, so this is never offered.
+      system({ id: SIBLING_WS_SOURCE, name: '别的工作区的源', workspaceId: 'ws_other', config: { dataSourceId: 'ds_other_ws' } }),
+      // Another tenant's tenant-wide row: never offered either.
+      system({ id: 'sys_tenant_b_plm', tenantId: 'tenant-b', workspaceId: null, config: { dataSourceId: 'ds_tenant_b' } }),
+    ] })
+
+    const view = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN, query: { workspaceId: 'default' } })
+    assert.equal(view.statusCode, 200)
+    assert.equal(view.body.data.origin, 'deploy_default', 'nothing is bound yet: the env default stands')
+    assert.equal(view.body.data.effectiveExternalSystemId, ENV_DEFAULT_SOURCE)
+    assert.equal(
+      view.body.data.effectiveSourceProblem,
+      null,
+      'the tenant-wide effective source is VISIBLE to a hinted caller — this is the 源不可用 false alarm',
+    )
+    assert.equal(view.body.data.takesEffectWithoutRestart, true, 'and the screen may promise no-restart again')
+    assert.deepEqual(
+      view.body.data.eligibleSources.map((entry) => entry.externalSystemId).sort(),
+      [CUSTOMER_PLM, ENV_DEFAULT_SOURCE].sort(),
+      'the tenant-wide candidates are offered; another workspace and another tenant are not',
+    )
+
+    // The ROUTE did not change: it hands the registry its own hint, verbatim. The widening is the
+    // registry's, so it is the same for every list caller rather than special-cased for this screen.
+    const listCall = mounted.externalSystemRegistry.calls.filter((entry) => entry.op === 'list').pop()
+    assert.deepEqual(listCall, { op: 'list', tenantId: TENANT, workspaceId: 'default' },
+      'the route passes tenant + its own hint through unchanged')
+
+    // And the fence the widening must not cross: a tenant-b admin with the SAME hint sees only its own.
+    const tenantBAdmin = { id: 'u_admin_b', roles: ['admin'], tenantId: 'tenant-b' }
+    const viewB = await call(mounted.routes, 'GET', GET_ROUTE, { user: tenantBAdmin, query: { workspaceId: 'default' } })
+    assert.equal(viewB.statusCode, 200)
+    assert.deepEqual(
+      viewB.body.data.eligibleSources.map((entry) => entry.externalSystemId),
+      ['sys_tenant_b_plm'],
+      "tenant-b's picker shows tenant-b's OWN tenant-wide source and nothing of tenant-a's",
+    )
+    assert.equal(
+      viewB.body.data.effectiveSourceProblem,
+      'not_found',
+      "and tenant-b's effective (deploy-default) id, which exists only as a tenant-a row, stays unreachable — the widening is tenant-bounded",
+    )
   })
 
   const total = passed + failed
