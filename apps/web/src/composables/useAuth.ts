@@ -1,4 +1,5 @@
 import { getApiBase } from '../utils/api'
+import { matchesPermission } from '../utils/permission-match'
 import { getCurrentScope, onScopeDispose } from 'vue'
 import { beginExplicitSessionOrgChange, clearExplicitSessionOrg, EXPLICIT_SESSION_ORG_KEY, installExplicitSessionOrg, ownsExplicitSessionOrgChange, restoreExplicitSessionOrg } from '../utils/explicitSessionOrg'
 // Single definitions, in a module with no dependencies of its own so a leaf that caches a
@@ -518,6 +519,13 @@ export function useAuth() {
     return getAccessSnapshot().isAdmin
   }
 
+  /**
+   * Unchanged behaviour, one owner: the admin/roles short-circuit stays here (it needs the session
+   * snapshot), and the code algebra below it now lives in `utils/permission-match.ts`, which the
+   * server's `packages/core-backend/src/auth/permission-match.ts` mirrors against a shared truth
+   * table. Before this, the server had no matcher at all and App Center shipped zero server-side
+   * filtering; inlining the algebra a second time on the server would have been the drift.
+   */
   function hasPermission(requiredPermission: string): boolean {
     const normalized = String(requiredPermission || '').trim()
     if (!normalized) return true
@@ -525,15 +533,7 @@ export function useAuth() {
     const snapshot = getAccessSnapshot()
     if (snapshot.isAdmin || snapshot.roles.includes('admin')) return true
 
-    const permissions = snapshot.permissions
-    if (permissions.includes(normalized) || permissions.includes('*:*')) return true
-
-    const [resource, action] = normalized.split(':')
-    if (!resource || !action) return false
-    if (permissions.includes(`${resource}:*`)) return true
-    if (permissions.includes(`${resource}:admin`) && action !== 'admin') return true
-    if (action === 'read' && permissions.includes(`${resource}:write`)) return true
-    return false
+    return matchesPermission(snapshot.permissions, normalized)
   }
 
   function getCurrentUser(): SessionUserRecord | null {

@@ -100,6 +100,7 @@ jobs:
                 apps/web/src/composables/useMobileViewport.ts|\
                 apps/web/src/composables/authPrincipal.ts|\
                 apps/web/src/styles/tokens.css|\
+                apps/web/src/utils/permission-match.ts|\
                 apps/web/src/utils/api.ts|\
                 apps/web/src/utils/explicitSessionOrg.ts|\
                 apps/web/src/utils/authRedirect.ts|\
