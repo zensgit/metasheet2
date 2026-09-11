@@ -193,6 +193,9 @@ const SORT_FIELD_IDS = Object.freeze([
   'ext_componentSortNo',
   'componentSourceId',
   'parentSourceId',
+  // 单层用量:不是排序键,是展示层去重键的第五项(见 displayDedupeKey)。和 SORT_FIELD_IDS 里
+  // 其它 id 一样,它是「解析出来供比较用」的,从不投影成单元格、也从不报进 unresolvedColumns。
+  'rawQuantity',
   'idempotencyKey',
 ])
 
@@ -484,14 +487,20 @@ function compareSiblingRows(left, right) {
 }
 
 // 老系统 `iterHandle` 686-693 的去重键,在展示层再兜一次:父组件图号 + 当前组件图号 +
-// 名称及规格 + 材料。名称及规格优先取包列(F1c 起有值),没有就退回 名称 —— 老系统那一列
-// (`nameAndStandard`)装的正是未切分的全串,而旧行的 名称 列装的也是全串。
+// 名称及规格 + 材料 + 单层用量。名称及规格优先取包列(F1c 起有值),没有就退回 名称 —— 老系统
+// 那一列(`nameAndStandard`)装的正是未切分的全串,而旧行的 名称 列装的也是全串。
+//
+// 单层用量在键里,是为了和展开层 **同一把键**(bom-expansion `siblingDedupeKey`):展开层多带
+// 用量,是为了不把「同父同件但用量不一致」这种数据缺陷从 duplicate_expanded_key 的 fail-closed
+// 挂起里偷走。展示层如果少带这一项,就会在打印时把展开层特意留下的那两行又合并掉 —— 触发口径
+// 和边界口径不同量,正是这类兜底最容易出的错。
 function displayDedupeKey(row) {
   return JSON.stringify([
     orderText(columnSourceValue(row, PARENT_CODE_ORDER_COLUMN)),
     orderText(columnSourceValue(row, COMPONENT_CODE_ORDER_COLUMN)),
     orderText(row.ext_nameAndSpec) || orderText(columnSourceValue(row, COMPONENT_NAME_ORDER_COLUMN)),
     orderText(row.material),
+    orderText(row.rawQuantity),
   ])
 }
 
