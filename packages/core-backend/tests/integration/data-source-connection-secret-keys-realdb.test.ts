@@ -11,8 +11,11 @@
  *      docs/development/data-source-connection-secret-keys-design-20260912.md is executed here so
  *      the doc's SQL cannot rot, and it counts rows WITHOUT ever selecting a secret value.
  *
- * Real-DB gate: runs only where DATABASE_URL is configured (CI plugin-tests.yml enumerates it, and
- * that runner asserts DATABASE_URL is present, so it cannot silently skip in CI).
+ * Real-DB gate: runs only where DATABASE_URL is configured. In CI that is the standalone lane
+ * .github/workflows/data-source-connection-secret-keys-realdb.yml (NOT plugin-tests.yml, which is
+ * an s6a-pinned file this PR leaves byte-identical); the lane sets EXPECT_DB=1, which arms the
+ * sentinel below so a lane run with a missing/broken DATABASE_URL goes RED instead of reporting the
+ * whole file as skipped-green.
  */
 import express from 'express'
 import { Kysely, PostgresDialect } from 'kysely'
@@ -26,6 +29,12 @@ import {
 import { dataSourcesRouter, initializeDataSourceManager } from '../../src/routes/data-sources'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
+// Anti-skip-green sentinel, same shape as tests/integration/approval-can-decide-current-node.db.test.ts:50-53.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
 
 const SUFFIX = `${process.pid}_${Date.now()}`
 const OWNER_ID = `dscs-realdb-owner-${SUFFIX}`

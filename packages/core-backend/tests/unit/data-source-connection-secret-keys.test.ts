@@ -21,7 +21,11 @@
  *      reports `hasCredentials: true`.
  *   D. SINGLE DEFINITION — schema refusal, read strip and redactSecrets all consult the one word
  *      list in data-adapters/data-source-secret-keys.ts, and that list is narrow enough not to eat
- *      legitimate connection keys.
+ *      legitimate connection keys. Also pinned here: the value list is LONGEST-FIRST (a short
+ *      secret that is a prefix of a longer one must not cut it up), and the known over-inclusion
+ *      (`passThroughMode` / `pass_through` / `byPass` hit because tokenisation precedes the
+ *      whole-token test) is nailed down in BOTH directions so nobody can restate it as "passthrough
+ *      and bypass never hit".
  *
  * Harness follows tests/unit/data-source-visibility-authority-matrix.test.ts: mocked audit + rbac
  * deps, a fake Kysely, fake adapters (no dialing), and ONE pinned listener for the file (the repo
@@ -304,6 +308,10 @@ describe('#5621 A — write entry refuses secrets under connection (fail-closed,
     ['pass (bare token)', { pass: 'x' }],
     ['pwd', { pwd: 'x' }],
     ['sslPassphrase', { sslPassphrase: 'x' }],
+    // Pinned CURRENT behaviour (known over-inclusion, see the module header): tokenisation runs
+    // before the `pass` whole-token test, so these camel/underscore spellings hit and 400.
+    ['passThroughMode (camel split -> [pass, through, mode])', { passThroughMode: 'direct' }],
+    ['pass_through (underscore split -> [pass, through])', { pass_through: 'yes' }],
   ])('POST create refuses connection.%s', async (_label, extra) => {
     const res = await as(OWNER)
       .post('/api/data-sources')
@@ -498,6 +506,17 @@ describe('#5621 D — one word list feeds the schema refusal, the read strip and
     expect(isSecretConfigKey(key)).toBe(true)
   })
 
+  // Tokenisation happens BEFORE the whole-token comparison, so these camel/underscore spellings
+  // DO hit while the unsplit lower-case ones below do not. Pinned as the CURRENT behaviour and as
+  // the counterexample to "passthrough / bypass never hit": if a real connection key ever looks
+  // like this, the fix is a word-list exception, never a looser rule (looser would pass `passHash`).
+  it.each(['passThroughMode', 'pass_through', 'passThrough', 'byPass'])(
+    'isSecretConfigKey("%s") === true (camel/underscore over-inclusion, pinned)',
+    (key) => {
+      expect(isSecretConfigKey(key)).toBe(true)
+    },
+  )
+
   it.each([
     'host', 'server', 'port', 'database', 'user', 'username', 'baseURL', 'url', 'uri', 'ssl',
     'encrypt', 'trustServerCertificate', 'tlsMinVersion', 'tlsCiphers', 'legacyTls',
@@ -530,6 +549,25 @@ describe('#5621 D — one word list feeds the schema refusal, the read strip and
         { host: 'h', password: 'conn-secret', headers: { Authorization: 'nested-secret' } },
       ]).sort(),
     ).toEqual(['conn-secret', 'cred-secret', 'nested-secret'])
+  })
+
+  it('collectSecretConfigValues returns LONGEST-FIRST (a short secret must not cut a longer one up)', () => {
+    // Insertion order here is ['xy', 'xyz']; replacing 'xy' first would leave '***z' of the longer
+    // secret in the message. The sort in collectSecretConfigValues is what makes this ['xyz', 'xy'].
+    expect(collectSecretConfigValues([{ secret: 'xy', password: 'xyz' }, {}])).toEqual(['xyz', 'xy'])
+  })
+
+  it('redactSecrets consumes the WHOLE longer secret when a shorter secret is its prefix', () => {
+    const adapter = new OkAdapter({
+      id: 'dscs-redact-order',
+      name: 'dscs-redact-order',
+      type: 'postgres',
+      connection: { host: 'db.internal.example' },
+      credentials: { secret: 'xy', password: 'xyz' },
+    } as unknown as DataSourceConfig)
+    // Bare value (no `key=value` shape), so only the VALUE list can scrub it: without the
+    // longest-first order this reads '... tried ***z'.
+    expect(adapter.redactCause('auth failed, tried xyz')).toBe('auth failed, tried ***')
   })
 
   it('the generated text pattern is a SUPERSET of the hand-written one it replaced', () => {

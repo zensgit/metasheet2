@@ -15,19 +15,42 @@
  * (`connection.apiToken`, `connection.clientSecret`, …) cannot be secret on one surface and
  * public on another.
  *
- * NO ADAPTER READS A SECRET OUT OF `connection`. Every shipped adapter takes its secret from
- * `config.credentials` only (PostgresAdapter :85-86, MSSQLAdapter :194-195, MySQLAdapter
- * :205-206, MongoDBAdapter :519, HTTPAdapter :152-156, PLMAdapter :1084-1086; the remaining
- * adapters read none). A secret under `connection` therefore never authenticated anything —
- * it was pure plaintext exposure, which is why the write entry can refuse it fail-closed
- * without taking away any working configuration.
+ * SCOPE OF THE FAIL-CLOSED CLAIM (narrowed deliberately — do not restate it as an absolute).
+ * Inside the surface this module guards — the API-WRITABLE FLAT `connection`, i.e. what
+ * routes/data-sources.ts `ConnectionConfigSchema` accepts: a record of SCALARS only — no shipped
+ * adapter reads a secret BY KEY NAME. Every one takes its secret from `config.credentials`
+ * (PostgresAdapter :85-86, MSSQLAdapter :194-195, MySQLAdapter :205-206, MongoDBAdapter :519,
+ * HTTPAdapter :152-156, PLMAdapter :1084-1086; the remaining adapters read none). A secret-shaped
+ * KEY sent to the API under `connection` therefore never authenticated anything — it was pure
+ * plaintext exposure, which is why the write entry can refuse it fail-closed without taking away
+ * any working configuration.
+ *
+ * It is NOT true that "nothing under `connection` can authenticate". Three measured counterexamples,
+ * all invisible to a key-name predicate and all tracked as follow-ups in
+ * docs/development/data-source-connection-secret-keys-design-20260912.md §6:
+ *   1. URL USERINFO IN A VALUE — `connection.baseURL = 'https://user:pw@host'` is handed to axios
+ *      by HTTPAdapter.ts:138, and axios@1.13.2 (lib/adapters/http.js:574-578) turns the URL's
+ *      username/password into a REAL Basic credential; that password does authenticate. This
+ *      module looks at keys only, so it neither refuses, strips, nor redacts it, and
+ *      PLMAdapter.ts:1137 additionally logs `connection.url` unredacted.
+ *   2. `connection.headers.Authorization` — the API cannot send it (the Zod record rejects object
+ *      values), but PLMAdapter writes its own Bearer into `this.config.connection.headers` at
+ *      runtime (PLMAdapter.ts:1076-1080, :1200-1205) and HTTPAdapter.ts:140,:147 spreads those
+ *      headers into the axios defaults, so a STORED row can hold a live credential there.
+ *   3. IN-PROCESS WRITERS — `DataSourceManager.addDataSource/updateDataSource` are not gated by this
+ *      module at all (a stated boundary of this cut; storage is untouched here).
  *
  * MATCHING RULE (deliberately narrow so it cannot swallow legitimate connection keys such as
  * `host` / `database` / `encrypt` / `trustServerCertificate` / `strictOffsetOrdering`):
  *   - the key is normalised (lower-cased, non-alphanumerics dropped) and matched against the
  *     word list below by SUBSTRING — `dbPassword`, `API_KEY`, `sslPassphrase` all hit;
  *   - a word marked `wholeTokenOnly` must equal one of the key's camel/underscore TOKENS —
- *     `pass` and `db_pass` hit, `passthrough` / `bypass` do NOT.
+ *     `pass` and `db_pass` hit; the UNSPLIT lower-case spellings `passthrough` / `bypass` do NOT.
+ *     Measured counterexample to any wider reading: tokenisation runs BEFORE the comparison, so
+ *     `passThrough`, `pass_through` and `byPass` DO hit and are refused with a coded 400. No key of
+ *     that shape exists in any shipped adapter's `connection` today (both directions pinned in
+ *     tests/unit/data-source-connection-secret-keys.test.ts group D); if one appears, the fix is a
+ *     word-list exception, not a looser rule (loosening would let `passHash` / `passValue` through).
  * There is no exemption list: `hasCredentials` is a PRESENCE FLAG computed by the route AFTER
  * stripping, never a key of a stored config, so it never reaches this predicate.
  */
@@ -55,7 +78,12 @@ export interface SecretKeyWord {
  *   - BaseAdapter.redactSecrets values: credentials.password / token / apiKey / secret,
  *     connection.password;
  *   - BaseAdapter.redactSecrets text pattern: password / pwd / pass / token / api[_-]?key / secret.
- * Widening this list can only ever refuse MORE on write and echo LESS on read.
+ * Widening this list refuses MORE on write and strips MORE on read. On the redaction leg it widens
+ * the VALUE SET only: `collectSecretConfigValues` returns a superset of the tuple it replaced, and
+ * it returns the values LONGEST-FIRST, because replacing a short secret that is a PREFIX of a
+ * longer one first would cut the longer one up and leave a tail (`{secret:'xy', password:'xyz'}`
+ * over "tried xyz" -> "tried ***z"). "Widens" is a statement about the value SET plus that order,
+ * not about every byte of every message.
  */
 export const DATA_SOURCE_SECRET_KEY_WORDS: readonly SecretKeyWord[] = [
   { parts: ['password'] },
@@ -176,6 +204,10 @@ export function stripSecretConfigKeys<T>(value: T): T {
  * Every string VALUE stored under a secret-shaped key, across the given config parts. Feeds
  * BaseAdapter.redactSecrets so a driver message can never carry a configured secret back to a
  * client — same rule as the write refusal and the read strip, one list.
+ *
+ * Returned LONGEST-FIRST (same ordering rule as secretKeyValueTextPattern): the caller replaces the
+ * values one after another, so a short secret that is a substring of a longer one must not go first
+ * — `{secret:'xy', password:'xyz'}` replaced in insertion order leaves "***z" of the longer secret.
  */
 export function collectSecretConfigValues(parts: ReadonlyArray<unknown>): string[] {
   const values: string[] = []
@@ -198,6 +230,8 @@ export function collectSecretConfigValues(parts: ReadonlyArray<unknown>): string
     }
   }
   for (const part of parts) walk(part, false)
+  // Longest first: a short secret that is a substring of a longer one must never be replaced first.
+  values.sort((a, b) => b.length - a.length)
   return values
 }
 

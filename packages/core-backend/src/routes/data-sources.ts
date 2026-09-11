@@ -345,10 +345,19 @@ function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'crede
 
 /**
  * #5621 WRITE FAIL-CLOSED. `connection` is the PUBLIC half of a data-source config: it is persisted
- * as plain JSON and echoed by the read surfaces above. NO shipped adapter reads a secret from it —
- * every one takes its secret from `credentials` (PostgresAdapter :85-86, MSSQLAdapter :194-195,
- * MySQLAdapter :205-206, MongoDBAdapter :519, HTTPAdapter :152-156) — so a secret placed there never
- * authenticated anything; it was plaintext that a later GET handed back. Refuse it at the entry.
+ * as plain JSON and echoed by the read surfaces above. In the API-WRITABLE FLAT `connection` — what
+ * `ConnectionConfigSchema` accepts, a record of SCALARS — no shipped adapter reads a secret BY KEY
+ * NAME: every one takes its secret from `credentials` (PostgresAdapter :85-86, MSSQLAdapter
+ * :194-195, MySQLAdapter :205-206, MongoDBAdapter :519, HTTPAdapter :152-156) — so a secret-shaped
+ * KEY placed there never authenticated anything; it was plaintext that a later GET handed back.
+ * Refuse it at the entry.
+ *
+ * That is NOT "nothing under `connection` can authenticate", which is false: a password embedded in
+ * a URL VALUE (`connection.baseURL = https://user:pw@host`) is turned into a live Basic credential
+ * by axios via HTTPAdapter.ts:138, and `connection.headers.Authorization` — unreachable through this
+ * Zod record, but written in-process by PLMAdapter — is sent as a real header. Both are invisible to
+ * a key-name predicate; see docs/development/data-source-connection-secret-keys-design-20260912.md
+ * §6 for the follow-up tickets.
  *
  * Runs on the RAW body, BEFORE Zod: `ConnectionConfigSchema` is a free record, and a nested shape
  * (`connection.headers.Authorization`) would otherwise collapse into the generic VALIDATION_ERROR
@@ -358,6 +367,12 @@ function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'crede
  * the stored connection, so checking the merge would lock every legacy row out of unrelated edits
  * (host / port / TLS) forever. Clearing an already-stored secret is the migration's job, not this
  * guard's. Placed after rbacGuard, so an anonymous caller still gets 401 first.
+ *
+ * Known consequence of that scope: the MERGE BASE can hold secret-shaped keys injected in-process
+ * (PLMAdapter writes its Bearer into `connection.headers` at runtime and `getConfig()` is a shallow
+ * copy), so a PUT that carries no secret itself can still re-persist one. The secret does not come
+ * from the request, and the read surfaces strip it; closing it belongs with the in-process write
+ * entries — see the design doc §6 follow-up.
  */
 function connectionSecretRefusal(body: unknown): { code: string; message: string } | null {
   const connection = (body as { connection?: unknown } | null | undefined)?.connection
