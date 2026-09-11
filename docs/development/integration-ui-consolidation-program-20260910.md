@@ -98,8 +98,8 @@
 | O | G06/G07 + G04 残核：触发端口与异步运行设计（**零代码**） | **#5615** | 正式，CI 全绿（21 项） | 设计件，未起复核 | 文档即交付物（189 行） |
 | Q | 交付说明订正两处过绝对表述（租户声明门有两条 legacy 例外；§7⑤ 的"必然 no-go"已被同文档 §3 的实测证伪） | **#5618** | 正式，CI 全绿（21 项） | 我直接复核 diff | 文档即交付物 |
 | P | G05：Automation 规则驱动 `send_webhook` 接上既有 SSRF 守卫（**安全敏感**；#5615 设计明写的硬前置） | **#5619** | 草稿，CI 已全绿（25 项 +1 SKIPPED）；**终审返修中，含一条阻断项（见 7.2）** | 3 查找 → 双反驳 → security-judge（36 代理）："修完再合" | `automation-webhook-ssrf-guard-{design,verification}-20260910.md` |
-| R | G44：数据工厂对外契约第一刀（integration 只读 GET 导出 OpenAPI + `integration:read` 作用域 token + 锚定允许表） | 代理进行中 | — | — | `integration-openapi-contract-{design,verification}-20260911.md` |
-| S | G02（报告里唯一的 P0）：连接/数据源共享作用域设计（**零代码**，核心文件与 #5593 争用故只出设计） | 代理进行中 | — | — | `data-source-sharing-scope-design-20260911.md` |
+| R | G44：数据工厂对外契约第一刀——24 条只读 GET 进 OpenAPI（297→322 条路径）+ `ApiTokenScope` 只加 `integration:read` + 锚定允许表 + 子树中间件两道门 | **#5623** | 草稿；**终审返修中（3 项，见 7.2b）** | 3 查找 → 双反驳 → security-judge（32 代理）："修完 3 项再合"；五条保证里四条成立且各有测试锚 | `integration-openapi-contract-{design,verification}-20260911.md` |
+| S | G02（报告里唯一的 P0）：连接/数据源共享作用域设计（**零代码**，核心文件与 #5593 争用故只出设计，512 行） | **#5620** | 正式，CI 全绿（21 项） | 未起复核工作流（零代码）；它对差距报告的四条订正与一条新发现**我逐条实读复验相符** | `data-source-sharing-scope-design-20260911.md` |
 
 ### 7.2 本窗口最重要的一条：守卫接对了，出口却被下游改写
 
@@ -114,6 +114,20 @@ G05 的实现本身是干净的——门放在 `executeSendWebhook` 内、URL �
 终审同时给了三条裁决：**https-only 保留**（明文内网、明文承载存储型 `Authorization` 是实打实的攻击面；放行 http-to-public 要靠 DNS 判定，而本 PR 自陈不做 resolve-then-pin，等于把最易被 rebinding 打穿的分支重新打开），条件是合并前做一次只读的存量 `http://` 规则盘点并写进发布说明；**日志记 `sheetId` 不越 values-free 线**（标识符不是值），真正的问题是注释承诺"能定位到出问题的规则"却没记 `ruleId`/`executionId`；**`ruleSnapshot` 的既有泄漏留单，但文案必须本波改**——两份文档写"由 `redactValue` 在落库时擦掉"属于假件背书，因为 `url` 不在 STRUCTURED_FIELDS 里，走 `redactString` 而其规则集既无通用 userinfo 也无通用 `token=`。
 
 终审点名的"所有视角都没看的一条路径"是 `automation-executor.ts:4251` 与 `:4348` 的 `redactString(url)`：它们在**放行之后**每次投递失败都会打，就在本 PR 加固的同一个函数里，直接顶撞提交标题「日志不带 URL/凭据」。代码是基线既有，**但那句断言是本 PR 新作的**。
+
+### 7.2b 第二条同类结论：新开的入口没有继承既有的围栏
+
+G44 的终审判定同样是「修完再合」，而必修的第二项与 G05 的重定向属于**同一个家族**——不是守卫写错了，而是**新开的面没有继承既有的不变量**。
+
+仓内有一份已生效的设计锁（`multitable-oapi4-scoped-tokens-designlock-20260629.md:120`）写死：作用域 token「在**任何**路由上、读写皆然，都不得越出它的 `base_ids` / `sheet_ids`」。而全仓只有两处代码读这两个字段（`middleware/api-token-auth.ts:76-77` 写、`middleware/oapi-scope-guard.ts:86-87` 读），**本 PR 新开的门一处都没有**。后果：一枚被围栏限定到某几张表的 token，一旦走这棵新子树就**变回 creator-wide**。终审同时判定反驳方把它降级为「可后续」是错的——辩护理由「integration 面没有可解析的 sheet 目标、无从校验」只能推出**拒绝**，推不出放行。修法 3 行 + 1 条测试。
+
+另两项：门体两处 `await` 被拒时是「无应答 + 未处理拒绝」而非 503（方向仍 fail-closed，`next()` 从未被调用，但可用性面有洞）；以及一处**假件背书**的测试名——它声称异常会「surfaced to the error handler」，而在本仓实装的 Express 4 里 async 中间件的 reject 根本不会进错误处理器。
+
+第三项 X1 是 CI 机械必红，与安全无关：上一提交重建了 OpenAPI 的 `dist` 三产物，却没跑生成链的第二段，`dist-sdk/index.d.ts` 仍是改动前的镜像（298 条路径键 vs dist 已 322），而工作流用 `git diff --exit-code` 钉住两者。**已由我修掉**（`128f552bc`）：重跑两段生成后只有 `index.d.ts` 有实质差异，新增路径键**恰好 24 个**、与声明的 24 条 GET 逐条对应。
+
+终审的三条特别裁决（理由已要求写进设计文档）：`GET /api/integration/status` 吐出全量路由表**留着不改**——同一份攻击面图已经在**无鉴权**的前端产物里给得更全，而门按 method + path 锚定判定，知不知道写面存在都一样被拒；`bridge-agent-checklists/:id` **留着**——它是纯读，审批动作是 POST + write，在方法轴上被白名单与「仓内无 method-override」双重挡死，机器凭据读到的是审批**证据**而不是审批**权力**；「creator 停用后 token 仍可读」**这条前提不成立**——更早的一道门已经 fail-closed。
+
+终审点名的「所有视角都没看的一条路径」是**门与插件路由的挂载顺序本身**：它是整个设计的承重假设，今天靠「中间件在构造函数里先挂、插件路由到加载阶段才动态注册」来保证，没有任何测试钉住。已要求补一条挂载序守卫测试。
 
 ### 7.3 合并门：不是推理，是实测
 
@@ -151,4 +165,8 @@ G05 的实现本身是干净的——门放在 `executeSendWebhook` 内、URL �
 
 1. **四段 linked server 收紧（#5614）的发布说明落在哪里**。本仓**没有**在维护的发布说明文件：根目录 `CHANGELOG.md` 最后一次改动是 2025-11-28、讲的是无关的旧阶段。实际在维护的两条客户/运维面文档是 `customer-delivery-guide-20260904.md`（近 10 天 30 次提交）与 `222-deploy-window-runbook-20260901.md`（14 次）。这条收紧影响的是登记 SQL Server 源的实施工程师，建议落在交付指南；但它会成为该文件上的第五支 PR，等你定。
 2. **#5619 的 https-only**。终审裁定保留并给了理由；代价是现存 `http://` 开头的自动化规则会开始以 `WEBHOOK_TARGET_REJECTED:scheme-not-allowed` 失败。合并前需要一次只读的存量盘点（需要真库，本机与本窗口都做不了），结果进发布说明。
-3. **交付说明里一个坏的交叉引用**（#5618 查出、不敢猜着改）：正文写"生产写 canonical（本期任何角色都不能，见 §7④）"，但现在的 §7④ 讲的是钉钉待办与宜搭，整个 `takeover-beiliao-20260821/` 目录 grep 不到别处解释这条限制。指针确定是坏的，正确指向未知。另有七条"未读到对应实现故无法判断"的绝对句清单，在 #5618 描述里。
+3. ~~交付说明里一个坏的交叉引用~~ **已解决**（#5618 追加提交 `92d3b27d0`）。正确指向已定位并四条互证：`222-deploy-window-runbook-20260901.md:74` 的 §0.6 = D1 裁决（owner，2026-09-01：本窗口落地表是沙箱表不是 canonical 主表）；同文 `:489` §7.2 标题自陈「设计，未实现」；同文 `:82-83` 给出技术原因——生产写入策略只认服务端配置键 `context.config.stockPrepApplyProduction`、**故意不设 env 开关**，所以真实部署里这条路径打不开；姊妹文档 `222-rehearsal-day-checklist-20260903.md:209` 的同义行原因写作「加载器缺失」。代码侧复核一致（`stock-preparation-table-actions.cjs:1839-1843`）。改法是指针改到 runbook 的 §0.6 / §7.2，并**把原因就地写进括号**。该行的权限判定本身未动。**「留给你」现在只剩七条「读不到实现因而无法判断」的绝对句**（清单在 #5618 描述里）。
+
+4. **一条新开的单：`connection.password` 明文落库且随 `GET /:id` 回显**（issue #5621，写 G02 设计时实读发现）。同一字段四处三种口径：`routes/data-sources.ts:79` 的 schema 是自由记录、**接受**它；`DataSourceManager.ts:409` 只加密 `config.credentials`、`connection` 原样落库；`sanitizeConfig`（`:321-327`）只解构 `credentials`、`connection` 随 `...rest` 原样回；而 `BaseAdapter.ts:504` 的 `redactSecrets` 却把 `conn.password` **算进秘密值**。随仓 UI 不触发（`buildPayload.ts:39-41` 把口令放进 `credentials`），直接调 API 会触发。四条腿逐条实读复验过。修法有多种取向且影响存量兼容，刻意不塞进共享线。
+
+5. **一个与本程序无关、但会打断自主开发的环境问题**：C 盘只剩 1.7 GB。`%TEMP%/odis_download_dest` 下有 **45 个同名 `pkg.odis.tar`、各约 427 MB、分别落在 45 个独立子目录里，合计 18.8 GB**；最早 09-08 00:08、最新 09-11 09:17，**每约 15 分钟新增一个且从不清理**（≈1.7 GB/小时）。与本仓库无关、非本会话创建，按纪律只报告不删。作为对照，Claude 在临时目录下的全部占用只有 422 MB（本项目）+ 86 MB（其它项目）——**把这些全删也只买到约 15 分钟**，所以这不是「评审沙箱没清」的问题。
