@@ -354,7 +354,7 @@ PATCH /api/admin/users/<用户 id>/namespaces/stock-prep/admission
 
 | 角色 | 能做 | 不能做(留给 `integration:admin`) |
 |---|---|---|
-| 一线操作员(`stock-prep:operate` **且** `stock-prep:read`,已开命名空间准入) | 搜自己租户的项目、开项目备料页;跑拉取(试算/写入,含大 BOM 后台通道);确认队列的 `confirmation-decisions/reconcile`(**不做按项目限制**,同租户内任意项目号都能对账——设计如此,见下) | 落快照批次(`mvp-persist`);装表/装 pack/`sandbox-target/ensure`;选源(`source-binding`);跨租户读任何东西;生产写 canonical(本期任何角色都不能,见 §7④) |
+| 一线操作员(`stock-prep:operate` **且** `stock-prep:read`,已开命名空间准入) | 搜自己租户的项目、开项目备料页;跑拉取(试算/写入,含大 BOM 后台通道);确认队列的 `confirmation-decisions/reconcile`(**不做按项目限制**,同租户内任意项目号都能对账——设计如此,见下) | 落快照批次(`mvp-persist`);装表/装 pack/`sandbox-target/ensure`;选源(`source-binding`);跨租户读任何东西;生产写 canonical(本期任何角色都不能——生产写入策略只认服务端配置键 `context.config.stockPrepApplyProduction`,而该策略**故意不设 env 开关**,真实部署的加载器不暴露这个键,因此这条路径打不开;见 `222-deploy-window-runbook-20260901.md` 的 §0.6 D1 裁决与 §7.2) |
 | 平台管理员(`role:admin` / `integration:admin`) | 上述"不能做"里的全部;授权限、开命名空间准入 | — |
 
 > **对账不做按项目限制(设计如此,不是缺口未补)**:一线操作员调 `confirmation-decisions/reconcile` 时,项目号**只校验租户,不校验项目**——同一租户内任何持 `stock-prep:operate` + `stock-prep:read` 的账号,都可以对本租户的任意项目号发起对账,包括作废该项目下别人已经排队的待确认行(孤儿清扫会把它们改判 superseded)。**边界是租户,不是项目**。
