@@ -31,7 +31,7 @@ server {
   root /opt/metasheet/apps/web/dist;
   index index.html;
 
-  # 与 222 现网同义(现网用 @maint 与 location /api/,此处命名不同、语义相同)：server 级的 503 默认落到 JSON 命名 location。
+  # 与 222 现网同义(现网的命名 location 叫 @maint、API 路径写法带尾斜杠;此处命名不同、语义相同)：server 级的 503 默认落到 JSON 命名 location。
   error_page 503 @maintenance_json;
 
   location / {
@@ -66,7 +66,7 @@ server {
   }
 
   location /api {
-    # 与 222 现网同义(现网用 @maint 与 location /api/,此处命名不同、语义相同)：维护门是这个 location 的第一条规则，排在 proxy_pass 之前。
+    # 与 222 现网同义(现网的命名 location 叫 @maint、API 路径写法带尾斜杠;此处命名不同、语义相同)：维护门是这个 location 的第一条规则，排在 proxy_pass 之前。
     if (-f /opt/metasheet/output/maintenance.flag) {
       return 503;
     }
