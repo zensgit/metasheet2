@@ -372,22 +372,26 @@ describe('MetaAutomationManager', () => {
     const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
     expect(container.querySelector('.meta-automation__form-title')?.textContent).toContain('新建自动化')
     expect(nameInput.placeholder).toBe('自动化名称')
-    expect(epSelectValue(actionSelect)).toBe('notify')
+    // F9: these values used to be the v0 aliases (notify / update_field), which the executor has NO
+    // dispatch case for — the quick form was minting rules that could never run. The expectation below
+    // is the corrected one; the labels are unchanged ('发送通知' covers both).
+    expect(epSelectValue(actionSelect)).toBe('send_notification')
     expect(epOptions(actionSelect).map((option) => option.value)).toEqual([
-      'notify',
-      'update_field',
+      'send_notification',
+      'update_record',
       'send_dingtalk_group_message',
       'send_dingtalk_person_message',
     ])
     expect(actionSelect.textContent).toContain('发送通知')
+    expect((container.querySelector('[data-automation-field="notifyUserIds"]') as HTMLInputElement).placeholder).toBe('用户 ID，逗号或换行分隔')
     expect((container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement).placeholder).toBe('通知内容')
     // UF-4 shape adaptation: el-drawer's built-in close button carries a localized aria-label by
     // design; the guard below still asserts the AUTHORED surface adds no aria-label noise.
     expect(container.querySelectorAll('[aria-label]:not(.el-drawer__close-btn)')).toHaveLength(0)
     expect(container.querySelectorAll('[title]')).toHaveLength(0)
-    expect(container.querySelectorAll('[placeholder]')).toHaveLength(2)
+    expect(container.querySelectorAll('[placeholder]')).toHaveLength(3) // name + recipients + message
 
-    epSetSelect(actionSelect, 'update_field')
+    epSetSelect(actionSelect, 'update_record')
     await nextTick()
 
     const targetField = container.querySelector('[data-automation-field="targetFieldId"]') as HTMLElement
@@ -902,14 +906,23 @@ describe('MetaAutomationManager', () => {
     nameInput.value = 'My Rule'
     nameInput.dispatchEvent(new Event('input', { bubbles: true }))
 
-    // Fill message for notify action
+    // F9: recipients are required before the message — a notification rule without them can never
+    // deliver, so the save button stays disabled until one is entered.
+    const saveBtnBefore = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    const recipientsInput = container.querySelector('[data-automation-field="notifyUserIds"]') as HTMLInputElement
     const msgInput = container.querySelector('[data-automation-field="notifyMessage"]') as HTMLInputElement
     msgInput.value = 'Hello!'
     msgInput.dispatchEvent(new Event('input', { bubbles: true }))
     await nextTick()
+    expect(saveBtnBefore.disabled).toBe(true)
+
+    recipientsInput.value = 'u1, u2'
+    recipientsInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
 
     // Save
     const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
     saveBtn.click()
     await flushPromises()
 
@@ -918,8 +931,44 @@ describe('MetaAutomationManager', () => {
     const body = JSON.parse(postCalls[0][1]?.body as string)
     expect(body.name).toBe('My Rule')
     expect(body.triggerType).toBe('record.created')
-    expect(body.actionType).toBe('notify')
-    expect(body.actionConfig.message).toBe('Hello!')
+    // F9 corrected expectation: this used to assert 'notify' + { message } — a rule shape the executor
+    // fails on. The config is now byte-identical to what the advanced editor emits.
+    expect(body.actionType).toBe('send_notification')
+    expect(body.actionConfig).toEqual({ userIds: ['u1', 'u2'], message: 'Hello!' })
+  })
+
+  it('F9: the quick form refuses to save an update_record without a target field + value', async () => {
+    const { client, fetchFn } = mockClient([])
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+    await flushPromises()
+
+    ;(container.querySelector('.meta-automation__btn-add') as HTMLButtonElement).click()
+    await nextTick()
+
+    const nameInput = container.querySelector('[data-automation-field="name"]') as HTMLInputElement
+    nameInput.value = 'Update rule'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    epSetSelect(container.querySelector('[data-automation-field="actionType"]') as HTMLElement, 'update_record')
+    await nextTick()
+
+    const saveBtn = container.querySelector('.meta-automation__btn--primary') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+
+    epSetSelect(container.querySelector('[data-automation-field="targetFieldId"]') as HTMLElement, 'fld_1')
+    const targetValue = container.querySelector('[data-automation-field="targetValue"]') as HTMLInputElement
+    targetValue.value = 'Done'
+    targetValue.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(saveBtn.disabled).toBe(false)
+
+    saveBtn.click()
+    await flushPromises()
+
+    const postCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'POST')
+    const body = JSON.parse(postCalls[0][1]?.body as string)
+    // UpdateRecordConfig's real shape — the legacy { fieldId, value } had no executor case at all.
+    expect(body.actionType).toBe('update_record')
+    expect(body.actionConfig).toEqual({ fields: { fld_1: 'Done' } })
   })
 
   it('toggles rule enabled/disabled', async () => {
@@ -1011,15 +1060,17 @@ describe('MetaAutomationManager', () => {
     addBtn.click()
     await nextTick()
 
-    // Default action is notify — should show message input
+    // Default action is send_notification — should show recipients + message inputs
+    expect(container.querySelector('[data-automation-field="notifyUserIds"]')).not.toBeNull()
     expect(container.querySelector('[data-automation-field="notifyMessage"]')).not.toBeNull()
     expect(container.querySelector('[data-automation-field="targetFieldId"]')).toBeNull()
 
-    // Switch to update_field
+    // Switch to update_record
     const actionSelect = container.querySelector('[data-automation-field="actionType"]') as HTMLElement
-    epSetSelect(actionSelect, 'update_field')
+    epSetSelect(actionSelect, 'update_record')
     await nextTick()
 
+    expect(container.querySelector('[data-automation-field="notifyUserIds"]')).toBeNull()
     expect(container.querySelector('[data-automation-field="notifyMessage"]')).toBeNull()
     expect(container.querySelector('[data-automation-field="targetFieldId"]')).not.toBeNull()
     expect(container.querySelector('[data-automation-field="targetValue"]')).not.toBeNull()
