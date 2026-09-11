@@ -77,7 +77,14 @@ export type MetaManagerLabelKey =
   | 'field.buttonNotifyRecipients' | 'field.buttonNotifyRecipientsHint'
   | 'field.error.buttonNotifyConfig'
   | 'field.autoNumberHint' | 'field.saveSettings' | 'field.applyDefaults'
+  // r4 item 4: "配置" panel for field types with no configurable options (dateTime,
+  // checkbox/boolean, url/email/phone/barcode/qrcode/location, and the read-only
+  // createdTime/modifiedTime/createdBy/modifiedBy system fields) previously rendered
+  // a blank body between the header and the save/cancel buttons — indistinguishable
+  // from a rendering bug. This key is the sole fallback copy for that state.
+  | 'field.noConfigurableOptions'
   | 'field.namePlaceholder' | 'field.addButton'
+  | 'field.nameRequiredHint' | 'field.optionColorEmpty'
   | 'field.changedTypeBlocking' | 'field.changedWarning'
   | 'field.latestMetadataLoaded'
   | 'field.discardManagerConfirm'
@@ -366,10 +373,19 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
     en: 'Existing records are backfilled once when the field is created or converted.',
     zh: '字段创建或转换时，会对已有记录一次性回填。',
   },
+  'field.noConfigurableOptions': {
+    en: 'This field type has no configurable options. To change how it displays, use view settings instead.',
+    zh: '这一类型暂无可配置项；要改显示方式请到视图设置调整。',
+  },
   'field.saveSettings': { en: 'Save field settings', zh: '保存字段设置' },
   'field.applyDefaults': { en: 'Apply defaults', zh: '应用默认值' },
   'field.namePlaceholder': { en: 'Field name', zh: '字段名称' },
   'field.addButton': { en: '+ Add', zh: '+ 添加' },
+  // Quiet inline hint for the empty-name leg of the '+ Add' disabled predicate
+  // (MetaFieldManager.vue). The duplicate-name leg already had a visible error;
+  // the empty-name leg silently did nothing at all.
+  'field.nameRequiredHint': { en: 'Enter a field name to add', zh: '输入字段名称后可添加' },
+  'field.optionColorEmpty': { en: 'No colour set', zh: '未设置颜色' },
   'field.changedTypeBlocking': {
     en: 'This field changed type in the background. Reload latest before saving.',
     zh: '该字段类型已在后台变更。保存前请重新加载最新设置。',
@@ -531,6 +547,23 @@ export function managerLabel(key: MetaManagerLabelKey, isZh: boolean): string {
 
 export function duplicateFieldName(name: string, isZh: boolean): string {
   return isZh ? `字段“${name}”已存在` : `A field named "${name}" already exists`
+}
+
+/**
+ * Shown inline (and repeated in the confirm) before a field-manager retype save.
+ * `normalizeFieldWriteInput` (core-backend routes/univer-meta.ts:5565-5588) re-runs
+ * `sanitizeFieldProperty` under the NEW type, so type-specific formatting (decimals,
+ * unit, currency code, options...) is dropped; stored cell values are left exactly as
+ * they are (the forward retype migrates nothing).
+ */
+export function fieldRetypeNotice(targetTypeLabel: string, isZh: boolean): string {
+  // Says BOTH consequences on purpose: the server re-sanitises `property` under the new
+  // type (format settings), and the FE drops validation rules the new type cannot enforce
+  // (utils/field-retype.ts retainedRetypeValidationRules) — a number `min` left on a text
+  // column would reject every later write.
+  return isZh
+    ? `改为${targetTypeLabel}后，现有格式设置、以及新类型无法执行的校验规则会被清除；已有数据不转换。`
+    : `Changing to ${targetTypeLabel} clears the current format settings and any validation rule the new type cannot enforce; existing data is not converted.`
 }
 
 export function deleteFieldConfirm(name: string, isZh: boolean): string {

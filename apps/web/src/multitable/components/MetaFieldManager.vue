@@ -56,11 +56,26 @@
         <div v-if="!fields.length" class="meta-field-mgr__empty">{{ ml('field.empty') }}</div>
       </div>
 
-      <div v-if="configTargetType" class="meta-field-mgr__config">
+      <div v-if="configTargetType" class="meta-field-mgr__config meta-field-mgr__config--scrollable">
         <div class="meta-field-mgr__config-header">
           <strong>{{ configTarget ? configureField(configTarget.name, isZh) : configureNewField(newFieldType, isZh) }}</strong>
-          <span>{{ fieldTypeLabel(configTargetType, isZh) }}</span>
+          <!-- #9: the type is a DROPDOWN only for the lossless directions in
+               utils/field-retype.ts (everything else stays a read-only span). -->
+          <select
+            v-if="configRetypeOptions.length"
+            v-model="configDraftType"
+            class="meta-field-mgr__select meta-field-mgr__type-select"
+            data-test="config-type-select"
+          >
+            <option v-for="t in configRetypeOptions" :key="t" :value="t">{{ fieldTypeLabel(t, isZh) }}</option>
+          </select>
+          <span v-else>{{ fieldTypeLabel(configTargetType, isZh) }}</span>
         </div>
+        <div
+          v-if="retypeNoticeText"
+          class="meta-field-mgr__hint meta-field-mgr__hint--retype"
+          data-test="retype-notice"
+        >{{ retypeNoticeText }}</div>
         <div v-if="fieldConfigOutdated" class="meta-field-mgr__warning">
           <span>{{ fieldConfigWarningText }}</span>
           <button class="meta-field-mgr__btn-inline" @click="reloadLatestConfig">{{ ml('action.reloadLatest') }}</button>
@@ -74,8 +89,39 @@
           <div class="meta-field-mgr__field">
             <span>{{ ml('field.options') }}</span>
             <div class="meta-field-mgr__stack">
-              <div v-for="(option, idx) in selectDraft.options" :key="idx" class="meta-field-mgr__option-row">
+              <div v-for="(option, idx) in selectDraft.options" :key="idx" class="meta-field-mgr__option-row meta-field-mgr__option-row--select">
                 <input v-model="option.value" class="meta-field-mgr__input" :placeholder="ml('field.optionValue')" />
+                <!-- #6: preset swatches + native picker + the (kept) hex text box.
+                     The preview block is what makes "unset" visually distinct from
+                     "#409eff", which used to be the placeholder of the text box. -->
+                <span class="meta-field-mgr__swatches">
+                  <button
+                    v-for="preset in SELECT_OPTION_PALETTE"
+                    :key="preset"
+                    type="button"
+                    class="meta-field-mgr__swatch"
+                    :class="{ 'meta-field-mgr__swatch--active': expandHex(option.color) === preset }"
+                    :style="{ backgroundColor: preset }"
+                    :aria-label="preset"
+                    :title="preset"
+                    :data-test="`option-swatch-${idx}-${preset}`"
+                    @click="option.color = preset"
+                  />
+                </span>
+                <input
+                  type="color"
+                  class="meta-field-mgr__color-input"
+                  :data-test="`option-color-picker-${idx}`"
+                  :value="expandHex(option.color) || '#409eff'"
+                  @input="option.color = ($event.target as HTMLInputElement).value"
+                />
+                <span
+                  class="meta-field-mgr__color-preview"
+                  :class="{ 'meta-field-mgr__color-preview--empty': !isHexColor(option.color) }"
+                  :style="isHexColor(option.color) ? { backgroundColor: expandHex(option.color) } : undefined"
+                  :title="isHexColor(option.color) ? option.color.trim() : ml('field.optionColorEmpty')"
+                  :data-test="`option-color-preview-${idx}`"
+                />
                 <input v-model="option.color" class="meta-field-mgr__input" placeholder="#409eff" />
                 <button class="meta-field-mgr__action meta-field-mgr__action--danger" @click="removeSelectOption(idx)">&times;</button>
               </div>
@@ -616,6 +662,15 @@
           </div>
         </template>
 
+        <!-- r4 item 4: types with no branch above AND no AI-shortcut section below (that
+             section covers string/longText) previously left this space blank between the
+             header and the save/cancel buttons — indistinguishable from a broken render. -->
+        <template v-else-if="!aiShortcutSectionVisible">
+          <p class="meta-field-mgr__no-config" data-test="field-config-no-options">
+            {{ ml('field.noConfigurableOptions') }}
+          </p>
+        </template>
+
         <!-- A3 §2.1: AI shortcut config section (string/longText targets only) -->
         <div v-if="aiShortcutSectionVisible" class="meta-field-mgr__ai" data-test="ai-shortcut-section">
           <div class="meta-field-mgr__ai-header">
@@ -770,7 +825,7 @@
             :class="{ 'meta-field-mgr__input--invalid': addNameConflict }"
             :placeholder="ml('field.namePlaceholder')"
             :aria-invalid="addNameConflict"
-            :aria-describedby="addNameConflict ? 'meta-field-mgr-add-error' : undefined"
+            :aria-describedby="addNameConflict ? 'meta-field-mgr-add-error' : (addNameMissing ? 'meta-field-mgr-add-name-required' : undefined)"
             @keydown.enter="onAddField"
           />
           <select v-model="newFieldType" class="meta-field-mgr__select" @change="openNewFieldConfigIfNeeded">
@@ -780,6 +835,8 @@
             variant="primary"
             class="meta-field-mgr__btn-add"
             :disabled="!newFieldName.trim() || addNameConflict"
+            :title="addDisabledHint || undefined"
+            data-test="add-field-submit"
             @click="onAddField"
           >{{ ml('field.addButton') }}</MtButton>
         </div>
@@ -790,6 +847,14 @@
           data-test="add-conflict-error"
           role="alert"
         >{{ duplicateFieldName(newFieldName.trim(), isZh) }}</div>
+        <!-- #3: the empty-name leg of the disabled predicate had NO visible
+             reason. Quiet muted line (not the boxed __hint), no role=alert. -->
+        <div
+          v-if="addNameMissing"
+          id="meta-field-mgr-add-name-required"
+          class="meta-field-mgr__inline-hint"
+          data-test="add-name-required-hint"
+        >{{ ml('field.nameRequiredHint') }}</div>
         <div v-if="newFieldTypeIsSystem" class="meta-field-mgr__hint meta-field-mgr__hint--system">
           {{ systemFieldHint(newFieldType) }}
         </div>
@@ -855,9 +920,12 @@ import {
   duplicateFieldName,
   aggregationLabel,
   fieldOptionRequired,
+  fieldRetypeNotice,
   insertFieldTokenTitle,
   managerLabel,
 } from '../utils/meta-manager-labels'
+import { SELECT_OPTION_PALETTE, expandHex, isHexColor, nextPaletteColor } from '../utils/select-option-palette'
+import { losslessRetypeTargets, retainedRetypeValidationRules, validationPanelTypeFor } from '../utils/field-retype'
 import { aiTokensConsumed, fieldTypeLabel } from '../utils/meta-core-labels'
 import { aiShortcutErrorMessage } from '../utils/meta-api-error-labels'
 import { aiBulkLabel } from '../utils/meta-ai-bulk-labels'
@@ -880,10 +948,12 @@ import { MtButton, MtIconButton } from '../ui'
 /** Field types where the validation panel is configurable. */
 const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'longText', 'number', 'select', 'multiSelect'])
 
+// Single source of truth with the retype rule filter (utils/field-retype.ts): the panel
+// that authors a rule is the panel that decides whether the rule may survive a retype.
+// The `?? 'select'` only ever fires for types the panel is not rendered for at all
+// (validationPanelVisible gates on VALIDATION_PANEL_TYPES) — kept for the old behaviour.
 function mapTypeForValidationPanel(fieldType: string): 'text' | 'number' | 'select' {
-  if (fieldType === 'string' || fieldType === 'longText') return 'text'
-  if (fieldType === 'number') return 'number'
-  return 'select'
+  return validationPanelTypeFor(fieldType) ?? 'select'
 }
 
 /**
@@ -1051,6 +1121,11 @@ const editingName = ref('')
 const deleteTargetId = ref<string | null>(null)
 const configTargetId = ref<string | null>(null)
 const configDraftType = ref<string | null>(null)
+// #9: the type the panel was HYDRATED with. Splits the two signals that used to be
+// conflated by `fieldConfigSchemaChanged`: `configDraftType !== baseline` is the USER
+// picking a new type in the dropdown (allowed), `stored type !== baseline` is the
+// field being re-typed in the BACKGROUND (still blocks the save).
+const configTypeBaseline = ref<string | null>(null)
 const fieldConfigError = ref('')
 // r2 item 6: distinct field-level state for "every persisted AI source field was deleted" — drives a
 // warning banner ON the AI config section so the user sees the AI section is the blocker (not their
@@ -1618,13 +1693,46 @@ function resetFormulaSuggestState() {
   formulaSuggestSeq++
 }
 
-const fieldConfigSchemaChanged = computed(() =>
-  Boolean(configTarget.value && configDraftType.value && displayFieldType(configTarget.value) !== configDraftType.value),
+/** User picked a different type in the edit panel's type dropdown. NEVER blocks. */
+const userRetypeRequested = computed(() =>
+  Boolean(
+    configTarget.value &&
+    configTypeBaseline.value &&
+    configDraftType.value &&
+    configDraftType.value !== configTypeBaseline.value,
+  ),
 )
+/**
+ * The STORED type moved under us since hydration (someone else re-typed the field).
+ * This is the only leg that blocks the save — the drafts on screen were built for the
+ * old type. Falls back to the pre-split comparison when no baseline was recorded.
+ */
+const backendTypeDrift = computed(() => {
+  const target = configTarget.value
+  if (!target) return false
+  const baseline = configTypeBaseline.value ?? configDraftType.value
+  return Boolean(baseline) && displayFieldType(target) !== baseline
+})
 const fieldConfigBlockingReason = computed(() => {
-  if (!configTarget.value || !fieldConfigOutdated.value || !fieldConfigSchemaChanged.value) return ''
+  if (!configTarget.value || !fieldConfigOutdated.value || !backendTypeDrift.value) return ''
   return ml('field.changedTypeBlocking')
 })
+/**
+ * Type dropdown contents: the hydrated type + its lossless targets. Keyed off the
+ * BASELINE (not the live stored type) so a background retype can't empty the list out
+ * from under the current selection — that case is handled by `backendTypeDrift`.
+ */
+const configRetypeOptions = computed<string[]>(() => {
+  const baseline = configTypeBaseline.value
+  if (!configTarget.value || !baseline) return []
+  const targets = losslessRetypeTargets(baseline)
+  return targets.length ? [baseline, ...targets] : []
+})
+const retypeNoticeText = computed(() =>
+  userRetypeRequested.value
+    ? fieldRetypeNotice(fieldTypeLabel(configDraftType.value ?? '', isZh.value), isZh.value)
+    : '',
+)
 const fieldConfigWarningText = computed(() => {
   return fieldConfigBlockingReason.value || ml('field.changedWarning')
 })
@@ -1644,6 +1752,18 @@ const addNameConflict = computed(() => {
   const normalized = normalizeFieldName(newFieldName.value)
   if (!normalized) return false
   return props.fields.some((field) => normalizeFieldName(field.name) === normalized)
+})
+
+/**
+ * #3: the two legs of the '+ Add' :disabled predicate, spelled out. Display-only —
+ * deliberately NOT part of `hasPendingDrafts`, so an untouched panel with the hint
+ * showing still closes without the discard confirm.
+ */
+const addNameMissing = computed(() => newFieldName.value.trim().length === 0)
+const addDisabledHint = computed(() => {
+  if (addNameMissing.value) return ml('field.nameRequiredHint')
+  if (addNameConflict.value) return duplicateFieldName(newFieldName.value.trim(), isZh.value)
+  return ''
 })
 
 const renameNameConflict = computed(() => {
@@ -1907,6 +2027,7 @@ function hydrateExistingFieldConfig(field: MetaField, options?: { liveRefreshTex
   resetDrafts()
   const fieldType = displayFieldType(field)
   configDraftType.value = fieldType
+  configTypeBaseline.value = fieldType
   fieldConfigLiveRefreshText.value = options?.liveRefreshText ?? ''
   if (fieldType === 'select' || fieldType === 'multiSelect') {
     const optionsList = resolveSelectFieldOptions(field.property)
@@ -2016,6 +2137,7 @@ function closeConfig() {
   }
   configTargetId.value = null
   configDraftType.value = null
+  configTypeBaseline.value = null
   fieldConfigBaseline.value = ''
   fieldConfigOutdated.value = false
   fieldConfigLiveRefreshText.value = ''
@@ -2031,6 +2153,7 @@ function resetTransientState() {
   deleteTargetId.value = null
   configTargetId.value = null
   configDraftType.value = null
+  configTypeBaseline.value = null
   newFieldConfigVisible.value = false
   fieldConfigBaseline.value = ''
   fieldConfigOutdated.value = false
@@ -2050,6 +2173,7 @@ function openNewFieldConfigIfNeeded() {
     newFieldConfigVisible.value = false
     configTargetId.value = null
     configDraftType.value = null
+    configTypeBaseline.value = null
     fieldConfigBaseline.value = ''
     fieldConfigOutdated.value = false
     fieldConfigLiveRefreshText.value = ''
@@ -2060,6 +2184,7 @@ function openNewFieldConfigIfNeeded() {
   newFieldConfigVisible.value = true
   configTargetId.value = null
   configDraftType.value = newFieldType.value
+  configTypeBaseline.value = null
   fieldConfigBaseline.value = serializeFieldDraft(newFieldType.value)
   fieldConfigOutdated.value = false
   fieldConfigLiveRefreshText.value = ''
@@ -2622,6 +2747,11 @@ function saveConfig() {
   }
   if (fieldConfigBlockingReason.value) return
   const fieldType = configDraftType.value ?? displayFieldType(configTarget.value)
+  // #9 retype: one explicit confirm carrying the exact consequence (the server
+  // re-sanitizes `property` under the NEW type, and no cell value is converted).
+  // Same window.confirm affordance as confirmDiscardFieldManagerChanges.
+  const retyping = userRetypeRequested.value
+  if (retyping && !window.confirm(retypeNoticeText.value)) return
   const property = currentDraftProperty(fieldType)
   if (!property && fieldConfigError.value) return
   if (!property) return
@@ -2638,17 +2768,38 @@ function saveConfig() {
   const storedProperty = (configTarget.value.property ?? {}) as Record<string, unknown>
   if (storedProperty.hidden === true) carried.hidden = true
   if (storedProperty.visible === false) carried.visible = false
+  // #9 retype, part 2: `currentDraftProperty` was just called with the NEW type, but the
+  // validation draft it serialises was authored under the OLD one — and both number and
+  // string/longText/select sit in VALIDATION_PANEL_TYPES, so a number field's `min`/`max`
+  // (or a select's `enum`) would ride along into a text column. That is not lossless: the
+  // engine coerces before comparing (field-validation-engine.ts:76-80 `toNumber` → null →
+  // false) and record-service.ts:725-731 turns every subsequent write into
+  // RecordValidationFailedError — a text column no non-numeric value can ever enter again.
+  // The server keeps whatever we send (field-codecs.ts:552 default branch returns the
+  // object as-is), so the filter has to happen HERE. Keep only what the target type's own
+  // validation panel could have authored; drop the key entirely when nothing survives.
+  if (retyping) {
+    const keptRules = retainedRetypeValidationRules(carried.validation, fieldType)
+    if (keptRules.length) carried.validation = keptRules
+    else delete carried.validation
+  }
   // Skip no-op saves for types that only expose validation + aiShortcut: if
   // the user touched neither surface there is nothing to persist, and
   // emitting an empty `property: {}` would otherwise clobber existing values
   // on the server. Types with mandatory structural config (select/link/
   // lookup/rollup/formula/attachment) always have keys to persist.
+  // A retype is ALWAYS a real change, so it must never take the no-op skip below
+  // (number -> string with untouched validation would otherwise close silently and
+  // drop the retype on the floor).
   const onlyValidationSurface = (fieldType === 'string' || fieldType === 'longText')
-  if (onlyValidationSurface && !validationDraftTouched.value && !aiShortcutDirty.value) {
+  if (!retyping && onlyValidationSurface && !validationDraftTouched.value && !aiShortcutDirty.value) {
     closeConfig()
     return
   }
-  emit('update-field', configTarget.value.id, { property: carried })
+  // `type` only when the user asked for it — a plain settings save keeps the exact
+  // pre-existing payload shape. `property: carried` (not a bare `{ type }`) is what
+  // preserves the hidden/visible carry above.
+  emit('update-field', configTarget.value.id, { ...(retyping ? { type: fieldType } : {}), property: carried })
   closeConfig()
 }
 
@@ -2689,6 +2840,16 @@ function confirmDelete() {
 
 const fieldConfigDirty = computed(() => {
   if (!configTarget.value) return false
+  // A user retype is a pending draft in its own right. serializeFieldDraft is keyed by
+  // type and string/longText serialize IDENTICALLY (:1924 both return
+  // {validation, aiShortcut}, and both are in VALIDATION_PANEL_TYPES), so string ->
+  // longText would otherwise read as NOT dirty — and the 1.2s metadata poll in
+  // MultitableWorkbench (:3971 setInterval -> any upstream rename changes the source
+  // signature) would take the `else` branch below at :2834 and re-hydrate, silently
+  // resetting configDraftType back to the stored type under the user's cursor.
+  // It also keeps hasPendingDrafts/update:dirty honest, so closing the dialog or
+  // switching fields asks before dropping the pick.
+  if (userRetypeRequested.value) return true
   return serializeFieldDraft(configDraftType.value) !== fieldConfigBaseline.value
 })
 
@@ -2725,7 +2886,10 @@ function dismissLiveRefreshNotice() {
 }
 
 function addSelectOption() {
-  selectDraft.options.push({ value: '', color: '' })
+  // #6: auto-assign the next palette colour so a fresh option is never "unset"
+  // (which renders as an uncoloured chip). EXISTING options are never rewritten —
+  // resetDrafts/hydrate still seed `color: ''` so a stored blank stays blank.
+  selectDraft.options.push({ value: '', color: nextPaletteColor(selectDraft.options.length) })
 }
 
 function removeSelectOption(index: number) {
@@ -2811,7 +2975,29 @@ onBeforeUnmount(() => {
 .meta-field-mgr__action--ok { color: #67c23a; }
 .meta-field-mgr__action--danger:hover { color: #f56c6c; }
 .meta-field-mgr__empty { text-align: center; padding: 20px; color: #999; font-size: 13px; }
+/* No-configurable-options fallback copy (r4 item 4) — same muted treatment as this
+   file's __empty class above, kept as a distinct class so tests can target it precisely
+   without also matching the (unrelated) "no fields defined" empty state. */
+.meta-field-mgr__no-config { margin: 0; padding: 4px 0; color: #909399; font-size: 12px; }
 .meta-field-mgr__config { padding: 14px 16px; border-top: 1px solid #eee; background: #fbfdff; display: flex; flex-direction: column; gap: 12px; }
+/* r4 item 5: the formula config panel (expression box + AI generate + insert-field chips +
+   formula reference catalog) has no bound on its own, so — inside a modal whose OUTER box
+   merely caps at max-height:84vh with default (visible) overflow — it was free to grow past
+   the modal, pushing the save/cancel row (__config-actions, the LAST child inside this same
+   container) below the viewport with no scrollbar to reach it. Bounding height here
+   (relative to the viewport, not a fixed px) turns this panel into its own scroll region
+   for every field type, not just formula. */
+.meta-field-mgr__config--scrollable { max-height: min(52vh, calc(84vh - 160px)); overflow-y: auto; }
+/* Keeps Save/Cancel reachable without scrolling to the very bottom of a long panel (e.g.
+   formula, button+notification). Sits inside the scrollable container above, so it rides
+   along with it rather than escaping to the fixed-size row of buttons elsewhere. */
+.meta-field-mgr__config--scrollable .meta-field-mgr__config-actions {
+  position: sticky;
+  bottom: 0;
+  padding-top: 8px;
+  margin-top: 4px;
+  background: #fbfdff;
+}
 .meta-field-mgr__config-header { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #666; }
 .meta-field-mgr__field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #666; }
 .meta-field-mgr__toggle { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #444; }
@@ -2892,4 +3078,16 @@ onBeforeUnmount(() => {
 .meta-field-mgr__rename--invalid { border-color: #f56c6c; }
 .meta-field-mgr__input--invalid { border-color: #f56c6c; }
 .meta-field-mgr__inline-error { color: #f56c6c; font-size: 11px; margin-top: 4px; }
+/* --- field-manager: empty-name hint / select-option palette / retype select --- */
+.meta-field-mgr__inline-hint { color: #909399; font-size: 11px; margin-top: 4px; }
+.meta-field-mgr__option-row--select { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.meta-field-mgr__option-row--select > .meta-field-mgr__input { flex: 1 1 120px; width: auto; min-width: 96px; }
+.meta-field-mgr__swatches { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.meta-field-mgr__swatch { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #d0d5dc; cursor: pointer; padding: 0; }
+.meta-field-mgr__swatch--active { box-shadow: 0 0 0 2px #1d4ed8; }
+.meta-field-mgr__color-input { width: 32px; height: 24px; padding: 0; border: 1px solid #ddd; border-radius: 4px; background: #fff; cursor: pointer; }
+.meta-field-mgr__color-preview { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #d0d5dc; display: inline-block; }
+.meta-field-mgr__color-preview--empty { background: repeating-linear-gradient(45deg, #fff, #fff 3px, #e4e7ed 3px, #e4e7ed 6px); }
+.meta-field-mgr__type-select { width: auto; max-width: 160px; }
+.meta-field-mgr__hint--retype { border-color: #f5dab1; background: #fdf6ec; color: #8a5a1a; }
 </style>
