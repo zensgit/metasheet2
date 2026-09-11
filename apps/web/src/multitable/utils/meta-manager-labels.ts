@@ -83,6 +83,10 @@ export type MetaManagerLabelKey =
   // a blank body between the header and the save/cancel buttons — indistinguishable
   // from a rendering bug. This key is the sole fallback copy for that state.
   | 'field.noConfigurableOptions'
+  // r8-B (2026-09-11): the body/config splitter + its enlarge/shrink toggle inside the field
+  // manager dialog. Chrome strings live here, never inline in the .vue -- this directory is
+  // watched by multitable-manager-panels-i18n.spec.ts.
+  | 'field.configPaneResizeHandle' | 'field.configPaneExpand' | 'field.configPaneCollapse'
   | 'field.namePlaceholder' | 'field.addButton'
   | 'field.nameRequiredHint' | 'field.optionColorEmpty'
   | 'field.changedTypeBlocking' | 'field.changedWarning'
@@ -377,6 +381,12 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
     en: 'This field type has no configurable options. To change how it displays, use view settings instead.',
     zh: '这一类型暂无可配置项；要改显示方式请到视图设置调整。',
   },
+  'field.configPaneResizeHandle': {
+    en: 'Resize the field settings pane',
+    zh: '调整字段配置区高度',
+  },
+  'field.configPaneExpand': { en: 'Enlarge settings pane', zh: '放大配置区' },
+  'field.configPaneCollapse': { en: 'Shrink settings pane', zh: '缩小配置区' },
   'field.saveSettings': { en: 'Save field settings', zh: '保存字段设置' },
   'field.applyDefaults': { en: 'Apply defaults', zh: '应用默认值' },
   'field.namePlaceholder': { en: 'Field name', zh: '字段名称' },
