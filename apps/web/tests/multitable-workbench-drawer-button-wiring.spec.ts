@@ -22,10 +22,13 @@ let capturedViewManagerAttrs: Record<string, unknown> | null = null
 // One shared push spy (not a fresh vi.fn() per useRouter() call) so the F5 template-center
 // navigation lock below can assert the target route AND drive the guard-abort branch.
 const routerPushSpy = vi.fn<(to: unknown) => Promise<unknown>>().mockResolvedValue(undefined)
+// The "More templates ->" entry keeps a REAL href (new-tab / copy-link affordances) resolved through
+// router.resolve(), never a hardcoded path — this spy pins that wire.
+const routerResolveSpy = vi.fn<(to: unknown) => { href: string }>(() => ({ href: '/base/multitable/templates' }))
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
-  return { ...actual, useRouter: () => ({ push: routerPushSpy }) }
+  return { ...actual, useRouter: () => ({ push: routerPushSpy, resolve: routerResolveSpy }) }
 })
 
 function stubComponent(name: string) {
@@ -123,6 +126,7 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
   }),
 }))
 
+import { createMemoryHistory, createRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
 import { workbenchLabel } from '../src/multitable/utils/workbench-labels'
 import { useLocale } from '../src/composables/useLocale'
@@ -385,6 +389,34 @@ function signedTestToken(payload: Record<string, unknown>): string {
 // a NavigationFailure instead of throwing, so nothing surfaced the block. The lock below drives the
 // real chain: click -> onGoToTemplateCenter -> router.push -> guard -> confirmPageLeave ->
 // window.confirm, and pins that the panel closes ONLY when the navigation actually happened.
+// Mints GENUINE NavigationFailure instances by driving a throwaway memory router, because
+// vue-router brands them with a module-private Symbol that isNavigationFailure() insists on.
+const ProbeBlank = defineComponent({ name: 'ProbeBlank', render: () => h('div') })
+async function realNavigationFailure(kind: 'aborted' | 'cancelled' | 'duplicated'): Promise<unknown> {
+  const probe = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', name: 'probe-home', component: ProbeBlank },
+      { path: '/a', name: 'probe-a', component: ProbeBlank },
+      { path: '/b', name: 'probe-b', component: ProbeBlank },
+    ],
+  })
+  await probe.push('/')
+  if (kind === 'aborted') {
+    probe.beforeEach((to) => (to.path === '/a' ? false : true))
+    return await probe.push('/a')
+  }
+  if (kind === 'duplicated') {
+    await probe.push('/a')
+    return await probe.push('/a')
+  }
+  // cancelled: a second navigation supersedes the in-flight one (double click on the entry while the
+  // lazy template-center chunk loads, or the embed host replacing the route mid-flight).
+  const superseded = probe.push('/a')
+  await probe.push('/b')
+  return await superseded
+}
+
 describe('MultitableWorkbench template center navigation (F5)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -448,22 +480,30 @@ describe('MultitableWorkbench template center navigation (F5)', () => {
 
   // Reproduces vue-router's real contract: a guard that returns false makes push() RESOLVE with a
   // NavigationFailure (it does not throw), which is exactly why the old code never noticed.
-  function wireRouterThroughPageLeaveGuard(workbenchRef: { value: any }) {
+  // The failure object must be a REAL one: isNavigationFailure() checks a module-private Symbol, so
+  // a hand-rolled `Object.assign(new Error(), { type: 4 })` look-alike would silently take the wrong
+  // branch and make these locks lie about which failure kinds surface a toast.
+  async function wireRouterThroughPageLeaveGuard(workbenchRef: { value: any }) {
+    const abortedFailure = await realNavigationFailure('aborted')
+    expect(isNavigationFailure(abortedFailure, NavigationFailureType.aborted)).toBe(true)
     routerPushSpy.mockImplementation(async () => {
       const allowed = workbenchRef.value?.confirmPageLeave?.() ?? true
       if (allowed) return undefined
-      return Object.assign(new Error('Navigation aborted from "/multitable" to "/multitable/templates" via a navigation guard.'), { type: 4 })
+      return abortedFailure
     })
   }
 
   it('navigates to the template center and only then closes the panel', async () => {
     await mountAndOpenTemplateLibrary()
     const link = moreTemplatesLink()
-    // No href anymore: the close must wait for the push result, so this is a programmatic link.
+    // Still an anchor with a real href, but the plain left click is handled programmatically so the
+    // close can wait for the push result.
     expect(link.tagName).toBe('A')
     expect(link.getAttribute('role')).toBe('link')
 
-    link.click()
+    const plainClick = new MouseEvent('click', { bubbles: true, cancelable: true })
+    link.dispatchEvent(plainClick)
+    expect(plainClick.defaultPrevented).toBe(true)
     await flushUi()
 
     expect(routerPushSpy).toHaveBeenCalledTimes(1)
@@ -474,7 +514,7 @@ describe('MultitableWorkbench template center navigation (F5)', () => {
 
   it('keeps the panel open and explains why when the page-leave guard aborts the navigation', async () => {
     const workbenchRef = await mountAndOpenTemplateLibrary()
-    wireRouterThroughPageLeaveGuard(workbenchRef)
+    await wireRouterThroughPageLeaveGuard(workbenchRef)
     // Real dirty state via the real wire the view manager uses (@update:dirty).
     expect(capturedViewManagerAttrs).not.toBeNull()
     ;(capturedViewManagerAttrs!['onUpdate:dirty'] as (v: boolean) => void)(true)
@@ -494,7 +534,7 @@ describe('MultitableWorkbench template center navigation (F5)', () => {
 
   it('navigates normally when the guard lets the user leave (confirm accepted)', async () => {
     const workbenchRef = await mountAndOpenTemplateLibrary()
-    wireRouterThroughPageLeaveGuard(workbenchRef)
+    await wireRouterThroughPageLeaveGuard(workbenchRef)
     ;(capturedViewManagerAttrs!['onUpdate:dirty'] as (v: boolean) => void)(true)
     await flushUi()
     confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -517,5 +557,63 @@ describe('MultitableWorkbench template center navigation (F5)', () => {
 
     expect(panelIsOpen()).toBe(true)
     expect(showErrorSpy).toHaveBeenCalledWith(blockedMessage())
+  })
+
+  // "push resolved with a failure" is NOT the same as "the guard blocked you". The template center is
+  // a lazy route (appRoutes.ts `component: () => import(...)`), so a double click — or the embed
+  // host's applyHostOverrides router.replace() landing mid-flight — makes the first push resolve with
+  // a `cancelled` failure while the succeeding navigation goes through. Treating that as a block
+  // flashed a bogus "unsaved changes" toast on a navigation that actually succeeded.
+  it('stays silent when a later navigation supersedes the push (cancelled failure)', async () => {
+    await mountAndOpenTemplateLibrary()
+    const cancelled = await realNavigationFailure('cancelled')
+    expect(isNavigationFailure(cancelled, NavigationFailureType.cancelled)).toBe(true)
+    routerPushSpy.mockResolvedValueOnce(cancelled)
+
+    moreTemplatesLink().click()
+    await flushUi()
+
+    expect(routerPushSpy).toHaveBeenCalledTimes(1)
+    // No error: the succeeding navigation owns the outcome, and it must not close the panel either
+    // (if that navigation is aborted in turn, the user still needs this entry).
+    expect(showErrorSpy).not.toHaveBeenCalled()
+    expect(panelIsOpen()).toBe(true)
+  })
+
+  it('stays silent when the push is a duplicate of the current route', async () => {
+    await mountAndOpenTemplateLibrary()
+    const duplicated = await realNavigationFailure('duplicated')
+    expect(isNavigationFailure(duplicated, NavigationFailureType.duplicated)).toBe(true)
+    routerPushSpy.mockResolvedValueOnce(duplicated)
+
+    moreTemplatesLink().click()
+    await flushUi()
+
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  // Dropping <router-link> must not drop what a real link gives the user: the href stays real (and is
+  // resolved through the router, so a sub-path deployment via createWebHistory(BASE_URL) still works),
+  // and modified clicks are handed back to the browser instead of being hijacked into this tab.
+  it('keeps the native link affordances: router-resolved href + Ctrl-click left to the browser', async () => {
+    await mountAndOpenTemplateLibrary()
+    const link = moreTemplatesLink()
+
+    expect(routerResolveSpy).toHaveBeenCalledWith({ name: AppRouteNames.MULTITABLE_TEMPLATES })
+    expect(link.getAttribute('href')).toBe('/base/multitable/templates')
+
+    let defaultPreventedByComponent: boolean | null = null
+    link.addEventListener('click', (event) => {
+      // Registered after Vue's own listener on the same element/phase, so this observes the verdict
+      // of the component handler; the preventDefault() only keeps jsdom from attempting navigation.
+      defaultPreventedByComponent = event.defaultPrevented
+      event.preventDefault()
+    })
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true }))
+    await flushUi()
+
+    expect(defaultPreventedByComponent).toBe(false)
+    expect(routerPushSpy).not.toHaveBeenCalled()
+    expect(panelIsOpen()).toBe(true)
   })
 })

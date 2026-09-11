@@ -91,14 +91,18 @@
         <!-- F5: programmatic navigation (NOT <router-link>) so closing this panel can wait for the
              push RESULT. A router-link fires its inline @click synchronously while the guard
              (MultitableEmbedHost onBeforeRouteLeave -> confirmPageLeave) can still abort the
-             navigation, which looked like "clicked, nothing happened, panel just closed". -->
+             navigation, which looked like "clicked, nothing happened, panel just closed".
+             The href is still real (resolved through the router) so Ctrl/Cmd/middle click, "copy
+             link address" and the status-bar preview keep working; onGoToTemplateCenter only
+             preventDefault()s the plain left click it actually handles. -->
         <a
           class="mt-template-library__more"
+          :href="templateCenterHref"
           role="link"
           tabindex="0"
           data-testid="multitable-workbench-template-center-link"
-          @click.prevent="onGoToTemplateCenter"
-          @keydown.enter.prevent="onGoToTemplateCenter"
+          @click="onGoToTemplateCenter"
+          @keydown.enter="onGoToTemplateCenter"
         >
           {{ wb('tpl.more', isZh) }}
         </a>
@@ -623,7 +627,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
@@ -1265,6 +1269,20 @@ watch(isRailDrawerOpen, (open) => {
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
+// F5: the "More templates ->" entry navigates programmatically (so the panel can wait for the push
+// RESULT), but it must keep the native link affordances a <router-link> used to give it -- Ctrl/Cmd
+// or middle click opening a new tab, "copy link address", the status-bar preview. Hence a REAL href
+// resolved through the router (never a hardcoded path: createWebHistory(import.meta.env.BASE_URL)
+// means the app can be served from a sub-path). Guarded because several specs mock useRouter() with
+// a push-only object; a missing href only costs the new-tab affordance, the click path still works.
+const templateCenterHref = computed<string | undefined>(() => {
+  if (typeof router.resolve !== 'function') return undefined
+  try {
+    return router.resolve({ name: TemplateCenterRouteName }).href
+  } catch {
+    return undefined
+  }
+})
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const showTrash = ref(false)
@@ -4792,15 +4810,38 @@ function openCommentInbox() {
 // NavigationFailure instead of throwing, so the old inline `@click="showTemplateLibrary = false"`
 // swallowed the block: panel gone, page unchanged. A rejected push (guard error) is treated the
 // same way -- navigation did not happen, so the panel stays open and the user gets a toast.
-async function onGoToTemplateCenter() {
+//
+// NOT every NavigationFailure means "the guard blocked you": vue-router also resolves push() with
+// `cancelled` (a later navigation superseded this one -- e.g. the user double-clicks this entry and
+// the lazy template-center chunk is still loading, or MultitableEmbedHost's applyHostOverrides
+// router.replace() lands mid-flight) and with `duplicated` (already on the target route). Those are
+// not user-facing errors: the succeeding navigation owns the outcome, so we stay silent and leave
+// the panel untouched instead of flashing a bogus "unsaved changes" toast.
+function navigationWasSuperseded(failure: unknown): boolean {
+  return (
+    isNavigationFailure(failure, NavigationFailureType.cancelled) ||
+    isNavigationFailure(failure, NavigationFailureType.duplicated)
+  )
+}
+
+async function onGoToTemplateCenter(event?: MouseEvent | KeyboardEvent) {
+  if (event) {
+    // Mirror <router-link>'s guardEvent: leave modified / non-primary clicks to the browser so
+    // Ctrl/Cmd/middle click still opens the template center in a new tab via the real href.
+    if (event.defaultPrevented) return
+    if (event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return
+    if ('button' in event && typeof event.button === 'number' && event.button !== 0) return
+    event.preventDefault()
+  }
   const failure = await router
     .push({ name: TemplateCenterRouteName })
     .catch((error: unknown) => error ?? new Error('navigation failed'))
-  if (failure) {
-    showError(wb('toast.templateCenterBlocked', isZh.value))
+  if (!failure) {
+    showTemplateLibrary.value = false
     return
   }
-  showTemplateLibrary.value = false
+  if (navigationWasSuperseded(failure)) return
+  showError(wb('toast.templateCenterBlocked', isZh.value))
 }
 
 async function loadCalendarHolidays(range: CalendarVisibleRange) {
@@ -5247,7 +5288,7 @@ defineExpose({
 .mt-template-library__state--error { color: #b91c1c; background: #fef2f2; }
 .mt-template-library__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .mt-template-library__footer { margin-top: 12px; display: flex; justify-content: flex-end; }
-/* F5: no href anymore (programmatic navigation), so restore the link affordance explicitly. */
+/* F5: the href can be absent when the router cannot resolve it, so pin the link affordance. */
 .mt-template-library__more { font-size: 12px; color: #2563eb; text-decoration: none; cursor: pointer; }
 .mt-template-library__more:hover { text-decoration: underline; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
