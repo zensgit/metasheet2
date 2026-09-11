@@ -14,6 +14,10 @@
  *   C8 可见性:模板默认 private —— 同租户另一个 manage-schema 用户列不到/装不了/删不掉;
  *      显式 visibility:'tenant' 才全租户可见。
  *   C9 选项形状:生产落库形状是 {value,color}(见 C1),老的 {id,name} 脏数据仍兼容。
+ *   F7-1 按表收窄:sheetIds 下推进 SQL 的 WHERE(第 51 张表也存得下),跨 Base 的 id 一张都匹配不到;
+ *   F7-2 按字段收窄:fieldIds 在 extractTemplateSheets **之前**做交集,视图里不留悬空引用;
+ *   F7-3 上限:sheetIds > 50 / fieldIds > 500 回 400,不静默截断;过滤后零字段回 400;
+ *   F7-4 类型保真:13 种自洽类型原样保留(不再有「已转为文本列」),button 仍降级出声。
  *
  * Harness 沿用 multitable-template-dryrun-routes.test.ts 的 mock-pool 路由precedent:
  * 真 express + 真 univerMetaRouter,poolManager.get() 打桩成内存 store。
@@ -47,7 +51,11 @@ type StoreOptions = {
   sheetPermissions?: Array<{ sheet_id: string; perm_code: string }>
   /** true → 自定义模板表报 42P01(未迁移)。 */
   customTemplateTableMissing?: boolean
+  /** 落在**另一个 Base** 上的表 —— 用来证明跨 Base 的 sheetId 一张都匹配不到。 */
+  otherBaseSheets?: SeedSheet[]
 }
+
+const OTHER_BASE_ID = 'base_other'
 
 const SOURCE_BASE_ID = 'base_source'
 
@@ -57,16 +65,22 @@ function createStore(opts: StoreOptions = {}) {
   const bases: Array<Record<string, unknown>> = [
     { id: SOURCE_BASE_ID, name: 'Ops Base', icon: 'table', color: '#0f766e', owner_id: null, workspace_id: null },
   ]
-  const sheets: Array<Record<string, unknown>> = seedSheets.map((sheet) => ({
-    id: sheet.id, base_id: SOURCE_BASE_ID, name: sheet.name, description: sheet.description ?? null,
-  }))
-  const fields: Array<Record<string, unknown>> = seedSheets.flatMap((sheet) =>
+  const otherSheets = opts.otherBaseSheets ?? []
+  const sheets: Array<Record<string, unknown>> = [
+    ...seedSheets.map((sheet) => ({
+      id: sheet.id, base_id: SOURCE_BASE_ID, name: sheet.name, description: sheet.description ?? null,
+    })),
+    ...otherSheets.map((sheet) => ({
+      id: sheet.id, base_id: OTHER_BASE_ID, name: sheet.name, description: sheet.description ?? null,
+    })),
+  ]
+  const fields: Array<Record<string, unknown>> = [...seedSheets, ...otherSheets].flatMap((sheet) =>
     sheet.fields.map((field) => ({
       id: field.id, sheet_id: sheet.id, name: field.name, type: field.type,
       property: field.property ?? {}, order: field.order,
     })),
   )
-  const views: Array<Record<string, unknown>> = seedSheets.flatMap((sheet) =>
+  const views: Array<Record<string, unknown>> = [...seedSheets, ...otherSheets].flatMap((sheet) =>
     (sheet.views ?? []).map((view) => ({
       id: view.id, sheet_id: sheet.id, name: view.name, type: view.type,
       filter_info: {}, sort_info: {}, group_info: view.group_info ?? {},
@@ -142,8 +156,20 @@ function createStore(opts: StoreOptions = {}) {
       return { rows: [base], rowCount: 1 }
     }
     if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_sheets') && normalized.includes('WHERE base_id = $1')) {
-      const [baseId] = params as [string]
-      return { rows: sheets.filter((sheet) => sheet.base_id === baseId) }
+      const [baseId, scopedSheetIds] = params as [string, string[] | null | undefined]
+      let rows = sheets.filter((sheet) => sheet.base_id === baseId)
+      // wire-vs-fixture:sheetIds 的收窄只在**被测 SQL 自己**写了下推谓词时才生效。
+      // 把 `AND ($2::text[] IS NULL OR id = ANY($2::text[]))` 从路由里删掉、改成事后在 JS 里
+      // 过滤,F7-1 的两个用例就会红,而不是被 fake 兜住。
+      if (normalized.includes('id = ANY($2::text[])') && Array.isArray(scopedSheetIds)) {
+        const idSet = new Set(scopedSheetIds)
+        rows = rows.filter((sheet) => idSet.has(sheet.id as string))
+      }
+      // LIMIT 也照做 —— 这正是「过滤必须下推」的那把尺子:过滤若发生在 LIMIT 之后,
+      // 排在第 51 位的表在这里就已经被截掉了。
+      const limit = /LIMIT (\d+)/.exec(normalized)
+      if (limit) rows = rows.slice(0, Number(limit[1]))
+      return { rows }
     }
     if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_sheets') && normalized.includes('WHERE id = $1')) {
       const [id] = params as [string]
@@ -291,9 +317,16 @@ const OPS_SHEETS: SeedSheet[] = [
         id: 'fld_link', name: '关联客户', type: 'link', order: 3,
         property: { foreignSheetId: 'sheet_customers_in_source_db', limitSingleRecord: true },
       },
-      // 模板系统装不下的生产类型(27 种字段里有 11 种进不了 16 种白名单)。必须出声。
-      { id: 'fld_owner', name: '负责人', type: 'person', order: 4, property: { multiple: false } },
+      // F7 之后 person / rating 是**保真**类型(自洽:值域由自己的 property 定,不指向外表)。
+      // property 仍走白名单:person 只留 limitSingleRecord,fixture 里的 `multiple` 要被丢掉。
+      { id: 'fld_owner', name: '负责人', type: 'person', order: 4, property: { multiple: false, limitSingleRecord: true } },
       { id: 'fld_score', name: '评分', type: 'rating', order: 5, property: { max: 5 } },
+      // button 仍然装不下:property 里是动作配置(收件人 userId、目标),搬到别的库要么悬空
+      // 要么误发 —— 必须继续降级并出声。
+      {
+        id: 'fld_button', name: '通知', type: 'button', order: 6,
+        property: { label: '催一下', actionType: 'send_notification', actionConfig: { userIds: ['user_leak_probe'] } },
+      },
     ],
     views: [
       {
@@ -336,7 +369,7 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
     // link 字段依赖源库另一张表 → 降级成文本并给人话说明
     expect(created.body.data.warnings.join('\n')).toContain('关联客户')
     const orders = template.sheets.find((sheet: any) => sheet.name === '订单')
-    expect(orders.fields.map((f: any) => f.name)).toEqual(['订单号', '状态', '金额', '关联客户', '负责人', '评分'])
+    expect(orders.fields.map((f: any) => f.name)).toEqual(['订单号', '状态', '金额', '关联客户', '负责人', '评分', '通知'])
     expect(orders.fields.find((f: any) => f.name === '关联客户').type).toBe('string')
     // 生产形状 {value,color} 的下拉选项必须原样存下来(值是结构,不是记录值),颜色也保住
     expect(orders.fields.find((f: any) => f.name === '状态').options).toEqual(['待处理', '已完成'])
@@ -344,14 +377,19 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
       { value: '待处理', color: '#f97316' },
       { value: '已完成' },
     ])
-    // 白名单外的类型(person/rating)降级成文本,并且**出声**
-    expect(orders.fields.find((f: any) => f.name === '负责人').type).toBe('string')
-    expect(orders.fields.find((f: any) => f.name === '评分').type).toBe('string')
+    // F7 类型保真:person / rating 是自洽类型 —— 原样保留,且**不再**出现「已转为文本列」
+    expect(orders.fields.find((f: any) => f.name === '负责人').type).toBe('person')
+    expect(orders.fields.find((f: any) => f.name === '评分').type).toBe('rating')
+    expect(orders.fields.find((f: any) => f.name === '评分').property).toEqual({ max: 5 })
+    // 白名单外的 property 键照丢:person 只留 limitSingleRecord
+    expect(orders.fields.find((f: any) => f.name === '负责人').property).toEqual({ limitSingleRecord: true })
     const warningText = created.body.data.warnings.join('\n')
-    expect(warningText).toContain('负责人')
-    expect(warningText).toContain('person')
-    expect(warningText).toContain('评分')
-    expect(warningText).toContain('rating')
+    expect(warningText).not.toContain('负责人')
+    expect(warningText).not.toContain('评分')
+    // button 仍然装不下 —— 降级成文本并出声
+    expect(orders.fields.find((f: any) => f.name === '通知').type).toBe('string')
+    expect(warningText).toContain('通知')
+    expect(warningText).toContain('button')
     // 视图结构位按局部 id 重挂
     const board = orders.views.find((v: any) => v.name === '状态看板')
     expect(board.groupByFieldId).toBe(orders.fields[1].id)
@@ -360,7 +398,7 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
     expect(store.sqlLog.filter((entry) => entry.sql.includes('meta_records'))).toEqual([])
     // VALUES-FREE 2:落库 JSON 里没有源库 id、没有 defaultValue 这类值、没有外表指针
     const persisted = JSON.stringify(store.customTemplates[0].definition)
-    for (const leak of ['sheet_orders', 'fld_title', 'fld_status', 'viw_grid', 'sheet_customers_in_source_db', '8888', 'defaultValue', 'foreignSheetId', 'multiple']) {
+    for (const leak of ['sheet_orders', 'fld_title', 'fld_status', 'viw_grid', 'sheet_customers_in_source_db', '8888', 'defaultValue', 'foreignSheetId', 'multiple', 'user_leak_probe', 'actionConfig']) {
       expect(persisted).not.toContain(leak)
     }
     // 白名单保留了真正的结构位
@@ -380,8 +418,11 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
     expect(installed.status).toBe(201)
     expect(installed.body.data.base.name).toBe('九月订单')
     expect(installed.body.data.fields.map((f: any) => f.name)).toEqual(
-      expect.arrayContaining(['订单号', '状态', '金额', '关联客户', '负责人', '评分']),
+      expect.arrayContaining(['订单号', '状态', '金额', '关联客户', '负责人', '评分', '通知']),
     )
+    // 装出来的表真的带着保真类型(不是模板 JSON 里写着、落库又变回文本)
+    const ownerField = store.fields.find((f: any) => f.name === '负责人' && f.sheet_id !== 'sheet_orders') as any
+    expect(ownerField.type).toBe('person')
     // 装出来的表:下拉选项 + 颜色都在(provisioning 按 value 把颜色对回去)
     const statusField = store.fields.find((f: any) => f.name === '状态' && f.sheet_id !== 'sheet_orders') as any
     expect(statusField.property.options).toEqual([
@@ -602,6 +643,260 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
       .post(`/api/multitable/templates/${sharedId}/install`)
       .send({ baseName: '同事的库' })
     expect(installShared.status).toBe(201)
+  })
+
+  // ── F7「从表一键存为模板」:sheetIds / fieldIds 两个收窄选择器 ──────────────
+
+  it('F7-1: sheetIds 只留点名的那张数据表 —— 同 Base 的另一张表一个字段都不进模板', async () => {
+    const store = createStore({ baseSheets: OPS_SHEETS })
+    const { app } = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(app)
+
+    const created = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '只存成本表', sheetIds: ['sheet_secret'] })
+    expect(created.status).toBe(201)
+    const sheets = created.body.data.template.sheets
+    expect(sheets.map((sheet: any) => sheet.name)).toEqual(['内部成本'])
+    // 没点名的那张表连字段名都不许出现在模板里
+    const persisted = JSON.stringify(store.customTemplates[0].definition)
+    for (const leak of ['订单', '订单号', '状态', '关联客户']) {
+      expect(persisted).not.toContain(leak)
+    }
+    // 收窄不等于放宽:整轮 SQL 依然一次都不碰 meta_records
+    expect(store.sqlLog.filter((entry) => entry.sql.includes('meta_records'))).toEqual([])
+    // 且授权闸照跑(非管理员会话会去查 spreadsheet_permissions);这里是管理员,
+    // 只断言可见性过滤器没有被 sheetIds 顶掉 —— 见下面 F7-5 的 403 用例。
+  })
+
+  it('F7-1b: Base 里有 51 张表时,点名第 51 张也存得下 —— 证明 sheetIds 下推进了 SQL 的 WHERE(不是 LIMIT 50 之后再过滤)', async () => {
+    // 51 张表,按 created_at(= 插入顺序)排最后一张是 sheet_51。路由那条 SQL 是
+    // `... ORDER BY created_at ASC LIMIT 50`:过滤若发生在 LIMIT 之后,sheet_51 早被截掉,
+    // 结果会是「一张可读表都没有」→ 404「Base not found」,把用户点名的表说成不存在。
+    const many: SeedSheet[] = Array.from({ length: 51 }, (_, index) => ({
+      id: `sheet_${index + 1}`,
+      name: `表${index + 1}`,
+      fields: [{ id: `fld_${index + 1}`, name: `列${index + 1}`, type: 'string', order: 0 }],
+      views: [{ id: `viw_${index + 1}`, name: '表格', type: 'grid' }],
+    }))
+    const store = createStore({ baseSheets: many })
+    const { app } = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(app)
+
+    const created = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '第 51 张', sheetIds: ['sheet_51'] })
+    expect(created.status).toBe(201)
+    expect(created.body.data.template.sheets.map((sheet: any) => sheet.name)).toEqual(['表51'])
+    // 下推的证据:发给 meta_sheets 的那条 SQL 自己带着 id = ANY($2::text[]) 与这份参数
+    const sheetQuery = store.sqlLog.find((entry) => entry.sql.includes('FROM meta_sheets') && entry.sql.includes('WHERE base_id = $1'))
+    expect(sheetQuery?.sql).toContain('id = ANY($2::text[])')
+    expect(sheetQuery?.params[1]).toEqual(['sheet_51'])
+  })
+
+  it('F7-2: 跨 Base 的 sheetId 一张都匹配不到 —— 回 404 且响应里不泄漏那张表的存在', async () => {
+    const store = createStore({
+      baseSheets: OPS_SHEETS,
+      otherBaseSheets: [{
+        id: 'sheet_other_base',
+        name: '别人库里的表',
+        fields: [{ id: 'fld_other', name: '别人的列', type: 'string', order: 0 }],
+        views: [{ id: 'viw_other', name: '表格', type: 'grid' }],
+      }],
+    })
+    const { app } = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(app)
+
+    const created = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '越界', sheetIds: ['sheet_other_base'] })
+    expect(created.status).toBe(404)
+    expect(created.body.error.code).toBe('NOT_FOUND')
+    const body = JSON.stringify(created.body)
+    expect(body).not.toContain('别人库里的表')
+    expect(body).not.toContain('别人的列')
+    expect(body).not.toContain('sheet_other_base')
+    expect(store.customTemplates).toHaveLength(0)
+
+    // 同一批里混进一个跨 Base 的 id:只会拿到本 Base 的那张,越界那张不会被顺带捎上
+    const mixed = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '混合', sheetIds: ['sheet_orders', 'sheet_other_base'] })
+    expect(mixed.status).toBe(201)
+    expect(mixed.body.data.template.sheets.map((sheet: any) => sheet.name)).toEqual(['订单'])
+    expect(JSON.stringify(store.customTemplates[0].definition)).not.toContain('别人的列')
+  })
+
+  it('F7-3: fieldIds 在抽取之前做交集 —— 被剔掉的字段不会在模板视图里留下悬空引用,也带不进额外字段', async () => {
+    const store = createStore({ baseSheets: OPS_SHEETS })
+    const { app } = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(app)
+
+    const created = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({
+        baseId: SOURCE_BASE_ID,
+        name: '只留两列',
+        sheetIds: ['sheet_orders'],
+        // 勾掉 fld_status(看板的 groupBy)与 fld_amount(网格的 hiddenFieldIds);
+        // 再塞一个**别的表**的 fieldId,证明 fieldIds 只做交集、带不进额外字段。
+        fieldIds: ['fld_title', 'fld_owner', 'fld_cost'],
+      })
+    expect(created.status).toBe(201)
+    const orders = created.body.data.template.sheets[0]
+    expect(orders.name).toBe('订单')
+    expect(orders.fields.map((f: any) => f.name)).toEqual(['订单号', '负责人'])
+    // 别的表的 fieldId 没有把「成本」带进来(也没有把那张表带进来)
+    expect(created.body.data.template.sheets).toHaveLength(1)
+    expect(JSON.stringify(created.body.data.template)).not.toContain('成本')
+
+    // 视图里对被剔掉字段的引用整条消失 —— 不是留一个指向已删字段的局部 id
+    const board = orders.views.find((v: any) => v.name === '状态看板')
+    expect(board.groupByFieldId).toBeUndefined()
+    const grid = orders.views.find((v: any) => v.name === '全部订单')
+    expect(grid.hiddenFieldIds).toBeUndefined()
+    // 留下来的那个 titleFieldId 仍然指向真实存在的局部字段
+    expect(grid.titleFieldId).toBe(orders.fields[0].id)
+    const localFieldIds = new Set(orders.fields.map((f: any) => f.id))
+    for (const view of orders.views) {
+      for (const ref of [view.groupByFieldId, view.dateFieldId, view.titleFieldId, ...(view.hiddenFieldIds ?? [])]) {
+        if (ref !== undefined) expect(localFieldIds.has(ref)).toBe(true)
+      }
+    }
+  })
+
+  it('F7-4: 过滤后一个字段都不剩 → 400 VALIDATION_ERROR,不落一张空模板;超限也是 400 而不是静默截断', async () => {
+    const store = createStore({ baseSheets: OPS_SHEETS })
+    const { app } = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(app)
+
+    const empty = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '空模板', sheetIds: ['sheet_orders'], fieldIds: ['fld_不存在'] })
+    expect(empty.status).toBe(400)
+    expect(empty.body.error.code).toBe('VALIDATION_ERROR')
+    expect(store.customTemplates).toHaveLength(0)
+
+    const tooManySheets = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({
+        baseId: SOURCE_BASE_ID, name: '表超限',
+        sheetIds: Array.from({ length: 51 }, (_, index) => `sheet_${index}`),
+      })
+    expect(tooManySheets.status).toBe(400)
+    expect(tooManySheets.body.error.code).toBe('VALIDATION_ERROR')
+
+    const tooManyFields = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({
+        baseId: SOURCE_BASE_ID, name: '字段超限',
+        fieldIds: Array.from({ length: 501 }, (_, index) => `fld_${index}`),
+      })
+    expect(tooManyFields.status).toBe(400)
+    expect(tooManyFields.body.error.code).toBe('VALIDATION_ERROR')
+    expect(store.customTemplates).toHaveLength(0)
+  })
+
+  it('F7-5: 带 sheetIds/fieldIds 的请求照样过授权与租户闸 —— 只有 multitable:write 仍 403;x-tenant-id 兼容头仍拿不到他租户的东西', async () => {
+    const store = createStore({ baseSheets: OPS_SHEETS })
+    const writer = await createApp(store.handler, { perms: WRITER_PERMS, tenantId: 'tenant_a' })
+    pinned.setApp(writer.app)
+    const refused = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '越权', sheetIds: ['sheet_orders'], fieldIds: ['fld_title'] })
+    expect(refused.status).toBe(403)
+    expect(store.customTemplates).toHaveLength(0)
+
+    // 读不到的表:即使被 sheetIds 明确点名,也不会因为「点了名」就进模板
+    const blocked = createStore({
+      baseSheets: OPS_SHEETS,
+      sheetPermissions: [{ sheet_id: 'sheet_secret', perm_code: 'sheet:no-access' }],
+    })
+    const appBlocked = await createApp(blocked.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(appBlocked.app)
+    const named = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '点名读不到的表', sheetIds: ['sheet_secret'] })
+    expect(named.status).toBe(404)
+    expect(JSON.stringify(named.body)).not.toContain('内部成本')
+    expect(blocked.customTemplates).toHaveLength(0)
+
+    // 无租户声明 + req.user.tenantId 被兼容头填成 tenant_a:建出来的模板落在 NULL 租户,
+    // tenant_a 看不到(租户只认 req.authenticatedTenantId)。
+    const spoofed = await createApp(store.handler, { userTenantId: 'tenant_a', userId: 'user_spoof' })
+    pinned.setApp(spoofed.app)
+    const mine = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '无租户表模板', sheetIds: ['sheet_orders'] })
+    expect(mine.status).toBe(201)
+    const appA = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(appA.app)
+    const listedA = await request(pinned.url()).get('/api/multitable/templates')
+    expect(listedA.body.data.templates.some((tpl: any) => tpl.id === mine.body.data.template.id)).toBe(false)
+  })
+
+  it('F7-6: 类型保真 —— 13 种自洽类型原样存进模板且不出「已转为文本列」;property 只留结构键', async () => {
+    const store = createStore({
+      baseSheets: [{
+        id: 'sheet_types',
+        name: '类型表',
+        fields: [
+          { id: 'f_person', name: '负责人', type: 'person', order: 0, property: { limitSingleRecord: true, restrictToMemberGroupIds: ['grp_source_tenant'] } },
+          { id: 'f_currency', name: '金额', type: 'currency', order: 1, property: { code: 'CNY', decimals: 2, defaultValue: 99 } },
+          { id: 'f_percent', name: '完成度', type: 'percent', order: 2, property: { decimals: 1 } },
+          { id: 'f_rating', name: '评分', type: 'rating', order: 3, property: { max: 10 } },
+          { id: 'f_duration', name: '工时', type: 'duration', order: 4, property: { durationFormat: 'h:mm' } },
+          { id: 'f_url', name: '主页', type: 'url', order: 5 },
+          { id: 'f_email', name: '邮箱', type: 'email', order: 6 },
+          { id: 'f_phone', name: '电话', type: 'phone', order: 7 },
+          { id: 'f_auto', name: '编号', type: 'autoNumber', order: 8, property: { prefix: 'SO-', digits: 4, start: 7, startAt: 7, readOnly: true } },
+          { id: 'f_ctime', name: '创建时间', type: 'createdTime', order: 9, property: { dateFormat: 'YYYY-MM-DD', readOnly: true } },
+          { id: 'f_mtime', name: '修改时间', type: 'modifiedTime', order: 10, property: { dateFormat: 'YYYY-MM-DD', readOnly: true } },
+          { id: 'f_cby', name: '创建人', type: 'createdBy', order: 11, property: { readOnly: true } },
+          { id: 'f_mby', name: '修改人', type: 'modifiedBy', order: 12, property: { readOnly: true } },
+        ],
+        views: [{ id: 'viw_types', name: '表格', type: 'grid' }],
+      }],
+    })
+    const { app } = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(app)
+
+    const created = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '类型保真' })
+    expect(created.status).toBe(201)
+    const fields = created.body.data.template.sheets[0].fields
+    const typeByName = Object.fromEntries(fields.map((f: any) => [f.name, f.type]))
+    expect(typeByName).toEqual({
+      负责人: 'person', 金额: 'currency', 完成度: 'percent', 评分: 'rating', 工时: 'duration',
+      主页: 'url', 邮箱: 'email', 电话: 'phone', 编号: 'autoNumber',
+      创建时间: 'createdTime', 修改时间: 'modifiedTime', 创建人: 'createdBy', 修改人: 'modifiedBy',
+    })
+    // 一条降级 warning 都不该有
+    expect(created.body.data.warnings).toEqual([])
+
+    const propertyByName = Object.fromEntries(fields.map((f: any) => [f.name, f.property]))
+    expect(propertyByName['金额']).toEqual({ code: 'CNY', decimals: 2 })
+    expect(propertyByName['评分']).toEqual({ max: 10 })
+    expect(propertyByName['工时']).toEqual({ durationFormat: 'h:mm' })
+    expect(propertyByName['编号']).toEqual({ prefix: 'SO-', digits: 4, start: 7, startAt: 7 })
+    // 白名单外一律丢:源租户的成员组 id、默认值、抄来的 readOnly 都不进模板
+    expect(propertyByName['负责人']).toEqual({ limitSingleRecord: true })
+    const persisted = JSON.stringify(store.customTemplates[0].definition)
+    expect(persisted).not.toContain('grp_source_tenant')
+    expect(persisted).not.toContain('defaultValue')
+    expect(persisted).not.toContain('readOnly')
+
+    // 装出来的表真的是这些类型(autoNumber 的序列行是懒建的,装表这一步不需要它)
+    const installed = await request(pinned.url())
+      .post(`/api/multitable/templates/${created.body.data.template.id}/install`)
+      .send({ baseName: '保真库' })
+    expect(installed.status).toBe(201)
+    const installedTypes = Object.fromEntries(installed.body.data.fields.map((f: any) => [f.name, f.type]))
+    expect(installedTypes['负责人']).toBe('person')
+    expect(installedTypes['编号']).toBe('autoNumber')
+    expect(installedTypes['评分']).toBe('rating')
+    expect(store.sqlLog.filter((entry) => entry.sql.includes('meta_field_auto_number_sequences'))).toEqual([])
   })
 
   it('C9: 历史脏数据里的 {id,name} 老形状仍能兼容读出选项(生产形状是 {value,color})', async () => {

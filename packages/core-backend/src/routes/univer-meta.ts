@@ -7413,6 +7413,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    * (filterReadableSheetRowsForAccess 对 isAdminRole 直接全量通过),他把带「内部成本」表的
    * Base 存成模板后,若默认全租户可见,表名与全部字段名就绕过表级权限漏给了每个只读用户。
    * 要当组织资产用,建模板的人显式传 visibility:'tenant'(前端是一个默认不勾的复选框)。
+   *
+   * 粒度(F7「从表一键存为模板」):可选的 `sheetIds` / `fieldIds` 把范围**收窄**到用户在工作台
+   * 里点名的那张数据表与勾选的那几列。两者都只做交集,一条可见性/授权闸都不替换 ——
+   * 传了也照样过 filterVisibleSheetRows → filterReadableSheetRowsForAccess,读不到的表/字段
+   * 不会因为被点名就进模板。省略两者 = 改动前的整 Base 行为,逐字不变。
    */
   router.post('/templates', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
@@ -7425,12 +7430,26 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       workspaceId: z.string().min(1).max(100).optional(),
       // 省略 = private。只有显式的 'tenant' 才会把模板发布给整个租户。
       visibility: z.enum(['private', 'tenant']).optional(),
+      // F7「从表一键存为模板」:两个**只收窄不放宽**的可选选择器,省略 = 今天的整 Base 行为。
+      // 上限与既有口径同量(表 50 = 下面那条 SQL 的 LIMIT 50;字段 500 = 字段读上限),
+      // 超限由 zod 直接回 400 而不是静默截断(截断会让用户以为存全了)。
+      sheetIds: z.array(z.string().min(1).max(50)).max(50).optional(),
+      fieldIds: z.array(z.string().min(1).max(100)).max(500).optional(),
     })
     const parsed = schema.safeParse(req.body ?? {})
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
     const baseId = parsed.data.baseId.trim()
+    // null = 不限(整 Base,= 改动前的行为)。这两个选择器只能把范围**收窄**:
+    // 它们不参与任何可见性判定,过滤器 filterVisibleSheetRows → filterReadableSheetRowsForAccess
+    // 一个都不少地照跑,所以「给了 fieldIds 就跳过可读性过滤」这条捷径在这里不存在。
+    const requestedSheetIds = parsed.data.sheetIds
+      ? Array.from(new Set(parsed.data.sheetIds.map((id) => id.trim()).filter((id) => id.length > 0)))
+      : null
+    const requestedFieldIds = parsed.data.fieldIds
+      ? new Set(parsed.data.fieldIds.map((id) => id.trim()).filter((id) => id.length > 0))
+      : null
 
     try {
       const pool = poolManager.get()
@@ -7450,13 +7469,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
       }
 
+      // sheetIds **下推进 WHERE**,不能在 LIMIT 之后过滤:Base 里表多于 50 张时,按 created_at
+      // 排在第 51 位的表会先被 LIMIT 截掉,事后再过滤等于把用户明确点名的那张表误判成「不存在」
+      // (回 404)。收窄语义由 `base_id = $1` 保住:别的 Base / 别的租户的 sheetId 一张都匹配不到。
       const sheetResult = await pool.query(
         `SELECT id, base_id, name, description
          FROM meta_sheets
          WHERE base_id = $1 AND deleted_at IS NULL
+           AND ($2::text[] IS NULL OR id = ANY($2::text[]))
          ORDER BY created_at ASC
          LIMIT 50`,
-        [baseId],
+        [baseId, requestedSheetIds],
       )
       const visibleSheetRows = filterVisibleSheetRows(((sheetResult as any).rows ?? []) as any[])
       const readableSheetRows = await filterReadableSheetRowsForAccess(
@@ -7483,9 +7506,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         [sheetIds],
       )
 
+      // fieldIds 的交集必须在 extractTemplateSheets **之前**做:抽取器只把 `fieldLocalIds` 里有的
+      // 源字段映射进视图的 groupBy/date/title/hidden(custom-template-store.ts),所以被剔掉的字段
+      // 在模板视图里自动消失、不留悬空引用。挪到抽取之后过滤,视图里就会留下指向已删字段的局部 id。
+      // 只做交集:传进来的 id 若不属于可读表的字段,什么也拿不到 —— 这里永远不可能放宽读面。
+      const fieldRows = ((fieldResult as any).rows ?? []) as any[]
+      const scopedFieldRows = requestedFieldIds
+        ? fieldRows.filter((row: any) => requestedFieldIds.has(String(row.id)))
+        : fieldRows
+
       const extracted = extractTemplateSheets({
         sheets: readableSheetRows.map((row) => ({ id: row.id, name: row.name, description: row.description })),
-        fields: ((fieldResult as any).rows ?? []) as any[],
+        fields: scopedFieldRows,
         views: ((viewResult as any).rows ?? []) as any[],
       })
       if (extracted.sheets.length === 0) {
@@ -7515,6 +7547,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         ok: true,
         userId: access.userId,
         sheetCount: extracted.sheets.length,
+        // 只记数量,不记 id / 名字 —— 日志面不是元数据读面。
+        scopedSheets: requestedSheetIds?.length ?? null,
+        scopedFields: requestedFieldIds?.size ?? null,
         visibility: template.visibility,
       })
       return res.status(201).json({ ok: true, data: { template, warnings: extracted.warnings } })

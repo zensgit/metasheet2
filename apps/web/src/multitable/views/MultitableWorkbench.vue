@@ -47,6 +47,7 @@
       <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.workflow" /></el-icon> {{ wb('toolbar.workflow', isZh) }}</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
       <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
+      <button v-if="caps.canManageFields.value && workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="save-sheet-as-template" @click="openSaveSheetAsTemplate"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('saveTpl.open', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
@@ -97,6 +98,93 @@
           {{ wb('tpl.more', isZh) }}
         </router-link>
       </footer>
+    </div>
+    <!--
+      F7「把当前数据表存为模板」。作用于**当前激活的数据表**,提交
+      { baseId, sheetIds: [activeSheetId], fieldIds: 勾选的那几个 } —— 服务端把这两个选择器
+      当成收窄参数下推,可读性/授权闸一条不少。这里的显隐只是 UX,门在服务端
+      (univer-meta.ts 的 canManageFields 判定)。
+    -->
+    <div v-if="showSaveSheetAsTemplate" class="mt-save-tpl__overlay">
+      <div class="mt-save-tpl" role="dialog" aria-modal="true" data-testid="save-sheet-as-template-dialog">
+        <header class="mt-save-tpl__header">
+          <strong>{{ wb('saveTpl.title', isZh) }}</strong>
+          <button class="mt-save-tpl__close" data-action="save-sheet-as-template-close" @click="closeSaveSheetAsTemplate">&times;</button>
+        </header>
+        <p class="mt-save-tpl__hint">{{ wb('saveTpl.hint', isZh) }}</p>
+        <template v-if="!saveTemplateResult">
+          <label class="mt-save-tpl__row">
+            <span class="mt-save-tpl__label">{{ wb('saveTpl.nameLabel', isZh) }}</span>
+            <input
+              v-model="saveTemplateName"
+              class="mt-save-tpl__input"
+              type="text"
+              maxlength="255"
+              data-testid="save-sheet-as-template-name"
+            />
+          </label>
+          <div class="mt-save-tpl__fields">
+            <div class="mt-save-tpl__fields-head">
+              <span class="mt-save-tpl__label">{{ wb('saveTpl.fieldsLabel', isZh) }}</span>
+              <span class="mt-save-tpl__count" data-testid="save-sheet-as-template-count">{{ saveTemplateFieldIds.length }} / {{ saveTemplateFieldChoices.length }}</span>
+              <button class="mt-save-tpl__link" data-action="save-sheet-as-template-select-all" @click="setAllSaveTemplateFields(true)">{{ wb('saveTpl.selectAll', isZh) }}</button>
+              <button class="mt-save-tpl__link" data-action="save-sheet-as-template-select-none" @click="setAllSaveTemplateFields(false)">{{ wb('saveTpl.selectNone', isZh) }}</button>
+            </div>
+            <ul class="mt-save-tpl__list">
+              <li v-for="field in saveTemplateFieldChoices" :key="field.id" class="mt-save-tpl__item">
+                <label>
+                  <input
+                    type="checkbox"
+                    :data-save-template-field="field.id"
+                    :checked="saveTemplateFieldIds.includes(field.id)"
+                    @change="toggleSaveTemplateField(field.id)"
+                  />
+                  <span class="mt-save-tpl__item-name">{{ field.name }}</span>
+                  <em class="mt-save-tpl__item-type">{{ field.type }}</em>
+                </label>
+              </li>
+            </ul>
+          </div>
+          <label class="mt-save-tpl__share">
+            <input v-model="saveTemplateShare" type="checkbox" data-testid="save-sheet-as-template-share" />
+            <span>{{ wb('saveTpl.shareLabel', isZh) }}</span>
+          </label>
+          <p class="mt-save-tpl__hint">{{ wb('saveTpl.shareHint', isZh) }}</p>
+          <p v-if="saveTemplateError" class="mt-save-tpl__error" data-testid="save-sheet-as-template-error">{{ saveTemplateError }}</p>
+          <footer class="mt-save-tpl__footer">
+            <MtButton data-action="save-sheet-as-template-cancel" @click="closeSaveSheetAsTemplate">{{ wb('saveTpl.cancel', isZh) }}</MtButton>
+            <MtButton
+              variant="primary"
+              data-action="save-sheet-as-template-submit"
+              :disabled="saveTemplateSubmitting"
+              @click="onSaveSheetAsTemplate"
+            >
+              {{ saveTemplateSubmitting ? wb('saveTpl.saving', isZh) : wb('saveTpl.submit', isZh) }}
+            </MtButton>
+          </footer>
+        </template>
+        <div v-else class="mt-save-tpl__result" data-testid="save-sheet-as-template-result">
+          <strong>{{ wb('saveTpl.successTitle', isZh) }}</strong>
+          <span class="mt-save-tpl__result-name">{{ saveTemplateResult.template.name }}</span>
+          <template v-if="saveTemplateResult.warnings.length > 0">
+            <p class="mt-save-tpl__label">{{ wb('saveTpl.warningsTitle', isZh) }}</p>
+            <ul class="mt-save-tpl__warnings" data-testid="save-sheet-as-template-warnings">
+              <li v-for="(warning, index) in saveTemplateResult.warnings" :key="index">{{ warning }}</li>
+            </ul>
+          </template>
+          <footer class="mt-save-tpl__footer">
+            <router-link
+              class="mt-save-tpl__link"
+              :to="{ name: TemplateCenterRouteName }"
+              data-testid="save-sheet-as-template-center-link"
+              @click="closeSaveSheetAsTemplate"
+            >
+              {{ wb('saveTpl.openCenter', isZh) }}
+            </router-link>
+            <MtButton data-action="save-sheet-as-template-done" @click="closeSaveSheetAsTemplate">{{ wb('saveTpl.close', isZh) }}</MtButton>
+          </footer>
+        </div>
+      </div>
     </div>
     <div
       v-if="capabilityOriginNotice"
@@ -679,6 +767,7 @@ import type {
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
   MetaTemplate,
+  CreateTemplateFromBaseResult,
   PersonSummary,
   RowDensity,
 } from '../types'
@@ -1259,6 +1348,16 @@ watch(isRailDrawerOpen, (open) => {
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
+// F7「把当前数据表存为模板」对话框状态。字段清单直接用 workbench.fields(已经在手上,零新请求),
+// 默认全勾。注意 fieldIds 只是**收窄**参数:它是经视图/权限过滤后的字段集,不是权威 ——
+// 服务端拿到它只做交集,读不到的字段不会因为出现在这个清单里就进模板。
+const showSaveSheetAsTemplate = ref(false)
+const saveTemplateName = ref('')
+const saveTemplateShare = ref(false)
+const saveTemplateFieldIds = ref<string[]>([])
+const saveTemplateSubmitting = ref(false)
+const saveTemplateError = ref<string | null>(null)
+const saveTemplateResult = ref<CreateTemplateFromBaseResult | null>(null)
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const showTrash = ref(false)
@@ -3872,6 +3971,79 @@ async function loadTemplateLibrary() {
   }
 }
 
+const saveTemplateFieldChoices = computed(() =>
+  workbench.fields.value.map((field) => ({ id: field.id, name: field.name, type: field.type })),
+)
+const activeSheetName = computed(() => {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return ''
+  return workbench.sheets.value.find((sheet) => sheet.id === sheetId)?.name ?? ''
+})
+
+function openSaveSheetAsTemplate(): void {
+  // 与工具栏的 v-if 同档再判一次:显隐是 UX,这里是本地的第二道;真正的门在服务端。
+  if (!caps.canManageFields.value || !workbench.activeSheetId.value) return
+  saveTemplateResult.value = null
+  saveTemplateError.value = null
+  saveTemplateSubmitting.value = false
+  // 默认不勾「共享给本租户」——模板带着表名与全部字段名,默认全租户可见等于绕过表级权限
+  // 的元数据读面(和服务端 normalizeCustomTemplateVisibility 的默认同向)。
+  saveTemplateShare.value = false
+  // 模板名默认取**当前数据表名**(不是工作区名)——入口在工作台,心智是「存这张表」。
+  saveTemplateName.value = activeSheetName.value
+  saveTemplateFieldIds.value = saveTemplateFieldChoices.value.map((field) => field.id)
+  showSaveSheetAsTemplate.value = true
+}
+
+function closeSaveSheetAsTemplate(): void {
+  showSaveSheetAsTemplate.value = false
+}
+
+function toggleSaveTemplateField(fieldId: string): void {
+  const next = new Set(saveTemplateFieldIds.value)
+  if (next.has(fieldId)) next.delete(fieldId)
+  else next.add(fieldId)
+  // 保持与字段清单同序,提交出去的 fieldIds 顺序稳定(便于用例逐字比对 payload)。
+  saveTemplateFieldIds.value = saveTemplateFieldChoices.value
+    .map((field) => field.id)
+    .filter((id) => next.has(id))
+}
+
+function setAllSaveTemplateFields(selected: boolean): void {
+  saveTemplateFieldIds.value = selected ? saveTemplateFieldChoices.value.map((field) => field.id) : []
+}
+
+async function onSaveSheetAsTemplate(): Promise<void> {
+  const baseId = activeBaseId.value
+  const sheetId = workbench.activeSheetId.value
+  if (!baseId || !sheetId) return
+  const name = saveTemplateName.value.trim()
+  if (!name) {
+    saveTemplateError.value = wb('saveTpl.errorNoName', isZh.value)
+    return
+  }
+  if (saveTemplateFieldIds.value.length === 0) {
+    // 零字段服务端也会 400,这里只是不白跑一趟(不是把服务端那道校验搬到前端)。
+    saveTemplateError.value = wb('saveTpl.errorNoFields', isZh.value)
+    return
+  }
+  saveTemplateSubmitting.value = true
+  saveTemplateError.value = null
+  try {
+    saveTemplateResult.value = await workbench.client.createTemplateFromBase({
+      baseId,
+      name,
+      sheetIds: [sheetId],
+      fieldIds: [...saveTemplateFieldIds.value],
+      visibility: saveTemplateShare.value ? 'tenant' : 'private',
+    })
+  } catch (e: any) {
+    saveTemplateError.value = e?.message ?? wb('saveTpl.failed', isZh.value)
+  } finally {
+    saveTemplateSubmitting.value = false
+  }
+}
+
 async function openTemplateLibrary() {
   if (!canCreateBasesAndSheets.value) {
     showError(wb('toast.templateInstallBlocked', isZh.value))
@@ -5225,6 +5397,30 @@ defineExpose({
 .mt-template-library__footer { margin-top: 12px; display: flex; justify-content: flex-end; }
 .mt-template-library__more { font-size: 12px; color: #2563eb; text-decoration: none; }
 .mt-template-library__more:hover { text-decoration: underline; }
+.mt-save-tpl__overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
+.mt-save-tpl { background: #fff; border-radius: 12px; padding: 18px 20px; width: min(520px, 92vw); max-height: 82vh; overflow: auto; box-shadow: 0 12px 32px rgba(15,23,42,.18); display: flex; flex-direction: column; gap: 10px; }
+.mt-save-tpl__header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.mt-save-tpl__header strong { font-size: 15px; color: #0f172a; }
+.mt-save-tpl__close { border: none; background: transparent; color: #64748b; font-size: 20px; line-height: 1; cursor: pointer; }
+.mt-save-tpl__hint { margin: 0; font-size: 12px; color: #64748b; }
+.mt-save-tpl__label { font-size: 12px; color: #334155; font-weight: 600; }
+.mt-save-tpl__row { display: flex; flex-direction: column; gap: 4px; }
+.mt-save-tpl__input { border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+.mt-save-tpl__fields { display: flex; flex-direction: column; gap: 6px; }
+.mt-save-tpl__fields-head { display: flex; align-items: center; gap: 10px; }
+.mt-save-tpl__count { font-size: 12px; color: #64748b; margin-right: auto; }
+.mt-save-tpl__link { border: none; background: transparent; color: #2563eb; font-size: 12px; cursor: pointer; text-decoration: none; padding: 0; }
+.mt-save-tpl__link:hover { text-decoration: underline; }
+.mt-save-tpl__list { list-style: none; margin: 0; padding: 6px 8px; max-height: 240px; overflow: auto; border: 1px solid #e2e8f0; border-radius: 8px; display: flex; flex-direction: column; gap: 2px; }
+.mt-save-tpl__item label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; cursor: pointer; }
+.mt-save-tpl__item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-save-tpl__item-type { font-size: 11px; color: #94a3b8; font-style: normal; }
+.mt-save-tpl__share { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; }
+.mt-save-tpl__error { margin: 0; font-size: 12px; color: #b91c1c; }
+.mt-save-tpl__footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }
+.mt-save-tpl__result { display: flex; flex-direction: column; gap: 8px; }
+.mt-save-tpl__result-name { font-size: 13px; color: #0f172a; }
+.mt-save-tpl__warnings { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #92400e; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }
 .mt-workbench__shortcuts-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 15px; }
@@ -5233,7 +5429,7 @@ defineExpose({
 .mt-workbench__shortcut { display: flex; align-items: center; gap: 12px; font-size: 13px; }
 .mt-workbench__shortcut kbd { background: #f0f0f0; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-family: monospace; font-size: 12px; min-width: 80px; text-align: center; }
 @media print {
-  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-template-library, .mt-workbench__rail { display: none !important; }
+  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-save-tpl__overlay, .mt-template-library, .mt-workbench__rail { display: none !important; }
   .mt-workbench__content { overflow: visible !important; }
   .mt-workbench__main { overflow: visible !important; }
 }

@@ -1280,6 +1280,44 @@ describe('MultitableApiClient', () => {
     expect(after.templates[0]?.id).toBe('mtpl_1')
   })
 
+  // F7「从表一键存为模板」:工作台提交的是带 sheetIds/fieldIds 的收窄请求。这两个键必须
+  // **原样**落到 POST body 上 —— client 里任何一层「顺手清理/挑字段」的改写都会让服务端
+  // 退回整 Base 抽取(用户勾掉的列照样进模板),而组件级 spec 看不见 body。
+  it('createTemplateFromBase forwards sheetIds/fieldIds verbatim in the POST body', async () => {
+    const template = { id: 'mtpl_2', name: '订单', description: '', category: 'Custom', icon: 'T', color: '#111', sheets: [], custom: true, visibility: 'private' }
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [] } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { template, warnings: [] } }), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [template] } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listTemplates()
+    await client.createTemplateFromBase({
+      baseId: 'base_1',
+      name: '订单',
+      sheetIds: ['sheet_1'],
+      fieldIds: ['fld_a', 'fld_c'],
+      visibility: 'private',
+    })
+
+    expect(fetchFn.mock.calls[1]?.[0]).toBe('/api/multitable/templates')
+    const init = fetchFn.mock.calls[1]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    // 精确 deep-equal:少一个键、多一个键、或把数组摊平成字符串都要红
+    expect(JSON.parse(init.body as string)).toEqual({
+      baseId: 'base_1',
+      name: '订单',
+      sheetIds: ['sheet_1'],
+      fieldIds: ['fld_a', 'fld_c'],
+      visibility: 'private',
+    })
+
+    // 收窄请求同样要作废模板缓存,否则模板中心刷不出刚建的那张
+    const after = await client.listTemplates()
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(after.templates[0]?.id).toBe('mtpl_2')
+  })
+
   it('deleteTemplate DELETEs the encoded template id and invalidates the templates cache', async () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [{ id: 'mtpl with space' }] } }), { status: 200 }))

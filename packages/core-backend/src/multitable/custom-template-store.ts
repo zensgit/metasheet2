@@ -122,11 +122,48 @@ const SAFE_PROPERTY_KEYS_BY_TYPE: Record<string, string[]> = {
   barcode: [],
   qrcode: [],
   location: [],
+  // F7 类型保真新增的 13 种自洽类型。键名按**生产写侧**取(univer-meta.ts 的
+  // sanitizeFieldPropertyByType 与 MetaFieldManager 的 buildProperty),不按想当然:
+  // currency 是 {code,decimals} 不是 {symbol,precision};rating 是 {max};duration 是
+  // {durationFormat};autoNumber 走 normalizeAutoNumberProperty 的 {prefix,digits,start,startAt}。
+  // person 只留 limitSingleRecord —— restrictToMemberGroupIds 装的是**源租户**的成员组 id,
+  // 和 link 的外表指针同性质,搬到别的库必然悬空,所以白名单外一律丢。
+  // createdTime/modifiedTime 只留显示格式;createdBy/modifiedBy/url/email/phone 没有结构位。
+  // readOnly 一概不带:这 5 种系统字段的只读由 isSystemFieldType 按类型推(permission-derivation.ts),
+  // 不靠模板里抄来的一个布尔。
+  person: ['limitSingleRecord'],
+  currency: ['code', 'decimals'],
+  percent: ['decimals'],
+  rating: ['max'],
+  duration: ['durationFormat'],
+  url: [],
+  email: [],
+  phone: [],
+  autoNumber: ['prefix', 'digits', 'start', 'startAt'],
+  createdTime: ['dateFormat', 'timeFormat', 'format', 'timeZone'],
+  modifiedTime: ['dateFormat', 'timeFormat', 'format', 'timeZone'],
+  createdBy: [],
+  modifiedBy: [],
 }
 
+/**
+ * 模板装得下的字段类型。**自洽性**是唯一的入选标准:一个类型只有在它的结构完全由自己的
+ * property 描述得清、不指向源库里的别的表/字段/记录时,才能原样保真搬到一个新 Base 上。
+ *
+ * F7 在原来 16 种上补了 13 种(person / currency / percent / rating / duration / url / email /
+ * phone / autoNumber / createdTime / modifiedTime / createdBy / modifiedBy)——它们全都自洽:
+ * 值域由自己的 property 定,没有一个引用外表。autoNumber 也安全,新表的序列行是
+ * `INSERT ... ON CONFLICT` 懒建的(auto-number-service.ts),不需要模板预先带一行。
+ *
+ * 仍然**不在**这张表里的是 button(property 里装的是动作配置:收件人 userId、目标等,
+ * 跨租户搬过去要么悬空要么误发),以及 link/lookup/rollup/formula(见 DOWNGRADED_FIELD_TYPES)。
+ * 它们照旧降级成文本列并出声。
+ */
 const TEMPLATE_FIELD_TYPES = new Set<string>([
   'string', 'number', 'boolean', 'date', 'dateTime', 'formula', 'select', 'multiSelect',
   'link', 'lookup', 'rollup', 'attachment', 'barcode', 'qrcode', 'location', 'longText',
+  'person', 'currency', 'percent', 'rating', 'duration', 'url', 'email', 'phone',
+  'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy',
 ])
 
 function asText(value: unknown): string {
@@ -227,10 +264,10 @@ export function extractTemplateSheets(input: ExtractTemplateInput): ExtractTempl
       const property = asObject(fieldRow.property)
       let type: string
       if (!TEMPLATE_FIELD_TYPES.has(rawType)) {
-        // 生产字段类型联合有 27 种(univer-meta.ts 的 UniverMetaField['type']),模板系统
-        // (= provisioning 的 MultitableProvisioningFieldType)只装得下 16 种。person /
-        // rating / autoNumber / phone / currency 这些在真表里很常见 —— 静默降级会让用户
-        // 以为「结构存下来了」,所以这里必须出声,和 link/lookup 那条降级一个待遇。
+        // 生产字段类型联合有 30 种(univer-meta.ts 的 UniverMetaField['type']),模板系统
+        // (= provisioning 的 MultitableProvisioningFieldType)装得下其中 29 种。剩下的
+        // button 以及任何未来新增/插件写进来的类型走这条:静默降级会让用户以为「结构存
+        // 下来了」,所以必须出声,和 link/lookup 那条降级一个待遇。
         type = 'string'
         if (rawType) {
           warnings.push(
