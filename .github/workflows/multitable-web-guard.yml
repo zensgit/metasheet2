@@ -46,6 +46,12 @@ on:
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
+      # Field-manager option palette + lossless-retype table: both are pure modules the
+      # component imports, so a change there is invisible to the MetaFieldManager.vue path
+      # trigger and would run multitable-field-manager.spec.ts in no gate at all.
+      - 'apps/web/src/multitable/utils/select-option-palette.ts'
+      - 'apps/web/src/multitable/utils/field-retype.ts'
+      - 'apps/web/tests/multitable-field-manager.spec.ts'
       - 'apps/web/src/multitable/composables/useMultitableGrid.ts'
       - 'apps/web/src/multitable/composables/useTrash.ts'
       - 'apps/web/src/multitable/components/TrashModal.vue'
@@ -224,6 +230,15 @@ on:
       - 'apps/web/tests/multitable-workbench-bulk-delete.spec.ts'
       - 'apps/web/tests/multitable-workbench-drawer-button-wiring.spec.ts'
       - 'apps/web/tests/multitable-workbench-import-flow.spec.ts'
+      # Import -> create-missing-fields: the sentinel/placeholder plumbing lives in
+      # import/create-fields.ts + MetaImportModal.vue, and the WRITE gate (manage-fields re-check,
+      # name planning, placeholder rewrite) lives in MultitableWorkbench.vue. All three specs must
+      # fire when any of those change, or the fail-closed guards stop being exercised.
+      - 'apps/web/src/multitable/import/create-fields.ts'
+      - 'apps/web/src/multitable/components/MetaImportModal.vue'
+      - 'apps/web/src/multitable/utils/meta-import-labels.ts'
+      - 'apps/web/tests/multitable-workbench-import-create-fields.spec.ts'
+      - 'apps/web/tests/multitable-import-create-fields-plan.spec.ts'
       - 'apps/web/tests/multitable-workbench-manager-flow.spec.ts'
       - 'apps/web/tests/multitable-workbench-permission-wiring.spec.ts'
       - 'apps/web/tests/multitable-workbench-view.spec.ts'
@@ -305,6 +320,13 @@ on:
       - 'apps/web/tests/multitable-embed-route.spec.ts'
       - 'apps/web/tests/multitable-export-dialog.spec.ts'
       - 'apps/web/tests/multitable-field-config-i18n.spec.ts'
+      # r4 item 4/5: field-config panel empty-state copy + scroll container. Own spec file
+      # (not appended to multitable-field-manager.spec.ts) — the parallel #5602 hint/
+      # palette/retype branch appends ~800 lines to the end of that same file. Placed here
+      # (not beside the MetaFieldManager.vue path trigger above) because #5602 also edits
+      # this file right after that exact line, and two insertions at the same anchor
+      # conflict under a 3-way merge regardless of content; this spot is untouched by it.
+      - 'apps/web/tests/multitable-field-config-panel.spec.ts'
       - 'apps/web/tests/multitable-field-display-i18n.spec.ts'
       - 'apps/web/tests/multitable-field-validation-panel.spec.ts'
       - 'apps/web/tests/multitable-form-layout.spec.ts'
@@ -416,6 +438,12 @@ on:
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
+      # Field-manager option palette + lossless-retype table: both are pure modules the
+      # component imports, so a change there is invisible to the MetaFieldManager.vue path
+      # trigger and would run multitable-field-manager.spec.ts in no gate at all.
+      - 'apps/web/src/multitable/utils/select-option-palette.ts'
+      - 'apps/web/src/multitable/utils/field-retype.ts'
+      - 'apps/web/tests/multitable-field-manager.spec.ts'
       - 'apps/web/src/multitable/composables/useMultitableGrid.ts'
       - 'apps/web/src/multitable/composables/useTrash.ts'
       - 'apps/web/src/multitable/components/TrashModal.vue'
@@ -594,6 +622,15 @@ on:
       - 'apps/web/tests/multitable-workbench-bulk-delete.spec.ts'
       - 'apps/web/tests/multitable-workbench-drawer-button-wiring.spec.ts'
       - 'apps/web/tests/multitable-workbench-import-flow.spec.ts'
+      # Import -> create-missing-fields: the sentinel/placeholder plumbing lives in
+      # import/create-fields.ts + MetaImportModal.vue, and the WRITE gate (manage-fields re-check,
+      # name planning, placeholder rewrite) lives in MultitableWorkbench.vue. All three specs must
+      # fire when any of those change, or the fail-closed guards stop being exercised.
+      - 'apps/web/src/multitable/import/create-fields.ts'
+      - 'apps/web/src/multitable/components/MetaImportModal.vue'
+      - 'apps/web/src/multitable/utils/meta-import-labels.ts'
+      - 'apps/web/tests/multitable-workbench-import-create-fields.spec.ts'
+      - 'apps/web/tests/multitable-import-create-fields-plan.spec.ts'
       - 'apps/web/tests/multitable-workbench-manager-flow.spec.ts'
       - 'apps/web/tests/multitable-workbench-permission-wiring.spec.ts'
       - 'apps/web/tests/multitable-workbench-view.spec.ts'
@@ -675,6 +712,13 @@ on:
       - 'apps/web/tests/multitable-embed-route.spec.ts'
       - 'apps/web/tests/multitable-export-dialog.spec.ts'
       - 'apps/web/tests/multitable-field-config-i18n.spec.ts'
+      # r4 item 4/5: field-config panel empty-state copy + scroll container. Own spec file
+      # (not appended to multitable-field-manager.spec.ts) — the parallel #5602 hint/
+      # palette/retype branch appends ~800 lines to the end of that same file. Placed here
+      # (not beside the MetaFieldManager.vue path trigger above) because #5602 also edits
+      # this file right after that exact line, and two insertions at the same anchor
+      # conflict under a 3-way merge regardless of content; this spot is untouched by it.
+      - 'apps/web/tests/multitable-field-config-panel.spec.ts'
       - 'apps/web/tests/multitable-field-display-i18n.spec.ts'
       - 'apps/web/tests/multitable-field-validation-panel.spec.ts'
       - 'apps/web/tests/multitable-form-layout.spec.ts'
@@ -804,6 +848,18 @@ jobs:
       - name: Run recovery archive web specs
         run: pnpm --filter @metasheet/web exec vitest run multitable-recovery-archive-client multitable-recovery-archive-modal --reporter=dot
 
+      # r4 item 4/5 (2026-09-10): field-config panel empty-state copy + the panel's own scroll
+      # region. Registered as a STANDALONE step, copying the recovery-archive step above,
+      # instead of appending one more token to the single ~10KB `vitest run` physical line of
+      # the step below: that one line is edited by every concurrent branch that adds a web spec
+      # (#5603 feat/multitable-import-create-missing-fields appends `xlsx-mapping
+      # multitable-import-create-fields-plan multitable-workbench-import-create-fields` to its
+      # tail right now), and a 3-way merge treats two edits to the same physical line as a
+      # conflict no matter how far apart the inserted tokens are inside it. A separate step is
+      # merge-neutral and fails the job identically (steps are sequential, no continue-on-error).
+      - name: Run field-config panel spec
+        run: pnpm --filter @metasheet/web exec vitest run multitable-field-config-panel --reporter=dot
+
       - name: Run multitable web guard specs (targeted)
         # A1: meta-grid-table (windowing + infinite-scroll trigger) + multitable-grid (useMultitableGrid
         # accumulation/loadMore) added so the grid virtualization ACTIVATION has real CI enforcement —
@@ -838,4 +894,4 @@ jobs:
         # file scan — its three `vitest run` steps carry zero automation-* tokens, so there is no
         # neighbouring approval spec there to sit beside). Two client wire-contract tests landed in the
         # already-tokenized multitable-client.spec.ts (no new token needed).
-        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView automation-rerun-execution comment-affordance-color-consistency fwb-rule-authoring-helpers fwb-rule-authoring meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-client multitable-comment-affordance multitable-comment-inbox-realtime multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-crossbase-workbench-wiring multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-phase11 multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-ui multitable-view-manager multitable-workbench-1672-1673 multitable-workbench-bulk-delete multitable-workbench-drawer-button-wiring multitable-workbench-history-field-scope-wiring multitable-workbench-import-flow multitable-workbench-manager-flow multitable-workbench-permission-wiring multitable-workbench-restore-wiring multitable-workbench-sheet-delete multitable-workbench-view multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag automation-log-redact automation-log-support-packet automation-rule-concurrent-merge meta-ai-bulk-labels meta-api-error-labels meta-api-token-labels meta-automation-delivery-viewers-i18n meta-base-picker meta-bulk-edit-labels meta-cell-editor-i18n meta-comment-composer-i18n meta-comment-labels meta-comments-drawer-i18n meta-form-share-labels meta-form-view-i18n meta-link-picker-i18n meta-link-picker-labels meta-notification-bell meta-permission-labels meta-record-labels meta-toolbar-group-picker meta-view-render-labels meta-sheet-view-rail multitable-agg-footer-grid multitable-ai-bulk-fill-composable multitable-ai-bulk-fill-dialog multitable-ai-bulk-fill-job-composable multitable-ai-bulk-fill-job-dialog multitable-ai-shortcut-cell-editor multitable-ai-shortcut-client multitable-ai-shortcut-composable multitable-ai-shortcut-drawer multitable-ai-shortcut-field-manager multitable-alt-view-comment-chip-i18n multitable-api-token-manager multitable-attachment-editor multitable-attachment-list multitable-barcode-field multitable-base-local-state multitable-build-chart-option multitable-bulk-edit-dialog multitable-button-field-config multitable-button-run-client multitable-calendar-drag-reschedule multitable-calendar-view multitable-capabilities multitable-cell-button multitable-cell-visual-display multitable-cf-scale multitable-chart-load-error multitable-chart-renderer multitable-comment-composer multitable-comment-inbox.spec.ts multitable-comment-presence multitable-comment-reactions multitable-comment-realtime multitable-comments multitable-comments-drawer multitable-conflict-ux multitable-core-i18n multitable-crossbase-link-normalizer multitable-crossbase-link-picker multitable-dashboard-view multitable-datetime-field multitable-duration-field multitable-embed-host multitable-embed-route multitable-export-dialog multitable-field-config-i18n multitable-field-display-i18n multitable-field-validation-panel multitable-form-layout multitable-form-share-manager multitable-form-view multitable-formula-dryrun-panel multitable-formula-suggest-field-manager multitable-frozen-columns-grid multitable-frozen-columns-util multitable-gallery-view multitable-gantt-view multitable-hierarchy-view multitable-home-view multitable-import multitable-import-modal multitable-link-picker multitable-linked-record-chip multitable-linked-record-popover multitable-location-field multitable-longtext-cell multitable-manager-panels-i18n multitable-mention-inbox multitable-mention-popover multitable-mention-realtime multitable-multiselect-field multitable-nongrid-summary-rendering multitable-number-format multitable-people-import multitable-person-field multitable-personal-view-toggle multitable-phase10 multitable-phase12 multitable-phase13 multitable-phase14 multitable-phase15 multitable-phase3 multitable-phase4 multitable-phase5 multitable-phase6 multitable-phase7 multitable-phase8 multitable-phase9 multitable-qrcode-field multitable-record-drawer multitable-record-drawer-button multitable-record-drawer-duplicate multitable-record-drawer-t5-migration.spec.ts multitable-record-inspector multitable-record-permissions-composable multitable-richtext-editor-mention multitable-richtext-longtext multitable-richtext-mention multitable-richtext-wiring multitable-scoped-permissions multitable-sheet-presence multitable-sheet-realtime multitable-system-fields multitable-template-center-view multitable-template-detail-view multitable-template-save-as multitable-timeline-view multitable-view-display-prefs-util multitable-workbench-i18n multitable-workbench.spec.ts multitable-yjs-cell-binding personal-view-client public-multitable-form view-manager-multitable-contract xlsx-mapping --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView automation-rerun-execution comment-affordance-color-consistency fwb-rule-authoring-helpers fwb-rule-authoring meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-client multitable-comment-affordance multitable-comment-inbox-realtime multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-crossbase-workbench-wiring multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-phase11 multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-ui multitable-view-manager multitable-workbench-1672-1673 multitable-workbench-bulk-delete multitable-workbench-drawer-button-wiring multitable-workbench-history-field-scope-wiring multitable-workbench-import-flow multitable-workbench-manager-flow multitable-workbench-permission-wiring multitable-workbench-restore-wiring multitable-workbench-sheet-delete multitable-workbench-view multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag automation-log-redact automation-log-support-packet automation-rule-concurrent-merge meta-ai-bulk-labels meta-api-error-labels meta-api-token-labels meta-automation-delivery-viewers-i18n meta-base-picker meta-bulk-edit-labels meta-cell-editor-i18n meta-comment-composer-i18n meta-comment-labels meta-comments-drawer-i18n meta-form-share-labels meta-form-view-i18n meta-link-picker-i18n meta-link-picker-labels meta-notification-bell meta-permission-labels meta-record-labels meta-toolbar-group-picker meta-view-render-labels meta-sheet-view-rail multitable-agg-footer-grid multitable-ai-bulk-fill-composable multitable-ai-bulk-fill-dialog multitable-ai-bulk-fill-job-composable multitable-ai-bulk-fill-job-dialog multitable-ai-shortcut-cell-editor multitable-ai-shortcut-client multitable-ai-shortcut-composable multitable-ai-shortcut-drawer multitable-ai-shortcut-field-manager multitable-alt-view-comment-chip-i18n multitable-api-token-manager multitable-attachment-editor multitable-attachment-list multitable-barcode-field multitable-base-local-state multitable-build-chart-option multitable-bulk-edit-dialog multitable-button-field-config multitable-button-run-client multitable-calendar-drag-reschedule multitable-calendar-view multitable-capabilities multitable-cell-button multitable-cell-visual-display multitable-cf-scale multitable-chart-load-error multitable-chart-renderer multitable-comment-composer multitable-comment-inbox.spec.ts multitable-comment-presence multitable-comment-reactions multitable-comment-realtime multitable-comments multitable-comments-drawer multitable-conflict-ux multitable-core-i18n multitable-crossbase-link-normalizer multitable-crossbase-link-picker multitable-dashboard-view multitable-datetime-field multitable-duration-field multitable-embed-host multitable-embed-route multitable-export-dialog multitable-field-config-i18n multitable-field-display-i18n multitable-field-validation-panel multitable-form-layout multitable-form-share-manager multitable-form-view multitable-formula-dryrun-panel multitable-formula-suggest-field-manager multitable-frozen-columns-grid multitable-frozen-columns-util multitable-gallery-view multitable-gantt-view multitable-hierarchy-view multitable-home-view multitable-import multitable-import-modal multitable-link-picker multitable-linked-record-chip multitable-linked-record-popover multitable-location-field multitable-longtext-cell multitable-manager-panels-i18n multitable-mention-inbox multitable-mention-popover multitable-mention-realtime multitable-multiselect-field multitable-nongrid-summary-rendering multitable-number-format multitable-people-import multitable-person-field multitable-personal-view-toggle multitable-phase10 multitable-phase12 multitable-phase13 multitable-phase14 multitable-phase15 multitable-phase3 multitable-phase4 multitable-phase5 multitable-phase6 multitable-phase7 multitable-phase8 multitable-phase9 multitable-qrcode-field multitable-record-drawer multitable-record-drawer-button multitable-record-drawer-duplicate multitable-record-drawer-t5-migration.spec.ts multitable-record-inspector multitable-record-permissions-composable multitable-richtext-editor-mention multitable-richtext-longtext multitable-richtext-mention multitable-richtext-wiring multitable-scoped-permissions multitable-sheet-presence multitable-sheet-realtime multitable-system-fields multitable-template-center-view multitable-template-detail-view multitable-timeline-view multitable-view-display-prefs-util multitable-workbench-i18n multitable-workbench.spec.ts multitable-yjs-cell-binding personal-view-client public-multitable-form view-manager-multitable-contract xlsx-mapping multitable-import-create-fields-plan multitable-workbench-import-create-fields multitable-template-save-as --reporter=dot
