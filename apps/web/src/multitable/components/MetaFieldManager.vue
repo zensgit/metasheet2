@@ -156,6 +156,15 @@
               <option v-for="sheet in targetSheets" :key="sheet.id" :value="sheet.id">{{ sheet.name }}</option>
             </select>
           </label>
+          <!-- 目标表缺失时的常驻提示 + 保存禁用（2026-09-10）。编辑一个"历史坏字段"（property 里没有
+               foreignSheetId）时它立刻可见，选好目标表保存即完成自愈；后端也已 fail-closed。 -->
+          <div
+            v-if="linkTargetMissing"
+            class="meta-field-mgr__hint meta-field-mgr__hint--error"
+            data-test="link-target-required"
+          >
+            {{ ml('field.linkTargetRequiredHint') }}
+          </div>
           <label class="meta-field-mgr__toggle">
             <input
               v-model="linkDraft.limitSingleRecord"
@@ -739,7 +748,7 @@
         <div v-if="fieldConfigError" class="meta-field-mgr__error">{{ fieldConfigError }}</div>
         <div class="meta-field-mgr__config-actions">
           <MtButton class="meta-field-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</MtButton>
-          <MtButton variant="primary" class="meta-field-mgr__btn-add" :disabled="Boolean(fieldConfigBlockingReason)" @click="saveConfig">{{ configTarget ? ml('field.saveSettings') : ml('field.applyDefaults') }}</MtButton>
+          <MtButton variant="primary" class="meta-field-mgr__btn-add" :disabled="Boolean(fieldConfigBlockingReason) || linkTargetMissing" data-test="field-config-save" @click="saveConfig">{{ configTarget ? ml('field.saveSettings') : ml('field.applyDefaults') }}</MtButton>
         </div>
       </div>
 
@@ -1347,6 +1356,19 @@ const configTargetType = computed(() => {
   if (configTarget.value) return configDraftType.value
   return newFieldConfigVisible.value && requiresConfig(newFieldType.value) ? newFieldType.value : null
 })
+
+/**
+ * 关联字段草稿缺目标表（2026-09-10）。true ⇒ 面板给常驻提示 + 保存按钮禁用。
+ *
+ * 为什么要有这条：后端过去允许没有 foreignSheetId 的 link 字段落库（univer-meta.ts 的 §2a.2 墙在
+ * `parseLinkFieldConfig` 返回 null 时直接放行），这样的字段一点「选择关联记录」就 400。现在后端已
+ * fail-closed，这里是同一条规则的前置提示，也是"已有坏字段"在字段管理里的自愈入口：编辑它就会看到
+ * 提示，选好目标表保存即修复。跨 base 与同 base 两条路径共用 `linkDraft.foreignSheetId`，所以一条判断
+ * 覆盖两个 select。
+ */
+const linkTargetMissing = computed(() =>
+  configTargetType.value === 'link' && !linkDraft.foreignSheetId.trim(),
+)
 
 // 3c foreign-field picker (defined AFTER configTargetType — activeForeignSheetId reads it, and watch
 // evaluates its source at registration). Foreign sheet = the active config's foreignSheetId override,
@@ -2347,7 +2369,28 @@ function currentDraftProperty(type: MetaFieldCreateType | string): Record<string
     }
   }
   if (normalizedType === 'person') {
-    return { limitSingleRecord: linkSingleRecordLockedByHierarchy.value || personDraft.limitSingleRecord }
+    // 历史“link 背书的人员字段”（stored type='link' + refKind:'user'，displayFieldType 把它显示成
+    // person）：`update-field` 是整体替换 property，而这个分支过去只发 `limitSingleRecord` ——
+    // 于是一次“改单选/多选”就把 refKind 和 foreignSheetId 一起抹掉，字段当场退化成“link 但没有目标表”，
+    // 正是用户报告里那种点「选择关联记录」必 400 的坏字段。这里把这两个结构键按存量原样带回（和本文件
+    // 既有的 actionConfig / hidden / visible 不透明携带同一套做法），既堵住这条产坏字段的路，也让后端
+    // 新加的 fail-closed 门不会把这条合法编辑挡在外面。新建 person 字段没有 configTarget，落的是原生
+    // `person` 类型，不受影响。
+    const storedPersonProperty = (configTarget.value?.property ?? {}) as Record<string, unknown>
+    const storedRefKind = typeof storedPersonProperty.refKind === 'string' ? storedPersonProperty.refKind.trim() : ''
+    const storedForeign = resolveLinkFieldProperty(storedPersonProperty).foreignSheetId
+    // 只在存量确实有目标表时才携带（后端唯一的 refKind:'user' 生产者 `ensurePeopleSheetPreset`
+    // 总是同时写 foreignSheetId，univer-meta.ts:5595）。存量本来就没有目标表的话，这里凭空补 refKind
+    // 也救不了它 —— 那种字段得当成 link 去「管理字段」里选目标表，不在这条携带的职责范围内。
+    const isLegacyLinkBackedPerson = configTarget.value?.type === 'link'
+      && storedRefKind.length > 0
+      && Boolean(storedForeign)
+    return {
+      ...(isLegacyLinkBackedPerson
+        ? { refKind: storedRefKind, foreignSheetId: storedForeign as string, foreignDatasheetId: storedForeign as string }
+        : {}),
+      limitSingleRecord: linkSingleRecordLockedByHierarchy.value || personDraft.limitSingleRecord,
+    }
   }
   if (normalizedType === 'lookup') {
     if (!lookupDraft.linkFieldId || !linkSourceFields.value.some((field) => field.id === lookupDraft.linkFieldId) || !lookupDraft.targetFieldId) {

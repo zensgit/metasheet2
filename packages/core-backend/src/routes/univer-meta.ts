@@ -1907,6 +1907,43 @@ async function validateLinkFieldConfig(
 }
 
 /**
+ * 关联字段缺目标表 —— 创建/更新侧 fail-closed（2026-09-10）。
+ *
+ * 历史行为是 fail-OPEN：`sanitizeFieldPropertyByType` 的 link 分支在 foreignSheetId 为空时直接把这个键
+ * 省略掉，而 §2a.2 的墙 `validateLinkFieldConfig` 在 `parseLinkFieldConfig` 返回 null 时也 return null
+ * （"不完整草稿不校验"），它的两个调用点还额外用 `linkForeignKeyInPayload` 收窄。结果：
+ * `POST /fields {type:'link'}` 不带 property、或 `PATCH {type:'link'}` 从别的类型转过来，都能落一个没有
+ * 目标表的 link 字段。这种字段在 `GET /fields/:fieldId/link-options` 上必然 400，用户点"选择关联记录"
+ * 只能看到一句原始报错。
+ *
+ * 这里是写入口的收紧（只收不放）：结果状态是 link 且不含任何 foreign 别名（foreignSheetId /
+ * foreignDatasheetId / datasheetId，统一经 `parseLinkFieldConfig` 归一）就拒绝落库。错误码稳定
+ * （`LINK_FIELD_FOREIGN_SHEET_REQUIRED`），message 不拼任何 id（values-free），前端按码翻人话。
+ *
+ * 历史 person 链接字段（type='link' + refKind:'user'）由 `ensurePeopleSheetPreset` 生成，property 永远
+ * 带 foreignSheetId（指向 People 表），所以这道门对它无影响。
+ */
+const LINK_FIELD_FOREIGN_SHEET_REQUIRED_CODE = 'LINK_FIELD_FOREIGN_SHEET_REQUIRED'
+const LINK_FIELD_FOREIGN_SHEET_REQUIRED_MESSAGE = '关联字段必须先选择要关联的目标数据表'
+/** 读取侧（link-options）对"已有坏字段"的稳定码 —— message 同样 values-free，不回显 fieldId。 */
+const LINK_FIELD_FOREIGN_SHEET_MISSING_CODE = 'LINK_FIELD_FOREIGN_SHEET_MISSING'
+const LINK_FIELD_FOREIGN_SHEET_MISSING_MESSAGE = '该关联字段还没有设置要关联哪张数据表'
+
+class LinkForeignSheetRequiredError extends Error {
+  constructor() {
+    super(LINK_FIELD_FOREIGN_SHEET_REQUIRED_MESSAGE)
+    this.name = 'LinkForeignSheetRequiredError'
+  }
+}
+
+/** 结果状态若是"没有目标表的 link 字段"就抛 —— 由 POST /fields 与 PATCH /fields/:fieldId 两个写口调用。 */
+function assertLinkFieldForeignSheetPresent(type: UniverMetaField['type'], property: unknown): void {
+  if (type !== 'link') return
+  if (parseLinkFieldConfig(property)) return
+  throw new LinkForeignSheetRequiredError()
+}
+
+/**
  * ②a §2a.4-c — sheet-create TOCTOU close. The §2a.2 wall (`validateLinkFieldConfig`) can only compare
  * bases when BOTH sheets exist; a link created against a not-yet-existent foreign sheet id slips through
  * (the wall no-ops). The hole is closed from the OTHER side: when a sheet is created with a caller-chosen
@@ -12258,6 +12295,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           requestedType,
           rawProperty,
         )
+        // 关联字段缺目标表 fail-closed（create）。放在 §2a.2 墙之前、且不看 payload 是否显式带 foreign 键：
+        // 这里判的是"落库后的结果状态"，所以 `POST {type:'link'}` 连 property 都不带也会被挡住。
+        assertLinkFieldForeignSheetPresent(type, property)
         const configError = await validateLookupRollupConfig(req, query, sheetId, type, property)
         if (configError) {
           throw new ValidationError(configError)
@@ -12342,6 +12382,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       if (err instanceof PermissionError) {
         return sendForbidden(res, err.message)
+      }
+      // 关联字段缺目标表 —— 稳定错误码，message 不含 fieldId（前端按码翻人话）。放在 ValidationError 前面，
+      // 因为它是 Error 的独立子类而不是 ValidationError 的子类（避免被通用 VALIDATION_ERROR 吞掉码）。
+      if (err instanceof LinkForeignSheetRequiredError) {
+        return res.status(400).json({ ok: false, error: { code: LINK_FIELD_FOREIGN_SHEET_REQUIRED_CODE, message: err.message } })
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
@@ -12734,6 +12779,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           throw new ValidationError(hierarchyParentMutationError)
         }
 
+        // 关联字段缺目标表 fail-closed（update）。两点是刻意的：
+        //   1) 触发条件按本文件既有的"lazy/on-edit"惯例收窄 —— 只有这次 PATCH 真的在写 property
+        //      （payload 带 property 键）或把别的类型转成 link 时才判。纯改名 / 纯调序不判：它不会让任何
+        //      健康字段变坏，已经坏掉的字段靠读取侧人话 + 字段管理面板的强制选择去自愈。
+        //   2) 位置排在既有的 lookup/rollup、跨 base 墙、aiShortcut、公式、层级父字段几道校验之后 ——
+        //      那些校验对同一个请求给的是更具体的原因（例如"该字段是层级视图的父字段"），保持它们的优先级，
+        //      本门只在没人反对时兜底。它仍在任何写语句之前，所以照样是 fail-closed。
+        if (typeof parsed.data.property !== 'undefined' || (nextType === 'link' && currentType !== 'link')) {
+          assertLinkFieldForeignSheetPresent(nextType, nextProperty)
+        }
+
         // W1-1 (design-lock §3 LOCK-B, B1/B2): an expression-change PATCH bulk-recomputes every
         // live record afterward (B3). B1 trigger = the request explicitly CARRIES
         // `property.expression` on a (or newly-converted-to) formula field — fires on BOTH an
@@ -12891,6 +12947,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           ok: false,
           error: { code: 'FORMULA_EXPRESSION_BULK_OVER_CAP', message: err.message, total: err.total, max: err.max },
         })
+      }
+      // 关联字段缺目标表 —— 与 create 侧同一稳定码，message values-free。
+      if (err instanceof LinkForeignSheetRequiredError) {
+        return res.status(400).json({ ok: false, error: { code: LINK_FIELD_FOREIGN_SHEET_REQUIRED_CODE, message: err.message } })
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
@@ -17150,7 +17210,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const linkConfig = parseLinkFieldConfig(field.property)
       if (!linkConfig) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Link field is missing foreignSheetId: ${fieldId}` } })
+        // 已有坏字段（写入口收紧之前落库的）走这里：稳定码 + values-free message，前端按码翻人话，
+        // 不再把 `fld_...` 原样甩给用户。自愈路径 = 在「管理字段」里编辑它并选好目标表。
+        return res.status(400).json({
+          ok: false,
+          error: { code: LINK_FIELD_FOREIGN_SHEET_MISSING_CODE, message: LINK_FIELD_FOREIGN_SHEET_MISSING_MESSAGE },
+        })
       }
 
       const targetSheet = await loadSheetRow(pool.query.bind(pool), linkConfig.foreignSheetId)

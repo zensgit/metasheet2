@@ -82,6 +82,8 @@ export type MetaManagerLabelKey =
   | 'field.latestMetadataLoaded'
   | 'field.discardManagerConfirm'
   | 'field.error.linkNeedsTargetSheet'
+  // 关联字段草稿区的常驻提示（2026-09-10）：没选目标表就不给保存 —— 这也是"已有坏字段"的自愈入口
+  | 'field.linkTargetRequiredHint'
   | 'field.error.linkNeedsCrossBaseTarget'
   | 'field.error.lookupNeedsLinkAndTarget'
   | 'field.error.lookupNeedsValidTargetSheet'
@@ -377,6 +379,10 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.latestMetadataLoaded': { en: 'Latest field metadata loaded from the sheet context.', zh: '已从数据表上下文加载最新字段元数据。' },
   'field.discardManagerConfirm': { en: 'Discard unsaved field manager changes?', zh: '放弃未保存的字段管理更改吗？' },
   'field.error.linkNeedsTargetSheet': { en: 'Choose a target sheet for link fields', zh: '请为关联字段选择目标数据表' },
+  'field.linkTargetRequiredHint': {
+    en: 'Pick the sheet this field links to. Without a target sheet it cannot be saved, and "Choose linked records" will not open.',
+    zh: '请选择这个字段要关联哪张数据表。没有目标表就无法保存，「选择关联记录」也打不开。',
+  },
   'field.error.linkNeedsCrossBaseTarget': { en: 'Choose a base and a readable table for the cross-base link', zh: '请为跨工作区关联选择目标工作区和可读取的数据表' },
   'field.error.lookupNeedsLinkAndTarget': { en: 'Lookup fields need a link field and a target field id', zh: '查找字段需要关联字段和目标字段 ID' },
   'field.error.lookupNeedsValidTargetSheet': { en: 'Lookup fields need a valid target sheet', zh: '查找字段需要有效的目标数据表' },

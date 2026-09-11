@@ -321,6 +321,11 @@ on:
       - 'apps/web/tests/multitable-import-modal.spec.ts'
       - 'apps/web/tests/multitable-import.spec.ts'
       - 'apps/web/tests/multitable-link-picker.spec.ts'
+      # 关联字段缺目标表（2026-09-10）：读取侧人话 + 字段管理草稿区的提示/禁用。两个文件名都命中
+      # 下方 `vitest run` 巨行里已有的 `multitable-link-picker` / `multitable-field-manager` token，
+      # 所以只需要在这里补路径触发，不必往那条单行里加新 token。
+      - 'apps/web/tests/multitable-link-picker-missing-target.spec.ts'
+      - 'apps/web/tests/multitable-field-manager-link-target.spec.ts'
       - 'apps/web/tests/multitable-linked-record-chip.spec.ts'
       - 'apps/web/tests/multitable-linked-record-popover.spec.ts'
       - 'apps/web/tests/multitable-location-field.spec.ts'
@@ -685,6 +690,11 @@ on:
       - 'apps/web/tests/multitable-import-modal.spec.ts'
       - 'apps/web/tests/multitable-import.spec.ts'
       - 'apps/web/tests/multitable-link-picker.spec.ts'
+      # 关联字段缺目标表（2026-09-10）：读取侧人话 + 字段管理草稿区的提示/禁用。两个文件名都命中
+      # 下方 `vitest run` 巨行里已有的 `multitable-link-picker` / `multitable-field-manager` token，
+      # 所以只需要在这里补路径触发，不必往那条单行里加新 token。
+      - 'apps/web/tests/multitable-link-picker-missing-target.spec.ts'
+      - 'apps/web/tests/multitable-field-manager-link-target.spec.ts'
       - 'apps/web/tests/multitable-linked-record-chip.spec.ts'
       - 'apps/web/tests/multitable-linked-record-popover.spec.ts'
       - 'apps/web/tests/multitable-location-field.spec.ts'
