@@ -10,10 +10,11 @@ All run from the worktree root, `pnpm 9.15.9` / `vitest 1.6.1` / Node 20.
 | # | Command | Result |
 |---|---|---|
 | 0 | `pnpm install --frozen-lockfile --offline` | exit **0** (1m 10s) |
-| 1 | `pnpm --filter @metasheet/core-backend run type-check` | exit **0** (`tsc --noEmit`) |
-| 2 | `… exec vitest run tests/unit/automation-send-webhook-ssrf.test.ts` | exit **0** — **37 passed / 37** |
-| 3 | `… exec vitest run` over the 8 affected specs (below) | exit **0** — **392 passed / 392**, 8 files |
-| 4 | Full `… exec vitest run` (core-backend) | see §5 — pre-existing local noise, CI is the judge |
+| 1 | `pnpm --filter @metasheet/core-backend run type-check` | exit **0** (`tsc --noEmit`), re-run after the review round |
+| 2 | `… exec vitest run tests/unit/automation-send-webhook-ssrf.test.ts` | exit **0** — **57 passed / 57** (was 37 before the review round) |
+| 3 | `… exec vitest run` over the 8 affected specs (below) | exit **0** — **412 passed / 412**, 8 files (was 392) |
+| 4 | `npx eslint src/multitable/automation-executor.ts src/multitable/webhook-refusal-class.ts` | exit **0**, no findings (run from the package root; the repo's `.eslintrc.json` needs `parserOptions.project` resolved there, and it ignores `**/*.test.ts`) |
+| 5 | Full `… exec vitest run` (core-backend) | see §5 — pre-existing local noise, CI is the judge |
 
 Command 3's file set: `automation-send-webhook-ssrf`, `send-webhook-action-hardening`,
 `automation-classb-outbound`, `automation-v1`, `webhook-ssrf-guard`, `multitable-button-routes`,
@@ -22,11 +23,33 @@ Command 3's file set: `automation-send-webhook-ssrf`, `send-webhook-action-harde
 **Pre-change baseline** for comparison: the same set minus the new spec (6 files) was **348 passed**,
 exit 0, before any edit — so nothing that was green went red.
 
+**Not run here** (stated so no one reads a number that does not exist): the 5 real-DB integration files.
+They need `DATABASE_URL`; three of them are in the vitest `exclude` list and run as whole files in the
+`plugin-tests.yml` real-DB lanes. Their first real execution is that lane on this PR. The pre-merge
+inventory in the design note (§7) also needs a real database and was **not** run from here.
+
+### Runtime fact this round depends on, measured rather than quoted
+
+```
+node v25.9.0
+new Request('https://e.com/').redirect                       === 'follow'
+new Request('https://e.com/', {redirect:'manual'}).redirect  === 'manual'
+[default] POST → 307 → status 200, redirected true, second server hit 1 time
+[manual]  POST → 307 → status 307, ok false, type 'basic', second server hit 0 times
+```
+
+Two loopback `http.Server`s in a scratch script (no external network, nothing written into the repo).
+The `manual` row is what the fix relies on: the platform surfaces the 3xx itself and issues no second
+request. Note the shape is the Node/undici one — the browser profile returns an opaque-redirect response
+(`type 'opaqueredirect'`, `status 0`) instead, so `isRefusedRedirectStatus`
+(`webhook-refusal-class.ts:86`) accepts both rather than assuming one.
+
 ## 2. Coverage map of the new spec
 
-`packages/core-backend/tests/unit/automation-send-webhook-ssrf.test.ts` — 37 tests. Every refusal test
-asserts `expect(fetch).toHaveBeenCalledTimes(0)` via the shared `expectRefused` helper, alongside the
-step status, the coded error and the values-free class.
+`packages/core-backend/tests/unit/automation-send-webhook-ssrf.test.ts` — 57 tests. Every *pre-dispatch*
+refusal test asserts `expect(fetch).toHaveBeenCalledTimes(0)` via the shared `expectRefused` helper,
+alongside the step status, the coded error and the values-free class. The redirect cases assert
+`toHaveBeenCalledTimes(1)` instead — the first hop is allowed, and nothing follows it.
 
 | Group | Cases | Class asserted |
 |---|---|---|
@@ -40,11 +63,24 @@ step status, the coded error and the values-free class.
 | **Two-phase (#4196)** | positive control (intent claimed + 1 fetch); private target; DNS-internal target; credentialed loopback — each asserting **0 intent inserts** and 0 fetches | — |
 | Terminal | a 500 on a public target *does* retry (>1 fetch); a refused target is never attempted | — |
 | Contract | pins the guard's `reason` strings; classifier returns only closed-set tokens | — |
+| **Redirects** (new) | legacy 307 → internal `Location`; `redirect:'manual'` asserted on the dispatch init (both paths); 301/302/303/307/308 table; two-phase 302 (intent claimed + outcome recorded); values-free; 2xx positive control | `redirect-not-allowed` |
+| **Post-dispatch logs** (new) | credentialed **public** URL that fails: the legacy "failed after N attempts" line and the two-phase `outcome_unknown` line carry no userinfo / `token=` / path | — |
+| **Host-form matrix** (new) | `0177.0.0.1`, `2130706433`, `0x7f.1`, `127.1`, `%31%32%37.0.0.1`, `127。0。0。1` (IDNA), `localhost.`, `LOCALHOST`, `http://public@127.0.0.1`; a lying resolver seam; plus two ALLOW counter-controls (`…#@127.0.0.1`, `127.0.0.1@example.com`) | `loopback` / `private` / — |
 
-Two assertions carry the security weight and are named explicitly for review:
+Four assertions carry the security weight and are named explicitly for review:
 
 - `refuses the IPv4 loopback literal 127.0.0.1 and never calls fetch`
 - `refuses an internal target BEFORE Tx A: no intent row claimed, no fetch`
+- `legacy path: a 307 to an internal Location produces NO second fetch and a failed step`
+- *legacy path: asks the platform not to follow (redirect: "manual" on the dispatch init)* — the one
+  that actually binds production, because an in-process mock cannot follow a redirect even when the
+  option is missing (see probe **M1**).
+
+The host-form matrix is a **tripwire, not a fix**: every row is refused on the baseline too. It exists
+because all of those rows are refused only thanks to WHATWG `new URL()` normalisation (IPv4
+octal/decimal/hex/short forms, IDNA mapping, percent-decoding) happening before
+`webhook-ssrf-guard.ts:98` reads `parsed.hostname` — an implicit precondition that nothing else in the
+suite states. Probe **M7** shows what that is worth.
 
 ## 3. Mutation probes
 
@@ -62,6 +98,25 @@ artifact remains.
 | **P2b** | Dispatch the request anyway but still **report** the refusal (status/error/class all unchanged) | **29 failed / 8 passed**; the loopback case fails with `expected "spy" to be called +0 times, but got 1 times` | Isolates the call-count assertion: with every status/error/class assertion still green, only the fetch counter catches the leak. This is the probe that proves "refused" means "nothing left the process". |
 | **P3** | Add `url` to the refusal log meta | **exactly 1 failed** — `VALUES-FREE: the refusal log carries only the code + host shape, never the URL or a header value` (`expected '["[automation.send_webhook.refused]",…' not to contain '127.0.0.1'`) | The values-free assertion is load-bearing and precisely targeted. |
 | **P4** | Move the gate to **after** the two-phase dispatch (legacy path only) | **exactly 3 failed** — the three two-phase refusal tests | The *placement* before Tx A is load-bearing, and the two-phase coverage is not redundant with the legacy coverage. |
+
+### 3.1 Review-round probes (the redirect fix and the two log lines)
+
+Same method: the file was copied to the session scratchpad, mutated in place, run, restored from the
+copy, and the sha256 re-checked. `automation-executor.ts` before and after:
+`5fd8076a85f765c15d06fcd099d1c5c35d70f76b9f85ba81c8c927c3256e6554` (identical);
+`webhook-ssrf-guard.ts` (touched only by M7) before and after:
+`a964abd8d4b4a483cb314e1609369753fe92eff615c0932b7b8a5636715b9a75` (identical). `git status` after the
+restore lists neither file as modified beyond the intended change set. All counts are out of **57**.
+
+| Probe | Mutation | Result | Reads as |
+|---|---|---|---|
+| **M1** | Delete `redirect: 'manual'` from **both** dispatch inits | **2 failed / 55 passed** — exactly the two "asks the platform not to follow" cases | Honest negative worth stating: the *behavioural* 307 cases survive this mutation, because a mocked `fetchFn` cannot follow a redirect regardless of the option. Only a direct assertion on the dispatch init can catch the deletion, which is why both paths have one. Without those two cases the production-relevant half of this fix would be unpinned. |
+| **M2** | Legacy path: make the 3xx branch unreachable (fall through to the ordinary non-2xx → retry path) | **3 failed / 54 passed** — the 307 case, the 301/302/303/307/308 table, and the values-free redirect case | A 3xx that is merely "a failed attempt" is not the same thing: the count goes to 3 fetches and the coded error disappears. |
+| **M3** | Two-phase path: make the redirect branch unreachable | **1 failed / 56 passed** — the two-phase 302 case | The two-phase coverage is not redundant with the legacy coverage (same conclusion P4 reached for the gate itself). |
+| **M4** | Restore the old legacy failure log (`send_webhook to ${redactString(url)} failed after …`) | **1 failed / 56 passed** — "the 'failed after N attempts' line carries shape + identifiers, never the URL" | The shared redactor does not save that line: the case feeds `https://<user>:<pw>@203.0.113.10/hook?token=…`, a **public** target the gate allows. |
+| **M5** | Restore the old two-phase `outcome_unknown` log | **1 failed / 56 passed** — the two-phase half of the same pair | Same, on the other dispatch path. |
+| **M6** | Drop `ruleId` / `executionId` from the refusal log meta | **1 failed / 56 passed** — the values-free refusal case (its positive half) | The identifiers are pinned, so a later "tidy up the log meta" cannot silently take them away again; and the FORBIDDEN list in the same case still guards the other direction. |
+| **M7** | Replace `parsed.hostname` in `webhook-ssrf-guard.ts` with hand-rolled string parsing of the raw URL (a plausible "let's normalise the host ourselves" refactor) | **6 failed / 51 passed** — exactly the six numeric/IDNA rows (`0177.0.0.1`, `2130706433`, `0x7f.1`, `127.1`, `%31%32%37.0.0.1`, `127。0。0。1`) | This is the case for the matrix: under that mutation all six become **allowed egress to loopback**, and every one of the original 37 cases stays green. The trailing-dot and uppercase rows also survive the mutation (that mutant still lowercases and the name classifier strips the trailing dot), which is why the matrix lists them separately rather than claiming one uniform reason. |
 
 ## 4. Existing tests that had to change, and why
 
@@ -81,12 +136,34 @@ different remedies, both chosen to keep unit tests deterministic **without** wea
    guard accepts with **no DNS lookup at all**. 33 URLs across 5 files (`multitable-automation-jobs`,
    `multitable-automation-start-approval`, `-start-approval-http`, `multitable-automation-branch-local-wait`,
    `multitable-d1c-approval-revision-realdb`), including the assertions that compare captured URLs. Each
-   file carries a header note explaining the choice. `fetchFn` is stubbed in all of them, so no packet is
-   ever sent.
+   file carries a header note explaining the choice.
 
-Not changed: `multitable-automation-jobs.test.ts:130` deliberately targets `http://127.0.0.1:1/blocked`
-and asserts the step **fails**. It still fails — now at the gate (`loopback`) instead of at connect —
-so the assertion holds and the case became strictly more deterministic.
+**`fetchFn` stubbing, stated exactly** (the earlier "stubbed in all of them" was wrong, and wrong in a
+security-evidence artifact, so here is the enumeration):
+
+| File | Constructions | Status |
+|---|---|---|
+| `multitable-automation-jobs.test.ts` | 6 | 3 stubbed (`:126`, `:195`, `:240`); 3 bare (`:90`, `:385`, `:532`) — checked one by one: none of those three rules contains a `send_webhook` action, so no dispatch can occur |
+| `multitable-automation-start-approval.test.ts` | 1 factory, 24 call sites | 4 were **bare** (`makeAutomationService()`) on rules that do carry a tail `send_webhook`. Fixed this round: the factory parameter now defaults to an OK stub (`:72-74`), so no call site can fall back to `globalThis.fetch` |
+| `-start-approval-http.test.ts` | 1 factory, 2 call sites | both pass a stub (0 bare) |
+| `branch-local-wait.test.ts` | 1 factory, 9 call sites | all pass `okFetch` / `failFetch` (0 bare) |
+| `d1c-approval-revision-realdb.test.ts` | 1 factory | stub hard-coded inside it |
+
+Why the 4 bare ones mattered even though the tail was unreachable: with the pre-change `example.test`
+host a stray real `fetch` failed in milliseconds (RFC 6761 NXDOMAIN); with `203.0.113.10` it is a
+black-hole address, so the same stray call becomes a per-attempt 5 s timeout (≈15 s with the default 2
+retries) inside a real-DB lane, which reads like a slow database rather than an outbound call. The
+default stub removes the possibility instead of relying on the tail staying unreachable.
+
+**Changed this round**: `multitable-automation-jobs.test.ts:143` used to target
+`http://127.0.0.1:1/blocked`. Under the gate that case went green for a **different reason** than the one
+it documents — its subject is "a throwing `fetchFn` makes the action fail fast, and `onStart`/`onSettled`
+still bracket it", and the gate refuses the URL before `fetchFn` is ever called, leaving the catch branch
+in the executor's retry loop (`automation-executor.ts:4274-4276`) with no coverage anywhere in the suite.
+(The earlier claim here that this was "strictly more deterministic" told only half of it.) It is now
+`https://203.0.113.10/blocked`, so the throwing stub is the failure source again, and the gate's own
+real-DB coverage lives in a **separate** case (`:193`) that asserts `WEBHOOK_TARGET_REJECTED:` **and**
+that the throwing `fetchFn` was never entered (`fetchCalls === 0`).
 
 **Not runnable locally**: the 5 integration files need real PostgreSQL; three of them
 (`-start-approval-http`, `branch-local-wait`, `d1c-approval-revision-realdb`) are in the vitest
@@ -96,7 +173,13 @@ verified by inspection + type-check here, and by those CI lanes on the PR.
 ## 5. Full-suite number
 
 `pnpm --filter @metasheet/core-backend exec vitest run` → exit **1**:
-**29 files failed / 847 passed / 175 skipped (1051)**.
+**29 files failed / 847 passed / 175 skipped (1051)**; tests **60 failed / 12797 passed / 1572 skipped
+(14429)**, 195.7 s.
+
+Re-run unchanged after the review round: the same **29** files, and the failing set contains none of the
+files this PR touches. Grepping the whole run output for `automation-send-webhook-ssrf`,
+`webhook-refusal-class` and `automation-executor.ts` returns hits only inside the passing
+`automation-send-webhook-ssrf` / `automation-v1` output, never inside a `FAIL` block.
 
 Known local-only noise on this Windows box; CI is the judge. That claim was **checked, not assumed** —
 the four failures that could plausibly have been caused by this change were re-run and read:
@@ -123,11 +206,35 @@ the pin is on that workflow file's own bytes, which are unchanged.
 
 ## 7. Residual risk, stated plainly
 
-- **DNS rebinding is not closed on this path.** The gate validates, then `fetchFn(url, …)` re-resolves.
-  The button route avoids this with `pinnedHttpsFetch`; adopting it here changes the response contract
-  and the retry/two-phase structure and is deliberately out of scope. No rebinding claim is made.
-- **`ruleSnapshot` still carries the raw rule config** in the in-memory execution object (redacted by
-  `redactValue` at persist time). Pre-existing, populated on every run, unchanged here — and the spec's
-  values-free test is scoped accordingly rather than making a blanket "nothing leaks" claim.
+- **DNS rebinding is not closed on this path.** The gate resolves once, **outside** the legacy retry
+  loop, and each attempt then resolves again — up to `retries + 1` = 3 times on the legacy path, once on
+  the two-phase path — with none of those connections pinned to the addresses the gate judged
+  (`ssrf.addresses` is computed and dropped). "A narrow window" understated the legacy path; this is the
+  precise shape. The button route avoids it with `pinnedHttpsFetch`; adopting that here changes the
+  response contract and the retry/two-phase structure and is deliberately out of scope (design §6, F-1).
+  No rebinding claim is made.
+- **Redirects are now refused, not followed** (design §2.1) — that is the one item of this list the
+  review round moved from "undeclared" to "closed". What is closed is *following*: the first hop is still
+  dispatched, so a rule aimed at an attacker-controlled public host still reaches that host with the
+  configured headers. That was always true of any allowed target and is not what the gate is for.
+- **`ruleSnapshot` still carries the raw rule config.** `redactValue` **is** applied at persist time
+  (`automation-log-service.ts:102`, `:274`) and it masks `headers.authorization` / `secret` / other
+  `STRUCTURED_FIELDS` **keys** — but `url` is not such a key, and the string rules behind it have no
+  generic userinfo rule and no generic `token=` rule, so a URL of the form
+  `https://<user>:<pw>@host/x?token=…` is persisted essentially as written (`access_token=` and the
+  DingTalk robot form are the exceptions). Measured against the real function; the full table is in
+  design §4. Pre-existing, populated on every run, unchanged by this PR, and deliberately **not** fixed
+  here (F-2 — the redactor is shared by four channels, mirrored in `apps/web`, and a generic URL rule
+  would overturn `tests/unit/multitable-automation-log-redact.test.ts:130`). The earlier wording here
+  ("redacted by `redactValue` at persist time") implied a coverage that does not exist and is corrected
+  rather than defended.
+- **A second, still-ungated egress out of the same EventBus**: `webhook-service.ts:394` (subscription
+  delivery) neither runs the guard nor sets `redirect`. Different config surface, different retry model
+  — a sibling slice, listed as F-3, not silently in scope here.
 - **https-only is a live behaviour change** for any existing rule using an `http://` webhook: it now
-  fails with `WEBHOOK_TARGET_REJECTED:scheme-not-allowed`. Flag in the release note.
+  fails with `WEBHOOK_TARGET_REJECTED:scheme-not-allowed`. Same for a receiver that answers 3xx
+  (`:redirect-not-allowed`). Both go in the release note, and the owner runs the read-only inventory in
+  design §7 **before** merge — that query needs a real database and was not run from this worktree.
+- **No author-side check and no i18n label yet** (F-7): both changes surface only at run time, as a coded
+  step error. `apps/web/src/services/integration/errorCodeLabels.ts` was deliberately left alone because
+  two other open PRs are editing it.

@@ -27,7 +27,10 @@ import { isIP } from 'node:net'
  */
 export const WEBHOOK_TARGET_REJECTED = 'WEBHOOK_TARGET_REJECTED' as const
 
-/** Closed set of refusal classes. Every member is a HOST SHAPE or a parse outcome — never a value. */
+/**
+ * Closed set of refusal classes. Every member is a HOST SHAPE, a parse outcome, or (the single
+ * post-dispatch member, `redirect-not-allowed`) a RESPONSE SHAPE — never a value.
+ */
 export type WebhookRefusalClass =
   /** Missing / non-string / unparseable URL (also an out-of-range dotted quad like `999.1.1.1`). */
   | 'invalid-url'
@@ -51,6 +54,14 @@ export type WebhookRefusalClass =
   | 'dns-unresolved'
   /** Refused for a reason this classifier could not label (fail-safe label; still refused). */
   | 'internal-other'
+  /**
+   * The ONLY post-dispatch member: the first hop answered 3xx and we refuse to follow it. The gate
+   * judges the URL the rule stored; a `Location` is a target the gate never saw, chosen by whoever
+   * answers the first hop. `classifyWebhookRefusal` never returns this — the caller sets it from the
+   * response status (see `isRefusedRedirectStatus`), which is why the dispatch sites pass
+   * `redirect: 'manual'` instead of letting the platform follow.
+   */
+  | 'redirect-not-allowed'
 
 /** Closed set of host families. `ipv4-mapped-ipv6` records a smuggling attempt (`::ffff:127.0.0.1`). */
 export type WebhookRefusalHostFamily = 'ipv4' | 'ipv6' | 'ipv4-mapped-ipv6' | 'name' | 'none'
@@ -59,6 +70,24 @@ export interface WebhookRefusal {
   code: typeof WEBHOOK_TARGET_REJECTED
   refusalClass: WebhookRefusalClass
   hostFamily: WebhookRefusalHostFamily
+}
+
+/** The literal, so dispatch sites cannot typo it. */
+export const REDIRECT_NOT_ALLOWED = 'redirect-not-allowed' as const satisfies WebhookRefusalClass
+
+/**
+ * Is this response status a redirect we refuse to follow? Measured on this repo's runtime
+ * (Node v25.9.0, undici): `fetch(url, { redirect: 'manual' })` resolves with the REAL 3xx status
+ * (`status: 307`, `ok: false`, `type: 'basic'`) and makes no second request. The WHATWG profile that
+ * browsers use instead yields an opaque-redirect filtered response (`type: 'opaqueredirect'`,
+ * `status: 0`); both are treated as a redirect here so the refusal does not depend on which profile
+ * the host runtime implements. A caller-supplied `fetchFn` (test seam) may return either shape.
+ */
+export function isRefusedRedirectStatus(response: { status?: number; type?: string } | null | undefined): boolean {
+  if (!response) return false
+  if (response.type === 'opaqueredirect') return true
+  const status = response.status
+  return typeof status === 'number' && status >= 300 && status < 400
 }
 
 /** The guard's dotted-quad literal test — kept identical so we classify exactly what it classified. */
@@ -121,6 +150,26 @@ function internalNameClass(host: string): WebhookRefusalClass | null {
 }
 
 /**
+ * The host SHAPE of a URL, with no judgement attached — the one field a values-free log line may carry
+ * about a target the guard ALLOWED (a failed delivery, a refused redirect). Returns a closed-set token
+ * only: never the host, port, path, query or userinfo. Mirrors the family fallback used below, so a
+ * refusal log and a post-dispatch log describe the same URL the same way.
+ */
+export function webhookHostFamily(rawUrl: unknown): WebhookRefusalHostFamily {
+  if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) return 'none'
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return 'none'
+  }
+  const hostname = parsed.hostname.replace(/^\[/, '').replace(/\]$/, '')
+  if (IPV4_LITERAL.test(hostname)) return 'ipv4'
+  if (hostname.includes(':')) return 'ipv6'
+  return 'name'
+}
+
+/**
  * Label an ALREADY-REFUSED webhook target. `guardReason` is the guard's rejection reason and is used
  * ONLY to distinguish outcomes that cannot be read off the URL (scheme / DNS); it is never returned,
  * logged, or persisted by this function.
@@ -156,7 +205,9 @@ export function classifyWebhookRefusal(rawUrl: unknown, guardReason?: string): W
     if (byName) return wrap(byName, 'name')
   }
 
-  const hostFamily: WebhookRefusalHostFamily = isV4Literal ? 'ipv4' : isV6Literal ? 'ipv6' : 'name'
+  // Same computation as `webhookHostFamily` by construction (rawUrl parsed fine above, so the 'none'
+  // branch there is unreachable here) — call it rather than repeating it, so the two cannot drift.
+  const hostFamily: WebhookRefusalHostFamily = webhookHostFamily(rawUrl)
   const reason = typeof guardReason === 'string' ? guardReason : ''
   if (reason.startsWith('scheme not allowed')) return wrap('scheme-not-allowed', hostFamily)
   if (reason === 'target resolves to an internal address') return wrap('dns-resolved-internal', hostFamily)

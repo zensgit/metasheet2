@@ -63,7 +63,13 @@ import {
 import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record-link-row-auth-lock'
 import { redactString, redactValue } from './automation-log-redact'
 import { checkWebhookTargetUrl, type SsrfLookupFn } from './webhook-ssrf-guard'
-import { classifyWebhookRefusal, WEBHOOK_TARGET_REJECTED } from './webhook-refusal-class'
+import {
+  classifyWebhookRefusal,
+  isRefusedRedirectStatus,
+  REDIRECT_NOT_ALLOWED,
+  WEBHOOK_TARGET_REJECTED,
+  webhookHostFamily,
+} from './webhook-refusal-class'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
@@ -4142,6 +4148,17 @@ export class AutomationExecutor {
     //     being sent. That is the whole "strip Authorization pointed at localhost" property: we do not
     //     scrub the header, we never dispatch it.
     //
+    // The gate judges ONE url — the one the rule stored. It is therefore only a boundary if the dispatch
+    // stops at that url: `fetch`'s default `redirect: 'follow'` would hand the method, the body, the
+    // caller-supplied headers and the signature headers below to a `Location` this gate never saw
+    // (a 307 from a public first hop is enough; the fetch standard has no scheme-downgrade guard, so
+    // https-only would not survive a redirect either — that half is read off the spec, not measured
+    // here, and it is not what the fix rests on). So BOTH dispatch
+    // sites below pass `redirect: 'manual'` and treat a 3xx as a terminal refusal
+    // (`WEBHOOK_TARGET_REJECTED:redirect-not-allowed`) — the same posture as the button route, which
+    // dispatches through `webhook-pinned-fetch.ts` (`https.request`, which does not follow), and as
+    // `guards/egress-dispatcher.ts:201`, which follows manually and re-validates every hop.
+    //
     // Refusal is FINAL for this attempt: no retry loop, no fallback, no env override (see the design
     // doc — neither egress path has an internal-target allowlist, by deliberate omission).
     const ssrf = await checkWebhookTargetUrl(url, this.deps.ssrfLookupFn)
@@ -4157,7 +4174,12 @@ export class AutomationExecutor {
         code: refusal.code,
         refusalClass: refusal.refusalClass,
         hostFamily: refusal.hostFamily,
-        sheetId: context.sheetId, // an identifier, so the offending rule is findable; never a value
+        // IDENTIFIERS, not values — `sheetId` alone does not locate the rule when a sheet carries many
+        // (it only narrows to the sheet), so carry the two the context already holds. Same identifier
+        // discipline as the sibling button route (`routes/multitable-button.ts:311-314`).
+        sheetId: context.sheetId,
+        ruleId: context.ruleId,
+        executionId: context.executionId,
       })
       return {
         actionType: 'send_webhook',
@@ -4223,8 +4245,24 @@ export class AutomationExecutor {
           headers,
           body: bodyStr,
           signal: controller.signal,
+          // G05: do NOT let the platform follow. See the gate comment above — following would replay
+          // this exact method/body/headers (incl. the signature headers) at a target the gate never
+          // judged. `manual` resolves with the 3xx itself and issues no second request.
+          redirect: 'manual',
         })
         clearTimeout(timeout)
+
+        if (isRefusedRedirectStatus(response)) {
+          // TERMINAL, and deliberately not `lastError` + retry: retrying re-sends the same body to the
+          // same first hop, which will answer 3xx again. Report it as the refusal it is.
+          // Identifiers listed one by one — never spread `context`, which carries `recordData` /
+          // `triggerEvent` (business values) into the log meta.
+          return this.refusedRedirectResult(url, {
+            sheetId: context.sheetId,
+            ruleId: context.ruleId,
+            executionId: context.executionId,
+          })
+        }
 
         if (response.ok) {
           return {
@@ -4247,13 +4285,57 @@ export class AutomationExecutor {
 
     // Surface the failure in the step result (never silent) — the executor lifts
     // a failed step into the execution log + marks the run failed.
-    logger.warn(
-      `send_webhook to ${redactString(url)} failed after ${retries + 1} attempts: ${lastError}`,
-    )
+    //
+    // G05 VALUES-FREE: this line used to be `send_webhook to ${redactString(url)} failed …`, but the
+    // shared redactor has no generic userinfo / `token=` rule (`automation-log-redact.ts:30-61`;
+    // `url` is not a `STRUCTURED_FIELDS` member either, :121-143), so a rule pointed at
+    // `https://<user>:<pw>@host/x?token=…` wrote its credentials here on EVERY failed delivery — on the
+    // allowed path, where the gate above never gets to speak. Log the host SHAPE plus identifiers
+    // instead, exactly like the refusal line; the free-text transport error still goes through the
+    // shared redactor and is unchanged in the step result the operator reads.
+    logger.warn('[automation.send_webhook.failed]', {
+      hostFamily: webhookHostFamily(url),
+      attempts: retries + 1,
+      failure: redactString(lastError ?? 'unknown'),
+      sheetId: context.sheetId,
+      ruleId: context.ruleId,
+      executionId: context.executionId,
+    })
     return {
       actionType: 'send_webhook',
       status: 'failed',
       error: `Webhook failed after ${retries + 1} attempts: ${lastError}`,
+    }
+  }
+
+  /**
+   * G05: the first hop answered 3xx while we asked for `redirect: 'manual'`, so nothing followed it.
+   * Shaped like a pre-dispatch refusal (same code, same closed-set fields, same `WEBHOOK_TARGET_REJECTED:`
+   * error prefix) so one alert query covers both, with one honest difference: `dispatched: true`, because
+   * the FIRST hop did go out — the gate allowed that url. The `Location` is never read, logged or
+   * followed: it is a value chosen by whoever answered, and it is the one input the gate never judged.
+   */
+  private refusedRedirectResult(
+    url: string,
+    ids: Record<string, string | undefined>,
+  ): AutomationStepResult {
+    const hostFamily = webhookHostFamily(url)
+    logger.warn('[automation.send_webhook.refused]', {
+      code: WEBHOOK_TARGET_REJECTED,
+      refusalClass: REDIRECT_NOT_ALLOWED,
+      hostFamily,
+      ...ids,
+    })
+    return {
+      actionType: 'send_webhook',
+      status: 'failed',
+      error: `${WEBHOOK_TARGET_REJECTED}:${REDIRECT_NOT_ALLOWED}`,
+      output: {
+        code: WEBHOOK_TARGET_REJECTED,
+        refusalClass: REDIRECT_NOT_ALLOWED,
+        hostFamily,
+        dispatched: true,
+      },
     }
   }
 
@@ -4306,6 +4388,7 @@ export class AutomationExecutor {
 
     // decision is 'proceed' | 'retry_failed' → attempt ONCE.
     let attempt: OutboundAttemptResult
+    let redirected = false
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), req.timeoutMs)
     try {
@@ -4314,8 +4397,11 @@ export class AutomationExecutor {
         headers: req.headers,
         body: req.bodyStr,
         signal: controller.signal,
+        // G05: same posture as the legacy loop — never follow a `Location` the gate did not judge.
+        redirect: 'manual',
       })
       attempt = { kind: 'response', status: response.status }
+      redirected = isRefusedRedirectStatus(response)
     } catch (err) {
       attempt = classifyFetchError(err)
     } finally {
@@ -4326,6 +4412,17 @@ export class AutomationExecutor {
     const reason = outboundReasonClass(attempt) // bounded, redacted class — never a body/URL/token
     // Tx B — record the terminal outcome (guarded `status='pending'`, single-writer).
     await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason)
+
+    if (redirected) {
+      // A 3xx is never 2xx, so `classifyOutboundResult` already classified it as the ambiguous outcome it
+      // is (the first hop DID receive the body) and Tx B above ran — the intent row is not left pending
+      // and nothing is auto-resent. Only the step label changes: say "we refused to follow" rather than
+      // "unknown outcome", so an operator is not sent hunting for a delivery a redirect ate.
+      return this.refusedRedirectResult(req.url, {
+        rootExecutionId: outboundId.rootExecutionId,
+        actionKey: outboundId.actionKey,
+      })
+    }
 
     if (outcome === 'sent') {
       return {
@@ -4345,7 +4442,15 @@ export class AutomationExecutor {
     }
     // outcome_unknown — the send MAY have happened; surfaced as failed so the run does NOT silently succeed,
     // and NEVER auto-resent (a retry consults the intent row and skips).
-    logger.warn(`send_webhook to ${redactString(req.url)} → outcome_unknown (${reason}); recorded, not auto-resent`)
+    // G05 VALUES-FREE (same reason as the legacy failure line): `redactString(req.url)` left userinfo and
+    // non-`access_token` query credentials intact, and this line fires on the ALLOWED path where the gate
+    // has already had its say. Host SHAPE + the bounded reason class + identifiers only.
+    logger.warn('[automation.send_webhook.outcome_unknown]', {
+      hostFamily: webhookHostFamily(req.url),
+      reason, // already a bounded class (`outboundReasonClass`) — never a body/URL/token
+      rootExecutionId: outboundId.rootExecutionId,
+      actionKey: outboundId.actionKey, // structural path + action type + config HASH; no config values
+    })
     return {
       actionType: 'send_webhook',
       status: 'failed',

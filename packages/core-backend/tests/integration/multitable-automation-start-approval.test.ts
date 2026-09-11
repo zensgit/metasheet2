@@ -61,7 +61,17 @@ const approvalIds: string[] = []
 const testRunRoots: string[] = []
 let templateSeq = 0
 
-function makeAutomationService(fetchFn?: typeof fetch): AutomationService {
+/**
+ * G05: the parameter DEFAULTS to a stub. Four call sites construct the service bare
+ * (`makeAutomationService()`), and their rules carry a tail `send_webhook` — unreachable today because the
+ * run fails/suspends first, but with no stub an executor change that reaches the tail would fall back to
+ * `globalThis.fetch` and put a real SYN on the wire from a test lane (at a documentation-only TEST-NET-3
+ * address, i.e. a per-case black-hole stall, not a millisecond failure). The default closes that by
+ * construction instead of by luck.
+ */
+const STUB_OK_FETCH = (async () => new Response('OK', { status: 200 })) as unknown as typeof fetch
+
+function makeAutomationService(fetchFn: typeof fetch = STUB_OK_FETCH): AutomationService {
   const svc = new AutomationService(eventBus, db as never, q as never, fetchFn as never)
   svc.init()
   return svc

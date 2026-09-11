@@ -339,6 +339,11 @@ describe('send_webhook SSRF gate — stored credentials are never emitted at an 
     // ...and it is still USEFUL: code + class are present, so an operator can triage without the value.
     expect(serialized).toContain('WEBHOOK_TARGET_REJECTED')
     expect(serialized).toContain('loopback')
+    // IDENTIFIERS must stay. `sheetId` alone only narrows the alert to a sheet, which can carry many
+    // rules; the log site's own comment promises the offending rule is findable. These are identifiers,
+    // not values, so they do not weaken the assertions above.
+    expect(serialized).toContain('"ruleId"')
+    expect(serialized).toContain('"executionId"')
   })
 
   it('VALUES-FREE: the persisted step result carries only the code + host shape', async () => {
@@ -434,6 +439,215 @@ describe('send_webhook SSRF gate — refusal is terminal (no retry loop re-attem
 })
 
 /**
+ * REDIRECTS. The gate judges ONE url — the one the rule stored. `fetch`'s default `redirect: 'follow'`
+ * would therefore turn a public first hop into a tunnel: the platform replays the SAME method, body,
+ * caller-supplied headers and the signature headers at whatever `Location` the first hop names, and the
+ * gate never sees that url (it also follows https: → http:). Measured on this runtime before writing
+ * these cases: Node v25.9.0, `new Request('https://e.com/').redirect === 'follow'`; two loopback servers,
+ * a plain POST to a 307 reached the second server; the same POST with `redirect: 'manual'` resolved with
+ * `status 307, ok false, type 'basic'` and the second server saw nothing.
+ *
+ * THE LOAD-BEARING ASSERTION here is `toHaveBeenCalledTimes(1)` — the first hop went out (the gate
+ * allowed that url), and nothing followed it.
+ */
+describe('send_webhook SSRF gate — a 3xx is a terminal refusal, not a hop to follow', () => {
+  const INTERNAL_LOCATION = 'http://127.0.0.1:8200/v1/sys/seal'
+  const CREDENTIALED_TAIL = {
+    headers: { Authorization: 'Bearer LEAKME-TOKEN-123', 'X-Vault-Token': 'LEAKME-VAULT' },
+    secret: 'HMAC-LEAKME-SECRET',
+  }
+
+  /**
+   * First hop answers 3xx; EVERY later call resolves 200. So a followed hop or a retried attempt does not
+   * merely change a count — it flips the step to `success`, which no assertion below tolerates.
+   */
+  function redirectHarness(status: number, location = INTERNAL_LOCATION): Harness {
+    const h = makeHarness()
+    let calls = 0
+    h.fetch.mockImplementation(async () => {
+      calls += 1
+      return (calls === 1
+        ? { ok: false, status, headers: new Headers({ location }) }
+        : { ok: true, status: 200, headers: new Headers() }) as unknown as Response
+    })
+    return h
+  }
+
+  function expectRedirectRefused(step: { status?: string; error?: string; output?: Record<string, unknown> } | undefined) {
+    expect(step?.status).toBe('failed')
+    expect(step?.error).toBe('WEBHOOK_TARGET_REJECTED:redirect-not-allowed')
+    expect(step?.output).toMatchObject({
+      code: 'WEBHOOK_TARGET_REJECTED',
+      refusalClass: 'redirect-not-allowed',
+      // Honest difference from a pre-dispatch refusal: the FIRST hop did go out.
+      dispatched: true,
+    })
+  }
+
+  it('legacy path: a 307 to an internal Location produces NO second fetch and a failed step', async () => {
+    const h = redirectHarness(307)
+    const step = await runWebhook(h, { url: PUBLIC_URL, ...CREDENTIALED_TAIL })
+    expect(h.fetch).toHaveBeenCalledTimes(1) // the hop the gate judged, and only that one
+    expectRedirectRefused(step)
+  })
+
+  it('legacy path: asks the platform not to follow (`redirect: "manual"` on the dispatch init)', async () => {
+    const h = redirectHarness(307)
+    await runWebhook(h, { url: PUBLIC_URL })
+    const init = h.fetch.mock.calls[0][1] as RequestInit
+    // Without this the platform default ('follow') makes the two assertions above unenforceable in prod:
+    // the mock can only refuse to follow because it is a mock.
+    expect(init.redirect).toBe('manual')
+  })
+
+  it('legacy path: every 3xx status is terminal — no retry loop re-attempt', async () => {
+    for (const status of [301, 302, 303, 307, 308]) {
+      const h = redirectHarness(status)
+      const step = await runWebhook(h, { url: PUBLIC_URL })
+      expect(h.fetch, `status ${status}`).toHaveBeenCalledTimes(1)
+      expectRedirectRefused(step)
+    }
+  })
+
+  it('VALUES-FREE: the refused redirect never logs or echoes the Location', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const h = redirectHarness(307)
+    const step = await runWebhook(h, { url: PUBLIC_URL, ...CREDENTIALED_TAIL })
+
+    const logs = warn.mock.calls.filter((c) => String(c[0]).includes('send_webhook'))
+    const serialized = JSON.stringify(logs) + JSON.stringify(step)
+    for (const value of ['127.0.0.1', '8200', 'sys/seal', 'LEAKME-TOKEN-123', 'LEAKME-VAULT', 'HMAC-LEAKME-SECRET']) {
+      expect(serialized).not.toContain(value)
+    }
+    // …and still triageable: the same code the pre-dispatch refusals use, with the redirect class.
+    expect(serialized).toContain('WEBHOOK_TARGET_REJECTED')
+    expect(serialized).toContain('redirect-not-allowed')
+  })
+
+  it('POSITIVE control: a 2xx on the same harness still succeeds (the 3xx branch is what refuses)', async () => {
+    const h = makeHarness()
+    const step = await runWebhook(h, { url: PUBLIC_URL })
+    expect(step?.status).toBe('success')
+    expect(h.fetch).toHaveBeenCalledTimes(1)
+  })
+
+  describe('two-phase path (#4196)', () => {
+    beforeEach(() => {
+      process.env[CLASSB_FLAG] = 'true'
+    })
+
+    it('a 302 to an internal Location produces NO second fetch and a failed step', async () => {
+      const h = redirectHarness(302)
+      const step = await runWebhook(h, { url: PUBLIC_URL, ...CREDENTIALED_TAIL }, ROOT)
+      expect(h.fetch).toHaveBeenCalledTimes(1)
+      expectRedirectRefused(step)
+      // At-most-once bookkeeping still closes: the intent was claimed (Tx A) and an outcome recorded
+      // (Tx B) — a redirect must not leave the row `pending` forever.
+      expect(h.intentInserts()).toBe(1)
+      expect(h.sql.some((s) => /UPDATE meta_automation_outbound_intent/i.test(s))).toBe(true)
+    })
+
+    it('asks the platform not to follow on this path too', async () => {
+      const h = redirectHarness(307)
+      await runWebhook(h, { url: PUBLIC_URL }, ROOT)
+      const init = h.fetch.mock.calls[0][1] as RequestInit
+      expect(init.redirect).toBe('manual')
+    })
+  })
+})
+
+/**
+ * THE ALLOWED PATH'S OWN LOGS. The refusal line was values-free from the start; the two lines that fire
+ * AFTER the gate says yes were not. Both used to be `send_webhook to ${redactString(url)} …`, and the
+ * shared redactor has no generic userinfo rule and no generic `token=` rule (it only knows
+ * `access_token=`, `publicToken=`, `sign=`/`timestamp=`, plus DingTalk/Bearer/JWT shapes — verified by
+ * running the real `redactString` against these very strings), so a credentialed URL was written verbatim
+ * on every failed delivery. The redactor is shared by four channels and mirrored in the web app, so it is
+ * NOT changed here; the two call sites in this executor are.
+ */
+describe('send_webhook — post-dispatch logs on the ALLOWED path are values-free too', () => {
+  // Public host literal (so the gate allows it) carrying the credential shapes the redactor misses.
+  const CREDENTIALED_PUBLIC = `https://svcuser:Sup3rSecret@${PUBLIC_ADDR}/hook?token=SUPERSECRETQUERY&api_key=KEYVALUE`
+  const FORBIDDEN = ['svcuser', 'Sup3rSecret', 'SUPERSECRETQUERY', 'KEYVALUE', 'token=', '/hook']
+
+  it('legacy path: the "failed after N attempts" line carries shape + identifiers, never the URL', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const h = makeHarness({ status: 500 })
+    const step = await runWebhook(h, { url: CREDENTIALED_PUBLIC })
+    expect(step?.status).toBe('failed')
+
+    const logs = JSON.stringify(warn.mock.calls.filter((c) => String(c[0]).includes('send_webhook')))
+    for (const value of FORBIDDEN) expect(logs).not.toContain(value)
+    // …and still triageable without the value.
+    expect(logs).toContain('send_webhook.failed')
+    expect(logs).toContain('ipv4')
+  })
+
+  it('two-phase path: the outcome_unknown line carries shape + identifiers, never the URL', async () => {
+    process.env[CLASSB_FLAG] = 'true'
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const h = makeHarness({ status: 500 })
+    const step = await runWebhook(h, { url: CREDENTIALED_PUBLIC }, ROOT)
+    expect(step?.status).toBe('failed')
+
+    const logs = JSON.stringify(warn.mock.calls.filter((c) => String(c[0]).includes('send_webhook')))
+    for (const value of FORBIDDEN) expect(logs).not.toContain(value)
+    expect(logs).toContain('send_webhook.outcome_unknown')
+    expect(logs).toContain('http_500') // the bounded reason class is kept
+  })
+})
+
+/**
+ * BYPASS SAMPLE MATRIX. Every row here is refused TODAY, and every row depends on one implicit
+ * precondition: `new URL()` (WHATWG) normalises IPv4 octal/decimal/hex/short forms, IDNA-maps
+ * non-ASCII labels, and percent-decodes host characters BEFORE `webhook-ssrf-guard.ts:98` looks at
+ * `parsed.hostname`. A future "let's pre-normalise the host ourselves" change, or reusing the guard on a
+ * non-WHATWG parser, would silently re-open the whole column while every other case in this file stays
+ * green. These rows are the tripwire for that.
+ *
+ * The two ALLOW rows are the counter-control: they prove the decision is made on the REAL host, not on a
+ * substring — `#@` and `user@` are userinfo/fragment confusion, not internal targets.
+ */
+describe('send_webhook SSRF gate — numeric / IDNA / trailing-dot / userinfo host forms', () => {
+  const REFUSED: Array<[string, string, string, string]> = [
+    ['octal IPv4', 'https://0177.0.0.1/x', 'loopback', 'ipv4'],
+    ['32-bit decimal IPv4', 'https://2130706433/x', 'loopback', 'ipv4'],
+    ['hex + short form', 'https://0x7f.1/x', 'loopback', 'ipv4'],
+    ['short form', 'https://127.1/x', 'loopback', 'ipv4'],
+    ['percent-encoded host digits', 'https://%31%32%37.0.0.1/x', 'loopback', 'ipv4'],
+    ['IDNA full-width stops', 'https://127。0。0。1/x', 'loopback', 'ipv4'],
+    ['trailing-dot FQDN', 'https://localhost./x', 'loopback', 'name'],
+    ['uppercase name', 'https://LOCALHOST/x', 'loopback', 'name'],
+    ['userinfo in front of loopback (http)', 'http://public@127.0.0.1/x', 'loopback', 'ipv4'],
+  ]
+
+  for (const [label, url, refusalClass, hostFamily] of REFUSED) {
+    it(`refuses ${label} with zero egress`, async () => {
+      // The resolver is stubbed PUBLIC on purpose: if any row passed only because DNS failed, this stub
+      // would let it through, so the row proves the URL-shape decision and not a resolver accident.
+      const h = makeHarness()
+      expectRefused(await runWebhook(h, { url }), h, refusalClass, hostFamily)
+    })
+  }
+
+  it('refuses an internal literal even when the resolver seam LIES that it is public (seam cannot allow)', async () => {
+    const lookup = vi.fn(async () => [{ address: PUBLIC_ADDR, family: 4 }])
+    const h = makeHarness({ lookup })
+    expectRefused(await runWebhook(h, { url: 'https://10.0.0.1/hook' }), h, 'private', 'ipv4')
+    expect(lookup).toHaveBeenCalledTimes(0) // literal branch short-circuits before the seam
+  })
+
+  it('ALLOWS fragment/userinfo confusion, because the real host is public (decision is on the host)', async () => {
+    for (const url of ['https://evil.example.com#@127.0.0.1/x', 'https://127.0.0.1@example.com/x']) {
+      const h = makeHarness()
+      const step = await runWebhook(h, { url })
+      expect(step?.status, url).toBe('success')
+      expect(h.fetch, url).toHaveBeenCalledTimes(1)
+    }
+  })
+})
+
+/**
  * COUPLING TRIPWIRE. The classifier maps the guard's rejection `reason` strings for the two outcomes it
  * cannot read off the URL (scheme / DNS). If the guard reworded those strings, the classifier would
  * silently degrade to `internal-other` and the refusal-class table in the docs would rot — while every
@@ -456,9 +670,13 @@ describe('send_webhook SSRF gate — guard/classifier contract', () => {
   })
 
   it('the classifier never returns anything but closed-set tokens (no free-text field to leak into)', () => {
+    // `redirect-not-allowed` is in the union but is NOT reachable from this function: it is decided from
+    // a RESPONSE status by the dispatch sites, not from a URL. Listed so the set stays a superset of the
+    // union (a future member must be added here consciously).
     const CLASSES = new Set([
       'invalid-url', 'scheme-not-allowed', 'loopback', 'private', 'link-local', 'unique-local',
       'unspecified', 'internal-name', 'dns-resolved-internal', 'dns-unresolved', 'internal-other',
+      'redirect-not-allowed',
     ])
     const FAMILIES = new Set(['ipv4', 'ipv6', 'ipv4-mapped-ipv6', 'name', 'none'])
     const samples: Array<[unknown, string | undefined]> = [
