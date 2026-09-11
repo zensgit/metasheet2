@@ -37,7 +37,10 @@
 //   S-13  driver error text NEVER reaches the report — a message carrying a password classifies to a
 //         code and the password is gone
 //   S-20  a SQL Server error NUMBER (208/2812/229/18456/4060) is judged BEFORE the English prose regexes,
-//         so a Chinese-locale server's 对象名…无效 / 拒绝了…权限 / 登录失败 still classifies correctly
+//         so a Chinese-locale server's 对象名…无效 / 拒绝了…权限 / 登录失败 still classifies correctly —
+//         locked by fixtures whose number and prose CONTRADICT each other
+//   S-21  the host's own post-#5586 connect refusal (`code: 'SOURCE_UNAVAILABLE'`, no number, fixed
+//         sentence) classifies as UNREACHABLE, so "cannot connect" is not reported as OBJECT_MISSING
 //   R-01  the route is registered at the module's own path and gated on the integration READ tier;
 //         a stock-prep-namespace principal is refused (source reads are not a queue-operator act)
 //   R-02  the source defaults to the CONFIGURED table action, and an explicit id overrides it
@@ -1203,6 +1206,36 @@ async function mssqlErrorNumberIsJudgedBeforeProse() {
       error: { number: 4060, message: '无法打开登录所请求的数据库 "存货备料"。登录失败。' },
       expected: 'auth_refused',
     },
+    // THE ORDER-LOCKING HALF. The five fixtures above only prove the number is USED — their prose is
+    // Chinese and matches nothing, so a build that judged prose first would pass them all unchanged.
+    // Each fixture below carries a number and English prose that point at DIFFERENT codes, so the
+    // assertion can only hold if the number is judged FIRST. Move the number block after the prose
+    // regexes and these five turn red; that is the whole claim of this section, made falsifiable.
+    {
+      name: '229 whose prose says "invalid object name" — the number wins',
+      error: { code: 'EREQUEST', number: 229, message: "Invalid object name 'dbo.Part'." },
+      expected: 'permission_denied', // prose-first would say object_missing
+    },
+    {
+      name: '208 whose prose says "permission denied" — the number wins',
+      error: { code: 'EREQUEST', number: 208, message: 'permission denied for table part' },
+      expected: 'object_missing', // prose-first would say permission_denied
+    },
+    {
+      name: '2812 whose prose says "permission denied" — the number wins',
+      error: { code: 'EREQUEST', number: 2812, message: 'permission denied for function dbo.usp_x' },
+      expected: 'object_missing', // prose-first would say permission_denied
+    },
+    {
+      name: '18456 whose prose says "invalid object name" — the number wins',
+      error: { code: 'EREQUEST', number: 18456, message: "Invalid object name 'dbo.Part'." },
+      expected: 'auth_refused', // prose-first would say object_missing
+    },
+    {
+      name: '4060 whose prose says "invalid object name" — the number wins',
+      error: { code: 'EREQUEST', number: 4060, message: "Invalid object name 'dbo.Part'." },
+      expected: 'auth_refused', // prose-first would say object_missing
+    },
   ]
   for (const testCase of cases) {
     assert.equal(
@@ -1242,6 +1275,47 @@ async function anUnrecognizedNumberFallsBackToProseThenUnknown() {
     classifyReadError({ code: 'EREQUEST', number: 999999, message: '某种未知的驱动错误' }),
     'unknown_error',
   )
+}
+
+// ---------------------------------------------------------------------------
+// S-21 — THE REAL CONNECT-FAILURE SHAPE. Since #5586 the host never lets a driver connect error out:
+// DataSourceManager.connectDataSource replaces it with a fixed values-free error whose ONLY
+// identifying mark is `code: 'SOURCE_UNAVAILABLE'` (no `.number`, no driver prose). That is the
+// object this module actually receives when a customer's SQL Server is down, credentials are wrong,
+// or the database cannot be opened — the 18456/4060 rows of the number table are NOT reachable on
+// this stack. Classified as UNREACHABLE, because the alternative (unknown_error) is not in
+// CONNECTIVITY_ERROR_CODES and made the reachability check report "cannot connect" as
+// OBJECT_MISSING, sending an implementer to the schema when the problem is the network.
+// ---------------------------------------------------------------------------
+
+// Byte-for-byte the host's own refusal: packages/core-backend/src/data-adapters/DataSourceManager.ts
+// DATA_SOURCE_UNAVAILABLE_MESSAGE + `{ status: 503, code: DATA_SOURCE_UNAVAILABLE_CODE }`. Copied
+// rather than imported because this plugin must not depend on core-backend's TS source.
+function hostSourceUnavailableError() {
+  return Object.assign(
+    new Error('数据源当前无法连接，请先「测试连接」查看原因 / Data source is currently unreachable; run "Test connection" for details'),
+    { status: 503, code: 'SOURCE_UNAVAILABLE' },
+  )
+}
+
+async function hostConnectRefusalIsAConnectivityFailure() {
+  assert.equal(
+    classifyReadError(hostSourceUnavailableError()),
+    'unreachable',
+    'the host connect refusal carries no number and no matchable prose; only its code identifies it',
+  )
+  // The consequence, end to end through the real report builder: the verdict must be "cannot
+  // connect", NOT "the entry table is missing".
+  const { report } = await preflight(orderModuleSource(), {
+    failEveryRead: () => hostSourceUnavailableError(),
+  })
+  const reachability = checkOf(report, 'reachability')
+  assert.equal(reachability.reachable, false)
+  assert.equal(reachability.failureCode, 'unreachable',
+    'unknown_error here would fall through to OBJECT_MISSING and blame the schema for a dead network')
+  assert.deepEqual(codesOf(report.blockers), [B.SOURCE_UNREACHABLE])
+  // Still values-free: the refusal sentence never travels, same as any driver text.
+  assert.equal(JSON.stringify(report).includes('Test connection'), false)
 }
 
 // ---------------------------------------------------------------------------
@@ -2198,6 +2272,9 @@ async function main() {
   await proseStillClassifiesWhenThereIsNoErrorNumber()
   await anUnrecognizedNumberFallsBackToProseThenUnknown()
   console.log('  ✓ S-20 a Chinese-locale SQL Server`s error NUMBER is judged before its (unmatchable) prose')
+
+  await hostConnectRefusalIsAConnectivityFailure()
+  console.log('  ✓ S-21 the host`s SOURCE_UNAVAILABLE connect refusal is a connectivity failure, not unknown')
 
   await routeIsRegisteredAtTheModulesOwnPath()
   await routeIsGatedOnTheIntegrationReadTier()

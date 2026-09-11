@@ -568,12 +568,34 @@ function looksNumeric(value) {
   return Number.isFinite(parsed) && parsed >= 0
 }
 
+// THE HOST'S OWN CONNECT REFUSAL. Since #5586 every failure of `connectDataSource` is replaced,
+// before any caller sees it, by a fixed values-free error carrying `code: 'SOURCE_UNAVAILABLE'`
+// (packages/core-backend/src/data-adapters/DataSourceManager.ts — `sourceUnavailableError`, thrown
+// from the two connect seams and nowhere else). Its message is a fixed bilingual sentence and the
+// driver's own `.code`/`.number` are dropped on the way, so NOTHING below can classify it: before
+// this branch existed it read as `unknown_error`, which is not in CONNECTIVITY_ERROR_CODES, and the
+// reachability check therefore reported "could not connect" as OBJECT_MISSING — the very confusion
+// the comment at CHECK 1 warns about, in reverse. Matched on the CODE (an exact equality), never on
+// the sentence, so a translation of that sentence cannot break this the way prose matching broke.
+const HOST_SOURCE_UNAVAILABLE_CODE = 'SOURCE_UNAVAILABLE'
+
 // tedious (the MSSQL driver) reports every server-side failure with `.code === 'EREQUEST'` — that
 // tells us nothing. The real SQL Server error number lives in `.number` and is locale-invariant: a
 // Chinese-locale SQL Server raises 对象名 'x' 无效 for the exact same 208 an English server spells
 // "Invalid object name". The English-prose regexes below never match the Chinese text, so a driver
 // number takes priority and prose is kept only as the fallback for errors that carry none (e.g. a
 // PG driver, or a raw socket failure with no server-assigned number at all).
+//
+// WHICH OF THESE ARE LIVE ON TODAY'S STACK — stated so nobody reads this table as a coverage claim.
+// A read reaches this module through `adapter.read` -> the host read-only facade -> MSSQLAdapter,
+// where a REQUEST failure comes back as `{ data: [], error }` carrying tedious's RequestError with
+// `.number` intact (mssql/lib/error/request-error.js sets it; connection-error.js does NOT). So
+// 208 / 2812 / 229 — request-time numbers — are the ones this table actually decides today.
+// 18456 (login failed) and 4060 (cannot open database) are CONNECT-time numbers: on this stack they
+// are swallowed by the SOURCE_UNAVAILABLE normalization above and never arrive here with a number
+// at all. They are kept for a caller that hands this module a direct driver error (a future
+// non-facade probe, or a driver that reports a login refusal on a request), and are NOT evidence
+// that connect-time failures classify by number today.
 const MSSQL_ERROR_NUMBER_CODES = Object.freeze({
   208: 'OBJECT_MISSING', // Invalid object name
   2812: 'OBJECT_MISSING', // Could not find stored procedure
@@ -588,6 +610,12 @@ const MSSQL_ERROR_NUMBER_CODES = Object.freeze({
  * text, so no later filter has to be trusted to remove a host or a login from it.
  */
 function classifyReadError(error) {
+  // The host's connect refusal first: it carries no number and no classifiable prose, and it means
+  // exactly one thing — the source could not be talked to at all.
+  if (optionalString(error && error.code) === HOST_SOURCE_UNAVAILABLE_CODE) {
+    return READ_ERROR_CODES.UNREACHABLE
+  }
+
   const number = Number.isInteger(error && error.number) ? error.number : null
   if (number !== null && Object.prototype.hasOwnProperty.call(MSSQL_ERROR_NUMBER_CODES, number)) {
     return READ_ERROR_CODES[MSSQL_ERROR_NUMBER_CODES[number]]
