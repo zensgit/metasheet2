@@ -218,6 +218,35 @@ describe('stock-prep posture plain language', () => {
   })
 
   // -------------------------------------------------------------------------
+  // SOURCE_UNAVAILABLE — the 503 DataSourceManager.connectDataSource raises when the source library
+  // itself (PLM / K3's SQL Server, etc.) cannot be reached (#5586). Source precheck, an operator's
+  // dry-run and a pull all read through that one chokepoint, so this code reaches the stock-prep
+  // surfaces too, not just the raw data-sources routes.
+  // -------------------------------------------------------------------------
+  it('SOURCE_UNAVAILABLE has a dedicated row naming the 503 and the source library, not the driver text', () => {
+    const plain = STOCK_PREP_ERROR_PLAIN.SOURCE_UNAVAILABLE
+    expect(plain, 'SOURCE_UNAVAILABLE must have a row in the shipped plain-language table').toBeTruthy()
+    // 「发生了什么」: the status and what kind of thing is down — never the driver's raw connect text.
+    expect(plain.zh).toContain('503')
+    expect(plain.zh).toContain('源库')
+    expect(plain.en).toContain('503')
+    // 「该怎么办」: #5588 review — a bare 503 cannot prove "not a permission problem" or "retrying
+    // never helps" (a source-account permission refusal and a transient fault both land on this same
+    // code), so the copy must not make either claim. What it CAN say, and what these assertions pin,
+    // is the narrower and provable half: adding a permission to the MetaSheet account will not fix
+    // this, because the account this route touches is on the source side.
+    expect(plain.zh).toContain('不是直接给 MetaSheet 账号加权限')
+    expect(plain.en).toContain('This is not fixed by adding a permission')
+    expect(plain.zhNext, 'zhNext').toBeTruthy()
+    expect(plain.zhNext).toContain('不是给账号加权限')
+    expect(plain.enNext, 'enNext').toBeTruthy()
+    expect(plain.enNext).toContain('This is not fixed by adding a permission')
+    // The lookup function a caller actually uses agrees with the table read directly.
+    expect(stockPrepErrorPlain('SOURCE_UNAVAILABLE').zh).toBe(plain.zh)
+    expect(stockPrepErrorPlain('SOURCE_UNAVAILABLE')).not.toEqual(STOCK_PREP_ERROR_GENERIC)
+  })
+
+  // -------------------------------------------------------------------------
   // P0-5 (second half): THE BOARD'S OWN TABLE — the one the FLOOR reads.
   //
   // The confirmation queue is where an administrator looks; the project board is where an operator
