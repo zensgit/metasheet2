@@ -725,10 +725,21 @@ export function dataSourcesRouter(): Router {
    *
    * FAIL-CLOSED, AND THAT IS THE POINT. Accepting `write` here as a fallback would leave the two
    * acts fused and make this change cosmetic. So a non-admin who holds `data_sources:write` and not
-   * `data_sources:rotate` now gets 403 on this route (platform admins are unaffected: rbacGuard
-   * short-circuits the global-admin tier at src/rbac/rbac.ts:69-72). The deployment prerequisite —
-   * count today's `data_sources:write` holders read-only, grant `data_sources:rotate` through a ROLE
-   * before shipping — is written out in
+   * `data_sources:rotate` now gets 403 ON THIS ROUTE (platform admins are unaffected: rbacGuard
+   * short-circuits the global-admin tier at src/rbac/rbac.ts:69-72).
+   *
+   * STATED PRECISELY: what `write` alone loses is IN-PLACE rotation, not every route to a new
+   * secret. `write` still owns `DELETE /:id` (:851) plus `POST /api/data-sources` (:463) with the
+   * same id and fresh `credentials`, i.e. an owner can drop and re-create the source (the delete
+   * runs `manager.assertAccess` first, so a non-owner still eats the uniform 404, and re-creation
+   * only ever lands under the caller's own ownership); and it still owns `PUT /:id` (:615), which
+   * repoints `connection`. What this gate splits is the AUTHORIZATION SURFACE of two
+   * different-magnitude acts, so the chore becomes delegable without the repoint — it is not a
+   * claim that a `write` holder can never reach a new password.
+   *
+   * The deployment prerequisite — count today's `data_sources:write` holders read-only across ALL
+   * THREE live surfaces (`role_permissions`, `user_permissions` and the legacy `users.permissions`
+   * column), then grant `data_sources:rotate` through a ROLE before shipping — is written out in
    * db/migrations/zzzz20260912120000_add_data_source_sharing_permissions.ts and in
    * docs/development/data-source-sharing-pr1-rotate-scope-design-20260912.md.
    *

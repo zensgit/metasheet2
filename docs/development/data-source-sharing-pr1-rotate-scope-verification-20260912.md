@@ -11,8 +11,8 @@
 
 | 文件 | 性质 | 关键行 |
 |---|---|---|
-| `packages/core-backend/src/db/migrations/zzzz20260912120000_add_data_source_sharing_permissions.ts` | **新增** 181 行 | `up() :111-128`、`down() :130-181`、导出常量 `:86 / :99 / :106` |
-| `packages/core-backend/src/routes/data-sources.ts` | 改 | **`:738`** 门 `write` → `rotate`;`:712-737` 注释块 |
+| `packages/core-backend/src/db/migrations/zzzz20260912120000_add_data_source_sharing_permissions.ts` | **新增** 210 行 | `up() :140-157`、`down() :159-210`、导出常量 `:115 / :128 / :135` |
+| `packages/core-backend/src/routes/data-sources.ts` | 改 | **`:749`** 门 `write` → `rotate`;`:712-748` 注释块 |
 | `packages/core-backend/tests/unit/data-source-sharing-permission-codes-seed.test.ts` | **新增** 27 项 | 见 §3 |
 | `packages/core-backend/tests/unit/data-source-visibility-authority-matrix.test.ts` | 改 | `:80-88` 新增 rotate 版 actor;`:451-530` 新增 5 项;`:438-448` 既有用例改用 `OTHER_WITH_ROTATE` |
 | `packages/core-backend/tests/unit/data-source-readonly.test.ts` | 改 | `:421` 用例改名;`:431-440` 新增 403 断言;`:446-454` 保留 404 断言 |
@@ -66,7 +66,7 @@ python 子进程一次)都是 `89 passed`。原因是上一轮 vitest 刚退出�
 | 组 | 项数 | 钉住什么 |
 |---|---|---|
 | vocabulary `:337-428` | 7 | 三码齐全且与迁移 SQL 逐字一致;三码同 `data_sources` 前缀(= 同一个准入开关);迁移文件在 provider 能发现的目录/命名下;`DO $$` + `ON CONFLICT` 形状;`up()` 零发权;`down()` 子表先于父表且不碰别的域(**包括 `data_sources:read/write/execute` ——那三个不是本迁移能删的**) |
-| the rotate gate `:430-501` | 7 | `:738` 的门是 `rotate` **独占**;`:615` 仍是 `write`;解析器认全部三种调用形态与三种引号;路由消失时**大声失败**(而不是让断言空转) |
+| the rotate gate `:430-501` | 7 | `:749` 的门是 `rotate` **独占**;`:615` 仍是 `write`;解析器认全部三种调用形态与三种引号;路由消失时**大声失败**(而不是让断言空转) |
 | reconciliation `:503-566` | 5 | 路由文件里每一个被强制的 `data_sources:*` 码都可授予;PR-1 **只接线 `rotate` 一个**;`use`/`share` 当前在路由文件里**不存在**(正面断言,不是"没查") |
 | idempotency `:568-632` | 5 | `up()` 跑两遍 = 三行、不抛重复键;库里已有部分码时 no-op;`permissions` 表不存在时整块跳过;`down()` 只回收自己的三码、保住运维已有的 `data_sources:write` 角色绑定 |
 | admission posture `:634-662` | 3 | `data_sources` 仍受准入管控;豁免资源做反证;迁移**可执行段**不含 `NON_NAMESPACED_PERMISSION_RESOURCES` / `user_namespace_admissions` |
@@ -94,8 +94,8 @@ python 子进程一次)都是 `89 passed`。原因是上一轮 vitest 刚退出�
 
 | # | 变异 | 期望 | 实测 |
 |---|---|---|---|
-| **M-A** | `:738` 的门改回 `rbacGuard('data_sources','write')`(PR 前状态) | 红 | **5 failed / 84 passed**。红的是:`…seed.test.ts` 的「独占」正面断言 + 两条形状探针;`matrix:470` 的 FAIL-CLOSED 403;`readonly:421` 的 403/404 成对用例 |
-| **M-B** | `:738` 的门改成 `rbacGuardAny(['data_sources:rotate','data_sources:write'])`(「把 403 修掉」的那种改法) | 红 | **3 failed / 24 passed**。`…seed.test.ts` 的三条结构断言全红。**注意**:另两个 spec 这一轮只收集到 27 项——因为 `rbacGuardAny` 在 `data-sources.ts` 里没有 import,路由构造期就 `ReferenceError`,两个 supertest 文件整体收集失败。这恰好说明了 §3.1 的点:**行为用例对这个变异是"全绿或全崩",只有形状断言给出精确的、可读的红** |
+| **M-A** | `:749` 的门改回 `rbacGuard('data_sources','write')`(PR 前状态) | 红 | **5 failed / 84 passed**。红的是:`…seed.test.ts` 的「独占」正面断言 + 两条形状探针;`matrix:470` 的 FAIL-CLOSED 403;`readonly:421` 的 403/404 成对用例 |
+| **M-B** | `:749` 的门改成 `rbacGuardAny(['data_sources:rotate','data_sources:write'])`(「把 403 修掉」的那种改法) | 红 | **3 failed / 24 passed**。`…seed.test.ts` 的三条结构断言全红。**注意**:另两个 spec 这一轮只收集到 27 项——因为 `rbacGuardAny` 在 `data-sources.ts` 里没有 import,路由构造期就 `ReferenceError`,两个 supertest 文件整体收集失败。这恰好说明了 §3.1 的点:**行为用例对这个变异是"全绿或全崩",只有形状断言给出精确的、可读的红** |
 | **M-C** | 迁移 `VALUES` 删掉 `data_sources:rotate` 一行(只种 2/3) | 红 | **5 failed / 84 passed**,全部落在 `…seed.test.ts`:词表对账、幂等(三行变两行)、以及对账抛 `enforced but never seeded: data_sources:rotate` |
 | **M-C2** | 迁移 `VALUES` 删掉 `data_sources:use` 一行(**当前无任何网关引用的码**) | 红 | **5 failed / 84 passed**。这条是专门设计的:少一个"还没接线"的码,`enforced` 方向看不见它,只有新增的 `declared but never seeded` 方向能抓 —— 证明两个方向都不是摆设 |
 | **M-D** | `up()` 里追加 `INSERT INTO role_permissions … ('admin','data_sources:rotate')`(种子变成发权) | 红 | **2 failed / 87 passed**:「零自动持有」正面断言 + 「去掉 ON CONFLICT 第二遍必炸」那条探针(因为多出的语句改变了 `executed` 的条数) |
@@ -111,17 +111,37 @@ python 子进程一次)都是 `89 passed`。原因是上一轮 vitest 刚退出�
 ## 5. 上机前置(必须在部署门改动之前做,**迁移里没有自动补权**)
 
 ```sql
--- 只读
+-- 步骤 0(只读):先定 legacy 列 users.permissions 的形状(jsonb 还是 TEXT[])。
+-- text[] 到 jsonb 没有合法 cast,第三段谓词按形状二选一。
+SELECT pg_typeof(permissions) FROM users LIMIT 1;
+```
+
+```sql
+-- 步骤 1(只读)。三张活面,不是两张:userHasPermission 查 user_permissions(rbac/service.ts:44)、
+-- role_permissions(:47) 与 legacy 的 users.permissions(:57-61);listUserPermissions 也把该列
+-- 并进结果(:94-96),那正是 rbacGuard 最先信的 req.user.permissions 的来源(rbac.ts:77-83)。
 SELECT 'role_permissions' AS surface, role_id AS subject, COUNT(*) AS grants
   FROM role_permissions WHERE permission_code = 'data_sources:write' GROUP BY role_id
 UNION ALL
 SELECT 'user_permissions', user_id::text, COUNT(*)
-  FROM user_permissions WHERE permission_code = 'data_sources:write' GROUP BY user_id;
+  FROM user_permissions WHERE permission_code = 'data_sources:write' GROUP BY user_id
+UNION ALL
+-- jsonb 形状:
+SELECT 'users.permissions', id::text, 1
+  FROM users WHERE permissions::jsonb ? 'data_sources:write';
+-- TEXT[] 形状改用这一段:
+--   SELECT 'users.permissions', id::text, 1
+--     FROM users WHERE 'data_sources:write' = ANY(permissions);
 ```
 
-非 0 行 → 先**经角色**把 `data_sources:rotate` 授给这些主体(直接写 `user_permissions` 会被命名空间准入
-过滤成 403 —— 2026-09-08 的备料教训),确认 `data_sources` 命名空间准入已开,让用户重登(RBAC 缓存 60s),
-再上门改动。**本前置未在 222 或客户库上执行过**(本机无 PG,未上机)。
+**三面均 0 行**才是「零回归面」。任意一面非 0 → 先把 `data_sources:rotate` 授给这些主体
+(**推荐经角色**;「直接写 `user_permissions` 一律 403」只对**靠角色够不到 `data_sources` 命名空间**的人成立
+—— `rbac/namespace-admission.ts:179-205` 的 `controlledNamespaces` 只从 `user_roles ⋈ role_permissions`
+推导,对已有 `data_sources:*` 角色的人直接授予其实有效),确认 `data_sources` 命名空间准入已开,
+再上门改动。**不需要重登**:授予**下一次请求即生效**(`rbac.ts:101` 落到 `service.ts:36-72` 直查库,无缓存);
+滞后只在**撤销**方向——裸 SQL 撤销后每个进程最多滞后 `RBAC_CACHE_TTL_MS`(默认 60s,
+`service.ts:74-99` 的 `listUserPermissions` 缓存),要即时生效走 `/api/admin/users` 或 `/api/permissions`
+的撤销接口(会调 `invalidateUserPerms`)。**本前置未在 222 或客户库上执行过**(本机无 PG,未上机)。
 
 ---
 
@@ -139,8 +159,10 @@ SELECT 'user_permissions', user_id::text, COUNT(*)
 5. **403 的响应体不告诉调用方缺哪个码**(`rbacGuard` 统一回 `{ error: 'Insufficient permissions' }`),
    前端 `apps/web/src/data-sources/api.ts:96-101` 只会显示一句通用失败。这是所有 `rbacGuard` 路由的
    既有形态,本刀不改,登记为 PR-5 面板可用性的输入。
-6. **#5611 的对账测试会被本刀打红**(设计文档 §5.1 给了根因与两种修法)。这不是本支能在自己树上修的:
-   那个文件不在本分支上。**后合的那一支必须改**,协调方在试合时会看到。
+6. **#5611 的对账测试会被本刀打红**(设计文档 §5.1 给了根因与修法)。这不是本支能在自己树上修的:
+   那个文件不在本分支上。修法**已在 #5611 侧落地**(把「已知可授予」集合并上本刀三码 + 等式放宽成子集),
+   两支任一顺序都绿;若 #5611 终究没先改,则两支**串行合并**,后合者 rebase 到 main 后**单跑**
+   `packages/core-backend/tests/unit/integration-permission-codes-seed.test.ts`。
 7. **解析器的射程**:`…seed.test.ts` 的门解析只读 `src/routes/data-sources.ts` 一个文件、只认写成引号字面量的门。
    在别的文件里新挂一个 `rbacGuard('data_sources:purge')`,或把码在运行时拼出来,这套对账看不见——
    这条残余风险不是写在注释里声明的,而是被 `:487` 一条断言(拼接形态解析为空)**钉成事实**。

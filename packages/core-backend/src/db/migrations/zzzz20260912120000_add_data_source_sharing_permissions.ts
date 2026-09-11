@@ -52,23 +52,52 @@ import { sql } from 'kysely'
  * onto `permissions(code)`, 20250924190000_create_rbac_tables.ts:92-115). It grants them to nobody,
  * not to a user and not to the `admin` role. Platform admins lose nothing — `rbacGuard`
  * short-circuits on the global-admin tier before consulting any table (src/rbac/rbac.ts:69-72) — but
- * a NON-ADMIN who holds `data_sources:write` today and nothing else WILL LOSE credential rotation
- * the moment :716 becomes rotate-exclusive, until an administrator grants them `data_sources:rotate`
- * THROUGH A ROLE. That is fail-closed by design, and the deployment prerequisite is written down
- * rather than automated:
+ * a NON-ADMIN who holds `data_sources:write` today and nothing else WILL LOSE IN-PLACE credential
+ * rotation (the `PUT /:id/credentials` route; dropping and re-creating the source, and repointing
+ * it, stay on `write`) the moment :716 becomes rotate-exclusive, until an administrator grants
+ * them `data_sources:rotate` THROUGH A ROLE. That is fail-closed by design, and the deployment
+ * prerequisite is written down rather than automated:
  *
- *     -- read-only, run BEFORE deploying this migration's companion gate change
+ *     -- STEP 0 (read-only): pin the shape of the legacy `users.permissions` column first. It is
+ *     -- `jsonb` when the table came from zzzz20260119100000_create_users_table.ts:16 and `TEXT[]`
+ *     -- when it came from the older packages/core-backend/migrations/054_create_users_table.sql:10,
+ *     -- and `text[]` has no cast to `jsonb`, so the third predicate below differs by shape.
+ *     SELECT pg_typeof(permissions) FROM users LIMIT 1;
+ *
+ *     -- STEP 1 (read-only), run BEFORE deploying this migration's companion gate change.
+ *     -- THREE live surfaces, not two: `userHasPermission` consults `user_permissions`
+ *     -- (src/rbac/service.ts:44), `role_permissions` (:47) AND the legacy `users.permissions`
+ *     -- column (:57-61), while `listUserPermissions` merges that same column into its answer
+ *     -- (:94-96) — and that answer is what hydrates `req.user.permissions`, the array `rbacGuard`
+ *     -- trusts first (src/rbac/rbac.ts:77-83). A holder that exists only in the legacy column
+ *     -- rotates credentials today exactly like a role holder does.
  *     SELECT 'role_permissions' AS surface, role_id AS subject, COUNT(*) AS grants
  *       FROM role_permissions WHERE permission_code = 'data_sources:write' GROUP BY role_id
  *     UNION ALL
  *     SELECT 'user_permissions', user_id::text, COUNT(*)
- *       FROM user_permissions WHERE permission_code = 'data_sources:write' GROUP BY user_id;
+ *       FROM user_permissions WHERE permission_code = 'data_sources:write' GROUP BY user_id
+ *     UNION ALL
+ *     -- jsonb shape (STEP 0 answered `jsonb`):
+ *     SELECT 'users.permissions', id::text, 1
+ *       FROM users WHERE permissions::jsonb ? 'data_sources:write';
+ *     -- TEXT[] shape instead (STEP 0 answered `text[]`), same third branch:
+ *     --   SELECT 'users.permissions', id::text, 1
+ *     --     FROM users WHERE 'data_sources:write' = ANY(permissions);
  *
- * If that returns any row, grant `data_sources:rotate` to those subjects VIA A ROLE first (a direct
- * `user_permissions` grant is filtered out by namespace admission and presents as a 403 — the
- * 2026-09-08 stock-prep lesson), then ship the exclusive gate. This migration deliberately does NOT
- * write `role_permissions` to "fix" that automatically: a migration that grants is a grant made by
- * nobody, which is exactly the 零自动 posture the stock-prep decision (R-11) fixed.
+ * If ANY OF THE THREE surfaces returns a row, grant `data_sources:rotate` to those subjects VIA A
+ * ROLE first, then ship the exclusive gate. "VIA A ROLE" is a recommendation with a scope, not an
+ * absolute rule: namespace admission derives `controlledNamespaces` only from `user_roles` joined
+ * to `role_permissions`, plus the `<namespace>_admin` delegated-admin role id
+ * (src/rbac/namespace-admission.ts:179-205), so a direct `user_permissions` grant is filtered into
+ * a 403 ONLY for a subject whose ROLES do not already reach `data_sources` — that is the
+ * 2026-09-08 stock-prep shape, not a universal law. A subject who can actually exercise
+ * `data_sources:write` today normally already holds that namespace through a role, and for that
+ * subject a direct grant does work. Use roles anyway: one recipe covers both populations and keeps
+ * the authorization auditable.
+ *
+ * This migration deliberately does NOT write `role_permissions` to "fix" that automatically: a
+ * migration that grants is a grant made by nobody, which is exactly the 零自动 posture the
+ * stock-prep decision (R-11) fixed.
  *
  * NOT ADDED TO `NON_NAMESPACED_PERMISSION_RESOURCES` (src/rbac/namespace-admission.ts:11-38). That
  * set is an EXEMPTION list — `isNamespaceAdmissionControlledResource` answers true for everything
