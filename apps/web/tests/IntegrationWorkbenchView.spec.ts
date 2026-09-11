@@ -1165,11 +1165,16 @@ describe('IntegrationWorkbenchView', () => {
   // 列表回退 x 带写按钮的清单 —— 工作台这一侧的接线。
   //
   // useAuth 把 localStorage.workspaceId 写成 tenantId,于是每个请求都带非 null 的 workspace hint;
-  // 外接源按既有约定建在 workspace_id IS NULL 上。列表读为此回退一步(本 PR),写入口没有也不该跟着放宽:
-  // upsert 的 findExisting 与 delete 仍按 (tenant, workspace, id) 精确匹配。所以回退来的行必须在这块屏幕上
-  // 只读,否则「停用」会静默新插一条同名 workspace 行(迁移 057 的唯一索引允许两条并存)并弹「连接已停用」,
-  // 而「删除」直接 404。
-  it('回退来的租户级连接在带 workspace hint 的工作台里只读:按钮置灰,且绕过按钮也发不出写请求', async () => {
+  // 外接源按既有约定建在 workspace_id IS NULL 上。列表读为此回退一步(本 PR),upsert/delete 没有也不该
+  // 跟着放宽:仍按 (tenant, workspace, id) 精确匹配。所以回退来的行在这块屏幕上编辑/停用/启用/删除
+  // 全置灰:服务端会以 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH / 404 拒掉它们(插件侧 L-10 钉着)。
+  //
+  // 而口径只到这四个为止:同一屏的「测试连接」**不**拦,因为服务端 persistExternalSystemTestResult
+  // (#5534)按行自身的作用域落库,它是真的写得进去的。下面第二个 it 钉住这一半 ——
+  // 两条合起来才是「置灰的量 = 实际写不动的量」。
+  const mountWithTenantWideSource = async (
+    onWrite?: (url: string, method: string) => Response | undefined,
+  ) => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
     localStorage.setItem('workspaceId', 'default')
     const writeRequests: Array<{ url: string; method: string }> = []
@@ -1177,7 +1182,7 @@ describe('IntegrationWorkbenchView', () => {
       const method = String(init?.method || 'GET').toUpperCase()
       if (method !== 'GET') {
         writeRequests.push({ url, method })
-        return jsonResponse({})
+        return onWrite?.(url, method) ?? jsonResponse({})
       }
       if (url === '/api/integration/adapters') {
         return jsonResponse([
@@ -1186,7 +1191,7 @@ describe('IntegrationWorkbenchView', () => {
       }
       if (url.startsWith('/api/integration/external-systems')) {
         // 服务端(lib/external-systems.cjs 的 listExternalSystems)对非 null hint 的回退结果:行仍报自己的
-        // 作用域(workspaceId: null),并带上 scopeFallback 标记。
+        // 作用域(workspaceId: null)。没有任何额外字段 —— 屏幕侧的判据就靠这个 workspaceId 与当前 hint 比。
         return jsonResponse([
           {
             id: 'sys_tenant_wide',
@@ -1196,7 +1201,6 @@ describe('IntegrationWorkbenchView', () => {
             kind: 'http',
             role: 'source',
             status: 'active',
-            scopeFallback: true,
           },
         ])
       }
@@ -1217,8 +1221,15 @@ describe('IntegrationWorkbenchView', () => {
     })
     app.mount(container)
     await flushUi(8)
+    return writeRequests
+  }
 
-    // 列表本身确实带了 hint —— 这正是回退发生的条件,也是写入口够不着这行的原因。
+  it('回退来的租户级连接:编辑/停用/删除置灰,且绕过按钮也发不出写请求', async () => {
+    const writeRequests = await mountWithTenantWideSource()
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    // 列表本身确实带了 hint —— 这正是回退发生的条件,也是 upsert/delete 够不着这行的原因。
     expect(apiFetchMock.mock.calls.some(([url]) => String(url) === '/api/integration/external-systems?tenantId=default&workspaceId=default')).toBe(true)
 
     ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
@@ -1226,11 +1237,19 @@ describe('IntegrationWorkbenchView', () => {
 
     const deactivate = container.querySelector('[data-testid="deactivate-connection-sys_tenant_wide"]') as HTMLButtonElement
     const remove = container.querySelector('[data-testid="delete-connection-sys_tenant_wide"]') as HTMLButtonElement
-    expect(container.querySelector('[data-testid="connection-scope-readonly-sys_tenant_wide"]')?.textContent).toContain('租户级')
+    const notice = container.querySelector('[data-testid="connection-scope-write-block-sys_tenant_wide"]')?.textContent || ''
+    expect(notice).toContain('租户级')
+    // 文案列出的就是被拦的那四个,而且必须说清测试连接不在内 —— 否则就是在屏幕上撒谎。
+    for (const action of ['编辑', '停用', '启用', '删除']) {
+      expect(notice).toContain(action)
+    }
+    expect(notice).toContain('测试连接')
+    expect(notice).not.toContain('只读')
     expect(deactivate.disabled).toBe(true)
     expect(remove.disabled).toBe(true)
 
     // 置灰只是外观。把 disabled 摘掉再点 —— 处理函数自己也得拒绝,并且一个写请求都不许发出去。
+    // (服务端也会拒 —— 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH,见插件侧 L-10;这里钉的是屏幕不再浪费一轮往返。)
     deactivate.disabled = false
     deactivate.click()
     await flushUi(8)
@@ -1246,8 +1265,36 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).not.toContain('连接已删除')
     // 删除甚至没走到确认框:守卫在 confirm 之前。
     expect(confirmMock).not.toHaveBeenCalled()
-    // 清单里仍然只有那一行:没有 fork 出同名的第二条。
+    // 清单里仍然只有那一行。
     expect(container.querySelectorAll('[data-testid^="deactivate-connection-"]').length).toBe(1)
+  })
+
+  // 口径的另一半,也是第二轮评审的那条 blocker:同一屏的「测试连接」会真的改掉这行的
+  // status / last_tested_at / last_error(服务端 persistExternalSystemTestResult 按行自身的作用域落库,
+  // #5534,插件侧 L-11)。所以它**不**能跟着那四个一起被拦:拦了就是把本 PR 要治的
+  // 「源不可用」换个按钮重现。拦不拦是一回事,说不说实话是另一回事 —— 测完要说出写到了哪一行。
+  it('同一行的「测试连接」不被拦:请求照发,且状态条告知写入的是租户级那一行', async () => {
+    const writeRequests = await mountWithTenantWideSource((url) => (
+      url.startsWith('/api/integration/external-systems/sys_tenant_wide/test')
+        ? jsonResponse({ ok: true, status: 200 })
+        : undefined
+    ))
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'sys_tenant_wide'
+    sourceSystemSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="test-source-system"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    // 1) 它真的发出去了 —— 与上一条里 writeRequests 永远为空的停用/删除形成对照。
+    expect(writeRequests).toEqual([
+      { url: '/api/integration/external-systems/sys_tenant_wide/test?tenantId=default&workspaceId=default', method: 'POST' },
+    ])
+    // 2) 并且屏幕说出了它写到哪里。
+    expect(container.textContent).toContain('连接测试通过')
+    expect(container.textContent).toContain('测试结果已写入租户级的那一行')
   })
 
   it('does not mark error-state source or target systems as dry-run ready', async () => {

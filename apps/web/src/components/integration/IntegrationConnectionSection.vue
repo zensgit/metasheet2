@@ -61,9 +61,11 @@
             <strong>{{ system.name }}</strong>
             <span>{{ system.kind }} · {{ system.role }} · {{ connectionStatusLabel(system) }}</span>
             <small v-if="runtimeBlockerForSystem(system)">{{ runtimeBlockerForSystem(system) }}</small>
-            <!-- 只读行：列表会把同租户的租户级连接（workspace_id IS NULL）一并列出来，但写入口按精确作用域
-                 匹配，够不着它。所以这里说明原因并把四个写按钮置灰，只留「复制」（复制是在当前作用域新建）。 -->
-            <small v-if="scopeWriteBlockFor(system)" :data-testid="`connection-scope-readonly-${system.id}`">{{ scopeWriteBlockFor(system) }}</small>
+            <!-- 列表会把同租户的租户级连接（workspace_id IS NULL）一并列出来，而 upsert/delete 按精确作用域
+                 匹配，够不着它（服务端 409 / 404）。所以这里说明原因并把编辑/停用/启用/删除置灰，
+                 只留「复制」（复制是在当前作用域新建）。它不是「只读」：同一屏的「测试连接」仍会按行自身的
+                 作用域写回该行的 status / last_tested_at / last_error，文案里写清楚了。 -->
+            <small v-if="scopeWriteBlockFor(system)" :data-testid="`connection-scope-write-block-${system.id}`">{{ scopeWriteBlockFor(system) }}</small>
             <div class="integration-workbench__actions integration-workbench__actions--inline">
               <button type="button" class="integration-workbench__icon-button" :data-testid="`edit-connection-${system.id}`" :disabled="Boolean(scopeWriteBlockFor(system))" :title="scopeWriteBlockFor(system) || undefined" @click="editConnection(system)">
                 编辑
@@ -305,7 +307,8 @@ const props = defineProps<{
   connectionStatusLabel: (system: WorkbenchExternalSystem | null) => string
   runtimeBlockerForSystem: (system: WorkbenchExternalSystem | null) => string
   /**
-   * 空串 = 这行连接在当前作用域里写得动；非空 = 只读，字符串是给人看的原因。
+   * 空串 = 这行连接在当前作用域里编辑/停用/启用/删除得了；非空 = 这四个做不了，字符串是给人看的原因。
+   * 它不说「这行只读」——测试连接仍会写到该行，见服务层 externalSystemScopeWriteBlock 的注释。
    * 父组件用 `externalSystemScopeWriteBlock(system, currentScope())` 算出来；没有传时按「写得动」处理，
    * 这样其它挂载点（以及既有测试）不受影响，而工作台这块唯一带写按钮的清单一定会传。
    */
@@ -352,7 +355,7 @@ const workspaceInput = defineModel<string>('workspaceInput', { default: '' })
 // disposition calls for — a hint pointing at the dedicated K3 WISE setup wizard (existing route,
 // see router/appRoutes.ts) when that adapter kind is selected, since that kind has its own
 // full-page config flow and the raw JSON editor here is a rarely-needed advanced override.
-// 见 props 上 `connectionScopeWriteBlock` 的说明：空串 = 可写；没传 prop 时按可写处理，不改其它挂载点的行为。
+// 见 props 上 `connectionScopeWriteBlock` 的说明：空串 = 这四个写动作做得了；没传 prop 时按做得了处理，不改其它挂载点的行为。
 function scopeWriteBlockFor(system: WorkbenchExternalSystem): string {
   return props.connectionScopeWriteBlock ? props.connectionScopeWriteBlock(system) : ''
 }

@@ -44,12 +44,6 @@ export interface WorkbenchExternalSystem {
   hasCredentials?: boolean
   lastTestedAt?: string | null
   lastError?: string | null
-  /**
-   * 服务端标记：这一行是 LIST 的「非 null workspace hint 回退到同租户 workspace_id IS NULL」那一步带回来的，
-   * 也就是说本次请求所带的 workspace 作用域里并没有它。读能读到，写（upsert/delete 都按精确作用域匹配）却够不着。
-   * 只有列表接口会给出这个字段，且只给回退来的行。
-   */
-  scopeFallback?: boolean
 }
 
 export interface PlmIntegrationCapabilityFeature {
@@ -1642,35 +1636,67 @@ function normalizeScopeWorkspaceId(value: string | null | undefined): string | n
 }
 
 /**
- * 「这一行连接，我在当前作用域里写得动吗？」—— 空串表示写得动；非空是给人看的原因。
+ * 「这一行连接，我在当前作用域里改得动 / 停得掉 / 删得了吗？」—— 空串表示可以；非空是给人看的原因。
  *
- * 为什么需要它。GET /api/integration/external-systems 的列表自 #56xx 起对非 null 的 workspace hint
- * 会回退一步，把同租户 `workspace_id IS NULL` 的行也列出来（单条读 #5471 早就这么做了，列表这次补上）。
- * 但写入口没有、也不应该跟着放宽：upsert 的 findExisting 与 deleteExternalSystem 仍按 (tenant, workspace, id)
- * 精确匹配。于是同一块屏幕上，回退来的那一行如果还摆着「停用 / 启用 / 删除」按钮：
- *   * 停用 → upsert 找不到同作用域的行 → 新插一条同名的 workspace 行（迁移 057 的唯一索引是
- *     (tenant_id, coalesce(workspace_id,''), name)，两条都合法），界面弹「连接已停用」，真正那行还开着；
- *   * 删除 → 404。
- * 所以列表加宽的代价必须在能写的那一侧显式收住：回退来的行在本作用域内只读。
+ * 它管的就是四个动作：编辑、停用、启用（三个都是 upsert）、删除。**不包括测试连接**，
+ * 见下方 `externalSystemScopeTestWriteNote`。把这种行笼统叫「只读」是假的：置灰的量 ≠ 实际写不动的量。
  *
- * 两条判据，彼此独立（任一成立即只读）：服务端打的 `scopeFallback` 标记，以及行自己的 workspaceId 与
- * 当前作用域 hint 不一致——后者不依赖服务端新增字段，服务端标记掉了它仍然拦得住。
+ * 为什么需要它。GET /api/integration/external-systems 的列表对非 null 的 workspace hint 会回退一步，
+ * 把同租户 `workspace_id IS NULL` 的行也列出来（单条读 #5471 早就这么做了，列表这次补上）；而 upsert 的
+ * findExisting 与 deleteExternalSystem 没有、也不应该跟着放宽，仍按 (tenant, workspace, id) 精确匹配。
+ * 回退来的那一行如果还摆着这四个按钮，真实结果是（插件侧
+ * plugins/plugin-integration-core/__tests__/external-systems-list-workspace-fallback.test.cjs 的 L-07/L-10 钉着）：
+ *   * 编辑 / 停用 / 启用 —— 请求体带着这行的 id（见 IntegrationWorkbenchView 的 deactivateConnection），
+ *     findExisting 在本作用域内找不到，服务端直接拒绝：409 `EXTERNAL_SYSTEM_SCOPE_MISMATCH`。
+ *     加这道拒绝之前它会滑到 insert 分支沿用同一个 id，撞迁移 057 的 `id TEXT PRIMARY KEY` 报 23505。
+ *     两种都是**报错**，不是静默成功，租户级那行不变；
+ *   * 删除 → 404；
+ *   * 只有**不带 id** 的 name-only upsert（API/脚本直连，不是这几个按钮）才会 fork 出一条同名的 workspace 行
+ *     —— 057 的唯一索引是 (tenant_id, coalesce(workspace_id,''), name)，两条都合法。
+ * 也就是说这几个按钮对回退来的行是死按钮，所以在屏幕上就拦住并说明原因。这里只是 UX；
+ * 真正的边界在服务端（上述 409 / 404），不经浏览器直调路由也一样被拒。
+ *
+ * 判据只有一条：行自己的 workspaceId 与**这次写将要带上的** hint 不一致。曾经还有一条服务端打的
+ * `scopeFallback` 标记，已去掉：它可从 `workspaceId` 推出来，而且标记钉在「拉列表那一刻」而 hint 是实时的
+ * —— 工作台改 workspace 输入框并不重拉列表，陈旧标记会把「请到租户级作用域里做」这条提示自己堵死。
  */
 export function externalSystemScopeWriteBlock(
-  system: Pick<WorkbenchExternalSystem, 'workspaceId' | 'scopeFallback'>,
+  system: Pick<WorkbenchExternalSystem, 'workspaceId'>,
   scope: IntegrationScope = {},
 ): string {
   if (!system) return NO_SCOPE_WRITE_BLOCK
   const hint = normalizeScopeWorkspaceId(scope.workspaceId)
   const rowScope = normalizeScopeWorkspaceId(system.workspaceId)
-  if (system.scopeFallback !== true && rowScope === hint) return NO_SCOPE_WRITE_BLOCK
+  if (rowScope === hint) return NO_SCOPE_WRITE_BLOCK
   return rowScope === null
-    ? '这是租户级连接（未归属当前工作区），在当前工作区里只读：停用 / 启用 / 删除请在租户级作用域里做，否则会新建一条同名连接。'
-    : '这条连接属于另一个工作区，在当前工作区里只读。'
+    ? '这是租户级连接（未归属当前工作区）：在当前工作区里不能编辑 / 停用 / 启用 / 删除——这几个写按精确作用域匹配，服务端会直接拒绝（409 / 404），请清空上方的工作区、到租户级作用域里做。「测试连接」不受此限：它按连接自身的作用域写入，会改这行的 status / last_tested_at / last_error。'
+    : '这条连接属于另一个工作区：在当前工作区里不能编辑 / 停用 / 启用 / 删除。'
+}
+
+/**
+ * 「点测试连接，会写到哪一行？」—— 空串表示就是当前作用域里的那行，没什么好说；非空是给人看的提示。
+ *
+ * 为什么它不能和 `externalSystemScopeWriteBlock` 合成一条。服务端的
+ * POST /api/integration/external-systems/{id}/test 读到系统后调 `persistExternalSystemTestResult`
+ * （plugins/plugin-integration-core/lib/http-routes.cjs，#5534），那里**故意**把写入作用域改成「这行自己的」
+ * 而不是调用方的 workspace hint，所以对回退来的租户级行，测试连接是**真的写得进去**的（测失败还会把
+ * active 翻成 error，而且这个行对本租户所有工作区可见）。拿「只读」盖过去就是假的，所以这里不拦测试连接，
+ * 只在测完之后如实说清写到了哪一行。插件侧 L-11 钉着这个行为。
+ */
+export function externalSystemScopeTestWriteNote(
+  system: Pick<WorkbenchExternalSystem, 'workspaceId'> | null | undefined,
+  scope: IntegrationScope = {},
+): string {
+  if (!system) return ''
+  const hint = normalizeScopeWorkspaceId(scope.workspaceId)
+  const rowScope = normalizeScopeWorkspaceId(system.workspaceId)
+  // Only the ONE shape the list fallback produces: a tenant-wide row surfaced to a hinted caller.
+  if (hint === null || rowScope !== null) return ''
+  return '（这是租户级连接：测试结果已写入租户级的那一行，不受当前工作区限制）'
 }
 
 export function isExternalSystemWritableInScope(
-  system: Pick<WorkbenchExternalSystem, 'workspaceId' | 'scopeFallback'>,
+  system: Pick<WorkbenchExternalSystem, 'workspaceId'>,
   scope: IntegrationScope = {},
 ): boolean {
   return externalSystemScopeWriteBlock(system, scope) === NO_SCOPE_WRITE_BLOCK

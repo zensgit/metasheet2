@@ -453,6 +453,7 @@ import {
   dryRunIntegrationExternalWrite,
   dryRunIntegrationTableAction,
   ensureIntegrationStockPreparationTarget,
+  externalSystemScopeTestWriteNote,
   externalSystemScopeWriteBlock,
   getDefaultIntegrationScope,
   getIntegrationStockPreparationTargetReadiness,
@@ -2152,10 +2153,16 @@ function resetConnectionDraft(): void {
   connectionDraftMode.value = 'new'
 }
 
-// 列表加宽（非 null workspace hint 回退到同租户 null 行）与写入口不加宽之间的那道不对称，落在这块屏幕上：
-// 回退来的行读得到、写不动。这里是屏幕侧的判据，`IntegrationConnectionSection` 据此把「编辑 / 停用 / 启用 /
-// 删除」置灰；下面每个写动作里再挡一次，是因为置灰只是外观——回调本身被别处调用（例如 openConnectionFromOverview
-// 走 editConnection）时，按钮的 disabled 拦不住它。复制不挡：复制清空 id，本来就是在当前作用域新建一条。
+// 列表加宽（非 null workspace hint 回退到同租户 null 行）与 upsert/delete 不加宽之间的那道不对称，落在这
+// 块屏幕上：回退来的行读得到，编辑/停用/启用/删除却够不着（带 id 的 upsert 被服务端以 409
+// EXTERNAL_SYSTEM_SCOPE_MISMATCH 拒掉，删除 404）。这里是屏幕侧的判据，`IntegrationConnectionSection`
+// 据此把这四个按钮置灰；下面每个写动作里再挡一次，是因为置灰只是外观——回调本身被别处调用（例如
+// openConnectionFromOverview 走 editConnection）时，按钮的 disabled 拦不住它。这两道都是 UX；唯一算数的边界
+// 在服务端（上述 409 / 404），不经浏览器直调路由也一样被拒。
+// 复制不挡：复制清空 id，本来就是在当前作用域新建一条。
+// **测试连接不在此列**，而且不许进这个名单：服务端的 persistExternalSystemTestResult（#5534）按行自己的
+// 作用域落库，对回退来的行是真的写得进去的（见 externalSystemScopeTestWriteNote）。所以那条路径保持可用，
+// 只在测完之后如实说明写到了哪一行——拿「只读」这种说法盖过去，才会让置灰的量和实际写不动的量对不上。
 function connectionScopeWriteBlock(system: WorkbenchExternalSystem): string {
   return externalSystemScopeWriteBlock(system, currentScope())
 }
@@ -2794,17 +2801,22 @@ async function testSystem(side: WorkbenchSide): Promise<void> {
   // Capture the status BEFORE the test so a recovery (error → active) can be reported explicitly —
   // result.system already carries the post-test status, so it can't tell us where we came from.
   const priorStatus = requestSystem?.status
+  // 测试连接是这块屏幕上唯一一条能写到「列表回退来的租户级行」的写路径（服务端按行自己的作用域落库），
+  // 所以它不被 connectionScopeWriteBlock 拦下，但要如实说出写到了哪一行——否则同一屏既说这行写不动，
+  // 又把它的 status/last_tested_at/last_error 改掉。成功与失败都会写（失败是 active → error），所以两个分支都带上。
+  // 注意取的是发请求前的 requestSystem：replaceSystem 之后的行来自服务端响应，不一定还在 systems 里。
+  const scopeNote = externalSystemScopeTestWriteNote(requestSystem, currentScope())
   try {
     const result = await testExternalSystemConnection(systemId, currentScope())
     if (result.system) replaceSystem(result.system)
     if (result.ok) {
-      setStatus(priorStatus === 'error' ? `${label}连接已恢复，已重新激活` : `${label}连接测试通过`, 'success')
+      setStatus(`${priorStatus === 'error' ? `${label}连接已恢复，已重新激活` : `${label}连接测试通过`}${scopeNote}`, 'success')
     } else {
       const failure = result.message || result.code || 'unknown error'
       const failureMessage = requestSystemKind === DATA_SOURCE_BRIDGE_KIND
         ? formatWorkbenchConnectionError(failure, 'test', side)
         : `${label}连接测试失败：${failure}`
-      setStatus(failureMessage, 'error')
+      setStatus(`${failureMessage}${scopeNote}`, 'error')
     }
   } catch (error) {
     setStatus(formatSideConnectionError(error, 'test', side, requestSystemKind), 'error')
