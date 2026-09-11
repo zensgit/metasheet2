@@ -561,7 +561,7 @@ export function duplicateFieldName(name: string, isZh: boolean): string {
 
 /**
  * Shown inline (and repeated in the confirm) before a field-manager retype save.
- * `normalizeFieldWriteInput` (core-backend routes/univer-meta.ts:5641-5664) re-runs
+ * `normalizeFieldWriteInput` (core-backend routes/univer-meta.ts:5642-5665) re-runs
  * `sanitizeFieldProperty` under the NEW type, so type-specific formatting (decimals,
  * unit, currency code, options...) is dropped; stored cell values are left exactly as
  * they are (the forward retype migrates nothing).
