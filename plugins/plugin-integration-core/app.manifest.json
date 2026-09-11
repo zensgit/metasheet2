@@ -31,6 +31,17 @@
     "stock-prep:operate",
     "stock-prep:admin"
   ],
+  "platformPermissions": {
+    "codes": [
+      "integration:read",
+      "integration:write",
+      "integration:admin"
+    ],
+    "enforcedBy": "plugins/plugin-integration-core/lib/http-routes.cjs (hasPermission)",
+    "seededBy": "packages/core-backend/src/db/migrations/zzzz20260910120000_add_integration_permissions.ts",
+    "automaticHolders": [],
+    "note": "本插件的路由除了备料自己的 stock-prep:* 之外,还有一层旧有的平台门 integration:read/write/admin(见 lib/http-routes.cjs 的 hasPermission)。它们此前从未被任何迁移种子化:permissions 表里没有行,而 role_permissions/user_permissions 都有指向 permissions(code) 的外键,所以这三个码既能在门上拦人、又无法被授予 —— 非管理员要走通主旅程只能有人手写 SQL。G09 把它们补进 RBAC 种子。故意不放进上面的 permissions 数组:那个数组是「备料这个应用自己的权限词表」,交付页第⑤步「谁能用」与安装页「装好之后谁能做什么」直接按它列出要授给一线的码(installPlan.ts 的 permissions.codes),把平台层的 integration:* 混进去会把「一线该拿哪些码」讲错,也会和写死「这三项」的文案自相矛盾。data_sources:* 同样不在此列,但理由不同:那是核心资源(packages/core-backend/src/routes/data-sources.ts 的 rbacGuard),不归本插件声明,由同一支迁移种子化。"
+  },
   "permissionPolicy": {
     "automaticHolders": [],
     "seededBy": "STOCK_PREP_PERMISSION_DESCRIPTORS (RBAC seed rows)",
