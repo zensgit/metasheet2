@@ -136,6 +136,32 @@ const EXPORT_COLUMNS = Object.freeze([
   Object.freeze({ id: 'procurementReplyDate', label: '采购回复日期' }),
   Object.freeze({ id: 'warehouseDone', label: '仓库完成', type: 'boolean' }),
   Object.freeze({ id: 'actualArrivalDate', label: '实际到货日期' }),
+  // ── F1c: 老系统 23 列里这张表还缺的那些,APPENDED AT THE END ──────────────────────────────
+  //
+  // 老系统 `exportExcel` 1536-1560 写死 23 个中文表头。上面 17 列里已经有 13 个同义列;剩下的
+  // 列补在末尾,一个都不插队 —— 模块头那句「列序是约定,不要重排」对已有列继续有效,客户手上
+  // 那张表打开后前 17 列还在原位。
+  //
+  // 映射来源分两类,并且没有第三类(没有列的不编一个出来):
+  //   * 主表模板本来就有的列:生产编号(projectNo,老系统的 productCode)/材料类型/毛胚类型/
+  //     备注/提前周期(天)。
+  //   * 只在客户包里存在的列(ext_):名称及规格/交接工段/毛胚宽度/厚度/数量/质量。没装包的
+  //     部署这些列解析不出绑定 -> 单元格空 + 进 `unresolvedColumns`(既有规则,没有放宽)。
+  //
+  // 仍然缺的那一列是 **序号**:它是老系统导出时现编的行号(`rowNum-1`),不是任何一列的值。
+  // 补在末尾的「序号」会和它的含义打架(它只在第一列才读得通),而第一列不能动 —— 所以它留在
+  // PR 的缺列清单里交 owner,而不是在这里发明一列。
+  Object.freeze({ id: 'projectNo', label: '生产编号' }),
+  Object.freeze({ id: 'ext_nameAndSpec', label: '名称及规格' }),
+  Object.freeze({ id: 'materialType', label: '材料类型' }),
+  Object.freeze({ id: 'blankType', label: '毛胚类型' }),
+  Object.freeze({ id: 'notes', label: '备注' }),
+  Object.freeze({ id: 'ext_handoverSection', label: '交接工段' }),
+  Object.freeze({ id: 'leadTimeDays', label: '提前周期(天)' }),
+  Object.freeze({ id: 'ext_blankWidth', label: '毛胚宽度' }),
+  Object.freeze({ id: 'ext_blankThickness', label: '毛胚厚度' }),
+  Object.freeze({ id: 'ext_blankQuantity', label: '毛胚数量' }),
+  Object.freeze({ id: 'ext_blankMass', label: '毛胚质量' }),
 ])
 const EXPORT_COLUMN_IDS = Object.freeze(EXPORT_COLUMNS.map((column) => column.id))
 // Every logical id the projection reads, including the fallback sources (which are never headers).
@@ -156,7 +182,19 @@ const SCOPE_FIELD_IDS = Object.freeze(['projectNo', 'active'])
 // owner-gated template change. Keying it now means the day that column ships the workbook follows
 // the customer's own 明细栏 sequence with no second edit here; until then every row is missing it
 // and the key falls through.
-const SORT_FIELD_IDS = Object.freeze(['componentSortNo', 'idempotencyKey'])
+//
+// F1c ADDS THREE MORE ORDER-ONLY IDS, for the same reason and under the same rule (never a column,
+// never an `unresolvedColumns` entry): `componentSourceId` + `parentSourceId` are what make a TREE
+// out of a flat row set (orderRowsAsBomTree), and `ext_componentSortNo` is where 明细排序号
+// actually lands — the frozen template still has no 排序号 column, the customer pack has had one
+// (当前组件排序号) all along, and F1c is what finally writes it.
+const SORT_FIELD_IDS = Object.freeze([
+  'componentSortNo',
+  'ext_componentSortNo',
+  'componentSourceId',
+  'parentSourceId',
+  'idempotencyKey',
+])
 
 // WHICH BINDINGS ARE LOAD-BEARING. Only the two SCOPE fields are: without `projectNo` the export
 // cannot scope and would hand one project's workbook the whole table, and without `active` it cannot
@@ -408,22 +446,128 @@ function sortExportRows(rows) {
       orderText(columnSourceValue(right, PARENT_CODE_ORDER_COLUMN)),
     )
     if (byParent !== 0) return byParent
-    const bySortNo = compareOrderNumber(orderNumber(left.componentSortNo), orderNumber(right.componentSortNo))
-    if (bySortNo !== 0) return bySortNo
-    const byCode = compareOrderText(
-      orderText(columnSourceValue(left, COMPONENT_CODE_ORDER_COLUMN)),
-      orderText(columnSourceValue(right, COMPONENT_CODE_ORDER_COLUMN)),
-    )
-    if (byCode !== 0) return byCode
-    const byKey = compareOrderText(orderText(left.idempotencyKey), orderText(right.idempotencyKey))
-    if (byKey !== 0) return byKey
-    const byName = compareOrderText(
-      orderText(columnSourceValue(left, COMPONENT_NAME_ORDER_COLUMN)),
-      orderText(columnSourceValue(right, COMPONENT_NAME_ORDER_COLUMN)),
-    )
-    if (byName !== 0) return byName
-    return compareOrderText(orderText(left[ROW_IDENTITY_KEY]), orderText(right[ROW_IDENTITY_KEY]))
+    return compareSiblingRows(left, right)
   })
+}
+
+// 明细排序号, per row. The frozen template has no such column; the customer pack's
+// 当前组件排序号 (`ext_componentSortNo`) is where F1c writes it. Native id first for the day a
+// template column exists, pack id second — the same native-first/pack-fallback rule the
+// projection uses for 父组件图号/父组件名称/规格.
+function rowSortNo(row) {
+  const native = orderNumber(row && row.componentSortNo)
+  if (native !== null) return native
+  return orderNumber(row && row.ext_componentSortNo)
+}
+
+/**
+ * Keys 2..6 of the agreed order — everything below 父组件图号. Split out of `sortExportRows` so the
+ * flat comparator and the tree's SIBLING comparator can never drift apart: inside one parent, the
+ * two are the same order by construction.
+ */
+function compareSiblingRows(left, right) {
+  const bySortNo = compareOrderNumber(rowSortNo(left), rowSortNo(right))
+  if (bySortNo !== 0) return bySortNo
+  const byCode = compareOrderText(
+    orderText(columnSourceValue(left, COMPONENT_CODE_ORDER_COLUMN)),
+    orderText(columnSourceValue(right, COMPONENT_CODE_ORDER_COLUMN)),
+  )
+  if (byCode !== 0) return byCode
+  const byKey = compareOrderText(orderText(left.idempotencyKey), orderText(right.idempotencyKey))
+  if (byKey !== 0) return byKey
+  const byName = compareOrderText(
+    orderText(columnSourceValue(left, COMPONENT_NAME_ORDER_COLUMN)),
+    orderText(columnSourceValue(right, COMPONENT_NAME_ORDER_COLUMN)),
+  )
+  if (byName !== 0) return byName
+  return compareOrderText(orderText(left[ROW_IDENTITY_KEY]), orderText(right[ROW_IDENTITY_KEY]))
+}
+
+// 老系统 `iterHandle` 686-693 的去重键,在展示层再兜一次:父组件图号 + 当前组件图号 +
+// 名称及规格 + 材料。名称及规格优先取包列(F1c 起有值),没有就退回 名称 —— 老系统那一列
+// (`nameAndStandard`)装的正是未切分的全串,而旧行的 名称 列装的也是全串。
+function displayDedupeKey(row) {
+  return JSON.stringify([
+    orderText(columnSourceValue(row, PARENT_CODE_ORDER_COLUMN)),
+    orderText(columnSourceValue(row, COMPONENT_CODE_ORDER_COLUMN)),
+    orderText(row.ext_nameAndSpec) || orderText(columnSourceValue(row, COMPONENT_NAME_ORDER_COLUMN)),
+    orderText(row.material),
+  ])
+}
+
+/**
+ * 深度优先的 BOM 树序 —— 老系统 `iterHandle` 669-700 / `exportExcel` 1526-1530 的形状。
+ *
+ * 根 = `parentSourceId` 为空、或它指的那个部件不在这批行里(孤儿行:它的父件被标无效、或这一批
+ * 就是被筛过的)。孤儿当根而不是丢掉 —— 导出从不少行,这是这个函数最要紧的一条性质。
+ * 兄弟按 `compareSiblingRows`(排序号 -> 图号 -> 幂等键 -> 名称 -> 记录 id),深度优先,同父之下
+ * 按老系统那把键去重(首条胜出,被去重的那条连它的子树一起不打印,和老系统一样)。
+ *
+ * 三条防线,各自有「拿掉就红」的用例:
+ *   1. 环 / 不可达:`visited` 保证每行最多打印一次;走完之后没被访问到的行按 F1b 的平比较器
+ *      追加在末尾。构不成树的数据会得到一个难看但完整的工作簿,而不是一个少了几行的工作簿。
+ *   2. 没有身份列的部署(老 target 没绑 `componentSourceId`):整批一行也认不出身份时直接退回
+ *      F1b 的平比较器,而不是把每一行都当根 —— 那会连「按父组件分组」都丢掉,比改之前更差。
+ *   3. 去重计数如实上报(`collapsedRowCount`),导出结果里能看见「这张表按老系统合并掉了几行」。
+ *
+ * PURE:不改入参,结果只取决于行内容(含记录 id),与扫描顺序无关。
+ */
+function orderRowsAsBomTree(rows) {
+  const identityOf = (row) => orderText(row && row.componentSourceId)
+  const knownIdentities = new Set()
+  for (const row of rows) {
+    const identity = identityOf(row)
+    if (identity !== '') knownIdentities.add(identity)
+  }
+  if (knownIdentities.size === 0) {
+    return { rows: sortExportRows(rows), collapsedRowCount: 0, treeOrdered: false }
+  }
+  const childrenByParent = new Map()
+  const roots = []
+  for (const row of rows) {
+    const parentIdentity = orderText(row && row.parentSourceId)
+    if (parentIdentity === '' || parentIdentity === identityOf(row) || !knownIdentities.has(parentIdentity)) {
+      roots.push(row)
+      continue
+    }
+    if (!childrenByParent.has(parentIdentity)) childrenByParent.set(parentIdentity, [])
+    childrenByParent.get(parentIdentity).push(row)
+  }
+
+  const ordered = []
+  const visited = new Set()
+  let collapsedRowCount = 0
+  // A collapsed twin takes its WHOLE subtree with it (老系统 never visits the dropped node, so its
+  // children never reach the workbook either) — marked visited rather than left behind, or the
+  // stranded-row sweep below would print exactly the duplicate band this key exists to remove.
+  const collapseSubtree = (row) => {
+    if (visited.has(row)) return
+    visited.add(row)
+    collapsedRowCount += 1
+    const identity = identityOf(row)
+    if (identity === '') return
+    for (const child of childrenByParent.get(identity) || []) collapseSubtree(child)
+  }
+  const walk = (siblings) => {
+    const seenKeys = new Set()
+    for (const row of siblings.slice().sort(compareSiblingRows)) {
+      if (visited.has(row)) continue
+      const key = displayDedupeKey(row)
+      if (seenKeys.has(key)) {
+        collapseSubtree(row)
+        continue
+      }
+      seenKeys.add(key)
+      visited.add(row)
+      ordered.push(row)
+      const identity = identityOf(row)
+      if (identity !== '') walk(childrenByParent.get(identity) || [])
+    }
+  }
+  walk(roots)
+  const stranded = rows.filter((row) => !visited.has(row))
+  if (stranded.length > 0) ordered.push(...sortExportRows(stranded))
+  return { rows: ordered, collapsedRowCount, treeOrdered: true }
 }
 
 // "Does this target bind logical ids to physical ids AT ALL?" — the writer's own predicate
@@ -436,7 +580,10 @@ function fieldIdMapHasExplicitBindings(fieldIdMap) {
 }
 
 function resolveExportFieldBindings(target) {
-  const fieldIds = [...EXPORT_SOURCE_FIELD_IDS, ...SCOPE_FIELD_IDS]
+  // DE-DUPLICATED since F1c: 生产编号 made `projectNo` both a PROJECTED column and a SCOPE field,
+  // and a repeated id would be reported twice in `missingFields` / `unresolvedColumns` — the same
+  // hole named twice reads as two holes.
+  const fieldIds = Array.from(new Set([...EXPORT_SOURCE_FIELD_IDS, ...SCOPE_FIELD_IDS]))
   const explicit = fieldIdMapHasExplicitBindings(target.fieldIdMap)
   const map = {}
   const missing = []
@@ -537,16 +684,23 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
     throw new StockPreparationPrepLineExportError(422, 'PREP_LINE_EXPORT_ROWS_TOO_LARGE', 'stock-preparation export exceeded the row bound', { maxRows: MAX_EXPORT_ROWS })
   }
   const headers = EXPORT_COLUMNS.map((column) => column.label)
-  // Deterministic hierarchy order BEFORE the projection — see sortExportRows. Without it the row
-  // order is the records service's `ORDER BY id ASC` over random UUIDs.
-  const orderedRows = sortExportRows(activeRows)
-  const rows = orderedRows.map((data) => EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column))))
+  // Deterministic hierarchy order BEFORE the projection — since F1c the DEPTH-FIRST BOM TREE
+  // (orderRowsAsBomTree), 老系统 iterHandle 的形状,而不再只是「按父组件图号分带」。身份列认不出
+  // 来的老部署自动退回 F1b 的平比较器,所以没有任何一种部署会比改之前更乱。
+  const ordering = orderRowsAsBomTree(activeRows)
+  const rows = ordering.rows.map((data) => EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column))))
   return {
     projectNo: scopedProjectNo,
     totalRowCount: allRows.length,
     activeRowCount: activeRows.length,
     headers,
     rows,
+    // Values-free ordering facts. `collapsedRowCount` is the ONE number that explains a workbook
+    // with fewer lines than the sheet has rows (同父同键的重复行按老系统合并),so it travels with
+    // the result instead of being a silent drop; `treeOrdered: false` says this deployment's rows
+    // carry no 部件源ID binding and got the flat order.
+    collapsedRowCount: ordering.collapsedRowCount,
+    treeOrdered: ordering.treeOrdered,
     // Values-free: logical field ids the bound target does not bind, so an export that came out
     // blank in a column can be told apart from a deployment that never had that column.
     unresolvedColumns: resolution.unbound.slice(),
@@ -607,6 +761,10 @@ module.exports = {
     queryAllMainRows,
     resolveExportFieldBindings,
     sortExportRows,
+    compareSiblingRows,
+    displayDedupeKey,
+    orderRowsAsBomTree,
+    rowSortNo,
     unmapRow,
     READ_PAGE_LIMIT,
     READ_MAX_PAGES,

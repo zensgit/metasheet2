@@ -256,7 +256,13 @@ const SANDBOX_SHEET = 'sheet_stock_prep_sandbox_twin'
 // with anything less is refused before the export module is ever reached. The module's own
 // tolerance for an unbound DISPLAY column is therefore defence in depth, exercised directly at the
 // module level below.)
-const PACK_FIELD_IDS = Object.freeze(['ext_parentDrawingNo', 'ext_parentName', 'ext_spec', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength'])
+// F1c 追加了六个包列(名称及规格/交接工段/毛胚宽度/厚度/数量/质量)和 当前组件排序号 —— 一个装了
+// 客户包的部署这些列本来就在,所以「全量 provisioned」的 target 也要绑它们。
+const PACK_FIELD_IDS = Object.freeze([
+  'ext_parentDrawingNo', 'ext_parentName', 'ext_spec', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength',
+  'ext_nameAndSpec', 'ext_handoverSection', 'ext_blankWidth', 'ext_blankThickness', 'ext_blankQuantity', 'ext_blankMass',
+  'ext_componentSortNo', 'ext_parentSortNo',
+])
 
 function targetFor(sheetId) {
   const fieldIds = [
@@ -313,7 +319,7 @@ async function moduleReturnsExactAgreedColumnsForASeededProject() {
     permission: 'admin',
   })
   assert.deepEqual(result.headers, EXPORT_COLUMNS.map((c) => c.label), 'R1: headers are exactly EXPORT_COLUMNS, in order')
-  assert.equal(result.headers.length, 17, 'R1/R12: seventeen columns (#5447 added five completion columns after the original twelve)')
+  assert.equal(result.headers.length, 28, 'R1/R12: 28 columns (#5447 的五列之后,F1c 又补了老系统 23 列里缺的十一列)')
   assert.equal(result.totalRowCount, 3, 'PROJECT_A has 3 rows total (2 active + 1 inactive)')
   assert.equal(result.activeRowCount, 2, 'PROJECT_A has 2 active rows')
   assert.equal(result.rows.length, 2)
@@ -994,10 +1000,13 @@ async function routeGateRefusesBeforeAnyHostIo() {
 //     the five reported in unresolvedColumns. Never a 500.
 // ---------------------------------------------------------------------------
 
-const SEVENTEEN_HEADERS_IN_ORDER = Object.freeze([
+// F1c: the original 17 (UNMOVED — 老列顺序是约定) followed by the eleven 老系统 23 列里补齐的列.
+const EXPORT_HEADERS_IN_ORDER = Object.freeze([
   '父组件图号', '父组件名称', '图号', '名称', '规格', '材料', '总数量',
   '备料情况', '需求日期', '领料节点', '备料日期', '毛胚长度',
   '自制/外购', '采购完成', '采购回复日期', '仓库完成', '实际到货日期',
+  '生产编号', '名称及规格', '材料类型', '毛胚类型', '备注', '交接工段',
+  '提前周期(天)', '毛胚宽度', '毛胚厚度', '毛胚数量', '毛胚质量',
 ])
 
 async function moduleExactSeventeenColumnHeaderOrder() {
@@ -1008,8 +1017,8 @@ async function moduleExactSeventeenColumnHeaderOrder() {
     projectNo: PROJECT_A,
     permission: 'admin',
   })
-  assert.deepEqual(result.headers, SEVENTEEN_HEADERS_IN_ORDER, 'R12: the exact 17 headers, in the agreed order')
-  assert.deepEqual(EXPORT_COLUMNS.map((c) => c.label), SEVENTEEN_HEADERS_IN_ORDER, 'R12: EXPORT_COLUMNS itself matches the literal agreed order')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R12: the exact 28 headers, in the agreed order')
+  assert.deepEqual(EXPORT_COLUMNS.map((c) => c.label), EXPORT_HEADERS_IN_ORDER, 'R12: EXPORT_COLUMNS itself matches the literal agreed order')
 }
 
 async function moduleCompletionFlagsRenderYesNoTextAndBlankWhenUnset() {
@@ -1059,7 +1068,7 @@ async function moduleTargetPredatingPR5447StillExportsAndReportsTheFive() {
     projectNo: PROJECT_A,
     permission: 'admin',
   })
-  assert.deepEqual(result.headers, SEVENTEEN_HEADERS_IN_ORDER, 'R15: the header set never shrinks — all 17 headers still appear')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R15: the header set never shrinks — all 28 headers still appear')
   assert.deepEqual(
     result.unresolvedColumns.slice().sort(),
     ['actualArrivalDate', 'makeOrBuy', 'procurementDone', 'procurementReplyDate', 'warehouseDone'],
@@ -1245,7 +1254,7 @@ async function moduleExportWithoutAnyParentBindingDegradesToDrawingOrder() {
     projectNo: PROJECT_ORDER,
     permission: 'admin',
   })
-  assert.deepEqual(result.headers, SEVENTEEN_HEADERS_IN_ORDER, 'R16e: the header set never shrinks')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R16e: the header set never shrinks')
   assert.deepEqual(
     result.rows.map((cells) => cells[columnIndex('parentComponentCode')]),
     [null, null, null, null, null, null],
@@ -1269,6 +1278,127 @@ async function moduleExportWithoutAnyParentBindingDegradesToDrawingOrder() {
     ['ext_parentDrawingNo', 'parentComponentCode'],
     'R16e: the missing hierarchy source is REPORTED, so "no parents bound" is distinguishable from "this project has no parents"',
   )
+}
+
+// ---------------------------------------------------------------------------
+// F1c — 深度优先 BOM 树序 + 老系统的同父去重(展示层兜底) + 补齐的老系统 23 列
+//
+// R17 打乱顺序喂进来 => 根 -> 子 -> 孙 的树序,兄弟按 明细排序号(客户包列 ext_componentSortNo)。
+// R18 同父同键的重复行按老系统合并,合并条数如实上报(collapsedRowCount),重复行的子树跟着走。
+// R19 孤儿行(父件不在这批里)当根打印,一行都不少。
+// R20 没有 部件源ID 的老部署退回 F1b 的平比较器(treeOrdered: false),不比改之前更乱。
+// ---------------------------------------------------------------------------
+
+const PROJECT_TREE = 'PRJ-TREE'
+
+function treeRows() {
+  const shared = {
+    parentComponentCode: 'TZ-T0',
+    parentComponentName: 'T主体',
+    ext_parentDrawingNo: 'TZ-T0',
+    ext_parentName: 'T主体',
+    material: 'Q235B',
+  }
+  return [
+    // 打乱:孙 -> 重复兄弟 -> 兄弟B -> 孤儿 -> 根 -> 兄弟A。没有任何一个比较器会产出这个顺序。
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-A1', componentName: 'A的子件',
+      componentSourceId: 'P-A', parentSourceId: 'P-A0', ext_componentSortNo: 10,
+      idempotencyKey: 'idk-t-a1',
+    }, 'rec_t_a1'),
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-B', componentName: 'B件',
+      componentSourceId: 'P-B-DUP', parentSourceId: 'P-ROOT', ext_componentSortNo: 20,
+      idempotencyKey: 'idk-t-b-dup',
+    }, 'rec_t_bdup'),
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-B', componentName: 'B件',
+      componentSourceId: 'P-B', parentSourceId: 'P-ROOT', ext_componentSortNo: 20,
+      idempotencyKey: 'idk-t-b',
+    }, 'rec_t_b'),
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-X', componentName: '孤儿件',
+      componentSourceId: 'P-X', parentSourceId: 'P-GONE', ext_componentSortNo: 99,
+      idempotencyKey: 'idk-t-x',
+    }, 'rec_t_x'),
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-ROOT', componentName: '根件',
+      parentComponentCode: undefined, parentComponentName: undefined,
+      ext_parentDrawingNo: undefined, ext_parentName: undefined,
+      componentSourceId: 'P-ROOT', parentSourceId: undefined, ext_componentSortNo: 1,
+      idempotencyKey: 'idk-t-root',
+    }, 'rec_t_root'),
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-A0', componentName: 'A件',
+      componentSourceId: 'P-A0', parentSourceId: 'P-ROOT', ext_componentSortNo: 5,
+      idempotencyKey: 'idk-t-a0',
+    }, 'rec_t_a0'),
+  ]
+}
+
+function treeSubstrate() {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: treeRows() },
+  })
+  return { records, target: targetFor(SANDBOX_SHEET) }
+}
+
+async function moduleExportOrderIsTheBomTreeNotAFlatBand() {
+  const { records, target } = treeSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target, projectNo: PROJECT_TREE, permission: 'admin',
+  })
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  assert.deepEqual(
+    result.rows.map((row) => row[codeColumn]),
+    ['DWG-T-ROOT', 'DWG-T-A0', 'DWG-T-A1', 'DWG-T-B', 'DWG-T-X'],
+    'R17: 根 -> (排序号 5)A件 -> A件的子件 -> (排序号 20)B件,孤儿行最后当根打印',
+  )
+  // R18: 同父同键的那条重复行被合并,并且合并条数如实上报。
+  assert.equal(result.collapsedRowCount, 1, 'R18: 一条同父同键的重复行被合并')
+  assert.equal(result.activeRowCount, 6, 'R18: 合并是打印层的事,行数统计仍是表里的真实行数')
+  assert.equal(result.rows.length, 5)
+  assert.equal(result.treeOrdered, true)
+}
+
+async function moduleExportWithoutSourceIdentityKeepsTheFlatOrder() {
+  const { records, target } = moduleSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target, projectNo: PROJECT_ORDER, permission: 'admin',
+  })
+  // 这批行一个 部件源ID 都没有(老部署 / 手工行),树建不起来 => 退回 F1b 的平比较器,
+  // 也就是 R16 已经钉住的那个顺序,而不是把每一行都当根从而丢掉按父组件分带。
+  assert.equal(result.treeOrdered, false, 'R20: 认不出身份就明说,而不是假装排了树序')
+  assert.equal(result.collapsedRowCount, 0)
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  assert.deepEqual(
+    result.rows.map((row) => row[codeColumn]),
+    ['DWG-0', 'DWG-1', 'DWG-2', 'DWG-2', 'DWG-9', 'DWG-1'],
+    'R20: F1b 的顺序原样保留(TZ-A 组 -> TZ-B 组 -> 无父件行)',
+  )
+}
+
+async function moduleLegacyTwentyThreeColumnsAreProjected() {
+  const { records, target } = moduleSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target, projectNo: PROJECT_A, permission: 'admin',
+  })
+  // 老系统 exportExcel 1536-1560 的 23 个表头里,这张工作簿现在能给出的那些(逐个点名,
+  // 而不是只数个数)。缺的那一个是「序号」—— 它是导出时现编的行号,不是任何一列的值。
+  const labels = result.headers
+  for (const label of ['备料日期', '生产编号', '父组件图号', '父组件名称', '名称及规格', '规格',
+    '材料', '总数量', '材料类型', '毛胚类型', '备注', '领料节点', '交接工段', '需求日期',
+    '提前周期(天)', '备料情况', '毛胚长度', '毛胚宽度', '毛胚厚度', '毛胚数量', '毛胚质量']) {
+    assert.ok(labels.includes(label), `老系统这一列在导出里有对应表头: ${label}`)
+  }
+  assert.equal(labels.includes('序号'), false, '「序号」是行号不是列值,留在 PR 的缺列清单里交 owner')
+  // 老列没挪窝:前 17 列仍是 #5447 之后那一版的顺序。
+  assert.deepEqual(labels.slice(0, 17), EXPORT_HEADERS_IN_ORDER.slice(0, 17))
+  // 生产编号 真的有值(它同时是作用域列,取的是同一个绑定)。
+  const projectColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'projectNo')
+  assert.equal(result.rows[0][projectColumn], PROJECT_A)
 }
 
 async function main() {
@@ -1310,6 +1440,10 @@ async function main() {
   await routeNeverCrossesTheTwoTargets()
   await routeReadsOnlyTheBoundSheet()
   await routeGateRefusesBeforeAnyHostIo()
+
+  await moduleExportOrderIsTheBomTreeNotAFlatBand()
+  await moduleExportWithoutSourceIdentityKeepsTheFlatOrder()
+  await moduleLegacyTwentyThreeColumnsAreProjected()
 
   console.log('stock-preparation-prep-line-export (按项目导出物料 Excel): all assertions passed')
 }
