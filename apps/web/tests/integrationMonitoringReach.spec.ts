@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
 import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
 // Static top-level import for the same reason IntegrationWorkbenchView.spec.ts uses one: a dynamic
 // import inside a test body pays this 5k-line SFC's first-time transform against that test's own
@@ -83,6 +84,10 @@ describe('G34 运行监控到达率 (view → request)', () => {
   let deadLetterUrls: string[] = []
 
   beforeEach(() => {
+    // #5587 folds DataSourcesPanel (a pinia store consumer) into IntegrationConnectionSection, which
+    // this bare createApp(View) mount renders unconditionally. Same precedent as
+    // IntegrationWorkbenchView.spec.ts. A no-op on trees without that panel.
+    setActivePinia(createPinia())
     apiFetchMock.mockReset()
     apiGetMock.mockReset()
     apiGetMock.mockImplementation(async () => ({ ok: true, data: { items: [] } }))
