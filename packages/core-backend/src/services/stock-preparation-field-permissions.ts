@@ -458,8 +458,13 @@ export interface ApplyRoleWriteScopesResult {
    *
    * Structurally EMPTY on the reconcile path — the classification refuses an unattributed legacy row
    * and a sibling pack's declared pair before the first INSERT and drops operator-held declared
-   * pairs from the write set. It is the ADDITIVE path, the one every plugin reaches through the host
-   * capability, that can produce entries here.
+   * pairs from the write set. Only the ADDITIVE path (no `reconcile`) can produce entries here —
+   * and NOTHING IN THIS REPO TAKES THAT PATH TODAY: the host injects this port into
+   * plugin-integration-core ONLY (`index.ts`: `manifest.name === 'plugin-integration-core' ? new
+   * StockPreparationFieldPermissionsService() : undefined`), and that plugin's only production
+   * call site always passes a rectangle (`stock-preparation-customer-pack-installer.cjs`,
+   * `reconcile: resolved.region`; a null region returns before the port is called at all). So this
+   * array is DEFENCE IN DEPTH for the next caller, not a channel anything reports on today.
    */
   skippedUnattributed: Array<RoleWriteScopeOwnedPair>
 }
@@ -1117,10 +1122,16 @@ export class StockPreparationFieldPermissionsService {
         // On the RECONCILE path the guard is provably a no-op: every pair still in `writeEntries` is
         // this pack's, adoptable legacy, or absent — the classification above removed the rest (an
         // unproven legacy row inside the rectangle refuses the whole call before this loop runs).
-        // The guard is what protects the ADDITIVE path, which classifies nothing — and the additive
-        // path is the one this port exposes to every plugin through the host capability, so the
-        // conditional legacy arm is the ONLY thing standing between an entries-only call and an
-        // operator's pre-stamping decision.
+        // The guard is what protects the ADDITIVE path, which classifies nothing. WHO CAN TAKE THAT
+        // PATH TODAY: no production caller in this repo. The host injects this port into
+        // plugin-integration-core ONLY (`index.ts`: `manifest.name === 'plugin-integration-core' ?
+        // new StockPreparationFieldPermissionsService() : undefined`, whose own comment reads
+        // "Absent for every other plugin"), and that plugin's only production call site always
+        // passes a rectangle (`stock-preparation-customer-pack-installer.cjs:1093-1099`,
+        // `reconcile: resolved.region`; a null region returns at :1073 without calling the port).
+        // C0's live reachability is therefore ZERO and this arm is DEFENCE IN DEPTH: it is what
+        // will stand between an entries-only call and an operator's pre-stamping decision the day
+        // a caller makes one — this plugin, or another plugin the host later grants the capability.
         //
         // `RETURNING created_by` IS THE WITNESS OF WHICH BRANCH RAN, taken from the statement rather
         // than re-derived from a second read: after the upsert the row's marker is `$4` exactly when

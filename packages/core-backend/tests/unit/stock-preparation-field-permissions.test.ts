@@ -2161,8 +2161,11 @@ describe('7-RC8. C0/P2 — an install never rewrites a pack-less row it was not 
   /**
    * THE RECONCILE PATH WAS ALREADY SAFE, AND STAYS SAFE — stated so the fix's scope is not guessed
    * at: an unproven pack-less row inside the rectangle refuses the whole call BEFORE the first
-   * upsert, so C0 could only ever fire on the ADDITIVE path (which is the path this port exposes to
-   * every plugin through the host capability in types/plugin.ts).
+   * upsert, so C0 could only ever fire on the ADDITIVE path — and no production caller takes that
+   * path today: the host injects this port into plugin-integration-core ONLY (index.ts,
+   * `manifest.name === 'plugin-integration-core' ? ... : undefined`), and that plugin's installer
+   * always passes `reconcile` (a pack with no rectangle returns before the port is called). The fix
+   * is therefore DEFENCE IN DEPTH for the next entries-only caller, not a live incident.
    */
   it('RECONCILE + no proof: refused before the first statement, and no upsert was even issued', async () => {
     const seeded = legacyRow(PAIR.fieldId, PAIR.roleId)
