@@ -752,9 +752,10 @@ function createExternalSystemRegistry({
   // match (the fallback query carries the caller's tenant), a workspace-scoped row is never reached
   // from another workspace or from a null `workspaceId` ARGUMENT, and writes/delete keep their
   // exact scope. LIST NO LONGER DOES: since the 选源面板 fix it widens the SAME one step as this
-  // function, and marks each row it reached that way — see `listExternalSystems`'s head comment
-  // below. This sentence used to say "writes/list/delete"; it was the only contract text #5471 left
-  // for later callers, so it is corrected here rather than left to contradict the code.
+  // function (no field is added; the row's own `workspaceId` is the consumer's key) — see
+  // `listExternalSystems`'s head comment below. This sentence used to say "writes/list/delete"; it
+  // was the only contract text #5471 left for later callers, so it is corrected here rather than
+  // left to contradict the code.
   //
   // REVERSE POINTER (stock-preparation, F3): "a null hint never widens" is an invariant of what THIS
   // FUNCTION does with the `workspaceId` it is handed — it says nothing about what that argument

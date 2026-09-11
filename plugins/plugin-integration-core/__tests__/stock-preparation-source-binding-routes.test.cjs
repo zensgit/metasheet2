@@ -31,6 +31,9 @@
 //   R-25  the LIST half of that same quadrant: under the UI's `workspaceId=default` hint the picker
 //         offers the tenant-wide sources and stops reporting `not_found` / 源不可用 for a source its
 //         own dry-run reads — while another workspace's and another tenant's rows stay invisible.
+//   R-26  the WRITE half of it, ON THE WIRE: the id-carrying upsert that the widened list newly puts
+//         in front of a hinted caller comes back as HTTP 409 with `EXTERNAL_SYSTEM_SCOPE_MISMATCH`
+//         (not an untyped 500), and the same payload under the row's own scope still lands.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -146,8 +149,10 @@ function selectScopedSystem(systems, { tenantId, workspaceId = null, id }) {
  * this case mounts the real thing, and the fake's list rule stays as a separate (and now
  * independently checked) mirror for the other cases.
  *
- * Only the two reads this case exercises are recorded/returned; the writes stay inert because the
- * GET picker performs none.
+ * R-26 reuses it for the WRITE half (the id-carrying upsert), so `upsertExternalSystem` delegates to
+ * the real registry too and `updateRow` really updates. `insertOne` stays a THROW on purpose: the
+ * guard R-26 pins must refuse BEFORE the insert branch, so any escape to it is loud (an unexpected
+ * 500) instead of a silently duplicated id. `deleteRows` stays inert — no case here deletes.
  */
 function createRealBackedRegistry(systems = DEFAULT_SYSTEMS) {
   const calls = []
@@ -182,7 +187,12 @@ function createRealBackedRegistry(systems = DEFAULT_SYSTEMS) {
       return ordered.slice(start, start + (limit || 1000))
     },
     async insertOne() { throw new Error('unexpected insertOne') },
-    async updateRow() { throw new Error('unexpected updateRow') },
+    async updateRow(_table, set, where) {
+      const row = rows.find((candidate) => matches(candidate, where))
+      if (!row) return []
+      Object.assign(row, set, { updated_at: '2026-09-11T00:00:00.000Z' })
+      return [row]
+    },
     async deleteRows() { throw new Error('unexpected deleteRows') },
     async countRows() { return 0 },
   }
@@ -213,7 +223,12 @@ function createRealBackedRegistry(systems = DEFAULT_SYSTEMS) {
         throw error
       })
     },
-    async upsertExternalSystem() { throw new Error('unexpected upsertExternalSystem') },
+    async upsertExternalSystem(input) {
+      calls.push({ op: 'upsert', tenantId: input.tenantId, workspaceId: input.workspaceId ?? null, id: input.id ?? null })
+      return real.upsertExternalSystem(input)
+    },
+    // The stored rows themselves, so a write case can check what did (or did not) land.
+    rows,
     async deleteExternalSystem() { throw new Error('unexpected deleteExternalSystem') },
   }
 }
@@ -1043,6 +1058,79 @@ async function main() {
       viewB.body.data.effectiveSourceProblem,
       'not_found',
       "and tenant-b's effective (deploy-default) id, which exists only as a tenant-a row, stays unreachable — the widening is tenant-bounded",
+    )
+  })
+
+  // -------------------------------------------------------------------------
+  // R-26 — THE WRITE HALF OF R-25's QUADRANT, ON THE WIRE.
+  //
+  // R-25 widened what a hinted caller can SEE. The shape that immediately follows on the screen is
+  // an id-carrying upsert (工作台's 编辑 / 停用 / 启用 all send `{ ...scope, id, name, kind, role,
+  // status }`) whose hint misses the row it just read. The registry refuses that
+  // (external-systems.cjs `assertHintedIdDoesNotTargetTenantWideRow`, pinned by L-10 in
+  // __tests__/external-systems-list-workspace-fallback.test.cjs) — but a registry-level throw is
+  // only half the claim: what an operator and any script actually get is the HTTP answer. Nothing
+  // asserted that the mapping (`/Conflict/` -> 409 in `inferHttpStatus`, `error.code` preferred by
+  // `inferErrorCode`) is really wired for THIS error. This case drives the real
+  // POST /api/integration/external-systems handler over the REAL registry and reads the status line.
+  //
+  // Note the db under it: `insertOne` throws. Delete the guard and this case does not quietly pass —
+  // the upsert falls into the insert branch and the route answers 500, which is exactly the untyped
+  // failure the guard replaced.
+  // -------------------------------------------------------------------------
+  await run('R-26 a hinted id-carrying upsert of a tenant-wide row answers 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH on the wire', async () => {
+    const TENANT_WIDE_HTTP = 'sys_tenant_wide_http'
+    const mounted = mount({ registryFactory: createRealBackedRegistry, systems: [
+      system({ id: TENANT_WIDE_HTTP, name: '客户 PLM', kind: 'http', workspaceId: null, config: {} }),
+    ] })
+    const stored = mounted.externalSystemRegistry.rows[0]
+
+    // 停用, verbatim: the row's own id, under the workbench's hint.
+    const refused = await call(mounted.routes, 'POST', '/api/integration/external-systems', {
+      user: ADMIN,
+      body: {
+        workspaceId: 'default',
+        id: TENANT_WIDE_HTTP,
+        name: '客户 PLM',
+        kind: 'http',
+        role: 'source',
+        status: 'inactive',
+      },
+    })
+    assert.equal(refused.statusCode, 409,
+      'R-26: a scope mismatch reaches the caller as a CONFLICT — not a 500, and not a 404')
+    assert.equal(refused.body.ok, false)
+    assert.equal(refused.body.error.code, 'EXTERNAL_SYSTEM_SCOPE_MISMATCH',
+      'R-26: with the stable wire code the UI can key on (raw driver text never was one)')
+    assert.equal(stored.status, 'active', 'R-26: the tenant-wide row keeps its status')
+    assert.equal(stored.workspace_id, null, 'R-26: ...and its scope')
+    assert.equal(mounted.externalSystemRegistry.rows.length, 1, 'R-26: and no second row with the same id')
+
+    // THE REFUSAL IS SCOPED, NOT A READ-ONLY FLAG: the same payload addressed to the row's OWN
+    // scope still lands. (This is also what the operator is told to do — clear the workspace box.)
+    const landed = await call(mounted.routes, 'POST', '/api/integration/external-systems', {
+      user: ADMIN,
+      body: {
+        id: TENANT_WIDE_HTTP,
+        name: '客户 PLM',
+        kind: 'http',
+        role: 'source',
+        status: 'inactive',
+      },
+    })
+    assert.equal(landed.statusCode, 201, 'R-26: the null-scope caller writes the row it addressed')
+    assert.equal(landed.body.data.status, 'inactive')
+    assert.equal(landed.body.data.workspaceId, null, 'R-26: and the row stays tenant-wide')
+    assert.equal(stored.status, 'inactive', 'R-26: ...which is the SAME row, updated in place')
+
+    // The route passed each caller's own hint through, verbatim, both times — no widening here.
+    assert.deepEqual(
+      mounted.externalSystemRegistry.calls.filter((entry) => entry.op === 'upsert'),
+      [
+        { op: 'upsert', tenantId: TENANT, workspaceId: 'default', id: TENANT_WIDE_HTTP },
+        { op: 'upsert', tenantId: TENANT, workspaceId: null, id: TENANT_WIDE_HTTP },
+      ],
+      'R-26: the route hands the registry the caller\'s own tenant + hint on both calls',
     )
   })
 

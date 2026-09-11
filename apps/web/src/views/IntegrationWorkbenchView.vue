@@ -2174,6 +2174,28 @@ function refuseScopeBlockedConnectionWrite(system: WorkbenchExternalSystem, acti
   return true
 }
 
+// 同一道作用域不对称的第五、第六个入口 —— 清洗表卡片上的「作为 Dry-run 来源」/「作为目标多维表」。
+// 它们不在上面那份「四动作」名单里,但走的是同一条服务端路径:请求体带的是**按项目算出的确定性 id**
+// (`stagingSourceSystemId(projectId)` / `multitableTargetSystemId(projectId)`),不是新建用的随机 id。
+// 所以当这个项目的 staging / 目标连接早先建在租户级(workspace_id IS NULL)、而当前工作区框非空时,
+// findExisting 在精确作用域内落空,服务端 assertHintedIdDoesNotTargetTenantWideRow 直接拒:
+// 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH(插件侧 L-10;加这道拒绝之前是撞 057 主键的 23505 → 无类型 500,
+// 两种都是失败,所以这里只是把失败说清楚,不是回归)。
+// 为什么必须在屏幕侧拦一次:`parseIntegrationResponse`
+// (apps/web/src/services/integration/workbench.ts:651-663)只保留 error.message、丢掉 error.code,
+// 这两处的 catch 直出 message,操作员看到的就是一句英文 "external system belongs to the tenant-wide scope"。
+// 判据和文案都复用四动作那一套(`externalSystemScopeWriteBlock`),不另起第二套口径。
+// 这里只会「少发一个注定失败的请求」,绝不改写入作用域去够那行租户级的连接 —— 那才是放宽。
+// 列表里没有这一行时(没加载 / 分页外)不猜:照发,由服务端那道 409 兜底。
+function refuseScopeBlockedEnsureWrite(systemId: string, action: string): boolean {
+  const existing = systems.value.find((system) => system.id === systemId)
+  if (!existing) return false
+  const blocked = connectionScopeWriteBlock(existing)
+  if (!blocked) return false
+  setStatus(`无法${action}：这个按钮按项目算出的固定 id「${systemId}」写这条连接。${blocked}`, 'error')
+  return true
+}
+
 function editConnection(system: WorkbenchExternalSystem): void {
   if (refuseScopeBlockedConnectionWrite(system, '编辑')) return
   connectionDraft.id = system.id
@@ -2943,10 +2965,12 @@ async function activateStagingAsSource(objectId: string, successMessage?: string
     setStatus('当前 staging 表缺少 sheetId，不能作为 dry-run 来源。', 'error')
     return
   }
+  const systemId = stagingSourceSystemId(projectId)
+  if (refuseScopeBlockedEnsureWrite(systemId, '把 staging 多维表设为 Dry-run 来源')) return
   try {
     const system = await upsertWorkbenchExternalSystem({
       ...currentScope(),
-      id: stagingSourceSystemId(projectId),
+      id: systemId,
       projectId,
       name: 'MetaSheet staging 多维表',
       kind: 'metasheet:staging',
@@ -2997,10 +3021,12 @@ async function useStagingAsTarget(objectId: string): Promise<void> {
     setStatus('当前多维表缺少 sheetId，不能作为写回目标。', 'error')
     return
   }
+  const systemId = multitableTargetSystemId(projectId)
+  if (refuseScopeBlockedEnsureWrite(systemId, '把多维表设为写回目标')) return
   try {
     const system = await upsertWorkbenchExternalSystem({
       ...currentScope(),
-      id: multitableTargetSystemId(projectId),
+      id: systemId,
       projectId,
       name: 'MetaSheet 目标多维表',
       kind: 'metasheet:multitable',

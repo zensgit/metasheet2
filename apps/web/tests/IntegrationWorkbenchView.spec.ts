@@ -1297,6 +1297,139 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('测试结果已写入租户级的那一行')
   })
 
+  // 同一道不对称的第五、第六个入口,不在「四动作」名单里:清洗表卡片的「作为 Dry-run 来源」/「作为目标多维表」。
+  // 它们发的是带**确定性 id** 的 upsert(id 由 projectId 算出,不是新建的随机 id),所以这个项目的连接行
+  // 若在租户级(workspace_id IS NULL)而当前工作区框非空,服务端会以 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH 拒
+  // (插件侧 L-10);而 parseIntegrationResponse 只保留 message、丢掉 code,直出的是一句英文原文。
+  // 这里钉:① 撞上租户级行时不发那一枪、给中文人话;② 判据是「行自己的作用域 vs 当前 hint」,
+  // 换一个没有租户级行的项目照发,而且请求仍带调用方自己的 hint —— 绝不为了写得进去而回退到 null 作用域。
+  it('确定性 id 的 ensure 按钮撞上租户级行:不发请求并给中文人话;换个项目照发且不放宽作用域', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    localStorage.setItem('workspaceId', 'default')
+    const writeRequests: Array<{ url: string; method: string }> = []
+    const externalSystemBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET') {
+        writeRequests.push({ url, method })
+        if (url === '/api/integration/staging/install') {
+          return jsonResponse({
+            projectId: 'project_1',
+            sheetIds: { standard_materials: 'sheet_materials' },
+            viewIds: { standard_materials: 'view_materials' },
+            openLinks: { standard_materials: '/multitable/sheet_materials/view_materials' },
+            targets: [{
+              id: 'standard_materials',
+              name: '物料清洗',
+              sheetId: 'sheet_materials',
+              viewId: 'view_materials',
+              openLink: '/multitable/sheet_materials/view_materials',
+            }],
+            warnings: [],
+          })
+        }
+        if (url === '/api/integration/external-systems') {
+          const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+          externalSystemBodies.push(body)
+          return jsonResponse(body)
+        }
+        return jsonResponse({})
+      }
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url.startsWith('/api/integration/external-systems')) {
+        // project_1 的两条连接都建在租户级,列表那一步的回退把它们带了出来(行仍报自己的作用域)。
+        return jsonResponse([
+          {
+            id: 'metasheet_staging_project_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'MetaSheet staging 多维表',
+            kind: 'metasheet:staging',
+            role: 'source',
+            status: 'active',
+          },
+          {
+            id: 'metasheet_target_project_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'MetaSheet 目标多维表',
+            kind: 'metasheet:multitable',
+            role: 'target',
+            status: 'active',
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([
+          { id: 'standard_materials', name: 'Standard Materials', fields: ['code', 'name'] },
+        ])
+      }
+      return jsonResponse([])
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const projectIdInput = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
+    projectIdInput.value = 'project_1'
+    projectIdInput.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="install-staging"]') as HTMLButtonElement).click()
+    await flushUi(20)
+
+    // 安装本身照做;它结尾自动「设为 Dry-run 来源」那一步撞上租户级行,被拦在发请求之前。
+    expect(writeRequests.map((entry) => entry.url)).toEqual(['/api/integration/staging/install'])
+    expect(externalSystemBodies).toEqual([])
+    expect(container.textContent).toContain('无法把 staging 多维表设为 Dry-run 来源')
+    expect(container.textContent).toContain('固定 id「metasheet_staging_project_1」')
+    expect(container.textContent).toContain('租户级')
+    expect(container.textContent).toContain('请清空上方的工作区')
+    // 服务端那句英文原文不许落到屏幕上 —— 它正是 parseIntegrationResponse 丢掉 code 之后剩下的东西。
+    expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
+
+    ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(writeRequests.map((entry) => entry.url)).toEqual(['/api/integration/staging/install'])
+    expect(externalSystemBodies).toEqual([])
+    expect(container.textContent).toContain('无法把多维表设为写回目标')
+    expect(container.textContent).toContain('固定 id「metasheet_target_project_1」')
+
+    // 判据只有「行自己的作用域 vs 这次写要带的 hint」:换一个列表里没有租户级行的项目,照发不误拦。
+    projectIdInput.value = 'project_2'
+    projectIdInput.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="use-staging-source-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(writeRequests.map((entry) => entry.url)).toEqual([
+      '/api/integration/staging/install',
+      '/api/integration/external-systems',
+    ])
+    expect(externalSystemBodies).toHaveLength(1)
+    expect(externalSystemBodies[0]).toMatchObject({
+      id: 'metasheet_staging_project_2',
+      tenantId: 'default',
+      // 仍然是调用方自己的 hint。屏幕侧这道拦截只少发注定失败的请求,不会改写入作用域去够那行租户级的连接。
+      workspaceId: 'default',
+      projectId: 'project_2',
+      kind: 'metasheet:staging',
+    })
+  })
+
   it('does not mark error-state source or target systems as dry-run ready', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {

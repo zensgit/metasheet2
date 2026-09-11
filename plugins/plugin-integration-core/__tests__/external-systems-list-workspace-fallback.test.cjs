@@ -41,7 +41,10 @@
 //   * drop `tenant_id` from the fallback branch's where-clause -> L-04 goes red;
 //   * replace the fallback branch's `workspace_id: null` with "any workspace" -> L-05 goes red;
 //   * delete the `assertHintedIdDoesNotTargetTenantWideRow` call in `upsertExternalSystem` -> L-10
-//     goes red (the insert branch runs and dies on this file's id primary key instead).
+//     goes red (the insert branch runs and dies on this file's id primary key instead);
+//   * drop `tenant_id` from the guard's own where-clause (making it a GLOBAL id probe) -> L-10 goes
+//     red on its same-id-different-tenant case: the guard would answer 409 for a row belonging to
+//     ANOTHER tenant instead of staying silent and letting the primary key raise 23505.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -469,9 +472,53 @@ async function testHintedIdCarryingUpsertIsRefusedServerSide() {
   assert.ok(!db.calls.some(([name]) => name === 'insertOne'),
     'L-10: ...and the insert is never even issued to the db')
 
-  // THE GUARD IS ONE STEP, NOT A GLOBAL ID PROBE. Another tenant's rows must not make this caller's
-  // create a "conflict" — that would answer a question about rows this caller can neither read nor
-  // list, and it would break ordinary creation.
+  // THE GUARD IS ONE STEP, NOT A GLOBAL ID PROBE — pinned with the ONLY payload that can tell the
+  // two apart: the SAME id, in ANOTHER tenant. Drop `tenant_id` from the guard's where-clause and it
+  // becomes a global id probe: it would find tenant_b's row and answer THIS caller
+  // EXTERNAL_SYSTEM_SCOPE_MISMATCH — speaking for, and disclosing the existence of, a row this
+  // caller can neither read nor list. Correct behaviour is SILENCE: the guard declines to answer,
+  // the insert branch runs, and the id collision stays what it always was — the database's own
+  // `id TEXT PRIMARY KEY` 23505, unchanged by this PR. (A *different* id cannot detect this: a
+  // global probe misses that too, which is why the case below is not enough on its own.)
+  const crossTenantDb = createMockDb()
+  seed(crossTenantDb, { id: 'sys_x', tenant_id: 'tenant_b', workspace_id: null, name: 'B 的源' })
+  const crossTenantRegistry = createRegistry(crossTenantDb)
+
+  await assert.rejects(
+    () => crossTenantRegistry.upsertExternalSystem({
+      tenantId: 'tenant_a',
+      workspaceId: 'default',
+      id: 'sys_x',
+      name: 'A 的源',
+      kind: 'http',
+      role: 'source',
+      status: 'active',
+    }),
+    (error) => {
+      assert.notEqual(error.code, 'EXTERNAL_SYSTEM_SCOPE_MISMATCH',
+        'L-10: the guard must NOT answer for another tenant\'s row — that is a cross-tenant probe')
+      assert.notEqual(error.name, 'ExternalSystemConflictError',
+        'L-10: ...so this is not this module\'s scope conflict at all')
+      assert.equal(error.code, '23505',
+        'L-10: it is the db primary key, i.e. the pre-existing behaviour this PR did not touch')
+      assert.equal(error.constraint, 'integration_external_systems_pkey',
+        'L-10: ...the id key specifically, not the (tenant, workspace, name) unique index')
+      return true
+    },
+    'L-10: a same-id-different-tenant hinted create reaches the insert branch, exactly as before',
+  )
+  assert.ok(crossTenantDb.calls.some(([name]) => name === 'insertOne'),
+    'L-10: ...i.e. the insert IS issued here — unlike the in-tenant case, which never gets that far')
+  assert.deepEqual(
+    crossTenantDb.calls.filter(([name]) => name === 'selectOne').map(([, , where]) => where.tenant_id),
+    ['tenant_a', 'tenant_a'],
+    'L-10: every by-id lookup on this path (findExisting + the guard) carries the CALLER\'s tenant',
+  )
+  assert.equal(crossTenantDb.rows.length, 1,
+    'L-10: and tenant_b\'s row is neither returned to this caller nor overwritten')
+
+  // AND ORDINARY CREATION IS UNTOUCHED: another tenant's rows must not make this caller's create a
+  // "conflict" when the id is fresh.
   const otherTenantDb = createMockDb()
   seed(otherTenantDb, { id: 'sys_b', tenant_id: 'tenant_b', workspace_id: null, name: 'B 的源' })
   const otherTenantRegistry = createRegistry(otherTenantDb)
