@@ -1,3 +1,29 @@
+# MetaSheet 多维表格 on-prem nginx 示例。
+#
+# 维护门（2026-09-11 加入）
+# ------------------------------------------------------------------------------
+# 就地升级（scripts/ops/multitable-onprem-package-upgrade-inplace.ps1）里 pm2 重启
+# 大约需要 60-90 秒。没有这道门时，正在页面上操作的人看到的是
+# ERR_CONNECTION_RESET / Failed to fetch —— 三天里四个升级窗口换来四次投诉。
+#
+# 做法：升级脚本在停后端**之前**写一个 flag 文件，升级完（后端直连健康检查通过后）
+# 立刻删掉它；nginx 只要看见这个文件就：
+#   * /api/*  → 503 + Retry-After + 一段 JSON 错误体（前端按普通错误提示处理）；
+#   * /       → 503 + 静态维护页（浏览器直接看到"维护中"，不是白屏）。
+# flag 文件路径必须在升级**不会替换**的目录下（output/），维护页也一样
+# （ops/maintenance/）—— apps/web/dist 与 packages/core-backend/dist 在升级中会被
+# 整体删除重建，把任何一个放进去都会在最需要它的时刻消失。
+#
+# 三点注意：
+#   1. 改这个示例文件对现网**零效果**。实施人必须手工把同样的段落同步到线上
+#      nginx.conf，然后 `nginx -t` 通过后再 reload。
+#   2. Windows 上 nginx 常以 SYSTEM 身份运行，reload 也必须以 SYSTEM 身份发
+#      （用一次性计划任务跑 `nginx -s reload`），普通管理员发的信号进不去。
+#      步骤见 docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md
+#      的「升级窗口的维护门」一节。
+#   3. 下面所有绝对路径按**实际根目录**改（示例用 /opt/metasheet；222 现网是
+#      C:/metasheet，nginx 配置里一律写正斜杠）。
+
 server {
   listen 80;
   server_name _;
@@ -5,11 +31,34 @@ server {
   root /opt/metasheet/apps/web/dist;
   index index.html;
 
+  # 与 222 现网同形：server 级的 503 默认落到 JSON 命名 location。
+  error_page 503 @maintenance_json;
+
   location / {
+    # 按实际根目录改。`if` 在 location 里只有 `return` / `rewrite last` 两种用法
+    # 是安全的，这里正是其中之一。
+    if (-f /opt/metasheet/output/maintenance.flag) {
+      return 503;
+    }
+    # 浏览器直接访问时给人看的页面，覆盖上面的 JSON 默认值。
+    error_page 503 /maintenance.html;
     try_files $uri $uri/ /index.html;
   }
 
+  # 静态维护页。root 指向**升级不会替换**的目录，所以升级中途它一定在。
+  # 最终文件路径 = root + URI = /opt/metasheet/ops/maintenance/maintenance.html
+  # （仓库里的模板见 ops/maintenance/maintenance.html，需要手工放到这个目录）。
+  location = /maintenance.html {
+    internal;
+    charset utf-8;
+    root /opt/metasheet/ops/maintenance;
+  }
+
   location /api {
+    # 与 222 现网同形：维护门是这个 location 的第一条规则，排在 proxy_pass 之前。
+    if (-f /opt/metasheet/output/maintenance.flag) {
+      return 503;
+    }
     client_max_body_size 120m;
     proxy_pass http://127.0.0.1:8900;
     proxy_http_version 1.1;
@@ -19,6 +68,16 @@ server {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_read_timeout 300s;
     proxy_send_timeout 300s;
+  }
+
+  # 维护期 /api/* 的应答体。升级脚本自己的健康检查**不走这里**：它先直连后端
+  # 127.0.0.1:<PORT>/health，通过后才删 flag、再探 /api/health —— 否则脚本会被
+  # 自己举起的这道门挡成 12 次 503（r29，2026-09-11 实际踩过，后端其实早就好了）。
+  location @maintenance_json {
+    default_type application/json;
+    add_header Retry-After 90 always;
+    add_header Cache-Control "no-store" always;
+    return 503 '{"error":{"code":"SERVICE_UNAVAILABLE","message":"服务暂时不可用,请稍后重试"}}';
   }
 
   location /files/ {
