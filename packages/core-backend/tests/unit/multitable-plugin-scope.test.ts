@@ -146,6 +146,7 @@ describe('multitable plugin scope helper', () => {
       getObjectSheetId: () => 'sheet_1',
       getFieldId: () => 'fld_1',
       getObjectField: async () => null,
+      findObjectView: async () => null,
       findObjectSheet: async () => null,
       isSheetOwnedByProject: async () => false,
       resolveFieldIds: async () => ({}),
@@ -168,6 +169,86 @@ describe('multitable plugin scope helper', () => {
         `plugin-scoped provisioning must wrap ${method}`,
       ).toBe('function')
     }
+  })
+
+  it('the READ-ONLY view probe is scoped like the write it reads back, and degrades on an older host', async () => {
+    // `findObjectView` exists so a plugin can tell "this view is PROVISIONED" from "I composed an
+    // id" (getObjectViewId is pure derivation and says nothing about existence) — which is what the
+    // 备料 deep link decides between the 备料填写视图 and the default view on. It is the READ sibling
+    // of `ensureView`, so it must be narrowed exactly like a write: project namespace first, then
+    // object scope, then forward. None of those three may be droppable while the suite stays green.
+    const delegate = vi.fn(async () => ({
+      id: 'view_1',
+      sheetId: 'sheet_1',
+      name: '备料填写视图',
+      type: 'grid',
+      filterInfo: {},
+      sortInfo: {},
+      groupInfo: {},
+      hiddenFieldIds: ['fld_1'],
+      config: {},
+    }))
+    const assertObjectScope = vi.fn(async () => {})
+    const scoped = createPluginScopedMultitableApi(
+      { provisioning: { findObjectView: delegate }, records: {} } as any,
+      'plugin-integration-core',
+      { assertObjectScope },
+    )
+
+    // (a) the plugin's own namespace: object scope asserted, then forwarded.
+    await expect(
+      scoped.provisioning.findObjectView!({
+        projectId: 'tenant_42:integration-core',
+        objectId: 'plm_stock_preparation',
+        viewId: 'prep-fill',
+      }),
+    ).resolves.toMatchObject({ id: 'view_1' })
+    expect(assertObjectScope).toHaveBeenCalledWith({
+      pluginName: 'plugin-integration-core',
+      projectId: 'tenant_42:integration-core',
+      objectId: 'plm_stock_preparation',
+    })
+    expect(delegate).toHaveBeenCalledTimes(1)
+
+    // (b) an object this plugin does not own: the scope hook's refusal propagates and the read is
+    //     never forwarded — a read may not be the way around a scope the write enforces.
+    assertObjectScope.mockRejectedValueOnce(new Error('object scope refused'))
+    await expect(
+      scoped.provisioning.findObjectView!({
+        projectId: 'tenant_42:integration-core',
+        objectId: 'someone_elses_object',
+        viewId: 'prep-fill',
+      }),
+    ).rejects.toThrow('object scope refused')
+    expect(delegate).toHaveBeenCalledTimes(1)
+
+    // (c) a FOREIGN plugin namespace: refused on the ARGUMENT, before the scope hook and before any
+    //     query — the same wall every other provisioning method takes.
+    assertObjectScope.mockClear()
+    await expect(
+      scoped.provisioning.findObjectView!({
+        projectId: 'tenant_42:attendance',
+        objectId: 'plm_stock_preparation',
+        viewId: 'prep-fill',
+      }),
+    ).rejects.toThrow(MultitableProjectNamespaceError)
+    expect(assertObjectScope).not.toHaveBeenCalled()
+    expect(delegate).toHaveBeenCalledTimes(1)
+
+    // (d) a host OLDER than the port answers null rather than throwing, so a plugin newer than its
+    //     host degrades to "cannot prove it exists" — which is the fallback the deep link wants.
+    const oldHost = createPluginScopedMultitableApi(
+      { provisioning: {}, records: {} } as any,
+      'plugin-integration-core',
+      { assertObjectScope },
+    )
+    await expect(
+      oldHost.provisioning.findObjectView!({
+        projectId: 'tenant_42:integration-core',
+        objectId: 'plm_stock_preparation',
+        viewId: 'prep-fill',
+      }),
+    ).resolves.toBeNull()
   })
 
   it('wraps provisioning methods with namespace checks', async () => {

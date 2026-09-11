@@ -825,6 +825,114 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
   ],
 }))
 
+// ---------------------------------------------------------------------------
+// 备料填写视图 — THE FILL VIEW's CONTRACT (ids only, never values).
+//
+// WHY A VIEW AND NOT A TEMPLATE CHANGE. The first real deployment's main table shows all 33
+// columns, 12 of which are machine plumbing the person filling the sheet can do nothing with
+// (源ID/路径/层级/刷新痕迹). A template edit cannot fix that: an EXISTING object is either
+// already ready or refused, never re-described (see stock-preparation-target-provisioning.cjs,
+// `buildStockPreparationTargetDescriptor`), so nothing in the template can hide a column on a
+// table that already exists. A VIEW can, it works on existing installs, and it carries the
+// sort/group/filter the same operator asked for. Nothing here renames or drops a column.
+//
+// IT IS DISPLAY, NOT PERMISSION. `hidden_field_ids` is read by the grid; field permissions,
+// the export projection and the apply writer do not consult it and must not be told they do.
+// Anyone who may open the sheet may unhide these columns.
+//
+// THE TWO VIEW IDS LIVE HERE TOGETHER so no module can hold a private copy of either. The
+// fill view is the plugin's OWN view (`prep-fill`); `default` is the HOST's default-view id
+// (packages/core-backend/src/multitable/provisioning.ts, DEFAULT_OBJECT_VIEW_LOGICAL_ID),
+// mirrored by the board suite. They must never be the same token: the default view is the one
+// a deployment may have hand-tuned, and `ensureObjectDefaultView`'s never-touch-existing-views
+// guarantee is exactly what an upsert onto `default` would hole.
+const STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID = 'prep-fill'
+const STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID = 'default'
+
+const STOCK_PREPARATION_FILL_VIEW_LABEL = Object.freeze({
+  label: 'Stock Preparation Fill',
+  labelZh: '备料填写视图',
+})
+
+// The 12 plm_system columns the fill view hides — the exact set the customer pointed at.
+// Every id is asserted below to be a plm_system column of the frozen main template, so this
+// list can never hide a human-owned column (the band a person fills) by a typo or a rename.
+const STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS = Object.freeze([
+  'idempotencyKey',
+  'componentSourceId',
+  'parentSourceId',
+  'path',
+  'depth',
+  'sourceVersion',
+  'rawQuantity',
+  'active',
+  'lastPlmRefreshRunId',
+  'lastPlmRefreshAt',
+  'lastPlmRefreshDecision',
+  'lastPlmConflictSummary',
+])
+
+// 按父组件分组、组内按图号排序 — the legacy 备料 system's own order
+// (`order by parent_component_code, component_sort_id`), expressed with the columns this
+// table actually has. Ascending only; `desc` is written explicitly so the stored shape is
+// the one the grid and the meta route parse (`sortInfo.rules[].desc`).
+const STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS = Object.freeze(['parentComponentCode', 'componentCode'])
+const STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS = Object.freeze(['parentComponentCode'])
+// A refresh MARKS rows inactive rather than deleting them (`missingFromPlmPolicy: 'mark_inactive'`),
+// so a fill view that did not filter would show rows PLM no longer reports beside live ones.
+const STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID = 'active'
+
+// Consistency between this contract and the frozen template, checked at load rather than
+// trusted: an id that is not a plm_system column of the main table, a sort/group column that
+// is hidden (a group header nobody can see), or a fill id equal to the host's default view id
+// are all authoring mistakes that would otherwise surface as a silently wrong view on a
+// customer's table.
+function assertFillViewContract({
+  template = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  hiddenFieldIds = STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+  sortFieldIds = STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+  groupFieldIds = STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
+  activeFilterFieldId = STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+  fillViewLogicalId = STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  defaultViewLogicalId = STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID,
+} = {}) {
+  if (fillViewLogicalId === defaultViewLogicalId) {
+    throw new StockPreparationTemplateError(
+      'the fill view must not be the default view: upserting the default view would hole the host\'s never-touch-existing-views guarantee',
+    )
+  }
+  const ownershipById = new Map((template.fields || []).map((field) => [field.id, field.ownership]))
+  const hidden = new Set(hiddenFieldIds)
+  for (const fieldId of hiddenFieldIds) {
+    if (!ownershipById.has(fieldId)) {
+      throw new StockPreparationTemplateError(`fill view hides an unknown field: ${fieldId}`)
+    }
+    if (ownershipById.get(fieldId) !== 'plm_system') {
+      throw new StockPreparationTemplateError(`fill view may only hide plm_system columns: ${fieldId}`)
+    }
+  }
+  for (const fieldId of [...sortFieldIds, ...groupFieldIds, activeFilterFieldId]) {
+    if (!ownershipById.has(fieldId)) {
+      throw new StockPreparationTemplateError(`fill view orders by an unknown field: ${fieldId}`)
+    }
+  }
+  for (const fieldId of [...sortFieldIds, ...groupFieldIds]) {
+    if (hidden.has(fieldId)) {
+      throw new StockPreparationTemplateError(`fill view cannot sort or group by a column it hides: ${fieldId}`)
+    }
+  }
+  return true
+}
+
+assertFillViewContract()
+
+// The fill view's own name, in the same language the sheet and its columns were created in —
+// through the one locale reader every other label goes through, never a second one.
+function pickFillViewName(options = {}) {
+  const locale = options.locale === undefined ? resolveTemplateLabelLocale() : options.locale
+  return pickTemplateLabel(STOCK_PREPARATION_FILL_VIEW_LABEL, locale)
+}
+
 // B-stage takeover decision ledger (FIRST CUT). This is deliberately NOT part of the frozen
 // nine-table MVP surface: canonical stock-preparation remains the only business fact table,
 // while this one supporting object stores revision-bound human decisions only. Customer-entered
@@ -1172,6 +1280,15 @@ module.exports = {
   pickTemplateLabel,
   STOCK_PREPARATION_DEFAULT_VIEW_LABELS,
   pickDefaultViewName,
+  STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_FILL_VIEW_LABEL,
+  STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+  assertFillViewContract,
+  pickFillViewName,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,

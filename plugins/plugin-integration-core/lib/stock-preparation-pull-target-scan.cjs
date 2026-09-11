@@ -60,7 +60,13 @@
 // the board's header already names as the real fix, and it is not this change either.
 
 const { optionalString } = require('./stock-preparation-common.cjs')
-const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
+const {
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  // The two view ids are the template module's, so the handle this file hands out and the view
+  // provisioning creates cannot drift about which token names which view.
+  STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID,
+} = require('./stock-preparation-templates.cjs')
 const {
   REQUIRED_EXPORT_FIELD_IDS,
   __internals: EXPORT_INTERNALS,
@@ -309,11 +315,47 @@ async function resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget)
 }
 
 /**
- * The logical view id the plugin's own default-view provisioning creates
+ * THE FALLBACK view id — the one the plugin's own default-view provisioning creates
  * (`ensureManagedTableDefaultView` -> host `ensureObjectDefaultView` -> `DEFAULT_OBJECT_VIEW_LOGICAL_ID`).
- * Kept as a constant rather than inlined so the two stay greppable together.
+ * Aliased here (the constant itself is the template module's) so this file's callers and its suite
+ * address it where they always did, and so the mirror test that pins it against the HOST constant
+ * keeps naming one token.
+ *
+ * It is a FALLBACK now rather than the destination: the deep link prefers the 备料填写视图
+ * (`STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID`, hidden system columns + 父组件分组/排序 + 有效过滤),
+ * and comes back here for every table that does not have one yet — which is every table created
+ * before the fill view existed, until its deployment runs the additive repair verb.
  */
-const STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID = 'default'
+const STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID = STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID
+
+/**
+ * DOES THE FILL VIEW EXIST? — a read-only, capability-detected existence probe.
+ *
+ * `getObjectViewId` COMPOSES an id and says nothing about whether the view is there (its own doc
+ * says so), so pointing the deep link at `prep-fill` without asking would send every existing
+ * deployment to a view id that resolves to nothing; the workbench would then fold to the sheet's
+ * FIRST view — which on a pack-installed table is a role view, not the default one. Hence the
+ * probe, and hence the fallback it feeds.
+ *
+ * IT WIDENS NOTHING. `findObjectView` is the read-only sibling of `ensureView` (which this plugin
+ * already holds for this same sheet) over an id DERIVED from the caller's own project + object, and
+ * it carries the same project-namespace + object-scope assertions on the host side. A host without
+ * it, a scope refusal, or any error at all answers "no" — and "no" costs the caller the default
+ * view, never another tenant's anything.
+ */
+async function fillViewExists(provisioning, stagingProjectId, objectId) {
+  if (typeof provisioning.findObjectView !== 'function') return false
+  try {
+    const view = await provisioning.findObjectView({
+      projectId: stagingProjectId,
+      objectId,
+      viewId: STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+    })
+    return !!(view && view.id)
+  } catch {
+    return false
+  }
+}
 
 /**
  * THE DEEP-LINK HANDLE — `{ sheetId, viewId }` for the 备料主表 — or null.
@@ -339,15 +381,20 @@ const STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID = 'default'
  * capability so a plugin newer than its host degrades to "no handle" rather than erroring — and it
  * costs NO IO, which is why a caller that already resolved `ownSheet` pays nothing for the handle.
  *
- * `viewId` is the id the plugin's own default-view provisioning uses. If a deployment's table carries
- * hand-made views instead, the workbench falls back to the sheet's first view
- * (useMultitableWorkbench's `preferredViewId` fold), so the handle degrades to "open this sheet"
- * rather than breaking.
+ * `viewId` IS THE 备料填写视图 WHEN THAT VIEW EXISTS, and the default view otherwise — decided by
+ * `fillViewExists` above, never assumed. A table provisioned before the fill view existed (every
+ * table in the field today, until its deployment runs the additive repair verb) therefore keeps the
+ * link it has today, byte for byte. If a deployment's table carries hand-made views instead of
+ * either, the workbench falls back to the sheet's first view (useMultitableWorkbench's
+ * `preferredViewId` fold), so the handle still degrades to "open this sheet" rather than breaking.
  */
 async function resolveFillTarget(provisioning, ownSheet, stagingProjectId) {
   if (!ownSheet) return null
   if (typeof provisioning.getObjectViewId !== 'function') return null
-  const viewId = provisioning.getObjectViewId(stagingProjectId, ownSheet.objectId, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID)
+  const logicalId = (await fillViewExists(provisioning, stagingProjectId, ownSheet.objectId))
+    ? STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID
+    : STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID
+  const viewId = provisioning.getObjectViewId(stagingProjectId, ownSheet.objectId, logicalId)
   if (typeof viewId !== 'string' || viewId.length === 0) return null
   return { sheetId: ownSheet.sheetId, viewId }
 }
@@ -585,7 +632,9 @@ module.exports = {
   SCAN_WHOLE_SHEET,
   STOCK_PREPARATION_FILL_OBJECT_ID,
   STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID,
   createPullTargetScanCache,
+  fillViewExists,
   parsePlmRefreshTimestampMs,
   proveBoundSheetIsAlive,
   readPullTargetRowFacts,

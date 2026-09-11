@@ -427,6 +427,21 @@ export function createPluginScopedMultitableApi(
         await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
         return multitable.provisioning.ensureView(input)
       },
+      // READ-ONLY view existence/content, scoped exactly like the field read below it:
+      // project namespace, then object scope. It is strictly NARROWER than the `ensureView`
+      // write above — same derived id, no mutation — so it widens no plugin's reach. A host
+      // that does not implement it answers null rather than throwing, which is the degrade the
+      // optional declaration on the API promises.
+      findObjectView: async (input) => {
+        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        await hooks.assertObjectScope?.({
+          pluginName,
+          projectId: input.projectId,
+          objectId: input.objectId,
+        })
+        if (typeof multitable.provisioning.findObjectView !== 'function') return null
+        return multitable.provisioning.findObjectView(input)
+      },
       patchObjectFieldProperty: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         await hooks.assertObjectScope?.({

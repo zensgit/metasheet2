@@ -14,6 +14,16 @@ const {
   buildSheetStructureFromTemplate,
   resolveTemplateLabelLocale,
   pickDefaultViewName,
+  // 备料填写视图 — the fill view's whole contract (two view ids, the hidden column set, the
+  // sort/group columns and the active filter column) lives in the template module beside the
+  // frozen template it is checked against, so no module here holds a private copy of any of them.
+  STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+  pickFillViewName,
 } = require('./stock-preparation-templates.cjs')
 
 // W2 canonical repair: namespace positive control for a repaired-in field.
@@ -553,6 +563,114 @@ async function ensureManagedTableDefaultView({ provisioning, projectId, objectId
   return { created: false, skipped: existingViewCount > 0 ? 'existing_views' : 'concurrent_create' }
 }
 
+// ---------------------------------------------------------------------------
+// 备料填写视图 — THE FILL VIEW, the one view 「打开项目备料」 lands on.
+//
+// WHAT IT IS FOR. The main table carries 33 columns; 12 of them are machine plumbing
+// (源ID / BOM路径 / 层级 / 刷新痕迹) that the person filling the sheet cannot act on and
+// did act as noise on the first customer-facing table. This view hides exactly those 12,
+// groups by 父组件图号 and sorts 父组件图号 → 图号 (the legacy system's own
+// `order by parent_component_code, component_sort_id`, expressed in the columns this table
+// has), and filters to 有效 rows so a refresh's `mark_inactive` leftovers do not sit beside
+// live ones.
+//
+// IT IS DISPLAY, NOT PERMISSION — stated here because this is where someone would be
+// tempted to use it as one. `hidden_field_ids` is honoured by the grid; field permissions,
+// the export projection and the apply writer never read it. Any operator who can open the
+// sheet can unhide every column, and MUST be able to: the hidden band includes `active` and
+// the refresh trace, which an investigator needs.
+//
+// WHY IT IS `ensureView` AND NOT `ensureObjectDefaultView`. The default view is the one a
+// deployment may already have hand-tuned, and the host's default-view primitive is shaped
+// around "a sheet that already has ANY view is left COMPLETELY alone". Upserting `default`
+// would hole exactly that guarantee. So the fill view is the plugin's OWN view id
+// (`prep-fill`), and the refusal below is load-bearing rather than a comment: this function
+// REFUSES to write a descriptor whose id is the host's default-view id, whatever a future
+// edit to the constants does.
+//
+// OPTIONAL CAPABILITY: an older host without `ensureView`/`getFieldId` is not a failure —
+// provisioning proceeds exactly as it does today and the evidence says which leg ran.
+function buildStockPreparationFillViewDescriptor({ provisioning, projectId, objectId, locale } = {}) {
+  // The stored ids are PHYSICAL (meta_views.hidden_field_ids is compared against meta_fields.id
+  // and sort/group/filter rules address the same physical ids), so every logical id goes through
+  // the host's stable-id function — the same mapping the customer-pack role views use.
+  const physical = (fieldId) => provisioning.getFieldId(projectId, objectId, fieldId)
+  const sortFieldIds = STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS.map(physical)
+  const groupFieldIds = STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS.map(physical)
+  return {
+    id: STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+    objectId,
+    name: pickFillViewName({ locale }),
+    type: 'grid',
+    hiddenFieldIds: STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS.map(physical),
+    sortInfo: { rules: sortFieldIds.map((fieldId) => ({ fieldId, desc: false })) },
+    // BOTH group shapes are written on purpose: the grid prefers the ordered `fieldIds` and
+    // falls back to the legacy single `fieldId`, and other view kinds still read only the
+    // latter (apps/web/src/multitable/composables/useMultitableGrid.ts).
+    groupInfo: { fieldIds: groupFieldIds, fieldId: groupFieldIds[0] },
+    filterInfo: {
+      conjunction: 'and',
+      conditions: [{ fieldId: physical(STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID), operator: 'is', value: true }],
+    },
+    // Values-free provenance: ids and counts only, never a customer row value.
+    config: {
+      stockPreparation: {
+        fillView: {
+          logicalId: STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+          hiddenFieldCount: STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS.length,
+          sortFieldCount: sortFieldIds.length,
+          groupFieldCount: groupFieldIds.length,
+          filtersActiveOnly: true,
+        },
+      },
+    },
+  }
+}
+
+async function ensureStockPreparationFillView({ provisioning, projectId, objectId, sheetId, locale, template } = {}) {
+  if (!provisioning || typeof provisioning.ensureView !== 'function' || typeof provisioning.getFieldId !== 'function') {
+    return { created: false, skipped: 'api_unavailable', viewId: null }
+  }
+  if (!sheetId) return { created: false, skipped: 'sheet_unknown', viewId: null }
+  // THE TABLE MUST ACTUALLY HAVE THE COLUMNS. `ensureStockPreparationTarget` accepts a CALLER's
+  // template for a fresh table (only `repair` is pinned to the frozen one), and the fill view's
+  // hidden/sort/group/filter rules are the FROZEN template's ids. A table without them would get a
+  // view full of ids that address nothing — so a template that does not carry every id this view
+  // names is skipped, reported, and never half-applied. The canonical main and the sandbox (same
+  // field ids, different objectId) both pass.
+  const resolvedTemplate = template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE
+  const templateIds = new Set((resolvedTemplate.fields || []).map((field) => field.id))
+  const requiredIds = [
+    ...STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+    ...STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+    ...STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
+    STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+  ]
+  if (requiredIds.some((fieldId) => !templateIds.has(fieldId))) {
+    return { created: false, skipped: 'template_mismatch', viewId: null }
+  }
+  const descriptor = buildStockPreparationFillViewDescriptor({ provisioning, projectId, objectId, locale })
+  // THE REFUSAL. `ensureView` is an UPSERT: pointed at the default view id it would overwrite a
+  // deployment's own hidden/sort/name — the very thing `ensureObjectDefaultView` promises never to
+  // touch. This function therefore refuses to be the tool that does it, and refuses from the
+  // descriptor it is ABOUT to send rather than from the constant it read.
+  if (descriptor.id === STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT',
+      'the stock-preparation fill view may never be upserted onto the default view id',
+      { objectId },
+    )
+  }
+  const view = await provisioning.ensureView({ projectId, sheetId, descriptor })
+  return {
+    created: true,
+    skipped: null,
+    viewId: view && view.id ? String(view.id) : null,
+    hiddenFieldCount: descriptor.hiddenFieldIds.length,
+  }
+}
+
 async function ensureStockPreparationTarget(input = {}) {
   const context = input.context || {}
   const provisioning = getProvisioningApi(context)
@@ -631,10 +749,25 @@ async function ensureStockPreparationTarget(input = {}) {
     viewKind: 'records',
     locale: input.locale,
   })
+  // 备料填写视图 — on the CREATE path only, for the same reason the default view is created
+  // here: the table was just created by THIS call (so its object scope is this plugin's, freshly
+  // claimed by `ensureObject`) and it has no hand-tuned views to respect. An already-ready target
+  // returned long before this point and is untouched; an EXISTING deployment gains the fill view
+  // through the additive REPAIR verb instead, which is the path that exists for exactly that.
+  // A real host error is NOT swallowed here: nothing was inherited, so nothing is ambiguous.
+  const fillView = await ensureStockPreparationFillView({
+    provisioning,
+    projectId,
+    objectId: template.objectId,
+    sheetId: ensured.sheet.id,
+    locale: input.locale,
+    template,
+  })
   return {
     ready: true,
     mode: `${modePrefix}_create`,
     defaultView,
+    fillView,
     target: buildCanonicalTargetBinding({ sheetId: ensured.sheet.id, objectId: template.objectId, fieldIdMap: resolvedAfterCreate }),
     evidence: summarizeStockPreparationTargetReadiness({
       template,
@@ -834,11 +967,40 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
     }
     // AFTER snapshot: every pre-existing field must be byte-for-byte unchanged.
     assertNoExistingFieldMutated(beforeContent, await tx.readObjectFieldsContent({ projectId, objectId: template.objectId, fieldIds: existingIds }), template.objectId)
-    return writeResult
+    // The sheet id travels out with the write result: the fill-view ensure below runs OUTSIDE
+    // this transaction (the repair surface deliberately exposes only the four field methods),
+    // and re-deriving the sheet id there would be a second answer to a question already proved.
+    return { ...writeResult, sheetId: sheet && sheet.id ? String(sheet.id) : '' }
   })
+  // 备料填写视图 — THE HEAL PATH for tables that already exist. This is why an existing
+  // deployment (whose table was created before the fill view existed, and whose `ensure` returns
+  // "already ready" without writing anything) can still get the view: repair is the additive verb,
+  // and the view is additive in exactly the same sense — its id is the plugin's own, so it can
+  // neither replace nor reorder a view the deployment made.
+  //
+  // IT DEGRADES, IT DOES NOT FAIL, and the degradation is REPORTED. The schema repair is already
+  // committed by now; an existing sheet may be one this plugin never claimed in the object registry
+  // (hand-made, or restored from a dump), in which case the host's sheet-scope assertion refuses
+  // `ensureView` — and turning a SUCCESSFUL schema repair into a 5xx over a display view would be
+  // the wrong trade. `fillView.skipped` carries which leg ran so it is observable rather than
+  // silent; re-running repair after the registry is fixed creates the view.
+  let fillView
+  try {
+    fillView = await ensureStockPreparationFillView({
+      provisioning,
+      projectId,
+      objectId: template.objectId,
+      sheetId: result.sheetId,
+      locale: input.locale,
+      template,
+    })
+  } catch {
+    fillView = { created: false, skipped: 'ensure_failed', viewId: null }
+  }
   return {
     ready: true,
     mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
+    fillView,
     evidence: {
       action: 'stock_preparation_canonical_repair',
       mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
@@ -846,6 +1008,9 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
       skippedExistingFieldCount: result.skippedExistingFieldIds.length,
       schemaCompleteAfter: true,
       templateVersion: template.version,
+      // Values-free: created / why-not only — never a view name or a column id.
+      fillViewCreated: fillView.created === true,
+      fillViewSkipped: fillView.skipped || null,
     },
   }
 }
@@ -931,6 +1096,8 @@ module.exports = {
   isSandboxNamespaceObjectId,
   buildStockPreparationTargetDescriptor,
   ensureManagedTableDefaultView,
+  ensureStockPreparationFillView,
+  buildStockPreparationFillViewDescriptor,
   summarizeStockPreparationTargetReadiness,
   hashEvidenceValue,
   sandboxStockPreparationTemplate,
