@@ -22,6 +22,16 @@
  * CHARACTERIZATION of today's behaviour, never an endorsement — see that block's own header for what to
  * do when it changes colour.
  *
+ * WHERE THIS RUNS. Nowhere without a database — by construction, and on purpose: this file is in
+ * `packages/core-backend/vitest.config.ts`'s `exclude:` list, so the no-DB default job cannot collect it
+ * and skip-green it, and it is named WHOLE-FILE in the `multitable-real-db-integration` step of
+ * `.github/workflows/plugin-tests.yml` (the step that sets DATABASE_URL and METASHEET_REAL_DB_TEST_STEP).
+ * Both halves of that wiring are asserted, not just described, by the `wiring:` test in
+ * `tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts` — so losing either one reds a unit
+ * test that DOES run on every PR, instead of silently turning this file into decoration.
+ * Corollary worth stating plainly: on a developer machine with no PostgreSQL this whole file reports
+ * `skipped`, and a green local run says NOTHING about the legs below.
+ *
  * Runs only with DATABASE_URL. The fail-not-skip sentinel is TOP-LEVEL (outside describeIfDatabase)
  * and scoped to the real-DB allowlist step via METASHEET_REAL_DB_TEST_STEP, which is the pattern
  * that actually holds: a sentinel INSIDE describeIfDatabase skips together with the goldens it is
@@ -1081,18 +1091,43 @@ describeIfDatabase('备料 列权限墙不在插件写路径上 — 特征化 go
   // ── 腿 2:插件 SDK —— 墙不在这里(特征化,不是背书) ──────────────────────────────────────────
   test('腿 2(特征化当前行为):插件 SDK patchRecord 写同一列 → 成功;这条绿代表列权限墙不在插件路径上', async () => {
     // 同一列、同一值、同一行 —— 与腿 1 逐项同量。
-    const patched = await sdk.patchRecord({
-      sheetId: PG_SHEET,
-      recordId: PG_REC,
-      changes: { [PG_LOCKED]: PG_PROBE_VALUE },
-    })
+    //
+    // M1(行为级变异断言,不是文本代理):如果有人在插件写路径上加了列权限门,这里只有两种表现 ——
+    // 要么 patchRecord 抛(门 throw/403),要么它悄悄把这一列从 payload 里滤掉(门只过滤不抛)。两种
+    // 都必须让这条腿变红,而且红出来的话要说人话,不能只留一个 "expected undefined to be …"。
+    // 下面的 try/catch + 落库回读把两种表现都钉住:第一种在 catch 里点名,第二种由紧随其后的值断言接住。
+    let patched: Awaited<ReturnType<PluginRecordsSdk['patchRecord']>>
+    try {
+      patched = await sdk.patchRecord({
+        sheetId: PG_SHEET,
+        recordId: PG_REC,
+        changes: { [PG_LOCKED]: PG_PROBE_VALUE },
+      })
+    } catch (err) {
+      throw new Error(
+        'M1 行为变更:插件 SDK patchRecord 在写这一列时抛了 —— 说明列权限门已经出现在插件写路径上(或者这条' +
+          '路径上多了别的拒绝)。这不是测试坏了,是本 golden 特征化的那句话("墙不在插件上")不再成立。' +
+          '请同步改写本 describe、守卫里 records.ts.patchRecord / records.ts.createRecord 的 ' +
+          'UNGATED_CHARACTERIZED 措辞,以及 ' +
+          'docs/development/takeover-beiliao-20260821/stock-preparation-overall-plan-20260902.md §10。' +
+          `原始错误:${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`,
+      )
+    }
 
-    expect(patched.data[PG_LOCKED]).toBe(PG_PROBE_VALUE)
+    expect(
+      patched.data[PG_LOCKED],
+      'M1 行为变更:插件 SDK patchRecord 没有抛,但这一列的值没进去 —— 说明插件路径上出现了一个"只过滤不' +
+        '报错"的列权限门。处理方式与抛错分支相同(改写本 golden + 守卫措辞 + 设计文档 §10)。',
+    ).toBe(PG_PROBE_VALUE)
     // 版本必须前进(证明真的发生了一次写),但不钉死成 2:任何 post-commit 钩子(自动编号/派生回写/
     // 自动化)再 bump 一次版本都不该让这条特征化 golden 变红 —— 它要断言的是"写成功了",不是版本算术。
     expect(patched.version).toBeGreaterThan(1)
-    // 真的落到了库里 —— 不是 SDK 返回值自说自话。
-    expect(await pgCell(PG_LOCKED)).toBe(PG_PROBE_VALUE)
+    // 真的落到了库里 —— 不是 SDK 返回值自说自话。第三种"门"的形态:SDK 回了成功但库里没变。
+    expect(
+      await pgCell(PG_LOCKED),
+      'M1 行为变更:插件 SDK 报成功、返回值也带着新值,但 meta_records.data 里这一列没变 —— 写被下游吞了。' +
+        '同样按"墙出现在插件路径上"处理。',
+    ).toBe(PG_PROBE_VALUE)
 
     // 而且策略行此刻仍然在原地:插件不是"因为门被拆了"才写进去的,是因为这条路上压根没有门。
     const still = (await q(

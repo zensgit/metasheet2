@@ -9,17 +9,34 @@
  * docs/development/multitable-per-subject-field-write-gate-w13-designlock-20260705.md §1).
  * Same discipline as `multitable-stored-data-taint-chokepoint.guard.test.ts`.
  *
+ * WHERE THIS RUNS (disputed in review, so it is pinned as an assertion, not prose — see the `wiring:`
+ * test at the bottom of this file). This guard is executed by `pnpm --filter @metasheet/core-backend
+ * test` — the "Run core-backend tests" step of `.github/workflows/plugin-tests.yml`'s `test` job, which
+ * carries no `paths:` filter on `pull_request` and therefore runs on every PR. That script is a bare
+ * `vitest`, `vitest.config.ts` declares no `include:` key, and this file is not in its `exclude:` list,
+ * so the default include collects it. It is NOT named file-by-file in any workflow, and it does not need
+ * to be: "named in a workflow" and "executed by CI" are different questions, and only the second one
+ * decides whether a guard gates anything.
+ *
  * SCOPE OF THE "FULL SET" CLAIM — read this before quoting the green (2026-09-11, corrected the same
  * day). This lock is a full set WITHIN ITS OWN SCOPE, and the scope is: the three MODULES that expose a
  * record-write API — `RecordWriteService`, `RecordService`, `multitable/records.ts`. Within them it is
- * exhaustive: EVERY member is discovered from source, and EVERY call site of every value-bearing member
- * is scanned across the whole `src` tree. It does NOT claim those three modules are the only code that
+ * exhaustive: EVERY member is discovered from the TypeScript AST of the surface (so property-assigned
+ * functions, `static` members, accessors, computed names and value re-exports are all seen — the earlier
+ * line-regex discovery saw only method syntax and a mutation probe landed a new write member on a fully
+ * green run), and EVERY call site of every value-bearing member is scanned across the whole `src` tree.
+ * The remaining, stated limit of the member scan is that it is SYNTACTIC: a member attached at runtime
+ * (`Object.assign(this, …)`, a mixin) is not a declaration and no source enumeration can see it.
+ * It does NOT claim those three modules are the only code that
  * can put a field VALUE into `meta_records.data`: raw-SQL writers live outside them
  * (`multitable/automation-executor.ts`, `multitable/derived-write-fence.ts`,
  * `multitable/exact-anchor-recovery-execute.ts`, the approval / e-learning projections, …). Those are
  * OUT OF SCOPE for the layer-3 question asked here; they are instead pinned by the chokepoint test at
  * the bottom of this file, which freezes the FILE SET allowed to run raw `INSERT/UPDATE meta_records`
- * so that a brand-new write spine cannot appear unnoticed. Anyone who needs "every write to
+ * — within `packages/core-backend/src` minus `db/migrations` (both exclusions are named in that test's
+ * doc comment, with the two migrations that do write the table listed by filename), and matching every
+ * Postgres spelling of the table name rather than one literal — so that a brand-new write spine in that
+ * tree cannot appear unnoticed. Anyone who needs "every write to
  * meta_records.data is gated" must treat those files as an open, separate case — they are named to the
  * owner in the PR body, not silently covered here.
  *
@@ -84,9 +101,10 @@
  * actor-less/system path where no subject identity applies — classify it EXEMPT with a one-line reason,
  * then update the allowlist below so the frozen count matches again.
  */
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
+import ts from 'typescript'
 import { describe, expect, test } from 'vitest'
 
 const SRC = join(__dirname, '../../src')
@@ -123,6 +141,16 @@ function isCommentMention(src: string, idx: number): boolean {
   const linePrefix = src.slice(lineStart, idx).trimStart()
   return linePrefix.startsWith('//') || linePrefix.startsWith('*')
 }
+
+/**
+ * A raw `INSERT INTO` / `UPDATE` naming the `meta_records` TABLE, in any spelling Postgres accepts for
+ * it: optional (optionally quoted) schema qualifier, optional `ONLY`, optional double quotes, any
+ * whitespace or newline between the keywords, any case. Used by the scope-boundary chokepoint at the
+ * bottom of this file — see that test's doc comment for why the normalisation exists and for the
+ * over-approximation it accepts on purpose. `meta_records_trash` must never match.
+ */
+const RAW_META_RECORDS_WRITE =
+  /\b(?:INSERT\s+INTO|UPDATE)\s+(?:ONLY\s+)?(?:"?[A-Za-z_][A-Za-z0-9_$]*"?\s*\.\s*)?"?meta_records"?(?![A-Za-z0-9_$])/gi
 
 /**
  * How a port is reached from a caller.
@@ -262,41 +290,120 @@ const SURFACES = {
 } as const
 type SurfaceName = keyof typeof SURFACES
 
-/** Public members declared on a class body that runs to end-of-file (both record services do — verified:
- *  `export class RecordService {` at record-service.ts and `export class RecordWriteService {` at
- *  record-write-service.ts are each the LAST top-level declaration in their file). `constructor` is not
- *  a member of the write surface. */
-function discoverClassMembers(file: string, className: string): string[] {
-  const src = read(file)
-  const at = src.indexOf(`export class ${className} {`)
-  expect(at, `write-surface discovery: 'export class ${className} {' not found in ${file}`).toBeGreaterThan(-1)
-  const body = src.slice(at)
-  const out = new Set<string>()
-  for (const line of body.split('\n')) {
-    const m = /^ {2}(?:public |private |protected )?(?:async )?([A-Za-z_][A-Za-z0-9_]*)\(/.exec(line)
-    if (!m) continue
-    if (m[1] === 'constructor') continue
-    out.add(m[1])
-  }
-  return [...out].sort()
+function parseTs(file: string): ts.SourceFile {
+  return ts.createSourceFile(file, read(file), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 }
 
-/** Exported functions of `multitable/records.ts` — the plugin lane's module surface. */
-function discoverExportedFunctions(file: string): string[] {
-  const src = read(file)
-  const out = new Set<string>()
-  const re = /^export (?:async )?function ([A-Za-z_][A-Za-z0-9_]*)\(/gm
-  for (;;) {
-    const m = re.exec(src)
-    if (m === null) break
-    out.add(m[1])
+function isExported(node: ts.Node): boolean {
+  const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined
+  return (modifiers ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+}
+
+/**
+ * EVERY member a class declares — enumerated from the TypeScript AST, NOT from a line regex.
+ *
+ * WHY THE AST (2026-09-11 adversarial review, r2 tests-ci ②). The previous implementation matched
+ * `/^ {2}(?:public |private |protected )?(?:async )?(name)\(/` — i.e. ONLY method syntax, with a
+ * hand-listed modifier set. Three real member shapes were invisible to it, and a mutation probe proved
+ * each one lands GREEN on a file whose header claims a full set:
+ *   - a property-assigned function: `  patchRecordUnchecked = async (input) => { … }`
+ *   - a `static` member (`static` was not in the modifier list at all)
+ *   - `get`/`set` accessors
+ * Any of those is a perfectly good new write port. The AST sees every `ClassElement` regardless of
+ * syntax, so "the member list is DISCOVERED from source" is now true of the shapes, not just of the one
+ * shape the author happened to think of. Computed names (`[Symbol.x]() {}`) and static blocks are
+ * surfaced under bracketed synthetic labels rather than dropped, so they cannot hide inside the green
+ * either — they simply fail the frozen classification until someone writes a line about them.
+ *
+ * `constructor` is not a member of the write surface (its parameter properties are constructor
+ * arguments, not callable ports). The class must still be EXPORTED — a surface that stops being
+ * exported stops being a surface, and that is a change worth a red.
+ */
+function discoverClassMembers(file: string, className: string): string[] {
+  const sourceFile = parseTs(file)
+  const found: string[] = []
+  let seenExported = false
+  const visit = (node: ts.Node): void => {
+    if (ts.isClassDeclaration(node) && node.name !== undefined && node.name.text === className) {
+      seenExported = seenExported || isExported(node)
+      for (const member of node.members) {
+        if (ts.isConstructorDeclaration(member) || ts.isSemicolonClassElement(member)) continue
+        if (ts.isClassStaticBlockDeclaration(member)) {
+          found.push('[static-block]')
+          continue
+        }
+        const name = member.name
+        if (name === undefined) {
+          found.push(`[unnamed:${ts.SyntaxKind[member.kind]}]`)
+          continue
+        }
+        if (
+          ts.isIdentifier(name) ||
+          ts.isPrivateIdentifier(name) ||
+          ts.isStringLiteral(name) ||
+          ts.isNumericLiteral(name)
+        ) {
+          found.push(name.text)
+          continue
+        }
+        found.push(`[computed:${name.getText(sourceFile)}]`)
+      }
+    }
+    ts.forEachChild(node, visit)
   }
-  return [...out].sort()
+  visit(sourceFile)
+  expect(
+    seenExported,
+    `write-surface discovery: 'export class ${className}' not found in ${file} (renamed, moved, or no ` +
+      'longer exported — this lock cannot enumerate a surface it cannot find).',
+  ).toBe(true)
+  return [...new Set(found)].sort()
+}
+
+/**
+ * EVERY VALUE another module can import from `multitable/records.ts` — the plugin lane's module
+ * surface, enumerated from the AST for the same reason as the class members above.
+ *
+ * The previous implementation matched `/^export (?:async )?function name\(/m`, so an exported
+ * `const patchRecordUnchecked = async (…) => {}` — an importable, callable write port — was invisible,
+ * and so was every value RE-EXPORT (`export { x } from './y'`), which importers reach through this
+ * module exactly as if it were declared here. Type-only exports (`export type`, `isTypeOnly`
+ * specifiers) are not part of the value surface and are excluded; a bare `export * from` or an
+ * `export default` is surfaced under a bracketed label so it cannot silently widen the surface.
+ */
+function discoverModuleValueExports(file: string): string[] {
+  const sourceFile = parseTs(file)
+  const found: string[] = []
+  for (const statement of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(statement) && isExported(statement) && statement.name !== undefined) {
+      found.push(statement.name.text)
+    } else if (ts.isClassDeclaration(statement) && isExported(statement) && statement.name !== undefined) {
+      found.push(statement.name.text)
+    } else if (ts.isVariableStatement(statement) && isExported(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) found.push(declaration.name.text)
+        else found.push(`[destructured-export:${declaration.name.getText(sourceFile)}]`)
+      }
+    } else if (ts.isExportAssignment(statement)) {
+      found.push('[export-default]')
+    } else if (ts.isExportDeclaration(statement) && !statement.isTypeOnly) {
+      if (statement.exportClause === undefined) {
+        found.push(`[export-star:${statement.moduleSpecifier?.getText(sourceFile) ?? '?'}]`)
+      } else if (ts.isNamedExports(statement.exportClause)) {
+        for (const element of statement.exportClause.elements) {
+          if (!element.isTypeOnly) found.push(element.name.text)
+        }
+      } else {
+        found.push(`[namespace-export:${statement.exportClause.name.text}]`)
+      }
+    }
+  }
+  return [...new Set(found)].sort()
 }
 
 function discoverSurfaceMembers(surface: SurfaceName): string[] {
   return surface === 'records.ts'
-    ? discoverExportedFunctions(SURFACES[surface])
+    ? discoverModuleValueExports(SURFACES[surface])
     : discoverClassMembers(SURFACES[surface], surface)
 }
 
@@ -316,6 +423,9 @@ const MEMBER_CLASSIFICATION: Record<SurfaceName, Record<string, 'FIELD_VALUE_WRI
     patchRecord: 'FIELD_VALUE_WRITE',
     createRecord: 'FIELD_VALUE_WRITE',
     restoreRecord: 'FIELD_VALUE_WRITE',
+    // Only visible since the AST rewrite of discoverClassMembers (it is a PropertyDeclaration, not a
+    // method — the old line regex could not see it, which is the hole r2 tests-ci ② named).
+    formulaRecalcHook: 'private state slot holding the injected recalc hook; not a callable port of the surface (its only setter, setFormulaRecalcHook, is classified below)',
     deleteRecord: 'row-level delete; carries no field value, so there is nothing PER-FIELD to gate (row/ownership gates live in the service: canDeleteRecord + ensureRecordWriteAllowed)',
     listDeletedRecords: 'read path (recycle bin listing)',
     setPostCommitHooks: 'boot-time wiring; takes no record and no field value',
@@ -330,6 +440,19 @@ const MEMBER_CLASSIFICATION: Record<SurfaceName, Record<string, 'FIELD_VALUE_WRI
     listRecords: 'read path',
     queryRecords: 'read path',
     queryRecordsWithCursor: 'read path',
+    // ── VALUE RE-EXPORTS ─────────────────────────────────────────────────────────────────────────
+    // Only visible since discoverModuleValueExports moved to the AST. They are declared in another
+    // module but are importable FROM records.ts, so they are part of this module's value surface and
+    // must each carry a reason — otherwise `export { somethingThatWrites } from './x'` would be a
+    // silent new plugin-lane port.
+    buildRecordsCacheKey: 're-export from ./query-service; builds a read-cache key string, writes nothing',
+    decodeRecordCursor: 're-export from ./query-service; read-path cursor codec',
+    encodeRecordCursor: 're-export from ./query-service; read-path cursor codec',
+    MultitableRecordDeleteCapExceededError: 're-export from ./record-errors; an Error class, carries no field value',
+    MultitableRecordNotFoundError: 're-export from ./record-errors; an Error class, carries no field value',
+    MultitableRecordValidationError: 're-export from ./record-errors; an Error class, carries no field value',
+    MultitableRecordVersionConflictError: 're-export from ./record-errors; an Error class, carries no field value',
+    MultitableSideDoorDeleteNonTransactionalError: 're-export from ./side-door-delete-trash; an Error class, carries no field value',
   },
 }
 
@@ -811,6 +934,29 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
    * up raw record SQL (a brand-new write spine) trips red and gets a decision instead of landing quietly.
    *
    * `meta_records_trash` is a different table (soft-delete archive) and is deliberately not matched.
+   *
+   * TABLE-REFERENCE NORMALISATION (2026-09-11, r2 tests-ci ③). The first cut matched the bare literal
+   * `/(INSERT INTO|UPDATE)\s+meta_records/` with no `i` flag, so three spellings that Postgres accepts
+   * for the SAME table walked straight past it — proven with mutation probes, each of which landed a new
+   * raw write spine on a fully GREEN guard:
+   *   `UPDATE public.meta_records …`  ·  `UPDATE ONLY meta_records …`  ·  `UPDATE Public."META_RECORDS" …`
+   * The matcher below therefore tolerates an optional (optionally quoted) schema qualifier, an optional
+   * `ONLY`, optional double quotes around the table, arbitrary whitespace/newlines between the keywords,
+   * and is case-insensitive. It DELIBERATELY OVER-APPROXIMATES: in Postgres a quoted `"META_RECORDS"` is
+   * a *different* relation from `meta_records`, and `otherschema.meta_records` is a different table — but
+   * a guard whose job is "no new write spine appears unnoticed" should red on those and be argued down in
+   * review, not miss them. `meta_records_trash` stays unmatched in every one of those spellings (the
+   * `(?![A-Za-z0-9_$])` tail is applied after the optional closing quote).
+   *
+   * TWO DISCLOSED EXCLUSIONS — do not read this green as "nothing else in the repo writes meta_records":
+   *   1. `src/db/migrations/**` is outside `RUNTIME_FILES` by construction (see `listRuntimeTsFiles`), and
+   *      two migrations DO run raw `UPDATE meta_records`:
+   *      `zzzz20260430163000_add_meta_record_modified_by.ts` and
+   *      `zzzz20260516113000_repair_onprem_multitable_record_create.ts`. They are one-shot schema/data
+   *      repairs on a different lifecycle (no actor, no request), not write spines, so freezing them here
+   *      would be noise — but they are named rather than silently dropped.
+   *   2. Only the `core-backend` `src` tree is walked. SQL issued from other packages or from plugin
+   *      code is not seen by this chokepoint at all.
    */
   test('chokepoint: the set of files running raw INSERT/UPDATE on meta_records is frozen (a new write spine outside the three surfaces trips red)', () => {
     const RAW_META_RECORDS_SQL_WRITERS: Record<string, string> = {
@@ -840,7 +986,7 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
       'services/elearning-stats-multitable-projection.ts':
         'OUT OF SCOPE — e-learning stats projection INSERTs a system-authored row.',
     }
-    const raw = /(INSERT INTO|UPDATE)\s+meta_records(?![A-Za-z0-9_])/g
+    const raw = RAW_META_RECORDS_WRITE
     const actual: string[] = []
     for (const file of RUNTIME_FILES) {
       const src = read(file)
@@ -860,5 +1006,110 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
         'per-site layer-3 assertions above apply to it. Decide what gate it needs, then record it here with a ' +
         'one-line IN SCOPE / OUT OF SCOPE reason. (meta_records_trash is a different table and is not matched.)',
     ).toEqual(Object.keys(RAW_META_RECORDS_SQL_WRITERS).sort())
+  })
+
+  /**
+   * The chokepoint above is only as strong as its table matcher, and the matcher is the thing that was
+   * silently weak: three accepted spellings of the SAME table slipped past the original literal
+   * (r2 tests-ci ③). Freezing the matcher's behaviour on a positive/negative table makes the evasion an
+   * EXECUTABLE fact instead of a comment — if someone narrows the regex back, this reds immediately,
+   * without needing a new raw write spine to exist first.
+   */
+  test('chokepoint matcher: every Postgres spelling of the meta_records table is matched, and meta_records_trash is not', () => {
+    const hits = (sql: string): boolean => {
+      RAW_META_RECORDS_WRITE.lastIndex = 0
+      return RAW_META_RECORDS_WRITE.test(sql)
+    }
+
+    // MUST match — each of these is a real write to the real table, and each of the last four walked
+    // past the pre-2026-09-11 literal matcher.
+    for (const sql of [
+      "UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2",
+      "INSERT INTO meta_records (id, sheet_id, data) VALUES ($1, $2, $3)",
+      "UPDATE public.meta_records SET data = $1 WHERE id = $2",
+      "UPDATE ONLY meta_records SET data = $1",
+      'UPDATE Public."META_RECORDS" SET data = $1',
+      'insert\n  into "public"."meta_records" (id) values ($1)',
+    ]) {
+      expect(hits(sql), `chokepoint matcher no longer sees a raw meta_records write: ${sql}`).toBe(true)
+    }
+
+    // MUST NOT match — a different table (soft-delete archive), in the same spellings.
+    for (const sql of [
+      'UPDATE meta_records_trash SET restored_at = now()',
+      'INSERT INTO meta_records_trash (id) VALUES ($1)',
+      'UPDATE public."meta_records_trash" SET restored_at = now()',
+      'update only meta_records_trash set restored_at = now()',
+    ]) {
+      expect(hits(sql), `chokepoint matcher now matches the TRASH table, which is a different table: ${sql}`).toBe(false)
+    }
+  })
+
+  /**
+   * WIRING — the "守卫没接线" check, applied to THIS FILE.
+   *
+   * A structural lock that no CI job collects is a paper guarantee, and this repo has landed exactly that
+   * mistake before (see the `node --test scripts/ops/...` steps in plugin-tests.yml, each of which exists
+   * because a suite landed dark). The r2 review disputed BOTH directions for this file, so the answer is
+   * pinned here as an assertion rather than argued in a PR body:
+   *
+   *   this file IS collected — by `pnpm --filter @metasheet/core-backend test` (the "Run core-backend
+   *   tests" step of plugin-tests.yml's `test` job, which has no `paths:` filter on `pull_request` and so
+   *   runs for every PR). That script is a bare `vitest`; `vitest.config.ts` declares NO `include:` key,
+   *   so the vitest default include collects `tests/unit/**.test.ts`, and this file is not in the ~400-line
+   *   `exclude:` list. Being named file-by-file in a workflow is a DIFFERENT question from being executed;
+   *   only the second one decides whether the guard gates anything.
+   *
+   * The real-DB golden this guard characterises is wired the OTHER way (excluded from the no-DB default
+   * job so `describeIfDatabase` cannot skip-green it, and named whole-file into the real-DB step), so both
+   * halves of the pair are asserted here.
+   */
+  test('wiring: this guard is collected by the core-backend suite CI runs on every PR, and the real-DB golden is wired to the real-DB step', () => {
+    const repoRoot = join(__dirname, '../../../..')
+    const selfRel = 'tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts'
+    const goldenRel = 'tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts'
+    expect(existsSync(join(repoRoot, 'packages/core-backend', selfRel))).toBe(true)
+    expect(existsSync(join(repoRoot, 'packages/core-backend', goldenRel))).toBe(true)
+
+    // 1. The package `test` script is a bare vitest run over the default config — no `--config`, no
+    //    explicit path list that could leave this file out.
+    const pkg = JSON.parse(readFileSync(join(repoRoot, 'packages/core-backend/package.json'), 'utf8')) as {
+      scripts: Record<string, string>
+    }
+    const testScript = pkg.scripts.test
+    expect(testScript, 'core-backend `test` script is gone').toBeTruthy()
+    expect(
+      /^vitest(\s|$)/.test(testScript) && !testScript.includes('--config') && !/\btests\//.test(testScript),
+      `core-backend "test" script is now ${JSON.stringify(testScript)} — it no longer collects the whole ` +
+        'default suite, so this guard may have gone dark. Re-verify what runs it before touching this assertion.',
+    ).toBe(true)
+
+    // 2. The default config collects by vitest's default include (no `include:` key) and does not exclude
+    //    this file.
+    const vitestConfig = readFileSync(join(repoRoot, 'packages/core-backend/vitest.config.ts'), 'utf8')
+    expect(
+      /^\s*include\s*:/m.test(vitestConfig),
+      'vitest.config.ts grew an `include:` key. The default include is what collects this guard — check it ' +
+        'is still collected, then update this assertion.',
+    ).toBe(false)
+    expect(
+      vitestConfig.includes(selfRel),
+      'vitest.config.ts now names this guard file (almost certainly in `exclude:`) — that would make it dark ' +
+        'in the no-DB job that is its only executor.',
+    ).toBe(false)
+
+    // 3. …and the step that invokes that script exists, unconditionally, in the PR gate.
+    const workflow = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+    expect(workflow).toContain('pnpm --filter @metasheet/core-backend test\n')
+
+    // 4. The paired real-DB golden: excluded from the no-DB lane exactly once, named exactly once in the
+    //    real-DB step that sets DATABASE_URL and METASHEET_REAL_DB_TEST_STEP.
+    expect(vitestConfig.split(`'${goldenRel}'`).length - 1).toBe(1)
+    const stepAt = workflow.indexOf('        id: multitable-real-db-integration')
+    expect(stepAt, 'the multitable real-DB step is gone — the golden has no executor').toBeGreaterThanOrEqual(0)
+    const stepEnd = workflow.indexOf('\n      - name:', stepAt)
+    const step = workflow.slice(stepAt, stepEnd === -1 ? undefined : stepEnd)
+    expect(step).toContain("METASHEET_REAL_DB_TEST_STEP: '1'")
+    expect(step.split(goldenRel).length - 1).toBe(1)
   })
 })
