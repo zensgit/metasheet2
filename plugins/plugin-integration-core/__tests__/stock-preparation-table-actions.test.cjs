@@ -32,6 +32,17 @@ const {
 const {
   saveTableScopeConflictPolicies,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-policies.cjs'))
+const {
+  normalizeExtFieldMapping,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-ext-field-mapping.cjs'))
+const {
+  FACTORY_A_REHEARSAL_PACK,
+} = require(path.join(__dirname, '..', 'lib', 'customer-packs', 'factory-a.rehearsal.cjs'))
+
+// Read off the REAL committed pack rather than a hand-typed stand-in, so the ext_ write-口 scope
+// assertions below cannot quietly disagree with the pack about which ids it declares.
+const PACK_EXTENSION_FIELD_IDS = FACTORY_A_REHEARSAL_PACK.extensionFields.map((field) => field.id)
+const UNDECLARED_EXT_FIELD_ID = 'ext_notInAnyPackWhatsoever'
 
 const PHYSICAL_FIELD_ID_MAP = Object.fromEntries(
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`]),
@@ -1319,7 +1330,7 @@ async function main() {
   testRevisionCarriesTheRowErrorOverflowFacts()
   testHardApplyBlockingRowErrorsSurviveTheCap()
   testRowErrorLimitIsAConditionalActionConfigKey()
-  testExtensionFieldIdsRejectsNonPackIdAndAcceptsCustomerPackId()
+  testExtensionFieldIdsEnforceNamespaceShapeAndPackMembershipIsOneLayerOut()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
 }
@@ -1548,17 +1559,25 @@ function testRowErrorLimitIsAConditionalActionConfigKey() {
   }
 }
 
-// ext_ 客户包列写口守卫盘点结清 (beiliao-takeover-status-ledger.md §4, closed 2026-09-10): the SAME
-// `assertExtensionFieldIdValid` predicate guards every ext_ write-口 (repair paths in
-// stock-preparation-target-provisioning.cjs/mvp-provisioning.cjs, the pack installer's normalizer in
-// stock-preparation-customer-pack.cjs, and -- the one this test locks -- `extensionFieldIds` on the
-// table-action config itself, which is what the confirm/apply writer actually reads to decide which
-// `ext_` columns a write is allowed to touch). A red witness here is a red witness for the guard being
-// wired to the write-口 THIS module owns, independent of whether the other three call sites stay wired.
-function testExtensionFieldIdsRejectsNonPackIdAndAcceptsCustomerPackId() {
-  // ① guard existence: a non-customer-pack id smuggled into `extensionFieldIds` must be refused
-  // before it can reach the write payload -- here, a frozen human-owned field id with no `ext_`
-  // prefix at all (no customer pack ever produces this shape).
+// ext_ 客户包列写口守卫盘点结清 (beiliao-takeover-status-ledger.md §4, 2026-09-11 全集盘点 ⑥/⑦).
+// The write-口 THIS test owns is ⑥: `extensionFieldIds` on the table-action config -- the durable list
+// the confirm/apply writer reads to decide which `ext_` columns a write may touch
+// (lib/stock-preparation-table-actions.cjs:233 normalizeActionExtensionFieldIds -> :246
+// assertExtensionFieldIdValid, reached from :449 normalizeStockPreparationActionConfig, which the
+// registry constructor :693 and assertStockPreparationTargetReady :589 both go through).
+//
+// SCOPE, stated exactly so this test is not read as more than it is: that predicate
+// (lib/stock-preparation-extension-namespace.cjs:117-160) checks NAMESPACE SHAPE ONLY -- prefix,
+// suffix shape, forbidden content keys, collision with a frozen template field. It has no pack
+// catalog and therefore CANNOT refuse "an id no customer pack declared"; the third case below pins
+// that boundary as an ACCEPT so nobody re-reads this suite as "non-pack ids are rejected here".
+// Pack MEMBERSHIP lives one layer out and is pinned by the last two cases: the mapper's pack
+// catalog (lib/stock-preparation-ext-field-mapping.cjs:386/:394 -> :315-317 TARGET_NOT_DECLARED_IN_PACK,
+// whose own battery is __tests__/stock-preparation-ext-field-mapping.test.cjs:232) and this module's
+// agreement gate (:564 assertExtFieldMappingAgreesWithAction -> :575), which refuses a mapping aimed
+// at an `ext_` column the action config never declared -- even one the pack DID declare.
+function testExtensionFieldIdsEnforceNamespaceShapeAndPackMembershipIsOneLayerOut() {
+  // (1) guard existence: an id with no `ext_` prefix at all cannot enter extensionFieldIds.
   assert.throws(
     () => normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: ['procurementDone'] })),
     (error) => error instanceof StockPreparationTableActionError
@@ -1567,10 +1586,9 @@ function testExtensionFieldIdsRejectsNonPackIdAndAcceptsCustomerPackId() {
     'a bare non-`ext_` id cannot enter extensionFieldIds -- code/reason must stay stable',
   )
 
-  // A second, independent non-pack shape: it DOES carry the `ext_` prefix, but its suffix collides
-  // with a frozen template field -- the exact shape stock-preparation-customer-pack.cjs:312's own
-  // guard exists to reject at pack-declaration time. Locking the refusal HERE too proves this
-  // write-口 does not simply trust whatever a caller labels `ext_*`.
+  // (2) a second, independent refusal shape: `ext_` prefix present, but the suffix collides with a
+  // frozen template field -- the shape stock-preparation-customer-pack.cjs:312 also rejects at
+  // pack-declaration time. Locking it HERE proves this write-口 does not simply trust `ext_*`.
   assert.throws(
     () => normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: ['ext_projectNo'] })),
     (error) => error instanceof StockPreparationTableActionError
@@ -1579,11 +1597,49 @@ function testExtensionFieldIdsRejectsNonPackIdAndAcceptsCustomerPackId() {
     'an `ext_` id colliding with a frozen template field is refused -- code/reason must stay stable',
   )
 
-  // ② positive control: a real customer-pack `ext_` id (customer-pack-rehearsal-report.md:48-51's
-  // `ext_stockPrepDate`) is admitted unchanged -- the guard narrows to non-pack ids, it does not
-  // block the feature it exists to let through.
+  // (3) positive control: a real customer-pack `ext_` id (FACTORY_A_REHEARSAL_PACK declares
+  // `ext_stockPrepDate`) is admitted unchanged -- the guard does not block the feature it exists for.
   const action = normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: ['ext_stockPrepDate'] }))
   assert.deepEqual(action.extensionFieldIds, ['ext_stockPrepDate'], 'a legitimate customer-pack ext_ id is admitted unchanged')
+
+  // (4) THE BOUNDARY, pinned as an accept: a shape-valid id that NO pack declares also passes here.
+  // This is not a hole being blessed -- it is the scope line. If someone later teaches this guard
+  // pack membership, this assertion goes red and they must update the ledger inventory with it.
+  const undeclaredId = PACK_EXTENSION_FIELD_IDS.includes(UNDECLARED_EXT_FIELD_ID)
+    ? null
+    : UNDECLARED_EXT_FIELD_ID
+  assert.ok(undeclaredId, 'fixture must name an ext_ id the rehearsal pack does not declare')
+  const shapeOnly = normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: [undeclaredId] }))
+  assert.deepEqual(
+    shapeOnly.extensionFieldIds,
+    [undeclaredId],
+    'namespace guard is shape-only: pack membership is NOT checked at this write-口',
+  )
+
+  // (5) where an id no pack declared is actually refused: the mapper's pack catalog.
+  assert.throws(
+    () => normalizeExtFieldMapping(
+      { mappingId: 'closeout-probe', mappingVersion: 1, mappings: [{ sourceColumn: 'A', target: undeclaredId }] },
+      { pack: FACTORY_A_REHEARSAL_PACK },
+    ),
+    (error) => error.reason === 'TARGET_NOT_DECLARED_IN_PACK',
+    'an ext_ id no customer pack declared is refused by the mapper pack catalog -- reason must stay stable',
+  )
+
+  // (6) and the second half of that wall: even a pack-DECLARED column cannot be written unless this
+  // action config declared it too (:564 -> :575).
+  const mappingToUndeclaredByAction = normalizeExtFieldMapping(
+    { mappingId: 'closeout-probe', mappingVersion: 1, mappings: [{ sourceColumn: 'A', target: 'ext_spec' }] },
+    { pack: FACTORY_A_REHEARSAL_PACK },
+  )
+  assert.throws(
+    () => tableActionInternals.assertExtFieldMappingAgreesWithAction(action, mappingToUndeclaredByAction),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TARGET_SCHEMA_INCOMPLETE'
+      && Array.isArray(error.details.undeclaredExtensionFields)
+      && error.details.undeclaredExtensionFields.includes('ext_spec'),
+    'a mapping may not write an ext_ column the action config never declared -- code must stay stable',
+  )
 }
 
 async function testApplySandboxGateFailsClosed() {
