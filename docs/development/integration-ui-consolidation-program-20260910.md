@@ -219,3 +219,51 @@ X02 的第一版（#5628 `c2b482c8b`）修得很像样：三条充要条件、18
 4. **一条新开的单：`connection.password` 明文落库且随 `GET /:id` 回显**（issue #5621，写 G02 设计时实读发现）。同一字段四处三种口径：`routes/data-sources.ts:79` 的 schema 是自由记录、**接受**它；`DataSourceManager.ts:409` 只加密 `config.credentials`、`connection` 原样落库；`sanitizeConfig`（`:321-327`）只解构 `credentials`、`connection` 随 `...rest` 原样回；而 `BaseAdapter.ts:504` 的 `redactSecrets` 却把 `conn.password` **算进秘密值**。随仓 UI 不触发（`buildPayload.ts:39-41` 把口令放进 `credentials`），直接调 API 会触发。四条腿逐条实读复验过。修法有多种取向且影响存量兼容，刻意不塞进共享线。
 
 5. **一个与本程序无关、但会打断自主开发的环境问题**：C 盘只剩 1.7 GB。`%TEMP%/odis_download_dest` 下有 **45 个同名 `pkg.odis.tar`、各约 427 MB、分别落在 45 个独立子目录里，合计 18.8 GB**；最早 09-08 00:08、最新 09-11 09:17，**每约 15 分钟新增一个且从不清理**（≈1.7 GB/小时）。与本仓库无关、非本会话创建，按纪律只报告不删。作为对照，Claude 在临时目录下的全部占用只有 422 MB（本项目）+ 86 MB（其它项目）——**把这些全删也只买到约 15 分钟**，所以这不是「评审沙箱没清」的问题。
+
+---
+
+## 8. 第三个 24h 窗口（2026-09-11 ~21:00 → 09-12 ~21:00）
+
+> 授权原话："接下去24小时我不在电脑前，你能帮我不间断的持续开发么？并根据代码难度来选择模型，完成后给出设计及验证MD"。边界同前两窗口。选题原则：只挑前两轮复核登记出的真实缺口、且与在飞 PR 零争用或可控争用；安全项一律过对抗复核（内存吃紧，一次只起一个复核）。
+
+### 8.1 交付一览
+
+| # | 项 | PR | 状态 | 复核 | 设计 / 验证文档 |
+|---|---|---|---|---|---|
+| A | `webhook-service.ts` 订阅投递出口接 SSRF 守卫 + `redirect:'manual'` + 失败日志闭集（复用 #5619 模块，**叠在 #5619 上**） | **#5649** | 正式，CI 绿（返修后 10/10） | 21 代理："修完 X 再合"，X 全是注释/文档；追加修了终审点名的「拒绝分支写库失败穿出重试循环」（归因订正：基线就有，本 PR 是加剧不是引入） | `webhook-service-ssrf-guard-{design,verification}-20260912.md` |
+| B | issue #5621：`connection` 下秘密键写入拒收 + 读取剥离，判据收敛到一处 | **#5648** | 正式，CI 跑中（独立真库道已在演员修复后 SUCCESS） | 23 代理："修完 X 再合"——X 是**协调方克隆的真库工作流外壳是假件背书**（paths 列不存在的文件、声称 spec 未实现的哨兵）与三处只对键名成立的绝对句；已全部修 | `data-source-connection-secret-keys-{design,verification}-20260912.md` |
+| C | G02 第一刀：种子化 `data_sources:use/rotate/share`（只种不发权）+ 凭据轮换门 write→rotate 独占 | **#5650** | 正式，CI 27/27 绿 | 25 代理："修完 X 再合"，X 全是文档：上机前置 SQL **漏第三张活面 `users.permissions`**；「后合者改一行」不成立 → 已在 #5611 侧解耦；缓存语义写反（授予即时生效、撤销才滞后） | `data-source-sharing-pr1-rotate-scope-{design,verification}-20260912.md` |
+| D | 托管表「导入插全新行」的野行在刷新/升级/导出/计数四处的命运（**零代码**） | **#5647** | 正式，CI 21/21 绿 | 设计件；它推翻了一个前提（见 8.2） | `managed-sheet-import-foreign-rows-design-20260912.md` |
+| E | X02 bare `concat` 全部部件缺失时不再写空串（**叠在 #5628 上**） | **#5652** | 正式，CI 11/11 绿 | 未起复核（叠加小刀；两套网格 3060+3780 组差异盘点自证：新增 980 组差异 100% 为「空串→不写」） | 更新 `transform-source-field-absent-{design,verification}-20260911.md` |
+| F | G52 `join.on` 改结构化并与 `join.type` 一起过白名单（**叠在 #5614 上**） | **#5653** | 正式，CI 10/10 绿 | 未起复核（叠加小刀；实测证明写入门兜不住外泄型读，是硬化的价值所在） | `mssql-join-on-hardening-{design,verification}-20260912.md` |
+| — | #5638 补漏：托管表 schema 写门补到第二个能力解析器，双解析器一致性测试 | **#5638**（47044632f） | CI 47/47 绿 | 分类为潜伏（7 个调用方零读取）；**新发现第三个解析器**同缺，审批域，只备案 | 更新 `managed-sheet-schema-write-gate-{design,verification}-20260911.md` |
+| — | #5611 对账 known 集并上 G02 三码，与 #5650 解耦（任一顺序绿） | **#5611** | 进行中 | C 终审裁定的唯一可接受处置 | — |
+
+另开 issue **#5655**：`PUT /api/admin/data/bulk` 对 `data_sources` 原样落库、绕过 #5648 的拒收与加密——门是 `requireSafetyCheck` 而非 `requireAdminRole`，等价性待复核。
+
+### 8.2 本窗口的三条实质结论
+
+1. **「刷新是 merge 所以安全」这个前提本身是错的**（D）。那条 `SET data = data || $1::jsonb` 是 REST 路径；插件刷新走 `records.ts:586-591` 整档替换的读-改-写，且 `getRecord` 无 `FOR UPDATE`、apply-writer 不传 `expectedVersion` → 存在窄的丢失更新窗口（只读推断，未复现）。它对人工列的结论仍成立，但只覆盖既有行——对野行一个字都没说。野行若撞上 PLM 键会被静默收编、且**冻结同键真行那一轮的刷新**。
+2. **URL userinfo 真的参与认证**（B 复核）。「十个适配器的秘密一律取自 `credentials`」只对**键名**成立：`connection.baseURL` 里的 `user:pw@` 被 axios（`http.js:574-578`）当 Basic 认证发出去、原样落库回显、顶层 only 的盘点 SQL 永远盘不出。已登记 F01/F02/F03/F10 与 #5655。
+3. **写入门兜不住外泄型读**（F）。`… ON 1 = 1 UNION ALL SELECT password …` 在 `outbound-sql-write-gate` 看来是纯读（白名单含 `union/select/from`），照发。门回答的是「是不是写」，外泄型读不在它的问题域——所以 `join.on` 必须在构造期结构化拒绝，而不是指望门。
+
+### 8.3 三次复核里被指正的终审断言（写下来是为了下次不重犯）
+
+- A：`:694` 无守卫循环**不是本 PR 引入**，基线就有两处可抛的 DB 调用；终审的 K03「catch 里 rethrow」建议会把异常抛回 tick 循环并记自由文本，与它自己点名的问题互斥。
+- B：admin bulk 路由的门**不是** `requireAdminRole`，是 `requireSafetyCheck(BULK_UPDATE)` 确认流程——这把「admin 的原始写通道」变成了「等价性未知的通道」，所以单开了 #5655。
+- C：「后合者改一行」是错的——不止一行、且 main 上没有合并前组合态 CI；「让他重登」写反了，授予即时生效、撤销才滞后。
+
+### 8.4 过程事故（如实记）
+
+1. **并行代理共用 scratchpad 撞名**：A 与 C 的实现代理各自写了 `mutate.py`，A 的一次调用实际跑了 C 的变异脚本、对 C 的 worktree 做了 apply→restore；没造成损坏只因对方脚本在 `finally` 里按原字节还原并做 sha256 断言。已写进记忆；此后派活写死 `scratchpad/<worktree>/` 子目录。
+2. **克隆工作流成了假件**：把 #5638 的真库工作流克隆给 B 时，只替换了全路径，`run:` 里的相对路径被通用改名成不存在的文件（首跑「No test files found」）；修了路径后外壳仍是 multitable 那份（name / paths / summary / 哨兵声明），被 B 的复核判为假件背书。教训：克隆工作流后 name / paths / summary / 哨兵四处都是接线，且 spec 必须真的实现哨兵。
+3. **`git add -A` 把复核探针提交进了 PR**：B 的复核代理在 worktree 留下 `.review-tmp/` 探针，我用 `git add -A` 提交演员修复时把它们一并带进 #5648，随后单独提交移除。此后一律 `git add -- <显式路径>`。
+4. **无 PG 本机写真库件的演员形状错**：B 的真库 spec 给演员 `roles + permissions`，而 `rbacGuard` 的 DB 回落路径忽略 `req.user.permissions`、且 `data_sources:*` 码由未合并的 #5611 种子——三条用例 403。照同目录既有真库件改成 `role:'admin'`（短路），意图不变。
+
+### 8.5 待用户裁决
+
+1. **#5638 的第三个能力解析器**（`services/approval-record-link-txn-auth.ts:679`）既缺托管表也缺 e-learning 那道，同为潜伏、在审批域——是否同波补。
+2. **#5655**：`requireSafetyCheck` 确认流程是否等价「仅平台管理员」；无论如何建议从 `validTables` 摘掉 `data_sources`。
+3. **A 的两处设计判断**：3xx 判终态但不自动停用；拒绝分支写库失败时「吞掉、那一次拒绝入账丢失」。若要求账本强一致，应改成把写移出易失窗口（FS-8）。
+4. **合并前置**（A、B 各一条只读盘点 SQL；C 的三面 0 行前置）仍需真库，本窗口未执行。
+5. **叠加关系**：#5649 → #5619、#5652 → #5628、#5653 → #5614；父 PR 合并后 GitHub 自动改基，需重跑。
