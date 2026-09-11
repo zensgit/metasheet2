@@ -441,10 +441,14 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
   // The exploit: `changed_keys` for a property-only revert is ['property'], and BOTH drift controls key off
   // `changed_keys` (driftConflict compares current vs `after`; baselineHash hashes only those keys). A `type`
   // change in between is therefore invisible to them. It is REACHABLE because sanitizeFieldProperty is the
-  // identity for url/email/phone/barcode/qrcode/location, so a `string -> url` type-only PATCH preserves
+  // identity for longText/url/email/phone/barcode/qrcode/location, so a `string -> longText` type-only PATCH preserves
   // `property` byte-for-byte and the stale `string`-era property revision does not drift. Reverting it would
-  // coerce every cell under the NEW type = a forward `text -> url` value migration smuggled in through the
-  // revert door, which lock §7 puts explicitly out of bounds.
+  // coerce every cell under the NEW type = a forward value migration smuggled in through the revert door,
+  // which lock §7 puts explicitly out of bounds.
+  // F8A (2026-09-11): the later type is `longText`, not `url`, because PATCH /fields now enforces the lossless
+  // whitelist (src/multitable/field-retype-whitelist.ts) and `string -> url` is refused there. `string ->
+  // longText` is on the whitelist, its sanitizer is the identity too, and the era guard keys on the type
+  // CHANGE, not on which type — so the exploit this test replays is unchanged in every load-bearing respect.
   const eraQ = {
     type: async (): Promise<string> => ((await q('SELECT type FROM meta_fields WHERE id=$1', [ERA_FIELD])).rows[0] as { type: string }).type,
     property: async (): Promise<unknown> => ((await q('SELECT property FROM meta_fields WHERE id=$1', [ERA_FIELD])).rows[0] as { property: unknown }).property,
@@ -458,9 +462,9 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(12), SHEET, JSON.stringify({ [ERA_FIELD]: 'https://ok.example' })])
     // (1) a plain property edit while the field is still `string` -> revision with changed_keys = ['property']
     await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ property: { note: 'a' } }).expect(200)
-    // (2) a type-only PATCH -> `url`. The url sanitizer is the identity, so `property` survives byte-for-byte
-    //     and this revision's changed_keys is ['type'] ALONE.
-    await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ type: 'url' }).expect(200)
+    // (2) a type-only PATCH -> `longText`. The longText sanitizer is the identity, so `property` survives
+    //     byte-for-byte and this revision's changed_keys is ['type'] ALONE.
+    await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ type: 'longText' }).expect(200)
     const revs = (await q(`SELECT id, changed_keys FROM meta_config_revisions WHERE sheet_id=$1 AND entity_id=$2 AND action='update' ORDER BY created_at ASC, id ASC`, [SHEET, ERA_FIELD])).rows as Array<{ id: string; changed_keys: string[] }>
     const propertyRev = revs.find((r) => r.changed_keys.length === 1 && r.changed_keys[0] === 'property')
     const typeRev = revs.find((r) => r.changed_keys.includes('type'))
@@ -475,7 +479,7 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
 
     // the exploit's premise, asserted: the type change is invisible to `changed_keys`-based drift control
     expect(typeRevisionKeys).toEqual(['type'])
-    expect(await eraQ.type()).toBe('url')
+    expect(await eraQ.type()).toBe('longText')
     expect(await eraQ.property()).toEqual({ note: 'a' }) // preserved byte-for-byte across the type PATCH
 
     const beforeCells = await eraQ.cells()
@@ -490,9 +494,9 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     expect(x.body?.error?.code).toBe('FIELD_TYPE_ERA_MISMATCH')
     expectNoLeak(x.body)
 
-    // zero destruction: 'hello world' (an invalid url) is NOT dropped, and nothing else moved
+    // zero destruction: 'hello world' is NOT dropped, and nothing else moved
     expect(await eraQ.cells()).toEqual(beforeCells)
-    expect(await eraQ.type()).toBe('url')
+    expect(await eraQ.type()).toBe('longText')
     expect(await eraQ.property()).toEqual({ note: 'a' })
     expect(await restoreConfigRevisions()).toEqual([])
     expect(await recordRevisions()).toEqual([])
@@ -554,17 +558,18 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     expect(typeof realToken).toBe('string')
     const beforeCells = await eraQ.cells()
 
-    // (2) TOCTOU: a type-only PATCH -> `url` lands in the window. The url sanitizer is the identity, so `property`
-    //     survives byte-for-byte and this type revision is invisible to the changed_keys-based drift controls.
-    await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ type: 'url' }).expect(200)
+    // (2) TOCTOU: a type-only PATCH -> `longText` lands in the window (F8A: a whitelisted, therefore reachable,
+    //     type change). Its sanitizer is the identity, so `property` survives byte-for-byte and this type
+    //     revision is invisible to the changed_keys-based drift controls.
+    await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ type: 'longText' }).expect(200)
 
-    // (3) execute with the REAL token -> the execute-side era guard refuses, and nothing is coerced under `url`.
+    // (3) execute with the REAL token -> the execute-side era guard refuses, and nothing is coerced under the new type.
     const x = await execute(propertyRev, realToken)
     expect(x.status).toBe(422)
     expect(x.body?.error?.code).toBe('FIELD_TYPE_ERA_MISMATCH')
     expectNoLeak(x.body)
     expect(await eraQ.cells()).toEqual(beforeCells) // 'hello world' NOT dropped
-    expect(await eraQ.type()).toBe('url')
+    expect(await eraQ.type()).toBe('longText')
     expect(await eraQ.property()).toEqual({ note: 'a' })
     expect(await restoreConfigRevisions()).toEqual([])
     expect(await recordRevisions()).toEqual([])

@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import MetaFieldManager from '../src/multitable/components/MetaFieldManager.vue'
@@ -1489,6 +1492,38 @@ describe('MetaFieldManager — lossless retype in the edit panel', () => {
       expect(updateSpy.mock.calls[0][1].type).toBe('longText')
     } finally { app.unmount(); container.remove() }
   })
+
+  // F8A: the way back. A PLAIN long text is just a string, so text is offered; a RICH
+  // one is not (its cells hold HTML, which a text field shows as bare markup). The
+  // dropdown reads the SOURCE field's stored property — same rule the server enforces
+  // against the DB row, so the two can only disagree in the safe direction.
+  it('a plain long text field offers [long text, text] and emits type:string', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { container, app, updateSpy } = mountWithField({ id: 'fld_notes', name: 'Notes', type: 'longText', property: {} })
+    try {
+      await openConfig(container)
+      const select = container.querySelector('[data-test="config-type-select"]') as HTMLSelectElement
+      expect(select).not.toBeNull()
+      expect(Array.from(select.options).map((o) => o.value)).toEqual(['longText', 'string'])
+      select.value = 'string'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await nextTick()
+      clickSave(container)
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy.mock.calls[0][1].type).toBe('string')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a RICH long text field offers no text target at all (read-only type label)', async () => {
+    const { container, app } = mountWithField({
+      id: 'fld_rich', name: 'Rich notes', type: 'longText', property: { rich: true },
+    })
+    try {
+      await openConfig(container)
+      expect(container.querySelector('[data-test="config-type-select"]')).toBeNull()
+    } finally { app.unmount(); container.remove() }
+  })
 })
 
 // The split between "the user picked a new type" and "the stored type moved" is what
@@ -1711,9 +1746,14 @@ describe('MetaFieldManager — retype survives the background metadata refresh',
 // ---------------------------------------------------------------------------
 // Whole-table golden for the retype whitelist. The per-type assertions above only
 // prove the rows they name, so a careless ADD to LOSSLESS_RETYPE (multiSelect, date,
-// longText -> string …) used to land with every test still green. The table IS the
-// safety boundary — the backend PATCH does a raw UPDATE with no value migration — so
-// widening it must require editing this golden.
+// person -> string …) used to land with every test still green. Widening the table
+// must require editing this golden.
+//
+// F8A (2026-09-11): this table is no longer the only wall — the server enforces the
+// SAME whitelist on PATCH /fields/:fieldId (core-backend field-retype-whitelist.ts,
+// 400 FIELD_RETYPE_NOT_LOSSLESS). Both sides are pinned to one shared fixture by the
+// mirror block below; this golden stays because it is the SHAPE lock (an exact table,
+// never toMatchObject/objectContaining) that makes a widening visible in review.
 // ---------------------------------------------------------------------------
 describe('LOSSLESS_RETYPE table shape', () => {
   it('contains exactly the owner-approved source rows and targets', () => {
@@ -1728,9 +1768,10 @@ describe('LOSSLESS_RETYPE table shape', () => {
       phone: ['string'],
       barcode: ['string'],
       string: ['longText'],
+      longText: ['string'],
     })
     expect(Object.keys(LOSSLESS_RETYPE).sort()).toEqual([
-      'barcode', 'currency', 'email', 'number', 'percent', 'phone', 'rating', 'select', 'string', 'url',
+      'barcode', 'currency', 'email', 'longText', 'number', 'percent', 'phone', 'rating', 'select', 'string', 'url',
     ])
     // every offered target is itself a plain scalar the raw UPDATE keeps readable
     const targets = new Set(Object.values(LOSSLESS_RETYPE).flat())
@@ -1738,17 +1779,36 @@ describe('LOSSLESS_RETYPE table shape', () => {
   })
 
   it('offers nothing for the directions the module documents as excluded', () => {
-    // array <-> scalar, rich-HTML exposure, display-semantics changes
+    // array <-> scalar, display-semantics changes, unverified storage shapes
     expect(losslessRetypeTargets('multiSelect')).toEqual([])
+    expect(losslessRetypeTargets('person')).toEqual([])
+    expect(losslessRetypeTargets('boolean')).toEqual([])
     expect(losslessRetypeTargets('date')).toEqual([])
     expect(losslessRetypeTargets('dateTime')).toEqual([])
-    expect(losslessRetypeTargets('longText')).toEqual([])
+    expect(losslessRetypeTargets('duration')).toEqual([])
+    expect(losslessRetypeTargets('qrcode')).toEqual([])
     // computed / structural types are never a source either
     for (const excluded of RETYPE_EXCLUDED_TARGET_TYPES) {
       expect(losslessRetypeTargets(excluded)).toEqual([])
     }
     expect(losslessRetypeTargets(null)).toEqual([])
     expect(losslessRetypeTargets('nope')).toEqual([])
+  })
+
+  // F8A's one new direction, and the property that gates it. The rich check is NOT in
+  // the table (a table row cannot express "unless property.rich"), so it needs its own
+  // rows here — deleting the `rich` clause in losslessRetypeTargets reddens this test.
+  it('long text offers text back ONLY while it is not rich', () => {
+    expect(losslessRetypeTargets('longText')).toEqual(['string'])
+    expect(losslessRetypeTargets('longText', {})).toEqual(['string'])
+    expect(losslessRetypeTargets('longText', { rich: false })).toEqual(['string'])
+    expect(losslessRetypeTargets('longText', { rich: 'true' })).toEqual(['string'])
+    expect(losslessRetypeTargets('longText', undefined)).toEqual(['string'])
+    // rich === true: the cells hold HTML a text field would render as bare markup
+    expect(losslessRetypeTargets('longText', { rich: true })).toEqual([])
+    // the gate is longText-specific: a rich-looking property on another source changes nothing
+    expect(losslessRetypeTargets('string', { rich: true })).toEqual(['longText'])
+    expect(losslessRetypeTargets('number', { rich: true })).toEqual(['string'])
   })
 
   it('never surfaces a backend-excluded type as a target, even if the table says so', () => {
@@ -1758,6 +1818,55 @@ describe('LOSSLESS_RETYPE table shape', () => {
       }
       expect(losslessRetypeTargets(source)).not.toContain(source)
     }
+  })
+
+  // ---------------------------------------------------------------------------
+  // F8A: the BROWSER side of the shared truth table. The SAME file on disk drives
+  // packages/core-backend/tests/multitable-field-retype-revert-narrowing.test.ts
+  // against core-backend/src/multitable/field-retype-whitelist.ts — the copy that
+  // actually refuses the write. PRECISELY: changing ONE implementation without
+  // touching the fixture turns THAT SIDE'S OWN run red; changing the fixture turns
+  // the OTHER side red too. (Not "one edit reddens the far side" — it does not.)
+  // ---------------------------------------------------------------------------
+  describe('parity with the server whitelist (shared truth table)', () => {
+    const TRUTH_TABLE_PATH = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../packages/core-backend/tests/fixtures/field-retype-truth-table.json',
+    )
+    interface RetypeTruthTable {
+      excludedTargetTypes: string[]
+      table: Record<string, string[]>
+      targetCases: Array<{ name: string; sourceType: string; property?: unknown; expected: string[] }>
+      pairCases: Array<{ name: string; sourceType: string; property?: unknown; targetType: string; lossless: boolean }>
+    }
+    const table = JSON.parse(readFileSync(TRUTH_TABLE_PATH, 'utf8')) as RetypeTruthTable
+
+    it('reads a non-trivial table (a silently emptied fixture must not pass as green)', () => {
+      expect(table.targetCases.length).toBeGreaterThanOrEqual(20)
+      expect(table.pairCases.length).toBeGreaterThanOrEqual(20)
+      expect(table.targetCases.some((row) => row.expected.length === 0)).toBe(true)
+      expect(table.pairCases.some((row) => row.lossless === false)).toBe(true)
+      expect(table.pairCases.some((row) => row.lossless === true)).toBe(true)
+    })
+
+    it('the dropdown table IS the fixture table, row for row', () => {
+      expect(LOSSLESS_RETYPE).toEqual(table.table)
+      expect(Array.from(RETYPE_EXCLUDED_TARGET_TYPES).sort()).toEqual([...table.excludedTargetTypes].sort())
+    })
+
+    it.each(table.targetCases.map((row) => [row.name, row] as const))(
+      'losslessRetypeTargets: %s',
+      (_name, row) => {
+        expect(losslessRetypeTargets(row.sourceType, row.property)).toEqual(row.expected)
+      },
+    )
+
+    it.each(table.pairCases.map((row) => [row.name, row] as const))(
+      'offered-as-lossless: %s',
+      (_name, row) => {
+        expect(losslessRetypeTargets(row.sourceType, row.property).includes(row.targetType)).toBe(row.lossless)
+      },
+    )
   })
 
   // The golden above only proves the CURRENT table has no excluded target, so the

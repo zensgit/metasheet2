@@ -1770,12 +1770,19 @@ const fieldConfigBlockingReason = computed(() => {
 const configRetypeOptions = computed<string[]>(() => {
   const baseline = configTypeBaseline.value
   if (!configTarget.value || !baseline) return []
-  const targets = losslessRetypeTargets(baseline)
+  // F8A: the source field's stored `property` decides the longText row — a RICH longText
+  // offers nothing (its HTML would show as bare markup in a text field). The server
+  // re-checks the same rule against the DB row, so this is the dropdown, not the wall.
+  const targets = losslessRetypeTargets(baseline, configTarget.value.property)
   return targets.length ? [baseline, ...targets] : []
 })
 const retypeNoticeText = computed(() =>
   userRetypeRequested.value
-    ? fieldRetypeNotice(fieldTypeLabel(configDraftType.value ?? '', isZh.value), isZh.value)
+    ? fieldRetypeNotice(
+        fieldTypeLabel(configDraftType.value ?? '', isZh.value),
+        isZh.value,
+        { from: configTypeBaseline.value ?? '', to: configDraftType.value ?? '' },
+      )
     : '',
 )
 const fieldConfigWarningText = computed(() => {

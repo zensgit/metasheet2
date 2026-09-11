@@ -16,6 +16,8 @@ describe('meta-api-error-labels', () => {
       'error.unauthenticated',
       'error.validation',
       'error.fieldValidation',
+      // F8A: the server-side lossless-retype whitelist refusal (FIELD_RETYPE_NOT_LOSSLESS).
+      'error.fieldRetypeNotLossless',
       // A3 AI shortcut state copy (§2.3) — keyed on error.code.
       'error.aiBlocked',
       'error.aiRateLimited',
@@ -79,6 +81,14 @@ describe('meta-api-error-labels', () => {
     expect(apiDefaultErrorMessage('FORBIDDEN', 403, true)).toBe('权限不足')
     expect(apiDefaultErrorMessage('UNAUTHENTICATED', 401, true)).toBe('请先登录后继续。')
     expect(apiDefaultErrorMessage('VALIDATION_ERROR', 422, true)).toBe('请检查提交的数据后重试。')
+    // F8A: a stable refusal code gets real copy in BOTH locales instead of `API 400`
+    // (the server's own Chinese message still wins in parseJson when one is present).
+    expect(apiDefaultErrorMessage('FIELD_RETYPE_NOT_LOSSLESS', 400, true))
+      .toBe('这样改字段类型会让已有数据不可读，已被拒绝。只允许无损的类型转换。')
+    expect(apiDefaultErrorMessage('FIELD_RETYPE_NOT_LOSSLESS', 400, false))
+      .toBe('This field type change would make the existing data unreadable, so it was refused. Only lossless conversions are allowed.')
+    // values-free: the copy names no field id
+    expect(apiDefaultErrorMessage('FIELD_RETYPE_NOT_LOSSLESS', 400, true)).not.toMatch(/fld[_-]/)
   })
 
   it('keeps unknown API status fallback technical and locale-neutral', () => {

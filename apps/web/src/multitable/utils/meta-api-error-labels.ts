@@ -11,6 +11,8 @@ export type MetaApiErrorLabelKey =
   | 'error.unauthenticated'
   | 'error.validation'
   | 'error.fieldValidation'
+  // F8A 改类型无损白名单：服务端拒绝码 FIELD_RETYPE_NOT_LOSSLESS 的人话。
+  | 'error.fieldRetypeNotLossless'
   // AI shortcut state copy (A3 §2.3) — keyed STRICTLY on error.code; the body
   // top-level `status` discriminator never reaches the frontend.
   | 'error.aiBlocked'
@@ -36,6 +38,13 @@ const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
   'error.unauthenticated': { en: 'Please sign in to continue.', zh: '请先登录后继续。' },
   'error.validation': { en: 'Please check the submitted data and try again.', zh: '请检查提交的数据后重试。' },
   'error.fieldValidation': { en: 'Validation failed', zh: '验证失败' },
+  // F8A: the server refuses any (current -> next) pair outside the lossless whitelist
+  // (core-backend/src/multitable/field-retype-whitelist.ts) because a retype migrates
+  // NO cell values. Copy says what the user can do, and names no field id.
+  'error.fieldRetypeNotLossless': {
+    en: 'This field type change would make the existing data unreadable, so it was refused. Only lossless conversions are allowed.',
+    zh: '这样改字段类型会让已有数据不可读，已被拒绝。只允许无损的类型转换。',
+  },
   // AI_BLOCKED is a deliberate readiness state, NOT a generic 5xx outage —
   // admins diagnose it via the A1 readiness endpoint.
   'error.aiBlocked': { en: 'AI is not enabled or not ready. Contact an administrator.', zh: 'AI 能力未启用或未就绪，请联系管理员' },
@@ -103,6 +112,11 @@ export function apiDefaultErrorMessage(code: string | undefined, status: number,
       return metaApiErrorLabel('error.unauthenticated', isZh)
     case 'VALIDATION_ERROR':
       return metaApiErrorLabel('error.validation', isZh)
+    // F8A: a stable refusal code, so it gets real copy instead of `API 400` whenever the
+    // payload arrives without a message (proxy/trim); with a message the server's own
+    // Chinese sentence still wins in parseJson, exactly like VALIDATION_ERROR.
+    case 'FIELD_RETYPE_NOT_LOSSLESS':
+      return metaApiErrorLabel('error.fieldRetypeNotLossless', isZh)
     default:
       return `API ${status}`
   }
