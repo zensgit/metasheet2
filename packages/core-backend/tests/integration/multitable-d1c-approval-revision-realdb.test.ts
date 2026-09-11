@@ -60,6 +60,13 @@
  *
  * Runs only with DATABASE_URL (plugin-tests.yml multitable real-DB job).
  */
+/**
+ * G05 note: the rule-driven `send_webhook` action is now SSRF-gated, and the gate RESOLVES a target name.
+ * These specs use a TEST-NET-3 literal (RFC 5737, documentation-only and not routable) because the gate
+ * accepts a public IP literal WITHOUT any DNS lookup — so the run stays deterministic offline. The previous
+ * `example.test` host is RFC 6761 guaranteed-NXDOMAIN: the gate would fail closed on it (and stall for the
+ * resolver timeout first). The stubbed fetchFn still means no packet is ever sent.
+ */
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -256,7 +263,7 @@ async function createStartApprovalRule(
     actionConfig: config,
     actions: [
       { type: 'start_approval', config },
-      { type: 'send_webhook', config: { url: 'https://example.test/d1c4-tail' } },
+      { type: 'send_webhook', config: { url: 'https://203.0.113.10/d1c4-tail' } },
     ] as never,
     executionMode: 'workflow_job_v1',
     createdBy: REQUESTER,
@@ -294,7 +301,7 @@ async function executeAndApprove(
     trigger: { type: 'record.created', config: {} },
     actions: [
       { type: 'start_approval', config: { templateId, formDataMapping: { summary: 'Record {{record.title}} needs approval' }, requester: { mode: 'trigger_actor' }, resultWriteback } },
-      { type: 'send_webhook', config: { url: 'https://example.test/d1c4-tail' } },
+      { type: 'send_webhook', config: { url: 'https://203.0.113.10/d1c4-tail' } },
     ],
     enabled: true,
     createdBy: REQUESTER,
@@ -579,7 +586,7 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
         trigger: { type: 'record.created', config: {} },
         actions: [
           { type: 'start_approval', config: { templateId, formDataMapping: { summary: 'Record {{record.title}} needs approval' }, requester: { mode: 'trigger_actor' }, resultWriteback: RW } },
-          { type: 'send_webhook', config: { url: 'https://example.test/d1c4-race-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/d1c4-race-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -647,7 +654,7 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
         trigger: { type: 'record.created', config: {} },
         actions: [
           { type: 'start_approval', config: { templateId, formDataMapping: { summary: 'Record {{record.title}} needs approval' }, requester: { mode: 'trigger_actor' }, resultWriteback: RW } },
-          { type: 'send_webhook', config: { url: 'https://example.test/d1c4-xb-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/d1c4-xb-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
