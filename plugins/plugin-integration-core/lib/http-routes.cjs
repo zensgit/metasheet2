@@ -6475,6 +6475,23 @@ function requireStockPreparationAudit() {
       })
       // FOS-4b-3-prod P2: post-plan production bound. The plan's clean (add/update) row count is fixed across
       // chunked runs, so checking it on each chunk consistently rejects an over-bound run before any write.
+      //
+      // WHAT THE PACK-AWARE BAND DOES TO THIS NUMBER — disclosed here because this is where it is
+      // consumed. Since the plan route resolves `installedFieldProperties`, a customer pack's `ext_`
+      // plm_system columns are COMPARED by the planner, and this family still supplies no
+      // `extFieldMapping`, so its expansion rows carry no `ext_` key at all. An existing `ext_` value
+      // against an absent incoming one reads as CHANGED (`changedFields` compares cells, and an
+      // absent cell is not an equal cell), so a row that was SKIPped before the band became reachable
+      // is now an UPDATE and is counted below. On a deployment whose owner configured a production
+      // policy this can push a refresh past `maxCleanRows` and 403 it — every round, not
+      // occasionally, for as long as the mapping is missing. The direction is the safe one: the
+      // refusal is fail-closed and lands BEFORE any write, so an over-count costs a refresh and never
+      // a row (the patch omits the `ext_` id either way — see the notice above `computeDryRun`'s
+      // caller). Fixing it at the root means narrowing `changedFields` to cells the incoming row
+      // actually defines, which changes the SHARED planner the small-BOM path runs on and is a
+      // separate decision, not a drive-by here. Pinned by `the widened band is counted by the
+      // production clean-row bound` in
+      // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs.
       const planDecisions = (pendingJob && pendingJob.plan && Array.isArray(pendingJob.plan.decisions)) ? pendingJob.plan.decisions : []
       const largeBomCleanRowCount = planDecisions.filter((d) => d && (d.decision === 'add' || d.decision === 'update')).length
       assertProductionCleanRowsWithinBound(applyGate, largeBomCleanRowCount)

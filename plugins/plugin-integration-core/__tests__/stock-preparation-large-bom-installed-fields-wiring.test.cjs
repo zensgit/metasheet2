@@ -27,6 +27,11 @@
 //   4. THE APPLY BAND IS FROZEN AT APPROVAL. The `.../run` route performs NO ledger read: an
 //      install (or a UI column deletion) between two chunks of one approved job cannot change the
 //      band the remaining chunks write through.
+//   6. THE PRICE OF 5, AND IT IS NOT FREE: that SKIP-to-UPDATE flip is COUNTED. The large-BOM apply
+//      route derives its production `maxCleanRows` bound from the plan's add+update count, so on a
+//      deployment an owner put in production mode the widened band can push a refresh over its
+//      authorized bound and take a 403. Fail-closed (nothing written, no row lost) but a real
+//      availability change, pinned here so it cannot be discovered in production instead.
 //   5. A BAND WITHOUT A MAPPING NEVER BLANKS AN `ext_` VALUE. The large-BOM path still supplies no
 //      `extFieldMapping`, so its rows carry no `ext_` key; `pickFields` skips an undefined cell and
 //      a patch does not blank what it omits, so an `ext_` value an earlier small-path refresh wrote
@@ -52,6 +57,9 @@ const {
 const {
   FACTORY_A_REHEARSAL_PACK,
 } = require(path.join(LIB, 'customer-packs', 'factory-a.rehearsal.cjs'))
+const {
+  PROD_CANONICAL_OBJECT_ID,
+} = require(path.join(LIB, 'stock-preparation-production-policy.cjs'))
 
 const PACK = FACTORY_A_REHEARSAL_PACK
 const PACK_ID = PACK.packId
@@ -96,21 +104,21 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value))
 }
 
-function sourceData() {
+function sourceData({ parts = ['A'] } = {}) {
   return {
     DN_PDM_PathExAttrInfo: [{ FileCode: PROJECT_NO, Parent_OBJ_ID: 'PATH-1' }],
     DN_PDM_PathInfo: [{ OBJ_ID: 'PATH-1' }],
     DN_PDM_OrderHeadInfo: [{ OBJ_ID: 'ORDER-1', path_id: 'PATH-1' }],
-    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2' }],
-    DN_PDM_PartLibraryInfo: [{
-      OBJ_ID: 'PART-A',
-      IdentityNo: 'A-001',
+    DN_PDM_OrderDetailInfo: parts.map((suffix) => ({ order_id: 'ORDER-1', part_id: `PART-${suffix}`, quantity: '2' })),
+    DN_PDM_PartLibraryInfo: parts.map((suffix, index) => ({
+      OBJ_ID: `PART-${suffix}`,
+      IdentityNo: `${suffix}-001`,
       IdentityName: 'Assembly',
       Material: 'Steel',
       SysVer: 'V1',
       Designer: 'designer-one',
-      SortNo: '10',
-    }],
+      SortNo: `${10 + index}`,
+    })),
     DN_PDM_BomHeadInfo: [],
     DN_PDM_BomDetailsInfo: [],
   }
@@ -273,20 +281,20 @@ function resolvedFieldIdMap() {
   return map
 }
 
-function actionConfig() {
+function actionConfig(objectId = OBJECT_ID) {
   return {
     actionId: PLM_STOCK_PREPARATION_ACTION_ID,
     source: { externalSystemId: SOURCE_SYSTEM_ID, kind: 'data-source:sql-readonly' },
     target: {
       sheetId: SHEET_ID,
-      objectId: OBJECT_ID,
+      objectId,
       fieldIdMap: resolvedFieldIdMap(),
     },
     extensionFieldIds: PACK.extensionFields.map((field) => field.id),
   }
 }
 
-function mount({ ledger, records, sourceAdapter } = {}) {
+function mount({ ledger, records, sourceAdapter, objectId = OBJECT_ID, applyProduction } = {}) {
   const routes = new Map()
   const recordsApi = records || createRecordsApi()
   const context = {
@@ -304,9 +312,16 @@ function mount({ ledger, records, sourceAdapter } = {}) {
     // `durable: true` is what the large-BOM job store demands before it accepts a job.
     storage: Object.assign(new Map(), { durable: true }),
     config: {
-      stockPreparationTableActions: [actionConfig()],
+      stockPreparationTableActions: [actionConfig(objectId)],
       stockPreparationCustomerPacks: { [PACK_ID]: PACK },
+      // Left in place even on the production mount below: with a production policy present the gate
+      // never consults it, so a 403 carrying the SANDBOX code would prove the production branch was
+      // not the one that ran.
       stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [OBJECT_ID] },
+      // Mounted only when a case asks for it, and MUTABLE on purpose: the production case lowers
+      // `maxCleanRows` between two authorization windows the way an owner sizes a window to the
+      // delta one refresh is expected to touch.
+      ...(applyProduction ? { stockPrepApplyProduction: applyProduction } : {}),
     },
   }
   httpRoutes.registerIntegrationRoutes({
@@ -558,11 +573,115 @@ async function aPackAwareBandNeverBlanksAnExtValueTheSmallPathWrote() {
   assert.equal(records.rows[0].data.fld_componentCode, 'A-001', 'and the canonical half is refreshed as always')
 }
 
+// -- 6. the widened band is COUNTED by the production clean-row bound --------
+//
+// WHAT THIS PINS, and why it is a test rather than a note. Case 5 establishes that a pack-aware band
+// makes the planner COMPARE an `ext_` column the large-BOM rows never carry, so an existing value
+// against an absent incoming one reads as CHANGED and a row that used to be SKIPped becomes an
+// UPDATE. That flip does not stop at a counter in a response: the large-BOM apply route computes
+// `largeBomCleanRowCount` from the plan's add+update decisions and feeds it to the production gate's
+// `maxCleanRows`. On a deployment with a production policy configured, a refresh whose genuine delta
+// is one row can therefore be refused as an N-row refresh — N being every row that carries an `ext_`
+// value — and stays refused every round until an `extFieldMapping` reaches this path and the
+// comparison has something to compare against.
+//
+// The direction is the safe one and is asserted as such: fail-closed, before any write, losing the
+// refresh and never a row. The bound is also dormant unless an owner configured a production policy.
+// That is why this is PINNED here rather than fixed here: narrowing `changedFields` to cells the
+// incoming row actually defines would change the SHARED planner the small-BOM path runs on, which is
+// a different decision on a different change.
+//
+// The CONTROL is the same scenario on a deployment with no ledger: same source, same rows, same
+// bound — one clean row, inside the bound, written. So it is the band that moved the count.
+
+function largeBomProductionPolicy(maxCleanRows) {
+  return {
+    enabled: true,
+    // The policy contract accepts only the production canonical target, so this case is the one
+    // mount in the suite that binds the action to it.
+    authorizedTargetObjectId: PROD_CANONICAL_OBJECT_ID,
+    authorizationId: 'auth-large-bom-window',
+    allowedActionId: ACTION_ID,
+    allowedRoute: 'large',
+    maxCleanRows,
+    // Inside the bounded authorization window, which the contract checks against the route's clock.
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    requireFreshDryRun: true,
+  }
+}
+
+/**
+ * Two rows land; an earlier small-path refresh left an `ext_` value on BOTH; exactly ONE of them
+ * really changes upstream; the owner authorizes a second window sized to that one row. Returns the
+ * `.../run` response UN-asserted so the banded and the control deployment can each read it.
+ */
+async function productionRefreshAfterAnEarlierExtWrite({ ledger }) {
+  const data = sourceData({ parts: ['A', 'B'] })
+  const mounted = mount({
+    ledger,
+    sourceAdapter: createSourceAdapter(data),
+    objectId: PROD_CANONICAL_OBJECT_ID,
+    applyProduction: largeBomProductionPolicy(2),
+  })
+  const { routes, context, records } = mounted
+
+  const first = await expandAndPlan(routes)
+  const firstApply = await approveAndRunApply(routes, first.jobId)
+  assert.equal(firstApply.ran.body.data.counts.created, 2, JSON.stringify(firstApply.ran.body))
+
+  // The only path that applies a mapping today wrote a tenant value onto both rows.
+  for (const row of records.rows) row.data[`fld_${EXT_PLM}`] = 'LEGACY_EXT_VALUE'
+  // Upstream, ONE row genuinely changed: a canonical plm_system column moved. Quantity, not one of
+  // the four IDENTITY columns — an identity move is adjudicated as a manual_confirm and would never
+  // reach the clean-row count this case is about.
+  data.DN_PDM_OrderDetailInfo[1].quantity = '5'
+  // A NEW authorization window, sized to the delta the owner expects: one row.
+  context.config.stockPrepApplyProduction = largeBomProductionPolicy(1)
+
+  const second = await expandAndPlan(routes)
+  const started = await call(routes, 'POST', APPLY_START_ROUTE, {
+    user: ADMIN_USER,
+    params: { actionId: ACTION_ID, jobId: second.jobId },
+    body: { confirm: { acceptManualConfirmHold: true } },
+  })
+  assert.equal(started.statusCode, 202, JSON.stringify(started.body))
+  const patchesBeforeRun = records.payloads('patchRecord').length
+  const ran = await call(routes, 'POST', APPLY_RUN_ROUTE, {
+    user: ADMIN_USER,
+    params: { actionId: ACTION_ID, jobId: second.jobId, applyJobId: started.body.data.jobId },
+  })
+  return { ran, records, patchesBeforeRun }
+}
+
+async function theWidenedBandIsCountedByTheProductionCleanRowBound() {
+  const banded = await productionRefreshAfterAnEarlierExtWrite({ ledger: createLedger() })
+  assert.equal(banded.ran.statusCode, 403, JSON.stringify(banded.ran.body))
+  assert.equal(banded.ran.body.ok, false)
+  // The PRODUCTION branch is what refused: a sandbox refusal of the canonical target carries
+  // STOCK_PREP_APPLY_SANDBOX_ONLY / prod_canonical, so this code proves which gate ran.
+  assert.equal(banded.ran.body.error.code, 'STOCK_PREP_PRODUCTION_APPLY_DENIED')
+  assert.equal(banded.ran.body.error.details.reason, 'max_clean_rows_exceeded')
+  assert.equal(
+    banded.records.payloads('patchRecord').length,
+    banded.patchesBeforeRun,
+    'fail-closed: the bound rejects BEFORE any write, so the refresh is lost and never a row',
+  )
+  assert.equal(banded.records.rows[0].data[`fld_${EXT_PLM}`], 'LEGACY_EXT_VALUE')
+
+  // CONTROL — identical scenario, no ledger: the template-only band compares no `ext_` column, the
+  // unchanged row stays a SKIP, one clean row is inside the same bound, and the refresh runs.
+  const control = await productionRefreshAfterAnEarlierExtWrite({ ledger: undefined })
+  assert.equal(control.ran.statusCode, 200, JSON.stringify(control.ran.body))
+  assert.equal(control.ran.body.data.counts.updated, 1, 'exactly the one row that really changed')
+  assert.equal(control.records.payloads('patchRecord').length, control.patchesBeforeRun + 1)
+}
+
 async function main() {
   await run('degraded resolution plans exactly what it always planned', degradedResolutionPlansExactlyWhatItAlwaysPlanned)
   await run('an installed pack widens the large-BOM plan band', installedPackWidensTheLargeBomPlanBand)
   await run('the approved band rejects a pack human column by name', theApprovedBandRejectsAPackHumanColumnByName)
   await run('a pack-aware band never blanks an ext_ value', aPackAwareBandNeverBlanksAnExtValueTheSmallPathWrote)
+  await run('the widened band is counted by the production clean-row bound', theWidenedBandIsCountedByTheProductionCleanRowBound)
 
   if (failures.length > 0) {
     console.error(`stock-preparation-large-bom-installed-fields-wiring.test.cjs FAILED (${failures.length})`)
