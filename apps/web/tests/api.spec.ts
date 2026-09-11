@@ -3,6 +3,7 @@ import { apiFetch, authHeaders, clearStoredAuthState } from '../src/utils/api'
 import { useAuth } from '../src/composables/useAuth'
 import { getAuthPrincipalKey } from '../src/composables/authPrincipal'
 import { createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
+import { NETWORK_UNAVAILABLE, networkUnavailableMessage } from '../src/utils/networkErrors'
 
 describe('apiFetch', () => {
   const store: Record<string, string> = {}
@@ -234,5 +235,274 @@ describe('apiFetch', () => {
     clearStoredAuthState()
     expect(store['metasheet.explicitSessionOrg.v1'] === undefined).toBe(true)
     expect(authHeaders().Authorization).toBeUndefined()
+  })
+
+  // ---------------------------------------------------------------------------
+  // F4-B: transport-failure copy + idempotent-read retry (apps/web/src/utils/api.ts
+  // fetchWithTransportCopy). The upgrade window takes the backend offline for ~2.5
+  // minutes; `fetch` then rejects with the browser literal "Failed to fetch", which
+  // every multitable catch site puts on screen verbatim via `e.message`.
+  // ---------------------------------------------------------------------------
+  /** Let already-settled promise reactions run while timers are faked. */
+  async function flushMicrotasks(times = 8): Promise<void> {
+    for (let i = 0; i < times; i += 1) await Promise.resolve()
+  }
+
+  function transportFailure(): TypeError {
+    // The literal Chromium produces when the upstream connection is refused/reset.
+    return new TypeError('Failed to fetch')
+  }
+
+  it('F4-B: an idempotent GET retries exactly twice, at 1200ms then 3500ms, and returns the eventual response', async () => {
+    vi.useFakeTimers()
+    try {
+      const okResponse = { ok: true, status: 200, statusText: 'OK' } as unknown as Response
+      const fetchMock = vi.fn()
+        .mockRejectedValueOnce(transportFailure())
+        .mockRejectedValueOnce(transportFailure())
+        .mockResolvedValueOnce(okResponse)
+      vi.stubGlobal('fetch', fetchMock)
+
+      const pending = apiFetch('/api/multitable/records', { suppressUnauthorizedRedirect: true })
+      await flushMicrotasks()
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+
+      // Backoff is a real wait, not a tight loop: nothing fires one tick early.
+      await vi.advanceTimersByTimeAsync(1199)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await flushMicrotasks()
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+
+      await vi.advanceTimersByTimeAsync(3499)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(1)
+      await flushMicrotasks()
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+
+      await expect(pending).resolves.toBe(okResponse)
+      // Retry replays the SAME request line, not a mangled one.
+      expect(fetchMock.mock.calls.map(call => call[0])).toEqual([
+        fetchMock.mock.calls[0][0],
+        fetchMock.mock.calls[0][0],
+        fetchMock.mock.calls[0][0],
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('F4-B: a GET that never comes back rejects with neutral human copy (code/status/cause) after 3 attempts total', async () => {
+    vi.useFakeTimers()
+    try {
+      const original = transportFailure()
+      const fetchMock = vi.fn().mockRejectedValue(original)
+      vi.stubGlobal('fetch', fetchMock)
+
+      const pending = apiFetch('/api/multitable/records', { suppressUnauthorizedRedirect: true })
+      const settled = pending.then(() => null, (error: unknown) => error)
+      await flushMicrotasks()
+      await vi.advanceTimersByTimeAsync(1200)
+      await flushMicrotasks()
+      await vi.advanceTimersByTimeAsync(3500)
+      await flushMicrotasks()
+
+      const caught = await settled as Error & { code?: string; status?: number; cause?: unknown }
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(caught.code).toBe(NETWORK_UNAVAILABLE)
+      expect(caught.status).toBe(0)
+      expect(caught.cause).toBe(original)
+      // The browser literal is what testers were shown before this fix; it must be gone.
+      expect(caught.message).toBe(networkUnavailableMessage(false))
+      // The assertion above is SELF-REFERENTIAL (expectation = the function under test), so it
+      // survives any rewrite of the EN copy. Pin the literal too, exactly as the zh case further
+      // down does: garbling networkErrors.ts's `en` string must turn this file red.
+      expect(caught.message).toBe('The service is temporarily unavailable. Please try again in a moment.')
+      expect(caught.message).not.toContain('Failed to fetch')
+      // Neutral by owner ruling: never announce an upgrade to the customer.
+      expect(caught.message.toLowerCase()).not.toContain('upgrad')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('F4-B: a DELETE is NOT retried even once — a reset can land after the server already committed', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = vi.fn().mockRejectedValue(transportFailure())
+      vi.stubGlobal('fetch', fetchMock)
+
+      const settled = apiFetch('/api/multitable/records/rec_1', {
+        method: 'DELETE',
+        suppressUnauthorizedRedirect: true,
+      }).then(() => null, (error: unknown) => error)
+
+      await flushMicrotasks()
+      // Give any (wrongly scheduled) backoff a full window to fire.
+      await vi.advanceTimersByTimeAsync(60_000)
+      await flushMicrotasks()
+
+      const caught = await settled as Error & { code?: string }
+      expect(caught.code).toBe(NETWORK_UNAVAILABLE)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['POST', 'PUT', 'PATCH'])('F4-B: a %s is NOT retried either', async method => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = vi.fn().mockRejectedValue(transportFailure())
+      vi.stubGlobal('fetch', fetchMock)
+
+      const settled = apiFetch('/api/multitable/records', {
+        method,
+        body: JSON.stringify({ fields: {} }),
+        suppressUnauthorizedRedirect: true,
+      }).then(() => null, (error: unknown) => error)
+
+      await flushMicrotasks()
+      await vi.advanceTimersByTimeAsync(60_000)
+      await flushMicrotasks()
+
+      expect((await settled as { code?: string }).code).toBe(NETWORK_UNAVAILABLE)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('F4-B: a GET carrying a body is treated as non-idempotent and is not retried', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = vi.fn().mockRejectedValue(transportFailure())
+      vi.stubGlobal('fetch', fetchMock)
+
+      const settled = apiFetch('/api/multitable/search', {
+        method: 'GET',
+        body: JSON.stringify({ q: 'x' }),
+        suppressUnauthorizedRedirect: true,
+      }).then(() => null, (error: unknown) => error)
+
+      await flushMicrotasks()
+      await vi.advanceTimersByTimeAsync(60_000)
+      await flushMicrotasks()
+
+      expect((await settled as { code?: string }).code).toBe(NETWORK_UNAVAILABLE)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('F4-B: an AbortError passes through by identity — an abort is not an outage', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const abortError = Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })
+    const fetchMock = vi.fn().mockRejectedValue(abortError)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const caught = await apiFetch('/api/multitable/records', {
+      signal: controller.signal,
+      suppressUnauthorizedRedirect: true,
+    }).then(() => null, (error: unknown) => error)
+
+    expect(caught).toBe(abortError)
+    expect((caught as { code?: string }).code).toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('F4-B: a GET whose signal is ALREADY aborted buys no retry, even when the stub rejects with a TypeError', async () => {
+    vi.useFakeTimers()
+    try {
+      const controller = new AbortController()
+      controller.abort()
+      const fetchMock = vi.fn().mockRejectedValue(transportFailure())
+      vi.stubGlobal('fetch', fetchMock)
+
+      const settled = apiFetch('/api/multitable/records', {
+        signal: controller.signal,
+        suppressUnauthorizedRedirect: true,
+      }).then(() => null, (error: unknown) => error)
+
+      await flushMicrotasks()
+      await vi.advanceTimersByTimeAsync(60_000)
+      await flushMicrotasks()
+
+      const caught = await settled as { name?: string; message?: string }
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      // The caller cancelled — do not relabel their own cancellation as an outage.
+      expect(caught.name).toBe('AbortError')
+      expect(caught.message).not.toBe(networkUnavailableMessage(false))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('F4-B: aborting DURING the backoff stops the retry immediately and reports the abort, not an outage', async () => {
+    vi.useFakeTimers()
+    try {
+      const controller = new AbortController()
+      const fetchMock = vi.fn().mockRejectedValue(transportFailure())
+      vi.stubGlobal('fetch', fetchMock)
+
+      const settled = apiFetch('/api/multitable/records', {
+        signal: controller.signal,
+        suppressUnauthorizedRedirect: true,
+      }).then(() => null, (error: unknown) => error)
+
+      await flushMicrotasks()
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+
+      controller.abort()
+      await flushMicrotasks()
+      const caught = await settled as { name?: string; message?: string }
+      expect(caught.name).toBe('AbortError')
+      expect(caught.message).not.toBe(networkUnavailableMessage(false))
+
+      // The pending backoff timer must not resurrect the request afterwards.
+      await vi.advanceTimersByTimeAsync(60_000)
+      await flushMicrotasks()
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('F4-B: an HTTP 5xx RESPONSE is returned untouched and never retried (no retry storm on a backend that just came up)', async () => {
+    const gatewayError = { ok: false, status: 502, statusText: 'Bad Gateway' } as unknown as Response
+    const fetchMock = vi.fn().mockResolvedValue(gatewayError)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(apiFetch('/api/multitable/records', { suppressUnauthorizedRedirect: true }))
+      .resolves.toBe(gatewayError)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('F4-B: POSITIVE CONTROL — a successful GET still calls fetch exactly once and returns the same Response', async () => {
+    const okResponse = { ok: true, status: 200, statusText: 'OK' } as unknown as Response
+    const fetchMock = vi.fn().mockResolvedValue(okResponse)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(apiFetch('/api/multitable/records', { suppressUnauthorizedRedirect: true }))
+      .resolves.toBe(okResponse)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('F4-B: the copy follows the stored UI locale (zh) without ever saying "升级"', async () => {
+    store.metasheet_locale = 'zh-CN'
+    const fetchMock = vi.fn().mockRejectedValue(transportFailure())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const caught = await apiFetch('/api/multitable/records/rec_1', {
+      method: 'DELETE',
+      suppressUnauthorizedRedirect: true,
+    }).then(() => null, (error: unknown) => error) as Error
+
+    expect(caught.message).toBe(networkUnavailableMessage(true))
+    expect(caught.message).toBe('服务暂时不可用，请稍后重试')
+    expect(caught.message).not.toContain('升级')
+    expect(caught.message).not.toContain('Failed to fetch')
   })
 })
