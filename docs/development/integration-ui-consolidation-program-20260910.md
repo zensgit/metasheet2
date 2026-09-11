@@ -230,9 +230,9 @@ X02 的第一版（#5628 `c2b482c8b`）修得很像样：三条充要条件、18
 
 | # | 项 | PR | 状态 | 复核 | 设计 / 验证文档 |
 |---|---|---|---|---|---|
-| A | `webhook-service.ts` 订阅投递出口接 SSRF 守卫 + `redirect:'manual'` + 失败日志闭集（复用 #5619 模块，**叠在 #5619 上**） | **#5649** | 正式，CI 绿（返修后 10/10） | 21 代理："修完 X 再合"，X 全是注释/文档；追加修了终审点名的「拒绝分支写库失败穿出重试循环」（归因订正：基线就有，本 PR 是加剧不是引入） | `webhook-service-ssrf-guard-{design,verification}-20260912.md` |
-| B | issue #5621：`connection` 下秘密键写入拒收 + 读取剥离，判据收敛到一处 | **#5648** | 正式，CI 跑中（独立真库道已在演员修复后 SUCCESS） | 23 代理："修完 X 再合"——X 是**协调方克隆的真库工作流外壳是假件背书**（paths 列不存在的文件、声称 spec 未实现的哨兵）与三处只对键名成立的绝对句；已全部修 | `data-source-connection-secret-keys-{design,verification}-20260912.md` |
-| C | G02 第一刀：种子化 `data_sources:use/rotate/share`（只种不发权）+ 凭据轮换门 write→rotate 独占 | **#5650** | 正式，CI 27/27 绿 | 25 代理："修完 X 再合"，X 全是文档：上机前置 SQL **漏第三张活面 `users.permissions`**；「后合者改一行」不成立 → 已在 #5611 侧解耦；缓存语义写反（授予即时生效、撤销才滞后） | `data-source-sharing-pr1-rotate-scope-{design,verification}-20260912.md` |
+| A | `webhook-service.ts` 订阅投递出口接 SSRF 守卫 + `redirect:'manual'` + 失败日志闭集（复用 #5619 模块，**叠在 #5619 上**） | **#5649** | 正式，收口 34b53e569，CI 10/10 绿 | 21 代理："修完 X 再合"，X 全是注释/文档；追加修了终审点名的「拒绝分支写库失败穿出重试循环」（归因订正：基线就有，本 PR 是加剧不是引入） | `webhook-service-ssrf-guard-{design,verification}-20260912.md` |
+| B | issue #5621：`connection` 下秘密键写入拒收 + 读取剥离，判据收敛到一处 | **#5648** | 正式，收口 691a20e83，CI 50/50 绿（独立真库道首次真实上库通过） | 23 代理："修完 X 再合"——X 是**协调方克隆的真库工作流外壳是假件背书**（paths 列不存在的文件、声称 spec 未实现的哨兵）与三处只对键名成立的绝对句；已全部修 | `data-source-connection-secret-keys-{design,verification}-20260912.md` |
+| C | G02 第一刀：种子化 `data_sources:use/rotate/share`（只种不发权）+ 凭据轮换门 write→rotate 独占 | **#5650** | 正式，收口 a387ae07a（零代码，runbook 补第三活面且区分 jsonb/TEXT[] 两形状），CI 重跑中 | 25 代理："修完 X 再合"，X 全是文档：上机前置 SQL **漏第三张活面 `users.permissions`**；「后合者改一行」不成立 → 已在 #5611 侧解耦；缓存语义写反（授予即时生效、撤销才滞后） | `data-source-sharing-pr1-rotate-scope-{design,verification}-20260912.md` |
 | D | 托管表「导入插全新行」的野行在刷新/升级/导出/计数四处的命运（**零代码**） | **#5647** | 正式，CI 21/21 绿 | 设计件；它推翻了一个前提（见 8.2） | `managed-sheet-import-foreign-rows-design-20260912.md` |
 | E | X02 bare `concat` 全部部件缺失时不再写空串（**叠在 #5628 上**） | **#5652** | 正式，CI 11/11 绿 | 未起复核（叠加小刀；两套网格 3060+3780 组差异盘点自证：新增 980 组差异 100% 为「空串→不写」） | 更新 `transform-source-field-absent-{design,verification}-20260911.md` |
 | F | G52 `join.on` 改结构化并与 `join.type` 一起过白名单（**叠在 #5614 上**） | **#5653** | 正式，CI 10/10 绿 | 未起复核（叠加小刀；实测证明写入门兜不住外泄型读，是硬化的价值所在） | `mssql-join-on-hardening-{design,verification}-20260912.md` |
