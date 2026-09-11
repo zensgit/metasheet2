@@ -89,6 +89,13 @@ function sheetScaffold(sql: string, params?: unknown[]): QueryResult | null {
     return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
   }
   if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+  // 托管表 schema 写门(src/multitable/managed-sheet-schema-write-guard.ts)在能力层查注册表:
+  // sheet_ops 是普通表,没有插件登记行。这道查询 fail-closed,所以未应答等于"当成托管表",
+  // 会把这些路由的 canManageFields 降掉 → 403;显式答空行才是这张表的真实形态。
+  if (sql.includes('FROM plugin_multitable_object_registry')) {
+    expect(params).toEqual(['sheet_ops'])
+    return { rows: [] }
+  }
   if (/^\s*INSERT\s+INTO\s+meta_config_revisions\b/i.test(sql)) return { rows: [], rowCount: 0 }
   return null
 }

@@ -57,6 +57,10 @@ import {
   loadElearningProjectionSheetOrgMap,
 } from './elearning-projection-access'
 import { restrictElearningProjectionCapabilities } from './elearning-projection-constants'
+import {
+  isPluginManagedSheetFailClosed,
+  restrictManagedSheetSchemaWriteCapabilities,
+} from './managed-sheet-schema-write-guard'
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
 import {
   parseConditionalRules,
@@ -1780,6 +1784,20 @@ export async function resolveSheetCapabilitiesForAccess(
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], access.userId)
   const sheetScope = scopeMap.get(sheetId)
   let capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, access.isAdminRole)
+  // MANAGED-SHEET SCHEMA-WRITE FENCE (immediately after the grant that creates the exposure): the
+  // grant above lifts `canManageFields` for ANY sheet-scoped full-write holder, which on a
+  // plugin-provisioned sheet would hand a data-plane operator the plugin's column set. Non-admins
+  // lose that one bit on a registered sheet; nothing else about their capabilities changes. The
+  // registry lookup is skipped whenever there is nothing to narrow (admin, or the bit is already
+  // false), so the admin hot path and read-only actors pay no query. Fail-closed on lookup errors
+  // (see managed-sheet-schema-write-guard.ts).
+  if (!access.isAdminRole && capabilities.canManageFields) {
+    capabilities = restrictManagedSheetSchemaWriteCapabilities(
+      capabilities,
+      await isPluginManagedSheetFailClosed(query, sheetId),
+      access.isAdminRole,
+    )
+  }
   // A + T36-1 (Plan A): the approval projection base stays admin-only on the write/manage plane;
   // a non-admin PARTICIPANT keeps the read plane (rows narrowed to their own by the row-deny
   // choke), any other non-admin keeps the original full fence (fail-closed on lookup errors).
