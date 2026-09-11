@@ -803,6 +803,75 @@ async function packWithoutOptionSetsSkipsTheKernel() {
   assert.equal(calls.ensureView.length, 0)
 }
 
+// ext_ 客户包列写口守卫盘点结清 (beiliao-takeover-status-ledger.md §4, 2026-09-11 全集盘点 ⑧/⑨:
+// 列属性写). The two host writes that land ON an existing `ext_` column's property rather than
+// creating it: the ownership stamp (installer :341 stampExistingExtensionFields -> :349
+// patchObjectFieldProperty, call site :1566) and the pack option sync (installer :492
+// syncPackOptionSets -> field-option-sync-runtime.cjs:110 patchObjectFieldProperty, call site
+// :1574). NEITHER re-checks a field id: both address only `pack.extensionFields`, and both are
+// handed `pack: normalized` -- the object `installCustomerPack` obtains at :1510 from the MANDATORY
+// `normalizeCustomerPack(pack)`, whose per-field `assertExtensionFieldIdValid`
+// (stock-preparation-customer-pack.cjs:312) is therefore the only thing standing between a
+// caller-supplied pack and a property write on an arbitrary column.
+//
+// SCOPE: this pins the NORMALIZATION PREREQUISITE of those two write points, not pack membership --
+// the namespace predicate is shape-only (see the scope notes in
+// stock-preparation-target-provisioning.test.cjs / -table-actions.test.cjs).
+async function extPropertyWritesAreBoundedByPackNormalization() {
+  // (1) guard existence: a pack whose extension field id collides with a frozen template column is
+  // refused by the mandatory normalization, and NOTHING is written -- no column created, no
+  // property patched, not even the ownership pre-scan read.
+  // ADDED, not renamed: renaming a declared column would also break the pack's role views, and the
+  // refusal below must be attributable to the field-id guard alone (a mutation probe that removes
+  // that guard has to reach the write, not trip over a second, unrelated normalization error).
+  const tamperedPack = {
+    ...FACTORY_A_SAMPLE_PACK,
+    extensionFields: [
+      ...FACTORY_A_SAMPLE_PACK.extensionFields,
+      { id: 'ext_projectNo', label: '探针冲突列', type: 'string', ownership: 'plm_system' },
+    ],
+  }
+  const { provisioning, calls, fieldsByPhysicalId } = createMockProvisioning()
+  // Seed the hand-built sheet so BOTH property-write arms (stamp + option sync) would fire if the
+  // pack got through: without this the test could pass for the wrong reason.
+  seedHandBuiltPackColumns(fieldsByPhysicalId)
+  await assert.rejects(
+    () => installCustomerPack({ provisioning, projectId: PROJECT_ID, pack: tamperedPack, logger: SILENT_LOGGER }),
+    (error) => error.name === 'StockPreparationCustomerPackError'
+      && error.reason === 'EXTENSION_FIELD_ID_INVALID'
+      && error.details && error.details.namespaceReason === 'FIELD_ID_TEMPLATE_COLLISION',
+    'a pack field id colliding with a frozen template column must be refused -- reason must stay stable',
+  )
+  assert.equal(calls.patchObjectFieldProperty.length, 0, 'no property write may be attempted for an unnormalizable pack')
+  assert.equal(calls.ensureMissingObjectFields.length, 0, 'no column write either')
+  assert.equal(calls.readObjectFieldsContent.length, 0, 'the refusal precedes even the pre-scan read')
+
+  // (2) positive control: the real pack, on the same hand-built sheet, DOES take both property-write
+  // arms -- and every patched column is one the normalized pack declares (or, for a dictionary on a
+  // frozen template select, a template column). The guard blocks nothing it exists to let through.
+  const normalized = normalizeCustomerPack(FACTORY_A_SAMPLE_PACK)
+  const declaredExtIds = new Set(normalized.extensionFields.map((field) => field.id))
+  const templateIds = new Set(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id))
+  const ok = createMockProvisioning()
+  seedHandBuiltPackColumns(ok.fieldsByPhysicalId)
+  const summary = await installCustomerPack({
+    provisioning: ok.provisioning,
+    projectId: PROJECT_ID,
+    pack: FACTORY_A_SAMPLE_PACK,
+    logger: SILENT_LOGGER,
+  })
+  assert.equal(summary.stampedExistingFields.length, 10, 'the ownership stamp arm (⑧) actually fired')
+  assert.deepEqual(summary.syncedOptionFields, ['ext_standard'], 'the option-sync arm (⑨) actually fired')
+  assert.ok(ok.calls.patchObjectFieldProperty.length >= 11, 'both arms reached the host property write')
+  for (const patch of ok.calls.patchObjectFieldProperty) {
+    assert.ok(
+      declaredExtIds.has(patch.fieldId) || templateIds.has(patch.fieldId),
+      `property write addressed an undeclared column: ${patch.fieldId}`,
+    )
+    assert.equal(patch.objectId, OBJECT_ID, 'property writes never leave the pack target object')
+  }
+}
+
 async function summaryIsValuesFree() {
   const { provisioning, fieldsByPhysicalId } = createMockProvisioning()
   // Install onto a hand-built sheet so the stamp arms are represented in the
@@ -877,6 +946,7 @@ async function main() {
   await optionPatchFailurePropagatesAsAClosedCode()
   await viewFailurePropagatesAsAClosedCode()
   await packWithoutOptionSetsSkipsTheKernel()
+  await extPropertyWritesAreBoundedByPackNormalization()
   await summaryIsValuesFree()
 }
 
