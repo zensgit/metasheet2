@@ -559,6 +559,18 @@ NODE_OPTIONS=--max-old-space-size=8192 npx vitest run attendance-admin-regressio
 # `approval-template-authoring-detail` diverges at the 4th word).
 npx vitest run multitable-recovery-archive-client multitable-recovery-archive-modal --reporter=dot
 
+# r4 item 4/5 (2026-09-10): field-config panel empty-state copy + scroll container
+# (apps/web/tests/multitable-field-config-panel.spec.ts). Own standalone `npx vitest run`
+# line, placed here rather than appended into the giant final `exec` line ~400 lines below
+# — that line is a single ~10KB physical line, and appending a second token there right
+# next to it would sit adjacent to the parallel #5602 hint/palette/retype branch's own
+# token append to that exact same line (`multitable-formula-editor`), which a 3-way merge
+# treats as a same-hunk conflict regardless of where in the line either side inserts, or
+# how much comment padding separates two SEPARATE new lines both immediately preceding it.
+# This spot is untouched by that branch and still runs under `set -euo pipefail` (line
+# 436) — a failure here aborts the script exactly like a failure in the final exec would.
+npx vitest run multitable-field-config-panel --reporter=dot
+
 # BOM备料 install page (§14 of multitable-application-model-20260830.md), 2026-08-31: four tokens
 # added. Two are NEW specs — `StockPreparationInstallRun` (the OK/SKIP/FAIL decision and the step
 # order, extracted from scripts/ops/stock-prep-acceptance-bootstrap.mjs so a reorder there reddens
