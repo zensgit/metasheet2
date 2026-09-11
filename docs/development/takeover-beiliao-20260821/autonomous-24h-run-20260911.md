@@ -150,7 +150,7 @@ nginx 三天日志:502/reset 只在四个升级窗口成簇,窗口外一条都�
 
 - **r30(`f1a5073ee`,09-11 19:26,222 本地)**:备份 `pre-r30-20260911-192625.dump` 2.26 MB;445 文件哈希 OK;迁移 exit 0;health OK(attempt 3);upgrade exit 0;web smoke PASS;计划任务试算 `LastTaskResult=0`;标记 #5640 / #5641 / #5642 / #5643 / #5644 / #5646 全 True(#5645 False = 尚未合入,预期);当前 bundle `index-BcPttObh.js`;`MULTITABLE_STOCK_PREP_TABLE_LABEL_LOCALE=zh-CN` 仍在 pm2 环境;18:00 后后端错误 0 行。这次没举维护 flag(客户工作时段外,且 F4A 未合),脚本自身的 nginx 探测前两次 502(后端重启中)第三次 200。
 
-- **F4A(#5654,升级脚本自管维护 flag)**:两轮反驳(r2 唯一 blocker:举 flag 在 try 之外 → 校验和拒绝后 flag 永久留存 = 站点永久 503,由 fix r2 挪进 try 首句 + 两道守卫修实)→ 只读终审 **MERGE、0 blocker**(镜像三变异全红;PS 5.1 实跑全部新函数;`maintenance.html` 不进包无需登记)。三处一字级措辞照裁判改;第一版措辞把「location /api」字面量写进 server 级注释、契约测试按首个出现定位真实块而红——改词后 35/35 绿。裁判点名的后续小项:conf 两处 `-f` 同根断言、RESTORE 框教再举 flag、`nginx -t -p`、直连探测读 `HOST`。等 CI 绿合入,进 r31。
+- **F4A(#5654,升级脚本自管维护 flag)**:两轮反驳(r2 唯一 blocker:举 flag 在 try 之外 → 校验和拒绝后 flag 永久留存 = 站点永久 503,由 fix r2 挪进 try 首句 + 两道守卫修实)→ 只读终审 **MERGE、0 blocker**(镜像三变异全红;PS 5.1 实跑全部新函数;`maintenance.html` 不进包无需登记)。三处一字级措辞照裁判改;第一版措辞把「location /api」字面量写进 server 级注释、契约测试按首个出现定位真实块而红——改词后 35/35 绿。裁判点名的后续小项:conf 两处 `-f` 同根断言、RESTORE 框教再举 flag、`nginx -t -p`、直连探测读 `HOST`。**合入 `72caae8de`**,进 r31。
 
 (本节在窗口结束前继续补:F1c / F8A 的裁决与 r31。)
 
