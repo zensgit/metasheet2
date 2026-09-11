@@ -810,6 +810,15 @@ export interface AutomationStepResult {
 
 export type AutomationDispatchMode = 'live' | 'simulate'
 
+/**
+ * F9: a send_notification with no recipients FAILS EXPLICITLY — it is never defaulted to the rule
+ * creator (that would be a delivery decision made on the author's behalf, and it would fork from the
+ * button route's NO_RECIPIENTS hard line in routes/multitable-button.ts). The text is the operator's
+ * next action, not an engine term, because the manager renders step.error verbatim in the test-run
+ * banner. The NO_RECIPIENTS token keeps it greppable/machine-matchable across both surfaces.
+ */
+export const AUTOMATION_NO_RECIPIENTS_ERROR = '该规则未配置通知接收人，请在编辑器中补充（NO_RECIPIENTS）'
+
 function simulationDisposition(actionType: AutomationActionType): 'execute' | 'simulate' {
   switch (actionType) {
     case 'condition_branch':
@@ -958,7 +967,7 @@ function simulatedGenericClassBPlan(
         : []
       const message = typeof config.message === 'string' ? config.message : ''
       if (!userIds.length) {
-        return { actionType: action.type, status: 'failed', error: 'No user IDs specified', durationMs: 0 }
+        return { actionType: action.type, status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR, durationMs: 0 }
       }
       if (!message) {
         return { actionType: action.type, status: 'failed', error: 'Notification message is required', durationMs: 0 }
@@ -4306,7 +4315,7 @@ export class AutomationExecutor {
     const message = config.message as string | undefined
 
     if (!userIds || userIds.length === 0) {
-      return { actionType: 'send_notification', status: 'failed', error: 'No user IDs specified' }
+      return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR }
     }
     if (!message) {
       return { actionType: 'send_notification', status: 'failed', error: 'Notification message is required' }

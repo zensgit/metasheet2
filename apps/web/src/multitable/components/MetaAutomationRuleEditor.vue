@@ -2819,6 +2819,38 @@ function draftConfigFromAction(type: AutomationActionType, config: Record<string
   return { ...config }
 }
 
+/**
+ * F9: fold the v0 aliases onto the canonical action the editor can actually render. A stored `notify`
+ * matches NO option in the action select (UNSUPPORTED_SELECTABLE_ACTION_TYPES is empty) and the backend
+ * rejects it on save (validateActionObject accepts canonical types only), so a legacy rule used to be
+ * neither runnable nor editable. Mirrors the backend's normalizeLegacyActionPair — including its refusal
+ * to convert an `update_field` that has no fieldId (never guess the target field).
+ */
+function normalizeLegacyEditorAction(
+  type: AutomationActionType,
+  config: Record<string, unknown> | null | undefined,
+): { type: AutomationActionType; config: Record<string, unknown> } {
+  const raw = isPlainRecord(config) ? config : {}
+  if (type === 'notify') {
+    const userIds = Array.isArray(raw.userIds)
+      ? (raw.userIds as unknown[]).filter((entry): entry is string => typeof entry === 'string' && !!entry.trim())
+      : []
+    return { type: 'send_notification', config: { ...raw, userIds } }
+  }
+  if (type === 'update_field') {
+    const fieldId = typeof raw.fieldId === 'string' ? raw.fieldId.trim() : ''
+    if (!fieldId) return { type, config: raw }
+    const fields = isPlainRecord(raw.fields) ? raw.fields : {}
+    return { type: 'update_record', config: { ...raw, fields: { ...fields, [fieldId]: raw.value ?? null } } }
+  }
+  return { type, config: raw }
+}
+
+function draftActionFromStored(type: AutomationActionType, config: Record<string, unknown> | null | undefined): DraftAction {
+  const normalized = normalizeLegacyEditorAction(type, config)
+  return createDraftAction(normalized.type, draftConfigFromAction(normalized.type, normalized.config), true)
+}
+
 function draftFromRule(rule: AutomationRule): Draft {
   const triggerConfig = { ...rule.triggerConfig, ...(rule.trigger?.config ?? {}) }
   // T1-2: the read API returns the inbound-webhook secret as the '<redacted>' placeholder — never let
@@ -2830,8 +2862,8 @@ function draftFromRule(rule: AutomationRule): Draft {
     triggerConfig,
     conditions: conditionGroupFromRule(rule.conditions),
     actions: rule.actions && rule.actions.length
-      ? rule.actions.map((a) => createDraftAction(a.type, draftConfigFromAction(a.type, a.config), true))
-      : [createDraftAction(rule.actionType, draftConfigFromAction(rule.actionType, rule.actionConfig), true)],
+      ? rule.actions.map((a) => draftActionFromStored(a.type, a.config))
+      : [draftActionFromStored(rule.actionType, rule.actionConfig)],
     executionMode: rule.executionMode ?? null,
   }
 }
