@@ -36,6 +36,14 @@
 //      `extFieldMapping`, so its rows carry no `ext_` key; `pickFields` skips an undefined cell and
 //      a patch does not blank what it omits, so an `ext_` value an earlier small-path refresh wrote
 //      survives the large-BOM refresh untouched.
+//   7. THE OTHER HALF OF 6 — WHAT THE DEFAULT DEPLOYMENT PAYS. Case 6 is the bounded deployment's
+//      half (403 before any write). Most deployments configure no production policy, and there
+//      nothing refuses the flip: every row already carrying an `ext_` value is REALLY patched on
+//      every refresh, and the patch stamps `lastPlmRefreshDecision = update` and a
+//      `lastPlmConflictSummary` naming `ext_designer` — a reason that patch does not honour, since
+//      it carries no `ext_` column. Display columns with no consumer, so the cost is write volume
+//      and an overstated refresh record, not data loss; pinned so the owner reads it here and in
+//      the status ledger rather than off a production sheet.
 //
 // Hermetic and dependency-free: no DB, no network, no filesystem writes, no clock assertions. The
 // customer pack is the REAL committed rehearsal pack, so a change to its ownership split fails this
@@ -676,12 +684,93 @@ async function theWidenedBandIsCountedByTheProductionCleanRowBound() {
   assert.equal(control.records.payloads('patchRecord').length, control.patchesBeforeRun + 1)
 }
 
+// -- 7. THE OTHER HALF OF THE PRICE: what the DEFAULT deployment pays ---------
+//
+// Case 6 is the bounded deployment's half (403). Most deployments configure no production policy at
+// all, and on those the same SKIP-to-UPDATE flip is not refused — it is EXECUTED. Every row that
+// already carries an `ext_` value is really patched on every large-BOM refresh, and the patch it
+// receives stamps the two audit columns with a reason the patch itself does not honour:
+// `lastPlmRefreshDecision = update` and a `lastPlmConflictSummary` naming `ext_designer` as the
+// changed field, while `pickFields` left `ext_designer` out of that very patch. Both columns are
+// plm_system DISPLAY columns with no downstream consumer, so this is a cost in write volume and in
+// the credibility of the refresh record, not data loss — but it is a cost an owner has to be told
+// about, in the ledger and here, rather than discover on a sheet.
+//
+// The CONTROL is the same scenario with no ledger: the untouched row stays a SKIP, is never patched,
+// and keeps the refresh record it already had. So it is the band that turned a no-op into a write.
+
+/** Two rows, an earlier small-path `ext_` value on both, exactly one genuine upstream change. */
+async function defaultDeploymentRefreshAfterAnEarlierExtWrite({ ledger }) {
+  const data = sourceData({ parts: ['A', 'B'] })
+  const { routes, records } = mount({ ledger, sourceAdapter: createSourceAdapter(data) })
+
+  const first = await expandAndPlan(routes)
+  const firstApply = await approveAndRunApply(routes, first.jobId)
+  assert.equal(firstApply.ran.body.data.counts.created, 2, JSON.stringify(firstApply.ran.body))
+
+  for (const row of records.rows) row.data[`fld_${EXT_PLM}`] = 'LEGACY_EXT_VALUE'
+  // Upstream, ONE row genuinely changed (quantity -> totalQuantity, not an IDENTITY column).
+  data.DN_PDM_OrderDetailInfo[1].quantity = '5'
+
+  const patchesBeforeRun = records.payloads('patchRecord').length
+  const second = await expandAndPlan(routes)
+  const secondApply = await approveAndRunApply(routes, second.jobId)
+  return { ran: secondApply.ran, records, patchesBeforeRun }
+}
+
+function rowByComponentCode(records, componentCode) {
+  const row = records.rows.find((entry) => entry.data.fld_componentCode === componentCode)
+  assert.ok(row, `the fixture must have landed a row for ${componentCode}`)
+  return row
+}
+
+async function theDefaultDeploymentPaysInWritesAndInAnUnhonouredRefreshReason() {
+  const banded = await defaultDeploymentRefreshAfterAnEarlierExtWrite({ ledger: createLedger() })
+  assert.equal(banded.ran.statusCode, 200, JSON.stringify(banded.ran.body))
+  // No production policy => nothing refuses the widened count; BOTH rows are written.
+  assert.equal(banded.ran.body.data.counts.updated, 2, 'both rows are rewritten though only one really changed')
+  assert.equal(banded.ran.body.data.counts.skipped, 0, 'the flip leaves no row on the cheap path')
+  const patches = banded.records.payloads('patchRecord')
+  assert.equal(patches.length, banded.patchesBeforeRun + 2, 'two real patchRecord calls, not two counters')
+
+  const untouched = rowByComponentCode(banded.records, 'A-001')
+  const patch = patches.find((payload) => payload.recordId === untouched.id)
+  assert.ok(patch, 'the row nothing upstream changed was patched anyway')
+  // UN-CLONED payload: a JSON round trip would drop an `undefined`-valued key.
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(patch.changes, `fld_${EXT_PLM}`),
+    false,
+    'the patch carries no ext_ column — the flip buys writes, not values',
+  )
+  // THE RECORD IT LEAVES BEHIND DISAGREES WITH WHAT IT WROTE.
+  assert.equal(patch.changes.fld_lastPlmRefreshDecision, 'update')
+  assert.deepEqual(
+    JSON.parse(patch.changes.fld_lastPlmConflictSummary),
+    { type: 'plm_system_refresh', changedFields: [EXT_PLM] },
+    'the 冲突摘要 column names an ext_ column as the reason for a patch that does not carry it',
+  )
+  assert.equal(untouched.data[`fld_${EXT_PLM}`], 'LEGACY_EXT_VALUE', 'still never blanked')
+
+  // CONTROL — same scenario, no ledger: the untouched row is never patched at all.
+  const control = await defaultDeploymentRefreshAfterAnEarlierExtWrite({ ledger: undefined })
+  assert.equal(control.ran.body.data.counts.updated, 1, 'exactly the one row that really changed')
+  assert.equal(control.ran.body.data.counts.skipped, 1)
+  assert.equal(control.records.payloads('patchRecord').length, control.patchesBeforeRun + 1)
+  const controlUntouched = rowByComponentCode(control.records, 'A-001')
+  assert.equal(
+    control.records.payloads('patchRecord').some((payload) => payload.recordId === controlUntouched.id),
+    false,
+    'without the band the untouched row stays a SKIP and keeps the refresh record it already had',
+  )
+}
+
 async function main() {
   await run('degraded resolution plans exactly what it always planned', degradedResolutionPlansExactlyWhatItAlwaysPlanned)
   await run('an installed pack widens the large-BOM plan band', installedPackWidensTheLargeBomPlanBand)
   await run('the approved band rejects a pack human column by name', theApprovedBandRejectsAPackHumanColumnByName)
   await run('a pack-aware band never blanks an ext_ value', aPackAwareBandNeverBlanksAnExtValueTheSmallPathWrote)
   await run('the widened band is counted by the production clean-row bound', theWidenedBandIsCountedByTheProductionCleanRowBound)
+  await run('the default deployment pays in writes and in an unhonoured refresh reason', theDefaultDeploymentPaysInWritesAndInAnUnhonouredRefreshReason)
 
   if (failures.length > 0) {
     console.error(`stock-preparation-large-bom-installed-fields-wiring.test.cjs FAILED (${failures.length})`)
