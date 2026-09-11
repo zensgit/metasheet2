@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const scriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-upgrade-inplace.ps1')
 const workflowPath = path.join(repoRoot, '.github/workflows/plugin-tests.yml')
+const runbookPath = path.join(repoRoot, 'docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md')
 const scriptSource = fs.readFileSync(scriptPath, 'utf8')
 
 // Strips PowerShell `<# ... #>` block comments (used here for rich, deliberately
@@ -303,10 +304,94 @@ test('the nginx example ships the maintenance gate, and both the flag and the ma
     assert.ok(!pageRoot.includes(replaced), `the maintenance page root must not live under ${replaced}`)
   }
 
+  // ── The two sides must name the SAME file ────────────────────────────────────
+  // Adversarial verification (2026-09-11) refuted the assertions above with a
+  // mutation: renaming the flag in the conf to a path the script never writes
+  // kept every assertion green. "Both locations agree with each other" is not
+  // "nginx reads the file the upgrade script raises" — the gate can silently
+  // decouple from the script and the whole suite stays green while the real
+  // upgrade window goes unshielded. So pin the conf to the script's own default,
+  // parsed from its single source of truth (Resolve-MaintenanceFlagPath).
+  const scriptDefaultRelative = (scriptSource.match(/-Relative '([^']*maintenance\.flag)'/) || [])[1]
+  assert.ok(
+    scriptDefaultRelative,
+    'the upgrade script must derive its default flag path from one literal (Resolve-MaintenanceFlagPath -Relative ...) so this contract has something to pin against',
+  )
+  assert.equal(scriptDefaultRelative, 'output/maintenance.flag')
+  for (const hit of flagPaths) {
+    assert.ok(
+      hit.replace(/\\/g, '/').endsWith(`/${scriptDefaultRelative}`),
+      `the nginx example must test the very file the upgrade script raises (<RootDir>/${scriptDefaultRelative}), not merely a path both nginx locations happen to agree on: ${hit}`,
+    )
+  }
+
+  // A missing maintenance page must degrade to 503, never to 404. error_page is
+  // an internal redirect: with the file absent the static handler fails open to
+  // 404 and recursive_error_pages (off by default) will not map it back to 503 —
+  // and the page is NOT in the deployment package, so "absent" is the default
+  // state of any freshly-built host.
+  const pageBlock = conf.slice(conf.indexOf('location = /maintenance.html'))
+  assert.match(
+    pageBlock.slice(0, pageBlock.indexOf('}')),
+    /try_files \$uri =503;/,
+    'location = /maintenance.html must fall back to =503 when the page file is missing, otherwise the client gets a 404 during the upgrade window',
+  )
+
+  // Whoever ships the page inside the package may delete the hand-copy step; but
+  // as long as it is NOT in the package, the runbook must say so in the same
+  // breath as the `/` verification, or the operator verifies a page that was
+  // never deployed and concludes the gate is broken.
+  const buildScript = fs.readFileSync(path.join(repoRoot, 'scripts/ops/multitable-onprem-package-build.sh'), 'utf8')
+  const pageIsPackaged = /"ops\/maintenance\/maintenance\.html"/.test(buildScript)
+  if (!pageIsPackaged) {
+    assert.match(
+      fs.readFileSync(runbookPath, 'utf8'),
+      /\*\*手工\*\*把仓库的 `ops\/maintenance\/maintenance\.html` 复制到/,
+      'ops/maintenance/maintenance.html is not in the package INCLUDED_PATHS, so the runbook must tell the operator to copy it by hand',
+    )
+  }
+
   // Zero external references: during the window the backend is down and any
   // outbound asset request would hang or fail, defeating the page's purpose.
   assert.doesNotMatch(page, /<(?:script|link|img|iframe)\b/i, 'the maintenance page must not reference any external asset')
   assert.doesNotMatch(page, /https?:\/\//i, 'the maintenance page must not contain any absolute URL')
+})
+
+test('the runbook never tells an operator to expect 503 from / on 222, where only location /api has the gate', () => {
+  // Adversarial verification (2026-09-11) found the runbook's "verify the gate
+  // on 222" recipe asking for `curl.exe -i http://127.0.0.1/` -> 503, while the
+  // SAME section documents that the only hand-synced blocks on 222 are the
+  // /api/ gate, the server-level error_page and the named location. On 222 `/`
+  // returns the SPA with 200, so the recipe would make an operator conclude,
+  // mid upgrade window, that the gate is broken and start editing the live
+  // nginx.conf — the single most dangerous thing to do in that window.
+  const runbook = fs.readFileSync(runbookPath, 'utf8')
+  const sectionStart = runbook.indexOf('## 升级窗口的维护门')
+  assert.ok(sectionStart > -1, 'the runbook must keep the maintenance gate section')
+  const section = runbook.slice(sectionStart, runbook.indexOf('\n## ', sectionStart + 10))
+
+  const recipeStart = section.indexOf('**怎么验证这道门真的在')
+  assert.ok(recipeStart > -1, 'the 222 verification recipe must exist')
+  const newHostStart = section.indexOf('**新机器', recipeStart)
+  assert.ok(newHostStart > recipeStart, 'the "new host, after syncing the example" expectations must be a SEPARATE sub-section from the 222 recipe')
+  const liveRecipe = section.slice(recipeStart, newHostStart)
+
+  // Only the copy-pasteable blocks matter here: the prose around them is free to
+  // (and must) discuss `/` in order to warn that it answers 200 on 222.
+  const copyPasteable = (liveRecipe.match(/```[\s\S]*?```/g) || []).join('\n')
+  assert.ok(copyPasteable.includes('curl.exe'), 'the 222 recipe must still contain a runnable check')
+  for (const line of copyPasteable.split('\n')) {
+    if (!line.includes('curl.exe')) continue
+    assert.ok(
+      /127\.0\.0\.1\/api\//.test(line),
+      `the 222 recipe may only probe /api/* — 222 has no gate on /, so any other URL here teaches a false expectation: ${line.trim()}`,
+    )
+  }
+  assert.match(
+    liveRecipe,
+    /http:\/\/127\.0\.0\.1\/` 在 222 上期望的是 200,不是 503/,
+    'the recipe must state outright that / answers 200 on 222 while the flag is up, so nobody "fixes" the live nginx.conf during a window',
+  )
 })
 
 test('CI wiring: this test file is actually invoked by the required `test` job (P0 fix)', () => {
@@ -653,6 +738,64 @@ test('Resolve-BackendHealthUrl derives 127.0.0.1:<PORT>/health from the env file
   }
 })
 
+// spawnSync blocks this process's event loop, so a node http server in the same
+// process could never answer a harness started with runPwshHarness. Anything that
+// needs the two to talk must use this async variant.
+function runPwshHarnessAsync(harness) {
+  return new Promise((resolve) => {
+    const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-Command', harness])
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('close', (status) => resolve({ status, stdout, stderr }))
+  })
+}
+
+test('Test-MaintenanceGateWired separates a wired gate (503) from an inert flag (200) and from an unreachable nginx, and never throws', async () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-unit-'))
+  const server = http.createServer((req, res) => {
+    // /wired/* impersonates an nginx that really reads the flag; every other
+    // path impersonates one whose conf was never synced.
+    if (req.url.startsWith('/wired')) {
+      res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '90' })
+      res.end('{"error":{"code":"SERVICE_UNAVAILABLE"}}')
+      return
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.end('ok')
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  try {
+    const flagPath = path.join(scratch, 'maintenance.flag')
+    fs.writeFileSync(flagPath, 'raised')
+    const harness =
+      dotSourcePrelude(scratch) +
+      [
+        `Write-Host ('A=' + (Test-MaintenanceGateWired -ProbeUrl 'http://127.0.0.1:${port}/wired/api/health' -FlagPath '${flagPath}'))`,
+        `Write-Host ('B=' + (Test-MaintenanceGateWired -ProbeUrl 'http://127.0.0.1:${port}/api/health' -FlagPath '${flagPath}'))`,
+        // Port 1: connection refused — a transport failure, NOT evidence either way.
+        `Write-Host ('C=' + (Test-MaintenanceGateWired -ProbeUrl 'http://127.0.0.1:1/api/health' -FlagPath '${flagPath}'))`,
+        "Write-Host 'SURVIVED'",
+      ].join('\n')
+    const result = await runPwshHarnessAsync(harness)
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.match(result.stdout, /A=WIRED/, '503 while the flag is up is the only positive proof that this host reads the flag')
+    assert.match(result.stdout, /B=NOT_WIRED/, '200 while the flag is up proves the conf was never synced here')
+    assert.match(result.stdout, /C=UNKNOWN/, 'an unreachable endpoint must not be reported as either wired or unwired')
+    assert.match(result.stdout, /MAINTENANCE_GATE_NOT_WIRED/, 'the 200 case must be loud enough for an operator to notice in the log')
+    assert.match(
+      result.stdout,
+      /SURVIVED/,
+      'the probe is a diagnostic, never a guard: refusing to upgrade a host whose nginx.conf was never synced would be worse than upgrading it unshielded',
+    )
+  } finally {
+    server.close()
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
 test('Main structure: the gate is validated before anything runs, raised before pm2 stop, and dropped by an unconditional finally', () => {
   const mainStart = scriptSource.indexOf("if ($MyInvocation.InvocationName -ne '.') {")
   const main = scriptSource.slice(mainStart)
@@ -666,6 +809,22 @@ test('Main structure: the gate is validated before anything runs, raised before 
   assert.ok(assertIdx < backupRootIdx, 'the flag-path refusal must come before ANY directory is created')
   assert.ok(assertIdx < raiseIdx, 'the path must be validated before the flag is written')
   assert.ok(raiseIdx < stopIdx, 'the gate must be raised before the backend is stopped')
+
+  // The positive self-witness: probe the PUBLIC url once while the flag is up
+  // and the backend is still serving. Only that window can distinguish "nginx
+  // reads this flag" (503) from "this host never got the conf" (200) — after
+  // pm2 is stopped a 503 could just as well be a dead upstream. Without it the
+  // run prints "maintenance flag: ... (removed)" on hosts where the flag is
+  // inert, which reads like proof the window was shielded.
+  const gateProbeIdx = main.indexOf('Test-MaintenanceGateWired -ProbeUrl $HealthUrl -FlagPath $maintenanceFlagPath')
+  assert.ok(gateProbeIdx > -1, 'Main must probe the public URL to prove the gate is actually wired on this host')
+  assert.ok(raiseIdx < gateProbeIdx, 'the gate probe is meaningless before the flag exists')
+  assert.ok(
+    gateProbeIdx < stopIdx,
+    'the gate probe must run BEFORE pm2 is stopped: with the backend down, a 503 no longer distinguishes "the gate answered" from "the upstream is dead"',
+  )
+  const finallyIdxForProbe = main.lastIndexOf('} finally {')
+  assert.ok(gateProbeIdx < finallyIdxForProbe && gateProbeIdx > main.indexOf('try {'), 'the probe must sit inside the try whose finally drops the flag')
 
   const finallyIdx = main.lastIndexOf('} finally {')
   assert.ok(finallyIdx > stopIdx, 'the pm2 stop and everything after it must sit inside the try whose finally drops the gate')
@@ -874,7 +1033,15 @@ function startHealthServer({ flagPath = null } = {}) {
   return new Promise((resolve) => {
     const requests = []
     const server = http.createServer((req, res) => {
-      requests.push({ url: req.url, flagExists: flagPath ? fs.existsSync(flagPath) : null })
+      requests.push({
+        url: req.url,
+        flagExists: flagPath ? fs.existsSync(flagPath) : null,
+        // The one-shot "is the gate actually wired on this host" probe tags
+        // itself; nginx's `if (-f ...)` is header-blind, so the tag cannot
+        // change what the probe measures on a real box — it only lets these
+        // fixtures tell that request apart from the two health probes.
+        gateProbe: req.headers['x-upgrade-gate-probe'] === '1',
+      })
       res.writeHead(200, { 'content-type': 'text/plain' })
       res.end('ok')
     })
@@ -987,8 +1154,11 @@ test('end-to-end (acid fixture): a clean upgrade passes under the real walk — 
     // 2) Backend-direct probe first, while the gate is still up; nginx probe only
     //    after the gate is gone. Probing nginx first is exactly what made r29 exit
     //    -1 against a backend that was already healthy.
-    const probes = health.requests
-    assert.ok(probes.length >= 2, `expected both probes, got: ${JSON.stringify(probes)}`)
+    // The gate self-witness is a third request, tagged and deliberately made
+    // BEFORE pm2 is stopped; the r29 ordering below is about the two health
+    // probes, so filter it out here and assert it separately further down.
+    const probes = health.requests.filter((entry) => !entry.gateProbe)
+    assert.ok(probes.length >= 2, `expected both probes, got: ${JSON.stringify(health.requests)}`)
     assert.equal(probes[0].url, '/health', 'the FIRST probe must be the backend-direct one, bypassing nginx')
     assert.equal(
       probes[0].flagExists,
@@ -1002,6 +1172,25 @@ test('end-to-end (acid fixture): a clean upgrade passes under the real walk — 
       false,
       'the flag must already be deleted when the nginx probe runs — otherwise the script fails its own healthcheck (r29)',
     )
+
+    // 2b) The gate self-witness: exactly one tagged request, aimed at the PUBLIC
+    //     url, fired while the flag was still up and — this is what makes it a
+    //     witness rather than decoration — BEFORE the backend was stopped, i.e.
+    //     before any of the other probes. This fixture's fake nginx answers 200
+    //     to everything (it does not implement the gate), which is precisely the
+    //     shape of an un-synced host, so the run must SAY the gate is not wired
+    //     instead of letting "maintenance flag: ... (removed)" imply it was.
+    const gateProbes = health.requests.filter((entry) => entry.gateProbe)
+    assert.equal(gateProbes.length, 1, `expected exactly one tagged gate probe, got: ${JSON.stringify(health.requests)}`)
+    assert.equal(health.requests[0].gateProbe, true, 'the gate probe must be the FIRST request of the whole run, before the backend is stopped')
+    assert.equal(gateProbes[0].url, '/api/health', 'the gate probe must go through the public URL — the whole point is testing what nginx does')
+    assert.equal(gateProbes[0].flagExists, true, 'probing before the flag is raised would prove nothing')
+    assert.match(
+      result.stdout,
+      /MAINTENANCE_GATE_NOT_WIRED/,
+      'a 200 on the public URL while the flag is up means this host\'s nginx never got the gate: the run must say so out loud',
+    )
+    assert.match(result.stdout, /maintenance gate:\s+NOT_WIRED/, 'the final report must carry the gate verdict, not just the flag path')
 
     // 3) The flag is gone when the script exits, and the final report names it.
     assert.ok(!fs.existsSync(witness.flagPath), 'the maintenance flag must not outlive a successful upgrade')

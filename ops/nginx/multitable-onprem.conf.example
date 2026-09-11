@@ -47,11 +47,22 @@ server {
 
   # 静态维护页。root 指向**升级不会替换**的目录，所以升级中途它一定在。
   # 最终文件路径 = root + URI = /opt/metasheet/ops/maintenance/maintenance.html
-  # （仓库里的模板见 ops/maintenance/maintenance.html，需要手工放到这个目录）。
+  #
+  # **这个文件不在部署包里**：scripts/ops/multitable-onprem-package-build.sh 的
+  # INCLUDED_PATHS 只收 ops/nginx/multitable-onprem.conf.example，不收
+  # ops/maintenance/maintenance.html。解包不会带出这个页面，必须**手工**从仓库
+  # 复制过来，否则下面这条 try_files 就会兜底。
+  #
+  # try_files $uri =503 是必须的：error_page 是一次内部重定向，目标文件不存在时
+  # 走的是"打开文件失败"路径，而 recursive_error_pages 默认 off —— 那个错误不会
+  # 再被映射回 503，客户端拿到的是 **404**。对升级窗口来说 404 比 503 更糟：
+  # 浏览器和上层探测都会把它当成"页面没了"而不是"稍后重试"。写了 =503 之后，
+  # 维护页没放时退化成 nginx 自带的 503 页（难看但语义正确），放了就是中文页。
   location = /maintenance.html {
     internal;
     charset utf-8;
     root /opt/metasheet/ops/maintenance;
+    try_files $uri =503;
   }
 
   location /api {

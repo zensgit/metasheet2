@@ -31,7 +31,13 @@
        /api/* while it exists, see ops/nginx/multitable-onprem.conf.example),
        THEN stop the pm2 app (name parameterized, default metasheet-backend).
        The flag is refused outright if it would live inside any ReplaceDirs
-       entry, and a finally block deletes it on every exit path.
+       entry, and a finally block deletes it on every exit path. Between the
+       two, probe HealthUrl ONCE while the backend is still up: 503 proves
+       this host's nginx really reads the flag, 200 proves it does not (the
+       example conf was never hand-synced here) and prints
+       MAINTENANCE_GATE_NOT_WIRED. Diagnostic only, never blocks the upgrade —
+       without it "maintenance flag: ... (removed)" would read like proof the
+       window was shielded on a host where the flag is inert.
     3. Back up docker/, config/, packages/core-backend/dist, apps/web/dist,
        and plugins/ (excluding node_modules) to a timestamped folder. Prints
        the backup path.
@@ -937,6 +943,60 @@ function Remove-MaintenanceFlag {
   return $false
 }
 
+function Test-MaintenanceGateWired {
+  <#
+    POSITIVE self-witness for the gate. Writing the flag proves nothing on its
+    own: nginx only answers 503 if somebody hand-synced the `if (-f ...)` block
+    into THIS host's nginx.conf (ops/nginx/multitable-onprem.conf.example is a
+    template — editing the repo has zero effect on a running box). On an
+    un-synced host the flag is inert, yet the run would still print
+    "maintenance flag: ... (removed)" and leave the operator believing a gate
+    was up while testers ate ERR_CONNECTION_RESET for 60-90 seconds.
+
+    Called right after the flag is raised and BEFORE pm2 is stopped, so the
+    backend is still serving: a 200 through the public URL at that instant can
+    only mean "this nginx does not read that file". 503 = wired. Anything else
+    (connection refused, 502 from an already-dead backend, a timeout) is
+    inconclusive and reported as such.
+
+    NEVER fails the upgrade: refusing to upgrade a host whose nginx.conf was
+    never synced would be worse than upgrading it without the gate. This is a
+    diagnostic, not a guard.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$ProbeUrl,
+    [Parameter(Mandatory = $true)][string]$FlagPath
+  )
+
+  $status = $null
+  try {
+    # The header is for test fixtures/log readers only — nginx's `if (-f ...)`
+    # gate is header-blind, so tagging the probe cannot change what it measures.
+    $response = Invoke-WebRequest -Uri $ProbeUrl -UseBasicParsing -TimeoutSec 5 -Headers @{ 'X-Upgrade-Gate-Probe' = '1' }
+    $status = [int]$response.StatusCode
+  } catch {
+    # PS 5.1 throws WebException (.Response is HttpWebResponse), pwsh 7 throws
+    # HttpResponseException (.Response is HttpResponseMessage); .StatusCode
+    # casts to int on both. A transport failure has no .Response at all.
+    $failed = $_.Exception.Response
+    if ($failed -and $failed.StatusCode) {
+      try { $status = [int]$failed.StatusCode } catch { $status = $null }
+    }
+  }
+
+  if ($status -eq 503) {
+    Write-Info "MAINTENANCE_GATE_WIRED: $ProbeUrl answered 503 while $FlagPath exists — nginx really is reading this flag."
+    return 'WIRED'
+  }
+  if ($status -ge 200 -and $status -lt 400) {
+    Write-Err "MAINTENANCE_GATE_NOT_WIRED: $ProbeUrl answered $status while the maintenance flag $FlagPath exists. This nginx does not read that file, so the upgrade window will NOT be shielded: users get ERR_CONNECTION_RESET / Failed to fetch while the backend is down. Sync the 'if (-f <flag>) { return 503; }' blocks from ops/nginx/multitable-onprem.conf.example into this host's nginx.conf (nginx -t, then reload as SYSTEM) — see the runbook section 升级窗口的维护门. The upgrade continues regardless."
+    return 'NOT_WIRED'
+  }
+  $observed = if ($null -eq $status) { 'nothing (transport failure)' } else { "status $status" }
+  Write-Info "MAINTENANCE_GATE_UNKNOWN: $ProbeUrl answered $observed while the flag was up — cannot tell whether the gate is wired. Verify by hand (see the runbook)."
+  return 'UNKNOWN'
+}
+
 function Get-EnvFileValue {
   <#
     Reads ONE key out of a KEY=VALUE env file without importing anything into
@@ -1117,7 +1177,15 @@ if ($MyInvocation.InvocationName -ne '.') {
   New-MaintenanceFlag -FlagPath $maintenanceFlagPath | Out-Null
   Write-Host "MAINTENANCE_FLAG=$maintenanceFlagPath"
 
+  $maintenanceGate = 'UNKNOWN'
   try {
+    # Ask the PUBLIC url once, while the flag is up and the backend is still
+    # running: 503 proves nginx really reads this flag on THIS host, 200 proves
+    # it does not (the conf was never hand-synced). Diagnostic only — it never
+    # blocks the upgrade. Inside the try, so its failure still hits the finally
+    # that drops the flag.
+    $maintenanceGate = Test-MaintenanceGateWired -ProbeUrl $HealthUrl -FlagPath $maintenanceFlagPath
+
     Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName
 
     Write-Info '=== Step 3/8: back up current install ==='
@@ -1221,6 +1289,10 @@ if ($MyInvocation.InvocationName -ne '.') {
       Write-Host "backend health:   $(if ($backendHealth.Ok) { 'OK' } else { 'FAILED' }) (attempt=$($backendHealth.Attempt), url=$resolvedBackendHealthUrl)"
       Write-Host "health:           $(if ($health.Ok) { 'OK' } else { 'FAILED' }) (attempt=$($health.Attempt), status=$($health.StatusCode))"
       Write-Host "maintenance flag: $maintenanceFlagPath ($(if (Test-Path -LiteralPath $maintenanceFlagPath) { 'STILL PRESENT - removed on exit; if the site keeps answering 503, delete it by hand' } else { 'removed' }))"
+      # "(removed)" above says the file is gone; it does NOT say anyone was
+      # reading it. This line is the only place the operator learns whether the
+      # window was actually shielded on THIS host.
+      Write-Host "maintenance gate: $maintenanceGate (probed $HealthUrl while the flag was up; NOT_WIRED = this nginx.conf never got the gate, the window was unshielded)"
       Write-Host ''
       Write-Host 'Next (do not skip these):'
       Write-Host '  1) Preflight:'
