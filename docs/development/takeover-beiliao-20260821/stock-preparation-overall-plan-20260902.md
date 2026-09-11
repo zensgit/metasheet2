@@ -246,7 +246,12 @@ Wave 2/3: 按 owner 优先级
 ## 10. 未核实(写方案时没有读到的)
 
 - 多维表网格是否已有"临时 filterInfo 叠加"钩子 —— W1-2 M/L 的分水岭;先派 Explore 代理查 `MultitableEmbedHost` 及视图组件。
-- 插件服务账号的记录写入是否绕过 `field_permissions`(plan-1 提出,未验证)—— 若绕过,W1-5 只保护网格,不保护 API;对抗 lane 要覆盖。
+- ~~插件服务账号的记录写入是否绕过 `field_permissions`~~ —— **2026-09-11 已核实:绕过。** 插件写路径上没有列级权限门(SDK 通道自始至终不带 actor,`multitable/records.ts`、`multitable/plugin-scope.ts`、`stock-preparation-persist-unit-of-work.ts` 三个文件里没有任何一处读 `field_permissions`)。所以 W1-5 只保护网格,不保护插件/SDK 写入。
+  - 可执行断言(结论从此有测试托底,不再只是散文):
+    - 真库 golden:`packages/core-backend/tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts` → describe `备料 列权限墙不在插件写路径上 — 特征化 golden(网格红 / 插件绿)`,其中 `腿 1(既有腿,确认仍绿):网格 HTTP 写这一列 → 403,值没动` 与 `腿 2(特征化当前行为):插件 SDK patchRecord 写同一列 → 成功;这条绿代表列权限墙不在插件路径上` 在同一世界状态下对同一行同一列同一值给出不同答案。
+    - 结构守卫:`packages/core-backend/tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts` → `records.ts.patchRecord` / `records.ts.createRecord` 两个端口标记为 `UNGATED_CHARACTERIZED`,并由 `characterization: the plugin write chain carries NO per-subject field_permissions vocabulary` 一条断言兜底。
+  - **这两条绿是"特征化当前行为",不是认可插件可以绕过列权限。** 要不要给插件路径加门是另一次裁决(牵动备料写入链);一旦加了或撤了,上面两处会立刻变红,请到那两个文件改断言并同步本条。
+  - 同一轮枚举补全时发现的**第二条腿(未修,交 owner)**:创建路径的列权限是 **layer-2 only** —— `RecordService.createRecord` 只查 `isFieldAlwaysReadOnly` + capabilities,不查 `field_permissions`,所以 `POST /records` 与 `POST /sheets/:sheetId/import-xlsx` 可以在"对我只读"的列上带值建行;三个 create 站点里只有 copy-record 用 `loadFieldPermissionScopeMap` + `allowCreateOnly` 过滤了 payload。恢复路径(`restoreRecord`)同样只有行级门。
 - 真实客户包 JSON 与 222 环境实际配置(客户包/env/动作绑定/B2a 登记/`readDeployJsonObjectFile` 在 Windows+pm2 的路径行为)。
 - #5442 六条修复的最终代码形状(修复代理进行中);#5445 未跑完的对抗 lane;#5446 补跑的对抗结果。
 - #5447 rebase 到 #5446 之后的列序与 `fieldWritePolicies` 校验是否变化(读的是 1dbf3535c)。
@@ -272,6 +277,7 @@ Wave 2/3: 按 owner 优先级
 | field_permissions 原语 | 迁移 `zzzz20260411140100`;`permission-service.ts:857-912`;`permission-derivation.ts:77-119`;执行点 `index.ts:4058`、`univer-meta.ts:3853/4730/4741`、`yjs-field-read-access.ts:54` |
 | 导出路由 / 模块 | `http-routes.cjs:6933-6992`;`stock-preparation-prep-line-export.cjs:66 / :101-113 / :148 / :237-274 / :348` |
 | 人工列墙 | `apply-writer.cjs:239 / :373 / :396`;`conflict-planner.cjs:1057` |
+| 插件写路径没有列权限门(特征化 golden) | `packages/core-backend/tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts`(describe `备料 列权限墙不在插件写路径上 — 特征化 golden(网格红 / 插件绿)`);端口枚举 `tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts`;写入口 `index.ts` 的 `patchMultitableRecord(` / `createMultitableRecord(` |
 | 模板 | `stock-preparation-templates.cjs:104-113`(8 人工列)、`:631-745`(主表) |
 | 多维表路由 | `apps/web/src/router/types.ts:461`;`multitableRoute.ts`;`StockPreparationWorkspace.vue:404-412` |
 | 钉钉客户端 | `packages/core-backend/src/integrations/dingtalk/client.ts:837 / :945 / :999 / :1067` |

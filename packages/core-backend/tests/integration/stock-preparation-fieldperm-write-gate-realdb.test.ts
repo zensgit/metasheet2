@@ -17,6 +17,11 @@
  * A port that hid columns would break the flow and be worse than the status quo; this suite is the
  * assertion that would go red if it ever did.
  *
+ * THIRD BLOCK (2026-09-11) — 特征化 golden「网格红 / 插件绿」: the same column, denied to EVERY role in
+ * its fixture, is 403 through the grid and WRITABLE through the production plugin SDK. That green is a
+ * CHARACTERIZATION of today's behaviour, never an endorsement — see that block's own header for what to
+ * do when it changes colour.
+ *
  * Runs only with DATABASE_URL. The fail-not-skip sentinel is TOP-LEVEL (outside describeIfDatabase)
  * and scoped to the real-DB allowlist step via METASHEET_REAL_DB_TEST_STEP, which is the pattern
  * that actually holds: a sentinel INSIDE describeIfDatabase skips together with the goldens it is
@@ -28,6 +33,8 @@ import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+// 特征化 golden 的腿 2 用它取到生产插件 SDK(createCoreAPI),而不是手搓 query 直连 records.ts。
+import { MetaSheetServer } from '../../src/index'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 import {
   StockPreparationFieldPermissionsError,
@@ -902,5 +909,201 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
     // the whole point — `field_permissions.field_id` must reference a field OF THIS SHEET.
     expect(await service.findMissingFieldIds({ sheetId: RC_TWIN_SHEET, fieldIds: [RC_MOVING] }))
       .toEqual({ missing: [RC_MOVING] })
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// 特征化 GOLDEN — 列权限墙不在插件写路径上(网格红 / 插件绿)
+//
+// 这不是背书。这是把一个"已经成立但没有任何可执行断言"的事实钉成一条会变红的测试。
+//
+// 同一张表、同一行、同一列、同一个值,两条腿并排跑:
+//   腿 1(网格/HTTP):`POST /api/multitable/patch` —— 该列对本 fixture 里的每一个角色都是 read_only,
+//                     所以 403,`meta_records.data` 一个字节都没动。这条腿与本文件上方的既有 403 腿
+//                     同形,是"墙确实存在于网格路径上"的证据。
+//   腿 2(插件 SDK):生产环境的 `MetaSheetServer.createCoreAPI().multitable.records.patchRecord`
+//                     —— 同一列写入成功。插件通道自始至终不带 actor,所以根本没有任何一行
+//                     `field_permissions` 会被读到(见
+//                     tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts 的
+//                     `records.ts.patchRecord` 端口与它的 characterization 断言)。
+//
+// 如果腿 2 哪天变红:说明有人给插件写路径加了列级权限门。那是行为变更,不是测试坏了 —— 请回到这里
+// 改断言,并同步 docs/development/takeover-beiliao-20260821/stock-preparation-overall-plan-20260902.md
+// §10 的那一条结论,以及上面那支 unit 守卫里 `UNGATED_CHARACTERIZED` 的措辞。
+//
+// 反之如果腿 1 变红(插件绿而网格也绿),说明列权限墙整个塌了 —— 那是 P0。
+//
+// 自带 base / sheet / fields / roles / user / express app,不碰上面两个 block 的夹具。
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+const PG_BASE = `base_bliao_pg_${TS}`
+const PG_SHEET = `sheet_bliao_pg_${TS}`
+const PG_REC = `rec_bliao_pg_${TS}`
+
+/** 被"对所有角色"置为 read_only 的那一列 —— 两条腿写的都是它。 */
+const PG_LOCKED = `fld_bliao_pg_locked_${TS}`
+/** 没有任何策略的对照列 —— 用来证明 403 是因为这一列,而不是夹具整体坏掉。 */
+const PG_FREE = `fld_bliao_pg_free_${TS}`
+const PG_FIELDS = [PG_LOCKED, PG_FREE]
+
+const PG_ROLE_A = `role_bliao_pg_a_${TS}`
+const PG_ROLE_B = `role_bliao_pg_b_${TS}`
+/** 本 fixture 宇宙里存在的全部角色 —— "对所有角色 read_only" 就是对这个集合而言。 */
+const PG_ROLES = [PG_ROLE_A, PG_ROLE_B]
+const PG_USER = `u_bliao_pg_${TS}`
+
+/** 两条腿写同一个值 —— 触发量与边界量必须同量,否则"网格红/插件绿"的对照就不成立。 */
+const PG_PROBE_VALUE = 'wall-probe-same-column-same-value'
+
+/** 生产插件 SDK 的真实入口:`index.ts` 注入 IoC 容器的那个对象,不是手搓的 query 直连 records.ts。
+ *  与 multitable-d1c-plugin-revision-realdb.test.ts 的 realSdk() 同技法 —— 只有走这里,
+ *  "插件真的能写"才是关于生产接线的陈述。 */
+type PluginRecordsSdk = {
+  patchRecord: (input: {
+    sheetId: string
+    recordId: string
+    changes: Record<string, unknown>
+    expectedVersion?: number
+  }) => Promise<{ id: string; sheetId: string; version: number; data: Record<string, unknown> }>
+}
+function realPluginRecordsSdk(): PluginRecordsSdk {
+  const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+  const coreApi = (server as unknown as {
+    createCoreAPI: () => { multitable: { records: PluginRecordsSdk } }
+  }).createCoreAPI()
+  return coreApi.multitable.records
+}
+
+describeIfDatabase('备料 列权限墙不在插件写路径上 — 特征化 golden(网格红 / 插件绿)', () => {
+  let pgApp: Express
+  let sdk: PluginRecordsSdk
+
+  const pgGridPatch = (fieldId: string, value: unknown) =>
+    request(pgApp)
+      .post('/api/multitable/patch')
+      .send({ sheetId: PG_SHEET, changes: [{ recordId: PG_REC, fieldId, value }] })
+
+  const pgCell = async (fieldId: string): Promise<unknown> => {
+    const r = await q('SELECT data FROM meta_records WHERE id = $1', [PG_REC])
+    return (r.rows[0] as { data?: Record<string, unknown> } | undefined)?.data?.[fieldId]
+  }
+
+  beforeAll(async () => {
+    pgApp = express()
+    pgApp.use(express.json())
+    pgApp.use((req, _res, next) => {
+      ;(req as { user?: unknown }).user = {
+        id: PG_USER,
+        roles: PG_ROLES, // 这个人持有本 fixture 里的每一个角色
+        perms: ['multitable:read', 'multitable:write'],
+      }
+      next()
+    })
+    pgApp.use('/api/multitable', univerMetaRouter())
+    sdk = realPluginRecordsSdk()
+
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [PG_BASE, '备料 Plugin-Path Base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [PG_SHEET, PG_BASE, '备料 Plugin-Path Sheet'])
+    for (const [index, fieldId] of PG_FIELDS.entries()) {
+      await q(
+        'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+        [fieldId, PG_SHEET, fieldId, 'string', '{}', index + 1],
+      )
+    }
+    for (const roleId of PG_ROLES) {
+      await q('INSERT INTO roles (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [roleId, roleId])
+    }
+    await q(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1,$2,$1,'x','member',$3::jsonb, TRUE, FALSE)
+       ON CONFLICT (id) DO UPDATE SET permissions = EXCLUDED.permissions`,
+      [PG_USER, `${PG_USER}@t.local`, JSON.stringify(['multitable:read', 'multitable:write'])],
+    )
+    for (const roleId of PG_ROLES) {
+      await q('INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [PG_USER, roleId])
+    }
+
+    // 真端口、真表:把 PG_LOCKED 对本 fixture 的每一个角色置 read_only。
+    const applied = await new StockPreparationFieldPermissionsService().applyRoleWriteScopes({
+      sheetId: PG_SHEET,
+      entries: PG_ROLES.map((roleId) => ({ fieldId: PG_LOCKED, roleId })),
+    })
+    expect(applied.applied).toBe(PG_ROLES.length)
+  })
+
+  afterAll(async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [PG_SHEET]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [PG_BASE]).catch(() => {})
+    await q('DELETE FROM user_roles WHERE user_id = $1', [PG_USER]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [PG_USER]).catch(() => {})
+    await q('DELETE FROM roles WHERE id = ANY($1::text[])', [PG_ROLES]).catch(() => {})
+  })
+
+  beforeEach(async () => {
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [PG_SHEET])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+      PG_REC,
+      PG_SHEET,
+      JSON.stringify(Object.fromEntries(PG_FIELDS.map((fieldId) => [fieldId, seedValue(fieldId)]))),
+    ])
+  })
+
+  // ── 反空转:先证明"墙真的立着",否则下面的"插件绿"什么也不说明 ────────────────────────────────
+  test('前置:该列对本 fixture 的每一个角色都有 read_only 行(否则整条对照是空转)', async () => {
+    const rows = (await q(
+      `SELECT subject_id, read_only, visible FROM field_permissions
+        WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' ORDER BY subject_id`,
+      [PG_SHEET, PG_LOCKED],
+    )).rows as Array<{ subject_id: string; read_only: boolean; visible: boolean }>
+    expect(rows.map((r) => r.subject_id)).toEqual([...PG_ROLES].sort())
+    for (const row of rows) {
+      expect(row.read_only).toBe(true)
+      expect(row.visible).toBe(true) // 只收窄写,不动读
+    }
+  })
+
+  // ── 腿 1:网格路径 —— 墙在这里 ─────────────────────────────────────────────────────────────────
+  test('腿 1(既有腿,确认仍绿):网格 HTTP 写这一列 → 403,值没动', async () => {
+    const res = await pgGridPatch(PG_LOCKED, PG_PROBE_VALUE)
+    expect(res.status).toBe(403)
+    expect(await pgCell(PG_LOCKED)).toBe(seedValue(PG_LOCKED))
+  })
+
+  test('腿 1 的对照:同一个人、同一行、没有策略的那一列 → 200,值落地(403 是列的事,不是夹具坏了)', async () => {
+    const res = await pgGridPatch(PG_FREE, PG_PROBE_VALUE)
+    expect(res.status).toBe(200)
+    expect(await pgCell(PG_FREE)).toBe(PG_PROBE_VALUE)
+  })
+
+  // ── 腿 2:插件 SDK —— 墙不在这里(特征化,不是背书) ──────────────────────────────────────────
+  test('腿 2(特征化当前行为):插件 SDK patchRecord 写同一列 → 成功;这条绿代表列权限墙不在插件路径上', async () => {
+    // 同一列、同一值、同一行 —— 与腿 1 逐项同量。
+    const patched = await sdk.patchRecord({
+      sheetId: PG_SHEET,
+      recordId: PG_REC,
+      changes: { [PG_LOCKED]: PG_PROBE_VALUE },
+    })
+
+    expect(patched.data[PG_LOCKED]).toBe(PG_PROBE_VALUE)
+    expect(patched.version).toBe(2)
+    // 真的落到了库里 —— 不是 SDK 返回值自说自话。
+    expect(await pgCell(PG_LOCKED)).toBe(PG_PROBE_VALUE)
+
+    // 而且策略行此刻仍然在原地:插件不是"因为门被拆了"才写进去的,是因为这条路上压根没有门。
+    const still = (await q(
+      `SELECT count(*)::int AS c FROM field_permissions
+        WHERE sheet_id = $1 AND field_id = $2 AND subject_type = 'role' AND read_only = TRUE`,
+      [PG_SHEET, PG_LOCKED],
+    )).rows[0] as { c: number }
+    expect(still.c).toBe(PG_ROLES.length)
+
+    // 同一条策略、同一列,网格此刻依然 403 —— 两条腿在同一个世界状态下给出不同答案,这正是本 golden
+    // 要钉住的那句话:"墙在网格上,不在插件上"。
+    const gridAgain = await pgGridPatch(PG_LOCKED, 'grid-still-refused')
+    expect(gridAgain.status).toBe(403)
+    expect(await pgCell(PG_LOCKED)).toBe(PG_PROBE_VALUE) // 插件写的值仍在,网格没能覆盖它
   })
 })
