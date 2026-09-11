@@ -568,12 +568,31 @@ function looksNumeric(value) {
   return Number.isFinite(parsed) && parsed >= 0
 }
 
+// tedious (the MSSQL driver) reports every server-side failure with `.code === 'EREQUEST'` — that
+// tells us nothing. The real SQL Server error number lives in `.number` and is locale-invariant: a
+// Chinese-locale SQL Server raises 对象名 'x' 无效 for the exact same 208 an English server spells
+// "Invalid object name". The English-prose regexes below never match the Chinese text, so a driver
+// number takes priority and prose is kept only as the fallback for errors that carry none (e.g. a
+// PG driver, or a raw socket failure with no server-assigned number at all).
+const MSSQL_ERROR_NUMBER_CODES = Object.freeze({
+  208: 'OBJECT_MISSING', // Invalid object name
+  2812: 'OBJECT_MISSING', // Could not find stored procedure
+  229: 'PERMISSION_DENIED', // The SELECT permission was denied
+  18456: 'AUTH_REFUSED', // Login failed for user
+  4060: 'AUTH_REFUSED', // Cannot open database requested by the login
+})
+
 /**
  * Collapse ANY read failure into one closed code. The error's message is read here and NOWHERE ELSE:
  * it is matched against patterns and then dropped on the floor. Nothing downstream is ever handed the
  * text, so no later filter has to be trusted to remove a host or a login from it.
  */
 function classifyReadError(error) {
+  const number = Number.isInteger(error && error.number) ? error.number : null
+  if (number !== null && Object.prototype.hasOwnProperty.call(MSSQL_ERROR_NUMBER_CODES, number)) {
+    return READ_ERROR_CODES[MSSQL_ERROR_NUMBER_CODES[number]]
+  }
+
   const code = optionalString(error && error.code) || ''
   const text = `${optionalString(error && error.message) || ''} ${code}`.toLowerCase()
 

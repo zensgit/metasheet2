@@ -36,6 +36,8 @@
 //         leaf, a closed-vocabulary violation and a planted secret
 //   S-13  driver error text NEVER reaches the report — a message carrying a password classifies to a
 //         code and the password is gone
+//   S-20  a SQL Server error NUMBER (208/2812/229/18456/4060) is judged BEFORE the English prose regexes,
+//         so a Chinese-locale server's 对象名…无效 / 拒绝了…权限 / 登录失败 still classifies correctly
 //   R-01  the route is registered at the module's own path and gated on the integration READ tier;
 //         a stock-prep-namespace principal is refused (source reads are not a queue-operator act)
 //   R-02  the source defaults to the CONFIGURED table action, and an explicit id overrides it
@@ -70,6 +72,7 @@ const {
   runStockPreparationSourcePreflight,
   assertSourcePreflightValuesFree,
   describeValuesFreeRefusal,
+  __internals: { classifyReadError },
 } = require(path.join(LIB, 'stock-preparation-source-preflight.cjs'))
 const {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
@@ -1167,6 +1170,81 @@ async function vocabulariesAreClosedAndOrdered() {
 }
 
 // ---------------------------------------------------------------------------
+// S-20 — a Chinese-locale SQL Server names no host and no login, but its driver still hands back a
+// server-assigned error NUMBER (tedious's `.code` is always the useless 'EREQUEST' for these). The
+// English prose regexes above never match 对象名…无效 / 拒绝了…权限 / 登录失败, so the number must be
+// judged FIRST, with prose kept only for drivers (or fixtures) that carry no number at all.
+// ---------------------------------------------------------------------------
+
+async function mssqlErrorNumberIsJudgedBeforeProse() {
+  const cases = [
+    {
+      name: '208 invalid object name (Chinese prose)',
+      error: { code: 'EREQUEST', number: 208, message: "对象名 'dbo.零件清单' 无效。" },
+      expected: 'object_missing',
+    },
+    {
+      name: '2812 stored procedure not found (Chinese prose)',
+      error: { code: 'EREQUEST', number: 2812, message: "找不到存储过程 'dbo.usp_x'。" },
+      expected: 'object_missing',
+    },
+    {
+      name: '229 permission denied (Chinese prose)',
+      error: { code: 'EREQUEST', number: 229, message: "拒绝了对对象 'dbo.物料' 的 SELECT 权限。" },
+      expected: 'permission_denied',
+    },
+    {
+      name: '18456 login failed (Chinese prose)',
+      error: { code: 'ELOGIN', number: 18456, message: "用户 'sa' 登录失败。" },
+      expected: 'auth_refused',
+    },
+    {
+      name: '4060 cannot open database (Chinese prose)',
+      error: { number: 4060, message: '无法打开登录所请求的数据库 "存货备料"。登录失败。' },
+      expected: 'auth_refused',
+    },
+  ]
+  for (const testCase of cases) {
+    assert.equal(
+      classifyReadError(testCase.error),
+      testCase.expected,
+      `${testCase.name} -> expected ${testCase.expected}`,
+    )
+  }
+}
+
+async function proseStillClassifiesWhenThereIsNoErrorNumber() {
+  // No `.number` at all (a PG driver, or any source that never assigns one) — the pre-existing
+  // English-prose path must still carry these, unchanged.
+  assert.equal(
+    classifyReadError({ code: 'EREQUEST', message: "Invalid object name 'dbo.Part'." }),
+    'object_missing',
+  )
+  assert.equal(
+    classifyReadError({ code: '42501', message: 'permission denied for table part' }),
+    'permission_denied',
+  )
+  assert.equal(
+    classifyReadError({ code: 'ELOGIN', message: "Login failed for user 'sa'." }),
+    'auth_refused',
+  )
+}
+
+async function anUnrecognizedNumberFallsBackToProseThenUnknown() {
+  // A number the module does not recognize must not shortcut past prose, and an error with neither
+  // a known number nor matching prose stays UNKNOWN — conservative, not guessed.
+  assert.equal(
+    classifyReadError({ code: 'EREQUEST', number: 999999, message: "Invalid object name 'dbo.Part'." }),
+    'object_missing',
+    'an unrecognized number must not block the prose fallback from still catching a plain English message',
+  )
+  assert.equal(
+    classifyReadError({ code: 'EREQUEST', number: 999999, message: '某种未知的驱动错误' }),
+    'unknown_error',
+  )
+}
+
+// ---------------------------------------------------------------------------
 // R-01 .. R-05 — the route
 // ---------------------------------------------------------------------------
 
@@ -2115,6 +2193,11 @@ async function main() {
   await driverTextNeverReachesTheReport()
   await vocabulariesAreClosedAndOrdered()
   console.log('  ✓ S-13 driver text never travels; the vocabularies are closed and ordered')
+
+  await mssqlErrorNumberIsJudgedBeforeProse()
+  await proseStillClassifiesWhenThereIsNoErrorNumber()
+  await anUnrecognizedNumberFallsBackToProseThenUnknown()
+  console.log('  ✓ S-20 a Chinese-locale SQL Server`s error NUMBER is judged before its (unmatchable) prose')
 
   await routeIsRegisteredAtTheModulesOwnPath()
   await routeIsGatedOnTheIntegrationReadTier()
