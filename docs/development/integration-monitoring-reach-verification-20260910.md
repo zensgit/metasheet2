@@ -20,6 +20,7 @@ X2（死信行与真实写入按钮必须写明 pipeline），以及审阅人后
 | `apps/web/tests/integrationMonitoringQuery.spec.ts` | 新增，**20 测试**（17 + P2 闸门 3） |
 | `apps/web/tests/IntegrationMonitoringSection.spec.ts` | 既有 2 测试保留 + 14 个 G34/X1/X2 测试 = 16（P2：3 条轮询用例改断言到新 prop） |
 | `apps/web/tests/integrationMonitoringReach.spec.ts` | 新增，**12 测试**（9 + P2 反例 3；挂真视图真 loader） |
+| `scripts/ops/integration-guard-guarded-paths.mjs`、`scripts/ops/integration-guard-run-web-specs.sh`、`.github/workflows/integration-guard.yml` | **独立 commit**：把 `monitoringQuery.ts` 与两个新 spec 接进 integration-guard（此前在 CI 里一个都没跑，见 §3.2.4） |
 
 ## 2. 命令与退出码
 
@@ -192,6 +193,39 @@ restored = True
 M2 连 M1 之外的另一个方向也钉住了：光有序号比较（last-write-wins）**不够**——轮询即使不作废手动读，也会用
 旧游标把屏幕改回去，所以必须两条一起在。M4/M5 证明「纯模块正确」不等于「接线正确」：闸门放在加载器里，
 但只要视图或组件把后台读伪装成手动读，反例立刻复活。
+
+### 3.2.4 接线补丁：两个新 spec 此前在 CI 里一个都没跑
+
+做 P2 时顺手核了一遍「这些用例在 CI 里真的会跑吗」，答案是**不会**：
+
+- `scripts/ops/integration-guard-run-web-specs.sh:57` 的 vitest 过滤 token 里只有
+  `IntegrationMonitoringSection`，按**大小写敏感的路径子串**匹配 —— `integrationMonitoringQuery.spec.ts`
+  和 `integrationMonitoringReach.spec.ts`（G34 本 PR 新增、承载 X1 与 P2 反例的两个文件）一个都不命中。
+- `apps/web/scripts/run-required-web-tests.sh`（always-on `web-tests` 必需检查）里 grep `[Mm]onitoring`
+  零命中。
+- `scripts/ops/integration-guard-guarded-paths.mjs` 里也没有 `monitoringQuery.ts` 与这两个 spec：
+  以后只改纯模块的 PR 连 integration-guard 都不会触发。
+
+即：变异探针在本机全红，到 CI 就没人跑。这属于「守卫没接线」，所以补了三处（**独立 commit，可单独回滚**）：
+roster 加 3 条、`integration-guard.yml` 的 `on.push.paths` 同步加同样 3 条（该仓库的
+`integration-guard-required-wiring-contract.test.mjs` Pin 10 要求两者**集合完全相等**）、web 守卫 token
+加 `integrationMonitoringQuery integrationMonitoringReach`（各自只命中一个文件，已逐个 `find` 核过，
+无子串碰撞）。
+
+合约测试实测（本机需要两个绕行：Windows 没有 `python3` → 拷一个 `python3.exe` 进 PATH；合约的 PyYAML 桥
+拒绝 CR，而本工作区是 CRLF（`core.autocrlf=true`，**索引里本来就是 LF**，CI 检出的也是 LF）→ 跑之前把该
+yml 临时写成 LF，跑完按字节还原，`restored: True`）：
+
+| 状态 | tests | pass | fail |
+| --- | --- | --- | --- |
+| 本次接线（3 处都加） | 62 | 56 | 6 |
+| 基线：把 3 处全部还原成 HEAD | 62 | 56 | **同样的 6 条** |
+| M6：roster/workflow 加了但 web 守卫 token 不加 | 62 | 55 | 7（多的是 `web-specs.sh: every guarded apps/web spec in the roster is actually RUN by the web guard`） |
+| M7：roster/token 加了但 `on.push.paths` 不加 | 62 | 55 | 7（多的是 `on.push.paths is exactly the guarded-path roster…`） |
+
+那 6 条恒红的是 `classify() CLI` ×3 与 `resolve-diff CLI` ×3，**改动前后逐条相同**，都是本机 Windows 下
+spawn CLI 拿到空 stdout 的环境噪音（基线行已证），不是本次引入。M6/M7 证明这三处必须同时在，
+少任何一处仓库自己的合约就红。
 
 ## 4. 手动核对的行为
 
