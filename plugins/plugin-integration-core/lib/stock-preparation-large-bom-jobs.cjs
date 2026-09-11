@@ -945,6 +945,16 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
     expansion = await expandPlmProjectBom({
       sourceAdapter,
       projectNo: job.parameters && job.parameters.projectNo,
+      // F1c 根选择规则,taken from the job's STORED ACTION SNAPSHOT (`cloneJson(action)` at enqueue)
+      // — the same seam `extensionFieldIds` / `carryPolicy` already use, and the reason it has to be
+      // read here: the caller-supplied `expansionOptions` are assembled by the route module from a
+      // fixed key set, so a deployment that configured `rootSelection` would otherwise get 老系统
+      // roots interactively and pre-F1c roots in the background lane — the SAME project expanding to
+      // two different root sets depending only on how big its BOM is.
+      //
+      // Listed BEFORE the spread so an explicit caller value still wins (the route stays the
+      // authority over what it passes); absent on both => `undefined` => the expander's default.
+      rootSelection: job.actionSnapshot && job.actionSnapshot.rootSelection,
       ...expansionOptions,
     })
   } catch (error) {

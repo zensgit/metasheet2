@@ -1331,6 +1331,8 @@ async function main() {
   testHardApplyBlockingRowErrorsSurviveTheCap()
   testRowErrorLimitIsAConditionalActionConfigKey()
   testExtensionFieldIdsEnforceNamespaceShapeAndPackMembershipIsOneLayerOut()
+  await testRootSelectionIsReachableFromTheActionConfig()
+  await testCollapsedSiblingCountReachesDryRunEvidence()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
 }
@@ -1693,6 +1695,140 @@ async function testApplySandboxGateFailsClosed() {
   const envPolicy = resolveStockPrepApplySandboxPolicy({}, { STOCK_PREP_SANDBOX_MODE: 'true', STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS: 'sandbox_stock_prep' })
   assert.doesNotThrow(() => assertStockPrepApplySandboxAllowed(sandboxTarget, envPolicy), 'env policy admits allowlisted sandbox target')
   assert.throws(() => assertStockPrepApplySandboxAllowed(prodTarget, envPolicy), isGate, 'env policy still rejects prod canonical')
+}
+
+// ---------------------------------------------------------------------------------------------
+// F1c — 根选择规则是 DEPLOY CONFIG,而且必须**真的接到线上**。
+//
+// 这条守的是「开关没接线」那一类漏法:`expandPlmProjectBom` 认 `rootSelection`,但交互式 dry-run
+// 的入参是一张显式白名单(computeDryRun 里逐键列举),白名单里没有这个键,配置写了也到不了展开器。
+// 所以这里不直接调纯函数,而是从 **动作配置** 出发走完整条 dry-run —— 证明的是「部署改得动」,
+// 不是「纯函数算得对」(后者由 bom-expansion 那支测试钉住)。
+//
+// 顺带钉住同一条链上的证据:dry-run 证据里要能看见 `rootsFilteredOut`,否则操作员在 dry-run 里
+// 只看到一个变小的行数,分不清「PLM 少了件」和「我们按老系统剔了根」。
+// ---------------------------------------------------------------------------------------------
+function rootSelectionPlmData() {
+  return basePlmData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-MAIN', quantity: '1' },
+      { order_id: 'ORDER-1', part_id: 'PART-OTHER', quantity: '1' },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-MAIN', IdentityNo: 'J100-00', IdentityName: '总图', Material: 'Steel', SysVer: 'V2' },
+      { OBJ_ID: 'PART-OTHER', IdentityNo: 'B-001', IdentityName: '别的件', Material: 'Steel', SysVer: 'V1' },
+    ],
+  })
+}
+
+async function dryRunWithRootSelection(rootSelection) {
+  const source = createSourceAdapter(rootSelectionPlmData())
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+  const action = normalizeStockPreparationActionConfig(baseAction(
+    rootSelection === undefined ? {} : { rootSelection },
+  ))
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: '2026-09-11T09:00:00.000Z',
+  })
+  return { action, dryRun }
+}
+
+async function testRootSelectionIsReachableFromTheActionConfig() {
+  // 默认(配置里一个字都没写)= 老系统规则,owner 裁决的那一条:有总图就只要总图。
+  const byDefault = await dryRunWithRootSelection(undefined)
+  assert.equal('rootSelection' in byDefault.action, false, '没配过的动作不长出这个键(快照/哈希不动)')
+  assert.equal(byDefault.dryRun.counts.add, 1, '默认按老系统:只有 J…-00 总图当根,另一条订单行被剔除')
+  assert.equal(
+    byDefault.dryRun.evidence.expansion.rootsFilteredOut,
+    1,
+    '被剔掉的根数进 dry-run 证据 —— 行数变少有据可查,不是静默丢行',
+  )
+
+  // 关掉 = 回到 F1c 之前的行为。没有这条接线,任何部署都回不去。
+  const disabled = await dryRunWithRootSelection({ enabled: false })
+  assert.equal(disabled.action.rootSelection.enabled, false, '配置被归一化后留在动作上')
+  assert.equal(disabled.dryRun.counts.add, 2, '关掉规则 => 订单行全部当根,与改前同量')
+  assert.equal(
+    'rootsFilteredOut' in disabled.dryRun.evidence.expansion,
+    false,
+    '一个根都没剔就不长这个键 —— 证据对象与改前逐字节相同',
+  )
+
+  // 换一家工厂的编码约定:规则是配置,不是写死的字典。
+  const retuned = await dryRunWithRootSelection({ mainDrawingPrefix: 'B', mainDrawingSuffix: '-001' })
+  assert.equal(retuned.dryRun.counts.add, 1, '换了前后缀,当根的就换成了另一条订单行')
+  assert.equal(
+    retuned.dryRun.evidence.expansion.rootsFilteredOut,
+    1,
+    '换规则之后被剔除的根同样计数',
+  )
+
+  // 配置本身 fail-closed,而且是在**配置时**就拒(存进快照的配置不能是对实际行为的谎言)。
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ rootSelection: { mainDrawingSuffix: '' } })),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && error.details.field === 'rootSelection.mainDrawingSuffix',
+    '空后缀会让每个图号都成为总图 => 422,而不是悄悄当成「没配」',
+  )
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ rootSelection: 'legacy' })),
+    (error) => error instanceof StockPreparationTableActionError && error.code === 'TABLE_ACTION_CONFIG_INVALID',
+    '不是对象的 rootSelection 直接拒',
+  )
+}
+
+// F1c — 同父去重的条数也必须走到 dry-run 证据里,理由同上:`summarizeBomExpansionForEvidence`
+// 是一张白名单投影,summary 上的键不写进去就永远到不了操作员眼前,而这个数是「重拉之后行数
+// 变少」的唯一解释。两条 active bomHead 指着同一条明细,正是差异A(展开器 banner 自承的重复
+// 来源)的形状。
+async function testCollapsedSiblingCountReachesDryRunEvidence() {
+  const source = createSourceAdapter(childBomPlmData({
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-A', bom_id: 'BOM-A2', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3' },
+      { bom_pid: 'BOM-A2', part_id: 'PART-B', Bom_ExAttr1: '3' },
+    ],
+  }))
+  const records = createRecordsApi()
+  const dryRun = await dryRunStockPreparationAction({
+    action: normalizeStockPreparationActionConfig(baseAction()),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: createMemoryStorage(),
+    plannedAt: '2026-09-11T09:00:00.000Z',
+  })
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.counts.add, 2, '根 + 一个子件:第二条 bomHead 的同键子件被同父去重吃掉')
+  assert.equal(
+    dryRun.evidence.expansion.duplicateSiblingsCollapsed,
+    1,
+    '合并条数进 dry-run 证据 —— 操作员分得清「PLM 少了件」和「我们按老系统合并了」',
+  )
+  const evidenceJson = JSON.stringify(dryRun.evidence)
+  assert.equal(evidenceJson.includes('B-001'), false, '证据里只有计数,没有图号')
+  assert.equal(evidenceJson.includes('Bolt'), false, '证据里只有计数,没有名称')
+
+  // 反向:没合并过的那次 dry-run 证据不长这个键(与改前逐字节相同)。
+  const clean = await dryRunStockPreparationAction({
+    action: normalizeStockPreparationActionConfig(baseAction()),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(childBomPlmData()).adapter,
+    recordsApi: createRecordsApi().recordsApi,
+    tokenStore: createMemoryStorage(),
+    plannedAt: '2026-09-11T09:00:00.000Z',
+  })
+  assert.equal('duplicateSiblingsCollapsed' in clean.evidence.expansion, false)
 }
 
 main().catch((err) => {

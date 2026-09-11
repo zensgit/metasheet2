@@ -2156,6 +2156,22 @@ function summarizeBomExpansionForEvidence(result = {}) {
       ? { ...summary.rowErrorTypeCounts }
       : {}
   }
+  // F1c — 老系统语义的两个计数,PROJECTED HERE ON PURPOSE.
+  //
+  // 这个函数是白名单投影:summary 上新长出来的键,不写在这里就**永远到不了 dry-run 证据**
+  // (`evidenceForDryRun` 只拿这个投影,路由不另外回原始 summary)。而这两个数正是「重拉之后行数
+  // 变少」的唯一解释 —— 少了这一步,操作员在 dry-run 里看到的只有一个变小的 rowsExpanded,分不清
+  // 「PLM 少了件」和「我们按老系统合并/剔根了」。
+  //
+  // 同 `subtree` 的 conditional discipline:0 不长键,所以一次什么都没合并、什么根都没剔的展开,
+  // 证据对象与本改动之前**逐字节相同**(dry-run revision 不动)。追加在最后,不移动既有条件块。
+  // VALUES-FREE:两个整数,没有图号、没有名称、没有材质。
+  if (Number.isFinite(summary.duplicateSiblingsCollapsed) && summary.duplicateSiblingsCollapsed > 0) {
+    evidence.duplicateSiblingsCollapsed = Number(summary.duplicateSiblingsCollapsed)
+  }
+  if (Number.isFinite(summary.rootsFilteredOut) && summary.rootsFilteredOut > 0) {
+    evidence.rootsFilteredOut = Number(summary.rootsFilteredOut)
+  }
   return evidence
 }
 
@@ -2182,6 +2198,10 @@ module.exports = {
   DEFAULT_ROOT_SELECTION,
   StockPreparationBomExpansionError,
   normalizeStockPreparationBomReadPlan,
+  // PUBLIC because the根选择 rules are DEPLOY CONFIG, not an internal: the action-config normalizer
+  // validates `action.rootSelection` through THIS function at config time, so a config can only say
+  // what the expander can mean (and a typo is refused where an operator sees it, not at read time).
+  normalizeRootSelection,
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
@@ -2206,7 +2226,7 @@ module.exports = {
     requireNormalizedExtFieldMapping,
     // F1c — 老系统语义的纯函数,单独暴露给测试:根选择、dash 层级判定、版本比较、名称规格切分、
     // 同父去重键。它们不做 IO,所以「老系统这条规则在这里是什么行为」可以不起适配器就钉住。
-    normalizeRootSelection,
+    // (`normalizeRootSelection` 已在上面公开导出 —— 它是配置契约的一部分,不只是测试钩子。)
     selectOrderRootCandidates,
     dashHierarchyRelationship,
     compareSourceVersion,

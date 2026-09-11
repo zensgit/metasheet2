@@ -38,6 +38,9 @@ const {
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
+  // F1c 根选择规则的 config-time 校验器。Reused rather than reimplemented so a config can only
+  // express what the expander can mean — one vocabulary, one refusal.
+  normalizeRootSelection,
   // Values-BEARING (see the module header). The only import in this file that is.
   summarizeMissingComponents,
 } = require('./stock-preparation-bom-expansion.cjs')
@@ -450,6 +453,7 @@ function normalizeStockPreparationActionConfig(input = {}) {
   const carryPolicy = normalizeActionCarryPolicy(input.carryPolicy)
   const largeBom = normalizeActionLargeBomCaps(input.largeBom)
   const rowErrorLimit = normalizeActionRowErrorLimit(input.rowErrorLimit)
+  const rootSelection = normalizeActionRootSelection(input.rootSelection)
   return {
     actionId,
     kind,
@@ -477,6 +481,40 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // an action config is snapshotted and hashed, and an unconditional key would move every legacy
     // config's shape for a knob it never set.
     ...(rowErrorLimit ? { rowErrorLimit } : {}),
+    // F1c 根选择规则(总图前后缀 / 钣金后缀 / dash 层级剔除 / 整条规则的开关)。Spread
+    // CONDITIONALLY for the same reason as every block above: absent on a config that never set it
+    // => a normalized action byte-identical to the pre-F1c one => no stored snapshot or hash moves.
+    // Absent also means the expander applies ITS default (`DEFAULT_ROOT_SELECTION`, 老系统规则),
+    // which is the owner's ruling; a deployment that needs the pre-F1c root set writes
+    // `rootSelection: { enabled: false }` HERE and it now actually reaches both lanes.
+    ...(rootSelection ? { rootSelection } : {}),
+  }
+}
+
+/**
+ * F1c — deploy-time validation of the根选择 rules.
+ *
+ * REFUSES rather than clamps (the same argument `normalizeActionRowErrorLimit` makes): a normalized
+ * action config is snapshotted, echoed back and hashed, so silently storing a rule the expander will
+ * not honour makes the stored config a lie about what runs. The vocabulary is the EXPANDER's
+ * (`normalizeRootSelection`) — one definition of what a rule may say, including its fail-closed
+ * refusal of an empty 总图 suffix (which would make every order line a 总图).
+ *
+ * The expander's own error class is translated to this module's 422 config error so a bad deploy
+ * config fails where an operator can see it (config time) with the code every other bad key uses.
+ */
+function normalizeActionRootSelection(input) {
+  if (input === undefined || input === null) return undefined
+  try {
+    return cloneJson(normalizeRootSelection(input))
+  } catch (error) {
+    const field = (error && error.details && error.details.field) || 'rootSelection'
+    throw new StockPreparationTableActionError(
+      422,
+      'TABLE_ACTION_CONFIG_INVALID',
+      (error && error.message) || 'rootSelection is invalid',
+      { field },
+    )
   }
 }
 
@@ -1425,6 +1463,12 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // D-C. Absent on every existing config => the expander's default cap, which is the whole point:
     // the bound arrives without a deployment having to ask for it.
     rowErrorLimit: action.rowErrorLimit,
+    // F1c. THE WIRE for the根选择 switch — without this line the `rootSelection` block is config
+    // that no code reads, and a deployment could not get back to the pre-F1c root set at all
+    // (this input list is an explicit allowlist: an unlisted key simply never reaches the expander).
+    // Absent on every existing config => `undefined` => the expander's老系统 default, i.e. the
+    // owner's ruling arrives without anyone having to configure it.
+    rootSelection: action.rootSelection,
     extFieldMapping,
     // E3-02's 断游标 half. Armed only: a page that claims `done: false` and offers no cursor stops
     // being a silent truncation and becomes a refusal.

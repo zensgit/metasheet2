@@ -799,6 +799,77 @@ async function runBackgroundJobUnderActionCaps({ action, jobId, source }) {
   })
 }
 
+// F1c — 根选择规则必须两条通道**同量**。
+//
+// 后台大 BOM 这条通道的展开入参是路由现编的(http-routes `largeBomExpansionOptionsForAction`,
+// 键集只有 readPlan/pageLimit/maxDepth + 后台放大的四个 caps),里面没有 rootSelection。若 worker
+// 不从任务自己的动作快照里取,同一个项目就会因为「BOM 够不够大」而落到两套根集合上 —— 交互式
+// 按老系统剔根、后台按改前全收,而操作员看到的只是一张行数对不上的表。
+//
+// 这里用的正是路由那套入参组合(runBackgroundJobUnderActionCaps 里 largeBomBackgroundExpansionCaps),
+// 所以它证明的是「配置到得了 worker」,不是「纯函数算得对」。
+function rootSelectionPlmData() {
+  return plmData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'MAIN_DRAWING_VALUE_SHOULD_NOT_APPEAR', quantity: '1', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR', quantity: '2', sort_id: 2 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      {
+        OBJ_ID: 'MAIN_DRAWING_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'J900-00',
+        IdentityName: 'MAIN_NAME_SHOULD_NOT_APPEAR',
+        Material: 'MATERIAL_VALUE_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+      {
+        OBJ_ID: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'CODE_VALUE_SHOULD_NOT_APPEAR',
+        IdentityName: 'NAME_VALUE_SHOULD_NOT_APPEAR',
+        Material: 'MATERIAL_VALUE_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+      {
+        OBJ_ID: 'CHILD_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'CHILD_CODE_SHOULD_NOT_APPEAR',
+        IdentityName: 'CHILD_NAME_SHOULD_NOT_APPEAR',
+        Material: 'CHILD_MATERIAL_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+    ],
+  })
+}
+
+async function testBackgroundWorkerHonoursTheActionsRootSelectionRules() {
+  // 默认(动作里一个字没写)= 老系统规则:有 J…-00 总图就只要总图,另一条订单行不当根。
+  const byDefault = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+    },
+    jobId: 'job-root-default',
+    source: createSourceAdapter(rootSelectionPlmData()),
+  })
+  assert.equal(byDefault.status, 'completed')
+  assert.equal(byDefault.artifact.rows.length, 1, '只有总图当根 —— 另一条订单行连同它的子件不再从根展开')
+
+  // 关掉规则 => 回到 F1c 之前的根集合。动作快照里写了,worker 就必须照做。
+  const disabled = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      // 路由存进任务的是**归一化后**的动作配置(createLargeBomBackgroundExpansionJob 里
+      // `actionSnapshot: cloneJson(action)`),这里直接给归一化后的形状。
+      rootSelection: { enabled: false },
+    },
+    jobId: 'job-root-disabled',
+    source: createSourceAdapter(rootSelectionPlmData()),
+  })
+  assert.equal(disabled.status, 'completed')
+  assert.equal(disabled.artifact.rows.length, 3, '两条订单行都当根 + 一个子件')
+  assertValuesFree(publicBackgroundExpansionJob(disabled))
+}
+
 // REGRESSION PIN for the 2026-09-05 field failure. This test used to hand the
 // worker `expansionOptions: { maxRows: 1 }` and call the resulting `failed` the
 // expected outcome — which pinned the bug: the background lane was handed the
@@ -2077,6 +2148,7 @@ async function main() {
   testBackgroundCapDerivationAndCeilings()
   testBackgroundCapConfigBlockParsing()
   await testBackgroundWorkerScalesPastTheInteractiveScaleBudget()
+  await testBackgroundWorkerHonoursTheActionsRootSelectionRules()
   await testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget()
   await testBackgroundBudgetsAreRecordedBeforeTheSourceRead()
   await testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe()
