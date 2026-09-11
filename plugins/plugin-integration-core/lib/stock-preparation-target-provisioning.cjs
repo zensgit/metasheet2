@@ -752,8 +752,15 @@ async function ensureStockPreparationTarget(input = {}) {
   // 备料填写视图 — on the CREATE path only, for the same reason the default view is created
   // here: the table was just created by THIS call (so its object scope is this plugin's, freshly
   // claimed by `ensureObject`) and it has no hand-tuned views to respect. An already-ready target
-  // returned long before this point and is untouched; an EXISTING deployment gains the fill view
-  // through the additive REPAIR verb instead, which is the path that exists for exactly that.
+  // returned long before this point and is untouched.
+  //
+  // AN EXISTING TABLE THEREFORE DOES NOT GET THE VIEW FROM HERE — AND TODAY IT GETS IT FROM
+  // NOWHERE. The additive REPAIR verb below is written to heal it, but nothing in production calls
+  // that verb (`CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT` below states it as data and a test
+  // pins it). So until an owner-gated entry for repair exists, this is a NEW-TABLE change: a
+  // deployment's existing 备料主表 keeps the deep link it has today, which is why the deep link
+  // PROBES for the fill view instead of assuming it.
+  //
   // A real host error is NOT swallowed here: nothing was inherited, so nothing is ambiguous.
   const fillView = await ensureStockPreparationFillView({
     provisioning,
@@ -875,6 +882,25 @@ function getCanonicalRepairApi(context) {
   return provisioning
 }
 
+// ---------------------------------------------------------------------------
+// IS THE CANONICAL REPAIR VERB REACHABLE IN PRODUCTION? — NO. Stated as data, and pinned by
+// `testCanonicalRepairReachabilityIsPinned`, because the same sentence written as prose in a PR
+// body is what already shipped as a false claim once.
+//
+// `repairStockPreparationCanonicalTarget` below is the designated heal path for a table that
+// ALREADY EXISTS (`ensureStockPreparationTarget` returns "already ready" without writing, by
+// design, so it can never be that path). But the plugin's HTTP surface routes inspect/ensure only
+// — `lib/http-routes.cjs` never names this verb — and no other production module calls it; its
+// only callers are tests. Consequence, in operator terms: a deployment whose 备料主表 was created
+// before the fill view existed CANNOT obtain that view today by any button, route or script, and
+// its 「打开项目备料」 deep link keeps landing on the default view (33 columns, ungrouped).
+//
+// NEXT CUT, registered here so it cannot be lost: expose an owner-gated entry for this verb (an
+// admin route in `lib/http-routes.cjs`, or a `scripts/ops/` script), and flip this constant in the
+// SAME change — the test fails the moment the constant and the wiring disagree, in EITHER
+// direction, so neither a stale `false` nor an unearned `true` can survive.
+const CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT = false
+
 // W2 template-evolution rung — canonical main-table repair. This is where the
 // human-field-reject guard is LOAD-BEARING: the canonical main carries the
 // HUMAN_PRESERVED_FIELD_IDS, so a repair that could add an ARBITRARY human column
@@ -972,11 +998,14 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
     // and re-deriving the sheet id there would be a second answer to a question already proved.
     return { ...writeResult, sheetId: sheet && sheet.id ? String(sheet.id) : '' }
   })
-  // 备料填写视图 — THE HEAL PATH for tables that already exist. This is why an existing
-  // deployment (whose table was created before the fill view existed, and whose `ensure` returns
-  // "already ready" without writing anything) can still get the view: repair is the additive verb,
-  // and the view is additive in exactly the same sense — its id is the plugin's own, so it can
-  // neither replace nor reorder a view the deployment made.
+  // 备料填写视图 — THE HEAL PATH for tables that already exist, ONCE SOMETHING CALLS THIS VERB.
+  // The heal is written here because this is the only additive verb that may touch an existing
+  // table (the view is additive in exactly the same sense — its id is the plugin's own, so it can
+  // neither replace nor reorder a view the deployment made). What it is NOT is a path a deployment
+  // can take today: this function has no route and no production caller
+  // (`CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT === false`), so no statement of the form "an
+  // existing deployment runs repair and gets the view" is true yet — it becomes true in the change
+  // that exposes the entry, not in this one.
   //
   // IT DEGRADES, IT DOES NOT FAIL, and the degradation is REPORTED. The schema repair is already
   // committed by now; an existing sheet may be one this plugin never claimed in the object registry
@@ -1084,6 +1113,9 @@ module.exports = {
   decideCarryTargetOwnership,
   CANONICAL_FIELD_MAP_MODE,
   repairStockPreparationCanonicalTarget,
+  // The reachability fact about the verb above, exported so a test can pin it against the actual
+  // wiring instead of against a sentence in a PR body (see its doc comment).
+  CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT,
   // Exported for its own direct witnesses: the ownership rule that decides whether the
   // additive heal path may create a given column (see the doc comment above it).
   assertRepairableFieldOwnership,

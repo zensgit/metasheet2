@@ -25,6 +25,7 @@ const {
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationSandboxTarget,
   repairStockPreparationCanonicalTarget,
+  CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT,
   ensureStockPreparationFillView,
   buildStockPreparationFillViewDescriptor,
   sandboxStockPreparationTemplate,
@@ -279,7 +280,8 @@ async function testInspectExtensionFieldIdsEnforceNamespaceShapeOnly() {
 //   (3) `default` is NEVER upserted — the host's "a sheet that already has ANY view is left
 //       completely alone" guarantee is what an upsert onto that id would hole; and
 //   (4) both the CREATE path and the REPAIR path actually call it (a guard nobody wires is a
-//       comment), repair being the one that reaches tables that already exist.
+//       comment), repair being the one that WOULD reach tables that already exist — once anything
+//       calls it, which nothing does yet (see testCanonicalRepairReachabilityIsPinned).
 const FILL_VIEW_PHYSICAL = (fieldId) => `fld_${fieldId}`
 
 // A provisioning fake with the VIEW half of the API: deterministic ids, a tiny meta_views store
@@ -466,8 +468,10 @@ async function testCreatePathProvisionsTheFillViewAndLeavesDefaultAlone() {
 }
 
 async function testRepairHealsTheFillViewOnAnExistingTable() {
-  // The heal path that matters: the table already exists (so `ensure` returns without writing), and
-  // REPAIR is what gives an EXISTING deployment the view.
+  // The heal path as WRITTEN: the table already exists (so `ensure` returns without writing) and
+  // repair is the verb that would give an EXISTING deployment the view. This test proves the verb's
+  // BODY, not its reachability — nothing calls it in production today, which is pinned separately by
+  // testCanonicalRepairReachabilityIsPinned. Read together: the heal is ready, the entry is not.
   const ctx = createContext({ sheetExists: true, missingFields: ['depth'] })
   const { views, viewCalls } = withViewApi(ctx)
   // A default view the deployment already hand-tuned — repair must not touch it.
@@ -586,7 +590,86 @@ async function testFillViewDegradesWithoutFailingTheRepair() {
 }
 
 
+// ---------------------------------------------------------------------------
+// THE REACHABILITY TRIPWIRE (review blocker, 2026-09-11). The first cut of this change shipped the
+// sentence "an existing deployment runs the canonical repair verb once and gets the fill view".
+// It was FALSE: the verb has no HTTP route and no production caller anywhere in the plugin, so on
+// a customer box the 「打开项目备料」 deep link still lands on the 33-column default view. A claim
+// about WIRING cannot be held down by prose in a PR body, so it is pinned to the wiring here.
+//
+// The lib tree is scanned for anything that CALLS or REFERENCES the repair verb outside its own
+// definition/export, and the verdict must equal the exported constant. BOTH directions fail:
+//   - constant false + a route or caller appears => you wired it: flip the constant and update the
+//     operator-facing wording in the same change;
+//   - constant true + nothing calls it           => the claim is unearned.
+// Comment lines are not callers (four files discuss the verb in prose), and the token itself is
+// proved against the real definition so a rename cannot make the scan vacuously green.
+async function testCanonicalRepairReachabilityIsPinned() {
+  const fs = require('node:fs')
+  const TOKEN = 'repairStockPreparationCanonicalTarget'
+  const libDir = path.join(__dirname, '..', 'lib')
+  const DEFINING_FILE = 'stock-preparation-target-provisioning.cjs'
+  assert.ok(
+    fs.readFileSync(path.join(libDir, DEFINING_FILE), 'utf8').includes(`async function ${TOKEN}(`),
+    'the scanned token must name the real verb (a rename must not make this test vacuous)',
+  )
+
+  const files = []
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (/\.(cjs|js|mjs)$/.test(entry.name)) files.push(full)
+    }
+  }
+  walk(libDir)
+  assert.ok(files.length > 50, 'the lib scan must actually see the module tree')
+  assert.ok(files.some((file) => path.basename(file) === 'http-routes.cjs'), 'the plugin HTTP surface must be in scan scope')
+
+  const callers = []
+  for (const file of files) {
+    const isDefining = path.basename(file) === DEFINING_FILE
+    fs.readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+      const trimmed = line.trim()
+      // Prose about the verb is not a caller.
+      if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) return
+      if (!line.includes(TOKEN)) return
+      // Its own definition and its own export entry are not callers either.
+      if (isDefining && (trimmed.startsWith(`async function ${TOKEN}(`) || trimmed === `${TOKEN},`)) return
+      callers.push(`${path.basename(file)}:${index + 1}`)
+    })
+  }
+  assert.equal(
+    callers.length > 0,
+    CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT,
+    `CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT says ${CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT} but the lib tree says ${callers.length > 0}`
+      + ` (references: ${callers.join(', ') || 'none'}). Flip the constant in the SAME change that exposes or removes the entry,`
+      + ' and fix the operator-facing sentence about how an EXISTING 备料主表 obtains the 备料填写视图.',
+  )
+
+  // THE CONSEQUENCE, EXECUTABLE. What every existing deployment has is an ALREADY-READY table, and
+  // that leg of `ensure` returns before any write — so "this cut only gives NEW tables the fill
+  // view" is a tested fact rather than a hedge in the PR body. It is also the guard that would
+  // catch someone "fixing" this blocker by teaching the ready leg to write views, which is exactly
+  // the 「已存在即拒」 semantic this change is not allowed to weaken.
+  const readyCtx = createContext({ sheetExists: true, missingFields: [] })
+  const { views, viewCalls } = withViewApi(readyCtx)
+  const ready = await ensureStockPreparationCanonicalTarget({
+    context: readyCtx.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+  })
+  assert.equal(ready.ready, true)
+  assert.equal(ready.mode, 'canonical_existing', 'an existing table takes the already-ready leg')
+  assert.equal(ready.fillView, undefined, 'the already-ready leg reports no fill view because it writes none')
+  assert.equal(viewCalls.ensureView.length, 0, 'ensure must not upsert a view onto a table it did not create')
+  assert.equal(viewCalls.ensureObjectDefaultView.length, 0, 'nor a default view')
+  assert.equal(views.size, 0, 'no view row exists after ensure on an existing table')
+  console.log('  testCanonicalRepairReachabilityIsPinned OK')
+}
+
 async function main() {
+  await testCanonicalRepairReachabilityIsPinned()
   await testFillViewDescriptorIsPhysicalAndValuesFree()
   await testFillViewContractCannotHideAHumanColumn()
   await testCreatePathProvisionsTheFillViewAndLeavesDefaultAlone()

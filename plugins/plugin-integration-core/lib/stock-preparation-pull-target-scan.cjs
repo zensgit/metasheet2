@@ -323,8 +323,12 @@ async function resolveOwnBoundSheet(provisioning, stagingProjectId, boundTarget)
  *
  * It is a FALLBACK now rather than the destination: the deep link prefers the 备料填写视图
  * (`STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID`, hidden system columns + 父组件分组/排序 + 有效过滤),
- * and comes back here for every table that does not have one yet — which is every table created
- * before the fill view existed, until its deployment runs the additive repair verb.
+ * and comes back here for every table that does not have one yet — which today is EVERY table in
+ * the field, because only the CREATE path provisions the fill view and the additive repair verb
+ * that would heal an existing one has no route and no production caller
+ * (`CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT` in stock-preparation-target-provisioning.cjs).
+ * So this fallback is not a rare edge: it is what an existing deployment gets until an owner-gated
+ * repair entry ships.
  */
 const STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID = STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID
 
@@ -383,8 +387,8 @@ async function fillViewExists(provisioning, stagingProjectId, objectId) {
  *
  * `viewId` IS THE 备料填写视图 WHEN THAT VIEW EXISTS, and the default view otherwise — decided by
  * `fillViewExists` above, never assumed. A table provisioned before the fill view existed (every
- * table in the field today, until its deployment runs the additive repair verb) therefore keeps the
- * link it has today, byte for byte. If a deployment's table carries hand-made views instead of
+ * table in the field today, and with no reachable repair verb, for as long as that stays true)
+ * therefore keeps the link it has today, byte for byte. If a deployment's table carries hand-made views instead of
  * either, the workbench falls back to the sheet's first view (useMultitableWorkbench's
  * `preferredViewId` fold), so the handle still degrades to "open this sheet" rather than breaking.
  */

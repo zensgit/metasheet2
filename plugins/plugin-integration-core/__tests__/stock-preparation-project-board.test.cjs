@@ -218,7 +218,8 @@ function mount({
   // not hash from the caller's own project.
   mainSheetIdOverride = null,
   // DOES THE 备料填写视图 EXIST on that table? `false` — the default, and the state of every table
-  // in the field until its deployment runs the additive repair verb — models a host that answers
+  // in the field (only the CREATE path provisions it; the repair verb that would heal an existing
+  // table has no route and no production caller today) — models a host that answers
   // "no such view"; `true` models one where provisioning created it. `null` models a host too old
   // to have the view-read port at all, which must degrade the same way a "no" does.
   fillViewProvisioned = false,
@@ -1429,8 +1430,8 @@ async function theModuleRefusesToProjectAValueWithoutAScope() {
 //
 //   * The PREFERRED id is the plugin's OWN view (`prep-fill`, the one with the 12 system columns
 //     hidden), and it is handed out ONLY when the host says that view EXISTS. A table provisioned
-//     before the fill view existed — every table in the field until its deployment runs the
-//     additive repair verb — must keep the link it has today. Without the existence probe the
+//     before the fill view existed — every table in the field, and there is no reachable verb that
+//     heals one today — must keep the link it has today. Without the existence probe the
 //     handle would name a view id that resolves to nothing, and the workbench would fold to the
 //     sheet's FIRST view, which on a pack-installed table is a role view, not the default one.
 function theFillViewIdMirrorsTheHostsDefaultViewId() {
@@ -1471,7 +1472,8 @@ async function theDeepLinkPrefersTheFillViewAndFallsBackToTheDefaultOne() {
     assert.equal(target.sheetId, ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID))
   }
   // (b) THE TABLE THAT DOES NOT — every table in the field today. The link is byte-for-byte the one
-  //     it has always been, so nothing regresses while deployments catch up with the repair verb.
+  //     it has always been, so nothing regresses — and since no deployment can run the repair verb
+  //     yet (it has no entry), this leg, not the one above, is what 222 gets from this change.
   {
     const res = await callBoard(
       mount({ mainTableProvisioned: true, fillViewProvisioned: false }).routes,
