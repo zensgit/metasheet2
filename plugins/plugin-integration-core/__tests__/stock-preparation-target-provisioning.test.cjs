@@ -211,8 +211,59 @@ async function testSandboxNamespaceRefusalNamesTheNamespace() {
   assert.equal(caught.message.includes('stock_prep_sandbox_trial'), false)
   console.log('  testSandboxNamespaceRefusalNamesTheNamespace OK')
 }
+// ext_ 客户包列写口守卫盘点结清 (beiliao-takeover-status-ledger.md §4, 2026-09-11 全集盘点 ⑤).
+// The ensure/inspect binding site feeds `input.extensionFieldIds` through the SAME
+// `assertExtensionFieldIdValid` predicate the repair paths use, via `normalizeExtensionFieldIds`
+// (stock-preparation-target-provisioning.cjs:300 -> :314, called from `inspectStockPreparationTarget`
+// at :419 -- BEFORE any sheet/field read). This locks that call reachable from the PUBLIC
+// `inspectStockPreparationCanonicalTarget` entry point, independent of whatever HTTP route wires
+// (or fails to wire) `extensionFieldIds` on top of it.
+//
+// SCOPE: that predicate (stock-preparation-extension-namespace.cjs:117-165) checks NAMESPACE SHAPE
+// ONLY -- prefix, suffix shape, forbidden content keys, collision with a frozen template field. It
+// holds no pack catalog, so "an id no customer pack declared" is NOT refused here; case (3) pins
+// that boundary as an accept. Pack membership is enforced one layer out, at
+// stock-preparation-ext-field-mapping.cjs:315-317 (TARGET_NOT_DECLARED_IN_PACK, battery at
+// __tests__/stock-preparation-ext-field-mapping.test.cjs:232), and physical creation is bounded by
+// the frozen descriptor regardless (an id with no descriptor entry can never become a column).
+async function testInspectExtensionFieldIdsEnforceNamespaceShapeOnly() {
+  // (1) guard existence: an id with no `ext_` prefix at all is refused before any sheet or field read.
+  const { context: rejectingContext, calls: rejectingCalls } = createContext({ sheetExists: true })
+  let namespaceError = null
+  try {
+    await inspectStockPreparationCanonicalTarget({
+      context: rejectingContext, projectId: 'tenant:proj', permission: 'admin', extensionFieldIds: ['procurementDone'],
+    })
+  } catch (error) {
+    namespaceError = error
+  }
+  assert.ok(namespaceError, 'a non-`ext_` id in extensionFieldIds must be refused')
+  assert.equal(namespaceError.reason, 'FIELD_ID_PREFIX_MISSING', 'guard/reason code must stay stable')
+  assert.equal(rejectingCalls.findObjectSheet.length, 0, 'the guard runs before any sheet read')
+
+  // (2) positive control: a real customer-pack `ext_` id (FACTORY_A_REHEARSAL_PACK declares
+  // `ext_stockPrepDate`) is admitted, and inspect proceeds to its normal ready verdict once the
+  // physical column resolves -- the guard does not block the feature it exists to let through.
+  const { context: readyContext } = createContext({ sheetExists: true })
+  const inspected = await inspectStockPreparationCanonicalTarget({
+    context: readyContext, projectId: 'tenant:proj', permission: 'admin', extensionFieldIds: ['ext_stockPrepDate'],
+  })
+  assert.equal(inspected.ready, true, 'a legitimate customer-pack ext_ id does not block inspect')
+
+  // (3) THE BOUNDARY, pinned as an accept: a shape-valid id that no pack declares also passes here.
+  // Pinning it keeps the ledger inventory honest -- if someone later teaches this call site pack
+  // membership, this goes red and the inventory must move with it.
+  const { context: shapeOnlyContext } = createContext({ sheetExists: true })
+  const shapeOnly = await inspectStockPreparationCanonicalTarget({
+    context: shapeOnlyContext, projectId: 'tenant:proj', permission: 'admin', extensionFieldIds: ['ext_notInAnyPackWhatsoever'],
+  })
+  assert.equal(shapeOnly.ready, true, 'namespace guard is shape-only: pack membership is NOT checked here')
+  console.log('  testInspectExtensionFieldIdsEnforceNamespaceShapeOnly OK')
+}
+
 async function main() {
   await testSandboxNamespaceRefusalNamesTheNamespace()
+  await testInspectExtensionFieldIdsEnforceNamespaceShapeOnly()
   // Descriptor is manifest-derived, schema-only, and carries no rows/customer content.
   const descriptor = buildStockPreparationTargetDescriptor()
   assert.equal(descriptor.id, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
