@@ -223,7 +223,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 **0-8. 配置「通知下一步」接力链(可选功能;要装就配齐,不装就完全不配)**
 - 背景:备料多人接力(#5442)把「现在轮到谁」变成一个可见信号,并在交接时往钉钉群发一条提醒。**不配这个键,整套行为与没有这个功能时逐字节相同**(状态读返回 `configured:false`,推进路由按名报 501,不写库不发消息),所以本窗口可以整步跳过。
 - 动作(要装才做):
-  1. 在部署机上建一个**不进仓库**的 JSON 文件（它会被读进服务端配置键 `stockPreparationHandoff`），并把路径写进 `dockerpp.env`：
+  1. 在部署机上建一个**不进仓库**的 JSON 文件（它会被读进服务端配置键 `stockPreparationHandoff`），并把路径写进 `docker\app.env`：
      ```
      INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH=D:\metasheet\config\stock-preparation-handoff.json
      ```
