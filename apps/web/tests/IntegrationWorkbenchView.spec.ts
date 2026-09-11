@@ -544,7 +544,11 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('连接系统')
     expect(container.textContent).toContain('选择数据集')
     expect(container.textContent).toContain('多维表清洗')
-    expect(container.textContent).toContain('Dry-run / 推送')
+    // G10: step 4 is 交付 (export / write into a Metasheet table), not 推送 — the K3 write-back it used
+    // to promise has been permanently fenced in the runtime since 20260829.
+    expect(container.textContent).toContain('Dry-run / 交付')
+    expect(container.textContent).toContain('K3 目标只读不写回')
+    expect(container.textContent).not.toContain('导出或 Save-only 写回')
     expect(container.querySelector('[data-testid="data-factory-quick-flow"]')?.textContent)
       .toContain('选来源系统 -> 2. 选来源数据集')
     expect(container.textContent).toContain('选择系统与数据集')
@@ -874,25 +878,23 @@ describe('IntegrationWorkbenchView', () => {
     await new Promise((resolve) => window.setTimeout(resolve, 0))
     expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:data-factory-cleansed-export')
 
-    ;(container.querySelector('[data-testid="allow-save-only-run"]') as HTMLInputElement).click()
-    await flushUi()
-    ;(container.querySelector('[data-testid="run-save-only"]') as HTMLButtonElement).click()
-    await flushUi(16)
-    expect(runBodies[1]).toEqual({
-      url: '/api/integration/pipelines/pipe_1/run',
-      body: {
-        tenantId: 'default',
-        workspaceId: null,
-        mode: 'manual',
-        sampleLimit: 20,
-      },
-    })
-    expect(container.textContent).toContain('Save-only 推送已提交')
+    // G10: the selected target is `erp:k3-wise-webapi`, and K3 external write-back is permanently fenced
+    // in the runtime (E4 / HG v1.2 §10.1, four refusal layers per kind). Before G10 this block ticked the
+    // allow-toggle and POSTed /run — an action the server answers with 403
+    // K3_WISE_PIPELINE_RUN_DISABLED / K3_WISE_EXTERNAL_WRITE_DISABLED. The affordance is now absent, not
+    // disabled: "disabled" reads as "not yet", and this is "never".
+    expect((container.querySelector('[data-testid="target-system"]') as HTMLSelectElement).value).toBe('k3_1')
+    expect(container.querySelector('[data-testid="allow-save-only-run"]')).toBeNull()
+    expect(container.querySelector('[data-testid="run-save-only"]')).toBeNull()
+    expect(container.querySelector('[data-testid="save-only-fenced-notice"]')?.textContent).toContain('K3 目标永久只读')
+    // Dry-run is a READ and must stay offered — a fence that killed preview would be the E4-05 failure.
+    expect((container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).disabled).toBe(false)
+    expect(runBodies.every((entry) => !entry.url.endsWith('/run'))).toBe(true)
 
     dryRunPreviewMode = 'empty'
     ;(container.querySelector('[data-testid="run-dry-run"]') as HTMLButtonElement).click()
     await flushUi(16)
-    expect(runBodies[2]).toMatchObject({
+    expect(runBodies[1]).toMatchObject({
       url: '/api/integration/pipelines/pipe_1/dry-run',
     })
     expect(container.textContent).toContain('Dry-run 成功，但本次没有可处理记录')
@@ -1095,9 +1097,13 @@ describe('IntegrationWorkbenchView', () => {
     expect(sourceOptions).toContain('PLM Source · http')
     expect(sourceOptions).not.toContain('K3 Target · erp:k3-wise-webapi')
     expect(targetOptions).toContain('K3 Target · erp:k3-wise-webapi')
-    expect(container.querySelector('[data-testid="source-selector-explanation"]')?.textContent).toContain('当前 K3 WISE WebAPI 仅作为目标写入连接')
+    // G10: the explanation used to sell K3 as the write target ("仅作为目标写入连接"). It now states the
+    // fence instead — same screen as the hub-overview 只读·永不写入 badge, same words.
+    expect(container.querySelector('[data-testid="source-selector-explanation"]')?.textContent).toContain('K3 目标永久只读、不写回')
+    expect(container.querySelector('[data-testid="source-selector-explanation"]')?.textContent).not.toContain('仅作为目标写入连接')
     expect(container.querySelector('[data-testid="k3-webapi-read-gate-notice"]')?.textContent).toContain('来源侧请使用 staging 多维表、SQL 只读通道或其他可读连接')
-    expect(container.querySelector('[data-testid="target-selector-explanation"]')?.textContent).toContain('Save-only')
+    expect(container.querySelector('[data-testid="target-selector-explanation"]')?.textContent).toContain('K3 目标永久只读')
+    expect(container.querySelector('[data-testid="target-selector-explanation"]')?.textContent).not.toContain('可写入')
 
     ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
     await flushUi()
@@ -1305,6 +1311,95 @@ describe('IntegrationWorkbenchView', () => {
     await flushUi()
     expect(runDryRunButton.disabled).toBe(true)
     expect(runSaveOnlyButton.disabled).toBe(true)
+  })
+
+  // G10: an integration API refusal carrying a REGISTERED code renders that code's humanized label + hint
+  // in the status bar instead of the backend's English prose.
+  //
+  // This is the case the hidden Save-only button does NOT cover, which is why both exist: a pipeline can
+  // be run from a PASTED id, and then the UI never saw the target kind — the refusal is the first time it
+  // learns. Before G10 the operator got the server's accurate English sentence, which reads like an outage.
+  it('G10: a run refused by the K3 fence renders the humanized label, never the English refusal prose', async () => {
+    const englishRefusal = 'K3 WISE live writes are C6-only: use external-write dry-run + apply'
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target'], supports: ['read', 'upsert'], advanced: false },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') {
+        return jsonResponse([
+          { id: 'plm_1', tenantId: 'default', workspaceId: null, name: 'PLM Source', kind: 'http', role: 'source', status: 'active' },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([])
+      }
+      if (url.endsWith('/run')) {
+        // The shape the SERVER actually emits, not a convenient one. `PipelineRunnerError` has no own
+        // `.code`, so http-routes `inferErrorCode` reports its CLASS NAME at the top of the envelope and
+        // the product code rides in `details.code`; `inferHttpStatus` maps /PipelineRunner/ to 422.
+        // Pinned server-side by
+        // plugins/plugin-integration-core/__tests__/http-routes-plm-k3wise-poc.test.cjs, which asserts
+        // exactly statusCode 422 + error.code 'PipelineRunnerError' + error.details.code
+        // 'K3_WISE_PIPELINE_RUN_DISABLED'.
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: { code: 'PipelineRunnerError', message: englishRefusal, details: { code: 'K3_WISE_PIPELINE_RUN_DISABLED', pipelineId: 'pipe_pasted_k3' } },
+          }),
+          { status: 422, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi()
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'plm_1'
+    sourceSystemSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // No target picked in the UI, so nothing is client-side fenced and the Save-only control renders —
+    // exactly the pasted-id situation this test is about.
+    const pipelineIdInput = container.querySelector('[data-testid="pipeline-id"]') as HTMLInputElement
+    pipelineIdInput.value = 'pipe_pasted_k3'
+    pipelineIdInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="allow-save-only-run"]') as HTMLInputElement).click()
+    await flushUi()
+
+    const saveOnlyButton = container.querySelector('[data-testid="run-save-only"]') as HTMLButtonElement
+    expect(saveOnlyButton.disabled).toBe(false)
+    saveOnlyButton.click()
+    await flushUi(16)
+
+    const status = container.querySelector('.integration-workbench__status') as HTMLElement
+    expect(status).toBeTruthy()
+    expect(status.getAttribute('data-kind')).toBe('error')
+    // This harness runs at locale 'en' (useLocale seeds from navigator.language at import time and this
+    // spec never overrides it), so the assertion is on the REGISTERED en label + hint. The zh side of the
+    // same three entries — including that every hint says 只读 — is asserted in
+    // tests/integrationErrorCodeLabels.spec.ts.
+    expect(status.textContent).toContain('This pipeline cannot push to its K3 target.')
+    expect(status.textContent).toContain('permanently read-only')
+    expect(status.textContent).toContain('export the cleansed result')
+    // The server's own refusal prose never reaches the operator, anywhere on the page. Drop the label
+    // entry (or the code-carrying throw) and the fallback puts this exact sentence back on screen.
+    expect(status.textContent).not.toContain('C6-only')
+    expect(container.textContent).not.toContain(englishRefusal)
   })
 
   it('C6-4: runs external-write dry-run then apply without exposing token or client-owned write scope', async () => {
