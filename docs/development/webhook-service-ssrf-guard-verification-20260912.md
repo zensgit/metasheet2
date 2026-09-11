@@ -8,6 +8,8 @@ Worktree `metasheet-wt-w3a`, branch `fix/webhook-service-ssrf-guard`, stacked on
 
 ## 1. Commands and exit codes
 
+### Round 1 — the original change (pre final review)
+
 | command (cwd `packages/core-backend`) | result |
 |---|---|
 | `npx tsc --noEmit` | **exit 0** (run twice: after the source change, and again after the spec changes) |
@@ -16,8 +18,25 @@ Worktree `metasheet-wt-w3a`, branch `fix/webhook-service-ssrf-guard`, stacked on
 | `npx vitest run tests/unit/webhook-service-ssrf.test.ts tests/unit/api-token-webhook.test.ts tests/unit/webhook-retry-policy-service.test.ts tests/unit/automation-send-webhook-ssrf.test.ts tests/unit/send-webhook-action-hardening.test.ts tests/unit/automation-classb-outbound.test.ts` | **6 files, 179 passed / 179** (51 + 46 + 9 + 62 + 3 + 8) |
 | `npx vitest --config vitest.integration.config.ts run tests/integration/multitable-webhook-{durable-dedup,event-bridge,retry-tick}.test.ts` | **13 skipped / 13** — the three real-DB specs COLLECT cleanly (so the edits compile) and skip on the absent `DATABASE_URL`. Not executed here; see §6. |
 
-The full `core-backend` suite was deliberately not run (host memory/disk budget for this task); the
-affected-spec set above is the evidence.
+### Round 2 — the final-review fixes (`refusal_unrecorded` containment + comment/doc corrections)
+
+Round 2 changed exactly one runtime thing: the refusal branch's `handleDeliveryFailure` call is now
+wrapped in a local `try`/`catch` (design §3.2). Everything else it touched is a comment, a stale line
+number, or this document set.
+
+| command (cwd `packages/core-backend`) | result |
+|---|---|
+| `npx vitest run tests/unit/webhook-service-ssrf.test.ts` | **54 passed / 54** (51 + the 3 new containment cases) |
+| `npx vitest run tests/unit/{api-token-webhook,webhook-retry-scheduler,webhook-retry-policy-service,webhook-retry-policy-schema,webhook-ssrf-guard,webhook-pinned-fetch}.test.ts` | **6 files, 95 passed / 95** |
+| `npx tsc --noEmit` (package `tsconfig.json`) | **exit 0** |
+| `npx tsc --noEmit` over the edited spec (temp config; the repo's own tsconfigs exclude `**/*.test.ts`) | **exit 0** |
+
+Round 2 did NOT re-run the round-1 six-file combination (`automation-send-webhook-ssrf`,
+`send-webhook-action-hardening`, `automation-classb-outbound`): its diff does not touch the automation
+path. Those numbers above are round 1's and are not restated as if they were re-measured.
+
+The full `core-backend` suite was deliberately not run in either round (host memory/disk budget for this
+task); the affected-spec set above is the evidence.
 
 ## 2. Runtime facts this round depends on — measured, not quoted
 
@@ -37,7 +56,7 @@ invalidating the reasoning.
    leak-proof tests passing vacuously. **No network request is made by this suite**: the throw precedes
    DNS/TCP, and every other case injects a mock `fetchFn` plus a deterministic resolver.
 
-## 3. Coverage map of the new spec (`tests/unit/webhook-service-ssrf.test.ts`, 51 tests)
+## 3. Coverage map of the new spec (`tests/unit/webhook-service-ssrf.test.ts`, 54 tests)
 
 | block | n | what it pins |
 |---|---|---|
@@ -47,15 +66,19 @@ invalidating the reasoning.
 | redirect posture | 9 | the two runtime-precondition assertions; the dispatch init carries `redirect: 'manual'`; 301/302/303/307/308 each → exactly ONE request, `Location` never read (`headers.get` not called), body never read, terminal row (`status='failed'`, `next_retry_at: null`, `WEBHOOK_TARGET_REJECTED:redirect-not-allowed`), and the internal `Location` value absent from the log; the browser-profile `opaqueredirect` (status 0) shape; a 2xx still succeeds |
 | failure logging is values-free | 7 | a transport error whose **`message` getter throws** is still classified (`conn-refused`) — proof the log path never reads `message`; ENOTFOUND/EAI_AGAIN → `dns-failure`, `CERT_HAS_EXPIRED` → `tls-failure`, `ECONNRESET` → `transport-error`; our own abort → `timeout`; an HTTP 503 still stores the RECEIVER's body and adds no new log line |
 | native request-construction exception | 3 | the runtime precondition above; the log contains `invalid-request` and none of the password / `token=` / the client's own free text; the persisted row likewise, carrying `WEBHOOK_DELIVERY_FAILED:invalid-request` |
+| a failed refusal WRITE stays inside its own row (round 2) | 3 | a retry tick with two claimed rows where the FIRST row's `multitable_webhooks` UPDATE throws: the pass still returns `retried === 2`, only `dlv_b`'s delivery UPDATE lands, `fetch` is still called 0 times, and exactly one `[webhook.delivery.refusal_unrecorded]` line names `dlv_a`; that line carries none of the driver's message / the URL's userinfo password / `token=` query / host / subscription secret, only the closed-set `private` label; and `executeDelivery` resolves instead of throwing even when the DB error's **`message` getter throws** |
 
 ## 4. Mutation probes
 
 Each mutant was applied to `src/multitable/webhook-service.ts`, measured against the new spec, then
-reverted inside a `finally`, with the restore verified byte-for-byte by sha256
+reverted, with the restore verified byte-for-byte by sha256 (round 2: restore from a copy taken before
+the first probe, re-verified after the last one —
+`9064f167d6038d3315551625c90ab1506b84f9237f50a3cf95b0e40d31fb2867`, and the spec re-run green at 54/54
+on the restored file). Round 1's driver did the same
 (`35b5e819491a076e349ae631a7b8ded1f18eea3075aef6340f27519a70946cba` before and after every probe — the
 driver asserts equality, so a failed restore aborts the run). Nothing was left on disk.
 
-| # | mutation | result (baseline 51/51 green) |
+| # | mutation | result (M1-M6 against a 51/51 baseline, M7-M8 against 54/54) |
 |---|---|---|
 | M1 | delete the SSRF gate block entirely | **32 failed / 19 passed** |
 | M2 | drop `redirect: 'manual'` from the fetch init | **1 failed / 50 passed** — "the dispatch asks for manual redirects" |
@@ -63,6 +86,8 @@ driver asserts equality, so a failed restore aborts the run). Nothing was left o
 | M4 | move the gate to AFTER the dispatch (same code, later position) | **30 failed / 21 passed** |
 | M5 | stop treating a 3xx as a refusal (`if (false && isRefusedRedirectStatus(response))`) | **6 failed / 45 passed** — all five status codes plus the opaque-redirect case |
 | M6 | put the URL back into the persisted delivery row marker | **2 failed / 49 passed** — the two "no credentials in the row/log" cases |
+| M7 (round 2) | delete the refusal branch's local `try`/`catch`, calling `handleDeliveryFailure` bare | **3 failed / 51 passed** (baseline 54/54) — all three round-2 cases; the other 51 stay green, i.e. the new guard is pinned by the new cases and by nothing else |
+| M8 (round 2) | keep the `try`/`catch` but bind the error and log `err.message` | **2 failed / 52 passed** — "the line it logs carries no DB free text…" and "executeDelivery … never reads the DB error message" (the throwing getter explodes). The batch-continuation case stays green, which is the point: swallowing and values-free are pinned INDEPENDENTLY |
 
 Honest negative result on **M2**: only the init assertion reds. A behavioural test cannot catch a
 missing `redirect: 'manual'` in-process, because the injected mock `fetchFn` never follows anything —
@@ -121,7 +146,20 @@ Not changed, on purpose:
    creator by `GET /api/multitable/webhooks`. This change guarantees the LOG and the DELIVERY ROW, not
    the subscription record.
 4. **`deliverEvent`'s fire-and-forget catch** still logs `err.message`; after this change only DB errors
-   from `executeDelivery` can reach it, but it is free text and it was left alone (out of scope).
+   from `executeDelivery` can reach it — and after round 2, not the refusal branch's own bookkeeping,
+   which is caught locally. It is still free text and it was left alone (out of scope). The same is true
+   of `WebhookRetryScheduler.ts:157`, which round 2 narrows by making one row's failed refusal write
+   stop being a way to reach it.
 5. **A permanently 3xx-answering subscription never auto-disables** (§3.3 of the design): it emits one
    first-hop request per matching event forever. That is unchanged egress volume versus today, but it is
    noise a follow-up may want to cap (FS-3).
+6. **The redirect refusal's terminal write is inside the dispatch `try`.** If that UPDATE itself throws,
+   the generic catch labels it `transport-error` and re-queues the row with a backoff, so "terminal, no
+   backoff row" holds except in that window (bounded by `max_retries`, containment-neutral — the retry
+   re-enters the gate and the first hop is the URL the gate already judged). Registered as FS-8; the
+   comment at `webhook-service.ts:607-615` and design §3.3 both state the qualification rather than the
+   absolute.
+7. **The refusal branch's local `catch` swallows.** It is deliberate and its blast radius is stated in
+   design §3.2: no dispatch is possible from that point, so the cost is bookkeeping (the row keeps its
+   prior state and is re-judged next tick), not containment. The general fix — a per-row guard around
+   `webhook-service.ts:731` — is existing code and out of scope here.

@@ -408,7 +408,7 @@ export class WebhookService {
     // SSRF GATE (F-3 of the #5619 security review) - the ONE decision that makes this file safe.
     //
     // `wh.url` is written by whoever created the subscription (POST /api/multitable/webhooks ->
-    // `createWebhook`, routes/api-tokens.ts:320), and PATCH (`updateWebhook`, :249-256) accepts any
+    // `createWebhook`, routes/api-tokens.ts:320), and PATCH (`updateWebhook`, :286-293) accepts any
     // parseable URL with no scheme check at all. So a plain session holder could aim this process at
     // 127.0.0.1 / 10.x / 169.254.169.254 and have every matching record event POSTed there, signed with
     // their own secret - request forgery with a delivery guarantee and a retry tick behind it.
@@ -453,7 +453,36 @@ export class WebhookService {
       delivery.attemptCount += 1
       delivery.httpStatus = undefined
       delivery.responseBody = `${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`
-      await this.handleDeliveryFailure(delivery, wh)
+      // BOOKKEEPING FAILURE IS THIS ROW'S PROBLEM ONLY. `handleDeliveryFailure` issues two UPDATEs, and
+      // this branch runs BEFORE the `try` below, so an exception here would leave `executeDelivery` -
+      // which the retry tick awaits per row without its own guard - and abort the whole pass in
+      // `retryFailedDeliveries`. Every other row that pass already CLAIMED has had `next_retry_at`
+      // leased forward, so they would sit undelivered until the lease expires, and the scheduler's
+      // catch would log the raw `err.message` (`services/WebhookRetryScheduler.ts:157`). Contained
+      // here instead, so THIS branch's failed bookkeeping cannot stall its batch. Scoped, not general:
+      // `getWebhookById` (:397) and the not-found UPDATE (:399-404) are still un-guarded DB calls ahead
+      // of the `try` in the same loop; a per-row guard at :731 is the real answer and is existing code.
+      //
+      // Swallowing is safe in containment terms, and ONLY in containment terms: the gate already
+      // refused, so nothing was dispatched and nothing is dispatched by the recovery either. The cost
+      // is bookkeeping - the delivery row keeps the state it had (a claimed row keeps its lease and is
+      // re-judged by this same gate after it expires; `failure_count` does not advance this attempt).
+      //
+      // NO BINDING on the catch, deliberately: the DB driver's message can carry the statement and its
+      // parameters, so the error object is not reachable from this scope at all and the line below is
+      // closed-set labels plus identifiers, the same discipline as the refusal log above.
+      try {
+        await this.handleDeliveryFailure(delivery, wh)
+      } catch {
+        logger.warn('[webhook.delivery.refusal_unrecorded]', {
+          code: WEBHOOK_TARGET_REJECTED,
+          refusalClass: refusal.refusalClass,
+          hostFamily: refusal.hostFamily,
+          webhookId: wh.id,
+          deliveryId: delivery.id,
+          event: delivery.event,
+        })
+      }
       return
     }
 
@@ -575,8 +604,16 @@ export class WebhookService {
   /**
    * The first hop answered 3xx while we asked for `redirect: 'manual'`, so nothing followed it.
    *
-   * Terminal by design: `status = 'failed'`, no backoff row, `next_retry_at` cleared (the retry tick
-   * only claims `pending` rows, so this can never be re-picked). The webhook's `failure_count` is NOT
+   * Terminal by design: `status = 'failed'`, no backoff row, `next_retry_at` cleared - so a row this
+   * method actually WROTE is not re-claimed by the retry tick, which only claims `pending` rows.
+   * QUALIFIED, not absolute: this call site is INSIDE the `try` at `:508`, so if the terminal UPDATE
+   * below itself throws (a DB blip), that throw is caught by the generic catch, classified like any
+   * other failure, and `handleDeliveryFailure` writes `status='pending'` + a backoff instead - the row
+   * IS re-picked and the same body re-sent to the same first hop, bounded by `max_retries`. Containment
+   * is unaffected either way (every re-attempt re-enters the SSRF gate, and the first hop is the URL the
+   * gate already judged); what is wrong in that case is the LABEL (`transport-error` for a DB fault).
+   * Moving the redirect decision out of the `try` is registered as FS-8 in the design doc, not done here.
+   * The webhook's `failure_count` is NOT
    * touched - auto-disable is the flap counter for a receiver that cannot be reached, and this receiver
    * answered; a subscription that permanently redirects therefore stays active and produces one refused
    * delivery per event until an operator fixes the url (registered as a follow-up in the design doc).

@@ -7,7 +7,7 @@
  * fan-out in `WebhookService.executeDelivery` — handed `multitable_webhooks.url` straight to `fetch`
  * with no check and with `redirect` left at its default. Its write surface is the WIDEST of the three:
  * `POST /api/multitable/webhooks` needs only a session (`routes/api-tokens.ts:320`), and the PATCH
- * route accepts any parseable URL with no scheme check at all (`webhook-service.ts:249-256`).
+ * route accepts any parseable URL with no scheme check at all (`webhook-service.ts:286-293`).
  *
  * THE LOAD-BEARING ASSERTION in every refusal case below is `expect(fetch).toHaveBeenCalledTimes(0)`:
  * "refused" is worth something only if NOTHING left the process. The second one is
@@ -46,7 +46,13 @@ const SECRET = 'subscription-hmac-secret'
 interface DbWrite {
   table: string
   set: Record<string, unknown>
+  /** The `.where(...)` arguments of the SAME chain, by reference — Kysely calls `.where()` AFTER
+   *  `.set()`, so this array is still empty when the write is recorded and full by the time it is read. */
+  where: unknown[]
 }
+
+/** Lets a test make one specific UPDATE fail, so the refusal branch's write fault can be observed. */
+type FailWrite = (w: { table: string; set: Record<string, unknown> }) => unknown
 
 interface MockState {
   /** Row returned by `getWebhookById` / the active-webhook scan. */
@@ -55,6 +61,7 @@ interface MockState {
   dueDeliveries: Record<string, unknown>[]
   writes: DbWrite[]
   inserts: Array<{ table: string; values: Record<string, unknown> }>
+  failWrite?: FailWrite
 }
 
 function webhookRow(url: string, over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -105,15 +112,22 @@ function pendingDelivery(over: Partial<WebhookDelivery> = {}): WebhookDelivery {
 /** Chainable Kysely stand-in: every builder method returns itself; terminals answer from `state`. */
 function makeChain(table: string, op: 'select' | 'insert' | 'update' | 'delete', state: MockState) {
   const self: Record<string, unknown> = {}
+  const whereArgs: unknown[] = []
   const pass = () => self
   for (const m of [
-    'selectAll', 'select', 'where', 'orderBy', 'limit', 'offset', 'groupBy',
+    'selectAll', 'select', 'orderBy', 'limit', 'offset', 'groupBy',
     'forUpdate', 'skipLocked', 'returningAll', 'onConflict', 'columns', 'doUpdateSet', 'leftJoin',
   ]) {
     self[m] = vi.fn(pass)
   }
+  self.where = vi.fn((...args: unknown[]) => {
+    whereArgs.push(...args)
+    return self
+  })
+  let lastSet: Record<string, unknown> = {}
   self.set = vi.fn((obj: Record<string, unknown>) => {
-    state.writes.push({ table, set: { ...obj } })
+    lastSet = { ...obj }
+    state.writes.push({ table, set: { ...obj }, where: whereArgs })
     return self
   })
   self.values = vi.fn((obj: Record<string, unknown>) => {
@@ -121,6 +135,10 @@ function makeChain(table: string, op: 'select' | 'insert' | 'update' | 'delete',
     return self
   })
   self.execute = vi.fn(async () => {
+    if (op === 'update') {
+      const boom = state.failWrite?.({ table, set: lastSet })
+      if (boom) throw boom
+    }
     if (op === 'select' && table === 'multitable_webhooks') return [state.webhookRow]
     if (op === 'select' && table === 'multitable_webhook_deliveries') return state.dueDeliveries
     return []
@@ -168,6 +186,7 @@ interface HarnessOpts {
   webhookOver?: Record<string, unknown>
   nativeFetch?: boolean
   dueDeliveries?: Record<string, unknown>[]
+  failWrite?: FailWrite
 }
 
 function makeHarness(opts: HarnessOpts = {}): Harness {
@@ -176,6 +195,7 @@ function makeHarness(opts: HarnessOpts = {}): Harness {
     dueDeliveries: opts.dueDeliveries ?? [],
     writes: [],
     inserts: [],
+    failWrite: opts.failWrite,
   }
   const fetchSpy = vi.fn(async () => {
     if (opts.reject !== undefined) throw opts.reject
@@ -607,5 +627,122 @@ describe('subscription delivery — a native request-construction exception leak
     expect(dumped).not.toContain(PW)
     expect(dumped).not.toContain('QUERY-SEKRET')
     expect(dumped).toContain('WEBHOOK_DELIVERY_FAILED:invalid-request')
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+//  7. A refusal whose BOOKKEEPING fails cannot take the rest of the retry batch with it
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * The refusal branch runs BEFORE the `try` that wraps the dispatch, and it calls
+ * `handleDeliveryFailure`, which issues two UPDATEs. The retry tick awaits `executeDelivery` per
+ * claimed row with no guard of its own (`webhook-service.ts:731`), so an exception there would leave
+ * `retryFailedDeliveries` entirely: every row that pass already CLAIMED has had `next_retry_at` leased
+ * forward, so they would sit undelivered until the lease expires, and `WebhookRetryScheduler.ts:157`
+ * would log the DB driver's raw `err.message`.
+ *
+ * These cases pin the containment: the write fault stays inside its own row, the line it produces is
+ * closed-set, and the gate's verdict is unchanged (still zero egress).
+ */
+describe('subscription delivery — a failed refusal WRITE stays inside its own row', () => {
+  /** A DB fault with a READABLE message, so an escape shows up as a failed assertion (and so the
+   *  values-free check has a string to hunt for). */
+  function dbError(): Error {
+    return Object.assign(new Error('pg: connection terminated; password=hunter2-db'), {
+      name: 'DatabaseError',
+      detail: 'UPDATE multitable_webhooks SET failure_count=$1 WHERE id=$2',
+    })
+  }
+  const failWebhookWrite = ({ table }: { table: string }) =>
+    table === 'multitable_webhooks' ? dbError() : undefined
+
+  test('the retry tick still processes the REST of the batch after one row fails to record', async () => {
+    let webhookUpdates = 0
+    const h = makeHarness({
+      url: 'https://10.0.0.9/hook',
+      dueDeliveries: [
+        deliveryRow({ id: 'dlv_a', attempt_count: 1 }),
+        deliveryRow({ id: 'dlv_b', attempt_count: 1 }),
+      ],
+      // Only the FIRST claimed row's bookkeeping fails; the tick processes rows in order.
+      failWrite: ({ table }) =>
+        table === 'multitable_webhooks' && ++webhookUpdates === 1 ? dbError() : undefined,
+    })
+    const warn = spyLogs()
+
+    const retried = await h.svc.retryFailedDeliveries()
+
+    expect(retried).toBe(2) // the pass completed instead of aborting on the first row
+    expect(h.fetch).toHaveBeenCalledTimes(0) // both rows were refused by the gate; still zero egress
+    // dlv_a's delivery UPDATE never ran (its webhook UPDATE threw first); dlv_b's did.
+    // (Filtered on `response_body` so the tick's own claim/lease UPDATE is not counted.)
+    const deliveryTargets = h.state.writes
+      .filter((w) => w.table === 'multitable_webhook_deliveries' && 'response_body' in w.set)
+      .map((w) => w.where)
+    expect(deliveryTargets).toHaveLength(1)
+    expect(deliveryTargets[0]).toContain('dlv_b')
+    expect(h.deliveryWrites().at(-1)).toMatchObject({
+      status: 'pending',
+      attempt_count: 2,
+      response_body: 'WEBHOOK_TARGET_REJECTED:private',
+    })
+    // One unrecorded line for dlv_a only — dlv_b recorded normally.
+    const unrecorded = webhookLogs(warn).filter((c) => c[0] === '[webhook.delivery.refusal_unrecorded]')
+    expect(unrecorded).toHaveLength(1)
+    expect(unrecorded[0][1]).toMatchObject({ deliveryId: 'dlv_a' })
+  })
+
+  test('the line it logs carries no DB free text, no URL and no secret', async () => {
+    const h = makeHarness({
+      url: 'https://admin:hunter2@10.0.0.9/hook?token=SEKRET',
+      failWrite: failWebhookWrite,
+    })
+    const warn = spyLogs()
+
+    await h.svc.executeDelivery(pendingDelivery())
+
+    const dumped = JSON.stringify(webhookLogs(warn))
+    expect(dumped).not.toContain('hunter2') // neither the URL's password nor the driver's message
+    expect(dumped).not.toContain('SEKRET')
+    expect(dumped).not.toContain('10.0.0.9')
+    expect(dumped).not.toContain('DatabaseError')
+    expect(dumped).not.toContain('UPDATE multitable_webhooks')
+    expect(dumped).not.toContain(SECRET)
+    expect(dumped).toContain('private') // the closed-set label survives
+  })
+
+  test('executeDelivery does not throw, and never reads the DB error message', async () => {
+    // A `message` getter that THROWS is the proof, same idiom as the transport-failure case above:
+    // any code path that reads it explodes instead of quietly leaking.
+    const exploding = Object.assign(new Error('placeholder'), { name: 'DatabaseError' })
+    Object.defineProperty(exploding, 'message', {
+      get() {
+        throw new Error('the DB error message must never be read by the refusal path')
+      },
+    })
+    const h = makeHarness({
+      url: 'https://10.0.0.9/hook',
+      failWrite: ({ table }) => (table === 'multitable_webhooks' ? exploding : undefined),
+    })
+    const warn = spyLogs()
+
+    // No `.rejects` — the point is that this resolves.
+    await h.svc.executeDelivery(pendingDelivery())
+
+    expect(h.fetch).toHaveBeenCalledTimes(0) // the gate's verdict is unchanged
+    const logs = webhookLogs(warn)
+    expect(logs.map((c) => c[0])).toEqual([
+      '[webhook.delivery.refused]',
+      '[webhook.delivery.refusal_unrecorded]',
+    ])
+    expect(logs[1][1]).toMatchObject({
+      code: 'WEBHOOK_TARGET_REJECTED',
+      refusalClass: 'private',
+      hostFamily: 'ipv4',
+      webhookId: WH_ID,
+      deliveryId: DELIVERY_ID,
+      event: 'record.created',
+    })
   })
 })
