@@ -1,5 +1,7 @@
 import { EventEmitter } from 'eventemitter3'
 
+import { collectSecretConfigValues, secretKeyValueTextPattern } from './data-source-secret-keys'
+
 // Type for connection pool (varies by adapter implementation)
 export type ConnectionPool = unknown
 
@@ -499,18 +501,17 @@ export abstract class BaseDataAdapter extends EventEmitter {
   // returned to a client or logged. Defense-in-depth: a connection error must never carry a password.
   protected redactSecrets(message: string): string {
     let out = message
-    const creds = this.config.credentials ?? {}
-    const conn = this.config.connection ?? {}
-    const secretValues = [creds.password, creds.token, creds.apiKey, creds.secret, conn.password]
-      .filter((v): v is string => typeof v === 'string' && v.length > 0)
+    // #5621 SINGLE DEFINITION: "which key is secret-shaped" now lives in data-source-secret-keys.ts —
+    // the very list the write refusal (routes/data-sources.ts) and the read strip (sanitizeConfig)
+    // consult. This used to be a hand-written tuple (credentials.password/token/apiKey/secret +
+    // connection.password) that could — and did — disagree with the other three surfaces. The shared
+    // list is a superset of that tuple and walks nested containers, so redaction only ever widens.
+    const secretValues = collectSecretConfigValues([this.config.credentials, this.config.connection])
     for (const secret of secretValues) {
       out = out.split(secret).join('***')
     }
-    // key=value / key: value with a single-token value.
-    out = out.replace(
-      /(\b(?:password|pwd|pass|token|api[_-]?key|secret)\b\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s;,)]+)/gi,
-      '$1***'
-    )
+    // key=value / key: value with a single-token value (alternation derived from the same word list).
+    out = out.replace(secretKeyValueTextPattern(), '$1***')
     // Authorization carries a scheme + token (e.g. "Bearer xyz"); consume the whole credential so the
     // token after the scheme is not left behind (a single-token rule would leave "Bearer ***  xyz").
     return out.replace(

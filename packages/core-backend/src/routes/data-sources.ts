@@ -10,7 +10,7 @@
  * - Secure credential handling (never exposed in responses)
  */
 
-import type { Request, Response } from 'express'
+import type { NextFunction, Request, Response } from 'express'
 import { Router } from 'express'
 import type { Kysely } from 'kysely'
 import { z } from 'zod'
@@ -32,6 +32,12 @@ import {
   K3_DESTINATION_MARKER_IMMUTABLE,
   K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE,
 } from '../data-adapters/k3-destination-write-fence'
+import {
+  connectionSecretRefusalMessage,
+  DATA_SOURCE_CONNECTION_SECRET_REJECTED_CODE,
+  findSecretConfigKeyPaths,
+  stripSecretConfigKeys,
+} from '../data-adapters/data-source-secret-keys'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
 
 // A deliberate gate refusal — the outbound-SQL-write arm/provisioning guard, the K3 destination fence —
@@ -318,12 +324,60 @@ export function isReadOnlySql(raw: string): boolean {
 }
 
 // Helper to sanitize config for response (remove credentials)
+//
+// #5621 LEGACY-ROW DEFENCE. `credentials` is destructured out (encrypted at rest, write-only), but
+// the REST used to be echoed verbatim — including a `connection.password` written by a direct API
+// caller back when the create/update entry still accepted one, and stored in plaintext because
+// DataSourceManager.configToRecord encrypts `credentials` only. Every surface that returns a config
+// (GET /:id, create, update, rotate) AND the update / rotate / delete AUDIT rows pass through here,
+// so strip secret-shaped keys from the whole remainder with the shared predicate.
+// This changes the ECHO only — the stored row is untouched; the read-only inventory SQL and the
+// removal migration are in docs/development/data-source-connection-secret-keys-design-20260912.md.
+// `hasCredentials` is attached AFTER the strip: it is a computed presence flag (and would itself
+// match the `credential` word), never a stored config key.
 function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'credentials'> & { hasCredentials: boolean } {
   const { credentials, ...rest } = config
   return {
-    ...rest,
+    ...stripSecretConfigKeys(rest),
     hasCredentials: !!credentials && Object.keys(credentials).length > 0
   }
+}
+
+/**
+ * #5621 WRITE FAIL-CLOSED. `connection` is the PUBLIC half of a data-source config: it is persisted
+ * as plain JSON and echoed by the read surfaces above. NO shipped adapter reads a secret from it —
+ * every one takes its secret from `credentials` (PostgresAdapter :85-86, MSSQLAdapter :194-195,
+ * MySQLAdapter :205-206, MongoDBAdapter :519, HTTPAdapter :152-156) — so a secret placed there never
+ * authenticated anything; it was plaintext that a later GET handed back. Refuse it at the entry.
+ *
+ * Runs on the RAW body, BEFORE Zod: `ConnectionConfigSchema` is a free record, and a nested shape
+ * (`connection.headers.Authorization`) would otherwise collapse into the generic VALIDATION_ERROR
+ * instead of this coded, actionable refusal.
+ *
+ * Scope is deliberately "what THIS request sends", not the merged result: PUT /:id deep-merges onto
+ * the stored connection, so checking the merge would lock every legacy row out of unrelated edits
+ * (host / port / TLS) forever. Clearing an already-stored secret is the migration's job, not this
+ * guard's. Placed after rbacGuard, so an anonymous caller still gets 401 first.
+ */
+function connectionSecretRefusal(body: unknown): { code: string; message: string } | null {
+  const connection = (body as { connection?: unknown } | null | undefined)?.connection
+  if (connection === undefined || connection === null) return null
+  const paths = findSecretConfigKeyPaths(connection, 'connection')
+  if (paths.length === 0) return null
+  return {
+    code: DATA_SOURCE_CONNECTION_SECRET_REJECTED_CODE,
+    message: connectionSecretRefusalMessage(paths)
+  }
+}
+
+/** Route guard form of connectionSecretRefusal: 400 + the coded, values-free refusal. */
+function refuseConnectionSecrets(req: Request, res: Response, next: NextFunction): void {
+  const refusal = connectionSecretRefusal(req.body)
+  if (refusal) {
+    res.status(400).json({ ok: false, error: refusal })
+    return
+  }
+  next()
 }
 
 export function dataSourcesRouter(): Router {
@@ -460,7 +514,7 @@ export function dataSourcesRouter(): Router {
    * POST /api/data-sources
    * Create a new data source configuration
    */
-  router.post('/api/data-sources', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
+  router.post('/api/data-sources', rbacGuard('data_sources', 'write'), refuseConnectionSecrets, async (req: Request, res: Response) => {
     const parse = DataSourceCreateSchema.safeParse(req.body)
     if (!parse.success) {
       return res.status(400).json({
@@ -546,7 +600,7 @@ export function dataSourcesRouter(): Router {
    * Route placement: `/test` is single-segment and there is no bare `POST /:id`, so it cannot collide
    * with the two-segment `/:id/*` routes; it is grouped with create for clarity.
    */
-  router.post('/api/data-sources/test', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
+  router.post('/api/data-sources/test', rbacGuard('data_sources', 'write'), refuseConnectionSecrets, async (req: Request, res: Response) => {
     const parse = DataSourceCreateSchema.safeParse(req.body)
     if (!parse.success) {
       return res.status(400).json({
@@ -612,7 +666,7 @@ export function dataSourcesRouter(): Router {
    * PUT /api/data-sources/:id
    * Update data source configuration (requires reconnect)
    */
-  router.put('/api/data-sources/:id', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
+  router.put('/api/data-sources/:id', rbacGuard('data_sources', 'write'), refuseConnectionSecrets, async (req: Request, res: Response) => {
     const parse = DataSourceUpdateSchema.safeParse(req.body)
     if (!parse.success) {
       return res.status(400).json({

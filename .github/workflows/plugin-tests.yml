@@ -1523,6 +1523,7 @@ jobs:
             tests/integration/multitable-ai-suggest-formula.test.ts \
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             tests/integration/data-source-test-ephemeral-realdb.test.ts \
+            tests/integration/data-source-connection-secret-keys-realdb.test.ts \
             tests/integration/multitable-personal-views-slice1-realdb.test.ts \
             tests/integration/multitable-personal-views-slice2-fieldorder-realdb.test.ts \
             tests/integration/multitable-personal-views-slice3-context-overlay-realdb.test.ts \
