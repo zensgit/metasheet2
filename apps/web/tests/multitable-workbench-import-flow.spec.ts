@@ -768,4 +768,122 @@ describe('MultitableWorkbench import flow', () => {
     expect(showErrorSpy).toHaveBeenCalledWith('Import cancelled')
     expect(document.body.querySelector('.meta-import-modal')).toBeNull()
   })
+  it('creates the unmatched column as a text field and imports the row under the new field id', async () => {
+    // End-to-end through the REAL import modal: an unmatched header defaults to "create new field"
+    // (the workbench reports manage-fields = true), the field is created BEFORE any record write, and
+    // the placeholder key the modal used is rewritten to the created field id.
+    mountWorkbench([
+      { id: 'fld_name', name: 'Name', type: 'string' },
+    ])
+    workbenchMock.client.createField.mockResolvedValue({ field: { id: 'fld_warehouse', name: 'Warehouse', type: 'string' } })
+    workbenchMock.client.createRecord.mockResolvedValue({ record: { id: 'rec_1', version: 1, data: {} } })
+
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Name\tWarehouse\nAlpha\tA1'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    const selects = Array.from(document.body.querySelectorAll('.meta-import__field-select')) as HTMLSelectElement[]
+    expect(selects.map((select) => select.value)).toEqual(['fld_name', '__create__'])
+    expect(document.body.textContent).toContain('1 column(s) will be created as new text fields.')
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Import 1 record'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(20)
+
+    expect(workbenchMock.client.createField).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.createField).toHaveBeenCalledWith({
+      sheetId: 'sheet_orders',
+      name: 'Warehouse',
+      type: 'string',
+    })
+    expect(workbenchMock.client.createRecord).toHaveBeenCalledWith({
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+      data: { fld_name: 'Alpha', fld_warehouse: 'A1' },
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(showSuccessSpy).toHaveBeenCalledWith('1 record imported', undefined)
+    expect(document.body.querySelector('.meta-import-modal')).toBeNull()
+  })
+
+  /**
+   * Pins the `:existing-field-names="importExistingFieldNames"` binding on the MetaImportModal tag
+   * (MultitableWorkbench.vue) end-to-end through the REAL modal. Drop that one template line and the
+   * modal falls back to `props.fields` — i.e. `importSurfaceFields`, which has ALREADY stripped these
+   * two columns — so both headers look "missing from the sheet", both default to the create sentinel
+   * and the import silently grows shadow `Score (2)` / `Secret (2)` text columns next to the real
+   * ones (export → re-import round trip).
+   *
+   * The two fields are chosen because they are the only shapes that can tell the two lists apart:
+   *  - fld_score: importSurfaceFields drops it via effectiveFieldPermissions[...].readOnly
+   *  - fld_secret: propertyVisibleWorkbenchFields drops it via property.hidden (filterPropertyVisibleFields)
+   * A `type: 'formula'` field would NOT work as a probe here: importSurfaceFields keeps it (it is
+   * property-visible and carries no readOnly permission), so it reaches the modal inside `props.fields`
+   * and the fallback would see its name anyway — the mutation would stay green.
+   */
+  it('will not offer to create a column that already exists as a read-only / hidden field on the sheet', async () => {
+    mountWorkbench([
+      { id: 'fld_name', name: 'Name', type: 'string' },
+      { id: 'fld_score', name: 'Score', type: 'number' },
+      { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+    ])
+    // Field-level permission read-only: the workbench strips fld_score out of importSurfaceFields,
+    // so the modal never receives it in `fields` — only `existingFieldNames` still carries the name.
+    gridMock.fieldPermissions.value = { fld_score: { visible: true, readOnly: true } }
+    workbenchMock.client.createRecord.mockResolvedValue({ record: { id: 'rec_1', version: 1, data: {} } })
+
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Name\tScore\tSecret\nAlpha\t9\tclassified'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    const selects = Array.from(document.body.querySelectorAll('.meta-import__field-select')) as HTMLSelectElement[]
+    expect(selects.map((select) => select.value)).toEqual(['fld_name', '', ''])
+    // "Create" stays OFFERED (an explicit manual choice is allowed), but the option label must promise
+    // the name that would actually be created — the planner suffixes it because the sheet already owns
+    // "Score"/"Secret". Without the binding the modal thinks the names are free and promises 「Score」.
+    const createOptionLabels = selects.map((select) =>
+      Array.from(select.options).find((option) => option.value === '__create__')?.textContent ?? null,
+    )
+    expect(createOptionLabels).toEqual([
+      'Create field "Name (2)" (text)',
+      'Create field "Score (2)" (text)',
+      'Create field "Secret (2)" (text)',
+    ])
+    expect(document.body.textContent).toContain(
+      '2 column(s) match an existing field that cannot be imported into (read-only, formula, or not permitted) and were skipped.',
+    )
+    expect(document.body.textContent).not.toContain('will be created as new text fields')
+
+    Array.from(document.body.querySelectorAll('.meta-import__actions .meta-import__btn'))
+      .find((button) => button.textContent?.includes('Import 1 record'))
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(20)
+
+    expect(workbenchMock.client.createField).not.toHaveBeenCalled()
+    expect(workbenchMock.client.createRecord).toHaveBeenCalledTimes(1)
+    expect(workbenchMock.client.createRecord).toHaveBeenCalledWith({
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+      data: { fld_name: 'Alpha' },
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(showSuccessSpy).toHaveBeenCalledWith('1 record imported', undefined)
+  })
 })
