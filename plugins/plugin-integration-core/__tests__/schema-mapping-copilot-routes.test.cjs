@@ -37,6 +37,11 @@ function stubServices(overrides = {}) {
     externalSystemRegistry: {
       async upsertExternalSystem() { return {} },
       async getExternalSystem() { return {} },
+      // G4/M2 (#5553 §3): `getExternalSystemForAdapter` is a registration-time REQUIREMENT now, so
+      // every mount — including a copilot suite that never loads an external system — has to name
+      // it. Deliberately a distinct function rather than an alias of the public accessor: aliasing
+      // is what makes a re-degraded call site look green.
+      async getExternalSystemForAdapter() { throw new Error("unexpected getExternalSystemForAdapter: the copilot routes load no external system") },
       async deleteExternalSystem() { return {} },
       async listExternalSystems() { return [] },
     },

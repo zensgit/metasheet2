@@ -227,20 +227,43 @@ function inertService(methods) {
   return service
 }
 
+// The row as the registry hands it to an ADAPTER: the whole config, including the private
+// `lookupProjection` subtree that `publicRow()` deletes for `data-source:sql-readonly`
+// (external-systems.cjs PRIVATE_CONFIG_KEYS_BY_KIND). Having the private key present here is what
+// makes the two accessors below distinguishable at all.
+function adapterReadyRow(input = {}) {
+  return {
+    id: input.id,
+    tenantId: input.tenantId,
+    name: 'Readonly PLM SQL',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    config: {
+      dataSourceId: 'ds_plm',
+      object: 'DN_PDM_PathExAttrInfo',
+      lookupProjection: { table: 'DN_PDM_PathExAttrInfo' },
+    },
+  }
+}
+
 function baseServices(sourceAdapter) {
   return {
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+      // G4/M2 (#5553 §3): the two accessors are DIFFERENT objects here, not an alias, because the
+      // route under test (`loadTableActionSourceAdapter`) now reads the decrypting one and only the
+      // decrypting one. `getExternalSystem` returns the public projection the registry really
+      // returns — private config subtree deleted (`lookupProjection` for this kind), no
+      // credentials — so a call site that degraded back to it would hand the adapter a different
+      // object, not the same one under another name.
       async getExternalSystem(input = {}) {
-        return {
-          id: input.id,
-          tenantId: input.tenantId,
-          name: 'Readonly PLM SQL',
-          kind: 'data-source:sql-readonly',
-          role: 'source',
-          status: 'active',
-          config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
-        }
+        const row = adapterReadyRow(input)
+        const { lookupProjection, ...publicConfig } = row.config
+        return { ...row, config: publicConfig }
+      },
+      async getExternalSystemForAdapter(input = {}) {
+        return adapterReadyRow(input)
       },
     },
     adapterRegistry: {
