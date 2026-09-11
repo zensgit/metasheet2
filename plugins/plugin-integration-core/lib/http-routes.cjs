@@ -6384,6 +6384,24 @@ function requireStockPreparationAudit() {
         // (`job.actionSnapshot.target.objectId` — the same sheet this plan will be applied to,
         // never the live binding, which may have been re-pointed since the expansion was sealed).
         // `undefined` => the frozen-template bands, i.e. byte-identical to the pre-wiring plan.
+        //
+        // WHAT IT COSTS ON A DEPLOYMENT WITH NO PRODUCTION POLICY — the DEFAULT deployment, and the
+        // half the production-bound note further down does not cover. A pack's `ext_` plm_system
+        // column now joins the COMPARED band while this family still supplies no `extFieldMapping`,
+        // so the expansion rows carry no `ext_` cell and an existing value compared against an
+        // absent one reads as CHANGED. With no bound configured nothing refuses that: every row
+        // that already holds an `ext_` value flips from SKIP to a REAL patchRecord on EVERY
+        // refresh, and that patch stamps `lastPlmRefreshDecision: 'update'` plus a
+        // `lastPlmConflictSummary` naming the `ext_` column as the reason — a reason the patch does
+        // NOT honour, because `pickFields` leaves that very column out of it. Both stamps are
+        // plm_system DISPLAY columns with no downstream consumer, so the price is write volume
+        // (order of magnitude: rows-carrying-an-`ext_`-value x ~47ms of server wall-clock per row,
+        // measured in the W8-4 note in stock-preparation-apply-writer.cjs) plus a refresh record
+        // that overstates what was written — never a lost cell. It lasts until an `extFieldMapping`
+        // reaches this path or `changedFields` is narrowed to cells the incoming row actually
+        // defines (the SHARED planner, a separate decision). Pinned by `the default deployment pays
+        // in writes and in an unhonoured refresh reason` in
+        // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs.
         installedFieldProperties: await resolveInstalledFieldProperties(req, action),
       })
       return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(planned)))
@@ -6484,12 +6502,15 @@ function requireStockPreparationAudit() {
       // absent cell is not an equal cell), so a row that was SKIPped before the band became reachable
       // is now an UPDATE and is counted below. On a deployment whose owner configured a production
       // policy this can push a refresh past `maxCleanRows` and 403 it — every round, not
-      // occasionally, for as long as the mapping is missing. The direction is the safe one: the
-      // refusal is fail-closed and lands BEFORE any write, so an over-count costs a refresh and never
-      // a row (the patch omits the `ext_` id either way — see the notice above `computeDryRun`'s
-      // caller). Fixing it at the root means narrowing `changedFields` to cells the incoming row
-      // actually defines, which changes the SHARED planner the small-BOM path runs on and is a
-      // separate decision, not a drive-by here. Pinned by `the widened band is counted by the
+      // occasionally, for as long as the mapping is missing. WHERE THIS BOUND EXISTS the direction is
+      // the safe one: the refusal is fail-closed and lands BEFORE any write, so an over-count costs a
+      // refresh and never a row (the patch omits the `ext_` id either way — see the notice above
+      // `computeDryRun`'s caller). That safety is about the REFUSAL, not about the flip: on the
+      // DEFAULT deployment (no production policy at all) nothing refuses, and the same flip is paid
+      // in real writes and in an overstated refresh record instead — disclosed at the plan route
+      // above, where the band enters. Fixing it at the root means narrowing `changedFields` to cells
+      // the incoming row actually defines, which changes the SHARED planner the small-BOM path runs
+      // on and is a separate decision, not a drive-by here. Pinned by `the widened band is counted by the
       // production clean-row bound` in
       // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs.
       const planDecisions = (pendingJob && pendingJob.plan && Array.isArray(pendingJob.plan.decisions)) ? pendingJob.plan.decisions : []
