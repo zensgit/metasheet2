@@ -46,6 +46,40 @@
   另有一条断言"无可收窄时根本不查注册表"（admin、以及只读演员）。
 - §3 纯函数真值表 + `isPluginManagedSheetFailClosed` 三态（有行/无行/抛错）。
 
+## 2.1 双解析器一致性（本机真跑）
+
+`packages/core-backend/tests/unit/multitable-managed-sheet-schema-write-gate-resolver-parity.test.ts`
+— 6 用例，本机 **6 passed / 6**。
+
+针对的是设计文档 §3.3 的第二个能力解析器（`sheet-capabilities.ts:247 resolveSheetCapabilitiesForUser`，
+Yjs/collab、automation、OAPI token 的能力口）。每个用例把**同一个**（用户、表、授权、admin 标志）输入
+分别喂给两条解析器（各自一份同形状的假 DB，唯一的差别就是它们自己的代码），断言的是
+两边 `canManageFields` **彼此相等**，不只是各自等于某个常量：
+
+| # | 用例 | 结论 |
+| --- | --- | --- |
+| 1 | 托管表 × 非 admin × 表级全写授权 | 两边都 `false` |
+| 2 | 非托管表，同一演员、同一授权 | 两边都 `true` |
+| 3 | 注册表查询抛错（`42P01`） | 两边都 `false`（fail-closed），且两边 `canEditRecord` 仍为 `true` |
+| 4 | 托管表 × admin | 两边都 `true`（admin 豁免逐字一致） |
+| 5 | 托管表 × 非 admin：数据面 | 两边 `canEditRecord` 都为 `true` |
+| 6 | "无可收窄就不查注册表" | 非 admin 持位时两边都发了注册表读；admin 时两边都没发 |
+
+演员**不带任何全局权限码**（`PERMISSIONS = []`），`canManageFields` 只可能来自表级全写授权被
+`applyContextSheetSchemaWriteGrant` 抬起来的那一位——也就是本门要收窄的那一层，两条解析器逐字共用的那一步。
+
+### 变异（本机实跑，未落盘）
+
+摘掉**第二解析器**的接线（`sheet-capabilities.ts:274-280` 整块删除，import 保留），其余不动：
+
+| 变异 | 结果 | 哪些格变红 |
+| --- | --- | --- |
+| 去掉第二解析器接线 | **3 failed / 3 passed** | #1 托管表非 admin（`viaUser` 收到 `true`，与 `viaRequest` 的 `false` 不等）、#3 fail-closed（同上）、#6 注册表读（`userLog` 里一条都没有） |
+
+`#2 / #4 / #5` 在变异下仍绿——正确：那三格本来就是"两边都 true"或"数据面不动"，摘掉门不改变它们，
+这恰好说明红的三格是被**接线本身**而不是被别的东西钉住的。变异后立即还原，还原文件与备份逐字节相同
+（`git diff` 回到只有 21 行新增）。
+
 ## 3. 变异表（本机实跑，未落盘）
 
 基线：该文件 16/16 绿。每次变异只改一处，跑完立刻还原（还原后与备份逐字节相同）。
@@ -112,6 +146,44 @@ M1 里 `PATCH` 那格在 mock pool 下变红的形态是 500 而不是 200 —�
   + SQL pin 那 1 格（B 里 pin 已按带门的新值，接线摘掉自然不匹配）+ `plm-disable-routes.test.ts` 1 格
   （A 绿 B 红 C 绿，抖动件，与本门无关）。
 
+### 4.3 第二解析器接线后的受影响套件（本机实跑，未跑全量）
+
+内存吃紧，只跑**受影响**的套件：先 grep 出第二解析器的全部直接调用方
+（`resolveSheetCapabilitiesForUser`）与间接调用方（automation-service 的 FWB 保存门、routes/api-tokens、
+index.ts 的 collab/Yjs 接线），再逐个跑它们对应的 spec。
+
+| 套件 | 结果 |
+| --- | --- |
+| `tests/unit/multitable-managed-sheet-schema-write-gate-resolver-parity.test.ts`（新增） | 6 passed |
+| `tests/unit/multitable-managed-sheet-schema-write-gate.test.ts` | 16 passed |
+| `tests/unit/approval-projection-capabilities-for-user.test.ts` | 7 passed |
+| `tests/unit/yjs-hardening.test.ts` | 7 passed |
+| `tests/unit/yjs-poc.test.ts` | 28 passed |
+| 第一批合计（一次跑） | **64 passed / 64** |
+| `tests/unit/multitable-automation-service.test.ts` | 52 passed |
+| `tests/unit/automation-testrun-gate.test.ts` | 16 passed |
+| `tests/unit/api-token-webhook.test.ts` | passed |
+| `tests/unit/multitable-manage-schema-permission-matrix.test.ts` | 99 passed |
+| `tests/unit/multitable-member-group-acl-hardening.test.ts` | passed |
+| `tests/unit/approval-fwb-number-mapping-gate.test.ts` | **1 failed**（见下，与本改动无关） |
+| 第二批合计（一次跑） | **219 passed / 220，1 failed** |
+| `tests/integration/dingtalk-group-destination-routes.api.test.ts` | 13 passed |
+
+`pnpm --filter @metasheet/core-backend type-check`（`tsc --noEmit`）：**0 错**。
+
+**假 SQL 夹具：本轮一个都不用补。** 第二解析器的门带"无可收窄就不查注册表"前置
+（`sheet-capabilities.ts:274`），而既有用例里走这条解析器的演员要么是 admin、要么没有全局
+`multitable:manage-schema`、也没有表级 `canRead && canWrite` 授权（`yjs-hardening.test.ts` 那格是
+read + write-own，`applyContextSheetSchemaWriteGrant` 不抬这一位），于是**新查询一次也没发出去**，
+throw-on-unknown 的假 query 不会被触发。首提交给 `multitable-context.api.test.ts` 补应答那类假红
+（f66badf00）在本轮没有复现。补过的文件清单：**空**。
+
+那一格 `approval-fwb-number-mapping-gate.test.ts` 的红是 **Windows CRLF 检出导致的本机假红**，与本改动无关，
+已逐字证伪：该文件 `git status` 干净（本支一个字节没动 `approval-fwb-activation.ts`），
+工作树（CRLF）sha256 = `e8e393b7…babc0`，而 git blob（LF）sha256 =
+`46f54ec5b7918388cb2cc5a8a5e2bf1e092963f310118220194d3eb707e00ad2`，与用例里的
+`PINNED_SHA256`（`approval-fwb-number-mapping-gate.test.ts:17`）**逐字节相同**。CI 是 LF 检出，绿。
+
 ## 5. CI 接线（两点法）
 
 - 真库件从无库默认配置里排除：`packages/core-backend/vitest.config.ts:1521`
@@ -129,3 +201,11 @@ M1 里 `PATCH` 那格在 mock pool 下变红的形态是 500 而不是 200 —�
   真库道第一次跑是它们的第一次实测。
 - 变异探针只作用于无库那半（本机唯一可执行的一半）。真库那七格的"去掉守卫必红"未在本机演示。
 - `GET /context` 的能力口径未对齐（设计文档 §4）：托管表上的字段管理 UI 仍然可见，点击得 403。
+- 第二解析器这一轮**没跑全量**（内存吃紧，按受影响面跑，见 §4.3）。没跑的包括：core-backend 无库全量
+  （首提交跑过三轮，本轮未重跑）、需要 `DATABASE_URL` 的真库道整套（`approval-record-projection.test.ts`、
+  `multitable-p2-fwb-eight-scenario-matrix.test.ts`、`multitable-permmatrix-b1-*-realdb`、
+  `multitable-w11/w13-*-realdb`、`multitable-fwb-update-activation-realdb`、
+  `approval-projection-participant-read.db.test.ts` 等——本机无 PG/无 docker）。已逐个 grep 确认
+  这些真库件里只有 `approval-projection-participant-read.db.test.ts:99` 断言 `canManageFields`，
+  且断言的是"投影表上非 admin 全为 false"，本门只收窄不放宽，不可能把它从 false 变 true。
+- 第二解析器的变异探针只作用于一致性用例文件（本机可执行的那一半）；没有在全量尺度上复现它的红格。

@@ -27,9 +27,13 @@
 - `restrictManagedSheetSchemaWriteCapabilities`（:69）— 纯函数：非 admin × 托管表 ⇒ `canManageFields: false`；
   其余情况原样返回（返回同一对象引用，无复制、无漂移）。
 
-接线在 `permission-service.ts:1787-1800`，位置在 `applyContextSheetSchemaWriteGrant`（:1786）之后、
-`restrictApprovalProjectionCapabilitiesPerRow`（:1806）与 `restrictElearningProjectionCapabilities`（:1810）之前，
-与那两个投影同形（判定由调用方查、纯函数做降权、lookup 失败 fail-closed）。
+接线共**两处**（两个能力解析器各一，逐字同形，见 §3.3）：
+
+- `permission-service.ts:1787-1800`（请求绑定解析器），位置在 `applyContextSheetSchemaWriteGrant`（:1786）之后、
+  `restrictApprovalProjectionCapabilitiesPerRow`（:1806）与 `restrictElearningProjectionCapabilities`（:1810）之前，
+  与那两个投影同形（判定由调用方查、纯函数做降权、lookup 失败 fail-closed）。
+- `sheet-capabilities.ts:264-281`（userId 键解析器），位置在 `applyContextSheetSchemaWriteGrant`（:263）之后、
+  `restrictApprovalProjectionCapabilitiesPerRow`（:306）与 `restrictElearningProjectionCapabilities`（:330）之前。
 
 两处与裁定原文的出入，先点名：
 
@@ -76,17 +80,57 @@ message:"Insufficient permissions"}}`；AI 那条本来就是自己拼的同码 
 2. **全局派生的三条路由** — `PATCH /bases/:baseId`（univer-meta.ts:7348）、`POST /templates`（:7442）、
    `DELETE /templates/:templateId`（:7552）用的是 `deriveCapabilities(access.permissions, ...)`（全局派生，
    与具体 sheet 无关）。没有 sheetId 可判，也不改任何托管表的列集。
-3. **`sheet-capabilities.ts:resolveSheetCapabilitiesForUser`**（Yjs/collab、api-token、automation 的能力口）—
-   全仓 grep `.canManageFields` 的消费者只有 permission-service.ts:1485、
-   recovery-authorization-stability.ts:27（两次解析取交集，两次都已被本门收窄）和 multitable-ai.ts:1514；
-   那个 user-keyed 解析器的调用方只读 `canRead / canCreateRecord / canEditRecord / canManageSheetAccess`
-   （index.ts:4096/4110/4132/4226/4360、automation-service.ts:2291/2330、routes/api-tokens.ts）。
-   也就是说那条链上**今天没有 schema 写面**，加一道无法被测试触发的门就拿不到"去掉它测试就红"的证据，
-   所以本 PR 不加，只在此备案：将来若有人在那条链上读 `canManageFields` 去写 schema，需要同样收窄。
-4. **`DELETE /api/multitable/sheets/:sheetId`** — 已有 `resolveSheetDeleteRefusal` 的 409 门
+3. ~~**`sheet-capabilities.ts:resolveSheetCapabilitiesForUser`**~~ — 初版把它排除在外（理由：那条链上今天
+   没有 schema 写面，拿不到"去掉它测试就红"的证据）。**已改判并在本支补接线**，见 §3.3。
+4. **第三个解析器 `services/approval-record-link-txn-auth.ts:679 resolveSheetCapabilitiesForUserOnQuery`**
+   — 事务内、queryFn 绑定的解析器，同样自己组合 `applyContextSheetSchemaWriteGrant`（:723）并克隆了
+   approval 投影那一道（:728-741），**既没有 e-learning 那一道、也没有托管表这一道**。消费者
+   （univer-meta.ts:12384/12481 的 record-permission PUT/DELETE 读 `canManageSheetAccess`；
+   approval-fwb-activation.ts:357/496/502 读 `canManageSheetAccess`/`canEditRecord`/`canCreateRecord`
+   与 `deriveFieldPermissions`；automation-executor.ts:4003 走 `ensureRecordWriteAllowed`；
+   approval-record-link-read-projection.ts:138 只取 `canRead`）同样一处都不读 `canManageFields`。
+   本支**不动它**（越界；且它连 e-learning 那道也缺，属于另一个口径问题），在此点名备案。
+5. **`DELETE /api/multitable/sheets/:sheetId`** — 已有 `resolveSheetDeleteRefusal` 的 409 门
    （univer-meta.ts:14349），与本门并行，不重复。
-5. **`GET /api/multitable/context`**（univer-meta.ts:7910）直接调 `applyContextSheetSchemaWriteGrant`，
+6. **`GET /api/multitable/context`**（univer-meta.ts:7910）直接调 `applyContextSheetSchemaWriteGrant`，
    不经 `resolveSheetCapabilities` ⇒ **不在本门覆盖内**，见下节误伤/口径评估。
+
+### 3.3 第二个能力解析器（本支补接，**潜伏洞不是活洞**）
+
+仓里有**两个**会把 `applyContextSheetSchemaWriteGrant` 的结果再做一轮 restrict 的 sheet 能力解析器。
+初版只在第一个上装门，第二个克隆了 approval 与 e-learning 两道投影 restrict、**独独缺托管表这道**：
+
+| # | 解析器 | 定义 | approval restrict | e-learning restrict | 托管表 restrict |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `resolveSheetCapabilitiesForAccess`（请求绑定，REST 全量） | permission-service.ts:1764 | :1806 | :1810 | **:1794**（首提交） |
+| 2 | `resolveSheetCapabilitiesForUser`（userId 键，Yjs/collab、automation、OAPI token） | sheet-capabilities.ts:247 | :306 | :330 | **:274**（本次补） |
+
+两处接线位置与形状逐字一致：都在 `applyContextSheetSchemaWriteGrant` 之后、两道投影 restrict 之前；
+都带 `!isAdminRole && capabilities.canManageFields` 的"无可收窄就不查"前置；都 admin 豁免；
+都复用同一个 `managed-sheet-schema-write-guard.ts`（判定 + 纯函数），没有第二份实现。
+
+**分类：潜伏，不是活洞。** 逐个调用方 grep `canManageFields` 及任何由它派生的 schema 写判定，结果全为 0：
+
+| 调用方 | file:line | 读到的能力位 | 有无 schema 写面 |
+| --- | --- | --- | --- |
+| collab 表房间鉴权 | index.ts:4096 | `canRead` | 无 |
+| collab 评论房间鉴权 | index.ts:4110 | `canRead` + `isAdminRole` | 无 |
+| 评论目标可读性 | index.ts:4132 | `canRead` + `isAdminRole` | 无 |
+| Yjs 记录订阅鉴权 | index.ts:4226 | `canRead`；`canWriteRecord`→`canEditRecord`；`canReadEveryYjsFieldForUser`→`Pick<…,'canEditRecord'\|'canCreateRecord'>`（collab/yjs-field-read-access.ts:44） | 无 |
+| Yjs 桥 flush 写入构建 | index.ts:4360 | `deriveFieldPermissions`→`Pick<…,'canEditRecord'\|'canCreateRecord'>`（permission-derivation.ts:79）；整个 capabilities 对象传给 `RecordWriteService.patchRecords`，而 record-write-service.ts 里 `canManageFields` **只在类型声明 :223 出现一次，无任何读取** | 无 |
+| automation FWB 保存门 1（改写者授权） | automation-service.ts:2291 | `canManageSheetAccess` | 无 |
+| automation FWB 保存门 2（创建者数据面） | automation-service.ts:2330 | `canCreateRecord` / `canEditRecord` | 无 |
+| OAPI token 的钉钉群目的地 | routes/api-tokens.ts:141 | `canManageAutomation` | 无 |
+
+全仓 `canManageFields` 的**读取点**（非类型声明、非注释）只有 `routes/univer-meta.ts`（§3.1 那张表）、
+`routes/multitable-ai.ts:1514`、`permission-service.ts:1485`、`recovery-authorization-stability.ts:27`
+与两个派生/守卫模块自身 —— 其中没有一处位于第二解析器的下游。前端与插件包里 `canManageFields`
+出现次数为 0。
+
+**那为什么还要补。** 两个解析器对同一个（用户、表、授权）输入必须给同一个答案，否则下一个在这条缝上
+读 `canManageFields` 的调用方会**静默**继承一个敞开的 schema 面；而"今天没人读"这条理由随时会过期。
+证据由一致性用例给（验证文档 §2.1）：同输入下两条解析器的 `canManageFields` 结论必须相等，
+不只是各自等于某个常量。
 
 ## 4. 误伤评估（能力位的其它消费者）
 
@@ -116,13 +160,42 @@ message:"Insufficient permissions"}}`；AI 那条本来就是自己拼的同码 
   `canManageFields`。方向是能力少给，不是多给；`plugin_multitable_object_registry` 由迁移
   `zzzz20260408123000_create_plugin_multitable_object_registry.ts` 建，正常部署里存在。
 
+### 4.1 第二解析器补接线后的误伤评估（Yjs / automation / api-token 三条路径）
+
+**行为影响：零。没有任何现有调用方因此少一位能力。** 第二解析器的八个调用方（§3.3 那张表）读的是
+`canRead / canCreateRecord / canEditRecord / canDeleteRecord / canManageSheetAccess / canManageAutomation`
+以及由 `canEditRecord|canCreateRecord` 派生的字段可写判定；本门只改 `canManageFields` 一位，
+那一位在这条链上今天没有读者。逐条：
+
+- **Yjs / collab（index.ts:4096/4110/4132/4226/4360）**：房间订阅、记录读写、桥 flush 的字段写门全部不看这一位。
+  `RecordWriteService` 收到的 capabilities 对象里这一位会在托管表上变 false，但该服务从不读它
+  （record-write-service.ts:223 只是类型字段）。**协同房间的可进入性、可写性、字段可见性逐位不变。**
+- **automation（automation-service.ts:2291/2330 的 FWB 保存门）**：门 1 看 `canManageSheetAccess`，
+  门 2 看 `canCreateRecord`/`canEditRecord` 与 `canUserWriteFwbTargetFields`（走第三个解析器 + 字段权限），
+  都与这一位无关。**托管表作为 FWB 目标表仍可被规则写数据**——这正是想要的：写数据是数据面，改列才是 schema 面。
+- **OAPI token（routes/api-tokens.ts:141）**：只看 `canManageAutomation`。**不变。**
+
+**成本：一次多余的注册表读，且只在很窄的子集上发生。** 只有"非 admin 且该位本来为 true"
+（＝持全局 `multitable:manage-schema`，或在该表上有表级 `canRead && canWrite` 授权）时才会多发一条
+`SELECT 1 FROM plugin_multitable_object_registry WHERE sheet_id = $1 LIMIT 1`（主键命中）。
+需要留意的是这条链上有两个**热**调用点：Yjs 订阅鉴权（index.ts:4226，每次 subscribe 一次）与
+桥 flush 写入构建（index.ts:4360，每次去抖 flush 一次，不是每次击键）。两者在该子集上各多一条索引命中读，
+与同一函数里既有的 approval 投影探测（:264 的 `meta_sheets … base_id`）、e-learning 投影读（:288）同量级；
+大多数协同演员（只读者、write-own 持有者）根本不进这个分支。
+
+**fail-closed 在这条链上的方向也一致**：注册表读不到时，第二解析器同样把非 admin 的 `canManageFields` 降为
+false，而 `canRead`/`canEditRecord` 不受牵连（一致性用例里对两条解析器都断言了这一点）——
+协同/自动化/OAPI 三条路径在注册表故障时**不会掉线**。
+
 ## 5. 本 PR 动了哪些文件
 
 | 文件 | 性质 |
 | --- | --- |
 | `packages/core-backend/src/multitable/managed-sheet-schema-write-guard.ts` | 新增：纯函数 + fail-closed 判定 |
-| `packages/core-backend/src/multitable/permission-service.ts:1787-1800` | 接线（唯一的产品代码改动，+18 行） |
+| `packages/core-backend/src/multitable/permission-service.ts:1787-1800` | 接线①：请求绑定解析器（+18 行） |
+| `packages/core-backend/src/multitable/sheet-capabilities.ts:264-281` | 接线②：userId 键解析器（+21 行，含 import；§3.3） |
 | `packages/core-backend/tests/unit/multitable-managed-sheet-schema-write-gate.test.ts` | 新增：无库半（真路由 + 真 permission service） |
+| `packages/core-backend/tests/unit/multitable-managed-sheet-schema-write-gate-resolver-parity.test.ts` | 新增：双解析器一致性（§3.3 / 验证文档 §2.1） |
 | `packages/core-backend/tests/integration/multitable-managed-sheet-schema-write-gate.db.test.ts` | 新增：真库件 |
 | `packages/core-backend/tests/unit/multitable-permission-subject-hydration.test.ts` | 夹具补一条注册表应答（验证文档 §4.1） |
 | `packages/core-backend/tests/unit/multitable-recovery-archive-writer-closure-routes.test.ts` | SQL 序列 sha256 pin 重打（验证文档 §4.1） |
@@ -134,7 +207,8 @@ message:"Insufficient permissions"}}`；AI 那条本来就是自己拼的同码 
 
 非 admin 且该位为 true 时，每次 sheet 能力解析多一条
 `SELECT 1 FROM plugin_multitable_object_registry WHERE sheet_id = $1 LIMIT 1`（主键命中）。admin 与
-读者零新增查询（`permission-service.ts:1794` 的前置判断）。与既有 approval 投影 lookup 同量级。
+读者零新增查询（`permission-service.ts:1794` / `sheet-capabilities.ts:274` 的前置判断，两处同形）。
+与既有 approval 投影 lookup 同量级。第二解析器那两个热调用点（Yjs 订阅鉴权、桥 flush 构建）的具体口径见 §4.1。
 
 ## 7. 没做的事
 
@@ -142,3 +216,6 @@ message:"Insufficient permissions"}}`；AI 那条本来就是自己拼的同码 
   `errorCodeLabels.ts`、任何迁移、`http-routes.cjs`、`plugin-tests.yml`（s6a 打包 pin 输入）。
 - 没重构权限体系：没有动 `applyContextSheetSchemaWriteGrant` 的语义，没有新增权限码，没有改角色模型。
 - 没给 `meta_fields` 加 `(sheet_id, name)` 唯一索引（那是迁移，且会影响既有数据；本门只堵住入口）。
+- 没动第三个解析器 `approval-record-link-txn-auth.ts:679`（§3.2 第 4 条）：它同样缺托管表这道、
+  而且连 e-learning 那道也缺，属于另一个口径问题，越出本支范围；同样已确认其消费者一处都不读
+  `canManageFields`（潜伏，不是活洞）。
