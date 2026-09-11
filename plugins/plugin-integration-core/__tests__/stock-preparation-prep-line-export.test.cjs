@@ -20,6 +20,11 @@
 //   R15 a sheet whose target predates #5447 (no bindings for the five columns) still exports the
 //       original twelve, with the five reported in unresolvedColumns — never a 500
 //
+// PLUS (反馈2「导出的层级乱了」) the deterministic row order:
+//   R16 rows come out in 父组件图号 → 明细排序号 → 图号 → 唯一键 order, blank parent last, identical
+//       whatever order the records scan returned them in — the export used to inherit the records
+//       service's `ORDER BY id ASC` over random UUID ids, i.e. no order at all
+//
 // plus the module-level (no HTTP) equivalents of R1/R2/R3/R4, and the unknown-project 404 edge case
 // (R1..R5 above are all driven through the mounted route; the module suite drives
 // exportStockPreparationPrepLines directly, so a route-layer regression and a module-layer regression
@@ -68,6 +73,11 @@ const PROJECT_UNKNOWN = 'PRJ-NEVER-SYNCED'
 // A sheet caught mid-migration: one row written by the current apply path (native columns), one
 // written before this change (pack columns only), one whose native cell is an empty string.
 const PROJECT_MIXED = 'PRJ-MIXED-SOURCES'
+// A project seeded DELIBERATELY OUT OF ORDER, for R16: two 父组件图号 groups, a pack-only parent, a
+// parentless row, and two rows agreeing on both parent and 图号 (one component, two BOM paths).
+const PROJECT_ORDER = 'PRJ-ORDER'
+// The same question for 明细排序号 — the column the frozen template does not carry yet.
+const PROJECT_SORTNO = 'PRJ-SORTNO'
 
 // One row's worth of every export column + the two scope-only fields, so a seed reads like the real
 // sheet. Values are synthetic and structurally shaped (never a real customer string).
@@ -101,7 +111,12 @@ function mainRow(projectNo, overrides = {}, id) {
     warehouseDone: false,
     actualArrivalDate: '2026-09-12',
   }
-  return physicalRow(STAGING, MAIN_OBJECT_ID, { ...base, ...overrides }, id)
+  const row = { ...base, ...overrides }
+  // 唯一键 is `required: true, key: true` on the main template, so every row the apply path wrote has
+  // one and it is distinct. A seed without it would make the export's total-order tiebreak look
+  // optional when in the sheet it is not.
+  if (row.idempotencyKey === undefined) row.idempotencyKey = `idk-${projectNo}-${row.componentCode}`
+  return physicalRow(STAGING, MAIN_OBJECT_ID, row, id)
 }
 
 function seededRows() {
@@ -143,6 +158,33 @@ function seededRows() {
       parentComponentCode: '', parentComponentName: '   ', componentSpec: '',
       ext_parentDrawingNo: 'TZ-PACK2', ext_parentName: '主体-PACK2', ext_spec: 'DN400-PACK',
     }, 'rec_m3'),
+
+    // R16 ORDER SEEDS, in an order no comparator would produce (this is the random-UUID scan the
+    // export used to inherit verbatim). Their expected order is spelled out in the R16 tests.
+    mainRow(PROJECT_ORDER, { componentCode: 'DWG-9', componentName: 'B组第一件', parentComponentCode: 'TZ-B', parentComponentName: 'B主体', ext_parentDrawingNo: 'TZ-B', ext_parentName: 'B主体' }, 'rec_o1'),
+    // No parent at all — neither the native column nor the pack one.
+    mainRow(PROJECT_ORDER, {
+      componentCode: 'DWG-1', componentName: '无父件行',
+      parentComponentCode: undefined, parentComponentName: undefined,
+      ext_parentDrawingNo: undefined, ext_parentName: undefined,
+    }, 'rec_o2'),
+    // Same component, same parent, two BOM paths: only 唯一键 separates them.
+    mainRow(PROJECT_ORDER, { componentCode: 'DWG-2', componentName: '二号路径B', idempotencyKey: 'idk-o-2b', parentComponentCode: 'TZ-A', parentComponentName: 'A主体', ext_parentDrawingNo: 'TZ-A', ext_parentName: 'A主体' }, 'rec_o3'),
+    mainRow(PROJECT_ORDER, { componentCode: 'DWG-1', componentName: 'A组一号件', parentComponentCode: 'TZ-A', parentComponentName: 'A主体', ext_parentDrawingNo: 'TZ-A', ext_parentName: 'A主体' }, 'rec_o4'),
+    mainRow(PROJECT_ORDER, { componentCode: 'DWG-2', componentName: '二号路径A', idempotencyKey: 'idk-o-2a', parentComponentCode: 'TZ-A', parentComponentName: 'A主体', ext_parentDrawingNo: 'TZ-A', ext_parentName: 'A主体' }, 'rec_o5'),
+    // A pack-only parent: the printed 父组件图号 comes from ext_parentDrawingNo, so it must sort
+    // into the TZ-A group rather than into the blank band.
+    mainRow(PROJECT_ORDER, {
+      componentCode: 'DWG-0', componentName: 'A组零号件',
+      parentComponentCode: undefined, parentComponentName: undefined,
+      ext_parentDrawingNo: 'TZ-A', ext_parentName: 'A主体(包列)',
+    }, 'rec_o6'),
+
+    // 明细排序号 seeds: the 图号 order (S1, S5, S9) and the 明细栏 order (S9, S1, then the row with
+    // no number) disagree on purpose, so which key won is never ambiguous.
+    mainRow(PROJECT_SORTNO, { componentCode: 'DWG-S1', componentName: 'S组明细二', componentSortNo: 20, parentComponentCode: 'TZ-S', parentComponentName: 'S主体', ext_parentDrawingNo: 'TZ-S', ext_parentName: 'S主体' }, 'rec_s1'),
+    mainRow(PROJECT_SORTNO, { componentCode: 'DWG-S9', componentName: 'S组明细一', componentSortNo: 10, parentComponentCode: 'TZ-S', parentComponentName: 'S主体', ext_parentDrawingNo: 'TZ-S', ext_parentName: 'S主体' }, 'rec_s2'),
+    mainRow(PROJECT_SORTNO, { componentCode: 'DWG-S5', componentName: 'S组无排序号', parentComponentCode: 'TZ-S', parentComponentName: 'S主体', ext_parentDrawingNo: 'TZ-S', ext_parentName: 'S主体' }, 'rec_s3'),
   ]
 }
 
@@ -195,13 +237,15 @@ function decoyRows() {
 
 // `boundSheet` is the sheet the deployment's table action points at: SANDBOX_SHEET models a default
 // install (apply wrote the twin), MAIN_SHEET models an owner-configured production one.
-function moduleSubstrate({ boundSheet = SANDBOX_SHEET } = {}) {
+// `seedOrder` re-orders the seeds before they reach the substrate — the ONE thing a random-UUID scan
+// varies between two deployments holding the same rows (R16).
+function moduleSubstrate({ boundSheet = SANDBOX_SHEET, seedOrder = (rows) => rows } = {}) {
   const records = makeStrictRecordsApi({
     stagingProjectId: STAGING,
     objectIdBySheetId: { [MAIN_SHEET]: MAIN_OBJECT_ID, [SANDBOX_SHEET]: MAIN_OBJECT_ID },
     rowsBySheet: {
-      [MAIN_SHEET]: boundSheet === MAIN_SHEET ? seededRows() : decoyRows(),
-      [SANDBOX_SHEET]: boundSheet === SANDBOX_SHEET ? seededRows() : decoyRows(),
+      [MAIN_SHEET]: boundSheet === MAIN_SHEET ? seedOrder(seededRows()) : decoyRows(),
+      [SANDBOX_SHEET]: boundSheet === SANDBOX_SHEET ? seedOrder(seededRows()) : decoyRows(),
     },
   })
   return { records, target: targetFor(boundSheet) }
@@ -991,6 +1035,118 @@ async function moduleTargetPredatingPR5447StillExportsAndReportsTheFive() {
   assert.equal(result.rows.length, 2, 'R15: the workbook is still produced (not an error)')
 }
 
+// ---------------------------------------------------------------------------
+// R16 层级序 — the workbook's ROW ORDER is a function of the rows, not of the scan
+// ---------------------------------------------------------------------------
+//
+// 反馈2「导出的层级乱了」. The export never sorted: it projected rows in `queryRecords` order, which
+// with no `orderBy` is the records service's `ORDER BY id ASC` over `rec_${randomUUID()}` ids — a
+// random order that also changes whenever a re-pull re-creates a row. These three witnesses pin the
+// replacement order (父组件图号 → 明细排序号 → 图号 → 唯一键) at the MODULE level, where the route
+// and the xlsx builder both inherit it.
+
+/** [父组件图号, 图号, 名称] per exported row — the three cells the order is visible in. */
+function orderedTriples(result) {
+  return result.rows.map((cells) => [
+    cells[columnIndex('parentComponentCode')],
+    cells[columnIndex('componentCode')],
+    cells[columnIndex('componentName')],
+  ])
+}
+
+async function moduleExportOrderIsTheAgreedHierarchyOrder() {
+  const { records, target } = moduleSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records,
+    target,
+    projectNo: PROJECT_ORDER,
+    permission: 'admin',
+  })
+  assert.deepEqual(
+    orderedTriples(result),
+    [
+      // TZ-A first (码点序: 'TZ-A' < 'TZ-B'), and the PACK-ONLY row joins its group: its native
+      // 父组件图号 is empty and the value the workbook prints comes from ext_parentDrawingNo, so the
+      // comparator must read the same fallback the projection does — sorting on the native column
+      // alone would exile this row to the blank band.
+      ['TZ-A', 'DWG-0', 'A组零号件'],
+      ['TZ-A', 'DWG-1', 'A组一号件'],
+      // Same parent AND same 图号 (one component reached through two BOM paths — the 反馈1 shape
+      // this change does NOT fix): ordered by 唯一键, never by scan order.
+      ['TZ-A', 'DWG-2', '二号路径A'],
+      ['TZ-A', 'DWG-2', '二号路径B'],
+      ['TZ-B', 'DWG-9', 'B组第一件'],
+      // BLANK PARENT LAST — a row with no parent trails the grouped ones instead of sitting between
+      // two groups (code-unit order would otherwise put '' first and split the workbook's head).
+      [null, 'DWG-1', '无父件行'],
+    ],
+    'R16: 父组件图号 → 图号 → 唯一键, blank parent last, pack fallback inside its own group',
+  )
+  assert.deepEqual(result.unresolvedColumns, [], 'R16: the order-only ids never surface as unresolved COLUMNS')
+}
+
+async function moduleExportOrderIsIndependentOfTheScanOrder() {
+  // The same rows, handed to the module in the opposite order — the one thing a random-UUID scan
+  // varies. A byte-identical projection is the proof the workbook is a function of the row set.
+  const forward = moduleSubstrate()
+  const reversed = moduleSubstrate({ seedOrder: (rows) => rows.slice().reverse() })
+  const args = { projectNo: PROJECT_ORDER, permission: 'admin' }
+  const first = await exportStockPreparationPrepLines({ recordsApi: forward.records, target: forward.target, ...args })
+  const second = await exportStockPreparationPrepLines({ recordsApi: reversed.records, target: reversed.target, ...args })
+  assert.deepEqual(second.rows, first.rows, 'R16: reversing the scan order changes nothing in the workbook')
+  assert.equal(
+    JSON.stringify(second.rows),
+    JSON.stringify(first.rows),
+    'R16: byte-identical — including the two rows that agree on parent and 图号 (唯一键 breaks the tie both times)',
+  )
+  // And a second export off the same substrate repeats itself (no hidden dependence on call count).
+  const again = await exportStockPreparationPrepLines({ recordsApi: forward.records, target: forward.target, ...args })
+  assert.equal(JSON.stringify(again.rows), JSON.stringify(first.rows), 'R16: two exports of an unchanged sheet are identical')
+}
+
+async function moduleExportOrderPrefersComponentSortNoWhereTheColumnExists() {
+  // 明细排序号 is keyed for a column the frozen template does not have yet (SORT_FIELD_IDS explains
+  // why). This drives BOTH deployments through the same seeds:
+  //   - a target that BINDS `componentSortNo` (the shape the day that owner-gated column ships) —
+  //     the 明细栏 sequence wins over 图号;
+  //   - a target that does NOT (every deployment today) — the key is simply absent, the order falls
+  //     through to 图号, and nothing is reported as unresolved.
+  const { records, target } = moduleSubstrate()
+  const withSortNo = {
+    ...target,
+    fieldIdMap: { ...target.fieldIdMap, componentSortNo: physicalFieldId(STAGING, MAIN_OBJECT_ID, 'componentSortNo') },
+  }
+  const sorted = await exportStockPreparationPrepLines({
+    recordsApi: records,
+    target: withSortNo,
+    projectNo: PROJECT_SORTNO,
+    permission: 'admin',
+  })
+  assert.deepEqual(
+    sorted.rows.map((cells) => cells[columnIndex('componentCode')]),
+    ['DWG-S9', 'DWG-S1', 'DWG-S5'],
+    'R16: 明细排序号 10 before 20, and the row without one comes last — 图号 order would have been S1, S5, S9',
+  )
+  assert.deepEqual(sorted.unresolvedColumns, [], 'R16: a BOUND order-only id is not a column either')
+
+  const today = await exportStockPreparationPrepLines({
+    recordsApi: records,
+    target,
+    projectNo: PROJECT_SORTNO,
+    permission: 'admin',
+  })
+  assert.deepEqual(
+    today.rows.map((cells) => cells[columnIndex('componentCode')]),
+    ['DWG-S1', 'DWG-S5', 'DWG-S9'],
+    'R16: an unbound 明细排序号 does not participate — 图号 orders the group, deterministically',
+  )
+  assert.deepEqual(
+    today.unresolvedColumns,
+    [],
+    'R16: an UNBOUND order-only id must NOT be reported as an unresolved column (it is not a column; reporting it would claim a blank cell that does not exist)',
+  )
+}
+
 async function main() {
   await moduleReturnsExactAgreedColumnsForASeededProject()
   await moduleNeverLeaksOtherProjectsRows()
@@ -1008,6 +1164,10 @@ async function main() {
   await moduleCompletionFlagsRenderYesNoTextAndBlankWhenUnset()
   await moduleDateCompletionColumnsPassThroughLikeDemandDate()
   await moduleTargetPredatingPR5447StillExportsAndReportsTheFive()
+
+  await moduleExportOrderIsTheAgreedHierarchyOrder()
+  await moduleExportOrderIsIndependentOfTheScanOrder()
+  await moduleExportOrderPrefersComponentSortNoWhereTheColumnExists()
 
   await routeReturnsExactColumnsForSeededProject()
   await routeScopingProofOtherProjectRowsNeverAppear()
