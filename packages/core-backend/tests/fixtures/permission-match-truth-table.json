@@ -1,0 +1,47 @@
+{
+  "$comment": [
+    "THE single truth table for permission-code matching. Read from disk by BOTH sides:",
+    "  packages/core-backend/tests/unit/permission-match.test.ts   -> src/auth/permission-match.ts",
+    "  apps/web/tests/permission-match-parity.spec.ts              -> apps/web/src/utils/permission-match.ts",
+    "                                                                 and useAuth().hasPermission",
+    "Neither implementation may be changed without the other: whichever side moves first turns the",
+    "other side's run of this table red. Rows are stated as claims about the CODE ALGEBRA ONLY —",
+    "the admin/roles bypass lives in the callers (useAuth's isAdmin snapshot, the router's",
+    "isPlatformAppAdminRequest), which is why `admin:all` below is NOT a wildcard here."
+  ],
+  "cases": [
+    { "name": "no codes at all refuses", "codes": [], "required": "stock-prep:read", "expected": false },
+    { "name": "exact hit", "codes": ["stock-prep:read"], "required": "stock-prep:read", "expected": true },
+    { "name": "global wildcard", "codes": ["*:*"], "required": "stock-prep:read", "expected": true },
+    { "name": "resource wildcard", "codes": ["stock-prep:*"], "required": "stock-prep:read", "expected": true },
+    { "name": "resource wildcard covers admin action", "codes": ["stock-prep:*"], "required": "stock-prep:admin", "expected": true },
+    { "name": "resource admin covers a non-admin action", "codes": ["stock-prep:admin"], "required": "stock-prep:read", "expected": true },
+    { "name": "resource admin covers operate", "codes": ["stock-prep:admin"], "required": "stock-prep:operate", "expected": true },
+    { "name": "resource admin matches itself exactly", "codes": ["stock-prep:admin"], "required": "stock-prep:admin", "expected": true },
+    { "name": "write implies read", "codes": ["stock-prep:write"], "required": "stock-prep:read", "expected": true },
+    { "name": "read does NOT imply write", "codes": ["stock-prep:read"], "required": "stock-prep:write", "expected": false },
+    { "name": "write does NOT imply operate", "codes": ["stock-prep:write"], "required": "stock-prep:operate", "expected": false },
+    { "name": "another resource's wildcard does not leak", "codes": ["integration:*"], "required": "stock-prep:read", "expected": false },
+    { "name": "another resource's admin does not leak", "codes": ["integration:admin"], "required": "stock-prep:read", "expected": false },
+    { "name": "integration:write is not stock-prep:operate (R-11)", "codes": ["integration:write"], "required": "stock-prep:operate", "expected": false },
+    { "name": "admin:all is an admin MARKER, not a code wildcard", "codes": ["admin:all"], "required": "stock-prep:read", "expected": false },
+    { "name": "bare resource code grants nothing", "codes": ["stock-prep"], "required": "stock-prep:read", "expected": false },
+    { "name": "requirement without an action refuses", "codes": ["stock-prep:read"], "required": "stock-prep", "expected": false },
+    { "name": "requirement with an empty resource refuses", "codes": ["stock-prep:read"], "required": ":read", "expected": false },
+    { "name": "blank requirement is satisfied by anyone", "codes": [], "required": "   ", "expected": true },
+    { "name": "requirement is trimmed before matching", "codes": ["stock-prep:read"], "required": "  stock-prep:read  ", "expected": true },
+    { "name": "held codes are trimmed before matching", "codes": ["  stock-prep:read  "], "required": "stock-prep:read", "expected": true },
+    { "name": "three-segment requirement takes resource+action from the first two", "codes": ["stock-prep:write"], "required": "stock-prep:read:extra", "expected": true },
+    { "name": "case is significant", "codes": ["Stock-Prep:Read"], "required": "stock-prep:read", "expected": false },
+    { "name": "one held code among many is enough", "codes": ["multitable:read", "stock-prep:operate", "elearning:read"], "required": "stock-prep:operate", "expected": true }
+  ],
+  "anyOfCases": [
+    { "name": "empty declaration is public", "codes": [], "required": [], "expected": true },
+    { "name": "declared but unusable fails closed", "codes": ["stock-prep:admin"], "required": ["", "   "], "expected": false },
+    { "name": "any one of the declared codes suffices", "codes": ["stock-prep:read"], "required": ["stock-prep:read", "stock-prep:operate", "stock-prep:admin"], "expected": true },
+    { "name": "last declared code suffices", "codes": ["stock-prep:admin"], "required": ["after_sales:read", "stock-prep:admin"], "expected": true },
+    { "name": "no declared code hit refuses", "codes": ["elearning:read"], "required": ["stock-prep:read", "stock-prep:operate", "stock-prep:admin"], "expected": false },
+    { "name": "holding nothing refuses a declared app", "codes": [], "required": ["stock-prep:read"], "expected": false },
+    { "name": "global wildcard satisfies any declaration", "codes": ["*:*"], "required": ["stock-prep:read", "elearning:admin"], "expected": true }
+  ]
+}

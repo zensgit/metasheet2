@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
-import { setPlatformAppRuntimeInstallState, type PlatformAppSummary } from '../src/composables/usePlatformApps'
+import { setPlatformAppRuntimeInstallState, usePlatformApps, type PlatformAppSummary } from '../src/composables/usePlatformApps'
 
 const apiGetMock = vi.fn()
 
@@ -94,6 +94,11 @@ describe('PlatformAppLauncherView', () => {
   beforeEach(() => {
     setPlatformAppRuntimeInstallState('after-sales', null)
     apiGetMock.mockReset()
+    localStorage.clear()
+    // `apps` is a MODULE-level singleton and `fetchApps()` returns early when it is already
+    // populated, so without this reset every case after the first would render the previous
+    // case's list instead of its own.
+    usePlatformApps().apps.value = []
   })
 
   afterEach(() => {
@@ -137,4 +142,78 @@ describe('PlatformAppLauncherView', () => {
     expect(container.textContent).toContain('partial')
     expect(container.textContent).toContain('Reinstall app')
   })
+
+  /**
+   * G-7 (4), browser side. `GET /api/platform/apps` is already filtered server-side
+   * (packages/core-backend/src/routes/platform-apps.ts#canSeePlatformApp); this case pins the
+   * SECOND line, which is what keeps a list the server served to some other principal -- or any
+   * summary already sitting in the shared `apps` ref -- from rendering a card whose shell route
+   * would 404. Remove `accessibleApps` from the view and this goes red.
+   */
+  it('does not render a card for an app whose declared codes the caller holds none of', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['elearning:read']))
+    apiGetMock.mockResolvedValueOnce({
+      list: [
+        createInstanceApp({
+          id: 'stock-preparation',
+          displayName: 'Stock Preparation',
+          runtimeBindings: undefined,
+          permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin'],
+        }),
+      ],
+    })
+
+    const View = (await import('../src/views/PlatformAppLauncherView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.mount(container)
+    await flushUi(6)
+
+    expect(container.querySelectorAll('.platform-app-launcher__card')).toHaveLength(0)
+    expect(container.textContent).not.toContain('Stock Preparation')
+    expect(container.textContent).toContain('No platform apps discovered.')
+  })
+
+  it('renders the same app once the caller holds ONE of its declared codes', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['stock-prep:operate']))
+    apiGetMock.mockResolvedValueOnce({
+      list: [
+        createInstanceApp({
+          id: 'stock-preparation',
+          displayName: 'Stock Preparation',
+          runtimeBindings: undefined,
+          permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin'],
+        }),
+      ],
+    })
+
+    const View = (await import('../src/views/PlatformAppLauncherView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.mount(container)
+    await flushUi(6)
+
+    expect(container.querySelectorAll('.platform-app-launcher__card')).toHaveLength(1)
+    expect(container.textContent).toContain('Stock Preparation')
+  })
+
+  it('still renders an app that declares no codes at all (owner decision 3: public)', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify([]))
+    apiGetMock.mockResolvedValueOnce({
+      list: [createInstanceApp({ runtimeBindings: undefined, permissions: [] })],
+    })
+
+    const View = (await import('../src/views/PlatformAppLauncherView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.mount(container)
+    await flushUi(6)
+
+    expect(container.querySelectorAll('.platform-app-launcher__card')).toHaveLength(1)
+    expect(container.textContent).toContain('After Sales')
+  })
+
 })

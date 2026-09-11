@@ -93,13 +93,15 @@ Lock-11 的两支迁移(`zzzz20260823050000_provision_zero_membership_active_use
 
 ### G-7 权限运行时强制(App Center)
 - **要求**:备料作为应用入口时,**服务端与前端双侧**权限过滤生效,不出现"无权用户可见但打不开的假入口"。
-- **四个前置(源:`docs/development/stock-preparation-generalization-and-scenario-packaging-proposal-20260717.md` §5.3 P1),2026-08-22 核实全部未达成**:
+- **四个前置(源:`docs/development/stock-preparation-generalization-and-scenario-packaging-proposal-20260717.md` §5.3 P1),2026-08-22 核实全部未达成;④ 已于 2026-09-11 达成,①②③ 仍未达成**:
   | # | 前置 | 现状 | 证据 |
   |---|---|---|---|
   | ① | 一个插件可注册多个子应用 | 未达成 | `packages/core-backend/src/platform/app-registry.ts` 每插件只收一个 manifest |
-  | ② | manifest 支持 `requiredPermissions` | 未达成 | 全部 `app.manifest.json` 零匹配 |
+  | ② | manifest 支持 `requiredPermissions` | 未达成(字段名口径待定) | 全部 `app.manifest.json` 零匹配 `requiredPermissions`;实际落地的字段叫 `permissions`(`packages/core-backend/src/platform/app-manifest.ts:253`),四个 manifest 均已声明,④ 消费的就是它 —— 是否就以 `permissions` 认定 ② 达成,留给 owner |
   | ③ | 功能 / 就绪态声明 | 未达成 | 全部 manifest 零匹配 |
-  | ④ | 服务端 + 前端双侧权限过滤 | 未达成 | `packages/core-backend/src/routes/platform-apps.ts:79` `router.get('/')` 无权限过滤、无 `requireAccess` |
+  | ④ | 服务端 + 前端双侧权限过滤 | 已达成(2026-09-11) | 服务端 `packages/core-backend/src/routes/platform-apps.ts:67` `canSeePlatformApp` —— `:139` 过滤 `GET /`、`:190` 无权则 404(与"不存在"同体同文,无 existence oracle);前端 `apps/web/src/composables/usePlatformApps.ts:444` `isPlatformAppAccessible` / `:458` `accessibleApps`,由 `views/PlatformAppLauncherView.vue:116` 与 `views/PlatformAppShellView.vue:221` 共用 |
+- **④ 的口径与双侧同形**(2026-09-11,PR 内替 owner 预设,可否决):任一命中即可见(manifest 的 `permissions` 是"这个应用用到的码",不是"全都要有");平台管理员(`role=admin` / `roles` 含 `admin` / `*:*` / `users.is_admin`)旁路;`permissions` 为空数组的 app 视为公开(四个内置 app 均非空,只影响未来的 app),声明了但规范化后为空(`[""]`)则 fail-closed;`GET /:appId` 无权返回 404 而非 403。两侧跑同一套代数:`packages/core-backend/src/auth/permission-match.ts` 与 `apps/web/src/utils/permission-match.ts`(后者被 `composables/useAuth.ts#hasPermission` 复用),由同一张真值表 `packages/core-backend/tests/fixtures/permission-match-truth-table.json` 钉住 —— 单侧改动会让另一侧的测试变红,因此"服务端藏了前端还显示"这类假入口有测试兜底。
+- **④ 的证据**:`packages/core-backend/tests/unit/platform-apps-router.test.ts`(22 用例,含无权账号列表不含该 app / 详情 404 与"不存在"同体 / 任一码即可见 / admin 四种旁路 / 空声明公开 / 无权时不发实例查询)、`packages/core-backend/tests/unit/permission-match.test.ts`(34)、`apps/web/tests/permission-match-parity.spec.ts`(61)、`apps/web/tests/platform-app-launcher.spec.ts` 与 `platform-app-shell.spec.ts` 的隐藏用例;每条守卫都做过单点变异(去掉即红)。**仍未做**:一次真账号的端到端双侧拒绝验证(退出条件里的那一条)仍待 222 上机补。
 - **附带未决**:owner 决策 #5(`stock-prep:read/operate/admin` 权限词表命名与迁移路径)仍 OPEN,是 V4 前置;现状权限过宽——操作员需持 `integration:write`(`apps/web/src/router/appRoutes.ts` `/stock-prep` 路由)。
 - **退出条件**:①–④ 全部达成 + 决策 #5 落定 + 一次无权账号访问被双侧拒绝的验证。
 - **现状**:☐ 未达成
