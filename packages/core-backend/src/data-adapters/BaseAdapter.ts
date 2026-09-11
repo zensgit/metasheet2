@@ -58,6 +58,18 @@ export interface DataSourceConfig {
   }
 }
 
+/**
+ * A JOIN predicate as STRUCTURE rather than as SQL text: `left = right`, both sides identifiers the
+ * adapter quotes with its dialect rule. `op` exists to say out loud that equality is the only
+ * comparison this shape can express — a value comparison belongs in `where` (bound parameters), and a
+ * richer ON expression belongs in the raw-SQL lane (`query()`), which the write gate classifies.
+ */
+export interface JoinOnPredicate {
+  left: string
+  right: string
+  op?: '='
+}
+
 export interface QueryOptions {
   limit?: number
   offset?: number
@@ -66,7 +78,19 @@ export interface QueryOptions {
   select?: string[]
   joins?: Array<{
     table: string
-    on: string
+    /**
+     * G52B: the STRUCTURED form is the contract — both sides are IDENTIFIERS (1–3 dot segments) that
+     * the dialect adapter quotes, never SQL text. `MSSQLAdapter.select()` REFUSES the `string`
+     * alternative with a coded 400 (`SQLSERVER_JOIN_ON_UNSUPPORTED`) and emits no statement.
+     *
+     * The `string` alternative survives in the TYPE only because `PostgresAdapter`/`MySQLAdapter` still
+     * concatenate it verbatim. That is a REGISTERED known difference, not an endorsement: those two
+     * adapters quote identifiers their own ASCII way and need the same change with a different escape
+     * (`"` doubled) and their own matrix — see
+     * docs/development/mssql-join-on-hardening-design-20260912.md §6. Repo-wide there is no production
+     * caller of `joins` on ANY adapter today (design §2), which is what makes narrowing it safe.
+     */
+    on: JoinOnPredicate | string
     type?: 'inner' | 'left' | 'right' | 'full'
   }>
   raw?: boolean
