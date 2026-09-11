@@ -18,6 +18,17 @@ const {
   quoteSqlServerIdentifier,
 } = require('@metasheet/mssql-readonly-utils')
 
+// THIS LANE HAS NO WRITE GATE. It runs statements on its own pool via `request.query(...)`; the
+// default-deny `assertSqlWriteAllowed` chokepoint lives in core-backend's MSSQLAdapter and never sees
+// anything built here. What holds the line today is upstream instead of downstream: this executor only
+// ever BUILDS a bounded SELECT (`buildSelectQuery`) and `insertMany` is hard-disabled
+// (SQLSERVER_WRITE_EXECUTOR_DISABLED) — there is no classifier behind that to catch a statement that
+// turned out to say something else. So these two patterns are not a duplicate of the shared helper's
+// rule — they are this lane's ONLY pre-quoting gate, deliberately ASCII-only and stricter than
+// `@metasheet/mssql-readonly-utils` (G52 widened that one to Unicode for the generic data-source path;
+// K3 WISE ships ASCII table names like `t_ICItem`, so there is nothing to gain here). BEFORE RELAXING
+// EITHER PATTERN, PUT A WRITE GATE IN FRONT OF THIS POOL. `k3-wise-adapters.test.cjs`
+// (`testK3SqlServerExecutorKeepsK3IdentifierPolicy`) pins the non-inheritance.
 const SIMPLE_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
 const QUALIFIED_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000

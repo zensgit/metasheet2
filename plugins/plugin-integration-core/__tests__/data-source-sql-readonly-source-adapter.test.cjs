@@ -237,6 +237,50 @@ async function main() {
     }
   }
 
+  // 4e-bis (G52). The projection's names may be 中文 / contain spaces — a customer DBA's real schema —
+  //     because the CHARACTER rule here is the shared helper's `assertSqlServerIdentifierPart`, the same
+  //     function that brackets the name and doubles any `]` before it becomes SQL. What stays refused is
+  //     what stays refused everywhere: SQL punctuation, a third part (cross-database), a pre-bracketed
+  //     name, and the two prototype-pollution keys.
+  {
+    const f = fakeFacade()
+    const a = adapterWith(f, 'owner-42', {
+      kind: ADAPTER_KIND,
+      config: {
+        dataSourceId: 'pg-1',
+        lookupProjection: {
+          baseObject: '仓库.物料清单',
+          lookupObject: '仓库.零件 库',
+          localKey: '物料编码',
+          foreignKey: '零件 编码',
+          fields: { FNumber: '编号', FName: '名称' },
+          maxRows: 3,
+        },
+      },
+    })
+    assert.equal(typeof a.read, 'function', 'a Unicode-named projection must construct')
+
+    for (const lookupProjection of [
+      { ...LOOKUP_SYSTEM.config.lookupProjection, lookupObject: 'tenant.dbo.parts' }, // three parts
+      { ...LOOKUP_SYSTEM.config.lookupProjection, lookupObject: '[dbo].[parts]' }, //   pre-bracketed
+      { ...LOOKUP_SYSTEM.config.lookupProjection, lookupObject: 'dbo.parts ' }, //      trailing space
+      { ...LOOKUP_SYSTEM.config.lookupProjection, localKey: 'part-id' }, //             punctuation
+      { ...LOOKUP_SYSTEM.config.lookupProjection, localKey: 'dbo.part_id' }, //         qualified column
+      { ...LOOKUP_SYSTEM.config.lookupProjection, foreignKey: 'a\nb' }, //              newline
+      { ...LOOKUP_SYSTEM.config.lookupProjection, foreignKey: 'x'.repeat(129) }, //     over sysname
+    ]) {
+      const rejected = fakeFacade()
+      assert.throws(
+        () => adapterWith(rejected, 'owner-42', {
+          kind: ADAPTER_KIND,
+          config: { dataSourceId: 'pg-1', lookupProjection },
+        }),
+        /lookupProjection/,
+      )
+      assert.equal(rejected.calls.select.length, 0)
+    }
+  }
+
   // 4f. The projection is bound to one base object and its saved row cap. Mismatch, over-limit,
   //     and watermark modes fail before source contact.
   {
