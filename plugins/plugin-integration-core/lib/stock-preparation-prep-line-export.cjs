@@ -318,14 +318,37 @@ function columnSourceValue(data, column) {
 //      number come before rows that do not, blank-last like every other key.
 //   3. 图号 `componentCode` — the order a reader expects inside one parent, and the one the legacy
 //      system's own query used alongside the parent code.
-//   4. 唯一键 `idempotencyKey` — TOTAL-ORDER TIEBREAK, not a business key. Two rows can legitimately
-//      agree on everything above: the same component reached through two BOM paths under the same
-//      parent is exactly the duplication 反馈1 is about, and THIS change does not fix that. Without
-//      this last key those rows would keep the scan order, i.e. the workbook would still be
-//      UUID-ordered precisely where the duplicates are, and two exports of an unchanged sheet could
-//      differ. `idempotencyKey` is `required: true, key: true` on the main template, so it is
-//      present and distinct on every row the apply path wrote, which makes the order a TOTAL one:
-//      the output is a function of the row set alone, never of the order it was scanned in.
+//   4. 唯一键 `idempotencyKey` — TIEBREAK, not a business key. Two rows can legitimately agree on
+//      everything above: the same component reached through two BOM paths under the same parent is
+//      exactly the duplication 反馈1 is about, and THIS change does not fix that. Without this key
+//      those rows would keep the scan order, i.e. the workbook would still be UUID-ordered precisely
+//      where the duplicates are.
+//      SCOPE OF THIS KEY, stated rather than assumed: `idempotencyKey` is `required: true,
+//      key: true` in the main table TEMPLATE, and that is plugin template metadata — the multitable
+//      layer does not enforce `required` on writes (packages/core-backend/src/multitable
+//      /provisioning.ts never reads it). So it is present and distinct on every row THE APPLY PATH
+//      WROTE THROUGH A TARGET THAT BINDS IT, and on those rows alone. A row typed in by hand in the
+//      grid, or any row on a target whose fieldIdMap has no `idempotencyKey` binding, carries none —
+//      which is why keys 5 and 6 exist.
+//   5. 名称 `componentName` — the last key a reader can SEE. It only decides rows that already agree
+//      on parent, 明细排序号, 图号 and 唯一键, i.e. in practice hand-added rows; ordering those by
+//      name beats ordering them by an opaque id.
+//   6. 物理记录 id (ROW_IDENTITY_KEY) — THE key that makes the order total, and the only one that can
+//      be: it is unique per row within a sheet by construction (`rec_${randomUUID()}`). With it the
+//      output is a function of the ROW SET alone — the same rows scanned in any order produce the
+//      same workbook, including the two rows above that a template-metadata `required` does not in
+//      fact guarantee apart. Note what it is NOT: it carries no business meaning, so it is the
+//      bottom of the key list, never a substitute for one of the five above.
+//
+// PRECONDITION ON KEY 1 — say it out loud, because a deployment can silently fail it. 父组件图号 is
+// only a 层级 on a sheet whose target actually binds `parentComponentCode` (or a pack carrying
+// `ext_parentDrawingNo`). An install provisioned before that column shipped binds NEITHER until the
+// additive repair verb heals it and its action target is rebound (see REQUIRED_EXPORT_FIELD_IDS
+// above): every row then reads blank on key 1, the whole table lands in one blank band, and the
+// workbook degrades to a pure 图号 order. That is deterministic and repeatable — this change's
+// actual guarantee — but it is NOT hierarchical, and on such a deployment the hierarchy 反馈2 asks
+// for arrives only after the repair, not from this module. `parentComponentCode` shows up in
+// `unresolvedColumns` exactly so an operator can tell that case from "this project has no parents".
 //
 // TEXT COMPARISON IS LOCALE-FREE BY CONSTRUCTION. `<` / `>` on strings is UTF-16 code-unit order,
 // identical in a zh-CN runtime and an en-US CI one. `localeCompare` / `Intl.Collator` is
@@ -335,6 +358,12 @@ function columnSourceValue(data, column) {
 // (For the BMP text these columns hold — 图号/名称 — code-unit order and code-point order coincide.)
 const PARENT_CODE_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'parentComponentCode')
 const COMPONENT_CODE_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentCode')
+const COMPONENT_NAME_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentName')
+
+// Where `unmapRow` parks the row's PHYSICAL record id so the comparator can reach it. Deliberately
+// not a logical field id and deliberately not projected: no EXPORT_COLUMN reads it, so it can never
+// reach a cell, and the double underscore keeps it out of any collision with a mapped column key.
+const ROW_IDENTITY_KEY = '__prepLineRecordId'
 
 // Blank (absent / null / whitespace-only) collapses to '' — the same blankness the projection's own
 // fallback uses (isBlankCell), so a cell that prints empty also sorts as empty.
@@ -369,7 +398,8 @@ function compareOrderNumber(left, right) {
 
 /**
  * The export's row order. Pure and non-mutating: returns a new array, and its result depends only on
- * the row CONTENT, never on the order the rows arrived in.
+ * the row CONTENT (including each row's physical record id — see ROW_IDENTITY_KEY), never on the
+ * order the rows arrived in.
  */
 function sortExportRows(rows) {
   return rows.slice().sort((left, right) => {
@@ -385,7 +415,14 @@ function sortExportRows(rows) {
       orderText(columnSourceValue(right, COMPONENT_CODE_ORDER_COLUMN)),
     )
     if (byCode !== 0) return byCode
-    return compareOrderText(orderText(left.idempotencyKey), orderText(right.idempotencyKey))
+    const byKey = compareOrderText(orderText(left.idempotencyKey), orderText(right.idempotencyKey))
+    if (byKey !== 0) return byKey
+    const byName = compareOrderText(
+      orderText(columnSourceValue(left, COMPONENT_NAME_ORDER_COLUMN)),
+      orderText(columnSourceValue(right, COMPONENT_NAME_ORDER_COLUMN)),
+    )
+    if (byName !== 0) return byName
+    return compareOrderText(orderText(left[ROW_IDENTITY_KEY]), orderText(right[ROW_IDENTITY_KEY]))
   })
 }
 
@@ -438,6 +475,12 @@ function unmapRow(row, fieldIdMap) {
   for (const [logical, physical] of Object.entries(fieldIdMap)) inverse[physical] = logical
   const out = {}
   for (const [key, value] of Object.entries(data)) out[inverse[key] || key] = value
+  // The record's own id, carried alongside the cells for ONE purpose: the export's last order key
+  // (sortExportRows). `queryRecords` returns it as a top-level `id` (LoadedMultitableRecord), i.e.
+  // outside `data`, so it is not a cell and unmapping cannot have translated it. Only taken when the
+  // record is the `{ id, data }` shape — when `recordData` fell back to treating the record itself
+  // as the data bag there is no record id to speak of, and the key simply stays absent.
+  if (data !== row && typeof row?.id === 'string' && row.id !== '') out[ROW_IDENTITY_KEY] = row.id
   return out
 }
 
@@ -567,6 +610,7 @@ module.exports = {
     unmapRow,
     READ_PAGE_LIMIT,
     READ_MAX_PAGES,
+    ROW_IDENTITY_KEY,
     SCOPE_FIELD_IDS,
     SORT_FIELD_IDS,
   },
