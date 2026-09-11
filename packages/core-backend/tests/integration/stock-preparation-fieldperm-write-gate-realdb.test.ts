@@ -749,6 +749,109 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
   })
 
   /**
+   * ═══ C0 AGAINST REAL POSTGRES: THE UPSERT'S OWNERSHIP GUARD, BOTH BRANCHES. ═══
+   *
+   * The guard is a `CASE WHEN created_by = ANY($5::text[])` inside an `ON CONFLICT DO UPDATE`, and
+   * its whole behaviour is Postgres semantics no in-memory model can settle: whether the ELSE branch
+   * really leaves the row's own `visible`/`read_only`/`created_by` bytes alone, and whether the
+   * marker set really excludes the bare legacy marker when adoption was not proven.
+   *
+   * The row seeded here is the one the field actually carries: this plugin's BARE marker, with an
+   * operator's pre-stamping decision layered on top (`visible = false` — they HID the column;
+   * `read_only = false` — they RELAXED the denial). Before this fix the bare marker was bound to the
+   * guard unconditionally, so an entries-only install put both dimensions back to true and
+   * re-stamped the row with its own pack id — reverting a human's decision, counting it in
+   * `applied`, and reporting it in nothing at all.
+   */
+  test('C0 real-DB: an ADDITIVE install leaves an unclaimable pack-less row byte-identical', async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
+    const service = new StockPreparationFieldPermissionsService()
+
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,false,false,$4)`,
+      [RC_SHEET, RC_MOVING, RC_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+    )
+
+    // NO REGION, NO PROOF — the additive path, which classifies nothing and therefore has only the
+    // upsert's guard between it and the operator's row.
+    const result = await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET,
+      entries: [{ fieldId: RC_MOVING, roleId: RC_PURCHASING }],
+      packId: RC_PACK,
+    })
+    expect(result.removed).toEqual([])
+
+    // ALL THREE COLUMNS TOOK THE ELSE BRANCH, in the database rather than in a model of it.
+    expect(await rcRow(RC_MOVING, RC_PURCHASING)).toEqual({
+      visible: false,
+      read_only: false,
+      created_by: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+    })
+    // …and the column really is still writable by 采购: the install did not silently re-deny it.
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'still-relaxed')).status)
+      .toBe(200)
+
+    // WITH THE PROOF the same call adopts the row — the fix narrows WHEN, it does not remove the
+    // capability. `visible` comes back up (this port can only ever widen read) and the denial is
+    // re-asserted under this pack's marker.
+    await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET,
+      entries: [{ fieldId: RC_MOVING, roleId: RC_PURCHASING }],
+      packId: RC_PACK,
+      legacyAdoptable: true,
+    })
+    expect(await rcRow(RC_MOVING, RC_PURCHASING)).toEqual({
+      visible: true,
+      read_only: true,
+      created_by: `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_PACK}`,
+    })
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'now-denied')).status)
+      .toBe(403)
+  })
+
+  /**
+   * THE OTHER TWO SHAPES THE GUARD MUST REFUSE, against real Postgres: `created_by` NULL (what every
+   * operator row in the field carries) and a SIBLING pack's marker. `NULL = ANY(...)` is NULL, not
+   * true — the ELSE branch — and that is load-bearing rather than incidental: a `NOT IN`-shaped
+   * guard would make the same row take the THEN branch.
+   */
+  test('C0 real-DB: a NULL-provenance row and a sibling pack\'s row both take the ELSE branch', async () => {
+    await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
+    const service = new StockPreparationFieldPermissionsService()
+
+    await q(
+      `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
+       VALUES ($1,$2,'role',$3,false,false,NULL), ($1,$4,'role',$3,false,false,$5)`,
+      [
+        RC_SHEET, RC_MOVING, RC_PURCHASING, RC_STABLE,
+        `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`,
+      ],
+    )
+
+    await service.applyRoleWriteScopes({
+      sheetId: RC_SHEET,
+      entries: [
+        { fieldId: RC_MOVING, roleId: RC_PURCHASING },
+        { fieldId: RC_STABLE, roleId: RC_PURCHASING },
+      ],
+      packId: RC_PACK,
+      // Even WITH the proof: adoption covers the pack-less marker, never a human's row and never a
+      // sibling pack's.
+      legacyAdoptable: true,
+    })
+
+    expect(await rcRow(RC_MOVING, RC_PURCHASING)).toEqual({
+      visible: false, read_only: false, created_by: null,
+    })
+    expect(await rcRow(RC_STABLE, RC_PURCHASING)).toEqual({
+      visible: false,
+      read_only: false,
+      created_by: `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_OTHER_PACK}`,
+    })
+  })
+
+  /**
    * ═══ THE CROSS-PACK REFUSAL, INSIDE THE WRITE'S OWN TRANSACTION. ═══
    *
    * The installer refuses this in its pre-flight, over an untouched sheet. The port refuses it AGAIN
