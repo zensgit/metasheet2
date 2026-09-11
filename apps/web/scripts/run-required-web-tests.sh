@@ -17,8 +17,14 @@
 # Maintenance: when you add a web spec to approval-web-guard or multitable-web-guard, add it here
 # too (same two-point discipline). The 19 pre-existing red files (approvalStaticPicker,
 # approvalMobileDetailActions, several multitable-workbench/*, attendance/*, featureFlags,
-# k3WiseSetup, platform-app-launcher, …) are deliberately OUT of this set until fixed; broaden
+# k3WiseSetup, …) are deliberately OUT of this set until fixed; broaden
 # toward full-suite-minus-quarantine once they are triaged.
+# 2026-09-11: `platform-app-launcher` LEFT that quarantine list (18 remain). Its single red case was
+# ONE stale assertion, not a product bug: it asserted `apiGet('/api/after-sales/projects/current')`
+# with no second argument while usePlatformApps.ts:202-204 has been passing
+# `{ suppressUnauthorizedRedirect: true }` on that runtime-install probe since before this branch.
+# The assertion was repaired to the real call shape (product code untouched) and the file is wired
+# below together with the other two App Center permission gates.
 #
 # CASING CONVENTION (备料, noted 2026-09-08 — no token added, no behaviour change): every 备料
 # vitest token below is CamelCase — `StockPreparation*` / `stockPrep*` (see the many `Stock
@@ -608,6 +614,34 @@ npx vitest run multitable-field-config-panel --reporter=dot
 # green in isolation and in this batch before being wired; neither collides with any existing token
 # in either direction (checked the full token list in this file).
 npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
+
+# App Center 双侧权限过滤 (G-7 ④, 2026-09-11): THREE tokens, all for the browser half of the App
+# Center visibility gate. The server half (`routes/platform-apps.ts#canSeePlatformApp`) is already
+# judged — plugin-tests.yml's `Run core-backend tests` step runs the whole no-DB vitest suite, which
+# collects `tests/unit/platform-apps-router.test.ts` and `tests/unit/permission-match.test.ts` by the
+# default include glob. The browser half had NO judge at all: `permission-match-parity` and
+# `platform-app-shell` are new files and `platform-app-launcher` sat in this file's quarantine list
+# (header note above), so a later commit could delete `accessibleApps` / `isPlatformAppAccessible`
+# and CI would stay green — a guard with no referee.
+#   * `permission-match-parity` — 61 cases driven by the SHARED truth table
+#     (packages/core-backend/tests/fixtures/permission-match-truth-table.json, read from disk by BOTH
+#     sides): it is the only thing that reddens when the browser algebra drifts from the server's
+#     `src/auth/permission-match.ts`, which is what would produce the "server hides it, browser shows
+#     it" fake entry G-7 forbids.
+#   * `platform-app-shell` — the shell view refuses to render an app whose declared codes the caller
+#     holds none of, and renders it on ONE hit.
+#   * `platform-app-launcher` — the same decision on the card grid (hidden / shown on one code /
+#     public when the manifest declares none).
+# Substring-collision checked the way this file requires, each token run alone with
+# `npx vitest run <token> --reporter=dot`: 1 file each. In particular `platform-app-launcher` does
+# NOT also match the sibling `tests/platform-app-actions.spec.ts`, and `permission-match-parity` does
+# not sweep in `src/utils/permission-match.ts` (not a `*.spec.ts`, never collected). All three
+# verified green in isolation and batched (72 tests) before being wired.
+# Two-point discipline, stated plainly: these tokens were NOT mirrored into approval-web-guard /
+# multitable-web-guard, because this PR's accepted diff is limited to packages/core-backend,
+# apps/web and one go-live-gate doc. This script IS the always-on required gate (web-tests.yml:77),
+# so the three gates do have a referee; mirroring into the two path-filtered guards is follow-up.
+npx vitest run permission-match-parity platform-app-shell platform-app-launcher --reporter=dot
 
 # 审批详情实例一致性 (instance consistency), 2026-09-06: TWO new tokens.
 #   * `approval-detail-instance-consistency` — the mounted ApprovalDetailView + REAL approval store

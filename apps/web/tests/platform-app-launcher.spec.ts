@@ -138,7 +138,15 @@ describe('PlatformAppLauncherView', () => {
     await flushUi(6)
 
     expect(apiGetMock).toHaveBeenNthCalledWith(1, '/api/platform/apps')
-    expect(apiGetMock).toHaveBeenNthCalledWith(2, '/api/after-sales/projects/current')
+    // The second argument is NOT decoration: usePlatformApps.ts:202-204 passes
+    // `{ suppressUnauthorizedRedirect: true }` on the runtime-install probe so a 401 on an app's own
+    // current-state endpoint cannot bounce the whole launcher to the login page. This assertion
+    // omitted it and had been red since that option landed (verified red at 5f4b32122, before this
+    // branch) — which is why this file sat in run-required-web-tests.sh's quarantine list and ran in
+    // NO workflow. Asserting the real call shape re-opens the file for CI.
+    expect(apiGetMock).toHaveBeenNthCalledWith(2, '/api/after-sales/projects/current', {
+      suppressUnauthorizedRedirect: true,
+    })
     expect(container.textContent).toContain('partial')
     expect(container.textContent).toContain('Reinstall app')
   })
