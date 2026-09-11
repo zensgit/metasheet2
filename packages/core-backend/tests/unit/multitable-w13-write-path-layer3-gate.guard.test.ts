@@ -9,21 +9,45 @@
  * docs/development/multitable-per-subject-field-write-gate-w13-designlock-20260705.md §1).
  * Same discipline as `multitable-stored-data-taint-chokepoint.guard.test.ts`.
  *
- * THE ENUMERATION IS A FULL SET, NOT A SAMPLE (2026-09-11). Until this revision the file enumerated
- * only the two `pat…`-prefixed members (`patchRecords` / `patchRecord`) — a hand-picked SAMPLE of the
- * write surface. Three more value-bearing ports existed and were invisible to it:
+ * SCOPE OF THE "FULL SET" CLAIM — read this before quoting the green (2026-09-11, corrected the same
+ * day). This lock is a full set WITHIN ITS OWN SCOPE, and the scope is: the three MODULES that expose a
+ * record-write API — `RecordWriteService`, `RecordService`, `multitable/records.ts`. Within them it is
+ * exhaustive: EVERY member is discovered from source, and EVERY call site of every value-bearing member
+ * is scanned across the whole `src` tree. It does NOT claim those three modules are the only code that
+ * can put a field VALUE into `meta_records.data`: raw-SQL writers live outside them
+ * (`multitable/automation-executor.ts`, `multitable/derived-write-fence.ts`,
+ * `multitable/exact-anchor-recovery-execute.ts`, the approval / e-learning projections, …). Those are
+ * OUT OF SCOPE for the layer-3 question asked here; they are instead pinned by the chokepoint test at
+ * the bottom of this file, which freezes the FILE SET allowed to run raw `INSERT/UPDATE meta_records`
+ * so that a brand-new write spine cannot appear unnoticed. Anyone who needs "every write to
+ * meta_records.data is gated" must treat those files as an open, separate case — they are named to the
+ * owner in the PR body, not silently covered here.
+ *
+ * Until this revision the file enumerated only the two `pat…`-prefixed members (`patchRecords` /
+ * `patchRecord`) — a hand-picked SAMPLE of the write surface. Three more value-bearing ports existed
+ * and were invisible to it:
  *   - `RecordService.createRecord` — a create carries field VALUES, so a column the actor may not
  *     write is reachable at create time.
  *   - `RecordService.restoreRecord` — re-materializes a trashed row's values.
- *   - the plugin lane's real entry points in `index.ts`, which call `multitable/records.ts`'s OWN
- *     `patchRecord`/`createRecord` through the IMPORT ALIASES `patchMultitableRecord` /
- *     `createMultitableRecord`. A `.patchRecord(`-shaped scan can never see those: there is no dot and
- *     the name differs.
+ *   - `multitable/records.ts`'s OWN `patchRecord`/`createRecord`, which callers reach as BARE function
+ *     calls under whatever local name their own `import` clause chose: `patchRecord as
+ *     patchMultitableRecord` in `index.ts`, plain `patchRecord` in
+ *     `attendance/attendance-multitable-cleaning-authority.ts`. A `.patchRecord(`-shaped scan can never
+ *     see those (there is no dot) — and pinning ONE alias literal (`patchMultitableRecord`) misses every
+ *     other importer, which is exactly how the attendance call site stayed invisible to the FIRST cut of
+ *     this lock. The scan is therefore IMPORT-BINDING-RESOLVED: per file we parse the
+ *     import clause, RESOLVE its module specifier against the importing file's own directory (so a
+ *     sibling inside `multitable/` spelling it `'./records'` is seen too — matching the literal
+ *     `multitable/records` misses exactly that case, verified with a mutation probe), take the LOCAL
+ *     name bound to the exported member (aliased or not), and count bare calls of THAT name. Namespace
+ *     imports, re-exports and `require()` of that module are separately forbidden, since any of them
+ *     would reopen an alias lane no scan can resolve.
  * So the port list itself is now DERIVED from the source of the three write surfaces
  * (`RecordWriteService`, `RecordService`, `multitable/records.ts`) and cross-checked against a frozen
  * classification: a new/renamed/removed member on ANY of those surfaces trips RED, and a port that is
  * classified as a field-value write but carries no allowlist trips RED. Deleting a port from the
- * enumeration can no longer pass silently — which is what "全集断言" means here.
+ * enumeration can no longer pass silently — which is what "全集断言" means here, with the module scope
+ * above as its explicit boundary.
  *
  * GROUNDING (verified at line level while implementing this lock, re-confirm before editing this file):
  * this is a MORE COMPLETE enumeration than the design-lock doc's own "six route sites" — that count named
@@ -101,19 +125,93 @@ function isCommentMention(src: string, idx: number): boolean {
 }
 
 /**
+ * How a port is reached from a caller.
+ *  - `method`   — `.name(`.
+ *  - `importBinding` — a BARE call of whatever LOCAL name the calling file bound the exported member
+ *    to in its `import { … } from '…/multitable/records'` clause. NEVER a hard-coded alias literal:
+ *    that was the hole (see file header) that hid `attendance-multitable-cleaning-authority.ts`.
+ */
+type Scan =
+  | { mode: 'method'; needle: string }
+  /** `needle` is the name EXPORTED by the module, not any caller's local name. `module` is the target
+   *  path RELATIVE TO `src/`, without extension. */
+  | { mode: 'importBinding'; module: string; needle: string }
+
+/** The plugin-lane module, as a path relative to `src/`. */
+const RECORDS_MODULE = 'multitable/records'
+
+/**
+ * Resolve a relative module specifier as written INSIDE `fromFile` (itself relative to `src/`) to a
+ * `src/`-relative module path. `routes/univer-meta.ts` + `'../multitable/records'` → `multitable/records`;
+ * `multitable/sheet-liveness.ts` + `'./records'` → `multitable/records`. Resolving (rather than
+ * pattern-matching the literal) is what makes a SIBLING importer inside `multitable/` visible — a
+ * `/multitable\/records$/`-shaped regex silently misses `'./records'`.
+ */
+function resolveSpecifier(fromFile: string, spec: string): string | null {
+  if (!spec.startsWith('.')) return null
+  const slash = fromFile.lastIndexOf('/')
+  const parts = slash === -1 ? [] : fromFile.slice(0, slash).split('/')
+  for (const seg of spec.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') {
+      parts.pop()
+      continue
+    }
+    parts.push(seg)
+  }
+  return parts.join('/').replace(/\.(ts|js)$/, '')
+}
+
+/** Count BARE identifier calls `name(` whose preceding char is neither an identifier char nor a dot.
+ *  A function DEFINITION line (`export async function patchRecord(`) IS bare — but no file both defines
+ *  and imports the same member, and the scan only runs on files that import it. The name inside an
+ *  `import { … }` clause is never matched because no `(` follows it there. */
+function countBareCalls(src: string, name: string): number {
+  const re = new RegExp(`(^|[^A-Za-z0-9_$.])${name}\\(`, 'g')
+  let count = 0
+  for (;;) {
+    const m = re.exec(src)
+    if (m === null) break
+    const idx = m.index + m[1].length
+    if (isCommentMention(src, idx)) continue
+    count += 1
+  }
+  return count
+}
+
+/**
+ * The LOCAL names one file binds to one exported member of a module — `patchRecord` binds to
+ * `patchRecord`, `patchRecord as patchMultitableRecord` binds to `patchMultitableRecord`. Returns an
+ * empty array when the file does not import that member at all.
+ */
+function resolveImportBindings(file: string, src: string, module: string, exported: string): string[] {
+  const out = new Set<string>()
+  const re = /import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g
+  for (;;) {
+    const m = re.exec(src)
+    if (m === null) break
+    if (isCommentMention(src, m.index)) continue
+    if (resolveSpecifier(file, m[2]) !== module) continue
+    for (const raw of m[1].split(',')) {
+      const spec = raw.trim()
+      if (spec === '') continue
+      const parsed = /^(?:type\s+)?([A-Za-z_$][A-Za-z0-9_$]*)(?:\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*))?$/.exec(spec)
+      if (parsed === null || parsed[1] !== exported) continue
+      out.add(parsed[2] ?? parsed[1])
+    }
+  }
+  return [...out]
+}
+
+/**
  * Count every non-definition, non-comment CALL site of one port in one file.
  *
  * `method` mode counts `.name(`. A method DEFINITION (`async patchRecords(input: RecordPatchInput) {`)
  * has no leading dot and is never matched. `.patchRecord(` can never match as a substring inside
  * `.patchRecords(` — the character immediately after `patchRecord` there is `s`, not `(` — so the two
  * counts never double-count each other.
- *
- * `function` mode counts a BARE identifier call `name(` whose preceding character is not an identifier
- * char and not a dot, which is how the plugin lane actually calls `multitable/records.ts` (imported
- * under an alias: `patchRecord as patchMultitableRecord`). The alias line in the `import { … }` block
- * is never matched because no `(` follows the name there.
  */
-function countCallSites(src: string, scan: { mode: 'method' | 'function'; needle: string }): number {
+function countCallSites(file: string, src: string, scan: Scan): number {
   if (scan.mode === 'method') {
     const needle = `.${scan.needle}(`
     let count = 0
@@ -127,30 +225,34 @@ function countCallSites(src: string, scan: { mode: 'method' | 'function'; needle
     }
     return count
   }
-  const re = new RegExp(`(^|[^A-Za-z0-9_$.])${scan.needle}\\(`, 'g')
   let count = 0
-  for (;;) {
-    const m = re.exec(src)
-    if (m === null) break
-    const idx = m.index + m[1].length
-    if (isCommentMention(src, idx)) continue
-    count += 1
+  for (const local of resolveImportBindings(file, src, scan.module, scan.needle)) {
+    count += countBareCalls(src, local)
   }
   return count
 }
 
-function countCallSitesByFile(scan: { mode: 'method' | 'function'; needle: string }): Map<string, number> {
+function countCallSitesByFile(scan: Scan): Map<string, number> {
   const byFile = new Map<string, number>()
   for (const file of RUNTIME_FILES) {
-    const n = countCallSites(read(file), scan)
+    const n = countCallSites(file, read(file), scan)
     if (n > 0) byFile.set(file, n)
   }
   return byFile
 }
 
+/** Files that IMPORT one exported member of `multitable/records.ts` — call or no call. An importer that
+ *  binds the member but calls it in a shape the counter misses would otherwise be invisible. */
+function importerFiles(exported: string): string[] {
+  return RUNTIME_FILES.filter((file) => resolveImportBindings(file, read(file), RECORDS_MODULE, exported).length > 0)
+}
+
 // ══════════════════════════════════════════════════════════════════════════════════════════════════
-// THE WRITE SURFACES — the three modules whose members can put a field VALUE into `meta_records.data`.
-// The member list of each is DISCOVERED from source below; the classification beside it is frozen.
+// THE WRITE SURFACES IN SCOPE OF THIS LOCK — the three modules that expose a record-write API.
+// NOT "the only modules that can put a field VALUE into `meta_records.data`": raw-SQL writers exist
+// outside them and are pinned separately by RAW_META_RECORDS_SQL_WRITERS at the bottom of this file.
+// The member list of each surface is DISCOVERED from source below; the classification beside it is
+// frozen.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════
 
 const SURFACES = {
@@ -237,8 +339,9 @@ type PortId = `${SurfaceName}.${string}`
 type Port = {
   surface: SurfaceName
   member: string
-  /** How this port is actually CALLED in `src` — a method call, or a bare (aliased) function call. */
-  scan: { mode: 'method' | 'function'; needle: string }
+  /** How this port is actually CALLED in `src` — a method call, or a bare call of the local name each
+   *  importer bound the exported member to. */
+  scan: Scan
   sites: Record<string, SiteEntry[]>
 }
 
@@ -386,12 +489,27 @@ const WRITE_PORTS: Record<PortId, Port> = {
     },
   },
 
-  // ── THE PLUGIN LANE — invisible to any `.patchRecord(`-shaped scan (aliased bare-function calls) ──
+  // ── THE BARE-CALL LANE — invisible to any `.patchRecord(`-shaped scan, and invisible to a scan that
+  //    pins ONE alias literal. Resolved per file from the caller's own import clause. ───────────────
   'records.ts.patchRecord': {
     surface: 'records.ts',
     member: 'patchRecord',
-    scan: { mode: 'function', needle: 'patchMultitableRecord' },
+    scan: { mode: 'importBinding', module: RECORDS_MODULE, needle: 'patchRecord' },
     sites: {
+      'attendance/attendance-multitable-cleaning-authority.ts': [
+        {
+          disposition: 'GATED_BY_CALLER',
+          reason:
+            'cleanupAttendanceCleaningProposal — imports records.ts patchRecord under its PLAIN name (no ' +
+            'alias), which is why the first cut of this lock could not see it. It is NOT a second ungated ' +
+            'leg: the per-subject field gate runs in the lock chain it must pass through first — ' +
+            'cleanupAttendanceCleaningProposal → lockAttendanceCleaningSource → ' +
+            'lockAttendanceCleaningProjectionAccess, whose tail does loadFieldPermissionScopeMap + ' +
+            'deriveFieldPermissions and throws (unavailable()) if isFieldWriteForbidden holds for EITHER of ' +
+            'the exact two field ids (cleaning_requested / cleaning_reason) this call site then writes. ' +
+            'Enforced, not asserted in prose: see the attendance smoke test below.',
+        },
+      ],
       'index.ts': [
         {
           disposition: 'UNGATED_CHARACTERIZED',
@@ -416,7 +534,7 @@ const WRITE_PORTS: Record<PortId, Port> = {
   'records.ts.createRecord': {
     surface: 'records.ts',
     member: 'createRecord',
-    scan: { mode: 'function', needle: 'createMultitableRecord' },
+    scan: { mode: 'importBinding', module: RECORDS_MODULE, needle: 'createRecord' },
     sites: {
       'index.ts': [
         {
@@ -513,7 +631,7 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
       const total = [...countCallSitesByFile(port.scan).values()].reduce((a, b) => a + b, 0)
       expect(
         total,
-        `GW7 GUARD: ${portId} scans for ${port.scan.mode === 'method' ? '.' : ''}${port.scan.needle}( and found ` +
+        `GW7 GUARD: ${portId} scans for ${port.scan.mode === 'method' ? '.' : 'import-bound '}${port.scan.needle}( and found ` +
           'NOTHING in src. Either the port was renamed (fix the scan) or the write path is gone (drop the port).',
       ).toBeGreaterThan(0)
     }
@@ -526,6 +644,50 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
       assertAllowlistMatchesReality(portId)
     },
   )
+
+  // ── THE IMPORTER LAYER: for the bare-call lane, binding the member is already enough to be on the
+  //    hook. This catches an importer whose call shape the counter misses (destructured into a local,
+  //    passed as a callback, re-bound, …) — it would otherwise be a silent, invisible write path. ──
+  test.each(
+    (Object.keys(WRITE_PORTS) as PortId[]).filter((id) => WRITE_PORTS[id].scan.mode === 'importBinding'),
+  )('every file that IMPORTS %s from multitable/records.ts is in its allowlist (binding it is enough)', (portId) => {
+    const port = WRITE_PORTS[portId]
+    const scan = port.scan
+    if (scan.mode !== 'importBinding') throw new Error('unreachable')
+    expect(
+      importerFiles(scan.needle).sort(),
+      `GW7 IMPORTER LAYER: the set of src files importing '${scan.needle}' from multitable/records.ts no ` +
+        `longer equals the ${portId} allowlist. A file that imports this write function is a write path ` +
+        'even if the call-site counter cannot see its call shape — classify it (gate / GATED_BY_CALLER / ' +
+        'EXEMPT / UNGATED_CHARACTERIZED) and add it to the allowlist.',
+    ).toEqual(Object.keys(port.sites).sort())
+  })
+
+  test('no namespace import, re-export, or require() of multitable/records.ts exists (each would reopen an alias lane no scan can resolve)', () => {
+    // Each pattern captures the module SPECIFIER; it is then RESOLVED against the importing file, so a
+    // sibling inside multitable/ spelling it `'./records'` is caught too.
+    const shapes = [
+      ['namespace import', /import\s+\*\s+as\s+[A-Za-z_$][A-Za-z0-9_$]*\s+from\s*['"]([^'"]+)['"]/g],
+      ['re-export', /export\s+(?:\*|\{[^}]*\})\s*from\s*['"]([^'"]+)['"]/g],
+      ['require()', /require\(\s*['"]([^'"]+)['"]\s*\)/g],
+    ] as const
+    for (const file of RUNTIME_FILES) {
+      const src = read(file)
+      for (const [label, pattern] of shapes) {
+        const re = new RegExp(pattern.source, 'g')
+        for (;;) {
+          const m = re.exec(src)
+          if (m === null) break
+          expect(
+            resolveSpecifier(file, m[1]),
+            `GW7 IMPORTER LAYER: ${file} reaches multitable/records.ts through a ${label}. The import-binding ` +
+              'scan above resolves named imports only; a namespace/re-export/require lane would hide write ' +
+              'call sites from it. Convert it to a named import, or teach this guard to resolve the new shape.',
+          ).not.toBe(RECORDS_MODULE)
+        }
+      }
+    }
+  })
 
   // ── THE SMOKE LAYER: the dispositions that point AWAY from the call site must still hold ────────
   test('smoke: the Yjs bridge write-input builder (index.ts) textually contains the GATED_BY_CALLER gate the allowlist above relies on', () => {
@@ -545,6 +707,41 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     expect(univerMeta).toMatch(
       /isFieldWriteForbidden\(patchContext\.fieldPermissions\[fid\]\)[\s\S]{0,600}sendForbidden\(res, `Field\(s\) not writable[\s\S]{0,3000}recordService\.patchRecord\(\{/,
     )
+  })
+
+  test('smoke: the attendance cleanup site reaches records.ts patchRecord ONLY through the lock chain that runs the per-field gate', () => {
+    const file = 'attendance/attendance-multitable-cleaning-authority.ts'
+    const src = read(file)
+    /** Slice one exported function's body: from its head to the next top-level `export`. */
+    const sliceExported = (name: string): string => {
+      const head = src.indexOf(`export async function ${name}(`)
+      expect(head, `${file} no longer exports '${name}' in the shape this smoke reads`).toBeGreaterThan(-1)
+      const next = src.indexOf('\nexport ', head + 1)
+      return src.slice(head, next === -1 ? undefined : next)
+    }
+
+    // 1. The writer reaches patchRecord only AFTER awaiting the lock chain.
+    const cleanup = sliceExported('cleanupAttendanceCleaningProposal')
+    const lockAt = cleanup.indexOf('await lockAttendanceCleaningSource(')
+    const writeAt = cleanup.indexOf('await patchRecord({')
+    expect(lockAt, 'cleanupAttendanceCleaningProposal no longer awaits lockAttendanceCleaningSource').toBeGreaterThan(-1)
+    expect(writeAt, 'cleanupAttendanceCleaningProposal no longer calls records.ts patchRecord').toBeGreaterThan(lockAt)
+
+    // 2. …and that lock chain unconditionally passes through the access lock.
+    expect(sliceExported('lockAttendanceCleaningSource')).toContain('await lockAttendanceCleaningProjectionAccess(query, input)')
+
+    // 3. …whose tail is a real per-subject field gate on the SAME two field ids the write then sets.
+    const access = sliceExported('lockAttendanceCleaningProjectionAccess')
+    expect(access).toContain('loadFieldPermissionScopeMap(')
+    expect(access).toContain('deriveFieldPermissions(')
+    expect(
+      access,
+      'the attendance per-field gate (the reason this call site is GATED_BY_CALLER, not a second ungated ' +
+        'leg) is gone or reshaped — reclassify the allowlist entry before touching this assertion.',
+    ).toContain('if (Object.values(fieldIds).some(id => isFieldWriteForbidden(permissions[id]))) unavailable()')
+    // The gated ids and the written ids are the same two.
+    expect(access).toMatch(/fieldIds = \{\s*\n\s*requested:[\s\S]{0,400}reason:/)
+    expect(cleanup).toContain('changes: { [locked.fieldIds.requested]: false, [locked.fieldIds.reason]: null },')
   })
 
   test('smoke: the copy-record create site (univer-meta.ts) really filters its payload by the per-subject scope map', () => {
@@ -602,5 +799,66 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     }
     // …and the window really is the wiring (not an empty slice that would make the loop vacuous).
     expect(window).toContain('poolManager.get().transaction(')
+  })
+
+  /**
+   * THE SCOPE-BOUNDARY CHOKEPOINT — what this lock does NOT cover, pinned so it cannot grow silently.
+   *
+   * The three write SURFACES above are not the only code that can put a value into `meta_records.data`:
+   * several modules run raw `INSERT INTO meta_records` / `UPDATE meta_records … SET data = …` directly.
+   * Those bypass the surfaces entirely, so the layer-3 per-site question above never reaches them. This
+   * test does not pretend to classify their gates — it FREEZES THE FILE SET, so that a NEW module taking
+   * up raw record SQL (a brand-new write spine) trips red and gets a decision instead of landing quietly.
+   *
+   * `meta_records_trash` is a different table (soft-delete archive) and is deliberately not matched.
+   */
+  test('chokepoint: the set of files running raw INSERT/UPDATE on meta_records is frozen (a new write spine outside the three surfaces trips red)', () => {
+    const RAW_META_RECORDS_SQL_WRITERS: Record<string, string> = {
+      // ── IN SCOPE of this lock: these ARE the three write surfaces ────────────────────────────────
+      'multitable/record-write-service.ts': 'IN SCOPE — the RecordWriteService surface itself (patchRecords).',
+      'multitable/record-service.ts': 'IN SCOPE — the RecordService surface itself (patch/create/restore/delete).',
+      'multitable/records.ts': 'IN SCOPE — the plugin-lane module surface itself.',
+      // ── OUT OF SCOPE: raw-SQL writers the surface-level enumeration above can never see ──────────
+      'routes/univer-meta.ts':
+        'OUT OF SCOPE for the surface enumeration (route-level raw SQL: field-value cleanup on field delete, ' +
+        'row lock/unlock, seed/import inserts). Its per-field-gated writes go through the surfaces and ARE ' +
+        'enumerated above; these raw statements are a separate question.',
+      'multitable/automation-executor.ts':
+        'OUT OF SCOPE — automation action writes ("SET data = COALESCE(data, \'{}\'::jsonb) || $1::jsonb" plus ' +
+        'row INSERTs) carry field VALUES and never consult field_permissions. Named to the owner as an open ' +
+        'write spine; NOT covered by this lock.',
+      'multitable/automation-service.ts':
+        'OUT OF SCOPE — same shape as the executor (merge-patch of data) on the service side.',
+      'multitable/derived-write-fence.ts':
+        'OUT OF SCOPE — derived/formula write-back ("SET data = data || $1::jsonb"); system-authored values, no actor.',
+      'multitable/exact-anchor-recovery-execute.ts':
+        'OUT OF SCOPE — recovery replay writes a whole data document back under a version CAS.',
+      'multitable/auto-number-service.ts':
+        'OUT OF SCOPE — auto-number backfill (jsonb_set of one system-generated column).',
+      'multitable/approval-record-projection-service.ts':
+        'OUT OF SCOPE — approval projection INSERTs a system-authored row.',
+      'services/elearning-stats-multitable-projection.ts':
+        'OUT OF SCOPE — e-learning stats projection INSERTs a system-authored row.',
+    }
+    const raw = /(INSERT INTO|UPDATE)\s+meta_records(?![A-Za-z0-9_])/g
+    const actual: string[] = []
+    for (const file of RUNTIME_FILES) {
+      const src = read(file)
+      raw.lastIndex = 0
+      for (;;) {
+        const m = raw.exec(src)
+        if (m === null) break
+        if (isCommentMention(src, m.index)) continue
+        actual.push(file)
+        break
+      }
+    }
+    expect(
+      actual.sort(),
+      'GW7 SCOPE BOUNDARY: the set of files running raw INSERT/UPDATE on meta_records changed. A file that ' +
+        'writes meta_records directly bypasses RecordWriteService / RecordService / records.ts, so NONE of the ' +
+        'per-site layer-3 assertions above apply to it. Decide what gate it needs, then record it here with a ' +
+        'one-line IN SCOPE / OUT OF SCOPE reason. (meta_records_trash is a different table and is not matched.)',
+    ).toEqual(Object.keys(RAW_META_RECORDS_SQL_WRITERS).sort())
   })
 })

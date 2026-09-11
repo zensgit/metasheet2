@@ -1088,7 +1088,9 @@ describeIfDatabase('备料 列权限墙不在插件写路径上 — 特征化 go
     })
 
     expect(patched.data[PG_LOCKED]).toBe(PG_PROBE_VALUE)
-    expect(patched.version).toBe(2)
+    // 版本必须前进(证明真的发生了一次写),但不钉死成 2:任何 post-commit 钩子(自动编号/派生回写/
+    // 自动化)再 bump 一次版本都不该让这条特征化 golden 变红 —— 它要断言的是"写成功了",不是版本算术。
+    expect(patched.version).toBeGreaterThan(1)
     // 真的落到了库里 —— 不是 SDK 返回值自说自话。
     expect(await pgCell(PG_LOCKED)).toBe(PG_PROBE_VALUE)
 
