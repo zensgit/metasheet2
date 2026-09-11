@@ -89,6 +89,13 @@ export type WorkbenchLabelKey =
   | 'detail.checkInstallable' | 'detail.checking' | 'detail.dryRunFailed'
   | 'detail.installableYes' | 'detail.installableNo'
   | 'detail.wouldCreateTitle' | 'detail.conflictsTitle' | 'detail.conflictHint'
+  // F7 工作台「把当前数据表存为模板」对话框(G-10:zh 里 Sheet 一律叫「数据表」)
+  | 'saveTpl.open' | 'saveTpl.title' | 'saveTpl.hint'
+  | 'saveTpl.nameLabel' | 'saveTpl.fieldsLabel' | 'saveTpl.selectAll' | 'saveTpl.selectNone'
+  | 'saveTpl.shareLabel' | 'saveTpl.shareHint'
+  | 'saveTpl.submit' | 'saveTpl.saving' | 'saveTpl.cancel' | 'saveTpl.close'
+  | 'saveTpl.errorNoName' | 'saveTpl.errorNoFields' | 'saveTpl.failed'
+  | 'saveTpl.successTitle' | 'saveTpl.warningsTitle' | 'saveTpl.openCenter'
   // final audit closure follow-up: composable fallback messages (backend e.message remains raw)
   | 'error.loadSheets' | 'error.loadSheetMetadata' | 'error.loadBaseMetadata'
 
@@ -307,6 +314,36 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
     en: 'Existing objects conflict with this template. Re-check before installing.',
     zh: '存在与模板冲突的对象，安装前请重新检查。',
   },
+
+  // F7「把当前数据表存为模板」。G-10 术语词典:zh 里 Sheet = 数据表、Base = 工作区。
+  'saveTpl.open': { en: 'Save as Template', zh: '存为模板' },
+  'saveTpl.title': { en: 'Save this table as a template', zh: '把当前数据表存为模板' },
+  'saveTpl.hint': {
+    en: 'Only the structure is saved — the fields you pick and their views. No records are ever included.',
+    zh: '只保存结构:你勾选的字段和它们的视图。任何记录都不会被保存。',
+  },
+  'saveTpl.nameLabel': { en: 'Template name', zh: '模板名称' },
+  'saveTpl.fieldsLabel': { en: 'Fields to include', zh: '包含的字段' },
+  'saveTpl.selectAll': { en: 'Select all', zh: '全选' },
+  'saveTpl.selectNone': { en: 'Clear all', zh: '全不选' },
+  'saveTpl.shareLabel': { en: 'Share with this tenant', zh: '共享给本租户' },
+  'saveTpl.shareHint': {
+    en: 'Unchecked: only you can see this template.',
+    zh: '不勾选时只有你自己看得见这个模板。',
+  },
+  'saveTpl.submit': { en: 'Save as template', zh: '保存为模板' },
+  'saveTpl.saving': { en: 'Saving...', zh: '正在保存...' },
+  'saveTpl.cancel': { en: 'Cancel', zh: '取消' },
+  'saveTpl.close': { en: 'Close', zh: '关闭' },
+  'saveTpl.errorNoName': { en: 'Enter a template name.', zh: '请填写模板名称。' },
+  'saveTpl.errorNoFields': { en: 'Pick at least one field.', zh: '请至少勾选一个字段。' },
+  'saveTpl.failed': { en: 'Failed to save as template', zh: '存为模板失败' },
+  'saveTpl.successTitle': { en: 'Template saved', zh: '模板已保存' },
+  'saveTpl.warningsTitle': {
+    en: 'Some fields were downgraded in the template:',
+    zh: '以下字段在模板里做了降级:',
+  },
+  'saveTpl.openCenter': { en: 'View in Template Center', zh: '去模板中心查看' },
 
   'error.loadSheets': { en: 'Failed to load sheets', zh: '加载数据表失败' },
   'error.loadSheetMetadata': { en: 'Failed to load sheet metadata', zh: '加载数据表元数据失败' },

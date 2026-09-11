@@ -10,11 +10,16 @@
  *  - 可见性:「共享给本租户」默认不勾,提交的 visibility 是 'private';勾了才是 'tenant';
  *  - 服务端的 customTemplatesUnavailable 降级标志位必须在页面上明说(而不是表现成「你没建过模板」)。
  *
+ * F7(09-11 反馈第 7 条:「在表里调好字段后一键存为模板」)追加的第二个 describe:
+ * 工作台工具栏的「存为模板」入口 —— 按 caps.canManageFields 与 activeSheetId 显隐、
+ * 对话框默认值(模板名 = 当前**数据表**名、字段默认全选、「共享给本租户」默认不勾)、
+ * 以及提交出去的 payload 形状 { baseId, sheetIds:[当前表], fieldIds:[勾选的] }。
+ *
  * 隐藏只是 UX,服务端才是门 —— 路由级证明在
  * packages/core-backend/tests/unit/multitable-custom-template-routes.test.ts。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import MultitableTemplateCenterView from '../src/views/MultitableTemplateCenterView.vue'
 import { useLocale } from '../src/composables/useLocale'
 
@@ -34,15 +39,74 @@ vi.mock('vue-router', async () => {
   return { ...actual, useRouter: () => ({ push: mocks.push }) }
 })
 
-vi.mock('../src/multitable/api/client', () => ({
-  multitableClient: {
-    listTemplates: mocks.listTemplates,
-    installTemplate: mocks.installTemplate,
-    listBases: mocks.listBases,
-    createTemplateFromBase: mocks.createTemplateFromBase,
-    deleteTemplate: mocks.deleteTemplate,
-  },
+// 只换掉 `multitableClient` 这一个单例,模块里别的导出(MultitableApiClient 类、
+// normalizeMultitableComment 等)保留真身 —— 工作台一路拉起来的 composable 里有好几个
+// 在模块作用域就引用它们,整模块替换会在 import 期就炸。
+vi.mock('../src/multitable/api/client', async () => {
+  const actual = await vi.importActual<typeof import('../src/multitable/api/client')>('../src/multitable/api/client')
+  return {
+    ...actual,
+    multitableClient: {
+      listTemplates: mocks.listTemplates,
+      installTemplate: mocks.installTemplate,
+      listBases: mocks.listBases,
+      createTemplateFromBase: mocks.createTemplateFromBase,
+      deleteTemplate: mocks.deleteTemplate,
+    },
+  }
+})
+
+// ── 工作台入口用的替身(第二个 describe)。模板中心那张视图一个都不用,所以这些
+// file 级 mock 不会影响上面的用例。
+function stubComponent(name: string) {
+  return defineComponent({ name, render() { return h('div', { [`data-stub-${name}`]: 'true' }) } })
+}
+
+let workbenchMock: any
+let gridMock: any
+let capsMock: any
+
+vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
+  useMultitableWorkbench: () => workbenchMock,
 }))
+vi.mock('../src/multitable/composables/useMultitableGrid', () => ({
+  useMultitableGrid: () => gridMock,
+}))
+vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
+  useMultitableCapabilities: () => capsMock,
+}))
+vi.mock('../src/multitable/composables/useMultitableComments', () => ({
+  useMultitableComments: () => ({
+    comments: ref([]), loading: ref(false), submitting: ref(false), resolvingIds: ref<string[]>([]),
+    updatingIds: ref<string[]>([]), deletingIds: ref<string[]>([]), error: ref<string | null>(null),
+    reactingKeys: ref<string[]>([]),
+    loadComments: vi.fn(), addComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn(),
+    resolveComment: vi.fn(), clearComments: vi.fn(), addReaction: vi.fn(), removeReaction: vi.fn(),
+  }),
+}))
+vi.mock('../src/multitable/composables/useMultitableCommentInbox', () => ({
+  useMultitableCommentInbox: () => ({ unreadCount: ref(0), refreshUnreadCount: vi.fn().mockResolvedValue(0) }),
+}))
+vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({ useMultitableCommentRealtime: vi.fn() }))
+vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({ useMultitableSheetRealtime: vi.fn() }))
+vi.mock('../src/multitable/import/bulk-import', () => ({ bulkImportRecords: vi.fn() }))
+vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubComponent('MetaSheetViewRail') }))
+vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
+vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
+vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
+vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({ default: stubComponent('MetaRecordInspector') }))
+vi.mock('../src/multitable/components/RestorePreviewDialog.vue', () => ({ default: stubComponent('RestorePreviewDialog') }))
+vi.mock('../src/multitable/components/RestoreBatchDialog.vue', () => ({ default: stubComponent('RestoreBatchDialog') }))
+vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({ default: stubComponent('MetaCommentsDrawer') }))
+vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
+vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubComponent('MetaFieldManager') }))
+vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({ default: stubComponent('MetaKanbanView') }))
+vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: stubComponent('MetaGalleryView') }))
+vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
+vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({ default: stubComponent('MetaTimelineView') }))
+vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({ default: stubComponent('MetaImportModal') }))
+vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubComponent('MetaBasePicker') }))
+vi.mock('../src/multitable/components/MetaToast.vue', () => ({ default: stubComponent('MetaToast') }))
 
 async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -313,4 +377,260 @@ describe('模板中心 —— 把 Base 存为模板', () => {
     expect(root.querySelector('[data-template-id="mtpl_shared"] [data-testid="template-card-private-badge"]')).toBeNull()
     expect(root.querySelector('[data-template-id="project-tracker"] [data-testid="template-card-private-badge"]')).toBeNull()
   })
+})
+
+// ── F7:工作台工具栏「把当前数据表存为模板」 ──────────────────────────────────
+//
+// 这一段证明的是**入口与 payload 形状**:按钮按 caps.canManageFields / activeSheetId 显隐、
+// 对话框默认值、以及提交出去的 { baseId, sheetIds, fieldIds } 逐字形状。收窄参数到底有没有
+// 被服务端下推进 SQL,是路由级 spec(F7-1/F7-1b/F7-3)的事,这里不冒充。
+
+const SHEET_FIELDS = [
+  { id: 'fld_title', name: '订单号', type: 'string', property: {}, order: 0, options: [] },
+  { id: 'fld_status', name: '状态', type: 'select', property: {}, order: 1, options: [] },
+  { id: 'fld_owner', name: '负责人', type: 'person', property: {}, order: 2, options: [] },
+]
+
+function createWorkbenchMock() {
+  const activeBaseId = ref('base_ops')
+  const activeSheetId = ref<string | null>('sheet_orders')
+  const activeViewId = ref('view_grid')
+  const views = ref([{ id: 'view_grid', sheetId: 'sheet_orders', name: 'Grid', type: 'grid', filterInfo: null, sortInfo: null, groupInfo: null, hiddenFieldIds: [], config: {} }])
+  return {
+    client: {
+      listBases: vi.fn().mockResolvedValue({ bases: [{ id: 'base_ops', name: '运营库' }] }),
+      loadContext: vi.fn().mockResolvedValue({ base: { id: 'base_ops' }, sheet: null, sheets: [], views: [], capabilities: {} }),
+      listTemplates: mocks.listTemplates,
+      installTemplate: mocks.installTemplate,
+      createTemplateFromBase: mocks.createTemplateFromBase,
+      loadFormContext: vi.fn(), getRecord: vi.fn(), createSheet: vi.fn(), createBase: vi.fn(),
+      renameSheet: vi.fn(), createField: vi.fn(), preparePersonField: vi.fn(), updateField: vi.fn(),
+      deleteField: vi.fn(), createView: vi.fn(), deleteView: vi.fn(), patchRecords: vi.fn(),
+      submitForm: vi.fn(), updateView: vi.fn(), deleteSheet: vi.fn(),
+    },
+    sheets: ref([
+      { id: 'sheet_orders', baseId: 'base_ops', name: '订单', description: null },
+      { id: 'sheet_archive', baseId: 'base_ops', name: '归档', description: null },
+    ]),
+    fields: ref(SHEET_FIELDS),
+    views, activeBaseId, activeSheetId, activeViewId,
+    bases: ref([]),
+    capabilities: ref({
+      canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canManageFields: true,
+      canManageSheetAccess: true, canManageViews: true, canComment: true, canManageAutomation: false,
+      canExport: true, canSendNotification: true, canDeleteSheet: true,
+    }),
+    capabilityOrigin: ref(null), fieldPermissions: ref({}), viewPermissions: ref({}),
+    activeView: computed(() => views.value.find((v) => v.id === activeViewId.value) ?? null),
+    loading: ref(false), error: ref<string | null>(null),
+    loadSheets: vi.fn().mockResolvedValue(true), loadBaseContext: vi.fn().mockResolvedValue(true),
+    loadSheetMeta: vi.fn().mockResolvedValue(true), switchBase: vi.fn().mockResolvedValue(true),
+    syncExternalContext: vi.fn().mockResolvedValue(true),
+    selectBase: vi.fn(), selectSheet: vi.fn(), selectView: vi.fn(),
+  }
+}
+
+function createGridMock() {
+  return {
+    fields: ref(SHEET_FIELDS), rows: ref([]), loading: ref(false), currentPage: ref(1), totalPages: ref(1),
+    page: ref({ offset: 0, limit: 50, total: 0, hasMore: false }), visibleFields: ref(SHEET_FIELDS),
+    sortRules: ref([]), filterRules: ref([]), filterConjunction: ref('and'), filterGroups: ref([]),
+    canLoadMore: ref(false), canUndo: ref(false), canRedo: ref(false),
+    groupFieldId: ref<string | null>(null), groupFieldIds: ref([]), groupField: ref(null), groupFields: ref([]),
+    hiddenFieldIds: ref<string[]>([]), columnWidths: ref<Record<string, number>>({}),
+    linkSummaries: ref({}), personSummaries: ref({}), attachmentSummaries: ref({}),
+    fieldPermissions: ref({}), viewPermission: ref(null), rowActions: ref(null), rowActionOverrides: ref({}),
+    capabilityOrigin: ref(null), conflict: ref(null), error: ref<string | null>(null), sortFilterDirty: ref(false),
+    toggleFieldVisibility: vi.fn(), addSortRule: vi.fn(), removeSortRule: vi.fn(), addFilterRule: vi.fn(),
+    updateFilterRule: vi.fn(), removeFilterRule: vi.fn(), clearFilters: vi.fn(), applySortFilter: vi.fn(),
+    undo: vi.fn(), redo: vi.fn(), setGroupField: vi.fn(), setGroupFields: vi.fn(), goToPage: vi.fn(),
+    patchCell: vi.fn(), createRecord: vi.fn(), deleteRecord: vi.fn(), resolveRowActions: vi.fn(() => null),
+    loadViewData: vi.fn().mockResolvedValue(true), reloadCurrentPage: vi.fn(), dismissConflict: vi.fn(),
+    retryConflict: vi.fn(), setColumnWidth: vi.fn(), setSearchQuery: vi.fn(),
+  }
+}
+
+function createCapsMock(overrides: Record<string, boolean> = {}) {
+  const base: Record<string, boolean> = {
+    canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
+    canManageFields: true, canManageSheetAccess: true, canManageViews: true, canComment: true,
+    canManageAutomation: false, canExport: true, canSendNotification: true, canDeleteSheet: true,
+    ...overrides,
+  }
+  return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, ref(value)]))
+}
+
+// MultitableWorkbench.vue 是 4700+ 行的单文件组件,下面每条用例都真挂一次整棵工作台。
+// vitest 默认 testTimeout 是 5000ms,apps/web 的 vite.config.ts 既没抬过它也没有 retry
+// (对比 packages/core-backend/vitest.config.ts 的 testTimeout: 30000 + CI retry: 2),
+// 本机同一条命令跑 7 次有 2 次红在「Test timed out in 5000ms」而不是断言不成立 ——
+// 首挂的 SFC 编译/求值在冷 CI worker 上就是能吃满 5s。这里只给真挂载的用例抬超时,
+// 断言一个字都不改:超时假红会让必过检查 multitable-web-guard 以「与改动无关」的形态挂掉。
+const WORKBENCH_MOUNT_TIMEOUT_MS = 20000
+
+describe('工作台 —— 把当前数据表存为模板(F7)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    capsMock = createCapsMock()
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    useLocale().setLocale('en')
+    vi.clearAllMocks()
+  })
+
+  async function mountWorkbench(): Promise<HTMLElement> {
+    const MultitableWorkbench = (await import('../src/multitable/views/MultitableWorkbench.vue')).default
+    app = createApp(defineComponent({ setup() { return () => h(MultitableWorkbench as Component) } }))
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        const href = typeof this.$props.to === 'string' ? this.$props.to : JSON.stringify(this.$props.to)
+        return h('a', { href, 'data-router-link-to': href }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container!)
+    await flushUi()
+    return container!
+  }
+
+  function entry(root: HTMLElement): HTMLButtonElement | null {
+    return root.querySelector('[data-action="save-sheet-as-template"]')
+  }
+
+  async function openDialog(root: HTMLElement): Promise<HTMLElement> {
+    entry(root)!.click()
+    await flushUi()
+    const dialog = root.querySelector('[data-testid="save-sheet-as-template-dialog"]') as HTMLElement
+    expect(dialog).toBeTruthy()
+    return dialog
+  }
+
+  it('入口按 canManageFields 显隐;没有激活数据表时不渲染', async () => {
+    const root = await mountWorkbench()
+    expect(entry(root)).toBeTruthy()
+
+    capsMock.canManageFields.value = false
+    await flushUi()
+    expect(entry(root)).toBeNull()
+
+    capsMock.canManageFields.value = true
+    workbenchMock.activeSheetId.value = null
+    await flushUi()
+    expect(entry(root)).toBeNull()
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('对话框默认值:模板名 = 当前数据表名、字段默认全选、「共享给本租户」默认不勾', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+
+    const name = dialog.querySelector('[data-testid="save-sheet-as-template-name"]') as HTMLInputElement
+    // 取的是**数据表**名(订单),不是工作区名(运营库)
+    expect(name.value).toBe('订单')
+
+    const boxes = Array.from(dialog.querySelectorAll('[data-save-template-field]')) as HTMLInputElement[]
+    expect(boxes.map((box) => box.getAttribute('data-save-template-field'))).toEqual(['fld_title', 'fld_status', 'fld_owner'])
+    expect(boxes.every((box) => box.checked)).toBe(true)
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-count"]')?.textContent?.trim()).toBe('3 / 3')
+
+    const share = dialog.querySelector('[data-testid="save-sheet-as-template-share"]') as HTMLInputElement
+    expect(share.checked).toBe(false)
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('勾掉两列后提交的 payload 逐字等于 { baseId, name, sheetIds:[当前表], fieldIds:[勾选的], visibility:private }', async () => {
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_new', name: '订单', custom: true }),
+      warnings: [],
+    })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+
+    for (const fieldId of ['fld_status', 'fld_owner']) {
+      const box = dialog.querySelector(`[data-save-template-field="${fieldId}"]`) as HTMLInputElement
+      box.click()
+      await flushUi()
+    }
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-count"]')?.textContent?.trim()).toBe('1 / 3')
+
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(mocks.createTemplateFromBase).toHaveBeenCalledTimes(1)
+    expect(mocks.createTemplateFromBase.mock.calls[0][0]).toEqual({
+      baseId: 'base_ops',
+      name: '订单',
+      sheetIds: ['sheet_orders'],
+      fieldIds: ['fld_title'],
+      visibility: 'private',
+    })
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('勾了「共享给本租户」才发 visibility: tenant', async () => {
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_shared', name: '订单', custom: true, visibility: 'tenant' }),
+      warnings: [],
+    })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    const share = dialog.querySelector('[data-testid="save-sheet-as-template-share"]') as HTMLInputElement
+    share.click()
+    await flushUi()
+
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(mocks.createTemplateFromBase.mock.calls[0][0].visibility).toBe('tenant')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('一个字段都不勾时不发请求,并给出可读的错误', async () => {
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-select-none"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(mocks.createTemplateFromBase).not.toHaveBeenCalled()
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-error"]')?.textContent).toContain('字段')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('成功后原样列出服务端 warnings,并给一条「去模板中心查看」的链接', async () => {
+    mocks.createTemplateFromBase.mockResolvedValue({
+      template: makeTemplate({ id: 'mtpl_new', name: '订单', custom: true }),
+      warnings: ['字段「通知」是 button 类型,模板里已转为文本列。'],
+    })
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const result = dialog.querySelector('[data-testid="save-sheet-as-template-result"]')
+    expect(result).toBeTruthy()
+    const warnings = Array.from(dialog.querySelectorAll('[data-testid="save-sheet-as-template-warnings"] li'))
+    expect(warnings.map((li) => li.textContent)).toEqual(['字段「通知」是 button 类型,模板里已转为文本列。'])
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-center-link"]')).toBeTruthy()
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
+
+  it('失败时把服务端的话原样显示,对话框不切到成功态', async () => {
+    mocks.createTemplateFromBase.mockRejectedValue(new Error('This base has no readable table with fields to save as a template'))
+    const root = await mountWorkbench()
+    const dialog = await openDialog(root)
+    ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-result"]')).toBeNull()
+    expect(dialog.querySelector('[data-testid="save-sheet-as-template-error"]')?.textContent)
+      .toContain('no readable table')
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
 })

@@ -1,3 +1,11 @@
+/**
+ * provisioning(模板装表 / 插件建表)认得的字段类型。
+ *
+ * F7 补了 13 种自洽类型(person 起至 modifiedBy),让「先在数据表里把类型调好、再一键存为
+ * 模板」这条路真的成立 —— 在此之前这些类型存进模板会被拍成文本列。`meta_fields.type` 是
+ * 裸 text 无 CHECK(zzz20251231_create_meta_schema.ts),所以加宽不需要任何 DDL / 数据迁移。
+ * 加宽只影响「装得下什么」,不影响任何读面或权限判定。
+ */
 export type MultitableProvisioningFieldType =
   | 'string'
   | 'number'
@@ -15,6 +23,19 @@ export type MultitableProvisioningFieldType =
   | 'qrcode'
   | 'location'
   | 'longText'
+  | 'person'
+  | 'currency'
+  | 'percent'
+  | 'rating'
+  | 'duration'
+  | 'url'
+  | 'email'
+  | 'phone'
+  | 'autoNumber'
+  | 'createdTime'
+  | 'modifiedTime'
+  | 'createdBy'
+  | 'modifiedBy'
 
 export interface MultitableProvisioningFieldDescriptor {
   id: string
