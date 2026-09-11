@@ -192,6 +192,7 @@ interface Props {
   report?: StockPreparationInstallRunReport | null
   canRunInstall?: boolean
   busy?: boolean
+  canOpenDataFactory?: boolean
 }
 
 function defaultProps(overrides: Props = {}): Required<Props> {
@@ -205,6 +206,9 @@ function defaultProps(overrides: Props = {}): Required<Props> {
     report: null,
     canRunInstall: false,
     busy: false,
+    // 整合切片 (2026-09-09): the DEFAULT here mirrors the component's own fail-closed default —
+    // a mount that says nothing about 数据工厂 access gets the 「找实施」 sentence, not a link.
+    canOpenDataFactory: false,
     ...overrides,
   }
 }
@@ -976,6 +980,70 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     button.click()
     await nextTick()
     expect(button.textContent).toContain('复制一份待办')
+  })
+
+  // ---------------------------------------------------------------------------
+  // 整合切片 (2026-09-09): step①'s off-page link
+  // ---------------------------------------------------------------------------
+
+  it('step① links to the folded-in 连接管理 section of 数据工厂, not the retired standalone page', async () => {
+    // The standalone /data-sources page is gone (it now redirects). A link left on the bare
+    // path would still "work" via that redirect, so this pins the DIRECT target: the one step
+    // this wizard cannot perform itself must land the reader on the section that can.
+    const root = await mount({ canOpenDataFactory: true })
+    const link = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]') as HTMLAnchorElement | null
+    expect(link).toBeTruthy()
+    const href = link?.getAttribute('href') ?? ''
+    expect(href).toContain('/integrations/workbench')
+    expect(href).toContain('int-sec-connection')
+    expect(href).not.toBe('/data-sources')
+    // The label has to name where it goes — an unchanged 「去外接数据源页」 would send the reader
+    // looking for a page that no longer exists.
+    expect(link?.textContent).toContain('数据工厂')
+  })
+
+  it('step① renders the English label for the same folded-in target', async () => {
+    h.locale = 'en'
+    const root = await mount({ canOpenDataFactory: true })
+    const link = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]') as HTMLAnchorElement | null
+    expect(link?.getAttribute('href')).toBe('/integrations/workbench#int-sec-connection')
+    expect(link?.textContent).toContain('Data Factory')
+  })
+
+  // The other half of the fold's cost, stated instead of hidden: 数据工厂 carries an
+  // `integration:write` route gate that the retired standalone page did not, and a
+  // `stock-prep:admin` holder — the documented reader of 「开始使用」 — does not hold it. For them
+  // the link would be a redirect dressed as an entry point (R-11 「看得见点不动」), so it is absent
+  // and the step says which permission is missing and who to ask.
+  it('step① renders a plain-text pointer, not a link, when the principal cannot open 数据工厂', async () => {
+    const root = await mount({ canOpenDataFactory: false })
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
+    const denied = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources-denied"]')
+    expect(denied).toBeTruthy()
+    expect(denied?.tagName).not.toBe('A')
+    expect(denied?.textContent).toContain('integration:write')
+    expect(denied?.textContent).toContain('实施')
+    // The STEP itself stays on screen — a reader who cannot do it still has to know it exists.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-connect"]')).toBeTruthy()
+    // ... and no bare path leaks back in as text.
+    expect(root.textContent ?? '').not.toContain('/integrations/workbench')
+  })
+
+  it('step① fails closed: a host that passes nothing gets the pointer, never the link', async () => {
+    // `defaultProps` deliberately omits nothing here — it passes `false`, the same value Vue's
+    // Boolean casting produces for an absent prop. Both roads lead to the same denied render.
+    const root = await mount()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources-denied"]')).toBeTruthy()
+  })
+
+  it('step① says the same thing in English when the principal cannot open 数据工厂', async () => {
+    h.locale = 'en'
+    const root = await mount({ canOpenDataFactory: false })
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
+    const denied = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources-denied"]')
+    expect(denied?.textContent).toContain('integration:write')
+    expect(denied?.textContent).toContain('implementer')
   })
 
   // ---------------------------------------------------------------------------

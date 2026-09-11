@@ -32,6 +32,21 @@
       </div>
     </div>
 
+    <!-- 整合切片 (2026-09-09): the standalone /data-sources page folded INTO 连接管理 — the same
+         DataSourcesPanel component the (now redirecting) /data-sources route rendered, mounted
+         here in its embedded presentation. Physical connections + credentials are registered
+         here; the connection-draft editor further down only REFERENCES one by connectionId.
+         `@changed` is what keeps that reference list honest: the host refreshes the draft
+         editor's connectionId options after a source is created/updated/deleted, so a freshly
+         registered source is selectable without a page reload. -->
+    <div class="integration-workbench__data-sources" data-testid="connection-data-sources-panel">
+      <div class="integration-workbench__data-sources-head">
+        <h3>外接数据源（物理连接与凭据）</h3>
+        <p>先在这里登记源库连接并测试连通，再在下方新增连接草稿时用 connectionId 引用它；凭据只存这里，不会复制到绑定里。</p>
+      </div>
+      <DataSourcesPanel embedded @changed="handleDataSourcesChanged" />
+    </div>
+
     <button
       type="button"
       class="integration-workbench__inventory-toggle"
@@ -184,9 +199,9 @@
           </select>
         </label>
         <p v-if="bridgeDataSourceObjectsLoading" class="integration-workbench__hint" data-testid="data-source-bridge-object-loading">正在加载表 / 视图列表...</p>
-        <p v-if="!bridgeDataSourceObjectsLoading && connectionDraft.connectionId && bridgeDataSourceObjectOptions.length === 0 && !bridgeDataSourceObjectsError" class="integration-workbench__hint" data-testid="data-source-bridge-object-empty">没有可选表 / 视图；请回 /data-sources 检查权限或 schema。</p>
+        <p v-if="!bridgeDataSourceObjectsLoading && connectionDraft.connectionId && bridgeDataSourceObjectOptions.length === 0 && !bridgeDataSourceObjectsError" class="integration-workbench__hint" data-testid="data-source-bridge-object-empty">没有可选表 / 视图；请到上方「外接数据源」面板检查权限或 schema。</p>
         <p v-if="selectedBridgeObjectSummary" class="integration-workbench__hint" data-testid="data-source-bridge-object-summary">{{ selectedBridgeObjectSummary }}</p>
-        <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由 /data-sources 管理,这里只在 connectionId 中引用数据源 ID，不复制账号密码。</p>
+        <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由上方「外接数据源」面板管理,这里只在 connectionId 中引用数据源 ID，不复制账号密码。</p>
         <p v-if="bridgeDataSourcesError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-error">{{ bridgeDataSourcesError }}</p>
         <p v-if="bridgeDataSourceObjectsError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-object-error">{{ bridgeDataSourceObjectsError }}</p>
       </div>
@@ -290,6 +305,7 @@ import type {
   IntegrationScopeState,
   StagingDatasetCard,
 } from './integrationWorkbenchSectionTypes'
+import DataSourcesPanel from '../data-sources/DataSourcesPanel.vue'
 import JsonAssist from './JsonAssist.vue'
 
 const props = defineProps<{
@@ -330,7 +346,18 @@ const props = defineProps<{
   saveConnectionDraft: () => Promise<void>
   resetConnectionDraft: () => void
   scope: IntegrationScopeState
+  // Optional so the section stays mountable standalone (its own spec mounts it without a
+  // workbench). Same `on*`-named plain-function-prop shape the section already uses for
+  // `onBridgeDataSourceChange` — a declared prop, not an emit listener.
+  onDataSourcesChanged?: () => void | Promise<void>
 }>()
+
+// The embedded 外接数据源 panel mutated the source list; tell the host so the connection-draft
+// editor's connectionId options stop showing the pre-mutation list. Fire-and-forget by design:
+// the panel already reported its own success/failure, and this section owns no refresh state.
+function handleDataSourcesChanged(): void {
+  void props.onDataSourcesChanged?.()
+}
 
 const inventoryExpanded = defineModel<boolean>('inventoryExpanded', { default: false })
 const showAdvancedConnectors = defineModel<boolean>('showAdvancedConnectors', { default: false })
@@ -373,6 +400,19 @@ const connectionCapabilitiesExample = JSON.stringify({
 </script>
 
 <style scoped>
+/* 整合切片: wrapper chrome for the embedded 外接数据源 panel. Token-only (this file is in the
+   UF-6 style-guard target set) — no hex/rgb literals. */
+.integration-workbench__data-sources {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--ms-border);
+  border-radius: 8px;
+}
+
+.integration-workbench__data-sources-head {
+  margin-bottom: 8px;
+}
+
 /* Verbatim copies of the rules in IntegrationWorkbenchView.vue's <style scoped> block that
    target markup now rendered by this component — see IntegrationMonitoringSection.vue's style
    block comment for why duplication (not relocation) is the correct approach here. */

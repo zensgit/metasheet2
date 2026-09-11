@@ -67,7 +67,10 @@
                  it would be a link that renders for a principal the guard immediately redirects: the
                  "visible but not actionable" failure moved from the page into the navigation. -->
             <router-link v-if="canUseStockPreparation" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
-            <router-link v-if="canUseIntegration" to="/data-sources" class="nav-link">{{ navLabels.dataSources }}</router-link>
+            <!-- 整合切片 (2026-09-09): the 外接数据源 nav entry is gone — that page is now the
+                 连接管理 section of 数据工厂 above, and '/data-sources' redirects there. The
+                 zh/en `navLabels.dataSources` entries are kept in both label maps below, but
+                 this shell has no consumer for them any more. -->
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
