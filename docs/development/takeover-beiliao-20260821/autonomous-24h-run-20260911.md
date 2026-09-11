@@ -61,7 +61,7 @@
 | #5642 | `f1a5073ee` | 网络错误人话 + GET 有限重试 | r2 0 blocker;CI 普查要求把新文件登记进浏览器 lane 触发清单(补一行) |
 | #5645 | `381b01a82` | 当前数据表一键存为模板 | r2 0 blocker;#5640 合入后在 `MultitableWorkbench.vue` 同一处各加一块而冲突,纯加法两边都留,82/82 + vue-tsc 0,重跑 CI 绿后合入(进 r31) |
 
-另:X2c(#5651,集成响应透传 `error.code`,409 作用域不匹配给人话)r1 两路 0 blocker,在跑 CI。
+另:X2c(#5651,集成响应透传 `error.code`/`status`,ensure 与写动作对 409 作用域不匹配给中文人话;#5634 残余缺口)r1 两路 0 blocker、M1–M3 内存级变异红,**合入 `bcf6754a3`**(进 r31)。
 
 **r30**:从 `f1a5073ee`(r29 + 上表前六支)打包;**第一次 ship 在远端解析阶段就失败、什么都没执行**——我往 wrapper 里塞的标记含中文字面量,PS 5.1 把无 BOM 的 UTF-8 当 GBK 读,尾字节吞掉收尾引号 → 整个脚本 ParserError(222 未动:bundle 仍 r29、无备份、health 200)。wrapper 改成 0 个非 ASCII 字节后重新 ship,结果见 §6。
 
