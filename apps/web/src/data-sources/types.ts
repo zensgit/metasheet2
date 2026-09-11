@@ -22,6 +22,17 @@ export interface DataSourceListItem {
   name: string
   type: string
   connected: boolean
+  /**
+   * How many 数据工厂 bindings point at this source (canonical `connection_id` plus
+   * owner-attributed legacy `config.dataSourceId`) — the same number the DELETE guard enforces.
+   *
+   * UNDEFINED IS NOT ZERO. The server omits the field when it could not count, and 0 would read as
+   * "unreferenced, safe to delete" about a delete that may still be refused. Render the missing
+   * case as 未知, never as 未被引用.
+   *
+   * A count only: which systems reference the source never crosses the wire.
+   */
+  referenceCount?: number
 }
 
 /** Sanitized detail from `GET /api/data-sources/:id`; credentials are never returned. */

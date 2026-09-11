@@ -231,6 +231,36 @@ describe('IntegrationConnectionSection (unit)', () => {
   // 整合切片 (2026-09-09): 外接数据源 is no longer a separate page — it renders INSIDE this
   // section. Asserting the wrapper alone would pass on an empty <div>, so the panel's own
   // primary control (`ds-new-button`) has to be found INSIDE the wrapper, inside the section.
+  it('the panel 去看绑定 link expands the 已配置连接 inventory (an anchor alone would land on a hidden answer)', async () => {
+    // 被引用 N 列 (2026-09-10): the reference column's link asks the HOST to reveal the bindings
+    // that hold a source. Those bindings are this inventory, which starts collapsed — so the
+    // request has to reach `inventoryExpanded`, or the operator is sent to a section whose
+    // answer is still folded away.
+    listDataSourcesMock.mockResolvedValue([
+      { id: 'src-1', name: 'Source 1', type: 'postgres', connected: true, referenceCount: 2 },
+    ])
+    const onUpdateInventoryExpanded = vi.fn(noopFn)
+    await mountSection(
+      baseProps({ inventoryExpanded: false, 'onUpdate:inventoryExpanded': onUpdateInventoryExpanded }),
+    )
+    // The embedded panel fetches its list on mount; flush that before reading the column.
+    for (let i = 0; i < 3; i += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+
+    const link = container?.querySelector<HTMLAnchorElement>(
+      '[data-testid="connection-data-sources-panel"] [data-testid="ds-reference-goto"]',
+    )
+    expect(link).toBeTruthy()
+    // Embedded, it is an in-page anchor at this very section — not a navigation elsewhere.
+    expect(link?.getAttribute('href')).toBe('#int-sec-connection')
+
+    link?.click()
+    await nextTick()
+    expect(onUpdateInventoryExpanded).toHaveBeenCalledWith(true)
+  })
+
   it('embeds the data-sources panel inside #int-sec-connection, with the panel content really rendered', async () => {
     await mountSection(baseProps())
     const panel = container?.querySelector('#int-sec-connection [data-testid="connection-data-sources-panel"]')

@@ -16,6 +16,7 @@ import type { Kysely } from 'kysely'
 import { z } from 'zod'
 import { rbacGuard } from '../rbac/rbac'
 import { auditLog } from '../audit/audit'
+import { Logger } from '../core/logger'
 import {
   c6WriteTargetQueryDisabledMessage,
   DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE,
@@ -33,6 +34,8 @@ import {
   K3_DESTINATION_MARKER_IMMUTABLE_MESSAGE,
 } from '../data-adapters/k3-destination-write-fence'
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
+
+const logger = new Logger('DataSourcesRouter')
 
 // A deliberate gate refusal — the outbound-SQL-write arm/provisioning guard, the K3 destination fence —
 // throws an Error carrying a numeric `status` and a fixed `code`. Surface those verbatim so the refusal
@@ -326,6 +329,40 @@ function sanitizeConfig(config: DataSourceConfig): Omit<DataSourceConfig, 'crede
   }
 }
 
+/**
+ * Reference counts for a whole READ surface, in ONE pair of grouped queries.
+ *
+ * Two properties this wrapper exists to hold:
+ * - NOT N+1: the counts for every listed source come from a single batched
+ *   call, so adding a source adds rows to a GROUP BY, not a round trip.
+ * - "unknown" is not "zero": if the count query fails, the listing still
+ *   answers (it is the management surface for these sources, and its own data
+ *   is intact) but referenceCount is OMITTED for every item. A displayed 0
+ *   would read as "safe to delete" — a claim we cannot make when the reference
+ *   table did not answer. The authoritative refusal is the DELETE guard, which
+ *   recomputes the count server-side and fails closed on the same error.
+ *
+ * values-free: the result carries integers only — never the name, tenant,
+ * owner or config of any referencing external system, and on failure only
+ * the SQLSTATE and the id count are logged (an error message here could name
+ * referencing rows).
+ */
+async function referenceCountsForDisplay(
+  manager: { countExternalSystemReferencesByIds(ids: readonly string[]): Promise<Map<string, number>> },
+  ids: readonly string[]
+): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map()
+  try {
+    return await manager.countExternalSystemReferencesByIds(ids)
+  } catch (err) {
+    logger.warn('reference count query failed; degrading to unknown for every listed id', {
+      sqlstate: (err as { code?: string } | null)?.code ?? 'unknown',
+      ids: ids.length,
+    })
+    return new Map()
+  }
+}
+
 export function dataSourcesRouter(): Router {
   const router = Router()
 
@@ -346,11 +383,20 @@ export function dataSourcesRouter(): Router {
       // Authority model: owners see their own sources; platform admins see
       // every source (management metadata only — never credentials).
       const sources = manager.listDataSources({ actor: resolveActor(req) })
+      // ONE grouped count for the whole page (never one query per row). The
+      // integer is management metadata like `connected`/`ownerId`: it says HOW
+      // MANY integration bindings point here, never WHICH ones.
+      const referenceCounts = await referenceCountsForDisplay(manager, sources.map((s) => s.id))
+      const items = sources.map((source) => {
+        const referenceCount = referenceCounts.get(source.id)
+        // Omitted, not 0, when unknown — see referenceCountsForDisplay.
+        return referenceCount === undefined ? source : { ...source, referenceCount }
+      })
       return res.json({
         ok: true,
         data: {
-          items: sources,
-          total: sources.length
+          items,
+          total: items.length
         }
       })
     } catch (error) {
@@ -431,12 +477,17 @@ export function dataSourcesRouter(): Router {
         await auditCrossOwnerAdminAction(req, 'read', req.params.id, ownerId)
       }
 
+      // Same batched helper with a single id, so detail and listing can never
+      // disagree about what "referenced" means.
+      const referenceCount = (await referenceCountsForDisplay(manager, [req.params.id])).get(req.params.id)
+
       return res.json({
         ok: true,
         data: {
           ...sanitizeConfig(config),
           ownerId,
-          connected: adapter.isConnected()
+          connected: adapter.isConnected(),
+          ...(referenceCount === undefined ? {} : { referenceCount })
         }
       })
     } catch (error) {
