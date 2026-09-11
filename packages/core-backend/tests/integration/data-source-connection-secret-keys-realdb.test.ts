@@ -40,7 +40,13 @@ function appAsOwner() {
   const a = express()
   a.use(express.json())
   a.use((req, _res, next) => {
-    req.user = { id: OWNER_ID, roles: ['member'], permissions: ['data_sources:read', 'data_sources:write'] } as never
+    // Same actor shape as data-source-test-ephemeral-realdb.test.ts:18. `rbacGuard('data_sources', …)`
+    // short-circuits a global admin; a non-admin goes to the DB fallback, which ignores
+    // `req.user.permissions` and finds no `data_sources:*` codes on this branch (they are seeded by
+    // #5611, not merged). Everything under test here sits AFTER that guard (the refusal runs after
+    // rbacGuard and before Zod; the strip is on the read side), so admin keeps the intent intact.
+    // OWNER_ID is kept so `assertAccess`'s owner-equality still holds for the seeded legacy row.
+    req.user = { id: OWNER_ID, role: 'admin' } as never
     // The create route trusts ONLY the verified-JWT tenant claim.
     req.authenticatedTenantId = TENANT_ID
     next()
