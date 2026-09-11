@@ -1367,6 +1367,11 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     // OPTIONAL pack-aware ownership projection, threaded (never fetched — this module
     // does no field I/O). Omitted => the frozen-template bands, i.e. today's behaviour.
     installedFieldProperties: input.installedFieldProperties,
+    // F1c: same DECLARED extension band as the interactive path, taken from the job's stored
+    // action snapshot (`cloneJson(action)`) — a background apply must fill the same three pack
+    // columns an interactive one does, or one project would carry different columns depending on
+    // how big its BOM is.
+    extensionFieldIds: job.actionSnapshot && job.actionSnapshot.extensionFieldIds,
     // W4 carry: threaded from the job's stored action snapshot (cloneJson of the
     // normalized deploy config). Absent => byte-identical pre-wiring planning.
     carryPolicy: job.actionSnapshot && job.actionSnapshot.carryPolicy,

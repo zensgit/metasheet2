@@ -1020,7 +1020,60 @@ function pickFields(row, fields) {
 // GRACEFUL ABSENCE throughout: a root row (no parentSourceId), a row whose parent is not in this
 // batch, and a deployment with no declared spec slot each add NO key at all. pickFields then
 // writes nothing for that column, so an UPDATE never blanks a value that is already there.
-const DENORMALIZED_PLM_FIELD_IDS = Object.freeze(['parentComponentCode', 'parentComponentName', 'componentSpec'])
+// ── F1c: 排序号 / 名称及规格 -> 客户包 ext_ 列 ────────────────────────────────
+//
+// THE GAP THIS CLOSES. The customer pack already declares 父组件排序号
+// (`ext_parentSortNo`), 当前组件排序号 (`ext_componentSortNo`) and 名称及规格
+// (`ext_nameAndSpec`) — 21 such ext_ columns were measured on the customer's own
+// sheet — and NOT ONE of them was ever written: the only writer of ext_ columns is
+// `applyExtFieldMapping`, which reads the PART row, while 明细排序号 lives on the
+// BOM DETAIL row (the expansion carries it as `sortLine`) and 名称及规格 is the
+// UNSPLIT name (`nameAndSpec` since F1c). Neither is reachable from a part-column
+// mapping, so the columns stayed empty on every deployment.
+//
+// WHY HERE, and not by widening the ext mapping: this is the same seam 父组件图号/
+// 父组件名称/规格 already use — the point where the add record / update patch is
+// built, AFTER everything that keys, fingerprints and adjudicates on the expansion
+// row. Deriving it here moves no persisted identity (see the header below).
+//
+// THE PACK IS STILL THE AUTHORITY. These three ids only survive `pickFields`, whose
+// field list is the PACK-AWARE writable band (`plmWritableFieldIds`): a deployment
+// whose pack does not declare the column — or declares it human_preserved, or
+// pinned `preserveOnRefresh` — gets nothing written, exactly as before. This code
+// can add a KEY to an in-memory row; it cannot add a COLUMN to anybody's sheet and
+// cannot promote one into the writable band.
+//
+// A MAPPED VALUE ALWAYS WINS. If a deployment's own ext mapping already fills one
+// of these three from a source column, the row arrives carrying it and the
+// derivation stands down (`isBlank` check per id) — the deployment's declared
+// mapping is measured, this is derived.
+const DENORMALIZED_PLM_FIELD_IDS = Object.freeze([
+  'parentComponentCode',
+  'parentComponentName',
+  'componentSpec',
+  'ext_componentSortNo',
+  'ext_parentSortNo',
+  'ext_nameAndSpec',
+])
+
+// 明细排序号 as the pack declares it: a NUMBER column. A source `sort_id` reaches the
+// expansion as whatever the driver handed over ('1' as often as 1), so it is coerced
+// here and REFUSED when it is not numeric — writing '甲' into a number column is a
+// broken cell, and a silently dropped one is the honest outcome (the column is
+// display/ordering only; nothing adjudicates on it).
+// CLOSED vocabularies, same discipline as the mapper's SPEC_KEYS: the keys an expansion row may
+// legitimately carry the 明细排序号 / 名称及规格 under, listed rather than guessed at.
+const EXPANSION_SORT_KEYS = Object.freeze(['sortLine', 'componentSortNo'])
+const EXPANSION_NAME_AND_SPEC_KEYS = Object.freeze(['nameAndSpec', 'nameAndStandard'])
+
+function sortNumberOrUndefined(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.trim())
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
+}
 
 function firstPresentValue(row, keys) {
   for (const key of keys) {
@@ -1029,7 +1082,25 @@ function firstPresentValue(row, keys) {
   return undefined
 }
 
-function denormalizedPlmFields(row, parentIndex) {
+// THE SECOND GATE ON THE THREE DERIVED ext_ COLUMNS, and the one that keeps a pull from FAILING.
+//
+// `pickFields` already refuses an id outside the pack-aware writable band. That is not enough on
+// its own: a deployment can have the pack column INSTALLED (so the band contains it) while the
+// table action neither declares nor BINDS it — and an unbound `ext_` id is a hard refusal at the
+// write boundary (apply-writer `mapFieldName`, 'unmapped_extension_field'), i.e. the whole row
+// fails to write rather than the column coming out empty. Deriving a value into a column the
+// target does not bind would therefore turn "this column stays empty" into "this project cannot be
+// applied at all".
+//
+// `extensionFieldIds` is the action's DECLARED extension band — the exact list
+// `assertTargetFieldMapCompleteness` requires the target's fieldIdMap to bind. FAIL-CLOSED: a
+// caller that passes nothing derives nothing, so a future call site that forgets to thread it
+// leaves three columns empty instead of breaking apply.
+function canDeriveExtensionField(fieldId, declaredExtensionFieldIds) {
+  return declaredExtensionFieldIds instanceof Set && declaredExtensionFieldIds.has(fieldId)
+}
+
+function denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
   const out = {}
   const parentSourceId = row && row.parentSourceId
   // buildParentIndex keys on `optionalString(componentSourceId)`, i.e. trimmed non-empty STRINGS
@@ -1040,17 +1111,40 @@ function denormalizedPlmFields(row, parentIndex) {
     if (parent) {
       if (!isBlank(parent.componentCode)) out.parentComponentCode = parent.componentCode
       if (!isBlank(parent.componentName)) out.parentComponentName = parent.componentName
+      // 父组件排序号 — THE PARENT ROW'S OWN 明细排序号, resolved through the same in-batch join
+      // as 父组件图号/父组件名称 just above.
+      //
+      // DELIBERATELY NOT WHAT 老系统 WROTE. `fillBasicStockInfo` 756 sets
+      // `parentComponentSortId = bomInfo.getSortId()` — the CHILD's own sort id — so the legacy
+      // column holds a copy of 当前组件排序号 and says nothing about the parent. That is a bug we
+      // are not copying into a column labelled 父组件排序号: the value that makes the column mean
+      // its own label (and makes a parent band sortable) is the parent's sort id.
+      if (canDeriveExtensionField('ext_parentSortNo', declaredExtensionFieldIds) && isBlank(row.ext_parentSortNo)) {
+        const parentSortNo = sortNumberOrUndefined(firstPresentValue(parent, EXPANSION_SORT_KEYS))
+        if (parentSortNo !== undefined) out.ext_parentSortNo = parentSortNo
+      }
     }
   }
   const spec = firstPresentValue(row, EXPANSION_SPEC_KEYS)
   if (spec !== undefined) out.componentSpec = spec
+  // 当前组件排序号 — the 明细栏 `sort_id` the expansion已经读进内存 (`sortLine`) 却一直无处可落。
+  if (canDeriveExtensionField('ext_componentSortNo', declaredExtensionFieldIds) && isBlank(row && row.ext_componentSortNo)) {
+    const componentSortNo = sortNumberOrUndefined(firstPresentValue(row, EXPANSION_SORT_KEYS))
+    if (componentSortNo !== undefined) out.ext_componentSortNo = componentSortNo
+  }
+  // 名称及规格 — the UNSPLIT PLM identityName. 图号 + 名称 + 规格 are the split halves; this is the
+  // cell the customer's own workbook prints, and the column 老系统 exports at index 6.
+  if (canDeriveExtensionField('ext_nameAndSpec', declaredExtensionFieldIds) && isBlank(row && row.ext_nameAndSpec)) {
+    const nameAndSpec = firstPresentValue(row, EXPANSION_NAME_AND_SPEC_KEYS)
+    if (nameAndSpec !== undefined) out.ext_nameAndSpec = nameAndSpec
+  }
   return Object.keys(out).length > 0 ? out : null
 }
 
 // Returns the row unchanged (same object identity) when nothing resolves, so a plan over a batch
 // with no resolvable parents and no declared spec slot is byte-identical to the pre-change one.
-function withDenormalizedPlmFields(row, parentIndex) {
-  const derived = denormalizedPlmFields(row, parentIndex)
+function withDenormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
+  const derived = denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds)
   return derived ? { ...row, ...derived } : row
 }
 
@@ -1266,6 +1360,12 @@ function planStockPreparationConflicts(input = {}) {
     templateFields: template.fields,
     installedFieldProperties: input.installedFieldProperties,
   })
+  // F1c — the action's DECLARED extension band, threaded by the two call sites that have it
+  // (table-actions' dry-run and the large-BOM job planner). Read ONLY by `denormalizedPlmFields`'s
+  // three derived ext_ columns; absent => nothing is derived (see canDeriveExtensionField).
+  const declaredExtensionFieldIds = Array.isArray(input.extensionFieldIds)
+    ? new Set(input.extensionFieldIds.filter((fieldId) => typeof fieldId === 'string' && fieldId !== ''))
+    : null
   const humanFields = ownership.humanPreservedFieldIds
   const plmFields = ownership.plmWritableFieldIds
   const templateFields = fieldMapForTemplate(template)
@@ -1378,7 +1478,7 @@ function planStockPreparationConflicts(input = {}) {
     // derived parent columns, which is also why a re-pull BACKFILLS them onto rows written
     // before this change: an existing row with no parentDrawing and a resolvable parent is a
     // plm_system-field change like any other.
-    const row = withDenormalizedPlmFields(rows[0], parentIndex)
+    const row = withDenormalizedPlmFields(rows[0], parentIndex, declaredExtensionFieldIds)
     const existingGroup = existing.keyed.get(key)
     const existingRow = existingGroup && existingGroup[0]
     if (!existingRow) {

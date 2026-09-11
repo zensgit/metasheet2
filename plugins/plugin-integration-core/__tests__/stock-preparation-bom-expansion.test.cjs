@@ -20,6 +20,11 @@ const {
   summarizeMissingComponents,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
 
+// F1c: the PURE 老系统 rules, exposed on __internals so a test can pin them without an adapter.
+const {
+  __internals: { dashHierarchyRelationship },
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
+
 // The C3 planner, required HERE so one test can carry a declared source column the whole way:
 // source row -> expansion row -> the record actually written to plm_stock_preparation_main. Each
 // leg has its own suite; only an end-to-end assertion catches a value that is read and then dropped
@@ -1292,6 +1297,312 @@ async function testMissingComponentProbeCountSurvivesTheRowErrorCap() {
   assert.equal(floor.probeCount, 9, 'the floor answers with the distinct count rather than an impossible 0')
 }
 
+// ---------------------------------------------------------------------------
+// F1c — 老系统 StockInfoController.java 的三条语义
+//
+// owner 裁决:「阅读 StockInfoController.java,采用该逻辑」。下面每个用例都钉一条老系统语义,
+// 注释里给出老系统的出处行号,以及这条守卫被拿掉时会红在哪。
+// ---------------------------------------------------------------------------
+
+// ① 两条 active bomHead 指着同一个子件(同用量)=> 子件只出一次,被合并的条数进 values-free 证据。
+//    差异A(展开器 banner :72-78 自承的重复来源)就是这个形状。
+async function testTwoActiveBomHeadsCollapseOneChild() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-A', bom_id: 'BOM-A2', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3', sort_id: 1 },
+      { bom_pid: 'BOM-A2', part_id: 'PART-B', Bom_ExAttr1: '3', sort_id: 1 },
+    ],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(result.valid, true)
+  assert.equal(result.rows.length, 2, '根 + 一个子件 —— 第二条 bomHead 的同键子件被同父去重吃掉')
+  assert.equal(result.rows.filter((row) => row.componentSourceId === 'PART-B').length, 1)
+  assert.equal(result.summary.duplicateSiblingsCollapsed, 1, '被合并的条数是 values-free 证据里的一个整数')
+  const summaryJson = JSON.stringify(result.summary)
+  assert.ok(!summaryJson.includes('B-001') && !summaryJson.includes('Bolt'), '证据里只有计数,没有图号/名称')
+  // 幂等键没动:留下的那行的键仍是 {projectNo, componentSourceId, parentSourceId, path}。
+  assert.deepEqual(
+    JSON.parse(result.rows[1].idempotencyKey),
+    { projectNo: 'P-001', componentSourceId: 'PART-B', parentSourceId: 'PART-A', path: ['PART-A', 'PART-B'] },
+  )
+
+  // 反向:只有一条 bomHead 时 summary 不长这个键(没合并过就是 byte-identical)。
+  const single = await expandPlmProjectBom({ sourceAdapter: createAdapter(baseData()).adapter, projectNo: 'P-001' })
+  assert.equal('duplicateSiblingsCollapsed' in single.summary, false, '没合并过的 summary 不长这个键')
+}
+
+// ② 同图号、不同名称/材质的标准件不被去重 —— 老系统 iterHandle 686-691 那句注释说的就是这件事
+//    (把名称和材质加进键,是因为标准件的图号一样,只按图号去重会把它们合并掉)。
+async function testSameDrawingDifferentStandardPartsSurvive() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'GB-70', IdentityName: '内六角螺钉', Material: '8.8级', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'GB-70', IdentityName: '内六角螺钉 M8', Material: '12.9级', SysVer: 'V1' },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '2', sort_id: 1 },
+      { bom_pid: 'BOM-A', part_id: 'PART-C', Bom_ExAttr1: '2', sort_id: 2 },
+    ],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(result.valid, true)
+  assert.equal(result.rows.length, 3, '同图号但名称及规格/材质不同的两个标准件都留下')
+  assert.equal('duplicateSiblingsCollapsed' in result.summary, false)
+}
+
+// ③ 同父同键但用量不同的两条明细:不合并,仍然两行 —— 这是对老系统的有意偏离,理由写在
+//    siblingDedupeKey 的注释里:合并会把 duplicate_expanded_key 的 fail-closed 挂起消掉。
+async function testSiblingsThatDisagreeOnQuantityAreNotCollapsed() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '1', sort_id: 1 },
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '2', sort_id: 2 },
+    ],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.equal(result.rows.length, 3, '用量不一致的重复明细两行都在,留给 duplicate_expanded_key 挂起')
+  assert.equal('duplicateSiblingsCollapsed' in result.summary, false)
+  assert.equal(result.rows[1].idempotencyKey, result.rows[2].idempotencyKey, '两行同键 —— 正是规划器要挂起的形状')
+}
+
+// ④ 根选择:有总图 => 版本最高的那张总图 + 全部钣金;其它订单行不当根。
+//    老系统 doGetAllBomInfo 1051-1089。
+async function testRootSelectionKeepsHighestMainDrawingAndSheetMetal() {
+  const data = () => baseData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-MAIN-V1', quantity: '1', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'PART-MAIN-V3', quantity: '1', sort_id: 2 },
+      { order_id: 'ORDER-1', part_id: 'PART-SHEET', quantity: '1', sort_id: 3 },
+      { order_id: 'ORDER-1', part_id: 'PART-OTHER', quantity: '1', sort_id: 4 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-MAIN-V1', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-MAIN-V3', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V3' },
+      { OBJ_ID: 'PART-SHEET', IdentityNo: 'J2601-A', IdentityName: '钣金件', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-OTHER', IdentityNo: 'X-900', IdentityName: '别的件', Material: 'Q235', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
+  })
+  const result = await expandPlmProjectBom({ sourceAdapter: createAdapter(data()).adapter, projectNo: 'P-001' })
+  assert.equal(result.valid, true)
+  assert.deepEqual(
+    result.rows.map((row) => row.componentSourceId).sort(),
+    ['PART-MAIN-V3', 'PART-SHEET'],
+    '最高版本总图 + 钣金件当根;低版本总图和非总图/非钣金的订单行不当根',
+  )
+  assert.equal(result.summary.rootsFilteredOut, 2)
+
+  // 规则可覆盖:关掉就退回 F1c 之前的行为(订单行全部当根)。
+  const disabled = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(data()).adapter,
+    projectNo: 'P-001',
+    rootSelection: { enabled: false },
+  })
+  assert.equal(disabled.rows.length, 4)
+  assert.equal('rootsFilteredOut' in disabled.summary, false)
+
+  // 规则可覆盖:另一家工厂的编码约定照样能表达,图号前后缀不是写死的。
+  const retuned = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(data()).adapter,
+    projectNo: 'P-001',
+    rootSelection: { mainDrawingPrefix: 'X', mainDrawingSuffix: '-900', sheetMetalSuffixes: ['-ZZ'] },
+  })
+  assert.deepEqual(retuned.rows.map((row) => row.componentSourceId), ['PART-OTHER'], '换了规则,根也跟着换')
+
+  // 配置本身 fail-closed:空后缀会让每个图号都成为总图。
+  await assert.rejects(
+    () => expandPlmProjectBom({
+      sourceAdapter: createAdapter(data()).adapter,
+      projectNo: 'P-001',
+      rootSelection: { mainDrawingSuffix: '' },
+    }),
+    /rootSelection.mainDrawingSuffix must not be empty/,
+  )
+}
+
+// ⑤ 根选择:无总图 => 订单行全部当根,但按图号 dash 分段判定为别人子级的行剔除。
+//    老系统 doGetAllBomInfo 1056-1072 + checkHierarchyRelationship 413-450。
+async function testRootSelectionDropsDashDescendantsWhenNoMainDrawing() {
+  const data = baseData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-P', quantity: '1', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'PART-C', quantity: '1', sort_id: 2 },
+      { order_id: 'ORDER-1', part_id: 'PART-U', quantity: '1', sort_id: 3 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-P', IdentityNo: 'K300-01', IdentityName: '父件', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'K300-01-02', IdentityName: '子件', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-U', IdentityNo: 'M900-01', IdentityName: '不相干', Material: 'Q235', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
+  })
+  const result = await expandPlmProjectBom({ sourceAdapter: createAdapter(data).adapter, projectNo: 'P-001' })
+  assert.deepEqual(
+    result.rows.map((row) => row.componentSourceId),
+    ['PART-P', 'PART-U'],
+    '同前缀、段数更多的 K300-01-02 是 K300-01 的子级,不当根;前缀不同的 M900-01 不受影响',
+  )
+  assert.equal(result.summary.rootsFilteredOut, 1)
+
+  // 纯函数一层:老系统那张真值表(1 / 2 / 0 / -1)。
+  assert.equal(dashHierarchyRelationship('K300-01', 'K300-01-02'), 1)
+  assert.equal(dashHierarchyRelationship('K300-01-02', 'K300-01'), 2)
+  assert.equal(dashHierarchyRelationship('K300-01', 'K300-02'), 0, '段数相同 => 无父子关系')
+  assert.equal(dashHierarchyRelationship('K300-01', 'M900-01-02'), 0, '首段不同 => 无关系')
+  assert.equal(dashHierarchyRelationship('K300-01', '   '), -1, '判不了就是 -1,而 -1 从不导致剔除')
+}
+
+// ⑥ 正控:换根/去重之后,沿路径累乘一如既往(老系统 GetChildrenBom 1122-1136)。
+async function testQuantityRollupSurvivesF1c() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: 1 }],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'J2601-00', IdentityName: '总图', Material: 'Q235', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: '子装配', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: '零件', Material: 'Steel', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-B', bom_id: 'BOM-B', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3', sort_id: 1 },
+      { bom_pid: 'BOM-B', part_id: 'PART-C', Bom_ExAttr1: '4', sort_id: 1 },
+    ],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+  assert.deepEqual(result.rows.map((row) => row.totalQuantity), [2, 6, 24], '2 -> 2x3 -> 2x3x4')
+}
+
+// ⑦ 名称/规格按第一个空格切(老系统 fillBasicStockInfo 762-770)。三种形状 + 声明列优先。
+async function testNameAndSpecSplitThreeShapes() {
+  const { adapter } = createAdapter(baseData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: '1', sort_id: 2 },
+      { order_id: 'ORDER-1', part_id: 'PART-C', quantity: '1', sort_id: 3 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-1', IdentityName: '螺栓 M8 x 30', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-1', IdentityName: '底板', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'C-1', IdentityName: '垫片  2mm', Material: 'Steel', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [],
+    DN_PDM_BomDetailsInfo: [],
+  }))
+  const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', rootSelection: { enabled: false } })
+  const byCode = Object.fromEntries(result.rows.map((row) => [row.componentCode, row]))
+
+  // 有空格:前段是名称,后段是规格,原串留在 nameAndSpec(名称及规格)。
+  assert.equal(byCode['A-1'].componentName, '螺栓')
+  assert.equal(byCode['A-1'].spec, 'M8 x 30', '只切第一个空格,后面的空格留在规格里')
+  assert.equal(byCode['A-1'].nameAndSpec, '螺栓 M8 x 30')
+
+  // 无空格:名称=全串,没有 spec 键(缺席,不是空串)。
+  assert.equal(byCode['B-1'].componentName, '底板')
+  assert.equal(Object.prototype.hasOwnProperty.call(byCode['B-1'], 'spec'), false)
+  assert.equal(byCode['B-1'].nameAndSpec, '底板')
+
+  // 连续空格:只切首个,第二段原样保留(老系统 split(" ", 2) 的行为)。
+  assert.equal(byCode['C-1'].componentName, '垫片')
+  assert.equal(byCode['C-1'].spec, ' 2mm')
+
+  // 声明了原生规格列时,声明列赢(切分只是兜底派生,不覆盖测量值)。
+  const plan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  plan.part.specField = 'Specification'
+  const declared = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }],
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-1', IdentityName: '螺栓 M8 x 30', Material: 'Steel', SysVer: 'V1', Specification: 'DN1200' },
+      ],
+      DN_PDM_BomHeadInfo: [],
+      DN_PDM_BomDetailsInfo: [],
+    })).adapter,
+    projectNo: 'P-001',
+    readPlan: plan,
+  })
+  assert.equal(declared.rows[0].spec, 'DN1200', '声明的原生列优先于切分出来的后半段')
+}
+
+// ⑧ 端到端:明细排序号 / 父件排序号 / 名称及规格 落进客户包的 ext_ 列,而且只在
+//    「包声明了 + 动作声明了(= target 绑了)」时才落。后者是 fail-closed 的第二道门:
+//    往 target 没绑的 ext_ 列写值会让整行写入被 apply-writer 拒(unmapped_extension_field)。
+async function testSortColumnsLandInThePackColumns() {
+  const expansion = await expandPlmProjectBom({
+    sourceAdapter: createAdapter(baseData({
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: 7 }],
+      DN_PDM_PartLibraryInfo: [
+        { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: '总装 甲型', Material: 'Steel', SysVer: 'V1' },
+        { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: '螺栓 M8', Material: 'Iron', SysVer: 'V1' },
+      ],
+      DN_PDM_BomDetailsInfo: [{ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3', sort_id: 40 }],
+    })).adapter,
+    projectNo: 'P-001',
+  })
+  assert.equal(expansion.valid, true)
+
+  const packStanza = (ownership) => ({
+    ownership,
+    preserveOnRefresh: ownership === 'human_preserved',
+    required: false,
+    key: false,
+    extension: true,
+    packId: 'factory-a',
+    packVersion: '1.0.0',
+  })
+  const installedFieldProperties = [
+    { logicalId: 'ext_componentSortNo', name: 'ext_componentSortNo', type: 'number', property: { stockPreparation: packStanza('plm_system') } },
+    { logicalId: 'ext_parentSortNo', name: 'ext_parentSortNo', type: 'number', property: { stockPreparation: packStanza('plm_system') } },
+    { logicalId: 'ext_nameAndSpec', name: 'ext_nameAndSpec', type: 'string', property: { stockPreparation: packStanza('plm_system') } },
+  ]
+  const extensionFieldIds = ['ext_componentSortNo', 'ext_parentSortNo', 'ext_nameAndSpec']
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: expansion.rows,
+    existingRows: [],
+    rowErrors: expansion.rowErrors,
+    runId: 'run-f1c-sort',
+    plannedAt: '2026-09-11T00:00:00.000Z',
+    installedFieldProperties,
+    extensionFieldIds,
+  })
+  const records = plan.decisions.filter((decision) => decision.decision === 'add').map((decision) => decision.record)
+  const root = records.find((record) => record.componentCode === 'A-001')
+  const child = records.find((record) => record.componentCode === 'B-001')
+
+  assert.equal(root.ext_componentSortNo, 7, '订单明细栏的 sort_id 落进当前组件排序号')
+  assert.equal(child.ext_componentSortNo, 40, 'BOM 明细栏的 sort_id 落进当前组件排序号')
+  assert.equal(child.ext_parentSortNo, 7, '父组件排序号 = 父件自己的排序号(不抄老系统 756 那行的子件 sortId)')
+  assert.equal(child.ext_nameAndSpec, '螺栓 M8', '名称及规格是未切分的原串')
+  assert.equal(child.componentName, '螺栓', '而名称是切分后的前段')
+  assert.equal(Object.prototype.hasOwnProperty.call(root, 'ext_parentSortNo'), false, '根没有父件 => 不写这个键')
+
+  // 第二道门:动作没声明这三列时,一个 ext_ 键都不写(否则 apply-writer 会因未绑定而拒整行)。
+  const undeclared = planStockPreparationConflicts({
+    expandedRows: expansion.rows,
+    existingRows: [],
+    rowErrors: expansion.rowErrors,
+    runId: 'run-f1c-sort-undeclared',
+    plannedAt: '2026-09-11T00:00:00.000Z',
+    installedFieldProperties,
+  })
+  for (const decision of undeclared.decisions.filter((entry) => entry.decision === 'add')) {
+    assert.deepEqual(
+      Object.keys(decision.record).filter((key) => key.startsWith('ext_')),
+      [],
+      '动作没声明扩展列 => 一个 ext_ 键都不派生',
+    )
+  }
+}
+
 async function main() {
   await testRowErrorCapBoundary()
   await testUnderTheCapIsByteIdenticalToAnUncappedExpansion()
@@ -1315,6 +1626,14 @@ async function main() {
   await testFailClosedGuards()
   await testBlankOrNullQuantityHeldNotZeroed()
   await testScaleLimitsRemainDiagnosableAndValuesFree()
+  await testTwoActiveBomHeadsCollapseOneChild()
+  await testSameDrawingDifferentStandardPartsSurvive()
+  await testSiblingsThatDisagreeOnQuantityAreNotCollapsed()
+  await testRootSelectionKeepsHighestMainDrawingAndSheetMetal()
+  await testRootSelectionDropsDashDescendantsWhenNoMainDrawing()
+  await testQuantityRollupSurvivesF1c()
+  await testNameAndSpecSplitThreeShapes()
+  await testSortColumnsLandInThePackColumns()
   testReadPlanValidation()
 
   console.log('stock-preparation-bom-expansion.test.cjs OK')

@@ -1470,6 +1470,11 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       plannedAt: plannedAt || new Date().toISOString(),
       duplicatePolicyReview: review,
       installedFieldProperties,
+      // F1c: the DECLARED extension band. The planner derives 当前组件排序号 / 父组件排序号 /
+      // 名称及规格 into pack columns only when they are on this list — which is exactly the list
+      // `assertTargetFieldMapCompleteness` already forces the target's fieldIdMap to bind, so a
+      // derived value can never reach the writer as an unbound `ext_` id.
+      extensionFieldIds: action.extensionFieldIds,
       // W4 carry: threaded from the deploy-time action config (undefined when the
       // config never opted in — the planner is then byte-identical to pre-wiring).
       carryPolicy: action.carryPolicy,

@@ -560,7 +560,12 @@ async function testPullOne(schema) {
   // Case-insensitive column read: the source rows only carry lower-case keys (Postgres folding),
   // yet the identity columns still land on the row.
   assert.equal(root.componentCode, 'SYN-A-1000')
-  assert.equal(root.componentName, 'Synthetic Root Assembly A')
+  // F1c: 名称 is the first segment of 名称及规格 (老系统 fillBasicStockInfo 762-770 按第一个空格切),
+  // the unsplit string stays on `nameAndSpec`, and the tail becomes 规格 because this read plan
+  // declares no native spec column.
+  assert.equal(root.componentName, 'Synthetic')
+  assert.equal(root.nameAndSpec, 'Synthetic Root Assembly A')
+  assert.equal(root.spec, 'Root Assembly A')
   assert.equal(root.material, 'SYN-MAT-STEEL')
   assert.equal(root.sourceVersion, 'V1')
 
