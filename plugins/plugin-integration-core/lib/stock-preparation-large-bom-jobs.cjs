@@ -1177,6 +1177,18 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
       ? cloneJson(sourceJob.actionSnapshot.template)
       : undefined,
     plan,
+    // OPTIONAL pack-aware ownership band, SNAPSHOTTED at approval time next to planRevision /
+    // targetRevision, for the same reason they are: a checkpoint apply advances over many separate
+    // HTTP requests, and an input read live inside each chunk would let an install (or a column
+    // deleted in the UI) mid-run hand two chunks of ONE approved job two different writable bands —
+    // some rows written with the pack's `ext_` columns in the band and some without, inside one
+    // apply the operator approved once.
+    //
+    // Key ABSENT when the resolver returned undefined (no ledger / no pack / read failure), so a
+    // job created on a deployment with no pack installed is byte-identical to the pre-wiring job.
+    ...(input.installedFieldProperties === undefined || input.installedFieldProperties === null
+      ? {}
+      : { installedFieldProperties: cloneJson(input.installedFieldProperties) }),
     totalDecisions: Array.isArray(plan.decisions) ? plan.decisions.length : 0,
     checkpoint: {
       nextDecisionIndex: 0,
@@ -1319,7 +1331,15 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
       // Same OPTIONAL projection the plan was built from. Threading it here too keeps
       // the human wall extended at WRITE time and not only at plan time — a chunked
       // apply must not be the one path where a pack `ext_` human column slips through.
-      installedFieldProperties: input.installedFieldProperties,
+      //
+      // THE STORED SNAPSHOT WINS over any per-call input: the band belongs to the approved job, so
+      // every chunk of one job writes through the band resolved when that job was approved. The
+      // `input` fallback survives only for a job carrying NO snapshot — a direct caller, or a job
+      // approved before this key existed — and there it is the pre-existing contract, not a
+      // widening: a job that HAS a snapshot can never be widened by its caller.
+      installedFieldProperties: Object.prototype.hasOwnProperty.call(job, 'installedFieldProperties')
+        ? job.installedFieldProperties
+        : input.installedFieldProperties,
       recordsApi,
     })
 

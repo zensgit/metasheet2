@@ -651,12 +651,14 @@ async function oneUnparseableCellDoesNotCostTheRow() {
 
 // ── 7. the large-BOM path announces that it does NOT apply the mapping ───────
 //
-// That path supplies neither `extFieldMapping` nor `installedFieldProperties`, and the second
-// omission is what makes the first dangerous: with template-only bands the planner leaves `ext_` out
-// of the update patch entirely, and a patch does not blank what it omits — so whatever a previous
-// SMALL-path refresh wrote SURVIVES while every canonical column around it moves to today's source.
-// Stale-but-plausible, not absent. Nor is the path chosen by anyone: a slow source alone
-// (`read_time_limit_exceeded`) moves an unchanged project from one path to the other.
+// That path supplies `installedFieldProperties` (see
+// stock-preparation-large-bom-installed-fields-wiring.test.cjs) but still no `extFieldMapping`, and
+// the band does not make the missing mapping harmless: with nothing filling an `ext_` cell the row
+// carries no such key, `pickFields` skips it and the planner leaves `ext_` out of the update patch —
+// and a patch does not blank what it omits, so whatever a previous SMALL-path refresh wrote SURVIVES
+// while every canonical column around it moves to today's source. Stale-but-plausible, not absent.
+// Nor is the path chosen by anyone: a slow source alone (`read_time_limit_exceeded`) moves an
+// unchanged project from one path to the other.
 
 const LARGE_BOM_START_ROUTE = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs'
 const DIVERGENCE_KEY = 'extFieldMappingConfiguredButNotAppliedOnThisPath'

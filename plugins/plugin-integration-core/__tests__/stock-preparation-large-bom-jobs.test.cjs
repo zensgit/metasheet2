@@ -2064,6 +2064,255 @@ async function testCheckpointApplyRejectsConcurrentRunningChunk() {
   assertValuesFree(publicCheckpointApplyJob(loaded))
 }
 
+// -- installedFieldProperties on the large-BOM path ---------------------------
+//
+// The two large-BOM routes now supply the pack-aware ownership band the small routes have always
+// supplied (http-routes.cjs: tableActionLargeBomExpansionJobPlan, tableActionLargeBomApplyJobStart).
+// The three properties that must hold at THIS layer:
+//
+//   (i)   omitted / undefined / null are ONE behaviour, and it is the pre-wiring behaviour --
+//         asserted as JSON equality of the whole stored job, not against a remembered constant;
+//   (ii)  a supplied band reaches the planner (plan side) and the apply writer's human wall
+//         (apply side), where it rejects a pack `ext_` human column BY NAME;
+//   (iii) the apply band is FROZEN when the job is approved. A checkpoint apply spans many HTTP
+//         requests; if each chunk read the ledger live, an install (or a UI column deletion)
+//         mid-run would give two chunks of ONE approved job two different writable bands.
+
+function packOwnershipStanza(ownership) {
+  return {
+    ownership,
+    preserveOnRefresh: ownership === 'human_preserved',
+    required: false,
+    key: false,
+    extension: true,
+    packId: 'large-bom-band-pack',
+    packVersion: '1.0.0',
+  }
+}
+
+const EXT_HUMAN_FIELD = 'ext_blankLength'
+const EXT_PLM_FIELD = 'ext_legacyRowId'
+
+function installedBand() {
+  return [
+    { fieldId: EXT_PLM_FIELD, property: { stockPreparation: packOwnershipStanza('plm_system') } },
+    { fieldId: EXT_HUMAN_FIELD, property: { stockPreparation: packOwnershipStanza('human_preserved') } },
+  ]
+}
+
+// A band that no longer knows the pack at all: packAware, but with nothing classified. It stands
+// in for "the ledger changed under a running job" -- under it the human column is NOT on the wall.
+function emptyBand() {
+  return []
+}
+
+function addDecisionCarryingExtHumanField(key) {
+  const decision = addDecision(key, { componentSourceId: 'CHILD_VALUE_SHOULD_NOT_APPEAR' })
+  decision.record[EXT_HUMAN_FIELD] = 12
+  return decision
+}
+
+async function testPlanBandOmittedUndefinedAndNullAreOneBehaviour() {
+  const planArgs = {
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    existingRows: [],
+    runId: 'large-bom-plan-run',
+    plannedAt: '2026-06-08T00:02:00.000Z',
+    now: () => '2026-06-08T00:03:00.000Z',
+  }
+  const omitted = await completedJobWithArtifact({ jobId: 'job-band-omitted' })
+  const plannedWithoutKey = await planLargeBomBackgroundExpansionJob({
+    storage: omitted.storage,
+    ...TEST_SCOPE,
+    ...planArgs,
+    jobId: omitted.jobId,
+  })
+
+  // `undefined` and `null` are what the route passes when there is no ledger, no pack installed, or
+  // any read failure (resolveInstalledFieldProperties returns undefined then). Byte-identical to
+  // the call shape that shipped before the wiring -- which is the whole inertness claim.
+  for (const value of [undefined, null]) {
+    const other = await completedJobWithArtifact({ jobId: 'job-band-omitted' })
+    const planned = await planLargeBomBackgroundExpansionJob({
+      storage: other.storage,
+      ...TEST_SCOPE,
+      ...planArgs,
+      jobId: other.jobId,
+      installedFieldProperties: value,
+    })
+    assert.equal(
+      JSON.stringify(planned),
+      JSON.stringify(plannedWithoutKey),
+      'a degraded band resolution must plan exactly what the pre-wiring call planned',
+    )
+  }
+  assert.equal(
+    plannedWithoutKey.planEvidence.packAwareOwnership,
+    undefined,
+    'no band => the plan evidence gains no pack stanza at all',
+  )
+  assert.equal(
+    plannedWithoutKey.planEvidence.plmSystemFields.some((id) => id.startsWith('ext_')),
+    false,
+    'no band => not one ext_ id is in the writable band',
+  )
+}
+
+async function testPlanBandReachesThePlannerThroughTheJobLayer() {
+  const { storage, jobId } = await completedJobWithArtifact({ jobId: 'job-band-supplied' })
+  const planned = await planLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId,
+    existingRows: [],
+    runId: 'large-bom-plan-run',
+    plannedAt: '2026-06-08T00:02:00.000Z',
+    now: () => '2026-06-08T00:03:00.000Z',
+    installedFieldProperties: installedBand(),
+  })
+  assert.ok(
+    planned.planEvidence.plmSystemFields.includes(EXT_PLM_FIELD),
+    'a supplied band puts the pack plm_system column in the plan writable band',
+  )
+  assert.ok(
+    planned.planEvidence.humanPreservedFields.includes(EXT_HUMAN_FIELD),
+    'and puts the pack human column on the wall',
+  )
+  assert.deepEqual(planned.planEvidence.packAwareOwnership.packPlmWritableFieldIds, [EXT_PLM_FIELD])
+  assert.deepEqual(planned.planEvidence.packAwareOwnership.packHumanPreservedFieldIds, [EXT_HUMAN_FIELD])
+  assert.deepEqual(planned.planEvidence.packAwareOwnership.unclassifiedPackFieldIds, [])
+  assertValuesFree(publicBackgroundExpansionJob(planned))
+}
+
+async function testApplyBandIsFrozenAtApprovalAndEveryChunkReadsTheSnapshot() {
+  const plan = planWithDecisions([
+    addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::BAND-1'),
+    addDecisionCarryingExtHumanField('PROJECT_VALUE_SHOULD_NOT_APPEAR::BAND-2'),
+  ])
+  const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ plan, jobId: 'job-band-apply' })
+  const api = createTargetRecordsApi()
+  const created = await createLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    jobId,
+    principal: 'user-1',
+    permission: 'write',
+    createApplyJobId: () => 'apply-job-band',
+    now: () => '2026-06-08T00:01:00.000Z',
+    installedFieldProperties: installedBand(),
+  })
+  assert.deepEqual(
+    created.installedFieldProperties.map((entry) => entry.fieldId),
+    [EXT_PLM_FIELD, EXT_HUMAN_FIELD],
+    'the approved job carries the band it was approved under',
+  )
+  // Values-free by construction: field ids and frozen ownership tokens, never a source cell. The
+  // band is PRIVATE job state -- `publicCheckpointApplyJob` is a whitelist and never projects it.
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(publicCheckpointApplyJob(created), 'installedFieldProperties'),
+    false,
+    'the band is private job state, not a response key',
+  )
+
+  const first = await runLargeBomCheckpointApplyJobChunk({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-band',
+    recordsApi: api.recordsApi,
+    maxDecisionsPerChunk: 1,
+    now: () => '2026-06-08T00:02:00.000Z',
+  })
+  assert.equal(first.counts.created, 1)
+
+  // THE LEDGER MOVES UNDER THE RUNNING JOB. A live per-chunk read would hand this chunk a band
+  // that no longer knows `ext_blankLength`, and the human column would be written; the snapshot
+  // refuses it.
+  const second = await runLargeBomCheckpointApplyJobChunk({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-band',
+    recordsApi: api.recordsApi,
+    maxDecisionsPerChunk: 1,
+    installedFieldProperties: emptyBand(),
+    now: () => '2026-06-08T00:03:00.000Z',
+  })
+  assert.equal(second.status, 'partial')
+  assert.equal(second.counts.failed, 1, 'the human wall of the APPROVED band rejects the ext_ human column')
+  assert.equal(second.counts.created, 1, 'and the rejection costs only its own row')
+  assert.equal(api.rows.length, 1)
+  for (const call of api.calls.filter((entry) => entry[0] === 'createRecord')) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(call[1].data, EXT_HUMAN_FIELD),
+      false,
+      'no write carries the pack human column',
+    )
+  }
+
+  // THE CONTROL that makes the assertion above mean something: the SAME chunk input on a job with
+  // no snapshot writes that column. So it is the snapshot doing the refusing, not the fixture.
+  const control = await seedPlannedLargeBomJob({ plan, jobId: 'job-band-apply-control' })
+  const controlApi = createTargetRecordsApi()
+  await createLargeBomCheckpointApplyJob({
+    storage: control.storage,
+    ...TEST_SCOPE,
+    actionId: control.actionId,
+    jobId: control.jobId,
+    principal: 'user-1',
+    permission: 'write',
+    createApplyJobId: () => 'apply-job-band-control',
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+  const controlRun = await runLargeBomCheckpointApplyJobChunk({
+    storage: control.storage,
+    ...TEST_SCOPE,
+    actionId: control.actionId,
+    applyJobId: 'apply-job-band-control',
+    recordsApi: controlApi.recordsApi,
+    installedFieldProperties: emptyBand(),
+    now: () => '2026-06-08T00:02:00.000Z',
+  })
+  assert.equal(controlRun.counts.created, 2, 'without a snapshot the per-call band governs, as it always did')
+  assert.equal(
+    controlApi.calls
+      .filter((entry) => entry[0] === 'createRecord')
+      .some((entry) => Object.prototype.hasOwnProperty.call(entry[1].data, EXT_HUMAN_FIELD)),
+    true,
+    'and that band lets the pack human column through -- the exact outcome the snapshot prevents',
+  )
+}
+
+async function testApplyJobWithoutABandIsShapedExactlyAsBefore() {
+  const plan = planWithDecisions([addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::SHAPE-1')])
+  const shapes = []
+  for (const value of ['omit', undefined, null]) {
+    const seeded = await seedPlannedLargeBomJob({ plan, jobId: 'job-band-shape' })
+    const input = {
+      storage: seeded.storage,
+      ...TEST_SCOPE,
+      actionId: seeded.actionId,
+      jobId: seeded.jobId,
+      principal: 'user-1',
+      permission: 'write',
+      createApplyJobId: () => 'apply-job-shape',
+      now: () => '2026-06-08T00:01:00.000Z',
+    }
+    if (value !== 'omit') input.installedFieldProperties = value
+    const job = await createLargeBomCheckpointApplyJob(input)
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(job, 'installedFieldProperties'),
+      false,
+      'a degraded band resolution must not add a key to the stored job',
+    )
+    shapes.push(JSON.stringify(job))
+  }
+  assert.equal(shapes[0], shapes[1])
+  assert.equal(shapes[0], shapes[2], 'omitted / undefined / null are one stored job, byte for byte')
+}
+
 async function main() {
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
@@ -2102,6 +2351,10 @@ async function main() {
   await testCheckpointApplyMissingRecordsApiFailsBeforeRunning()
   await testCheckpointApplySingleFlightRejectsConcurrentQueuedRun()
   await testCheckpointApplyRejectsConcurrentRunningChunk()
+  await testPlanBandOmittedUndefinedAndNullAreOneBehaviour()
+  await testPlanBandReachesThePlannerThroughTheJobLayer()
+  await testApplyBandIsFrozenAtApprovalAndEveryChunkReadsTheSnapshot()
+  await testApplyJobWithoutABandIsShapedExactlyAsBefore()
 }
 
 main().catch((err) => {

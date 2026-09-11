@@ -3970,6 +3970,12 @@ function requireStockPreparationAudit() {
    *
    * `undefined` (no ledger, no pack installed, or any read failure) means the caller must OMIT the
    * parameter, which is byte-identical to the pre-pack behaviour.
+   *
+   * FIVE call sites: the small-BOM dry-run, the confirmation-decision route and the small-BOM apply
+   * resolve it per request, immediately before one in-process plan/apply. The large-BOM family
+   * resolves it twice — once when a plan is built, once when an apply job is APPROVED — and the
+   * apply resolution is stored on the job so that the many HTTP chunks of one approved run cannot
+   * drift apart.
    */
   async function resolveInstalledFieldProperties(req, action) {
     const objectId = (action && action.target && action.target.objectId)
@@ -3988,16 +3994,19 @@ function requireStockPreparationAudit() {
   // FRESHNESS-DIVERGENCE NOTICE for the large-BOM job family.
   //
   // The two small-BOM refresh routes apply the configured source->`ext_` mapping. The large-BOM
-  // routes do NOT: they expand into a stored job and plan out of that artifact, and neither call
-  // supplies `extFieldMapping` or `installedFieldProperties` (the latter has never been supplied on
-  // this path — see the note above `computeDryRun` in stock-preparation-table-actions.cjs).
+  // routes still do NOT: they expand into a stored job and plan out of that artifact, and no call in
+  // this family supplies `extFieldMapping`. `installedFieldProperties` IS supplied now — the plan
+  // route resolves it per request and the apply-job START route freezes it into the job — so the
+  // two inputs no longer travel together on this path, which is exactly why the notice below is
+  // still conditional on a configured MAPPING and only on that.
   //
-  // The consequence is NOT "no `ext_` write". Without `installedFieldProperties` the planner's
-  // writable band is template-only (derivePackAwarePlmWritableFields, packAware=false), so
-  // `pickFields` leaves every `ext_` id out of the update patch — and a patch does not blank what it
-  // omits. Any `ext_` value an earlier SMALL-path refresh wrote therefore SURVIVES while every
-  // canonical column around it moves to today's source. The row reads as fresh while its tenant
-  // columns sit at an older epoch, which in a 备料 table is a worse failure than a missing value.
+  // The consequence is NOT "no `ext_` write", and it did not change when the band arrived. With no
+  // mapping the expansion rows carry no `ext_` key at all, so `pickFields` (which skips
+  // `row[field] === undefined`) leaves every `ext_` id out of the update patch even with a
+  // pack-aware band — and a patch does not blank what it omits. Any `ext_` value an earlier
+  // SMALL-path refresh wrote therefore SURVIVES while every canonical column around it moves to
+  // today's source. The row reads as fresh while its tenant columns sit at an older epoch, which in
+  // a 备料 table is a worse failure than a missing value.
   //
   // Which path a project takes is not the operator's choice and is not monotonic either:
   // `read_time_limit_exceeded` is in LARGE_BOM_BOUNDED_ERROR_TYPES, so one unchanged project can go
@@ -6371,6 +6380,11 @@ function requireStockPreparationAudit() {
         jobId,
         existingRows,
         conflictPolicyReview,
+        // The pack-aware ownership band, resolved against the STORED job's action snapshot
+        // (`job.actionSnapshot.target.objectId` — the same sheet this plan will be applied to,
+        // never the live binding, which may have been re-pointed since the expansion was sealed).
+        // `undefined` => the frozen-template bands, i.e. byte-identical to the pre-wiring plan.
+        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
       })
       return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(planned)))
     },
@@ -6386,6 +6400,23 @@ function requireStockPreparationAudit() {
       const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
+      // THE BAND IS RESOLVED ONCE PER APPLY JOB, HERE — at the moment a human approves it — and is
+      // then FROZEN INTO the stored job (same family as planRevision / targetRevision). A checkpoint
+      // apply advances across MANY HTTP requests, so a live ledger read inside `.../run` would let
+      // an install (or a column deleted in the UI) mid-run give two chunks of ONE approved job two
+      // different writable bands. Chunks read the snapshot and nothing else.
+      //
+      // Resolved against the STORED expansion job's action snapshot, which is the same objectId
+      // `tableActionLargeBomExpansionJobPlan` planned with and the same target
+      // `createLargeBomCheckpointApplyJob` copies into `job.target` — plan band and write band
+      // cannot address different sheets. Reading the LIVE binding here instead would resolve a band
+      // for a sheet this job is not going to write to if the binding moved after the expansion.
+      const expansionJob = await loadLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        ...routeScope,
+        actionId,
+        jobId,
+      })
       const job = await createLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -6394,6 +6425,10 @@ function requireStockPreparationAudit() {
         principal: requestPrincipal(req),
         permission: applyPermissionForUser(user),
         acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+        installedFieldProperties: await resolveInstalledFieldProperties(
+          req,
+          assertStockPreparationTargetReady(expansionJob.actionSnapshot),
+        ),
       })
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)), 202)
     },
