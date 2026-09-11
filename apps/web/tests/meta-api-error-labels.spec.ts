@@ -8,6 +8,7 @@ import {
   apiFieldValidationFallback,
   metaApiErrorLabel,
 } from '../src/multitable/utils/meta-api-error-labels'
+import { networkUnavailableMessage } from '../src/utils/networkErrors'
 
 describe('meta-api-error-labels', () => {
   it('exposes all API fallback keys in both locales', () => {
@@ -113,6 +114,26 @@ describe('meta-api-error-labels', () => {
     expect(apiDefaultErrorMessage('INTERNAL_ERROR', 500, true)).toBe('API 500')
     expect(apiDefaultErrorMessage(undefined, 501, true)).toBe('API 501')
     expect(apiDefaultErrorMessage(undefined, 505, true)).toBe('API 505')
+  })
+
+  // F4-B CONTRACT (cross-module): the two outage copies live in two files on two different
+  // layers — utils/networkErrors.ts (no HTTP response at all) and this module (gateway answered
+  // 502/503/504). A user cannot tell the two apart, so they must be BYTE-IDENTICAL per locale.
+  // Nothing else enforces that: api.spec.ts's EN assertion used to compare the helper with
+  // itself, so rewriting only one of the two files left every spec green. These assertions are
+  // the whole enforcement of the "one wording, two layers" ruling.
+  it('F4-B CONTRACT: transport copy and gateway-status copy are identical in both locales', () => {
+    expect(networkUnavailableMessage(false)).toBe(metaApiErrorLabel('error.serverRestarting', false))
+    expect(networkUnavailableMessage(true)).toBe(metaApiErrorLabel('error.serverRestarting', true))
+    // …and identical through the status path the gateway actually takes.
+    expect(networkUnavailableMessage(false)).toBe(apiDefaultErrorMessage(undefined, 502, false))
+    expect(networkUnavailableMessage(true)).toBe(apiDefaultErrorMessage(undefined, 503, true))
+    expect(networkUnavailableMessage(false)).toBe(apiDefaultErrorMessage(undefined, 504, false))
+    // Both sides pinned to the literal, so a matched rename of BOTH files still turns this red.
+    expect(networkUnavailableMessage(false)).toBe('The service is temporarily unavailable. Please try again in a moment.')
+    expect(networkUnavailableMessage(true)).toBe('服务暂时不可用，请稍后重试')
+    // The EN/zh pair must stay two distinct strings (a copy-paste slip is a real failure mode).
+    expect(networkUnavailableMessage(true)).not.toBe(networkUnavailableMessage(false))
   })
 
   it('F4-B REGRESSION: the code-keyed branches still win over the new status branch', () => {

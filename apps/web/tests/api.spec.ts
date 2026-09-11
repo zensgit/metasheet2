@@ -314,6 +314,10 @@ describe('apiFetch', () => {
       expect(caught.cause).toBe(original)
       // The browser literal is what testers were shown before this fix; it must be gone.
       expect(caught.message).toBe(networkUnavailableMessage(false))
+      // The assertion above is SELF-REFERENTIAL (expectation = the function under test), so it
+      // survives any rewrite of the EN copy. Pin the literal too, exactly as the zh case further
+      // down does: garbling networkErrors.ts's `en` string must turn this file red.
+      expect(caught.message).toBe('The service is temporarily unavailable. Please try again in a moment.')
       expect(caught.message).not.toContain('Failed to fetch')
       // Neutral by owner ruling: never announce an upgrade to the customer.
       expect(caught.message.toLowerCase()).not.toContain('upgrad')
