@@ -417,6 +417,23 @@ describe('MetaFieldManager — resizable field-list / field-config split (r8-B)'
       }
     })
 
+    it('consumes the four resize keys (preventDefault) so they do not also scroll the dialog', async () => {
+      const { container, app } = await mountWithConfigOpen(1000)
+      try {
+        for (const key of ['ArrowUp', 'ArrowDown', 'Home', 'End']) {
+          const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+          splitter(container).dispatchEvent(event)
+          expect(event.defaultPrevented, `${key} must be consumed`).toBe(true)
+        }
+        // A key the splitter does NOT own stays available to the rest of the dialog.
+        const passthrough = new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true, cancelable: true })
+        splitter(container).dispatchEvent(passthrough)
+        expect(passthrough.defaultPrevented).toBe(false)
+      } finally {
+        app.unmount()
+      }
+    })
+
     it('consumes the resize keys only from the splitter: the same keys elsewhere in the dialog do nothing', async () => {
       const { container, app } = await mountWithConfigOpen(1000)
       try {
@@ -439,6 +456,22 @@ describe('MetaFieldManager — resizable field-list / field-config split (r8-B)'
         const event = pointer('pointerdown', 500, 3)
         splitter(container).dispatchEvent(event)
         expect(event.defaultPrevented).toBe(true)
+      } finally {
+        app.unmount()
+      }
+    })
+
+    it('captures the pointer on the HANDLE itself (that is what makes handle-scoped listeners enough)', async () => {
+      const { container, app } = await mountWithConfigOpen(1000)
+      try {
+        const el = splitter(container)
+        // jsdom implements neither capture method, so an own-property stub is the only way to see
+        // the call at all; without it the component's `?.` swallows the whole mechanic silently.
+        const capture = vi.fn()
+        ;(el as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = capture
+        el.dispatchEvent(pointer('pointerdown', 500, 11))
+        expect(capture).toHaveBeenCalledWith(11)
+        el.dispatchEvent(pointer('pointerup', 500, 11))
       } finally {
         app.unmount()
       }
@@ -650,13 +683,72 @@ describe('MetaFieldManager — resizable field-list / field-config split (r8-B)'
         expect(configPaneHeightPx(container)).toBe(expectedMax(1000))
         expect(expandToggle(container).getAttribute('aria-pressed')).toBe('true')
         expect(expandToggle(container).getAttribute('aria-label')).toBe(managerLabel('field.configPaneCollapse', false))
-        expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe(String(expectedMax(1000)))
+        // What gets stored is the MANUAL height, never the enlarge-produced ceiling. (This assertion
+        // used to read `expectedMax(1000)` and was pinning the bug: storing the ceiling made the
+        // next mount seed both the live height and the restore target from it, so the pair went
+        // dead after a reload — see the cross-mount case below.)
+        expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe(String(manual))
 
         expandToggle(container).click()
         await flushUi()
         expect(configPaneHeightPx(container)).toBe(manual)
         expect(expandToggle(container).getAttribute('aria-pressed')).toBe('false')
         expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe(String(manual))
+      } finally {
+        app.unmount()
+      }
+    })
+
+    // The two cases below are about the pair ACROSS MOUNTS / after a reload — the path every
+    // same-mount case above structurally misses, and the one where the pair went dead: both clicks
+    // produced no visual change at all once the stored number was the ceiling.
+    it('after enlarge → reload, the pair still moves (a reload never comes back pinned to the ceiling)', async () => {
+      const first = await mountWithConfigOpen(1000)
+      expandToggle(first.container).click()
+      await flushUi()
+      expect(configPaneHeightPx(first.container)).toBe(expectedMax(1000))
+      // The reload will read THIS number: the last manual height, not the ceiling it is showing.
+      expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe(String(expectedDefault(1000)))
+      first.app.unmount()
+      first.container.remove()
+
+      const second = await mountWithConfigOpen(1000)
+      try {
+        expect(configPaneHeightPx(second.container)).toBe(expectedDefault(1000))
+        expect(expandToggle(second.container).getAttribute('aria-pressed')).toBe('false')
+        expandToggle(second.container).click()
+        await flushUi()
+        expect(configPaneHeightPx(second.container)).toBe(expectedMax(1000))
+        expandToggle(second.container).click()
+        await flushUi()
+        expect(configPaneHeightPx(second.container)).toBeLessThan(expectedMax(1000))
+        expect(configPaneHeightPx(second.container)).toBe(expectedDefault(1000))
+      } finally {
+        second.app.unmount()
+      }
+    })
+
+    it('collapse still moves when the remembered MANUAL height is itself the ceiling (End, then the pair)', async () => {
+      const { container, app } = await mountWithConfigOpen(1000)
+      try {
+        const el = splitter(container)
+        keydown(el, 'End') // a manual choice that lands exactly on the ceiling
+        keyup(el, 'End')
+        await flushUi()
+        expect(configPaneHeightPx(container)).toBe(expectedMax(1000))
+
+        expandToggle(container).click() // enlarging an already-maxed pane
+        await flushUi()
+        expect(expandToggle(container).getAttribute('aria-pressed')).toBe('true')
+        expandToggle(container).click()
+        await flushUi()
+        // Collapse must not "restore" the ceiling it is already at: it falls back to the default,
+        // capped one step below the ceiling so the move is always visible.
+        const fallback = Math.min(expectedDefault(1000), expectedMax(1000) - CONFIG_PANE_STEP)
+        expect(configPaneHeightPx(container)).toBe(fallback)
+        expect(configPaneHeightPx(container)).toBeLessThan(expectedMax(1000))
+        expect(expandToggle(container).getAttribute('aria-pressed')).toBe('false')
+        expect(window.localStorage.getItem(CONFIG_PANE_STORAGE_KEY)).toBe(String(fallback))
       } finally {
         app.unmount()
       }
@@ -714,13 +806,25 @@ describe('MetaFieldManager — resizable field-list / field-config split (r8-B)'
     })
 
     it('stops tracking the viewport once the dialog unmounts (no leaked resize listener)', async () => {
+      // This has to be proven through the listener REGISTRY, not through behaviour: a leaked
+      // `syncViewportHeight` only assigns to a ref of a torn-down component, which throws nothing
+      // and renders nothing — an earlier `expect(() => setViewportHeight(400)).not.toThrow()` here
+      // stayed green with the component's `removeEventListener` line deleted outright.
+      const addSpy = vi.spyOn(window, 'addEventListener')
       const { container, app } = await mountWithConfigOpen(1000)
+      const added = addSpy.mock.calls.filter(([type]) => type === 'resize').map(([, handler]) => handler)
+      expect(added.length).toBeGreaterThan(0)
+
       const el = splitter(container)
       keydown(el, 'End')
       await flushUi()
+
+      const removeSpy = vi.spyOn(window, 'removeEventListener')
       app.unmount()
-      // A resize after unmount must not throw (the listener is gone; if it were still attached it
-      // would run against a torn-down component).
+      const removed = removeSpy.mock.calls.filter(([type]) => type === 'resize').map(([, handler]) => handler)
+      // Every resize handler this mount registered must have been handed back on unmount.
+      expect(added.filter((handler) => !removed.includes(handler))).toEqual([])
+      // ...and the post-unmount resize itself must still be inert.
       expect(() => setViewportHeight(400)).not.toThrow()
     })
   })

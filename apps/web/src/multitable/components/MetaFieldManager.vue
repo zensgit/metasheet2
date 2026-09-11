@@ -3066,6 +3066,17 @@ const configPaneHeight = ref(readStoredConfigPaneHeight())
 // The height to restore when the enlarge toggle is switched back off: the most recent MANUALLY
 // chosen one (drag or keyboard), not the mount-time one.
 const lastChosenConfigPaneHeight = ref(configPaneHeight.value)
+
+/** The ONLY thing ever written to localStorage is the last MANUAL height.
+ *
+ *  r8-B follow-up: persisting `configPaneHeight` instead made the enlarge/collapse pair dead ACROSS
+ *  MOUNTS -- enlarge wrote the ceiling, and the next mount seeded BOTH `configPaneHeight` and
+ *  `lastChosenConfigPaneHeight` from that same stored number, so collapse "restored" the ceiling it
+ *  was already at and neither button changed anything. Routing every persist through the chosen
+ *  value keeps the stored number and the restore target the same thing by construction. */
+function persistChosenConfigPaneHeight() {
+  persistConfigPaneHeight(lastChosenConfigPaneHeight.value)
+}
 // Presentation state only -- deliberately not persisted (the px height already is, and a reload
 // that comes back "pressed" without the user having pressed anything is worse than starting off).
 const isConfigPaneExpanded = ref(false)
@@ -3097,17 +3108,34 @@ watch(maxConfigPaneHeight, (max) => {
   }
 })
 
+/** 放大/缩小: enlarge pins the pane to the current ceiling, collapse returns to the last MANUAL
+ *  height ("记住上一次手动值").
+ *
+ *  The collapse fallback is what keeps the pair from being a dead control when the remembered manual
+ *  height IS the ceiling (the user dragged, or pressed End, all the way up, possibly in an earlier
+ *  session): "restoring" the max would render no change at all, so fall back to the default instead.
+ *  One step below the ceiling caps that fallback so it is always a visible move; on a viewport so
+ *  short that the floor and the ceiling meet, the clamp collapses them back together -- there is
+ *  genuinely no room to resize there, and no ARIA state is violated. */
 function toggleConfigPaneExpand() {
   if (isConfigPaneExpanded.value) {
-    configPaneHeight.value = clampConfigPaneHeight(lastChosenConfigPaneHeight.value)
+    const remembered = lastChosenConfigPaneHeight.value
+    const restored = clampConfigPaneHeight(
+      remembered >= maxConfigPaneHeight.value
+        ? Math.min(defaultConfigPaneHeight.value, maxConfigPaneHeight.value - CONFIG_PANE_STEP)
+        : remembered,
+    )
+    configPaneHeight.value = restored
+    lastChosenConfigPaneHeight.value = restored
     isConfigPaneExpanded.value = false
   } else {
     lastChosenConfigPaneHeight.value = configPaneHeight.value
     configPaneHeight.value = maxConfigPaneHeight.value
     isConfigPaneExpanded.value = true
   }
-  // A click is itself one discrete release -- persist here directly.
-  persistConfigPaneHeight(configPaneHeight.value)
+  // A click is itself one discrete release -- persist here directly. Note this writes the CHOSEN
+  // height, so an enlarge never stores the ceiling (see `persistChosenConfigPaneHeight`).
+  persistChosenConfigPaneHeight()
 }
 
 // The handle sits ABOVE the config pane, so dragging it UP (smaller clientY) grows the pane:
@@ -3153,7 +3181,7 @@ function onManagerKeydown(event: KeyboardEvent) {
 function onManagerKeyup(event: KeyboardEvent) {
   if (!SPLITTER_RESIZE_KEYS.has(event.key)) return
   if (!fromSplitter(event)) return
-  persistConfigPaneHeight(configPaneHeight.value)
+  persistChosenConfigPaneHeight()
 }
 
 // Pointer Events + setPointerCapture on the HANDLE ITSELF (not `document`): capture redirects every
@@ -3188,7 +3216,7 @@ function onSplitterPointerDown(event: PointerEvent) {
       handle.removeEventListener('pointerup', onUp)
       handle.removeEventListener('pointercancel', onUp)
       // Persist on release (pointerup/pointercancel), never per pointermove.
-      persistConfigPaneHeight(configPaneHeight.value)
+      persistChosenConfigPaneHeight()
     }
   }
   handle.addEventListener('pointermove', onMove)
