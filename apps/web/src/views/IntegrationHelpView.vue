@@ -303,9 +303,19 @@ export const INTEGRATION_HELP_GLOSSARY: GlossaryEntry[] = [
 // `integrationErrorCodeEntries()` table further down) and a code pasted into prose here would be a
 // second one.
 export interface HelpCaseStepAnchor {
-  /** Repo-root-relative path of the file that proves this step's action exists. */
+  /** Repo-root-relative path of the file that proves this step's action exists. This is the ONE
+   *  path rendered to the reader (see the `{{ anchor.file }}` cells below) — `altFiles` never is. */
   file: string
-  /** A literal that must occur in that file (route path, data-testid, label, function name). */
+  /**
+   * Optional additional repo-root-relative paths where the same `token` would ALSO resolve. Exists
+   * for a control mid-migration between two files: PR #5587 (feat/data-sources-fold-into-workbench,
+   * in flight as of 2026-09-11) moves the `/data-sources` form out of DataSourcesView.vue into
+   * apps/web/src/components/data-sources/DataSourcesPanel.vue. Once that lands and DataSourcesView.vue
+   * is gone, drop `file`/`altFiles` back down to a single `file` pointing at the panel — this list is
+   * a bridge, not the steady state.
+   */
+  altFiles?: string[]
+  /** A literal that must occur in `file` (or one of `altFiles`) (route path, data-testid, label, function name). */
   token: string
 }
 
@@ -349,9 +359,9 @@ export const INTEGRATION_HELP_SQL_SOURCE_CASE_STEPS: HelpCaseStep[] = [
     failureEn: 'A SQL Server source reports that either host or server is required — that check fires before submit, so fill one in; Postgres / MySQL accept host only.',
     anchors: [
       { file: 'apps/web/src/router/appRoutes.ts', token: "path: '/data-sources'" },
-      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-new-button' },
-      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-field-host' },
-      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-field-readonly' },
+      { file: 'apps/web/src/views/DataSourcesView.vue', altFiles: ['apps/web/src/components/data-sources/DataSourcesPanel.vue'], token: 'ds-new-button' },
+      { file: 'apps/web/src/views/DataSourcesView.vue', altFiles: ['apps/web/src/components/data-sources/DataSourcesPanel.vue'], token: 'ds-field-host' },
+      { file: 'apps/web/src/views/DataSourcesView.vue', altFiles: ['apps/web/src/components/data-sources/DataSourcesPanel.vue'], token: 'ds-field-readonly' },
     ],
   },
   {
@@ -367,9 +377,9 @@ export const INTEGRATION_HELP_SQL_SOURCE_CASE_STEPS: HelpCaseStep[] = [
     failureZh: '出现「连接失败」时，提示里不会回显你填的 Host 或账号（服务端会把提交的标识符从驱动原文里剔掉）——真实原因看服务端日志，或对已保存的源用列表行里的「测试连接」。注意「创建」本身不拨号，所以填错也会保存成功：保存成功不等于连得上。',
     failureEn: 'On "connection failed" the message does not echo the host or account you typed (the server strips submitted identifiers out of the driver text) — read the server log for the real cause, or use the row-level "Test connection" on an already-saved source. Note that "Create" itself never dials, so a wrong value still saves successfully: saved is not the same as reachable.',
     anchors: [
-      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-test-draft' },
+      { file: 'apps/web/src/views/DataSourcesView.vue', altFiles: ['apps/web/src/components/data-sources/DataSourcesPanel.vue'], token: 'ds-test-draft' },
       { file: 'apps/web/src/data-sources/api.ts', token: "'/api/data-sources/test'" },
-      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-submit' },
+      { file: 'apps/web/src/views/DataSourcesView.vue', altFiles: ['apps/web/src/components/data-sources/DataSourcesPanel.vue'], token: 'ds-submit' },
       { file: 'apps/web/src/data-sources/buildPayload.ts', token: 'export function buildCreatePayload' },
       { file: 'packages/core-backend/src/data-adapters/DataSourceManager.ts', token: 'addDataSourceInternal(config, false)' },
       { file: 'packages/core-backend/src/data-adapters/DataSourceManager.ts', token: 'async testEphemeralConnection' },

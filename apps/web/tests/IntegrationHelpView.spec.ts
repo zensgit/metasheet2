@@ -29,6 +29,22 @@ function readRepoFile(relativePath: string): string {
 }
 
 /**
+ * Same as readRepoFile, but a missing file resolves to `null` instead of throwing. Used only for
+ * anchor `altFiles` candidates: on THIS branch (which does not include #5587) the migration target
+ * apps/web/src/components/data-sources/DataSourcesPanel.vue does not exist on disk yet, so eagerly
+ * readFileSync-ing every candidate would throw ENOENT even though the anchor's primary `file` already
+ * resolves the token. A candidate that does not exist simply contributes no match.
+ */
+function tryReadRepoFile(relativePath: string): string | null {
+  try {
+    return readRepoFile(relativePath)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null
+    throw err
+  }
+}
+
+/**
  * Return the source slice from `startMarker` up to and including the first following `endMarker`.
  * Used to scope a "this code contains no write call" assertion to ONE function body instead of a
  * whole 2000-line file, where an unrelated `upsert(` elsewhere would make the assertion meaningless.
@@ -48,6 +64,21 @@ function sliceBetween(source: string, startMarker: string, endMarker: string): s
   const end = source.indexOf(endMarker, start + startMarker.length)
   expect(end, `end marker not found after start marker: ${endMarker}`).toBeGreaterThan(start)
   return source.slice(start, end + endMarker.length)
+}
+
+/**
+ * G12/G41 review round 3 (PR #5613 vs in-flight #5587, 2026-09-11): #5587
+ * (feat/data-sources-fold-into-workbench) moves the /data-sources form out of DataSourcesView.vue
+ * into apps/web/src/components/data-sources/DataSourcesPanel.vue. Once that branch merges, every
+ * anchor naming DataSourcesView.vue would go red purely from the file move, even though the token
+ * (button/testid) still exists — in the panel. So an anchor's candidate set is `file` plus its
+ * optional `altFiles`, and it resolves if the token occurs in ANY of them; only the primary `file`
+ * is rendered to the reader. This helper is the single place that rule lives, so both the real
+ * disk-backed resolution test below and the synthetic candidate-file test exercise the same logic.
+ */
+function anchorResolves(anchor: HelpCaseStepAnchor, contentByFile: Map<string, string>): boolean {
+  const candidateFiles = [anchor.file, ...(anchor.altFiles ?? [])]
+  return candidateFiles.some((file) => (contentByFile.get(file) ?? '').includes(anchor.token))
 }
 
 const pushSpy = vi.fn()
@@ -372,14 +403,44 @@ describe('IntegrationHelpView (IU-6c)', () => {
     for (const { caseId, step } of allSteps) {
       expect(step.anchors.length, `${caseId}/${step.id} declares no code anchor`).toBeGreaterThanOrEqual(2)
       for (const anchor of step.anchors) {
-        expect(anchor.file, `${caseId}/${step.id} anchor path`).toMatch(/^(apps|packages|plugins)\//)
-        if (!fileCache.has(anchor.file)) fileCache.set(anchor.file, readRepoFile(anchor.file))
+        const candidateFiles = [anchor.file, ...(anchor.altFiles ?? [])]
+        for (const file of candidateFiles) {
+          expect(file, `${caseId}/${step.id} anchor path`).toMatch(/^(apps|packages|plugins)\//)
+          if (!fileCache.has(file)) {
+            const content = tryReadRepoFile(file)
+            if (content !== null) fileCache.set(file, content)
+          }
+        }
         expect(
-          fileCache.get(anchor.file)!.includes(anchor.token),
-          `${caseId}/${step.id}: anchor token missing from ${anchor.file} -> ${anchor.token}`,
+          anchorResolves(anchor, fileCache),
+          `${caseId}/${step.id}: anchor token missing from ${candidateFiles.join(' and ')} -> ${anchor.token}`,
         ).toBe(true)
       }
     }
+  })
+
+  // The candidate-file rule itself, isolated from disk: anchorResolves() must accept a token that is
+  // only in a candidate (altFiles) file, and must still refuse when the token is in neither. Simulated
+  // entirely in memory — no repo file is read or written for this case.
+  it('anchor resolution accepts a token found only in a candidate altFiles entry, and rejects one found in neither', () => {
+    const contentByFile = new Map<string, string>([
+      ['apps/web/src/views/FakePrimaryView.vue', 'export const unrelated = 1'],
+      ['apps/web/src/components/fake/FakeCandidatePanel.vue', 'data-testid="fake-only-in-candidate"'],
+    ])
+
+    const resolvedViaCandidate: HelpCaseStepAnchor = {
+      file: 'apps/web/src/views/FakePrimaryView.vue',
+      altFiles: ['apps/web/src/components/fake/FakeCandidatePanel.vue'],
+      token: 'fake-only-in-candidate',
+    }
+    expect(anchorResolves(resolvedViaCandidate, contentByFile)).toBe(true)
+
+    const missingEverywhere: HelpCaseStepAnchor = {
+      file: 'apps/web/src/views/FakePrimaryView.vue',
+      altFiles: ['apps/web/src/components/fake/FakeCandidatePanel.vue'],
+      token: 'fake-token-nowhere',
+    }
+    expect(anchorResolves(missingEverywhere, contentByFile)).toBe(false)
   })
 
   // ...and the anchors must actually reach the reader, not just sit in a constant the spec imports.
