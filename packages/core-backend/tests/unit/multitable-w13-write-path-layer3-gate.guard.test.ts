@@ -24,7 +24,15 @@
  * exhaustive: EVERY member is discovered from the TypeScript AST of the surface (so property-assigned
  * functions, `static` members, accessors, computed names and value re-exports are all seen — the earlier
  * line-regex discovery saw only method syntax and a mutation probe landed a new write member on a fully
- * green run), and EVERY call site of every value-bearing member is scanned across the whole `src` tree.
+ * green run), and every call site of every value-bearing member is COUNTED across the whole `src` tree —
+ * in the ONE call shape each lane is actually written in: every `.member(` call on the method lane, and
+ * every bare call of the local name an importer bound on the `records.ts` lane. On the METHOD lane a
+ * `.bind(`, a bracket access (`svc['patchRecord'](…)`), a non-null-asserted call (`svc.patchRecord!(…)`)
+ * or a callback reference is NOT a call that counter can see; none exists today, and that ZERO is itself
+ * asserted ('no method-lane reference … is written in a shape the call-site counter cannot see' below),
+ * so such a shape lands RED instead of landing invisible. The `records.ts` lane needs no equivalent
+ * assertion because its IMPORTER LAYER puts a file on the hook for merely IMPORTING the member, whatever
+ * shape it then calls it in.
  * The remaining, stated limit of the member scan is that it is SYNTACTIC: a member attached at runtime
  * (`Object.assign(this, …)`, a mixin) is not a declaration and no source enumeration can see it.
  * It does NOT claim those three modules are the only code that
@@ -35,8 +43,12 @@
  * the bottom of this file, which freezes the FILE SET allowed to run raw `INSERT/UPDATE meta_records`
  * — within `packages/core-backend/src` minus `db/migrations` (both exclusions are named in that test's
  * doc comment, with the two migrations that do write the table listed by filename), and matching every
- * Postgres spelling of the table name rather than one literal — so that a brand-new write spine in that
- * tree cannot appear unnoticed. Anyone who needs "every write to
+ * Postgres spelling of the table name rather than one literal — so that a brand-new raw-SQL `INSERT
+ * INTO` / `UPDATE` / `MERGE INTO` naming the table LITERALLY cannot appear unnoticed. A kysely builder
+ * write (`.updateTable('meta_records')` / `.insertInto('meta_records')`) is caught by a SECOND matcher
+ * added alongside the SQL one; an INTERPOLATED table name (`` `UPDATE ${TABLE} SET data = …` ``) is
+ * caught by NEITHER — all three facts are stated in that test's own doc comment, which is the place to
+ * read before quoting its green. Anyone who needs "every write to
  * meta_records.data is gated" must treat those files as an open, separate case — they are named to the
  * owner in the PR body, not silently covered here.
  *
@@ -86,11 +98,15 @@
  *
  * WHAT `UNGATED_CHARACTERIZED` MEANS. It is NOT an endorsement. It records a write path that reaches
  * field values with NO layer-3 per-subject gate, pinned deliberately so that adding OR removing a gate
- * there becomes a RED test instead of a silent change. The plugin-lane entries are the subject of the
- * real-DB golden
+ * there becomes a RED test instead of a silent change. The `records.ts.patchRecord` entry — and ONLY that
+ * one — is the subject of the real-DB golden
  *   packages/core-backend/tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts
  *   → describe '备料 列权限墙不在插件写路径上 — 特征化 golden(网格红 / 插件绿)'
- * which proves the same column is 403 through the grid and writable through the production plugin SDK.
+ * which proves the same column is 403 through the grid and writable through the production plugin SDK:
+ * its leg 2 calls the plugin SDK's `patchRecord` (`index.ts`'s wiring) and nothing else.
+ * `records.ts.createRecord` and `RecordService.restoreRecord` carry NO behavioural golden — they are
+ * characterized only by the VOCABULARY smoke in this file (the write chain mentions no per-subject
+ * `field_permissions` token), which is a weaker statement and must not be quoted as if a golden ran.
  * The create-path entries are a SECOND, separate leg (create-time layer-3 is absent; only the
  * copy-record site filters its payload) — reported to the owner, NOT fixed in this wave.
  *
@@ -143,14 +159,34 @@ function isCommentMention(src: string, idx: number): boolean {
 }
 
 /**
- * A raw `INSERT INTO` / `UPDATE` naming the `meta_records` TABLE, in any spelling Postgres accepts for
- * it: optional (optionally quoted) schema qualifier, optional `ONLY`, optional double quotes, any
- * whitespace or newline between the keywords, any case. Used by the scope-boundary chokepoint at the
+ * A raw `INSERT INTO` / `UPDATE` / `MERGE INTO` naming the `meta_records` TABLE, in any spelling Postgres
+ * accepts for it: optional (optionally quoted) schema qualifier, optional `ONLY`, optional double quotes,
+ * any whitespace or newline between the keywords, any case. Used by the scope-boundary chokepoint at the
  * bottom of this file — see that test's doc comment for why the normalisation exists and for the
  * over-approximation it accepts on purpose. `meta_records_trash` must never match.
+ *
+ * `MERGE INTO` is here because Postgres 15+ accepts it and a `MERGE INTO meta_records … WHEN MATCHED THEN
+ * UPDATE SET data = …` is a full-blown write spine that the `INSERT INTO|UPDATE` pair walked straight
+ * past (mutation probe I: it landed a new raw write spine on a fully GREEN chokepoint). `ONLY` is
+ * accepted after it too — over-approximating a keyword combination Postgres rejects is harmless; missing
+ * a real write is not.
  */
 const RAW_META_RECORDS_WRITE =
-  /\b(?:INSERT\s+INTO|UPDATE)\s+(?:ONLY\s+)?(?:"?[A-Za-z_][A-Za-z0-9_$]*"?\s*\.\s*)?"?meta_records"?(?![A-Za-z0-9_$])/gi
+  /\b(?:INSERT\s+INTO|UPDATE|MERGE\s+INTO)\s+(?:ONLY\s+)?(?:"?[A-Za-z_][A-Za-z0-9_$]*"?\s*\.\s*)?"?meta_records"?(?![A-Za-z0-9_$])/gi
+
+/**
+ * A kysely QUERY-BUILDER write naming the same table: `.updateTable('meta_records')` /
+ * `.insertInto('meta_records')`, any quote style, whitespace tolerated after the paren.
+ *
+ * This lane is LIVE in this tree, not hypothetical: `collab/yjs-persistence-adapter.ts:97` already reads
+ * the table through `this.db.selectFrom('meta_records')`, so the builder is wired into a module that
+ * touches records — writing through it needs no new dependency, no raw SQL, and (before this matcher)
+ * no red test (mutation probe M: `db.updateTable('meta_records').set({ data: {} })` landed on a fully
+ * GREEN chokepoint). `selectFrom`/`deleteFrom` are deliberately NOT matched: a read is not a write spine,
+ * and a row delete carries no field value — which is why adding this matcher leaves the frozen file set
+ * unchanged at 11 (verified: the adapter's two `selectFrom` hits do not match).
+ */
+const KYSELY_META_RECORDS_WRITE = /\.(updateTable|insertInto)\(\s*['"`]meta_records['"`]/g
 
 /**
  * How a port is reached from a caller.
@@ -812,6 +848,81 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
     }
   })
 
+  /**
+   * THE CALL-SHAPE LAYER — the method lane counts exactly ONE shape, so every other shape must be ZERO.
+   *
+   * `countCallSites` in `method` mode is `src.indexOf('.name(')`: it sees a member reference only when the
+   * very next character after the name is `(`. Four shapes reach the same function and are invisible to
+   * it — `svc.patchRecord.bind(svc)`, `svc['patchRecord'](i)`, `svc.patchRecord!(i)`, `svc.patchRecord?.(i)`
+   * — and passing the member as a callback (`queue.push(svc.patchRecord)`) is a fifth. A mutation probe
+   * confirmed the first two land on a fully GREEN allowlist: the per-site counter simply never sees them,
+   * so the file's count does not change and no allowlist entry is demanded. None of these shapes exists in
+   * `src` today; this test FREEZES that zero, so the day one appears it is a RED here instead of a silent
+   * new write path. (The `records.ts` bare-call lane needs no equivalent: the IMPORTER LAYER above puts a
+   * file on the hook for merely IMPORTING the member, whatever shape it then calls it in.)
+   *
+   * Deliberate over-approximation: this has no type information, so it flags the NAME on any receiver —
+   * an unrelated object with a `createRecord` property counts too. That is the right direction for a
+   * guard: a reference the counter cannot see should demand a human decision, not be assumed harmless.
+   */
+  test('no method-lane reference of an enumerated write member is written in a shape the call-site counter cannot see', () => {
+    const methodLaneNames = [
+      ...new Set(
+        Object.values(WRITE_PORTS)
+          .map((port) => port.scan)
+          .filter((scan) => scan.mode === 'method')
+          .map((scan) => scan.needle),
+      ),
+    ]
+    expect(methodLaneNames.length, 'no method-lane port left to check — the derivation below is broken').toBeGreaterThan(0)
+
+    const unseeable: string[] = []
+    for (const file of RUNTIME_FILES) {
+      const src = read(file)
+      // Cheap prefilter: only files that MENTION one of the names at all are parsed. It tests for the
+      // bare name, not for a call shape, so no shape can slip through the prefilter itself.
+      if (!methodLaneNames.some((name) => src.includes(name))) continue
+      const sourceFile = parseTs(file)
+      const at = (pos: number): string => {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(pos)
+        return `${file}:${line + 1}:${character + 1}`
+      }
+      const visit = (node: ts.Node): void => {
+        if (
+          ts.isPropertyAccessExpression(node) &&
+          ts.isIdentifier(node.name) &&
+          methodLaneNames.includes(node.name.text)
+        ) {
+          // Exactly the counter's own rule: it only sees `.name(`, i.e. `(` immediately after the name.
+          if (src.charAt(node.name.getEnd()) !== '(') {
+            unseeable.push(`${at(node.name.getStart(sourceFile))} — ${node.getText(sourceFile).slice(0, 80)}`)
+          }
+        } else if (ts.isElementAccessExpression(node)) {
+          const argument = node.argumentExpression
+          if (
+            (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument)) &&
+            methodLaneNames.includes(argument.text)
+          ) {
+            unseeable.push(`${at(node.getStart(sourceFile))} — ${node.getText(sourceFile).slice(0, 80)}`)
+          }
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(sourceFile)
+    }
+
+    expect(
+      unseeable.sort(),
+      'GW7 CALL-SHAPE LAYER: a reference to an enumerated write member is written in a shape the per-site ' +
+        'call-site counter CANNOT see (it only counts `.member(` — a `(` immediately after the name). ' +
+        '`.bind(`, bracket access, `!(`, `?.(` and bare callback references all reach the same write ' +
+        'function while leaving every allowlist count unchanged, which is precisely the silent side door ' +
+        'this file exists to prevent. Either write the site as a direct `.member(` call, or teach ' +
+        '`countCallSites` the new shape AND classify the site in the allowlist — do not delete this ' +
+        'assertion. The sites found are the Received value below.',
+    ).toEqual([])
+  })
+
   // ── THE SMOKE LAYER: the dispositions that point AWAY from the call site must still hold ────────
   test('smoke: the Yjs bridge write-input builder (index.ts) textually contains the GATED_BY_CALLER gate the allowlist above relies on', () => {
     const indexTs = read('index.ts')
@@ -948,7 +1059,16 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
    * review, not miss them. `meta_records_trash` stays unmatched in every one of those spellings (the
    * `(?![A-Za-z0-9_$])` tail is applied after the optional closing quote).
    *
-   * TWO DISCLOSED EXCLUSIONS — do not read this green as "nothing else in the repo writes meta_records":
+   * TWO MATCHERS, TWO WRITE DIALECTS (2026-09-11 r3). Freezing only the raw-SQL dialect froze only half
+   * the door: this repo also talks to Postgres through the kysely query builder (`selectFrom` on the
+   * table is already live in `collab/yjs-persistence-adapter.ts:97`), and `MERGE INTO` is a third raw
+   * spelling Postgres 15+ accepts. Each of those landed a new write on a GREEN chokepoint in a mutation
+   * probe, so a file now counts as a raw-record writer if EITHER `RAW_META_RECORDS_WRITE` (SQL text,
+   * `INSERT INTO`/`UPDATE`/`MERGE INTO`) or `KYSELY_META_RECORDS_WRITE` (`.updateTable('meta_records')` /
+   * `.insertInto('meta_records')`) matches outside a comment. Adding the builder matcher did NOT change
+   * the frozen set (still the same 11 files): today no runtime file writes the table through kysely.
+   *
+   * THREE DISCLOSED EXCLUSIONS — do not read this green as "nothing else in the repo writes meta_records":
    *   1. `src/db/migrations/**` is outside `RUNTIME_FILES` by construction (see `listRuntimeTsFiles`), and
    *      two migrations DO run raw `UPDATE meta_records`:
    *      `zzzz20260430163000_add_meta_record_modified_by.ts` and
@@ -957,8 +1077,16 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
    *      would be noise — but they are named rather than silently dropped.
    *   2. Only the `core-backend` `src` tree is walked. SQL issued from other packages or from plugin
    *      code is not seen by this chokepoint at all.
+   *   3. BOTH matchers need the table name to be WRITTEN OUT at the write site. A statement that builds
+   *      the name indirectly — an interpolated constant (`` `UPDATE ${RECORDS_TABLE} SET data = …` ``), a
+   *      concatenation, a variable passed to `.updateTable(table)`, a builder verb outside the
+   *      `updateTable`/`insertInto` pair — is invisible to a regex over source text, and a mutation probe
+   *      confirmed the interpolated form lands GREEN. Closing that would take type-aware analysis, not a
+   *      stricter pattern; it is named here rather than implied away. The frozen set below is therefore
+   *      "every file writing meta_records with the table named literally", not "every file writing
+   *      meta_records".
    */
-  test('chokepoint: the set of files running raw INSERT/UPDATE on meta_records is frozen (a new write spine outside the three surfaces trips red)', () => {
+  test('chokepoint: the set of files writing meta_records directly (raw INSERT/UPDATE/MERGE SQL or a kysely builder) is frozen (a new write spine outside the three surfaces trips red)', () => {
     const RAW_META_RECORDS_SQL_WRITERS: Record<string, string> = {
       // ── IN SCOPE of this lock: these ARE the three write surfaces ────────────────────────────────
       'multitable/record-write-service.ts': 'IN SCOPE — the RecordWriteService surface itself (patchRecords).',
@@ -986,23 +1114,30 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
       'services/elearning-stats-multitable-projection.ts':
         'OUT OF SCOPE — e-learning stats projection INSERTs a system-authored row.',
     }
-    const raw = RAW_META_RECORDS_WRITE
+    // Either write DIALECT counts: raw SQL text, or a kysely builder write naming the same table.
+    const matchers = [RAW_META_RECORDS_WRITE, KYSELY_META_RECORDS_WRITE]
     const actual: string[] = []
     for (const file of RUNTIME_FILES) {
       const src = read(file)
-      raw.lastIndex = 0
-      for (;;) {
-        const m = raw.exec(src)
-        if (m === null) break
-        if (isCommentMention(src, m.index)) continue
-        actual.push(file)
-        break
+      let writes = false
+      for (const matcher of matchers) {
+        matcher.lastIndex = 0
+        for (;;) {
+          const m = matcher.exec(src)
+          if (m === null) break
+          if (isCommentMention(src, m.index)) continue
+          writes = true
+          break
+        }
+        if (writes) break
       }
+      if (writes) actual.push(file)
     }
     expect(
       actual.sort(),
-      'GW7 SCOPE BOUNDARY: the set of files running raw INSERT/UPDATE on meta_records changed. A file that ' +
-        'writes meta_records directly bypasses RecordWriteService / RecordService / records.ts, so NONE of the ' +
+      'GW7 SCOPE BOUNDARY: the set of files writing meta_records directly — raw INSERT/UPDATE/MERGE SQL, or a ' +
+        "kysely .updateTable('meta_records')/.insertInto('meta_records') — changed. A file that writes " +
+        'meta_records directly bypasses RecordWriteService / RecordService / records.ts, so NONE of the ' +
         'per-site layer-3 assertions above apply to it. Decide what gate it needs, then record it here with a ' +
         'one-line IN SCOPE / OUT OF SCOPE reason. (meta_records_trash is a different table and is not matched.)',
     ).toEqual(Object.keys(RAW_META_RECORDS_SQL_WRITERS).sort())
@@ -1015,14 +1150,17 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
    * EXECUTABLE fact instead of a comment — if someone narrows the regex back, this reds immediately,
    * without needing a new raw write spine to exist first.
    */
-  test('chokepoint matcher: every Postgres spelling of the meta_records table is matched, and meta_records_trash is not', () => {
-    const hits = (sql: string): boolean => {
-      RAW_META_RECORDS_WRITE.lastIndex = 0
-      return RAW_META_RECORDS_WRITE.test(sql)
+  test('chokepoint matcher: every Postgres spelling of the meta_records table is matched, the kysely builder write is matched, and meta_records_trash is not', () => {
+    const hits = (source: string): boolean => {
+      for (const matcher of [RAW_META_RECORDS_WRITE, KYSELY_META_RECORDS_WRITE]) {
+        matcher.lastIndex = 0
+        if (matcher.test(source)) return true
+      }
+      return false
     }
 
-    // MUST match — each of these is a real write to the real table, and each of the last four walked
-    // past the pre-2026-09-11 literal matcher.
+    // MUST match — each of these is a real write to the real table, and each of the last four raw
+    // spellings walked past the pre-2026-09-11 literal matcher.
     for (const sql of [
       "UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2",
       "INSERT INTO meta_records (id, sheet_id, data) VALUES ($1, $2, $3)",
@@ -1030,18 +1168,30 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
       "UPDATE ONLY meta_records SET data = $1",
       'UPDATE Public."META_RECORDS" SET data = $1',
       'insert\n  into "public"."meta_records" (id) values ($1)',
+      // `MERGE INTO` (Postgres 15+) — mutation probe I landed exactly this on a green chokepoint.
+      'MERGE INTO meta_records t USING staged s ON t.id = s.id WHEN MATCHED THEN UPDATE SET data = s.data',
+      'merge into public."meta_records" t using s on t.id = s.id when not matched then insert (id) values (s.id)',
+      // …and the kysely builder lane — mutation probe M landed exactly this on a green chokepoint.
+      "db.updateTable('meta_records').set({ data: {} }).where('id', '=', id).execute()",
+      'this.db.insertInto("meta_records").values({ id, data }).execute()',
+      "trx.updateTable( 'meta_records' ).set({ data })",
     ]) {
-      expect(hits(sql), `chokepoint matcher no longer sees a raw meta_records write: ${sql}`).toBe(true)
+      expect(hits(sql), `chokepoint matcher no longer sees a direct meta_records write: ${sql}`).toBe(true)
     }
 
-    // MUST NOT match — a different table (soft-delete archive), in the same spellings.
+    // MUST NOT match — a different table (soft-delete archive), in the same spellings; and a READ through
+    // the same builder, which is not a write spine (this is the shape yjs-persistence-adapter.ts:97 uses,
+    // so matching it would silently widen the frozen file set).
     for (const sql of [
       'UPDATE meta_records_trash SET restored_at = now()',
       'INSERT INTO meta_records_trash (id) VALUES ($1)',
       'UPDATE public."meta_records_trash" SET restored_at = now()',
       'update only meta_records_trash set restored_at = now()',
+      'MERGE INTO meta_records_trash t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET restored_at = now()',
+      "this.db.selectFrom('meta_records').select('id')",
+      "db.updateTable('meta_records_trash').set({ restored_at: new Date() })",
     ]) {
-      expect(hits(sql), `chokepoint matcher now matches the TRASH table, which is a different table: ${sql}`).toBe(false)
+      expect(hits(sql), `chokepoint matcher now matches something that is not a meta_records write: ${sql}`).toBe(false)
     }
   })
 
@@ -1056,9 +1206,15 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
    *   this file IS collected — by `pnpm --filter @metasheet/core-backend test` (the "Run core-backend
    *   tests" step of plugin-tests.yml's `test` job, which has no `paths:` filter on `pull_request` and so
    *   runs for every PR). That script is a bare `vitest`; `vitest.config.ts` declares NO `include:` key,
-   *   so the vitest default include collects `tests/unit/**.test.ts`, and this file is not in the ~400-line
-   *   `exclude:` list. Being named file-by-file in a workflow is a DIFFERENT question from being executed;
-   *   only the second one decides whether the guard gates anything.
+   *   so the vitest default include collects `tests/unit/**.test.ts`, and this file is not in the
+   *   1730-line `exclude:` list (`vitest.config.ts:31-1761`). Being named file-by-file in a workflow is a
+   *   DIFFERENT question from being executed; only the second one decides whether the guard gates anything.
+   *
+   * "Unconditionally" below is asserted on the STEP, not on the file: step 3 slices the "Run core-backend
+   * tests" step out of the workflow and requires it to sit in the `test` job, to run the script verbatim,
+   * and to carry no step-level `if:`. The earlier version asked only whether the run line appeared ANYWHERE
+   * in the workflow, which a step-level `if:` leaves untouched — a green that said nothing about whether
+   * the step runs on pull requests.
    *
    * The real-DB golden this guard characterises is wired the OTHER way (excluded from the no-DB default
    * job so `describeIfDatabase` cannot skip-green it, and named whole-file into the real-DB step), so both
@@ -1098,18 +1254,91 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
         'in the no-DB job that is its only executor.',
     ).toBe(false)
 
-    // 3. …and the step that invokes that script exists, unconditionally, in the PR gate.
+    // 3. …and the step that invokes that script exists, UNCONDITIONALLY, in the PR gate.
+    //
+    //    Asserted on the STEP SLICE, never on the whole 130KB workflow: `workflow.toContain(runLine)`
+    //    answers "does this string appear anywhere in the file", which stays TRUE when the step grows an
+    //    `if:` that switches the guard off for pull requests (mutation probe O: adding
+    //    `if: github.event_name == 'push'` to this very step left all 22 tests green). The slice runs from
+    //    the step's `- name:` line to the next `- name:` at step indentation, so a step-level key (8
+    //    spaces) belongs to THIS step and to no other. Writing the step as `- if: …` first would move the
+    //    name off the `- name:` form and fail the lookup below instead — also red, also correct.
     const workflow = readFileSync(join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
-    expect(workflow).toContain('pnpm --filter @metasheet/core-backend test\n')
+    const coreStepHead = '      - name: Run core-backend tests\n'
+    const coreStepAt = workflow.indexOf(coreStepHead)
+    expect(
+      coreStepAt,
+      'plugin-tests.yml no longer contains a step spelled exactly `- name: Run core-backend tests`. That step ' +
+        'is this guard\'s only executor: find what runs `pnpm --filter @metasheet/core-backend test` now, ' +
+        'confirm it runs on pull_request, and re-pin it here.',
+    ).toBeGreaterThanOrEqual(0)
+    const coreStepEnd = workflow.indexOf('\n      - name:', coreStepAt + coreStepHead.length)
+    const coreStep = workflow.slice(coreStepAt, coreStepEnd === -1 ? undefined : coreStepEnd)
+    // What a failure prints: the step, not the workflow. Capped so a long trailing comment block cannot
+    // turn a red into a wall of YAML.
+    const coreStepShown = coreStep.split('\n').slice(0, 40).join('\n')
+
+    //    3a. The step lives inside the `test` job — the job the r2 review's "which job runs it?" question
+    //        was about. Bounded by the next TOP-LEVEL job key (two-space indent), so a step that moved to
+    //        another job cannot keep this green.
+    const testJobAt = workflow.indexOf('\n  test:\n')
+    expect(
+      testJobAt,
+      'plugin-tests.yml no longer declares a top-level `test:` job — the job this guard rides in is gone or renamed.',
+    ).toBeGreaterThanOrEqual(0)
+    const nextTopLevelJob = /\n {2}[A-Za-z_][A-Za-z0-9_-]*:\n/g
+    nextTopLevelJob.lastIndex = testJobAt + 1
+    const nextJobMatch = nextTopLevelJob.exec(workflow)
+    const testJobEnd = nextJobMatch === null ? workflow.length : nextJobMatch.index
+    expect(
+      coreStepAt > testJobAt && coreStepAt < testJobEnd,
+      'the "Run core-backend tests" step is no longer inside plugin-tests.yml\'s `test` job (the job that runs ' +
+        'on every pull_request with no `paths:` filter). It may now sit in a job with its own trigger or ' +
+        `condition — re-verify what executes this guard. The step slice read was:\n${coreStepShown}`,
+    ).toBe(true)
+
+    //    3b. That step really runs the script that collects this file. Asserted against the step slice, so
+    //        a failure's "Received" is these ≤40 lines rather than the entire workflow file.
+    expect(
+      coreStepShown,
+      'the "Run core-backend tests" step no longer runs `pnpm --filter @metasheet/core-backend test` verbatim ' +
+        '(extra flags such as a narrowed reporter, a `--project`, or a path list would change WHAT it ' +
+        'collects). Re-verify that this guard still runs, then update this assertion. Received below is the ' +
+        'step slice this test read.',
+    ).toContain('pnpm --filter @metasheet/core-backend test\n')
+
+    //    3c. …and it carries NO step-level condition. A step key sits at 8 spaces, so `\n        if:`
+    //        inside this slice is this step's own `if:`.
+    expect(
+      coreStep.includes('\n        if:'),
+      'the "Run core-backend tests" step grew a step-level `if:`. Whatever the condition says, this guard then ' +
+        'stops being an unconditional PR gate — which is exactly the claim the file header makes. Remove the ' +
+        'condition, or correct the header and this test to describe when the guard actually runs. The step ' +
+        `slice read was:\n${coreStepShown}`,
+    ).toBe(false)
 
     // 4. The paired real-DB golden: excluded from the no-DB lane exactly once, named exactly once in the
     //    real-DB step that sets DATABASE_URL and METASHEET_REAL_DB_TEST_STEP.
-    expect(vitestConfig.split(`'${goldenRel}'`).length - 1).toBe(1)
+    expect(
+      vitestConfig.split(`'${goldenRel}'`).length - 1,
+      'the real-DB golden must be named exactly once in vitest.config.ts (its `exclude:` entry, which keeps ' +
+        'describeIfDatabase from skip-greening it in the no-DB job). A different count means the exclusion was ' +
+        'dropped or duplicated.',
+    ).toBe(1)
     const stepAt = workflow.indexOf('        id: multitable-real-db-integration')
     expect(stepAt, 'the multitable real-DB step is gone — the golden has no executor').toBeGreaterThanOrEqual(0)
     const stepEnd = workflow.indexOf('\n      - name:', stepAt)
     const step = workflow.slice(stepAt, stepEnd === -1 ? undefined : stepEnd)
-    expect(step).toContain("METASHEET_REAL_DB_TEST_STEP: '1'")
-    expect(step.split(goldenRel).length - 1).toBe(1)
+    const stepShown = step.split('\n').slice(0, 40).join('\n')
+    expect(
+      step.includes("METASHEET_REAL_DB_TEST_STEP: '1'"),
+      'the multitable real-DB step no longer sets METASHEET_REAL_DB_TEST_STEP — the golden\'s own sentinel ' +
+        `would then let it skip-green with no database. Step slice read:\n${stepShown}`,
+    ).toBe(true)
+    expect(
+      step.split(goldenRel).length - 1,
+      'the multitable real-DB step must name the golden file exactly once; a different count means it was ' +
+        `dropped from (or duplicated in) the only step that runs it with a database. Step slice read:\n${stepShown}`,
+    ).toBe(1)
   })
 })
