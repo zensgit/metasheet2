@@ -3,14 +3,18 @@
  * that drives the per-tier flag) and `isSupportedFieldRetypeRevert` (the confirmable/executable scalar-safe subset).
  * DB-free (the real-DB wiring is tests/integration/multitable-field-retype-revert-realdb.test.ts).
  *
- * CI REALITY CHECK (corrected 2026-09-11, F8A): the line that used to sit here — "so it runs in the default
- * `test` job every PR" — is FALSE and has been since this file landed. No workflow names this file, and this
- * repo has no blanket core-backend unit lane (wiring here is per-file, by name, inside a workflow step). So
- * everything below runs on developer machines only. Anything that MUST be enforced by CI has to live in a
- * file a workflow names: the F8A whitelist's load-bearing claims (route refusal before any write, the one
- * new direction, and the truth-table mirror) are therefore duplicated into
- * tests/integration/multitable-context.api.test.ts, which .github/workflows/plugin-tests.yml runs on every
- * pull_request. Both copies read the same fixture, so they cannot disagree about the table.
+ * CI REALITY CHECK (re-corrected 2026-09-11, F8A — the FIRST "correction" in this spot was itself wrong and
+ * claimed this file runs nowhere; it does run): this file IS executed by the required `test (18.x/20.x)` check.
+ * .github/workflows/plugin-tests.yml:844 runs a BLANKET `pnpm --filter @metasheet/core-backend test` step in
+ * job `test:` (:174, matrix [18.x, 20.x]; the workflow's `on.pull_request` has only a branches filter, no
+ * paths filter). That script is `vitest` (package.json:26) under vitest.config.ts, which declares NO `include`
+ * — so the default glob collects this file, and the only non-integration entry in its `exclude` is
+ * 'tests/e2e/**'. What is true is the weaker statement: no workflow names this file INDIVIDUALLY; it is
+ * collected by a glob. Verified by running the file under the default config (68 passed).
+ * The same load-bearing claims (route refusal before any write, the one new direction, the truth-table mirror)
+ * are ALSO duplicated into tests/integration/multitable-context.api.test.ts — a REDUNDANT second copy in the
+ * real-DB lane (plugin-tests.yml:1306, same `test` job, 20.x + DATABASE_URL), not the closing of a gap.
+ * Both copies read the same fixture, so they cannot disagree about the table.
  *
  * Mirrors the Tier-1 lock from #3297. Tier 2's supported surface is defined by EXCLUSION (everything scalar except
  * FIELD_RETYPE_EXCLUDED_TYPES), so the "silent future widening" risk is REMOVING a type from that exclusion set (or a
@@ -24,8 +28,8 @@
  *
  * F8A (2026-09-11) — this file also owns the FORWARD side of the same boundary now: the lossless retype
  * whitelist that `PATCH /fields/:fieldId` enforces (src/multitable/field-retype-whitelist.ts), its mirror
- * against the shared truth table, and the route wiring (the detailed matrix; the CI-executed subset is in
- * tests/integration/multitable-context.api.test.ts — see the CI REALITY CHECK above). Same subject (which (source → target) pairs a raw
+ * against the shared truth table, and the route wiring (the detailed matrix; a redundant subset is re-pinned in
+ * tests/integration/multitable-context.api.test.ts's real-DB lane — see the CI REALITY CHECK above). Same subject (which (source → target) pairs a raw
  * `UPDATE meta_fields` may perform), opposite direction, so the two locks live side by side instead of
  * drifting apart in separate files.
  */

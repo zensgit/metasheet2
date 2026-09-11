@@ -1833,17 +1833,22 @@ describe('Multitable context API', () => {
 })
 
 // =================================================================================================
-// F8A (2026-09-11) — the lossless-retype whitelist, IN A LANE THAT ACTUALLY RUNS.
+// F8A (2026-09-11) — the lossless-retype whitelist, SECOND COPY in the real-DB lane.
 //
 // The full lock for this boundary lives in tests/multitable-field-retype-revert-narrowing.test.ts
-// (algebra + route matrix + the revert/backward side). That file is named by NO workflow, and this
-// repo has no blanket core-backend unit lane, so nothing in it executes in CI. This file IS wired:
-// .github/workflows/plugin-tests.yml names tests/integration/multitable-context.api.test.ts in the
-// multitable real-DB step, and that workflow triggers on every pull_request with no paths filter.
-// So the load-bearing claims — the route refuses a lossy retype BEFORE any UPDATE, the one
-// direction this cut adds really lands, and the server table has not drifted from the shared truth
-// table — are duplicated here on purpose. Both copies read the SAME fixture, so they cannot
-// disagree about the table; only about who runs them.
+// (algebra + route matrix + the revert/backward side). CORRECTION (2026-09-11, same day): an earlier
+// version of this header said that file "is named by NO workflow ... so nothing in it executes in CI"
+// and presented the duplication below as closing a gap. That was WRONG. plugin-tests.yml:844 runs a
+// blanket `pnpm --filter @metasheet/core-backend test` in job `test:` (:174, matrix [18.x, 20.x], no
+// paths filter), core-backend's `test` script is plain `vitest`, and vitest.config.ts declares no
+// `include` — so the narrowing file is collected by the default glob and DOES run on every PR.
+// What is true: it is not named INDIVIDUALLY by any workflow, only glob-collected.
+//
+// So the copies below are a deliberate REDUNDANT re-pin of the load-bearing claims — the route
+// refuses a lossy retype BEFORE any UPDATE, the one direction this cut adds really lands, and the
+// server table has not drifted from the shared truth table — in the real-DB lane
+// (plugin-tests.yml:1306, same `test` job, 20.x + DATABASE_URL). Both copies read the SAME fixture,
+// so they cannot disagree about the table; only about which lane reds first.
 //
 // Mirror wording (same discipline as permission-match-truth-table.json, #5626): changing ONE
 // implementation WITHOUT touching the fixture turns THAT SIDE'S OWN run red; changing the fixture
@@ -1863,7 +1868,7 @@ interface RetypeTruthTable {
 
 const retypeTruthTable = JSON.parse(fs.readFileSync(RETYPE_TRUTH_TABLE_PATH, 'utf8')) as RetypeTruthTable
 
-describe('F8A lossless retype whitelist (server-authoritative, CI-wired)', () => {
+describe('F8A lossless retype whitelist (server-authoritative, real-DB-lane copy)', () => {
   afterEach(() => {
     vi.restoreAllMocks()
   })
@@ -1972,6 +1977,27 @@ describe('F8A lossless retype whitelist (server-authoritative, CI-wired)', () =>
     // the older guard's reason is more specific; the whitelist only backstops when nobody else objects
     expect(res.body.error.code).toBe('LINK_FIELD_FOREIGN_SHEET_REQUIRED')
     expect(world.updates).toEqual([])
+  })
+
+  // CHARACTERIZATION, not an endorsement. The whitelist passes through any pair with an endpoint in
+  // FIELD_RETYPE_EXCLUDED_TYPES, and the two ends are NOT symmetric:
+  //   target in the set -> a pre-existing guard really takes over (the link case above);
+  //   SOURCE in the set -> nobody takes over. Grep the PATCH body: there is no
+  //   `currentType === 'attachment' | 'lookup' | 'rollup' | 'button' | 'createdTime'` branch at all
+  //   (validateHierarchyParentFieldMutation only covers a same-sheet single-value parent LINK, and the
+  //   autoNumber sequence cleanup runs AFTER the `UPDATE meta_fields` — a side effect, not a guard).
+  // So `attachment -> text` is a plain 200 today, exactly as it was before this cut, even though the
+  // browser offers no such option (apps/web losslessRetypeTargets returns [] for an excluded source).
+  // This test exists so the seam is VISIBLE and so closing it later is a deliberate, owner-approved
+  // product tightening (attachment/link -> text would become 400) rather than an accident.
+  test('KNOWN SEAM (characterization): an EXCLUDED SOURCE is unguarded — attachment -> text is still 200', async () => {
+    const world = retypeWorld({ type: 'attachment' })
+    const res = await patchType(world, { type: 'string' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.error).toBeUndefined()
+    expect(world.updates.map((u) => u.type)).toEqual(['string'])
+    expect(world.row.type).toBe('string')
   })
 
   test('the server table IS the shared fixture table, row for row', () => {

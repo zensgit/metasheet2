@@ -14,11 +14,21 @@
     "SCOPE — rows are claims about the WHITELIST ALGEBRA ONLY: 'may this (source -> target) pair be offered by",
     "the dropdown / accepted by the route as LOSSLESS'. LOSSLESS means exactly one thing: the STORED cell values",
     "stay readable under the new type. Nothing is converted; no record data is touched.",
-    "WHERE it is enforced (the PATCH /fields/:fieldId route) and which pairs the route DEFERS to the pre-existing",
-    "side-effect guards (link / formula / autoNumber / lookup / rollup / attachment / system-stamp endpoints, which",
-    "run type-transition handlers this table knows nothing about) is route behaviour, pinned in the route tests —",
-    "not here. `excludedTargetTypes` below is only the dropdown-side mirror of that same set: a target in it is",
-    "never offered even if a careless table edit named it."
+    "WHERE it is enforced (the PATCH /fields/:fieldId route) is route behaviour, pinned in the route tests — not",
+    "here. The route does not express an opinion on pairs with an endpoint in `excludedTargetTypes`, and the two",
+    "ends mean DIFFERENT things (corrected 2026-09-11 — the earlier 'the route defers this pair to the endpoint",
+    "guards' wording was true of targets and FALSE of sources):",
+    "  TARGET in the set  -> a pre-existing guard really does take over (cross-base link wall, formula reverse-ref",
+    "                        gate, validateLookupRollupConfig, autoNumber backfill).",
+    "  SOURCE in the set  -> nobody takes over. There is no `currentType === 'attachment' | 'lookup' | 'rollup' |",
+    "                        'button' | 'createdTime'` branch anywhere in the PATCH body, so those requests are",
+    "                        still a plain 200 today. This cut deliberately leaves that seam as-is (tightening it",
+    "                        would turn attachment/link -> string into a 400 = a product-behaviour change needing",
+    "                        an owner call); a characterization test in tests/integration/multitable-context.api.test.ts",
+    "                        pins the current 200 so the seam is visible.",
+    "`excludedTargetTypes` below is only the dropdown-side mirror of that same set: a target in it is never offered",
+    "even if a careless table edit named it. NOTE the two sides differ on SOURCES by design — the browser's",
+    "losslessRetypeTargets returns [] for an excluded source (no dropdown option), while the route lets it through."
   ],
   "excludedTargetTypes": [
     "formula", "lookup", "rollup", "link", "attachment", "button",
@@ -86,6 +96,6 @@
     { "name": "qrcode -> text is NOT lossless", "sourceType": "qrcode", "targetType": "string", "lossless": false },
     { "name": "a type is never its own lossless target (same type is not a retype at all)", "sourceType": "string", "targetType": "string", "lossless": false },
     { "name": "an excluded target is never lossless even from a whitelisted source", "sourceType": "number", "targetType": "link", "lossless": false },
-    { "name": "an excluded source is not in the table either (the ROUTE defers this pair to the endpoint guards — see the route tests)", "sourceType": "formula", "targetType": "string", "lossless": false }
+    { "name": "an excluded source is not in the table either (the ROUTE takes no position on it — no guard, still 200; see the characterization test)", "sourceType": "formula", "targetType": "string", "lossless": false }
   ]
 }

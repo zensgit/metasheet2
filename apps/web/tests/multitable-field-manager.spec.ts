@@ -1824,10 +1824,14 @@ describe('LOSSLESS_RETYPE table shape', () => {
   // F8A: the BROWSER side of the shared truth table. The SAME file on disk drives the
   // server side against core-backend/src/multitable/field-retype-whitelist.ts — the
   // copy that actually refuses the write — from
-  // packages/core-backend/tests/integration/multitable-context.api.test.ts (the copy
-  // CI runs: plugin-tests.yml names that file on every pull_request) and, in more
-  // detail, from packages/core-backend/tests/multitable-field-retype-revert-narrowing.test.ts
-  // (no workflow names that one, so it is developer-machine only).
+  // packages/core-backend/tests/multitable-field-retype-revert-narrowing.test.ts (the
+  // detailed matrix) and, redundantly, from
+  // packages/core-backend/tests/integration/multitable-context.api.test.ts.
+  // BOTH run in CI's required `test` job: the narrowing file via the blanket
+  // `pnpm --filter @metasheet/core-backend test` step (plugin-tests.yml:844, default vitest
+  // glob — it is just never named individually), the integration file via the real-DB step
+  // (plugin-tests.yml:1306). An earlier comment here called the narrowing file
+  // "developer-machine only" — that was false and is corrected.
   // PRECISELY: changing ONE implementation without
   // touching the fixture turns THAT SIDE'S OWN run red; changing the fixture turns
   // the OTHER side red too. (Not "one edit reddens the far side" — it does not.)

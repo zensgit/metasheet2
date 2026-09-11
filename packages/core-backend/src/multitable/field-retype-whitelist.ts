@@ -16,14 +16,23 @@
  * 已知边界 —— 本刀只覆盖 HTTP 写口 `PATCH /api/multitable/fields/:fieldId`（univer-meta.ts 里
  * 调 assertLosslessFieldRetype 的那一处）。meta_fields.type 还有第二条写口：插件 SDK 的
  * `ensureFields`（multitable/provisioning.ts，`ON CONFLICT (id) DO UPDATE SET ... type = EXCLUDED.type`，
- * 由 index.ts 的 `ensureObjectInScope` 转发 overwriteMode）。它**不过这道门**：
- *   - overwriteMode='refuse'（默认，resolveEnsureFieldsOverwriteMode）——任何会改动既有字段的
- *     descriptor 直接抛 MultitableEnsureFieldsRefusedError，改类型在默认配置下落不了地；
- *   - 'observe' / 'overwrite'（后者要显式的环境变量字面量）——仍然能把 type 改成任意值，且
- *     'overwrite' 连 per-field 预读都跳过。
- * 也就是说「服务端权威」这句话在本 PR 的范围里等于「HTTP PATCH 这个写口权威 + ensureFields 默认
- * fail-closed」，不等于「任何路径都不可能改类型」。把白名单接进 ensureFields 的 type-diff 分支是
- * 另一刀（会改插件升级语义：插件自己声明的字段演进也要受这张表约束，需要先过插件侧的回归）。
+ * 由 index.ts 的 `ensureObjectInScope` 转发 overwriteMode）。它**不过这道门**；它的 fail-closed
+ * 到底有多硬，下面这几行 2026-09-11 订正过一次（旧版写「'overwrite' 要显式的环境变量字面量」，
+ * 是**假陈述**）：
+ *   - 生效值是 `input.overwriteMode ?? resolveEnsureFieldsOverwriteMode()`（provisioning.ts:397）——
+ *     **逐次调用的参数优先于环境变量**；`overwriteMode` 是插件 SDK 的公开 per-call 参数
+ *     （types/plugin.ts:506，文档自称 "destructive-reconcile mode for this ONE call"），
+ *     index.ts:2099 的 `ensureObjectInScope` 原样转发。
+ *   - 所以 'overwrite' / 'observe' 既能由 env 全局开，**也能由插件自己一行调用参数打开**，不需要任何
+ *     运维动作；插件传 'overwrite' 就直接走 provisioning.ts 那条
+ *     `ON CONFLICT (id) DO UPDATE SET ... type = EXCLUDED.type` 把 type 改成任意值，连 per-field 预读都跳过。
+ *   - 默认的 'refuse'（抛 MultitableEnsureFieldsRefusedError）只在**调用方没有显式传 overwriteMode**
+ *     时成立。这条写口上剩下的真实约束不是本表，是插件作用域门 `assertPluginOwnsObject`（index.ts
+ *     的同一个 hook 里）：插件只能这样动**自己拥有的对象**的字段。
+ * 也就是说「服务端权威」这句话在本 PR 的范围里等于「HTTP PATCH 这个写口权威 + ensureFields 在
+ * **调用方未自选 overwrite/observe** 时 fail-closed」，不等于「任何路径都不可能改类型」。把白名单接进
+ * ensureFields 的 type-diff 分支是另一刀（会改插件升级语义：插件自己声明的字段演进也要受这张表
+ * 约束，需要先过插件侧的回归）。
  * 反例侧的事实澄清：provisioning.ts 里只有 `patchObjectFieldProperty`（`UPDATE meta_fields SET
  * property = $3::jsonb`）是纯改 property 的，ensureFields 不是。
  * 第三条写口是配置回滚 `applyConfigRevert`（multitable/config-restore.ts，按 changed_keys 拼
@@ -33,9 +42,25 @@
  *
  * 作用域（务必与真值表 JSON 的 SCOPE 段一致）：本模块只回答「这一对算不算无损」。有一整类
  * 类型（formula/lookup/rollup/link/attachment/button/autoNumber + 系统戳）在改类型时要跑自己的
- * 副作用处理（autoNumber 序列、公式依赖、link 连接表、跨 base 墙……），它们由路由里既有的那几道
- * 校验各自负责；本白名单对**任一端落在该集合里**的配对一律不表态（见 assertLosslessFieldRetype），
- * 从而 link/formula/autoNumber 的既有路径一字不变。
+ * 副作用处理（autoNumber 序列、公式依赖、link 连接表、跨 base 墙……）；本白名单对**任一端落在该
+ * 集合里**的配对一律不表态（见 assertLosslessFieldRetype），从而 link/formula/autoNumber 的既有路径
+ * 一字不变。
+ *
+ * 这个「不表态」在两端的含义**不一样**，别把它说成一句话（2026-09-11 订正，旧版注释与 PR 正文
+ * 都笼统写成「让给既有专门校验」，在源端不成立）：
+ *   - **目标端**（nextType ∈ 排除集）：确实有既有校验接手 —— link 的跨 base 墙 /
+ *     assertLinkFieldForeignSheetPresent、formula 的反向引用门、lookup/rollup 的 validateLookupRollupConfig、
+ *     autoNumber 的 backfill……路由里逐条可见。
+ *   - **源端**（currentType ∈ 排除集）：路由里**没有**任何 `currentType === 'attachment' | 'lookup' |
+ *     'rollup' | 'button' | 'createdTime' | …` 的对应校验（唯二沾边的是 validateHierarchyParentFieldMutation
+ *     ——只管同表单值层级父 link，和 autoNumber 的清序列，后者排在 `UPDATE meta_fields` **之后**，是
+ *     副作用不是守卫）。所以 `attachment → string`、`lookup → string`、`button → string` 这类请求
+ *     **今天仍然 200 且无人把关**。本刀对源端**不表态、维持既有行为**，不是「交给了谁」。这条缝在
+ *     tests/integration/multitable-context.api.test.ts 里有一条 characterization 用例钉着现状，后来人
+ *     看得见；要不要把源端也收进白名单（会把 attachment/link → string 变成 400，是产品行为再收紧）
+ *     需要 owner 拍板，不在本刀范围。
+ *   - 前端是另一套口径：apps/web 的 losslessRetypeTargets 对排除集里的**源**一律返回 []（下拉框里
+ *     一个目标都不给）。所以 UI 走不到这条缝，只有直接调 API 的调用方走得到。
  */
 import { isRichLongTextProperty } from './field-codecs'
 
@@ -120,8 +145,10 @@ export class FieldRetypeNotLosslessError extends Error {
 /**
  * 写口守卫：不在白名单里的改类型 ⇒ 抛（路由映射成 400 + 稳定码）。三种情况直接放行：
  *   1. 同类型 → 同类型（根本不是改类型，照旧放行，纯改名/调序/改 property 不受影响）；
- *   2. 任一端属于 FIELD_RETYPE_EXCLUDED_TYPES：这些配对归路由里既有的专门校验管
- *      （link 跨 base 墙 / 公式引用反向门 / autoNumber 序列 / 层级父字段……），本门不改它们的结论；
+ *   2. 任一端属于 FIELD_RETYPE_EXCLUDED_TYPES。两端的理由不同，见本文件头的「作用域」：
+ *      **目标端**是让给路由里既有的专门校验（link 跨 base 墙 / 公式引用反向门 / lookup-rollup 配置……），
+ *      本门不改它们的结论；**源端**则是本刀不表态 —— 路由里没有对应校验，`attachment → string`
+ *      一类请求维持既有的 200（已知缝，有 characterization 用例钉着）；
  *   3. 在白名单里。
  * 调用点必须排在那些专门校验**之后**（它们对同一个请求给的是更具体的原因，保持优先级）、
  * 且在任何写语句**之前** —— 与本路由既有的 assertLinkFieldForeignSheetPresent 同一个位置惯例。
