@@ -76,6 +76,8 @@ export type WorkbenchLabelKey =
   | 'confirm.buttonRun'
   // §3.6 MetaTemplateCard button (counts use the card* helpers below)
   | 'card.install' | 'card.installing'
+  // 自定义模板(把这张 Base 存为模板)——角标与删除入口
+  | 'card.customBadge' | 'card.delete' | 'card.privateBadge'
   // S2 template detail + dry-run (design 20260611 §2.2)
   | 'card.viewDetail'
   | 'detail.back' | 'detail.loading' | 'detail.notFound'
@@ -263,6 +265,11 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
 
   'card.install': { en: 'Use template', zh: '使用模板' },
   'card.installing': { en: 'Installing...', zh: '创建中...' },
+
+  'card.customBadge': { en: 'Custom', zh: '自定义' },
+  'card.delete': { en: 'Delete', zh: '删除模板' },
+  // 私有模板(默认):只有建它的人看得见 —— 角标是为了让人知道同事看不到它。
+  'card.privateBadge': { en: 'Only you', zh: '仅自己可见' },
 
   'card.viewDetail': { en: 'View details', zh: '查看详情' },
   'detail.back': { en: '← Back to template center', zh: '← 返回模板中心' },

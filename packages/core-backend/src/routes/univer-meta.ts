@@ -235,7 +235,20 @@ import {
   getMultitableTemplate,
   installMultitableTemplate,
   listMultitableTemplates,
+  type MultitableTemplate,
 } from '../multitable/template-library'
+import {
+  CUSTOM_TEMPLATE_DEFAULT_CATEGORY,
+  CUSTOM_TEMPLATE_ID_PREFIX,
+  createCustomTemplate,
+  extractTemplateSheets,
+  getCustomTemplate,
+  isCustomTemplateId,
+  isUndefinedTableError as isCustomTemplateTableMissing,
+  listCustomTemplates,
+  normalizeCustomTemplateVisibility,
+  softDeleteCustomTemplate,
+} from '../multitable/custom-template-store'
 import { Logger } from '../core/logger'
 import {
   queryRecordsWithCursor,
@@ -4441,6 +4454,31 @@ const INVALID_DISPLAY_NAME_MESSAGE =
   `This endpoint accepts only { name }: a string of ${DISPLAY_NAME_MIN_LENGTH}-${DISPLAY_NAME_MAX_LENGTH} characters after trimming.`
 
 /** Values-free: names the authority that WOULD be accepted, so a refusal is actionable. */
+/**
+ * 自定义模板的租户维度 —— 只认 JWT 校验挂上的 req.authenticatedTenantId。
+ *
+ * 故意**不**回落 req.user.tenantId:无租户声明的 token 上,那个字段可能来自调用方
+ * 可控的 x-tenant-id 兼容头(见 routes/data-sources.ts 的同名口径),用它定租户
+ * 等于把租户交给请求方自选。没有可信租户时返回 null,而 null 在 SQL 里用
+ * `IS NOT DISTINCT FROM` 匹配,只会匹到同样没有租户的行 —— 不会跨到任何具体租户。
+ */
+function resolveTemplateTenantId(req: Request): string | null {
+  const tenantId = req.authenticatedTenantId
+  return typeof tenantId === 'string' && tenantId.trim().length > 0 ? tenantId.trim() : null
+}
+
+/**
+ * 「把这张 Base 存为模板」的授权口径 —— 与 PATCH /bases/:id(改名)同一档,而不是
+ * POST /bases(建空 Base)那一档。理由:存模板是把别人也在用的表结构做成可复制的组织资产,
+ * 属于 schema 权威(canManageFields = 管理员角色或 multitable:manage-schema),
+ * 光有 multitable:write(写记录)不够。删除自定义模板同档。
+ */
+const SAVE_AS_TEMPLATE_FORBIDDEN_MESSAGE =
+  'Saving a base as a template requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+
+const CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE =
+  'Custom template storage is not migrated yet (meta_multitable_custom_templates missing). Run `pnpm --filter @metasheet/core-backend migrate`.'
+
 const DISPLAY_RENAME_FORBIDDEN_MESSAGE =
   'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
 
@@ -7278,8 +7316,213 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   })
 
-  router.get('/templates', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
-    return res.json({ ok: true, data: { templates: listMultitableTemplates() } })
+  /**
+   * 模板列表 = 内置常量表(只读,来自 template-library.ts 的 TEMPLATE_LIBRARY)
+   *          + 本租户里**这个人看得见的**自定义模板(共享给租户的 + 他自己建的私有模板)。
+   *
+   * 降级口径:内置模板本来零 DB 依赖。自定义模板读失败(表还没迁移 / 库没起来 / 其它)时
+   * 不能把整个模板中心打成 500 —— 回内置模板并显式带上 customTemplatesUnavailable:true,
+   * 前端(MultitableTemplateCenterView 的 template-custom-unavailable 提示条)据此明说
+   * 「自定义模板暂不可用」,而不是假装用户没建过模板。
+   * 注意方向:这个回退只让**读**的结果更少,写入口(POST/DELETE)没有任何对应回退。
+   */
+  router.get('/templates', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+    const builtin = listMultitableTemplates()
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      const custom = await listCustomTemplates(
+        (sql, params) => pool.query(sql, params),
+        resolveTemplateTenantId(req),
+        access.userId,
+      )
+      return res.json({ ok: true, data: { templates: [...custom, ...builtin] } })
+    } catch (err) {
+      if (!isCustomTemplateTableMissing(err)) {
+        console.error('[univer-meta] list custom templates failed:', err)
+      }
+      return res.json({ ok: true, data: { templates: builtin, customTemplatesUnavailable: true } })
+    }
+  })
+
+  /**
+   * 「把这张 Base 存为模板」(09-10 测试反馈第 8 条:模板中心只能用、不能建)。
+   *
+   * VALUES-FREE,按构造证明:本路由只 SELECT meta_bases / meta_sheets / meta_fields /
+   * meta_views 四张**结构**表,一次都不碰 meta_records;抽取由纯函数 extractTemplateSheets
+   * 完成(property 白名单、视图只留结构位、所有 id 重编号成模板内局部 id),
+   * 所以模板 JSON 里既没有记录值,也没有源库的 sheet/field/view id。
+   *
+   * 可见性(抽取侧):源 Base 的表要先过 filterReadableSheetRowsForAccess —— 与 GET /bases
+   * 同一个可读过滤器。看不见的表不会被抽进模板;一张都看不见就按「Base 不存在」回 404
+   * (不告诉调用方这个 id 是否存在)。
+   *
+   * 可见性(发布侧):模板默认 private —— 只有建它的人看得见。理由是抽取侧的闸只保证
+   * 「建模板的人读得到这些表」,并不保证租户里**别人**读得到:管理员一路放行
+   * (filterReadableSheetRowsForAccess 对 isAdminRole 直接全量通过),他把带「内部成本」表的
+   * Base 存成模板后,若默认全租户可见,表名与全部字段名就绕过表级权限漏给了每个只读用户。
+   * 要当组织资产用,建模板的人显式传 visibility:'tenant'(前端是一个默认不勾的复选框)。
+   */
+  router.post('/templates', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      baseId: z.string().min(1).max(50),
+      name: z.string().min(1).max(255).optional(),
+      description: z.string().max(500).optional(),
+      category: z.string().min(1).max(64).optional(),
+      icon: z.string().min(1).max(64).optional(),
+      color: z.string().min(1).max(32).optional(),
+      workspaceId: z.string().min(1).max(100).optional(),
+      // 省略 = private。只有显式的 'tenant' 才会把模板发布给整个租户。
+      visibility: z.enum(['private', 'tenant']).optional(),
+    })
+    const parsed = schema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+    const baseId = parsed.data.baseId.trim()
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!capabilities.canManageFields) return sendForbidden(res, SAVE_AS_TEMPLATE_FORBIDDEN_MESSAGE)
+
+      const baseResult = await pool.query(
+        'SELECT id, name, icon, color FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+        [baseId],
+      )
+      const baseRow = (baseResult as any).rows?.[0]
+      if (!baseRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      }
+
+      const sheetResult = await pool.query(
+        `SELECT id, base_id, name, description
+         FROM meta_sheets
+         WHERE base_id = $1 AND deleted_at IS NULL
+         ORDER BY created_at ASC
+         LIMIT 50`,
+        [baseId],
+      )
+      const visibleSheetRows = filterVisibleSheetRows(((sheetResult as any).rows ?? []) as any[])
+      const readableSheetRows = await filterReadableSheetRowsForAccess(
+        pool.query.bind(pool),
+        visibleSheetRows.map((row: any) => ({
+          id: String(row.id),
+          name: typeof row.name === 'string' ? row.name : '',
+          description: typeof row.description === 'string' ? row.description : null,
+        })),
+        access,
+        capabilities,
+      )
+      if (readableSheetRows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      }
+      const sheetIds = readableSheetRows.map((row) => row.id)
+
+      const fieldResult = await pool.query(
+        'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY "order" ASC',
+        [sheetIds],
+      )
+      const viewResult = await pool.query(
+        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[])',
+        [sheetIds],
+      )
+
+      const extracted = extractTemplateSheets({
+        sheets: readableSheetRows.map((row) => ({ id: row.id, name: row.name, description: row.description })),
+        fields: ((fieldResult as any).rows ?? []) as any[],
+        views: ((viewResult as any).rows ?? []) as any[],
+      })
+      if (extracted.sheets.length === 0) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: 'This base has no readable table with fields to save as a template' },
+        })
+      }
+
+      const template = await createCustomTemplate({
+        query: (sql, params) => pool.query(sql, params),
+        id: `${CUSTOM_TEMPLATE_ID_PREFIX}${randomUUID().replace(/-/g, '').slice(0, 24)}`,
+        tenantId: resolveTemplateTenantId(req),
+        workspaceId: parsed.data.workspaceId?.trim() ?? null,
+        name: (parsed.data.name?.trim() || String(baseRow.name ?? '').trim() || 'Untitled template').slice(0, 255),
+        description: (parsed.data.description ?? '').trim().slice(0, 500),
+        category: parsed.data.category?.trim() || CUSTOM_TEMPLATE_DEFAULT_CATEGORY,
+        icon: parsed.data.icon?.trim() || (typeof baseRow.icon === 'string' && baseRow.icon ? baseRow.icon : 'table'),
+        color: parsed.data.color?.trim() || (typeof baseRow.color === 'string' && baseRow.color ? baseRow.color : '#2563eb'),
+        sheets: extracted.sheets,
+        createdBy: access.userId,
+        visibility: normalizeCustomTemplateVisibility(parsed.data.visibility),
+      })
+
+      templateInstallLogger.info('[multitable.template.save-as]', {
+        templateId: template.id,
+        ok: true,
+        userId: access.userId,
+        sheetCount: extracted.sheets.length,
+        visibility: template.visibility,
+      })
+      return res.status(201).json({ ok: true, data: { template, warnings: extracted.warnings } })
+    } catch (err) {
+      if (isCustomTemplateTableMissing(err)) {
+        return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] save base as template failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save base as template' } })
+    }
+  })
+
+  /**
+   * 删除自定义模板(软删)。内置模板不可删 —— 它们是常量表里的代码,不是数据。
+   * 与创建同档鉴权;租户维度写在 SQL 里,别的租户即使猜到 id 也只会拿到 404。
+   */
+  router.delete('/templates/:templateId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const templateId = typeof req.params.templateId === 'string' ? req.params.templateId.trim() : ''
+    if (!templateId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'templateId is required' } })
+    }
+    if (!isCustomTemplateId(templateId)) {
+      return sendForbidden(res, 'Built-in templates cannot be deleted')
+    }
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!capabilities.canManageFields) return sendForbidden(res, SAVE_AS_TEMPLATE_FORBIDDEN_MESSAGE)
+
+      const deleted = await softDeleteCustomTemplate(
+        (sql, params) => pool.query(sql, params),
+        resolveTemplateTenantId(req),
+        templateId,
+        access.userId,
+      )
+      if (!deleted) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'NOT_FOUND', message: new MultitableTemplateNotFoundError(templateId).message },
+        })
+      }
+      templateInstallLogger.info('[multitable.template.delete]', { templateId, ok: true, userId: access.userId })
+      return res.json({ ok: true, data: { templateId } })
+    } catch (err) {
+      if (isCustomTemplateTableMissing(err)) {
+        return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] delete custom template failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete template' } })
+    }
   })
 
   router.post('/templates/:templateId/install', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
@@ -7309,9 +7552,25 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       userId = access.userId
 
+      // 自定义模板(mtpl_ 前缀)存在 DB 里:按本租户查出来再交给同一套安装机器。
+      // 查不到 —— 别的租户的模板、已软删的模板、不存在的 id —— 一律走内置模板那条
+      // 404(NotFound),不区分「不存在」和「不是你的」。
+      let resolvedTemplate: MultitableTemplate | undefined
+      if (isCustomTemplateId(templateId)) {
+        const found = await getCustomTemplate(
+          (sql, params) => pool.query(sql, params),
+          resolveTemplateTenantId(req),
+          templateId,
+          access.userId,
+        )
+        if (!found) throw new MultitableTemplateNotFoundError(templateId)
+        resolvedTemplate = found
+      }
+
       const result = await pool.transaction(async ({ query }) => installMultitableTemplate({
         query: query as unknown as QueryFn,
         templateId,
+        template: resolvedTemplate,
         baseName: parsed.data.baseName,
         ownerId: access.userId,
         workspaceId: parsed.data.workspaceId ?? null,
@@ -7334,6 +7593,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         statusCode = 404
         errorCode = 'NOT_FOUND'
         message = err.message
+      } else if (isCustomTemplateTableMissing(err)) {
+        statusCode = 503
+        errorCode = 'DB_NOT_READY'
+        message = CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE
       } else if (err instanceof MultitableTemplateConflictError) {
         statusCode = 409
         errorCode = 'CONFLICT'
@@ -7404,7 +7667,28 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       req.user?.userId?.toString() ??
       null
 
-    const template = getMultitableTemplate(templateId)
+    // 自定义模板同样支持 dry-run:多一条**只读** SELECT(按租户查模板行),
+    // 零写不变量原样成立。查不到就落到下面与内置模板同一个 404。
+    let template = getMultitableTemplate(templateId)
+    if (!template && isCustomTemplateId(templateId)) {
+      try {
+        const pool = poolManager.get()
+        template = await getCustomTemplate(
+          (sql, params) => pool.query(sql, params),
+          resolveTemplateTenantId(req),
+          templateId,
+          userId ?? '',
+        )
+      } catch (err) {
+        if (isCustomTemplateTableMissing(err)) {
+          return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE } })
+        }
+        const hint = getDbNotReadyMessage(err)
+        if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+        console.error('[univer-meta] resolve custom template failed:', err)
+        return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to dry-run template' } })
+      }
+    }
     if (!template) {
       templateInstallLogger.info('[multitable.template.dry-run]', {
         templateId,
