@@ -61,6 +61,42 @@ M7/M8 的输出里还带着上面那条既有的 `not ok 10`,不影响判读。
   (package-build.sh / package-verify.sh / plugin-tests.yml,三者在 `.gitattributes` 里都是
   `text eol=lf`,工作区即 LF 字节)。三条 pin 全部重算,40 条 pin 逐条复核对齐,#4 由红转绿。
 
+## 三点五、第三轮返修(2026-09-10,评审反例:跳过一线步骤仍报闭环通过)
+
+反例原话:抽取真实结论表达式,`STEP6B = SKIP` 时 `conclusion = CLOSED_LOOP_PASS`。
+
+复现方式就是新测试本身:契约测试把 .ps1 里真实的 `$conclusion = ...` 语句(以及修后它调用的
+`Get-RequiredClosedLoopStepIds` / `Get-AcceptanceConclusion` 两个纯函数)按大括号配平**原文切出**,
+灌进一个只喂状态表(`$script:ExitCode` / `$script:ChainMode` / `$script:Results`)的 PowerShell
+harness 跑,打印脚本自己的判定——不写平行逻辑,两份替身互相印证等于没证。
+
+| 阶段 | 结果 |
+|---|---|
+| 修前(HEAD `b1f5d926c`) | `# tests 39 / # pass 31 / # fail 8`;反例那条的断言输出 `actual: 'CLOSED_LOOP_PASS'` |
+| 修后 | 本契约 `# tests 40 / # pass 40 / # fail 0`;全目录 `# tests 88 / # pass 88 / # fail 0` |
+
+真机口径的两次实跑(把脚本汇总+报告那一段原文切出来喂合成步骤表,PS 5.1.26100.9168):
+STEP6B=SKIP 其余全 PASS → 打 `CONCLUSION: INCOMPLETE (REQUIRED_STEP_NOT_PASSED)`、
+`MISSING STEP STEP6B-... SKIP`、`MISSING INPUT PROJECT_NO`,报告 `closedLoop: false`;
+十条必需步骤全 PASS 且 `chainMode=CLOSED_LOOP` → `CONCLUSION: CLOSED_LOOP_PASS
+(ALL_REQUIRED_STEPS_PASSED)`,`missingRequiredSteps: []`。
+
+变异探针(只改 scratch 里的镜像副本,仓库工作区零改动):
+
+| 探针 | 改动 | 转红 |
+|---|---|---|
+| M9 | 结论表达式退回只看 `ExitCode` + `ChainMode` | 9 条(含 `a run that SKIPPED the front-line dry-run can never conclude CLOSED_LOOP_PASS`),`# pass 31 / # fail 9` |
+| M10 | 必需清单里拿掉 `STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN` | 5 条(含反例那条与清单断言),`# pass 35 / # fail 5` |
+
+`EXPECTED_OPS_TESTS_COUNT` 随之 79 → **88**(scheduled-pull 31 + 本契约 **40** +
+synth-large-bom 11 + attendance-mint-token 6)。改了 `plugin-tests.yml` 就要重钉
+`evidenceFiles.pluginTestsWorkflow`:`dcf6d5ba…4344` 之前是
+`dcf6d5bae8ca8f12b7a81b2beab1b332848bac5d14f8fc2720a5275cd7bb54a1`,新值
+`9921d9d7d72953e7ff701141c644feed386fd4985863233087a90bea94c74344`;官方口径重算后
+66 条 pin 逐条比对零差异,`sealed-export-package-provenance.test.cjs` 绿。
+验收脚本本体与它的契约测试都不在 pin 名单里(名单里的 `s6aAcceptanceRunner` /
+`s6aAcceptancePs51Test` 指的是另一支 S6-A 脚本)。
+
 ## 四、没做/留给下一轮
 
 - STEP6B 仍只断言 dry-run 的 HTTP 200,没有断言返回体里的行数/字段形状——本轮返修范围外。
@@ -68,4 +104,9 @@ M7/M8 的输出里还带着上面那条既有的 `not ok 10`,不影响判读。
   找不到时契约测试**判红而不是 skip**。运行 `scripts/ops/__tests__/*.test.mjs` 的 CI job
   是 ubuntu-latest 且同一 job 里已有 `shell: pwsh` 步骤,前提成立。
 - 闭环那一档(`CLOSED_LOOP_PASS`)在真机上尚未取得过:需要先把备料表动作绑到新建的源。
-  本轮只保证"没绑就绝不写成闭环"。
+  现在的保证是两条:没绑就绝不写成闭环,必需步骤没跑就绝不写成"通过"(报 `INCOMPLETE`)。
+- `INCOMPLETE` **不改退出码**(仍是 0)。退出码只表达"有没有 FAIL / ISOLATION_BREACH",
+  这是上一轮既有语义,本轮没动;只看退出码的自动化仍需要再读一眼 `conclusion` 字段。
+- 缺 `-ProjectNo` / `-OperatorTokenFile` 的判定来自步骤表(两条 STEP6 都 SKIP → 缺 token,
+  只有 STEP6B SKIP → 缺项目号),不是回读参数本身;若将来 STEP6A 因别的原因记成 SKIP,
+  这条提示会指错输入——步骤清单本身仍然是准的。

@@ -42,8 +42,7 @@ leg1 失败时 leg2 照跑(GET 无副作用),因为 `status`/`lastError` 正是"
 
 非闭环时步骤描述、汇总行 `NOT A CLOSED LOOP` 和 JSON 报告(`chainMode` / `closedLoop` /
 `chainCode` / `boundSourceDigest`)都明写"测的是既有来源";既有源只用 digest
-(id 的 sha256 前 12 位)指代,能和已知 id 对上又不把 id 写进报告。总结论三选一:
-`CLOSED_LOOP_PASS` / `ENV_PROBE_PASS` / `FAILED`——非闭环的运行**写不出**"闭环通过"。
+(id 的 sha256 前 12 位)指代,能和已知 id 对上又不把 id 写进报告。
 预检本身改读真实字段:`data.ok` 为真布尔且 `data.verdict == 'go'` 才 PASS,
 `verdict: 'no-go'` 判 FAIL,只有 `ready` 的 body 判 `PREFLIGHT_FIELDS_ABSENT`。
 
@@ -66,6 +65,33 @@ SQL 登录名/密码与 bearer token 共用一个读取函数,`.Trim()` 会把�
 
 底层统一走 `[System.IO.File]::ReadAllText(path, UTF8)`:PS 5.1 的 `Get-Content -Raw`
 对无 BOM 文件按 ANSI 代码页解码,中文环境会把 UTF-8 密码读坏。
+
+## P2-3 跳过一线步骤仍报"闭环通过"(第三轮返修)
+
+第二轮的结论表达式只看两样:`$script:ExitCode` 和 `$script:ChainMode`。评审抽出这段真实
+表达式、喂一张 `STEP6B = SKIP` 的状态表,结论照样是 `CLOSED_LOOP_PASS`——没给 `-ProjectNo`
+(或压根没给 `-OperatorTokenFile`)的运行,一线 dry-run 从来没跑过,报告却说整条链闭合。
+
+改法:结论收到一个纯函数 `Get-AcceptanceConclusion` 里,它读**记录下来的步骤表**,要求
+`Get-RequiredClosedLoopStepIds` 列出的每一条**闭环必需步骤都显式 PASS**。清单(按脚本里的
+步骤 id,即正例链路本身):`STEP1-OWNER-CREATE-DATA-SOURCE`、
+`STEP2-OWNER-CREATE-EXTERNAL-SYSTEM`、`STEP2-OWNER-GET-EXTERNAL-SYSTEM`(绑定读回比对)、
+`STEP3-TEST-CONNECTION`、`STEP3-GET-LAST-TESTED`(连接测试的调用与落库两腿)、
+`STEP4-ACTION-SOURCE-BINDING`、`STEP4-BOUND-SOURCE-CONNECTION`、`STEP4-SOURCE-PREFLIGHT`
+(预检)、`STEP6A-OPERATOR-PROJECT-DIRECTORY`、`STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN`
+(一线 dry-run)。负例拒绝检查(STEP1B/2B/5/7/8/9)不进清单——它们由各自步骤和退出码把关,
+不是"闭环"这两个字所声称的东西。
+
+结论因此四选一:`FAILED`(退出码非 0)/ `INCOMPLETE`(有必需步骤不是 PASS)/
+`CLOSED_LOOP_PASS`(全部 PASS 且绑定就是本次新建的源)/ `ENV_PROBE_PASS`(全部 PASS 但绑定
+是既有源)。`INCOMPLETE` 会把每条没过的步骤连同结果(`SKIP` / `WARN` / 从未记录时的
+`NOT_RUN`)逐行打出来,并按固定词表点名缺的输入:两条 STEP6 都 SKIP → `OPERATOR_TOKEN`,
+只有 STEP6B SKIP → `PROJECT_NO`。报告里的 `closedLoop` 也跟着收紧成**完整声明**
+(`$conclusion -eq 'CLOSED_LOOP_PASS'`),只看这一个字段的读者再也不会被跳过的 dry-run 蒙住;
+`chainMode` 保留,它仍然是唯一说明"STEP4/STEP6 测的是哪条源"的字段。
+
+契约测试不重写这条规则:它把 .ps1 里真实的 `$conclusion = ...` 语句和它调用的纯函数
+**原文切出来**,塞进一个只喂状态表的 harness 里跑,打印脚本自己的判定。
 
 ## 测试策略:从"静态"升级到"真跑分类器"
 

@@ -40,6 +40,16 @@
                  in as many words. A run like that can never conclude
                  CLOSED_LOOP_PASS.
 
+  THE CONCLUSION is gated on TWO things, not one. Besides the chain mode above,
+  EVERY closed-loop step (Get-RequiredClosedLoopStepIds: STEP1, STEP2 create +
+  readback, STEP3 call + saved result, the three STEP4 legs, STEP6A, STEP6B)
+  must be an explicit PASS. A run that skipped the front-line dry-run because
+  no -ProjectNo / no -OperatorTokenFile was supplied concludes INCOMPLETE and
+  names the step and the missing input; it reports neither CLOSED_LOOP_PASS nor
+  ENV_PROBE_PASS, because it measured nothing about the front line at all.
+  Exit code plus chain mode were never enough on their own:
+  "STEP6B = SKIP, CONCLUSION = CLOSED_LOOP_PASS" was a real hole in this file.
+
   Every request is logged values-free: step id, HTTP status, error.code, and
   fixed booleans/counts only. Never the token, credentials, connection
   string, or raw response body -- the pre-existing bound source is named only
@@ -255,6 +265,111 @@ function Get-IdDigest {
     $sha256.Dispose()
   }
   return (-join ($bytes | ForEach-Object { $_.ToString('x2') })).Substring(0, 12)
+}
+
+# THE CONCLUSION, part 1 -- the steps this run has to have WALKED before the
+# words "closed loop" are allowed anywhere near its report. They are the
+# POSITIVE chain, in run order: create the source, read the binding back, prove
+# the connection (the call AND the saved result), preflight it, and have the
+# FRONT LINE actually pull through it. The negative checks (STEP1B, STEP2B,
+# STEP5, STEP7, STEP8, STEP9) are refusal probes: they are graded by their own
+# steps and by the exit code, and they are not what the words "closed loop"
+# claim.
+function Get-RequiredClosedLoopStepIds {
+  return @(
+    'STEP1-OWNER-CREATE-DATA-SOURCE',
+    'STEP2-OWNER-CREATE-EXTERNAL-SYSTEM',
+    'STEP2-OWNER-GET-EXTERNAL-SYSTEM',
+    'STEP3-TEST-CONNECTION',
+    'STEP3-GET-LAST-TESTED',
+    'STEP4-ACTION-SOURCE-BINDING',
+    'STEP4-BOUND-SOURCE-CONNECTION',
+    'STEP4-SOURCE-PREFLIGHT',
+    'STEP6A-OPERATOR-PROJECT-DIRECTORY',
+    'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN'
+  )
+}
+
+# THE CONCLUSION, part 2 -- pure, and the single place the verdict is decided,
+# so the contract test can replay a whole state table through THIS function
+# instead of through a parallel replica of it.
+#
+# The hole this closes: a run that never executed the front-line dry-run (no
+# -ProjectNo, or no -OperatorTokenFile at all) still ended with exit code 0 and
+# a CLOSED_LOOP chain mode, and a conclusion that read only those two things
+# answered CLOSED_LOOP_PASS for a chain whose last link had never run. A SKIP is
+# not a PASS, and a step that was never recorded is not even a SKIP: both are
+# INCOMPLETE, and the report names every step that did not pass plus the input
+# that would have let it run. Everything returned here is fixed vocabulary --
+# step ids and result words, never a token, a project number or a value.
+function Get-AcceptanceConclusion {
+  param(
+    [int]$ExitCode,
+    [string]$ChainMode,
+    $Steps
+  )
+  $required = Get-RequiredClosedLoopStepIds
+  $observed = @{}
+  foreach ($step in @($Steps)) {
+    if ($null -eq $step) { continue }
+    $stepId = ''
+    $stepResult = ''
+    if ($step -is [System.Collections.IDictionary]) {
+      if ($step.Contains('stepId')) { $stepId = "$($step['stepId'])" }
+      if ($step.Contains('result')) { $stepResult = "$($step['result'])" }
+    } else {
+      $properties = $step.PSObject.Properties
+      if ($properties['stepId']) { $stepId = "$($properties['stepId'].Value)" }
+      if ($properties['result']) { $stepResult = "$($properties['result'].Value)" }
+    }
+    if (-not ($required -contains $stepId)) { continue }
+    # A step recorded more than once counts as passed only if EVERY entry
+    # passed: the first non-PASS is the one the reader has to see.
+    if ($observed.ContainsKey($stepId) -and $observed[$stepId] -ne 'PASS') { continue }
+    $observed[$stepId] = $stepResult
+  }
+
+  $missingSteps = New-Object System.Collections.ArrayList
+  foreach ($stepId in $required) {
+    if (-not $observed.ContainsKey($stepId)) {
+      [void]$missingSteps.Add([pscustomobject]@{ stepId = $stepId; result = 'NOT_RUN' })
+    } elseif ($observed[$stepId] -ne 'PASS') {
+      [void]$missingSteps.Add([pscustomobject]@{ stepId = $stepId; result = $observed[$stepId] })
+    }
+  }
+
+  # Which INPUT the next run has to supply for the skipped front-line steps to
+  # execute. Fixed vocabulary, never the value of that input.
+  $missingInputs = New-Object System.Collections.ArrayList
+  $projectDirectoryResult = ''
+  if ($observed.ContainsKey('STEP6A-OPERATOR-PROJECT-DIRECTORY')) { $projectDirectoryResult = $observed['STEP6A-OPERATOR-PROJECT-DIRECTORY'] }
+  $dryRunResult = ''
+  if ($observed.ContainsKey('STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN')) { $dryRunResult = $observed['STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN'] }
+  if ($projectDirectoryResult -eq 'SKIP' -and $dryRunResult -eq 'SKIP') {
+    [void]$missingInputs.Add('OPERATOR_TOKEN')
+  } elseif ($dryRunResult -eq 'SKIP') {
+    [void]$missingInputs.Add('PROJECT_NO')
+  }
+
+  $conclusion = 'ENV_PROBE_PASS'
+  $code = 'BOUND_TO_PRE_EXISTING_SOURCE'
+  if ($ExitCode -ne 0) {
+    $conclusion = 'FAILED'
+    $code = 'EXIT_CODE_NONZERO'
+  } elseif ($missingSteps.Count -gt 0) {
+    $conclusion = 'INCOMPLETE'
+    $code = 'REQUIRED_STEP_NOT_PASSED'
+  } elseif ($ChainMode -eq 'CLOSED_LOOP') {
+    $conclusion = 'CLOSED_LOOP_PASS'
+    $code = 'ALL_REQUIRED_STEPS_PASSED'
+  }
+  return [pscustomobject]@{
+    Conclusion = $conclusion
+    Code = $code
+    RequiredSteps = @($required)
+    MissingSteps = @($missingSteps)
+    MissingInputs = @($missingInputs)
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -1014,21 +1129,30 @@ foreach ($result in $script:Results) {
 }
 Write-Host ("EXIT CODE: $script:ExitCode  ISOLATION_BREACH: $script:IsolationBreach")
 
-# THE CONCLUSION, and the one sentence this script exists to keep honest. A
-# green run whose STEP4/STEP6 never touched the source STEP1 created is NOT a
-# closed-loop pass, and is never reported as one.
-$conclusion = if ($script:ExitCode -ne 0) {
-  'FAILED'
-} elseif ($script:ChainMode -eq 'CLOSED_LOOP') {
-  'CLOSED_LOOP_PASS'
-} else {
-  'ENV_PROBE_PASS'
-}
+# THE CONCLUSION, and the one sentence this script exists to keep honest. TWO
+# gates, both of which have been wrong in this file before:
+#   1. every closed-loop step actually RAN and PASSED. A SKIP (no -ProjectNo, no
+#      -OperatorTokenFile) or a step that never got recorded means this run
+#      measured nothing about the front line -- it says INCOMPLETE and lists
+#      what is missing, and it says it whatever the chain mode was.
+#   2. the table action is bound to the source STEP1 created. Otherwise
+#      STEP4/STEP6 probed a pre-existing source and the run is an ENV_PROBE.
+$conclusionVerdict = Get-AcceptanceConclusion -ExitCode $script:ExitCode -ChainMode $script:ChainMode -Steps $script:Results
+$conclusion = $conclusionVerdict.Conclusion
 Write-Host ("CHAIN: {0} ({1})" -f $script:ChainMode, $script:ChainCode)
 if ($script:ChainMode -ne 'CLOSED_LOOP') {
   Write-Host ("  -> NOT A CLOSED LOOP: the table action is bound to a pre-existing source (boundSourceDigest={0}), not the source this run created. STEP4/STEP6 are independent probes of this deployment; they do NOT prove 'new source -> front-line dry-run'." -f $script:BoundSourceDigest)
 }
-Write-Host ("CONCLUSION: $conclusion")
+if ($conclusion -eq 'INCOMPLETE') {
+  Write-Host '  -> INCOMPLETE: a step the closed-loop claim depends on did not run and pass, so this run proves NEITHER a closed loop NOR a clean environment probe. Supply what is listed below and run it again before reporting anything.'
+  foreach ($missingStep in $conclusionVerdict.MissingSteps) {
+    Write-Host ("     MISSING STEP  {0,-42} {1}" -f $missingStep.stepId, $missingStep.result)
+  }
+  foreach ($missingInput in $conclusionVerdict.MissingInputs) {
+    Write-Host ("     MISSING INPUT {0}" -f $missingInput)
+  }
+}
+Write-Host ("CONCLUSION: {0} ({1})" -f $conclusion, $conclusionVerdict.Code)
 
 $reportSteps = @()
 foreach ($result in $script:Results) {
@@ -1053,9 +1177,17 @@ $report = [ordered]@{
   # that id the same way, and can never read the id out of this report.
   chainMode = $script:ChainMode
   chainCode = $script:ChainCode
-  closedLoop = ($script:ChainMode -eq 'CLOSED_LOOP')
+  # `closedLoop` is the FULL claim, not just the binding comparison: it is true
+  # only when the chain was proven AND every required step passed. A reader that
+  # keys on this field can never be shown `true` for a run that skipped the
+  # front-line dry-run -- `chainMode` alone still says what STEP4/STEP6 measured.
+  closedLoop = ($conclusion -eq 'CLOSED_LOOP_PASS')
   boundSourceDigest = $script:BoundSourceDigest
   conclusion = $conclusion
+  conclusionCode = $conclusionVerdict.Code
+  requiredClosedLoopSteps = @($conclusionVerdict.RequiredSteps)
+  missingRequiredSteps = @($conclusionVerdict.MissingSteps | ForEach-Object { [ordered]@{ stepId = $_.stepId; result = $_.result } })
+  missingInputs = @($conclusionVerdict.MissingInputs)
   steps = $reportSteps
 }
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)

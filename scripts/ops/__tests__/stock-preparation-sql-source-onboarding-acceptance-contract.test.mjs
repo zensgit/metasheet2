@@ -231,6 +231,359 @@ test('a token file is still whitespace-trimmed at both ends', () => {
 })
 
 // ---------------------------------------------------------------------------
+// (E6) THE CONCLUSION — the reviewer's second counter-example, replayed
+// through the script's OWN expression.
+//
+//   "STEP6B = SKIP, conclusion = CLOSED_LOOP_PASS" — a run that never executed
+//   the front-line dry-run (no -ProjectNo, or no operator token at all) still
+//   ended exit 0 with ChainMode = CLOSED_LOOP, and the conclusion looked at
+//   nothing else. The report claimed the loop closed while its last link had
+//   never run.
+//
+// Nothing below re-implements that rule. `extractConclusionStatement` CUTS the
+// real `$conclusion = ...` statement out of the shipped .ps1 and
+// `extractBalancedBlock` cuts out the pure functions it calls; the harness only
+// feeds a state table in ($script:ExitCode / $script:ChainMode /
+// $script:Results) and prints what the script's own code decided. A replica
+// written here would prove nothing — two replicas can agree with each other and
+// both disagree with the file that ships.
+// ---------------------------------------------------------------------------
+
+// The closed-loop chain, by the step ids the script records: new source ->
+// binding read back -> connection proven (call + saved result) -> preflight ->
+// the front line actually pulls. A run may call itself a closed loop only when
+// EVERY one of these is an explicit PASS. The negative checks (STEP1B / STEP2B /
+// STEP5 / STEP7 / STEP8 / STEP9) are refusal probes graded by their own steps
+// and by the exit code; a skip there is not what the words "closed loop" claim.
+const REQUIRED_CLOSED_LOOP_STEPS = [
+  'STEP1-OWNER-CREATE-DATA-SOURCE',
+  'STEP2-OWNER-CREATE-EXTERNAL-SYSTEM',
+  'STEP2-OWNER-GET-EXTERNAL-SYSTEM',
+  'STEP3-TEST-CONNECTION',
+  'STEP3-GET-LAST-TESTED',
+  'STEP4-ACTION-SOURCE-BINDING',
+  'STEP4-BOUND-SOURCE-CONNECTION',
+  'STEP4-SOURCE-PREFLIGHT',
+  'STEP6A-OPERATOR-PROJECT-DIRECTORY',
+  'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN',
+]
+
+// Steps that are NOT part of the closed-loop claim, carried in the realistic
+// state tables so a missing one of these can never be what flips a conclusion.
+const NON_REQUIRED_STEPS = [
+  { stepId: 'STEP1B-CLAIMLESS-CREATE-DATA-SOURCE', result: 'SKIP' },
+  { stepId: 'STEP2B-CREDENTIALS-FORBIDDEN', result: 'PASS' },
+  { stepId: 'STEP5-DELETE-REFERENCED-CONFLICT', result: 'PASS' },
+  { stepId: 'STEP7-CLAIMLESS-TENANT-HEADER-SQL-BINDING', result: 'SKIP' },
+  { stepId: 'STEP8-TENANT-MISMATCH-SQL-BINDING', result: 'PASS' },
+  { stepId: 'STEP9-OPERATOR-RAW-QUERY-FORBIDDEN', result: 'PASS' },
+  { stepId: 'CLEANUP-DELETE-EXTERNAL-SYSTEM', result: 'WARN' },
+  { stepId: 'CLEANUP-DELETE-DATA-SOURCE', result: 'PASS' },
+]
+
+// `'ABSENT'` drops the row entirely — the shape of a run that halted (or was
+// interrupted) before that step ever executed, which is NOT the same state as a
+// recorded SKIP and must not be graded as one.
+function closedLoopStepTable(overrides = {}) {
+  return REQUIRED_CLOSED_LOOP_STEPS.filter((stepId) => overrides[stepId] !== 'ABSENT').map((stepId) => ({
+    stepId,
+    result: overrides[stepId] || 'PASS',
+  }))
+}
+
+const CONCLUSION_CASES = [
+  // THE COUNTER-EXAMPLE, verbatim: everything green, chain proven closed, and
+  // the one step that actually proves a front-line pull never ran.
+  {
+    id: 'dry-run-skipped-no-project-no',
+    exitCode: 0,
+    chainMode: 'CLOSED_LOOP',
+    steps: closedLoopStepTable({ 'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN': 'SKIP' }),
+  },
+  {
+    id: 'no-operator-token',
+    exitCode: 0,
+    chainMode: 'CLOSED_LOOP',
+    steps: closedLoopStepTable({
+      'STEP6A-OPERATOR-PROJECT-DIRECTORY': 'SKIP',
+      'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN': 'SKIP',
+    }),
+  },
+  {
+    id: 'every-required-step-passed-closed-loop',
+    exitCode: 0,
+    chainMode: 'CLOSED_LOOP',
+    steps: [...closedLoopStepTable(), ...NON_REQUIRED_STEPS],
+  },
+  {
+    id: 'every-required-step-passed-env-probe',
+    exitCode: 0,
+    chainMode: 'ENV_PROBE',
+    steps: [...closedLoopStepTable(), ...NON_REQUIRED_STEPS],
+  },
+  {
+    id: 'env-probe-with-skipped-dry-run',
+    exitCode: 0,
+    chainMode: 'ENV_PROBE',
+    steps: closedLoopStepTable({ 'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN': 'SKIP' }),
+  },
+  {
+    id: 'halted-before-the-dry-run',
+    exitCode: 0,
+    chainMode: 'CLOSED_LOOP',
+    steps: closedLoopStepTable({ 'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN': 'ABSENT' }),
+  },
+  {
+    id: 'binding-readback-warned',
+    exitCode: 0,
+    chainMode: 'ENV_PROBE',
+    steps: closedLoopStepTable({
+      'STEP4-ACTION-SOURCE-BINDING': 'WARN',
+      'STEP4-BOUND-SOURCE-CONNECTION': 'SKIP',
+    }),
+  },
+  {
+    id: 'a-required-step-failed',
+    exitCode: 1,
+    chainMode: 'CLOSED_LOOP',
+    steps: closedLoopStepTable({ 'STEP3-TEST-CONNECTION': 'FAIL' }),
+  },
+]
+
+function countOccurrences(text, needle) {
+  return text.split(needle).length - 1
+}
+
+// Cuts `function <Name> { ... }` out of the script by brace balance. Optional,
+// because the PRE-FIX script has no such function and the replay must still be
+// able to run its old, inline expression — that is how this file reproduces the
+// counter-example instead of only describing it.
+function extractBalancedBlock(text, marker) {
+  const start = text.indexOf(marker)
+  if (start < 0) return null
+  const open = text.indexOf('{', start)
+  assert.ok(open > start, `expected an opening brace after ${marker}`)
+  let depth = 0
+  for (let i = open; i < text.length; i += 1) {
+    if (text[i] === '{') depth += 1
+    else if (text[i] === '}') {
+      depth -= 1
+      if (depth === 0) return text.slice(start, i + 1)
+    }
+  }
+  assert.fail(`unbalanced braces after ${marker}`)
+  return null
+}
+
+// Cuts the whole top-level `$conclusion... = ...` statement (or the run of
+// consecutive ones) out of the script, whatever shape it currently has: a
+// multi-line `if` expression, or a call into a pure function plus the field
+// read that follows it.
+function extractConclusionStatement(lines) {
+  const isAssignment = (line) => /^\$conclusion\w*\s*=/.test(line)
+  const start = lines.findIndex(isAssignment)
+  assert.ok(start >= 0, 'expected a top-level `$conclusion = ...` statement in the script')
+  const picked = []
+  let index = start
+  while (index < lines.length) {
+    if (picked.length > 0 && !isAssignment(lines[index])) break
+    let depth = 0
+    do {
+      picked.push(lines[index])
+      depth += countOccurrences(lines[index], '{') - countOccurrences(lines[index], '}')
+      index += 1
+    } while (depth > 0 && index < lines.length)
+    assert.equal(depth, 0, 'unbalanced braces while cutting the $conclusion statement out of the script')
+  }
+  return picked.join('\n')
+}
+
+const CONCLUSION_EXPRESSION_MARKER = '#<<CONCLUSION-STATEMENT>>'
+
+// ASCII only: a .ps1 written without a BOM is decoded by Windows PowerShell 5.1
+// in the host's ANSI code page, so the harness never carries a non-ASCII byte.
+const CONCLUSION_HARNESS_DRIVER = [
+  '$statePath = $args[0]',
+  '$replayCases = (Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json).cases',
+  '$replayResults = New-Object System.Collections.ArrayList',
+  'foreach ($replayCase in @($replayCases)) {',
+  '  $script:ExitCode = [int]$replayCase.exitCode',
+  '  $script:ChainMode = [string]$replayCase.chainMode',
+  "  $script:ChainCode = 'REPLAYED_STATE'",
+  "  $script:BoundSourceDigest = 'n/a'",
+  '  $script:IsolationBreach = $false',
+  '  $script:Results = @()',
+  '  foreach ($replayStep in @($replayCase.steps)) {',
+  "    $script:Results += [pscustomobject]@{ stepId = [string]$replayStep.stepId; description = 'replayed state row'; result = [string]$replayStep.result; status = 'n/a'; code = 'n/a' }",
+  '  }',
+  '  $conclusion = $null',
+  '  $conclusionVerdict = $null',
+  CONCLUSION_EXPRESSION_MARKER,
+  "  $replayCode = ''",
+  '  $replayMissingSteps = New-Object System.Collections.ArrayList',
+  '  $replayMissingInputs = New-Object System.Collections.ArrayList',
+  '  if ($null -ne $conclusionVerdict) {',
+  '    $replayCode = "$($conclusionVerdict.Code)"',
+  '    foreach ($entry in @($conclusionVerdict.MissingSteps)) { [void]$replayMissingSteps.Add("$($entry.stepId):$($entry.result)") }',
+  '    foreach ($entry in @($conclusionVerdict.MissingInputs)) { [void]$replayMissingInputs.Add("$entry") }',
+  '  }',
+  '  [void]$replayResults.Add([pscustomobject]([ordered]@{',
+  '    id = [string]$replayCase.id',
+  '    conclusion = "$conclusion"',
+  '    code = $replayCode',
+  '    missingSteps = @($replayMissingSteps)',
+  '    missingInputs = @($replayMissingInputs)',
+  '  }))',
+  '}',
+  "[pscustomobject]([ordered]@{ schema = 'conclusion-replay/v1'; results = @($replayResults) }) | ConvertTo-Json -Depth 8",
+].join('\n')
+
+function runConclusionReplay(cases) {
+  const shell = resolvePowerShell()
+  assert.ok(shell, 'PowerShell is required to replay the script\'s own conclusion statement; this is a failure, not a skip')
+  const blocks = ['function Get-RequiredClosedLoopStepIds', 'function Get-AcceptanceConclusion']
+    .map((marker) => extractBalancedBlock(scriptText, marker))
+    .filter((block) => block !== null)
+  const statement = extractConclusionStatement(scriptLines)
+  assert.ok(
+    /CLOSED_LOOP_PASS/.test(`${blocks.join('\n')}\n${statement}`),
+    'the cut-out conclusion code must be the real one (it has to mention CLOSED_LOOP_PASS)',
+  )
+  const harness = [
+    'Set-StrictMode -Version Latest',
+    "$ErrorActionPreference = 'Stop'",
+    ...blocks,
+    CONCLUSION_HARNESS_DRIVER.replace(CONCLUSION_EXPRESSION_MARKER, statement),
+  ].join('\n')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-sql-src-acc-conclusion-'))
+  try {
+    const harnessPath = path.join(dir, 'conclusion-replay.ps1')
+    const statePath = path.join(dir, 'state.json')
+    fs.writeFileSync(harnessPath, Buffer.from(harness, 'ascii'))
+    fs.writeFileSync(statePath, JSON.stringify({ cases }), 'utf8')
+    const args = ['-NoProfile']
+    if (process.platform === 'win32') args.push('-ExecutionPolicy', 'Bypass')
+    args.push('-File', harnessPath, statePath)
+    const run = spawnSync(shell, args, { encoding: 'utf8' })
+    assert.equal(
+      run.status,
+      0,
+      `conclusion replay exited ${run.status}\nharness:\n${harness}\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
+    )
+    let parsed
+    try {
+      parsed = JSON.parse(run.stdout)
+    } catch (error) {
+      assert.fail(`conclusion replay did not print parseable JSON (${error.message})\nstdout:\n${run.stdout}`)
+    }
+    assert.equal(parsed.schema, 'conclusion-replay/v1')
+    return parsed
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const conclusionReplay = runConclusionReplay(CONCLUSION_CASES)
+
+// PS 5.1 serialises a one-element array as a bare scalar; normalise both ways.
+function asArray(value) {
+  if (value === null || value === undefined) return []
+  return Array.isArray(value) ? value : [value]
+}
+
+const replayById = new Map(asArray(conclusionReplay.results).map((entry) => [entry.id, entry]))
+
+function replayOf(id) {
+  const entry = replayById.get(id)
+  assert.ok(entry, `conclusion replay produced no case '${id}' (produced: ${[...replayById.keys()].join(', ')})`)
+  return {
+    conclusion: entry.conclusion,
+    code: entry.code,
+    missingSteps: asArray(entry.missingSteps),
+    missingInputs: asArray(entry.missingInputs),
+  }
+}
+
+test('a run that SKIPPED the front-line dry-run can never conclude CLOSED_LOOP_PASS', () => {
+  const replay = replayOf('dry-run-skipped-no-project-no')
+  assert.notEqual(
+    replay.conclusion,
+    'CLOSED_LOOP_PASS',
+    'STEP6B = SKIP with everything else green is exactly the reviewer\'s counter-example',
+  )
+  assert.equal(replay.conclusion, 'INCOMPLETE')
+  assert.equal(replay.code, 'REQUIRED_STEP_NOT_PASSED')
+  assert.deepEqual(replay.missingSteps, ['STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN:SKIP'])
+  // "incomplete: missing X" — the operator has to be told WHICH input to supply.
+  assert.deepEqual(replay.missingInputs, ['PROJECT_NO'])
+})
+
+test('a run with no operator token reports INCOMPLETE and names the missing input', () => {
+  const replay = replayOf('no-operator-token')
+  assert.equal(replay.conclusion, 'INCOMPLETE')
+  assert.deepEqual(replay.missingSteps, [
+    'STEP6A-OPERATOR-PROJECT-DIRECTORY:SKIP',
+    'STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN:SKIP',
+  ])
+  assert.deepEqual(replay.missingInputs, ['OPERATOR_TOKEN'])
+})
+
+test('CLOSED_LOOP_PASS requires the proven chain AND every required step explicitly PASS', () => {
+  const replay = replayOf('every-required-step-passed-closed-loop')
+  assert.equal(replay.conclusion, 'CLOSED_LOOP_PASS')
+  assert.equal(replay.code, 'ALL_REQUIRED_STEPS_PASSED')
+  assert.deepEqual(replay.missingSteps, [])
+  assert.deepEqual(replay.missingInputs, [])
+})
+
+test('an environment probe is graded by the same required-step list', () => {
+  const clean = replayOf('every-required-step-passed-env-probe')
+  assert.equal(clean.conclusion, 'ENV_PROBE_PASS')
+  assert.equal(clean.code, 'BOUND_TO_PRE_EXISTING_SOURCE')
+  // ENV_PROBE_PASS is not a consolation prize for a run that skipped the step.
+  const skipped = replayOf('env-probe-with-skipped-dry-run')
+  assert.equal(skipped.conclusion, 'INCOMPLETE')
+  assert.deepEqual(skipped.missingSteps, ['STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN:SKIP'])
+})
+
+test('a required step that never ran at all is INCOMPLETE, not a pass', () => {
+  const replay = replayOf('halted-before-the-dry-run')
+  assert.equal(replay.conclusion, 'INCOMPLETE')
+  // NOT_RUN, not SKIP: nothing recorded a decision for that step at all.
+  assert.deepEqual(replay.missingSteps, ['STEP6B-OPERATOR-TABLE-ACTION-DRY-RUN:NOT_RUN'])
+  assert.deepEqual(replay.missingInputs, [])
+})
+
+test('a WARN on a required step is not a PASS', () => {
+  const replay = replayOf('binding-readback-warned')
+  assert.equal(replay.conclusion, 'INCOMPLETE')
+  assert.deepEqual(replay.missingSteps, [
+    'STEP4-ACTION-SOURCE-BINDING:WARN',
+    'STEP4-BOUND-SOURCE-CONNECTION:SKIP',
+  ])
+})
+
+test('a non-zero exit code still concludes FAILED', () => {
+  const replay = replayOf('a-required-step-failed')
+  assert.equal(replay.conclusion, 'FAILED')
+  assert.equal(replay.code, 'EXIT_CODE_NONZERO')
+})
+
+test('the script spells out the closed-loop required steps, and it is the positive chain', () => {
+  const block = extractBalancedBlock(scriptText, 'function Get-RequiredClosedLoopStepIds')
+  assert.ok(block, 'expected a Get-RequiredClosedLoopStepIds function naming the required steps')
+  const ids = (block.match(/'(STEP[A-Z0-9-]+)'/g) || []).map((quoted) => quoted.slice(1, -1))
+  assert.deepEqual(ids, REQUIRED_CLOSED_LOOP_STEPS)
+  // Every one of them must be a step the run can actually record.
+  for (const stepId of ids) {
+    assert.ok(
+      scriptText.includes(`-StepId '${stepId}'`),
+      `${stepId} is required for a closed loop but is never recorded by the script`,
+    )
+  }
+})
+
+// ---------------------------------------------------------------------------
 // STATIC LAYER
 // ---------------------------------------------------------------------------
 
@@ -439,16 +792,49 @@ test('the plan carries the two binding-readback legs that decide the closed-loop
 test('the run concludes CLOSED_LOOP_PASS only when the binding readback proved it', () => {
   assert.match(scriptText, /CLOSED_LOOP_PASS/)
   assert.match(scriptText, /ENV_PROBE_PASS/)
-  // The conclusion is derived from $script:ChainMode, so a non-closed-loop run
-  // cannot print the closed-loop wording.
+  // The conclusion is decided in ONE place, from the step table and the chain
+  // mode together, so no caller can print the closed-loop wording off a
+  // shorter rule of its own.
   assert.match(
     scriptText,
-    /\$script:ChainMode\s+-eq\s+'CLOSED_LOOP'\)\s*\{\s*\r?\n\s*'CLOSED_LOOP_PASS'/,
-    'CLOSED_LOOP_PASS must be gated on $script:ChainMode',
+    /\$conclusionVerdict = Get-AcceptanceConclusion -ExitCode \$script:ExitCode -ChainMode \$script:ChainMode -Steps \$script:Results/,
+    'the printed conclusion must come from Get-AcceptanceConclusion, fed the recorded step table',
+  )
+  assert.match(
+    scriptText,
+    /\$conclusion = \$conclusionVerdict\.Conclusion/,
+    'the printed conclusion must be the verdict that function returned',
+  )
+  assert.match(
+    scriptText,
+    /\$ChainMode -eq 'CLOSED_LOOP'\) \{\s*\r?\n\s*\$conclusion = 'CLOSED_LOOP_PASS'/,
+    'CLOSED_LOOP_PASS must still be gated on the proven chain mode',
   )
   assert.match(scriptText, /NOT A CLOSED LOOP/, 'a non-closed-loop run must say so in as many words')
-  assert.match(scriptText, /closedLoop = \(\$script:ChainMode -eq 'CLOSED_LOOP'\)/, 'the JSON report must carry the claim too')
   assert.match(scriptText, /boundSourceDigest/, 'the pre-existing bound source must be named by digest in the report')
+})
+
+test('an incomplete run says so in the summary and in the report, and never claims closedLoop', () => {
+  // The summary must NAME what did not run; "INCOMPLETE" on its own sends an
+  // operator back to the script to work out which input they forgot.
+  assert.match(scriptText, /if \(\$conclusion -eq 'INCOMPLETE'\) \{/, 'the summary must branch on an INCOMPLETE conclusion')
+  assert.match(scriptText, /MISSING STEP/, 'the summary must list the step ids that did not pass')
+  assert.match(scriptText, /MISSING INPUT/, 'the summary must name the missing input (operator token / project number)')
+  // The report's `closedLoop` flag is the FULL claim now: a run that skipped
+  // the dry-run must not leave `closedLoop: true` behind for a reader that
+  // never looks at the steps array.
+  assert.match(
+    scriptText,
+    /closedLoop = \(\$conclusion -eq 'CLOSED_LOOP_PASS'\)/,
+    'the JSON report flag must follow the conclusion, not the binding comparison alone',
+  )
+  assert.match(scriptText, /conclusionCode = \$conclusionVerdict\.Code/)
+  assert.match(scriptText, /requiredClosedLoopSteps = @\(\$conclusionVerdict\.RequiredSteps\)/)
+  assert.match(scriptText, /missingRequiredSteps = /)
+  assert.match(scriptText, /missingInputs = @\(\$conclusionVerdict\.MissingInputs\)/)
+  // chainMode stays, because it is the only field that says WHICH source
+  // STEP4/STEP6 measured.
+  assert.match(scriptText, /chainMode = \$script:ChainMode/)
 })
 
 test('the acceptance run never rebinds the deployed table action to close its own loop', () => {
