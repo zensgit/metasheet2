@@ -418,7 +418,7 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
     expect(blank.body.error.code).toBe('VALIDATION_ERROR')
   })
 
-  it('scopes credential rotation to the source owner (non-admin denied; admins may — by design)', async () => {
+  it('gates credential rotation on data_sources:rotate AND ownership (admins may — by design)', async () => {
     currentUser = admin('alice')
     pinned.setApp(app)
     await request(pinned.url()).post('/api/data-sources').send({
@@ -428,9 +428,26 @@ describe('data-sources PUT deep-merge (A-RO)', () => {
       options: { autoConnect: false, readOnly: true },
     })
 
-    // bob is a NON-ADMIN holding the global write code: rbacGuard passes, the
-    // manager's ownership scope must still refuse with the uniform 404.
+    // G02 PR-1 — this route's coarse gate is `data_sources:rotate`, EXCLUSIVELY
+    // (src/routes/data-sources.ts:738). bob holding only the global WRITE code no longer reaches
+    // the handler at all: he is refused 403 by rbacGuard before ownership is ever consulted. This
+    // is the fail-closed regression the deployment prerequisite covers — today's `data_sources:write`
+    // holders lose rotation until an administrator grants `data_sources:rotate` through a ROLE.
     currentUser = { id: 'bob', roles: ['member'], permissions: ['data_sources:write'] } as never
+    const coarseDenied = await request(pinned.url())
+      .put('/api/data-sources/rotate-scope/credentials')
+      .send({ credentials: { password: 'bob-password' } })
+    expect(coarseDenied.status).toBe(403)
+
+    // ...and with `rotate` granted, the COARSE door opens while the OWNERSHIP door does not: the
+    // uniform 404 is still the answer on somebody else's source. Keeping this cell (rather than
+    // only the 403 above) is the point — otherwise moving the coarse gate would have silently
+    // deleted this file's only proof that rotation is owner-scoped.
+    currentUser = {
+      id: 'bob',
+      roles: ['member'],
+      permissions: ['data_sources:write', 'data_sources:rotate'],
+    } as never
     const denied = await request(pinned.url())
       .put('/api/data-sources/rotate-scope/credentials')
       .send({ credentials: { password: 'bob-password' } })
