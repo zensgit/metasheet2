@@ -643,6 +643,20 @@ npx vitest run my-apps-landing-view featureFlags.plm.spec.ts --reporter=dot
 # so the three gates do have a referee; mirroring into the two path-filtered guards is follow-up.
 npx vitest run permission-match-parity platform-app-shell platform-app-launcher --reporter=dot
 
+# App Center 失配账本 (G-7 4 的残留, 2026-09-11): ONE more token, and it is NOT a fourth guard - it is
+# the LEDGER of the two off-diagonal cells the visibility filter leaves open, asserted as exact sets:
+#   * visible-but-blocked - card shown, landing route refuses (stock-prep:operate, elearning:grade,
+#     elearning:stats: the entry routes demand a single :read that none of those three codes cover);
+#   * permitted-but-hidden - landing route allows, card filtered away (attendance, after-sales: their
+#     entry routes carry NO permissions key in meta at all, /p/:plugin/:viewId being the ungated
+#     wildcard, while their manifests declare 5 and 4 codes).
+# It is wired here because the go-live gate cites both cells as KNOWN-AND-ACCEPTED; without a referee
+# the cited contents would drift the moment a manifest or a route meta changes, and the doc would
+# silently become a lie. Redness here means "update the 4-residual ledger or get the owner decision",
+# not "a gate broke". Substring collision checked as this file requires: run alone, the token matches
+# exactly ONE file (Test Files 1 passed) and is matched by none of the three tokens above.
+npx vitest run platform-app-entry-mismatch-inventory --reporter=dot
+
 # 审批详情实例一致性 (instance consistency), 2026-09-06: TWO new tokens.
 #   * `approval-detail-instance-consistency` — the mounted ApprovalDetailView + REAL approval store
 #     spec (route switch clears the outgoing instance, write verbs act on the displayed instance,
