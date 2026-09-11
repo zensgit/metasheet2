@@ -536,6 +536,30 @@ export interface MultitableProvisioningAPI {
     hiddenFieldIds: string[]
     config: Record<string, unknown>
   }>
+  /**
+   * READ-ONLY sibling of `ensureView`: does this provisioned view EXIST, and with what shape?
+   * Null when it does not. `getObjectViewId` only COMPOSES an id, so a plugin that deep-links to
+   * one of its own provisioned views had no way to tell a provisioned view from a composed id.
+   *
+   * OPTIONAL on purpose: a plugin newer than its host must degrade ("cannot prove it exists"),
+   * never crash. It grants nothing `ensureView` does not already grant — same project namespace,
+   * same object scope, and an id derived from the caller's own project + object.
+   */
+  findObjectView?(input: {
+    projectId: string
+    objectId: string
+    viewId: string
+  }): Promise<{
+    id: string
+    sheetId: string
+    name: string
+    type: string
+    filterInfo: Record<string, unknown>
+    sortInfo: Record<string, unknown>
+    groupInfo: Record<string, unknown>
+    hiddenFieldIds: string[]
+    config: Record<string, unknown>
+  } | null>
   patchObjectFieldProperty(input: {
     projectId: string
     objectId: string

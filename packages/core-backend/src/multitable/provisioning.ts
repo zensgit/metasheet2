@@ -310,6 +310,32 @@ async function loadActiveView(
   }
 }
 
+export type FindObjectViewInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  viewId: string
+}
+
+/**
+ * READ-ONLY existence/content read for ONE of a provisioned object's views — the read sibling of
+ * `ensureView`, exactly as `getObjectField` is the read sibling of `patchObjectFieldProperty`.
+ *
+ * It exists because `getObjectViewId` is pure id derivation and deliberately says nothing about
+ * whether the view is there, so a caller that wants to DEEP-LINK to a provisioned view had no way
+ * to tell "provisioned" from "composed" and would hand out a link to a view id that resolves to
+ * nothing. Returns null when the view does not exist — the caller decides what to do about it.
+ *
+ * No write, no create, no merge: one SELECT by the deterministic id derived from (projectId,
+ * objectId, viewId), so it can only ever answer about a view whose id the caller could already
+ * compute for itself.
+ */
+export async function findObjectView(
+  input: FindObjectViewInput,
+): Promise<MultitableProvisioningView | null> {
+  return loadActiveView(input.query, getObjectViewId(input.projectId, input.objectId, input.viewId))
+}
+
 export async function createSheet(
   input: EnsureSheetInput,
 ): Promise<CreateSheetResult> {

@@ -10,6 +10,10 @@ const path = require('node:path')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   HUMAN_PRESERVED_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+  assertFillViewContract,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const {
   SANDBOX_FIELD_MAP_MODE,
@@ -21,6 +25,10 @@ const {
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationSandboxTarget,
   repairStockPreparationCanonicalTarget,
+  CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT,
+  ensureStockPreparationFillView,
+  buildStockPreparationFillViewDescriptor,
+  sandboxStockPreparationTemplate,
   assertRepairableFieldOwnership,
   assertSandboxObjectId,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
@@ -260,8 +268,552 @@ async function testInspectExtensionFieldIdsEnforceNamespaceShapeOnly() {
   assert.equal(shapeOnly.ready, true, 'namespace guard is shape-only: pack membership is NOT checked here')
   console.log('  testInspectExtensionFieldIdsEnforceNamespaceShapeOnly OK')
 }
+// ---------------------------------------------------------------------------
+// 备料填写视图 (F1-C) — THE FILL VIEW
+// ---------------------------------------------------------------------------
+//
+// The view 「打开项目备料」 lands on. Four things are pinned here, because each one is a way
+// this could ship looking right and doing nothing:
+//   (1) the STORED ids are PHYSICAL — a view whose hidden/sort/group/filter rules carry LOGICAL
+//       ids hides nothing at all (meta_views rules are compared against meta_fields.id);
+//   (2) the hidden set is exactly the 12 plm_system columns and may never contain a human column;
+//   (3) `default` is NEVER upserted — the host's "a sheet that already has ANY view is left
+//       completely alone" guarantee is what an upsert onto that id would hole; and
+//   (4) both the CREATE path and the REPAIR path actually call it (a guard nobody wires is a
+//       comment), repair being the one that WOULD reach tables that already exist — once anything
+//       calls it, which nothing does yet (see testCanonicalRepairReachabilityIsPinned).
+const FILL_VIEW_PHYSICAL = (fieldId) => `fld_${fieldId}`
+
+// A provisioning fake with the VIEW half of the API: deterministic ids, a tiny meta_views store
+// and a recorder. `ensureObjectDefaultView` behaves like the host primitive it stands for (writes
+// only from zero views, never touches an existing one) so "the default view did not move" is a
+// statement about a STORED ROW, not about a mock's call list.
+// `ensureViewThrows` is either `true` (a plain host error — a scope refusal, a DB hiccup) or an
+// Error INSTANCE, so a test can distinguish host weather from a refusal this plugin raises itself.
+function withViewApi(ctx, { ensureViewThrows = false } = {}) {
+  const provisioning = ctx.context.api.multitable.provisioning
+  const views = new Map()
+  const calls = { ensureView: [], ensureObjectDefaultView: [], getFieldId: [] }
+  provisioning.getFieldId = (projectId, objectId, fieldId) => {
+    calls.getFieldId.push([projectId, objectId, fieldId])
+    return FILL_VIEW_PHYSICAL(fieldId)
+  }
+  provisioning.getObjectViewId = (projectId, objectId, viewId) => `view_${objectId}_${viewId}`
+  provisioning.ensureObjectDefaultView = async (input) => {
+    calls.ensureObjectDefaultView.push(input)
+    if (views.size > 0) return { created: false, viewId: null, existingViewCount: views.size }
+    const id = `view_${input.objectId}_default`
+    views.set(id, {
+      id,
+      name: input.name,
+      type: input.type || 'grid',
+      filterInfo: {},
+      sortInfo: {},
+      groupInfo: {},
+      hiddenFieldIds: [],
+      config: {},
+    })
+    return { created: true, viewId: id, existingViewCount: 0 }
+  }
+  provisioning.ensureView = async (input) => {
+    calls.ensureView.push(input)
+    if (ensureViewThrows) {
+      throw ensureViewThrows instanceof Error ? ensureViewThrows : new Error('mock ensureView refusal (sheet scope)')
+    }
+    const id = `view_${input.descriptor.objectId}_${input.descriptor.id}`
+    const stored = {
+      id,
+      sheetId: input.sheetId,
+      name: input.descriptor.name,
+      type: input.descriptor.type || 'grid',
+      filterInfo: input.descriptor.filterInfo || {},
+      sortInfo: input.descriptor.sortInfo || {},
+      groupInfo: input.descriptor.groupInfo || {},
+      hiddenFieldIds: input.descriptor.hiddenFieldIds || [],
+      config: input.descriptor.config || {},
+    }
+    views.set(id, stored)
+    return stored
+  }
+  return { provisioning, views, viewCalls: calls }
+}
+
+async function testFillViewDescriptorIsPhysicalAndValuesFree() {
+  const provisioning = { getFieldId: (projectId, objectId, fieldId) => FILL_VIEW_PHYSICAL(fieldId) }
+  const descriptor = buildStockPreparationFillViewDescriptor({
+    provisioning,
+    projectId: 'proj_x',
+    objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    locale: 'zh-CN',
+  })
+
+  // (1) its own id, and NOT the default view's.
+  assert.equal(descriptor.id, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID)
+  assert.equal(descriptor.id, 'prep-fill')
+  assert.notEqual(descriptor.id, STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID)
+  assert.equal(descriptor.name, '备料填写视图')
+  assert.equal(
+    buildStockPreparationFillViewDescriptor({ provisioning, projectId: 'proj_x', objectId: 'o', locale: 'en' }).name,
+    'Stock Preparation Fill',
+  )
+
+  // (2) LOGICAL -> PHYSICAL on every stored id. The negative half is the one that matters: not a
+  //     single bare logical id survives into the stored shape, which is what silently hides nothing.
+  assert.deepEqual(descriptor.hiddenFieldIds, STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS.map(FILL_VIEW_PHYSICAL))
+  assert.equal(descriptor.hiddenFieldIds.length, 12, 'the customer named 12 system columns')
+  const logicalIds = new Set(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id))
+  const storedIds = [
+    ...descriptor.hiddenFieldIds,
+    ...descriptor.sortInfo.rules.map((rule) => rule.fieldId),
+    ...descriptor.groupInfo.fieldIds,
+    descriptor.groupInfo.fieldId,
+    ...descriptor.filterInfo.conditions.map((condition) => condition.fieldId),
+  ]
+  for (const id of storedIds) {
+    assert.equal(logicalIds.has(id), false, `stored view ids must be physical, found logical: ${id}`)
+    assert.equal(id.startsWith('fld_'), true)
+  }
+
+  // (3) 按父组件分组、组内按图号排序 — ascending, explicit, and BOTH group shapes (the grid reads
+  //     the ordered `fieldIds`; other view kinds still read the legacy single `fieldId`).
+  assert.deepEqual(descriptor.sortInfo, {
+    rules: [
+      { fieldId: FILL_VIEW_PHYSICAL('parentComponentCode'), desc: false },
+      { fieldId: FILL_VIEW_PHYSICAL('componentCode'), desc: false },
+    ],
+  })
+  assert.deepEqual(descriptor.groupInfo, {
+    fieldIds: [FILL_VIEW_PHYSICAL('parentComponentCode')],
+    fieldId: FILL_VIEW_PHYSICAL('parentComponentCode'),
+  })
+
+  // (4) 有效 only — a refresh MARKS rows inactive rather than deleting them.
+  assert.deepEqual(descriptor.filterInfo, {
+    conjunction: 'and',
+    conditions: [{ fieldId: FILL_VIEW_PHYSICAL('active'), operator: 'is', value: true }],
+  })
+
+  // (5) values-free provenance: counts and booleans, no customer row value anywhere.
+  assert.deepEqual(descriptor.config.stockPreparation.fillView, {
+    logicalId: 'prep-fill',
+    hiddenFieldCount: 12,
+    sortFieldCount: 2,
+    groupFieldCount: 1,
+    filtersActiveOnly: true,
+  })
+  console.log('  testFillViewDescriptorIsPhysicalAndValuesFree OK')
+}
+
+async function testFillViewContractCannotHideAHumanColumn() {
+  // The shipped contract agrees with the frozen template: every hidden id is a plm_system column,
+  // and not one of them is in the human band a person fills.
+  const ownershipById = new Map(STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((f) => [f.id, f.ownership]))
+  for (const fieldId of STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS) {
+    assert.equal(ownershipById.get(fieldId), 'plm_system', `${fieldId} must be a plm_system column`)
+    assert.equal(HUMAN_PRESERVED_FIELD_IDS.includes(fieldId), false, `${fieldId} must not be human-owned`)
+  }
+  assert.equal(assertFillViewContract(), true, 'the shipped contract checks out')
+
+  // Each way of getting it wrong is refused, so the check is a wall and not a formality.
+  const humanId = HUMAN_PRESERVED_FIELD_IDS[0]
+  assert.throws(() => assertFillViewContract({ hiddenFieldIds: [humanId] }), /only hide plm_system columns/)
+  assert.throws(() => assertFillViewContract({ hiddenFieldIds: ['noSuchColumn'] }), /hides an unknown field/)
+  assert.throws(
+    () => assertFillViewContract({ hiddenFieldIds: ['parentComponentCode'] }),
+    /cannot sort or group by a column it hides/,
+  )
+  assert.throws(() => assertFillViewContract({ sortFieldIds: ['noSuchColumn'] }), /orders by an unknown field/)
+  // THE ONE THAT PROTECTS THE DEFAULT VIEW at the constants layer.
+  assert.throws(() => assertFillViewContract({ fillViewLogicalId: 'default' }), /must not be the default view/)
+  console.log('  testFillViewContractCannotHideAHumanColumn OK')
+}
+
+async function testCreatePathProvisionsTheFillViewAndLeavesDefaultAlone() {
+  const ctx = createContext({ sheetExists: false })
+  const { views, viewCalls } = withViewApi(ctx)
+  const result = await ensureStockPreparationCanonicalTarget({
+    context: ctx.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+    locale: 'zh-CN',
+  })
+  assert.equal(result.mode, 'canonical_create')
+  assert.equal(result.fillView.created, true)
+  assert.equal(result.fillView.hiddenFieldCount, 12)
+
+  // It was sent to the SHEET THIS CALL CREATED, under the plugin's own view id.
+  assert.equal(viewCalls.ensureView.length, 1)
+  assert.equal(viewCalls.ensureView[0].sheetId, 'sheet_created_stock_target')
+  assert.equal(viewCalls.ensureView[0].descriptor.id, 'prep-fill')
+
+  // THE DEFAULT VIEW DID NOT MOVE. Not "was not called with" — the STORED ROW is byte-identical to
+  // the one `ensureObjectDefaultView` wrote, so an upsert onto `default` fails right here.
+  const defaultId = `view_${STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId}_default`
+  const defaultAfter = views.get(defaultId)
+  assert.ok(defaultAfter, 'the default view exists')
+  assert.equal(
+    JSON.stringify(defaultAfter),
+    JSON.stringify({
+      id: defaultId,
+      name: '全部记录',
+      type: 'grid',
+      filterInfo: {},
+      sortInfo: {},
+      groupInfo: {},
+      hiddenFieldIds: [],
+      config: {},
+    }),
+    'the default view must be byte-identical to what the default-view primitive wrote',
+  )
+  for (const call of viewCalls.ensureView) {
+    assert.notEqual(call.descriptor.id, 'default', 'ensureView must never be pointed at the default view id')
+  }
+  console.log('  testCreatePathProvisionsTheFillViewAndLeavesDefaultAlone OK')
+}
+
+async function testRepairHealsTheFillViewOnAnExistingTable() {
+  // The heal path as WRITTEN: the table already exists (so `ensure` returns without writing) and
+  // repair is the verb that would give an EXISTING deployment the view. This test proves the verb's
+  // BODY, not its reachability — nothing calls it in production today, which is pinned separately by
+  // testCanonicalRepairReachabilityIsPinned. Read together: the heal is ready, the entry is not.
+  const ctx = createContext({ sheetExists: true, missingFields: ['depth'] })
+  const { views, viewCalls } = withViewApi(ctx)
+  // A default view the deployment already hand-tuned — repair must not touch it.
+  const defaultId = `view_${STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId}_default`
+  const handTuned = {
+    id: defaultId,
+    name: '操作员自己调过的视图',
+    type: 'grid',
+    filterInfo: {},
+    sortInfo: { rules: [{ fieldId: 'fld_componentName', desc: true }] },
+    groupInfo: {},
+    hiddenFieldIds: ['fld_notes'],
+    config: {},
+  }
+  views.set(defaultId, handTuned)
+  const before = JSON.stringify(handTuned)
+
+  const result = await repairStockPreparationCanonicalTarget({
+    context: ctx.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+    locale: 'zh-CN',
+  })
+  assert.equal(result.mode, 'canonical_repaired')
+  assert.equal(result.fillView.created, true)
+  assert.equal(result.evidence.fillViewCreated, true)
+  assert.equal(result.evidence.fillViewSkipped, null)
+
+  const fill = views.get(`view_${STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId}_prep-fill`)
+  assert.ok(fill, 'repair created the fill view')
+  assert.equal(fill.sheetId, 'sheet_private_stock_target', 'the fill view is attached to the sheet repair proved exists')
+  assert.equal(fill.hiddenFieldIds.length, 12)
+  assert.equal(fill.name, '备料填写视图')
+  assert.equal(JSON.stringify(views.get(defaultId)), before, 'the hand-tuned default view is byte-identical after repair')
+  for (const call of viewCalls.ensureView) {
+    assert.notEqual(call.descriptor.id, 'default', 'repair must never upsert the default view')
+  }
+  console.log('  testRepairHealsTheFillViewOnAnExistingTable OK')
+}
+
+async function testCreateLegReportsTheFillViewOutcomeAndNeverLosesTheTable() {
+  // WHY THIS EXISTS (review blocker, 2026-09-11). The create leg is the ONLY reachable leg of this
+  // feature, and it used to be the only one that could neither report nor survive a fill-view
+  // failure: the outcome lived on `result.fillView`, which the plugin's HTTP projection drops
+  // (publicStockPreparationTargetResult returns ready/mode/targetBinding/evidence only), and a
+  // throwing `ensureView` took the whole ensure down AFTER the table had been committed. Re-running
+  // ensure then takes the already-ready leg — ready:true, no view, forever, with no reachable repair
+  // verb. So: the outcome rides the EVIDENCE, and a host failure degrades.
+
+  // (a) The happy path reports itself where an admin can actually see it.
+  const ok = createContext({ sheetExists: false })
+  withViewApi(ok)
+  const created = await ensureStockPreparationCanonicalTarget({
+    context: ok.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+    locale: 'zh-CN',
+  })
+  assert.equal(created.evidence.fillViewCreated, true, 'the fill view outcome is in the evidence, not only on a dropped key')
+  assert.equal(created.evidence.fillViewSkipped, null)
+
+  // (b) The host REFUSES the view write on the table this very call created. The table is already
+  //     committed, so the create stays successful and the refusal is reported.
+  const refusing = createContext({ sheetExists: false })
+  const { views, viewCalls } = withViewApi(refusing, { ensureViewThrows: true })
+  const degraded = await ensureStockPreparationCanonicalTarget({
+    context: refusing.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+    locale: 'zh-CN',
+  })
+  assert.equal(degraded.ready, true, 'a committed table must not be reported as a failed ensure over a display view')
+  assert.equal(degraded.mode, 'canonical_create')
+  assert.equal(degraded.fillView.skipped, 'ensure_failed')
+  assert.equal(degraded.evidence.fillViewCreated, false)
+  assert.equal(degraded.evidence.fillViewSkipped, 'ensure_failed', 'the admin can tell the view is missing')
+  assert.ok(degraded.target && degraded.target.sheetId, 'the binding of the committed table still travels out')
+  // The default view of that same table was still created, and the failed fill view left no row.
+  const defaultId = `view_${STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId}_default`
+  assert.ok(views.get(defaultId), 'the default view the create leg writes is unaffected')
+  assert.equal(views.has(`view_${STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId}_prep-fill`), false)
+  for (const call of viewCalls.ensureView) {
+    assert.notEqual(call.descriptor.id, 'default', 'and the failure path still never points ensureView at the default view')
+  }
+
+  // (c) An older host with no view API at all: same shape, different reason code — the create leg
+  //     provisions exactly as it did before this feature and says so.
+  const oldHost = createContext({ sheetExists: false })
+  const legacy = await ensureStockPreparationCanonicalTarget({
+    context: oldHost.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+  })
+  assert.equal(legacy.ready, true)
+  assert.equal(legacy.evidence.fillViewCreated, false)
+  assert.equal(legacy.evidence.fillViewSkipped, 'api_unavailable')
+
+  // (d) THE ONE FAILURE THAT IS NOT DEGRADED. A StockPreparationTargetProvisioningError out of the
+  //     fill-view helper is this module's OWN refusal — above all FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT,
+  //     the guard that keeps this feature off a deployment's default view. Demoting that to
+  //     `skipped: 'ensure_failed'` would turn the loudest guard in the file into a quiet evidence key,
+  //     so it travels out of BOTH legs as the error it is.
+  const refusalError = new StockPreparationTargetProvisioningError(
+    409,
+    'FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT',
+    'the stock-preparation fill view may never be upserted onto the default view id',
+    { objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId },
+  )
+  const refusedCreate = createContext({ sheetExists: false })
+  withViewApi(refusedCreate, { ensureViewThrows: refusalError })
+  await assert.rejects(
+    () => ensureStockPreparationCanonicalTarget({ context: refusedCreate.context, projectId: 'proj_x', permission: 'admin' }),
+    (error) => error.code === 'FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT',
+    'the create leg must not swallow this module\'s own refusal',
+  )
+  const refusedRepair = createContext({ sheetExists: true, missingFields: ['depth'] })
+  withViewApi(refusedRepair, { ensureViewThrows: refusalError })
+  await assert.rejects(
+    () => repairStockPreparationCanonicalTarget({ context: refusedRepair.context, projectId: 'proj_x', permission: 'admin' }),
+    (error) => error.code === 'FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT',
+    'and neither may the repair leg',
+  )
+  console.log('  testCreateLegReportsTheFillViewOutcomeAndNeverLosesTheTable OK')
+}
+
+async function testFillViewDegradesWithoutFailingTheRepair() {
+  // (a) An older host with no view API at all: provisioning is unchanged from today, and the
+  //     evidence says which leg ran rather than claiming a view that does not exist.
+  const oldHost = createContext({ sheetExists: true, missingFields: ['depth'] })
+  const oldResult = await repairStockPreparationCanonicalTarget({
+    context: oldHost.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+  })
+  assert.equal(oldResult.ready, true)
+  assert.equal(oldResult.fillView.created, false)
+  assert.equal(oldResult.fillView.skipped, 'api_unavailable')
+  assert.equal(oldResult.evidence.fillViewCreated, false)
+  assert.equal(oldResult.evidence.fillViewSkipped, 'api_unavailable')
+
+  // (b) A host that REFUSES the write (an unclaimed sheet fails the scope assertion): the schema
+  //     repair is already committed, so it stays successful and the refusal is REPORTED, not
+  //     swallowed — re-running repair after the registry is fixed creates the view.
+  const refusing = createContext({ sheetExists: true, missingFields: ['depth'] })
+  withViewApi(refusing, { ensureViewThrows: true })
+  const refusedResult = await repairStockPreparationCanonicalTarget({
+    context: refusing.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+  })
+  assert.equal(refusedResult.ready, true)
+  assert.equal(refusedResult.mode, 'canonical_repaired')
+  assert.equal(refusedResult.fillView.skipped, 'ensure_failed')
+  assert.equal(refusedResult.evidence.fillViewCreated, false)
+  assert.equal(refusedResult.evidence.fillViewSkipped, 'ensure_failed')
+
+  // (c) The helper's own degrade legs, addressed directly: no view API, and a caller that cannot
+  //     name a sheet. Neither may invent a view, and neither may throw.
+  const noApi = await ensureStockPreparationFillView({
+    provisioning: {},
+    projectId: 'proj_x',
+    objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    sheetId: 'sheet_private_stock_target',
+  })
+  assert.deepEqual(noApi, { created: false, skipped: 'api_unavailable', viewId: null })
+  const noSheet = await ensureStockPreparationFillView({
+    provisioning: { ensureView: async () => { throw new Error('must not be reached') }, getFieldId: (p, o, f) => f },
+    projectId: 'proj_x',
+    objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    sheetId: '',
+  })
+  assert.deepEqual(noSheet, { created: false, skipped: 'sheet_unknown', viewId: null })
+
+  // (d) A TABLE THAT DOES NOT HAVE THE COLUMNS. `ensure` accepts a CALLER's template for a fresh
+  //     table, and this view's rules are the FROZEN template's ids — so a template missing any of
+  //     them is skipped and REPORTED rather than given a view full of ids that address nothing.
+  let reached = false
+  const strippedTemplate = {
+    ...STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+    fields: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.filter((field) => field.id !== 'parentComponentCode'),
+  }
+  const mismatch = await ensureStockPreparationFillView({
+    provisioning: { ensureView: async () => { reached = true; return {} }, getFieldId: (p2, o, f) => f },
+    projectId: 'proj_x',
+    objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    sheetId: 'sheet_private_stock_target',
+    template: strippedTemplate,
+  })
+  assert.deepEqual(mismatch, { created: false, skipped: 'template_mismatch', viewId: null })
+  assert.equal(reached, false, 'a template without the columns never reaches the view write')
+  // The SANDBOX template carries the same field ids under a different objectId, so it passes.
+  const sandboxOk = await ensureStockPreparationFillView({
+    provisioning: { ensureView: async (input) => ({ id: `view_${input.descriptor.id}` }), getFieldId: (p2, o, f) => `fld_${f}` },
+    projectId: 'proj_x',
+    objectId: 'plm_stock_preparation_sandbox_trial',
+    sheetId: 'sheet_sandbox',
+    template: sandboxStockPreparationTemplate({ objectId: 'plm_stock_preparation_sandbox_trial' }),
+  })
+  assert.equal(sandboxOk.created, true)
+  console.log('  testFillViewDegradesWithoutFailingTheRepair OK')
+}
+
+
+// ---------------------------------------------------------------------------
+// THE REACHABILITY TRIPWIRE (review blocker, 2026-09-11). The first cut of this change shipped the
+// sentence "an existing deployment runs the canonical repair verb once and gets the fill view".
+// It was FALSE: the verb has no HTTP route and no production caller anywhere in the plugin, so on
+// a customer box the 「打开项目备料」 deep link still lands on the 33-column default view. A claim
+// about WIRING cannot be held down by prose in a PR body, so it is pinned to the wiring here.
+//
+// THE SCAN DOMAIN IS THE CLAIM'S DOMAIN. This started out walking `lib/` only, which is SMALLER than
+// what the constant asserts ("no production entry anywhere"): the plugin's real entry file
+// (index.cjs, where adapters and stores get registered) sits one level ABOVE lib/, and so do
+// scripts/ops/*.cjs and every core-backend module that can require this lib — wiring the verb into
+// any of them left the constant at false and this test green. So the walk starts at the REPO ROOT.
+//
+// Test files are REFERENCES, NOT CALLERS (several suites drive the verb on purpose, and one
+// core-backend integration test does too), so they are counted separately and reported rather than
+// pinning the constant. KNOWN BLIND SPOTS, stated instead of implied: a caller that builds the name
+// dynamically (`api['repair' + 'StockPreparationCanonicalTarget']`), a caller outside this
+// repository, and a file type outside the extension list below. Nothing here can see those.
+//
+// The tree is scanned for anything that CALLS or REFERENCES the repair verb outside its own
+// definition/export, and the verdict must equal the exported constant. BOTH directions fail:
+//   - constant false + a route or caller appears => you wired it: flip the constant and update the
+//     operator-facing wording in the same change;
+//   - constant true + nothing calls it           => the claim is unearned.
+// Comment lines are not callers (four files discuss the verb in prose), and the token itself is
+// proved against the real definition so a rename cannot make the scan vacuously green.
+async function testCanonicalRepairReachabilityIsPinned() {
+  const fs = require('node:fs')
+  const TOKEN = 'repairStockPreparationCanonicalTarget'
+  const libDir = path.join(__dirname, '..', 'lib')
+  const DEFINING_FILE = 'stock-preparation-target-provisioning.cjs'
+  assert.ok(
+    fs.readFileSync(path.join(libDir, DEFINING_FILE), 'utf8').includes(`async function ${TOKEN}(`),
+    'the scanned token must name the real verb (a rename must not make this test vacuous)',
+  )
+
+  // The repo root, PROVED rather than assumed — a walk that silently started somewhere else (a
+  // packaged copy of the plugin, a moved suite) would go quietly vacuous, which is the failure mode
+  // this whole test exists to prevent.
+  const repoRoot = path.join(__dirname, '..', '..', '..')
+  assert.ok(fs.existsSync(path.join(repoRoot, 'pnpm-workspace.yaml')), 'the scan must start at the repo root')
+  const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.turbo', '.vite', 'out', 'artifacts'])
+  const SCANNED_EXT = /\.(cjs|js|mjs|ts|tsx|vue|sh|ps1)$/
+  const posix = (file) => path.relative(repoRoot, file).split(path.sep).join('/')
+  const files = []
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name)) continue
+        walk(full)
+      } else if (SCANNED_EXT.test(entry.name)) files.push(full)
+    }
+  }
+  walk(repoRoot)
+  const scanned = new Set(files.map(posix))
+  assert.ok(files.length > 1000, 'the scan must actually see the repo tree')
+  // The four places a future entry would most plausibly be wired. Each is asserted to be IN SCOPE,
+  // so shrinking the walk back to a subtree fails here rather than going quietly green.
+  for (const mustSee of [
+    'plugins/plugin-integration-core/index.cjs',
+    'plugins/plugin-integration-core/lib/http-routes.cjs',
+    'packages/core-backend/src/index.ts',
+    'scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs',
+  ]) {
+    assert.ok(scanned.has(mustSee), `${mustSee} must be in scan scope`)
+  }
+
+  const isTestFile = (file) => {
+    const segments = path.relative(repoRoot, file).split(path.sep)
+    return segments.some((segment) => segment === '__tests__' || segment === 'tests' || segment === 'test' || segment === 'e2e')
+      || /\.(test|spec)\./.test(path.basename(file))
+  }
+  const callers = []
+  const testReferences = []
+  for (const file of files) {
+    const isDefining = posix(file) === `plugins/plugin-integration-core/lib/${DEFINING_FILE}`
+    let content
+    try {
+      content = fs.readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    if (!content.includes(TOKEN)) continue
+    content.split('\n').forEach((line, index) => {
+      const trimmed = line.trim()
+      // Prose about the verb is not a caller.
+      if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('#')) return
+      if (!line.includes(TOKEN)) return
+      // Its own definition and its own export entry are not callers either.
+      if (isDefining && (trimmed.startsWith(`async function ${TOKEN}(`) || trimmed === `${TOKEN},`)) return
+      ;(isTestFile(file) ? testReferences : callers).push(`${posix(file)}:${index + 1}`)
+    })
+  }
+  // The verb IS driven by tests — that is how its body is proved — so a scan that found nothing at
+  // all would mean the token stopped matching reality and every verdict below would be vacuous.
+  assert.ok(testReferences.length > 0, 'the scan must still see the suites that drive the verb')
+  assert.equal(
+    callers.length > 0,
+    CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT,
+    `CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT says ${CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT} but the repo says ${callers.length > 0}`
+      + ` (references: ${callers.join(', ') || 'none'}). Flip the constant in the SAME change that exposes or removes the entry,`
+      + ' and fix the operator-facing sentence about how an EXISTING 备料主表 obtains the 备料填写视图.',
+  )
+
+  // THE CONSEQUENCE, EXECUTABLE. What every existing deployment has is an ALREADY-READY table, and
+  // that leg of `ensure` returns before any write — so "this cut only gives NEW tables the fill
+  // view" is a tested fact rather than a hedge in the PR body. It is also the guard that would
+  // catch someone "fixing" this blocker by teaching the ready leg to write views, which is exactly
+  // the 「已存在即拒」 semantic this change is not allowed to weaken.
+  const readyCtx = createContext({ sheetExists: true, missingFields: [] })
+  const { views, viewCalls } = withViewApi(readyCtx)
+  const ready = await ensureStockPreparationCanonicalTarget({
+    context: readyCtx.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+  })
+  assert.equal(ready.ready, true)
+  assert.equal(ready.mode, 'canonical_existing', 'an existing table takes the already-ready leg')
+  assert.equal(ready.fillView, undefined, 'the already-ready leg reports no fill view because it writes none')
+  assert.equal(viewCalls.ensureView.length, 0, 'ensure must not upsert a view onto a table it did not create')
+  assert.equal(viewCalls.ensureObjectDefaultView.length, 0, 'nor a default view')
+  assert.equal(views.size, 0, 'no view row exists after ensure on an existing table')
+  console.log('  testCanonicalRepairReachabilityIsPinned OK')
+}
 
 async function main() {
+  await testCanonicalRepairReachabilityIsPinned()
+  await testFillViewDescriptorIsPhysicalAndValuesFree()
+  await testFillViewContractCannotHideAHumanColumn()
+  await testCreatePathProvisionsTheFillViewAndLeavesDefaultAlone()
+  await testCreateLegReportsTheFillViewOutcomeAndNeverLosesTheTable()
+  await testRepairHealsTheFillViewOnAnExistingTable()
+  await testFillViewDegradesWithoutFailingTheRepair()
   await testSandboxNamespaceRefusalNamesTheNamespace()
   await testInspectExtensionFieldIdsEnforceNamespaceShapeOnly()
   // Descriptor is manifest-derived, schema-only, and carries no rows/customer content.

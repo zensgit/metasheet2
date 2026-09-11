@@ -88,6 +88,7 @@ import {
   ensureObjectDefaultView as ensureMultitableObjectDefaultView,
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
+  findObjectView as findProvisionedObjectView,
   runObjectFieldsRepairTransactionWith,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
@@ -976,6 +977,19 @@ export class MetaSheetServer {
                 propertyPatch,
               })
             })
+          },
+          findObjectView: async ({ projectId, objectId, viewId }) => {
+            // Read-only — a plain pooled query (no transaction needed for a SELECT), the read
+            // sibling of `ensureView` above.
+            const readQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+              const result = await poolManager.get().query(sql, params)
+              return {
+                rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                  ? (result as { rows: unknown[] }).rows
+                  : [],
+              }
+            }
+            return findProvisionedObjectView({ query: readQuery, projectId, objectId, viewId })
           },
           getObjectField: async ({ projectId, objectId, fieldId }) => {
             // Read-only — a plain pooled query (no transaction needed for a SELECT).

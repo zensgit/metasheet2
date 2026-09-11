@@ -299,6 +299,57 @@ const VALID_ACTION_TYPES = new Set<string>([
   ...ALL_ACTION_TYPES,
 ])
 const CANONICAL_ACTION_TYPES = new Set<string>(ALL_ACTION_TYPES)
+
+/**
+ * F9 legacy alias normalization. `notify` / `update_field` are v0 action types: the save layer and the
+ * DB CHECK still accept them, but the executor dispatch has NO case for either — they fall through to
+ * `default` and fail with `Unknown action type: notify` on EVERY trigger (automation-executor.ts).
+ *
+ * Fold them onto the canonical actions instead:
+ *   notify       -> send_notification { userIds: existing ?? [], message }
+ *   update_field -> update_record     { fields: { [fieldId]: value } }
+ *
+ * `update_field` WITHOUT a usable fieldId is deliberately left untouched: guessing a target field is
+ * worse than the explicit failure. Empty `userIds` is likewise NOT defaulted to the rule creator — it
+ * stays an explicit, actionable failure (same call as the button route's NO_RECIPIENTS).
+ */
+export function normalizeLegacyActionPair(
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+): { actionType: string; actionConfig: Record<string, unknown>; changed: boolean } {
+  const config = (actionConfig ?? {}) as Record<string, unknown>
+  // A config that is not a plain object (e.g. an unparsed JSON string from a hand-edited row) is left
+  // VERBATIM: renaming the action while dropping its configuration would lose the author's intent.
+  if (!isRecord(config)) return { actionType, actionConfig: config, changed: false }
+  if (actionType === 'notify') {
+    const userIds = Array.isArray(config.userIds)
+      ? config.userIds.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+      : []
+    return { actionType: 'send_notification', actionConfig: { ...config, userIds }, changed: true }
+  }
+  if (actionType === 'update_field') {
+    const fieldId = typeof config.fieldId === 'string' ? config.fieldId.trim() : ''
+    if (!fieldId) return { actionType, actionConfig: config, changed: false }
+    const existingFields = isRecord(config.fields) ? config.fields : {}
+    return {
+      actionType: 'update_record',
+      actionConfig: { ...config, fields: { ...existingFields, [fieldId]: config.value ?? null } },
+      changed: true,
+    }
+  }
+  return { actionType, actionConfig: config, changed: false }
+}
+
+/** F9: the AutomationAction-shaped wrapper of normalizeLegacyActionPair (executor read path). */
+function normalizeLegacyAction(action: AutomationAction): AutomationAction {
+  const normalized = normalizeLegacyActionPair(
+    action?.type as string,
+    action?.config as Record<string, unknown> | null,
+  )
+  if (!normalized.changed) return action
+  return { ...action, type: normalized.actionType as AutomationAction['type'], config: normalized.actionConfig }
+}
+
 const SAFE_BRANCH_KEY = /^[A-Za-z0-9_-]{1,64}$/
 const PARALLEL_BRANCH_ACTION_TYPES = new Set(['update_record', 'send_notification'])
 const MAX_PARALLEL_BRANCHES = 10
@@ -873,9 +924,15 @@ export function toExecutorRule(rule: AutomationRule): ExecutorRule {
 
   // V1 rules can have multiple actions via the `actions` column,
   // or fall back to single action from legacy columns.
-  const actions: AutomationAction[] = rule.actions && rule.actions.length > 0
+  //
+  // F9: every stored action passes through normalizeLegacyAction here — this transform is the ONE
+  // chokepoint every execution path shares (handleEvent / testRun / retry / resume / scheduler all call
+  // toExecutorRule), so a stored `notify` row stops hitting the dispatch `default` branch on read,
+  // without any data migration. Save-time normalization (createRule/updateRule) keeps NEW rows canonical.
+  const actions: AutomationAction[] = (rule.actions && rule.actions.length > 0
     ? rule.actions
     : [{ type: rule.action_type as AutomationAction['type'], config: rule.action_config ?? {} }]
+  ).map(normalizeLegacyAction)
 
   return {
     id: rule.id,
@@ -1135,6 +1192,14 @@ export class AutomationService {
     if (!VALID_ACTION_TYPES.has(input.actionType)) {
       throw new AutomationRuleValidationError(`Invalid action_type: ${input.actionType}`)
     }
+    // F9: fold a v0 alias (notify / update_field) onto its canonical (type, config) pair BEFORE any
+    // validation or persistence, so a legacy-shaped create from an older client is STORED canonical and
+    // never reaches the executor's `default` branch. LEGACY_ACTION_TYPES stays inside VALID_ACTION_TYPES
+    // for input compatibility only — no new row is written with a legacy value any more.
+    const legacyNormalizedInput = normalizeLegacyActionPair(input.actionType, input.actionConfig ?? null)
+    if (legacyNormalizedInput.changed) {
+      input = { ...input, actionType: legacyNormalizedInput.actionType, actionConfig: legacyNormalizedInput.actionConfig }
+    }
     const ruleId = `atr_${randomUUID()}`
     const now = new Date().toISOString()
     const normalizedDingTalkInputs = normalizeDingTalkAutomationActionInputs(
@@ -1321,6 +1386,10 @@ export class AutomationService {
     let normalizedActionConfigForUpdate: Record<string, unknown> | undefined
     let normalizedActionsForUpdate: AutomationAction[] | null | undefined
     let normalizedExecutionModeForUpdate: string | null | undefined
+    // F9: set when the MERGED (incoming ?? stored) action pair was a v0 alias — both columns are then
+    // rewritten together below, even if the caller only sent one of them.
+    let legacyActionTypeRewrite: string | undefined
+    let legacyActionConfigRewrite: Record<string, unknown> | undefined
     // T1-3: reuse the rule row already fetched by the action/trigger validation blocks below so the
     // approval.completed resulting-shape check does NOT add a getRule call for those input shapes
     // (unit tests mock getRule as a strict response queue — an extra fetch drains it and regresses
@@ -1332,8 +1401,15 @@ export class AutomationService {
       existingRuleSnapshot = existing
       if (!existing || existing.sheet_id !== sheetId) return null
 
-      const nextActionType = input.actionType ?? existing.action_type
-      const nextActionConfig = input.actionConfig ?? existing.action_config
+      // F9: normalize the merged pair FIRST so every validator below (and the persisted row) sees the
+      // canonical action. `update_field` without a fieldId is left alone by the normalizer and keeps
+      // failing explicitly rather than being rewritten into an update_record with no target.
+      const legacyNormalizedUpdate = normalizeLegacyActionPair(
+        input.actionType ?? existing.action_type,
+        (input.actionConfig ?? existing.action_config) as Record<string, unknown> | null,
+      )
+      const nextActionType = legacyNormalizedUpdate.actionType
+      const nextActionConfig = legacyNormalizedUpdate.actionConfig
       const nextActions = input.actions !== undefined ? input.actions : existing.actions ?? null
       const nextExecutionMode = input.executionMode !== undefined
         ? normalizeExecutionMode(input.executionMode)
@@ -1384,6 +1460,10 @@ export class AutomationService {
       )
       if (linkValidationError) throw new AutomationRuleValidationError(linkValidationError)
 
+      if (legacyNormalizedUpdate.changed) {
+        legacyActionTypeRewrite = nextActionType
+        legacyActionConfigRewrite = normalizedNextActionConfig
+      }
       if (input.actionConfig !== undefined) normalizedActionConfigForUpdate = normalizedNextActionConfig
       if (input.actions !== undefined) normalizedActionsForUpdate = Array.isArray(input.actions) ? normalizedNextActions : null
       if (input.executionMode !== undefined) normalizedExecutionModeForUpdate = nextExecutionMode
@@ -1394,6 +1474,13 @@ export class AutomationService {
     if (input.triggerConfig !== undefined) updates.trigger_config = JSON.stringify(input.triggerConfig)
     if (input.actionType !== undefined) updates.action_type = input.actionType
     if (input.actionConfig !== undefined) updates.action_config = JSON.stringify(normalizedActionConfigForUpdate ?? input.actionConfig)
+    if (legacyActionTypeRewrite !== undefined) {
+      // F9: rewrite BOTH columns. Writing only the canonical type would leave the v0 config shape
+      // ({fieldId,value}) under update_record, which toExecutorRule can no longer repair (a canonical
+      // type is not normalized on read).
+      updates.action_type = legacyActionTypeRewrite
+      updates.action_config = JSON.stringify(legacyActionConfigRewrite ?? {})
+    }
     if (input.enabled !== undefined) updates.enabled = input.enabled
     if (input.conditions !== undefined) updates.conditions = input.conditions ? JSON.stringify(input.conditions) : null
     if (input.actions !== undefined) updates.actions = normalizedActionsForUpdate ? JSON.stringify(normalizedActionsForUpdate) : null

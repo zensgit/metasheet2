@@ -146,6 +146,18 @@ const EXPORT_SOURCE_FIELD_IDS = Object.freeze([
 // Resolved alongside the projected columns for filtering/scoping ONLY — never projected into a cell.
 const SCOPE_FIELD_IDS = Object.freeze(['projectNo', 'active'])
 
+// Resolved alongside the projected columns for ORDERING ONLY — never projected into a cell, never
+// reported as an unresolved column (they are not columns: an unbound one costs a tiebreak, not a
+// blank cell the reader would go looking for). See sortExportRows for what each one does.
+//
+// `componentSortNo` is deliberately a key for a column that DOES NOT EXIST YET: the frozen main
+// template carries no 明细排序号 (the PLM 明细栏 `sort_id` is read by the expander —
+// stock-preparation-bom-expansion.cjs `sortLine` — and has nowhere to land), and adding it is an
+// owner-gated template change. Keying it now means the day that column ships the workbook follows
+// the customer's own 明细栏 sequence with no second edit here; until then every row is missing it
+// and the key falls through.
+const SORT_FIELD_IDS = Object.freeze(['componentSortNo', 'idempotencyKey'])
+
 // WHICH BINDINGS ARE LOAD-BEARING. Only the two SCOPE fields are: without `projectNo` the export
 // cannot scope and would hand one project's workbook the whole table, and without `active` it cannot
 // exclude retired rows and would silently ship components a PLM refresh removed. Both are plm_system
@@ -281,6 +293,139 @@ function columnSourceValue(data, column) {
   return data[column.fallbackId]
 }
 
+// DETERMINISTIC ROW ORDER — 反馈2「导出的层级乱了」.
+//
+// Until this change the workbook came out in whatever order `queryRecords` happened to return, and
+// that order is not a business order at all: this module issues the query with NO `orderBy`, the
+// records service then falls back to `ORDER BY id ASC`
+// (packages/core-backend/src/multitable/query-service.ts), and a record id is
+// `rec_${randomUUID()}` (packages/core-backend/src/multitable/records.ts). So the rows were sorted
+// by a random UUID — unrelated to the BOM, unrelated to the order the apply path wrote them, and
+// not even stable for one sheet across a re-pull that re-creates a row under a new id. "层级乱了"
+// was not a lost sort; there was never a sort.
+//
+// THE ORDER IS IMPOSED HERE, on the read side, rather than by asking the query for it: the
+// comparator must see the same per-row pack fallback the projection uses (a pack-only row's
+// 父组件图号 lives in `ext_parentDrawingNo`, which no single ORDER BY column can express), and this
+// module keeps its single-verb contract with the records API — queryRecords and nothing else.
+//
+// THE KEY, outermost first:
+//   1. 父组件图号 `parentComponentCode` (pack fallback applied) — every child sits under its parent,
+//      which is what 层级 means in this workbook. BLANK LAST: a row with no parent is a top-level
+//      or orphan row and belongs after the grouped ones, never interleaved between two groups.
+//   2. 明细排序号 `componentSortNo` — numeric, and OPTIONAL by design (see SORT_FIELD_IDS: no such
+//      column exists in the frozen template today, so today this key never fires). Rows carrying a
+//      number come before rows that do not, blank-last like every other key.
+//   3. 图号 `componentCode` — the order a reader expects inside one parent, and the one the legacy
+//      system's own query used alongside the parent code.
+//   4. 唯一键 `idempotencyKey` — TIEBREAK, not a business key. Two rows can legitimately agree on
+//      everything above: the same component reached through two BOM paths under the same parent is
+//      exactly the duplication 反馈1 is about, and THIS change does not fix that. Without this key
+//      those rows would keep the scan order, i.e. the workbook would still be UUID-ordered precisely
+//      where the duplicates are.
+//      SCOPE OF THIS KEY, stated rather than assumed: `idempotencyKey` is `required: true,
+//      key: true` in the main table TEMPLATE, and that is plugin template metadata — the multitable
+//      layer does not enforce `required` on writes (packages/core-backend/src/multitable
+//      /provisioning.ts never reads it). So it is present and distinct on every row THE APPLY PATH
+//      WROTE THROUGH A TARGET THAT BINDS IT, and on those rows alone. A row typed in by hand in the
+//      grid, or any row on a target whose fieldIdMap has no `idempotencyKey` binding, carries none —
+//      which is why keys 5 and 6 exist.
+//   5. 名称 `componentName` — the last key a reader can SEE. It only decides rows that already agree
+//      on parent, 明细排序号, 图号 and 唯一键, i.e. in practice hand-added rows; ordering those by
+//      name beats ordering them by an opaque id.
+//   6. 物理记录 id (ROW_IDENTITY_KEY) — THE key that makes the order total, and the only one that can
+//      be: it is unique per row within a sheet by construction (`rec_${randomUUID()}`). With it the
+//      output is a function of the ROW SET alone — the same rows scanned in any order produce the
+//      same workbook, including the two rows above that a template-metadata `required` does not in
+//      fact guarantee apart. Note what it is NOT: it carries no business meaning, so it is the
+//      bottom of the key list, never a substitute for one of the five above.
+//
+// PRECONDITION ON KEY 1 — say it out loud, because a deployment can silently fail it. 父组件图号 is
+// only a 层级 on a sheet whose target actually binds `parentComponentCode` (or a pack carrying
+// `ext_parentDrawingNo`). An install provisioned before that column shipped binds NEITHER until the
+// additive repair verb heals it and its action target is rebound (see REQUIRED_EXPORT_FIELD_IDS
+// above): every row then reads blank on key 1, the whole table lands in one blank band, and the
+// workbook degrades to a pure 图号 order. That is deterministic and repeatable — this change's
+// actual guarantee — but it is NOT hierarchical, and on such a deployment the hierarchy 反馈2 asks
+// for arrives only after the repair, not from this module. `parentComponentCode` shows up in
+// `unresolvedColumns` exactly so an operator can tell that case from "this project has no parents".
+//
+// TEXT COMPARISON IS LOCALE-FREE BY CONSTRUCTION. `<` / `>` on strings is UTF-16 code-unit order,
+// identical in a zh-CN runtime and an en-US CI one. `localeCompare` / `Intl.Collator` is
+// deliberately NOT used: a collator reads the host locale, so the same sheet would order one way on
+// the customer's server and another way in CI — a locale trap this repo has already paid for in its
+// PG guards, and one that would make an ordering test green while the customer's workbook is not.
+// (For the BMP text these columns hold — 图号/名称 — code-unit order and code-point order coincide.)
+const PARENT_CODE_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'parentComponentCode')
+const COMPONENT_CODE_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentCode')
+const COMPONENT_NAME_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentName')
+
+// Where `unmapRow` parks the row's PHYSICAL record id so the comparator can reach it. Deliberately
+// not a logical field id and deliberately not projected: no EXPORT_COLUMN reads it, so it can never
+// reach a cell, and the double underscore keeps it out of any collision with a mapped column key.
+const ROW_IDENTITY_KEY = '__prepLineRecordId'
+
+// Blank (absent / null / whitespace-only) collapses to '' — the same blankness the projection's own
+// fallback uses (isBlankCell), so a cell that prints empty also sorts as empty.
+function orderText(value) {
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+function compareOrderText(left, right) {
+  if (left === right) return 0
+  if (left === '') return 1 // blank last
+  if (right === '') return -1
+  return left < right ? -1 : 1
+}
+
+function orderNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.trim())
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+function compareOrderNumber(left, right) {
+  if (left === right) return 0
+  if (left === null) return 1 // no 明细排序号 sorts after every row that has one
+  if (right === null) return -1
+  return left < right ? -1 : 1
+}
+
+/**
+ * The export's row order. Pure and non-mutating: returns a new array, and its result depends only on
+ * the row CONTENT (including each row's physical record id — see ROW_IDENTITY_KEY), never on the
+ * order the rows arrived in.
+ */
+function sortExportRows(rows) {
+  return rows.slice().sort((left, right) => {
+    const byParent = compareOrderText(
+      orderText(columnSourceValue(left, PARENT_CODE_ORDER_COLUMN)),
+      orderText(columnSourceValue(right, PARENT_CODE_ORDER_COLUMN)),
+    )
+    if (byParent !== 0) return byParent
+    const bySortNo = compareOrderNumber(orderNumber(left.componentSortNo), orderNumber(right.componentSortNo))
+    if (bySortNo !== 0) return bySortNo
+    const byCode = compareOrderText(
+      orderText(columnSourceValue(left, COMPONENT_CODE_ORDER_COLUMN)),
+      orderText(columnSourceValue(right, COMPONENT_CODE_ORDER_COLUMN)),
+    )
+    if (byCode !== 0) return byCode
+    const byKey = compareOrderText(orderText(left.idempotencyKey), orderText(right.idempotencyKey))
+    if (byKey !== 0) return byKey
+    const byName = compareOrderText(
+      orderText(columnSourceValue(left, COMPONENT_NAME_ORDER_COLUMN)),
+      orderText(columnSourceValue(right, COMPONENT_NAME_ORDER_COLUMN)),
+    )
+    if (byName !== 0) return byName
+    return compareOrderText(orderText(left[ROW_IDENTITY_KEY]), orderText(right[ROW_IDENTITY_KEY]))
+  })
+}
+
 // "Does this target bind logical ids to physical ids AT ALL?" — the writer's own predicate
 // (apply-writer.cjs fieldIdMapHasExplicitBindings), restated on the read side so the two modes are
 // decided by the same question. An EMPTY map is a legitimate mode: the target is addressed by
@@ -303,6 +448,16 @@ function resolveExportFieldBindings(target) {
     else if (REQUIRED_EXPORT_FIELD_IDS.includes(fieldId)) missing.push(fieldId)
     else unbound.push(fieldId)
   }
+  // ORDER-ONLY ids, resolved so `unmapRow` hands the comparator a logical key. Kept OUT of the
+  // loop above on purpose: an explicit map that does not bind one of these is not a hole to report —
+  // `componentSortNo` has no column to bind on any deployment today, and putting it in
+  // `unresolvedColumns` would tell the operator a COLUMN of their workbook came out blank, which is
+  // false. An unbound order key simply does not participate (sortExportRows treats it as absent).
+  for (const fieldId of SORT_FIELD_IDS) {
+    const physical = target.fieldIdMap[fieldId]
+    if (physical) map[fieldId] = physical
+    else if (!explicit) map[fieldId] = fieldId
+  }
   if (missing.length > 0) {
     throw new StockPreparationPrepLineExportError(
       500,
@@ -320,6 +475,12 @@ function unmapRow(row, fieldIdMap) {
   for (const [logical, physical] of Object.entries(fieldIdMap)) inverse[physical] = logical
   const out = {}
   for (const [key, value] of Object.entries(data)) out[inverse[key] || key] = value
+  // The record's own id, carried alongside the cells for ONE purpose: the export's last order key
+  // (sortExportRows). `queryRecords` returns it as a top-level `id` (LoadedMultitableRecord), i.e.
+  // outside `data`, so it is not a cell and unmapping cannot have translated it. Only taken when the
+  // record is the `{ id, data }` shape — when `recordData` fell back to treating the record itself
+  // as the data bag there is no record id to speak of, and the key simply stays absent.
+  if (data !== row && typeof row?.id === 'string' && row.id !== '') out[ROW_IDENTITY_KEY] = row.id
   return out
 }
 
@@ -376,7 +537,10 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
     throw new StockPreparationPrepLineExportError(422, 'PREP_LINE_EXPORT_ROWS_TOO_LARGE', 'stock-preparation export exceeded the row bound', { maxRows: MAX_EXPORT_ROWS })
   }
   const headers = EXPORT_COLUMNS.map((column) => column.label)
-  const rows = activeRows.map((data) => EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column))))
+  // Deterministic hierarchy order BEFORE the projection — see sortExportRows. Without it the row
+  // order is the records service's `ORDER BY id ASC` over random UUIDs.
+  const orderedRows = sortExportRows(activeRows)
+  const rows = orderedRows.map((data) => EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column))))
   return {
     projectNo: scopedProjectNo,
     totalRowCount: allRows.length,
@@ -442,9 +606,12 @@ module.exports = {
     normalizeExportTarget,
     queryAllMainRows,
     resolveExportFieldBindings,
+    sortExportRows,
     unmapRow,
     READ_PAGE_LIMIT,
     READ_MAX_PAGES,
+    ROW_IDENTITY_KEY,
     SCOPE_FIELD_IDS,
+    SORT_FIELD_IDS,
   },
 }
