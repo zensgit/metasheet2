@@ -211,8 +211,44 @@ async function testSandboxNamespaceRefusalNamesTheNamespace() {
   assert.equal(caught.message.includes('stock_prep_sandbox_trial'), false)
   console.log('  testSandboxNamespaceRefusalNamesTheNamespace OK')
 }
+// ext_ 客户包列写口守卫盘点结清 (beiliao-takeover-status-ledger.md §4, closed 2026-09-10): the
+// ensure/inspect write-口 (ledger item ④) feeds `input.extensionFieldIds` through the SAME
+// `assertExtensionFieldIdValid` predicate the repair paths use, via `normalizeExtensionFieldIds`
+// (stock-preparation-target-provisioning.cjs:300-320, called from `inspectStockPreparationTarget`
+// at :419 -- BEFORE any sheet/field read). This locks that call reachable from the PUBLIC
+// `inspectStockPreparationCanonicalTarget` entry point, independent of whatever HTTP route wires
+// (or fails to wire) `extensionFieldIds` on top of it.
+async function testInspectExtensionFieldIdsRejectsNonPackIdAndAcceptsCustomerPackId() {
+  // ① guard existence: a non-customer-pack id (no `ext_` prefix at all -- no customer pack ever
+  // produces this shape) smuggled into `extensionFieldIds` must be refused before any sheet or
+  // field read happens.
+  const { context: rejectingContext, calls: rejectingCalls } = createContext({ sheetExists: true })
+  let namespaceError = null
+  try {
+    await inspectStockPreparationCanonicalTarget({
+      context: rejectingContext, projectId: 'tenant:proj', permission: 'admin', extensionFieldIds: ['procurementDone'],
+    })
+  } catch (error) {
+    namespaceError = error
+  }
+  assert.ok(namespaceError, 'a non-`ext_` id in extensionFieldIds must be refused')
+  assert.equal(namespaceError.reason, 'FIELD_ID_PREFIX_MISSING', 'guard/reason code must stay stable')
+  assert.equal(rejectingCalls.findObjectSheet.length, 0, 'the guard runs before any sheet read')
+
+  // ② positive control: a real customer-pack `ext_` id (customer-pack-rehearsal-report.md:48-51's
+  // `ext_stockPrepDate`) is admitted, and inspect proceeds to its normal ready verdict once the
+  // physical column resolves -- the guard does not block the feature it exists to let through.
+  const { context: readyContext } = createContext({ sheetExists: true })
+  const inspected = await inspectStockPreparationCanonicalTarget({
+    context: readyContext, projectId: 'tenant:proj', permission: 'admin', extensionFieldIds: ['ext_stockPrepDate'],
+  })
+  assert.equal(inspected.ready, true, 'a legitimate customer-pack ext_ id does not block inspect')
+  console.log('  testInspectExtensionFieldIdsRejectsNonPackIdAndAcceptsCustomerPackId OK')
+}
+
 async function main() {
   await testSandboxNamespaceRefusalNamesTheNamespace()
+  await testInspectExtensionFieldIdsRejectsNonPackIdAndAcceptsCustomerPackId()
   // Descriptor is manifest-derived, schema-only, and carries no rows/customer content.
   const descriptor = buildStockPreparationTargetDescriptor()
   assert.equal(descriptor.id, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)

@@ -1319,6 +1319,7 @@ async function main() {
   testRevisionCarriesTheRowErrorOverflowFacts()
   testHardApplyBlockingRowErrorsSurviveTheCap()
   testRowErrorLimitIsAConditionalActionConfigKey()
+  testExtensionFieldIdsRejectsNonPackIdAndAcceptsCustomerPackId()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
 }
@@ -1545,6 +1546,44 @@ function testRowErrorLimitIsAConditionalActionConfigKey() {
       `rowErrorLimit: ${JSON.stringify(nonsense)} is refused rather than coerced`,
     )
   }
+}
+
+// ext_ 客户包列写口守卫盘点结清 (beiliao-takeover-status-ledger.md §4, closed 2026-09-10): the SAME
+// `assertExtensionFieldIdValid` predicate guards every ext_ write-口 (repair paths in
+// stock-preparation-target-provisioning.cjs/mvp-provisioning.cjs, the pack installer's normalizer in
+// stock-preparation-customer-pack.cjs, and -- the one this test locks -- `extensionFieldIds` on the
+// table-action config itself, which is what the confirm/apply writer actually reads to decide which
+// `ext_` columns a write is allowed to touch). A red witness here is a red witness for the guard being
+// wired to the write-口 THIS module owns, independent of whether the other three call sites stay wired.
+function testExtensionFieldIdsRejectsNonPackIdAndAcceptsCustomerPackId() {
+  // ① guard existence: a non-customer-pack id smuggled into `extensionFieldIds` must be refused
+  // before it can reach the write payload -- here, a frozen human-owned field id with no `ext_`
+  // prefix at all (no customer pack ever produces this shape).
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: ['procurementDone'] })),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && error.details && error.details.namespaceReason === 'FIELD_ID_PREFIX_MISSING',
+    'a bare non-`ext_` id cannot enter extensionFieldIds -- code/reason must stay stable',
+  )
+
+  // A second, independent non-pack shape: it DOES carry the `ext_` prefix, but its suffix collides
+  // with a frozen template field -- the exact shape stock-preparation-customer-pack.cjs:312's own
+  // guard exists to reject at pack-declaration time. Locking the refusal HERE too proves this
+  // write-口 does not simply trust whatever a caller labels `ext_*`.
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: ['ext_projectNo'] })),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && error.details && error.details.namespaceReason === 'FIELD_ID_TEMPLATE_COLLISION',
+    'an `ext_` id colliding with a frozen template field is refused -- code/reason must stay stable',
+  )
+
+  // ② positive control: a real customer-pack `ext_` id (customer-pack-rehearsal-report.md:48-51's
+  // `ext_stockPrepDate`) is admitted unchanged -- the guard narrows to non-pack ids, it does not
+  // block the feature it exists to let through.
+  const action = normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: ['ext_stockPrepDate'] }))
+  assert.deepEqual(action.extensionFieldIds, ['ext_stockPrepDate'], 'a legitimate customer-pack ext_ id is admitted unchanged')
 }
 
 async function testApplySandboxGateFailsClosed() {
