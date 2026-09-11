@@ -785,7 +785,7 @@ function createPipelineRunner(deps = {}) {
     // same row failed to transform. Identifiers only - never a value, never row content.
     if (sourceFieldAbsent && Array.isArray(transformed.warnings) && transformed.warnings.length > 0) {
       // Count the ROW from the filtered list, not from `warnings.length`: today SOURCE_FIELD_ABSENT
-      // is the only code transformRecord() pushes (transform-engine.cjs:359), so the two agree, but
+      // is the only code transformRecord() pushes (transform-engine.cjs:412), so the two agree, but
       // the next code added would otherwise inflate a counter whose `fields` list stayed short.
       const absentWarnings = transformed.warnings.filter((warning) => warning && warning.code === SOURCE_FIELD_ABSENT)
       if (absentWarnings.length > 0) sourceFieldAbsent.rows += 1
