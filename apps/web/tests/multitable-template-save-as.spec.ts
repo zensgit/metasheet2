@@ -460,6 +460,14 @@ function createCapsMock(overrides: Record<string, boolean> = {}) {
   return Object.fromEntries(Object.entries(base).map(([key, value]) => [key, ref(value)]))
 }
 
+// MultitableWorkbench.vue 是 4700+ 行的单文件组件,下面每条用例都真挂一次整棵工作台。
+// vitest 默认 testTimeout 是 5000ms,apps/web 的 vite.config.ts 既没抬过它也没有 retry
+// (对比 packages/core-backend/vitest.config.ts 的 testTimeout: 30000 + CI retry: 2),
+// 本机同一条命令跑 7 次有 2 次红在「Test timed out in 5000ms」而不是断言不成立 ——
+// 首挂的 SFC 编译/求值在冷 CI worker 上就是能吃满 5s。这里只给真挂载的用例抬超时,
+// 断言一个字都不改:超时假红会让必过检查 multitable-web-guard 以「与改动无关」的形态挂掉。
+const WORKBENCH_MOUNT_TIMEOUT_MS = 20000
+
 describe('工作台 —— 把当前数据表存为模板(F7)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -522,7 +530,7 @@ describe('工作台 —— 把当前数据表存为模板(F7)', () => {
     workbenchMock.activeSheetId.value = null
     await flushUi()
     expect(entry(root)).toBeNull()
-  })
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
 
   it('对话框默认值:模板名 = 当前数据表名、字段默认全选、「共享给本租户」默认不勾', async () => {
     const root = await mountWorkbench()
@@ -539,7 +547,7 @@ describe('工作台 —— 把当前数据表存为模板(F7)', () => {
 
     const share = dialog.querySelector('[data-testid="save-sheet-as-template-share"]') as HTMLInputElement
     expect(share.checked).toBe(false)
-  })
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
 
   it('勾掉两列后提交的 payload 逐字等于 { baseId, name, sheetIds:[当前表], fieldIds:[勾选的], visibility:private }', async () => {
     mocks.createTemplateFromBase.mockResolvedValue({
@@ -567,7 +575,7 @@ describe('工作台 —— 把当前数据表存为模板(F7)', () => {
       fieldIds: ['fld_title'],
       visibility: 'private',
     })
-  })
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
 
   it('勾了「共享给本租户」才发 visibility: tenant', async () => {
     mocks.createTemplateFromBase.mockResolvedValue({
@@ -583,7 +591,7 @@ describe('工作台 —— 把当前数据表存为模板(F7)', () => {
     ;(dialog.querySelector('[data-action="save-sheet-as-template-submit"]') as HTMLButtonElement).click()
     await flushUi()
     expect(mocks.createTemplateFromBase.mock.calls[0][0].visibility).toBe('tenant')
-  })
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
 
   it('一个字段都不勾时不发请求,并给出可读的错误', async () => {
     const root = await mountWorkbench()
@@ -595,7 +603,7 @@ describe('工作台 —— 把当前数据表存为模板(F7)', () => {
 
     expect(mocks.createTemplateFromBase).not.toHaveBeenCalled()
     expect(dialog.querySelector('[data-testid="save-sheet-as-template-error"]')?.textContent).toContain('字段')
-  })
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
 
   it('成功后原样列出服务端 warnings,并给一条「去模板中心查看」的链接', async () => {
     mocks.createTemplateFromBase.mockResolvedValue({
@@ -612,7 +620,7 @@ describe('工作台 —— 把当前数据表存为模板(F7)', () => {
     const warnings = Array.from(dialog.querySelectorAll('[data-testid="save-sheet-as-template-warnings"] li'))
     expect(warnings.map((li) => li.textContent)).toEqual(['字段「通知」是 button 类型,模板里已转为文本列。'])
     expect(dialog.querySelector('[data-testid="save-sheet-as-template-center-link"]')).toBeTruthy()
-  })
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
 
   it('失败时把服务端的话原样显示,对话框不切到成功态', async () => {
     mocks.createTemplateFromBase.mockRejectedValue(new Error('This base has no readable table with fields to save as a template'))
@@ -624,5 +632,5 @@ describe('工作台 —— 把当前数据表存为模板(F7)', () => {
     expect(dialog.querySelector('[data-testid="save-sheet-as-template-result"]')).toBeNull()
     expect(dialog.querySelector('[data-testid="save-sheet-as-template-error"]')?.textContent)
       .toContain('no readable table')
-  })
+  }, WORKBENCH_MOUNT_TIMEOUT_MS)
 })

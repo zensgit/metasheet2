@@ -7417,7 +7417,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    * 粒度(F7「从表一键存为模板」):可选的 `sheetIds` / `fieldIds` 把范围**收窄**到用户在工作台
    * 里点名的那张数据表与勾选的那几列。两者都只做交集,一条可见性/授权闸都不替换 ——
    * 传了也照样过 filterVisibleSheetRows → filterReadableSheetRowsForAccess,读不到的表/字段
-   * 不会因为被点名就进模板。省略两者 = 改动前的整 Base 行为,逐字不变。
+   * 不会因为被点名就进模板。省略两者 = 改动前的整 Base 行为,逐字不变;而**显式传空**
+   * (`sheetIds: []` / `fieldIds: []`,或归一后什么都不剩的一批空白 id)= 零匹配,直接 400,
+   * 不会退化成「不限」。
    */
   router.post('/templates', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
     const schema = z.object({
@@ -7450,6 +7452,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const requestedFieldIds = parsed.data.fieldIds
       ? new Set(parsed.data.fieldIds.map((id) => id.trim()).filter((id) => id.length > 0))
       : null
+    // 口径:**省略 = 不限(整 Base);给了键就是显式收窄,空选择 = 零匹配,不是「不限」。**
+    // `[]`(以及只写了空白、归一后什么都不剩的一批 id)在这里 fail-closed 回 400,而不是
+    // 悄悄退回整 Base:把空集合当「不限」意味着一个「我一列都没选」的请求会被放大成
+    // 「把这个 Base 的所有表所有列都抽进模板」—— 收窄选择器只能收窄,绝不能反向放宽读面。
+    // 400 只由调用方自己的入参形状决定,不透露 baseId 存不存在(与 zod 的 400 同层、同在
+    // 任何 DB 查询之前),所以也不构成存在性探测面。
+    if (requestedSheetIds?.length === 0 || requestedFieldIds?.size === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'sheetIds/fieldIds must contain at least one non-blank id when provided; an empty selection is not "no limit"',
+        },
+      })
+    }
 
     try {
       const pool = poolManager.get()

@@ -17,6 +17,7 @@
  *   F7-1 按表收窄:sheetIds 下推进 SQL 的 WHERE(第 51 张表也存得下),跨 Base 的 id 一张都匹配不到;
  *   F7-2 按字段收窄:fieldIds 在 extractTemplateSheets **之前**做交集,视图里不留悬空引用;
  *   F7-3 上限:sheetIds > 50 / fieldIds > 500 回 400,不静默截断;过滤后零字段回 400;
+ *        空选择口径:省略 = 不限,显式的 `[]` / 纯空白 id = 零匹配 → 400(不退化成整 Base);
  *   F7-4 类型保真:13 种自洽类型原样保留(不再有「已转为文本列」),button 仍降级出声。
  *
  * Harness 沿用 multitable-template-dryrun-routes.test.ts 的 mock-pool 路由precedent:
@@ -795,6 +796,40 @@ describe('自定义模板路由 —— 把 Base 存为模板', () => {
     expect(tooManyFields.status).toBe(400)
     expect(tooManyFields.body.error.code).toBe('VALIDATION_ERROR')
     expect(store.customTemplates).toHaveLength(0)
+  })
+
+  it('F7-4b: 显式传空选择 = 零匹配而不是「不限」—— sheetIds:[] / fieldIds:[] / 只有空白的 id 一律 400,绝不退化成整 Base', async () => {
+    const store = createStore({ baseSheets: OPS_SHEETS })
+    const { app } = await createApp(store.handler, { tenantId: 'tenant_a' })
+    pinned.setApp(app)
+
+    // 反向的诱惑写法是「空数组归一成 null(= 不限)」。那样这几条请求全会 201,并把用户
+    // **没勾选的**「内部成本」表连同全部列一起抽进模板 —— 一个「我什么都没选」的请求被
+    // 放大成「把整个 Base 都存下来」。收窄选择器只能收窄,这里把 fail-closed 语义钉死。
+    const emptySelections: Array<Record<string, unknown>> = [
+      { baseId: SOURCE_BASE_ID, name: '空表选择', sheetIds: [] },
+      { baseId: SOURCE_BASE_ID, name: '空字段选择', fieldIds: [] },
+      { baseId: SOURCE_BASE_ID, name: '两者都空', sheetIds: [], fieldIds: [] },
+      // z.string().min(1) 放行纯空白串,trim 后什么都不剩 —— 走同一条 fail-closed
+      { baseId: SOURCE_BASE_ID, name: '空白表 id', sheetIds: ['   '] },
+      { baseId: SOURCE_BASE_ID, name: '空白字段 id', sheetIds: ['sheet_orders'], fieldIds: [' ', '  '] },
+    ]
+    for (const body of emptySelections) {
+      const res = await request(pinned.url()).post('/api/multitable/templates').send(body)
+      // 把 name 带进断言,失败时一眼看出是哪一条
+      expect([body.name, res.status, res.body.error?.code]).toEqual([body.name, 400, 'VALIDATION_ERROR'])
+    }
+    // 一张模板都没落;而且这个 400 在摸 DB 之前就回了(压根没去查源库的表/字段)
+    expect(store.customTemplates).toHaveLength(0)
+    expect(store.sqlLog.filter((entry) => entry.sql.includes('FROM meta_sheets') || entry.sql.includes('FROM meta_fields'))).toEqual([])
+
+    // 对照组:同一个 Base,**省略**两个键才是「不限」—— 照样 201 且两张表都抽进去。
+    // (没有这条对照,上面的 400 分不清是「fail-closed」还是「整条路都堵死了」。)
+    const omitted = await request(pinned.url())
+      .post('/api/multitable/templates')
+      .send({ baseId: SOURCE_BASE_ID, name: '不限' })
+    expect(omitted.status).toBe(201)
+    expect(omitted.body.data.template.sheets.map((sheet: any) => sheet.name)).toEqual(['订单', '内部成本'])
   })
 
   it('F7-5: 带 sheetIds/fieldIds 的请求照样过授权与租户闸 —— 只有 multitable:write 仍 403;x-tenant-id 兼容头仍拿不到他租户的东西', async () => {
