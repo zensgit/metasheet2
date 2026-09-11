@@ -931,6 +931,47 @@ function parentChildBatch(childOverrides = {}) {
   return { parent, child }
 }
 
+// 父组件名称 = 父件的**未切分** identityName(老系统口径),不是 F1c 切出来的首段。
+//
+// 老系统 StockInfoController 754-755:
+//   stockInfo.setParentComponentCode(parentBomInfo.getIdentityNo());
+//   stockInfo.setParentComponentName(parentBomInfo.getIdentityName());
+// —— 父件那一侧取的是 identityName **全串**,老系统导出第 5 列 父组件名称 打印的就是它。切分
+// (fillBasicStockInfo 762-770 的 split(" ", 2))只作用在**当前组件**那一侧的 名称/规格 上。
+//
+// F1c 把展开层的 `componentName` 改成了首段,如果这里照抄 `parent.componentName`,父组件名称 就从
+// 「主体组件 DN1200」悄悄退成「主体组件」—— 既偏离老系统,也是对改前行为的回退。行上现成有全串
+// (展开层 createRow 落的 `nameAndSpec`),所以先取它。
+//
+// 把 `firstPresentValue(parent, EXPANSION_NAME_AND_SPEC_KEYS)` 换回 `parent.componentName` ⇒ 本用例必红。
+function testParentComponentNameIsTheUnsplitLegacyString() {
+  const { parent, child } = parentChildBatch()
+  parent.nameAndSpec = '主体组件 DN1200'
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-parent-unsplit',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const childAdd = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+  assert.equal(
+    childAdd.record.parentComponentName,
+    '主体组件 DN1200',
+    '父组件名称 取父件未切分的 名称及规格(老系统 754-755),不是 F1c 切出来的首段',
+  )
+  // 负控:父件没有全串时退回首段 —— 改前写进去的老行、以及源行本就没有 名称及规格 的行,
+  // 都不会因为这条规则而丢值。
+  const plain = parentChildBatch()
+  const plainPlan = planStockPreparationConflicts({
+    expandedRows: [plain.parent, plain.child],
+    existingRows: [],
+    runId: 'run-parent-fallback',
+    plannedAt: '2026-09-02T00:00:00.000Z',
+  })
+  const plainChild = byDecision(plainPlan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD')
+  assert.equal(plainChild.record.parentComponentName, '主体组件', '父件没有全串时退回 componentName,不丢值')
+}
+
 function testDenormalizedParentAndSpecReachTheMainRow() {
   const { parent, child } = parentChildBatch({ spec: 'DN1200' })
   const plan = planStockPreparationConflicts({
@@ -1194,6 +1235,7 @@ function main() {
   testO1bIdentityIsReproducibleFromTheSameInput()
   testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched()
   testDenormalizedParentAndSpecReachTheMainRow()
+  testParentComponentNameIsTheUnsplitLegacyString()
   testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
   testUnresolvableParentIsAbsenceNotAGuess()
   testExistingRowsAreBackfilledByAReRun()

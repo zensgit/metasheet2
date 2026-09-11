@@ -1110,7 +1110,16 @@ function denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
     const parent = parentIndex.get(parentSourceId.trim())
     if (parent) {
       if (!isBlank(parent.componentCode)) out.parentComponentCode = parent.componentCode
-      if (!isBlank(parent.componentName)) out.parentComponentName = parent.componentName
+      // 父组件名称 = 父件的 **未切分** 名称及规格(老系统 StockInfoController 754-755:
+      //   stockInfo.setParentComponentName(parentBomInfo.getIdentityName())  —— identityName 全串),
+      // 不是 F1c 切出来的首段。切分只改了 当前组件 那一侧的 名称 列(createRow 的
+      // splitNameAndSpec),父件这一侧老系统从来没切过,导出第 5 列打印的就是全串。行上现成有
+      // 全串(展开层 createRow 落的 `nameAndSpec`),所以这里先取它,取不到才退回 componentName
+      // —— 退回路径覆盖两种行:改前写进去的老行(componentName 本来就是全串),以及源行没有
+      // 名称及规格 的行(两个键都空,什么也不写)。
+      const parentName = firstPresentValue(parent, EXPANSION_NAME_AND_SPEC_KEYS)
+      if (!isBlank(parentName)) out.parentComponentName = parentName
+      else if (!isBlank(parent.componentName)) out.parentComponentName = parent.componentName
       // 父组件排序号 — THE PARENT ROW'S OWN 明细排序号, resolved through the same in-batch join
       // as 父组件图号/父组件名称 just above.
       //
