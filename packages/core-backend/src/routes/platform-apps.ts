@@ -40,8 +40,13 @@ function visibleInstallation(req: Request, app: PlatformAppResponse): boolean {
  * Platform-admin bypass, read ONLY from what the auth middleware hydrated onto `req.user`
  * (`auth/jwt-middleware.ts` → `AuthService#verifyToken` → `mapAuthUserRow`, whose `role` is already
  * resolved through `rbac/service#isAdmin` and whose `permissions` are already resolved through
- * `rbac/service#listUserPermissions`). Raw token claims are NOT consulted — same discipline, and the
+ * `rbac/service#listUserPermissions`). **In production** raw token claims are NOT consulted — same discipline, and the
  * same three markers, as `isElearningGlobalAdminRequest` in `elearning-admin-access.ts`.
+ * `elearning-admin-access.ts`. The one NON-PRODUCTION exception (verified 2026-09-11 — an
+ * unqualified absolute invites someone to rely on it): `AuthService#buildTrustedTokenUser` DOES
+ * build the user straight from `payload.roles` / `payload.perms` when `RBAC_TOKEN_TRUST` is
+ * `true`/`1` AND `NODE_ENV !== 'production'`. Production is unaffected; a dev/CI box with that
+ * flag on can hand this filter token-supplied permission codes.
  *
  * `is_admin` is the users-table column (`db/types.ts:761`); today's `mapAuthUserRow` does not project
  * it onto `req.user`, so it is inert on this path — it is honoured here so that a hydration which

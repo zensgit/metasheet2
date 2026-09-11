@@ -4,7 +4,10 @@
     "  packages/core-backend/tests/unit/permission-match.test.ts   -> src/auth/permission-match.ts",
     "  apps/web/tests/permission-match-parity.spec.ts              -> apps/web/src/utils/permission-match.ts",
     "                                                                 and useAuth().hasPermission",
-    "Neither implementation may be changed without the other: whichever side moves first turns the",
+    "Neither implementation may be changed without the other. PRECISELY (verified 2026-09-11): changing",
+    "one side WITHOUT touching this table turns THAT SIDE'S OWN run red; changing this table turns the",
+    "OTHER side red too. Both together are what make a one-sided drift impossible to land quietly.",
+    "(The earlier wording claimed the first edit alone reddens the far side — it does not.)",
     "other side's run of this table red. Rows are stated as claims about the CODE ALGEBRA ONLY —",
     "the admin/roles bypass lives in the callers (useAuth's isAdmin snapshot, the router's",
     "isPlatformAppAdminRequest), which is why `admin:all` below is NOT a wildcard here."
