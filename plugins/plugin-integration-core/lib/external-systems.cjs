@@ -54,6 +54,11 @@ class ExternalSystemConflictError extends Error {
     super(message)
     this.name = 'ExternalSystemConflictError'
     this.details = details
+    // Same opt-in as ExternalSystemValidationError above: `inferErrorCode` (lib/http-routes.cjs)
+    // prefers `error.code` over `error.name`, so a conflict that needs a STABLE wire code can ask
+    // for one. Callers that pass no `details.code` keep emitting `ExternalSystemConflictError`
+    // verbatim, exactly as before.
+    if (typeof details.code === 'string' && details.code.trim()) this.code = details.code.trim()
   }
 }
 
@@ -552,9 +557,59 @@ function createExternalSystemRegistry({
     }
   }
 
+  // SERVER-SIDE REFUSAL for the one write shape the LIST's read fallback newly puts in front of a
+  // caller: an id-carrying upsert (the 工作台's 编辑 / 停用 / 启用 all send `{ ...scope, id, name,
+  // kind, role, status }`) whose hint misses, against a row this caller CAN read — the SAME tenant's
+  // tenant-wide (`workspace_id IS NULL`) row with that id.
+  //
+  // WHAT USED TO HAPPEN, verified in memory against this module with a db that enforces migration
+  // 057's two constraints: `findExisting` misses, the INSERT branch below re-uses the SAME id
+  // (`id: normalized.id || idGenerator()`), and `id TEXT PRIMARY KEY` (057:20) raises 23505 — an
+  // UNTYPED 500 carrying raw driver text, with the boundary living in the database rather than
+  // here. On any db handle that does not enforce that key (every hand-written fake in __tests__,
+  // and any future non-PG driver) the same call SILENTLY writes a second row with a DUPLICATE id.
+  // So the rule was real but unstated, and untestable at this layer.
+  //
+  // NOW: a stable 409 (`/Conflict/` -> 409 in `inferHttpStatus`) with a fixed code. This only ever
+  // TIGHTENS — the same call previously errored too, just untypeably, or corrupted the table. No
+  // scope is widened: the write still lands on, and only on, its own exact scope.
+  //
+  // SCOPE OF THE LOOKUP, exactly one step. It asks only about `workspace_id IS NULL` in the
+  // CALLER'S OWN tenant — precisely the row `selectScopedRow`/`listExternalSystems` already hand
+  // this caller — so it discloses nothing new. It deliberately does NOT ask "does this id exist
+  // anywhere", which would answer for other tenants and other workspaces that this caller cannot
+  // read; those keep the pre-existing primary-key behaviour.
+  //
+  // NOT IN SCOPE, on purpose: `POST /external-systems/:id/test`. `persistExternalSystemTestResult`
+  // (lib/http-routes.cjs, #5534) re-addresses its write to the row's OWN scope BEFORE calling this
+  // function, so `findExisting` hits and this guard never sees it. That write is intended to reach
+  // a fallback-read row and does; see L-11 in
+  // __tests__/external-systems-list-workspace-fallback.test.cjs.
+  async function assertHintedIdDoesNotTargetTenantWideRow(normalized) {
+    if (!normalized.id) return
+    // A null hint already searched `workspace_id IS NULL`, so a miss there means the row is absent,
+    // not out of scope — nothing to refuse.
+    if (normalized.workspaceId === null) return
+    const tenantWide = await db.selectOne(TABLE, {
+      tenant_id: normalized.tenantId,
+      workspace_id: null,
+      id: normalized.id,
+    })
+    if (!tenantWide) return
+    throw new ExternalSystemConflictError('external system belongs to the tenant-wide scope', {
+      code: 'EXTERNAL_SYSTEM_SCOPE_MISMATCH',
+      id: normalized.id,
+      // Both are the caller's own request values, echoed back so an operator can see WHICH two
+      // scopes disagreed. Nothing from the stored row is disclosed.
+      requestedWorkspaceId: normalized.workspaceId,
+      rowWorkspaceId: null,
+    })
+  }
+
   async function upsertExternalSystem(input) {
     const normalized = normalizeExternalSystemInput(input)
     const existing = await findExisting(normalized)
+    if (!existing) await assertHintedIdDoesNotTargetTenantWideRow(normalized)
     const connectionId = requestedConnectionId(normalized, existing)
     // A SQL read-only Binding references the platform Connection that owns all
     // physical credentials. Accepting a second credential document here would
@@ -1049,18 +1104,41 @@ function createExternalSystemRegistry({
   // (`publicRow` — private per-kind config subtrees are still deleted). So this widens WHICH rows
   // are listed, never WHAT is told about a row nor WHO may ask.
   //
-  // `scopeFallback: true` — THE PRICE OF THE ASYMMETRY, MADE VISIBLE. The list widens and the
-  // writes do not, and at least one caller renders this list as a WRITABLE inventory
-  // (apps/web 工作台 连接管理: 编辑 / 停用 / 启用 / 删除 per row). On a tenant-wide row reached through
-  // the fallback those buttons would MISS: upsert's `findExisting` matches the hint exactly, so a
-  // 停用 would silently INSERT a second, same-named workspace row (migration 057's unique index is
-  // (tenant_id, coalesce(workspace_id,''), name) — both rows are legal) and report success while
-  // the real row stayed active; delete would 404. So every row that came from the fallback branch
-  // is tagged, and a caller that offers writes must treat a tagged row as read-only. The tag
-  // discloses NOTHING new — `workspaceId: null` is already in the projection and says the same
-  // thing — it just states the consequence at the place that knows it. Widening the WRITES instead
-  // would have been the other repair; it is deliberately NOT taken here, because a hinted write
-  // silently retargeting a tenant-wide row is a scope decision for the owner, not a display bug.
+  // THE PRICE OF THE ASYMMETRY, AND WHERE IT IS PAID. The list widens; `findExisting` (upsert) and
+  // `deleteExternalSystem` do not. At least one caller renders this list as a WRITABLE inventory
+  // (apps/web 工作台 连接管理: 编辑 / 停用 / 启用 / 删除 per row), so a fallback-reached row now
+  // appears under buttons that cannot address it. WHAT THOSE BUTTONS ACTUALLY DO — measured, not
+  // assumed (L-07/L-10 of __tests__/external-systems-list-workspace-fallback.test.cjs pin all three):
+  //   * 编辑 / 停用 / 启用 send the ROW'S OWN id, so `findExisting` takes its id branch, misses in
+  //     the caller's exact scope, and `assertHintedIdDoesNotTargetTenantWideRow` (above) REFUSES:
+  //     409 `EXTERNAL_SYSTEM_SCOPE_MISMATCH`. Before that guard the INSERT branch re-used the id and
+  //     died on 057's `id TEXT PRIMARY KEY` (23505 -> untyped 500). Either way the tenant-wide row
+  //     is untouched — it is an ERROR, never a silent success.
+  //   * 删除 raises ExternalSystemNotFoundError -> 404, unchanged.
+  //   * Only a NAME-ONLY upsert (no id — a direct API/script call, NOT these buttons) forks a
+  //     second, same-named workspace row, which 057's (tenant_id, coalesce(workspace_id,''), name)
+  //     unique index permits. Earlier revisions of this comment attributed that fork to 停用; the
+  //     probe says otherwise, and the sentence is corrected here rather than left to mislead.
+  // NOT A CLAIM OF IMMUNITY: `persistExternalSystemTestResult` (lib/http-routes.cjs, #5534)
+  // deliberately re-addresses its write to the ROW'S own scope, so POST /external-systems/:id/test
+  // from a hinted caller DOES update this row's status / last_tested_at / last_error (a failed test
+  // flips active -> error). Any UI wording derived from this asymmetry must say that too — calling
+  // such a row 「只读」 flat out is false.
+  //
+  // NO NEW WIRE FIELD. An earlier revision tagged every fallback-branch row `scopeFallback: true`.
+  // It is dropped, for three reasons: (1) its stated justification was the silent-fork story above,
+  // which is false; (2) it is fully derivable by the consumer from `workspaceId` — already in this
+  // projection — plus the hint its own write will carry, and the derivation is STRICTLY more
+  // accurate, because the tag is pinned to the fetch while the write's hint is live (in the
+  // workbench, editing the workspace box does not reload the list, so a stale tag would keep
+  // refusing the very tenant-level write the UI just told the operator to go and make); (3) this
+  // plugin already uses the name `scopeFallback` for a DIFFERENT, string-valued, internal-only
+  // annotation (lib/stock-preparation-source-binding-store.cjs; its routes test asserts
+  // "scopeFallback never reaches the wire").
+  //
+  // Widening the WRITES instead would have been the other repair; it is deliberately NOT taken
+  // here, because a hinted write silently retargeting a tenant-wide row is a scope decision for the
+  // owner, not a display bug.
   async function listExternalSystems(input = {}) {
     const tenantId = requiredString(input.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input.workspaceId)
@@ -1102,10 +1180,8 @@ function createExternalSystemRegistry({
 
     const merged = []
     const seenIds = new Set()
-    // `scopeFallback` is decided by WHICH BRANCH produced the row, not by re-reading its column:
-    // a row from the second branch is exactly a row the caller's own (hinted) WRITE scope does not
-    // contain. A row present in BOTH branches is kept from the first one, so it is NOT tagged.
-    for (const [rows, scopeFallback] of [[exactRows, false], [tenantWideRows, true]]) {
+    // Exact branch first, so a row present in BOTH is kept in the scope the caller writes in.
+    for (const rows of [exactRows, tenantWideRows]) {
       for (const row of toRowArray(rows)) {
         if (!row) continue
         const id = row.id
@@ -1113,16 +1189,16 @@ function createExternalSystemRegistry({
           if (seenIds.has(id)) continue
           seenIds.add(id)
         }
-        merged.push({ row, scopeFallback })
+        merged.push(row)
       }
     }
     // Array.prototype.sort is stable, so equal `created_at` keeps the exact-scope row ahead of the
     // tenant-wide one.
-    merged.sort((left, right) => createdAtSortKey(right.row) - createdAtSortKey(left.row))
-    return Promise.all(merged.slice(offset, offset + limit).map(async (entry) => {
-      const projected = await publicRow(credentialStore, entry.row)
-      return entry.scopeFallback ? { ...projected, scopeFallback: true } : projected
-    }))
+    merged.sort((left, right) => createdAtSortKey(right) - createdAtSortKey(left))
+    // The projection is byte-for-byte the single-query one: same `publicRow`, no added field. What
+    // a consumer needs in order to tell "my own writes cannot reach this row" is `workspaceId`,
+    // which `publicRow` has always carried.
+    return publicRows(merged.slice(offset, offset + limit))
   }
 
   return {
