@@ -489,40 +489,55 @@ function compareSiblingRows(left, right) {
   return compareOrderText(orderText(left[ROW_IDENTITY_KEY]), orderText(right[ROW_IDENTITY_KEY]))
 }
 
-// 老系统 `iterHandle` 686-693 的去重键第三项 `nameAndStandard` 在这条管线上的还原,三种形状依次
-// 退化 —— 这是本模块最容易出错的一处,因为 F1c **自己**改了 名称 列的含义:
+// 老系统 `iterHandle` 686-693 的去重键第三项 `nameAndStandard` 在这条管线上的还原 —— 这是本模块
+// 最容易出错的一处,因为 F1c **自己**改了 名称 列的含义:名称 从 F1c 起只装 identityName 的
+// **首段**(`createRow` 的 `splitNameAndSpec`,bom-expansion.cjs),而展开层的 `siblingDedupeKey`
+// 比的是**未切分**的全串。展示层要么还原出同一把键,要么就别合并 —— 不许在还原不出来的时候
+// 拿一把**更粗**的键去合并,那会把两个合法的不同标准件并成一行,并且连被合并那条的整棵子树
+// 一起不打印(`collapseSubtree`)。导出少行是本模块最贵的错误。
 //
-//   1. 客户包列 `ext_nameAndSpec`:F1c 之后新写的行装的就是未切分的全串,与展开层
-//      `siblingDedupeKey` 的 `nameAndSpec` 逐字同源(两边都来自 PLM identityName)。
-//   2. 没装包、或装了包但动作没在 `extensionFieldIds` 里声明这一列的部署(包列恒空):名称 列
-//      **只有首段** —— `createRow` 从 F1c 起写的是 `splitNameAndSpec(identityName).componentName`
-//      (bom-expansion.cjs 的 createRow)。单独拿首段当键,会把「同图号、同材料、同用量、规格
-//      不同」的两个标准件合并成一行,并且连被合并那条的整棵子树一起不打印 —— 老系统
-//      `iterHandle` 的注释明说加名称就是为了挡住这个标准件场景。所以把 规格 拼回去,还原出
-//      老系统那一串。
-//   3. 连 规格 也没有(名称里没有空格、部署也没绑 规格 列):键退回名称本身,与改前同量。
+// 三种形状,只有前两种可证:
+//   1. 客户包列 `ext_nameAndSpec` 有值:它装的就是未切分的全串,与展开层键逐字同源(两边都
+//      来自 PLM identityName)。**可证**。
+//   2. 规格 列为空:规格 为空只可能是因为名称里没有空格 —— 声明了 `readPlan.part.specField` 的
+//      部署里源行 Spec 为空时会退回派生(bom-expansion createRow),派生出空 ⇔ 无空格 ⇔ 名称就是
+//      全串。所以键 = 名称本身,与源串逐字相同。**可证**。
+//   3. 规格 有值而包列为空:规格 **可能**是名称的尾巴(派生;`splitNameAndSpec` 的尾段是 verbatim
+//      的 slice,拼回去逐字相同),**也可能**是部署自己声明的 规格 列的值 —— dn-pdm-family.preset
+//      把 规格 描述成 a part-side dictionary assignment,字典值天生粗:两行 identityName 分别是
+//      「螺栓 M8x30」「螺栓 M10x40」、规格 列却同为「碳钢」时,拼出来的键会撞。行上没有任何东西
+//      能把这两种来源区分开(名称永远是首段,两种来源都不含空格)。**不可证 ⇒ 返回 null**,
+//      `walk` 见 null 就不比较也不登记,这一行照打,它的子树照打。
 //
-// 拼回来的串不保证与源串逐字相同(部署自己声明了 规格 列时,规格 不是名称的尾巴),但那个方向
-// 只会让键**更细** —— 合并得更少,永远不会多合并一行。这是这把兜底键唯一可以接受的偏差方向。
+// 代价说清楚:装了包却没在 `extensionFieldIds` 里声明 名称及规格、同时又有 规格 值的部署,展示层
+// 兜底去重就此失效(`collapsedRowCount` 为 0)。这是有意的:**展开层**(bom-expansion
+// `siblingDedupeKey`)才是去重的权威点,它拿得到未切分的源串;展示层这一层只是给 F1c 之前
+// 写进表里的老行兜底。兜不住时宁可多打印一行,也不丢一棵子树。
 //
-// 单层用量在键里,是为了和展开层 **同一把键**(bom-expansion `siblingDedupeKey`):展开层多带
-// 用量,是为了不把「同父同件但用量不一致」这种数据缺陷从 duplicate_expanded_key 的 fail-closed
-// 挂起里偷走。展示层如果少带这一项,就会在打印时把展开层特意留下的那两行又合并掉 —— 触发口径
-// 和边界口径不同量,正是这类兜底最容易出的错。
+// 单层用量在键里,是为了和展开层 **同一把键**:展开层多带用量,是为了不把「同父同件但用量不
+// 一致」这种数据缺陷从 duplicate_expanded_key 的 fail-closed 挂起里偷走。展示层如果少带这一项,
+// 就会在打印时把展开层特意留下的那两行又合并掉 —— 触发口径和边界口径不同量。
 function nameAndSpecDisplayKey(row) {
   const packed = orderText(row.ext_nameAndSpec)
-  if (packed !== '') return packed
+  if (packed !== '') return { text: packed, provable: true }
   const name = orderText(columnSourceValue(row, COMPONENT_NAME_ORDER_COLUMN))
   const spec = orderText(columnSourceValue(row, COMPONENT_SPEC_ORDER_COLUMN))
-  if (spec === '') return name
-  return `${name} ${spec}`
+  if (spec === '') return { text: name, provable: true }
+  return { text: `${name} ${spec}`, provable: false }
 }
 
+/**
+ * 展示层去重键,或 `null` —— null 的意思是「这一行的 名称及规格 还原不出来,不许拿它跟任何行
+ * 比」,不是「键为空」。调用方(`walk`)必须把 null 当作「永不合并」,而不是当作一个可以互相
+ * 撞的普通键值。
+ */
 function displayDedupeKey(row) {
+  const nameAndSpec = nameAndSpecDisplayKey(row)
+  if (!nameAndSpec.provable) return null
   return JSON.stringify([
     orderText(columnSourceValue(row, PARENT_CODE_ORDER_COLUMN)),
     orderText(columnSourceValue(row, COMPONENT_CODE_ORDER_COLUMN)),
-    nameAndSpecDisplayKey(row),
+    nameAndSpec.text,
     orderText(row.material),
     orderText(row.rawQuantity),
   ])
@@ -534,7 +549,8 @@ function displayDedupeKey(row) {
  * 根 = `parentSourceId` 为空、或它指的那个部件不在这批行里(孤儿行:它的父件被标无效、或这一批
  * 就是被筛过的)。孤儿当根而不是丢掉 —— 导出从不少行,这是这个函数最要紧的一条性质。
  * 兄弟按 `compareSiblingRows`(排序号 -> 图号 -> 幂等键 -> 名称 -> 记录 id),深度优先,同父之下
- * 按老系统那把键去重(首条胜出,被去重的那条连它的子树一起不打印,和老系统一样)。
+ * 按老系统那把键去重(首条胜出,被去重的那条连它的子树一起不打印,和老系统一样),但**只在这把
+ * 键还原得出来的时候**去重 —— 还原不出来就一行不并(displayDedupeKey 返回 null)。
  *
  * 三条防线,各自有「拿掉就红」的用例:
  *   1. 环 / 不可达:`visited` 保证每行最多打印一次;走完之后没被访问到的行按 F1b 的平比较器
@@ -586,12 +602,17 @@ function orderRowsAsBomTree(rows) {
     const seenKeys = new Set()
     for (const row of siblings.slice().sort(compareSiblingRows)) {
       if (visited.has(row)) continue
+      // null = 这一行的 名称及规格 还原不出来(见 displayDedupeKey)。既不比较也不登记 ⇒ 它
+      // 既不会被别人合并掉,也不会把别人合并掉。把 null 当普通键值丢进 Set 的写法会让所有
+      // 不可证的行互相撞成一行 —— 正好是这把键要挡的那个错,方向还反了。
       const key = displayDedupeKey(row)
-      if (seenKeys.has(key)) {
-        collapseSubtree(row)
-        continue
+      if (key !== null) {
+        if (seenKeys.has(key)) {
+          collapseSubtree(row)
+          continue
+        }
+        seenKeys.add(key)
       }
-      seenKeys.add(key)
       visited.add(row)
       ordered.push(row)
       const identity = identityOf(row)

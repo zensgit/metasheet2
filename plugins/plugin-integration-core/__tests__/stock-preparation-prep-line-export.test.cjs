@@ -1285,6 +1285,9 @@ async function moduleExportWithoutAnyParentBindingDegradesToDrawingOrder() {
 //
 // R17 打乱顺序喂进来 => 根 -> 子 -> 孙 的树序,兄弟按 明细排序号(客户包列 ext_componentSortNo)。
 // R18 同父同键的重复行按老系统合并,合并条数如实上报(collapsedRowCount),重复行的子树跟着走。
+//    这批行带 ext_nameAndSpec(名称及规格):展示层只在这把键**还原得出来**的时候才合并 ——
+//    包列有值是三种可证形状里的第一种(见 displayDedupeKey);第三种(规格 有值、包列为空)
+//    不可证,一行不并,那是 R22。
 // R19 孤儿行(父件不在这批里)当根打印,一行都不少。
 // R20 没有 部件源ID 的老部署退回 F1b 的平比较器(treeOrdered: false),不比改之前更乱。
 // ---------------------------------------------------------------------------
@@ -1303,26 +1306,31 @@ function treeRows() {
     // 打乱:孙 -> 重复兄弟 -> 兄弟B -> 孤儿 -> 根 -> 兄弟A。没有任何一个比较器会产出这个顺序。
     mainRow(PROJECT_TREE, {
       ...shared, componentCode: 'DWG-T-A1', componentName: 'A的子件',
+      ext_nameAndSpec: 'A的子件',
       componentSourceId: 'P-A', parentSourceId: 'P-A0', ext_componentSortNo: 10,
       idempotencyKey: 'idk-t-a1',
     }, 'rec_t_a1'),
     mainRow(PROJECT_TREE, {
       ...shared, componentCode: 'DWG-T-B', componentName: 'B件',
+      ext_nameAndSpec: 'B件',
       componentSourceId: 'P-B-DUP', parentSourceId: 'P-ROOT', ext_componentSortNo: 20,
       idempotencyKey: 'idk-t-b-dup',
     }, 'rec_t_bdup'),
     mainRow(PROJECT_TREE, {
       ...shared, componentCode: 'DWG-T-B', componentName: 'B件',
+      ext_nameAndSpec: 'B件',
       componentSourceId: 'P-B', parentSourceId: 'P-ROOT', ext_componentSortNo: 20,
       idempotencyKey: 'idk-t-b',
     }, 'rec_t_b'),
     mainRow(PROJECT_TREE, {
       ...shared, componentCode: 'DWG-T-X', componentName: '孤儿件',
+      ext_nameAndSpec: '孤儿件',
       componentSourceId: 'P-X', parentSourceId: 'P-GONE', ext_componentSortNo: 99,
       idempotencyKey: 'idk-t-x',
     }, 'rec_t_x'),
     mainRow(PROJECT_TREE, {
       ...shared, componentCode: 'DWG-T-ROOT', componentName: '根件',
+      ext_nameAndSpec: '根件',
       parentComponentCode: undefined, parentComponentName: undefined,
       ext_parentDrawingNo: undefined, ext_parentName: undefined,
       componentSourceId: 'P-ROOT', parentSourceId: undefined, ext_componentSortNo: 1,
@@ -1330,6 +1338,7 @@ function treeRows() {
     }, 'rec_t_root'),
     mainRow(PROJECT_TREE, {
       ...shared, componentCode: 'DWG-T-A0', componentName: 'A件',
+      ext_nameAndSpec: 'A件',
       componentSourceId: 'P-A0', parentSourceId: 'P-ROOT', ext_componentSortNo: 5,
       idempotencyKey: 'idk-t-a0',
     }, 'rec_t_a0'),
@@ -1477,6 +1486,104 @@ async function moduleSameDrawingDifferentSpecIsNotCollapsed() {
   assert.equal(result.treeOrdered, true)
 }
 
+// ---------------------------------------------------------------------------
+// R22 — 部署自己声明了 规格 列(readPlan.part.specField)时,展示层拼不回老系统那一串,
+// 于是**一行不并**。
+//
+// 声明了 specField 的部署上(dn-pdm-family.preset 把 规格 叫做 a part-side dictionary
+// assignment),规格 是 part 侧的字典值,不是 identityName 的尾巴;而 F1c 之后 名称 列只装
+// 首段。两行 identityName 分别是「螺栓 M8x30」「螺栓 M10x40」、规格 列却同为「碳钢」时,
+// 名称 + 规格 拼出来的串对这两行**完全相同** —— 比展开层那把键(比未切分全串)更**粗**。
+// 照拼就会把两个合法的不同标准件并成一行,还连第二件的子件一起吞掉(collapseSubtree)。
+//
+// 拿掉 walk 里的 `key !== null` 守卫(或让 displayDedupeKey 的不可证分支照拼)⇒ 本用例必红:
+// 打印 2 行而不是 4 行,collapsedRowCount 从 0 变 2。R21 盖不住这个形状 —— R21 那两行的 规格
+// 是不同值。
+// ---------------------------------------------------------------------------
+
+const PROJECT_DECLARED_SPEC = 'PRJ-DECL-SPEC'
+
+function declaredSpecColumnRows({ packNameAndSpec } = {}) {
+  const shared = {
+    // 无包(或包列未声明):名称及规格 恒空 —— 展示层唯一可证的那条路被关掉。
+    ext_parentDrawingNo: undefined,
+    ext_parentName: undefined,
+    ext_spec: undefined,
+    ext_nameAndSpec: undefined,
+    parentComponentCode: 'TZ-D0',
+    parentComponentName: 'D主体',
+    material: '碳钢',
+    totalQuantity: 2,
+  }
+  return [
+    mainRow(PROJECT_DECLARED_SPEC, {
+      ...shared,
+      parentComponentCode: undefined, parentComponentName: undefined,
+      componentCode: 'J100-00', componentName: 'D主体', componentSpec: undefined,
+      componentSourceId: 'P-D0', parentSourceId: undefined, ext_componentSortNo: 1,
+      idempotencyKey: 'idk-d0',
+    }, 'rec_d0'),
+    // 两个标准件:图号/名称(首段)/材质/用量全同,规格 列同为字典值「碳钢」。
+    // 它们的源串(identityName)是「螺栓 M8x30」「螺栓 M10x40」—— 合法的两行。
+    mainRow(PROJECT_DECLARED_SPEC, {
+      ...shared,
+      componentCode: 'GB/T5783', componentName: '螺栓', componentSpec: '碳钢',
+      componentSourceId: 'P-D1', parentSourceId: 'P-D0', ext_componentSortNo: 10,
+      ext_nameAndSpec: packNameAndSpec,
+      idempotencyKey: 'idk-d1',
+    }, 'rec_d1'),
+    mainRow(PROJECT_DECLARED_SPEC, {
+      ...shared,
+      componentCode: 'GB/T5783', componentName: '螺栓', componentSpec: '碳钢',
+      componentSourceId: 'P-D2', parentSourceId: 'P-D0', ext_componentSortNo: 20,
+      ext_nameAndSpec: packNameAndSpec,
+      idempotencyKey: 'idk-d2',
+    }, 'rec_d2'),
+    mainRow(PROJECT_DECLARED_SPEC, {
+      ...shared,
+      parentComponentCode: 'GB/T5783', parentComponentName: '螺栓 M10x40',
+      componentCode: 'WASHER-9', componentName: '垫圈', componentSpec: '碳钢',
+      componentSourceId: 'P-D2-C', parentSourceId: 'P-D2', ext_componentSortNo: 5,
+      idempotencyKey: 'idk-d2c',
+    }, 'rec_d2c'),
+  ]
+}
+
+async function moduleDeclaredSpecColumnNeverCollapsesTwoDifferentStandardParts() {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: declaredSpecColumnRows() },
+  })
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_DECLARED_SPEC, permission: 'admin',
+  })
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  assert.deepEqual(
+    result.rows.map((row) => row[codeColumn]),
+    ['J100-00', 'GB/T5783', 'GB/T5783', 'WASHER-9'],
+    'R22: 声明了 规格 列时,名称+规格 拼出的串撞了也不许合并 —— 两个标准件都打印,第二件的子件跟着打印',
+  )
+  assert.equal(result.collapsedRowCount, 0, 'R22: 一行都没被合并')
+  assert.equal(result.treeOrdered, true, 'R22: 树序照给 —— 放弃的是兜底去重,不是树序')
+  // 正控:同一个形状,只要 名称及规格 包列有值(可证的那一支),这两行就**该**被合并 —— 证明
+  // R22 放弃的是不可证的那一支,不是整把键塌了。
+  const packedRecords = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: declaredSpecColumnRows({ packNameAndSpec: '螺栓 M8x30' }) },
+  })
+  const packed = await exportStockPreparationPrepLines({
+    recordsApi: packedRecords, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_DECLARED_SPEC, permission: 'admin',
+  })
+  assert.deepEqual(
+    packed.rows.map((row) => row[codeColumn]),
+    ['J100-00', 'GB/T5783'],
+    'R22 正控:名称及规格 可证且相同 ⇒ 第二件连同它的子件一起被合并(老系统 iterHandle 的行为)',
+  )
+  assert.equal(packed.collapsedRowCount, 2, 'R22 正控:合并条数含被吞掉的子树')
+}
+
 async function main() {
   await moduleReturnsExactAgreedColumnsForASeededProject()
   await moduleNeverLeaksOtherProjectsRows()
@@ -1521,6 +1628,7 @@ async function main() {
   await moduleExportWithoutSourceIdentityKeepsTheFlatOrder()
   await moduleLegacyTwentyThreeColumnsAreProjected()
   await moduleSameDrawingDifferentSpecIsNotCollapsed()
+  await moduleDeclaredSpecColumnNeverCollapsesTwoDifferentStandardParts()
 
   console.log('stock-preparation-prep-line-export (按项目导出物料 Excel): all assertions passed')
 }
