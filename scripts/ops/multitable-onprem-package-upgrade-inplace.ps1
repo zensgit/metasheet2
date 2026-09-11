@@ -26,7 +26,18 @@
   STEPS
     1. Verify the package: SHA-256 of the zip against its `.sha256` sidecar.
        Refuse on mismatch.
-    2. Stop the pm2 app (name parameterized, default metasheet-backend).
+    2. Raise the maintenance gate (write MaintenanceFlagPath, default
+       <RootDir>\output\maintenance.flag — nginx returns 503 + Retry-After for
+       /api/* while it exists, see ops/nginx/multitable-onprem.conf.example),
+       THEN stop the pm2 app (name parameterized, default metasheet-backend).
+       The flag is refused outright if it would live inside any ReplaceDirs
+       entry, and a finally block deletes it on every exit path. Between the
+       two, probe HealthUrl ONCE while the backend is still up: 503 proves
+       this host's nginx really reads the flag, 200 proves it does not (the
+       example conf was never hand-synced here) and prints
+       MAINTENANCE_GATE_NOT_WIRED. Diagnostic only, never blocks the upgrade —
+       without it "maintenance flag: ... (removed)" would read like proof the
+       window was shielded on a host where the flag is inert.
     3. Back up docker/, config/, packages/core-backend/dist, apps/web/dist,
        and plugins/ (excluding node_modules) to a timestamped folder. Prints
        the backup path.
@@ -45,8 +56,14 @@
        hash mismatch, or detected leak.
     6. Run migrations with env loaded from docker/app.env into this process
        (pm2 holds stale env otherwise).
-    7. Restart pm2 with env reload; poll the health endpoint until ok or
-       timeout; print a plugins summary.
+    7. Restart pm2 with env reload; poll the BACKEND DIRECTLY
+       (http://127.0.0.1:<PORT>/health, PORT read from the env file) until ok
+       or timeout; drop the maintenance gate; only then poll the public
+       endpoint through nginx. r29 (2026-09-11) proved why the order matters:
+       with the gate up, nginx answers 503 to /api/health too, so probing
+       nginx first made the script fail its own healthcheck 12 times and exit
+       -1 on an upgrade whose backend was already serving. Print a plugins
+       summary.
     8. Print a final report: package name, backup path, migration exit,
        health, and the exact operator commands to run next (preflight +
        acceptance bootstrap).
@@ -84,9 +101,32 @@ param(
 
   [string]$HealthUrl = 'http://127.0.0.1/api/health',
 
+  # Backend-direct probe, bypassing nginx entirely. Empty = derive
+  # http://127.0.0.1:<PORT>/health with PORT read out of the env file (see
+  # Get-EnvFileValue / Resolve-BackendHealthUrl). This probe MUST come first:
+  # while the maintenance flag is up, nginx answers 503 to /api/* — including
+  # this script's own healthcheck. r29 (2026-09-11) burned a window on exactly
+  # that: the backend was already healthy, the flag was still up, the nginx
+  # probe got 12 x 503, and the script exited -1 on a successful upgrade.
+  [string]$BackendHealthUrl = '',
+
+  # Fallback when the env file declares no PORT (matches
+  # packages/core-backend/src/config.ts: parseInt(process.env.PORT || '8900')).
+  [int]$BackendDefaultPort = 8900,
+
   [int]$HealthcheckAttempts = 12,
 
   [int]$HealthcheckDelaySec = 5,
+
+  # The maintenance gate nginx tests for. While this file exists, nginx answers
+  # 503 + Retry-After to /api/* and serves the static maintenance page on /, so
+  # testers see "维护中" instead of ERR_CONNECTION_RESET during the pm2 restart
+  # window. Empty = <RootDir>\output\maintenance.flag. It MUST NOT live under
+  # any ReplaceDirs entry (see Assert-MaintenanceFlagOutsideReplaceDirs): those
+  # directories are deleted and recopied wholesale mid-upgrade, which would drop
+  # the gate at the worst possible moment and leave a flag file that the next
+  # upgrade's replace step would silently resurrect or destroy.
+  [string]$MaintenanceFlagPath = '',
 
   [ValidateSet('0', '1')]
   [string]$RunMigrations = '1',
@@ -796,13 +836,227 @@ function Invoke-CheckedCommand {
   }
 }
 
+# ── The maintenance gate (flag file read by nginx) ──────────────────────────
+
+function Join-RootRelativePath {
+  <#
+    Builds an absolute path from RootDir + a repo-style relative path, tolerating
+    either separator, WITHOUT requiring the path to exist (Resolve-Path cannot be
+    used here: the flag file does not exist yet when it is validated, and the
+    ReplaceDirs may not exist on a fresh host).
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$RootDir,
+    [Parameter(Mandatory = $true)][string]$Relative
+  )
+
+  $result = $RootDir
+  foreach ($segment in ($Relative -split '[\\/]+')) {
+    if ([string]::IsNullOrWhiteSpace($segment)) { continue }
+    $result = Join-Path $result $segment
+  }
+  return [System.IO.Path]::GetFullPath($result)
+}
+
+function Resolve-MaintenanceFlagPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$RootDir,
+    [string]$Candidate = ''
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Candidate)) {
+    return (Join-RootRelativePath -RootDir $RootDir -Relative 'output/maintenance.flag')
+  }
+  if ([System.IO.Path]::IsPathRooted($Candidate)) {
+    return [System.IO.Path]::GetFullPath($Candidate)
+  }
+  return (Join-RootRelativePath -RootDir $RootDir -Relative $Candidate)
+}
+
+function Assert-MaintenanceFlagOutsideReplaceDirs {
+  <#
+    Static, pre-flight refusal: the flag must not live inside any directory this
+    upgrade deletes and recopies wholesale (Update-ReplaceDirs). If it did, the
+    replace step would delete the raised gate mid-upgrade — traffic would hit a
+    down backend with a raw connection reset, which is the exact symptom the gate
+    exists to remove — and the post-upgrade removal would then be a no-op against
+    a path the package may have repopulated. Refuses BEFORE pm2 is touched.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$FlagPath,
+    [Parameter(Mandatory = $true)][string]$RootDir,
+    [string[]]$ReplaceDirs = @()
+  )
+
+  # OrdinalIgnoreCase on every platform: on a case-sensitive filesystem this only
+  # refuses MORE paths than strictly necessary, which is the safe direction for a
+  # gate whose failure mode is a silently-dropped maintenance window.
+  $comparison = [System.StringComparison]::OrdinalIgnoreCase
+  $flagFull = [System.IO.Path]::GetFullPath($FlagPath)
+  $separator = [System.IO.Path]::DirectorySeparatorChar
+
+  foreach ($rel in $ReplaceDirs) {
+    $dirFull = Join-RootRelativePath -RootDir $RootDir -Relative $rel
+    $dirPrefix = $dirFull.TrimEnd([char]'\', [char]'/') + $separator
+    if ($flagFull.Equals($dirFull.TrimEnd([char]'\', [char]'/'), $comparison) -or $flagFull.StartsWith($dirPrefix, $comparison)) {
+      throw "MAINTENANCE_FLAG_PATH_INSIDE_REPLACE_DIR: $flagFull is under the replaced directory '$rel' ($dirFull). Pick a path outside every replaced directory, for example <RootDir>\output\maintenance.flag."
+    }
+  }
+
+  return $flagFull
+}
+
+function New-MaintenanceFlag {
+  <#
+    Raises the gate. Written BEFORE pm2 is stopped so no request can fall into
+    the window between "backend down" and "gate up".
+  #>
+  param([Parameter(Mandatory = $true)][string]$FlagPath)
+
+  $parent = Split-Path -Parent $FlagPath
+  if (-not [string]::IsNullOrWhiteSpace($parent)) {
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  }
+  $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+  Set-Content -LiteralPath $FlagPath -Value "multitable-onprem-package-upgrade-inplace raised this maintenance flag at $stamp. Delete this file to let traffic through again." -Encoding ASCII
+  return $FlagPath
+}
+
+function Remove-MaintenanceFlag {
+  <#
+    Drops the gate. Idempotent on purpose: it is called on the success path (as
+    soon as the backend answers directly, BEFORE the nginx probe) and again,
+    unconditionally, from the finally block in Main — so a flag raised by a run
+    that then died anywhere, at any step, never outlives the script.
+  #>
+  param([Parameter(Mandatory = $true)][string]$FlagPath)
+
+  if (Test-Path -LiteralPath $FlagPath) {
+    Remove-Item -LiteralPath $FlagPath -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $FlagPath) {
+      Write-Err "MAINTENANCE_FLAG_STILL_PRESENT: failed to delete $FlagPath — the site will keep answering 503 until this file is removed by hand."
+      return $false
+    }
+    Write-Info "Maintenance flag removed: $FlagPath"
+    return $true
+  }
+  return $false
+}
+
+function Test-MaintenanceGateWired {
+  <#
+    POSITIVE self-witness for the gate. Writing the flag proves nothing on its
+    own: nginx only answers 503 if somebody hand-synced the `if (-f ...)` block
+    into THIS host's nginx.conf (ops/nginx/multitable-onprem.conf.example is a
+    template — editing the repo has zero effect on a running box). On an
+    un-synced host the flag is inert, yet the run would still print
+    "maintenance flag: ... (removed)" and leave the operator believing a gate
+    was up while testers ate ERR_CONNECTION_RESET for 60-90 seconds.
+
+    Called right after the flag is raised and BEFORE pm2 is stopped, so the
+    backend is still serving: a 200 through the public URL at that instant can
+    only mean "this nginx does not read that file". 503 = wired. Anything else
+    (connection refused, 502 from an already-dead backend, a timeout) is
+    inconclusive and reported as such.
+
+    NEVER fails the upgrade: refusing to upgrade a host whose nginx.conf was
+    never synced would be worse than upgrading it without the gate. This is a
+    diagnostic, not a guard.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$ProbeUrl,
+    [Parameter(Mandatory = $true)][string]$FlagPath
+  )
+
+  $status = $null
+  try {
+    # The header is for test fixtures/log readers only — nginx's `if (-f ...)`
+    # gate is header-blind, so tagging the probe cannot change what it measures.
+    $response = Invoke-WebRequest -Uri $ProbeUrl -UseBasicParsing -TimeoutSec 5 -Headers @{ 'X-Upgrade-Gate-Probe' = '1' }
+    $status = [int]$response.StatusCode
+  } catch {
+    # PS 5.1 throws WebException (.Response is HttpWebResponse), pwsh 7 throws
+    # HttpResponseException (.Response is HttpResponseMessage); .StatusCode
+    # casts to int on both. A transport failure has no .Response at all.
+    $failed = $_.Exception.Response
+    if ($failed -and $failed.StatusCode) {
+      try { $status = [int]$failed.StatusCode } catch { $status = $null }
+    }
+  }
+
+  if ($status -eq 503) {
+    Write-Info "MAINTENANCE_GATE_WIRED: $ProbeUrl answered 503 while $FlagPath exists — nginx really is reading this flag."
+    return 'WIRED'
+  }
+  if ($status -ge 200 -and $status -lt 400) {
+    Write-Err "MAINTENANCE_GATE_NOT_WIRED: $ProbeUrl answered $status while the maintenance flag $FlagPath exists. This nginx does not read that file, so the upgrade window will NOT be shielded: users get ERR_CONNECTION_RESET / Failed to fetch while the backend is down. Sync the 'if (-f <flag>) { return 503; }' blocks from ops/nginx/multitable-onprem.conf.example into this host's nginx.conf (nginx -t, then reload as SYSTEM) — see the runbook section 升级窗口的维护门. The upgrade continues regardless."
+    return 'NOT_WIRED'
+  }
+  $observed = if ($null -eq $status) { 'nothing (transport failure)' } else { "status $status" }
+  Write-Info "MAINTENANCE_GATE_UNKNOWN: $ProbeUrl answered $observed while the flag was up — cannot tell whether the gate is wired. Verify by hand (see the runbook)."
+  return 'UNKNOWN'
+}
+
+function Get-EnvFileValue {
+  <#
+    Reads ONE key out of a KEY=VALUE env file without importing anything into
+    this process (Import-AppEnvFile does that, but only when migrations run —
+    the backend port must be resolvable even with -RunMigrations 0).
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$EnvFile,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+
+  if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
+    return $null
+  }
+  foreach ($rawLine in Get-Content -LiteralPath $EnvFile) {
+    $line = $rawLine.Trim()
+    if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) { continue }
+    $parts = $line -split '=', 2
+    if ($parts.Length -ne 2) { continue }
+    if ($parts[0].Trim() -ne $Name) { continue }
+    $value = $parts[1].Trim()
+    if ($value.Length -ge 2) {
+      if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+        $value = $value.Substring(1, $value.Length - 2)
+      }
+    }
+    return $value
+  }
+  return $null
+}
+
+function Resolve-BackendHealthUrl {
+  param(
+    [string]$Candidate = '',
+    [string]$EnvFile = '',
+    [int]$DefaultPort = 8900
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($Candidate)) {
+    return $Candidate
+  }
+  $port = $DefaultPort
+  if (-not [string]::IsNullOrWhiteSpace($EnvFile)) {
+    $declared = Get-EnvFileValue -EnvFile $EnvFile -Name 'PORT'
+    $parsed = 0
+    if ($declared -and [int]::TryParse($declared, [ref]$parsed) -and $parsed -gt 0) {
+      $port = $parsed
+    }
+  }
+  return "http://127.0.0.1:$port/health"
+}
+
 # ── Step 7: restart + healthcheck ───────────────────────────────────────────
 
 function Wait-ForHealthOk {
   param(
     [string]$HealthUrl,
     [int]$Attempts = 12,
-    [int]$DelaySec = 5
+    [int]$DelaySec = 5,
+    [string]$Label = 'Healthcheck'
   )
 
   for ($attempt = 1; $attempt -le $Attempts; $attempt += 1) {
@@ -816,9 +1070,9 @@ function Wait-ForHealthOk {
           Body       = $response.Content
         }
       }
-      Write-Info "Healthcheck attempt $attempt/$Attempts returned status $($response.StatusCode)"
+      Write-Info "$Label attempt $attempt/$Attempts returned status $($response.StatusCode)"
     } catch {
-      Write-Info "Healthcheck attempt $attempt/$Attempts failed: $($_.Exception.Message)"
+      Write-Info "$Label attempt $attempt/$Attempts failed: $($_.Exception.Message)"
     }
     if ($attempt -lt $Attempts) {
       Start-Sleep -Seconds $DelaySec
@@ -847,12 +1101,19 @@ function Write-RestoreBlock {
     [Parameter(Mandatory = $true)][string]$BackupPath,
     [Parameter(Mandatory = $true)][string]$RootDir,
     [string[]]$ReplacedRelativePaths = @(),
-    [string]$Pm2AppName = 'metasheet-backend'
+    [string]$Pm2AppName = 'metasheet-backend',
+    [string]$MaintenanceFlagPath = ''
   )
 
   Write-Host ''
   Write-Host '=========================== RESTORE REQUIRED ==========================='
   Write-Host "Backup path: $BackupPath"
+  if (-not [string]::IsNullOrWhiteSpace($MaintenanceFlagPath)) {
+    Write-Host "Maintenance flag: $MaintenanceFlagPath"
+    Write-Host '  This script deletes that flag on exit. If the site still answers 503 afterwards,'
+    Write-Host '  delete it by hand:'
+    Write-Host ("  Remove-Item -LiteralPath '{0}' -Force" -f $MaintenanceFlagPath)
+  }
   Write-Host ''
   Write-Host 'The upgrade did not complete. Restore each replaced path from the backup,'
   Write-Host 'then restart pm2:'
@@ -882,6 +1143,14 @@ if ($MyInvocation.InvocationName -ne '.') {
     $resolvedEnvFile = (Resolve-Path -LiteralPath $resolvedEnvFile).Path
   }
 
+  # Resolved and validated BEFORE anything at all happens — no pm2 call, no
+  # backup directory, no file touched. A flag path inside a replaced directory
+  # is a configuration error that must stop the run, not something to discover
+  # halfway through the swap.
+  $maintenanceFlagPath = Resolve-MaintenanceFlagPath -RootDir $resolvedRoot -Candidate $MaintenanceFlagPath
+  $maintenanceFlagPath = Assert-MaintenanceFlagOutsideReplaceDirs -FlagPath $maintenanceFlagPath -RootDir $resolvedRoot -ReplaceDirs $ReplaceDirs
+  $resolvedBackendHealthUrl = Resolve-BackendHealthUrl -Candidate $BackendHealthUrl -EnvFile $resolvedEnvFile -DefaultPort $BackendDefaultPort
+
   $resolvedBackupRoot = $BackupRoot
   if ([string]::IsNullOrWhiteSpace($resolvedBackupRoot)) {
     $resolvedBackupRoot = Join-Path $resolvedRoot 'output\backups'
@@ -898,114 +1167,172 @@ if ($MyInvocation.InvocationName -ne '.') {
   $verifiedSha = Test-PackageChecksum -ArchivePath $resolvedArchive
   Write-Info "Package verified: $packageBaseName sha256=$verifiedSha"
 
-  Write-Info '=== Step 2/8: stop pm2 app ==='
-  Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName
+  Write-Info '=== Step 2/8: stop pm2 app (maintenance gate raised first) ==='
 
-  Write-Info '=== Step 3/8: back up current install ==='
-  $backupPath = New-TimestampedBackup -RootDir $resolvedRoot -BackupRoot $resolvedBackupRoot -RelativePaths $BackupPaths
-  Write-Host "BACKUP_PATH=$backupPath"
-
-  # THE MUTATION WINDOW. From here through the health check, ANY exception —
-  # a mid-swap failure inside Update-ReplaceDirs/Update-Plugins, a failed
-  # F22/hash assertion, a failed migration, a failed pm2 restart, or a failed
-  # healthcheck (raised as an exception below, deliberately, so it flows
-  # through this SAME handler instead of a second, easily-forgotten copy of
-  # this logic) — is caught by the single handler at the bottom of this
-  # block. That handler stops pm2 (a broken deployment must not be left
-  # running; Stop-Pm2App tolerates pm2 already being stopped, which is the
-  # normal case for every failure point except a failed healthcheck) and
-  # prints the restore block, then rethrows. Nothing past step 3 may fail
-  # without telling the operator where the backup is.
+  $maintenanceGate = 'UNKNOWN'
   try {
-    Write-Info '=== Step 4/8: extract + replace runtime paths ==='
-    $stagingBase = Resolve-StagingBase -Candidate $StagingRoot
-    $extractRoot = New-ShortTempDirectory -Prefix 'mspui' -BaseRoot $stagingBase
-    Write-Info "Staging extract root: $extractRoot"
+    # The gate goes up BEFORE the backend goes down, so no request can land in
+    # the gap between "pm2 stopped" and "nginx answering 503": that gap is the
+    # ERR_CONNECTION_RESET / Failed to fetch testers reported in four separate
+    # upgrade windows.
+    #
+    # The write is the FIRST statement INSIDE the try, never before it. A flag
+    # raised on the pre-try lines would outlive any exception thrown between
+    # the write and `try {` — nothing would ever delete it and the site would
+    # answer 503 forever. Remove-MaintenanceFlag is idempotent, so putting the
+    # write inside costs nothing even when this very line is what threw.
+    # Everything from here on runs inside the try/finally below, whose finally
+    # drops the gate unconditionally — success, refusal, or an exception
+    # raised anywhere in between.
+    New-MaintenanceFlag -FlagPath $maintenanceFlagPath | Out-Null
+    Write-Host "MAINTENANCE_FLAG=$maintenanceFlagPath"
+
+    # Ask the PUBLIC url once, while the flag is up and the backend is still
+    # running: 503 proves nginx really reads this flag on THIS host, 200 proves
+    # it does not (the conf was never hand-synced). Diagnostic only — it never
+    # blocks the upgrade. Inside the try, so its failure still hits the finally
+    # that drops the flag.
+    $maintenanceGate = Test-MaintenanceGateWired -ProbeUrl $HealthUrl -FlagPath $maintenanceFlagPath
+
+    Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName
+
+    Write-Info '=== Step 3/8: back up current install ==='
+    $backupPath = New-TimestampedBackup -RootDir $resolvedRoot -BackupRoot $resolvedBackupRoot -RelativePaths $BackupPaths
+    Write-Host "BACKUP_PATH=$backupPath"
+
+    # THE MUTATION WINDOW. From here through the health check, ANY exception —
+    # a mid-swap failure inside Update-ReplaceDirs/Update-Plugins, a failed
+    # F22/hash assertion, a failed migration, a failed pm2 restart, or a failed
+    # healthcheck (raised as an exception below, deliberately, so it flows
+    # through this SAME handler instead of a second, easily-forgotten copy of
+    # this logic) — is caught by the single handler at the bottom of this
+    # block. That handler stops pm2 (a broken deployment must not be left
+    # running; Stop-Pm2App tolerates pm2 already being stopped, which is the
+    # normal case for every failure point except a failed healthcheck) and
+    # prints the restore block, then rethrows. Nothing past step 3 may fail
+    # without telling the operator where the backup is.
     try {
-      Expand-UpgradePackage -ArchivePath $resolvedArchive -TargetDir $extractRoot
-      $packageRoot = Resolve-PackageRoot -ExtractRoot $extractRoot
-      Write-Info "Extracted package root: $packageRoot"
+      Write-Info '=== Step 4/8: extract + replace runtime paths ==='
+      $stagingBase = Resolve-StagingBase -Candidate $StagingRoot
+      $extractRoot = New-ShortTempDirectory -Prefix 'mspui' -BaseRoot $stagingBase
+      Write-Info "Staging extract root: $extractRoot"
+      try {
+        Expand-UpgradePackage -ArchivePath $resolvedArchive -TargetDir $extractRoot
+        $packageRoot = Resolve-PackageRoot -ExtractRoot $extractRoot
+        Write-Info "Extracted package root: $packageRoot"
 
-      Update-ReplaceDirs -PackageRoot $packageRoot -RootDir $resolvedRoot -RelativeDirs $ReplaceDirs
-      Update-Plugins -PackageRoot $packageRoot -RootDir $resolvedRoot
+        Update-ReplaceDirs -PackageRoot $packageRoot -RootDir $resolvedRoot -RelativeDirs $ReplaceDirs
+        Update-Plugins -PackageRoot $packageRoot -RootDir $resolvedRoot
 
-      Write-Info '=== Step 5/8: assert must-exist files (F22 tripwire) + per-file hash verification ==='
-      Assert-MustExistFiles -RootDir $resolvedRoot -RelativePaths $MustExistManifest | Out-Null
-      Write-Info 'Must-exist manifest: OK, all files present'
-      $verifiedFileCount = Assert-PluginTreesMatchPackage -PackageRoot $packageRoot -RootDir $resolvedRoot
-      Write-Info "Plugin hash verification: OK ($verifiedFileCount files checked)"
-      $excludedCheckedCount = Assert-NoNodeModulesContentLeaked -PackageRoot $packageRoot -RootDir $resolvedRoot
-      Write-Info "Plugin node_modules leak check: OK ($excludedCheckedCount excluded package files checked)"
-      Write-PluginLibFileCountReport -PackageRoot $packageRoot -RootDir $resolvedRoot
-    } finally {
-      Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
-
-    Write-Info '=== Step 6/8: run migrations ==='
-    Set-Location $resolvedRoot
-    $migrationExit = 'skipped'
-    if ($RunMigrations -ne '0') {
-      if (-not (Test-Path -LiteralPath $resolvedEnvFile -PathType Leaf)) {
-        throw "ENV_FILE_MISSING: $resolvedEnvFile"
+        Write-Info '=== Step 5/8: assert must-exist files (F22 tripwire) + per-file hash verification ==='
+        Assert-MustExistFiles -RootDir $resolvedRoot -RelativePaths $MustExistManifest | Out-Null
+        Write-Info 'Must-exist manifest: OK, all files present'
+        $verifiedFileCount = Assert-PluginTreesMatchPackage -PackageRoot $packageRoot -RootDir $resolvedRoot
+        Write-Info "Plugin hash verification: OK ($verifiedFileCount files checked)"
+        $excludedCheckedCount = Assert-NoNodeModulesContentLeaked -PackageRoot $packageRoot -RootDir $resolvedRoot
+        Write-Info "Plugin node_modules leak check: OK ($excludedCheckedCount excluded package files checked)"
+        Write-PluginLibFileCountReport -PackageRoot $packageRoot -RootDir $resolvedRoot
+      } finally {
+        Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
       }
-      $importedCount = Import-AppEnvFile -EnvFile $resolvedEnvFile
-      Write-Info "Loaded $importedCount vars from $resolvedEnvFile (migration/restart/healthcheck inherit these)"
 
-      $migratePath = Join-Path $resolvedRoot 'packages\core-backend\dist\src\db\migrate.js'
-      if (-not (Test-Path -LiteralPath $migratePath -PathType Leaf)) {
-        throw "MIGRATE_ENTRYPOINT_MISSING: $migratePath"
+      Write-Info '=== Step 6/8: run migrations ==='
+      Set-Location $resolvedRoot
+      $migrationExit = 'skipped'
+      if ($RunMigrations -ne '0') {
+        if (-not (Test-Path -LiteralPath $resolvedEnvFile -PathType Leaf)) {
+          throw "ENV_FILE_MISSING: $resolvedEnvFile"
+        }
+        $importedCount = Import-AppEnvFile -EnvFile $resolvedEnvFile
+        Write-Info "Loaded $importedCount vars from $resolvedEnvFile (migration/restart/healthcheck inherit these)"
+
+        $migratePath = Join-Path $resolvedRoot 'packages\core-backend\dist\src\db\migrate.js'
+        if (-not (Test-Path -LiteralPath $migratePath -PathType Leaf)) {
+          throw "MIGRATE_ENTRYPOINT_MISSING: $migratePath"
+        }
+        Invoke-CheckedCommand "Run database migrations ($migratePath)" { node $migratePath }
+        $migrationExit = 0
+      } else {
+        Write-Info 'RunMigrations=0: skipped'
       }
-      Invoke-CheckedCommand "Run database migrations ($migratePath)" { node $migratePath }
-      $migrationExit = 0
-    } else {
-      Write-Info 'RunMigrations=0: skipped'
-    }
 
-    Write-Info '=== Step 7/8: restart pm2 + healthcheck ==='
-    if ($RestartService -ne '0') {
-      & $pm2Command restart $Pm2AppName --update-env
-      if ($LASTEXITCODE -ne 0) {
-        throw "PM2_RESTART_FAILED: exit=$LASTEXITCODE"
+      Write-Info '=== Step 7/8: restart pm2 + healthcheck (backend direct first, then nginx) ==='
+      if ($RestartService -ne '0') {
+        & $pm2Command restart $Pm2AppName --update-env
+        if ($LASTEXITCODE -ne 0) {
+          throw "PM2_RESTART_FAILED: exit=$LASTEXITCODE"
+        }
+      } else {
+        Write-Info 'RestartService=0: skipped'
       }
-    } else {
-      Write-Info 'RestartService=0: skipped'
-    }
 
-    $health = [pscustomobject]@{ Ok = $true; Attempt = 0; StatusCode = $null; Body = 'skipped (RestartService=0)' }
-    if ($RestartService -ne '0') {
-      $health = Wait-ForHealthOk -HealthUrl $HealthUrl -Attempts $HealthcheckAttempts -DelaySec $HealthcheckDelaySec
-    }
-    Write-PluginsSummary -RootDir $resolvedRoot
+      $backendHealth = [pscustomobject]@{ Ok = $true; Attempt = 0; StatusCode = $null; Body = 'skipped (RestartService=0)' }
+      $health = [pscustomobject]@{ Ok = $true; Attempt = 0; StatusCode = $null; Body = 'skipped (RestartService=0)' }
+      if ($RestartService -ne '0') {
+        # THE ORDER BELOW IS LOAD-BEARING (r29, 2026-09-11). The maintenance gate
+        # makes nginx answer 503 to everything under /api/ — this script's own
+        # nginx healthcheck included. Probing nginx first meant 12 x 503 and an
+        # exit -1 on an upgrade whose backend had been healthy the whole time.
+        # So: prove the backend is up by talking to it DIRECTLY (no nginx in the
+        # path, so the gate cannot answer for it), only then drop the gate, and
+        # only then probe through nginx — which now also proves the gate is
+        # really down, because a 200 through /api/ is impossible while it is up.
+        $backendHealth = Wait-ForHealthOk -HealthUrl $resolvedBackendHealthUrl -Attempts $HealthcheckAttempts -DelaySec $HealthcheckDelaySec -Label 'Backend-direct healthcheck'
+        if ($backendHealth.Ok) {
+          Write-Info "Backend answered directly on attempt $($backendHealth.Attempt) ($resolvedBackendHealthUrl); dropping the maintenance gate before the nginx probe"
+          Remove-MaintenanceFlag -FlagPath $maintenanceFlagPath | Out-Null
+          $health = Wait-ForHealthOk -HealthUrl $HealthUrl -Attempts $HealthcheckAttempts -DelaySec $HealthcheckDelaySec -Label 'Nginx healthcheck'
+        } else {
+          $health = [pscustomobject]@{ Ok = $false; Attempt = 0; StatusCode = $null; Body = 'not attempted (the backend never answered directly)' }
+        }
+      }
+      Write-PluginsSummary -RootDir $resolvedRoot
 
-    Write-Info '=== Step 8/8: final report ==='
-    Write-Host ''
-    Write-Host '===== multitable-onprem-package-upgrade-inplace: final report ====='
-    Write-Host "package:          $packageBaseName"
-    Write-Host "backup path:      $backupPath"
-    Write-Host "migration exit:   $migrationExit"
-    Write-Host "health:           $(if ($health.Ok) { 'OK' } else { 'FAILED' }) (attempt=$($health.Attempt), status=$($health.StatusCode))"
-    Write-Host ''
-    Write-Host 'Next (do not skip these):'
-    Write-Host '  1) Preflight:'
-    Write-Host '       GET <base-url>/api/integration/stock-preparation/preflight'
-    Write-Host '     Fix every listed blocker with its own fix.run until "ready": true.'
-    Write-Host '  2) Acceptance bootstrap (env-only input, see script header for full list):'
-    Write-Host '       node scripts/ops/stock-prep-acceptance-bootstrap.mjs'
-    Write-Host '     Requires MS_API, MS_TOKEN, MS_PROJECT_NO, MS_PACK_ID, MS_DATA_SOURCE_ID,'
-    Write-Host '     MS_EXTERNAL_SYSTEM_ID set in the environment beforehand.'
-    Write-Host '===================================================================='
+      Write-Info '=== Step 8/8: final report ==='
+      Write-Host ''
+      Write-Host '===== multitable-onprem-package-upgrade-inplace: final report ====='
+      Write-Host "package:          $packageBaseName"
+      Write-Host "backup path:      $backupPath"
+      Write-Host "migration exit:   $migrationExit"
+      Write-Host "backend health:   $(if ($backendHealth.Ok) { 'OK' } else { 'FAILED' }) (attempt=$($backendHealth.Attempt), url=$resolvedBackendHealthUrl)"
+      Write-Host "health:           $(if ($health.Ok) { 'OK' } else { 'FAILED' }) (attempt=$($health.Attempt), status=$($health.StatusCode))"
+      Write-Host "maintenance flag: $maintenanceFlagPath ($(if (Test-Path -LiteralPath $maintenanceFlagPath) { 'STILL PRESENT - removed on exit; if the site keeps answering 503, delete it by hand' } else { 'removed' }))"
+      # "(removed)" above says the file is gone; it does NOT say anyone was
+      # reading it. This line is the only place the operator learns whether the
+      # window was actually shielded on THIS host.
+      Write-Host "maintenance gate: $maintenanceGate (probed $HealthUrl while the flag was up; NOT_WIRED = this nginx.conf never got the gate, the window was unshielded)"
+      Write-Host ''
+      Write-Host 'Next (do not skip these):'
+      Write-Host '  1) Preflight:'
+      Write-Host '       GET <base-url>/api/integration/stock-preparation/preflight'
+      Write-Host '     Fix every listed blocker with its own fix.run until "ready": true.'
+      Write-Host '  2) Acceptance bootstrap (env-only input, see script header for full list):'
+      Write-Host '       node scripts/ops/stock-prep-acceptance-bootstrap.mjs'
+      Write-Host '     Requires MS_API, MS_TOKEN, MS_PROJECT_NO, MS_PACK_ID, MS_DATA_SOURCE_ID,'
+      Write-Host '     MS_EXTERNAL_SYSTEM_ID set in the environment beforehand.'
+      Write-Host '===================================================================='
 
-    if (-not $health.Ok) {
-      throw "HEALTHCHECK_FAILED after $HealthcheckAttempts attempts against $HealthUrl"
-    }
-  } catch {
-    Write-Err $_.Exception.Message
-    try {
-      Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName
+      if (-not $backendHealth.Ok) {
+        throw "BACKEND_HEALTHCHECK_FAILED after $HealthcheckAttempts attempts against $resolvedBackendHealthUrl (the nginx probe was never attempted)"
+      }
+      if (-not $health.Ok) {
+        throw "HEALTHCHECK_FAILED after $HealthcheckAttempts attempts against $HealthUrl"
+      }
     } catch {
-      Write-Err "pm2 stop itself failed while handling the error above: $($_.Exception.Message)"
+      Write-Err $_.Exception.Message
+      try {
+        Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName
+      } catch {
+        Write-Err "pm2 stop itself failed while handling the error above: $($_.Exception.Message)"
+      }
+      Write-RestoreBlock -BackupPath $backupPath -RootDir $resolvedRoot -ReplacedRelativePaths $restoredRelativePaths -Pm2AppName $Pm2AppName -MaintenanceFlagPath $maintenanceFlagPath
+      throw
     }
-    Write-RestoreBlock -BackupPath $backupPath -RootDir $resolvedRoot -ReplacedRelativePaths $restoredRelativePaths -Pm2AppName $Pm2AppName
-    throw
+  } finally {
+    # UNCONDITIONAL. Remove-MaintenanceFlag is idempotent, so the success path
+    # (which drops the gate earlier, right after the backend answers directly)
+    # and this net cannot fight each other. A maintenance flag that outlives
+    # the script is a site-wide 503 nobody is watching for.
+    Remove-MaintenanceFlag -FlagPath $maintenanceFlagPath | Out-Null
   }
 }
