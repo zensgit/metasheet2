@@ -195,9 +195,16 @@
         type="button"
         class="sp-sync__link"
         data-testid="stock-prep-project-sync-open-multitable"
+        :data-fill-target="fillTarget ? 'bound' : 'none'"
         @click="emit('open-multitable')"
       >
-        {{ bi('到多维表看数据', 'Open the multitable and look at the data') }}
+        <!-- THE LABEL NAMES THE DESTINATION IT ACTUALLY HAS. With a handle the parent lands the
+             operator in the 备料主表 their run just wrote; without one there is no sheet this
+             deployment can prove is theirs, and the parent opens the multitable workbench. Saying
+             「打开备料多维表」 in that second case is the promise that made this button feel broken. -->
+        {{ fillTarget
+          ? bi('打开备料多维表', 'Open the stock-preparation table')
+          : bi('打开多维表工作台', 'Open the multitable workbench') }}
       </button>
       <button
         v-if="report.pendingConfirmCount > 0"
@@ -269,6 +276,7 @@
       :scope="scope"
       :api="largeBomApi"
       :wait="largeBomPollWait"
+      :fill-target="fillTarget"
       @open-multitable="emit('open-multitable')"
       @synced="emit('synced', null)"
     />
@@ -351,6 +359,7 @@ import {
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
+import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
 
 const props = withDefaults(
   defineProps<{
@@ -404,8 +413,14 @@ const props = withDefaults(
      * the button and not of the word.
      */
     runVariant?: 'sync' | 'pull'
-  }>(),
-  {
+    /**
+     * The 备料主表 deep-link handle, or null. THE PANEL NEVER FETCHES IT and never composes a route:
+     * both mount points (项目备料页's board and the shell's 项目工作台 tab) already hold the read it
+     * comes from, and routing belongs to whoever owns the router. All this prop decides is which
+     * of the two true sentences the button says about where the click will land.
+     */
+    fillTarget?: StockPreparationFillTarget | null
+  }>(),  {
     runEmphasis: 'primary',
     scope: () => ({}),
     armedAt: 0,
@@ -414,6 +429,7 @@ const props = withDefaults(
     largeBomApi: null,
     largeBomPollWait: null,
     runVariant: 'sync',
+    fillTarget: null,
   },
 )
 

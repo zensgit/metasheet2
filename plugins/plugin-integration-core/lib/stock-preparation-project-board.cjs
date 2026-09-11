@@ -124,19 +124,19 @@ const { optionalString } = require('./stock-preparation-common.cjs')
 // `lastPlmRefreshAt` cell is parsed, or on what a TRUNCATED scan is allowed to claim. Nothing about
 // this module's behaviour changed with the move, and the three are still re-exported under
 // `__internals` at the bottom of this file so the suite addresses them where it always did.
+// `resolveFillTarget` and `STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID` MOVED to the same module in this
+// pass, for the same reason the three above did: the operator DIRECTORY now hands out the same handle
+// (so 「打开备料多维表」 works before any project is open), and one tenant-gated handle builder is the
+// only way the two reads cannot drift about which sheet a caller may be pointed at. Both are still
+// re-exported below so this module's callers and its suite address them where they always did.
 const {
   STOCK_PREPARATION_FILL_OBJECT_ID,
+  STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
   parsePlmRefreshTimestampMs,
   readPullTargetRowFacts,
+  resolveFillTarget,
   resolveOwnBoundSheet,
 } = require('./stock-preparation-pull-target-scan.cjs')
-
-/**
- * The logical view id the plugin's own default-view provisioning creates
- * (`ensureManagedTableDefaultView` -> host `ensureObjectDefaultView` -> `DEFAULT_OBJECT_VIEW_LOGICAL_ID`).
- * Kept as a constant rather than inlined so the two stay greppable together.
- */
-const STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID = 'default'
 
 /**
  * THE FROZEN PROJECTION. A key is added here deliberately or not at all — the response object below
@@ -232,34 +232,12 @@ function notFound() {
   )
 }
 
-/**
- * The deep-link handle, or null. See the header for the claim it does NOT make.
- *
- * IT IS BUILT FROM THE BOUND TABLE-ACTION TARGET, not from the canonical object id, because the
- * bound target is the sheet `apply` actually writes to — and on a deployment whose production gate is
- * closed that is the sandbox twin, not the canonical table. A link composed from the canonical id
- * would open an empty sheet and tell the operator their pull did nothing.
- *
- * AND IT IS TENANT-GUARDED, which is the load-bearing half. `action.target` is DEPLOY-TIME
- * configuration shared by every tenant on the deployment (see the export route's own note on this),
- * so the sheet id it names is NOT derived from the caller's tenant. Handing it out unchecked would be
- * this route's one reachable way to name a sheet outside the caller's own staging project. So it is
- * only ever handed out when it EQUALS the id the CALLER'S OWN provisioning would compute for that
- * object — which is also precisely the case in which the matching default view id is derivable at
- * all. Anything else yields null, and the page says the table is not ready rather than linking into
- * the dark.
- *
- * `findObjectSheet` is then the EXISTENCE proof and the only IO here. `getObjectSheetId` /
- * `getObjectViewId` are pure deterministic id derivations on the host side, treated as OPTIONAL
- * capabilities so a plugin newer than its host degrades to "no handle" rather than erroring.
- */
-async function resolveFillTarget(provisioning, ownSheet, stagingProjectId) {
-  if (!ownSheet) return null
-  if (typeof provisioning.getObjectViewId !== 'function') return null
-  const viewId = provisioning.getObjectViewId(stagingProjectId, ownSheet.objectId, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID)
-  if (typeof viewId !== 'string' || viewId.length === 0) return null
-  return { sheetId: ownSheet.sheetId, viewId }
-}
+// THE DEEP-LINK HANDLE IS `resolveFillTarget`, and it now lives in
+// stock-preparation-pull-target-scan.cjs beside the tenant gate it rides on (`resolveOwnBoundSheet`),
+// because the operator DIRECTORY hands out the SAME handle as of this pass. The claim it does NOT
+// make, and the two things that make it honest anyway, are argued in this file's header and at the
+// function itself; nothing about the board's behaviour changed with the move, and it is still
+// re-exported under `__internals` at the bottom of this file.
 
 /**
  * READ ONE PROJECT'S BOARD, or refuse with the shapeless 404.

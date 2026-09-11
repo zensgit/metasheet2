@@ -28,6 +28,12 @@
 //   R-24  the third quadrant: a binding written with NO workspace hint (the delivery guide's §3
 //         script shape, landing on the workspace_id IS NULL row) is read by the UI's own
 //         `workspaceId=default` dry-run and GET picker; another tenant's hinted caller never is.
+//   R-25  the LIST half of that same quadrant: under the UI's `workspaceId=default` hint the picker
+//         offers the tenant-wide sources and stops reporting `not_found` / 源不可用 for a source its
+//         own dry-run reads — while another workspace's and another tenant's rows stay invisible.
+//   R-26  the WRITE half of it, ON THE WIRE: the id-carrying upsert that the widened list newly puts
+//         in front of a hinted caller comes back as HTTP 409 with `EXTERNAL_SYSTEM_SCOPE_MISMATCH`
+//         (not an untyped 500), and the same payload under the row's own scope still lands.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -36,6 +42,9 @@ const LIB = path.join(__dirname, '..', 'lib')
 
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const { createStockPreparationSourceBindingStore } = require(path.join(LIB, 'stock-preparation-source-binding-store.cjs'))
+// The REAL registry factory. R-25 mounts THIS over an in-memory db instead of the hand-written fake
+// below, so its assertions hang on lib/external-systems.cjs itself — see createRealBackedRegistry.
+const { createExternalSystemRegistry: createRealExternalSystemRegistry } = require(path.join(LIB, 'external-systems.cjs'))
 const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 
@@ -128,13 +137,125 @@ function selectScopedSystem(systems, { tenantId, workspaceId = null, id }) {
   return systems.find((entry) => entry.id === id && entry.tenantId === tenantId && (entry.workspaceId ?? null) === null) || null
 }
 
+/**
+ * THE REAL REGISTRY, over an in-memory db — used by R-25 only.
+ *
+ * WHY ONE CASE GETS ITS OWN REGISTRY. Every other case here needs the fake: it fabricates
+ * ineligible shapes (a data source somebody else owns, a target-role connector, an inactive row)
+ * and asserts the ROUTE's behaviour around them. R-25 is different: the property it claims —
+ * "under the UI's workspaceId=default hint the picker lists the tenant-wide sources" — is produced
+ * INSIDE `listExternalSystems`. Asserting it against a fake that was taught the same rule proves
+ * only that the fake was taught; revert lib/external-systems.cjs and such a case stays green. So
+ * this case mounts the real thing, and the fake's list rule stays as a separate (and now
+ * independently checked) mirror for the other cases.
+ *
+ * R-26 reuses it for the WRITE half (the id-carrying upsert), so `upsertExternalSystem` delegates to
+ * the real registry too and `updateRow` really updates. `insertOne` stays a THROW on purpose: the
+ * guard R-26 pins must refuse BEFORE the insert branch, so any escape to it is loud (an unexpected
+ * 500) instead of a silently duplicated id. `deleteRows` stays inert — no case here deletes.
+ */
+function createRealBackedRegistry(systems = DEFAULT_SYSTEMS) {
+  const calls = []
+  const rows = systems.map((entry, index) => ({
+    id: entry.id,
+    connection_id: entry.connectionId ?? null,
+    tenant_id: entry.tenantId,
+    workspace_id: entry.workspaceId ?? null,
+    project_id: null,
+    name: entry.name,
+    kind: entry.kind,
+    role: entry.role,
+    config: entry.config ?? {},
+    capabilities: entry.capabilities ?? {},
+    status: entry.status,
+    credentials_encrypted: null,
+    last_tested_at: null,
+    last_error: null,
+    // Descending insertion order, so the seed order is the list order.
+    created_at: new Date(Date.UTC(2026, 8, 10, 0, 0, systems.length - index)).toISOString(),
+    updated_at: '2026-09-10T00:00:00.000Z',
+  }))
+  const matches = (row, where) => Object.entries(where || {}).every(([column, value]) => (row[column] ?? null) === (value ?? null))
+  const db = {
+    async selectOne(_table, where) { return rows.find((row) => matches(row, where)) || null },
+    async select(_table, { where, orderBy, limit, offset } = {}) {
+      const filtered = rows.filter((row) => matches(row, where || {}))
+      const ordered = orderBy && orderBy[0] === 'created_at'
+        ? filtered.slice().sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+        : filtered
+      const start = offset || 0
+      return ordered.slice(start, start + (limit || 1000))
+    },
+    async insertOne() { throw new Error('unexpected insertOne') },
+    async updateRow(_table, set, where) {
+      const row = rows.find((candidate) => matches(candidate, where))
+      if (!row) return []
+      Object.assign(row, set, { updated_at: '2026-09-11T00:00:00.000Z' })
+      return [row]
+    },
+    async deleteRows() { throw new Error('unexpected deleteRows') },
+    async countRows() { return 0 },
+  }
+  const credentialStore = {
+    async encrypt(value) { return `enc:${value}` },
+    async decrypt(value) { return String(value).slice(4) },
+    async fingerprint(value) { return `fp_${String(value).length}` },
+  }
+  const real = createRealExternalSystemRegistry({ db, credentialStore, idGenerator: () => 'sys_unused' })
+  return {
+    calls,
+    async listExternalSystems(input) {
+      calls.push({ op: 'list', tenantId: input.tenantId, workspaceId: input.workspaceId ?? null })
+      return real.listExternalSystems(input)
+    },
+    async getExternalSystem(input) {
+      calls.push({ op: 'get', tenantId: input.tenantId, workspaceId: input.workspaceId ?? null, id: input.id })
+      // The fake answers a miss with `null`; keep that shape so the route sees one contract.
+      return real.getExternalSystem(input).catch((error) => {
+        if (error && error.name === 'ExternalSystemNotFoundError') return null
+        throw error
+      })
+    },
+    async getExternalSystemForAdapter(input) {
+      calls.push({ op: 'getForAdapter', tenantId: input.tenantId, workspaceId: input.workspaceId ?? null, id: input.id })
+      return real.getExternalSystemForAdapter(input).catch((error) => {
+        if (error && error.name === 'ExternalSystemNotFoundError') return null
+        throw error
+      })
+    },
+    async upsertExternalSystem(input) {
+      calls.push({ op: 'upsert', tenantId: input.tenantId, workspaceId: input.workspaceId ?? null, id: input.id ?? null })
+      return real.upsertExternalSystem(input)
+    },
+    // The stored rows themselves, so a write case can check what did (or did not) land.
+    rows,
+    async deleteExternalSystem() { throw new Error('unexpected deleteExternalSystem') },
+  }
+}
+
 function createExternalSystemRegistry(systems = DEFAULT_SYSTEMS) {
   const calls = []
   return {
     calls,
-    async listExternalSystems({ tenantId }) {
-      calls.push({ op: 'list', tenantId })
-      return systems.filter((entry) => entry.tenantId === tenantId).map((entry) => ({ ...entry }))
+    // Mirrors external-systems.cjs's `listExternalSystems` AS IT NOW IS: the caller's own workspace
+    // ∪ the SAME tenant's tenant-wide (workspace_id IS NULL) rows for a non-null hint, deduped; a
+    // null hint keeps its exact null scope and never widens. This fake used to return EVERY row of
+    // the tenant regardless of scope, which endorsed the picker no matter what the registry did —
+    // precisely why the list half of this screen could answer `not_found` / 源不可用 in production
+    // (exact workspace match, zero candidates) with every route test green. R-25 is the case that
+    // fake could not fail.
+    async listExternalSystems({ tenantId, workspaceId = null }) {
+      calls.push({ op: 'list', tenantId, workspaceId })
+      const hint = workspaceId ?? null
+      const seen = new Set()
+      return systems
+        .filter((entry) => entry.tenantId === tenantId)
+        .filter((entry) => {
+          const scope = entry.workspaceId ?? null
+          return scope === hint || (hint !== null && scope === null)
+        })
+        .filter((entry) => (seen.has(entry.id) ? false : Boolean(seen.add(entry.id))))
+        .map((entry) => ({ ...entry }))
     },
     async getExternalSystem({ tenantId, workspaceId = null, id }) {
       calls.push({ op: 'get', tenantId, workspaceId, id })
@@ -205,12 +326,12 @@ function envConfiguredAction(externalSystemId = ENV_DEFAULT_SOURCE) {
  * Mount the real routes ONCE, exactly as `activate()` does. Everything a test later asserts about
  * "no restart" is asserted against THIS object graph — nothing is rebuilt between calls.
  */
-function mount({ systems, withBindingStore = true, withAuditStore = true, withDataSourceDirectory = true, actions } = {}) {
+function mount({ systems, withBindingStore = true, withAuditStore = true, withDataSourceDirectory = true, actions, registryFactory = createExternalSystemRegistry } = {}) {
   const routes = new Map()
   const db = createFakeDb()
   const bindingStore = createStockPreparationSourceBindingStore({ db, idGenerator: () => 'bind_1' })
   const auditStore = createStockPreparationAuditStore({ db, idGenerator: () => 'audit_1' })
-  const externalSystemRegistry = createExternalSystemRegistry(systems)
+  const externalSystemRegistry = registryFactory(systems)
   const dataSources = createDataSourceDirectory()
   // Records every adapter the runtime asked to build — this is how "which source did the next
   // request actually read" is observed, rather than trusting a response field.
@@ -868,6 +989,149 @@ async function main() {
       "tenant-b's hinted caller reads its own deploy default, never tenant-a's null-row binding",
     )
     assert.notEqual(resB.body, undefined)
+  })
+
+  // -------------------------------------------------------------------------
+  // R-25 — THE PICKER'S OWN HALF of the third quadrant. R-24 proves the BINDING resolves for a
+  // `workspaceId=default` caller; this proves the LIST does too, which is what the screen renders.
+  //
+  // The gap it pins: sources are provisioned tenant-wide (`workspace_id IS NULL`) while every web
+  // request carries a workspace hint, and `listExternalSystems` used to match the hint EXACTLY. So
+  // the picker listed zero candidates and reported `effectiveSourceProblem: 'not_found'` ("源不可用")
+  // for the very source the same screen's dry-run — a BY-ID read, fallback-enabled since #5471 —
+  // read without complaint.
+  //
+  // WHICH LAYER THIS HANGS ON, precisely — because the sentence above is worth nothing if the case
+  // is answered by a fake that was taught the fix. This case, ALONE in this file, mounts the REAL
+  // `createExternalSystemRegistry` from lib/external-systems.cjs over an in-memory db
+  // (`createRealBackedRegistry`). Revert the list fallback IN THAT FILE and the assertions on
+  // `effectiveSourceProblem` / `eligibleSources` below go red; no edit to this file can keep them
+  // green. (Verified by a require-hook mutation probe that patched the module source in memory.)
+  //
+  // The route is unchanged by that fix and this test says so: it still passes its own hint straight
+  // through (asserted on the recorded call), and the widening happens inside the registry, once, for
+  // every list caller — not here.
+  // -------------------------------------------------------------------------
+  await run('R-25 the picker under a workspaceId=default hint lists the tenant-wide sources and stops saying 源不可用', async () => {
+    const SIBLING_WS_SOURCE = 'sys_other_workspace_plm'
+    const mounted = mount({ registryFactory: createRealBackedRegistry, systems: [
+      system({ id: ENV_DEFAULT_SOURCE, name: '内置演示源', workspaceId: null, config: { dataSourceId: 'ds_demo' } }),
+      system({ id: CUSTOMER_PLM, workspaceId: null }),
+      // Same tenant, a DIFFERENT non-null workspace: the fallback is null-only, so this is never offered.
+      system({ id: SIBLING_WS_SOURCE, name: '别的工作区的源', workspaceId: 'ws_other', config: { dataSourceId: 'ds_other_ws' } }),
+      // Another tenant's tenant-wide row: never offered either.
+      system({ id: 'sys_tenant_b_plm', tenantId: 'tenant-b', workspaceId: null, config: { dataSourceId: 'ds_tenant_b' } }),
+    ] })
+
+    const view = await call(mounted.routes, 'GET', GET_ROUTE, { user: ADMIN, query: { workspaceId: 'default' } })
+    assert.equal(view.statusCode, 200)
+    assert.equal(view.body.data.origin, 'deploy_default', 'nothing is bound yet: the env default stands')
+    assert.equal(view.body.data.effectiveExternalSystemId, ENV_DEFAULT_SOURCE)
+    assert.equal(
+      view.body.data.effectiveSourceProblem,
+      null,
+      'the tenant-wide effective source is VISIBLE to a hinted caller — this is the 源不可用 false alarm',
+    )
+    assert.equal(view.body.data.takesEffectWithoutRestart, true, 'and the screen may promise no-restart again')
+    assert.deepEqual(
+      view.body.data.eligibleSources.map((entry) => entry.externalSystemId).sort(),
+      [CUSTOMER_PLM, ENV_DEFAULT_SOURCE].sort(),
+      'the tenant-wide candidates are offered; another workspace and another tenant are not',
+    )
+
+    // The ROUTE did not change: it hands the registry its own hint, verbatim. The widening is the
+    // registry's, so it is the same for every list caller rather than special-cased for this screen.
+    const listCall = mounted.externalSystemRegistry.calls.filter((entry) => entry.op === 'list').pop()
+    assert.deepEqual(listCall, { op: 'list', tenantId: TENANT, workspaceId: 'default' },
+      'the route passes tenant + its own hint through unchanged')
+
+    // And the fence the widening must not cross: a tenant-b admin with the SAME hint sees only its own.
+    const tenantBAdmin = { id: 'u_admin_b', roles: ['admin'], tenantId: 'tenant-b' }
+    const viewB = await call(mounted.routes, 'GET', GET_ROUTE, { user: tenantBAdmin, query: { workspaceId: 'default' } })
+    assert.equal(viewB.statusCode, 200)
+    assert.deepEqual(
+      viewB.body.data.eligibleSources.map((entry) => entry.externalSystemId),
+      ['sys_tenant_b_plm'],
+      "tenant-b's picker shows tenant-b's OWN tenant-wide source and nothing of tenant-a's",
+    )
+    assert.equal(
+      viewB.body.data.effectiveSourceProblem,
+      'not_found',
+      "and tenant-b's effective (deploy-default) id, which exists only as a tenant-a row, stays unreachable — the widening is tenant-bounded",
+    )
+  })
+
+  // -------------------------------------------------------------------------
+  // R-26 — THE WRITE HALF OF R-25's QUADRANT, ON THE WIRE.
+  //
+  // R-25 widened what a hinted caller can SEE. The shape that immediately follows on the screen is
+  // an id-carrying upsert (工作台's 编辑 / 停用 / 启用 all send `{ ...scope, id, name, kind, role,
+  // status }`) whose hint misses the row it just read. The registry refuses that
+  // (external-systems.cjs `assertHintedIdDoesNotTargetTenantWideRow`, pinned by L-10 in
+  // __tests__/external-systems-list-workspace-fallback.test.cjs) — but a registry-level throw is
+  // only half the claim: what an operator and any script actually get is the HTTP answer. Nothing
+  // asserted that the mapping (`/Conflict/` -> 409 in `inferHttpStatus`, `error.code` preferred by
+  // `inferErrorCode`) is really wired for THIS error. This case drives the real
+  // POST /api/integration/external-systems handler over the REAL registry and reads the status line.
+  //
+  // Note the db under it: `insertOne` throws. Delete the guard and this case does not quietly pass —
+  // the upsert falls into the insert branch and the route answers 500, which is exactly the untyped
+  // failure the guard replaced.
+  // -------------------------------------------------------------------------
+  await run('R-26 a hinted id-carrying upsert of a tenant-wide row answers 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH on the wire', async () => {
+    const TENANT_WIDE_HTTP = 'sys_tenant_wide_http'
+    const mounted = mount({ registryFactory: createRealBackedRegistry, systems: [
+      system({ id: TENANT_WIDE_HTTP, name: '客户 PLM', kind: 'http', workspaceId: null, config: {} }),
+    ] })
+    const stored = mounted.externalSystemRegistry.rows[0]
+
+    // 停用, verbatim: the row's own id, under the workbench's hint.
+    const refused = await call(mounted.routes, 'POST', '/api/integration/external-systems', {
+      user: ADMIN,
+      body: {
+        workspaceId: 'default',
+        id: TENANT_WIDE_HTTP,
+        name: '客户 PLM',
+        kind: 'http',
+        role: 'source',
+        status: 'inactive',
+      },
+    })
+    assert.equal(refused.statusCode, 409,
+      'R-26: a scope mismatch reaches the caller as a CONFLICT — not a 500, and not a 404')
+    assert.equal(refused.body.ok, false)
+    assert.equal(refused.body.error.code, 'EXTERNAL_SYSTEM_SCOPE_MISMATCH',
+      'R-26: with the stable wire code the UI can key on (raw driver text never was one)')
+    assert.equal(stored.status, 'active', 'R-26: the tenant-wide row keeps its status')
+    assert.equal(stored.workspace_id, null, 'R-26: ...and its scope')
+    assert.equal(mounted.externalSystemRegistry.rows.length, 1, 'R-26: and no second row with the same id')
+
+    // THE REFUSAL IS SCOPED, NOT A READ-ONLY FLAG: the same payload addressed to the row's OWN
+    // scope still lands. (This is also what the operator is told to do — clear the workspace box.)
+    const landed = await call(mounted.routes, 'POST', '/api/integration/external-systems', {
+      user: ADMIN,
+      body: {
+        id: TENANT_WIDE_HTTP,
+        name: '客户 PLM',
+        kind: 'http',
+        role: 'source',
+        status: 'inactive',
+      },
+    })
+    assert.equal(landed.statusCode, 201, 'R-26: the null-scope caller writes the row it addressed')
+    assert.equal(landed.body.data.status, 'inactive')
+    assert.equal(landed.body.data.workspaceId, null, 'R-26: and the row stays tenant-wide')
+    assert.equal(stored.status, 'inactive', 'R-26: ...which is the SAME row, updated in place')
+
+    // The route passed each caller's own hint through, verbatim, both times — no widening here.
+    assert.deepEqual(
+      mounted.externalSystemRegistry.calls.filter((entry) => entry.op === 'upsert'),
+      [
+        { op: 'upsert', tenantId: TENANT, workspaceId: 'default', id: TENANT_WIDE_HTTP },
+        { op: 'upsert', tenantId: TENANT, workspaceId: null, id: TENANT_WIDE_HTTP },
+      ],
+      'R-26: the route hands the registry the caller\'s own tenant + hint on both calls',
+    )
   })
 
   const total = passed + failed

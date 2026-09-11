@@ -8,8 +8,9 @@
     <StockPreparationProjectSyncPanel
       :scope="scope"
       :armed-at="syncArmedAt"
+      :fill-target="props.fillTarget"
       @navigate-stage="(viewKey: string) => emit('navigate-stage', viewKey)"
-      @open-multitable="emit('open-multitable')"
+      @open-multitable="emit('open-multitable', props.fillTarget ?? null)"
       @synced="load"
     />
 
@@ -184,13 +185,20 @@ import {
 } from '../../../services/integration/stockPreparation/projectWorkspace'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
+import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
 
 const props = withDefaults(
   defineProps<{
     /** Optional tenant/workspace scope passed straight through to the readonly GET. */
     scope?: IntegrationScope
+    /**
+     * The 备料主表 deep-link handle the SHELL resolved, or null when the server could not prove one
+     * exists for this tenant. This view fetches nothing for it: the shell owns the one directory
+     * read it comes from, exactly as it owns routing.
+     */
+    fillTarget?: StockPreparationFillTarget | null
   }>(),
-  { scope: () => ({}) },
+  { scope: () => ({}), fillTarget: null },
 )
 
 const emit = defineEmits<{
@@ -204,8 +212,12 @@ const emit = defineEmits<{
    * dashboard's stepper emits) rather than growing a second navigation of its own.
    */
   (e: 'navigate-stage', viewKey: string): void
-  /** Forwarded from the panel: "open the multitable". The shell owns routing. */
-  (e: 'open-multitable'): void
+  /**
+   * 到多维表. CARRIES THE HANDLE the shell resolved, or null. It used to carry nothing, which left
+   * the shell with only one destination it could name — the multitable home — for a button whose
+   * whole point is the sheet the import just wrote.
+   */
+  (e: 'open-multitable', target: StockPreparationFillTarget | null): void
 }>()
 
 const { locale } = useLocale()

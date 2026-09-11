@@ -15,6 +15,10 @@
 import { apiFetch } from '../../../utils/api'
 import { buildQuerySuffix, type IntegrationApiEnvelope, type IntegrationScope } from '../workbench'
 import { StockPreparationConfirmApiError, parseStockPreparationConfirmResponse } from './confirmApi'
+// TYPE-ONLY, so it is erased at compile time and cannot create a module cycle. The handle has ONE
+// definition on this surface — the board's — because the board and this directory return the very
+// same server-side object, and a second interface would be free to drift from it.
+import type { StockPreparationFillTarget } from './projectBoard'
 
 /** Frozen server status vocabulary (stock-preparation-confirmation-decisions.cjs STATUSES). */
 export type StockPreparationDecisionStatus = 'pending' | 'confirmed' | 'superseded'
@@ -61,6 +65,36 @@ export const STOCK_PREPARATION_CONFIRMABLE_CONFLICT_TYPE = 'duplicate_expanded_k
 /** Whether the confirm endpoint can act on this row's conflict type at all. */
 export function isConfirmableConflictType(conflictType: string | null | undefined): boolean {
   return conflictType === STOCK_PREPARATION_CONFIRMABLE_CONFLICT_TYPE
+}
+
+/**
+ * The CARRY-POLICY conflict family — refused by THIS page, but NOT a source-data defect.
+ *
+ * Mirrors `CARRY_CONFLICT_TYPES` in
+ * `plugins/plugin-integration-core/lib/stock-preparation-carry-policy.cjs:97` (whose order and
+ * membership are themselves pinned by `stock-preparation-carry-policy.test.cjs:70`). Kept as a
+ * separate list from the confirmable type because the two answer different questions: "can this
+ * page decide it" (no, for every type but `duplicate_expanded_key`) versus "is there anything in
+ * the source system a person could go fix" (no, for exactly these three).
+ *
+ * WHY THE UI NEEDS THIS. A carry hold means the planner found a previous-version row that this new
+ * ADD row may or may not continue from — the decision is about OUR reattachment, not about a cell
+ * the customer typed wrong. Its confirmation surface is the K2 carry route (`applyCarryViaConfirm`
+ * + the reserved `carry_via_confirm` token — see
+ * docs/development/takeover-beiliao-20260821/anonymous-hold-identity-spec-20260829.md:258), which
+ * this queue does not drive. So telling an operator to "fix it in the source system and sync
+ * again" sends them to look for something that is not there, and the row would still be here after
+ * the sync. Naming the family lets the page refuse it WITHOUT inventing a cause.
+ */
+export const STOCK_PREPARATION_CARRY_CONFLICT_TYPES: readonly string[] = Object.freeze([
+  'carry_ambiguous_component_source',
+  'carry_reattach_requires_confirm',
+  'carry_conflicting_source_content',
+])
+
+/** Whether this row is a carry-policy hold (refused here, and NOT fixable in the source system). */
+export function isCarryConflictType(conflictType: string | null | undefined): boolean {
+  return typeof conflictType === 'string' && STOCK_PREPARATION_CARRY_CONFLICT_TYPES.includes(conflictType)
 }
 
 /** One values-free queue row. Value/notes are PRESENCE booleans; contents never cross here. */
@@ -203,6 +237,16 @@ export interface StockPreparationOperatorDirectory {
   /** True when the `lastExportAt` window could not be read, or came back full (so a `null` on a row
    *  may mean "never exported" or "outside the window we could see" — not "never", unconditionally). */
   lastExportAtMayBeIncomplete?: boolean
+  /**
+   * 「打开备料多维表」 — THE DEEP-LINK HANDLE FOR THE SHEET THE OPERATOR FILLS, or `null` when the
+   * server could not prove one exists for THIS tenant. Present only under `includePullTargets=1`,
+   * like every key above it, and absent (never `null`) on an older backend — `null` means 「这台系统
+   * 上没有能证明属于您的备料主表」, which is a different sentence from 「没人问过」.
+   *
+   * IT IS THE SAME OBJECT 项目备料页 RETURNS, from the same server-side tenant gate. It is NOT a
+   * permission decision: multitable enforces access when the operator lands there.
+   */
+  fillTarget?: StockPreparationFillTarget | null
 }
 
 const EXPORT_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
@@ -254,7 +298,20 @@ export async function exportStockPreparationPrepLines(
     }
     const code = typeof payload?.error?.code === 'string' && EXPORT_ERROR_CODE_PATTERN.test(payload.error.code)
       ? payload.error.code
-      : 'STOCK_PREPARATION_EXPORT_REQUEST_FAILED'
+      // THE BODY IS NOT ALWAYS OURS. The route answers a standard envelope
+      // (`{ok:false,error:{code}}`), so the branch above is the normal path — but a 404 that never
+      // reached the route (a reverse proxy's own HTML 404, a stripped body, a non-JSON gateway page)
+      // arrives here with nothing to read, and the generic fallback then tells a person
+      // 「稍后再点一次」 about a state that retrying will never change. The 2026-09-10 field report (a)
+      // has exactly that shape: the screen showed this client-side generic even though the server had
+      // answered 404 PREP_LINE_EXPORT_PROJECT_NOT_FOUND, which means the body the browser read did
+      // not carry the code. So a status-404 miss gets its own code, whose words cover BOTH readings
+      // (nothing has been written yet / the request never reached the export route) without asserting
+      // either as fact. Every other status keeps the pre-existing generic, byte for byte, and a 404
+      // that DOES carry a code still forwards that code untouched.
+      : response.status === 404
+        ? 'STOCK_PREPARATION_EXPORT_NOT_FOUND'
+        : 'STOCK_PREPARATION_EXPORT_REQUEST_FAILED'
     throw new StockPreparationConfirmApiError(response.status, code, null)
   }
   const blob = await response.blob()

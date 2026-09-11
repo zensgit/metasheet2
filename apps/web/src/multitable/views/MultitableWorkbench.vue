@@ -329,9 +329,13 @@
         />
       </div>
       <MetaRecordInspector
+        ref="recordInspectorRef"
         :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
         :visible="inspectorOpen && !!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
+        :inspector-field-layout="inspectorFieldLayout"
+        :fetch-record="fetchLinkedRecordFn"
         :opener-el="inspectorOpenerEl"
+        :field-errors="inspectorFieldErrors"
         :sheet-id="workbench.activeSheetId.value ?? undefined"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
@@ -369,6 +373,7 @@
         :comment-composer-initial-mentions="commentComposerInitialMentions"
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
+        @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
@@ -416,9 +421,13 @@
       :visible="showImportModal"
       :sheet-id="workbench.activeSheetId.value"
       :fields="importSurfaceFields"
+      :existing-field-names="importExistingFieldNames"
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
+      :can-create-fields="caps.canManageFields.value"
+      :create-fields-error="importCreateFieldsError"
+      :created-field-columns="importCreatedFieldColumns"
       @update:dirty="importDirty = $event"
       @close="closeImportModal"
       @cancel-import="cancelImport"
@@ -642,6 +651,7 @@ import {
 } from '../utils/workbench-labels'
 import { recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
+import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
@@ -676,6 +686,8 @@ import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
+import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
+import { metaCoreLabel } from '../utils/meta-core-labels'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { usePersonalViewToggle } from '../composables/usePersonalViewToggle'
 import { reorderViewFields } from '../utils/reorder-view-fields'
@@ -742,8 +754,22 @@ import MetaDashboardView from '../components/MetaDashboardView.vue'
 import { MtButton } from '../ui'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
-import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
+import { extractImportTokens, type ImportBuildFailure, type ImportValueResolver } from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
+import {
+  MAX_FIELD_NAME_LENGTH,
+  MAX_SHEET_FIELDS,
+  createFieldPlaceholderId,
+  planCreateFieldNames,
+  type ImportSubmitPayload,
+} from '../import/create-fields'
+import {
+  importLabel,
+  createFieldFailed as fmtCreateFieldFailed,
+  createFieldLimitReached as fmtCreateFieldLimitReached,
+  createFieldNameInvalid as fmtCreateFieldNameInvalid,
+  createFieldNameTooLong as fmtCreateFieldNameTooLong,
+} from '../utils/meta-import-labels'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
 import {
@@ -1324,6 +1350,11 @@ const recentBaseOpens = ref(readRecentBaseOpens())
 const basePickerBases = computed(() => decorateAndSortBases(bases.value, favoriteBaseIds.value, recentBaseOpens.value))
 const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
+// PR-B2 round 2 (§1.3 "Field-anchored server errors"): imperative query handle on the record inspector —
+// `onDrawerPatch` asks its exposed `canAnchorFieldError(recordId, fieldId)` BEFORE writing an inline
+// entry and keeps today's toast when the alert could not render (other tab active, field row not
+// rendered, inspector closed or showing another record). Same idiom as `toastRef.showError` above.
+const recordInspectorRef = ref<InstanceType<typeof MetaRecordInspector> | null>(null)
 const commentDraft = ref('')
 const currentUserId = ref<string | null>(null)
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
@@ -1377,6 +1408,11 @@ type ImportResult = {
   failures: ImportFailure[]
 }
 const importResult = ref<ImportResult | null>(null)
+// Import → "create the missing columns as new text fields": the modal only ASKS (payload.createFields);
+// the write happens here, behind the same manage-fields capability that gates the field manager, and
+// behind the server's own 403 on POST /api/multitable/fields.
+const importCreateFieldsError = ref<string | null>(null)
+const importCreatedFieldColumns = ref<Record<number, string> | null>(null)
 // --- Display prefs (column width / row density / group collapse): server-persisted in view.config
 // (persist-display-prefs arc 2026-06-16). Each is OPTIMISTIC-LOCAL: a writable ref updates the UI
 // instantly, then `persistDisplayPref` writes the merged config in the background (no row refetch).
@@ -1397,6 +1433,24 @@ const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
 const formFieldErrors = ref<Record<string, string>>({})
+// Record inspector v3 PR-B2 (docs/development/multitable-record-inspector-v3-design-20260905.md §1.3
+// "Field-anchored server errors", §4 item 11): per-field server rejections for the OPEN inspector
+// record, keyed by fieldId — the inspector-side twin of `formFieldErrors` above (same prop shape, same
+// `:field-errors` idiom, WB → MetaRecordInspector → MetaRecordFieldsPanel). Written only by
+// `onDrawerPatch` (field / conflict routes, and only when the inspector confirms the alert can render —
+// see `recordInspectorRef`), cleared per field on that field's next successful patch, wholesale on
+// record/view change, and — for entries the VERSION_CONFLICT path wrote, and ONLY those — when
+// `grid.conflict` clears. Round 2: each entry is tagged with its ORIGIN so the conflict-clear watch
+// cannot wipe a validation alert that happens to sit on the same field (e.g. a grid-path conflict on
+// that field raised and dismissed while the drawer's validation alert is up); the panel-facing prop
+// (`inspectorFieldErrors`) is the derived fieldId → message map, recomputed as a fresh object on every
+// write so the panel's prev/next `fieldErrors` watch keeps seeing distinct snapshots.
+type InspectorFieldErrorOrigin = 'field' | 'conflict'
+const inspectorFieldErrorEntries = ref<Record<string, { message: string; origin: InspectorFieldErrorOrigin }>>({})
+const inspectorPatchOwners = new Map<string, object>()
+const inspectorFieldErrors = computed<Record<string, string>>(() =>
+  Object.fromEntries(Object.entries(inspectorFieldErrorEntries.value).map(([fieldId, entry]) => [fieldId, entry.message])),
+)
 const deepLinkedRecordLinkSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const deepLinkedRecordPersonSummaries = ref<Record<string, PersonSummary[]>>({})
 const deepLinkedRecordAttachmentSummaries = ref<Record<string, MetaAttachment[]>>({})
@@ -1597,6 +1651,24 @@ const twoLayerVisibleFields = computed(() => filterPropertyVisibleFields(scopedA
 const scopedGridFields = computed(() =>
   grid.visibleFields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Sections"): the details tab's two-section field
+// layout. §1 `ordered` = view order ∩ layer-2 ∩ layer-3 — `scopedGridFields` is `grid.visibleFields`
+// (the active view's resolved `fieldOrder`, fail-soft on stale ids, minus the view's hidden ids and
+// property-hidden fields, useMultitableGrid.ts `visibleFields`) re-filtered through THIS file's
+// `effectiveFieldPermissions` (layer-3 with the deep-link/standalone-form overrides the grid's own
+// permission ref does not carry); `filterPropertyVisibleFields` is applied again explicitly so the
+// layer-2 conjunct is stated here, not inherited from the grid computed's internals. §2 `hiddenInView`
+// = the rest of `twoLayerVisibleFields` (layer-2 ∩ layer-3, sheet order) — fields this viewer may see
+// but the active view hides. Disjoint by construction; MetaRecordFieldsPanel re-applies both layers
+// anyway (negative golden N3). Applying layer-2 to the details tab is a declared behaviour change
+// (design §4 item 4): it previously received `scopedAllFields` (layer-3 only) and rendered
+// property-hidden fields.
+const inspectorFieldLayout = computed<MetaRecordInspectorFieldLayout>(() => {
+  const ordered = filterPropertyVisibleFields(scopedGridFields.value)
+  const orderedIds = new Set(ordered.map((field) => field.id))
+  const hiddenInView = twoLayerVisibleFields.value.filter((field) => !orderedIds.has(field.id))
+  return { ordered, hiddenInView }
+})
 const conditionalFormattingRules = computed(() =>
   extractRulesFromConfig(workbench.activeView.value?.config),
 )
@@ -1639,6 +1711,15 @@ const importSurfaceFields = computed(() =>
     return permission?.visible !== false && permission?.readOnly !== true
   }),
 )
+/**
+ * Names of EVERY field on the sheet, including the ones importSurfaceFields strips (formula /
+ * lookup / rollup / readonly / permission-hidden). The modal needs them to tell "this header is
+ * missing from the sheet" apart from "this header exists but is not writable" — otherwise a header
+ * matching a formula column defaults to "create a new field" and a shadow `X (2)` text column
+ * appears. Same source list applyImportCreateFields plans against, so read side and write side can
+ * not disagree. Names only; no values leave the sheet through this prop.
+ */
+const importExistingFieldNames = computed(() => workbench.fields.value.map((field) => field.name))
 const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
   const resolvers: Record<string, ImportValueResolver> = {}
   for (const field of importSurfaceFields.value) {
@@ -2614,15 +2695,81 @@ async function onRetryConflict() {
   if (grid.error.value) showError(grid.error.value)
 }
 
+// PR-B2 (§1.3): immutable per-key writes so MetaRecordFieldsPanel's shallow `fieldErrors` watch sees a
+// prev/next pair (it prunes a rejected-value draft exactly when that field's error goes set → unset).
+function setInspectorFieldError(fieldId: string, message: string, origin: InspectorFieldErrorOrigin) {
+  inspectorFieldErrorEntries.value = { ...inspectorFieldErrorEntries.value, [fieldId]: { message, origin } }
+}
+/** Drop the entry for `fieldId`; with `onlyOrigin`, drop it only if THAT path wrote it (round 2: the
+ *  conflict-clear watch passes 'conflict' so it never wipes a validation alert on the same field). */
+function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldErrorOrigin) {
+  const current = inspectorFieldErrorEntries.value[fieldId]
+  if (!current) return
+  if (onlyOrigin && current.origin !== onlyOrigin) return
+  const next = { ...inspectorFieldErrorEntries.value }
+  delete next[fieldId]
+  inspectorFieldErrorEntries.value = next
+}
+
 async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
   if (!ensureCanEditRecord(record.id)) return
-  await grid.patchCell(record.id, fieldId, value, record.version)
+  const patchOwner = {}
+  inspectorPatchOwners.set(fieldId, patchOwner)
+  // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
+  // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
+  // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
+  // toast the second's message and lose its own alert when both rejections landed in one flush.
+  const failure = await grid.patchCell(record.id, fieldId, value, record.version)
+  const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
+  if (failure) {
+    // Route by the failure the composable returned for THIS patch — still guarded on record + field
+    // (defensive: the composable builds both from its own arguments, so a mismatch means a foreign
+    // object and falls through to today's toast). `resolvePatchFailureRoute` holds the one rule (its
+    // doc comment states the matrix: fieldErrors / 422 / VALIDATION_ERROR → field; VERSION_CONFLICT →
+    // conflict; everything else — including a plain 400 with any other code — → toast).
+    const own = failure.recordId === record.id && failure.fieldId === fieldId
+    const route = own ? resolvePatchFailureRoute(failure) : 'toast'
+    // Can the inline alert RENDER right now? Only the inspector knows (details tab active, field row
+    // rendered, still open on this record). Asked synchronously, before any write — see the doc on
+    // `canAnchorFieldError` in MetaRecordInspector.vue. `false`/unmounted → today's toast, no entry.
+    const anchorable = own && recordInspectorRef.value?.canAnchorFieldError(record.id, fieldId) === true && latestRequest
+    const toastText = (text: string) => text || metaCoreLabel('grid.errorPatchCell', isZh.value)
+    if (route === 'field') {
+      const message = fieldAnchoredPatchMessage(failure)
+      // Inline iff it can render AND the server gave us text to render; an empty message has nothing to
+      // anchor (the alert node would be blank) and falls back to the toast with the generic label.
+      if (anchorable && message) {
+        setInspectorFieldError(fieldId, message, 'field')
+        return
+      }
+      showError(toastText(message))
+      return
+    }
+    if (route === 'conflict') {
+      // The conflict banner is already up (root template `v-if="grid.conflict.value"`, set by the
+      // composable — unchanged). Add the field marker under the control with the SAME text the banner
+      // shows (when it can render), tagged 'conflict' so it clears WITH the conflict — reload / retry /
+      // dismiss, see the `grid.conflict` watch beside the record-change watch — and KEEP the toast this
+      // path always fired: round 1 suppressed it, round 2 restores it so §4 item 11's "all other codes
+      // keep the toast" is true verbatim (banner + marker + toast).
+      if (anchorable) setInspectorFieldError(fieldId, conflictMessage.value || failure.message, 'conflict')
+      showError(toastText(failure.message))
+      return
+    }
+    showError(toastText(failure.message))
+    return
+  }
   if (grid.error.value) {
+    // The composable's LOCAL row-action refusal (never reaches the server, returns no failure) — today's
+    // toast, unchanged. (Normally unreachable from the drawer: `ensureCanEditRecord` above already gates.)
     showError(grid.error.value)
     return
   }
+  // A successful patch of a field clears that field's error, whichever path wrote it (and, via the
+  // panel's watch, its draft). Other fields' errors are untouched.
+  if (latestRequest) clearInspectorFieldError(fieldId)
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
@@ -2631,6 +2778,26 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
     }
   }
   showSuccess(wb('toast.recordUpdated', isZh.value), historyLinkAction(grid.lastBatchId.value))
+}
+
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Copy link"): the inspector's copy-link icon only
+// EMITS; this is the one clipboard write. `window.location.href` already carries `#recordId=<id>`
+// while the panel is open (the PR-A hash watcher), so the copied URL reopens this record. Status goes
+// through MetaToast's existing `aria-live="polite"` / `role="status"` region via the reserved
+// `record.copyLinkDone` / `record.copyLinkFailed` keys; a missing Clipboard API (the inspector also
+// disables its button in that case) or a rejected write both land on the failed copy — never a throw.
+async function onCopyRecordLink() {
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
+  if (!clipboard || typeof clipboard.writeText !== 'function') {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+    return
+  }
+  try {
+    await clipboard.writeText(window.location.href)
+    showSuccess(recordLabel('record.copyLinkDone', isZh.value))
+  } catch {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+  }
 }
 
 async function onFormSubmit(data: Record<string, unknown>) {
@@ -3380,6 +3547,8 @@ function onSelectView(viewId: string) {
 }
 
 function onOpenImportModal() {
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
   showImportModal.value = true
 }
 
@@ -3787,12 +3956,121 @@ function onReorderField(fromId: string, toId: string) {
 }
 
 // --- Bulk import ---
-async function onBulkImport(payload: ImportBuildResult) {
+/**
+ * Create the fields the import modal asked for, then rewrite the placeholder keys the modal used for
+ * those columns to the new field ids. Fail-closed: any refusal or backend error aborts BEFORE a
+ * single record is written (records are only rewritten after every create succeeded).
+ *
+ * Returns false when the caller must abort the import.
+ */
+async function applyImportCreateFields(payload: ImportSubmitPayload): Promise<boolean> {
+  const requests = payload.createFields ?? []
+  if (!requests.length) return true
+  // WRITE-SIDE GATE. The modal's `canCreateFields` prop only controls what it OFFERS; a stale prop,
+  // a revoked role, or a hand-built payload must not reach `createField` from here.
+  if (!caps.canManageFields.value) {
+    importCreateFieldsError.value = importLabel('import.createFieldsForbidden', isZh.value)
+    return false
+  }
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) {
+    importCreateFieldsError.value = wb('toast.fieldCreateFailed', isZh.value)
+    return false
+  }
+  const existingFields = workbench.fields.value
+  const plan = planCreateFieldNames({
+    requests,
+    existingNames: existingFields.map((field) => field.name),
+    existingFieldCount: existingFields.length,
+  })
+  if (!plan.ok) {
+    importCreateFieldsError.value = plan.reason === 'field-limit'
+      ? fmtCreateFieldLimitReached(MAX_SHEET_FIELDS, isZh.value)
+      : plan.reason === 'name-too-long'
+        ? fmtCreateFieldNameTooLong(plan.header, MAX_FIELD_NAME_LENGTH, isZh.value)
+        : fmtCreateFieldNameInvalid(plan.header, isZh.value)
+    return false
+  }
+
+  const createdColumns: Record<number, string> = {}
+  for (const [index, request] of requests.entries()) {
+    try {
+      const created = await workbench.client.createField({
+        sheetId,
+        name: plan.names[index],
+        type: 'string' as MetaFieldType,
+      })
+      createdColumns[request.columnIndex] = created.field.id
+    } catch (e: any) {
+      importCreateFieldsError.value = fmtCreateFieldFailed(
+        request.header,
+        e?.message ?? wb('toast.fieldCreateFailed', isZh.value),
+        isZh.value,
+      )
+      // A create can not be rolled back (there is no transaction across these calls), so the fields
+      // built before the failure are already on the sheet. Publish them: the modal rebinds those
+      // columns from the sentinel to their real ids, so the retry the user is about to make asks
+      // only for the column that actually failed. Dropping createdColumns here (the previous
+      // behaviour) left orphans behind AND made the retry create a SECOND field with the same name
+      // — meta_fields has no (sheet_id, name) unique index to stop it.
+      try {
+        await publishCreatedImportFields(payload, sheetId, createdColumns)
+      } catch {
+        // A failed sheet-meta refresh must NOT mask the create error the user has to act on; the
+        // column → id map is published regardless (see the finally inside), which is what stops the
+        // retry from duplicating.
+      }
+      return false
+    }
+  }
+
+  await publishCreatedImportFields(payload, sheetId, createdColumns)
+  return true
+}
+
+/**
+ * Adopt the fields that were actually created: rewrite the modal's placeholder keys to the real
+ * field ids, refresh the sheet meta (so a retry plans names against the CURRENT field list instead
+ * of a stale one), and hand the column → id map to the modal. Used on both the success path and the
+ * partial-failure path; on the failure path it must not clobber importCreateFieldsError.
+ */
+async function publishCreatedImportFields(
+  payload: ImportSubmitPayload,
+  sheetId: string,
+  createdColumns: Record<number, string>,
+): Promise<void> {
+  if (!Object.keys(createdColumns).length) return
+  // Rewrite IN PLACE: the modal keeps these same record objects for "retry failed rows", so the
+  // placeholder key must disappear everywhere, not just in this attempt's copy.
+  for (const record of payload.records) {
+    for (const [columnIndex, fieldId] of Object.entries(createdColumns)) {
+      const placeholder = createFieldPlaceholderId(Number(columnIndex))
+      if (!(placeholder in record)) continue
+      record[fieldId] = record[placeholder]
+      delete record[placeholder]
+    }
+  }
+  try {
+    await workbench.loadSheetMeta(sheetId)
+  } finally {
+    // Published even when the refresh threw: the modal must learn which columns now exist, or the
+    // retry asks for them again and a second same-named field appears. The throw still propagates
+    // on the success path, where a stale grid was already treated as a reason to abort.
+    importCreatedFieldColumns.value = { ...createdColumns }
+  }
+}
+
+async function onBulkImport(payload: ImportSubmitPayload) {
   const controller = new AbortController()
   importAbortController.value = controller
   importSubmitting.value = true
   importResult.value = null
+  importCreateFieldsError.value = null
   try {
+    if (!(await applyImportCreateFields(payload))) {
+      showError(importCreateFieldsError.value ?? wb('toast.fieldCreateFailed', isZh.value))
+      return
+    }
     const recordsToImport = payload.records
     const rowIndexesToImport = payload.rowIndexes
     const skippedRows: ImportFailure[] = []
@@ -3898,6 +4176,8 @@ function closeImportModal() {
   importSubmitting.value = false
   importResult.value = null
   importAbortController.value = null
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
 }
 
 // --- CSV export ---
@@ -4127,6 +4407,23 @@ watch([selectedRecordId, () => workbench.activeViewId.value], () => {
   formSuccessMessage.value = null
   formErrorMessage.value = null
   formFieldErrors.value = {}
+})
+
+// PR-B2 (§1.3): field-anchored errors belong to the record they were raised on — the same
+// record/view edge that resets the form-field errors above discards them (MetaRecordFieldsPanel drops
+// its rejected-value drafts on the record-id edge on its side, so control and alert reset together).
+watch([selectedRecordId, () => workbench.activeViewId.value], () => {
+  // Invalidates older requests even when navigation returns to the same record and field.
+  inspectorPatchOwners.clear()
+  inspectorFieldErrorEntries.value = {}
+}, { flush: 'sync' })
+// PR-B2 (§1.3): the VERSION_CONFLICT field marker lives exactly as long as the conflict it mirrors —
+// reload / retry / dismiss (and any later patchCell, which resets `conflict` first) all clear
+// `grid.conflict` in the composable (unchanged); the marker for that field follows. Round 2: ONLY the
+// marker — an entry the conflict path wrote. A validation alert on the same field (origin 'field')
+// survives a conflict on that field being raised and cleared, e.g. by a grid-path edit.
+watch(() => grid.conflict.value, (current, previous) => {
+  if (!current && previous) clearInspectorFieldError(previous.fieldId, 'conflict')
 })
 
 async function refreshDialogMeta() {

@@ -20,6 +20,9 @@ import {
   isDeadLetterReplayable,
   normalizeIntegrationProjectId,
   replayIntegrationDeadLetter,
+  externalSystemScopeTestWriteNote,
+  externalSystemScopeWriteBlock,
+  isExternalSystemWritableInScope,
 } from '../src/services/integration/workbench'
 
 const apiFetchMock = vi.fn()
@@ -507,5 +510,73 @@ describe('integration provenance read service (DF-N2-3)', () => {
     expect(calls[0]).not.toContain('from=')
     expect(calls[0]).not.toContain('limit=')
     expect(calls[0]).toContain('rowId=MAT-1')
+  })
+})
+
+// 列表回退 vs upsert/delete 不回退 —— 屏幕侧的那条判据。
+//
+// 背景:GET /api/integration/external-systems 对非 null 的 workspace hint 会回退一步,把同租户
+// workspace_id IS NULL 的行也列出来;而 upsert 的 findExisting 与 delete 仍按 (tenant, workspace, id)
+// 精确匹配。所以「列表里能看见」不等于「在这个作用域里改得动」,工作台的连接清单又恰好是带写按钮的清单。
+//
+// 口径:拦的是编辑/停用/启用/删除四个,**不是「只读」** —— 测试连接按行自身的作用域写回该行
+// (服务端 persistExternalSystemTestResult,#5534),下面第二个 describe 钉着文案必须说出这件事。
+describe('externalSystemScopeWriteBlock (回退来的行在当前作用域内改不动/停不掉/删不了)', () => {
+  it('放行:行的作用域与当前 hint 一致(含两边都是租户级 null)', () => {
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: null })).toBe('')
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, {})).toBe('')
+    expect(externalSystemScopeWriteBlock({ workspaceId: 'ws_a' }, { workspaceId: 'ws_a' })).toBe('')
+    // 空串/空白 hint 与 null 同义(与后端 normalizeWorkspaceId 同形)
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: '  ' })).toBe('')
+    expect(isExternalSystemWritableInScope({ workspaceId: null }, { workspaceId: '' })).toBe(true)
+  })
+
+  it('拦下:带 hint 的调用方看到的租户级行 —— 四个写动作服务端会 409/404 拒掉', () => {
+    const message = externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: 'default' })
+    expect(message).toContain('租户级')
+    // 枚举四个动作,不准再用「只读」这种盖过测试连接的说法。
+    for (const action of ['编辑', '停用', '启用', '删除']) {
+      expect(message).toContain(action)
+    }
+    expect(message).not.toContain('只读')
+    expect(isExternalSystemWritableInScope({ workspaceId: null }, { workspaceId: 'default' })).toBe(false)
+  })
+
+  it('文案必须说出测试连接仍会写这行 —— 置灰的量 ≠ 实际写不动的量', () => {
+    const message = externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: 'default' })
+    expect(message).toContain('测试连接')
+    expect(message).toContain('status')
+  })
+
+  it('拦下:另一个工作区的行', () => {
+    expect(externalSystemScopeWriteBlock({ workspaceId: 'ws_b' }, { workspaceId: 'ws_a' }))
+      .toContain('另一个工作区')
+  })
+
+  // 去掉 scopeFallback 线路字段后的回归防线:判据必须只看「这次写将要带上的 hint」。
+  // 旧实现把服务端标记当第二条判据,而标记钉在拉列表那一刻:操作员按提示清空工作区输入框后
+  // (工作台不会重拉列表),陈旧标记会继续拦住那条本来会成功的租户级写。
+  it('hint 清空后同一行重新可写 —— 判据跟着实时 hint 走,不跟着拉列表那一刻走', () => {
+    const tenantWideRow = { workspaceId: null }
+    expect(externalSystemScopeWriteBlock(tenantWideRow, { workspaceId: 'default' })).not.toBe('')
+    expect(externalSystemScopeWriteBlock(tenantWideRow, { workspaceId: null })).toBe('')
+  })
+})
+
+// 测试连接不在拦截名单里,但要如实告知写到了哪一行。
+// 服务端 POST /external-systems/{id}/test 读到系统后,persistExternalSystemTestResult 故意按行自己的
+// 作用域落库(#5534),所以回退来的租户级行是真的被改了 status/last_tested_at/last_error。
+describe('externalSystemScopeTestWriteNote (测试连接写到了哪一行)', () => {
+  it('回退来的租户级行:提示写入的是租户级那一行', () => {
+    const note = externalSystemScopeTestWriteNote({ workspaceId: null }, { workspaceId: 'default' })
+    expect(note).toContain('租户级')
+  })
+
+  it('自己作用域内的行、以及本来就没带 hint 的调用方:一律不加提示', () => {
+    expect(externalSystemScopeTestWriteNote({ workspaceId: 'default' }, { workspaceId: 'default' })).toBe('')
+    expect(externalSystemScopeTestWriteNote({ workspaceId: null }, { workspaceId: null })).toBe('')
+    expect(externalSystemScopeTestWriteNote({ workspaceId: null }, {})).toBe('')
+    expect(externalSystemScopeTestWriteNote({ workspaceId: 'ws_b' }, { workspaceId: 'ws_a' })).toBe('')
+    expect(externalSystemScopeTestWriteNote(null, { workspaceId: 'default' })).toBe('')
   })
 })

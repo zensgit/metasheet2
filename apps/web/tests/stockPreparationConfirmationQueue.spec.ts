@@ -52,13 +52,15 @@ vi.mock('vue-router', () => ({
 }))
 
 import {
+  exportStockPreparationPrepLines,
   listStockPreparationDecisions,
   readStockPreparationDecisionReadiness,
   readStockPreparationValueEntry,
 } from '../src/services/integration/stockPreparation/confirmationQueue'
+import { StockPreparationConfirmApiError } from '../src/services/integration/stockPreparation/confirmApi'
 import StockPreparationWorkspace from '../src/components/integration/stockPreparation/StockPreparationWorkspace.vue'
 import StockPreparationConfirmationQueueView from '../src/components/integration/stockPreparation/StockPreparationConfirmationQueueView.vue'
-import { STOCK_PREP_ADMIN_ACTION_PLAIN } from '../src/services/integration/stockPreparation/plainLanguage'
+import { STOCK_PREP_ADMIN_ACTION_PLAIN, stockPrepErrorPlain } from '../src/services/integration/stockPreparation/plainLanguage'
 
 function jsonResponse(body: unknown, init: { status?: number; ok?: boolean } = {}): Response {
   const status = init.status ?? 200
@@ -590,5 +592,286 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
     await flush()
     expect(standaloneNavigateSpy).toHaveBeenCalledWith('project-board', PROJECT_NO)
     expect(standaloneResyncSpy).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2026-09-10 field report (a): 确认队列点「导出物料清单(Excel)」→ the export route answers 404
+// PREP_LINE_EXPORT_PROJECT_NOT_FOUND when the project table has never had a stock-preparation row
+// written to it (e.g. all 1137 rows still sitting in the confirmation queue). The export client
+// already forwards `error.code` from the response body (confirmationQueue.ts's
+// `exportStockPreparationPrepLines`); this closes the OTHER half — the view must resolve that code
+// through `stockPrepErrorPlain`, not the generic write-shaped `STOCK_PREPARATION_EXPORT_REQUEST_FAILED`
+// fallback its own `recordError` used before this code had a row in the table.
+// ---------------------------------------------------------------------------
+describe('2026-09-10: export failure names the actual reason, not the generic write-shaped fallback', () => {
+  let app: VueApp | null = null
+  let container: HTMLDivElement | null = null
+  const PROJECT_NO = '230920006'
+
+  function ok(data: unknown): Response {
+    return new Response(JSON.stringify({ ok: true, data }), { status: 200 })
+  }
+
+  function directoryPayload(): Record<string, unknown> {
+    return { tenantId: 'default', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
+  }
+
+  function queuePayload(rows: unknown[] = []): Record<string, unknown> {
+    return { rowCount: rows.length, byStatus: {}, byResolutionAction: {}, parkedCount: 0, rows }
+  }
+
+  function row(conflictType: string, decisionId = 'decision_1'): Record<string, unknown> {
+    return {
+      decisionId,
+      conflictType,
+      status: 'pending',
+      resolutionAction: null,
+      inputFingerprint: 'sha16:0123456789abcdef',
+      sourceRevisionPresent: true,
+      confirmedByPresent: false,
+      confirmedAtPresent: false,
+      notesPresent: false,
+      resolvedValuePresent: false,
+      resolvedAuxValuePresent: false,
+    }
+  }
+
+  async function flush(cycles = 8): Promise<void> {
+    for (let turn = 0; turn < cycles; turn += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  function q(testid: string): HTMLElement | null {
+    return container!.querySelector(`[data-testid="${testid}"]`)
+  }
+
+  beforeEach(() => {
+    shellState.locale = 'zh-CN'
+    shellState.permissions = ['stock-prep:read', 'stock-prep:operate']
+    apiFetchMock.mockReset()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  function mount(): HTMLDivElement {
+    app = createApp(StockPreparationConfirmationQueueView as Component, { scope: { tenantId: 'default' }, projectNo: PROJECT_NO })
+    app.mount(container!)
+    return container!
+  }
+
+  it('a 404 PREP_LINE_EXPORT_PROJECT_NOT_FOUND renders its own plain-language sentence, never the generic export fallback', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload())
+      if (path.includes('/prep-lines/export')) {
+        return new Response(
+          JSON.stringify({ ok: false, error: { code: 'PREP_LINE_EXPORT_PROJECT_NOT_FOUND', message: 'no stock-preparation rows exist for this project' } }),
+          { status: 404 },
+        )
+      }
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-export') as HTMLButtonElement).click()
+    await flush()
+
+    const errorNode = q('stock-prep-confirmation-error')
+    expect(errorNode, 'the export failure must surface on the shared error line').not.toBeNull()
+    // PINNED AS A LITERAL, deliberately. Asserting `stockPrepErrorPlain(code).zh` only proved the
+    // view called the same lookup this line did — reword the vocabulary entry into anything at all,
+    // including an engineering enum, and the assertion still passed. This is the sentence the
+    // operator has to be able to act on.
+    expect(errorNode!.textContent).toContain('这个项目还没有写入过备料行')
+    expect(errorNode!.textContent).toContain(stockPrepErrorPlain('PREP_LINE_EXPORT_PROJECT_NOT_FOUND').zh)
+    expect(errorNode!.textContent, 'the read-shaped, actionable sentence — not the generic write fallback').not.toContain('导出没有做完')
+    expect(errorNode!.textContent).toContain('PREP_LINE_EXPORT_PROJECT_NOT_FOUND')
+  })
+
+  it('「什么情况」renders the plain-language conflict type, with the raw server token kept in `title`', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload([row('SOURCE_VALUE_NOT_A_STRING')]))
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+
+    const cell = q('stock-prep-confirmation-conflict-type')
+    expect(cell, '什么情况 cell renders for the row').not.toBeNull()
+    expect(cell!.textContent).toBe('源值不是文本(多为数字型属性)')
+    expect(cell!.textContent).not.toContain('SOURCE_VALUE_NOT_A_STRING')
+    expect(cell!.getAttribute('title')).toBe('SOURCE_VALUE_NOT_A_STRING')
+  })
+
+  it('an unknown/future conflict type keeps rendering its raw token (fail-soft), title matches the visible text', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload([row('some_future_conflict_type')]))
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+
+    const cell = q('stock-prep-confirmation-conflict-type')
+    expect(cell!.textContent).toBe('some_future_conflict_type')
+    expect(cell!.getAttribute('title')).toBe('some_future_conflict_type')
+  })
+
+  // -------------------------------------------------------------------------
+  // 2026-09-10 field report (b), second half: 「看我填过什么」 used to print the WIRE name next to each
+  // plain label (填的值 `resolvedValue` / 附带的值 `resolvedAuxValue` / 备注 `notes`), and the operator
+  // read the grey word as the thing being shown. Nothing in the repo asserted this pane's copy, so
+  // the whole change was silently revertible. This is that guard: the readback pane carries the plain
+  // labels ONLY, while the three names stay verbatim one disclosure away for whoever needs to match a
+  // request body against them. Both halves are asserted — the fix is a MOVE, not a deletion.
+  // -------------------------------------------------------------------------
+  it('「看我填过什么」 shows plain labels only — the request-body field names live in 技术详情, not next to the values', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      // MUST precede the bare-list branch: the value-entry route is a suffix of the list path.
+      if (path.includes('/confirmation-decisions/value-entry')) {
+        return ok({
+          decisionId: 'decision_1',
+          conflictType: 'SOURCE_VALUE_NOT_A_STRING',
+          status: 'pending',
+          resolutionAction: null,
+          inputFingerprint: 'sha16:0123456789abcdef',
+          // Deliberately free of the three wire names, so the negative assertions below can only
+          // fail on the LABELS — never on a value that happened to echo one.
+          valueEntry: { resolvedValue: '12.5', resolvedAuxValue: '千克', notes: '按图纸取整' },
+        })
+      }
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload([row('SOURCE_VALUE_NOT_A_STRING')]))
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-queue-refresh') as HTMLButtonElement).click()
+    await flush()
+    ;(q('stock-prep-confirmation-value-entry') as HTMLButtonElement).click()
+    await flush()
+
+    const pane = q('stock-prep-confirmation-value-entry-pane')
+    expect(pane, 'the readback pane opens for an operator-tier actor').not.toBeNull()
+    const paneText = pane!.textContent ?? ''
+    // The plain labels are what a reader is left with.
+    expect(paneText).toContain('填的值')
+    expect(paneText).toContain('附带的值')
+    expect(paneText).toContain('备注')
+    // …and NOT one of the three wire names, which is what the field report tripped over.
+    expect(paneText, 'the grey wire name next to 填的值 is what was misread as the value itself').not.toContain('resolvedValue')
+    expect(paneText).not.toContain('resolvedAuxValue')
+    expect(paneText).not.toContain('notes')
+    // The values themselves are untouched — this is a copy change, not a narrowing of the readback.
+    expect(q('stock-prep-confirmation-value-entry-value')?.textContent).toBe('12.5')
+    expect(q('stock-prep-confirmation-value-entry-aux')?.textContent).toBe('千克')
+    expect(q('stock-prep-confirmation-value-entry-notes')?.textContent).toBe('按图纸取整')
+    // THE OTHER HALF: an implementer still gets the names verbatim, one disclosure away. (The
+    // disclosure keeps its content in the DOM while collapsed — StockPrepTechnicalDetails.vue.)
+    const tech = q('stock-prep-confirmation-tech')?.textContent ?? ''
+    expect(tech, 'the names moved to 技术详情 — deleting them outright would strip what a support thread matches on').toContain('resolvedValue')
+    expect(tech).toContain('resolvedAuxValue')
+    expect(tech).toContain('notes')
+  })
+  // -------------------------------------------------------------------------
+  // THE OTHER HALF OF FIELD REPORT (a), and the one the first cut could not explain: the browser
+  // showed `STOCK_PREPARATION_EXPORT_REQUEST_FAILED` — a code NOTHING on the server ever sends; it
+  // exists only as this client's fallback (confirmationQueue.ts). So on 222 the body that reached
+  // the page had no readable `error.code`, and adding a plain sentence for
+  // PREP_LINE_EXPORT_PROJECT_NOT_FOUND alone would have left the observed screen unchanged. These
+  // four pin the fallback by STATUS: a 404 no longer degrades to the retry-shaped generic, whatever
+  // the body turns out to be, while every other status and every body that DOES carry a code are
+  // byte-for-byte what they were.
+  // -------------------------------------------------------------------------
+  it('a 404 whose body carries no error.code falls back to STOCK_PREPARATION_EXPORT_NOT_FOUND, not the retry-shaped generic', async () => {
+    apiFetchMock.mockImplementation(async () => new Response(
+      '<html><head><title>404 Not Found</title></head><body>nginx</body></html>',
+      { status: 404, headers: { 'Content-Type': 'text/html' } },
+    ))
+
+    const raised = await exportStockPreparationPrepLines({ tenantId: 'default', projectNo: PROJECT_NO })
+      .then(() => null, (error: unknown) => error)
+    expect(raised, 'a non-2xx export must reject, never resolve to an empty download').toBeInstanceOf(StockPreparationConfirmApiError)
+    expect((raised as StockPreparationConfirmApiError).status).toBe(404)
+    expect(
+      (raised as StockPreparationConfirmApiError).code,
+      'the code the operator saw on 222 was the generic — a 404 must not produce it',
+    ).toBe('STOCK_PREPARATION_EXPORT_NOT_FOUND')
+  })
+
+  it('a 404 that DOES carry error.code still forwards the server code untouched', async () => {
+    apiFetchMock.mockImplementation(async () => new Response(
+      JSON.stringify({ ok: false, error: { code: 'PREP_LINE_EXPORT_PROJECT_NOT_FOUND', message: 'no stock-preparation rows exist for this project' } }),
+      { status: 404 },
+    ))
+
+    const raised = await exportStockPreparationPrepLines({ tenantId: 'default', projectNo: PROJECT_NO })
+      .then(() => null, (error: unknown) => error)
+    expect((raised as StockPreparationConfirmApiError).code).toBe('PREP_LINE_EXPORT_PROJECT_NOT_FOUND')
+  })
+
+  it('a NON-404 failure keeps the pre-existing generic fallback, unchanged', async () => {
+    apiFetchMock.mockImplementation(async () => new Response('upstream exploded', {
+      status: 500,
+      headers: { 'Content-Type': 'text/plain' },
+    }))
+
+    const raised = await exportStockPreparationPrepLines({ tenantId: 'default', projectNo: PROJECT_NO })
+      .then(() => null, (error: unknown) => error)
+    expect((raised as StockPreparationConfirmApiError).status).toBe(500)
+    expect(
+      (raised as StockPreparationConfirmApiError).code,
+      'only 404 was re-shaped — a 5xx really is "try again shortly"',
+    ).toBe('STOCK_PREPARATION_EXPORT_REQUEST_FAILED')
+  })
+
+  it('the page turns a code-less 404 into words that do NOT invite an endless retry', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      const path = String(url)
+      if (path.includes('/operator/projects')) return ok(directoryPayload())
+      if (path.includes('/confirmation-decisions')) return ok(queuePayload())
+      if (path.includes('/prep-lines/export')) {
+        return new Response('<html>404</html>', { status: 404, headers: { 'Content-Type': 'text/html' } })
+      }
+      return ok({})
+    })
+
+    mount()
+    await flush()
+    ;(q('stock-prep-confirmation-export') as HTMLButtonElement).click()
+    await flush()
+
+    const errorNode = q('stock-prep-confirmation-error')
+    expect(errorNode).not.toBeNull()
+    expect(errorNode!.textContent).toContain(stockPrepErrorPlain('STOCK_PREPARATION_EXPORT_NOT_FOUND').zh)
+    // THE SENTENCE THE OPERATOR ACTUALLY SAW ON 222 — it must be gone.
+    expect(errorNode!.textContent, 'retrying cannot fix either reading of this 404').not.toContain('稍后再点一次')
+    // Both readings are named, neither is asserted as fact.
+    expect(errorNode!.textContent).toContain('确认队列')
+    expect(errorNode!.textContent).toContain('管理员')
   })
 })
