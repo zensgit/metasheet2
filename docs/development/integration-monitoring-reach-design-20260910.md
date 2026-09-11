@@ -83,10 +83,46 @@ pipelineId 粘进输入框就能读到同一批数据，变的只是少一步（
 所以死信行的 `<small>` 补上 `· pipeline {{ deadLetter.pipelineId }}`（类型早就有：`workbench.ts:391`），
 「确认 Replay（会真实写入）」按钮的 `title` 同步带上 pipelineId。run 行已有 `<dt>pipeline</dt>`，两边持平。
 
+### 3.2.3 P2（#5612 审阅反例必修）：后台轮询不得抢占手动意图
+
+反例原话：
+
+> 用户选择 failed、请求尚未返回时，5 秒轮询使用旧的 all 条件发起新请求，并让手动请求失效。真实 loader 的
+> 内存复现结果是：用户选择 failed，最终显示 all，没有错误提示。慢请求还可能反复失效、一直不刷新。
+
+**调用链（改前）**：`IntegrationMonitoringSection.vue` 的 `setInterval` → `props.refreshPipelineObservation(true)`
+→ 视图 `refreshPipelineObservation(silent, nextQuery?)`。轮询不传 `nextQuery`，于是
+`const query = nextQuery ?? monitoringQuery.value` 取到的是**已提交游标**——而 X1 规定游标只在读取成功后才和行
+一起提交，所以手动读还没回来时，`monitoringQuery` 仍然是用户刚离开的那个条件（all）。同时轮询在 `issue()`
+里拿到更新的票据，手动读回来时 `isCurrent` 为假被丢弃。两件事叠在一起：屏幕回到 all、下拉回弹到 all、
+`monitoringError` 因为轮询成功而被清空 → **一个字都不说**。慢请求每 5 秒被作废一次，可以永远刷不出来。
+
+**修法**：票据升级成「读取闸门」`createMonitoringReadGate()`（纯模块），它同时回答两个问题：
+
+1. `begin('background')`：**只要还有未结算的读取就拒绝本轮轮询**（返回 `null`，加载器直接 return，
+   一个请求都不发）。这是二选一里的「读取未完成时跳过轮询」。选它而不是「完成后再调度」的原因：
+   定时器是 `setInterval`，被拒绝的一跳会在 5 秒后自然重来，**跳过即延后**，不需要在共用组件里做定时器手术
+   （改调度要在 `IntegrationMonitoringSection.vue` 里维护 timeout 链和重入，风险更大）；而且闸门放在加载器里，
+   任何未来的后台调用方都自动受管，不只是这一个定时器。
+2. `isCurrent(ticket)`：只有最后发出的票据能落盘。手动读**永不被拒绝**，所以它总是拿到比在飞后台读更大的
+   序号 → 后台读回来时条件已被用户改过，结果直接丢弃。
+
+**硬约束落点**：`source: MonitoringReadSource = 'manual'` 是加载器第三参的默认值，视图里唯一传
+`'background'` 的是新函数 `pollPipelineObservation()`；组件拿到的是**单独的 prop**
+`pollPipelineObservation`（不是在刷新 prop 上加旗标），所以「这次请求没人要求过」是写在定时器调用点上的。
+既有三个动作后重读（dry-run / save-only、replay、外部写 apply）全部走默认的 `'manual'`，行为不变。
+
+**优先级不靠时序**：全部判定来自单调自增的票据序号与「未结算集合」大小，没有任何 `Date.now()` / 延时比较。
+
+**代价（明写）**：后台读也会挡住下一次后台读（慢轮询不会堆积）；如果某次读取**永远不结算**，轮询也会一直停，
+`pendingCount()` 可以观测到。相比「静默把用户的筛选改回去」，这是更好的失败方向。轮询期间
+`observingPipeline` 仍会置 true（刷新按钮闪一下），这条不在本次修法里，见 §5.2。
+
 ### 3.3 视图侧只留最小接线
 
-`IntegrationWorkbenchView.vue` 只动了 4 处（导入、一个 `monitoringQuery` ref + 一个 gate、
-`refreshPipelineObservation` 重写、3 个新 prop），刻意避开在飞 PR #5587/#5596/#5597 的落点。
+`IntegrationWorkbenchView.vue` 只动了 5 处（导入、一个 `monitoringQuery` ref + 一个 gate、
+`refreshPipelineObservation` 重写、新增 `pollPipelineObservation()`、4 个新 prop），刻意避开在飞 PR
+#5587/#5596/#5597 的落点。
 `pipelineRuns` / `deadLetters` / `observationSummary` / 既有 replay & provenance 逻辑全部原地不动。
 
 ## 4. 没做的项与原因
@@ -106,8 +142,10 @@ pipelineId 粘进输入框就能读到同一批数据，变的只是少一步（
 1. **跨端 parity spec**：把前端三个常量（run 状态闭集 / 死信状态闭集 / limit・offset 上限）钉到后端导出上。
    三个源头都已导出：`pipelines.cjs:815 __internals`（`VALID_RUN_STATUSES` 在 `:826`）、`dead-letter.cjs:193`、`http-routes.cjs:9752-9753`（MAX_LIST_LIMIT / MAX_LIST_OFFSET）；
    仓内有同形先例 `apps/web/tests/composition-vocab-mirror.spec.ts`。做了之后，后端改闭集会直接把前端拖红。
-2. **轮询与手动读取分离 spinner / 分页禁用**：今天轮询也会把 `observingPipeline` 置 true，刷新按钮会闪。
-   要分开得改 `refreshPipelineObservation` 签名并回归全部调用点（dry-run / save-only / replay），不适合本波。
+2. **轮询与手动读取分离 spinner / 分页禁用**：签名已经在 §3.2.3（P2 必修）里改了——第三参 `source` 默认
+   `'manual'`，三个动作后重读的调用点行为逐字不变，已跑回归（`IntegrationWorkbenchView.spec.ts` 等 4 个
+   spec / 106 测试）。**仍未做**的是 spinner 本身：轮询照样把 `observingPipeline` 置 true，刷新按钮会闪一下。
+   要分开得再给 section 一个「后台读取中」的独立状态位并改按钮禁用条件，本波不做（纯观感，不影响正确性）。
 3. **换管道不重置 offset**：`IntegrationWorkbenchView.vue:4116`（本波前为 :4098）的 `watch(savedPipelineId)` 只调
    `resetExternalWriteReview()`，不碰 `monitoringQuery.offset`。停在第 5 页时换管道，会用 offset 20 去读新管道
    （很可能直接空页）。修法是在那个 watch 里把游标归零并重读——但那行在在飞 PR 的落点附近，本波不碰。

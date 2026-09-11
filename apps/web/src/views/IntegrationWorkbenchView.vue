@@ -399,6 +399,7 @@
       :row-provenance-timeline="rowProvenanceTimeline"
       :row-provenance-attrs-summary="rowProvenanceAttrsSummary"
       :refresh-pipeline-observation="refreshPipelineObservation"
+      :poll-pipeline-observation="pollPipelineObservation"
       :toggle-run-summaries="toggleRunSummaries"
       :request-replay="requestReplay"
       :cancel-replay="cancelReplay"
@@ -520,8 +521,9 @@ import {
   buildDeadLetterRequestParams,
   buildRunsRequestParams,
   createMonitoringQueryState,
-  createMonitoringResponseGate,
+  createMonitoringReadGate,
   type MonitoringQueryState,
+  type MonitoringReadSource,
 } from '../services/integration/monitoringQuery'
 import MetaIntegrationFieldRuleAuthoring from '../components/integration/MetaIntegrationFieldRuleAuthoring.vue'
 import IntegrationReadSourceConfigPanel from '../components/integration/IntegrationReadSourceConfigPanel.vue'
@@ -883,8 +885,9 @@ const monitoringQuery = ref<MonitoringQueryState>(createMonitoringQueryState())
 // X1: a filter/page read that FAILS must not leave the section silent. The status bar is not
 // enough (filter reads are silent by design), so the section renders this string itself.
 const monitoringError = ref('')
-// Last-write-wins gate for overlapping observation reads (5s polling + operator filter changes).
-const observationGate = createMonitoringResponseGate()
+// Ordering gate for overlapping observation reads (5s polling + operator filter changes): it
+// decides both whether a BACKGROUND read may run at all and whose answer may paint.
+const observationGate = createMonitoringReadGate()
 // IU-1 (RATIFIED addendum): the raw `errorMessage` free-text field must NEVER reach the DOM — it is
 // scrubbed for secret-shaped values only at dead-letter *write* time (see
 // plugins/plugin-integration-core/lib/dead-letter.cjs scrubSecretStringValue), so rendering it here would
@@ -3284,9 +3287,23 @@ function buildPipelinePayload() {
 // `monitoringQuery` only together with the rows it produced, so the section can never label a
 // list with a filter/page that did not actually load — the failure mode that would let an
 // operator hit 「确认 Replay（会真实写入）」 on a row from the PREVIOUS filter.
-async function refreshPipelineObservation(silent = false, nextQuery?: MonitoringQueryState): Promise<void> {
-  // Ticket FIRST: a slower earlier read must never repaint the list under a newer cursor.
-  const ticket = observationGate.issue()
+//
+// P2 (#5612 审阅反例): `source` separates the operator's reads from the 5s poll. The poll used to
+// enter here with no mark at all, which made it (a) read `monitoringQuery` — the cursor an
+// unfinished filter read has NOT committed yet, i.e. the condition the operator just left — and
+// (b) take the newest ticket, so the operator's own answer was discarded when it arrived. Result:
+// operator picks failed, screen lands on all, no error. The gate now refuses a background read
+// while any read is unsettled; a manual read is never refused and always outranks an in-flight
+// background one (higher ticket id → the background answer is dropped, not painted).
+async function refreshPipelineObservation(
+  silent = false,
+  nextQuery?: MonitoringQueryState,
+  source: MonitoringReadSource = 'manual',
+): Promise<void> {
+  // Ticket FIRST: a slower earlier read must never repaint the list under a newer cursor, and a
+  // background tick must not even be ISSUED while the operator is still waiting for an answer.
+  const ticket = observationGate.begin(source)
+  if (!ticket) return
   const query = nextQuery ?? monitoringQuery.value
   observingPipeline.value = true
   try {
@@ -3311,9 +3328,17 @@ async function refreshPipelineObservation(silent = false, nextQuery?: Monitoring
     monitoringError.value = `监控读取失败，筛选/翻页未生效（仍显示上一次成功的结果）：${message}`
     if (!silent) setStatus(message, 'error')
   } finally {
+    // Release the slot whatever happened — a read that failed still has to let the poll back in.
+    observationGate.settle(ticket)
     // A superseded read must not clear the spinner the newer read is still using.
     if (observationGate.isCurrent(ticket)) observingPipeline.value = false
   }
+}
+
+// The 5s poll's ONLY entry point. Everything else defaults to 'manual', so a caller that forgets
+// this function cannot accidentally give a background read operator priority.
+async function pollPipelineObservation(): Promise<void> {
+  await refreshPipelineObservation(true, undefined, 'background')
 }
 
 // The section's only write path into the cursor: it hands back a state the pure module built.

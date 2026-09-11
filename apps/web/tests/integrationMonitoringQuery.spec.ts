@@ -7,7 +7,7 @@ import {
   buildRunsRequestParams,
   countDeadLettersForRun,
   createMonitoringQueryState,
-  createMonitoringResponseGate,
+  createMonitoringReadGate,
   groupDeadLettersByErrorCode,
   hasNextMonitoringPage,
   hasPreviousMonitoringPage,
@@ -203,18 +203,22 @@ describe('monitoringQuery — client-side aggregates the backend does not provid
   })
 })
 
-describe('monitoringQuery — response gate', () => {
+describe('monitoringQuery — read gate', () => {
   it('drops a slow EARLIER response so it cannot repaint a newer page', async () => {
-    const gate = createMonitoringResponseGate()
+    const gate = createMonitoringReadGate()
     let painted = 'initial'
 
     // Two overlapping reads, resolving out of order: the page-1 read (slow) lands AFTER the
     // page-2 read. Without the gate the screen ends up showing page 1 under a page-2 cursor.
     async function read(label: string, delayTicks: number): Promise<void> {
-      const ticket = gate.issue()
-      for (let i = 0; i < delayTicks; i += 1) await Promise.resolve()
-      if (!gate.isCurrent(ticket)) return
-      painted = label
+      const ticket = gate.begin('manual')
+      try {
+        for (let i = 0; i < delayTicks; i += 1) await Promise.resolve()
+        if (!gate.isCurrent(ticket)) return
+        painted = label
+      } finally {
+        gate.settle(ticket)
+      }
     }
 
     const slowFirst = read('page-1', 4)
@@ -224,11 +228,57 @@ describe('monitoringQuery — response gate', () => {
   })
 
   it('keeps the newest ticket current and invalidates every earlier one', () => {
-    const gate = createMonitoringResponseGate()
-    const first = gate.issue()
+    const gate = createMonitoringReadGate()
+    const first = gate.begin()
     expect(gate.isCurrent(first)).toBe(true)
-    const second = gate.issue()
+    const second = gate.begin()
     expect(gate.isCurrent(first)).toBe(false)
     expect(gate.isCurrent(second)).toBe(true)
+    // A refused (null) ticket is never current — the caller must not paint on it.
+    expect(gate.isCurrent(null)).toBe(false)
+  })
+
+  // #5612 [P2]: the poll may not preempt what the operator asked for.
+  it('P2: refuses a BACKGROUND read while any read is still unsettled, and lets it in afterwards', () => {
+    const gate = createMonitoringReadGate()
+    const manual = gate.begin('manual')
+    expect(manual).not.toBeNull()
+    expect(gate.pendingCount()).toBe(1)
+
+    // The 5s tick arrives mid-read: refused outright, so it cannot issue a request with the
+    // cursor the operator has already left, and cannot take the newest ticket either.
+    expect(gate.begin('background')).toBeNull()
+    expect(gate.isCurrent(manual)).toBe(true)
+
+    // Deferral, not shutdown: once the operator's read settles the next tick is admitted.
+    gate.settle(manual)
+    expect(gate.pendingCount()).toBe(0)
+    const poll = gate.begin('background')
+    expect(poll).not.toBeNull()
+    expect(poll?.source).toBe('background')
+    // ...and a background read blocks the NEXT background read, so slow polls cannot pile up.
+    expect(gate.begin('background')).toBeNull()
+  })
+
+  it('P2: a MANUAL read is never refused, and it invalidates an in-flight background read', () => {
+    const gate = createMonitoringReadGate()
+    const poll = gate.begin('background')
+    expect(poll).not.toBeNull()
+
+    // The operator changes a filter while the poll is unanswered: they must not be made to wait.
+    const manual = gate.begin('manual')
+    expect(manual).not.toBeNull()
+    expect(gate.isCurrent(manual)).toBe(true)
+    // The poll's answer now belongs to a condition the operator has replaced → discard it.
+    expect(gate.isCurrent(poll)).toBe(false)
+  })
+
+  it('P2: a read that FAILED still releases the slot (otherwise polling stops forever)', () => {
+    const gate = createMonitoringReadGate()
+    const failed = gate.begin('manual')
+    expect(gate.begin('background')).toBeNull()
+    gate.settle(failed) // the loader settles in `finally`, success or failure
+    expect(gate.pendingCount()).toBe(0)
+    expect(gate.begin('background')).not.toBeNull()
   })
 })

@@ -4,6 +4,7 @@ import { createApp, defineComponent, h, nextTick, type App as VueApp, type Compo
 // import inside a test body pays this 5k-line SFC's first-time transform against that test's own
 // 5000ms timeout, which is exactly how the #4614 integration-guard flake reproduced.
 import View from '../src/views/IntegrationWorkbenchView.vue'
+import { MONITORING_POLL_INTERVAL_MS } from '../src/services/integration/monitoringQuery'
 
 // G34 运行监控到达率 (docs/development/integration-monitoring-reach-design-20260910.md).
 //
@@ -61,6 +62,20 @@ function pipelineRun(overrides: Record<string, unknown> = {}): Record<string, un
   }
 }
 
+function deadLetterRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'dl_g34',
+    tenantId: 'default',
+    workspaceId: null,
+    runId: 'run_g34',
+    pipelineId: 'pipe_g34',
+    errorCode: 'VALIDATION_FAILED',
+    errorMessage: 'x',
+    status: 'open',
+    ...overrides,
+  }
+}
+
 describe('G34 运行监控到达率 (view → request)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -77,10 +92,13 @@ describe('G34 运行监控到达率 (view → request)', () => {
   })
 
   afterEach(() => {
+    // Unmount FIRST: onBeforeUnmount clears the poll interval, and clearing it needs the same
+    // clock implementation that created it.
     if (app) app.unmount()
     if (container) container.remove()
     app = null
     container = null
+    vi.useRealTimers()
   })
 
   /**
@@ -325,5 +343,145 @@ describe('G34 运行监控到达率 (view → request)', () => {
 
     await clickRefresh()
     expect(container?.querySelector('[data-testid="monitoring-error"]')).toBeNull()
+  })
+
+  // ---------------------------------------------------------------------------------------------
+  // #5612 审阅反例 [P2]「后台轮询会撤销用户正在执行的筛选」。原话：
+  //   用户选择 failed、请求尚未返回时，5 秒轮询使用旧的 all 条件发起新请求，并让手动请求失效。
+  //   真实 loader 的内存复现结果是：用户选择 failed，最终显示 all，没有错误提示。
+  //   慢请求还可能反复失效、一直不刷新。
+  // 这三条用例挂的是真视图 + 真 loader，只有 setInterval/clearInterval 被替身接管。
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * ONLY the interval is faked. The poll timer is the single thing these tests need to control,
+   * and leaving setTimeout/Date real keeps `flushUi` and undici's Response body plumbing on their
+   * real implementations (a fully faked clock deadlocks the body read).
+   */
+  function useFakePollClock(): void {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  }
+
+  function selectValue(testId: string): string {
+    return (container?.querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement).value
+  }
+
+  it('P2: a 5s poll never reverts the filter whose read has not come back yet', async () => {
+    let releaseFilteredRead: (() => void) | null = null
+    const filteredRead = new Promise<Response>((resolve) => {
+      releaseFilteredRead = () => resolve(jsonResponse([pipelineRun({ id: 'run_failed', status: 'failed' })]))
+    })
+    installFetchMock((url) => {
+      // The operator's `failed` read hangs; the OLD (all) condition would answer instantly.
+      if (url.includes('status=failed')) return filteredRead
+      return [pipelineRun({ id: 'run_running', status: 'running' })]
+    })
+    useFakePollClock()
+    await mountView()
+    await setPipelineId('pipe_g34')
+    await clickRefresh()
+    // A `running` run is on screen, so the 5s timer is live — the report's precondition.
+    expect(container?.querySelector('[data-testid="monitoring-polling"]')).not.toBeNull()
+
+    await chooseOption('monitoring-run-status', 'failed')
+    expect(runUrls.at(-1)).toContain('status=failed')
+    const urlsWhenOperatorAsked = runUrls.length
+
+    // 5s pass while the operator's read is still unanswered.
+    vi.advanceTimersByTime(MONITORING_POLL_INTERVAL_MS)
+    await flushUi()
+    // A background read here would carry the OLD condition AND invalidate the operator's read.
+    expect(runUrls.length).toBe(urlsWhenOperatorAsked)
+
+    // The operator's read finally answers — it is the one that must paint.
+    releaseFilteredRead?.()
+    await flushUi()
+    expect(selectValue('monitoring-run-status')).toBe('failed')
+    expect(runUrls.at(-1)).toContain('status=failed')
+    expect(container?.querySelector('[data-testid="pipeline-run-run_failed"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid="pipeline-run-run_running"]')).toBeNull()
+    // ...and nothing was "explained" by an error banner either (the report: no error is shown).
+    expect(container?.querySelector('[data-testid="monitoring-error"]')).toBeNull()
+  })
+
+  it('P2: a manual read slower than TWO poll periods still wins, and the poll resumes with ITS condition', async () => {
+    let releaseSlowRead: (() => void) | null = null
+    const slowRead = new Promise<Response>((resolve) => {
+      releaseSlowRead = () => resolve(jsonResponse([deadLetterRow({ id: 'dl_replayed', status: 'replayed' })]))
+    })
+    installFetchMock(
+      // The runs list keeps a `running` run the whole time, so the poll timer never stops.
+      () => [pipelineRun({ id: 'run_running', status: 'running' })],
+      (url) => (url.includes('status=replayed') ? slowRead : [deadLetterRow({ id: 'dl_open' })]),
+    )
+    useFakePollClock()
+    await mountView()
+    await setPipelineId('pipe_g34')
+    await clickRefresh()
+    expect(container?.querySelector('[data-testid="monitoring-polling"]')).not.toBeNull()
+
+    await chooseOption('monitoring-dead-letter-status', 'replayed')
+    const runUrlsWhenAsked = runUrls.length
+    const deadLetterUrlsWhenAsked = deadLetterUrls.length
+
+    // Two full poll periods go by with the operator's read still unanswered.
+    vi.advanceTimersByTime(MONITORING_POLL_INTERVAL_MS)
+    await flushUi()
+    vi.advanceTimersByTime(MONITORING_POLL_INTERVAL_MS)
+    await flushUi()
+    expect(runUrls.length).toBe(runUrlsWhenAsked)
+    expect(deadLetterUrls.length).toBe(deadLetterUrlsWhenAsked)
+
+    releaseSlowRead?.()
+    await flushUi()
+    expect(selectValue('monitoring-dead-letter-status')).toBe('replayed')
+    expect(container?.querySelector('[data-testid="dead-letter-dl_replayed"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid="dead-letter-dl_open"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="monitoring-error"]')).toBeNull()
+
+    // Skipping a tick is a DEFERRAL, not a shutdown: the next tick polls — and it polls the
+    // condition the operator picked, because that is the one the visible rows came from.
+    vi.advanceTimersByTime(MONITORING_POLL_INTERVAL_MS)
+    await flushUi()
+    expect(deadLetterUrls.length).toBe(deadLetterUrlsWhenAsked + 1)
+    expect(deadLetterUrls.at(-1)).toContain('status=replayed')
+  })
+
+  it('P2: an in-flight POLL never makes the operator wait, and its late answer is discarded', async () => {
+    let releasePollRead: (() => void) | null = null
+    const pollRead = new Promise<Response>((resolve) => {
+      releasePollRead = () => resolve(jsonResponse([pipelineRun({ id: 'run_stale_poll', status: 'running' })]))
+    })
+    let unfilteredAnswered = false
+    installFetchMock((url) => {
+      if (url.includes('status=failed')) return [pipelineRun({ id: 'run_fresh', status: 'failed' })]
+      if (unfilteredAnswered) return pollRead
+      unfilteredAnswered = true
+      return [pipelineRun({ id: 'run_running', status: 'running' })]
+    })
+    useFakePollClock()
+    await mountView()
+    await setPipelineId('pipe_g34')
+    await clickRefresh()
+    expect(container?.querySelector('[data-testid="pipeline-run-run_running"]')).not.toBeNull()
+
+    // Nothing else is in flight, so the poll DOES fire — and then hangs.
+    const urlsBeforePoll = runUrls.length
+    vi.advanceTimersByTime(MONITORING_POLL_INTERVAL_MS)
+    await flushUi()
+    expect(runUrls.length).toBe(urlsBeforePoll + 1)
+
+    // The operator changes the filter while the poll is unanswered: a background read may never
+    // hold the operator back.
+    await chooseOption('monitoring-run-status', 'failed')
+    expect(runUrls.at(-1)).toContain('status=failed')
+    expect(container?.querySelector('[data-testid="pipeline-run-run_fresh"]')).not.toBeNull()
+
+    // The poll's answer lands last, carrying a condition the operator has since replaced → drop it.
+    releasePollRead?.()
+    await flushUi()
+    expect(container?.querySelector('[data-testid="pipeline-run-run_stale_poll"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="pipeline-run-run_fresh"]')).not.toBeNull()
+    expect(selectValue('monitoring-run-status')).toBe('failed')
   })
 })

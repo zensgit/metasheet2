@@ -97,6 +97,7 @@ describe('IntegrationMonitoringSection (unit)', () => {
       rowProvenanceTimeline: () => [],
       rowProvenanceAttrsSummary: () => '',
       refreshPipelineObservation: vi.fn(noopFn),
+      pollPipelineObservation: vi.fn(noopFn),
       toggleRunSummaries: vi.fn(noopFn),
       requestReplay: vi.fn(noopFn),
       cancelReplay: vi.fn(noopFn),
@@ -357,50 +358,57 @@ describe('IntegrationMonitoringSection (unit)', () => {
     expect(confirm.getAttribute('title')).toContain('真实写入')
   })
 
+  // P2 (#5612): the timer calls the BACKGROUND door only. The operator's door
+  // (`refreshPipelineObservation`) must stay untouched by the poll, because the loader behind it
+  // gives manual reads priority — a poll arriving there would preempt the operator's own read.
   it('G34: polls every 5s while a run is running, and stops as soon as none is', async () => {
     vi.useFakeTimers()
     const refreshPipelineObservation = vi.fn(noopFn)
+    const pollPipelineObservation = vi.fn(noopFn)
     await mountSection(baseProps({
       refreshPipelineObservation,
+      pollPipelineObservation,
       pipelineRuns: [run({ id: 'run-r', status: 'running' })],
     }))
     expect(container?.querySelector('[data-testid="monitoring-polling"]')).toBeTruthy()
 
     vi.advanceTimersByTime(5000)
-    expect(refreshPipelineObservation).toHaveBeenCalledTimes(1)
-    expect(refreshPipelineObservation).toHaveBeenCalledWith(true)
+    expect(pollPipelineObservation).toHaveBeenCalledTimes(1)
+    // The poll NEVER enters through the operator's door.
+    expect(refreshPipelineObservation).not.toHaveBeenCalled()
     vi.advanceTimersByTime(5000)
-    expect(refreshPipelineObservation).toHaveBeenCalledTimes(2)
+    expect(pollPipelineObservation).toHaveBeenCalledTimes(2)
 
     // The run finished: the timer must go away (nothing left that can change).
     await updateProps({ pipelineRuns: [run({ id: 'run-r', status: 'succeeded' })] })
     expect(container?.querySelector('[data-testid="monitoring-polling"]')).toBeNull()
     vi.advanceTimersByTime(20000)
-    expect(refreshPipelineObservation).toHaveBeenCalledTimes(2)
+    expect(pollPipelineObservation).toHaveBeenCalledTimes(2)
+    expect(refreshPipelineObservation).not.toHaveBeenCalled()
   })
 
   it('G34: never polls when nothing is running', async () => {
     vi.useFakeTimers()
-    const refreshPipelineObservation = vi.fn(noopFn)
-    await mountSection(baseProps({ refreshPipelineObservation, pipelineRuns: [run({ status: 'succeeded' })] }))
+    const pollPipelineObservation = vi.fn(noopFn)
+    await mountSection(baseProps({ pollPipelineObservation, pipelineRuns: [run({ status: 'succeeded' })] }))
     expect(container?.querySelector('[data-testid="monitoring-polling"]')).toBeNull()
     vi.advanceTimersByTime(30000)
-    expect(refreshPipelineObservation).not.toHaveBeenCalled()
+    expect(pollPipelineObservation).not.toHaveBeenCalled()
   })
 
   it('G34: unmount clears the poll timer (an interval outliving the section keeps fetching forever)', async () => {
     vi.useFakeTimers()
-    const refreshPipelineObservation = vi.fn(noopFn)
+    const pollPipelineObservation = vi.fn(noopFn)
     await mountSection(baseProps({
-      refreshPipelineObservation,
+      pollPipelineObservation,
       pipelineRuns: [run({ id: 'run-r', status: 'running' })],
     }))
     vi.advanceTimersByTime(5000)
-    expect(refreshPipelineObservation).toHaveBeenCalledTimes(1)
+    expect(pollPipelineObservation).toHaveBeenCalledTimes(1)
 
     app?.unmount()
     app = null
     vi.advanceTimersByTime(60000)
-    expect(refreshPipelineObservation).toHaveBeenCalledTimes(1)
+    expect(pollPipelineObservation).toHaveBeenCalledTimes(1)
   })
 })

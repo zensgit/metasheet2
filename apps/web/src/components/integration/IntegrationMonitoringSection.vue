@@ -359,7 +359,15 @@ const props = defineProps<{
   rowProvenanceError: (deadLetterId: string) => string
   rowProvenanceTimeline: (deadLetterId: string) => IntegrationProvenanceTimelineEntry[]
   rowProvenanceAttrsSummary: (attrs: Record<string, unknown> | undefined) => string
+  /** The operator-initiated read (刷新 button). Always wins over a background poll. */
   refreshPipelineObservation: (silent?: boolean) => Promise<void>
+  /**
+   * The BACKGROUND read, used by the 5s timer and by nothing else. It is a separate prop (not a
+   * flag on the one above) so that "this request was nobody's request" is stated at the call site
+   * the timer uses: the loader behind it refuses to run while an operator read is unsettled, and
+   * its answer is dropped if the operator has moved on (#5612 [P2]).
+   */
+  pollPipelineObservation: () => Promise<void>
   toggleRunSummaries: (runId: string) => void
   requestReplay: (deadLetterId: string) => void
   cancelReplay: () => void
@@ -479,9 +487,13 @@ function deadLetterCountForRun(runId: string): number {
 }
 
 // Polling: only a `running` run can still change, so the timer exists exactly while one is on
-// screen. It re-reads through the SAME loader the refresh button uses (silent = no status-bar
-// noise), and that loader is ticket-guarded, so a slow poll response can never repaint a newer
-// page. The timer is cleared when the last running run leaves AND on unmount — an interval that
+// screen. It re-reads through `pollPipelineObservation` — the loader's BACKGROUND door (silent =
+// no status-bar noise). The timer stays dumb on purpose: it fires every 5s and the gate inside the
+// loader decides whether this tick may run at all, because the timer cannot see whether an
+// operator read is in flight (#5612 [P2]: a tick that fired mid-filter-read used to re-issue the
+// cursor the operator had already left AND cancel their answer). A refused tick is not lost —
+// the next tick re-asks, and the first one after the read settles carries the committed cursor.
+// The timer is cleared when the last running run leaves AND on unmount — an interval that
 // outlives the component would keep fetching for a screen nobody is looking at.
 const pollingActive = computed(() => hasRunningRun(props.pipelineRuns))
 let monitoringPollTimer: ReturnType<typeof setInterval> | null = null
@@ -495,7 +507,7 @@ function stopMonitoringPoll(): void {
 function startMonitoringPoll(): void {
   if (monitoringPollTimer !== null) return
   monitoringPollTimer = setInterval(() => {
-    void props.refreshPipelineObservation(true)
+    void props.pollPipelineObservation()
   }, MONITORING_POLL_INTERVAL_MS)
 }
 

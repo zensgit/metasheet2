@@ -3,7 +3,8 @@
 设计见 `docs/development/integration-monitoring-reach-design-20260910.md`。
 
 本文档已含 **#5612 对抗复核（29 代理）终审**后的两项必修：X1（游标与数据不分家 + 失败可见）、
-X2（死信行与真实写入按钮必须写明 pipeline）。两个待裁决点已裁：省 pipelineId **不**算越权放宽、不加权限位；
+X2（死信行与真实写入按钮必须写明 pipeline），以及审阅人后续反例 **P2（后台轮询撤销用户正在执行的筛选）**
+的修复（§3.2）。两个待裁决点已裁：省 pipelineId **不**算越权放宽、不加权限位；
 轮询期间**不**禁用筛选维持现状。
 本机：Windows 11 / Node 20 / pnpm 9.15.9 / vitest 1.6.1，worktree `metasheet-wt-g34`，分支
 `feat/integration-monitoring-reach`（基于 origin/main 11dddc18b）。**后端零改动**（`plugins/`、`packages/` 未触碰）。
@@ -12,23 +13,24 @@ X2（死信行与真实写入按钮必须写明 pipeline）。两个待裁决点
 
 | 文件 | 说明 |
 | --- | --- |
-| `apps/web/src/services/integration/monitoringQuery.ts` | 新增。纯模块：状态→请求参数、游标推进、分组/计数、响应票据 |
-| `apps/web/src/components/integration/IntegrationMonitoringSection.vue` | 筛选/翻页/分组/运行详情/5s 轮询（含卸载清理） |
-| `apps/web/src/views/IntegrationWorkbenchView.vue` | 4 处最小接线：导入、`monitoringQuery` ref + gate、`refreshPipelineObservation` 重写、3 个新 prop |
+| `apps/web/src/services/integration/monitoringQuery.ts` | 新增。纯模块：状态→请求参数、游标推进、分组/计数、**读取闸门**（P2：票据 + 后台读拒绝规则） |
+| `apps/web/src/components/integration/IntegrationMonitoringSection.vue` | 筛选/翻页/分组/运行详情/5s 轮询（含卸载清理）；P2：定时器改走独立的 `pollPipelineObservation` prop |
+| `apps/web/src/views/IntegrationWorkbenchView.vue` | 5 处最小接线：导入、`monitoringQuery` ref + gate、`refreshPipelineObservation` 重写（P2 加第三参 `source`）、新增 `pollPipelineObservation()`、4 个新 prop |
 | `apps/web/src/services/integration/workbench.ts` | `IntegrationPipelineObservationQuery.pipelineId` 由必填改为可选（后端本来就可选） |
-| `apps/web/tests/integrationMonitoringQuery.spec.ts` | 新增，17 测试 |
-| `apps/web/tests/IntegrationMonitoringSection.spec.ts` | 既有 2 测试保留 + 14 个 G34/X1/X2 测试 = 16 |
-| `apps/web/tests/integrationMonitoringReach.spec.ts` | 新增，9 测试（挂真视图：URL / 票据 / X1 失败路径） |
+| `apps/web/tests/integrationMonitoringQuery.spec.ts` | 新增，**20 测试**（17 + P2 闸门 3） |
+| `apps/web/tests/IntegrationMonitoringSection.spec.ts` | 既有 2 测试保留 + 14 个 G34/X1/X2 测试 = 16（P2：3 条轮询用例改断言到新 prop） |
+| `apps/web/tests/integrationMonitoringReach.spec.ts` | 新增，**12 测试**（9 + P2 反例 3；挂真视图真 loader） |
 
 ## 2. 命令与退出码
 
 | 命令（cwd） | 退出码 | 结果 |
 | --- | --- | --- |
 | `pnpm install --frozen-lockfile --offline`（worktree 根） | 0 | 6m3s |
-| `npx vitest run tests/integrationMonitoringQuery.spec.ts tests/IntegrationMonitoringSection.spec.ts tests/integrationMonitoringReach.spec.ts`（apps/web） | 0 | 3 files / **42 passed** (17 + 16 + 9) |
-| `npx vitest run tests/IntegrationWorkbenchView.spec.ts tests/integrationWorkbench.spec.ts tests/IntegrationK3WiseSetupView.spec.ts tests/IntegrationWorkbenchRail.spec.ts`（apps/web） | 0 | 4 files / **106 passed**（既有回归，未改这些文件） |
-| `pnpm --filter web run type-check`（worktree 根） | 0 | vue-tsc -b + 两个 verification tsconfig |
-| `npx eslint src/services/integration/monitoringQuery.ts tests/integrationMonitoringQuery.spec.ts` | 0 | 0 problems |
+| `npx vitest run tests/integrationMonitoringQuery.spec.ts tests/IntegrationMonitoringSection.spec.ts tests/integrationMonitoringReach.spec.ts`（apps/web） | 0 | 3 files / **48 passed** (20 + 16 + 12)，P2 修复后重跑 |
+| 同上，**P2 修复之前** | 1 | 3 files / 2 failed \| 46 passed —— 新增的两条反例用例（见 §3.2） |
+| `npx vitest run tests/IntegrationWorkbenchView.spec.ts tests/integrationWorkbench.spec.ts tests/IntegrationK3WiseSetupView.spec.ts tests/IntegrationWorkbenchRail.spec.ts`（apps/web） | 0 | 4 files / **106 passed**（既有回归，未改这些文件；P2 改了加载器签名后重跑，数字不变） |
+| `pnpm --filter web run type-check`（worktree 根） | 0 | vue-tsc -b + 两个 verification tsconfig（P2 后重跑） |
+| `npx eslint src/services/integration/monitoringQuery.ts tests/integrationMonitoringQuery.spec.ts tests/integrationMonitoringReach.spec.ts tests/IntegrationMonitoringSection.spec.ts` | 0 | 0 errors（6 个 warning 全是既有的 `vue/one-component-per-file` 等，落在改动前就有的行上） |
 | `npx vitest run --watch=false`（apps/web 全量） | 1 | 813 files / 10977 tests：**760 files & 10901 tests passed**，53 files / 76 tests failed，474s |
 
 lint 说明：`apps/web` 的 `lint` 脚本是**白名单**（`src/main.ts`、PLM、workflow 等），本次改动的文件都不在其中，
@@ -94,6 +96,103 @@ X1c 只把 section 层用例拖红：reach 层那条断言下拉回弹的用例�
 所以在那个场景里 v-model 的 updated 钩子依然能拉回。`filterEpoch` 是为“两次失败错误文字完全相同 → 无 prop 变化”
 那一支准备的保险，已在 section 层单独钉住。
 
+## 3.2 P2（审阅反例）：后台轮询撤销用户正在执行的筛选
+
+审阅原话：
+
+> [P2] #5612：后台轮询会撤销用户正在执行的筛选。用户选择 failed、请求尚未返回时，5 秒轮询使用旧的 all 条件
+> 发起新请求，并让手动请求失效。真实 loader 的内存复现结果是：用户选择 failed，最终显示 all，没有错误提示。
+> 慢请求还可能反复失效、一直不刷新。修法：读取未完成时跳过轮询，或完成后再调度；后台请求不能抢占手动意图。
+
+修法与理由见设计文档 §3.2.3。落点：
+
+- `apps/web/src/services/integration/monitoringQuery.ts:281-351` — `createMonitoringReadGate()`
+  （`begin(source) / isCurrent / settle / pendingCount`；`'background'` 在有未结算读取时返回 `null`）。
+- `apps/web/src/views/IntegrationWorkbenchView.vue:3291-3342` — 加载器第三参 `source`（默认 `'manual'`）、
+  `begin()` 返回 `null` 就一个请求都不发、`finally` 里 `settle(ticket)`；新增 `pollPipelineObservation()`。
+- `apps/web/src/components/integration/IntegrationMonitoringSection.vue:364-370、:489-512` — 定时器只调
+  `props.pollPipelineObservation()`（独立 prop），不再借用操作员那扇门。
+
+### 3.2.1 反例：修前红的原样输出
+
+新增用例（`apps/web/tests/integrationMonitoringReach.spec.ts`，挂真视图 + 真 loader，只替身
+`setInterval/clearInterval`）。**在修改 `monitoringQuery.ts` / 视图 / 组件之前**跑同一个 spec：
+
+```
+ ❯ tests/integrationMonitoringReach.spec.ts  (12 tests | 2 failed) 7184ms
+   ❯ ... > P2: a 5s poll never reverts the filter whose read has not come back yet
+     → expected 3 to be 2 // Object.is equality
+   ❯ ... > P2: a manual read slower than TWO poll periods still wins, and the poll resumes with ITS condition
+     → expected 4 to be 2 // Object.is equality
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  tests/integrationMonitoringReach.spec.ts > G34 运行监控到达率 (view → request) > P2: a 5s poll never reverts the filter whose read has not come back yet
+AssertionError: expected 3 to be 2 // Object.is equality
+- Expected
++ Received
+- 2
++ 3
+ ❯ tests/integrationMonitoringReach.spec.ts:393:28
+    391|     await flushUi()
+    392|     // A background read here would carry the OLD condition AND invali…
+    393|     expect(runUrls.length).toBe(urlsWhenOperatorAsked)
+       |                            ^
+ Test Files  1 failed (1)
+      Tests  2 failed | 10 passed (12)
+```
+
+`expected 3 to be 2` = 手动读取还挂着的时候，轮询**多发了一个请求**（第 3 个 runs URL）。慢请求那条是
+`expected 4 to be 2`：两个轮询周期各抢发一次。
+
+因为断言在「轮询发了请求」这一步就停了，审阅人描述的**终局**（"最终显示 all，没有错误提示"）还没被打印出来。
+所以又做了一次内存探针：把这条用例的中途断言去掉、并把结尾断言原样改成审阅人的说法
+（`selectValue('monitoring-run-status') === ''`、`run_failed` 不在、`run_running` 在、没有
+`monitoring-error`），在**修复前**的代码上跑：
+
+```
+EXIT 0
+ Test Files  1 passed (1)
+      Tests  1 passed | 11 skipped (12)
+restored = True
+```
+
+即：修复前，用户选 failed、最终屏幕落在 all、死活没有任何错误提示——审阅人的复现被逐条坐实。探针改完立刻还原
+（`restored = True`，`git status` 无残留）。
+
+### 3.2.2 修后绿
+
+```
+ Test Files  3 passed (3)
+      Tests  48 passed (48)
+```
+
+三条新用例（全部挂真视图真 loader）：
+
+1. `P2: a 5s poll never reverts the filter whose read has not come back yet` —— 屏上有 `running` run（定时器活着）
+   → 选 `failed`（请求挂起）→ 推进 5s → **runs URL 数量不变**（轮询一个请求都没发）→ 放行手动请求 →
+   下拉是 `failed`、`run_failed` 在、`run_running` 不在、没有错误横幅。
+2. `P2: a manual read slower than TWO poll periods still wins, and the poll resumes with ITS condition` ——
+   死信筛选 `replayed` 的读取挂满**两个**轮询周期 → 两边 URL 数量都不变 → 放行 → 屏上是 `dl_replayed`；
+   再推进 5s，轮询**恢复**并且带的是 `status=replayed`（跳过是延后不是停摆，且轮询跟着用户的意图走）。
+3. `P2: an in-flight POLL never makes the operator wait, and its late answer is discarded` —— 轮询先发且挂起 →
+   用户改筛选，手动请求**立刻发出并渲染**（后台在飞不许挡住操作员）→ 轮询的旧答案最后落地 → 丢弃，不渲染。
+
+另加 3 条纯模块用例（`integrationMonitoringQuery.spec.ts`）：后台读在有未结算读取时被拒绝且之后放行、
+手动读永不被拒绝且作废在飞后台读、失败的读取也必须释放名额。
+
+### 3.2.3 P2 变异探针（内存改写 → 跑 3 个 spec → 立即还原，全部 `restored = True`）
+
+| # | 变异 | exit | 3 spec 汇总 | 变红的测试 |
+| --- | --- | --- | --- | --- |
+| M1 | 去掉序号比较：`isCurrent` 只判票据非空 | 1 | 5 failed / 43 passed | query: `drops a slow EARLIER response…` / `keeps the newest ticket current…` / `P2: a MANUAL read is never refused…`；reach: `a slow EARLIER read cannot repaint the list…(response gate)` / `P2: an in-flight POLL never makes the operator wait…` |
+| M2 | 去掉跳过逻辑：后台读不再被在飞读拒绝 | 1 | 4 failed / 44 passed | query: `P2: refuses a BACKGROUND read…` / `P2: a read that FAILED still releases the slot…`；reach: `P2: a 5s poll never reverts the filter…` / `P2: a manual read slower than TWO poll periods…` |
+| M3 | `settle()` 变空操作（名额永不释放） | 1 | 4 failed / 44 passed | query: `P2: refuses a BACKGROUND read…` / `P2: a read that FAILED still releases the slot…`；reach: `P2: a manual read slower than TWO poll periods…` / `P2: an in-flight POLL never makes the operator wait…` |
+| M4 | 视图把轮询标成 `'manual'`（后台冒充手动） | 1 | 2 failed / 46 passed | reach: `P2: a 5s poll never reverts the filter…` / `P2: a manual read slower than TWO poll periods…` |
+| M5 | 组件定时器改回调 `refreshPipelineObservation(true)` | 1 | 4 failed / 44 passed | reach 同 M4 两条；section: `G34: polls every 5s while a run is running…` / `G34: unmount clears the poll timer…` |
+
+M2 连 M1 之外的另一个方向也钉住了：光有序号比较（last-write-wins）**不够**——轮询即使不作废手动读，也会用
+旧游标把屏幕改回去，所以必须两条一起在。M4/M5 证明「纯模块正确」不等于「接线正确」：闸门放在加载器里，
+但只要视图或组件把后台读伪装成手动读，反例立刻复活。
+
 ## 4. 手动核对的行为
 
 - 首屏（已保存 Pipeline + 默认筛选）请求 URL 与改前完全一致：
@@ -103,6 +202,7 @@ X1c 只把 section 层用例拖红：reach 层那条断言下拉回弹的用例�
 - run 状态与死信状态互不串台（run 的 `failed` 不会进死信路由，死信的 `replayed` 不会进 runs 路由）。
 - 翻页：`limit=20` → `limit=20&offset=20` → 回到 `limit=20`（首页不带 offset）。
 - 票据：读 #1 挂起 → 改筛选发出读 #2 并渲染 → 释放读 #1 → 列表仍是 #2 的数据。
+- P2 轮询：手动读在飞时 5s 定时器一个请求都不发；手动读结束后的下一跳恢复轮询，且带的是用户刚选中的条件。
 
 ## 5. 没做 / 遗留
 
@@ -116,3 +216,10 @@ X1c 只把 section 层用例拖红：reach 层那条断言下拉回弹的用例�
 5. 死信区的空态引导文案（IU-6）仍写“当前没有 open dead letters”，选了其他状态且结果为空时措辞略偏；
    标题已带当前状态（如 `Dead Letters（replayed）`），文案本身由另一条测试钉长度，本期不改。
 6. 未覆盖：真实浏览器/e2e 未跑（无环境），轮询与真实后端的联调未做。
+7. **P2 遗留**：(a) spinner 不分家——轮询照样把 `observingPipeline` 置 true，刷新按钮会闪一下（纯观感，
+   见设计 §5.2）；(b) 一次**永不结算**的读取会让轮询一直停在跳过态（`pendingCount()` 可观测，
+   真实 fetch 总会 settle，所以只会出现在被 mock 卡住的测试里）；(c) 后台轮询失败时仍然写
+   `monitoringError`（文案是「筛选/翻页未生效」，对一次后台读来说措辞偏硬）——这条是 X1 的既有形状，
+   本次不动，以免松掉 X1 的守卫。
+8. 本轮未跑 `apps/web` 全量 vitest（上一轮已跑过并逐条比对过 53 个本机噪音红文件）；本轮只跑了
+   monitoring 三件套 + 4 个相邻回归 spec + type-check。CI 是裁判。

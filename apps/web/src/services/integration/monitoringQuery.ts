@@ -278,26 +278,74 @@ export function hasRunningRun(runs: readonly Pick<IntegrationPipelineRun, 'statu
   return runs.some((run) => run?.status === 'running')
 }
 
-export interface MonitoringResponseGate {
-  /** Starts a new request and invalidates every earlier one. */
-  issue: () => number
-  /** True only for the most recently issued ticket. */
-  isCurrent: (ticket: number) => boolean
+/**
+ * Who asked for a read.
+ *  - 'manual': the operator did — a filter change, a page turn, the 刷新 button, or the re-read
+ *    that follows an action they just triggered (dry-run / save-only / replay).
+ *  - 'background': the 5s poll. Nobody asked for it, so it must never overwrite, delay, or
+ *    invalidate a read that somebody DID ask for.
+ */
+export type MonitoringReadSource = 'manual' | 'background'
+
+export interface MonitoringReadTicket {
+  /** Monotonic issue order. `isCurrent` compares THIS — never wall-clock timing. */
+  readonly id: number
+  readonly source: MonitoringReadSource
+}
+
+export interface MonitoringReadGate {
+  /**
+   * Reserve a ticket, or refuse the read outright (`null`). A 'manual' read is ALWAYS issued.
+   * A 'background' read is refused while any earlier read is still unsettled.
+   */
+  begin: (source?: MonitoringReadSource) => MonitoringReadTicket | null
+  /** True only for the most recently issued ticket (a `null` ticket is never current). */
+  isCurrent: (ticket: MonitoringReadTicket | null) => boolean
+  /** Release the ticket once the read has ended — success OR failure. Must run in a `finally`. */
+  settle: (ticket: MonitoringReadTicket | null) => void
+  /** Reads issued but not yet settled. Exposed so the refusal rule is testable/observable. */
+  pendingCount: () => number
 }
 
 /**
- * Last-write-wins guard for overlapping monitoring reads. Polling (5s) plus operator-driven filter
- * changes make out-of-order responses ordinary, and without this an in-flight page-1 read that
- * lands AFTER a page-2 read would repaint page 1 under a "page 2" cursor. Pure: it owns a counter,
- * performs no IO, and never touches the responses themselves.
+ * Ordering guard for overlapping monitoring reads. It answers two different questions, and both
+ * come from the same monotonic counter — never from timing:
+ *
+ *  1. `begin('background')` → may this poll run AT ALL? No, if any read is still unsettled.
+ *     This is the #5612 [P2] fix: a 5s poll that fires while the operator's filter read is
+ *     in flight would (a) carry the cursor the operator has ALREADY moved off — the loader reads
+ *     `monitoringQuery`, which by design only commits together with the rows it produced — and
+ *     (b) take the newest ticket, so the operator's own answer gets dropped on arrival. The
+ *     observed result was: operator picks `failed`, screen ends up on `all`, and NOTHING says so.
+ *     Refusing the tick (rather than cancelling the operator) is the only ordering in which a
+ *     background read cannot preempt a manual intent. It is a DEFERRAL, not a shutdown: the poll
+ *     is an interval, so the next tick re-asks, and the first tick after the read settles runs
+ *     with the cursor the operator actually committed. The accepted cost is that a read which
+ *     never settles also stops the poll — visible via `pendingCount()`, and strictly better than
+ *     silently reverting the operator.
+ *     A background read blocks the NEXT background read too: a poll slower than the cadence would
+ *     otherwise pile up requests that can only answer for a cursor someone may already have left.
+ *  2. `isCurrent(ticket)` → may this answer paint? Only if no later read was issued. This keeps a
+ *     slow page-1 read from repainting page 1 under a page-2 cursor, and it is also what throws
+ *     away a poll answer whose condition the operator has since replaced: a manual read is never
+ *     refused, so it always takes a HIGHER id than the background read it overtakes.
+ *
+ * Pure: it owns a counter and a set of unsettled ids, performs no IO, and never touches responses.
  */
-export function createMonitoringResponseGate(): MonitoringResponseGate {
-  let latest = 0
+export function createMonitoringReadGate(): MonitoringReadGate {
+  let lastIssuedId = 0
+  const unsettled = new Set<number>()
   return {
-    issue: () => {
-      latest += 1
-      return latest
+    begin: (source: MonitoringReadSource = 'manual') => {
+      if (source === 'background' && unsettled.size > 0) return null
+      lastIssuedId += 1
+      unsettled.add(lastIssuedId)
+      return { id: lastIssuedId, source }
     },
-    isCurrent: (ticket: number) => ticket === latest,
+    isCurrent: (ticket: MonitoringReadTicket | null) => !!ticket && ticket.id === lastIssuedId,
+    settle: (ticket: MonitoringReadTicket | null) => {
+      if (ticket) unsettled.delete(ticket.id)
+    },
+    pendingCount: () => unsettled.size,
   }
 }
