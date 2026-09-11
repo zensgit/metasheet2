@@ -1168,17 +1168,25 @@ if ($MyInvocation.InvocationName -ne '.') {
   Write-Info "Package verified: $packageBaseName sha256=$verifiedSha"
 
   Write-Info '=== Step 2/8: stop pm2 app (maintenance gate raised first) ==='
-  # The gate goes up BEFORE the backend goes down, so no request can land in
-  # the gap between "pm2 stopped" and "nginx answering 503": that gap is the
-  # ERR_CONNECTION_RESET / Failed to fetch testers reported in four separate
-  # upgrade windows. Everything from here on runs inside the try/finally below,
-  # whose finally drops the gate unconditionally — success, refusal, or an
-  # exception raised anywhere in between.
-  New-MaintenanceFlag -FlagPath $maintenanceFlagPath | Out-Null
-  Write-Host "MAINTENANCE_FLAG=$maintenanceFlagPath"
 
   $maintenanceGate = 'UNKNOWN'
   try {
+    # The gate goes up BEFORE the backend goes down, so no request can land in
+    # the gap between "pm2 stopped" and "nginx answering 503": that gap is the
+    # ERR_CONNECTION_RESET / Failed to fetch testers reported in four separate
+    # upgrade windows.
+    #
+    # The write is the FIRST statement INSIDE the try, never before it. A flag
+    # raised on the pre-try lines would outlive any exception thrown between
+    # the write and `try {` — nothing would ever delete it and the site would
+    # answer 503 forever. Remove-MaintenanceFlag is idempotent, so putting the
+    # write inside costs nothing even when this very line is what threw.
+    # Everything from here on runs inside the try/finally below, whose finally
+    # drops the gate unconditionally — success, refusal, or an exception
+    # raised anywhere in between.
+    New-MaintenanceFlag -FlagPath $maintenanceFlagPath | Out-Null
+    Write-Host "MAINTENANCE_FLAG=$maintenanceFlagPath"
+
     # Ask the PUBLIC url once, while the flag is up and the backend is still
     # running: 503 proves nginx really reads this flag on THIS host, 200 proves
     # it does not (the conf was never hand-synced). Diagnostic only — it never

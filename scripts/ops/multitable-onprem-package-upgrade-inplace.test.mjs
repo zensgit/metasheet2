@@ -810,6 +810,36 @@ test('Main structure: the gate is validated before anything runs, raised before 
   assert.ok(assertIdx < raiseIdx, 'the path must be validated before the flag is written')
   assert.ok(raiseIdx < stopIdx, 'the gate must be raised before the backend is stopped')
 
+  // THE INVARIANT THAT HAD NO GUARD: "once the flag is up, the finally owns it".
+  // A raise sitting even two statements ABOVE `try {` still passes every
+  // ordering assertion above, yet any throw between the write and the try --
+  // or an early `exit` from a gate that has not run yet -- leaves the flag on
+  // disk forever, i.e. a permanently 503 site. So: the checksum gate (the one
+  // pre-try step that legitimately refuses) must run BEFORE the raise, the
+  // raise must sit INSIDE the try, and nothing that can throw may separate
+  // `try {` from the raise.
+  const checksumIdx = main.indexOf('$verifiedSha = Test-PackageChecksum')
+  const tryIdx = main.indexOf('try {')
+  assert.ok(checksumIdx > -1 && tryIdx > -1)
+  assert.ok(
+    checksumIdx < raiseIdx,
+    'the checksum refusal must come BEFORE the gate is raised: it exits without running any finally',
+  )
+  assert.ok(
+    tryIdx < raiseIdx,
+    'the gate must be raised INSIDE the try whose finally drops it -- a pre-try raise survives every throw before `try {`',
+  )
+  const betweenTryAndRaise = main.slice(tryIdx + 'try {'.length, raiseIdx)
+  const executableBetween = betweenTryAndRaise
+    .split(String.fromCharCode(10))
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'))
+  assert.deepEqual(
+    executableBetween,
+    [],
+    'nothing that can throw may sit between `try {` and the raise -- the window it opens is exactly the one the finally cannot close',
+  )
+
   // The positive self-witness: probe the PUBLIC url once while the flag is up
   // and the backend is still serving. Only that window can distinguish "nginx
   // reads this flag" (503) from "this host never got the conf" (200) — after
@@ -1239,6 +1269,15 @@ test('end-to-end (acid fixture): checksum mismatch refuses BEFORE touching pm2 o
     assert.match(result.stderr + result.stdout, /PACKAGE_CHECKSUM_MISMATCH/)
     assert.ok(!fs.existsSync(pm2LogPath), 'pm2 must never be invoked when the checksum gate refuses')
     assert.ok(!fs.existsSync(backupRoot) || fs.readdirSync(backupRoot).length === 0, 'no backup should be written')
+    // The refusal happens before the gate goes up, so nothing may be left
+    // holding it. If a future edit hoists the raise above the checksum gate (or
+    // anywhere outside the try), this run ends with the flag still on disk and
+    // nginx answers 503 for every request until a human deletes the file --
+    // a refused upgrade would take the site down harder than a broken one.
+    assert.ok(
+      !fs.existsSync(path.join(liveRoot, 'output', 'maintenance.flag')),
+      'a pre-try refusal must not leave a maintenance flag behind: no finally runs on that path',
+    )
     assert.match(
       fs.readFileSync(path.join(liveRoot, ...PREFLIGHT_FILE.split('/')), 'utf8'),
       /stale: true/,
