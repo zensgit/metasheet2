@@ -47,9 +47,15 @@
           'The most common main journey: pull a whole table or view from a SQL database into a multi-dimensional table to clean, confirm with a dry-run, then push it to a target multi-dimensional table. Each step below states where it lives, what to click, what success looks like, and where to look on common failure.',
         ) }}
       </p>
+      <p class="integration-help__callout" data-testid="help-case-sql-source-real-values">
+        {{ bi(
+          '配置表单里请填真实值。表单输入框里的灰字（例如 Host 框里的样例地址、Database 框里的样例库名）是 HTML placeholder 提示，不会被提交；尖括号写法的占位符只用于文档、截图和验收证据，填进真实表单会让连接不可用。判断连接是否可用的唯一动作是点「测试连接」——「创建」只把配置落库，不会拨号。',
+          'Fill the real configuration form with real values. The grey text inside an input (the sample address in Host, the sample database name in Database) is an HTML placeholder hint and is never submitted; angle-bracket placeholders belong in docs, screenshots and acceptance evidence only — typed into a real form they leave the connection unusable. The only action that tells you whether a connection works is "Test connection"; "Create" merely persists the configuration and never dials out.',
+        ) }}
+      </p>
       <ol class="integration-help__case-steps" data-testid="help-case-sql-source-steps">
         <li
-          v-for="(step, index) in sqlSourceCaseSteps"
+          v-for="(step, index) in INTEGRATION_HELP_SQL_SOURCE_CASE_STEPS"
           :key="step.id"
           class="integration-help__case-step"
           :data-testid="`help-case-sql-source-step-${index + 1}`"
@@ -64,6 +70,12 @@
             <dd>{{ bi(step.successZh, step.successEn) }}</dd>
             <dt>{{ bi('常见失败与去哪看', 'Common failure & where to look') }}</dt>
             <dd>{{ bi(step.failureZh, step.failureEn) }}</dd>
+            <dt>{{ bi('这一步对应的代码', 'The code this step maps to') }}</dt>
+            <dd :data-testid="`help-case-sql-source-anchors-${step.id}`">
+              <code v-for="anchor in step.anchors" :key="`${anchor.file}:${anchor.token}`" class="integration-help__anchor">
+                {{ anchor.file }} · {{ anchor.token }}
+              </code>
+            </dd>
           </dl>
         </li>
       </ol>
@@ -73,13 +85,19 @@
       <h2>{{ bi('案例二：K3 WISE 预设', 'Walkthrough two: the K3 WISE preset') }}</h2>
       <p>
         {{ bi(
-          '一条更短的旅程：用现成的 K3 WISE 预设模板读取物料 / BOM，不用手填连接参数。K3 目标永久只读——Dry-run 后只能导出，或把结果推送到多维表，永远不会写回 K3。',
-          'A shorter journey: use the ready-made K3 WISE preset template to read materials / BOMs, with no connection parameters to fill in by hand. The K3 target is permanently read-only — after a dry-run you can only export the result or push it into a multi-dimensional table; it is never written back to K3.',
+          '这条旅程的真实方向是 PLM → K3 预览，不是“读 K3”：预设页先接通 K3 通道，再安装 staging 多维表，然后生成两条 PLM 来源、K3 目标的 draft pipeline；Dry-run 读的是 PLM 来源，产出的是“如果真要写，会发给 K3 的那份 payload”的预览。K3 目标永久只读，预览由本地组装，不向 K3 发出任何请求。',
+          'The real direction of this journey is PLM → K3 preview, not "reading K3": the preset page first connects the K3 channel, installs the staging multi-dimensional table, then generates two draft pipelines whose source is PLM and whose target is K3. A dry-run reads the PLM source and produces a preview of the request payload that a real transfer would have sent to the ERP. The K3 target is permanently read-only, and the preview is composed locally without issuing any request to it.',
+        ) }}
+      </p>
+      <p class="integration-help__callout" data-testid="help-case-k3-wise-preview-not-saved">
+        {{ bi(
+          '预览结果不会被保存：它只在这次请求的响应里返回并显示在页面上，刷新即消失，既不会落进 staging 多维表，也不会落进任何目标系统。「打开多维表（新建记录入口）」是一个纯导航链接，跳到该 staging 表的多维表页面，点它不触发任何保存动作；这个按钮由「安装 Staging 多维表」的结果驱动，和 Dry-run 结果无关。要让数据真正落进多维表，需要在数据工厂把目标设为 MetaSheet 多维表后做一次显式推送，或者导出 CSV / Excel。',
+          'The preview result is not persisted: it comes back in that one response, is rendered on the page, and is gone on reload — it does not land in the staging multi-dimensional table, nor in any target system. "Open the multi-dimensional table (new-record entry)" is a plain navigation link to that staging table\'s grid page; clicking it triggers no persistence call at all, and the link is driven by the staging-install result rather than by any dry-run. To actually land rows in a multi-dimensional table, set the target to a MetaSheet multi-dimensional table in the Data Factory and run one explicit push, or export CSV / Excel.',
         ) }}
       </p>
       <ol class="integration-help__case-steps" data-testid="help-case-k3-wise-steps">
         <li
-          v-for="(step, index) in k3WiseCaseSteps"
+          v-for="(step, index) in INTEGRATION_HELP_K3_WISE_CASE_STEPS"
           :key="step.id"
           class="integration-help__case-step"
           :data-testid="`help-case-k3-wise-step-${index + 1}`"
@@ -94,6 +112,12 @@
             <dd>{{ bi(step.successZh, step.successEn) }}</dd>
             <dt>{{ bi('常见失败与去哪看', 'Common failure & where to look') }}</dt>
             <dd>{{ bi(step.failureZh, step.failureEn) }}</dd>
+            <dt>{{ bi('这一步对应的代码', 'The code this step maps to') }}</dt>
+            <dd :data-testid="`help-case-k3-wise-anchors-${step.id}`">
+              <code v-for="anchor in step.anchors" :key="`${anchor.file}:${anchor.token}`" class="integration-help__anchor">
+                {{ anchor.file }} · {{ anchor.token }}
+              </code>
+            </dd>
           </dl>
         </li>
       </ol>
@@ -259,6 +283,303 @@ export const INTEGRATION_HELP_GLOSSARY: GlossaryEntry[] = [
     meaningEn: 'The record left behind by one failed pipeline run; you can inspect and replay it from the "Monitoring & Dead Letters" section.',
   },
 ]
+
+// ---------------------------------------------------------------------------------------------
+// End-to-end walkthroughs (G12/G41, rewritten 2026-09-10 after review).
+//
+// REVIEW FINDING THIS SHAPE ANSWERS. The first version of these two walkthroughs described an
+// operation chain that does not exist: step one told the reader to type placeholders into the real
+// data-source form and then promised a usable connection, and case two claimed the K3 dry-run
+// "only reads K3" and that "open the multi-dimensional table" saves the preview. Copy that merely
+// EXISTS is not copy that is TRUE, and a test that only asserts the copy is rendered cannot tell
+// the two apart.
+//
+// So every step carries `anchors`: the file plus a literal token (route path, data-testid, button
+// label, function name) that must be findable in that file for the step's described action to be
+// real. The spec reads those files off disk and asserts each token is present — deleting a button,
+// renaming a testid or moving a route turns the corresponding step red instead of leaving the help
+// center quietly describing a dead control. Anchors are IDENTIFIERS ONLY: never an error-code
+// literal, because the page's error-code vocabulary has exactly one source (the IU-1 label module's
+// `integrationErrorCodeEntries()` table further down) and a code pasted into prose here would be a
+// second one.
+export interface HelpCaseStepAnchor {
+  /** Repo-root-relative path of the file that proves this step's action exists. */
+  file: string
+  /** A literal that must occur in that file (route path, data-testid, label, function name). */
+  token: string
+}
+
+export interface HelpCaseStep {
+  id: string
+  titleZh: string
+  titleEn: string
+  whereZh: string
+  whereEn: string
+  actionZh: string
+  actionEn: string
+  successZh: string
+  successEn: string
+  failureZh: string
+  failureEn: string
+  anchors: HelpCaseStepAnchor[]
+}
+
+// Case one: SQL read-only source -> multi-dimensional table.
+//
+// The producer chain, read out before rewriting (the reason the placeholder claim had to go):
+//   DataSourcesView.vue `ds-test-draft` -> runDraftTest() -> data-sources/api.ts
+//     testDataSourceDraftConnection() -> POST /api/data-sources/test -> routes/data-sources.ts ->
+//     DataSourceManager.testEphemeralConnection() — this is the ONLY step that dials the database.
+//   DataSourcesView.vue `ds-submit` -> submit() -> buildCreatePayload() -> POST /api/data-sources ->
+//     manager.addDataSource() -> addDataSourceInternal(config, false) — persists WITHOUT connecting.
+// That asymmetry is the whole point: a placeholder host saves successfully and only fails later, so
+// "it saved" can never be reported as "the connection works".
+export const INTEGRATION_HELP_SQL_SOURCE_CASE_STEPS: HelpCaseStep[] = [
+  {
+    id: 'register-data-source',
+    titleZh: '在「外接数据源」页填真实连接参数',
+    titleEn: 'Fill the real connection parameters on the Data Sources page',
+    whereZh: '「外接数据源」页 /data-sources。数据工厂 · 连接管理只会按 ID 引用这里的数据源，不在那边重复填账号密码。',
+    whereEn: 'The Data Sources page at /data-sources. Data Factory · Connections only references a source registered here by id; it never asks you to re-enter the account there.',
+    actionZh: '点「新建数据源」打开表单，填 ID、名称、类型（PostgreSQL / SQL Server / MySQL）、Host、Port、Database 和一个只读账号——全部填目标库的真实值，并保持「只读」勾选。输入框里的灰字是 placeholder 属性的示例提示，不是可提交的值。',
+    actionEn: 'Click "New data source" to open the form and fill in id, name, type (PostgreSQL / SQL Server / MySQL), host, port, database and a read-only account — all with the target database\'s real values, leaving the read-only box checked. The grey text inside each input is a placeholder attribute hint, not a submittable value.',
+    successZh: '表单保持展开，底部操作区有「测试连接」和「创建」两个按钮——新建模式下「测试连接」始终提供，不按字段是否填满来置灰，所以下一步随时可以用它验证。',
+    successEn: 'The form stays open with two buttons in its action row — "Test connection" and "Create". In create mode the test button is always offered (it is not greyed out based on how complete the fields are), so the next step can verify at any point.',
+    failureZh: 'SQL Server 源提示需要 Host 或 Server 之一——这条校验在提交前就拦住了，补一个即可；Postgres / MySQL 只认 Host。',
+    failureEn: 'A SQL Server source reports that either host or server is required — that check fires before submit, so fill one in; Postgres / MySQL accept host only.',
+    anchors: [
+      { file: 'apps/web/src/router/appRoutes.ts', token: "path: '/data-sources'" },
+      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-new-button' },
+      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-field-host' },
+      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-field-readonly' },
+    ],
+  },
+  {
+    id: 'test-then-create',
+    titleZh: '先「测试连接」，再「创建」',
+    titleEn: 'Test the connection first, then create',
+    whereZh: '同一个新建表单的底部操作区。',
+    whereEn: 'The action row at the bottom of that same create form.',
+    actionZh: '先点「测试连接」——它把当前表单内容发给一个临时测试接口，真正拨号，然后原样丢弃：不保存、不注册任何数据源。看到「连接成功」后再点「创建」。',
+    actionEn: 'Click "Test connection" first — it posts the current form to an ephemeral test endpoint that really dials out and then throws everything away: nothing is stored, nothing is registered. Only after you see "connection succeeded" do you click "Create".',
+    successZh: '表单下方出现「连接成功 · 延迟」；点「创建」后数据源出现在列表里，它的 ID 就是后面连接草稿里要引用的 connectionId。',
+    successEn: 'A "connection succeeded · latency" line appears under the form; after "Create" the source shows up in the list, and its id is the connectionId you will reference from the connection draft.',
+    failureZh: '出现「连接失败」时，提示里不会回显你填的 Host 或账号（服务端会把提交的标识符从驱动原文里剔掉）——真实原因看服务端日志，或对已保存的源用列表行里的「测试连接」。注意「创建」本身不拨号，所以填错也会保存成功：保存成功不等于连得上。',
+    failureEn: 'On "connection failed" the message does not echo the host or account you typed (the server strips submitted identifiers out of the driver text) — read the server log for the real cause, or use the row-level "Test connection" on an already-saved source. Note that "Create" itself never dials, so a wrong value still saves successfully: saved is not the same as reachable.',
+    anchors: [
+      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-test-draft' },
+      { file: 'apps/web/src/data-sources/api.ts', token: "'/api/data-sources/test'" },
+      { file: 'apps/web/src/views/DataSourcesView.vue', token: 'ds-submit' },
+      { file: 'apps/web/src/data-sources/buildPayload.ts', token: 'export function buildCreatePayload' },
+      { file: 'packages/core-backend/src/data-adapters/DataSourceManager.ts', token: 'addDataSourceInternal(config, false)' },
+      { file: 'packages/core-backend/src/data-adapters/DataSourceManager.ts', token: 'async testEphemeralConnection' },
+    ],
+  },
+  {
+    id: 'connection-draft',
+    titleZh: '新增连接草稿并用 connectionId 引用',
+    titleEn: 'Add a connection draft that references the connectionId',
+    whereZh: '数据工厂 · 连接管理，勾选「显示 SQL / 高级连接」后点「新增连接草稿」。',
+    whereEn: 'Data Factory · Connections — check "Show SQL / advanced connectors", then click "Add connection draft".',
+    actionZh: '连接类型选 “Read-only SQL data source”（kind: data-source:sql-readonly）；connectionId 下拉选刚注册的数据源；对象(表 / 视图) 下拉选一张要读的表或视图；点「保存连接设置」。',
+    actionEn: 'Set the connection type to "Read-only SQL data source" (kind: data-source:sql-readonly), pick the connectionId you just registered, pick the object (table / view) to read, then click "Save connection".',
+    successZh: '提示保存成功，这条连接出现在「已配置连接」清单里。',
+    successEn: 'A save-succeeded status appears and the connection shows up in the "configured connections" list.',
+    failureZh: 'connectionId 下拉为空、或表 / 视图列表为空——这一步是真实读库，所以它会先于其他步骤暴露上一步没测出来的连接问题：回 /data-sources 用「测试连接」确认，并确认账号对该库有权限。',
+    failureEn: 'The connectionId dropdown is empty, or the table/view list is empty — this step reads the database for real, so it is where a connection problem you skipped testing surfaces first: go back to /data-sources, run "Test connection", and confirm the account can see that database.',
+    anchors: [
+      { file: 'apps/web/src/components/integration/IntegrationConnectionSection.vue', token: 'show-advanced-connectors' },
+      { file: 'apps/web/src/components/integration/IntegrationConnectionSection.vue', token: 'data-source-bridge-id' },
+      { file: 'apps/web/src/components/integration/IntegrationConnectionSection.vue', token: 'save-connection-draft' },
+      { file: 'plugins/plugin-integration-core/lib/adapters/data-source-sql-readonly-source-adapter.cjs', token: "label: 'Read-only SQL data source'" },
+    ],
+  },
+  {
+    id: 'pick-dataset',
+    titleZh: '选择系统与数据集',
+    titleEn: 'Pick the system and dataset',
+    whereZh: '数据工厂 · 清洗映射（「选择系统与数据集」面板）。',
+    whereEn: 'Data Factory · Cleansing & Mapping (the "Pick system and dataset" panel).',
+    actionZh: '来源系统选刚保存的连接，点「加载来源对象」，在「来源数据集（从哪里取数）」下拉里选那张表或视图（同一个选择器，标题叫“对象”，下拉标签叫“数据集”——见上方术语表）。',
+    actionEn: 'Pick the connection you just saved as the source system, click "Load source objects", and pick the table/view from the "source dataset" dropdown (the same picker is titled "object" but the dropdown label says "dataset" — see the glossary above).',
+    successZh: '数据集下拉被填满，字段列表加载出来，说明这个对象确实可读。',
+    successEn: 'The dataset dropdown fills in and the field list loads, confirming the object is actually readable.',
+    failureZh: '提示加载失败——回连接草稿确认 connectionId 与对象是否仍然有效，表可能已被删除或权限已被收回。',
+    failureEn: 'A load-failed message appears — go back to the connection draft and confirm the connectionId and object are still valid; the table may have been dropped or access revoked.',
+    anchors: [
+      { file: 'apps/web/src/components/integration/IntegrationObjectTemplateSection.vue', token: 'load-source-objects' },
+      { file: 'apps/web/src/components/integration/IntegrationObjectTemplateSection.vue', token: 'data-testid="source-object"' },
+    ],
+  },
+  {
+    id: 'cleansing-mapping',
+    titleZh: '创建清洗表并配置映射',
+    titleEn: 'Create the cleansing table and map the fields',
+    whereZh: '数据工厂 · 清洗映射。',
+    whereEn: 'Data Factory · Cleansing & Mapping.',
+    actionZh: '点「创建清洗表」生成一张 staging 多维表；在多维表里修正、审核、补字段；配置字段映射规则。',
+    actionEn: 'Click "Create cleansing table" to generate a staging multi-dimensional table, fix/review/fill fields in the grid, then configure the field-mapping rules.',
+    successZh: '状态显示清洗表已创建，可以在 staging 卡片上选择「作为 Dry-run 来源」。',
+    successEn: 'The status shows the cleansing table was created, and you can pick "use as dry-run source" on the staging card.',
+    failureZh: '保存版本时报 500——大概率是数据库迁移还没跑到位，这是常见部署缺口，不是配置写错了。',
+    failureEn: 'Save-version returns a 500 — most likely the required database migrations have not been applied yet; this is a common deployment gap, not a configuration mistake.',
+    anchors: [
+      { file: 'apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue', token: 'install-staging' },
+      { file: 'apps/web/src/components/integration/IntegrationCleaningDatasetSection.vue', token: '创建清洗表' },
+    ],
+  },
+  {
+    id: 'dry-run',
+    titleZh: 'Dry-run',
+    titleEn: 'Dry-run',
+    whereZh: '数据工厂 · 运行与推送。',
+    whereEn: 'Data Factory · Run & Push.',
+    actionZh: '点「Dry-run」。',
+    actionEn: 'Click "Dry-run".',
+    successZh: '来源被读取、按映射转换，并生成目标 payload 预览；目标系统的写入调用在 dry-run 分支上根本不会执行。平台自己仍会记一条本次运行的记录（details 里标记为 dry-run），所以「监控与死信」的运行列表里能看到它；但 dry-run 的失败行只出现在预览自带的错误清单里，不会生成死信。',
+    successEn: 'The source is read, transformed by your mapping, and a target payload preview is produced; the target-system write call is simply not reached on the dry-run branch. The platform still records the run itself (flagged as a dry run in its details), so it appears in the run list under "Monitoring & Dead Letters" — but a dry run\'s failed rows only show up in the preview\'s own error list; they never become dead letters.',
+    failureZh: '按钮置灰或提示前置条件未满足——按提示补齐连接 / 对象 / 映射，不要跳过直接推送。',
+    failureEn: 'The button is disabled or a readiness message appears — fill in the missing connection / object / mapping as instructed rather than skipping straight to push.',
+    anchors: [
+      { file: 'apps/web/src/components/integration/IntegrationPipelineRunSection.vue', token: 'run-dry-run' },
+      { file: 'plugins/plugin-integration-core/lib/pipeline-runner.cjs', token: 'attachDryRunTargetPreview' },
+      { file: 'plugins/plugin-integration-core/lib/pipeline-runner.cjs', token: 'if (!dryRun && cleanRecords.length > 0)' },
+      { file: 'plugins/plugin-integration-core/lib/pipeline-runner.cjs', token: 'async function writeDeadLetter(input) {' },
+      { file: 'plugins/plugin-integration-core/lib/pipeline-runner.cjs', token: 'let run = await runLogger.startRun({' },
+    ],
+  },
+  {
+    id: 'push-to-multitable',
+    titleZh: '推送到多维表',
+    titleEn: 'Push to the multi-dimensional table',
+    whereZh: '数据工厂 · 运行与推送。',
+    whereEn: 'Data Factory · Run & Push.',
+    actionZh: '目标选 MetaSheet 多维表（已建好的 staging 多维表也可以直接作为目标）；勾选「允许本次 Save-only 推送」；点「Save-only 推送」。也可以先点「导出」，选 CSV 或 Excel 做人工复核。',
+    actionEn: 'Set the target to a MetaSheet multi-dimensional table (an existing staging table can be used as the target directly), check the box that allows this one push, then click the push button. You can also click "Export" first and pick CSV or Excel for manual review.',
+    successZh: '成功后展示写入数与目标记录信息；可以在「监控与死信」分区看到这次运行的记录。',
+    successEn: 'On success it shows the write count and target record info; you can see this run recorded under "Monitoring & Dead Letters".',
+    failureZh: '推送失败会写入一条死信——回「监控与死信」分区打开这条死信排查，或对照下方错误码表核对机器码。',
+    failureEn: 'A failed push writes a dead letter — open it from "Monitoring & Dead Letters" to investigate, or check the machine code against the error-code table below.',
+    anchors: [
+      { file: 'apps/web/src/components/integration/IntegrationPipelineRunSection.vue', token: 'allow-save-only-run' },
+      { file: 'apps/web/src/components/integration/IntegrationPipelineRunSection.vue', token: 'run-save-only' },
+      { file: 'apps/web/src/views/IntegrationWorkbenchView.vue', token: 'export-cleansed-result' },
+    ],
+  },
+]
+
+// Case two: the K3 WISE preset.
+//
+// The producer chain, read out before rewriting (the reason "only reads K3" and "opening the
+// multi-dimensional table saves the preview" had to go):
+//   IntegrationK3WiseSetupView.vue journey nav = connect K3 -> prepare multi-dim table -> create
+//     pipelines -> dry-run then push. Step one DOES require typing the WebAPI address + authority
+//     code; there is a "保存配置" then "测试 WebAPI" pair.
+//   buildK3WisePipelinePayloads() sets sourceSystemId = the PLM source system and targetSystemId =
+//     the K3 WebAPI system, with descriptions "Draft PLM material/BOM cleansing pipeline" — so the
+//     READ side is PLM, and K3 is the (fenced) write side.
+//   executePipeline(target, true) -> POST .../dry-run -> pipeline-runner.runPipeline ->
+//     attachDryRunTargetPreview -> targetAdapter.previewUpsert(); the K3 WebAPI adapter's
+//     previewUpsert composes the Save body and returns it WITHOUT calling login() or issuing any
+//     request, while its upsert() refuses permanently via the four-layer K3 write fence.
+//   "打开多维表（新建记录入口）" is a <router-link :to="target.openLink"> built by
+//     buildStagingOpenTargets()/buildMultitableOpenLink() from the STAGING INSTALL result — pure
+//     navigation to /multitable/:sheetId/:viewId, no save call anywhere on that path.
+export const INTEGRATION_HELP_K3_WISE_CASE_STEPS: HelpCaseStep[] = [
+  {
+    id: 'connect-k3',
+    titleZh: '接通 K3 通道',
+    titleEn: 'Connect the K3 channel',
+    whereZh: '/integrations/k3-wise（也可以从数据工厂 · 连接管理点「使用 K3 WISE 预设」进入）。',
+    whereEn: '/integrations/k3-wise (or click "Use K3 WISE preset" from Data Factory · Connections).',
+    actionZh: '预设带的是物料 / BOM 的对象模板和字段映射，连接参数仍然要填：按页面第一步填 WebAPI 地址与授权码，先点「保存配置」，再点「测试 WebAPI」（SQL Server 通道同理）。和案例一一样，这里填真实值，先保存后测试——有未保存改动时页面会直接拦住测试。',
+    actionEn: 'The preset ships the material / BOM object templates and field mappings; the connection parameters are still yours to enter. Follow the page\'s first step: type the WebAPI address and authority code, click "Save configuration", then click "Test WebAPI" (same for the SQL Server channel). As in walkthrough one these are real values, and save comes before test — the page blocks testing while an unsaved draft exists.',
+    successZh: '「WebAPI 状态」徽标变为已连接并显示最近测试时间。',
+    successEn: 'The "WebAPI status" badge flips to connected and shows the last-tested timestamp.',
+    failureZh: '页面打不开或提示无权限——这条路由需要写权限，找管理员确认账号权限；测试失败时页面只给一句概述，原始诊断 JSON 在可折叠的排障区里。',
+    failureEn: 'The page fails to load or reports no permission — this route requires the integration write permission; ask an admin. If a test fails the page shows one summary line, with the raw diagnostic JSON inside the collapsible troubleshooting block.',
+    anchors: [
+      { file: 'apps/web/src/router/appRoutes.ts', token: "path: '/integrations/k3-wise'" },
+      { file: 'apps/web/src/components/integration/IntegrationConnectionSection.vue', token: 'k3-preset-entry' },
+      { file: 'apps/web/src/views/IntegrationK3WiseSetupView.vue', token: '测试 WebAPI' },
+      { file: 'apps/web/src/views/IntegrationK3WiseSetupView.vue', token: 'connection-test-summary' },
+    ],
+  },
+  {
+    id: 'install-staging',
+    titleZh: '安装 Staging 多维表',
+    titleEn: 'Install the staging multi-dimensional table',
+    whereZh: 'K3 WISE 预设页左侧「清洗链路」面板。',
+    whereEn: 'The "cleansing chain" panel on the left of the K3 WISE preset page.',
+    actionZh: '点「安装 Staging 多维表」。',
+    actionEn: 'Click "Install staging table".',
+    successZh: '状态提示 Staging 多维表已安装或确认存在；安装结果里带着每张表的 sheetId / viewId，于是面板下方出现「打开多维表（新建记录入口）」链接。',
+    successEn: 'The status says the staging tables were installed or confirmed present; the install result carries each table\'s sheetId / viewId, which is what makes the "Open the multi-dimensional table (new-record entry)" links appear below the panel.',
+    failureZh: '提示安装失败——详情见服务端日志；先确认数据库迁移已跑到位。按钮置灰时看它下面列出的待补字段。',
+    failureEn: 'An install-failed message appears — see the server log for detail, and first confirm the database migrations have been applied. If the button is disabled, read the missing-field list under it.',
+    anchors: [
+      { file: 'apps/web/src/views/IntegrationK3WiseSetupView.vue', token: '安装 Staging 多维表' },
+      { file: 'apps/web/src/services/integration/k3WiseSetup.ts', token: "'/api/integration/staging/install'" },
+      { file: 'apps/web/src/views/IntegrationK3WiseSetupView.vue', token: 'staging-open-targets' },
+    ],
+  },
+  {
+    id: 'create-pipelines',
+    titleZh: '创建 PLM → K3 的清洗 Pipeline',
+    titleEn: 'Create the PLM → K3 cleansing pipelines',
+    whereZh: 'K3 WISE 预设页的「多维表清洗准备」区 +「清洗链路」面板。',
+    whereEn: 'The "multi-dimensional table preparation" section plus the "cleansing chain" panel on the preset page.',
+    actionZh: '填「PLM Source System ID」（来源）与只读展示的「K3 Target System ID」（目标），选好物料 / BOM 的 Staging 对象，点「创建清洗 Pipeline」。',
+    actionEn: 'Fill in "PLM Source System ID" (the source) and the read-only "K3 Target System ID" (the target), pick the material / BOM staging objects, then click "Create cleansing pipelines".',
+    successZh: '生成两条 draft 状态的 pipeline（物料一条、BOM 一条），方向都是 PLM 来源 → K3 目标；页面把两条的 id / 名称 / 状态回显出来。',
+    successEn: 'Two draft pipelines are created (one material, one BOM), both running from the PLM source to the K3 target; the page echoes each one\'s id, name and status.',
+    failureZh: '这一页是 PLM-first 创建器：如果当前只有 MetaSheet staging 多维表而没有 PLM 来源，按页面提示回数据工厂，选 MetaSheet staging 作为来源去建清洗流程。',
+    failureEn: 'This page is a PLM-first builder: if you only have a MetaSheet staging table and no PLM source, follow the page hint back to the Data Factory and build the flow with the MetaSheet staging source instead.',
+    anchors: [
+      { file: 'apps/web/src/views/IntegrationK3WiseSetupView.vue', token: 'PLM Source System ID' },
+      { file: 'apps/web/src/services/integration/k3WiseSetup.ts', token: 'export function buildK3WisePipelinePayloads' },
+      { file: 'apps/web/src/services/integration/k3WiseSetup.ts', token: 'sourceSystemId,' },
+      { file: 'apps/web/src/services/integration/k3WiseSetup.ts', token: 'targetSystemId,' },
+    ],
+  },
+  {
+    id: 'dry-run-preview',
+    titleZh: 'Dry-run 物料 / BOM：读 PLM，产出 K3 payload 预览',
+    titleEn: 'Dry-run material / BOM: read PLM, produce the K3 payload preview',
+    whereZh: 'K3 WISE 预设页的「执行 Pipeline」折叠区。',
+    whereEn: 'The "run pipeline" collapsible block on the preset page.',
+    actionZh: '点「Dry-run 物料」或「Dry-run BOM」。',
+    actionEn: 'Click "Dry-run material" or "Dry-run BOM".',
+    successZh: '页面回显一段预览：每行的 PLM 来源值、按映射转换后的值，以及目标侧会发出的请求形状（方法、路径、body）。这份 payload 由适配器在本地组装，dry-run 分支上不会调用目标的写入方法，也不会向 ERP 发出任何请求；预览只在响应里，不落库。',
+    successEn: 'The page echoes a preview: each row\'s PLM source values, the mapped values, and the shape of the request the target side would receive (method, path, body). That payload is composed locally by the adapter; on the dry-run branch the target\'s write method is never invoked and no request goes to the ERP, and the preview lives in the response only — nothing is persisted.',
+    failureZh: '一个物料存在多个 BOM 报“存在歧义”不是 bug——收窄筛选条件或换一条能唯一区分候选记录的规则。旁边的「执行物料 / 执行 BOM」是真实执行按钮，对 K3 目标会被运行器直接拒绝（见下一步）。',
+    failureEn: 'A material with multiple BOMs reporting "ambiguous" is not a bug — narrow the filter or use a resolver rule that can uniquely tell the candidates apart. The neighbouring "Execute material / Execute BOM" buttons are the live-run buttons, and against a K3 target the runner refuses them outright (see the next step).',
+    anchors: [
+      { file: 'apps/web/src/views/IntegrationK3WiseSetupView.vue', token: 'Dry-run 物料' },
+      { file: 'apps/web/src/services/integration/k3WiseSetup.ts', token: "const endpoint = dryRun ? 'dry-run' : 'run'" },
+      { file: 'plugins/plugin-integration-core/lib/pipeline-runner.cjs', token: 'targetAdapter.previewUpsert(' },
+      { file: 'plugins/plugin-integration-core/lib/adapters/k3-wise-webapi-adapter.cjs', token: 'async function previewUpsert' },
+    ],
+  },
+  {
+    id: 'open-multitable-is-navigation-only',
+    titleZh: '「打开多维表」只是导航；要落数据走推送或导出',
+    titleEn: '"Open the multi-dimensional table" is navigation only; landing data means a push or an export',
+    whereZh: '「清洗链路」面板下方的打开链接 / 数据工厂 · 运行与推送。',
+    whereEn: 'The open links under the "cleansing chain" panel, and Data Factory · Run & Push.',
+    actionZh: '「打开多维表（新建记录入口）」是一个路由链接，跳到 /multitable/<表>/<视图>，点它不会保存任何东西，也不会把刚才的预览写进去；它由安装结果生成，和 Dry-run 无关。要真正落数据，在数据工厂把目标设为 MetaSheet 多维表后做一次显式推送，或用导出功能落 CSV / Excel。',
+    actionEn: 'The "open the multi-dimensional table (new-record entry)" control is a router link to /multitable/<sheet>/<view>. Clicking it persists nothing and does not copy the preview anywhere; it is generated from the install result and has no relationship to the dry-run. To land data for real, set the target to a MetaSheet multi-dimensional table in the Data Factory and run one explicit push, or export CSV / Excel.',
+    successZh: '浏览器跳到那张 staging 多维表；表里此刻有什么，取决于此前真实的推送或人工录入，而不是这次 Dry-run。',
+    successEn: 'The browser navigates to that staging table; whatever rows it contains come from an earlier real push or manual entry, not from this dry-run.',
+    failureZh: '打开后是空表，通常说明你只做了 Dry-run 还没做过推送。链接报表不存在时，回「安装 Staging 多维表」重装，或确认那张表没有被单独删掉。',
+    failureEn: 'An empty table usually means you have only dry-run and never pushed. If the link reports that the table does not exist, reinstall from "Install staging table" or confirm the sheet was not deleted separately.',
+    anchors: [
+      { file: 'apps/web/src/views/IntegrationK3WiseSetupView.vue', token: 'function buildStagingOpenTargets' },
+      { file: 'apps/web/src/views/IntegrationK3WiseSetupView.vue', token: 'function buildMultitableOpenLink' },
+      { file: 'plugins/plugin-integration-core/lib/k3-external-write-permanent-fence.cjs', token: 'function refuseK3ExternalWritePermanently' },
+    ],
+  },
+]
 </script>
 
 <script setup lang="ts">
@@ -269,14 +590,14 @@ export const INTEGRATION_HELP_GLOSSARY: GlossaryEntry[] = [
 //      label, error text, code/prop names) — this table collapses them to one unified name. The alias
 //      column is grounded in a real grep of IntegrationWorkbenchView.vue, components/integration/*.vue
 //      (direct children only) and App.vue's nav copy — see the design doc for the full file:line list.
-//   2. Two end-to-end walkthroughs (G12/G41): "SQL read-only source -> multi-dimensional table" (the
-//      main journey the old page never mentioned) and the shorter "K3 WISE preset" journey. Steps are
-//      grounded in the actual button/testid labels in IntegrationConnectionSection.vue,
-//      IntegrationObjectTemplateSection.vue, IntegrationCleaningDatasetSection.vue and
-//      IntegrationPipelineRunSection.vue — never invented UI. Case two's "K3 target is permanently
-//      read-only" line intentionally matches the in-flight fix/integration-k3-writeback-copy-and-codes
-//      branch's direction (a734f8add, not yet on this branch) rather than today's still-visible
-//      Save-only-to-K3 affordance — see the design doc for why.
+//   2. Two end-to-end walkthroughs (G12/G41, REWRITTEN 2026-09-10 after review): "SQL read-only
+//      source -> multi-dimensional table" and "K3 WISE preset". Both live in the plain <script>
+//      block above as INTEGRATION_HELP_SQL_SOURCE_CASE_STEPS / INTEGRATION_HELP_K3_WISE_CASE_STEPS,
+//      each step carrying `anchors` (file + literal token) that the spec verifies against the real
+//      source files. The review finding they answer: the first draft told the reader to type
+//      placeholders into the real data-source form while promising a working connection, and said
+//      the K3 dry-run "only reads K3" and that "open the multi-dimensional table" saves the preview.
+//      None of that is what the code does — see the two producer-chain comments above each array.
 //   3. When to use a read source (single hop) vs. a composition (two hop) — values-free explanation.
 //   4. Error-code reference table — SINGLE SOURCE: iterates `integrationErrorCodeEntries()` from the
 //      IU-1 label module (errorCodeLabels.ts) rather than copying label text into this view, so a
@@ -305,161 +626,6 @@ function bi(zh: string, en: string): string {
 // Single-source (IU-6c hard requirement): NEVER hand-copy label text here — always iterate the
 // module's own registered entries so additions/removals need zero edits to this view.
 const errorCodeEntries = computed<IntegrationErrorCodeEntry[]>(() => integrationErrorCodeEntries())
-
-interface HelpCaseStep {
-  id: string
-  titleZh: string
-  titleEn: string
-  whereZh: string
-  whereEn: string
-  actionZh: string
-  actionEn: string
-  successZh: string
-  successEn: string
-  failureZh: string
-  failureEn: string
-}
-
-// Case one: SQL read-only source -> multi-dimensional table (G12/G41 main journey). Every location
-// and button label below is grounded in the real component copy — see the design doc for citations.
-const sqlSourceCaseSteps: HelpCaseStep[] = [
-  {
-    id: 'register-data-source',
-    titleZh: '登记外接数据源',
-    titleEn: 'Register the external data source',
-    whereZh: '在数据工厂 · 连接管理里登记外接数据源（旧版本在独立的「外接数据源」页 /data-sources）。',
-    whereEn: 'Register it under Data Factory · Connections (an older build has a separate "Data Sources" page at /data-sources).',
-    actionZh: '点“新建数据源”，选类型 PostgreSQL / SQL Server / MySQL，填 Host / Port / Database 与只读账号密码（用占位符，不要填真实值）。',
-    actionEn: 'Click "New data source", pick type PostgreSQL / SQL Server / MySQL, and fill in Host / Port / Database plus a read-only account (use placeholders, never real values).',
-    successZh: '数据源出现在列表里，状态可用；它的 ID 就是后面要在连接草稿里引用的 connectionId。',
-    successEn: 'The data source appears in the list in a usable state; its ID is the connectionId you will reference from the connection draft next.',
-    failureZh: '连接测试失败——回到 /data-sources 检查 Host / Port / 凭据是否正确，这一步的排障在数据源页，不在数据工厂。',
-    failureEn: 'Connection test fails — go back to /data-sources and check Host / Port / credentials; this failure is diagnosed on the data source page, not in the Data Factory.',
-  },
-  {
-    id: 'connection-draft',
-    titleZh: '新增连接草稿并用 connectionId 引用',
-    titleEn: 'Add a connection draft that references the connectionId',
-    whereZh: '数据工厂 · 连接管理，勾选“显示 SQL / 高级连接”后点“新增连接草稿”。',
-    whereEn: 'Data Factory · Connections — check "Show SQL / advanced connectors", then click "Add connection draft".',
-    actionZh: '连接类型选 “Read-only SQL data source”（kind: data-source:sql-readonly）；connectionId 下拉选刚注册的数据源；对象(表 / 视图) 下拉选一张要读的表或视图；点“保存连接设置”。',
-    actionEn: 'Set the connection type to "Read-only SQL data source" (kind: data-source:sql-readonly), pick the connectionId you just registered, pick the object (table / view) to read, then click "Save connection".',
-    successZh: '提示保存成功，这条连接出现在“已配置连接”清单里。',
-    successEn: 'A save-succeeded status appears and the connection shows up in the "configured connections" list.',
-    failureZh: 'connectionId 下拉是空的、或表 / 视图列表为空——回第一步确认数据源已保存，并确认当前账号对该库有权限。',
-    failureEn: 'The connectionId dropdown is empty, or the table/view list is empty — go back to step one and confirm the data source was saved and the current account has access to that database.',
-  },
-  {
-    id: 'pick-dataset',
-    titleZh: '选择系统与数据集',
-    titleEn: 'Pick the system and dataset',
-    whereZh: '数据工厂 · 清洗映射（“选择系统与数据集”面板）。',
-    whereEn: 'Data Factory · Cleansing & Mapping (the "Pick system and dataset" panel).',
-    actionZh: '来源系统选刚保存的连接，点“加载来源对象”，在“来源数据集”下拉里选那张表或视图（同一个选择器，标题叫“对象”，下拉标签叫“数据集”——见上方术语表）。',
-    actionEn: 'Pick the connection you just saved as the source system, click "Load source objects", and pick the table/view from the "source dataset" dropdown (the same picker is titled "object" but the dropdown label says "dataset" — see the glossary above).',
-    successZh: 'schema 字段列表加载出来，说明这个对象确实可读。',
-    successEn: 'The schema field list loads, confirming the object is actually readable.',
-    failureZh: '提示加载 SQL 表 / 视图失败——回连接草稿确认 connectionId 与对象是否仍然有效，表可能已被删除或权限已被收回。',
-    failureEn: 'A "failed to load SQL table/view" message appears — go back to the connection draft and confirm the connectionId and object are still valid; the table may have been dropped or access revoked.',
-  },
-  {
-    id: 'cleansing-mapping',
-    titleZh: '清洗映射',
-    titleEn: 'Cleanse and map',
-    whereZh: '数据工厂 · 清洗映射。',
-    whereEn: 'Data Factory · Cleansing & Mapping.',
-    actionZh: '点“创建清洗表”生成一张 staging 多维表；在多维表里修正、审核、补字段；配置字段映射规则。',
-    actionEn: 'Click "Create cleansing table" to generate a staging multi-dimensional table, fix/review/fill fields in the grid, then configure the field-mapping rules.',
-    successZh: '状态显示“清洗表已创建”，可以在 staging 卡片上选择“作为 Dry-run 来源”。',
-    successEn: 'The status shows "cleansing table created", and you can pick "use as dry-run source" on the staging card.',
-    failureZh: '保存版本时报 500——大概率是数据库迁移还没跑到位，这是常见部署缺口，不是配置写错了。',
-    failureEn: 'Save-version returns a 500 — most likely the required database migrations have not been applied yet; this is a common deployment gap, not a configuration mistake.',
-  },
-  {
-    id: 'dry-run',
-    titleZh: 'Dry-run',
-    titleEn: 'Dry-run',
-    whereZh: '数据工厂 · 运行与推送。',
-    whereEn: 'Data Factory · Run & Push.',
-    actionZh: '点“Dry-run”。',
-    actionEn: 'Click "Dry-run".',
-    successZh: '只读取来源数据、生成目标 payload 预览，不写入 K3 或其他任何外部系统。',
-    successEn: 'It only reads the source data and generates a target payload preview — it does not write to K3 or any other external system.',
-    failureZh: '按钮置灰或提示前置条件未满足——按提示补齐连接 / 对象 / 映射，不要跳过直接推送。',
-    failureEn: 'The button is disabled or a readiness message appears — fill in the missing connection / object / mapping as instructed rather than skipping straight to push.',
-  },
-  {
-    id: 'push-to-multitable',
-    titleZh: '推送到多维表',
-    titleEn: 'Push to the multi-dimensional table',
-    whereZh: '数据工厂 · 运行与推送。',
-    whereEn: 'Data Factory · Run & Push.',
-    actionZh: '目标选 MetaSheet 多维表（已建好的 staging 多维表也可以直接作为目标）；勾选“允许本次 Save-only 推送”；点“Save-only 推送”。也可以先点“导出”，选 CSV 或 Excel 做人工复核。',
-    actionEn: 'Set the target to a MetaSheet multi-dimensional table (an existing staging table can be used as the target directly), check "allow this Save-only push", then click "Save-only push". You can also click "Export" first and pick CSV or Excel for manual review.',
-    successZh: '成功后展示写入数与目标记录信息；可以在“监控与死信”分区看到这次运行的记录。',
-    successEn: 'On success it shows the write count and target record info; you can see this run recorded under "Monitoring & Dead Letters".',
-    failureZh: '推送失败会写入一条死信——回“监控与死信”分区打开这条死信排查，或对照错误码表核对机器码。',
-    failureEn: 'A failed push writes a dead letter — open it from "Monitoring & Dead Letters" to investigate, or check the machine code against the error-code table.',
-  },
-]
-
-// Case two: the K3 WISE preset (G12/G41, shorter journey). "K3 target is permanently read-only"
-// intentionally matches the in-flight fix/integration-k3-writeback-copy-and-codes direction — see
-// the module header comment above and the design doc.
-const k3WiseCaseSteps: HelpCaseStep[] = [
-  {
-    id: 'open-preset',
-    titleZh: '打开 K3 WISE 预设',
-    titleEn: 'Open the K3 WISE preset',
-    whereZh: '/integrations/k3-wise（也可以从数据工厂 · 连接管理点“使用 K3 WISE 预设”进入）。',
-    whereEn: '/integrations/k3-wise (or click "Use K3 WISE preset" from Data Factory · Connections).',
-    actionZh: '不需要手填连接参数——预设已经带好物料 / BOM 模板，直接进入下一步准备多维表。',
-    actionEn: 'No connection parameters to fill in by hand — the preset already ships a material / BOM template; move straight to preparing the multi-dimensional table.',
-    successZh: '预设页打开，看到“准备多维表”与“Dry-run 后推送”两个步骤提示。',
-    successEn: 'The preset page opens, showing the "prepare multi-dimensional table" and "dry-run then push" step hints.',
-    failureZh: '页面打不开或提示无权限——这条路由需要 integration:write 权限，找管理员确认账号权限。',
-    failureEn: 'The page fails to load or reports no permission — this route requires the integration:write permission; ask an admin to confirm your account has it.',
-  },
-  {
-    id: 'install-staging',
-    titleZh: '安装 Staging 多维表',
-    titleEn: 'Install the staging multi-dimensional table',
-    whereZh: 'K3 WISE 预设页的“准备多维表”区。',
-    whereEn: 'The "prepare multi-dimensional table" area of the K3 WISE preset page.',
-    actionZh: '点“安装 Staging 多维表”。',
-    actionEn: 'Click "Install staging table".',
-    successZh: '提示“Staging 多维表已安装或确认存在”。',
-    successEn: 'A "staging table installed or confirmed to exist" message appears.',
-    failureZh: '提示安装失败——详情见服务端日志；先确认数据库迁移已跑到位。',
-    failureEn: 'An install-failed message appears — see the server log for detail; first confirm the required database migrations have been applied.',
-  },
-  {
-    id: 'dry-run-material-bom',
-    titleZh: 'Dry-run 物料或 BOM',
-    titleEn: 'Dry-run material or BOM',
-    whereZh: 'K3 WISE 预设页，物料或 BOM 卡片。',
-    whereEn: 'The K3 WISE preset page, on the material or BOM card.',
-    actionZh: '点“Dry-run 物料”或“Dry-run BOM”。',
-    actionEn: 'Click "Dry-run material" or "Dry-run BOM".',
-    successZh: '预览生成，只读取 K3 数据，不写入 K3 或任何其他外部系统。',
-    successEn: 'A preview is generated by reading K3 only — nothing is written to K3 or any other external system.',
-    failureZh: '一个物料存在多个 BOM 报“存在歧义”不是 bug——收窄筛选条件或换一条能唯一区分候选记录的规则。',
-    failureEn: 'A material with multiple BOMs reporting "ambiguous" is not a bug — narrow the filter or use a resolver rule that can uniquely tell the candidates apart.',
-  },
-  {
-    id: 'export-or-push',
-    titleZh: '导出或写入多维表（K3 目标永久只读）',
-    titleEn: 'Export or push to a multi-dimensional table (the K3 target is permanently read-only)',
-    whereZh: 'K3 WISE 预设页 / 数据工厂 · 运行与推送。',
-    whereEn: 'The K3 WISE preset page / Data Factory · Run & Push.',
-    actionZh: 'K3 目标永久只读，Dry-run 之后不会有写回 K3 的选项——点“打开多维表”把结果落到 staging 多维表，或用导出功能落 CSV / Excel。',
-    actionEn: 'The K3 target is permanently read-only, so a dry-run here never turns into a save into K3 — click "open the multi-dimensional table" to land the result in the staging table, or use export for CSV / Excel.',
-    successZh: '多维表里出现本次 Dry-run 的数据，或导出文件下载完成。',
-    successEn: 'The dry-run data appears in the multi-dimensional table, or the exported file finishes downloading.',
-    failureZh: '打开多维表提示表不存在——回“安装 Staging 多维表”步骤重新安装，或确认 sheetId 没有被外部删除。',
-    failureEn: 'Opening the table reports it does not exist — go back to "install staging table" and reinstall, or confirm the sheetId was not deleted elsewhere.',
-  },
-]
 
 type FaqItem = { zhQ: string; enQ: string; zhA: string; enA: string }
 
@@ -595,6 +761,24 @@ const faqItems: FaqItem[] = [
   margin: 0;
   color: var(--ms-text-2);
   line-height: 1.6;
+}
+/* Token-only (UF-6 grammar): no hex/rgb literals, only var(--ms-*) / var(--el-*). */
+.integration-help__callout {
+  margin: var(--ms-space-2) 0 var(--ms-space-3);
+  padding: var(--ms-space-3);
+  border-left: 3px solid var(--ms-border);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
+  line-height: 1.6;
+}
+.integration-help__anchor {
+  display: inline-block;
+  margin: 0 var(--ms-space-2) var(--ms-space-1) 0;
+  padding: 0 var(--ms-space-1);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-sm);
+  color: var(--ms-text-3);
+  word-break: break-all;
 }
 .integration-help__faq-item {
   padding: var(--ms-space-2) 0;
