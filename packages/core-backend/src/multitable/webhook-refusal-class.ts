@@ -90,6 +90,140 @@ export function isRefusedRedirectStatus(response: { status?: number; type?: stri
   return typeof status === 'number' && status >= 300 && status < 400
 }
 
+/* ──────────────────────────────────────────────────────────────────────────────────────────────────
+ * POST-GATE FAILURE CLASSES (#5619 review, P2 "日志脱敏尚未完成").
+ *
+ * The block above labels a target the guard REFUSED. This block labels a delivery the guard ALLOWED and
+ * that then failed — the other half of the same values-free promise, and the half that was still broken:
+ * the failure log handed the transport's free text to the shared redactor
+ * (`failure: redactString(lastError)`), and the real client's free text can BE the credential. Measured
+ * on this repo's runtime (Node v25.9.0, undici), a rule whose URL carries userinfo makes `fetch` throw
+ *
+ *     TypeError: Request cannot be constructed from a URL that includes credentials: https://svc:<pw>@host/x
+ *
+ * while CONSTRUCTING the Request — before any socket. `automation-log-redact.ts` has no generic userinfo
+ * rule (its only URL-credential rule is for `postgres://`/`mysql://`), so that whole URL, password and
+ * query token included, was written verbatim on every attempt. The redactor is shared by four channels
+ * plus a web mirror and is deliberately NOT changed; the fix is to stop shipping free text at all.
+ *
+ * SO: `classifyWebhookFailure` returns a member of a fixed union and NEVER READS `error.message`. That is
+ * the load-bearing property — a value cannot reach a label the function cannot see. It reads only the
+ * structural identifiers (`name`, `code`, `cause.name`, `cause.code`), which are runtime/system tokens,
+ * not attacker text.
+ *
+ * DELIBERATE NON-MEMBERS:
+ *   - `aborted` — the only abort on these two dispatch sites is our OWN per-attempt timeout controller,
+ *     so an `aborted` distinct from `timeout` would be unreachable and untestable; a caller abort is
+ *     honestly reported as `timeout`.
+ *   - `redirect-not-allowed` — a 3xx never reaches this classifier: both dispatch sites treat it as a
+ *     terminal REFUSAL (`WebhookRefusalClass`) before any failure bookkeeping.
+ * ────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Closed set of failure classes for a delivery the gate ALLOWED. Every member is a SHAPE — an HTTP
+ * status band, or a transport outcome — never a value, and there is no free-text member by construction.
+ */
+export type WebhookFailureClass =
+  /** The receiver answered 4xx (the request was built and sent). */
+  | 'http-4xx'
+  /** The receiver answered 5xx. */
+  | 'http-5xx'
+  /** A non-2xx/3xx/4xx/5xx status (1xx, or something out of range from a caller-supplied client). */
+  | 'http-other'
+  /** Our per-attempt timeout fired, or the caller aborted. */
+  | 'timeout'
+  /**
+   * The CLIENT refused to build/dispatch the request — nothing left the process. The credential-in-URL
+   * `TypeError` above is the case that matters: the operator needs to know the URL itself is unusable,
+   * and this label says so without quoting it.
+   */
+  | 'invalid-request'
+  /** DNS did not resolve the target (`ENOTFOUND` / `EAI_AGAIN`). */
+  | 'dns-failure'
+  /** TCP connection refused — no listener (`ECONNREFUSED`). */
+  | 'conn-refused'
+  /** TLS/certificate handshake failure (the handshake precedes the body leaving the client). */
+  | 'tls-failure'
+  /** Any other transport failure (reset, unknown system code, a non-object rejection…). */
+  | 'transport-error'
+  /** No attempt was recorded at all — defensive; a loop that ran zero times. */
+  | 'unknown'
+
+/**
+ * Values-free description of ONE attempt's outcome. The caller passes the raw error, not its message, so
+ * that the "never read `message`" rule lives in ONE place instead of at every call site.
+ */
+export type WebhookFailureInput =
+  | { kind: 'response'; status: number }
+  | { kind: 'error'; error: unknown }
+  | { kind: 'none' }
+
+/** Node/undici DNS codes — the request body never left the client. */
+const DNS_CODES: ReadonlySet<string> = new Set(['ENOTFOUND', 'EAI_AGAIN'])
+/**
+ * TLS handshake codes. Kept in step with `automation-outbound-intent.ts`'s `TLS_HANDSHAKE_CODES` (the
+ * at-most-once classifier) so the two views of one attempt do not describe it differently; they are
+ * separate lists on purpose — that module's list decides RETRY ELIGIBILITY, this one only names a label,
+ * and a label must never be able to change a delivery decision.
+ */
+const TLS_CODES: ReadonlySet<string> = new Set([
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'HOSTNAME_MISMATCH',
+])
+
+function codeClass(code: string): WebhookFailureClass {
+  if (DNS_CODES.has(code)) return 'dns-failure'
+  if (code === 'ECONNREFUSED') return 'conn-refused'
+  if (TLS_CODES.has(code) || code.startsWith('ERR_TLS_') || code.startsWith('ERR_SSL_')) return 'tls-failure'
+  return 'transport-error'
+}
+
+/**
+ * Label ONE failed webhook attempt with a closed-set token.
+ *
+ * READS `name` / `code` / `cause.name` / `cause.code` ONLY — never `message`, never the URL, never the
+ * body. A test pins that by passing an error whose `message` getter throws.
+ */
+export function classifyWebhookFailure(input: WebhookFailureInput): WebhookFailureClass {
+  if (input.kind === 'none') return 'unknown'
+  if (input.kind === 'response') {
+    const status = input.status
+    if (!Number.isFinite(status)) return 'http-other'
+    if (status >= 500 && status < 600) return 'http-5xx'
+    if (status >= 400 && status < 500) return 'http-4xx'
+    return 'http-other'
+  }
+
+  const error = input.error
+  // A non-object rejection (a thrown string — e.g. the URL itself) has no structure to read; it is NOT
+  // stringified into the label, it just falls into the generic transport class.
+  if (typeof error !== 'object' || error === null) return 'transport-error'
+
+  const name = (error as { name?: unknown }).name
+  const cause = (error as { cause?: unknown }).cause
+  const causeIsObject = typeof cause === 'object' && cause !== null
+  const causeName = causeIsObject ? (cause as { name?: unknown }).name : undefined
+  if (name === 'AbortError' || name === 'TimeoutError' || causeName === 'AbortError' || causeName === 'TimeoutError') {
+    return 'timeout'
+  }
+
+  const directCode = (error as { code?: unknown }).code
+  const causeCode = causeIsObject ? (cause as { code?: unknown }).code : undefined
+  const code = typeof directCode === 'string' ? directCode : typeof causeCode === 'string' ? causeCode : null
+  if (code) return codeClass(code)
+
+  // No transport code AND no `cause` at all: undici attaches the socket error as the `cause` of its
+  // `TypeError: fetch failed` on every TRANSPORT failure, so a bare, cause-less `TypeError` is the client
+  // REFUSING TO BUILD the request (credentials in the URL, an illegal header name, a bad method…).
+  if (name === 'TypeError' && cause === undefined) return 'invalid-request'
+  return 'transport-error'
+}
+
 /** The guard's dotted-quad literal test — kept identical so we classify exactly what it classified. */
 const IPV4_LITERAL = /^\d{1,3}(\.\d{1,3}){3}$/
 

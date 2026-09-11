@@ -26,7 +26,17 @@ import {
 import { EventBus } from '../../src/integration/events/event-bus'
 import { Logger } from '../../src/core/logger'
 import { checkWebhookTargetUrl, type SsrfLookupFn } from '../../src/multitable/webhook-ssrf-guard'
-import { classifyWebhookRefusal } from '../../src/multitable/webhook-refusal-class'
+import { classifyWebhookFailure, classifyWebhookRefusal } from '../../src/multitable/webhook-refusal-class'
+import { redactString } from '../../src/multitable/automation-log-redact'
+
+/**
+ * The REAL client, captured at MODULE LOAD — i.e. BEFORE `tests/setup.ts`'s `beforeAll` replaces the
+ * global with `vi.stubGlobal('fetch', vi.fn())`. The request-construction suite at the bottom of this file
+ * injects THIS through the `fetchFn` seam, so that path runs undici's genuine `fetch` (and its genuine
+ * exceptions), not a mock. Without the capture the stubbed global returns `undefined` and the executor
+ * fails with "Cannot read properties of undefined" — a fake failure that proves nothing.
+ */
+const NATIVE_FETCH = globalThis.fetch
 
 const CLASSB_FLAG = 'AUTOMATION_CLASSB_OUTBOUND_ENABLED'
 const ROOT = 'exec_root_ssrf'
@@ -45,7 +55,7 @@ interface Harness {
   intentInserts: () => number
 }
 
-function makeHarness(opts: { lookup?: SsrfLookupFn; status?: number } = {}): Harness {
+function makeHarness(opts: { lookup?: SsrfLookupFn; status?: number; nativeFetch?: boolean } = {}): Harness {
   const sql: string[] = []
   let intentInserts = 0
   const fetchSpy = vi.fn(async () => ({
@@ -68,7 +78,9 @@ function makeHarness(opts: { lookup?: SsrfLookupFn; status?: number } = {}): Har
     deps: {
       eventBus: new EventBus(),
       queryFn,
-      fetchFn: fetchSpy as unknown as typeof fetch,
+      // `nativeFetch` swaps the mock for the REAL client (see NATIVE_FETCH above): same seam, genuine
+      // implementation — used only by the request-construction suite at the bottom of this file.
+      fetchFn: (opts.nativeFetch ? NATIVE_FETCH : (fetchSpy as unknown as typeof fetch)) as typeof fetch,
       ssrfLookupFn: opts.lookup ?? publicLookup,
     },
     fetch: fetchSpy,
@@ -701,5 +713,143 @@ describe('send_webhook SSRF gate — guard/classifier contract', () => {
     // An unrecognised guard reason degrades the LABEL only — it is still a refusal.
     expect(classifyWebhookRefusal('https://weird.example.com/x', 'brand new reason').refusalClass)
       .toBe('internal-other')
+  })
+})
+
+/**
+ * THE REVIEWER'S COUNTEREXAMPLE (#5619 review, P2 "日志脱敏尚未完成").
+ *
+ * The two suites above dispatch through a MOCK that returns an HTTP 500, so the only free text that ever
+ * reached `[automation.send_webhook.failed]` was the string `HTTP 500` — which of course redacts clean.
+ * The real client is not so polite: a URL with userinfo makes undici/WHATWG `fetch` throw
+ *
+ *     TypeError: Request cannot be constructed from a URL that includes credentials: https://svc:<pw>@…
+ *
+ * while CONSTRUCTING the Request — before any socket exists. That message is `err.message`, i.e. exactly
+ * the `lastError` the failure log used to hand to `redactString`, and the shared redactor has no generic
+ * userinfo rule. So the password went into the log on the ALLOWED path (the gate cannot help: the host is
+ * public and the URL is well-formed).
+ *
+ * NO NETWORK: every case here uses the REAL `globalThis.fetch` (no `fetchFn` seam) against a TEST-NET-3
+ * literal, and the rejection happens at request construction — the first test pins that, so this suite
+ * cannot silently turn into a suite that dials out.
+ */
+describe('send_webhook — a NATIVE request-construction exception must not put credentials in a log', () => {
+  const NATIVE_PASSWORD = 'S3cr3t'
+  const NATIVE_CRED_URL = `https://svc:${NATIVE_PASSWORD}@${PUBLIC_ADDR}/x?token=SUPERSECRETQUERY`
+  /** Everything the client's own message contains — none of it may reach a log or a step CLASSIFICATION. */
+  const FORBIDDEN = [
+    NATIVE_PASSWORD,
+    'svc:',
+    'SUPERSECRETQUERY',
+    NATIVE_CRED_URL,
+    'includes credentials', // the client's free text itself — a closed-set label can never contain it
+  ]
+
+  beforeEach(() => {
+    // One attempt, so the suite is deterministic and does not sit in the retry backoff.
+    process.env.AUTOMATION_WEBHOOK_MAX_RETRIES = '0'
+  })
+  afterEach(() => {
+    delete process.env.AUTOMATION_WEBHOOK_MAX_RETRIES
+  })
+
+  it('runtime precondition: the native client rejects the credentialed URL at request CONSTRUCTION, and its message carries the password', async () => {
+    let caught: unknown
+    try {
+      // Real fetch, no seam, no mock. If this ever opens a socket instead of throwing, the rejection
+      // below would be a connect error and this assertion — `includes credentials` — would fail loudly.
+      await NATIVE_FETCH(NATIVE_CRED_URL, { method: 'POST', body: '{}', redirect: 'manual' })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(TypeError)
+    expect(String((caught as Error).message)).toContain('includes credentials')
+    // THE LEAK SOURCE: the client's message embeds the whole URL, password and all …
+    expect(String((caught as Error).message)).toContain(NATIVE_PASSWORD)
+    // … and the shared redactor (which this change does NOT touch — four channels + a web mirror) has no
+    // rule that catches it. This is why the fix has to be at the CALL SITE, not in the redactor.
+    expect(redactString(String((caught as Error).message))).toContain(NATIVE_PASSWORD)
+  })
+
+  it('legacy path: the failure log carries a CLOSED failure class, never the client message', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const h = makeHarness({ nativeFetch: true })
+    const step = await runWebhook(h, {
+      url: NATIVE_CRED_URL,
+      headers: { Authorization: 'Bearer LEAKME-TOKEN-123' },
+    })
+    expect(step?.status).toBe('failed')
+
+    const logs = JSON.stringify(warn.mock.calls.filter((c) => String(c[0]).includes('send_webhook')))
+    for (const value of FORBIDDEN) expect(logs).not.toContain(value)
+    expect(logs).not.toContain('LEAKME-TOKEN-123')
+    // …and still triageable: the line names the bounded class and the host shape.
+    expect(logs).toContain('send_webhook.failed')
+    expect(logs).toContain('"failureClass":"invalid-request"')
+    expect(logs).toContain('"hostFamily":"ipv4"')
+  })
+
+  it('legacy path: the step CLASSIFICATION is closed-set — the client message is not in it', async () => {
+    const h = makeHarness({ nativeFetch: true })
+    const step = await runWebhook(h, { url: NATIVE_CRED_URL })
+    expect(step?.status).toBe('failed')
+    expect(step?.output).toMatchObject({ failureClass: 'invalid-request', hostFamily: 'ipv4' })
+    const classification = JSON.stringify(step?.output)
+    for (const value of FORBIDDEN) expect(classification).not.toContain(value)
+  })
+
+  it('two-phase path: neither the log nor the step classification carries the client message', async () => {
+    process.env[CLASSB_FLAG] = 'true'
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const h = makeHarness({ nativeFetch: true })
+    const step = await runWebhook(h, { url: NATIVE_CRED_URL }, ROOT)
+    expect(step?.status).toBe('failed')
+
+    const logs = JSON.stringify(warn.mock.calls.filter((c) => String(c[0]).includes('send_webhook')))
+    for (const value of FORBIDDEN) expect(logs).not.toContain(value)
+    for (const value of FORBIDDEN) expect(JSON.stringify(step?.output)).not.toContain(value)
+    // The bookkeeping still closed (Tx A claimed, Tx B recorded) — a construction failure must not leave
+    // the intent row pending.
+    expect(h.intentInserts()).toBe(1)
+    expect(h.sql.some((s) => /UPDATE meta_automation_outbound_intent/i.test(s))).toBe(true)
+    expect(logs).toContain('send_webhook.outcome_unknown')
+  })
+
+  it('the failure classifier is closed-set and never reads `message` (so free text cannot reach a label)', () => {
+    const CLASSES = new Set([
+      'http-4xx', 'http-5xx', 'http-other', 'timeout', 'invalid-request',
+      'dns-failure', 'conn-refused', 'tls-failure', 'transport-error', 'unknown',
+    ])
+    // A poisoned error: touching `.message` throws. If the classifier ever starts reading free text to
+    // decide a label, this test dies rather than quietly shipping the leak back.
+    const poisoned = {
+      name: 'TypeError',
+      get message(): string {
+        throw new Error('classifyWebhookFailure must not read message')
+      },
+    }
+    const CRED_MESSAGE = `Request cannot be constructed from a URL that includes credentials: ${NATIVE_CRED_URL}`
+    const samples: Array<Parameters<typeof classifyWebhookFailure>[0]> = [
+      { kind: 'response', status: 500 },
+      { kind: 'response', status: 404 },
+      { kind: 'response', status: 100 },
+      { kind: 'error', error: poisoned },
+      { kind: 'error', error: Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }) },
+      { kind: 'error', error: Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } }) },
+      { kind: 'error', error: Object.assign(new TypeError('fetch failed'), { cause: { code: 'ERR_TLS_CERT_ALTNAME_INVALID' } }) },
+      { kind: 'error', error: Object.assign(new Error('aborted'), { name: 'AbortError' }) },
+      { kind: 'error', error: new TypeError(CRED_MESSAGE) },
+      { kind: 'error', error: NATIVE_CRED_URL },
+      { kind: 'none' },
+    ]
+    for (const sample of samples) {
+      const label = classifyWebhookFailure(sample)
+      expect(CLASSES.has(label), label).toBe(true)
+      expect(label).not.toContain(NATIVE_PASSWORD)
+    }
+    // The two decisions this suite depends on, spelled out.
+    expect(classifyWebhookFailure({ kind: 'error', error: new TypeError(CRED_MESSAGE) })).toBe('invalid-request')
+    expect(classifyWebhookFailure({ kind: 'response', status: 500 })).toBe('http-5xx')
   })
 })

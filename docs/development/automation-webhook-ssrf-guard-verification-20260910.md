@@ -11,8 +11,8 @@ All run from the worktree root, `pnpm 9.15.9` / `vitest 1.6.1` / Node 20.
 |---|---|---|
 | 0 | `pnpm install --frozen-lockfile --offline` | exit **0** (1m 10s) |
 | 1 | `pnpm --filter @metasheet/core-backend run type-check` | exit **0** (`tsc --noEmit`), re-run after the review round |
-| 2 | `… exec vitest run tests/unit/automation-send-webhook-ssrf.test.ts` | exit **0** — **57 passed / 57** (was 37 before the review round) |
-| 3 | `… exec vitest run` over the 8 affected specs (below) | exit **0** — **412 passed / 412**, 8 files (was 392) |
+| 2 | `… exec vitest run tests/unit/automation-send-webhook-ssrf.test.ts` | exit **0** — **62 passed / 62** (37 → 57 after the first review round → 62 after the second, §3.2) |
+| 3 | `… exec vitest run` over the 8 affected specs (below) | exit **0** — **417 passed / 417**, 8 files (392 → 412 → 417) |
 | 4 | `npx eslint src/multitable/automation-executor.ts src/multitable/webhook-refusal-class.ts` | exit **0**, no findings (run from the package root; the repo's `.eslintrc.json` needs `parserOptions.project` resolved there, and it ignores `**/*.test.ts`) |
 | 5 | Full `… exec vitest run` (core-backend) | see §5 — pre-existing local noise, CI is the judge |
 
@@ -46,7 +46,7 @@ request. Note the shape is the Node/undici one — the browser profile returns a
 
 ## 2. Coverage map of the new spec
 
-`packages/core-backend/tests/unit/automation-send-webhook-ssrf.test.ts` — 57 tests. Every *pre-dispatch*
+`packages/core-backend/tests/unit/automation-send-webhook-ssrf.test.ts` — 62 tests. Every *pre-dispatch*
 refusal test asserts `expect(fetch).toHaveBeenCalledTimes(0)` via the shared `expectRefused` helper,
 alongside the step status, the coded error and the values-free class. The redirect cases assert
 `toHaveBeenCalledTimes(1)` instead — the first hop is allowed, and nothing follows it.
@@ -64,7 +64,8 @@ alongside the step status, the coded error and the values-free class. The redire
 | Terminal | a 500 on a public target *does* retry (>1 fetch); a refused target is never attempted | — |
 | Contract | pins the guard's `reason` strings; classifier returns only closed-set tokens | — |
 | **Redirects** (new) | legacy 307 → internal `Location`; `redirect:'manual'` asserted on the dispatch init (both paths); 301/302/303/307/308 table; two-phase 302 (intent claimed + outcome recorded); values-free; 2xx positive control | `redirect-not-allowed` |
-| **Post-dispatch logs** (new) | credentialed **public** URL that fails: the legacy "failed after N attempts" line and the two-phase `outcome_unknown` line carry no userinfo / `token=` / path | — |
+| **Post-dispatch logs** | credentialed **public** URL that fails with a **mocked HTTP 500**: the legacy "failed after N attempts" line and the two-phase `outcome_unknown` line carry no userinfo / `token=` / path. **Insufficient on its own** — see the row below and §3.2 | — |
+| **Native request-construction exception** (new, §3.2) | the same credentialed **public** URL dispatched through the **real** `fetch` (no mock): runtime precondition (throws at request construction, message carries the password, `redactString` does **not** catch it); legacy log; legacy step classification; two-phase log + step classification + intent bookkeeping; the classifier's closed set + its "never reads `message`" invariant | `invalid-request` |
 | **Host-form matrix** (new) | `0177.0.0.1`, `2130706433`, `0x7f.1`, `127.1`, `%31%32%37.0.0.1`, `127。0。0。1` (IDNA), `localhost.`, `LOCALHOST`, `http://public@127.0.0.1`; a lying resolver seam; plus two ALLOW counter-controls (`…#@127.0.0.1`, `127.0.0.1@example.com`) | `loopback` / `private` / — |
 
 Four assertions carry the security weight and are named explicitly for review:
@@ -113,10 +114,68 @@ restore lists neither file as modified beyond the intended change set. All count
 | **M1** | Delete `redirect: 'manual'` from **both** dispatch inits | **2 failed / 55 passed** — exactly the two "asks the platform not to follow" cases | Honest negative worth stating: the *behavioural* 307 cases survive this mutation, because a mocked `fetchFn` cannot follow a redirect regardless of the option. Only a direct assertion on the dispatch init can catch the deletion, which is why both paths have one. Without those two cases the production-relevant half of this fix would be unpinned. |
 | **M2** | Legacy path: make the 3xx branch unreachable (fall through to the ordinary non-2xx → retry path) | **3 failed / 54 passed** — the 307 case, the 301/302/303/307/308 table, and the values-free redirect case | A 3xx that is merely "a failed attempt" is not the same thing: the count goes to 3 fetches and the coded error disappears. |
 | **M3** | Two-phase path: make the redirect branch unreachable | **1 failed / 56 passed** — the two-phase 302 case | The two-phase coverage is not redundant with the legacy coverage (same conclusion P4 reached for the gate itself). |
-| **M4** | Restore the old legacy failure log (`send_webhook to ${redactString(url)} failed after …`) | **1 failed / 56 passed** — "the 'failed after N attempts' line carries shape + identifiers, never the URL" | The shared redactor does not save that line: the case feeds `https://<user>:<pw>@203.0.113.10/hook?token=…`, a **public** target the gate allows. |
+| **M4** | Restore the old legacy failure log (`send_webhook to ${redactString(url)} failed after …`) | **1 failed / 56 passed** — "the 'failed after N attempts' line carries shape + identifiers, never the URL" | The shared redactor does not save that line: the case feeds `https://<user>:<pw>@203.0.113.10/hook?token=…`, a **public** target the gate allows. **Incomplete, as the next review round proved**: this probe only removed the *URL* interpolation, while the replacement line still carried `failure: redactString(lastError)`, and the case's mocked HTTP 500 makes `lastError` the harmless string `HTTP 500`. See §3.2. |
 | **M5** | Restore the old two-phase `outcome_unknown` log | **1 failed / 56 passed** — the two-phase half of the same pair | Same, on the other dispatch path. |
 | **M6** | Drop `ruleId` / `executionId` from the refusal log meta | **1 failed / 56 passed** — the values-free refusal case (its positive half) | The identifiers are pinned, so a later "tidy up the log meta" cannot silently take them away again; and the FORBIDDEN list in the same case still guards the other direction. |
 | **M7** | Replace `parsed.hostname` in `webhook-ssrf-guard.ts` with hand-rolled string parsing of the raw URL (a plausible "let's normalise the host ourselves" refactor) | **6 failed / 51 passed** — exactly the six numeric/IDNA rows (`0177.0.0.1`, `2130706433`, `0x7f.1`, `127.1`, `%31%32%37.0.0.1`, `127。0。0。1`) | This is the case for the matrix: under that mutation all six become **allowed egress to loopback**, and every one of the original 37 cases stays green. The trailing-dot and uppercase rows also survive the mutation (that mutant still lowercases and the name classifier strips the trailing dot), which is why the matrix lists them separately rather than claiming one uniform reason. |
+
+### 3.2 Second review round — the P2 counterexample (log redaction was not finished)
+
+**The counterexample, as given**: the new log still recorded `redactString(lastError)`; with a synthetic
+URL, the real guard, the real redactor and **native `fetch`**, the request-construction exception carries
+the full URL and the password still reaches the log. The earlier test used a mocked HTTP 500 and missed it.
+
+**Reproduced first, on the branch as it stood.** A throwaway spec (real `globalThis.fetch` captured at
+module load, real guard with a TEST-NET-3 resolver stub, real redactor, no mock, `AUTOMATION_WEBHOOK_MAX_RETRIES=0`)
+printed the log line the executor actually emitted:
+
+```
+[automation.send_webhook.failed] {"hostFamily":"ipv4","attempts":1,
+ "failure":"Request cannot be constructed from a URL that includes credentials: https://svc:S3cr3t@203.0.113.10/x?token=SUPERSECRETQUERY",
+ "sheetId":"sheet_1","ruleId":"rule_ssrf","executionId":"axe_63be9ece-…"}
+```
+
+→ `AssertionError: expected '[["[automation.send_webhook.failed]",…' not to contain 'S3cr3t'`
+(**1 failed / 2 passed**). The same probe's two-phase case was **green** before the fix — that path logs
+`reason: "network_error"` from `outboundReasonClass`, which is computed from a status/system code and
+never from a message. So the leak was the legacy line only, and the probe says so rather than claiming
+both. The probe file was deleted after capture; the permanent version of all five cases lives in the spec
+(`automation-send-webhook-ssrf.test.ts:737`).
+
+**No network**: the rejection happens while *constructing* the `Request` (undici refuses a URL with
+userinfo), before DNS or any socket, and the host is an RFC 5737 documentation literal. The spec pins that
+precondition explicitly, so the suite cannot quietly become one that dials out.
+
+**The fix**: `failure: redactString(lastError ?? 'unknown')` → `failureClass: WebhookFailureClass`, a
+closed union produced by `classifyWebhookFailure` (`webhook-refusal-class.ts:192`) which reads only
+`name` / `code` / `cause.name` / `cause.code` and **never** `error.message`. Closed set (10 members):
+`http-4xx`, `http-5xx`, `http-other`, `timeout`, `invalid-request`, `dns-failure`, `conn-refused`,
+`tls-failure`, `transport-error`, `unknown`. The same class is echoed into the step's `output`
+(`automation-executor.ts:4332`). The credentialed case now logs
+`{"attempts":1,"failureClass":"invalid-request","hostFamily":"ipv4","sheetId":…,"ruleId":…,"executionId":…}`.
+
+**Probes** (same method: file copied to the session scratchpad, mutated, run, restored from the copy;
+nothing committed, no artifact left). All counts out of **62**; the suite is 62/62 again after each restore.
+
+| Probe | Mutation | Result | Reads as |
+|---|---|---|---|
+| **R1** | Exactly the reviewer's revert: log `failure: redactString(lastError ?? 'unknown')` instead of `failureClass` | **1 failed / 61 passed** — `legacy path: the failure log carries a CLOSED failure class, never the client message` | The counterexample is pinned by precisely one case, and it is the case that names it. |
+| **R2** | Keep `failureClass` **and** re-add `failure: redactString(lastError)` (the plausible "but it is useful" regression) | **1 failed / 61 passed** — same case | The assertion is on the **absence of free text**, not merely on the presence of the class; adding the class back does not buy a leak. |
+| **R3** | Step `output.failureClass` carries `lastError` instead of the class | **1 failed / 61 passed** — `legacy path: the step CLASSIFICATION is closed-set — the client message is not in it` | The step classification is covered separately from the log, so neither surface can regress under cover of the other. |
+| **R4** | `classifyWebhookFailure` builds its label from `error.message` | **3 failed / 59 passed** — the legacy log case, the legacy step-classification case, and `the failure classifier is closed-set and never reads 'message'` | The "never reads `message`" invariant is enforced by a poisoned error whose `message` getter throws, so a classifier that starts reading free text dies at the source as well as at both call sites. |
+
+**Scope correction carried into the design note (§4).** "The log carries no credential" is a claim about
+these log lines and nothing else. `lastError` still reaches the step's operator-facing `error`
+(`Webhook failed after N attempts: …`, pre-existing and asserted by two other specs), and that string is
+persisted through `redactValue`, which has the documented userinfo blind spot — as does `rule_snapshot`,
+which stores `config.url` verbatim on every run. The credentialed URL is therefore still recoverable from
+`meta_automation_executions`; that persistence face is pre-existing, is **not** closed by this PR, and
+closing it means changing the shared redactor (four channels + a web mirror).
+
+**Also observed, not changed** (reported rather than fixed, because the fix would *loosen* a safety
+property): on the two-phase path a request-construction `TypeError` is classified `outcome_unknown`
+("the send may have happened") by `classifyOutboundResult`, although nothing was built, let alone sent.
+That is conservative in the safe direction — it blocks an automatic resend — so it is left alone.
 
 ## 4. Existing tests that had to change, and why
 

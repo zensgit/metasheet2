@@ -64,11 +64,13 @@ import { acquireRecordLinkRowAuthLockOnQuery } from '../services/approval-record
 import { redactString, redactValue } from './automation-log-redact'
 import { checkWebhookTargetUrl, type SsrfLookupFn } from './webhook-ssrf-guard'
 import {
+  classifyWebhookFailure,
   classifyWebhookRefusal,
   isRefusedRedirectStatus,
   REDIRECT_NOT_ALLOWED,
   WEBHOOK_TARGET_REJECTED,
   webhookHostFamily,
+  type WebhookFailureInput,
 } from './webhook-refusal-class'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
@@ -4235,6 +4237,9 @@ export class AutomationExecutor {
     const retries = maxWebhookRetries()
 
     let lastError: string | undefined
+    // #5619 review: the LOG below gets this structured view of the last attempt, never `lastError`. Two
+    // separate variables on purpose — the log line physically cannot be handed the free text.
+    let lastFailure: WebhookFailureInput = { kind: 'none' }
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         const controller = new AbortController()
@@ -4273,8 +4278,11 @@ export class AutomationExecutor {
         }
 
         lastError = `HTTP ${response.status}`
+        lastFailure = { kind: 'response', status: response.status }
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err)
+        // The RAW error, not its message: `classifyWebhookFailure` reads only `name`/`code`/`cause.*`.
+        lastFailure = { kind: 'error', error: err }
       }
 
       // Wait before retry (simple exponential backoff)
@@ -4286,17 +4294,31 @@ export class AutomationExecutor {
     // Surface the failure in the step result (never silent) — the executor lifts
     // a failed step into the execution log + marks the run failed.
     //
-    // G05 VALUES-FREE: this line used to be `send_webhook to ${redactString(url)} failed …`, but the
-    // shared redactor has no generic userinfo / `token=` rule (`automation-log-redact.ts:30-61`;
-    // `url` is not a `STRUCTURED_FIELDS` member either, :121-143), so a rule pointed at
-    // `https://<user>:<pw>@host/x?token=…` wrote its credentials here on EVERY failed delivery — on the
-    // allowed path, where the gate above never gets to speak. Log the host SHAPE plus identifiers
-    // instead, exactly like the refusal line; the free-text transport error still goes through the
-    // shared redactor and is unchanged in the step result the operator reads.
+    // G05 VALUES-FREE, CLOSED FAILURE CLASS (#5619 review, P2). This line was
+    // `send_webhook to ${redactString(url)} failed … ${lastError}`; the first pass replaced the URL with a
+    // host shape but kept `failure: redactString(lastError ?? 'unknown')`. That still leaked, because on
+    // the ALLOWED path the TRANSPORT'S OWN free text can BE the credential: a rule whose URL carries
+    // userinfo makes the native client throw, at request CONSTRUCTION,
+    //   `TypeError: Request cannot be constructed from a URL that includes credentials: https://u:<pw>@h/x`
+    // — i.e. `lastError` IS the whole URL — and the shared redactor has no generic userinfo rule
+    // (`automation-log-redact.ts:30-61`; `url` is not a `STRUCTURED_FIELDS` member either, :121-143), so it
+    // passes through verbatim. Measured on this runtime, not inferred (see the spec's runtime-precondition
+    // test). So NO free text goes in this line at all: host SHAPE + a closed-set failure class +
+    // identifiers — the same discipline as the refusal line, which never had this hole.
+    //
+    // SCOPE, stated exactly so the claim is not wider than the code: `lastError` STILL reaches the
+    // operator-facing step `error` below (pre-existing behaviour — it is what tells an operator their URL
+    // is unusable). That string is persisted by `automation-log-service.record()` through `redactValue`,
+    // which has the same blind spot, as does the `rule_snapshot` channel, which stores `config.url`
+    // verbatim on EVERY run, refused or not. Closing that PERSISTENCE face means changing the shared
+    // redactor (four channels + a web mirror) and is deliberately not done here. What this change
+    // guarantees is the LOG, and only the log.
+    const failureClass = classifyWebhookFailure(lastFailure)
+    const hostFamily = webhookHostFamily(url)
     logger.warn('[automation.send_webhook.failed]', {
-      hostFamily: webhookHostFamily(url),
+      hostFamily,
       attempts: retries + 1,
-      failure: redactString(lastError ?? 'unknown'),
+      failureClass,
       sheetId: context.sheetId,
       ruleId: context.ruleId,
       executionId: context.executionId,
@@ -4305,6 +4327,9 @@ export class AutomationExecutor {
       actionType: 'send_webhook',
       status: 'failed',
       error: `Webhook failed after ${retries + 1} attempts: ${lastError}`,
+      // The values-free CLASSIFICATION of the same failure, for anything that triages structurally
+      // instead of grepping the `error` prose.
+      output: { failureClass, hostFamily, attempts: retries + 1 },
     }
   }
 

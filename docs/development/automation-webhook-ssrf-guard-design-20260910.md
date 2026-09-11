@@ -151,14 +151,49 @@ A webhook URL is both attacker-influenced and credential-bearing
   sheet, which can carry many rules, so it did not make good on this section's own promise that "the
   offending rule is findable"; `ruleId`/`executionId` were already on the `ExecutionContext`
   (`automation-executor.ts:1412-1416`).
-- The two **post-dispatch** lines on the ALLOWED path are values-free too, as of this round:
-  `[automation.send_webhook.failed]` (`:4294`) and `[automation.send_webhook.outcome_unknown]` (`:4446`)
-  carry `hostFamily` + attempt count / bounded reason class + identifiers. They previously read
+- The two **post-dispatch** lines on the ALLOWED path are values-free too:
+  `[automation.send_webhook.failed]` (`automation-executor.ts:4318`) and
+  `[automation.send_webhook.outcome_unknown]` (`:4473`) carry `hostFamily` + attempt count + a
+  **closed-set failure class** / bounded reason class + identifiers. They previously read
   `send_webhook to ${redactString(url)} …`, which is **not** the same thing — see the redactor's real
   coverage below. These lines fire on every failed delivery, i.e. exactly where the gate has already
   said yes, so they were the largest remaining URL-bearing surface owned by this function.
-- Never logged / never persisted by this path: the URL, the host, the port, the path, the query, any
-  header value, the HMAC secret, the `Location` of a refused redirect, and the guard's raw `reason`.
+- **Correction from the #5619 review (P2).** The first pass at those two lines replaced the URL with a
+  host shape but kept `failure: redactString(lastError ?? 'unknown')` — free text — on the `failed` line,
+  and the only test covering it dispatched through a **mock HTTP 500**, so the only string that field ever
+  saw in test was `HTTP 500`. Against the **real** client the same field leaks the whole credential:
+  measured on this repo's runtime (Node v25.9.0, undici), `fetch('https://svc:<pw>@203.0.113.10/x…')`
+  rejects while **constructing the Request** — before any socket — with
+
+  > `TypeError: Request cannot be constructed from a URL that includes credentials: https://svc:<pw>@203.0.113.10/x?token=…`
+
+  That message **is** `lastError`, and `redactString` has no generic userinfo rule (table below), so the
+  password was written verbatim on every attempt. Fix: the line now carries
+  `failureClass: WebhookFailureClass` — a closed union computed by `classifyWebhookFailure`
+  (`webhook-refusal-class.ts:192`) which **never reads `error.message`** (it reads only `name`, `code`,
+  `cause.name`, `cause.code`), so free text cannot reach a label by construction. Closed set:
+  `http-4xx` | `http-5xx` | `http-other` | `timeout` | `invalid-request` | `dns-failure` | `conn-refused`
+  | `tls-failure` | `transport-error` | `unknown`. The same class is echoed in the step's `output`
+  (`:4332`) for structural triage. Two members are deliberately absent: `aborted` (the only abort on these
+  sites is our own per-attempt timeout, so it would be unreachable) and `redirect-not-allowed` (a 3xx is a
+  terminal *refusal* before any failure bookkeeping).
+- The `outcome_unknown` line needed no change for this: its `reason` is `outboundReasonClass(...)`
+  (`automation-outbound-intent.ts:245`), which is already computed from a status / system code, never
+  from a message — verified by the same native-exception case, which logs `reason: "network_error"`.
+- **Scope of "the log carries no credential", stated exactly.** It is a claim about the **log lines**
+  this function emits, and only those. It is **not** a claim about:
+  1. the step's operator-facing `error` string, which still reads
+     `Webhook failed after N attempts: <the client's message>` — pre-existing behaviour, kept because it
+     is what tells an operator their URL is unusable, and
+  2. the **persistence** face: that step string is stored by `automation-log-service.record()` through
+     `redactValue`, which has the blind spot documented below, as does the `rule_snapshot` channel, which
+     stores `config.url` verbatim on **every** run, refused or not.
+
+  So a credentialed rule URL is still recoverable from `meta_automation_executions` (snapshot, and now
+  also the step error). Closing that requires a generic URL rule in the **shared** redactor — four
+  channels plus a web mirror — and is out of scope here; see §6.
+- Never logged by this path: the URL, the host, the port, the path, the query, any header value, the HMAC
+  secret, the `Location` of a refused redirect, the guard's raw `reason`, and the transport's own message.
 
 **Scoped honestly** — the execution object also carries `ruleSnapshot`, i.e. the rule exactly as
 supplied, so the raw `config.url` / `config.headers` are in *there*. That carrier is pre-existing and is
