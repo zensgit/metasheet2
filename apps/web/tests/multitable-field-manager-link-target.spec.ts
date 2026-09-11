@@ -37,7 +37,12 @@ const HEALTHY_LINK_FIELD = {
   property: { foreignSheetId: 'sheet_2', foreignDatasheetId: 'sheet_2', limitSingleRecord: false },
 }
 
-function mountManager(fields: unknown[], updateSpy = vi.fn()) {
+function mountManager(
+  fields: unknown[],
+  updateSpy = vi.fn(),
+  // 默认：base 里还有一张别的表可选。传 [] 就是"这个 base 只有当前这一张表"的真实形态。
+  sheets: unknown[] = [{ id: 'sheet_2', name: 'Related' }],
+) {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const app = createApp({
@@ -45,7 +50,7 @@ function mountManager(fields: unknown[], updateSpy = vi.fn()) {
       return h(MetaFieldManager, {
         visible: true,
         sheetId: 'sheet_1',
-        sheets: [{ id: 'sheet_2', name: 'Related' }],
+        sheets,
         fields,
         onUpdateField: updateSpy,
       })
@@ -129,6 +134,54 @@ describe('MetaFieldManager — 关联字段缺目标表', () => {
       foreignSheetId: 'sheet_2',
       foreignDatasheetId: 'sheet_2',
     })
+
+    app.unmount()
+  })
+
+  it('base 里没有别的表时：提示换成"先建一张表"的空态人话，而不是让人对着空下拉（反驳意见）', async () => {
+    // 这是 MultitableHomeView 建 base 后的形态：唯一一张表。targetSheets 排掉当前表后是空的，编辑既有
+    // 字段时跨 base 开关又是锁的 —— 只说"请选目标表"没有出路，所以这里必须给下一步。
+    const { app, container } = mountManager([BROKEN_LINK_FIELD], vi.fn(), [])
+    await nextTick()
+
+    openConfigForFirstField(container)
+    await nextTick()
+
+    const empty = container.querySelector('[data-test="link-target-no-sheets"]')
+    expect(empty).toBeTruthy()
+    expect(empty?.textContent).toContain('Create a second table first')
+    // 空态时不再重复那句只说"请选目标表"的提示
+    expect(container.querySelector('[data-test="link-target-required"]')).toBeNull()
+
+    const save = container.querySelector('[data-test="field-config-save"]') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+
+    app.unmount()
+  })
+
+  it('空态提示的中文人话', async () => {
+    useLocale().setLocale('zh-CN')
+    const { app, container } = mountManager([BROKEN_LINK_FIELD], vi.fn(), [])
+    await nextTick()
+
+    openConfigForFirstField(container)
+    await nextTick()
+
+    expect(container.querySelector('[data-test="link-target-no-sheets"]')?.textContent)
+      .toContain('请先新建一张数据表')
+
+    app.unmount()
+  })
+
+  it('base 里有别的表时仍是原来那句提示（空态分支不越界）', async () => {
+    const { app, container } = mountManager([BROKEN_LINK_FIELD])
+    await nextTick()
+
+    openConfigForFirstField(container)
+    await nextTick()
+
+    expect(container.querySelector('[data-test="link-target-no-sheets"]')).toBeNull()
+    expect(container.querySelector('[data-test="link-target-required"]')).toBeTruthy()
 
     app.unmount()
   })

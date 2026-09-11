@@ -6060,7 +6060,9 @@ export function extractMultitableRecordCreateContextFromUrl(value: unknown): { s
 async function createSeededSheet(args: { sheetId: string; name: string; description?: string | null; query?: QueryFn }): Promise<void> {
   const pool = poolManager.get()
 
-  const fields = [
+  // 显式标注成宽类型（而不是让 TS 从字面量推出一个窄联合），这样下面那条 link 守卫的 `field.type ===
+  // 'link'` 是一条真判断，模板被改回 link 时守卫才拦得住，而不是被 TS 判成"永假比较"。
+  const fields: Array<{ id: string; name: string; type: UniverMetaField['type']; order: number; property: Record<string, unknown> }> = [
     { id: buildId('fld'), name: '产品名称', type: 'string' as const, order: 1, property: {} },
     { id: buildId('fld'), name: '数量', type: 'number' as const, order: 2, property: {} },
     { id: buildId('fld'), name: '单价', type: 'number' as const, order: 3, property: {} },
@@ -6079,7 +6081,13 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
         ],
       },
     },
-    { id: buildId('fld'), name: '关联', type: 'link' as const, order: 6, property: {} },
+    // 2026-09-10：这一列过去是 `type: 'link'` + `property: {}` —— 即"link 但没有目标表"，而且它经下面的
+    // 裸 SQL 落库，既不过 `normalizeFieldWriteInput` 也不过写口的 `assertLinkFieldForeignSheetPresent`。
+    // 于是每张 seed 出来的数据表（POST /sheets {seed:true}、GET /view?seed=true，前端建表默认就传 seed）
+    // 都自带一个点「选择关联记录」必 400 的坏字段 —— 这是用户报告里坏字段的主产源。种子记录在这一列里
+    // 放的本来就是 'PLM#6' 这种外部单号文本（不是记录 id），所以按它实际承载的语义降为 string：不猜目标
+    // 表、不凭空建第二张表，示例数据原样可读。真想要关联就在「管理字段」里新建 link 并选目标表。
+    { id: buildId('fld'), name: '关联', type: 'string' as const, order: 6, property: {} },
   ]
 
   const byName = new Map(fields.map(f => [f.name, f.id] as const))
@@ -6187,6 +6195,12 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
     )
 
     for (const field of fields) {
+      // 种子是裸 SQL 写口，绕开了 POST/PATCH /fields 上的 `assertLinkFieldForeignSheetPresent`。把同一条
+      // 规则挂在这里，模板将来再被改回"link 但没目标表"时当场炸（fail-closed），而不是静默给每张新表种
+      // 一个坏字段。语义与写口一致：只看结果状态，经 `parseLinkFieldConfig` 归一三个 foreign 别名。
+      if (field.type === 'link' && !parseLinkFieldConfig(field.property)) {
+        throw new LinkForeignSheetRequiredError()
+      }
       await query(
         `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
          VALUES ($1, $2, $3, $4, $5::jsonb, $6)

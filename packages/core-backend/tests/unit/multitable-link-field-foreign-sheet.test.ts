@@ -347,3 +347,52 @@ describe('link field without a foreign sheet — write fail-closed + readable re
     expect(store.byId.get(PERSON_FIELD_ID)?.property.foreignSheetId).toBe(PEOPLE_SHEET_ID)
   })
 })
+
+/**
+ * 第二个（也是命中率更高的）坏字段产源：`createSeededSheet` 的裸 SQL 种子（2026-09-10 反驳意见）。
+ *
+ * 种子模板里过去有一行 `{ name: '关联', type: 'link', property: {} }`，它经 `INSERT INTO meta_fields`
+ * 直接落库 —— 不过 `normalizeFieldWriteInput`，也不过写口的 `assertLinkFieldForeignSheetPresent`。
+ * 两个调用点都在生产路径（POST /sheets 的 `seed`、GET /view?seed=true），而前端建表默认就传 seed，
+ * 所以修好写口之后每张新表照样自带一个"link 但没有目标表"的字段。这里从 HTTP 口实证：seed 出来的
+ * 字段里不允许存在这种字段。
+ */
+describe('seed 出来的数据表不许自带"没有目标表的 link 字段"', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  function createSeedStore() {
+    const base = createStore([])
+    const handler = (sql: string, params?: unknown[]): QueryResult => {
+      if (sql.includes('INSERT INTO meta_bases')) return { rows: [], rowCount: 1 }
+      if (sql.includes('INSERT INTO meta_sheets')) return { rows: [], rowCount: 1 }
+      // rows 为空 ⇒ 路由跳过默认视图的配置修订记录，和本用例无关
+      if (sql.includes('INSERT INTO meta_views')) return { rows: [], rowCount: 0 }
+      if (sql.includes('INSERT INTO meta_records')) return { rows: [], rowCount: 1 }
+      return base.handler(sql, params)
+    }
+    return { inserted: base.inserted, handler }
+  }
+
+  it('POST /sheets {seed:true}：种下的字段里没有一个是 link 而缺目标表', async () => {
+    const store = createSeedStore()
+    pinned.setApp(await createApp(store.handler))
+
+    const res = await request(pinned.url())
+      .post('/api/multitable/sheets')
+      .send({ id: 'sheet_seed_lnkreq', name: 'Seeded', seed: true })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    // 确实走到了种子（不是因为一个都没插所以"没有坏字段"）
+    expect(store.inserted.length).toBeGreaterThanOrEqual(6)
+
+    const foreignOf = (property: Record<string, unknown>) =>
+      [property.foreignDatasheetId, property.foreignSheetId, property.datasheetId]
+        .find((value) => typeof value === 'string' && value.trim().length > 0)
+    const targetless = store.inserted.filter((f) => f.type === 'link' && !foreignOf(f.property))
+    expect(targetless).toEqual([])
+  })
+})

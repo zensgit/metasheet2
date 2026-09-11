@@ -157,9 +157,19 @@
             </select>
           </label>
           <!-- 目标表缺失时的常驻提示 + 保存禁用（2026-09-10）。编辑一个"历史坏字段"（property 里没有
-               foreignSheetId）时它立刻可见，选好目标表保存即完成自愈；后端也已 fail-closed。 -->
+               foreignSheetId）时它立刻可见，选好目标表保存即完成自愈；后端也已 fail-closed。
+               空态先判：同 base 路径下这个 base 只有当前这一张表时，上面的下拉是空的（targetSheets 排除
+               自己），编辑既有字段时跨 base 开关又是锁的 —— 只说"请选目标表"等于让用户对着空下拉干瞪眼。
+               这一支直接说清下一步：先去建第二张表。 -->
           <div
-            v-if="linkTargetMissing"
+            v-if="linkTargetMissing && linkNoTargetSheetsAvailable"
+            class="meta-field-mgr__hint meta-field-mgr__hint--error"
+            data-test="link-target-no-sheets"
+          >
+            {{ ml('field.linkNoOtherSheetsHint') }}
+          </div>
+          <div
+            v-else-if="linkTargetMissing"
             class="meta-field-mgr__hint meta-field-mgr__hint--error"
             data-test="link-target-required"
           >
@@ -1368,6 +1378,19 @@ const configTargetType = computed(() => {
  */
 const linkTargetMissing = computed(() =>
   configTargetType.value === 'link' && !linkDraft.foreignSheetId.trim(),
+)
+
+/**
+ * 同 base 路径下"一张可选的表都没有"（2026-09-10 反驳意见）。
+ *
+ * `targetSheets` 会排掉当前表（不能关联自己），所以一个只有一张表的 base 里这个下拉是空的；而编辑既有
+ * 字段时跨 base 开关被 `linkCrossBaseToggleLocked` 锁死（同 base↔跨 base 改向会毁掉已存的记录 id 值，
+ * 那条锁保持不动）。这两条一叠，用户看到的就是"提示要选目标表 + 空下拉 + 灰掉的保存"。这个计算量只用来
+ * 把提示换成一句能执行的下一步，不解锁任何东西、也不放宽保存条件。
+ * 跨 base 打开时不适用：那条路径自己有 loading / 403 / 空表三个提示（data-test="link-cross-base-*"）。
+ */
+const linkNoTargetSheetsAvailable = computed(() =>
+  !linkDraft.crossBase && targetSheets.value.length === 0,
 )
 
 // 3c foreign-field picker (defined AFTER configTargetType — activeForeignSheetId reads it, and watch

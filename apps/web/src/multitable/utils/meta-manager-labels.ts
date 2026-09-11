@@ -84,6 +84,8 @@ export type MetaManagerLabelKey =
   | 'field.error.linkNeedsTargetSheet'
   // 关联字段草稿区的常驻提示（2026-09-10）：没选目标表就不给保存 —— 这也是"已有坏字段"的自愈入口
   | 'field.linkTargetRequiredHint'
+  // 同上，但这个 base 里一张可选的表都没有：提示要给出能执行的下一步，而不是让人对着空下拉
+  | 'field.linkNoOtherSheetsHint'
   | 'field.error.linkNeedsCrossBaseTarget'
   | 'field.error.lookupNeedsLinkAndTarget'
   | 'field.error.lookupNeedsValidTargetSheet'
@@ -382,6 +384,10 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.linkTargetRequiredHint': {
     en: 'Pick the sheet this field links to. Without a target sheet it cannot be saved, and "Choose linked records" will not open.',
     zh: '请选择这个字段要关联哪张数据表。没有目标表就无法保存，「选择关联记录」也打不开。',
+  },
+  'field.linkNoOtherSheetsHint': {
+    en: 'There is no other table in this workspace to link to yet. Create a second table first, then come back and pick it here.',
+    zh: '这个工作区还没有其它数据表可以关联。请先新建一张数据表，再回到这里选它。',
   },
   'field.error.linkNeedsCrossBaseTarget': { en: 'Choose a base and a readable table for the cross-base link', zh: '请为跨工作区关联选择目标工作区和可读取的数据表' },
   'field.error.lookupNeedsLinkAndTarget': { en: 'Lookup fields need a link field and a target field id', zh: '查找字段需要关联字段和目标字段 ID' },
