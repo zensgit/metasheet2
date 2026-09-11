@@ -1401,6 +1401,82 @@ async function moduleLegacyTwentyThreeColumnsAreProjected() {
   assert.equal(result.rows[0][projectColumn], PROJECT_A)
 }
 
+// ---------------------------------------------------------------------------
+// R21 — 同图号、不同规格的两个标准件,两行都要打印(老系统 iterHandle 686-693 的注释明说,加
+// 名称/材质进键就是为了不把同图号的标准件合并掉)。
+//
+// 这条钉的是展示层去重键在**最弱的那种部署**上的强度:没装客户包(或装了包但动作没在
+// extensionFieldIds 里声明 名称及规格),所以 ext_nameAndSpec 恒空;而 F1c 之后 名称 列只装
+// identityName 的**首段**(bom-expansion createRow 用 splitNameAndSpec 切过)。此时键的第三项
+// 若只取 名称,两条 螺栓 就会撞成同一个键 —— 并且被合并那条连它的整棵子树一起不打印。
+// 去掉 nameAndSpecDisplayKey 里的 规格 退回一项,这个用例必红。
+// ---------------------------------------------------------------------------
+
+const PROJECT_STANDARD_PARTS = 'PRJ-STD'
+
+function standardPartRows() {
+  const shared = {
+    parentComponentCode: 'TZ-S0',
+    parentComponentName: 'S主体',
+    // 无包部署:两个包列都不存在。名称及规格 因此恒空,规格 只能从模板列取。
+    ext_parentDrawingNo: undefined,
+    ext_parentName: undefined,
+    ext_spec: undefined,
+    ext_nameAndSpec: undefined,
+    material: 'Q235B',
+    totalQuantity: 4,
+  }
+  return [
+    mainRow(PROJECT_STANDARD_PARTS, {
+      ...shared,
+      parentComponentCode: undefined, parentComponentName: undefined,
+      componentCode: 'TZ-S0', componentName: 'S主体', componentSpec: undefined,
+      componentSourceId: 'P-S0', parentSourceId: undefined, ext_componentSortNo: 1,
+      idempotencyKey: 'idk-s0',
+    }, 'rec_s0'),
+    mainRow(PROJECT_STANDARD_PARTS, {
+      ...shared,
+      componentCode: 'GB/T5783', componentName: '螺栓', componentSpec: 'M8x30',
+      componentSourceId: 'P-S1', parentSourceId: 'P-S0', ext_componentSortNo: 10,
+      idempotencyKey: 'idk-s1',
+    }, 'rec_s1'),
+    mainRow(PROJECT_STANDARD_PARTS, {
+      ...shared,
+      componentCode: 'GB/T5783', componentName: '螺栓', componentSpec: 'M10x40',
+      componentSourceId: 'P-S2', parentSourceId: 'P-S0', ext_componentSortNo: 20,
+      idempotencyKey: 'idk-s2',
+    }, 'rec_s2'),
+    // 挂在第二个标准件下的子件 —— 合并会把整棵子树一起吞掉,所以它是「被吞了」最直接的证据。
+    mainRow(PROJECT_STANDARD_PARTS, {
+      ...shared,
+      parentComponentCode: 'GB/T5783', parentComponentName: '螺栓',
+      componentCode: 'WASHER-1', componentName: '垫圈', componentSpec: 'D10',
+      componentSourceId: 'P-S2-C', parentSourceId: 'P-S2', ext_componentSortNo: 5,
+      idempotencyKey: 'idk-s2c',
+    }, 'rec_s2c'),
+  ]
+}
+
+async function moduleSameDrawingDifferentSpecIsNotCollapsed() {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: standardPartRows() },
+  })
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_STANDARD_PARTS, permission: 'admin',
+  })
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  const specColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentSpec')
+  assert.deepEqual(
+    result.rows.map((row) => [row[codeColumn], row[specColumn]]),
+    [['TZ-S0', null], ['GB/T5783', 'M8x30'], ['GB/T5783', 'M10x40'], ['WASHER-1', 'D10']],
+    'R21: 同图号不同规格的两个标准件都要打印,第二个的子件跟着打印',
+  )
+  assert.equal(result.collapsedRowCount, 0, 'R21: 一行都没被合并 —— 它们不是重复行')
+  assert.equal(result.treeOrdered, true)
+}
+
 async function main() {
   await moduleReturnsExactAgreedColumnsForASeededProject()
   await moduleNeverLeaksOtherProjectsRows()
@@ -1444,6 +1520,7 @@ async function main() {
   await moduleExportOrderIsTheBomTreeNotAFlatBand()
   await moduleExportWithoutSourceIdentityKeepsTheFlatOrder()
   await moduleLegacyTwentyThreeColumnsAreProjected()
+  await moduleSameDrawingDifferentSpecIsNotCollapsed()
 
   console.log('stock-preparation-prep-line-export (按项目导出物料 Excel): all assertions passed')
 }

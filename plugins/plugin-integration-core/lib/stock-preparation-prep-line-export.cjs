@@ -400,6 +400,9 @@ function columnSourceValue(data, column) {
 const PARENT_CODE_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'parentComponentCode')
 const COMPONENT_CODE_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentCode')
 const COMPONENT_NAME_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentName')
+// 规格 — only ever read by the display dedupe key below (never by the comparator), and read through
+// `columnSourceValue` so a pack-only row's `ext_spec` counts exactly like a native one.
+const COMPONENT_SPEC_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentSpec')
 
 // Where `unmapRow` parks the row's PHYSICAL record id so the comparator can reach it. Deliberately
 // not a logical field id and deliberately not projected: no EXPORT_COLUMN reads it, so it can never
@@ -486,19 +489,40 @@ function compareSiblingRows(left, right) {
   return compareOrderText(orderText(left[ROW_IDENTITY_KEY]), orderText(right[ROW_IDENTITY_KEY]))
 }
 
-// 老系统 `iterHandle` 686-693 的去重键,在展示层再兜一次:父组件图号 + 当前组件图号 +
-// 名称及规格 + 材料 + 单层用量。名称及规格优先取包列(F1c 起有值),没有就退回 名称 —— 老系统
-// 那一列(`nameAndStandard`)装的正是未切分的全串,而旧行的 名称 列装的也是全串。
+// 老系统 `iterHandle` 686-693 的去重键第三项 `nameAndStandard` 在这条管线上的还原,三种形状依次
+// 退化 —— 这是本模块最容易出错的一处,因为 F1c **自己**改了 名称 列的含义:
+//
+//   1. 客户包列 `ext_nameAndSpec`:F1c 之后新写的行装的就是未切分的全串,与展开层
+//      `siblingDedupeKey` 的 `nameAndSpec` 逐字同源(两边都来自 PLM identityName)。
+//   2. 没装包、或装了包但动作没在 `extensionFieldIds` 里声明这一列的部署(包列恒空):名称 列
+//      **只有首段** —— `createRow` 从 F1c 起写的是 `splitNameAndSpec(identityName).componentName`
+//      (bom-expansion.cjs 的 createRow)。单独拿首段当键,会把「同图号、同材料、同用量、规格
+//      不同」的两个标准件合并成一行,并且连被合并那条的整棵子树一起不打印 —— 老系统
+//      `iterHandle` 的注释明说加名称就是为了挡住这个标准件场景。所以把 规格 拼回去,还原出
+//      老系统那一串。
+//   3. 连 规格 也没有(名称里没有空格、部署也没绑 规格 列):键退回名称本身,与改前同量。
+//
+// 拼回来的串不保证与源串逐字相同(部署自己声明了 规格 列时,规格 不是名称的尾巴),但那个方向
+// 只会让键**更细** —— 合并得更少,永远不会多合并一行。这是这把兜底键唯一可以接受的偏差方向。
 //
 // 单层用量在键里,是为了和展开层 **同一把键**(bom-expansion `siblingDedupeKey`):展开层多带
 // 用量,是为了不把「同父同件但用量不一致」这种数据缺陷从 duplicate_expanded_key 的 fail-closed
 // 挂起里偷走。展示层如果少带这一项,就会在打印时把展开层特意留下的那两行又合并掉 —— 触发口径
 // 和边界口径不同量,正是这类兜底最容易出的错。
+function nameAndSpecDisplayKey(row) {
+  const packed = orderText(row.ext_nameAndSpec)
+  if (packed !== '') return packed
+  const name = orderText(columnSourceValue(row, COMPONENT_NAME_ORDER_COLUMN))
+  const spec = orderText(columnSourceValue(row, COMPONENT_SPEC_ORDER_COLUMN))
+  if (spec === '') return name
+  return `${name} ${spec}`
+}
+
 function displayDedupeKey(row) {
   return JSON.stringify([
     orderText(columnSourceValue(row, PARENT_CODE_ORDER_COLUMN)),
     orderText(columnSourceValue(row, COMPONENT_CODE_ORDER_COLUMN)),
-    orderText(row.ext_nameAndSpec) || orderText(columnSourceValue(row, COMPONENT_NAME_ORDER_COLUMN)),
+    nameAndSpecDisplayKey(row),
     orderText(row.material),
     orderText(row.rawQuantity),
   ])
@@ -517,7 +541,8 @@ function displayDedupeKey(row) {
  *      追加在末尾。构不成树的数据会得到一个难看但完整的工作簿,而不是一个少了几行的工作簿。
  *   2. 没有身份列的部署(老 target 没绑 `componentSourceId`):整批一行也认不出身份时直接退回
  *      F1b 的平比较器,而不是把每一行都当根 —— 那会连「按父组件分组」都丢掉,比改之前更差。
- *   3. 去重计数如实上报(`collapsedRowCount`),导出结果里能看见「这张表按老系统合并掉了几行」。
+ *   3. 去重计数如实上报(`collapsedRowCount`),**模块返回值里**能看见「这张表按老系统合并掉了
+ *      几行」—— 注意它到此为止:导出路由与审计记录今天都不读它(见函数尾部那段 REACH 说明)。
  *
  * PURE:不改入参,结果只取决于行内容(含记录 id),与扫描顺序无关。
  */
@@ -708,6 +733,13 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
     // with fewer lines than the sheet has rows (同父同键的重复行按老系统合并),so it travels with
     // the result instead of being a silent drop; `treeOrdered: false` says this deployment's rows
     // carry no 部件源ID binding and got the flat order.
+    //
+    // REACH, stated so nobody reads more into it than is true: today these two are MODULE RETURN
+    // VALUES ONLY. The HTTP export route (`http-routes.cjs`, frozen in this change) writes its
+    // audit detail from `totalRowCount` / `activeRowCount` / `headers.length` and never reads
+    // either key — so an operator whose workbook came out short cannot yet see this number
+    // anywhere. Wiring it into the audit detail is the next hand's job; until then "有据可查"
+    // applies to the module, not to the product.
     collapsedRowCount: ordering.collapsedRowCount,
     treeOrdered: ordering.treeOrdered,
     // Values-free: logical field ids the bound target does not bind, so an export that came out
