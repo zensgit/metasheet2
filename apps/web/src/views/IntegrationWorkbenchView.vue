@@ -462,6 +462,7 @@ import {
   getExternalSystemSchema,
   getPlmDataSourceCapabilities,
   installIntegrationStaging,
+  integrationApiErrorCode,
   isDeadLetterReplayable,
   listIntegrationDeadLetters,
   listIntegrationPipelineRuns,
@@ -2187,6 +2188,31 @@ function refuseScopeBlockedConnectionWrite(system: WorkbenchExternalSystem, acti
 // 判据和文案都复用四动作那一套(`externalSystemScopeWriteBlock`),不另起第二套口径。
 // 这里只会「少发一个注定失败的请求」,绝不改写入作用域去够那行租户级的连接 —— 那才是放宽。
 // 列表里没有这一行时(没加载 / 分页外)不猜:照发,由服务端那道 409 兜底。
+// 上面那道屏幕侧预检的**兜底**：列表里没有这一行时（没加载 / 分页外 / 刚被别处建到租户级），预检按约定
+// 不猜、照发，请求就真的撞上服务端那道 409。此前 `parseIntegrationResponse` 只留 message、丢掉 code，
+// 于是这里的 catch 只能直出英文原文 "external system belongs to the tenant-wide scope"；现在服务端的
+// `error.code` 透传到 Error 上（workbench.ts），判据从「匹配英文散文」换成「匹配稳定的 wire code」。
+//
+// 为什么文案还是走 `externalSystemScopeWriteBlock`：不另起第二套口径 —— 预检拦下与服务端拒回，
+// 操作员看到的必须是同一句话（含「测试连接不受此限」那半句）。
+// 形状只有一种：服务端 assertHintedIdDoesNotTargetTenantWideRow 仅在「请求带非 null workspace hint
+// 且该 id 的行是租户级(workspace_id IS NULL)」时抛这个码（lib/external-systems.cjs:588-606），
+// 所以这里用 `{ workspaceId: null }` 对当前 hint 求那句话。hint 为空时该函数返回空串 —— 那说明这个码
+// 出现在它本不该出现的形状里，此时**不编话**，退回服务端原 message。
+const EXTERNAL_SYSTEM_SCOPE_MISMATCH_CODE = 'EXTERNAL_SYSTEM_SCOPE_MISMATCH'
+
+function scopeMismatchWriteBlockFromError(error: unknown): string {
+  if (integrationApiErrorCode(error) !== EXTERNAL_SYSTEM_SCOPE_MISMATCH_CODE) return ''
+  return externalSystemScopeWriteBlock({ workspaceId: null }, currentScope())
+}
+
+// 写动作 catch 的统一出口：认得的 code 给中文人话，其它一律照旧直出 message（不改既有行为）。
+function connectionWriteErrorText(error: unknown, action: string): string {
+  const blocked = scopeMismatchWriteBlockFromError(error)
+  if (blocked) return `无法${action}：${blocked}`
+  return error instanceof Error ? error.message : String(error)
+}
+
 function refuseScopeBlockedEnsureWrite(systemId: string, action: string): boolean {
   const existing = systems.value.find((system) => system.id === systemId)
   if (!existing) return false
@@ -2244,7 +2270,7 @@ async function deactivateConnection(system: WorkbenchExternalSystem): Promise<vo
     normalizeSystemSelections()
     setStatus(`连接已停用：${system.name}`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '停用'), 'error')
   }
 }
 
@@ -2263,7 +2289,7 @@ async function activateConnection(system: WorkbenchExternalSystem): Promise<void
     normalizeSystemSelections()
     setStatus(`连接已启用：${system.name}`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '启用'), 'error')
   }
 }
 
@@ -2289,7 +2315,7 @@ async function deleteConnection(system: WorkbenchExternalSystem): Promise<void> 
     clearDeletedSystemState(system.id)
     setStatus(`连接已删除：${system.name}`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '删除'), 'error')
   } finally {
     deletingConnectionId.value = ''
   }
@@ -2357,7 +2383,7 @@ async function saveConnectionDraft(): Promise<void> {
     normalizeSystemSelections()
     setStatus(`连接已保存：${system.name}`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '保存连接'), 'error')
   } finally {
     savingConnectionDraft.value = false
   }
@@ -3003,7 +3029,7 @@ async function activateStagingAsSource(objectId: string, successMessage?: string
     }
     setStatus(successMessage || `已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为 Dry-run 来源`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '把 staging 多维表设为 Dry-run 来源'), 'error')
   }
 }
 
@@ -3062,7 +3088,7 @@ async function useStagingAsTarget(objectId: string): Promise<void> {
     if (mappings.value.length === 0) seedMappingsFromTargetSchema(targetSchema.value.fields)
     setStatus(`已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为写回目标`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '把多维表设为写回目标'), 'error')
   }
 }
 

@@ -1430,6 +1430,128 @@ describe('IntegrationWorkbenchView', () => {
     })
   })
 
+  // 上一条钉的是「列表带出了那一行时，屏幕侧预检省掉一次注定失败的请求」。这一条钉它的**兜底**：
+  // 列表里没有这一行（没加载 / 分页外 / 别处刚把它建到租户级），预检按约定不猜、照发，请求就真的
+  // 撞上服务端那道 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH。此前 parseIntegrationResponse 丢掉 code，
+  // catch 只能直出英文原文；现在 code 透传到 Error 上，判据是稳定的 wire code 而不是英文散文。
+  // 第二段是正控：换一个 code，照旧直出服务端 message —— 这次改动只认一个码，没有把别的错误吞成
+  // 「作用域不匹配」。
+  const mountWithEmptyInventory = async (
+    onExternalSystemPost: (body: Record<string, unknown>) => Response,
+  ) => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    localStorage.setItem('workspaceId', 'default')
+    const externalSystemBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET') {
+        if (url === '/api/integration/staging/install') {
+          return jsonResponse({
+            projectId: 'project_1',
+            sheetIds: { standard_materials: 'sheet_materials' },
+            viewIds: { standard_materials: 'view_materials' },
+            openLinks: { standard_materials: '/multitable/sheet_materials/view_materials' },
+            targets: [{
+              id: 'standard_materials',
+              name: '物料清洗',
+              sheetId: 'sheet_materials',
+              viewId: 'view_materials',
+              openLink: '/multitable/sheet_materials/view_materials',
+            }],
+            warnings: [],
+          })
+        }
+        if (url === '/api/integration/external-systems') {
+          const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+          externalSystemBodies.push(body)
+          return onExternalSystemPost(body)
+        }
+        return jsonResponse({})
+      }
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      // 清单是空的 —— 屏幕侧预检查无可查，只能照发；兜底只剩服务端那道 409。
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([{ id: 'standard_materials', name: 'Standard Materials', fields: ['code', 'name'] }])
+      }
+      return jsonResponse([])
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const projectIdInput = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
+    projectIdInput.value = 'project_1'
+    projectIdInput.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="install-staging"]') as HTMLButtonElement).click()
+    await flushUi(20)
+    return externalSystemBodies
+  }
+
+  it('列表没带出这一行时：ensure 请求照发，服务端 409 SCOPE_MISMATCH 被翻成中文人话，英文原文不上屏', async () => {
+    const externalSystemBodies = await mountWithEmptyInventory(() => new Response(
+      JSON.stringify({
+        ok: false,
+        error: {
+          code: 'EXTERNAL_SYSTEM_SCOPE_MISMATCH',
+          message: 'external system belongs to the tenant-wide scope',
+          details: { id: 'metasheet_staging_project_1', requestedWorkspaceId: 'default', rowWorkspaceId: null },
+        },
+      }),
+      { status: 409, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    // 请求确实发了（与上一条的 externalSystemBodies === [] 正相反），而且带的仍是调用方自己的 hint。
+    expect(externalSystemBodies).toHaveLength(1)
+    expect(externalSystemBodies[0]).toMatchObject({
+      id: 'metasheet_staging_project_1',
+      workspaceId: 'default',
+    })
+    expect(container.textContent).toContain('无法把 staging 多维表设为 Dry-run 来源')
+    // 文案与预检那条同源（externalSystemScopeWriteBlock），不另起第二套口径。
+    expect(container.textContent).toContain('租户级')
+    expect(container.textContent).toContain('请清空上方的工作区')
+    expect(container.textContent).toContain('测试连接')
+    expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
+
+    // 目标那一侧同理。
+    ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(externalSystemBodies).toHaveLength(2)
+    expect(container.textContent).toContain('无法把多维表设为写回目标')
+    expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
+  })
+
+  it('正控：其它 error code 照旧直出服务端 message，不被当成作用域不匹配', async () => {
+    await mountWithEmptyInventory(() => new Response(
+      JSON.stringify({
+        ok: false,
+        error: { code: 'EXTERNAL_SYSTEM_KIND_UNSUPPORTED', message: 'adapter kind metasheet:staging is not registered' },
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    expect(container.textContent).toContain('adapter kind metasheet:staging is not registered')
+    expect(container.textContent).not.toContain('请清空上方的工作区')
+  })
+
   it('does not mark error-state source or target systems as dry-run ready', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {

@@ -648,6 +648,44 @@ export function summarizeFieldProvenance(
   return { entries, stats }
 }
 
+// 机器可读的错误码只允许这一种形状（与 stockPreparation/confirmApi.ts 的 ERROR_CODE_PATTERN 同一口径）：
+// 值面字符串（物料号、连接串、驱动原文）不可能长成这样，所以从响应体抬到 Error 上的 code 是 values-free 的。
+const INTEGRATION_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
+
+/**
+ * `parseIntegrationResponse` 在非 2xx / `ok:false` 时抛出的 Error 附带的机器可读字段。
+ *
+ * 为什么要有它：服务端答的是 `{ ok:false, error:{ code, message, details } }`，而这里以前只留
+ * `error.message`、把 `code` 丢了 —— 于是调用点只能去匹配英文散文（"external system belongs to the
+ * tenant-wide scope" 那种），那是 PG 中文 locale 一类坑的同款脆弱守卫：服务端换一句话、换个语言，
+ * 分支就静默失效。现在 code / status / details 一并挂到同一个 Error 上。
+ *
+ * 兼容性：仍然是 `new Error(message)`，`message` 一字未改、`instanceof Error` 不变，
+ * 所有只读 `.message` 的既有调用点行为完全不变；新字段是可选的加法。
+ * 不新造错误类：本模块的错误在几十个调用点被 `error instanceof Error` 判着，换类型是无谓的爆炸半径；
+ * 也不复用 `StockPreparationConfirmApiError`（那是备料确认专用、且刻意丢掉 message）。
+ */
+export interface IntegrationApiErrorFields {
+  /** 服务端 `error.code`，已按 enum 形状夹紧；响应体没有合法 code 时不存在。 */
+  code?: string
+  /** 失败响应的 HTTP 状态码（例如作用域不匹配的 409）。 */
+  status?: number
+  /** 服务端 `error.details`（仅当它是普通对象时）。只供判据使用，不直接渲染。 */
+  details?: Record<string, unknown>
+}
+
+export type IntegrationApiError = Error & IntegrationApiErrorFields
+
+/**
+ * 从任意 catch 到的东西里取出集成错误码；不是本模块抛的、或 code 形状不合法时返回 null。
+ * 调用点用它代替「按 message 文本判断」，这样服务端换文案不会让分支静默失效。
+ */
+export function integrationApiErrorCode(error: unknown): string | null {
+  if (!(error instanceof Error)) return null
+  const code = (error as IntegrationApiError).code
+  return typeof code === 'string' && INTEGRATION_ERROR_CODE_PATTERN.test(code) ? code : null
+}
+
 export async function parseIntegrationResponse<T>(response: Response): Promise<T> {
   let payload: IntegrationApiEnvelope<T> | null = null
   try {
@@ -657,7 +695,13 @@ export async function parseIntegrationResponse<T>(response: Response): Promise<T
   }
   if (!response.ok || payload?.ok === false) {
     const message = payload?.error?.message || `${response.status} ${response.statusText}`.trim()
-    throw new Error(message || 'Integration API request failed')
+    const rawCode = payload?.error?.code
+    const rawDetails = payload?.error?.details
+    const error = new Error(message || 'Integration API request failed') as IntegrationApiError
+    if (typeof rawCode === 'string' && INTEGRATION_ERROR_CODE_PATTERN.test(rawCode)) error.code = rawCode
+    error.status = response.status
+    if (rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails)) error.details = rawDetails
+    throw error
   }
   return payload?.data as T
 }

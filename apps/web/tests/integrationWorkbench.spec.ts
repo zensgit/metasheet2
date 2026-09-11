@@ -22,7 +22,10 @@ import {
   replayIntegrationDeadLetter,
   externalSystemScopeTestWriteNote,
   externalSystemScopeWriteBlock,
+  integrationApiErrorCode,
   isExternalSystemWritableInScope,
+  parseIntegrationResponse,
+  type IntegrationApiError,
 } from '../src/services/integration/workbench'
 
 const apiFetchMock = vi.fn()
@@ -578,5 +581,89 @@ describe('externalSystemScopeTestWriteNote (测试连接写到了哪一行)', ()
     expect(externalSystemScopeTestWriteNote({ workspaceId: null }, {})).toBe('')
     expect(externalSystemScopeTestWriteNote({ workspaceId: 'ws_b' }, { workspaceId: 'ws_a' })).toBe('')
     expect(externalSystemScopeTestWriteNote(null, { workspaceId: 'default' })).toBe('')
+  })
+})
+
+// 非 2xx 的错误码透传（#5634 的兜底）。
+// 服务端答的是 `{ ok:false, error:{ code, message, details } }`；以前这里只留 message、丢掉 code，
+// 于是调用点只能去匹配英文散文（"external system belongs to the tenant-wide scope"）——
+// 服务端换一句话、换个语言，分支就静默失效（PG 中文 locale 那类脆弱守卫的同款）。
+describe('parseIntegrationResponse（错误码/状态透传，message 不变）', () => {
+  function errorResponse(body: unknown, status: number, statusText?: string): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      ...(statusText ? { statusText } : {}),
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  it('非 2xx 的 {error:{code,message}}：抛出的 Error 带 code / status / details，message 一字不改', async () => {
+    const raised = await parseIntegrationResponse(errorResponse({
+      ok: false,
+      error: {
+        code: 'EXTERNAL_SYSTEM_SCOPE_MISMATCH',
+        message: 'external system belongs to the tenant-wide scope',
+        details: { id: 'metasheet_staging_project_1', requestedWorkspaceId: 'default', rowWorkspaceId: null },
+      },
+    }, 409)).then(() => null, (error: unknown) => error as IntegrationApiError)
+
+    expect(raised).toBeInstanceOf(Error)
+    // 既有调用点只读 .message —— 它必须保持逐字不变，这次是纯加法。
+    expect(raised?.message).toBe('external system belongs to the tenant-wide scope')
+    expect(raised?.code).toBe('EXTERNAL_SYSTEM_SCOPE_MISMATCH')
+    expect(raised?.status).toBe(409)
+    expect(raised?.details).toMatchObject({ requestedWorkspaceId: 'default', rowWorkspaceId: null })
+    expect(integrationApiErrorCode(raised)).toBe('EXTERNAL_SYSTEM_SCOPE_MISMATCH')
+  })
+
+  it('非 JSON 体：code 不存在，message 仍是既有兜底文案（正控）', async () => {
+    const raised = await parseIntegrationResponse(new Response('<html>502 Bad Gateway</html>', {
+      status: 502,
+      statusText: 'Bad Gateway',
+      headers: { 'Content-Type': 'text/html' },
+    })).then(() => null, (error: unknown) => error as IntegrationApiError)
+
+    expect(raised?.message).toBe('502 Bad Gateway')
+    expect(raised?.code).toBeUndefined()
+    expect(integrationApiErrorCode(raised)).toBeNull()
+    expect(raised?.status).toBe(502)
+  })
+
+  it('code 形状不合法（值面字符串）时夹掉，不让值经错误路径进 DOM 判据', async () => {
+    const raised = await parseIntegrationResponse(errorResponse({
+      ok: false,
+      error: { code: '物料 A-001 冲突 jdbc:sqlserver://10.0.0.1', message: 'conflict' },
+    }, 409)).then(() => null, (error: unknown) => error as IntegrationApiError)
+
+    expect(raised?.message).toBe('conflict')
+    expect(raised?.code).toBeUndefined()
+    expect(integrationApiErrorCode(raised)).toBeNull()
+  })
+
+  it('2xx 正常响应照旧返回 data；integrationApiErrorCode 对非本模块的错误返回 null', async () => {
+    await expect(parseIntegrationResponse(jsonResponse({ id: 'sys_1' })))
+      .resolves.toEqual({ id: 'sys_1' })
+    expect(integrationApiErrorCode(new Error('plain'))).toBeNull()
+    expect(integrationApiErrorCode('EXTERNAL_SYSTEM_SCOPE_MISMATCH')).toBeNull()
+    expect(integrationApiErrorCode(null)).toBeNull()
+  })
+
+  it('走真实服务函数（upsertWorkbenchExternalSystem）时，code 一路到达调用点', async () => {
+    apiFetchMock.mockReset()
+    apiFetchMock.mockImplementation(async () => errorResponse({
+      ok: false,
+      error: { code: 'EXTERNAL_SYSTEM_SCOPE_MISMATCH', message: 'external system belongs to the tenant-wide scope' },
+    }, 409))
+    const raised = await upsertWorkbenchExternalSystem({
+      tenantId: 'default',
+      workspaceId: 'default',
+      id: 'metasheet_staging_project_1',
+      name: 'MetaSheet staging 多维表',
+      kind: 'metasheet:staging',
+      role: 'source',
+      status: 'active',
+    }).then(() => null, (error: unknown) => error as IntegrationApiError)
+    expect(integrationApiErrorCode(raised)).toBe('EXTERNAL_SYSTEM_SCOPE_MISMATCH')
+    expect(raised?.status).toBe(409)
   })
 })
