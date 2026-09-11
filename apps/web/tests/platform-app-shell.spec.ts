@@ -124,6 +124,7 @@ describe('PlatformAppShellView', () => {
     apiPostMock.mockReset()
     pushMock.mockReset()
     installationGetMock.mockReset()
+    localStorage.clear()
   })
 
   afterEach(() => {
@@ -351,4 +352,56 @@ describe('PlatformAppShellView', () => {
     expect(container.textContent).toContain('partial')
     expect(container.textContent).toContain('runtime install is incomplete')
   })
+
+  /**
+   * G-7 (4), shell side. The detail route already 404s an app the caller may not see
+   * (packages/core-backend/src/routes/platform-apps.ts `GET /:appId`); this pins the second line for
+   * the case the server never sees -- a summary ALREADY in the shared `apps` ref. Drop
+   * `isPlatformAppAccessible` from the view's `app` computed and this goes red.
+   */
+  it('refuses to render the shell for an app whose declared codes the caller holds none of', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['elearning:read']))
+    const target = createInstanceApp({
+      id: 'stock-preparation',
+      displayName: 'Stock Preparation',
+      runtimeBindings: undefined,
+      permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin'],
+    })
+    currentAppId = 'stock-preparation'
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+
+    const component = (await import('../src/views/PlatformAppShellView.vue')).default
+    container = document.createElement('div')
+    app = createApp(component as Component)
+    app.mount(container)
+    await flushUi(8)
+
+    // Same state an app that does not exist renders: no existence oracle in the browser either.
+    expect(container.textContent).toContain('Platform app not found.')
+    expect(container.textContent).not.toContain('Stock Preparation')
+  })
+
+  it('renders that same shell once the caller holds ONE of its declared codes', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['stock-prep:admin']))
+    const target = createInstanceApp({
+      id: 'stock-preparation',
+      displayName: 'Stock Preparation',
+      runtimeBindings: undefined,
+      permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin'],
+    })
+    currentAppId = 'stock-preparation'
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+
+    const component = (await import('../src/views/PlatformAppShellView.vue')).default
+    container = document.createElement('div')
+    app = createApp(component as Component)
+    app.mount(container)
+    await flushUi(8)
+
+    expect(container.textContent).toContain('Stock Preparation')
+    expect(container.textContent).not.toContain('Platform app not found.')
+  })
+
 })

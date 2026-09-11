@@ -165,7 +165,7 @@
             @click="railCollapsed = !railCollapsed"
           >{{ railCollapsed ? '›' : '‹' }}</button>
         </div>
-        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" />
+        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" />
       </aside>
       <div class="mt-workbench__main">
         <MetaDashboardView
@@ -419,9 +419,13 @@
       :visible="showImportModal"
       :sheet-id="workbench.activeSheetId.value"
       :fields="importSurfaceFields"
+      :existing-field-names="importExistingFieldNames"
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
+      :can-create-fields="caps.canManageFields.value"
+      :create-fields-error="importCreateFieldsError"
+      :created-field-columns="importCreatedFieldColumns"
       @update:dirty="importDirty = $event"
       @close="closeImportModal"
       @cancel-import="cancelImport"
@@ -640,6 +644,8 @@ import {
   duplicateRowsSkipped as fmtDuplicateRowsSkipped,
   recordsDeleted as fmtRecordsDeleted,
   recordNotFound as fmtRecordNotFound,
+  sheetDeleteConfirm as fmtSheetDeleteConfirm,
+  sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
 } from '../utils/workbench-labels'
 import { recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
@@ -744,8 +750,22 @@ import MetaDashboardView from '../components/MetaDashboardView.vue'
 import { MtButton } from '../ui'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
-import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
+import { extractImportTokens, type ImportBuildFailure, type ImportValueResolver } from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
+import {
+  MAX_FIELD_NAME_LENGTH,
+  MAX_SHEET_FIELDS,
+  createFieldPlaceholderId,
+  planCreateFieldNames,
+  type ImportSubmitPayload,
+} from '../import/create-fields'
+import {
+  importLabel,
+  createFieldFailed as fmtCreateFieldFailed,
+  createFieldLimitReached as fmtCreateFieldLimitReached,
+  createFieldNameInvalid as fmtCreateFieldNameInvalid,
+  createFieldNameTooLong as fmtCreateFieldNameTooLong,
+} from '../utils/meta-import-labels'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
 import {
@@ -856,6 +876,10 @@ const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workb
 // records; Reset may delete them and retains its typed confirmation. No wall-clock asOf crosses either wire.
 const pitResetEnabled = computed(() => capabilitySource.value?.pitResetEnabled === true)
 const sheetRevertEnabled = computed(() => capabilitySource.value?.sheetRevertEnabled === true)
+// Whole-sheet delete authority for the SELECTED sheet — the same server-derived, FE-read-only shape as
+// pitResetEnabled: read straight off the /context capabilities object (`=== true`), never a role fallback,
+// so an old backend, a legacy role-string source or a stale object all fail CLOSED (trash button hidden).
+const canDeleteSheet = computed(() => capabilitySource.value?.canDeleteSheet === true)
 const listHistoryEventsWire = (
   baseId: string,
   params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
@@ -1375,6 +1399,11 @@ type ImportResult = {
   failures: ImportFailure[]
 }
 const importResult = ref<ImportResult | null>(null)
+// Import → "create the missing columns as new text fields": the modal only ASKS (payload.createFields);
+// the write happens here, behind the same manage-fields capability that gates the field manager, and
+// behind the server's own 403 on POST /api/multitable/fields.
+const importCreateFieldsError = ref<string | null>(null)
+const importCreatedFieldColumns = ref<Record<number, string> | null>(null)
 // --- Display prefs (column width / row density / group collapse): server-persisted in view.config
 // (persist-display-prefs arc 2026-06-16). Each is OPTIMISTIC-LOCAL: a writable ref updates the UI
 // instantly, then `persistDisplayPref` writes the merged config in the background (no row refetch).
@@ -1655,6 +1684,15 @@ const importSurfaceFields = computed(() =>
     return permission?.visible !== false && permission?.readOnly !== true
   }),
 )
+/**
+ * Names of EVERY field on the sheet, including the ones importSurfaceFields strips (formula /
+ * lookup / rollup / readonly / permission-hidden). The modal needs them to tell "this header is
+ * missing from the sheet" apart from "this header exists but is not writable" — otherwise a header
+ * matching a formula column defaults to "create a new field" and a shadow `X (2)` text column
+ * appears. Same source list applyImportCreateFields plans against, so read side and write side can
+ * not disagree. Names only; no values leave the sheet through this prop.
+ */
+const importExistingFieldNames = computed(() => workbench.fields.value.map((field) => field.name))
 const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
   const resolvers: Record<string, ImportValueResolver> = {}
   for (const field of importSurfaceFields.value) {
@@ -3314,6 +3352,41 @@ async function onRenameSheet(sheetId: string, name: string) {
   } catch (e: any) { showError(e.message ?? wb('toast.sheetRenameFailed', isZh.value)) }
 }
 
+// Whole-sheet soft delete (DELETE /api/multitable/sheets/:id). The rail only shows the trash button
+// for the SELECTED sheet when the server-derived `canDeleteSheet` bit is true, and this handler
+// re-checks that bit so a stale rail can never issue the request. Confirm first — the same
+// window.confirm idiom every other destructive prompt in this file uses — with copy that names the
+// sheet and states the consequence (records hidden with it; admin-only API restore, no UI yet).
+// Refusals are coded (409 SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED, 404 SHEET_DELETED) and get
+// plain-language toasts by CODE; anything else surfaces the server message or the generic toast.
+//
+// Refresh: if the deleted sheet is the ACTIVE one, re-pull the base with `loadBaseContext(baseId)`
+// — NOT `switchBase`, which short-circuits to `return true` for the same base with no sheetId
+// (useMultitableWorkbench.ts) and would leave the workbench pointing at a sheet that no longer
+// exists. /context with only baseId selects the first remaining readable sheet server-side, and
+// syncContextState falls back to the first listed sheet (or '' when the base is now empty — the
+// existing no-sheet state). If another sheet was deleted, `loadSheetMeta` re-pulls the list the way
+// onRenameSheet does.
+async function onDeleteSheet(sheetId: string) {
+  if (!canDeleteSheet.value) return
+  const target = workbench.sheets.value.find((s) => s.id === sheetId)
+  if (!window.confirm(fmtSheetDeleteConfirm(target?.name ?? sheetId, isZh.value))) return
+  try {
+    await workbench.client.deleteSheet(sheetId)
+  } catch (e: any) {
+    showError(fmtSheetDeleteErrorMessage(e, isZh.value))
+    if (e?.code === 'SHEET_DELETED') await workbench.loadSheetMeta(workbench.activeSheetId.value)
+    return
+  }
+  showSuccess(wb('toast.sheetDeleted', isZh.value))
+  if (sheetId === workbench.activeSheetId.value) {
+    const ok = await workbench.loadBaseContext(workbench.activeBaseId.value)
+    if (!ok) showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
+  } else {
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+  }
+}
+
 // --- Base management ---
 async function loadBases() {
   try {
@@ -3381,6 +3454,8 @@ function onSelectView(viewId: string) {
 }
 
 function onOpenImportModal() {
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
   showImportModal.value = true
 }
 
@@ -3788,12 +3863,121 @@ function onReorderField(fromId: string, toId: string) {
 }
 
 // --- Bulk import ---
-async function onBulkImport(payload: ImportBuildResult) {
+/**
+ * Create the fields the import modal asked for, then rewrite the placeholder keys the modal used for
+ * those columns to the new field ids. Fail-closed: any refusal or backend error aborts BEFORE a
+ * single record is written (records are only rewritten after every create succeeded).
+ *
+ * Returns false when the caller must abort the import.
+ */
+async function applyImportCreateFields(payload: ImportSubmitPayload): Promise<boolean> {
+  const requests = payload.createFields ?? []
+  if (!requests.length) return true
+  // WRITE-SIDE GATE. The modal's `canCreateFields` prop only controls what it OFFERS; a stale prop,
+  // a revoked role, or a hand-built payload must not reach `createField` from here.
+  if (!caps.canManageFields.value) {
+    importCreateFieldsError.value = importLabel('import.createFieldsForbidden', isZh.value)
+    return false
+  }
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) {
+    importCreateFieldsError.value = wb('toast.fieldCreateFailed', isZh.value)
+    return false
+  }
+  const existingFields = workbench.fields.value
+  const plan = planCreateFieldNames({
+    requests,
+    existingNames: existingFields.map((field) => field.name),
+    existingFieldCount: existingFields.length,
+  })
+  if (!plan.ok) {
+    importCreateFieldsError.value = plan.reason === 'field-limit'
+      ? fmtCreateFieldLimitReached(MAX_SHEET_FIELDS, isZh.value)
+      : plan.reason === 'name-too-long'
+        ? fmtCreateFieldNameTooLong(plan.header, MAX_FIELD_NAME_LENGTH, isZh.value)
+        : fmtCreateFieldNameInvalid(plan.header, isZh.value)
+    return false
+  }
+
+  const createdColumns: Record<number, string> = {}
+  for (const [index, request] of requests.entries()) {
+    try {
+      const created = await workbench.client.createField({
+        sheetId,
+        name: plan.names[index],
+        type: 'string' as MetaFieldType,
+      })
+      createdColumns[request.columnIndex] = created.field.id
+    } catch (e: any) {
+      importCreateFieldsError.value = fmtCreateFieldFailed(
+        request.header,
+        e?.message ?? wb('toast.fieldCreateFailed', isZh.value),
+        isZh.value,
+      )
+      // A create can not be rolled back (there is no transaction across these calls), so the fields
+      // built before the failure are already on the sheet. Publish them: the modal rebinds those
+      // columns from the sentinel to their real ids, so the retry the user is about to make asks
+      // only for the column that actually failed. Dropping createdColumns here (the previous
+      // behaviour) left orphans behind AND made the retry create a SECOND field with the same name
+      // — meta_fields has no (sheet_id, name) unique index to stop it.
+      try {
+        await publishCreatedImportFields(payload, sheetId, createdColumns)
+      } catch {
+        // A failed sheet-meta refresh must NOT mask the create error the user has to act on; the
+        // column → id map is published regardless (see the finally inside), which is what stops the
+        // retry from duplicating.
+      }
+      return false
+    }
+  }
+
+  await publishCreatedImportFields(payload, sheetId, createdColumns)
+  return true
+}
+
+/**
+ * Adopt the fields that were actually created: rewrite the modal's placeholder keys to the real
+ * field ids, refresh the sheet meta (so a retry plans names against the CURRENT field list instead
+ * of a stale one), and hand the column → id map to the modal. Used on both the success path and the
+ * partial-failure path; on the failure path it must not clobber importCreateFieldsError.
+ */
+async function publishCreatedImportFields(
+  payload: ImportSubmitPayload,
+  sheetId: string,
+  createdColumns: Record<number, string>,
+): Promise<void> {
+  if (!Object.keys(createdColumns).length) return
+  // Rewrite IN PLACE: the modal keeps these same record objects for "retry failed rows", so the
+  // placeholder key must disappear everywhere, not just in this attempt's copy.
+  for (const record of payload.records) {
+    for (const [columnIndex, fieldId] of Object.entries(createdColumns)) {
+      const placeholder = createFieldPlaceholderId(Number(columnIndex))
+      if (!(placeholder in record)) continue
+      record[fieldId] = record[placeholder]
+      delete record[placeholder]
+    }
+  }
+  try {
+    await workbench.loadSheetMeta(sheetId)
+  } finally {
+    // Published even when the refresh threw: the modal must learn which columns now exist, or the
+    // retry asks for them again and a second same-named field appears. The throw still propagates
+    // on the success path, where a stale grid was already treated as a reason to abort.
+    importCreatedFieldColumns.value = { ...createdColumns }
+  }
+}
+
+async function onBulkImport(payload: ImportSubmitPayload) {
   const controller = new AbortController()
   importAbortController.value = controller
   importSubmitting.value = true
   importResult.value = null
+  importCreateFieldsError.value = null
   try {
+    if (!(await applyImportCreateFields(payload))) {
+      showError(importCreateFieldsError.value ?? wb('toast.fieldCreateFailed', isZh.value))
+      return
+    }
     const recordsToImport = payload.records
     const rowIndexesToImport = payload.rowIndexes
     const skippedRows: ImportFailure[] = []
@@ -3899,6 +4083,8 @@ function closeImportModal() {
   importSubmitting.value = false
   importResult.value = null
   importAbortController.value = null
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
 }
 
 // --- CSV export ---

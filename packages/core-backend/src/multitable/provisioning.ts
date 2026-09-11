@@ -198,9 +198,25 @@ function buildFieldProperty(
   if ((field.type !== 'select' && field.type !== 'multiSelect') || !Array.isArray(field.options) || field.options.length === 0) {
     return base
   }
+  // options(string[])是可选值的**权威清单**;property.options 里若带着 {value,color},
+  // 只按 value 对号入座地把颜色带过来(模板保色用的就是这条)。清单本身不受影响:
+  // property 里多出来的 value 不会被装进去,少的也不会被补上;没有颜色时输出与从前逐字相同。
+  const colorByValue = new Map<string, string>()
+  const carried = Array.isArray(base.options) ? base.options : []
+  for (const option of carried) {
+    if (!option || typeof option !== 'object' || Array.isArray(option)) continue
+    const value = (option as { value?: unknown }).value
+    const color = (option as { color?: unknown }).color
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    if (typeof color !== 'string' || color.trim().length === 0) continue
+    colorByValue.set(String(value), color)
+  }
   return {
     ...base,
-    options: field.options.map((value) => ({ value })),
+    options: field.options.map((value) => {
+      const color = colorByValue.get(value)
+      return color ? { value, color } : { value }
+    }),
   }
 }
 

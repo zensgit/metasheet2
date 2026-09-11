@@ -12,11 +12,129 @@
         <router-link class="multitable-templates__back" :to="{ name: HomeRouteName }">
           ← 返回多维表首页
         </router-link>
-        <MtButton class="multitable-templates__refresh" :disabled="loading" @click="loadTemplates">
+        <!--
+          「把 Base 存为模板」入口。隐藏只是 UX:真正的门在服务端(POST /api/multitable/templates
+          要 canManageFields —— 管理员角色或 multitable:manage-schema),这里沿用首页改名入口
+          同一套 useAuth().hasPermission() 口径,权限不够的人看不到按钮,看到也照样 403。
+        -->
+        <MtButton
+          v-if="canAuthorTemplates"
+          variant="primary"
+          class="multitable-templates__create"
+          data-testid="template-create-open"
+          @click="toggleCreateForm"
+        >
+          {{ showCreateForm ? '收起' : '把 Base 存为模板' }}
+        </MtButton>
+        <MtButton class="multitable-templates__refresh" :disabled="loading" @click="loadTemplates({ force: true })">
           {{ loading ? '加载中...' : '刷新' }}
         </MtButton>
       </div>
     </header>
+
+    <!--
+      服务端在自定义模板那一段读失败(表没迁移 / 库没起来)时会回退成「只有内置模板」并带
+      customTemplatesUnavailable:true。这里必须明说,否则页面看起来就是「你没建过模板」——
+      用户会以为自己刚存的模板丢了。
+    -->
+    <p
+      v-if="customTemplatesUnavailable"
+      class="multitable-templates__warning"
+      role="status"
+      data-testid="template-custom-unavailable"
+    >
+      自定义模板暂不可用(服务端读取用户模板失败),下面只列出内置模板。已保存的自定义模板不会丢失,请联系管理员检查数据库迁移。
+    </p>
+
+    <section
+      v-if="canAuthorTemplates && showCreateForm"
+      class="multitable-templates__create-panel"
+      data-testid="template-create-form"
+      aria-label="把 Base 存为模板"
+    >
+      <p class="multitable-templates__create-hint">
+        只抽取所选 Base 的<strong>结构</strong>(表、字段、视图),不会复制任何一行记录数据。
+      </p>
+      <div class="multitable-templates__create-row">
+        <label>
+          <span>选择 Base</span>
+          <select
+            v-model="createBaseId"
+            data-testid="template-create-base"
+            :disabled="creating"
+            @change="onCreateBaseChange"
+          >
+            <option value="">请选择…</option>
+            <option v-for="base in createBases" :key="base.id" :value="base.id">{{ base.name }}</option>
+          </select>
+        </label>
+        <label>
+          <span>模板名称</span>
+          <input
+            v-model="createName"
+            type="text"
+            maxlength="255"
+            data-testid="template-create-name"
+            :disabled="creating"
+            placeholder="例如:订单跟进模板"
+          />
+        </label>
+        <label>
+          <span>分类</span>
+          <input
+            v-model="createCategory"
+            type="text"
+            maxlength="64"
+            data-testid="template-create-category"
+            :disabled="creating"
+            placeholder="Custom"
+          />
+        </label>
+      </div>
+      <label class="multitable-templates__create-desc">
+        <span>说明</span>
+        <input
+          v-model="createDescription"
+          type="text"
+          maxlength="500"
+          data-testid="template-create-description"
+          :disabled="creating"
+          placeholder="这个模板适合什么场景"
+        />
+      </label>
+      <label class="multitable-templates__create-share">
+        <input
+          v-model="createShared"
+          type="checkbox"
+          data-testid="template-create-shared"
+          :disabled="creating"
+        />
+        <span>
+          共享给本租户(同事都能看到并使用)。不勾选时只有你自己看得见 ——
+          模板会带上表名与全部字段名,共享等于把这些名字给整个租户看。
+        </span>
+      </label>
+      <div class="multitable-templates__create-actions">
+        <MtButton
+          variant="primary"
+          data-testid="template-create-submit"
+          :disabled="!canSubmitCreate"
+          @click="submitCreate"
+        >
+          {{ creating ? '保存中...' : '保存为模板' }}
+        </MtButton>
+        <MtButton data-testid="template-create-cancel" :disabled="creating" @click="closeCreateForm">取消</MtButton>
+      </div>
+      <p v-if="createError" class="multitable-templates__error" role="alert" data-testid="template-create-error">
+        {{ createError }}
+      </p>
+      <p v-if="createNotice" class="multitable-templates__stats" role="status" data-testid="template-create-notice">
+        {{ createNotice }}
+      </p>
+      <ul v-if="createWarnings.length" class="multitable-templates__create-warnings" data-testid="template-create-warnings">
+        <li v-for="(warning, index) in createWarnings" :key="index">{{ warning }}</li>
+      </ul>
+    </section>
 
     <section class="multitable-templates__controls" aria-label="筛选与搜索">
       <nav v-if="categories.length" class="multitable-templates__categories" aria-label="分类筛选">
@@ -57,7 +175,7 @@
 
     <p v-if="errorMessage" class="multitable-templates__error" role="alert">
       {{ errorMessage }}
-      <MtButton class="multitable-templates__retry" @click="loadTemplates">重试</MtButton>
+      <MtButton class="multitable-templates__retry" @click="loadTemplates({ force: true })">重试</MtButton>
     </p>
 
     <p v-if="installError" class="multitable-templates__warning" role="status">
@@ -80,8 +198,10 @@
         :template="template"
         :installing="installingTemplateId === template.id"
         show-detail
+        :deletable="canAuthorTemplates"
         @install="onInstall"
         @detail="onDetail"
+        @delete="onDelete"
       />
     </div>
   </section>
@@ -94,9 +214,10 @@ import MetaTemplateCard from '../multitable/components/MetaTemplateCard.vue'
 import { multitableClient } from '../multitable/api/client'
 import { useTemplateInstall } from '../multitable/composables/useTemplateInstall'
 import { categoryLabel } from '../multitable/utils/category-labels'
-import type { MetaTemplate } from '../multitable/types'
+import type { MetaBase, MetaTemplate } from '../multitable/types'
 import { AppRouteNames } from '../router/types'
 import { MtButton } from '../multitable/ui'
+import { useAuth } from '../composables/useAuth'
 
 const ALL_CATEGORY = '__all__'
 const HomeRouteName = AppRouteNames.MULTITABLE_HOME
@@ -109,6 +230,108 @@ const activeCategory = ref<string>(ALL_CATEGORY)
 const searchQuery = ref('')
 
 const { installingTemplateId, errorMessage: installError, installAndOpen } = useTemplateInstall()
+
+// 入口显隐镜像服务端的 canManageFields 门(管理员角色或 multitable:manage-schema),
+// 与 MultitableHomeView 的改名入口同一套写法。隐藏只是 UX,服务端才是执行者。
+const auth = useAuth()
+const canAuthorTemplates = computed(() => auth.hasPermission('multitable:manage-schema'))
+
+const showCreateForm = ref(false)
+const customTemplatesUnavailable = ref(false)
+const createBases = ref<MetaBase[]>([])
+const createBaseId = ref('')
+const createName = ref('')
+const createDescription = ref('')
+const createCategory = ref('')
+const creating = ref(false)
+// 默认不勾:模板携带表名与全部字段名,发布给整租户必须是一次显式动作(服务端默认也是 private)。
+const createShared = ref(false)
+const createError = ref('')
+const createNotice = ref('')
+const createWarnings = ref<string[]>([])
+
+const canSubmitCreate = computed(
+  () => !creating.value && createBaseId.value.trim().length > 0 && createName.value.trim().length > 0,
+)
+
+async function toggleCreateForm(): Promise<void> {
+  if (showCreateForm.value) {
+    closeCreateForm()
+    return
+  }
+  showCreateForm.value = true
+  createError.value = ''
+  try {
+    const data = await multitableClient.listBases()
+    createBases.value = data.bases ?? []
+  } catch (error) {
+    createError.value = error instanceof Error ? error.message : '加载 Base 列表失败'
+  }
+}
+
+function closeCreateForm(): void {
+  showCreateForm.value = false
+  createBaseId.value = ''
+  createName.value = ''
+  createDescription.value = ''
+  createCategory.value = ''
+  createShared.value = false
+  createError.value = ''
+  createWarnings.value = []
+}
+
+function onCreateBaseChange(): void {
+  // 名称留空时用所选 Base 的名字兜底,用户改过就不覆盖。
+  const base = createBases.value.find((item) => item.id === createBaseId.value)
+  if (base && !createName.value.trim()) createName.value = base.name
+}
+
+async function submitCreate(): Promise<void> {
+  if (!canSubmitCreate.value) return
+  creating.value = true
+  createError.value = ''
+  createNotice.value = ''
+  createWarnings.value = []
+  try {
+    const result = await multitableClient.createTemplateFromBase({
+      baseId: createBaseId.value.trim(),
+      name: createName.value.trim(),
+      description: createDescription.value.trim() || undefined,
+      category: createCategory.value.trim() || undefined,
+      visibility: createShared.value ? 'tenant' : 'private',
+    })
+    createWarnings.value = Array.isArray(result.warnings) ? result.warnings : []
+    // 可见性以**服务端返回的那份**为准(不是本地勾选框),免得前后端默认值不一致时骗人。
+    const shared = result.template.visibility === 'tenant'
+    createNotice.value = `已保存模板「${result.template.name}」(${shared ? '已共享给本租户' : '仅自己可见'})。`
+    createBaseId.value = ''
+    createName.value = ''
+    createDescription.value = ''
+    createCategory.value = ''
+    createShared.value = false
+    await loadTemplates({ force: true })
+  } catch (error) {
+    createError.value = error instanceof Error ? error.message : '保存模板失败'
+  } finally {
+    creating.value = false
+  }
+}
+
+async function onDelete(template: MetaTemplate): Promise<void> {
+  if (!template.custom) return
+  if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+    if (!window.confirm(`删除模板「${template.name}」?已用它创建的 Base 不受影响。`)) return
+  }
+  createError.value = ''
+  try {
+    await multitableClient.deleteTemplate(template.id)
+    createNotice.value = `已删除模板「${template.name}」。`
+    await loadTemplates({ force: true })
+  } catch (error) {
+    createError.value = error instanceof Error ? error.message : '删除模板失败'
+    showCreateForm.value = true
+  }
+}
 
 const categories = computed(() => {
   const counts = new Map<string, number>()
@@ -147,12 +370,13 @@ const visibleStats = computed(() => {
   return `匹配 ${shown} / ${total} 个模板`
 })
 
-async function loadTemplates(): Promise<void> {
+async function loadTemplates(opts?: { force?: boolean }): Promise<void> {
   loading.value = true
   errorMessage.value = ''
   try {
-    const data = await multitableClient.listTemplates()
+    const data = await multitableClient.listTemplates(opts?.force ? { force: true } : undefined)
     templates.value = data.templates ?? []
+    customTemplatesUnavailable.value = data.customTemplatesUnavailable === true
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '加载模板失败'
   } finally {
@@ -234,6 +458,59 @@ onMounted(() => {
 /* .multitable-templates__refresh: the hero refresh control is now <MtButton> (default ghost — sanctioned
    border drop, same family as batch-1/batch-3 refresh migrations). Bespoke resting/disabled CSS removed to
    avoid double-styling the MtButton root; class kept on the element for selector stability. */
+
+.multitable-templates__create-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 1rem;
+  background: #f8fafc;
+}
+
+.multitable-templates__create-hint {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: #475569;
+}
+
+.multitable-templates__create-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.multitable-templates__create-row label,
+.multitable-templates__create-desc {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+  color: #334155;
+  min-width: 200px;
+  flex: 1;
+}
+
+.multitable-templates__create-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.multitable-templates__create-share {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  color: #334155;
+}
+
+.multitable-templates__create-warnings {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.8125rem;
+  color: #b45309;
+}
 
 .multitable-templates__controls {
   display: flex;

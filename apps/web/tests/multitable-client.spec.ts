@@ -1106,6 +1106,62 @@ describe('MultitableApiClient', () => {
     expect(error.code).toBe('FORBIDDEN')
   })
 
+  it('deleteSheet DELETEs the sheet endpoint (no body) and unwraps { deleted }', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { deleted: 'sheet_1' },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.deleteSheet('sheet_1')
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/sheet_1')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('DELETE')
+    expect(init.body).toBeUndefined()
+    expect(result).toEqual({ deleted: 'sheet_1' })
+  })
+
+  it('deleteSheet URL-encodes the sheet id', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { deleted: 'a/b' } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+    await client.deleteSheet('a/b')
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/a%2Fb')
+  })
+
+  it('deleteSheet surfaces the coded 409 SHEET_PLUGIN_MANAGED refusal (code + message + status) so the caller can pick copy by code', async () => {
+    const message = 'This sheet is provisioned and owned by a plugin and cannot be deleted from the UI or the sheet API.'
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: { code: 'SHEET_PLUGIN_MANAGED', message },
+    }), { status: 409 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const error = await client.deleteSheet('sheet_1').catch((err) => err)
+
+    expect(error.name).toBe('MultitableApiError')
+    expect(error.status).toBe(409)
+    expect(error.code).toBe('SHEET_PLUGIN_MANAGED')
+    expect(error.message).toBe(message)
+  })
+
+  it('restoreSheet POSTs the restore endpoint and unwraps { restored, sheet } (API half only — no UI caller yet)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { restored: 'sheet_1', sheet: { id: 'sheet_1', baseId: 'base_1', name: 'Orders', description: null } },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await client.restoreSheet('sheet_1')
+
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/sheets/sheet_1/restore')
+    const init = fetchFn.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect(result.restored).toBe('sheet_1')
+    expect(result.sheet.id).toBe('sheet_1')
+  })
+
   it('renameBase PATCHes the base endpoint with the given name, unwraps the base, and invalidates the bases cache', async () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({
@@ -1190,5 +1246,70 @@ describe('MultitableApiClient', () => {
     expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/multitable/automation-executions/axe%20with%20space/retry')
     expect(error.code).toBe('NOT_RETRYABLE')
     expect(error.status).toBe(409)
+  })
+
+  // 「把 Base 存为模板」(09-10 测试反馈第 8 条)。组件级 spec 把整个 client mock 掉了,
+  // 只看得见「方法被调用时传了什么」——URL / method / body / 缓存作废这几条 wire 契约
+  // 只有在这里才钉得住(把路径改成 /api/multitable/TYPO-templates 时,这三条会红)。
+  it('createTemplateFromBase POSTs to /api/multitable/templates and invalidates the templates cache', async () => {
+    const template = { id: 'mtpl_1', name: 'Ops', description: '', category: 'Custom', icon: 'T', color: '#111', sheets: [], custom: true, visibility: 'private' }
+    const fetchFn = vi.fn()
+      // 1) 预热模板缓存
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [] } }), { status: 200 }))
+      // 2) 创建
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { template, warnings: ['w'] } }), { status: 201 }))
+      // 3) 缓存作废后的重新拉取
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [template] } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listTemplates()
+    const result = await client.createTemplateFromBase({ baseId: 'base_1', name: 'Ops', visibility: 'private' })
+
+    expect(fetchFn.mock.calls[1]?.[0]).toBe('/api/multitable/templates')
+    const init = fetchFn.mock.calls[1]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
+    // 精确 deep-equal:visibility 被吞掉(默认变成全租户可见)也要红
+    expect(JSON.parse(init.body as string)).toEqual({ baseId: 'base_1', name: 'Ops', visibility: 'private' })
+    expect(result.template.id).toBe('mtpl_1')
+    expect(result.warnings).toEqual(['w'])
+
+    // 缓存必须作废,否则模板中心刷不出刚建的模板
+    const after = await client.listTemplates()
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(after.templates[0]?.id).toBe('mtpl_1')
+  })
+
+  it('deleteTemplate DELETEs the encoded template id and invalidates the templates cache', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [{ id: 'mtpl with space' }] } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templateId: 'mtpl with space' } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: { templates: [] } }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await client.listTemplates()
+    await expect(client.deleteTemplate('mtpl with space')).resolves.toEqual({ templateId: 'mtpl with space' })
+
+    expect(fetchFn.mock.calls[1]?.[0]).toBe('/api/multitable/templates/mtpl%20with%20space')
+    expect((fetchFn.mock.calls[1]?.[1] as RequestInit).method).toBe('DELETE')
+
+    const after = await client.listTemplates()
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(after.templates).toEqual([])
+  })
+
+  it('listTemplates passes the customTemplatesUnavailable degradation flag through (cache hits included)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { templates: [{ id: 'project-tracker' }], customTemplatesUnavailable: true },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const first = await client.listTemplates()
+    expect(first.customTemplatesUnavailable).toBe(true)
+    // 缓存命中的那次也必须带着标志位,否则提示条会闪一下就消失
+    const cached = await client.listTemplates()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(cached.customTemplatesUnavailable).toBe(true)
   })
 })

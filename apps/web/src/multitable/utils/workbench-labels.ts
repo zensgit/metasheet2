@@ -59,6 +59,13 @@ export type WorkbenchLabelKey =
   // feat/multitable-rename: sheet/base rename failure toasts (server e.message takes priority —
   // these are only the generic fallback when the response carried no message).
   | 'toast.sheetRenameFailed' | 'toast.baseRenameFailed'
+  // Sheet delete (workbench onDeleteSheet): success toast + the generic failure fallback, plus the
+  // three CODED refusals the server can answer with — picked by `error.code`, never by status text:
+  //   409 SHEET_PLUGIN_MANAGED  → the sheet is provisioned by a plugin (deleting would break its ensure)
+  //   409 SHEET_SYSTEM_MANAGED  → server-owned system sheet (People directory / projections)
+  //   404 SHEET_DELETED         → already soft-deleted (stale list); restorable by an admin via the API
+  | 'toast.sheetDeleted' | 'toast.sheetDeleteFailed'
+  | 'toast.sheetPluginManaged' | 'toast.sheetSystemManaged' | 'toast.sheetAlreadyDeleted'
   | 'toast.importCancelled' | 'toast.importFailed'
   | 'toast.excelExportFailed' | 'toast.csvExportFailed' | 'toast.bulkDeleteFailed'
   | 'toast.workbenchInitFailed'
@@ -69,6 +76,8 @@ export type WorkbenchLabelKey =
   | 'confirm.buttonRun'
   // §3.6 MetaTemplateCard button (counts use the card* helpers below)
   | 'card.install' | 'card.installing'
+  // 自定义模板(把这张 Base 存为模板)——角标与删除入口
+  | 'card.customBadge' | 'card.delete' | 'card.privateBadge'
   // S2 template detail + dry-run (design 20260611 §2.2)
   | 'card.viewDetail'
   | 'detail.back' | 'detail.loading' | 'detail.notFound'
@@ -212,6 +221,20 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.baseCreateFailed': { en: 'Failed to create base', zh: '创建工作区失败' },
   'toast.sheetRenameFailed': { en: 'Failed to rename sheet', zh: '重命名数据表失败' },
   'toast.baseRenameFailed': { en: 'Failed to rename base', zh: '重命名工作区失败' },
+  'toast.sheetDeleted': { en: 'Sheet deleted', zh: '数据表已删除' },
+  'toast.sheetDeleteFailed': { en: 'Failed to delete sheet', zh: '删除数据表失败' },
+  'toast.sheetPluginManaged': {
+    en: 'This sheet is managed by a plugin and cannot be deleted from the UI.',
+    zh: '该表由插件托管，不能在界面删除。',
+  },
+  'toast.sheetSystemManaged': {
+    en: 'This sheet is managed by the system and cannot be deleted.',
+    zh: '该表由系统托管，不能删除。',
+  },
+  'toast.sheetAlreadyDeleted': {
+    en: 'This sheet was already deleted. An administrator can restore it through the API.',
+    zh: '该数据表已被删除，管理员可通过接口恢复。',
+  },
   'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
   'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
   'toast.excelExportFailed': { en: 'Excel export failed', zh: 'Excel 导出失败' },
@@ -242,6 +265,11 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
 
   'card.install': { en: 'Use template', zh: '使用模板' },
   'card.installing': { en: 'Installing...', zh: '创建中...' },
+
+  'card.customBadge': { en: 'Custom', zh: '自定义' },
+  'card.delete': { en: 'Delete', zh: '删除模板' },
+  // 私有模板(默认):只有建它的人看得见 —— 角标是为了让人知道同事看不到它。
+  'card.privateBadge': { en: 'Only you', zh: '仅自己可见' },
 
   'card.viewDetail': { en: 'View details', zh: '查看详情' },
   'detail.back': { en: '← Back to template center', zh: '← 返回模板中心' },
@@ -368,6 +396,30 @@ export function recordsDeleted(n: number, isZh: boolean): string {
 
 export function recordNotFound(recordId: string, isZh: boolean): string {
   return isZh ? `未找到记录：${recordId}` : `Record not found: ${recordId}`
+}
+
+// Sheet-delete confirm (workbench onDeleteSheet). Names the sheet the user is about to delete and
+// states the consequence honestly: records are hidden with the sheet (soft delete), and only an
+// administrator can bring it back through the API — there is no recycle-bin UI in this slice.
+export function sheetDeleteConfirm(sheetName: string, isZh: boolean): string {
+  return isZh
+    ? `删除数据表「${sheetName}」？记录会一并隐藏，可由管理员通过接口恢复。`
+    : `Delete sheet "${sheetName}"? Its records are hidden with it; an administrator can restore it through the API.`
+}
+
+// Sheet-delete failure copy, chosen by the server's error CODE (the codes are stable contracts;
+// the status alone cannot tell "plugin-managed" from a generic conflict). Unknown codes fall back to
+// the server's own message when it sent one, else the generic failure toast.
+export function sheetDeleteErrorMessage(
+  error: { code?: string; message?: string } | null | undefined,
+  isZh: boolean,
+): string {
+  switch (error?.code) {
+    case 'SHEET_PLUGIN_MANAGED': return workbenchLabel('toast.sheetPluginManaged', isZh)
+    case 'SHEET_SYSTEM_MANAGED': return workbenchLabel('toast.sheetSystemManaged', isZh)
+    case 'SHEET_DELETED': return workbenchLabel('toast.sheetAlreadyDeleted', isZh)
+    default: return error?.message || workbenchLabel('toast.sheetDeleteFailed', isZh)
+  }
 }
 
 // S2 dry-run conflicts: the server emits English messages plus a stable

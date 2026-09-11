@@ -39,6 +39,9 @@
           <div v-if="restoredDraft" class="meta-import__warning">
             <span>{{ l('import.recoveredDraft') }}</span>
           </div>
+          <div v-if="createFieldsDropped" class="meta-import__warning meta-import__create-dropped">
+            <span>{{ l('import.createFieldsDropped') }}</span>
+          </div>
           <div v-if="parseWarning" class="meta-import__warning">
             <span>{{ parseWarning }}</span>
           </div>
@@ -54,9 +57,20 @@
               <select class="meta-import__field-select" :value="fieldMapping[i] ?? ''" @change="fieldMapping[i] = ($event.target as HTMLSelectElement).value">
                 <option value="">{{ l('import.skip') }}</option>
                 <option v-for="f in importableFields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                <option v-if="canOfferCreateField(header)" :value="CREATE_FIELD_SENTINEL">{{ createFieldOption(plannedCreateFieldName(header), isZh) }}</option>
               </select>
             </div>
           </div>
+          <p v-if="createFieldRequests.length" class="meta-import__hint meta-import__create-summary">
+            {{ createFieldsPlanned(createFieldRequests.length, isZh) }}
+          </p>
+          <p v-if="skippedColumnCount > 0" class="meta-import__hint meta-import__skip-summary">
+            {{ columnsSkippedNoField(skippedColumnCount, isZh) }}
+          </p>
+          <p v-if="existingFieldSkippedColumnCount > 0" class="meta-import__hint meta-import__existing-skip-summary">
+            {{ columnsSkippedExistingField(existingFieldSkippedColumnCount, isZh) }}
+          </p>
+          <div v-if="createFieldsErrorText" class="meta-import__error meta-import__create-error">{{ createFieldsErrorText }}</div>
           <div v-if="parsedRows.length" class="meta-import__preview-table">
             <table>
               <thead><tr><th v-for="(h, i) in parsedHeaders" :key="i">{{ h }}</th></tr></thead>
@@ -178,9 +192,20 @@ import type { LinkedRecordSummary, MetaField } from '../types'
 import { buildImportedRecords, parseDelimitedText } from '../import/delimited'
 import type { ImportBuildFailure, ImportBuildResult, ImportFieldOverrides, ImportValueResolver } from '../import/delimited'
 import { XLSX_MAX_BYTES, XLSX_MAX_ROWS, mapXlsxColumnsToFields, parseXlsxBuffer } from '../import/xlsx-mapping'
+import {
+  CREATE_FIELD_SENTINEL,
+  createFieldPlaceholderId,
+  planCreateFieldNames,
+  type ImportCreateFieldRequest,
+  type ImportSubmitPayload,
+} from '../import/create-fields'
 import { isLinkField, isPersonField, linkActionLabel } from '../utils/link-fields'
 import {
   columnLabel,
+  columnsSkippedExistingField,
+  columnsSkippedNoField,
+  createFieldOption,
+  createFieldsPlanned,
   detectedRows,
   fieldNoLongerImportable,
   fileTooLarge,
@@ -240,12 +265,31 @@ const props = defineProps<{
   importing?: boolean
   result?: ImportResult | null
   fieldResolvers?: Record<string, ImportValueResolver>
+  /**
+   * Whether the CALLER may create fields on this sheet (workbench passes `caps.canManageFields`).
+   * This modal only offers/defaults the "create new field" mapping when it is true; the actual write
+   * is still gated in the workbench AND by the server's 403 on POST /api/multitable/fields.
+   */
+  canCreateFields?: boolean
+  /** Set by the caller when field creation failed — sends the modal back to mapping, no rows written. */
+  createFieldsError?: string | null
+  /** columnIndex → newly created field id; rebinds the sentinel so a re-import never re-creates it. */
+  createdFieldColumns?: Record<number, string> | null
+  /**
+   * EVERY field name that already exists on the target sheet — including the ones this modal can
+   * not map onto (formula/lookup/rollup, read-only, or not visible under field permissions), which `fields` has
+   * already been filtered past. Used ONLY to answer "is this header missing from the sheet?": with
+   * `fields` alone, a header matching a formula column looks missing and would DEFAULT to "create a
+   * new field", silently producing an `X (2)` shadow text column (export → re-import round trip).
+   * Names only, never values. Falls back to `fields` when the caller does not supply it.
+   */
+  existingFieldNames?: string[]
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'cancel-import'): void
-  (e: 'import', payload: ImportBuildResult): void
+  (e: 'import', payload: ImportSubmitPayload): void
   (e: 'update:dirty', dirty: boolean): void
 }>()
 
@@ -268,8 +312,110 @@ const manualOverrideSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const pickerTarget = ref<{ rowIndex: number; fieldId: string } | null>(null)
 const pickerVisible = ref(false)
 const restoredDraft = ref(false)
+const createFieldsDropped = ref(false)
 
-const hasMappedFields = computed(() => Object.values(fieldMapping.value).some((value) => value))
+const canCreateFields = computed(() => props.canCreateFields === true)
+const createFieldsErrorText = computed(() => props.createFieldsError ?? '')
+/**
+ * A sentinel only counts while the caller still holds manage-fields AND the header is non-empty.
+ *
+ * The manage-fields half is deliberately REDUNDANT with the `props.canCreateFields` watch below,
+ * which already rewrites every sentinel to '' the moment the capability is lost, and with
+ * `restoreImportDraft`, which degrades a restored sentinel the same way. No single-guard mutation
+ * can turn it red for that reason — it is kept as the fail-closed last line in case a future caller
+ * introduces a fourth way for a sentinel to coexist with a missing capability.
+ */
+function isActiveCreateColumn(columnIndex: number | string): boolean {
+  if (!canCreateFields.value) return false
+  if (fieldMapping.value[Number(columnIndex)] !== CREATE_FIELD_SENTINEL) return false
+  return (parsedHeaders.value[Number(columnIndex)] ?? '').trim().length > 0
+}
+function canOfferCreateField(header: string): boolean {
+  return canCreateFields.value && header.trim().length > 0
+}
+/**
+ * Names of every field that already exists on the sheet, NOT just the importable ones.
+ * `props.fields` is the import surface (workbench strips formula/lookup/rollup, readonly and
+ * permission-hidden fields before it gets here), so it can not answer "does the sheet already have
+ * a column called X?" — `existingFieldNames` can. Fall back to the import surface when the caller
+ * predates the prop; the write side (planCreateFieldNames) still de-duplicates either way.
+ */
+const existingFieldNameKeys = computed(() => {
+  const source = props.existingFieldNames ?? props.fields.map((field) => field.name)
+  const keys = new Set<string>()
+  for (const name of source) {
+    const key = String(name ?? '').trim().toLowerCase()
+    if (key) keys.add(key)
+  }
+  return keys
+})
+const importableFieldNameKeys = computed(() => {
+  const keys = new Set<string>()
+  for (const field of importableFields.value) {
+    const key = String(field.name ?? '').trim().toLowerCase()
+    if (key) keys.add(key)
+  }
+  return keys
+})
+/**
+ * True when the sheet already has a field with this header's name (case-insensitive) that this
+ * modal can NOT map onto — formula/lookup/rollup, readonly, or hidden by field permissions.
+ *
+ * The "and not importable" half matters: two columns that both normalize to one importable field
+ * are a different story (the matcher gives the field to the first and the second legitimately wants
+ * its own new column), so those must keep defaulting to create.
+ */
+function headerMatchesUnmappableField(header: string): boolean {
+  const key = header.trim().toLowerCase()
+  if (!key) return false
+  return existingFieldNameKeys.value.has(key) && !importableFieldNameKeys.value.has(key)
+}
+/**
+ * The option label must show the name that would ACTUALLY be created: when the header collides with
+ * an existing (unmappable) field the planner suffixes it to `X (2)`, and promising 「X」 there would
+ * be a lie. Same planner as the write side, so the two can not drift.
+ */
+function plannedCreateFieldName(header: string): string {
+  const plan = planCreateFieldNames({
+    requests: [{ header, columnIndex: 0 }],
+    existingNames: [...existingFieldNameKeys.value],
+  })
+  return plan.ok ? plan.names[0] : header.trim()
+}
+/**
+ * Columns skipped because the sheet ALREADY has a field of that name that this modal can not write
+ * into (formula/lookup/rollup, readonly, or hidden by field permissions). Reported separately from
+ * `skippedColumnCount` so "the sheet has no such column" and "the sheet has it but it is read-only"
+ * do not collapse into one misleading sentence.
+ */
+const existingFieldSkippedColumnCount = computed(() => parsedHeaders.value.filter((header, index) => {
+  if (!header.trim()) return false
+  const mapped = fieldMapping.value[index]
+  if (mapped && mapped !== CREATE_FIELD_SENTINEL) return false
+  if (mapped === CREATE_FIELD_SENTINEL && isActiveCreateColumn(index)) return false
+  return headerMatchesUnmappableField(header)
+}).length)
+const createFieldRequests = computed<ImportCreateFieldRequest[]>(() =>
+  Object.keys(fieldMapping.value)
+    .map((columnIndex) => Number(columnIndex))
+    .filter((columnIndex) => Number.isInteger(columnIndex) && isActiveCreateColumn(columnIndex))
+    .sort((a, b) => a - b)
+    .map((columnIndex) => ({ columnIndex, header: (parsedHeaders.value[columnIndex] ?? '').trim() })),
+)
+const skippedColumnCount = computed(() => parsedHeaders.value.filter((header, index) => {
+  if (!header.trim()) return false
+  // Counted by existingFieldSkippedColumnCount instead — different cause, different sentence.
+  if (headerMatchesUnmappableField(header)) return false
+  const mapped = fieldMapping.value[index]
+  if (!mapped) return true
+  return mapped === CREATE_FIELD_SENTINEL && !isActiveCreateColumn(index)
+}).length)
+
+const hasMappedFields = computed(() => Object.entries(fieldMapping.value).some(([columnIndex, value]) => {
+  if (!value) return false
+  if (value === CREATE_FIELD_SENTINEL) return isActiveCreateColumn(columnIndex)
+  return true
+}))
 function isImportReadOnlyField(field: MetaField): boolean {
   const property = field.property ?? {}
   return property.readonly === true || property.readOnly === true
@@ -345,6 +491,10 @@ const importDraftIssues = computed<ImportDraftIssue[]>(() => {
   const issues = new Map<string, ImportDraftIssue>()
   for (const [columnIndex, fieldId] of Object.entries(fieldMapping.value)) {
     if (!fieldId) continue
+    // A "create this column as a new field" sentinel is NOT a stale mapping: there is no field to
+    // look up yet. It is dropped elsewhere (restore / permission-loss) when it can no longer be
+    // honoured, so it must never raise a mapping-missing draft issue here.
+    if (fieldId === CREATE_FIELD_SENTINEL) continue
     const field = fieldsById.value.get(fieldId)
     const header = parsedHeaders.value[Number(columnIndex)] || columnLabel(Number(columnIndex), isZh.value)
     if (!field) {
@@ -462,9 +612,19 @@ function restoreImportDraft() {
     parsedRows.value = Array.isArray(snapshot.parsedRows)
       ? snapshot.parsedRows.map((row) => Array.isArray(row) ? row.map((cell) => typeof cell === 'string' ? cell : '') : [])
       : []
+    // Drafts persist the create-field sentinel, but permissions can change between sessions: when the
+    // caller no longer holds manage-fields the sentinel DEGRADES to skip (never to a silent create),
+    // and the modal says so.
+    const restoredMapping = Object.entries(snapshot.fieldMapping ?? {}).filter(([, fieldId]) => typeof fieldId === 'string')
+    const droppedCreateColumns = restoredMapping.filter(([, fieldId]) => fieldId === CREATE_FIELD_SENTINEL).length
     fieldMapping.value = Object.fromEntries(
-      Object.entries(snapshot.fieldMapping ?? {}).filter(([, fieldId]) => typeof fieldId === 'string'),
+      restoredMapping.map(([columnIndex, fieldId]) => (
+        fieldId === CREATE_FIELD_SENTINEL && !canCreateFields.value
+          ? [columnIndex, '']
+          : [columnIndex, fieldId]
+      )),
     ) as Record<number, string>
+    createFieldsDropped.value = droppedCreateColumns > 0 && !canCreateFields.value
     manualFieldOverrides.value = (snapshot.manualFieldOverrides && typeof snapshot.manualFieldOverrides === 'object')
       ? snapshot.manualFieldOverrides
       : {}
@@ -533,6 +693,40 @@ watch(() => props.result, (result) => {
   }
 })
 
+// Manage-fields revoked while the modal is open → every sentinel degrades to skip immediately.
+// Tightening only: this watch never turns a skip into a create.
+watch(() => props.canCreateFields, (canCreate) => {
+  if (canCreate) return
+  const entries = Object.entries(fieldMapping.value)
+  if (!entries.some(([, fieldId]) => fieldId === CREATE_FIELD_SENTINEL)) return
+  fieldMapping.value = Object.fromEntries(
+    entries.map(([columnIndex, fieldId]) => [columnIndex, fieldId === CREATE_FIELD_SENTINEL ? '' : fieldId]),
+  ) as Record<number, string>
+  createFieldsDropped.value = true
+})
+
+// Field creation failed in the caller: no records were written, so return to mapping instead of
+// leaving the modal spinning on the importing step (props.result stays null in that case).
+watch(() => props.createFieldsError, (message) => {
+  if (!message) return
+  if (step.value === 'importing' || step.value === 'result') step.value = 'preview'
+})
+
+// Fields were created: rebind those columns from the sentinel to the real field ids so a second
+// import attempt maps onto the new fields instead of creating duplicates.
+watch(() => props.createdFieldColumns, (created) => {
+  if (!created || !Object.keys(created).length) return
+  const next = { ...fieldMapping.value }
+  let changed = false
+  for (const [columnIndex, fieldId] of Object.entries(created)) {
+    if (typeof fieldId !== 'string' || !fieldId) continue
+    if (next[Number(columnIndex)] !== CREATE_FIELD_SENTINEL) continue
+    next[Number(columnIndex)] = fieldId
+    changed = true
+  }
+  if (changed) fieldMapping.value = next
+}, { deep: true })
+
 function parseAndPreview() {
   parseError.value = ''
   const parsed = parseDelimitedText(rawText.value)
@@ -548,13 +742,31 @@ function parseAndPreview() {
     return
   }
 
-  fieldMapping.value = {}
-  parsedHeaders.value.forEach((header, index) => {
-    const normalizedHeader = header.toLowerCase().trim()
-    const match = importableFields.value.find((field) => field.name.toLowerCase() === normalizedHeader)
-    if (match) fieldMapping.value[index] = match.id
-  })
+  // Paste and file paths now share ONE matcher (mapXlsxColumnsToFields): it trims both sides and
+  // refuses to map two headers onto the same field, which the old inline paste matcher did not.
+  fieldMapping.value = buildDefaultFieldMapping(parsedHeaders.value)
   step.value = 'preview'
+}
+
+/**
+ * Default column → field mapping: exact (case-insensitive, trimmed, de-duplicated) name match first;
+ * every remaining non-empty header defaults to "create a new text field" WHEN the caller holds
+ * manage-fields, otherwise to skip (the pre-existing behaviour).
+ */
+function buildDefaultFieldMapping(headers: string[]): Record<number, string> {
+  const mapping = { ...mapXlsxColumnsToFields(headers, importableFields.value).mapping }
+  headers.forEach((header, index) => {
+    if (mapping[index]) return
+    // "Missing from the sheet" is decided against EVERY existing field name, not just the mappable
+    // ones. A header matching a formula/readonly/hidden field is left on skip: defaulting it to
+    // create would build an `X (2)` shadow text column behind the user's back (the export →
+    // re-import round trip hits exactly this). The option stays in the dropdown for anyone who
+    // deliberately wants the extra column.
+    mapping[index] = canOfferCreateField(header) && !headerMatchesUnmappableField(header)
+      ? CREATE_FIELD_SENTINEL
+      : ''
+  })
+  return mapping
 }
 
 async function readAndSetText(file: File) {
@@ -594,7 +806,7 @@ async function readAndSetXlsx(file: File) {
     rawText.value = ''
     parsedHeaders.value = result.headers
     parsedRows.value = result.rows
-    fieldMapping.value = mapXlsxColumnsToFields(result.headers, importableFields.value).mapping
+    fieldMapping.value = buildDefaultFieldMapping(result.headers)
     if (result.truncated) {
       parseWarning.value = xlsxTruncated(parsedRows.value.length, XLSX_MAX_ROWS, isZh.value)
     }
@@ -627,10 +839,28 @@ watch([() => props.importing, () => props.result, () => props.visible], ([import
   if (result) step.value = 'result'
 }, { immediate: true })
 
+/**
+ * Mapping handed to `buildImportedRecords`: the sentinel is replaced by a per-column PLACEHOLDER key
+ * (`__create__:<columnIndex>`) that cannot collide with a real field id, so the raw cell text is
+ * carried through the build untouched. The workbench rewrites those keys to the ids of the fields it
+ * creates before any record is written. Sentinels that are no longer honourable become skip.
+ */
+function effectiveFieldMapping(): Record<number, string> {
+  const mapping: Record<number, string> = {}
+  for (const [columnIndex, fieldId] of Object.entries(fieldMapping.value)) {
+    if (fieldId !== CREATE_FIELD_SENTINEL) {
+      mapping[Number(columnIndex)] = fieldId
+      continue
+    }
+    mapping[Number(columnIndex)] = isActiveCreateColumn(columnIndex) ? createFieldPlaceholderId(Number(columnIndex)) : ''
+  }
+  return mapping
+}
+
 async function buildRecords(): Promise<ImportBuildResult> {
   return buildImportedRecords({
     parsedRows: parsedRows.value,
-    fieldMapping: fieldMapping.value,
+    fieldMapping: effectiveFieldMapping(),
     fields: props.fields,
     fieldResolvers: props.fieldResolvers,
     fieldOverrides: manualFieldOverrides.value,
@@ -720,6 +950,10 @@ function reconcileImportDraft() {
   const nextFieldMapping = { ...fieldMapping.value }
   for (const [columnIndex, fieldId] of Object.entries(nextFieldMapping)) {
     if (!fieldId || importableFieldIds.value.has(fieldId)) continue
+    // Keep live create-field sentinels: reconcile exists to drop mappings whose FIELD vanished, and
+    // a sentinel has no field yet. Without this guard reconcile would silently reset the column to
+    // "skip" and the import would drop that column's data.
+    if (fieldId === CREATE_FIELD_SENTINEL && isActiveCreateColumn(columnIndex)) continue
     delete nextFieldMapping[Number(columnIndex)]
   }
 
@@ -759,7 +993,7 @@ async function applyFixesAndRetry() {
   }, {})
   const rebuilt = await buildImportedRecords({
     parsedRows: manualRowIndexes.map((rowIndex) => [...(parsedRows.value[rowIndex] ?? [])]),
-    fieldMapping: fieldMapping.value,
+    fieldMapping: effectiveFieldMapping(),
     fields: props.fields,
     fieldResolvers: props.fieldResolvers,
     fieldOverrides: subsetOverrides,
@@ -834,7 +1068,12 @@ function emitImport(payload: ImportBuildResult) {
   pendingRecordCount.value = payload.records.length
   lastAttemptRecords.value = payload.records
   lastAttemptRowIndexes.value = payload.rowIndexes
-  emit('import', payload)
+  // Every emit path (first import, retry, apply-fixes) carries the CURRENT create requests: once the
+  // caller reports the created ids back via `createdFieldColumns` the sentinels are gone, so a retry
+  // can never create the same field twice.
+  const createFields = createFieldRequests.value
+  const submitPayload: ImportSubmitPayload = createFields.length ? { ...payload, createFields } : payload
+  emit('import', submitPayload)
 }
 
 function resetState() {
@@ -853,6 +1092,7 @@ function resetState() {
   parseError.value = ''
   parseWarning.value = ''
   restoredDraft.value = false
+  createFieldsDropped.value = false
 }
 
 onBeforeUnmount(() => {
@@ -914,4 +1154,8 @@ onBeforeUnmount(() => {
 .meta-import__fix-selected { font-size: 12px; color: #0f5ba7; }
 .meta-import__spinner { width: 32px; height: 32px; border: 3px solid #eee; border-top-color: #409eff; border-radius: 50%; animation: meta-import-spin 0.8s linear infinite; }
 @keyframes meta-import-spin { to { transform: rotate(360deg); } }
+/* Create-missing-fields summaries (appended; no existing rule changed). */
+.meta-import__create-summary { margin: 8px 0 0; color: #0f5ba7; }
+.meta-import__skip-summary { margin: 8px 0 0; }
+.meta-import__create-error { margin-top: 8px; }
 </style>

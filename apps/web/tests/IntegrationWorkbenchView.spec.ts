@@ -2616,6 +2616,9 @@ describe('IntegrationWorkbenchView', () => {
       if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === '/api/data-sources/pg-1/schema') {
+        // A listing that DID read columns (detail:'full' / adapters that never had an N+1 listing).
+        // The list-only default body — columns:[] + columnsLoaded:false + detail:'list' — is pinned
+        // by the "list-only schema body" test below; both shapes have to render correctly.
         return jsonResponse({
           tables: [{ name: 'items', schema: 'public', columns: [{ name: 'id' }, { name: 'name' }] }],
           views: [{ name: 'item_view', schema: 'reporting', columns: [{ name: 'id' }] }],
@@ -2709,6 +2712,79 @@ describe('IntegrationWorkbenchView', () => {
     expect(apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/integration/external-systems/ds_bridge_1/objects'))).toBe(true)
     const objectSelect = container.querySelector('[data-testid="source-object"]') as HTMLSelectElement
     expect(Array.from(objectSelect.options).map((option) => option.value)).toContain('public.items')
+  })
+
+  it('C2b: a list-only schema body shows NO column count — empty columns is never rendered as 「0 列」', async () => {
+    // GET /api/data-sources/:id/schema is list-only by default (the per-table fan-out timed out at
+    // nginx on the customer PLM, 2026-09-10 222 error.log: four times upstream timed out (10060)).
+    // The bridge object picker reads `columns` STRAIGHT off that listing, so without the
+    // columnsLoaded/detail check every table would claim 「0 列」 — a wrong answer ("this table has
+    // no fields"), not a slow one. Mutation probe: drop the columnsLoaded/detail branch in
+    // bridgeObjectColumnCount() and both assertions below go red.
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') {
+        return { ok: true, data: { items: [{ id: 'pg-1', name: 'Warehouse PG', type: 'postgres', connected: true }] } }
+      }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target', 'bidirectional'], supports: ['read', 'upsert'], advanced: false },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: true, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/data-sources/pg-1/schema') {
+        // Verbatim shape of the default backend body (MSSQL/PG/MySQL/Mongo list-only path).
+        return jsonResponse({
+          detail: 'list',
+          tables: [{ name: 'items', schema: 'public', columns: [], columnsLoaded: false }],
+          views: [{ name: 'item_view', schema: 'reporting', columns: [], columnsLoaded: false }],
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).checked = true
+    container.querySelector('[data-testid="show-advanced-connectors"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    const dsSelect = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
+    dsSelect.value = 'pg-1'
+    dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+
+    const objSelect = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
+    const labels = Array.from(objSelect.options).map((option) => option.textContent?.trim() ?? '')
+    // The objects are still listed by name...
+    expect(labels).toContain('表 · public.items')
+    expect(labels).toContain('视图 · reporting.item_view')
+    // ...but nothing claims a column count, least of all 「0 列」.
+    expect(labels.some((label) => label.includes('列'))).toBe(false)
+
+    objSelect.value = 'public.items'
+    objSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    const summary = container.querySelector('[data-testid="data-source-bridge-object-summary"]')?.textContent ?? ''
+    expect(summary).toContain('仅保存对象名')
+    expect(summary).not.toContain('0 列')
+    expect(summary).not.toContain('列 ·')
   })
 
   it('C2b: editing an existing bridge sends a PATCH of the picker fields — it never restates (or blanks) the stored config keys it does not render', async () => {
