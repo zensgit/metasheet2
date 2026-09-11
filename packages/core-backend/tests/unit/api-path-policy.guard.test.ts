@@ -46,6 +46,18 @@ const EXEMPTIONS: readonly { file: string; reason: string; allowed: readonly str
     allowed: ['/^\\/api'],
   },
   {
+    file: 'integration/oapi-integration-read-allowlist.ts',
+    reason:
+      'G44 — the same class of exemption as multitable/oapi-read-allowlist.ts above, for the integration ' +
+      '(data-factory) read surface. Every pattern is a fully anchored (^…$) SINGLE-ROUTE identity test ' +
+      '("is this exactly GET /api/integration/pipelines/:id?"), deliberately case-SENSITIVE so it can ' +
+      'only ever be narrower than the Express router; a miss falls through to the session gate ' +
+      '(fail-closed). The one question in that file that IS a path-policy question — "does this request ' +
+      'belong to the /api/integration subtree at all?" — does NOT re-implement anything: it calls the ' +
+      'shared apiPathHasPrefix. So this exemption covers route identity only.',
+    allowed: ['/^\\/api'],
+  },
+  {
     file: 'auth/jwt-middleware.ts',
     reason:
       'PUBLIC_FORM_SUBMIT_PATH — a fully anchored (^…$) single-route pattern for the public-form token ' +
