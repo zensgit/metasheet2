@@ -31,7 +31,7 @@ server {
   root /opt/metasheet/apps/web/dist;
   index index.html;
 
-  # 与 222 现网同形：server 级的 503 默认落到 JSON 命名 location。
+  # 与 222 现网同义(现网用 @maint 与 location /api/,此处命名不同、语义相同)：server 级的 503 默认落到 JSON 命名 location。
   error_page 503 @maintenance_json;
 
   location / {
@@ -49,7 +49,7 @@ server {
   # 最终文件路径 = root + URI = /opt/metasheet/ops/maintenance/maintenance.html
   #
   # **这个文件不在部署包里**：scripts/ops/multitable-onprem-package-build.sh 的
-  # INCLUDED_PATHS 只收 ops/nginx/multitable-onprem.conf.example，不收
+  # REQUIRED_PATHS(build.sh)/required(verify.sh) 只收 ops/nginx/multitable-onprem.conf.example，不收
   # ops/maintenance/maintenance.html。解包不会带出这个页面，必须**手工**从仓库
   # 复制过来，否则下面这条 try_files 就会兜底。
   #
@@ -66,7 +66,7 @@ server {
   }
 
   location /api {
-    # 与 222 现网同形：维护门是这个 location 的第一条规则，排在 proxy_pass 之前。
+    # 与 222 现网同义(现网用 @maint 与 location /api/,此处命名不同、语义相同)：维护门是这个 location 的第一条规则，排在 proxy_pass 之前。
     if (-f /opt/metasheet/output/maintenance.flag) {
       return 503;
     }
@@ -83,7 +83,7 @@ server {
 
   # 维护期 /api/* 的应答体。升级脚本自己的健康检查**不走这里**：它先直连后端
   # 127.0.0.1:<PORT>/health，通过后才删 flag、再探 /api/health —— 否则脚本会被
-  # 自己举起的这道门挡成 12 次 503（r29，2026-09-11 实际踩过，后端其实早就好了）。
+  # 协调方手工举起的这道门挡成 12 次 503（r29，2026-09-11 实际踩过，后端其实早就好了）。
   location @maintenance_json {
     default_type application/json;
     add_header Retry-After 90 always;

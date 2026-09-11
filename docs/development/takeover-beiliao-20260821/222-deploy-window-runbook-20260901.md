@@ -339,11 +339,11 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
    }
    ```
 
-仓库里的 `ops/nginx/multitable-onprem.conf.example` 已经补上同形的段落,外加 `location /` 也判 flag、503 落到 `<RootDir>/ops/maintenance/maintenance.html`(静态维护页,模板在仓库 `ops/maintenance/maintenance.html`)。**`location /` 那一段和维护页 222 现网没有**——上面三段才是 222 实际有的全部,所以 222 上 flag 举着时 `/` 仍然返回 200 的前端首页(见下面的验证小节)。**注意:改仓库里的例子对 222 现网零效果**,例子只是留档 + 给下一台新机器抄。现网要变,只能手工改 `nginx.conf`。
+仓库里的 `ops/nginx/multitable-onprem.conf.example` 已经补上同义的段落(命名 location 与尾斜杠写法与 222 现网略有不同,语义相同),外加 `location /` 也判 flag、503 落到 `<RootDir>/ops/maintenance/maintenance.html`(静态维护页,模板在仓库 `ops/maintenance/maintenance.html`)。**`location /` 那一段和维护页 222 现网没有**——上面三段才是 222 实际有的全部,所以 222 上 flag 举着时 `/` 仍然返回 200 的前端首页(见下面的验证小节)。**注意:改仓库里的例子对 222 现网零效果**,例子只是留档 + 给下一台新机器抄。现网要变,只能手工改 `nginx.conf`。
 
 **flag 路径为什么是 `output\maintenance.flag`。** 升级会把 `apps/web/dist`、`packages/core-backend/dist`、`packages/core-backend/migrations` 整体删掉重建(脚本参数 `-ReplaceDirs`)。flag 落在这三个目录里的任何位置,都会在升级中途被删掉——门在最需要它的几十秒里自己塌了。`output\` 不在替换清单里。脚本对此有静态断言:`-MaintenanceFlagPath` 落在任一 `ReplaceDirs` 下时,**开工前**就抛 `MAINTENANCE_FLAG_PATH_INSIDE_REPLACE_DIR` 拒绝启动(那时还没碰 pm2、没建备份目录)。维护页放 `ops/maintenance/` 同理。
 
-**健康探测的顺序(r29 的坑,2026-09-11)。** r29 上机时脚本报 `exit -1`,但后端其实早就起来了:脚本的健康检查走的是 nginx 的 `/api/health`,而它自己举着的 flag 正好让 nginx 对 `/api/*` 一律答 503——12 次重试全是 503,脚本判定升级失败。现在顺序改成:
+**健康探测的顺序(r29 的坑,2026-09-11)。** r29 上机时脚本报 `exit -1`,但后端其实早就起来了:脚本的健康检查走的是 nginx 的 `/api/health`,而协调方上机脚本手工举着的 flag 正好让 nginx 对 `/api/*` 一律答 503——12 次重试全是 503,脚本判定升级失败。现在顺序改成:
 
 1. **直连后端** `http://127.0.0.1:<PORT>/health`(PORT 从 `docker\app.env` 读,缺省 8900)——不经过 nginx,门挡不住它;
 2. 通过后**立刻删 flag**;
@@ -385,7 +385,7 @@ curl.exe -i http://127.0.0.1/api/health          # 期望:HTTP/1.1 200
 **新机器:按示例补齐 `location /` 门之后才成立的验证。** `ops/nginx/multitable-onprem.conf.example` 比 222 现网多两段(`location /` 的 flag 判断 + `location = /maintenance.html`)。两个前置都做完才有下面的期望:
 
 1. 把这两段同步进该机器的 `nginx.conf`,`nginx -t` 通过后以 SYSTEM 身份 reload;
-2. **手工**把仓库的 `ops/maintenance/maintenance.html` 复制到 `<RootDir>\ops\maintenance\maintenance.html`。这个文件**不在部署包里**(`scripts/ops/multitable-onprem-package-build.sh` 的 `INCLUDED_PATHS` 只收 `ops/nginx/multitable-onprem.conf.example`),解包不会带出来。
+2. **手工**把仓库的 `ops/maintenance/maintenance.html` 复制到 `<RootDir>\ops\maintenance\maintenance.html`。这个文件**不在部署包里**(`scripts/ops/multitable-onprem-package-build.sh` 的 `REQUIRED_PATHS(build.sh)/required(verify.sh)` 只收 `ops/nginx/multitable-onprem.conf.example`),解包不会带出来。
 
 ```powershell
 curl.exe -i http://127.0.0.1/                    # 期望:HTTP/1.1 503,body 是中文维护页

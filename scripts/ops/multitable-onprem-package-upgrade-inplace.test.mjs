@@ -347,7 +347,7 @@ test('the nginx example ships the maintenance gate, and both the flag and the ma
     assert.match(
       fs.readFileSync(runbookPath, 'utf8'),
       /\*\*手工\*\*把仓库的 `ops\/maintenance\/maintenance\.html` 复制到/,
-      'ops/maintenance/maintenance.html is not in the package INCLUDED_PATHS, so the runbook must tell the operator to copy it by hand',
+      'ops/maintenance/maintenance.html is not in the package REQUIRED_PATHS, so the runbook must tell the operator to copy it by hand',
     )
   }
 
