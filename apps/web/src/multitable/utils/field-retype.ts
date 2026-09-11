@@ -93,7 +93,7 @@ export function losslessRetypeTargets(sourceType: string | null | undefined, pro
  * `null` (core-backend/src/multitable/field-validation-engine.ts:76-80 →
  * record-service.ts:725-731 throws RecordValidationFailedError). The server does not
  * strip it either — `sanitizeFieldProperty` returns unknown keys as-is for text types
- * (multitable/field-codecs.ts:551) — so the FE must not send them.
+ * (multitable/field-codecs.ts:552) — so the FE must not send them.
  *
  * The catalogue below mirrors, one for one, the rule rows MetaFieldValidationPanel.vue
  * renders per panel type (`data-rule-type=` at :9/:32/:62/:92/:136/:165/:197): a rule

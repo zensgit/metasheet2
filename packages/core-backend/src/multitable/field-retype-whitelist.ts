@@ -13,6 +13,24 @@
  * `coerceBatch1Value` 对 string/number/select/date/longText 是恒等函数，拿它做预检会给
  * `text → number` 的 "abc" 盖零损失章，所以这里一个字都不复用它）。
  *
+ * 已知边界 —— 本刀只覆盖 HTTP 写口 `PATCH /api/multitable/fields/:fieldId`（univer-meta.ts 里
+ * 调 assertLosslessFieldRetype 的那一处）。meta_fields.type 还有第二条写口：插件 SDK 的
+ * `ensureFields`（multitable/provisioning.ts，`ON CONFLICT (id) DO UPDATE SET ... type = EXCLUDED.type`，
+ * 由 index.ts 的 `ensureObjectInScope` 转发 overwriteMode）。它**不过这道门**：
+ *   - overwriteMode='refuse'（默认，resolveEnsureFieldsOverwriteMode）——任何会改动既有字段的
+ *     descriptor 直接抛 MultitableEnsureFieldsRefusedError，改类型在默认配置下落不了地；
+ *   - 'observe' / 'overwrite'（后者要显式的环境变量字面量）——仍然能把 type 改成任意值，且
+ *     'overwrite' 连 per-field 预读都跳过。
+ * 也就是说「服务端权威」这句话在本 PR 的范围里等于「HTTP PATCH 这个写口权威 + ensureFields 默认
+ * fail-closed」，不等于「任何路径都不可能改类型」。把白名单接进 ensureFields 的 type-diff 分支是
+ * 另一刀（会改插件升级语义：插件自己声明的字段演进也要受这张表约束，需要先过插件侧的回归）。
+ * 反例侧的事实澄清：provisioning.ts 里只有 `patchObjectFieldProperty`（`UPDATE meta_fields SET
+ * property = $3::jsonb`）是纯改 property 的，ensureFields 不是。
+ * 第三条写口是配置回滚 `applyConfigRevert`（multitable/config-restore.ts，按 changed_keys 拼
+ * `UPDATE meta_fields SET type = $1 ...`）。它走的是 T9-W 设计锁那套自己的判据
+ * （isSupportedFieldRetypeRevert + 执行侧的 FIELD_TYPE_ERA_MISMATCH 时代守卫），只把字段改回它
+ * 曾经的类型，方向与本表相反；本刀一字不动它。
+ *
  * 作用域（务必与真值表 JSON 的 SCOPE 段一致）：本模块只回答「这一对算不算无损」。有一整类
  * 类型（formula/lookup/rollup/link/attachment/button/autoNumber + 系统戳）在改类型时要跑自己的
  * 副作用处理（autoNumber 序列、公式依赖、link 连接表、跨 base 墙……），它们由路由里既有的那几道

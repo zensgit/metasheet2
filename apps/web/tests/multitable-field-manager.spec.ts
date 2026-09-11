@@ -1821,10 +1821,14 @@ describe('LOSSLESS_RETYPE table shape', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // F8A: the BROWSER side of the shared truth table. The SAME file on disk drives
-  // packages/core-backend/tests/multitable-field-retype-revert-narrowing.test.ts
-  // against core-backend/src/multitable/field-retype-whitelist.ts — the copy that
-  // actually refuses the write. PRECISELY: changing ONE implementation without
+  // F8A: the BROWSER side of the shared truth table. The SAME file on disk drives the
+  // server side against core-backend/src/multitable/field-retype-whitelist.ts — the
+  // copy that actually refuses the write — from
+  // packages/core-backend/tests/integration/multitable-context.api.test.ts (the copy
+  // CI runs: plugin-tests.yml names that file on every pull_request) and, in more
+  // detail, from packages/core-backend/tests/multitable-field-retype-revert-narrowing.test.ts
+  // (no workflow names that one, so it is developer-machine only).
+  // PRECISELY: changing ONE implementation without
   // touching the fixture turns THAT SIDE'S OWN run red; changing the fixture turns
   // the OTHER side red too. (Not "one edit reddens the far side" — it does not.)
   // ---------------------------------------------------------------------------
