@@ -1340,6 +1340,21 @@ export default defineConfig({
       // allowlist entry there would force an s6a re-pin and a merge-serialisation race) — the same
       // precedent the sibling approval-realdb-* lanes above cite.
       'tests/integration/approval-list-scope-server-side.db.test.ts',
+      // P3-1 CSV export read-parity. Needs real PostgreSQL for the same reason its sibling above
+      // does: the assertions that matter are the ones only a real row can establish — that a row the
+      // list scope admits but `canReadApprovalInstance` refuses is absent from the CSV (with its
+      // positive control on the same instance), that the per-viewer record-link sentinel and the
+      // hidden-field redaction survive serialization, and that the org conjunct is inherited rather
+      // than re-derived. Excluded here so describeIfDatabase cannot skip-green it. The measurement
+      // that motivated this entry was taken BEFORE the exclusion existed and on an earlier revision
+      // of the suite: without the entry the no-DB config collected this file and reported every test
+      // SKIPPED while the run still exited 0. With the entry in place the no-DB config does not
+      // collect it at all (`No test files found`), which is the state this line ships — do not read
+      // the historical skip count as a description of the shipped artifact. Wired as a WHOLE
+      // FILE into the standalone .github/workflows/approval-realdb-export-csv.yml lane, which arms
+      // EXPECT_DB=1 so a missing DATABASE_URL reds that lane instead of skipping green.
+      // plugin-tests.yml is left byte-identical for the same s6a re-pin reason cited above.
+      'tests/integration/approval-export-csv.db.test.ts',
       // P1b round 3 item 6 — the approval-administrator CAPABILITY predicate
       // (`is_active = TRUE AND (is_admin = TRUE OR role = 'admin')`) executed against real
       // PostgreSQL, plus its route and its agreement with the list scope's admin arm on one seeded
