@@ -65,6 +65,53 @@ M5 证明同一个函数对豁免资源确实答 `false`,所以一旦有人把 `
 | 3 | **`/data-sources` 方向订正**:挡住的是导航链接,路由 meta 无 `permissions` 键 | 指南 §5-6 末尾 |
 | 4 | **「核对」段补前置**:改完必须重登(RBAC 缓存 60s,只有 admission 那半边失效缓存),且 `/me` 不是唯一裁判 | 指南 §5-6「核对」 |
 
+## 3.2 与在飞 #5650 的解耦(2026-09-11 追加)
+
+**问题。** `data_sources:*` 这张词表是**两支 PR 共有**的:#5650(G02 PR-1)新增迁移
+`zzzz20260912120000_add_data_source_sharing_permissions.ts` 种子化 `data_sources:use|rotate|share`,
+并把 `PUT /api/data-sources/:id/credentials` 的粗门从 `data_sources:write` 改成 `data_sources:rotate` 独占。
+本文件原先把「代码里被强制的 `data_sources` 码集合」与「本迁移种子集」写成**等式**,
+两支**无论谁先合**,组合态都会红;而 main 上没有合并前的组合态 CI,这个红会潜伏到
+下一支碰 `packages/core-backend/**` 的 PR 才冒出来,打在无关作者头上。「后合者改一行」也不成立
+(等式 + `assertSeedMatchesEnforcement` 两处都要动)。故在本支就把断言改成**双向子集**。
+
+**断言形状(改前 → 改后)**,`tests/unit/integration-permission-codes-seed.test.ts`:
+
+| | 改前 | 改后 |
+|---|---|---|
+| 词表 | `expect(enforced).toEqual([...DATA_SOURCES_PERMISSION_CODES].sort())`(等式) | 方向一 `:452` 本迁移六码**每一个**仍必须在路由文件里有门;方向二 `:456` 路由文件不得出现「本迁移六码 ∪ #5650 三码」之外的动作 |
+| 可授予性 | `assertSeedMatchesEnforcement(seeded, enforced)` | `assertSeedMatchesEnforcement(seeded, enforced, grantableElsewhere)` `:473`,第三参**默认空**,只能放宽「被强制的码」一侧,永远不能豁免「本迁移种下的码必须被强制」 |
+| 宽限来源 | — | `grantableElsewhere` = **写死的 #5650 三码** `:94`(该迁移在本支不存在,不能 import,故列出并注明来源 PR)**∩** `codesSeededByOtherMigrations()` `:126` 在 `src/db/migrations` 里真正扫到的 `INSERT INTO permissions` 码 |
+
+两个集合取**交**是关键:光有清单等于白送三个码,光有扫描等于任何迁移种下的任何码都能开门。
+交集使得「门先于种子上线」(G09 原 bug)在本支仍然红,而「三码之外的第七个动作」到哪儿都红。
+扫描按**内容**而非文件名判断(342 个迁移顺序读、逐个丢弃,26ms),所以 #5650 那支改名也不会误红。
+
+**本机组合态实跑**(内存/临时改写,跑完按备份逐字节还原,`git status` 只剩本次测试文件):
+
+| 状态 | 构造 | 结果 |
+|---|---|---|
+| A 单独态 | 本支原样 | `19 passed (19)` ✓ |
+| B 组合态 | `routes/data-sources.ts:716` 的门改成 `rbacGuard('data_sources','rotate')` **且**把 #5650 头(`10f79c95`)的迁移文件放进 `src/db/migrations/` | `19 passed (19)` ✓ |
+| A' 还原 | 还原上述两处 | `19 passed (19)` ✓ |
+| **基线反证** | **改前**的断言(`git show HEAD:…`)+ 组合态 B | `1 failed / 18 passed` ✗ —— 证明「不改就会红」不是推测 |
+
+| # | 变异 | 期望 | 实测 |
+|---|---|---|---|
+| M12 | 组合态 B,把 `data_sources:rotate` 从 `:94` 的清单里删掉 | 方向二抛 | 红 ✓ `1 failed / 18 passed`,`expected [ 'data_sources:rotate' ] to deeply equal []` |
+| M13 | 门已改成 `rotate`,但**不放**#5650 的迁移文件(门先于种子上线) | 对账抛 `enforced but never seeded` | 红 ✓ `1 failed / 18 passed`,`…ungrantable): data_sources:rotate` |
+| M14 | 单独态,从迁移 `VALUES` 删掉 `('data_sources:write', …)` 一行 | 种子侧仍有牙 | 红 ✓ `5 failed / 14 passed`,`…ungrantable): data_sources:write` |
+| M15 | 宽限只能单向:`assertSeedMatchesEnforcement(seeded, seeded∖{write}, ['data_sources:write'])` | 抛 `seeded but enforced nowhere` | 红 ✓(常驻用例 `:571-575`;同段 `:563-567` 钉住「空扫描 → rotate 仍红 / 有扫描 → 放行」这对夹子) |
+
+M12/M13 合起来钉住宽限的**两个夹子**:少了清单红、少了真实种子也红。M14 证明加宽没有把
+种子侧的牙拔掉。M1(逐个删六码)与 M2(`data_sources:truncate`)保持不变且仍红,M1 的断言
+另行**收紧**为「错误信息里必须点名被删的那个码」——否则组合态下一条泛泛的
+`/enforced but never seeded/` 可能被别的码满足,探针就空转了(`:544-550`)。
+
+**本节未做**:没有把两支真合到一起跑(不 push / 不 merge / 不 rebase);组合态是把 #5650 头的
+那一个迁移文件与那一行门改动搬到本支模拟出来的,#5650 自己的三个测试文件没跑;
+#5650 若在合并前改动三码拼写或改动别的门,本节结论需重跑。
+
 ## 4. 交给 CI / 未做
 
 - **真库重放**:本机无 PostgreSQL,`db:migrate` 跑两遍的真库幂等验证交给 CI 的 migration-replay 泳道。

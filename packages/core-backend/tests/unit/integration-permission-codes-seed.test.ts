@@ -17,10 +17,20 @@
  *   seeded codes        -> parsed out of the migration's own INSERT ... VALUES text
  *   data_sources gates  -> parsed out of `rbacGuard('data_sources', '<action>')` in the real route file
  *   integration gates   -> parsed out of the `'integration:<action>'` literals in the real plugin gate
+ *   sibling seeds       -> parsed out of EVERY OTHER migration in `src/db/migrations`, so a gate this
+ *                          migration does not seed is still required to be seeded by SOMETHING
  *   idempotency         -> the migration's OWN emitted SQL, replayed against a Postgres simulation
  *                          that models the `permissions` primary key
  *   admission posture   -> `derivePermissionNamespace` called live, so adding either resource to
  *                          NON_NAMESPACED_PERMISSION_RESOURCES reds this file
+ *
+ * THE RECONCILIATION IS A DOUBLE SUBSET, NOT AN EQUATION — on purpose. `data_sources` vocabulary is
+ * co-owned: PR #5650 (G02 PR-1) adds a second seed migration for `data_sources:use|rotate|share` and
+ * makes `PUT /api/data-sources/:id/credentials` a `rotate`-exclusive gate. Written as an equation,
+ * this file would red the moment the two branches sat on main together, in whichever order they
+ * landed, and the red would surface on some unrelated later PR rather than on either author's. So
+ * the enforcement direction reads "every enforced code is seeded by SOME migration in this repo"
+ * and the seed direction stays exact: every code THIS migration seeds must still be gated.
  *
  * Each guard is paired with an in-memory MUTATION PROBE that feeds the same assertion a deliberately
  * broken input and requires it to throw. A guard that cannot fail is not a guard, and these probes
@@ -55,15 +65,37 @@ import {
 import { derivePermissionNamespace, isNamespaceAdmissionControlledResource } from '../../src/rbac/namespace-admission'
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..')
+const MIGRATIONS_DIR = path.join(__dirname, '../../src/db/migrations')
 const MIGRATION_PATH = path.join(
-  __dirname,
-  '../../src/db/migrations/zzzz20260910120000_add_integration_permissions.ts',
+  MIGRATIONS_DIR,
+  'zzzz20260910120000_add_integration_permissions.ts',
 )
 const DATA_SOURCES_ROUTES_PATH = path.join(__dirname, '../../src/routes/data-sources.ts')
 const PLUGIN_GATE_PATH = path.join(
   REPO_ROOT,
   'plugins/plugin-integration-core/lib/http-routes.cjs',
 )
+
+/**
+ * `data_sources:*` vocabulary this migration deliberately does NOT own, listed so the two branches
+ * that create it can land in either order.
+ *
+ * PR #5650 (G02 PR-1) adds `src/db/migrations/zzzz20260912120000_add_data_source_sharing_permissions.ts`,
+ * which seeds these three and nothing else, and re-gates `PUT /api/data-sources/:id/credentials`
+ * from `data_sources:write` to `data_sources:rotate` (exclusively). That file does not exist on this
+ * branch, so these codes are WRITTEN OUT here rather than imported — an import would not compile,
+ * and importing across migrations would couple two independent seeds anyway.
+ *
+ * This list is a candidate set, not a licence. A code named here is accepted as grantable only when
+ * `codesSeededByOtherMigrations()` finds a migration in this repo that really INSERTs it, so the
+ * G09 failure mode — a gate shipped ahead of its seed row — still reds on this branch, and a gate
+ * action outside these three still reds everywhere. See `assertSeedMatchesEnforcement`.
+ */
+const DATA_SOURCES_CODES_SEEDED_BY_PR_5650 = [
+  'data_sources:use',
+  'data_sources:rotate',
+  'data_sources:share',
+] as const
 
 // ---------------------------------------------------------------------------
 // Parsers — every "expected" set below is derived from real source, never typed out.
@@ -76,6 +108,35 @@ function parseSeededCodes(migrationSource: string): string[] {
   const values = insert.split('ON CONFLICT')[0] ?? insert
   const codes = [...values.matchAll(/\(\s*'([a-z_]+:[a-z_]+)'\s*,/g)].map((match) => match[1])
   return [...new Set(codes)].sort()
+}
+
+/**
+ * Every permission code seeded by a migration in this package OTHER than this one, read with the
+ * same `INSERT INTO permissions ... VALUES` parser.
+ *
+ * FILENAME-AGNOSTIC ON PURPOSE. The question this answers is "does some migration in this repo
+ * create that row", not "is there a file with the name PR #5650 happened to use". Keying on a
+ * filename would hand back exactly the fragility this scan exists to remove: rename the sibling
+ * migration and the combined state goes red for a reason that has nothing to do with grantability.
+ *
+ * SCOPE: one folder, first `INSERT INTO permissions` per file, tuples that open with the code
+ * literal — the same shape every seed migration in this repo uses. A seed written some other way is
+ * invisible here, which fails CLOSED (the code is treated as unseeded and the reconciliation reds).
+ */
+async function codesSeededByOtherMigrations(): Promise<string[]> {
+  const self = path.basename(MIGRATION_PATH)
+  const names = (await fs.readdir(MIGRATIONS_DIR)).filter(
+    (name) => name.endsWith('.ts') && name !== self,
+  )
+
+  const codes = new Set<string>()
+  for (const name of names) {
+    // Sequential and discarded per file: 340+ migrations, ~3 MB, never all resident at once.
+    const source = await fs.readFile(path.join(MIGRATIONS_DIR, name), 'utf8')
+    if (!source.includes('INSERT INTO permissions')) continue
+    for (const code of parseSeededCodes(source)) codes.add(code)
+  }
+  return [...codes].sort()
 }
 
 /**
@@ -139,6 +200,13 @@ function assertUpGrantsNothing(migrationSource: string): void {
  * an enforced code that is ungrantable (the G09 bug), or a seeded code nothing enforces (dead
  * vocabulary that would quietly widen what an operator can hand out).
  *
+ * `grantableFromOtherMigrations` is the only softening, and it DEFAULTS TO EMPTY: a caller must
+ * hand over the codes it has evidence some other migration seeds (see `codesSeededByOtherMigrations`),
+ * and the softening is one-directional — it can make an ENFORCED code grantable, it can never excuse
+ * a code THIS migration seeds from being enforced. Passing a code here that no migration actually
+ * INSERTs would be the widening this suite exists to prevent, which is why every production call
+ * site below intersects the scan with a written-out list instead of trusting either one alone.
+ *
  * WHAT THIS DOES AND DOES NOT CATCH. It catches drift in gates that are written as quote-delimited
  * literals INSIDE the two files this suite reads (`src/routes/data-sources.ts` and
  * `plugins/plugin-integration-core/lib/http-routes.cjs`), in either `rbacGuard` call shape. It does
@@ -148,11 +216,16 @@ function assertUpGrantsNothing(migrationSource: string): void {
  * take a repo-wide sweep of every `rbacGuard` call site, which is deliberately out of scope for this
  * migration's suite; this is a tripwire on the known gates, not a proof about all gates.
  */
-function assertSeedMatchesEnforcement(seededCodes: string[], enforcedCodes: string[]): void {
+function assertSeedMatchesEnforcement(
+  seededCodes: string[],
+  enforcedCodes: string[],
+  grantableFromOtherMigrations: readonly string[] = [],
+): void {
   const seeded = [...new Set(seededCodes)].sort()
   const enforced = [...new Set(enforcedCodes)].sort()
+  const grantable = new Set([...seeded, ...grantableFromOtherMigrations])
 
-  const ungrantable = enforced.filter((code) => !seeded.includes(code))
+  const ungrantable = enforced.filter((code) => !grantable.has(code))
   if (ungrantable.length > 0) {
     throw new Error(
       `enforced but never seeded (FK to permissions(code) makes these ungrantable): ${ungrantable.join(', ')}`,
@@ -359,23 +432,49 @@ describe('integration/data_sources permission seed — vocabulary', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 2. Reconciliation: seeded set == enforced set, both derived from real source.
+// 2. Reconciliation: every enforced code is seeded somewhere, every code seeded HERE is enforced.
+//    Both sides derived from real source; `integration:*` stays an equation (single-owner namespace),
+//    `data_sources:*` is the co-owned one (see DATA_SOURCES_CODES_SEEDED_BY_PR_5650).
 // ---------------------------------------------------------------------------
 
 describe('integration/data_sources permission seed — reconciliation with the gates', () => {
-  it('seeds exactly the data_sources codes rbacGuard enforces in the route file', async () => {
-    const [migrationSource, routeSource] = await Promise.all([
+  it('every data_sources gate in the route file is grantable, and every code it seeds is still gated', async () => {
+    const [migrationSource, routeSource, otherMigrationCodes] = await Promise.all([
       readMigrationSource(),
       fs.readFile(DATA_SOURCES_ROUTES_PATH, 'utf8'),
+      codesSeededByOtherMigrations(),
     ])
 
     const enforced = parseRbacGuardCodes(routeSource, 'data_sources')
     // Proof the parser actually found the gates rather than silently matching nothing.
     expect(enforced.length).toBeGreaterThan(0)
-    expect(enforced).toEqual([...DATA_SOURCES_PERMISSION_CODES].sort())
 
+    // DIRECTION 1, exact: every code this migration seeds is still gated in the route file. Losing
+    // the last gate for one of them turns it into vocabulary an operator can hand out for nothing.
+    expect([...DATA_SOURCES_PERMISSION_CODES].filter((code) => !enforced.includes(code))).toEqual([])
+
+    // DIRECTION 2, bounded: the route file may gate the three codes PR #5650 seeds — and NOTHING
+    // else. A seventh action (`data_sources:purge`, …) still has to come through this file.
+    const knownVocabulary: readonly string[] = [
+      ...DATA_SOURCES_PERMISSION_CODES,
+      ...DATA_SOURCES_CODES_SEEDED_BY_PR_5650,
+    ]
+    expect(enforced.filter((code) => !knownVocabulary.includes(code))).toEqual([])
+
+    // Proof the sibling scan is not silently empty — it must see other domains' seed migrations, or
+    // the grantability check below would pass by finding nothing rather than by checking anything.
+    expect(otherMigrationCodes).toContain('attendance:read')
+    expect(otherMigrationCodes).toContain('elearning:read')
+    expect(otherMigrationCodes).not.toContain('data_sources:read') // only this migration seeds it
+
+    // Grantability: a gate is allowed to name a code this migration does not seed ONLY while some
+    // other migration in this repo actually INSERTs it. On this branch that intersection is empty
+    // and the check is an equality; once #5650 lands it covers `data_sources:rotate`.
+    const grantableElsewhere = otherMigrationCodes.filter((code) =>
+      (DATA_SOURCES_CODES_SEEDED_BY_PR_5650 as readonly string[]).includes(code),
+    )
     const seeded = parseSeededCodes(migrationSource).filter((code) => code.startsWith('data_sources:'))
-    expect(() => assertSeedMatchesEnforcement(seeded, enforced)).not.toThrow()
+    expect(() => assertSeedMatchesEnforcement(seeded, enforced, grantableElsewhere)).not.toThrow()
   })
 
   it('seeds exactly the integration codes the plugin gate compares against', async () => {
@@ -430,6 +529,9 @@ describe('integration/data_sources permission seed — reconciliation with the g
       ...parseRbacGuardCodes(await fs.readFile(DATA_SOURCES_ROUTES_PATH, 'utf8'), 'data_sources'),
       ...parseQuotedCodes(await fs.readFile(PLUGIN_GATE_PATH, 'utf8'), 'integration'),
     ]
+    const grantableElsewhere = (await codesSeededByOtherMigrations()).filter((code) =>
+      (DATA_SOURCES_CODES_SEEDED_BY_PR_5650 as readonly string[]).includes(code),
+    )
 
     // In-memory only: the file on disk is never touched.
     for (const dropped of INTEGRATION_SEED_PERMISSION_CODES) {
@@ -439,10 +541,13 @@ describe('integration/data_sources permission seed — reconciliation with the g
       )
       expect(parseSeededCodes(mutated), `${dropped} should be gone from the mutated source`)
         .not.toContain(dropped)
+      // The message must NAME the dropped code, not merely throw. With the sibling allowance in
+      // play a bare /enforced but never seeded/ could be satisfied by some unrelated code and this
+      // probe would stop proving anything about `dropped`.
       expect(
-        () => assertSeedMatchesEnforcement(parseSeededCodes(mutated), enforced),
+        () => assertSeedMatchesEnforcement(parseSeededCodes(mutated), enforced, grantableElsewhere),
         `dropping ${dropped} must be caught`,
-      ).toThrow(/enforced but never seeded/)
+      ).toThrow(new RegExp(`enforced but never seeded[\\s\\S]*${dropped}`))
     }
   })
 
@@ -451,6 +556,23 @@ describe('integration/data_sources permission seed — reconciliation with the g
     const enforcedPlusNewGate = [...seeded, 'data_sources:truncate']
     expect(() => assertSeedMatchesEnforcement(seeded, enforcedPlusNewGate))
       .toThrow(/data_sources:truncate/)
+
+    // Not even a code on the #5650 list gets in on the strength of the list: the allowance is the
+    // INTERSECTION of that list with what the sibling migrations really seed, so an empty scan
+    // (= the migration is not in this tree) still reds a `rotate` gate.
+    expect(() => assertSeedMatchesEnforcement(seeded, [...seeded, 'data_sources:rotate'], []))
+      .toThrow(/enforced but never seeded[\s\S]*data_sources:rotate/)
+    expect(() =>
+      assertSeedMatchesEnforcement(seeded, [...seeded, 'data_sources:rotate'], ['data_sources:rotate']),
+    ).not.toThrow()
+
+    // And the allowance never works the other way round: a sibling seed cannot excuse one of THIS
+    // migration's codes from being enforced.
+    expect(() =>
+      assertSeedMatchesEnforcement(seeded, seeded.filter((code) => code !== 'data_sources:write'), [
+        'data_sources:write',
+      ]),
+    ).toThrow(/seeded but enforced nowhere[\s\S]*data_sources:write/)
   })
 })
 
