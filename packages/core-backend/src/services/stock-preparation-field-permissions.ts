@@ -83,6 +83,17 @@
  *   · another pack's row inside the rectangle but on NO declared pair → left alone and returned in
  *     `governedByOtherPacks`. It is not stale, and it is not the operator's to clear.
  *
+ * ON THE ADDITIVE PATH (no rectangle) NONE of those refusals exist — there is no classification to
+ * raise them — and the upsert's ownership guard is the only thing between an entries-only call and
+ * a foreign row. What it does there is take the ELSE branch on all three columns: the row is left
+ * byte-identical AND THE DECLARATION DOES NOT LAND. That is this port's one fail-open direction and
+ * it is reported rather than assumed away: such a pair comes back in `skippedUnattributed` and is
+ * NOT counted in `applied` (which therefore counts declarations in force, not statements issued).
+ * Concretely: a pack-less row an operator RELAXED stays writable after an install that declared it
+ * denied — the caller learns which pairs from that array. The previous, unconditional binding of
+ * the bare legacy marker did deny it, at the price of silently reverting every other operator
+ * decision on such a row; the conservative reading is chosen, and its cost is named, not hidden.
+ *
  * THE DELETE is the invariant's only destructive arm, and it fires only on a row satisfying ALL of:
  *   0. `sheet_id = <the target sheet>` — `field_permissions` carries NO tenant and NO project
  *      column, so this single clause is the entire project/tenant bound of the statement. It is
@@ -397,8 +408,14 @@ export interface ApplyRoleWriteScopesInput {
 
 export interface ApplyRoleWriteScopesResult {
   /**
-   * Rows actually WRITTEN — `entries.length` MINUS the declared pairs an operator holds (those are
-   * skipped, never overwritten; see `operatorHeld`). Equals `entries.length` on the ordinary path.
+   * Declarations IN FORCE when this call returns — `entries.length` MINUS the declared pairs an
+   * operator holds (skipped, never overwritten; see `operatorHeld`) MINUS the pairs whose existing
+   * row this call was not entitled to rewrite (see `skippedUnattributed`). Equals `entries.length`
+   * on the ordinary path.
+   *
+   * It counts EFFECT, not statements issued. The upsert runs for every write entry, but on a row
+   * this port does not own all three DO UPDATE columns take the ELSE branch: the statement ran and
+   * the denial did NOT land. Counting those would be the fail-open reading of "applied".
    */
   applied: number
   /** The canonical (de-duplicated, order-preserving) entries actually written. */
@@ -420,6 +437,31 @@ export interface ApplyRoleWriteScopesResult {
    * Left standing, reported. `[]` without a region.
    */
   governedByOtherPacks: Array<RoleWriteScopeOwnedPair>
+  /**
+   * THE ONE FAIL-OPEN DIRECTION OF THE C0 FIX, MADE VISIBLE RATHER THAN CALLED FREE.
+   *
+   * Declared pairs whose EXISTING row this call was not entitled to rewrite — its `created_by` is
+   * not in the adoptable marker set: an operator's row, a `NULL`-provenance row, a sibling pack's
+   * row, or a pack-LESS legacy row when `legacyAdoptable` was not claimed. The upsert ran, all
+   * three DO UPDATE columns took the ELSE branch, and the row is byte-identical to what it was.
+   *
+   * THE COST IS NOT ZERO AND MUST NOT BE REPORTED AS ZERO: if that row is RELAXED
+   * (`read_only = false`), the denial this call declared is NOT in force afterwards. The previous,
+   * unconditional binding of the bare legacy marker DID force those rows to `read_only = true` —
+   * protective in exactly that one shape, and a silent revert of a human's decision in every other
+   * (it also re-stamped the row and re-showed a column an operator had hidden). This array is what
+   * replaces "the caller has no channel to learn it": such pairs are NAMED here, EXCLUDED from
+   * `applied`, and still listed in `entries` (they were addressed).
+   *
+   * `packId` is the owner read out of the row's marker: a pack id for a sibling pack's row,
+   * `null` for a pack-less legacy row and for every row this port did not author.
+   *
+   * Structurally EMPTY on the reconcile path — the classification refuses an unattributed legacy row
+   * and a sibling pack's declared pair before the first INSERT and drops operator-held declared
+   * pairs from the write set. It is the ADDITIVE path, the one every plugin reaches through the host
+   * capability, that can produce entries here.
+   */
+  skippedUnattributed: Array<RoleWriteScopeOwnedPair>
 }
 
 /** One row of the provenance census: a (column, role) pair THIS port previously denied. */
@@ -936,7 +978,14 @@ export class StockPreparationFieldPermissionsService {
     // all" is expressed. Short-circuiting it left the previous revision's rows in force and locked
     // those columns for every role the new revision names as their owner.
     if (entries.length === 0 && !reconcile) {
-      return { applied: 0, entries: [], removed: [], operatorHeld: [], governedByOtherPacks: [] }
+      return {
+        applied: 0,
+        entries: [],
+        removed: [],
+        operatorHeld: [],
+        governedByOtherPacks: [],
+        skippedUnattributed: [],
+      }
     }
 
     /** What this call stamps, and — with the legacy marker — the whole of what it may retire. */
@@ -1044,6 +1093,9 @@ export class StockPreparationFieldPermissionsService {
         ? [...new Set([createdBy, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY])]
         : [createdBy]
 
+      /** Pairs the guard REFUSED to rewrite — the fail-open direction, named instead of swallowed. */
+      const skippedUnattributed: RoleWriteScopeOwnedPair[] = []
+
       for (const entry of writeEntries) {
         // WRITE-ONLY SCOPE. `visible` is the hardcoded literal `true` in the VALUES list — it is not
         // a bind parameter and never can be a caller's choice. The five bind parameters are
@@ -1069,14 +1121,22 @@ export class StockPreparationFieldPermissionsService {
         // path is the one this port exposes to every plugin through the host capability, so the
         // conditional legacy arm is the ONLY thing standing between an entries-only call and an
         // operator's pre-stamping decision.
-        await query(
+        //
+        // `RETURNING created_by` IS THE WITNESS OF WHICH BRANCH RAN, taken from the statement rather
+        // than re-derived from a second read: after the upsert the row's marker is `$4` exactly when
+        // the THEN branch fired (a fresh INSERT, or an adoptable row rewritten), and anything else
+        // means all three columns took the ELSE branch — the declaration did NOT land. That is the
+        // only fail-open direction the conditional legacy arm introduced, so it is REPORTED
+        // (`skippedUnattributed`) and excluded from `applied` instead of being called free.
+        const upserted = await query(
           `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
            VALUES ($1, $2, 'role', $3, true, true, $4)
            ON CONFLICT (sheet_id, field_id, subject_type, subject_id)
            DO UPDATE SET
              visible = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN true ELSE field_permissions.visible END,
              read_only = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN true ELSE field_permissions.read_only END,
-             created_by = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN $4 ELSE field_permissions.created_by END`,
+             created_by = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN $4 ELSE field_permissions.created_by END
+           RETURNING created_by`,
           [
             sheetId,
             entry.fieldId,
@@ -1085,6 +1145,20 @@ export class StockPreparationFieldPermissionsService {
             adoptableCreatedBy,
           ],
         )
+        // A host whose driver returns no RETURNING row cannot witness anything, and INVENTING a
+        // "skipped" there would be a guess. The row is reported as landed only when the statement
+        // SAYS the marker is now this call's own — absent a row we stay silent rather than lie in
+        // either direction (the byte-level guarantee is the DB's, and is pinned by the real-DB spec).
+        const settledRow = (upserted && Array.isArray(upserted.rows) ? upserted.rows[0] : undefined) as
+          { created_by?: unknown } | undefined
+        const settledCreatedBy = settledRow ? settledRow.created_by : undefined
+        if (settledRow !== undefined && settledCreatedBy !== createdBy) {
+          skippedUnattributed.push({
+            fieldId: entry.fieldId,
+            roleId: entry.roleId,
+            packId: parseStockPreparationFieldPermissionCreatedBy(settledCreatedBy).packId,
+          })
+        }
       }
 
       // THE SCOPED RECONCILE. Same transaction as the upserts above, so there is no instant at which
@@ -1160,7 +1234,9 @@ export class StockPreparationFieldPermissionsService {
       }
 
       return {
-        applied: writeEntries.length,
+        // EFFECT, not statements issued: a pair whose row took the ELSE branch is named in
+        // `skippedUnattributed` and is NOT counted as applied.
+        applied: writeEntries.length - skippedUnattributed.length,
         entries: writeEntries,
         removed,
         operatorHeld: classification
@@ -1171,6 +1247,7 @@ export class StockPreparationFieldPermissionsService {
         governedByOtherPacks: classification
           ? classification.governedByOtherPacks.map((row) => ({ ...row }))
           : [],
+        skippedUnattributed,
       }
     })
   }

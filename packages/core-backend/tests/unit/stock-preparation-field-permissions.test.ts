@@ -290,7 +290,14 @@ describe('applyRoleWriteScopes — writes one role-scoped, read-only, provenance
     const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: [] })
     // `removed: []` and NOT null: the empty-entry path is a TOTAL no-op that runs no delete, which
     // is a different (and stronger) statement than "a reconcile ran and retired nothing".
-    expect(result).toEqual({ applied: 0, entries: [], removed: [], operatorHeld: [], governedByOtherPacks: [] })
+    expect(result).toEqual({
+      applied: 0,
+      entries: [],
+      removed: [],
+      operatorHeld: [],
+      governedByOtherPacks: [],
+      skippedUnattributed: [],
+    })
     expect(fake.transactions).toBe(0)
     expect(fake.calls).toHaveLength(0)
   })
@@ -1169,14 +1176,14 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
         + ' DO UPDATE SET'
         + ' visible = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN true ELSE field_permissions.visible END,'
         + ' read_only = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN true ELSE field_permissions.read_only END,'
-        + ' created_by = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN $4 ELSE field_permissions.created_by END',
+        + ' created_by = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN $4 ELSE field_permissions.created_by END' + ' RETURNING created_by',
       "INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)"
         + " VALUES ($1, $2, 'role', $3, true, true, $4)"
         + ' ON CONFLICT (sheet_id, field_id, subject_type, subject_id)'
         + ' DO UPDATE SET'
         + ' visible = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN true ELSE field_permissions.visible END,'
         + ' read_only = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN true ELSE field_permissions.read_only END,'
-        + ' created_by = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN $4 ELSE field_permissions.created_by END',
+        + ' created_by = CASE WHEN field_permissions.created_by = ANY($5::text[]) THEN $4 ELSE field_permissions.created_by END' + ' RETURNING created_by',
     ])
     // (2) THE BOUND PARAMETERS, in order. `$5` is the ADOPTABLE MARKER SET, and for a caller that
     //     names no pack it holds exactly one value — the bare marker, which is also what this call
@@ -1198,10 +1205,11 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     ])
     expect(fake.transactions).toBe(1)
 
-    // (3) THE RESULT. `applied` and `entries` are unchanged; THREE keys are new, all empty, because
-    //     absent a region nothing was classified, no DELETE was issued and no pair was skipped.
+    // (3) THE RESULT. `applied` and `entries` are unchanged; FOUR keys are new, all empty, because
+    //     absent a region nothing was classified, no DELETE was issued, and every row this call
+    //     addressed came back carrying this caller's own marker (nothing was left unattributed).
     expect(Object.keys(result).sort()).toEqual([
-      'applied', 'entries', 'governedByOtherPacks', 'operatorHeld', 'removed',
+      'applied', 'entries', 'governedByOtherPacks', 'operatorHeld', 'removed', 'skippedUnattributed',
     ])
     expect({ applied: result.applied, entries: result.entries }).toEqual({
       applied: 2,
@@ -1213,6 +1221,7 @@ describe('6. the scoped reconcile — a revision that moves a column between dep
     expect(result.removed).toEqual([])
     expect(result.operatorHeld).toEqual([])
     expect(result.governedByOtherPacks).toEqual([])
+    expect(result.skippedUnattributed).toEqual([])
   })
 
   /**
@@ -1283,6 +1292,7 @@ function createDecodingTablePool(seed: TableRow[] = []): {
       const [sheetId, fieldId, subjectId, createdBy] = params as string[]
       const existing = rows.find((row) => row.sheet_id === sheetId
         && row.field_id === fieldId && row.subject_type === 'role' && row.subject_id === subjectId)
+      let settled: TableRow
       if (existing) {
         // THE CONFLICT ARM, decoded from the statement rather than assumed. ALL THREE columns are
         // guarded by the same CASE, so all three are decoded the same way: an unconditional
@@ -1292,8 +1302,9 @@ function createDecodingTablePool(seed: TableRow[] = []): {
         if (resolveUpsertColumn(sql, 'visible', owned)) existing.visible = true
         if (resolveUpsertColumn(sql, 'read_only', owned)) existing.read_only = true
         existing.created_by = resolveUpsertCreatedBy(sql, params, existing.created_by, createdBy)
+        settled = existing
       } else {
-        rows.push({
+        settled = {
           sheet_id: sheetId,
           field_id: fieldId,
           subject_type: 'role',
@@ -1301,9 +1312,24 @@ function createDecodingTablePool(seed: TableRow[] = []): {
           visible: true,
           read_only: true,
           created_by: createdBy,
-        })
+        }
+        rows.push(settled)
       }
-      return { rows: [], rowCount: 1 }
+      // RETURNING IS DECODED TOO, from the statement's own projection list and from the row AFTER
+      // the CASEs ran — never from what the caller asked to write. A statement with no RETURNING
+      // clause answers with no row at all, so "the port learned which branch fired" can only ever be
+      // true because the SQL says so (drop `RETURNING created_by` and the skip report goes silent,
+      // which is what the mutation witness on this file checks).
+      const insertReturning = (sql.match(/RETURNING\s+([\w,\s]+)/) ?? [, ''])[1]
+        .split(',').map((token) => token.trim()).filter(Boolean)
+      return {
+        rows: insertReturning.length > 0
+          ? [Object.fromEntries(insertReturning.map((column) => [
+            column, (settled as unknown as Record<string, unknown>)[column],
+          ]))]
+          : [],
+        rowCount: 1,
+      }
     }
     if (sql.includes('DELETE FROM field_permissions')) {
       deletes.push({ sql, params })
@@ -1532,7 +1558,14 @@ describe('7-RC1. a declaration with a region but NO entries still reconciles', (
 
     const result = await service.applyRoleWriteScopes({ sheetId: SHEET, entries: [] })
 
-    expect(result).toEqual({ applied: 0, entries: [], removed: [], operatorHeld: [], governedByOtherPacks: [] })
+    expect(result).toEqual({
+      applied: 0,
+      entries: [],
+      removed: [],
+      operatorHeld: [],
+      governedByOtherPacks: [],
+      skippedUnattributed: [],
+    })
     expect(fake.deletes).toHaveLength(0)
     expect(fake.rows).toHaveLength(1)
   })
@@ -1838,6 +1871,10 @@ describe('7-RC7. falsy reconcile is absent, not malformed', () => {
         // absent: an additive call decided nothing about anybody's rows, and says so.
         operatorHeld: [],
         governedByOtherPacks: [],
+        // Empty because this fake's upsert answers with no RETURNING row at all — "no witness" is
+        // reported as nothing skipped, never as a guess in either direction. The table-modelling
+        // fake below is where the witness is actually read.
+        skippedUnattributed: [],
       })
       expect(fake.calls.filter((call) => /DELETE/i.test(call.sql))).toHaveLength(0)
       // …and the additive path issues no classification SELECT either — the header's
@@ -1916,12 +1953,125 @@ describe('7-RC8. C0/P2 — an install never rewrites a pack-less row it was not 
       // …and the reason is in the BIND, not in a habit: the bare marker is not in the set at all.
       expect(fake.inserts[0].params[4]).toEqual([markerFor(PACK_A)])
       expect(result.removed).toEqual([])
-      // `applied` still counts the DECLARED pair rather than the rows whose bytes changed. An
-      // additive call classifies nothing and has no channel to report "left alone" through, so this
-      // is pinned as the KNOWN residual imprecision instead of being discovered later: an additive
-      // install's own count over-reports by the number of unclaimable legacy pairs it re-declared.
-      expect(result.applied).toBe(1)
+      // ═══ AND THE CALLER IS TOLD. ═══
+      //
+      // This is the half the first revision of this fix got wrong by calling the conservative
+      // reading "free". Leaving the row alone is right, but it is NOT costless: the denial this
+      // call declared did not land, and `applied = 1` + `removed = []` gave the installer no way
+      // to learn that. The pair is now NAMED (`skippedUnattributed`) and excluded from `applied`,
+      // which counts declarations IN FORCE rather than statements issued.
+      expect(result.skippedUnattributed).toEqual([
+        { fieldId: PAIR.fieldId, roleId: PAIR.roleId, packId: null },
+      ])
+      expect(result.applied).toBe(0)
+      // The pair is still listed in `entries`: it WAS addressed. "Addressed" and "in force" are
+      // different facts and are reported as different fields rather than averaged into one number.
+      expect(result.entries).toEqual([PAIR])
     }
+  })
+
+  /**
+   * ═══ THE FAIL-OPEN DIRECTION, DEMONSTRATED THROUGH THE REAL ENFORCEMENT CHAIN. ═══
+   *
+   * The shape that matters is the one an operator RELAXED without hiding: `visible = true`,
+   * `read_only = false`, bare marker. The old unconditional binding forced it back to
+   * `read_only = true`, so the declaration DID take effect there — that is the one case where the
+   * conservative fix gives something up, and it is asserted here rather than described.
+   *
+   * The row is fed through the REAL `loadFieldPermissionScopeMap` → `deriveFieldPermissions` →
+   * `isFieldWriteForbidden` chain, so "still writable" is the platform's own answer, not a reading
+   * of the table. The channel that makes this survivable is `skippedUnattributed`: the installer
+   * can say WHICH (column, role) it declared and did not get.
+   */
+  it('ADDITIVE + no proof over an operator-RELAXED row: still writable, and SAID so', async () => {
+    const relaxed = legacyRow(PAIR.fieldId, PAIR.roleId, { visible: true, read_only: false })
+    const fake = createDecodingTablePool([relaxed])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [PAIR],
+      packId: PACK_A,
+    })
+
+    expect(fake.rows).toEqual([relaxed])
+    expect(result.applied).toBe(0)
+    expect(result.skippedUnattributed).toEqual([
+      { fieldId: PAIR.fieldId, roleId: PAIR.roleId, packId: null },
+    ])
+
+    // THE CONSEQUENCE, through the platform's own gate: 采购 can still write the column. This is the
+    // price of the conservative reading and it is pinned so nobody can call it zero again.
+    const scopeMap: Map<string, FieldPermissionScope> = await loadFieldPermissionScopeMap(
+      fieldPermissionQueryFn(fake.rows, { user_caigou: [ROLE_PURCHASING] }),
+      SHEET,
+      'user_caigou',
+    )
+    const perms = deriveFieldPermissions(FIELDS, CAPABILITIES, { fieldScopeMap: scopeMap })
+    expect(isFieldWriteForbidden(perms[PAIR.fieldId]), 'the declared denial did NOT land').toBe(false)
+    // …and READ is untouched too: the operator had not hidden this one, and nothing here hides it.
+    expect(perms[PAIR.fieldId].visible).not.toBe(false)
+  })
+
+  /**
+   * The OTHER two unclaimable shapes report the same way, and a sibling pack's row reports WHOSE it
+   * is — `packId` is read out of the row's marker, never out of the caller's request.
+   */
+  it('an operator row and a SIBLING pack row are each named, with the owner the row carries', async () => {
+    const fake = createDecodingTablePool([
+      legacyRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, {
+        read_only: false,
+        created_by: operatorFieldPermissionCreatedBy('u_admin'),
+      }),
+      legacyRow(F_PURCHASE_REPLY, ROLE_WAREHOUSE, {
+        read_only: false,
+        created_by: markerFor(PACK_B),
+      }),
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [
+        { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING },
+        { fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE },
+      ],
+      packId: PACK_A,
+    })
+
+    expect(result.skippedUnattributed).toEqual([
+      { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING, packId: null },
+      { fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE, packId: PACK_B },
+    ])
+    expect(result.applied).toBe(0)
+  })
+
+  /**
+   * THE POSITIVE CONTROL FOR THE COUNT — a pair this call really did install is counted and is NOT
+   * named as skipped, so `applied = 0` above is a fact about ownership and not about the code
+   * having stopped installing anything.
+   */
+  it('a FRESH pair and an own-pack pair both count as applied and are never named as skipped', async () => {
+    const fake = createDecodingTablePool([
+      legacyRow(F_WAREHOUSE_DATE, ROLE_PURCHASING, {
+        visible: false,
+        read_only: false,
+        created_by: markerFor(PACK_A),
+      }),
+    ])
+    const service = new StockPreparationFieldPermissionsService({ pool: fake.pool })
+
+    const result = await service.applyRoleWriteScopes({
+      sheetId: SHEET,
+      entries: [
+        { fieldId: F_WAREHOUSE_DATE, roleId: ROLE_PURCHASING }, // this pack's own row
+        { fieldId: F_PURCHASE_REPLY, roleId: ROLE_WAREHOUSE }, // no row at all yet
+      ],
+      packId: PACK_A,
+    })
+
+    expect(result.applied).toBe(2)
+    expect(result.skippedUnattributed).toEqual([])
   })
 
   /**
@@ -2308,6 +2458,13 @@ describe('9. classifyRoleWriteScopeRows — each projection holds exactly what i
       // And the human's row is byte-identical: hidden, writable, unattributed to this plugin.
       const held = fake.rows.find((r) => r.field_id === F_WAREHOUSE_DATE)!
       expect(held).toMatchObject({ visible: false, read_only: false, created_by: createdBy })
+      // TWO CHANNELS, NOT ONE, AND THEY DO NOT OVERLAP. A pair dropped by the classification is
+      // `operatorHeld` — a DECISION this call deferred to. `skippedUnattributed` is the other
+      // thing: a pair the call did address and whose row the guard then refused to rewrite. The
+      // reconcile path can only ever produce the first, because an unattributed legacy row or a
+      // sibling pack's declared pair refuses the whole call before the first INSERT. That claim is
+      // asserted here rather than reasoned about in the doc comment.
+      expect(result.skippedUnattributed).toEqual([])
     }
   })
 

@@ -1284,9 +1284,18 @@ export interface PluginServices {
       packId?: string
       reconcile?: { fieldIds: readonly string[]; roleIds: readonly string[] } | null | false
       /**
-       * "I can PROVE this pack is the only pack ever installed on this sheet." Only then may the
-       * reconcile adopt or retire the pack-LESS legacy rows in its rectangle. Default false, which
-       * makes such rows unattributed and REFUSES the call.
+       * "I can PROVE this pack is the only pack ever installed on this sheet." Only then may this
+       * call adopt or retire the pack-LESS legacy rows it addresses. Default false.
+       *
+       * IT BINDS BOTH PATHS, and they FAIL DIFFERENTLY — the difference is the whole of what a
+       * caller must plan for:
+       *  · WITH `reconcile`: an unattributed pack-less row inside the rectangle REFUSES the call
+       *    (`LEGACY_UNATTRIBUTED`), before a single row is written.
+       *  · ENTRIES-ONLY (no `reconcile`): there is no refusal. The upsert's ownership guard simply
+       *    takes the ELSE branch on all three columns, so such a row keeps its `visible`,
+       *    `read_only` and `created_by` exactly as found — including an operator's earlier
+       *    decision. The declaration does NOT land for that pair; it is named in
+       *    `skippedUnattributed` and excluded from `applied` rather than silently counted.
        */
       legacyAdoptable?: boolean
     }): Promise<{
@@ -1297,6 +1306,14 @@ export interface PluginServices {
       operatorHeld?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
       /** Another pack's rows in the region on undeclared pairs: left standing, reported. */
       governedByOtherPacks?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+      /**
+       * Declared pairs whose EXISTING row this call was not entitled to rewrite (an operator's row,
+       * a NULL-provenance row, a sibling pack's row, or a pack-less legacy row without
+       * `legacyAdoptable`). The row is byte-identical to what it was, and — if it was RELAXED —
+       * THE DENIAL THIS CALL DECLARED IS NOT IN FORCE. Excluded from `applied`. OPTIONAL: an older
+       * host omits it, which a consumer must read as "not checked", never as "nothing was skipped".
+       */
+      skippedUnattributed?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
     }>
     /**
      * THE REHEARSAL OF THE INVARIANT — the same classification the write path runs under its row

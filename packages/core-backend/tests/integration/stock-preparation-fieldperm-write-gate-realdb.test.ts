@@ -756,12 +756,21 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
    * really leaves the row's own `visible`/`read_only`/`created_by` bytes alone, and whether the
    * marker set really excludes the bare legacy marker when adoption was not proven.
    *
-   * The row seeded here is the one the field actually carries: this plugin's BARE marker, with an
-   * operator's pre-stamping decision layered on top (`visible = false` — they HID the column;
-   * `read_only = false` — they RELAXED the denial). Before this fix the bare marker was bound to the
-   * guard unconditionally, so an entries-only install put both dimensions back to true and
-   * re-stamped the row with its own pack id — reverting a human's decision, counting it in
-   * `applied`, and reporting it in nothing at all.
+   * TWO rows are seeded, both carrying this plugin's BARE marker with an operator's pre-stamping
+   * decision layered on top, because the two shapes have DIFFERENT consequences at the write gate
+   * and conflating them is how "no protection is lost" was asserted without being true:
+   *   · RC_MOVING — `visible = true, read_only = false`: the operator RELAXED the denial. This is
+   *     the ONE shape where the conservative fix gives something up: the denial this install
+   *     declares does NOT come into force and the column stays writable (asserted below: 200).
+   *   · RC_STABLE — `visible = false, read_only = false`: the operator HID the column. Hidden is
+   *     itself unwritable at the gate (`isFieldWriteForbidden`: `!perm || visible === false ||
+   *     readOnly === true`), so the patch is 403 either way. What this fix protects THERE is the
+   *     operator's two dimensions and the row's provenance — not its writability.
+   *
+   * Before this fix the bare marker was bound to the guard unconditionally, so an entries-only
+   * install put both dimensions back to true and re-stamped both rows with its own pack id —
+   * un-hiding a column a human hid, reverting a relaxation, counting both in `applied`, and
+   * reporting them in nothing at all.
    */
   test('C0 real-DB: an ADDITIVE install leaves an unclaimable pack-less row byte-identical', async () => {
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [RC_SHEET])
@@ -769,43 +778,76 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
 
     await q(
       `INSERT INTO field_permissions(sheet_id, field_id, subject_type, subject_id, visible, read_only, created_by)
-       VALUES ($1,$2,'role',$3,false,false,$4)`,
-      [RC_SHEET, RC_MOVING, RC_PURCHASING, STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY],
+       VALUES ($1,$2,'role',$3,true,false,$5), ($1,$4,'role',$3,false,false,$5)`,
+      [
+        RC_SHEET, RC_MOVING, RC_PURCHASING, RC_STABLE,
+        STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+      ],
     )
 
     // NO REGION, NO PROOF — the additive path, which classifies nothing and therefore has only the
     // upsert's guard between it and the operator's row.
     const result = await service.applyRoleWriteScopes({
       sheetId: RC_SHEET,
-      entries: [{ fieldId: RC_MOVING, roleId: RC_PURCHASING }],
+      entries: [
+        { fieldId: RC_MOVING, roleId: RC_PURCHASING },
+        { fieldId: RC_STABLE, roleId: RC_PURCHASING },
+      ],
       packId: RC_PACK,
     })
     expect(result.removed).toEqual([])
 
     // ALL THREE COLUMNS TOOK THE ELSE BRANCH, in the database rather than in a model of it.
     expect(await rcRow(RC_MOVING, RC_PURCHASING)).toEqual({
+      visible: true,
+      read_only: false,
+      created_by: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
+    })
+    expect(await rcRow(RC_STABLE, RC_PURCHASING)).toEqual({
       visible: false,
       read_only: false,
       created_by: STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY,
     })
-    // …and the column really is still writable by 采购: the install did not silently re-deny it.
+
+    // ═══ THE COST, NAMED — this is the fail-open direction and it is not free. ═══
+    // Neither declaration came into force, so neither is counted in `applied`, and both pairs come
+    // back so the installer can say exactly which (column, role) it declared and did not get.
+    expect(result.skippedUnattributed).toEqual([
+      { fieldId: RC_MOVING, roleId: RC_PURCHASING, packId: null },
+      { fieldId: RC_STABLE, roleId: RC_PURCHASING, packId: null },
+    ])
+    expect(result.applied).toBe(0)
+
+    // 采购 really can still write the RELAXED column — the declared denial did not land. Before the
+    // fix this was a 403, and that protection is exactly what the conservative reading gives up.
     expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'still-relaxed')).status)
       .toBe(200)
+    // The HIDDEN column is refused — because it is hidden, which is the host's own rule and not
+    // something this install asserted. The bytes checked above are what the fix preserved there.
+    expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_STABLE, 'hidden-is-not-writable')).status)
+      .toBe(403)
 
-    // WITH THE PROOF the same call adopts the row — the fix narrows WHEN, it does not remove the
+    // WITH THE PROOF the same call adopts both rows — the fix narrows WHEN, it does not remove the
     // capability. `visible` comes back up (this port can only ever widen read) and the denial is
     // re-asserted under this pack's marker.
-    await service.applyRoleWriteScopes({
+    const adopted = await service.applyRoleWriteScopes({
       sheetId: RC_SHEET,
-      entries: [{ fieldId: RC_MOVING, roleId: RC_PURCHASING }],
+      entries: [
+        { fieldId: RC_MOVING, roleId: RC_PURCHASING },
+        { fieldId: RC_STABLE, roleId: RC_PURCHASING },
+      ],
       packId: RC_PACK,
       legacyAdoptable: true,
     })
-    expect(await rcRow(RC_MOVING, RC_PURCHASING)).toEqual({
-      visible: true,
-      read_only: true,
-      created_by: `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_PACK}`,
-    })
+    expect(adopted.skippedUnattributed).toEqual([])
+    expect(adopted.applied).toBe(2)
+    for (const fieldId of [RC_MOVING, RC_STABLE]) {
+      expect(await rcRow(fieldId, RC_PURCHASING)).toEqual({
+        visible: true,
+        read_only: true,
+        created_by: `${STOCK_PREPARATION_FIELD_PERMISSION_CREATED_BY}#${RC_PACK}`,
+      })
+    }
     expect((await rcPatch(RC_U_PURCHASING, [RC_PURCHASING], RC_MOVING, 'now-denied')).status)
       .toBe(403)
   })
@@ -829,7 +871,7 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
       ],
     )
 
-    await service.applyRoleWriteScopes({
+    const result = await service.applyRoleWriteScopes({
       sheetId: RC_SHEET,
       entries: [
         { fieldId: RC_MOVING, roleId: RC_PURCHASING },
@@ -840,6 +882,15 @@ describeIfDatabase('备料 write scope — the scoped reconcile of a revision th
       // sibling pack's.
       legacyAdoptable: true,
     })
+
+    // BOTH ARE REPORTED, AND THE SIBLING IS REPORTED BY NAME — `packId` is decoded from the marker
+    // Postgres actually returned, so the owner in the report is the owner in the row rather than a
+    // guess made from the request. Neither declaration is counted as applied.
+    expect(result.skippedUnattributed).toEqual([
+      { fieldId: RC_MOVING, roleId: RC_PURCHASING, packId: null },
+      { fieldId: RC_STABLE, roleId: RC_PURCHASING, packId: RC_OTHER_PACK },
+    ])
+    expect(result.applied).toBe(0)
 
     expect(await rcRow(RC_MOVING, RC_PURCHASING)).toEqual({
       visible: false, read_only: false, created_by: null,
