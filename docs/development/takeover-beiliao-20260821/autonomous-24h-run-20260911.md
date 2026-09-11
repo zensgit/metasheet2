@@ -67,6 +67,17 @@
 
 **教训 5**:上机 wrapper 一律纯 ASCII(或带 BOM);中文断言放独立的 `-File` 校验脚本。
 
+### 2.4 F1c / F8A(截至 2026-09-11 21:20,在飞)
+
+| 支 | 分支 / 基线 | 流程到哪 | 关键裁决 |
+|---|---|---|---|
+| **F1c** 老系统 BOM 语义移植(fable) | `feat/stock-prep-legacy-bom-semantics` @ `3d826d142`(基线 `2c28ec121`,13 文件 +1725/−64,全在 `plugins/plugin-integration-core/{lib,__tests__}`) | 工作流 7 agents / 0 error;r2 三条 blocker(演示脚本整链红 / 展示层去重键在 specField 部署上比展开层更粗 / 父组件名称被改短)→ fix r2 → **终审 r1 = FIX_FIRST** → fix r3 在跑 | 终审确认:幂等键、`HUMAN_PRESERVED_FIELD_IDS`、冻结 33 列一字未动(templates.cjs +16 行全是注释);根选择逐条对上老系统 `doGetAllBomInfo`;同父去重四项 + 用量与 `iterHandle` 同量、不进幂等键;父组件名称取父行未切分串。**新 blocker**:导出树用部件 id 建父子而行身份是路径 → 共用子装配第二次出现的子行被展示层去重整棵吞掉(实跑 6 行只打 5 行);修法 = 节点身份改用模板必列 `path`,兄弟集合按父**行**。另一条廉价 blocker:后台链 `extensionFieldIds` 接线无测试绑定。六处正文订正(对照表三处「同形」改「有偏离」并写方向;「修法 C」与代码矛盾;open_risks 2 无依据;1141 行段补 mark_inactive/upsert 命中原行)。 |
+| **F8A** 改类型第一刀:后端权威无损白名单(opus) | `feat/multitable-field-retype-lossless-whitelist` @ `991babe8e`(基线 `338da25e7`,13 文件 +1089/−93) | 工作流 7 agents / 0 error;r1 两条 + r2 三条 blocker;fix r2 未再核 → **终审在跑** | r2 三条:① ensureFields 逐次调用 `overwriteMode` 是 `meta_fields.type` 的第二写口(不是只有 env 才能开)→ 口径改成「调用方未自选 overwrite/observe 时 fail-closed」;② 排除集**源端**(attachment/lookup/rollup/button/createdTime → text)在 PATCH 路由无守卫、今天仍 200 → 修复者替 owner 选了 (a) 不收紧、补一条 characterization 把 200 钉死(是否越权、attachment→text 是否丢数据,交终审);③ 上一提交写进仓库的「narrowing 文件不在 CI 跑」是假陈述(blanket core-backend lane 每 PR 都跑它)→ 回滚。终审重点:所有 `meta_fields.type` 写点清单、既有契约用例被重写有没有削弱保证、200→400 行为变化清单。 |
+
+顺带发现(基线既有,不是本轮引入):`packages/core-backend/tests/integration/multitable-context.api.test.ts:1193` 的 SQL 拦截守卫正则里有一个 0x08 字节(`meta_sheets` 后本意是 ``,被某次 heredoc 折成退格)→ 该守卫永不命中;全仓控制字符横扫只有这一处是 bug(其余 0x01 都是有意的分隔符/测试输入)。等 F8A 合入后单独一支小 PR 修(同文件,避免冲突)。
+
+**r31 已备好未 build**:wrapper 加 #5651(`EXTERNAL_SYSTEM_SCOPE_MISMATCH` 字面量计数 ≥ 4)/#5654(upgrade-inplace 含 `MaintenanceFlagPath` + `Assert-MaintenanceFlagOutsideReplaceDirs`;事后 flag 不存在)标记,纯 ASCII、0 控制字符;ship 改为上传 `origin/main` 的 `multitable-onprem-package-upgrade-inplace.ps1`(加 BOM;1382 个非 ASCII 字节)替代 tools-r22 旧本;两份脚本本机 Windows PowerShell 5.1 `Parser::ParseFile` 0 错。基线等 F1c/F8A 裁决后定(合入则 main + 两支,否则 `72caae8de`);夜里上机,**不举 flag**(脚本自己举)。
+
 ---
 
 ## 3. 09-11 测试反馈 9 条:裁定与设计
@@ -160,7 +171,8 @@ nginx 三天日志:502/reset 只在四个升级窗口成簇,窗口外一条都�
 
 - **#5625** 仍等用户回 1/2/3。
 - **演示项目重置**:等 F1c 上机。
-- **F8A / F1c**:等前置 PR 合入以避免同文件冲突。
+- **F1c**:终审 FIX_FIRST → fix r3 在跑(见 §2.4);**F8A**:终审在跑。两支合入前不打 r31(最迟 02:00 以 main 现状上机)。
+- **`multitable-context.api.test.ts:1193` 0x08 守卫失效**:等 F8A 合入后单独小 PR。
 - **规则侧通知落库到通知中心**:F9 登记的独立项。
 - **自动化 `MetaAutomationRuleEditor.vue` 4780 行大文件**:任何同期改动要与 #5641 串行。
 
