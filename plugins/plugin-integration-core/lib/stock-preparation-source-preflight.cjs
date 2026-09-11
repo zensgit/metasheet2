@@ -596,6 +596,22 @@ const HOST_SOURCE_UNAVAILABLE_CODE = 'SOURCE_UNAVAILABLE'
 // at all. They are kept for a caller that hands this module a direct driver error (a future
 // non-facade probe, or a driver that reports a login refusal on a request), and are NOT evidence
 // that connect-time failures classify by number today.
+//
+// THE SEAM THAT KEEPS `.number` ALIVE, traced end to end (2026-09-10) so a later refactor can see
+// what would silently turn this whole table into dead code:
+//   tedious RequestError (`.number` set in mssql/lib/error/request-error.js)
+//   -> MSSQLAdapter.query's catch returns `{ data: [], error }` WITHOUT rewrapping the driver error
+//      (packages/core-backend/src/data-adapters/MSSQLAdapter.ts), and `select()` returns that result
+//   -> DataSourceManager.select and the read-only plugin facade pass the result through untouched
+//   -> lib/adapters/data-source-sql-readonly-source-adapter.cjs `read()` rethrows `result.error`
+//      AS-IS when it is an Error. That single `throw result.error` is the load-bearing link: wrap it
+//      in a `new Error(...)` anywhere on this path and every number below stops arriving.
+//   -> probeObject's catch -> classifyReadError.
+// ONE KNOWN BLIND SPOT on that same seam, recorded rather than papered over here: a source configured
+// with `lookupProjection` deliberately coarsens EVERY read failure into `lookup projection base read
+// failed`, which carries neither a number nor matchable prose, so such a source still classifies as
+// UNKNOWN whatever the server said. That coarsening is the adapter's values-free choice; undoing it
+// belongs there, not in this classifier.
 const MSSQL_ERROR_NUMBER_CODES = Object.freeze({
   208: 'OBJECT_MISSING', // Invalid object name
   2812: 'OBJECT_MISSING', // Could not find stored procedure
