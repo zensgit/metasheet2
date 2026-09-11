@@ -132,6 +132,10 @@ const { optionalString } = require('./stock-preparation-common.cjs')
 const {
   STOCK_PREPARATION_FILL_OBJECT_ID,
   STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  // The deep link's FALLBACK view — the host's own default-view id. Re-exported below beside the
+  // preferred id so the suite can pin both halves of the "prefer the fill view, fall back to the
+  // default one" decision in one place.
+  STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID,
   parsePlmRefreshTimestampMs,
   readPullTargetRowFacts,
   resolveFillTarget,
@@ -420,6 +424,7 @@ async function readOperatorProjectBoard({
 module.exports = {
   STOCK_PREPARATION_FILL_OBJECT_ID,
   STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID,
   STOCK_PREPARATION_PROJECT_BOARD_AUDIT_ACTION,
   STOCK_PREPARATION_PROJECT_BOARD_KEYS,
   STOCK_PREPARATION_PROJECT_BOARD_MODES,
