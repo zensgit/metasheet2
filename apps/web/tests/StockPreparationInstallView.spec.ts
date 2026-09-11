@@ -739,8 +739,10 @@ describe('BOM备料 install page (§14 defaults for confirmation)', () => {
     // eslint-disable-next-line no-bitwise
     expect(Boolean(wizard!.compareDocumentPosition(intro!) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
 
-    // The six-step map renders too — the wizard is not an empty shell at this mount point.
-    expect(root.querySelectorAll('[data-testid="stock-prep-getting-started-step"]').length).toBe(6)
+    // The seven-step map renders too — the wizard is not an empty shell at this mount point.
+    // SEVEN since ①拆分 (2026-09-10): 「登记外接数据源」 and 「新增 SQL 绑定」 are two acts
+    // with two controls and two different reads, so they are two rows.
+    expect(root.querySelectorAll('[data-testid="stock-prep-getting-started-step"]').length).toBe(7)
   })
 
   it('P0-4: a MANIFEST failure does not repaint the wizard\'s ④ badge', async () => {

@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
 
-// BOM备料 接入向导「开始使用」(P0-4) — the six-step map's DOM half.
+// BOM备料 接入向导「开始使用」(P0-4) — the seven-step map's DOM half.
 //
 // PURELY PRESENTATIONAL — this component issues no fetch of its own. Every prop here is exactly what
 // `StockPreparationInstallView.vue` already owns and passes down.
 //
 // Guards this suite pins:
-//   G1  六步地图: all six steps render, each with exactly one badge, before any button is pressed
+//   G1  七步地图: all seven steps render, each with exactly one badge, before any button is pressed.
+//       SEVEN, not six, since 2026-09-10: 整合切片 put 外接数据源 and the connection-draft editor in
+//       ONE 数据工厂 section, and the old ① was describing both at once — its sentence was about
+//       registering a data source while its badge came from the BINDING envelope, which is silent
+//       about whether a data source exists. ①a and ①b now have one read, one badge and one link each.
 //   G2  THE TWO THIRD STATES, kept apart (G4): a read that FAILED — with ANY status, not only 403 —
 //       reads 「? 看不到」; a manual probe NOBODY HAS RUN reads 「未检查」. Neither is 「没完成」, and
 //       a 500 on either read must never paint a step red.
@@ -42,6 +46,13 @@ const h = vi.hoisted(() => ({
    */
   readiness: null as Record<string, unknown> | null,
   readinessCalls: 0,
+  /**
+   * The step①a data-source-registry read's answer, on the same terms as `readiness` above: `null`
+   * means the read NEVER SETTLES, which is the default, so every case written before the ① split
+   * keeps asserting a genuine FIRST PAINT.
+   */
+  registry: null as Record<string, unknown> | null,
+  registryCalls: 0,
 }))
 
 vi.mock('../src/composables/useLocale', () => ({
@@ -74,6 +85,23 @@ vi.mock('../src/services/integration/stockPreparation/onboardingReadiness', asyn
       h.readinessCalls += 1
       if (h.readiness === null) return new Promise(() => {}) as never
       return h.readiness as never
+    }),
+  }
+})
+
+// The step①a read's seam, mocked for the same reason ⑤'s is: the SERVICE's own behaviour
+// (403/500/network/HTML/unknown-shape → unknown, the SQL-type filter, the values-free projection) is
+// pinned in StockPreparationDataSourceRegistry.spec.ts; here only the badge's DOM matters.
+vi.mock('../src/services/integration/stockPreparation/dataSourceRegistry', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/integration/stockPreparation/dataSourceRegistry')>(
+    '../src/services/integration/stockPreparation/dataSourceRegistry',
+  )
+  return {
+    ...actual,
+    readStockPrepDataSourceRegistry: vi.fn(async () => {
+      h.registryCalls += 1
+      if (h.registry === null) return new Promise(() => {}) as never
+      return h.registry as never
     }),
   }
 })
@@ -116,7 +144,20 @@ function preflight(overrides: Partial<StockPreparationPreflight> = {}): StockPre
 }
 
 function binding(overrides: Partial<StockPrepGettingStartedBinding> = {}): StockPrepGettingStartedBinding {
-  return { effectiveExternalSystemId: 'plm-1', eligibleSourceCount: 1, ...overrides }
+  return {
+    effectiveExternalSystemId: 'plm-1',
+    eligibleSourceCount: 1,
+    dataSourceBackedSourceCount: 1,
+    // The DATA-SOURCE road by default — what ①a/①b are written for. The legacy road has its own
+    // case below, and it is the one F06 was about.
+    requiredKind: 'data-source:sql-readonly',
+    ...overrides,
+  }
+}
+
+/** The step①a registry projection, as `dataSourceRegistry.ts` returns it. */
+function registry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { state: 'present', sqlCount: 1, totalCount: 1, status: null, ...overrides }
 }
 
 function sourcePreflight(overrides: Partial<StockPrepSourcePreflight> = {}): StockPrepSourcePreflight {
@@ -208,6 +249,9 @@ function defaultProps(overrides: Props = {}): Required<Props> {
     busy: false,
     // 整合切片 (2026-09-09): the DEFAULT here mirrors the component's own fail-closed default —
     // a mount that says nothing about 数据工厂 access gets the 「找实施」 sentence, not a link.
+    // ①拆分 (2026-09-10): cases that want the LINKED rendering now say `canOpenDataFactory: true`
+    // explicitly, which is the honest direction — a `true` default would let a component that lost
+    // its gate look correct in every case that did not mention the prop.
     canOpenDataFactory: false,
     ...overrides,
   }
@@ -223,6 +267,8 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     h.copyResult = true
     h.readiness = null
     h.readinessCalls = 0
+    h.registry = null
+    h.registryCalls = 0
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -275,25 +321,34 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     return root
   }
 
+  /** Same, for step①a's registry read. `flushReadiness` drains both — one microtask pump, two reads. */
+  async function mountWithRegistry(answer: Record<string, unknown>, props: Props = {}): Promise<HTMLDivElement> {
+    h.registry = answer
+    const root = await mount(props)
+    await flushReadiness()
+    return root
+  }
+
   function accessBlock(root: HTMLElement): HTMLElement {
     return root.querySelector('[data-testid="stock-prep-getting-started-access-state"]') as HTMLElement
   }
 
   // ---------------------------------------------------------------------------
-  // The six-step map itself
+  // The seven-step map itself
   // ---------------------------------------------------------------------------
 
-  it('renders all six steps, in order, before any button is pressed', async () => {
+  it('renders all seven steps, in order, before any button is pressed', async () => {
     const root = await mount()
     const steps = root.querySelectorAll('[data-testid="stock-prep-getting-started-step"]')
-    expect(steps.length).toBe(6)
+    expect(steps.length).toBe(7)
     expect(Array.from(steps).map((el) => (el as HTMLElement).dataset.step)).toEqual([
-      'source-connect', 'source-verify', 'source-bind', 'install-tables', 'grant-access', 'first-project-run',
+      'source-register', 'source-connect', 'source-verify', 'source-bind', 'install-tables', 'grant-access', 'first-project-run',
     ])
     // NOTHING HAS BEEN READ YET, and the three ways of not knowing stay apart (G4):
     // the binding envelope has not arrived → 「? 看不到」; the two manual probes have not been run →
     // 「未检查」; the two off-page steps are somebody's work → 「需要别人做」. None of them is
     // 「还没开始」, a word this vocabulary deliberately does not contain.
+    expect(badgeOf(root, 'source-register')).toBe('unknown')
     expect(badgeOf(root, 'source-connect')).toBe('unknown')
     expect(badgeOf(root, 'source-verify')).toBe('not_checked')
     expect(badgeOf(root, 'source-bind')).toBe('unknown')
@@ -305,16 +360,188 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
 
   it('progress counts only 已完成 — 未检查 / 看不到 / 需要别人做 are not progress', async () => {
     const empty = await mount()
-    expect(empty.querySelector('[data-testid="stock-prep-getting-started-progress"]')?.textContent).toContain('0/6')
+    expect(empty.querySelector('[data-testid="stock-prep-getting-started-progress"]')?.textContent).toContain('0/7')
     if (app) app.unmount()
     app = null
-    const wired = await mount({
+    const wiredProps = {
       binding: binding(),
       sourcePreflight: sourcePreflight(),
       preflight: preflight({ ready: true, blockerCount: 0, blockers: [] }),
+    }
+    // ①a's read never settles here (h.registry === null), so it stays 「? 看不到」 and is NOT
+    // progress — which is the point: the denominator grew by one and the numerator did not.
+    const wired = await mount(wiredProps)
+    expect(wired.querySelector('[data-testid="stock-prep-getting-started-progress"]')?.textContent).toContain('4/7')
+    if (app) app.unmount()
+    app = null
+    // ...and once ①a's read DOES answer 'present', the same deployment reads 5/7. Two steps that
+    // used to be one, counted separately: this is the whole reason the split is visible to a reader.
+    const withRegistry = await mountWithRegistry(registry(), wiredProps)
+    expect(withRegistry.querySelector('[data-testid="stock-prep-getting-started-progress"]')?.textContent).toContain('5/7')
+  })
+
+  // ---------------------------------------------------------------------------
+  // ① SPLIT (2026-09-10) — ①a and ①b are answered by DIFFERENT reads
+  // ---------------------------------------------------------------------------
+
+  it('①a comes from the registry read and ①b from the binding envelope — all four combinations', async () => {
+    // (present, bound): both done.
+    let root = await mountWithRegistry(registry(), { binding: binding() })
+    expect(badgeOf(root, 'source-register')).toBe('done')
+    expect(badgeOf(root, 'source-connect')).toBe('done')
+    if (app) app.unmount()
+    app = null
+
+    // (present, NO binding yet) — THE STATE ONE ROW COULD NOT EXPRESS. A data source is registered
+    // and no binding references it: ①a is genuinely done, ①b genuinely is not. The old single step
+    // read the binding envelope alone and reported 「需要别人做」 over a sentence about registering.
+    root = await mountWithRegistry(registry(), { binding: binding({ effectiveExternalSystemId: null, eligibleSourceCount: 0, dataSourceBackedSourceCount: 0 }) })
+    expect(badgeOf(root, 'source-register')).toBe('done')
+    expect(badgeOf(root, 'source-connect')).toBe('held')
+    if (app) app.unmount()
+    app = null
+
+    // (absent, bound) — the legacy-bridge deployment: nothing in `data_sources` this account can
+    // see, and a working binding anyway. ①b must NOT be dragged down by ①a.
+    root = await mountWithRegistry(registry({ state: 'absent', sqlCount: 0, totalCount: 0 }), { binding: binding() })
+    expect(badgeOf(root, 'source-register')).toBe('held')
+    expect(badgeOf(root, 'source-connect')).toBe('done')
+    if (app) app.unmount()
+    app = null
+
+    // (unknown, unknown): the read was refused and the panel never called its route.
+    root = await mountWithRegistry(registry({ state: 'unknown', sqlCount: 0, totalCount: 0, status: 403 }), { binding: null })
+    expect(badgeOf(root, 'source-register')).toBe('unknown')
+    expect(badgeOf(root, 'source-connect')).toBe('unknown')
+  })
+
+  it('①a’s evidence is a COUNT scoped to this account, and ①b’s names which road the bindings took', async () => {
+    const evidence = (root: HTMLElement, step: string) => (root.querySelector(
+      `[data-testid="stock-prep-getting-started-step"][data-step="${step}"] [data-testid="stock-prep-getting-started-step-evidence"]`,
+    ) as HTMLElement | null)?.textContent ?? ''
+
+    let root = await mountWithRegistry(registry({ sqlCount: 2, totalCount: 3 }), {
+      binding: binding({ eligibleSourceCount: 2, dataSourceBackedSourceCount: 1 }),
     })
-    // ①②③④ done; ⑤⑥ are held by construction in P0, so 6/6 is unreachable and 4/6 is the truth.
-    expect(wired.querySelector('[data-testid="stock-prep-getting-started-progress"]')?.textContent).toContain('4/6')
+    // 「本账号看得到」, not 「这台机器上有」: the list is owner-scoped (#5401), so 0 would mean
+    // 「this account sees none」 and promoting that into 「none exists」 would be a claim nobody can back.
+    expect(evidence(root, 'source-register')).toContain('2')
+    expect(evidence(root, 'source-register')).toContain('本账号')
+    expect(evidence(root, 'source-connect')).toContain('已登记 2 条')
+    expect(evidence(root, 'source-connect')).toContain('1 条走外接数据源')
+    if (app) app.unmount()
+    app = null
+
+    // A data-source-road deployment with no data-source-backed candidate YET still reads done on
+    // ①b — badging it 「没完成」 would tell an administrator to redo working work. The wording is
+    // 「尚未」, not 「都是旧式桥接」: F06 was that the old sentence described a legacy deployment's
+    // correct configuration as a shortfall, and the legacy case has its own wording now.
+    root = await mountWithRegistry(registry(), { binding: binding({ eligibleSourceCount: 1, dataSourceBackedSourceCount: 0 }) })
+    expect(badgeOf(root, 'source-connect')).toBe('done')
+    expect(evidence(root, 'source-connect')).toContain('尚未有一条走外接数据源')
+    if (app) app.unmount()
+    app = null
+
+    // ①a says NOTHING when it cannot tell — the badge already says 「? 看不到」.
+    root = await mountWithRegistry(registry({ state: 'unknown', sqlCount: 0, status: 500 }))
+    expect(evidence(root, 'source-register')).toBe('')
+  })
+
+  // F06 (2026-09-10 对抗复核) — THE FIFTH COMBINATION. A `bridge:legacy-sql-readonly` deployment
+  // can never be offered a `data-source:sql-readonly` system (the server narrows `eligibleSources`
+  // to the action's own frozen kind), so ①a/①b are not its steps at all. Before the fix this
+  // deployment was told to go register a data source the action cannot use, and ①b's evidence
+  // described its working configuration as a shortfall.
+  it('a legacy-bridge deployment is told ①a/①b do not apply — not told to go register a data source', async () => {
+    const legacy = binding({ requiredKind: 'bridge:legacy-sql-readonly', dataSourceBackedSourceCount: 0 })
+    // The registry says `absent` — which, on the data-source road, would be 「需要别人做」. Here it
+    // must NOT be: the action cannot use a data source, so there is nothing outstanding.
+    const root = await mountWithRegistry(registry({ state: 'absent', sqlCount: 0, totalCount: 0 }), { binding: legacy })
+
+    expect(badgeOf(root, 'source-register')).toBe('done')
+    expect(badgeOf(root, 'source-connect')).toBe('done')
+
+    // ONE sentence replaces BOTH instructions...
+    const notice = root.querySelector('[data-testid="stock-prep-getting-started-step-source-legacy-bridge"]')
+    expect(notice, 'the legacy deployment must be told which road it is on').toBeTruthy()
+    expect(notice?.textContent).toContain('不适用')
+    expect(notice?.textContent).toContain('bridge:legacy-sql-readonly')
+    // ...and neither instruction, nor either link, is on screen to be followed.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-register"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-connect"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-connection-draft"]')).toBeNull()
+
+    // G5: the MAP is untouched — seven rows, and the ✔ on ①a is never bare.
+    expect(root.querySelectorAll('[data-testid="stock-prep-getting-started-step"]').length).toBe(7)
+    const evidence = (step: string) => (root.querySelector(
+      `[data-testid="stock-prep-getting-started-step"][data-step="${step}"] [data-testid="stock-prep-getting-started-step-evidence"]`,
+    ) as HTMLElement | null)?.textContent ?? ''
+    expect(evidence('source-register')).toContain('不适用')
+    // ①b's evidence names the road WITHOUT calling it a shortfall — the exact wording F06 objected to.
+    expect(evidence('source-connect')).toContain('本部署就是走旧式桥接')
+    expect(evidence('source-connect')).not.toContain('不经外接数据源')
+  })
+
+  it('the data-source road is unaffected: requiredKind data-source:sql-readonly still drives ①a/①b', async () => {
+    // The negative half of the case above — without it, hard-coding `legacyBridge = true` would pass.
+    const root = await mountWithRegistry(registry({ state: 'absent', sqlCount: 0, totalCount: 0 }), { binding: binding() })
+    expect(badgeOf(root, 'source-register')).toBe('held')
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-legacy-bridge"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-register"]')).toBeTruthy()
+  })
+
+  // Review item 5 — THE PATH NOBODY WAS LOOKING AT. `stock-prep:admin` is the documented reader of
+  // 「开始使用」 and holds no `data_sources:read`, so ①a's read 403s EVERY time for them: the badge
+  // is permanently 「? 看不到」 and progress tops out at 6/7. That is honest, but an unexplained
+  // permanent shrug on the page's primary audience is not. The 403 gets a REASON; other failures
+  // keep the bare badge, because for those the page genuinely does not know why.
+  it('①a’s 403 says which permission is missing; a 500 stays a bare 「? 看不到」', async () => {
+    const evidence = (root: HTMLElement) => (root.querySelector(
+      '[data-testid="stock-prep-getting-started-step"][data-step="source-register"] [data-testid="stock-prep-getting-started-step-evidence"]',
+    ) as HTMLElement | null)?.textContent ?? ''
+
+    let root = await mountWithRegistry(registry({ state: 'unknown', sqlCount: 0, totalCount: 0, status: 403 }))
+    expect(badgeOf(root, 'source-register')).toBe('unknown')
+    expect(evidence(root)).toContain('data_sources:read')
+    expect(evidence(root)).toContain('实施')
+    if (app) app.unmount()
+    app = null
+
+    root = await mountWithRegistry(registry({ state: 'unknown', sqlCount: 0, totalCount: 0, status: 500 }))
+    expect(badgeOf(root, 'source-register')).toBe('unknown')
+    expect(evidence(root), 'a 500 is not a permission story — the page must not invent one').toBe('')
+  })
+
+  it('unknown + denied: the ①a card reads as ONE story — why it cannot tell, and who to ask', async () => {
+    // The real `stock-prep:admin` combination, both halves at once: the registry read 403s AND the
+    // 数据工厂 link is withheld. Asserted on the WHOLE card text, because the failure mode this
+    // guards is two correct sentences that contradict each other on one screen.
+    const root = await mountWithRegistry(
+      registry({ state: 'unknown', sqlCount: 0, totalCount: 0, status: 403 }),
+      { canOpenDataFactory: false },
+    )
+    const row = root.querySelector('[data-testid="stock-prep-getting-started-step"][data-step="source-register"]') as HTMLElement
+    const hint = root.querySelector('[data-testid="stock-prep-getting-started-step-source-register"]') as HTMLElement
+    expect(row).toBeTruthy()
+    expect(hint).toBeTruthy()
+
+    const card = `${row.textContent ?? ''}\n${hint.textContent ?? ''}`
+    // ① what the badge says, ② why it says it, ③ what to do about it, ④ who to ask.
+    expect(card).toContain('看不到')
+    expect(card).toContain('data_sources:read')
+    expect(card).toContain('integration:write')
+    expect(card).toContain('实施')
+    // ...and NOT a link the reader cannot open, nor a claim that the step is unfinished.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
+    expect(card).not.toContain('还没登记')
+    // Progress is honestly capped, never inflated to hide the hole.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-progress"]')?.textContent).toContain('/7')
+  })
+
+  it('①a’s read is issued once on mount and never auto-probes the customer database (D6)', async () => {
+    await mountWithRegistry(registry())
+    expect(h.registryCalls).toBe(1)
   })
 
   // ---------------------------------------------------------------------------
@@ -983,10 +1210,10 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // 整合切片 (2026-09-09): step①'s off-page link
+  // 整合切片 (2026-09-09) + ①拆分 (2026-09-10): the two off-page step-① links
   // ---------------------------------------------------------------------------
 
-  it('step① links to the folded-in 连接管理 section of 数据工厂, not the retired standalone page', async () => {
+  it('①a links to the folded-in 连接管理 section of 数据工厂, not the retired standalone page', async () => {
     // The standalone /data-sources page is gone (it now redirects). A link left on the bare
     // path would still "work" via that redirect, so this pins the DIRECT target: the one step
     // this wizard cannot perform itself must land the reader on the section that can.
@@ -1002,7 +1229,7 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(link?.textContent).toContain('数据工厂')
   })
 
-  it('step① renders the English label for the same folded-in target', async () => {
+  it('①a renders the English label for the same folded-in target', async () => {
     h.locale = 'en'
     const root = await mount({ canOpenDataFactory: true })
     const link = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]') as HTMLAnchorElement | null
@@ -1010,12 +1237,13 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(link?.textContent).toContain('Data Factory')
   })
 
+  // —— the base slice's three denied cases, now pointing at ①a's half of the split ——
   // The other half of the fold's cost, stated instead of hidden: 数据工厂 carries an
   // `integration:write` route gate that the retired standalone page did not, and a
   // `stock-prep:admin` holder — the documented reader of 「开始使用」 — does not hold it. For them
   // the link would be a redirect dressed as an entry point (R-11 「看得见点不动」), so it is absent
   // and the step says which permission is missing and who to ask.
-  it('step① renders a plain-text pointer, not a link, when the principal cannot open 数据工厂', async () => {
+  it('①a renders a plain-text pointer, not a link, when the principal cannot open 数据工厂', async () => {
     const root = await mount({ canOpenDataFactory: false })
     expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
     const denied = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources-denied"]')
@@ -1024,26 +1252,94 @@ describe('BOM备料 接入向导「开始使用」(P0-4)', () => {
     expect(denied?.textContent).toContain('integration:write')
     expect(denied?.textContent).toContain('实施')
     // The STEP itself stays on screen — a reader who cannot do it still has to know it exists.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-register"]')).toBeTruthy()
     expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-connect"]')).toBeTruthy()
     // ... and no bare path leaks back in as text.
     expect(root.textContent ?? '').not.toContain('/integrations/workbench')
   })
 
-  it('step① fails closed: a host that passes nothing gets the pointer, never the link', async () => {
-    // `defaultProps` deliberately omits nothing here — it passes `false`, the same value Vue's
-    // Boolean casting produces for an absent prop. Both roads lead to the same denied render.
+  it('① fails closed: a host that passes nothing gets the pointer, never the link', async () => {
+    // `defaultProps` passes `false`, the same value Vue's Boolean casting produces for an absent
+    // prop. Both roads lead to the same denied render — the genuinely-absent road is the case
+    // below this one.
     const root = await mount()
     expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
     expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources-denied"]')).toBeTruthy()
   })
 
-  it('step① says the same thing in English when the principal cannot open 数据工厂', async () => {
+  it('①a says the same thing in English when the principal cannot open 数据工厂', async () => {
     h.locale = 'en'
     const root = await mount({ canOpenDataFactory: false })
     expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
     const denied = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources-denied"]')
     expect(denied?.textContent).toContain('integration:write')
     expect(denied?.textContent).toContain('implementer')
+  })
+
+  // —— the ① split's own cases ——
+  // ①b — THE HALF THAT USED TO HAVE NO ROW OF ITS OWN. Deleting this step (or folding it back into
+  // ①a) reddens this case, the seven-step order case, and the four-combination case above.
+  it('①b has its own row, its own link into the SAME section, and names 「新增连接草稿」', async () => {
+    const root = await mount({ canOpenDataFactory: true })
+    const row = root.querySelector('[data-testid="stock-prep-getting-started-step-source-connect"]') as HTMLElement | null
+    expect(row, '①b must render its own hint row').toBeTruthy()
+    // The sentence has to say WHICH control in that section, because ①a points at the same anchor.
+    expect(row?.textContent).toContain('新增连接草稿')
+    expect(row?.textContent).toContain('引用')
+    const link = root.querySelector('[data-testid="stock-prep-getting-started-link-connection-draft"]') as HTMLAnchorElement | null
+    expect(link, '①b must have a link of its own').toBeTruthy()
+    expect(link?.getAttribute('href')).toBe('/integrations/workbench#int-sec-connection')
+    // ...and it is NOT ①a's element: two steps, two testids, two destinations named in words.
+    const registerLink = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')
+    expect(registerLink).toBeTruthy()
+    expect(registerLink).not.toBe(link)
+  })
+
+  it('①a and ①b render as a bilingual PAIR', async () => {
+    h.locale = 'en'
+    const root = await mount({ canOpenDataFactory: true })
+    const register = root.querySelector('[data-testid="stock-prep-getting-started-step-source-register"]') as HTMLElement
+    const draft = root.querySelector('[data-testid="stock-prep-getting-started-step-source-connect"]') as HTMLElement
+    expect(register.textContent).toContain('sign-in credentials')
+    expect(draft.textContent).toContain('references the data source')
+    // No Chinese leaks into the English rendering of either row.
+    expect(register.textContent ?? '').not.toContain('外接数据源')
+    expect(draft.textContent ?? '').not.toContain('新增连接草稿')
+  })
+
+  // R-11 for a LINK, over BOTH halves: a destination this caller cannot open is a sentence, never
+  // an anchor — and ①b must carry its own denied node rather than leaning on ①a's.
+  it('a caller who cannot open 数据工厂 gets both sentences and NEITHER link', async () => {
+    const root = await mount({ canOpenDataFactory: false })
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-link-connection-draft"]')).toBeNull()
+    const denyA = root.querySelector('[data-testid="stock-prep-getting-started-link-data-sources-denied"]')
+    const denyB = root.querySelector('[data-testid="stock-prep-getting-started-link-connection-draft-denied"]')
+    // Both name the permission and who to ask — the pair reads the same way, in two places.
+    expect(denyA?.textContent).toContain('integration:write')
+    expect(denyB?.textContent).toContain('integration:write')
+    expect(denyA?.textContent).toContain('实施')
+    expect(denyB?.textContent).toContain('实施')
+    expect(denyA).not.toBe(denyB)
+    // The MAP is untouched — it is not a gate (G5): both rows still render with their own badges.
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-register"]')).toBeTruthy()
+    expect(root.querySelector('[data-testid="stock-prep-getting-started-step-source-connect"]')).toBeTruthy()
+    expect(root.querySelectorAll('[data-testid="stock-prep-getting-started-step"]').length).toBe(7)
+  })
+
+  it('the link gate is FAIL-CLOSED for BOTH halves when the prop is genuinely absent', async () => {
+    // Stronger than the `false` case above: this mounts with the key DELETED, which is what a host
+    // that forgets to wire it produces. Vue casts an absent Boolean prop to false, so both denied
+    // nodes must appear and neither link may.
+    const props = defaultProps() as Record<string, unknown>
+    delete props.canOpenDataFactory
+    app = createApp(StockPreparationGettingStarted as Component, props)
+    app.mount(container!)
+    await nextTick()
+    expect(container!.querySelector('[data-testid="stock-prep-getting-started-link-data-sources"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="stock-prep-getting-started-link-connection-draft"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="stock-prep-getting-started-link-data-sources-denied"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="stock-prep-getting-started-link-connection-draft-denied"]')).toBeTruthy()
   })
 
   // ---------------------------------------------------------------------------
