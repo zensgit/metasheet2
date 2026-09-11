@@ -39,6 +39,9 @@ const LIB = path.join(__dirname, '..', 'lib')
 
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const { createStockPreparationSourceBindingStore } = require(path.join(LIB, 'stock-preparation-source-binding-store.cjs'))
+// The REAL registry factory. R-25 mounts THIS over an in-memory db instead of the hand-written fake
+// below, so its assertions hang on lib/external-systems.cjs itself — see createRealBackedRegistry.
+const { createExternalSystemRegistry: createRealExternalSystemRegistry } = require(path.join(LIB, 'external-systems.cjs'))
 const { createStockPreparationAuditStore } = require(path.join(LIB, 'stock-preparation-audit-store.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 
@@ -129,6 +132,90 @@ function selectScopedSystem(systems, { tenantId, workspaceId = null, id }) {
   if (exact) return exact
   if (hint === null) return null
   return systems.find((entry) => entry.id === id && entry.tenantId === tenantId && (entry.workspaceId ?? null) === null) || null
+}
+
+/**
+ * THE REAL REGISTRY, over an in-memory db — used by R-25 only.
+ *
+ * WHY ONE CASE GETS ITS OWN REGISTRY. Every other case here needs the fake: it fabricates
+ * ineligible shapes (a data source somebody else owns, a target-role connector, an inactive row)
+ * and asserts the ROUTE's behaviour around them. R-25 is different: the property it claims —
+ * "under the UI's workspaceId=default hint the picker lists the tenant-wide sources" — is produced
+ * INSIDE `listExternalSystems`. Asserting it against a fake that was taught the same rule proves
+ * only that the fake was taught; revert lib/external-systems.cjs and such a case stays green. So
+ * this case mounts the real thing, and the fake's list rule stays as a separate (and now
+ * independently checked) mirror for the other cases.
+ *
+ * Only the two reads this case exercises are recorded/returned; the writes stay inert because the
+ * GET picker performs none.
+ */
+function createRealBackedRegistry(systems = DEFAULT_SYSTEMS) {
+  const calls = []
+  const rows = systems.map((entry, index) => ({
+    id: entry.id,
+    connection_id: entry.connectionId ?? null,
+    tenant_id: entry.tenantId,
+    workspace_id: entry.workspaceId ?? null,
+    project_id: null,
+    name: entry.name,
+    kind: entry.kind,
+    role: entry.role,
+    config: entry.config ?? {},
+    capabilities: entry.capabilities ?? {},
+    status: entry.status,
+    credentials_encrypted: null,
+    last_tested_at: null,
+    last_error: null,
+    // Descending insertion order, so the seed order is the list order.
+    created_at: new Date(Date.UTC(2026, 8, 10, 0, 0, systems.length - index)).toISOString(),
+    updated_at: '2026-09-10T00:00:00.000Z',
+  }))
+  const matches = (row, where) => Object.entries(where || {}).every(([column, value]) => (row[column] ?? null) === (value ?? null))
+  const db = {
+    async selectOne(_table, where) { return rows.find((row) => matches(row, where)) || null },
+    async select(_table, { where, orderBy, limit, offset } = {}) {
+      const filtered = rows.filter((row) => matches(row, where || {}))
+      const ordered = orderBy && orderBy[0] === 'created_at'
+        ? filtered.slice().sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+        : filtered
+      const start = offset || 0
+      return ordered.slice(start, start + (limit || 1000))
+    },
+    async insertOne() { throw new Error('unexpected insertOne') },
+    async updateRow() { throw new Error('unexpected updateRow') },
+    async deleteRows() { throw new Error('unexpected deleteRows') },
+    async countRows() { return 0 },
+  }
+  const credentialStore = {
+    async encrypt(value) { return `enc:${value}` },
+    async decrypt(value) { return String(value).slice(4) },
+    async fingerprint(value) { return `fp_${String(value).length}` },
+  }
+  const real = createRealExternalSystemRegistry({ db, credentialStore, idGenerator: () => 'sys_unused' })
+  return {
+    calls,
+    async listExternalSystems(input) {
+      calls.push({ op: 'list', tenantId: input.tenantId, workspaceId: input.workspaceId ?? null })
+      return real.listExternalSystems(input)
+    },
+    async getExternalSystem(input) {
+      calls.push({ op: 'get', tenantId: input.tenantId, workspaceId: input.workspaceId ?? null, id: input.id })
+      // The fake answers a miss with `null`; keep that shape so the route sees one contract.
+      return real.getExternalSystem(input).catch((error) => {
+        if (error && error.name === 'ExternalSystemNotFoundError') return null
+        throw error
+      })
+    },
+    async getExternalSystemForAdapter(input) {
+      calls.push({ op: 'getForAdapter', tenantId: input.tenantId, workspaceId: input.workspaceId ?? null, id: input.id })
+      return real.getExternalSystemForAdapter(input).catch((error) => {
+        if (error && error.name === 'ExternalSystemNotFoundError') return null
+        throw error
+      })
+    },
+    async upsertExternalSystem() { throw new Error('unexpected upsertExternalSystem') },
+    async deleteExternalSystem() { throw new Error('unexpected deleteExternalSystem') },
+  }
 }
 
 function createExternalSystemRegistry(systems = DEFAULT_SYSTEMS) {
@@ -224,12 +311,12 @@ function envConfiguredAction(externalSystemId = ENV_DEFAULT_SOURCE) {
  * Mount the real routes ONCE, exactly as `activate()` does. Everything a test later asserts about
  * "no restart" is asserted against THIS object graph — nothing is rebuilt between calls.
  */
-function mount({ systems, withBindingStore = true, withAuditStore = true, withDataSourceDirectory = true, actions } = {}) {
+function mount({ systems, withBindingStore = true, withAuditStore = true, withDataSourceDirectory = true, actions, registryFactory = createExternalSystemRegistry } = {}) {
   const routes = new Map()
   const db = createFakeDb()
   const bindingStore = createStockPreparationSourceBindingStore({ db, idGenerator: () => 'bind_1' })
   const auditStore = createStockPreparationAuditStore({ db, idGenerator: () => 'audit_1' })
-  const externalSystemRegistry = createExternalSystemRegistry(systems)
+  const externalSystemRegistry = registryFactory(systems)
   const dataSources = createDataSourceDirectory()
   // Records every adapter the runtime asked to build — this is how "which source did the next
   // request actually read" is observed, rather than trusting a response field.
@@ -897,8 +984,14 @@ async function main() {
   // request carries a workspace hint, and `listExternalSystems` used to match the hint EXACTLY. So
   // the picker listed zero candidates and reported `effectiveSourceProblem: 'not_found'` ("源不可用")
   // for the very source the same screen's dry-run — a BY-ID read, fallback-enabled since #5471 —
-  // read without complaint. Revert the registry's list fallback and the two assertions on
-  // `effectiveSourceProblem` / `eligibleSources` go red together.
+  // read without complaint.
+  //
+  // WHICH LAYER THIS HANGS ON, precisely — because the sentence above is worth nothing if the case
+  // is answered by a fake that was taught the fix. This case, ALONE in this file, mounts the REAL
+  // `createExternalSystemRegistry` from lib/external-systems.cjs over an in-memory db
+  // (`createRealBackedRegistry`). Revert the list fallback IN THAT FILE and the assertions on
+  // `effectiveSourceProblem` / `eligibleSources` below go red; no edit to this file can keep them
+  // green. (Verified by a require-hook mutation probe that patched the module source in memory.)
   //
   // The route is unchanged by that fix and this test says so: it still passes its own hint straight
   // through (asserted on the recorded call), and the widening happens inside the registry, once, for
@@ -906,7 +999,7 @@ async function main() {
   // -------------------------------------------------------------------------
   await run('R-25 the picker under a workspaceId=default hint lists the tenant-wide sources and stops saying 源不可用', async () => {
     const SIBLING_WS_SOURCE = 'sys_other_workspace_plm'
-    const mounted = mount({ systems: [
+    const mounted = mount({ registryFactory: createRealBackedRegistry, systems: [
       system({ id: ENV_DEFAULT_SOURCE, name: '内置演示源', workspaceId: null, config: { dataSourceId: 'ds_demo' } }),
       system({ id: CUSTOMER_PLM, workspaceId: null }),
       // Same tenant, a DIFFERENT non-null workspace: the fallback is null-only, so this is never offered.

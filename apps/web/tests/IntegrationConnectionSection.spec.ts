@@ -211,4 +211,56 @@ describe('IntegrationConnectionSection (unit)', () => {
     const link = container?.querySelector<HTMLAnchorElement>('[data-testid="connection-draft-k3-setup-link"]')
     expect(link).toBeTruthy()
   })
+
+  // 这块清单是带写按钮的清单,而列表读已经放宽到「同租户的租户级行」。写入口没有放宽(upsert 的
+  // findExisting / delete 都按精确作用域匹配),所以回退来的行必须在这里就写不动:
+  // 否则「停用」会新插一条同名 workspace 行并弹成功,「删除」会 404。
+  const scopeFallbackSystem: WorkbenchExternalSystem = {
+    id: 'sys_tenant_wide',
+    tenantId: 'default',
+    workspaceId: null,
+    name: '客户 PLM 只读库',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    scopeFallback: true,
+  }
+  const ownScopeSystem: WorkbenchExternalSystem = {
+    ...scopeFallbackSystem,
+    id: 'sys_ws',
+    name: '本工作区的源',
+    workspaceId: 'default',
+    scopeFallback: undefined,
+  }
+
+  it('把回退来的行标成只读:编辑/停用/删除置灰并给出原因,复制仍可用', async () => {
+    await mountSection(baseProps({
+      inventoryExpanded: true,
+      systems: [scopeFallbackSystem, ownScopeSystem],
+      connectionScopeWriteBlock: (system: WorkbenchExternalSystem) => (
+        system.scopeFallback === true ? '这是租户级连接(未归属当前工作区),在当前工作区里只读。' : ''
+      ),
+    }))
+
+    const notice = container?.querySelector('[data-testid="connection-scope-readonly-sys_tenant_wide"]')
+    expect(notice?.textContent).toContain('只读')
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="edit-connection-sys_tenant_wide"]')?.disabled).toBe(true)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="deactivate-connection-sys_tenant_wide"]')?.disabled).toBe(true)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="delete-connection-sys_tenant_wide"]')?.disabled).toBe(true)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="delete-connection-sys_tenant_wide"]')?.title).toContain('只读')
+    // 复制会清空 id、在当前作用域新建一条,是这行唯一正当的写动作,不许一起置灰。
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="copy-connection-sys_tenant_wide"]')?.disabled).toBe(false)
+
+    // 同一份渲染里,本作用域的行一切照旧 —— 只读是按行判的,不是整块清单一刀切。
+    expect(container?.querySelector('[data-testid="connection-scope-readonly-sys_ws"]')).toBeFalsy()
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="edit-connection-sys_ws"]')?.disabled).toBe(false)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="deactivate-connection-sys_ws"]')?.disabled).toBe(false)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="delete-connection-sys_ws"]')?.disabled).toBe(false)
+  })
+
+  it('没传 connectionScopeWriteBlock 时按可写渲染(其它挂载点与既有用法不受影响)', async () => {
+    await mountSection(baseProps({ inventoryExpanded: true, systems: [scopeFallbackSystem] }))
+    expect(container?.querySelector('[data-testid="connection-scope-readonly-sys_tenant_wide"]')).toBeFalsy()
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="deactivate-connection-sys_tenant_wide"]')?.disabled).toBe(false)
+  })
 })

@@ -44,6 +44,12 @@ export interface WorkbenchExternalSystem {
   hasCredentials?: boolean
   lastTestedAt?: string | null
   lastError?: string | null
+  /**
+   * 服务端标记：这一行是 LIST 的「非 null workspace hint 回退到同租户 workspace_id IS NULL」那一步带回来的，
+   * 也就是说本次请求所带的 workspace 作用域里并没有它。读能读到，写（upsert/delete 都按精确作用域匹配）却够不着。
+   * 只有列表接口会给出这个字段，且只给回退来的行。
+   */
+  scopeFallback?: boolean
 }
 
 export interface PlmIntegrationCapabilityFeature {
@@ -1625,4 +1631,47 @@ export function canReadFromSystem(system: WorkbenchExternalSystem): boolean {
 
 export function canWriteToSystem(system: WorkbenchExternalSystem): boolean {
   return system.role === 'target' || system.role === 'bidirectional'
+}
+
+const NO_SCOPE_WRITE_BLOCK = ''
+
+function normalizeScopeWorkspaceId(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed === '' ? null : trimmed
+}
+
+/**
+ * 「这一行连接，我在当前作用域里写得动吗？」—— 空串表示写得动；非空是给人看的原因。
+ *
+ * 为什么需要它。GET /api/integration/external-systems 的列表自 #56xx 起对非 null 的 workspace hint
+ * 会回退一步，把同租户 `workspace_id IS NULL` 的行也列出来（单条读 #5471 早就这么做了，列表这次补上）。
+ * 但写入口没有、也不应该跟着放宽：upsert 的 findExisting 与 deleteExternalSystem 仍按 (tenant, workspace, id)
+ * 精确匹配。于是同一块屏幕上，回退来的那一行如果还摆着「停用 / 启用 / 删除」按钮：
+ *   * 停用 → upsert 找不到同作用域的行 → 新插一条同名的 workspace 行（迁移 057 的唯一索引是
+ *     (tenant_id, coalesce(workspace_id,''), name)，两条都合法），界面弹「连接已停用」，真正那行还开着；
+ *   * 删除 → 404。
+ * 所以列表加宽的代价必须在能写的那一侧显式收住：回退来的行在本作用域内只读。
+ *
+ * 两条判据，彼此独立（任一成立即只读）：服务端打的 `scopeFallback` 标记，以及行自己的 workspaceId 与
+ * 当前作用域 hint 不一致——后者不依赖服务端新增字段，服务端标记掉了它仍然拦得住。
+ */
+export function externalSystemScopeWriteBlock(
+  system: Pick<WorkbenchExternalSystem, 'workspaceId' | 'scopeFallback'>,
+  scope: IntegrationScope = {},
+): string {
+  if (!system) return NO_SCOPE_WRITE_BLOCK
+  const hint = normalizeScopeWorkspaceId(scope.workspaceId)
+  const rowScope = normalizeScopeWorkspaceId(system.workspaceId)
+  if (system.scopeFallback !== true && rowScope === hint) return NO_SCOPE_WRITE_BLOCK
+  return rowScope === null
+    ? '这是租户级连接（未归属当前工作区），在当前工作区里只读：停用 / 启用 / 删除请在租户级作用域里做，否则会新建一条同名连接。'
+    : '这条连接属于另一个工作区，在当前工作区里只读。'
+}
+
+export function isExternalSystemWritableInScope(
+  system: Pick<WorkbenchExternalSystem, 'workspaceId' | 'scopeFallback'>,
+  scope: IntegrationScope = {},
+): boolean {
+  return externalSystemScopeWriteBlock(system, scope) === NO_SCOPE_WRITE_BLOCK
 }

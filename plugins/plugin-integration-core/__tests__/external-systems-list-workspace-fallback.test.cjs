@@ -22,6 +22,10 @@
 //                                                     own row; the tenant-wide row is not touched
 //   L-08 filters + pagination                      -> kind/status apply to both branches, and the
 //                                                     page is cut from the MERGE
+//   L-09 the `scopeFallback` tag                    -> ONLY the rows the fallback branch produced
+//                                                     carry it, so a caller that renders this list
+//                                                     with write buttons can tell which rows its
+//                                                     own (exact-scope) writes would MISS
 //
 // MUTATION EVIDENCE (probed in memory against a patched copy of the module source, then reverted —
 // nothing is written to disk by this file):
@@ -290,6 +294,11 @@ async function testWritesStayOnTheirOwnRow() {
   const listed = await registry.listExternalSystems({ tenantId: 'tenant_a', workspaceId: 'default' })
   assert.ok(listed.some((system) => system.id === 'sys_tenant_wide'),
     'L-07: read widening and write scoping coexist — this is the asymmetry, on purpose')
+  // ...and the asymmetry is DECLARED on the row, because one caller of this list renders it as a
+  // writable inventory (工作台 连接管理's 编辑/停用/启用/删除). Without the tag the screen offers a 停用
+  // that forks a second same-named row and a 删除 that 404s. L-09 pins the tag itself.
+  assert.equal(listed.find((system) => system.id === 'sys_tenant_wide').scopeFallback, true,
+    'L-07: the row whose delete just 404d is the row the list marks as fallback-reached')
 }
 
 // L-08 --------------------------------------------------------------------
@@ -322,6 +331,38 @@ async function testFiltersAndPaginationApplyToTheMerge() {
   )
 }
 
+// L-09 --------------------------------------------------------------------
+// THE TAG A WRITABLE LIST KEYS ON. `scopeFallback` says "your own write scope does not contain this
+// row" — the SAME rows `findExisting`/`deleteExternalSystem` (both exact) cannot reach. Drop the tag
+// and the workbench re-offers 停用/删除 on a tenant-wide row: the 停用 forks a second same-named row
+// (migration 057's unique index is (tenant_id, coalesce(workspace_id,''), name), so both are legal)
+// and reports success while the real row stays active.
+async function testFallbackReachedRowsAreTagged() {
+  const db = createMockDb()
+  seed(db, { id: 'sys_ws', workspace_id: 'default', created_at: '2026-09-05T00:00:00.000Z' })
+  seed(db, { id: 'sys_tenant_wide', workspace_id: null, created_at: '2026-09-04T00:00:00.000Z' })
+  const registry = createRegistry(db)
+
+  const listed = await registry.listExternalSystems({ tenantId: 'tenant_a', workspaceId: 'default' })
+  const byId = new Map(listed.map((system) => [system.id, system]))
+  assert.equal(byId.get('sys_tenant_wide').scopeFallback, true,
+    'L-09: a row the fallback branch produced is tagged')
+  assert.ok(!('scopeFallback' in byId.get('sys_ws')),
+    'L-09: a row in the SAME scope the caller writes in carries no tag at all — its writes land')
+
+  // A null hint reads tenant-wide rows in its own EXACT scope: its writes land on them, so nothing
+  // is tagged. The tag tracks "unreachable by MY writes", not "the row is tenant-wide".
+  const unhinted = await registry.listExternalSystems({ tenantId: 'tenant_a' })
+  assert.deepEqual(unhinted.map((system) => system.id), ['sys_tenant_wide'])
+  assert.ok(!('scopeFallback' in unhinted[0]),
+    'L-09: the unhinted caller writes in the same scope it read, so the row is not tagged')
+
+  // The tag is a projection-level statement, not new disclosure: the row already names its own
+  // scope, and that is what the tag restates.
+  assert.equal(byId.get('sys_tenant_wide').workspaceId, null,
+    'L-09: the tag says the same thing the projection already said')
+}
+
 const CASES = {
   'L-01': testTenantWideRowIsVisibleToHintedCaller,
   'L-02': testWorkspaceRowIsNotDuplicated,
@@ -331,6 +372,7 @@ const CASES = {
   'L-06': testNullHintIsUnchanged,
   'L-07': testWritesStayOnTheirOwnRow,
   'L-08': testFiltersAndPaginationApplyToTheMerge,
+  'L-09': testFallbackReachedRowsAreTagged,
 }
 
 async function main() {

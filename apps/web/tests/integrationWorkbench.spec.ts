@@ -20,6 +20,8 @@ import {
   isDeadLetterReplayable,
   normalizeIntegrationProjectId,
   replayIntegrationDeadLetter,
+  externalSystemScopeWriteBlock,
+  isExternalSystemWritableInScope,
 } from '../src/services/integration/workbench'
 
 const apiFetchMock = vi.fn()
@@ -507,5 +509,43 @@ describe('integration provenance read service (DF-N2-3)', () => {
     expect(calls[0]).not.toContain('from=')
     expect(calls[0]).not.toContain('limit=')
     expect(calls[0]).toContain('rowId=MAT-1')
+  })
+})
+
+// 列表回退 vs 写入口不回退 —— 屏幕侧的那条判据。
+//
+// 背景:GET /api/integration/external-systems 对非 null 的 workspace hint 会回退一步,把同租户
+// workspace_id IS NULL 的行也列出来;而 upsert 的 findExisting 与 delete 仍按 (tenant, workspace, id)
+// 精确匹配。所以「列表里能看见」不等于「在这个作用域里写得动」,工作台的连接清单又恰好是带写按钮的清单。
+describe('externalSystemScopeWriteBlock (列表回退来的行在当前作用域内只读)', () => {
+  it('放行:行的作用域与当前 hint 一致(含两边都是租户级 null)', () => {
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: null })).toBe('')
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, {})).toBe('')
+    expect(externalSystemScopeWriteBlock({ workspaceId: 'ws_a' }, { workspaceId: 'ws_a' })).toBe('')
+    // 空串/空白 hint 与 null 同义(与后端 normalizeWorkspaceId 同形)
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: '  ' })).toBe('')
+    expect(isExternalSystemWritableInScope({ workspaceId: null }, { workspaceId: '' })).toBe(true)
+  })
+
+  it('拦下:带 hint 的调用方看到的租户级行 —— 停用会 fork 出同名新行、删除会 404', () => {
+    const message = externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: 'default' })
+    expect(message).toContain('租户级')
+    expect(message).toContain('只读')
+    expect(isExternalSystemWritableInScope({ workspaceId: null }, { workspaceId: 'default' })).toBe(false)
+  })
+
+  it('拦下:服务端打了 scopeFallback 标记的行 —— 即使 workspaceId 看起来一致也不许写', () => {
+    // 两条判据互相独立:这条只有服务端标记,列一条 workspaceId 与 hint 相同的行来证明标记自己就够。
+    expect(externalSystemScopeWriteBlock(
+      { workspaceId: 'default', scopeFallback: true },
+      { workspaceId: 'default' },
+    )).not.toBe('')
+    // 反过来,标记缺失时靠作用域比对仍然拦得住(服务端字段被摘掉不会让守卫失效)。
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: 'default' })).not.toBe('')
+  })
+
+  it('拦下:另一个工作区的行', () => {
+    expect(externalSystemScopeWriteBlock({ workspaceId: 'ws_b' }, { workspaceId: 'ws_a' }))
+      .toContain('另一个工作区')
   })
 })

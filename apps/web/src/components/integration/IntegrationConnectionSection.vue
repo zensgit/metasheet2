@@ -61,20 +61,23 @@
             <strong>{{ system.name }}</strong>
             <span>{{ system.kind }} · {{ system.role }} · {{ connectionStatusLabel(system) }}</span>
             <small v-if="runtimeBlockerForSystem(system)">{{ runtimeBlockerForSystem(system) }}</small>
+            <!-- 只读行：列表会把同租户的租户级连接（workspace_id IS NULL）一并列出来，但写入口按精确作用域
+                 匹配，够不着它。所以这里说明原因并把四个写按钮置灰，只留「复制」（复制是在当前作用域新建）。 -->
+            <small v-if="scopeWriteBlockFor(system)" :data-testid="`connection-scope-readonly-${system.id}`">{{ scopeWriteBlockFor(system) }}</small>
             <div class="integration-workbench__actions integration-workbench__actions--inline">
-              <button type="button" class="integration-workbench__icon-button" :data-testid="`edit-connection-${system.id}`" @click="editConnection(system)">
+              <button type="button" class="integration-workbench__icon-button" :data-testid="`edit-connection-${system.id}`" :disabled="Boolean(scopeWriteBlockFor(system))" :title="scopeWriteBlockFor(system) || undefined" @click="editConnection(system)">
                 编辑
               </button>
               <button type="button" class="integration-workbench__icon-button" :data-testid="`copy-connection-${system.id}`" @click="copyConnection(system)">
                 复制
               </button>
-              <button v-if="system.status !== 'inactive'" type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" @click="deactivateConnection(system)">
+              <button v-if="system.status !== 'inactive'" type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" :disabled="Boolean(scopeWriteBlockFor(system))" :title="scopeWriteBlockFor(system) || undefined" @click="deactivateConnection(system)">
                 停用
               </button>
-              <button v-else type="button" class="integration-workbench__icon-button" :data-testid="`activate-connection-${system.id}`" @click="activateConnection(system)">
+              <button v-else type="button" class="integration-workbench__icon-button" :data-testid="`activate-connection-${system.id}`" :disabled="Boolean(scopeWriteBlockFor(system))" :title="scopeWriteBlockFor(system) || undefined" @click="activateConnection(system)">
                 启用
               </button>
-              <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" :disabled="deletingConnectionId === system.id" title="只能删除未被 pipeline 引用的连接" @click="deleteConnection(system)">
+              <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" :disabled="deletingConnectionId === system.id || Boolean(scopeWriteBlockFor(system))" :title="scopeWriteBlockFor(system) || '只能删除未被 pipeline 引用的连接'" @click="deleteConnection(system)">
                 {{ deletingConnectionId === system.id ? '删除中' : '删除' }}
               </button>
             </div>
@@ -301,6 +304,12 @@ const props = defineProps<{
   systems: WorkbenchExternalSystem[]
   connectionStatusLabel: (system: WorkbenchExternalSystem | null) => string
   runtimeBlockerForSystem: (system: WorkbenchExternalSystem | null) => string
+  /**
+   * 空串 = 这行连接在当前作用域里写得动；非空 = 只读，字符串是给人看的原因。
+   * 父组件用 `externalSystemScopeWriteBlock(system, currentScope())` 算出来；没有传时按「写得动」处理，
+   * 这样其它挂载点（以及既有测试）不受影响，而工作台这块唯一带写按钮的清单一定会传。
+   */
+  connectionScopeWriteBlock?: (system: WorkbenchExternalSystem) => string
   editConnection: (system: WorkbenchExternalSystem) => void
   copyConnection: (system: WorkbenchExternalSystem) => void
   deactivateConnection: (system: WorkbenchExternalSystem) => Promise<void>
@@ -343,6 +352,11 @@ const workspaceInput = defineModel<string>('workspaceInput', { default: '' })
 // disposition calls for — a hint pointing at the dedicated K3 WISE setup wizard (existing route,
 // see router/appRoutes.ts) when that adapter kind is selected, since that kind has its own
 // full-page config flow and the raw JSON editor here is a rarely-needed advanced override.
+// 见 props 上 `connectionScopeWriteBlock` 的说明：空串 = 可写；没传 prop 时按可写处理，不改其它挂载点的行为。
+function scopeWriteBlockFor(system: WorkbenchExternalSystem): string {
+  return props.connectionScopeWriteBlock ? props.connectionScopeWriteBlock(system) : ''
+}
+
 const K3_WISE_WEBAPI_KIND = 'erp:k3-wise-webapi'
 const K3_WISE_SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
 

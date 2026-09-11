@@ -695,8 +695,11 @@ function createExternalSystemRegistry({
   // Without this the two halves of ONE pull disagree on scope and dry-run/apply 404 with
   // ExternalSystemNotFoundError. What does NOT change, INSIDE THIS FUNCTION: tenant_id must still
   // match (the fallback query carries the caller's tenant), a workspace-scoped row is never reached
-  // from another workspace or from a null `workspaceId` ARGUMENT, and writes/list/delete keep their
-  // exact scope.
+  // from another workspace or from a null `workspaceId` ARGUMENT, and writes/delete keep their
+  // exact scope. LIST NO LONGER DOES: since the 选源面板 fix it widens the SAME one step as this
+  // function, and marks each row it reached that way — see `listExternalSystems`'s head comment
+  // below. This sentence used to say "writes/list/delete"; it was the only contract text #5471 left
+  // for later callers, so it is corrected here rather than left to contradict the code.
   //
   // REVERSE POINTER (stock-preparation, F3): "a null hint never widens" is an invariant of what THIS
   // FUNCTION does with the `workspaceId` it is handed — it says nothing about what that argument
@@ -1042,9 +1045,22 @@ function createExternalSystemRegistry({
   //
   // DISCLOSURE. Every row this adds to a hinted caller's list is one that caller can ALREADY fetch
   // by id through `getExternalSystem` / `getExternalSystemAdapterConfig` (same tenant, same
-  // fallback, since #5471), at the same permission tier; the projection is unchanged
+  // fallback, since #5471), at the same permission tier; the projection is otherwise unchanged
   // (`publicRow` — private per-kind config subtrees are still deleted). So this widens WHICH rows
   // are listed, never WHAT is told about a row nor WHO may ask.
+  //
+  // `scopeFallback: true` — THE PRICE OF THE ASYMMETRY, MADE VISIBLE. The list widens and the
+  // writes do not, and at least one caller renders this list as a WRITABLE inventory
+  // (apps/web 工作台 连接管理: 编辑 / 停用 / 启用 / 删除 per row). On a tenant-wide row reached through
+  // the fallback those buttons would MISS: upsert's `findExisting` matches the hint exactly, so a
+  // 停用 would silently INSERT a second, same-named workspace row (migration 057's unique index is
+  // (tenant_id, coalesce(workspace_id,''), name) — both rows are legal) and report success while
+  // the real row stayed active; delete would 404. So every row that came from the fallback branch
+  // is tagged, and a caller that offers writes must treat a tagged row as read-only. The tag
+  // discloses NOTHING new — `workspaceId: null` is already in the projection and says the same
+  // thing — it just states the consequence at the place that knows it. Widening the WRITES instead
+  // would have been the other repair; it is deliberately NOT taken here, because a hinted write
+  // silently retargeting a tenant-wide row is a scope decision for the owner, not a display bug.
   async function listExternalSystems(input = {}) {
     const tenantId = requiredString(input.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input.workspaceId)
@@ -1086,19 +1102,27 @@ function createExternalSystemRegistry({
 
     const merged = []
     const seenIds = new Set()
-    for (const row of [...toRowArray(exactRows), ...toRowArray(tenantWideRows)]) {
-      if (!row) continue
-      const id = row.id
-      if (id !== undefined && id !== null) {
-        if (seenIds.has(id)) continue
-        seenIds.add(id)
+    // `scopeFallback` is decided by WHICH BRANCH produced the row, not by re-reading its column:
+    // a row from the second branch is exactly a row the caller's own (hinted) WRITE scope does not
+    // contain. A row present in BOTH branches is kept from the first one, so it is NOT tagged.
+    for (const [rows, scopeFallback] of [[exactRows, false], [tenantWideRows, true]]) {
+      for (const row of toRowArray(rows)) {
+        if (!row) continue
+        const id = row.id
+        if (id !== undefined && id !== null) {
+          if (seenIds.has(id)) continue
+          seenIds.add(id)
+        }
+        merged.push({ row, scopeFallback })
       }
-      merged.push(row)
     }
     // Array.prototype.sort is stable, so equal `created_at` keeps the exact-scope row ahead of the
     // tenant-wide one.
-    merged.sort((left, right) => createdAtSortKey(right) - createdAtSortKey(left))
-    return publicRows(merged.slice(offset, offset + limit))
+    merged.sort((left, right) => createdAtSortKey(right.row) - createdAtSortKey(left.row))
+    return Promise.all(merged.slice(offset, offset + limit).map(async (entry) => {
+      const projected = await publicRow(credentialStore, entry.row)
+      return entry.scopeFallback ? { ...projected, scopeFallback: true } : projected
+    }))
   }
 
   return {

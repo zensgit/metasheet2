@@ -54,6 +54,7 @@
       :systems="systems"
       :connection-status-label="connectionStatusLabel"
       :runtime-blocker-for-system="runtimeBlockerForSystem"
+      :connection-scope-write-block="connectionScopeWriteBlock"
       :edit-connection="editConnection"
       :copy-connection="copyConnection"
       :deactivate-connection="deactivateConnection"
@@ -452,6 +453,7 @@ import {
   dryRunIntegrationExternalWrite,
   dryRunIntegrationTableAction,
   ensureIntegrationStockPreparationTarget,
+  externalSystemScopeWriteBlock,
   getDefaultIntegrationScope,
   getIntegrationStockPreparationTargetReadiness,
   isIntegrationScopedProjectId,
@@ -2150,7 +2152,23 @@ function resetConnectionDraft(): void {
   connectionDraftMode.value = 'new'
 }
 
+// 列表加宽（非 null workspace hint 回退到同租户 null 行）与写入口不加宽之间的那道不对称，落在这块屏幕上：
+// 回退来的行读得到、写不动。这里是屏幕侧的判据，`IntegrationConnectionSection` 据此把「编辑 / 停用 / 启用 /
+// 删除」置灰；下面每个写动作里再挡一次，是因为置灰只是外观——回调本身被别处调用（例如 openConnectionFromOverview
+// 走 editConnection）时，按钮的 disabled 拦不住它。复制不挡：复制清空 id，本来就是在当前作用域新建一条。
+function connectionScopeWriteBlock(system: WorkbenchExternalSystem): string {
+  return externalSystemScopeWriteBlock(system, currentScope())
+}
+
+function refuseScopeBlockedConnectionWrite(system: WorkbenchExternalSystem, action: string): boolean {
+  const blocked = connectionScopeWriteBlock(system)
+  if (!blocked) return false
+  setStatus(`无法${action}「${system.name}」：${blocked}`, 'error')
+  return true
+}
+
 function editConnection(system: WorkbenchExternalSystem): void {
+  if (refuseScopeBlockedConnectionWrite(system, '编辑')) return
   connectionDraft.id = system.id
   connectionDraft.name = system.name
   connectionDraft.kind = system.kind
@@ -2183,6 +2201,7 @@ function copyConnection(system: WorkbenchExternalSystem): void {
 }
 
 async function deactivateConnection(system: WorkbenchExternalSystem): Promise<void> {
+  if (refuseScopeBlockedConnectionWrite(system, '停用')) return
   try {
     const updated = await upsertWorkbenchExternalSystem({
       ...currentScope(),
@@ -2201,6 +2220,7 @@ async function deactivateConnection(system: WorkbenchExternalSystem): Promise<vo
 }
 
 async function activateConnection(system: WorkbenchExternalSystem): Promise<void> {
+  if (refuseScopeBlockedConnectionWrite(system, '启用')) return
   try {
     const updated = await upsertWorkbenchExternalSystem({
       ...currentScope(),
@@ -2232,6 +2252,7 @@ function clearDeletedSystemState(systemId: string): void {
 }
 
 async function deleteConnection(system: WorkbenchExternalSystem): Promise<void> {
+  if (refuseScopeBlockedConnectionWrite(system, '删除')) return
   if (!confirmConnectionDelete(system)) return
   deletingConnectionId.value = system.id
   try {

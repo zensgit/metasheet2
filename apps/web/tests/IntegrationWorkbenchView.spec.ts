@@ -1162,6 +1162,94 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).not.toContain('K3 Target · erp:k3-wise-webapi')
   })
 
+  // 列表回退 x 带写按钮的清单 —— 工作台这一侧的接线。
+  //
+  // useAuth 把 localStorage.workspaceId 写成 tenantId,于是每个请求都带非 null 的 workspace hint;
+  // 外接源按既有约定建在 workspace_id IS NULL 上。列表读为此回退一步(本 PR),写入口没有也不该跟着放宽:
+  // upsert 的 findExisting 与 delete 仍按 (tenant, workspace, id) 精确匹配。所以回退来的行必须在这块屏幕上
+  // 只读,否则「停用」会静默新插一条同名 workspace 行(迁移 057 的唯一索引允许两条并存)并弹「连接已停用」,
+  // 而「删除」直接 404。
+  it('回退来的租户级连接在带 workspace hint 的工作台里只读:按钮置灰,且绕过按钮也发不出写请求', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    localStorage.setItem('workspaceId', 'default')
+    const writeRequests: Array<{ url: string; method: string }> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET') {
+        writeRequests.push({ url, method })
+        return jsonResponse({})
+      }
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target'], supports: ['read', 'upsert'], advanced: false },
+        ])
+      }
+      if (url.startsWith('/api/integration/external-systems')) {
+        // 服务端(lib/external-systems.cjs 的 listExternalSystems)对非 null hint 的回退结果:行仍报自己的
+        // 作用域(workspaceId: null),并带上 scopeFallback 标记。
+        return jsonResponse([
+          {
+            id: 'sys_tenant_wide',
+            tenantId: 'default',
+            workspaceId: null,
+            name: '客户 PLM 只读库',
+            kind: 'http',
+            role: 'source',
+            status: 'active',
+            scopeFallback: true,
+          },
+        ])
+      }
+      return jsonResponse([])
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    // 列表本身确实带了 hint —— 这正是回退发生的条件,也是写入口够不着这行的原因。
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url) === '/api/integration/external-systems?tenantId=default&workspaceId=default')).toBe(true)
+
+    ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const deactivate = container.querySelector('[data-testid="deactivate-connection-sys_tenant_wide"]') as HTMLButtonElement
+    const remove = container.querySelector('[data-testid="delete-connection-sys_tenant_wide"]') as HTMLButtonElement
+    expect(container.querySelector('[data-testid="connection-scope-readonly-sys_tenant_wide"]')?.textContent).toContain('租户级')
+    expect(deactivate.disabled).toBe(true)
+    expect(remove.disabled).toBe(true)
+
+    // 置灰只是外观。把 disabled 摘掉再点 —— 处理函数自己也得拒绝,并且一个写请求都不许发出去。
+    deactivate.disabled = false
+    deactivate.click()
+    await flushUi(8)
+    expect(writeRequests).toEqual([])
+    expect(container.textContent).toContain('无法停用')
+    expect(container.textContent).not.toContain('连接已停用')
+
+    remove.disabled = false
+    remove.click()
+    await flushUi(8)
+    expect(writeRequests).toEqual([])
+    expect(container.textContent).toContain('无法删除')
+    expect(container.textContent).not.toContain('连接已删除')
+    // 删除甚至没走到确认框:守卫在 confirm 之前。
+    expect(confirmMock).not.toHaveBeenCalled()
+    // 清单里仍然只有那一行:没有 fork 出同名的第二条。
+    expect(container.querySelectorAll('[data-testid^="deactivate-connection-"]').length).toBe(1)
+  })
+
   it('does not mark error-state source or target systems as dry-run ready', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {
