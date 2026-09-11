@@ -169,9 +169,22 @@ export function isIntegrationApiPath(path: string): boolean {
   return apiPathHasPrefix(path || '', INTEGRATION_SUBTREE)
 }
 
-/** True when `(method, path)` is one of the declared read routes. Method- and path-bound; GET only. */
+/**
+ * True when `(method, path)` is one of the declared read routes. Method- and path-bound; GET only.
+ *
+ * The subtree test is repeated here on purpose, as an AND-constraint over the table above. Nothing
+ * structurally forces a row's `pattern` to agree with its `expressPath`: the lockstep tests diff the
+ * `expressPath` column against the plugin's ROUTES table, so an entry whose `expressPath` is legitimate
+ * but whose hand-written `pattern` names a branch OUTSIDE `/api/integration` would pass every existing
+ * assertion — and the gate only intercepts the subtree (`integration-api-token-gate.ts`), so such a
+ * path would be admitted by the global switch (`multitable/oapi-read-allowlist.ts:129`) with no gate
+ * behind it at all. This line makes that construction impossible rather than merely unobserved. It can
+ * only ever NARROW: `isIntegrationApiPath` is the wider (case-insensitive, slash-tolerant) predicate,
+ * so every path the anchored patterns already match satisfies it.
+ */
 export function isIntegrationOapiReadPath(method: string, path: string): boolean {
   if (method !== 'GET') return false
+  if (!isIntegrationApiPath(path)) return false
   return INTEGRATION_OAPI_READ_ROUTES.some((route) => route.pattern.test(path))
 }
 

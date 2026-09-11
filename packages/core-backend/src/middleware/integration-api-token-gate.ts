@@ -25,6 +25,23 @@
  * fail-CLOSED: no scopes attached on an `mst_` bearer → 401, scopes attached without the one we need
  * → 403.
  *
+ * DOOR 1c — THE OAPI-4a BASE/SHEET FENCE. A token may additionally carry per-base/sheet whitelists
+ * (`api-token-auth.ts:76-77`). On the records surface `oapiScopeGuard` resolves the request's target
+ * sheet server-side and refuses anything outside them. An integration route has no base/sheet target,
+ * so the fence cannot be CHECKED here — and the ratified design lock says a scoped token can never act
+ * outside it "on any route, read or write", and that scoping "only tightens"
+ * (`docs/development/multitable-oapi4-scoped-tokens-designlock-20260629.md:120-122`). Admitting a
+ * fenced token would therefore widen it back to creator-wide on this subtree. So a base- or
+ * sheet-scoped token is refused 403 `OUT_OF_SCOPE` here. Unscoped tokens (both whitelists empty or
+ * absent) are the legacy creator-wide shape and pass, exactly as they do through `oapiScopeGuard`.
+ *
+ * WHEN THE AUTHORIZATION BACKEND ITSELF FAILS. Every await in the handshake sits inside one try/catch
+ * that answers 503 `AUTHZ_UNAVAILABLE` with a static message. Without it the rejected promise is simply
+ * DROPPED by Express 4 (measured on this repo's express 4.21.2: no response, error handler not reached,
+ * process-level unhandled rejection). The authorization direction was fail-closed either way — `next()`
+ * is never reached — but "no answer at all" is not an acceptable availability posture, and the driver's
+ * own error text must never be echoed back to a caller that has not been authenticated.
+ *
  * DOOR 2 — THE CREATOR'S RBAC. A token carries no permissions of its own. `apiTokenAuth` sets
  * `req.user = { id: <creator>, apiToken: true }` with NO `permissions`, NO `role`, NO `tenantId`
  * (`api-token-auth.ts:80-83`), which means the plugin's `hasPermission` would see an empty permission
@@ -61,10 +78,13 @@
  *   `authService.resolveSessionTenantId(creatorId)` with NO requested tenant, i.e. the same resolution
  *   the creator's own login performs (`AuthService.ts:387-425`). That function returns a tenant only
  *   when the user has EXACTLY ONE active membership and the user row is active; ambiguity or an
- *   inactive user yields `undefined`, and then every tenant-scoped integration route refuses with the
- *   plugin's own `TENANT_CONTEXT_REQUIRED` (http-routes.cjs:1039-1041) because `user.tenantId` is
- *   empty and the tenantless-platform-admin branch is unreachable. Only the four tenant-free catalog
- *   reads keep working.
+ *   inactive user yields `undefined`, and then every tenant-scoped integration route refuses inside the
+ *   plugin's own `resolveTenantId` — 400 `TENANT_REQUIRED` (http-routes.cjs:1032) when the request
+ *   carries no `?tenantId=` either, and 403 `TENANT_CONTEXT_REQUIRED` (http-routes.cjs:1039) when it
+ *   does, because `user.tenantId` is empty and the tenantless-platform-admin branch is unreachable.
+ *   (Verified by running the plugin's exported `resolveTenantId` with the identity built below: no
+ *   tenant anywhere → 400 `TENANT_REQUIRED`; `?tenantId=t9` → 403 `TENANT_CONTEXT_REQUIRED`.) Only the
+ *   four tenant-free catalog reads keep working.
  *
  *   The `x-tenant-id` REQUEST HEADER IS NEVER CONSULTED. `jwt-middleware.ts:107-109` copies that
  *   header onto `user.tenantId` when a verified token carries no tenant claim — the hole the
@@ -84,6 +104,7 @@
 import type { Request, RequestHandler, Response } from 'express'
 
 import { authService } from '../auth/AuthService'
+import { Logger } from '../core/logger'
 import {
   INTEGRATION_OAPI_READ_PERMISSION,
   INTEGRATION_OAPI_READ_SCOPE,
@@ -93,6 +114,8 @@ import {
 } from '../integration/oapi-integration-read-allowlist'
 import { userHasPermission } from '../rbac/service'
 import { apiTokenAuth } from './api-token-auth'
+
+const logger = new Logger('IntegrationApiTokenGate')
 
 /**
  * Seams, injected only by tests. Production wiring uses the real `apiTokenAuth`, the real RBAC
@@ -126,48 +149,67 @@ export function createIntegrationApiTokenGate(deps: IntegrationApiTokenGateDeps 
   const resolveCreatorTenantId =
     deps.resolveCreatorTenantId ?? ((userId: string) => authService.resolveSessionTenantId(userId))
 
-  return async (req, res, next) => {
-    const authHeader = req.headers.authorization
-    // Session/JWT traffic and every non-`mst_` bearer is untouched by this gate.
-    if (!isIntegrationApiTokenBearer(authHeader)) return next()
-    // A token on any other surface is the multitable allowlist's business, not this gate's.
-    if (!isIntegrationApiPath(req.path)) return next()
-
-    // Fail-closed on the subtree: an `mst_` bearer may only attempt the declared read routes.
-    if (!isIntegrationOapiReadAllowlistRequest(req.method, req.path, authHeader)) {
-      return deny(
-        res,
-        401,
-        'UNAUTHORIZED',
-        'API tokens may only call the declared integration read routes',
-      )
-    }
-
+  /**
+   * The whole handshake. Returns `true` ONLY when the request is admitted and the narrow identity has
+   * been hydrated; every other outcome has already written its own refusal to `res`. Factored out so
+   * the caller can keep `next()` strictly OUTSIDE the try/catch below — a downstream layer's failure
+   * must never be reported as this gate's 503.
+   */
+  const authorize = async (req: Request, res: Response): Promise<boolean> => {
     // DOOR 1a — the token itself must validate. `apiTokenAuth` answers 401 on its own for a revoked /
     // expired / unknown token; if it did, we must not continue.
     await authenticateToken(req, res)
-    if (res.headersSent) return
+    if (res.headersSent) return false
 
     // DOOR 1b — the scope. Explicit and fail-closed; `requireScope`'s fail-open is not relied on.
     const scopes = req.apiTokenScopes
     if (!Array.isArray(scopes)) {
-      return deny(res, 401, 'INVALID_API_TOKEN', 'API token could not be authenticated')
+      deny(res, 401, 'INVALID_API_TOKEN', 'API token could not be authenticated')
+      return false
     }
     if (!scopes.includes(INTEGRATION_OAPI_READ_SCOPE)) {
       req.oapiAuditReason = 'insufficient_scope'
-      return deny(res, 403, 'INSUFFICIENT_SCOPE', `Required scope: ${INTEGRATION_OAPI_READ_SCOPE}`)
+      deny(res, 403, 'INSUFFICIENT_SCOPE', `Required scope: ${INTEGRATION_OAPI_READ_SCOPE}`)
+      return false
+    }
+
+    // DOOR 1c — the OAPI-4a per-base/sheet FENCE. `apiTokenAuth` attaches the token's whitelists
+    // (`api-token-auth.ts:76-77`); on the records surface `oapiScopeGuard` resolves the request's
+    // target sheet server-side and refuses anything outside them (`oapi-scope-guard.ts:86-101`).
+    // An integration route has no sheet/base target to resolve, so this gate cannot CHECK the fence —
+    // and the design lock is explicit that "a scoped token can NEVER act outside its base_ids/sheet_ids,
+    // on any route, read or write" and that "scoping only tightens"
+    // (`docs/development/multitable-oapi4-scoped-tokens-designlock-20260629.md:120-122`). The only
+    // composition consistent with both facts is to REFUSE: admitting a fenced token here would silently
+    // widen it back to creator-wide on this subtree, i.e. the caller's own least-privilege action
+    // (filling `sheetIds`) would have loosened nothing while looking like it had. Unscoped tokens
+    // (both whitelists absent/empty) are unaffected — that is the legacy creator-wide shape
+    // `oapiScopeGuard` also lets through.
+    const baseScoped = Array.isArray(req.apiTokenBaseIds) && req.apiTokenBaseIds.length > 0
+    const sheetScoped = Array.isArray(req.apiTokenSheetIds) && req.apiTokenSheetIds.length > 0
+    if (baseScoped || sheetScoped) {
+      req.oapiAuditReason = 'out_of_base_sheet_scope'
+      deny(
+        res,
+        403,
+        'OUT_OF_SCOPE',
+        'a base/sheet-scoped API token cannot use the integration surface',
+      )
+      return false
     }
 
     const creatorId = typeof req.apiTokenUserId === 'string' ? req.apiTokenUserId.trim() : ''
     if (!creatorId) {
-      return deny(res, 401, 'INVALID_API_TOKEN', 'API token could not be authenticated')
+      deny(res, 401, 'INVALID_API_TOKEN', 'API token could not be authenticated')
+      return false
     }
 
     // DOOR 2 — the creator's own RBAC. A scope is a capability the creator DELEGATED; it can never
     // exceed what the creator holds. No permission code (or no DB) → refuse.
     const permitted = await hasRbacPermission(creatorId, INTEGRATION_OAPI_READ_PERMISSION)
     if (!permitted) {
-      return deny(res, 403, 'FORBIDDEN', 'Insufficient integration permissions')
+      deny(res, 403, 'FORBIDDEN', 'Insufficient integration permissions')
+      return false
     }
 
     // Tenant: derived from the creator's membership, never from the request or the `x-tenant-id`
@@ -186,6 +228,54 @@ export function createIntegrationApiTokenGate(deps: IntegrationApiTokenGateDeps 
     } as Express.Request['user']
     if (tenantId) req.authenticatedTenantId = tenantId
     else delete req.authenticatedTenantId
+
+    return true
+  }
+
+  return async (req, res, next) => {
+    const authHeader = req.headers.authorization
+    // Session/JWT traffic and every non-`mst_` bearer is untouched by this gate.
+    if (!isIntegrationApiTokenBearer(authHeader)) return next()
+    // A token on any other surface is the multitable allowlist's business, not this gate's.
+    if (!isIntegrationApiPath(req.path)) return next()
+
+    // Fail-closed on the subtree: an `mst_` bearer may only attempt the declared read routes.
+    if (!isIntegrationOapiReadAllowlistRequest(req.method, req.path, authHeader)) {
+      return deny(
+        res,
+        401,
+        'UNAUTHORIZED',
+        'API tokens may only call the declared integration read routes',
+      )
+    }
+
+    let admitted = false
+    try {
+      admitted = await authorize(req, res)
+    } catch (error) {
+      // Express 4 DROPS a rejected async middleware promise: `Layer.handle_request` only catches a
+      // SYNCHRONOUS throw, so the error handler is never reached, no response is ever written, and the
+      // host process (which installs no `unhandledRejection` listener) takes an unhandled rejection.
+      // Measured on this repo's own express 4.21.2 / node v25.9.0: bare async reject → error handler
+      // NOT reached, "NO RESPONSE within 1200ms", `unhandledRejection: db down`; the same app with this
+      // try/catch answers `503` immediately. (`next(error)` would also reach the error handler, but an
+      // explicit refusal is self-evidencing and cannot depend on an error handler being mounted.)
+      // The direction was already fail-closed — `next()` is never called and no identity is hydrated —
+      // so this only fixes the availability half. The message is static: a driver/DB error string must
+      // not be echoed to an unauthenticated caller.
+      logger.error(
+        `integration api-token gate failed closed: ${req.method} ${req.path}`,
+        error instanceof Error ? error : undefined,
+      )
+      if (res.headersSent) return
+      return deny(
+        res,
+        503,
+        'AUTHZ_UNAVAILABLE',
+        'integration authorization is temporarily unavailable',
+      )
+    }
+    if (!admitted) return
 
     return next()
   }

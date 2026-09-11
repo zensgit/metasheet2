@@ -1,8 +1,10 @@
 # G44 — 数据工厂对外契约的第一刀（只读面）· 验证
 
-- 日期：2026-09-11
+- 日期：2026-09-11（第二版：对抗复核终审返修后）
 - 分支：`feat/integration-openapi-contract`，基于 `5f4b32122`
 - 设计文档：`docs/development/integration-openapi-contract-design-20260911.md`
+
+**本版相对第一版的变化**：终审判定"修完 3 项再合"。X1（重新生成 `packages/openapi/dist-sdk/index.d.ts`）已由派活方在 `128f552bc` 完成，本轮**没有再动任何 openapi 产物**，也没有重跑 `generate:sdk`（见 §7）。X2（base/sheet 受限 token fail-closed）、X3（门体 try/catch 答 503 + 删掉假件背书的测试名）以及四条建议在本轮落地，新增变异 11 项（§4.4）。
 
 ---
 
@@ -12,8 +14,8 @@
 
 | 文件 | 用例数 | 内容 |
 | --- | --- | --- |
-| `packages/core-backend/tests/unit/integration-oapi-read-allowlist.test.ts` | 59 | 24 条正例、凭据/方法拒绝例、32 条路径绕过负例、三组 lockstep 对拍、防绕过性质测试 |
-| `packages/core-backend/tests/unit/integration-api-token-gate.test.ts` | 38 | 穿透、允许表前置拒绝（16 条）、门 1、门 2、身份形状、租户来源 |
+| `packages/core-backend/tests/unit/integration-oapi-read-allowlist.test.ts` | **65**（第一版 59） | 24 条正例、凭据/方法拒绝例、32 条路径绕过负例、三组 lockstep 对拍、防绕过性质测试；**新增 6 条**：子树 AND 约束（注入一条 pattern 逃出子树的坏行、断言仍拒、再还原），含探针非空性与表完整性两条兜底 |
+| `packages/core-backend/tests/unit/integration-api-token-gate.test.ts` | **59**（第一版 38） | 穿透、允许表前置拒绝（16 条）、门 1、门 2、身份形状、租户来源；**新增 21 条**：门 1c base/sheet 围栏（7）、授权后端抛错答 503（4，替换掉原先那条名字写错的）、挂载序守卫（3 运行时 + 6 源码接线）、默认 seam 是真实实现（2） |
 
 ### 1.2 改动的既有测试
 
@@ -21,28 +23,33 @@
 
 ### 1.3 实跑结果（原样）
 
-新增两支 + 受影响守卫 + 相邻既有 token 测试，最终状态（4 + 59 + 38 + 14 + 46 = 161）：
+新增两支 + 受影响守卫 + 相邻既有 token 测试，返修后状态（4 + 65 + 59 + 14 + 46 = 188）：
 
 ```
- ✓ tests/unit/api-path-policy.guard.test.ts  (4 tests)
- ✓ tests/unit/integration-oapi-read-allowlist.test.ts  (59 tests)
- ✓ tests/unit/integration-api-token-gate.test.ts  (38 tests)
- ✓ tests/unit/multitable-oapi-read-allowlist.test.ts  (14 tests)
- ✓ tests/unit/api-token-webhook.test.ts  (46 tests) 919ms
-
  Test Files  5 passed (5)
-      Tests  161 passed (161)
-   Duration  3.45s
+      Tests  188 passed (188)
+   Duration  2.16s (transform 564ms, setup 705ms, collect 2.02s, tests 1.40s, environment 1ms, prepare 1.03s)
 ```
 
-过程记录：gate 测试最初是 36 条，第一轮变异（§4.2）显示 M3/M4 各只红 1 条，于是补了两条正交断言，变成 38 条；上面的 161 是补完之后的数字。
+只跑两支新增 spec 时：`Test Files 2 passed (2) / Tests 124 passed (124)`（65 + 59）。第一版是 97（59 + 38）。
+
+过程记录：gate 测试最初是 36 条，第一轮变异显示 M3/M4 各只红 1 条，于是补了两条正交断言，变成 38 条；本轮返修再补到 59 条。
 
 ### 1.4 type-check
 
 ```
 cd packages/core-backend && npx tsc --noEmit
-EXIT=0
+exit=0
 ```
+
+仓库的 `tsconfig.json` 把 `**/*.test.ts` 排除在外，所以上面那条**不覆盖本 PR 的两支测试**。为了不留死角，另用一份临时 config（只在 include 里加这两个测试文件、其余排除项保持原样）再跑一次，跑完即删：
+
+```
+npx tsc --noEmit -p tsconfig.g44check.json
+exit=0
+```
+
+这一步抓到并修掉了一条**既有**的类型错：`beforeEach(() => vi.clearAllMocks())` 的简写体返回 `VitestUtils`，不是 `Awaitable<HookCleanupCallback>`（`TS2322`）。已改成带花括号的形式。临时 config 未提交，跑完 `git status` 只剩本 PR 自己的改动。
 
 ### 1.5 lint —— 没跑，并说明为什么
 
@@ -78,6 +85,10 @@ integration paths: 24
 ```
 
 无重排、无删除。
+
+**X1 补记（终审的阻断项）**：第一版漏了 SDK 那一条腿。`.github/workflows/plugin-tests.yml:800-802` 在 job `test` 里跑 `pnpm --filter @metasheet/openapi generate:sdk` 然后 `git diff --exit-code -- packages/openapi/dist packages/openapi/dist-sdk/index.d.ts`，而 `generate:sdk` = `build && pnpm --dir dist-sdk build`（`packages/openapi/package.json:10`），`dist-sdk/scripts/build.mjs:9,18-28` 会用 openapi-typescript 从 `dist/openapi.yaml` 重生成 `index.d.ts`。第一版只提交了 `dist/` 三个产物，`dist-sdk/index.d.ts` 仍是 PR 前镜像（298 条路径键 vs dist 的 322），CI 必红。
+
+这一条**由派活方在 commit `128f552bc` 补齐**（`packages/openapi/dist-sdk/index.d.ts` +1179 行、24 个新路径键）。**本轮返修没有再动任何 openapi 产物，也没有重跑 `generate:sdk`**——本地没装 openapi-typescript，且磁盘余量不允许 `pnpm install`。所以"重跑 generate:sdk 后 diff 为空"这件事**我没有实测**，只能靠 CI 判定（记在 §7）。
 
 ---
 
@@ -143,9 +154,11 @@ POST /api/integration/pipelines/p1/run    -> status=200 reqPath="/api/integratio
 
 ---
 
-## 4. 变异自证：11 项，全部致红
+## 4. 变异自证：两轮共 22 项
 
-### 4.1 方法
+第一轮 11 项（§4.1-4.3，第一版）全部一次致红。第二轮 11 项（§4.4，本次返修）10 项一次致红，1 项**先出负结果**——而且那条负结果暴露的是我自己新写的守卫的漏洞，已修好后重跑致红。
+
+### 4.1 第一轮的方法
 
 变异**只作用于 scratchpad 里的一份基线树副本**（`git archive 5f4b32122` 展开 + junction 复用 node_modules），把我的改动文件复制进去后再改坏。**工作树全程未被改动一个字节**——变异跑完后 `git status --short` 与跑前逐行一致（见 §4.3）。
 
@@ -176,6 +189,7 @@ POST /api/integration/pipelines/p1/run    -> status=200 reqPath="/api/integratio
 - M3、M4、M5 的红用例数偏少（2/2/1）。M4 的那条"scopes WITHOUT integration:read"内部遍历 4 种 scope 形状（空、`records:read`、三项组合、`integration:write`），是 1 个用例 4 组断言，不是只测了一种。第一轮跑 M3/M4 各只红 1 条，我因此**补了两条正交断言**（RBAC 拒绝后身份未被装配；scope 拒绝后身份未被装配且租户解析器根本没被调用），把各自提到 2 条。我没有为了凑数字再拆用例。
 - M5 与 M11 是同一处的两种改坏方式，故意都跑：M5（回落）只红"请求头不能在 creator 无租户时供租户"，M11（优先）额外红"请求头被忽略"。两条断言各自承重，缺一条就会有一种改坏方式漏网。
 
+
 ### 4.3 工作树未被污染的证据
 
 变异跑完后：
@@ -196,6 +210,74 @@ POST /api/integration/pipelines/p1/run    -> status=200 reqPath="/api/integratio
 ```
 
 与变异前完全一致，且随后重跑三支 spec 仍为全绿。
+
+---
+
+### 4.4 第二轮变异（终审返修的三项 + 两条硬化），11 项，10 项一次致红、1 项**先出负结果再修好守卫**
+
+方法与第一轮不同，原因是磁盘只剩 2.2G，不能再复制一份基线树：本轮**在工作树里原地改坏 → 跑 spec → 从内存里的原始字节还原 → sha256 比对**。跑完 11 项后 `git status --short` 仍只有本 PR 的 5 个文件，`git diff --stat -- packages/core-backend/src/index.ts` 为空（`index.ts` 全程只被读、被临时改坏、再还原，最终未进入本 PR 的改动集）。
+
+| 探针 | 改坏了什么 | 红掉 | 红掉的用例（名） |
+| --- | --- | --- | --- |
+| **M-X2a** | 门 1c 整条失效（`if (false && (baseScoped \|\| sheetScoped))`） | **5 / 57** | DOOR 1c 的 sheet-scoped / base-scoped / both 三条 + `the refusal leaves the identity UNHYDRATED` + `the fence is refused on EVERY declared read path` |
+| **M-X2b** | 门 1c 的 `\|\|` 改成 `&&`（只有同时带 base 和 sheet 才拒） | **4 / 57** | 上面五条里除 `both` 之外的四条 |
+| **M-X2c** | 门 1c 照拒，但不写 `req.oapiAuditReason` | **1 / 57** | `the refusal leaves the identity UNHYDRATED — no read authority is ever assembled` |
+| **M-X2d** | 门 1b（capability scope）失效，于是围栏抢先应答 | **3 / 57** | `scopes WITHOUT integration:read → 403 INSUFFICIENT_SCOPE`；`a scope-denied request leaves the identity UNHYDRATED`；`the capability-scope refusal still wins when BOTH are wrong (no reordering of DOOR 1b)` |
+| **M-X3a** | catch 里改回 `throw error`（修复前的行为） | **3 / 57** | `授权后端抛错` 三条（DOOR 1a / DOOR 2 / TENANT）全红 |
+| **M-X3b** | 503 的文案改成回显 `error.message` | **3 / 57** | 同上三条（`expect(JSON.stringify(body)).not.toContain('db down')` 命中） |
+| **M-SUB** | 删掉 `isIntegrationOapiReadPath` 里的子树 AND 约束 | **4 / 65** | 四条注入用例：sibling subtree / admin route / lookalike prefix / 吞一切的通配 |
+| **M-ORD-a** | 把 `this.app.use(createIntegrationApiTokenGate())` 注释掉 | **2 / 57** | `the gate is mounted app-level EXACTLY once, and inside setupMiddleware()`；`setupMiddleware() registers no /api/integration route ahead of the gate either` |
+| **M-ORD-b** | 构造函数不再调 `setupMiddleware()` | **1 / 57** | `setupMiddleware() runs from the CONSTRUCTOR, so the mount happens at construction time` |
+| **M-ORD-c** | 把 `loadPlugins()` 拉进构造函数 | **2 / 57** | `nothing can register a route before that: the constructor loads no plugin and mounts no route`；`plugin loading lives in start(), which cannot run before the constructor has finished` |
+| **M-ORD-d** | 在 `start()` 里再挂一次门（挂载点不再唯一） | **1 / 57** | `the gate is mounted app-level EXACTLY once, and inside setupMiddleware()` |
+
+**一条负结果，如实记录并已修好**：M-ORD-a / M-ORD-b 第一次跑是**全绿 57/57**。原因是守卫用 `line.includes(...)` 做纯文本匹配，而"把一行注释掉"之后那行**仍然包含**被匹配的文本——守卫读不出"这行不再执行"。这正是变异探针存在的意义：它抓到的是我自己新写的守卫的漏洞，不是产品代码的。修法是给源码扫描加一个 `isCode(line)`（排除 `//`、`*`、`/*` 开头的行）并用在四处断言上，重跑后 M-ORD-a 红 2 条、M-ORD-b 红 1 条。
+
+**两条诚实标注**：
+
+- M-X2c 只红 1 条，是因为审计理由只在一条用例里被断言。没有为了抬数字去拆用例。
+- 运行时那半边的挂载序守卫（A：`app._router.stack` 索引 + 真实派发）**没有**对应的产品代码变异——它证明的是 Express 的语义，不是本仓某一行。它的非空性由同文件的 CONTROL 用例保证：把同样两层反序注册，handler 确实被执行、返回 200、`reached` 非空。
+
+### 4.5 Express 4 的行为是实测的，不是推断的
+
+终审要求删掉 `tests/unit/integration-api-token-gate.test.ts` 里那条名为 "…surfaced to the error handler" 的用例名，因为它把 Express 5 的行为当成本仓行为钉住了。我用 core-backend 自己的依赖（`packages/core-backend/node_modules/express` = **4.21.2**，node **v25.9.0**）跑了三种中间件形状，原样结果：
+
+```
+{
+  "express": "4.21.2",
+  "node": "v25.9.0",
+  "results": [
+    { "kind": "bare",     "response": "NO RESPONSE within 1200ms (socket still open)", "errorHandlerReached": false },
+    { "kind": "trycatch", "response": "503 {\"ok\":false,\"error\":{\"code\":\"AUTHZ_UNAVAILABLE\"}}", "errorHandlerReached": false },
+    { "kind": "nexterr",  "response": "500 {\"viaErrorHandler\":true,\"msg\":\"db down\"}", "errorHandlerReached": true }
+  ],
+  "unhandledRejections": ["db down"],
+  "mountOrder": {
+    "useThenGet": { "gate": 2, "route": 3, "gateFirst": true },
+    "getThenUse": { "gate": 3, "route": 2, "gateFirst": false }
+  }
+}
+```
+
+三条结论：(1) 裸 async 中间件的 rejection **不**进 error handler、客户端**无任何应答**、进程收到 `unhandledRejection` —— 旧用例名是错的；(2) try/catch 答 503 是真的有应答；(3) `next(err)` **确实**能进 error handler ——所以终审/发现里"Express 4 不会把错误交给 error handler"这句要限定成"**async 中间件的 rejection** 不会"，显式 `next(err)` 会。本门选 `deny` 而不是 `next(err)`，理由是自证：不依赖末端确实挂了 error handler。
+
+`mountOrder` 那两行是同一个探针顺手测的 Express 层序语义，和 §3.6 的守卫 A 同源。
+
+脚本跑在 scratchpad、跑完即弃，仓库无落盘。
+
+### 4.6 拒绝码是跑出来的
+
+`§3.1`（设计文档）里那两支 `resolveTenantId` 结果，是直接 require 插件的 `http-routes.cjs` 调 `__internals.resolveTenantId` 跑出来的，输入就是本门装配的身份：
+
+```
+no tenantId anywhere         => 400 TENANT_REQUIRED "tenantId is required"
+caller supplies ?tenantId=t9 => 403 TENANT_CONTEXT_REQUIRED "tenant context is required"
+```
+
+所以门注释与设计文档里原先只写 403 `TENANT_CONTEXT_REQUIRED` 是不全的，已改成两支并列。
+
+---
+
 
 ---
 
@@ -260,6 +342,10 @@ lines starting with router.: 102 ["  router.get('/bases', async (req: Request, r
 2. **集成 / e2e 没跑** —— 只跑 unit 层。真实 `apiTokenAuth` → 真库 `userHasPermission` → `resolveSessionTenantId` → 插件 handler 的整链没有端到端跑过。门里三个依赖都做成可注入 seam，unit 层注入了替身。
 3. **插件自己的测试套件（`plugins/plugin-integration-core/__tests__`）没跑** —— 本 PR 一个字节都没改该插件，判断为不受影响，但没有实跑证据。
 4. **222 / 任何真实部署没验证** —— 不知道目标部署的 `integration` 命名空间准入是否已启用、`integration:read` 权限码是否已种。两者缺失的结果都是 403（fail-closed）。
-5. **前端选不出这个作用域** —— `MetaApiTokenManager.vue:491` 硬编码六项。后端 API 可以创建（`routes/api-tokens.ts:42` 走 `ALL_API_TOKEN_SCOPES`），UI 暂时不行。刻意不做。
+5. **前端选不出这个作用域** —— `MetaApiTokenManager.vue:498` 的 `availableScopes` 硬编码六项（本轮只改了它上方那段已过期的注释，逻辑未动）。后端 API 可以创建（`routes/api-tokens.ts:42` 走 `ALL_API_TOKEN_SCOPES`），UI 暂时不行。刻意不做。
 6. **`%2f` / `%2E%2E` 的放行** —— 已用真实路由器证明落点是已声明的 GET（§3），但这依赖 Express 4 的当前解码时机（路由用未解码 pathname，`req.params` 事后 `decodeURIComponent`）。若将来换路由器或加一层会规范化路径的反代，这个结论需要重测。性质测试会抓到，前提是有人在那次变更时跑它。
 7. **读侧无 per-token 限流** —— 见设计文档 §6.7。
+8. **`generate:sdk` 没有本地重跑** —— X1 的产物由派活方在 `128f552bc` 提交，我没有在本地跑 `pnpm --filter @metasheet/openapi generate:sdk` 复验"重跑后 diff 为空"（本地无 openapi-typescript，磁盘余量不允许安装）。CI 的 `git diff --exit-code` 是唯一的判定者。
+9. **挂载序守卫只证到接线层，没证到进程层** —— A 半边证的是 Express 的层序语义（真实 express + 真实派发 + 反序对照），B 半边证的是 `src/index.ts` 的接线文本。两者合起来覆盖了"门被挪走 / 插件加载提前 / 挂载点不唯一"这三类改坏，但**不覆盖**"有人在 `setupMiddleware` 之外、用某种本守卫扫不出的形式把 `/api/integration` 挂到更早的子 router 上"。真正根治要走后续单第 1 条（per-route 前置门）。启动一个真实的 `MetaSheetServer` 实例来断言 `app._router.stack` 的做法本轮没做：构造函数会拉起注入器与一串服务，unit 层跑不动。
+10. **门 1c 的实际影响面没有在真库上核过** —— 逻辑上受影响的只有"既带 base/sheet 围栏又带 `integration:read`"的 token，而 `integration:read` 本 PR 才诞生，所以我判断今天为零；但我没有查询任何真实部署的 `multitable_api_tokens` 来证实。
+11. **`resolveCreatorTenantId` 在生产默认实现里其实不会抛** —— `AuthService.resolveSessionTenantId` 自带 try/catch 返回 `undefined`（`AuthService.ts:422-425`）。所以 §4.4 的 M-X3a/M-X3b 里那条 TENANT 用例走的是注入的替身，测的是门的 catch 语义而不是一条今天真会发生的生产路径。真正会抛的是 DOOR 1a（`validateToken` 的三次裸 DB 调用）和 DOOR 2（`userHasPermission` 对非 schema 错误 rethrow，`rbac/service.ts:70`）。终审里"三处 await 都可能 reject"的说法应当限定为**两处**。

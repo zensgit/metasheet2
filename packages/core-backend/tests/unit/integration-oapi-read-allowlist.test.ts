@@ -25,6 +25,7 @@ import { join } from 'node:path'
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
+import type { IntegrationOapiReadRoute } from '../../src/integration/oapi-integration-read-allowlist'
 import {
   INTEGRATION_OAPI_READ_ROUTES,
   INTEGRATION_OAPI_READ_SCOPE,
@@ -580,5 +581,59 @@ describe('G44 does not disturb the multitable allowlist', () => {
     ]) {
       expect(isIntegrationOapiReadPath('GET', path)).toBe(false)
     }
+  })
+})
+
+/**
+ * THE SUBTREE AND-CONSTRAINT — the one shape the lockstep tests structurally cannot see.
+ *
+ * Every row of the table carries TWO independent path strings: `expressPath` (diffed against the
+ * plugin's ROUTES table by LOCKSTEP A/B) and a hand-written `pattern` (what actually decides
+ * admission). Nothing forces them to agree. A row with a legitimate `expressPath` and a `pattern`
+ * naming a branch OUTSIDE `/api/integration` would satisfy every other assertion in this file — and it
+ * would be the worst possible result, because the app-level gate only intercepts the subtree
+ * (`integration-api-token-gate.ts`), so the global switch (`multitable/oapi-read-allowlist.ts:129`)
+ * would admit an `mst_` bearer onto a route with no token guard behind it at all.
+ *
+ * `isIntegrationOapiReadPath` therefore AND-composes the subtree test over the table. These tests
+ * inject exactly that bad row, assert the constraint holds, and restore the table.
+ */
+describe('G44 the matcher is AND-constrained to the subtree, whatever a row pattern says', () => {
+  const table = INTEGRATION_OAPI_READ_ROUTES as unknown as IntegrationOapiReadRoute[]
+  const ESCAPEES: ReadonlyArray<readonly [string, RegExp, string]> = [
+    ['a sibling API subtree', /^\/api\/multitable\/records$/, '/api/multitable/records'],
+    ['an admin route', /^\/api\/admin\/users$/, '/api/admin/users'],
+    ['a lookalike prefix', /^\/api\/integrations\/pipelines$/, '/api/integrations/pipelines'],
+    ['a wildcard that swallows everything', /^\/api\/.*$/, '/api/admin/users'],
+  ]
+
+  test('the probes are real — each injected pattern genuinely matches its probe path on its own', () => {
+    for (const [, pattern, probe] of ESCAPEES) expect(pattern.test(probe)).toBe(true)
+  })
+
+  for (const [label, pattern, probe] of ESCAPEES) {
+    test(`a hand-written pattern reaching ${label} still cannot admit`, () => {
+      const before = table.length
+      table.push({ expressPath: '/api/integration/status', handler: 'status', pattern })
+      try {
+        expect(isIntegrationOapiReadPath('GET', probe)).toBe(false)
+        expect(isIntegrationOapiReadAllowlistRequest('GET', probe, MST)).toBe(false)
+        // and the global switch stays where it was for a path no multitable term claims
+        if (probe === '/api/admin/users' || probe === '/api/integrations/pipelines') {
+          expect(isOapiAllowlistRequest('GET', probe, MST)).toBe(false)
+        }
+      } finally {
+        table.pop()
+      }
+      expect(table.length).toBe(before)
+    })
+  }
+
+  test('the table is intact afterwards — no injected row leaked into the contract', () => {
+    expect(INTEGRATION_OAPI_READ_ROUTES.length).toBe(24)
+    expect(INTEGRATION_OAPI_READ_ROUTES.every((r) => r.expressPath.startsWith('/api/integration/'))).toBe(true)
+    expect(
+      INTEGRATION_OAPI_READ_ROUTES.every((r) => String(r.pattern).startsWith('/^\\/api\\/integration\\/')),
+    ).toBe(true)
   })
 })
