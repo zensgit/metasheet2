@@ -211,4 +211,59 @@ describe('IntegrationConnectionSection (unit)', () => {
     const link = container?.querySelector<HTMLAnchorElement>('[data-testid="connection-draft-k3-setup-link"]')
     expect(link).toBeTruthy()
   })
+
+  // 这块清单是带写按钮的清单,而列表读已经放宽到「同租户的租户级行」。upsert/delete 没有放宽
+  // (都按精确作用域匹配),所以回退来的行必须在这里就改不动:否则「停用」会被服务端以 409
+  // EXTERNAL_SYSTEM_SCOPE_MISMATCH 拒掉,「删除」会 404 —— 两个死按钮。
+  // 口径注意:这四个按钮置灰 ≠ 这行只读。同一屏的「测试连接」仍会按行自身的作用域写回该行
+  // (服务端 persistExternalSystemTestResult,#5534),所以组件只负责原样展示父组件给的理由。
+  const tenantWideSystem: WorkbenchExternalSystem = {
+    id: 'sys_tenant_wide',
+    tenantId: 'default',
+    workspaceId: null,
+    name: '客户 PLM 只读库',
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+  }
+  const ownScopeSystem: WorkbenchExternalSystem = {
+    ...tenantWideSystem,
+    id: 'sys_ws',
+    name: '本工作区的源',
+    workspaceId: 'default',
+  }
+  const WRITE_BLOCK_REASON = '这是租户级连接(未归属当前工作区):在当前工作区里不能编辑 / 停用 / 启用 / 删除。'
+
+  it('把回退来的行的编辑/停用/删除置灰并给出原因,复制仍可用', async () => {
+    await mountSection(baseProps({
+      inventoryExpanded: true,
+      systems: [tenantWideSystem, ownScopeSystem],
+      // 与父组件同形:判据只看行自己的 workspaceId 与当前 hint 是否一致。
+      connectionScopeWriteBlock: (system: WorkbenchExternalSystem) => (
+        (system.workspaceId ?? null) === null ? WRITE_BLOCK_REASON : ''
+      ),
+    }))
+
+    const notice = container?.querySelector('[data-testid="connection-scope-write-block-sys_tenant_wide"]')
+    expect(notice?.textContent).toContain('租户级')
+    expect(notice?.textContent).toContain('停用')
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="edit-connection-sys_tenant_wide"]')?.disabled).toBe(true)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="deactivate-connection-sys_tenant_wide"]')?.disabled).toBe(true)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="delete-connection-sys_tenant_wide"]')?.disabled).toBe(true)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="delete-connection-sys_tenant_wide"]')?.title).toContain('租户级')
+    // 复制会清空 id、在当前作用域新建一条,是这行唯一正当的写动作,不许一起置灰。
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="copy-connection-sys_tenant_wide"]')?.disabled).toBe(false)
+
+    // 同一份渲染里,本作用域的行一切照旧 —— 是按行判的,不是整块清单一刀切。
+    expect(container?.querySelector('[data-testid="connection-scope-write-block-sys_ws"]')).toBeFalsy()
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="edit-connection-sys_ws"]')?.disabled).toBe(false)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="deactivate-connection-sys_ws"]')?.disabled).toBe(false)
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="delete-connection-sys_ws"]')?.disabled).toBe(false)
+  })
+
+  it('没传 connectionScopeWriteBlock 时按可写渲染(其它挂载点与既有用法不受影响)', async () => {
+    await mountSection(baseProps({ inventoryExpanded: true, systems: [tenantWideSystem] }))
+    expect(container?.querySelector('[data-testid="connection-scope-write-block-sys_tenant_wide"]')).toBeFalsy()
+    expect(container?.querySelector<HTMLButtonElement>('[data-testid="deactivate-connection-sys_tenant_wide"]')?.disabled).toBe(false)
+  })
 })
