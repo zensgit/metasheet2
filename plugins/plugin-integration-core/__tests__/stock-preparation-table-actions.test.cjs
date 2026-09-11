@@ -1567,7 +1567,7 @@ function testRowErrorLimitIsAConditionalActionConfigKey() {
 // registry constructor :693 and assertStockPreparationTargetReady :589 both go through).
 //
 // SCOPE, stated exactly so this test is not read as more than it is: that predicate
-// (lib/stock-preparation-extension-namespace.cjs:117-160) checks NAMESPACE SHAPE ONLY -- prefix,
+// (lib/stock-preparation-extension-namespace.cjs:117-165) checks NAMESPACE SHAPE ONLY -- prefix,
 // suffix shape, forbidden content keys, collision with a frozen template field. It has no pack
 // catalog and therefore CANNOT refuse "an id no customer pack declared"; the third case below pins
 // that boundary as an ACCEPT so nobody re-reads this suite as "non-pack ids are rejected here".

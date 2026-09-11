@@ -219,7 +219,7 @@ async function testSandboxNamespaceRefusalNamesTheNamespace() {
 // `inspectStockPreparationCanonicalTarget` entry point, independent of whatever HTTP route wires
 // (or fails to wire) `extensionFieldIds` on top of it.
 //
-// SCOPE: that predicate (stock-preparation-extension-namespace.cjs:117-160) checks NAMESPACE SHAPE
+// SCOPE: that predicate (stock-preparation-extension-namespace.cjs:117-165) checks NAMESPACE SHAPE
 // ONLY -- prefix, suffix shape, forbidden content keys, collision with a frozen template field. It
 // holds no pack catalog, so "an id no customer pack declared" is NOT refused here; case (3) pins
 // that boundary as an accept. Pack membership is enforced one layer out, at
