@@ -71,6 +71,10 @@ const NON_GH_PREFIXES = [
 ]
 const NON_GH_EXACT = new Set([
   'MULTITABLE_AGGREGATE_MAX_ROWS', // read-aggregation row cap
+  // 自定义模板表名常量(#5617)，不是环境开关：它是 migration 与 custom-template-store 共用的表名字面量，
+  // 被这条 `MULTITABLE_[A-Z_0-9]+` grep 当成 flag 抓到。列在这里等于声明「不得要求它出现在
+  // GLOBAL_HISTORY_FLAG_MANIFEST 里」，而不是把它注册成 flag。
+  'MULTITABLE_CUSTOM_TEMPLATES_TABLE',
   'MULTITABLE_CAPABILITY_KEYS', // capability registry
   'MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE', // cross-base mirror write (separate line)
   'MULTITABLE_ENSURE_FIELDS_OVERWRITE_MODE', // P0-S S3: provisioning destructive-reconcile guard mode (refuse[default]|overwrite|observe|preserve) — not a Global-History/recovery flag
