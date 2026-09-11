@@ -1300,7 +1300,8 @@ describe('IntegrationWorkbenchView', () => {
   // 同一道不对称的第五、第六个入口,不在「四动作」名单里:清洗表卡片的「作为 Dry-run 来源」/「作为目标多维表」。
   // 它们发的是带**确定性 id** 的 upsert(id 由 projectId 算出,不是新建的随机 id),所以这个项目的连接行
   // 若在租户级(workspace_id IS NULL)而当前工作区框非空,服务端会以 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH 拒
-  // (插件侧 L-10);而 parseIntegrationResponse 只保留 message、丢掉 code,直出的是一句英文原文。
+  // (插件侧 L-10);那时 parseIntegrationResponse 只保留 message、丢掉 code,直出的是一句英文原文
+  // (code 已透传之后,兜底见本文件下方「列表没带出这一行时」那条)。
   // 这里钉:① 撞上租户级行时不发那一枪、给中文人话;② 判据是「行自己的作用域 vs 当前 hint」,
   // 换一个没有租户级行的项目照发,而且请求仍带调用方自己的 hint —— 绝不为了写得进去而回退到 null 作用域。
   it('确定性 id 的 ensure 按钮撞上租户级行:不发请求并给中文人话;换个项目照发且不放宽作用域', async () => {
@@ -1400,7 +1401,7 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).toContain('固定 id「metasheet_staging_project_1」')
     expect(container.textContent).toContain('租户级')
     expect(container.textContent).toContain('请清空上方的工作区')
-    // 服务端那句英文原文不许落到屏幕上 —— 它正是 parseIntegrationResponse 丢掉 code 之后剩下的东西。
+    // 服务端那句英文原文不许落到屏幕上(这里根本没发请求;发了也会被下面那条兜底翻成中文)。
     expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
 
     ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()

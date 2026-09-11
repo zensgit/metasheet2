@@ -2182,9 +2182,10 @@ function refuseScopeBlockedConnectionWrite(system: WorkbenchExternalSystem, acti
 // findExisting 在精确作用域内落空,服务端 assertHintedIdDoesNotTargetTenantWideRow 直接拒:
 // 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH(插件侧 L-10;加这道拒绝之前是撞 057 主键的 23505 → 无类型 500,
 // 两种都是失败,所以这里只是把失败说清楚,不是回归)。
-// 为什么必须在屏幕侧拦一次:`parseIntegrationResponse`
-// (apps/web/src/services/integration/workbench.ts:651-663)只保留 error.message、丢掉 error.code,
-// 这两处的 catch 直出 message,操作员看到的就是一句英文 "external system belongs to the tenant-wide scope"。
+// 为什么在屏幕侧先拦一次:省掉一次注定失败的往返。
+// (历史:`parseIntegrationResponse` 曾只保留 error.message、丢掉 error.code,那时这两处的 catch 直出
+// message,操作员看到的就是一句英文 "external system belongs to the tenant-wide scope";现在 code 已透传,
+// 见下面 `connectionWriteErrorText` —— 那是兜底,这道预检仍在,两者说的是同一句话。)
 // 判据和文案都复用四动作那一套(`externalSystemScopeWriteBlock`),不另起第二套口径。
 // 这里只会「少发一个注定失败的请求」,绝不改写入作用域去够那行租户级的连接 —— 那才是放宽。
 // 列表里没有这一行时(没加载 / 分页外)不猜:照发,由服务端那道 409 兜底。
