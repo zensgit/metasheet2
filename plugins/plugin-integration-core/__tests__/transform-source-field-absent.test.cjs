@@ -22,6 +22,7 @@ const {
   getPath,
   resolveSourcePath,
   transformRecord,
+  __internals: { absentSourceLookupKey },
 } = require(path.join(__dirname, '..', 'lib', 'transform-engine.cjs'))
 const { validateRecord } = require(path.join(__dirname, '..', 'lib', 'validator.cjs'))
 const { createAdapterRegistry, createReadResult, createUpsertResult } = require(path.join(__dirname, '..', 'lib', 'contracts.cjs'))
@@ -200,10 +201,10 @@ function testBlankDefaultValueIsUnset() {
 
 // --- 3c. a bare `concat` still writes '' - a PINNED residual, not a fix -------
 // `concat` filters its blank parts and join()s them, so an all-absent concat returns '' rather
-// than undefined (`transform-engine.cjs:221-239`); the third no-write condition is
+// than undefined (`transform-engine.cjs:243-261`); the third no-write condition is
 // `outputValue === undefined`, so that '' is written with no warning. Widening the condition to
 // isBlank() would ALSO stop writing values a chain was explicitly asked to manufacture (the
-// `{fn:'defaultValue', value:''}` case below), which `transform-engine.cjs:293-299` refuses to do.
+// `{fn:'defaultValue', value:''}` case below), which `transform-engine.cjs:345-354` refuses to do.
 // The behaviour fix belongs to a separate cut; this case pins today's answer so it cannot drift.
 function testBareConcatStillWritesEmptyString() {
   for (const transform of [{ fn: 'concat' }, { fn: 'concat', fields: ['colour'], separator: '-' }]) {
@@ -231,6 +232,126 @@ function testBareConcatStillWritesEmptyString() {
     { sourceField: 'spec', targetField: 'FSpec', transform: { fn: 'concat', fields: ['colour'], separator: '-' } },
   ])
   assert.deepEqual(produced.value, { FSpec: 'RED' })
+}
+
+// --- 3e. a dictMap that answers the PRE-CHANGE lookup key still writes --------
+// Reviewer correction to this cut: "no non-empty write is lost" was false for one shape. The
+// pre-change engine never handed the chain `undefined` for an absent path - the value fill-in
+// handed it `mapping.defaultValue`, i.e. `null` for every registry-stored mapping - so a
+// dictionary carrying a "null" key really did fire and really did write `UNKNOWN`. Reproduced on
+// 919582e71 vs 0a35028d9: `{dictMap: {"null": "UNKNOWN"}}` + an absent source went from `UNKNOWN`
+// to nothing at all. The fix restores the LOOKUP KEY for dictMap alone; these assertions pin both
+// halves - the dictionary answer is written again, and everything else still is not.
+function testDictMapNullKeyStillAnswersAbsentSource() {
+  const absent = { code: 'MAT-001', quantity: 9 } // the record simply does not carry `name`
+  const dictRow = (map) => rowToFieldMapping({
+    id: 'fm_dict',
+    pipeline_id: 'pipe_x02',
+    source_field: 'name',
+    target_field: 'name',
+    transform: JSON.stringify({ fn: 'dictMap', args: { map } }),
+    validation: null,
+    default_value: null,
+    sort_order: 0,
+    created_at: null,
+  })
+
+  // 1. The REGISTRY's own factories, with the dictionary stored as JSON (a JSON object key is a
+  //    string, so "null" is exactly what an operator can store and exactly what used to fire).
+  const stored = dictRow({ null: 'UNKNOWN' })
+  assert.equal(stored.defaultValue, null, 'the stored mapping still carries the registry-encoded unset default')
+  const viaStored = transformRecord(absent, [stored])
+  assert.deepEqual(viaStored.value, { name: 'UNKNOWN' }, 'the dictionary answer for an absent source is still written')
+  assert.deepEqual(viaStored.warnings, [], 'a dictionary answer is a produced value, not an absence')
+  const viaNormalize = normalizeFieldMappings([{
+    sourceField: 'name',
+    targetField: 'name',
+    transform: { fn: 'dictMap', args: { map: { null: 'UNKNOWN' } } },
+    sortOrder: 0,
+  }])
+  assert.deepEqual(transformRecord(absent, viaNormalize).value, { name: 'UNKNOWN' }, 'same through the write-side entry point')
+
+  // 2. The key is consulted wherever the chain still carries the nothing, because the steps in
+  //    front of dictMap passed `null` through before this cut and pass `undefined` through now.
+  const chains = [
+    [[{ fn: 'trim' }, { fn: 'dictMap', args: { map: { null: 'UNKNOWN' } } }], 'UNKNOWN'],
+    [[{ fn: 'upper' }, { fn: 'dictMap', args: { map: { null: 'UNKNOWN' } } }], 'UNKNOWN'],
+    [[{ fn: 'dictMap', args: { map: { null: 'unknown' } } }, { fn: 'upper' }], 'UNKNOWN'],
+  ]
+  for (const [transform, expected] of chains) {
+    const result = transformRecord(absent, [{ ...stored, transform }])
+    assert.deepEqual(result.value, { name: expected }, `chain ${JSON.stringify(transform)} still produces its answer`)
+    assert.deepEqual(result.warnings, [])
+  }
+
+  // 3. A MISS still writes nothing: the key is swapped, the VALUE flowing down the chain is not,
+  //    so `outputValue === undefined` still holds. (Pre-change this wrote `null` - a blank.)
+  const miss = transformRecord(absent, [dictRow({ A: 'a' })])
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(miss.value, 'name'),
+    false,
+    'a dictionary with no answer still leaves the target alone',
+  )
+  assert.deepEqual(warningCodes(miss), ['SOURCE_FIELD_ABSENT'])
+
+  // 4. NO GLOBAL NORMALISATION. Only dictMap consults the key; every other step still passes the
+  //    nothing through and the target still goes unwritten. If `undefined` were normalised to
+  //    `null` for the whole chain, each of these would start writing `null` again - the exact
+  //    blanking this cut removes.
+  for (const transform of ['trim', 'upper', 'lower', 'toNumber', 'toDate']) {
+    const result = transformRecord(absent, [{ ...stored, transform }])
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(result.value, 'name'),
+      false,
+      `${transform} must still pass the nothing through and leave the target unwritten`,
+    )
+    assert.deepEqual(warningCodes(result), ['SOURCE_FIELD_ABSENT'])
+  }
+
+  // 5. The key follows what THIS MAPPING would have fed the chain, not a blanket "null". A mapping
+  //    with no defaultValue key at all fed `undefined` before this cut, so a "null" entry must NOT
+  //    fire for it - otherwise the fix would start writing values 919582e71 never wrote.
+  const noDefaultKey = {
+    sourceField: 'name',
+    targetField: 'name',
+    transform: { fn: 'dictMap', args: { map: { null: 'UNKNOWN' } } },
+  }
+  assert.equal(Object.prototype.hasOwnProperty.call(noDefaultKey, 'defaultValue'), false)
+  assert.deepEqual(
+    transformRecord(absent, [noDefaultKey]).value,
+    {},
+    'a "null" entry does not fire for a mapping that never fed null',
+  )
+  assert.deepEqual(warningCodes(transformRecord(absent, [noDefaultKey])), ['SOURCE_FIELD_ABSENT'])
+  const undefKeyMap = { ...noDefaultKey, transform: { fn: 'dictMap', args: { map: { undefined: 'FROM_UNDEF' } } } }
+  assert.deepEqual(
+    transformRecord(absent, [undefKeyMap]).value,
+    { name: 'FROM_UNDEF' },
+    'and the key it DID feed still fires',
+  )
+  // Both entries present: the stored mapping fed `null`, so the "null" entry wins - which is the
+  // answer 919582e71 gives.
+  const bothKeys = transformRecord(absent, [dictRow({ null: 'FROM_NULL', undefined: 'FROM_UNDEF' })])
+  assert.deepEqual(bothKeys.value, { name: 'FROM_NULL' })
+
+  // 6. Neighbours unchanged: a present-but-null source still maps, the dictMap fallback still wins
+  //    on a miss, and a real mapping default still pre-empts the dictionary.
+  assert.deepEqual(transformRecord({ name: null }, [stored]).value, { name: 'UNKNOWN' }, 'present-but-null is unchanged')
+  assert.deepEqual(
+    transformRecord(absent, [{ ...stored, transform: { fn: 'dictMap', args: { map: { A: 'a' }, defaultValue: 'FB' } } }]).value,
+    { name: 'FB' },
+    'the dictMap fallback still wins on a miss',
+  )
+  assert.deepEqual(
+    transformRecord(absent, [{ ...stored, defaultValue: 'D' }]).value,
+    { name: 'D' },
+    'a real mapping default still pre-empts the dictionary, exactly as before',
+  )
+
+  // 7. The key itself is the string the pre-change engine would have looked up.
+  assert.equal(absentSourceLookupKey({ defaultValue: null }), 'null')
+  assert.equal(absentSourceLookupKey({ defaultValue: undefined }), 'undefined')
+  assert.equal(absentSourceLookupKey({}), 'undefined')
 }
 
 // --- 3d. an empty array SEGMENT is absent - decided, not accidental -----------
@@ -730,6 +851,62 @@ async function testStoredMappingShapeIsNotBlanked() {
   assert.deepEqual(warningCodes(fromRegistry), warningCodes(fromLiteral))
 }
 
+// --- 9b. the dictMap compatibility survives the RUNNER, not just transformRecord ---
+// The unit case pins the engine's answer; this one pins that the answer reaches the STORED row
+// through runPipeline() + the real multitable target adapter, and that a dictionary MISS on the
+// very same wiring still leaves the stored value alone and still reports the absence.
+async function testDictMapCompatWritesThroughTheRunner() {
+  const mappingRows = (map) => [
+    { id: 'fm1', pipeline_id: 'pipe_x02', source_field: 'code', target_field: 'code', transform: null, validation: null, default_value: null, sort_order: 0, created_at: null },
+    { id: 'fm2', pipeline_id: 'pipe_x02', source_field: 'name', target_field: 'name', transform: JSON.stringify({ fn: 'dictMap', args: { map } }), validation: null, default_value: null, sort_order: 1, created_at: null },
+    { id: 'fm3', pipeline_id: 'pipe_x02', source_field: 'quantity', target_field: 'quantity', transform: null, validation: null, default_value: null, sort_order: 2, created_at: null },
+  ].map(rowToFieldMapping)
+  const existingRow = () => [{
+    id: 'rec_existing',
+    sheetId: 'sheet_approved_materials',
+    version: 1,
+    data: { code: 'MAT-001', name: 'Correct bolt', quantity: 7 },
+  }]
+  const sourceRecords = [{ code: 'MAT-001', quantity: 9, updatedAt: '2026-09-10T00:00:00.000Z' }]
+
+  // The dictionary answers the key the pre-change engine looked up -> the value is written.
+  const answered = createHarness({
+    fieldMappings: mappingRows({ null: 'UNKNOWN' }),
+    multitableRows: existingRow(),
+    sourceRecords,
+  })
+  const answeredResult = await answered.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_x02', triggeredBy: 'test' })
+  assert.equal(answeredResult.metrics.rowsFailed, 0)
+  assert.equal(
+    answered.storedRows[0].data.name,
+    'UNKNOWN',
+    'a dictMap answer for an absent source column is still written through the runner, as on 919582e71',
+  )
+  assert.equal(answered.storedRows[0].data.quantity, 9, 'the column the source did carry is written too')
+  const answeredRun = answered.db.tables.get('integration_runs')[0]
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(answeredRun.details, 'sourceFieldAbsent'),
+    false,
+    'nothing was left unwritten, so the run carries no absence detail',
+  )
+
+  // Same wiring, a dictionary with no answer -> the stored value is left alone and reported.
+  const missed = createHarness({
+    fieldMappings: mappingRows({ A: 'a' }),
+    multitableRows: existingRow(),
+    sourceRecords,
+  })
+  await missed.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_x02', triggeredBy: 'test' })
+  assert.equal(
+    missed.storedRows[0].data.name,
+    'Correct bolt',
+    'a dictionary MISS must still leave the stored value alone - the key swap must not widen the write',
+  )
+  const missedRun = missed.db.tables.get('integration_runs')[0]
+  assert.equal(missedRun.details.sourceFieldAbsent.rows, 1)
+  assert.deepEqual(missedRun.details.sourceFieldAbsent.fields, [{ sourceField: 'name', targetField: 'name' }])
+}
+
 // --- 10. the dry-run path reports the same fact and writes nothing ------------
 async function testDryRunReportsAbsenceAndWritesNothing() {
   const { db, runner, writtenRecords } = createHarness({
@@ -905,6 +1082,7 @@ const CASES = {
   testDefaultsAndTransformsStillProduceValues,
   testBlankDefaultValueIsUnset,
   testBareConcatStillWritesEmptyString,
+  testDictMapNullKeyStillAnswersAbsentSource,
   testEmptyArraySegmentIsAbsentByDecision,
   testSkipDoesNotBypassGuards,
   testResolveSourcePathValueParityWithGetPath,
@@ -912,6 +1090,7 @@ const CASES = {
   testRunReportsAbsenceWithCountAndFieldNames,
   testCleanRunCarriesNoAbsenceDetail,
   testStoredMappingShapeIsNotBlanked,
+  testDictMapCompatWritesThroughTheRunner,
   testDryRunReportsAbsenceAndWritesNothing,
   testFieldsTruncatedOnlyWhenAPairWasDropped,
   testPlannerConvergesWhenSourceFieldIsAbsent,

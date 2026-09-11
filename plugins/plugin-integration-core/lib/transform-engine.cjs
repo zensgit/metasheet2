@@ -187,7 +187,29 @@ function normalizeTransformStep(step) {
   }
 }
 
-function applyTransform(value, step, sourceRecord) {
+// The transform chain runs with no context in every case but one, so this frozen empty object is
+// the shape every other caller sees.
+const EMPTY_TRANSFORM_CONTEXT = Object.freeze({})
+
+// Compatibility key for the "source path absent" branch of transformRecord(), and ONLY for that
+// branch. Before this cut the chain never saw `undefined` for an absent path: the value fill-in
+// handed it `mapping.defaultValue`, which for every registry-stored mapping is `null`
+// (`pipelines.cjs:318` / `:201`). `dictMap` is a LOOKUP TABLE, so a map carrying a "null" key is
+// an operator writing down "and if the source says nothing here, write this" - and before this
+// cut that key really did fire and really did write a non-empty value. This returns the key the
+// pre-change engine would have looked up, so that answer stays writable.
+//
+// It returns a KEY, never a value, and only `dictMap` consults it. Normalising `undefined` to
+// `null` for the whole chain instead would hand `trim`/`upper`/`lower`/`toNumber`/`toDate` a
+// `null` to pass through as their own answer; `outputValue` would stop being `undefined`, and the
+// blanking write this cut removes would come straight back.
+function absentSourceLookupKey(mapping) {
+  return Object.prototype.hasOwnProperty.call(mapping, 'defaultValue')
+    ? String(mapping.defaultValue)
+    : 'undefined'
+}
+
+function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CONTEXT) {
   const { fn, args } = normalizeTransformStep(step)
   if (!SUPPORTED_TRANSFORMS.has(fn)) {
     throw new TransformError(`unsupported transform: ${fn}`, { fn })
@@ -241,9 +263,16 @@ function applyTransform(value, step, sourceRecord) {
       if (!isPlainObject(args.map)) {
         throw new TransformError('dictMap map must be an object', { map: args.map })
       }
-      const key = String(value)
+      // `context.absentSourceKey` is set only by transformRecord()'s absent-source branch
+      // (see absentSourceLookupKey()); with no context this is byte-for-byte the previous lookup.
+      // It swaps the LOOKUP KEY, never the value: on a MISS the chain still carries `undefined`,
+      // so `outputValue === undefined` still holds and the target still goes unwritten.
+      const lookup = value === undefined && typeof context.absentSourceKey === 'string'
+        ? context.absentSourceKey
+        : value
+      const key = String(lookup)
       if (Object.prototype.hasOwnProperty.call(args.map, key)) return args.map[key]
-      if (Object.prototype.hasOwnProperty.call(args.map, value)) return args.map[value]
+      if (Object.prototype.hasOwnProperty.call(args.map, lookup)) return args.map[lookup]
       if (Object.prototype.hasOwnProperty.call(args, 'defaultValue')) return args.defaultValue
       return value
     }
@@ -252,9 +281,9 @@ function applyTransform(value, step, sourceRecord) {
   }
 }
 
-function transformValue(value, transform, sourceRecord = {}) {
+function transformValue(value, transform, sourceRecord = {}, context = EMPTY_TRANSFORM_CONTEXT) {
   return normalizeTransformList(transform).reduce(
-    (current, step) => applyTransform(current, step, sourceRecord),
+    (current, step) => applyTransform(current, step, sourceRecord, context),
     value,
   )
 }
@@ -304,13 +333,22 @@ function transformRecord(sourceRecord, fieldMappings = []) {
       // independent time (outputValue became null, never undefined).
       if (defaultApplied || (usedDefault && resolved.found)) fieldValue = mapping.defaultValue
 
-      const outputValue = transformValue(fieldValue, mapping.transform, sourceRecord)
+      // Built for EXACTLY the branch that would otherwise skip the write, and consulted by
+      // `dictMap` alone (absentSourceLookupKey()). A mapping whose dictionary answers the key the
+      // pre-change engine looked up still produces that answer, so the promise below - "a pipeline
+      // that writes a non-empty value today keeps writing it" - holds for dictMaps too.
+      const transformContext = !resolved.found && !defaultApplied
+        ? { absentSourceKey: absentSourceLookupKey(mapping) }
+        : EMPTY_TRANSFORM_CONTEXT
+      const outputValue = transformValue(fieldValue, mapping.transform, sourceRecord, transformContext)
 
       // Do not write only when ALL THREE hold: the source path was absent from this record, no
       // default actually supplied a value, and the transform chain produced nothing of its own.
-      // A `concat` that produced a NON-EMPTY value, or a `dictMap` fallback, still writes exactly
-      // as before - a bare `concat` whose parts are all absent still produces '' and is still
-      // written; widening this condition to isBlank() would stop writing values a chain was asked
+      // A `concat` that produced a NON-EMPTY value, a `dictMap` fallback, or a `dictMap` whose
+      // dictionary carries the pre-change lookup key (its "null" entry - see
+      // absentSourceLookupKey()) still writes exactly as before - a bare `concat` whose parts
+      // are all absent still produces '' and is still written; widening this condition to
+      // isBlank() would stop writing values a chain was asked
       // to manufacture (`{fn:'defaultValue', value:''}`), which is the one thing this cut refuses
       // to do. A path that EXISTS holding null or '' is the source genuinely clearing the value
       // and is written as before.
@@ -364,6 +402,7 @@ module.exports = {
   transformValue,
   transformRecord,
   __internals: {
+    absentSourceLookupKey,
     applyTransform,
     DANGEROUS_PATH_SEGMENTS,
     isPlainObject,

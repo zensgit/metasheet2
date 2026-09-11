@@ -568,7 +568,7 @@ function classifyExisting({ existingRows, targetRecord, writableFields }) {
   // the update payload; counting it as a difference plans an `update` that changes nothing and
   // therefore re-plans as `update` on the very next round - counts and rowFingerprints report churn
   // forever. X02 made that reachable: a source field the record does not carry now leaves the key
-  // out of transformRecord()'s output instead of writing null (transform-engine.cjs:297-310).
+  // out of transformRecord()'s output instead of writing null (transform-engine.cjs:345-368).
   // This only ever turns an otherwise no-op `update` into `skip`; it can never turn a real
   // difference into a skip, because a field the payload DOES carry is still compared.
   const comparedFields = writableFields.filter((field) => getPath(targetRecord, field) !== undefined)
