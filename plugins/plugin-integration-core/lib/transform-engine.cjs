@@ -19,6 +19,15 @@ const SUPPORTED_TRANSFORMS = new Set([
 ])
 const DANGEROUS_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor'])
 
+// A coded, NON-FATAL notice. "The source record does not carry this key at all" is not the same
+// fact as "the source emptied this value": the first says the source never spoke about the field,
+// the second says it spoke and said nothing. Writing `undefined` for the first blanks a target
+// column out of silence. Mappings whose source path is absent, that carry no defaultValue, and
+// whose transform chain produced nothing are therefore left UNWRITTEN, and the fact is reported
+// under this code instead of disappearing. It never flips `ok` - a pipeline that runs green today
+// keeps running green, it just stops writing holes.
+const SOURCE_FIELD_ABSENT = 'SOURCE_FIELD_ABSENT'
+
 class TransformError extends Error {
   constructor(message, details = {}) {
     super(message)
@@ -40,6 +49,37 @@ function getPath(record, path) {
   }, record)
 }
 
+// Same traversal as getPath(), and the VALUE it returns is produced by the identical expression, so
+// it cannot drift from getPath()'s answer. What it adds is `found`: whether every segment of the
+// path was an own property that actually existed. getPath() alone collapses "absent key" and "key
+// present holding undefined" into one `undefined`, which is exactly the ambiguity that let an
+// absent source column overwrite a correct target value.
+//
+// getPath() itself is deliberately left byte-identical: it is exported and read by the validator,
+// the watermark reader, the idempotency key, the K3 body composer and the reference-mapping
+// resolver, none of which are in this change's blast radius.
+function resolveSourcePath(record, path) {
+  if (!path) return { found: false, value: undefined }
+  const parts = parsePathSegments(path)
+  if (parts.length === 0) return { found: false, value: undefined }
+  let found = true
+  const value = parts.reduce((current, part) => {
+    if (current === undefined || current === null) {
+      found = false
+      return undefined
+    }
+    if (found && !Object.prototype.hasOwnProperty.call(current, part.key)) found = false
+    const next = current[part.key]
+    if (part.array) {
+      // An absent array, a non-array, and an empty array all mean "no element 0 to read".
+      if (!Array.isArray(next) || next.length === 0) found = false
+      return Array.isArray(next) ? next[0] : undefined
+    }
+    return next
+  }, record)
+  return { found, value }
+}
+
 function parsePathSegments(path) {
   return String(path || '').split('.').filter(Boolean).map((part) => {
     const array = part.endsWith('[]')
@@ -51,7 +91,11 @@ function parsePathSegments(path) {
   })
 }
 
-function setPath(record, path, value) {
+// The write-side path guard, lifted out of setPath() unchanged so that the "do not write" branch in
+// transformRecord() can still run it. Skipping the write must not also skip the guard: a mapping
+// with an unsafe targetField has to keep failing whether or not its source field happened to be
+// absent in this particular record.
+function parseTargetPath(path) {
   const parts = parsePathSegments(path)
   if (parts.length === 0) {
     throw new TransformError('targetField is required')
@@ -61,6 +105,11 @@ function setPath(record, path, value) {
       throw new TransformError('targetField contains an unsafe path segment', { segment: part.key })
     }
   }
+  return parts
+}
+
+function setPath(record, path, value) {
+  const parts = parseTargetPath(path)
 
   let current = record
   for (let index = 0; index < parts.length - 1; index += 1) {
@@ -220,6 +269,7 @@ function transformRecord(sourceRecord, fieldMappings = []) {
 
   const value = {}
   const errors = []
+  const warnings = []
 
   fieldMappings.forEach((mapping, index) => {
     const targetField = mapping && mapping.targetField
@@ -229,12 +279,37 @@ function transformRecord(sourceRecord, fieldMappings = []) {
       }
       if (!targetField) throw new TransformError('targetField is required')
 
-      let fieldValue = getPath(sourceRecord, mapping.sourceField)
-      if (isBlank(fieldValue) && Object.prototype.hasOwnProperty.call(mapping, 'defaultValue')) {
-        fieldValue = mapping.defaultValue
+      const resolved = resolveSourcePath(sourceRecord, mapping.sourceField)
+      let fieldValue = resolved.value
+      // Unchanged precedence: a configured defaultValue still fills in for a blank, and it still
+      // wins before the transform chain runs. `usedDefault` only records that it DID fill in, so
+      // the absent branch below cannot swallow a value the operator asked for.
+      const usedDefault = isBlank(fieldValue)
+        && Object.prototype.hasOwnProperty.call(mapping, 'defaultValue')
+      if (usedDefault) fieldValue = mapping.defaultValue
+
+      const outputValue = transformValue(fieldValue, mapping.transform, sourceRecord)
+
+      // Do not write only when ALL THREE hold: the source path was absent from this record, no
+      // defaultValue was applied, and the transform chain produced nothing of its own (a `concat`
+      // of literals or a `dictMap` fallback still writes, exactly as before). A path that EXISTS
+      // holding null or '' is the source genuinely clearing the value and is written as before.
+      if (!resolved.found && !usedDefault && outputValue === undefined) {
+        // Run the write-side path guard anyway - see parseTargetPath(). Its throw is caught below
+        // and recorded as TRANSFORM_FAILED, exactly as setPath()'s throw was.
+        parseTargetPath(targetField)
+        warnings.push({
+          field: targetField,
+          sourceField: mapping.sourceField,
+          index,
+          code: SOURCE_FIELD_ABSENT,
+          message: 'source field is absent from this record; target field left unwritten',
+          details: {},
+        })
+        return
       }
 
-      setPath(value, targetField, transformValue(fieldValue, mapping.transform, sourceRecord))
+      setPath(value, targetField, outputValue)
     } catch (error) {
       errors.push({
         field: targetField || null,
@@ -248,17 +323,23 @@ function transformRecord(sourceRecord, fieldMappings = []) {
   })
 
   return {
+    // `ok` still means "no TRANSFORM_FAILED". Absent source fields are reported, not failed:
+    // making them fail would break pipelines that run green today and would move the watermark
+    // question, neither of which belongs in this change.
     ok: errors.length === 0,
     value,
     errors,
+    warnings,
   }
 }
 
 module.exports = {
+  SOURCE_FIELD_ABSENT,
   SUPPORTED_TRANSFORMS,
   TransformError,
   getPath,
   isBlank,
+  resolveSourcePath,
   setPath,
   transformValue,
   transformRecord,
@@ -269,5 +350,6 @@ module.exports = {
     normalizeTransformList,
     normalizeTransformStep,
     normalizeFiniteNumber,
+    parseTargetPath,
   },
 }
