@@ -33,6 +33,8 @@ describe('meta-api-error-labels', () => {
       'error.aiBulkActiveJobExists',
       'error.aiBulkJobNotCommittable',
       'error.aiBulkJobCommitInProgress',
+      // F4-B gateway-outage copy (502/503/504).
+      'error.serverRestarting',
     ])
 
     for (const key of META_API_ERROR_LABEL_KEYS) {
@@ -85,5 +87,37 @@ describe('meta-api-error-labels', () => {
     expect(apiDefaultErrorMessage('SOMETHING_NEW', 418, false)).toBe('API 418')
     expect(apiDefaultErrorMessage('SOMETHING_NEW', 418, true)).toBe('API 418')
     expect(apiDefaultErrorMessage(undefined, 500, true)).toBe('API 500')
+  })
+
+  // F4-B: during a backend outage nginx answers 502/503/504 with no JSON body, so
+  // client.ts falls through to apiDefaultErrorMessage and the red toast used to read
+  // "API 502". Gateway statuses now get human copy; 500 deliberately does not.
+  it('F4-B: 502/503/504 get neutral human copy in both locales', () => {
+    for (const status of [502, 503, 504]) {
+      expect(apiDefaultErrorMessage(undefined, status, true)).toBe('服务暂时不可用，请稍后重试')
+      expect(apiDefaultErrorMessage(undefined, status, false))
+        .toBe('The service is temporarily unavailable. Please try again in a moment.')
+      expect(apiDefaultErrorMessage(undefined, status, true)).not.toBe(`API ${status}`)
+      // Neutral by owner ruling: the copy must not announce an upgrade.
+      expect(apiDefaultErrorMessage(undefined, status, true)).not.toContain('升级')
+      expect(apiDefaultErrorMessage(undefined, status, false).toLowerCase()).not.toContain('upgrad')
+    }
+    // A gateway code with the same status resolves identically.
+    expect(apiDefaultErrorMessage('BAD_GATEWAY', 502, true)).toBe('服务暂时不可用，请稍后重试')
+    expect(apiDefaultErrorMessage('GATEWAY_TIMEOUT', 504, true)).toBe('服务暂时不可用，请稍后重试')
+  })
+
+  it('F4-B BOUNDARY: 500 and 501 stay `API <status>` — an app bug must not read as "retry in a moment"', () => {
+    expect(apiDefaultErrorMessage(undefined, 500, true)).toBe('API 500')
+    expect(apiDefaultErrorMessage(undefined, 500, false)).toBe('API 500')
+    expect(apiDefaultErrorMessage('INTERNAL_ERROR', 500, true)).toBe('API 500')
+    expect(apiDefaultErrorMessage(undefined, 501, true)).toBe('API 501')
+    expect(apiDefaultErrorMessage(undefined, 505, true)).toBe('API 505')
+  })
+
+  it('F4-B REGRESSION: the code-keyed branches still win over the new status branch', () => {
+    expect(apiDefaultErrorMessage('FORBIDDEN', 502, true)).toBe('权限不足')
+    expect(apiDefaultErrorMessage('UNAUTHENTICATED', 503, true)).toBe('请先登录后继续。')
+    expect(apiDefaultErrorMessage('VALIDATION_ERROR', 504, true)).toBe('请检查提交的数据后重试。')
   })
 })
