@@ -382,8 +382,15 @@ async function fillViewExists(provisioning, stagingProjectId, objectId) {
  * non-null only when the caller's OWN staging project is proved to own the bound sheet, so this
  * function adds no new way to name a sheet: it takes an already-proved sheet or it returns null.
  * `getObjectViewId` is a pure deterministic id derivation on the host side, treated as an OPTIONAL
- * capability so a plugin newer than its host degrades to "no handle" rather than erroring — and it
- * costs NO IO, which is why a caller that already resolved `ownSheet` pays nothing for the handle.
+ * capability so a plugin newer than its host degrades to "no handle" rather than erroring.
+ *
+ * WHAT IT COSTS, HONESTLY: ONE read-only `findObjectView` per board/directory response — this used
+ * to be a zero-IO id derivation and is not one any more, because the deep link PROBES for the fill
+ * view instead of assuming it (see `fillViewExists`). It is one SELECT per RESPONSE, not per project:
+ * there is exactly one `ownSheet` per caller and this runs once outside every project loop. The read
+ * happens AFTER the tenant gate (`resolveOwnBoundSheet` already proved the caller owns the sheet), is
+ * values-free (one view row's existence, no customer cell), and opens no new door — it can only name
+ * a view id derived from the caller's own project + object.
  *
  * `viewId` IS THE 备料填写视图 WHEN THAT VIEW EXISTS, and the default view otherwise — decided by
  * `fillViewExists` above, never assumed. A table provisioned before the fill view existed (every

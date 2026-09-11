@@ -671,6 +671,33 @@ async function ensureStockPreparationFillView({ provisioning, projectId, objectI
   }
 }
 
+// ONE CLASSIFIER FOR A FILL-VIEW FAILURE, shared by the create leg and the repair leg so the two
+// cannot drift on the question "is a failed display view worth failing a committed schema write?".
+//
+// IT DEGRADES ON A HOST ERROR. By the time either leg calls this, the schema work is ALREADY
+// COMMITTED (create: ensureObject + resolveFieldIds + the default view; repair: the additive field
+// transaction). A scope refusal on an unclaimed sheet, or a DB hiccup, would therefore turn a
+// SUCCEEDED provisioning into a 5xx — and on the create leg that is strictly the worst outcome
+// available: the caller retries, the retry takes the already-ready leg (which returns before any
+// write, by design), and the table then answers ready:true forever while carrying no fill view,
+// with no reachable verb able to heal it (CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT === false).
+// So the failure is REPORTED as `fillViewSkipped` in the evidence both legs return — which is what
+// an admin reads on the ensure/repair response — and never thrown.
+//
+// THIS MODULE'S OWN REFUSALS ARE NEVER SWALLOWED. A StockPreparationTargetProvisioningError out of
+// `ensureStockPreparationFillView` is not host weather: it is a contract violation this file raises
+// on purpose, above all FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT — the guard that keeps this feature
+// off a deployment's own default view. Folding that into `skipped: 'ensure_failed'` would demote
+// the loudest guard in this file to a quiet evidence key, so it travels out as the error it is.
+async function ensureFillViewOrReportSkip(args) {
+  try {
+    return await ensureStockPreparationFillView(args)
+  } catch (error) {
+    if (error instanceof StockPreparationTargetProvisioningError) throw error
+    return { created: false, skipped: 'ensure_failed', viewId: null }
+  }
+}
+
 async function ensureStockPreparationTarget(input = {}) {
   const context = input.context || {}
   const provisioning = getProvisioningApi(context)
@@ -761,8 +788,13 @@ async function ensureStockPreparationTarget(input = {}) {
   // deployment's existing 备料主表 keeps the deep link it has today, which is why the deep link
   // PROBES for the fill view instead of assuming it.
   //
-  // A real host error is NOT swallowed here: nothing was inherited, so nothing is ambiguous.
-  const fillView = await ensureStockPreparationFillView({
+  // A HOST FAILURE HERE DOES NOT FAIL THE CREATE, AND IS NOT SILENT EITHER — see
+  // `ensureFillViewOrReportSkip` above for why this leg degrades instead of throwing (short version:
+  // the table is already committed, and a retry takes the already-ready leg, which writes no view
+  // and still answers ready:true). The outcome rides the evidence below, so a caller that only sees
+  // the HTTP projection (ready/mode/targetBinding/evidence) can still tell whether the 备料填写视图
+  // was written, skipped by an older host, or refused.
+  const fillView = await ensureFillViewOrReportSkip({
     provisioning,
     projectId,
     objectId: template.objectId,
@@ -776,15 +808,24 @@ async function ensureStockPreparationTarget(input = {}) {
     defaultView,
     fillView,
     target: buildCanonicalTargetBinding({ sheetId: ensured.sheet.id, objectId: template.objectId, fieldIdMap: resolvedAfterCreate }),
-    evidence: summarizeStockPreparationTargetReadiness({
-      template,
-      mode: `${modePrefix}_create`,
-      status: 'ready',
-      missingFields: [],
-      fieldIdMapEmpty: false,
-      fieldMapMode,
-      includeObjectId,
-    }),
+    evidence: {
+      ...summarizeStockPreparationTargetReadiness({
+        template,
+        mode: `${modePrefix}_create`,
+        status: 'ready',
+        missingFields: [],
+        fieldIdMapEmpty: false,
+        fieldMapMode,
+        includeObjectId,
+      }),
+      // The same two keys the repair leg reports, in the same shape and for the same reason: the
+      // plugin's HTTP surface projects `evidence` and DROPS every other top-level key of this
+      // result (publicStockPreparationTargetResult), so `result.fillView` alone is invisible to the
+      // admin who just pressed ensure. Values-free: a boolean and a reason code, never a view name
+      // or a column id.
+      fillViewCreated: fillView.created === true,
+      fillViewSkipped: fillView.skipped || null,
+    },
   }
 }
 
@@ -894,6 +935,12 @@ function getCanonicalRepairApi(context) {
 // only callers are tests. Consequence, in operator terms: a deployment whose 备料主表 was created
 // before the fill view existed CANNOT obtain that view today by any button, route or script, and
 // its 「打开项目备料」 deep link keeps landing on the default view (33 columns, ungrouped).
+//
+// THE PIN'S DOMAIN IS THIS WHOLE REPOSITORY, not just this plugin's `lib/`: index.cjs, scripts/ops
+// and core-backend are all places a caller could appear, so all of them are scanned (test files are
+// counted as references, since driving the verb is how its body is proved). What the pin CANNOT
+// see, stated rather than implied: a caller that builds the name dynamically, and a caller outside
+// this repository.
 //
 // NEXT CUT, registered here so it cannot be lost: expose an owner-gated entry for this verb (an
 // admin route in `lib/http-routes.cjs`, or a `scripts/ops/` script), and flip this constant in the
@@ -1012,20 +1059,17 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
   // (hand-made, or restored from a dump), in which case the host's sheet-scope assertion refuses
   // `ensureView` — and turning a SUCCESSFUL schema repair into a 5xx over a display view would be
   // the wrong trade. `fillView.skipped` carries which leg ran so it is observable rather than
-  // silent; re-running repair after the registry is fixed creates the view.
-  let fillView
-  try {
-    fillView = await ensureStockPreparationFillView({
-      provisioning,
-      projectId,
-      objectId: template.objectId,
-      sheetId: result.sheetId,
-      locale: input.locale,
-      template,
-    })
-  } catch {
-    fillView = { created: false, skipped: 'ensure_failed', viewId: null }
-  }
+  // silent; re-running repair after the registry is fixed creates the view. The ONE failure that
+  // still travels out is this module's own refusal (FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT) — see
+  // `ensureFillViewOrReportSkip`, which both legs share so they cannot answer this differently.
+  const fillView = await ensureFillViewOrReportSkip({
+    provisioning,
+    projectId,
+    objectId: template.objectId,
+    sheetId: result.sheetId,
+    locale: input.locale,
+    template,
+  })
   return {
     ready: true,
     mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,

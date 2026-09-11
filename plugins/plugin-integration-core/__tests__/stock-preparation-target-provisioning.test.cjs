@@ -288,6 +288,8 @@ const FILL_VIEW_PHYSICAL = (fieldId) => `fld_${fieldId}`
 // and a recorder. `ensureObjectDefaultView` behaves like the host primitive it stands for (writes
 // only from zero views, never touches an existing one) so "the default view did not move" is a
 // statement about a STORED ROW, not about a mock's call list.
+// `ensureViewThrows` is either `true` (a plain host error — a scope refusal, a DB hiccup) or an
+// Error INSTANCE, so a test can distinguish host weather from a refusal this plugin raises itself.
 function withViewApi(ctx, { ensureViewThrows = false } = {}) {
   const provisioning = ctx.context.api.multitable.provisioning
   const views = new Map()
@@ -315,7 +317,9 @@ function withViewApi(ctx, { ensureViewThrows = false } = {}) {
   }
   provisioning.ensureView = async (input) => {
     calls.ensureView.push(input)
-    if (ensureViewThrows) throw new Error('mock ensureView refusal (sheet scope)')
+    if (ensureViewThrows) {
+      throw ensureViewThrows instanceof Error ? ensureViewThrows : new Error('mock ensureView refusal (sheet scope)')
+    }
     const id = `view_${input.descriptor.objectId}_${input.descriptor.id}`
     const stored = {
       id,
@@ -512,6 +516,91 @@ async function testRepairHealsTheFillViewOnAnExistingTable() {
   console.log('  testRepairHealsTheFillViewOnAnExistingTable OK')
 }
 
+async function testCreateLegReportsTheFillViewOutcomeAndNeverLosesTheTable() {
+  // WHY THIS EXISTS (review blocker, 2026-09-11). The create leg is the ONLY reachable leg of this
+  // feature, and it used to be the only one that could neither report nor survive a fill-view
+  // failure: the outcome lived on `result.fillView`, which the plugin's HTTP projection drops
+  // (publicStockPreparationTargetResult returns ready/mode/targetBinding/evidence only), and a
+  // throwing `ensureView` took the whole ensure down AFTER the table had been committed. Re-running
+  // ensure then takes the already-ready leg — ready:true, no view, forever, with no reachable repair
+  // verb. So: the outcome rides the EVIDENCE, and a host failure degrades.
+
+  // (a) The happy path reports itself where an admin can actually see it.
+  const ok = createContext({ sheetExists: false })
+  withViewApi(ok)
+  const created = await ensureStockPreparationCanonicalTarget({
+    context: ok.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+    locale: 'zh-CN',
+  })
+  assert.equal(created.evidence.fillViewCreated, true, 'the fill view outcome is in the evidence, not only on a dropped key')
+  assert.equal(created.evidence.fillViewSkipped, null)
+
+  // (b) The host REFUSES the view write on the table this very call created. The table is already
+  //     committed, so the create stays successful and the refusal is reported.
+  const refusing = createContext({ sheetExists: false })
+  const { views, viewCalls } = withViewApi(refusing, { ensureViewThrows: true })
+  const degraded = await ensureStockPreparationCanonicalTarget({
+    context: refusing.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+    locale: 'zh-CN',
+  })
+  assert.equal(degraded.ready, true, 'a committed table must not be reported as a failed ensure over a display view')
+  assert.equal(degraded.mode, 'canonical_create')
+  assert.equal(degraded.fillView.skipped, 'ensure_failed')
+  assert.equal(degraded.evidence.fillViewCreated, false)
+  assert.equal(degraded.evidence.fillViewSkipped, 'ensure_failed', 'the admin can tell the view is missing')
+  assert.ok(degraded.target && degraded.target.sheetId, 'the binding of the committed table still travels out')
+  // The default view of that same table was still created, and the failed fill view left no row.
+  const defaultId = `view_${STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId}_default`
+  assert.ok(views.get(defaultId), 'the default view the create leg writes is unaffected')
+  assert.equal(views.has(`view_${STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId}_prep-fill`), false)
+  for (const call of viewCalls.ensureView) {
+    assert.notEqual(call.descriptor.id, 'default', 'and the failure path still never points ensureView at the default view')
+  }
+
+  // (c) An older host with no view API at all: same shape, different reason code — the create leg
+  //     provisions exactly as it did before this feature and says so.
+  const oldHost = createContext({ sheetExists: false })
+  const legacy = await ensureStockPreparationCanonicalTarget({
+    context: oldHost.context,
+    projectId: 'proj_x',
+    permission: 'admin',
+  })
+  assert.equal(legacy.ready, true)
+  assert.equal(legacy.evidence.fillViewCreated, false)
+  assert.equal(legacy.evidence.fillViewSkipped, 'api_unavailable')
+
+  // (d) THE ONE FAILURE THAT IS NOT DEGRADED. A StockPreparationTargetProvisioningError out of the
+  //     fill-view helper is this module's OWN refusal — above all FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT,
+  //     the guard that keeps this feature off a deployment's default view. Demoting that to
+  //     `skipped: 'ensure_failed'` would turn the loudest guard in the file into a quiet evidence key,
+  //     so it travels out of BOTH legs as the error it is.
+  const refusalError = new StockPreparationTargetProvisioningError(
+    409,
+    'FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT',
+    'the stock-preparation fill view may never be upserted onto the default view id',
+    { objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId },
+  )
+  const refusedCreate = createContext({ sheetExists: false })
+  withViewApi(refusedCreate, { ensureViewThrows: refusalError })
+  await assert.rejects(
+    () => ensureStockPreparationCanonicalTarget({ context: refusedCreate.context, projectId: 'proj_x', permission: 'admin' }),
+    (error) => error.code === 'FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT',
+    'the create leg must not swallow this module\'s own refusal',
+  )
+  const refusedRepair = createContext({ sheetExists: true, missingFields: ['depth'] })
+  withViewApi(refusedRepair, { ensureViewThrows: refusalError })
+  await assert.rejects(
+    () => repairStockPreparationCanonicalTarget({ context: refusedRepair.context, projectId: 'proj_x', permission: 'admin' }),
+    (error) => error.code === 'FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT',
+    'and neither may the repair leg',
+  )
+  console.log('  testCreateLegReportsTheFillViewOutcomeAndNeverLosesTheTable OK')
+}
+
 async function testFillViewDegradesWithoutFailingTheRepair() {
   // (a) An older host with no view API at all: provisioning is unchanged from today, and the
   //     evidence says which leg ran rather than claiming a view that does not exist.
@@ -597,7 +686,19 @@ async function testFillViewDegradesWithoutFailingTheRepair() {
 // a customer box the 「打开项目备料」 deep link still lands on the 33-column default view. A claim
 // about WIRING cannot be held down by prose in a PR body, so it is pinned to the wiring here.
 //
-// The lib tree is scanned for anything that CALLS or REFERENCES the repair verb outside its own
+// THE SCAN DOMAIN IS THE CLAIM'S DOMAIN. This started out walking `lib/` only, which is SMALLER than
+// what the constant asserts ("no production entry anywhere"): the plugin's real entry file
+// (index.cjs, where adapters and stores get registered) sits one level ABOVE lib/, and so do
+// scripts/ops/*.cjs and every core-backend module that can require this lib — wiring the verb into
+// any of them left the constant at false and this test green. So the walk starts at the REPO ROOT.
+//
+// Test files are REFERENCES, NOT CALLERS (several suites drive the verb on purpose, and one
+// core-backend integration test does too), so they are counted separately and reported rather than
+// pinning the constant. KNOWN BLIND SPOTS, stated instead of implied: a caller that builds the name
+// dynamically (`api['repair' + 'StockPreparationCanonicalTarget']`), a caller outside this
+// repository, and a file type outside the extension list below. Nothing here can see those.
+//
+// The tree is scanned for anything that CALLS or REFERENCES the repair verb outside its own
 // definition/export, and the verdict must equal the exported constant. BOTH directions fail:
 //   - constant false + a route or caller appears => you wired it: flip the constant and update the
 //     operator-facing wording in the same change;
@@ -614,35 +715,72 @@ async function testCanonicalRepairReachabilityIsPinned() {
     'the scanned token must name the real verb (a rename must not make this test vacuous)',
   )
 
+  // The repo root, PROVED rather than assumed — a walk that silently started somewhere else (a
+  // packaged copy of the plugin, a moved suite) would go quietly vacuous, which is the failure mode
+  // this whole test exists to prevent.
+  const repoRoot = path.join(__dirname, '..', '..', '..')
+  assert.ok(fs.existsSync(path.join(repoRoot, 'pnpm-workspace.yaml')), 'the scan must start at the repo root')
+  const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.turbo', '.vite', 'out', 'artifacts'])
+  const SCANNED_EXT = /\.(cjs|js|mjs|ts|tsx|vue|sh|ps1)$/
+  const posix = (file) => path.relative(repoRoot, file).split(path.sep).join('/')
   const files = []
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue
       const full = path.join(dir, entry.name)
-      if (entry.isDirectory()) walk(full)
-      else if (/\.(cjs|js|mjs)$/.test(entry.name)) files.push(full)
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name)) continue
+        walk(full)
+      } else if (SCANNED_EXT.test(entry.name)) files.push(full)
     }
   }
-  walk(libDir)
-  assert.ok(files.length > 50, 'the lib scan must actually see the module tree')
-  assert.ok(files.some((file) => path.basename(file) === 'http-routes.cjs'), 'the plugin HTTP surface must be in scan scope')
+  walk(repoRoot)
+  const scanned = new Set(files.map(posix))
+  assert.ok(files.length > 1000, 'the scan must actually see the repo tree')
+  // The four places a future entry would most plausibly be wired. Each is asserted to be IN SCOPE,
+  // so shrinking the walk back to a subtree fails here rather than going quietly green.
+  for (const mustSee of [
+    'plugins/plugin-integration-core/index.cjs',
+    'plugins/plugin-integration-core/lib/http-routes.cjs',
+    'packages/core-backend/src/index.ts',
+    'scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs',
+  ]) {
+    assert.ok(scanned.has(mustSee), `${mustSee} must be in scan scope`)
+  }
 
+  const isTestFile = (file) => {
+    const segments = path.relative(repoRoot, file).split(path.sep)
+    return segments.some((segment) => segment === '__tests__' || segment === 'tests' || segment === 'test' || segment === 'e2e')
+      || /\.(test|spec)\./.test(path.basename(file))
+  }
   const callers = []
+  const testReferences = []
   for (const file of files) {
-    const isDefining = path.basename(file) === DEFINING_FILE
-    fs.readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+    const isDefining = posix(file) === `plugins/plugin-integration-core/lib/${DEFINING_FILE}`
+    let content
+    try {
+      content = fs.readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    if (!content.includes(TOKEN)) continue
+    content.split('\n').forEach((line, index) => {
       const trimmed = line.trim()
       // Prose about the verb is not a caller.
-      if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) return
+      if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('#')) return
       if (!line.includes(TOKEN)) return
       // Its own definition and its own export entry are not callers either.
       if (isDefining && (trimmed.startsWith(`async function ${TOKEN}(`) || trimmed === `${TOKEN},`)) return
-      callers.push(`${path.basename(file)}:${index + 1}`)
+      ;(isTestFile(file) ? testReferences : callers).push(`${posix(file)}:${index + 1}`)
     })
   }
+  // The verb IS driven by tests — that is how its body is proved — so a scan that found nothing at
+  // all would mean the token stopped matching reality and every verdict below would be vacuous.
+  assert.ok(testReferences.length > 0, 'the scan must still see the suites that drive the verb')
   assert.equal(
     callers.length > 0,
     CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT,
-    `CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT says ${CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT} but the lib tree says ${callers.length > 0}`
+    `CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT says ${CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT} but the repo says ${callers.length > 0}`
       + ` (references: ${callers.join(', ') || 'none'}). Flip the constant in the SAME change that exposes or removes the entry,`
       + ' and fix the operator-facing sentence about how an EXISTING 备料主表 obtains the 备料填写视图.',
   )
@@ -673,6 +811,7 @@ async function main() {
   await testFillViewDescriptorIsPhysicalAndValuesFree()
   await testFillViewContractCannotHideAHumanColumn()
   await testCreatePathProvisionsTheFillViewAndLeavesDefaultAlone()
+  await testCreateLegReportsTheFillViewOutcomeAndNeverLosesTheTable()
   await testRepairHealsTheFillViewOnAnExistingTable()
   await testFillViewDegradesWithoutFailingTheRepair()
   await testSandboxNamespaceRefusalNamesTheNamespace()
