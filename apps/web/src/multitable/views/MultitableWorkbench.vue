@@ -88,14 +88,20 @@
         />
       </div>
       <footer class="mt-template-library__footer">
-        <router-link
+        <!-- F5: programmatic navigation (NOT <router-link>) so closing this panel can wait for the
+             push RESULT. A router-link fires its inline @click synchronously while the guard
+             (MultitableEmbedHost onBeforeRouteLeave -> confirmPageLeave) can still abort the
+             navigation, which looked like "clicked, nothing happened, panel just closed". -->
+        <a
           class="mt-template-library__more"
-          :to="{ name: TemplateCenterRouteName }"
+          role="link"
+          tabindex="0"
           data-testid="multitable-workbench-template-center-link"
-          @click="showTemplateLibrary = false"
+          @click.prevent="onGoToTemplateCenter"
+          @keydown.enter.prevent="onGoToTemplateCenter"
         >
           {{ wb('tpl.more', isZh) }}
-        </router-link>
+        </a>
       </footer>
     </div>
     <div
@@ -4779,6 +4785,24 @@ function openCommentInbox() {
   })
 }
 
+// F5 "More templates ->": close the template library ONLY when the navigation actually happened.
+// Leaving this route runs MultitableEmbedHost's onBeforeRouteLeave -> confirmPageLeave(), which
+// returns false whenever the user keeps unsaved drafts (form / field manager / view manager /
+// import wizard / comment draft) and declines the confirm. vue-router then resolves push() with a
+// NavigationFailure instead of throwing, so the old inline `@click="showTemplateLibrary = false"`
+// swallowed the block: panel gone, page unchanged. A rejected push (guard error) is treated the
+// same way -- navigation did not happen, so the panel stays open and the user gets a toast.
+async function onGoToTemplateCenter() {
+  const failure = await router
+    .push({ name: TemplateCenterRouteName })
+    .catch((error: unknown) => error ?? new Error('navigation failed'))
+  if (failure) {
+    showError(wb('toast.templateCenterBlocked', isZh.value))
+    return
+  }
+  showTemplateLibrary.value = false
+}
+
 async function loadCalendarHolidays(range: CalendarVisibleRange) {
   const from = String(range.from || '').trim()
   const to = String(range.to || '').trim()
@@ -5223,7 +5247,8 @@ defineExpose({
 .mt-template-library__state--error { color: #b91c1c; background: #fef2f2; }
 .mt-template-library__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .mt-template-library__footer { margin-top: 12px; display: flex; justify-content: flex-end; }
-.mt-template-library__more { font-size: 12px; color: #2563eb; text-decoration: none; }
+/* F5: no href anymore (programmatic navigation), so restore the link affordance explicitly. */
+.mt-template-library__more { font-size: 12px; color: #2563eb; text-decoration: none; cursor: pointer; }
 .mt-template-library__more:hover { text-decoration: underline; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }

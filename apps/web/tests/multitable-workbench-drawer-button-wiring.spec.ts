@@ -17,10 +17,15 @@ const showSuccessSpy = vi.fn()
 
 let capturedDrawerAttrs: Record<string, unknown> | null = null
 let capturedGridAttrs: Record<string, unknown> | null = null
+let capturedViewManagerAttrs: Record<string, unknown> | null = null
+
+// One shared push spy (not a fresh vi.fn() per useRouter() call) so the F5 template-center
+// navigation lock below can assert the target route AND drive the guard-abort branch.
+const routerPushSpy = vi.fn<(to: unknown) => Promise<unknown>>().mockResolvedValue(undefined)
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
-  return { ...actual, useRouter: () => ({ push: vi.fn().mockResolvedValue(undefined) }) }
+  return { ...actual, useRouter: () => ({ push: routerPushSpy }) }
 })
 
 function stubComponent(name: string) {
@@ -90,6 +95,18 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
 vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({ default: stubComponent('MetaCommentsDrawer') }))
 vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
 vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubComponent('MetaFieldManager') }))
+// Capturing stub: the F5 lock needs the REAL `@update:dirty` listener to make the workbench
+// genuinely dirty (that is what makes confirmPageLeave() ask window.confirm).
+vi.mock('../src/multitable/components/MetaViewManager.vue', () => ({
+  default: defineComponent({
+    name: 'MetaViewManager',
+    inheritAttrs: false,
+    setup(_props, { attrs }) {
+      capturedViewManagerAttrs = attrs as Record<string, unknown>
+      return () => h('div', { 'data-stub-MetaViewManager': 'true' })
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaKanbanView.vue', () => ({ default: stubComponent('MetaKanbanView') }))
 vi.mock('../src/multitable/components/MetaGalleryView.vue', () => ({ default: stubComponent('MetaGalleryView') }))
 vi.mock('../src/multitable/components/MetaCalendarView.vue', () => ({ default: stubComponent('MetaCalendarView') }))
@@ -107,6 +124,9 @@ vi.mock('../src/multitable/components/MetaToast.vue', () => ({
 }))
 
 import MultitableWorkbench from '../src/multitable/views/MultitableWorkbench.vue'
+import { workbenchLabel } from '../src/multitable/utils/workbench-labels'
+import { useLocale } from '../src/composables/useLocale'
+import { AppRouteNames } from '../src/router/types'
 
 async function flushUi(cycles = 5): Promise<void> {
   for (let i = 0; i < cycles; i += 1) { await Promise.resolve(); await nextTick() }
@@ -128,6 +148,7 @@ function createWorkbenchMock() {
       createView: vi.fn(), deleteView: vi.fn(), patchRecords: vi.fn(), submitForm: vi.fn(), updateView: vi.fn(),
       // The function under test:
       runButton: vi.fn().mockResolvedValue({ status: 'succeeded', executionId: 'exec_1' }),
+      listTemplates: vi.fn().mockResolvedValue({ templates: [] }),
     },
     sheets: ref([{ id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null }]),
     fields: ref([buttonField]),
@@ -347,5 +368,154 @@ describe('MultitableWorkbench duplicate-record handler wiring (2026-06-16)', () 
 
     expect(showSuccessSpy).not.toHaveBeenCalled()
     expect(showErrorSpy).toHaveBeenCalledWith('Failed to duplicate record')
+  })
+})
+
+function signedTestToken(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => btoa(JSON.stringify(value)).replace(/=+$/, '')
+  const head = encode({ alg: 'none', typ: 'JWT' })
+  const body = encode({ ...payload, exp: Math.floor(Date.now() / 1000) + 3600 })
+  return [head, body, 'sig'].join('.')
+}
+
+// F5 (feedback 2026-09-11): the template library's "More templates ->" entry closed the panel but
+// did not navigate. Root cause: the old <router-link> ran its inline `@click="showTemplateLibrary =
+// false"` synchronously while the page-leave guard (MultitableEmbedHost's onBeforeRouteLeave ->
+// workbench confirmPageLeave()) could still abort the navigation -- vue-router RESOLVES push() with
+// a NavigationFailure instead of throwing, so nothing surfaced the block. The lock below drives the
+// real chain: click -> onGoToTemplateCenter -> router.push -> guard -> confirmPageLeave ->
+// window.confirm, and pins that the panel closes ONLY when the navigation actually happened.
+describe('MultitableWorkbench template center navigation (F5)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  let confirmSpy: ReturnType<typeof vi.spyOn> | null = null
+  const { isZh } = useLocale()
+  const blockedMessage = () => workbenchLabel('toast.templateCenterBlocked', isZh.value)
+
+  beforeEach(() => {
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    capturedDrawerAttrs = null
+    capturedGridAttrs = null
+    capturedViewManagerAttrs = null
+    routerPushSpy.mockReset()
+    routerPushSpy.mockResolvedValue(undefined)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null; container = null
+    confirmSpy?.mockRestore(); confirmSpy = null
+    for (const key of ['auth_token', 'jwt', 'user_permissions']) localStorage.removeItem(key)
+    showErrorSpy.mockReset(); showSuccessSpy.mockReset()
+    vi.unstubAllGlobals(); vi.clearAllMocks()
+  })
+
+  function panelIsOpen(): boolean {
+    return container!.querySelector('[data-testid="multitable-template-library"]') !== null
+  }
+
+  function moreTemplatesLink(): HTMLElement {
+    const el = container!.querySelector('[data-testid="multitable-workbench-template-center-link"]')
+    expect(el, '"More templates" entry is missing from the open template library').not.toBeNull()
+    return el as HTMLElement
+  }
+
+  async function mountAndOpenTemplateLibrary() {
+    // canCreateBasesAndSheets reads useAuth().getAccessSnapshot(). A tokenless session wipes the
+    // stored permission snapshot (bootstrapSession -> resetSessionBootstrap), so grant the
+    // permission the way a real session does: inside the token payload.
+    const token = signedTestToken({ email: 'tester@example.com', perms: ['multitable:write'] })
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('jwt', token)
+    const workbenchRef = ref<any>(null)
+    const Host = defineComponent({
+      setup() { return () => h(MultitableWorkbench as Component, { ref: workbenchRef }) },
+    })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+    const openButton = container!.querySelector('[data-action="open-template-library"]') as HTMLButtonElement | null
+    expect(openButton, 'template library entry button not rendered').not.toBeNull()
+    openButton!.click()
+    await flushUi()
+    expect(panelIsOpen()).toBe(true)
+    return workbenchRef
+  }
+
+  // Reproduces vue-router's real contract: a guard that returns false makes push() RESOLVE with a
+  // NavigationFailure (it does not throw), which is exactly why the old code never noticed.
+  function wireRouterThroughPageLeaveGuard(workbenchRef: { value: any }) {
+    routerPushSpy.mockImplementation(async () => {
+      const allowed = workbenchRef.value?.confirmPageLeave?.() ?? true
+      if (allowed) return undefined
+      return Object.assign(new Error('Navigation aborted from "/multitable" to "/multitable/templates" via a navigation guard.'), { type: 4 })
+    })
+  }
+
+  it('navigates to the template center and only then closes the panel', async () => {
+    await mountAndOpenTemplateLibrary()
+    const link = moreTemplatesLink()
+    // No href anymore: the close must wait for the push result, so this is a programmatic link.
+    expect(link.tagName).toBe('A')
+    expect(link.getAttribute('role')).toBe('link')
+
+    link.click()
+    await flushUi()
+
+    expect(routerPushSpy).toHaveBeenCalledTimes(1)
+    expect(routerPushSpy).toHaveBeenCalledWith({ name: AppRouteNames.MULTITABLE_TEMPLATES })
+    expect(panelIsOpen()).toBe(false)
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('keeps the panel open and explains why when the page-leave guard aborts the navigation', async () => {
+    const workbenchRef = await mountAndOpenTemplateLibrary()
+    wireRouterThroughPageLeaveGuard(workbenchRef)
+    // Real dirty state via the real wire the view manager uses (@update:dirty).
+    expect(capturedViewManagerAttrs).not.toBeNull()
+    ;(capturedViewManagerAttrs!['onUpdate:dirty'] as (v: boolean) => void)(true)
+    await flushUi()
+    confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    moreTemplatesLink().click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(routerPushSpy).toHaveBeenCalledTimes(1)
+    // The whole point of F5: navigation did NOT happen, so the panel must still be there.
+    expect(panelIsOpen()).toBe(true)
+    expect(showErrorSpy).toHaveBeenCalledTimes(1)
+    expect(showErrorSpy).toHaveBeenCalledWith(blockedMessage())
+  })
+
+  it('navigates normally when the guard lets the user leave (confirm accepted)', async () => {
+    const workbenchRef = await mountAndOpenTemplateLibrary()
+    wireRouterThroughPageLeaveGuard(workbenchRef)
+    ;(capturedViewManagerAttrs!['onUpdate:dirty'] as (v: boolean) => void)(true)
+    await flushUi()
+    confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    moreTemplatesLink().click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(routerPushSpy).toHaveBeenCalledWith({ name: AppRouteNames.MULTITABLE_TEMPLATES })
+    expect(panelIsOpen()).toBe(false)
+    expect(showErrorSpy).not.toHaveBeenCalled()
+  })
+
+  it('keeps the panel open when the router rejects the navigation', async () => {
+    await mountAndOpenTemplateLibrary()
+    routerPushSpy.mockRejectedValueOnce(new Error('router exploded'))
+
+    moreTemplatesLink().click()
+    await flushUi()
+
+    expect(panelIsOpen()).toBe(true)
+    expect(showErrorSpy).toHaveBeenCalledWith(blockedMessage())
   })
 })

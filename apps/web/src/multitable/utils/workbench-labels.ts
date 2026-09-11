@@ -55,6 +55,9 @@ export type WorkbenchLabelKey =
   | 'toast.sheetCreateBlocked' | 'toast.sheetRefreshFailed' | 'toast.sheetCreateFailed'
   | 'toast.baseLoadFailed' | 'toast.contextSyncFailed'
   | 'toast.externalContextBusy' | 'toast.externalContextUnsaved'
+  // F5: the template library's "More templates ->" entry navigates programmatically; when the
+  // page-leave guard (unsaved drafts) aborts that navigation the panel stays open and says why.
+  | 'toast.templateCenterBlocked'
   | 'toast.baseCreateBlocked' | 'toast.baseCreateFailed'
   // feat/multitable-rename: sheet/base rename failure toasts (server e.message takes priority —
   // these are only the generic fallback when the response carried no message).
@@ -213,6 +216,10 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.externalContextUnsaved': {
     en: 'Host multitable context changed while unsaved drafts are open. Resolve or discard changes to continue.',
     zh: '宿主多维表上下文已变更。请处理或放弃未保存草稿后继续。',
+  },
+  'toast.templateCenterBlocked': {
+    en: 'Unsaved changes are still open. Resolve them before opening the template center.',
+    zh: '有未保存的更改，请先处理',
   },
   'toast.baseCreateBlocked': {
     en: 'Base creation requires multitable write access.',
