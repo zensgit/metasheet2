@@ -784,17 +784,25 @@ function createPipelineRunner(deps = {}) {
     // !ok branch: the source's shape is a true fact about the row even if another mapping of the
     // same row failed to transform. Identifiers only - never a value, never row content.
     if (sourceFieldAbsent && Array.isArray(transformed.warnings) && transformed.warnings.length > 0) {
-      sourceFieldAbsent.rows += 1
-      for (const warning of transformed.warnings) {
-        if (warning.code !== SOURCE_FIELD_ABSENT) continue
-        if (sourceFieldAbsent.fields.size >= MAX_SOURCE_FIELD_ABSENT_FIELDS) {
-          sourceFieldAbsent.truncated = true
-          break
-        }
-        sourceFieldAbsent.fields.add(JSON.stringify({
+      // Count the ROW from the filtered list, not from `warnings.length`: today SOURCE_FIELD_ABSENT
+      // is the only code transformRecord() pushes (transform-engine.cjs:301), so the two agree, but
+      // the next code added would otherwise inflate a counter whose `fields` list stayed short.
+      const absentWarnings = transformed.warnings.filter((warning) => warning && warning.code === SOURCE_FIELD_ABSENT)
+      if (absentWarnings.length > 0) sourceFieldAbsent.rows += 1
+      for (const warning of absentWarnings) {
+        const entry = JSON.stringify({
           sourceField: typeof warning.sourceField === 'string' ? warning.sourceField : null,
           targetField: typeof warning.field === 'string' ? warning.field : null,
-        }))
+        })
+        // De-duplicate BEFORE testing the cap. `fields` is a Set, so re-seeing a pair already
+        // recorded drops nothing; testing the cap first made a no-op add raise `fieldsTruncated`
+        // on a run whose list was exhaustive (exactly MAX distinct pairs, then any repeat).
+        if (sourceFieldAbsent.fields.has(entry)) continue
+        if (sourceFieldAbsent.fields.size >= MAX_SOURCE_FIELD_ABSENT_FIELDS) {
+          sourceFieldAbsent.truncated = true
+          continue
+        }
+        sourceFieldAbsent.fields.add(entry)
       }
     }
     if (!transformed.ok) {

@@ -32,6 +32,16 @@ const { createRunLogger } = require(path.join(__dirname, '..', 'lib', 'run-log.c
 const {
   createMetaSheetMultitableTargetAdapter,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'metasheet-multitable-target-adapter.cjs'))
+// The REGISTRY's own mapping factories. Every run-level fixture that matters is built with
+// these rather than with object literals: the two shapes differ by exactly one key
+// (`defaultValue`), and that difference is what made the first version of this guard inert.
+const {
+  __internals: { normalizeFieldMappings, rowToFieldMapping },
+} = require(path.join(__dirname, '..', 'lib', 'pipelines.cjs'))
+const {
+  applyExternalWrite,
+  dryRunExternalWrite,
+} = require(path.join(__dirname, '..', 'lib', 'external-write-dry-run.cjs'))
 
 function ownKeys(object) {
   return Object.keys(object).sort()
@@ -129,12 +139,8 @@ function testDefaultsAndTransformsStillProduceValues() {
   assert.deepEqual(withDefault.value, { FSpec: 'UNKNOWN' }, 'mapping defaultValue still fills an absent field')
   assert.deepEqual(withDefault.warnings, [], 'a filled default is not a silent blanking, so nothing is reported')
 
-  // defaultValue explicitly set to undefined: the operator asked for it; unchanged.
-  const undefinedDefault = transformRecord({}, [
-    { sourceField: 'spec', targetField: 'FSpec', defaultValue: undefined },
-  ])
-  assert.equal(Object.prototype.hasOwnProperty.call(undefinedDefault.value, 'FSpec'), true)
-  assert.deepEqual(undefinedDefault.warnings, [])
+  // A BLANK defaultValue is covered by its own case below (testBlankDefaultValueIsUnset): it is
+  // the registry's encoding of "unset", not an operator-supplied value.
 
   // A transform chain that manufactures a value out of nothing still writes it.
   const manufactured = transformRecord({}, [
@@ -152,6 +158,98 @@ function testDefaultsAndTransformsStillProduceValues() {
   ])
   assert.deepEqual(passthrough.value, {})
   assert.deepEqual(warningCodes(passthrough), ['SOURCE_FIELD_ABSENT', 'SOURCE_FIELD_ABSENT'])
+}
+
+// --- 3b. a BLANK defaultValue is "unset", not an operator-supplied value -----
+// The registry puts a `defaultValue` key on EVERY mapping it hands back (`pipelines.cjs:318`
+// reads a SQL NULL column as `null`; `pipelines.cjs:201` collapses an undefined one into `null`),
+// so "the key is present" cannot mean "the operator supplied a default".
+function testBlankDefaultValueIsUnset() {
+  for (const blankDefault of [null, undefined]) {
+    const blanked = transformRecord({}, [
+      { sourceField: 'spec', targetField: 'FSpec', defaultValue: blankDefault },
+    ])
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(blanked.value, 'FSpec'),
+      false,
+      `defaultValue: ${String(blankDefault)} is the registry's encoding of "unset", not a supplied value`,
+    )
+    assert.deepEqual(warningCodes(blanked), ['SOURCE_FIELD_ABSENT'])
+  }
+
+  // An empty-string default IS a value an operator can type and JSON can carry, so it still writes.
+  const emptyDefault = transformRecord({}, [
+    { sourceField: 'spec', targetField: 'FSpec', defaultValue: '' },
+  ])
+  assert.deepEqual(emptyDefault.value, { FSpec: '' })
+  assert.deepEqual(emptyDefault.warnings, [])
+
+  // The VALUE precedence for a path that EXISTS is untouched, blank default included: a present
+  // but blank source value still collapses to the configured default exactly as before.
+  assert.deepEqual(
+    transformRecord({ spec: '' }, [{ sourceField: 'spec', targetField: 'FSpec', defaultValue: null }]).value,
+    { FSpec: null },
+    'present-but-blank + defaultValue: null still writes null',
+  )
+  assert.deepEqual(
+    transformRecord({ spec: null }, [{ sourceField: 'spec', targetField: 'FSpec', defaultValue: 'X' }]).value,
+    { FSpec: 'X' },
+    'present-but-blank + a real default still takes the default',
+  )
+}
+
+// --- 3c. a bare `concat` still writes '' - a PINNED residual, not a fix -------
+// `concat` filters its blank parts and join()s them, so an all-absent concat returns '' rather
+// than undefined (`transform-engine.cjs:221-239`); the third no-write condition is
+// `outputValue === undefined`, so that '' is written with no warning. Widening the condition to
+// isBlank() would ALSO stop writing values a chain was explicitly asked to manufacture (the
+// `{fn:'defaultValue', value:''}` case below), which `transform-engine.cjs:293-299` refuses to do.
+// The behaviour fix belongs to a separate cut; this case pins today's answer so it cannot drift.
+function testBareConcatStillWritesEmptyString() {
+  for (const transform of [{ fn: 'concat' }, { fn: 'concat', fields: ['colour'], separator: '-' }]) {
+    const result = transformRecord({ code: 'MAT-001' }, [
+      { sourceField: 'code', targetField: 'FNumber' },
+      { sourceField: 'spec', targetField: 'FSpec', transform },
+    ])
+    assert.deepEqual(
+      result.value,
+      { FNumber: 'MAT-001', FSpec: '' },
+      'pinned residual: an all-absent concat manufactures an empty string and it IS written',
+    )
+    assert.deepEqual(result.warnings, [], 'and it is not reported as an absence')
+  }
+
+  // Why the residual is not closed by widening the third condition:
+  const deliberateEmpty = transformRecord({}, [
+    { sourceField: 'spec', targetField: 'T', transform: { fn: 'defaultValue', value: '' } },
+  ])
+  assert.deepEqual(deliberateEmpty.value, { T: '' }, 'a chain asked for an empty string still writes one')
+  assert.deepEqual(deliberateEmpty.warnings, [])
+
+  // A concat that produces a NON-EMPTY value writes it, exactly as before.
+  const produced = transformRecord({ code: 'MAT-001', colour: 'RED' }, [
+    { sourceField: 'spec', targetField: 'FSpec', transform: { fn: 'concat', fields: ['colour'], separator: '-' } },
+  ])
+  assert.deepEqual(produced.value, { FSpec: 'RED' })
+}
+
+// --- 3d. an empty array SEGMENT is absent - decided, not accidental -----------
+// `tags[]` names element 0 of `tags`; an empty array has no element 0, so there is nothing to
+// read (`transform-engine.cjs:74-77`). The rejected alternative (`found: true, value: undefined`)
+// would not clear the target either - it would write `undefined`, i.e. exactly the blanking this
+// cut removes - so it buys nothing and reopens the hole. A source that wants to clear a repeating
+// target field maps the ARRAY, which does exist and is written as [].
+function testEmptyArraySegmentIsAbsentByDecision() {
+  assert.deepEqual(resolveSourcePath({ tags: [] }, 'tags[]'), { found: false, value: undefined })
+  assert.deepEqual(resolveSourcePath({ tags: [] }, 'tags'), { found: true, value: [] })
+
+  const viaElement = transformRecord({ tags: [] }, [{ sourceField: 'tags[]', targetField: 'FTag' }])
+  assert.deepEqual(viaElement.value, {}, 'element-0 of an empty array is absent, so nothing is written')
+  assert.deepEqual(warningCodes(viaElement), ['SOURCE_FIELD_ABSENT'])
+
+  const viaArray = transformRecord({ tags: [] }, [{ sourceField: 'tags', targetField: 'FTags' }])
+  assert.deepEqual(viaArray.value, { FTags: [] }, 'mapping the array itself DOES clear the target to []')
+  assert.deepEqual(viaArray.warnings, [])
 }
 
 // --- 4. the skip branch does not bypass the existing guards ------------------
@@ -343,9 +441,14 @@ function createMockDb() {
   }
 }
 
-function createHarness({ sourceRecords, fieldMappings }) {
+// `multitableRows`, when given, swaps the collect-only mock target for the REAL
+// metasheet:multitable target adapter over a stub records API, so "the target keeps its existing
+// value" is observed on a STORED row rather than on a collected payload.
+function createHarness({ sourceRecords, fieldMappings, multitableRows }) {
   const db = createMockDb()
   const writtenRecords = []
+  const storedRows = (multitableRows || []).map((row) => ({ ...row, data: { ...row.data } }))
+  const useMultitable = Array.isArray(multitableRows)
   const pipeline = {
     id: 'pipe_x02',
     tenantId: 'tenant_1',
@@ -354,7 +457,7 @@ function createHarness({ sourceRecords, fieldMappings }) {
     sourceSystemId: 'source_1',
     sourceObject: 'materials',
     targetSystemId: 'target_1',
-    targetObject: 'BD_MATERIAL',
+    targetObject: useMultitable ? 'approved_materials' : 'BD_MATERIAL',
     mode: 'incremental',
     status: 'active',
     idempotencyKeyFields: ['code'],
@@ -407,10 +510,55 @@ function createHarness({ sourceRecords, fieldMappings }) {
       }
     },
   }
+  const multitableTargetSystem = {
+    id: 'target_1',
+    name: 'MetaSheet target',
+    kind: 'metasheet:multitable',
+    role: 'target',
+    config: {
+      objects: {
+        approved_materials: {
+          name: 'Approved Materials',
+          sheetId: 'sheet_approved_materials',
+          keyFields: ['code'],
+          fieldDetails: [
+            { id: 'code', name: 'Code', type: 'string' },
+            { id: 'name', name: 'Name', type: 'string' },
+            { id: 'quantity', name: 'Quantity', type: 'number' },
+          ],
+        },
+      },
+    },
+  }
   const systems = new Map([
     ['source_1', { id: 'source_1', name: 'PLM mock', kind: 'mock-source', role: 'source', config: {} }],
-    ['target_1', { id: 'target_1', name: 'ERP mock', kind: 'mock-target', role: 'target', config: {} }],
+    ['target_1', useMultitable
+      ? multitableTargetSystem
+      : { id: 'target_1', name: 'ERP mock', kind: 'mock-target', role: 'target', config: {} }],
   ])
+  const multitableContext = {
+    api: {
+      multitable: {
+        records: {
+          async queryRecords(input) {
+            return storedRows.filter((row) => Object.entries(input.filters || {})
+              .every(([field, value]) => row.data[field] === value)).slice(0, input.limit || 10)
+          },
+          async createRecord(input) {
+            const row = { id: `rec_${storedRows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...input.data } }
+            storedRows.push(row)
+            return row
+          },
+          async patchRecord(input) {
+            const row = storedRows.find((item) => item.id === input.recordId)
+            row.version += 1
+            row.data = { ...row.data, ...input.changes }
+            return row
+          },
+        },
+      },
+    },
+  }
   const adapterRegistry = createAdapterRegistry()
     .registerAdapter('mock-source', ({ system }) => ({
       system,
@@ -430,6 +578,10 @@ function createHarness({ sourceRecords, fieldMappings }) {
         return createUpsertResult({ written: input.records.length, skipped: 0, results: [] })
       },
     }))
+    .registerAdapter('metasheet:multitable', ({ system }) => createMetaSheetMultitableTargetAdapter({
+      system,
+      context: multitableContext,
+    }))
   const runner = createPipelineRunner({
     pipelineRegistry,
     externalSystemRegistry: {
@@ -445,7 +597,7 @@ function createHarness({ sourceRecords, fieldMappings }) {
     runLogger: createRunLogger({ pipelineRegistry }),
     clock: (() => { let tick = 0; return () => tick++ * 25 })(),
   })
-  return { db, pipeline, runner, writtenRecords }
+  return { db, pipeline, runner, writtenRecords, storedRows }
 }
 
 async function testRunReportsAbsenceWithCountAndFieldNames() {
@@ -517,17 +669,252 @@ async function testCleanRunCarriesNoAbsenceDetail() {
   )
 }
 
+// --- 9. the PRODUCTION mapping shape, built by the registry's own functions ----
+// Load-bearing: every other run-level case here hands the runner hand-written literals, and a
+// literal is a shape the registry NEVER produces. `rowToFieldMapping()` (`pipelines.cjs:310-322`)
+// and `normalizeFieldMappings()` (`pipelines.cjs:181-205`) both put a `defaultValue` key on every
+// mapping - null for an unset default - so a no-write gate that asked only whether the KEY existed
+// was unreachable on every stored pipeline while this whole suite stayed green. This case is the
+// one that can tell the two shapes apart.
+async function testStoredMappingShapeIsNotBlanked() {
+  const mappingRows = [
+    { id: 'fm1', pipeline_id: 'pipe_x02', source_field: 'code', target_field: 'code', transform: null, validation: null, default_value: null, sort_order: 0, created_at: null },
+    { id: 'fm2', pipeline_id: 'pipe_x02', source_field: 'name', target_field: 'name', transform: null, validation: null, default_value: null, sort_order: 1, created_at: null },
+    { id: 'fm3', pipeline_id: 'pipe_x02', source_field: 'quantity', target_field: 'quantity', transform: null, validation: null, default_value: null, sort_order: 2, created_at: null },
+  ]
+  const fieldMappings = mappingRows.map(rowToFieldMapping)
+
+  // The shape itself is part of the assertion: if the registry ever stops emitting the key, this
+  // case must notice, because the gate's meaning depends on it.
+  assert.deepEqual(
+    fieldMappings.map((mapping) => [
+      mapping.sourceField,
+      Object.prototype.hasOwnProperty.call(mapping, 'defaultValue'),
+      mapping.defaultValue,
+    ]),
+    [['code', true, null], ['name', true, null], ['quantity', true, null]],
+    'rowToFieldMapping() emits defaultValue on EVERY mapping; a SQL NULL column reads back as null',
+  )
+  const viaNormalize = normalizeFieldMappings([{ sourceField: 'name', targetField: 'name', sortOrder: 0 }])
+  assert.equal(Object.prototype.hasOwnProperty.call(viaNormalize[0], 'defaultValue'), true)
+  assert.equal(viaNormalize[0].defaultValue, null, 'the write-side entry point collapses undefined to that same null')
+
+  const { db, runner, storedRows } = createHarness({
+    fieldMappings,
+    multitableRows: [{
+      id: 'rec_existing',
+      sheetId: 'sheet_approved_materials',
+      version: 1,
+      data: { code: 'MAT-001', name: 'Correct bolt', quantity: 7 },
+    }],
+    sourceRecords: [{ code: 'MAT-001', quantity: 9, updatedAt: '2026-09-10T00:00:00.000Z' }],
+  })
+
+  const result = await runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_x02', triggeredBy: 'test' })
+
+  assert.equal(result.metrics.rowsFailed, 0, 'absence is not a row failure')
+  assert.equal(storedRows.length, 1, 'the existing row was updated, not duplicated')
+  assert.equal(storedRows[0].data.name, 'Correct bolt', 'a REGISTRY-SHAPED mapping must not blank the stored value either')
+  assert.equal(storedRows[0].data.quantity, 9, 'the column the source did carry is still written')
+
+  const runRow = db.tables.get('integration_runs')[0]
+  assert.equal(runRow.details.sourceFieldAbsent.rows, 1, 'the run reports the affected row count')
+  assert.deepEqual(runRow.details.sourceFieldAbsent.fields, [{ sourceField: 'name', targetField: 'name' }])
+  assert.equal(JSON.stringify(runRow.details).includes('Correct bolt'), false, 'still values-free')
+
+  // The two shapes must agree, mapping for mapping - that is the property the old gate broke.
+  const sourceRecord = { code: 'MAT-001', quantity: 9 }
+  const fromRegistry = transformRecord(sourceRecord, [fieldMappings[1]])
+  const fromLiteral = transformRecord(sourceRecord, [{ sourceField: 'name', targetField: 'name' }])
+  assert.deepEqual(ownKeys(fromRegistry.value), ownKeys(fromLiteral.value), 'a registry mapping and a literal mapping must write the same keys')
+  assert.deepEqual(warningCodes(fromRegistry), warningCodes(fromLiteral))
+}
+
+// --- 10. the dry-run path reports the same fact and writes nothing ------------
+async function testDryRunReportsAbsenceAndWritesNothing() {
+  const { db, runner, writtenRecords } = createHarness({
+    fieldMappings: normalizeFieldMappings([
+      { sourceField: 'code', targetField: 'FNumber', sortOrder: 0 },
+      { sourceField: 'spec', targetField: 'FSpec', sortOrder: 1 },
+    ]),
+    sourceRecords: [{ code: 'MAT-001', updatedAt: '2026-09-10T00:00:00.000Z' }],
+  })
+
+  const result = await runner.runPipeline({
+    tenantId: 'tenant_1',
+    pipelineId: 'pipe_x02',
+    triggeredBy: 'test',
+    dryRun: true,
+  })
+
+  assert.equal(writtenRecords.length, 0, 'a dry run writes nothing')
+  assert.equal(result.metrics.rowsWritten, 0)
+  assert.deepEqual(
+    ownKeys(result.preview.records[0].transformed),
+    ['FNumber', '_integration_idempotency_key'],
+    'the PREVIEWED payload lacks the key the source did not carry, exactly like the live one',
+  )
+  const runRow = db.tables.get('integration_runs')[0]
+  assert.equal(runRow.details.dryRun, true)
+  assert.deepEqual(runRow.details.sourceFieldAbsent, {
+    code: 'SOURCE_FIELD_ABSENT',
+    rows: 1,
+    fields: [{ sourceField: 'spec', targetField: 'FSpec' }],
+  }, 'the dry run carries the same run detail as a live run')
+  assert.equal(db.tables.get('integration_watermarks').length, 0, 'a dry run still does not move the watermark')
+}
+
+// --- 11. fieldsTruncated means "a pair was dropped", not "the cap was reached" -
+async function testFieldsTruncatedOnlyWhenAPairWasDropped() {
+  const mappingsOf = (count) => normalizeFieldMappings(Array.from({ length: count }, (unused, index) => ({
+    sourceField: 'absent_' + index,
+    targetField: 'T_' + index,
+    sortOrder: index,
+  })))
+  const rowsOf = (count) => Array.from({ length: count }, (unused, index) => ({
+    code: 'MAT-' + index,
+    updatedAt: '2026-09-1' + index + 'T00:00:00.000Z',
+  }))
+
+  // Exactly the cap, seen on two rows: the list IS exhaustive, so nothing may claim truncation.
+  const exact = createHarness({ fieldMappings: mappingsOf(50), sourceRecords: rowsOf(2) })
+  await exact.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_x02', triggeredBy: 'test' })
+  const exactDetail = exact.db.tables.get('integration_runs')[0].details.sourceFieldAbsent
+  assert.equal(exactDetail.rows, 2)
+  assert.equal(exactDetail.fields.length, 50)
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(exactDetail, 'fieldsTruncated'),
+    false,
+    'a repeat of an already-recorded pair drops nothing, so it must not raise fieldsTruncated',
+  )
+
+  // One pair over the cap: a pair really was dropped, and the flag must still appear.
+  const over = createHarness({ fieldMappings: mappingsOf(51), sourceRecords: rowsOf(1) })
+  await over.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_x02', triggeredBy: 'test' })
+  const overDetail = over.db.tables.get('integration_runs')[0].details.sourceFieldAbsent
+  assert.equal(overDetail.rows, 1)
+  assert.equal(overDetail.fields.length, 50)
+  assert.equal(overDetail.fieldsTruncated, true, 'a genuinely dropped pair is still reported')
+}
+
+// --- 12. C6 external-write planner: an absent field must still CONVERGE -------
+// Not writing the key changes what the planner sees. `writableDataFromRecord()`
+// (`external-write-dry-run.cjs:545-551`) drops undefined, so the field is not in the update
+// payload; if the classifier still counted it as a difference, every round would re-plan the same
+// `update`, the write would change nothing, and counts/rowFingerprints would report churn for
+// ever. Before this cut the planner "converged" only by writing null over the good value.
+async function testPlannerConvergesWhenSourceFieldIsAbsent() {
+  const stored = new Map([['P-002', { externalId: 'P-002', name: 'Old gadget', status: 'old' }]])
+  const calls = { updateRows: [], insertRows: [] }
+  const input = {
+    pipeline: {
+      id: 'pipe_c6',
+      tenantId: 'tenant_1',
+      workspaceId: 'workspace_1',
+      sourceSystemId: 'source_1',
+      sourceObject: 'items',
+      targetSystemId: 'target_1',
+      targetObject: 'target_items',
+      createdBy: 'owner-7',
+      // C6 refuses a source without persisted equality filters; mirrors the planner suite fixture.
+      options: { source: { filters: { approvedSlice: 'fixture' } } },
+      // Registry shape again: these mappings carry defaultValue: null, like every stored one.
+      fieldMappings: normalizeFieldMappings([
+        { sourceField: 'code', targetField: 'externalId', sortOrder: 0 },
+        { sourceField: 'name', targetField: 'name', sortOrder: 1 },
+        { sourceField: 'status', targetField: 'status', sortOrder: 2 },
+      ]),
+    },
+    sourceSystem: { id: 'source_1', kind: 'data-source:sql-readonly' },
+    targetSystem: {
+      id: 'target_1',
+      kind: 'data-source:sql-write-gated',
+      config: {
+        dataSourceId: 'writable-ds',
+        object: 'public.target_items',
+        keyFields: ['externalId'],
+        writableFields: ['name', 'status'],
+      },
+    },
+    // The source row simply does not carry `name`.
+    sourceAdapter: {
+      async read() { return { records: [{ code: 'P-002', status: 'new' }], done: true, nextCursor: null } },
+    },
+    dataSourceWrites: {
+      async test() {
+        return { success: true, capabilityState: { readOnly: false, c6WriteTarget: true, genericQueryDisabled: true } }
+      },
+      async lookupByKey(id, object, key) {
+        const row = stored.get(key.externalId)
+        return { data: row ? [{ ...row }] : [], metadata: {} }
+      },
+      async insertRows(id, object, rows) {
+        calls.insertRows.push(...rows)
+        for (const row of rows) stored.set(row.externalId, { ...row })
+        return { data: rows, metadata: {} }
+      },
+      async updateRows(id, object, rows) {
+        calls.updateRows.push(...rows)
+        // A keyed update writes the columns it is given; the ones it omits keep their value.
+        for (const row of rows) stored.set(row.externalId, { ...stored.get(row.externalId), ...row })
+        return { rowCount: rows.length, results: [] }
+      },
+    },
+    tokenStore: (() => {
+      const map = new Map()
+      return {
+        async get(key) { return map.get(key) || null },
+        async set(key, value) { map.set(key, JSON.parse(JSON.stringify(value))) },
+        async consume(key) { const value = map.get(key) || null; map.delete(key); return value },
+        async delete(key) { map.delete(key) },
+      }
+    })(),
+    dryRunUser: 'user_write',
+    dataSourceOwnerPrincipal: 'owner-7',
+    maxRows: 100,
+  }
+
+  // Round 1: `status` really did change, so the row is an update - with a payload that does NOT
+  // carry `name`.
+  const first = await dryRunExternalWrite(input)
+  assert.equal(first.counts.update, 1, 'a real difference is still planned as an update')
+  assert.equal(first.counts.skip, 0)
+  await applyExternalWrite({ ...input, dryRunToken: first.dryRunToken, applyUser: 'user_write', runId: 'run_c6_1' })
+  assert.deepEqual(
+    ownKeys(calls.updateRows[0]),
+    ['externalId', 'status'],
+    'the write payload omits the field the source did not carry',
+  )
+  assert.equal(stored.get('P-002').name, 'Old gadget', 'and the target keeps its value')
+
+  // Round 2: nothing the row can write differs any more, so it must settle to `skip`. If the
+  // classifier compared a field the payload cannot carry, this would be a second `update` and the
+  // plan would never converge.
+  const second = await dryRunExternalWrite(input)
+  assert.equal(second.counts.update, 0, 'the plan converges instead of re-planning a no-op update')
+  assert.equal(second.counts.skip, 1)
+  assert.equal(calls.updateRows.length, 1, 'and no second write is issued')
+  assert.equal(stored.get('P-002').name, 'Old gadget')
+}
+
 // Exported one-by-one so a mutation probe can run each case in isolation and count
 // exactly how many go red; `node __tests__/...` (the test-chain shape) still runs them all.
 const CASES = {
   testAbsentSourcePathLeavesTargetUnwritten,
   testPresentButEmptyStillWrites,
   testDefaultsAndTransformsStillProduceValues,
+  testBlankDefaultValueIsUnset,
+  testBareConcatStillWritesEmptyString,
+  testEmptyArraySegmentIsAbsentByDecision,
   testSkipDoesNotBypassGuards,
   testResolveSourcePathValueParityWithGetPath,
   testTargetPatchPreservesExistingValue,
   testRunReportsAbsenceWithCountAndFieldNames,
   testCleanRunCarriesNoAbsenceDetail,
+  testStoredMappingShapeIsNotBlanked,
+  testDryRunReportsAbsenceAndWritesNothing,
+  testFieldsTruncatedOnlyWhenAPairWasDropped,
+  testPlannerConvergesWhenSourceFieldIsAbsent,
 }
 
 async function main() {

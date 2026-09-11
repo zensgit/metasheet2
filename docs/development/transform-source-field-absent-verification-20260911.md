@@ -1,154 +1,173 @@
 # 映射源字段「不存在」不再静默覆盖目标值（X02）— 验证
 
-- 日期：2026-09-11
-- 分支：`fix/transform-source-field-absent`（基于 `919582e71`）
+- 日期：2026-09-11（返修轮：2026-09-11，X02 终审后）
+- 分支：`fix/transform-source-field-absent`（基于 `919582e71`；第一版 `c2b482c8b`，本文为其返修后的状态）
 - 本机：Windows 11，Node 在 worktree `C:\Users\zhou\Downloads\dev\metasheet-wt-g44` 内直接跑（未 `pnpm install`，未建新 worktree，未复制仓库）
 - 配套设计文档：`docs/development/transform-source-field-absent-design-20260911.md`
 
-## 1. 新增套件
+## 0. 返修摘要：第一版的门在生产路径上是空转的
 
-`plugins/plugin-integration-core/__tests__/transform-source-field-absent.test.cjs`，8 个用例：
+终审（17 代理对抗复核）判「修完再合」，阻断项是：不写分支的第二个条件 `usedDefault` 只测 `hasOwnProperty(mapping, 'defaultValue')`，而注册表给**每一条**存库映射都塞了这个键（`pipelines.cjs:318`、`:201`），于是该条件对任何真实管道恒为真，**分支永不触发**。我复跑确认，并且发现**第二重死锁**：即使把条件换成 `defaultApplied`，原来的取值回填 `if (usedDefault) fieldValue = mapping.defaultValue` 会把 `fieldValue` 变成 `null`，`outputValue` 于是是 `null` 而不是 `undefined`，**第三个条件独立地再挡一次**。
+
+前后对照（进程内喂真函数，源记录 `{code:'MAT-001', quantity:9}`，缺 `name`）：
+
+| 映射来源 | 返修前（`c2b482c8b`） | 返修后 |
+| --- | --- | --- |
+| 内联字面量 `[{sourceField:'name',targetField:'name'}]` | `value={}`，`warnings=1` | `value={}`，`warnings=1` |
+| 存库形状 `[{...,defaultValue:null}]` | `value={"name":null}`，`warnings=0` | `value={}`，`warnings=1` |
+| `__internals.rowToFieldMapping({default_value:null,...})` | `value={"name":null}`，`warnings=0` | `value={}`，`warnings=1` |
+| `__internals.normalizeFieldMappings([{sourceField:'name',targetField:'name',sortOrder:0}])` | `value={"name":null}`，`warnings=0` | `value={}`，`warnings=1` |
+
+复跑方式：进程内 `require` 真模块直接喂参数，跑完即弃，未落盘到仓库。
+
+### 全量行为差异（不是抽样）
+
+12 条源记录 × 3 条路径 × 5 种 `defaultValue` 形状（无键 / `null` / `undefined` / `''` / `'X'`）× 11 种 transform = **1980 组**，把 `919582e71` 的 `transformRecord` 与返修后的逐组比对：
+
+```
+combinations: 1980 diffs: 420
+[140] nokey | {has:true, v:<<undef>>, w:[]} -> {has:false, w:[SOURCE_FIELD_ABSENT]}
+[140] null  | {has:true, v:null,      w:[]} -> {has:false, w:[SOURCE_FIELD_ABSENT]}
+[140] undef | {has:true, v:<<undef>>, w:[]} -> {has:false, w:[SOURCE_FIELD_ABSENT]}
+```
+
+三个桶，方向一致：**本来写一个空值 → 现在不写并记一条告警**。`''` 与 `'X'` 两种非空默认值**零差异**（优先级未动）；没有任何一组从「写了一个非空值」变成「不写」。与第一版 `c2b482c8b` 相比是 **280 组**（只有 `null`、`undefined` 两桶），即返修新增的行为面恰好就是被终审点名的那两种形状。
+
+## 1. 套件（15 个用例，返修新增 6 个）
+
+`plugins/plugin-integration-core/__tests__/transform-source-field-absent.test.cjs`（932 行）：
 
 | # | 用例 | 钉住的事实 |
 | --- | --- | --- |
-| 1 | `testAbsentSourcePathLeavesTargetUnwritten` | 源路径不存在 → 目标键**不出现在 payload 里**（用 `hasOwnProperty` 断言，不是断言值为 `undefined`）；`ok` 仍为 true；`errors` 为空；`warnings` 条目逐字段比对；嵌套路径不会顺手建出父对象/父数组；空数组算不存在 |
-| 2 | `testPresentButEmptyStillWrites` | `null` / `''` / `0` / `false` / 自有键持 `undefined` 五种"存在但空"照旧写，且不记 warning；嵌套与数组形式同 |
-| 3 | `testDefaultsAndTransformsStillProduceValues` | `mapping.defaultValue`（含显式 `undefined`）优先级不变；`defaultValue` / `dictMap.defaultValue` / `concat.values` 造出的值照旧写；纯透传的 `trim` / `toNumber` 链则落到不写 |
-| 4 | `testSkipDoesNotBypassGuards` | 3 个不安全 `targetField` 在源字段缺失时**仍然** `TRANSFORM_FAILED`；`required` 对"没写的键"照旧判 `REQUIRED`；无 `sourceField` 的常量型映射行为不变 |
-| 5 | `testResolveSourcePathValueParityWithGetPath` | `resolveSourcePath().value` 与 `getPath()` 在 14 记录 × 13 路径 = **182 组**上 `Object.is` 相等；另有 6 条 `found` 的正/反例 |
-| 6 | `testTargetPatchPreservesExistingValue` | 端到端：真 `metasheet:multitable` 目标适配器 + `patchRecord`，源行缺 `name` 列 → 库里 `name` 保留 `'Correct bolt'`，`quantity` 照常更新为 9，行数仍为 1（没变成插入） |
-| 7 | `testRunReportsAbsenceWithCountAndFieldNames` | 3 行源数据跑完整 `runPipeline`：`rowsFailed === 0`、`rowsWritten === 3`；三条 payload 的键集逐个比对；`details.sourceFieldAbsent` 等于 `{code, rows: 2, fields:[2 对]}`；run details 整串不含 6 个源值；**run 状态仍 `succeeded`、水位仍推进到 `2026-09-10T02:00:00.000Z`**（把"本刀不改水位"钉成成文事实） |
-| 8 | `testCleanRunCarriesNoAbsenceDetail` | 所有映射路径都存在（值为 `null`）的运行，`details` 里**没有** `sourceFieldAbsent` 这个键 |
+| 1 | `testAbsentSourcePathLeavesTargetUnwritten` | 源路径不存在 → 目标键**不出现在 payload 里**（`hasOwnProperty` 断言）；`ok` 仍 true；嵌套路径不建父容器 |
+| 2 | `testPresentButEmptyStillWrites` | `null`/`''`/`0`/`false`/自有键持 `undefined` 五种"存在但空"照旧写、不记 warning |
+| 3 | `testDefaultsAndTransformsStillProduceValues` | 非空 `defaultValue` 优先级不变；`defaultValue`/`dictMap.defaultValue`/`concat.values` 造出的值照旧写；纯透传 `trim`/`toNumber` 链落到不写 |
+| 3b | `testBlankDefaultValueIsUnset` **（新）** | `defaultValue: null` 与 `defaultValue: undefined` 都是注册表编码的"未设置"，不算供值 → 不写 + 告警；`defaultValue: ''` 仍写；**路径存在**时回填优先级逐条不变 |
+| 3c | `testBareConcatStillWritesEmptyString` **（新）** | 残留显式化：`{fn:'concat'}` 与 `{fn:'concat',fields:[...]}` 全缺时写 `''` 且不记告警；`{fn:'defaultValue',value:''}` 仍写 `''`（这正是不能放宽第三条件的原因）；产出非空值的 concat 照旧写 |
+| 3d | `testEmptyArraySegmentIsAbsentByDecision` **（新）** | F02 定案：`tags[]` 对空数组 = 不存在；`tags`（数组本身）= 存在，写 `[]` 清空目标 |
+| 4 | `testSkipDoesNotBypassGuards` | 3 个不安全 `targetField` 在源字段缺失时仍 `TRANSFORM_FAILED`；`required` 照旧判 `REQUIRED` |
+| 5 | `testResolveSourcePathValueParityWithGetPath` | `resolveSourcePath().value` 与 `getPath()` 在 14×13 = **182 组**上 `Object.is` 相等 |
+| 6 | `testTargetPatchPreservesExistingValue` | 端到端（字面量映射）：真 multitable 适配器 + `patchRecord`，缺 `name` → 库里保留 `'Correct bolt'` |
+| 7 | `testRunReportsAbsenceWithCountAndFieldNames` | 3 行跑完整 `runPipeline`：`rowsFailed===0`、`details.sourceFieldAbsent={code,rows:2,fields:[2 对]}`、values-free、状态 `succeeded`、水位照推 |
+| 8 | `testCleanRunCarriesNoAbsenceDetail` | 全路径存在的运行，`details` 里没有 `sourceFieldAbsent` 键 |
+| 9 | `testStoredMappingShapeIsNotBlanked` **（新，本次返修的核心交付物）** | **映射由 `pipelines.__internals.rowToFieldMapping` / `normalizeFieldMappings` 产出，不含任何内联字面量**：先断言注册表确实给每条映射带 `defaultValue: null`，再跑完整 `runPipeline` 打到真 multitable 适配器，断言库里 `name` 仍是 `'Correct bolt'`、`quantity` 更新成 9、`details.sourceFieldAbsent.rows === 1`、字段对为 `{name,name}`、details 不含源值；最后断言注册表形状与字面量形状的答案**逐键相同** |
+| 10 | `testDryRunReportsAbsenceAndWritesNothing` **（新）** | dry-run 分支：不写、`rowsWritten===0`、`preview.records[0].transformed` 缺那个键、`details.dryRun===true` 且 `details.sourceFieldAbsent` 与实跑同形、水位表为空 |
+| 11 | `testFieldsTruncatedOnlyWhenAPairWasDropped` **（新）** | 恰好 50 个不同字段对 × 2 行 → `fields.length===50` 且**没有** `fieldsTruncated`；51 对 × 1 行 → `fields.length===50` 且 `fieldsTruncated===true` |
+| 12 | `testPlannerConvergesWhenSourceFieldIsAbsent` **（新）** | C6 规划器收敛性：第 1 轮判 `update` 且写出的 payload 不含缺失字段、库里旧值保留；第 2 轮判 `skip`、不再发第二次写 |
 
 套件用 `require.main === module` 守卫 + 导出 `CASES`，既能被 test-chain 以 `node __tests__/...` 整跑，也能被变异探针逐个用例跑来数精确条数。
 
+### 一条被改掉的既有断言（点名）
+
+第一版的用例 3 有一条 `defaultValue: undefined` → **照写**的断言（原 `:132-137`）。返修后它改成**不写**，理由写在设计文档 3.1：`pipelines.cjs:201` 自己就把 `undefined` 折成 `null` 存库，也就是注册表把 `undefined` 当作"没给"；再把它当"操作员明示给了值"就自相矛盾。这条路径在生产上不可达（JSON 表达不出 `undefined`，`normalizeFieldMappings` 也会折掉），所以改动面只在 JS 字面量。
+
+**这一点与派工说明不一致，在此点名**：派工写「`:289` 的取值回填一字不动，必须保住 `:132-137` 已钉住的『`defaultValue` 键存在但值 undefined → 照写』」。实测这两条要求互相矛盾——`:132-137` 绿不绿取决于 `:297` 的第二条件，不取决于 `:289`；只要第二条件改用 `!defaultApplied`（派工的另一条硬要求），这条用例必红。而且**只改第二条件、回填一字不动，阻断项根本没修好**（变异 M9 实证）。
+
 ## 2. test-chain 接线
 
-插入位置：`plugins/plugin-integration-core/test-chain.txt` **第 33 行**，上下文是
-
-```
-31: # --- suites (order not significant; add new suites here) ---
-32: node __tests__/plugin-runtime-smoke.test.cjs
-33: node __tests__/transform-source-field-absent.test.cjs      <-- 新增
-34: node __tests__/app-manifest.test.cjs
-```
-
-即 suites 区块的第 2 条，远在 `# --- sealed-export stage tail: S4 -> S5 -> S6-A ...`（第 224 行，插入后）之前。该文件在 `.gitattributes:69` 声明 `text eol=lf merge=union`，写入按 LF，`git diff --stat` 只有 `1 insertion(+)`，没有换行符噪声。
-
-执行到位的证据（不是自述，是仓内守卫算出来的）：
+`plugins/plugin-integration-core/test-chain.txt` 第 33 行的接线**未改动**（返修没有新增套件文件）：
 
 ```
 $ node __tests__/test-chain-completeness.test.cjs
 ✓ test-chain-completeness: 215 suites, all executed by `pnpm test` (0 intentional exclusions)
 ```
 
-改动前是 214。另外直接解析 `test-chain.txt` 确认命令序号：
+## 3. 变异自证（9 项，全部原地改 → 跑 → 还原 → sha256 核对）
 
-```
-total commands: 215
-index of new suite: 1
-node __tests__/transform-source-field-absent.test.cjs
-```
+计数口径：`total=15 failed=N`，逐个用例独立 try/catch，N 是**精确的红用例条数**。对照组（无变异）：`{"total":15,"failed":0}`。
 
-## 3. 变异自证（7 项，全部原地改 → 跑 → 还原 → 字节核对）
-
-计数口径：`CASES total=8 failed=N`，逐个用例独立 try/catch，所以 N 是**精确的红用例条数**（不是"第一条就中断"）。另外同时跑 6 个相关既有套件看有没有连带红。
-
-| 变异 | 改了什么 | 新套件红用例 | 红的用例名 | 既有套件 |
+| 变异 | 改了什么 | 文件 | 红 | 红的用例 |
 | --- | --- | --- | --- | --- |
-| M1 | 把缺陷放回去：`if (false && !resolved.found && ...)`，即照旧写 `undefined` | **5 / 8** | Absent…Unwritten、Defaults…、SkipDoesNotBypassGuards、TargetPatchPreserves…、RunReportsAbsence… | 6 个全绿 |
-| M2 | 保留"不写"，删掉 `warnings.push({...})` 这个编码信号 | **5 / 8** | 同上 5 条（含 run details 那条） | 6 个全绿 |
-| M3 | 把 `null` / `''` 也当成"不存在"（`found = false`） | **1 / 8** | ResolveSourcePathValueParity… | 6 个全绿 |
-| M4 | "不写"分支里删掉 `parseTargetPath(targetField)`，让跳过写入顺带跳过路径守卫 | **1 / 8** | SkipDoesNotBypassGuards（`__proto__: unsafe target path still fails`） | 6 个全绿 |
-| M5 | 成功路径不再 `...buildSourceFieldAbsentDetails()` | **1 / 8** | RunReportsAbsence…（`run details carry the COUNT…`） | 6 个全绿 |
-| M6 | 保留计数，把 `fields` 置空（只报数不报字段名） | **1 / 8** | RunReportsAbsence… | 6 个全绿 |
-| M7 | 让缺失计入 `metrics.rowsFailed += 1`（即擅自动水位语义） | **1 / 8** | RunReportsAbsence…（`absence is not a row failure`） | 6 个全绿 |
+| **M8** | 门的第二条件改回 `!usedDefault`（= 第一版形态） | transform-engine | **4 / 15** | `testBlankDefaultValueIsUnset`、**`testStoredMappingShapeIsNotBlanked`**（`a REGISTRY-SHAPED mapping must not blank the stored value either`）、`testDryRunReportsAbsenceAndWritesNothing`、`testFieldsTruncatedOnlyWhenAPairWasDropped` |
+| **M9** | 取值回填改回 `if (usedDefault) ...`（= 派工要求的"一字不动"） | transform-engine | **5 / 15** | M8 那 4 条 + `testPlannerConvergesWhenSourceFieldIsAbsent` |
+| M10 | `defaultApplied` 去掉 `!== null`（空 `null` 也算供值） | transform-engine | 5 / 15 | 同 M9 |
+| M11 | 规划器改回比全部 `writableFields` | external-write-dry-run | **1 / 15** | `testPlannerConvergesWhenSourceFieldIsAbsent`（`the plan converges instead of re-planning a no-op update`） |
+| M12 | 计数改回"先判上限再去重" | pipeline-runner | **1 / 15** | `testFieldsTruncatedOnlyWhenAPairWasDropped` |
+| M13 | 行计数改回看 `warnings.length`（不按 code 过滤） | pipeline-runner | **0 / 15** | —（**负结果**，见下） |
+| M14 | 第三条件放宽成 `isBlank(outputValue)` | transform-engine | **1 / 15** | `testBareConcatStillWritesEmptyString` |
+| M15 | 空数组段当作存在 | transform-engine | **1 / 15** | `testEmptyArraySegmentIsAbsentByDecision` |
+| M16 | 成功路径不再 `...buildSourceFieldAbsentDetails()` | pipeline-runner | 4 / 15 | `testRunReportsAbsenceWithCountAndFieldNames`、`testStoredMappingShapeIsNotBlanked`、`testDryRunReportsAbsenceAndWritesNothing`、`testFieldsTruncatedOnlyWhenAPairWasDropped` |
 
-同跑的 6 个既有套件：`transform-source-field-absent`、`transform-validator`、`pipeline-runner`、`http-routes`、`external-write-dry-run`、`k3-df-t1-target-payload-preview`。
+（第一版的 M1–M7 见 git 历史，未在本轮重跑。）
 
-对照组（无变异）：`CASES total=8 failed=0`。
+### 判别力自证（本轮的核心要求）
 
-每次变异后都把文件按原字节写回，并核对 sha256：
+**M8 是判别力证据**：把门改回第一版形态后，用例 9（映射由注册表函数产出）**红在端到端断言上**——`a REGISTRY-SHAPED mapping must not blank the stored value either`，即库里的 `'Correct bolt'` 真的被覆盖了。与此同时，**所有内联字面量的用例全部保持绿**：用例 1（`testAbsentSourcePathLeavesTargetUnwritten`）、用例 6（`testTargetPatchPreservesExistingValue`）、用例 7（`testRunReportsAbsenceWithCountAndFieldNames`）在 M8 下一条不红。这正是终审说的「214 条既有套件 + 新套件，合计 0 条能钉住真路径」——现在有 4 条能（3b 用写死的 `defaultValue: null`，9/10/11 直接用注册表函数产出映射），而原有的字面量用例仍然对真路径无判别力。
 
-```
-397381458d203031a23e9d17e5440dda55092c28c1b2bf639805527a38642111  lib/transform-engine.cjs
-374e589b245cf86a00fa4d938b40e87c82a751086124c8328209f085ad6eb8fa  lib/pipeline-runner.cjs
-21857fc868f08572b946816a81e27a15d547d959e325c631a85c1f330415795b  test-chain.txt
-```
-
-七轮跑完后三项全部 `OK`（`sha256sum -c`）。
+用例 9 的断言顺序是刻意的：形状比对被放在端到端断言**之后**，否则一条便宜的 `transformRecord` 比对会先短路，红在一个没有说服力的地方。
 
 ### 负结果（诚实标注）
 
-**M1（把缺陷原样放回去）在整条 215 条 test-chain 上只让 1 个套件变红，就是新加的那个。** 这一条是穷举跑出来的，不是抽样：
+1. **M13 零红。** 把行计数改回 `warnings.length > 0` 不触发任何用例。原因实读确认：`transform-engine.cjs:321` 是本文件唯一的 `warnings.push`，`code` 恒为 `SOURCE_FIELD_ABSENT`，所以今天两种写法逐行等价——这条改动是**纯潜伏加固**，没有能让它变红的当前输入。没有为它造用例，因为造出来的只能是"给 transformRecord 打桩塞一个假 code"，那是钉桩不是钉行为。
+2. **未重跑整条 215 条 test-chain。** 任务硬规则禁止（磁盘约 1.5 GB）。第一版那轮的穷举结论（M1 在 215 条上只红新套件）仍然成立且**仍然无判别力**，正是本轮补用例 9 的原因。
+3. **M2–M7（第一版的变异）未在返修后重跑。**
+
+### 字节还原
+
+每次变异后按原字节写回并核对 sha256，9 轮跑完三个文件全部 `OK`：
 
 ```
-MUTATION M1 over the FULL chain
-  chain: 215 commands, 198 pass, 17 fail        （基线是 199 pass / 16 fail）
-  newly red vs baseline (1):
-    __tests__/transform-source-field-absent.test.cjs
-  no longer red (0): []
-  restored sha: 397381458d203031a23e9d17e5440dda55092c28c1b2bf639805527a38642111
+lib/transform-engine.cjs        67a738f3ab6bc23855a10fe5010234b880d02b3b559c0794fea06b193a70ea6d
+lib/pipeline-runner.cjs         646115c41848f51aac91979cbaf214eda41ebad093f9bfd8fe9ddadb887d9363
+lib/external-write-dry-run.cjs  d18f6a3ba1ff56fdeb78464b69df6b93ae18d31825622ba7f369f4baedd0dde7
 ```
-
-也就是说：改动前的 214 条既有套件里，没有一条钉住这条行为——这正是它能以"静默"形态存活的原因。M2–M7 我只在上表那 6 个套件范围内看了连带情况（都绿），没有对每一条变异都跑满 215 条，所以对 M2–M7 只能说"这 6 个没红"，不能推广。
-
-代价：这条线的回归保护落在 `transform-source-field-absent.test.cjs` 一个套件上，它一旦掉出 test-chain 就等于保护消失（所以第 2 节把"链条确实执行到它"单独取证）。
 
 ## 4. 套件与检查的实际数字
 
-### 受影响套件（逐个）
+### 受影响套件（逐个实跑，exit code）
 
 ```
-transform-validator                PASS
-pipeline-runner                    PASS
-external-write-dry-run             PASS
-http-routes                        PASS
-k3-df-t1-target-payload-preview    PASS
-e2e-plm-k3wise-writeback           PASS
-k3-raw-row-intake-aliases          PASS
-transform-source-field-absent      PASS（新增）
+transform-source-field-absent        exit=0   (15/15 cases)
+transform-validator                  exit=0
+pipeline-runner                      exit=0
+external-write-dry-run               exit=0   (1373 行既有套件，规划器改动下仍全绿)
+http-routes                          exit=0
+pipelines                            exit=0
+k3-df-t1-target-payload-preview      exit=0
+e2e-plm-k3wise-writeback             exit=0
+k3-raw-row-intake-aliases            exit=0
+metasheet-multitable-target-adapter  exit=0
+data-source-sql-readonly-source-adapter exit=0
+df-n2-2c-provenance-read             exit=0
+http-routes-plm-k3wise-poc           exit=0
+k3-external-write-permanent-fence    exit=0
+k3-wise-c6-write-profile             exit=0
+k3-write-approval-posture            exit=0
+outbound-http-write-gate             exit=0
+test-chain-completeness              exit=0   (215 suites)
 ```
 
-### 整条 test-chain
+套件选择不是拍脑袋：对 `__tests__/` 全量 grep `transform-engine|transformRecord|external-write-dry-run|pipeline-runner`，命中 15 个文件，逐个跑完。
 
-`node scripts/test-chain.cjs` 是 fail-fast，在本机第 1 条就停（见下），所以另外用一个 continue-on-failure 的执行器把 215 条全部跑了一遍：
+两条红，**均为本机缺件、与本次改动无关**：
 
 ```
-chain: 215 commands, 199 pass, 16 fail   (real 0m50.471s)
+b2a-trial-registry-wiring                    exit=1  MODULE_NOT_FOUND @metasheet/mssql-readonly-utils
+k3-sqlserver-external-write-fence-parity     exit=1  MODULE_NOT_FOUND @metasheet/mssql-readonly-utils
 ```
 
-16 条红全部是**本机环境缺件**，与本次改动无关：
+（本 worktree 未 `pnpm install`，按任务硬规则不装；这两条属于第一版验证里记录的 16 条本机环境红之一类。）
 
-- 8 条 `MODULE_NOT_FOUND @metasheet/mssql-readonly-utils`（该 workspace 包在本 worktree 的 `node_modules` 里没有链接；`packages/mssql-readonly-utils` 存在，但本 worktree 未 `pnpm install`，按任务硬规则不装）
-- `MODULE_NOT_FOUND mssql`、`MODULE_NOT_FOUND pg` 各 1 条
-- `spawnSync python3 ENOENT` 1 条（real-DB step contract 守卫 fail-closed）
-- `vitest.config.ts must ... exclude ...` 2 条、`AssertionError` 2 条（sealed-export S3/S4/S6-A 系列，同属缺件环境）
+### 语法检查
 
-**不是自述，是对照跑出来的**：把 `lib/transform-engine.cjs` 与 `lib/pipeline-runner.cjs` 临时换成 `HEAD` 版本（按 autocrlf 写回 CRLF），这 16 条**逐条仍然 exit=1**；随后按原字节还原并核对 sha256 通过。
-
-CI 才是裁判——这 16 条在 CI 上的结论以 CI 为准。
+`node --check` 四个改动文件（3 个 lib + 1 个套件）全部通过。
 
 ### 溯源 pin
 
-改动的三个文件都不在 pin 清单里，**没有重打 pin**：
-
-- `lib/sealed-export/vectors/s6a-package-provenance-pins.json` 共 **66** 个 pin 键，无 `transform` / `pipeline-runner` / `test-chain.txt` 相关键。
-- `lib/sealed-export/sealed-export-package-provenance.cjs:223-231` 的注释明确写着 `test-chain.txt` 故意不 pin（pin 的是 `scripts/test-chain.cjs`，本次未改）。
-- `node __tests__/sealed-export-package-provenance.test.cjs` → `OK`（exit 0）。
+改动的四个文件都不在 pin 清单里，**没有重打 pin**：`lib/sealed-export/vectors/s6a-package-provenance-pins.json` 共 **66** 个 pin 键，无 `transform-engine` / `pipeline-runner` / `external-write-dry-run` / `test-chain.txt` 相关键。
 
 ### type-check
 
-- 本次改动**没有 TS 文件**，也没有 `.ts` / `.vue` 引用 `transform-engine`（全仓 grep 为空）。
-- `plugins/plugin-integration-core/package.json` **没有** `type-check` 也没有 `lint` 脚本，所以 `pnpm -r type-check`（根 `package.json` 的定义）本来就跳过这个包。
-- 实际做的是 `node --check` 三个改动/新增文件，全部通过。
-- **没跑**：仓库级 `pnpm -r type-check` 与 `pnpm -r lint`。原因：无 TS 改动 + 磁盘只剩约 1.8 GB、禁止 `pnpm install`。这一项以 CI 为准。
+- 本次改动**没有 TS/Vue 文件**。
+- **没跑**：仓库级 `pnpm -r type-check` 与 `pnpm -r lint`（无 TS 改动 + 磁盘约 1.5 GB、禁止 `pnpm install`）。以 CI 为准。
 
 ## 5. 我没跑 / 没做的事
 
-1. `pnpm -r type-check`、`pnpm -r lint`（理由同上）。
-2. `apps/web` 的任何测试：本刀没有改前端，也刻意没碰 `errorCodeLabels.ts`。
-3. 真实数据库 / 222 上机验证：没做，全部是进程内假件。
-4. `external-write-dry-run` 的 dry-run 报告口径：没有把 `SOURCE_FIELD_ABSENT` 加进它的 `counts` / `rowErrorTypes`（后续单）。
-5. `preview`（dry-run 的 `{ records, errors }`）没有新增 `warnings` 数组——dry-run 同样会走 `finishRun`，所以 `details.sourceFieldAbsent` 对 dry-run 也成立，就没有再动 preview 的形状。这一点没有被新套件覆盖到 dry-run 分支，属于缺口。
-6. 16 条本机红的套件本身没有修（环境缺件，且禁止安装）。
+1. `pnpm -r type-check`、`pnpm -r lint`。
+2. 整条 215 条 test-chain（任务硬规则禁止；只跑了 18 条相关套件 + completeness 守卫）。
+3. `apps/web` 的任何测试：本刀没有改前端。`details.sourceFieldAbsent` 在运行历史面板上的渲染**仍然没有**——设计文档 §6 第 6 条记录了原因与正确的一刀在哪。
+4. 真实数据库 / 222 上机验证：没做，全部是进程内假件。
+5. `external-write-dry-run` 的 `counts` / `rowErrorTypes` 没有新增 `source_field_absent` 口径（只做了收敛性修复）。
+6. `sourceFieldAbsent.rows` 没有抬进 `metrics`：那会牵动落库形状（`run-log.cjs:45-52` 只透传 5 个键，且它们是**独立列**不是 JSONB），按派工要求"只登记不做"。
+7. bare `concat` 的**行为**没有修正（只钉住现状 + 订正文档口径），留下一刀。
+8. 那两条 `MODULE_NOT_FOUND` 的本机红没有修（环境缺件，且禁止安装）。

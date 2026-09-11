@@ -282,19 +282,39 @@ function transformRecord(sourceRecord, fieldMappings = []) {
       const resolved = resolveSourcePath(sourceRecord, mapping.sourceField)
       let fieldValue = resolved.value
       // Unchanged precedence: a configured defaultValue still fills in for a blank, and it still
-      // wins before the transform chain runs. `usedDefault` only records that it DID fill in, so
-      // the absent branch below cannot swallow a value the operator asked for.
+      // wins before the transform chain runs. `usedDefault` drives ONLY that value precedence and
+      // is byte-identical to the pre-change condition (919582e71 `:233`).
       const usedDefault = isBlank(fieldValue)
         && Object.prototype.hasOwnProperty.call(mapping, 'defaultValue')
-      if (usedDefault) fieldValue = mapping.defaultValue
+      // ...but "the key is present" is NOT "the operator supplied a default", and gating the
+      // no-write branch on the key made that branch unreachable on every stored pipeline: the
+      // registry puts a `defaultValue` key on EVERY mapping it hands back - `pipelines.cjs:318`
+      // `parseJsonbValue(row.default_value, null)` for a SQL NULL column, `pipelines.cjs:201`
+      // `mapping.defaultValue === undefined ? null : ...` on the write side. `null` is exactly how
+      // the registry encodes "unset", and `:201` collapses `undefined` into that same `null`, so
+      // neither can mean "a default supplied this value".
+      const defaultApplied = usedDefault
+        && mapping.defaultValue !== null
+        && mapping.defaultValue !== undefined
+      // Fill in EXACTLY as before whenever the source path existed (a present-but-blank value
+      // keeps collapsing to the configured default, byte-for-byte as pre-change) and whenever a
+      // real default was supplied. The single case left out is "path absent AND the default is
+      // itself unset", where the fill-in would manufacture a null out of nothing and then hand
+      // that null to the chain - which is what made the no-write branch unreachable a second,
+      // independent time (outputValue became null, never undefined).
+      if (defaultApplied || (usedDefault && resolved.found)) fieldValue = mapping.defaultValue
 
       const outputValue = transformValue(fieldValue, mapping.transform, sourceRecord)
 
       // Do not write only when ALL THREE hold: the source path was absent from this record, no
-      // defaultValue was applied, and the transform chain produced nothing of its own (a `concat`
-      // of literals or a `dictMap` fallback still writes, exactly as before). A path that EXISTS
-      // holding null or '' is the source genuinely clearing the value and is written as before.
-      if (!resolved.found && !usedDefault && outputValue === undefined) {
+      // default actually supplied a value, and the transform chain produced nothing of its own.
+      // A `concat` that produced a NON-EMPTY value, or a `dictMap` fallback, still writes exactly
+      // as before - a bare `concat` whose parts are all absent still produces '' and is still
+      // written; widening this condition to isBlank() would stop writing values a chain was asked
+      // to manufacture (`{fn:'defaultValue', value:''}`), which is the one thing this cut refuses
+      // to do. A path that EXISTS holding null or '' is the source genuinely clearing the value
+      // and is written as before.
+      if (!resolved.found && !defaultApplied && outputValue === undefined) {
         // Run the write-side path guard anyway - see parseTargetPath(). Its throw is caught below
         // and recorded as TRANSFORM_FAILED, exactly as setPath()'s throw was.
         parseTargetPath(targetField)
