@@ -147,3 +147,18 @@ export interface MetaRecordInspectorFieldLayout {
   ordered: MetaField[]
   hiddenInView: MetaField[]
 }
+
+/**
+ * Record inspector v3 PR-B2 round 2 (2026-09-05, §1.3 "Field-anchored server errors"): the ONE
+ * predicate for "which of `fields` does MetaRecordFieldsPanel render a row for" — the layer-3 RBAC
+ * field-mask (`fieldPermissions[id].visible !== false`; an absent map hides nothing). Hoisted out of the
+ * panel's `visibleFields` computed so MetaRecordInspector's `canAnchorFieldError` (which decides whether a
+ * field-anchored server error CAN render, or must fall back to the workbench toast) reads the exact same
+ * rule instead of a second, drift-prone copy. Byte-identical to the prior inline filter.
+ */
+export function visibleRecordFields(
+  fields: MetaField[] | null | undefined,
+  fieldPermissions: Record<string, MetaFieldPermission> | null | undefined,
+): MetaField[] {
+  return (fields ?? []).filter((field) => fieldPermissions?.[field.id]?.visible !== false)
+}

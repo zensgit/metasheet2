@@ -74,6 +74,29 @@ export interface GridConflictState {
   nextLinkSummaries?: LinkedRecordSummary[]
 }
 
+/**
+ * Record inspector v3 PR-B2 (docs/development/multitable-record-inspector-v3-design-20260905.md §1.3
+ * "Field-anchored server errors", §4 item 11): a patchCell REJECTION, kept with the HTTP status / error
+ * code / server `fieldErrors` map that `client.ts`'s parseJson already attaches to the thrown
+ * MultitableApiError but that the composable used to flatten into the single `error.value` string.
+ * `patchCell` RETURNS it (round 2: per call — `null` on success and on the local row-action refusal),
+ * so a caller (the workbench's `onDrawerPatch`) routes on exactly ITS OWN call's outcome; two in-flight
+ * patches can never read each other's failure, which a shared "last failure" ref read after `await`
+ * allowed. `fieldErrors` is whatever the server sent, normalised by client.ts (`normalizeFieldErrors`)
+ * — this composable never synthesises a map from `message` text (the /patch route on this head emits
+ * none; see the PR body pre-check). `message` is the server's text verbatim (may be '' if the server
+ * sent none — the caller decides what to show then).
+ */
+export interface GridPatchFailure {
+  recordId: string
+  fieldId: string
+  attemptedValue: unknown
+  status?: number
+  code?: string
+  message: string
+  fieldErrors?: Record<string, string>
+}
+
 type RemoteRecordMergeOptions = {
   linkSummaries?: Record<string, LinkedRecordSummary[]>
   personSummaries?: Record<string, PersonSummary[]>
@@ -1054,10 +1077,15 @@ export function useMultitableGrid(opts: {
       previousLinkSummaries?: LinkedRecordSummary[]
       nextLinkSummaries?: LinkedRecordSummary[]
     },
-  ) {
+  ): Promise<GridPatchFailure | null> {
     error.value = null
     conflict.value = null
-    if (resolveRowActions(recordId)?.canEdit === false) return rejectRowEdit()
+    // PR-B2 (§1.3): the LOCAL row-action refusal never reaches the server and yields no structured
+    // failure — `error.value` is set exactly as before (rejectRowEdit) and the caller toasts it.
+    if (resolveRowActions(recordId)?.canEdit === false) {
+      rejectRowEdit()
+      return null
+    }
     const row = rows.value.find((r) => r.id === recordId)
     const oldValue = row?.data[fieldId]
     const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
@@ -1101,7 +1129,19 @@ export function useMultitableGrid(opts: {
         }
       }
       error.value = e.message ?? fallback('grid.errorPatchCell')
+      // PR-B2 (§1.3): additive — return status/code/fieldErrors for THIS call's routing decision.
+      // Nothing above this line changed (rollback + conflict + error.value stay as-is).
+      return {
+        recordId,
+        fieldId,
+        attemptedValue: value,
+        status: typeof e?.status === 'number' ? e.status : undefined,
+        code: typeof e?.code === 'string' ? e.code : undefined,
+        message: e?.message ?? fallback('grid.errorPatchCell'),
+        fieldErrors: e?.fieldErrors && typeof e.fieldErrors === 'object' ? { ...(e.fieldErrors as Record<string, string>) } : undefined,
+      }
     }
+    return null
   }
 
   // --- Undo / Redo ---

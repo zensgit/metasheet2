@@ -329,11 +329,13 @@
         />
       </div>
       <MetaRecordInspector
+        ref="recordInspectorRef"
         :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
         :visible="inspectorOpen && !!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
         :inspector-field-layout="inspectorFieldLayout"
         :fetch-record="fetchLinkedRecordFn"
         :opener-el="inspectorOpenerEl"
+        :field-errors="inspectorFieldErrors"
         :sheet-id="workbench.activeSheetId.value ?? undefined"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
@@ -684,6 +686,8 @@ import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
+import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
+import { metaCoreLabel } from '../utils/meta-core-labels'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { usePersonalViewToggle } from '../composables/usePersonalViewToggle'
 import { reorderViewFields } from '../utils/reorder-view-fields'
@@ -1346,6 +1350,11 @@ const recentBaseOpens = ref(readRecentBaseOpens())
 const basePickerBases = computed(() => decorateAndSortBases(bases.value, favoriteBaseIds.value, recentBaseOpens.value))
 const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
+// PR-B2 round 2 (§1.3 "Field-anchored server errors"): imperative query handle on the record inspector —
+// `onDrawerPatch` asks its exposed `canAnchorFieldError(recordId, fieldId)` BEFORE writing an inline
+// entry and keeps today's toast when the alert could not render (other tab active, field row not
+// rendered, inspector closed or showing another record). Same idiom as `toastRef.showError` above.
+const recordInspectorRef = ref<InstanceType<typeof MetaRecordInspector> | null>(null)
 const commentDraft = ref('')
 const currentUserId = ref<string | null>(null)
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
@@ -1424,6 +1433,24 @@ const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
 const formFieldErrors = ref<Record<string, string>>({})
+// Record inspector v3 PR-B2 (docs/development/multitable-record-inspector-v3-design-20260905.md §1.3
+// "Field-anchored server errors", §4 item 11): per-field server rejections for the OPEN inspector
+// record, keyed by fieldId — the inspector-side twin of `formFieldErrors` above (same prop shape, same
+// `:field-errors` idiom, WB → MetaRecordInspector → MetaRecordFieldsPanel). Written only by
+// `onDrawerPatch` (field / conflict routes, and only when the inspector confirms the alert can render —
+// see `recordInspectorRef`), cleared per field on that field's next successful patch, wholesale on
+// record/view change, and — for entries the VERSION_CONFLICT path wrote, and ONLY those — when
+// `grid.conflict` clears. Round 2: each entry is tagged with its ORIGIN so the conflict-clear watch
+// cannot wipe a validation alert that happens to sit on the same field (e.g. a grid-path conflict on
+// that field raised and dismissed while the drawer's validation alert is up); the panel-facing prop
+// (`inspectorFieldErrors`) is the derived fieldId → message map, recomputed as a fresh object on every
+// write so the panel's prev/next `fieldErrors` watch keeps seeing distinct snapshots.
+type InspectorFieldErrorOrigin = 'field' | 'conflict'
+const inspectorFieldErrorEntries = ref<Record<string, { message: string; origin: InspectorFieldErrorOrigin }>>({})
+const inspectorPatchOwners = new Map<string, object>()
+const inspectorFieldErrors = computed<Record<string, string>>(() =>
+  Object.fromEntries(Object.entries(inspectorFieldErrorEntries.value).map(([fieldId, entry]) => [fieldId, entry.message])),
+)
 const deepLinkedRecordLinkSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const deepLinkedRecordPersonSummaries = ref<Record<string, PersonSummary[]>>({})
 const deepLinkedRecordAttachmentSummaries = ref<Record<string, MetaAttachment[]>>({})
@@ -2668,15 +2695,81 @@ async function onRetryConflict() {
   if (grid.error.value) showError(grid.error.value)
 }
 
+// PR-B2 (§1.3): immutable per-key writes so MetaRecordFieldsPanel's shallow `fieldErrors` watch sees a
+// prev/next pair (it prunes a rejected-value draft exactly when that field's error goes set → unset).
+function setInspectorFieldError(fieldId: string, message: string, origin: InspectorFieldErrorOrigin) {
+  inspectorFieldErrorEntries.value = { ...inspectorFieldErrorEntries.value, [fieldId]: { message, origin } }
+}
+/** Drop the entry for `fieldId`; with `onlyOrigin`, drop it only if THAT path wrote it (round 2: the
+ *  conflict-clear watch passes 'conflict' so it never wipes a validation alert on the same field). */
+function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldErrorOrigin) {
+  const current = inspectorFieldErrorEntries.value[fieldId]
+  if (!current) return
+  if (onlyOrigin && current.origin !== onlyOrigin) return
+  const next = { ...inspectorFieldErrorEntries.value }
+  delete next[fieldId]
+  inspectorFieldErrorEntries.value = next
+}
+
 async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
   if (!ensureCanEditRecord(record.id)) return
-  await grid.patchCell(record.id, fieldId, value, record.version)
+  const patchOwner = {}
+  inspectorPatchOwners.set(fieldId, patchOwner)
+  // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
+  // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
+  // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
+  // toast the second's message and lose its own alert when both rejections landed in one flush.
+  const failure = await grid.patchCell(record.id, fieldId, value, record.version)
+  const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
+  if (failure) {
+    // Route by the failure the composable returned for THIS patch — still guarded on record + field
+    // (defensive: the composable builds both from its own arguments, so a mismatch means a foreign
+    // object and falls through to today's toast). `resolvePatchFailureRoute` holds the one rule (its
+    // doc comment states the matrix: fieldErrors / 422 / VALIDATION_ERROR → field; VERSION_CONFLICT →
+    // conflict; everything else — including a plain 400 with any other code — → toast).
+    const own = failure.recordId === record.id && failure.fieldId === fieldId
+    const route = own ? resolvePatchFailureRoute(failure) : 'toast'
+    // Can the inline alert RENDER right now? Only the inspector knows (details tab active, field row
+    // rendered, still open on this record). Asked synchronously, before any write — see the doc on
+    // `canAnchorFieldError` in MetaRecordInspector.vue. `false`/unmounted → today's toast, no entry.
+    const anchorable = own && recordInspectorRef.value?.canAnchorFieldError(record.id, fieldId) === true && latestRequest
+    const toastText = (text: string) => text || metaCoreLabel('grid.errorPatchCell', isZh.value)
+    if (route === 'field') {
+      const message = fieldAnchoredPatchMessage(failure)
+      // Inline iff it can render AND the server gave us text to render; an empty message has nothing to
+      // anchor (the alert node would be blank) and falls back to the toast with the generic label.
+      if (anchorable && message) {
+        setInspectorFieldError(fieldId, message, 'field')
+        return
+      }
+      showError(toastText(message))
+      return
+    }
+    if (route === 'conflict') {
+      // The conflict banner is already up (root template `v-if="grid.conflict.value"`, set by the
+      // composable — unchanged). Add the field marker under the control with the SAME text the banner
+      // shows (when it can render), tagged 'conflict' so it clears WITH the conflict — reload / retry /
+      // dismiss, see the `grid.conflict` watch beside the record-change watch — and KEEP the toast this
+      // path always fired: round 1 suppressed it, round 2 restores it so §4 item 11's "all other codes
+      // keep the toast" is true verbatim (banner + marker + toast).
+      if (anchorable) setInspectorFieldError(fieldId, conflictMessage.value || failure.message, 'conflict')
+      showError(toastText(failure.message))
+      return
+    }
+    showError(toastText(failure.message))
+    return
+  }
   if (grid.error.value) {
+    // The composable's LOCAL row-action refusal (never reaches the server, returns no failure) — today's
+    // toast, unchanged. (Normally unreachable from the drawer: `ensureCanEditRecord` above already gates.)
     showError(grid.error.value)
     return
   }
+  // A successful patch of a field clears that field's error, whichever path wrote it (and, via the
+  // panel's watch, its draft). Other fields' errors are untouched.
+  if (latestRequest) clearInspectorFieldError(fieldId)
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
@@ -4314,6 +4407,23 @@ watch([selectedRecordId, () => workbench.activeViewId.value], () => {
   formSuccessMessage.value = null
   formErrorMessage.value = null
   formFieldErrors.value = {}
+})
+
+// PR-B2 (§1.3): field-anchored errors belong to the record they were raised on — the same
+// record/view edge that resets the form-field errors above discards them (MetaRecordFieldsPanel drops
+// its rejected-value drafts on the record-id edge on its side, so control and alert reset together).
+watch([selectedRecordId, () => workbench.activeViewId.value], () => {
+  // Invalidates older requests even when navigation returns to the same record and field.
+  inspectorPatchOwners.clear()
+  inspectorFieldErrorEntries.value = {}
+}, { flush: 'sync' })
+// PR-B2 (§1.3): the VERSION_CONFLICT field marker lives exactly as long as the conflict it mirrors —
+// reload / retry / dismiss (and any later patchCell, which resets `conflict` first) all clear
+// `grid.conflict` in the composable (unchanged); the marker for that field follows. Round 2: ONLY the
+// marker — an entry the conflict path wrote. A validation alert on the same field (origin 'field')
+// survives a conflict on that field being raised and cleared, e.g. by a grid-path edit.
+watch(() => grid.conflict.value, (current, previous) => {
+  if (!current && previous) clearInspectorFieldError(previous.fieldId, 'conflict')
 })
 
 async function refreshDialogMeta() {
