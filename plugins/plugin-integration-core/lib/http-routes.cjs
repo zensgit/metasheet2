@@ -3970,6 +3970,12 @@ function requireStockPreparationAudit() {
    *
    * `undefined` (no ledger, no pack installed, or any read failure) means the caller must OMIT the
    * parameter, which is byte-identical to the pre-pack behaviour.
+   *
+   * FIVE call sites: the small-BOM dry-run, the confirmation-decision route and the small-BOM apply
+   * resolve it per request, immediately before one in-process plan/apply. The large-BOM family
+   * resolves it twice — once when a plan is built, once when an apply job is APPROVED — and the
+   * apply resolution is stored on the job so that the many HTTP chunks of one approved run cannot
+   * drift apart.
    */
   async function resolveInstalledFieldProperties(req, action) {
     const objectId = (action && action.target && action.target.objectId)
@@ -3988,16 +3994,19 @@ function requireStockPreparationAudit() {
   // FRESHNESS-DIVERGENCE NOTICE for the large-BOM job family.
   //
   // The two small-BOM refresh routes apply the configured source->`ext_` mapping. The large-BOM
-  // routes do NOT: they expand into a stored job and plan out of that artifact, and neither call
-  // supplies `extFieldMapping` or `installedFieldProperties` (the latter has never been supplied on
-  // this path — see the note above `computeDryRun` in stock-preparation-table-actions.cjs).
+  // routes still do NOT: they expand into a stored job and plan out of that artifact, and no call in
+  // this family supplies `extFieldMapping`. `installedFieldProperties` IS supplied now — the plan
+  // route resolves it per request and the apply-job START route freezes it into the job — so the
+  // two inputs no longer travel together on this path, which is exactly why the notice below is
+  // still conditional on a configured MAPPING and only on that.
   //
-  // The consequence is NOT "no `ext_` write". Without `installedFieldProperties` the planner's
-  // writable band is template-only (derivePackAwarePlmWritableFields, packAware=false), so
-  // `pickFields` leaves every `ext_` id out of the update patch — and a patch does not blank what it
-  // omits. Any `ext_` value an earlier SMALL-path refresh wrote therefore SURVIVES while every
-  // canonical column around it moves to today's source. The row reads as fresh while its tenant
-  // columns sit at an older epoch, which in a 备料 table is a worse failure than a missing value.
+  // The consequence is NOT "no `ext_` write", and it did not change when the band arrived. With no
+  // mapping the expansion rows carry no `ext_` key at all, so `pickFields` (which skips
+  // `row[field] === undefined`) leaves every `ext_` id out of the update patch even with a
+  // pack-aware band — and a patch does not blank what it omits. Any `ext_` value an earlier
+  // SMALL-path refresh wrote therefore SURVIVES while every canonical column around it moves to
+  // today's source. The row reads as fresh while its tenant columns sit at an older epoch, which in
+  // a 备料 table is a worse failure than a missing value.
   //
   // Which path a project takes is not the operator's choice and is not monotonic either:
   // `read_time_limit_exceeded` is in LARGE_BOM_BOUNDED_ERROR_TYPES, so one unchanged project can go
@@ -6371,6 +6380,29 @@ function requireStockPreparationAudit() {
         jobId,
         existingRows,
         conflictPolicyReview,
+        // The pack-aware ownership band, resolved against the STORED job's action snapshot
+        // (`job.actionSnapshot.target.objectId` — the same sheet this plan will be applied to,
+        // never the live binding, which may have been re-pointed since the expansion was sealed).
+        // `undefined` => the frozen-template bands, i.e. byte-identical to the pre-wiring plan.
+        //
+        // WHAT IT COSTS ON A DEPLOYMENT WITH NO PRODUCTION POLICY — the DEFAULT deployment, and the
+        // half the production-bound note further down does not cover. A pack's `ext_` plm_system
+        // column now joins the COMPARED band while this family still supplies no `extFieldMapping`,
+        // so the expansion rows carry no `ext_` cell and an existing value compared against an
+        // absent one reads as CHANGED. With no bound configured nothing refuses that: every row
+        // that already holds an `ext_` value flips from SKIP to a REAL patchRecord on EVERY
+        // refresh, and that patch stamps `lastPlmRefreshDecision: 'update'` plus a
+        // `lastPlmConflictSummary` naming the `ext_` column as the reason — a reason the patch does
+        // NOT honour, because `pickFields` leaves that very column out of it. Both stamps are
+        // plm_system DISPLAY columns with no downstream consumer, so the price is write volume
+        // (order of magnitude: rows-carrying-an-`ext_`-value x ~47ms of server wall-clock per row,
+        // measured in the W8-4 note in stock-preparation-apply-writer.cjs) plus a refresh record
+        // that overstates what was written — never a lost cell. It lasts until an `extFieldMapping`
+        // reaches this path or `changedFields` is narrowed to cells the incoming row actually
+        // defines (the SHARED planner, a separate decision). Pinned by `the default deployment pays
+        // in writes and in an unhonoured refresh reason` in
+        // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs.
+        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
       })
       return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(planned)))
     },
@@ -6386,6 +6418,23 @@ function requireStockPreparationAudit() {
       const routeScope = largeBomJobScope(req, { actionId })
       assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
+      // THE BAND IS RESOLVED ONCE PER APPLY JOB, HERE — at the moment a human approves it — and is
+      // then FROZEN INTO the stored job (same family as planRevision / targetRevision). A checkpoint
+      // apply advances across MANY HTTP requests, so a live ledger read inside `.../run` would let
+      // an install (or a column deleted in the UI) mid-run give two chunks of ONE approved job two
+      // different writable bands. Chunks read the snapshot and nothing else.
+      //
+      // Resolved against the STORED expansion job's action snapshot, which is the same objectId
+      // `tableActionLargeBomExpansionJobPlan` planned with and the same target
+      // `createLargeBomCheckpointApplyJob` copies into `job.target` — plan band and write band
+      // cannot address different sheets. Reading the LIVE binding here instead would resolve a band
+      // for a sheet this job is not going to write to if the binding moved after the expansion.
+      const expansionJob = await loadLargeBomBackgroundExpansionJob({
+        storage: context.storage,
+        ...routeScope,
+        actionId,
+        jobId,
+      })
       const job = await createLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -6394,6 +6443,10 @@ function requireStockPreparationAudit() {
         principal: requestPrincipal(req),
         permission: applyPermissionForUser(user),
         acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
+        installedFieldProperties: await resolveInstalledFieldProperties(
+          req,
+          assertStockPreparationTargetReady(expansionJob.actionSnapshot),
+        ),
       })
       return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)), 202)
     },
@@ -6440,6 +6493,26 @@ function requireStockPreparationAudit() {
       })
       // FOS-4b-3-prod P2: post-plan production bound. The plan's clean (add/update) row count is fixed across
       // chunked runs, so checking it on each chunk consistently rejects an over-bound run before any write.
+      //
+      // WHAT THE PACK-AWARE BAND DOES TO THIS NUMBER — disclosed here because this is where it is
+      // consumed. Since the plan route resolves `installedFieldProperties`, a customer pack's `ext_`
+      // plm_system columns are COMPARED by the planner, and this family still supplies no
+      // `extFieldMapping`, so its expansion rows carry no `ext_` key at all. An existing `ext_` value
+      // against an absent incoming one reads as CHANGED (`changedFields` compares cells, and an
+      // absent cell is not an equal cell), so a row that was SKIPped before the band became reachable
+      // is now an UPDATE and is counted below. On a deployment whose owner configured a production
+      // policy this can push a refresh past `maxCleanRows` and 403 it — every round, not
+      // occasionally, for as long as the mapping is missing. WHERE THIS BOUND EXISTS the direction is
+      // the safe one: the refusal is fail-closed and lands BEFORE any write, so an over-count costs a
+      // refresh and never a row (the patch omits the `ext_` id either way — see the notice above
+      // `computeDryRun`'s caller). That safety is about the REFUSAL, not about the flip: on the
+      // DEFAULT deployment (no production policy at all) nothing refuses, and the same flip is paid
+      // in real writes and in an overstated refresh record instead — disclosed at the plan route
+      // above, where the band enters. Fixing it at the root means narrowing `changedFields` to cells
+      // the incoming row actually defines, which changes the SHARED planner the small-BOM path runs
+      // on and is a separate decision, not a drive-by here. Pinned by `the widened band is counted by the
+      // production clean-row bound` in
+      // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs.
       const planDecisions = (pendingJob && pendingJob.plan && Array.isArray(pendingJob.plan.decisions)) ? pendingJob.plan.decisions : []
       const largeBomCleanRowCount = planDecisions.filter((d) => d && (d.decision === 'add' || d.decision === 'update')).length
       assertProductionCleanRowsWithinBound(applyGate, largeBomCleanRowCount)

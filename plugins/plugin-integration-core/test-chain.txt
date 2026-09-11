@@ -88,6 +88,7 @@ node __tests__/b2a-trial-registry.test.cjs
 node __tests__/b2a-trial-registry-wiring.test.cjs
 node __tests__/stock-preparation-pack-install-ledger.test.cjs
 node __tests__/stock-preparation-pack-install-readback.test.cjs
+node __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs
 node __tests__/stock-preparation-pack-sandbox-target.test.cjs
 node __tests__/stock-preparation-customer-pack-routes.test.cjs
 node __tests__/customer-dictionary-leak-guard.test.cjs

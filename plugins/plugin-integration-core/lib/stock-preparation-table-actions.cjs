@@ -1248,9 +1248,10 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 // closed by the customer-pack INSTALL LEDGER (integration_stock_prep_pack_installs, migration
 // 076) plus the read-back seam in stock-preparation-pack-installed-fields.cjs: the ledger names
 // the candidate `ext_` ids, readObjectFieldsContent says which of them are still live and how
-// they are classified, and the small-BOM dry-run/apply routes now supply the result here. The
-// large-BOM checkpoint path still supplies nothing and stays on the legacy bands; it plans into
-// a stored job, so wiring it is a separate change.
+// they are classified, and the small-BOM dry-run/apply routes supply the result here. The
+// large-BOM checkpoint path supplies it too now (`tableActionLargeBomExpansionJobPlan` per plan;
+// the apply-job START route freezes one band into the job, and every chunk writes through that
+// snapshot rather than re-reading the ledger per HTTP request).
 //
 // The LEGACY POSTURE remains safe by construction and remains the fallback: omission yields
 // exactly the pre-pack writable set, and since the pack's `ext_` columns are then in neither
@@ -1262,25 +1263,35 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 // produced once at route registration from server config (stock-preparation-ext-field-mapping-
 // config.cjs), never built here, never request-influenced. Absent -> `rowFromPart` adds no key.
 //
-// THE TWO MUST TRAVEL TOGETHER OR NOT AT ALL. `installedFieldProperties` decides whether an `ext_`
-// column is in the planner's writable band; `extFieldMapping` decides whether a row carries an
-// `ext_` value at all. Supply the mapping without the bands and the expansion produces values the
-// planner then drops on the floor — the same "built but never reached" defect one layer down.
-// Supply the bands without the mapping and the refresh widens over columns nothing fills. On the
-// SMALL route both are resolved per request, immediately before one in-process expansion, so they
-// cannot disagree, and they are wired together here.
+// THE TWO TRAVEL TOGETHER, AND THE ASYMMETRY BETWEEN THEM IS DELIBERATE.
+// `installedFieldProperties` decides whether an `ext_` column is in the planner's writable band;
+// `extFieldMapping` decides whether a row carries an `ext_` value at all. Supply the mapping
+// without the bands and the expansion produces values the planner then drops on the floor — the
+// same "built but never reached" defect one layer down; that ordering is the dangerous one and is
+// never shipped. The reverse — bands without a mapping — is the SAFE half-state: the band widens
+// over columns nothing fills, and a column nothing fills contributes no key to the row, so
+// `pickFields` omits it and a patch does not blank what it omits. What the band still buys on its
+// own is the human WALL, which is enforced by NAME at write time. On the SMALL route both are
+// resolved per request, immediately before one in-process expansion, so they cannot disagree, and
+// they are wired together here.
 //
-// THE LARGE-BOM CHECKPOINT PATH IS STILL UNWIRED, AND THAT IS NOT "INERT". It supplies neither
-// input. Because `installedFieldProperties` is absent the planner's band is template-only
-// (derivePackAwarePlmWritableFields, packAware=false), so `pickFields` leaves every `ext_` id out of
-// the update patch — and a patch does not blank what it omits. Any `ext_` value an earlier SMALL-
-// path refresh wrote SURVIVES while every canonical column around it moves to today's source: the
-// row reads fresh and its tenant columns sit at an older epoch. Nor is the path an operator's
-// choice, or even stable — `read_time_limit_exceeded` is a bounded-expansion trigger, so one
-// unchanged project can go small one day and large the next because the source was slow. The two
-// large-BOM route families therefore stamp a conditional, values-free
-// `extFieldMappingConfiguredButNotAppliedOnThisPath` notice onto every response
+// ON THE LARGE-BOM CHECKPOINT PATH ONLY `extFieldMapping` IS STILL UNWIRED, AND THAT IS NOT
+// "INERT". `installedFieldProperties` now travels on that path as well, so the planner's band there
+// is the same pack-aware band the small route computes — but with no mapper the expansion rows
+// carry no `ext_` key at all, and `pickFields` skips `row[field] === undefined`, so every `ext_` id
+// stays out of the update patch exactly as it did before — and a patch does not blank what it
+// omits. Any `ext_` value an earlier SMALL-path refresh wrote SURVIVES while every canonical column
+// around it moves to today's source: the row reads fresh and its tenant columns sit at an older
+// epoch. Nor is the path an operator's choice, or even stable — `read_time_limit_exceeded` is a
+// bounded-expansion trigger, so one unchanged project can go small one day and large the next
+// because the source was slow. The two large-BOM route families therefore stamp a conditional,
+// values-free `extFieldMappingConfiguredButNotAppliedOnThisPath` notice onto every response
 // (`largeBomJobResponse` in http-routes.cjs) so the divergence is announced rather than silent.
+//
+// What the band DOES buy on this path is the write side: the human wall in the apply writer now
+// rejects a pack `ext_` human column BY NAME on the chunked apply, not merely by its absence from
+// the frozen template, and the wall only ever grows (derivePackAwarePlmWritableFields is
+// fail-closed, so an unclassified pack column is in neither band).
 //
 // WHAT ACTUALLY REMAINS OPEN, stated precisely, because the earlier version of this note overstated
 // it and risked deferring a small change forever:
@@ -1292,11 +1303,13 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 //     `artifactRevision`. Only the mapping's IDENTITY (mappingId/mappingVersion) is uncovered.
 //   * the one genuinely open item is that plan-time bands are read LIVE in a later request than the
 //     one that sealed the artifact. That is a PRE-EXISTING property of `installedFieldProperties` on
-//     this path, not something the mapping introduces — the same seam was already unwired here
-//     before any mapper existed.
-// So wiring this is threading two existing runtime parameters plus stamping the mapping id into the
-// job for evidence; it is not migration-shaped. It is out of scope here only because it needs its
-// own route-level tests for the stale-artifact case.
+//     this path, not something the mapping introduces — and it is now bounded rather than removed:
+//     the plan band is read once per plan request, and the APPLY band is read once per approval and
+//     frozen onto the job, so no single plan and no single approved apply can straddle two bands.
+//     Plan and apply are still two separate live reads, exactly as they are on the small route.
+// So wiring the mapping is threading ONE remaining runtime parameter plus stamping the mapping id
+// into the job for evidence; it is not migration-shaped. It is out of scope here only because it
+// needs its own route-level tests for the stale-artifact case.
 /**
  * THE B2a SEAM for every stock-preparation path that reads an external source through this module.
  *
