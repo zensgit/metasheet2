@@ -1617,8 +1617,10 @@ describe('DingTalk automation link route validation', () => {
   it('passes a save-time RECIPIENT_NOT_AUTHORIZED refusal through as 400 + code + message (create)', async () => {
     const automationService = createMockAutomationService()
     const { app } = await createApp({ automationService })
-    const { AutomationRuleValidationError } = await import('../../src/multitable/automation-service')
-    const message = '通知接收人不在可选人员范围内，请在编辑器中改选（RECIPIENT_NOT_AUTHORIZED）：u_ghost'
+    const { AutomationRuleValidationError, automationSaveRecipientNotAuthorizedMessage } = await import('../../src/multitable/automation-service')
+    // The wording comes from the SERVICE's own builder, never a literal copy: a future rewording must
+    // not leave this lane green while the client sees a different string.
+    const message = automationSaveRecipientNotAuthorizedMessage(['u_ghost'])
     automationService.createRule = vi.fn(async () => {
       throw new AutomationRuleValidationError(message, 'RECIPIENT_NOT_AUTHORIZED')
     }) as never
@@ -1641,7 +1643,9 @@ describe('DingTalk automation link route validation', () => {
     const automationService = createMockAutomationService()
     const { app } = await createApp({ automationService })
     const { AutomationRuleValidationError } = await import('../../src/multitable/automation-service')
-    const message = '该规则未配置通知接收人，请在编辑器中补充（NO_RECIPIENTS）'
+    // Same constant the EXECUTOR raises, so save-time and run-time stay one wording by construction.
+    const { AUTOMATION_NO_RECIPIENTS_ERROR } = await import('../../src/multitable/automation-executor')
+    const message = AUTOMATION_NO_RECIPIENTS_ERROR
     automationService.updateRule = vi.fn(async () => {
       throw new AutomationRuleValidationError(message, 'NO_RECIPIENTS')
     }) as never

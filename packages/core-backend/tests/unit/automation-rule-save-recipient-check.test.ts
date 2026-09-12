@@ -9,7 +9,7 @@
  * Every assertion here is on the service's only two outbound seams: the Kysely mock (did a row get
  * written?) and `queryFn` (which roster, for which sheet, how many times?).
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   AutomationRuleValidationError,
@@ -19,6 +19,7 @@ import {
 } from '../../src/multitable/automation-service'
 import { AUTOMATION_NO_RECIPIENTS_ERROR } from '../../src/multitable/automation-executor'
 import { EventBus } from '../../src/integration/events/event-bus'
+import { Logger } from '../../src/core/logger'
 
 const SHEET_ID = 'sheet_f9c'
 const ROSTER_SQL = /WITH user_candidates AS/i
@@ -285,6 +286,47 @@ describe('F9c — createRule recipient roster gate', () => {
     expect(h.insertedRows()).toHaveLength(0)
   })
 
+  /**
+   * PER-ACTION, not a union: an EMPTY send_notification must be refused on its own even when a SIBLING
+   * send_notification in the same rule names a valid recipient. Without this spec the gate's
+   * `groups.some((recipients) => recipients.length === 0)` (automation-service.ts:2213) can be weakened
+   * to `groups.every(...)` and every other spec here stays green — the empty branch would then be
+   * persisted and skipped at run time, which is exactly the "dry run green, live fire fails" gap F9c
+   * exists to close.
+   */
+  it('refuses an EMPTY send_notification even when a sibling one has a valid recipient (no union masking)', async () => {
+    const action = {
+      type: 'condition_branch',
+      config: {
+        branches: [{
+          key: 'vip',
+          conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
+          actions: [{ type: 'send_notification', config: { userIds: ['u1'], message: 'vip' } }],
+        }],
+        defaultBranch: {
+          key: 'fallback',
+          actions: [{ type: 'send_notification', config: { userIds: [], message: 'fallback' } }],
+        },
+      },
+    }
+
+    const err = await rejection(h.service.createRule(SHEET_ID, {
+      name: 'F9c sibling empty',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'condition_branch',
+      actionConfig: action.config,
+      actions: [action] as never,
+      executionMode: 'workflow_job_v1',
+      createdBy: 'u1',
+    }))
+
+    expect(err.code).toBe('NO_RECIPIENTS')
+    expect(h.insertedRows()).toHaveLength(0)
+    // The valid sibling must not buy the empty one a roster read either.
+    expect(h.rosterCalls()).toHaveLength(0)
+  })
+
   it('refuses the save when the roster read THROWS — never treats it as an empty pass (M2)', async () => {
     h = makeHarness({ rosterError: new Error('connection terminated') })
 
@@ -476,5 +518,94 @@ describe('F9c — collectNotificationRecipientGroupsAtSave', () => {
 
   it('yields nothing for a rule with no send_notification', () => {
     expect(collectNotificationRecipientGroupsAtSave('update_record', { fields: {} }, [])).toEqual([])
+  })
+})
+
+/**
+ * F9c — the ASYMMETRY is the point, and it is the one rule of this slice that no other spec pins:
+ * the rejected ids MUST reach the response (the author typed them and cannot fix the rule otherwise)
+ * and MUST NOT reach the server log (operators reading logs have no business learning who someone
+ * tried to notify). Every one of the gate's three refusal logs is checked ARGUMENT-BY-ARGUMENT with
+ * `toEqual`, so a payload that grows an id-bearing field — `rejected: rejected` instead of
+ * `rejected.length`, a `userIds`, a `join()` — reds here, and a refusal that stops logging altogether
+ * reds here too.
+ *
+ * The seam is `Logger.prototype.warn`: the spy captures the RAW meta the service hands over, BEFORE
+ * the winston formatter, which is exactly where the service decides what to disclose.
+ */
+describe('F9c — save-gate logs are values-free (ids to the author, counts to the log)', () => {
+  const AUTHOR = 'u_author'
+  const KEEP = 'u_keep'
+  const GHOST = 'u_ghost'
+  let warn: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warn.mockRestore()
+  })
+
+  /** Everything the service handed to ANY logger during the save, serialized. */
+  const logged = (): string => JSON.stringify(warn.mock.calls)
+  const metaFor = (message: string): unknown => warn.mock.calls.find(([msg]) => msg === message)?.[1]
+
+  function notifyCreate(config: Record<string, unknown>) {
+    return {
+      name: 'F9c log check',
+      triggerType: 'record.created',
+      triggerConfig: {},
+      actionType: 'send_notification',
+      actionConfig: config,
+      createdBy: AUTHOR,
+    }
+  }
+
+  it('logs counts only when recipients are rejected — the ids go to the 400 body, not the log', async () => {
+    const h = makeHarness({ members: [KEEP] })
+
+    const err = await rejection(h.service.createRule(SHEET_ID, notifyCreate({ message: 'ping', userIds: [KEEP, GHOST] })))
+
+    // Positive control: the id IS disclosed to the author.
+    expect(err.code).toBe('RECIPIENT_NOT_AUTHORIZED')
+    expect(err.message).toContain(GHOST)
+    // …and the refusal IS logged, with counts and nothing else.
+    expect(metaFor('[automation.save] recipients rejected: outside selectable-people roster')).toEqual({
+      sheetId: SHEET_ID,
+      requested: 2,
+      rejected: 1,
+    })
+    // Neither the rejected id nor the accepted co-recipient appears anywhere in the log.
+    expect(logged()).not.toContain(GHOST)
+    expect(logged()).not.toContain(KEEP)
+  })
+
+  it('logs counts only when the roster read throws — no ids, no driver text', async () => {
+    const h = makeHarness({ members: [KEEP], rosterError: new Error('connection terminated: host 10.0.0.9') })
+
+    const err = await rejection(h.service.createRule(SHEET_ID, notifyCreate({ message: 'ping', userIds: [KEEP] })))
+
+    expect(err.code).toBe('ROSTER_UNAVAILABLE')
+    expect(metaFor('[automation.save] recipient roster unreadable; rule save refused')).toEqual({
+      sheetId: SHEET_ID,
+      requested: 1,
+      error: 'Error',
+    })
+    expect(logged()).not.toContain(KEEP)
+    expect(logged()).not.toContain('connection terminated')
+  })
+
+  it('logs counts only when the roster sink is unwired — no ids', async () => {
+    const h = makeHarness({ members: [KEEP], withQueryFn: false })
+
+    const err = await rejection(h.service.createRule(SHEET_ID, notifyCreate({ message: 'ping', userIds: [KEEP, GHOST] })))
+
+    expect(err.code).toBe('ROSTER_UNAVAILABLE')
+    expect(metaFor('[automation.save] recipient roster sink unavailable; rule save refused')).toEqual({
+      sheetId: SHEET_ID,
+      requested: 2,
+    })
+    expect(logged()).not.toContain(GHOST)
+    expect(logged()).not.toContain(KEEP)
   })
 })
