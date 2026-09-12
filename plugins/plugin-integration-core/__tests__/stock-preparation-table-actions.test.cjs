@@ -1344,6 +1344,8 @@ async function main() {
   await testDryRunRevisionIsBlindToTheOrderOfSeveralDuplicateGroups()
   await testDryRunRevisionIsBlindToRowErrorOrder()
   await testTheCanonicalHashOrderNeverReordersWhatGetsWritten()
+  // X6 — 来料没这个键 ≠ 变更(#5625 M2 探针形状,正向钉住)。
+  await testX6DryRunDoesNotCountRowsWhoseIntakeLacksTheExtColumn()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
 }
@@ -2554,6 +2556,119 @@ async function testTheCanonicalHashOrderNeverReordersWhatGetsWritten() {
     beforeHashing,
     'buildRevision hashes a COPY — the arrays it was handed keep their production order',
   )
+}
+
+// ---------------------------------------------------------------------------------------------
+// X6 — 来料没这个键 ≠ 变更。#5625(大 BOM 接带)的 M2 探针形状,从动作配置一路走到 dry-run 计数与
+// apply 的 patch:一批存量带 `ext_` 值(包列已装、在 plm_system 可写 band 里)、来料上**没有**这个
+// 键 ⇒ counts.update 不含这些行。X6 之前每一行都是一条 update —— 默认部署真的对每行发一次
+// patchRecord,并在 lastPlmConflictSummary 写下点名 ext_ 列、而 patch 里没有它的理由;配了生产策略
+// 的部署则被 maxCleanRows 拦成 403。M1(把收窄去掉)⇒ 本用例红。
+// ---------------------------------------------------------------------------------------------
+const X6_EXT_FIELD_ID = 'ext_designer'
+
+function installedX6ExtColumn() {
+  return [{
+    logicalId: X6_EXT_FIELD_ID,
+    name: X6_EXT_FIELD_ID,
+    type: 'string',
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system',
+        preserveOnRefresh: false,
+        required: false,
+        key: false,
+        extension: true,
+        packId: 'factory-a-rehearsal',
+        packVersion: '1.0.0',
+      },
+    },
+  }]
+}
+
+async function testX6DryRunDoesNotCountRowsWhoseIntakeLacksTheExtColumn() {
+  // 三条存量根行,ext_ 列上三种真实形状:有值 / 有值 / 空串(F1c-b 终审 r2 的根行)。来料(multiRoot
+  // 展开)上没有任何 ext_ 键 —— 没有映射、也没有派生这一列的规则。
+  const existingShapes = {
+    'PART-A': { [X6_EXT_FIELD_ID]: '设计员甲' },
+    'PART-B': { [X6_EXT_FIELD_ID]: '设计员乙' },
+    'PART-C': { [X6_EXT_FIELD_ID]: '' },
+  }
+  const installedFieldProperties = installedX6ExtColumn()
+  const action = baseAction()
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(multiRootPlmData()).adapter,
+    recordsApi: createRecordsApi({ existing: x4ExistingRecords(existingShapes) }).recordsApi,
+    tokenStore: createMemoryStorage(),
+    installedFieldProperties,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'ready')
+  // 这一列**确实在**比较 band 里 —— 不然下面的 update:0 是空话。
+  assert.ok(dryRun.evidence.plan.plmSystemFields.includes(X6_EXT_FIELD_ID), '包列在 plm_system 可写/比较 band 里')
+  assert.deepEqual(
+    dryRun.counts,
+    { add: 0, update: 0, skip: 3, inactive: 0, manual_confirm: 0 },
+    '来料不带 ext_ 键 ⇒ 三条存量都是 SKIP(X6 之前 update:3,每条都是空 update)',
+  )
+  assert.equal(JSON.stringify(dryRun.evidence).includes('设计员'), false, 'dry-run 证据不带 ext_ 列的值')
+
+  // 对照:同一批里一条行的 PLM 数量变了 ⇒ 那一行照常 update,另外两行仍 SKIP;apply 发出的 patch 里
+  // 没有来料没给的 ext_ 列,理由也不点名它(#5625 代价 (b))。
+  const shiftedSource = multiRootPlmData()
+  shiftedSource.DN_PDM_OrderDetailInfo = shiftedSource.DN_PDM_OrderDetailInfo.map((detail) => (
+    detail.part_id === 'PART-C' ? { ...detail, quantity: '9' } : detail
+  ))
+  const storage = createMemoryStorage()
+  const records = createRecordsApi({ existing: x4ExistingRecords(existingShapes) })
+  const shiftedDryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(shiftedSource).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(shiftedDryRun.status, 'ready')
+  assert.deepEqual(
+    shiftedDryRun.counts,
+    { add: 0, update: 1, skip: 2, inactive: 0, manual_confirm: 0 },
+    '真变了的那一行才 update;来料缺 ext_ 键的其余两行仍 SKIP',
+  )
+  const applied = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: shiftedDryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(shiftedSource).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    permission: 'write',
+  })
+  assert.equal(applied.status, 'succeeded')
+  assert.equal(applied.apply.counts.updated, 1, 'apply 只对真变了的那一行发 patchRecord')
+  const patchCalls = records.calls.filter((call) => call[0] === 'patchRecord')
+  assert.equal(patchCalls.length, 1)
+  const changes = patchCalls[0][1].changes
+  assert.equal(Object.prototype.hasOwnProperty.call(changes, X6_EXT_FIELD_ID), false, 'patch 里没有来料没给的 ext_ 列')
+  assert.equal(changes.lastPlmRefreshDecision, DECISIONS.UPDATE)
+  const reason = JSON.parse(changes.lastPlmConflictSummary)
+  assert.equal(reason.type, 'plm_system_refresh')
+  assert.equal(reason.changedFields.includes(X6_EXT_FIELD_ID), false, 'lastPlmConflictSummary 不点名 patch 里没有的列')
+  assert.ok(reason.changedFields.includes('rawQuantity'), '理由列的是真变了的列')
+  // 存量的 ext_ 值原样留在表上,一个字没动。
+  const untouched = records.rows.filter((record) => record.data.componentSourceId !== 'PART-C')
+  assert.deepEqual(
+    untouched.map((record) => record.data[X6_EXT_FIELD_ID]).sort(),
+    ['设计员乙', '设计员甲'].sort(),
+    '没被写的两行的 ext_ 值还是原来的',
+  )
+  assert.equal(records.rows.find((record) => record.data.componentSourceId === 'PART-C').data[X6_EXT_FIELD_ID], '', '被 update 的那一行的 ext_ 空串也没被动')
 }
 
 main().catch((err) => {

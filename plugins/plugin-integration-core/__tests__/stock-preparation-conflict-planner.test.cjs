@@ -1654,15 +1654,39 @@ function testExistingRowsGetThePackColumnsAsAPlainUpdate() {
       ...(existingShape === 'empty-string' ? { ext_parentDrawingNo: '', ext_parentName: '' } : {}),
       ...(existingShape === 'hand-authored' ? { ...HAND_AUTHORED } : {}),
     }
+    // X6 —— **派生缺席**的那一行(根行 parentA:无父 ⇒ 包列不派生 ⇒ 来料上连键都没有)按同一
+    // 形状放进存量,与子行并排:
+    //   'absent'        存量也没有这两列        ⇒ X6 前后都相等,SKIP;
+    //   'empty-string'  存量两列为空串          ⇒ X6 之前是 update:1 的**空 update**(changedFields
+    //                                             两列、patch 里零 ext_ 键、每次 dry-run 重现 —— F1c-b
+    //                                             终审 r2 在 222 上的 2 条根行),X6 之后 SKIP;
+    //   'hand-authored' 存量两列是人手填的值    ⇒ X6 之前同样是一条空 update(#5625 代价 (a):理由
+    //                                             点名两列、patch 一个字不写),X6 之后 SKIP,手填值原样
+    //                                             留在表上。
+    // 于是下面 `updates.length === 1` 同时钉住两件事:有父的子行(派生在场)仍是一次**带值**
+    // update(断言不变),派生缺席的根行不再是 update。
+    const existingRoot = {
+      ...batch.parentA,
+      ...(existingShape === 'empty-string' ? { ext_parentDrawingNo: '', ext_parentName: '' } : {}),
+      ...(existingShape === 'hand-authored' ? { ...HAND_AUTHORED } : {}),
+    }
     const plan = planWithParentPackColumns({
       expandedRows: [batch.parentA, batch.childA],
-      existingRows: [{ ...batch.parentA }, existingChild],
+      existingRows: [existingRoot, existingChild],
       runId: 'run-parent-pack-backfill',
     })
     assert.equal(plan.counts[DECISIONS.MANUAL_CONFIRM], 0, emptyShape + ': 补两列不挂起任何一行')
     assert.equal(plan.valid, true, emptyShape + ': 计划仍然是可执行的')
     const updates = byDecision(plan, DECISIONS.UPDATE)
-    assert.equal(updates.length, 1, emptyShape + ': 只有那条子行需要刷新')
+    assert.equal(updates.length, 1, emptyShape + ': 只有那条子行需要刷新(X6:派生缺席的根行不再是空 update)')
+    assert.equal(updates[0].idempotencyKey, batch.childA.idempotencyKey, emptyShape + ': 刷新的是有父的子行')
+    const rootDecision = plan.decisions.find((decision) => decision.idempotencyKey === batch.parentA.idempotencyKey)
+    assert.equal(
+      rootDecision.decision,
+      DECISIONS.SKIP,
+      emptyShape + ': 根行来料没有这两列的键 ⇒ SKIP(X6 之前 empty-string / hand-authored 两形状是 update:1 的空 update)',
+    )
+    assert.equal(rootDecision.conflictSummary.type, 'unchanged', emptyShape + ': 根行的理由是 unchanged,不点名任何一列')
     assert.deepEqual(
       updates[0].changedFields.slice().sort(),
       ['ext_parentDrawingNo', 'ext_parentName'],
@@ -1732,12 +1756,172 @@ function testExistingRowsGetThePackColumnsAsAPlainUpdate() {
     const filled = { ...existingChild, ext_parentDrawingNo: 'TZ-0001', ext_parentName: '主体组件 DN1200' }
     const second = planWithParentPackColumns({
       expandedRows: [batch.parentA, batch.childA],
-      existingRows: [{ ...batch.parentA }, filled],
+      existingRows: [existingRoot, filled],
       runId: 'run-parent-pack-backfill-2',
     })
     assert.equal(byDecision(second, DECISIONS.UPDATE).length, 0, emptyShape + ': 填好之后重拉不再写')
     assert.equal(byDecision(second, DECISIONS.SKIP).length, 2, emptyShape + ': 两行都是 SKIP')
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// X6 — 来料没这个键 ≠ 变更(#5625 三选一里的 ②,替 owner 定的口径,可撤回)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `changedFields` 只把**来料真正给了值**的格算作变更。判据与下游 `pickFields` 的投影判据是同一个量
+// (`row[field] !== undefined`):来料上键缺席 / 键在但值为 `undefined` 的格根本写不进 patch,所以也
+// 不能算变更 —— 否则就是「说变了、什么也没写」的空 update(#5625 代价 (a)(b);F1c-b 终审 r2)。
+// `null` 与空串是值,不是缺席:键在 ⇒ 照 `valuesEqualForTemplateField` 比较。存量那一侧不看键的
+// 在与不在:来料给了值、存量没这一列 ⇒ 仍是变更(回填方向,testExistingRowsAreBackfilledByAReRun)。
+//
+// 变异(内存级):M1「把收窄去掉」⇒ 本组缺键用例红 + table-actions 的端到端计数用例红;
+// M2「把 null 也当缺席」⇒ null 用例红;M3「只在 refresh 调用点收窄、lineage/identity 不收」⇒
+// testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide 红。
+function testX6ChangedFieldsIgnoresKeysTheIntakeDidNotProvide() {
+  const { changedFields } = __internals
+  const existing = { f: 'x' }
+  assert.deepEqual(changedFields({}, existing, ['f']), [], '键缺席 ⇒ 不算变更')
+  assert.deepEqual(changedFields({ f: undefined }, existing, ['f']), [], '键在但值为 undefined ⇒ 与 pickFields 同判据,不算变更')
+  assert.deepEqual(changedFields({}, { f: '' }, ['f']), [], '存量空串、来料无键 ⇒ 不算变更(F1c-b 终审 r2 那条永不收敛的空 update)')
+  assert.deepEqual(changedFields({}, { f: null }, ['f']), [], '存量 null、来料无键 ⇒ 不算变更(改前就相等,保持)')
+  assert.deepEqual(changedFields({ f: null }, existing, ['f']), ['f'], 'null 是值,不是缺席:键在且为 null ⇒ 仍照比较 ⇒ 变更')
+  assert.deepEqual(changedFields({ f: '' }, existing, ['f']), ['f'], '空串是值 ⇒ 仍照比较 ⇒ 变更')
+  assert.deepEqual(changedFields({ f: 'y' }, existing, ['f']), ['f'], '来料给了不同的值 ⇒ 变更')
+  assert.deepEqual(changedFields({ f: 'x' }, existing, ['f']), [], '来料给了相同的值 ⇒ 相等')
+  assert.deepEqual(changedFields({ f: 'x' }, {}, ['f']), ['f'], '来料给了值、存量没这一列 ⇒ 仍是变更(回填方向不受影响)')
+  assert.deepEqual(changedFields({ f: 'x' }, { f: undefined }, ['f']), ['f'], '存量 undefined、来料有值 ⇒ 变更')
+  // 模板归一化照旧 —— 只要来料给了键,比较的那一半一个字没改。
+  const numberField = new Map([['f', { id: 'f', type: 'number' }]])
+  assert.deepEqual(changedFields({ f: '5' }, { f: 5 }, ['f'], numberField), [], '来料 "5" 与存量 5 按 number 模板相等')
+  assert.deepEqual(changedFields({ f: '6' }, { f: 5 }, ['f'], numberField), ['f'], '来料 "6" 与存量 5 按 number 模板不等')
+  // 混合列表:保持 fields 的顺序,只留下「来料给了、且不等」的那些。
+  assert.deepEqual(
+    changedFields({ b: null, c: 'same', d: 'new' }, { a: 'x', b: 'y', c: 'same', d: 'old' }, ['a', 'b', 'c', 'd']),
+    ['b', 'd'],
+    'a 缺席不算;b 给了 null 算;c 相同不算;d 不同算',
+  )
+}
+
+// refresh 调用点(:1629 那一带)——#5625 的两处代价与 F1c-b 的空 update,正向钉住。
+function testX6RefreshSkipsRowsWhoseIntakeLacksTheColumn() {
+  const EXT = 'ext_designer'
+  const installed = [installedPackColumn(EXT)]
+  const refreshReason = (decision) => JSON.parse(decision.patch.lastPlmConflictSummary)
+
+  // (a) #5625 代价 (a):存量有值、来料上没这个键。
+  const absentIntake = row({ componentSourceId: 'PART-ABSENT', pathTokens: ['PART-ABSENT'] })
+  assert.equal(Object.prototype.hasOwnProperty.call(absentIntake, EXT), false, '前提:来料上没有这个键')
+  // (b) F1c-b 终审 r2:存量空串、来料上没这个键。
+  const absentIntakeEmpty = row({ componentSourceId: 'PART-ABSENT-EMPTY', pathTokens: ['PART-ABSENT-EMPTY'] })
+  // (c) null 是值。
+  const nullIntake = row({ componentSourceId: 'PART-NULL', pathTokens: ['PART-NULL'], [EXT]: null })
+  // (d) 值不同 / (e) 值相同。
+  const changedIntake = row({ componentSourceId: 'PART-CHANGED', pathTokens: ['PART-CHANGED'], [EXT]: '设计员乙' })
+  const sameIntake = row({ componentSourceId: 'PART-SAME', pathTokens: ['PART-SAME'], [EXT]: '设计员甲' })
+  // (f) #5625 代价 (b):别的列真变了、来料仍没这个键 ⇒ 理由只能列 patch 里真有的列。
+  const quantityIntake = row({ componentSourceId: 'PART-QTY', pathTokens: ['PART-QTY'], rawQuantity: 9, totalQuantity: 9 })
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [absentIntake, absentIntakeEmpty, nullIntake, changedIntake, sameIntake, quantityIntake],
+    existingRows: [
+      { ...absentIntake, [EXT]: '设计员甲' },
+      { ...absentIntakeEmpty, [EXT]: '' },
+      { ...nullIntake, [EXT]: '设计员甲' },
+      { ...changedIntake, [EXT]: '设计员甲' },
+      { ...sameIntake },
+      { ...quantityIntake, rawQuantity: 2, totalQuantity: 2, [EXT]: '设计员甲' },
+    ],
+    runId: 'run-x6-refresh',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+    installedFieldProperties: installed,
+  })
+  // 这一列**确实在**比较 band 里 —— 不然下面每一条 SKIP 都是空话(守卫没接线那类漏法)。
+  assert.ok(plan.summary.plmSystemFields.includes(EXT), '包列在 plm_system 可写/比较 band 里')
+  assert.equal(plan.valid, true)
+  assert.deepEqual(plan.counts, { add: 0, update: 3, skip: 3, inactive: 0, manual_confirm: 0 })
+  const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+
+  for (const [intake, label] of [[absentIntake, '存量有值'], [absentIntakeEmpty, '存量空串']]) {
+    const decision = byKey.get(intake.idempotencyKey)
+    assert.equal(decision.decision, DECISIONS.SKIP, label + '、来料无键 ⇒ SKIP(X6 之前是 update:1 的空 update)')
+    assert.equal(decision.conflictSummary.type, 'unchanged', label + ': 理由是 unchanged')
+    assert.equal(Object.prototype.hasOwnProperty.call(decision, 'patch'), false, label + ': 没有 patch,一个字不写')
+    assert.equal(JSON.stringify(decision).includes(EXT), false, label + ': 决策里不点名这一列')
+  }
+
+  const nullDecision = byKey.get(nullIntake.idempotencyKey)
+  assert.equal(nullDecision.decision, DECISIONS.UPDATE, 'null 是值,不是缺席 ⇒ 仍是变更')
+  assert.deepEqual(nullDecision.changedFields, [EXT])
+  assert.equal(Object.prototype.hasOwnProperty.call(nullDecision.patch, EXT), true, 'null 进 patch(pickFields 同样投影 null)')
+  assert.equal(nullDecision.patch[EXT], null)
+  assert.deepEqual(refreshReason(nullDecision).changedFields, [EXT], '理由点名的列就是 patch 里的列')
+
+  const changedDecision = byKey.get(changedIntake.idempotencyKey)
+  assert.equal(changedDecision.decision, DECISIONS.UPDATE, '来料给了不同的值 ⇒ 仍是变更')
+  assert.deepEqual(changedDecision.changedFields, [EXT])
+  assert.equal(changedDecision.patch[EXT], '设计员乙')
+
+  const sameDecision = byKey.get(sameIntake.idempotencyKey)
+  assert.equal(sameDecision.decision, DECISIONS.SKIP, '来料给了相同的值 ⇒ 相等')
+
+  const quantityDecision = byKey.get(quantityIntake.idempotencyKey)
+  assert.equal(quantityDecision.decision, DECISIONS.UPDATE, '别的列真变了 ⇒ 照常 update')
+  assert.deepEqual(quantityDecision.changedFields.slice().sort(), ['rawQuantity', 'totalQuantity'], '理由只列真正变了的列')
+  assert.equal(Object.prototype.hasOwnProperty.call(quantityDecision.patch, EXT), false, 'patch 里没有来料没给的列')
+  assert.equal(
+    refreshReason(quantityDecision).changedFields.includes(EXT),
+    false,
+    'lastPlmConflictSummary 不点名 patch 里没有的列(#5625 代价 (b):理由与写入一致)',
+  )
+}
+
+// lineage(:1605)/ identity(:1617)两处调用点:此前来料缺键同样从不写入(pickFields 一样跳过),
+// 判成变更只会把行推进 manual_confirm;收窄后归 SKIP。键在值变 ⇒ 仍挂起。M3 ⇒ 本用例红。
+function testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide() {
+  // lineage:来料没有 `path` 键,存量的 path 是另一串 ⇒ 不算 lineage 变更。
+  const lineageAbsent = row({ componentSourceId: 'PART-LN-ABSENT', pathTokens: ['PART-LN-ABSENT'] })
+  delete lineageAbsent.path
+  const lineageAbsentExisting = {
+    ...row({ componentSourceId: 'PART-LN-ABSENT', pathTokens: ['PART-LN-ABSENT'] }),
+    path: JSON.stringify(['ELSEWHERE', 'PART-LN-ABSENT']),
+  }
+  // lineage 对照:来料给了不同的 path ⇒ 仍是 lineage_mismatch。
+  const lineageChanged = row({ componentSourceId: 'PART-LN-CHANGED', pathTokens: ['PART-LN-CHANGED'] })
+  const lineageChangedExisting = { ...lineageChanged, path: JSON.stringify(['ELSEWHERE', 'PART-LN-CHANGED']) }
+  // identity:来料没有 `material` 键,存量有 ⇒ 不算 identity 变更。
+  const identityAbsent = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  delete identityAbsent.material
+  const identityAbsentExisting = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  assert.equal(typeof identityAbsentExisting.material, 'string', '前提:存量这一列有值')
+  // identity 对照:来料给了不同的 material ⇒ 仍是 component_identity_conflict。
+  const identityChanged = row({ componentSourceId: 'PART-ID-CHANGED', pathTokens: ['PART-ID-CHANGED'], material: 'Iron' })
+  const identityChangedExisting = { ...identityChanged, material: 'Steel' }
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [lineageAbsent, lineageChanged, identityAbsent, identityChanged],
+    existingRows: [lineageAbsentExisting, lineageChangedExisting, identityAbsentExisting, identityChangedExisting],
+    runId: 'run-x6-lineage-identity',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+
+  const lineageAbsentDecision = byKey.get(lineageAbsent.idempotencyKey)
+  assert.equal(lineageAbsentDecision.decision, DECISIONS.SKIP, 'lineage:来料无 path 键 ⇒ 不算变更(X6 之前是 lineage_mismatch 挂起)')
+  assert.equal(lineageAbsentDecision.conflictSummary.type, 'unchanged')
+  const lineageChangedDecision = byKey.get(lineageChanged.idempotencyKey)
+  assert.equal(lineageChangedDecision.decision, DECISIONS.MANUAL_CONFIRM, 'lineage:来料给了不同的 path ⇒ 仍挂起')
+  assert.equal(lineageChangedDecision.conflictSummary.type, 'lineage_mismatch')
+  assert.deepEqual(lineageChangedDecision.changedFields, ['path'])
+
+  const identityAbsentDecision = byKey.get(identityAbsent.idempotencyKey)
+  assert.equal(identityAbsentDecision.decision, DECISIONS.SKIP, 'identity:来料无 material 键 ⇒ 不算变更(X6 之前是 component_identity_conflict 挂起)')
+  assert.equal(identityAbsentDecision.conflictSummary.type, 'unchanged')
+  const identityChangedDecision = byKey.get(identityChanged.idempotencyKey)
+  assert.equal(identityChangedDecision.decision, DECISIONS.MANUAL_CONFIRM, 'identity:来料给了不同的 material ⇒ 仍挂起')
+  assert.equal(identityChangedDecision.conflictSummary.type, 'component_identity_conflict')
+  assert.deepEqual(identityChangedDecision.changedFields, ['material'])
+
+  assert.deepEqual(plan.counts, { add: 0, update: 0, skip: 2, inactive: 0, manual_confirm: 2 })
 }
 
 function main() {
@@ -1768,6 +1952,9 @@ function main() {
   testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull()
   testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived()
   testExistingRowsGetThePackColumnsAsAPlainUpdate()
+  testX6ChangedFieldsIgnoresKeysTheIntakeDidNotProvide()
+  testX6RefreshSkipsRowsWhoseIntakeLacksTheColumn()
+  testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide()
   testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
   testUnresolvableParentIsAbsenceNotAGuess()
   testExistingRowsAreBackfilledByAReRun()

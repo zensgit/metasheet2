@@ -985,8 +985,27 @@ function resolveDuplicateExpandedRows({ expandedKeyed, existingKeyed, duplicateP
   }
 }
 
+// X6 — 来料**没有**这个键 ≠ 变更。
+//
+// 「来料给了值」的判据与下游 `pickFields` 的投影判据(`row[field] !== undefined`)是同一个量:
+// 键缺席 / 键在但值为 `undefined` ⇒ 这一格根本不会被写进 add 记录或 update 补丁,所以也不能
+// 算作变更。此前 `nextRow[field]` 取到 `undefined`,经 `comparableValue` 折成 `null` 后与存量的
+// 空串或真值比较必然「不等」⇒ 判成 update,而 patch 里却没有这一列 —— 一条「说变了、什么也
+// 没写」、每轮 dry-run 都重现的空 update(#5625 大 BOM 接带的代价 (a)(b);F1c-b 终审 r2 的
+// 根行/孤儿行存量空串)。
+//
+// `null` 是值,不是缺席:键在且值为 `null` / 空串 ⇒ 照 `valuesEqualForTemplateField` 比较
+// (`pickFields` 同样会把 `null` 投影进 patch)。存量那一侧不看键的在与不在:来料给了值、存量
+// 没有这一列 ⇒ 仍是变更(re-pull 回填改前写入的老行,testExistingRowsAreBackfilledByAReRun)。
+function intakeProvidesField(row, field) {
+  return row !== null && typeof row === 'object'
+    && Object.prototype.hasOwnProperty.call(row, field)
+    && row[field] !== undefined
+}
+
 function changedFields(nextRow, existingRow, fields, templateFields = new Map()) {
-  return fields.filter((field) => !valuesEqualForTemplateField(nextRow[field], existingRow[field], templateFields.get(field)))
+  return fields.filter((field) => intakeProvidesField(nextRow, field)
+    && !valuesEqualForTemplateField(nextRow[field], existingRow[field], templateFields.get(field)))
 }
 
 function pickFields(row, fields) {
