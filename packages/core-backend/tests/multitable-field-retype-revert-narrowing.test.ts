@@ -190,26 +190,48 @@ describe('F8A lossless retype whitelist — server side of the shared truth tabl
   )
 
   test('null/undefined endpoints are never lossless (fail-closed)', () => {
-    expect(isLosslessFieldRetype(null, 'string')).toBe(false)
-    expect(isLosslessFieldRetype('number', null)).toBe(false)
-    expect(isLosslessFieldRetype(undefined, undefined)).toBe(false)
-    expect(losslessRetypeTargets(null)).toEqual([])
+    expect(isLosslessFieldRetype(null, 'string', undefined)).toBe(false)
+    expect(isLosslessFieldRetype('number', null, undefined)).toBe(false)
+    expect(isLosslessFieldRetype(undefined, undefined, undefined)).toBe(false)
+    expect(losslessRetypeTargets(null, undefined)).toEqual([])
+  })
+
+  // B3（裁决 2026-09-12）：`property` 缺省时按"非富文本"处理是 fail-OPEN —— 漏传的调用方会让
+  // 富文本长文本 → 文本一路放行。所以两个入口都把 property 改成必传。tsconfig 把 `**/*.test.ts`
+  // exclude 掉了（packages/core-backend/tsconfig.json），类型签名管不到测试与 JS 调用方，因此
+  // 必传是靠**运行时 arity 检查**兜底的；本用例就是那条检查的锁：把 property 改回可选 ⇒ 这里红。
+  test('property 是必传参数：漏传直接抛，绝不退化成"按非富文本放行"', () => {
+    const targetsAnyArity = losslessRetypeTargets as unknown as (source: string) => string[]
+    const assertAnyArity = assertLosslessFieldRetype as unknown as (current: string, next: string) => void
+    const isLosslessAnyArity = isLosslessFieldRetype as unknown as (source: string, target: string) => boolean
+
+    expect(() => targetsAnyArity('longText')).toThrow(/property/)
+    // 三个导出都挡，否则换个函数名就能拿回那个静默缺省
+    expect(() => isLosslessAnyArity('longText', 'string')).toThrow(/property/)
+    // arity 检查排在"同类型直接放行"之前，所以任何分支都换不到静默通过
+    expect(() => assertAnyArity('longText', 'string')).toThrow(/property/)
+    expect(() => assertAnyArity('date', 'date')).toThrow(/property/)
+    // 传了就正常工作（值可以是 undefined —— 那是"这个字段库里没有 property"，不是"我没传"）
+    expect(losslessRetypeTargets('longText', undefined)).toEqual(['string'])
+    expect(losslessRetypeTargets('longText', { rich: true })).toEqual([])
   })
 
   test('assertLosslessFieldRetype: the three pass-through cases and the refusal', () => {
     // 1) 同类型 → 同类型不是改类型
-    expect(() => assertLosslessFieldRetype('date', 'date')).not.toThrow()
-    // 2) 任一端是副作用类型 ⇒ 让给路由里既有的专门守卫，白名单不表态
+    expect(() => assertLosslessFieldRetype('date', 'date', undefined)).not.toThrow()
+    // 2) 任一端是副作用类型 ⇒ 白名单不表态（**不等于"有人接手"**：只有 link/formula/lookup/rollup
+    //    作目标时真有既有校验；attachment 与 4 个系统戳作目标零守卫；autoNumber 作目标是主 UPDATE
+    //    之后的整列覆写。见 ② 与 tests/integration/multitable-context.api.test.ts 的 KNOWN SEAM 用例）
     for (const excluded of FIELD_RETYPE_EXCLUDED_TYPES) {
-      expect(() => assertLosslessFieldRetype('string', excluded)).not.toThrow()
-      expect(() => assertLosslessFieldRetype(excluded, 'string')).not.toThrow()
+      expect(() => assertLosslessFieldRetype('string', excluded, undefined)).not.toThrow()
+      expect(() => assertLosslessFieldRetype(excluded, 'string', undefined)).not.toThrow()
     }
     // 3) 白名单内放行；白名单外抛（message 中文、不含 fieldId）
     expect(() => assertLosslessFieldRetype('longText', 'string', {})).not.toThrow()
-    expect(() => assertLosslessFieldRetype('string', 'number')).toThrow(FieldRetypeNotLosslessError)
+    expect(() => assertLosslessFieldRetype('string', 'number', undefined)).toThrow(FieldRetypeNotLosslessError)
     expect(() => assertLosslessFieldRetype('longText', 'string', { rich: true })).toThrow(FieldRetypeNotLosslessError)
     try {
-      assertLosslessFieldRetype('string', 'number')
+      assertLosslessFieldRetype('string', 'number', undefined)
       throw new Error('unreachable: the whitelist must have refused')
     } catch (err) {
       expect(err).toBeInstanceOf(FieldRetypeNotLosslessError)
@@ -230,7 +252,10 @@ type RtResult = { rows: any[]; rowCount?: number }
 
 function createRetypeStore(fields: RtRow[]) {
   const byId = new Map(fields.map((f) => [f.id, { ...f, property: { ...f.property } }]))
+  /** 记录所有改到**记录数据**的写 —— 本刀声称"不碰 meta_records"，那就要能看得见，不是嘴上说。 */
+  const recordWrites: Array<{ sql: string; params: unknown[] }> = []
   const handler = (sql: string, params?: unknown[]): RtResult => {
+    if (/UPDATE\s+meta_records/i.test(sql)) recordWrites.push({ sql, params: params ?? [] })
     if (sql.includes('FROM meta_sheets WHERE id = $1')) {
       return { rows: [{ id: String(params?.[0] ?? RT_SHEET), base_id: 'base_retype', name: 'Sheet', description: null, deleted_at: null }] }
     }
@@ -258,7 +283,7 @@ function createRetypeStore(fields: RtRow[]) {
     }
     return { rows: [], rowCount: 0 }
   }
-  return { byId, handler }
+  return { byId, recordWrites, handler }
 }
 
 async function createRetypeApp(handler: (sql: string, params?: unknown[]) => RtResult) {
@@ -378,6 +403,32 @@ describe('PATCH /fields/:fieldId — the lossless whitelist is enforced server-s
 
     expect(res.status).toBe(200)
     expect(store.byId.get('fld_retype_1')?.type).toBe('string')
+  })
+
+  // KNOWN SEAM (characterization) —— 富文本长文本的**两步**绕过，B3（裁决 2026-09-12）。
+  // 单次请求买不到通行证（上面那条用例），但两次可以，而且两步都是既有行为，本刀一个门都没加：
+  //   第一步 PATCH {property:{}}：`assertRichLongTextToggleAllowed` 只判 OFF→ON（field-codecs.ts:812-823），
+  //     关掉 rich 不在它的判据里；`sanitizeFieldPropertyByType` 没有 longText 分支，property 原样落成 {}；
+  //     这一步只改 schema，单元格里的 HTML 一个字节没动。
+  //   第二步 PATCH {type:'string'}：白名单读的是**库里**的 property，此时已是 {} ⇒ 非富文本 ⇒ 放行 200。
+  // 结果：HTML 以裸文本呈现给用户。本用例只钉现状（两步都 200 + 记录数据零改写），让这条路径可见；
+  // 要不要给 rich ON→OFF 加「已有数据则拒」的门是 owner 决策（PR 正文 owner 待办），不在本刀。
+  test('KNOWN SEAM（两步绕过，characterization）：先关 rich 再改类型 ⇒ 两步都 200，本刀不加门', async () => {
+    const store = createRetypeStore([field({ type: 'longText', property: { rich: true } })])
+
+    // 第一步：只改 property，把 rich 关掉
+    const step1 = await patch(store, { property: {} })
+    expect(step1.status).toBe(200)
+    expect(store.byId.get('fld_retype_1')?.type).toBe('longText')
+    expect(store.byId.get('fld_retype_1')?.property).toEqual({})
+
+    // 第二步：同一个字段现在在库里已经是非富文本，白名单据此放行
+    const step2 = await patch(store, { type: 'string' })
+    expect(step2.status).toBe(200)
+    expect(store.byId.get('fld_retype_1')?.type).toBe('string')
+
+    // 两步都没有改写任何记录数据 —— 原来的 HTML 就原样留在单元格里
+    expect(store.recordWrites).toEqual([])
   })
 
   test('副作用类型的既有路径不变 ②：文本 → 关联(缺目标表) 仍然给更具体的那个稳定码', async () => {

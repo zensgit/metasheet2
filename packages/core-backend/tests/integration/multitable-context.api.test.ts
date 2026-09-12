@@ -1884,7 +1884,15 @@ describe('F8A lossless retype whitelist (server-authoritative, real-DB-lane copy
       ...stored,
     }
     const updates: Array<{ name: string; type: string; property: string; order: number }> = []
+    /**
+     * Every write that touches RECORD DATA, remembered separately from the schema write above.
+     * This cut's claim is "zero backend data rewrite", so the cell-level writes a PATCH emits have
+     * to be observable, not argued — see the `-> autoNumber` characterization below, where the
+     * route DOES rewrite the whole column.
+     */
+    const recordWrites: Array<{ sql: string; params: unknown[] }> = []
     const queryHandler = (sql: string, params?: unknown[]) => {
+      if (/UPDATE\s+meta_records/i.test(sql)) recordWrites.push({ sql, params: params ?? [] })
       if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) return { rows: [{ id: RETYPE_SHEET }] }
       if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
         return { rows: params?.[0] === row.id ? [{ id: row.id, sheet_id: row.sheet_id }] : [] }
@@ -1904,7 +1912,7 @@ describe('F8A lossless retype whitelist (server-authoritative, real-DB-lane copy
       { const cr = configRevisionNoop(sql); if (cr) return cr }
       return { rows: [], rowCount: 0 }
     }
-    return { row, updates, queryHandler }
+    return { row, updates, recordWrites, queryHandler }
   }
 
   const patchType = async (world: ReturnType<typeof retypeWorld>, body: Record<string, unknown>) => {
@@ -1998,6 +2006,47 @@ describe('F8A lossless retype whitelist (server-authoritative, real-DB-lane copy
     expect(res.body.error).toBeUndefined()
     expect(world.updates.map((u) => u.type)).toEqual(['string'])
     expect(world.row.type).toBe('string')
+  })
+
+  // The TARGET end is a seam too, and a bigger one than the first version of this PR admitted
+  // (judged 2026-09-12). Of the 11 excluded targets only link/formula/lookup/rollup actually have a
+  // pre-existing guard. `attachment` and the four system stamps (createdTime/modifiedTime/createdBy/
+  // modifiedBy) have NO matching `nextType === ...` branch in the PATCH body at all, so the pair is a
+  // plain 200 — the whitelist passes it through and nobody else objects. Characterization of TODAY,
+  // not an endorsement: closing it would turn `text -> attachment` into a 400 (a product change).
+  test('KNOWN SEAM (characterization): an EXCLUDED TARGET can be unguarded too — text -> attachment is still 200', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'attachment' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.error).toBeUndefined()
+    expect(world.updates.map((u) => u.type)).toEqual(['attachment'])
+    expect(world.row.type).toBe('attachment')
+    // and nothing rewrote the cells on this path
+    expect(world.recordWrites).toEqual([])
+  })
+
+  // `-> autoNumber` is the sharpest correction to this PR's own prose: it is NOT "a guard taking
+  // over", it is a DESTRUCTIVE SIDE EFFECT that runs AFTER the schema write. The whitelist returns
+  // early (target is excluded), `UPDATE meta_fields` lands, and then univer-meta.ts:13163-13165 calls
+  // backfillAutoNumberField(..., { overwrite: true }); its single statement
+  // (auto-number-service.ts:112-131) is
+  //   UPDATE meta_records ... SET data = jsonb_set(...) WHERE sheet_id = $3 AND ($4::boolean OR NOT (data ? $1))
+  // with $4 = true, i.e. EVERY existing cell of that column is replaced by a sequence number. This is
+  // pre-existing behaviour that this cut does not touch — the test exists so the claim "this cut
+  // rewrites no data" can never be misread as "this ROUTE rewrites no data".
+  test('KNOWN SEAM (characterization): text -> autoNumber is 200 and OVERWRITES every existing cell (not a guard, a destructive backfill)', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'autoNumber' })
+
+    expect(res.status).toBe(200)
+    expect(world.updates.map((u) => u.type)).toEqual(['autoNumber'])
+    // exactly one record-data write, and it is the overwrite-everything backfill
+    const backfills = world.recordWrites.filter((w) => w.sql.includes('jsonb_set'))
+    expect(backfills).toHaveLength(1)
+    // $4 = the `overwrite` flag: `true` drops the `NOT (data ? $1)` restriction to already-empty cells
+    expect(backfills[0].sql).toContain('$4::boolean OR NOT (data ? $1)')
+    expect(backfills[0].params[3]).toBe(true)
   })
 
   test('the server table IS the shared fixture table, row for row', () => {

@@ -24,10 +24,15 @@
  * types). Those need the type-transition side effects (autoNumber sequence, formula
  * deps, link join table) that the raw UPDATE skips, and `link`/`formula` conversions
  * carry their own route-side guards (univer-meta.ts:13025/:13060). The server-side
- * whitelist deliberately does NOT rule on pairs touching those types — it defers to
- * those guards, so their behaviour is unchanged. `losslessRetypeTargets` re-filters
- * against that set so a careless table edit can never surface an excluded target in
- * the dropdown.
+ * whitelist deliberately does NOT rule on pairs touching those types — and "does not
+ * rule" is NOT the same as "something else does" (corrected 2026-09-12): only
+ * link/formula/lookup/rollup as a TARGET really have a pre-existing route guard;
+ * attachment + the four system stamps have none (`text -> attachment` is a plain 200
+ * server-side), and `-> autoNumber` runs a destructive backfill (overwrite:true) AFTER
+ * the UPDATE, which is a side effect, not validation. See the server module's header.
+ * None of that is reachable from this dropdown — `losslessRetypeTargets` re-filters
+ * against the excluded set so a careless table edit can never surface an excluded
+ * target, and it returns [] for an excluded SOURCE. The seams are API-only.
  *
  * NOT included on purpose: multiSelect/person (array ⇄ scalar, JSON sprayed at the
  * user), checkbox → text (`true/false`, not 是/否), date/dateTime (ISO text is a
@@ -76,6 +81,12 @@ function isRichLongTextProperty(property: unknown): boolean {
  * `rich: true`); the authoritative check runs server-side against the DB row anyway
  * (core-backend/src/multitable/field-retype-whitelist.ts), so a stale/absent property
  * here can only make the dropdown optimistic, never make a lossy write land.
+ *
+ * SIGNATURE ASYMMETRY (deliberate, 2026-09-12): the server-side twin takes `property`
+ * as a REQUIRED argument and throws when it is omitted — there, an omitted property is
+ * a fail-OPEN (a rich longText would be judged non-rich and the write would land). Here
+ * the worst case is an option the server then refuses with 400, so this side keeps the
+ * optional parameter and its non-rich default.
  */
 export function losslessRetypeTargets(sourceType: string | null | undefined, property?: unknown): string[] {
   if (!sourceType) return []

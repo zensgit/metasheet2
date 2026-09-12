@@ -494,7 +494,14 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     expect(x.body?.error?.code).toBe('FIELD_TYPE_ERA_MISMATCH')
     expectNoLeak(x.body)
 
-    // zero destruction: 'hello world' is NOT dropped, and nothing else moved
+    // zero destruction: 'hello world' is NOT dropped, and nothing else moved.
+    // READ THIS BEFORE TRUSTING THE LINE BELOW (F8A, 2026-09-12): with the era now `longText` instead of
+    // `url`, coerceBatch1Value is the IDENTITY for these values, so `cells() === beforeCells` would also
+    // hold if the guard were removed and the revert were allowed to coerce. It is kept as a
+    // nothing-moved invariant, NOT as the destructive positive control it was under `url`. What actually
+    // catches a regression here is the pair above/below: the 422 + FIELD_TYPE_ERA_MISMATCH on BOTH
+    // preview and execute, and the empty restore/record-revision/tombstone ledgers (an allowed revert
+    // writes a restore revision even when the coerced values happen to be identical).
     expect(await eraQ.cells()).toEqual(beforeCells)
     expect(await eraQ.type()).toBe('longText')
     expect(await eraQ.property()).toEqual({ note: 'a' })
@@ -568,6 +575,9 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     expect(x.status).toBe(422)
     expect(x.body?.error?.code).toBe('FIELD_TYPE_ERA_MISMATCH')
     expectNoLeak(x.body)
+    // Same caveat as the P1-1 case above (F8A, 2026-09-12): under the `longText` era this equality is a
+    // nothing-moved invariant, not a destructive positive control — the 422 and the three empty ledgers
+    // below are what would turn red if the TOCTOU guard were removed.
     expect(await eraQ.cells()).toEqual(beforeCells) // 'hello world' NOT dropped
     expect(await eraQ.type()).toBe('longText')
     expect(await eraQ.property()).toEqual({ note: 'a' })

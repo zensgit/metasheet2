@@ -13090,14 +13090,19 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         // F8A 第一刀（裁决 b）：改类型的无损白名单，服务端权威。
-        // 在此之前 (currentType → nextType) 这一对零校验 —— 下面那条裸 `UPDATE meta_fields` 不迁移任何
-        // 单元格值，于是任何拿得到 fields:write 的调用方绕开前端下拉框就能做有损改类型（例如把存着
-        // "abc" 的文本字段改成数字）。白名单与前端 utils/field-retype.ts 同源于
+        // 在此之前 (currentType → nextType) 这一对除 link/formula/lookup/rollup 目标与层级父字段外
+        // 零配对校验 —— 下面那条裸 `UPDATE meta_fields` 不迁移任何单元格值，于是任何过得了本路由
+        // :12937 那道 `capabilities.canManageFields`（管理员角色或 multitable:manage-schema）的调用方
+        // 绕开前端下拉框就能做有损改类型（例如把存着 "abc" 的文本字段改成数字）。
+        // 白名单与前端 utils/field-retype.ts 同源于
         // tests/fixtures/field-retype-truth-table.json（双侧镜像测试）。
         // 位置刻意排在上面所有专门校验之后：那些校验对同一个请求给的是更具体的原因（层级父字段、
         // 跨 base 墙、公式引用……），保持它们的优先级；同时仍在任何写语句之前，所以照样 fail-closed。
         // 判 property 用的是 DB 里的 currentProperty（富文本长文本不许改回单行文本），不是请求体 ——
         // 请求体里的 property 是"改完之后"的，拿它判会让用户把 rich 关掉 + 改类型一次过。
+        // 范围要说准：这只挡住"同一次请求"；先 PATCH {property:{}} 关掉 rich、再 PATCH {type:'string'}
+        // 的两步路径仍然两步都 200（rich ON→OFF 没有门），HTML 原样留在单元格 —— 已知边界，
+        // 有 characterization 用例钉着，加不加 ON→OFF 的门是 owner 决策。
         assertLosslessFieldRetype(currentType, nextType, currentProperty)
 
         // W1-1 (design-lock §3 LOCK-B, B1/B2): an expression-change PATCH bulk-recomputes every
