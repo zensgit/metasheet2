@@ -1924,6 +1924,64 @@ function testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide() {
   assert.deepEqual(plan.counts, { add: 0, update: 0, skip: 2, inactive: 0, manual_confirm: 2 })
 }
 
+// 反驳 r1 blocker A1 —— **批级**后果,不只是行级。lineage / identity 调用点收窄后,那一行从
+// manual_confirm 变 SKIP 的同时,整批的「挂起必须被显式承认」闸门也跟着松开:
+//   `valid: counts[MANUAL_CONFIRM] === 0`(lib 的 return 处)由 false 翻成 true
+//   ⇒ dry-run 状态 manual_confirm_required → ready(table-actions `dryRunStatus`)
+//   ⇒ apply 不再 409 TABLE_ACTION_MANUAL_CONFIRM_REQUIRED(table-actions apply 的 MANUAL_CONFIRM 闸)
+//   ⇒ 大 BOM 检查点 apply 的同一闸(large-bom-jobs LARGE_BOM_APPLY_MANUAL_CONFIRM_ACK_REQUIRED)
+//   ⇒ MVP 快照路径的 `!plan.valid` 拒绝(STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY)
+// 都不再触发 —— 同一批里那条 add 由「整批 409 拒绝」变成「直接写」。
+// 可达性是**真实配置**,不是构造:readPlan.part.materialField 是可选项(bom-expansion normalizeReadPlan
+// 的 part 可选列表);不配时 rowFromPart 照样把 `material` 键放到展开行上、值 undefined。
+// 这里把「缺身份键的行 + 同批一条 add」的 valid 与 counts 前后钉死;对照组(键在值变)证明闸门本身
+// 没丢。M1(去掉收窄)⇒ 本用例红:counts 回到 {add:1, manual_confirm:1}、valid=false。
+function testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch() {
+  const addRow = row({ componentSourceId: 'PART-NEW', pathTokens: ['PART-NEW'] })
+  // 展开行的真实形状:键在、值 undefined(readPlan 未配 materialField)。
+  const identityAbsent = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: undefined })
+  assert.equal(Object.prototype.hasOwnProperty.call(identityAbsent, 'material'), true, '前提:来料上键在')
+  assert.equal(identityAbsent.material, undefined, '前提:来料上值为 undefined')
+  const identityAbsentExisting = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  assert.equal(typeof identityAbsentExisting.material, 'string', '前提:存量这一列有值')
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [addRow, identityAbsent],
+    existingRows: [identityAbsentExisting],
+    runId: 'run-x6-batch-gate',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  // X6 之前:counts = {add:1, manual_confirm:1}、valid=false ⇒ 同批那条 add 被整批 409 拦住,要
+  // acceptManualConfirmHold=true 才能过。X6 之后:整批可执行,add 直接写。
+  assert.deepEqual(
+    plan.counts,
+    { add: 1, update: 0, skip: 1, inactive: 0, manual_confirm: 0 },
+    'X6:来料缺身份键的行是 SKIP、不是 manual_confirm(X6 之前 {add:1, manual_confirm:1})',
+  )
+  assert.equal(plan.valid, true, 'X6:整批不再挂起(X6 之前 valid=false ⇒ dry-run manual_confirm_required、apply 409)')
+  const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+  const absentDecision = byKey.get(identityAbsent.idempotencyKey)
+  assert.equal(absentDecision.decision, DECISIONS.SKIP)
+  assert.equal(absentDecision.conflictSummary.type, 'unchanged')
+  assert.equal(Object.prototype.hasOwnProperty.call(absentDecision, 'patch'), false, 'SKIP 行没有 patch:存量 material 一个字不动')
+  const addDecision = byKey.get(addRow.idempotencyKey)
+  assert.equal(addDecision.decision, DECISIONS.ADD, '同批那条 add 在闸门松开后直接写')
+  assert.equal(addDecision.record.lastPlmRefreshRunId, 'run-x6-batch-gate')
+
+  // 对照:来料给了**不同**的 material ⇒ 闸门原样:整批 valid=false,同批的 add 仍被拦在闸后。
+  const identityChanged = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: 'Iron' })
+  const held = planStockPreparationConflicts({
+    expandedRows: [addRow, identityChanged],
+    existingRows: [identityAbsentExisting],
+    runId: 'run-x6-batch-gate-control',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  assert.deepEqual(held.counts, { add: 1, update: 0, skip: 0, inactive: 0, manual_confirm: 1 }, '键在值变 ⇒ 仍是 manual_confirm')
+  assert.equal(held.valid, false, '键在值变 ⇒ 整批仍挂起(闸门本身没丢,只是缺键的行不再触发它)')
+  const heldAdd = held.decisions.find((decision) => decision.idempotencyKey === addRow.idempotencyKey)
+  assert.equal(heldAdd.decision, DECISIONS.ADD, '对照组里那条 add 的行级决策不变,变的是整批能否执行')
+}
+
 function main() {
   testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger()
   testAddUpdateSkipInactive()
@@ -1955,6 +2013,7 @@ function main() {
   testX6ChangedFieldsIgnoresKeysTheIntakeDidNotProvide()
   testX6RefreshSkipsRowsWhoseIntakeLacksTheColumn()
   testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide()
+  testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch()
   testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
   testUnresolvableParentIsAbsenceNotAGuess()
   testExistingRowsAreBackfilledByAReRun()

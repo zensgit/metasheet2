@@ -23,6 +23,7 @@ const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const {
+  PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   ROW_ERROR_LIMIT_CEILING,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
 const {
@@ -1346,6 +1347,8 @@ async function main() {
   await testTheCanonicalHashOrderNeverReordersWhatGetsWritten()
   // X6 — 来料没这个键 ≠ 变更(#5625 M2 探针形状,正向钉住)。
   await testX6DryRunDoesNotCountRowsWhoseIntakeLacksTheExtColumn()
+  // 反驳 r1 blocker A1 —— 批级闸门(valid / dryRunStatus / 409)前后钉死。
+  await testX6AbsentIdentityKeyDoesNotHoldTheDryRun()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
 }
@@ -2669,6 +2672,119 @@ async function testX6DryRunDoesNotCountRowsWhoseIntakeLacksTheExtColumn() {
     '没被写的两行的 ext_ 值还是原来的',
   )
   assert.equal(records.rows.find((record) => record.data.componentSourceId === 'PART-C').data[X6_EXT_FIELD_ID], '', '被 update 的那一行的 ext_ 空串也没被动')
+
+  // 反驳 r1 blocker A2 / B1 —— 「没有任何一格取值改变」**不成立**,有界表述是:除 runPatch 的四列
+  // 刷新戳(lastPlmRefreshRunId / lastPlmRefreshAt / lastPlmRefreshDecision / lastPlmConflictSummary)
+  // 外,没有任何业务列的取值改变。X6 之前这两行每轮都被写成本次 run 的值(runId / plannedAt /
+  // 'update' / 点名 ext_ 列的理由);X6 之后 SKIP 决策没有 patch,四列停在**上一次真变更**留下的值
+  // (X4 fixture 里的 run-r33 / X4_EXISTING_REFRESH_STAMP)——这正是 project-board 对
+  // `lastChangedFromPlmAt`(取 lastPlmRefreshAt 的最大值)声明的「最近变更、不是最近同步」语义,
+  // 也是 suggestion-operators 按 lastPlmRefreshAt 排新近度时拿到的值。被 update 的那一行照常盖本次戳。
+  for (const record of untouched) {
+    assert.equal(record.data.lastPlmRefreshRunId, 'run-r33', '没被写的行:lastPlmRefreshRunId 停在上一次真变更(X6 之前每轮盖成本次 runId)')
+    assert.equal(record.data.lastPlmRefreshAt, X4_EXISTING_REFRESH_STAMP, '没被写的行:lastPlmRefreshAt 停在上一次真变更(X6 之前每轮盖成本次 plannedAt)')
+    assert.equal(Object.prototype.hasOwnProperty.call(record.data, 'lastPlmRefreshDecision'), false, '没被写的行:本轮没盖 decision')
+    assert.equal(Object.prototype.hasOwnProperty.call(record.data, 'lastPlmConflictSummary'), false, '没被写的行:本轮没写理由')
+  }
+  const written = records.rows.find((record) => record.data.componentSourceId === 'PART-C')
+  assert.notEqual(written.data.lastPlmRefreshRunId, 'run-r33', '被 update 的行盖本次 runId')
+  assert.notEqual(written.data.lastPlmRefreshAt, X4_EXISTING_REFRESH_STAMP, '被 update 的行盖本次 plannedAt')
+  assert.equal(written.data.lastPlmRefreshDecision, DECISIONS.UPDATE)
+}
+
+// ---------------------------------------------------------------------------------------------
+// 反驳 r1 blocker A1 —— **批级**闸门,dry-run → apply 层。真实配置可达:readPlan.part.materialField 是
+// 可选项(bom-expansion normalizeReadPlan 的 part 可选列表);不配时 rowFromPart 照样把 `material` 键放
+// 到展开行上、值 undefined。X6 之前这三条存量(material 有值)每轮都是 component_identity_conflict ⇒
+// counts.manual_confirm=3、plan.valid=false ⇒ dry-run 状态 manual_confirm_required(`dryRunStatus`)、
+// apply 不带 acceptManualConfirmHold ⇒ 409 TABLE_ACTION_MANUAL_CONFIRM_REQUIRED —— 同批那条 add 也被整批
+// 拦住。X6 之后:三条 SKIP、状态 ready、add 直接写、零 patchRecord。对照组(默认 readPlan 带 materialField、
+// 存量 material 与来料不同)证明闸门本身没丢。M1(去掉收窄)⇒ 本用例红。
+// ---------------------------------------------------------------------------------------------
+async function testX6AbsentIdentityKeyDoesNotHoldTheDryRun() {
+  const { materialField, ...partWithoutMaterial } = PLM_STOCK_PREPARATION_BOM_READ_PLAN.part
+  assert.equal(materialField, 'Material', '前提:默认读计划配了 materialField,这里显式拿掉')
+  const action = baseAction({
+    source: {
+      ...baseAction().source,
+      readPlan: { ...PLM_STOCK_PREPARATION_BOM_READ_PLAN, part: partWithoutMaterial },
+    },
+  })
+  // 同批一条 add:第四个根行不在存量里。
+  const source = multiRootPlmData()
+  source.DN_PDM_OrderDetailInfo.push({ order_id: 'ORDER-1', part_id: 'PART-D', quantity: '1' })
+  source.DN_PDM_PartLibraryInfo.push({ OBJ_ID: 'PART-D', IdentityNo: 'D-001', IdentityName: 'Duct', Material: 'Copper', SysVer: 'V1' })
+
+  const storage = createMemoryStorage()
+  const records = createRecordsApi({ existing: x4ExistingRecords() })
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(source).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'ready', 'X6:来料缺身份键不再把整批挂起(X6 之前 manual_confirm_required)')
+  assert.equal(dryRun.evidence.plan.valid, true, 'X6:plan.valid 由 false 翻成 true')
+  assert.deepEqual(
+    dryRun.counts,
+    { add: 1, update: 0, skip: 3, inactive: 0, manual_confirm: 0 },
+    '三条存量 SKIP、同批一条 add(X6 之前 {add:1, manual_confirm:3})',
+  )
+  // 不带 acceptManualConfirmHold —— X6 之前这里是 409 TABLE_ACTION_MANUAL_CONFIRM_REQUIRED。
+  const applied = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(source).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'write',
+  })
+  assert.equal(applied.status, 'succeeded', 'X6:同批那条 add 直接写(X6 之前整批 409)')
+  assert.equal(applied.apply.counts.created, 1)
+  assert.equal(applied.apply.counts.updated, 0)
+  assert.equal(applied.apply.counts.held, 0)
+  assert.equal(records.calls.filter((call) => call[0] === 'patchRecord').length, 0, '三条 SKIP 行零 patchRecord')
+  // 存量的 material 一个字没动;新行不带来料没给的 material 键(pickFields 同判据)。
+  for (const seed of X4_ROOT_SEEDS) {
+    const kept = records.rows.find((record) => record.data.componentSourceId === seed.componentSourceId)
+    assert.equal(kept.data.material, seed.material, '存量 material 原样')
+    assert.equal(kept.data.lastPlmRefreshRunId, 'run-r33', 'SKIP 行的刷新戳停在上一次真变更')
+  }
+  const created = records.calls.find((call) => call[0] === 'createRecord')[1]
+  assert.equal(Object.prototype.hasOwnProperty.call(created.data, 'material'), false, 'add 记录里也没有来料没给的列')
+
+  // 对照:默认读计划(带 materialField),存量 PART-A 的 material 与来料不同 ⇒ 闸门原样。
+  const heldStorage = createMemoryStorage()
+  const heldRecords = createRecordsApi({ existing: x4ExistingRecords({ 'PART-A': { material: 'Bronze' } }) })
+  const held = await dryRunStockPreparationAction({
+    action: baseAction(),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(source).adapter,
+    recordsApi: heldRecords.recordsApi,
+    tokenStore: heldStorage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(held.status, 'manual_confirm_required', '键在值变 ⇒ 整批仍挂起(闸门本身没丢)')
+  assert.deepEqual(held.counts, { add: 1, update: 0, skip: 2, inactive: 0, manual_confirm: 1 })
+  await assert.rejects(
+    () => applyStockPreparationAction({
+      sandboxPolicy: SANDBOX_POLICY,
+      action: baseAction(),
+      parameters: { projectNo: 'P-001' },
+      dryRunToken: held.dryRunToken,
+      sourceAdapter: createSourceAdapter(source).adapter,
+      recordsApi: heldRecords.recordsApi,
+      tokenStore: heldStorage,
+      permission: 'write',
+    }),
+    (err) => err instanceof StockPreparationTableActionError && err.status === 409 && err.code === 'TABLE_ACTION_MANUAL_CONFIRM_REQUIRED',
+    '键在值变 ⇒ 不带 acceptManualConfirmHold 的 apply 仍是 409',
+  )
+  assert.equal(heldRecords.calls.some((call) => call[0] === 'createRecord'), false, '闸门后面那条 add 没被写')
 }
 
 main().catch((err) => {
