@@ -734,6 +734,12 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
   const importBatchImpactLoading = ref(false)
   const importBatchImpactReport = ref<AttendanceImportBatchImpactReport | null>(null)
   const lastLoadedOrgId = ref<string | null>(null)
+  const selectedBatchOrgId = ref<string | null>(null)
+
+  function batchOrgId(batchId: string, fallback = lastLoadedOrgId.value): string | null {
+    if (importBatchSelectedId.value === batchId && selectedBatchOrgId.value) return selectedBatchOrgId.value
+    return importBatches.value.find(batch => batch.id === batchId)?.orgId ?? fallback
+  }
 
   function setImportStatus(message: string, kind: ImportStatusKind = 'info') {
     importStatusKind.value = kind
@@ -772,9 +778,13 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
 
   async function loadImportBatchItems(batchId: string) {
     if (!batchId) return
+    const orgId = batchOrgId(batchId)
+    const params = new URLSearchParams()
+    if (orgId) params.set('orgId', orgId)
+    const query = params.size ? `?${params}` : ''
     importLoading.value = true
     try {
-      const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items`)
+      const response = await apiFetch(`/api/attendance/import/batches/${encodeURIComponent(batchId)}/items${query}`)
       if (response.status === 403) {
         adminForbiddenRef.value = true
         return
@@ -786,6 +796,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
       }
 
       importBatchSelectedId.value = batchId
+      selectedBatchOrgId.value = orgId
       if (importBatchImpactReport.value?.batchId && importBatchImpactReport.value.batchId !== batchId) {
         importBatchImpactReport.value = null
       }
@@ -813,10 +824,23 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
   async function rollbackImportBatch(batchId: string, rollbackOptions: RollbackImportBatchOptions = {}) {
     const confirmMessage = rollbackOptions.confirmMessage ?? tr('Rollback this import batch?', '确认回滚该导入批次吗？')
     if (!batchId || !confirm(confirmMessage)) return
+    const orgId = batchOrgId(batchId, rollbackOptions.orgId ?? lastLoadedOrgId.value)
 
     importLoading.value = true
     try {
-      const response = await apiFetch(`/api/attendance/import/rollback/${batchId}`, { method: 'POST' })
+      if (orgId) {
+        // Rollback is session-scoped on the server; body/query selectors are ignored.
+        const sessionResponse = await apiFetch('/api/auth/me', { suppressUnauthorizedRedirect: true })
+        const session = await sessionResponse.json().catch(() => null)
+        const user = session?.data?.user
+        const sessionOrg = user?.orgId ?? user?.workspaceId ?? user?.tenantId
+        if (!sessionResponse.ok || session?.success !== true || String(sessionOrg ?? '') !== orgId) {
+          throw new Error(tr('Switch to the batch organization before rollback.', '请先切换到该批次所属组织，再执行回滚。'))
+        }
+      }
+      const response = await apiFetch(`/api/attendance/import/rollback/${encodeURIComponent(batchId)}`, {
+        method: 'POST',
+      })
       if (response.status === 403) {
         adminForbiddenRef.value = true
         return
@@ -827,7 +851,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
         throw new Error(String(data?.error?.message || tr('Failed to rollback import batch', '回滚导入批次失败')))
       }
 
-      await loadImportBatches({ orgId: rollbackOptions.orgId ?? lastLoadedOrgId.value })
+      await loadImportBatches({ orgId })
       if (importBatchImpactReport.value?.batchId === batchId) {
         importBatchImpactReport.value = null
       }
@@ -835,6 +859,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
         importBatchItems.value = []
         importBatchSnapshot.value = null
         importBatchSelectedId.value = ''
+        selectedBatchOrgId.value = null
       }
       setImportStatus(tr('Import batch rolled back.', '导入批次已回滚。'))
     } catch (error: unknown) {
@@ -844,7 +869,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
     }
   }
 
-  async function fetchAllImportBatchItems(batchId: string): Promise<AttendanceImportItem[]> {
+  async function fetchAllImportBatchItems(batchId: string, orgId = batchOrgId(batchId)): Promise<AttendanceImportItem[]> {
     let page = 1
     let total: number | null = null
     const items: AttendanceImportItem[] = []
@@ -854,7 +879,8 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
         page: String(page),
         pageSize: String(fallbackPageSize),
       })
-      const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items?${params.toString()}`)
+      if (orgId) params.set('orgId', orgId)
+      const response = await apiFetch(`/api/attendance/import/batches/${encodeURIComponent(batchId)}/items?${params.toString()}`)
       if (response.status === 403) {
         adminForbiddenRef.value = true
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
@@ -903,6 +929,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
 
   async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
     const batchId = importBatchSelectedId.value
+    const orgId = batchOrgId(batchId)
     if (!batchId) {
       setImportStatus(tr('Select a batch first.', '请先选择批次。'), 'error')
       return
@@ -911,7 +938,9 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
     importLoading.value = true
     try {
       const exportType = onlyAnomalies ? 'anomalies' : 'all'
-      const serverResponse = await apiFetch(`/api/attendance/import/batches/${batchId}/export.csv?type=${exportType}`, {
+      const params = new URLSearchParams({ type: exportType })
+      if (orgId) params.set('orgId', orgId)
+      const serverResponse = await apiFetch(`/api/attendance/import/batches/${encodeURIComponent(batchId)}/export.csv?${params}`, {
         method: 'GET',
         headers: { Accept: 'text/csv' },
       })
@@ -936,7 +965,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
         throw new Error(errorText || tr(`Failed to export CSV (HTTP ${serverResponse.status})`, `导出 CSV 失败（HTTP ${serverResponse.status}）`))
       }
 
-      const allItems = await fetchAllImportBatchItems(batchId)
+      const allItems = await fetchAllImportBatchItems(batchId, orgId)
       if (allItems.length === 0) {
         setImportStatus(tr('No batch items found.', '未找到批次明细。'), 'error')
         return

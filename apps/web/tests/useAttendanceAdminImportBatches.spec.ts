@@ -62,6 +62,103 @@ function createItem(overrides: Partial<AttendanceImportItem> = {}): AttendanceIm
 }
 
 describe('useAttendanceAdminImportBatches', () => {
+  it('keeps batch reads, exports and rollback in the batch organization', async () => {
+    const batchOrg = 'qa-batch-org'
+    const calls: Array<{ url: URL; init?: RequestInit }> = []
+    const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = new URL(input, 'http://local.test')
+      calls.push({ url, init })
+      if (url.pathname === '/api/attendance/import/batches') {
+        return jsonResponse(200, { ok: true, data: { items: [createBatch({ orgId: batchOrg })] } })
+      }
+      if (url.pathname === '/api/auth/me') return jsonResponse(200, {
+        success: true, data: { user: { tenantId: batchOrg } },
+      })
+      // The real rollback route ignores body/query and uses the authenticated session.
+      const requestedOrg = init?.method === 'POST' ? batchOrg : url.searchParams.get('orgId')
+      if (requestedOrg !== batchOrg) return jsonResponse(404, { ok: false })
+      if (url.pathname.endsWith('/export.csv')) return textResponse(200, 'batchId\nbatch-1\n')
+      return jsonResponse(200, { ok: true, data: { items: [createItem()], total: 1 } })
+    })
+    const downloadCsv = vi.fn()
+    const batches = useAttendanceAdminImportBatches({ apiFetch, tr, downloadCsv, confirm: () => true })
+    await batches.loadImportBatches({ orgId: 'qa-selector-org' })
+    await batches.loadImportBatchItems('batch-1')
+    expect(batches.importBatchItems.value).toEqual([createItem()])
+    await batches.loadFullImportBatchImpact('batch-1')
+    expect(batches.importBatchImpactReport.value?.itemCount).toBe(1)
+    await batches.exportImportBatchItemsCsv(false)
+    expect(downloadCsv).toHaveBeenCalledOnce()
+    await batches.rollbackImportBatch('batch-1', { orgId: 'qa-selector-org' })
+    const scoped = calls.filter(({ url }) => url.pathname.startsWith('/api/attendance/import/')
+      && url.pathname !== '/api/attendance/import/batches')
+    expect(scoped).toHaveLength(4)
+    for (const { url, init } of scoped) {
+      if (init?.method === 'POST') expect(init.body).toBeUndefined()
+      else expect(url.searchParams.get('orgId')).toBe(batchOrg)
+    }
+    expect(batches.importStatusMessage.value).toBe('Import batch rolled back.')
+  })
+
+  it.each([
+    { name: 'different session', status: 200, payload: { success: true, data: { user: { tenantId: 'qa-other' } } } },
+    { name: 'unknown session', status: 200, payload: { success: true, data: { user: {} } } },
+    { name: 'expired session', status: 401, payload: { success: false } },
+  ])('refuses rollback before POST for $name', async ({ status, payload }) => {
+    const apiFetch = vi.fn(async (input: string) => {
+      if (input === '/api/auth/me') return jsonResponse(status, payload)
+      return jsonResponse(200, { ok: true, data: { items: [] } })
+    })
+    const batches = useAttendanceAdminImportBatches({ apiFetch, tr, confirm: () => true })
+    batches.importBatches.value = [createBatch({ orgId: 'qa-batch' })]
+    await batches.rollbackImportBatch('batch-1', { orgId: 'qa-other' })
+    expect(apiFetch).toHaveBeenCalledOnce()
+    expect(apiFetch).toHaveBeenCalledWith('/api/auth/me', { suppressUnauthorizedRedirect: true })
+    expect(batches.importStatusKind.value).toBe('error')
+    expect(batches.importStatusMessage.value).toBe('Switch to the batch organization before rollback.')
+  })
+
+  it('pins the export fallback organization across pages when the list selection changes', async () => {
+    let batches: ReturnType<typeof useAttendanceAdminImportBatches>
+    const pages: URL[] = []
+    const downloadCsv = vi.fn()
+    const apiFetch = vi.fn(async (input: string) => {
+      const url = new URL(input, 'http://local.test')
+      if (url.pathname === '/api/attendance/import/batches') {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url.pathname.endsWith('/export.csv')) {
+        expect(url.searchParams.get('orgId')).toBe('qa-first')
+        return textResponse(404, '')
+      }
+      pages.push(url)
+      if (pages.length === 1) await batches.loadImportBatches({ orgId: 'qa-second' })
+      return jsonResponse(200, { ok: true, data: {
+        items: [createItem({ id: `item-${pages.length}` })], total: 2,
+      } })
+    })
+    batches = useAttendanceAdminImportBatches({ apiFetch, tr, downloadCsv, fallbackPageSize: 1 })
+    await batches.loadImportBatches({ orgId: 'qa-first' })
+    batches.importBatchSelectedId.value = 'batch-1'
+    await batches.exportImportBatchItemsCsv(false)
+    expect(pages.map(url => [url.searchParams.get('orgId'), url.searchParams.get('page')]))
+      .toEqual([['qa-first', '1'], ['qa-first', '2']])
+    expect(downloadCsv).toHaveBeenCalledOnce()
+  })
+
+  it('does not download or report success when the scoped batch request is denied', async () => {
+    const apiFetch = vi.fn(async (_input: string) => jsonResponse(403, { ok: false }))
+    const downloadCsv = vi.fn()
+    const batches = useAttendanceAdminImportBatches({ apiFetch, tr, downloadCsv })
+    batches.importBatches.value = [createBatch({ orgId: 'qa-denied' })]
+    batches.importBatchSelectedId.value = 'batch-1'
+    await batches.exportImportBatchItemsCsv(false)
+    expect(apiFetch).toHaveBeenCalledOnce()
+    expect(String(apiFetch.mock.calls[0]?.[0])).toContain('orgId=qa-denied')
+    expect(downloadCsv).not.toHaveBeenCalled()
+    expect(batches.importStatusKind.value).toBe('error')
+  })
+
   it('classifies batch items and summarizes anomaly impact', () => {
     const items = [
       createItem({
@@ -307,7 +404,7 @@ describe('useAttendanceAdminImportBatches', () => {
           data: { items: [createBatch({ id: 'batch-a' })] },
         })
       }
-      if (input === '/api/attendance/import/batches/batch-a/items') {
+      if (input === '/api/attendance/import/batches/batch-a/items?orgId=org-1') {
         return jsonResponse(200, {
           ok: true,
           data: { items: [createItem({ id: 'item-a', batchId: 'batch-a' })] },
@@ -345,7 +442,7 @@ describe('useAttendanceAdminImportBatches', () => {
           },
         })
       }
-      if (url === '/api/attendance/import/batches/batch-a/items?page=1&pageSize=200') {
+      if (url === '/api/attendance/import/batches/batch-a/items?page=1&pageSize=200&orgId=org-1') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -379,7 +476,7 @@ describe('useAttendanceAdminImportBatches', () => {
           },
         })
       }
-      if (url === '/api/attendance/import/batches/batch-a/items?page=2&pageSize=200') {
+      if (url === '/api/attendance/import/batches/batch-a/items?page=2&pageSize=200&orgId=org-1') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -430,13 +527,16 @@ describe('useAttendanceAdminImportBatches', () => {
     const confirm = vi.fn(() => true)
     const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input)
+      if (url === '/api/auth/me') return jsonResponse(200, {
+        success: true, data: { user: { tenantId: 'org-1' } },
+      })
       if (url === '/api/attendance/import/batches?orgId=org-1') {
         return jsonResponse(200, {
           ok: true,
           data: { items: [createBatch({ id: 'batch-a' })] },
         })
       }
-      if (url === '/api/attendance/import/batches/batch-a/items') {
+      if (url === '/api/attendance/import/batches/batch-a/items?orgId=org-1') {
         return jsonResponse(200, {
           ok: true,
           data: { items: [createItem({ id: 'item-a', batchId: 'batch-a', previewSnapshot: { foo: 'bar' } })] },
