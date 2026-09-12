@@ -215,6 +215,34 @@ describe('IntegrationHelpView (IU-6c)', () => {
     expect(section().textContent).not.toMatch(/用占位符，不要填真实值|请填占位符/)
   })
 
+  it.each(['en', 'zh-CN'] as const)('case one separates the physical connection panel from the ID-only draft (%s)', async (locale) => {
+    const root = await mountView()
+    useLocale().setLocale(locale)
+    await flushUi()
+
+    // Inspect the rendered instructions, not exported constants or source-code anchor labels.
+    // /data-sources is an entry point in both layouts: a standalone view or the Connections panel.
+    const register = root.querySelector('[data-testid="help-case-sql-source-step-1"]') as HTMLElement
+    const registerWhere = register.querySelector('dl > dd')!.textContent!
+    const draft = root.querySelector('[data-testid="help-case-sql-source-step-3"]') as HTMLElement
+    const draftAction = draft.querySelectorAll('dl > dd')[1].textContent!
+    expect(registerWhere).toContain('/data-sources')
+
+    if (locale === 'zh-CN') {
+      expect(registerWhere).not.toMatch(/连接管理只会|不在那边重复填账号/)
+      expect(registerWhere).toContain('「外接数据源」面板')
+      expect(registerWhere).toContain('登记并测试物理连接')
+      expect(registerWhere).toMatch(/「连接草稿」只引用 connectionId，不重复填写账号密码/)
+      expect(draftAction).toContain('connectionId 下拉选刚注册的数据源')
+    } else {
+      expect(registerWhere).not.toMatch(/Connections only references|never asks you to re-enter the account there/i)
+      expect(registerWhere).toContain('Data Sources panel')
+      expect(registerWhere).toMatch(/register and test the physical connection/i)
+      expect(registerWhere).toMatch(/connection draft only references connectionId, without re-entering the account or password/i)
+      expect(draftAction).toContain('pick the connectionId you just registered')
+    }
+  })
+
   // Same finding, the half that makes the placeholder rule matter: "Create" persists without dialing
   // (routes/data-sources.ts -> manager.addDataSource -> addDataSourceInternal(config, false)), while
   // the ephemeral POST /api/data-sources/test is the only step that actually connects. The copy must

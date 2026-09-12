@@ -347,10 +347,10 @@ export interface HelpCaseStep {
 export const INTEGRATION_HELP_SQL_SOURCE_CASE_STEPS: HelpCaseStep[] = [
   {
     id: 'register-data-source',
-    titleZh: '在「外接数据源」页填真实连接参数',
-    titleEn: 'Fill the real connection parameters on the Data Sources page',
-    whereZh: '「外接数据源」页 /data-sources。数据工厂 · 连接管理只会按 ID 引用这里的数据源，不在那边重复填账号密码。',
-    whereEn: 'The Data Sources page at /data-sources. Data Factory · Connections only references a source registered here by id; it never asks you to re-enter the account there.',
+    titleZh: '在「外接数据源」面板填真实连接参数',
+    titleEn: 'Fill the real connection parameters in the Data Sources panel',
+    whereZh: '「外接数据源」面板（/data-sources 入口）。在这里登记并测试物理连接；后面的「连接草稿」只引用 connectionId，不重复填写账号密码。',
+    whereEn: 'The Data Sources panel (via /data-sources). Register and test the physical connection here; the later connection draft only references connectionId, without re-entering the account or password.',
     actionZh: '点「新建数据源」打开表单，填 ID、名称、类型（PostgreSQL / SQL Server / MySQL）、Host、Port、Database 和一个只读账号——全部填目标库的真实值，并保持「只读」勾选。输入框里的灰字是 placeholder 属性的示例提示，不是可提交的值。',
     actionEn: 'Click "New data source" to open the form and fill in id, name, type (PostgreSQL / SQL Server / MySQL), host, port, database and a read-only account — all with the target database\'s real values, leaving the read-only box checked. The grey text inside each input is a placeholder attribute hint, not a submittable value.',
     successZh: '表单保持展开，底部操作区有「测试连接」和「创建」两个按钮——新建模式下「测试连接」始终提供，不按字段是否填满来置灰，所以下一步随时可以用它验证。',
