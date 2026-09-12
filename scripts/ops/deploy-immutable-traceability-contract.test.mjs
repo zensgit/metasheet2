@@ -17,6 +17,24 @@ function assertContains(haystack, needle, label) {
   )
 }
 
+test('backend media dependencies bootstrap CA before HTTPS with bounded retries', () => {
+  const raw = readRepoFile('Dockerfile.backend')
+  const runner = raw.split('FROM node:20-slim AS runner')[1]
+  assert.ok(runner)
+  const ca = runner.indexOf('install -y --no-install-recommends ca-certificates')
+  const https = runner.indexOf("sed -i 's|http://deb.debian.org|https://deb.debian.org|g'")
+  const media = runner.indexOf('install -y --no-install-recommends ffmpeg')
+  assert.ok(ca >= 0 && https > ca && media > https)
+  const aptCommands = runner.match(/apt-get[^\n]+/g)
+  assert.equal(aptCommands?.length, 4)
+  for (const command of aptCommands) {
+    assert.match(command, /-o Acquire::Retries=3/)
+    assert.match(command, /-o Acquire::(?:http|https)::Timeout=30/)
+  }
+  assert.ok(runner.indexOf('command -v ffprobe') > media)
+  assert.doesNotMatch(runner, /--allow-unauthenticated|trusted=yes|Verify-Peer=false|Verify-Host=false|\|\|\s*true/)
+})
+
 test('frontend build gets a bounded build-only heap budget', () => {
   const raw = readRepoFile('Dockerfile.frontend')
   const stages = raw.split(/^FROM nginx:[^\n]+$/m)
