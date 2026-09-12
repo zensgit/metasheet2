@@ -1,6 +1,6 @@
 # Attendance import scope follow-up: verification
 
-Status: local verification complete. This document does not assert exact-head GitHub merge readiness or staging acceptance.
+Status: post-review read-boundary correction under local verification. This document does not assert exact-head GitHub merge readiness or staging acceptance.
 
 Base: `1c22d3b328f377dface03b222bf57d09f4b7dec0`.
 
@@ -20,8 +20,9 @@ Publication catch-up base: `9fb29831c33abba5eac1a5d64adbe62d915676c2`. The resul
 | Ops contract regressions | 47/47 PASS across strict, override-confirm, import-perf-payload and acceptance-preflight suites |
 | Ops on-disk mutations | 9/9 RED, source SHA-256 restored |
 | Local Chromium request-panel fixture | PASS: real helper opens hidden/collapsed details, fills date, preserves already-open state; not product E2E |
-| Independent review | Sol: no P1/P2 in restored source/test/contract snapshot; independently ran 66 focused, 15 strict-contract, 31 neighbor-contract and 14 OpenAPI-parity tests; docs excluded |
-| New exact-head GitHub checks | NOT RUN |
+| Historical local review | Earlier Sol source/test review excluded docs; its nonblocking verdict is superseded by the publication review below |
+| Publication review at `97de651662e09b837594b40d3dfa786ccdbc8e5e` | CHANGES REQUESTED; read-boundary authorization and runner scope/cleanup required correction |
+| CI at the publication head | Attendance guard 67 files / 1351 tests plus 6 browser cases PASS; required web final batch 455 files / 6627 tests PASS; these results do not transfer to the backend correction |
 | New staging/product-browser/real-database acceptance | NOT RUN |
 
 The initial async test used an incorrect option name and did not reach the intended lane. It was corrected to the actual `thresholds` option before positive verification and on-disk mutation. That initial failure is not counted as reproduction of the polling defect.
@@ -31,6 +32,14 @@ The final required-web run started before a comment-only correction from "both s
 Delegation: Grok 4.6 was assigned the bounded ops slice but produced no edits during its session; it was stopped and the parent implemented that slice. Sol performed independent source review and local reruns. No additional model fan-out was used. All delegated sessions and the temporary clean-base typecheck worktree were closed; the delivery worktree and local evidence remain.
 
 ## Executed mutations
+
+### Read-boundary follow-up
+
+The registered plugin-handler suite plus import permission, identity, UUID validation and fixed-schedule neighbors passed 206/206 locally. The new suite contributes 50 cases across the five readers, with no PostgreSQL dependency. Each reader's identity resolver was independently replaced on disk by the old organization selection; every run failed 9 cases and passed 41. The restored plugin SHA-256 was `89f70a83d5fb1e49f70e9db951605b44afaf0dc0bf12620b59fb447d795d5b28`. No guard mutation remains applied. These controls prove the handler boundary with query doubles, not real-DB or shared-staging acceptance.
+
+The existing malformed-UUID positive-auth fixture now supplies its authenticated tenant so it reaches UUID validation; its 400/body/no-query expectations were retained. Missing-tenant refusal has dedicated new cases. Backend unit discovery already includes this new non-DB suite; no workflow or provenance pin was edited for it.
+
+### Earlier caller corrections
 
 Each mutation edits one implementation site, runs its named regression, requires an assertion failure, restores the full file, then verifies SHA-256. No mutation is left applied.
 
@@ -69,7 +78,7 @@ The domain suite command is read from the YAML step named `Run attendance web gu
 | Gate | Evidence / boundary |
 | --- | --- |
 | Preserve requested job/batch organization | Live-shell and extracted-workflow tests; pagination/export scope mutations |
-| Do not widen backend tenant access | Backend/plugin paths unchanged; rollback stays authenticated-session scoped |
+| Bind import reads to authenticated tenancy | Five readers use the existing identity resolver; new registered-handler suite and five independent on-disk mutations; rollback stays session-scoped |
 | Reject mismatched rollback session | Positive same-org control plus missing/mismatched/expired negatives, no automatic redirect |
 | Interact with reachable controls | Strict helper function tests and local Chromium details fixture; staging still required |
 | Durable frontend test execution | Three specs appear in attendance-web-guard and the explicit required-web batch |
@@ -78,5 +87,7 @@ The domain suite command is read from the YAML step named `Run attendance web gu
 ## Remaining acceptance
 
 The earlier deployed candidate passed security 7/7 and Chinese locale, but failed strict/import. Those historical results are not transferred to this unmerged patch. After separate authorization: restore public DNS, publish/deploy an exact reviewed SHA, verify migration alignment and OFF posture, then rerun security, strict twice, locale, import/export/business rollback and synthetic cleanup. Retained append-only evidence must be reported separately from mutable residue.
+
+The historical security runner did not cover these five import readers. Its strict configuration also enabled a global settings write, outside a synthetic-organization-only scope, and its cleanup skipped ambiguous seed acknowledgements. That runner must not be reused unchanged. A scoped run excluding global settings is not full strict acceptance; any excluded global case remains BLOCKED unless verified in a separately isolated environment.
 
 No deployment, rollout/shadow enablement, real tenant data use, production traffic expansion or #4556 closure occurred in this work.

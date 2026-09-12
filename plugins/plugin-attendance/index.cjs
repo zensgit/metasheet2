@@ -42763,7 +42763,9 @@ module.exports = {
       'GET',
       '/api/attendance/import/jobs/:id',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const identity = resolveAttendanceRecordReadIdentity(req, res)
+        if (!identity) return
+        const orgId = identity.orgId
         const jobId = String(req.params?.id ?? '').trim()
         if (!jobId) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'jobId is required' } })
@@ -43500,7 +43502,9 @@ module.exports = {
       'GET',
       '/api/attendance/import/batches',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const identity = resolveAttendanceRecordReadIdentity(req, res)
+        if (!identity) return
+        const orgId = identity.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -43540,7 +43544,9 @@ module.exports = {
       'GET',
       '/api/attendance/import/batches/:id',
       withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const identity = resolveAttendanceRecordReadIdentity(req, res)
+        if (!identity) return
+        const orgId = identity.orgId
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)
@@ -43571,7 +43577,9 @@ module.exports = {
 	      'GET',
 	      '/api/attendance/import/batches/:id/items',
 	      withAttendanceImportPermission(async (req, res) => {
-        const orgId = getOrgId(req)
+        const identity = resolveAttendanceRecordReadIdentity(req, res)
+        if (!identity) return
+        const orgId = identity.orgId
         const batchId = normalizeUuidString(req.params.id)
         if (!batchId) {
           respondInvalidUuid(res)
@@ -43615,7 +43623,9 @@ module.exports = {
 	      'GET',
 	      '/api/attendance/import/batches/:id/export.csv',
 	      withAttendanceImportPermission(async (req, res) => {
-	        const orgId = getOrgId(req)
+	        const identity = resolveAttendanceRecordReadIdentity(req, res)
+	        if (!identity) return
+	        const orgId = identity.orgId
 	        const batchId = normalizeUuidString(req.params.id)
 	        if (!batchId) {
 	          respondInvalidUuid(res)

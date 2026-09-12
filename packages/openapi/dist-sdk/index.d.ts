@@ -5867,7 +5867,7 @@ export interface paths {
         get: {
             parameters: {
                 query?: {
-                    /** @description Organization used to enqueue the job; retain it for polling, refresh, and resume. */
+                    /** @description Organization used to enqueue the job; when supplied it must match the authenticated session organization. Retain it for polling, refresh, and resume. */
                     orgId?: string;
                 };
                 header?: never;

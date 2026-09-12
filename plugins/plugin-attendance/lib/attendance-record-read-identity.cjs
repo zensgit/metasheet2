@@ -1,4 +1,4 @@
-// Only the records/calendar reader uses this boundary. JWT middleware sets
+// Records, calendar and import job/batch readers share this boundary. JWT middleware sets
 // authenticatedTenantId before its legacy header fallback into user.tenantId.
 function resolveAttendanceRecordReadIdentity(req, res) {
   const actorId = req.user?.id
