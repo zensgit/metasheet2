@@ -29,12 +29,15 @@ The five import job/batch GET handlers now use the existing authenticated record
 - OpenAPI job GET documents optional matching `orgId`; regenerated dist and SDK agree. Existing endpoint URLs, role permissions, schemas, migrations and flags are unchanged.
 - Five existing plugin readers (job, batch list/detail/items/export) share `resolveAttendanceRecordReadIdentity`; the existing records/calendar logic is not altered. This supersedes the earlier incorrect claim that role permission alone established organization authorization.
 - A new backend unit suite invokes the real registered plugin handlers with deterministic query doubles. Permission bypass isolates the tenant boundary; same-org positives and mismatched/missing identity negatives verify the selected SQL scope or no import SQL. It is not a real-PostgreSQL result.
+- Five existing real-PostgreSQL positive fixtures that cross the corrected GET readers now mint their test JWT with the fixture's known organization. The production resolver remains fail-closed; pure-write fixtures were deliberately left unchanged. This is test identity repair, not a permission bypass or product fallback.
 - `attendance-smoke-api.mjs`, `attendance-import-perf.mjs` and the production-flow verifier retain organization scope. The small shared `attendance-import-scope.mjs` validates the `/auth/me` envelope using the backend's authenticated organization precedence.
 - The existing strict contract suite exercises both polling functions, session refusal and its positive control, batch URL expressions, and request-panel navigation. These are local function/contract tests, not remote browser acceptance.
 
 ## Review correction
 
 Independent review caught an initial incorrect rollback assumption: adding `orgId` to its body cannot affect the session-scoped backend. That patch was removed and replaced by the session precheck above. The first new negative tests also used an unsupported local Vitest matcher; the assertions were split. A second review required suppressing the API wrapper's automatic unauthorized redirect so the neutral refusal remains on-page.
+
+Fresh CI on `c9eddbd032f60ee3a54c8ea1097b6ea7ae3f8262` exposed five older positive fixtures whose dev tokens omitted `tenantId`. The corrected readers therefore refused them with 403 before their intended 404/200 assertions. Commit `0c18c87a5cc6523f43b5c1fc1b7731c09fba548d` adds the already-known fixture organization to exactly those token sources. It does not weaken the authenticated-tenant boundary.
 
 ## Delivery boundaries
 
