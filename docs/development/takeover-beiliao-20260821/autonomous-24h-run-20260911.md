@@ -98,6 +98,10 @@
 
 **停摆二**:09-12 12:0x–13:00 本地再次 429(session limit,resets 10pm PT),F9c impl 与 F1c-b fix r3 被打死;13:00 重派。用户决定换 Anthropic 账号继续(`claude stop` → 换号 → `--resume`),交接点写在 STATE.md。
 
+**r34(`53ba81936` = r33 + #5668 bell + #5670 F1c-b,09-12 14:20 上 222)**:备份 `pre-r34-20260912-142024.dump`;gate WIRED → attempt 3 → 200;exit 0;smoke PASS;#5670 标记 True;错误 0 行。演示项目 dry-run 形状如预期(update 579 / skip 2 / manual_confirm 0)。
+
+**发现 P1(222 实证)——有存量行的项目 apply 恒 409 `TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH`**:连续 4 次 dry-run 计数一致、响应 1490 个叶子键全同,只有 `revision` 在 4 个哈希之间轮换 ⇒ `buildRevision`(`stock-preparation-table-actions.cjs:1093`)把 `expansion.rows` / `rowErrors` / `existingRows` 按**原数组顺序**喂进 `stableStringify`(只排对象键不排数组),apply 重展开/重读后顺序一变就 409;改前 0 存量行时 add-only apply 曾 200,所以此前没暴露。**影响**:测试员对任何已拉过的项目再次拉取都会在 apply 撞 409——这是日常复拉的主路径。→ **X4**(规格 `spec-X4-dryrun-revision-canonical-order.md`:哈希前按行身份(idempotencyKey / 记录 id)排序副本,不动数组本身;R-a…R-d 用例、M1–M3 变异)在跑;合入即 r35,两个包列的存量回填等 r35 后再 apply。
+
 **F9b(新派,opus + 两路反驳)**:规则侧 `send_notification` 落库到通知中心——根因是全仓没有 `automation.notification` 的监听者,按钮路径已持久化而规则路径 eventBus-only;复用同一 seam `insertRecordSubscriptionNotifications`,成员校验与按钮同量,先写后 emit,模拟不写,表缺失不吞,规则侧不借用按钮的 dedup 表(重复投递语义如实写)。规格 `spec-F9b-rule-notification-persist.md`。
 
 ~~**r31 已备好未 build**~~(已上机,见上):wrapper 加 #5651(`EXTERNAL_SYSTEM_SCOPE_MISMATCH` 字面量计数 ≥ 4)/#5654(upgrade-inplace 含 `MaintenanceFlagPath` + `Assert-MaintenanceFlagOutsideReplaceDirs`;事后 flag 不存在)标记,纯 ASCII、0 控制字符;ship 改为上传 `origin/main` 的 `multitable-onprem-package-upgrade-inplace.ps1`(加 BOM;1382 个非 ASCII 字节)替代 tools-r22 旧本;两份脚本本机 Windows PowerShell 5.1 `Parser::ParseFile` 0 错。基线等 F1c/F8A 裁决后定(合入则 main + 两支,否则 `72caae8de`);夜里上机,**不举 flag**(脚本自己举)。
