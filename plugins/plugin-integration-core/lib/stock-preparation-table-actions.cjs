@@ -1090,6 +1090,82 @@ function rowErrorTruncationRevisionKeys(expansion = {}) {
   }
 }
 
+// ── X4: CANONICAL ORDER FOR THE HASHED ARRAYS (222/r34) ───────────────────────────────────────
+//
+// THE FIELD FACT. A project carrying 581 existing rows answered four consecutive READ-ONLY
+// dry-runs with identical counts (update 579 / skip 2) and 1490 byte-identical leaf keys — and
+// four DIFFERENT `revision` values that then started repeating. A finite set being permuted, not a
+// clock: nothing in the hash is time-derived. `--apply` 409'd
+// TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH every single time on a batch nobody had touched.
+//
+// THE CAUSE. `stableStringify` sorts object KEYS and leaves ARRAY ORDER alone, by design — array
+// order is data. But `expansion.rows` comes off an MSSQL read plus a tree walk (siblings sharing a
+// sort number have no total order) and `existingRows` comes off a paged records read, so the two
+// arrays are the SAME SET in an incidental order. Apply re-expands and re-reads before comparing
+// its recomputed revision to the token (see applyStockPreparationAction), so one reshuffle between
+// the two reads is indistinguishable from "the data moved under review".
+//
+// THE FIX, AND ITS TWO BOUNDS.
+//  1. HASH-LOCAL. The sort happens on a COPY that only `hashJson` ever sees. `computeDryRun`
+//     hands `expansion` and `existingRows` back BY REFERENCE and callers keep reading them
+//     AFTER the revision exists: `prepareStockPreparationMvpSnapshot` returns `expansion.rows`
+//     verbatim as `expansionResult` — the snapshot LINE ORDER — and the large-BOM
+//     `boundedPreview` slices the same array. Stated precisely, because the overclaim is easy:
+//     THIS module's own apply path would survive an in-place sort, since it plans before it
+//     hashes. That is an accident of ordering, not a guarantee, so the copy is asserted head-on
+//     in the table-action tests ('buildRevision hashes a COPY') instead of being relied upon.
+//  2. ORDER-ONLY. Every row still enters the hash whole. "One field of one row changed => the
+//     revision changes" is the pre-existing promise this must not weaken, so nothing is projected
+//     away, deduped or rounded here — the same multiset is hashed in a canonical order.
+//
+// THE KEY IS ROW IDENTITY (idempotencyKey / record id), never a refresh-time column: identity is
+// the part that survives a re-read unchanged. Refresh stamps DO stay in the hash as CONTENT — they
+// just must not decide the order, or a re-stamped batch would reshuffle itself.
+//
+// WHY THE CONTENT TIEBREAKER IS NOT OPTIONAL: duplicate idempotencyKeys are a real, planned-for
+// shape here (duplicate_expanded_key / resolveDuplicateExpandedRows). Sorting on identity alone
+// would leave those rows tied, and a tied sort keeps INPUT order — precisely the nondeterminism
+// being removed. So identity orders the rows and `stableStringify` breaks the ties; rows that tie
+// on BOTH are equal values, and swapping equal values cannot move a hash.
+function rowHashIdentityToken(value) {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+// Stock-preparation row identity, in the order the row itself declares it: the expander's
+// idempotencyKey (projectNo + component + parent + path) first, its `path` when a row predates or
+// fails that key, and — via the caller's tiebreaker — the row's own content when it has neither.
+function expandedRowHashIdentity(row) {
+  if (!isPlainObject(row)) return ''
+  return rowHashIdentityToken(row.idempotencyKey) || rowHashIdentityToken(row.path)
+}
+
+// Existing target rows are addressed by RECORD id when the records API surfaced one (that is the
+// id the writer patches), and by idempotencyKey otherwise — `unmapRecordFields` projects a record
+// down to its `data`, so whether `id` is present is a property of the host's row shape, not of the
+// batch. Both are stable across a re-read; the row's 最近刷新时间 / RunID columns are not, which is
+// exactly why neither is consulted here.
+function existingRowHashIdentity(row) {
+  if (!isPlainObject(row)) return ''
+  return rowHashIdentityToken(row.id) || rowHashIdentityToken(row.idempotencyKey)
+}
+
+// A COPY of `value` in canonical order, or `value` untouched when it is not an array (an absent
+// `rows`/`rowErrors` must keep hashing exactly as it did — stableStringify emits `undefined` for
+// it, and turning that into `[]` would move every legacy revision).
+function canonicalHashOrder(value, identityOf) {
+  if (!Array.isArray(value)) return value
+  return value
+    .map((item) => ({ item, identity: identityOf(item), content: stableStringify(item) }))
+    .sort((left, right) => {
+      if (left.identity !== right.identity) return left.identity < right.identity ? -1 : 1
+      if (left.content !== right.content) return left.content < right.content ? -1 : 1
+      return 0
+    })
+    .map((entry) => entry.item)
+}
+
 function buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan }) {
   return hashJson({
     actionId: action.actionId,
@@ -1102,9 +1178,15 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
     target: action.target,
     expansion: {
       status: expansion.status,
-      rows: expansion.rows,
+      // X4: hashed in canonical row-identity order (see canonicalHashOrder). `errors` is
+      // deliberately NOT sorted — not because its order is proven stable, but because a batch
+      // that carries a GLOBAL error has `canApply: !hasGlobalErrors && ...` false and is refused
+      // by TABLE_ACTION_DRY_RUN_NOT_APPLYABLE whatever its token says, so an unstable order
+      // there cannot produce the failure X4 exists to remove (a 409 on an applyable batch).
+      rows: canonicalHashOrder(expansion.rows, expandedRowHashIdentity),
       errors: expansion.errors,
-      rowErrors: expansion.rowErrors,
+      // The bounded sample has no row identity to sort on, so its canonical order is its content.
+      rowErrors: canonicalHashOrder(expansion.rowErrors, () => ''),
       // D-C. `rowErrors` is now a BOUNDED SAMPLE, so hashing it alone stopped being enough: two
       // projects that overflow the cap with the same first 5000 entries and different totals would
       // hash identically, and one project's dry-run token would then validate against the other's
@@ -1115,7 +1197,7 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
       // hash is byte-identical to the pre-cap one.
       ...rowErrorTruncationRevisionKeys(expansion),
     },
-    existingRows,
+    existingRows: canonicalHashOrder(existingRows, existingRowHashIdentity),
     conflictPolicyReview: conflictPolicyReview || null,
     plan: plan
       ? {

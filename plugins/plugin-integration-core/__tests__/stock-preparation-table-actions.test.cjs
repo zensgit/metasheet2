@@ -1334,6 +1334,14 @@ async function main() {
   await testRootSelectionIsReachableFromTheActionConfig()
   await testCollapsedSiblingCountReachesDryRunEvidence()
   await testParentPackColumnsReachTheInteractiveChain()
+  // X4 — canonical order for the hashed arrays (222/r34 revision churn -> apply 409).
+  await testDryRunRevisionIsBlindToExpandedRowOrder()
+  await testDryRunRevisionIsBlindToExistingRowOrder()
+  await testDryRunRevisionStillMovesWhenAnyRowValueMoves()
+  await testApplyAcceptsATokenWhenBothRecomputedReadsCameBackReshuffled()
+  await testDryRunRevisionIsBlindToTheOrderInsideADuplicateKeyGroup()
+  await testDryRunRevisionIsBlindToRowErrorOrder()
+  await testTheCanonicalHashOrderNeverReordersWhatGetsWritten()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
 }
@@ -1938,6 +1946,393 @@ async function testParentPackColumnsReachTheInteractiveChain() {
     undeclared.find((data) => data.componentSourceId === 'PART-B').parentComponentCode,
     'A-001',
     '模板列照旧 —— 这次改动是纯加法',
+  )
+}
+
+// ---------------------------------------------------------------------------------------------
+// X4 (222/r34): the dry-run revision is a function of WHAT the batch contains, never of the order
+// two incidental reads handed it back in.
+//
+// THE FIELD SHAPE THESE CASES REPRODUCE: a project with 581 existing rows answered four consecutive
+// READ-ONLY dry-runs with identical counts (update 579 / skip 2) and 1490 byte-identical leaf keys,
+// and four DIFFERENT revisions that then began repeating — a permutation of a finite set, not a
+// clock. Apply re-expands and re-reads before comparing, so every `--apply` 409'd
+// TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH on a batch nobody had touched.
+// ---------------------------------------------------------------------------------------------
+const X4_PLANNED_AT = '2026-06-04T09:00:00.000Z'
+// ONE pull stamps every row it touched with the SAME 最近刷新时间 — which is precisely why a refresh
+// stamp cannot order rows: it does not tell them apart. It rides in as CONTENT (R-c asserts it).
+const X4_EXISTING_REFRESH_STAMP = '2026-09-10T22:10:00.000Z'
+const X4_ROOT_SEEDS = [
+  { componentSourceId: 'PART-A', componentCode: 'A-001', componentName: 'Assembly', material: 'Steel', quantity: '2' },
+  { componentSourceId: 'PART-B', componentCode: 'B-001', componentName: 'Bolt', material: 'Iron', quantity: '3' },
+  { componentSourceId: 'PART-C', componentCode: 'C-001', componentName: 'Cover', material: 'Alu', quantity: '4' },
+]
+
+// Three order roots, so the read order is something the fixture can actually vary.
+function multiRootPlmData(overrides = {}) {
+  return basePlmData({
+    DN_PDM_OrderDetailInfo: X4_ROOT_SEEDS.map((seed) => ({
+      order_id: 'ORDER-1',
+      part_id: seed.componentSourceId,
+      quantity: seed.quantity,
+    })),
+    DN_PDM_PartLibraryInfo: X4_ROOT_SEEDS.map((seed) => ({
+      OBJ_ID: seed.componentSourceId,
+      IdentityNo: seed.componentCode,
+      IdentityName: seed.componentName,
+      Material: seed.material,
+      SysVer: 'V1',
+    })),
+    ...overrides,
+  })
+}
+
+// The SAME batch, handed back in the opposite order — the one thing an MSSQL read with no total
+// order over equal sort numbers is free to do between two calls.
+function reshuffledPlmData(data) {
+  const out = clone(data)
+  for (const key of Object.keys(out)) if (Array.isArray(out[key])) out[key].reverse()
+  return out
+}
+
+function x4ExistingRowData(seed, overrides = {}) {
+  return {
+    projectNo: 'P-001',
+    idempotencyKey: JSON.stringify({
+      projectNo: 'P-001',
+      componentSourceId: seed.componentSourceId,
+      parentSourceId: null,
+      path: [seed.componentSourceId],
+    }),
+    componentSourceId: seed.componentSourceId,
+    parentSourceId: null,
+    path: JSON.stringify([seed.componentSourceId]),
+    depth: 0,
+    componentCode: seed.componentCode,
+    componentName: seed.componentName,
+    material: seed.material,
+    sourceVersion: 'V1',
+    rawQuantity: Number(seed.quantity),
+    totalQuantity: Number(seed.quantity),
+    active: true,
+    lastPlmRefreshAt: X4_EXISTING_REFRESH_STAMP,
+    lastPlmRefreshRunId: 'run-r33',
+    notes: 'operator note ' + seed.componentSourceId,
+    ...overrides,
+  }
+}
+
+// Host row shape #1 — what the multitable records service actually returns: the payload lives under
+// `data`, so `unmapRecordFields` projects the record down to its columns and the record id never
+// reaches the revision. Identity there is the idempotencyKey.
+function x4ExistingRecords(overridesByComponent = {}) {
+  return X4_ROOT_SEEDS.map((seed, index) => ({
+    id: 'rec_' + (index + 1),
+    sheetId: 'sheet_stock',
+    version: 1,
+    data: x4ExistingRowData(seed, overridesByComponent[seed.componentSourceId] || {}),
+  }))
+}
+
+// Host row shape #2 — a records API that answers with FLAT rows. `unmapRecordFields` passes those
+// through whole, so `id` IS part of the hashed row here, and it is the identity the canonical order
+// uses. Both shapes have to be order-blind; only this one exercises the id branch.
+function createFlatRecordsApi(rows) {
+  return {
+    async queryRecords(input = {}) {
+      return rows
+        .filter((row) => Object.entries(input.filters || {}).every(([field, value]) => row[field] === value))
+        .map(clone)
+    },
+    async createRecord() {
+      throw new Error('X4 read-only fixture: createRecord must not be reached')
+    },
+    async patchRecord() {
+      throw new Error('X4 read-only fixture: patchRecord must not be reached')
+    },
+  }
+}
+
+async function x4DryRun({ plmData = multiRootPlmData(), recordsApi, action = baseAction() } = {}) {
+  return dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(plmData).adapter,
+    recordsApi,
+    tokenStore: createMemoryStorage(),
+    plannedAt: X4_PLANNED_AT,
+  })
+}
+
+// R-a. Same expanded batch, two source orders => one revision.
+async function testDryRunRevisionIsBlindToExpandedRowOrder() {
+  const forward = await x4DryRun({ recordsApi: createRecordsApi().recordsApi })
+  const reshuffled = await x4DryRun({
+    plmData: reshuffledPlmData(multiRootPlmData()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+
+  assert.equal(forward.status, 'ready')
+  assert.equal(forward.counts.add, 3, 'three order roots expand to three rows')
+  assert.deepEqual(reshuffled.counts, forward.counts, 'a reshuffled read plans the same batch')
+  assert.equal(
+    reshuffled.revision,
+    forward.revision,
+    'the same expanded batch in two source orders hashes to ONE revision',
+  )
+
+  // …and the permutation is REAL rather than a fixture that never varied, stated through the same
+  // hasher: the two orders hashed AS THEY ARRIVE (what buildRevision used to do) are two digests.
+  const asRead = X4_ROOT_SEEDS.map((seed) => x4ExistingRowData(seed))
+  assert.notEqual(
+    tableActionInternals.hashJson(asRead),
+    tableActionInternals.hashJson(asRead.slice().reverse()),
+    'hashing an array as-read is order-sensitive — that is the bug this test would miss otherwise',
+  )
+}
+
+// R-b. Same existing rows, two records-read orders => one revision. Both host row shapes.
+async function testDryRunRevisionIsBlindToExistingRowOrder() {
+  const forwardRecords = createRecordsApi({ existing: x4ExistingRecords() })
+  const reshuffledRecords = createRecordsApi({ existing: x4ExistingRecords().reverse() })
+  assert.notDeepEqual(
+    forwardRecords.rows.map((record) => record.id),
+    reshuffledRecords.rows.map((record) => record.id),
+    'the fixture really does hand the existing rows back in two different orders',
+  )
+
+  const forward = await x4DryRun({ recordsApi: forwardRecords.recordsApi })
+  const reshuffled = await x4DryRun({ recordsApi: reshuffledRecords.recordsApi })
+  assert.equal(forward.status, 'ready')
+  assert.deepEqual(reshuffled.counts, forward.counts, 'a reshuffled existing-row read plans the same batch')
+  assert.equal(
+    reshuffled.revision,
+    forward.revision,
+    'existing rows returned in two page orders hash to ONE revision',
+  )
+
+  // The flat-row host: `id` is part of the row here and is the identity the order is built on.
+  const flatRows = X4_ROOT_SEEDS.map((seed, index) => ({ id: 'rec_' + (index + 1), ...x4ExistingRowData(seed) }))
+  const flatForward = await x4DryRun({ recordsApi: createFlatRecordsApi(flatRows) })
+  const flatReshuffled = await x4DryRun({ recordsApi: createFlatRecordsApi(flatRows.slice().reverse()) })
+  assert.equal(flatForward.status, 'ready')
+  assert.equal(
+    flatReshuffled.revision,
+    flatForward.revision,
+    'a host that answers with flat rows is order-blind too (record id is the identity there)',
+  )
+}
+
+// R-c. The pre-existing promise, unweakened: any row value that moves moves the revision. Order was
+// removed from the hash; CONTENT was not reduced, deduped or rounded away.
+async function testDryRunRevisionStillMovesWhenAnyRowValueMoves() {
+  const baseline = await x4DryRun({ recordsApi: createRecordsApi({ existing: x4ExistingRecords() }).recordsApi })
+
+  // (1) one EXPANDED row's value changes (PLM quantity 4 -> 9 on PART-C).
+  const shiftedSource = multiRootPlmData()
+  shiftedSource.DN_PDM_OrderDetailInfo = shiftedSource.DN_PDM_OrderDetailInfo.map((detail) => (
+    detail.part_id === 'PART-C' ? { ...detail, quantity: '9' } : detail
+  ))
+  const expandedShift = await x4DryRun({
+    plmData: shiftedSource,
+    recordsApi: createRecordsApi({ existing: x4ExistingRecords() }).recordsApi,
+  })
+  assert.notEqual(expandedShift.revision, baseline.revision, 'one expanded row value moves the revision')
+
+  // (2) one EXISTING row's value changes — and deliberately a column the PLAN cannot see: the run
+  // band (最近刷新时间) is excluded from the refresh comparison, so the counts are identical and the
+  // ONLY thing that could move the revision is the row content itself.
+  const stampShift = await x4DryRun({
+    recordsApi: createRecordsApi({
+      existing: x4ExistingRecords({ 'PART-B': { lastPlmRefreshAt: '2026-09-11T01:02:03.000Z' } }),
+    }).recordsApi,
+  })
+  assert.deepEqual(stampShift.counts, baseline.counts, 'the run band does not change what will be written')
+  assert.notEqual(stampShift.revision, baseline.revision, 'one existing row value moves the revision anyway')
+
+  // (3) same, on a HUMAN column the refresh never writes.
+  const noteShift = await x4DryRun({
+    recordsApi: createRecordsApi({
+      existing: x4ExistingRecords({ 'PART-A': { notes: 'operator changed the note' } }),
+    }).recordsApi,
+  })
+  assert.deepEqual(noteShift.counts, baseline.counts)
+  assert.notEqual(noteShift.revision, baseline.revision, 'a human column edit moves the revision too')
+}
+
+// R-d. End to end, the 222 failure itself: dry-run on order A, apply re-expands and re-reads in
+// order B. Before X4 this was a 409 on a batch nobody touched.
+async function testApplyAcceptsATokenWhenBothRecomputedReadsCameBackReshuffled() {
+  const storage = createMemoryStorage()
+  const records = createRecordsApi({ existing: x4ExistingRecords() })
+  const action = baseAction()
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(multiRootPlmData()).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.canApply, true)
+
+  // BOTH reads come back in the other order for the apply-side recompute. Same rows, same store —
+  // only the order of the array the reads produce.
+  records.rows.reverse()
+  const result = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(reshuffledPlmData(multiRootPlmData())).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'write',
+  })
+
+  assert.equal(result.status, 'succeeded', 'a reshuffled recompute applies instead of 409ing')
+  assert.equal(Number(result.apply.counts.failed || 0), 0, 'and nothing failed on the way in')
+  assert.equal(
+    JSON.stringify(result.evidence).includes('P-001'),
+    false,
+    'apply evidence stays values-free',
+  )
+}
+
+// R-e. The tie-breaker, made load-bearing. Two expanded rows can legitimately share ONE
+// idempotencyKey — duplicate_expanded_key is a planned-for shape here, not a corruption — and
+// identity alone leaves them TIED. A tied sort keeps INPUT order, i.e. exactly the nondeterminism
+// X4 removes, so the canonical order breaks ties on the row's own content.
+//
+// SCOPE, stated: one duplicate GROUP. With several groups the planner's own diagnostics arrays
+// (duplicateExpandedKeyResolution.heldPolicies / conflictPolicyReview) are themselves built in
+// expansion order, and those are outside buildRevision's three arrays and outside this change.
+async function testDryRunRevisionIsBlindToTheOrderInsideADuplicateKeyGroup() {
+  const forward = await x4DryRun({
+    plmData: duplicateRootPlmData(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  const reshuffled = await x4DryRun({
+    plmData: reshuffledPlmData(duplicateRootPlmData()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+
+  assert.equal(forward.status, 'manual_confirm_required', 'two order lines on one part are HELD, not written')
+  assert.deepEqual(reshuffled.counts, forward.counts, 'the hold is the same hold in either order')
+  assert.equal(
+    reshuffled.revision,
+    forward.revision,
+    'two rows sharing one idempotencyKey hash to ONE revision whichever came back first',
+  )
+}
+
+// R-f. The third hashed array. `rowErrors` is a BOUNDED SAMPLE taken in production order, so two
+// reads of the same broken batch can retain the same entries in a different order. It carries no
+// row identity at all (the entries are values-free {type, field, depth, relation} stanzas), so its
+// canonical order is its content — and the two entries below are DIFFERENT stanzas, which is what
+// makes the ordering observable rather than a no-op on identical objects.
+async function testDryRunRevisionIsBlindToRowErrorOrder() {
+  const brokenBatch = () => basePlmData({
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2' },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: 'not-a-number' },
+      { order_id: 'ORDER-1', part_id: 'PART-MISSING', quantity: '1' },
+    ],
+  })
+
+  const forward = await x4DryRun({ plmData: brokenBatch(), recordsApi: createRecordsApi().recordsApi })
+  const reshuffled = await x4DryRun({
+    plmData: reshuffledPlmData(brokenBatch()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+
+  assert.equal(forward.status, 'manual_confirm_required')
+  assert.equal(forward.counts.manual_confirm, 2, 'two DIFFERENT row errors — a bad quantity and a missing part')
+  assert.deepEqual(reshuffled.counts, forward.counts)
+  assert.equal(
+    reshuffled.revision,
+    forward.revision,
+    'the same retained row-error sample in two orders hashes to ONE revision',
+  )
+}
+
+// R-g. The other half of the bound: the canonical order is for the HASH ONLY. `computeDryRun`
+// hands `expansion` and `existingRows` back BY REFERENCE, and the row order the planner sees is the
+// order the apply writer creates rows in — i.e. the order the operator will read the 备料表 in. A
+// sort that leaked out of the hash would silently re-order the customer's sheet.
+//
+// The fixture is chosen so the two orders CANNOT be confused: the source hands the batch back
+// C, B, A, while the canonical (idempotencyKey) order is A, B, C.
+async function testTheCanonicalHashOrderNeverReordersWhatGetsWritten() {
+  const storage = createMemoryStorage()
+  const records = createRecordsApi()
+  const action = baseAction()
+  const plmData = reshuffledPlmData(multiRootPlmData())
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(plmData).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.counts.add, 3)
+
+  const result = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(plmData).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'write',
+  })
+  assert.equal(result.status, 'succeeded')
+
+  const written = records.calls
+    .filter((call) => call[0] === 'createRecord')
+    .map((call) => call[1].data.componentSourceId)
+  assert.deepEqual(
+    written,
+    ['PART-C', 'PART-B', 'PART-A'],
+    'rows are written in SOURCE order — the hash sort never reaches the writer',
+  )
+
+  // …and the copy stated DIRECTLY on the seam that sorts, because the end-to-end half above
+  // cannot prove it: this module plans BEFORE it hashes, so an in-place sort would not move
+  // ITS writes. The consumer that would move is the one reading `expansion.rows` AFTER the
+  // revision exists — `prepareStockPreparationMvpSnapshot` returns that very array as
+  // `expansionResult`, i.e. the snapshot line order, and the large-BOM boundedPreview slices it.
+  const hashedRows = ['PART-C', 'PART-B', 'PART-A'].map((componentSourceId) => x4ExistingRowData({
+    componentSourceId,
+    componentCode: componentSourceId + '-CODE',
+    componentName: componentSourceId + ' name',
+    material: 'Steel',
+    quantity: '2',
+  }))
+  const hashedExisting = hashedRows.slice().reverse()
+  const beforeHashing = clone({ rows: hashedRows, existingRows: hashedExisting })
+  tableActionInternals.buildRevision({
+    action: ROW_ERROR_REVISION_ACTION,
+    parameters: { projectNo: 'P-001' },
+    expansion: { status: 'ready', rows: hashedRows, errors: [], rowErrors: [] },
+    existingRows: hashedExisting,
+    conflictPolicyReview: null,
+    plan: null,
+  })
+  assert.deepEqual(
+    { rows: hashedRows, existingRows: hashedExisting },
+    beforeHashing,
+    'buildRevision hashes a COPY — the arrays it was handed keep their production order',
   )
 }
 
