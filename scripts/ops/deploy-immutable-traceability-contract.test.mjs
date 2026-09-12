@@ -17,20 +17,30 @@ function assertContains(haystack, needle, label) {
   )
 }
 
-test('backend media dependencies bootstrap CA before HTTPS with bounded retries', () => {
+test('backend media dependencies use HTTPS bootstrap then system trust with bounded retries', () => {
   const raw = readRepoFile('Dockerfile.backend')
   const runner = raw.split('FROM node:20-slim AS runner')[1]
   assert.ok(runner)
   const ca = runner.indexOf('install -y --no-install-recommends ca-certificates')
   const https = runner.indexOf("sed -i 's|http://deb.debian.org|https://deb.debian.org|g'")
   const media = runner.indexOf('install -y --no-install-recommends ffmpeg')
-  assert.ok(ca >= 0 && https > ca && media > https)
+  const bootstrap = runner.indexOf('require("tls").rootCertificates')
+  const cleanup = runner.indexOf('rm /tmp/elearning-apt-bootstrap-ca.pem')
+  assert.ok(bootstrap >= 0 && https > bootstrap && ca > https && cleanup > ca && media > cleanup)
   const aptCommands = runner.match(/apt-get[^\n]+/g)
   assert.equal(aptCommands?.length, 4)
-  for (const command of aptCommands) {
+  for (const [index, command] of aptCommands.entries()) {
     assert.match(command, /-o Acquire::Retries=3/)
-    assert.match(command, /-o Acquire::(?:http|https)::Timeout=30/)
+    assert.match(command, /-o Acquire::https::Timeout=30/)
+    if (index < 2) {
+      assert.match(command, /-o Acquire::https::CaInfo=\/tmp\/elearning-apt-bootstrap-ca.pem/)
+    } else {
+      assert.doesNotMatch(command, /CaInfo/)
+    }
+    if (/\bupdate\b/.test(command)) assert.match(command, /-o APT::Update::Error-Mode=any/)
   }
+  assert.match(runner, /test -s \/etc\/ssl\/certs\/ca-certificates.crt/)
+  assert.doesNotMatch(runner, /^(?:ENV|ARG).*NODE_(?:EXTRA_CA_CERTS|TLS_REJECT_UNAUTHORIZED)/m)
   assert.ok(runner.indexOf('command -v ffprobe') > media)
   assert.doesNotMatch(runner, /--allow-unauthenticated|trusted=yes|Verify-Peer=false|Verify-Host=false|\|\|\s*true/)
 })
