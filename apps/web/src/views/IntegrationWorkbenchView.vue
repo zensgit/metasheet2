@@ -2,7 +2,7 @@
   <PageShell width="wide">
     <section class="integration-workbench">
       <p class="integration-workbench__eyebrow">Data Factory</p>
-      <PageHeader title="数据工厂" subtitle="连接任意 CRM / PLM / ERP / SRM / HTTP / SQL 系统，把数据落到多维表清洗后，先 dry-run，再导出或 Save-only 推送。">
+      <PageHeader title="数据工厂" subtitle="连接任意 CRM / PLM / ERP / SRM / HTTP / SQL 系统，把数据落到多维表清洗。先 dry-run，再导出或写入多维表。K3 目标永久只读、不写回；通用 HTTP 外发默认关闭。">
         <template #actions>
           <div class="integration-workbench__header-links">
             <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设模板</router-link>
@@ -220,7 +220,7 @@
           <div class="integration-workbench__panel-head">
             <div>
               <h2>运行与推送</h2>
-          <p>先保存清洗流程，再做 dry-run；确认无误后才 Save-only 推送到目标系统。默认不会 Submit / Audit。</p>
+          <p>先保存清洗流程，再做 dry-run；确认无误后导出或写入多维表。K3 目标永久只读、不提供 Save-only 写回；其余目标推送默认不会 Submit / Audit。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="save-pipeline" :disabled="savingPipeline || !canSavePipeline" @click="savePipeline">
           {{ savingPipeline ? '保存中' : '保存清洗流程' }}
@@ -243,6 +243,7 @@
         :running-pipeline="runningPipeline"
         :can-run-pipeline="canRunPipeline"
         :dry-run-empty-preview-notice="dryRunEmptyPreviewNotice"
+        :target-write-fenced="targetWriteFenced"
         :use-generated-pipeline-name="useGeneratedPipelineName"
         :execute-pipeline="executePipeline"
         v-model:pipeline-name="pipelineName"
@@ -439,7 +440,8 @@ import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
 import PageShell from '../components/layout/PageShell.vue'
 import PageHeader from '../components/layout/PageHeader.vue'
-import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../services/integration/errorCodeLabels'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint, integrationErrorCodeMessageOr } from '../services/integration/errorCodeLabels'
+import { isK3ExternalWriteTargetKind } from '../services/integration/writeFence'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { getDataSourceSchema, listDataSources } from '../data-sources/api'
 import type { DataSourceListItem, DataSourceSchemaInfo, DataSourceTableInfo } from '../data-sources/types'
@@ -644,7 +646,7 @@ const flowSteps = [
   { title: '1. 连接系统', description: '接入 CRM / PLM / ERP / SRM / HTTP / SQL' },
   { title: '2. 选择数据集', description: '选择来源对象、清洗表和目标模板' },
   { title: '3. 多维表清洗', description: '业务人员在表格里修正、审核、补字段' },
-  { title: '4. Dry-run / 推送', description: '预览 payload 后导出或 Save-only 写回' },
+  { title: '4. Dry-run / 交付', description: '预览 payload 后导出，或写入多维表；K3 目标只读不写回' },
 ]
 const auth = useAuth()
 const { locale } = useLocale()
@@ -1171,22 +1173,31 @@ const targetConnectionStatus = computed(() => selectedTargetSystem.value?.status
 const sourceConnectionLabel = computed(() => connectionStatusLabel(selectedSourceSystem.value))
 const targetConnectionLabel = computed(() => connectionStatusLabel(selectedTargetSystem.value))
 const sourceRuntimeBlocker = computed(() => runtimeBlockerForSystem(selectedSourceSystem.value))
+// G10: is the target this run would push to inside the permanent K3 external-write fence?
+//
+// Read off the SELECTED target system's kind — the same fact the server fence checks — so the answer
+// tracks the dropdown rather than a saved pipeline the operator may not be looking at. No target
+// selected => false => the pre-G10 rendering, unchanged. This never gates a REQUEST (the runtime fence
+// does that, at four layers); it only stops the UI offering a push that is refused by design.
+const targetWriteFenced = computed(() => isK3ExternalWriteTargetKind(selectedTargetSystem.value?.kind))
 const k3WebApiReadGateNotice = computed(() => {
   const targetOnlyK3WebApi = visibleSystems.value.some((system) => system.kind === 'erp:k3-wise-webapi' && canWriteToSystem(system) && !canReadFromSystem(system))
   if (!targetOnlyK3WebApi) return ''
-  return '当前 K3 WISE WebAPI 仅作为目标写入连接；来源侧请使用 staging 多维表、SQL 只读通道或其他可读连接。K3 WebAPI read/list runtime 仍等待客户 GATE 样例。'
+  return '当前 K3 WISE WebAPI 连接只登记在目标侧，但 K3 目标永久只读、不写回（只读·永不写入）；来源侧请使用 staging 多维表、SQL 只读通道或其他可读连接。K3 WebAPI read/list runtime 仍等待客户 GATE 样例。'
 })
 const sourceSelectorExplanation = computed(() => {
   if (k3WebApiReadGateNotice.value) {
-    return '这里显示已保存且具备读取能力的连接，不是全部 adapter。当前 K3 WISE WebAPI 仅作为目标写入连接；读取 K3 可用 SQL 只读通道、staging 多维表或其他可读连接。'
+    return '这里显示已保存且具备读取能力的连接，不是全部 adapter。K3 目标永久只读、不写回（只读·永不写入）；读取 K3 可用 SQL 只读通道、staging 多维表或其他可读连接。'
   }
   return '这里显示已保存且具备读取能力的连接，不是全部 adapter。若只看到目标系统，请先创建 staging 来源或启用可读连接。'
 })
 const targetSelectorExplanation = computed(() => {
-  if (targetSystems.value.length === 1 && targetSystems.value[0]?.kind === 'erp:k3-wise-webapi') {
-    return '当前只有 K3 WISE WebAPI 目标连接可写入。创建清洗表后，也可把 MetaSheet 多维表设为目标输出；真实推送仍按 Save-only 显式确认。'
+  // G10: the fence predicate, not a WebAPI-kind literal — the sqlserver sibling is banned too, and this
+  // branch used to tell an operator that the one target they had was writable.
+  if (targetSystems.value.length === 1 && isK3ExternalWriteTargetKind(targetSystems.value[0]?.kind)) {
+    return '当前只登记了 K3 目标连接，而 K3 目标永久只读、不写回（只读·永不写入）。请创建清洗表后把 MetaSheet 多维表设为目标输出，或 dry-run 后导出清洗结果。'
   }
-  return '这里显示已保存且具备写入能力的连接。Save-only 推送仍需显式勾选，不会自动 Submit / Audit。'
+  return '这里显示已保存且具备写入能力的连接。K3 目标永久只读、不提供 Save-only 写回；其余目标的 Save-only 推送仍需显式勾选，不会自动 Submit / Audit。'
 })
 const selectedApprovalAutomationFeature = computed<PlmIntegrationCapabilityFeature | null>(() => {
   const result = selectedSourcePlmCapabilities.value
@@ -3495,7 +3506,9 @@ async function replayDeadLetter(deadLetter: IntegrationDeadLetter): Promise<void
       setStatus(`Replay 成功：dead letter ${deadLetter.id} 已重放${warning}`, 'success')
     }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    // Replay against a K3 target is refused with K3_WISE_REPLAY_DISABLED — a PipelineRunnerError, so the
+    // code rides in details.code and only reaches here because parseIntegrationResponse now reads it.
+    setStatus(integrationFailureMessage(error), 'error')
   } finally {
     replayingDeadLetterId.value = ''
     confirmReplayDeadLetterId.value = ''
@@ -3516,6 +3529,25 @@ async function savePipeline(): Promise<void> {
   } finally {
     savingPipeline.value = false
   }
+}
+
+// G10: render a REGISTERED error code as its humanized label (+ hint) instead of the backend's English
+// prose.
+//
+// The three write-fence refusals are the reason this exists: they arrive as
+// "K3 external write-back is permanently disabled; no flag, policy or approval can enable it", which is
+// accurate, English, and reads to an operator like an outage they should escalate. The label says the
+// same thing in the product's own voice and names the remedy.
+//
+// Exact-key lookup only (integrationErrorCodeMessageOr -> integrationErrorCodeLabel own-key access), so
+// an UNREGISTERED code falls through to the pre-existing message text rather than to a guessed label —
+// narrowing what is shown, never inventing it. The K3 preset page calls the same shared helper.
+function integrationFailureMessage(error: unknown): string {
+  return integrationErrorCodeMessageOr(
+    integrationApiErrorCode(error),
+    error instanceof Error ? error.message : String(error),
+    locale.value,
+  )
 }
 
 async function executePipeline(dryRun: boolean): Promise<void> {
@@ -3553,7 +3585,7 @@ async function executePipeline(dryRun: boolean): Promise<void> {
       : 'Dry-run 已提交'
     setStatus(dryRun ? dryRunStatus : 'Save-only 推送已提交', 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(integrationFailureMessage(error), 'error')
   } finally {
     runningPipeline.value = ''
   }
@@ -3609,7 +3641,7 @@ async function dryRunExternalWrite(): Promise<void> {
     }, null, 2)
     setStatus(result.canApply === true ? '外部写 dry-run 完成，可复核后 apply' : '外部写 dry-run 完成，但 apply 被阻塞', result.canApply === true ? 'success' : 'error')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(integrationFailureMessage(error), 'error')
   } finally {
     runningExternalWrite.value = ''
   }
@@ -3678,7 +3710,7 @@ async function applyExternalWrite(): Promise<void> {
     await refreshPipelineObservation(true)
     setStatus(`外部写 apply 完成：${result.status || 'unknown'}`, result.status === 'failed' ? 'error' : 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(integrationFailureMessage(error), 'error')
   } finally {
     runningExternalWrite.value = ''
   }
