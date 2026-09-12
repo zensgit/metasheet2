@@ -28,8 +28,16 @@ ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=8900
 # E-learning M1: ffprobe/ffmpeg are a deployment dependency (server-side duration/codec probe).
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg \
+# Node's bundled roots are only the bootstrap trust, not the Debian system roots.
+# Keep Debian signature checks; remove bootstrap trust after installing system CA.
+RUN node -e 'require("fs").writeFileSync("/tmp/elearning-apt-bootstrap-ca.pem", require("tls").rootCertificates.join("\n") + "\n")' \
+  && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+  && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 -o Acquire::https::Timeout=30 -o Acquire::https::CaInfo=/tmp/elearning-apt-bootstrap-ca.pem update \
+  && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 -o Acquire::https::CaInfo=/tmp/elearning-apt-bootstrap-ca.pem install -y --no-install-recommends ca-certificates \
+  && test -s /etc/ssl/certs/ca-certificates.crt \
+  && rm /tmp/elearning-apt-bootstrap-ca.pem \
+  && apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update \
+  && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends ffmpeg \
   && command -v ffprobe \
   && rm -rf /var/lib/apt/lists/*
 ENV METASHEET_BUILD_COMMIT=${VCS_REF}
