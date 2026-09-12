@@ -1608,4 +1608,53 @@ describe('DingTalk automation link route validation', () => {
     }), ACTOR_ID)
     expect(mockPool.query.mock.calls.some(([sql]) => String(sql).includes('FROM meta_views'))).toBe(false)
   })
+
+  // F9c: the save-time recipient gate throws AutomationRuleValidationError with a NON-default code.
+  // The route already answers `400 { code: err.code, message: err.message }` for this class — these two
+  // specs pin that the new code and the id-bearing Chinese message reach the client UNALTERED (the
+  // editor renders the server message verbatim: useMultitableAutomations.ts:15 → the drawer banner),
+  // so a code added in the service can never silently degrade to a generic 400 or a 500.
+  it('passes a save-time RECIPIENT_NOT_AUTHORIZED refusal through as 400 + code + message (create)', async () => {
+    const automationService = createMockAutomationService()
+    const { app } = await createApp({ automationService })
+    const { AutomationRuleValidationError, automationSaveRecipientNotAuthorizedMessage } = await import('../../src/multitable/automation-service')
+    // The wording comes from the SERVICE's own builder, never a literal copy: a future rewording must
+    // not leave this lane green while the client sees a different string.
+    const message = automationSaveRecipientNotAuthorizedMessage(['u_ghost'])
+    automationService.createRule = vi.fn(async () => {
+      throw new AutomationRuleValidationError(message, 'RECIPIENT_NOT_AUTHORIZED')
+    }) as never
+
+    const res = await request(app)
+      .post(`/api/multitable/sheets/${SHEET_ID}/automations`)
+      .send({
+        name: 'Notify person',
+        triggerType: 'record.created',
+        triggerConfig: {},
+        actionType: 'send_notification',
+        actionConfig: { message: 'ping', userIds: ['u_ghost'] },
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({ code: 'RECIPIENT_NOT_AUTHORIZED', message })
+  })
+
+  it('passes a save-time NO_RECIPIENTS refusal through as 400 + code (update)', async () => {
+    const automationService = createMockAutomationService()
+    const { app } = await createApp({ automationService })
+    const { AutomationRuleValidationError } = await import('../../src/multitable/automation-service')
+    // Same constant the EXECUTOR raises, so save-time and run-time stay one wording by construction.
+    const { AUTOMATION_NO_RECIPIENTS_ERROR } = await import('../../src/multitable/automation-executor')
+    const message = AUTOMATION_NO_RECIPIENTS_ERROR
+    automationService.updateRule = vi.fn(async () => {
+      throw new AutomationRuleValidationError(message, 'NO_RECIPIENTS')
+    }) as never
+
+    const res = await request(app)
+      .patch(`/api/multitable/sheets/${SHEET_ID}/automations/${RULE_ID}`)
+      .send({ name: 'renamed' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toEqual({ code: 'NO_RECIPIENTS', message })
+  })
 })

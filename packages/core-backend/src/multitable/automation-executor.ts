@@ -863,8 +863,13 @@ export const AUTOMATION_NOTIFICATION_ROSTER_UNAVAILABLE_ERROR =
  * shaping (routes/multitable-button.ts:224-228). Applied ONCE and reused by the membership gate, the
  * durable write, the emitted payload AND the dry-run preflight, so all four speak about the SAME list
  * (a duplicate id must never become two notification rows for one person).
+ *
+ * F9c: EXPORTED (was module-private) so the rule SAVE gate (automation-service.ts
+ * `assertNotificationRecipientsAtSave`) shapes recipients with THIS function instead of a second
+ * copy — save-time and run-time must never disagree about what ' u1 ' or a repeated id means.
+ * Nothing on the execution path changed.
  */
-function normalizeNotificationRecipients(userIds: unknown): string[] {
+export function normalizeNotificationRecipients(userIds: unknown): string[] {
   return Array.from(new Set(
     (Array.isArray(userIds) ? userIds : [])
       .filter((entry): entry is string => typeof entry === 'string')
