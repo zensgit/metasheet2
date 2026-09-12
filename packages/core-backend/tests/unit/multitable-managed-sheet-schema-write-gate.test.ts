@@ -32,6 +32,7 @@ import {
 } from '../../src/multitable/managed-sheet-schema-write-guard'
 import { resolveSheetCapabilitiesForAccess, type QueryFn } from '../../src/multitable/permission-service'
 import { usePinnedServer } from '../utils/pinned-server'
+import type { ApiTokenScope } from '../../src/multitable/api-tokens'
 
 const MANAGED_SHEET_ID = 'sheet_mgw_managed'
 const PLAIN_SHEET_ID = 'sheet_mgw_plain'
@@ -73,6 +74,7 @@ const SHEET_IDS = [MANAGED_SHEET_ID, PLAIN_SHEET_ID]
 const FIELD_WRITE_SQL = /^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+meta_fields\b/i
 const RECORD_WRITE_SQL = /^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+meta_records\b/i
 type MockPoolOptions = {
+  tokenScopes?: ApiTokenScope[]
   throwOnRegistry?: boolean
   deleteOnTransaction?: boolean
   collideOnSheetInsert?: boolean
@@ -226,14 +228,26 @@ async function buildApp(
   // (which then tries to reach a live Postgres and the cell fails for the wrong reason).
   vi.resetModules()
   vi.doMock('../../src/rbac/service', () => ({
-    isAdmin: vi.fn().mockResolvedValue(false),
+    isAdmin: vi.fn().mockResolvedValue(actor.roles.includes('admin')),
     userHasPermission: vi.fn().mockResolvedValue(false),
-    listUserPermissions: vi.fn().mockResolvedValue([]),
+    listUserPermissions: vi.fn().mockResolvedValue(actor.perms),
     invalidateUserPerms: vi.fn(),
     getPermCacheStatus: vi.fn(),
   }))
   const { poolManager } = await import('../../src/integration/db/connection-pool')
   const { univerMetaRouter } = await import('../../src/routes/univer-meta')
+  if (options.tokenScopes) {
+    const { ApiTokenService } = await import('../../src/multitable/api-token-service')
+    // Stub only credential lookup: the real auth middleware attaches the creator and scopes,
+    // then the real request-access resolver loads that creator's RBAC through the fixture above.
+    vi.spyOn(ApiTokenService.prototype, 'validateToken').mockResolvedValue({
+      valid: true,
+      token: {
+        id: 'token_mgw', name: 'Synthetic scope test', tokenHash: 'synthetic', tokenPrefix: 'mst_test',
+        scopes: options.tokenScopes, createdBy: actor.id, createdAt: '2026-01-01T00:00:00.000Z', revoked: false,
+      },
+    })
+  }
   const pool = createMockPool(fields, scopedWriterCodes, options)
   vi.spyOn(poolManager, 'get').mockReturnValue(pool as any)
 
@@ -343,6 +357,37 @@ describe('§1 schema routes on a plugin-managed sheet (real router, real permiss
 // ── §2 capability layer ────────────────────────────────────────────────────────
 
 describe('seed writes use the real schema gate, including GET /view aliases', () => {
+  it.each([
+    { label: 'read-only managed table', scopes: ['records:read'], query: { sheetId: MANAGED_SHEET_ID } },
+    { label: 'record-writer view alias', scopes: ['records:read', 'records:write'], query: { viewId: VIEW_ID } },
+    { label: 'read-only ordinary table', scopes: ['records:read'], query: { sheetId: PLAIN_SHEET_ID } },
+    { label: 'read-only new table', scopes: ['records:read'], query: { sheetId: 'sheet_mgw_token_new' } },
+  ])('API token cannot inherit its admin creator schema authority: $label', async ({ scopes, query }) => {
+    const fields = freshFields()
+    const { app, pool } = await buildApp(ADMIN, fields, [], { tokenScopes: scopes as ApiTokenScope[] })
+    const beforeFields = [...fields.entries()]
+    const beforeSheets = [...pool.sheets.entries()]
+    const res = await on(app).get('/api/multitable/view')
+      .set('Authorization', 'Bearer mst_synthetic_scope_test')
+      .query({ ...query, seed: 'true' })
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('FORBIDDEN')
+    expect([...fields.entries()]).toEqual(beforeFields)
+    expect([...pool.sheets.entries()]).toEqual(beforeSheets)
+    expect(pool.records.size).toBe(0)
+    expect(pool.sqlLog.filter((sql) => FIELD_WRITE_SQL.test(sql) || RECORD_WRITE_SQL.test(sql))).toEqual([])
+  })
+
+  it.each([undefined, 'false'])('API token still reads without seeding (seed=%s)', async (seed) => {
+    const fields = freshFields()
+    const { app, pool } = await buildApp(ADMIN, fields, [], { tokenScopes: ['records:read'] })
+    const res = await on(app).get('/api/multitable/view')
+      .set('Authorization', 'Bearer mst_synthetic_scope_test')
+      .query({ sheetId: MANAGED_SHEET_ID, ...(seed === undefined ? {} : { seed }) })
+    expect(res.status).toBe(200)
+    expect(pool.sqlLog.filter((sql) => FIELD_WRITE_SQL.test(sql) || RECORD_WRITE_SQL.test(sql))).toEqual([])
+  })
+
   it.each([
     { label: 'managed sheet-scoped writer', actor: WRITER, codes: ['spreadsheet:write'], query: { sheetId: MANAGED_SHEET_ID } },
     { label: 'managed sheet-scoped reader', actor: WRITER, codes: ['spreadsheet:read'], query: { sheetId: MANAGED_SHEET_ID } },

@@ -15529,6 +15529,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const sheetIdParam = typeof req.query.sheetId === 'string' ? req.query.sheetId.trim() : undefined
     const viewIdParam = typeof req.query.viewId === 'string' ? req.query.viewId.trim() : undefined
     const seed = req.query.seed === 'true'
+    // API tokens delegate record operations, not schema creation: there is no schema-write
+    // token scope. Do not let a read request inherit its creator's admin/schema authority
+    // through GET seeding (existing tables, new tables and view aliases all share this door).
+    if (seed && req.apiTokenScopes) return sendForbidden(res)
     const includeLinkSummaries = req.query.includeLinkSummaries === 'true'
     const search = normalizeSearchTerm(req.query.search)
     const limitParam = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : undefined
