@@ -133,6 +133,7 @@ import { startAuditLogPartitionEnsure } from './audit/audit-partition-schedule'
 import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
+import { startNotificationRetention } from './multitable/notification-retention'
 import {
   approvalAttachmentRefsJsonParser,
   isApprovalAttachmentsEnabled,
@@ -561,6 +562,9 @@ export class MetaSheetServer {
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
+  // E(2026-09-12): 通知中心保留期清理。默认关 —— 没配 MULTITABLE_NOTIFICATION_RETENTION_DAYS
+  // 时 startNotificationRetention 返回 no-op,这个句柄就是个空函数,stop 时照调不误。
+  private stopNotificationRetention?: () => void
   private stopApprovalAttachmentWorkers?: () => void | Promise<void>
   private stopElearningMediaWorkers?: () => void | Promise<void>
   private automationService?: AutomationService
@@ -3374,6 +3378,13 @@ export class MetaSheetServer {
         this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
+        this.stopNotificationRetention?.()
+      } catch (err) {
+        this.logger.warn(`Notification retention stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
     shutdownTasks.push(Promise.resolve().then(async () => {
       try {
         // stop awaits any in-flight GC/purge/reconcile tick before the pool closes.
@@ -4554,6 +4565,7 @@ export class MetaSheetServer {
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
       this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })
       this.stopMultitableAttachmentBlobPurge = startMultitableAttachmentBlobPurge({ logger: this.logger })
+      this.stopNotificationRetention = startNotificationRetention({ logger: this.logger })
     }
 
     // Register signal handlers only for real runtime, not test runners.
