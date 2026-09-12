@@ -3,7 +3,7 @@
  *
  * 背景：`PATCH /api/multitable/fields/:fieldId` 接受 `type`，落库是一条裸 `UPDATE meta_fields`，
  * 单元格值一个都不迁移（multitable/lossy-retype-oracle.ts 开头就写明了这一点）。在此之前，
- * (currentType → nextType) 这一对**除 link/formula/lookup/rollup 目标与层级父字段外零配对校验**：
+ * (currentType → nextType) 这一对**除 link/formula/lookup/rollup 目标与层级父字段外零配对校验**(rich 长文本 OFF→ON 的「已有数据」门是 property 级,不在类型配对之列)：
  * 前端 `apps/web/src/multitable/utils/field-retype.ts` 的表只是下拉框里提供什么，任何过得了
  * `capabilities.canManageFields`（管理员角色或 `multitable:manage-schema`；univer-meta.ts:4480/:4511，
  * 本路由的门在 :12937 —— 没有 `fields:write` 这个权限名）的 API 调用方绕开 UI 就能做任意有损改类型。
@@ -143,7 +143,7 @@ export const LOSSLESS_FIELD_RETYPE: Record<string, readonly string[]> = {
  * "改完之后"的 property，这个缺省就是 fail-open（rich 长文本会被判成非 rich 从而放行）。所以本函数
  * 不再接受"不传"：漏传直接抛（下方 arity 检查），由 TypeScript 与运行时**两道**挡住。
  * 注意这条缺省**挡不住两步绕过**：先 `PATCH {property:{}}` 把 rich 关掉（`assertRichLongTextToggleAllowed`
- * 只判 turning ON，`sanitizeFieldPropertyByType` 没有 longText 分支），再 `PATCH {type:'string'}` —— 第二次
+ * 只判 turning ON，univer-meta.ts:2420 路由自己那份 `sanitizeFieldPropertyByType` 没有 longText 分支(field-codecs.ts:505-514 的同名函数有,结果同为 `{}`)），再 `PATCH {type:'string'}` —— 第二次
  * 请求读到的库内 property 已经是 `{}`，两步都 200，HTML 原样留在单元格里。要不要给 rich ON→OFF 加
  * 「已有数据则拒」的门是 owner 决策，本刀不加，只用 characterization 用例把这条路径钉住。
  */

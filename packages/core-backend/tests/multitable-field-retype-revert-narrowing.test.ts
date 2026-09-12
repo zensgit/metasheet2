@@ -407,8 +407,8 @@ describe('PATCH /fields/:fieldId — the lossless whitelist is enforced server-s
 
   // KNOWN SEAM (characterization) —— 富文本长文本的**两步**绕过，B3（裁决 2026-09-12）。
   // 单次请求买不到通行证（上面那条用例），但两次可以，而且两步都是既有行为，本刀一个门都没加：
-  //   第一步 PATCH {property:{}}：`assertRichLongTextToggleAllowed` 只判 OFF→ON（field-codecs.ts:812-823），
-  //     关掉 rich 不在它的判据里；`sanitizeFieldPropertyByType` 没有 longText 分支，property 原样落成 {}；
+  //   第一步 PATCH {property:{}}：`assertRichLongTextToggleAllowed` 只判 OFF→ON（field-codecs.ts:842-868,判据 `isRichLongTextTurningOn` :814-826），
+  //     关掉 rich 不在它的判据里；univer-meta.ts:2420 路由自己那份 `sanitizeFieldPropertyByType` 没有 longText 分支(field-codecs.ts:505-514 的同名函数有,结果同为 `{}`)，property 原样落成 {}；
   //     这一步只改 schema，单元格里的 HTML 一个字节没动。
   //   第二步 PATCH {type:'string'}：白名单读的是**库里**的 property，此时已是 {} ⇒ 非富文本 ⇒ 放行 200。
   // 结果：HTML 以裸文本呈现给用户。本用例只钉现状（两步都 200 + 记录数据零改写），让这条路径可见；

@@ -1989,7 +1989,7 @@ describe('F8A lossless retype whitelist (server-authoritative, real-DB-lane copy
 
   // CHARACTERIZATION, not an endorsement. The whitelist passes through any pair with an endpoint in
   // FIELD_RETYPE_EXCLUDED_TYPES, and the two ends are NOT symmetric:
-  //   target in the set -> a pre-existing guard really takes over (the link case above);
+  //   target in the set -> only link/formula/lookup/rollup have a guard (see the two target-seam tests below);
   //   SOURCE in the set -> nobody takes over. Grep the PATCH body: there is no
   //   `currentType === 'attachment' | 'lookup' | 'rollup' | 'button' | 'createdTime'` branch at all
   //   (validateHierarchyParentFieldMutation only covers a same-sheet single-value parent LINK, and the
