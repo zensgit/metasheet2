@@ -1,5 +1,27 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia } from 'pinia'
 import { createApp, defineComponent, h, nextTick, reactive, type App as VueApp, type Component } from 'vue'
+
+// 整合切片 (2026-09-09): the section now embeds DataSourcesPanel (the folded-in 外接数据源 page),
+// which owns a pinia store and fetches the source list on mount. Stub the SAME api-client seam
+// data-sources-ui.spec.ts stubs so this stays a DOM-structure check with zero network, and give
+// every mount a fresh pinia below.
+const listDataSourcesMock = vi.hoisted(() => vi.fn())
+const createDataSourceMock = vi.hoisted(() => vi.fn())
+vi.mock('../src/data-sources/api', () => ({
+  listDataSources: listDataSourcesMock,
+  getDataSource: vi.fn(),
+  createDataSource: createDataSourceMock,
+  updateDataSource: vi.fn(),
+  rotateDataSourceCredentials: vi.fn(),
+  deleteDataSource: vi.fn(),
+  testDataSourceConnection: vi.fn(),
+  testDataSourceDraftConnection: vi.fn(),
+  getDataSourceSchema: vi.fn(),
+  getDataSourceTableInfo: vi.fn(),
+  previewDataSourceRows: vi.fn(),
+}))
+
 import IntegrationConnectionSection from '../src/components/integration/IntegrationConnectionSection.vue'
 import type { IntegrationAdapterMetadata, WorkbenchExternalSystem } from '../src/services/integration/workbench'
 import type { ConnectionDraft } from '../src/components/integration/integrationWorkbenchSectionTypes'
@@ -23,7 +45,15 @@ describe('IntegrationConnectionSection (unit)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
 
+  beforeEach(() => {
+    // Default answer for the embedded panel's own on-mount list call. Cases that care about
+    // the list override it before mounting.
+    listDataSourcesMock.mockResolvedValue([])
+  })
+
   afterEach(() => {
+    listDataSourcesMock.mockReset()
+    createDataSourceMock.mockReset()
     if (app) app.unmount()
     if (container) container.remove()
     app = null
@@ -39,6 +69,7 @@ describe('IntegrationConnectionSection (unit)', () => {
       },
     })
     app = createApp(Host)
+    app.use(createPinia())
     app.component('ElCard', ElCard)
     app.component('router-link', { props: ['to'], setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
     app.mount(container)
@@ -195,6 +226,96 @@ describe('IntegrationConnectionSection (unit)', () => {
     await nextTick()
     const status = container?.querySelector('[data-testid="connection-draft-config-json-status"]')
     expect(status?.getAttribute('data-status')).toBe('invalid')
+  })
+
+  // 整合切片 (2026-09-09): 外接数据源 is no longer a separate page — it renders INSIDE this
+  // section. Asserting the wrapper alone would pass on an empty <div>, so the panel's own
+  // primary control (`ds-new-button`) has to be found INSIDE the wrapper, inside the section.
+  it('embeds the data-sources panel inside #int-sec-connection, with the panel content really rendered', async () => {
+    await mountSection(baseProps())
+    const panel = container?.querySelector('#int-sec-connection [data-testid="connection-data-sources-panel"]')
+    expect(panel).toBeTruthy()
+    expect(panel?.querySelector('[data-testid="ds-new-button"]')).toBeTruthy()
+    // It sits AFTER the onboarding block and BEFORE the inventory toggle — the position the two
+    // 「上方『外接数据源』面板」 hints further down the section promise the operator.
+    const onboarding = container?.querySelector('[data-testid="connection-onboarding"]')
+    const inventoryToggle = container?.querySelector('[data-testid="toggle-inventory-overview"]')
+    expect(onboarding).toBeTruthy()
+    expect(inventoryToggle).toBeTruthy()
+    expect((onboarding!.compareDocumentPosition(panel!) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true)
+    expect((panel!.compareDocumentPosition(inventoryToggle!) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true)
+  })
+
+  it('calls onDataSourcesChanged after the embedded panel reports a successful create', async () => {
+    // The whole point of the fold: a source registered in the embedded panel must become
+    // selectable in the connection draft below WITHOUT a reload. That only holds if the panel's
+    // `changed` emit actually reaches the host's refresh callback.
+    listDataSourcesMock.mockResolvedValue([])
+    createDataSourceMock.mockResolvedValue({ id: 'src-1' })
+    const onDataSourcesChanged = vi.fn(noopFn)
+    await mountSection(baseProps({ onDataSourcesChanged }))
+
+    container?.querySelector<HTMLButtonElement>('[data-testid="ds-new-button"]')?.click()
+    await nextTick()
+    for (const [testid, value] of [['ds-field-id', 'src-1'], ['ds-field-name', 'Source 1'], ['ds-field-host', 'db.internal'], ['ds-field-database', 'app']] as const) {
+      const input = container?.querySelector<HTMLInputElement>(`[data-testid="${testid}"]`)
+      expect(input, testid).toBeTruthy()
+      if (input) {
+        input.value = value
+        input.dispatchEvent(new Event('input'))
+      }
+    }
+    await nextTick()
+
+    container?.querySelector<HTMLFormElement>('[data-testid="ds-create-form"]')?.dispatchEvent(
+      new Event('submit', { cancelable: true }),
+    )
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+
+    expect(createDataSourceMock).toHaveBeenCalledTimes(1)
+    expect(onDataSourcesChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not call onDataSourcesChanged when the create fails', async () => {
+    // A refetch on a FAILED attempt would repaint the pre-attempt list as if it were fresh.
+    listDataSourcesMock.mockResolvedValue([])
+    createDataSourceMock.mockRejectedValue(new Error('create rejected'))
+    const onDataSourcesChanged = vi.fn(noopFn)
+    await mountSection(baseProps({ onDataSourcesChanged }))
+
+    container?.querySelector<HTMLButtonElement>('[data-testid="ds-new-button"]')?.click()
+    await nextTick()
+    for (const [testid, value] of [['ds-field-id', 'src-1'], ['ds-field-name', 'Source 1'], ['ds-field-host', 'db.internal'], ['ds-field-database', 'app']] as const) {
+      const input = container?.querySelector<HTMLInputElement>(`[data-testid="${testid}"]`)
+      expect(input, testid).toBeTruthy()
+      if (input) {
+        input.value = value
+        input.dispatchEvent(new Event('input'))
+      }
+    }
+    await nextTick()
+
+    container?.querySelector<HTMLFormElement>('[data-testid="ds-create-form"]')?.dispatchEvent(
+      new Event('submit', { cancelable: true }),
+    )
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+
+    expect(createDataSourceMock).toHaveBeenCalledTimes(1)
+    expect(onDataSourcesChanged).not.toHaveBeenCalled()
+  })
+
+  it('points the bridge hints at the embedded panel instead of the retired /data-sources path', async () => {
+    const connectionDraft: ConnectionDraft = { ...emptyConnectionDraft, kind: 'data-source:sql-readonly' }
+    await mountSection(baseProps({ connectionDraft, isDataSourceBridgeKind: true }))
+    const hint = container?.querySelector('[data-testid="data-source-bridge-hint"]')?.textContent ?? ''
+    expect(hint).toContain('上方「外接数据源」面板')
+    expect(hint).not.toContain('/data-sources')
   })
 
   it('does not render the K3 WISE setup-wizard hint for a non-K3 kind', async () => {
