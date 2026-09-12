@@ -32,10 +32,21 @@ import { univerMetaRouter } from '../../src/routes/univer-meta'
 import { db } from '../../src/db/db'
 import { eventBus as integrationEventBus } from '../../src/integration/events/event-bus'
 import { WebhookService } from '../../src/multitable/webhook-service'
+import type { SsrfLookupFn } from '../../src/multitable/webhook-ssrf-guard'
 import {
   initWebhookEventBridge,
   resetWebhookEventBridgeForTests,
 } from '../../src/multitable/webhook-event-bridge'
+
+/**
+ * F-3 SSRF gate (`webhook-service.ts` -> `checkWebhookTargetUrl`): delivery now resolves the target and
+ * refuses anything internal, and an UNRESOLVABLE name is refused fail-closed. The sink names below are
+ * reserved TLDs that never resolve, so the specs inject this deterministic resolver through the service's
+ * third constructor argument: a RESOLVER seam only (the guard still judges the address it returns), which
+ * keeps these specs off real DNS instead of weakening the gate. TEST-NET-3 (RFC 5737) is public as far as
+ * the guard is concerned and is not routable.
+ */
+const publicLookup: SsrfLookupFn = async () => [{ address: '203.0.113.10', family: 4 }]
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -121,7 +132,7 @@ describeIfDatabase('webhook event bridge real chain (real DB)', () => {
     resetWebhookEventBridgeForTests(integrationEventBus)
     initWebhookEventBridge({
       eventBus: integrationEventBus,
-      webhookService: new WebhookService(db, loopbackFetch),
+      webhookService: new WebhookService(db, loopbackFetch, publicLookup),
     })
   })
 
