@@ -4,6 +4,8 @@ Status: local verification complete. This document does not assert exact-head Gi
 
 Base: `1c22d3b328f377dface03b222bf57d09f4b7dec0`.
 
+Publication catch-up base: `9fb29831c33abba5eac1a5d64adbe62d915676c2`. The results below describe pre-publication local verification. New PR-head checks, independent review, merge/image/runtime identities and staging acceptance will be reported separately, not inferred from this table.
+
 ## Local evidence
 
 | Check | Result |

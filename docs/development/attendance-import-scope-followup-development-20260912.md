@@ -5,6 +5,7 @@ Status: local implementation and verification; no merge or deployment authorizat
 ## Baseline and scope
 
 - Base: `1c22d3b328f377dface03b222bf57d09f4b7dec0`.
+- Publication catch-up: `9fb29831c33abba5eac1a5d64adbe62d915676c2`; the intervening change is two takeover documents, with no repair-path overlap. Fresh checks and independent review are required on the resulting PR head.
 - Follows the prepare-token organization fix in PR #5673, merge `23fd5942bbd58f4a45aaa11440e76b6e3532e35f`.
 - Refs #4556. This work does not change its acceptance contract or authorize closure.
 - Staging run `34684405380` proved preview/commit can succeed while later job polling, batch reads and CSV export fail for a nondefault synthetic organization. Business rollback was not reached in that run.
