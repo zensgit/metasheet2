@@ -43,10 +43,12 @@
 | 26 | `PUT /snapshots/:id/tags` | ✅ | 子路由 `snapshot-labels.ts:40` |
 | 27 | `PATCH /snapshots/:id/protection` | ✅ | 子路由 `snapshot-labels.ts:74` |
 | 28 | `PATCH /snapshots/:id/release-channel` | ✅ | 子路由 `snapshot-labels.ts:109` |
-| 29 | `POST /safety/rules` | ❌ | 子路由 `protection-rules.ts:111` —— **豁免 TODO(#5667)** |
-| 30 | `PATCH /safety/rules/:id` | ❌ | 子路由 `protection-rules.ts:203` —— **豁免 TODO(#5667)** |
-| 31 | `DELETE /safety/rules/:id` | ❌ | 子路由 `protection-rules.ts:244` —— **豁免 TODO(#5667)** |
-| 32 | `POST /safety/rules/evaluate` | ❌ | 子路由 `protection-rules.ts:267` —— **豁免 TODO(#5667)** |
+| 29 | `POST /safety/rules` | ❌ | 子路由 `protection-rules.ts:111` —— **临时豁免 `todo:#5667`** |
+| 30 | `PATCH /safety/rules/:id` | ❌ | 子路由 `protection-rules.ts:203` —— **临时豁免 `todo:#5667`** |
+| 31 | `DELETE /safety/rules/:id` | ❌ | 子路由 `protection-rules.ts:244` —— **临时豁免 `todo:#5667`** |
+| 32 | `POST /safety/rules/evaluate` | ❌ | 子路由 `protection-rules.ts:267` —— **临时豁免 `todo:#5667`** |
+
+（第 9/10/25 行是**永久**豁免，第 29-32 行是**临时**豁免。两类的区别与理由见设计说明 §4.0。）
 
 计数不是手算的，是从守卫自己的审计函数里打出来的（一次性计数探针，跑完即删）：
 
@@ -78,7 +80,7 @@ requireSafetyCheck matches gate src: false
 
 ---
 
-## 1. 新 spec 全绿（20 个用例）
+## 1. 新 spec 全绿（21 个用例）
 
 ```
 $ npx vitest run tests/unit/admin-routes-write-endpoints-structural-gate.test.ts --reporter=verbose
@@ -93,19 +95,20 @@ $ npx vitest run tests/unit/admin-routes-write-endpoints-structural-gate.test.ts
  ✓ ... > 结构性保证：每条写路由的首位都是 admin 门 > 没有「既无 admin 门、又不在豁免表里」的写路由
  ✓ ... > 结构性保证：每条写路由的首位都是 admin 门 > #5665 补门的那一族逐条仍然有门（回归钉）
  ✓ ... > 豁免表 > 每条豁免都对应一条真实存在的写路由（禁止残留过期豁免）
- ✓ ... > 豁免表 > 豁免表不得覆盖已经有门的路由（门补上了就必须删豁免）
- ✓ ... > 豁免表 > 每条豁免都写了理由
- ✓ ... > 豁免表 > 豁免表就是今天全部无门写路由的集合（不多不少）
+ ✓ ... > 豁免表 > 永久豁免不得覆盖已经有门的路由（门补上了 = 设计变了，必须删豁免）
+ ✓ ... > 豁免表 > 临时豁免：已可删除的条目只点名提示、不挡合并
+ ✓ ... > 豁免表 > 每条豁免都写了理由；临时豁免的 todo 必须是 issue/PR 号
+ ✓ ... > 豁免表 > 无门写路由 ⊆ 豁免表（核心不变量）
  ✓ ... > 子路由挂载面 > router.use 挂的子路由恰好是固定集合，且没有挂载级中间件
  ✓ ... > 子路由挂载面 > /snapshots 子路由（snapshot-labels.ts）的三条写路由都有门
- ✓ ... > 子路由挂载面 > /safety/rules 子路由（protection-rules.ts）今天四条写路由全部无门 —— 即 #5667 的洞
+ ✓ ... > 子路由挂载面 > /safety/rules 子路由（protection-rules.ts）的四条写路由：路径集合固定，门的有无只记录
  ✓ ... > 变异自证 > 摘掉 PUT /data/bulk 的首个 handler（= 去掉 #5665 补的门）→ 红并点名该路由
  ✓ ... > 变异自证 > 新加一条无门写路由（= §4 残余第 1 条描述的开洞方式）→ 红并点名该路由
  ✓ ... > 变异自证 > 把门换成 requireSafetyCheck（= #5665 修前的形状）→ 仍然红
- ✓ ... > 变异自证 > 把豁免表清空 → 今天那 7 条无门写路由全部变成违规（证明豁免表是真的在生效）
+ ✓ ... > 变异自证 > 把豁免表清空 → 今天全部无门写路由都会变成违规（证明豁免表是真的在生效、不是空转）
 
  Test Files  1 passed (1)
-      Tests  20 passed (20)
+      Tests  21 passed (21)
 ```
 
 ---
@@ -120,12 +123,22 @@ $ npx vitest run tests/unit/admin-routes-write-endpoints-structural-gate.test.ts
 
 ### 2.2 外部变异探针（一次性，跑完即删，不进提交）
 
-为了给出「主断言真的会红」的原样输出，生成了三份 spec 变体（改变体、不改被测源码），跑完删除。
+为了给出「主断言真的会红」的原样输出，生成了四份 spec 变体（改变体、不改被测源码），跑完删除。
+M1/M2/M3 证明「开洞会红」，**M4 证明「修洞不会红」** —— 后者是豁免表改成两类之后新增的关键证据。
+
+汇总：
+
+| 变体 | 内容 | 结果 |
+|---|---|---|
+| M1 | 摘掉 `PUT /data/bulk` 的 admin 门 | **7 failed / 21** |
+| M2 | 新加一条无门写路由 | **6 failed / 21** |
+| M3 | 把匹配器放宽成「是函数就算门」 | **8 failed / 21** |
+| M4 | 模拟 #5677 已合并（给 `/safety/rules` 四条注入真门） | **21 passed / 21**（只多 warn） |
 
 #### M1 —— 摘掉 `PUT /data/bulk` 的 admin 门（= 撤销 #5665 对这条的修复）
 
 ```
- ❯ tests/unit/w4b-mut1-drop-gate.test.ts  (20 tests | 7 failed)
+ ❯ tests/unit/w4b-mut1-drop-gate.test.ts  (21 tests | 7 failed)
    ❯ 结构性保证：每条写路由的首位都是 admin 门 > 没有「既无 admin 门、又不在豁免表里」的写路由
      → 以下写路由的中间件链首位不是 requireAdminRole()/protectAdminOperation(...)，也不在本文件的豁免表里：
   - PUT /api/admin/data/bulk
@@ -133,8 +146,6 @@ $ npx vitest run tests/unit/admin-routes-write-endpoints-structural-gate.test.ts
    ❯ 结构性保证：每条写路由的首位都是 admin 门 > #5665 补门的那一族逐条仍然有门（回归钉）
      → 以下 #5665 已补门的路由丢了门或丢了路由：
 PUT /api/admin/data/bulk: expected [ 'PUT /api/admin/data/bulk' ] to deeply equal []
-   ❯ 豁免表 > 豁免表就是今天全部无门写路由的集合（不多不少）
-     → expected Set{ …(8) } to deeply equal Set{ 'post /health/check', …(6) }
 ```
 
 红，并**点名 `PUT /api/admin/data/bulk`**。
@@ -142,7 +153,7 @@ PUT /api/admin/data/bulk: expected [ 'PUT /api/admin/data/bulk' ] to deeply equa
 #### M2 —— 新加一条无门写路由（= §4 残余第 1 条描述的开洞方式）
 
 ```
- ❯ tests/unit/w4b-mut2-new-ungated-route.test.ts  (20 tests | 6 failed)
+ ❯ tests/unit/w4b-mut2-new-ungated-route.test.ts  (21 tests | 6 failed)
 AssertionError: 以下写路由的中间件链首位不是 requireAdminRole()/protectAdminOperation(...)，也不在本文件的豁免表里：
   - POST /api/admin/w4b-leaked-write/:id
 
@@ -155,25 +166,59 @@ AssertionError: 以下写路由的中间件链首位不是 requireAdminRole()/pr
 
 ```
  Test Files  1 failed (1)
-      Tests  11 failed | 9 passed (20)
+      Tests  8 failed | 13 passed (21)
 
  FAIL  ... > 识别机制的正反自证 > 反：requireSafetyCheck(...) 不是 admin 门（确认层 ≠ 授权门，#5665 的要害）
  FAIL  ... > 识别机制的正反自证 > 反：已知无门的读路由 GET /slo/status（admin-routes.ts:1392）首位不被认出来
  FAIL  ... > 识别机制的正反自证 > 反：裸中间件 / 非函数都不是 admin 门
  FAIL  ... > 识别机制的正反自证 > 正：protectAdminOperation(...) 是 [admin 门, 审计]，首位就是门；反：第二位不是门
- FAIL  ... > 子路由挂载面 > /safety/rules 子路由（protection-rules.ts）今天四条写路由全部无门 —— 即 #5667 的洞
- FAIL  ... > 豁免表 > 豁免表不得覆盖已经有门的路由（门补上了就必须删豁免）
- FAIL  ... > 豁免表 > 豁免表就是今天全部无门写路由的集合（不多不少）
+ FAIL  ... > 豁免表 > 永久豁免不得覆盖已经有门的路由（门补上了 = 设计变了，必须删豁免）
  FAIL  ... > 变异自证 > 摘掉 PUT /data/bulk 的首个 handler（= 去掉 #5665 补的门）→ 红并点名该路由
  FAIL  ... > 变异自证 > 新加一条无门写路由（= §4 残余第 1 条描述的开洞方式）→ 红并点名该路由
  FAIL  ... > 变异自证 > 把门换成 requireSafetyCheck（= #5665 修前的形状）→ 仍然红
- FAIL  ... > 变异自证 > 把豁免表清空 → 今天那 7 条无门写路由全部变成违规（证明豁免表是真的在生效）
 ```
 
 **这是本文件最重要的一条证据**：把匹配器偷偷放宽（最危险的假件化方向 —— 「谁都认」会让整片静悄悄转绿），
 反向控制组**立刻全红**。也就是说识别机制的正反自证不是装饰，它真的在把关。
 
-探针清理：三份变体与探针文件已删除，`git status` 只剩本次要提交的三个文件（见 §5）。
+对比豁免表改成两类**之前**（等式 + 临时豁免硬红）的那一版，M3 从 11 failed 变成 8 failed ——
+少掉的三条正是被刻意改掉的那三条（「豁免表 == 无门集合」的等式、「临时豁免覆盖已有门路由」的硬红、
+「/safety/rules 四条必须无门」的硬判）。这是**预期内的**：那三条红信号的来源是「断言了当前快照」，
+而快照断言正是造成 PR 耦合的东西。**抗假件的核心没丢** —— 四条负向控制组仍然全红，
+并且「**永久**豁免不得覆盖已有门路由」这条硬红仍然抓得住 M3（因为假件匹配器会让
+`/health/check` 与两条 `*-unsafe` 看起来「有门了」）。
+
+#### M4 —— 模拟 #5667 / PR #5677 已合并（给 `/safety/rules` 四条写路由首位注入真实 `requireAdminRole()`）
+
+这是豁免表改成「永久 / 临时」两类之后新增的关键变异：它验证的不是「开洞会红」，而是
+**「洞被别人修好了，本 spec 不会红」** —— 也就是两支 PR 没有被耦合成固定合并顺序。
+
+```
+stderr | ... > 豁免表 > 临时豁免：已可删除的条目只点名提示、不挡合并
+[结构性守卫] 4 条临时豁免已可删除 —— 对应路由已经补上 admin 门：
+  - POST /api/admin/safety/rules  (todo: #5667)
+  - PATCH /api/admin/safety/rules/:id  (todo: #5667)
+  - DELETE /api/admin/safety/rules/:id  (todo: #5667)
+  - POST /api/admin/safety/rules/evaluate  (todo: #5667)
+请在对应 issue 收口时从本 spec 的 EXEMPTIONS 里删掉这些条目。（这里只提示不失败：修洞的 PR 不该因为本 spec 而被挡住。）
+
+stderr | ... > 子路由挂载面 > /safety/rules 子路由（protection-rules.ts）的四条写路由：路径集合固定，门的有无只记录
+[结构性守卫] /safety/rules 已有 4/4 条写路由补上了 admin 门（#5667 / PR #5677 生效中）：
+  - POST /api/admin/safety/rules
+  - PATCH /api/admin/safety/rules/:id
+  - DELETE /api/admin/safety/rules/:id
+  - POST /api/admin/safety/rules/evaluate
+四条都补齐后，请把本 spec EXEMPTIONS 里那四条 todo:#5667 的临时豁免删掉。
+
+ ✓ tests/unit/w4b-mut4-5677-merged.test.ts  (21 tests) 12ms
+ Test Files  1 passed (1)
+      Tests  21 passed (21)
+```
+
+**21/21 全绿**，只多出两段 `console.warn`。所以：#5677 先合、本支先合、或两支一起进组合树，
+本 spec 都不会红，也不会假红。清理这四条临时豁免是一件「看得见但不挡路」的收尾工作。
+
+探针清理：四份变体与探针文件已删除，`git status` 只剩本次要提交的三个文件（见 §6）。
 
 ---
 
@@ -193,17 +238,17 @@ $ npx vitest run tests/unit/admin-routes-write-endpoints-structural-gate.test.ts
     tests/unit/snapshot-labels-authz.test.ts \
     tests/unit/snapshots-safety-guard.test.ts
 
- ✓ tests/unit/snapshot-labels-authz.test.ts  (5 tests) 86ms
- ✓ tests/unit/snapshots-safety-guard.test.ts  (5 tests) 56ms
- ✓ tests/unit/safety-guard-confirm-flow.test.ts  (15 tests) 177ms
- ✓ tests/unit/admin-safety-confirm-authz.test.ts  (3 tests) 10ms
- ✓ tests/unit/admin-routes-write-endpoints-structural-gate.test.ts  (20 tests) 10ms
- ✓ tests/unit/admin-yjs-status-routes.test.ts  (2 tests) 11ms
- ✓ tests/unit/admin-snapshot-delete-authz.test.ts  (3 tests) 9ms
- ✓ tests/unit/admin-safety-toggle-and-bulk-authz.test.ts  (18 tests) 132ms
+ ✓ tests/unit/snapshot-labels-authz.test.ts  (5 tests) 78ms
+ ✓ tests/unit/snapshots-safety-guard.test.ts  (5 tests) 57ms
+ ✓ tests/unit/safety-guard-confirm-flow.test.ts  (15 tests) 162ms
+ ✓ tests/unit/admin-yjs-status-routes.test.ts  (2 tests) 7ms
+ ✓ tests/unit/admin-snapshot-delete-authz.test.ts  (3 tests) 11ms
+ ✓ tests/unit/admin-routes-write-endpoints-structural-gate.test.ts  (21 tests) 14ms
+ ✓ tests/unit/admin-safety-confirm-authz.test.ts  (3 tests) 16ms
+ ✓ tests/unit/admin-safety-toggle-and-bulk-authz.test.ts  (18 tests) 140ms
 
  Test Files  8 passed (8)
-      Tests  71 passed (71)
+      Tests  72 passed (72)
 ```
 
 （输出里穿插的 `error: RBAC check failed` 日志来自那几个 spec 自己的 fail-closed 用例 —— 它们**故意**
@@ -259,9 +304,9 @@ $ npx tsc --noEmit -p tsconfig.w4b-check.json
 - **正向证据**：只给子串过滤（不给路径），让配置的 include/exclude 自己去解析 ——
   ```
   $ npx vitest run admin-routes-write-endpoints
-   ✓ tests/unit/admin-routes-write-endpoints-structural-gate.test.ts  (20 tests) 11ms
+   ✓ tests/unit/admin-routes-write-endpoints-structural-gate.test.ts  (21 tests)
    Test Files  1 passed (1)
-        Tests  20 passed (20)
+        Tests  21 passed (21)
   ```
 - **反证控制组**（证明 exclude 在显式传路径之后仍然生效，所以上一条不是「传了路径就一定跑」）：
   ```
@@ -290,9 +335,13 @@ docs/development/admin-routes-structural-gate-verification-20260912.md          
 ## 7. 不确定项 / 留给复核的问题
 
 1. **`POST /safety/rules/evaluate` 是否真属写面** —— 它触发规则求值、不落库。本次按「POST + 吃 body」的
-   保守口径进豁免表；若 #5667 判定它只需读权限，豁免与理由要一起改。
-2. **豁免表「门补上就红」是刻意设计** —— #5667 合并时会让本 spec 红一次，修法是删掉那四条豁免并更新
-   「/safety/rules 四条今天全部无门」那条现状快照用例。这是**特性**不是缺陷，但需要 #5667 的作者知道。
+   保守口径进临时豁免表；若 #5677 判定它只需读权限，豁免与理由要一起改。
+2. **issue 号 vs PR 号** —— 代码里 `todo` 统一写 `'#5667'`（issue），文案里同时提 PR **#5677**
+   （`fix/protection-rules-require-admin-and-identity`）。若这两个号其实指同一个对象、或号记反了，
+   请以 issue 号为准改 `todo` 字段（改字符串即可，「`todo` 必须是 `#<号>`」那条用例不挑具体数字）。
+3. **临时豁免的清理只有可见性、没有强制力** —— 这是为了不把独立 PR 耦合成固定合并顺序而付出的代价：
+   一条临时豁免可以在洞修好之后长期留着不删（无害但是噪声），只会持续 `console.warn`。
+   要收紧就得引入「到期」概念 + 定期巡检，而不是改回硬红。见设计说明 §7 残余第 7 条。
 3. **`toString()` 同一性的适用边界** —— 它在同一个进程/同一份模块实例内是可靠的。如果将来构建链引入
    对同一模块的重复实例化（两份 `guards/audit-integration`），生产代码挂的门可能来自另一份实例、源文本
    仍相同 → 依然匹配（因为比的是文本不是引用），所以这个方向是安全的。反方向（源文本相同但其实是另一个
