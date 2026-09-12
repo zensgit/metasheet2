@@ -4,6 +4,15 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { configRevisionNoop } from './config-revision-mock'
 
+// MANAGED-SHEET GATE (src/multitable/managed-sheet-schema-write-guard.ts): capability resolution now asks
+// once whether the sheet is plugin-registered before a NON-admin may keep canManageFields. These fixtures
+// throw on unhandled SQL and the guard is fail-closed on throw (=> 403), so every capability-shaped query
+// mock must answer this read. No test in this file registers a sheet, so 'not managed' is the true answer.
+function managedSheetRegistryNoop(sql: string): { rows: unknown[] } | null {
+  if (sql.includes('FROM plugin_multitable_object_registry')) return { rows: [] }
+  return null
+}
+
 type QueryResult = {
   rows: any[]
   rowCount?: number
@@ -167,6 +176,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -295,6 +305,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -372,6 +383,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -476,6 +488,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -579,6 +592,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -626,6 +640,7 @@ describe('Multitable context API', () => {
           return { rows: [], rowCount: 1 }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -662,6 +677,7 @@ describe('Multitable context API', () => {
           return { rows: [], rowCount: 1 }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -806,6 +822,7 @@ describe('Multitable context API', () => {
           return { rows: views.filter((view) => view.id === viewId) }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(normalized)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -916,6 +933,7 @@ describe('Multitable context API', () => {
           return { rows: views.filter((view) => view.id === viewId) }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(normalized)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1014,6 +1032,7 @@ describe('Multitable context API', () => {
           return { rows: [], rowCount: 1 }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1051,6 +1070,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1102,6 +1122,7 @@ describe('Multitable context API', () => {
           return { rows: [{ system_kind: null, description: null }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1133,6 +1154,7 @@ describe('Multitable context API', () => {
           throw new Error('the operator must never reach the write')
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
         throw new Error(`Unhandled SQL in test: ${sql}`)
@@ -1168,6 +1190,7 @@ describe('Multitable context API', () => {
           return { rows: [], rowCount: 0 }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1194,6 +1217,7 @@ describe('Multitable context API', () => {
         throw new Error('an unauthorized actor must never reach the write')
       }
       { const cr = configRevisionNoop(sql); if (cr) return cr }
+      { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
       if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
       if (sql.includes('FROM meta_view_personal_configs')) return { rows: [] }
       return { rows: [], rowCount: 0 }
@@ -1270,6 +1294,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1349,6 +1374,7 @@ describe('Multitable context API', () => {
           return { rows: [], rowCount: 1 }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1428,6 +1454,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1509,6 +1536,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1627,6 +1655,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
@@ -1753,6 +1782,7 @@ describe('Multitable context API', () => {
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
+        { const mr = managedSheetRegistryNoop(sql); if (mr) return mr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
         // Slice 3: /context resolves the actor's personal-view overlay when the flag is on. No personal rows
