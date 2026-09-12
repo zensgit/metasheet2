@@ -4035,7 +4035,15 @@ describe('AutomationService — Rule CRUD', () => {
 
   beforeEach(() => {
     eventBus = new EventBus()
-    queryFn = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    // F9c: createRule/updateRule now resolve the selectable-people roster (the SAME
+    // loadSheetMemberUserIdSet the executor and the button route use) before persisting any rule that
+    // contains a send_notification. An unmodelled roster is the EMPTY set = fail-closed, so the legacy
+    // alias / branch specs below would be refused for a FIXTURE reason rather than a product one.
+    // Modelling it with the file's own helper keeps every recipient in these specs (`u1`) a member.
+    queryFn = vi.fn(async (sql: unknown) => (
+      (typeof sql === 'string' ? sheetMemberRosterRows(MOCK_SHEET_MEMBER_IDS, sql) : null)
+      ?? { rows: [], rowCount: 0 }
+    ))
     _valuesCalls.length = 0
     const db = makeMockDb()
     service = new AutomationService(eventBus, db as never, queryFn)

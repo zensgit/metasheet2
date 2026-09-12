@@ -66,7 +66,10 @@ import {
   type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
-import { AutomationExecutor, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode } from './automation-executor'
+import { AutomationExecutor, AUTOMATION_NO_RECIPIENTS_ERROR, normalizeNotificationRecipients, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode } from './automation-executor'
+// F9c: the save-time recipient gate resolves the SAME roster as the execution path and the button
+// route (one resolver, zero drift) — see assertNotificationRecipientsAtSave.
+import { loadSheetMemberUserIdSet } from './permission-service'
 import { ALL_ACTION_TYPES, type AutomationAction } from './automation-actions'
 import type { AutomationTrigger } from './automation-triggers'
 import {
@@ -124,11 +127,26 @@ const logger = new Logger('AutomationService')
 
 const MAX_AUTOMATION_DEPTH = 3
 
-export class AutomationRuleValidationError extends Error {
-  readonly code = 'VALIDATION_ERROR'
+/**
+ * F9c: the rule-save refusal codes. `VALIDATION_ERROR` stays the DEFAULT, so every pre-existing
+ * `throw new AutomationRuleValidationError(msg)` keeps its exact wire shape; the three recipient
+ * codes exist so the editor (and any API client) can tell "your rule config is malformed" apart from
+ * "this person may not be notified" / "the roster could not be read". The route already answers 400
+ * with `error.code = err.code` for this class (routes/univer-meta.ts:19248/:19302), so no new error
+ * shape and no new route branch is introduced.
+ */
+export type AutomationRuleValidationCode =
+  | 'VALIDATION_ERROR'
+  | 'RECIPIENT_NOT_AUTHORIZED'
+  | 'NO_RECIPIENTS'
+  | 'ROSTER_UNAVAILABLE'
 
-  constructor(message: string) {
+export class AutomationRuleValidationError extends Error {
+  readonly code: AutomationRuleValidationCode
+
+  constructor(message: string, code: AutomationRuleValidationCode = 'VALIDATION_ERROR') {
     super(message)
+    this.code = code
     this.name = 'AutomationRuleValidationError'
   }
 }
@@ -827,6 +845,76 @@ function collectNestedAutomationActions(
 }
 
 /**
+ * F9c — SAVE-TIME `send_notification` recipient roster check.
+ *
+ * THE GAP: recipients are a free-text box in the editor (MetaAutomationRuleEditor.vue:461 top level,
+ * :1283/:1317/:1362 branch sub-actions, :4329 parseUserIdsText) and the test run is contractually
+ * zero-DB (automation-v1.test.ts pins `expect(deps.queryFn).not.toHaveBeenCalled()` in 14 places), so a
+ * typo used to pass BOTH surfaces: dry run green, first LIVE fire fails the whole step (F9b), every
+ * later action skipped. The preflight therefore goes where the rule is WRITTEN, next to the other
+ * in-DB save gates (validateDingTalkAutomationLinks) — not into simulate.
+ *
+ * ROSTER WIDTH (stated exactly, no wider claim): `loadSheetMemberUserIdSet` (permission-service.ts:611)
+ * → `listSheetPermissionCandidates` (:416) = ACTIVE users holding a GLOBAL multitable read/write grant.
+ * It is "a selectable person on this platform", NOT "granted on THIS sheet" and NOT a tenant boundary.
+ * That width is inherited ON PURPOSE from the execution path and the button route; narrowing it is a
+ * three-surface change and is deliberately out of this slice.
+ */
+export const AUTOMATION_SAVE_ROSTER_UNAVAILABLE_ERROR =
+  '通知接收人名册暂时读不到，规则未保存，请稍后重试（ROSTER_UNAVAILABLE）'
+
+/** Cap on the ids echoed back, so a pasted 500-id list cannot turn one 400 into a wall of text. */
+const MAX_LISTED_REJECTED_RECIPIENTS = 10
+
+/**
+ * F9c: the save-time refusal NAMES the offending ids, unlike the execution-time constant
+ * (AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR), which stays values-free because the manager renders
+ * step.error verbatim in a shared banner. Here the reader IS the rule author, who just typed those ids
+ * and cannot fix the rule without knowing WHICH one is wrong. Response only — the LOG stays counts-only.
+ */
+export function automationSaveRecipientNotAuthorizedMessage(rejected: string[]): string {
+  const shown = rejected.slice(0, MAX_LISTED_REJECTED_RECIPIENTS)
+  const suffix = rejected.length > shown.length ? `…（共 ${rejected.length} 个）` : ''
+  return `通知接收人不在可选人员范围内，请在编辑器中改选（RECIPIENT_NOT_AUTHORIZED）：${shown.join('、')}${suffix}`
+}
+
+/**
+ * F9c: one normalized recipient list PER `send_notification` in the rule being saved.
+ *
+ * `actions` is the ALREADY-FLATTENED list every other save validator receives
+ * (`collectNestedAutomationActions`), i.e. top-level `actions[*]` plus `config.branches[*].actions[*]`
+ * and `config.defaultBranch.actions[*]`. SCOPE OF THAT CLAIM: one branch level is all a SAVEABLE rule
+ * can have — `validateConditionBranchConfig` refuses a branch that nests another branch — so for every
+ * rule that can reach this line the flattened list and the deeper walk in
+ * `automation-rule-fingerprint.ts:55 enumerateRuleActions` enumerate the same actions. A hand-written
+ * deeper row is not reachable either: the same branch validators run before this gate on EVERY update.
+ * The legacy single-action pair is
+ * checked too, exactly like validateSendEmailActionConfigs does, and it arrives here ALREADY folded
+ * through `normalizeLegacyActionPair`, so a v0 `notify` is enumerated as the `send_notification` it
+ * becomes (no second alias table here).
+ *
+ * PER-ACTION lists, not one union: an action with zero recipients is a different refusal
+ * (NO_RECIPIENTS) from one with an outsider, and a union would hide the empty one behind a sibling.
+ */
+export function collectNotificationRecipientGroupsAtSave(
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+  actions: ReadonlyArray<AutomationAction> | null | undefined,
+): string[][] {
+  const groups: string[][] = []
+  const push = (config: unknown): void => {
+    const record = isRecord(config) ? config : {}
+    groups.push(normalizeNotificationRecipients(record.userIds))
+  }
+  if (actionType === 'send_notification') push(actionConfig)
+  for (const action of actions ?? []) {
+    if (!action || action.type !== 'send_notification') continue
+    push(action.config)
+  }
+  return groups
+}
+
+/**
  * Legacy DB-shaped rule (from automation_rules table).
  * Kept for backward compatibility with existing CRUD routes.
  */
@@ -1231,6 +1319,12 @@ export class AutomationService {
       actionsForValidation,
     )
     if (linkValidationError) throw new AutomationRuleValidationError(linkValidationError)
+
+    // F9c: every send_notification in THIS rule must name recipients, and every recipient must be in
+    // the selectable-people roster — the same function + the same set the executor uses. Placed after
+    // the config-shape validators so a malformed action still reports its own (more specific) error,
+    // and before any persistence: a refused save writes NOTHING.
+    await this.assertNotificationRecipientsAtSave(sheetId, input.actionType, actionConfig, actionsForValidation)
 
     // W7-obs (rule-save fail-fast): validate the resultWriteback target FIELDS exist + are type-
     // compatible against the SOURCE sheet schema at save — the same check as the runtime backwrite
@@ -1639,6 +1733,26 @@ export class AutomationService {
         existingForApproval.enabled === false && input.enabled === true,
       )
       if (fwbUpdateError) throw new AutomationRuleValidationError(fwbUpdateError)
+
+      // F9c: the recipient gate runs on the RESULTING rule for EVERY write shape — a rename, a
+      // conditions-only edit or an enable/disable toggle (setRuleEnabled routes through updateRule) is
+      // still a save of whatever recipients the rule carries. Deliberately NOT gated on
+      // `shouldValidateActions`: that would let an existing rule with a typo'd recipient be edited
+      // forward forever, which is exactly the state F9b leaves on 222 today. The gate is free for rules
+      // without a send_notification (zero DB reads), so unrelated edits pay nothing.
+      // The merged pair is folded through normalizeLegacyActionPair first, so a stored v0 `notify` is
+      // enumerated as the send_notification it executes as (this block, unlike the shouldValidateActions
+      // block above, sees the RAW stored action_type).
+      const recipientPair = normalizeLegacyActionPair(
+        nextActionType,
+        (nextActionConfig ?? null) as Record<string, unknown> | null,
+      )
+      await this.assertNotificationRecipientsAtSave(
+        sheetId,
+        recipientPair.actionType,
+        recipientPair.actionConfig,
+        approvalActions,
+      )
     }
 
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
@@ -2059,6 +2173,92 @@ export class AutomationService {
     const execRule = toExecutorRule(rule)
     if (execRule.trigger.type !== 'schedule.date_field') return
     await this.evaluateDateReminders(execRule)
+  }
+
+  /**
+   * F9c SAVE-BOUNDARY recipient gate — throws AutomationRuleValidationError (→ 400 + code) or returns.
+   *
+   * SAME FUNCTION, SAME SET as the execution path, by construction and not by description:
+   *   - shaping  : `normalizeNotificationRecipients` (automation-executor.ts:867, exported for this)
+   *   - roster   : `loadSheetMemberUserIdSet(queryFn, sheetId)` (permission-service.ts:611) — the same
+   *                call `AutomationExecutor.checkNotificationRecipients` and the button route
+   *                (routes/multitable-button.ts:243) make. The executor passes `context.sheetId` (the
+   *                TRIGGERING sheet, which for a rule-driven execution is the sheet the rule is
+   *                registered on); this gate passes that same sheet id.
+   * WHAT THIS DOES AND DOES NOT PROVE: both directions stay time-dependent, because membership can
+   * change between save and fire. A save that passes here can still fail at run time (the recipient was
+   * deactivated since), and a save refused here could become deliverable later (someone grants the
+   * recipient multitable:read). The claim is only the useful one: at SAVE time the author is told,
+   * instead of finding out on the first live trigger with every later action skipped.
+   *
+   * FAIL-CLOSED, three ways: no send_notification ⇒ zero DB reads (an unrelated edit must not pay for,
+   * or be blocked by, a roster read); a roster that resolves to zero rows is the EMPTY set ⇒ every
+   * recipient is outside it; a roster read that THROWS never yields a set ⇒ ROSTER_UNAVAILABLE. No
+   * branch falls through to the write. Missing `queryFn` is a wiring bug (production injects it at
+   * automation-service.ts:1067 from index.ts:3686), never a reason to skip the check.
+   *
+   * VALUES-FREE LOGS: counts only. The rejected ids travel in the 400 body (the author needs them),
+   * never into the server log.
+   */
+  private async assertNotificationRecipientsAtSave(
+    sheetId: string,
+    actionType: string,
+    actionConfig: Record<string, unknown> | null | undefined,
+    actions: ReadonlyArray<AutomationAction> | null | undefined,
+  ): Promise<void> {
+    const groups = collectNotificationRecipientGroupsAtSave(actionType, actionConfig, actions)
+    if (groups.length === 0) return
+
+    // Empty AFTER normalization (missing / non-array / whitespace-only entries) is the execution
+    // path's NO_RECIPIENTS, raised here before any DB read so it costs nothing and never depends on
+    // roster availability.
+    if (groups.some((recipients) => recipients.length === 0)) {
+      throw new AutomationRuleValidationError(AUTOMATION_NO_RECIPIENTS_ERROR, 'NO_RECIPIENTS')
+    }
+
+    const requested: string[] = []
+    const seen = new Set<string>()
+    for (const group of groups) {
+      for (const userId of group) {
+        if (seen.has(userId)) continue
+        seen.add(userId)
+        requested.push(userId)
+      }
+    }
+
+    const queryFn = this.queryFn
+    if (typeof queryFn !== 'function') {
+      logger.warn('[automation.save] recipient roster sink unavailable; rule save refused', {
+        sheetId,
+        requested: requested.length, // counts only — never the ids
+      })
+      throw new AutomationRuleValidationError(AUTOMATION_SAVE_ROSTER_UNAVAILABLE_ERROR, 'ROSTER_UNAVAILABLE')
+    }
+
+    let memberSet: Set<string>
+    try {
+      memberSet = await loadSheetMemberUserIdSet(queryFn, sheetId)
+    } catch (err) {
+      logger.warn('[automation.save] recipient roster unreadable; rule save refused', {
+        sheetId,
+        requested: requested.length,
+        error: err instanceof Error ? err.name : 'unknown',
+      })
+      throw new AutomationRuleValidationError(AUTOMATION_SAVE_ROSTER_UNAVAILABLE_ERROR, 'ROSTER_UNAVAILABLE')
+    }
+
+    const rejected = requested.filter((userId) => !memberSet.has(userId))
+    if (rejected.length > 0) {
+      logger.warn('[automation.save] recipients rejected: outside selectable-people roster', {
+        sheetId,
+        requested: requested.length,
+        rejected: rejected.length, // counts only — the ids go to the AUTHOR, not to the log
+      })
+      throw new AutomationRuleValidationError(
+        automationSaveRecipientNotAuthorizedMessage(rejected),
+        'RECIPIENT_NOT_AUTHORIZED',
+      )
+    }
   }
 
   /**
