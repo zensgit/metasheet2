@@ -848,6 +848,45 @@ export const AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR =
 export const AUTOMATION_NOTIFICATION_SINK_UNAVAILABLE_ERROR =
   '通知无法落库：notification sink unavailable（NOTIFICATION_SINK_UNAVAILABLE）'
 
+/**
+ * F9b r2 (refutation A, minor «错误文案错标»): reading the roster and writing the rows are two stages.
+ * In r1 the roster read sat INSIDE the write try/catch, so an unreadable roster was reported as
+ * “send_notification durable write failed: <driver text>” — the wrong stage, and the only path that
+ * pushed a driver string into `step.error` for a READ. Both stages stay fail-closed (no roster ⇒ no
+ * delivery, ever); r2 only makes the reported stage true and keeps this one values-free.
+ */
+export const AUTOMATION_NOTIFICATION_ROSTER_UNAVAILABLE_ERROR =
+  '通知接收人名册暂时读不到，未发送通知，请稍后重试（ROSTER_UNAVAILABLE）'
+
+/**
+ * F9b r2: the ONE recipient shaping for this action — trim + dedupe, byte-for-byte the button route's
+ * shaping (routes/multitable-button.ts:224-228). Applied ONCE and reused by the membership gate, the
+ * durable write, the emitted payload AND the dry-run preflight, so all four speak about the SAME list
+ * (a duplicate id must never become two notification rows for one person).
+ */
+function normalizeNotificationRecipients(userIds: unknown): string[] {
+  return Array.from(new Set(
+    (Array.isArray(userIds) ? userIds : [])
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ))
+}
+
+/**
+ * F9b r2: outcome of the recipient membership gate — shared by the live path and the dry-run preflight.
+ * A single shape (not a discriminated union) because this package compiles with `strict:false`, where a
+ * boolean discriminant does not narrow.
+ */
+interface NotificationRecipientGate {
+  /** TRUE only when EVERY recipient is inside the roster; both failure modes report false. */
+  ok: boolean
+  /** Values-free operator text; set only when `ok` is false. */
+  error?: string
+  /** Count of refused recipients (all of them when the roster itself was unreadable). */
+  rejected?: number
+}
+
 function simulationDisposition(actionType: AutomationActionType): 'execute' | 'simulate' {
   switch (actionType) {
     case 'condition_branch':
@@ -4352,12 +4391,7 @@ export class AutomationExecutor {
 
     // F9b: normalize ONCE (trim + dedupe, the button route's exact recipient shaping) so the
     // membership check, the durable rows and the emitted payload all speak about the SAME list.
-    const recipients = Array.from(new Set(
-      (Array.isArray(userIds) ? userIds : [])
-        .filter((entry): entry is string => typeof entry === 'string')
-        .map((entry) => entry.trim())
-        .filter(Boolean),
-    ))
+    const recipients = normalizeNotificationRecipients(userIds)
     if (recipients.length === 0) {
       return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR }
     }
@@ -4370,35 +4404,25 @@ export class AutomationExecutor {
       return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NOTIFICATION_SINK_UNAVAILABLE_ERROR }
     }
 
-    try {
-      // F9b §1 RECIPIENT HARD-REJECT (no write). Same resolver, same set, SAME ARGUMENT as the button
-      // route (`loadSheetMemberUserIdSet(query, sheetId)`, routes/multitable-button.ts:243) — one
-      // recipient口径 for both surfaces, no drift. ANY recipient outside the roster fails the WHOLE step:
-      // no partial delivery, no durable row, no emit. An unresolvable roster resolves to the EMPTY set,
-      // so this control is fail-closed by construction.
-      // WIDTH: the roster is the platform selectable-people set, NOT a per-sheet grant — see
-      // AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR above for the exact derivation.
-      // The `context.sheetId` argument is pinned by tests/unit/automation-rule-notification-persist.test.ts
-      // (“roster is resolved for the TRIGGERING sheet” asserts $1 of the roster query), because a roster
-      // read keyed by the wrong id would still answer a plausible list and stay green otherwise.
-      const memberSet = await loadSheetMemberUserIdSet(queryFn, context.sheetId)
-      const nonMemberCount = recipients.filter((userId) => !memberSet.has(userId)).length
-      if (nonMemberCount > 0) {
-        logger.warn('[automation.send_notification] recipients rejected: outside selectable-people roster', {
-          sheetId: context.sheetId,
-          ruleId: context.ruleId,
-          requested: recipients.length,
-          rejected: nonMemberCount, // counts only — never the ids, never the message
-        })
-        return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR }
-      }
+    // F9b §1 RECIPIENT HARD-REJECT (no write) — see checkNotificationRecipients. Fail-closed on BOTH
+    // its branches (outside-roster and roster-unreadable); r2 split it out of the write try/catch so the
+    // reported stage is the stage that broke, and so the DRY RUN can run the identical check read-only.
+    const gate = await this.checkNotificationRecipients(queryFn, recipients, context)
+    if (!gate.ok) {
+      return { actionType: 'send_notification', status: 'failed', error: gate.error }
+    }
 
+    let persisted: number
+    try {
       // F9b §2 DURABLE WRITE FIRST — one `notification.sent` row per recipient through the SAME seam
       // the button route uses (no parallel INSERT, no new table, no dedup ledger borrowed from the
       // button). A missing table or a failing INSERT is NEVER swallowed (no isUndefinedTableError
       // "0 rows = success" here): it throws into the catch below and the step fails, so a
       // `status:'success'` always implies durable rows.
-      await insertRecordSubscriptionNotifications(queryFn, {
+      // r2: `inserted` is the seam's OWN count (record-subscription-service.ts re-trims/re-filters before
+      // it builds rows), so output.persisted is a MEASUREMENT of what was written, not a restatement of
+      // what we asked for.
+      const result = await insertRecordSubscriptionNotifications(queryFn, {
         userIds: recipients,
         sheetId: context.sheetId,
         recordId: context.recordId,
@@ -4406,6 +4430,7 @@ export class AutomationExecutor {
         message,
         actorId: context.actorId ?? null,
       })
+      persisted = result.inserted
     } catch (err) {
       return {
         actionType: 'send_notification',
@@ -4433,9 +4458,67 @@ export class AutomationExecutor {
     return {
       actionType: 'send_notification',
       status: 'success',
-      output: { notifiedUsers: recipients.length, persisted: recipients.length },
+      output: { notifiedUsers: recipients.length, persisted },
     }
   }
+
+  /**
+   * F9b §1 RECIPIENT GATE — the ONE membership check for this action. LIVE PATH ONLY.
+   *
+   * r2 NOTE (refutation A, blocker 2 — why the dry run does NOT call this): the simulate path is a
+   * pinned ZERO-DATABASE path (tests/unit/automation-v1.test.ts asserts `expect(deps.queryFn)
+   * .not.toHaveBeenCalled()` for every simulated step — 14 places, e.g. :679/:805/:1164), so a
+   * read-only roster preflight in simulate cannot be added without relaxing that invariant. The
+   * consequence is stated plainly instead of papered over: a TEST RUN never validates recipients, so a
+   * pre-existing rule aimed at someone outside the roster still test-runs green and only fails on its
+   * first LIVE trigger (and then skips the actions after it). Closing that needs its own slice
+   * (preflight + the zero-DB simulate invariant re-decided together); it is NOT done here.
+   *
+   * Same resolver, same set, SAME ARGUMENT as the button route (`loadSheetMemberUserIdSet(query,
+   * sheetId)`, routes/multitable-button.ts:243) — one recipient口径 for both surfaces, no drift. ANY
+   * recipient outside the roster fails the WHOLE step: no partial delivery, no durable row, no emit.
+   * WIDTH: the roster is the platform selectable-people set, NOT a per-sheet grant — see
+   * AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR above for the exact derivation.
+   * The `context.sheetId` argument is pinned by tests/unit/automation-rule-notification-persist.test.ts
+   * (“roster is resolved for the TRIGGERING sheet” asserts $1 of the roster query), because a roster
+   * read keyed by the wrong id would still answer a plausible list and stay green otherwise.
+   *
+   * FAIL-CLOSED ON BOTH BRANCHES, by two DIFFERENT mechanisms (r2 states them separately because r1's
+   * comment described only the first): a roster that resolves to ZERO ROWS is the EMPTY set, so every
+   * recipient is outside it ⇒ rejected; a roster read that THROWS never produces a set at all ⇒ the
+   * catch below rejects with ROSTER_UNAVAILABLE. Neither branch can fall through to a write.
+   */
+  private async checkNotificationRecipients(
+    queryFn: AutomationDeps['queryFn'],
+    recipients: string[],
+    context: ExecutionContext,
+  ): Promise<NotificationRecipientGate> {
+    let memberSet: Set<string>
+    try {
+      memberSet = await loadSheetMemberUserIdSet(queryFn, context.sheetId)
+    } catch (err) {
+      logger.warn('[automation.send_notification] recipient roster unreadable; delivery refused', {
+        sheetId: context.sheetId,
+        ruleId: context.ruleId,
+        requested: recipients.length, // counts only — never the ids, never the message
+        error: err instanceof Error ? err.name : 'unknown',
+      })
+      return { ok: false, error: AUTOMATION_NOTIFICATION_ROSTER_UNAVAILABLE_ERROR, rejected: recipients.length }
+    }
+
+    const rejected = recipients.filter((userId) => !memberSet.has(userId)).length
+    if (rejected > 0) {
+      logger.warn('[automation.send_notification] recipients rejected: outside selectable-people roster', {
+        sheetId: context.sheetId,
+        ruleId: context.ruleId,
+        requested: recipients.length,
+        rejected, // counts only — never the ids, never the message
+      })
+      return { ok: false, error: AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR, rejected }
+    }
+    return { ok: true }
+  }
+
 
   private async executeSendEmail(
     config: SendEmailConfig,

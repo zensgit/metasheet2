@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   AutomationExecutor,
   AUTOMATION_NO_RECIPIENTS_ERROR,
+  AUTOMATION_NOTIFICATION_ROSTER_UNAVAILABLE_ERROR,
   AUTOMATION_NOTIFICATION_SINK_UNAVAILABLE_ERROR,
   AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR,
   type AutomationDeps,
@@ -40,7 +41,7 @@ interface Harness {
   insertedRows: () => Array<Record<string, unknown>>
 }
 
-function makeHarness(options: { members?: string[]; insertError?: Error } = {}): Harness {
+function makeHarness(options: { members?: string[]; insertError?: Error; rosterError?: Error } = {}): Harness {
   const members = options.members ?? ['u1', 'u2']
   const calls: RecordedCall[] = []
   const order: string[] = []
@@ -49,6 +50,9 @@ function makeHarness(options: { members?: string[]; insertError?: Error } = {}):
   const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
     calls.push({ sql, params })
     if (MEMBER_ROSTER_SQL.test(sql)) {
+      // r2: a roster read that THROWS is a different mechanism from a roster that answers zero rows;
+      // both must fail closed, but they must not report the same stage.
+      if (options.rosterError) throw options.rosterError
       // The roster read is KEYED BY SHEET ID ($1 of listSheetPermissionCandidates). Answering the same
       // names for any argument would let a wrong key (e.g. the rule id) stay green, so this stub behaves
       // like the real query: a roster asked for another sheet comes back EMPTY.
@@ -271,6 +275,80 @@ describe('F9b — rule send_notification persists to the notification centre', (
     expect((roster?.params ?? [])[0]).toBe(SHEET_ID)
     expect(execution.steps[0].status).toBe('success')
     expect(h.insertedRows()[0]?.sheet_id).toBe(SHEET_ID)
+  })
+
+  it('DUPLICATE recipients collapse to ONE row per person (and output.persisted counts written rows)', async () => {
+    // r2 (refutation B, M9): without the trim+dedupe normalisation the same person gets two rows and
+    // NOTHING in this suite went red — the head-line promise ("one row per recipient") was unpinned.
+    const h = makeHarness({ members: ['u1'] })
+    const execution = await new AutomationExecutor(h.deps).execute(
+      notifyRule({ userIds: ['u1', 'u1', '  u1  '], message: 'Ping' }),
+      TRIGGER,
+    )
+
+    expect(execution.steps[0].status).toBe('success')
+    const rows = h.insertedRows()
+    expect(rows).toHaveLength(1)
+    expect(rows[0].user_id).toBe('u1')
+    // output.persisted is the WRITE SEAM's own row count (record-subscription-service re-filters before
+    // it builds rows), so a success can never advertise more notifications than it wrote.
+    expect((execution.steps[0].output as Record<string, unknown>).persisted).toBe(rows.length)
+    // The emitted payload speaks about the SAME de-duplicated list as the rows.
+    expect(h.emit).toHaveBeenCalledWith(
+      'automation.notification',
+      expect.objectContaining({ userIds: ['u1'], message: 'Ping' }),
+    )
+  })
+
+  it('SIMULATE does NOT preflight recipients (STATED GAP): a non-member rule still test-runs GREEN', async () => {
+    // r2 (refutation A, blocker 2) — pinned as a FACT, not papered over. The test-run button is the only
+    // pre-deploy surface and it is deliberately a ZERO-DATABASE path (tests/unit/automation-v1.test.ts
+    // asserts `expect(deps.queryFn).not.toHaveBeenCalled()` for every simulated step — 14 places), so the
+    // F9b recipient gate cannot run there without re-deciding that invariant. Consequence, in one test:
+    // the SAME rule is green in a test run and failed on its first live trigger. Whoever adds the
+    // preflight turns this red and has to re-decide the zero-DB simulate rule at the same time.
+    const dry = makeHarness({ members: ['u1'] })
+    const dryRun = await new AutomationExecutor(dry.deps).execute(
+      notifyRule({ userIds: ['u1', 'u_outsider'], message: 'Ping' }),
+      TRIGGER,
+      undefined,
+      undefined,
+      'simulate',
+    )
+
+    expect(dryRun.status).toBe('success')
+    expect(dryRun.steps[0].simulated).toBe(true)
+    expect(dry.calls).toHaveLength(0) // no roster read, no INSERT — the dry run touches no database
+    expect(dry.emit).not.toHaveBeenCalledWith('automation.notification', expect.anything())
+
+    // ...and the identical rule on a LIVE trigger is refused.
+    const live = makeHarness({ members: ['u1'] })
+    const liveRun = await new AutomationExecutor(live.deps).execute(
+      notifyRule({ userIds: ['u1', 'u_outsider'], message: 'Ping' }),
+      TRIGGER,
+    )
+    expect(liveRun.steps[0].status).toBe('failed')
+    expect(liveRun.steps[0].error).toBe(AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR)
+    expect(live.insertCalls()).toHaveLength(0)
+  })
+
+  it('an UNREADABLE roster fails as ROSTER_UNAVAILABLE — the read stage, no driver text, no write', async () => {
+    // r2 (refutation A, minor "错误文案错标"): r1 kept the roster read inside the write try/catch, so this
+    // case reported "durable write failed: <driver text>" — wrong stage, and the only READ path that
+    // pushed a driver string into the verbatim-rendered step.error.
+    const h = makeHarness({ members: ['u1'], rosterError: new Error('canceling statement due to user request') })
+    const execution = await new AutomationExecutor(h.deps).execute(
+      notifyRule({ userIds: ['u1'], message: 'Ping' }),
+      TRIGGER,
+    )
+
+    expect(execution.steps[0].status).toBe('failed')
+    expect(execution.steps[0].error).toBe(AUTOMATION_NOTIFICATION_ROSTER_UNAVAILABLE_ERROR)
+    expect(execution.steps[0].error).toContain('ROSTER_UNAVAILABLE')
+    expect(execution.steps[0].error).not.toContain('durable write failed')
+    expect(execution.steps[0].error).not.toContain('canceling statement')
+    expect(h.insertCalls()).toHaveLength(0)
+    expect(h.emit).not.toHaveBeenCalledWith('automation.notification', expect.anything())
   })
 
   it('DUPLICATE SEMANTICS, STATED: the rule path has no dedup ledger — two runs write two sets of rows', async () => {
