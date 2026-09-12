@@ -1343,6 +1343,8 @@ async function main() {
   await testDryRunRevisionIsBlindToTheOrderInsideADuplicateKeyGroup()
   await testDryRunRevisionIsBlindToTheOrderOfSeveralDuplicateGroups()
   await testDryRunRevisionIsBlindToRowErrorOrder()
+  // X5 — deterministic SELECTION at the cap (the residual X4 measured and could not close here).
+  await testATruncatedRowErrorSamplePlansTheSameWayInEitherSourceOrder()
   await testTheCanonicalHashOrderNeverReordersWhatGetsWritten()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
@@ -2481,6 +2483,113 @@ async function testDryRunRevisionIsBlindToRowErrorOrder() {
     forward.revision,
     'the same retained row-error sample in two orders hashes to ONE revision',
   )
+}
+
+// X5. THE RESIDUAL R-f NAMED, and the 409 a canonical hash order could not remove.
+//
+// Past the cap the rowError array is a SAMPLE, and until X5 it was the sample the source happened
+// to produce first. With one slot, a batch holding one bad quantity and one missing part kept the
+// bad quantity read one way and the missing part read the other — and the planner emits one
+// manual_confirm decision per RETAINED entry, so the two dry-runs previewed genuinely different
+// plans (`conflictTypes` [add_missing, invalid_quantity] vs [add_missing, missing_component]).
+// Different plans MUST hash differently; the fix had to be in the expander's SELECTION, which now
+// keeps the N entries that sort first by row identity (stock-preparation-bom-expansion.cjs,
+// ROW_ERROR_IDENTITY_FIELDS). This is the end-to-end statement of that: same batch, two source
+// orders, one revision, one conflictTypes, and an apply that goes through.
+//
+// `rowErrorLimit: 1` is a REAL action-config key (testRowErrorLimitIsAConditionalActionConfigKey),
+// not a test hook — it is how a two-row fixture stands in for a 40k-position project past 5000.
+function x5BrokenBatchPlmData() {
+  return basePlmData({
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2' },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: 'not-a-number' },
+      { order_id: 'ORDER-1', part_id: 'PART-MISSING', quantity: '1' },
+    ],
+  })
+}
+
+async function testATruncatedRowErrorSamplePlansTheSameWayInEitherSourceOrder() {
+  const action = baseAction({ rowErrorLimit: 1 })
+  const forward = await x4DryRun({
+    action,
+    plmData: x5BrokenBatchPlmData(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  const reshuffled = await x4DryRun({
+    action,
+    plmData: reshuffledPlmData(x5BrokenBatchPlmData()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+
+  // The cap fired, and the overflow facts are the TRUE totals on both sides — the sample lost an
+  // entry, the counts lost nothing.
+  assert.equal(forward.evidence.expansion.rowErrorsTruncated, true, 'one slot for two defects: the cap really fired')
+  assert.equal(forward.evidence.expansion.rowErrorsRetained, 1)
+  assert.deepEqual(
+    forward.evidence.expansion.rowErrorTypeCounts,
+    { invalid_quantity: 1, missing_component: 1 },
+    'both defects are counted however few were retained',
+  )
+  // The overflow stanza and the type vocabulary, key by key. NOT the whole expansion stanza: the
+  // read trace (`readDiagnostics`) records the per-object row counts IN READ ORDER and legitimately
+  // differs between the two orders — it is a trace of the reads, not a projection of the batch, and
+  // the revision does not hash it.
+  for (const key of ['rowErrorsTruncated', 'rowErrorsTotal', 'rowErrorsRetained', 'rowErrorTypeCounts', 'errorTypes']) {
+    assert.deepEqual(
+      reshuffled.evidence.expansion[key],
+      forward.evidence.expansion[key],
+      `the overflow stanza is order-blind: ${key}`,
+    )
+  }
+
+  // THE PLAN — the thing X4 could not make agree, because the two plans really were different.
+  assert.deepEqual(
+    forward.evidence.plan.conflictTypes,
+    ['add_missing', 'invalid_quantity'],
+    'the retained entry is the identity-first one, so the plan is the same plan in either order',
+  )
+  assert.deepEqual(reshuffled.evidence.plan.conflictTypes, forward.evidence.plan.conflictTypes)
+  assert.deepEqual(reshuffled.counts, forward.counts)
+  assert.equal(reshuffled.revision, forward.revision, 'one batch, two source orders, ONE revision')
+
+  // End to end: dry-run reads order A, apply re-expands in order B and must still recognise its own
+  // token. Before X5 this was `does not match the current dry-run revision` — a 409 on a batch
+  // nobody had touched.
+  const storage = createMemoryStorage()
+  const records = createRecordsApi()
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(x5BrokenBatchPlmData()).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'manual_confirm_required')
+  assert.equal(dryRun.revision, forward.revision)
+
+  const result = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(reshuffledPlmData(x5BrokenBatchPlmData())).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'write',
+    // The hold is REAL and stays a hold — this test is about the token surviving the reshuffle, not
+    // about waving the manual-confirm gate through.
+    acceptManualConfirmHold: true,
+  })
+  assert.equal(result.status, 'partial', 'the apply runs instead of 409ing on a batch nobody touched')
+  assert.equal(Number(result.apply.counts.created || 0), 1, 'the add row is written')
+  assert.equal(Number(result.apply.counts.held || 0), 1, 'and the manual-confirm row is still held')
+  assert.equal(Number(result.apply.counts.failed || 0), 0)
 }
 
 // R-g. The other half of the bound: the canonical order is for the HASH ONLY. `computeDryRun`

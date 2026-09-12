@@ -21,8 +21,10 @@ const {
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
 
 // F1c: the PURE 老系统 rules, exposed on __internals so a test can pin them without an adapter.
+// X5: `createRowErrorCollector` rides the same seam, so the cap's MEMORY bound can be asserted on
+// the structure itself rather than only through the length of an expansion's output.
 const {
-  __internals: { dashHierarchyRelationship },
+  __internals: { dashHierarchyRelationship, createRowErrorCollector },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
 
 // The C3 planner, required HERE so one test can carry a declared source column the whole way:
@@ -1043,18 +1045,24 @@ async function testTheCapCostsAWholePartNeverAWrongCount() {
 // blank fails at `toKey` and never reaches `readPart`, so N rowErrors cost N array entries and zero
 // extra source reads. That keeps a 6001-position fixture a sub-second test.
 // ---------------------------------------------------------------------------------------------
-function bomOfBlankComponentIds(count, { badQuantityPositions = 0 } = {}) {
+function bomOfBlankComponentIds(count, { badQuantityPositions = 0, quantitiesFirst = false } = {}) {
   const data = baseData()
   data.DN_PDM_OrderDetailInfo = [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }]
-  const details = []
+  const blanks = []
   for (let i = 0; i < count; i += 1) {
-    details.push({ bom_pid: 'BOM-A', part_id: '', Bom_ExAttr1: '1', sort_id: details.length })
+    blanks.push({ bom_pid: 'BOM-A', part_id: '', Bom_ExAttr1: '1' })
   }
-  // A SECOND type, appended after the first block, so the per-type totals have something to be wrong
-  // about and the retained prefix demonstrably drops a whole type when the first block overflows.
+  // A SECOND type, so the per-type totals have something to be wrong about and the retained sample
+  // demonstrably drops a whole type when the other block fills the cap.
+  const badQuantities = []
   for (let i = 0; i < badQuantityPositions; i += 1) {
-    details.push({ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: 'not-a-number', sort_id: details.length })
+    badQuantities.push({ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: 'not-a-number' })
   }
+  // X5 — THE PRODUCTION ORDER, made a knob. The expander walks `DN_PDM_BomDetailsInfo` in the order
+  // the source hands it back, so which type it meets FIRST is a property of the source, not of the
+  // batch. Flipping the two blocks is the whole of the two-order probe below.
+  const details = (quantitiesFirst ? badQuantities.concat(blanks) : blanks.concat(badQuantities))
+    .map((detail, index) => ({ ...detail, sort_id: index }))
   data.DN_PDM_BomDetailsInfo = details
   return data
 }
@@ -1107,23 +1115,36 @@ async function testRowErrorCapBoundary() {
   }
 
   // THE COUNTS ARE PER TYPE, and a type whose every occurrence was dropped still has to be named.
-  // 5000 blanks fill the array exactly; the 7 unparseable quantities that follow are all refused a
-  // slot, so `rowErrors` contains not one `invalid_quantity` — and the summary must still report it.
-  const mixed = await expandBlankComponentBom(ROW_ERROR_LIMIT, { badQuantityPositions: 7 })
+  //
+  // X5 CHANGED WHICH TYPE THAT IS, and nothing else here. The cap keeps the N entries that sort
+  // FIRST by row identity, so the type that loses every slot is the one that sorts LAST —
+  // `missing_component_source_id`, not `invalid_quantity`. The fixture is flipped to match (5000
+  // unparseable quantities fill the sample, 7 blanks are refused); the claim under test is
+  // unchanged, and it is now a claim about the SET rather than about who arrived first.
+  const mixed = await expandBlankComponentBom(7, { badQuantityPositions: ROW_ERROR_LIMIT })
   assert.equal(mixed.rowErrors.length, ROW_ERROR_LIMIT)
   assert.equal(
-    mixed.rowErrors.some((entry) => entry.type === 'invalid_quantity'),
+    mixed.rowErrors.some((entry) => entry.type === 'missing_component_source_id'),
     false,
-    'the retained sample contains no invalid_quantity at all',
+    'the retained sample contains no missing_component_source_id at all',
   )
   assert.deepEqual(mixed.summary.rowErrorTypeCounts, {
-    invalid_quantity: 7,
-    missing_component_source_id: ROW_ERROR_LIMIT,
-  }, 'but the per-type totals count the seven the array never saw')
+    invalid_quantity: ROW_ERROR_LIMIT,
+    missing_component_source_id: 7,
+  }, 'but the per-type totals count the seven the sample never kept')
   assert.ok(
-    mixed.summary.errorTypes.includes('invalid_quantity'),
+    mixed.summary.errorTypes.includes('missing_component_source_id'),
     'and errorTypes names the type whose every occurrence the cap dropped — otherwise the summary would say the project has no such defect',
   )
+  // …and the SAME seven are dropped when the source hands the two blocks back the other way round.
+  // Before X5 this was the opposite sample entirely: the blanks came first, so they took every slot
+  // and `invalid_quantity` was the type that vanished.
+  const mixedReversed = await expandBlankComponentBom(7, {
+    badQuantityPositions: ROW_ERROR_LIMIT,
+    quantitiesFirst: true,
+  })
+  assert.deepEqual(mixedReversed.rowErrors, mixed.rowErrors, 'the retained sample is the same sample in either production order')
+  assert.deepEqual(mixedReversed.summary, mixed.summary, 'and so is the whole summary')
 
   // Evidence stays values-free: integers, a boolean, and the type tokens `errorTypes` already
   // publishes. Nothing customer-shaped can ride the stanza.
@@ -1199,6 +1220,161 @@ async function testOverTheCapIsDeterministicAndDistinguishable() {
     revisionOf(first),
     'and that alone must move the revision — otherwise two different overflowing projects share a dry-run token',
   )
+}
+
+// ---------------------------------------------------------------------------------------------
+// X5: WHICH entries the cap keeps. D-C bounded the sample and X4 took the truncated sample out of
+// the revision hash; what survived both was that the SELECTION followed the source's reading order,
+// so two reads of one batch kept entries of different TYPES, planned different conflictTypes and
+// 409'd. The four tests below are the whole claim: (①) under the cap nothing moves, (②) past it the
+// surviving set is order-blind, (③) the totals stay true, (④) the structure stays bounded by N.
+// ---------------------------------------------------------------------------------------------
+
+// ① THE ASYMMETRY, PINNED. Under the cap the sample is the WHOLE set, so no selection is happening
+// and the entries stay in TRAVERSAL order. Sorting them too would be tidier and would move the
+// revision of every deployment that never overflowed anything (the untruncated array is still
+// hashed whole — X4-b only drops the truncated one), so it is deliberately not done. This test is
+// what fails if a later cut decides to canonicalise the under-cap array as well.
+async function testUnderTheCapTheSampleStaysInTraversalOrder() {
+  const blanksFirst = await expandBlankComponentBom(3, {
+    badQuantityPositions: 2,
+    expand: { rowErrorLimit: 10 },
+  })
+  assert.deepEqual(
+    blanksFirst.rowErrors.map((entry) => entry.type),
+    ['missing_component_source_id', 'missing_component_source_id', 'missing_component_source_id', 'invalid_quantity', 'invalid_quantity'],
+    'under the cap the sample is in the order the expander met the defects, NOT in sort-key order',
+  )
+  assert.deepEqual(
+    Object.keys(blanksFirst.summary).filter((key) => key.startsWith('rowError')),
+    [],
+    'and an under-cap expansion still mounts no overflow stanza',
+  )
+
+  // The other production order is a DIFFERENT array here, and that is correct: nothing was dropped,
+  // so both arrays carry the same five entries and the revision hasher is what makes the ORDER
+  // immaterial (X4's canonicalHashOrder). X5 is about the SELECTION, and there is none to make.
+  const quantitiesFirst = await expandBlankComponentBom(3, {
+    badQuantityPositions: 2,
+    quantitiesFirst: true,
+    expand: { rowErrorLimit: 10 },
+  })
+  assert.deepEqual(
+    quantitiesFirst.rowErrors.map((entry) => entry.type),
+    ['invalid_quantity', 'invalid_quantity', 'missing_component_source_id', 'missing_component_source_id', 'missing_component_source_id'],
+    'the under-cap array follows the source order on this side too',
+  )
+  assert.equal(
+    revisionOf(quantitiesFirst),
+    revisionOf(blanksFirst),
+    'and the two under-cap orders still hash to ONE revision — that half was already X4',
+  )
+}
+
+// ② + ③ THE JUDGE'S PROBE, generalised. One batch, two source orders, a cap small enough that the
+// selection is forced: the retained entries must be the SAME entries, and the totals must stay the
+// true totals of the whole batch rather than of the sample.
+async function testTheTruncatedSampleIsTheSameSetInEitherProductionOrder() {
+  const blanks = 6
+  const badQuantities = 5
+  const total = blanks + badQuantities
+  const trueTypeCounts = { invalid_quantity: badQuantities, missing_component_source_id: blanks }
+
+  // rowErrorLimit=1 is the裁判 probe verbatim: before X5 one order kept the blank and the other kept
+  // the bad quantity, so the plans disagreed on conflictTypes and apply 409'd.
+  for (const rowErrorLimit of [1, 2, 5, 6, 10]) {
+    const label = `rowErrorLimit=${rowErrorLimit}`
+    const forward = await expandBlankComponentBom(blanks, {
+      badQuantityPositions: badQuantities,
+      expand: { rowErrorLimit },
+    })
+    const reversed = await expandBlankComponentBom(blanks, {
+      badQuantityPositions: badQuantities,
+      quantitiesFirst: true,
+      expand: { rowErrorLimit },
+    })
+
+    assert.equal(forward.rowErrors.length, rowErrorLimit, `${label}: the sample is the cap`)
+    assert.deepEqual(reversed.rowErrors, forward.rowErrors, `${label}: and it is the SAME sample in either source order`)
+    assert.equal(revisionOf(reversed), revisionOf(forward), `${label}: so both dry-runs carry one revision`)
+
+    // ③ The counts are of the BATCH, not of the sample, on both sides.
+    assert.equal(forward.summary.rowErrorsTotal, total, `${label}: the total is the truth`)
+    assert.equal(forward.summary.rowErrorsRetained, rowErrorLimit, `${label}: alongside what was kept`)
+    assert.equal(forward.summary.rowErrorsTruncated, true, `${label}: and the overflow is stated`)
+    assert.deepEqual(forward.summary.rowErrorTypeCounts, trueTypeCounts, `${label}: per-type totals count every occurrence`)
+    assert.deepEqual(reversed.summary, forward.summary, `${label}: the summary is order-blind too`)
+    assert.deepEqual(
+      forward.summary.errorTypes,
+      ['invalid_quantity', 'missing_component_source_id'],
+      `${label}: errorTypes still names BOTH types, including one the sample may hold none of`,
+    )
+  }
+
+  // The composition itself, stated rather than implied: with one slot the surviving entry is the
+  // one the ROW IDENTITY orders first — invalid_quantity — whichever block the source read first.
+  const oneSlot = await expandBlankComponentBom(blanks, {
+    badQuantityPositions: badQuantities,
+    expand: { rowErrorLimit: 1 },
+  })
+  assert.deepEqual(oneSlot.rowErrors.map((entry) => entry.type), ['invalid_quantity'])
+}
+
+// ④ THE MEMORY BOUND, which is the reason "collect everything, then sort and slice" is not the
+// implementation. Asserted twice: through an expansion (50 defects, cap 3) and directly on the
+// collector, where an occupancy that ever exceeds the cap is visible even though the OUTPUT is the
+// same three entries either way.
+//
+// WHAT THIS DOES NOT PROVE, stated rather than implied: a degenerate collector that buffered every
+// entry AND reported a capped `size()` would be indistinguishable from outside — its output, its
+// summary and its revision would all match. Measured: mutating the collector into "push everything,
+// slice in finalize" turns this suite red at the first cap test (`rowErrorsRetained` stops being
+// the retained count); doing the same AND capping the reported size leaves the whole suite green.
+// The O(N) ceiling is therefore structural — `entries` is pushed to only while it is SHORTER than
+// `limit`, one line in `createRowErrorCollector` — and this test guards the reachable form of the
+// regression, not the adversarial one.
+async function testTheTruncatedSampleNeverOutgrowsTheCap() {
+  const result = await expandBlankComponentBom(45, {
+    badQuantityPositions: 5,
+    expand: { rowErrorLimit: 3 },
+  })
+  assert.equal(result.summary.rowErrorsTotal, 50, '50 defects were produced')
+  assert.equal(result.rowErrors.length, 3, 'and exactly 3 survived')
+  assert.deepEqual(
+    result.rowErrors.map((entry) => entry.type),
+    ['invalid_quantity', 'invalid_quantity', 'invalid_quantity'],
+    'the survivors are the sort-key-first 3 — the 45 blanks arrived first and still lost',
+  )
+  assert.deepEqual(result.summary.rowErrorTypeCounts, { invalid_quantity: 5, missing_component_source_id: 45 })
+
+  // Directly on the seam. The 47 entries that lose are offered FIRST, so a collector that grew to
+  // hold them all before trimming would be caught by the size assertion rather than by the output.
+  const collector = createRowErrorCollector(3)
+  const winner = { type: 'invalid_quantity', field: 'Bom_ExAttr1', depth: 1, relation: 'child' }
+  const loser = { type: 'missing_component_source_id', field: 'part_id', depth: 1 }
+  let peak = 0
+  for (let index = 0; index < 47; index += 1) {
+    collector.add({ ...loser })
+    peak = Math.max(peak, collector.size())
+  }
+  for (let index = 0; index < 3; index += 1) {
+    collector.add({ ...winner })
+    peak = Math.max(peak, collector.size())
+  }
+  assert.equal(peak, 3, 'the collector never holds more than the cap, not even for one add')
+  assert.deepEqual(collector.finalize(), [winner, winner, winner], 'and the three it kept are the three that sort first')
+
+  // The key is ROW IDENTITY, not arrival: two entries of one type are ordered by `path`, and the
+  // smaller path wins whichever of them was offered first.
+  for (const order of [['["Z"]', '["A"]'], ['["A"]', '["Z"]']]) {
+    const paths = createRowErrorCollector(1)
+    for (const pathToken of order) paths.add({ type: 'missing_component', path: pathToken, depth: 1 })
+    assert.deepEqual(
+      paths.finalize().map((entry) => entry.path),
+      ['["A"]'],
+      `offered as ${order.join(' then ')}, the identity-first entry is the one kept`,
+    )
+  }
 }
 
 // Configuration may move the cap, and only within reach of the ceiling. Enforcement lives in the
@@ -1607,6 +1783,9 @@ async function main() {
   await testRowErrorCapBoundary()
   await testUnderTheCapIsByteIdenticalToAnUncappedExpansion()
   await testOverTheCapIsDeterministicAndDistinguishable()
+  await testUnderTheCapTheSampleStaysInTraversalOrder()
+  await testTheTruncatedSampleIsTheSameSetInEitherProductionOrder()
+  await testTheTruncatedSampleNeverOutgrowsTheCap()
   await testRowErrorLimitIsConfigurableUnderACeiling()
   await testMissingComponentProbeCountSurvivesTheRowErrorCap()
   await testMissingComponentDetailNeverReachesTheHashedSurfaces()
