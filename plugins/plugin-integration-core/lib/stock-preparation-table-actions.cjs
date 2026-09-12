@@ -1515,9 +1515,14 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       duplicatePolicyReview: review,
       installedFieldProperties,
       // F1c/F1c-b: the DECLARED extension band. The planner derives 当前组件排序号 / 父组件排序号 /
-      // 名称及规格 / 父组件图号 / 父组件名称 into pack columns only when they are on this list —
-      // which is exactly the list `assertTargetFieldMapCompleteness` already forces the target's
-      // fieldIdMap to bind, so a derived value can never reach the writer as an unbound `ext_` id.
+      // 名称及规格 / 父组件图号 / 父组件名称 into pack columns only when they are on this list.
+      // IN EXPLICIT BINDING MODE that list is exactly the one `assertTargetFieldMapCompleteness`
+      // already forces the target's fieldIdMap to bind, so a derived value cannot reach the writer
+      // as an unbound `ext_` id. In implicit mode the claim does not hold: that check returns early
+      // (:559 `if (!targetFieldMapHasExplicitBindings(action.target.fieldIdMap)) return`) and the
+      // writer's refusal is gated the same way (stock-preparation-apply-writer.cjs:146
+      // `if (explicit && ...)`), so the logical id passes through instead of failing — there the
+      // backstop is the planner's other gate, `pickFields`' pack-aware writable band.
       extensionFieldIds: action.extensionFieldIds,
       // W4 carry: threaded from the deploy-time action config (undefined when the
       // config never opted in — the planner is then byte-identical to pre-wiring).

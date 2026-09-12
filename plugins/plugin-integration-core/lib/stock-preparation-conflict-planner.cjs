@@ -1051,10 +1051,13 @@ function pickFields(row, fields) {
 // F1c-b — 父组件图号 / 父组件名称 的**客户包**那一半(`ext_parentDrawingNo` / `ext_parentName`).
 //
 // 缺口:装了包的部署上这两列与模板列 `parentComponentCode` / `parentComponentName` 同名同义,
-// 模板列 F1c 之后按老系统口径有值,包列(中文名、人真正看的那两列)一行都没有。这条拉取链上
-// 能往 ext_ 列写值的只有两处:部署自己的 ext 映射(`applyExtFieldMapping`)和 F1c 起本函数
-// 派生的那三列 —— 前者读的是 PART 行,而父件这一侧展开层只发出一个 OBJ_ID,任何 part 列映射
-// 都够不着它;后者到今天为止不含这两列。所以它们不是"没配",是配了也填不上。
+// 模板列 F1c 之后按老系统口径有值,包列(中文名、人真正看的那两列)一行都没有。**在展开→规划
+// 这一段上、对 `plm_system` 归属的 ext_ 列**,能往里写值的只有两处:部署自己的 ext 映射
+// (`applyExtFieldMapping`)和 F1c 起本函数派生的那三列 —— 前者读的是 PART 行,而父件这一侧展开层
+// 只发出一个 OBJ_ID,任何 part 列映射都够不着它;后者到今天为止不含这两列。所以它们不是"没配",
+// 是配了也填不上。(这句有作用域,别当全集读:W4 carry 会把**人工归属**的 ext_ 列从上一批存量行
+// 抄进新的 add 记录,见 stock-preparation-carry-policy.cjs 的 carry 选取那一带;那条路不经过本
+// 函数,也碰不到这两列 —— 包把它们声明成 plm_system。)
 //
 // 同源而不是同规则:值取的就是下面刚写进 `out` 的那两个模板列值本身(见 denormalizedPlmFields),
 // 不存在第二份取值逻辑可以漂移,所以**凡是本函数派生出来的行**,两列与模板列逐行相等。模板列没写
@@ -1122,10 +1125,21 @@ function firstPresentValue(row, keys) {
 // target does not bind would therefore turn "this column stays empty" into "this project cannot be
 // applied at all".
 //
-// `extensionFieldIds` is the action's DECLARED extension band — the exact list
-// `assertTargetFieldMapCompleteness` requires the target's fieldIdMap to bind. FAIL-CLOSED: a
-// caller that passes nothing derives nothing, so a future call site that forgets to thread it
-// leaves those five columns empty instead of breaking apply.
+// `extensionFieldIds` is the action's DECLARED extension band. IN EXPLICIT BINDING MODE
+// (`target.fieldIdMap` carries explicit bindings) it is the exact list
+// `assertTargetFieldMapCompleteness` requires that map to bind — declaring without binding is an
+// up-front 422, so on those deployments "declared" really does mean "bound".
+//
+// NOT UNCONDITIONAL. In implicit mode that whole guarantee is off: the completeness check returns
+// early (stock-preparation-table-actions.cjs:559 `if (!targetFieldMapHasExplicitBindings(...))
+// return`) and the writer's hard refusal is gated on the same flag
+// (stock-preparation-apply-writer.cjs:146 `if (explicit && isTenantExtensionField(field))`), so a
+// logical `ext_` id passes through as-is instead of failing. What keeps a derived value off those
+// tables is the OTHER gate on its own: the pack-aware writable band `pickFields` applies below
+// (pack not installed / column not plm_system-writable => not one character is written).
+//
+// FAIL-CLOSED: a caller that passes nothing derives nothing, so a future call site that forgets to
+// thread it leaves those five columns empty instead of breaking apply.
 function canDeriveExtensionField(fieldId, declaredExtensionFieldIds) {
   return declaredExtensionFieldIds instanceof Set && declaredExtensionFieldIds.has(fieldId)
 }
@@ -1136,6 +1150,13 @@ function denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
   // buildParentIndex keys on `optionalString(componentSourceId)`, i.e. trimmed non-empty STRINGS
   // only. The lookup mirrors that exactly rather than coercing, so the two can never disagree
   // about which ids are joinable.
+  //
+  // FIRST OCCURRENCE WINS when the same 父件 appears more than once in a batch (it does — one
+  // component can sit under several paths): the index is built with
+  // `if (sourceId && !index.has(sourceId))` (stock-preparation-expansion-snapshot-mapper.cjs:133),
+  // so a later occurrence never replaces an earlier one. The part code/name are identical across
+  // every path a component appears on, and BOTH the template columns and the two pack columns read
+  // this one index — so the choice cannot make 包列 and 模板列 disagree.
   if (parentIndex && typeof parentSourceId === 'string' && parentSourceId.trim() !== '') {
     const parent = parentIndex.get(parentSourceId.trim())
     if (parent) {

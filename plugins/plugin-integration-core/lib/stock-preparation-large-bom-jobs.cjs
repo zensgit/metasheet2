@@ -1377,10 +1377,19 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     // OPTIONAL pack-aware ownership projection, threaded (never fetched — this module
     // does no field I/O). Omitted => the frozen-template bands, i.e. today's behaviour.
     installedFieldProperties: input.installedFieldProperties,
-    // F1c: same DECLARED extension band as the interactive path, taken from the job's stored
-    // action snapshot (`cloneJson(action)`) — a background apply must fill the same three pack
-    // columns an interactive one does, or one project would carry different columns depending on
-    // how big its BOM is.
+    // F1c/F1c-b: same DECLARED extension band as the interactive path, taken from the job's stored
+    // action snapshot (`cloneJson(action)`) — a background apply must fill the same FIVE pack
+    // columns an interactive one does (F1c: 当前组件排序号 / 父组件排序号 / 名称及规格; F1c-b:
+    // 父组件图号 / 父组件名称), or one project would carry different columns depending on how big
+    // its BOM is.
+    //
+    // DECLARED, NOT YET LANDED on this path. The declaration below is one of two halves; the other
+    // is `installedFieldProperties` just above, and the large-BOM HTTP routes do not pass it
+    // (`resolveInstalledFieldProperties` appears only on the interactive routes) — so the band this
+    // module plans against is template-only and `pickFields` leaves every `ext_` id outside it.
+    // Today a project that goes down the background path therefore still gets NONE of the five
+    // columns on its sheet; the tests here prove the planner-level wiring, not the route. Wiring
+    // that route is an owner item (F1c's pre-existing gap, carried into F1c-b).
     extensionFieldIds: job.actionSnapshot && job.actionSnapshot.extensionFieldIds,
     // W4 carry: threaded from the job's stored action snapshot (cloneJson of the
     // normalized deploy config). Absent => byte-identical pre-wiring planning.

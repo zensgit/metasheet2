@@ -1424,6 +1424,59 @@ function testParentPackColumnsNeedBothTheDeclarationAndThePack() {
     )
   }
   assert.equal(noPack.summary.plmSystemFields.includes('ext_parentDrawingNo'), false, '没装包 ⇒ 可写 band 里没有这两列')
+
+  // ③ 声明是**逐列**的:只声明两列中的一列 ⇒ 只派生那一列,另一列一个键都不写。
+  //    ①② 两段是 all / none 两个**对称**形状,「只要传了非空数组就把登记表里的列全派生」这种
+  //    整批放行的接线在它们身上判据恒等 ⇒ 变异存活(终审 J11_PARTIAL)。现网真正可达的正是不
+  //    对称形状:222 上的 action.extensionFieldIds 是一份 durable JSON,旧配置只含 F1c 那三列时
+  //    这两列一个也不该冒出来 —— 冒出来就是往 target 的 fieldIdMap 没绑的 ext_ id 上写,
+  //    apply-writer 硬拒整行("这列空着"升级成"这个项目根本 apply 不了")。两个方向各跑一次,
+  //    照 testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull 那条不对称用例的形状。
+  const DERIVED_FOR_CHILD_A = {
+    ext_parentDrawingNo: 'TZ-0001',
+    ext_parentName: '主体组件 DN1200',
+  }
+  const TEMPLATE_COLUMN_OF = {
+    ext_parentDrawingNo: 'parentComponentCode',
+    ext_parentName: 'parentComponentName',
+  }
+  for (const [declaredId, undeclaredId] of [
+    ['ext_parentDrawingNo', 'ext_parentName'],
+    ['ext_parentName', 'ext_parentDrawingNo'],
+  ]) {
+    const partial = planWithParentPackColumns({
+      expandedRows: batch.rows,
+      extensionFieldIds: [declaredId],
+      runId: 'run-parent-pack-partial',
+    })
+    const partialAdds = byDecision(partial, DECISIONS.ADD)
+    assert.equal(partialAdds.length, 9, '只声明一列不改变 add 的条数')
+    const partialChild = partialAdds.find((d) => d.record.componentSourceId === 'PART-CHILD').record
+    assert.equal(
+      partialChild[declaredId],
+      DERIVED_FOR_CHILD_A[declaredId],
+      '只声明了 ' + declaredId + ' ⇒ 这一列照派生',
+    )
+    for (const decision of partialAdds) {
+      const record = decision.record
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(record, undeclaredId),
+        false,
+        record.componentSourceId + ': 没声明 ' + undeclaredId + ' ⇒ 无键 —— 不是空串,也不能被另一列的声明捎带出来',
+      )
+      // 被声明的那一列仍然只跟着它自己的模板列走:模板列在它就在,模板列缺席它也缺席。
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(record, declaredId),
+        Object.prototype.hasOwnProperty.call(record, TEMPLATE_COLUMN_OF[declaredId]),
+        record.componentSourceId + ': ' + declaredId + ' 与 ' + TEMPLATE_COLUMN_OF[declaredId] + ' 要么都写要么都不写',
+      )
+      assert.deepEqual(
+        Object.keys(record).filter((key) => key.startsWith('ext_') && key !== declaredId),
+        [],
+        record.componentSourceId + ': 只声明 ' + declaredId + ' ⇒ 记录上不会冒出第二个 ext_ 键',
+      )
+    }
+  }
 }
 
 // **本次拉取带上来的**值(部署自己的 ext 映射测到的)永远优先;派生的从不覆盖这一次测得的值。
@@ -1640,8 +1693,16 @@ function testExistingRowsGetThePackColumnsAsAPlainUpdate() {
         'hand-authored: 真正的人工列(notes)不进 patch,一字不动',
       )
 
-      // 唯一挡得住的那条路:包把这一列声明成 human_preserved ⇒ 它离开 plm_system 可写 band,
-      // 手填值活下来(派生也一并停掉 —— 这是包声明的取舍,不是这段代码的开关)。
+      // **经包安装器安装的列**只有这一条路挡得住:包把这一列声明成 human_preserved ⇒ 它离开
+      // plm_system 可写 band,手填值活下来(派生照样在内存里跑,只是 pickFields 一个字也不往表上
+      // 写 —— 这是包声明的取舍,不是这段代码的开关)。
+      //
+      // band 本身认两条路(derivePackAwarePlmWritableFields:(1) `preserveOnRefresh === true` 显式
+      // 钉、(2) `ownership === human_preserved` 兜底,见 lib 里 'preserve_on_refresh_pinned' /
+      // 'human_preserved_ownership' 两个 reason),这里一次改了两个键,所以钉住的是 (1) 先命中。
+      // 走包这条路两者必须一致(preserveOnRefresh 由 ownership 推导,安装器拒掉不一致的 stanza),
+      // 但绕过安装器直接把字段属性 patch 成 preserveOnRefresh:true 同样离开可写 band —— "唯一"
+      // 说的是包声明这一层,不是 band 那一层。
       const preservedPlan = planStockPreparationConflicts({
         expandedRows: [batch.parentA, batch.childA],
         existingRows: [{ ...batch.parentA }, existingChild],
