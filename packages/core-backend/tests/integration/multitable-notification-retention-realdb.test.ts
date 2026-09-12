@@ -96,19 +96,47 @@ describeIfDatabase('E 通知保留期清理 (real DB)', () => {
     await cleanup()
   })
 
-  test('有界批量:5 条积压 + batchSize=2/单轮 1 批 ⇒ 一轮只删 2,剩下的留给下一轮', async () => {
+  /**
+   * 断言口径照本文件头 :10-12:sweep 是**表级**的,窗口里可能夹着共享测试库里别的用例留下的老
+   * 通知行,而 `ORDER BY created_at LIMIT $2` 先删的是**全表最老**的那些 —— 不一定是我这张 sheet
+   * 的。所以这里不能写整表的恰好计数(原来的 `first.deleted === 2` / `toHaveLength(3)` /
+   * `second.deleted === 3` 在有遗留行的库上会假红),只能写:
+   *   (a) 单轮**上界**:一轮最多 batchSize × maxBatchesPerRun 行 —— 这才是本用例真正要钉的守卫,
+   *       去掉单轮批数上限的变异体在这里仍然会红;
+   *   (b) 本 sheet 作用域的**存活行集合**:我造的行按轮递减、最终一条不剩、且从不冒出新行。
+   */
+  test('有界批量:5 条积压 + batchSize=2/单轮 1 批 ⇒ 一轮最多带走 2 条,剩下的留给下一轮', async () => {
     await cleanup()
     for (let i = 0; i < 5; i++) await insertNotification(`backlog${i}`, 400)
+    const before = await rowIds()
+    expect(before).toHaveLength(5)
 
     const first = await sweepNotificationRetention(q, { retentionDays: 30, batchSize: 2, maxBatchesPerRun: 1 })
-    expect(first.deleted).toBe(2)
     expect(first.batches).toBe(1)
+    // 单轮上界 = 2:去掉 maxBatchesPerRun 的话这里会一路删到排空,值远大于 2。
+    expect(first.deleted).toBeGreaterThan(0)
+    expect(first.deleted).toBeLessThanOrEqual(2)
     expect(first.drained).toBe(false)
-    expect(await rowIds()).toHaveLength(3)
 
-    const second = await sweepNotificationRetention(q, { retentionDays: 30, batchSize: 2, maxBatchesPerRun: 10 })
-    expect(second.deleted).toBe(3)
-    expect(await rowIds()).toHaveLength(0)
+    const afterFirst = await rowIds()
+    // 本 sheet 视角:这一轮最多带走我 2 条,所以我的 5 条至少还剩 3 条;存活行只可能是 before 的子集。
+    expect(afterFirst.length).toBeGreaterThanOrEqual(before.length - 2)
+    expect(afterFirst.length).toBeLessThanOrEqual(before.length)
+    for (const id of afterFirst) expect(before).toContain(id)
+
+    // 排空:一轮(≤20 行)不保证能扫到我剩下的那几条(前面可能排着别人的更老行),所以按轮排空,
+    // 只断言"本 sheet 最终一条不剩"与"这几轮删掉的总数至少覆盖了我的存活行数"。
+    let survivors = afterFirst
+    let drainRounds = 0
+    let drainDeleted = 0
+    while (survivors.length > 0 && drainRounds < 20) {
+      const round = await sweepNotificationRetention(q, { retentionDays: 30, batchSize: 2, maxBatchesPerRun: 10 })
+      drainDeleted += round.deleted
+      drainRounds += 1
+      survivors = await rowIds()
+    }
+    expect(survivors).toEqual([])
+    expect(drainDeleted).toBeGreaterThanOrEqual(afterFirst.length)
     await cleanup()
   })
 })

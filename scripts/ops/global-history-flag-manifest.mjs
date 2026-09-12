@@ -422,7 +422,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      'Retention window (days) for the notification-centre sweep on meta_record_subscription_notifications. DEFAULT OFF: unset / empty / non-numeric / <=0 resolves to null and the janitor never starts (zero SQL) — this flag is the ON switch. Set to N (clamped to 3650) and rows older than N days are DELETEd, READ AND UNREAD ALIKE (owner default; a "read-only" variant would need an extra read_at predicate in the delete SQL). Deletion is permanent and there is no leader lock, so every instance sweeps.',
+      'Retention window (days) for the notification-centre sweep on meta_record_subscription_notifications. DEFAULT OFF: unset / empty / blank / a string that Number() cannot parse into a finite value / <=0 (and anything below 1 whole day) resolves to null and the janitor never starts (zero SQL) — this flag is the ON switch. Parsing is Number(), NOT a decimal-only parse, so JS numeric literals count as numeric and DO turn it on: "0x1e" reads as 30 days and "1e3" as 1000 days. Set to N (clamped to 3650) and rows older than N days are DELETEd, READ AND UNREAD ALIKE (owner default; a "read-only" variant would need an extra read_at predicate in the delete SQL). Deletion is permanent and there is no leader lock, so every instance sweeps.',
     // source: packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_DAYS (resolveNotificationRetentionDays + the null ⇒ no-op early return in startNotificationRetention)
     source:
       'packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_DAYS',

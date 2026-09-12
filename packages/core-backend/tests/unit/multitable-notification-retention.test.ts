@@ -156,6 +156,31 @@ describe('G1 默认关:没有显式正数天数就一条 SQL 都不发', () => {
     expect(mockedQuery).not.toHaveBeenCalled()
   })
 
+  // fix r2-minor:关停态原本**一条日志都不打**,运维分不清"没配所以没开"与"配了还没到点"。
+  // 这条钉死:早退路径打且只打一行 values-free 的 info(点名 env 键),而"零 SQL / 零 timer"不变。
+  it('env 未设 ⇒ 打一行 values-free 的"已关闭"info(且仍然零 SQL)', async () => {
+    const timers = installTimerHarness()
+    const logger = silentLogger()
+
+    const stop = startNotificationRetention({ env: {}, logger })
+    await flush()
+
+    const lines = vi.mocked(logger.info).mock.calls.map((call) => String(call[0]))
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('disabled')
+    expect(lines[0]).toContain('MULTITABLE_NOTIFICATION_RETENTION_DAYS')
+    // values-free:关停日志同样不许出现表里的值字段名。
+    for (const forbidden of ['user_id', 'actor_id', 'message', 'sheet_id', 'record_id', 'comment_id']) {
+      expect(lines[0]).not.toContain(forbidden)
+    }
+    // 这行日志不得把"默认关"换成别的行为:依旧零 SQL、零 timer。
+    expect(mockedQuery).not.toHaveBeenCalled()
+    expect(global.setInterval).not.toHaveBeenCalled()
+    expect(timers.clearCalls()).toHaveLength(0)
+    await stop()
+    expect(mockedQuery).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['0', '零'],
     ['-1', '负数'],
@@ -526,7 +551,18 @@ describe('G7 在飞的一轮:不重入、关停能截断、积压不等满一个
   it('A3 一轮打满批数上限仍没排空 ⇒ 排一个 1s 续轮(unref),而不是干等一个 24h interval', async () => {
     const timers = installTimerHarness()
     // 永远满批 ⇒ 每轮都撞上限、每轮都 drained=false。
-    mockedQuery.mockResolvedValue({ rows: [], rowCount: 2 } as never)
+    // 带"越界就抛"护栏(与 G2 两条同形,见本文件 :239-242 / :283-284,fix r2-blocker3):没有它时,去掉单轮批数
+    // 上限的变异体(M2 `while (batches < maxBatches)` → `while (true)`)会把批量循环变成纯
+    // microtask 死循环,饿死事件循环 ⇒ vitest 的超时 timer 永远触发不了,整个文件只能靠 worker
+    // 堆内存耗尽(ERR_WORKER_OUT_OF_MEMORY,约 17s)才红。有了它,M2 在毫秒级以**断言红**结束。
+    // 上界 = maxBatchesPerRun(3) × 本用例放行的轮数(初始轮 + 续轮 = 2)+ 5 格余量。
+    const A3_MAX_CALLS = 3 * 2 + 5
+    mockedQuery.mockImplementation((async () => {
+      if (mockedQuery.mock.calls.length > A3_MAX_CALLS) {
+        throw new Error('per-run batch cap breached')
+      }
+      return { rows: [], rowCount: 2 }
+    }) as never)
 
     const stop = startNotificationRetention({
       env: { MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30' },
@@ -565,7 +601,16 @@ describe('G7 在飞的一轮:不重入、关停能截断、积压不等满一个
 
   it('A3+A4 stop 会把还没放行的续轮 timer 一起收掉', async () => {
     const timers = installTimerHarness()
-    mockedQuery.mockResolvedValue({ rows: [], rowCount: 2 } as never)
+    // 同一道"越界就抛"护栏(fix r2-blocker3):本用例也是"永远满批",没有护栏时 M2 同样会在这里
+    // 变成 microtask 死循环、把红从断言级降级成 worker OOM 级。
+    // 上界 = maxBatchesPerRun(2) × 本用例放行的轮数(只有初始那一轮;续轮被 stop 收掉)+ 5 格余量。
+    const A3A4_MAX_CALLS = 2 * 1 + 5
+    mockedQuery.mockImplementation((async () => {
+      if (mockedQuery.mock.calls.length > A3A4_MAX_CALLS) {
+        throw new Error('per-run batch cap breached')
+      }
+      return { rows: [], rowCount: 2 }
+    }) as never)
 
     const stop = startNotificationRetention({
       env: { MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30' },

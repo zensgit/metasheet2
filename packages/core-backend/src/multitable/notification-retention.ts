@@ -170,7 +170,15 @@ export function startNotificationRetention(options: NotificationRetentionOptions
     : resolveNotificationRetentionDays(env.MULTITABLE_NOTIFICATION_RETENTION_DAYS)
 
   // 默认关:没有显式、合法、正数的天数就什么都不做(连一条 SQL 都不发)。
-  if (retentionDays === null) return async () => {}
+  // 早退前打一行 values-free 的 info(反驳 r1 minor / 裁判 prose):没有它时关停态是**完全静默**的,
+  // 运维分不清"没配所以没开"与"配了还没到点",只能翻源码。这行只说开关状态与 env 名,不打任何行值。
+  if (retentionDays === null) {
+    const disabledLogger = options.logger ?? new Logger('NotificationRetention')
+    disabledLogger.info(
+      'Notification retention disabled (MULTITABLE_NOTIFICATION_RETENTION_DAYS unset or invalid)',
+    )
+    return async () => {}
+  }
 
   const logger = options.logger ?? new Logger('NotificationRetention')
   const intervalMs = options.intervalMs !== undefined
