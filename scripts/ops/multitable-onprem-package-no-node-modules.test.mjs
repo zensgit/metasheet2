@@ -416,6 +416,18 @@ test('on-prem verifier rejects packages missing the stock-preparation acceptance
   const sealedAcceptancePath = path.join(root, 'scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1')
   const sealedRunbookPath = path.join(root, 'docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md')
   const pm2SamplePath = path.join(root, 'scripts/ops/stock-preparation-pm2-sample.mjs')
+  const sqlSourceAcceptancePath = path.join(root, 'scripts/ops/stock-preparation-sql-source-onboarding-acceptance.ps1')
+  // Mirrors the REAL markers the packaged runner carries, not just the strings
+  // the verifier greps for: the cross-tenant alarm, the no-request planning
+  // mode, the offline self-test schema, the closed-loop-vs-env-probe verdict,
+  // and the byte-exact credential reader.
+  const sqlSourceAcceptanceBody = [
+    'ISOLATION_BREACH',
+    '[switch]$DryRun',
+    "schema = 'stock-preparation/sql-source-onboarding-acceptance/self-test/v1'",
+    "'CLOSED_LOOP_PASS'",
+    'function Read-AcceptanceCredential {',
+  ].join('\n')
   fs.mkdirSync(path.dirname(migrationPath), { recursive: true })
   fs.mkdirSync(path.dirname(smokePath), { recursive: true })
   fs.mkdirSync(path.dirname(sealedRunbookPath), { recursive: true })
@@ -463,6 +475,7 @@ test('on-prem verifier rejects packages missing the stock-preparation acceptance
     ].join('\n'),
   )
   fs.writeFileSync(pm2SamplePath, "const APP_NAME = 'metasheet-backend'\n")
+  fs.writeFileSync(sqlSourceAcceptancePath, sqlSourceAcceptanceBody)
 
   try {
     const clean = runStockPreparationVerifier(root)
@@ -537,6 +550,35 @@ test('on-prem verifier rejects packages missing the stock-preparation acceptance
     const incomplete = runStockPreparationVerifier(root)
     assert.notEqual(incomplete.status, 0)
     assert.match(incomplete.stderr, /values-free self scan/)
+
+    // SQL source onboarding acceptance: absent, then present-but-gutted. The
+    // first case is the one that matters -- the runner shipped for two rounds
+    // without being in REQUIRED_PATHS at all, which no keyword check can catch.
+    fs.writeFileSync(smokePath, 'S.auditActionsCovered = "8/8"\nS.selfScanClean = true\nS.pass = true\n')
+    fs.rmSync(sqlSourceAcceptancePath)
+    const missingSqlSourceAcceptance = runStockPreparationVerifier(root)
+    assert.notEqual(missingSqlSourceAcceptance.status, 0)
+    assert.match(missingSqlSourceAcceptance.stderr, /SQL source onboarding acceptance script must be packaged/)
+
+    for (const [droppedMarker, expectedMessage] of [
+      ['ISOLATION_BREACH', /expected refusal that returned 2xx/],
+      ['[switch]$DryRun', /no-request dry run/],
+      ["schema = 'stock-preparation/sql-source-onboarding-acceptance/self-test/v1'", /values-free offline self-test/],
+      ["'CLOSED_LOOP_PASS'", /closed-loop pass from an environment probe/],
+      ['function Read-AcceptanceCredential {', /byte-exact/],
+    ]) {
+      fs.writeFileSync(
+        sqlSourceAcceptancePath,
+        sqlSourceAcceptanceBody
+          .split('\n')
+          .filter((line) => line !== droppedMarker)
+          .join('\n'),
+      )
+      const gutted = runStockPreparationVerifier(root)
+      assert.notEqual(gutted.status, 0, `dropping ${droppedMarker} must fail verification`)
+      assert.match(gutted.stderr, expectedMessage)
+    }
+    fs.writeFileSync(sqlSourceAcceptancePath, sqlSourceAcceptanceBody)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
