@@ -68,7 +68,7 @@
  *     **`autoNumber` 作目标不是校验，是破坏性副作用**：白名单因目标属排除集直接放行，主
  *     `UPDATE meta_fields` 落库之后，univer-meta.ts:13163-13165 调
  *     `backfillAutoNumberField(..., { overwrite: true })`，其 SQL（auto-number-service.ts:112-131）是
- *     `UPDATE meta_records ... SET data = jsonb_set(...) WHERE sheet_id = $3 AND ($4::boolean OR NOT (data ? $1))`，
+ *     对 meta_records 表的整表 UPDATE（`SET data = jsonb_set(...) WHERE sheet_id = $3 AND ($4::boolean OR NOT (data ? $1))`），
  *     `$4 = true` ⇒ **该列所有既有单元格值被序号覆写**。这与「本刀零后端数据改写」并存的前提是：
  *     这条覆写是改动前就有的既有行为，本刀一字不动它，但它必须被如实写出来，不能算进「有校验接手」。
  *     两条 characterization 用例（`text → attachment`、`text → autoNumber`）在
