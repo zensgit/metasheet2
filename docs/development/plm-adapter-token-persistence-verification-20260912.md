@@ -112,16 +112,15 @@ M3 原样输出(节选,说明"不回归认证"的两条守卫确实带电):
 
 M3 下"yuantus 模式"用例仍绿,是**真实**语义:yuantus 模式的令牌由 `setTokenProvider` 的请求拦截器逐请求注入,不依赖客户端默认头;客户端默认头这条路只对 legacy/静态令牌是唯一通道。
 
-## 5. CI 收不收(结论:目前不收,需一行 workflow 改动,本单不允许做)
+## 5. CI 收不收（结论：收；复核订正）
 
-- 包脚本 `packages/core-backend/package.json` 的 `test:unit` = `vitest run tests/unit`,能收本 spec;`vitest.config.ts` 的 `exclude` 里没有匹配它的条目(用默认 config 单跑已验证能被收集)。
-- 但 `.github/workflows/` 里**没有**"跑整个 tests/unit"的 lane:必跑的 `test (18.x/20.x)`(`plugin-tests.yml` 的 `test` job)是逐条点名 spec 的清单(125 条 `tests/unit/...`,没有 plm-adapter-*);改 `PLMAdapter.ts` 会触发的 `yuantus-pact-consumer.yml` 只跑 `tests/contract/**` + `tests/unit/plm-adapter-yuantus.test.ts`。
-- 因此本 spec 目前不会在任何 CI 检查里执行。最小接线是在 `.github/workflows/yuantus-pact-consumer.yml` 的
-  `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/plm-adapter-yuantus.test.ts` 后追加本 spec 路径(该 workflow 的 `paths` 已含 `PLMAdapter.ts`)。本单硬边界禁止改 `.github/workflows/*`,所以留给 owner/协调方决定。
+- `.github/workflows/plugin-tests.yml:842-844` 的「Run core-backend tests」= `pnpm --filter @metasheet/core-backend test`，即 `package.json:26` 的 `vitest`（无参数，默认 config）；`vitest.config.ts` 无 `include` 键、`exclude` 里没有任何 `tests/unit` 条目 → 本 spec 被必跑的 `test (18.x/20.x)` job 全量收。
+- `yuantus-pact-consumer.yml:90` 只点名 `plm-adapter-yuantus.test.ts`，**无需**追加本 spec（原文「最小接线是在那里追加」作废）。
+- 原文「本 spec 目前不会在任何 CI 检查里执行」为误判：看的是逐条点名的其他步骤，漏了 catch-all 那一步。
 
 ## 6. 没验证 / 不确定
 
-1. **真机未跑**:没有对接真实 PLM 验证过 legacy 静态令牌与 yuantus 登录两条链路;wire 层证据来自本机 http 服务,axios 是真的(1.8.x),但上游是假的。
+1. **真机未跑**:没有对接真实 PLM 验证过 legacy 静态令牌与 yuantus 登录两条链路;wire 层证据来自本机 http 服务,axios 是真的(1.13.2,`pnpm-lock.yaml:2053` 锁定),但上游是假的。
 2. **axios 头合并次序**靠的是本 spec 用例 3 的实测(扁平默认头赢过手工 `authorization`),不是 axios 文档承诺;axios 大版本升级时这条用例就是探针。
 3. **`resolvedUrl` 写回未改**,消费者清单见设计文档 §4.1;我 grep 过 `packages/**`(ts/tsx/vue)与 `plugins/**`(ts/js/cjs)里的 `connection.headers`:除 `PLMAdapter.ts` 自身外只有 `HTTPAdapter.ts:140`(建 axios 客户端)一处;`connection.url`/`baseURL` 的消费者更多,设计文档 §4.1 只列了我实读到的那几处,不排除还有按 `getConfig()` 整体转发的调用方。
 4. **历史脏数据**:库里已有的明文令牌不在本 PR 处理范围。

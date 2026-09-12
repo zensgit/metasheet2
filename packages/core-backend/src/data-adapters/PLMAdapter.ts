@@ -1148,9 +1148,9 @@ export class PLMAdapter extends HTTPAdapter {
     // strip it before it reaches the log sink. No semantic change — the URL used to connect is untouched.
     this.logger.info(`PLM Adapter connecting to ${redactUrlUserinfo(String(this.config.connection.url ?? ''))}`);
     await super.connect();
-    // #5648 F02: apply the instance-held Bearer token to the axios client that super.connect() just
-    // built. Must run BEFORE any request this method fires (refreshIntegrationCapabilities below).
-    this.applyAuthTokenToClient();
+    // #5648 F02: the instance-held Bearer token is wired onto the axios client inside onConnect() (see
+    // below) — i.e. in the same synchronous segment where HTTPAdapter.connect() flips `connected`,
+    // so no caller can observe isConnected() === true before the token is on the client.
     // PLM-COLLAB P2.5: warm/refresh the integration capability cache after a real connect
     // (fire-and-forget; refreshIntegrationCapabilities degrades gracefully and never throws,
     // so this never blocks or fails connect).
@@ -1242,6 +1242,17 @@ export class PLMAdapter extends HTTPAdapter {
    * `connection.headers.Authorization`. Dropping a lowercase `authorization` mirrors the `delete
    * headers.authorization` the old in-config path did, so the request carries exactly one credential.
    */
+  /**
+   * #5679 复核订正：HTTPAdapter.connect() 在 `connected = true` 之后、返回之前 `await this.onConnect()`。
+   * 令牌若等 super.connect() 返回后再接线，会留下一个微任务级窗口——并发调用方看到 isConnected() 已真却
+   * 发出不带 Authorization 的请求（修前令牌在 axios.create 时就在头里，没有这个窗口）。把接线放进
+   * onConnect() 的同步段，让「已连接」与「已带令牌」在同一 tick 成立；mock 模式下 client 为 null，直接跳过。
+   */
+  protected async onConnect(): Promise<void> {
+    this.applyAuthTokenToClient()
+    await super.onConnect()
+  }
+
   private applyAuthTokenToClient(): void {
     if (!this.client || !this.authToken) return
     const defaultHeaders = this.client.defaults.headers as unknown as Record<string, unknown>

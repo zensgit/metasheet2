@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
 import { DataSourceManager } from '../../src/data-adapters/DataSourceManager'
-import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
+import { BaseAdapter, type DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 
 /**
  * #5648 §6 后续单 F02:PLM 适配器的 Bearer 令牌不得写回 `config.connection`。
@@ -137,6 +137,23 @@ describe('PLMAdapter Bearer 令牌不落 config.connection(#5648 F02)', () => {
     expect(result.error).toBeUndefined()
     const sent = requests.find((r) => r.url === '/health')
     expect(sent?.headers.authorization).toBe(`Bearer ${FAKE_STATIC_TOKEN}`)
+  })
+
+  it('令牌在 connected 变真的同一同步段就已接线:super.onConnect() 被调用时默认头已含 Authorization(#5679 复核)', async () => {
+    const adapter = makeAdapter({ 'plm.apiToken': FAKE_STATIC_TOKEN })
+    const seen: unknown[] = []
+    const proto = BaseAdapter.prototype as unknown as { onConnect: () => Promise<void> }
+    const spy = vi.spyOn(proto, 'onConnect').mockImplementation(async function (this: unknown) {
+      const self = this as { client?: { defaults: { headers: Record<string, unknown> } }; connected?: boolean }
+      seen.push(self.client?.defaults.headers.Authorization, self.connected)
+    })
+    try {
+      await adapter.connect()
+    } finally {
+      spy.mockRestore()
+    }
+    // 到 super.onConnect() 时:connected 已真、且默认头已带本次解析出的令牌——两者在同一 tick 成立。
+    expect(seen).toEqual([`Bearer ${FAKE_STATIC_TOKEN}`, true])
   })
 
   it('legacy 模式:连接里遗留的旧 Authorization 头不得盖掉刚解析出的令牌(落库遗留行的回读)', async () => {

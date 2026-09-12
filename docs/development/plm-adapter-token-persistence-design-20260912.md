@@ -68,7 +68,7 @@ packages/core-backend/src/data-adapters/PLMAdapter.ts:1200-1206   cacheAuthToken
 1. **`resolvedUrl` 写回 `config.connection.url/baseURL`(基线 :1069-1073,现 :1080-1085)——保留,按任务约定回报不改。** 它有外部消费者:
    - `HTTPAdapter.connect():138` 用 `connection.baseURL || connection.url` 建客户端。只配 `plm.url`/`PLM_BASE_URL`、`connection.url` 为空的数据源,一旦改成私有字段,父类就拿不到 baseURL(除非改 `HTTPAdapter`,而它是本次要避开的争用面)。
    - `getRuntimeStatus()`(现 :1336-1341) 的 `configured` 判定、`GET /api/data-sources/:id` 经 `sanitizeConfig` 的 UI 回显,都读这个值。
-   - 它不是秘密(userinfo 的部分已在日志侧脱敏)。代价:PUT 仍会把"适配器解析出的 URL"写回库,属于同一种"适配器改公共配置"模式,登记为残余。
+   - URL 主体不是令牌；但带 userinfo 时那一段**是凭据**——本刀只在日志侧脱敏，落库/回显仍原样（R1，#5648 F01 的迁移设计另单）。代价:PUT 仍会把"适配器解析出的 URL"写回库,属于同一种"适配器改公共配置"模式,登记为残余。
 2. **`applyTenantOrgHeaders()`(现 :1196-1213)仍写 `connection.headers` 的 `x-tenant-id`/`x-org-id`** —— `getEffectiveTenantId()`(现 :1035-1047)明确以"connect 后 connection.headers 上的 x-tenant-id"为事实来源,embed 中继据此做租户交叉校验;动它会动租户闭合语义,超出本单范围。且这两个值本来就是配置的一部分,不是凭据。
 3. **`routes/data-sources.ts` / `BaseAdapter.ts` / `data-source-secret-keys.ts` 未改** —— #5648 在飞,避免争用。因此:`getConfig()` 的浅拷贝、`sanitizeConfig()` 只剥 credentials 这两条**结构性**问题仍在,本 PR 只是让 PLM 令牌不再进入那条链。
 4. **未做历史数据清理** —— 修复前已写进 `data_sources.config.connection.headers.Authorization` 的旧令牌,本 PR 不会删。重启后它仍会被 `axios.create` 采纳,但只要配置里仍能解析出令牌,`applyAuthTokenToClient()` 就会覆盖它;真正的清理(以及旧令牌吊销)要 owner 侧动库/换令牌。
@@ -81,4 +81,11 @@ packages/core-backend/src/data-adapters/PLMAdapter.ts:1200-1206   cacheAuthToken
 | R2 | #5648 F03:密钥词表 | `connection` 里还有哪些 key 该被当秘密(`headers` 下的任意 `*-token` / `x-api-key` 等)由 #5648 的词表决定,本 PR 不引入新词表 |
 | R3 | 进程内写入口 | `getConfig()` 浅拷贝 + 适配器可写 `this.config.connection` 这条模式依然成立(`resolvedUrl`、租户头就是例子);要根治得在 `BaseAdapter`/写入口上做(深拷贝或冻结),属于 #5648 及其后续单 |
 | R4 | 旧行里的明文令牌 | 见 §4.4,需要 owner 侧清理 + 吊销 |
-| R5 | 新 spec 未进任何 CI 闸 | 见验证文档 §5:仓库里没有"跑整个 tests/unit"的 lane,而本单不允许改 `.github/workflows/*` |
+| R5 | ~~新 spec 未进任何 CI 闸~~（复核订正：**已被必跑的 `test` job 全量收**——`plugin-tests.yml:842-844` 的 `pnpm --filter @metasheet/core-backend test` = `vitest`，`vitest.config.ts` 无 include、exclude 不含 tests/unit；无需改 workflow） | 见验证文档 §5 |
+
+## 复核订正（对抗复核 23 代理，10 条发现 → 0 存活；终审「修完 X 再合」）
+
+- **保证①的措辞限定**：「不再写回 `config.connection`」指**本次 connect 解析出的令牌**；修复前已经落库的 `data_sources.config.connection.headers.Authorization` 与 `audit_logs.meta` 里的历史副本本刀不清、也清不掉审计副本——owner 须吊销/轮换（R4）。修复后 PLMAdapter 不再删旧键，`GET /:id`、PUT 响应、`PUT /credentials`（routes:745-756）与 DELETE 审计（:866）仍会把存量旧值原样回显——零回归、单调改善，但不是「已无泄漏」。
+- **时序窗口（本刀新引入、已关）**：`HTTPAdapter.connect()` 在 `connected = true` 之后 `await onConnect()` 才返回；原实现等 `super.connect()` 返回后再接线令牌，留下一个微任务级窗口——并发调用方（如 facade 的 `if (!adapter.isConnected())` 模式）可能发出不带 Authorization 的请求。现改为在 `onConnect()` 的同步段接线，并用 spec 钉住「`super.onConnect()` 被调用时默认头已含令牌且 `connected` 已真」。
+- **axios 版本**：仓内锁定 1.13.2（`pnpm-lock.yaml:2053`），不是 1.8.x；合并次序结论按 1.13.2 的 `Axios.js:118-130` + `AxiosHeaders.js:79-92` 源码核过（扁平后铺、findKey 大小写不敏感、后写覆盖）。`applyAuthTokenToClient` 里 `delete defaultHeaders.authorization` 按该语义冗余，留作防御，未加测试。
+- **没人看的路径（终审）**：带 userinfo 的 baseURL 会让 axios `http.js:574-580` 删掉 authorization 改走 Basic——Bearer 根本到不了线（修前同，用例 7 不断言 wire）；归 #5648 F01。`credentials.bearerToken` 全仓零写点（`docs/DATA_SOURCE_ADAPTERS.md:247-252` 却列出），优先级论证靠槽位同一性而非测试。
