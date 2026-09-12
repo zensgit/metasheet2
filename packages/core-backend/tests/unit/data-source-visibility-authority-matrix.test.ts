@@ -62,7 +62,7 @@ import {
   DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
   DataSourceManager,
 } from '../../src/data-adapters/DataSourceManager'
-import { dataSourcesRouter, initializeDataSourceManager } from '../../src/routes/data-sources'
+import { dataSourcesRouter, getDataSourceManager, initializeDataSourceManager } from '../../src/routes/data-sources'
 import { auditLog } from '../../src/audit/audit'
 import { usePinnedServer } from '../utils/pinned-server'
 
@@ -76,6 +76,16 @@ const ADMIN = { id: 'u_dsv_admin', role: 'admin' }
 const ADMIN_VIA_ROLES = { id: 'u_dsv_admin2', roles: ['admin', 'member'] }
 const OWNER = { id: 'u_dsv_owner', roles: ['member'], permissions: DS_PERMS }
 const OTHER = { id: 'u_dsv_other', roles: ['member'], permissions: DS_PERMS }
+
+// G02 PR-1 — `PUT /:id/credentials` moved off `data_sources:write` onto `data_sources:rotate`,
+// EXCLUSIVELY (src/routes/data-sources.ts:738). DS_PERMS above is deliberately LEFT as today's
+// write-holder vocabulary, so this file keeps a live specimen of the tier that LOSES rotation. The
+// variants below are the SAME user ids with `rotate` added, because ownership is an id comparison
+// and the fine gate (`assertAccess`) must see no difference between them — that is what makes the
+// pair "write-only => 403 / rotate => 200" attributable to the coarse door and nothing else.
+const DS_PERMS_WITH_ROTATE = [...DS_PERMS, 'data_sources:rotate']
+const OWNER_WITH_ROTATE = { ...OWNER, permissions: DS_PERMS_WITH_ROTATE }
+const OTHER_WITH_ROTATE = { ...OTHER, permissions: DS_PERMS_WITH_ROTATE }
 
 // ── poison values: if ANY of these ever appears in ANY response body or audit row, credentials
 //    stopped being write-only. (Values chosen to be un-collidable with generated output.)
@@ -427,10 +437,95 @@ describe('data_sources authority matrix — edit and credential rotation', () =>
 
   it('other => 404 on both edit routes; anonymous => 401', async () => {
     expect((await as(OTHER).put(`/api/data-sources/${ID}`).send({ name: 'x' })).status).toBe(404)
+    // OTHER_WITH_ROTATE, not OTHER: this cell is about the FINE gate, so the caller must clear the
+    // coarse one. With plain OTHER the 404 below would be a 403 and this cell would silently stop
+    // testing ownership at all (see the dedicated 403 cells in the rotate describe).
     expect(
-      (await as(OTHER).put(`/api/data-sources/${ID}/credentials`).send({ credentials: { password: 'x' } })).status,
+      (await as(OTHER_WITH_ROTATE).put(`/api/data-sources/${ID}/credentials`).send({ credentials: { password: 'x' } }))
+        .status,
     ).toBe(404)
     expect((await as(undefined).put(`/api/data-sources/${ID}`).send({ name: 'x' })).status).toBe(401)
+  })
+})
+
+// ── G02 PR-1: rotation is its own verb ─────────────────────────────────────────
+//
+// `PUT /:id/credentials` used to share `data_sources:write` with `PUT /:id`, so the only way to let
+// an operator swap a password was to also let them repoint the source at another host. The coarse
+// door is now `data_sources:rotate`, EXCLUSIVELY — not an any-of that still accepts `write`, because
+// an any-of would leave the two acts fused while looking like a split.
+//
+// The cells below pin all four corners, and they are written as PAIRS that differ in exactly one
+// input, so each 403/200/404 is attributable:
+//   same id, only the permission list differs  -> isolates the coarse door;
+//   same permission list, only the id differs  -> isolates the fine door;
+//   same actor, only the route differs         -> shows `write` still repoints (the split is real).
+describe('credential rotation is gated by data_sources:rotate, EXCLUSIVELY (G02 PR-1)', () => {
+  const ID = 'dsv-rotate-verb'
+
+  function storedPassword(id: string): unknown {
+    return (getDataSourceManager().getDataSource(id).getConfig().credentials ?? {}).password
+  }
+
+  it('FAIL-CLOSED: the owner holding write but NOT rotate => 403, credential untouched', async () => {
+    await createAsOwner(ID)
+    expect(storedPassword(ID)).toBe(POISON.password)
+
+    const res = await as(OWNER).put(`/api/data-sources/${ID}/credentials`)
+      .send({ credentials: { password: POISON.rotatedPassword } })
+    expect(res.status).toBe(403)
+    expectNoPoison(res.body)
+
+    // The refusal is the COARSE door: the handler never ran, so nothing was written and nothing was
+    // audited. This is the regression the deployment prerequisite exists for — today's
+    // `data_sources:write` holders lose rotation until an administrator grants `rotate` via a ROLE.
+    expect(storedPassword(ID)).toBe(POISON.password)
+    expect(auditCalls('update_credentials', ID)).toHaveLength(0)
+  })
+
+  it('the very same owner, with rotate added => 200 (the ONLY difference is the permission)', async () => {
+    const res = await as(OWNER_WITH_ROTATE).put(`/api/data-sources/${ID}/credentials`)
+      .send({ credentials: { password: POISON.rotatedPassword } })
+    expect(res.status).toBe(200)
+    expectNoPoison(res.body)
+
+    expect(storedPassword(ID)).toBe(POISON.rotatedPassword)
+    const call = auditCalls('update_credentials', ID).at(-1)
+    expect(call).toMatchObject({ actorId: OWNER.id, meta: { changedCredentialKeys: ['password'] } })
+    // An owner rotating their own source is not a cross-owner admin action.
+    expect((call?.meta as Record<string, unknown>).crossOwnerAdmin).toBeUndefined()
+  })
+
+  it('rotate does NOT widen ownership: a non-owner holding rotate still gets the uniform 404', async () => {
+    const res = await as(OTHER_WITH_ROTATE).put(`/api/data-sources/${ID}/credentials`)
+      .send({ credentials: { password: 'other-should-never-land' } })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual(notFoundBody(ID))
+    expect(storedPassword(ID)).toBe(POISON.rotatedPassword)
+  })
+
+  it('platform admin is unaffected by the split (rbacGuard short-circuits the global-admin tier)', async () => {
+    const res = await as(ADMIN).put(`/api/data-sources/${ID}/credentials`)
+      .send({ credentials: { password: POISON.rotatedPassword } })
+    expect(res.status).toBe(200)
+    expectNoPoison(res.body)
+    expect(auditCalls('update_credentials', ID).at(-1)).toMatchObject({
+      actorId: ADMIN.id,
+      meta: { ownerId: OWNER.id, crossOwnerAdmin: true },
+    })
+  })
+
+  it('THE SPLIT IS A SPLIT: the write-only owner still repoints the connection on PUT /:id', async () => {
+    // Same actor that just got 403 on rotation. If this were also refused, the change would be a
+    // blanket tightening of `write` rather than the extraction of one verb.
+    const res = await as(OWNER).put(`/api/data-sources/${ID}`)
+      .send({ connection: { host: 'moved.example', port: 5432, database: 'plm' } })
+    expect(res.status).toBe(200)
+    expect(res.body.data.connection).toMatchObject({ host: 'moved.example' })
+
+    // ...and symmetrically, rotate alone must not become a licence to repoint.
+    const rotateOnly = { ...OWNER, permissions: ['data_sources:read', 'data_sources:rotate'] }
+    expect((await as(rotateOnly).put(`/api/data-sources/${ID}`).send({ name: 'repoint-by-rotator' })).status).toBe(403)
   })
 })
 
