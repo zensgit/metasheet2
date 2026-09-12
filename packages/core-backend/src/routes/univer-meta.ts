@@ -99,6 +99,7 @@ import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 // from a pack's — but the stamp itself is about THIS route owning what it writes.
 import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
+import { resolveSheetDeleteRefusal, sheetDeleteRefusalBody } from '../multitable/sheet-delete-guard'
 import {
   isElearningProjectionBaseIdCandidate,
   isElearningProjectionSheetIdCandidate,
@@ -234,7 +235,20 @@ import {
   getMultitableTemplate,
   installMultitableTemplate,
   listMultitableTemplates,
+  type MultitableTemplate,
 } from '../multitable/template-library'
+import {
+  CUSTOM_TEMPLATE_DEFAULT_CATEGORY,
+  CUSTOM_TEMPLATE_ID_PREFIX,
+  createCustomTemplate,
+  extractTemplateSheets,
+  getCustomTemplate,
+  isCustomTemplateId,
+  isUndefinedTableError as isCustomTemplateTableMissing,
+  listCustomTemplates,
+  normalizeCustomTemplateVisibility,
+  softDeleteCustomTemplate,
+} from '../multitable/custom-template-store'
 import { Logger } from '../core/logger'
 import {
   queryRecordsWithCursor,
@@ -1903,6 +1917,43 @@ async function validateLinkFieldConfig(
   }
 
   return null
+}
+
+/**
+ * 关联字段缺目标表 —— 创建/更新侧 fail-closed（2026-09-10）。
+ *
+ * 历史行为是 fail-OPEN：`sanitizeFieldPropertyByType` 的 link 分支在 foreignSheetId 为空时直接把这个键
+ * 省略掉，而 §2a.2 的墙 `validateLinkFieldConfig` 在 `parseLinkFieldConfig` 返回 null 时也 return null
+ * （"不完整草稿不校验"），它的两个调用点还额外用 `linkForeignKeyInPayload` 收窄。结果：
+ * `POST /fields {type:'link'}` 不带 property、或 `PATCH {type:'link'}` 从别的类型转过来，都能落一个没有
+ * 目标表的 link 字段。这种字段在 `GET /fields/:fieldId/link-options` 上必然 400，用户点"选择关联记录"
+ * 只能看到一句原始报错。
+ *
+ * 这里是写入口的收紧（只收不放）：结果状态是 link 且不含任何 foreign 别名（foreignSheetId /
+ * foreignDatasheetId / datasheetId，统一经 `parseLinkFieldConfig` 归一）就拒绝落库。错误码稳定
+ * （`LINK_FIELD_FOREIGN_SHEET_REQUIRED`），message 不拼任何 id（values-free），前端按码翻人话。
+ *
+ * 历史 person 链接字段（type='link' + refKind:'user'）由 `ensurePeopleSheetPreset` 生成，property 永远
+ * 带 foreignSheetId（指向 People 表），所以这道门对它无影响。
+ */
+const LINK_FIELD_FOREIGN_SHEET_REQUIRED_CODE = 'LINK_FIELD_FOREIGN_SHEET_REQUIRED'
+const LINK_FIELD_FOREIGN_SHEET_REQUIRED_MESSAGE = '关联字段必须先选择要关联的目标数据表'
+/** 读取侧（link-options）对"已有坏字段"的稳定码 —— message 同样 values-free，不回显 fieldId。 */
+const LINK_FIELD_FOREIGN_SHEET_MISSING_CODE = 'LINK_FIELD_FOREIGN_SHEET_MISSING'
+const LINK_FIELD_FOREIGN_SHEET_MISSING_MESSAGE = '该关联字段还没有设置要关联哪张数据表'
+
+class LinkForeignSheetRequiredError extends Error {
+  constructor() {
+    super(LINK_FIELD_FOREIGN_SHEET_REQUIRED_MESSAGE)
+    this.name = 'LinkForeignSheetRequiredError'
+  }
+}
+
+/** 结果状态若是"没有目标表的 link 字段"就抛 —— 由 POST /fields 与 PATCH /fields/:fieldId 两个写口调用。 */
+function assertLinkFieldForeignSheetPresent(type: UniverMetaField['type'], property: unknown): void {
+  if (type !== 'link') return
+  if (parseLinkFieldConfig(property)) return
+  throw new LinkForeignSheetRequiredError()
 }
 
 /**
@@ -4440,6 +4491,31 @@ const INVALID_DISPLAY_NAME_MESSAGE =
   `This endpoint accepts only { name }: a string of ${DISPLAY_NAME_MIN_LENGTH}-${DISPLAY_NAME_MAX_LENGTH} characters after trimming.`
 
 /** Values-free: names the authority that WOULD be accepted, so a refusal is actionable. */
+/**
+ * 自定义模板的租户维度 —— 只认 JWT 校验挂上的 req.authenticatedTenantId。
+ *
+ * 故意**不**回落 req.user.tenantId:无租户声明的 token 上,那个字段可能来自调用方
+ * 可控的 x-tenant-id 兼容头(见 routes/data-sources.ts 的同名口径),用它定租户
+ * 等于把租户交给请求方自选。没有可信租户时返回 null,而 null 在 SQL 里用
+ * `IS NOT DISTINCT FROM` 匹配,只会匹到同样没有租户的行 —— 不会跨到任何具体租户。
+ */
+function resolveTemplateTenantId(req: Request): string | null {
+  const tenantId = req.authenticatedTenantId
+  return typeof tenantId === 'string' && tenantId.trim().length > 0 ? tenantId.trim() : null
+}
+
+/**
+ * 「把这张 Base 存为模板」的授权口径 —— 与 PATCH /bases/:id(改名)同一档,而不是
+ * POST /bases(建空 Base)那一档。理由:存模板是把别人也在用的表结构做成可复制的组织资产,
+ * 属于 schema 权威(canManageFields = 管理员角色或 multitable:manage-schema),
+ * 光有 multitable:write(写记录)不够。删除自定义模板同档。
+ */
+const SAVE_AS_TEMPLATE_FORBIDDEN_MESSAGE =
+  'Saving a base as a template requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
+
+const CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE =
+  'Custom template storage is not migrated yet (meta_multitable_custom_templates missing). Run `pnpm --filter @metasheet/core-backend migrate`.'
+
 const DISPLAY_RENAME_FORBIDDEN_MESSAGE =
   'Renaming requires schema authority: an admin role or the multitable:manage-schema permission. multitable:write alone is not sufficient.'
 
@@ -6022,7 +6098,9 @@ export function extractMultitableRecordCreateContextFromUrl(value: unknown): { s
 async function createSeededSheet(args: { sheetId: string; name: string; description?: string | null; query?: QueryFn }): Promise<void> {
   const pool = poolManager.get()
 
-  const fields = [
+  // 显式标注成宽类型（而不是让 TS 从字面量推出一个窄联合），这样下面那条 link 守卫的 `field.type ===
+  // 'link'` 是一条真判断，模板被改回 link 时守卫才拦得住，而不是被 TS 判成"永假比较"。
+  const fields: Array<{ id: string; name: string; type: UniverMetaField['type']; order: number; property: Record<string, unknown> }> = [
     { id: buildId('fld'), name: '产品名称', type: 'string' as const, order: 1, property: {} },
     { id: buildId('fld'), name: '数量', type: 'number' as const, order: 2, property: {} },
     { id: buildId('fld'), name: '单价', type: 'number' as const, order: 3, property: {} },
@@ -6041,7 +6119,13 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
         ],
       },
     },
-    { id: buildId('fld'), name: '关联', type: 'link' as const, order: 6, property: {} },
+    // 2026-09-10：这一列过去是 `type: 'link'` + `property: {}` —— 即"link 但没有目标表"，而且它经下面的
+    // 裸 SQL 落库，既不过 `normalizeFieldWriteInput` 也不过写口的 `assertLinkFieldForeignSheetPresent`。
+    // 于是每张 seed 出来的数据表（POST /sheets {seed:true}、GET /view?seed=true，前端建表默认就传 seed）
+    // 都自带一个点「选择关联记录」必 400 的坏字段 —— 这是用户报告里坏字段的主产源。种子记录在这一列里
+    // 放的本来就是 'PLM#6' 这种外部单号文本（不是记录 id），所以按它实际承载的语义降为 string：不猜目标
+    // 表、不凭空建第二张表，示例数据原样可读。真想要关联就在「管理字段」里新建 link 并选目标表。
+    { id: buildId('fld'), name: '关联', type: 'string' as const, order: 6, property: {} },
   ]
 
   const byName = new Map(fields.map(f => [f.name, f.id] as const))
@@ -6149,6 +6233,12 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
     )
 
     for (const field of fields) {
+      // 种子是裸 SQL 写口，绕开了 POST/PATCH /fields 上的 `assertLinkFieldForeignSheetPresent`。把同一条
+      // 规则挂在这里，模板将来再被改回"link 但没目标表"时当场炸（fail-closed），而不是静默给每张新表种
+      // 一个坏字段。语义与写口一致：只看结果状态，经 `parseLinkFieldConfig` 归一三个 foreign 别名。
+      if (field.type === 'link' && !parseLinkFieldConfig(field.property)) {
+        throw new LinkForeignSheetRequiredError()
+      }
       await query(
         `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
          VALUES ($1, $2, $3, $4, $5::jsonb, $6)
@@ -7277,8 +7367,265 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
   })
 
-  router.get('/templates', rbacGuard('multitable', 'read'), async (_req: Request, res: Response) => {
-    return res.json({ ok: true, data: { templates: listMultitableTemplates() } })
+  /**
+   * 模板列表 = 内置常量表(只读,来自 template-library.ts 的 TEMPLATE_LIBRARY)
+   *          + 本租户里**这个人看得见的**自定义模板(共享给租户的 + 他自己建的私有模板)。
+   *
+   * 降级口径:内置模板本来零 DB 依赖。自定义模板读失败(表还没迁移 / 库没起来 / 其它)时
+   * 不能把整个模板中心打成 500 —— 回内置模板并显式带上 customTemplatesUnavailable:true,
+   * 前端(MultitableTemplateCenterView 的 template-custom-unavailable 提示条)据此明说
+   * 「自定义模板暂不可用」,而不是假装用户没建过模板。
+   * 注意方向:这个回退只让**读**的结果更少,写入口(POST/DELETE)没有任何对应回退。
+   */
+  router.get('/templates', rbacGuard('multitable', 'read'), async (req: Request, res: Response) => {
+    const builtin = listMultitableTemplates()
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      const custom = await listCustomTemplates(
+        (sql, params) => pool.query(sql, params),
+        resolveTemplateTenantId(req),
+        access.userId,
+      )
+      return res.json({ ok: true, data: { templates: [...custom, ...builtin] } })
+    } catch (err) {
+      if (!isCustomTemplateTableMissing(err)) {
+        console.error('[univer-meta] list custom templates failed:', err)
+      }
+      return res.json({ ok: true, data: { templates: builtin, customTemplatesUnavailable: true } })
+    }
+  })
+
+  /**
+   * 「把这张 Base 存为模板」(09-10 测试反馈第 8 条:模板中心只能用、不能建)。
+   *
+   * VALUES-FREE,按构造证明:本路由只 SELECT meta_bases / meta_sheets / meta_fields /
+   * meta_views 四张**结构**表,一次都不碰 meta_records;抽取由纯函数 extractTemplateSheets
+   * 完成(property 白名单、视图只留结构位、所有 id 重编号成模板内局部 id),
+   * 所以模板 JSON 里既没有记录值,也没有源库的 sheet/field/view id。
+   *
+   * 可见性(抽取侧):源 Base 的表要先过 filterReadableSheetRowsForAccess —— 与 GET /bases
+   * 同一个可读过滤器。看不见的表不会被抽进模板;一张都看不见就按「Base 不存在」回 404
+   * (不告诉调用方这个 id 是否存在)。
+   *
+   * 可见性(发布侧):模板默认 private —— 只有建它的人看得见。理由是抽取侧的闸只保证
+   * 「建模板的人读得到这些表」,并不保证租户里**别人**读得到:管理员一路放行
+   * (filterReadableSheetRowsForAccess 对 isAdminRole 直接全量通过),他把带「内部成本」表的
+   * Base 存成模板后,若默认全租户可见,表名与全部字段名就绕过表级权限漏给了每个只读用户。
+   * 要当组织资产用,建模板的人显式传 visibility:'tenant'(前端是一个默认不勾的复选框)。
+   *
+   * 粒度(F7「从表一键存为模板」):可选的 `sheetIds` / `fieldIds` 把范围**收窄**到用户在工作台
+   * 里点名的那张数据表与勾选的那几列。两者都只做交集,一条可见性/授权闸都不替换 ——
+   * 传了也照样过 filterVisibleSheetRows → filterReadableSheetRowsForAccess,读不到的表/字段
+   * 不会因为被点名就进模板。省略两者 = 改动前的整 Base 行为,逐字不变;而**显式传空**
+   * (`sheetIds: []` / `fieldIds: []`,或归一后什么都不剩的一批空白 id)= 零匹配,直接 400,
+   * 不会退化成「不限」。
+   */
+  router.post('/templates', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      baseId: z.string().min(1).max(50),
+      name: z.string().min(1).max(255).optional(),
+      description: z.string().max(500).optional(),
+      category: z.string().min(1).max(64).optional(),
+      icon: z.string().min(1).max(64).optional(),
+      color: z.string().min(1).max(32).optional(),
+      workspaceId: z.string().min(1).max(100).optional(),
+      // 省略 = private。只有显式的 'tenant' 才会把模板发布给整个租户。
+      visibility: z.enum(['private', 'tenant']).optional(),
+      // F7「从表一键存为模板」:两个**只收窄不放宽**的可选选择器,省略 = 今天的整 Base 行为。
+      // 上限与既有口径同量(表 50 = 下面那条 SQL 的 LIMIT 50;字段 500 = 字段读上限),
+      // 超限由 zod 直接回 400 而不是静默截断(截断会让用户以为存全了)。
+      sheetIds: z.array(z.string().min(1).max(50)).max(50).optional(),
+      fieldIds: z.array(z.string().min(1).max(100)).max(500).optional(),
+    })
+    const parsed = schema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+    const baseId = parsed.data.baseId.trim()
+    // null = 不限(整 Base,= 改动前的行为)。这两个选择器只能把范围**收窄**:
+    // 它们不参与任何可见性判定,过滤器 filterVisibleSheetRows → filterReadableSheetRowsForAccess
+    // 一个都不少地照跑,所以「给了 fieldIds 就跳过可读性过滤」这条捷径在这里不存在。
+    const requestedSheetIds = parsed.data.sheetIds
+      ? Array.from(new Set(parsed.data.sheetIds.map((id) => id.trim()).filter((id) => id.length > 0)))
+      : null
+    const requestedFieldIds = parsed.data.fieldIds
+      ? new Set(parsed.data.fieldIds.map((id) => id.trim()).filter((id) => id.length > 0))
+      : null
+    // 口径:**省略 = 不限(整 Base);给了键就是显式收窄,空选择 = 零匹配,不是「不限」。**
+    // `[]`(以及只写了空白、归一后什么都不剩的一批 id)在这里 fail-closed 回 400,而不是
+    // 悄悄退回整 Base:把空集合当「不限」意味着一个「我一列都没选」的请求会被放大成
+    // 「把这个 Base 的所有表所有列都抽进模板」—— 收窄选择器只能收窄,绝不能反向放宽读面。
+    // 400 只由调用方自己的入参形状决定,不透露 baseId 存不存在(与 zod 的 400 同层、同在
+    // 任何 DB 查询之前),所以也不构成存在性探测面。
+    if (requestedSheetIds?.length === 0 || requestedFieldIds?.size === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'sheetIds/fieldIds must contain at least one non-blank id when provided; an empty selection is not "no limit"',
+        },
+      })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!capabilities.canManageFields) return sendForbidden(res, SAVE_AS_TEMPLATE_FORBIDDEN_MESSAGE)
+
+      const baseResult = await pool.query(
+        'SELECT id, name, icon, color FROM meta_bases WHERE id = $1 AND deleted_at IS NULL',
+        [baseId],
+      )
+      const baseRow = (baseResult as any).rows?.[0]
+      if (!baseRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      }
+
+      // sheetIds **下推进 WHERE**,不能在 LIMIT 之后过滤:Base 里表多于 50 张时,按 created_at
+      // 排在第 51 位的表会先被 LIMIT 截掉,事后再过滤等于把用户明确点名的那张表误判成「不存在」
+      // (回 404)。收窄语义由 `base_id = $1` 保住:别的 Base / 别的租户的 sheetId 一张都匹配不到。
+      const sheetResult = await pool.query(
+        `SELECT id, base_id, name, description
+         FROM meta_sheets
+         WHERE base_id = $1 AND deleted_at IS NULL
+           AND ($2::text[] IS NULL OR id = ANY($2::text[]))
+         ORDER BY created_at ASC
+         LIMIT 50`,
+        [baseId, requestedSheetIds],
+      )
+      const visibleSheetRows = filterVisibleSheetRows(((sheetResult as any).rows ?? []) as any[])
+      const readableSheetRows = await filterReadableSheetRowsForAccess(
+        pool.query.bind(pool),
+        visibleSheetRows.map((row: any) => ({
+          id: String(row.id),
+          name: typeof row.name === 'string' ? row.name : '',
+          description: typeof row.description === 'string' ? row.description : null,
+        })),
+        access,
+        capabilities,
+      )
+      if (readableSheetRows.length === 0) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Base not found: ${baseId}` } })
+      }
+      const sheetIds = readableSheetRows.map((row) => row.id)
+
+      const fieldResult = await pool.query(
+        'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY "order" ASC',
+        [sheetIds],
+      )
+      const viewResult = await pool.query(
+        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[])',
+        [sheetIds],
+      )
+
+      // fieldIds 的交集必须在 extractTemplateSheets **之前**做:抽取器只把 `fieldLocalIds` 里有的
+      // 源字段映射进视图的 groupBy/date/title/hidden(custom-template-store.ts),所以被剔掉的字段
+      // 在模板视图里自动消失、不留悬空引用。挪到抽取之后过滤,视图里就会留下指向已删字段的局部 id。
+      // 只做交集:传进来的 id 若不属于可读表的字段,什么也拿不到 —— 这里永远不可能放宽读面。
+      const fieldRows = ((fieldResult as any).rows ?? []) as any[]
+      const scopedFieldRows = requestedFieldIds
+        ? fieldRows.filter((row: any) => requestedFieldIds.has(String(row.id)))
+        : fieldRows
+
+      const extracted = extractTemplateSheets({
+        sheets: readableSheetRows.map((row) => ({ id: row.id, name: row.name, description: row.description })),
+        fields: scopedFieldRows,
+        views: ((viewResult as any).rows ?? []) as any[],
+      })
+      if (extracted.sheets.length === 0) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'VALIDATION_ERROR', message: 'This base has no readable table with fields to save as a template' },
+        })
+      }
+
+      const template = await createCustomTemplate({
+        query: (sql, params) => pool.query(sql, params),
+        id: `${CUSTOM_TEMPLATE_ID_PREFIX}${randomUUID().replace(/-/g, '').slice(0, 24)}`,
+        tenantId: resolveTemplateTenantId(req),
+        workspaceId: parsed.data.workspaceId?.trim() ?? null,
+        name: (parsed.data.name?.trim() || String(baseRow.name ?? '').trim() || 'Untitled template').slice(0, 255),
+        description: (parsed.data.description ?? '').trim().slice(0, 500),
+        category: parsed.data.category?.trim() || CUSTOM_TEMPLATE_DEFAULT_CATEGORY,
+        icon: parsed.data.icon?.trim() || (typeof baseRow.icon === 'string' && baseRow.icon ? baseRow.icon : 'table'),
+        color: parsed.data.color?.trim() || (typeof baseRow.color === 'string' && baseRow.color ? baseRow.color : '#2563eb'),
+        sheets: extracted.sheets,
+        createdBy: access.userId,
+        visibility: normalizeCustomTemplateVisibility(parsed.data.visibility),
+      })
+
+      templateInstallLogger.info('[multitable.template.save-as]', {
+        templateId: template.id,
+        ok: true,
+        userId: access.userId,
+        sheetCount: extracted.sheets.length,
+        // 只记数量,不记 id / 名字 —— 日志面不是元数据读面。
+        scopedSheets: requestedSheetIds?.length ?? null,
+        scopedFields: requestedFieldIds?.size ?? null,
+        visibility: template.visibility,
+      })
+      return res.status(201).json({ ok: true, data: { template, warnings: extracted.warnings } })
+    } catch (err) {
+      if (isCustomTemplateTableMissing(err)) {
+        return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] save base as template failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to save base as template' } })
+    }
+  })
+
+  /**
+   * 删除自定义模板(软删)。内置模板不可删 —— 它们是常量表里的代码,不是数据。
+   * 与创建同档鉴权;租户维度写在 SQL 里,别的租户即使猜到 id 也只会拿到 404。
+   */
+  router.delete('/templates/:templateId', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const templateId = typeof req.params.templateId === 'string' ? req.params.templateId.trim() : ''
+    if (!templateId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'templateId is required' } })
+    }
+    if (!isCustomTemplateId(templateId)) {
+      return sendForbidden(res, 'Built-in templates cannot be deleted')
+    }
+
+    try {
+      const pool = poolManager.get()
+      const access = await resolveRequestAccess(req)
+      if (!access.userId) {
+        return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      }
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      if (!capabilities.canManageFields) return sendForbidden(res, SAVE_AS_TEMPLATE_FORBIDDEN_MESSAGE)
+
+      const deleted = await softDeleteCustomTemplate(
+        (sql, params) => pool.query(sql, params),
+        resolveTemplateTenantId(req),
+        templateId,
+        access.userId,
+      )
+      if (!deleted) {
+        return res.status(404).json({
+          ok: false,
+          error: { code: 'NOT_FOUND', message: new MultitableTemplateNotFoundError(templateId).message },
+        })
+      }
+      templateInstallLogger.info('[multitable.template.delete]', { templateId, ok: true, userId: access.userId })
+      return res.json({ ok: true, data: { templateId } })
+    } catch (err) {
+      if (isCustomTemplateTableMissing(err)) {
+        return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] delete custom template failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete template' } })
+    }
   })
 
   router.post('/templates/:templateId/install', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
@@ -7308,9 +7655,25 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       userId = access.userId
 
+      // 自定义模板(mtpl_ 前缀)存在 DB 里:按本租户查出来再交给同一套安装机器。
+      // 查不到 —— 别的租户的模板、已软删的模板、不存在的 id —— 一律走内置模板那条
+      // 404(NotFound),不区分「不存在」和「不是你的」。
+      let resolvedTemplate: MultitableTemplate | undefined
+      if (isCustomTemplateId(templateId)) {
+        const found = await getCustomTemplate(
+          (sql, params) => pool.query(sql, params),
+          resolveTemplateTenantId(req),
+          templateId,
+          access.userId,
+        )
+        if (!found) throw new MultitableTemplateNotFoundError(templateId)
+        resolvedTemplate = found
+      }
+
       const result = await pool.transaction(async ({ query }) => installMultitableTemplate({
         query: query as unknown as QueryFn,
         templateId,
+        template: resolvedTemplate,
         baseName: parsed.data.baseName,
         ownerId: access.userId,
         workspaceId: parsed.data.workspaceId ?? null,
@@ -7333,6 +7696,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         statusCode = 404
         errorCode = 'NOT_FOUND'
         message = err.message
+      } else if (isCustomTemplateTableMissing(err)) {
+        statusCode = 503
+        errorCode = 'DB_NOT_READY'
+        message = CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE
       } else if (err instanceof MultitableTemplateConflictError) {
         statusCode = 409
         errorCode = 'CONFLICT'
@@ -7403,7 +7770,28 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       req.user?.userId?.toString() ??
       null
 
-    const template = getMultitableTemplate(templateId)
+    // 自定义模板同样支持 dry-run:多一条**只读** SELECT(按租户查模板行),
+    // 零写不变量原样成立。查不到就落到下面与内置模板同一个 404。
+    let template = getMultitableTemplate(templateId)
+    if (!template && isCustomTemplateId(templateId)) {
+      try {
+        const pool = poolManager.get()
+        template = await getCustomTemplate(
+          (sql, params) => pool.query(sql, params),
+          resolveTemplateTenantId(req),
+          templateId,
+          userId ?? '',
+        )
+      } catch (err) {
+        if (isCustomTemplateTableMissing(err)) {
+          return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: CUSTOM_TEMPLATE_TABLE_MISSING_MESSAGE } })
+        }
+        const hint = getDbNotReadyMessage(err)
+        if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+        console.error('[univer-meta] resolve custom template failed:', err)
+        return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to dry-run template' } })
+      }
+    }
     if (!template) {
       templateInstallLogger.info('[multitable.template.dry-run]', {
         templateId,
@@ -7690,6 +8078,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // sheet-admin, mirroring revert-preview/-execute's own canManageSheetAccess (D2) floor exactly.
             sheetRevertEnabled: (String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true,
             personalViewsEnabled: isPersonalViewsEnabled(),
+            // Whole-sheet delete authority for the SELECTED sheet — the same server-derived, FE-read-only
+            // pattern as pitResetEnabled. Deliberately NOT `capabilities.canManageFields`: that is
+            // post-scope-grant and true for a sheet-scoped full-write holder, who
+            // `DELETE /sheets/:sheetId` refuses (hasSheetLifecycleAuthority = GLOBAL schema authority
+            // OR sheet-scoped ADMIN). Mirroring the route's own gate here is what keeps the FE delete
+            // affordance from being shown to an actor the server will 403. Single-sheet by construction
+            // (`selectedSheetScope` is resolved for `effectiveSheetId` only), so the FE may show a
+            // delete entry for the CURRENT sheet only, never for the rail's other rows.
+            canDeleteSheet: effectiveSheetId ? hasSheetLifecycleAuthority(access, selectedSheetScope) : false,
           },
           capabilityOrigin,
           fieldPermissions,
@@ -12248,6 +12645,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           requestedType,
           rawProperty,
         )
+        // 关联字段缺目标表 fail-closed（create）。放在 §2a.2 墙之前、且不看 payload 是否显式带 foreign 键：
+        // 这里判的是"落库后的结果状态"，所以 `POST {type:'link'}` 连 property 都不带也会被挡住。
+        assertLinkFieldForeignSheetPresent(type, property)
         const configError = await validateLookupRollupConfig(req, query, sheetId, type, property)
         if (configError) {
           throw new ValidationError(configError)
@@ -12332,6 +12732,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       if (err instanceof PermissionError) {
         return sendForbidden(res, err.message)
+      }
+      // 关联字段缺目标表 —— 稳定错误码，message 不含 fieldId（前端按码翻人话）。放在 ValidationError 前面，
+      // 因为它是 Error 的独立子类而不是 ValidationError 的子类（避免被通用 VALIDATION_ERROR 吞掉码）。
+      if (err instanceof LinkForeignSheetRequiredError) {
+        return res.status(400).json({ ok: false, error: { code: LINK_FIELD_FOREIGN_SHEET_REQUIRED_CODE, message: err.message } })
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
@@ -12724,6 +13129,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           throw new ValidationError(hierarchyParentMutationError)
         }
 
+        // 关联字段缺目标表 fail-closed（update）。两点是刻意的：
+        //   1) 触发条件按本文件既有的"lazy/on-edit"惯例收窄 —— 只有这次 PATCH 真的在写 property
+        //      （payload 带 property 键）或把别的类型转成 link 时才判。纯改名 / 纯调序不判：它不会让任何
+        //      健康字段变坏，已经坏掉的字段靠读取侧人话 + 字段管理面板的强制选择去自愈。
+        //   2) 位置排在既有的 lookup/rollup、跨 base 墙、aiShortcut、公式、层级父字段几道校验之后 ——
+        //      那些校验对同一个请求给的是更具体的原因（例如"该字段是层级视图的父字段"），保持它们的优先级，
+        //      本门只在没人反对时兜底。它仍在任何写语句之前，所以照样是 fail-closed。
+        if (typeof parsed.data.property !== 'undefined' || (nextType === 'link' && currentType !== 'link')) {
+          assertLinkFieldForeignSheetPresent(nextType, nextProperty)
+        }
+
         // W1-1 (design-lock §3 LOCK-B, B1/B2): an expression-change PATCH bulk-recomputes every
         // live record afterward (B3). B1 trigger = the request explicitly CARRIES
         // `property.expression` on a (or newly-converted-to) formula field — fires on BOTH an
@@ -12881,6 +13297,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           ok: false,
           error: { code: 'FORMULA_EXPRESSION_BULK_OVER_CAP', message: err.message, total: err.total, max: err.max },
         })
+      }
+      // 关联字段缺目标表 —— 与 create 侧同一稳定码，message values-free。
+      if (err instanceof LinkForeignSheetRequiredError) {
+        return res.status(400).json({ ok: false, error: { code: LINK_FIELD_FOREIGN_SHEET_REQUIRED_CODE, message: err.message } })
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
@@ -13971,6 +14391,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const { access, sheetScope, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!hasSheetLifecycleAuthority(access, sheetScope)) return sendForbidden(res, SHEET_DELETE_FORBIDDEN_MESSAGE)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // MANAGED-SHEET GUARD (after the authority gate, so an unauthorised actor never learns that a
+      // sheet is plugin-owned; before the write). A plugin-provisioned sheet has a deterministic id
+      // that `ensureObject` re-inserts with ON CONFLICT DO NOTHING and reads back with
+      // `deleted_at IS NULL` — soft-deleting it does not "hide a table", it breaks that plugin's
+      // provisioning until someone finds the UI-less restore endpoint. System sheets (People
+      // directory, projections) are refused on the same path. See multitable/sheet-delete-guard.ts
+      // for why the registry row is the authoritative signal.
+      const deleteRefusal = await resolveSheetDeleteRefusal(pool.query.bind(pool), sheetId)
+      if (deleteRefusal) return res.status(409).json(sheetDeleteRefusalBody(deleteRefusal))
       const sheetDeleteFencePlan = await prepareSheetLinkDeleteFencePlan(
         pool.query.bind(pool),
         sheetId,
@@ -17131,7 +17560,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const linkConfig = parseLinkFieldConfig(field.property)
       if (!linkConfig) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Link field is missing foreignSheetId: ${fieldId}` } })
+        // 已有坏字段（写入口收紧之前落库的）走这里：稳定码 + values-free message，前端按码翻人话，
+        // 不再把 `fld_...` 原样甩给用户。自愈路径 = 在「管理字段」里编辑它并选好目标表。
+        return res.status(400).json({
+          ok: false,
+          error: { code: LINK_FIELD_FOREIGN_SHEET_MISSING_CODE, message: LINK_FIELD_FOREIGN_SHEET_MISSING_MESSAGE },
+        })
       }
 
       const targetSheet = await loadSheetRow(pool.query.bind(pool), linkConfig.foreignSheetId)

@@ -77,11 +77,26 @@ export type MetaManagerLabelKey =
   | 'field.buttonNotifyRecipients' | 'field.buttonNotifyRecipientsHint'
   | 'field.error.buttonNotifyConfig'
   | 'field.autoNumberHint' | 'field.saveSettings' | 'field.applyDefaults'
+  // r4 item 4: "配置" panel for field types with no configurable options (dateTime,
+  // checkbox/boolean, url/email/phone/barcode/qrcode/location, and the read-only
+  // createdTime/modifiedTime/createdBy/modifiedBy system fields) previously rendered
+  // a blank body between the header and the save/cancel buttons — indistinguishable
+  // from a rendering bug. This key is the sole fallback copy for that state.
+  | 'field.noConfigurableOptions'
+  // r8-B (2026-09-11): the body/config splitter + its enlarge/shrink toggle inside the field
+  // manager dialog. Chrome strings live here, never inline in the .vue -- this directory is
+  // watched by multitable-manager-panels-i18n.spec.ts.
+  | 'field.configPaneResizeHandle' | 'field.configPaneExpand' | 'field.configPaneCollapse'
   | 'field.namePlaceholder' | 'field.addButton'
+  | 'field.nameRequiredHint' | 'field.optionColorEmpty'
   | 'field.changedTypeBlocking' | 'field.changedWarning'
   | 'field.latestMetadataLoaded'
   | 'field.discardManagerConfirm'
   | 'field.error.linkNeedsTargetSheet'
+  // 关联字段草稿区的常驻提示（2026-09-10）：没选目标表就不给保存 —— 这也是"已有坏字段"的自愈入口
+  | 'field.linkTargetRequiredHint'
+  // 同上，但这个 base 里一张可选的表都没有：提示要给出能执行的下一步，而不是让人对着空下拉
+  | 'field.linkNoOtherSheetsHint'
   | 'field.error.linkNeedsCrossBaseTarget'
   | 'field.error.lookupNeedsLinkAndTarget'
   | 'field.error.lookupNeedsValidTargetSheet'
@@ -362,10 +377,25 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
     en: 'Existing records are backfilled once when the field is created or converted.',
     zh: '字段创建或转换时，会对已有记录一次性回填。',
   },
+  'field.noConfigurableOptions': {
+    en: 'This field type has no configurable options. To change how it displays, use view settings instead.',
+    zh: '这一类型暂无可配置项；要改显示方式请到视图设置调整。',
+  },
+  'field.configPaneResizeHandle': {
+    en: 'Resize the field settings pane',
+    zh: '调整字段配置区高度',
+  },
+  'field.configPaneExpand': { en: 'Enlarge settings pane', zh: '放大配置区' },
+  'field.configPaneCollapse': { en: 'Shrink settings pane', zh: '缩小配置区' },
   'field.saveSettings': { en: 'Save field settings', zh: '保存字段设置' },
   'field.applyDefaults': { en: 'Apply defaults', zh: '应用默认值' },
   'field.namePlaceholder': { en: 'Field name', zh: '字段名称' },
   'field.addButton': { en: '+ Add', zh: '+ 添加' },
+  // Quiet inline hint for the empty-name leg of the '+ Add' disabled predicate
+  // (MetaFieldManager.vue). The duplicate-name leg already had a visible error;
+  // the empty-name leg silently did nothing at all.
+  'field.nameRequiredHint': { en: 'Enter a field name to add', zh: '输入字段名称后可添加' },
+  'field.optionColorEmpty': { en: 'No colour set', zh: '未设置颜色' },
   'field.changedTypeBlocking': {
     en: 'This field changed type in the background. Reload latest before saving.',
     zh: '该字段类型已在后台变更。保存前请重新加载最新设置。',
@@ -377,6 +407,14 @@ const LABELS: Record<MetaManagerLabelKey, { en: string; zh: string }> = {
   'field.latestMetadataLoaded': { en: 'Latest field metadata loaded from the sheet context.', zh: '已从数据表上下文加载最新字段元数据。' },
   'field.discardManagerConfirm': { en: 'Discard unsaved field manager changes?', zh: '放弃未保存的字段管理更改吗？' },
   'field.error.linkNeedsTargetSheet': { en: 'Choose a target sheet for link fields', zh: '请为关联字段选择目标数据表' },
+  'field.linkTargetRequiredHint': {
+    en: 'Pick the sheet this field links to. Without a target sheet it cannot be saved, and "Choose linked records" will not open.',
+    zh: '请选择这个字段要关联哪张数据表。没有目标表就无法保存，「选择关联记录」也打不开。',
+  },
+  'field.linkNoOtherSheetsHint': {
+    en: 'There is no other table in this workspace to link to yet. Create a second table first, then come back and pick it here.',
+    zh: '这个工作区还没有其它数据表可以关联。请先新建一张数据表，再回到这里选它。',
+  },
   'field.error.linkNeedsCrossBaseTarget': { en: 'Choose a base and a readable table for the cross-base link', zh: '请为跨工作区关联选择目标工作区和可读取的数据表' },
   'field.error.lookupNeedsLinkAndTarget': { en: 'Lookup fields need a link field and a target field id', zh: '查找字段需要关联字段和目标字段 ID' },
   'field.error.lookupNeedsValidTargetSheet': { en: 'Lookup fields need a valid target sheet', zh: '查找字段需要有效的目标数据表' },
@@ -519,6 +557,23 @@ export function managerLabel(key: MetaManagerLabelKey, isZh: boolean): string {
 
 export function duplicateFieldName(name: string, isZh: boolean): string {
   return isZh ? `字段“${name}”已存在` : `A field named "${name}" already exists`
+}
+
+/**
+ * Shown inline (and repeated in the confirm) before a field-manager retype save.
+ * `normalizeFieldWriteInput` (core-backend routes/univer-meta.ts:5565-5588) re-runs
+ * `sanitizeFieldProperty` under the NEW type, so type-specific formatting (decimals,
+ * unit, currency code, options...) is dropped; stored cell values are left exactly as
+ * they are (the forward retype migrates nothing).
+ */
+export function fieldRetypeNotice(targetTypeLabel: string, isZh: boolean): string {
+  // Says BOTH consequences on purpose: the server re-sanitises `property` under the new
+  // type (format settings), and the FE drops validation rules the new type cannot enforce
+  // (utils/field-retype.ts retainedRetypeValidationRules) — a number `min` left on a text
+  // column would reject every later write.
+  return isZh
+    ? `改为${targetTypeLabel}后，现有格式设置、以及新类型无法执行的校验规则会被清除；已有数据不转换。`
+    : `Changing to ${targetTypeLabel} clears the current format settings and any validation rule the new type cannot enforce; existing data is not converted.`
 }
 
 export function deleteFieldConfirm(name: string, isZh: boolean): string {

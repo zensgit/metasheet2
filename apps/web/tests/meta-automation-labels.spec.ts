@@ -156,6 +156,9 @@ describe('meta-automation-labels', () => {
     expect(automationCardActionSummary('notify', '', true)).toBe('发送通知')
     expect(automationCardActionSummary('update_field', '状态', false)).toBe('Update "状态"')
     expect(automationCardActionSummary('update_field', 'Status', true)).toBe('更新“Status”')
+    // F9: update_field folded into update_record — a single-field update still names its field.
+    expect(automationCardActionSummary('update_record', 'Status', true)).toBe('更新“Status”')
+    expect(automationCardActionSummary('update_record', '', true)).toBe('更新记录')
     expect(automationCardActionSummary('future_action', '', true)).toBe('future_action')
 
     expect(automationCardLinkLabel('publicForm', '我的视图', false)).toBe('Open public form: 我的视图')

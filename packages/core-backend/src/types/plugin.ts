@@ -536,6 +536,30 @@ export interface MultitableProvisioningAPI {
     hiddenFieldIds: string[]
     config: Record<string, unknown>
   }>
+  /**
+   * READ-ONLY sibling of `ensureView`: does this provisioned view EXIST, and with what shape?
+   * Null when it does not. `getObjectViewId` only COMPOSES an id, so a plugin that deep-links to
+   * one of its own provisioned views had no way to tell a provisioned view from a composed id.
+   *
+   * OPTIONAL on purpose: a plugin newer than its host must degrade ("cannot prove it exists"),
+   * never crash. It grants nothing `ensureView` does not already grant — same project namespace,
+   * same object scope, and an id derived from the caller's own project + object.
+   */
+  findObjectView?(input: {
+    projectId: string
+    objectId: string
+    viewId: string
+  }): Promise<{
+    id: string
+    sheetId: string
+    name: string
+    type: string
+    filterInfo: Record<string, unknown>
+    sortInfo: Record<string, unknown>
+    groupInfo: Record<string, unknown>
+    hiddenFieldIds: string[]
+    config: Record<string, unknown>
+  } | null>
   patchObjectFieldProperty(input: {
     projectId: string
     objectId: string
@@ -1284,9 +1308,18 @@ export interface PluginServices {
       packId?: string
       reconcile?: { fieldIds: readonly string[]; roleIds: readonly string[] } | null | false
       /**
-       * "I can PROVE this pack is the only pack ever installed on this sheet." Only then may the
-       * reconcile adopt or retire the pack-LESS legacy rows in its rectangle. Default false, which
-       * makes such rows unattributed and REFUSES the call.
+       * "I can PROVE this pack is the only pack ever installed on this sheet." Only then may this
+       * call adopt or retire the pack-LESS legacy rows it addresses. Default false.
+       *
+       * IT BINDS BOTH PATHS, and they FAIL DIFFERENTLY — the difference is the whole of what a
+       * caller must plan for:
+       *  · WITH `reconcile`: an unattributed pack-less row inside the rectangle REFUSES the call
+       *    (`LEGACY_UNATTRIBUTED`), before a single row is written.
+       *  · ENTRIES-ONLY (no `reconcile`): there is no refusal. The upsert's ownership guard simply
+       *    takes the ELSE branch on all three columns, so such a row keeps its `visible`,
+       *    `read_only` and `created_by` exactly as found — including an operator's earlier
+       *    decision. The declaration does NOT land for that pair; it is named in
+       *    `skippedUnattributed` and excluded from `applied` rather than silently counted.
        */
       legacyAdoptable?: boolean
     }): Promise<{
@@ -1297,6 +1330,14 @@ export interface PluginServices {
       operatorHeld?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
       /** Another pack's rows in the region on undeclared pairs: left standing, reported. */
       governedByOtherPacks?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
+      /**
+       * Declared pairs whose EXISTING row this call was not entitled to rewrite (an operator's row,
+       * a NULL-provenance row, a sibling pack's row, or a pack-less legacy row without
+       * `legacyAdoptable`). The row is byte-identical to what it was, and — if it was RELAXED —
+       * THE DENIAL THIS CALL DECLARED IS NOT IN FORCE. Excluded from `applied`. OPTIONAL: an older
+       * host omits it, which a consumer must read as "not checked", never as "nothing was skipped".
+       */
+      skippedUnattributed?: Array<{ fieldId: string; roleId: string; packId?: string | null }>
     }>
     /**
      * THE REHEARSAL OF THE INVARIANT — the same classification the write path runs under its row

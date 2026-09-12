@@ -424,8 +424,21 @@ describe('multitable formula editor', () => {
     expect(container.textContent).toContain('未知字段引用 {fld_missing}。')
     expect(container.textContent).not.toContain('Unknown field reference {fld_missing}.')
     expect(container.querySelector('.meta-field-mgr__formula-diagnostic--error')).toBeTruthy()
-    expect(container.querySelectorAll('[aria-label]')).toHaveLength(0)
-    expect(container.querySelectorAll('[title]')).toHaveLength(13)
+    // 2 (was 0): r8-B added the field-list/config splitter and its 放大/缩小 toggle, the first two
+    // aria-labelled controls in this dialog. Same discipline as the [title] golden below — the
+    // COUNT alone would be a widening, so the zh text of both is pinned here.
+    const renderedAriaLabels = Array.from(container.querySelectorAll('[aria-label]')).map((el) => el.getAttribute('aria-label'))
+    expect(renderedAriaLabels).toEqual(['调整字段配置区高度', '放大配置区'])
+    // 14 (was 13): the field-manager '+ 添加' button now carries a disabled-reason
+    // title (MetaFieldManager.vue:810 `:title="addDisabledHint || undefined"`); the add
+    // row is unconditional and this case leaves the name box empty, so the hint is always
+    // present. This golden's point is "no English leaks under zh-CN", so pin the TEXT too
+    // — bumping the count alone would silently widen it.
+    const renderedTitles = Array.from(container.querySelectorAll('[title]')).map((el) => el.getAttribute('title'))
+    expect(renderedTitles).toContain('输入字段名称后可添加')
+    // 15 (was 14): r8-B's 放大/缩小 toggle carries a localized title alongside its aria-label.
+    expect(renderedTitles).toContain('放大配置区')
+    expect(renderedTitles).toHaveLength(15)
     expect(container.querySelectorAll('[placeholder]')).toHaveLength(3)
 
     app.unmount()

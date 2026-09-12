@@ -30,6 +30,9 @@ export type MetaApiErrorLabelKey =
   | 'error.aiBulkActiveJobExists'
   | 'error.aiBulkJobNotCommittable'
   | 'error.aiBulkJobCommitInProgress'
+  // Gateway-side outage copy (F4-B): 502/503/504 arrive while the backend is down or
+  // restarting. Neutral wording by owner ruling — it must NOT say "upgrading".
+  | 'error.serverRestarting'
 
 const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
   'error.forbidden': { en: 'Insufficient permissions', zh: '权限不足' },
@@ -81,6 +84,13 @@ const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
     en: 'Another write for this bulk-fill job is already in progress.',
     zh: '该批量填充任务已有另一次写入正在进行中。',
   },
+  // Deliberately identical in spirit to utils/networkErrors.ts: the user cannot tell
+  // (and should not have to) whether the gateway answered 502 or the connection was
+  // reset outright — both mean "the backend is not there right now".
+  'error.serverRestarting': {
+    en: 'The service is temporarily unavailable. Please try again in a moment.',
+    zh: '服务暂时不可用，请稍后重试',
+  },
 }
 
 export const META_API_ERROR_LABEL_KEYS = Object.freeze(
@@ -104,6 +114,12 @@ export function apiDefaultErrorMessage(code: string | undefined, status: number,
     case 'VALIDATION_ERROR':
       return metaApiErrorLabel('error.validation', isZh)
     default:
+      // Gateway-side outage statuses only (F4-B). 500 stays `API 500` on purpose: a
+      // 500 is an application bug with a real stack behind it, and telling the user
+      // to "try again in a moment" would hide it. Pinned by a spec assertion.
+      if (status === 502 || status === 503 || status === 504) {
+        return metaApiErrorLabel('error.serverRestarting', isZh)
+      }
       return `API ${status}`
   }
 }

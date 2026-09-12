@@ -20,6 +20,12 @@ import {
   isDeadLetterReplayable,
   normalizeIntegrationProjectId,
   replayIntegrationDeadLetter,
+  externalSystemScopeTestWriteNote,
+  externalSystemScopeWriteBlock,
+  integrationApiErrorCode,
+  isExternalSystemWritableInScope,
+  parseIntegrationResponse,
+  type IntegrationApiError,
 } from '../src/services/integration/workbench'
 
 const apiFetchMock = vi.fn()
@@ -507,5 +513,157 @@ describe('integration provenance read service (DF-N2-3)', () => {
     expect(calls[0]).not.toContain('from=')
     expect(calls[0]).not.toContain('limit=')
     expect(calls[0]).toContain('rowId=MAT-1')
+  })
+})
+
+// 列表回退 vs upsert/delete 不回退 —— 屏幕侧的那条判据。
+//
+// 背景:GET /api/integration/external-systems 对非 null 的 workspace hint 会回退一步,把同租户
+// workspace_id IS NULL 的行也列出来;而 upsert 的 findExisting 与 delete 仍按 (tenant, workspace, id)
+// 精确匹配。所以「列表里能看见」不等于「在这个作用域里改得动」,工作台的连接清单又恰好是带写按钮的清单。
+//
+// 口径:拦的是编辑/停用/启用/删除四个,**不是「只读」** —— 测试连接按行自身的作用域写回该行
+// (服务端 persistExternalSystemTestResult,#5534),下面第二个 describe 钉着文案必须说出这件事。
+describe('externalSystemScopeWriteBlock (回退来的行在当前作用域内改不动/停不掉/删不了)', () => {
+  it('放行:行的作用域与当前 hint 一致(含两边都是租户级 null)', () => {
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: null })).toBe('')
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, {})).toBe('')
+    expect(externalSystemScopeWriteBlock({ workspaceId: 'ws_a' }, { workspaceId: 'ws_a' })).toBe('')
+    // 空串/空白 hint 与 null 同义(与后端 normalizeWorkspaceId 同形)
+    expect(externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: '  ' })).toBe('')
+    expect(isExternalSystemWritableInScope({ workspaceId: null }, { workspaceId: '' })).toBe(true)
+  })
+
+  it('拦下:带 hint 的调用方看到的租户级行 —— 四个写动作服务端会 409/404 拒掉', () => {
+    const message = externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: 'default' })
+    expect(message).toContain('租户级')
+    // 枚举四个动作,不准再用「只读」这种盖过测试连接的说法。
+    for (const action of ['编辑', '停用', '启用', '删除']) {
+      expect(message).toContain(action)
+    }
+    expect(message).not.toContain('只读')
+    expect(isExternalSystemWritableInScope({ workspaceId: null }, { workspaceId: 'default' })).toBe(false)
+  })
+
+  it('文案必须说出测试连接仍会写这行 —— 置灰的量 ≠ 实际写不动的量', () => {
+    const message = externalSystemScopeWriteBlock({ workspaceId: null }, { workspaceId: 'default' })
+    expect(message).toContain('测试连接')
+    expect(message).toContain('status')
+  })
+
+  it('拦下:另一个工作区的行', () => {
+    expect(externalSystemScopeWriteBlock({ workspaceId: 'ws_b' }, { workspaceId: 'ws_a' }))
+      .toContain('另一个工作区')
+  })
+
+  // 去掉 scopeFallback 线路字段后的回归防线:判据必须只看「这次写将要带上的 hint」。
+  // 旧实现把服务端标记当第二条判据,而标记钉在拉列表那一刻:操作员按提示清空工作区输入框后
+  // (工作台不会重拉列表),陈旧标记会继续拦住那条本来会成功的租户级写。
+  it('hint 清空后同一行重新可写 —— 判据跟着实时 hint 走,不跟着拉列表那一刻走', () => {
+    const tenantWideRow = { workspaceId: null }
+    expect(externalSystemScopeWriteBlock(tenantWideRow, { workspaceId: 'default' })).not.toBe('')
+    expect(externalSystemScopeWriteBlock(tenantWideRow, { workspaceId: null })).toBe('')
+  })
+})
+
+// 测试连接不在拦截名单里,但要如实告知写到了哪一行。
+// 服务端 POST /external-systems/{id}/test 读到系统后,persistExternalSystemTestResult 故意按行自己的
+// 作用域落库(#5534),所以回退来的租户级行是真的被改了 status/last_tested_at/last_error。
+describe('externalSystemScopeTestWriteNote (测试连接写到了哪一行)', () => {
+  it('回退来的租户级行:提示写入的是租户级那一行', () => {
+    const note = externalSystemScopeTestWriteNote({ workspaceId: null }, { workspaceId: 'default' })
+    expect(note).toContain('租户级')
+  })
+
+  it('自己作用域内的行、以及本来就没带 hint 的调用方:一律不加提示', () => {
+    expect(externalSystemScopeTestWriteNote({ workspaceId: 'default' }, { workspaceId: 'default' })).toBe('')
+    expect(externalSystemScopeTestWriteNote({ workspaceId: null }, { workspaceId: null })).toBe('')
+    expect(externalSystemScopeTestWriteNote({ workspaceId: null }, {})).toBe('')
+    expect(externalSystemScopeTestWriteNote({ workspaceId: 'ws_b' }, { workspaceId: 'ws_a' })).toBe('')
+    expect(externalSystemScopeTestWriteNote(null, { workspaceId: 'default' })).toBe('')
+  })
+})
+
+// 非 2xx 的错误码透传（#5634 的兜底）。
+// 服务端答的是 `{ ok:false, error:{ code, message, details } }`；以前这里只留 message、丢掉 code，
+// 于是调用点只能去匹配英文散文（"external system belongs to the tenant-wide scope"）——
+// 服务端换一句话、换个语言，分支就静默失效（PG 中文 locale 那类脆弱守卫的同款）。
+describe('parseIntegrationResponse（错误码/状态透传，message 不变）', () => {
+  function errorResponse(body: unknown, status: number, statusText?: string): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      ...(statusText ? { statusText } : {}),
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  it('非 2xx 的 {error:{code,message}}：抛出的 Error 带 code / status / details，message 一字不改', async () => {
+    const raised = await parseIntegrationResponse(errorResponse({
+      ok: false,
+      error: {
+        code: 'EXTERNAL_SYSTEM_SCOPE_MISMATCH',
+        message: 'external system belongs to the tenant-wide scope',
+        details: { id: 'metasheet_staging_project_1', requestedWorkspaceId: 'default', rowWorkspaceId: null },
+      },
+    }, 409)).then(() => null, (error: unknown) => error as IntegrationApiError)
+
+    expect(raised).toBeInstanceOf(Error)
+    // 既有调用点只读 .message —— 它必须保持逐字不变，这次是纯加法。
+    expect(raised?.message).toBe('external system belongs to the tenant-wide scope')
+    expect(raised?.code).toBe('EXTERNAL_SYSTEM_SCOPE_MISMATCH')
+    expect(raised?.status).toBe(409)
+    expect(raised?.details).toMatchObject({ requestedWorkspaceId: 'default', rowWorkspaceId: null })
+    expect(integrationApiErrorCode(raised)).toBe('EXTERNAL_SYSTEM_SCOPE_MISMATCH')
+  })
+
+  it('非 JSON 体：code 不存在，message 仍是既有兜底文案（正控）', async () => {
+    const raised = await parseIntegrationResponse(new Response('<html>502 Bad Gateway</html>', {
+      status: 502,
+      statusText: 'Bad Gateway',
+      headers: { 'Content-Type': 'text/html' },
+    })).then(() => null, (error: unknown) => error as IntegrationApiError)
+
+    expect(raised?.message).toBe('502 Bad Gateway')
+    expect(raised?.code).toBeUndefined()
+    expect(integrationApiErrorCode(raised)).toBeNull()
+    expect(raised?.status).toBe(502)
+  })
+
+  it('code 形状不合法（值面字符串）时夹掉，不让值经错误路径进 DOM 判据', async () => {
+    const raised = await parseIntegrationResponse(errorResponse({
+      ok: false,
+      error: { code: '物料 A-001 冲突 jdbc:sqlserver://10.0.0.1', message: 'conflict' },
+    }, 409)).then(() => null, (error: unknown) => error as IntegrationApiError)
+
+    expect(raised?.message).toBe('conflict')
+    expect(raised?.code).toBeUndefined()
+    expect(integrationApiErrorCode(raised)).toBeNull()
+  })
+
+  it('2xx 正常响应照旧返回 data；integrationApiErrorCode 对非本模块的错误返回 null', async () => {
+    await expect(parseIntegrationResponse(jsonResponse({ id: 'sys_1' })))
+      .resolves.toEqual({ id: 'sys_1' })
+    expect(integrationApiErrorCode(new Error('plain'))).toBeNull()
+    expect(integrationApiErrorCode('EXTERNAL_SYSTEM_SCOPE_MISMATCH')).toBeNull()
+    expect(integrationApiErrorCode(null)).toBeNull()
+  })
+
+  it('走真实服务函数（upsertWorkbenchExternalSystem）时，code 一路到达调用点', async () => {
+    apiFetchMock.mockReset()
+    apiFetchMock.mockImplementation(async () => errorResponse({
+      ok: false,
+      error: { code: 'EXTERNAL_SYSTEM_SCOPE_MISMATCH', message: 'external system belongs to the tenant-wide scope' },
+    }, 409))
+    const raised = await upsertWorkbenchExternalSystem({
+      tenantId: 'default',
+      workspaceId: 'default',
+      id: 'metasheet_staging_project_1',
+      name: 'MetaSheet staging 多维表',
+      kind: 'metasheet:staging',
+      role: 'source',
+      status: 'active',
+    }).then(() => null, (error: unknown) => error as IntegrationApiError)
+    expect(integrationApiErrorCode(raised)).toBe('EXTERNAL_SYSTEM_SCOPE_MISMATCH')
+    expect(raised?.status).toBe(409)
   })
 })

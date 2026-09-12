@@ -55,10 +55,20 @@ export type WorkbenchLabelKey =
   | 'toast.sheetCreateBlocked' | 'toast.sheetRefreshFailed' | 'toast.sheetCreateFailed'
   | 'toast.baseLoadFailed' | 'toast.contextSyncFailed'
   | 'toast.externalContextBusy' | 'toast.externalContextUnsaved'
+  // F5: the template library's "More templates ->" entry navigates programmatically; when the
+  // page-leave guard (unsaved drafts) aborts that navigation the panel stays open and says why.
+  | 'toast.templateCenterBlocked'
   | 'toast.baseCreateBlocked' | 'toast.baseCreateFailed'
   // feat/multitable-rename: sheet/base rename failure toasts (server e.message takes priority —
   // these are only the generic fallback when the response carried no message).
   | 'toast.sheetRenameFailed' | 'toast.baseRenameFailed'
+  // Sheet delete (workbench onDeleteSheet): success toast + the generic failure fallback, plus the
+  // three CODED refusals the server can answer with — picked by `error.code`, never by status text:
+  //   409 SHEET_PLUGIN_MANAGED  → the sheet is provisioned by a plugin (deleting would break its ensure)
+  //   409 SHEET_SYSTEM_MANAGED  → server-owned system sheet (People directory / projections)
+  //   404 SHEET_DELETED         → already soft-deleted (stale list); restorable by an admin via the API
+  | 'toast.sheetDeleted' | 'toast.sheetDeleteFailed'
+  | 'toast.sheetPluginManaged' | 'toast.sheetSystemManaged' | 'toast.sheetAlreadyDeleted'
   | 'toast.importCancelled' | 'toast.importFailed'
   | 'toast.excelExportFailed' | 'toast.csvExportFailed' | 'toast.bulkDeleteFailed'
   | 'toast.workbenchInitFailed'
@@ -69,6 +79,8 @@ export type WorkbenchLabelKey =
   | 'confirm.buttonRun'
   // §3.6 MetaTemplateCard button (counts use the card* helpers below)
   | 'card.install' | 'card.installing'
+  // 自定义模板(把这张 Base 存为模板)——角标与删除入口
+  | 'card.customBadge' | 'card.delete' | 'card.privateBadge'
   // S2 template detail + dry-run (design 20260611 §2.2)
   | 'card.viewDetail'
   | 'detail.back' | 'detail.loading' | 'detail.notFound'
@@ -77,6 +89,13 @@ export type WorkbenchLabelKey =
   | 'detail.checkInstallable' | 'detail.checking' | 'detail.dryRunFailed'
   | 'detail.installableYes' | 'detail.installableNo'
   | 'detail.wouldCreateTitle' | 'detail.conflictsTitle' | 'detail.conflictHint'
+  // F7 工作台「把当前数据表存为模板」对话框(G-10:zh 里 Sheet 一律叫「数据表」)
+  | 'saveTpl.open' | 'saveTpl.title' | 'saveTpl.hint'
+  | 'saveTpl.nameLabel' | 'saveTpl.fieldsLabel' | 'saveTpl.selectAll' | 'saveTpl.selectNone'
+  | 'saveTpl.shareLabel' | 'saveTpl.shareHint'
+  | 'saveTpl.submit' | 'saveTpl.saving' | 'saveTpl.cancel' | 'saveTpl.close'
+  | 'saveTpl.errorNoName' | 'saveTpl.errorNoFields' | 'saveTpl.failed'
+  | 'saveTpl.successTitle' | 'saveTpl.warningsTitle' | 'saveTpl.openCenter'
   // final audit closure follow-up: composable fallback messages (backend e.message remains raw)
   | 'error.loadSheets' | 'error.loadSheetMetadata' | 'error.loadBaseMetadata'
 
@@ -205,6 +224,10 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
     en: 'Host multitable context changed while unsaved drafts are open. Resolve or discard changes to continue.',
     zh: '宿主多维表上下文已变更。请处理或放弃未保存草稿后继续。',
   },
+  'toast.templateCenterBlocked': {
+    en: 'Unsaved changes are still open. Resolve them before opening the template center.',
+    zh: '有未保存的更改，请先处理',
+  },
   'toast.baseCreateBlocked': {
     en: 'Base creation requires multitable write access.',
     zh: '创建工作区需要多维表写入权限。',
@@ -212,6 +235,20 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.baseCreateFailed': { en: 'Failed to create base', zh: '创建工作区失败' },
   'toast.sheetRenameFailed': { en: 'Failed to rename sheet', zh: '重命名数据表失败' },
   'toast.baseRenameFailed': { en: 'Failed to rename base', zh: '重命名工作区失败' },
+  'toast.sheetDeleted': { en: 'Sheet deleted', zh: '数据表已删除' },
+  'toast.sheetDeleteFailed': { en: 'Failed to delete sheet', zh: '删除数据表失败' },
+  'toast.sheetPluginManaged': {
+    en: 'This sheet is managed by a plugin and cannot be deleted from the UI.',
+    zh: '该表由插件托管，不能在界面删除。',
+  },
+  'toast.sheetSystemManaged': {
+    en: 'This sheet is managed by the system and cannot be deleted.',
+    zh: '该表由系统托管，不能删除。',
+  },
+  'toast.sheetAlreadyDeleted': {
+    en: 'This sheet was already deleted. An administrator can restore it through the API.',
+    zh: '该数据表已被删除，管理员可通过接口恢复。',
+  },
   'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
   'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
   'toast.excelExportFailed': { en: 'Excel export failed', zh: 'Excel 导出失败' },
@@ -243,6 +280,11 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'card.install': { en: 'Use template', zh: '使用模板' },
   'card.installing': { en: 'Installing...', zh: '创建中...' },
 
+  'card.customBadge': { en: 'Custom', zh: '自定义' },
+  'card.delete': { en: 'Delete', zh: '删除模板' },
+  // 私有模板(默认):只有建它的人看得见 —— 角标是为了让人知道同事看不到它。
+  'card.privateBadge': { en: 'Only you', zh: '仅自己可见' },
+
   'card.viewDetail': { en: 'View details', zh: '查看详情' },
   'detail.back': { en: '← Back to template center', zh: '← 返回模板中心' },
   'detail.loading': { en: 'Loading template...', zh: '正在加载模板...' },
@@ -272,6 +314,36 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
     en: 'Existing objects conflict with this template. Re-check before installing.',
     zh: '存在与模板冲突的对象，安装前请重新检查。',
   },
+
+  // F7「把当前数据表存为模板」。G-10 术语词典:zh 里 Sheet = 数据表、Base = 工作区。
+  'saveTpl.open': { en: 'Save as Template', zh: '存为模板' },
+  'saveTpl.title': { en: 'Save this table as a template', zh: '把当前数据表存为模板' },
+  'saveTpl.hint': {
+    en: 'Only the structure is saved — the fields you pick and their views. No records are ever included.',
+    zh: '只保存结构:你勾选的字段和它们的视图。任何记录都不会被保存。',
+  },
+  'saveTpl.nameLabel': { en: 'Template name', zh: '模板名称' },
+  'saveTpl.fieldsLabel': { en: 'Fields to include', zh: '包含的字段' },
+  'saveTpl.selectAll': { en: 'Select all', zh: '全选' },
+  'saveTpl.selectNone': { en: 'Clear all', zh: '全不选' },
+  'saveTpl.shareLabel': { en: 'Share with this tenant', zh: '共享给本租户' },
+  'saveTpl.shareHint': {
+    en: 'Unchecked: only you can see this template.',
+    zh: '不勾选时只有你自己看得见这个模板。',
+  },
+  'saveTpl.submit': { en: 'Save as template', zh: '保存为模板' },
+  'saveTpl.saving': { en: 'Saving...', zh: '正在保存...' },
+  'saveTpl.cancel': { en: 'Cancel', zh: '取消' },
+  'saveTpl.close': { en: 'Close', zh: '关闭' },
+  'saveTpl.errorNoName': { en: 'Enter a template name.', zh: '请填写模板名称。' },
+  'saveTpl.errorNoFields': { en: 'Pick at least one field.', zh: '请至少勾选一个字段。' },
+  'saveTpl.failed': { en: 'Failed to save as template', zh: '存为模板失败' },
+  'saveTpl.successTitle': { en: 'Template saved', zh: '模板已保存' },
+  'saveTpl.warningsTitle': {
+    en: 'Some fields were downgraded in the template:',
+    zh: '以下字段在模板里做了降级:',
+  },
+  'saveTpl.openCenter': { en: 'View in Template Center', zh: '去模板中心查看' },
 
   'error.loadSheets': { en: 'Failed to load sheets', zh: '加载数据表失败' },
   'error.loadSheetMetadata': { en: 'Failed to load sheet metadata', zh: '加载数据表元数据失败' },
@@ -368,6 +440,30 @@ export function recordsDeleted(n: number, isZh: boolean): string {
 
 export function recordNotFound(recordId: string, isZh: boolean): string {
   return isZh ? `未找到记录：${recordId}` : `Record not found: ${recordId}`
+}
+
+// Sheet-delete confirm (workbench onDeleteSheet). Names the sheet the user is about to delete and
+// states the consequence honestly: records are hidden with the sheet (soft delete), and only an
+// administrator can bring it back through the API — there is no recycle-bin UI in this slice.
+export function sheetDeleteConfirm(sheetName: string, isZh: boolean): string {
+  return isZh
+    ? `删除数据表「${sheetName}」？记录会一并隐藏，可由管理员通过接口恢复。`
+    : `Delete sheet "${sheetName}"? Its records are hidden with it; an administrator can restore it through the API.`
+}
+
+// Sheet-delete failure copy, chosen by the server's error CODE (the codes are stable contracts;
+// the status alone cannot tell "plugin-managed" from a generic conflict). Unknown codes fall back to
+// the server's own message when it sent one, else the generic failure toast.
+export function sheetDeleteErrorMessage(
+  error: { code?: string; message?: string } | null | undefined,
+  isZh: boolean,
+): string {
+  switch (error?.code) {
+    case 'SHEET_PLUGIN_MANAGED': return workbenchLabel('toast.sheetPluginManaged', isZh)
+    case 'SHEET_SYSTEM_MANAGED': return workbenchLabel('toast.sheetSystemManaged', isZh)
+    case 'SHEET_DELETED': return workbenchLabel('toast.sheetAlreadyDeleted', isZh)
+    default: return error?.message || workbenchLabel('toast.sheetDeleteFailed', isZh)
+  }
 }
 
 // S2 dry-run conflicts: the server emits English messages plus a stable

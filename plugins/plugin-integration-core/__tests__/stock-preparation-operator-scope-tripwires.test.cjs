@@ -601,6 +601,18 @@ async function main() {
     //       indistinguishable from one that has never been exported — and 「从未导出」 is a claim,
     //       not an absence.
     //
+    //   `fillTarget`                 THE DEEP-LINK HANDLE FOR THE 备料主表 (this PR) — `{ sheetId,
+    //       viewId }` or null, and those two ids are the ONLY thing it carries. 项目备料页 has returned
+    //       exactly this object since it shipped, from exactly this gate (`resolveOwnBoundSheet` — the
+    //       bound sheet must be PROVED to belong to the caller's own staging project), but that page
+    //       404s until a project number is in hand, so the home page's and the panels' 「到多维表」
+    //       buttons had no sheet to route to and dropped the operator on the multitable chooser.
+    //       IT RIDES THIS OPT-IN AND NO OTHER because `ownSheet` does: a caller that did not ask for
+    //       the union resolved no bound sheet, and `fillTarget: null` would then claim
+    //       「没有备料主表」 where the truth is 「没人问过」. It is NOT a permission decision — the plugin
+    //       has no user-aware multitable ACL seam and multitable enforces access on landing — and it
+    //       is values-free: no projectNo, no project name, no row.
+    //
     // The row keys are reviewed at OPERATOR_PROJECT_ROW_WITH_PULL_TARGETS' own definition.
     // ─────────────────────────────────────────────────────────────────────────
     const { routes } = mount()
@@ -612,6 +624,7 @@ async function main() {
     assert.deepEqual(Object.keys(asked.body.data).sort(), [
       'directoryMayBeIncomplete',
       'directoryReady',
+      'fillTarget',
       'lastExportAtMayBeIncomplete',
       'ledgerReady',
       'pendingProjectCount',
@@ -620,7 +633,14 @@ async function main() {
       'pullTargetReady',
       'pullTargetScanCapped',
       'tenantId',
-    ], 'the opt-in adds EXACTLY four keys and changes nothing else')
+    ], 'the opt-in adds EXACTLY five keys and changes nothing else')
+    // PRESENT-BUT-NULL IS THE ANSWER ON THIS SUBSTRATE, and it is the one that matters here: nothing
+    // is bound in this harness, so no sheet can be proved to be the caller's own and the handle must
+    // be null rather than a link composed from a deterministic hash into a table that may not exist.
+    // The populated shape and the cross-tenant refusal are pinned in
+    // stock-preparation-operator-project-directory.test.cjs (N7-a / N7-b / N7-c).
+    assert.equal(asked.body.data.fillTarget, null,
+      'no bound table action ⇒ no handle, never a hash-composed link into the dark')
     assert.ok(asked.body.data.projects.length > 0, 'precondition: there is a row to pin')
     for (const project of asked.body.data.projects) {
       assert.deepEqual(Object.keys(project).sort(), OPERATOR_PROJECT_ROW_WITH_PULL_TARGETS,
@@ -841,6 +861,89 @@ async function main() {
     const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
     assert.equal(res.statusCode, 501)
     assert.equal(errorCode(res), 'AUDIT_STORE_UNAVAILABLE')
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // S-08 — OWNERSHIP IS NOT EXISTENCE. The gate at the MODULE, where both surfaces ride it.
+  //
+  // WHY IT IS A TRIPWIRE AND NOT A FEATURE TEST. `resolveOwnBoundSheet` claims to hand back a sheet
+  // only when it is "proved to belong to the caller's own staging project AND to exist", and the
+  // second half was NOT true on the registry path: `plugin_multitable_object_registry` is written at
+  // provisioning time and no code path ever deletes a row from it, while dropping a table is
+  // `UPDATE meta_sheets SET deleted_at = now()`. So a deleted table went on being claimed forever,
+  // and every feature test stayed green because every fixture that owned a sheet also had one.
+  //
+  // BOTH SURFACES ARE THIS ONE FUNCTION — 项目备料页's board and the operator directory (which is what
+  // put the handle on the home page and the project workbench in this PR) — so the assertion is
+  // placed on the function rather than duplicated per route.
+  // ─────────────────────────────────────────────────────────────────────────
+  const STAGING = 'tenant-a:integration-core'
+  const FILL_OBJECT_ID = 'plm_stock_preparation_main'
+  const derived = (projectId, objectId) => `sheet__${projectId}__${objectId}`
+  const BOUND_SHEET = derived(STAGING, FILL_OBJECT_ID)
+  const gateProvisioning = ({ sheetExists, ownedByRegistry = true }) => ({
+    async isSheetOwnedByProject(sheetId, projectId) {
+      return ownedByRegistry && sheetId === BOUND_SHEET && projectId === STAGING
+    },
+    getObjectSheetId: derived,
+    async findObjectSheet({ projectId, objectId } = {}) {
+      if (!sheetExists) return null
+      return projectId === STAGING && objectId === FILL_OBJECT_ID ? { id: BOUND_SHEET } : null
+    },
+  })
+
+  await run('S-08 the registry says OWNED but the table is GONE ⇒ the gate answers null', async () => {
+    const { resolveOwnBoundSheet } = require(path.join(LIB, 'stock-preparation-pull-target-scan.cjs'))
+    const boundTarget = { sheetId: BOUND_SHEET, objectId: FILL_OBJECT_ID }
+    // THE POSITIVE CONTROL FIRST, so the null below is the delete and not a fixture that never
+    // resolved anything.
+    const live = await resolveOwnBoundSheet(gateProvisioning({ sheetExists: true }), STAGING, boundTarget)
+    assert.deepEqual(live, { sheetId: BOUND_SHEET, objectId: FILL_OBJECT_ID },
+      'precondition: this exact fixture DOES resolve while the table exists')
+    const deleted = await resolveOwnBoundSheet(gateProvisioning({ sheetExists: false }), STAGING, boundTarget)
+    assert.equal(deleted, null,
+      'the registry keeps claiming a soft-deleted sheet forever; ownership alone must not be enough')
+  })
+
+  await run('S-08b the D1=B sandbox rebinding is liveness-checked against the CANONICAL object', async () => {
+    // The sanctioned deploy-window config names a SANDBOX objectId over the sheet the deployment
+    // already had — a sheet whose id hashes from the canonical object. A liveness read that only
+    // tried the BOUND objectId would be permanently "cannot say" on exactly that configuration, i.e.
+    // the guard would be decorative where it matters most.
+    const { resolveOwnBoundSheet } = require(path.join(LIB, 'stock-preparation-pull-target-scan.cjs'))
+    const sandboxTarget = { sheetId: BOUND_SHEET, objectId: 'plm_stock_preparation_sandbox_main' }
+    const live = await resolveOwnBoundSheet(gateProvisioning({ sheetExists: true }), STAGING, sandboxTarget)
+    assert.ok(live, 'the runbook\'s own binding must keep working — this is the sanctioned config')
+    assert.equal(live.sheetId, BOUND_SHEET)
+    const deleted = await resolveOwnBoundSheet(gateProvisioning({ sheetExists: false }), STAGING, sandboxTarget)
+    assert.equal(deleted, null, 'and the same binding over a deleted sheet is refused')
+  })
+
+  await run('S-08c a HAND-BOUND sheet is unchanged — the liveness read narrows, it never refuses blind', async () => {
+    // The remaining gap, pinned as a PROPERTY rather than left as a surprise: an administrator can
+    // bind a sheet whose id hashes from neither the bound nor the canonical object, and the host's
+    // only existence read takes a (project, objectId) pair — so nothing on the plugin side can name
+    // that sheet to it. Liveness is then "cannot say", and the registry's ownership answer stands, as
+    // it always has. Closing this needs a host port that takes a SHEET ID; it is named in the PR body.
+    const { resolveOwnBoundSheet } = require(path.join(LIB, 'stock-preparation-pull-target-scan.cjs'))
+    const handBound = { sheetId: 'sheet_hand_made_by_an_admin', objectId: FILL_OBJECT_ID }
+    const provisioning = {
+      async isSheetOwnedByProject(sheetId, projectId) {
+        return sheetId === 'sheet_hand_made_by_an_admin' && projectId === STAGING
+      },
+      getObjectSheetId: derived,
+      async findObjectSheet() { return null },
+    }
+    const resolved = await resolveOwnBoundSheet(provisioning, STAGING, handBound)
+    assert.deepEqual(resolved, { sheetId: 'sheet_hand_made_by_an_admin', objectId: FILL_OBJECT_ID },
+      'an unprovable liveness must not become a refusal — that would drop the sheets PROOF 1 exists for')
+    // …and the registry is still the thing that decides: without its YES, the same hand-bound sheet
+    // is refused, so this case is not a hole punched through the tenant gate.
+    const unclaimed = await resolveOwnBoundSheet({
+      ...provisioning,
+      async isSheetOwnedByProject() { return false },
+    }, STAGING, handBound)
+    assert.equal(unclaimed, null, 'no registry claim and no hash match ⇒ still nothing')
   })
 
   if (failures > 0) {

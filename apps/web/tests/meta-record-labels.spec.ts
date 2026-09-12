@@ -6,6 +6,7 @@ import {
   requiredField,
   restoredFromVersionBadge,
   recordPosition,
+  recordHiddenFieldsHeading,
 } from '../src/multitable/utils/meta-record-labels'
 
 describe('meta-record-labels static keys', () => {
@@ -80,6 +81,25 @@ describe('meta-record-labels static keys', () => {
     expect(recordLabel('record.errorWatchUpdate', false)).toBe('Failed to update watch status')
   })
 
+  // Record inspector v3 (2026-09-05, docs/development/multitable-record-inspector-v3-design-20260905.md
+  // §1.3 body, PR-B1): the details-tab hide-empty toggle's CONSTANT label (APG toggle button —
+  // `aria-pressed` carries the state, so there is no separate pressed copy; round 2 removed the
+  // round-1 `record.showEmpty` pin along with the key), the link-field "edit links" button beside the
+  // chips, and the copy-link status pair PR-A reserved for this slice — every key in BOTH locales.
+  // The "hidden in this view" heading is `recordHiddenFieldsHeading` (pinned separately); §1 has no
+  // heading at all (round 2 removed the round-1 `record.fieldsInView` pin along with the key).
+  // Additive pins only; no pre-existing pin above changes.
+  it('PR-B1: hide-empty toggle, edit-links and copy-link status keys exist in both locales', () => {
+    expect(recordLabel('record.hideEmpty', false)).toBe('Hide empty fields')
+    expect(recordLabel('record.hideEmpty', true)).toBe('隐藏空字段')
+    expect(recordLabel('record.editLinks', false)).toBe('Edit links')
+    expect(recordLabel('record.editLinks', true)).toBe('编辑关联')
+    expect(recordLabel('record.copyLinkDone', false)).toBe('Link copied')
+    expect(recordLabel('record.copyLinkDone', true)).toBe('链接已复制')
+    expect(recordLabel('record.copyLinkFailed', false)).toBe('Could not copy link')
+    expect(recordLabel('record.copyLinkFailed', true)).toBe('链接复制失败')
+  })
+
   it('M1: form submit/reset chain is fully covered (Saving/Save/Create/Reset)', () => {
     expect(recordLabel('form.loading', true)).toBe('正在加载...')
     expect(recordLabel('form.readOnly', true)).toBe('此表单为只读')
@@ -138,6 +158,16 @@ describe('meta-record-labels helpers', () => {
     expect(recordPosition(3, 12, false)).toBe('3 / 12')
     expect(recordPosition(1, 999, false)).toBe('1 / 999')
     expect(recordPosition(1, 999, true)).toBe('1/999')
+  })
+
+  // Record inspector v3 (PR-B1 §1.3 sections): the "hidden in this view" section heading interpolates
+  // the count raw (data), both locales; zero is a legal argument (the caller simply does not render the
+  // section then, but the helper must not special-case it into a different sentence).
+  it('recordHiddenFieldsHeading interpolates the hidden-field count raw in both locales', () => {
+    expect(recordHiddenFieldsHeading(2, false)).toBe('Hidden in this view (2)')
+    expect(recordHiddenFieldsHeading(2, true)).toBe('本视图中隐藏的字段 (2)')
+    expect(recordHiddenFieldsHeading(17, false)).toBe('Hidden in this view (17)')
+    expect(recordHiddenFieldsHeading(0, false)).toBe('Hidden in this view (0)')
   })
 
   it('recordPosition compacts a total of 1000 or more (a huge record list must not force the header wider)', () => {

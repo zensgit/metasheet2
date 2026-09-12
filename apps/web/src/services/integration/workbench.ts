@@ -648,64 +648,69 @@ export function summarizeFieldProvenance(
   return { entries, stats }
 }
 
-// G10: the envelope carries `error.code` from a small REGISTERED vocabulary, and this function used
-// to drop it on the floor — every failure reached the UI as backend English prose with no key to look
-// up a humanized label. Subclassing Error (rather than changing what is thrown) keeps every existing
-// call site intact: `instanceof Error` still holds and `error.message` is byte-identical to before.
-// The code is ADDITIONAL metadata only; nothing here widens, re-derives or scrubs the message, and no
-// caller gains access to anything the response did not already contain.
-export class IntegrationApiError extends Error {
-  readonly code: string | null = null
-  readonly status: number = 0
-
-  constructor(message: string, code?: string | null, status = 0) {
-    super(message)
-    this.name = 'IntegrationApiError'
-    this.code = typeof code === 'string' && code.trim() ? code.trim() : null
-    this.status = typeof status === 'number' ? status : 0
-  }
-}
+// 机器可读的错误码只允许这一种形状（与 stockPreparation/confirmApi.ts 的 ERROR_CODE_PATTERN 同一口径）：
+// 值面字符串（物料号、连接串、驱动原文）不可能长成这样，所以从响应体抬到 Error 上的 code 是 values-free 的。
+const INTEGRATION_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
 
 /**
- * The envelope error code an integration API failure carried, or `null` for anything else (a network
- * TypeError, a JSON parse failure, a thrown string). Never guesses: only an `IntegrationApiError` that
- * actually received a non-blank code answers non-null.
+ * `parseIntegrationResponse` 在非 2xx / `ok:false` 时抛出的 Error 附带的机器可读字段。
+ *
+ * 为什么要有它：服务端答的是 `{ ok:false, error:{ code, message, details } }`，而这里以前只留
+ * `error.message`、把 `code` 丢了 —— 于是调用点只能去匹配英文散文（"external system belongs to the
+ * tenant-wide scope" 那种），那是 PG 中文 locale 一类坑的同款脆弱守卫：服务端换一句话、换个语言，
+ * 分支就静默失效。现在 code / status / details 一并挂到同一个 Error 上。
+ *
+ * 兼容性：仍然是 `new Error(message)`，`message` 一字未改、`instanceof Error` 不变，
+ * 所有只读 `.message` 的既有调用点行为完全不变；新字段是可选的加法。
+ * 不新造错误类：本模块的错误在几十个调用点被 `error instanceof Error` 判着，换类型是无谓的爆炸半径；
+ * 也不复用 `StockPreparationConfirmApiError`（那是备料确认专用、且刻意丢掉 message）。
  */
-export function integrationApiErrorCode(error: unknown): string | null {
-  return error instanceof IntegrationApiError ? error.code : null
+export interface IntegrationApiErrorFields {
+  /** 服务端错误码，已按 enum 形状夹紧；响应体没有合法 code 时不存在。取值位置见 `integrationEnvelopeErrorCode`。 */
+  code?: string
+  /** 失败响应的 HTTP 状态码（例如作用域不匹配的 409）。 */
+  status?: number
+  /** 服务端 `error.details`（仅当它是普通对象时）。只供判据使用，不直接渲染。 */
+  details?: Record<string, unknown>
 }
 
-// F01 — WHERE THE PRODUCT CODE ACTUALLY IS.
+export type IntegrationApiError = Error & IntegrationApiErrorFields
+
+/**
+ * 从任意 catch 到的东西里取出集成错误码；不是本模块抛的、或 code 形状不合法时返回 null。
+ * 调用点用它代替「按 message 文本判断」，这样服务端换文案不会让分支静默失效。
+ */
+export function integrationApiErrorCode(error: unknown): string | null {
+  if (!(error instanceof Error)) return null
+  const code = (error as IntegrationApiError).code
+  return typeof code === 'string' && INTEGRATION_ERROR_CODE_PATTERN.test(code) ? code : null
+}
+
+// F01 —— 产品码不一定在信封顶层。
 //
-// The envelope's top-level `error.code` is NOT reliably the product code. plugin-integration-core's
-// `sendError` (http-routes.cjs) derives it through `inferErrorCode`, which is
-// `error.code || error.name || 'INTERNAL_ERROR'` — so any thrown error WITHOUT an own `.code` reports
-// its CLASS NAME there. `PipelineRunnerError` (pipeline-runner.cjs) is exactly that shape: it sets
-// `this.details = details` and nothing else, and every one of its refusals puts the product code in
-// `details.code`. A K3 `/run` refusal therefore arrives as
+// plugin-integration-core 的 `sendError`（lib/http-routes.cjs）用 `inferErrorCode` 推顶层码，
+// 它是 `error.code || error.name || 'INTERNAL_ERROR'`：任何**自己没带 `.code`** 的错误，顶层报的是它的
+// **类名**。`PipelineRunnerError`（lib/pipeline-runner.cjs）正是这种形状 —— 只设 `this.details = details`，
+// 而它每一条拒绝都把产品码放在 `details.code` 里。于是 K3 `/run` 的拒绝到达前端时长这样：
 //
 //   422 { ok:false, error:{ code:'PipelineRunnerError',
 //                           details:{ code:'K3_WISE_PIPELINE_RUN_DISABLED', pipelineId } } }
 //
-// (pinned server-side by plugins/plugin-integration-core/__tests__/http-routes-plm-k3wise-poc.test.cjs,
-// which asserts that exact status + pair). Reading only the top level made every such code unlookup-able.
+// （服务端由 plugins/plugin-integration-core/__tests__/http-routes-plm-k3wise-poc.test.cjs 钉死这对
+// status + 码。）只读顶层的话，`K3_WISE_PIPELINE_RUN_DISABLED` 永远查不到，人话码表对这一族就是死代码：
+// 顶层的 `PipelineRunnerError` 本来就过不了 `INTEGRATION_ERROR_CODE_PATTERN`（大小写混排），
+// 夹紧后 code 直接不存在，调用点只能把服务端英文散文直出。
 //
-// Errors that DO carry their own code — `HttpRouteError`, `ExternalWriteDryRunError` — are unaffected:
-// the top level keeps winning for them. The class-name shape is recognised by its `Error` SUFFIX rather
-// than by an allowlist of class names, so a future typed error with no own `.code` is handled without
-// another edit here. The test is case-sensitive and registered codes are SCREAMING_SNAKE, so a real
-// code can never be mistaken for a class name (`UNKNOWN_ERROR` ends in 'ERROR', not 'Error').
-//
-// This only ever changes WHICH string is used to look up a humanized label. It cannot widen a scope,
-// relax a guard, or make a failed response look successful.
+// 自己带 `.code` 的错误（`HttpRouteError`、`ExternalWriteDryRunError`）不受影响：顶层合形状就顶层赢，
+// 回退只在顶层**不是**合法码时才发生。回退值同样要过同一条 pattern —— 这里不放宽 main 的 values-free 夹紧，
+// 只是多看一个位置。它改变的只有「拿哪个字符串去查人话标签」，不能放宽作用域、不能软化守卫，
+// 也不会把失败的响应说成成功。
 function integrationEnvelopeErrorCode(payload: IntegrationApiEnvelope<unknown> | null): string | undefined {
-  const rawEnvelopeCode = payload?.error?.code
-  const envelopeCode = typeof rawEnvelopeCode === 'string' && rawEnvelopeCode.trim() ? rawEnvelopeCode : undefined
+  const rawTopCode = payload?.error?.code
+  if (typeof rawTopCode === 'string' && INTEGRATION_ERROR_CODE_PATTERN.test(rawTopCode)) return rawTopCode
   const rawDetailsCode = (payload?.error?.details as { code?: unknown } | undefined)?.code
-  const detailsCode = typeof rawDetailsCode === 'string' && rawDetailsCode.trim() ? rawDetailsCode : undefined
-  if (!detailsCode) return envelopeCode
-  if (!envelopeCode) return detailsCode
-  return /Error$/.test(envelopeCode) ? detailsCode : envelopeCode
+  if (typeof rawDetailsCode === 'string' && INTEGRATION_ERROR_CODE_PATTERN.test(rawDetailsCode)) return rawDetailsCode
+  return undefined
 }
 
 export async function parseIntegrationResponse<T>(response: Response): Promise<T> {
@@ -717,7 +722,13 @@ export async function parseIntegrationResponse<T>(response: Response): Promise<T
   }
   if (!response.ok || payload?.ok === false) {
     const message = payload?.error?.message || `${response.status} ${response.statusText}`.trim()
-    throw new IntegrationApiError(message || 'Integration API request failed', integrationEnvelopeErrorCode(payload), response.status)
+    const rawDetails = payload?.error?.details
+    const error = new Error(message || 'Integration API request failed') as IntegrationApiError
+    const code = integrationEnvelopeErrorCode(payload)
+    if (code) error.code = code
+    error.status = response.status
+    if (rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails)) error.details = rawDetails
+    throw error
   }
   return payload?.data as T
 }
@@ -1685,4 +1696,79 @@ export function canReadFromSystem(system: WorkbenchExternalSystem): boolean {
 
 export function canWriteToSystem(system: WorkbenchExternalSystem): boolean {
   return system.role === 'target' || system.role === 'bidirectional'
+}
+
+const NO_SCOPE_WRITE_BLOCK = ''
+
+function normalizeScopeWorkspaceId(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed === '' ? null : trimmed
+}
+
+/**
+ * 「这一行连接，我在当前作用域里改得动 / 停得掉 / 删得了吗？」—— 空串表示可以；非空是给人看的原因。
+ *
+ * 它管的就是四个动作：编辑、停用、启用（三个都是 upsert）、删除。**不包括测试连接**，
+ * 见下方 `externalSystemScopeTestWriteNote`。把这种行笼统叫「只读」是假的：置灰的量 ≠ 实际写不动的量。
+ *
+ * 为什么需要它。GET /api/integration/external-systems 的列表对非 null 的 workspace hint 会回退一步，
+ * 把同租户 `workspace_id IS NULL` 的行也列出来（单条读 #5471 早就这么做了，列表这次补上）；而 upsert 的
+ * findExisting 与 deleteExternalSystem 没有、也不应该跟着放宽，仍按 (tenant, workspace, id) 精确匹配。
+ * 回退来的那一行如果还摆着这四个按钮，真实结果是（插件侧
+ * plugins/plugin-integration-core/__tests__/external-systems-list-workspace-fallback.test.cjs 的 L-07/L-10 钉着）：
+ *   * 编辑 / 停用 / 启用 —— 请求体带着这行的 id（见 IntegrationWorkbenchView 的 deactivateConnection），
+ *     findExisting 在本作用域内找不到，服务端直接拒绝：409 `EXTERNAL_SYSTEM_SCOPE_MISMATCH`。
+ *     加这道拒绝之前它会滑到 insert 分支沿用同一个 id，撞迁移 057 的 `id TEXT PRIMARY KEY` 报 23505。
+ *     两种都是**报错**，不是静默成功，租户级那行不变；
+ *   * 删除 → 404；
+ *   * 只有**不带 id** 的 name-only upsert（API/脚本直连，不是这几个按钮）才会 fork 出一条同名的 workspace 行
+ *     —— 057 的唯一索引是 (tenant_id, coalesce(workspace_id,''), name)，两条都合法。
+ * 也就是说这几个按钮对回退来的行是死按钮，所以在屏幕上就拦住并说明原因。这里只是 UX；
+ * 真正的边界在服务端（上述 409 / 404），不经浏览器直调路由也一样被拒。
+ *
+ * 判据只有一条：行自己的 workspaceId 与**这次写将要带上的** hint 不一致。曾经还有一条服务端打的
+ * `scopeFallback` 标记，已去掉：它可从 `workspaceId` 推出来，而且标记钉在「拉列表那一刻」而 hint 是实时的
+ * —— 工作台改 workspace 输入框并不重拉列表，陈旧标记会把「请到租户级作用域里做」这条提示自己堵死。
+ */
+export function externalSystemScopeWriteBlock(
+  system: Pick<WorkbenchExternalSystem, 'workspaceId'>,
+  scope: IntegrationScope = {},
+): string {
+  if (!system) return NO_SCOPE_WRITE_BLOCK
+  const hint = normalizeScopeWorkspaceId(scope.workspaceId)
+  const rowScope = normalizeScopeWorkspaceId(system.workspaceId)
+  if (rowScope === hint) return NO_SCOPE_WRITE_BLOCK
+  return rowScope === null
+    ? '这是租户级连接（未归属当前工作区）：在当前工作区里不能编辑 / 停用 / 启用 / 删除——这几个写按精确作用域匹配，服务端会直接拒绝（409 / 404），请清空上方的工作区、到租户级作用域里做。「测试连接」不受此限：它按连接自身的作用域写入，会改这行的 status / last_tested_at / last_error。'
+    : '这条连接属于另一个工作区：在当前工作区里不能编辑 / 停用 / 启用 / 删除。'
+}
+
+/**
+ * 「点测试连接，会写到哪一行？」—— 空串表示就是当前作用域里的那行，没什么好说；非空是给人看的提示。
+ *
+ * 为什么它不能和 `externalSystemScopeWriteBlock` 合成一条。服务端的
+ * POST /api/integration/external-systems/{id}/test 读到系统后调 `persistExternalSystemTestResult`
+ * （plugins/plugin-integration-core/lib/http-routes.cjs，#5534），那里**故意**把写入作用域改成「这行自己的」
+ * 而不是调用方的 workspace hint，所以对回退来的租户级行，测试连接是**真的写得进去**的（测失败还会把
+ * active 翻成 error，而且这个行对本租户所有工作区可见）。拿「只读」盖过去就是假的，所以这里不拦测试连接，
+ * 只在测完之后如实说清写到了哪一行。插件侧 L-11 钉着这个行为。
+ */
+export function externalSystemScopeTestWriteNote(
+  system: Pick<WorkbenchExternalSystem, 'workspaceId'> | null | undefined,
+  scope: IntegrationScope = {},
+): string {
+  if (!system) return ''
+  const hint = normalizeScopeWorkspaceId(scope.workspaceId)
+  const rowScope = normalizeScopeWorkspaceId(system.workspaceId)
+  // Only the ONE shape the list fallback produces: a tenant-wide row surfaced to a hinted caller.
+  if (hint === null || rowScope !== null) return ''
+  return '（这是租户级连接：测试结果已写入租户级的那一行，不受当前工作区限制）'
+}
+
+export function isExternalSystemWritableInScope(
+  system: Pick<WorkbenchExternalSystem, 'workspaceId'>,
+  scope: IntegrationScope = {},
+): boolean {
+  return externalSystemScopeWriteBlock(system, scope) === NO_SCOPE_WRITE_BLOCK
 }

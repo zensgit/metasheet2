@@ -198,9 +198,25 @@ function buildFieldProperty(
   if ((field.type !== 'select' && field.type !== 'multiSelect') || !Array.isArray(field.options) || field.options.length === 0) {
     return base
   }
+  // options(string[])是可选值的**权威清单**;property.options 里若带着 {value,color},
+  // 只按 value 对号入座地把颜色带过来(模板保色用的就是这条)。清单本身不受影响:
+  // property 里多出来的 value 不会被装进去,少的也不会被补上;没有颜色时输出与从前逐字相同。
+  const colorByValue = new Map<string, string>()
+  const carried = Array.isArray(base.options) ? base.options : []
+  for (const option of carried) {
+    if (!option || typeof option !== 'object' || Array.isArray(option)) continue
+    const value = (option as { value?: unknown }).value
+    const color = (option as { color?: unknown }).color
+    if (typeof value !== 'string' && typeof value !== 'number') continue
+    if (typeof color !== 'string' || color.trim().length === 0) continue
+    colorByValue.set(String(value), color)
+  }
   return {
     ...base,
-    options: field.options.map((value) => ({ value })),
+    options: field.options.map((value) => {
+      const color = colorByValue.get(value)
+      return color ? { value, color } : { value }
+    }),
   }
 }
 
@@ -292,6 +308,32 @@ async function loadActiveView(
     hiddenFieldIds: normalizeStringArray(row.hidden_field_ids),
     config: normalizeJson(row.config),
   }
+}
+
+export type FindObjectViewInput = {
+  query: MultitableProvisioningQueryFn
+  projectId: string
+  objectId: string
+  viewId: string
+}
+
+/**
+ * READ-ONLY existence/content read for ONE of a provisioned object's views — the read sibling of
+ * `ensureView`, exactly as `getObjectField` is the read sibling of `patchObjectFieldProperty`.
+ *
+ * It exists because `getObjectViewId` is pure id derivation and deliberately says nothing about
+ * whether the view is there, so a caller that wants to DEEP-LINK to a provisioned view had no way
+ * to tell "provisioned" from "composed" and would hand out a link to a view id that resolves to
+ * nothing. Returns null when the view does not exist — the caller decides what to do about it.
+ *
+ * No write, no create, no merge: one SELECT by the deterministic id derived from (projectId,
+ * objectId, viewId), so it can only ever answer about a view whose id the caller could already
+ * compute for itself.
+ */
+export async function findObjectView(
+  input: FindObjectViewInput,
+): Promise<MultitableProvisioningView | null> {
+  return loadActiveView(input.query, getObjectViewId(input.projectId, input.objectId, input.viewId))
 }
 
 export async function createSheet(

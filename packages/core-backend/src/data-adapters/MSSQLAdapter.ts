@@ -17,6 +17,7 @@ import type {
   QueryOptions,
   QueryResult,
   SchemaInfo,
+  SchemaFetchOptions,
   TableInfo,
   ColumnInfo,
   IndexInfo,
@@ -28,6 +29,7 @@ import type {
 } from './BaseAdapter';
 import { BaseDataAdapter, getStringConfig, getNumberConfig } from './BaseAdapter'
 import { assertSqlWriteAllowed } from './sql-write-arm-binding'
+import { startSchemaDetailBudget } from './schema-detail-budget'
 
 // Minimal structural typing for the optional `mssql` driver (avoid `any` and a
 // hard build-time dependency on @types/mssql).
@@ -479,7 +481,18 @@ export class MSSQLAdapter extends BaseDataAdapter {
     return this.query<T>(sql, whereClause.params)
   }
 
-  async getSchema(schema: string = 'dbo'): Promise<SchemaInfo> {
+  /**
+   * LIST-ONLY BY DEFAULT (2026-09-10 222 PLM 504). Two INFORMATION_SCHEMA queries (tables + views), issued in
+   * parallel — no per-table fan-out. Each entry carries name/schema with `columns: []` and the
+   * explicit `columnsLoaded: false` marker; columns come from getTableInfo()/`GET /:id/tables/:t`
+   * for the ONE table the operator picked. `includeColumns: true` restores the old 4N+2 shape for
+   * the callers that consume columns off the listing, bounded by the schema-detail budget.
+   */
+  async getSchema(schema: string = 'dbo', options?: SchemaFetchOptions): Promise<SchemaInfo> {
+    const includeColumns = options?.includeColumns === true
+    // Started BEFORE the listing queries: the budget bounds the WHOLE call, which is what the proxy
+    // is timing. Null on the list-only path — a fixed pair of queries needs no budget.
+    const budget = includeColumns ? startSchemaDetailBudget(options?.budgetMs) : null
     const tablesQuery =
       `SELECT TABLE_NAME AS table_name, TABLE_SCHEMA AS table_schema ` +
       `FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = $1 AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME`
@@ -493,16 +506,24 @@ export class MSSQLAdapter extends BaseDataAdapter {
     ])
 
     const tables: TableInfo[] = []
-    for (const row of tablesResult.data) {
-      tables.push(await this.getTableInfo(row.table_name, row.table_schema))
+    if (includeColumns) {
+      for (const row of tablesResult.data) {
+        budget?.assertWithinBudget(tables.length, tablesResult.data.length)
+        tables.push(await this.getTableInfo(row.table_name, row.table_schema))
+      }
+    } else {
+      for (const row of tablesResult.data) {
+        tables.push({ name: row.table_name, schema: row.table_schema, columns: [], columnsLoaded: false })
+      }
     }
     const views = viewsResult.data.map(row => ({
       name: row.view_name,
       schema: row.view_schema,
       definition: row.view_definition,
-      columns: []
+      columns: [],
+      columnsLoaded: false
     }))
-    return { tables, views }
+    return { tables, views, detail: includeColumns ? 'full' : 'list' }
   }
 
   async getTableInfo(table: string, schema: string = 'dbo'): Promise<TableInfo> {

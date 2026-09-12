@@ -105,7 +105,9 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 3. **Step 1-2 订正**:222 上 PATH 里没有 `pg_dump`/`psql`,需要用完整路径 `C:\Program Files\PostgreSQL\17\bin\pg_dump.exe`(本地 Postgres 17,监听 5432 端口;`postgresql-x64-17` 服务在服务列表里显示 Stopped,但服务器实际在监听——不要去"启动"它)。今天的 DB 快照:`C:\metasheet\output\backups\upgrade-backup-20260903-135009\pre-upgrade-db.dump`(2.0 MB);脚本自带的代码备份:`upgrade-backup-20260903-140619`(docker/config/dist/web dist/plugins)。
 4. **时间线与验收**:停机 14:06:18 → 健康检查 OK 14:08:55(约 2.5 分钟);F22 must-exist 清单 OK,插件 hash 校验 OK(436 个文件),node_modules 泄漏检查 OK;执行的迁移:`079`、`080`、`081`、`082`、`084`、`085`、`086`,以及 `zzzz20260830200000`/`211000`/`220000`/`230000`、`zzzz20260831090000`、`zzzz20260902120000`;audit CHECK 现在列出 `handoff_advance` 和 `project_board_read`;`integration_stock_prep_handoff` 表存在;`attendance_records`/`approval_instances` 行数不变(0/0)。**in-place 脚本不会刷新 `C:\metasheet\BUILD_PROVENANCE.json`**——升级完成后要手动从包根目录把新的 `BUILD_PROVENANCE.json` 拷过去(旧的已存到备份目录,存为 `BUILD_PROVENANCE.r6.json`),否则 Step 3-1 读到的还是旧提交。
 5. **远程执行注意事项**:一次性 `ssh 192.168.1.222 powershell -Command "..."` 遇到引号会出问题;改用 `powershell -NoProfile -EncodedCommand <脚本的 UTF-16LE base64>`(例如用 Node 生成:`Buffer.from(script,'utf16le').toString('base64')`)。
-6. **升级完成后待办(需要 admin Bearer token;preflight 路由在没有 token 时返回 401 UNAUTHORIZED)**:针对**已存在**的 objectId `plm_stock_preparation_sandbox_r6_trial` 重新推导沙箱绑定——调用 `POST /api/integration/stock-preparation/sandbox-target/ensure`(当前绑定的 `sheet_32df959afa3cecfa564e5486` 缺少 #5447 新增的五个部门列 `makeOrBuy`/`procurementDone`/`procurementReplyDate`/`warehouseDone`/`actualArrivalDate`),把返回的 `data.targetBinding` 贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`,`pm2 restart metasheet-backend --update-env`,再用 `GET /api/integration/stock-preparation/preflight` 确认 `ready:true`。222 上已有一个做这件事的辅助脚本(token 从文件读取,不会回显):`C:\metasheet\output\releases\incoming\222-rebind-sandbox-target.ps1`。
+6. **升级完成后待办(需要 admin Bearer token;preflight 路由在没有 token 时返回 401 UNAUTHORIZED)**:针对**已存在**的 objectId `plm_stock_preparation_sandbox_r6_trial` 重新推导沙箱绑定——调用 `POST /api/integration/stock-preparation/sandbox-target/ensure`(当前绑定的 `sheet_32df959afa3cecfa564e5486` 缺少 #5447 新增的五个部门列 `makeOrBuy`/`procurementDone`/`procurementReplyDate`/`warehouseDone`/`actualArrivalDate`),**不要**把返回的 `data.targetBinding` 直接整段贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`——它只有 33 个 TEMPLATE 字段,不含 customer pack 的 `ext_` 列,直接贴会替换掉旧配置里的 `ext_*` 条目(见下面第 8 条的订正,合并口径 33+21=54),要先按第 8 条合并再贴,再 `pm2 restart metasheet-backend --update-env`,用 `GET /api/integration/stock-preparation/preflight` 确认 `ready:true`。222 上已有一个做这件事的辅助脚本(token 从文件读取,不会回显):`C:\metasheet\output\releases\incoming\222-rebind-sandbox-target.ps1`(**该脚本当天没有做 ext_ 合并**,今天是靠第 8 条另外的一次性合并脚本补上的,下一窗口用它前先确认它是否已经把合并逻辑接进去)。
+
+   > **2026-09-10 订正**:本条此前只写"把返回的 `data.targetBinding` 贴进"配置,未提示会丢 `ext_` 列,与本节第 8 条的订正矛盾——已补上合并口径的指向。
 7. **管理员 token 怎么来的**:用仓库自带的 `scripts/ops/attendance-window-runner-mint-token.mjs`(需复制到 `C:\metasheet\packages\core-backend\scripts\` 下,`import('pg')` 才能解析)——先 `node <它> --find-admin` 找到已存在的活跃 admin 账号,再 `node <它> --mint --user-id <id> --roles admin --expires-in 3600 --tenant-id default` 用宿主机自己的 `JWT_SECRET` 现签一份 HS256 token(用完删掉这个脚本副本);全程不碰密码,secret 也不离开宿主机。**用 `--tenant-id default` 签发后,令牌自带 tenant claim**(本次部署的唯一 org id);请求头 `x-tenant-id` 仍可以继续带,但不再是租户来源。等 flag 开启后,不带 tenant claim 的令牌会被备料相关 admin 路由直接 403。
 8. **Step 0-7 订正**:`POST /api/integration/stock-preparation/sandbox-target/ensure` 返回的 `targetBinding` **只有 33 个 TEMPLATE 字段**(20 个 `plm_system` + 13 个人工列,含 #5447 的部门列),**不带** customer pack 的 21 个 `ext_` 列。把它"整段"贴进去会**替换掉**原有 action 配置里的 `fieldIdMap`,`ext_` 列(领料节点/备料日期/毛胚尺寸等)静默变成无法解析。**正确做法是合并**:ensure 返回的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId ⇒ 旧的物理列 id 依然有效;今天是 33 + 21 = 54)。今天用了一次性 node 脚本做合并(`output/releases/incoming/tools-r7/merge-ext.cjs`);动手前先备份 `app.env`(今天存了两份:`app.env.before-rebind-20260903-143232` 与 `app.env.before-extmerge-20260903063616`)。合并后:`pm2 restart --update-env`,预检确认 `ready:true`、`checks.carryTargetBinding.ownershipState=owned_by_this_project`、没有 `missingHumanFields`。
 9. **#5452(统一 SQL 连接绑定,2026-09-03 已合入)带来一个新 blocker**:`data-source:sql-readonly` 外部系统现在要求 `integration_external_systems.connection_id` 非空;该迁移只回填了 `config` 里带服务端打上的 `dataSourceOwnerId` 那些行——r6 时代的两条(`Customer PLM readonly` `104e9bad`、`Synthetic PLM readonly` `7130b124`)都没有这个标记,于是 source-preflight 报 `CONNECTION_LEGACY_FALLBACK_DENIED`。**修法(走认可路径,带 admin token + `x-tenant-id`)**:先 `GET /api/integration/external-systems/:id`,再用同样的公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`)加上 `connectionId = config.dataSourceId`(分别是 `customer-plm-test` / `synthetic-plm`)调 `POST /api/integration/external-systems`。用 `select id, connection_id from integration_external_systems` 核验。
@@ -182,22 +184,28 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
      两者是**互相独立的字段**。于是"objectId 换成沙箱、sheetId 留着正式表那个"的组合会让沙箱门放行,然后**把行写进正式主表**——挂着沙箱的名,干着正式表的事,正好是 D1=B 要避免的那件事。
 
-     **正确做法,一条路,别的都别走**:调 ensure,把它**返回的 `targetBinding` 整段**贴进 action 配置。这个接口就是本仓库认可的绑定生成器——它建表(或确认表已在)、写好所有权登记行,然后把该贴的东西原样给你。
+     **正确做法**:调 ensure 建表(或确认表已在)、写好所有权登记行;它返回的 `data.targetBinding` **只有 33 个 TEMPLATE 字段**(20 个 `plm_system` + 13 个人工列),**不含 customer pack 的 `ext_` 列**——**不能把它整段贴进 action 配置去替换原有的 `fieldIdMap`**,那会让 `ext_` 列(领料节点/备料日期/毛坯尺寸等)静默变成无法解析。若这次窗口没装 customer pack,ensure 的输出就是完整的,可以直接贴;**若装了 pack,必须合并**再贴。
 
      ```
      POST /api/integration/stock-preparation/sandbox-target/ensure
      { "objectId": "<本窗口沙箱 objectId>", "label": "<表名>" }
      ```
-     响应里的 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`,**整段**贴进:
+     响应里的 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`。**合并口径**:`sheetId`/`objectId`/`keyField` 与 33 列 `fieldIdMap` 一律用这次 ensure 的输出(objectId 一变,`fld_+sha1(projectId:objectId:fieldId)` 全变,旧的 33 列条目不能沿用);但**同一 sheet/objectId 下旧配置里的 `ext_*` 条目物理列 id 依然有效**,必须把它们并进新的 `fieldIdMap`,不能丢。合并后贴:
      ```json
-     { "plm.stock-preparation.pull-bom.v1": { "target": "<把 data.targetBinding 整段贴在这里>" } }
+     { "plm.stock-preparation.pull-bom.v1": { "target": "<合并后的 targetBinding,而非 ensure 原始输出>" } }
      ```
+     **推荐做法是不要手工做 JSON 合并**:装了 pack 时,ensure 建完表之后,用 `scripts/ops/stock-preparation-derive-target-binding.mjs` 带上 `--pack <packFile>`(见下面的离线段落)离线算出**已经合并好**的 `{ target, extensionFieldIds }`——**把这两半都贴进 action 配置,不能只贴 `target`**:`target` 贴到 `target` 键,`extensionFieldIds` 贴到与 `target` 同级的 `extensionFieldIds` 键。脚本自己的注释把这两半叫作"the two halves an action config needs"(`stock-preparation-derive-target-binding.mjs:50-51`)不是修辞——`action.extensionFieldIds` 是这份配置的 DURABLE 半边,完整性门(`assertTargetFieldMapCompleteness`,`stock-preparation-table-actions.cjs:529-532`)按它(而不是 `fieldIdMap` 的键)算"哪些 ext 列是必须绑的",只贴 `target` 而不换这个键,会让它继续读旧配置里的旧值(或空数组);旧值缺列时该门读不到新列就静默放过、留到 apply 时才在 `assertExtFieldMappingAgreesWithAction`(`:564-580`)撞上 422 `TARGET_SCHEMA_INCOMPLETE`。若这次要用的 `ext_` 列集合与旧配置一致,直接用脚本这次输出的 `extensionFieldIds` **整体替换**旧配置里的那个键即可,不要把两次输出的 `extensionFieldIds` 再手工拼接。这份输出的 `fieldIdMap` 是脚本按同一套哈希公式重算的 33 + pack 的 `ext_` 列全集,不是"ensure 输出 + 手工拼接",不会漏列也不会贴错物理列 id。
 
-     两件事都必须来自这次输出,不能手改:
+     三件事都必须来自这次(合并后的)输出,不能手改:
      - `sheetId` —— apply 写哪张表、导出读哪张表都只看它;
-     - `fieldIdMap` —— 物理列 id 是 `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变**整张表的列 id 全变**,沿用旧 map 会让写入落到不存在的列上。而且**必须是完整的一整份**(含 13 个人工列),少一列结转会在部署期被 `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` 拦下。
+     - `fieldIdMap` —— 必须是完整的一整份(33 个 TEMPLATE 列 + 已装 pack 的全部 `ext_` 列;含 13 个人工列),少一列结转会在部署期被 `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` 拦下。
+     - `extensionFieldIds`(与 `target` 同级、单独一个键)—— 完整性门与运行期一致性门(见上一段)都只认它,不认 `fieldIdMap` 里出现过哪些 ext 键。
 
-     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> --action-fragment` 能算出**同样**的绑定。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒。)
+     > **2026-09-10 订正**:上面这段此前只教"把 `target` 整段贴进 action 配置",漏了 `--action-fragment` 输出的另一半 `extensionFieldIds`——已按脚本自述与 `assertExtFieldMappingAgreesWithAction`/`assertTargetFieldMapCompleteness` 的实际校验补全。
+
+     （离线场景:没法调接口时,`node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> [--pack <packFile> --pack-id <id>] --action-fragment` 能算出**同样**的绑定;带上 `--pack` 时输出已经是与 customer pack 的 `ext_` 列合并好的完整映射,不带 `--pack` 只算 33 列 TEMPLATE 部分。但它只算不建——**之后仍要调一次上面的 ensure**,否则表和所有权登记行不存在,结转会被 `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` 拒。)
+
+     > **2026-09-10 订正**:本节此前写的是"调 ensure,把它返回的 `targetBinding` 整段贴进 action 配置,一条路,别的都别走",与文末 r7 实际执行记录第 8 条(:110 附近)矛盾且会丢客户 pack 的 21 个 `ext_` 列——已按第 8 条的合并口径改写为上面这版,并补充指向 `stock-preparation-derive-target-binding.mjs --pack` 这个可以直接产出合并结果的脚本,避免手工 JSON 拼接出错。依据:该脚本已支持 `--pack`/`--pack-id`(`scripts/ops/stock-preparation-derive-target-binding.mjs`),以及本文件 :110 的 r7 实际记录(33+21=54)。
 
      不写 `target.objectId`(或写错)会默认成 canonical(`stock-preparation-table-actions.cjs:147-157`),导致 Step 6-2 在 `assertStockPrepApplySandboxAllowed` 那一步被无条件拒绝(`reason: prod_canonical`)。
   3. 若这次窗口装了 customer pack,确认 pack 配置(`INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH` 指向的文件)里的 `targetObjectId` 是**同一个**沙箱 objectId——这条本来就只允许沙箱命名空间(`stock-preparation-customer-pack.cjs:269-285` 的 `normalizePackTargetObjectId`),不需要为 D1=B 额外改,只需要核对三处(env 允许清单、action 绑定、pack 目标)用的是同一个字符串,不是三个不同的沙箱 objectId。
@@ -215,7 +223,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 **0-8. 配置「通知下一步」接力链(可选功能;要装就配齐,不装就完全不配)**
 - 背景:备料多人接力(#5442)把「现在轮到谁」变成一个可见信号,并在交接时往钉钉群发一条提醒。**不配这个键,整套行为与没有这个功能时逐字节相同**(状态读返回 `configured:false`,推进路由按名报 501,不写库不发消息),所以本窗口可以整步跳过。
 - 动作(要装才做):
-  1. 在部署机上建一个**不进仓库**的 JSON 文件（它会被读进服务端配置键 `stockPreparationHandoff`），并把路径写进 `dockerpp.env`：
+  1. 在部署机上建一个**不进仓库**的 JSON 文件（它会被读进服务端配置键 `stockPreparationHandoff`），并把路径写进 `docker\app.env`：
      ```
      INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH=D:\metasheet\config\stock-preparation-handoff.json
      ```
@@ -290,13 +298,13 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 ```
 它会依次做(8 步,全部打印到终端):
 1. 校验包的 SHA-256(对着 `.sha256` sidecar,不匹配直接拒绝);
-2. 停 pm2;
+2. **举维护门 flag**(默认 `<RootDir>\output\maintenance.flag`,打印 `MAINTENANCE_FLAG=...`)→ 拿 `-HealthUrl` 探一次门在不在(后端这时还活着:503=门在,200=这台 nginx 不读 flag,只警告不拦升级)→ 然后停 pm2 —— flag 先举再停服,中间不留"后端已死、门还没起"的缝;
 3. 备份(见 Step 1-3,打印 `BACKUP_PATH=...`);
 4. 解包 + 替换(**逐文件遍历,不用 `-Exclude`**——这正是 F22 教训的固化,见脚本头注释);
 5. F22 断言(必存在文件清单)+ 逐文件哈希核对(比"文件数对得上"更强的检查)+ node_modules 未泄漏检查;
 6. 跑迁移(从 `docker\app.env` 加载 env 到本进程,`pm2` 不会自动重新读 env);
-7. `pm2 restart --update-env` + 轮询健康检查(默认 `http://127.0.0.1/api/health`,12 次 × 5 秒);
-8. 打印最终报告(包名 / 备份路径 / 迁移退出码 / 健康状态)。
+7. `pm2 restart --update-env` + 健康检查**分两段**:先直连后端 `http://127.0.0.1:<PORT>/health`(PORT 从 `docker\app.env` 读,缺省 8900)→ 通过后**先删 flag** → 再探 `http://127.0.0.1/api/health`(12 次 × 5 秒)。顺序不能反,原因见下一节;
+8. 打印最终报告(包名 / 备份路径 / 迁移退出码 / 后端直连健康 / nginx 健康 / `maintenance flag: <path> (removed)` / `maintenance gate: WIRED|NOT_WIRED|UNKNOWN` —— `(removed)` 只说文件删了,`gate` 那行才说这台机器的 nginx 到底读不读它)。失败路径也一样:try/finally 的 finally 里**无条件删 flag**,RESTORE 框里会再打印一次 flag 路径和手工删除命令。
 
 **验证**
 - 终端最后一段"final report"里 `health: OK`。
@@ -306,6 +314,93 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 **失败处理**
 - **脚本本身在第 4-7 步之间的任何异常**(校验失败、迁移失败、重启失败、健康检查超时),脚本会**自动**:停 pm2 → 打印一段"RESTORE REQUIRED"框(备份路径 + 每个被替换路径的精确恢复命令)→ 重新抛出异常。**照着它打印的命令做,不用自己回忆 Step 1 的回滚程序**。
 - 若脚本尚未开始执行就失败(比如包的 SHA-256 校验不过),说明 Step 0-5 传输过程中包损坏,重新传一次,不要跳过校验强行继续。
+
+---
+
+## 升级窗口的维护门(2026-09-11 加,先读这一节再排 nginx 的错)
+
+**为什么有这道门。** 每次就地升级 pm2 重启要 60-90 秒。这段时间正在页面上测试的人看到的是 `ERR_CONNECTION_RESET` / `Failed to fetch`——三天四个升级窗口,四次投诉。现在改成:升级脚本停服前写一个 flag 文件,nginx 见到 flag 就 `/api/*` 答 503 JSON、`/` 答静态维护页;升级完脚本自己删 flag。
+
+**222 现网已经手工做完了(2026-09-11 18:03)**,配置文件是 `C:\nginx\conf\nginx.conf`,改前备份存在同目录 `nginx.conf.bak-20260911-180300`。加的三段是:
+
+1. `location /api/` 的**第一行**(排在 `proxy_pass` 之前,否则永远不会被执行到):
+   ```nginx
+   if (-f C:/metasheet/output/maintenance.flag) { return 503; }
+   ```
+   (nginx 配置里 Windows 路径一律写正斜杠。)
+2. server 级:`error_page 503 @maint;`
+3. 命名 location:
+   ```nginx
+   location @maint {
+     default_type application/json;
+     add_header Retry-After 90 always;
+     add_header Cache-Control "no-store" always;
+     return 503 '{"error":{"code":"SERVICE_UNAVAILABLE","message":"服务暂时不可用,请稍后重试"}}';
+   }
+   ```
+
+仓库里的 `ops/nginx/multitable-onprem.conf.example` 已经补上同义的段落(命名 location 与尾斜杠写法与 222 现网略有不同,语义相同),外加 `location /` 也判 flag、503 落到 `<RootDir>/ops/maintenance/maintenance.html`(静态维护页,模板在仓库 `ops/maintenance/maintenance.html`)。**`location /` 那一段和维护页 222 现网没有**——上面三段才是 222 实际有的全部,所以 222 上 flag 举着时 `/` 仍然返回 200 的前端首页(见下面的验证小节)。**注意:改仓库里的例子对 222 现网零效果**,例子只是留档 + 给下一台新机器抄。现网要变,只能手工改 `nginx.conf`。
+
+**flag 路径为什么是 `output\maintenance.flag`。** 升级会把 `apps/web/dist`、`packages/core-backend/dist`、`packages/core-backend/migrations` 整体删掉重建(脚本参数 `-ReplaceDirs`)。flag 落在这三个目录里的任何位置,都会在升级中途被删掉——门在最需要它的几十秒里自己塌了。`output\` 不在替换清单里。脚本对此有静态断言:`-MaintenanceFlagPath` 落在任一 `ReplaceDirs` 下时,**开工前**就抛 `MAINTENANCE_FLAG_PATH_INSIDE_REPLACE_DIR` 拒绝启动(那时还没碰 pm2、没建备份目录)。维护页放 `ops/maintenance/` 同理。
+
+**健康探测的顺序(r29 的坑,2026-09-11)。** r29 上机时脚本报 `exit -1`,但后端其实早就起来了:脚本的健康检查走的是 nginx 的 `/api/health`,而协调方上机脚本手工举着的 flag 正好让 nginx 对 `/api/*` 一律答 503——12 次重试全是 503,脚本判定升级失败。现在顺序改成:
+
+1. **直连后端** `http://127.0.0.1:<PORT>/health`(PORT 从 `docker\app.env` 读,缺省 8900)——不经过 nginx,门挡不住它;
+2. 通过后**立刻删 flag**;
+3. 再探 `http://127.0.0.1/api/health`——这一探同时证明了两件事:后端好了,**且门确实放下了**(门还在的话这里不可能 200)。
+
+失败也不会留下门:整段(从写 flag 到最终报告)包在 try/finally 里,finally 无条件删 flag;RESTORE 框和终报都会打印 flag 路径和手工删除命令。
+
+**协调方的上机脚本不要再自己举 flag。** 之前上机脚本里手工 `New-Item maintenance.flag` / 手工删的做法**作废**:两边都管同一个文件,一边删一边举,只会产生"升级早就结束、站点还在 503"或者"门根本没起来"的两种事故。现在 flag 由 `multitable-onprem-package-upgrade-inplace.ps1` 独占管理。人只在一种情况下碰它:脚本异常退出后站点仍然 503 —— 按终报打印的路径手工 `Remove-Item`。
+
+**Windows 上怎么 reload(必须以 SYSTEM 身份发)。** 222 的 nginx 以 SYSTEM 身份跑,普通管理员 shell 里 `nginx -s reload` 发的信号进不去(master 进程属于 SYSTEM,信号被拒),表现是"命令没报错,配置没生效"。用一次性计划任务以 SYSTEM 身份发:
+
+```powershell
+# 1) 先验配置,语法不过就别 reload(nginx -t 用当前身份跑即可,它只读文件)
+C:\nginx\nginx.exe -t -c C:\nginx\conf\nginx.conf
+
+# 2) 以 SYSTEM 身份 reload
+schtasks /Create /TN nginx-reload /TR "C:\nginx\nginx.exe -s reload" /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F
+schtasks /Run /TN nginx-reload
+Start-Sleep -Seconds 3
+schtasks /Delete /TN nginx-reload /F
+```
+
+> `/TR` 的工作目录不是 nginx 前缀目录时,带上 `-p C:\nginx`。reload 后 `Get-Process nginx` 应仍有 master + worker,worker 的启动时间是新的。
+
+**怎么验证这道门真的在(222 现网:只有 `/api/` 有门)。** 在 222 上(不影响正在用的人的做法是挑个没人测的时段,验完立刻删 flag):
+
+```powershell
+# ON:建 flag → /api/* 应答 503 + JSON
+New-Item -ItemType File -Force -Path C:\metasheet\output\maintenance.flag | Out-Null
+curl.exe -i http://127.0.0.1/api/health          # 期望:HTTP/1.1 503,Retry-After: 90,body 是 SERVICE_UNAVAILABLE JSON
+
+# OFF:删 flag → 恢复
+Remove-Item -LiteralPath C:\metasheet\output\maintenance.flag -Force
+curl.exe -i http://127.0.0.1/api/health          # 期望:HTTP/1.1 200
+```
+
+> **`curl.exe -i http://127.0.0.1/` 在 222 上期望的是 200,不是 503。** 2026-09-11 18:03 那次手工改动只加了 `location /api/` 的门,`location /` 里没有 flag 判断——flag 举着时首页照常返回 SPA 的 200(接口 503,页面上是中文错误提示,不是白屏)。**别因为 `/` 没给 503 就认定门坏了、在升级窗口里去改现网 `nginx.conf`**:窗口期改 nginx 是最不该做的事,判断门在不在只看 `/api/health` 这一条。
+
+**新机器:按示例补齐 `location /` 门之后才成立的验证。** `ops/nginx/multitable-onprem.conf.example` 比 222 现网多两段(`location /` 的 flag 判断 + `location = /maintenance.html`)。两个前置都做完才有下面的期望:
+
+1. 把这两段同步进该机器的 `nginx.conf`,`nginx -t` 通过后以 SYSTEM 身份 reload;
+2. **手工**把仓库的 `ops/maintenance/maintenance.html` 复制到 `<RootDir>\ops\maintenance\maintenance.html`。这个文件**不在部署包里**(`scripts/ops/multitable-onprem-package-build.sh` 的 `REQUIRED_PATHS(build.sh)/required(verify.sh)` 只收 `ops/nginx/multitable-onprem.conf.example`),解包不会带出来。
+
+```powershell
+curl.exe -i http://127.0.0.1/                    # 期望:HTTP/1.1 503,body 是中文维护页
+```
+
+怎么读这一条的结果:
+
+- `503` + 中文维护页 → 门在、页面也放对了;
+- `503` + nginx 自带的 `503 Service Temporarily Unavailable` → 门在,维护页文件没放(示例里 `location = /maintenance.html` 的 `try_files $uri =503;` 在兜底);
+- `404` → `try_files $uri =503;` 那行被漏抄了(error_page 是内部重定向,目标文件不存在时默认给 404,`recursive_error_pages` 默认 off 不会再映射回 503);
+- `200` → `location /` 的门根本没同步进去。
+
+验证时 `Invoke-RestMethod` 不好用:它对 503 直接抛异常、看不到响应体,用 `curl.exe -i` 或 `Invoke-WebRequest -SkipHttpErrorCheck`(PS 7+)。
+
+**升级脚本自己会替你验一次。** `multitable-onprem-package-upgrade-inplace.ps1` 在举 flag 之后、停 pm2 之前,拿 `-HealthUrl` 探一次(这时后端还活着):503 → 终报打 `maintenance gate: WIRED`;200 → 打 `MAINTENANCE_GATE_NOT_WIRED` 警告并在终报写 `NOT_WIRED`,意思是这台机器的 nginx 根本不读这个 flag、这次窗口没有被遮住(脚本照常继续升级,不会因此失败)。222 上正常应该看到 `WIRED`;看到 `NOT_WIRED` 说明 `nginx.conf` 被谁覆盖回去了(比如从备份还原过),按本节重新同步。
 
 ---
 

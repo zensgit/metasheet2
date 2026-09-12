@@ -55,6 +55,7 @@ const {
 } = require(path.join(LIB, 'stock-preparation-project-reads.cjs'))
 const {
   STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID,
   STOCK_PREPARATION_PROJECT_BOARD_KEYS,
   STOCK_PREPARATION_PROJECT_BOARD_MODES,
   readOperatorProjectBoard,
@@ -216,6 +217,12 @@ function mount({
   // that models a hand-bound sheet moves it, which is the only way to model a sheet whose id does
   // not hash from the caller's own project.
   mainSheetIdOverride = null,
+  // DOES THE 备料填写视图 EXIST on that table? `false` — the default, and the state of every table
+  // in the field (only the CREATE path provisions it; the repair verb that would heal an existing
+  // table has no route and no production caller today) — models a host that answers
+  // "no such view"; `true` models one where provisioning created it. `null` models a host too old
+  // to have the view-read port at all, which must degrade the same way a "no" does.
+  fillViewProvisioned = false,
 } = {}) {
   const routes = new Map()
   const MAIN_SHEET = mainSheetIdOverride || MAIN_SHEET_A
@@ -377,6 +384,16 @@ function mount({
     getObjectViewId(projectId, objectId, viewId) {
       return `view_${projectId}_${objectId}_${viewId}`
     },
+    // The host's READ-ONLY view existence probe. Absent (`null`) models a host older than the port;
+    // present, it answers only about the view id the caller composed for its OWN project + object.
+    ...(fillViewProvisioned === null ? {} : {
+      async findObjectView({ projectId, objectId, viewId } = {}) {
+        if (!fillViewProvisioned) return null
+        if (viewId !== 'prep-fill') return null
+        const id = `view_${projectId}_${objectId}_${viewId}`
+        return { id, sheetId: ownSheetIdFor(projectId, objectId), name: '备料填写视图', type: 'grid', filterInfo: {}, sortInfo: {}, groupInfo: {}, hiddenFieldIds: [], config: {} }
+      },
+    }),
     // The host's OWNERSHIP question — a BOOLEAN about the project we name, so no other tenant's
     // project id is ever returned to this plugin.
     ...(owners === null ? {} : {
@@ -1237,6 +1254,50 @@ async function tenancyIsProvedFromTheSheetNotTheBindingShape() {
     assert.ok(res.body.data.fillTarget, 'B-12: the deterministic proof still stands on a host without the port')
     assert.equal(res.body.data.pullTargetReady, true)
   }
+
+  // 6. THE SHEET WAS DELETED, AND THE REGISTRY STILL CLAIMS IT. `plugin_multitable_object_registry`
+  //    is written at provisioning time and NOTHING in the product ever deletes a row from it;
+  //    dropping a table is `UPDATE meta_sheets SET deleted_at = now()`. So "the registry says yours"
+  //    outlives the table, and PROOF 1 on its own kept handing out a deep link into a table that is
+  //    gone — the board's oldest form of this gap, now closed for every surface at once because both
+  //    the board and the operator directory ride the same `resolveOwnBoundSheet`.
+  //
+  //    OWNERSHIP IS UNTOUCHED HERE: the registry answer is still `true`, the hash still derives, and
+  //    the ONLY thing that changed is that `findObjectSheet` — the host's `deleted_at IS NULL` read —
+  //    no longer finds it. Refusing is therefore strictly a NARROWING.
+  {
+    const harness = mount({
+      mainTableProvisioned: false,
+      sheetOwners: { [CANONICAL_SHEET]: STAGING_A },
+    })
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200, 'B-12: a deleted fill table is a deployment state, not a board failure')
+    assert.equal(res.body.data.fillTarget, null, 'B-12: a sheet the registry claims but that no longer EXISTS yields no handle')
+    assert.equal(res.body.data.pullTargetReady, false, 'B-12: and it is not read for row counts either')
+    assert.equal(res.body.data.pulledRowCount, 0)
+  }
+
+  // 7. THE D1=B WINDOW, WITH THAT SAME SHEET DELETED. The runbook's sandbox rebinding names an
+  //    objectId the sheet was never created under, so the liveness read has to be tried against the
+  //    CANONICAL object as well — otherwise the one configuration a live deployment actually runs
+  //    would be the one that never gets checked. Case 1 above is this case's live twin: same
+  //    binding, same registry answer, and it still yields a handle.
+  {
+    const sandboxBinding = {
+      sheetId: CANONICAL_SHEET,
+      objectId: 'plm_stock_preparation_sandbox_main',
+      fieldIdMap: MAIN_FIELD_ID_MAP,
+    }
+    const harness = mount({
+      boundTarget: sandboxBinding,
+      mainTableProvisioned: false,
+      sheetOwners: { [CANONICAL_SHEET]: STAGING_A },
+    })
+    const res = await callBoard(harness.routes, { user: OPERATOR_A, projectNo: PROJECT_A_NO })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.fillTarget, null, 'B-12: a sandbox-rebound binding over a DELETED sheet yields no handle')
+    assert.equal(res.body.data.pullTargetReady, false)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,14 +1418,22 @@ async function theModuleRefusesToProjectAValueWithoutAScope() {
 }
 
 // ---------------------------------------------------------------------------
-// B-10 — THE DEEP LINK'S VIEW ID IS THE HOST'S, NOT A HAND-COPIED LITERAL
+// B-10 — THE DEEP LINK PREFERS THE 备料填写视图, AND FALLS BACK TO THE DEFAULT VIEW
 // ---------------------------------------------------------------------------
 //
-// `STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID` must be the same token the host's own default-view
-// provisioning creates (`DEFAULT_OBJECT_VIEW_LOGICAL_ID`). Nothing enforced that: changing the
-// plugin's copy to any other string kept every suite green and shipped a link to a view that does
-// not exist. Mirrored byte-for-byte out of the host source, in the same style B-01's vocabulary
-// mirror uses.
+// Two halves, and BOTH are load-bearing:
+//
+//   * The FALLBACK id must still be the token the host's own default-view provisioning creates
+//     (`DEFAULT_OBJECT_VIEW_LOGICAL_ID`). Nothing enforced that before this mirror existed:
+//     changing the plugin's copy to any other string kept every suite green and shipped a link to
+//     a view that does not exist. Mirrored byte-for-byte out of the host source.
+//
+//   * The PREFERRED id is the plugin's OWN view (`prep-fill`, the one with the 12 system columns
+//     hidden), and it is handed out ONLY when the host says that view EXISTS. A table provisioned
+//     before the fill view existed — every table in the field, and there is no reachable verb that
+//     heals one today — must keep the link it has today. Without the existence probe the
+//     handle would name a view id that resolves to nothing, and the workbench would fold to the
+//     sheet's FIRST view, which on a pack-installed table is a role view, not the default one.
 function theFillViewIdMirrorsTheHostsDefaultViewId() {
   const provisioningSrc = fs.readFileSync(
     path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'multitable', 'provisioning.ts'),
@@ -1373,11 +1442,76 @@ function theFillViewIdMirrorsTheHostsDefaultViewId() {
   const match = provisioningSrc.match(/export const DEFAULT_OBJECT_VIEW_LOGICAL_ID = '([^']+)'/)
   assert.ok(match, 'B-10: the host still declares DEFAULT_OBJECT_VIEW_LOGICAL_ID')
   assert.equal(
+    STOCK_PREPARATION_FILL_VIEW_FALLBACK_LOGICAL_ID,
+    match[1],
+    'B-10: the deep link\'s FALLBACK must name the view id the host\'s own default-view provisioning creates',
+  )
+  assert.notEqual(
     STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
     match[1],
-    'B-10: the fill deep link must name the view id the host\'s own default-view provisioning creates',
+    'B-10: the fill view must be the plugin\'s OWN view id — upserting the default view would hole the host\'s never-touch-existing-views guarantee',
   )
+  assert.equal(STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID, 'prep-fill')
 }
+
+async function theDeepLinkPrefersTheFillViewAndFallsBackToTheDefaultOne() {
+  // (a) THE TABLE THAT HAS ONE. The handle names the 备料填写视图 — the view whose hidden columns,
+  //     父组件分组 and 有效过滤 are the whole point of 「打开项目备料」.
+  {
+    const res = await callBoard(
+      mount({ mainTableProvisioned: true, fillViewProvisioned: true }).routes,
+      { user: OPERATOR_A, projectNo: PROJECT_A_NO },
+    )
+    const target = res.body.data.fillTarget
+    assert.ok(target, 'B-10: a provisioned fill table still yields a handle')
+    assert.equal(
+      target.viewId,
+      `view_${STAGING_A}_${MAIN_OBJECT_ID}_prep-fill`,
+      'B-10: when the fill view exists, the deep link lands on it',
+    )
+    assert.equal(target.sheetId, ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID))
+  }
+  // (b) THE TABLE THAT DOES NOT — every table in the field today. The link is byte-for-byte the one
+  //     it has always been, so nothing regresses — and since no deployment can run the repair verb
+  //     yet (it has no entry), this leg, not the one above, is what 222 gets from this change.
+  {
+    const res = await callBoard(
+      mount({ mainTableProvisioned: true, fillViewProvisioned: false }).routes,
+      { user: OPERATOR_A, projectNo: PROJECT_A_NO },
+    )
+    const target = res.body.data.fillTarget
+    assert.ok(target, 'B-10: a missing fill view is not an error')
+    assert.equal(
+      target.viewId,
+      `view_${STAGING_A}_${MAIN_OBJECT_ID}_default`,
+      'B-10: with no fill view, the deep link falls back to the DEFAULT view',
+    )
+  }
+  // (c) A HOST TOO OLD to answer the question at all degrades exactly like a "no" — a plugin newer
+  //     than its host keeps working rather than erroring.
+  {
+    const res = await callBoard(
+      mount({ mainTableProvisioned: true, fillViewProvisioned: null }).routes,
+      { user: OPERATOR_A, projectNo: PROJECT_A_NO },
+    )
+    const target = res.body.data.fillTarget
+    assert.ok(target, 'B-10: an older host still yields a handle')
+    assert.equal(target.viewId, `view_${STAGING_A}_${MAIN_OBJECT_ID}_default`, 'B-10: unprovable existence means the default view')
+  }
+  // (d) THE TENANT GATE STILL COMES FIRST. A fill view that exists cannot conjure a handle for a
+  //     sheet that is not the caller's own: the probe is a display decision taken AFTER ownership,
+  //     never a second way to name a sheet.
+  {
+    const foreign = { sheetId: ownSheetIdFor(STAGING_B, MAIN_OBJECT_ID), objectId: MAIN_OBJECT_ID }
+    const res = await callBoard(
+      mount({ boundTarget: foreign, fillViewProvisioned: true }).routes,
+      { user: OPERATOR_A, projectNo: PROJECT_A_NO },
+    )
+    assert.equal(res.body.data.fillTarget, null, 'B-10: a bound target outside the caller\'s own tenant yields NO handle, fill view or not')
+    assert.ok(!JSON.stringify(res.body).includes(STAGING_B), 'B-10: and nothing about the foreign project is echoed')
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // B-13 (H13) — THE AUDIT VOCABULARY GATE
@@ -1508,6 +1642,7 @@ async function main() {
   await oneProjectsBoardCostsOneProjectsQueries()
   await theModuleRefusesToProjectAValueWithoutAScope()
   theFillViewIdMirrorsTheHostsDefaultViewId()
+  await theDeepLinkPrefersTheFillViewAndFallsBackToTheDefaultOne()
   await anAuditStoreWithoutListStillAnswersTheBoard()
   await theBoardReportsLastChangedFromPlmFromTheBoundLastPlmRefreshColumn()
   await lastChangedFromPlmIsNeverReportedFromATruncatedScan()

@@ -1168,6 +1168,397 @@ describe('IntegrationWorkbenchView', () => {
     expect(container.textContent).not.toContain('K3 Target · erp:k3-wise-webapi')
   })
 
+  // 列表回退 x 带写按钮的清单 —— 工作台这一侧的接线。
+  //
+  // useAuth 把 localStorage.workspaceId 写成 tenantId,于是每个请求都带非 null 的 workspace hint;
+  // 外接源按既有约定建在 workspace_id IS NULL 上。列表读为此回退一步(本 PR),upsert/delete 没有也不该
+  // 跟着放宽:仍按 (tenant, workspace, id) 精确匹配。所以回退来的行在这块屏幕上编辑/停用/启用/删除
+  // 全置灰:服务端会以 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH / 404 拒掉它们(插件侧 L-10 钉着)。
+  //
+  // 而口径只到这四个为止:同一屏的「测试连接」**不**拦,因为服务端 persistExternalSystemTestResult
+  // (#5534)按行自身的作用域落库,它是真的写得进去的。下面第二个 it 钉住这一半 ——
+  // 两条合起来才是「置灰的量 = 实际写不动的量」。
+  const mountWithTenantWideSource = async (
+    onWrite?: (url: string, method: string) => Response | undefined,
+  ) => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    localStorage.setItem('workspaceId', 'default')
+    const writeRequests: Array<{ url: string; method: string }> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET') {
+        writeRequests.push({ url, method })
+        return onWrite?.(url, method) ?? jsonResponse({})
+      }
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target'], supports: ['read', 'upsert'], advanced: false },
+        ])
+      }
+      if (url.startsWith('/api/integration/external-systems')) {
+        // 服务端(lib/external-systems.cjs 的 listExternalSystems)对非 null hint 的回退结果:行仍报自己的
+        // 作用域(workspaceId: null)。没有任何额外字段 —— 屏幕侧的判据就靠这个 workspaceId 与当前 hint 比。
+        return jsonResponse([
+          {
+            id: 'sys_tenant_wide',
+            tenantId: 'default',
+            workspaceId: null,
+            name: '客户 PLM 只读库',
+            kind: 'http',
+            role: 'source',
+            status: 'active',
+          },
+        ])
+      }
+      return jsonResponse([])
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+    return writeRequests
+  }
+
+  it('回退来的租户级连接:编辑/停用/删除置灰,且绕过按钮也发不出写请求', async () => {
+    const writeRequests = await mountWithTenantWideSource()
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    // 列表本身确实带了 hint —— 这正是回退发生的条件,也是 upsert/delete 够不着这行的原因。
+    expect(apiFetchMock.mock.calls.some(([url]) => String(url) === '/api/integration/external-systems?tenantId=default&workspaceId=default')).toBe(true)
+
+    ;(container.querySelector('[data-testid="toggle-inventory-overview"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const deactivate = container.querySelector('[data-testid="deactivate-connection-sys_tenant_wide"]') as HTMLButtonElement
+    const remove = container.querySelector('[data-testid="delete-connection-sys_tenant_wide"]') as HTMLButtonElement
+    const notice = container.querySelector('[data-testid="connection-scope-write-block-sys_tenant_wide"]')?.textContent || ''
+    expect(notice).toContain('租户级')
+    // 文案列出的就是被拦的那四个,而且必须说清测试连接不在内 —— 否则就是在屏幕上撒谎。
+    for (const action of ['编辑', '停用', '启用', '删除']) {
+      expect(notice).toContain(action)
+    }
+    expect(notice).toContain('测试连接')
+    expect(notice).not.toContain('只读')
+    expect(deactivate.disabled).toBe(true)
+    expect(remove.disabled).toBe(true)
+
+    // 置灰只是外观。把 disabled 摘掉再点 —— 处理函数自己也得拒绝,并且一个写请求都不许发出去。
+    // (服务端也会拒 —— 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH,见插件侧 L-10;这里钉的是屏幕不再浪费一轮往返。)
+    deactivate.disabled = false
+    deactivate.click()
+    await flushUi(8)
+    expect(writeRequests).toEqual([])
+    expect(container.textContent).toContain('无法停用')
+    expect(container.textContent).not.toContain('连接已停用')
+
+    remove.disabled = false
+    remove.click()
+    await flushUi(8)
+    expect(writeRequests).toEqual([])
+    expect(container.textContent).toContain('无法删除')
+    expect(container.textContent).not.toContain('连接已删除')
+    // 删除甚至没走到确认框:守卫在 confirm 之前。
+    expect(confirmMock).not.toHaveBeenCalled()
+    // 清单里仍然只有那一行。
+    expect(container.querySelectorAll('[data-testid^="deactivate-connection-"]').length).toBe(1)
+  })
+
+  // 口径的另一半,也是第二轮评审的那条 blocker:同一屏的「测试连接」会真的改掉这行的
+  // status / last_tested_at / last_error(服务端 persistExternalSystemTestResult 按行自身的作用域落库,
+  // #5534,插件侧 L-11)。所以它**不**能跟着那四个一起被拦:拦了就是把本 PR 要治的
+  // 「源不可用」换个按钮重现。拦不拦是一回事,说不说实话是另一回事 —— 测完要说出写到了哪一行。
+  it('同一行的「测试连接」不被拦:请求照发,且状态条告知写入的是租户级那一行', async () => {
+    const writeRequests = await mountWithTenantWideSource((url) => (
+      url.startsWith('/api/integration/external-systems/sys_tenant_wide/test')
+        ? jsonResponse({ ok: true, status: 200 })
+        : undefined
+    ))
+
+    const sourceSystemSelect = container.querySelector('[data-testid="source-system"]') as HTMLSelectElement
+    sourceSystemSelect.value = 'sys_tenant_wide'
+    sourceSystemSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="test-source-system"]') as HTMLButtonElement).click()
+    await flushUi(8)
+
+    // 1) 它真的发出去了 —— 与上一条里 writeRequests 永远为空的停用/删除形成对照。
+    expect(writeRequests).toEqual([
+      { url: '/api/integration/external-systems/sys_tenant_wide/test?tenantId=default&workspaceId=default', method: 'POST' },
+    ])
+    // 2) 并且屏幕说出了它写到哪里。
+    expect(container.textContent).toContain('连接测试通过')
+    expect(container.textContent).toContain('测试结果已写入租户级的那一行')
+  })
+
+  // 同一道不对称的第五、第六个入口,不在「四动作」名单里:清洗表卡片的「作为 Dry-run 来源」/「作为目标多维表」。
+  // 它们发的是带**确定性 id** 的 upsert(id 由 projectId 算出,不是新建的随机 id),所以这个项目的连接行
+  // 若在租户级(workspace_id IS NULL)而当前工作区框非空,服务端会以 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH 拒
+  // (插件侧 L-10);那时 parseIntegrationResponse 只保留 message、丢掉 code,直出的是一句英文原文
+  // (code 已透传之后,兜底见本文件下方「列表没带出这一行时」那条)。
+  // 这里钉:① 撞上租户级行时不发那一枪、给中文人话;② 判据是「行自己的作用域 vs 当前 hint」,
+  // 换一个没有租户级行的项目照发,而且请求仍带调用方自己的 hint —— 绝不为了写得进去而回退到 null 作用域。
+  it('确定性 id 的 ensure 按钮撞上租户级行:不发请求并给中文人话;换个项目照发且不放宽作用域', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    localStorage.setItem('workspaceId', 'default')
+    const writeRequests: Array<{ url: string; method: string }> = []
+    const externalSystemBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET') {
+        writeRequests.push({ url, method })
+        if (url === '/api/integration/staging/install') {
+          return jsonResponse({
+            projectId: 'project_1',
+            sheetIds: { standard_materials: 'sheet_materials' },
+            viewIds: { standard_materials: 'view_materials' },
+            openLinks: { standard_materials: '/multitable/sheet_materials/view_materials' },
+            targets: [{
+              id: 'standard_materials',
+              name: '物料清洗',
+              sheetId: 'sheet_materials',
+              viewId: 'view_materials',
+              openLink: '/multitable/sheet_materials/view_materials',
+            }],
+            warnings: [],
+          })
+        }
+        if (url === '/api/integration/external-systems') {
+          const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+          externalSystemBodies.push(body)
+          return jsonResponse(body)
+        }
+        return jsonResponse({})
+      }
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      if (url.startsWith('/api/integration/external-systems')) {
+        // project_1 的两条连接都建在租户级,列表那一步的回退把它们带了出来(行仍报自己的作用域)。
+        return jsonResponse([
+          {
+            id: 'metasheet_staging_project_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'MetaSheet staging 多维表',
+            kind: 'metasheet:staging',
+            role: 'source',
+            status: 'active',
+          },
+          {
+            id: 'metasheet_target_project_1',
+            tenantId: 'default',
+            workspaceId: null,
+            name: 'MetaSheet 目标多维表',
+            kind: 'metasheet:multitable',
+            role: 'target',
+            status: 'active',
+          },
+        ])
+      }
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([
+          { id: 'standard_materials', name: 'Standard Materials', fields: ['code', 'name'] },
+        ])
+      }
+      return jsonResponse([])
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const projectIdInput = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
+    projectIdInput.value = 'project_1'
+    projectIdInput.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="install-staging"]') as HTMLButtonElement).click()
+    await flushUi(20)
+
+    // 安装本身照做;它结尾自动「设为 Dry-run 来源」那一步撞上租户级行,被拦在发请求之前。
+    expect(writeRequests.map((entry) => entry.url)).toEqual(['/api/integration/staging/install'])
+    expect(externalSystemBodies).toEqual([])
+    expect(container.textContent).toContain('无法把 staging 多维表设为 Dry-run 来源')
+    expect(container.textContent).toContain('固定 id「metasheet_staging_project_1」')
+    expect(container.textContent).toContain('租户级')
+    expect(container.textContent).toContain('请清空上方的工作区')
+    // 服务端那句英文原文不许落到屏幕上(这里根本没发请求;发了也会被下面那条兜底翻成中文)。
+    expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
+
+    ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(writeRequests.map((entry) => entry.url)).toEqual(['/api/integration/staging/install'])
+    expect(externalSystemBodies).toEqual([])
+    expect(container.textContent).toContain('无法把多维表设为写回目标')
+    expect(container.textContent).toContain('固定 id「metasheet_target_project_1」')
+
+    // 判据只有「行自己的作用域 vs 这次写要带的 hint」:换一个列表里没有租户级行的项目,照发不误拦。
+    projectIdInput.value = 'project_2'
+    projectIdInput.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="use-staging-source-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(writeRequests.map((entry) => entry.url)).toEqual([
+      '/api/integration/staging/install',
+      '/api/integration/external-systems',
+    ])
+    expect(externalSystemBodies).toHaveLength(1)
+    expect(externalSystemBodies[0]).toMatchObject({
+      id: 'metasheet_staging_project_2',
+      tenantId: 'default',
+      // 仍然是调用方自己的 hint。屏幕侧这道拦截只少发注定失败的请求,不会改写入作用域去够那行租户级的连接。
+      workspaceId: 'default',
+      projectId: 'project_2',
+      kind: 'metasheet:staging',
+    })
+  })
+
+  // 上一条钉的是「列表带出了那一行时，屏幕侧预检省掉一次注定失败的请求」。这一条钉它的**兜底**：
+  // 列表里没有这一行（没加载 / 分页外 / 别处刚把它建到租户级），预检按约定不猜、照发，请求就真的
+  // 撞上服务端那道 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH。此前 parseIntegrationResponse 丢掉 code，
+  // catch 只能直出英文原文；现在 code 透传到 Error 上，判据是稳定的 wire code 而不是英文散文。
+  // 第二段是正控：换一个 code，照旧直出服务端 message —— 这次改动只认一个码，没有把别的错误吞成
+  // 「作用域不匹配」。
+  const mountWithEmptyInventory = async (
+    onExternalSystemPost: (body: Record<string, unknown>) => Response,
+  ) => {
+    localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
+    localStorage.setItem('workspaceId', 'default')
+    const externalSystemBodies: Array<Record<string, unknown>> = []
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = String(init?.method || 'GET').toUpperCase()
+      if (method !== 'GET') {
+        if (url === '/api/integration/staging/install') {
+          return jsonResponse({
+            projectId: 'project_1',
+            sheetIds: { standard_materials: 'sheet_materials' },
+            viewIds: { standard_materials: 'view_materials' },
+            openLinks: { standard_materials: '/multitable/sheet_materials/view_materials' },
+            targets: [{
+              id: 'standard_materials',
+              name: '物料清洗',
+              sheetId: 'sheet_materials',
+              viewId: 'view_materials',
+              openLink: '/multitable/sheet_materials/view_materials',
+            }],
+            warnings: [],
+          })
+        }
+        if (url === '/api/integration/external-systems') {
+          const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+          externalSystemBodies.push(body)
+          return onExternalSystemPost(body)
+        }
+        return jsonResponse({})
+      }
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'metasheet:staging', label: 'MetaSheet staging multitable', roles: ['source'], supports: ['read'], advanced: false },
+          { kind: 'metasheet:multitable', label: 'MetaSheet multitable', roles: ['target'], supports: ['upsert'], advanced: false },
+        ])
+      }
+      // 清单是空的 —— 屏幕侧预检查无可查，只能照发；兜底只剩服务端那道 409。
+      if (url.startsWith('/api/integration/external-systems')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') {
+        return jsonResponse([{ id: 'standard_materials', name: 'Standard Materials', fields: ['code', 'name'] }])
+      }
+      return jsonResponse([])
+    })
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async () => EMPTY_HUB_OVERVIEW)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    app.component('router-link', {
+      props: ['to'],
+      setup(_props, { slots }) {
+        return () => h('a', slots.default?.())
+      },
+    })
+    app.mount(container)
+    await flushUi(8)
+
+    const projectIdInput = container.querySelector('[data-testid="staging-project-id"]') as HTMLInputElement
+    projectIdInput.value = 'project_1'
+    projectIdInput.dispatchEvent(new Event('input'))
+    ;(container.querySelector('[data-testid="install-staging"]') as HTMLButtonElement).click()
+    await flushUi(20)
+    return externalSystemBodies
+  }
+
+  it('列表没带出这一行时：ensure 请求照发，服务端 409 SCOPE_MISMATCH 被翻成中文人话，英文原文不上屏', async () => {
+    const externalSystemBodies = await mountWithEmptyInventory(() => new Response(
+      JSON.stringify({
+        ok: false,
+        error: {
+          code: 'EXTERNAL_SYSTEM_SCOPE_MISMATCH',
+          message: 'external system belongs to the tenant-wide scope',
+          details: { id: 'metasheet_staging_project_1', requestedWorkspaceId: 'default', rowWorkspaceId: null },
+        },
+      }),
+      { status: 409, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    // 请求确实发了（与上一条的 externalSystemBodies === [] 正相反），而且带的仍是调用方自己的 hint。
+    expect(externalSystemBodies).toHaveLength(1)
+    expect(externalSystemBodies[0]).toMatchObject({
+      id: 'metasheet_staging_project_1',
+      workspaceId: 'default',
+    })
+    expect(container.textContent).toContain('无法把 staging 多维表设为 Dry-run 来源')
+    // 文案与预检那条同源（externalSystemScopeWriteBlock），不另起第二套口径。
+    expect(container.textContent).toContain('租户级')
+    expect(container.textContent).toContain('请清空上方的工作区')
+    expect(container.textContent).toContain('测试连接')
+    expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
+
+    // 目标那一侧同理。
+    ;(container.querySelector('[data-testid="use-multitable-target-standard_materials"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(externalSystemBodies).toHaveLength(2)
+    expect(container.textContent).toContain('无法把多维表设为写回目标')
+    expect(container.textContent).not.toContain('belongs to the tenant-wide scope')
+  })
+
+  it('正控：其它 error code 照旧直出服务端 message，不被当成作用域不匹配', async () => {
+    await mountWithEmptyInventory(() => new Response(
+      JSON.stringify({
+        ok: false,
+        error: { code: 'EXTERNAL_SYSTEM_KIND_UNSUPPORTED', message: 'adapter kind metasheet:staging is not registered' },
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    expect(container.textContent).toContain('adapter kind metasheet:staging is not registered')
+    expect(container.textContent).not.toContain('请清空上方的工作区')
+  })
+
   it('does not mark error-state source or target systems as dry-run ready', async () => {
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') {
@@ -2711,6 +3102,9 @@ describe('IntegrationWorkbenchView', () => {
       if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
       if (url === '/api/integration/staging/descriptors') return jsonResponse([])
       if (url === '/api/data-sources/pg-1/schema') {
+        // A listing that DID read columns (detail:'full' / adapters that never had an N+1 listing).
+        // The list-only default body — columns:[] + columnsLoaded:false + detail:'list' — is pinned
+        // by the "list-only schema body" test below; both shapes have to render correctly.
         return jsonResponse({
           tables: [{ name: 'items', schema: 'public', columns: [{ name: 'id' }, { name: 'name' }] }],
           views: [{ name: 'item_view', schema: 'reporting', columns: [{ name: 'id' }] }],
@@ -2804,6 +3198,79 @@ describe('IntegrationWorkbenchView', () => {
     expect(apiFetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/integration/external-systems/ds_bridge_1/objects'))).toBe(true)
     const objectSelect = container.querySelector('[data-testid="source-object"]') as HTMLSelectElement
     expect(Array.from(objectSelect.options).map((option) => option.value)).toContain('public.items')
+  })
+
+  it('C2b: a list-only schema body shows NO column count — empty columns is never rendered as 「0 列」', async () => {
+    // GET /api/data-sources/:id/schema is list-only by default (the per-table fan-out timed out at
+    // nginx on the customer PLM, 2026-09-10 222 error.log: four times upstream timed out (10060)).
+    // The bridge object picker reads `columns` STRAIGHT off that listing, so without the
+    // columnsLoaded/detail check every table would claim 「0 列」 — a wrong answer ("this table has
+    // no fields"), not a slow one. Mutation probe: drop the columnsLoaded/detail branch in
+    // bridgeObjectColumnCount() and both assertions below go red.
+    apiGetMock.mockReset()
+    apiGetMock.mockImplementation(async (url: string) => {
+      if (url === '/api/data-sources') {
+        return { ok: true, data: { items: [{ id: 'pg-1', name: 'Warehouse PG', type: 'postgres', connected: true }] } }
+      }
+      throw new Error(`unexpected apiGet ${url}`)
+    })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/integration/adapters') {
+        return jsonResponse([
+          { kind: 'http', label: 'HTTP API', roles: ['source', 'target', 'bidirectional'], supports: ['read', 'upsert'], advanced: false },
+          { kind: 'data-source:sql-readonly', label: 'Read-only SQL data source', roles: ['source'], supports: ['testConnection', 'listObjects', 'getSchema', 'read'], advanced: true, guardrails: { write: { supported: false } } },
+        ])
+      }
+      if (url === '/api/integration/external-systems?tenantId=default') return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url === '/api/data-sources/pg-1/schema') {
+        // Verbatim shape of the default backend body (MSSQL/PG/MySQL/Mongo list-only path).
+        return jsonResponse({
+          detail: 'list',
+          tables: [{ name: 'items', schema: 'public', columns: [], columnsLoaded: false }],
+          views: [{ name: 'item_view', schema: 'reporting', columns: [], columnsLoaded: false }],
+        })
+      }
+      throw new Error(`unexpected URL ${url}`)
+    })
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.component('ElCard', ElCard)
+    // eslint-disable-next-line vue/one-component-per-file
+    app.component('RouterLink', { props: { to: { type: [String, Object], required: false, default: '' } }, setup(_props, { slots }) { return () => h('a', slots.default?.()) } })
+    app.mount(container)
+    await flushUi()
+
+    ;(container.querySelector('[data-testid="show-advanced-connectors"]') as HTMLInputElement).checked = true
+    container.querySelector('[data-testid="show-advanced-connectors"]')!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    const kindSelect = container.querySelector('[data-testid="connection-draft-kind"]') as HTMLSelectElement
+    kindSelect.value = 'data-source:sql-readonly'
+    kindSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    const dsSelect = container.querySelector('[data-testid="data-source-bridge-id"]') as HTMLSelectElement
+    dsSelect.value = 'pg-1'
+    dsSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(8)
+
+    const objSelect = container.querySelector('[data-testid="data-source-bridge-object"]') as HTMLSelectElement
+    const labels = Array.from(objSelect.options).map((option) => option.textContent?.trim() ?? '')
+    // The objects are still listed by name...
+    expect(labels).toContain('表 · public.items')
+    expect(labels).toContain('视图 · reporting.item_view')
+    // ...but nothing claims a column count, least of all 「0 列」.
+    expect(labels.some((label) => label.includes('列'))).toBe(false)
+
+    objSelect.value = 'public.items'
+    objSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    const summary = container.querySelector('[data-testid="data-source-bridge-object-summary"]')?.textContent ?? ''
+    expect(summary).toContain('仅保存对象名')
+    expect(summary).not.toContain('0 列')
+    expect(summary).not.toContain('列 ·')
   })
 
   it('C2b: editing an existing bridge sends a PATCH of the picker fields — it never restates (or blanks) the stored config keys it does not render', async () => {
