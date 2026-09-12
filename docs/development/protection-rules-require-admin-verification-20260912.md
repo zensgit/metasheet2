@@ -155,14 +155,11 @@ M3 把洞展示得最直白：同一个主体发 11 次请求、每次换一个 
 清单：`protection-rules-authz`（新增）、`IntegrationSimulation`、`SnapshotService.labels`、
 `SnapshotService`、`snapshot-labels-authz`、`snapshots-authz`、`change-management-authz`。
 
-**跳过并说明**：`tests/integration/snapshot-protection.test.ts` 命中了 grep，但**没有跑**。
-它在 `vitest.config.ts:1533` 的排除表里，任何 CI 作业都不跑它（排除理由写在配置注释里：
-CI 测试库的 `MIGRATION_EXCLUDE` 漏掉了 view 表迁移，`views` 表不存在，
-`createSnapshot` 的 `captureViewState` 跑不起来——是已声明的债）。
-它确实会被本次修复打红（它用 `x-user-id` 头打这些端点，现在会拿 403），
-但它**在本次修复之前就已经对不上 main**了：同一文件也用 `x-user-id` 打
-`/api/snapshots/:id/tags`，而那条链路在 GHSA-h8mf 时就加了 `requireAdminRole()`。
-本次没有动它，理由见设计文档 §4.4。
+**本机跳过、CI 真库实跑**：`tests/integration/snapshot-protection.test.ts` 命中了 grep，本机无 PG 没跑。
+它在无库 `vitest.config.ts:1533` 的排除表里，但**不是**「任何 CI 作业都不跑」（复核订正）：
+`.github/workflows/plugin-tests.yml:1285-1294` 的「Run snapshot-protection E2E (GHSA-h8mf authz)」在 `test (20.x)` 上
+用真 PG 跑它，演员由该文件 `:51-56` 种进 `user_roles` 成 admin。本 PR 的 plugin-tests 运行 34689744663 该步骤 **success**——
+这是四条写端点「admin 行为不变」在真库整链上的证据。它带的 `x-user-id` 头在修复后被忽略，身份取自 `req.user`（admin），故仍绿。
 
 ## 5. 类型检查
 

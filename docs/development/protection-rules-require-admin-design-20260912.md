@@ -88,21 +88,24 @@
 
 ### 2.3 `x-user-id` 全仓写入点核查
 
-全仓搜过 `x-user-id`。除去测试与注释，生产代码里只有三处读它：
+在 `packages/core-backend/src` 内搜过 `x-user-id`。除去测试与注释，生产代码里只有三处读它（`plugins/` 下另有自己的读点，属各插件范围，本次不涉及）：
 
 - `src/routes/protection-rules.ts:21,113` —— 本次修掉的两处。
 - `src/routes/kanban.ts:25` `const raw = user?.id ?? req.headers['x-user-id']` —— 另一个 router，
   不在本次范围，**没动**。
 - `src/routes/comments.ts:79` —— 同上，**没动**。
 
-**没有任何内部调用方向 `/api/admin/safety/rules` 发 `x-user-id`**：
-非测试代码里除了 `admin-routes.ts` 的挂载行之外，没有第二处提到 `safety/rules`；
-前端没有调用点。唯一会带这个头打这些端点的是
+**运行时代码与前端没有调用方向 `/api/admin/safety/rules` 发 `x-user-id`**：
+`packages/core-backend/src` 里除了 `admin-routes.ts` 的挂载行之外，没有第二处提到 `safety/rules`；
+前端没有调用点。仓库脚本里有两处会打它——`scripts/verify-sprint2-staging.sh:31/:119`（带 `x-user-id: staging-validator`）
+与 `scripts/preflight-staging.sh`——但它们都要求传入 admin 的 `API_TOKEN`（同一脚本先打 `/api/snapshots`，那条链自 GHSA-h8mf 起就需 admin），
+且只在 workflow_dispatch 手动触发时跑；本次改动后它们带的 `x-user-id` 头被忽略、身份取 token 主体，行为不变。唯一会带这个头打这些端点的是
 `tests/integration/snapshot-protection.test.ts`，见 §4。
 
 ## 3. 没改什么（有意的）
 
-- **读端点不动**：`GET /`（`:74`）和 `GET /:id`（`:102`）保持原状，非管理员照样能读。
+- **读端点的授权与处理器不动**：`GET /`（`:74`）和 `GET /:id`（`:102`）非管理员照样能读。
+  唯一随之变化的是无路径限流器的 key（`:38-41`）：从请求头改为 `req.user.id || req.ip`，GET 同受影响（方向是收紧：伪造头不再能换桶）。
   这是本次刻意划的边界——只收紧写面，读面的口径留给 owner 单独裁决（见 §4 残余）。
 - **`ProtectionRuleService` 不动**、**`SafetyGuard` 不动**。
 - **`admin-routes.ts` 不动**（#5665 在飞，避免争用）。
@@ -131,9 +134,8 @@
    `/safety/rules/evaluate`（:795）在契约里既没有声明管理员要求，也没有 403/503 响应，
    更没有把 `x-user-id` 记成参数（所以也谈不上删）。本次**没有**同步这个 yaml，
    契约与实现之间的这条缝是已知的、明写的债。
-4. **`tests/integration/snapshot-protection.test.ts` 已经对不上**。它用 `x-user-id` 头打这些端点，
-   在本次修复后会拿到 403。但它在 `vitest.config.ts:1533` 的排除表里，**任何 CI 作业都不跑它**
-   （排除理由是 CI 测试库的 `MIGRATION_EXCLUDE` 漏掉了 view 表迁移，是已声明的债）。
-   而且它**在本次修复之前就已经和 main 对不上了**：同一个文件也用 `x-user-id` 打
-   `/api/snapshots/:id/tags`，而那条链路早在 GHSA-h8mf 就加了 `requireAdminRole()`。
-   本次没有去修它——修它要连同它的整体重新上线一起做，不该塞进一个安全修复里。
+4. **`tests/integration/snapshot-protection.test.ts` 是本次的真库整链证据，不是死件**（复核订正）。它虽在无库
+   `vitest.config.ts:1533` 的排除表里，但 `.github/workflows/plugin-tests.yml:1285-1294` 的「Run snapshot-protection E2E」
+   步骤在 `test (20.x)` 作业上用真 PG 跑它（`vitest.integration.config.ts`），演员由该文件 `:51-56` 种进 `user_roles` 成 admin，
+   所以它带的 `x-user-id` 头被忽略后仍以 admin 身份通过——本 PR 自己的运行（plugin-tests run 34689744663）该步骤 success。
+   它对四条写端点的覆盖是保证④「admin 行为不变」在真库上的实证。

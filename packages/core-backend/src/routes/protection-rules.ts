@@ -19,7 +19,8 @@ const logger = new Logger('ProtectionRulesRoutes');
 // at all, while the rule creator and the rate-limit bucket were read from the caller-controlled
 // `x-user-id` header with an `'anon'`/`'system'` fallback — so any authenticated user could rewrite the
 // safety rules that gate destructive operations, and attribute the change to anyone. Writes are now
-// platform-admin (requireAdminRole, which fails closed with 503 when RBAC is unavailable) and identity
+// platform-admin (requireAdminRole: isAdmin throwing -> 503; no pool -> isAdmin returns false -> 403,
+// see rbac/service.ts) and identity
 // comes ONLY from req.user.id. Same treatment as the sibling snapshot-labels router (GHSA-h8mf F2).
 // Reads (GET /, GET /:id) are deliberately left as they were.
 const getUserId = (req: Request): string => {
