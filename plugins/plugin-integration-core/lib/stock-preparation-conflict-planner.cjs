@@ -1058,8 +1058,9 @@ function pickFields(row, fields) {
 //
 // 同源而不是同规则:值取的就是下面刚写进 `out` 的那两个模板列值本身(见 denormalizedPlmFields),
 // 不存在第二份取值逻辑可以漂移,所以**凡是本函数派生出来的行**,两列与模板列逐行相等。模板列没写
-// (父件图号为空、父件两个名字键都空、父件不在这批里、根行无父)时包列同样不写 —— 不发明空串,
-// 也不让两侧口径分家。
+// (父件图号为空、父件两个名字键都空、父件不在这批里、根行无父)时**派生**同样不写 —— 不发明空串,
+// 也不让两侧口径分家。(说「派生不写」而不是「包列没有值」:同一行上包列仍可能带着部署自己映射来的
+// 值抵达,那不归这段代码管,见下一段。)
 //
 // 这句话的作用域到派生为止,不是无条件的:部署把这两个 id 也配进自己的 ext 映射是受支持的配置
 // (声明了而映射没填不算错,反过来才 422 —— stock-preparation-table-actions.cjs 的
@@ -1124,7 +1125,7 @@ function firstPresentValue(row, keys) {
 // `extensionFieldIds` is the action's DECLARED extension band — the exact list
 // `assertTargetFieldMapCompleteness` requires the target's fieldIdMap to bind. FAIL-CLOSED: a
 // caller that passes nothing derives nothing, so a future call site that forgets to thread it
-// leaves three columns empty instead of breaking apply.
+// leaves those five columns empty instead of breaking apply.
 function canDeriveExtensionField(fieldId, declaredExtensionFieldIds) {
   return declaredExtensionFieldIds instanceof Set && declaredExtensionFieldIds.has(fieldId)
 }
@@ -1160,9 +1161,15 @@ function denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
       // fieldIdMap 已绑定的那张表,fail-closed;不声明就不派生,免得把整行写入变成
       // 'unmapped_extension_field' 的硬拒)+ `isBlank(row.ext_*)`(**本次拉取带上来的**映射值优先,
       // 派生的从不覆盖这一次测得的值 —— `row` 是展开行,不是表上的存量行:人在表里手填进这两个
-      // 包列的值不受这道闸保护,下一次拉取会被派生值以 update 覆盖。手填值的保护在另一道闸上,
-      // 即包声明的 ownership / preserveOnRefresh(声明成 human_preserved 或钉住 ⇒ 这两列根本不进
-      // 下面那条可写 band),要让手填值活下来是改包声明的事,不是改这段代码的事)
+      // 包列的值不受这道闸保护,下一次拉取会被派生值以 update 覆盖(普通刷新,不挂 manual_confirm;
+      // 用例 testExistingRowsGetThePackColumnsAsAPlainUpdate 的 'hand-authored' 分支把这个现状钉死)。
+      // 手填值在**包**这一层只有一条活路:把该列声明成 `ownership: 'human_preserved'`。band 本身
+      // 认两条路(derivePackAwarePlmWritableFields 的 (1) `preserveOnRefresh === true` 显式钉 与
+      // (2) human 归属),但包不能只走第(1)条 —— `preserveOnRefresh` 在包上由 ownership 推导
+      // (stock-preparation-customer-pack.cjs:343 `preserveOnRefresh: ownership === 'human_preserved'`),
+      // 安装器还会拒掉与推导值不一致的 stanza(stock-preparation-customer-pack-installer.cjs:223
+      // 那一带)。走了那条路之后,这里的派生照样在内存里跑,只是下面的 `pickFields` 一个字也不往
+      // 表上写。要让手填值活下来是改包声明 ownership 的事,不是改这段代码的事)
       // + 下游 `pickFields` 的包感知可写 band(包没装/声明为人工保留/
       // 钉了 preserveOnRefresh ⇒ 一个字也落不到表上)。这段代码能给内存行加一个 KEY,
       // 不能给任何人的表加一列,也不能把一列抬进可写 band。

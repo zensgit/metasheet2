@@ -6,6 +6,7 @@
 // without aborting good expanded rows.
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
 const path = require('node:path')
 
 const {
@@ -1461,13 +1462,52 @@ function testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull() {
     assert.equal(blankedRecord.ext_parentDrawingNo, 'TZ-0001', '空白值 ' + JSON.stringify(blank) + ' 照派生')
     assert.equal(blankedRecord.ext_parentName, '主体组件 DN1200')
   }
+
+  // 逐列接线的负控。上面两种形状都是**对称**的(两列同时带映射值 / 两列同时空白),把两个
+  // `isBlank` 读交叉接线(图号闸去读名称列、名称闸去读图号列)在对称形状下判据恒等 ⇒ 变异存活。
+  // 现网真正可达的是不对称形状:部署只映射了两列中的**一列**。两个方向各跑一次 —— 被映射的那列
+  // 必须保住映射值(交叉接线会拿派生值把它盖掉),另一列必须照常派生(交叉接线会因为「另一列有
+  // 值」把它的派生关掉)。这两条断言把每一道闸钉到它自己那一列上。
+  const DERIVED_PARENT_VALUE = {
+    ext_parentDrawingNo: 'TZ-0001',
+    ext_parentName: '主体组件 DN1200',
+  }
+  for (const [mappedId, derivedId] of [
+    ['ext_parentDrawingNo', 'ext_parentName'],
+    ['ext_parentName', 'ext_parentDrawingNo'],
+  ]) {
+    const asymmetric = { ...batch.childA, [mappedId]: 'ONLY-MAPPED-' + mappedId }
+    const asymmetricPlan = planWithParentPackColumns({
+      expandedRows: [batch.parentA, asymmetric],
+      runId: 'run-parent-pack-asymmetric',
+    })
+    const asymmetricRecord = byDecision(asymmetricPlan, DECISIONS.ADD)
+      .find((decision) => decision.record.componentSourceId === 'PART-CHILD').record
+    assert.equal(
+      asymmetricRecord[mappedId],
+      'ONLY-MAPPED-' + mappedId,
+      '只映射了 ' + mappedId + ' 一列 ⇒ 这一列的映射值保住(这道闸读的必须是它自己那一列)',
+    )
+    assert.equal(
+      asymmetricRecord[derivedId],
+      DERIVED_PARENT_VALUE[derivedId],
+      '只映射了 ' + mappedId + ' 一列 ⇒ ' + derivedId + ' 照常派生(另一列有值不该关掉这一列的派生)',
+    )
+  }
 }
 
 // DENORMALIZED_PLM_FIELD_IDS 是「这个函数会派生哪些列」的登记表,在这条用例之前它没有任何运行时
 // 消费者,加进去两项也好、漏登记也好,整条套件照绿(反驳 B blocker 2 的 MXDEAD)。这里把它绑成
-// 真闸:一次让**全部**派生列同时落地的批次,记录上的 ext_ 键集合必须与登记表的 ext_ 半边**逐项
-// 相同**(deepEqual,不是包含),登记表里的非 ext_ 三列也必须都在。漏登记下一列 ⇒ 红;登记了却
-// 派生不出来 ⇒ 也红。
+// 真闸,两半各管一个方向:
+//  · **行为半**(一次让全部派生列同时落地的批次):记录上的 ext_ 键集合必须与登记表的 ext_ 半边
+//    逐项相同(deepEqual,不是包含),登记表里的非 ext_ 三列也必须都在 —— 登记了却派生不出来
+//    ⇒ 红,删掉一条已登记的派生 ⇒ 红。这一半**证不到「漏登记」**:没登记的新 id 不会出现在任何
+//    用例的 extensionFieldIds 里,`canDeriveExtensionField` 先把它挡掉,记录上永远不出现,
+//    deepEqual 照样相等(反驳 B blocker 2 的 MXNEWCOL)。
+//  · **结构半**(直接读 lib 源码):派生点的两种字面量 —— 闸 `canDeriveExtensionField('ext_…'`
+//    与落值 `out.ext_… =` —— 抽出来的 id 集合也必须与登记表的 ext_ 半边逐项相同。往
+//    denormalizedPlmFields 里加第六列而**不**登记 ⇒ 这里红。两种抽法都留着:只有闸没有落值
+//    (或反过来)的新列同样是漏登记,也同样是一条自相矛盾的派生。
 function testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived() {
   const ALL_DERIVED_EXT_IDS = ['ext_componentSortNo', 'ext_parentSortNo', 'ext_nameAndSpec', 'ext_parentDrawingNo', 'ext_parentName']
   const parent = row({
@@ -1510,21 +1550,55 @@ function testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived() {
     )
   }
   assertNoHumanFields(record, 'denormalized registry record')
+
+  // 结构半:漏登记那个方向只能从源码上抓(见函数头)。
+  const plannerSource = fs.readFileSync(
+    path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'),
+    'utf8',
+  )
+  const registeredExtIds = DENORMALIZED_PLM_FIELD_IDS.filter((id) => id.startsWith('ext_')).slice().sort()
+  const gatedExtIds = [...new Set(
+    Array.from(plannerSource.matchAll(/canDeriveExtensionField\('(ext_[A-Za-z0-9_]+)'/g), (match) => match[1]),
+  )].sort()
+  const assignedExtIds = [...new Set(
+    Array.from(plannerSource.matchAll(/\bout\.(ext_[A-Za-z0-9_]+)\s*=[^=]/g), (match) => match[1]),
+  )].sort()
+  assert.deepEqual(
+    gatedExtIds,
+    registeredExtIds,
+    '源码里过 canDeriveExtensionField 的 ext_ 列必须与 DENORMALIZED_PLM_FIELD_IDS 逐项相同(漏登记 ⇒ 红)',
+  )
+  assert.deepEqual(
+    assignedExtIds,
+    registeredExtIds,
+    '源码里真的落值(out.ext_… =)的 ext_ 列必须与 DENORMALIZED_PLM_FIELD_IDS 逐项相同(漏登记 ⇒ 红)',
+  )
 }
 
 // 222 上那 581 行的迁移答案:没有迁移。下一次 dry-run 把两列以 **update** 补上,不触发
 // manual_confirm(这两列既不在 IDENTITY_FIELD_IDS 也不在 LINEAGE_FIELD_IDS,是普通的
 // plm_system 刷新),人工列一字不动,补完之后再拉一次是 SKIP。
+//
+// 第三种形状('hand-authored')钉的是**行为变化**,不是补值:这两列从本次改动起第一次有了刷新
+// 写手,于是人**在表里手填**进这两个包列的值会被下一次刷新以 update 覆盖(manual_confirm 仍然
+// 是 0 —— 这不是冲突,是刷新)。`isBlank` 那道闸读的是展开行,管不到表上的存量值;包列要挡住
+// 刷新只有一条路:包把该列声明成 `ownership: 'human_preserved'` —— 它随即离开 plm_system 可写
+// band(派生照样在内存里跑,只是 pickFields 一个字也不往表上写)。规格「已有值(人工/映射)⇒
+// 不覆盖」的**人工**那一半今天不成立,这里把现状钉死,免得合进去的是一条自己说不覆盖、实际
+// 覆盖的硬规则(见 PR 正文 owner 待办)。
 function testExistingRowsGetThePackColumnsAsAPlainUpdate() {
   const batch = twoFamilyBatch()
-  // 存量行的两种真实形状:列不存在(从没写过),和列存在但为空串。
-  for (const emptyShape of ['absent', 'empty-string']) {
+  const HAND_AUTHORED = { ext_parentDrawingNo: '人手填的图号', ext_parentName: '人手填的父件名' }
+  // 存量行的三种真实形状:列不存在(从没写过)、列存在但为空串、列里是人手填的值。
+  for (const existingShape of ['absent', 'empty-string', 'hand-authored']) {
+    const emptyShape = existingShape
     const existingChild = {
       ...batch.childA,
       parentComponentCode: 'TZ-0001',
       parentComponentName: '主体组件 DN1200',
       notes: '人工备注必须活下来',
-      ...(emptyShape === 'empty-string' ? { ext_parentDrawingNo: '', ext_parentName: '' } : {}),
+      ...(existingShape === 'empty-string' ? { ext_parentDrawingNo: '', ext_parentName: '' } : {}),
+      ...(existingShape === 'hand-authored' ? { ...HAND_AUTHORED } : {}),
     }
     const plan = planWithParentPackColumns({
       expandedRows: [batch.parentA, batch.childA],
@@ -1546,6 +1620,51 @@ function testExistingRowsGetThePackColumnsAsAPlainUpdate() {
     assert.equal(updates[0].patch.ext_parentDrawingNo, updates[0].patch.parentComponentCode)
     assert.equal(updates[0].patch.ext_parentName, updates[0].patch.parentComponentName)
     assertNoHumanFields(updates[0].patch, 'F1c-b backfill patch')
+
+    if (existingShape === 'hand-authored') {
+      // 现状,不是理想:手填值被派生值取代,而且这一行照样是普通 update(不挂起、不提示)。
+      assert.notEqual(
+        updates[0].patch.ext_parentDrawingNo,
+        HAND_AUTHORED.ext_parentDrawingNo,
+        'hand-authored: 手填进包列的图号被派生值覆盖 —— 规格「人工值不覆盖」那一半今天不成立',
+      )
+      assert.notEqual(
+        updates[0].patch.ext_parentName,
+        HAND_AUTHORED.ext_parentName,
+        'hand-authored: 手填进包列的父件名被派生值覆盖',
+      )
+      assert.equal(plan.counts[DECISIONS.MANUAL_CONFIRM], 0, 'hand-authored: 覆盖手填值不会挂起这一行')
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(updates[0].patch, 'notes'),
+        false,
+        'hand-authored: 真正的人工列(notes)不进 patch,一字不动',
+      )
+
+      // 唯一挡得住的那条路:包把这一列声明成 human_preserved ⇒ 它离开 plm_system 可写 band,
+      // 手填值活下来(派生也一并停掉 —— 这是包声明的取舍,不是这段代码的开关)。
+      const preservedPlan = planStockPreparationConflicts({
+        expandedRows: [batch.parentA, batch.childA],
+        existingRows: [{ ...batch.parentA }, existingChild],
+        runId: 'run-parent-pack-human-preserved',
+        plannedAt: '2026-09-12T00:00:00.000Z',
+        extensionFieldIds: PARENT_PACK_COLUMN_IDS,
+        installedFieldProperties: PARENT_PACK_COLUMN_IDS.map((id) => ({
+          ...installedPackColumn(id),
+          property: {
+            stockPreparation: {
+              ...installedPackColumn(id).property.stockPreparation,
+              ownership: 'human_preserved',
+              preserveOnRefresh: true,
+            },
+          },
+        })),
+      })
+      assert.equal(
+        byDecision(preservedPlan, DECISIONS.UPDATE).length,
+        0,
+        'hand-authored: 包把这两列声明成 human_preserved ⇒ 刷新一个字也不写',
+      )
+    }
 
     // 幂等:填好之后再拉一次是 SKIP,不会每次 dry-run 都报一条 update。
     const filled = { ...existingChild, ext_parentDrawingNo: 'TZ-0001', ext_parentName: '主体组件 DN1200' }

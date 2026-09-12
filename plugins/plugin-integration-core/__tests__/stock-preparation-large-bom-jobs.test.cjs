@@ -2214,8 +2214,21 @@ async function main() {
 // F1c-b — 后台大 BOM 链上的 父组件图号 / 父组件名称 包列。与上面那条 当前组件排序号 的绑定同形:
 // 两条真实调用链经过同一个规划器,但各自从不同的 seam 取「动作声明的扩展列」——交互链是
 // `action.extensionFieldIds`(table-actions computeDryRun),这一条是
-// `job.actionSnapshot.extensionFieldIds`(planLargeBomBackgroundExpansionJob)。断掉这一行,同一个
-// 项目会因为 BOM 够不够大而落到两套列上:小 BOM 有值、大 BOM 空着。
+// `job.actionSnapshot.extensionFieldIds`(planLargeBomBackgroundExpansionJob)。
+//
+// 本用例证到哪儿,以及证不到哪儿 —— 别把它读成「大 BOM 项目今天这两列有值」:
+//  · 证到的是**规划器层的接线**:动作快照的 extensionFieldIds 是这条链上派生的**必要条件**,
+//    断掉 lib/stock-preparation-large-bom-jobs.cjs 里那一行 ⇒ 本用例红(下面的 undeclared 负控
+//    就是同一件事的正面形状)。
+//  · 证不到的是 plan-time 的**包感知可写 band**:`installedFieldProperties` 是本用例**自己**手传
+//    进 planLargeBomBackgroundExpansionJob 的。真实 HTTP 路由上那一路至今没接线 ——
+//    lib/http-routes.cjs 全文只有三处 `resolveInstalledFieldProperties`(5820 / 5973 / 6178),
+//    大 BOM 规划路由(6367 `planLargeBomBackgroundExpansionJob({ storage, ...routeScope, actionId,
+//    jobId, existingRows, conflictPolicyReview })`)与后台 apply 分片路由都不在其中。band 因此
+//    是模板-only,`pickFields` 把每一个 `ext_` id 都留在外面:**大 BOM 走后台链的项目,今天这两列
+//    (以及 F1c 那三列)仍然是空的**,分歧不会因为本次改动消失。
+//  · 所以「小 BOM 有值 / 大 BOM 空着」这条分歧的根在路由层,不在规划器层;http-routes.cjs 本轮
+//    不可动,已列进 PR 正文 owner 待办。
 async function testBackgroundPlanFillsTheParentPackColumns() {
   const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
   const installedFieldProperties = PARENT_PACK_COLUMN_IDS.map((fieldId) => ({
