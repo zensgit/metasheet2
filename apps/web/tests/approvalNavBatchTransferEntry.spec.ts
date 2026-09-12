@@ -285,6 +285,69 @@ describe('批量转交 nav entry gate', () => {
     expect(capabilitySpy).toHaveBeenCalledTimes(1)
   })
 
+  it('does not restore the entry when an in-flight grant settles after sign-out without a replacement read', async () => {
+    localStorage.setItem('auth_token', tokenFor('user-a'))
+    const { notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    let release!: (value: string) => void
+    capabilitySpy.mockReturnValueOnce(new Promise<string>((resolve) => { release = resolve }))
+    const root = await mountApp()
+    expect(entryOf(root)).toBeNull()
+    expect(capabilitySpy).toHaveBeenCalledTimes(1)
+
+    // Match clearToken: listeners run before storage is cleared, with no intervening await.
+    notifyAuthPrincipalChange()
+    localStorage.clear()
+    await flushUi()
+    expect(capabilitySpy).toHaveBeenCalledTimes(1)
+
+    release('granted')
+    await flushUi()
+    expect(entryOf(root)).toBeNull()
+    expect(capabilitySpy).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('a[href="/approvals"]')).not.toBeNull()
+  })
+
+  it('re-reads same-subject permissions and ignores the superseded pending grant', async () => {
+    localStorage.setItem('auth_token', tokenFor('user-a'))
+    const { getAuthPrincipalKey, notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    const principal = getAuthPrincipalKey()
+    let release!: (value: string) => void
+    capabilitySpy.mockReturnValueOnce(new Promise<string>((resolve) => { release = resolve }))
+    capabilitySpy.mockResolvedValue('denied')
+    const root = await mountApp()
+
+    notifyAuthPrincipalChange()
+    localStorage.setItem('auth_token', `${tokenFor('user-a')}-refreshed`)
+    expect(getAuthPrincipalKey()).toBe(principal)
+    await flushUi()
+    expect(capabilitySpy).toHaveBeenCalledTimes(2)
+    expect(entryOf(root)).toBeNull()
+
+    release('granted')
+    await flushUi()
+    expect(entryOf(root)).toBeNull()
+    expect(capabilitySpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads the replacement principal after the auth notification precedes the token write', async () => {
+    localStorage.setItem('auth_token', tokenFor('user-a'))
+    const { getAuthPrincipalKey, notifyAuthPrincipalChange } = await import('../src/composables/authPrincipal')
+    const observed: (string | null)[] = []
+    capabilitySpy.mockImplementation(async () => {
+      const principal = getAuthPrincipalKey()
+      observed.push(principal)
+      return principal === 'sub:user-a' ? 'granted' : 'denied'
+    })
+    const root = await mountApp()
+    expect(entryOf(root)).not.toBeNull()
+
+    notifyAuthPrincipalChange()
+    localStorage.setItem('auth_token', tokenFor('user-b'))
+    await flushUi()
+    expect(observed).toEqual(['sub:user-a', 'sub:user-b'])
+    expect(entryOf(root)).toBeNull()
+  })
+
   it('a THROWING entry component leaves the rest of the nav rendered (ShellChromeBoundary)', async () => {
     const throwingSetup = vi.fn(() => { throw new Error('nav entry exploded') })
     vi.resetModules()
