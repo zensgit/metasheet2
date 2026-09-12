@@ -666,7 +666,7 @@ const INTEGRATION_ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,80}$/
  * 也不复用 `StockPreparationConfirmApiError`（那是备料确认专用、且刻意丢掉 message）。
  */
 export interface IntegrationApiErrorFields {
-  /** 服务端 `error.code`，已按 enum 形状夹紧；响应体没有合法 code 时不存在。 */
+  /** 服务端错误码，已按 enum 形状夹紧；响应体没有合法 code 时不存在。取值位置见 `integrationEnvelopeErrorCode`。 */
   code?: string
   /** 失败响应的 HTTP 状态码（例如作用域不匹配的 409）。 */
   status?: number
@@ -686,6 +686,33 @@ export function integrationApiErrorCode(error: unknown): string | null {
   return typeof code === 'string' && INTEGRATION_ERROR_CODE_PATTERN.test(code) ? code : null
 }
 
+// F01 —— 产品码不一定在信封顶层。
+//
+// plugin-integration-core 的 `sendError`（lib/http-routes.cjs）用 `inferErrorCode` 推顶层码，
+// 它是 `error.code || error.name || 'INTERNAL_ERROR'`：任何**自己没带 `.code`** 的错误，顶层报的是它的
+// **类名**。`PipelineRunnerError`（lib/pipeline-runner.cjs）正是这种形状 —— 只设 `this.details = details`，
+// 而它每一条拒绝都把产品码放在 `details.code` 里。于是 K3 `/run` 的拒绝到达前端时长这样：
+//
+//   422 { ok:false, error:{ code:'PipelineRunnerError',
+//                           details:{ code:'K3_WISE_PIPELINE_RUN_DISABLED', pipelineId } } }
+//
+// （服务端由 plugins/plugin-integration-core/__tests__/http-routes-plm-k3wise-poc.test.cjs 钉死这对
+// status + 码。）只读顶层的话，`K3_WISE_PIPELINE_RUN_DISABLED` 永远查不到，人话码表对这一族就是死代码：
+// 顶层的 `PipelineRunnerError` 本来就过不了 `INTEGRATION_ERROR_CODE_PATTERN`（大小写混排），
+// 夹紧后 code 直接不存在，调用点只能把服务端英文散文直出。
+//
+// 自己带 `.code` 的错误（`HttpRouteError`、`ExternalWriteDryRunError`）不受影响：顶层合形状就顶层赢，
+// 回退只在顶层**不是**合法码时才发生。回退值同样要过同一条 pattern —— 这里不放宽 main 的 values-free 夹紧，
+// 只是多看一个位置。它改变的只有「拿哪个字符串去查人话标签」，不能放宽作用域、不能软化守卫，
+// 也不会把失败的响应说成成功。
+function integrationEnvelopeErrorCode(payload: IntegrationApiEnvelope<unknown> | null): string | undefined {
+  const rawTopCode = payload?.error?.code
+  if (typeof rawTopCode === 'string' && INTEGRATION_ERROR_CODE_PATTERN.test(rawTopCode)) return rawTopCode
+  const rawDetailsCode = (payload?.error?.details as { code?: unknown } | undefined)?.code
+  if (typeof rawDetailsCode === 'string' && INTEGRATION_ERROR_CODE_PATTERN.test(rawDetailsCode)) return rawDetailsCode
+  return undefined
+}
+
 export async function parseIntegrationResponse<T>(response: Response): Promise<T> {
   let payload: IntegrationApiEnvelope<T> | null = null
   try {
@@ -695,10 +722,10 @@ export async function parseIntegrationResponse<T>(response: Response): Promise<T
   }
   if (!response.ok || payload?.ok === false) {
     const message = payload?.error?.message || `${response.status} ${response.statusText}`.trim()
-    const rawCode = payload?.error?.code
     const rawDetails = payload?.error?.details
     const error = new Error(message || 'Integration API request failed') as IntegrationApiError
-    if (typeof rawCode === 'string' && INTEGRATION_ERROR_CODE_PATTERN.test(rawCode)) error.code = rawCode
+    const code = integrationEnvelopeErrorCode(payload)
+    if (code) error.code = code
     error.status = response.status
     if (rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails)) error.details = rawDetails
     throw error
