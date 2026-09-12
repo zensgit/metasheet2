@@ -1293,7 +1293,9 @@ async function moduleExportWithoutAnyParentBindingDegradesToDrawingOrder() {
 //    这批行带 ext_nameAndSpec(名称及规格):展示层只在这把键**还原得出来**的时候才合并 ——
 //    包列有值是三种可证形状里的第一种(见 displayDedupeKey);第三种(规格 有值、包列为空)
 //    不可证,一行不并,那是 R22。
-// R19 孤儿行(父件不在这批里)当根打印,一行都不少。
+// R19 孤儿行(父路径不在这批里)当根打印,一行都不少;孤儿自己的子行紧跟在它后面(父在子前),
+//    不是被平比较器扫到末尾。「父路径不在批内 ⇒ 当根」这一子句的判别用例就是 R17 里孤儿带子行的
+//    那两行(子行的 父组件图号 按平比较器排在孤儿的前面 —— 子句拿掉,顺序断言必红)+ R24a。
 // R20 没有 部件源ID 的老部署退回 F1b 的平比较器(treeOrdered: false),不比改之前更乱。
 // ---------------------------------------------------------------------------
 
@@ -1311,7 +1313,7 @@ function treeRows({ withPath = true } = {}) {
   }
   const pathOf = (...tokens) => (withPath ? bomPath(...tokens) : undefined)
   return [
-    // 打乱:孙 -> 重复兄弟 -> 兄弟B -> 孤儿 -> 根 -> 兄弟A。没有任何一个比较器会产出这个顺序。
+    // 打乱:孙 -> 孤儿的子件 -> 重复兄弟 -> 兄弟B -> 孤儿 -> 根 -> 兄弟A。没有任何一个比较器会产出这个顺序。
     mainRow(PROJECT_TREE, {
       ...shared, componentCode: 'DWG-T-A1', componentName: 'A的子件',
       ext_nameAndSpec: 'A的子件',
@@ -1319,6 +1321,19 @@ function treeRows({ withPath = true } = {}) {
       path: pathOf('P-ROOT', 'P-A0', 'P-A'),
       idempotencyKey: 'idk-t-a1',
     }, 'rec_t_a1'),
+    // 孤儿的子件:父路径 ["P-GONE","P-X"] 在批内(就是下面那个孤儿),所以它挂在孤儿之下,不是再当
+    // 一个根。故意排在孤儿**前面**喂进来,而且它的 父组件图号(DWG-T-X)按平比较器排在孤儿的
+    // (TZ-T0)前面:「父路径不在批内 ⇒ 当根」这一子句一旦拿掉,孤儿和它都掉进末尾的 stranded
+    // 追加、被平比较器排成子先于父 —— R17 的顺序断言就红(行数不少,树序错)。
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-XC', componentName: '孤儿的子件',
+      ext_nameAndSpec: '孤儿的子件',
+      parentComponentCode: 'DWG-T-X', parentComponentName: '孤儿件',
+      ext_parentDrawingNo: 'DWG-T-X', ext_parentName: '孤儿件',
+      componentSourceId: 'P-X-C', parentSourceId: 'P-X', ext_componentSortNo: 1,
+      path: pathOf('P-GONE', 'P-X', 'P-X-C'),
+      idempotencyKey: 'idk-t-xc',
+    }, 'rec_t_xc'),
     mainRow(PROJECT_TREE, {
       ...shared, componentCode: 'DWG-T-B', componentName: 'B件',
       ext_nameAndSpec: 'B件',
@@ -1333,11 +1348,12 @@ function treeRows({ withPath = true } = {}) {
       path: pathOf('P-ROOT', 'P-B'),
       idempotencyKey: 'idk-t-b',
     }, 'rec_t_b'),
-    // 孤儿:父路径 ["P-GONE"] 不在这批里 => 当根。
+    // 孤儿:父路径 ["P-GONE"] 不在这批里 => 当根。排序号 15 故意小于兄弟 B 的 20:根这一层的排序
+    // 号只在根之间比,ROOT 的整棵子树(含 B)先打印完,孤儿才作为下一个根出现 —— 不会插到 B 前面。
     mainRow(PROJECT_TREE, {
       ...shared, componentCode: 'DWG-T-X', componentName: '孤儿件',
       ext_nameAndSpec: '孤儿件',
-      componentSourceId: 'P-X', parentSourceId: 'P-GONE', ext_componentSortNo: 99,
+      componentSourceId: 'P-X', parentSourceId: 'P-GONE', ext_componentSortNo: 15,
       path: pathOf('P-GONE', 'P-X'),
       idempotencyKey: 'idk-t-x',
     }, 'rec_t_x'),
@@ -1375,15 +1391,23 @@ async function moduleExportOrderIsTheBomTreeNotAFlatBand() {
     recordsApi: records, target, projectNo: PROJECT_TREE, permission: 'admin',
   })
   const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  const codes = result.rows.map((row) => row[codeColumn])
   assert.deepEqual(
-    result.rows.map((row) => row[codeColumn]),
-    ['DWG-T-ROOT', 'DWG-T-A0', 'DWG-T-A1', 'DWG-T-B', 'DWG-T-X'],
-    'R17: 根 -> (排序号 5)A件 -> A件的子件 -> (排序号 20)B件,孤儿行最后当根打印',
+    codes,
+    ['DWG-T-ROOT', 'DWG-T-A0', 'DWG-T-A1', 'DWG-T-B', 'DWG-T-X', 'DWG-T-XC'],
+    'R17: 根 -> (排序号 5)A件 -> A件的子件 -> (排序号 20)B件;孤儿(排序号 15)在根的整棵子树之后当根打印,孤儿的子件紧跟在它后面',
+  )
+  // R19: 「父路径不在批内 ⇒ 当根」这一子句有它自己的判别 —— 孤儿的子行必须紧跟在孤儿之后(父在
+  // 子前)。子句拿掉,孤儿与子行都掉进末尾的 stranded 追加,平比较器按 父组件图号 排出
+  // DWG-T-XC(父 DWG-T-X)先于 DWG-T-X(父 TZ-T0):子先于父。行数一样,顺序不一样。
+  assert.ok(
+    codes.indexOf('DWG-T-X') === codes.indexOf('DWG-T-XC') - 1,
+    'R19: 孤儿按树位置当根打印、它的子件紧跟其后 —— 不是被平比较器扫到末尾排成子先于父',
   )
   // R18: 同父同键的那条重复行被合并,并且合并条数如实上报。
   assert.equal(result.collapsedRowCount, 1, 'R18: 一条同父同键的重复行被合并')
-  assert.equal(result.activeRowCount, 6, 'R18: 合并是打印层的事,行数统计仍是表里的真实行数')
-  assert.equal(result.rows.length, 5)
+  assert.equal(result.activeRowCount, 7, 'R18: 合并是打印层的事,行数统计仍是表里的真实行数')
+  assert.equal(result.rows.length, 6)
   assert.equal(result.treeOrdered, true)
 }
 
@@ -1622,6 +1646,11 @@ async function moduleDeclaredSpecColumnNeverCollapsesTwoDifferentStandardParts()
 // R23c 编码器钉死:导出侧 encodeBomPath ≡ 展开侧 makePath;父 = 去掉最后一段再编码;根 = 单段。
 // R23d 没有 path 的老 target 退回部件 id 方案,返回值标 treeDegraded(不是悄悄降级)。
 // R23e 规格 列未绑(行上既无 componentSpec 也无 ext_spec 键)时展示层键不可证 —— 不并。
+// R24a 根判定的「父路径不在批内 ⇒ 当根」子句:孤儿带子行,直接喂 orderRowsAsBomTree 看幂等键序列。
+//      变异 M-F「根判定只认 parent === null」⇒ 孤儿与子行掉进 stranded 追加、平比较器排成子先于父 ⇒ 红。
+// R24b 降级方案的环(两行无 path、componentSourceId/parentSourceId 互指):两行都不是根、永不被 walk
+//      到,只有末尾的 stranded 追加能把它们打印出来;treeDegraded 必为 true。行路径方案下这条不可达
+//      (父路径恒比子路径短一段)。变异 M-J「删掉 stranded 追加」⇒ 两行整行消失 ⇒ 红。
 // ---------------------------------------------------------------------------
 
 const PROJECT_SHARED = 'PRJ-SHARED-SUBASSEMBLY'
@@ -1780,8 +1809,8 @@ async function moduleRowsWithoutAPathDegradeToThePartIdentityAndSaySo() {
   const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
   assert.deepEqual(
     result.rows.map((row) => row[codeColumn]),
-    ['DWG-T-ROOT', 'DWG-T-A0', 'DWG-T-A1', 'DWG-T-B', 'DWG-T-X'],
-    'R23d: 没有 path 的老 target 仍拿到树序(没有共用子装配时和行路径方案同序)',
+    ['DWG-T-ROOT', 'DWG-T-A0', 'DWG-T-A1', 'DWG-T-B', 'DWG-T-X', 'DWG-T-XC'],
+    'R23d: 没有 path 的老 target 仍拿到树序(没有共用子装配时和行路径方案同序,孤儿子树也一样)',
   )
   assert.equal(result.treeOrdered, true)
   assert.equal(result.treeIdentity, 'componentSourceId', 'R23d: 用的是部件 id 方案')
@@ -1803,6 +1832,111 @@ async function moduleRowsWithoutAPathDegradeToThePartIdentityAndSaySo() {
   assert.equal(mixed.treeIdentity, 'path')
   assert.equal(mixed.treeDegraded, false)
   assert.deepEqual(mixed.rows.map((row) => row.idempotencyKey), ['idk-r', 'idk-k', 'idk-h'], 'R23d: 手工行(无 path)当根排在后面,不丢')
+}
+
+// R24a 「父路径不在批内 ⇒ 当根」的判别用例。R(排序 1)> K(排序 5);孤儿 O(排序 2,父路径 ["P-GONE"]
+// 不在批内)带子行 OC(排序 1)。修后 [idk-r, idk-k, idk-o, idk-oc]。把根判定改成只认 parent === null
+// (变异 M-F),O 与 OC 都不是根、也没人 walk 到它们,掉进末尾的 stranded 追加;平比较器先比 父组件图号
+// (OC 的 DWG-O < O 的 ZZ-GONE),再比排序号(OC 的 1 < O 的 2)—— 两个键都把子排到父前面:
+// [idk-r, idk-k, idk-oc, idk-o]。行数一样,树序错。
+function moduleOrphanSubtreeIsRootedInPlaceNotStrandedAtTheEnd() {
+  const result = exportInternals.orderRowsAsBomTree([
+    // 打乱:孤儿的子行 -> K -> 孤儿 -> R。
+    {
+      componentCode: 'OC', parentComponentCode: 'DWG-O', componentSourceId: 'P-OC', parentSourceId: 'P-O',
+      path: bomPath('P-GONE', 'P-O', 'P-OC'), idempotencyKey: 'idk-oc', ext_componentSortNo: 1,
+    },
+    {
+      componentCode: 'K', parentComponentCode: 'DWG-R', componentSourceId: 'P-K', parentSourceId: 'P-R',
+      path: bomPath('P-R', 'P-K'), idempotencyKey: 'idk-k', ext_componentSortNo: 5,
+    },
+    {
+      componentCode: 'O', parentComponentCode: 'ZZ-GONE', componentSourceId: 'P-O', parentSourceId: 'P-GONE',
+      path: bomPath('P-GONE', 'P-O'), idempotencyKey: 'idk-o', ext_componentSortNo: 2,
+    },
+    { componentCode: 'R', componentSourceId: 'P-R', path: bomPath('P-R'), idempotencyKey: 'idk-r', ext_componentSortNo: 1 },
+  ])
+  assert.equal(result.treeIdentity, 'path')
+  assert.equal(result.treeDegraded, false)
+  assert.equal(result.collapsedRowCount, 0)
+  assert.deepEqual(
+    result.rows.map((row) => row.idempotencyKey),
+    ['idk-r', 'idk-k', 'idk-o', 'idk-oc'],
+    'R24a: 孤儿当根、按树位置打印,它的子行紧跟其后 —— 不是掉到末尾被平比较器排成子先于父',
+  )
+}
+
+const PROJECT_CYCLE = 'PRJ-DEGRADED-CYCLE'
+
+// R24b 降级方案的环。两行无 path、componentSourceId/parentSourceId 互指(A.parent = B, B.parent = A):
+// 两行都不是根,也永远不会从任何根 walk 到 ⇒ 只有末尾的 stranded 追加能把它们打印出来。删掉那一句
+// (变异 M-J),两行整行消失 —— 这是 orderRowsAsBomTree 三条防线里的第 1 条,此前从无用例。
+// 行路径方案下这条不可达(父路径恒比子路径短一段,任何父链都终于单段根或「父不在批内」的根),
+// 所以这一批必须是降级的:treeDegraded 为 true 既是断言,也是「这个用例只对降级方案有意义」的证明。
+async function moduleDegradedSchemeCycleRowsAreStrandedAtTheEndNotDropped() {
+  // 直接喂逻辑行:能看见幂等键。
+  const direct = exportInternals.orderRowsAsBomTree([
+    {
+      componentCode: 'DWG-CY-A', parentComponentCode: 'DWG-CY-B', componentSourceId: 'P-CY-A', parentSourceId: 'P-CY-B',
+      idempotencyKey: 'idk-cy-a', ext_componentSortNo: 2,
+    },
+    { componentCode: 'DWG-CY-R', componentSourceId: 'P-CY-R', idempotencyKey: 'idk-cy-r', ext_componentSortNo: 1 },
+    {
+      componentCode: 'DWG-CY-B', parentComponentCode: 'DWG-CY-A', componentSourceId: 'P-CY-B', parentSourceId: 'P-CY-A',
+      idempotencyKey: 'idk-cy-b', ext_componentSortNo: 3,
+    },
+  ])
+  assert.equal(direct.treeIdentity, 'componentSourceId', 'R24b: 没有一行带 path ⇒ 部件 id 方案')
+  assert.equal(direct.treeDegraded, true, 'R24b: 环只在降级方案上可达,这一批必须标成降级')
+  assert.equal(direct.treeOrdered, true)
+  assert.equal(direct.collapsedRowCount, 0)
+  assert.equal(direct.rows.length, 3, 'R24b: 环上的两行不丢 —— stranded 追加是唯一能打印它们的路径')
+  assert.deepEqual(
+    direct.rows.map((row) => row.idempotencyKey),
+    ['idk-cy-r', 'idk-cy-b', 'idk-cy-a'],
+    'R24b: 根先打印;环上的两行按 F1b 平比较器(父组件图号 优先:B 的父 DWG-CY-A < A 的父 DWG-CY-B)追加在末尾',
+  )
+  // 走一遍真实导出:同一形状经 mainRow 落到表里、由 exportStockPreparationPrepLines 读回并投影。
+  const cycleRows = [
+    mainRow(PROJECT_CYCLE, {
+      componentCode: 'DWG-CY-A', componentName: '环A', ext_nameAndSpec: '环A',
+      parentComponentCode: 'DWG-CY-B', parentComponentName: '环B',
+      ext_parentDrawingNo: 'DWG-CY-B', ext_parentName: '环B',
+      componentSourceId: 'P-CY-A', parentSourceId: 'P-CY-B', ext_componentSortNo: 2,
+      idempotencyKey: 'idk-cy-a',
+    }, 'rec_cy_a'),
+    mainRow(PROJECT_CYCLE, {
+      componentCode: 'DWG-CY-R', componentName: '环外的根', ext_nameAndSpec: '环外的根',
+      parentComponentCode: undefined, parentComponentName: undefined,
+      ext_parentDrawingNo: undefined, ext_parentName: undefined,
+      componentSourceId: 'P-CY-R', parentSourceId: undefined, ext_componentSortNo: 1,
+      idempotencyKey: 'idk-cy-r',
+    }, 'rec_cy_r'),
+    mainRow(PROJECT_CYCLE, {
+      componentCode: 'DWG-CY-B', componentName: '环B', ext_nameAndSpec: '环B',
+      parentComponentCode: 'DWG-CY-A', parentComponentName: '环A',
+      ext_parentDrawingNo: 'DWG-CY-A', ext_parentName: '环A',
+      componentSourceId: 'P-CY-B', parentSourceId: 'P-CY-A', ext_componentSortNo: 3,
+      idempotencyKey: 'idk-cy-b',
+    }, 'rec_cy_b'),
+  ]
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: cycleRows },
+  })
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_CYCLE, permission: 'admin',
+  })
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  assert.deepEqual(
+    result.rows.map((row) => row[codeColumn]),
+    ['DWG-CY-R', 'DWG-CY-B', 'DWG-CY-A'],
+    'R24b: 导出层同样三行全打印,环上的两行在末尾',
+  )
+  assert.equal(result.activeRowCount, 3)
+  assert.equal(result.treeDegraded, true)
+  assert.equal(result.collapsedRowCount, 0)
 }
 
 const PROJECT_UNBOUND_SPEC = 'PRJ-UNBOUND-SPEC'
@@ -1925,6 +2059,8 @@ async function main() {
   await moduleDedupeScopeIsTheParentRowNotTheParentPart()
   moduleBomPathEncoderIsTheExpandersOwn()
   await moduleRowsWithoutAPathDegradeToThePartIdentityAndSaySo()
+  moduleOrphanSubtreeIsRootedInPlaceNotStrandedAtTheEnd()
+  await moduleDegradedSchemeCycleRowsAreStrandedAtTheEndNotDropped()
   await moduleUnboundSpecColumnMakesTheDisplayKeyUnprovable()
 
   console.log('stock-preparation-prep-line-export (按项目导出物料 Excel): all assertions passed')

@@ -559,14 +559,17 @@ function displayDedupeKey(row) {
 
 // ── 树节点的身份 = 行路径,不是部件 id ──────────────────────────────────────────────────────
 //
-// 老系统 `iterHandle` 682-684 取子级用的是 `val.getParentId() == stockInfo.getId()` —— 父指针指向
+// 老系统 `iterHandle`(StockInfoController.java:683)取子级用的是
+// `filter(val -> Objects.equals(val.getParentId(), stockInfo.getId()))` —— 父指针指向
 // 父**行**的 id,而一行就是 BOM 树上的一个节点(`iterSave*` 对每个节点各 `addOne` 一行:同一个
 // 部件 P 挂在 X 和 Y 之下就是两行 P@X、P@Y,各自有自己的子行)。这条管线上行的身份是**路径**:
 // 幂等键含 `pathTokens`,模板必列 `path` 装的就是展开层 `makePath(pathTokens)` 写下的那串
 // (bom-expansion.cjs:`JSON.stringify(pathTokens)`,tokens = 从根到本行的 componentSourceId 序列)。
 //
 // 为什么不能用 `componentSourceId` / `parentSourceId`(部件 id)建父子:共用子装配(老系统所谓
-// 「通用组件」,`selectByPliObjIdAndProductCode` 返回 List 那条注释)会让同一个部件 P 出现两行,
+// 「通用组件」—— StockInfoController.java:507 挂在 `curBatchInDb.stream().filter(val ->
+// Objects.equals(preStockInfo.getPliObjId(), val.getPliObjId()))` 上的那条注释「这里可能有多个,
+// 因为有可能是通用组件(零件)」:同一 pliObjId 多行)会让同一个部件 P 出现两行,
 // 两行的子行 C@P@X、C@P@Y 都写着 `parentSourceId = P`。按部件 id 挂,`childrenByParent.get(P)`
 // 把两支子行合成一个兄弟集合,走到 P@X 时一次全走完:C@P@Y 与 C@P@X 同键被 `collapseSubtree`
 // 整棵吞掉,P@Y 打印成空壳 —— 导出少行;不开去重时也是错的(两支子行都挂在 P@X 下,P@Y 无子)。
@@ -624,7 +627,9 @@ const TREE_IDENTITY_COMPONENT = 'componentSourceId'
  *
  * 节点身份 = 行路径(`path`,见上面那段)。根 = 路径只有一段、或父路径不在这批行里(孤儿行:
  * 它的父行被标无效、或这一批就是被筛过的)。孤儿当根而不是丢掉 —— 导出从不少行,这是这个函数
- * 最要紧的一条性质。
+ * 最要紧的一条性质。「父路径不在批内 ⇒ 当根」这一子句由 R17(孤儿带子行)与 R24a 钉住:孤儿的
+ * 子树按树位置打印、父在子前;把这一子句拿掉,孤儿及其子行会掉进末尾的 stranded 追加,按平比较器
+ * 排成子先于父(行数不少,但树序错了)。
  * 兄弟按 `compareSiblingRows`(排序号 -> 图号 -> 幂等键 -> 名称 -> 记录 id),深度优先,同一父**行**
  * 之下按老系统那把键去重(首条胜出,被去重的那条连它的子树一起不打印,和老系统一样),但**只在
  * 这把键还原得出来的时候**去重 —— 还原不出来就一行不并(displayDedupeKey 返回 null)。
@@ -639,14 +644,18 @@ const TREE_IDENTITY_COMPONENT = 'componentSourceId'
  *     还是树,但共用子装配会少行,调用方看得见这是降级。
  *   * 两样都没有 ⇒ F1b 的平比较器(`treeOrdered: false`)。
  *
- * 三条防线,各自有「拿掉就红」的用例:
- *   1. 环 / 不可达:`visited` 保证每行最多打印一次;走完之后没被访问到的行按 F1b 的平比较器
- *      追加在末尾。构不成树的数据会得到一个难看但完整的工作簿,而不是一个少了几行的工作簿。
+ * 三条防线,各自有「拿掉就红」的用例(R24b / R20 / R18):
+ *   1. 环 / 不可达:`visited` 保证每行最多打印一次;走完之后没被访问到的行(stranded)按 F1b 的
+ *      平比较器追加在末尾。构不成树的数据会得到一个难看但完整的工作簿,而不是一个少了几行的
+ *      工作簿。**行路径方案下这条不可达**:父路径恒比子路径短一段,任何父链都终于单段根或
+ *      「父不在批内」的根,不会有两行互为父子;只有降级(部件 id)方案的环(A.parentSourceId = B
+ *      且 B.parentSourceId = A)会让两行同时非根、永不被 walk 到。用例 R24b 钉的就是这一支:
+ *      拿掉 stranded 追加,环上的两行整行消失。
  *   2. 没有身份列的部署(老 target 既没绑 `path` 也没绑 `componentSourceId`):整批一行也认不出
  *      身份时直接退回 F1b 的平比较器,而不是把每一行都当根 —— 那会连「按父组件分组」都丢掉,
- *      比改之前更差。
+ *      比改之前更差(R20)。
  *   3. 去重计数如实上报(`collapsedRowCount`),**模块返回值里**能看见「这张表按老系统合并掉了
- *      几行」—— 注意它到此为止:导出路由与审计记录今天都不读它(见函数尾部那段 REACH 说明)。
+ *      几行」—— 注意它到此为止:导出路由与审计记录今天都不读它(见函数尾部那段 REACH 说明)(R18)。
  *
  * 与老系统的两处已知偏离(写进 PR 正文,不在这里悄悄改):根这一层也过同一把去重键(老系统只对
  * childList 去重,顶层 collect 不去重);幸存者是排序后的首条(老系统按 DB 顺序首条胜出)。
