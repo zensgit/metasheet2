@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto')
 
-const { transformRecord } = require('./transform-engine.cjs')
+const { SOURCE_FIELD_ABSENT, transformRecord } = require('./transform-engine.cjs')
 const { validateRecord } = require('./validator.cjs')
 const { computeRecordIdempotencyKey } = require('./idempotency.cjs')
 const { deriveNextWatermark, normalizeWatermarkConfig } = require('./watermark.cjs')
@@ -72,6 +72,10 @@ const SENSITIVE_WATERMARK_CURSOR_PREFIX = 'dswm1:'
 // in run details (provenanceDropped), never as a sentinel event, so the DF-N2-2a
 // by-row view stays uniform. Retention/aging stays run-level (DF-N2-2 design).
 const MAX_PROVENANCE_EVENTS = 500
+// Cap on the DISTINCT source/target field-name pairs carried in the SOURCE_FIELD_ABSENT run detail.
+// These are pipeline-configuration identifiers, not record content, so the cap is about keeping the
+// run detail bounded, not about redaction. Same 50 the target-write summaries use.
+const MAX_SOURCE_FIELD_ABSENT_FIELDS = 50
 
 function coerceTruthyFlag(value, field) {
   if (value === undefined || value === null) return false
@@ -746,7 +750,7 @@ function createPipelineRunner(deps = {}) {
     }
   }
 
-  async function processRecord({ context, run, sourceRecord, cleanRecords, metrics, preview, dryRun }) {
+  async function processRecord({ context, run, sourceRecord, cleanRecords, metrics, preview, dryRun, sourceFieldAbsent }) {
     metrics.rowsRead += 1
     if (sourceRecord === null || sourceRecord === undefined ||
         typeof sourceRecord !== 'object' || Array.isArray(sourceRecord)) {
@@ -774,6 +778,33 @@ function createPipelineRunner(deps = {}) {
       return
     }
     const transformed = transformRecord(sourceRecord, context.pipeline.fieldMappings || [])
+    // X02: mappings whose source path was absent from this record left their target field
+    // unwritten instead of blanking it. Count the row and remember WHICH mapping it was, so the
+    // run reads as "N rows did not carry field X" rather than as silence. Recorded before the
+    // !ok branch: the source's shape is a true fact about the row even if another mapping of the
+    // same row failed to transform. Identifiers only - never a value, never row content.
+    if (sourceFieldAbsent && Array.isArray(transformed.warnings) && transformed.warnings.length > 0) {
+      // Count the ROW from the filtered list, not from `warnings.length`: today SOURCE_FIELD_ABSENT
+      // is the only code transformRecord() pushes (transform-engine.cjs:359), so the two agree, but
+      // the next code added would otherwise inflate a counter whose `fields` list stayed short.
+      const absentWarnings = transformed.warnings.filter((warning) => warning && warning.code === SOURCE_FIELD_ABSENT)
+      if (absentWarnings.length > 0) sourceFieldAbsent.rows += 1
+      for (const warning of absentWarnings) {
+        const entry = JSON.stringify({
+          sourceField: typeof warning.sourceField === 'string' ? warning.sourceField : null,
+          targetField: typeof warning.field === 'string' ? warning.field : null,
+        })
+        // De-duplicate BEFORE testing the cap. `fields` is a Set, so re-seeing a pair already
+        // recorded drops nothing; testing the cap first made a no-op add raise `fieldsTruncated`
+        // on a run whose list was exhaustive (exactly MAX distinct pairs, then any repeat).
+        if (sourceFieldAbsent.fields.has(entry)) continue
+        if (sourceFieldAbsent.fields.size >= MAX_SOURCE_FIELD_ABSENT_FIELDS) {
+          sourceFieldAbsent.truncated = true
+          continue
+        }
+        sourceFieldAbsent.fields.add(entry)
+      }
+    }
     if (!transformed.ok) {
       metrics.rowsFailed += 1
       const failure = {
@@ -984,6 +1015,20 @@ function createPipelineRunner(deps = {}) {
       ...(provenanceAttributionSkipped > 0 ? { provenanceAttributionSkipped } : {}),
     })
 
+    // X02: run-scoped tally of "the source record did not carry this mapping's field". Declared
+    // outside the try, like the provenance counters, so a mid-run throw still reports what was seen
+    // before it. rowsFailed is deliberately NOT incremented - these rows were written, just without
+    // the absent column - so run status and the watermark keep their current meaning.
+    const sourceFieldAbsent = { rows: 0, fields: new Set(), truncated: false }
+    const buildSourceFieldAbsentDetails = () => (sourceFieldAbsent.rows > 0 ? {
+      sourceFieldAbsent: {
+        code: SOURCE_FIELD_ABSENT,
+        rows: sourceFieldAbsent.rows,
+        fields: Array.from(sourceFieldAbsent.fields).sort().map((entry) => JSON.parse(entry)),
+        ...(sourceFieldAbsent.truncated ? { fieldsTruncated: true } : {}),
+      },
+    } : {})
+
     try {
       const watermarkConfig = resolveWatermarkConfig(context.pipeline, {
         requireTiebreaker: shouldRequireWatermarkTiebreaker(context, mode),
@@ -1036,7 +1081,7 @@ function createPipelineRunner(deps = {}) {
           ? readResult.records
           : readResult.records.slice(0, remainingDryRunSamples)
         for (const sourceRecord of records) {
-          await processRecord({ context, run, sourceRecord, cleanRecords, metrics, preview, dryRun })
+          await processRecord({ context, run, sourceRecord, cleanRecords, metrics, preview, dryRun, sourceFieldAbsent })
           if (remainingDryRunSamples !== null) remainingDryRunSamples -= 1
         }
 
@@ -1174,6 +1219,7 @@ function createPipelineRunner(deps = {}) {
               targetWriteSummaries,
             }),
             ...buildProvenanceDetails(),
+            ...buildSourceFieldAbsentDetails(),
             maxPagesReached,
             pagesProcessed: page,
           },
@@ -1201,7 +1247,7 @@ function createPipelineRunner(deps = {}) {
         run = await runLogger.finishRun(run, metrics, 'failed', {
           provenanceEvents,
           errorSummary: error.message || String(error),
-          details: buildProvenanceDetails(),
+          details: { ...buildProvenanceDetails(), ...buildSourceFieldAbsentDetails() },
         })
       } catch {
         // Secondary failure — original error takes priority
