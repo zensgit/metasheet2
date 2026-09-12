@@ -5638,7 +5638,14 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            /** @description Send the same organization identifier used by the subsequent preview or commit request. */
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        orgId?: string;
+                    };
+                };
+            };
             responses: {
                 /** @description OK */
                 200: {

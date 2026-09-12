@@ -1731,7 +1731,7 @@ export function useAttendanceAdminImportWorkflow({
     return Number.isFinite(expiresAt) && expiresAt - now() > 60 * 1000
   }
 
-  async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {}): Promise<boolean> {
+  async function ensureImportCommitToken(options: { forceRefresh?: boolean; orgId?: unknown } = {}): Promise<boolean> {
     if (options.forceRefresh) {
       importCommitToken.value = ''
       importCommitTokenExpiresAt.value = ''
@@ -1739,7 +1739,11 @@ export function useAttendanceAdminImportWorkflow({
     if (isImportCommitTokenValid()) return true
 
     try {
-      const response = await apiFetch('/api/attendance/import/prepare', { method: 'POST' })
+      const targetOrgId = normalizeIdentifier(options.orgId) ?? normalizedOrgId()
+      const response = await apiFetch('/api/attendance/import/prepare', {
+        method: 'POST',
+        body: JSON.stringify(targetOrgId ? { orgId: targetOrgId } : {}),
+      })
       if (response.status === 404) {
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
@@ -1793,7 +1797,7 @@ export function useAttendanceAdminImportWorkflow({
 
       const remainingSample = Math.max(1, plan.sampleLimit - aggregatedItems.length)
       const chunkPayload = plan.buildPayload(chunkIndex, remainingSample)
-      const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+      const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: chunkPayload.orgId })
       if (!tokenOk) throw new Error(tr('Failed to prepare import token', '准备导入令牌失败'))
       if (importCommitToken.value) chunkPayload.commitToken = importCommitToken.value
 
@@ -2010,7 +2014,7 @@ export function useAttendanceAdminImportWorkflow({
       message: tr('Queued async preview job.', '已排队异步预览任务。'),
     }
 
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
     if (!tokenOk) return true
     if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -2027,7 +2031,7 @@ export function useAttendanceAdminImportWorkflow({
       if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
-        const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+        const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
         if (!refreshed || !importCommitToken.value) {
           throw new Error(tr(
             'Failed to refresh import commit token. Check server deployment/migrations.',
@@ -2146,7 +2150,7 @@ export function useAttendanceAdminImportWorkflow({
         message: null,
       }
 
-      const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+      const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
       if (!tokenOk) {
         if (importPreviewTask.value) {
           importPreviewTask.value = {
@@ -2233,7 +2237,7 @@ export function useAttendanceAdminImportWorkflow({
     applyImportScalabilityHints(payload, { mode: 'commit' })
     importLoading.value = true
     try {
-      const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+      const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
       if (!tokenOk) return
       if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -2252,7 +2256,7 @@ export function useAttendanceAdminImportWorkflow({
           } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
             importCommitToken.value = ''
             importCommitTokenExpiresAt.value = ''
-            const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+            const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
             if (!refreshed || !importCommitToken.value) {
               throw new Error(tr(
                 'Failed to refresh import commit token. Check server deployment/migrations.',
@@ -2329,7 +2333,7 @@ export function useAttendanceAdminImportWorkflow({
         } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
           importCommitToken.value = ''
           importCommitTokenExpiresAt.value = ''
-          const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+          const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
           if (!refreshed || !importCommitToken.value) {
             throw new Error(tr(
               'Failed to refresh import commit token. Check server deployment/migrations.',
