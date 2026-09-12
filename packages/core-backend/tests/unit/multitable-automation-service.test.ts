@@ -46,11 +46,44 @@ function createMockRule(overrides: Partial<AutomationRule> = {}): AutomationRule
   }
 }
 
+// F9b: send_notification now hard-rejects any recipient outside the selectable-people roster (same
+// resolver as the button route: ACTIVE users with a GLOBAL multitable read/write grant, NOT a per-sheet
+// grant) BEFORE its durable write. This blanket "every query returns the rules" stub therefore
+// has to model the member-roster SQL, or every notify rule fail-closes on an empty roster.
+const MOCK_NOTIFY_MEMBER_IDS = ['user_notify', 'user_a', 'user_b', 'u1']
+
+function memberRosterRows(sqlText: string): { rows: unknown[]; rowCount: number } | null {
+  if (/WITH user_candidates AS/i.test(sqlText)) {
+    return {
+      rows: MOCK_NOTIFY_MEMBER_IDS.map((id) => ({
+        subject_type: 'user',
+        subject_id: id,
+        user_name: id,
+        user_email: `${id}@members.test`,
+        user_is_active: true,
+        permission_codes: ['multitable:read'],
+      })),
+      rowCount: MOCK_NOTIFY_MEMBER_IDS.length,
+    }
+  }
+  if (/FROM user_permissions up/i.test(sqlText)) {
+    return {
+      rows: MOCK_NOTIFY_MEMBER_IDS.map((id) => ({ user_id: id, permission_code: 'multitable:read' })),
+      rowCount: MOCK_NOTIFY_MEMBER_IDS.length,
+    }
+  }
+  return null
+}
+
 function createMockQuery(rules: AutomationRule[]): AutomationQueryFn {
-  return vi.fn(async (_sql: string, _params?: unknown[]) => ({
-    rows: rules,
-    rowCount: rules.length,
-  }))
+  return vi.fn(async (sql: string, _params?: unknown[]) => {
+    const roster = typeof sql === 'string' ? memberRosterRows(sql) : null
+    if (roster) return roster
+    return {
+      rows: rules,
+      rowCount: rules.length,
+    }
+  })
 }
 
 function createMockDb(rules: AutomationRule[]) {
