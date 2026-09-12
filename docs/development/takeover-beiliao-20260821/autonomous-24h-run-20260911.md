@@ -92,6 +92,12 @@
 
 **F9b 收官(#5664 合入 `02ca7b1ef`)**:impl `638cfd2a3` → 三轮反驳(2+2 / 2+0 / 2+2)两次修复 → 终审 r1 FIX_FIRST(3 条:message 不 trim 会落空白通知;准入注释理由过期;修复者错误驳回「保存期名册校验可做」且编辑器收件人是自由文本)→ fix r3 `2a1b68ee7`(live/simulate 同判 trim + 用例 + 注释 + 正文 + **222 部署前盘点 SQL**)→ 终审 r2 FIX_FIRST 但唯一 blocker 只在正文(SQL `btrim` 空白集合与 JS trim 不同量,已改 `btrim(x, E' \t\r\n')`)。裁判核实:生产三处 `new AutomationExecutor` 都注入 queryFn(缺 sink 失败关闭是接线错误守卫);收件人边界 = **平台可选人员**(active + 全局 multitable:read/write,与按钮、Person 字段同集合),不是 sheet 成员、不是租户边界;real-fire 试运行到不了写路径;simulate 零库三处门;规则侧无 dedup 账本(重复投递三窗口如实写)。**盘点 SQL 已在 222 只读实跑**:1 条 enabled 规则命中——测试员建在备料主表上的「测试」规则,收件人不在名册内 → F9b 上机后它首次实发的通知步会明确失败(中文文案)、其后动作 skipped;**未动客户规则**,请 owner 知悉。
 
+**F1c-b(派生包列「父组件图号 / 父组件名称」,#5670 草稿,CI 在跑)**:impl `7763eac39` → 三轮反驳两次修复 → 终审 r1 FIX_FIRST(声明子集无负控 / 两处注释无条件化 / 正文「人工值优先」被自己的用例证伪 + 存量 581 行结论缺三前置)→ fix r3 `890776622` → 终审 r2 FIX_FIRST 但两条只在注释/正文(W4 carry 那句三层证伪:carry 只抄 13 个模板人工列;「永不收敛的空 update」只对派生缺席的行成立)→ 我改注释+正文 `ce334ae1e`。**owner 二选一**:包列永远等于模板列(现状,pack 声明 plm_system,手填会被下次刷新取代)vs 改包 ownership 为 human_preserved(放弃逐行相等);**F1c 既有缺口**:大 BOM 后台路由(http-routes.cjs:6367)不传 installedFieldProperties ⇒ 后台链一个 ext_ 都落不到表上(581 行走交互路由不受影响)。存量 581 行下次 dry-run 以 update 补上的三个前置条件已写进 PR。
+
+**bell(#5668,合入 `578e0d313`)**:F9b 后非记录触发的规则通知落 `record_id=''`,铃铛点击改为只标已读不导航(消费方对空 id 会弹「记录不存在」)。7/7 + vue-tsc 0。
+
+**停摆二**:09-12 12:0x–13:00 本地再次 429(session limit,resets 10pm PT),F9c impl 与 F1c-b fix r3 被打死;13:00 重派。用户决定换 Anthropic 账号继续(`claude stop` → 换号 → `--resume`),交接点写在 STATE.md。
+
 **F9b(新派,opus + 两路反驳)**:规则侧 `send_notification` 落库到通知中心——根因是全仓没有 `automation.notification` 的监听者,按钮路径已持久化而规则路径 eventBus-only;复用同一 seam `insertRecordSubscriptionNotifications`,成员校验与按钮同量,先写后 emit,模拟不写,表缺失不吞,规则侧不借用按钮的 dedup 表(重复投递语义如实写)。规格 `spec-F9b-rule-notification-persist.md`。
 
 ~~**r31 已备好未 build**~~(已上机,见上):wrapper 加 #5651(`EXTERNAL_SYSTEM_SCOPE_MISMATCH` 字面量计数 ≥ 4)/#5654(upgrade-inplace 含 `MaintenanceFlagPath` + `Assert-MaintenanceFlagOutsideReplaceDirs`;事后 flag 不存在)标记,纯 ASCII、0 控制字符;ship 改为上传 `origin/main` 的 `multitable-onprem-package-upgrade-inplace.ps1`(加 BOM;1382 个非 ASCII 字节)替代 tools-r22 旧本;两份脚本本机 Windows PowerShell 5.1 `Parser::ParseFile` 0 错。基线等 F1c/F8A 裁决后定(合入则 main + 两支,否则 `72caae8de`);夜里上机,**不举 flag**(脚本自己举)。
