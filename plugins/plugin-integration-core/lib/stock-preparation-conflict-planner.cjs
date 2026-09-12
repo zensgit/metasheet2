@@ -1055,9 +1055,10 @@ function pickFields(row, fields) {
 // 这一段上、对 `plm_system` 归属的 ext_ 列**,能往里写值的只有两处:部署自己的 ext 映射
 // (`applyExtFieldMapping`)和 F1c 起本函数派生的那三列 —— 前者读的是 PART 行,而父件这一侧展开层
 // 只发出一个 OBJ_ID,任何 part 列映射都够不着它;后者到今天为止不含这两列。所以它们不是"没配",
-// 是配了也填不上。(这句有作用域,别当全集读:W4 carry 会把**人工归属**的 ext_ 列从上一批存量行
-// 抄进新的 add 记录,见 stock-preparation-carry-policy.cjs 的 carry 选取那一带;那条路不经过本
-// 函数,也碰不到这两列 —— 包把它们声明成 plm_system。)
+// 是配了也填不上。(这句有作用域:W4 carry 只抄 HUMAN_PRESERVED_FIELD_IDS 那 13 个模板人工列 ——
+// carry-policy.cjs resolveHumanFields 只看模板、本文件只传 { template }、confirm-writes.cjs 再断言
+// carryFields ⊆ 白名单 —— 任何 ext_ 列不论归属都不在 carry 范围内,所以「只有两处」在 carry 那条路上
+// 也成立;限定作用域只是因为拉取链之外还有人工编辑/导入等写口,与本函数无关。)
 //
 // 同源而不是同规则:值取的就是下面刚写进 `out` 的那两个模板列值本身(见 denormalizedPlmFields),
 // 不存在第二份取值逻辑可以漂移,所以**凡是本函数派生出来的行**,两列与模板列逐行相等。模板列没写
@@ -1154,8 +1155,9 @@ function denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
   // FIRST OCCURRENCE WINS when the same 父件 appears more than once in a batch (it does — one
   // component can sit under several paths): the index is built with
   // `if (sourceId && !index.has(sourceId))` (stock-preparation-expansion-snapshot-mapper.cjs:133),
-  // so a later occurrence never replaces an earlier one. The part code/name are identical across
-  // every path a component appears on, and BOTH the template columns and the two pack columns read
+  // so a later occurrence never replaces an earlier one. The same component record carries the same
+  // code/name on every path it appears on (a property of the source data, not a code guarantee),
+  // and BOTH the template columns and the two pack columns read
   // this one index — so the choice cannot make 包列 and 模板列 disagree.
   if (parentIndex && typeof parentSourceId === 'string' && parentSourceId.trim() !== '') {
     const parent = parentIndex.get(parentSourceId.trim())

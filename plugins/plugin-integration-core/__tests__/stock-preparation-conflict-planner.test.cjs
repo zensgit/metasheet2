@@ -1430,7 +1430,8 @@ function testParentPackColumnsNeedBothTheDeclarationAndThePack() {
   //    整批放行的接线在它们身上判据恒等 ⇒ 变异存活(终审 J11_PARTIAL)。现网真正可达的正是不
   //    对称形状:222 上的 action.extensionFieldIds 是一份 durable JSON,旧配置只含 F1c 那三列时
   //    这两列一个也不该冒出来 —— 冒出来就是往 target 的 fieldIdMap 没绑的 ext_ id 上写,
-  //    apply-writer 硬拒整行("这列空着"升级成"这个项目根本 apply 不了")。两个方向各跑一次,
+  //    explicit 绑定模式下(222 由 derive-target-binding.mjs 生成 fieldIdMap,即 explicit)apply-writer
+  //    硬拒整行("这列空着"升级成"这个项目根本 apply 不了");implicit 模式靠 pickFields 的包感知 band 兜底。两个方向各跑一次,
   //    照 testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull 那条不对称用例的形状。
   const DERIVED_FOR_CHILD_A = {
     ext_parentDrawingNo: 'TZ-0001',
