@@ -4,6 +4,17 @@ import { IConfigService, ILogger } from '../di/identifiers'
 import { HTTPAdapter } from './HTTPAdapter'
 import type { QueryResult, DataSourceConfig } from './BaseAdapter'
 
+/**
+ * #5648 F01 (adjacent): scrub URL userinfo (`scheme://user:pass@host`) before a base URL reaches a
+ * log sink. Same rule as `stripUrlUserinfo` in services/ai-provider-client.ts (copied rather than
+ * imported so a data adapter does not pull the AI provider module in); the userinfo run is
+ * `[^/\s]*` so an unencoded '@' inside the password is still redacted through the LAST '@' before
+ * the host, while a bare '@' in a path/query is left alone.
+ */
+function redactUrlUserinfo(text: string): string {
+  return text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s]*@/gi, '$1<redacted>@')
+}
+
 export interface PLMProduct {
   id: string
   name: string
@@ -1073,10 +1084,9 @@ export class PLMAdapter extends HTTPAdapter {
     }
 
     if (token) {
-      const headers = (this.config.connection.headers as Record<string, string> | undefined) || {}
-      delete headers.authorization
-      headers.Authorization = `Bearer ${token}`
-      this.config.connection.headers = headers
+      // #5648 F02: the token is cached on the INSTANCE only (see cacheAuthToken) and applied to the
+      // axios client after super.connect(). It must never be written back to this.config.connection —
+      // that object is the persisted, plaintext half of the data source (see applyAuthTokenToClient).
       this.cacheAuthToken(token)
     }
 
@@ -1134,8 +1144,13 @@ export class PLMAdapter extends HTTPAdapter {
       return;
     }
 
-    this.logger.info(`PLM Adapter connecting to ${this.config.connection.url}`);
+    // #5648 F01 (adjacent, logging only): a base URL may carry userinfo (scheme://user:pass@host);
+    // strip it before it reaches the log sink. No semantic change — the URL used to connect is untouched.
+    this.logger.info(`PLM Adapter connecting to ${redactUrlUserinfo(String(this.config.connection.url ?? ''))}`);
     await super.connect();
+    // #5648 F02: apply the instance-held Bearer token to the axios client that super.connect() just
+    // built. Must run BEFORE any request this method fires (refreshIntegrationCapabilities below).
+    this.applyAuthTokenToClient();
     // PLM-COLLAB P2.5: warm/refresh the integration capability cache after a real connect
     // (fire-and-forget; refreshIntegrationCapabilities degrades gracefully and never throws,
     // so this never blocks or fails connect).
@@ -1197,12 +1212,41 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
+  /**
+   * #5648 F02: the Bearer token lives ONLY here (instance state) and on the axios client's default
+   * headers — never on this.config.connection.
+   *
+   * Why: `connection` is the PUBLIC half of a data source. BaseAdapter.getConfig() (:547-549) hands
+   * out a SHALLOW copy, so callers get the very same `connection` object; PUT /api/data-sources/:id
+   * (routes/data-sources.ts:634, :656) deep-merges it into the new config, and
+   * DataSourceManager.configToRecord (:395-412) puts `config.connection` into the persisted record
+   * VERBATIM — only `credentials` is encrypted. Writing the token there meant every PUT wrote the live
+   * token into the data_sources row in plaintext (and into the PUT response + audit_logs.meta, since
+   * sanitizeConfig only strips `credentials`).
+   *
+   * Applied to the client in applyAuthTokenToClient(); mid-session refreshes reach requests through
+   * the HTTPAdapter token-provider interceptor (registered in connect() for yuantus mode).
+   */
   private cacheAuthToken(token: string): void {
     this.authToken = token
     this.authTokenExpiresAt = this.getTokenExpiry(token)
-    const headers = (this.config.connection.headers as Record<string, string> | undefined) || {}
-    headers.Authorization = `Bearer ${token}`
-    this.config.connection.headers = headers
+  }
+
+  /**
+   * Put the instance-held Bearer token on the axios client built by HTTPAdapter.connect().
+   *
+   * Writes the FLAT slot of `client.defaults.headers` (not `.common`) on purpose: that is exactly the
+   * slot `axios.create({ headers: connection.headers })` used to fill, and axios concatenates the flat
+   * defaults AFTER `defaults.headers.common`, so the token resolved by this connect() still wins over
+   * a `credentials.bearerToken` default and over any hand-set — or pre-fix, persisted and now stale —
+   * `connection.headers.Authorization`. Dropping a lowercase `authorization` mirrors the `delete
+   * headers.authorization` the old in-config path did, so the request carries exactly one credential.
+   */
+  private applyAuthTokenToClient(): void {
+    if (!this.client || !this.authToken) return
+    const defaultHeaders = this.client.defaults.headers as unknown as Record<string, unknown>
+    delete defaultHeaders.authorization
+    defaultHeaders.Authorization = `Bearer ${this.authToken}`
   }
 
   private invalidateAuthToken(): void {
