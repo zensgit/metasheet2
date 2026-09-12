@@ -212,6 +212,15 @@
             @cancel="closeDedicatedMakeupRequestCard"
             @submit="submitDedicatedMakeupRequestCard"
           />
+          <AttendanceEmployeeOvertimeRequestCard
+            v-if="overtimeRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :overtime-rules="overtimeRules"
+            :submitting="requestSubmitting"
+            @cancel="closeDedicatedOvertimeRequestCard"
+            @submit="submitDedicatedOvertimeRequestCard"
+          />
         </template>
         <template #historyFilters>
           <label class="attendance__field attendance-ew__history-filter-control" for="attendance-from-date">
@@ -10158,6 +10167,7 @@ import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSe
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
 import AttendanceEmployeeLeaveRequestCard from './attendance/AttendanceEmployeeLeaveRequestCard.vue'
 import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployeeMakeupRequestCard.vue'
+import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmployeeOvertimeRequestCard.vue'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
 import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
 import {
@@ -14902,6 +14912,7 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
 const overviewRequestToolsOpen = ref(false)
 const leaveRequestCardOpen = ref(false)
 const makeupRequestCardOpen = ref(false)
+const overtimeRequestCardOpen = ref(false)
 
 const eligibleMakeupAnomalies = computed(() =>
   anomalies.value.filter(item => item.state !== 'pending'),
@@ -17230,16 +17241,17 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
     await openDedicatedLeaveRequestCard()
     return
   }
-  if (leaveRequestCardOpen.value) closeDedicatedLeaveRequestCard()
   if (action === 'missing-punch') {
     await openDedicatedMakeupRequestCard()
     return
   }
-  if (makeupRequestCardOpen.value) closeDedicatedMakeupRequestCard()
   if (action === 'overtime') {
-    await openQuickRequestDraft('overtime')
+    await openDedicatedOvertimeRequestCard()
     return
   }
+  if (leaveRequestCardOpen.value) closeDedicatedLeaveRequestCard()
+  if (makeupRequestCardOpen.value) closeDedicatedMakeupRequestCard()
+  if (overtimeRequestCardOpen.value) closeDedicatedOvertimeRequestCard()
   if (action === 'shift_swap') {
     await openQuickRequestDraft('shift_swap')
     return
@@ -17254,6 +17266,7 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
 async function openDedicatedLeaveRequestCard(): Promise<void> {
   prepareRequestDraft('leave', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
   makeupRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
   leaveRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
@@ -17318,6 +17331,7 @@ async function openDedicatedMakeupRequestCard(): Promise<void> {
   const draft = resolveMakeupCardPrefill(anomalies.value, fallbackWorkDate)
   prepareRequestDraft(draft.requestType, draft.workDate)
   leaveRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
   makeupRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
@@ -17347,6 +17361,38 @@ function closeDedicatedMakeupRequestCard(): void {
 async function submitDedicatedMakeupRequestCard(): Promise<void> {
   await submitRequest()
   if (statusKind.value !== 'error') closeDedicatedMakeupRequestCard()
+}
+
+async function openDedicatedOvertimeRequestCard(): Promise<void> {
+  prepareRequestDraft('overtime', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  leaveRequestCardOpen.value = false
+  makeupRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      tr(`Request form ready for ${formatRequestType('overtime')}.`, `已为${formatRequestType('overtime')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-overtime-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const ruleField = document.getElementById('attendance-overtime-card-rule')
+  if (ruleField instanceof HTMLElement && typeof ruleField.focus === 'function') {
+    ruleField.focus()
+  }
+}
+
+function closeDedicatedOvertimeRequestCard(): void {
+  overtimeRequestCardOpen.value = false
+}
+
+async function submitDedicatedOvertimeRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedOvertimeRequestCard()
 }
 
 function buildQuery(params: Record<string, string | undefined>): URLSearchParams {
