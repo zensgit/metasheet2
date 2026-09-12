@@ -183,14 +183,17 @@ const SCOPE_FIELD_IDS = Object.freeze(['projectNo', 'active'])
 // the customer's own 明细栏 sequence with no second edit here; until then every row is missing it
 // and the key falls through.
 //
-// F1c ADDS THREE MORE ORDER-ONLY IDS, for the same reason and under the same rule (never a column,
-// never an `unresolvedColumns` entry): `componentSourceId` + `parentSourceId` are what make a TREE
-// out of a flat row set (orderRowsAsBomTree), and `ext_componentSortNo` is where 明细排序号
+// F1c ADDS FOUR MORE ORDER-ONLY IDS, for the same reason and under the same rule (never a column,
+// never an `unresolvedColumns` entry): `path` is the ROW's identity in the BOM tree (the node the
+// expander wrote, `makePath(pathTokens)` — see orderRowsAsBomTree for why the tree hangs off the
+// row path and not off the part id), `componentSourceId` + `parentSourceId` are the DEGRADED
+// identity a row without a `path` falls back to, and `ext_componentSortNo` is where 明细排序号
 // actually lands — the frozen template still has no 排序号 column, the customer pack has had one
 // (当前组件排序号) all along, and F1c is what finally writes it.
 const SORT_FIELD_IDS = Object.freeze([
   'componentSortNo',
   'ext_componentSortNo',
+  'path',
   'componentSourceId',
   'parentSourceId',
   // 单层用量:不是排序键,是展示层去重键的第五项(见 displayDedupeKey)。和 SORT_FIELD_IDS 里
@@ -517,10 +520,21 @@ function compareSiblingRows(left, right) {
 // 单层用量在键里,是为了和展开层 **同一把键**:展开层多带用量,是为了不把「同父同件但用量不
 // 一致」这种数据缺陷从 duplicate_expanded_key 的 fail-closed 挂起里偷走。展示层如果少带这一项,
 // 就会在打印时把展开层特意留下的那两行又合并掉 —— 触发口径和边界口径不同量。
+//
+// 形状 2 的前提是「规格 为空」是一个**测得到**的事实:行上得有 规格 这一列(模板列 `componentSpec`
+// 或包列 `ext_spec` 至少绑了一个)、而且它的单元格是空的。两个键都**不在行上**(target 没绑这一列,
+// unmapRow 之后连键都没有)时,「空」只是「看不见」—— 首段同名的两个标准件会因此并成一行。所以
+// 键缺失判不可证;只有键在、值为空,才走「名称无空格」这一支。
+function rowCarriesSpecColumn(row) {
+  return Object.prototype.hasOwnProperty.call(row, COMPONENT_SPEC_ORDER_COLUMN.id)
+    || Object.prototype.hasOwnProperty.call(row, COMPONENT_SPEC_ORDER_COLUMN.fallbackId)
+}
+
 function nameAndSpecDisplayKey(row) {
   const packed = orderText(row.ext_nameAndSpec)
   if (packed !== '') return { text: packed, provable: true }
   const name = orderText(columnSourceValue(row, COMPONENT_NAME_ORDER_COLUMN))
+  if (!rowCarriesSpecColumn(row)) return { text: name, provable: false }
   const spec = orderText(columnSourceValue(row, COMPONENT_SPEC_ORDER_COLUMN))
   if (spec === '') return { text: name, provable: true }
   return { text: `${name} ${spec}`, provable: false }
@@ -543,45 +557,137 @@ function displayDedupeKey(row) {
   ])
 }
 
+// ── 树节点的身份 = 行路径,不是部件 id ──────────────────────────────────────────────────────
+//
+// 老系统 `iterHandle` 682-684 取子级用的是 `val.getParentId() == stockInfo.getId()` —— 父指针指向
+// 父**行**的 id,而一行就是 BOM 树上的一个节点(`iterSave*` 对每个节点各 `addOne` 一行:同一个
+// 部件 P 挂在 X 和 Y 之下就是两行 P@X、P@Y,各自有自己的子行)。这条管线上行的身份是**路径**:
+// 幂等键含 `pathTokens`,模板必列 `path` 装的就是展开层 `makePath(pathTokens)` 写下的那串
+// (bom-expansion.cjs:`JSON.stringify(pathTokens)`,tokens = 从根到本行的 componentSourceId 序列)。
+//
+// 为什么不能用 `componentSourceId` / `parentSourceId`(部件 id)建父子:共用子装配(老系统所谓
+// 「通用组件」,`selectByPliObjIdAndProductCode` 返回 List 那条注释)会让同一个部件 P 出现两行,
+// 两行的子行 C@P@X、C@P@Y 都写着 `parentSourceId = P`。按部件 id 挂,`childrenByParent.get(P)`
+// 把两支子行合成一个兄弟集合,走到 P@X 时一次全走完:C@P@Y 与 C@P@X 同键被 `collapseSubtree`
+// 整棵吞掉,P@Y 打印成空壳 —— 导出少行;不开去重时也是错的(两支子行都挂在 P@X 下,P@Y 无子)。
+// 展开层的兄弟集合是「同一父**行**之下」(`expandChildren(parentRow, …)` 一次调用一套
+// `siblingKeys`),展示层必须和它同量,否则「触发口径和边界口径不同量」。
+//
+// 编码器和展开层同一个:tokens 解析出来之后**重新** `JSON.stringify`,父 = 去掉最后一段 tokens 后
+// 再编码。这样节点身份与父身份都是规范串,不依赖存进表里那一串的空白/转义细节。
+// 这里不 require bom-expansion.cjs(本模块只依赖 common.cjs,见模块头「结构上只读」),
+// 而是由用例把两边的编码器钉在一起(prep-line-export.test.cjs:encodeBomPath === makePath)。
+function encodeBomPath(tokens) {
+  return JSON.stringify(tokens)
+}
+
+// 行路径 -> tokens;不是「非空 JSON 数组」的一律 null(没绑 `path` 列的老 target、手工行、脏值)。
+function bomPathTokensOf(row) {
+  const raw = row && row.path
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (_err) {
+    return null
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null
+  return parsed
+}
+
+// 主方案:行路径。根 = tokens 只有一段(父为 null),或父路径不在批内(由调用方判定)。
+function pathIdentityOf(row) {
+  const tokens = bomPathTokensOf(row)
+  if (tokens === null) return null
+  return {
+    self: encodeBomPath(tokens),
+    parent: tokens.length > 1 ? encodeBomPath(tokens.slice(0, -1)) : null,
+  }
+}
+
+// 降级方案:部件 id。只在整批**没有一行**带可解析 `path` 时才用(见 orderRowsAsBomTree),
+// 它带着上面说的共用子装配缺陷,所以返回值把它标成 `treeDegraded: true`。
+// 自指(parentSourceId === componentSourceId)当根,和改前一样。
+function componentIdentityOf(row) {
+  const self = orderText(row && row.componentSourceId)
+  if (self === '') return null
+  const parent = orderText(row && row.parentSourceId)
+  return { self, parent: parent === '' || parent === self ? null : parent }
+}
+
+// 三个 values-free 的方案标记:行路径 / 部件 id(降级) / 认不出身份(平序)。
+const TREE_IDENTITY_PATH = 'path'
+const TREE_IDENTITY_COMPONENT = 'componentSourceId'
+
 /**
  * 深度优先的 BOM 树序 —— 老系统 `iterHandle` 669-700 / `exportExcel` 1526-1530 的形状。
  *
- * 根 = `parentSourceId` 为空、或它指的那个部件不在这批行里(孤儿行:它的父件被标无效、或这一批
- * 就是被筛过的)。孤儿当根而不是丢掉 —— 导出从不少行,这是这个函数最要紧的一条性质。
- * 兄弟按 `compareSiblingRows`(排序号 -> 图号 -> 幂等键 -> 名称 -> 记录 id),深度优先,同父之下
- * 按老系统那把键去重(首条胜出,被去重的那条连它的子树一起不打印,和老系统一样),但**只在这把
- * 键还原得出来的时候**去重 —— 还原不出来就一行不并(displayDedupeKey 返回 null)。
+ * 节点身份 = 行路径(`path`,见上面那段)。根 = 路径只有一段、或父路径不在这批行里(孤儿行:
+ * 它的父行被标无效、或这一批就是被筛过的)。孤儿当根而不是丢掉 —— 导出从不少行,这是这个函数
+ * 最要紧的一条性质。
+ * 兄弟按 `compareSiblingRows`(排序号 -> 图号 -> 幂等键 -> 名称 -> 记录 id),深度优先,同一父**行**
+ * 之下按老系统那把键去重(首条胜出,被去重的那条连它的子树一起不打印,和老系统一样),但**只在
+ * 这把键还原得出来的时候**去重 —— 还原不出来就一行不并(displayDedupeKey 返回 null)。
+ * 去重的作用域是**一次 walk = 一个父行的子集合**,与展开层 `expandChildren` 的 `siblingKeys`
+ * 同量;不跨父行合并 —— 共用子装配在两个父行下各出现一次,两次都打印。
+ *
+ * 身份方案按整批选,不逐行混用(两套身份空间混在一棵树里父子对不上):
+ *   * 批内任一行带可解析 `path`  ⇒ 行路径方案(`treeIdentity: 'path'`)。没有 `path` 的那几行
+ *     (手工行)认不出父,当根打印 —— 和它们在改前的待遇一样,一行不少。
+ *   * 一行 `path` 都没有,但有 `componentSourceId` ⇒ 退回部件 id 方案(改前的形状),返回值标
+ *     `treeDegraded: true` / `treeIdentity: 'componentSourceId'`:老 target 没绑 `path` 列时拿到的
+ *     还是树,但共用子装配会少行,调用方看得见这是降级。
+ *   * 两样都没有 ⇒ F1b 的平比较器(`treeOrdered: false`)。
  *
  * 三条防线,各自有「拿掉就红」的用例:
  *   1. 环 / 不可达:`visited` 保证每行最多打印一次;走完之后没被访问到的行按 F1b 的平比较器
  *      追加在末尾。构不成树的数据会得到一个难看但完整的工作簿,而不是一个少了几行的工作簿。
- *   2. 没有身份列的部署(老 target 没绑 `componentSourceId`):整批一行也认不出身份时直接退回
- *      F1b 的平比较器,而不是把每一行都当根 —— 那会连「按父组件分组」都丢掉,比改之前更差。
+ *   2. 没有身份列的部署(老 target 既没绑 `path` 也没绑 `componentSourceId`):整批一行也认不出
+ *      身份时直接退回 F1b 的平比较器,而不是把每一行都当根 —— 那会连「按父组件分组」都丢掉,
+ *      比改之前更差。
  *   3. 去重计数如实上报(`collapsedRowCount`),**模块返回值里**能看见「这张表按老系统合并掉了
  *      几行」—— 注意它到此为止:导出路由与审计记录今天都不读它(见函数尾部那段 REACH 说明)。
+ *
+ * 与老系统的两处已知偏离(写进 PR 正文,不在这里悄悄改):根这一层也过同一把去重键(老系统只对
+ * childList 去重,顶层 collect 不去重);幸存者是排序后的首条(老系统按 DB 顺序首条胜出)。
  *
  * PURE:不改入参,结果只取决于行内容(含记录 id),与扫描顺序无关。
  */
 function orderRowsAsBomTree(rows) {
-  const identityOf = (row) => orderText(row && row.componentSourceId)
+  let identityOf = null
+  let treeIdentity = null
+  if (rows.some((row) => pathIdentityOf(row) !== null)) {
+    identityOf = pathIdentityOf
+    treeIdentity = TREE_IDENTITY_PATH
+  } else if (rows.some((row) => componentIdentityOf(row) !== null)) {
+    identityOf = componentIdentityOf
+    treeIdentity = TREE_IDENTITY_COMPONENT
+  }
+  if (identityOf === null) {
+    return { rows: sortExportRows(rows), collapsedRowCount: 0, treeOrdered: false, treeIdentity: null, treeDegraded: false }
+  }
+  const identities = new Map()
   const knownIdentities = new Set()
   for (const row of rows) {
     const identity = identityOf(row)
-    if (identity !== '') knownIdentities.add(identity)
-  }
-  if (knownIdentities.size === 0) {
-    return { rows: sortExportRows(rows), collapsedRowCount: 0, treeOrdered: false }
+    identities.set(row, identity)
+    if (identity !== null) knownIdentities.add(identity.self)
   }
   const childrenByParent = new Map()
   const roots = []
   for (const row of rows) {
-    const parentIdentity = orderText(row && row.parentSourceId)
-    if (parentIdentity === '' || parentIdentity === identityOf(row) || !knownIdentities.has(parentIdentity)) {
+    const identity = identities.get(row)
+    const parentIdentity = identity === null ? null : identity.parent
+    if (parentIdentity === null || !knownIdentities.has(parentIdentity)) {
       roots.push(row)
       continue
     }
     if (!childrenByParent.has(parentIdentity)) childrenByParent.set(parentIdentity, [])
     childrenByParent.get(parentIdentity).push(row)
+  }
+  const childrenOf = (row) => {
+    const identity = identities.get(row)
+    return identity === null ? [] : (childrenByParent.get(identity.self) || [])
   }
 
   const ordered = []
@@ -594,10 +700,12 @@ function orderRowsAsBomTree(rows) {
     if (visited.has(row)) return
     visited.add(row)
     collapsedRowCount += 1
-    const identity = identityOf(row)
-    if (identity === '') return
-    for (const child of childrenByParent.get(identity) || []) collapseSubtree(child)
+    for (const child of childrenOf(row)) collapseSubtree(child)
   }
+  // ONE `seenKeys` PER CALL, i.e. per parent ROW's child set (and one for the root band). It must
+  // not be hoisted out of `walk`: a set shared across parents would collapse the second occurrence
+  // of a shared sub-assembly's child under its OTHER parent — the exact row this identity scheme
+  // exists to keep.
   const walk = (siblings) => {
     const seenKeys = new Set()
     for (const row of siblings.slice().sort(compareSiblingRows)) {
@@ -615,14 +723,19 @@ function orderRowsAsBomTree(rows) {
       }
       visited.add(row)
       ordered.push(row)
-      const identity = identityOf(row)
-      if (identity !== '') walk(childrenByParent.get(identity) || [])
+      walk(childrenOf(row))
     }
   }
   walk(roots)
   const stranded = rows.filter((row) => !visited.has(row))
   if (stranded.length > 0) ordered.push(...sortExportRows(stranded))
-  return { rows: ordered, collapsedRowCount, treeOrdered: true }
+  return {
+    rows: ordered,
+    collapsedRowCount,
+    treeOrdered: true,
+    treeIdentity,
+    treeDegraded: treeIdentity === TREE_IDENTITY_COMPONENT,
+  }
 }
 
 // "Does this target bind logical ids to physical ids AT ALL?" — the writer's own predicate
@@ -753,16 +866,22 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
     // Values-free ordering facts. `collapsedRowCount` is the ONE number that explains a workbook
     // with fewer lines than the sheet has rows (同父同键的重复行按老系统合并),so it travels with
     // the result instead of being a silent drop; `treeOrdered: false` says this deployment's rows
-    // carry no 部件源ID binding and got the flat order.
+    // carry neither a `path` nor a 部件源ID binding and got the flat order; `treeIdentity` names
+    // which identity scheme built the tree ('path' — the row path, the correct one — or
+    // 'componentSourceId', the DEGRADED part-id scheme a batch with no `path` falls back to), and
+    // `treeDegraded` is that second case spelled out as a boolean: the workbook is a tree, but a
+    // shared sub-assembly's second occurrence prints without its children (see orderRowsAsBomTree).
     //
-    // REACH, stated so nobody reads more into it than is true: today these two are MODULE RETURN
+    // REACH, stated so nobody reads more into it than is true: today these are MODULE RETURN
     // VALUES ONLY. The HTTP export route (`http-routes.cjs`, frozen in this change) writes its
     // audit detail from `totalRowCount` / `activeRowCount` / `headers.length` and never reads
-    // either key — so an operator whose workbook came out short cannot yet see this number
+    // any of these keys — so an operator whose workbook came out short cannot yet see this number
     // anywhere. Wiring it into the audit detail is the next hand's job; until then "有据可查"
     // applies to the module, not to the product.
     collapsedRowCount: ordering.collapsedRowCount,
     treeOrdered: ordering.treeOrdered,
+    treeIdentity: ordering.treeIdentity,
+    treeDegraded: ordering.treeDegraded,
     // Values-free: logical field ids the bound target does not bind, so an export that came out
     // blank in a column can be told apart from a deployment that never had that column.
     unresolvedColumns: resolution.unbound.slice(),
@@ -825,7 +944,13 @@ module.exports = {
     sortExportRows,
     compareSiblingRows,
     displayDedupeKey,
+    nameAndSpecDisplayKey,
+    rowCarriesSpecColumn,
     orderRowsAsBomTree,
+    encodeBomPath,
+    bomPathTokensOf,
+    pathIdentityOf,
+    componentIdentityOf,
     rowSortNo,
     unmapRow,
     READ_PAGE_LIMIT,

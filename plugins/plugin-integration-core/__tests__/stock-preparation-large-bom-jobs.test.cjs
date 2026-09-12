@@ -1703,7 +1703,10 @@ async function testSuccessfulRunHasNoReadFailureKeys() {
   ])
 }
 
-async function completedJobWithArtifact({ storage = createStorage(), jobId = 'job-plan-1' } = {}) {
+// `extensionFieldIds` (optional) lands on the job's stored `actionSnapshot` exactly as the deploy-time
+// action config does (`cloneJson(action)` at enqueue) — the seam the background planner reads its
+// DECLARED extension band from. Omitted => the action is byte-identical to the pre-F1c one.
+async function completedJobWithArtifact({ storage = createStorage(), jobId = 'job-plan-1', extensionFieldIds } = {}) {
   const source = createSourceAdapter(plmData())
   await createLargeBomBackgroundExpansionJob({
     storage,
@@ -1712,6 +1715,7 @@ async function completedJobWithArtifact({ storage = createStorage(), jobId = 'jo
       actionId: 'plm.stock-preparation.pull-bom.v1',
       source: { kind: 'data-source:sql-readonly', externalSystemId: 'SOURCE_BINDING_SHOULD_NOT_APPEAR' },
       target: { sheetId: 'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR' },
+      ...(extensionFieldIds === undefined ? {} : { extensionFieldIds }),
     },
     parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
     principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
@@ -1782,7 +1786,23 @@ async function testPlannerHandoffRejectsMalformedExistingRows() {
 }
 
 async function testPlannerHandoffStoresValuesFreePlanEvidence() {
-  const { storage, jobId } = await completedJobWithArtifact()
+  // F1c: the action DECLARES 当前组件排序号, so the background planner must fill it from the
+  // artifact rows' `sortLine` exactly as the interactive dry-run does (table-actions.cjs threads
+  // `action.extensionFieldIds`; this lane threads `job.actionSnapshot.extensionFieldIds`). The
+  // pack-aware ownership projection is the second gate: the column must be INSTALLED as a
+  // plm_system extension for `pickFields` to let it into the add record at all.
+  const { storage, jobId } = await completedJobWithArtifact({ extensionFieldIds: ['ext_componentSortNo'] })
+  const installedFieldProperties = [{
+    logicalId: 'ext_componentSortNo',
+    name: 'ext_componentSortNo',
+    type: 'number',
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system', preserveOnRefresh: false, required: false, key: false,
+        extension: true, packId: 'factory-a', packVersion: '1.0.0',
+      },
+    },
+  }]
   const planned = await planLargeBomBackgroundExpansionJob({
     storage,
     ...TEST_SCOPE,
@@ -1795,6 +1815,7 @@ async function testPlannerHandoffStoresValuesFreePlanEvidence() {
       componentName: 'EXISTING_TARGET_VALUE_SHOULD_NOT_APPEAR',
       active: true,
     }],
+    installedFieldProperties,
     runId: 'large-bom-plan-run',
     plannedAt: '2026-06-08T00:02:00.000Z',
     now: () => '2026-06-08T00:03:00.000Z',
@@ -1806,6 +1827,19 @@ async function testPlannerHandoffStoresValuesFreePlanEvidence() {
   assert.equal(planned.planArtifact.plan.counts.add, 2, 'private plan keeps decisions for future C4')
   assert.equal(planned.planArtifact.plan.counts.manual_confirm, 0)
   assert.equal(planned.planArtifact.existingRowCount, 1)
+  // The wiring under test: 明细栏 sort_id (order detail 1 for the root, BOM detail 2 for the child)
+  // reaches the pack column ONLY through `extensionFieldIds: job.actionSnapshot.extensionFieldIds`
+  // in planLargeBomBackgroundExpansionJob. Dropping that line (extensionFieldIds: undefined) makes
+  // both records lose the key — this is the assertion that turns red.
+  const addRecords = planned.planArtifact.plan.decisions
+    .filter((decision) => decision.decision === 'add')
+    .map((decision) => decision.record)
+  assert.equal(addRecords.length, 2)
+  const rootRecord = addRecords.find((record) => record.depth === 0)
+  const childRecord = addRecords.find((record) => record.depth === 1)
+  assert.ok(rootRecord && childRecord, 'the artifact holds one root row and one child row')
+  assert.equal(rootRecord.ext_componentSortNo, 1, 'background plan fills 当前组件排序号 for the root from the order detail sort_id')
+  assert.equal(childRecord.ext_componentSortNo, 2, 'background plan fills 当前组件排序号 for the child from the BOM detail sort_id')
   const publicJob = publicBackgroundExpansionJob(planned)
   assert.equal(publicJob.planRevisionPresent, true)
   assert.equal(publicJob.evidence.plan.counts.add, 2)
