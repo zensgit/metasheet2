@@ -237,7 +237,9 @@ X02 的第一版（#5628 `c2b482c8b`）修得很像样：三条充要条件、18
 | E | X02 bare `concat` 全部部件缺失时不再写空串（**叠在 #5628 上**） | **#5652** | 正式，CI 11/11 绿 | 未起复核（叠加小刀；两套网格 3060+3780 组差异盘点自证：新增 980 组差异 100% 为「空串→不写」） | 更新 `transform-source-field-absent-{design,verification}-20260911.md` |
 | F | G52 `join.on` 改结构化并与 `join.type` 一起过白名单（**叠在 #5614 上**） | **#5653** | 正式，CI 10/10 绿 | 未起复核（叠加小刀；实测证明写入门兜不住外泄型读，是硬化的价值所在） | `mssql-join-on-hardening-{design,verification}-20260912.md` |
 | — | #5638 补漏：托管表 schema 写门补到第二个能力解析器，双解析器一致性测试 | **#5638**（47044632f） | CI 47/47 绿 | 分类为潜伏（7 个调用方零读取）；**新发现第三个解析器**同缺，审批域，只备案 | 更新 `managed-sheet-schema-write-gate-{design,verification}-20260911.md` |
-| — | #5611 对账 known 集并上 G02 三码，与 #5650 解耦（任一顺序绿） | **#5611** | 收口 ebb2af6ac，CI 跑中 | C 终审裁定的唯一可接受处置；单独态/组合态各 19/19，两方向变异均红；宽限 = 写死清单 ∩ 兄弟迁移实际种子 | 更新 `integration-permission-codes-seed-verification-20260910.md` §3.2 |
+| — | #5611 对账 known 集并上 G02 三码，与 #5650 解耦（任一顺序绿） | **#5611** | 收口 ebb2af6ac，CI 26 绿 | C 终审裁定的唯一可接受处置；单独态/组合态各 19/19，两方向变异均红；宽限 = 写死清单 ∩ 兄弟迁移实际种子 | 更新 `integration-permission-codes-seed-verification-20260910.md` §3.2 |
+| — | **#5597 对 main 的语义冲突归并**：main 后合入的 #5651 在 `workbench.ts` 引入同名同概念 `IntegrationApiError`/`integrationApiErrorCode`（普通 Error + 可选字段 + 形状夹紧 vs 本支的子类）；按 main 形状归并，本支独有的 F01 `details.code` 回退改为 `integrationEnvelopeErrorCode` 的回退（回退值同样过 pattern） | **#5597**（11e017d92） | 归并后 GitHub 判可合并，CI 23 绿 | 归并代理在 `git merge` 后停摆（600s 无进展，文件已解好未 add），协调方接手收尾；两侧 spec 69/69 + 本支另三 spec 76/76、vue-tsc 0；变异：删 details.code 回退 1 红、删 pattern 夹紧 2 红 | 无新文档（PR 正文补归并说明） |
+| G | **issue #5655 复核升级**：`requireSafetyCheck` 是确认流程不是授权门；`POST /safety/disable` 按 LOW 把关且零角色门，可关掉进程单例确认层，之后 `PUT|DELETE /data/bulk` 对任意已认证非 admin 开放（白名单表原样写/删、无租户注入）。同文件 12 个只靠确认层把关的写端点在其前补既有 `requireAdminRole()`（核心 4 + 同规则 8，全仓零调用点） | **#5665**（86178de38 + 3c79b2059） | CI 26 绿（收口头 3c79b2059） | 25 代理，11 条发现 → 双反驳后 0 存活；终审「修完 X 再合」，X 全是文档行（漏记同挂载面 `/safety/rules` 洞 → issue #5667、四处绝对句限定、admin 口径 = `user_roles` 行、CI lane 引用订正），五条逐一实读核实后收口 3c79b2059；判断题 5 项见 8.5 | `admin-safety-toggle-require-admin-{design,verification}-20260912.md` |
 
 另开 issue **#5655**：`PUT /api/admin/data/bulk` 对 `data_sources` 原样落库、绕过 #5648 的拒收与加密——门是 `requireSafetyCheck` 而非 `requireAdminRole`，等价性待复核。
 
@@ -267,3 +269,31 @@ X02 的第一版（#5628 `c2b482c8b`）修得很像样：三条充要条件、18
 3. **A 的两处设计判断**：3xx 判终态但不自动停用；拒绝分支写库失败时「吞掉、那一次拒绝入账丢失」。若要求账本强一致，应改成把写移出易失窗口（FS-8）。
 4. **合并前置**（A、B 各一条只读盘点 SQL；C 的三面 0 行前置）仍需真库，本窗口未执行。
 5. **叠加关系**：#5649 → #5619、#5652 → #5628、#5653 → #5614；父 PR 合并后 GitHub 自动改基，需重跑。
+6. **#5655 的升级结论与 #5665 的唯一判断题**。只读复核判定「确认流程 ≠ 仅平台管理员」——且真正的打穿路径不是伪造确认（`/safety/confirm` 确有 admin 门、令牌绑定 initiator），而是零角色门的 `/safety/disable`（对未改 main 以非 admin 整链复现：disable 200 → bulk PUT/DELETE 200 且落库调用各 1 次；三条 LOW 端点修前也直接 200）。修复 PR 把同文件 12 个只靠确认层的写端点一并加门：核心 4 条（enable/disable/bulk PUT/DELETE）无争议；另 8 条（cache/clear、metrics/reset、dlq×4、ratelimits×2）按同一规则加、全仓零调用点，但静态搜索看不见运维脚本/监控代理用非 admin 服务令牌调它们——要更窄的爆炸半径可以摘掉。`data_sources` 是否从 `validTables` 摘掉仍待裁决；`POST /health/check` 匿名可触发全量健康扫描、plugins reload-unsafe 的 admin 判据（token roles）与 `requireAdminRole`（`user_roles` 直查）不同源，只登记。
+
+### 8.6 合并门复验：组合树第三次构建（main + 27 支）
+
+按用户第二轮的合并门规则（「试合成功也不等于组合后的测试通过」），在 #5636（main 0ffc5e355 + 20 支）之后 main 又前进、五支改头、新增 7 支，重建组合树：草稿 PR **#5657**（跑完即关，勿合并），脚本 `stack-all-27.sh`（20 + #5638 + 第三窗口 6 支，叠加子支排在父支之后）。**两处新冲突**：
+
+1. **#5597 对 main 语义冲突**（`apps/web/src/services/integration/workbench.ts`）：main 后合入的 #5651 引入了与 #5597 同名同概念的 `IntegrationApiError` / `integrationApiErrorCode`，形状不同（普通 `Error` + 可选 `code/status/details` + `INTEGRATION_ERROR_CODE_PATTERN` 夹紧 vs `class extends Error`）。处置：在 #5597 侧 merge（不 rebase）origin/main，以 main 的形状为准，#5597 独有的价值——信封顶层 code 是类名（`PipelineRunnerError`）时产品码在 `details.code`——改为回退且回退值同样过 pattern；调用点只用 `integrationApiErrorCode(error)`，无需改动。GitHub 上 #5597 由不可合并变回可合并。
+2. **#5648 × #5593 邻接冲突**（`packages/core-backend/src/routes/data-sources.ts`）：两支在 `sanitizeConfig` 之后同一位置各插一段 JSDoc + 函数（`referenceCountsForDisplay` / `refuseConnectionSecrets`），共享的 `/**` 开头被 git 提成公共上下文。纯文本冲突，两段都保留；写了 `merge-both-added-doc.py` 确定性解掉并由 rerere 记住。**后合者只需解这一处**（main 自 #5648 基点起没动过该文件）。
+
+脚本两处订正：合并计数改 `--first-parent`（原计数把分支内部的 merge-main 提交也算进去，27 支时数出 31）；多文件冲突标记检查改成只认 `<<<<<<< ` / `>>>>>>> `（`=======` 会撞 markdown 的 setext 标题）。
+
+**两次构建**：第一次（988dc7ab7，26 支、暂缺 #5597）CI 62 项全绿；第二次（e1f42a7c7，main + 全部 27 支）CI 62 项全绿 / 0 失败 / 1 skipped（条件泳道）；#5657 已按约定关闭，分支保留。第二次即为本窗口的合并门结果；#5665 在其后开出，不在这棵树里。
+
+### 8.7 v4 变更摘要草稿条目（第三窗口部分；不开交付指南 v4 节，切版本时直接用）
+
+> **托管表（插件登记表）的字段结构写入只允许管理员**（#5638）。导入默认建列、字段管理面板的新建/改类型/删除，对非 admin 在能力层 fail-closed 拒绝；两个能力解析器同判。
+
+> **自动化订阅投递（webhook）不再投向内网/回环/链路本地地址，且不跟随重定向**（#5649）。指向内网地址或会 3xx 跳转的订阅会以闭集码（`WEBHOOK_TARGET_REJECTED:*` / `redirect-not-allowed`）失败并记入投递日志；不自动停用订阅，需人工改地址。
+
+> **外接数据源 `connection` 下不再接受口令类键**（#5648）。创建/测试/更新时 `connection` 里出现 `password`/`secret`/`token` 等形状的键一律 400 `DATA_SOURCE_CONNECTION_SECRET_REJECTED`，口令只能放 `credentials`；已存的这类键在读取时被剥离、不再回显。合并前置：一次只读盘点（含 `connection.baseURL` 里的 `user:pw@`）。
+
+> **数据源权限码新增 `data_sources:use / rotate / share`，凭据轮换改为 `rotate` 独占**（#5650）。三码只种不发权；持 `write` 无 `rotate` 者不能就地轮换凭据（`PUT /:id/credentials` 403）。合并前置：三面（`role_permissions` / `user_permissions` / `users.permissions`，后者有 jsonb 与 TEXT[] 两形状）0 行盘点，并给管理员角色授 `rotate`。
+
+> **映射转换的 bare `concat` 在全部部件缺失时不再写空串**（#5652）。与 #5628 同一原则：源字段不存在就不写目标，不再把目标覆盖成 `""`。
+
+> **SQL Server 源的 `join.on` 改为结构化对象**（#5653）。字符串形式的 ON 一律 400 `SQLSERVER_JOIN_ON_UNSUPPORTED` 且不发 SQL；`join.type` 过白名单。
+
+> **`/api/admin` 下 12 个写端点改为仅管理员**（#5665）。安全确认层的开关（enable/disable）、bulk 写/删、缓存清理、指标/限流重置、DLQ 重试/清理，非 admin 一律 403 `ADMIN_REQUIRED`；管理员流程不变。
