@@ -185,6 +185,7 @@ interface HarnessOpts {
   reject?: unknown
   webhookOver?: Record<string, unknown>
   nativeFetch?: boolean
+  fetchImpl?: typeof fetch
   dueDeliveries?: Record<string, unknown>[]
   failWrite?: FailWrite
 }
@@ -203,7 +204,7 @@ function makeHarness(opts: HarnessOpts = {}): Harness {
   })
   const svc = new WebhookService(
     createMockDb(state),
-    (opts.nativeFetch ? NATIVE_FETCH : (fetchSpy as unknown as typeof fetch)) as typeof fetch,
+    opts.fetchImpl ?? (opts.nativeFetch ? NATIVE_FETCH : (fetchSpy as unknown as typeof fetch)),
     opts.lookup ?? publicLookup,
   )
   return {
@@ -498,6 +499,105 @@ describe('subscription delivery — redirect posture', () => {
     await h.svc.executeDelivery(pendingDelivery())
 
     expect(h.deliveryWrites().at(-1)).toMatchObject({ status: 'success', http_status: 200 })
+  })
+})
+
+// Exercise the native fetch body/abort lifecycle, without DNS, sockets or a real receiver.
+// Unlike a Response stub, this dispatcher obeys body backpressure: an unread finite body
+// cannot finish unless the service consumes it or aborts the first-hop transport.
+function nativeBodyDelivery(status: number, openBody = false) {
+  const state = { calls: 0, chunks: 0, completed: false, aborted: false }
+  let signal: AbortSignal | undefined
+  let response: Response | undefined
+  const dispatcher = {
+    dispatch(_options: unknown, handler: {
+      onConnect(abort: () => void): void
+      onHeaders(code: number, headers: Buffer[], resume: () => void, statusText: string): void
+      onData(bytes: Buffer): boolean
+      onComplete(trailers: Buffer[]): void
+    }) {
+      state.calls += 1
+      handler.onConnect(() => { state.aborted = true })
+      const pump = () => {
+        if (state.aborted || openBody) return
+        while (state.chunks < 4) {
+          state.chunks += 1
+          if (!handler.onData(Buffer.alloc(65_536, 'x'))) return
+        }
+        state.completed = true
+        handler.onComplete([])
+      }
+      queueMicrotask(() => {
+        // No Location: an ordinary follow+text client would consume this finite 302 too.
+        handler.onHeaders(status, [], () => queueMicrotask(pump), 'Synthetic')
+        pump()
+      })
+      return true
+    },
+  }
+  const fetchImpl: typeof fetch = async (input, init) => {
+    signal = init?.signal ?? undefined
+    // `dispatcher` is Node fetch's transport injection seam, not a web RequestInit member.
+    response = await NATIVE_FETCH(input, { ...init, dispatcher } as RequestInit)
+    return response
+  }
+  return {
+    state,
+    fetchImpl,
+    isAborted: () => signal?.aborted === true,
+    cleanup: async () => { await response?.body?.cancel().catch(() => undefined) },
+  }
+}
+
+describe('subscription delivery — native redirect response cleanup', () => {
+  test.each([
+    { status: 302, openBody: false, ledgerFailure: false },
+    { status: 307, openBody: true, ledgerFailure: false },
+    { status: 308, openBody: false, ledgerFailure: true },
+  ])('releases $status before bookkeeping (open=$openBody, write failure=$ledgerFailure)', async ({ status, openBody, ledgerFailure }) => {
+    vi.useFakeTimers()
+    const transport = nativeBodyDelivery(status, openBody)
+    const abortAtWrites: boolean[] = []
+    const h = makeHarness({
+      fetchImpl: transport.fetchImpl,
+      failWrite: (write) => {
+        abortAtWrites.push(transport.state.aborted)
+        if (ledgerFailure && write.set.status === 'failed') return new Error('synthetic ledger failure')
+        return undefined
+      },
+    })
+    spyLogs()
+    try {
+      await h.svc.executeDelivery(pendingDelivery())
+      expect(transport.state.calls).toBe(1)
+      expect(transport.state.completed).toBe(false)
+      expect(transport.state.chunks).toBeLessThan(4)
+      expect(transport.state.aborted).toBe(true)
+      expect(transport.isAborted()).toBe(true)
+      expect(abortAtWrites.length).toBeGreaterThan(0)
+      expect(abortAtWrites.every(Boolean)).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+      // Keep the existing ledger-failure recovery policy; only transport ownership changes.
+      expect(h.deliveryWrites().at(-1)?.status).toBe(ledgerFailure ? 'pending' : 'failed')
+    } finally {
+      await transport.cleanup()
+      vi.useRealTimers()
+    }
+  })
+
+  test('still reads a successful finite body completely before recording success', async () => {
+    const transport = nativeBodyDelivery(200)
+    const h = makeHarness({ fetchImpl: transport.fetchImpl })
+    try {
+      await h.svc.executeDelivery(pendingDelivery())
+      expect(transport.state).toEqual({ calls: 1, chunks: 4, completed: true, aborted: false })
+      expect(transport.isAborted()).toBe(false)
+      expect(h.deliveryWrites().at(-1)).toMatchObject({
+        status: 'success', http_status: 200, response_body: 'x'.repeat(4 * 65_536),
+      })
+    } finally {
+      await transport.cleanup()
+    }
   })
 })
 

@@ -526,6 +526,10 @@ export class WebhookService {
       clearTimeout(timer)
 
       if (isRefusedRedirectStatus(response)) {
+        // We will not consume this response. Close the first-hop transport before awaiting
+        // bookkeeping, which can fail or stall after the header timeout has been cleared.
+        // Aborting releases native fetch's unread body without inspecting body or Location.
+        controller.abort()
         // Checked BEFORE the body is read, so nothing from the redirect response - `Location` above all
         // - is read, logged or persisted. TERMINAL, unlike the target refusal above: a retry would
         // re-send the same body to the same first hop, which answers 3xx again; that is real repeated
