@@ -136,7 +136,7 @@
       </p>
       <table v-else class="data-sources__table">
         <thead>
-          <tr><th>名称</th><th>类型</th><th>状态</th><th>连接测试</th><th></th></tr>
+          <tr><th>名称</th><th>类型</th><th>状态</th><th>被引用</th><th>连接测试</th><th></th></tr>
         </thead>
         <tbody>
           <tr v-for="ds in store.items" :key="ds.id" data-testid="ds-row" :data-ds-id="ds.id">
@@ -146,6 +146,24 @@
               <span class="data-sources__status" :class="ds.connected ? 'is-on' : 'is-off'">
                 {{ ds.connected ? '已连接' : '未连接' }}
               </span>
+            </td>
+            <!-- How many 数据工厂 bindings hold this source. THREE states, not two: the server
+                 omits the count when it could not compute it, and rendering that as 未被引用 would
+                 promise a delete the server may still refuse. -->
+            <td data-testid="ds-reference-cell">
+              <template v-if="ds.referenceCount === undefined">
+                <span class="data-sources__muted" data-testid="ds-reference-unknown">未知</span>
+              </template>
+              <template v-else-if="ds.referenceCount > 0">
+                <span class="data-sources__ref" data-testid="ds-reference-count">{{ ds.referenceCount }} 个绑定</span>
+                <a
+                  class="data-sources__ref-link"
+                  data-testid="ds-reference-goto"
+                  :href="bindingsHref"
+                  @click="goToBindings"
+                >去看绑定</a>
+              </template>
+              <span v-else class="data-sources__muted" data-testid="ds-reference-none">未被引用</span>
             </td>
             <td>
               <button
@@ -202,7 +220,7 @@
                   type="button"
                   class="data-sources__btn data-sources__btn--danger"
                   data-testid="ds-delete"
-                  @click="confirmRemove(ds.id, ds.name)"
+                  @click="confirmRemove(ds.id, ds.name, ds.referenceCount)"
                 >删除</button>
               </div>
             </td>
@@ -377,13 +395,26 @@ import {
   type DataSourceType,
 } from '../../data-sources/types'
 import { buildCreatePayload, buildCredentialRotationPayload, buildUpdatePayload } from '../../data-sources/buildPayload'
+import { deleteConfirmMessage } from '../../data-sources/deleteRefusalCopy'
 
-withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
+const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 
-// Fired after a mutation the host may need to react to (create / update / credential rotation /
-// delete). Emitted only on the store's own success answer, never on a failed or rejected call:
-// a host that refetches on every attempt would paint a stale list as if it were fresh.
-const emit = defineEmits<{ (e: 'changed'): void }>()
+// `changed` is fired after a mutation the host may need to react to (create / update / credential
+// rotation / delete). Emitted only on the store's own success answer, never on a failed or rejected
+// call: a host that refetches on every attempt would paint a stale list as if it were fresh.
+//
+// `show-bindings` is a REQUEST, not a mutation: the reference column asks the host to reveal the
+// bindings that hold a source. Its semantics are independent of `changed`, which is unchanged.
+const emit = defineEmits<{ (e: 'changed'): void; (e: 'show-bindings'): void }>()
+
+// 数据工厂's 连接管理 section is where the referencing bindings live. Embedded, that section is
+// this very page, so the link is an in-page anchor and the host is asked to expand its
+// 已配置连接 list; standalone, it is a real navigation into the workbench (the /data-sources
+// route itself now redirects there).
+const BINDINGS_SECTION_ID = 'int-sec-connection'
+const bindingsHref = computed(() =>
+  props.embedded ? '#' + BINDINGS_SECTION_ID : '/integrations/workbench#' + BINDINGS_SECTION_ID,
+)
 
 const PREVIEW_ROW_LIMIT = 100
 const store = useDataSourcesStore()
@@ -762,8 +793,26 @@ function formatCell(value: unknown): string {
   return String(value)
 }
 
-async function confirmRemove(id: string, name: string): Promise<void> {
-  if (typeof window !== 'undefined' && !window.confirm(`删除数据源「${name}」?此操作不可撤销。`)) return
+function goToBindings(event: MouseEvent): void {
+  // Standalone: plain navigation to the workbench anchor, no interception.
+  if (!props.embedded) return
+  event.preventDefault()
+  // The host owns its layout (its 已配置连接 list starts collapsed), so ASK it to reveal the
+  // bindings. The scroll below is only the fallback for a host that does not listen.
+  emit('show-bindings')
+  const section = typeof document === 'undefined' ? null : document.getElementById(BINDINGS_SECTION_ID)
+  if (section && typeof section.scrollIntoView === 'function') {
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
+async function confirmRemove(id: string, name: string, referenceCount?: number): Promise<void> {
+  // The count is the most recent snapshot of the SAME server fact the delete guard enforces —
+  // not a live one. This panel fetches once on mount (below); adding or removing a binding on
+  // this same page only mutates local `systems`, so the snapshot can go stale within a session.
+  // When it is > 0 the dialog names it as a likely refusal, not a guaranteed one. Deliberately no
+  // force affordance: force=true is a platform-admin API action this UI does not expose.
+  if (typeof window !== 'undefined' && !window.confirm(deleteConfirmMessage(name, referenceCount))) return
   if (await store.remove(id)) emit('changed')
 }
 
@@ -798,6 +847,8 @@ onMounted(() => {
 .data-sources__status { font-size: 12px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
 .data-sources__status.is-on { background: #f6ffed; color: #389e0d; }
 .data-sources__status.is-off { background: #f5f5f5; color: #8c8c8c; }
+.data-sources__ref { font-size: 12px; color: #374151; white-space: nowrap; }
+.data-sources__ref-link { display: block; margin-top: 2px; font-size: 12px; color: #2563eb; white-space: nowrap; }
 .data-sources__actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .data-sources__test-result { margin: 6px 0 0; font-size: 12px; max-width: 260px; overflow-wrap: anywhere; }
 .data-sources__test-result.is-ok { color: #237804; }
