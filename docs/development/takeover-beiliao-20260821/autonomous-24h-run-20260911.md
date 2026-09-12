@@ -86,6 +86,8 @@
 
 **r32(`e74b9c14a` = r31 + F1c + peer #5297,09-12 09:46 上 222)**:备份 `pre-r32-20260912-094650.dump`;维护门 WIRED → 后端直连 attempt 7 → 删 flag → 200;upgrade exit 0;web smoke PASS;F1c 标记 6/6 True;事后错误 0 行。F8A(+F9b)进 r33。
 
+**演示项目 2-20241722.1723 重置(owner 裁决 a,09-12 09:53–09:56)**:改前 1141 行全属该项目,人工列(备注/备料状态/毛胚类型/采购回复/仓库确认)全空 → 无人工数据可丢;r32 语义下对旧行 dry-run = update 287 / inactive 551 / manual_confirm 298(`manual_confirm_required`),证实「不删只重拉」会留下 551 行失效 + 298 行待确认;按裁决:`\copy` 导出 1141 行到 `C:\metasheet\outputackups\demo-project-2-20241722.1723-rows.csv`(另有 pre-r32 pg_dump)→ 事务内 DELETE 1141 → 以 origin/main 版 `stock-preparation-scheduled-pull.mjs --apply`(222 上原 tools-r10 版已过时;定时任务 env 未动)重拉:dry-run ready / add 581 → apply 200。**改后 581 行**(2 根 = 总图 + 钣金,69 个父件,最深 5 层);包列填充:当前组件排序号 581、父组件排序号 579(根无)、名称及规格 581、规格 6(只有名称含空格的);后端错误 0 行。**发现**:包列「父组件图号 / 父组件名称」仍 0 行(规划器只派生三列),父件图号/名称只在英文模板列 Parent Component Code/Name(579 行)里 → 派 **F1c-b**(派生这两列,与模板列同源;`ext_spec` 语义与模板 Component Specification 不同,留 owner)。
+
 **F9b(新派,opus + 两路反驳)**:规则侧 `send_notification` 落库到通知中心——根因是全仓没有 `automation.notification` 的监听者,按钮路径已持久化而规则路径 eventBus-only;复用同一 seam `insertRecordSubscriptionNotifications`,成员校验与按钮同量,先写后 emit,模拟不写,表缺失不吞,规则侧不借用按钮的 dedup 表(重复投递语义如实写)。规格 `spec-F9b-rule-notification-persist.md`。
 
 ~~**r31 已备好未 build**~~(已上机,见上):wrapper 加 #5651(`EXTERNAL_SYSTEM_SCOPE_MISMATCH` 字面量计数 ≥ 4)/#5654(upgrade-inplace 含 `MaintenanceFlagPath` + `Assert-MaintenanceFlagOutsideReplaceDirs`;事后 flag 不存在)标记,纯 ASCII、0 控制字符;ship 改为上传 `origin/main` 的 `multitable-onprem-package-upgrade-inplace.ps1`(加 BOM;1382 个非 ASCII 字节)替代 tools-r22 旧本;两份脚本本机 Windows PowerShell 5.1 `Parser::ParseFile` 0 错。基线等 F1c/F8A 裁决后定(合入则 main + 两支,否则 `72caae8de`);夜里上机,**不举 flag**(脚本自己举)。
@@ -182,7 +184,7 @@ nginx 三天日志:502/reset 只在四个升级窗口成簇,窗口外一条都�
 ## 7. 未做与原因(截至 19:20)
 
 - **#5625** 仍等用户回 1/2/3。
-- **演示项目重置**:等 F1c 上机。
+- ~~演示项目重置~~:已做(见 §2.4)。
 - **F8A**:#5660 真库 lane 用例前提修正后重跑 CI → 合入 → r33;**F9b**:工作流在飞。
 - **`multitable-context.api.test.ts:1193` 0x08 守卫失效**:等 F8A 合入后单独小 PR。
 - **规则侧通知落库到通知中心**:F9 登记的独立项。
