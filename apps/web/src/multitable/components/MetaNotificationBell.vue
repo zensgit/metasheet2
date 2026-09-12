@@ -85,7 +85,14 @@ async function toggle(): Promise<void> {
 
 async function onItemClick(n: MetaRecordSubscriptionNotification): Promise<void> {
   if (!n.readAt) void markRead([n.id])
-  emit('navigate', { sheetId: n.sheetId, recordId: n.recordId })
+  // F9b (#5664): non-record-triggered automations (webhook.received / approval.task_created|completed /
+  // schedule) deliver `send_notification` rows with `record_id = ''` — there is no record to locate. The
+  // navigate consumer (onNotificationNavigate in MultitableWorkbench.vue) treats any recordId as a lookup
+  // target and would fetch a nonexistent record, surfacing a confusing "record not found" toast. Skip the
+  // emit entirely for a blank recordId; still mark read and close the panel.
+  if (n.recordId && n.recordId.trim()) {
+    emit('navigate', { sheetId: n.sheetId, recordId: n.recordId })
+  }
   open.value = false
 }
 
