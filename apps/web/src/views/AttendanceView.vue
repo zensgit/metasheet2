@@ -19997,14 +19997,20 @@ function isImportCommitTokenValid(): boolean {
   return Number.isFinite(expiresAt) && expiresAt - Date.now() > 60 * 1000
 }
 
-async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {}): Promise<boolean> {
+async function ensureImportCommitToken(options: { forceRefresh?: boolean; orgId?: unknown } = {}): Promise<boolean> {
   if (options.forceRefresh) {
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   }
   if (isImportCommitTokenValid()) return true
   try {
-    const response = await apiFetch('/api/attendance/import/prepare', { method: 'POST' })
+    const targetOrgId = typeof options.orgId === 'string' && options.orgId.trim()
+      ? options.orgId.trim()
+      : normalizedOrgId()
+    const response = await apiFetch('/api/attendance/import/prepare', {
+      method: 'POST',
+      body: JSON.stringify(targetOrgId ? { orgId: targetOrgId } : {}),
+    })
     if (response.status === 404) {
       // Legacy backend: commit token endpoints not available.
       importCommitToken.value = ''
@@ -20056,7 +20062,7 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
 
     const remainingSample = Math.max(1, plan.sampleLimit - aggregatedItems.length)
     const chunkPayload = plan.buildPayload(chunkIndex, remainingSample)
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: chunkPayload.orgId })
     if (!tokenOk) throw new Error(tr('Failed to prepare import token', '准备导入令牌失败'))
     if (importCommitToken.value) chunkPayload.commitToken = importCommitToken.value
 
@@ -20148,7 +20154,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
     message: tr('Queued async preview job.', '已排队异步预览任务。'),
   }
 
-  const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+  const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
   if (!tokenOk) return true
   if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -20165,7 +20171,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
     if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
       importCommitToken.value = ''
       importCommitTokenExpiresAt.value = ''
-      const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+      const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
       if (!refreshed || !importCommitToken.value) {
         throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
       }
@@ -20278,7 +20284,7 @@ async function previewImport() {
       message: null,
     }
 
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
     if (!tokenOk) {
       if (importPreviewTask.value) {
         importPreviewTask.value = {
@@ -20484,7 +20490,7 @@ async function runImport() {
   applyImportScalabilityHints(payload, { mode: 'commit' })
   importLoading.value = true
   try {
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
     if (!tokenOk) return
     if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -20505,7 +20511,7 @@ async function runImport() {
         } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
           importCommitToken.value = ''
           importCommitTokenExpiresAt.value = ''
-          const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+          const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
           if (!refreshed || !importCommitToken.value) {
             throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
           }
@@ -20574,7 +20580,7 @@ async function runImport() {
       } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
-        const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+        const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
         if (!refreshed || !importCommitToken.value) {
           throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
         }

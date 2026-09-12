@@ -846,7 +846,7 @@ async function run() {
   let tPreview1 = tPreview0
   const previewAsyncIdempotencyKey = `${runId}-preview`
   for (let attempt = 1; attempt <= previewRetryAttempts; attempt += 1) {
-    const prepPreview = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    const prepPreview = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
     assertOk(prepPreview, `POST /attendance/import/prepare (preview attempt ${attempt})`)
     const commitTokenPreview = prepPreview.body?.data?.commitToken
     if (!commitTokenPreview) die(`prepare (preview attempt ${attempt}) did not return commitToken`)
@@ -1016,7 +1016,7 @@ async function run() {
   let finalAsyncJob = null
   let finalAsyncJobId = null
   for (let attempt = 1; attempt <= activeCommitRetryAttempts; attempt += 1) {
-    const prepCommit = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
+    const prepCommit = await apiFetch('/attendance/import/prepare', { method: 'POST', body: JSON.stringify({ orgId }) })
     assertOk(prepCommit, `POST /attendance/import/prepare (commit attempt ${attempt})`)
     const commitTokenCommit = prepCommit.body?.data?.commitToken
     if (!commitTokenCommit) die(`prepare (commit attempt ${attempt}) did not return commitToken`)

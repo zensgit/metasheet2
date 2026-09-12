@@ -1051,6 +1051,9 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # batch before wiring. The same token is added to multitable-web-guard.yml's own run-list (two-point
 # discipline, header of this file), together with path triggers for the spec, MetaRecordFieldsPanel.vue
 # and the new MetaRecordFieldSection.vue, which that advisory guard previously did not trigger on.
+# Attendance import token/org binding: both specs are also listed in attendance-web-guard.yml;
+# keep their execution explicit in the always-on required lane.
+npx vitest run attendance-import-preview-regression.spec.ts useAttendanceAdminImportWorkflow.spec.ts --reporter=dot || exit $?
 # Attendance report closeout: this spec is also listed in attendance-web-guard.yml; keep its
 # required-lane execution explicit and fail the script if the dedicated run fails.
 npx vitest run attendance-punch-outcome --reporter=dot || exit $?

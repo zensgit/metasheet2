@@ -23595,6 +23595,23 @@
             "bearerAuth": []
           }
         ],
+        "requestBody": {
+          "required": false,
+          "description": "Send the same organization identifier used by the subsequent preview or commit request.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "orgId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "OK",
