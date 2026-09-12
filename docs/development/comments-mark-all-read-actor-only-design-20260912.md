@@ -106,6 +106,13 @@ const count = await commentService.markAllCommentsRead(spreadsheetId, context.us
    JWT"；代码侧该开关只剩 `src/config.ts:71,77` / `src/config/index.ts:67` 的配置读取。文档与实际链路是否
    还一致要连同残余 2 一起核，改文档前先定结论。
 
+### 复核补记（对抗复核 23 代理，10 条 → 0 存活，终审「可合」）
+
+- `docs/development/collab-week1-week2-dev-verification-20260414.md:199-206` 的示例仍教发 `userId`，且响应形状（`markedCount`）自 6358ba3b7 起就与实现不符——无消费方、非 OpenAPI 契约，登记为过时文档。
+- `comments.ts:126-131` 的 G-8 注释点名 `resolve`（`:585-598`）无作者/sheet 门是既有跟进项；「任何能评论者可 resolve」是否出货语义待裁决。
+- §2 第 5 条的 grep 摘要精确口径：`mark-all-read` 全仓 5 处命中、2 个无关端点 + 本端点 + 两个 spec。
+- 终审核过同 router 17 条路由：身份来源全是 `context.userId` 或 `getUserId(req)`，**已无同形端点**；`mst_` 令牌路径（`api-token-auth.ts:80-83`）的 `req.user.id` 是令牌创建者，不可由请求体指定。
+
 ## 7. 不确定项
 
 - 是否存在仓库外的老客户端（移动端/脚本）真的在发 `userId`：无法证伪；本修法对它们只是"改成标自己的已读"，

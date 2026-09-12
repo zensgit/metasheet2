@@ -160,6 +160,18 @@ describe('mark-all-read 只认认证主体', () => {
     expect(commentService.markAllCommentsRead).toHaveBeenCalledWith('sheet-1', ACTOR, [])
   })
 
+  it('空串 userId：仍按 schema 拒 400，服务零调用（钉住「保留字段但忽略」不改状态码的承诺，#5682 复核）', async () => {
+    const commentService = buildCommentService()
+    pinned.setApp(buildApp(commentService))
+
+    await request(pinned.url())
+      .post('/api/multitable/sheet-1/comments/mark-all-read')
+      .send({ userId: '' })
+      .expect(400)
+
+    expect(commentService.markAllCommentsRead).not.toHaveBeenCalled()
+  })
+
   it('未认证：真 rbacGuard 401，服务不被调用', async () => {
     const commentService = buildCommentService()
     pinned.setApp(buildApp(commentService, false))

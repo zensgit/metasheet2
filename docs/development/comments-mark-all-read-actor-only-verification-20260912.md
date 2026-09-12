@@ -101,7 +101,7 @@ Received:
 
 ## 4. 相邻套件
 
-`grep -rl "comments.ts\|commentsRouter\|markAllCommentsRead" packages/core-backend/tests` → 8 个文件，逐个跑：
+`grep -rl "comments.ts\|commentsRouter\|markAllCommentsRead" packages/core-backend/tests` → 9 个文件（复核订正：原文写 8），逐个跑：
 
 | 文件 | 结果 |
 | --- | --- |
