@@ -13,11 +13,21 @@ import { createHmac } from 'crypto'
 import { AutomationExecutor, type AutomationDeps } from '../../src/multitable/automation-executor'
 import { EventBus } from '../../src/integration/events/event-bus'
 
+/**
+ * G05: `send_webhook` is now SSRF-gated, and the gate resolves the target name. Inject a
+ * deterministic PUBLIC resolution (TEST-NET-3, RFC 5737 — reserved for documentation and not
+ * routable) so these specs never touch real DNS: without it the run depends on the network and
+ * `example.test` (RFC 6761, guaranteed NXDOMAIN) stalls for the resolver timeout, then fails closed.
+ * This seam only supplies ADDRESSES — the gate still judges them, so it cannot hide a regression.
+ */
+const PUBLIC_LOOKUP = async () => [{ address: '203.0.113.10', family: 4 }]
+
 function deps(fetchFn: typeof fetch): AutomationDeps {
   return {
     eventBus: new EventBus(),
     queryFn: vi.fn(async () => ({ rows: [], rowCount: 0 })),
     fetchFn,
+    ssrfLookupFn: PUBLIC_LOOKUP,
   }
 }
 

@@ -8,6 +8,13 @@
  * (lifecycleFor onStart→onSettled→onSkipped → listByExecution + raw-SQL confirm).
  * Runs only with DATABASE_URL (plugin-tests.yml real-DB job).
  */
+/**
+ * G05 note: the rule-driven `send_webhook` action is now SSRF-gated, and the gate RESOLVES a target name.
+ * These specs use a TEST-NET-3 literal (RFC 5737, documentation-only and not routable) because the gate
+ * accepts a public IP literal WITHOUT any DNS lookup — so the run stays deterministic offline. The previous
+ * `example.test` host is RFC 6761 guaranteed-NXDOMAIN: the gate would fail closed on it (and stall for the
+ * resolver timeout first). The stubbed fetchFn still means no packet is ever sent.
+ */
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -112,8 +119,9 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
   // WorkflowJob plane (C1), and a legacy rule writes none. Unit tests mock the executor and the
   // lifecycle test above drives lifecycleFor directly; only this exercises executeRule's
   // job-factory wiring (the one path never run as a single chain). A throwing fetchFn makes any
-  // webhook action fail fast; `onStart` writes a job BEFORE the action, so ≥1 job persists
-  // regardless of the action outcome.
+  // webhook action fail fast — the target is a PUBLIC literal so the throw, not the SSRF gate, is
+  // what fails it; `onStart` writes a job BEFORE the action, so ≥1 job persists regardless of the
+  // action outcome.
   test('acceptance seam: executeRule opt-in writes per-action jobs (C1); opt-out writes none', async () => {
     const svc = new AutomationService(
       new EventBus(),
@@ -127,7 +135,12 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
       name: 'a6-1 seam',
       sheetId: `sheet_seam_${TS}`,
       trigger: { type: 'record.created', config: {} },
-      actions: [{ type: 'send_webhook', config: { url: 'http://127.0.0.1:1/blocked' } }],
+      // G05: a PUBLIC literal on purpose. This seam's subject is "a throwing fetchFn makes the action
+      // fail, and onStart/onSettled still bracket it" — an internal URL here would be refused at the
+      // gate, so the step would fail without the fetchFn ever being called and the catch branch in
+      // `executeSendWebhook`'s retry loop would lose its only coverage. The gate's own coverage lives in
+      // the dedicated case below, not here.
+      actions: [{ type: 'send_webhook', config: { url: 'https://203.0.113.10/blocked' } }],
       enabled: true,
       createdBy: '',
       createdAt: new Date(TS).toISOString(),
@@ -173,6 +186,55 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
     }
   })
 
+  // G05 companion to the seam above. Same job plane, opposite failure source: an INTERNAL target must be
+  // refused by the SSRF gate BEFORE any dispatch. Kept as its own case on purpose — while the seam above
+  // still targeted loopback, it was green because of this gate, so the "throwing fetchFn" wiring it claims
+  // to prove (and the catch branch in the executor's retry loop) had no guard at all.
+  test('G05 gate: an internal webhook target fails the run with WEBHOOK_TARGET_REJECTED and zero fetch attempts', async () => {
+    let fetchCalls = 0
+    const svc = new AutomationService(
+      new EventBus(),
+      db as never,
+      (async () => ({ rows: [], rowCount: 0 })) as never,
+      (async () => {
+        fetchCalls += 1
+        throw new Error('fetchFn must not be reached for an internal target')
+      }) as never,
+    )
+    const rule = {
+      id: `atr_seam_gate_${TS}`,
+      name: 'a6-1 seam gate',
+      sheetId: `sheet_seam_gate_${TS}`,
+      trigger: { type: 'record.created', config: {} },
+      actions: [{ type: 'send_webhook', config: { url: 'http://127.0.0.1:1/blocked' } }],
+      enabled: true,
+      createdBy: '',
+      createdAt: new Date(TS).toISOString(),
+      executionMode: 'workflow_job_v1',
+    }
+    const event = { sheetId: rule.sheetId, recordId: `rec_seam_gate_${TS}`, data: {} }
+    let execId = ''
+    try {
+      const exec = await svc.executeRule(rule as never, event)
+      execId = exec.id
+      expect(exec.status).toBe('failed')
+      expect(exec.steps).toHaveLength(1)
+      expect(String(exec.steps[0].error)).toMatch(/^WEBHOOK_TARGET_REJECTED:/)
+      expect(fetchCalls).toBe(0) // the whole point: nothing left the process
+      const jobRows = await q(
+        'SELECT status, error FROM multitable_automation_jobs WHERE execution_id = $1',
+        [exec.id],
+      )
+      expect(jobRows.rows).toHaveLength(1)
+      expect(jobRows.rows[0].status).toBe('failed')
+    } finally {
+      if (execId) {
+        await q('DELETE FROM multitable_automation_jobs WHERE execution_id = $1', [execId])
+        await q('DELETE FROM multitable_automation_executions WHERE id = $1', [execId])
+      }
+    }
+  })
+
   test('A6-3-1 seam: condition_branch persists parent, selected child, and downstream C1 jobs', async () => {
     const urls: string[] = []
     const svc = new AutomationService(
@@ -193,12 +255,12 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
             key: 'vip',
             label: 'VIP',
             conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'vip' }] },
-            actions: [{ type: 'send_webhook', config: { url: 'https://example.test/vip' } }],
+            actions: [{ type: 'send_webhook', config: { url: 'https://203.0.113.10/vip' } }],
           },
           {
             key: 'standard',
             conditions: { logic: 'and', conditions: [{ fieldId: 'tier', operator: 'equals', value: 'standard' }] },
-            actions: [{ type: 'send_webhook', config: { url: 'https://example.test/standard' } }],
+            actions: [{ type: 'send_webhook', config: { url: 'https://203.0.113.10/standard' } }],
           },
         ],
       },
@@ -228,7 +290,7 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
           trigger: { type: 'record.created', config: {} },
           actions: [
             branchAction,
-            { type: 'send_webhook', config: { url: 'https://example.test/after' } },
+            { type: 'send_webhook', config: { url: 'https://203.0.113.10/after' } },
           ],
           enabled: true,
           createdBy: 'u1',
@@ -244,7 +306,7 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
         status: 'success',
         output: { selectedBranchKey: 'vip', selectedBranchLabel: 'VIP', matched: true },
       })
-      expect(urls).toEqual(['https://example.test/vip', 'https://example.test/after'])
+      expect(urls).toEqual(['https://203.0.113.10/vip', 'https://203.0.113.10/after'])
 
       const raw = await q(
         `SELECT id, step_index, step_key, action_type, status, upstream_job_id
