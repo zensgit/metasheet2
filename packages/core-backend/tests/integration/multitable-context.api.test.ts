@@ -1201,7 +1201,7 @@ describe('Multitable context API', () => {
   test('ANTI-ORACLE: a write-only operator gets 403 for a MISSING sheet, same as for an existing one', async () => {
     const handler = async (sql: string) => {
       if (sql.includes('FROM meta_sheets') && sql.includes('WHERE id = $1')) return { rows: [], rowCount: 0 }
-      if (/^\s*(UPDATE|DELETE)\s+(FROM\s+)?meta_sheets/i.test(sql)) {
+      if (/^\s*(UPDATE|DELETE)\s+(FROM\s+)?meta_sheets\b/i.test(sql)) {
         throw new Error('an unauthorized actor must never reach the write')
       }
       { const cr = configRevisionNoop(sql); if (cr) return cr }
