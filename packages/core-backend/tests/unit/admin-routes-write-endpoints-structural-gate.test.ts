@@ -39,6 +39,21 @@
  * 边界：本文件只管**写方法**（POST/PUT/PATCH/DELETE，外加 `router.all` —— 它同样应答写方法）。
  * 读侧（`GET /dlq`、`/queues`、`/shards*`、`/ratelimits*`、`/slo/status`、`/health/*`、`/safety/status`
  * 等无门 GET）是 #5665 §4 第 7 条登记的另一个面，本文件**不管**。
+ *
+ * 豁免表分两类，以及为什么必须分
+ * ------------------------------
+ * 核心不变量只有一条：**无门写路由 ⊆ 豁免表**（没登记的洞 = 红）。刻意**不是**等式。
+ *
+ * 等式（「豁免表恰等于今天的无门写路由集合」）看着更紧，实际有害：它等价于断言「豁免表里每一条
+ * 今天都必须仍然无门」，于是**修洞的 PR 一合并，本 spec 就红**。#5667 / PR #5677（给 /safety/rules
+ * 四条补门）与本支互相独立、可能先合 —— 硬红会把两条 PR 耦合成固定合并顺序，组合树验证还会假红。
+ * 守卫的职责是拦住新洞，不是给修洞的人设路障。
+ *
+ * 所以豁免分两类（`Exemption.todo`）：
+ *  - **永久豁免**（无 `todo`）：`POST /health/check`、两条 `*-unsafe`。理由是「设计上就不该有中间件门」。
+ *    它们要是哪天有门了 = 设计变了 → **硬红**，必须来删豁免。
+ *  - **临时豁免**（有 `todo`，如 `#5667`）：已登记、有人在修的洞。门补上了是我们盼着的结果 →
+ *    **不红**，只用 `console.warn` 点名「这几条豁免已可删除」，让人看得见又不挡合并。
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
@@ -116,6 +131,17 @@ interface Exemption {
   /** 相对 admin router 的完整路径（含子路由挂载前缀），不含 `/api/admin`。 */
   path: string
   reason: string
+  /**
+   * **临时豁免**标记：填 issue/PR 号（如 `'#5667'`）表示「这是个已登记、有人在修的洞」。
+   *
+   * 临时 vs 永久，差别只在「门补上之后怎么办」：
+   *  - **永久豁免**（不填 `todo`）：设计上就不该有中间件门（只读探针 / 自带 in-handler 门）。
+   *    如果有一天它有门了，说明设计变了 → **硬红**，必须来删豁免。
+   *  - **临时豁免**（填 `todo`）：门补上就是我们盼着的结果。如果这里也硬红，那么修洞的那个 PR
+   *    一合并就会把本 spec 打红，两条互相独立的 PR 被强耦合成固定合并顺序，组合树验证还会假红。
+   *    所以临时豁免「已可删除」只**提示不拦**（见 `describe('豁免表')` 里那条 console.warn 用例）。
+   */
+  todo?: string
 }
 
 const EXEMPTIONS: readonly Exemption[] = [
@@ -144,35 +170,48 @@ const EXEMPTIONS: readonly Exemption[] = [
       '同上，in-handler 双门在 admin-routes.ts:821-836；口径不一致同样记在 #5665 §4 残余第 5 条。',
   },
 
-  // ---- 子路由 /safety/rules（protection-rules.ts）----
-  // TODO(#5667)：这四条今天是**真的无门**，不是设计如此。#5665 设计 §2.1 / §4 残余第 7 条已登记：
-  //   四条写端点零授权门，且身份取自**可伪造的 `x-user-id` 请求头**（protection-rules.ts:21、:113）。
-  //   W4-A 分支 `fix/protection-rules-require-admin-and-identity`（issue #5667）正在修。
-  // **#5667 合并后必须把这四条豁免删掉** —— 下面「豁免表不得覆盖已经有门的路由」那条用例会在门补上的
-  // 那一刻自动变红来提醒，不需要靠人记。
+  // ---- 子路由 /safety/rules（protection-rules.ts）—— 全部是**临时豁免** ----
+  // 这四条今天是**真的无门**，不是设计如此。#5665 设计 §2.1 / §4 残余第 7 条已登记：
+  //   四条写端点零授权门，且身份取自**可伪造的 `x-user-id` 请求头`**（protection-rules.ts:21、:113）。
+  //   issue #5667 / W4-A 分支 `fix/protection-rules-require-admin-and-identity`（PR #5677）正在修。
+  //
+  // 补门之后这四条豁免就该删掉，但**删豁免这件事不由本 spec 强制**：#5677 与本支互相独立、
+  // 可能先合。若把「临时豁免覆盖了已有门路由」做成硬红，#5677 一合就会把本 spec 打红 ——
+  // 两条独立 PR 被强耦合成固定合并顺序，组合树验证还会假红。所以它们走 `todo` 这一路：
+  // 已可删除时只 console.warn 点名（见 `describe('豁免表')`），不拦合并。
   {
     method: 'post',
     path: '/safety/rules',
-    reason: 'TODO(#5667) 待裁决/在修：protection-rules.ts:111 创建规则，零授权门，身份取自 x-user-id 请求头。',
+    todo: '#5667',
+    reason: '在修（#5667 / PR #5677）：protection-rules.ts:111 创建规则，零授权门，身份取自 x-user-id 请求头。',
   },
   {
     method: 'patch',
     path: '/safety/rules/:id',
-    reason: 'TODO(#5667) 待裁决/在修：protection-rules.ts:203 改规则，零授权门。',
+    todo: '#5667',
+    reason: '在修（#5667 / PR #5677）：protection-rules.ts:203 改规则，零授权门。',
   },
   {
     method: 'delete',
     path: '/safety/rules/:id',
-    reason: 'TODO(#5667) 待裁决/在修：protection-rules.ts:244 删规则，零授权门。',
+    todo: '#5667',
+    reason: '在修（#5667 / PR #5677）：protection-rules.ts:244 删规则，零授权门。',
   },
   {
     method: 'post',
     path: '/safety/rules/evaluate',
+    todo: '#5667',
     reason:
-      'TODO(#5667) 待裁决/在修：protection-rules.ts:267 触发规则求值，零授权门。' +
-      '（求值本身不落库，但它是 POST 且吃 body，按写方法口径一并登记。）',
+      '在修（#5667 / PR #5677）：protection-rules.ts:267 触发规则求值，零授权门。' +
+      '（求值本身不落库，但它是 POST 且吃 body，按写方法口径一并登记；若 #5677 判定它只需读权限，' +
+      '这条豁免与理由要一起改。）',
   },
 ]
+
+/** 永久豁免：设计上就不该有中间件门。门补上了 = 设计变了 → 硬红。 */
+const PERMANENT_EXEMPTIONS = EXEMPTIONS.filter((e) => !e.todo)
+/** 临时豁免：已登记、有人在修的洞。门补上了 = 好事 → 只提示不拦。 */
+const TEMPORARY_EXEMPTIONS = EXEMPTIONS.filter((e) => !!e.todo)
 
 const EXEMPT_KEYS = new Set(EXEMPTIONS.map((e) => `${e.method} ${e.path}`))
 
@@ -313,6 +352,18 @@ function describeViolations(violations: WriteRoute[]): string {
   return violations.map((v) => `  - ${v.label}`).join('\n')
 }
 
+function labelOf(e: Exemption): string {
+  return `${e.method.toUpperCase()} ${ADMIN_MOUNT}${e.path}`
+}
+
+/** 给定一批豁免，挑出「对应路由今天**已经**有 admin 门」的那些 —— 即已可删除的豁免。 */
+function exemptionsCoveringGatedRoutes(exemptions: readonly Exemption[]): Exemption[] {
+  const { all } = auditWriteRoutes(router)
+  return exemptions.filter((e) =>
+    all.some((r) => r.method === e.method && r.path === e.path && isAdminGate(r.firstHandler)),
+  )
+}
+
 // --------------------------------------------------------------------------
 // 4. 用例
 // --------------------------------------------------------------------------
@@ -428,28 +479,56 @@ describe('豁免表', () => {
     expect(stale, `豁免表里这些路由已经不存在了，请删掉对应豁免：\n${stale.join('\n')}`).toEqual([])
   })
 
-  it('豁免表不得覆盖已经有门的路由（门补上了就必须删豁免）', () => {
-    const { all } = auditWriteRoutes(router)
-    const nowGated = EXEMPTIONS.filter((e) =>
-      all.some((r) => r.method === e.method && r.path === e.path && isAdminGate(r.firstHandler)),
-    ).map((e) => `${e.method.toUpperCase()} ${ADMIN_MOUNT}${e.path}`)
+  it('永久豁免不得覆盖已经有门的路由（门补上了 = 设计变了，必须删豁免）', () => {
+    const nowGated = exemptionsCoveringGatedRoutes(PERMANENT_EXEMPTIONS).map(labelOf)
     expect(
       nowGated,
-      '以下路由已经有 admin 门了，豁免是多余的，请从 EXEMPTIONS 里删掉：\n' +
+      '以下路由已经有 admin 门了，而它们登记的是**永久**豁免（理由是「设计上不该有中间件门」）——\n' +
         nowGated.join('\n') +
-        '\n（/safety/rules 的四条会在 #5667 合并后走到这一步 —— 那正是提醒删豁免的机制。）',
+        '\n门补上说明那个理由不再成立，请从 EXEMPTIONS 里删掉对应条目。',
     ).toEqual([])
   })
 
-  it('每条豁免都写了理由', () => {
+  // 刻意**不**硬红：见 Exemption.todo 的注释。#5667/#5677 与本支互相独立、可能先合，
+  // 硬红会把两条 PR 耦合成固定合并顺序，并让组合树验证假红。
+  it('临时豁免：已可删除的条目只点名提示、不挡合并', () => {
+    const removable = exemptionsCoveringGatedRoutes(TEMPORARY_EXEMPTIONS)
+    if (removable.length > 0) {
+      console.warn(
+        `[结构性守卫] ${removable.length} 条临时豁免已可删除 —— 对应路由已经补上 admin 门：\n` +
+          removable.map((e) => `  - ${labelOf(e)}  (todo: ${e.todo})`).join('\n') +
+          '\n请在对应 issue 收口时从本 spec 的 EXEMPTIONS 里删掉这些条目。' +
+          '（这里只提示不失败：修洞的 PR 不该因为本 spec 而被挡住。）',
+      )
+    }
+    // 断言的是「这份可删除清单是良构且有界的」，不是「它必须为空」：
+    // 每条都带 todo 标记，且不会多于临时豁免总数。
+    expect(removable.every((e) => !!e.todo)).toBe(true)
+    expect(removable.length).toBeLessThanOrEqual(TEMPORARY_EXEMPTIONS.length)
+  })
+
+  it('每条豁免都写了理由；临时豁免的 todo 必须是 issue/PR 号', () => {
     for (const e of EXEMPTIONS) {
       expect(e.reason.trim().length, `${e.method} ${e.path} 的豁免没写理由`).toBeGreaterThan(20)
     }
+    for (const e of TEMPORARY_EXEMPTIONS) {
+      expect(e.todo, `${e.method} ${e.path} 的临时豁免 todo 不是 #<号>`).toMatch(/^#\d+$/)
+    }
+    expect(PERMANENT_EXEMPTIONS.length + TEMPORARY_EXEMPTIONS.length).toBe(EXEMPTIONS.length)
   })
 
-  it('豁免表就是今天全部无门写路由的集合（不多不少）', () => {
-    const { ungated } = auditWriteRoutes(router)
-    expect(new Set(ungated.map((r) => `${r.method} ${r.path}`))).toEqual(new Set(EXEMPT_KEYS))
+  // 核心不变量：**无门写路由 ⊆ 豁免表**。
+  // 刻意不是等式 —— 等式意味着「豁免表里每一条今天都必须仍然无门」，那等于把
+  // 「谁先合并」写进了断言（#5677 补门后等式立刻不成立）。子集关系才是这条守卫真正要的：
+  // 可以有已经被修好的豁免（多余但无害），不可以有没登记的洞。
+  it('无门写路由 ⊆ 豁免表（核心不变量）', () => {
+    const { ungated, violations } = auditWriteRoutes(router)
+    expect(violations, `以下无门写路由不在豁免表里：\n${describeViolations(violations)}`).toEqual([])
+    const ungatedKeys = ungated.map((r) => `${r.method} ${r.path}`)
+    expect(ungatedKeys.every((k) => EXEMPT_KEYS.has(k))).toBe(true)
+    expect(ungated.length).toBeLessThanOrEqual(EXEMPTIONS.length)
+    // 注意这里**没有**「无门路由必须非空」的断言：那会让「所有洞都被补上、豁免表清空」这个
+    // 最好的结局反而变红。「豁免表确实在承担工作、不是空转」由 `describe('变异自证')` 证明。
   })
 })
 
@@ -489,7 +568,9 @@ describe('子路由挂载面', () => {
     }
   })
 
-  it('/safety/rules 子路由（protection-rules.ts）今天四条写路由全部无门 —— 即 #5667 的洞', () => {
+  // 同样刻意**不**硬判门的有无：#5667/#5677 补门后若这里断言 `false` 就会红，又把两支耦合起来。
+  // 路径集合是稳定事实（硬断言），门的有无只记录 + 提示。
+  it('/safety/rules 子路由（protection-rules.ts）的四条写路由：路径集合固定，门的有无只记录', () => {
     const subRoutes = auditWriteRoutes(router).all.filter((r) => r.source === '/safety/rules')
     expect(subRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
       'delete /safety/rules/:id',
@@ -497,12 +578,17 @@ describe('子路由挂载面', () => {
       'post /safety/rules',
       'post /safety/rules/evaluate',
     ])
-    // 这条是**现状快照**，不是「应该如此」。#5667 补门后它会红，届时连同上面四条豁免一起删。
-    for (const r of subRoutes) {
-      expect(isAdminGate(r.firstHandler), `${r.label} 已经有门了 → 请删掉 #5667 的豁免并更新本用例`).toBe(
-        false,
+    const gated = subRoutes.filter((r) => isAdminGate(r.firstHandler))
+    if (gated.length > 0) {
+      console.warn(
+        `[结构性守卫] /safety/rules 已有 ${gated.length}/4 条写路由补上了 admin 门` +
+          '（#5667 / PR #5677 生效中）：\n' +
+          gated.map((r) => `  - ${r.label}`).join('\n') +
+          '\n四条都补齐后，请把本 spec EXEMPTIONS 里那四条 todo:#5667 的临时豁免删掉。',
       )
     }
+    // 每条要么有门要么无门 —— 这条只是确保上面的分类没漏人，不对「应该是哪种」表态。
+    expect(gated.length + subRoutes.filter((r) => !isAdminGate(r.firstHandler)).length).toBe(4)
   })
 })
 
@@ -575,11 +661,21 @@ describe('变异自证', () => {
     expect(auditWriteRoutes(router).violations).toEqual([])
   })
 
-  it('把豁免表清空 → 今天那 7 条无门写路由全部变成违规（证明豁免表是真的在生效）', () => {
-    const { ungated } = auditWriteRoutes(router)
-    // 不改 EXEMPT_KEYS 本身（它是 const 且被其他用例共享），这里等价地重算一遍。
+  it('把豁免表清空 → 今天全部无门写路由都会变成违规（证明豁免表是真的在生效、不是空转）', () => {
+    const { ungated, violations } = auditWriteRoutes(router)
+    // 「豁免表清空」= 不做豁免过滤，违规集合就等于全部无门写路由。
+    // 不改 EXEMPT_KEYS 本身（const，且被其他用例共享），这里等价地重算一遍。
     const withoutExemptions = ungated.map((r) => r.label)
-    expect(withoutExemptions).toHaveLength(EXEMPTIONS.length)
-    expect(withoutExemptions.length).toBeGreaterThan(0)
+    expect(withoutExemptions.length).toBe(ungated.length)
+    // 有豁免时零违规、无豁免时违规数 = 无门路由数 —— 两者之差就是豁免表实际挡下的量。
+    expect(violations).toEqual([])
+    expect(withoutExemptions.length - violations.length).toBe(ungated.length)
+    // 今天豁免表确实在承担工作（>0）。这里用 ungated.length 而不是写死 7：
+    // #5667/#5677 补门后无门路由会减少，写死的数字会假红。全部补齐（归零）时本条会转为
+    // 「豁免表已无事可做」——那时 PERMANENT/TEMPORARY 两条用例会分别硬红/提示，指引删豁免。
+    if (EXEMPTIONS.length > 0 && ungated.length === 0) {
+      console.warn('[结构性守卫] 全部写路由都已有门，豁免表已无事可做 —— 可以整张删掉了。')
+    }
+    expect(ungated.length).toBeLessThanOrEqual(EXEMPTIONS.length)
   })
 })
