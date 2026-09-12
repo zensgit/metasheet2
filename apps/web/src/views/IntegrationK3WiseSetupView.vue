@@ -1020,7 +1020,8 @@ const k3WriteFenced = isK3ExternalWriteTargetKind(K3_WISE_WEBAPI_KIND)
 const k3WriteFenceExplanation = K3_WRITE_FENCE_EXPLANATION.zh
 
 // Same shared humanizer the workbench view uses. Reaches a registered label only because
-// k3WiseSetup.ts's calls now go through workbench.ts's parser and therefore throw IntegrationApiError.
+// k3WiseSetup.ts's calls now go through workbench.ts's parser, whose thrown Error carries the envelope
+// code (top level when it is shape-valid, else the details.code fallback).
 //
 // `fallback` is REQUIRED to be supplied by the caller on this page rather than defaulting to
 // `error.message`: this surface is values-free (its lane-F specs assert the server's free text never

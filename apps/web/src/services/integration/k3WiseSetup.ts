@@ -2238,8 +2238,9 @@ export function applyExternalSystemToForm(form: K3WiseSetupForm, system: Integra
 // This module used to ship its OWN copy of `parseIntegrationResponse`, byte-identical to the one in
 // workbench.ts except that it threw a bare `Error` — so every K3 preset-page call discarded the
 // envelope's error code and no failure on this page could ever be humanized, no matter what the view
-// did at its catch. The duplicate is gone; there is now one parser, and both surfaces get
-// `IntegrationApiError` (with its details.code fallback) from it.
+// did at its catch. The duplicate is gone; there is now one parser, and both surfaces get the
+// code-carrying Error it throws (`IntegrationApiError` = `Error & { code?, status?, details? }` —
+// a plain Error with optional machine-readable fields, including the F01 details.code fallback).
 //
 // Imported under the same local name so the ~40 call sites below are untouched; workbench.ts is now the
 // single definition, and this module deliberately does NOT re-export it.
