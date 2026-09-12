@@ -10,6 +10,7 @@ const path = require('node:path')
 
 const {
   DECISIONS,
+  DENORMALIZED_PLM_FIELD_IDS,
   StockPreparationConflictPlannerError,
   __internals,
   planStockPreparationConflicts,
@@ -1222,9 +1223,11 @@ function testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger() {
 // 这条拉取链上能往 ext_ 列写值的只有部署自己的 ext 映射(applyExtFieldMapping,读 PART 行)
 // 和 F1c 起规划器派生的那三列,而父件这一侧展开层只发出一个 OBJ_ID,part 列映射够不着它。
 //
-// 这几条用例钉住:①两列与模板列**逐行相等**(同源 —— 值就是模板列那一个值本身,不是复制一份
-// 规则);②根行/父件不在批内 ⇒ 一个键都不写;③动作没声明 ⇒ 不派生;④行上已有值(映射或人工)
-// ⇒ 不覆盖;⑤存量空列在下一次 dry-run 以 update 补上且不触发 manual_confirm。
+// 这几条用例钉住:①**派生出来的**两列与模板列逐行相等(同源 —— 值就是模板列那一个值本身,不是
+// 复制一份规则),包括父件自己那个字段为空时两边一起缺席、不发明空串;②根行/父件不在批内 ⇒ 一个
+// 键都不写;③动作没声明 ⇒ 不派生;④**本次拉取带上来的**映射值 ⇒ 不覆盖(表上手填的值不在这道闸
+// 的作用域内,见该用例的作用域说明);⑤存量空列在下一次 dry-run 以 update 补上且不触发
+// manual_confirm。
 // -----------------------------------------------------------------------------
 
 const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
@@ -1263,8 +1266,12 @@ function planWithParentPackColumns(input = {}) {
   })
 }
 
-// 两个父 + 两个子 + 一个父件不在批内的孤儿。第二个父件**没有**未切分全串,走的是模板列自己的
+// 四个父 + 四个子 + 一个父件不在批内的孤儿。第二个父件**没有**未切分全串,走的是模板列自己的
 // 退回路径(nameAndSpec -> componentName)—— 包列跟着同一条路径走,才叫同源。
+// 第三、第四家族钉的是「模板列缺席 ⇒ 包列也缺席,不发明空串」这条硬规则里**父件在批内、但父件
+// 自己那个字段为空**的象限:前两个家族的父件图号与名字都有值,`out.parentComponentCode !==
+// undefined` / `out.parentComponentName !== undefined` 两道守卫在它们身上永远是真,去掉守卫改写
+// 空串也照绿(反驳 B blocker 1 的 MXEMPTY / MXEMPTY2)。
 function twoFamilyBatch() {
   const parentA = row({ componentSourceId: 'PART-ROOT', componentCode: 'TZ-0001', componentName: '主体组件', nameAndSpec: '主体组件 DN1200' })
   const childA = row({
@@ -1282,6 +1289,25 @@ function twoFamilyBatch() {
     componentCode: 'GJ-0008',
     componentName: '封头',
   })
+  // 父件在批内,但父件**自己的图号是空的** ⇒ 模板列 parentComponentCode 缺席 ⇒ 包列必须同样缺席。
+  const parentC = row({ componentSourceId: 'PART-ROOT-3', componentCode: '', componentName: '无图号组件', nameAndSpec: '无图号组件 DN800' })
+  const childC = row({
+    componentSourceId: 'PART-CHILD-3',
+    parentSourceId: 'PART-ROOT-3',
+    pathTokens: ['PART-ROOT-3', 'PART-CHILD-3'],
+    componentCode: 'GJ-0010',
+    componentName: '裙座',
+  })
+  // 父件在批内,但父件**两个名字键都空**(没有 nameAndSpec 键、componentName 为空串)
+  // ⇒ 模板列 parentComponentName 缺席 ⇒ 包列必须同样缺席。
+  const parentD = row({ componentSourceId: 'PART-ROOT-4', componentCode: 'TZ-0004', componentName: '' })
+  const childD = row({
+    componentSourceId: 'PART-CHILD-4',
+    parentSourceId: 'PART-ROOT-4',
+    pathTokens: ['PART-ROOT-4', 'PART-CHILD-4'],
+    componentCode: 'GJ-0011',
+    componentName: '法兰',
+  })
   const orphan = row({
     componentSourceId: 'PART-ORPHAN',
     parentSourceId: 'PART-NOT-IN-THIS-BATCH',
@@ -1289,7 +1315,18 @@ function twoFamilyBatch() {
     componentCode: 'GJ-0009',
     componentName: '接管',
   })
-  return { parentA, childA, parentB, childB, orphan, rows: [parentA, childA, parentB, childB, orphan] }
+  return {
+    parentA,
+    childA,
+    parentB,
+    childB,
+    parentC,
+    childC,
+    parentD,
+    childD,
+    orphan,
+    rows: [parentA, childA, parentB, childB, parentC, childC, parentD, childD, orphan],
+  }
 }
 
 // 同源 = 包列的值就是模板列那一个值本身。
@@ -1298,7 +1335,7 @@ function testParentPackColumnsAreTheTemplateColumnsOwnValue() {
   const batch = twoFamilyBatch()
   const plan = planWithParentPackColumns({ expandedRows: batch.rows, runId: 'run-parent-pack-same-source' })
   const adds = byDecision(plan, DECISIONS.ADD)
-  assert.equal(adds.length, 5, 'five rows are added')
+  assert.equal(adds.length, 9, 'nine rows are added')
 
   const childA = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD').record
   assert.equal(childA.ext_parentDrawingNo, 'TZ-0001', '父组件图号 落进客户包列')
@@ -1306,6 +1343,24 @@ function testParentPackColumnsAreTheTemplateColumnsOwnValue() {
   const childB = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD-2').record
   assert.equal(childB.ext_parentDrawingNo, 'TZ-0002')
   assert.equal(childB.ext_parentName, '副体组件', '父件没有全串时包列跟着模板列一起退回 componentName —— 同一条路径,不是第二套规则')
+
+  // 父件在批内、但父件自己那个字段为空:模板列缺席 ⇒ 包列**缺席**,不是空串。
+  // 这两条各自单独钉住 `out.parentComponentCode !== undefined` / `out.parentComponentName !== undefined`
+  // 那两道守卫 —— 去掉任意一道改写空串,这里必红(反驳 B blocker 1)。
+  const childC = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD-3').record
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(childC, 'ext_parentDrawingNo'),
+    false,
+    '父件图号为空 ⇒ 客户包列缺席,不写空串',
+  )
+  assert.equal(childC.ext_parentName, '无图号组件 DN800', '名字那一列不受图号缺值牵连,照派生')
+  const childD = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD-4').record
+  assert.equal(childD.ext_parentDrawingNo, 'TZ-0004', '图号那一列不受名字缺值牵连,照派生')
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(childD, 'ext_parentName'),
+    false,
+    '父件两个名字键都空 ⇒ 客户包列缺席,不写空串',
+  )
 
   // 逐行相等,而且**键在不在**也相等:把两列与模板列拆成两份取值逻辑,这一圈必红。
   for (const decision of adds) {
@@ -1325,7 +1380,7 @@ function testParentPackColumnsAreTheTemplateColumnsOwnValue() {
   }
 
   // 根行无父、孤儿的父件不在这批里:都是**缺席**,不是空串。
-  for (const componentSourceId of ['PART-ROOT', 'PART-ROOT-2', 'PART-ORPHAN']) {
+  for (const componentSourceId of ['PART-ROOT', 'PART-ROOT-2', 'PART-ROOT-3', 'PART-ROOT-4', 'PART-ORPHAN']) {
     const record = adds.find((decision) => decision.record.componentSourceId === componentSourceId).record
     for (const fieldId of ['ext_parentDrawingNo', 'ext_parentName', 'parentComponentCode', 'parentComponentName']) {
       assert.equal(
@@ -1370,9 +1425,14 @@ function testParentPackColumnsNeedBothTheDeclarationAndThePack() {
   assert.equal(noPack.summary.plmSystemFields.includes('ext_parentDrawingNo'), false, '没装包 ⇒ 可写 band 里没有这两列')
 }
 
-// 已有值(部署自己的 ext 映射测到的,或人工填的)永远优先;派生的从不覆盖。
+// **本次拉取带上来的**值(部署自己的 ext 映射测到的)永远优先;派生的从不覆盖这一次测得的值。
 // M3(去掉 isBlank 判断)⇒ 本用例红。
-function testParentPackColumnsNeverOverwriteAMeasuredValue() {
+//
+// 作用域:isBlank 读的是**展开行**,不是表上的存量行 —— 人在表里手填进这两个包列的值不受这道
+// 闸保护,下一次拉取会被派生值以 update 覆盖(见 testExistingRowsGetThePackColumnsAsAPlainUpdate
+// 的 'empty-string' 分支同理)。手填值的保护在另一道闸上:包把这两列声明成 human_preserved 或钉
+// preserveOnRefresh,它们就根本不进 pickFields 的可写 band。这是包声明的事,不是这段代码的事。
+function testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull() {
   const batch = twoFamilyBatch()
   const mapped = {
     ...batch.childA,
@@ -1401,6 +1461,55 @@ function testParentPackColumnsNeverOverwriteAMeasuredValue() {
     assert.equal(blankedRecord.ext_parentDrawingNo, 'TZ-0001', '空白值 ' + JSON.stringify(blank) + ' 照派生')
     assert.equal(blankedRecord.ext_parentName, '主体组件 DN1200')
   }
+}
+
+// DENORMALIZED_PLM_FIELD_IDS 是「这个函数会派生哪些列」的登记表,在这条用例之前它没有任何运行时
+// 消费者,加进去两项也好、漏登记也好,整条套件照绿(反驳 B blocker 2 的 MXDEAD)。这里把它绑成
+// 真闸:一次让**全部**派生列同时落地的批次,记录上的 ext_ 键集合必须与登记表的 ext_ 半边**逐项
+// 相同**(deepEqual,不是包含),登记表里的非 ext_ 三列也必须都在。漏登记下一列 ⇒ 红;登记了却
+// 派生不出来 ⇒ 也红。
+function testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived() {
+  const ALL_DERIVED_EXT_IDS = ['ext_componentSortNo', 'ext_parentSortNo', 'ext_nameAndSpec', 'ext_parentDrawingNo', 'ext_parentName']
+  const parent = row({
+    componentSourceId: 'PART-ROOT',
+    componentCode: 'TZ-0001',
+    componentName: '主体组件',
+    nameAndSpec: '主体组件 DN1200',
+    sortLine: 3,
+  })
+  const child = row({
+    componentSourceId: 'PART-CHILD',
+    parentSourceId: 'PART-ROOT',
+    pathTokens: ['PART-ROOT', 'PART-CHILD'],
+    componentCode: 'GJ-0007',
+    componentName: '筒体',
+    nameAndSpec: '筒体 DN1200',
+    spec: 'DN1200',
+    sortLine: 7,
+  })
+  const plan = planStockPreparationConflicts({
+    expandedRows: [parent, child],
+    existingRows: [],
+    runId: 'run-denormalized-registry',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+    extensionFieldIds: ALL_DERIVED_EXT_IDS,
+    installedFieldProperties: ALL_DERIVED_EXT_IDS.map((id) => installedPackColumn(id, id.endsWith('SortNo') ? 'number' : 'string')),
+  })
+  const record = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
+
+  assert.deepEqual(
+    Object.keys(record).filter((key) => key.startsWith('ext_')).sort(),
+    DENORMALIZED_PLM_FIELD_IDS.filter((id) => id.startsWith('ext_')).slice().sort(),
+    '派生出来的 ext_ 列集合必须与 DENORMALIZED_PLM_FIELD_IDS 的 ext_ 半边逐项相同',
+  )
+  for (const fieldId of DENORMALIZED_PLM_FIELD_IDS) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(record, fieldId),
+      true,
+      '登记表里的 ' + fieldId + ' 必须真的派生得出来',
+    )
+  }
+  assertNoHumanFields(record, 'denormalized registry record')
 }
 
 // 222 上那 581 行的迁移答案:没有迁移。下一次 dry-run 把两列以 **update** 补上,不触发
@@ -1475,7 +1584,8 @@ function main() {
   testParentComponentNameIsTheUnsplitLegacyString()
   testParentPackColumnsAreTheTemplateColumnsOwnValue()
   testParentPackColumnsNeedBothTheDeclarationAndThePack()
-  testParentPackColumnsNeverOverwriteAMeasuredValue()
+  testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull()
+  testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived()
   testExistingRowsGetThePackColumnsAsAPlainUpdate()
   testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
   testUnresolvableParentIsAbsenceNotAGuess()

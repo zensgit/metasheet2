@@ -1057,8 +1057,15 @@ function pickFields(row, fields) {
 // 都够不着它;后者到今天为止不含这两列。所以它们不是"没配",是配了也填不上。
 //
 // 同源而不是同规则:值取的就是下面刚写进 `out` 的那两个模板列值本身(见 denormalizedPlmFields),
-// 不存在第二份取值逻辑可以漂移,两列与模板列必然**逐行**相等。模板列没写(父件图号为空、父件两个
-// 名字键都空、父件不在这批里、根行无父)时包列同样不写 —— 不发明空串,也不让两侧口径分家。
+// 不存在第二份取值逻辑可以漂移,所以**凡是本函数派生出来的行**,两列与模板列逐行相等。模板列没写
+// (父件图号为空、父件两个名字键都空、父件不在这批里、根行无父)时包列同样不写 —— 不发明空串,
+// 也不让两侧口径分家。
+//
+// 这句话的作用域到派生为止,不是无条件的:部署把这两个 id 也配进自己的 ext 映射是受支持的配置
+// (声明了而映射没填不算错,反过来才 422 —— stock-preparation-table-actions.cjs 的
+// assertTargetFieldMapCompleteness 那一带),那种行带着映射值到达,派生按上面 A MAPPED VALUE
+// ALWAYS WINS 让位,于是包列=映射值、模板列=父件 join 值,两者**可以不等**。这是规格要的优先级,
+// 不是漂移;判定是逐行的(isBlank 逐行看),所以同一列里两种来源可以并存。
 //
 // 不派生 `ext_spec`,尽管它与模板 `componentSpec` 同为 规格 二字。模板列今天有两个来源:部署
 // 声明的 readPlan.part.specField,以及没声明时由 名称 按第一个空格切出的后段(bom-expansion
@@ -1151,8 +1158,12 @@ function denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
       //
       // 三道闸与另外三列一字不差:`canDeriveExtensionField`(动作 DECLARED 的扩展列 = 目标表
       // fieldIdMap 已绑定的那张表,fail-closed;不声明就不派生,免得把整行写入变成
-      // 'unmapped_extension_field' 的硬拒)+ `isBlank(row.ext_*)`(部署自己的映射或人工值优先,
-      // 派生的从不覆盖已测得的)+ 下游 `pickFields` 的包感知可写 band(包没装/声明为人工保留/
+      // 'unmapped_extension_field' 的硬拒)+ `isBlank(row.ext_*)`(**本次拉取带上来的**映射值优先,
+      // 派生的从不覆盖这一次测得的值 —— `row` 是展开行,不是表上的存量行:人在表里手填进这两个
+      // 包列的值不受这道闸保护,下一次拉取会被派生值以 update 覆盖。手填值的保护在另一道闸上,
+      // 即包声明的 ownership / preserveOnRefresh(声明成 human_preserved 或钉住 ⇒ 这两列根本不进
+      // 下面那条可写 band),要让手填值活下来是改包声明的事,不是改这段代码的事)
+      // + 下游 `pickFields` 的包感知可写 band(包没装/声明为人工保留/
       // 钉了 preserveOnRefresh ⇒ 一个字也落不到表上)。这段代码能给内存行加一个 KEY,
       // 不能给任何人的表加一列,也不能把一列抬进可写 band。
       if (canDeriveExtensionField('ext_parentDrawingNo', declaredExtensionFieldIds)
