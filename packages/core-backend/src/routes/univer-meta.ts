@@ -58,6 +58,7 @@ import {
   resolveBaseReadable,
   resolveReadableSheetIds,
   resolveSheetCapabilities,
+  resolveSheetCapabilitiesForAccess,
   resolveSheetReadableCapabilities,
   type MultitableCapabilityOrigin,
   type MultitableRowActions,
@@ -6095,7 +6096,17 @@ export function extractMultitableRecordCreateContextFromUrl(value: unknown): { s
   return {}
 }
 
-async function createSeededSheet(args: { sheetId: string; name: string; description?: string | null; query?: QueryFn }): Promise<void> {
+type SeedSheetInput = {
+  sheetId: string
+  name: string
+  description?: string | null
+} & (
+  // POST /sheets has already proved creation with its INSERT in this same transaction.
+  | { kind: 'created-sheet'; query: QueryFn }
+  | { kind: 'view-seed'; access: ResolvedRequestAccess }
+)
+
+async function createSeededSheet(args: SeedSheetInput): Promise<void> {
   const pool = poolManager.get()
 
   // 显式标注成宽类型（而不是让 TS 从字面量推出一个窄联合），这样下面那条 link 守卫的 `field.type ===
@@ -6203,8 +6214,6 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
     // D-H1: GET /view?seed=true and POST /sheets?seed=true write meta_sheets / meta_fields / meta_records.
     // Fence-before-check in THIS transaction (the route's txn, or the helper's own txn). Flag-off ⇒ no-op.
     await fenceWriterEntry(query, args.sheetId)
-    const baseId = await ensureLegacyBase(query)
-
     // ②a §2a.4-c TOCTOU close — CENTRALIZED chokepoint. `createSeededSheet` is the sheet-create sink for
     // BOTH POST /sheets (sheet pre-inserted by the route at the caller-chosen base, route-guarded there)
     // and GET /view?seed=true (caller-chosen id, NO route guard). Gating the guard HERE — keyed to a
@@ -6215,8 +6224,36 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
     // base before reaching here, so it exists → skip (the INSERT no-ops via ON CONFLICT). Re-running the
     // guard there with the LEGACY baseId would false-positive the legit caller-chosen-base create. When
     // the sheet IS new (the seed path), validate against the base it is ACTUALLY created at (legacy).
-    const existing = await query('SELECT id FROM meta_sheets WHERE id = $1', [args.sheetId])
+    const existing = await query('SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE', [args.sheetId])
     const isGenuinelyNew = (existing.rows as unknown[]).length === 0
+    if (args.kind === 'created-sheet' && isGenuinelyNew) {
+      throw new ConflictError('Seed target was not created in this transaction')
+    }
+    if (args.kind === 'view-seed' && !isGenuinelyNew) {
+      // Seeding an existing table edits its schema, even though the entry point is a GET.
+      // Re-resolve on the transaction handle and hold the sheet row against lifecycle changes;
+      // the route's earlier canRead/liveness snapshot is not authority to append columns.
+      // Optional permission-table loaders deliberately catch missing-relation errors. Keep each
+      // probe in a savepoint so that their existing fallback cannot leave this transaction aborted.
+      // Only probes use this handle: the row lock and every write remain outside these savepoints.
+      // Re-throw unchanged after cleanup; the resolver, not this wrapper, decides fallback policy.
+      const capabilityQuery: QueryFn = async (sql, params) => {
+        await query('SAVEPOINT seed_capability_probe')
+        try {
+          const result = await query(sql, params)
+          await query('RELEASE SAVEPOINT seed_capability_probe')
+          return result
+        } catch (error) {
+          await query('ROLLBACK TO SAVEPOINT seed_capability_probe')
+          await query('RELEASE SAVEPOINT seed_capability_probe')
+          throw error
+        }
+      }
+      const { capabilities, sheetLiveness } = await resolveSheetCapabilitiesForAccess(capabilityQuery, args.sheetId, args.access)
+      if (sheetLiveness !== 'live') throw new SheetNotLiveError(args.sheetId, sheetLiveness)
+      if (!capabilities.canRead || !capabilities.canManageFields) throw new PermissionError('Insufficient permissions')
+    }
+    const baseId = await ensureLegacyBase(query)
     if (isGenuinelyNew) {
       await acquireLinkTargetMaterializationLock(query as unknown as QueryFn, args.sheetId)
       const retroactiveCrossBase = await validateSheetCreateNoRetroactiveCrossBaseLink(query, args.sheetId, baseId)
@@ -6225,12 +6262,19 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
       }
     }
 
-    await query(
+    const inserted = await query(
       `INSERT INTO meta_sheets (id, base_id, name, description)
        VALUES ($1, $2, $3, $4)
-       ON CONFLICT (id) DO NOTHING`,
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id`,
       [args.sheetId, baseId, args.name, args.description ?? null],
     )
+    // An absent row cannot be locked. Another creator may win after the existence check;
+    // never turn that conflict into an unauthorized existing-sheet seed. A retry must take
+    // the existing-sheet authorization path instead. Values-free refusal, before any columns.
+    if (isGenuinelyNew && inserted.rows.length !== 1) {
+      throw new ConflictError('Seed target changed during creation; retry the request')
+    }
 
     for (const field of fields) {
       // 种子是裸 SQL 写口，绕开了 POST/PATCH /fields 上的 `assertLinkFieldForeignSheetPresent`。把同一条
@@ -6259,7 +6303,7 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
     }
   }
 
-  if (args.query) {
+  if (args.kind === 'created-sheet') {
     await run(args.query)
     return
   }
@@ -14660,7 +14704,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         }
 
         if (seed) {
-          await createSeededSheet({ sheetId, name, description, query: query as unknown as QueryFn })
+          await createSeededSheet({ kind: 'created-sheet', sheetId, name, description, query: query as unknown as QueryFn })
         }
       })
 
@@ -15518,7 +15562,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const rawSortRules = viewConfig ? parseMetaSortRules(viewConfig.sortInfo) : []
       const rawFilterInfo = viewConfig ? parseMetaFilterInfo(viewConfig.filterInfo) : null
       if (seed) {
-        await createSeededSheet({ sheetId, name: `Seed ${sheetId}` })
+        await createSeededSheet({ kind: 'view-seed', sheetId, name: `Seed ${sheetId}`, access })
       }
 
       const [sheet, fields] = await Promise.all([
@@ -15998,6 +16042,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (err instanceof ConflictError) {
         return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
       }
+      if (err instanceof PermissionError) return sendForbidden(res, err.message)
+      if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] view failed:', err)
