@@ -76,7 +76,13 @@
 
 顺带发现(基线既有,不是本轮引入):`packages/core-backend/tests/integration/multitable-context.api.test.ts:1193` 的 SQL 拦截守卫正则里有一个 0x08 字节(`meta_sheets` 后本意是 ``,被某次 heredoc 折成退格)→ 该守卫永不命中;全仓控制字符横扫只有这一处是 bug(其余 0x01 都是有意的分隔符/测试输入)。等 F8A 合入后单独一支小 PR 修(同文件,避免冲突)。
 
-**r31 已备好未 build**:wrapper 加 #5651(`EXTERNAL_SYSTEM_SCOPE_MISMATCH` 字面量计数 ≥ 4)/#5654(upgrade-inplace 含 `MaintenanceFlagPath` + `Assert-MaintenanceFlagOutsideReplaceDirs`;事后 flag 不存在)标记,纯 ASCII、0 控制字符;ship 改为上传 `origin/main` 的 `multitable-onprem-package-upgrade-inplace.ps1`(加 BOM;1382 个非 ASCII 字节)替代 tools-r22 旧本;两份脚本本机 Windows PowerShell 5.1 `Parser::ParseFile` 0 错。基线等 F1c/F8A 裁决后定(合入则 main + 两支,否则 `72caae8de`);夜里上机,**不举 flag**(脚本自己举)。
+**停摆与用户裁决**:09-11 ~21:20 起两个代理被 API 429(session limit,resets 8am PT = 23:00 本地)打死,主循环随之停到 09-12 08:03 才恢复——夜间上机窗口整段错过。08:0x 用户回「允许」= 周六白天可上机。
+
+**r31(`72caae8de` = r30 + #5645 F7 + #5651 X2c + #5654 F4A,09-12 08:11 本地上 222)**:CI 3 分钟出包;备份 `pre-r31-20260912-081140.dump` 2.26 MB;**F4A 升级脚本第一次实跑**——`MAINTENANCE_GATE_WIRED`(举 flag 时 nginx 真答 503 JSON,而不是连接重置)→ 后端直连 attempt 3 OK → 先删 flag 再探 nginx → 200;upgrade exit 0;web smoke PASS;计划任务试算 `LastTaskResult=0`;标记 #5645 / #5654×2 / wave6 全 True;事后迁移 402、pm2 env zh-CN、08:00 后后端错误 0 行、flag 不存在、health 200。#5651 的「字面量计数」标记不成立(minifier 把常量合并成 1 处),以包 gitSha 精确匹配为准。F1c / F8A(+ F9b)合入后打 **r32**。
+
+**F9b(新派,opus + 两路反驳)**:规则侧 `send_notification` 落库到通知中心——根因是全仓没有 `automation.notification` 的监听者,按钮路径已持久化而规则路径 eventBus-only;复用同一 seam `insertRecordSubscriptionNotifications`,成员校验与按钮同量,先写后 emit,模拟不写,表缺失不吞,规则侧不借用按钮的 dedup 表(重复投递语义如实写)。规格 `spec-F9b-rule-notification-persist.md`。
+
+~~**r31 已备好未 build**~~(已上机,见上):wrapper 加 #5651(`EXTERNAL_SYSTEM_SCOPE_MISMATCH` 字面量计数 ≥ 4)/#5654(upgrade-inplace 含 `MaintenanceFlagPath` + `Assert-MaintenanceFlagOutsideReplaceDirs`;事后 flag 不存在)标记,纯 ASCII、0 控制字符;ship 改为上传 `origin/main` 的 `multitable-onprem-package-upgrade-inplace.ps1`(加 BOM;1382 个非 ASCII 字节)替代 tools-r22 旧本;两份脚本本机 Windows PowerShell 5.1 `Parser::ParseFile` 0 错。基线等 F1c/F8A 裁决后定(合入则 main + 两支,否则 `72caae8de`);夜里上机,**不举 flag**(脚本自己举)。
 
 ---
 
