@@ -199,14 +199,24 @@ const EMPTY_TRANSFORM_CONTEXT = Object.freeze({})
 // cut that key really did fire and really did write a non-empty value. This returns the key the
 // pre-change engine would have looked up, so that answer stays writable.
 //
-// It returns a KEY, never a value, and only `dictMap` consults it. Normalising `undefined` to
-// `null` for the whole chain instead would hand `trim`/`upper`/`lower`/`toNumber`/`toDate` a
+// It returns a KEY, never a value, and only `dictMap` consults it while the chain is still passing
+// the original absence through. A default or dictionary answer consumes that compatibility even
+// when its own answer is undefined: that is a produced value, not the original missing input.
+// Normalising `undefined` to `null` for the whole chain instead would hand
+// `trim`/`upper`/`lower`/`toNumber`/`toDate` a
 // `null` to pass through as their own answer; `outputValue` would stop being `undefined`, and the
 // blanking write this cut removes would come straight back.
 function absentSourceLookupKey(mapping) {
   return Object.prototype.hasOwnProperty.call(mapping, 'defaultValue')
     ? String(mapping.defaultValue)
     : 'undefined'
+}
+
+// `transformValue()` owns this mutable chain-local context. Transparent steps and dictionary
+// misses leave it alone; a branch that produces an answer consumes the original absence once.
+function producedTransformValue(value, context) {
+  if (context !== EMPTY_TRANSFORM_CONTEXT) delete context.absentSourceKey
+  return value
 }
 
 function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CONTEXT) {
@@ -238,7 +248,7 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
     }
     case 'defaultValue': {
       const fallback = Object.prototype.hasOwnProperty.call(args, 'value') ? args.value : args.defaultValue
-      return isBlank(value) || isBlankAfterTrim(value) ? fallback : value
+      return isBlank(value) || isBlankAfterTrim(value) ? producedTransformValue(fallback, context) : value
     }
     case 'concat': {
       if (args.fields !== undefined && !Array.isArray(args.fields)) {
@@ -254,10 +264,11 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
       for (const field of args.fields || []) parts.push(getPath(sourceRecord, field))
       for (const literal of args.values || []) parts.push(literal)
 
-      return parts
+      const output = parts
         .filter((part) => !isBlank(part) && !isBlankAfterTrim(part))
         .map((part) => String(part))
         .join(separator)
+      return producedTransformValue(output, context)
     }
     case 'dictMap': {
       if (!isPlainObject(args.map)) {
@@ -271,9 +282,9 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
         ? context.absentSourceKey
         : value
       const key = String(lookup)
-      if (Object.prototype.hasOwnProperty.call(args.map, key)) return args.map[key]
-      if (Object.prototype.hasOwnProperty.call(args.map, lookup)) return args.map[lookup]
-      if (Object.prototype.hasOwnProperty.call(args, 'defaultValue')) return args.defaultValue
+      if (Object.prototype.hasOwnProperty.call(args.map, key)) return producedTransformValue(args.map[key], context)
+      if (Object.prototype.hasOwnProperty.call(args.map, lookup)) return producedTransformValue(args.map[lookup], context)
+      if (Object.prototype.hasOwnProperty.call(args, 'defaultValue')) return producedTransformValue(args.defaultValue, context)
       return value
     }
     default:
@@ -282,8 +293,12 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
 }
 
 function transformValue(value, transform, sourceRecord = {}, context = EMPTY_TRANSFORM_CONTEXT) {
+  // Never mutate a caller's context or let one mapping/run consume another one's key.
+  const chainContext = typeof context.absentSourceKey === 'string'
+    ? { absentSourceKey: context.absentSourceKey }
+    : EMPTY_TRANSFORM_CONTEXT
   return normalizeTransformList(transform).reduce(
-    (current, step) => applyTransform(current, step, sourceRecord, context),
+    (current, step) => applyTransform(current, step, sourceRecord, chainContext),
     value,
   )
 }

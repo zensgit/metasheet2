@@ -22,6 +22,7 @@ const {
   getPath,
   resolveSourcePath,
   transformRecord,
+  transformValue,
   __internals: { absentSourceLookupKey },
 } = require(path.join(__dirname, '..', 'lib', 'transform-engine.cjs'))
 const { validateRecord } = require(path.join(__dirname, '..', 'lib', 'validator.cjs'))
@@ -50,6 +51,22 @@ function ownKeys(object) {
 
 function warningCodes(result) {
   return (result.warnings || []).map((warning) => warning.code)
+}
+
+// Exercise both production mapping producers and their JSON storage boundary. In particular,
+// a valid `{ fn: 'defaultValue' }` step has no fallback but survives this round trip unchanged.
+function registryRoundTripMappings(mappings) {
+  return normalizeFieldMappings(JSON.parse(JSON.stringify(mappings))).map((mapping, index) => rowToFieldMapping({
+    id: `fm_chain_${index}`,
+    pipeline_id: 'pipe_x02',
+    source_field: mapping.sourceField,
+    target_field: mapping.targetField,
+    transform: JSON.stringify(mapping.transform),
+    validation: JSON.stringify(mapping.validation),
+    default_value: JSON.stringify(mapping.defaultValue),
+    sort_order: mapping.sortOrder,
+    created_at: null,
+  }))
 }
 
 // --- 1. absent source path: nothing is written, and the fact is reported -----
@@ -352,6 +369,69 @@ function testDictMapNullKeyStillAnswersAbsentSource() {
   assert.equal(absentSourceLookupKey({ defaultValue: null }), 'null')
   assert.equal(absentSourceLookupKey({ defaultValue: undefined }), 'undefined')
   assert.equal(absentSourceLookupKey({}), 'undefined')
+}
+
+// A lookup compatibility key belongs to the original absent source, not to every undefined
+// later produced by a transform. A default step without a fallback is valid stored JSON and
+// intentionally evaluates to undefined; a following dictionary must see THAT answer.
+function testDictMapCompatibilityStopsAtProducedValues() {
+  const distinguish = { fn: 'dictMap', map: { null: 'NULLVALUE', undefined: 'UNDEFINEDVALUE', '': 'EMPTYVALUE', 0: 'ZERO', false: 'FALSE' } }
+  const cases = [
+    { label: 'original counterexample', chain: [{ fn: 'defaultValue' }, distinguish], expected: 'UNDEFINEDVALUE' },
+    { label: 'string step', chain: ['defaultValue', distinguish], expected: 'UNDEFINEDVALUE' },
+    { label: 'nested args step', chain: [{ type: 'defaultValue', args: {} }, distinguish], expected: 'UNDEFINEDVALUE' },
+    { label: 'produced undefined through trim', chain: [{ fn: 'defaultValue' }, 'trim', distinguish], expected: 'UNDEFINEDVALUE' },
+    { label: 'transparent trim', chain: ['trim', distinguish], expected: 'NULLVALUE' },
+    { label: 'miss remains absent', chain: [{ fn: 'dictMap', map: {} }, 'trim', distinguish], expected: 'NULLVALUE' },
+    { label: 'matched null then default', chain: [{ fn: 'dictMap', map: { null: null } }, { fn: 'defaultValue' }, distinguish], expected: 'UNDEFINEDVALUE' },
+    { label: 'matched empty then default', chain: [{ fn: 'dictMap', map: { null: '' } }, { fn: 'defaultValue' }, distinguish], expected: 'UNDEFINEDVALUE' },
+    { label: 'fallback null then default', chain: [{ fn: 'dictMap', map: {}, defaultValue: null }, { fn: 'defaultValue' }, distinguish], expected: 'UNDEFINEDVALUE' },
+    { label: 'matched null through trim', chain: [{ fn: 'dictMap', map: { null: null } }, 'trim', distinguish], expected: 'NULLVALUE' },
+    { label: 'explicit null default', chain: [{ fn: 'defaultValue', value: null }, distinguish], expected: 'NULLVALUE' },
+    { label: 'explicit empty default', chain: [{ fn: 'defaultValue', value: '' }, distinguish], expected: 'EMPTYVALUE' },
+    { label: 'explicit zero default', chain: [{ fn: 'defaultValue', value: 0 }, distinguish], expected: 'ZERO' },
+    { label: 'explicit false default', chain: [{ fn: 'defaultValue', value: false }, distinguish], expected: 'FALSE' },
+    { label: 'explicit text default', chain: [{ fn: 'defaultValue', value: 'TEXT' }, distinguish], expected: 'TEXT' },
+  ]
+  for (const { label, chain, expected } of cases) {
+    const input = [{ sourceField: 'name', targetField: 'name', transform: chain }]
+    for (const mappings of [normalizeFieldMappings(input), registryRoundTripMappings(input)]) {
+      assert.equal(mappings[0].defaultValue, null, `${label}: production unset default is null`)
+      const result = transformRecord({}, mappings)
+      assert.deepEqual(result.errors, [], label)
+      assert.deepEqual(result.value, { name: expected }, label)
+      assert.deepEqual(result.warnings, [], label)
+    }
+  }
+
+  // The literal/no-default-key shape historically starts with undefined, unlike stored rows.
+  for (const chain of [[distinguish], ['trim', distinguish], [{ fn: 'defaultValue' }, distinguish]]) {
+    const result = transformRecord({}, [{ sourceField: 'name', targetField: 'name', transform: chain }])
+    assert.deepEqual(result.value, { name: 'UNDEFINEDVALUE' })
+    assert.deepEqual(result.warnings, [])
+  }
+
+  // Explicit undefined dictionary answers cannot survive JSON, but internal callers support
+  // them. A MATCH or an explicit fallback consumes absence even when the answer is undefined.
+  for (const first of [
+    { fn: 'dictMap', map: { null: undefined } },
+    { fn: 'dictMap', map: {}, defaultValue: undefined },
+  ]) {
+    const result = transformRecord({}, [{ sourceField: 'name', targetField: 'name', defaultValue: null, transform: [first, distinguish] }])
+    assert.deepEqual(result.value, { name: 'UNDEFINEDVALUE' })
+  }
+
+  // Consuming compatibility must not convert an otherwise unwritten field back to null/undefined.
+  for (const chain of [[], ['trim'], [{ fn: 'dictMap', map: {} }, 'trim'], [{ fn: 'defaultValue' }]]) {
+    const result = transformRecord({}, registryRoundTripMappings([{ sourceField: 'name', targetField: 'name', transform: chain }]))
+    assert.deepEqual(result.value, {})
+    assert.deepEqual(warningCodes(result), [SOURCE_FIELD_ABSENT])
+  }
+
+  const context = Object.freeze({ absentSourceKey: 'null' })
+  assert.equal(transformValue(undefined, [{ fn: 'defaultValue' }, distinguish], {}, context), 'UNDEFINEDVALUE')
+  assert.equal(transformValue(undefined, ['trim', distinguish], {}, context), 'NULLVALUE', 'one chain must not consume another caller/run context')
+  assert.deepEqual(context, { absentSourceKey: 'null' })
 }
 
 // --- 3d. an empty array SEGMENT is absent - decided, not accidental -----------
@@ -907,6 +987,30 @@ async function testDictMapCompatWritesThroughTheRunner() {
   assert.deepEqual(missedRun.details.sourceFieldAbsent.fields, [{ sourceField: 'name', targetField: 'name' }])
 }
 
+async function testProducedUndefinedLookupWritesThroughTheRunner() {
+  const fieldMappings = registryRoundTripMappings([
+    { sourceField: 'code', targetField: 'code' },
+    { sourceField: 'name', targetField: 'name', transform: [
+      { fn: 'defaultValue' },
+      { fn: 'dictMap', map: { null: 'NULLVALUE', undefined: 'UNDEFINEDVALUE' } },
+    ] },
+    { sourceField: 'quantity', targetField: 'quantity', transform: ['trim', { fn: 'dictMap', map: {} }] },
+  ])
+  assert.deepEqual(fieldMappings[1].transform[0], { fn: 'defaultValue' }, 'the counterexample survives real mapping producers')
+  const { db, runner, storedRows } = createHarness({
+    fieldMappings,
+    multitableRows: [{ id: 'rec_existing', sheetId: 'sheet_approved_materials', version: 1, data: { code: 'MAT-001', name: 'Correct bolt', quantity: 7 } }],
+    sourceRecords: [{ code: 'MAT-001', updatedAt: '2026-09-10T00:00:00.000Z' }],
+  })
+  const result = await runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_x02', triggeredBy: 'test' })
+  assert.equal(result.metrics.rowsFailed, 0)
+  assert.equal(result.metrics.rowsWritten, 1)
+  assert.equal(storedRows.length, 1)
+  assert.equal(storedRows[0].data.name, 'UNDEFINEDVALUE', 'the real runner and target adapter store the produced-value lookup answer')
+  assert.equal(storedRows[0].data.quantity, 7, 'unconsumed absence still leaves the existing target alone')
+  assert.deepEqual(db.tables.get('integration_runs')[0].details.sourceFieldAbsent.fields, [{ sourceField: 'quantity', targetField: 'quantity' }])
+}
+
 // --- 10. the dry-run path reports the same fact and writes nothing ------------
 async function testDryRunReportsAbsenceAndWritesNothing() {
   const { db, runner, writtenRecords } = createHarness({
@@ -1083,6 +1187,7 @@ const CASES = {
   testBlankDefaultValueIsUnset,
   testBareConcatStillWritesEmptyString,
   testDictMapNullKeyStillAnswersAbsentSource,
+  testDictMapCompatibilityStopsAtProducedValues,
   testEmptyArraySegmentIsAbsentByDecision,
   testSkipDoesNotBypassGuards,
   testResolveSourcePathValueParityWithGetPath,
@@ -1091,6 +1196,7 @@ const CASES = {
   testCleanRunCarriesNoAbsenceDetail,
   testStoredMappingShapeIsNotBlanked,
   testDictMapCompatWritesThroughTheRunner,
+  testProducedUndefinedLookupWritesThroughTheRunner,
   testDryRunReportsAbsenceAndWritesNothing,
   testFieldsTruncatedOnlyWhenAPairWasDropped,
   testPlannerConvergesWhenSourceFieldIsAbsent,
