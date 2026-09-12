@@ -2270,13 +2270,78 @@ FROM generate_series(1, :user_count) AS i
 JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
 ON CONFLICT DO NOTHING;
 
--- POST /api/attendance/punch is withPermission('attendance:write'); login tokens carry no
--- perms on staging (RBAC reads the tables), so grant the one needed permission directly.
+-- Employee attendance reads and punches are permission-gated; login tokens carry no
+-- permissions on staging (RBAC reads the tables), so grant the two self-service permissions.
 INSERT INTO user_permissions (user_id, permission_code)
 SELECT u.id, 'attendance:write'
 FROM generate_series(1, :user_count) AS i
 JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
 ON CONFLICT DO NOTHING;
+
+INSERT INTO user_permissions (user_id, permission_code)
+SELECT u.id, 'attendance:read'
+FROM generate_series(1, :user_count) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
+ON CONFLICT DO NOTHING;
+
+-- Minimal self-service policy fixtures. These dedicated business keys are owned by the
+-- synthetic soak family, so a re-seed may reactivate/update them without touching tenant
+-- policy rows created through the product UI.
+INSERT INTO attendance_leave_types
+  (id, org_id, code, name, requires_approval, requires_attachment, default_minutes_per_day, is_active)
+VALUES
+  (gen_random_uuid(), :'org', 'w4w7_soak_leave', 'W4W7 soak leave', true, false, 480, true)
+ON CONFLICT (org_id, code) DO UPDATE
+  SET name = EXCLUDED.name,
+      requires_approval = EXCLUDED.requires_approval,
+      requires_attachment = EXCLUDED.requires_attachment,
+      default_minutes_per_day = EXCLUDED.default_minutes_per_day,
+      is_active = true,
+      updated_at = now();
+
+INSERT INTO attendance_overtime_rules
+  (id, org_id, name, min_minutes, rounding_minutes, max_minutes_per_day, requires_approval, is_active)
+VALUES
+  (gen_random_uuid(), :'org', 'W4W7 soak overtime', 30, 15, 600, true, true)
+ON CONFLICT (org_id, name) DO UPDATE
+  SET min_minutes = EXCLUDED.min_minutes,
+      rounding_minutes = EXCLUDED.rounding_minutes,
+      max_minutes_per_day = EXCLUDED.max_minutes_per_day,
+      requires_approval = EXCLUDED.requires_approval,
+      is_active = true,
+      updated_at = now();
+
+-- The employee shift-swap form reads the scoped assignment list. Give each synthetic user
+-- view access only to the closed user family in this synthetic org. The deterministic id
+-- makes the scope an idempotent fixture rather than an accumulating set of grants.
+INSERT INTO attendance_scheduler_scopes
+  (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+SELECT (
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 1, 8) || '-' ||
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 9, 4) || '-4' ||
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 14, 3) || '-8' ||
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 18, 3) || '-' ||
+         substr(md5('w4w7-soak-selfservice-scope:' || :'org' || ':' || u.id), 21, 12)
+       )::uuid,
+       :'org', 'user', u.id, ARRAY['view']::text[],
+       jsonb_build_object(
+         'userIds',
+         (
+           SELECT COALESCE(jsonb_agg(family_user.id ORDER BY family_user.username), '[]'::jsonb)
+           FROM generate_series(1, :user_count) AS family_i
+           JOIN users family_user
+             ON family_user.username = :'user_prefix' || lpad(family_i::text, 2, '0')
+         )
+       ),
+       true, 'w4w7-soak-seed-selfservice', 'w4w7-soak-seed-selfservice'
+FROM generate_series(1, :user_count) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
+ON CONFLICT (id) DO UPDATE
+  SET actions = EXCLUDED.actions,
+      scope = EXCLUDED.scope,
+      is_active = true,
+      updated_by = EXCLUDED.updated_by,
+      updated_at = now();
 
 -- Full-day shift 00:00-23:59 in the org's timezone (task-ruled shape).
 INSERT INTO attendance_shifts (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days, late_grace_minutes, early_grace_minutes, rounding_minutes, flex_mode)
@@ -2312,14 +2377,15 @@ WHERE g.org_id = :'org' AND g.name = :'group_name'
      WHERE m.org_id = :'org' AND m.group_id = g.id
        AND m.user_id = u.id);
 
--- Published GROUP-PRODUCED assignment. producer_key spells the ONE canonical
--- implementation (plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs):
--- 'attendance_group_fixed_schedule:<groupId>:<shiftId>:<startDate>:<endDate>'.
-INSERT INTO attendance_shift_assignments (org_id, user_id, shift_id, start_date, end_date, is_active, producer_type, producer_ref_id, producer_key, producer_run_id, publish_status)
-SELECT :'org', u.id, s.id, :'start_date'::date, :'end_date'::date, true,
+-- The group-produced assignment covers the soak window. The second SELECT adds two
+-- manual, single-day published assignments after that window for the shift-swap form.
+INSERT INTO attendance_shift_assignments
+  (id, org_id, user_id, shift_id, slot_index, start_date, end_date, is_active,
+   producer_type, producer_ref_id, producer_key, producer_run_id, publish_status, assignment_kind)
+SELECT gen_random_uuid(), :'org', u.id, s.id, 0, :'start_date'::date, :'end_date'::date, true,
        'attendance_group_fixed_schedule', g.id,
        'attendance_group_fixed_schedule:' || g.id || ':' || s.id || ':' || :'start_date' || ':' || :'end_date',
-       gen_random_uuid(), 'published'
+       gen_random_uuid(), 'published', 'regular'
 FROM attendance_groups g
 JOIN attendance_shifts s ON s.org_id = g.org_id AND s.name = :'shift_name'
 CROSS JOIN generate_series(1, :user_count) AS i
@@ -2330,7 +2396,35 @@ WHERE g.org_id = :'org' AND g.name = :'group_name'
      WHERE a.org_id = :'org'
        AND a.user_id = u.id
        AND a.shift_id = s.id
-       AND a.producer_key = 'attendance_group_fixed_schedule:' || g.id || ':' || s.id || ':' || :'start_date' || ':' || :'end_date');
+       AND a.producer_key = 'attendance_group_fixed_schedule:' || g.id || ':' || s.id || ':' || :'start_date' || ':' || :'end_date')
+UNION ALL
+SELECT (
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 1, 8) || '-' ||
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 9, 4) || '-4' ||
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 14, 3) || '-8' ||
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 18, 3) || '-' ||
+         substr(md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username), 21, 12)
+       )::uuid,
+       :'org', u.id, s.id, 0,
+       :'end_date'::date + 1, :'end_date'::date + 1, true,
+       NULL, NULL, NULL, NULL, 'published', 'regular'
+FROM generate_series(1, 2) AS i
+JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')
+JOIN attendance_shifts s ON s.org_id = :'org' AND s.name = :'shift_name'
+ON CONFLICT (id) DO UPDATE
+  SET user_id = EXCLUDED.user_id,
+      shift_id = EXCLUDED.shift_id,
+      slot_index = EXCLUDED.slot_index,
+      start_date = EXCLUDED.start_date,
+      end_date = EXCLUDED.end_date,
+      is_active = EXCLUDED.is_active,
+      producer_type = EXCLUDED.producer_type,
+      producer_ref_id = EXCLUDED.producer_ref_id,
+      producer_key = EXCLUDED.producer_key,
+      producer_run_id = EXCLUDED.producer_run_id,
+      publish_status = EXCLUDED.publish_status,
+      assignment_kind = EXCLUDED.assignment_kind,
+      updated_at = now();
 
 INSERT INTO attendance_calculation_group_memberships (org_id, user_id, group_id, effective_from, effective_to, assigned_by, assigned_reason, assigned_correlation_id)
 SELECT :'org', u.id, g.id, :'start_date'::date, NULL, 'w4w7-soak-seed', 'combined-soak seed', 'w4w7-soak-' || g.id
@@ -2358,12 +2452,17 @@ soak_seed_report_org() {
     echo "users=$(soak_psql_ta "SELECT count(*) FROM users WHERE username LIKE '${prefix}%';")"
     echo "user_orgs=$(soak_psql_ta "SELECT count(*) FROM user_orgs uo WHERE uo.org_id = '${org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = uo.user_id AND u.username LIKE '${prefix}%');")"
     echo "user_permissions=$(soak_psql_ta "SELECT count(*) FROM user_permissions p WHERE p.permission_code = 'attendance:write' AND EXISTS (SELECT 1 FROM users u WHERE u.id = p.user_id AND u.username LIKE '${prefix}%');")"
+    echo "user_read_permissions=$(soak_psql_ta "SELECT count(*) FROM user_permissions p WHERE p.permission_code = 'attendance:read' AND EXISTS (SELECT 1 FROM users u WHERE u.id = p.user_id AND u.username LIKE '${prefix}%');")"
+    echo "active_leave_types=$(soak_psql_ta "SELECT count(*) FROM attendance_leave_types WHERE org_id = '${org}' AND code = 'w4w7_soak_leave' AND is_active = true;")"
+    echo "active_overtime_rules=$(soak_psql_ta "SELECT count(*) FROM attendance_overtime_rules WHERE org_id = '${org}' AND name = 'W4W7 soak overtime' AND is_active = true;")"
+    echo "selfservice_view_scopes=$(soak_psql_ta "SELECT count(*) FROM attendance_scheduler_scopes WHERE org_id = '${org}' AND created_by = 'w4w7-soak-seed-selfservice' AND is_active = true;")"
     echo "shifts=$(soak_psql_ta "SELECT count(*) FROM attendance_shifts WHERE org_id = '${org}' AND name LIKE 'w4w7-soak%';")"
     echo "segments=$(soak_psql_ta "SELECT count(*) FROM attendance_shift_segments seg WHERE seg.org_id = '${org}' AND EXISTS (SELECT 1 FROM attendance_shifts s WHERE s.id = seg.shift_id AND s.name LIKE 'w4w7-soak%');")"
     echo "groups=$(soak_psql_ta "SELECT count(*) FROM attendance_groups WHERE org_id = '${org}' AND name LIKE 'w4w7-soak%';")"
     echo "fixed_schedule_configs=$(soak_psql_ta "SELECT count(*) FROM attendance_group_fixed_schedule_configs WHERE org_id = '${org}' AND updated_by = 'w4w7-soak-seed';")"
     echo "group_members=$(soak_psql_ta "SELECT count(*) FROM attendance_group_members m WHERE m.org_id = '${org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = m.user_id AND u.username LIKE '${prefix}%');")"
     echo "published_assignments=$(soak_psql_ta "SELECT count(*) FROM attendance_shift_assignments a WHERE a.org_id = '${org}' AND a.publish_status = 'published' AND EXISTS (SELECT 1 FROM users u WHERE u.id = a.user_id AND u.username LIKE '${prefix}%');")"
+    echo "manual_swap_assignments=$(soak_psql_ta "SELECT count(*) FROM attendance_shift_assignments a WHERE a.org_id = '${org}' AND a.publish_status = 'published' AND a.assignment_kind = 'regular' AND a.producer_type IS NULL AND a.start_date = a.end_date AND a.start_date > DATE '${SOAK_SEED_END_DATE}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = a.user_id AND u.username LIKE '${prefix}%');")"
     echo "calc_group_memberships=$(soak_psql_ta "SELECT count(*) FROM attendance_calculation_group_memberships m WHERE m.org_id = '${org}' AND EXISTS (SELECT 1 FROM users u WHERE u.id = m.user_id AND u.username LIKE '${prefix}%');")"
   } >> "${OUTPUT_DIR}/soak-seed-report.txt"
 }
@@ -2706,7 +2805,8 @@ action_soak_seed() {
   mkdir -p "$SOAK_PERSIST_DIR"
   local users_per_org tz_opt w7_target
   users_per_org="$(soak_opt users_per_org 10)"
-  [[ "$users_per_org" =~ ^[1-9][0-9]?$ ]] || fail "users_per_org must be 1..99, got '${users_per_org}'"
+  [[ "$users_per_org" =~ ^[1-9][0-9]?$ ]] && (( users_per_org >= 2 )) \
+    || fail "users_per_org must be 2..99 so the shift-swap fixture has two distinct users, got '${users_per_org}'"
   tz_opt="$(soak_opt tz Asia/Shanghai)"
   w7_target="$(soak_opt w7_target group_shadow)"
   if [[ "$w7_target" != "group_shadow" ]]; then

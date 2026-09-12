@@ -126,7 +126,7 @@
               >{{ metricOutTime }}</strong>
             </div>
             <div class="attendance__summary-item attendance__summary-item--stat">
-              <span>{{ tr("Today's hours", '今日工时') }}</span>
+              <span>{{ workbenchHoursLabel }}</span>
               <strong class="attendance__summary-value">{{ workDurationLabel }}</strong>
             </div>
             <div class="attendance__summary-item attendance__summary-item--stat">
@@ -543,7 +543,6 @@ const props = defineProps<{
   workbenchStatusDescription: string
   workbenchRecordStatus: string | null
   workbenchFocusDateLabel: string | null
-  workbenchLatestPunchLabel: string
   workbenchWorkMinutes: number
   workbenchLateEarlyLabel: string
   workbenchHasLateEarly: boolean
@@ -675,11 +674,17 @@ const greetingSubline = computed(() => {
   return datePart
 })
 
-const clockedIn = computed(() => isClockedIn(props.heroTimeline, props.workbenchLatestPunchLabel))
+const clockedIn = computed(() => isClockedIn(props.heroTimeline))
+
+const clockedOut = computed(() => Boolean(props.heroTimeline?.checkOut))
 
 const offDutySuggest = computed(() => suggestOffDutyTime(props.selfRulesWorkWindowSummary))
+const workbenchHoursLabel = computed(() => props.workbenchFocusDateLabel
+  ? `${props.tr('Hours', '工时')} · ${props.workbenchFocusDateLabel}`
+  : props.tr('Hours', '工时'))
 
 const clockStatusLine = computed(() => {
+  if (clockedOut.value) return props.tr('Clocked out', '已下班')
   if (!clockedIn.value) return props.tr('Not clocked in yet', '尚未上班')
   const suggestAt = offDutySuggest.value
   if (suggestAt) {
@@ -708,7 +713,7 @@ const expiredBalanceLabel = computed(() =>
 
 const lateEarlyDisplay = computed(() => formatLateEarlyPair(props.workbenchLateEarlyLabel, props.tr))
 
-const metricInTime = computed(() => props.heroTimeline?.checkIn ?? props.workbenchLatestPunchLabel ?? '--:--')
+const metricInTime = computed(() => props.heroTimeline?.checkIn ?? '--:--')
 
 const metricOutTime = computed(() => props.heroTimeline?.checkOut ?? '--:--')
 

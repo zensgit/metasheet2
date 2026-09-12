@@ -116,7 +116,6 @@ export function buildEmployeeWorkspaceProps(state: OverviewHarnessState) {
         : '当天出勤正常。',
     workbenchRecordStatus: isEmpty ? null : isLate ? (state === 'missing' ? 'late_early' : 'late') : 'normal',
     workbenchFocusDateLabel: isEmpty ? null : '2026年4月15日',
-    workbenchLatestPunchLabel: isEmpty ? '--:--' : '09:18',
     workbenchWorkMinutes: isEmpty ? 0 : 444,
     workbenchLateEarlyLabel: isLate ? '18 / 18' : '0 / 0',
     workbenchHasLateEarly: isLate,
