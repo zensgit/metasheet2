@@ -328,9 +328,9 @@ $ cd packages/core-backend && npx tsc --noEmit
 - `exclude` 共 **395** 条字符串项，其中只有三条是 glob：`**/node_modules/**`、`**/dist/**`、
   `tests/e2e/**`；其余全部是逐个枚举的 `tests/integration/...` 文件名。
   **没有任何一条能匹配 `tests/unit/**`。**
-- 无库 lane 跑的是 `pnpm --filter @metasheet/core-backend test:unit`
-  = `vitest run tests/unit --reporter=dot`（`packages/core-backend/package.json:28`），
-  新 spec 在 `tests/unit/` 下，必然被收集。
+- 无库 lane 跑的是 `pnpm --filter @metasheet/core-backend test`（`.github/workflows/plugin-tests.yml`
+  「Run core-backend tests」步骤）= `vitest`（`packages/core-backend/package.json:26`）：无 include 限制、
+  exclude 不含 `tests/unit`，新 spec 必然被收集。`test:unit`（`package.json:28`）存在但没有任何工作流调用它。
 - **反证控制组**：vitest 的 exclude 在显式传入路径之后仍然生效 —— 拿一个确实被排除的文件验证：
   ```
   $ npx vitest run tests/integration/approval-directory-resolve.api.test.ts
