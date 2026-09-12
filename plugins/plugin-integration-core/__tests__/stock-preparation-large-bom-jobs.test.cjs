@@ -799,6 +799,77 @@ async function runBackgroundJobUnderActionCaps({ action, jobId, source }) {
   })
 }
 
+// F1c — 根选择规则必须两条通道**同量**。
+//
+// 后台大 BOM 这条通道的展开入参是路由现编的(http-routes `largeBomExpansionOptionsForAction`,
+// 键集只有 readPlan/pageLimit/maxDepth + 后台放大的四个 caps),里面没有 rootSelection。若 worker
+// 不从任务自己的动作快照里取,同一个项目就会因为「BOM 够不够大」而落到两套根集合上 —— 交互式
+// 按老系统剔根、后台按改前全收,而操作员看到的只是一张行数对不上的表。
+//
+// 这里用的正是路由那套入参组合(runBackgroundJobUnderActionCaps 里 largeBomBackgroundExpansionCaps),
+// 所以它证明的是「配置到得了 worker」,不是「纯函数算得对」。
+function rootSelectionPlmData() {
+  return plmData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'MAIN_DRAWING_VALUE_SHOULD_NOT_APPEAR', quantity: '1', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR', quantity: '2', sort_id: 2 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      {
+        OBJ_ID: 'MAIN_DRAWING_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'J900-00',
+        IdentityName: 'MAIN_NAME_SHOULD_NOT_APPEAR',
+        Material: 'MATERIAL_VALUE_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+      {
+        OBJ_ID: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'CODE_VALUE_SHOULD_NOT_APPEAR',
+        IdentityName: 'NAME_VALUE_SHOULD_NOT_APPEAR',
+        Material: 'MATERIAL_VALUE_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+      {
+        OBJ_ID: 'CHILD_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'CHILD_CODE_SHOULD_NOT_APPEAR',
+        IdentityName: 'CHILD_NAME_SHOULD_NOT_APPEAR',
+        Material: 'CHILD_MATERIAL_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+    ],
+  })
+}
+
+async function testBackgroundWorkerHonoursTheActionsRootSelectionRules() {
+  // 默认(动作里一个字没写)= 老系统规则:有 J…-00 总图就只要总图,另一条订单行不当根。
+  const byDefault = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+    },
+    jobId: 'job-root-default',
+    source: createSourceAdapter(rootSelectionPlmData()),
+  })
+  assert.equal(byDefault.status, 'completed')
+  assert.equal(byDefault.artifact.rows.length, 1, '只有总图当根 —— 另一条订单行连同它的子件不再从根展开')
+
+  // 关掉规则 => 回到 F1c 之前的根集合。动作快照里写了,worker 就必须照做。
+  const disabled = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      // 路由存进任务的是**归一化后**的动作配置(createLargeBomBackgroundExpansionJob 里
+      // `actionSnapshot: cloneJson(action)`),这里直接给归一化后的形状。
+      rootSelection: { enabled: false },
+    },
+    jobId: 'job-root-disabled',
+    source: createSourceAdapter(rootSelectionPlmData()),
+  })
+  assert.equal(disabled.status, 'completed')
+  assert.equal(disabled.artifact.rows.length, 3, '两条订单行都当根 + 一个子件')
+  assertValuesFree(publicBackgroundExpansionJob(disabled))
+}
+
 // REGRESSION PIN for the 2026-09-05 field failure. This test used to hand the
 // worker `expansionOptions: { maxRows: 1 }` and call the resulting `failed` the
 // expected outcome — which pinned the bug: the background lane was handed the
@@ -1632,7 +1703,10 @@ async function testSuccessfulRunHasNoReadFailureKeys() {
   ])
 }
 
-async function completedJobWithArtifact({ storage = createStorage(), jobId = 'job-plan-1' } = {}) {
+// `extensionFieldIds` (optional) lands on the job's stored `actionSnapshot` exactly as the deploy-time
+// action config does (`cloneJson(action)` at enqueue) — the seam the background planner reads its
+// DECLARED extension band from. Omitted => the action is byte-identical to the pre-F1c one.
+async function completedJobWithArtifact({ storage = createStorage(), jobId = 'job-plan-1', extensionFieldIds } = {}) {
   const source = createSourceAdapter(plmData())
   await createLargeBomBackgroundExpansionJob({
     storage,
@@ -1641,6 +1715,7 @@ async function completedJobWithArtifact({ storage = createStorage(), jobId = 'jo
       actionId: 'plm.stock-preparation.pull-bom.v1',
       source: { kind: 'data-source:sql-readonly', externalSystemId: 'SOURCE_BINDING_SHOULD_NOT_APPEAR' },
       target: { sheetId: 'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR' },
+      ...(extensionFieldIds === undefined ? {} : { extensionFieldIds }),
     },
     parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
     principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
@@ -1711,7 +1786,23 @@ async function testPlannerHandoffRejectsMalformedExistingRows() {
 }
 
 async function testPlannerHandoffStoresValuesFreePlanEvidence() {
-  const { storage, jobId } = await completedJobWithArtifact()
+  // F1c: the action DECLARES 当前组件排序号, so the background planner must fill it from the
+  // artifact rows' `sortLine` exactly as the interactive dry-run does (table-actions.cjs threads
+  // `action.extensionFieldIds`; this lane threads `job.actionSnapshot.extensionFieldIds`). The
+  // pack-aware ownership projection is the second gate: the column must be INSTALLED as a
+  // plm_system extension for `pickFields` to let it into the add record at all.
+  const { storage, jobId } = await completedJobWithArtifact({ extensionFieldIds: ['ext_componentSortNo'] })
+  const installedFieldProperties = [{
+    logicalId: 'ext_componentSortNo',
+    name: 'ext_componentSortNo',
+    type: 'number',
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system', preserveOnRefresh: false, required: false, key: false,
+        extension: true, packId: 'factory-a', packVersion: '1.0.0',
+      },
+    },
+  }]
   const planned = await planLargeBomBackgroundExpansionJob({
     storage,
     ...TEST_SCOPE,
@@ -1724,6 +1815,7 @@ async function testPlannerHandoffStoresValuesFreePlanEvidence() {
       componentName: 'EXISTING_TARGET_VALUE_SHOULD_NOT_APPEAR',
       active: true,
     }],
+    installedFieldProperties,
     runId: 'large-bom-plan-run',
     plannedAt: '2026-06-08T00:02:00.000Z',
     now: () => '2026-06-08T00:03:00.000Z',
@@ -1735,6 +1827,19 @@ async function testPlannerHandoffStoresValuesFreePlanEvidence() {
   assert.equal(planned.planArtifact.plan.counts.add, 2, 'private plan keeps decisions for future C4')
   assert.equal(planned.planArtifact.plan.counts.manual_confirm, 0)
   assert.equal(planned.planArtifact.existingRowCount, 1)
+  // The wiring under test: 明细栏 sort_id (order detail 1 for the root, BOM detail 2 for the child)
+  // reaches the pack column ONLY through `extensionFieldIds: job.actionSnapshot.extensionFieldIds`
+  // in planLargeBomBackgroundExpansionJob. Dropping that line (extensionFieldIds: undefined) makes
+  // both records lose the key — this is the assertion that turns red.
+  const addRecords = planned.planArtifact.plan.decisions
+    .filter((decision) => decision.decision === 'add')
+    .map((decision) => decision.record)
+  assert.equal(addRecords.length, 2)
+  const rootRecord = addRecords.find((record) => record.depth === 0)
+  const childRecord = addRecords.find((record) => record.depth === 1)
+  assert.ok(rootRecord && childRecord, 'the artifact holds one root row and one child row')
+  assert.equal(rootRecord.ext_componentSortNo, 1, 'background plan fills 当前组件排序号 for the root from the order detail sort_id')
+  assert.equal(childRecord.ext_componentSortNo, 2, 'background plan fills 当前组件排序号 for the child from the BOM detail sort_id')
   const publicJob = publicBackgroundExpansionJob(planned)
   assert.equal(publicJob.planRevisionPresent, true)
   assert.equal(publicJob.evidence.plan.counts.add, 2)
@@ -2077,6 +2182,7 @@ async function main() {
   testBackgroundCapDerivationAndCeilings()
   testBackgroundCapConfigBlockParsing()
   await testBackgroundWorkerScalesPastTheInteractiveScaleBudget()
+  await testBackgroundWorkerHonoursTheActionsRootSelectionRules()
   await testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget()
   await testBackgroundBudgetsAreRecordedBeforeTheSourceRead()
   await testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe()

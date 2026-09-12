@@ -63,7 +63,12 @@ const {
   EXPORT_SOURCE_FIELD_IDS,
   StockPreparationPrepLineExportError,
   exportStockPreparationPrepLines,
+  __internals: exportInternals,
 } = require(path.join(LIB, 'stock-preparation-prep-line-export.cjs'))
+// The expander's OWN path encoder (`makePath`): the tree fixtures below carry `path` exactly as the
+// apply path writes it, and R23c pins the export's re-encoder to it so the two cannot drift.
+const { __internals: bomExpansionInternals } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
+const bomPath = (...tokens) => bomExpansionInternals.makePath(tokens)
 const {
   makeStrictRecordsApi,
   physicalFieldId,
@@ -256,7 +261,13 @@ const SANDBOX_SHEET = 'sheet_stock_prep_sandbox_twin'
 // with anything less is refused before the export module is ever reached. The module's own
 // tolerance for an unbound DISPLAY column is therefore defence in depth, exercised directly at the
 // module level below.)
-const PACK_FIELD_IDS = Object.freeze(['ext_parentDrawingNo', 'ext_parentName', 'ext_spec', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength'])
+// F1c 追加了六个包列(名称及规格/交接工段/毛胚宽度/厚度/数量/质量)和 当前组件排序号 —— 一个装了
+// 客户包的部署这些列本来就在,所以「全量 provisioned」的 target 也要绑它们。
+const PACK_FIELD_IDS = Object.freeze([
+  'ext_parentDrawingNo', 'ext_parentName', 'ext_spec', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength',
+  'ext_nameAndSpec', 'ext_handoverSection', 'ext_blankWidth', 'ext_blankThickness', 'ext_blankQuantity', 'ext_blankMass',
+  'ext_componentSortNo', 'ext_parentSortNo',
+])
 
 function targetFor(sheetId) {
   const fieldIds = [
@@ -313,7 +324,7 @@ async function moduleReturnsExactAgreedColumnsForASeededProject() {
     permission: 'admin',
   })
   assert.deepEqual(result.headers, EXPORT_COLUMNS.map((c) => c.label), 'R1: headers are exactly EXPORT_COLUMNS, in order')
-  assert.equal(result.headers.length, 17, 'R1/R12: seventeen columns (#5447 added five completion columns after the original twelve)')
+  assert.equal(result.headers.length, 28, 'R1/R12: 28 columns (#5447 的五列之后,F1c 又补了老系统 23 列里缺的十一列)')
   assert.equal(result.totalRowCount, 3, 'PROJECT_A has 3 rows total (2 active + 1 inactive)')
   assert.equal(result.activeRowCount, 2, 'PROJECT_A has 2 active rows')
   assert.equal(result.rows.length, 2)
@@ -994,10 +1005,13 @@ async function routeGateRefusesBeforeAnyHostIo() {
 //     the five reported in unresolvedColumns. Never a 500.
 // ---------------------------------------------------------------------------
 
-const SEVENTEEN_HEADERS_IN_ORDER = Object.freeze([
+// F1c: the original 17 (UNMOVED — 老列顺序是约定) followed by the eleven 老系统 23 列里补齐的列.
+const EXPORT_HEADERS_IN_ORDER = Object.freeze([
   '父组件图号', '父组件名称', '图号', '名称', '规格', '材料', '总数量',
   '备料情况', '需求日期', '领料节点', '备料日期', '毛胚长度',
   '自制/外购', '采购完成', '采购回复日期', '仓库完成', '实际到货日期',
+  '生产编号', '名称及规格', '材料类型', '毛胚类型', '备注', '交接工段',
+  '提前周期(天)', '毛胚宽度', '毛胚厚度', '毛胚数量', '毛胚质量',
 ])
 
 async function moduleExactSeventeenColumnHeaderOrder() {
@@ -1008,8 +1022,8 @@ async function moduleExactSeventeenColumnHeaderOrder() {
     projectNo: PROJECT_A,
     permission: 'admin',
   })
-  assert.deepEqual(result.headers, SEVENTEEN_HEADERS_IN_ORDER, 'R12: the exact 17 headers, in the agreed order')
-  assert.deepEqual(EXPORT_COLUMNS.map((c) => c.label), SEVENTEEN_HEADERS_IN_ORDER, 'R12: EXPORT_COLUMNS itself matches the literal agreed order')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R12: the exact 28 headers, in the agreed order')
+  assert.deepEqual(EXPORT_COLUMNS.map((c) => c.label), EXPORT_HEADERS_IN_ORDER, 'R12: EXPORT_COLUMNS itself matches the literal agreed order')
 }
 
 async function moduleCompletionFlagsRenderYesNoTextAndBlankWhenUnset() {
@@ -1059,7 +1073,7 @@ async function moduleTargetPredatingPR5447StillExportsAndReportsTheFive() {
     projectNo: PROJECT_A,
     permission: 'admin',
   })
-  assert.deepEqual(result.headers, SEVENTEEN_HEADERS_IN_ORDER, 'R15: the header set never shrinks — all 17 headers still appear')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R15: the header set never shrinks — all 28 headers still appear')
   assert.deepEqual(
     result.unresolvedColumns.slice().sort(),
     ['actualArrivalDate', 'makeOrBuy', 'procurementDone', 'procurementReplyDate', 'warehouseDone'],
@@ -1245,7 +1259,7 @@ async function moduleExportWithoutAnyParentBindingDegradesToDrawingOrder() {
     projectNo: PROJECT_ORDER,
     permission: 'admin',
   })
-  assert.deepEqual(result.headers, SEVENTEEN_HEADERS_IN_ORDER, 'R16e: the header set never shrinks')
+  assert.deepEqual(result.headers, EXPORT_HEADERS_IN_ORDER, 'R16e: the header set never shrinks')
   assert.deepEqual(
     result.rows.map((cells) => cells[columnIndex('parentComponentCode')]),
     [null, null, null, null, null, null],
@@ -1269,6 +1283,730 @@ async function moduleExportWithoutAnyParentBindingDegradesToDrawingOrder() {
     ['ext_parentDrawingNo', 'parentComponentCode'],
     'R16e: the missing hierarchy source is REPORTED, so "no parents bound" is distinguishable from "this project has no parents"',
   )
+}
+
+// ---------------------------------------------------------------------------
+// F1c — 深度优先 BOM 树序 + 老系统的同父去重(展示层兜底) + 补齐的老系统 23 列
+//
+// R17 打乱顺序喂进来 => 根 -> 子 -> 孙 的树序,兄弟按 明细排序号(客户包列 ext_componentSortNo)。
+// R18 同父同键的重复行按老系统合并,合并条数如实上报(collapsedRowCount),重复行的子树跟着走。
+//    这批行带 ext_nameAndSpec(名称及规格):展示层只在这把键**还原得出来**的时候才合并 ——
+//    包列有值是三种可证形状里的第一种(见 displayDedupeKey);第三种(规格 有值、包列为空)
+//    不可证,一行不并,那是 R22。
+// R19 孤儿行(父路径不在这批里)当根打印,一行都不少;孤儿自己的子行紧跟在它后面(父在子前),
+//    不是被平比较器扫到末尾。「父路径不在批内 ⇒ 当根」这一子句的判别用例就是 R17 里孤儿带子行的
+//    那两行(子行的 父组件图号 按平比较器排在孤儿的前面 —— 子句拿掉,顺序断言必红)+ R24a。
+// R20 没有 部件源ID 的老部署退回 F1b 的平比较器(treeOrdered: false),不比改之前更乱。
+// ---------------------------------------------------------------------------
+
+const PROJECT_TREE = 'PRJ-TREE'
+
+// `withPath: false` models the sheet an OLD target produced — `path` never bound, so the rows carry
+// 部件源ID but no row path (R23d: the degraded identity scheme).
+function treeRows({ withPath = true } = {}) {
+  const shared = {
+    parentComponentCode: 'TZ-T0',
+    parentComponentName: 'T主体',
+    ext_parentDrawingNo: 'TZ-T0',
+    ext_parentName: 'T主体',
+    material: 'Q235B',
+  }
+  const pathOf = (...tokens) => (withPath ? bomPath(...tokens) : undefined)
+  return [
+    // 打乱:孙 -> 孤儿的子件 -> 重复兄弟 -> 兄弟B -> 孤儿 -> 根 -> 兄弟A。没有任何一个比较器会产出这个顺序。
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-A1', componentName: 'A的子件',
+      ext_nameAndSpec: 'A的子件',
+      componentSourceId: 'P-A', parentSourceId: 'P-A0', ext_componentSortNo: 10,
+      path: pathOf('P-ROOT', 'P-A0', 'P-A'),
+      idempotencyKey: 'idk-t-a1',
+    }, 'rec_t_a1'),
+    // 孤儿的子件:父路径 ["P-GONE","P-X"] 在批内(就是下面那个孤儿),所以它挂在孤儿之下,不是再当
+    // 一个根。故意排在孤儿**前面**喂进来,而且它的 父组件图号(DWG-T-X)按平比较器排在孤儿的
+    // (TZ-T0)前面:「父路径不在批内 ⇒ 当根」这一子句一旦拿掉,孤儿和它都掉进末尾的 stranded
+    // 追加、被平比较器排成子先于父 —— R17 的顺序断言就红(行数不少,树序错)。
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-XC', componentName: '孤儿的子件',
+      ext_nameAndSpec: '孤儿的子件',
+      parentComponentCode: 'DWG-T-X', parentComponentName: '孤儿件',
+      ext_parentDrawingNo: 'DWG-T-X', ext_parentName: '孤儿件',
+      componentSourceId: 'P-X-C', parentSourceId: 'P-X', ext_componentSortNo: 1,
+      path: pathOf('P-GONE', 'P-X', 'P-X-C'),
+      idempotencyKey: 'idk-t-xc',
+    }, 'rec_t_xc'),
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-B', componentName: 'B件',
+      ext_nameAndSpec: 'B件',
+      componentSourceId: 'P-B-DUP', parentSourceId: 'P-ROOT', ext_componentSortNo: 20,
+      path: pathOf('P-ROOT', 'P-B-DUP'),
+      idempotencyKey: 'idk-t-b-dup',
+    }, 'rec_t_bdup'),
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-B', componentName: 'B件',
+      ext_nameAndSpec: 'B件',
+      componentSourceId: 'P-B', parentSourceId: 'P-ROOT', ext_componentSortNo: 20,
+      path: pathOf('P-ROOT', 'P-B'),
+      idempotencyKey: 'idk-t-b',
+    }, 'rec_t_b'),
+    // 孤儿:父路径 ["P-GONE"] 不在这批里 => 当根。排序号 15 故意小于兄弟 B 的 20:根这一层的排序
+    // 号只在根之间比,ROOT 的整棵子树(含 B)先打印完,孤儿才作为下一个根出现 —— 不会插到 B 前面。
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-X', componentName: '孤儿件',
+      ext_nameAndSpec: '孤儿件',
+      componentSourceId: 'P-X', parentSourceId: 'P-GONE', ext_componentSortNo: 15,
+      path: pathOf('P-GONE', 'P-X'),
+      idempotencyKey: 'idk-t-x',
+    }, 'rec_t_x'),
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-ROOT', componentName: '根件',
+      ext_nameAndSpec: '根件',
+      parentComponentCode: undefined, parentComponentName: undefined,
+      ext_parentDrawingNo: undefined, ext_parentName: undefined,
+      componentSourceId: 'P-ROOT', parentSourceId: undefined, ext_componentSortNo: 1,
+      path: pathOf('P-ROOT'),
+      idempotencyKey: 'idk-t-root',
+    }, 'rec_t_root'),
+    mainRow(PROJECT_TREE, {
+      ...shared, componentCode: 'DWG-T-A0', componentName: 'A件',
+      ext_nameAndSpec: 'A件',
+      componentSourceId: 'P-A0', parentSourceId: 'P-ROOT', ext_componentSortNo: 5,
+      path: pathOf('P-ROOT', 'P-A0'),
+      idempotencyKey: 'idk-t-a0',
+    }, 'rec_t_a0'),
+  ]
+}
+
+function treeSubstrate() {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: treeRows() },
+  })
+  return { records, target: targetFor(SANDBOX_SHEET) }
+}
+
+async function moduleExportOrderIsTheBomTreeNotAFlatBand() {
+  const { records, target } = treeSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target, projectNo: PROJECT_TREE, permission: 'admin',
+  })
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  const codes = result.rows.map((row) => row[codeColumn])
+  assert.deepEqual(
+    codes,
+    ['DWG-T-ROOT', 'DWG-T-A0', 'DWG-T-A1', 'DWG-T-B', 'DWG-T-X', 'DWG-T-XC'],
+    'R17: 根 -> (排序号 5)A件 -> A件的子件 -> (排序号 20)B件;孤儿(排序号 15)在根的整棵子树之后当根打印,孤儿的子件紧跟在它后面',
+  )
+  // R19: 「父路径不在批内 ⇒ 当根」这一子句有它自己的判别 —— 孤儿的子行必须紧跟在孤儿之后(父在
+  // 子前)。子句拿掉,孤儿与子行都掉进末尾的 stranded 追加,平比较器按 父组件图号 排出
+  // DWG-T-XC(父 DWG-T-X)先于 DWG-T-X(父 TZ-T0):子先于父。行数一样,顺序不一样。
+  assert.ok(
+    codes.indexOf('DWG-T-X') === codes.indexOf('DWG-T-XC') - 1,
+    'R19: 孤儿按树位置当根打印、它的子件紧跟其后 —— 不是被平比较器扫到末尾排成子先于父',
+  )
+  // R18: 同父同键的那条重复行被合并,并且合并条数如实上报。
+  assert.equal(result.collapsedRowCount, 1, 'R18: 一条同父同键的重复行被合并')
+  assert.equal(result.activeRowCount, 7, 'R18: 合并是打印层的事,行数统计仍是表里的真实行数')
+  assert.equal(result.rows.length, 6)
+  assert.equal(result.treeOrdered, true)
+}
+
+async function moduleExportWithoutSourceIdentityKeepsTheFlatOrder() {
+  const { records, target } = moduleSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target, projectNo: PROJECT_ORDER, permission: 'admin',
+  })
+  // 这批行一个 部件源ID 都没有(老部署 / 手工行),树建不起来 => 退回 F1b 的平比较器,
+  // 也就是 R16 已经钉住的那个顺序,而不是把每一行都当根从而丢掉按父组件分带。
+  assert.equal(result.treeOrdered, false, 'R20: 认不出身份就明说,而不是假装排了树序')
+  assert.equal(result.collapsedRowCount, 0)
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  assert.deepEqual(
+    result.rows.map((row) => row[codeColumn]),
+    ['DWG-0', 'DWG-1', 'DWG-2', 'DWG-2', 'DWG-9', 'DWG-1'],
+    'R20: F1b 的顺序原样保留(TZ-A 组 -> TZ-B 组 -> 无父件行)',
+  )
+}
+
+async function moduleLegacyTwentyThreeColumnsAreProjected() {
+  const { records, target } = moduleSubstrate()
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target, projectNo: PROJECT_A, permission: 'admin',
+  })
+  // 老系统 exportExcel 1536-1560 的 23 个表头里,这张工作簿现在能给出的那些(逐个点名,
+  // 而不是只数个数)。缺的那一个是「序号」—— 它是导出时现编的行号,不是任何一列的值。
+  const labels = result.headers
+  for (const label of ['备料日期', '生产编号', '父组件图号', '父组件名称', '名称及规格', '规格',
+    '材料', '总数量', '材料类型', '毛胚类型', '备注', '领料节点', '交接工段', '需求日期',
+    '提前周期(天)', '备料情况', '毛胚长度', '毛胚宽度', '毛胚厚度', '毛胚数量', '毛胚质量']) {
+    assert.ok(labels.includes(label), `老系统这一列在导出里有对应表头: ${label}`)
+  }
+  assert.equal(labels.includes('序号'), false, '「序号」是行号不是列值,留在 PR 的缺列清单里交 owner')
+  // 老列没挪窝:前 17 列仍是 #5447 之后那一版的顺序。
+  assert.deepEqual(labels.slice(0, 17), EXPORT_HEADERS_IN_ORDER.slice(0, 17))
+  // 生产编号 真的有值(它同时是作用域列,取的是同一个绑定)。
+  const projectColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'projectNo')
+  assert.equal(result.rows[0][projectColumn], PROJECT_A)
+}
+
+// ---------------------------------------------------------------------------
+// R21 — 同图号、不同规格的两个标准件,两行都要打印(老系统 iterHandle 686-693 的注释明说,加
+// 名称/材质进键就是为了不把同图号的标准件合并掉)。
+//
+// 这条钉的是展示层去重键在**最弱的那种部署**上的强度:没装客户包(或装了包但动作没在
+// extensionFieldIds 里声明 名称及规格),所以 ext_nameAndSpec 恒空;而 F1c 之后 名称 列只装
+// identityName 的**首段**(bom-expansion createRow 用 splitNameAndSpec 切过)。此时键的第三项
+// 若只取 名称,两条 螺栓 就会撞成同一个键 —— 并且被合并那条连它的整棵子树一起不打印。
+// 去掉 nameAndSpecDisplayKey 里的 规格 退回一项,这个用例必红。
+// ---------------------------------------------------------------------------
+
+const PROJECT_STANDARD_PARTS = 'PRJ-STD'
+
+function standardPartRows() {
+  const shared = {
+    parentComponentCode: 'TZ-S0',
+    parentComponentName: 'S主体',
+    // 无包部署:两个包列都不存在。名称及规格 因此恒空,规格 只能从模板列取。
+    ext_parentDrawingNo: undefined,
+    ext_parentName: undefined,
+    ext_spec: undefined,
+    ext_nameAndSpec: undefined,
+    material: 'Q235B',
+    totalQuantity: 4,
+  }
+  return [
+    mainRow(PROJECT_STANDARD_PARTS, {
+      ...shared,
+      parentComponentCode: undefined, parentComponentName: undefined,
+      componentCode: 'TZ-S0', componentName: 'S主体', componentSpec: undefined,
+      componentSourceId: 'P-S0', parentSourceId: undefined, ext_componentSortNo: 1,
+      path: bomPath('P-S0'),
+      idempotencyKey: 'idk-s0',
+    }, 'rec_s0'),
+    mainRow(PROJECT_STANDARD_PARTS, {
+      ...shared,
+      componentCode: 'GB/T5783', componentName: '螺栓', componentSpec: 'M8x30',
+      componentSourceId: 'P-S1', parentSourceId: 'P-S0', ext_componentSortNo: 10,
+      path: bomPath('P-S0', 'P-S1'),
+      idempotencyKey: 'idk-s1',
+    }, 'rec_s1'),
+    mainRow(PROJECT_STANDARD_PARTS, {
+      ...shared,
+      componentCode: 'GB/T5783', componentName: '螺栓', componentSpec: 'M10x40',
+      componentSourceId: 'P-S2', parentSourceId: 'P-S0', ext_componentSortNo: 20,
+      path: bomPath('P-S0', 'P-S2'),
+      idempotencyKey: 'idk-s2',
+    }, 'rec_s2'),
+    // 挂在第二个标准件下的子件 —— 合并会把整棵子树一起吞掉,所以它是「被吞了」最直接的证据。
+    mainRow(PROJECT_STANDARD_PARTS, {
+      ...shared,
+      parentComponentCode: 'GB/T5783', parentComponentName: '螺栓',
+      componentCode: 'WASHER-1', componentName: '垫圈', componentSpec: 'D10',
+      componentSourceId: 'P-S2-C', parentSourceId: 'P-S2', ext_componentSortNo: 5,
+      path: bomPath('P-S0', 'P-S2', 'P-S2-C'),
+      idempotencyKey: 'idk-s2c',
+    }, 'rec_s2c'),
+  ]
+}
+
+async function moduleSameDrawingDifferentSpecIsNotCollapsed() {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: standardPartRows() },
+  })
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_STANDARD_PARTS, permission: 'admin',
+  })
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  const specColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentSpec')
+  assert.deepEqual(
+    result.rows.map((row) => [row[codeColumn], row[specColumn]]),
+    [['TZ-S0', null], ['GB/T5783', 'M8x30'], ['GB/T5783', 'M10x40'], ['WASHER-1', 'D10']],
+    'R21: 同图号不同规格的两个标准件都要打印,第二个的子件跟着打印',
+  )
+  assert.equal(result.collapsedRowCount, 0, 'R21: 一行都没被合并 —— 它们不是重复行')
+  assert.equal(result.treeOrdered, true)
+}
+
+// ---------------------------------------------------------------------------
+// R22 — 部署自己声明了 规格 列(readPlan.part.specField)时,展示层拼不回老系统那一串,
+// 于是**一行不并**。
+//
+// 声明了 specField 的部署上(dn-pdm-family.preset 把 规格 叫做 a part-side dictionary
+// assignment),规格 是 part 侧的字典值,不是 identityName 的尾巴;而 F1c 之后 名称 列只装
+// 首段。两行 identityName 分别是「螺栓 M8x30」「螺栓 M10x40」、规格 列却同为「碳钢」时,
+// 名称 + 规格 拼出来的串对这两行**完全相同** —— 比展开层那把键(比未切分全串)更**粗**。
+// 照拼就会把两个合法的不同标准件并成一行,还连第二件的子件一起吞掉(collapseSubtree)。
+//
+// 拿掉 walk 里的 `key !== null` 守卫(或让 displayDedupeKey 的不可证分支照拼)⇒ 本用例必红:
+// 打印 2 行而不是 4 行,collapsedRowCount 从 0 变 2。R21 盖不住这个形状 —— R21 那两行的 规格
+// 是不同值。
+// ---------------------------------------------------------------------------
+
+const PROJECT_DECLARED_SPEC = 'PRJ-DECL-SPEC'
+
+function declaredSpecColumnRows({ packNameAndSpec } = {}) {
+  const shared = {
+    // 无包(或包列未声明):名称及规格 恒空 —— 展示层唯一可证的那条路被关掉。
+    ext_parentDrawingNo: undefined,
+    ext_parentName: undefined,
+    ext_spec: undefined,
+    ext_nameAndSpec: undefined,
+    parentComponentCode: 'TZ-D0',
+    parentComponentName: 'D主体',
+    material: '碳钢',
+    totalQuantity: 2,
+  }
+  return [
+    mainRow(PROJECT_DECLARED_SPEC, {
+      ...shared,
+      parentComponentCode: undefined, parentComponentName: undefined,
+      componentCode: 'J100-00', componentName: 'D主体', componentSpec: undefined,
+      componentSourceId: 'P-D0', parentSourceId: undefined, ext_componentSortNo: 1,
+      path: bomPath('P-D0'),
+      idempotencyKey: 'idk-d0',
+    }, 'rec_d0'),
+    // 两个标准件:图号/名称(首段)/材质/用量全同,规格 列同为字典值「碳钢」。
+    // 它们的源串(identityName)是「螺栓 M8x30」「螺栓 M10x40」—— 合法的两行。
+    mainRow(PROJECT_DECLARED_SPEC, {
+      ...shared,
+      componentCode: 'GB/T5783', componentName: '螺栓', componentSpec: '碳钢',
+      componentSourceId: 'P-D1', parentSourceId: 'P-D0', ext_componentSortNo: 10,
+      path: bomPath('P-D0', 'P-D1'),
+      ext_nameAndSpec: packNameAndSpec,
+      idempotencyKey: 'idk-d1',
+    }, 'rec_d1'),
+    mainRow(PROJECT_DECLARED_SPEC, {
+      ...shared,
+      componentCode: 'GB/T5783', componentName: '螺栓', componentSpec: '碳钢',
+      componentSourceId: 'P-D2', parentSourceId: 'P-D0', ext_componentSortNo: 20,
+      path: bomPath('P-D0', 'P-D2'),
+      ext_nameAndSpec: packNameAndSpec,
+      idempotencyKey: 'idk-d2',
+    }, 'rec_d2'),
+    mainRow(PROJECT_DECLARED_SPEC, {
+      ...shared,
+      parentComponentCode: 'GB/T5783', parentComponentName: '螺栓 M10x40',
+      componentCode: 'WASHER-9', componentName: '垫圈', componentSpec: '碳钢',
+      componentSourceId: 'P-D2-C', parentSourceId: 'P-D2', ext_componentSortNo: 5,
+      path: bomPath('P-D0', 'P-D2', 'P-D2-C'),
+      idempotencyKey: 'idk-d2c',
+    }, 'rec_d2c'),
+  ]
+}
+
+async function moduleDeclaredSpecColumnNeverCollapsesTwoDifferentStandardParts() {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: declaredSpecColumnRows() },
+  })
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_DECLARED_SPEC, permission: 'admin',
+  })
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  assert.deepEqual(
+    result.rows.map((row) => row[codeColumn]),
+    ['J100-00', 'GB/T5783', 'GB/T5783', 'WASHER-9'],
+    'R22: 声明了 规格 列时,名称+规格 拼出的串撞了也不许合并 —— 两个标准件都打印,第二件的子件跟着打印',
+  )
+  assert.equal(result.collapsedRowCount, 0, 'R22: 一行都没被合并')
+  assert.equal(result.treeOrdered, true, 'R22: 树序照给 —— 放弃的是兜底去重,不是树序')
+  // 正控:同一个形状,只要 名称及规格 包列有值(可证的那一支),这两行就**该**被合并 —— 证明
+  // R22 放弃的是不可证的那一支,不是整把键塌了。
+  const packedRecords = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: declaredSpecColumnRows({ packNameAndSpec: '螺栓 M8x30' }) },
+  })
+  const packed = await exportStockPreparationPrepLines({
+    recordsApi: packedRecords, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_DECLARED_SPEC, permission: 'admin',
+  })
+  assert.deepEqual(
+    packed.rows.map((row) => row[codeColumn]),
+    ['J100-00', 'GB/T5783'],
+    'R22 正控:名称及规格 可证且相同 ⇒ 第二件连同它的子件一起被合并(老系统 iterHandle 的行为)',
+  )
+  assert.equal(packed.collapsedRowCount, 2, 'R22 正控:合并条数含被吞掉的子树')
+}
+
+// ---------------------------------------------------------------------------
+// R23 — 树节点的身份是**行路径**,不是部件 id(终审 r1 blocker 1)。
+//
+// 老系统 `iterHandle` 682-684 按 `parentId == 父行 id` 取子级:一行 = 一个节点,共用子装配(「通用
+// 组件」)挂在两个父件下就是两行,各带自己的子行。按 `componentSourceId`/`parentSourceId`(部件 id)
+// 建树会把两支子行合成一个兄弟集合,第二支同键的子行被 collapseSubtree 整棵吞掉 —— 导出少行。
+//
+// R23a 共用子装配:同一 componentSourceId 挂两个父件、各带同键子件 ⇒ 6 行全打印、collapsedRowCount
+//      = 0、顺序 = 老系统 iterHandle(kX > kP@X > kC@X > kY > kP@Y > kC@Y)。
+//      变异 M-A「父身份换回 componentSourceId」⇒ 红(5 行、collapsed 1)。
+// R23b 去重作用域 = 同一父**行**:P@X 之下两条真重复兄弟并成一条,P@Y 之下的同键子件照打。
+//      变异 M-B「seenKeys 提到 walk 外(全局)」⇒ 红(collapsed 从 1 变 2)。
+// R23c 编码器钉死:导出侧 encodeBomPath ≡ 展开侧 makePath;父 = 去掉最后一段再编码;根 = 单段。
+// R23d 没有 path 的老 target 退回部件 id 方案,返回值标 treeDegraded(不是悄悄降级)。
+// R23e 规格 列未绑(行上既无 componentSpec 也无 ext_spec 键)时展示层键不可证 —— 不并。
+// R24a 根判定的「父路径不在批内 ⇒ 当根」子句:孤儿带子行,直接喂 orderRowsAsBomTree 看幂等键序列。
+//      变异 M-F「根判定只认 parent === null」⇒ 孤儿与子行掉进 stranded 追加、平比较器排成子先于父 ⇒ 红。
+// R24b 降级方案的环(两行无 path、componentSourceId/parentSourceId 互指):两行都不是根、永不被 walk
+//      到,只有末尾的 stranded 追加能把它们打印出来;treeDegraded 必为 true。行路径方案下这条不可达
+//      (父路径恒比子路径短一段)。变异 M-J「删掉 stranded 追加」⇒ 两行整行消失 ⇒ 红。
+// ---------------------------------------------------------------------------
+
+const PROJECT_SHARED = 'PRJ-SHARED-SUBASSEMBLY'
+
+// 逻辑行(直接喂 orderRowsAsBomTree 用,能看见幂等键),以及经 mainRow 落到表里的物理行。
+// `withDuplicateUnderX` 给 P@X 再加一条与 C@X 同键的真重复兄弟(R23b)。
+function sharedSubassemblyLogicalRows({ withDuplicateUnderX = false } = {}) {
+  const rows = [
+    // 打乱:C@Y -> P@Y -> X -> C@X -> Y -> P@X。
+    {
+      componentCode: 'DWG-C', componentName: '共用子件', ext_nameAndSpec: '共用子件', material: 'Q235B', rawQuantity: 1,
+      parentComponentCode: 'DWG-P', parentComponentName: '共用组件',
+      componentSourceId: 'P-C', parentSourceId: 'P-SHARED', path: bomPath('P-Y', 'P-SHARED', 'P-C'),
+      ext_componentSortNo: 5, idempotencyKey: 'idk-c-at-y', __id: 'rec_sh_c_y',
+    },
+    {
+      componentCode: 'DWG-P', componentName: '共用组件', ext_nameAndSpec: '共用组件', material: 'Q235B', rawQuantity: 1,
+      parentComponentCode: 'DWG-Y', parentComponentName: 'Y总成',
+      componentSourceId: 'P-SHARED', parentSourceId: 'P-Y', path: bomPath('P-Y', 'P-SHARED'),
+      ext_componentSortNo: 10, idempotencyKey: 'idk-p-at-y', __id: 'rec_sh_p_y',
+    },
+    {
+      componentCode: 'DWG-X', componentName: 'X总成', ext_nameAndSpec: 'X总成', material: 'Q235B', rawQuantity: 1,
+      parentComponentCode: undefined, parentComponentName: undefined,
+      componentSourceId: 'P-X', parentSourceId: undefined, path: bomPath('P-X'),
+      ext_componentSortNo: 1, idempotencyKey: 'idk-x', __id: 'rec_sh_x',
+    },
+    {
+      componentCode: 'DWG-C', componentName: '共用子件', ext_nameAndSpec: '共用子件', material: 'Q235B', rawQuantity: 1,
+      parentComponentCode: 'DWG-P', parentComponentName: '共用组件',
+      componentSourceId: 'P-C', parentSourceId: 'P-SHARED', path: bomPath('P-X', 'P-SHARED', 'P-C'),
+      ext_componentSortNo: 5, idempotencyKey: 'idk-c-at-x', __id: 'rec_sh_c_x',
+    },
+    {
+      componentCode: 'DWG-Y', componentName: 'Y总成', ext_nameAndSpec: 'Y总成', material: 'Q235B', rawQuantity: 1,
+      parentComponentCode: undefined, parentComponentName: undefined,
+      componentSourceId: 'P-Y', parentSourceId: undefined, path: bomPath('P-Y'),
+      ext_componentSortNo: 2, idempotencyKey: 'idk-y', __id: 'rec_sh_y',
+    },
+    {
+      componentCode: 'DWG-P', componentName: '共用组件', ext_nameAndSpec: '共用组件', material: 'Q235B', rawQuantity: 1,
+      parentComponentCode: 'DWG-X', parentComponentName: 'X总成',
+      componentSourceId: 'P-SHARED', parentSourceId: 'P-X', path: bomPath('P-X', 'P-SHARED'),
+      ext_componentSortNo: 10, idempotencyKey: 'idk-p-at-x', __id: 'rec_sh_p_x',
+    },
+  ]
+  if (withDuplicateUnderX) {
+    // 与 C@X 同一父行、同一把键(父图号/图号/名称及规格/材质/用量全同)—— 两条 active bomHead
+    // 指着同一条明细那种真重复。幂等键排在 C@X 之后,所以被并的是它。
+    rows.push({
+      componentCode: 'DWG-C', componentName: '共用子件', ext_nameAndSpec: '共用子件', material: 'Q235B', rawQuantity: 1,
+      parentComponentCode: 'DWG-P', parentComponentName: '共用组件',
+      componentSourceId: 'P-C-DUP', parentSourceId: 'P-SHARED', path: bomPath('P-X', 'P-SHARED', 'P-C-DUP'),
+      ext_componentSortNo: 5, idempotencyKey: 'idk-c-at-x-dup', __id: 'rec_sh_c_x_dup',
+    })
+  }
+  return rows
+}
+
+function sharedSubassemblyPhysicalRows(options) {
+  return sharedSubassemblyLogicalRows(options).map(({ __id, ...row }) => mainRow(PROJECT_SHARED, {
+    ...row,
+    ext_parentDrawingNo: row.parentComponentCode,
+    ext_parentName: row.parentComponentName,
+  }, __id))
+}
+
+async function exportSharedSubassembly(options) {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: sharedSubassemblyPhysicalRows(options) },
+  })
+  return exportStockPreparationPrepLines({
+    recordsApi: records, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_SHARED, permission: 'admin',
+  })
+}
+
+async function moduleSharedSubassemblyPrintsUnderEveryParentRow() {
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  const parentColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'parentComponentCode')
+  const result = await exportSharedSubassembly()
+  assert.deepEqual(
+    result.rows.map((row) => [row[codeColumn], row[parentColumn]]),
+    [['DWG-X', null], ['DWG-P', 'DWG-X'], ['DWG-C', 'DWG-P'], ['DWG-Y', null], ['DWG-P', 'DWG-Y'], ['DWG-C', 'DWG-P']],
+    'R23a: 共用组件在 X、Y 之下各打印一次,各自的子件跟着各自的父行 —— 老系统 iterHandle 的顺序',
+  )
+  assert.equal(result.rows.length, 6, 'R23a: 6 行一行不少')
+  assert.equal(result.collapsedRowCount, 0, 'R23a: 跨父行的同键子件不是重复行,一行都不并')
+  assert.equal(result.treeOrdered, true)
+  assert.equal(result.treeIdentity, 'path', 'R23a: 树是按行路径建的')
+  assert.equal(result.treeDegraded, false)
+  // 直接看幂等键序列:两条 C 在投影里长得一样,这里把「哪条 C 跟着哪个父行」钉死。
+  const ordering = exportInternals.orderRowsAsBomTree(sharedSubassemblyLogicalRows())
+  assert.deepEqual(
+    ordering.rows.map((row) => row.idempotencyKey),
+    ['idk-x', 'idk-p-at-x', 'idk-c-at-x', 'idk-y', 'idk-p-at-y', 'idk-c-at-y'],
+    'R23a: kX > kP@X > kC@X > kY > kP@Y > kC@Y',
+  )
+  assert.equal(ordering.collapsedRowCount, 0)
+}
+
+async function moduleDedupeScopeIsTheParentRowNotTheParentPart() {
+  const result = await exportSharedSubassembly({ withDuplicateUnderX: true })
+  assert.equal(result.activeRowCount, 7)
+  assert.equal(result.rows.length, 6, 'R23b: P@X 之下的真重复兄弟并成一条,P@Y 之下的同键子件照打')
+  assert.equal(result.collapsedRowCount, 1, 'R23b: 恰好并掉一条 —— 作用域是同一父行,不是同一父部件、更不是全局')
+  const ordering = exportInternals.orderRowsAsBomTree(sharedSubassemblyLogicalRows({ withDuplicateUnderX: true }))
+  assert.deepEqual(
+    ordering.rows.map((row) => row.idempotencyKey),
+    ['idk-x', 'idk-p-at-x', 'idk-c-at-x', 'idk-y', 'idk-p-at-y', 'idk-c-at-y'],
+    'R23b: 被并的是 P@X 之下幂等键靠后的那条(idk-c-at-x-dup),C@Y 不受影响',
+  )
+  assert.equal(ordering.collapsedRowCount, 1)
+}
+
+function moduleBomPathEncoderIsTheExpandersOwn() {
+  const tokens = ['P-ROOT', 'P-A0', 'P-A']
+  assert.equal(
+    exportInternals.encodeBomPath(tokens),
+    bomExpansionInternals.makePath(tokens),
+    'R23c: 导出侧的路径编码器与展开侧 makePath 逐字相同 —— 两边漂了这条就红',
+  )
+  assert.deepEqual(
+    exportInternals.pathIdentityOf({ path: bomPath('P-ROOT', 'P-A0', 'P-A') }),
+    { self: bomPath('P-ROOT', 'P-A0', 'P-A'), parent: bomPath('P-ROOT', 'P-A0') },
+    'R23c: 父 = 去掉最后一段 tokens 再用同一编码器',
+  )
+  assert.deepEqual(
+    exportInternals.pathIdentityOf({ path: bomPath('P-ROOT') }),
+    { self: bomPath('P-ROOT'), parent: null },
+    'R23c: 单段路径 = 根',
+  )
+  // 存进表里的串多了空白也归一到规范串 —— 身份比较的是 tokens,不是字节。
+  assert.deepEqual(
+    exportInternals.pathIdentityOf({ path: ' ["P-ROOT", "P-A0"] ' }),
+    { self: bomPath('P-ROOT', 'P-A0'), parent: bomPath('P-ROOT') },
+  )
+  for (const bad of [undefined, null, '', '   ', 'not json', '{}', '[]', '"P-ROOT"', 42]) {
+    assert.equal(exportInternals.pathIdentityOf({ path: bad }), null, `R23c: 不是非空 JSON 数组的一律认不出身份: ${JSON.stringify(bad)}`)
+  }
+  assert.equal(exportInternals.pathIdentityOf({}), null)
+  assert.ok(exportInternals.SORT_FIELD_IDS.includes('path'), 'R23c: path 是解析出来供建树用的 id(不投影、不报 unresolvedColumns)')
+  assert.equal(EXPORT_COLUMNS.some((column) => column.id === 'path'), false, 'R23c: path 从不成为一列')
+}
+
+async function moduleRowsWithoutAPathDegradeToThePartIdentityAndSaySo() {
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: treeRows({ withPath: false }) },
+  })
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_TREE, permission: 'admin',
+  })
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  assert.deepEqual(
+    result.rows.map((row) => row[codeColumn]),
+    ['DWG-T-ROOT', 'DWG-T-A0', 'DWG-T-A1', 'DWG-T-B', 'DWG-T-X', 'DWG-T-XC'],
+    'R23d: 没有 path 的老 target 仍拿到树序(没有共用子装配时和行路径方案同序,孤儿子树也一样)',
+  )
+  assert.equal(result.treeOrdered, true)
+  assert.equal(result.treeIdentity, 'componentSourceId', 'R23d: 用的是部件 id 方案')
+  assert.equal(result.treeDegraded, true, 'R23d: 降级要标出来,不许悄悄地退')
+  assert.equal(result.collapsedRowCount, 1)
+  // 正控:同一批行带上 path 就是主方案。
+  const withPath = await (async () => {
+    const { records: pathRecords, target } = treeSubstrate()
+    return exportStockPreparationPrepLines({ recordsApi: pathRecords, target, projectNo: PROJECT_TREE, permission: 'admin' })
+  })()
+  assert.equal(withPath.treeIdentity, 'path')
+  assert.equal(withPath.treeDegraded, false)
+  // 混批:哪怕只有一行带 path,也走行路径方案;没 path 的那行认不出父,当根打印,一行不少。
+  const mixed = exportInternals.orderRowsAsBomTree([
+    { componentCode: 'R', componentSourceId: 'P-R', path: bomPath('P-R'), idempotencyKey: 'idk-r', ext_componentSortNo: 1 },
+    { componentCode: 'K', componentSourceId: 'P-K', parentSourceId: 'P-R', path: bomPath('P-R', 'P-K'), idempotencyKey: 'idk-k' },
+    { componentCode: 'H', componentSourceId: 'P-H', parentSourceId: 'P-R', idempotencyKey: 'idk-h', ext_componentSortNo: 2 },
+  ])
+  assert.equal(mixed.treeIdentity, 'path')
+  assert.equal(mixed.treeDegraded, false)
+  assert.deepEqual(mixed.rows.map((row) => row.idempotencyKey), ['idk-r', 'idk-k', 'idk-h'], 'R23d: 手工行(无 path)当根排在后面,不丢')
+}
+
+// R24a 「父路径不在批内 ⇒ 当根」的判别用例。R(排序 1)> K(排序 5);孤儿 O(排序 2,父路径 ["P-GONE"]
+// 不在批内)带子行 OC(排序 1)。修后 [idk-r, idk-k, idk-o, idk-oc]。把根判定改成只认 parent === null
+// (变异 M-F),O 与 OC 都不是根、也没人 walk 到它们,掉进末尾的 stranded 追加;平比较器先比 父组件图号
+// (OC 的 DWG-O < O 的 ZZ-GONE),再比排序号(OC 的 1 < O 的 2)—— 两个键都把子排到父前面:
+// [idk-r, idk-k, idk-oc, idk-o]。行数一样,树序错。
+function moduleOrphanSubtreeIsRootedInPlaceNotStrandedAtTheEnd() {
+  const result = exportInternals.orderRowsAsBomTree([
+    // 打乱:孤儿的子行 -> K -> 孤儿 -> R。
+    {
+      componentCode: 'OC', parentComponentCode: 'DWG-O', componentSourceId: 'P-OC', parentSourceId: 'P-O',
+      path: bomPath('P-GONE', 'P-O', 'P-OC'), idempotencyKey: 'idk-oc', ext_componentSortNo: 1,
+    },
+    {
+      componentCode: 'K', parentComponentCode: 'DWG-R', componentSourceId: 'P-K', parentSourceId: 'P-R',
+      path: bomPath('P-R', 'P-K'), idempotencyKey: 'idk-k', ext_componentSortNo: 5,
+    },
+    {
+      componentCode: 'O', parentComponentCode: 'ZZ-GONE', componentSourceId: 'P-O', parentSourceId: 'P-GONE',
+      path: bomPath('P-GONE', 'P-O'), idempotencyKey: 'idk-o', ext_componentSortNo: 2,
+    },
+    { componentCode: 'R', componentSourceId: 'P-R', path: bomPath('P-R'), idempotencyKey: 'idk-r', ext_componentSortNo: 1 },
+  ])
+  assert.equal(result.treeIdentity, 'path')
+  assert.equal(result.treeDegraded, false)
+  assert.equal(result.collapsedRowCount, 0)
+  assert.deepEqual(
+    result.rows.map((row) => row.idempotencyKey),
+    ['idk-r', 'idk-k', 'idk-o', 'idk-oc'],
+    'R24a: 孤儿当根、按树位置打印,它的子行紧跟其后 —— 不是掉到末尾被平比较器排成子先于父',
+  )
+}
+
+const PROJECT_CYCLE = 'PRJ-DEGRADED-CYCLE'
+
+// R24b 降级方案的环。两行无 path、componentSourceId/parentSourceId 互指(A.parent = B, B.parent = A):
+// 两行都不是根,也永远不会从任何根 walk 到 ⇒ 只有末尾的 stranded 追加能把它们打印出来。删掉那一句
+// (变异 M-J),两行整行消失 —— 这是 orderRowsAsBomTree 三条防线里的第 1 条,此前从无用例。
+// 行路径方案下这条不可达(父路径恒比子路径短一段,任何父链都终于单段根或「父不在批内」的根),
+// 所以这一批必须是降级的:treeDegraded 为 true 既是断言,也是「这个用例只对降级方案有意义」的证明。
+async function moduleDegradedSchemeCycleRowsAreStrandedAtTheEndNotDropped() {
+  // 直接喂逻辑行:能看见幂等键。
+  const direct = exportInternals.orderRowsAsBomTree([
+    {
+      componentCode: 'DWG-CY-A', parentComponentCode: 'DWG-CY-B', componentSourceId: 'P-CY-A', parentSourceId: 'P-CY-B',
+      idempotencyKey: 'idk-cy-a', ext_componentSortNo: 2,
+    },
+    { componentCode: 'DWG-CY-R', componentSourceId: 'P-CY-R', idempotencyKey: 'idk-cy-r', ext_componentSortNo: 1 },
+    {
+      componentCode: 'DWG-CY-B', parentComponentCode: 'DWG-CY-A', componentSourceId: 'P-CY-B', parentSourceId: 'P-CY-A',
+      idempotencyKey: 'idk-cy-b', ext_componentSortNo: 3,
+    },
+  ])
+  assert.equal(direct.treeIdentity, 'componentSourceId', 'R24b: 没有一行带 path ⇒ 部件 id 方案')
+  assert.equal(direct.treeDegraded, true, 'R24b: 环只在降级方案上可达,这一批必须标成降级')
+  assert.equal(direct.treeOrdered, true)
+  assert.equal(direct.collapsedRowCount, 0)
+  assert.equal(direct.rows.length, 3, 'R24b: 环上的两行不丢 —— stranded 追加是唯一能打印它们的路径')
+  assert.deepEqual(
+    direct.rows.map((row) => row.idempotencyKey),
+    ['idk-cy-r', 'idk-cy-b', 'idk-cy-a'],
+    'R24b: 根先打印;环上的两行按 F1b 平比较器(父组件图号 优先:B 的父 DWG-CY-A < A 的父 DWG-CY-B)追加在末尾',
+  )
+  // 走一遍真实导出:同一形状经 mainRow 落到表里、由 exportStockPreparationPrepLines 读回并投影。
+  const cycleRows = [
+    mainRow(PROJECT_CYCLE, {
+      componentCode: 'DWG-CY-A', componentName: '环A', ext_nameAndSpec: '环A',
+      parentComponentCode: 'DWG-CY-B', parentComponentName: '环B',
+      ext_parentDrawingNo: 'DWG-CY-B', ext_parentName: '环B',
+      componentSourceId: 'P-CY-A', parentSourceId: 'P-CY-B', ext_componentSortNo: 2,
+      idempotencyKey: 'idk-cy-a',
+    }, 'rec_cy_a'),
+    mainRow(PROJECT_CYCLE, {
+      componentCode: 'DWG-CY-R', componentName: '环外的根', ext_nameAndSpec: '环外的根',
+      parentComponentCode: undefined, parentComponentName: undefined,
+      ext_parentDrawingNo: undefined, ext_parentName: undefined,
+      componentSourceId: 'P-CY-R', parentSourceId: undefined, ext_componentSortNo: 1,
+      idempotencyKey: 'idk-cy-r',
+    }, 'rec_cy_r'),
+    mainRow(PROJECT_CYCLE, {
+      componentCode: 'DWG-CY-B', componentName: '环B', ext_nameAndSpec: '环B',
+      parentComponentCode: 'DWG-CY-A', parentComponentName: '环A',
+      ext_parentDrawingNo: 'DWG-CY-A', ext_parentName: '环A',
+      componentSourceId: 'P-CY-B', parentSourceId: 'P-CY-A', ext_componentSortNo: 3,
+      idempotencyKey: 'idk-cy-b',
+    }, 'rec_cy_b'),
+  ]
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+    rowsBySheet: { [SANDBOX_SHEET]: cycleRows },
+  })
+  const result = await exportStockPreparationPrepLines({
+    recordsApi: records, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_CYCLE, permission: 'admin',
+  })
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  assert.deepEqual(
+    result.rows.map((row) => row[codeColumn]),
+    ['DWG-CY-R', 'DWG-CY-B', 'DWG-CY-A'],
+    'R24b: 导出层同样三行全打印,环上的两行在末尾',
+  )
+  assert.equal(result.activeRowCount, 3)
+  assert.equal(result.treeDegraded, true)
+  assert.equal(result.collapsedRowCount, 0)
+}
+
+const PROJECT_UNBOUND_SPEC = 'PRJ-UNBOUND-SPEC'
+
+// 两条同父、同图号、首段同名、同材质、同用量的标准件,名称及规格 包列为空。`withSpecKey: false`
+// 把 规格 的两个键(模板列 componentSpec / 包列 ext_spec)从行上**删掉** —— target 没绑这一列时
+// unmapRow 之后行上就是这个样子;`withSpecKey: true` 则键在、值为空串。
+function unboundSpecRows({ withSpecKey }) {
+  const shared = {
+    parentComponentCode: 'TZ-U0', parentComponentName: 'U主体',
+    ext_parentDrawingNo: 'TZ-U0', ext_parentName: 'U主体',
+    ext_nameAndSpec: undefined, material: 'Q235B', totalQuantity: 2, rawQuantity: 2,
+    componentSpec: '', ext_spec: '',
+  }
+  const rows = [
+    mainRow(PROJECT_UNBOUND_SPEC, {
+      ...shared, parentComponentCode: undefined, parentComponentName: undefined,
+      ext_parentDrawingNo: undefined, ext_parentName: undefined,
+      componentCode: 'TZ-U0', componentName: 'U主体',
+      componentSourceId: 'P-U0', parentSourceId: undefined, path: bomPath('P-U0'), ext_componentSortNo: 1,
+      idempotencyKey: 'idk-u0',
+    }, 'rec_u0'),
+    mainRow(PROJECT_UNBOUND_SPEC, {
+      ...shared, componentCode: 'GB/T5783', componentName: '螺栓',
+      componentSourceId: 'P-U1', parentSourceId: 'P-U0', path: bomPath('P-U0', 'P-U1'), ext_componentSortNo: 10,
+      idempotencyKey: 'idk-u1',
+    }, 'rec_u1'),
+    mainRow(PROJECT_UNBOUND_SPEC, {
+      ...shared, componentCode: 'GB/T5783', componentName: '螺栓',
+      componentSourceId: 'P-U2', parentSourceId: 'P-U0', path: bomPath('P-U0', 'P-U2'), ext_componentSortNo: 20,
+      idempotencyKey: 'idk-u2',
+    }, 'rec_u2'),
+  ]
+  if (!withSpecKey) {
+    for (const record of rows) {
+      delete record.data[physicalFieldId(STAGING, MAIN_OBJECT_ID, 'componentSpec')]
+      delete record.data[physicalFieldId(STAGING, MAIN_OBJECT_ID, 'ext_spec')]
+    }
+  }
+  return rows
+}
+
+async function moduleUnboundSpecColumnMakesTheDisplayKeyUnprovable() {
+  // 单元层:键缺失 ⇒ 不可证 ⇒ displayDedupeKey 为 null;键在、值空 ⇒ 可证(名称无空格那一支)。
+  const bare = { parentComponentCode: 'TZ', componentCode: 'GB/T5783', componentName: '螺栓', material: 'Q235B', rawQuantity: 1 }
+  assert.deepEqual(exportInternals.nameAndSpecDisplayKey(bare), { text: '螺栓', provable: false }, 'R23e: 规格 列未绑 ⇒ 不可证')
+  assert.equal(exportInternals.displayDedupeKey(bare), null, 'R23e: 不可证 ⇒ 不并')
+  assert.deepEqual(exportInternals.nameAndSpecDisplayKey({ ...bare, componentSpec: '' }), { text: '螺栓', provable: true }, 'R23e: 模板列在、值为空串 ⇒ 名称就是全串')
+  assert.deepEqual(exportInternals.nameAndSpecDisplayKey({ ...bare, ext_spec: '' }), { text: '螺栓', provable: true }, 'R23e: 包列在、值为空串 ⇒ 同上')
+  assert.deepEqual(exportInternals.nameAndSpecDisplayKey({ ...bare, componentSpec: 'M8x30' }), { text: '螺栓 M8x30', provable: false }, 'R23e: 规格 有值仍是第三种形状(不可证)')
+  assert.deepEqual(exportInternals.nameAndSpecDisplayKey({ ...bare, ext_nameAndSpec: '螺栓 M8x30' }), { text: '螺栓 M8x30', provable: true }, 'R23e: 包列 名称及规格 有值仍可证')
+
+  // 导出层:同样两条标准件,规格 列未绑 ⇒ 两行都打印;规格 列绑了且为空 ⇒ 按老系统并成一行。
+  const codeColumn = EXPORT_COLUMNS.findIndex((column) => column.id === 'componentCode')
+  const run = async (withSpecKey) => {
+    const records = makeStrictRecordsApi({
+      stagingProjectId: STAGING,
+      objectIdBySheetId: { [SANDBOX_SHEET]: MAIN_OBJECT_ID },
+      rowsBySheet: { [SANDBOX_SHEET]: unboundSpecRows({ withSpecKey }) },
+    })
+    return exportStockPreparationPrepLines({
+      recordsApi: records, target: targetFor(SANDBOX_SHEET), projectNo: PROJECT_UNBOUND_SPEC, permission: 'admin',
+    })
+  }
+  const unbound = await run(false)
+  assert.deepEqual(unbound.rows.map((row) => row[codeColumn]), ['TZ-U0', 'GB/T5783', 'GB/T5783'], 'R23e: 规格 列未绑 ⇒ 首段同名的两个标准件都打印')
+  assert.equal(unbound.collapsedRowCount, 0)
+  const bound = await run(true)
+  assert.deepEqual(bound.rows.map((row) => row[codeColumn]), ['TZ-U0', 'GB/T5783'], 'R23e 正控:规格 列绑了且为空 ⇒ 名称就是全串,同键并成一行')
+  assert.equal(bound.collapsedRowCount, 1)
 }
 
 async function main() {
@@ -1310,6 +2048,20 @@ async function main() {
   await routeNeverCrossesTheTwoTargets()
   await routeReadsOnlyTheBoundSheet()
   await routeGateRefusesBeforeAnyHostIo()
+
+  await moduleExportOrderIsTheBomTreeNotAFlatBand()
+  await moduleExportWithoutSourceIdentityKeepsTheFlatOrder()
+  await moduleLegacyTwentyThreeColumnsAreProjected()
+  await moduleSameDrawingDifferentSpecIsNotCollapsed()
+  await moduleDeclaredSpecColumnNeverCollapsesTwoDifferentStandardParts()
+
+  await moduleSharedSubassemblyPrintsUnderEveryParentRow()
+  await moduleDedupeScopeIsTheParentRowNotTheParentPart()
+  moduleBomPathEncoderIsTheExpandersOwn()
+  await moduleRowsWithoutAPathDegradeToThePartIdentityAndSaySo()
+  moduleOrphanSubtreeIsRootedInPlaceNotStrandedAtTheEnd()
+  await moduleDegradedSchemeCycleRowsAreStrandedAtTheEndNotDropped()
+  await moduleUnboundSpecColumnMakesTheDisplayKeyUnprovable()
 
   console.log('stock-preparation-prep-line-export (按项目导出物料 Excel): all assertions passed')
 }

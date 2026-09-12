@@ -857,6 +857,17 @@ const STOCK_PREPARATION_FILL_VIEW_LABEL = Object.freeze({
 // The 12 plm_system columns the fill view hides — the exact set the customer pointed at.
 // Every id is asserted below to be a plm_system column of the frozen main template, so this
 // list can never hide a human-owned column (the band a person fills) by a typo or a rename.
+// F1c 看过这张清单,并且**没有**往里加 `parentComponentCode` / `parentComponentName` /
+// `componentSpec` —— 理由记在这里,免得下一个人以为是漏了:
+//   * 客户包装了 父组件图号 / 父组件名称 / 规格 三个同义 ext_ 列,222 上两套并存确实重复;但这张
+//     清单是**全局常量**,对没装包的部署一样生效。把模板的 规格/父组件名称 藏掉,在无包部署上就是
+//     把那两列**彻底藏了**(包列根本不存在),填表的人再也看不到规格。
+//   * `parentComponentCode` 更是藏不得:这张视图按它分组、按它排序,`assertFillViewContract` 明文
+//     拒绝「排序/分组用一列却把它藏起来」。为了藏它去放宽那条守卫,是把守卫改松。
+//   结论(替 owner 定,写进 PR):**只在装了包的部署上**才该藏,而藏的判断需要「这张表到底装了哪些
+//   列」这条信息 —— 视图描述符今天拿不到(它只有 provisioning.getFieldId,那是个纯算法,不回答
+//   「存在与否」)。所以 F1c 先把包列的值补上(那才是它们空着的真正原因),藏列留给能读到已装字段
+//   的那一版做。
 const STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS = Object.freeze([
   'idempotencyKey',
   'componentSourceId',
@@ -876,6 +887,11 @@ const STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS = Object.freeze([
 // (`order by parent_component_code, component_sort_id`), expressed with the columns this
 // table actually has. Ascending only; `desc` is written explicitly so the stored shape is
 // the one the grid and the meta route parse (`sortInfo.rules[].desc`).
+// F1c 的差距,明说:导出走的是深度优先 BOM 树序(prep-line-export `orderRowsAsBomTree`),而视图
+// 排序表达不了树 —— 它只有「按列排」。第二键也换不成 明细排序号:那一列只存在于客户包
+// (`ext_componentSortNo`),而 `ensureStockPreparationFillView` 要求视图点名的每个 id 都在**模板**
+// 里(否则视图会指向一堆不存在的列)。所以视图保持「按父组件图号分组、组内按图号」,树序只在导出
+// 里有;冻结模板哪天真有了 明细排序号 列,第二键就该换成它。
 const STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS = Object.freeze(['parentComponentCode', 'componentCode'])
 const STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS = Object.freeze(['parentComponentCode'])
 // A refresh MARKS rows inactive rather than deleting them (`missingFromPlmPolicy: 'mark_inactive'`),

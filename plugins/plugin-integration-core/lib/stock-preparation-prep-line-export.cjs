@@ -136,6 +136,32 @@ const EXPORT_COLUMNS = Object.freeze([
   Object.freeze({ id: 'procurementReplyDate', label: '采购回复日期' }),
   Object.freeze({ id: 'warehouseDone', label: '仓库完成', type: 'boolean' }),
   Object.freeze({ id: 'actualArrivalDate', label: '实际到货日期' }),
+  // ── F1c: 老系统 23 列里这张表还缺的那些,APPENDED AT THE END ──────────────────────────────
+  //
+  // 老系统 `exportExcel` 1536-1560 写死 23 个中文表头。上面 17 列里已经有 13 个同义列;剩下的
+  // 列补在末尾,一个都不插队 —— 模块头那句「列序是约定,不要重排」对已有列继续有效,客户手上
+  // 那张表打开后前 17 列还在原位。
+  //
+  // 映射来源分两类,并且没有第三类(没有列的不编一个出来):
+  //   * 主表模板本来就有的列:生产编号(projectNo,老系统的 productCode)/材料类型/毛胚类型/
+  //     备注/提前周期(天)。
+  //   * 只在客户包里存在的列(ext_):名称及规格/交接工段/毛胚宽度/厚度/数量/质量。没装包的
+  //     部署这些列解析不出绑定 -> 单元格空 + 进 `unresolvedColumns`(既有规则,没有放宽)。
+  //
+  // 仍然缺的那一列是 **序号**:它是老系统导出时现编的行号(`rowNum-1`),不是任何一列的值。
+  // 补在末尾的「序号」会和它的含义打架(它只在第一列才读得通),而第一列不能动 —— 所以它留在
+  // PR 的缺列清单里交 owner,而不是在这里发明一列。
+  Object.freeze({ id: 'projectNo', label: '生产编号' }),
+  Object.freeze({ id: 'ext_nameAndSpec', label: '名称及规格' }),
+  Object.freeze({ id: 'materialType', label: '材料类型' }),
+  Object.freeze({ id: 'blankType', label: '毛胚类型' }),
+  Object.freeze({ id: 'notes', label: '备注' }),
+  Object.freeze({ id: 'ext_handoverSection', label: '交接工段' }),
+  Object.freeze({ id: 'leadTimeDays', label: '提前周期(天)' }),
+  Object.freeze({ id: 'ext_blankWidth', label: '毛胚宽度' }),
+  Object.freeze({ id: 'ext_blankThickness', label: '毛胚厚度' }),
+  Object.freeze({ id: 'ext_blankQuantity', label: '毛胚数量' }),
+  Object.freeze({ id: 'ext_blankMass', label: '毛胚质量' }),
 ])
 const EXPORT_COLUMN_IDS = Object.freeze(EXPORT_COLUMNS.map((column) => column.id))
 // Every logical id the projection reads, including the fallback sources (which are never headers).
@@ -156,7 +182,25 @@ const SCOPE_FIELD_IDS = Object.freeze(['projectNo', 'active'])
 // owner-gated template change. Keying it now means the day that column ships the workbook follows
 // the customer's own 明细栏 sequence with no second edit here; until then every row is missing it
 // and the key falls through.
-const SORT_FIELD_IDS = Object.freeze(['componentSortNo', 'idempotencyKey'])
+//
+// F1c ADDS FOUR MORE ORDER-ONLY IDS, for the same reason and under the same rule (never a column,
+// never an `unresolvedColumns` entry): `path` is the ROW's identity in the BOM tree (the node the
+// expander wrote, `makePath(pathTokens)` — see orderRowsAsBomTree for why the tree hangs off the
+// row path and not off the part id), `componentSourceId` + `parentSourceId` are the DEGRADED
+// identity a row without a `path` falls back to, and `ext_componentSortNo` is where 明细排序号
+// actually lands — the frozen template still has no 排序号 column, the customer pack has had one
+// (当前组件排序号) all along, and F1c is what finally writes it.
+const SORT_FIELD_IDS = Object.freeze([
+  'componentSortNo',
+  'ext_componentSortNo',
+  'path',
+  'componentSourceId',
+  'parentSourceId',
+  // 单层用量:不是排序键,是展示层去重键的第五项(见 displayDedupeKey)。和 SORT_FIELD_IDS 里
+  // 其它 id 一样,它是「解析出来供比较用」的,从不投影成单元格、也从不报进 unresolvedColumns。
+  'rawQuantity',
+  'idempotencyKey',
+])
 
 // WHICH BINDINGS ARE LOAD-BEARING. Only the two SCOPE fields are: without `projectNo` the export
 // cannot scope and would hand one project's workbook the whole table, and without `active` it cannot
@@ -359,6 +403,9 @@ function columnSourceValue(data, column) {
 const PARENT_CODE_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'parentComponentCode')
 const COMPONENT_CODE_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentCode')
 const COMPONENT_NAME_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentName')
+// 规格 — only ever read by the display dedupe key below (never by the comparator), and read through
+// `columnSourceValue` so a pack-only row's `ext_spec` counts exactly like a native one.
+const COMPONENT_SPEC_ORDER_COLUMN = EXPORT_COLUMNS.find((column) => column.id === 'componentSpec')
 
 // Where `unmapRow` parks the row's PHYSICAL record id so the comparator can reach it. Deliberately
 // not a logical field id and deliberately not projected: no EXPORT_COLUMN reads it, so it can never
@@ -408,22 +455,296 @@ function sortExportRows(rows) {
       orderText(columnSourceValue(right, PARENT_CODE_ORDER_COLUMN)),
     )
     if (byParent !== 0) return byParent
-    const bySortNo = compareOrderNumber(orderNumber(left.componentSortNo), orderNumber(right.componentSortNo))
-    if (bySortNo !== 0) return bySortNo
-    const byCode = compareOrderText(
-      orderText(columnSourceValue(left, COMPONENT_CODE_ORDER_COLUMN)),
-      orderText(columnSourceValue(right, COMPONENT_CODE_ORDER_COLUMN)),
-    )
-    if (byCode !== 0) return byCode
-    const byKey = compareOrderText(orderText(left.idempotencyKey), orderText(right.idempotencyKey))
-    if (byKey !== 0) return byKey
-    const byName = compareOrderText(
-      orderText(columnSourceValue(left, COMPONENT_NAME_ORDER_COLUMN)),
-      orderText(columnSourceValue(right, COMPONENT_NAME_ORDER_COLUMN)),
-    )
-    if (byName !== 0) return byName
-    return compareOrderText(orderText(left[ROW_IDENTITY_KEY]), orderText(right[ROW_IDENTITY_KEY]))
+    return compareSiblingRows(left, right)
   })
+}
+
+// 明细排序号, per row. The frozen template has no such column; the customer pack's
+// 当前组件排序号 (`ext_componentSortNo`) is where F1c writes it. Native id first for the day a
+// template column exists, pack id second — the same native-first/pack-fallback rule the
+// projection uses for 父组件图号/父组件名称/规格.
+function rowSortNo(row) {
+  const native = orderNumber(row && row.componentSortNo)
+  if (native !== null) return native
+  return orderNumber(row && row.ext_componentSortNo)
+}
+
+/**
+ * Keys 2..6 of the agreed order — everything below 父组件图号. Split out of `sortExportRows` so the
+ * flat comparator and the tree's SIBLING comparator can never drift apart: inside one parent, the
+ * two are the same order by construction.
+ */
+function compareSiblingRows(left, right) {
+  const bySortNo = compareOrderNumber(rowSortNo(left), rowSortNo(right))
+  if (bySortNo !== 0) return bySortNo
+  const byCode = compareOrderText(
+    orderText(columnSourceValue(left, COMPONENT_CODE_ORDER_COLUMN)),
+    orderText(columnSourceValue(right, COMPONENT_CODE_ORDER_COLUMN)),
+  )
+  if (byCode !== 0) return byCode
+  const byKey = compareOrderText(orderText(left.idempotencyKey), orderText(right.idempotencyKey))
+  if (byKey !== 0) return byKey
+  const byName = compareOrderText(
+    orderText(columnSourceValue(left, COMPONENT_NAME_ORDER_COLUMN)),
+    orderText(columnSourceValue(right, COMPONENT_NAME_ORDER_COLUMN)),
+  )
+  if (byName !== 0) return byName
+  return compareOrderText(orderText(left[ROW_IDENTITY_KEY]), orderText(right[ROW_IDENTITY_KEY]))
+}
+
+// 老系统 `iterHandle` 686-693 的去重键第三项 `nameAndStandard` 在这条管线上的还原 —— 这是本模块
+// 最容易出错的一处,因为 F1c **自己**改了 名称 列的含义:名称 从 F1c 起只装 identityName 的
+// **首段**(`createRow` 的 `splitNameAndSpec`,bom-expansion.cjs),而展开层的 `siblingDedupeKey`
+// 比的是**未切分**的全串。展示层要么还原出同一把键,要么就别合并 —— 不许在还原不出来的时候
+// 拿一把**更粗**的键去合并,那会把两个合法的不同标准件并成一行,并且连被合并那条的整棵子树
+// 一起不打印(`collapseSubtree`)。导出少行是本模块最贵的错误。
+//
+// 三种形状,只有前两种可证:
+//   1. 客户包列 `ext_nameAndSpec` 有值:它装的就是未切分的全串,与展开层键逐字同源(两边都
+//      来自 PLM identityName)。**可证**。
+//   2. 规格 列为空:规格 为空只可能是因为名称里没有空格 —— 声明了 `readPlan.part.specField` 的
+//      部署里源行 Spec 为空时会退回派生(bom-expansion createRow),派生出空 ⇔ 无空格 ⇔ 名称就是
+//      全串。所以键 = 名称本身,与源串逐字相同。**可证**。
+//   3. 规格 有值而包列为空:规格 **可能**是名称的尾巴(派生;`splitNameAndSpec` 的尾段是 verbatim
+//      的 slice,拼回去逐字相同),**也可能**是部署自己声明的 规格 列的值 —— dn-pdm-family.preset
+//      把 规格 描述成 a part-side dictionary assignment,字典值天生粗:两行 identityName 分别是
+//      「螺栓 M8x30」「螺栓 M10x40」、规格 列却同为「碳钢」时,拼出来的键会撞。行上没有任何东西
+//      能把这两种来源区分开(名称永远是首段,两种来源都不含空格)。**不可证 ⇒ 返回 null**,
+//      `walk` 见 null 就不比较也不登记,这一行照打,它的子树照打。
+//
+// 代价说清楚:装了包却没在 `extensionFieldIds` 里声明 名称及规格、同时又有 规格 值的部署,展示层
+// 兜底去重就此失效(`collapsedRowCount` 为 0)。这是有意的:**展开层**(bom-expansion
+// `siblingDedupeKey`)才是去重的权威点,它拿得到未切分的源串;展示层这一层只是给 F1c 之前
+// 写进表里的老行兜底。兜不住时宁可多打印一行,也不丢一棵子树。
+//
+// 单层用量在键里,是为了和展开层 **同一把键**:展开层多带用量,是为了不把「同父同件但用量不
+// 一致」这种数据缺陷从 duplicate_expanded_key 的 fail-closed 挂起里偷走。展示层如果少带这一项,
+// 就会在打印时把展开层特意留下的那两行又合并掉 —— 触发口径和边界口径不同量。
+//
+// 形状 2 的前提是「规格 为空」是一个**测得到**的事实:行上得有 规格 这一列(模板列 `componentSpec`
+// 或包列 `ext_spec` 至少绑了一个)、而且它的单元格是空的。两个键都**不在行上**(target 没绑这一列,
+// unmapRow 之后连键都没有)时,「空」只是「看不见」—— 首段同名的两个标准件会因此并成一行。所以
+// 键缺失判不可证;只有键在、值为空,才走「名称无空格」这一支。
+function rowCarriesSpecColumn(row) {
+  return Object.prototype.hasOwnProperty.call(row, COMPONENT_SPEC_ORDER_COLUMN.id)
+    || Object.prototype.hasOwnProperty.call(row, COMPONENT_SPEC_ORDER_COLUMN.fallbackId)
+}
+
+function nameAndSpecDisplayKey(row) {
+  const packed = orderText(row.ext_nameAndSpec)
+  if (packed !== '') return { text: packed, provable: true }
+  const name = orderText(columnSourceValue(row, COMPONENT_NAME_ORDER_COLUMN))
+  if (!rowCarriesSpecColumn(row)) return { text: name, provable: false }
+  const spec = orderText(columnSourceValue(row, COMPONENT_SPEC_ORDER_COLUMN))
+  if (spec === '') return { text: name, provable: true }
+  return { text: `${name} ${spec}`, provable: false }
+}
+
+/**
+ * 展示层去重键,或 `null` —— null 的意思是「这一行的 名称及规格 还原不出来,不许拿它跟任何行
+ * 比」,不是「键为空」。调用方(`walk`)必须把 null 当作「永不合并」,而不是当作一个可以互相
+ * 撞的普通键值。
+ */
+function displayDedupeKey(row) {
+  const nameAndSpec = nameAndSpecDisplayKey(row)
+  if (!nameAndSpec.provable) return null
+  return JSON.stringify([
+    orderText(columnSourceValue(row, PARENT_CODE_ORDER_COLUMN)),
+    orderText(columnSourceValue(row, COMPONENT_CODE_ORDER_COLUMN)),
+    nameAndSpec.text,
+    orderText(row.material),
+    orderText(row.rawQuantity),
+  ])
+}
+
+// ── 树节点的身份 = 行路径,不是部件 id ──────────────────────────────────────────────────────
+//
+// 老系统 `iterHandle`(StockInfoController.java:683)取子级用的是
+// `filter(val -> Objects.equals(val.getParentId(), stockInfo.getId()))` —— 父指针指向
+// 父**行**的 id,而一行就是 BOM 树上的一个节点(`iterSave*` 对每个节点各 `addOne` 一行:同一个
+// 部件 P 挂在 X 和 Y 之下就是两行 P@X、P@Y,各自有自己的子行)。这条管线上行的身份是**路径**:
+// 幂等键含 `pathTokens`,模板必列 `path` 装的就是展开层 `makePath(pathTokens)` 写下的那串
+// (bom-expansion.cjs:`JSON.stringify(pathTokens)`,tokens = 从根到本行的 componentSourceId 序列)。
+//
+// 为什么不能用 `componentSourceId` / `parentSourceId`(部件 id)建父子:共用子装配(老系统所谓
+// 「通用组件」—— StockInfoController.java:507 挂在 `curBatchInDb.stream().filter(val ->
+// Objects.equals(preStockInfo.getPliObjId(), val.getPliObjId()))` 上的那条注释「这里可能有多个,
+// 因为有可能是通用组件(零件)」:同一 pliObjId 多行)会让同一个部件 P 出现两行,
+// 两行的子行 C@P@X、C@P@Y 都写着 `parentSourceId = P`。按部件 id 挂,`childrenByParent.get(P)`
+// 把两支子行合成一个兄弟集合,走到 P@X 时一次全走完:C@P@Y 与 C@P@X 同键被 `collapseSubtree`
+// 整棵吞掉,P@Y 打印成空壳 —— 导出少行;不开去重时也是错的(两支子行都挂在 P@X 下,P@Y 无子)。
+// 展开层的兄弟集合是「同一父**行**之下」(`expandChildren(parentRow, …)` 一次调用一套
+// `siblingKeys`),展示层必须和它同量,否则「触发口径和边界口径不同量」。
+//
+// 编码器和展开层同一个:tokens 解析出来之后**重新** `JSON.stringify`,父 = 去掉最后一段 tokens 后
+// 再编码。这样节点身份与父身份都是规范串,不依赖存进表里那一串的空白/转义细节。
+// 这里不 require bom-expansion.cjs(本模块只依赖 common.cjs,见模块头「结构上只读」),
+// 而是由用例把两边的编码器钉在一起(prep-line-export.test.cjs:encodeBomPath === makePath)。
+function encodeBomPath(tokens) {
+  return JSON.stringify(tokens)
+}
+
+// 行路径 -> tokens;不是「非空 JSON 数组」的一律 null(没绑 `path` 列的老 target、手工行、脏值)。
+function bomPathTokensOf(row) {
+  const raw = row && row.path
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (_err) {
+    return null
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null
+  return parsed
+}
+
+// 主方案:行路径。根 = tokens 只有一段(父为 null),或父路径不在批内(由调用方判定)。
+function pathIdentityOf(row) {
+  const tokens = bomPathTokensOf(row)
+  if (tokens === null) return null
+  return {
+    self: encodeBomPath(tokens),
+    parent: tokens.length > 1 ? encodeBomPath(tokens.slice(0, -1)) : null,
+  }
+}
+
+// 降级方案:部件 id。只在整批**没有一行**带可解析 `path` 时才用(见 orderRowsAsBomTree),
+// 它带着上面说的共用子装配缺陷,所以返回值把它标成 `treeDegraded: true`。
+// 自指(parentSourceId === componentSourceId)当根,和改前一样。
+function componentIdentityOf(row) {
+  const self = orderText(row && row.componentSourceId)
+  if (self === '') return null
+  const parent = orderText(row && row.parentSourceId)
+  return { self, parent: parent === '' || parent === self ? null : parent }
+}
+
+// 三个 values-free 的方案标记:行路径 / 部件 id(降级) / 认不出身份(平序)。
+const TREE_IDENTITY_PATH = 'path'
+const TREE_IDENTITY_COMPONENT = 'componentSourceId'
+
+/**
+ * 深度优先的 BOM 树序 —— 老系统 `iterHandle` 669-700 / `exportExcel` 1526-1530 的形状。
+ *
+ * 节点身份 = 行路径(`path`,见上面那段)。根 = 路径只有一段、或父路径不在这批行里(孤儿行:
+ * 它的父行被标无效、或这一批就是被筛过的)。孤儿当根而不是丢掉 —— 导出从不少行,这是这个函数
+ * 最要紧的一条性质。「父路径不在批内 ⇒ 当根」这一子句由 R17(孤儿带子行)与 R24a 钉住:孤儿的
+ * 子树按树位置打印、父在子前;把这一子句拿掉,孤儿及其子行会掉进末尾的 stranded 追加,按平比较器
+ * 排成子先于父(行数不少,但树序错了)。
+ * 兄弟按 `compareSiblingRows`(排序号 -> 图号 -> 幂等键 -> 名称 -> 记录 id),深度优先,同一父**行**
+ * 之下按老系统那把键去重(首条胜出,被去重的那条连它的子树一起不打印,和老系统一样),但**只在
+ * 这把键还原得出来的时候**去重 —— 还原不出来就一行不并(displayDedupeKey 返回 null)。
+ * 去重的作用域是**一次 walk = 一个父行的子集合**,与展开层 `expandChildren` 的 `siblingKeys`
+ * 同量;不跨父行合并 —— 共用子装配在两个父行下各出现一次,两次都打印。
+ *
+ * 身份方案按整批选,不逐行混用(两套身份空间混在一棵树里父子对不上):
+ *   * 批内任一行带可解析 `path`  ⇒ 行路径方案(`treeIdentity: 'path'`)。没有 `path` 的那几行
+ *     (手工行)认不出父,当根打印 —— 和它们在改前的待遇一样,一行不少。
+ *   * 一行 `path` 都没有,但有 `componentSourceId` ⇒ 退回部件 id 方案(改前的形状),返回值标
+ *     `treeDegraded: true` / `treeIdentity: 'componentSourceId'`:老 target 没绑 `path` 列时拿到的
+ *     还是树,但共用子装配会少行,调用方看得见这是降级。
+ *   * 两样都没有 ⇒ F1b 的平比较器(`treeOrdered: false`)。
+ *
+ * 三条防线,各自有「拿掉就红」的用例(R24b / R20 / R18;R24b 在 fix r4 实证,R18 的红来自 fix r2 的 M5 变异,R20 见 r2 变异表):
+ *   1. 环 / 不可达:`visited` 保证每行最多打印一次;走完之后没被访问到的行(stranded)按 F1b 的
+ *      平比较器追加在末尾。构不成树的数据会得到一个难看但完整的工作簿,而不是一个少了几行的
+ *      工作簿。**行路径方案下这条不可达**:父路径恒比子路径短一段,任何父链都终于单段根或
+ *      「父不在批内」的根,不会有两行互为父子;只有降级(部件 id)方案的环(A.parentSourceId = B
+ *      且 B.parentSourceId = A)会让两行同时非根、永不被 walk 到。用例 R24b 钉的就是这一支:
+ *      拿掉 stranded 追加,环上的两行整行消失。
+ *   2. 没有身份列的部署(老 target 既没绑 `path` 也没绑 `componentSourceId`):整批一行也认不出
+ *      身份时直接退回 F1b 的平比较器,而不是把每一行都当根 —— 那会连「按父组件分组」都丢掉,
+ *      比改之前更差(R20)。
+ *   3. 去重计数如实上报(`collapsedRowCount`),**模块返回值里**能看见「这张表按老系统合并掉了
+ *      几行」—— 注意它到此为止:导出路由与审计记录今天都不读它(见函数尾部那段 REACH 说明)(R18)。
+ *
+ * 与老系统的两处已知偏离(写进 PR 正文,不在这里悄悄改):根这一层也过同一把去重键(老系统只对
+ * childList 去重,顶层 collect 不去重);幸存者是排序后的首条(老系统按 DB 顺序首条胜出)。
+ *
+ * PURE:不改入参,结果只取决于行内容(含记录 id),与扫描顺序无关。
+ */
+function orderRowsAsBomTree(rows) {
+  let identityOf = null
+  let treeIdentity = null
+  if (rows.some((row) => pathIdentityOf(row) !== null)) {
+    identityOf = pathIdentityOf
+    treeIdentity = TREE_IDENTITY_PATH
+  } else if (rows.some((row) => componentIdentityOf(row) !== null)) {
+    identityOf = componentIdentityOf
+    treeIdentity = TREE_IDENTITY_COMPONENT
+  }
+  if (identityOf === null) {
+    return { rows: sortExportRows(rows), collapsedRowCount: 0, treeOrdered: false, treeIdentity: null, treeDegraded: false }
+  }
+  const identities = new Map()
+  const knownIdentities = new Set()
+  for (const row of rows) {
+    const identity = identityOf(row)
+    identities.set(row, identity)
+    if (identity !== null) knownIdentities.add(identity.self)
+  }
+  const childrenByParent = new Map()
+  const roots = []
+  for (const row of rows) {
+    const identity = identities.get(row)
+    const parentIdentity = identity === null ? null : identity.parent
+    if (parentIdentity === null || !knownIdentities.has(parentIdentity)) {
+      roots.push(row)
+      continue
+    }
+    if (!childrenByParent.has(parentIdentity)) childrenByParent.set(parentIdentity, [])
+    childrenByParent.get(parentIdentity).push(row)
+  }
+  const childrenOf = (row) => {
+    const identity = identities.get(row)
+    return identity === null ? [] : (childrenByParent.get(identity.self) || [])
+  }
+
+  const ordered = []
+  const visited = new Set()
+  let collapsedRowCount = 0
+  // A collapsed twin takes its WHOLE subtree with it (老系统 never visits the dropped node, so its
+  // children never reach the workbook either) — marked visited rather than left behind, or the
+  // stranded-row sweep below would print exactly the duplicate band this key exists to remove.
+  const collapseSubtree = (row) => {
+    if (visited.has(row)) return
+    visited.add(row)
+    collapsedRowCount += 1
+    for (const child of childrenOf(row)) collapseSubtree(child)
+  }
+  // ONE `seenKeys` PER CALL, i.e. per parent ROW's child set (and one for the root band). It must
+  // not be hoisted out of `walk`: a set shared across parents would collapse the second occurrence
+  // of a shared sub-assembly's child under its OTHER parent — the exact row this identity scheme
+  // exists to keep.
+  const walk = (siblings) => {
+    const seenKeys = new Set()
+    for (const row of siblings.slice().sort(compareSiblingRows)) {
+      if (visited.has(row)) continue
+      // null = 这一行的 名称及规格 还原不出来(见 displayDedupeKey)。既不比较也不登记 ⇒ 它
+      // 既不会被别人合并掉,也不会把别人合并掉。把 null 当普通键值丢进 Set 的写法会让所有
+      // 不可证的行互相撞成一行 —— 正好是这把键要挡的那个错,方向还反了。
+      const key = displayDedupeKey(row)
+      if (key !== null) {
+        if (seenKeys.has(key)) {
+          collapseSubtree(row)
+          continue
+        }
+        seenKeys.add(key)
+      }
+      visited.add(row)
+      ordered.push(row)
+      walk(childrenOf(row))
+    }
+  }
+  walk(roots)
+  const stranded = rows.filter((row) => !visited.has(row))
+  if (stranded.length > 0) ordered.push(...sortExportRows(stranded))
+  return {
+    rows: ordered,
+    collapsedRowCount,
+    treeOrdered: true,
+    treeIdentity,
+    treeDegraded: treeIdentity === TREE_IDENTITY_COMPONENT,
+  }
 }
 
 // "Does this target bind logical ids to physical ids AT ALL?" — the writer's own predicate
@@ -436,7 +757,10 @@ function fieldIdMapHasExplicitBindings(fieldIdMap) {
 }
 
 function resolveExportFieldBindings(target) {
-  const fieldIds = [...EXPORT_SOURCE_FIELD_IDS, ...SCOPE_FIELD_IDS]
+  // DE-DUPLICATED since F1c: 生产编号 made `projectNo` both a PROJECTED column and a SCOPE field,
+  // and a repeated id would be reported twice in `missingFields` / `unresolvedColumns` — the same
+  // hole named twice reads as two holes.
+  const fieldIds = Array.from(new Set([...EXPORT_SOURCE_FIELD_IDS, ...SCOPE_FIELD_IDS]))
   const explicit = fieldIdMapHasExplicitBindings(target.fieldIdMap)
   const map = {}
   const missing = []
@@ -537,16 +861,36 @@ async function exportStockPreparationPrepLines({ recordsApi, target, projectNo, 
     throw new StockPreparationPrepLineExportError(422, 'PREP_LINE_EXPORT_ROWS_TOO_LARGE', 'stock-preparation export exceeded the row bound', { maxRows: MAX_EXPORT_ROWS })
   }
   const headers = EXPORT_COLUMNS.map((column) => column.label)
-  // Deterministic hierarchy order BEFORE the projection — see sortExportRows. Without it the row
-  // order is the records service's `ORDER BY id ASC` over random UUIDs.
-  const orderedRows = sortExportRows(activeRows)
-  const rows = orderedRows.map((data) => EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column))))
+  // Deterministic hierarchy order BEFORE the projection — since F1c the DEPTH-FIRST BOM TREE
+  // (orderRowsAsBomTree), 老系统 iterHandle 的形状,而不再只是「按父组件图号分带」。身份列认不出
+  // 来的老部署自动退回 F1b 的平比较器,所以没有任何一种部署会比改之前更乱。
+  const ordering = orderRowsAsBomTree(activeRows)
+  const rows = ordering.rows.map((data) => EXPORT_COLUMNS.map((column) => formatCellForColumn(column, columnSourceValue(data, column))))
   return {
     projectNo: scopedProjectNo,
     totalRowCount: allRows.length,
     activeRowCount: activeRows.length,
     headers,
     rows,
+    // Values-free ordering facts. `collapsedRowCount` is the ONE number that explains a workbook
+    // with fewer lines than the sheet has rows (同父同键的重复行按老系统合并),so it travels with
+    // the result instead of being a silent drop; `treeOrdered: false` says this deployment's rows
+    // carry neither a `path` nor a 部件源ID binding and got the flat order; `treeIdentity` names
+    // which identity scheme built the tree ('path' — the row path, the correct one — or
+    // 'componentSourceId', the DEGRADED part-id scheme a batch with no `path` falls back to), and
+    // `treeDegraded` is that second case spelled out as a boolean: the workbook is a tree, but a
+    // shared sub-assembly's second occurrence prints without its children (see orderRowsAsBomTree).
+    //
+    // REACH, stated so nobody reads more into it than is true: today these are MODULE RETURN
+    // VALUES ONLY. The HTTP export route (`http-routes.cjs`, frozen in this change) writes its
+    // audit detail from `totalRowCount` / `activeRowCount` / `headers.length` and never reads
+    // any of these keys — so an operator whose workbook came out short cannot yet see this number
+    // anywhere. Wiring it into the audit detail is the next hand's job; until then "有据可查"
+    // applies to the module, not to the product.
+    collapsedRowCount: ordering.collapsedRowCount,
+    treeOrdered: ordering.treeOrdered,
+    treeIdentity: ordering.treeIdentity,
+    treeDegraded: ordering.treeDegraded,
     // Values-free: logical field ids the bound target does not bind, so an export that came out
     // blank in a column can be told apart from a deployment that never had that column.
     unresolvedColumns: resolution.unbound.slice(),
@@ -607,6 +951,16 @@ module.exports = {
     queryAllMainRows,
     resolveExportFieldBindings,
     sortExportRows,
+    compareSiblingRows,
+    displayDedupeKey,
+    nameAndSpecDisplayKey,
+    rowCarriesSpecColumn,
+    orderRowsAsBomTree,
+    encodeBomPath,
+    bomPathTokensOf,
+    pathIdentityOf,
+    componentIdentityOf,
+    rowSortNo,
     unmapRow,
     READ_PAGE_LIMIT,
     READ_MAX_PAGES,
