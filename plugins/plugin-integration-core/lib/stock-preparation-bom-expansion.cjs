@@ -212,17 +212,39 @@ const ROW_ERROR_LIMIT_CEILING = 20000
 // of the SET of rowErrors the batch produced, not of the order it produced them in, and the memory
 // bound D-C exists for is untouched: at most N entries are ever held (see the collector's header).
 //
-// THE KEY IS ROW IDENTITY ONLY, exactly as in X4's `canonicalHashOrder`: `type`, then `path`, then
-// `idempotencyKey`, then `componentCode`, with the entry's own stable content breaking ties. No
-// timestamp, no counter, no arrival index — any of those would re-introduce the production order
-// under a different name and this whole guard would be decoration.
+// THE KEY IS ROW IDENTITY, THEN THE ENTRY'S OWN CONTENT: `type`, then `path`, then
+// `idempotencyKey`, then `componentCode`, with `stableRowErrorContent` breaking ties. No timestamp,
+// no counter, no arrival index — any of those would re-introduce the production order under a
+// different name and this whole guard would be decoration.
+//
+// SCOPE OF THAT SENTENCE, BECAUSE THREE QUARTERS OF THE TUPLE IS EMPTY TODAY. Of the four identity
+// fields only `type` is ever populated: every `addRowError` call site in this module emits
+// `{type, field, depth}` (some with `relation`), and the ext-mapping branch adds
+// `{type, target, sourceColumn, expectedType, depth}` — not one payload carries `path`,
+// `idempotencyKey` or `componentCode`. So on production data the identity half degenerates to the
+// type token and THE CONTENT TIEBREAKER IS THE HALF THAT DOES THE WORK: it is what separates two
+// `invalid_quantity` entries differing only in `depth`, and dropping it would hand the cap back to
+// arrival order for every same-type collision. The other three fields stay declared because a
+// rowError carrying a row identity is a planned shape (the expanded ROW already has both
+// `idempotencyKey` and `path`) and because X4's `rowHashIdentityToken` reads the same token types.
+// `testTheSampleIsOrderBlindWhenTwoDefectsShareAType` pins the working half on a real expansion AND
+// pins this scope claim, so a payload that starts carrying `path` turns that test red and brings
+// whoever added it back to this paragraph. (The resemblance to X4 is in the TOKEN helper, not in
+// the key: `canonicalHashOrder` orders rowErrors with an identity of `() => ''`, content alone.)
 //
 // ASYMMETRY, DELIBERATE AND NARROW: an expansion that did NOT overflow still reports its rowErrors
-// in TRAVERSAL order. Sorting them too would be tidier and would move every under-cap deployment's
-// revision hash (the untruncated array IS hashed — X4-b only drops the truncated one), i.e. it
-// would buy nothing and cost a 409 on every project that never had this problem. Under the cap the
-// retained set is the whole set, so arrival order cannot make it differ; the determinism this
-// constant is about is only in question once something was dropped.
+// in TRAVERSAL order — but NOT, as an earlier draft of this comment claimed, because sorting them
+// would move every under-cap deployment's revision. It would not. `stock-preparation-table-actions`
+// hashes the untruncated array through `canonicalHashOrder(expansion.rowErrors, () => '')`, which
+// re-sorts it by content first, so the array's order is ALREADY invisible to the revision (measured
+// on an 11-entry under-cap expansion: sorting changes the array's bytes and leaves the revision
+// hash identical). The two reasons that do hold: (1) `expansion.rowErrors` is what an operator
+// READS out of the dry-run response, and under the cap its order is the order the expander MET the
+// defects — a real diagnostic sequence, and the only place it survives; (2) under the cap the
+// retained set IS the whole set, so no selection is happening and no two reads can differ — sorting
+// would buy no determinism at all, while renumbering the positional `index` that
+// `stock-preparation-expansion-snapshot-mapper.cjs` hands `stampMissingChildLine`. The determinism
+// this constant is about is only in question once something was dropped.
 const ROW_ERROR_IDENTITY_FIELDS = Object.freeze(['type', 'path', 'idempotencyKey', 'componentCode'])
 
 const FORBIDDEN_PLAN_KEYS = Object.freeze([

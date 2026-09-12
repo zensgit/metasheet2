@@ -1226,15 +1226,19 @@ async function testOverTheCapIsDeterministicAndDistinguishable() {
 // X5: WHICH entries the cap keeps. D-C bounded the sample and X4 took the truncated sample out of
 // the revision hash; what survived both was that the SELECTION followed the source's reading order,
 // so two reads of one batch kept entries of different TYPES, planned different conflictTypes and
-// 409'd. The four tests below are the whole claim: (①) under the cap nothing moves, (②) past it the
-// surviving set is order-blind, (③) the totals stay true, (④) the structure stays bounded by N.
+// 409'd. The five tests below are the whole claim: (①) under the cap nothing moves, (②) past it the
+// surviving set is order-blind ACROSS types and (②b) WITHIN one type — the half the sort key's
+// content tiebreaker owns, and the only half that is load-bearing on real payloads — (③) the totals
+// stay true, (④) the structure stays bounded by N.
 // ---------------------------------------------------------------------------------------------
 
 // ① THE ASYMMETRY, PINNED. Under the cap the sample is the WHOLE set, so no selection is happening
-// and the entries stay in TRAVERSAL order. Sorting them too would be tidier and would move the
-// revision of every deployment that never overflowed anything (the untruncated array is still
-// hashed whole — X4-b only drops the truncated one), so it is deliberately not done. This test is
-// what fails if a later cut decides to canonicalise the under-cap array as well.
+// and the entries stay in TRAVERSAL order — the order the expander MET the defects, which is what
+// an operator reads out of the dry-run response. Not, to correct the reason this comment used to
+// give, because sorting would move an under-cap revision: it would not, and the assertion at the
+// bottom of this test is the proof — two different under-cap orders already hash to ONE revision,
+// so canonicalising the array would buy nothing there. This test is what fails if a later cut
+// decides to canonicalise the under-cap array anyway.
 async function testUnderTheCapTheSampleStaysInTraversalOrder() {
   const blanksFirst = await expandBlankComponentBom(3, {
     badQuantityPositions: 2,
@@ -1320,6 +1324,106 @@ async function testTheTruncatedSampleIsTheSameSetInEitherProductionOrder() {
   assert.deepEqual(oneSlot.rowErrors.map((entry) => entry.type), ['invalid_quantity'])
 }
 
+/**
+ * ②b — THE SAME CLAIM WHERE THE TYPE CANNOT DECIDE IT, which is where this guard actually lives.
+ *
+ * The probe above flips two BLOCKS of different types, so `type` alone settles the order and the
+ * content tiebreaker is never consulted. On real payloads that is the common case in reverse: NO
+ * rowError this module emits carries `path` / `idempotencyKey` / `componentCode` (see
+ * ROW_ERROR_IDENTITY_FIELDS' header), so the identity half collapses to the type token and the
+ * content half is the ONLY thing that can tell two same-type defects apart. Why ② was not enough,
+ * measured: delete the content comparison (or stub `stableRowErrorContent` to ''), and ② — plus the
+ * whole table-actions suite — stays green while the entry this fixture retains flips with the source
+ * order. So this test — its one-slot assertion is what goes red under either of those mutations.
+ *
+ * THE FIXTURE IS A NESTED BOM, because depth is the cheapest content difference the expander will
+ * actually produce:
+ *
+ *   PART-A ─ BOM-A ─┬─ PART-C   bad quantity  -> invalid_quantity depth 1
+ *                   └─ PART-D   good quantity
+ *                        └ BOM-D ─ PART-E  bad quantity -> invalid_quantity depth 2
+ *
+ * Expansion is depth-first (`expandChildren` recurses inside the detail loop), so swapping the two
+ * SIBLINGS under BOM-A swaps which of the two `invalid_quantity` entries is produced first — and
+ * nothing else: both source orders carry the identical set of detail rows, `sort_id` included, so
+ * this really is one batch read twice rather than two batches.
+ */
+function nestedQuantityDefectBom({ subtreeFirst = false } = {}) {
+  const badChild = { bom_pid: 'BOM-A', part_id: 'PART-C', Bom_ExAttr1: 'not-a-number', sort_id: 1 }
+  const goodBranch = { bom_pid: 'BOM-A', part_id: 'PART-D', Bom_ExAttr1: '1', sort_id: 2 }
+  return baseData({
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity: '1', sort_id: 1 }],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-C', IdentityNo: 'C-001', IdentityName: 'Clip', Material: 'Iron', SysVer: 'V1' },
+      { OBJ_ID: 'PART-D', IdentityNo: 'D-001', IdentityName: 'Subassembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-E', IdentityNo: 'E-001', IdentityName: 'Screw', Material: 'Iron', SysVer: 'V1' },
+    ],
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-D', bom_id: 'BOM-D', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: (subtreeFirst ? [goodBranch, badChild] : [badChild, goodBranch])
+      .concat([{ bom_pid: 'BOM-D', part_id: 'PART-E', Bom_ExAttr1: 'not-a-number', sort_id: 1 }]),
+  })
+}
+
+async function expandNestedQuantityDefectBom(options = {}) {
+  const { adapter } = createAdapter(nestedQuantityDefectBom(options))
+  return expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001', ...(options.expand || {}) })
+}
+
+async function testTheSampleIsOrderBlindWhenTwoDefectsShareAType() {
+  const DEPTH_1 = { type: 'invalid_quantity', field: 'Bom_ExAttr1', depth: 1, relation: 'child' }
+  const DEPTH_2 = { type: 'invalid_quantity', field: 'Bom_ExAttr1', depth: 2, relation: 'child' }
+
+  const childFirst = await expandNestedQuantityDefectBom()
+  const subtreeFirst = await expandNestedQuantityDefectBom({ subtreeFirst: true })
+
+  // THE SCOPE CLAIM IN ROW_ERROR_IDENTITY_FIELDS' HEADER, enforced rather than asserted in prose:
+  // these entries carry none of the three unpopulated identity fields, so `type` is the whole
+  // identity and everything below is decided by CONTENT alone. A payload that starts carrying one of
+  // them makes this red — and that comment is then the thing to re-read before it is made green.
+  for (const entry of childFirst.rowErrors) {
+    assert.deepEqual(Object.keys(entry).sort(), ['depth', 'field', 'relation', 'type'], 'the real payload is {type, field, depth, relation} — see ROW_ERROR_IDENTITY_FIELDS')
+    for (const identityField of ['path', 'idempotencyKey', 'componentCode']) {
+      assert.equal(identityField in entry, false, `a real rowError carries no ${identityField}, so identity is the type token alone`)
+    }
+  }
+
+  // The two source orders really do produce the two entries in opposite sequence — asserted before
+  // the cap is applied, because a fixture that quietly stopped flipping would make the rest vacuous.
+  assert.deepEqual(childFirst.rowErrors, [DEPTH_1, DEPTH_2], 'one order meets the depth-1 defect first')
+  assert.deepEqual(subtreeFirst.rowErrors, [DEPTH_2, DEPTH_1], 'the other meets the depth-2 defect first')
+
+  // ONE SLOT, TWO SAME-TYPE DEFECTS. The survivor must be the content-smaller one (depth 1 sorts
+  // before depth 2) in BOTH source orders. This is the assertion the content tiebreaker owns: with
+  // it deleted the collector ties on identity, keeps the incumbent, and returns whichever entry the
+  // source happened to hand over first.
+  const forward = await expandNestedQuantityDefectBom({ expand: { rowErrorLimit: 1 } })
+  const reversed = await expandNestedQuantityDefectBom({ subtreeFirst: true, expand: { rowErrorLimit: 1 } })
+  assert.deepEqual(reversed.rowErrors, forward.rowErrors, 'same-type defects are selected identically in either source order')
+  assert.deepEqual(forward.rowErrors, [DEPTH_1], 'and the survivor is the content-smaller entry, not the first one produced')
+  assert.equal(revisionOf(reversed), revisionOf(forward), 'so both dry-runs carry one revision')
+
+  // AND THE ASYMMETRY ON THE SAME FIXTURE: a cap of 2 truncates nothing here, so both orders keep
+  // BOTH entries in traversal order and stay two different arrays — exactly what ① pins, restated
+  // where the two entries share a type. The revision is one revision anyway, because the untruncated
+  // array is hashed through `canonicalHashOrder`, which re-sorts it.
+  const underCap = await expandNestedQuantityDefectBom({ expand: { rowErrorLimit: 2 } })
+  const underCapReversed = await expandNestedQuantityDefectBom({ subtreeFirst: true, expand: { rowErrorLimit: 2 } })
+  assert.deepEqual(underCap.rowErrors, [DEPTH_1, DEPTH_2], 'under the cap the array is still traversal order…')
+  assert.deepEqual(underCapReversed.rowErrors, [DEPTH_2, DEPTH_1], '…on both sides, because nothing was selected')
+  assert.equal(revisionOf(underCapReversed), revisionOf(underCap), 'and the hasher makes that order immaterial')
+
+  // The counts stay the truth of the batch on this shape too, and both orders agree on them.
+  const capped = await expandNestedQuantityDefectBom({ expand: { rowErrorLimit: 1 } })
+  const cappedReversed = await expandNestedQuantityDefectBom({ subtreeFirst: true, expand: { rowErrorLimit: 1 } })
+  assert.equal(capped.summary.rowErrorsTotal, 2, 'both same-type defects are counted')
+  assert.deepEqual(capped.summary.rowErrorTypeCounts, { invalid_quantity: 2 }, 'per-type totals count the dropped one')
+  assert.deepEqual(cappedReversed.summary, capped.summary, 'and the summary is order-blind')
+}
+
 // ④ THE MEMORY BOUND, which is the reason "collect everything, then sort and slice" is not the
 // implementation. Asserted twice: through an expansion (50 defects, cap 3) and directly on the
 // collector, where an occupancy that ever exceeds the cap is visible even though the OUTPUT is the
@@ -1364,8 +1468,13 @@ async function testTheTruncatedSampleNeverOutgrowsTheCap() {
   assert.equal(peak, 3, 'the collector never holds more than the cap, not even for one add')
   assert.deepEqual(collector.finalize(), [winner, winner, winner], 'and the three it kept are the three that sort first')
 
-  // The key is ROW IDENTITY, not arrival: two entries of one type are ordered by `path`, and the
-  // smaller path wins whichever of them was offered first.
+  // The identity half of the key, pinned on the COLLECTOR's contract rather than on an expansion —
+  // deliberately, and this is the one synthetic shape in the X5 block: no rowError the expander
+  // emits carries `path` (its `missing_component` payload is `{type, field, depth}`), so `path`
+  // ordering is reachable only by calling the collector directly. What the expander really produces
+  // is covered by testTheSampleIsOrderBlindWhenTwoDefectsShareAType, where identity collapses to the
+  // type token and the CONTENT tiebreaker decides. Keep both: this one fails if a future payload
+  // starts carrying `path` and the identity comparison was dropped meanwhile.
   for (const order of [['["Z"]', '["A"]'], ['["A"]', '["Z"]']]) {
     const paths = createRowErrorCollector(1)
     for (const pathToken of order) paths.add({ type: 'missing_component', path: pathToken, depth: 1 })
@@ -1785,6 +1894,7 @@ async function main() {
   await testOverTheCapIsDeterministicAndDistinguishable()
   await testUnderTheCapTheSampleStaysInTraversalOrder()
   await testTheTruncatedSampleIsTheSameSetInEitherProductionOrder()
+  await testTheSampleIsOrderBlindWhenTwoDefectsShareAType()
   await testTheTruncatedSampleNeverOutgrowsTheCap()
   await testRowErrorLimitIsConfigurableUnderACeiling()
   await testMissingComponentProbeCountSurvivesTheRowErrorCap()

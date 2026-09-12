@@ -1246,24 +1246,33 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
       // The bounded sample has no row identity to sort on, so its canonical order is its content —
       // but ONLY while the sample is the whole set.
       //
-      // X4-b, THE TRUNCATED CASE. Past the cap the array is a SUBSET chosen by production order
-      // ("keeps the FIRST rowErrorLimit entries", stock-preparation-bom-expansion.cjs), so a
-      // reshuffled read retains DIFFERENT entries, not the same ones in a different order. Sorting
-      // cannot rescue that, and such a batch is still applyable (only `missing_child_bom` is hard
-      // blocking), so it was the second reachable 409. The sample therefore leaves the hash
-      // entirely when it is truncated and the order-free overflow facts below stand in for it:
-      // total, per-type composition and the truncation flag itself, all counted BEFORE the cap.
-      // The trade is stated rather than hidden — past the cap two batches with identical totals and
-      // identical per-type composition but different retained diagnostics now share a revision.
+      // X4-b, THE TRUNCATED CASE. When X4-b was written the array past the cap was a SUBSET chosen
+      // by production order, so a reshuffled read retained DIFFERENT entries and sorting here could
+      // not rescue it; such a batch is still applyable (only `missing_child_bom` is hard blocking),
+      // so that was the second reachable 409.
+      //
+      // X5 CHANGED THE FIRST HALF OF THAT: the truncated sample is now the deterministic top-N by
+      // row identity (`createRowErrorCollector`, stock-preparation-bom-expansion.cjs — see
+      // ROW_ERROR_IDENTITY_FIELDS' header), so two reads of one batch retain the SAME entries in the
+      // same order whatever order the source produced them in, and `plan.summary.conflictTypes` —
+      // one manual_confirm decision per retained entry — no longer disagrees between two dry-runs.
+      // That was the residual this comment used to record as open; it is closed at the expander,
+      // which is where it had to be closed, not by a different hash recipe here.
+      //
+      // THE SAMPLE STILL LEAVES THE HASH WHEN IT IS TRUNCATED, for a weaker reason than before: not
+      // "the selection is unstable" but "the sample is not a projection of the BATCH". Past the cap
+      // it is N entries out of a larger set, while the order-free overflow facts below — total,
+      // per-type composition, the truncation flag, all counted BEFORE the cap — are properties of
+      // the whole batch. The trade is stated rather than hidden: two batches with identical totals
+      // and identical per-type composition but different retained diagnostics share a revision.
       // What will be WRITTEN is unaffected: rowErrors are diagnostics, the decisions they produce
       // are counted in `plan.counts`, and the rows themselves are hashed above.
       //
-      // AND THE RESIDUAL, measured rather than assumed: when the surviving subset differs in TYPE
-      // the PLAN differs too (`plan.summary.conflictTypes` is derived from the retained entries, one
-      // manual_confirm decision each), so the revision still moves — dropping the sample from the
-      // hash cannot and must not hide that, because the two dry-runs really did preview different
-      // plans. Closing THAT needs deterministic selection at the point of truncation (the expander),
-      // not a different hash recipe here.
+      // PUTTING THE TRUNCATED SAMPLE BACK IN IS NOW A REAL OPTION, deliberately not taken. It would
+      // be sound (the sample is deterministic), and it would cost this: `rowErrorLimit` is a deploy
+      // config, so two deployments reading the same batch with different caps would hash different
+      // revisions, and a cap change would invalidate every outstanding dry-run token of an
+      // overflowing project. The overflow facts already distinguish the batches the sample would.
       //
       // Spread CONDITIONALLY so an UNDER-CAP expansion hashes byte-identically to before X4-b.
       ...(rowErrorsWereTruncated(expansion)
