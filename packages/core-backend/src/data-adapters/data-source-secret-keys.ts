@@ -42,10 +42,14 @@
  *
  * MATCHING RULE (deliberately narrow so it cannot swallow legitimate connection keys such as
  * `host` / `database` / `encrypt` / `trustServerCertificate` / `strictOffsetOrdering`):
- *   - the key is normalised (lower-cased, non-alphanumerics dropped) and matched against the
- *     word list below by SUBSTRING — `dbPassword`, `API_KEY`, `sslPassphrase` all hit;
- *   - a word marked `wholeTokenOnly` must equal one of the key's camel/underscore TOKENS —
- *     `pass` and `db_pass` hit; the UNSPLIT lower-case spellings `passthrough` / `bypass` do NOT.
+ *   - the key is first folded with NFKC (see `foldKey`), then normalised (lower-cased,
+ *     non-alphanumerics dropped) and matched against the word list below by SUBSTRING —
+ *     `dbPassword`, `API_KEY`, `sslPassphrase`, `ｐａｓｓｗｏｒｄ` all hit;
+ *   - a word marked `wholeTokenOnly` must equal one of the key's camel/underscore TOKENS, or be
+ *     that token minus one of the GLUED_KEY_QUALIFIERS prefixes — `pass`, `db_pass`, `dbpass`,
+ *     `pgpass`, `pw`, `db_pw`, `rootpw` hit; the UNSPLIT lower-case spellings `passthrough` /
+ *     `bypass` / `compass` / `surpass` / `passive` do NOT (see GLUED_KEY_QUALIFIERS for why the
+ *     qualifier list, not a plain substring, is what makes `dbpass` reachable).
  *     Measured counterexample to any wider reading: tokenisation runs BEFORE the comparison, so
  *     `passThrough`, `pass_through` and `byPass` DO hit and are refused with a coded 400. No key of
  *     that shape exists in any shipped adapter's `connection` today (both directions pinned in
@@ -53,6 +57,11 @@
  *     word-list exception, not a looser rule (loosening would let `passHash` / `passValue` through).
  * There is no exemption list: `hasCredentials` is a PRESENCE FLAG computed by the route AFTER
  * stripping, never a key of a stored config, so it never reaches this predicate.
+ *
+ * STILL A SHAPE MATCH, NOT A SEMANTIC ONE. Widening the vocabulary raises the floor; it does not
+ * change the kind of thing this module can see. A secret parked under a perfectly ordinary key
+ * (`connection.hostAlias = 'hunter2'`) is invisible here, exactly as before — as is a homoglyph
+ * spelling from another script (`раssword` with Cyrillic а), which NFKC does NOT fold.
  */
 
 /** Coded refusal for a write that carries a secret-shaped key under `connection`. */
@@ -61,7 +70,10 @@ export const DATA_SOURCE_CONNECTION_SECRET_REJECTED_CODE = 'DATA_SOURCE_CONNECTI
 export interface SecretKeyWord {
   /** Word parts; joined for key matching, separator-tolerant in the text pattern. */
   readonly parts: readonly string[]
-  /** Match only a whole camel/underscore token of the key (keeps `passthrough` out). */
+  /**
+   * Match only a whole camel/underscore token of the key — optionally carrying one of
+   * GLUED_KEY_QUALIFIERS as a glued prefix (`dbpass`). Keeps `passthrough` / `bypass` (unsplit) out.
+   */
   readonly wholeTokenOnly?: boolean
   /**
    * Keep this word OUT of the `key=value` text pattern. Only `authorization` sets it: its value
@@ -89,8 +101,11 @@ export const DATA_SOURCE_SECRET_KEY_WORDS: readonly SecretKeyWord[] = [
   { parts: ['password'] },
   { parts: ['passwd'] },
   { parts: ['pwd'] },
+  { parts: ['pswd'] },
   { parts: ['passphrase'] },
+  { parts: ['passcode'] },
   { parts: ['pass'], wholeTokenOnly: true },
+  { parts: ['pw'], wholeTokenOnly: true },
   { parts: ['secret'] },
   { parts: ['token'] },
   { parts: ['credential'] },
@@ -100,9 +115,50 @@ export const DATA_SOURCE_SECRET_KEY_WORDS: readonly SecretKeyWord[] = [
   { parts: ['authorization'], skipInTextPattern: true },
 ]
 
+/**
+ * Qualifier prefixes that real keys GLUE to a secret word with no separator: `dbpass`, `pgpass`,
+ * `sqlpass`, `rootpw`, `userpw`. A `wholeTokenOnly` word therefore also hits a token of the shape
+ * `<qualifier><word>`.
+ *
+ * WHY A LIST AND NOT JUST A SUBSTRING MATCH. Dropping `wholeTokenOnly` for `pass` would indeed
+ * catch `dbpass`, but it would equally refuse `bypass`, `compass`, `surpass`, `trespass`,
+ * `overpass`, `encompass`, `passive` / `passiveMode` (the FTP lever) and `passenger` — none of them
+ * secrets. The write entry is FAIL-CLOSED, so every false positive is a legitimate configuration a
+ * caller can no longer send; that price is not worth paying for a spelling nobody uses. The entries
+ * below are SYSTEM QUALIFIERS. English fragments that merely look like one are deliberately absent:
+ * `by` (bypass), `com` (compass), `sur` (surpass), `tres`, `over`, `under`, `en` (encompass).
+ * Same reasoning as the module header: when a real key collides, add an exception here — do not
+ * loosen the rule (a looser rule lets `passHash` / `passValue` through).
+ */
+const GLUED_KEY_QUALIFIERS: readonly string[] = [
+  'db', 'pg', 'pgsql', 'my', 'sql', 'mysql', 'mssql', 'ora', 'oracle', 'redis', 'mongo',
+  'user', 'usr', 'admin', 'root', 'login', 'account', 'acct', 'svc', 'service',
+  'app', 'client', 'api', 'auth', 'conn', 'connection',
+  'ftp', 'sftp', 'ssh', 'smtp', 'imap', 'mail', 'proxy',
+]
+
+/**
+ * NFKC fold, applied to KEY NAMES ONLY. A key arrives as arbitrary JSON text and can be spelled in
+ * a Unicode compatibility form that renders identically to ASCII — fullwidth `ｐａｓｓｗｏｒｄ`,
+ * `ＡＰＩ＿ＫＥＹ`, `Ｔｏｋｅｎ`, or the halfwidth/circled variants. Before this fold those keys
+ * survived `normalizeKey` as the EMPTY string (every code point fails `[^a-z0-9]`) and matched
+ * nothing, so `connection.ｐａｓｓｗｏｒｄ` was accepted, stored in plaintext and echoed back.
+ *
+ * VALUES ARE NEVER FOLDED. `stripSecretConfigKeys` deletes by the ORIGINAL key, values are copied
+ * byte-for-byte, and `collectSecretConfigValues` / `redactSecrets` compare the stored value as
+ * sent — normalising a value would change bytes the caller gave us and could stop a real secret
+ * from matching itself.
+ *
+ * BOUNDARY (stated, not claimed away): NFKC folds compatibility variants, NOT cross-script
+ * homoglyphs. `раssword` with Cyrillic `а`/`р` still does not match.
+ */
+function foldKey(key: string): string {
+  return key.normalize('NFKC')
+}
+
 /** Split a key into lower-cased camel/underscore tokens: `dbPassWord` -> ['db','pass','word']. */
 function keyTokens(key: string): string[] {
-  return key
+  return foldKey(key)
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
     .split(/[^A-Za-z0-9]+/)
@@ -111,7 +167,14 @@ function keyTokens(key: string): string[] {
 }
 
 function normalizeKey(key: string): string {
-  return key.toLowerCase().replace(/[^a-z0-9]/g, '')
+  return foldKey(key).toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+/** `pass` / `dbpass` / `pgpass` hit; `bypass` / `compass` / `passthrough` do not. */
+function tokenMatchesWord(token: string, joined: string): boolean {
+  if (token === joined) return true
+  if (token.length <= joined.length || !token.endsWith(joined)) return false
+  return GLUED_KEY_QUALIFIERS.includes(token.slice(0, token.length - joined.length))
 }
 
 /** THE predicate. True when this config key is secret-shaped and must never be stored/echoed bare. */
@@ -123,7 +186,7 @@ export function isSecretConfigKey(key: string): boolean {
     const joined = word.parts.join('')
     if (word.wholeTokenOnly) {
       tokens ??= keyTokens(key)
-      if (tokens.includes(joined)) return true
+      if (tokens.some((token) => tokenMatchesWord(token, joined))) return true
     } else if (normalized.includes(joined)) {
       return true
     }
@@ -238,12 +301,23 @@ export function collectSecretConfigValues(parts: ReadonlyArray<unknown>): string
 /**
  * `key=value` / `key: value` redaction pattern built from the SAME word list. Returned fresh per
  * call because a /g RegExp carries lastIndex state. Longest words first so a short word can never
- * shadow a longer one.
+ * shadow a longer one — the sort is on the WORD BODY, not on the emitted branch, so the optional
+ * qualifier group added for `wholeTokenOnly` words (`dbpass=…` in a driver string) cannot reorder
+ * `password` behind `pass`.
+ *
+ * The `\b…\b` anchors are the text-side equivalent of the whole-token rule: `bypass=x` and
+ * `compass=x` are NOT redacted (no qualifier matches, and `pass` is not at a word boundary there),
+ * while `dbpass=x`, `db_pw=x` and `user-pass=x` are — the qualifier may carry the same optional
+ * `[_-]` separator the multi-part words use. This leg sees free text and is deliberately NOT
+ * NFKC-folded: it rewrites a message handed back to a caller, so it must not rewrite bytes it did
+ * not redact.
  */
 export function secretKeyValueTextPattern(): RegExp {
+  const qualifiers = GLUED_KEY_QUALIFIERS.join('|')
   const alternation = DATA_SOURCE_SECRET_KEY_WORDS.filter((word) => word.skipInTextPattern !== true)
-    .map((word) => word.parts.join('[_-]?'))
-    .sort((a, b) => b.length - a.length)
+    .map((word) => ({ body: word.parts.join('[_-]?'), glued: word.wholeTokenOnly === true }))
+    .sort((a, b) => b.body.length - a.body.length)
+    .map((word) => (word.glued ? `(?:(?:${qualifiers})[_-]?)?${word.body}` : word.body))
     .join('|')
   return new RegExp(
     `(\\b(?:${alternation})\\b\\s*[=:]\\s*)("[^"]*"|'[^']*'|[^\\s;,)]+)`,
