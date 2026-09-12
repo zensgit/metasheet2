@@ -248,6 +248,8 @@ scheduled dry-run LastTaskResult=0
 
 **我的建议已作为评论发在该 PR 上：选 ②（先收窄 `changedFields` 再合）**，理由是收窄本身就在修一个独立的语义错误 —— 现在的判定把「上游压根没提这一列」当成「这一列变了」。`changedFields`（`stock-preparation-conflict-planner.cjs:988`）拿来料的 `undefined` 和已存值比必然不等，而 `pickFields`（同文件 `:992`）又跳过 `undefined`，所以这类行拿到的是「把其余列原值原样重写一遍 + 一条点名了没被写的列的理由」。收窄后没有任何一格的最终取值会变，少掉的是那次无意义的重写和那条不成立的理由。代价是它动小 BOM 共用的 planner，属另一次裁决，需要完整的两路对抗，且会让 #5625 新增的两个用例一起变红。在你回「1 / 2 / 3」之前 #5625 保持草稿不动。
 
+> **订正（2026-09-12，X6 = 分支 `fix/stock-prep-changed-fields-absent-key`，两轮反驳后）**：上段「收窄后没有任何一格的最终取值会变」是绝对句，不成立，已被 X6 自己的用例证伪。有界表述：**在 X6 之前就会被写的既有行上**，除 runPatch 四列刷新戳（`lastPlmRefreshRunId` / `lastPlmRefreshAt` / `lastPlmRefreshDecision` / `lastPlmConflictSummary`——收窄后在 SKIP 行上不再逐轮盖章，停在最后一次真变更）外，没有任何业务列的**语义**取值改变；comparator 判等但存量落盘表示与来料不同的格（number 列的数字串↔数字、string/date/select 列的数字/布尔）此前会随那次空 update 被 apply-writer 归一化重写，X6 之后保持存量表示——表示层差异，不是取值差异。批级后果：lineage / identity 调用点收窄后 `plan.valid` 可由 false 翻 true，同批 add 的业务列由「整批 409 不落表」变成「落表」；生产闸 `cleanRowCount = add + update` 的触发量随之变小。另，「会让 #5625 新增的两个用例一起变红」是欠计：受影响的是 `stock-preparation-large-bom-installed-fields-wiring.test.cjs` 里的三条——`aPackAwareBandNeverBlanksAnExtValueTheSmallPathWrote`（#5625 首个提交就有，不在「新增的两个」里）、`theWidenedBandIsCountedByTheProductionCleanRowBound`、`theDefaultDeploymentPaysInWritesAndInAnUnhonouredRefreshReason`；同文件「narrowing `changedFields` … is a different decision on a different change」那段注释在 X6 合入后也成过期表述，重基时一并改。
+
 ### 7.2 只有 owner/客户能做
 
 - **222 转正第 4 步：绑定生产 PLM**。这需要客户侧凭据，在硬边界里明确是 owner/客户专属动作。
