@@ -80,6 +80,12 @@
 
 **r31(`72caae8de` = r30 + #5645 F7 + #5651 X2c + #5654 F4A,09-12 08:11 本地上 222)**:CI 3 分钟出包;备份 `pre-r31-20260912-081140.dump` 2.26 MB;**F4A 升级脚本第一次实跑**——`MAINTENANCE_GATE_WIRED`(举 flag 时 nginx 真答 503 JSON,而不是连接重置)→ 后端直连 attempt 3 OK → 先删 flag 再探 nginx → 200;upgrade exit 0;web smoke PASS;计划任务试算 `LastTaskResult=0`;标记 #5645 / #5654×2 / wave6 全 True;事后迁移 402、pm2 env zh-CN、08:00 后后端错误 0 行、flag 不存在、health 200。#5651 的「字面量计数」标记不成立(minifier 把常量合并成 1 处),以包 gitSha 精确匹配为准。F1c / F8A(+ F9b)合入后打 **r32**。
 
+**F1c 收官(09-12 上午)**:fix r3 `7daeb271c`(导出树节点身份改行路径 `path`、后台链 extensionFieldIds 测试绑定、规格列未绑判不可证、正文改写)→ 终审 r2 FIX_FIRST(2 条:根判定「父路径不在批内」无判别用例、stranded 兜底无用例且 JSDoc 夸口)→ fix r4 `62a581c8c`(R24a/R24b,M-F/M-J 红)→ **终审 r3 = MERGE,0 blocker**(裁判自跑 11 支 exit 0;宿主层核实 `mapRecordRow` 不补键 ⇒ 规格空串形状在 222 上只由网格手改触发)。两处注释订正 `4a82e8d56`。**#5659 CI 21/21 → 合入 `e74b9c14a`**。
+
+**F8A 收官进行中**:fix r3 `875ba5319`(目标端事实三处同步 + 两条 target-seam characterization + plugin-attendance overwrite 披露 + rich 两步绕过 characterization + `property` 必传含运行时 arity 检查 + 值面行为变化表)→ **终审 r2 = MERGE,0 blocker**;四处 comment-only 订正 `5b83ea832`;**#5660** CI 第一轮 1 红 = `multitable-richtext-longtext-write-sink.guard.test.ts` 结构守卫把注释里逐字引用的 `UPDATE meta_records …` 当成写点(改措辞 `5b9959146`);第二轮 20.x 真库 lane 2 红 = a18bdd07e 把 `multitable-lossy-retype-revert-realdb.test.ts` 的改类型换成 string→longText,而 config-restore 不把它当 type era 变化,用例前提失效(mock lane 看不见)→ opus 在修(选「白名单放行 + 跨 era」的类型对,断言不弱化)。7 条 owner 待办在 PR 正文(对已有数据的列拒绝 → autoNumber;rich ON→OFF 加门;源端/目标端收紧;number→currency|percent|rating 候选放开;0x08 死守卫;order 位移无测试锁)。
+
+**r32(`e74b9c14a` = r31 + F1c + peer #5297,09-12 09:46 上 222)**:备份 `pre-r32-20260912-094650.dump`;维护门 WIRED → 后端直连 attempt 7 → 删 flag → 200;upgrade exit 0;web smoke PASS;F1c 标记 6/6 True;事后错误 0 行。F8A(+F9b)进 r33。
+
 **F9b(新派,opus + 两路反驳)**:规则侧 `send_notification` 落库到通知中心——根因是全仓没有 `automation.notification` 的监听者,按钮路径已持久化而规则路径 eventBus-only;复用同一 seam `insertRecordSubscriptionNotifications`,成员校验与按钮同量,先写后 emit,模拟不写,表缺失不吞,规则侧不借用按钮的 dedup 表(重复投递语义如实写)。规格 `spec-F9b-rule-notification-persist.md`。
 
 ~~**r31 已备好未 build**~~(已上机,见上):wrapper 加 #5651(`EXTERNAL_SYSTEM_SCOPE_MISMATCH` 字面量计数 ≥ 4)/#5654(upgrade-inplace 含 `MaintenanceFlagPath` + `Assert-MaintenanceFlagOutsideReplaceDirs`;事后 flag 不存在)标记,纯 ASCII、0 控制字符;ship 改为上传 `origin/main` 的 `multitable-onprem-package-upgrade-inplace.ps1`(加 BOM;1382 个非 ASCII 字节)替代 tools-r22 旧本;两份脚本本机 Windows PowerShell 5.1 `Parser::ParseFile` 0 错。基线等 F1c/F8A 裁决后定(合入则 main + 两支,否则 `72caae8de`);夜里上机,**不举 flag**(脚本自己举)。
@@ -177,7 +183,7 @@ nginx 三天日志:502/reset 只在四个升级窗口成簇,窗口外一条都�
 
 - **#5625** 仍等用户回 1/2/3。
 - **演示项目重置**:等 F1c 上机。
-- **F1c**:终审 FIX_FIRST → fix r3 在跑(见 §2.4);**F8A**:终审在跑。两支合入前不打 r31(最迟 02:00 以 main 现状上机)。
+- **F8A**:#5660 真库 lane 用例前提修正后重跑 CI → 合入 → r33;**F9b**:工作流在飞。
 - **`multitable-context.api.test.ts:1193` 0x08 守卫失效**:等 F8A 合入后单独小 PR。
 - **规则侧通知落库到通知中心**:F9 登记的独立项。
 - **自动化 `MetaAutomationRuleEditor.vue` 4780 行大文件**:任何同期改动要与 #5641 串行。
