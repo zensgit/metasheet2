@@ -24,6 +24,38 @@ const RULE_ID = `atr_jobs_${TS}`
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const jobs = new AutomationJobService()
 
+/**
+ * F9b: a rule-side `send_notification` hard-rejects recipients that are not sheet members (the SAME
+ * `loadSheetMemberUserIdSet` resolver the button route uses) BEFORE its durable notification write, and
+ * an unresolvable roster is the EMPTY set (fail-closed). These A6-3-4 scenarios drive the executor with
+ * a STUB queryFn (no real rows needed for the job plane), so the stub has to answer the two roster reads
+ * — otherwise the branch notify steps would fail-close for fixture reasons rather than product reasons.
+ */
+function stubQueryFnWithMembers(memberIds: string[]) {
+  return (async (sql: string) => {
+    if (typeof sql === 'string' && /WITH user_candidates AS/i.test(sql)) {
+      return {
+        rows: memberIds.map((id) => ({
+          subject_type: 'user',
+          subject_id: id,
+          user_name: id,
+          user_email: `${id}@members.test`,
+          user_is_active: true,
+          permission_codes: ['multitable:read'],
+        })),
+        rowCount: memberIds.length,
+      }
+    }
+    if (typeof sql === 'string' && /FROM user_permissions up/i.test(sql)) {
+      return {
+        rows: memberIds.map((id) => ({ user_id: id, permission_code: 'multitable:read' })),
+        rowCount: memberIds.length,
+      }
+    }
+    return { rows: [], rowCount: 0 }
+  })
+}
+
 describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
   beforeAll(async () => {
     await q('DELETE FROM multitable_automation_jobs WHERE execution_id = $1', [EXEC_ID])
@@ -323,7 +355,7 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
     const svc = new AutomationService(
       bus,
       db as never,
-      (async () => ({ rows: [], rowCount: 0 })) as never,
+      stubQueryFnWithMembers(['u1']) as never,
     )
     const subscription = bus.subscribe('automation.notification', (payload) => {
       notifications.push(payload)
@@ -470,7 +502,7 @@ describeIfDatabase('multitable automation jobs (A6-1, real DB)', () => {
     const svc = new AutomationService(
       bus,
       db as never,
-      (async () => ({ rows: [], rowCount: 0 })) as never,
+      stubQueryFnWithMembers(['u2']) as never,
     )
     const subscription = bus.subscribe('automation.notification', (payload) => {
       notifications.push(payload)

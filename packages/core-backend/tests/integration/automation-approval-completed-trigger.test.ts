@@ -110,6 +110,9 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
       )
     }
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`, [CREATOR])
+    // F9b: the notify oracle's recipient must be a sheet member (loadSheetMemberUserIdSet) or the
+    // send_notification step fail-closes before its durable write — and the oracle would go silent.
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'multitable:read') ON CONFLICT DO NOTHING`, [CREATOR])
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:write') ON CONFLICT DO NOTHING`, [REQUESTER])
     // Lock-11 §10 arm (a) fixture delta: REQUESTER needs exactly one active
     // user_orgs membership or the real createApproval/startApproval call below 422s
@@ -147,6 +150,8 @@ describeIfDatabase('T1-3 approval.completed automation trigger (real DB)', () =>
     for (const tid of allTemplateIds) {
       await q('DELETE FROM approval_templates WHERE id = $1', [tid]).catch(() => {})
     }
+    // F9b: the rule path now writes durable notification rows for this sheet — clean them up too.
+    await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
     await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER, OUTSIDER]]).catch(() => {})

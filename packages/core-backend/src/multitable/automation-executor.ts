@@ -54,8 +54,11 @@ import type { FwbGateChecks } from './approval-fwb-permission-gates'
 import {
   ensureRecordWriteAllowed,
   loadRecordPermissionScopeMap,
+  loadSheetMemberUserIdSet,
   loadSheetPermissionScopeMap,
 } from './permission-service'
+// F9b: the ONE durable notification-write seam (shared with routes/multitable-button.ts).
+import { insertRecordSubscriptionNotifications } from './record-subscription-service'
 import {
   lockRecordLinkMultiTargetAuthorityPhasedOnQuery,
   resolveSheetCapabilitiesForUserOnQuery,
@@ -818,6 +821,24 @@ export type AutomationDispatchMode = 'live' | 'simulate'
  * banner. The NO_RECIPIENTS token keeps it greppable/machine-matchable across both surfaces.
  */
 export const AUTOMATION_NO_RECIPIENTS_ERROR = '该规则未配置通知接收人，请在编辑器中补充（NO_RECIPIENTS）'
+
+/**
+ * F9b: a rule-side send_notification whose recipients are not ALL sheet members fails the WHOLE step —
+ * the same hard line the button route draws with RECIPIENT_NOT_AUTHORIZED, so one recipient policy
+ * governs both surfaces. Never a partial delivery, never a durable row, never an emit. Values-free on
+ * purpose (a count, never the ids) because the manager renders step.error verbatim.
+ */
+export const AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR =
+  '通知接收人不在该表可选成员范围内，请在编辑器中改选（RECIPIENT_NOT_AUTHORIZED）'
+
+/**
+ * F9b fail-closed sink: every PRODUCTION AutomationExecutor construction injects `deps.queryFn`
+ * (multitable/automation-service.ts:1069 and both routes/multitable-button.ts constructions), so a
+ * missing sink is a wiring bug — the step fails instead of silently degrading back to the
+ * eventBus-only phantom notification this slice exists to close.
+ */
+export const AUTOMATION_NOTIFICATION_SINK_UNAVAILABLE_ERROR =
+  '通知无法落库：notification sink unavailable（NOTIFICATION_SINK_UNAVAILABLE）'
 
 function simulationDisposition(actionType: AutomationActionType): 'execute' | 'simulate' {
   switch (actionType) {
@@ -4321,31 +4342,84 @@ export class AutomationExecutor {
       return { actionType: 'send_notification', status: 'failed', error: 'Notification message is required' }
     }
 
+    // F9b: normalize ONCE (trim + dedupe, the button route's exact recipient shaping) so the
+    // membership check, the durable rows and the emitted payload all speak about the SAME list.
+    const recipients = Array.from(new Set(
+      (Array.isArray(userIds) ? userIds : [])
+        .filter((entry): entry is string => typeof entry === 'string')
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ))
+    if (recipients.length === 0) {
+      return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR }
+    }
+
+    // F9b §4 FAIL-CLOSED SINK — no queryFn ⇒ no durable notification is possible. Do NOT fall back to
+    // an eventBus-only "delivery": that is exactly the phantom (test ran green, notification centre
+    // empty) this slice closes.
+    const queryFn = this.deps.queryFn
+    if (typeof queryFn !== 'function') {
+      return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NOTIFICATION_SINK_UNAVAILABLE_ERROR }
+    }
+
     try {
-      // Emit notification event — CollabService or other handler picks this up.
-      //
-      // B1-S1 D0-A SCOPE NOTE: the DURABLE notification write does NOT live here. A
-      // button's durable Notification-Center delivery is a route-level dedicated
-      // side-effect transaction (see routes/multitable-button.ts) so it composes
-      // with the run's dedup + audit as one all-or-nothing unit. The automation-RULE
-      // path stays eventBus-only here — adding durable writes / member-filter / dedup
-      // to the shared executor would expand automation's behavior surface, which is
-      // out of scope for a button slice.
+      // F9b §1 RECIPIENT HARD-REJECT (no write). Same resolver, same set as the button route
+      // (`loadSheetMemberUserIdSet`) — one member口径 for both surfaces, no drift. ANY non-member
+      // fails the WHOLE step: no partial delivery, no durable row, no emit. An unresolvable member
+      // set resolves to the EMPTY set, so this control is fail-closed by construction.
+      const memberSet = await loadSheetMemberUserIdSet(queryFn, context.sheetId)
+      const nonMemberCount = recipients.filter((userId) => !memberSet.has(userId)).length
+      if (nonMemberCount > 0) {
+        logger.warn('[automation.send_notification] recipients rejected: not sheet members', {
+          sheetId: context.sheetId,
+          ruleId: context.ruleId,
+          requested: recipients.length,
+          nonMembers: nonMemberCount, // counts only — never the ids, never the message
+        })
+        return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR }
+      }
+
+      // F9b §2 DURABLE WRITE FIRST — one `notification.sent` row per recipient through the SAME seam
+      // the button route uses (no parallel INSERT, no new table, no dedup ledger borrowed from the
+      // button). A missing table or a failing INSERT is NEVER swallowed (no isUndefinedTableError
+      // "0 rows = success" here): it throws into the catch below and the step fails, so a
+      // `status:'success'` always implies durable rows.
+      await insertRecordSubscriptionNotifications(queryFn, {
+        userIds: recipients,
+        sheetId: context.sheetId,
+        recordId: context.recordId,
+        eventType: 'notification.sent',
+        message,
+        actorId: context.actorId ?? null,
+      })
+    } catch (err) {
+      return {
+        actionType: 'send_notification',
+        status: 'failed',
+        error: `send_notification durable write failed: ${err instanceof Error ? err.message : String(err)}`,
+      }
+    }
+
+    try {
+      // F9b §2 EMIT AFTER THE WRITE — the legacy realtime event still fires for any in-memory
+      // subscriber, but it can no longer announce a notification that was never persisted.
       this.deps.eventBus.emit('automation.notification', {
-        userIds,
+        userIds: recipients,
         message,
         sheetId: context.sheetId,
         recordId: context.recordId,
         actorId: context.actorId,
       })
-
-      return {
-        actionType: 'send_notification',
-        status: 'success',
-        output: { notifiedUsers: userIds.length },
-      }
     } catch (err) {
+      // Pre-F9b behaviour for a throwing subscriber is kept (step fails). The durable rows are
+      // already committed at this point — stated plainly rather than papered over.
       return { actionType: 'send_notification', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+
+    return {
+      actionType: 'send_notification',
+      status: 'success',
+      output: { notifiedUsers: recipients.length, persisted: recipients.length },
     }
   }
 

@@ -35,6 +35,11 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const SHEET = `sheet_blw_${TS}`
 const BASE = `base_blw_${TS}`
+// F9b: a rule-side send_notification hard-rejects recipients that are not sheet members (the SAME
+// loadSheetMemberUserIdSet口径 the button route uses) BEFORE its durable write, so this branch's notify
+// step needs a REAL, active, multitable-eligible recipient. Scoped to this run's TS so the fixture can
+// never collide with (or delete) another suite's user.
+const NOTIFY_USER = `u_blw_notify_${TS}`
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const jobsRead = new AutomationJobService()
 const execIds: string[] = []
@@ -66,7 +71,7 @@ const HIGH_BRANCH_HAPPY = {
   label: 'High',
   conditions: { logic: 'and', conditions: [{ fieldId: 'amount', operator: 'greater_than', value: 100000 }] },
   actions: [
-    { type: 'send_notification', config: { userIds: ['owner-1'], message: 'High amount needs review' } },
+    { type: 'send_notification', config: { userIds: [NOTIFY_USER], message: 'High amount needs review' } },
     { type: 'wait_for_callback', config: {} },
     { type: 'update_record', config: { fields: { status: 'approved_after_review' } } },
   ],
@@ -88,7 +93,7 @@ const HIGH_BRANCH_FAIL = {
   label: 'High',
   conditions: { logic: 'and', conditions: [{ fieldId: 'amount', operator: 'greater_than', value: 100000 }] },
   actions: [
-    { type: 'send_notification', config: { userIds: ['owner-1'], message: 'review' } },
+    { type: 'send_notification', config: { userIds: [NOTIFY_USER], message: 'review' } },
     { type: 'wait_for_callback', config: {} },
     { type: 'send_webhook', config: { url: 'https://example.test/fail' } },
     { type: 'update_record', config: { fields: { status: 'should_not_run' } } },
@@ -181,6 +186,17 @@ describeIfDatabase('multitable automation branch-local wait (A6-3-3a, real DB)',
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING', [SHEET, BASE, 'BLW Sheet'])
     await q('DELETE FROM multitable_automation_jobs WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM multitable_automation_suspensions WHERE sheet_id = $1', [SHEET])
+    // F9b recipient fixture: an active user with multitable eligibility = a member for the notify step.
+    await q(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, FALSE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+      [NOTIFY_USER, `${NOTIFY_USER}@blw.test`],
+    )
+    await q(
+      `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'multitable:read') ON CONFLICT DO NOTHING`,
+      [NOTIFY_USER],
+    )
   })
   afterAll(async () => {
     for (const id of execIds) {
@@ -190,8 +206,11 @@ describeIfDatabase('multitable automation branch-local wait (A6-3-3a, real DB)',
     await q('DELETE FROM multitable_automation_jobs WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM automation_rules WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET])
+    await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = $1', [NOTIFY_USER]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [NOTIFY_USER]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => {
