@@ -132,7 +132,7 @@ const MAX_AUTOMATION_DEPTH = 3
  * `throw new AutomationRuleValidationError(msg)` keeps its exact wire shape; the three recipient
  * codes exist so the editor (and any API client) can tell "your rule config is malformed" apart from
  * "this person may not be notified" / "the roster could not be read". The route already answers 400
- * with `error.code = err.code` for this class (routes/univer-meta.ts:19248/:19302), so no new error
+ * with `error.code = err.code` for this class (routes/univer-meta.ts:19248 POST / :19299 PATCH), so no new error
  * shape and no new route branch is introduced.
  */
 export type AutomationRuleValidationCode =
@@ -885,11 +885,13 @@ export function automationSaveRecipientNotAuthorizedMessage(rejected: string[]):
  * (`collectNestedAutomationActions`), i.e. top-level `actions[*]` plus `config.branches[*].actions[*]`
  * and `config.defaultBranch.actions[*]`. SCOPE OF THAT CLAIM: one branch level is all a SAVEABLE rule
  * can have — `validateConditionBranchConfig` refuses a branch that nests another branch — so for every
- * rule that can reach this line the flattened list and the deeper walk in
- * `automation-rule-fingerprint.ts:55 enumerateRuleActions` enumerate the same actions. A hand-written
- * deeper row is not reachable either: the same branch validators run before this gate on EVERY update.
- * The legacy single-action pair is
- * checked too, exactly like validateSendEmailActionConfigs does, and it arrives here ALREADY folded
+ * rule that can reach this line the flattened list is a SUPERSET of the deeper walk in
+ * `automation-rule-fingerprint.ts:55 enumerateRuleActions` (that walk reads `actions` only, while the
+ * caller additionally hands this function the top-level legacy pair) — superset is the fail-closed
+ * direction: the save gate may refuse a config the executor would have dropped, never the reverse.
+ * A hand-written deeper row is not reachable either: the same branch validators run before this gate
+ * on EVERY update. The legacy single-action pair is checked too, exactly like
+ * validateSendEmailActionConfigs does, and it arrives here ALREADY folded
  * through `normalizeLegacyActionPair`, so a v0 `notify` is enumerated as the `send_notification` it
  * becomes (no second alias table here).
  *
@@ -2179,7 +2181,7 @@ export class AutomationService {
    * F9c SAVE-BOUNDARY recipient gate — throws AutomationRuleValidationError (→ 400 + code) or returns.
    *
    * SAME FUNCTION, SAME SET as the execution path, by construction and not by description:
-   *   - shaping  : `normalizeNotificationRecipients` (automation-executor.ts:867, exported for this)
+   *   - shaping  : `normalizeNotificationRecipients` (automation-executor.ts:872, exported for this)
    *   - roster   : `loadSheetMemberUserIdSet(queryFn, sheetId)` (permission-service.ts:611) — the same
    *                call `AutomationExecutor.checkNotificationRecipients` and the button route
    *                (routes/multitable-button.ts:243) make. The executor passes `context.sheetId` (the

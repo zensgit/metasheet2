@@ -530,24 +530,46 @@ describe('F9c — collectNotificationRecipientGroupsAtSave', () => {
  * `rejected.length`, a `userIds`, a `join()` — reds here, and a refusal that stops logging altogether
  * reds here too.
  *
- * The seam is `Logger.prototype.warn`: the spy captures the RAW meta the service hands over, BEFORE
- * the winston formatter, which is exactly where the service decides what to disclose.
+ * The seam is `Logger.prototype` — ALL FOUR levels, not only the one the gate happens to use today.
+ * A spy on `warn` alone would have let a later `logger.info('…', { rejected })` or
+ * `logger.error('…', new Error(rejected.join()))` inside this same gate leak every rejected id while
+ * this suite stayed green; both escapes were reproduced as in-memory mutations, and widening the spy is
+ * what makes them red. The spies capture the RAW arguments the service hands over, BEFORE the winston
+ * formatter — exactly where the service decides what to disclose.
  */
 describe('F9c — save-gate logs are values-free (ids to the author, counts to the log)', () => {
   const AUTHOR = 'u_author'
   const KEEP = 'u_keep'
   const GHOST = 'u_ghost'
   let warn: ReturnType<typeof vi.spyOn>
+  let logSpies: ReturnType<typeof vi.spyOn>[]
 
   beforeEach(() => {
     warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {})
+    logSpies = [
+      vi.spyOn(Logger.prototype, 'debug').mockImplementation(() => {}),
+      vi.spyOn(Logger.prototype, 'info').mockImplementation(() => {}),
+      warn,
+      vi.spyOn(Logger.prototype, 'error').mockImplementation(() => {}),
+    ]
   })
   afterEach(() => {
-    warn.mockRestore()
+    for (const spy of logSpies) spy.mockRestore()
   })
 
-  /** Everything the service handed to ANY logger during the save, serialized. */
-  const logged = (): string => JSON.stringify(warn.mock.calls)
+  /**
+   * Everything the service handed to ANY logger level during the save, serialized.
+   *
+   * Errors are UNWRAPPED on the way out: `Logger.error(message, error)` and `Logger.warn(message, error)`
+   * both funnel `error.message` + `error.stack` into the emitted meta (src/core/logger.ts:104-115), so an
+   * id smuggled inside an Error really does reach the log — but a plain `JSON.stringify` of an Error
+   * yields `{}` and would hide it. The replacer below is what keeps that escape red.
+   */
+  const logged = (): string =>
+    JSON.stringify(
+      logSpies.map((spy) => spy.mock.calls),
+      (_key, value) => (value instanceof Error ? { message: value.message, stack: value.stack } : value),
+    )
   const metaFor = (message: string): unknown => warn.mock.calls.find(([msg]) => msg === message)?.[1]
 
   function notifyCreate(config: Record<string, unknown>) {
