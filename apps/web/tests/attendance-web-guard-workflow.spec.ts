@@ -117,7 +117,20 @@ describe('attendance web guard workflow contract', () => {
     expect(workflow).toContain(' attendance-web-guard-workflow.spec --reporter=dot')
     expect(workflow).toContain("if: steps.changes.outputs.relevant == 'true'")
     expect(targetedStep).toContain('NODE_OPTIONS: --max-old-space-size=8192')
-    expect(workflow.match(/NODE_OPTIONS: --max-old-space-size=8192/g)).toHaveLength(1)
+    // The heap bump must sit on the vitest steps that need it and nowhere else. A bare
+    // count guard could not tell "moved to the right new step" from "leaked onto an
+    // unrelated one", so pin the OWNING STEP NAMES parsed out of the YAML instead.
+    const heapDoc = loadYaml(workflow) as {
+      jobs: Record<string, { steps: Array<{ name?: string; env?: Record<string, string> }> }>
+    }
+    const heapSteps = Object.values(heapDoc.jobs)
+      .flatMap(job => job.steps)
+      .filter(step => (step?.env?.NODE_OPTIONS ?? '').includes('--max-old-space-size=8192'))
+      .map(step => step?.name)
+    expect(heapSteps).toEqual([
+      'Run the oversized attendance admin regression spec in isolation',
+      'Run attendance web guard specs (targeted)',
+    ])
     // Bound concurrent AttendanceView transforms without removing any regression specs.
     const args = targetedRunCommand(workflow).trim().split(/\s+/)
     expect(args).toContain('--maxWorkers=2')
