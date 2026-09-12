@@ -1328,6 +1328,7 @@ async function main() {
   await testTargetScopedApiForwardsTheHostMetadataCacheCapability()
   await testTargetScopedApiForwardsTheHostFilterValueListDeclaration()
   testRevisionCarriesTheRowErrorOverflowFacts()
+  testATruncatedRowErrorSampleLeavesTheHash()
   testHardApplyBlockingRowErrorsSurviveTheCap()
   testRowErrorLimitIsAConditionalActionConfigKey()
   testExtensionFieldIdsEnforceNamespaceShapeAndPackMembershipIsOneLayerOut()
@@ -1340,6 +1341,7 @@ async function main() {
   await testDryRunRevisionStillMovesWhenAnyRowValueMoves()
   await testApplyAcceptsATokenWhenBothRecomputedReadsCameBackReshuffled()
   await testDryRunRevisionIsBlindToTheOrderInsideADuplicateKeyGroup()
+  await testDryRunRevisionIsBlindToTheOrderOfSeveralDuplicateGroups()
   await testDryRunRevisionIsBlindToRowErrorOrder()
   await testTheCanonicalHashOrderNeverReordersWhatGetsWritten()
 
@@ -1452,6 +1454,10 @@ function testRevisionCarriesTheRowErrorOverflowFacts() {
   // deleting `rowErrorsTotal` or `rowErrorsTruncated` from the projection left both suites green.
   // The day someone adds a rowError with no type, total and typeCounts decouple, and this is the
   // assertion that will be standing there.
+  //
+  // X4-b changed ONE thing here: the truncated projection no longer carries `rowErrors`. Past the
+  // cap the retained sample is a subset chosen by read order, so hashing it produced a 409 on an
+  // applyable batch (see testATruncatedRowErrorSampleLeavesTheHash). The overflow facts stay.
   const truncatedProjection = {
     actionId: ROW_ERROR_REVISION_ACTION.actionId,
     parameters: { projectNo: 'P-001' },
@@ -1465,7 +1471,6 @@ function testRevisionCarriesTheRowErrorOverflowFacts() {
       status: smaller.status,
       rows: smaller.rows,
       errors: smaller.errors,
-      rowErrors: smaller.rowErrors,
       rowErrorsTruncated: true,
       rowErrorsTotal: 5001,
       rowErrorTypeCounts: { missing_component_source_id: 5001 },
@@ -1477,7 +1482,15 @@ function testRevisionCarriesTheRowErrorOverflowFacts() {
   assert.equal(
     revisionFor(smaller),
     tableActionInternals.hashJson(truncatedProjection),
-    'a truncated expansion hashes EXACTLY these three overflow keys and no fourth',
+    'a truncated expansion hashes EXACTLY these three overflow keys, no fourth — and not the sample',
+  )
+  assert.notEqual(
+    revisionFor(smaller),
+    tableActionInternals.hashJson({
+      ...truncatedProjection,
+      expansion: { ...truncatedProjection.expansion, rowErrors: smaller.rowErrors },
+    }),
+    'the retained sample is genuinely OUT of the truncated projection (adding it back moves the hash)',
   )
   for (const key of ['rowErrorsTruncated', 'rowErrorsTotal', 'rowErrorTypeCounts']) {
     const without = clone(truncatedProjection)
@@ -1488,6 +1501,61 @@ function testRevisionCarriesTheRowErrorOverflowFacts() {
       `${key} is load-bearing in the revision — dropping it must move the hash`,
     )
   }
+}
+
+// X4-b. THE SECOND REACHABLE 409, and the one a sort cannot remove: past the cap the rowError array
+// is not a permutation of a fixed set, it is a SUBSET picked by production order ("keeps the FIRST
+// rowErrorLimit entries", stock-preparation-bom-expansion.cjs), so a reshuffled read RETAINS
+// DIFFERENT ENTRIES. Such a batch is still applyable — only `missing_child_bom` is hard blocking —
+// so it minted a token and then 409'd on the recompute. Nothing bounded by read order may be hashed:
+// the sample leaves, the order-free overflow facts stay.
+//
+// The cap is deploy-reachable, which is what makes this a live path rather than a thought
+// experiment: `rowErrorLimit` is an action-config key (testRowErrorLimitIsAConditionalActionConfigKey).
+function testATruncatedRowErrorSampleLeavesTheHash() {
+  const truncation = {
+    rowErrorsTotal: 9001,
+    rowErrorsRetained: 2,
+    rowErrorsTruncated: true,
+    rowErrorTypeCounts: { missing_component: 9001 },
+  }
+  // Same type and same totals — a cap that landed on two different pairs of the SAME failure class.
+  const retainedHere = [
+    { type: 'missing_component', field: 'part_id', depth: 1 },
+    { type: 'missing_component', field: 'part_id', depth: 2 },
+  ]
+  const retainedThere = [
+    { type: 'missing_component', field: 'part_id', depth: 5 },
+    { type: 'missing_component', field: 'part_id', depth: 8 },
+  ]
+  assert.notEqual(
+    tableActionInternals.hashJson(retainedHere),
+    tableActionInternals.hashJson(retainedThere),
+    'the two samples really are different subsets — otherwise this test proves nothing',
+  )
+
+  const here = { status: 'failed', rows: [], errors: [], rowErrors: retainedHere, summary: { status: 'failed', ...truncation } }
+  const there = { status: 'failed', rows: [], errors: [], rowErrors: retainedThere, summary: { status: 'failed', ...truncation } }
+  assert.equal(
+    revisionFor(here),
+    revisionFor(there),
+    'which entries survived the cap cannot move the revision — the batch is the same batch',
+  )
+
+  // …and the bound in the other direction, twice over, so "stop hashing the sample" cannot quietly
+  // become "stop hashing row errors".
+  const differentTotals = clone(there)
+  differentTotals.summary.rowErrorsTotal = 9002
+  differentTotals.summary.rowErrorTypeCounts = { missing_component: 9002 }
+  assert.notEqual(revisionFor(here), revisionFor(differentTotals), 'the overflow totals still separate two batches')
+
+  const underCapHere = { status: 'failed', rows: [], errors: [], rowErrors: retainedHere, summary: { status: 'failed' } }
+  const underCapThere = { status: 'failed', rows: [], errors: [], rowErrors: retainedThere, summary: { status: 'failed' } }
+  assert.notEqual(
+    revisionFor(underCapHere),
+    revisionFor(underCapThere),
+    'UNDER the cap the sample is the whole set and its content is hashed exactly as before',
+  )
 }
 
 // FAIL-CLOSED. The hard apply-blocking check used to read the array; past the cap the array can
@@ -2207,9 +2275,9 @@ async function testApplyAcceptsATokenWhenBothRecomputedReadsCameBackReshuffled()
 // identity alone leaves them TIED. A tied sort keeps INPUT order, i.e. exactly the nondeterminism
 // X4 removes, so the canonical order breaks ties on the row's own content.
 //
-// SCOPE, stated: one duplicate GROUP. With several groups the planner's own diagnostics arrays
-// (duplicateExpandedKeyResolution.heldPolicies / conflictPolicyReview) are themselves built in
-// expansion order, and those are outside buildRevision's three arrays and outside this change.
+// SCOPE, stated: one duplicate GROUP, i.e. the tie-breaker INSIDE a group. Several groups reorder
+// the planner's own diagnostics arrays as well, which is a different seam with its own case —
+// testDryRunRevisionIsBlindToTheOrderOfSeveralDuplicateGroups.
 async function testDryRunRevisionIsBlindToTheOrderInsideADuplicateKeyGroup() {
   const forward = await x4DryRun({
     plmData: duplicateRootPlmData(),
@@ -2227,6 +2295,158 @@ async function testDryRunRevisionIsBlindToTheOrderInsideADuplicateKeyGroup() {
     forward.revision,
     'two rows sharing one idempotencyKey hash to ONE revision whichever came back first',
   )
+}
+
+// R-e2 (X4-c). SEVERAL duplicate groups — the seam the three-array fix did NOT reach. The review's
+// `selectedPolicies` is `groups.map(...)` over the duplicate diagnostics and the planner's
+// `resolvedPolicies` / `heldPolicies` are pushed as it walks the same map, so both arrays inherit
+// the expansion order and both are hashed whole. Two groups, two source orders, and the revision
+// moved — on a batch that is `ready`, needs no operator action, and 409'd on apply.
+//
+// BOTH shapes are asserted because they are reached differently: HELD needs nothing but the
+// duplicate (`manual_confirm_required`, still applyable with acceptManualConfirmHold), RESOLVED is
+// the plain `ready` batch a saved table-scope keep_multiple_rows policy produces.
+function twoDuplicateGroupsPlmData(overrides = {}) {
+  return basePlmData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: '10' },
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '3', sort_id: '20' },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: '4', sort_id: '30' },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: '5', sort_id: '40' },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+    ...overrides,
+  })
+}
+
+async function keepMultipleRowsPolicyStoreForBothGroups() {
+  const storage = createMemoryStorage()
+  await saveTableScopeConflictPolicies({
+    action: normalizeStockPreparationActionConfig(baseAction()),
+    policyStore: storage,
+    approver: 'admin-user',
+    request: {
+      conflictType: 'duplicate_expanded_key',
+      policies: [
+        { fingerprint: rootPartFingerprint('P-001', 'PART-A'), policy: 'keep_multiple_rows' },
+        { fingerprint: rootPartFingerprint('P-001', 'PART-B'), policy: 'keep_multiple_rows' },
+      ],
+    },
+  })
+  return storage
+}
+
+async function twoGroupDryRun({ plmData, policyStore, tokenStore, recordsApi }) {
+  return dryRunStockPreparationAction({
+    action: baseAction(),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(plmData).adapter,
+    recordsApi,
+    tokenStore: tokenStore || createMemoryStorage(),
+    policyStore,
+    plannedAt: X4_PLANNED_AT,
+  })
+}
+
+async function testDryRunRevisionIsBlindToTheOrderOfSeveralDuplicateGroups() {
+  // (1) HELD: two groups, no policy at all. Applyable (acceptManualConfirmHold), so a moving
+  // revision is a 409 an operator can actually hit.
+  const heldForward = await twoGroupDryRun({
+    plmData: twoDuplicateGroupsPlmData(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  const heldReshuffled = await twoGroupDryRun({
+    plmData: reshuffledPlmData(twoDuplicateGroupsPlmData()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  assert.equal(heldForward.status, 'manual_confirm_required')
+  assert.equal(heldForward.canApply, true, 'a held duplicate batch still mints a token')
+  assert.equal(
+    heldForward.evidence.plan.duplicateExpandedKeyResolution.heldGroupCount,
+    2,
+    'the fixture really does produce TWO held groups (one group would not exercise this)',
+  )
+  assert.deepEqual(heldReshuffled.counts, heldForward.counts)
+  assert.equal(
+    heldReshuffled.revision,
+    heldForward.revision,
+    'two HELD duplicate groups hash to ONE revision in either source order',
+  )
+
+  // (2) RESOLVED: the same two groups with a saved table-scope keep_multiple_rows policy. Plain
+  // `ready`, nothing for an operator to accept — and this is the shape that 409'd before X4-c.
+  const resolvedForward = await twoGroupDryRun({
+    plmData: twoDuplicateGroupsPlmData(),
+    policyStore: await keepMultipleRowsPolicyStoreForBothGroups(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  const resolvedReshuffled = await twoGroupDryRun({
+    plmData: reshuffledPlmData(twoDuplicateGroupsPlmData()),
+    policyStore: await keepMultipleRowsPolicyStoreForBothGroups(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  assert.equal(resolvedForward.status, 'ready')
+  assert.equal(resolvedForward.counts.add, 4)
+  assert.equal(
+    resolvedForward.evidence.plan.duplicateExpandedKeyResolution.resolvedGroupCount,
+    2,
+    'both groups are auto-resolved — no operator action is involved in this path',
+  )
+  assert.deepEqual(resolvedReshuffled.counts, resolvedForward.counts)
+  assert.equal(
+    resolvedReshuffled.revision,
+    resolvedForward.revision,
+    'two RESOLVED duplicate groups hash to ONE revision in either source order',
+  )
+
+  // …and the permutation is real: the two orders put the groups' fingerprints on the wire in
+  // opposite order, which is exactly what used to reach the hash.
+  const forwardFingerprints = resolvedForward.evidence.plan.duplicateExpandedKeyResolution
+    .resolvedPolicies.map((row) => row.fingerprint)
+  const reshuffledFingerprints = resolvedReshuffled.evidence.plan.duplicateExpandedKeyResolution
+    .resolvedPolicies.map((row) => row.fingerprint)
+  assert.notDeepEqual(
+    forwardFingerprints,
+    reshuffledFingerprints,
+    'the planner summary the CALLER sees keeps its expansion order — only the hash copy is sorted',
+  )
+  assert.deepEqual(
+    forwardFingerprints.slice().sort(),
+    reshuffledFingerprints.slice().sort(),
+    '…and it is the same two groups either way',
+  )
+
+  // (3) END TO END, the 222 failure on this shape: dry-run on order A, apply re-expands in order B.
+  const storage = await keepMultipleRowsPolicyStoreForBothGroups()
+  const records = createRecordsApi()
+  const action = baseAction()
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(twoDuplicateGroupsPlmData()).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'ready')
+  const result = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(reshuffledPlmData(twoDuplicateGroupsPlmData())).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    permission: 'write',
+    acceptDuplicateResolution: true,
+  })
+  assert.equal(result.status, 'succeeded', 'a reshuffled recompute of a two-group batch applies instead of 409ing')
+  assert.equal(Number(result.apply.counts.created || 0), 4)
 }
 
 // R-f. The third hashed array. `rowErrors` is a BOUNDED SAMPLE taken in production order, so two

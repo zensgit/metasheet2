@@ -1077,12 +1077,19 @@ function emptyPlan() {
   }
 }
 
+// The expansion's OWN verdict on whether it dropped rowErrors. Read in two places that must never
+// disagree: the overflow facts below, and the decision to stop hashing the sample at all (X4-b).
+function rowErrorsWereTruncated(expansion = {}) {
+  const summary = isPlainObject(expansion.summary) ? expansion.summary : {}
+  return summary.rowErrorsTruncated === true
+}
+
 // The D-C overflow facts, read off the expansion's OWN summary (the expander is the only thing in a
 // position to count what it dropped) and reduced to the three that change what will be written.
 // `{}` — and therefore no key at all — for every expansion under the cap.
 function rowErrorTruncationRevisionKeys(expansion = {}) {
   const summary = isPlainObject(expansion.summary) ? expansion.summary : {}
-  if (summary.rowErrorsTruncated !== true) return {}
+  if (!rowErrorsWereTruncated(expansion)) return {}
   return {
     rowErrorsTruncated: true,
     rowErrorsTotal: Number(summary.rowErrorsTotal || 0),
@@ -1100,8 +1107,9 @@ function rowErrorTruncationRevisionKeys(expansion = {}) {
 //
 // THE CAUSE. `stableStringify` sorts object KEYS and leaves ARRAY ORDER alone, by design — array
 // order is data. But `expansion.rows` comes off an MSSQL read plus a tree walk (siblings sharing a
-// sort number have no total order) and `existingRows` comes off a paged records read, so the two
-// arrays are the SAME SET in an incidental order. Apply re-expands and re-reads before comparing
+// sort number have no total order) and `existingRows` comes off a paged records read, so THOSE TWO
+// arrays are the same set in an incidental order (`expansion.rowErrors` is too — but only while it
+// is under the cap; see X4-b). Apply re-expands and re-reads before comparing
 // its recomputed revision to the token (see applyStockPreparationAction), so one reshuffle between
 // the two reads is indistinguishable from "the data moved under review".
 //
@@ -1116,7 +1124,19 @@ function rowErrorTruncationRevisionKeys(expansion = {}) {
 //     in the table-action tests ('buildRevision hashes a COPY') instead of being relied upon.
 //  2. ORDER-ONLY. Every row still enters the hash whole. "One field of one row changed => the
 //     revision changes" is the pre-existing promise this must not weaken, so nothing is projected
-//     away, deduped or rounded here — the same multiset is hashed in a canonical order.
+//     away, deduped or rounded here — the same multiset is hashed in a canonical order. The ONE
+//     documented exception is the TRUNCATED rowError sample (X4-b below), where the array is not a
+//     multiset of the batch at all and no ordering could make it one.
+//  3. WHAT IT COVERS, named rather than implied. FIVE arrays reach this hash from an order that a
+//     re-read can permute: `expansion.rows`, `expansion.rowErrors`, `existingRows`, the review's
+//     `selectedPolicies`, and the planner summary's `resolvedPolicies` / `heldPolicies`. All of
+//     them are canonicalised here — except a TRUNCATED `rowErrors`, which leaves the hash instead
+//     (X4-b), and with the residual named there. Everything else in the projection is either a
+//     scalar, an object (stableStringify sorts keys) or an already-sorted set (`conflictTypes` is
+//     `Array.from(new Set(...)).sort()` in the planner). NOT covered, and out of this change's reach: a paged
+//     `existingRows` read spanning >1000 rows can return a different MULTISET (a row seen twice or
+//     missed) if the table moves between pages — that is not a permutation and a sort cannot fix
+//     it; and the large-BOM job revision (`largeBomPlanRevision`) hashes its own projection.
 //
 // THE KEY IS ROW IDENTITY (idempotencyKey / record id), never a refresh-time column: identity is
 // the part that survives a re-read unchanged. Refresh stamps DO stay in the hash as CONTENT — they
@@ -1166,6 +1186,41 @@ function canonicalHashOrder(value, identityOf) {
     .map((entry) => entry.item)
 }
 
+// X4-c: THE PLANNER'S OWN DIAGNOSTIC ARRAYS, which are hashed WHOLE and are themselves built by
+// walking the expansion. `buildConflictPolicyReview` maps over the duplicate diagnostics' groups
+// (stock-preparation-conflict-policies.cjs `groups.map(...)`, groups being keyed off `expansion.rows`)
+// and `resolveDuplicateExpandedRows` pushes one entry per group as it walks the same map
+// (stock-preparation-conflict-planner.cjs `summary.resolvedPolicies.push` / `heldPolicies.push`).
+// So a project with >= 2 duplicate-key GROUPS still reshuffled its revision after the three arrays
+// above were made order-blind — and, crucially, not only in the held case: a group the table-scope
+// policy RESOLVES needs no operator action at all, the batch is plain `ready`, and apply 409'd.
+// Each entry is addressed by its group `fingerprint` (a stable hash of the identity tuple, not a
+// position), so the same hash-local sort applies verbatim.
+function policyRowHashIdentity(row) {
+  if (!isPlainObject(row)) return ''
+  return rowHashIdentityToken(row.fingerprint)
+}
+
+// A COPY of the review with its policy list in canonical order — `{ ...review }` so no key is added
+// or dropped (stableStringify sorts keys, so the spread cannot move a hash on its own), and the
+// review the CALLER holds keeps the order evidence renders it in.
+function canonicalHashOrderConflictPolicyReview(review) {
+  if (!isPlainObject(review) || !Array.isArray(review.selectedPolicies)) return review
+  return { ...review, selectedPolicies: canonicalHashOrder(review.selectedPolicies, policyRowHashIdentity) }
+}
+
+// Same, for the planner's duplicate-resolution summary. Both arrays are CONDITIONAL keys on that
+// summary (`compactDuplicateResolutionSummary` only sets them when non-empty), so they are rewritten
+// in place on the copy rather than defaulted — a summary that never had `heldPolicies` must not
+// grow one, or every stored revision for the resolved-only shape would move.
+function canonicalHashOrderDuplicateResolution(resolution) {
+  if (!isPlainObject(resolution)) return resolution
+  const out = { ...resolution }
+  if (Array.isArray(out.resolvedPolicies)) out.resolvedPolicies = canonicalHashOrder(out.resolvedPolicies, policyRowHashIdentity)
+  if (Array.isArray(out.heldPolicies)) out.heldPolicies = canonicalHashOrder(out.heldPolicies, policyRowHashIdentity)
+  return out
+}
+
 function buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan }) {
   return hashJson({
     actionId: action.actionId,
@@ -1179,14 +1234,41 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
     expansion: {
       status: expansion.status,
       // X4: hashed in canonical row-identity order (see canonicalHashOrder). `errors` is
-      // deliberately NOT sorted — not because its order is proven stable, but because a batch
-      // that carries a GLOBAL error has `canApply: !hasGlobalErrors && ...` false and is refused
-      // by TABLE_ACTION_DRY_RUN_NOT_APPLYABLE whatever its token says, so an unstable order
-      // there cannot produce the failure X4 exists to remove (a 409 on an applyable batch).
+      // deliberately NOT sorted — not because its order is proven stable, but because a batch that
+      // carries a GLOBAL error is `canApply: !hasGlobalErrors && ...` false and therefore never
+      // MINTS a token at all (`if (dryRun.canApply)` in dryRunStockPreparationAction), so an
+      // unstable order there cannot produce the failure X4 exists to remove (a 409 on an applyable
+      // batch). Stated that way on purpose: apply checks the token BEFORE it checks applyability
+      // (TOKEN_MISMATCH at the top of the recompute block, NOT_APPLYABLE right after), so it is the
+      // absent token — not that ordering — that keeps a global-error batch out of this.
       rows: canonicalHashOrder(expansion.rows, expandedRowHashIdentity),
       errors: expansion.errors,
-      // The bounded sample has no row identity to sort on, so its canonical order is its content.
-      rowErrors: canonicalHashOrder(expansion.rowErrors, () => ''),
+      // The bounded sample has no row identity to sort on, so its canonical order is its content —
+      // but ONLY while the sample is the whole set.
+      //
+      // X4-b, THE TRUNCATED CASE. Past the cap the array is a SUBSET chosen by production order
+      // ("keeps the FIRST rowErrorLimit entries", stock-preparation-bom-expansion.cjs), so a
+      // reshuffled read retains DIFFERENT entries, not the same ones in a different order. Sorting
+      // cannot rescue that, and such a batch is still applyable (only `missing_child_bom` is hard
+      // blocking), so it was the second reachable 409. The sample therefore leaves the hash
+      // entirely when it is truncated and the order-free overflow facts below stand in for it:
+      // total, per-type composition and the truncation flag itself, all counted BEFORE the cap.
+      // The trade is stated rather than hidden — past the cap two batches with identical totals and
+      // identical per-type composition but different retained diagnostics now share a revision.
+      // What will be WRITTEN is unaffected: rowErrors are diagnostics, the decisions they produce
+      // are counted in `plan.counts`, and the rows themselves are hashed above.
+      //
+      // AND THE RESIDUAL, measured rather than assumed: when the surviving subset differs in TYPE
+      // the PLAN differs too (`plan.summary.conflictTypes` is derived from the retained entries, one
+      // manual_confirm decision each), so the revision still moves — dropping the sample from the
+      // hash cannot and must not hide that, because the two dry-runs really did preview different
+      // plans. Closing THAT needs deterministic selection at the point of truncation (the expander),
+      // not a different hash recipe here.
+      //
+      // Spread CONDITIONALLY so an UNDER-CAP expansion hashes byte-identically to before X4-b.
+      ...(rowErrorsWereTruncated(expansion)
+        ? {}
+        : { rowErrors: canonicalHashOrder(expansion.rowErrors, () => '') }),
       // D-C. `rowErrors` is now a BOUNDED SAMPLE, so hashing it alone stopped being enough: two
       // projects that overflow the cap with the same first 5000 entries and different totals would
       // hash identically, and one project's dry-run token would then validate against the other's
@@ -1198,13 +1280,17 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
       ...rowErrorTruncationRevisionKeys(expansion),
     },
     existingRows: canonicalHashOrder(existingRows, existingRowHashIdentity),
-    conflictPolicyReview: conflictPolicyReview || null,
+    // X4-c: hash-local copy, fingerprint-ordered (see canonicalHashOrderConflictPolicyReview).
+    conflictPolicyReview: canonicalHashOrderConflictPolicyReview(conflictPolicyReview) || null,
     plan: plan
       ? {
           counts: plan.counts,
           valid: plan.valid === true,
           conflictTypes: plan.summary && plan.summary.conflictTypes,
-          duplicateExpandedKeyResolution: plan.summary && plan.summary.duplicateExpandedKeyResolution,
+          // X4-c: same, for `resolvedPolicies` / `heldPolicies` inside the summary.
+          duplicateExpandedKeyResolution: canonicalHashOrderDuplicateResolution(
+            plan.summary && plan.summary.duplicateExpandedKeyResolution,
+          ),
           // A dry-run token is a promise about WHAT WILL BE WRITTEN, so the pack-aware
           // writable/human bands belong in the revision: if a pack install lands between
           // dry-run and apply, the projected payloads move and the token must stop matching.
