@@ -297,3 +297,52 @@ X02 的第一版（#5628 `c2b482c8b`）修得很像样：三条充要条件、18
 > **SQL Server 源的 `join.on` 改为结构化对象**（#5653）。字符串形式的 ON 一律 400 `SQLSERVER_JOIN_ON_UNSUPPORTED` 且不发 SQL；`join.type` 过白名单。
 
 > **`/api/admin` 下 12 个写端点改为仅管理员**（#5665）。安全确认层的开关（enable/disable）、bulk 写/删、缓存清理、指标/限流重置、DLQ 重试/清理，非 admin 一律 403 `ADMIN_REQUIRED`；管理员流程不变。
+
+---
+
+## 9. 第四个 72h 窗口（2026-09-12 ~19:00 → 09-15 ~19:00）
+
+> 授权原话："接下去72小时我不在电脑前，你能帮我不间断的持续开发么？并根据代码难度来选择模型，完成后给出设计及验证MD"。边界同前三窗口，新增：不碰任何 junction 式 worktree（同伴会话与 Codex 的）、删 worktree 先拆外指链接。选题只取前几轮复核**登记过且不需用户裁决**的缺口；安全项过对抗复核（一次一个）；模型按难度：守卫/身份/适配器 → opus，盘点/文档 → sonnet。本节随窗口推进增量更新。
+
+### 9.1 交付一览（首日）
+
+| # | 项 | PR | 状态 | 复核 | 设计 / 验证文档 |
+|---|---|---|---|---|---|
+| W4-A | issue #5667：`/api/admin/safety/rules` 四条写端点补 `requireAdminRole()`，创建者/限流身份改取 `req.user`（不再信 `x-user-id`） | **#5677**（a1428b6eb + 收口 5b52fa34a） | 正式，CI 绿 | 25 代理，11 条 → 1 存活："修完 X 再合"，X 全文档——要害是代理把 `snapshot-protection` E2E 记成死件，实际它在 20.x 真 PG 上跑且本 PR 该步骤 success，恰是「admin 行为不变」的真库整链证据 | `protection-rules-require-admin-{design,verification}-20260912.md` |
+| W4-B | `admin-routes.ts` 结构性守卫测试：写路由首位必须是 admin 门，豁免表显式带理由；临时豁免条件式（**叠在 #5665 上**） | **#5680**（21fcc031e） | 正式，CI 10/10 绿 | 未起复核（纯测试+文档）；识别靠函数源文本同一性而非 mock；M3 假件化 8 红、M4 模拟 #5677 已合 21/21 绿 | `admin-routes-structural-gate-{design,verification}-20260912.md` |
+| W4-C | admin 读侧 13 条无门 GET 的暴露面盘点（**零代码**） | **#5678**（12a0caf91） | 正式，CI 绿 | 设计件：只有 `GET /dlq` 同时「含业务 payload + 跨租户」；前端零调用；#5665 终审给的行号普遍差 30–35 行（附对照表） | `admin-read-endpoints-exposure-inventory-20260912.md` |
+| W4-D | #5648 F02：PLMAdapter 的 Bearer 令牌不再写回 `config.connection`（经 PUT 深合并 + `configToRecord` 明文落库，且随 PUT 响应体与 audit_logs 回显） | **#5679**（45737eb59） | 正式，CI 29/29 绿 | 对抗复核进行中 | `plm-adapter-token-persistence-{design,verification}-20260912.md` |
+| W4-E | #5648 F03/F10：秘密键词表补 `pw/pswd/passcode` + NFKC + 粘连限定词规则；盘点 SQL 补两种列形状与嵌套路径（**叠在 #5648 上**） | **#5681**（d0796b008） | 正式，CI 11/11 绿 | 未起复核（扩既有 76 例到 123，修前 28 红；变异 9/16/13 红） | 更新 `data-source-connection-secret-keys-{design,verification}-20260912.md` |
+| W4-F | `kanban.ts:25` / `comments.ts:79` 的 `x-user-id`（#5677 顺带发现）只读核查 | —（无 PR） | 结论 C：死回退，`req.user` 永远先短路（comments 每路由挂 `rbacGuard`，kanban 靠全局门），不造伪红 | 顺带发现一条真洞 → W4-G；kanban `parseInt` 串状态（列类型裁决）；`KANBAN_AUTH_REQUIRED` 过时文档 | — |
+| W4-G | `POST …/comments/mark-all-read` 优先取请求体 `userId`，已认证用户可替他人批量标已读 | 进行中 | — | — | — |
+
+### 9.2 事故（如实记）
+
+1. **清理老 worktree 时主检出被误删一部分**（09-12 18:3x）。`git worktree remove --force` 顺着老 worktree 里指向主检出的 `node_modules` / `apps/web/node_modules` junction 递归删进去，再经 pnpm 工作区符号链接 `node_modules/@metasheet/openapi-sdk` 删掉 `packages/openapi/dist-sdk` 的 13 个受控文件；`apps/web/node_modules`、根 `.bin` 被清空。我事先只用 PowerShell 做过 junction 删除实验（只删链接本身），没有测 git 的行为——**测试对象与执行者不同量**。恢复：`git checkout -- packages/openapi/dist-sdk` + `pnpm install --frozen-lockfile --force`（第一次不带 `--force` 只补了 7 包，pnpm 信任被删了一半的 node_modules）。Codex 与同伴的 worktree、pr1 检出、core-backend 的 node_modules 完好。同伴会话在盘点与删除之间复用同名目录新建的 `metasheet-wt-coerce` 被我一并删掉（删时干净、分支 ref 仍在），已如实告知，对方核过无缺失。
+2. **时间戳估高**：首日 19:00–21:00 的几条账本时间是估的，PowerShell 实测把「21:00」订正到约 19:15；此后每条先取 `Get-Date`。
+3. 一条合并了多个 heredoc 的大 Bash 命令因解析错误整个没执行（#5677 的文档收口一行都没落），拆小重做后才落地——大命令要拆。
+
+### 9.3 本窗口的结论与教训
+
+- **`git worktree remove --force` 在 Windows 上把 junction 当目录删进去**（PowerShell 7 的 `Remove-Item -Recurse` 反而只删链接）。删 worktree 前先枚举 reparse point、拆掉外指链接，或只用 PowerShell 删再 `git worktree prune`。
+- **代理对 CI 覆盖的自陈要实读核**：W4-A 把 `snapshot-protection` E2E 记成「任何 CI 都不跑」，W4-D 把新 spec 记成「无 lane 收」——两处都错，实读 `plugin-tests.yml` 一次就能定。
+- **同名不同形**：`x-user-id` 在 `protection-rules.ts` 是无条件读头（真洞），在 kanban/comments 是 `req.user ?? header` 的死回退（不可达）；按「已认证用户可冒充」判据核实后不造伪红。
+- **结构性守卫要解耦合并顺序**：临时豁免做成条件式 + 子集不变量，否则修洞的 PR 会被守卫 PR 挡住。
+
+### 9.4 待用户裁决（累计）
+
+1. #5678：哪些读端点加门——建议先 `GET /dlq` + protection-rules 两条 GET，其次 health/shards（需真库看驱动 error 原文）。
+2. #5677：`/api/admin` 面两套 admin 定义（`user_roles` vs legacy claim）是否统一；`/evaluate` admin-only 是否符合产品预期；限流器是否移到门后；非生产 `dev-token` 端点在哪些环境可达（`NODE_ENV !== 'production'` 即可为任意 id 签 admin token）。
+3. #5665：另 8 条端点是否保留；声明式 admin 账号回填。
+4. kanban `view_states.user_id` 是 integer 而 `users.id` 是 text，`parseInt` 让所有 UUID 用户共用 `user_id=0` 行（跨用户串状态）——列类型裁决。
+5. #5681 的粘连限定词白名单成员；真库道 B 的词表与应用同步谁来做。
+6. 存量脏数据：已落库的 PLM 令牌（#5679）与 `connection` 秘密键（#5648/#5681）的清理与吊销，需真库。
+7. 合并顺序：#5680 叠 #5665、#5681 叠 #5648；#5677 与 #5680 任一顺序皆可（条件式豁免）。
+
+### 9.5 v4 变更摘要草稿条目（第四窗口部分；不开交付指南 v4 节）
+
+> **`/api/admin/safety/rules` 的增删改与求值改为仅管理员**（#5677）。规则创建者与限流身份取自登录主体，请求头 `x-user-id` 不再生效。
+
+> **PLM 数据源的访问令牌不再随配置落库**（#5679）。此前认证后令牌会写进 `connection.headers` 并在保存/审计时明文入库；现只存内存。已落库的旧令牌需一次性清理。
+
+> **外接数据源 `connection` 秘密键判据加严**（#5681）。`pw`/`pswd`/`passcode`、全角键名、`dbpass`/`rootpw` 一类粘连写法也被拒收/剥离。
