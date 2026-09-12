@@ -563,8 +563,9 @@ export class MetaSheetServer {
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
   // E(2026-09-12): 通知中心保留期清理。默认关 —— 没配 MULTITABLE_NOTIFICATION_RETENTION_DAYS
-  // 时 startNotificationRetention 返回 no-op,这个句柄就是个空函数,stop 时照调不误。
-  private stopNotificationRetention?: () => void
+  // 时 startNotificationRetention 返回 no-op,这个句柄就是个空 async 函数,stop 时照调不误。
+  // async 是必须的:stop 要 await 在飞的那一轮 sweep,否则关停会和 pool.end() 赛跑(fix r1-A4)。
+  private stopNotificationRetention?: () => Promise<void>
   private stopApprovalAttachmentWorkers?: () => void | Promise<void>
   private stopElearningMediaWorkers?: () => void | Promise<void>
   private automationService?: AutomationService
@@ -3378,9 +3379,11 @@ export class MetaSheetServer {
         this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
-    shutdownTasks.push(Promise.resolve().then(() => {
+    shutdownTasks.push(Promise.resolve().then(async () => {
       try {
-        this.stopNotificationRetention?.()
+        // stop awaits the in-flight retention sweep before the pool closes (同 approval 那条)。
+        await this.stopNotificationRetention?.()
+        this.stopNotificationRetention = undefined
       } catch (err) {
         this.logger.warn(`Notification retention stop error: ${err instanceof Error ? err.message : String(err)}`)
       }

@@ -415,6 +415,32 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/meta-revision-retention.ts:311,314-316,342',
   },
   {
+    key: 'MULTITABLE_NOTIFICATION_RETENTION_DAYS',
+    type: 'numeric',
+    activationValue: 'numeric days (UNSET = OFF; 1..3650 turns it on)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'Retention window (days) for the notification-centre sweep on meta_record_subscription_notifications. DEFAULT OFF: unset / empty / non-numeric / <=0 resolves to null and the janitor never starts (zero SQL) — this flag is the ON switch. Set to N (clamped to 3650) and rows older than N days are DELETEd, READ AND UNREAD ALIKE (owner default; a "read-only" variant would need an extra read_at predicate in the delete SQL). Deletion is permanent and there is no leader lock, so every instance sweeps.',
+    // source: packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_DAYS (resolveNotificationRetentionDays + the null ⇒ no-op early return in startNotificationRetention)
+    source:
+      'packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_DAYS',
+  },
+  {
+    key: 'MULTITABLE_NOTIFICATION_RETENTION_INTERVAL_MS',
+    type: 'numeric',
+    activationValue: 'numeric ms (default 86400000 = 24h; clamped to [10000, 604800000])',
+    dependsOn: ['MULTITABLE_NOTIFICATION_RETENTION_DAYS'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Tick cadence for the notification-centre retention janitor. Default 24h; an in-range value is clamped to [10s, 7d]; unset / empty / blank / non-numeric / <=0 falls back to the 24h default (it is NOT clamped up to the 10s floor). Inert unless MULTITABLE_NOTIFICATION_RETENTION_DAYS turns the janitor on.',
+    // source: packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_INTERVAL_MS (resolveNotificationRetentionIntervalMs)
+    source:
+      'packages/core-backend/src/multitable/notification-retention.ts#MULTITABLE_NOTIFICATION_RETENTION_INTERVAL_MS',
+  },
+  {
     key: 'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
     type: 'boolean',
     activationValue: 'true',

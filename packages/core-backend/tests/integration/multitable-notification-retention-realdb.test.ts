@@ -10,9 +10,13 @@
  *  1. sweep 是**表级**的(和既有 tombstone retention 同形,没有 sheet 作用域)—— 所以断言写成
  *     "我这张 sheet 的两条老行没了、那条新行还在" + "整表至少删了 2 行",而不是"整表恰好删 2 行";
  *     共享测试库里别的用例留下的老通知也会被这一轮扫掉,那正是这把刀的本意。
- *  2. 本文件**还没有**被 .github/workflows/plugin-tests.yml 的真库 lane 逐条列入(那份 lane 是
- *     显式文件清单,不是 glob)。在有人补上那一行之前,它只能在本地带 DATABASE_URL 跑 —— 所以
- *     它不算 CI 证据,CI 证据全在单测那条。
+ *  2. **两点接线只落了一点**(fix r1-B2)。第一点已补:本文件被 packages/core-backend/vitest.config.ts
+ *     的 exclude 列入,所以它不会再在无 DB 的必需 lane 里被收集然后 skip-green(那种"5 skipped、
+ *     退出码 0"的假绿,仓库在 vitest.config.ts:1206-1207 自己定性为缺陷类)。第二点**仍然缺**:
+ *     .github/workflows/plugin-tests.yml 的真库 lane 是显式文件清单,本文件还没被列进去,而这把刀
+ *     不允许改 .github/workflows —— 必须由有权改 workflow 的一方补那一行。
+ *     在那一行落地之前:**本文件跑在任何地方都没有,这 5 条用例不构成任何证据**,DELETE 语句也
+ *     从未被真 PostgreSQL 解析过;CI 证据全在单测那条(它现在对整条 SQL 做等值断言)。
  */
 import { describe, expect, test } from 'vitest'
 

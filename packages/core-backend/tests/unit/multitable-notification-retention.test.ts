@@ -7,9 +7,11 @@
  * 这个文件钉五件事,每件都对应一个"去掉就红"的变异:
  *   G1 默认关   —— env 未设/0/负数/NaN/空串 ⇒ start 返回 no-op 且**零 SQL**       (M1)
  *   G2 批量上限 —— 每批满 batchSize ⇒ 单轮最多 MAX_BATCHES 批,绝不无界打转        (M2)
- *   G3 删除口径 —— SQL 必含 created_at 窗口 + ORDER BY + LIMIT,且**不区分已读**   (M3)
- *   G4 stop 位  —— stop() 之后 tick 回调一条 SQL 都不发                            (M4)
+ *   G3 删除口径 —— 归一化后的**整条 SQL 等值断言**(表名/包裹/窗口/排序/LIMIT)      (M3)
+ *   G4 stop 位  —— stop() 之后 tick 回调一条 SQL 都不发 + 间隔 env 的解析与绑定      (M4)
  *   G5 容错     —— 表不存在/其它错误都只 warn 不抛,下一轮继续                      (M5)
+ *   G7 在飞轮次 —— 不重入(A2)、stop 截断在飞的批量循环并被 await(A4)、
+ *                  积压不干等一个 interval 而是排续轮(A3)                        (fix r1)
  *
  * 真库那条(tests/integration/multitable-notification-retention-realdb.test.ts)证 SQL 在
  * 真 Postgres 上确实只删老行;这里证分支与形状。
@@ -26,6 +28,7 @@ import { Logger } from '../../src/core/logger'
 import { query } from '../../src/db/pg'
 import {
   NOTIFICATION_RETENTION_BATCH_SIZE,
+  NOTIFICATION_RETENTION_CATCHUP_DELAY_MS,
   NOTIFICATION_RETENTION_MAX_BATCHES_PER_RUN,
   NOTIFICATION_RETENTION_MAX_DAYS,
   resolveNotificationRetentionDays,
@@ -51,6 +54,11 @@ type TimerHarness = {
   tick: () => void
   intervalMs: () => number | undefined
   clearCalls: () => unknown[]
+  /** fix r1-A3:积压续轮走 setTimeout。只登记不执行,由用例手动放行。 */
+  catchUpDelays: () => number[]
+  fireCatchUp: () => void
+  catchUpUnref: ReturnType<typeof vi.fn>
+  catchUpCleared: () => unknown[]
 }
 
 function installTimerHarness(): TimerHarness {
@@ -60,6 +68,16 @@ function installTimerHarness(): TimerHarness {
   let ms: number | undefined
   const cleared: unknown[] = []
 
+  const catchUpUnref = vi.fn()
+  const catchUpHandle = { unref: catchUpUnref } as unknown as NodeJS.Timeout
+  const catchUpDelays: number[] = []
+  const catchUpCleared: unknown[] = []
+  let catchUpFn: (() => void) | undefined
+  // 只截住"续轮"那一档延时(NOTIFICATION_RETENTION_CATCHUP_DELAY_MS),其余 setTimeout 原样放行 ——
+  // 不把 vitest/node 自己的定时器一起劫持。
+  const realSetTimeout = global.setTimeout
+  const realClearTimeout = global.clearTimeout
+
   vi.spyOn(global, 'setInterval').mockImplementation(((fn: () => void, delay?: number) => {
     captured = fn
     ms = delay
@@ -68,6 +86,21 @@ function installTimerHarness(): TimerHarness {
   vi.spyOn(global, 'clearInterval').mockImplementation(((handleArg: unknown) => {
     cleared.push(handleArg)
   }) as unknown as typeof clearInterval)
+  vi.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void, delay?: number, ...rest: unknown[]) => {
+    if (delay === NOTIFICATION_RETENTION_CATCHUP_DELAY_MS) {
+      catchUpFn = fn
+      catchUpDelays.push(delay)
+      return catchUpHandle
+    }
+    return (realSetTimeout as unknown as (...args: unknown[]) => NodeJS.Timeout)(fn, delay, ...rest)
+  }) as unknown as typeof setTimeout)
+  vi.spyOn(global, 'clearTimeout').mockImplementation(((handleArg: unknown) => {
+    if (handleArg === catchUpHandle) {
+      catchUpCleared.push(handleArg)
+      return
+    }
+    ;(realClearTimeout as unknown as (...args: unknown[]) => void)(handleArg)
+  }) as unknown as typeof clearTimeout)
 
   return {
     unref,
@@ -75,7 +108,20 @@ function installTimerHarness(): TimerHarness {
     tick: () => captured?.(),
     intervalMs: () => ms,
     clearCalls: () => cleared,
+    catchUpDelays: () => [...catchUpDelays],
+    fireCatchUp: () => catchUpFn?.(),
+    catchUpUnref,
+    catchUpCleared: () => catchUpCleared,
   }
+}
+
+/** 一个可以手动放行的 DELETE:第一轮挂在这里不返回,用来证"重入/关停"两条守卫。 */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
 }
 
 function silentLogger(): Logger {
@@ -186,7 +232,7 @@ describe('G2 批量循环:满批继续、缺批立停、单轮最多 20 批', ()
     const result = await sweepNotificationRetention(queryFn, { retentionDays: 30 })
 
     expect(queryFn).toHaveBeenCalledTimes(1)
-    expect(result).toEqual({ deleted: NOTIFICATION_RETENTION_BATCH_SIZE - 1, batches: 1, drained: true })
+    expect(result).toEqual({ deleted: NOTIFICATION_RETENTION_BATCH_SIZE - 1, batches: 1, drained: true, stoppedEarly: false })
   })
 
   it('满批 + 缺批 ⇒ 两批后停', async () => {
@@ -197,14 +243,14 @@ describe('G2 批量循环:满批继续、缺批立停、单轮最多 20 批', ()
     const result = await sweepNotificationRetention(queryFn, { retentionDays: 30 })
 
     expect(queryFn).toHaveBeenCalledTimes(2)
-    expect(result).toEqual({ deleted: NOTIFICATION_RETENTION_BATCH_SIZE + 3, batches: 2, drained: true })
+    expect(result).toEqual({ deleted: NOTIFICATION_RETENTION_BATCH_SIZE + 3, batches: 2, drained: true, stoppedEarly: false })
   })
 
   it('零行 ⇒ 一条 SQL 就收工', async () => {
     const queryFn = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] as unknown[], rowCount: 0 }))
     const result = await sweepNotificationRetention(queryFn, { retentionDays: 30 })
     expect(queryFn).toHaveBeenCalledTimes(1)
-    expect(result).toEqual({ deleted: 0, batches: 1, drained: true })
+    expect(result).toEqual({ deleted: 0, batches: 1, drained: true, stoppedEarly: false })
   })
 
   it('自定义 batchSize / maxBatchesPerRun 也被遵守(真库用例靠这个做有界排空)', async () => {
@@ -216,21 +262,52 @@ describe('G2 批量循环:满批继续、缺批立停、单轮最多 20 批', ()
     const result = await sweepNotificationRetention(queryFn, { retentionDays: 30, batchSize: 2, maxBatchesPerRun: 3 })
     expect(queryFn).toHaveBeenCalledTimes(3)
     expect(queryFn.mock.calls[0]?.[1]).toEqual([30, 2])
-    expect(result).toEqual({ deleted: 6, batches: 3, drained: false })
+    expect(result).toEqual({ deleted: 6, batches: 3, drained: false, stoppedEarly: false })
   })
 })
 
 // ---- G3 删除口径(硬规则 8 / M3) ------------------------------------------
+
+/**
+ * fix r1-A5/B3:**整条 SQL 的等值断言**,不是子串断言。
+ *
+ * 反驳实证:只做 `toContain` 时,三个变异体全部 30/30 绿 ——
+ *   (a) 子查询的表名换成父表 `meta_record_subscriptions`(真库上一行都删不掉);
+ *   (b) `ORDER BY created_at` 改成 `... DESC`(先删最新的);
+ *   (c) 去掉 `id IN (SELECT ...)` 包裹(PG 的 DELETE 不支持 ORDER BY/LIMIT ⇒ 42601,
+ *       运行期被容错分支吞成 warn,永远删不掉一行)。
+ * 这里把归一化空白后的整条语句钉成定值,上面三个变异体各差一处、立刻跑红。
+ * 这条常量是在用例里**手写**的(不是从被测模块 import 的),所以不是同义反复。
+ */
+const EXPECTED_DELETE_SQL =
+  'DELETE FROM meta_record_subscription_notifications ' +
+  'WHERE id IN ( ' +
+  'SELECT id ' +
+  'FROM meta_record_subscription_notifications ' +
+  'WHERE created_at < now() - make_interval(days => $1) ' +
+  'ORDER BY created_at ' +
+  'LIMIT $2 ' +
+  ')'
+
+const normalizeSql = (sql: string): string => sql.replace(/\s+/g, ' ').trim()
+
 describe('G3 删除 SQL 的形状:只删过期行,且不区分已读', () => {
-  it('SQL 含 created_at 窗口 + ORDER BY + LIMIT,参数是 [天数, 批大小]', async () => {
+  it('整条 SQL(归一化空白后)逐字等于预期:表名/包裹/窗口/排序/LIMIT 一处都不许漂', async () => {
     const queryFn = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] as unknown[], rowCount: 0 }))
     await sweepNotificationRetention(queryFn, { retentionDays: 45 })
 
     const sql = String(queryFn.mock.calls[0]?.[0])
+    expect(normalizeSql(sql)).toBe(EXPECTED_DELETE_SQL)
+    // 冗余但有意:等值断言坏了时,下面几条指出是哪一处坏的。
     expect(sql).toContain('DELETE FROM meta_record_subscription_notifications')
+    expect(sql).toContain('WHERE id IN (')
     expect(sql).toContain('created_at < now() - make_interval(days => $1)')
     expect(sql).toContain('ORDER BY created_at')
+    expect(normalizeSql(sql)).not.toContain('ORDER BY created_at DESC')
     expect(sql).toContain('LIMIT $2')
+    // 子查询必须回到**同一张表**(换成父表 meta_record_subscriptions 就一行都删不掉)。
+    expect(normalizeSql(sql).match(/meta_record_subscription_notifications/g)).toHaveLength(2)
+    expect(sql).not.toContain('meta_record_subscriptions ')
     expect(queryFn.mock.calls[0]?.[1]).toEqual([45, NOTIFICATION_RETENTION_BATCH_SIZE])
   })
 
@@ -315,6 +392,198 @@ describe('G4 timer 与 stop', () => {
     expect(resolveNotificationRetentionIntervalMs('999999999999')).toBe(7 * 24 * 60 * 60 * 1000)
     expect(resolveNotificationRetentionIntervalMs('60000')).toBe(60_000)
   })
+
+  // fix r1-A1:空串/全空白/0/负数 **不是**"小于下限,夹到 10 秒",而是"没配,回 24h"。
+  // `Number('') === 0` 是有限数 —— 老实现只判 Number.isFinite,这四格全落到 10s(快 8640 倍),
+  // 而 `MULTITABLE_NOTIFICATION_RETENTION_INTERVAL_MS=`(键在值空)正是部署文件里的常见写法。
+  it.each([
+    ['', '空串'],
+    ['   ', '全空白'],
+    ['0', '零'],
+    ['-1', '负数'],
+    ['-86400000', '更负'],
+  ])('间隔 env=%s(%s)⇒ 回默认 24h,不是被夹成 10 秒', (raw) => {
+    expect(resolveNotificationRetentionIntervalMs(raw)).toBe(24 * 60 * 60 * 1000)
+    expect(resolveNotificationRetentionIntervalMs(raw)).not.toBe(10_000)
+  })
+
+  it('间隔 env 名真的被读到:INTERVAL_MS=60000 ⇒ setInterval 收到 60000(名字打错就会静默回 24h)', async () => {
+    const timers = installTimerHarness()
+    const stop = startNotificationRetention({
+      env: {
+        MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30',
+        MULTITABLE_NOTIFICATION_RETENTION_INTERVAL_MS: '60000',
+      },
+      logger: silentLogger(),
+    })
+    await flush()
+
+    expect(timers.intervalMs()).toBe(60_000)
+    await stop()
+  })
+
+  it('间隔 env 为空串 ⇒ 走的是 24h 那条路(fix r1-A1 的 env 级证据,不只是解析器级)', async () => {
+    const timers = installTimerHarness()
+    const stop = startNotificationRetention({
+      env: {
+        MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30',
+        MULTITABLE_NOTIFICATION_RETENTION_INTERVAL_MS: '',
+      },
+      logger: silentLogger(),
+    })
+    await flush()
+
+    expect(timers.intervalMs()).toBe(24 * 60 * 60 * 1000)
+    await stop()
+  })
+})
+
+// ---- G7 重入 / 关停 / 积压续轮(fix r1-A2 / A3 / A4) ------------------------
+describe('G7 在飞的一轮:不重入、关停能截断、积压不等满一个 interval', () => {
+  it('A2 上一轮还在飞时再来两次 tick ⇒ 并发轮数仍然是 1(SQL 只发出去一条)', async () => {
+    const timers = installTimerHarness()
+    const gate = deferred<{ rows: unknown[]; rowCount: number }>()
+    mockedQuery.mockReturnValue(gate.promise as never)
+
+    const stop = startNotificationRetention({
+      env: { MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30' },
+      logger: silentLogger(),
+    })
+    await flush()
+    // 第一轮的第一条 DELETE 已发出,挂在 gate 上不返回。
+    expect(mockedQuery).toHaveBeenCalledTimes(1)
+
+    timers.tick()
+    timers.tick()
+    await flush()
+    // 没有重入守卫时,这两次 tick 会各起一轮、各占一条池连接 —— 那样这里会是 3。
+    expect(mockedQuery).toHaveBeenCalledTimes(1)
+
+    gate.resolve({ rows: [], rowCount: 0 })
+    await flush()
+    await stop()
+  })
+
+  it('A2 上一轮结束后,下一次 tick 照常能跑(证明守卫不是把清理永久锁死)', async () => {
+    const timers = installTimerHarness()
+    const gate = deferred<{ rows: unknown[]; rowCount: number }>()
+    mockedQuery.mockReturnValueOnce(gate.promise as never)
+    mockedQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+
+    const stop = startNotificationRetention({
+      env: { MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30' },
+      logger: silentLogger(),
+    })
+    await flush()
+    timers.tick()
+    await flush()
+    expect(mockedQuery).toHaveBeenCalledTimes(1)
+
+    gate.resolve({ rows: [], rowCount: 0 })
+    await flush()
+
+    timers.tick()
+    await flush()
+    expect(mockedQuery).toHaveBeenCalledTimes(2)
+    await stop()
+  })
+
+  it('A4 stop 截断在飞的批量循环:关停后一条新 DELETE 都不再发,且 stop 会等这轮收尾', async () => {
+    const timers = installTimerHarness()
+    const gate = deferred<{ rows: unknown[]; rowCount: number }>()
+    let settled = false
+    // 每批都"满批"(=2)⇒ 没有守卫的话这轮会一直打到 maxBatchesPerRun=6。
+    mockedQuery.mockReturnValueOnce(gate.promise as never)
+    mockedQuery.mockResolvedValue({ rows: [], rowCount: 2 } as never)
+
+    const stop = startNotificationRetention({
+      env: { MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30' },
+      logger: silentLogger(),
+      batchSize: 2,
+      maxBatchesPerRun: 6,
+    })
+    await flush()
+    expect(mockedQuery).toHaveBeenCalledTimes(1)
+
+    const stopped = stop().then(() => {
+      settled = true
+    })
+    // stop 必须还没返回:第一条 DELETE 还挂在 gate 上。
+    await flush()
+    expect(settled).toBe(false)
+
+    gate.resolve({ rows: [], rowCount: 2 })
+    await stopped
+    expect(settled).toBe(true)
+    // 关停位在下一批之前就被看到 ⇒ 总共只发了这一条(没守卫时是 6 条)。
+    expect(mockedQuery).toHaveBeenCalledTimes(1)
+
+    timers.tick()
+    await flush()
+    expect(mockedQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('A3 一轮打满批数上限仍没排空 ⇒ 排一个 1s 续轮(unref),而不是干等一个 24h interval', async () => {
+    const timers = installTimerHarness()
+    // 永远满批 ⇒ 每轮都撞上限、每轮都 drained=false。
+    mockedQuery.mockResolvedValue({ rows: [], rowCount: 2 } as never)
+
+    const stop = startNotificationRetention({
+      env: { MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30' },
+      logger: silentLogger(),
+      batchSize: 2,
+      maxBatchesPerRun: 3,
+    })
+    await flush()
+
+    expect(mockedQuery).toHaveBeenCalledTimes(3)
+    expect(timers.catchUpDelays()).toEqual([NOTIFICATION_RETENTION_CATCHUP_DELAY_MS])
+    expect(NOTIFICATION_RETENTION_CATCHUP_DELAY_MS).toBeLessThan(24 * 60 * 60 * 1000)
+    expect(timers.catchUpUnref).toHaveBeenCalledTimes(1)
+
+    // 放行续轮 ⇒ 又是有界的一轮(3 批),积压按秒排空而不是按天。
+    timers.fireCatchUp()
+    await flush()
+    expect(mockedQuery).toHaveBeenCalledTimes(6)
+
+    await stop()
+  })
+
+  it('A3 排空的那一轮不排续轮(drained=true ⇒ 老老实实等下一个 interval)', async () => {
+    const timers = installTimerHarness()
+    mockedQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+
+    const stop = startNotificationRetention({
+      env: { MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30' },
+      logger: silentLogger(),
+    })
+    await flush()
+
+    expect(timers.catchUpDelays()).toEqual([])
+    await stop()
+  })
+
+  it('A3+A4 stop 会把还没放行的续轮 timer 一起收掉', async () => {
+    const timers = installTimerHarness()
+    mockedQuery.mockResolvedValue({ rows: [], rowCount: 2 } as never)
+
+    const stop = startNotificationRetention({
+      env: { MULTITABLE_NOTIFICATION_RETENTION_DAYS: '30' },
+      logger: silentLogger(),
+      batchSize: 2,
+      maxBatchesPerRun: 2,
+    })
+    await flush()
+    expect(timers.catchUpDelays()).toHaveLength(1)
+
+    await stop()
+    expect(timers.catchUpCleared()).toHaveLength(1)
+
+    const callsAtStop = mockedQuery.mock.calls.length
+    timers.fireCatchUp()
+    await flush()
+    expect(mockedQuery.mock.calls.length).toBe(callsAtStop)
+  })
 })
 
 // ---- G5 容错(硬规则 5 / M5) ----------------------------------------------
@@ -395,9 +664,19 @@ describe('G6 src/index.ts 接线', () => {
   })
 
   it('关停钩子挂在 shutdownTasks 里,句柄声明为可选字段', () => {
-    expect(indexSource).toContain('private stopNotificationRetention?: () => void')
+    expect(indexSource).toContain('private stopNotificationRetention?: () => Promise<void>')
     const stopAt = indexSource.indexOf('this.stopNotificationRetention?.()')
     expect(stopAt).toBeGreaterThan(-1)
     expect(indexSource.slice(Math.max(0, stopAt - 400), stopAt)).toContain('shutdownTasks.push(')
+  })
+
+  // fix r1-A4:关停必须 **await** 这条,否则 stop 只是置位,在飞的批量循环会和同一批
+  // shutdownTasks 里的 `await pool.end()` 赛跑(邻居 approval 那条早就是 await 的)。
+  it('shutdownTask 是 await 的,不是 fire-and-forget', () => {
+    expect(indexSource).toContain('await this.stopNotificationRetention?.()')
+    const stopAt = indexSource.indexOf('await this.stopNotificationRetention?.()')
+    expect(stopAt).toBeGreaterThan(-1)
+    // 这条 shutdownTask 的回调必须是 async,否则 await 根本写不进去。
+    expect(indexSource.slice(Math.max(0, stopAt - 400), stopAt)).toContain('shutdownTasks.push(Promise.resolve().then(async () => {')
   })
 })
