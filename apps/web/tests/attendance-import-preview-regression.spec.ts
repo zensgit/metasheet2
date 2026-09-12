@@ -95,6 +95,58 @@ describe('Attendance import preview regression', () => {
     window.localStorage.removeItem('auth_token')
   })
 
+  it.each(['preview', 'commit'] as const)('keeps the live async %s job in its original payload org', async (kind) => {
+    window.localStorage.setItem('auth_token', unsignedJwt({ id: 'qa-user', tenantId: 'qa-selector' }))
+    const polls: URL[] = []
+    let queued = false
+    let state: Record<string, any>
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (input: string, init?: RequestInit) => {
+      const url = new URL(input, 'http://local.test')
+      if (url.pathname.endsWith('/import/prepare')) return jsonResponse(200, { ok: true, data: {
+        commitToken: 'qa-token', expiresAt: '2099-01-01T00:00:00Z',
+      } })
+      if (url.pathname.endsWith(`/import/${kind}-async`)) {
+        queued = true
+        expect(JSON.parse(String(init?.body)).orgId).toBe('qa-payload')
+        state.orgId = 'qa-changed'
+        return jsonResponse(200, { ok: true, data: { job: {
+          id: 'job-1', kind, status: 'queued', progress: 0, total: 1,
+        } } })
+      }
+      if (url.pathname === '/api/attendance/import/jobs/job-1') {
+        polls.push(url)
+        if (url.searchParams.get('orgId') !== 'qa-payload') return jsonResponse(404, { ok: false })
+        return jsonResponse(200, { ok: true, data: {
+          id: 'job-1', kind, status: 'completed', progress: 1, total: 1,
+          preview: { items: [], rowCount: 1 },
+        } })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    state = (vm as any).$?.setupState
+    state.importThresholds.previewAsyncThreshold = 1
+    state.importThresholds.commitAsyncThreshold = 1
+    state.importForm.payload = JSON.stringify({
+      orgId: 'qa-payload', source: 'manual', rows: [{ userId: 'qa-user', workDate: '2026-09-12' }],
+    })
+    await state[kind === 'preview' ? 'previewImport' : 'runImport']()
+    expect(queued).toBe(true)
+    expect(unwrapRef<any>(state.importAsyncJob)?.status).toBe('completed')
+    await state.refreshImportAsyncJob()
+    await state.resumeImportAsyncJobPolling()
+    expect(polls.map(url => url.searchParams.get('orgId'))).toEqual(Array(3).fill('qa-payload'))
+    if (kind === 'commit') {
+      const listRequests = apiFetchMock.mock.calls
+        .map(([input]) => new URL(input, 'http://local.test'))
+        .filter(url => url.pathname === '/api/attendance/import/batches')
+      expect(listRequests.at(-1)?.searchParams.get('orgId')).toBe('qa-payload')
+    }
+  })
+
   it('binds prepare and preview to the same non-default organization', async () => {
     const tenantId = '00000000-0000-4000-8000-000000000123'
     window.localStorage.setItem('auth_token', unsignedJwt({ id: 'qa-user', tenantId }))

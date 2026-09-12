@@ -1,4 +1,5 @@
 import { assertImportTelemetry } from './attendance-import-telemetry-utils.mjs'
+import { requireImportSessionOrg } from './attendance-import-scope.mjs'
 import {
   scanBlockingTimeCorrectionRequests,
   selectAvailableSmokeWorkDate,
@@ -370,7 +371,7 @@ async function pollImportJob(jobId, { timeoutMs = 180000, intervalMs = 1000 } = 
       throw new Error(`import job timed out after ${timeoutMs}ms: jobId=${jobId}`)
     }
 
-    const jobRes = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' })
+    const jobRes = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}?${new URLSearchParams({ orgId })}`, { method: 'GET' })
     assertOk(jobRes, 'GET /attendance/import/jobs/:id')
     const job = jobRes.body?.data ?? null
     if (!job || typeof job !== 'object') throw new Error('import job response missing data')
@@ -407,6 +408,7 @@ async function run() {
   // 1) auth/me
   const me = await apiFetch('/auth/me', { method: 'GET' })
   assertOk(me, 'GET /auth/me')
+  requireImportSessionOrg(me.body, orgId)
   const meData = me.body?.data ?? {}
   const user = meData?.user ?? {}
   const features = meData?.features ?? {}
@@ -725,7 +727,7 @@ async function run() {
   }
 
   // 6.2) export endpoint should return CSV (items or anomalies).
-  const exportUrl = `${apiBase}/attendance/import/batches/${batchId}/export.csv?type=anomalies`
+  const exportUrl = `${apiBase}/attendance/import/batches/${encodeURIComponent(batchId)}/export.csv?${new URLSearchParams({ type: 'anomalies', orgId })}`
   const exportRes = await fetchWithRetry(exportUrl, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },
@@ -817,13 +819,16 @@ async function run() {
       log(`import async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs} recordUpsertStrategy=${telemetry.recordUpsertStrategy || 'n/a'}`)
     }
 
-    const asyncItemsRes = await apiFetch(`/attendance/import/batches/${asyncBatchId}/items?pageSize=50`, { method: 'GET' })
+    const asyncItemsRes = await apiFetch(`/attendance/import/batches/${encodeURIComponent(asyncBatchId)}/items?${new URLSearchParams({ pageSize: '50', orgId })}`, { method: 'GET' })
     assertOk(asyncItemsRes, 'GET /attendance/import/batches/:id/items (async)')
     const asyncItems = asyncItemsRes.body?.data?.items
     if (!Array.isArray(asyncItems) || asyncItems.length === 0) die('async batch items returned 0 rows')
     log(`async batch items ok: rows=${asyncItems.length}`)
 
-    const asyncRollback = await apiFetch(`/attendance/import/rollback/${asyncBatchId}`, { method: 'POST', body: '{}' })
+    const rollbackSession = await apiFetch('/auth/me', { method: 'GET' })
+    assertOk(rollbackSession, 'GET /auth/me before rollback')
+    requireImportSessionOrg(rollbackSession.body, orgId)
+    const asyncRollback = await apiFetch(`/attendance/import/rollback/${encodeURIComponent(asyncBatchId)}`, { method: 'POST', body: '{}' })
     assertOk(asyncRollback, 'POST /attendance/import/rollback/:id (async)')
     log('async rollback ok')
 
@@ -843,7 +848,7 @@ async function run() {
   }
 
   // 7) batch items exist
-  const itemsRes = await apiFetch(`/attendance/import/batches/${batchId}/items?pageSize=200`, { method: 'GET' })
+  const itemsRes = await apiFetch(`/attendance/import/batches/${encodeURIComponent(batchId)}/items?${new URLSearchParams({ pageSize: '200', orgId })}`, { method: 'GET' })
   assertOk(itemsRes, 'GET /attendance/import/batches/:id/items')
   const batchItems = itemsRes.body?.data?.items
   if (!Array.isArray(batchItems) || batchItems.length === 0) die('batch items returned 0 rows')

@@ -16808,6 +16808,15 @@ paths:
           required: true
           schema:
             type: string
+        - in: query
+          name: orgId
+          required: false
+          description: >-
+            Organization used to enqueue the job; when supplied it must match
+            the authenticated session organization. Retain it for polling,
+            refresh, and resume.
+          schema:
+            type: string
       responses:
         '200':
           description: OK

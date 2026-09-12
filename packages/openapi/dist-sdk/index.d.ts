@@ -5866,7 +5866,10 @@ export interface paths {
         /** Get attendance import job */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description Organization used to enqueue the job; when supplied it must match the authenticated session organization. Retain it for polling, refresh, and resume. */
+                    orgId?: string;
+                };
                 header?: never;
                 path: {
                     id: string;

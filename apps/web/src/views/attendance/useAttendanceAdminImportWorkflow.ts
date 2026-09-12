@@ -1879,13 +1879,17 @@ export function useAttendanceAdminImportWorkflow({
 
   let importJobPollSeq = 0
 
-  async function fetchImportJob(jobId: string): Promise<AttendanceImportJob> {
-    const response = await apiFetch(`/api/attendance/import/jobs/${encodeURIComponent(jobId)}`)
+  async function fetchImportJob(jobId: string, orgId?: string): Promise<AttendanceImportJob> {
+    const params = new URLSearchParams()
+    if (orgId) params.set('orgId', orgId)
+    const query = params.size ? `?${params}` : ''
+    const response = await apiFetch(`/api/attendance/import/jobs/${encodeURIComponent(jobId)}${query}`)
     const data = await response.json().catch(() => ({}))
     if (!response.ok || !data.ok) {
       throw createApiError(response, data, tr('Failed to load import job', '加载导入任务失败'))
     }
-    return (data.data ?? data) as AttendanceImportJob
+    const job = (data.data ?? data) as AttendanceImportJob
+    return { ...job, orgId: job.orgId ?? orgId }
   }
 
   function createImportJobStateError(code: string, message: string): AttendanceApiError {
@@ -1894,7 +1898,7 @@ export function useAttendanceAdminImportWorkflow({
     return error
   }
 
-  async function pollImportJob(jobId: string): Promise<AttendanceImportJob> {
+  async function pollImportJob(jobId: string, orgId?: string): Promise<AttendanceImportJob> {
     const seq = ++importJobPollSeq
     importAsyncPolling.value = true
     const startedAt = now()
@@ -1904,7 +1908,7 @@ export function useAttendanceAdminImportWorkflow({
           importDebugTimeoutPending = false
           throw createImportJobStateError('IMPORT_JOB_TIMEOUT', tr('Import job timed out', '导入任务超时'))
         }
-        const job = await fetchImportJob(jobId)
+        const job = await fetchImportJob(jobId, orgId)
         importAsyncJob.value = job
         if (job.status === 'completed') return job
         if (job.status === 'failed') {
@@ -1933,7 +1937,7 @@ export function useAttendanceAdminImportWorkflow({
       return
     }
     try {
-      const job = await fetchImportJob(jobId)
+      const job = await fetchImportJob(jobId, importAsyncJob.value?.orgId)
       importAsyncJob.value = job
       if (!options.silent) {
         reportStatus(tr(
@@ -1955,7 +1959,7 @@ export function useAttendanceAdminImportWorkflow({
       return
     }
     try {
-      const finalJob = await pollImportJob(jobId)
+      const finalJob = await pollImportJob(jobId, importAsyncJob.value?.orgId)
       if (finalJob.kind === 'preview') {
         const previewData = finalJob.preview && typeof finalJob.preview === 'object' ? finalJob.preview : null
         if (previewData) {
@@ -1991,7 +1995,7 @@ export function useAttendanceAdminImportWorkflow({
         ))
       }
       await loadRecords()
-      await loadImportBatches({ orgId: normalizedOrgId() })
+      await loadImportBatches({ orgId: finalJob.orgId })
     } catch (error) {
       reportError(error, tr('Failed while polling import job', '轮询导入任务失败'), 'import-run')
     }
@@ -2057,10 +2061,10 @@ export function useAttendanceAdminImportWorkflow({
     }
 
     adminForbiddenRef.value = false
-    importAsyncJob.value = job
+    importAsyncJob.value = { ...job, orgId: payload.orgId ?? job.orgId }
     reportStatus(tr(`Preview job queued (${job.status}).`, `预览任务已排队（${job.status}）。`))
 
-    const finalJob = await pollImportJob(job.id)
+    const finalJob = await pollImportJob(job.id, importAsyncJob.value.orgId)
     const previewData = finalJob.preview && typeof finalJob.preview === 'object' ? finalJob.preview : null
     if (!previewData) {
       throw new Error(tr('Async preview completed without preview payload', '异步预览完成但缺少预览载荷'))
@@ -2278,10 +2282,10 @@ export function useAttendanceAdminImportWorkflow({
             throw new Error(tr('Async import did not return job id', '异步导入未返回任务 ID'))
           }
           adminForbiddenRef.value = false
-          importAsyncJob.value = job
+          importAsyncJob.value = { ...job, orgId: payload.orgId ?? job.orgId }
           reportStatus(tr(`Import job queued (${job.status}).`, `导入任务已排队（${job.status}）。`))
 
-          const finalJob = await pollImportJob(job.id)
+          const finalJob = await pollImportJob(job.id, importAsyncJob.value.orgId)
           const imported = Number(finalJob.progress ?? 0)
           const total = Number(finalJob.total ?? 0)
           const perfSuffix = buildImportPerfSuffix({
@@ -2303,7 +2307,7 @@ export function useAttendanceAdminImportWorkflow({
           }
 
           await loadRecords()
-          await loadImportBatches({ orgId: normalizedOrgId() })
+          await loadImportBatches({ orgId: payload.orgId })
           importCommitToken.value = ''
           importCommitTokenExpiresAt.value = ''
           return
@@ -2379,7 +2383,7 @@ export function useAttendanceAdminImportWorkflow({
         reportStatus(tr(`Imported ${count} rows.${perfSuffix.en}`, `已导入 ${count} 行。${perfSuffix.zh}`))
       }
       await loadRecords()
-      await loadImportBatches({ orgId: normalizedOrgId() })
+      await loadImportBatches({ orgId: payload.orgId })
       importCommitToken.value = ''
       importCommitTokenExpiresAt.value = ''
     } catch (error) {
