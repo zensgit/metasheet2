@@ -165,15 +165,17 @@ test.describe('设计稿 §6.1 —— P0 验收', () => {
     expectNoUnmockedRoutes(log)
   })
 
-  test('P0-05 向导在没点任何按钮之前,就已经渲染出六步地图与九步计划的 held 解释', async ({ page }) => {
+  test('P0-05 向导在没点任何按钮之前,就已经渲染出七步地图与九步计划的 held 解释', async ({ page }) => {
     const log = await openStockPrepHarness(page, { actor: 'platform', scenario: 'fresh' })
 
     // D2:未装完 → 落地页就是 开始使用。零点击。
     await expect(page.locator('[data-testid="stock-prep-panel"]')).toHaveAttribute('data-active', 'getting-started')
     const map = page.locator('[data-testid="stock-prep-getting-started-map"]')
     await expect(map).toBeVisible()
-    await expect(map.locator('[data-testid="stock-prep-getting-started-step"]')).toHaveCount(6)
-    await expect(page.locator('[data-testid="stock-prep-getting-started-progress"]')).toContainText('/6')
+    // 七, not 六: ①拆分 (2026-09-10) gave 「登记外接数据源」 and 「新增 SQL 绑定」 a row each,
+    // because they are two acts with two controls and two different reads behind them.
+    await expect(map.locator('[data-testid="stock-prep-getting-started-step"]')).toHaveCount(7)
+    await expect(page.locator('[data-testid="stock-prep-getting-started-progress"]')).toContainText('/7')
 
     const plan = page.locator('[data-testid="stock-prep-getting-started-plan"]')
     await expect(plan).toContainText('九步')
