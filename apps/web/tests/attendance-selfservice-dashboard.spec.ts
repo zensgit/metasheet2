@@ -997,7 +997,24 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('#attendance-overview-requests')).toBeTruthy()
   })
 
-  it('below-fold IA: a non-makeup quick action opens the request/makeup disclosure without a second form', async () => {
+  it('below-fold IA: a non-leave quick action opens the request/makeup disclosure without a second form', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(requestTools.open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="overtime"]')!.click()
+    await flushUi(3)
+
+    expect(requestTools.open).toBe(true)
+    expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('overtime')
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
+  })
+
+  it('leave tile opens the dedicated leave card below 常用 and leaves the shared disclosure closed', async () => {
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi()
@@ -1008,7 +1025,11 @@ describe('Attendance self-service dashboard', () => {
     container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
     await flushUi(3)
 
-    expect(requestTools.open).toBe(true)
+    const card = container!.querySelector('[data-attendance-leave-request-card]')
+    const common = container!.querySelector('[data-selfservice-card="actions"]')
+    expect(card).toBeTruthy()
+    expect(common?.nextElementSibling).toBe(card)
+    expect(requestTools.open).toBe(false)
     expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('leave')
     expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
@@ -1083,6 +1104,43 @@ describe('Attendance self-service dashboard', () => {
     card = await openMakeupCard()
 
     expect(card.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('2026-04-15T09:00')
+  })
+
+  it('reopening the same makeup type on a different date clears its timestamp draft', async () => {
+    installOverviewMock({
+      anomalyItems: [
+        DEFAULT_OVERVIEW_ANOMALY,
+        {
+          ...DEFAULT_OVERVIEW_ANOMALY,
+          recordId: 'record-yesterday-check-in',
+          workDate: '2026-04-14',
+          suggestedRequestType: 'missed_check_in',
+        },
+      ],
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const openMakeupCard = async (): Promise<HTMLElement> => {
+      container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+      await flushUi(3)
+      return container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')!
+    }
+
+    let card = await openMakeupCard()
+    setFormValue(card, '[data-makeup-card-anomaly]', 'record-yesterday-check-in::2026-04-14')
+    await flushUi(2)
+    setFormValue(card, '[data-makeup-card-time]', '2026-04-14T09:00')
+    expect(card.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('2026-04-14T09:00')
+
+    card.querySelector<HTMLButtonElement>('[data-makeup-card-cancel="header"]')!.click()
+    await flushUi()
+    card = await openMakeupCard()
+
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-in')?.value).toBe('')
+    expect(card.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('')
   })
 
   it('below-fold overflow contract: history surfaces stay within 1440 and 390', async () => {
@@ -1730,12 +1788,14 @@ describe('Attendance self-service dashboard', () => {
     await flushUi(3)
     expect(requestType?.value).toBe('leave')
     expect(workDate?.value).toBe('2026-04-15')
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeTruthy()
     expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
 
     missingPunchButton!.click()
     await flushUi(3)
     expect(requestType?.value).toBe('missed_check_in')
     expect(workDate?.value).toBe('2026-04-15')
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
     expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
   })
 
@@ -2605,11 +2665,29 @@ describe('Attendance self-service dashboard', () => {
     container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
     await flushUi(3)
     expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeTruthy()
+    setFormValue(container!, '[data-makeup-card-time]', '2026-04-15T09:00')
+    await flushUi(2)
 
     container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
     await flushUi(3)
     expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
-    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(true)
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeTruthy()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(false)
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('leave')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-in')?.value).toBe('')
+
+    setFormValue(container!, '[data-leave-card-start]', '2026-04-15T09:00')
+    setFormValue(container!, '[data-leave-card-end]', '2026-04-15T17:00')
+    await flushUi(2)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-minutes')?.value).toBe('480')
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="overtime"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBeNull()
+    expect((container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement).open).toBe(true)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('overtime')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-in')?.value).toBe('')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-out')?.value).toBe('')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-minutes')?.value).toBe('')
   })
 })
