@@ -261,6 +261,63 @@ describe('F9b — rule send_notification persists to the notification centre', (
     expect(h.insertCalls()).toHaveLength(0)
   })
 
+  it('a WHITESPACE-ONLY message is refused (no blank row, no emit) and a padded one is stored TRIMMED', async () => {
+    // r3 (judge blocker 1): the rule path used to take `config.message` RAW (`as string | undefined`), so
+    // '   ' sailed past `if (!message)` and persisted a BLANK durable notification row — the bell renders
+    // `message` verbatim (MetaNotificationBell.vue:41-45), i.e. an empty item the recipient cannot act on.
+    // Shaping is now the button route's, byte-for-byte (routes/multitable-button.ts:229 → :241
+    // MESSAGE_REQUIRED). Removing the `.trim()` turns this test red.
+    const blank = makeHarness({ members: ['u1'] })
+    const refused = await new AutomationExecutor(blank.deps).execute(
+      notifyRule({ userIds: ['u1'], message: '   \t\n ' }),
+      TRIGGER,
+    )
+
+    expect(refused.status).toBe('failed')
+    expect(refused.steps[0].status).toBe('failed')
+    expect(refused.steps[0].error).toBe('Notification message is required')
+    // Refused BEFORE any database traffic at all: no roster read, no INSERT, and nothing announced.
+    expect(blank.calls).toHaveLength(0)
+    expect(blank.insertCalls()).toHaveLength(0)
+    expect(blank.emit).not.toHaveBeenCalledWith('automation.notification', expect.anything())
+
+    // A NON-STRING message hits the same line (it used to be truthy and reach the write seam).
+    const nonString = makeHarness({ members: ['u1'] })
+    const refusedObject = await new AutomationExecutor(nonString.deps).execute(
+      notifyRule({ userIds: ['u1'], message: { text: 'Ping' } }),
+      TRIGGER,
+    )
+    expect(refusedObject.steps[0].error).toBe('Notification message is required')
+    expect(nonString.insertCalls()).toHaveLength(0)
+    expect(nonString.emit).not.toHaveBeenCalledWith('automation.notification', expect.anything())
+
+    // SIMULATE judges the SAME shaped message — no "test run green, first live fire red" split.
+    const dry = makeHarness({ members: ['u1'] })
+    const dryRun = await new AutomationExecutor(dry.deps).execute(
+      notifyRule({ userIds: ['u1'], message: '   ' }),
+      TRIGGER,
+      undefined,
+      undefined,
+      'simulate',
+    )
+    expect(dryRun.steps[0].status).toBe('failed')
+    expect(dryRun.steps[0].error).toBe('Notification message is required')
+    expect(dry.calls).toHaveLength(0)
+
+    // Positive side of the same shaping: padding never reaches the notification centre.
+    const padded = makeHarness({ members: ['u1'] })
+    const sent = await new AutomationExecutor(padded.deps).execute(
+      notifyRule({ userIds: ['u1'], message: '  Ping  ' }),
+      TRIGGER,
+    )
+    expect(sent.steps[0].status).toBe('success')
+    expect(padded.insertedRows()[0]?.message).toBe('Ping')
+    expect(padded.emit).toHaveBeenCalledWith(
+      'automation.notification',
+      expect.objectContaining({ message: 'Ping' }),
+    )
+  })
+
   it('the roster is resolved for the TRIGGERING SHEET (roster query $1 === sheetId, not the rule id)', async () => {
     const h = makeHarness({ members: ['u1'] })
     const execution = await new AutomationExecutor(h.deps).execute(

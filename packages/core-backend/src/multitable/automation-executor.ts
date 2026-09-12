@@ -1033,7 +1033,10 @@ function simulatedGenericClassBPlan(
       const userIds = Array.isArray(config.userIds)
         ? config.userIds.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry))
         : []
-      const message = typeof config.message === 'string' ? config.message : ''
+      // F9b r3: simulate judges the SAME shaped message as the live path (executeSendNotification
+      // trims too) - a whitespace-only message must not test-run green and then fail on its first
+      // live fire.
+      const message = typeof config.message === 'string' ? config.message.trim() : ''
       if (!userIds.length) {
         return { actionType: action.type, status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR, durationMs: 0 }
       }
@@ -4380,7 +4383,14 @@ export class AutomationExecutor {
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
     const userIds = config.userIds as string[] | undefined
-    const message = config.message as string | undefined
+    // F9b r3: message shaping is now the button route's, byte-for-byte
+    // (routes/multitable-button.ts:229 `typeof ... === 'string' ? ....trim() : ''`). Before this, a
+    // whitespace-only or non-string message passed `if (!message)` and persisted a BLANK durable
+    // notification row - the bell renders `message` verbatim (MetaNotificationBell.vue:41-45), so a
+    // blank row is an undismissable no-op for the recipient. Both cases now take the same explicit
+    // step failure the button answers with MESSAGE_REQUIRED. The trimmed value is also what gets
+    // written and emitted, so padding never reaches the notification centre.
+    const message = typeof config.message === 'string' ? config.message.trim() : ''
 
     if (!userIds || userIds.length === 0) {
       return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_NO_RECIPIENTS_ERROR }
