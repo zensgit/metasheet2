@@ -35,10 +35,11 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const SHEET = `sheet_blw_${TS}`
 const BASE = `base_blw_${TS}`
-// F9b: a rule-side send_notification hard-rejects recipients that are not sheet members (the SAME
-// loadSheetMemberUserIdSet口径 the button route uses) BEFORE its durable write, so this branch's notify
-// step needs a REAL, active, multitable-eligible recipient. Scoped to this run's TS so the fixture can
-// never collide with (or delete) another suite's user.
+// F9b: a rule-side send_notification hard-rejects any recipient outside the selectable-people roster
+// (the SAME loadSheetMemberUserIdSet口径 the button route uses: ACTIVE users with a GLOBAL multitable
+// read/write grant — NOT a per-sheet grant) BEFORE its durable write, so this branch's notify step needs
+// a REAL, active, multitable-eligible recipient. Scoped to this run's TS so the fixture can never
+// collide with (or delete) another suite's user.
 const NOTIFY_USER = `u_blw_notify_${TS}`
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const jobsRead = new AutomationJobService()
@@ -268,6 +269,28 @@ describeIfDatabase('multitable automation branch-local wait (A6-3-3a, real DB)',
     expect(byKey.has('0.branch.high_amount.2')).toBe(false) // later branch action not run yet
     expect(byKey.has('1')).toBe(false) // top-level tail not run yet
     expect(await recordStatus(recId)).not.toBe('approved_after_review') // post-wait update not run yet
+
+    // F9b REAL WRITE / REAL READ (the slice's core claim, proven on real Postgres rather than on a
+    // stubbed queryFn): the notify branch child above is `resolved`, so the notification centre must
+    // hold exactly ONE row for the one recipient. This is what proves, against the live schema, that
+    // the event_type CHECK admits 'notification.sent', that the `message` column exists, and that the
+    // trigger's sheet/record context lands verbatim through the SHARED seam.
+    const notified = await q(
+      `SELECT user_id, event_type, message, actor_id, record_id
+         FROM meta_record_subscription_notifications
+        WHERE sheet_id = $1 AND record_id = $2`,
+      [SHEET, recId],
+    )
+    expect(notified.rows).toHaveLength(1)
+    expect(notified.rows[0]).toMatchObject({
+      user_id: NOTIFY_USER,
+      event_type: 'notification.sent',
+      message: 'High amount needs review',
+      record_id: recId,
+    })
+    // This trigger carries no actor (executor context: `payload?.actorId ?? null`), so actor_id is NULL
+    // rather than a stand-in id — the row never invents an actor.
+    expect(notified.rows[0].actor_id).toBeNull()
   })
 
   // §7 — descriptor hydrates onto the branch CHILD (stepKey), NEVER the parent condition_branch job.

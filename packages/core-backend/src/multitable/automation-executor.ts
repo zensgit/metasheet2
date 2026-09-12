@@ -823,17 +823,25 @@ export type AutomationDispatchMode = 'live' | 'simulate'
 export const AUTOMATION_NO_RECIPIENTS_ERROR = '该规则未配置通知接收人，请在编辑器中补充（NO_RECIPIENTS）'
 
 /**
- * F9b: a rule-side send_notification whose recipients are not ALL sheet members fails the WHOLE step —
- * the same hard line the button route draws with RECIPIENT_NOT_AUTHORIZED, so one recipient policy
- * governs both surfaces. Never a partial delivery, never a durable row, never an emit. Values-free on
- * purpose (a count, never the ids) because the manager renders step.error verbatim.
+ * F9b: a rule-side send_notification whose recipients are not ALL inside the selectable-people roster
+ * fails the WHOLE step — the same hard line the button route draws with RECIPIENT_NOT_AUTHORIZED, so one
+ * recipient policy governs both surfaces. Never a partial delivery, never a durable row, never an emit.
+ * Values-free on purpose (a count, never the ids) because the manager renders step.error verbatim.
+ *
+ * WHAT THAT ROSTER ACTUALLY IS (stated exactly, no wider claim): `loadSheetMemberUserIdSet`
+ * (multitable/permission-service.ts:611) delegates to `listSheetPermissionCandidates` (:416), whose USER
+ * branch LEFT JOINs `spreadsheet_permissions` (:440) for the access-level LABEL only — the filter that
+ * survives (:594) keeps every ACTIVE user holding a GLOBAL `multitable:read`/`multitable:write` grant.
+ * So this control means “a selectable person on this platform”; it is NOT “granted on THIS sheet” and NOT
+ * a tenant boundary. That width is inherited ON PURPOSE from the button route (one resolver, zero drift);
+ * narrowing it to per-sheet grants is a both-surfaces change and is deliberately out of this slice.
  */
 export const AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR =
-  '通知接收人不在该表可选成员范围内，请在编辑器中改选（RECIPIENT_NOT_AUTHORIZED）'
+  '通知接收人不在可选人员范围内，请在编辑器中改选（RECIPIENT_NOT_AUTHORIZED）'
 
 /**
  * F9b fail-closed sink: every PRODUCTION AutomationExecutor construction injects `deps.queryFn`
- * (multitable/automation-service.ts:1069 and both routes/multitable-button.ts constructions), so a
+ * (multitable/automation-service.ts:1067 and both routes/multitable-button.ts constructions), so a
  * missing sink is a wiring bug — the step fails instead of silently degrading back to the
  * eventBus-only phantom notification this slice exists to close.
  */
@@ -4363,18 +4371,24 @@ export class AutomationExecutor {
     }
 
     try {
-      // F9b §1 RECIPIENT HARD-REJECT (no write). Same resolver, same set as the button route
-      // (`loadSheetMemberUserIdSet`) — one member口径 for both surfaces, no drift. ANY non-member
-      // fails the WHOLE step: no partial delivery, no durable row, no emit. An unresolvable member
-      // set resolves to the EMPTY set, so this control is fail-closed by construction.
+      // F9b §1 RECIPIENT HARD-REJECT (no write). Same resolver, same set, SAME ARGUMENT as the button
+      // route (`loadSheetMemberUserIdSet(query, sheetId)`, routes/multitable-button.ts:243) — one
+      // recipient口径 for both surfaces, no drift. ANY recipient outside the roster fails the WHOLE step:
+      // no partial delivery, no durable row, no emit. An unresolvable roster resolves to the EMPTY set,
+      // so this control is fail-closed by construction.
+      // WIDTH: the roster is the platform selectable-people set, NOT a per-sheet grant — see
+      // AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR above for the exact derivation.
+      // The `context.sheetId` argument is pinned by tests/unit/automation-rule-notification-persist.test.ts
+      // (“roster is resolved for the TRIGGERING sheet” asserts $1 of the roster query), because a roster
+      // read keyed by the wrong id would still answer a plausible list and stay green otherwise.
       const memberSet = await loadSheetMemberUserIdSet(queryFn, context.sheetId)
       const nonMemberCount = recipients.filter((userId) => !memberSet.has(userId)).length
       if (nonMemberCount > 0) {
-        logger.warn('[automation.send_notification] recipients rejected: not sheet members', {
+        logger.warn('[automation.send_notification] recipients rejected: outside selectable-people roster', {
           sheetId: context.sheetId,
           ruleId: context.ruleId,
           requested: recipients.length,
-          nonMembers: nonMemberCount, // counts only — never the ids, never the message
+          rejected: nonMemberCount, // counts only — never the ids, never the message
         })
         return { actionType: 'send_notification', status: 'failed', error: AUTOMATION_RECIPIENT_NOT_AUTHORIZED_ERROR }
       }

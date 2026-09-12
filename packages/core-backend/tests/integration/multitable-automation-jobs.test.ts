@@ -25,8 +25,9 @@ const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, para
 const jobs = new AutomationJobService()
 
 /**
- * F9b: a rule-side `send_notification` hard-rejects recipients that are not sheet members (the SAME
- * `loadSheetMemberUserIdSet` resolver the button route uses) BEFORE its durable notification write, and
+ * F9b: a rule-side `send_notification` hard-rejects any recipient outside the selectable-people roster
+ * (the SAME `loadSheetMemberUserIdSet` resolver the button route uses — ACTIVE users with a GLOBAL
+ * multitable read/write grant, NOT a per-sheet grant) BEFORE its durable notification write, and
  * an unresolvable roster is the EMPTY set (fail-closed). These A6-3-4 scenarios drive the executor with
  * a STUB queryFn (no real rows needed for the job plane), so the stub has to answer the two roster reads
  * — otherwise the branch notify steps would fail-close for fixture reasons rather than product reasons.

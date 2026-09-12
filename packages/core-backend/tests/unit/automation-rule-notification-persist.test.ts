@@ -49,6 +49,10 @@ function makeHarness(options: { members?: string[]; insertError?: Error } = {}):
   const queryFn = vi.fn(async (sql: string, params?: unknown[]) => {
     calls.push({ sql, params })
     if (MEMBER_ROSTER_SQL.test(sql)) {
+      // The roster read is KEYED BY SHEET ID ($1 of listSheetPermissionCandidates). Answering the same
+      // names for any argument would let a wrong key (e.g. the rule id) stay green, so this stub behaves
+      // like the real query: a roster asked for another sheet comes back EMPTY.
+      if ((params ?? [])[0] !== SHEET_ID) return { rows: [], rowCount: 0 }
       return {
         rows: members.map((id) => ({
           subject_type: 'user',
@@ -251,6 +255,22 @@ describe('F9b — rule send_notification persists to the notification centre', (
     )
     expect(execution.steps[0].error).toBe(AUTOMATION_NO_RECIPIENTS_ERROR)
     expect(h.insertCalls()).toHaveLength(0)
+  })
+
+  it('the roster is resolved for the TRIGGERING SHEET (roster query $1 === sheetId, not the rule id)', async () => {
+    const h = makeHarness({ members: ['u1'] })
+    const execution = await new AutomationExecutor(h.deps).execute(
+      notifyRule({ userIds: ['u1'], message: 'Ping' }),
+      TRIGGER,
+    )
+
+    // Without this, the recipient gate reads SOME roster and the step still succeeds: swapping the
+    // argument for context.ruleId left the whole chain green (refutation r1 / M6).
+    const roster = h.calls.find((call) => MEMBER_ROSTER_SQL.test(call.sql))
+    expect(roster).toBeDefined()
+    expect((roster?.params ?? [])[0]).toBe(SHEET_ID)
+    expect(execution.steps[0].status).toBe('success')
+    expect(h.insertedRows()[0]?.sheet_id).toBe(SHEET_ID)
   })
 
   it('DUPLICATE SEMANTICS, STATED: the rule path has no dedup ledger — two runs write two sets of rows', async () => {

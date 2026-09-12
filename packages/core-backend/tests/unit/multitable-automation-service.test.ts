@@ -46,8 +46,9 @@ function createMockRule(overrides: Partial<AutomationRule> = {}): AutomationRule
   }
 }
 
-// F9b: send_notification now hard-rejects recipients that are not sheet members (same resolver as the
-// button route) BEFORE its durable write. This blanket "every query returns the rules" stub therefore
+// F9b: send_notification now hard-rejects any recipient outside the selectable-people roster (same
+// resolver as the button route: ACTIVE users with a GLOBAL multitable read/write grant, NOT a per-sheet
+// grant) BEFORE its durable write. This blanket "every query returns the rules" stub therefore
 // has to model the member-roster SQL, or every notify rule fail-closes on an empty roster.
 const MOCK_NOTIFY_MEMBER_IDS = ['user_notify', 'user_a', 'user_b', 'u1']
 
