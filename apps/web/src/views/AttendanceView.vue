@@ -132,7 +132,6 @@
         :workbench-status-description="activeWorkbenchStatusDescription"
         :workbench-record-status="workbenchRecordStatus"
         :workbench-focus-date-label="workbenchFocusDateLabel"
-        :workbench-latest-punch-label="activeWorkbenchLatestPunchLabel"
         :workbench-work-minutes="workbenchWorkMinutes"
         :workbench-late-early-label="activeWorkbenchLateEarlyLabel"
         :workbench-has-late-early="activeWorkbenchHasLateEarly"
@@ -1414,7 +1413,7 @@
                       >
                         <div class="attendance__timeline-primary">
                           <strong>{{ formatPunchEventType(event.eventType) }}</strong>
-                          <span>{{ formatDateTime(event.occurredAt) }}</span>
+                          <span>{{ formatDateTime(event.occurredAt, normalizeAttendanceTimeZone(event.timezone) ?? attendanceRecordTimezone(record)) }}</span>
                         </div>
                         <small v-if="formatPunchEventMeta(event)" class="attendance__field-hint">
                           {{ formatPunchEventMeta(event) }}
@@ -10232,6 +10231,7 @@ import {
 } from './attendance/importXlsxConvert'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
+  buildPunchBasePayload,
   buildPunchRetryWithNotePayload,
   classifyPunchErrorOutcome,
   classifyPunchSuccessOutcome,
@@ -10346,6 +10346,13 @@ import { apiFetch as sendApiFetch } from '../utils/api'
 import { provideAttendanceSessionGuard } from '../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../utils/error'
 import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
+import {
+  formatAttendanceClockTime,
+  formatAttendanceDateKey,
+  formatAttendanceDateTime,
+  formatAttendanceWeekday,
+  normalizeAttendanceTimeZone,
+} from './attendance/attendanceDateTimePresentation'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -10523,6 +10530,7 @@ interface AttendanceRecord {
   reportValues?: Record<string, unknown>
   workday_context?: {
     shiftName?: string | null
+    timezone?: string | null
   } | null
 }
 
@@ -11911,16 +11919,14 @@ onUnmounted(() => {
   if (heroClockTimer) clearInterval(heroClockTimer)
 })
 const heroClockTime = computed(() => {
-  const now = heroClockNow.value
-  const pad = (value: number) => String(value).padStart(2, '0')
-  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+  return formatAttendanceClockTime(heroClockNow.value, resolvedAttendanceTimezone.value, true) ?? '--:--:--'
 })
 const heroClockDate = computed(() => {
   const now = heroClockNow.value
-  const pad = (value: number) => String(value).padStart(2, '0')
-  const weekdayZh = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()]
-  const weekdayEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][now.getDay()]
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} · ${tr(weekdayEn, weekdayZh)}`
+  const weekdayLocale = isZh.value ? 'zh-CN' : 'en-US'
+  const dateKey = formatAttendanceDateKey(now, resolvedAttendanceTimezone.value)
+  const weekday = formatAttendanceWeekday(now, weekdayLocale, resolvedAttendanceTimezone.value)
+  return dateKey && weekday ? `${dateKey} · ${weekday}` : '--'
 })
 // Punch outcome clarity (frontend-only, 2026-07-05 design-lock, G2): inline
 // outdoor-punch note retry state. See
@@ -12183,7 +12189,46 @@ const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC
 const timezoneOptions = computed(() =>
   buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
 )
-const overviewTimezoneLabel = computed(() => displayTimezone(defaultTimezone))
+function selfServiceRuleTimezone(): string | null {
+  return normalizeAttendanceTimeZone(
+    String(selfRulesData.value?.runtimeRule?.timezone ?? '').trim(),
+  )
+}
+const reportRecordTimezoneValues = computed(() => Array.from(new Set(
+  records.value
+    .map(record => String(record.workday_context?.timezone ?? '').trim()),
+)))
+const reportRecordTimezones = computed(() => Array.from(new Set(
+  reportRecordTimezoneValues.value
+    .map(timezone => normalizeAttendanceTimeZone(timezone))
+    .filter((timezone): timezone is string => Boolean(timezone)),
+)))
+const reportHasInvalidRecordTimezone = computed(() =>
+  reportRecordTimezoneValues.value.some(timezone => !normalizeAttendanceTimeZone(timezone)))
+function attendanceRecordTimezone(record: AttendanceRecord): string | null {
+  return normalizeAttendanceTimeZone(record.workday_context?.timezone)
+}
+const resolvedAttendanceTimezone = computed<string | null>(() => {
+  if (showReports.value) {
+    return !reportHasInvalidRecordTimezone.value && reportRecordTimezones.value.length === 1
+      ? reportRecordTimezones.value[0]!
+      : null
+  }
+  return normalizeAttendanceTimeZone(selfServiceRuleTimezone())
+})
+const overviewTimezoneLabel = computed(() => {
+  if (showReports.value && reportHasInvalidRecordTimezone.value) {
+    return tr('Some report record timezones are unavailable', '部分报告记录时区不可用')
+  }
+  if (showReports.value && reportRecordTimezones.value.length > 1) {
+    return tr('Multiple report record timezones', '多个报告记录时区')
+  }
+  return resolvedAttendanceTimezone.value
+    ? displayTimezone(resolvedAttendanceTimezone.value)
+    : showReports.value
+      ? tr('Report record timezone unavailable', '报告记录时区不可用')
+      : tr('Rule timezone unavailable', '规则时区不可用')
+})
 const overviewRefreshTimezoneContextHint = computed(() =>
   `${tr('Overview timezone context', '总览时区上下文')}: ${overviewTimezoneLabel.value}`
 )
@@ -13186,7 +13231,7 @@ const attendanceCaliberGuideItems = computed<AttendanceCaliberGuideItem[]>(() =>
   }))
 })
 
-const todayWorkDateKey = computed(() => toDateInput(new Date()))
+const todayWorkDateKey = computed(() => formatAttendanceDateKey(new Date(), resolvedAttendanceTimezone.value) ?? '')
 
 const latestAttendanceRecord = computed<AttendanceRecord | null>(() => {
   if (records.value.length === 0) return null
@@ -13197,28 +13242,23 @@ const activeWorkbenchRecord = computed<AttendanceRecord | null>(() =>
   records.value.find(record => record.work_date === todayWorkDateKey.value) ?? latestAttendanceRecord.value
 )
 
-// UI-P1 (ui-p1-remainder design-lock D1): today's two-node punch timeline for
-// the hero card — reuses activeWorkbenchRecord, renders only for TODAY's row.
+// UI-P1 (ui-p1-remainder design-lock D1): two-node punch timeline for the
+// workbench record. When there is no row for today the workbench intentionally
+// falls back to the latest row, so preserve both event polarities from that row
+// instead of collapsing its checkout into an untyped "latest punch" label.
 const heroTodayTimeline = computed(() => {
   const record = activeWorkbenchRecord.value
-  if (!record || record.work_date !== todayWorkDateKey.value) return null
+  if (!record) return null
   const timeOf = (value: string | null | undefined) => {
-    if (!value) return null
-    const parsed = new Date(value)
-    if (Number.isNaN(parsed.getTime())) return null
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+    return formatAttendanceClockTime(
+      value,
+      attendanceRecordTimezone(record),
+    )
   }
   return {
     checkIn: timeOf(record.first_in_at),
     checkOut: timeOf(record.last_out_at),
   }
-})
-
-const activeWorkbenchLatestPunchLabel = computed(() => {
-  const record = activeWorkbenchRecord.value
-  if (!record) return '--'
-  return formatDateTime(record.last_out_at || record.first_in_at)
 })
 
 const activeWorkbenchStatusDescription = computed(() =>
@@ -16812,11 +16852,17 @@ function normalizeDateKey(value: string | null | undefined): string | null {
   return date.toISOString().slice(0, 10)
 }
 
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return '--'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '--'
-  return date.toLocaleString(locale.value)
+function formatDateTime(value: string | null | undefined, timeZone?: string | null): string {
+  if (!showOverview.value && !showReports.value && timeZone === undefined) {
+    if (!value) return '--'
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? '--' : date.toLocaleString(locale.value)
+  }
+  return formatAttendanceDateTime(
+    value,
+    locale.value,
+    timeZone === undefined ? resolvedAttendanceTimezone.value : timeZone,
+  )
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -18054,7 +18100,10 @@ function formatRecordReportCell(record: AttendanceRecord, field: AttendanceRecor
     case 'attendance_group':
       return firstRecordValue(recordMetaValue(record, ['attendanceGroup', 'attendance_group', '考勤组']))
     case 'punch_times':
-      return [formatDateTime(record.first_in_at), formatDateTime(record.last_out_at)].filter(item => item !== '--').join(' / ') || '--'
+      return [
+        formatDateTime(record.first_in_at, attendanceRecordTimezone(record)),
+        formatDateTime(record.last_out_at, attendanceRecordTimezone(record)),
+      ].filter(item => item !== '--').join(' / ') || '--'
     case 'punch_result':
     case 'attendance_result':
       return formatStatus(status)
@@ -21982,11 +22031,12 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
   // happens on a punch failure, unchanged from before.
   let postPunchRefresh: (() => Promise<unknown>) | null = null
   try {
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
     const orgValue = normalizedOrgId()
-    const basePayload: PunchRetryBasePayload = orgValue
-      ? { eventType, timezone, orgId: orgValue }
-      : { eventType, timezone }
+    const basePayload: PunchRetryBasePayload = buildPunchBasePayload(
+      eventType,
+      selfServiceRuleTimezone(),
+      orgValue,
+    )
     // Hard boundary (design-lock §4): no geolocation collected, no injected
     // meta.outdoor — the only extra field ever sent is the backend-accepted
     // meta.note string, and only as part of a G2 user-initiated retry.
@@ -22618,8 +22668,10 @@ async function refreshAll(): Promise<boolean> {
   try {
     const tasks = [loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()]
     if (showOverview.value) {
+      tasks.push(loadSelfAttendanceRules())
+    }
+    if (showOverview.value) {
       tasks.push(
-        loadSelfAttendanceRules(),
         loadEmployeeQuickActionIcons(),
         loadLeaveTypes({ activeOnly: true }),
         loadOvertimeRules({ activeOnly: true }),

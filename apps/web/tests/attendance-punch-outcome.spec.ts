@@ -21,6 +21,7 @@ import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
 import { createNetworkUnavailableError } from '../src/utils/networkErrors'
 import {
+  buildPunchBasePayload,
   buildPunchRetryWithNotePayload,
   classifyPunchErrorOutcome,
   classifyPunchSuccessOutcome,
@@ -95,7 +96,16 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
 
 /** Minimal default mock: every non-punch endpoint returns an empty-but-ok payload so mount + refreshAll() never throw. */
 function installBaselineMock(): void {
-  vi.mocked(apiFetch).mockImplementation(async () => jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+  vi.mocked(apiFetch).mockImplementation(async (input) => {
+    const url = typeof input === 'string' ? input : input.url
+    if (url.includes('/api/attendance/rules/me')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: { runtimeRule: { timezone: 'Asia/Shanghai' } },
+      })
+    }
+    return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+  })
 }
 
 describe('Punch outcome clarity (pure)', () => {
@@ -112,6 +122,20 @@ describe('Punch outcome clarity (pure)', () => {
     expect(checkOut.kind).toBe('recorded')
     expect(checkOut.message).toBe('Check out recorded.')
     expect(checkOut.shouldRefreshRequests).toBe(false)
+  })
+
+  it('builds punch payloads from the effective rule timezone, never a browser fallback', () => {
+    expect(buildPunchBasePayload('check_in', ' Asia/Shanghai ', '')).toEqual({
+      eventType: 'check_in',
+      timezone: 'Asia/Shanghai',
+    })
+    expect(buildPunchBasePayload('check_out', null, ' org-9 ')).toEqual({
+      eventType: 'check_out',
+      orgId: 'org-9',
+    })
+    expect(buildPunchBasePayload('check_in', 'Invalid/Zone', null)).toEqual({
+      eventType: 'check_in',
+    })
   })
 
   it('classifies pendingApproval:true as pendingApproval and never says "recorded"', () => {
@@ -237,6 +261,7 @@ describe('Attendance punch outcome clarity (mount)', () => {
         expect((init as RequestInit | undefined)?.method).toBe('POST')
         const body = JSON.parse(String((init as RequestInit).body))
         expect(Object.keys(body).sort()).toEqual(['eventType', 'timezone'])
+        expect(body.timezone).toBe('Asia/Shanghai')
         expect(body).not.toHaveProperty('location')
         expect(body).not.toHaveProperty('meta')
         punchPosted = true

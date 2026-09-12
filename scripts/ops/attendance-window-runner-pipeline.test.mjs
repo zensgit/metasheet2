@@ -1919,6 +1919,10 @@ function assertSoakContract({ remote, workflow }) {
       "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
       "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
       "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
+      "ON family_user.username = :'user_prefix' || lpad(family_i::text, 2, '0')",
+      "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
+      "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
+      "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
       "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
       "JOIN users u ON u.username = :'user_prefix' || lpad(i::text, 2, '0')",
     ],
@@ -2010,6 +2014,49 @@ function assertSoakContract({ remote, workflow }) {
   )
   assert.match(remote, /SOAK_USER_PREFIX="synth-w4w7-"/, 'the closed synthetic user family prefix must be pinned')
   assert.ok(slices.seed.includes("'attendance:write'"), 'seed must grant attendance:write (punch route is withPermission-gated)')
+  assert.ok(
+    slices.seed.includes("SELECT u.id, 'attendance:read'"),
+    'seed must grant attendance:read to each synthetic user (self-service policy routes are permission-gated)',
+  )
+  assert.match(
+    slices.seed,
+    /ON CONFLICT \(org_id, code\) DO UPDATE[\s\S]*?is_active = true/,
+    'seed must idempotently leave its dedicated leave type active',
+  )
+  assert.match(
+    slices.seed,
+    /ON CONFLICT \(org_id, name\) DO UPDATE[\s\S]*?is_active = true/,
+    'seed must idempotently leave its dedicated overtime rule active',
+  )
+  assert.match(
+    slices.seed,
+    /substr\(md5\('w4w7-soak-selfservice-scope:' \|\| :'org' \|\| ':' \|\| u\.id\), 1, 8\)[\s\S]*?\|\| '-4' \|\|[\s\S]*?\|\| '-8' \|\|[\s\S]*?\)::uuid/,
+    'each synthetic self-service scope must use a deterministic RFC 4122 v4-shaped id',
+  )
+  assert.match(
+    slices.seed,
+    /substr\(md5\('w4w7-soak-shift-swap-source:' \|\| :'org' \|\| ':' \|\| u\.username\), 1, 8\)[\s\S]*?\|\| '-4' \|\|[\s\S]*?\|\| '-8' \|\|[\s\S]*?\)::uuid/,
+    'each manual shift-swap assignment must use a deterministic RFC 4122 v4-shaped id',
+  )
+  assert.match(
+    slices.seed,
+    /ARRAY\['view'\]::text\[\][\s\S]*?jsonb_build_object\([\s\S]*?'userIds'/,
+    'synthetic users may receive only view scope over the closed user-id family',
+  )
+  assert.match(
+    slices.seed,
+    /:'end_date'::date \+ 1, :'end_date'::date \+ 1, true,[\s\S]*?NULL, NULL, NULL, NULL, 'published', 'regular'[\s\S]*?FROM generate_series\(1, 2\)/,
+    'shift-swap fixtures must be two same-day manual published assignments outside the soak date window',
+  )
+  assert.match(
+    remote,
+    /users_per_org must be 2\.\.99 so the shift-swap fixture has two distinct users/,
+    'soak seed must refuse a user family too small to exercise shift swap',
+  )
+  assert.ok(
+    remote.includes('(( users_per_org >= 2 ))'),
+    'the users-per-org lower bound must enforce the two-user shift-swap fixture contract',
+  )
   assert.ok(slices.seed.includes('"$SOAK_W4C5_CLI" plan'), 'W4 posture must go through the Gate C CLI plan')
   assert.ok(slices.seed.includes('"$SOAK_W4C5_CLI" apply'), 'W4 posture must go through the Gate C CLI apply')
   assert.ok(slices.seed.includes('"$SOAK_W7_CLI" plan'), 'W7 posture must go through the W7-3 CLI plan')
@@ -2734,6 +2781,62 @@ test('combined-soak actions: full source contract (workflow wiring, order gates,
   })
 })
 
+test('MUTATION: dropping the synthetic attendance:read grant turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace("SELECT u.id, 'attendance:read'", "SELECT u.id, 'attendance:write'")
+  assert.notEqual(mutated, original, 'mutation anchor must hit')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /attendance:read/,
+  )
+})
+
+test('MUTATION: changing synthetic scheduler scope from view turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace("ARRAY['view']::text[]", "ARRAY['edit']::text[]")
+  assert.notEqual(mutated, original, 'mutation anchor must hit')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /view scope/,
+  )
+})
+
+test('MUTATION: raw md5 UUIDs without RFC version and variant bits turn the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    /\(\n {9}substr\(md5\('w4w7-soak-shift-swap-source:'[\s\S]*?\n {7}\)::uuid/,
+    "md5('w4w7-soak-shift-swap-source:' || :'org' || ':' || u.username)::uuid",
+  )
+  assert.notEqual(mutated, original, 'mutation anchor must hit')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /RFC 4122/,
+  )
+})
+
+test('MUTATION: moving manual shift-swap fixtures into the soak window turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    ":'end_date'::date + 1, :'end_date'::date + 1, true,",
+    ":'end_date'::date, :'end_date'::date, true,",
+  )
+  assert.notEqual(mutated, original, 'mutation anchor must hit')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /outside the soak date window/,
+  )
+})
+
+test('MUTATION: allowing a one-user soak family turns the shift-swap fixture contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace('(( users_per_org >= 2 ))', '(( users_per_org >= 1 ))')
+  assert.notEqual(mutated, original, 'mutation anchor must hit')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /two-user shift-swap fixture contract/,
+  )
+})
+
 test('MUTATION: deleting the soak-flags baseline-marker gate turns the soak contract red', () => {
   const original = readFileSync(REMOTE_SH, 'utf8')
   const mutated = original.replace('  [[ -f "$SOAK_BASELINE_MARKER" ]] \\\n', '')
@@ -3341,6 +3444,12 @@ const INJECT = "\n'; touch /tmp/PWNED_soak_test; echo '"
 test('P2-1 negative control: a benign single-line soak-seed input PASSES workflow validation (harness discriminates)', () => {
   const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: THREE_UUIDS, SOAK_OPTS: 'owner_ref=ownerX;entrypoint_inventory_ref=invY;users_per_org=10' })
   assert.equal(r.status, 0, `benign input must pass validation; stderr: ${r.stderr}`)
+})
+
+test('workflow rejects a synthetic family too small for the two-user shift-swap fixture', () => {
+  const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: THREE_UUIDS, SOAK_OPTS: 'owner_ref=ownerX;entrypoint_inventory_ref=invY;users_per_org=1' })
+  assert.equal(r.status, 2, `users_per_org=1 must be rejected before SSH; got ${r.status}, stderr: ${r.stderr}`)
+  assert.match(r.stderr, /users_per_org must be 2\.\.99/, 'rejection must name the shared workflow/remote lower bound')
 })
 
 test('P2-1: a newline-injection payload in soak_orgs is REJECTED by workflow validation', () => {

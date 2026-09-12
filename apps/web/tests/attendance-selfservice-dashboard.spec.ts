@@ -121,6 +121,7 @@ function installOverviewMock(options?: { anomalyItems?: Array<Record<string, unk
               early_leave_minutes: 18,
               status: 'late_early',
               meta: {},
+              workday_context: { timezone: 'Asia/Shanghai' },
             },
             {
               id: 'record-yesterday',
@@ -132,6 +133,7 @@ function installOverviewMock(options?: { anomalyItems?: Array<Record<string, unk
               early_leave_minutes: 0,
               status: 'adjusted',
               meta: {},
+              workday_context: { timezone: 'Asia/Shanghai' },
             },
           ],
           total: 2,
@@ -445,6 +447,21 @@ function installShiftSwapSelfServiceMock(options: { actorUserId?: string } = {})
           items: [
             {
               assignment: {
+                id: 'assignment-generated',
+                userId: 'swap-user-a',
+                shiftId: 'shift-generated',
+                startDate: '2026-04-15',
+                endDate: '2026-04-15',
+                isActive: true,
+                publishStatus: 'published',
+                assignmentKind: 'regular',
+                producerType: 'attendance_group_fixed_schedule',
+                slotIndex: 0,
+              },
+              shift: { id: 'shift-generated', name: 'Generated', timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00', lateGraceMinutes: 10, earlyGraceMinutes: 5, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+            },
+            {
+              assignment: {
                 id: 'assignment-a',
                 userId: 'swap-user-a',
                 shiftId: 'shift-a',
@@ -473,8 +490,23 @@ function installShiftSwapSelfServiceMock(options: { actorUserId?: string } = {})
               },
               shift: { id: 'shift-b', name: 'Evening', timezone: 'Asia/Shanghai', workStartTime: '13:00', workEndTime: '22:00', lateGraceMinutes: 10, earlyGraceMinutes: 5, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
             },
+            {
+              assignment: {
+                id: 'assignment-multi-day',
+                userId: 'swap-user-b',
+                shiftId: 'shift-multi-day',
+                startDate: '2026-04-16',
+                endDate: '2026-04-17',
+                isActive: true,
+                publishStatus: 'published',
+                assignmentKind: 'regular',
+                producerType: null,
+                slotIndex: 0,
+              },
+              shift: { id: 'shift-multi-day', name: 'Multi-day', timezone: 'Asia/Shanghai', workStartTime: '13:00', workEndTime: '22:00', lateGraceMinutes: 10, earlyGraceMinutes: 5, roundingMinutes: 5, workingDays: [1, 2, 3, 4, 5] },
+            },
           ],
-          total: 2,
+          total: 4,
         },
       })
     }
@@ -741,6 +773,9 @@ describe('Attendance self-service dashboard', () => {
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Shanghai Store A')
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Morning rotation')
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('09:00-18:00 · Asia/Shanghai')
+    expect(container?.textContent).toContain('Summary timezone context: UTC+08:00 · Asia/Shanghai')
+    expect(container?.textContent).toContain('Calendar timezone context: UTC+08:00 · Asia/Shanghai')
+    expect(container?.textContent).toContain('Request timezone context: UTC+08:00 · Asia/Shanghai')
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Mon, Tue, Wed, Thu, Fri')
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Late 5m / Early 5m')
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Severe 30m / Absence 60m')
@@ -766,6 +801,114 @@ describe('Attendance self-service dashboard', () => {
     }
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('Adjusted')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('manual correction')
+  })
+
+  it('renders report context and punch instants in the resolved record timezone', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi(12)
+
+    expect(container!.textContent).toContain('Request report timezone context: UTC+08:00 · Asia/Shanghai')
+    expect(container!.textContent).toContain('Records timezone context: UTC+08:00 · Asia/Shanghai')
+    expect(container!.textContent).toContain('9:18:00 AM')
+    expect(container!.textContent).not.toContain('1:18:00 AM')
+  })
+
+  it('does not substitute another record or the current rule when one report row lacks historical timezone evidence', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch/events?')) {
+        const workDate = url.includes('from=2026-04-15') ? '2026-04-15' : '2026-04-14'
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: `event-${workDate}`,
+              userId: 'swap-user-a',
+              workDate,
+              eventType: 'check_in',
+              occurredAt: workDate === '2026-04-15'
+                ? '2026-04-15T01:18:00.000Z'
+                : '2026-04-14T00:34:00.000Z',
+              source: 'terminal',
+              timezone: null,
+            }],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/records?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'record-with-timezone',
+                work_date: '2026-04-15',
+                first_in_at: '2026-04-15T01:18:00.000Z',
+                last_out_at: '2026-04-15T09:42:00.000Z',
+                work_minutes: 504,
+                late_minutes: 0,
+                early_leave_minutes: 0,
+                status: 'normal',
+                meta: {},
+                workday_context: { timezone: 'Asia/Shanghai' },
+              },
+              {
+                id: 'record-without-timezone',
+                work_date: '2026-04-14',
+                first_in_at: '2026-04-14T00:34:00.000Z',
+                last_out_at: '2026-04-14T08:56:00.000Z',
+                work_minutes: 502,
+                late_minutes: 0,
+                early_leave_minutes: 0,
+                status: 'normal',
+                meta: {},
+                workday_context: null,
+              },
+            ],
+            total: 2,
+            reportFields: [
+              { code: 'work_date', name: 'Date', sortOrder: 1000 },
+              { code: 'punch_times', name: 'Punch times', sortOrder: 2000 },
+            ],
+          },
+        })
+      }
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi(12)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(([input]) => {
+      const url = typeof input === 'string' ? input : input.url
+      return url.includes('/api/attendance/rules/me')
+    })).toBe(false)
+    expect(container!.textContent).toContain('Some report record timezones are unavailable')
+    const recordRows = container!.querySelectorAll('[data-report-card="records"] tbody > tr')
+    expect(recordRows).toHaveLength(2)
+    expect(recordRows[0]?.textContent).toContain('9:18:00 AM')
+    expect(recordRows[1]?.textContent).toContain('--')
+    expect(recordRows[1]?.textContent).not.toContain('8:34:00 AM')
+
+    const detailsButtons = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-report-card="records"] button'))
+      .filter(button => button.textContent?.trim() === 'Details')
+    expect(detailsButtons).toHaveLength(2)
+    detailsButtons[0]!.click()
+    await flushUi()
+    expect(container!.querySelector('.attendance__timeline-item')?.textContent).toContain('9:18:00 AM')
+
+    findButton(container!, 'Hide').click()
+    await flushUi()
+    const remainingDetails = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-report-card="records"] button'))
+      .filter(button => button.textContent?.trim() === 'Details')
+    remainingDetails[1]!.click()
+    await flushUi()
+    const missingTimezoneTimeline = container!.querySelector('.attendance__timeline-item')?.textContent ?? ''
+    expect(missingTimezoneTimeline).toContain('--')
+    expect(missingTimezoneTimeline).not.toContain('8:34:00 AM')
   })
 
   // ---- Employee-overview task-first design-lock (RATIFIED 2026-07-21) ----
@@ -1978,6 +2121,8 @@ describe('Attendance self-service dashboard', () => {
       expect(requesterAssignment!.value).toBe('assignment-a')
       expect(counterpartyAssignment!.value).toBe('assignment-b')
     }, { timeout: 1000 })
+    expect(Array.from(requesterAssignment!.options).map(option => option.value).filter(Boolean)).toEqual(['assignment-a'])
+    expect(Array.from(counterpartyAssignment!.options).map(option => option.value).filter(Boolean)).toEqual(['assignment-b'])
 
     const reason = container!.querySelector<HTMLInputElement>('#attendance-request-reason')
     expect(reason).toBeTruthy()
@@ -2535,12 +2680,9 @@ describe('Attendance self-service dashboard', () => {
   })
 
   it('UI-P0 hero punch card: live clock renders and punch buttons keep their contract', async () => {
-    const apiFetchMock = vi.mocked(apiFetch)
-    apiFetchMock.mockImplementation(async () => jsonResponse(200, { ok: true, data: { items: [], summary: null } }))
-
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
-    await flushUi(4)
+    await flushUi()
 
     const hero = container!.querySelector('[data-testid="attendance-hero-punch"]') as HTMLElement | null
     expect(hero, 'expected hero punch card in overview mode').toBeTruthy()
@@ -2561,6 +2703,27 @@ describe('Attendance self-service dashboard', () => {
     expect(checkOut!.classList.contains('attendance__btn')).toBe(true)
   })
 
+  it('UI-P0 hero clock and work date follow the rule timezone across a browser-day boundary', async () => {
+    vi.setSystemTime(new Date('2026-04-15T16:30:00.000Z'))
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="attendance-hero-time"]')?.textContent).toBe('00:30:00')
+    expect(container!.querySelector('[data-attendance-overview-greeting]')?.textContent).toContain('2026-04-16')
+  })
+
+  it('UI-P0 does not guess a browser timezone when the rule timezone is unavailable', async () => {
+    vi.mocked(apiFetch).mockImplementation(async () =>
+      jsonResponse(200, { ok: true, data: { items: [], summary: null } }))
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="attendance-hero-time"]')?.textContent).toBe('--:--:--')
+    expect(container!.textContent).toContain('Rule timezone unavailable')
+  })
+
   it('UI-P0 hero punch card: absent outside overview mode', async () => {
     const apiFetchMock = vi.mocked(apiFetch)
     apiFetchMock.mockImplementation(async () => jsonResponse(200, { ok: true, data: { items: [], summary: null } }))
@@ -2579,10 +2742,8 @@ describe('Attendance self-service dashboard', () => {
 
     const timeline = container!.querySelector('[data-testid="attendance-hero-timeline"]') as HTMLElement | null
     expect(timeline, 'expected today timeline in hero card').toBeTruthy()
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const timeOf = (iso: string) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}` }
-    expect(timeline!.textContent).toContain(timeOf('2026-04-15T09:18:00+08:00'))
-    expect(timeline!.textContent).toContain(timeOf('2026-04-15T17:42:00+08:00'))
+    expect(timeline!.textContent).toContain('09:18')
+    expect(timeline!.textContent).toContain('17:42')
     expect(timeline!.querySelectorAll('.attendance__hero-timeline-node--pending')).toHaveLength(0)
   })
 
@@ -2596,7 +2757,7 @@ describe('Attendance self-service dashboard', () => {
     // late-early — no fourth "Attention items" stat (that signal now lives
     // solely in the Needs-attention band, §4.2, avoiding a second copy).
     const summary = container!.querySelector('.attendance__summary--workbench') as HTMLElement
-    expect(summary.textContent).toContain("Today's hours")
+    expect(summary.textContent).toContain('Hours · 4/15/2026')
     expect(summary.textContent).toContain('7h 24m')
     expect(summary.textContent).not.toContain('444')
     expect(summary.textContent).toContain('Late / Early')
@@ -2607,7 +2768,7 @@ describe('Attendance self-service dashboard', () => {
     expect(warning!.textContent).toContain('18m / 18m')
   })
 
-  it('UI-P1: no timeline when the active record is not from today', async () => {
+  it('UI-P1: the latest completed record preserves both timeline nodes when today has no row', async () => {
     const apiFetchMock = vi.mocked(apiFetch)
     const baseImpl = apiFetchMock.getMockImplementation()!
     apiFetchMock.mockImplementation(async (input: unknown, init?: unknown) => {
@@ -2626,6 +2787,7 @@ describe('Attendance self-service dashboard', () => {
               early_leave_minutes: 0,
               status: 'adjusted',
               meta: {},
+              workday_context: { timezone: 'Asia/Shanghai' },
             }],
             total: 1,
           },
@@ -2638,7 +2800,11 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+    const timeline = container!.querySelector('[data-testid="attendance-hero-timeline"]')
+    expect(timeline).toBeTruthy()
+    expect(timeline!.textContent).toContain('09:00')
+    expect(timeline!.textContent).toContain('18:06')
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked out')
   })
 
   it('UI-P1 768px targets exist: stat-card container class + filter fields (selector-preservation guard)', async () => {

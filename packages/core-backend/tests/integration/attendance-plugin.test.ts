@@ -13136,7 +13136,7 @@ attendanceIntegrationDescribe(
     }
   })
 
-  it('exposes workday context for holiday overrides and shift schedules on attendance records', async () => {
+  it('exposes persisted-timezone workday context for holiday overrides and shift schedules', async () => {
     if (!baseUrl) return
 
     const userId = randomUUID()
@@ -13238,9 +13238,9 @@ attendanceIntegrationDescribe(
           {
             workDate: sundayDate,
             fields: {
-              firstInAt: `${sundayDate}T09:00:00Z`,
+              firstInAt: `${sundayDate}T09:30:00Z`,
               lastOutAt: `${sundayDate}T18:00:00Z`,
-              status: 'normal',
+              status: 'late',
             },
           },
           {
@@ -13257,6 +13257,16 @@ attendanceIntegrationDescribe(
       }),
     })
     expect(importRes.status).toBe(200)
+
+    const updateShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ timezone: 'Asia/Shanghai' }),
+    })
+    expect(updateShiftRes.status).toBe(200)
 
     const recordsRes = await requestJson(
       `${baseUrl}/api/attendance/records?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}&userId=${encodeURIComponent(userId)}`,
@@ -13279,6 +13289,7 @@ attendanceIntegrationDescribe(
       matchesStored: true,
       source: 'shift',
       sourceName: shiftName,
+      timezone: 'UTC',
       weekday: 0,
       workingDays: [0],
       holiday: null,
@@ -13292,6 +13303,7 @@ attendanceIntegrationDescribe(
       resolvedIsWorkday: false,
       matchesStored: true,
       source: 'rule',
+      timezone: 'UTC',
       weekday: 3,
       workingDays: [1, 2, 3, 4, 5],
       holiday: {
@@ -13300,6 +13312,19 @@ attendanceIntegrationDescribe(
       },
     })
     expect(typeof wednesdayRecord?.workday_context?.holiday?.name).toBe('string')
+
+    const anomaliesRes = await requestJson(
+      `${baseUrl}/api/attendance/anomalies?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}&userId=${encodeURIComponent(userId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(anomaliesRes.status).toBe(200)
+    const anomalyItems = (anomaliesRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+    const sundayAnomaly = anomalyItems.find((row) => String(row?.workDate ?? '').slice(0, 10) === sundayDate)
+    expect(sundayAnomaly?.workdayContext?.timezone).toBe('UTC')
   })
 
   it('keeps existing records after rolling back a later update batch', async () => {

@@ -27,6 +27,8 @@
 // backend behavior. The only extra field this module ever adds to a retry
 // payload is the already-accepted `meta.note` string.
 
+import { normalizeAttendanceTimeZone } from './attendanceDateTimePresentation'
+
 export type PunchEventType = 'check_in' | 'check_out'
 
 export type TranslateFn = (en: string, zh: string) => string
@@ -137,12 +139,26 @@ export function classifyPunchErrorOutcome(
 /** The fields a normal (non-retry) punch already sends. */
 export interface PunchRetryBasePayload {
   eventType: PunchEventType
-  timezone: string
+  timezone?: string
   orgId?: string
 }
 
 export interface PunchRetryWithNotePayload extends PunchRetryBasePayload {
   meta: { note: string }
+}
+
+export function buildPunchBasePayload(
+  eventType: PunchEventType,
+  ruleTimezone: string | null | undefined,
+  orgId?: string | null,
+): PunchRetryBasePayload {
+  const timezone = normalizeAttendanceTimeZone(ruleTimezone)
+  const normalizedOrgId = String(orgId ?? '').trim()
+  return {
+    eventType,
+    ...(timezone ? { timezone } : {}),
+    ...(normalizedOrgId ? { orgId: normalizedOrgId } : {}),
+  }
 }
 
 /**

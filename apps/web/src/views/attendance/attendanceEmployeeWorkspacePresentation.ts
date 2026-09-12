@@ -104,9 +104,6 @@ export function suggestOffDutyTime(summary: string | null | undefined): string |
 
 export function isClockedIn(
   timeline: { checkIn: string | null; checkOut: string | null } | null | undefined,
-  latestPunchLabel: string | null | undefined,
 ): boolean {
-  if (timeline?.checkIn) return true
-  if (!latestPunchLabel || latestPunchLabel === '--:--') return false
-  return /\d{1,2}:\d{2}/.test(latestPunchLabel)
+  return Boolean(timeline?.checkIn && !timeline.checkOut)
 }
