@@ -29,6 +29,9 @@ const {
   unsupportedAdapterOperation,
 } = require('../contracts.cjs')
 const { getPath, isBlank } = require('../transform-engine.cjs')
+// G52: ONE character rule for SQL object names, owned by the shared read-only helper that also does
+// the bracket-quoting downstream — so this gate cannot drift from the quoter it stands in front of.
+const { assertSqlServerIdentifierPart } = require('@metasheet/mssql-readonly-utils')
 const {
   isDataSourceRequestTimeoutDisabledError,
   refuseB2aArmedSqlServerRequestTimeoutDisabled,
@@ -48,8 +51,7 @@ const LOOKUP_PROJECTION_CONFIG_KEYS = new Set([
 ])
 const LOOKUP_PROJECTION_FIELD_ALIASES = Object.freeze(['FNumber', 'FName'])
 const FORBIDDEN_PROPERTY_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
-const SQL_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
-const SQL_OBJECT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/
+const SQL_OBJECT_MAX_PARTS = 2
 
 // `requiredString` / `optionalString` are kept local (contracts.cjs only exposes them under
 // `__internals`); mirrors the staging adapter's approach.
@@ -99,11 +101,33 @@ function snapshotAllowedObject(value, field, allowedKeys) {
   return out
 }
 
+// G52 — the projection's own object/column names may now be non-ASCII (中文表名) or contain spaces,
+// because the CHARACTER rule is `assertSqlServerIdentifierPart` from the shared helper: the same
+// function the SQL Server path calls right before it brackets the name and doubles any `]`. Widening
+// here without widening there would be pointless, and widening there without here would leave this
+// config surface refusing names the server accepts — one function keeps both honest.
+//
+// THREE things stay local and STRICTER than the helper:
+//   • at most TWO dot-separated parts (`schema.object`). `splitQualifiedObject` below only understands
+//     schema + object, and a three-part name is CROSS-DATABASE — a boundary this adapter has never
+//     crossed. Not opened here. (Four-part linked-server names the helper refuses outright.)
+//   • `__proto__` / `prototype` / `constructor` stay refused PER SEGMENT: these strings are also used
+//     as JavaScript object keys while the projection is applied to rows.
+//   • surrounding whitespace is REFUSED, not trimmed. The value is returned verbatim and later compared
+//     for equality against `request.object` (assertLookupProjectionReadRequest); normalising one side
+//     of that comparison would silently make a configured projection unmatchable.
 function requiredSqlIdentifier(value, field, { qualified = false } = {}) {
-  const patternMatches = typeof value === 'string' && (qualified ? SQL_OBJECT_PATTERN : SQL_IDENTIFIER_PATTERN).test(value)
-  const containsForbiddenSegment = patternMatches && value.split('.').some((segment) => FORBIDDEN_PROPERTY_KEYS.has(segment))
-  if (!patternMatches || containsForbiddenSegment) {
-    throw new AdapterValidationError(`${field} must be a SQL identifier`, { field })
+  const invalid = () => new AdapterValidationError(`${field} must be a SQL identifier`, { field })
+  if (typeof value !== 'string' || value === '' || value !== value.trim()) throw invalid()
+  const segments = value.split('.')
+  if (segments.length > (qualified ? SQL_OBJECT_MAX_PARTS : 1)) throw invalid()
+  for (const segment of segments) {
+    if (FORBIDDEN_PROPERTY_KEYS.has(segment)) throw invalid()
+    try {
+      assertSqlServerIdentifierPart(segment, field)
+    } catch {
+      throw invalid()
+    }
   }
   return value
 }

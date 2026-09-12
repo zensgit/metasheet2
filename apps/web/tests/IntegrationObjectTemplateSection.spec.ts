@@ -44,6 +44,13 @@ describe('IntegrationObjectTemplateSection (unit)', () => {
     await nextTick()
   }
 
+  // The click handler is async (it awaits the clipboard write), so a re-render needs the macrotask
+  // turn AND a Vue tick — two bare nextTicks land one microtask short.
+  async function flush(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+  }
+
   const emptySchema: IntegrationObjectSchema = { object: '', fields: [] }
   const noopFn = (..._args: unknown[]): unknown => undefined
 
@@ -123,5 +130,92 @@ describe('IntegrationObjectTemplateSection (unit)', () => {
     }
     await nextTick()
     expect(onUpdateSourceSystemId).toHaveBeenCalledWith('sys-1')
+  })
+
+  // G52 (second half) — the field list is filterable, type-badged and click-to-copy. A real ERP table
+  // is 40-200 columns and, once SQL Server object names may be 中文, unskimmable as a bare <ul>.
+  describe('schema field list (G52)', () => {
+    const schema: IntegrationObjectSchema = {
+      object: '仓库.销售订单',
+      fields: [
+        { name: '物料编码', label: '物料编码', type: 'nvarchar(50)' },
+        { name: '供应商 名称', label: 'Supplier', type: 'nvarchar(200)' },
+        { name: 'FQty', label: '数量', type: 'decimal(18,4)' },
+      ],
+    }
+
+    it('renders every field with its declared type badge and a total count', async () => {
+      await mountSection(baseProps({ sourceSchema: schema }))
+      expect(container?.querySelector('[data-testid="source-field-物料编码"]')).toBeTruthy()
+      expect(container?.querySelector('[data-testid="source-field-供应商 名称"]')).toBeTruthy()
+      expect(container?.querySelector('[data-testid="source-field-count"]')?.textContent?.trim()).toBe('3 / 3')
+      expect(container?.textContent).toContain('nvarchar(50)')
+    })
+
+    it('filters on name, label OR type — case-insensitively', async () => {
+      await mountSection(baseProps({ sourceSchema: schema }))
+      const input = container?.querySelector<HTMLInputElement>('[data-testid="source-field-filter"]')
+      expect(input).toBeTruthy()
+
+      // by NAME (non-ASCII)
+      if (input) { input.value = '供应商'; input.dispatchEvent(new Event('input')) }
+      await nextTick()
+      expect(container?.querySelector('[data-testid="source-field-供应商 名称"]')).toBeTruthy()
+      expect(container?.querySelector('[data-testid="source-field-FQty"]')).toBeFalsy()
+      expect(container?.querySelector('[data-testid="source-field-count"]')?.textContent?.trim()).toBe('1 / 3')
+
+      // by LABEL, in the other language than the name — the reason label is searched at all
+      if (input) { input.value = '数量'; input.dispatchEvent(new Event('input')) }
+      await nextTick()
+      expect(container?.querySelector('[data-testid="source-field-FQty"]')).toBeTruthy()
+
+      // by TYPE, case-insensitively
+      if (input) { input.value = 'DECIMAL'; input.dispatchEvent(new Event('input')) }
+      await nextTick()
+      expect(container?.querySelector('[data-testid="source-field-FQty"]')).toBeTruthy()
+      expect(container?.querySelector('[data-testid="source-field-物料编码"]')).toBeFalsy()
+
+      // no match -> an explicit empty row, not a blank box
+      if (input) { input.value = 'zzz'; input.dispatchEvent(new Event('input')) }
+      await nextTick()
+      expect(container?.querySelector('[data-testid="source-field-empty"]')).toBeTruthy()
+    })
+
+    it('copies the exact field NAME on click and flashes only after the copy succeeded', async () => {
+      const writeText = vi.fn(async () => {})
+      Object.defineProperty(globalThis.navigator, 'clipboard', { value: { writeText }, configurable: true })
+      await mountSection(baseProps({ sourceSchema: schema }))
+      container?.querySelector<HTMLElement>('[data-testid="source-field-供应商 名称"]')?.click()
+      await flush()
+      // The NAME, not the label — the label is not what a mapping expression accepts.
+      expect(writeText).toHaveBeenCalledWith('供应商 名称')
+      expect(container?.querySelector('[data-testid="source-field-copied"]')).toBeTruthy()
+    })
+
+    it('does NOT claim success when the browsing context has no clipboard (plain-HTTP on-prem)', async () => {
+      Object.defineProperty(globalThis.navigator, 'clipboard', { value: undefined, configurable: true })
+      await mountSection(baseProps({ sourceSchema: schema }))
+      container?.querySelector<HTMLElement>('[data-testid="source-field-FQty"]')?.click()
+      await flush()
+      expect(container?.querySelector('[data-testid="source-field-copied"]')).toBeFalsy()
+    })
+
+    it('the target list gets the same treatment and keeps its 必填 marker', async () => {
+      await mountSection(baseProps({
+        targetSchema: {
+          object: 't',
+          fields: [
+            { name: '编号', type: 'text', required: true },
+            { name: 'note', type: 'text' },
+          ],
+        } as IntegrationObjectSchema,
+      }))
+      expect(container?.querySelector('[data-testid="target-field-编号"]')?.textContent).toContain('必填')
+      const input = container?.querySelector<HTMLInputElement>('[data-testid="target-field-filter"]')
+      if (input) { input.value = 'note'; input.dispatchEvent(new Event('input')) }
+      await nextTick()
+      expect(container?.querySelector('[data-testid="target-field-编号"]')).toBeFalsy()
+      expect(container?.querySelector('[data-testid="target-field-count"]')?.textContent?.trim()).toBe('1 / 2')
+    })
   })
 })
