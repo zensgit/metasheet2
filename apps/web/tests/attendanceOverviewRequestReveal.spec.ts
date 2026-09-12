@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { createApp, nextTick, reactive, type App } from 'vue'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   ATTENDANCE_OVERVIEW_ANOMALIES_SECTION_ID,
   ATTENDANCE_OVERVIEW_REQUEST_REPORT_SECTION_ID,
   ATTENDANCE_OVERVIEW_REQUESTS_SECTION_ID,
   shouldRevealOverviewRequestTools,
 } from '../src/views/attendance/attendanceOverviewRequestReveal'
+import AttendanceEmployeeOvertimeRequestCard from '../src/views/attendance/AttendanceEmployeeOvertimeRequestCard.vue'
 import {
   formatLeaveDurationHours,
   hoursFromLeaveMinutes,
@@ -54,6 +56,56 @@ describe('leave-card duration display (hours follow start/end, 0.5-step)', () =>
   it('snaps a datetime range to half-hour minutes without inventing a day length', () => {
     expect(minutesFromDateTimeRange('2026-08-28T09:00', '2026-08-28T17:30')).toBe(510)
     expect(minutesFromDateTimeRange('2026-08-28T09:00', '2026-08-28T18:00')).toBe(540)
+  })
+})
+
+describe('overtime-card duration follows start/end (same 0.5-hour helpers)', () => {
+  let app: App<Element> | undefined
+  let root: HTMLDivElement | undefined
+  afterEach(() => { app?.unmount(); root?.remove() })
+
+  function mountCard() {
+    const form = reactive({
+      overtimeRuleId: 'ot-default',
+      workDate: '2026-04-15',
+      requestedInAt: '2026-04-15T18:00',
+      requestedOutAt: '2026-04-15T20:00',
+      minutes: '90',
+      reason: 'keep',
+    })
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(AttendanceEmployeeOvertimeRequestCard, {
+      tr: (en: string) => en,
+      requestForm: form,
+      overtimeRules: [{ id: 'ot-default', name: 'Standard Overtime' }],
+      submitting: false,
+    })
+    app.mount(root)
+    return form
+  }
+
+  it.each(['start', 'end'])('clears derived minutes when %s is cleared', async field => {
+    const form = mountCard()
+    const input = root!.querySelector<HTMLInputElement>(`[data-overtime-card-${field}]`)!
+    input.value = ''
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(form.minutes).toBe('')
+    expect(root!.querySelector('[data-overtime-card-duration-value]')!.textContent).toBe('—')
+    expect(form.reason).toBe('keep')
+  })
+
+  it('snaps a 2.5-hour overtime range to 150 minutes and rejects free-form 2.3 display', async () => {
+    const form = mountCard()
+    const end = root!.querySelector<HTMLInputElement>('[data-overtime-card-end]')!
+    end.value = '2026-04-15T20:30'
+    end.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(form.minutes).toBe('150')
+    expect(root!.querySelector('[data-overtime-card-duration-value]')!.textContent).toContain('2.5')
+    expect(formatLeaveDurationHours(138)).toBe('2.5')
+    expect(formatLeaveDurationHours(138)).not.toBe('2.3')
   })
 })
 
