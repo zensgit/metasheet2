@@ -561,19 +561,34 @@ export function duplicateFieldName(name: string, isZh: boolean): string {
 
 /**
  * Shown inline (and repeated in the confirm) before a field-manager retype save.
- * `normalizeFieldWriteInput` (core-backend routes/univer-meta.ts:5565-5588) re-runs
+ * `normalizeFieldWriteInput` (core-backend routes/univer-meta.ts:5642-5665) re-runs
  * `sanitizeFieldProperty` under the NEW type, so type-specific formatting (decimals,
  * unit, currency code, options...) is dropped; stored cell values are left exactly as
  * they are (the forward retype migrates nothing).
+ *
+ * `retype` (optional) carries the concrete direction so a direction whose consequence
+ * is NOT covered by the two generic sentences can add its own. Today that is only
+ * F8A's plain `longText → string`: nothing is truncated, but the cell stops being a
+ * multi-line editor.
  */
-export function fieldRetypeNotice(targetTypeLabel: string, isZh: boolean): string {
+export function fieldRetypeNotice(
+  targetTypeLabel: string,
+  isZh: boolean,
+  retype?: { from: string; to: string },
+): string {
   // Says BOTH consequences on purpose: the server re-sanitises `property` under the new
   // type (format settings), and the FE drops validation rules the new type cannot enforce
   // (utils/field-retype.ts retainedRetypeValidationRules) — a number `min` left on a text
   // column would reject every later write.
-  return isZh
+  const base = isZh
     ? `改为${targetTypeLabel}后，现有格式设置、以及新类型无法执行的校验规则会被清除；已有数据不转换。`
     : `Changing to ${targetTypeLabel} clears the current format settings and any validation rule the new type cannot enforce; existing data is not converted.`
+  if (retype?.from === 'longText' && retype?.to === 'string') {
+    return base + (isZh
+      ? '长文本内容会完整保留，但文本字段按单行编辑与展示。'
+      : ' The long-text content is kept in full, but a text field edits and renders on a single line.')
+  }
+  return base
 }
 
 export function deleteFieldConfirm(name: string, isZh: boolean): string {

@@ -1,7 +1,18 @@
+import * as fs from 'fs'
+import * as path from 'path'
+import { fileURLToPath } from 'node:url'
+
 import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import {
+  FIELD_RETYPE_EXCLUDED_TYPES,
+  FIELD_RETYPE_NOT_LOSSLESS_CODE,
+  isLosslessFieldRetype,
+  LOSSLESS_FIELD_RETYPE,
+  losslessRetypeTargets,
+} from '../../src/multitable/field-retype-whitelist'
 import { configRevisionNoop } from './config-revision-mock'
 
 type QueryResult = {
@@ -1463,11 +1474,21 @@ describe('Multitable context API', () => {
     expect(response.body.data.field.property).not.toHaveProperty('foreignSheetId')
   })
 
-  // PATCH `{type:'person'}` converts a field to a NATIVE person (type='person', userId[]) — no
-  // People-sheet rewrite. Coexistence note: a legacy person is `type='link'`; editing its config
-  // sends `{property}` only (no type), so `requestedType` falls back to 'link' and it can NEVER
-  // be silently flipped native (verified by the route's `requestedType ?? mapFieldType(stored)`).
-  test('updates a field into a native person field stored as type=person (no People-sheet rewrite)', async () => {
+  // PATCH `{type:'person'}` on a NATIVE person field (type='person', userId[]) — property is
+  // re-normalized, no People-sheet rewrite. Coexistence note: a legacy person is `type='link'`;
+  // editing its config sends `{property}` only (no type), so `requestedType` falls back to 'link'
+  // and it can NEVER be silently flipped native (verified by the route's
+  // `requestedType ?? mapFieldType(stored)`).
+  //
+  // F8A (2026-09-11) CONTRACT CHANGE — this case used to start from `type: 'string'`, i.e. it
+  // asserted that a plain TEXT column could be converted into a person field through the API.
+  // The lossless-retype whitelist (src/multitable/field-retype-whitelist.ts) now refuses that pair
+  // with 400 FIELD_RETYPE_NOT_LOSSLESS: retyping converts NOTHING, so the stored names would sit
+  // unreadable under a userId[] type. The refusal itself is pinned below in
+  // 'F8A lossless retype whitelist'. What this case still owns — and what it always really owned —
+  // is the native-person PROPERTY normalization: the spoofed foreignSheetId is dropped,
+  // limitSingleRecord survives, and no People sheet is provisioned.
+  test('normalizes a native person field on update, dropping a spoofed foreignSheetId (no People-sheet rewrite)', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
@@ -1482,8 +1503,8 @@ describe('Multitable context API', () => {
               id: 'fld_assignee',
               sheet_id: 'sheet_ops',
               name: 'Assignee',
-              type: 'string',
-              property: {},
+              type: 'person',
+              property: { limitSingleRecord: false },
               order: 2,
             }],
           }
@@ -1669,6 +1690,12 @@ describe('Multitable context API', () => {
   })
 
   test('accepts MF2 field types in create and update multitable field contracts', async () => {
+    // The rows this test pretends are already in meta_fields. `fld_contact` (email) exists so the
+    // update contract can be exercised on an MF2 type without crossing a lossy retype pair (F8A).
+    const storedMf2Fields: Record<string, { id: string; sheet_id: string; name: string; type: string; property: Record<string, unknown>; order: number }> = {
+      fld_amount: { id: 'fld_amount', sheet_id: 'sheet_ops', name: 'Amount', type: 'currency', property: { code: 'usd', decimals: 2 }, order: 4 },
+      fld_contact: { id: 'fld_contact', sheet_id: 'sheet_ops', name: 'Contact', type: 'email', property: {}, order: 5 },
+    }
     const { app } = await createApp({
       tokenPerms: ['multitable:write', 'multitable:manage-schema'],
       queryHandler: async (sql, params) => {
@@ -1700,57 +1727,39 @@ describe('Multitable context API', () => {
           }
         }
         if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
-          if (params?.[0] === 'fld_amount') {
-            return {
-              rows: [{
-                id: 'fld_amount',
-                name: 'Amount',
-                type: 'currency',
-                property: { code: 'usd', decimals: 2 },
-                order: 4,
-              }],
-            }
+          const stored = storedMf2Fields[String(params?.[0])]
+          if (stored) {
+            const { sheet_id: _sheetId, ...withoutSheet } = stored
+            return { rows: [{ ...withoutSheet }] }
           }
           throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
         }
         if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
-          if (params?.[0] === 'fld_amount') {
-            return { rows: [{ id: 'fld_amount', sheet_id: 'sheet_ops' }] }
+          const stored = storedMf2Fields[String(params?.[0])]
+          if (stored) {
+            return { rows: [{ id: stored.id, sheet_id: stored.sheet_id }] }
           }
           throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
         }
         if (sql.includes('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
-          if (params?.[0] === 'fld_amount') {
-            return {
-              rows: [{
-                id: 'fld_amount',
-                sheet_id: 'sheet_ops',
-                name: 'Amount',
-                type: 'currency',
-                property: { code: 'usd', decimals: 2 },
-                order: 4,
-              }],
-            }
+          const stored = storedMf2Fields[String(params?.[0])]
+          if (stored) {
+            return { rows: [{ ...stored }] }
           }
           throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
         }
         if (sql.includes('UPDATE meta_fields') && sql.includes('SET name = $2, type = $3, property = $4::jsonb, "order" = $5')) {
-          expect(params).toEqual([
-            'fld_amount',
-            'Amount',
-            'email',
-            '{}',
-            4,
-          ])
-          return {
-            rows: [{
-              id: 'fld_amount',
-              name: 'Amount',
-              type: 'email',
-              property: {},
-              order: 4,
-            }],
+          const [fieldId, name, type, property, order] = params as [string, string, string, string, number]
+          if (fieldId === 'fld_amount') {
+            // currency -> number: an MF2 type change that IS on the lossless whitelist (the stored
+            // digits stay readable), so the F8A guard lets the pre-existing update contract through.
+            expect([name, type, property, order]).toEqual(['Amount', 'number', '{"thousands":false}', 4])
+          } else if (fieldId === 'fld_contact') {
+            expect([name, type, property, order]).toEqual(['Contact', 'email', '{}', 5])
+          } else {
+            throw new Error(`Unexpected field update params: ${JSON.stringify(params)}`)
           }
+          return { rows: [{ id: fieldId, name, type, property: JSON.parse(property), order }] }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
@@ -1781,10 +1790,17 @@ describe('Multitable context API', () => {
       order: 4,
     })
 
+    // F8A (2026-09-11) CONTRACT CHANGE — this leg used to PATCH the currency field straight to
+    // `email`. That pair is NOT on the lossless whitelist (currency stores numbers; under an email
+    // type they are unreadable and the email write path would never take them back), so the route
+    // now answers 400 FIELD_RETYPE_NOT_LOSSLESS — pinned below in 'F8A lossless retype whitelist'.
+    // The claim this test actually makes — MF2 field types are accepted by the create AND the
+    // update field contract — is kept whole by splitting the leg in two: a whitelisted MF2 type
+    // change (currency -> number) and an MF2 type on the update contract itself (email).
     const updateResponse = await request(app)
       .patch('/api/multitable/fields/fld_amount')
       .send({
-        type: 'email',
+        type: 'number',
         property: {},
       })
       .expect(200)
@@ -1792,9 +1808,265 @@ describe('Multitable context API', () => {
     expect(updateResponse.body.data.field).toMatchObject({
       id: 'fld_amount',
       name: 'Amount',
-      type: 'email',
-      property: {},
+      type: 'number',
+      // the route normalizes a number field's property; the currency-only keys are gone
+      property: { thousands: false },
       order: 4,
     })
+
+    const emailUpdateResponse = await request(app)
+      .patch('/api/multitable/fields/fld_contact')
+      .send({
+        type: 'email',
+        property: {},
+      })
+      .expect(200)
+
+    expect(emailUpdateResponse.body.data.field).toMatchObject({
+      id: 'fld_contact',
+      name: 'Contact',
+      type: 'email',
+      property: {},
+      order: 5,
+    })
   })
+})
+
+// =================================================================================================
+// F8A (2026-09-11) — the lossless-retype whitelist, SECOND COPY in the real-DB lane.
+//
+// The full lock for this boundary lives in tests/multitable-field-retype-revert-narrowing.test.ts
+// (algebra + route matrix + the revert/backward side). CORRECTION (2026-09-11, same day): an earlier
+// version of this header said that file "is named by NO workflow ... so nothing in it executes in CI"
+// and presented the duplication below as closing a gap. That was WRONG. plugin-tests.yml:844 runs a
+// blanket `pnpm --filter @metasheet/core-backend test` in job `test:` (:174, matrix [18.x, 20.x], no
+// paths filter), core-backend's `test` script is plain `vitest`, and vitest.config.ts declares no
+// `include` — so the narrowing file is collected by the default glob and DOES run on every PR.
+// What is true: it is not named INDIVIDUALLY by any workflow, only glob-collected.
+//
+// So the copies below are a deliberate REDUNDANT re-pin of the load-bearing claims — the route
+// refuses a lossy retype BEFORE any UPDATE, the one direction this cut adds really lands, and the
+// server table has not drifted from the shared truth table — in the real-DB lane
+// (plugin-tests.yml:1306, same `test` job, 20.x + DATABASE_URL). Both copies read the SAME fixture,
+// so they cannot disagree about the table; only about which lane reds first.
+//
+// Mirror wording (same discipline as permission-match-truth-table.json, #5626): changing ONE
+// implementation WITHOUT touching the fixture turns THAT SIDE'S OWN run red; changing the fixture
+// turns the OTHER side (apps/web/tests/multitable-field-manager.spec.ts) red too.
+// =================================================================================================
+const RETYPE_TRUTH_TABLE_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../fixtures/field-retype-truth-table.json',
+)
+
+interface RetypeTruthTable {
+  excludedTargetTypes: string[]
+  table: Record<string, string[]>
+  targetCases: Array<{ name: string; sourceType: string; property?: unknown; expected: string[] }>
+  pairCases: Array<{ name: string; sourceType: string; property?: unknown; targetType: string; lossless: boolean }>
+}
+
+const retypeTruthTable = JSON.parse(fs.readFileSync(RETYPE_TRUTH_TABLE_PATH, 'utf8')) as RetypeTruthTable
+
+describe('F8A lossless retype whitelist (server-authoritative, real-DB-lane copy)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const RETYPE_SHEET = 'sheet_retype_ci'
+
+  type StoredField = { id: string; sheet_id: string; name: string; type: string; property: Record<string, unknown>; order: number }
+
+  /** A one-field mock world that REMEMBERS whether the field row was actually written. */
+  function retypeWorld(stored: Partial<StoredField>) {
+    const row: StoredField = {
+      id: 'fld_retype_ci', sheet_id: RETYPE_SHEET, name: 'F', type: 'string', property: {}, order: 0,
+      ...stored,
+    }
+    const updates: Array<{ name: string; type: string; property: string; order: number }> = []
+    /**
+     * Every write that touches RECORD DATA, remembered separately from the schema write above.
+     * This cut's claim is "zero backend data rewrite", so the cell-level writes a PATCH emits have
+     * to be observable, not argued — see the `-> autoNumber` characterization below, where the
+     * route DOES rewrite the whole column.
+     */
+    const recordWrites: Array<{ sql: string; params: unknown[] }> = []
+    const queryHandler = (sql: string, params?: unknown[]) => {
+      if (/UPDATE\s+meta_records/i.test(sql)) recordWrites.push({ sql, params: params ?? [] })
+      if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) return { rows: [{ id: RETYPE_SHEET }] }
+      if (sql.includes('SELECT id, sheet_id FROM meta_fields WHERE id = $1')) {
+        return { rows: params?.[0] === row.id ? [{ id: row.id, sheet_id: row.sheet_id }] : [] }
+      }
+      if (sql.includes('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+        return { rows: params?.[0] === row.id ? [{ ...row }] : [] }
+      }
+      if (sql.includes('UPDATE meta_fields') && sql.includes('SET name = $2, type = $3')) {
+        const [, name, type, property, order] = params as [string, string, string, string, number]
+        updates.push({ name, type, property, order })
+        row.name = name
+        row.type = type
+        row.property = JSON.parse(property)
+        row.order = order
+        return { rows: [{ id: row.id, name, type, property: row.property, order }] }
+      }
+      { const cr = configRevisionNoop(sql); if (cr) return cr }
+      return { rows: [], rowCount: 0 }
+    }
+    return { row, updates, recordWrites, queryHandler }
+  }
+
+  const patchType = async (world: ReturnType<typeof retypeWorld>, body: Record<string, unknown>) => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write', 'multitable:manage-schema'],
+      queryHandler: world.queryHandler,
+    })
+    return request(app).patch('/api/multitable/fields/fld_retype_ci').send(body)
+  }
+
+  test('refuses a lossy retype with 400 + the stable code, BEFORE any UPDATE reaches the table', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'number' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe(FIELD_RETYPE_NOT_LOSSLESS_CODE)
+    // values-free: no field id, no sheet id in the message the user sees
+    expect(String(res.body.error.message)).not.toMatch(/fld[_-]/)
+    expect(String(res.body.error.message)).not.toContain(RETYPE_SHEET)
+    // fail-closed: the guard runs before the write, so the row was never touched
+    expect(world.updates).toEqual([])
+    expect(world.row.type).toBe('string')
+  })
+
+  test('refuses text -> person: a stored name is not a userId (this pair used to be a 200)', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'person', property: { limitSingleRecord: true } })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe(FIELD_RETYPE_NOT_LOSSLESS_CODE)
+    expect(world.updates).toEqual([])
+    expect(world.row.type).toBe('string')
+  })
+
+  test('refuses RICH long text -> text, judging the STORED property and not the request body', async () => {
+    const world = retypeWorld({ type: 'longText', property: { rich: true } })
+    // turning rich off in the same request must not buy the caller a pass
+    const res = await patchType(world, { type: 'string', property: { rich: false } })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe(FIELD_RETYPE_NOT_LOSSLESS_CODE)
+    expect(world.updates).toEqual([])
+    expect(world.row.type).toBe('longText')
+  })
+
+  test('POSITIVE CONTROL: plain long text -> text is accepted and really lands', async () => {
+    const world = retypeWorld({ type: 'longText', property: {} })
+    const res = await patchType(world, { type: 'string' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.field.type).toBe('string')
+    expect(world.updates.map((u) => u.type)).toEqual(['string'])
+    expect(world.row.type).toBe('string')
+  })
+
+  test('same type -> same type is not a retype at all: a rename carrying `type` still passes', async () => {
+    const world = retypeWorld({ type: 'date', name: 'D' })
+    const res = await patchType(world, { type: 'date', name: 'Delivery' })
+
+    expect(res.status).toBe(200)
+    expect(world.row.name).toBe('Delivery')
+    expect(world.row.type).toBe('date')
+  })
+
+  test('the pre-existing side-effect path is untouched: text -> link still gets ITS specific code', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'link' })
+
+    expect(res.status).toBe(400)
+    // the older guard's reason is more specific; the whitelist only backstops when nobody else objects
+    expect(res.body.error.code).toBe('LINK_FIELD_FOREIGN_SHEET_REQUIRED')
+    expect(world.updates).toEqual([])
+  })
+
+  // CHARACTERIZATION, not an endorsement. The whitelist passes through any pair with an endpoint in
+  // FIELD_RETYPE_EXCLUDED_TYPES, and the two ends are NOT symmetric:
+  //   target in the set -> only link/formula/lookup/rollup have a guard (see the two target-seam tests below);
+  //   SOURCE in the set -> nobody takes over. Grep the PATCH body: there is no
+  //   `currentType === 'attachment' | 'lookup' | 'rollup' | 'button' | 'createdTime'` branch at all
+  //   (validateHierarchyParentFieldMutation only covers a same-sheet single-value parent LINK, and the
+  //   autoNumber sequence cleanup runs AFTER the `UPDATE meta_fields` — a side effect, not a guard).
+  // So `attachment -> text` is a plain 200 today, exactly as it was before this cut, even though the
+  // browser offers no such option (apps/web losslessRetypeTargets returns [] for an excluded source).
+  // This test exists so the seam is VISIBLE and so closing it later is a deliberate, owner-approved
+  // product tightening (attachment/link -> text would become 400) rather than an accident.
+  test('KNOWN SEAM (characterization): an EXCLUDED SOURCE is unguarded — attachment -> text is still 200', async () => {
+    const world = retypeWorld({ type: 'attachment' })
+    const res = await patchType(world, { type: 'string' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.error).toBeUndefined()
+    expect(world.updates.map((u) => u.type)).toEqual(['string'])
+    expect(world.row.type).toBe('string')
+  })
+
+  // The TARGET end is a seam too, and a bigger one than the first version of this PR admitted
+  // (judged 2026-09-12). Of the 11 excluded targets only link/formula/lookup/rollup actually have a
+  // pre-existing guard. `attachment` and the four system stamps (createdTime/modifiedTime/createdBy/
+  // modifiedBy) have NO matching `nextType === ...` branch in the PATCH body at all, so the pair is a
+  // plain 200 — the whitelist passes it through and nobody else objects. Characterization of TODAY,
+  // not an endorsement: closing it would turn `text -> attachment` into a 400 (a product change).
+  test('KNOWN SEAM (characterization): an EXCLUDED TARGET can be unguarded too — text -> attachment is still 200', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'attachment' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.error).toBeUndefined()
+    expect(world.updates.map((u) => u.type)).toEqual(['attachment'])
+    expect(world.row.type).toBe('attachment')
+    // and nothing rewrote the cells on this path
+    expect(world.recordWrites).toEqual([])
+  })
+
+  // `-> autoNumber` is the sharpest correction to this PR's own prose: it is NOT "a guard taking
+  // over", it is a DESTRUCTIVE SIDE EFFECT that runs AFTER the schema write. The whitelist returns
+  // early (target is excluded), `UPDATE meta_fields` lands, and then univer-meta.ts:13163-13165 calls
+  // backfillAutoNumberField(..., { overwrite: true }); its single statement
+  // (auto-number-service.ts:112-131) is
+  //   UPDATE meta_records ... SET data = jsonb_set(...) WHERE sheet_id = $3 AND ($4::boolean OR NOT (data ? $1))
+  // with $4 = true, i.e. EVERY existing cell of that column is replaced by a sequence number. This is
+  // pre-existing behaviour that this cut does not touch — the test exists so the claim "this cut
+  // rewrites no data" can never be misread as "this ROUTE rewrites no data".
+  test('KNOWN SEAM (characterization): text -> autoNumber is 200 and OVERWRITES every existing cell (not a guard, a destructive backfill)', async () => {
+    const world = retypeWorld({ type: 'string' })
+    const res = await patchType(world, { type: 'autoNumber' })
+
+    expect(res.status).toBe(200)
+    expect(world.updates.map((u) => u.type)).toEqual(['autoNumber'])
+    // exactly one record-data write, and it is the overwrite-everything backfill
+    const backfills = world.recordWrites.filter((w) => w.sql.includes('jsonb_set'))
+    expect(backfills).toHaveLength(1)
+    // $4 = the `overwrite` flag: `true` drops the `NOT (data ? $1)` restriction to already-empty cells
+    expect(backfills[0].sql).toContain('$4::boolean OR NOT (data ? $1)')
+    expect(backfills[0].params[3]).toBe(true)
+  })
+
+  test('the server table IS the shared fixture table, row for row', () => {
+    expect(retypeTruthTable.targetCases.length).toBeGreaterThanOrEqual(20)
+    expect(retypeTruthTable.pairCases.length).toBeGreaterThanOrEqual(20)
+    expect(LOSSLESS_FIELD_RETYPE).toEqual(retypeTruthTable.table)
+    expect(Array.from(FIELD_RETYPE_EXCLUDED_TYPES).sort()).toEqual([...retypeTruthTable.excludedTargetTypes].sort())
+  })
+
+  test.each(retypeTruthTable.targetCases.map((row) => [row.name, row] as const))(
+    'losslessRetypeTargets: %s',
+    (_name, row) => {
+      expect(losslessRetypeTargets(row.sourceType, row.property)).toEqual(row.expected)
+    },
+  )
+
+  test.each(retypeTruthTable.pairCases.map((row) => [row.name, row] as const))(
+    'isLosslessFieldRetype: %s',
+    (_name, row) => {
+      expect(isLosslessFieldRetype(row.sourceType, row.targetType, row.property)).toBe(row.lossless)
+    },
+  )
 })
