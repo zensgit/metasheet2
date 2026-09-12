@@ -66,7 +66,7 @@ const {
   __internals: exportInternals,
 } = require(path.join(LIB, 'stock-preparation-prep-line-export.cjs'))
 // The expander's OWN path encoder (`makePath`): the tree fixtures below carry `path` exactly as the
-// apply path writes it, and R23e pins the export's re-encoder to it so the two cannot drift.
+// apply path writes it, and R23c pins the export's re-encoder to it so the two cannot drift.
 const { __internals: bomExpansionInternals } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
 const bomPath = (...tokens) => bomExpansionInternals.makePath(tokens)
 const {
