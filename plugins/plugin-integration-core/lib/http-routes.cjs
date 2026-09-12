@@ -3493,7 +3493,15 @@ function createHandlers(services, options = {}) {
     return service
   }
 
-  const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems'])
+  // G4/M2 (#5553 §3): `getExternalSystemForAdapter` is a HARD registration dependency, not an
+  // optional capability. Before this line every adapter load point read
+  //   typeof externalSystems.getExternalSystemForAdapter === 'function' ? ForAdapter : getExternalSystem
+  // so a services object that simply omitted the accessor silently downgraded EVERY credential load
+  // to the credential-stripped PUBLIC projection — with no error, no log, and no failing test. That
+  // is the #5538 shape: the guard held only because each call site remembered to ask for it.
+  // Requiring it here makes the omission unrepresentable at mount time instead of invisible at
+  // request time. Registration is the right place: it runs once, before any route can be called.
+  const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems'])
   // W5b (#3890): the stock-prep audit store is OPTIONAL at registration (environments without the
   // SQL db can still register read routes), but every W5b human-decision write fails closed without
   // it — an unaudited confirm/generation/resolve is refused, not silently allowed. System-sync
@@ -4075,9 +4083,7 @@ function requireStockPreparationAudit() {
       })
     }
 
-    const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-      ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-      : externalSystems.getExternalSystem.bind(externalSystems)
+    const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
     let system
     try {
       system = await loadSystem(scopedAdapterInput(req, {
@@ -4463,9 +4469,7 @@ function requireStockPreparationAudit() {
    * (pre-F3) behaviour — no new failure mode, just the old one, in an already-rare window.
    */
   async function loadTableActionSourceAdapter(req, action, options = {}) {
-    const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-      ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-      : externalSystems.getExternalSystem.bind(externalSystems)
+    const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
     const sourceScope = { id: action.source.externalSystemId }
     if (options.tenantId) sourceScope.tenantId = options.tenantId
     if (action.source.workspaceId) {
@@ -4769,9 +4773,7 @@ function requireStockPreparationAudit() {
 
     async externalSystemsTest(req, res) {
       requireAccess(req, 'write')
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       let result
@@ -4811,9 +4813,7 @@ function requireStockPreparationAudit() {
       }
       const preset = getReadSmokePreset(contract.presetId)
       // Backend credential context — NOT the public, credential-stripped system response.
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       // Kind must match the preset (fail-closed). Read-only: the system role/config is never modified here.
       if (!system || system.kind !== preset.requiredKind) {
@@ -4852,9 +4852,7 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(409, 'READ_SOURCE_PROBE_SYSTEM_MISMATCH', 'probe config does not reference this external system')
       }
       // Backend credential context — NOT the public, credential-stripped system response.
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       if (!system || system.kind !== probe.plan.requiredKind) {
         throw new HttpRouteError(409, 'READ_SOURCE_PROBE_KIND_MISMATCH', 'external system kind does not match the probe config')
@@ -5002,9 +5000,7 @@ function requireStockPreparationAudit() {
         throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: error && typeof error.reason === 'string' ? error.reason : 'invalid' })
       }
       // Backend credential context via the stored systemId reference — resolution stays dynamic (lock 5).
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: row.systemId }))
       if (!system || system.kind !== prepared.plan.requiredKind) {
         throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
@@ -5149,9 +5145,7 @@ function requireStockPreparationAudit() {
       // throws NOT_APPROVED) + its backend system (dynamic credential context via the stored systemId
       // reference). The bundle carries status:'approved' by construction (getForRuntime only returns
       // approved rows); the C-R2 planner re-validates it as defense-in-depth.
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const steps = composition && composition.config && Array.isArray(composition.config.steps)
         ? composition.config.steps
         : []
@@ -5249,9 +5243,7 @@ function requireStockPreparationAudit() {
 
     async externalSystemObjects(req, res) {
       requireAccess(req, 'read')
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       const adapterObjects = typeof adapter.listObjects === 'function'
@@ -5274,9 +5266,7 @@ function requireStockPreparationAudit() {
       if (!object) {
         throw new HttpRouteError(400, 'OBJECT_REQUIRED', 'object is required')
       }
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: requestParams(req).id }))
       const template = findDocumentTemplate(system, object)
       if (template) {
@@ -5475,9 +5465,7 @@ function requireStockPreparationAudit() {
         purpose: B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
         runId: b2aRunId('c6-external-write-dry-run'),
       })
-      const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSourceSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const sourceSystem = await loadSourceSystem(scopedAdapterInput(req, {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
@@ -5501,7 +5489,6 @@ function requireStockPreparationAudit() {
       if (
         targetSystem
         && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
-        && typeof externalSystems.getExternalSystemForAdapter === 'function'
       ) {
         targetSystem = await externalSystems.getExternalSystemForAdapter(targetSystemScope)
       }
@@ -5623,9 +5610,7 @@ function requireStockPreparationAudit() {
         purpose: B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
         runId: b2aRunId('c6-external-write-apply'),
       })
-      const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSourceSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const sourceSystem = await loadSourceSystem(scopedAuthenticatedWriteInput(req, {
         id: pipeline.sourceSystemId,
         tenantId: body.tenantId,
@@ -5636,7 +5621,6 @@ function requireStockPreparationAudit() {
       if (
         targetSystem
         && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
-        && typeof externalSystems.getExternalSystemForAdapter === 'function'
       ) {
         targetSystem = await externalSystems.getExternalSystemForAdapter(targetSystemScope)
       }
@@ -6614,9 +6598,7 @@ function requireStockPreparationAudit() {
         )
       }
 
-      const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
+      const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       const system = await loadSystem(scopedAdapterInput(req, { id: externalSystemId }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       if (!adapter || typeof adapter.read !== 'function') {
@@ -9488,9 +9470,7 @@ function requireStockPreparationAudit() {
       const sources = normalizeReferenceMappingSources(body.referenceMappingSources)
       let previewOptions = {}
       if (sources.length > 0) {
-        const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-          ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-          : externalSystems.getExternalSystem.bind(externalSystems)
+        const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         const referenceMappingIndexes = {}
         const adapterBySystem = new Map()
         for (const source of sources) {

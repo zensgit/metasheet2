@@ -221,6 +221,10 @@ node __tests__/stock-preparation-project-board.test.cjs
 node __tests__/stock-preparation-operator-pull-gate.test.cjs
 node __tests__/stock-preparation-write-scope-reconcile-bounds.test.cjs
 
+# G4/M2 (#5553): adapter-load hard dependency + no credential-stripped fallback.
+# Mutation probe: scripts/g4-m2-mutation-probe.cjs
+node __tests__/integration-g4-m2-adapter-load-hard-dependency.test.cjs
+
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 node __tests__/sealed-export-s4-generation-kernel.test.cjs
