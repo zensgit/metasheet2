@@ -1333,6 +1333,7 @@ async function main() {
   testExtensionFieldIdsEnforceNamespaceShapeAndPackMembershipIsOneLayerOut()
   await testRootSelectionIsReachableFromTheActionConfig()
   await testCollapsedSiblingCountReachesDryRunEvidence()
+  await testParentPackColumnsReachTheInteractiveChain()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
 }
@@ -1829,6 +1830,115 @@ async function testCollapsedSiblingCountReachesDryRunEvidence() {
     plannedAt: '2026-09-11T09:00:00.000Z',
   })
   assert.equal('duplicateSiblingsCollapsed' in clean.evidence.expansion, false)
+}
+
+// ---------------------------------------------------------------------------------------------
+// F1c-b — 客户包的 父组件图号 / 父组件名称 走完**交互链**,而且两道闸都在。
+//
+// 与 large-bom-jobs 那条(后台链)同形:两条真实调用链经过同一个规划器,但各自从不同的 seam 取
+// 「动作声明的扩展列」——交互链是 computeDryRun 里的 `extensionFieldIds: action.extensionFieldIds`,
+// 后台链是 `job.actionSnapshot.extensionFieldIds`。任何一条断线,对应链上的这两列就永远空着,而
+// 纯函数用例照样绿。所以这里从**动作配置**出发,一路走到写进目标表的那条记录上。
+// ---------------------------------------------------------------------------------------------
+const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
+
+function installedParentPackColumns() {
+  return PARENT_PACK_COLUMN_IDS.map((fieldId) => ({
+    logicalId: fieldId,
+    name: fieldId,
+    type: 'string',
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system',
+        preserveOnRefresh: false,
+        required: false,
+        key: false,
+        extension: true,
+        packId: 'factory-a-rehearsal',
+        packVersion: '1.0.0',
+      },
+    },
+  }))
+}
+
+// 父件的 IdentityName 带空格:F1c 把**当前组件**那一侧切成 名称 + 规格,父件这一侧老系统从不切。
+// 所以 父组件名称 应当是全串 'Assembly DN1200',这条也顺带钉住包列没有偷偷去拿切过的首段。
+function parentPackPlmData() {
+  return childBomPlmData({
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly DN1200', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+  })
+}
+
+async function pullParentPackRowsWith(action) {
+  const source = createSourceAdapter(parentPackPlmData())
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+  const installedFieldProperties = installedParentPackColumns()
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    plannedAt: '2026-09-12T09:00:00.000Z',
+  })
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.counts.add, 2, '根 + 一个子件')
+  const applied = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    permission: 'write',
+  })
+  assert.equal(applied.status, 'succeeded')
+  assert.equal(applied.apply.counts.created, 2)
+  return records.calls.filter((call) => call[0] === 'createRecord').map((call) => call[1].data)
+}
+
+async function testParentPackColumnsReachTheInteractiveChain() {
+  const declared = await pullParentPackRowsWith(normalizeStockPreparationActionConfig(
+    baseAction({ extensionFieldIds: PARENT_PACK_COLUMN_IDS }),
+  ))
+  const child = declared.find((data) => data.componentSourceId === 'PART-B')
+  const root = declared.find((data) => data.componentSourceId === 'PART-A')
+  assert.ok(child && root, '这批写进目标表的是一根一子')
+  assert.equal(child.ext_parentDrawingNo, 'A-001', '交互链把 父组件图号 写进客户包列')
+  assert.equal(child.ext_parentName, 'Assembly DN1200', '父组件名称 是父件**未切分**的全串(老系统 754-755 口径)')
+  // 同源:包列与模板列是同一个值,不是两套取值规则各算一遍。
+  assert.equal(child.ext_parentDrawingNo, child.parentComponentCode, '包列 = 模板列 parentComponentCode')
+  assert.equal(child.ext_parentName, child.parentComponentName, '包列 = 模板列 parentComponentName')
+  for (const fieldId of PARENT_PACK_COLUMN_IDS.concat(['parentComponentCode', 'parentComponentName'])) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(root, fieldId),
+      false,
+      '根行无父 ⇒ ' + fieldId + ' 连键都没有,不写空串',
+    )
+  }
+
+  // 负控 = 这条断线的证据:动作没声明这两列(表上照样装着包)⇒ 交互链一个 ext_ 键都不写。
+  // 声明才是「目标表 fieldIdMap 已绑定」的凭据,派进没绑的列会让整行写入被 apply-writer 硬拒。
+  const undeclared = await pullParentPackRowsWith(normalizeStockPreparationActionConfig(baseAction()))
+  for (const data of undeclared) {
+    assert.deepEqual(
+      Object.keys(data).filter((key) => key.startsWith('ext_')),
+      [],
+      '没声明扩展列的动作写不出任何 ext_ 列',
+    )
+  }
+  assert.equal(
+    undeclared.find((data) => data.componentSourceId === 'PART-B').parentComponentCode,
+    'A-001',
+    '模板列照旧 —— 这次改动是纯加法',
+  )
 }
 
 main().catch((err) => {

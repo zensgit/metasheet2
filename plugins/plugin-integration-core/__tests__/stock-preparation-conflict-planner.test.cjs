@@ -1213,6 +1213,243 @@ function testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger() {
   }
 }
 
+// -----------------------------------------------------------------------------
+// F1c-b -- 客户包的 父组件图号 / 父组件名称 (ext_parentDrawingNo / ext_parentName)
+//
+// 现场(222,演示项目 581 行):模板列 parentComponentCode / parentComponentName 在 F1c 之后
+// 579/581 行有值(规格记录的缺值原因:根行无父),而**同名同义**的客户包列 ext_parentDrawingNo /
+// ext_parentName 是 0 行有值 —— 人看的是中文包列,填上的是英文模板列。包列填不上不是"没配":
+// 这条拉取链上能往 ext_ 列写值的只有部署自己的 ext 映射(applyExtFieldMapping,读 PART 行)
+// 和 F1c 起规划器派生的那三列,而父件这一侧展开层只发出一个 OBJ_ID,part 列映射够不着它。
+//
+// 这几条用例钉住:①两列与模板列**逐行相等**(同源 —— 值就是模板列那一个值本身,不是复制一份
+// 规则);②根行/父件不在批内 ⇒ 一个键都不写;③动作没声明 ⇒ 不派生;④行上已有值(映射或人工)
+// ⇒ 不覆盖;⑤存量空列在下一次 dry-run 以 update 补上且不触发 manual_confirm。
+// -----------------------------------------------------------------------------
+
+const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
+
+// 包安装到表上之后的字段属性,与安装器盖的那一份同形(ownership=plm_system ⇒ 进 pickFields 的
+// 可写 band)。只列扩展列:模板列由冻结模板自己管,写进 installed 也会被 template_governed 挡掉。
+function installedPackColumn(fieldId, type = 'string') {
+  return {
+    logicalId: fieldId,
+    name: fieldId,
+    type,
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system',
+        preserveOnRefresh: false,
+        required: false,
+        key: false,
+        extension: true,
+        packId: 'factory-a-rehearsal',
+        packVersion: '1.0.0',
+      },
+    },
+  }
+}
+
+function planWithParentPackColumns(input = {}) {
+  const declared = input.extensionFieldIds === undefined ? PARENT_PACK_COLUMN_IDS : input.extensionFieldIds
+  const installPack = input.installPack !== false
+  return planStockPreparationConflicts({
+    expandedRows: input.expandedRows,
+    existingRows: input.existingRows || [],
+    runId: input.runId || 'run-parent-pack',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+    ...(declared === null ? {} : { extensionFieldIds: declared }),
+    ...(installPack ? { installedFieldProperties: PARENT_PACK_COLUMN_IDS.map((id) => installedPackColumn(id)) } : {}),
+  })
+}
+
+// 两个父 + 两个子 + 一个父件不在批内的孤儿。第二个父件**没有**未切分全串,走的是模板列自己的
+// 退回路径(nameAndSpec -> componentName)—— 包列跟着同一条路径走,才叫同源。
+function twoFamilyBatch() {
+  const parentA = row({ componentSourceId: 'PART-ROOT', componentCode: 'TZ-0001', componentName: '主体组件', nameAndSpec: '主体组件 DN1200' })
+  const childA = row({
+    componentSourceId: 'PART-CHILD',
+    parentSourceId: 'PART-ROOT',
+    pathTokens: ['PART-ROOT', 'PART-CHILD'],
+    componentCode: 'GJ-0007',
+    componentName: '筒体',
+  })
+  const parentB = row({ componentSourceId: 'PART-ROOT-2', componentCode: 'TZ-0002', componentName: '副体组件' })
+  const childB = row({
+    componentSourceId: 'PART-CHILD-2',
+    parentSourceId: 'PART-ROOT-2',
+    pathTokens: ['PART-ROOT-2', 'PART-CHILD-2'],
+    componentCode: 'GJ-0008',
+    componentName: '封头',
+  })
+  const orphan = row({
+    componentSourceId: 'PART-ORPHAN',
+    parentSourceId: 'PART-NOT-IN-THIS-BATCH',
+    pathTokens: ['PART-NOT-IN-THIS-BATCH', 'PART-ORPHAN'],
+    componentCode: 'GJ-0009',
+    componentName: '接管',
+  })
+  return { parentA, childA, parentB, childB, orphan, rows: [parentA, childA, parentB, childB, orphan] }
+}
+
+// 同源 = 包列的值就是模板列那一个值本身。
+// M1(派生源换成子行自己的 componentCode / componentName)⇒ 本用例红。
+function testParentPackColumnsAreTheTemplateColumnsOwnValue() {
+  const batch = twoFamilyBatch()
+  const plan = planWithParentPackColumns({ expandedRows: batch.rows, runId: 'run-parent-pack-same-source' })
+  const adds = byDecision(plan, DECISIONS.ADD)
+  assert.equal(adds.length, 5, 'five rows are added')
+
+  const childA = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD').record
+  assert.equal(childA.ext_parentDrawingNo, 'TZ-0001', '父组件图号 落进客户包列')
+  assert.equal(childA.ext_parentName, '主体组件 DN1200', '父组件名称 落进客户包列,并且是父件**未切分**的全串')
+  const childB = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD-2').record
+  assert.equal(childB.ext_parentDrawingNo, 'TZ-0002')
+  assert.equal(childB.ext_parentName, '副体组件', '父件没有全串时包列跟着模板列一起退回 componentName —— 同一条路径,不是第二套规则')
+
+  // 逐行相等,而且**键在不在**也相等:把两列与模板列拆成两份取值逻辑,这一圈必红。
+  for (const decision of adds) {
+    const record = decision.record
+    for (const [packId, templateId] of [
+      ['ext_parentDrawingNo', 'parentComponentCode'],
+      ['ext_parentName', 'parentComponentName'],
+    ]) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(record, packId),
+        Object.prototype.hasOwnProperty.call(record, templateId),
+        record.componentSourceId + ': ' + packId + ' 与 ' + templateId + ' 要么都写要么都不写',
+      )
+      assert.equal(record[packId], record[templateId], record.componentSourceId + ': ' + packId + ' 与模板列逐行相等')
+    }
+    assertNoHumanFields(record, 'F1c-b add record')
+  }
+
+  // 根行无父、孤儿的父件不在这批里:都是**缺席**,不是空串。
+  for (const componentSourceId of ['PART-ROOT', 'PART-ROOT-2', 'PART-ORPHAN']) {
+    const record = adds.find((decision) => decision.record.componentSourceId === componentSourceId).record
+    for (const fieldId of ['ext_parentDrawingNo', 'ext_parentName', 'parentComponentCode', 'parentComponentName']) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(record, fieldId),
+        false,
+        componentSourceId + ' 不写 ' + fieldId + ' —— 无父就是无键,不是空串',
+      )
+    }
+  }
+}
+
+// 两道闸,各一条否定控制。
+// M2(去掉 canDeriveExtensionField 闸)⇒ 第一段红。
+function testParentPackColumnsNeedBothTheDeclarationAndThePack() {
+  const batch = twoFamilyBatch()
+
+  // ① 包装了(pickFields 认这两列),但动作没声明 ⇒ 不派生。声明才是"目标表已绑定"的凭据,
+  //    派进一个 target 没绑的 ext_ 列会让整行写入被 apply-writer 拒("这列空着"升级成"这个项目
+  //    根本 apply 不了")。
+  const undeclared = planWithParentPackColumns({ expandedRows: batch.rows, extensionFieldIds: null, runId: 'run-parent-pack-undeclared' })
+  for (const decision of byDecision(undeclared, DECISIONS.ADD)) {
+    assert.deepEqual(
+      Object.keys(decision.record).filter((key) => key.startsWith('ext_')),
+      [],
+      '动作没声明扩展列 ⇒ 一个 ext_ 键都不派生',
+    )
+  }
+  const undeclaredChild = byDecision(undeclared, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
+  assert.equal(undeclaredChild.parentComponentCode, 'TZ-0001', '模板列照旧 —— 这次改动纯加法')
+  assert.equal(undeclaredChild.parentComponentName, '主体组件 DN1200')
+
+  // ② 声明了,但表上没装这个包 ⇒ pickFields 的可写 band 里没有这两列,记录上同样没有。
+  //    派生只能给内存行加一个键,加不了任何人表上的一列。
+  const noPack = planWithParentPackColumns({ expandedRows: batch.rows, installPack: false, runId: 'run-parent-pack-no-pack' })
+  for (const decision of byDecision(noPack, DECISIONS.ADD)) {
+    assert.deepEqual(
+      Object.keys(decision.record).filter((key) => key.startsWith('ext_')),
+      [],
+      '没装包的部署一个 ext_ 列都写不出去',
+    )
+  }
+  assert.equal(noPack.summary.plmSystemFields.includes('ext_parentDrawingNo'), false, '没装包 ⇒ 可写 band 里没有这两列')
+}
+
+// 已有值(部署自己的 ext 映射测到的,或人工填的)永远优先;派生的从不覆盖。
+// M3(去掉 isBlank 判断)⇒ 本用例红。
+function testParentPackColumnsNeverOverwriteAMeasuredValue() {
+  const batch = twoFamilyBatch()
+  const mapped = {
+    ...batch.childA,
+    ext_parentDrawingNo: 'MAPPED-DWG-9',
+    ext_parentName: '映射来的父件名',
+  }
+  const plan = planWithParentPackColumns({
+    expandedRows: [batch.parentA, mapped],
+    runId: 'run-parent-pack-measured',
+  })
+  const record = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
+  assert.equal(record.ext_parentDrawingNo, 'MAPPED-DWG-9', '部署自己映射到的值胜出 —— 测得的压过派生的')
+  assert.equal(record.ext_parentName, '映射来的父件名')
+  // 模板列不受影响:它本来就不归这条规则管。
+  assert.equal(record.parentComponentCode, 'TZ-0001')
+  assert.equal(record.parentComponentName, '主体组件 DN1200')
+
+  // 空白的几种写法都算"没有值",照派生(空串/空格不是人写下的值)。
+  for (const blank of ['', '   ', null, undefined]) {
+    const blanked = { ...batch.childA, ext_parentDrawingNo: blank, ext_parentName: blank }
+    const blankedPlan = planWithParentPackColumns({
+      expandedRows: [batch.parentA, blanked],
+      runId: 'run-parent-pack-blank',
+    })
+    const blankedRecord = byDecision(blankedPlan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
+    assert.equal(blankedRecord.ext_parentDrawingNo, 'TZ-0001', '空白值 ' + JSON.stringify(blank) + ' 照派生')
+    assert.equal(blankedRecord.ext_parentName, '主体组件 DN1200')
+  }
+}
+
+// 222 上那 581 行的迁移答案:没有迁移。下一次 dry-run 把两列以 **update** 补上,不触发
+// manual_confirm(这两列既不在 IDENTITY_FIELD_IDS 也不在 LINEAGE_FIELD_IDS,是普通的
+// plm_system 刷新),人工列一字不动,补完之后再拉一次是 SKIP。
+function testExistingRowsGetThePackColumnsAsAPlainUpdate() {
+  const batch = twoFamilyBatch()
+  // 存量行的两种真实形状:列不存在(从没写过),和列存在但为空串。
+  for (const emptyShape of ['absent', 'empty-string']) {
+    const existingChild = {
+      ...batch.childA,
+      parentComponentCode: 'TZ-0001',
+      parentComponentName: '主体组件 DN1200',
+      notes: '人工备注必须活下来',
+      ...(emptyShape === 'empty-string' ? { ext_parentDrawingNo: '', ext_parentName: '' } : {}),
+    }
+    const plan = planWithParentPackColumns({
+      expandedRows: [batch.parentA, batch.childA],
+      existingRows: [{ ...batch.parentA }, existingChild],
+      runId: 'run-parent-pack-backfill',
+    })
+    assert.equal(plan.counts[DECISIONS.MANUAL_CONFIRM], 0, emptyShape + ': 补两列不挂起任何一行')
+    assert.equal(plan.valid, true, emptyShape + ': 计划仍然是可执行的')
+    const updates = byDecision(plan, DECISIONS.UPDATE)
+    assert.equal(updates.length, 1, emptyShape + ': 只有那条子行需要刷新')
+    assert.deepEqual(
+      updates[0].changedFields.slice().sort(),
+      ['ext_parentDrawingNo', 'ext_parentName'],
+      emptyShape + ': 变的就是这两列,别的一列没动',
+    )
+    assert.equal(updates[0].patch.ext_parentDrawingNo, 'TZ-0001', emptyShape + ': update 把 父组件图号 填进包列')
+    assert.equal(updates[0].patch.ext_parentName, '主体组件 DN1200', emptyShape + ': update 把 父组件名称 填进包列')
+    // update 计划里同样逐行相等(硬规则 1 覆盖 add 与 update 两条路径)。
+    assert.equal(updates[0].patch.ext_parentDrawingNo, updates[0].patch.parentComponentCode)
+    assert.equal(updates[0].patch.ext_parentName, updates[0].patch.parentComponentName)
+    assertNoHumanFields(updates[0].patch, 'F1c-b backfill patch')
+
+    // 幂等:填好之后再拉一次是 SKIP,不会每次 dry-run 都报一条 update。
+    const filled = { ...existingChild, ext_parentDrawingNo: 'TZ-0001', ext_parentName: '主体组件 DN1200' }
+    const second = planWithParentPackColumns({
+      expandedRows: [batch.parentA, batch.childA],
+      existingRows: [{ ...batch.parentA }, filled],
+      runId: 'run-parent-pack-backfill-2',
+    })
+    assert.equal(byDecision(second, DECISIONS.UPDATE).length, 0, emptyShape + ': 填好之后重拉不再写')
+    assert.equal(byDecision(second, DECISIONS.SKIP).length, 2, emptyShape + ': 两行都是 SKIP')
+  }
+}
+
 function main() {
   testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger()
   testAddUpdateSkipInactive()
@@ -1236,6 +1473,10 @@ function main() {
   testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched()
   testDenormalizedParentAndSpecReachTheMainRow()
   testParentComponentNameIsTheUnsplitLegacyString()
+  testParentPackColumnsAreTheTemplateColumnsOwnValue()
+  testParentPackColumnsNeedBothTheDeclarationAndThePack()
+  testParentPackColumnsNeverOverwriteAMeasuredValue()
+  testExistingRowsGetThePackColumnsAsAPlainUpdate()
   testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
   testUnresolvableParentIsAbsenceNotAGuess()
   testExistingRowsAreBackfilledByAReRun()

@@ -2203,11 +2203,85 @@ async function main() {
   await testPlannerHandoffRequiresAuthoritativeArtifact()
   await testPlannerHandoffRejectsMalformedExistingRows()
   await testPlannerHandoffStoresValuesFreePlanEvidence()
+  await testBackgroundPlanFillsTheParentPackColumns()
   await testCheckpointApplyRequiresDurablePlanPermissionAndManualAck()
   await testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree()
   await testCheckpointApplyMissingRecordsApiFailsBeforeRunning()
   await testCheckpointApplySingleFlightRejectsConcurrentQueuedRun()
   await testCheckpointApplyRejectsConcurrentRunningChunk()
+}
+
+// F1c-b — 后台大 BOM 链上的 父组件图号 / 父组件名称 包列。与上面那条 当前组件排序号 的绑定同形:
+// 两条真实调用链经过同一个规划器,但各自从不同的 seam 取「动作声明的扩展列」——交互链是
+// `action.extensionFieldIds`(table-actions computeDryRun),这一条是
+// `job.actionSnapshot.extensionFieldIds`(planLargeBomBackgroundExpansionJob)。断掉这一行,同一个
+// 项目会因为 BOM 够不够大而落到两套列上:小 BOM 有值、大 BOM 空着。
+async function testBackgroundPlanFillsTheParentPackColumns() {
+  const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
+  const installedFieldProperties = PARENT_PACK_COLUMN_IDS.map((fieldId) => ({
+    logicalId: fieldId,
+    name: fieldId,
+    type: 'string',
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system', preserveOnRefresh: false, required: false, key: false,
+        extension: true, packId: 'factory-a', packVersion: '1.0.0',
+      },
+    },
+  }))
+
+  async function planWith(extensionFieldIds, jobId) {
+    const job = await completedJobWithArtifact({ jobId, extensionFieldIds })
+    const planned = await planLargeBomBackgroundExpansionJob({
+      storage: job.storage,
+      ...TEST_SCOPE,
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      jobId: job.jobId,
+      existingRows: [],
+      installedFieldProperties,
+      runId: 'large-bom-parent-pack-run',
+      plannedAt: '2026-06-08T00:02:00.000Z',
+      now: () => '2026-06-08T00:03:00.000Z',
+    })
+    assert.equal(planned.status, 'completed')
+    assert.equal(planned.planArtifact.plan.counts.manual_confirm, 0)
+    const addRecords = planned.planArtifact.plan.decisions
+      .filter((decision) => decision.decision === 'add')
+      .map((decision) => decision.record)
+    assert.equal(addRecords.length, 2, 'the artifact holds one root row and one child row')
+    return { planned, addRecords }
+  }
+
+  const declared = await planWith(PARENT_PACK_COLUMN_IDS, 'job-plan-parent-pack')
+  const rootRecord = declared.addRecords.find((record) => record.depth === 0)
+  const childRecord = declared.addRecords.find((record) => record.depth === 1)
+  assert.ok(rootRecord && childRecord)
+  // 值本身是 fixture 里的 *_SHOULD_NOT_APPEAR 串,这里不复述它,只断言「就是父行那一个值」——
+  // 同源要证的正是这件事。
+  assert.equal(childRecord.ext_parentDrawingNo, rootRecord.componentCode, '后台链把父行图号写进客户包列')
+  assert.equal(childRecord.ext_parentDrawingNo, childRecord.parentComponentCode, '包列 = 模板列 parentComponentCode(同一个值)')
+  assert.equal(childRecord.ext_parentName, childRecord.parentComponentName, '包列 = 模板列 parentComponentName(同一个值)')
+  assert.equal(typeof childRecord.ext_parentDrawingNo, 'string')
+  assert.ok(childRecord.ext_parentDrawingNo.length > 0, '写进去的是真值,不是空串')
+  for (const fieldId of PARENT_PACK_COLUMN_IDS) {
+    assert.equal(Object.prototype.hasOwnProperty.call(rootRecord, fieldId), false, '根行无父 ⇒ ' + fieldId + ' 连键都没有')
+  }
+  assertValuesFree(publicBackgroundExpansionJob(declared.planned))
+
+  // 负控 = 这条接线断掉的证据:动作快照里没有这两列 ⇒ 后台计划一个 ext_ 键都不派生。
+  const undeclared = await planWith(undefined, 'job-plan-parent-pack-undeclared')
+  for (const record of undeclared.addRecords) {
+    assert.deepEqual(
+      Object.keys(record).filter((key) => key.startsWith('ext_')),
+      [],
+      '动作快照没声明扩展列 ⇒ 后台计划不派生任何 ext_ 列',
+    )
+  }
+  assert.equal(
+    undeclared.addRecords.find((record) => record.depth === 1).parentComponentCode,
+    rootRecord.componentCode,
+    '模板列照旧 —— 这次改动是纯加法',
+  )
 }
 
 main().catch((err) => {

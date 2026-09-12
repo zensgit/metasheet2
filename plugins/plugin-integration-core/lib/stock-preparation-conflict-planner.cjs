@@ -1044,9 +1044,28 @@ function pickFields(row, fields) {
 // cannot promote one into the writable band.
 //
 // A MAPPED VALUE ALWAYS WINS. If a deployment's own ext mapping already fills one
-// of these three from a source column, the row arrives carrying it and the
+// of them from a source column, the row arrives carrying it and the
 // derivation stands down (`isBlank` check per id) — the deployment's declared
 // mapping is measured, this is derived.
+//
+// F1c-b — 父组件图号 / 父组件名称 的**客户包**那一半(`ext_parentDrawingNo` / `ext_parentName`).
+//
+// 缺口:装了包的部署上这两列与模板列 `parentComponentCode` / `parentComponentName` 同名同义,
+// 模板列 F1c 之后按老系统口径有值,包列(中文名、人真正看的那两列)一行都没有。这条拉取链上
+// 能往 ext_ 列写值的只有两处:部署自己的 ext 映射(`applyExtFieldMapping`)和 F1c 起本函数
+// 派生的那三列 —— 前者读的是 PART 行,而父件这一侧展开层只发出一个 OBJ_ID,任何 part 列映射
+// 都够不着它;后者到今天为止不含这两列。所以它们不是"没配",是配了也填不上。
+//
+// 同源而不是同规则:值取的就是下面刚写进 `out` 的那两个模板列值本身(见 denormalizedPlmFields),
+// 不存在第二份取值逻辑可以漂移,两列与模板列必然**逐行**相等。模板列没写(父件图号为空、父件两个
+// 名字键都空、父件不在这批里、根行无父)时包列同样不写 —— 不发明空串,也不让两侧口径分家。
+//
+// 不派生 `ext_spec`,尽管它与模板 `componentSpec` 同为 规格 二字。模板列今天有两个来源:部署
+// 声明的 readPlan.part.specField,以及没声明时由 名称 按第一个空格切出的后段(bom-expansion
+// createRow)。包列 `ext_spec` 这条链上从来没有写手,也没有任何一处把两者判定为同义 —— 导出
+// (stock-preparation-prep-line-export.cjs:126)只把它当 `componentSpec` 不在时的兼容兜底,而
+// 演示脚本把它绑到源的 Specification 列。同名不等于同义,把一个填进另一个是改语义、不是补
+// 缺口,留 owner 裁决(见 PR 正文 owner 待办)。
 const DENORMALIZED_PLM_FIELD_IDS = Object.freeze([
   'parentComponentCode',
   'parentComponentName',
@@ -1054,6 +1073,8 @@ const DENORMALIZED_PLM_FIELD_IDS = Object.freeze([
   'ext_componentSortNo',
   'ext_parentSortNo',
   'ext_nameAndSpec',
+  'ext_parentDrawingNo',
+  'ext_parentName',
 ])
 
 // 明细排序号 as the pack declares it: a NUMBER column. A source `sort_id` reaches the
@@ -1082,7 +1103,8 @@ function firstPresentValue(row, keys) {
   return undefined
 }
 
-// THE SECOND GATE ON THE THREE DERIVED ext_ COLUMNS, and the one that keeps a pull from FAILING.
+// THE SECOND GATE ON THE DERIVED ext_ COLUMNS (three since F1c, five since F1c-b), and the one that
+// keeps a pull from FAILING.
 //
 // `pickFields` already refuses an id outside the pack-aware writable band. That is not enough on
 // its own: a deployment can have the pack column INSTALLED (so the band contains it) while the
@@ -1120,6 +1142,29 @@ function denormalizedPlmFields(row, parentIndex, declaredExtensionFieldIds) {
       const parentName = firstPresentValue(parent, EXPANSION_NAME_AND_SPEC_KEYS)
       if (!isBlank(parentName)) out.parentComponentName = parentName
       else if (!isBlank(parent.componentName)) out.parentComponentName = parent.componentName
+      // F1c-b — 客户包的 父组件图号 / 父组件名称。THE VALUE IS THE TEMPLATE COLUMN'S OWN VALUE:
+      // `out.parentComponentCode` / `out.parentComponentName` were just resolved two lines up, and
+      // are READ BACK here rather than recomputed. There is no second copy of the parent-join or of
+      // the 未切分名称 fallback to drift from — 逐行相等 is structural, not a convention a future
+      // edit has to remember. 模板列没有落值 ⇒ 包列也不落(`undefined` 检查),根行/父件不在批内
+      // ⇒ 整段不进(外层 if),所以空串永远写不出去。
+      //
+      // 三道闸与另外三列一字不差:`canDeriveExtensionField`(动作 DECLARED 的扩展列 = 目标表
+      // fieldIdMap 已绑定的那张表,fail-closed;不声明就不派生,免得把整行写入变成
+      // 'unmapped_extension_field' 的硬拒)+ `isBlank(row.ext_*)`(部署自己的映射或人工值优先,
+      // 派生的从不覆盖已测得的)+ 下游 `pickFields` 的包感知可写 band(包没装/声明为人工保留/
+      // 钉了 preserveOnRefresh ⇒ 一个字也落不到表上)。这段代码能给内存行加一个 KEY,
+      // 不能给任何人的表加一列,也不能把一列抬进可写 band。
+      if (canDeriveExtensionField('ext_parentDrawingNo', declaredExtensionFieldIds)
+        && isBlank(row.ext_parentDrawingNo)
+        && out.parentComponentCode !== undefined) {
+        out.ext_parentDrawingNo = out.parentComponentCode
+      }
+      if (canDeriveExtensionField('ext_parentName', declaredExtensionFieldIds)
+        && isBlank(row.ext_parentName)
+        && out.parentComponentName !== undefined) {
+        out.ext_parentName = out.parentComponentName
+      }
       // 父组件排序号 — THE PARENT ROW'S OWN 明细排序号, resolved through the same in-batch join
       // as 父组件图号/父组件名称 just above.
       //
@@ -1371,7 +1416,8 @@ function planStockPreparationConflicts(input = {}) {
   })
   // F1c — the action's DECLARED extension band, threaded by the two call sites that have it
   // (table-actions' dry-run and the large-BOM job planner). Read ONLY by `denormalizedPlmFields`'s
-  // three derived ext_ columns; absent => nothing is derived (see canDeriveExtensionField).
+  // derived ext_ columns (F1c: 排序号两列 + 名称及规格; F1c-b: 父组件图号/父组件名称 的包列);
+  // absent => nothing is derived (see canDeriveExtensionField).
   const declaredExtensionFieldIds = Array.isArray(input.extensionFieldIds)
     ? new Set(input.extensionFieldIds.filter((fieldId) => typeof fieldId === 'string' && fieldId !== ''))
     : null
