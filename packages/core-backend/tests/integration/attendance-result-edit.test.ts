@@ -109,7 +109,7 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
   async function mintToken(userId: string, perms: string): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent(perms)}`)
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
