@@ -133,12 +133,16 @@
   `GET /health/detailed|summary|subsystem/:name`。任务限定「读端点不动」，本次不改变任何读可见面。
 - **`POST /health/check`（`:2047`）**：不带 `requireSafetyCheck`、也不带 admin 门。它只调用
   `healthAggregator.checkHealth()` 取一次健康快照并返回摘要，不写任何状态——按「写/破坏性」判定
-  不属于本次范围，**未加门**。（它仍是一个无鉴权的探测面，归入残余。）
+  不属于本次范围，**未加门**。（它仍是一个**任意已认证用户**可触发的探测面——全局 JWT 门挡匿名、不鉴角色，归入残余。）
 - **`POST /plugins/reload-all-unsafe`(`:768`)、`POST /plugins/:id/reload-unsafe`(`:819`)**：
   未加 `requireAdminRole()`。它们**已有**自己的双重门：先要 `ALLOW_UNSAFE_ADMIN === 'true'`
   （否则 403 `UNSAFE_DISABLED`），再要 `req.user.roles` 含 `'admin'`（否则 403 `ADMIN_REQUIRED`）。
   这条角色判断是读 token 上的 `roles` 数组而非查 `user_roles`，与 `requireAdminRole()` 的口径不同，
   但它**不是**「只靠确认层」的那一族，改它属于另一件事（口径统一），本次不动，列入残余。
+- **同挂载面的子路由 `/safety/rules`（`admin-routes.ts:2087` 挂 `protection-rules.ts`）**：四条写端点
+  `:111 POST /`、`:203 PATCH /:id`、`:244 DELETE /:id`、`:267 POST /evaluate` **零授权门**，且身份取自可伪造的
+  `x-user-id` 请求头（`:21`、`:113`）。先存洞、不是本次回归；也**不能**用它重开上面 12 条（`SafetyGuard.ts:394`
+  只在 `entityType && entityId` 都在时评规则，bulk 的 `getDetails` 不给）。本次不动，另开 issue。
 - **已经有门的**：`/safety/confirm`(`:92`)、`/plugins/*`(`:391 :404 :478 :526 :560 :594 :613`)、
   `/yjs/status`(`:1412`)，以及走 `protectAdminOperation` 的 `/plugins/:id/reload`、
   `/plugins/reload-all`、`DELETE /plugins/:id`、`/snapshots/:id/restore`、`DELETE /snapshots/:id`、
@@ -148,13 +152,20 @@
 以及全仓（排除 `node_modules`、`.git`）搜索 `admin/safety/disable|admin/safety/enable|admin/data/bulk|
 admin/cache/clear|admin/metrics/reset|admin/ratelimits|admin/dlq`，命中全部是**文档**
 （`ROADMAP_V2.md`、`TODO_SPRINT4.md`、`TODO_SPRINT7.md`、`SPRINT4_COMPLETION_REPORT.md`、
-`claudedocs/PHASE10_ADVANCED_MESSAGING_PLAN.md`）与 `admin-routes.ts` 自身的注释行，
-**零前端调用点、零程序化调用点**。因此不存在「非 admin 合法调用方」被误伤。
+`claudedocs/PHASE10_ADVANCED_MESSAGING_PLAN.md`）与 `admin-routes.ts` 自身的注释行，外加**唯一一个程序化调用方**
+`scripts/test-safety-guard-e2e.sh:294`（拼接路径打 `/metrics/reset`，以 `safety-guard-e2e.yml:103-111` 播种进 `user_roles`
+的 admin 身份跑，CI 在本头上绿）。**零前端调用点**；「非 admin 合法调用方」在代码/脚本形态里不存在——
+`.http`/Postman/运维 runbook 之类非代码形态未覆盖，静态搜索看不见用非 admin 服务令牌的外部监控代理。
 
 ---
 
 ## 3. 对 admin 的行为不变
 
+- **「admin」的口径 = `user_roles` 里有 `admin` 行**（§1.2，`rbac/service.ts:19-23`）。`users.role='admin'`、`is_admin`
+  或 token 里声明的 admin **不算**：这类主体在 `/safety/enable|disable`、`/metrics/reset`、`/ratelimits/:key/reset`、
+  `/ratelimits/reset-all` 五条上由修前 200 变 403 `ADMIN_REQUIRED`，`/cache/clear` 由「一次重试即过」变 403；
+  另 6 条修前就被 `/safety/confirm`(`:92`) 的同一口径挡住，无变化。目标部署若存在只有 `users.role`
+  没有 `user_roles` 行的运维账号，上线前需回填（仓内无回填迁移，待用户定）。
 - 没有给 admin 新增任何放行路径：`requireAdminRole()` 只在原有中间件链**最前面**加了一层，
   admin 通过后进入的仍是**原封不动**的 `requireSafetyCheck(...)` + 原处理器。
 - `PUT /data/bulk`、`DELETE /data/bulk` 对 admin 仍然是 403 `SAFETY_CHECK_REQUIRED` 并回确认令牌
@@ -179,8 +190,10 @@ admin/cache/clear|admin/metrics/reset|admin/ratelimits|admin/dlq`，命中全部
    本次**刻意不动**：加租户注入属于改写语义，不在「最小、不重构」范围内。
 3. **`data_sources` 仍留在 `validTables` 里**（`:1227` / `:1318` 两份）。是否把它（以及
    `users` / `protection_rules` 等）摘出白名单是 issue **#5655 待用户裁决**的另一个问题，本次不动。
-4. **`POST /health/check`（`:2047`）无任何鉴权**，是一个匿名可触发的健康探测/放大面（读，不写）。
+4. **`POST /health/check`（`:2047`）无角色门**，任意已认证用户可触发的健康探测/放大面（读，不写；匿名被全局 JWT 门挡住）。
 5. **`*-unsafe` 两条路由的 admin 判定口径与 `requireAdminRole()` 不一致**（读 token 的 `roles`
    数组 vs 查 `user_roles` 表）。两套口径共存本身是隐患，但需要先确定哪一套是权威，本次不动。
+7. **`/safety/rules` 子路由四条写端点零授权门、身份取自请求头**（见 §2.1），另开 issue；同 router 还有 12 条无门 GET
+   （`/dlq`、`/queues`、`/shards*`、`/ratelimits*`、`/slo/status`、`/health/*`、`/safety/status`），读侧信息泄露面，本次未动。
 6. **`allowBypass` 仍是死配置**，留在 `types.ts` / `SafetyGuard.ts` / `initAdminRoutes` 里没人读。
    它今天无害，但是一个会误导读者（以为测试环境会绕过）的悬挂旋钮。
