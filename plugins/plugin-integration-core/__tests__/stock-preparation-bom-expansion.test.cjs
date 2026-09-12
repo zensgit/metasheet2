@@ -1486,6 +1486,89 @@ async function testTheTruncatedSampleNeverOutgrowsTheCap() {
   }
 }
 
+// ②c — THE STRUCTURAL PREMISE OF ②, PINNED ON THE COLLECTOR. The selection is order-blind only
+// because the slot `add` offers up for eviction holds the LARGEST entry retained so far. That is
+// the job of ONE line: the one-shot heapify `add` runs on the first entry it refuses, which turns
+// the traversal-ordered fill into a MAX-heap before any comparison is made against `entries[0]`.
+// Delete it and `entries[0]` is merely whatever the fill happened to leave at index 0, every later
+// newcomer is compared against the wrong incumbent, and the retained set goes back to depending on
+// arrival order — the exact 409 X5 exists to close.
+//
+// MEASURED, AND THE REASON THIS TEST EXISTS: with that single line removed the whole declared chain
+// (bom-expansion / table-actions / large-bom-jobs / conflict-planner / expansion-snapshot-mapper)
+// stayed green. No fixture above ever fills the buffer with three or more DISTINCT sort keys in an
+// order that is not already heap order — the expansions feed at most two distinct keys, and the
+// cap-bound test above feeds 47 byte-identical losers followed by 3 byte-identical winners, so the
+// heap property is never load-bearing there. A cap of 3 cannot see it either: with three slots the
+// heapify loop degenerates to a single `siftDown(0)`, so the buggy variants and the correct one
+// agree. Hence a cap of FOUR below, and a fill that parks the largest retained entry at index 3 —
+// a leaf under the second internal node, which only a full bottom-up heapify ever visits.
+//
+// This is a collector-seam test for the same reason the `path` case above is: the expander cannot
+// produce four distinct sort keys in one batch of this shape on demand, and the invariant belongs
+// to the structure rather than to any one expansion.
+function testTheEvictedSlotIsTheLargestRetainedEntry() {
+  // Five of the module's own type tokens, listed ASCENDING by the sort key. Identity is the type
+  // token alone on these payloads (see ROW_ERROR_IDENTITY_FIELDS' header), so the ladder is the
+  // sort order and nothing else is consulted.
+  const ASCENDING = [
+    { type: 'ambiguous_component', field: 'part_id', depth: 1 },
+    { type: 'invalid_quantity', field: 'Bom_ExAttr1', depth: 1 },
+    { type: 'missing_bom_id', field: 'bom_id', depth: 1 },
+    { type: 'missing_child_bom', field: 'bom_id', depth: 1 },
+    { type: 'missing_component', field: 'part_id', depth: 1 },
+  ]
+  const [SMALLEST, SECOND, THIRD, FOURTH, LARGEST] = ASCENDING
+  const EXPECTED = [SMALLEST, SECOND, THIRD, FOURTH]
+
+  const offer = (order) => {
+    const collector = createRowErrorCollector(4)
+    let peak = 0
+    for (const entry of order) {
+      collector.add(entry)
+      peak = Math.max(peak, collector.size())
+    }
+    return { retained: collector.finalize(), peak }
+  }
+
+  // THE FILL THAT IS NOT HEAP ORDER. The four that fit arrive smallest-first with the LARGEST of
+  // them last, so it lands at index 3; the fifth entry offered sorts below it and must take its
+  // place. A collector that compares the newcomer against index 0 instead refuses it and keeps the
+  // largest — a different retained set, which is a different plan.
+  const notHeapOrder = offer([SMALLEST, SECOND, THIRD, LARGEST, FOURTH])
+  assert.deepEqual(
+    notHeapOrder.retained,
+    EXPECTED,
+    'the entry evicted is the LARGEST retained one, not whatever the fill left at index 0',
+  )
+  assert.equal(notHeapOrder.peak, 4, 'and the cap still holds while that swap happens')
+
+  // The mirror image fills largest-first, which already satisfies the heap property at the root. It
+  // agrees today AND it agreed with every broken heapify measured above — which is precisely why
+  // the assertion before it, not this one, is the binding half.
+  const alreadyHeapOrder = offer([LARGEST, THIRD, SECOND, SMALLEST, FOURTH])
+  assert.deepEqual(alreadyHeapOrder.retained, EXPECTED, 'and the heap-ordered fill agrees, entry for entry')
+
+  // EVERY order, not two. 120 permutations of the same five entries through a cap of 4: the retained
+  // set is a function of the SET alone, so all 120 must answer identically. This is ② restated
+  // where an arrival order is free rather than a fixture away, and it is what catches a partial
+  // heapify (root only, or top-down) that the two named fills above may happen to survive.
+  const permutationsOf = (items) => (items.length <= 1 ? [items] : items.flatMap((item, index) => (
+    permutationsOf(items.slice(0, index).concat(items.slice(index + 1))).map((rest) => [item].concat(rest))
+  )))
+  const orders = permutationsOf(ASCENDING)
+  assert.equal(orders.length, 120, 'every arrival order of the five entries is covered')
+  for (const order of orders) {
+    const { retained, peak } = offer(order)
+    assert.deepEqual(
+      retained,
+      EXPECTED,
+      `arrival order ${order.map((entry) => entry.type).join(' -> ')} kept a different set`,
+    )
+    assert.equal(peak, 4, 'and no arrival order grows the structure past the cap')
+  }
+}
+
 // Configuration may move the cap, and only within reach of the ceiling. Enforcement lives in the
 // expander (the only thing that reads the cap), and it REFUSES rather than clamps: a silent
 // `Math.min` would let a deploy config say 2000000 while 20000 ran, with nothing anywhere to tell
@@ -1896,6 +1979,7 @@ async function main() {
   await testTheTruncatedSampleIsTheSameSetInEitherProductionOrder()
   await testTheSampleIsOrderBlindWhenTwoDefectsShareAType()
   await testTheTruncatedSampleNeverOutgrowsTheCap()
+  testTheEvictedSlotIsTheLargestRetainedEntry()
   await testRowErrorLimitIsConfigurableUnderACeiling()
   await testMissingComponentProbeCountSurvivesTheRowErrorCap()
   await testMissingComponentDetailNeverReachesTheHashedSurfaces()
