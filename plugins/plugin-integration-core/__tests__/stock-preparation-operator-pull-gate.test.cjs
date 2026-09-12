@@ -136,7 +136,7 @@ function mount({ tenantPrincipalDirectory = { async verifyTenantMembership() { r
     config: {},
   }
   const services = {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
     pipelineRunner: inertService(['runPipeline']),
@@ -395,6 +395,11 @@ function mountWithSource({
     async deleteExternalSystem() { throw new Error('unexpected') },
     async listExternalSystems() { return { items: [] } },
   }
+  // G4/M2 (#5553 §3): the decrypting accessor is a REGISTRATION requirement now, so it exists on
+  // every mount, not only on the owner-modelling ones. The default shape resolves for anybody
+  // (this harness models no connection owner) and records NOTHING, so `loadPrincipals` keeps
+  // meaning exactly what P-12 and P-13 read it as: owner-constrained connection resolutions.
+  registry.getExternalSystemForAdapter = async () => storedRow
   if (connectionOwner) {
     // The NON-DECRYPTING guard accessor the identity peek is contracted to use. It resolves no
     // connection, so it answers for every caller — which is the whole reason the peek can precede
