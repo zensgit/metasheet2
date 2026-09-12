@@ -199,14 +199,23 @@ const EMPTY_TRANSFORM_CONTEXT = Object.freeze({})
 // cut that key really did fire and really did write a non-empty value. This returns the key the
 // pre-change engine would have looked up, so that answer stays writable.
 //
-// It returns a KEY, never a value, and only `dictMap` consults it. Normalising `undefined` to
-// `null` for the whole chain instead would hand `trim`/`upper`/`lower`/`toNumber`/`toDate` a
+// It returns a KEY, never a value, and only `dictMap` consults it while the original absence is
+// passing through. A default or dictionary answer consumes that compatibility, even when its
+// answer is undefined. Normalising `undefined` to `null` for the whole chain instead would hand
+// `trim`/`upper`/`lower`/`toNumber`/`toDate` a
 // `null` to pass through as their own answer; `outputValue` would stop being `undefined`, and the
 // blanking write this cut removes would come straight back.
 function absentSourceLookupKey(mapping) {
   return Object.prototype.hasOwnProperty.call(mapping, 'defaultValue')
     ? String(mapping.defaultValue)
     : 'undefined'
+}
+
+// The context is owned by this transformValue() invocation, never by its caller. Transparent
+// steps and dictionary misses preserve compatibility; a produced answer consumes it once.
+function producedTransformValue(value, context) {
+  if (context !== EMPTY_TRANSFORM_CONTEXT) delete context.absentSourceKey
+  return value
 }
 
 function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CONTEXT) {
@@ -238,7 +247,7 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
     }
     case 'defaultValue': {
       const fallback = Object.prototype.hasOwnProperty.call(args, 'value') ? args.value : args.defaultValue
-      return isBlank(value) || isBlankAfterTrim(value) ? fallback : value
+      return isBlank(value) || isBlankAfterTrim(value) ? producedTransformValue(fallback, context) : value
     }
     case 'concat': {
       if (args.fields !== undefined && !Array.isArray(args.fields)) {
@@ -286,10 +295,11 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
       //     cannot tell those apart - only transformRecord() can, and this is how it says so.
       if (!anyPartSupplied && context.sourceFieldAbsent === true) return undefined
 
-      return parts
+      const output = parts
         .filter((part) => !isBlank(part) && !isBlankAfterTrim(part))
         .map((part) => String(part))
         .join(separator)
+      return producedTransformValue(output, context)
     }
     case 'dictMap': {
       if (!isPlainObject(args.map)) {
@@ -303,9 +313,9 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
         ? context.absentSourceKey
         : value
       const key = String(lookup)
-      if (Object.prototype.hasOwnProperty.call(args.map, key)) return args.map[key]
-      if (Object.prototype.hasOwnProperty.call(args.map, lookup)) return args.map[lookup]
-      if (Object.prototype.hasOwnProperty.call(args, 'defaultValue')) return args.defaultValue
+      if (Object.prototype.hasOwnProperty.call(args.map, key)) return producedTransformValue(args.map[key], context)
+      if (Object.prototype.hasOwnProperty.call(args.map, lookup)) return producedTransformValue(args.map[lookup], context)
+      if (Object.prototype.hasOwnProperty.call(args, 'defaultValue')) return producedTransformValue(args.defaultValue, context)
       return value
     }
     default:
@@ -315,9 +325,9 @@ function applyTransform(value, step, sourceRecord, context = EMPTY_TRANSFORM_CON
 
 function transformValue(value, transform, sourceRecord = {}, context = EMPTY_TRANSFORM_CONTEXT) {
   let current = value
-  // Only ever REPLACED by a fresh object, never mutated: the caller's context (and the frozen
-  // EMPTY_TRANSFORM_CONTEXT) is left exactly as it was handed in.
-  let stepContext = context
+  // Real producers consume the chain-local compatibility key. Keep sourceFieldAbsent as a
+  // separate fact for concat, and never let this chain consume a caller's or another run's key.
+  let stepContext = context === EMPTY_TRANSFORM_CONTEXT ? EMPTY_TRANSFORM_CONTEXT : { ...context }
   for (const step of normalizeTransformList(transform)) {
     const next = applyTransform(current, step, sourceRecord, stepContext)
     // The single step whose new answer changes what the PRE-CHANGE engine would have handed the

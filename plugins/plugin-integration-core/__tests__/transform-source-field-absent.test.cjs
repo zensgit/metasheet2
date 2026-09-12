@@ -53,6 +53,34 @@ function warningCodes(result) {
   return (result.warnings || []).map((warning) => warning.code)
 }
 
+// Exercise both production mapping producers and their JSON storage boundary. A valid
+// defaultValue step with no fallback must survive as a producer whose answer is undefined.
+function registryRoundTripMappings(mappings) {
+  return normalizeFieldMappings(JSON.parse(JSON.stringify(mappings))).map((mapping, index) => rowToFieldMapping({
+    id: `fm_chain_${index}`,
+    pipeline_id: 'pipe_x02',
+    source_field: mapping.sourceField,
+    target_field: mapping.targetField,
+    transform: JSON.stringify(mapping.transform),
+    validation: JSON.stringify(mapping.validation),
+    default_value: JSON.stringify(mapping.defaultValue),
+    sort_order: mapping.sortOrder,
+    created_at: null,
+  }))
+}
+
+function producedUndefinedMapping() {
+  return {
+    sourceField: 'name',
+    targetField: 'name',
+    transform: [
+      { fn: 'concat' },
+      { fn: 'defaultValue' },
+      { fn: 'dictMap', args: { map: { '': 'WRONG', undefined: 'EXPECTED' } } },
+    ],
+  }
+}
+
 // --- 1. absent source path: nothing is written, and the fact is reported -----
 function testAbsentSourcePathLeavesTargetUnwritten() {
   const mappings = [
@@ -326,6 +354,69 @@ async function testAllAbsentConcatWritesNothing() {
     rows: 1,
     fields: [{ sourceField: 'name', targetField: 'name' }],
   }, 'and the run reports it instead of losing it')
+}
+
+// A compatibility key belongs to absence, not to a later producer's undefined answer. In
+// particular, concat's synthetic '' key must stop at a default or dictionary answer while a
+// transparent step or dictionary miss still passes it through.
+function testDictMapCompatibilityStopsAtProducedValues() {
+  const distinguish = { fn: 'dictMap', args: { map: { null: 'NULL', undefined: 'UNDEFINED', '': 'EMPTY', 0: 'ZERO', false: 'FALSE' } } }
+  const cases = [
+    { label: 'concat then default with no fallback', chain: ['concat', 'defaultValue', distinguish], expected: 'UNDEFINED' },
+    { label: 'nested default step', chain: ['concat', { type: 'defaultValue', args: {} }, distinguish], expected: 'UNDEFINED' },
+    { label: 'produced undefined through trim', chain: ['concat', 'defaultValue', 'trim', distinguish], expected: 'UNDEFINED' },
+    { label: 'concat key through transparent steps', chain: ['concat', 'trim', 'upper', 'lower', 'toNumber', 'toDate', distinguish], expected: 'EMPTY' },
+    { label: 'concat key through dictionary miss', chain: ['concat', { fn: 'dictMap', map: {} }, 'trim', distinguish], expected: 'EMPTY' },
+    { label: 'original absence through trim', chain: ['trim', distinguish], expected: 'NULL' },
+    { label: 'original absence through dictionary miss', chain: [{ fn: 'dictMap', map: {} }, distinguish], expected: 'NULL' },
+    { label: 'original absence then default', chain: ['defaultValue', distinguish], expected: 'UNDEFINED' },
+    { label: 'matched null then default', chain: ['concat', { fn: 'dictMap', map: { '': null } }, 'defaultValue', distinguish], expected: 'UNDEFINED' },
+    { label: 'matched empty then default', chain: ['concat', { fn: 'dictMap', map: { '': '' } }, 'defaultValue', distinguish], expected: 'UNDEFINED' },
+    { label: 'fallback null then default', chain: ['concat', { fn: 'dictMap', map: {}, defaultValue: null }, 'defaultValue', distinguish], expected: 'UNDEFINED' },
+    { label: 'explicit null default', chain: ['concat', { fn: 'defaultValue', value: null }, distinguish], expected: 'NULL' },
+    { label: 'explicit empty default', chain: ['concat', { fn: 'defaultValue', value: '' }, distinguish], expected: 'EMPTY' },
+    { label: 'explicit zero default', chain: ['concat', { fn: 'defaultValue', value: 0 }, distinguish], expected: 'ZERO' },
+    { label: 'explicit false default', chain: ['concat', { fn: 'defaultValue', value: false }, distinguish], expected: 'FALSE' },
+    { label: 'explicit text default', chain: ['concat', { fn: 'defaultValue', value: 'TEXT' }, distinguish], expected: 'TEXT' },
+    { label: 'later concat installs its own empty key', chain: ['concat', 'defaultValue', 'concat', distinguish], expected: 'EMPTY' },
+  ]
+  for (const { label, chain, expected } of cases) {
+    const input = [{ sourceField: 'name', targetField: 'name', transform: chain }]
+    for (const mappings of [normalizeFieldMappings(input), registryRoundTripMappings(input)]) {
+      assert.equal(mappings[0].defaultValue, null, `${label}: production unset default is null`)
+      const result = transformRecord({}, mappings)
+      assert.deepEqual(result.errors, [], label)
+      assert.deepEqual(result.value, { name: expected }, label)
+      assert.deepEqual(result.warnings, [], label)
+    }
+  }
+
+  const persisted = registryRoundTripMappings([producedUndefinedMapping()])
+  assert.deepEqual(persisted[0].transform, producedUndefinedMapping().transform)
+  assert.deepEqual(transformRecord({}, persisted).value, { name: 'EXPECTED' }, 'the exact persisted regression must not select WRONG')
+
+  // Explicit undefined answers are supported internally even though JSON omits their key.
+  // Isolate each producer: removing only dictionary-key consumption must make these fail.
+  for (const first of [
+    { fn: 'dictMap', map: { '': undefined } },
+    { fn: 'dictMap', map: {}, defaultValue: undefined },
+  ]) {
+    const result = transformRecord({}, [{ sourceField: 'name', targetField: 'name', defaultValue: null, transform: ['concat', first, distinguish] }])
+    assert.deepEqual(result.value, { name: 'UNDEFINED' })
+  }
+
+  for (const chain of [['concat'], ['concat', 'trim'], ['concat', { fn: 'dictMap', map: {} }], ['concat', 'defaultValue']]) {
+    const result = transformRecord({}, registryRoundTripMappings([{ sourceField: 'name', targetField: 'name', transform: chain }]))
+    assert.deepEqual(result.value, {}, 'consuming compatibility must never turn no output into a blank write')
+    assert.deepEqual(warningCodes(result), [SOURCE_FIELD_ABSENT])
+  }
+
+  const context = Object.freeze({ absentSourceKey: 'null', sourceFieldAbsent: true })
+  assert.equal(transformValue(undefined, ['concat', 'defaultValue', distinguish], {}, context), 'UNDEFINED')
+  assert.equal(transformValue(undefined, ['trim', distinguish], {}, context), 'NULL', 'a previous chain must not consume a reused context')
+  assert.equal(transformValue(undefined, ['concat', distinguish], {}, context), 'EMPTY', 'sourceFieldAbsent survives the context copy')
+  assert.deepEqual(context, { absentSourceKey: 'null', sourceFieldAbsent: true })
+  assert.equal(transformValue(undefined, ['concat', 'defaultValue', distinguish]), 'UNDEFINED', 'context-free callers keep native lookup semantics')
 }
 
 // --- 3e. a dictMap that answers the PRE-CHANGE lookup key still writes --------
@@ -1001,6 +1092,32 @@ async function testDictMapCompatWritesThroughTheRunner() {
   assert.deepEqual(missedRun.details.sourceFieldAbsent.fields, [{ sourceField: 'name', targetField: 'name' }])
 }
 
+async function testProducedUndefinedLookupWritesThroughTheRunner() {
+  const fieldMappings = registryRoundTripMappings([
+    { sourceField: 'code', targetField: 'code' },
+    producedUndefinedMapping(),
+    { sourceField: 'quantity', targetField: 'quantity', transform: ['concat', 'trim', { fn: 'dictMap', map: {} }] },
+  ])
+  const fixture = {
+    fieldMappings,
+    multitableRows: [{ id: 'rec_existing', sheetId: 'sheet_approved_materials', version: 1, data: { code: 'MAT-001', name: 'Correct bolt', quantity: 7 } }],
+    sourceRecords: [{ code: 'MAT-001', updatedAt: '2026-09-10T00:00:00.000Z' }],
+  }
+  const { db, runner, storedRows } = createHarness(fixture)
+  const result = await runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_x02', triggeredBy: 'test' })
+  assert.equal(result.metrics.rowsFailed, 0)
+  assert.equal(result.metrics.rowsWritten, 1)
+  assert.equal(storedRows.length, 1)
+  assert.equal(storedRows[0].data.name, 'EXPECTED', 'the real runner and multitable adapter must not silently store WRONG')
+  assert.equal(storedRows[0].data.quantity, 7, 'an all-absent concat through a dictionary miss still preserves the target')
+  assert.deepEqual(db.tables.get('integration_runs')[0].details.sourceFieldAbsent.fields, [{ sourceField: 'quantity', targetField: 'quantity' }])
+
+  const previewHarness = createHarness(fixture)
+  const dryRun = await previewHarness.runner.runPipeline({ tenantId: 'tenant_1', pipelineId: 'pipe_x02', triggeredBy: 'test', dryRun: true })
+  assert.equal(dryRun.preview.records[0].transformed.name, 'EXPECTED', 'the production preview sees the consumed key')
+  assert.equal(previewHarness.storedRows[0].data.name, 'Correct bolt', 'dry-run does not write')
+}
+
 // --- 10. the dry-run path reports the same fact and writes nothing ------------
 async function testDryRunReportsAbsenceAndWritesNothing() {
   const { db, runner, writtenRecords } = createHarness({
@@ -1074,7 +1191,7 @@ async function testFieldsTruncatedOnlyWhenAPairWasDropped() {
 // payload; if the classifier still counted it as a difference, every round would re-plan the same
 // `update`, the write would change nothing, and counts/rowFingerprints would report churn for
 // ever. Before this cut the planner "converged" only by writing null over the good value.
-async function testPlannerConvergesWhenSourceFieldIsAbsent() {
+function createPlannerHarness() {
   const stored = new Map([['P-002', { externalId: 'P-002', name: 'Old gadget', status: 'old' }]])
   const calls = { updateRows: [], insertRows: [] }
   const input = {
@@ -1144,7 +1261,11 @@ async function testPlannerConvergesWhenSourceFieldIsAbsent() {
     dataSourceOwnerPrincipal: 'owner-7',
     maxRows: 100,
   }
+  return { input, stored, calls }
+}
 
+async function testPlannerConvergesWhenSourceFieldIsAbsent() {
+  const { input, stored, calls } = createPlannerHarness()
   // Round 1: `status` really did change, so the row is an update - with a payload that does NOT
   // carry `name`.
   const first = await dryRunExternalWrite(input)
@@ -1168,6 +1289,27 @@ async function testPlannerConvergesWhenSourceFieldIsAbsent() {
   assert.equal(stored.get('P-002').name, 'Old gadget')
 }
 
+async function testProducedUndefinedLookupConvergesThroughThePlanner() {
+  const { input, stored, calls } = createPlannerHarness()
+  input.pipeline.fieldMappings = registryRoundTripMappings([
+    { sourceField: 'code', targetField: 'externalId' },
+    producedUndefinedMapping(),
+    { sourceField: 'status', targetField: 'status' },
+  ])
+  const first = await dryRunExternalWrite(input)
+  assert.equal(first.counts.update, 1)
+  assert.deepEqual(first.evidence.rowErrorTypes, [])
+  assert.equal(calls.updateRows.length, 0, 'planning must not write')
+  const result = await applyExternalWrite({ ...input, dryRunToken: first.dryRunToken, applyUser: 'user_write', runId: 'run_c6_chain' })
+  assert.deepEqual(result.evidence.rowErrorTypes, [])
+  assert.equal(calls.updateRows[0].name, 'EXPECTED', 'C6 uses the same consumed compatibility key as the live runner')
+  assert.equal(stored.get('P-002').name, 'EXPECTED', 'only the in-memory capability is written, never external infrastructure')
+  const second = await dryRunExternalWrite(input)
+  assert.equal(second.counts.update, 0)
+  assert.equal(second.counts.skip, 1)
+  assert.equal(calls.updateRows.length, 1, 'the correct result converges without a second write')
+}
+
 // Exported one-by-one so a mutation probe can run each case in isolation and count
 // exactly how many go red; `node __tests__/...` (the test-chain shape) still runs them all.
 const CASES = {
@@ -1176,6 +1318,7 @@ const CASES = {
   testDefaultsAndTransformsStillProduceValues,
   testBlankDefaultValueIsUnset,
   testAllAbsentConcatWritesNothing,
+  testDictMapCompatibilityStopsAtProducedValues,
   testDictMapNullKeyStillAnswersAbsentSource,
   testEmptyArraySegmentIsAbsentByDecision,
   testSkipDoesNotBypassGuards,
@@ -1185,9 +1328,11 @@ const CASES = {
   testCleanRunCarriesNoAbsenceDetail,
   testStoredMappingShapeIsNotBlanked,
   testDictMapCompatWritesThroughTheRunner,
+  testProducedUndefinedLookupWritesThroughTheRunner,
   testDryRunReportsAbsenceAndWritesNothing,
   testFieldsTruncatedOnlyWhenAPairWasDropped,
   testPlannerConvergesWhenSourceFieldIsAbsent,
+  testProducedUndefinedLookupConvergesThroughThePlanner,
 }
 
 async function main() {
