@@ -28,6 +28,14 @@
 //      no driver text in the response, zero source/records calls.
 //   R3 also pins that a refused apply does NOT burn the dry-run token: the SAME token applies once the
 //      columns are back.
+//   R9 the confirmation-decision RECONCILE route: the five gone => 422, zero source reads, zero records
+//      calls and NO audit row - the refusal lands before the intent append and before the ledger sweep.
+//  R10 the MVP-PERSIST route: the five gone => 422 before the source read and before any snapshot write.
+//      R9/R10 are the two `computeDryRun` entry points the dry-run/apply cases above did not cover; each
+//      is calibrated against deleting its own `targetFieldExistence:` line (#5719 终审 non-blocking item).
+//  R11 a host whose `getObjectSheetId` answers a Promise (the async-host future) => 503
+//      TARGET_SCHEMA_UNAVAILABLE through the route, values-free, and the DB read never ran - not a
+//      silent skip of the probe.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -214,7 +222,7 @@ function actionConfig() {
   }
 }
 
-function mount({ dbRead = true, scopeError = null, computedMissing = [], derivedSheetId = SHEET_ID } = {}) {
+function mount({ dbRead = true, scopeError = null, computedMissing = [], derivedSheetId = SHEET_ID, extraServices = null } = {}) {
   const routes = new Map()
   const host = createProvisioning({ dbRead, scopeError, computedMissing, derivedSheetId })
   const records = createRecordsApi()
@@ -240,7 +248,7 @@ function mount({ dbRead = true, scopeError = null, computedMissing = [], derived
   const logLines = []
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: baseServices(source.adapter),
+    services: { ...baseServices(source.adapter), ...(extraServices || {}) },
     logger: {
       info(message, detail) { logLines.push(['info', message, detail]) },
       warn(message, detail) { logLines.push(['warn', message, detail]) },
@@ -510,6 +518,155 @@ async function r8AHostFailureIsAValuesFree503() {
   assert.deepEqual(harness.records.calls, [], 'R8: zero records calls')
 }
 
+// ── R9 the confirmation-decision RECONCILE route ───────────────────────────────────
+
+const RECONCILE_ROUTE = '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile'
+
+/** The two OPTIONAL services reconcile fails closed without (501) before it ever reaches the plan. */
+function reconcileServices(auditAppends) {
+  return {
+    stockPreparationAuditStore: {
+      async append(entry) {
+        auditAppends.push(clone(entry))
+        return { ok: true }
+      },
+    },
+    stockPreparationConfirmationDecisionLease: {
+      async acquire() { return { held: true, leaseId: 'lease-1' } },
+      async renew() { return { held: true } },
+      async release() { return { released: true } },
+    },
+  }
+}
+
+async function routeReconcile(routes) {
+  return call(routes, 'POST', RECONCILE_ROUTE, {
+    user: ADMIN_USER,
+    params: ACTION_PARAMS,
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+}
+
+async function r9ReconcileIsRefusedBeforeAnyReadOrLedgerWrite() {
+  const auditAppends = []
+  const harness = mount({ extraServices: reconcileServices(auditAppends) })
+  for (const id of MISSING_FIVE) harness.host.missing.add(id)
+  const res = await routeReconcile(harness.routes)
+  assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+  assert.equal(res.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+  assert.deepEqual(res.body.error.details.missingFields, [...MISSING_FIVE], 'R9: the route reports exactly the five')
+  assert.deepEqual(Object.keys(res.body.error.details).sort(), ['fieldExistenceMode', 'missingFields', 'targetObjectId'])
+  assert.equal(res.body.error.details.fieldExistenceMode, 'db')
+  assert.equal(res.body.error.details.targetObjectId, OBJECT_ID)
+  const text = JSON.stringify(res.body)
+  assert.equal(text.includes('fld_'), false, 'R9: no physical id in the response')
+  assert.equal(text.includes(SHEET_ID), false, 'R9: no sheet id in the response')
+  assert.equal(harness.host.probeCalls.length, 1, 'R9: exactly one DB read')
+  assert.deepEqual(
+    harness.host.derivations,
+    [{ projectId: STAGING_PROJECT_ID, objectId: OBJECT_ID }],
+    'R9: the probe derived the sheet the read is about, under the authenticated tenant',
+  )
+  assert.equal(harness.host.probeCalls[0].projectId, STAGING_PROJECT_ID, 'R9: asked under the authenticated tenant\'s staging project')
+  assert.equal(harness.host.probeCalls[0].objectId, OBJECT_ID)
+  assert.deepEqual(harness.host.probeCalls[0].fieldIds, TEMPLATE_FIELD_IDS)
+  assert.deepEqual(harness.source.calls, [], 'R9: zero source reads')
+  assert.deepEqual(harness.records.calls, [], 'R9: zero records calls — nothing was planned')
+  assert.deepEqual(auditAppends, [], 'R9: the refusal lands before the intent audit row')
+
+  // Control: the SAME mount with the columns back is not refused by the probe and reaches the source
+  // — so the 422 above is this probe\'s doing, not some other refusal on the way in.
+  harness.host.missing.clear()
+  const through = await routeReconcile(harness.routes)
+  assert.notEqual(
+    through.body.error && through.body.error.code,
+    'TARGET_SCHEMA_INCOMPLETE',
+    `R9 control: a complete target is not refused by the probe (${JSON.stringify(through.body)})`,
+  )
+  assert.ok(harness.source.calls.length > 0, 'R9 control: the complete target plans off the source')
+  assert.equal(auditAppends.length, 1, 'R9 control: and the intent row the refusal withheld is appended')
+}
+
+// ── R10 the MVP-PERSIST route ──────────────────────────────────────────────────
+
+const MVP_PERSIST_ROUTE = '/api/integration/table-actions/:actionId/mvp-persist'
+const MVP_PERSIST_FLAG = 'MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED'
+
+async function routeMvpPersist(routes) {
+  return call(routes, 'POST', MVP_PERSIST_ROUTE, {
+    user: ADMIN_USER,
+    params: ACTION_PARAMS,
+    body: { parameters: { projectNo: 'P-001' } },
+  })
+}
+
+async function r10MvpPersistIsRefusedBeforeAnySourceReadOrSnapshotWrite() {
+  const previous = process.env[MVP_PERSIST_FLAG]
+  process.env[MVP_PERSIST_FLAG] = 'true'
+  try {
+    const harness = mount()
+    for (const id of MISSING_FIVE) harness.host.missing.add(id)
+    const res = await routeMvpPersist(harness.routes)
+    assert.equal(res.statusCode, 422, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'TARGET_SCHEMA_INCOMPLETE')
+    assert.deepEqual(res.body.error.details.missingFields, [...MISSING_FIVE], 'R10: the route reports exactly the five')
+    assert.deepEqual(Object.keys(res.body.error.details).sort(), ['fieldExistenceMode', 'missingFields', 'targetObjectId'])
+    assert.equal(res.body.error.details.fieldExistenceMode, 'db')
+    assert.equal(res.body.error.details.targetObjectId, OBJECT_ID)
+    const text = JSON.stringify(res.body)
+    assert.equal(text.includes('fld_'), false, 'R10: no physical id in the response')
+    assert.equal(text.includes(SHEET_ID), false, 'R10: no sheet id in the response')
+    assert.equal(harness.host.probeCalls.length, 1, 'R10: exactly one DB read')
+    assert.deepEqual(
+      harness.host.derivations,
+      [{ projectId: STAGING_PROJECT_ID, objectId: OBJECT_ID }],
+      'R10: the probe derived the sheet the read is about, under the authenticated tenant',
+    )
+    assert.equal(harness.host.probeCalls[0].projectId, STAGING_PROJECT_ID, 'R10: asked under the authenticated tenant\'s staging project')
+    assert.equal(harness.host.probeCalls[0].objectId, OBJECT_ID)
+    assert.deepEqual(harness.host.probeCalls[0].fieldIds, TEMPLATE_FIELD_IDS)
+    assert.deepEqual(harness.source.calls, [], 'R10: zero source reads')
+    assert.deepEqual(harness.records.calls, [], 'R10: zero records calls — the snapshot committer was never reached')
+
+    // Control, same shape as R9\'s: with the columns back the probe does not refuse and the route
+    // goes on to read the source (what it does with the snapshot afterwards is not this suite\'s claim).
+    harness.host.missing.clear()
+    const through = await routeMvpPersist(harness.routes)
+    assert.notEqual(
+      through.body.error && through.body.error.code,
+      'TARGET_SCHEMA_INCOMPLETE',
+      `R10 control: a complete target is not refused by the probe (${JSON.stringify(through.body)})`,
+    )
+    assert.ok(harness.source.calls.length > 0, 'R10 control: the complete target plans off the source')
+  } finally {
+    if (previous === undefined) delete process.env[MVP_PERSIST_FLAG]
+    else process.env[MVP_PERSIST_FLAG] = previous
+  }
+}
+
+// ── R11 a derivation that is not a string ──────────────────────────────────────────
+
+// The day a host makes `getObjectSheetId` async, its Promise used to normalise to an empty id and the
+// sheet-identity gate (R6) read that as "some other sheet": every plan on that install silently stopped
+// being probed. Through the route that is now the same values-free 503 R8 pins, and the DB read the
+// probe could not prove was about the bound sheet still never runs.
+async function r11ANonStringDerivationIsAValuesFree503() {
+  const harness = mount({ derivedSheetId: Promise.resolve(SHEET_ID) })
+  for (const id of MISSING_FIVE) harness.host.missing.add(id)
+  const res = await dryRun(harness.routes)
+  assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+  assert.equal(res.body.error.code, 'TARGET_SCHEMA_UNAVAILABLE')
+  assert.deepEqual(Object.keys(res.body.error.details), ['targetObjectId'], 'R11: details carry the object id and nothing else')
+  assert.equal(res.body.error.details.targetObjectId, OBJECT_ID)
+  const text = JSON.stringify(res.body)
+  assert.equal(text.includes(SHEET_ID), false, 'R11: no sheet id in the response')
+  assert.equal(text.includes('getObjectSheetId'), false, 'R11: the contract message stays on the server log')
+  assert.equal(harness.host.probeCalls.length, 0, 'R11: the DB read never ran')
+  assert.deepEqual(harness.host.derivations, [{ projectId: STAGING_PROJECT_ID, objectId: OBJECT_ID }], 'R11: the derivation is what decided it')
+  assert.deepEqual(harness.source.calls, [], 'R11: zero source reads')
+  assert.deepEqual(harness.records.calls, [], 'R11: zero records calls')
+}
+
 async function main() {
   await r1MissingColumnsRefuseTheRouteBeforeAnyRead()
   const legacyData = await r2CompleteHostAndOldHostAnswerIdentically()
@@ -519,6 +676,9 @@ async function main() {
   await r6ADivergentBindingIsNotJudgedOnTheDerivedSheet(legacyData)
   await r7TheLargeBomLaneIsProbedAtPlanApprovalAndEveryChunk()
   await r8AHostFailureIsAValuesFree503()
+  await r9ReconcileIsRefusedBeforeAnyReadOrLedgerWrite()
+  await r10MvpPersistIsRefusedBeforeAnySourceReadOrSnapshotWrite()
+  await r11ANonStringDerivationIsAValuesFree503()
   console.log('stock-preparation-dry-run-target-field-probe-routes tests passed')
 }
 
