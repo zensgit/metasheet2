@@ -137,3 +137,50 @@ NODE_PATH yielded all 11 files PASS, without install or lock changes.
 Local logs are under `/private/tmp/tm-recovery-*-20260914.log`; they are session-local
 and not remote CI artifacts. GitHub checks on the publication head must be observed
 independently before any later owner-authorized merge.
+
+## Current-Main Replay: 2026-09-14
+
+This section supplements the original checkpoint above; it does not rewrite its
+base, test counts or browser-evidence boundary.
+
+- Existing Draft PR: #5709.
+- Previous published head: `d824103bfcb7c2b2e0857f0de4d6e7e982ded3a8`.
+  Its remote checks reached 28 SUCCESS and 1 intentional Strict E2E SKIPPED,
+  with zero pending/failure. These results belong to that old head only.
+- Replayed main: `7e74936dc5734d98f2acebfcc737120febafc530`.
+- True-merge code head: `cdde5df52223263fa16ee76812d7335b81b978e9`.
+- Code tree: `d36f9b97c8bd8df257ea7cc6e50c64e36150f366`.
+- Ordered parents: previous published head first, replayed main second.
+- Only manual resolution: the declaration conflict in
+  `apps/web/tests/multitable-workbench-sheet-delete.spec.ts`. All three captures
+  for table trash, record history and field manager are retained. Runtime files
+  merged automatically, preserving main's managed-field refusal and localization.
+- Relative-main scope before this report appendix: the same 44 files,
+  +2994/-161. No new recovery capability or restore writer change in this replay.
+
+### Replayed-Tree Gates
+
+| Gate | Result |
+| --- | --- |
+| Recovery/client/workbench frontend | 8 files / 211 tests PASS |
+| Managed-field guard, permission matrix, audit neighbors | 3 files / 113 tests PASS |
+| Required web script | All groups PASS; final group 456 files / 6721 tests; groups overlap |
+| Core TypeScript and web application tsconfig | Both PASS using installed Node 20 |
+| OpenAPI parity | 1/1 PASS; source/generated files byte-identical to previous published head |
+| Selectors | plugin-tests, multitable web guard and required-web byte-identical to previous published head; no lost selectors |
+| Provenance | Main's pin retained byte-for-byte; official six-section live/frozen differenceCount=0 |
+| Sealed export | Full 11-file S5 chain PASS |
+| Diff and review | Diff check PASS; independent Luna read-only replay review: zero P1/P2 in the examined union |
+
+Fresh isolated PostgreSQL 15: all 402 migrations applied, second replay no-op.
+The original five recovery suites plus `multitable-config-history-api-realdb.test.ts`
+passed 6 files / 77 tests with zero skips on Node 20. This includes actor-name
+enrichment and permission-filtered history alongside table/record/config recovery.
+Fixture base/sheet prefixes and other connections were zero; the exact disposable
+database was dropped, database/backend-prefix residue was zero, and the dedicated
+PG was stopped with no response on its loopback port. No shared database was used.
+
+Luna ran no tests or writes; the coordinator ran the gates above. No old mutation
+result is relabeled as a new mutation run. New remote exact-head CI remains a
+separate post-push gate. This appendix is a report-only child of the merge code
+head; it grants no Ready/merge, flag, dispatch, deployment or production authority.
