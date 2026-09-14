@@ -20090,7 +20090,7 @@ async function previewAttendanceComprehensiveHours(db, orgId, body = {}) {
 }
 
 function buildWorkdayContextSummary(options) {
-  const { workDate, storedIsWorkday, resolvedContext } = options
+  const { workDate, storedIsWorkday, storedTimezone, resolvedContext } = options
   if (!resolvedContext || !workDate) return null
 
   const sourceName = resolvedContext.source === 'rotation'
@@ -20106,6 +20106,7 @@ function buildWorkdayContextSummary(options) {
     : null
   const normalizedStored = storedIsWorkday !== false
   const normalizedResolved = resolvedContext.isWorkingDay !== false
+  const normalizedStoredTimezone = typeof storedTimezone === 'string' ? storedTimezone.trim() : ''
 
   return {
     storedIsWorkday: normalizedStored,
@@ -20113,6 +20114,9 @@ function buildWorkdayContextSummary(options) {
     matchesStored: normalizedStored === normalizedResolved,
     source: resolvedContext.source ?? 'rule',
     sourceName,
+    timezone: isValidTimeZoneIdentifier(normalizedStoredTimezone)
+      ? normalizedStoredTimezone
+      : null,
     weekday: getWeekdayFromDateKey(workDate),
     workingDays: Array.isArray(resolvedContext.rule?.workingDays) ? [...resolvedContext.rule.workingDays] : [...DEFAULT_RULE.workingDays],
     holiday,
@@ -30632,6 +30636,7 @@ module.exports = {
               workday_context: buildWorkdayContextSummary({
                 workDate,
                 storedIsWorkday: row.is_workday,
+                storedTimezone: row.timezone,
                 resolvedContext,
               }),
               meta: {
@@ -31310,6 +31315,7 @@ module.exports = {
 	              workdayContext: buildWorkdayContextSummary({
 	                workDate,
 	                storedIsWorkday: row.is_workday,
+	                storedTimezone: row.timezone,
 	                resolvedContext,
 	              }),
 	              state,
@@ -47494,7 +47500,7 @@ module.exports = {
                     a.published_at, a.published_by, a.locked_at, a.reopened_from_assignment_id,
                     a.assignment_kind, a.temporary_mode, a.temporary_replaces_kind,
                     a.temporary_replaces_assignment_id, a.temporary_reason, a.temporary_created_by,
-                    a.temporary_created_at,
+                    a.temporary_created_at, a.producer_type,
                     s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
                     s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
                     s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,

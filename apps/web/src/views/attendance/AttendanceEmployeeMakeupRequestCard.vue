@@ -2,8 +2,8 @@
   Dedicated employee 补卡申请 card (owner lock 2026-08-29).
 
   Display / form-UX only. Writes the same `requestForm` object AttendanceView
-  already submits through POST /api/attendance/requests. Leave / overtime /
-  shift-swap stay on the shared collapsed form. First viewport is untouched.
+  already submits through POST /api/attendance/requests. Shift-swap stays on
+  the shared collapsed form. First viewport is untouched.
 
   Prefill uses the existing non-pending anomaly rule. Pending-only / empty
   lists stay hand-fill — this card does not invent an anomaly type.

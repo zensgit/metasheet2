@@ -19,7 +19,9 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
+import { createNetworkUnavailableError } from '../src/utils/networkErrors'
 import {
+  buildPunchBasePayload,
   buildPunchRetryWithNotePayload,
   classifyPunchErrorOutcome,
   classifyPunchSuccessOutcome,
@@ -94,7 +96,16 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
 
 /** Minimal default mock: every non-punch endpoint returns an empty-but-ok payload so mount + refreshAll() never throw. */
 function installBaselineMock(): void {
-  vi.mocked(apiFetch).mockImplementation(async () => jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+  vi.mocked(apiFetch).mockImplementation(async (input) => {
+    const url = typeof input === 'string' ? input : input.url
+    if (url.includes('/api/attendance/rules/me')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: { runtimeRule: { timezone: 'Asia/Shanghai' } },
+      })
+    }
+    return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+  })
 }
 
 describe('Punch outcome clarity (pure)', () => {
@@ -111,6 +122,20 @@ describe('Punch outcome clarity (pure)', () => {
     expect(checkOut.kind).toBe('recorded')
     expect(checkOut.message).toBe('Check out recorded.')
     expect(checkOut.shouldRefreshRequests).toBe(false)
+  })
+
+  it('builds punch payloads from the effective rule timezone, never a browser fallback', () => {
+    expect(buildPunchBasePayload('check_in', ' Asia/Shanghai ', '')).toEqual({
+      eventType: 'check_in',
+      timezone: 'Asia/Shanghai',
+    })
+    expect(buildPunchBasePayload('check_out', null, ' org-9 ')).toEqual({
+      eventType: 'check_out',
+      orgId: 'org-9',
+    })
+    expect(buildPunchBasePayload('check_in', 'Invalid/Zone', null)).toEqual({
+      eventType: 'check_in',
+    })
   })
 
   it('classifies pendingApproval:true as pendingApproval and never says "recorded"', () => {
@@ -236,6 +261,7 @@ describe('Attendance punch outcome clarity (mount)', () => {
         expect((init as RequestInit | undefined)?.method).toBe('POST')
         const body = JSON.parse(String((init as RequestInit).body))
         expect(Object.keys(body).sort()).toEqual(['eventType', 'timezone'])
+        expect(body.timezone).toBe('Asia/Shanghai')
         expect(body).not.toHaveProperty('location')
         expect(body).not.toHaveProperty('meta')
         punchPosted = true
@@ -852,5 +878,46 @@ describe('Attendance punch outcome clarity (mount)', () => {
     deferredB.resolve(jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
     await flushUi(8)
     expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeNull()
+  })
+
+  // F4-B regression (apps/web/src/utils/api.ts now rewrites transport failures).
+  // WHY HERE: classifyStatusError() reads `err.code` first and otherwise infers a code
+  // from ENGLISH keywords in the message; localizeRuntimeErrorMessage() then DROPS any
+  // Latin-only message under a zh UI and shows the caller's generic fallback instead.
+  // A zh-localized transport message therefore has exactly two ways to degrade —
+  // an empty/generic banner, or the raw browser literal — and both are pinned below.
+  // The error object is built by the REAL utils/networkErrors factory, i.e. the same
+  // object apiFetch throws in production; nothing here is a look-alike.
+  it('F4-B: a transport failure surfaces neutral zh copy with its code, and never auto re-POSTs the punch', async () => {
+    window.localStorage.setItem('metasheet_locale', 'zh-CN')
+    useLocale().setLocale('zh-CN')
+
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let punchAttempts = 0
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchAttempts += 1
+        throw createNetworkUnavailableError(new TypeError('Failed to fetch'))
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, '上班打卡').click()
+    await flushUi(6)
+
+    const pageText = container!.textContent ?? ''
+    expect(pageText).toContain('服务暂时不可用，请稍后重试')
+    // The browser literal must not reach the panel, and the copy must not collapse
+    // into the bare generic fallback (what a Latin-only message would have produced).
+    expect(pageText).not.toContain('Failed to fetch')
+    expect(pageText).not.toContain('NetworkError')
+    // A punch is non-idempotent: the panel must not fire a second POST on its own.
+    expect(punchAttempts).toBe(1)
   })
 })

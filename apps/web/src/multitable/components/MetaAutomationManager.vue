@@ -44,13 +44,21 @@
 
           <label class="meta-automation__label">{{ l('manager.action') }}</label>
           <el-select v-model="draft.actionType" class="meta-automation__select" data-automation-field="actionType">
-            <el-option value="notify" data-value="notify" :label="automationActionTypeLabel('notify', isZh)" />
-            <el-option value="update_field" data-value="update_field" :label="automationActionTypeLabel('update_field', isZh)" />
+            <el-option value="send_notification" data-value="send_notification" :label="automationActionTypeLabel('send_notification', isZh)" />
+            <el-option value="update_record" data-value="update_record" :label="automationActionTypeLabel('update_record', isZh)" />
             <el-option value="send_dingtalk_group_message" data-value="send_dingtalk_group_message" :label="automationActionTypeLabel('send_dingtalk_group_message', isZh)" />
             <el-option value="send_dingtalk_person_message" data-value="send_dingtalk_person_message" :label="automationActionTypeLabel('send_dingtalk_person_message', isZh)" />
           </el-select>
 
-          <template v-if="draft.actionType === 'notify'">
+          <template v-if="draft.actionType === 'send_notification'">
+            <!-- F9: recipients FIRST — a notification without them is a rule that can never deliver. -->
+            <label class="meta-automation__label">{{ l('actionConfig.recipients') }}</label>
+            <el-input
+              v-model="draft.notifyUserIds"
+              type="text"
+              :placeholder="l('actionConfig.recipientsPlaceholder')"
+              data-automation-field="notifyUserIds"
+            />
             <label class="meta-automation__label">{{ l('actionConfig.message') }}</label>
             <el-input
               v-model="draft.notifyMessage"
@@ -60,7 +68,7 @@
             />
           </template>
 
-          <template v-if="draft.actionType === 'update_field'">
+          <template v-if="draft.actionType === 'update_record'">
             <label class="meta-automation__label">{{ l('manager.targetField') }}</label>
             <el-select v-model="draft.targetFieldId" class="meta-automation__select" :placeholder="l('trigger.selectField')" data-automation-field="targetFieldId">
               <el-option value="" data-value="" :label="l('trigger.selectField')" />
@@ -901,6 +909,7 @@ interface DraftState {
   triggerType: AutomationTriggerType
   triggerFieldId: string
   actionType: AutomationActionType
+  notifyUserIds: string
   notifyMessage: string
   targetFieldId: string
   targetValue: string
@@ -926,7 +935,8 @@ function emptyDraft(): DraftState {
     name: '',
     triggerType: 'record.created',
     triggerFieldId: '',
-    actionType: 'notify',
+    actionType: 'send_notification',
+    notifyUserIds: '',
     notifyMessage: '',
     targetFieldId: '',
     targetValue: '',
@@ -1736,8 +1746,12 @@ async function refreshRuleCardData(ruleId: string) {
 const canSave = computed(() => {
   if (!draft.value.name.trim()) return false
   if (draft.value.triggerType === 'field.changed' && !draft.value.triggerFieldId) return false
-  if (draft.value.actionType === 'notify' && !draft.value.notifyMessage.trim()) return false
-  if (draft.value.actionType === 'update_field' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
+  // F9: recipients are REQUIRED here. Without them the saved rule is guaranteed to fail at run time
+  // (AUTOMATION_NO_RECIPIENTS_ERROR) — blocking the save is the same call the button route makes
+  // (NO_RECIPIENTS), not a silent fallback to the rule's creator.
+  if (draft.value.actionType === 'send_notification'
+    && (!parseUserIdsText(draft.value.notifyUserIds).length || !draft.value.notifyMessage.trim())) return false
+  if (draft.value.actionType === 'update_record' && (!draft.value.targetFieldId || !draft.value.targetValue.trim())) return false
   if (draft.value.actionType === 'send_dingtalk_group_message') {
     const destinationFieldPaths = parseRecipientFieldPathsText(draft.value.dingtalkDestinationFieldPath)
     if (!draft.value.dingtalkDestinationIds.length && !destinationFieldPaths.length) return false
@@ -1788,16 +1802,30 @@ function openCreateForm() {
   showForm.value = true
 }
 
+// NOTE: currently unreferenced — the card's edit button opens the ADVANCED editor (openRuleEditor,
+// see the template). Kept in sync with DraftState (and with F9's canonical action types) so the quick
+// form stays coherent if it is ever wired back to a card.
 function openEditForm(rule: AutomationRule) {
   editingRuleId.value = rule.id
+  const legacyFolded: AutomationActionType = rule.actionType === 'notify'
+    ? 'send_notification'
+    : rule.actionType === 'update_field'
+      ? 'update_record'
+      : rule.actionType
+  const updatedFields = rule.actionConfig?.fields && typeof rule.actionConfig.fields === 'object' && !Array.isArray(rule.actionConfig.fields)
+    ? Object.entries(rule.actionConfig.fields as Record<string, unknown>)
+    : []
   draft.value = {
     name: rule.name,
     triggerType: rule.triggerType,
     triggerFieldId: (rule.triggerConfig?.fieldId as string) ?? '',
-    actionType: rule.actionType,
+    actionType: legacyFolded,
+    notifyUserIds: Array.isArray(rule.actionConfig?.userIds) ? (rule.actionConfig?.userIds as string[]).join(', ') : '',
     notifyMessage: (rule.actionConfig?.message as string) ?? '',
-    targetFieldId: (rule.actionConfig?.fieldId as string) ?? '',
-    targetValue: (rule.actionConfig?.value as string) ?? '',
+    targetFieldId: (rule.actionConfig?.fieldId as string) ?? (updatedFields.length === 1 ? updatedFields[0][0] : ''),
+    targetValue: rule.actionConfig?.value !== undefined
+      ? String(rule.actionConfig?.value ?? '')
+      : updatedFields.length === 1 ? String(updatedFields[0][1] ?? '') : '',
     dingtalkDestinationIds: parseGroupDestinationIds(rule.actionConfig?.destinationIds ?? rule.actionConfig?.destinationId),
     dingtalkDestinationPickerId: '',
     dingtalkDestinationFieldPath: Array.isArray(rule.actionConfig?.destinationIdFieldPaths)
@@ -1843,11 +1871,14 @@ function buildTriggerConfig(): Record<string, unknown> {
 }
 
 function buildActionConfig(): Record<string, unknown> {
-  if (draft.value.actionType === 'notify') {
-    return { message: draft.value.notifyMessage }
+  // F9: the shapes below are the executor's real config shapes (SendNotificationConfig /
+  // UpdateRecordConfig) and are byte-identical to what the advanced editor emits, so a rule authored
+  // in either editor renders and runs the same in both.
+  if (draft.value.actionType === 'send_notification') {
+    return { userIds: parseUserIdsText(draft.value.notifyUserIds), message: draft.value.notifyMessage.trim() }
   }
-  if (draft.value.actionType === 'update_field') {
-    return { fieldId: draft.value.targetFieldId, value: draft.value.targetValue }
+  if (draft.value.actionType === 'update_record') {
+    return { fields: { [draft.value.targetFieldId]: draft.value.targetValue } }
   }
   if (draft.value.actionType === 'send_dingtalk_group_message') {
     const destinationIds = Array.from(new Set(draft.value.dingtalkDestinationIds.map((id) => id.trim()).filter(Boolean)))
@@ -1990,7 +2021,14 @@ function describeActionType(actionType: AutomationActionType, actionConfig: Reco
       const fid = actionConfig?.fieldId as string | undefined
       return automationCardActionSummary(actionType, fid ? fieldNameById(fid) : '', isZh.value)
     }
-    case 'update_record':
+    case 'update_record': {
+      // F9: quick-form update_record writes exactly one field — keep naming it on the card (what the
+      // legacy update_field card showed). Multi-field configs fall back to the plain action label.
+      const fields = actionConfig?.fields && typeof actionConfig.fields === 'object' && !Array.isArray(actionConfig.fields)
+        ? Object.keys(actionConfig.fields as Record<string, unknown>)
+        : []
+      return automationCardActionSummary(actionType, fields.length === 1 ? fieldNameById(fields[0]) : '', isZh.value)
+    }
     case 'create_record':
     case 'send_webhook':
     case 'delete_record':

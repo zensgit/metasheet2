@@ -166,11 +166,18 @@ describe('B4 — MetaRecordDrawer: mirror fields render display-only even with N
     }))
   }
 
-  it('a mirror link field falls through to the generic display span, not the editable link-picker button', async () => {
+  it('a mirror link field renders display-only (non-clickable link chip), not the editable link-picker button', async () => {
     const root = mountDrawer([MIRROR_FIELD], { id: 'rec_1', version: 1, data: { fld_mirror: 'rec_x' } })
     await flushUi()
     expect(root.querySelector('.meta-record-drawer__link-btn')).toBeNull()
-    expect(root.querySelector('.meta-record-drawer__text')).not.toBeNull()
+    // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Link chips"): a POPULATED read-only link field no
+    // longer falls through to the generic `.meta-record-drawer__text` span — it renders the grid's own
+    // MetaCellRenderer chips. The B4 claim this test pins is unchanged (display-only, no editor): with no
+    // `fetchRecord` on this deprecated shell the chip is the plain `span` form — no `data-test="link-chip"`
+    // button, i.e. no click affordance of any kind.
+    expect(root.querySelector('.meta-record-drawer__text')).toBeNull()
+    expect(root.querySelector('.meta-cell-renderer__link')).not.toBeNull()
+    expect(root.querySelector('[data-test="link-chip"]')).toBeNull()
   })
 
   it('negative leg: a forward (non-mirror) link field renders the editable link-picker button', async () => {

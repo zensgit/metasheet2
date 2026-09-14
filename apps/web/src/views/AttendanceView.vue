@@ -132,7 +132,6 @@
         :workbench-status-description="activeWorkbenchStatusDescription"
         :workbench-record-status="workbenchRecordStatus"
         :workbench-focus-date-label="workbenchFocusDateLabel"
-        :workbench-latest-punch-label="activeWorkbenchLatestPunchLabel"
         :workbench-work-minutes="workbenchWorkMinutes"
         :workbench-late-early-label="activeWorkbenchLateEarlyLabel"
         :workbench-has-late-early="activeWorkbenchHasLateEarly"
@@ -191,6 +190,17 @@
         @open-balance-trace="handleOpenSelfBalanceTrace"
       >
         <template #afterCommon>
+          <AttendanceEmployeeLeaveRequestCard
+            v-if="leaveRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :leave-types="leaveTypes"
+            :can-quick-fill="canQuickFillLeave"
+            :submitting="requestSubmitting"
+            @cancel="closeDedicatedLeaveRequestCard"
+            @submit="submitDedicatedLeaveRequestCard"
+            @quick-fill="applyLeaveQuickFill"
+          />
           <AttendanceEmployeeMakeupRequestCard
             v-if="makeupRequestCardOpen"
             :tr="tr"
@@ -200,6 +210,15 @@
             :submitting="requestSubmitting"
             @cancel="closeDedicatedMakeupRequestCard"
             @submit="submitDedicatedMakeupRequestCard"
+          />
+          <AttendanceEmployeeOvertimeRequestCard
+            v-if="overtimeRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :overtime-rules="overtimeRules"
+            :submitting="requestSubmitting"
+            @cancel="closeDedicatedOvertimeRequestCard"
+            @submit="submitDedicatedOvertimeRequestCard"
           />
         </template>
         <template #historyFilters>
@@ -1394,7 +1413,7 @@
                       >
                         <div class="attendance__timeline-primary">
                           <strong>{{ formatPunchEventType(event.eventType) }}</strong>
-                          <span>{{ formatDateTime(event.occurredAt) }}</span>
+                          <span>{{ formatDateTime(event.occurredAt, normalizeAttendanceTimeZone(event.timezone) ?? attendanceRecordTimezone(record)) }}</span>
                         </div>
                         <small v-if="formatPunchEventMeta(event)" class="attendance__field-hint">
                           {{ formatPunchEventMeta(event) }}
@@ -10145,7 +10164,9 @@ import {
 import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
+import AttendanceEmployeeLeaveRequestCard from './attendance/AttendanceEmployeeLeaveRequestCard.vue'
 import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployeeMakeupRequestCard.vue'
+import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmployeeOvertimeRequestCard.vue'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
 import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
 import {
@@ -10210,6 +10231,7 @@ import {
 } from './attendance/importXlsxConvert'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
+  buildPunchBasePayload,
   buildPunchRetryWithNotePayload,
   classifyPunchErrorOutcome,
   classifyPunchSuccessOutcome,
@@ -10324,6 +10346,13 @@ import { apiFetch as sendApiFetch } from '../utils/api'
 import { provideAttendanceSessionGuard } from '../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../utils/error'
 import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
+import {
+  formatAttendanceClockTime,
+  formatAttendanceDateKey,
+  formatAttendanceDateTime,
+  formatAttendanceWeekday,
+  normalizeAttendanceTimeZone,
+} from './attendance/attendanceDateTimePresentation'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -10501,6 +10530,7 @@ interface AttendanceRecord {
   reportValues?: Record<string, unknown>
   workday_context?: {
     shiftName?: string | null
+    timezone?: string | null
   } | null
 }
 
@@ -11889,16 +11919,14 @@ onUnmounted(() => {
   if (heroClockTimer) clearInterval(heroClockTimer)
 })
 const heroClockTime = computed(() => {
-  const now = heroClockNow.value
-  const pad = (value: number) => String(value).padStart(2, '0')
-  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+  return formatAttendanceClockTime(heroClockNow.value, resolvedAttendanceTimezone.value, true) ?? '--:--:--'
 })
 const heroClockDate = computed(() => {
   const now = heroClockNow.value
-  const pad = (value: number) => String(value).padStart(2, '0')
-  const weekdayZh = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()]
-  const weekdayEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][now.getDay()]
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} · ${tr(weekdayEn, weekdayZh)}`
+  const weekdayLocale = isZh.value ? 'zh-CN' : 'en-US'
+  const dateKey = formatAttendanceDateKey(now, resolvedAttendanceTimezone.value)
+  const weekday = formatAttendanceWeekday(now, weekdayLocale, resolvedAttendanceTimezone.value)
+  return dateKey && weekday ? `${dateKey} · ${weekday}` : '--'
 })
 // Punch outcome clarity (frontend-only, 2026-07-05 design-lock, G2): inline
 // outdoor-punch note retry state. See
@@ -12161,7 +12189,46 @@ const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC
 const timezoneOptions = computed(() =>
   buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
 )
-const overviewTimezoneLabel = computed(() => displayTimezone(defaultTimezone))
+function selfServiceRuleTimezone(): string | null {
+  return normalizeAttendanceTimeZone(
+    String(selfRulesData.value?.runtimeRule?.timezone ?? '').trim(),
+  )
+}
+const reportRecordTimezoneValues = computed(() => Array.from(new Set(
+  records.value
+    .map(record => String(record.workday_context?.timezone ?? '').trim()),
+)))
+const reportRecordTimezones = computed(() => Array.from(new Set(
+  reportRecordTimezoneValues.value
+    .map(timezone => normalizeAttendanceTimeZone(timezone))
+    .filter((timezone): timezone is string => Boolean(timezone)),
+)))
+const reportHasInvalidRecordTimezone = computed(() =>
+  reportRecordTimezoneValues.value.some(timezone => !normalizeAttendanceTimeZone(timezone)))
+function attendanceRecordTimezone(record: AttendanceRecord): string | null {
+  return normalizeAttendanceTimeZone(record.workday_context?.timezone)
+}
+const resolvedAttendanceTimezone = computed<string | null>(() => {
+  if (showReports.value) {
+    return !reportHasInvalidRecordTimezone.value && reportRecordTimezones.value.length === 1
+      ? reportRecordTimezones.value[0]!
+      : null
+  }
+  return normalizeAttendanceTimeZone(selfServiceRuleTimezone())
+})
+const overviewTimezoneLabel = computed(() => {
+  if (showReports.value && reportHasInvalidRecordTimezone.value) {
+    return tr('Some report record timezones are unavailable', '部分报告记录时区不可用')
+  }
+  if (showReports.value && reportRecordTimezones.value.length > 1) {
+    return tr('Multiple report record timezones', '多个报告记录时区')
+  }
+  return resolvedAttendanceTimezone.value
+    ? displayTimezone(resolvedAttendanceTimezone.value)
+    : showReports.value
+      ? tr('Report record timezone unavailable', '报告记录时区不可用')
+      : tr('Rule timezone unavailable', '规则时区不可用')
+})
 const overviewRefreshTimezoneContextHint = computed(() =>
   `${tr('Overview timezone context', '总览时区上下文')}: ${overviewTimezoneLabel.value}`
 )
@@ -13164,7 +13231,7 @@ const attendanceCaliberGuideItems = computed<AttendanceCaliberGuideItem[]>(() =>
   }))
 })
 
-const todayWorkDateKey = computed(() => toDateInput(new Date()))
+const todayWorkDateKey = computed(() => formatAttendanceDateKey(new Date(), resolvedAttendanceTimezone.value) ?? '')
 
 const latestAttendanceRecord = computed<AttendanceRecord | null>(() => {
   if (records.value.length === 0) return null
@@ -13175,28 +13242,23 @@ const activeWorkbenchRecord = computed<AttendanceRecord | null>(() =>
   records.value.find(record => record.work_date === todayWorkDateKey.value) ?? latestAttendanceRecord.value
 )
 
-// UI-P1 (ui-p1-remainder design-lock D1): today's two-node punch timeline for
-// the hero card — reuses activeWorkbenchRecord, renders only for TODAY's row.
+// UI-P1 (ui-p1-remainder design-lock D1): two-node punch timeline for the
+// workbench record. When there is no row for today the workbench intentionally
+// falls back to the latest row, so preserve both event polarities from that row
+// instead of collapsing its checkout into an untyped "latest punch" label.
 const heroTodayTimeline = computed(() => {
   const record = activeWorkbenchRecord.value
-  if (!record || record.work_date !== todayWorkDateKey.value) return null
+  if (!record) return null
   const timeOf = (value: string | null | undefined) => {
-    if (!value) return null
-    const parsed = new Date(value)
-    if (Number.isNaN(parsed.getTime())) return null
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+    return formatAttendanceClockTime(
+      value,
+      attendanceRecordTimezone(record),
+    )
   }
   return {
     checkIn: timeOf(record.first_in_at),
     checkOut: timeOf(record.last_out_at),
   }
-})
-
-const activeWorkbenchLatestPunchLabel = computed(() => {
-  const record = activeWorkbenchRecord.value
-  if (!record) return '--'
-  return formatDateTime(record.last_out_at || record.first_in_at)
 })
 
 const activeWorkbenchStatusDescription = computed(() =>
@@ -14888,7 +14950,9 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
 }
 
 const overviewRequestToolsOpen = ref(false)
+const leaveRequestCardOpen = ref(false)
 const makeupRequestCardOpen = ref(false)
+const overtimeRequestCardOpen = ref(false)
 
 const eligibleMakeupAnomalies = computed(() =>
   anomalies.value.filter(item => item.state !== 'pending'),
@@ -16788,11 +16852,17 @@ function normalizeDateKey(value: string | null | undefined): string | null {
   return date.toISOString().slice(0, 10)
 }
 
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return '--'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '--'
-  return date.toLocaleString(locale.value)
+function formatDateTime(value: string | null | undefined, timeZone?: string | null): string {
+  if (!showOverview.value && !showReports.value && timeZone === undefined) {
+    if (!value) return '--'
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? '--' : date.toLocaleString(locale.value)
+  }
+  return formatAttendanceDateTime(
+    value,
+    locale.value,
+    timeZone === undefined ? resolvedAttendanceTimezone.value : timeZone,
+  )
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -17213,19 +17283,21 @@ async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void>
 }
 
 async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Promise<void> {
+  if (action === 'leave') {
+    await openDedicatedLeaveRequestCard()
+    return
+  }
   if (action === 'missing-punch') {
     await openDedicatedMakeupRequestCard()
     return
   }
-  if (makeupRequestCardOpen.value) closeDedicatedMakeupRequestCard()
-  if (action === 'leave') {
-    await openQuickRequestDraft('leave')
-    return
-  }
   if (action === 'overtime') {
-    await openQuickRequestDraft('overtime')
+    await openDedicatedOvertimeRequestCard()
     return
   }
+  if (leaveRequestCardOpen.value) closeDedicatedLeaveRequestCard()
+  if (makeupRequestCardOpen.value) closeDedicatedMakeupRequestCard()
+  if (overtimeRequestCardOpen.value) closeDedicatedOvertimeRequestCard()
   if (action === 'shift_swap') {
     await openQuickRequestDraft('shift_swap')
     return
@@ -17237,9 +17309,40 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)
 }
 
+async function openDedicatedLeaveRequestCard(): Promise<void> {
+  prepareRequestDraft('leave', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  makeupRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
+  leaveRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      tr(`Request form ready for ${formatRequestType('leave')}.`, `已为${formatRequestType('leave')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-leave-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const typeField = document.getElementById('attendance-leave-card-type')
+  if (typeField instanceof HTMLElement && typeof typeField.focus === 'function') {
+    typeField.focus()
+  }
+}
+
+function closeDedicatedLeaveRequestCard(): void {
+  leaveRequestCardOpen.value = false
+}
+
+async function submitDedicatedLeaveRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedLeaveRequestCard()
+}
+
 async function openQuickRequestDraft(requestType: AttendanceRequest['request_type']): Promise<void> {
-  requestForm.workDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
-  requestForm.requestType = requestType
+  prepareRequestDraft(requestType, activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
   setStatus(
     appendStatusContext(
       tr(`Request form ready for ${formatRequestType(requestType)}.`, `已为${formatRequestType(requestType)}准备申请表单。`),
@@ -17249,18 +17352,32 @@ async function openQuickRequestDraft(requestType: AttendanceRequest['request_typ
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
 }
 
+function prepareRequestDraft(requestType: AttendanceRequest['request_type'], workDate: string): void {
+  const typeChanged = requestForm.requestType !== requestType
+  const dateChanged = requestForm.workDate !== workDate
+  requestForm.workDate = workDate
+  if (dateChanged || typeChanged) {
+    requestForm.requestedInAt = ''
+    requestForm.requestedOutAt = ''
+    requestForm.minutes = ''
+  }
+  if (!typeChanged) return
+  if (requestType !== 'leave') requestForm.leaveTypeId = ''
+  if (requestType !== 'overtime') requestForm.overtimeRuleId = ''
+  if (requestType !== 'shift_swap') {
+    requestForm.requesterAssignmentId = ''
+    requestForm.counterpartyAssignmentId = ''
+  }
+  requestForm.requestType = requestType
+}
+
 async function openDedicatedMakeupRequestCard(): Promise<void> {
   clearRequestSubmitStatus()
   const fallbackWorkDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
   const draft = resolveMakeupCardPrefill(anomalies.value, fallbackWorkDate)
-  const prefillChanged = requestForm.workDate !== draft.workDate
-    || requestForm.requestType !== draft.requestType
-  requestForm.workDate = draft.workDate
-  requestForm.requestType = draft.requestType
-  if (prefillChanged) {
-    requestForm.requestedInAt = ''
-    requestForm.requestedOutAt = ''
-  }
+  prepareRequestDraft(draft.requestType, draft.workDate)
+  leaveRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = false
   makeupRequestCardOpen.value = true
   setStatus(
     appendStatusContext(
@@ -17290,6 +17407,38 @@ function closeDedicatedMakeupRequestCard(): void {
 async function submitDedicatedMakeupRequestCard(): Promise<void> {
   await submitRequest()
   if (statusKind.value !== 'error') closeDedicatedMakeupRequestCard()
+}
+
+async function openDedicatedOvertimeRequestCard(): Promise<void> {
+  prepareRequestDraft('overtime', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  leaveRequestCardOpen.value = false
+  makeupRequestCardOpen.value = false
+  overtimeRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      tr(`Request form ready for ${formatRequestType('overtime')}.`, `已为${formatRequestType('overtime')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-overtime-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const ruleField = document.getElementById('attendance-overtime-card-rule')
+  if (ruleField instanceof HTMLElement && typeof ruleField.focus === 'function') {
+    ruleField.focus()
+  }
+}
+
+function closeDedicatedOvertimeRequestCard(): void {
+  overtimeRequestCardOpen.value = false
+}
+
+async function submitDedicatedOvertimeRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedOvertimeRequestCard()
 }
 
 function buildQuery(params: Record<string, string | undefined>): URLSearchParams {
@@ -17951,7 +18100,10 @@ function formatRecordReportCell(record: AttendanceRecord, field: AttendanceRecor
     case 'attendance_group':
       return firstRecordValue(recordMetaValue(record, ['attendanceGroup', 'attendance_group', '考勤组']))
     case 'punch_times':
-      return [formatDateTime(record.first_in_at), formatDateTime(record.last_out_at)].filter(item => item !== '--').join(' / ') || '--'
+      return [
+        formatDateTime(record.first_in_at, attendanceRecordTimezone(record)),
+        formatDateTime(record.last_out_at, attendanceRecordTimezone(record)),
+      ].filter(item => item !== '--').join(' / ') || '--'
     case 'punch_result':
     case 'attendance_result':
       return formatStatus(status)
@@ -19845,14 +19997,20 @@ function isImportCommitTokenValid(): boolean {
   return Number.isFinite(expiresAt) && expiresAt - Date.now() > 60 * 1000
 }
 
-async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {}): Promise<boolean> {
+async function ensureImportCommitToken(options: { forceRefresh?: boolean; orgId?: unknown } = {}): Promise<boolean> {
   if (options.forceRefresh) {
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   }
   if (isImportCommitTokenValid()) return true
   try {
-    const response = await apiFetch('/api/attendance/import/prepare', { method: 'POST' })
+    const targetOrgId = typeof options.orgId === 'string' && options.orgId.trim()
+      ? options.orgId.trim()
+      : normalizedOrgId()
+    const response = await apiFetch('/api/attendance/import/prepare', {
+      method: 'POST',
+      body: JSON.stringify(targetOrgId ? { orgId: targetOrgId } : {}),
+    })
     if (response.status === 404) {
       // Legacy backend: commit token endpoints not available.
       importCommitToken.value = ''
@@ -19904,7 +20062,7 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
 
     const remainingSample = Math.max(1, plan.sampleLimit - aggregatedItems.length)
     const chunkPayload = plan.buildPayload(chunkIndex, remainingSample)
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: chunkPayload.orgId })
     if (!tokenOk) throw new Error(tr('Failed to prepare import token', '准备导入令牌失败'))
     if (importCommitToken.value) chunkPayload.commitToken = importCommitToken.value
 
@@ -19996,7 +20154,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
     message: tr('Queued async preview job.', '已排队异步预览任务。'),
   }
 
-  const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+  const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
   if (!tokenOk) return true
   if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -20013,7 +20171,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
     if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
       importCommitToken.value = ''
       importCommitTokenExpiresAt.value = ''
-      const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+      const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
       if (!refreshed || !importCommitToken.value) {
         throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
       }
@@ -20126,7 +20284,7 @@ async function previewImport() {
       message: null,
     }
 
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
     if (!tokenOk) {
       if (importPreviewTask.value) {
         importPreviewTask.value = {
@@ -20332,7 +20490,7 @@ async function runImport() {
   applyImportScalabilityHints(payload, { mode: 'commit' })
   importLoading.value = true
   try {
-    const tokenOk = await ensureImportCommitToken({ forceRefresh: true })
+    const tokenOk = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
     if (!tokenOk) return
     if (importCommitToken.value) payload.commitToken = importCommitToken.value
 
@@ -20353,7 +20511,7 @@ async function runImport() {
         } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
           importCommitToken.value = ''
           importCommitTokenExpiresAt.value = ''
-          const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+          const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
           if (!refreshed || !importCommitToken.value) {
             throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
           }
@@ -20422,7 +20580,7 @@ async function runImport() {
       } else if (errorCode === 'COMMIT_TOKEN_INVALID' || errorCode === 'COMMIT_TOKEN_REQUIRED') {
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
-        const refreshed = await ensureImportCommitToken({ forceRefresh: true })
+        const refreshed = await ensureImportCommitToken({ forceRefresh: true, orgId: payload.orgId })
         if (!refreshed || !importCommitToken.value) {
           throw new Error(tr('Failed to refresh import commit token. Check server deployment/migrations.', '刷新导入提交令牌失败，请检查服务端部署或迁移。'))
         }
@@ -21879,11 +22037,12 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
   // happens on a punch failure, unchanged from before.
   let postPunchRefresh: (() => Promise<unknown>) | null = null
   try {
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
     const orgValue = normalizedOrgId()
-    const basePayload: PunchRetryBasePayload = orgValue
-      ? { eventType, timezone, orgId: orgValue }
-      : { eventType, timezone }
+    const basePayload: PunchRetryBasePayload = buildPunchBasePayload(
+      eventType,
+      selfServiceRuleTimezone(),
+      orgValue,
+    )
     // Hard boundary (design-lock §4): no geolocation collected, no injected
     // meta.outdoor — the only extra field ever sent is the backend-accepted
     // meta.note string, and only as part of a G2 user-initiated retry.
@@ -22515,8 +22674,10 @@ async function refreshAll(): Promise<boolean> {
   try {
     const tasks = [loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()]
     if (showOverview.value) {
+      tasks.push(loadSelfAttendanceRules())
+    }
+    if (showOverview.value) {
       tasks.push(
-        loadSelfAttendanceRules(),
         loadEmployeeQuickActionIcons(),
         loadLeaveTypes({ activeOnly: true }),
         loadOvertimeRules({ activeOnly: true }),

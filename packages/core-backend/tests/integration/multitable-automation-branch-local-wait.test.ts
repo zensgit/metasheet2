@@ -35,6 +35,12 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
 const SHEET = `sheet_blw_${TS}`
 const BASE = `base_blw_${TS}`
+// F9b: a rule-side send_notification hard-rejects any recipient outside the selectable-people roster
+// (the SAME loadSheetMemberUserIdSet口径 the button route uses: ACTIVE users with a GLOBAL multitable
+// read/write grant — NOT a per-sheet grant) BEFORE its durable write, so this branch's notify step needs
+// a REAL, active, multitable-eligible recipient. Scoped to this run's TS so the fixture can never
+// collide with (or delete) another suite's user.
+const NOTIFY_USER = `u_blw_notify_${TS}`
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 const jobsRead = new AutomationJobService()
 const execIds: string[] = []
@@ -66,7 +72,7 @@ const HIGH_BRANCH_HAPPY = {
   label: 'High',
   conditions: { logic: 'and', conditions: [{ fieldId: 'amount', operator: 'greater_than', value: 100000 }] },
   actions: [
-    { type: 'send_notification', config: { userIds: ['owner-1'], message: 'High amount needs review' } },
+    { type: 'send_notification', config: { userIds: [NOTIFY_USER], message: 'High amount needs review' } },
     { type: 'wait_for_callback', config: {} },
     { type: 'update_record', config: { fields: { status: 'approved_after_review' } } },
   ],
@@ -88,7 +94,7 @@ const HIGH_BRANCH_FAIL = {
   label: 'High',
   conditions: { logic: 'and', conditions: [{ fieldId: 'amount', operator: 'greater_than', value: 100000 }] },
   actions: [
-    { type: 'send_notification', config: { userIds: ['owner-1'], message: 'review' } },
+    { type: 'send_notification', config: { userIds: [NOTIFY_USER], message: 'review' } },
     { type: 'wait_for_callback', config: {} },
     { type: 'send_webhook', config: { url: 'https://example.test/fail' } },
     { type: 'update_record', config: { fields: { status: 'should_not_run' } } },
@@ -181,6 +187,17 @@ describeIfDatabase('multitable automation branch-local wait (A6-3-3a, real DB)',
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING', [SHEET, BASE, 'BLW Sheet'])
     await q('DELETE FROM multitable_automation_jobs WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM multitable_automation_suspensions WHERE sheet_id = $1', [SHEET])
+    // F9b recipient fixture: an active user with multitable eligibility = a member for the notify step.
+    await q(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, FALSE)
+       ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+      [NOTIFY_USER, `${NOTIFY_USER}@blw.test`],
+    )
+    await q(
+      `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'multitable:read') ON CONFLICT DO NOTHING`,
+      [NOTIFY_USER],
+    )
   })
   afterAll(async () => {
     for (const id of execIds) {
@@ -190,8 +207,11 @@ describeIfDatabase('multitable automation branch-local wait (A6-3-3a, real DB)',
     await q('DELETE FROM multitable_automation_jobs WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM automation_rules WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET])
+    await q('DELETE FROM meta_record_subscription_notifications WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = $1', [NOTIFY_USER]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [NOTIFY_USER]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => {
@@ -249,6 +269,28 @@ describeIfDatabase('multitable automation branch-local wait (A6-3-3a, real DB)',
     expect(byKey.has('0.branch.high_amount.2')).toBe(false) // later branch action not run yet
     expect(byKey.has('1')).toBe(false) // top-level tail not run yet
     expect(await recordStatus(recId)).not.toBe('approved_after_review') // post-wait update not run yet
+
+    // F9b REAL WRITE / REAL READ (the slice's core claim, proven on real Postgres rather than on a
+    // stubbed queryFn): the notify branch child above is `resolved`, so the notification centre must
+    // hold exactly ONE row for the one recipient. This is what proves, against the live schema, that
+    // the event_type CHECK admits 'notification.sent', that the `message` column exists, and that the
+    // trigger's sheet/record context lands verbatim through the SHARED seam.
+    const notified = await q(
+      `SELECT user_id, event_type, message, actor_id, record_id
+         FROM meta_record_subscription_notifications
+        WHERE sheet_id = $1 AND record_id = $2`,
+      [SHEET, recId],
+    )
+    expect(notified.rows).toHaveLength(1)
+    expect(notified.rows[0]).toMatchObject({
+      user_id: NOTIFY_USER,
+      event_type: 'notification.sent',
+      message: 'High amount needs review',
+      record_id: recId,
+    })
+    // This trigger carries no actor (executor context: `payload?.actorId ?? null`), so actor_id is NULL
+    // rather than a stand-in id — the row never invents an actor.
+    expect(notified.rows[0].actor_id).toBeNull()
   })
 
   // §7 — descriptor hydrates onto the branch CHILD (stepKey), NEVER the parent condition_branch job.

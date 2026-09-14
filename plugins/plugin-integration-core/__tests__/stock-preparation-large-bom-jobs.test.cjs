@@ -799,6 +799,77 @@ async function runBackgroundJobUnderActionCaps({ action, jobId, source }) {
   })
 }
 
+// F1c — 根选择规则必须两条通道**同量**。
+//
+// 后台大 BOM 这条通道的展开入参是路由现编的(http-routes `largeBomExpansionOptionsForAction`,
+// 键集只有 readPlan/pageLimit/maxDepth + 后台放大的四个 caps),里面没有 rootSelection。若 worker
+// 不从任务自己的动作快照里取,同一个项目就会因为「BOM 够不够大」而落到两套根集合上 —— 交互式
+// 按老系统剔根、后台按改前全收,而操作员看到的只是一张行数对不上的表。
+//
+// 这里用的正是路由那套入参组合(runBackgroundJobUnderActionCaps 里 largeBomBackgroundExpansionCaps),
+// 所以它证明的是「配置到得了 worker」,不是「纯函数算得对」。
+function rootSelectionPlmData() {
+  return plmData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'MAIN_DRAWING_VALUE_SHOULD_NOT_APPEAR', quantity: '1', sort_id: 1 },
+      { order_id: 'ORDER-1', part_id: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR', quantity: '2', sort_id: 2 },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      {
+        OBJ_ID: 'MAIN_DRAWING_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'J900-00',
+        IdentityName: 'MAIN_NAME_SHOULD_NOT_APPEAR',
+        Material: 'MATERIAL_VALUE_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+      {
+        OBJ_ID: 'COMPONENT_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'CODE_VALUE_SHOULD_NOT_APPEAR',
+        IdentityName: 'NAME_VALUE_SHOULD_NOT_APPEAR',
+        Material: 'MATERIAL_VALUE_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+      {
+        OBJ_ID: 'CHILD_VALUE_SHOULD_NOT_APPEAR',
+        IdentityNo: 'CHILD_CODE_SHOULD_NOT_APPEAR',
+        IdentityName: 'CHILD_NAME_SHOULD_NOT_APPEAR',
+        Material: 'CHILD_MATERIAL_SHOULD_NOT_APPEAR',
+        SysVer: 'V1',
+      },
+    ],
+  })
+}
+
+async function testBackgroundWorkerHonoursTheActionsRootSelectionRules() {
+  // 默认(动作里一个字没写)= 老系统规则:有 J…-00 总图就只要总图,另一条订单行不当根。
+  const byDefault = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+    },
+    jobId: 'job-root-default',
+    source: createSourceAdapter(rootSelectionPlmData()),
+  })
+  assert.equal(byDefault.status, 'completed')
+  assert.equal(byDefault.artifact.rows.length, 1, '只有总图当根 —— 另一条订单行连同它的子件不再从根展开')
+
+  // 关掉规则 => 回到 F1c 之前的根集合。动作快照里写了,worker 就必须照做。
+  const disabled = await runBackgroundJobUnderActionCaps({
+    action: {
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      source: { kind: 'data-source:sql-readonly' },
+      // 路由存进任务的是**归一化后**的动作配置(createLargeBomBackgroundExpansionJob 里
+      // `actionSnapshot: cloneJson(action)`),这里直接给归一化后的形状。
+      rootSelection: { enabled: false },
+    },
+    jobId: 'job-root-disabled',
+    source: createSourceAdapter(rootSelectionPlmData()),
+  })
+  assert.equal(disabled.status, 'completed')
+  assert.equal(disabled.artifact.rows.length, 3, '两条订单行都当根 + 一个子件')
+  assertValuesFree(publicBackgroundExpansionJob(disabled))
+}
+
 // REGRESSION PIN for the 2026-09-05 field failure. This test used to hand the
 // worker `expansionOptions: { maxRows: 1 }` and call the resulting `failed` the
 // expected outcome — which pinned the bug: the background lane was handed the
@@ -1632,7 +1703,10 @@ async function testSuccessfulRunHasNoReadFailureKeys() {
   ])
 }
 
-async function completedJobWithArtifact({ storage = createStorage(), jobId = 'job-plan-1' } = {}) {
+// `extensionFieldIds` (optional) lands on the job's stored `actionSnapshot` exactly as the deploy-time
+// action config does (`cloneJson(action)` at enqueue) — the seam the background planner reads its
+// DECLARED extension band from. Omitted => the action is byte-identical to the pre-F1c one.
+async function completedJobWithArtifact({ storage = createStorage(), jobId = 'job-plan-1', extensionFieldIds } = {}) {
   const source = createSourceAdapter(plmData())
   await createLargeBomBackgroundExpansionJob({
     storage,
@@ -1641,6 +1715,7 @@ async function completedJobWithArtifact({ storage = createStorage(), jobId = 'jo
       actionId: 'plm.stock-preparation.pull-bom.v1',
       source: { kind: 'data-source:sql-readonly', externalSystemId: 'SOURCE_BINDING_SHOULD_NOT_APPEAR' },
       target: { sheetId: 'TARGET_RECORD_VALUE_SHOULD_NOT_APPEAR' },
+      ...(extensionFieldIds === undefined ? {} : { extensionFieldIds }),
     },
     parameters: { projectNo: 'PROJECT_VALUE_SHOULD_NOT_APPEAR' },
     principal: 'PRIVATE_TOKEN_SHOULD_NOT_APPEAR',
@@ -1711,7 +1786,23 @@ async function testPlannerHandoffRejectsMalformedExistingRows() {
 }
 
 async function testPlannerHandoffStoresValuesFreePlanEvidence() {
-  const { storage, jobId } = await completedJobWithArtifact()
+  // F1c: the action DECLARES 当前组件排序号, so the background planner must fill it from the
+  // artifact rows' `sortLine` exactly as the interactive dry-run does (table-actions.cjs threads
+  // `action.extensionFieldIds`; this lane threads `job.actionSnapshot.extensionFieldIds`). The
+  // pack-aware ownership projection is the second gate: the column must be INSTALLED as a
+  // plm_system extension for `pickFields` to let it into the add record at all.
+  const { storage, jobId } = await completedJobWithArtifact({ extensionFieldIds: ['ext_componentSortNo'] })
+  const installedFieldProperties = [{
+    logicalId: 'ext_componentSortNo',
+    name: 'ext_componentSortNo',
+    type: 'number',
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system', preserveOnRefresh: false, required: false, key: false,
+        extension: true, packId: 'factory-a', packVersion: '1.0.0',
+      },
+    },
+  }]
   const planned = await planLargeBomBackgroundExpansionJob({
     storage,
     ...TEST_SCOPE,
@@ -1724,6 +1815,7 @@ async function testPlannerHandoffStoresValuesFreePlanEvidence() {
       componentName: 'EXISTING_TARGET_VALUE_SHOULD_NOT_APPEAR',
       active: true,
     }],
+    installedFieldProperties,
     runId: 'large-bom-plan-run',
     plannedAt: '2026-06-08T00:02:00.000Z',
     now: () => '2026-06-08T00:03:00.000Z',
@@ -1735,6 +1827,19 @@ async function testPlannerHandoffStoresValuesFreePlanEvidence() {
   assert.equal(planned.planArtifact.plan.counts.add, 2, 'private plan keeps decisions for future C4')
   assert.equal(planned.planArtifact.plan.counts.manual_confirm, 0)
   assert.equal(planned.planArtifact.existingRowCount, 1)
+  // The wiring under test: 明细栏 sort_id (order detail 1 for the root, BOM detail 2 for the child)
+  // reaches the pack column ONLY through `extensionFieldIds: job.actionSnapshot.extensionFieldIds`
+  // in planLargeBomBackgroundExpansionJob. Dropping that line (extensionFieldIds: undefined) makes
+  // both records lose the key — this is the assertion that turns red.
+  const addRecords = planned.planArtifact.plan.decisions
+    .filter((decision) => decision.decision === 'add')
+    .map((decision) => decision.record)
+  assert.equal(addRecords.length, 2)
+  const rootRecord = addRecords.find((record) => record.depth === 0)
+  const childRecord = addRecords.find((record) => record.depth === 1)
+  assert.ok(rootRecord && childRecord, 'the artifact holds one root row and one child row')
+  assert.equal(rootRecord.ext_componentSortNo, 1, 'background plan fills 当前组件排序号 for the root from the order detail sort_id')
+  assert.equal(childRecord.ext_componentSortNo, 2, 'background plan fills 当前组件排序号 for the child from the BOM detail sort_id')
   const publicJob = publicBackgroundExpansionJob(planned)
   assert.equal(publicJob.planRevisionPresent, true)
   assert.equal(publicJob.evidence.plan.counts.add, 2)
@@ -2064,6 +2169,255 @@ async function testCheckpointApplyRejectsConcurrentRunningChunk() {
   assertValuesFree(publicCheckpointApplyJob(loaded))
 }
 
+// -- installedFieldProperties on the large-BOM path ---------------------------
+//
+// The two large-BOM routes now supply the pack-aware ownership band the small routes have always
+// supplied (http-routes.cjs: tableActionLargeBomExpansionJobPlan, tableActionLargeBomApplyJobStart).
+// The three properties that must hold at THIS layer:
+//
+//   (i)   omitted / undefined / null are ONE behaviour, and it is the pre-wiring behaviour --
+//         asserted as JSON equality of the whole stored job, not against a remembered constant;
+//   (ii)  a supplied band reaches the planner (plan side) and the apply writer's human wall
+//         (apply side), where it rejects a pack `ext_` human column BY NAME;
+//   (iii) the apply band is FROZEN when the job is approved. A checkpoint apply spans many HTTP
+//         requests; if each chunk read the ledger live, an install (or a UI column deletion)
+//         mid-run would give two chunks of ONE approved job two different writable bands.
+
+function packOwnershipStanza(ownership) {
+  return {
+    ownership,
+    preserveOnRefresh: ownership === 'human_preserved',
+    required: false,
+    key: false,
+    extension: true,
+    packId: 'large-bom-band-pack',
+    packVersion: '1.0.0',
+  }
+}
+
+const EXT_HUMAN_FIELD = 'ext_blankLength'
+const EXT_PLM_FIELD = 'ext_legacyRowId'
+
+function installedBand() {
+  return [
+    { fieldId: EXT_PLM_FIELD, property: { stockPreparation: packOwnershipStanza('plm_system') } },
+    { fieldId: EXT_HUMAN_FIELD, property: { stockPreparation: packOwnershipStanza('human_preserved') } },
+  ]
+}
+
+// A band that no longer knows the pack at all: packAware, but with nothing classified. It stands
+// in for "the ledger changed under a running job" -- under it the human column is NOT on the wall.
+function emptyBand() {
+  return []
+}
+
+function addDecisionCarryingExtHumanField(key) {
+  const decision = addDecision(key, { componentSourceId: 'CHILD_VALUE_SHOULD_NOT_APPEAR' })
+  decision.record[EXT_HUMAN_FIELD] = 12
+  return decision
+}
+
+async function testPlanBandOmittedUndefinedAndNullAreOneBehaviour() {
+  const planArgs = {
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    existingRows: [],
+    runId: 'large-bom-plan-run',
+    plannedAt: '2026-06-08T00:02:00.000Z',
+    now: () => '2026-06-08T00:03:00.000Z',
+  }
+  const omitted = await completedJobWithArtifact({ jobId: 'job-band-omitted' })
+  const plannedWithoutKey = await planLargeBomBackgroundExpansionJob({
+    storage: omitted.storage,
+    ...TEST_SCOPE,
+    ...planArgs,
+    jobId: omitted.jobId,
+  })
+
+  // `undefined` and `null` are what the route passes when there is no ledger, no pack installed, or
+  // any read failure (resolveInstalledFieldProperties returns undefined then). Byte-identical to
+  // the call shape that shipped before the wiring -- which is the whole inertness claim.
+  for (const value of [undefined, null]) {
+    const other = await completedJobWithArtifact({ jobId: 'job-band-omitted' })
+    const planned = await planLargeBomBackgroundExpansionJob({
+      storage: other.storage,
+      ...TEST_SCOPE,
+      ...planArgs,
+      jobId: other.jobId,
+      installedFieldProperties: value,
+    })
+    assert.equal(
+      JSON.stringify(planned),
+      JSON.stringify(plannedWithoutKey),
+      'a degraded band resolution must plan exactly what the pre-wiring call planned',
+    )
+  }
+  assert.equal(
+    plannedWithoutKey.planEvidence.packAwareOwnership,
+    undefined,
+    'no band => the plan evidence gains no pack stanza at all',
+  )
+  assert.equal(
+    plannedWithoutKey.planEvidence.plmSystemFields.some((id) => id.startsWith('ext_')),
+    false,
+    'no band => not one ext_ id is in the writable band',
+  )
+}
+
+async function testPlanBandReachesThePlannerThroughTheJobLayer() {
+  const { storage, jobId } = await completedJobWithArtifact({ jobId: 'job-band-supplied' })
+  const planned = await planLargeBomBackgroundExpansionJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    jobId,
+    existingRows: [],
+    runId: 'large-bom-plan-run',
+    plannedAt: '2026-06-08T00:02:00.000Z',
+    now: () => '2026-06-08T00:03:00.000Z',
+    installedFieldProperties: installedBand(),
+  })
+  assert.ok(
+    planned.planEvidence.plmSystemFields.includes(EXT_PLM_FIELD),
+    'a supplied band puts the pack plm_system column in the plan writable band',
+  )
+  assert.ok(
+    planned.planEvidence.humanPreservedFields.includes(EXT_HUMAN_FIELD),
+    'and puts the pack human column on the wall',
+  )
+  assert.deepEqual(planned.planEvidence.packAwareOwnership.packPlmWritableFieldIds, [EXT_PLM_FIELD])
+  assert.deepEqual(planned.planEvidence.packAwareOwnership.packHumanPreservedFieldIds, [EXT_HUMAN_FIELD])
+  assert.deepEqual(planned.planEvidence.packAwareOwnership.unclassifiedPackFieldIds, [])
+  assertValuesFree(publicBackgroundExpansionJob(planned))
+}
+
+async function testApplyBandIsFrozenAtApprovalAndEveryChunkReadsTheSnapshot() {
+  const plan = planWithDecisions([
+    addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::BAND-1'),
+    addDecisionCarryingExtHumanField('PROJECT_VALUE_SHOULD_NOT_APPEAR::BAND-2'),
+  ])
+  const { storage, actionId, jobId } = await seedPlannedLargeBomJob({ plan, jobId: 'job-band-apply' })
+  const api = createTargetRecordsApi()
+  const created = await createLargeBomCheckpointApplyJob({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    jobId,
+    principal: 'user-1',
+    permission: 'write',
+    createApplyJobId: () => 'apply-job-band',
+    now: () => '2026-06-08T00:01:00.000Z',
+    installedFieldProperties: installedBand(),
+  })
+  assert.deepEqual(
+    created.installedFieldProperties.map((entry) => entry.fieldId),
+    [EXT_PLM_FIELD, EXT_HUMAN_FIELD],
+    'the approved job carries the band it was approved under',
+  )
+  // Values-free by construction: field ids and frozen ownership tokens, never a source cell. The
+  // band is PRIVATE job state -- `publicCheckpointApplyJob` is a whitelist and never projects it.
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(publicCheckpointApplyJob(created), 'installedFieldProperties'),
+    false,
+    'the band is private job state, not a response key',
+  )
+
+  const first = await runLargeBomCheckpointApplyJobChunk({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-band',
+    recordsApi: api.recordsApi,
+    maxDecisionsPerChunk: 1,
+    now: () => '2026-06-08T00:02:00.000Z',
+  })
+  assert.equal(first.counts.created, 1)
+
+  // THE LEDGER MOVES UNDER THE RUNNING JOB. A live per-chunk read would hand this chunk a band
+  // that no longer knows `ext_blankLength`, and the human column would be written; the snapshot
+  // refuses it.
+  const second = await runLargeBomCheckpointApplyJobChunk({
+    storage,
+    ...TEST_SCOPE,
+    actionId,
+    applyJobId: 'apply-job-band',
+    recordsApi: api.recordsApi,
+    maxDecisionsPerChunk: 1,
+    installedFieldProperties: emptyBand(),
+    now: () => '2026-06-08T00:03:00.000Z',
+  })
+  assert.equal(second.status, 'partial')
+  assert.equal(second.counts.failed, 1, 'the human wall of the APPROVED band rejects the ext_ human column')
+  assert.equal(second.counts.created, 1, 'and the rejection costs only its own row')
+  assert.equal(api.rows.length, 1)
+  for (const call of api.calls.filter((entry) => entry[0] === 'createRecord')) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(call[1].data, EXT_HUMAN_FIELD),
+      false,
+      'no write carries the pack human column',
+    )
+  }
+
+  // THE CONTROL that makes the assertion above mean something: the SAME chunk input on a job with
+  // no snapshot writes that column. So it is the snapshot doing the refusing, not the fixture.
+  const control = await seedPlannedLargeBomJob({ plan, jobId: 'job-band-apply-control' })
+  const controlApi = createTargetRecordsApi()
+  await createLargeBomCheckpointApplyJob({
+    storage: control.storage,
+    ...TEST_SCOPE,
+    actionId: control.actionId,
+    jobId: control.jobId,
+    principal: 'user-1',
+    permission: 'write',
+    createApplyJobId: () => 'apply-job-band-control',
+    now: () => '2026-06-08T00:01:00.000Z',
+  })
+  const controlRun = await runLargeBomCheckpointApplyJobChunk({
+    storage: control.storage,
+    ...TEST_SCOPE,
+    actionId: control.actionId,
+    applyJobId: 'apply-job-band-control',
+    recordsApi: controlApi.recordsApi,
+    installedFieldProperties: emptyBand(),
+    now: () => '2026-06-08T00:02:00.000Z',
+  })
+  assert.equal(controlRun.counts.created, 2, 'without a snapshot the per-call band governs, as it always did')
+  assert.equal(
+    controlApi.calls
+      .filter((entry) => entry[0] === 'createRecord')
+      .some((entry) => Object.prototype.hasOwnProperty.call(entry[1].data, EXT_HUMAN_FIELD)),
+    true,
+    'and that band lets the pack human column through -- the exact outcome the snapshot prevents',
+  )
+}
+
+async function testApplyJobWithoutABandIsShapedExactlyAsBefore() {
+  const plan = planWithDecisions([addDecision('PROJECT_VALUE_SHOULD_NOT_APPEAR::SHAPE-1')])
+  const shapes = []
+  for (const value of ['omit', undefined, null]) {
+    const seeded = await seedPlannedLargeBomJob({ plan, jobId: 'job-band-shape' })
+    const input = {
+      storage: seeded.storage,
+      ...TEST_SCOPE,
+      actionId: seeded.actionId,
+      jobId: seeded.jobId,
+      principal: 'user-1',
+      permission: 'write',
+      createApplyJobId: () => 'apply-job-shape',
+      now: () => '2026-06-08T00:01:00.000Z',
+    }
+    if (value !== 'omit') input.installedFieldProperties = value
+    const job = await createLargeBomCheckpointApplyJob(input)
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(job, 'installedFieldProperties'),
+      false,
+      'a degraded band resolution must not add a key to the stored job',
+    )
+    shapes.push(JSON.stringify(job))
+  }
+  assert.equal(shapes[0], shapes[1])
+  assert.equal(shapes[0], shapes[2], 'omitted / undefined / null are one stored job, byte for byte')
+}
+
 async function main() {
   testStatusEnumsArePinned()
   testBackgroundEvidenceIsValuesFreeProjection()
@@ -2077,6 +2431,7 @@ async function main() {
   testBackgroundCapDerivationAndCeilings()
   testBackgroundCapConfigBlockParsing()
   await testBackgroundWorkerScalesPastTheInteractiveScaleBudget()
+  await testBackgroundWorkerHonoursTheActionsRootSelectionRules()
   await testBackgroundWorkerFailsNonAuthoritativeOnScaleBudget()
   await testBackgroundBudgetsAreRecordedBeforeTheSourceRead()
   await testBackgroundWorkerStoresFailedJobWhenErrorTokenIsUnsafe()
@@ -2097,11 +2452,102 @@ async function main() {
   await testPlannerHandoffRequiresAuthoritativeArtifact()
   await testPlannerHandoffRejectsMalformedExistingRows()
   await testPlannerHandoffStoresValuesFreePlanEvidence()
+  await testBackgroundPlanFillsTheParentPackColumns()
   await testCheckpointApplyRequiresDurablePlanPermissionAndManualAck()
   await testCheckpointApplyChunksPlanAndKeepsPublicEvidenceValuesFree()
   await testCheckpointApplyMissingRecordsApiFailsBeforeRunning()
   await testCheckpointApplySingleFlightRejectsConcurrentQueuedRun()
   await testCheckpointApplyRejectsConcurrentRunningChunk()
+  await testPlanBandOmittedUndefinedAndNullAreOneBehaviour()
+  await testPlanBandReachesThePlannerThroughTheJobLayer()
+  await testApplyBandIsFrozenAtApprovalAndEveryChunkReadsTheSnapshot()
+  await testApplyJobWithoutABandIsShapedExactlyAsBefore()
+}
+
+// F1c-b — 后台大 BOM 链上的 父组件图号 / 父组件名称 包列。与上面那条 当前组件排序号 的绑定同形:
+// 两条真实调用链经过同一个规划器,但各自从不同的 seam 取「动作声明的扩展列」——交互链是
+// `action.extensionFieldIds`(table-actions computeDryRun),这一条是
+// `job.actionSnapshot.extensionFieldIds`(planLargeBomBackgroundExpansionJob)。
+//
+// 本用例证到哪儿,以及证不到哪儿 —— 别把它读成「大 BOM 项目今天这两列有值」:
+//  · 证到的是**规划器层的接线**:动作快照的 extensionFieldIds 是这条链上派生的**必要条件**,
+//    断掉 lib/stock-preparation-large-bom-jobs.cjs 里那一行 ⇒ 本用例红(下面的 undeclared 负控
+//    就是同一件事的正面形状)。
+//  · 证不到的是 plan-time 的**包感知可写 band**:`installedFieldProperties` 是本用例**自己**手传
+//    进 planLargeBomBackgroundExpansionJob 的。真实 HTTP 路由上那一路至今没接线 ——
+//    lib/http-routes.cjs 全文只有三处 `resolveInstalledFieldProperties`(5820 / 5973 / 6178),
+//    大 BOM 规划路由(6367 `planLargeBomBackgroundExpansionJob({ storage, ...routeScope, actionId,
+//    jobId, existingRows, conflictPolicyReview })`)与后台 apply 分片路由都不在其中。band 因此
+//    是模板-only,`pickFields` 把每一个 `ext_` id 都留在外面:**大 BOM 走后台链的项目,今天这两列
+//    (以及 F1c 那三列)仍然是空的**,分歧不会因为本次改动消失。
+//  · 所以「小 BOM 有值 / 大 BOM 空着」这条分歧的根在路由层,不在规划器层;http-routes.cjs 本轮
+//    不可动,已列进 PR 正文 owner 待办。
+async function testBackgroundPlanFillsTheParentPackColumns() {
+  const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
+  const installedFieldProperties = PARENT_PACK_COLUMN_IDS.map((fieldId) => ({
+    logicalId: fieldId,
+    name: fieldId,
+    type: 'string',
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system', preserveOnRefresh: false, required: false, key: false,
+        extension: true, packId: 'factory-a', packVersion: '1.0.0',
+      },
+    },
+  }))
+
+  async function planWith(extensionFieldIds, jobId) {
+    const job = await completedJobWithArtifact({ jobId, extensionFieldIds })
+    const planned = await planLargeBomBackgroundExpansionJob({
+      storage: job.storage,
+      ...TEST_SCOPE,
+      actionId: 'plm.stock-preparation.pull-bom.v1',
+      jobId: job.jobId,
+      existingRows: [],
+      installedFieldProperties,
+      runId: 'large-bom-parent-pack-run',
+      plannedAt: '2026-06-08T00:02:00.000Z',
+      now: () => '2026-06-08T00:03:00.000Z',
+    })
+    assert.equal(planned.status, 'completed')
+    assert.equal(planned.planArtifact.plan.counts.manual_confirm, 0)
+    const addRecords = planned.planArtifact.plan.decisions
+      .filter((decision) => decision.decision === 'add')
+      .map((decision) => decision.record)
+    assert.equal(addRecords.length, 2, 'the artifact holds one root row and one child row')
+    return { planned, addRecords }
+  }
+
+  const declared = await planWith(PARENT_PACK_COLUMN_IDS, 'job-plan-parent-pack')
+  const rootRecord = declared.addRecords.find((record) => record.depth === 0)
+  const childRecord = declared.addRecords.find((record) => record.depth === 1)
+  assert.ok(rootRecord && childRecord)
+  // 值本身是 fixture 里的 *_SHOULD_NOT_APPEAR 串,这里不复述它,只断言「就是父行那一个值」——
+  // 同源要证的正是这件事。
+  assert.equal(childRecord.ext_parentDrawingNo, rootRecord.componentCode, '后台链把父行图号写进客户包列')
+  assert.equal(childRecord.ext_parentDrawingNo, childRecord.parentComponentCode, '包列 = 模板列 parentComponentCode(同一个值)')
+  assert.equal(childRecord.ext_parentName, childRecord.parentComponentName, '包列 = 模板列 parentComponentName(同一个值)')
+  assert.equal(typeof childRecord.ext_parentDrawingNo, 'string')
+  assert.ok(childRecord.ext_parentDrawingNo.length > 0, '写进去的是真值,不是空串')
+  for (const fieldId of PARENT_PACK_COLUMN_IDS) {
+    assert.equal(Object.prototype.hasOwnProperty.call(rootRecord, fieldId), false, '根行无父 ⇒ ' + fieldId + ' 连键都没有')
+  }
+  assertValuesFree(publicBackgroundExpansionJob(declared.planned))
+
+  // 负控 = 这条接线断掉的证据:动作快照里没有这两列 ⇒ 后台计划一个 ext_ 键都不派生。
+  const undeclared = await planWith(undefined, 'job-plan-parent-pack-undeclared')
+  for (const record of undeclared.addRecords) {
+    assert.deepEqual(
+      Object.keys(record).filter((key) => key.startsWith('ext_')),
+      [],
+      '动作快照没声明扩展列 ⇒ 后台计划不派生任何 ext_ 列',
+    )
+  }
+  assert.equal(
+    undeclared.addRecords.find((record) => record.depth === 1).parentComponentCode,
+    rootRecord.componentCode,
+    '模板列照旧 —— 这次改动是纯加法',
+  )
 }
 
 main().catch((err) => {

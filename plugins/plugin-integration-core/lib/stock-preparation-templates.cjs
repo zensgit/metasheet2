@@ -825,6 +825,130 @@ const STOCK_PREPARATION_MAIN_TABLE_TEMPLATE = Object.freeze(normalizeStockPrepar
   ],
 }))
 
+// ---------------------------------------------------------------------------
+// 备料填写视图 — THE FILL VIEW's CONTRACT (ids only, never values).
+//
+// WHY A VIEW AND NOT A TEMPLATE CHANGE. The first real deployment's main table shows all 33
+// columns, 12 of which are machine plumbing the person filling the sheet can do nothing with
+// (源ID/路径/层级/刷新痕迹). A template edit cannot fix that: an EXISTING object is either
+// already ready or refused, never re-described (see stock-preparation-target-provisioning.cjs,
+// `buildStockPreparationTargetDescriptor`), so nothing in the template can hide a column on a
+// table that already exists. A VIEW can, it works on existing installs, and it carries the
+// sort/group/filter the same operator asked for. Nothing here renames or drops a column.
+//
+// IT IS DISPLAY, NOT PERMISSION. `hidden_field_ids` is read by the grid; field permissions,
+// the export projection and the apply writer do not consult it and must not be told they do.
+// Anyone who may open the sheet may unhide these columns.
+//
+// THE TWO VIEW IDS LIVE HERE TOGETHER so no module can hold a private copy of either. The
+// fill view is the plugin's OWN view (`prep-fill`); `default` is the HOST's default-view id
+// (packages/core-backend/src/multitable/provisioning.ts, DEFAULT_OBJECT_VIEW_LOGICAL_ID),
+// mirrored by the board suite. They must never be the same token: the default view is the one
+// a deployment may have hand-tuned, and `ensureObjectDefaultView`'s never-touch-existing-views
+// guarantee is exactly what an upsert onto `default` would hole.
+const STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID = 'prep-fill'
+const STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID = 'default'
+
+const STOCK_PREPARATION_FILL_VIEW_LABEL = Object.freeze({
+  label: 'Stock Preparation Fill',
+  labelZh: '备料填写视图',
+})
+
+// The 12 plm_system columns the fill view hides — the exact set the customer pointed at.
+// Every id is asserted below to be a plm_system column of the frozen main template, so this
+// list can never hide a human-owned column (the band a person fills) by a typo or a rename.
+// F1c 看过这张清单,并且**没有**往里加 `parentComponentCode` / `parentComponentName` /
+// `componentSpec` —— 理由记在这里,免得下一个人以为是漏了:
+//   * 客户包装了 父组件图号 / 父组件名称 / 规格 三个同义 ext_ 列,222 上两套并存确实重复;但这张
+//     清单是**全局常量**,对没装包的部署一样生效。把模板的 规格/父组件名称 藏掉,在无包部署上就是
+//     把那两列**彻底藏了**(包列根本不存在),填表的人再也看不到规格。
+//   * `parentComponentCode` 更是藏不得:这张视图按它分组、按它排序,`assertFillViewContract` 明文
+//     拒绝「排序/分组用一列却把它藏起来」。为了藏它去放宽那条守卫,是把守卫改松。
+//   结论(替 owner 定,写进 PR):**只在装了包的部署上**才该藏,而藏的判断需要「这张表到底装了哪些
+//   列」这条信息 —— 视图描述符今天拿不到(它只有 provisioning.getFieldId,那是个纯算法,不回答
+//   「存在与否」)。所以 F1c 先把包列的值补上(那才是它们空着的真正原因),藏列留给能读到已装字段
+//   的那一版做。
+const STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS = Object.freeze([
+  'idempotencyKey',
+  'componentSourceId',
+  'parentSourceId',
+  'path',
+  'depth',
+  'sourceVersion',
+  'rawQuantity',
+  'active',
+  'lastPlmRefreshRunId',
+  'lastPlmRefreshAt',
+  'lastPlmRefreshDecision',
+  'lastPlmConflictSummary',
+])
+
+// 按父组件分组、组内按图号排序 — the legacy 备料 system's own order
+// (`order by parent_component_code, component_sort_id`), expressed with the columns this
+// table actually has. Ascending only; `desc` is written explicitly so the stored shape is
+// the one the grid and the meta route parse (`sortInfo.rules[].desc`).
+// F1c 的差距,明说:导出走的是深度优先 BOM 树序(prep-line-export `orderRowsAsBomTree`),而视图
+// 排序表达不了树 —— 它只有「按列排」。第二键也换不成 明细排序号:那一列只存在于客户包
+// (`ext_componentSortNo`),而 `ensureStockPreparationFillView` 要求视图点名的每个 id 都在**模板**
+// 里(否则视图会指向一堆不存在的列)。所以视图保持「按父组件图号分组、组内按图号」,树序只在导出
+// 里有;冻结模板哪天真有了 明细排序号 列,第二键就该换成它。
+const STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS = Object.freeze(['parentComponentCode', 'componentCode'])
+const STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS = Object.freeze(['parentComponentCode'])
+// A refresh MARKS rows inactive rather than deleting them (`missingFromPlmPolicy: 'mark_inactive'`),
+// so a fill view that did not filter would show rows PLM no longer reports beside live ones.
+const STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID = 'active'
+
+// Consistency between this contract and the frozen template, checked at load rather than
+// trusted: an id that is not a plm_system column of the main table, a sort/group column that
+// is hidden (a group header nobody can see), or a fill id equal to the host's default view id
+// are all authoring mistakes that would otherwise surface as a silently wrong view on a
+// customer's table.
+function assertFillViewContract({
+  template = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  hiddenFieldIds = STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+  sortFieldIds = STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+  groupFieldIds = STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
+  activeFilterFieldId = STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+  fillViewLogicalId = STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  defaultViewLogicalId = STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID,
+} = {}) {
+  if (fillViewLogicalId === defaultViewLogicalId) {
+    throw new StockPreparationTemplateError(
+      'the fill view must not be the default view: upserting the default view would hole the host\'s never-touch-existing-views guarantee',
+    )
+  }
+  const ownershipById = new Map((template.fields || []).map((field) => [field.id, field.ownership]))
+  const hidden = new Set(hiddenFieldIds)
+  for (const fieldId of hiddenFieldIds) {
+    if (!ownershipById.has(fieldId)) {
+      throw new StockPreparationTemplateError(`fill view hides an unknown field: ${fieldId}`)
+    }
+    if (ownershipById.get(fieldId) !== 'plm_system') {
+      throw new StockPreparationTemplateError(`fill view may only hide plm_system columns: ${fieldId}`)
+    }
+  }
+  for (const fieldId of [...sortFieldIds, ...groupFieldIds, activeFilterFieldId]) {
+    if (!ownershipById.has(fieldId)) {
+      throw new StockPreparationTemplateError(`fill view orders by an unknown field: ${fieldId}`)
+    }
+  }
+  for (const fieldId of [...sortFieldIds, ...groupFieldIds]) {
+    if (hidden.has(fieldId)) {
+      throw new StockPreparationTemplateError(`fill view cannot sort or group by a column it hides: ${fieldId}`)
+    }
+  }
+  return true
+}
+
+assertFillViewContract()
+
+// The fill view's own name, in the same language the sheet and its columns were created in —
+// through the one locale reader every other label goes through, never a second one.
+function pickFillViewName(options = {}) {
+  const locale = options.locale === undefined ? resolveTemplateLabelLocale() : options.locale
+  return pickTemplateLabel(STOCK_PREPARATION_FILL_VIEW_LABEL, locale)
+}
+
 // B-stage takeover decision ledger (FIRST CUT). This is deliberately NOT part of the frozen
 // nine-table MVP surface: canonical stock-preparation remains the only business fact table,
 // while this one supporting object stores revision-bound human decisions only. Customer-entered
@@ -1172,6 +1296,15 @@ module.exports = {
   pickTemplateLabel,
   STOCK_PREPARATION_DEFAULT_VIEW_LABELS,
   pickDefaultViewName,
+  STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_FILL_VIEW_LABEL,
+  STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+  assertFillViewContract,
+  pickFillViewName,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,

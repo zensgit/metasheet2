@@ -3,7 +3,7 @@ import { expect, test, type Page } from '@playwright/test'
 const cardSelector = '[data-attendance-makeup-request-card]'
 const proof = 'https://example.com/synthetic-proof.png'
 
-async function mockAttendance(page: Page) {
+async function mockAttendance(page: Page, withLeave = false) {
   const posts: Record<string, unknown>[] = []
   const unexpected: string[] = []
   await page.clock.setFixedTime(new Date('2026-04-15T10:00:00+08:00'))
@@ -48,6 +48,9 @@ async function mockAttendance(page: Page) {
         { recordId: 'yesterday-out', workDate: '2026-04-14', state: 'open', status: 'partial', suggestedRequestType: 'missed_check_out', request: null },
       ] } })
     }
+    if (withLeave && path === '/api/attendance/leave-types') {
+      return reply({ ok: true, data: { items: [{ id: 'annual', name: 'Annual', code: 'annual', defaultMinutesPerDay: 450, requiresAttachment: true, isActive: true }] } })
+    }
     if (emptyLists.has(path)) return reply({ ok: true, data: { items: [], total: 0 } })
     if (path === '/api/attendance/summary') {
       return reply({ ok: true, data: { total_days: 0, total_minutes: 0 } })
@@ -59,7 +62,7 @@ async function mockAttendance(page: Page) {
       return reply({ ok: true, data: {
         userId: 'synthetic-employee', orgId: 'synthetic-org', resolvedForDate: '2026-04-15',
         assignment: { attendanceGroups: [], scheduleGroups: [] },
-        runtimeRule: { timezone: 'Asia/Shanghai' }, punchPolicy: { merge: {} }, warnings: [],
+        runtimeRule: { timezone: 'Asia/Shanghai', ...(withLeave ? { workStartTime: '09:00', workEndTime: '18:00' } : {}) }, punchPolicy: { merge: {} }, warnings: [],
       } })
     }
     if (path === '/api/attendance/effective-calendar') {
@@ -74,11 +77,11 @@ async function mockAttendance(page: Page) {
   return { posts, unexpected }
 }
 
-async function assertFits(page: Page) {
-  const card = page.locator(cardSelector)
+async function assertFits(page: Page, selector = cardSelector) {
+  const card = page.locator(selector)
   const outer = await card.boundingBox()
   expect(outer).not.toBeNull()
-  for (const control of await card.locator('input, select, button').all()) {
+  for (const control of await card.locator('input, select, button, textarea').all()) {
     await expect(control).toBeVisible()
     const box = await control.boundingBox()
     expect(box!.x).toBeGreaterThanOrEqual(outer!.x - 1)
@@ -89,6 +92,44 @@ async function assertFits(page: Page) {
 }
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`${viewport.width}x${viewport.height}: leave duration and mutually exclusive makeup cards`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport)
+    const { posts, unexpected } = await mockAttendance(page, true)
+    await page.goto('/verification/attendance-makeup-request-harness.html')
+    const leave = page.locator('[data-attendance-leave-request-card]')
+    await page.locator('[data-selfservice-action="leave"]').click()
+    await expect(leave).toBeVisible()
+    await expect(page.locator(cardSelector)).toHaveCount(0)
+    await leave.locator('[data-leave-card-preset="full_day"]').click()
+    await leave.locator('[data-leave-card-unit-switch]').click()
+    await expect(leave.locator('[data-leave-card-duration-value]')).toContainText('450')
+    await leave.locator('[data-leave-card-end]').fill('')
+    await expect(leave.locator('[data-leave-card-duration-value]')).toHaveText('—')
+    await expect(page.locator('#attendance-request-minutes')).toHaveValue('')
+    await leave.locator('[data-leave-card-end]').fill('2026-04-15T16:30')
+    await leave.locator('[data-leave-card-attachment]').fill(proof)
+    await leave.locator('[data-leave-card-reason]').fill('Synthetic leave')
+    await assertFits(page, '[data-attendance-leave-request-card]')
+    await leave.screenshot({ path: testInfo.outputPath(`leave-${viewport.width}.png`) })
+    await leave.locator('[data-leave-card-submit]').click()
+    await expect(leave).toHaveCount(0)
+    expect(posts).toEqual([{ workDate: '2026-04-15', requestType: 'leave', requestedInAt: '2026-04-15T09:00', requestedOutAt: '2026-04-15T16:30', leaveTypeId: 'annual', minutes: 450, reason: 'Synthetic leave', attachmentUrl: proof, orgId: 'synthetic-org' }])
+    await page.locator('[data-selfservice-action="missing-punch"]').click()
+    await expect(page.locator(cardSelector)).toBeVisible()
+    await expect(leave).toHaveCount(0)
+    await expect(page.locator('[data-makeup-card-time]')).toHaveValue('')
+    await page.locator('[data-makeup-card-time]').fill('2026-04-15T09:30')
+    await page.locator('[data-makeup-card-submit]').click()
+    await expect(page.locator(cardSelector)).toHaveCount(0)
+    expect(posts[1]).toEqual({ workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T09:30', reason: 'Synthetic leave', attachmentUrl: proof, orgId: 'synthetic-org' })
+    await page.locator('[data-selfservice-action="leave"]').click()
+    await expect(leave).toBeVisible()
+    await expect(page.locator(cardSelector)).toHaveCount(0)
+    await expect(leave.locator('[data-leave-card-duration-value]')).toHaveText('—')
+    expect(posts).toHaveLength(2)
+    expect(unexpected).toEqual([])
+  })
+
   test(`${viewport.width}x${viewport.height}: reopening clears a different-date draft before submitting`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport)
     const { posts, unexpected } = await mockAttendance(page)

@@ -14,6 +14,16 @@ const {
   buildSheetStructureFromTemplate,
   resolveTemplateLabelLocale,
   pickDefaultViewName,
+  // 备料填写视图 — the fill view's whole contract (two view ids, the hidden column set, the
+  // sort/group columns and the active filter column) lives in the template module beside the
+  // frozen template it is checked against, so no module here holds a private copy of any of them.
+  STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
+  STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+  pickFillViewName,
 } = require('./stock-preparation-templates.cjs')
 
 // W2 canonical repair: namespace positive control for a repaired-in field.
@@ -553,6 +563,141 @@ async function ensureManagedTableDefaultView({ provisioning, projectId, objectId
   return { created: false, skipped: existingViewCount > 0 ? 'existing_views' : 'concurrent_create' }
 }
 
+// ---------------------------------------------------------------------------
+// 备料填写视图 — THE FILL VIEW, the one view 「打开项目备料」 lands on.
+//
+// WHAT IT IS FOR. The main table carries 33 columns; 12 of them are machine plumbing
+// (源ID / BOM路径 / 层级 / 刷新痕迹) that the person filling the sheet cannot act on and
+// did act as noise on the first customer-facing table. This view hides exactly those 12,
+// groups by 父组件图号 and sorts 父组件图号 → 图号 (the legacy system's own
+// `order by parent_component_code, component_sort_id`, expressed in the columns this table
+// has), and filters to 有效 rows so a refresh's `mark_inactive` leftovers do not sit beside
+// live ones.
+//
+// IT IS DISPLAY, NOT PERMISSION — stated here because this is where someone would be
+// tempted to use it as one. `hidden_field_ids` is honoured by the grid; field permissions,
+// the export projection and the apply writer never read it. Any operator who can open the
+// sheet can unhide every column, and MUST be able to: the hidden band includes `active` and
+// the refresh trace, which an investigator needs.
+//
+// WHY IT IS `ensureView` AND NOT `ensureObjectDefaultView`. The default view is the one a
+// deployment may already have hand-tuned, and the host's default-view primitive is shaped
+// around "a sheet that already has ANY view is left COMPLETELY alone". Upserting `default`
+// would hole exactly that guarantee. So the fill view is the plugin's OWN view id
+// (`prep-fill`), and the refusal below is load-bearing rather than a comment: this function
+// REFUSES to write a descriptor whose id is the host's default-view id, whatever a future
+// edit to the constants does.
+//
+// OPTIONAL CAPABILITY: an older host without `ensureView`/`getFieldId` is not a failure —
+// provisioning proceeds exactly as it does today and the evidence says which leg ran.
+function buildStockPreparationFillViewDescriptor({ provisioning, projectId, objectId, locale } = {}) {
+  // The stored ids are PHYSICAL (meta_views.hidden_field_ids is compared against meta_fields.id
+  // and sort/group/filter rules address the same physical ids), so every logical id goes through
+  // the host's stable-id function — the same mapping the customer-pack role views use.
+  const physical = (fieldId) => provisioning.getFieldId(projectId, objectId, fieldId)
+  const sortFieldIds = STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS.map(physical)
+  const groupFieldIds = STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS.map(physical)
+  return {
+    id: STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+    objectId,
+    name: pickFillViewName({ locale }),
+    type: 'grid',
+    hiddenFieldIds: STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS.map(physical),
+    sortInfo: { rules: sortFieldIds.map((fieldId) => ({ fieldId, desc: false })) },
+    // BOTH group shapes are written on purpose: the grid prefers the ordered `fieldIds` and
+    // falls back to the legacy single `fieldId`, and other view kinds still read only the
+    // latter (apps/web/src/multitable/composables/useMultitableGrid.ts).
+    groupInfo: { fieldIds: groupFieldIds, fieldId: groupFieldIds[0] },
+    filterInfo: {
+      conjunction: 'and',
+      conditions: [{ fieldId: physical(STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID), operator: 'is', value: true }],
+    },
+    // Values-free provenance: ids and counts only, never a customer row value.
+    config: {
+      stockPreparation: {
+        fillView: {
+          logicalId: STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
+          hiddenFieldCount: STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS.length,
+          sortFieldCount: sortFieldIds.length,
+          groupFieldCount: groupFieldIds.length,
+          filtersActiveOnly: true,
+        },
+      },
+    },
+  }
+}
+
+async function ensureStockPreparationFillView({ provisioning, projectId, objectId, sheetId, locale, template } = {}) {
+  if (!provisioning || typeof provisioning.ensureView !== 'function' || typeof provisioning.getFieldId !== 'function') {
+    return { created: false, skipped: 'api_unavailable', viewId: null }
+  }
+  if (!sheetId) return { created: false, skipped: 'sheet_unknown', viewId: null }
+  // THE TABLE MUST ACTUALLY HAVE THE COLUMNS. `ensureStockPreparationTarget` accepts a CALLER's
+  // template for a fresh table (only `repair` is pinned to the frozen one), and the fill view's
+  // hidden/sort/group/filter rules are the FROZEN template's ids. A table without them would get a
+  // view full of ids that address nothing — so a template that does not carry every id this view
+  // names is skipped, reported, and never half-applied. The canonical main and the sandbox (same
+  // field ids, different objectId) both pass.
+  const resolvedTemplate = template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE
+  const templateIds = new Set((resolvedTemplate.fields || []).map((field) => field.id))
+  const requiredIds = [
+    ...STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+    ...STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+    ...STOCK_PREPARATION_FILL_VIEW_GROUP_FIELD_IDS,
+    STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+  ]
+  if (requiredIds.some((fieldId) => !templateIds.has(fieldId))) {
+    return { created: false, skipped: 'template_mismatch', viewId: null }
+  }
+  const descriptor = buildStockPreparationFillViewDescriptor({ provisioning, projectId, objectId, locale })
+  // THE REFUSAL. `ensureView` is an UPSERT: pointed at the default view id it would overwrite a
+  // deployment's own hidden/sort/name — the very thing `ensureObjectDefaultView` promises never to
+  // touch. This function therefore refuses to be the tool that does it, and refuses from the
+  // descriptor it is ABOUT to send rather than from the constant it read.
+  if (descriptor.id === STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT',
+      'the stock-preparation fill view may never be upserted onto the default view id',
+      { objectId },
+    )
+  }
+  const view = await provisioning.ensureView({ projectId, sheetId, descriptor })
+  return {
+    created: true,
+    skipped: null,
+    viewId: view && view.id ? String(view.id) : null,
+    hiddenFieldCount: descriptor.hiddenFieldIds.length,
+  }
+}
+
+// ONE CLASSIFIER FOR A FILL-VIEW FAILURE, shared by the create leg and the repair leg so the two
+// cannot drift on the question "is a failed display view worth failing a committed schema write?".
+//
+// IT DEGRADES ON A HOST ERROR. By the time either leg calls this, the schema work is ALREADY
+// COMMITTED (create: ensureObject + resolveFieldIds + the default view; repair: the additive field
+// transaction). A scope refusal on an unclaimed sheet, or a DB hiccup, would therefore turn a
+// SUCCEEDED provisioning into a 5xx — and on the create leg that is strictly the worst outcome
+// available: the caller retries, the retry takes the already-ready leg (which returns before any
+// write, by design), and the table then answers ready:true forever while carrying no fill view,
+// with no reachable verb able to heal it (CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT === false).
+// So the failure is REPORTED as `fillViewSkipped` in the evidence both legs return — which is what
+// an admin reads on the ensure/repair response — and never thrown.
+//
+// THIS MODULE'S OWN REFUSALS ARE NEVER SWALLOWED. A StockPreparationTargetProvisioningError out of
+// `ensureStockPreparationFillView` is not host weather: it is a contract violation this file raises
+// on purpose, above all FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT — the guard that keeps this feature
+// off a deployment's own default view. Folding that into `skipped: 'ensure_failed'` would demote
+// the loudest guard in this file to a quiet evidence key, so it travels out as the error it is.
+async function ensureFillViewOrReportSkip(args) {
+  try {
+    return await ensureStockPreparationFillView(args)
+  } catch (error) {
+    if (error instanceof StockPreparationTargetProvisioningError) throw error
+    return { created: false, skipped: 'ensure_failed', viewId: null }
+  }
+}
+
 async function ensureStockPreparationTarget(input = {}) {
   const context = input.context || {}
   const provisioning = getProvisioningApi(context)
@@ -631,20 +776,56 @@ async function ensureStockPreparationTarget(input = {}) {
     viewKind: 'records',
     locale: input.locale,
   })
+  // 备料填写视图 — on the CREATE path only, for the same reason the default view is created
+  // here: the table was just created by THIS call (so its object scope is this plugin's, freshly
+  // claimed by `ensureObject`) and it has no hand-tuned views to respect. An already-ready target
+  // returned long before this point and is untouched.
+  //
+  // AN EXISTING TABLE THEREFORE DOES NOT GET THE VIEW FROM HERE — AND TODAY IT GETS IT FROM
+  // NOWHERE. The additive REPAIR verb below is written to heal it, but nothing in production calls
+  // that verb (`CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT` below states it as data and a test
+  // pins it). So until an owner-gated entry for repair exists, this is a NEW-TABLE change: a
+  // deployment's existing 备料主表 keeps the deep link it has today, which is why the deep link
+  // PROBES for the fill view instead of assuming it.
+  //
+  // A HOST FAILURE HERE DOES NOT FAIL THE CREATE, AND IS NOT SILENT EITHER — see
+  // `ensureFillViewOrReportSkip` above for why this leg degrades instead of throwing (short version:
+  // the table is already committed, and a retry takes the already-ready leg, which writes no view
+  // and still answers ready:true). The outcome rides the evidence below, so a caller that only sees
+  // the HTTP projection (ready/mode/targetBinding/evidence) can still tell whether the 备料填写视图
+  // was written, skipped by an older host, or refused.
+  const fillView = await ensureFillViewOrReportSkip({
+    provisioning,
+    projectId,
+    objectId: template.objectId,
+    sheetId: ensured.sheet.id,
+    locale: input.locale,
+    template,
+  })
   return {
     ready: true,
     mode: `${modePrefix}_create`,
     defaultView,
+    fillView,
     target: buildCanonicalTargetBinding({ sheetId: ensured.sheet.id, objectId: template.objectId, fieldIdMap: resolvedAfterCreate }),
-    evidence: summarizeStockPreparationTargetReadiness({
-      template,
-      mode: `${modePrefix}_create`,
-      status: 'ready',
-      missingFields: [],
-      fieldIdMapEmpty: false,
-      fieldMapMode,
-      includeObjectId,
-    }),
+    evidence: {
+      ...summarizeStockPreparationTargetReadiness({
+        template,
+        mode: `${modePrefix}_create`,
+        status: 'ready',
+        missingFields: [],
+        fieldIdMapEmpty: false,
+        fieldMapMode,
+        includeObjectId,
+      }),
+      // The same two keys the repair leg reports, in the same shape and for the same reason: the
+      // plugin's HTTP surface projects `evidence` and DROPS every other top-level key of this
+      // result (publicStockPreparationTargetResult), so `result.fillView` alone is invisible to the
+      // admin who just pressed ensure. Values-free: a boolean and a reason code, never a view name
+      // or a column id.
+      fillViewCreated: fillView.created === true,
+      fillViewSkipped: fillView.skipped || null,
+    },
   }
 }
 
@@ -742,6 +923,31 @@ function getCanonicalRepairApi(context) {
   return provisioning
 }
 
+// ---------------------------------------------------------------------------
+// IS THE CANONICAL REPAIR VERB REACHABLE IN PRODUCTION? — NO. Stated as data, and pinned by
+// `testCanonicalRepairReachabilityIsPinned`, because the same sentence written as prose in a PR
+// body is what already shipped as a false claim once.
+//
+// `repairStockPreparationCanonicalTarget` below is the designated heal path for a table that
+// ALREADY EXISTS (`ensureStockPreparationTarget` returns "already ready" without writing, by
+// design, so it can never be that path). But the plugin's HTTP surface routes inspect/ensure only
+// — `lib/http-routes.cjs` never names this verb — and no other production module calls it; its
+// only callers are tests. Consequence, in operator terms: a deployment whose 备料主表 was created
+// before the fill view existed CANNOT obtain that view today by any button, route or script, and
+// its 「打开项目备料」 deep link keeps landing on the default view (33 columns, ungrouped).
+//
+// THE PIN'S DOMAIN IS THIS WHOLE REPOSITORY, not just this plugin's `lib/`: index.cjs, scripts/ops
+// and core-backend are all places a caller could appear, so all of them are scanned (test files are
+// counted as references, since driving the verb is how its body is proved). What the pin CANNOT
+// see, stated rather than implied: a caller that builds the name dynamically, and a caller outside
+// this repository.
+//
+// NEXT CUT, registered here so it cannot be lost: expose an owner-gated entry for this verb (an
+// admin route in `lib/http-routes.cjs`, or a `scripts/ops/` script), and flip this constant in the
+// SAME change — the test fails the moment the constant and the wiring disagree, in EITHER
+// direction, so neither a stale `false` nor an unearned `true` can survive.
+const CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT = false
+
 // W2 template-evolution rung — canonical main-table repair. This is where the
 // human-field-reject guard is LOAD-BEARING: the canonical main carries the
 // HUMAN_PRESERVED_FIELD_IDS, so a repair that could add an ARBITRARY human column
@@ -834,11 +1040,40 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
     }
     // AFTER snapshot: every pre-existing field must be byte-for-byte unchanged.
     assertNoExistingFieldMutated(beforeContent, await tx.readObjectFieldsContent({ projectId, objectId: template.objectId, fieldIds: existingIds }), template.objectId)
-    return writeResult
+    // The sheet id travels out with the write result: the fill-view ensure below runs OUTSIDE
+    // this transaction (the repair surface deliberately exposes only the four field methods),
+    // and re-deriving the sheet id there would be a second answer to a question already proved.
+    return { ...writeResult, sheetId: sheet && sheet.id ? String(sheet.id) : '' }
+  })
+  // 备料填写视图 — THE HEAL PATH for tables that already exist, ONCE SOMETHING CALLS THIS VERB.
+  // The heal is written here because this is the only additive verb that may touch an existing
+  // table (the view is additive in exactly the same sense — its id is the plugin's own, so it can
+  // neither replace nor reorder a view the deployment made). What it is NOT is a path a deployment
+  // can take today: this function has no route and no production caller
+  // (`CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT === false`), so no statement of the form "an
+  // existing deployment runs repair and gets the view" is true yet — it becomes true in the change
+  // that exposes the entry, not in this one.
+  //
+  // IT DEGRADES, IT DOES NOT FAIL, and the degradation is REPORTED. The schema repair is already
+  // committed by now; an existing sheet may be one this plugin never claimed in the object registry
+  // (hand-made, or restored from a dump), in which case the host's sheet-scope assertion refuses
+  // `ensureView` — and turning a SUCCESSFUL schema repair into a 5xx over a display view would be
+  // the wrong trade. `fillView.skipped` carries which leg ran so it is observable rather than
+  // silent; re-running repair after the registry is fixed creates the view. The ONE failure that
+  // still travels out is this module's own refusal (FILL_VIEW_MUST_NOT_OVERWRITE_DEFAULT) — see
+  // `ensureFillViewOrReportSkip`, which both legs share so they cannot answer this differently.
+  const fillView = await ensureFillViewOrReportSkip({
+    provisioning,
+    projectId,
+    objectId: template.objectId,
+    sheetId: result.sheetId,
+    locale: input.locale,
+    template,
   })
   return {
     ready: true,
     mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
+    fillView,
     evidence: {
       action: 'stock_preparation_canonical_repair',
       mode: result.addedFieldIds.length > 0 ? `${modePrefix}_repaired` : `${modePrefix}_already_ready`,
@@ -846,6 +1081,9 @@ async function repairStockPreparationCanonicalTarget(input = {}) {
       skippedExistingFieldCount: result.skippedExistingFieldIds.length,
       schemaCompleteAfter: true,
       templateVersion: template.version,
+      // Values-free: created / why-not only — never a view name or a column id.
+      fillViewCreated: fillView.created === true,
+      fillViewSkipped: fillView.skipped || null,
     },
   }
 }
@@ -919,6 +1157,9 @@ module.exports = {
   decideCarryTargetOwnership,
   CANONICAL_FIELD_MAP_MODE,
   repairStockPreparationCanonicalTarget,
+  // The reachability fact about the verb above, exported so a test can pin it against the actual
+  // wiring instead of against a sentence in a PR body (see its doc comment).
+  CANONICAL_REPAIR_HAS_PRODUCTION_ENTRYPOINT,
   // Exported for its own direct witnesses: the ownership rule that decides whether the
   // additive heal path may create a given column (see the doc comment above it).
   assertRepairableFieldOwnership,
@@ -931,6 +1172,8 @@ module.exports = {
   isSandboxNamespaceObjectId,
   buildStockPreparationTargetDescriptor,
   ensureManagedTableDefaultView,
+  ensureStockPreparationFillView,
+  buildStockPreparationFillViewDescriptor,
   summarizeStockPreparationTargetReadiness,
   hashEvidenceValue,
   sandboxStockPreparationTemplate,

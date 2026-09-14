@@ -13,6 +13,13 @@ import {
   workWindowShortLabel,
 } from '../src/views/attendance/attendanceEmployeeWorkspacePresentation'
 import { buildEmployeeWorkspaceProps } from '../verification/attendance-employee-overview-first-viewport-fixtures'
+import {
+  formatAttendanceClockTime,
+  formatAttendanceDateKey,
+  formatAttendanceDateTime,
+  formatAttendanceWeekday,
+  normalizeAttendanceTimeZone,
+} from '../src/views/attendance/attendanceDateTimePresentation'
 
 const en = (english: string, _zh: string) => english
 const zh = (_english: string, chinese: string) => chinese
@@ -75,10 +82,51 @@ describe('attendanceEmployeeWorkspacePresentation', () => {
     expect(suggestOffDutyTime('—')).toBeNull()
   })
 
-  it('treats a check-in time as clocked in', () => {
-    expect(isClockedIn({ checkIn: '09:18', checkOut: null }, '--:--')).toBe(true)
-    expect(isClockedIn({ checkIn: null, checkOut: null }, '09:18')).toBe(true)
-    expect(isClockedIn(null, '--:--')).toBe(false)
+  it('treats only an open check-in as clocked in', () => {
+    expect(isClockedIn({ checkIn: '09:18', checkOut: null })).toBe(true)
+    expect(isClockedIn({ checkIn: '09:18', checkOut: '18:02' })).toBe(false)
+    expect(isClockedIn({ checkIn: null, checkOut: '18:02' })).toBe(false)
+    expect(isClockedIn(null)).toBe(false)
+  })
+
+  it('renders work dates and punch clocks in the resolved attendance rule timezone', () => {
+    const instant = new Date('2026-09-10T19:15:49.000Z')
+    expect(formatAttendanceDateKey(instant, 'Asia/Shanghai')).toBe('2026-09-11')
+    expect(formatAttendanceDateKey(instant, 'America/Los_Angeles')).toBe('2026-09-10')
+    expect(formatAttendanceClockTime(instant, 'Asia/Shanghai')).toBe('03:15')
+    expect(formatAttendanceClockTime(instant, 'America/Los_Angeles')).toBe('12:15')
+  })
+
+  it('refuses to guess browser-local dates or times when the rule timezone is unavailable', () => {
+    const instant = new Date('2026-09-10T19:15:49.000Z')
+    expect(normalizeAttendanceTimeZone(' Mars/Olympus ')).toBeNull()
+    expect(normalizeAttendanceTimeZone('')).toBeNull()
+    expect(formatAttendanceDateKey(instant, 'Mars/Olympus')).toBeNull()
+    expect(formatAttendanceClockTime(instant, null)).toBeNull()
+    expect(formatAttendanceWeekday(instant, 'en-US', 'Mars/Olympus')).toBeNull()
+    expect(formatAttendanceDateTime(instant.toISOString(), 'en-US', 'Mars/Olympus')).toBe('--')
+  })
+
+  it('renders a completed pair as clocked out with both timestamps', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('normal'),
+      tr: en,
+      heroTimeline: { checkIn: '09:18', checkOut: '18:02' },
+    })
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('.attendance-ew__clock-status')?.textContent).toBe('Clocked out')
+    const metricText = container.querySelector('[data-selfservice-card="status"]')?.textContent ?? ''
+    expect(metricText).toContain('In09:18')
+    expect(metricText).toContain('Out18:02')
+    expect(metricText).toContain('Hours')
+    expect(metricText).not.toContain("Today's hours")
+
+    app.unmount()
+    container.remove()
   })
 })
 

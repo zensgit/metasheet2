@@ -2,7 +2,7 @@
   <div id="app">
     <nav class="app-nav" v-if="showNav">
       <div class="nav-brand">
-        <span class="brand-text">{{ brandText }}</span>
+        <router-link :to="brandHomePath" class="brand-text brand-link" data-testid="nav-brand-link">{{ brandText }}</router-link>
       </div>
       <div class="nav-links">
         <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
@@ -133,7 +133,7 @@ import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
-const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
+const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures, resolveHomePath } = useFeatureFlags()
 const { clearToken, getAccessSnapshot, getToken, hasPermission } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 setMultitableApiErrorLocaleResolver(() => isZh.value)
@@ -240,6 +240,16 @@ const brandText = computed(() => {
   if (attendanceFocused.value) return navLabels.value.attendance
   if (plmWorkbenchFocused.value) return navLabels.value.plmWorkbench
   return 'MetaSheet'
+})
+
+// Owner request (2026-09-14): the top-left brand is the way back to the landing page. It goes
+// through resolveHomePath() so the two FOCUSED product modes keep their own home ('/attendance' /
+// '/plm') and the router guard still decides reachability. For the ordinary platform mode this is
+// a top-nav entry to '/home' (我的应用) — superseding the #5392 note that '/home' had none.
+const brandHomePath = computed(() => {
+  void attendanceFocused.value
+  void plmWorkbenchFocused.value
+  return resolveHomePath()
 })
 
 const documentTitle = computed(() => resolveRouteDocumentTitle(route.meta, isZh.value))
@@ -352,6 +362,16 @@ html, body {
   font-weight: 600;
   color: var(--ms-color-primary);
   white-space: nowrap;
+}
+
+.brand-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.brand-link:hover,
+.brand-link:focus-visible {
+  text-decoration: underline;
 }
 
 .nav-links {

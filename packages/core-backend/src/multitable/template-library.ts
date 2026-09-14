@@ -56,6 +56,12 @@ export type MultitableTemplateBase = {
 export type InstallMultitableTemplateInput = {
   query: MultitableProvisioningQueryFn
   templateId: string
+  /**
+   * 已解析好的模板描述。用户自定义模板(id 以 `mtpl_` 开头)存在 DB 里,不在
+   * TEMPLATE_LIBRARY 常量表里,由路由按租户维度查出来后从这里传进来;省略时
+   * (内置模板)走原来的 getMultitableTemplate 查表路径,行为逐字不变。
+   */
+  template?: MultitableTemplate
   baseId?: string
   baseName?: string
   ownerId?: string | null
@@ -562,7 +568,9 @@ export async function detectTemplateConflicts(
 export async function installMultitableTemplate(
   input: InstallMultitableTemplateInput,
 ): Promise<InstallMultitableTemplateResult> {
-  const template = getMultitableTemplate(input.templateId)
+  const template = input.template
+    ? normalizeTemplate(input.template)
+    : getMultitableTemplate(input.templateId)
   if (!template) {
     throw new MultitableTemplateNotFoundError(input.templateId)
   }

@@ -718,6 +718,50 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1')
   })
 
+  // F9 — a stored v0 rule used to be a dead end in BOTH directions: the action select had no matching
+  // option (so the config block rendered nothing) and saving it back was rejected server-side
+  // (validateActionObject accepts canonical types only). Hydration now folds the alias.
+  it('F9: a stored legacy notify rule opens as send_notification and saves a canonical action', async () => {
+    const saved = vi.fn()
+    const rule: AutomationRule = {
+      id: 'atr_legacy_notify', sheetId: 'sheet_1', name: 'legacy notify', triggerType: 'record.updated',
+      triggerConfig: {}, actionType: 'notify', actionConfig: { message: 'Ping', userIds: ['u1'] }, enabled: true,
+    } as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    expect(epSelectValue(actionSelect)).toBe('send_notification')
+    expect(epOptions(actionSelect).map((option) => option.value)).toContain('send_notification')
+    const recipientInput = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-config input') as HTMLInputElement
+    expect(recipientInput.value).toBe('u1')
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions).toEqual([
+      { type: 'send_notification', config: { userIds: ['u1'], message: 'Ping' } },
+    ])
+  })
+
+  it('F9: a stored legacy update_field rule opens as update_record with its field row filled in', async () => {
+    const saved = vi.fn()
+    const rule: AutomationRule = {
+      id: 'atr_legacy_update', sheetId: 'sheet_1', name: 'legacy update', triggerType: 'record.updated',
+      triggerConfig: {}, actionType: 'update_field', actionConfig: { fieldId: 'fld_2', value: 'Done' }, enabled: true,
+    } as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule, onSave: saved })
+    await flushPromises()
+
+    const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+    expect(epSelectValue(actionSelect)).toBe('update_record')
+
+    ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+    await flushPromises()
+    expect(saved.mock.calls[0][0].actions).toEqual([
+      { type: 'update_record', config: { fields: { fld_2: 'Done' } } },
+    ])
+  })
+
   it('backfills + round-trips a form.submitted → start_approval rule (the combo, both directions)', async () => {
     const saved = vi.fn()
     const rule: AutomationRule = {

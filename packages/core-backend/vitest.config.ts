@@ -1217,6 +1217,13 @@ export default defineConfig({
       // C6/G8 tombstone-table retention sweep (bounded batch, keep-days floor at
       // META_REVISION_RETENTION_MIN_DAYS, disabled-by-default zero rows touched).
       'tests/integration/multitable-tombstone-retention-realdb.test.ts',
+      // E notification-centre retention sweep (keep-days window on meta_record_subscription_notifications,
+      // unread-included owner default, bounded batch drain). Real Postgres only — excluded HERE so it cannot
+      // skip-green in the no-DB lane. Two-point wiring: the SECOND point (the explicit file list in
+      // `Run multitable real-DB integration`, .github/workflows/plugin-tests.yml) is still MISSING and must be
+      // added by someone allowed to touch .github/workflows — until then this file runs nowhere and the
+      // delete SQL has never been parsed by a real server. Do not read this exclude as "it is wired".
+      'tests/integration/multitable-notification-retention-realdb.test.ts',
       // P2 durable-delivery S1 (#4203 Layer 1 / #4239): additive outbox-schema + flag golden — real Postgres
       // only (checks the migration landed both tables, the status CHECK, FK cascade, defaults). Excluded HERE
       // so it cannot skip-green in the no-DB lane, whole-file wired into plugin-tests.yml. Two-point wiring.
