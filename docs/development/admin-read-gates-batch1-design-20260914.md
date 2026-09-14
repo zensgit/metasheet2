@@ -82,3 +82,12 @@
 
 - 若生产上存在未在仓库内登记的外部调用方（自建看板、curl 巡检）用非管理员 token 读这三条端点，它们会开始收到 403。仓库内已穷尽查证为零调用方，仓库外无法证伪——上线公告里应带一句。
 - `isAdmin` 在 RBAC 故障时抛异常 → 503。这是 fail-closed，与 #5677 的写端点保持一致：DLQ 看板在 RBAC 挂掉时会读不到，属有意选择。
+
+## 复核登记（缩水版对抗复核 · 查找者，2026-09-14）
+
+- **[已修] CI 触发面**：本 PR 原 base 为 #5677 分支，`.github/workflows/plugin-tests.yml:17-18` 只对 `pull_request: branches: [main, develop]` 触发，core-backend 单测（`:842-844`）在叠加 PR 上**不跑**（rollup 10 条、无 `test (18.x/20.x)`）。已把 base 改为 main：diff = #5677 + 本批次，与合并后内容一致，CI 才真正执行两个新 spec。教训：叠加 PR 的保证只有本地证据，要么改 base 要么进组合树。
+- **[登记，批次 2] `GET /queues`**（`admin-routes.ts:1583`）无门，内部三次 `dlqService.list({limit:0})`，而 `DeadLetterQueueService.ts:167` 是 `.limit(options.limit || 50)`——`0` 被 falsy 吞成 50，每次未鉴权请求真取 50 行全字段（含 payload），只回 `.total`。外泄的是全平台 DLQ 计数不是 payload；与 `/dlq` 同数据面，建议随批次 2 一并加门，并把 `limit:0` 改成显式 `count` 路径。
+- **[登记，#5667 遗留] 限流键含 `:id` 且在门之前**（`protection-rules.ts:48-62`）：key = `${userId}:${method}:${path}`，`GET /:id` 时随机 id 进 key，module 级 Map 只在同 key 复访时剪枝 → 未认证方可让其无界增长；且每次 403 都写一条 audit（`guards/audit-integration.ts:120-145`）。本 PR 未加剧（改前那些请求回的是真数据），但「限流先跑」不只是优点。
+- **口径降调**：`verify-sprint2-staging.sh:167` 对非 429 只 `[WARN]` 不计 fail，且建/删规则本就需管理员 token（#5677），所以本 PR 对该脚本结果**零影响**；正文原来把「第 11 次仍 429」当载荷性理由略夸大。
+- 查找者核过未发现反例：假件背书（spec 只 mock `isAdmin`，`requireAdminRole` 本体真跑，放行用例经真门）、守卫没接线（`/dlq` 全仓唯一读路由，`/safety/rules` 唯一挂载点，无 v2 别名）、逐套绿整链红（#5680 结构 spec 明写读侧不管，反例控制用 `GET /slo/status`）。残留弱点：protection-rules spec 直挂 router 而非经 `initAdminRoutes()`（继承 #5667）。
+
