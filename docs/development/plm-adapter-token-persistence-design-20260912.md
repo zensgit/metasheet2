@@ -77,7 +77,7 @@ packages/core-backend/src/data-adapters/PLMAdapter.ts:1200-1206   cacheAuthToken
 
 | 编号 | 残余 | 说明 |
 | --- | --- | --- |
-| R1 | #5648 F01:URL userinfo | 本 PR 只脱敏了 PLM 连接日志这一处;`connection.url` 本身仍原样落库/回显 |
+| R1 | #5648 F01:URL userinfo | 本 PR 只脱敏了 PLM 连接日志这一处;`connection.url` 本身仍原样落库/回显。**叠加提交后扩到两条 fetch 腿的错误面,见 §6**;落库/回显与"fetch 腿不接受 userinfo URL"的功能问题仍未动 |
 | R2 | #5648 F03:密钥词表 | `connection` 里还有哪些 key 该被当秘密(`headers` 下的任意 `*-token` / `x-api-key` 等)由 #5648 的词表决定,本 PR 不引入新词表 |
 | R3 | 进程内写入口 | `getConfig()` 浅拷贝 + 适配器可写 `this.config.connection` 这条模式依然成立(`resolvedUrl`、租户头就是例子);要根治得在 `BaseAdapter`/写入口上做(深拷贝或冻结),属于 #5648 及其后续单 |
 | R4 | 旧行里的明文令牌 | 见 §4.4,需要 owner 侧清理 + 吊销 |
@@ -89,3 +89,47 @@ packages/core-backend/src/data-adapters/PLMAdapter.ts:1200-1206   cacheAuthToken
 - **时序窗口（本刀新引入、已关）**：`HTTPAdapter.connect()` 在 `connected = true` 之后 `await onConnect()` 才返回；原实现等 `super.connect()` 返回后再接线令牌，留下一个微任务级窗口——并发调用方（如 facade 的 `if (!adapter.isConnected())` 模式）可能发出不带 Authorization 的请求。现改为在 `onConnect()` 的同步段接线，并用 spec 钉住「`super.onConnect()` 被调用时默认头已含令牌且 `connected` 已真」。
 - **axios 版本**：仓内锁定 1.13.2（`pnpm-lock.yaml:2053`），不是 1.8.x；合并次序结论按 1.13.2 的 `Axios.js:118-130` + `AxiosHeaders.js:79-92` 源码核过（扁平后铺、findKey 大小写不敏感、后写覆盖）。`applyAuthTokenToClient` 里 `delete defaultHeaders.authorization` 按该语义冗余，留作防御，未加测试。
 - **没人看的路径（终审）**：带 userinfo 的 baseURL 会让 axios `http.js:574-580` 删掉 authorization 改走 Basic——Bearer 根本到不了线（修前同，用例 7 不断言 wire）；归 #5648 F01。`credentials.bearerToken` 全仓零写点（`docs/DATA_SOURCE_ADAPTERS.md:247-252` 却列出），优先级论证靠槽位同一性而非测试。
+
+## 6. 追加(叠加提交):两条 fetch 腿的**错误面**打码(#5648 F01 ①a)
+
+§3 只处理了 `connect()` 那一条 `logger.info`。W4-J 实读把同一类泄漏在**错误面**上又找出两处——它们不走 axios,走 Node 内置 `fetch`:
+
+| 腿 | fetch 调用 | 修前的错误出口 |
+| --- | --- | --- |
+| Yuantus 登录 `fetchYuantusToken()` | 现 `:1389` | `catch (_err) { return null }` 整个吞掉;`connect()`(旧 `:1124`)打一条**误导性**告警,叫操作员去查 `PLM_USERNAME/PLM_PASSWORD` |
+| discussion 会话/写 `yuantusDiscussionFetch()` | 现 `:2708` | `error: err instanceof Error ? err : new Error(String(err))` —— **原错误对象**直接进 `QueryResult.error` |
+
+### 6.1 事实:message 里就是明文口令
+
+`connection.url/baseURL` 形如 `scheme://user:pass@host` 时,`fetch` 在 **Request 构造阶段**(还没发包)就抛 `TypeError`,而 Node 把 URL **原样**嵌进 message。本机 Node v25.9.0 实测两种形状:
+
+```
+Request cannot be constructed from a URL that includes credentials: http://u:<口令原文>@host/api/v1/auth/login
+Failed to parse URL from http://u:<口令原文>@host/api/x        # 口令里含 '/' 时走这条,且 cause.input 也带原文
+```
+
+于是 discussion 腿把明文口令交到了适配器边界之外。两条 relay 路由(`routes/plm-embed-discussion.ts:217-224`、`-read.ts:196+`)当前确实不回显 message(统一映射成 `EMBED_DISCUSSION_*` + 502),所以今天没有 HTTP 层泄漏;但那是**消费者的选择**,不是适配器的保证——同文件里 `routes/plm-workbench.ts:1131/1219` 就是把 `result.error.message` 直接塞进响应体的反例(那两处走 axios 腿,不经本次改动)。登录腿则相反:今天**不**泄漏(错误被整个吞掉),坏在没有任何可定位信息 + 告警指错方向。
+
+### 6.2 修法
+
+1. **`redactErrorText()`(:55)—— 专供错误文本的两层打码**,与 `redactUrlUserinfo()`(:14,#5679 加的)并存而不是替换:
+   - **值层**:把本适配器交给 fetch 的那些 URL(`connection.baseURL` / `connection.url`)的 userinfo 段**按字面量**从文本里抹掉,形状无关。
+   - **形状层**:再过一遍 `redactUrlUserinfo()`,兜住不是我们构造的 URL(上游 `detail` 回显的跳转目标等)。
+   - **为什么一层不够(实测,不是推测)**:共享正则的 userinfo 段是 `[^/\s]*@`,口令里只要含**空格**或 `/`,这个字符类就被截断、后面跟不上 `@`,**整条正则不匹配**,口令原文原封不动留在文本里。两种形状都在新 spec 里钉住了。
+   - `extractUrlUserinfo()`(:30) 故意不用 `new URL()`:到得了这里的 URL 恰恰是 URL 解析器拒绝的那些。取 `://` 到(去掉 query/fragment 后)**最后一个 `@`**,宁可多打码——路径里带 `@` 又没凭据的 base URL 会连主机名一起被遮,代价是错误文本少一点可读性;少遮一个字符的代价是一条明文凭据。
+2. **登录腿改成结构性不外带**(:1412):catch 只把**错误类型名**记进私有字段 `lastTokenFetchFailureKind`(:1052),message 从此不进任何汇——不是"打码后再打",是根本不打。返回值语义不变,登录失败对调用方仍是 `null`。
+3. **告警改成 values-free 且不误导**(:1180-1187):`connect()` 按上面那个字段分两支——"请求根本没发出去(附类型名,明说凭据**未被验证**、先查 base URL 形状)" vs 原来那条凭据告警(服务端确实拒登时才打,语义不变)。
+4. **discussion 腿返回打码后的新 Error**(:2724-2726):`PLM discussion request failed (TypeError): <打码文本>`。**不**把原错误挂成 `cause`——"Failed to parse URL" 那条变体的 `cause.input` 同样带 URL 原文。信封语义不变:这个 catch 只会产生传输层错误,从来不带 `.response`,relay 的 `providerErrorStatus()` 照旧读到 null、照旧降级 502。
+5. **非 2xx 分支的 `detail`(:2746)也过一遍打码**:它是上游可控文本,有些网关会把请求 URL 回显进去。不含 URL 时是恒等变换(新 spec 有"原样回传"的不回归用例)。`response.data` 原样不动——那是上游载荷、不是我们的 URL,重塑它会改消费者读到的形状。
+
+### 6.3 不在本刀里的(留给 F01 裁决)
+
+- **功能问题**:`fetch` 腿根本不接受带 userinfo 的 URL —— 这两条腿在这种配置下**必然失败**(登录拿不到令牌、discussion 全部 502)。本刀只保证"失败时不泄漏、且报得准",**没有**让它们跑通;怎么迁移(改写 URL 为 Basic 头 / 拒绝这种 URL 落库 / 兜到 credentials)属于 #5648 F01 的迁移设计。附带说明:axios 腿在同样配置下会走 Basic(设计文档终审那条),两条腿行为**不一致**,这本身就是 F01 要裁的东西。
+- `HTTPAdapter.ts` / `BaseAdapter.ts` / `routes/*` 未动(§4.3 同因:#5648 在飞,避开争用)。因此 `routes/plm-workbench.ts:1131/1219` 那两处 `result.error.message` 直传仍在——它们消费的是 axios 腿的错误,不在本刀射程内,登记为残余 R6。
+
+### 6.4 残余(接 §5)
+
+| 编号 | 残余 | 说明 |
+| --- | --- | --- |
+| R6 | axios 腿的错误文本未打码 | `routes/plm-workbench.ts:1131/1219` 把 `result.error.message` 直传响应体;axios 错误是否会带上 userinfo 未实证(axios 对带 userinfo 的 URL 走 Basic,见终审那条),要动得先动 `HTTPAdapter`——避开争用,留给 F01 |
+| R7 | 值层依赖"URL 还在 config 上" | `redactErrorText` 的值层读 `this.config.connection.{baseURL,url}`;若将来 URL 改由别处提供(F01 迁移的可能结果),值层会退化成只剩形状层,那时空格/斜杠形状会重新漏——新 spec 的两个形状用例就是那时的探针 |

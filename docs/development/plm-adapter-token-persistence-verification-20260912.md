@@ -124,3 +124,79 @@ M3 下"yuantus 模式"用例仍绿,是**真实**语义:yuantus 模式的令牌�
 2. **axios 头合并次序**靠的是本 spec 用例 3 的实测(扁平默认头赢过手工 `authorization`),不是 axios 文档承诺;axios 大版本升级时这条用例就是探针。
 3. **`resolvedUrl` 写回未改**,消费者清单见设计文档 §4.1;我 grep 过 `packages/**`(ts/tsx/vue)与 `plugins/**`(ts/js/cjs)里的 `connection.headers`:除 `PLMAdapter.ts` 自身外只有 `HTTPAdapter.ts:140`(建 axios 客户端)一处;`connection.url`/`baseURL` 的消费者更多,设计文档 §4.1 只列了我实读到的那几处,不排除还有按 `getConfig()` 整体转发的调用方。
 4. **历史脏数据**:库里已有的明文令牌不在本 PR 处理范围。
+
+## 7. 追加(叠加提交)验证:两条 fetch 腿的错误面打码(#5648 F01 ①a)
+
+设计见设计文档 §6。新增 spec:`packages/core-backend/tests/unit/plm-adapter-fetch-error-redaction.test.ts`(9 例),写法沿用本文 §1 的 `http.createServer` + 假令牌;构造阶段就抛的用例连包都不会发,不需要外网。
+
+### 7.1 事前实证(Node v25.9.0,本机)
+
+```
+URL   : https://svc-user:<假口令>@plm.example.invalid/api/v1/auth/login
+NAME  : TypeError | CTOR: TypeError
+MSG   : "Request cannot be constructed from a URL that includes credentials: https://svc-user:<假口令>@plm.example.invalid/api/v1/auth/login"
+CONTAINS-PASS: true
+```
+
+同一探针跑六种口令形状,其中两种**共享正则 `redactUrlUserinfo` 打不掉**(这就是要单写 `redactErrorText` 的理由):
+
+| 口令形状 | fetch 抛出的 message 形状 | 只用共享正则的结果 |
+| --- | --- | --- |
+| `Sup3r…`(常规) | `…includes credentials: …` | 已打码 |
+| `p%40ss-with-at` / `P4ss@Word`(含 `@`) | 同上 | 已打码(吃到最后一个 `@`) |
+| `bad pass`(**含空格**) | 同上 | **未打码,口令原文留在文本里** |
+| `sl/ash`(**含斜杠**) | `Failed to parse URL from …`(且 `cause.input` 带原文) | **未打码** |
+
+### 7.2 修前基线(先红)
+
+`npx vitest run tests/unit/plm-adapter-fetch-error-redaction.test.ts`(未改 src):**4 failed | 5 passed (9)**。原样节选:
+
+```
+ × 登录腿:URL 带 userinfo 时告警不含口令、不再误导性地指向 PLM_USERNAME/PLM_PASSWORD,并点名错误类型
+   AssertionError: expected 'PLM Yuantus login failed; check PLM_U…' not to contain 'PLM_PASSWORD'
+   + PLM Yuantus login failed; check PLM_USERNAME/PLM_PASSWORD/PLM_TENANT_ID/PLM_ORG_ID
+
+ × discussion 腿:QueryResult.error 不含口令,仍带错误类型名
+   AssertionError: expected 'Request cannot be constructed from a …' not to contain 'FAKE-PW-NEVER-REAL-7x9'
+   + Request cannot be constructed from a URL that includes credentials: http://plm-fake-user:FAKE-PW-NEVER-REAL-7x9@127.0.0.1:59744/api/v1/auth/embed/discussion-session
+
+ × discussion 腿:错误对象的任何一层(message/stack/cause)都不含口令
+   + stack|TypeError: Request cannot be constructed from a URL that includes credentials: http://plm-fake-user:FAKE-PW-NEVER-REAL-7x9@…|message|…
+
+ × discussion 腿:口令含空格/斜杠(纯 userinfo 正则打不掉的形状)时仍不泄漏
+   AssertionError: password shape: FAKE PW WITH SPACE: expected 'stack|TypeError: Request cannot be co…' not to contain 'FAKE PW WITH SPACE'
+      Tests  4 failed | 5 passed (9)
+```
+
+**一处与派工前提不符,如实记录**:任务书预期"登录腿修前会把假口令写进告警/错误文本"。实读到的分支上**不会**——`fetchYuantusToken` 的 catch 是 `catch (_err) { return null }`,message 一个字都没往外带(所以"四个汇里都不出现口令"那条用例**修前就是绿的**,它是回归钉而非红点)。登录腿的真实缺陷是:告警指错方向(请求压根没发出去,却叫人去查凭据)+ 零可定位信息。真正的明文外带只有 discussion 腿一处。
+
+### 7.3 修后
+
+| 范围 | 结果 |
+| --- | --- |
+| 新 spec + #5679 原 spec | **17 passed (17)** —— 新 9 + 原 8,原 8 例一条没动 |
+| 相邻 PLM/federation(10 文件:plm-adapter-{bom-multitable,capabilities,effective-tenant,token-not-persisted,yuantus,fetch-error-redaction}、plm-embed-{discussion-routes,discussion-read-routes,routes}、federation.contract) | **204 passed (204)** |
+| 其余 PLM 面(11 文件:plm-workbench-*×6、plm-collaborative-permissions、plm-disable-routes、plm-approval-bridge、plm-team-filter-presets、approval-instance-readability-plm-id-agreement) | **134 passed (134)** |
+| `npx tsc --noEmit`(core-backend) | **0**(exit 0,无输出) |
+
+### 7.4 变异探针(内存级,不落盘)
+
+用一个**临时** vitest 配置在 Vite 的 transform 阶段重写 `PLMAdapter.ts`(磁盘上的源文件全程未被改动,跑完 `git diff --stat` 仍只有本次的 98/4 行;harness 跑完即删,不进提交)。
+
+| 变异 | 改了什么 | 结果(9 例) |
+| --- | --- | --- |
+| M1 | 去掉 `redactErrorText` 的**值层**,只剩共享正则 | 1 failed —— 点名「口令含空格/斜杠…时仍不泄漏」 |
+| M2 | discussion 腿改回直接把原错误对象塞进 `QueryResult.error` | 3 failed —— 点名三条 discussion 用例 |
+| M3 | 登录腿 catch 不再记录错误类型名 | 1 failed —— 点名「登录腿:告警…并点名错误类型」 |
+| M4 | `connect()` 恒打旧的单条(误导性)告警 | 1 failed —— 同上一条 |
+| M5 | `extractUrlUserinfo` 改成"authority 到第一个 `/` 为止"的天真解析 | 1 failed —— 点名空格/斜杠那条 |
+
+M1 与 M5 只红空格/斜杠那一条、其余 discussion 用例仍绿,是**真实**语义:常规口令形状共享正则就能打掉,值层/最后一个 `@` 的取法只在被截断的形状上才是唯一防线。M3/M4 各自点名同一条用例但改的是两个不同站点(记录端 / 打印端),说明两端都带电。
+
+### 7.5 没验证 / 不确定
+
+1. **真机未跑**:没有对着真实 PLM 验证过带 userinfo 的配置;上游是本机 http 服务,但抛错发生在 Request 构造阶段,与上游无关,这一段是 Node 行为而非仿真。
+2. **Node 版本相关**:message 文案("Request cannot be constructed…" / "Failed to parse URL from …")是 undici 的实现细节,Node 大版本换文案时打码仍然生效(值层按字面量抹、形状层按 `scheme://…@` 匹配,都不依赖文案),但"仍含 `TypeError` 类型名"这条断言依赖的是 `err.name`,不是文案——已按 `name` 写。
+3. **axios 腿未覆盖**:见设计文档 R6。`routes/plm-workbench.ts:1131/1219` 的 `result.error.message` 直传仍在;axios 错误在带 userinfo 配置下到底带不带 URL 原文,本轮**没有**实证。
+4. **`response.data` 未打码**:非 2xx 时上游载荷原样挂在错误上(`:2750`)。若上游把请求 URL 回显进 body 而不是 `detail`,那条路径仍会带原文——本刀只处理了 message 面,理由见设计文档 §6.2 第 5 条。
+5. **过度打码的代价未量化**:`extractUrlUserinfo` 取最后一个 `@`,路径里带 `@` 又没凭据的 base URL 会连主机名一起被遮。仓内没见过这种 base URL,但没有普查。
