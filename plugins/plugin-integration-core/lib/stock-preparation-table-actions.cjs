@@ -1495,8 +1495,12 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 // ON THE LARGE-BOM CHECKPOINT PATH ONLY `extFieldMapping` IS STILL UNWIRED, AND THAT IS NOT
 // "INERT". `installedFieldProperties` now travels on that path as well, so the planner's band there
 // is the same pack-aware band the small route computes — but with no mapper the expansion rows
-// carry no `ext_` key at all, and `pickFields` skips `row[field] === undefined`, so every `ext_` id
-// stays out of the update patch exactly as it did before — and a patch does not blank what it
+// carry no MAPPER-FILLED `ext_` key, and `pickFields` skips `row[field] === undefined`, so every
+// mapper-territory `ext_` id stays out of the update patch exactly as it did before. The ONLY `ext_`
+// ids that can reach the patch on this path are the (<=5) F1c/F1c-b planner-derived pack columns
+// (parentDrawingNo/parentName/parentSortNo/componentSortNo/nameAndSpec), and only when the action
+// declares them AND the pack classifies them plm_system AND the incoming cell is blank — the
+// installed-fields-wiring suite pins that positively. And a patch does not blank what it
 // omits. Any `ext_` value an earlier SMALL-path refresh wrote SURVIVES while every canonical column
 // around it moves to today's source: the row reads fresh and its tenant columns sit at an older
 // epoch. Nor is the path an operator's choice, or even stable — `read_time_limit_exceeded` is a

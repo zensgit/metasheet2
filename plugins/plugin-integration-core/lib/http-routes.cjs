@@ -4000,10 +4000,13 @@ function requireStockPreparationAudit() {
   // two inputs no longer travel together on this path, which is exactly why the notice below is
   // still conditional on a configured MAPPING and only on that.
   //
-  // The consequence is NOT "no `ext_` write", and it did not change when the band arrived. With no
-  // mapping the expansion rows carry no `ext_` key at all, so `pickFields` (which skips
-  // `row[field] === undefined`) leaves every `ext_` id out of the update patch even with a
-  // pack-aware band — and a patch does not blank what it omits. Any `ext_` value an earlier
+  // The consequence is NOT "no `ext_` write", and for MAPPER-TERRITORY `ext_` ids it did not change
+  // when the band arrived: with no mapping the expansion rows carry no mapper-filled `ext_` key, so
+  // `pickFields` (which skips `row[field] === undefined`) leaves those ids out of the update patch.
+  // What the band DID open on this path is the (<=5) F1c/F1c-b planner-derived pack columns, which
+  // reach the patch only when the action declares them, the pack classifies them plm_system and
+  // the incoming cell is blank — pinned by the installed-fields-wiring suite. A patch does not
+  // blank what it omits. Any `ext_` value an earlier
   // SMALL-path refresh wrote therefore SURVIVES while every canonical column around it moves to
   // today's source. The row reads as fresh while its tenant columns sit at an older epoch, which in
   // a 备料 table is a worse failure than a missing value.

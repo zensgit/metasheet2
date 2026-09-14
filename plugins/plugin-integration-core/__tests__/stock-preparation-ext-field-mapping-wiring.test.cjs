@@ -653,8 +653,10 @@ async function oneUnparseableCellDoesNotCostTheRow() {
 //
 // That path supplies `installedFieldProperties` (see
 // stock-preparation-large-bom-installed-fields-wiring.test.cjs) but still no `extFieldMapping`, and
-// the band does not make the missing mapping harmless: with nothing filling an `ext_` cell the row
-// carries no such key, `pickFields` skips it and the planner leaves `ext_` out of the update patch —
+// the band does not make the missing mapping harmless: with no mapper filling an `ext_` cell the row
+// carries no such key, `pickFields` skips it and the planner leaves every mapper-territory `ext_` id
+// out of the update patch (the only exception is the <=5 planner-derived pack columns, see
+// stock-preparation-large-bom-installed-fields-wiring.test.cjs) —
 // and a patch does not blank what it omits, so whatever a previous SMALL-path refresh wrote SURVIVES
 // while every canonical column around it moves to today's source. Stale-but-plausible, not absent.
 // Nor is the path chosen by anyone: a slow source alone (`read_time_limit_exceeded`) moves an
