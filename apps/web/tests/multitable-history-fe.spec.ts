@@ -31,6 +31,16 @@ function fakeClient(over: Partial<Spied> = {}): FakeClient {
 }
 const spied = (c: FakeClient): Spied => c as unknown as Spied
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 describe('useHistoryCenter — read-only history center', () => {
   it('load populates batches (bulk = one batch with multiple records)', async () => {
     const { batches, load } = useHistoryCenter(fakeClient())
@@ -89,6 +99,65 @@ describe('useHistoryCenter — read-only history center', () => {
     expect(batches.value).toEqual([])
   })
 
+  it('ignores an older list success, error, and finally while a newer scope is loading', async () => {
+    const oldRequest = deferred<{ batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }>()
+    const currentRequest = deferred<{ batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }>()
+    const c = fakeClient({ listHistoryEvents: vi.fn().mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(currentRequest.promise) })
+    const { batches, loading, load } = useHistoryCenter(c)
+
+    const oldLoad = load('base_a', { sheetId: 'sheet_a' })
+    const currentLoad = load('base_b', { sheetId: 'sheet_b' })
+    oldRequest.resolve({ batches: [batch('old')], total: 1, nextCursor: null, searchTruncated: false })
+    await oldLoad
+    expect(loading.value).toBe(true)
+    expect(batches.value).toEqual([])
+
+    currentRequest.resolve({ batches: [batch('current')], total: 1, nextCursor: null, searchTruncated: false })
+    await currentLoad
+    expect(batches.value.map((entry) => entry.batchId)).toEqual(['current'])
+
+    const oldError = deferred<{ batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }>()
+    const currentAfterError = deferred<{ batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }>()
+    const errorClient = fakeClient({ listHistoryEvents: vi.fn().mockReturnValueOnce(oldError.promise).mockReturnValueOnce(currentAfterError.promise) })
+    const errorHistory = useHistoryCenter(errorClient)
+    const failedOldLoad = errorHistory.load('base_a', { sheetId: 'sheet_a' })
+    const successfulCurrentLoad = errorHistory.load('base_b', { sheetId: 'sheet_b' })
+    currentAfterError.resolve({ batches: [batch('current_after_error')], total: 1, nextCursor: null, searchTruncated: false })
+    await successfulCurrentLoad
+    oldError.reject(new Error('late error'))
+    await failedOldLoad
+    expect(errorHistory.error.value).toBeNull()
+    expect(errorHistory.batches.value.map((entry) => entry.batchId)).toEqual(['current_after_error'])
+  })
+
+  it('keeps an old load-more page from changing a newer ABA scope or its spinner', async () => {
+    const oldPage = deferred<{ batches: HistoryBatchSummary[]; total: number; nextCursor: string | null; searchTruncated: boolean }>()
+    const currentPage = deferred<{ batches: HistoryBatchSummary[]; total: number; nextCursor: string | null; searchTruncated: boolean }>()
+    const calls = vi.fn()
+      .mockResolvedValueOnce({ batches: [batch('a_initial')], total: 2, nextCursor: 'a_old_cursor', searchTruncated: false })
+      .mockReturnValueOnce(oldPage.promise)
+      .mockResolvedValueOnce({ batches: [batch('b')], total: 1, nextCursor: null, searchTruncated: false })
+      .mockResolvedValueOnce({ batches: [batch('a_current')], total: 2, nextCursor: 'a_new_cursor', searchTruncated: false })
+      .mockReturnValueOnce(currentPage.promise)
+    const { batches, loadingMore, nextCursor, load, loadMore } = useHistoryCenter(fakeClient({ listHistoryEvents: calls }))
+
+    await load('base', { search: 'a' })
+    const oldMore = loadMore()
+    await load('base', { search: 'b' })
+    await load('base', { search: 'a' })
+    const currentMore = loadMore()
+    expect(loadingMore.value).toBe(true)
+
+    oldPage.resolve({ batches: [batch('a_old_page')], total: 2, nextCursor: 'a_old_after', searchTruncated: false })
+    await oldMore
+    expect(batches.value.map((entry) => entry.batchId)).toEqual(['a_current'])
+    expect(nextCursor.value).toBe('a_new_cursor')
+    expect(loadingMore.value).toBe(true)
+
+    currentPage.resolve({ batches: [batch('a_current_page')], total: 2, nextCursor: null, searchTruncated: false })
+    await currentMore
+  })
+
   it('toggle lazily loads detail; toggling the same batch collapses it', async () => {
     const { expandedId, detail, toggle } = useHistoryCenter(fakeClient())
     await toggle('base1', 'b1')
@@ -98,11 +167,105 @@ describe('useHistoryCenter — read-only history center', () => {
     expect(expandedId.value).toBeNull()
   })
 
+  it('keeps the current cursor and spinner when an obsolete page rejects', async () => {
+    const oldPage = deferred<never>()
+    const currentPage = deferred<{ batches: HistoryBatchSummary[]; total: number; nextCursor: null; searchTruncated: boolean }>()
+    const calls = vi.fn()
+      .mockResolvedValueOnce({ batches: [batch('old')], nextCursor: 'old_cursor' })
+      .mockReturnValueOnce(oldPage.promise)
+      .mockResolvedValueOnce({ batches: [batch('current')], nextCursor: 'current_cursor' })
+      .mockReturnValueOnce(currentPage.promise)
+    const history = useHistoryCenter(fakeClient({ listHistoryEvents: calls }))
+    await history.load('base', { search: 'old' })
+    const oldMore = history.loadMore()
+    await history.load('base', { search: 'current' })
+    const currentMore = history.loadMore()
+    oldPage.reject(new Error('obsolete page'))
+    await oldMore
+    expect(history.nextCursor.value).toBe('current_cursor')
+    expect(history.loadingMore.value).toBe(true)
+    expect(history.batches.value.map((entry) => entry.batchId)).toEqual(['current'])
+    currentPage.resolve({ batches: [batch('current_page')], total: 2, nextCursor: null, searchTruncated: false })
+    await currentMore
+    expect(history.batches.value.map((entry) => entry.batchId)).toEqual(['current', 'current_page'])
+  })
+
+  it('keeps replacement detail when an obsolete detail rejects', async () => {
+    const oldDetail = deferred<never>()
+    const history = useHistoryCenter(fakeClient({ getHistoryBatch: vi.fn()
+      .mockReturnValueOnce(oldDetail.promise).mockResolvedValueOnce(detailOf('current')) }))
+    const oldToggle = history.toggle('base', 'old')
+    await history.toggle('base', 'current')
+    oldDetail.reject(new Error('obsolete detail'))
+    await oldToggle
+    expect(history.expandedId.value).toBe('current')
+    expect(history.detail.value).toEqual(detailOf('current'))
+    expect(history.detailLoading.value).toBe(false)
+  })
+
+  it.each(['success', 'failure'] as const)('keeps replacement pin loading after obsolete %s', async (outcome) => {
+    const oldPin = deferred<HistoryBatchDetail | null>()
+    const currentPin = deferred<HistoryBatchDetail | null>()
+    const history = useHistoryCenter(fakeClient({ getHistoryBatch: vi.fn()
+      .mockReturnValueOnce(oldPin.promise).mockReturnValueOnce(currentPin.promise) }))
+    const oldLoad = history.loadPinned('base', 'old')
+    const currentLoad = history.loadPinned('base', 'current')
+    if (outcome === 'success') oldPin.resolve(detailOf('old'))
+    else oldPin.reject(new Error('obsolete pin'))
+    await oldLoad
+    expect(history.pinnedLoading.value).toBe(true)
+    expect(history.pinnedDetail.value).toBeNull()
+    currentPin.resolve(detailOf('current'))
+    await currentLoad
+    expect(history.pinnedDetail.value).toEqual(detailOf('current'))
+    expect(history.pinnedLoading.value).toBe(false)
+  })
+
+  it('keeps replacement pin detail after an obsolete rejection', async () => {
+    const oldPin = deferred<never>()
+    const history = useHistoryCenter(fakeClient({ getHistoryBatch: vi.fn()
+      .mockReturnValueOnce(oldPin.promise).mockResolvedValueOnce(detailOf('current')) }))
+    const oldLoad = history.loadPinned('base', 'old')
+    await history.loadPinned('base', 'current')
+    oldPin.reject(new Error('obsolete pin'))
+    await oldLoad
+    expect(history.pinnedDetail.value).toEqual(detailOf('current'))
+  })
+
   it('toggle on a denied/missing batch (client → null, no oracle) shows no detail and never throws', async () => {
     const c = fakeClient({ getHistoryBatch: vi.fn().mockResolvedValue(null) })
     const { detail, expandedId, toggle } = useHistoryCenter(c)
     await toggle('base1', 'bX')
     expect(expandedId.value).toBe('bX')
     expect(detail.value).toBeNull()
+  })
+
+  it('ignores an older detail after another batch is expanded or a list reload invalidates it', async () => {
+    const firstDetail = deferred<HistoryBatchDetail | null>()
+    const secondDetail = deferred<HistoryBatchDetail | null>()
+    const c = fakeClient({ getHistoryBatch: vi.fn().mockReturnValueOnce(firstDetail.promise).mockReturnValueOnce(secondDetail.promise) })
+    const { detail, detailLoading, expandedId, load, toggle } = useHistoryCenter(c)
+
+    const firstToggle = toggle('base', 'b1')
+    const secondToggle = toggle('base', 'b2')
+    firstDetail.resolve(detailOf('b1'))
+    await firstToggle
+    expect(expandedId.value).toBe('b2')
+    expect(detail.value).toBeNull()
+    expect(detailLoading.value).toBe(true)
+
+    secondDetail.resolve(detailOf('b2'))
+    await secondToggle
+    expect(detail.value?.batchId).toBe('b2')
+
+    const staleAfterReload = deferred<HistoryBatchDetail | null>()
+    spied(c).getHistoryBatch.mockReturnValueOnce(staleAfterReload.promise)
+    const staleToggle = toggle('base', 'b3')
+    await load('base', { search: 'new scope' })
+    staleAfterReload.resolve(detailOf('b3'))
+    await staleToggle
+    expect(expandedId.value).toBeNull()
+    expect(detail.value).toBeNull()
+    expect(detailLoading.value).toBe(false)
   })
 })

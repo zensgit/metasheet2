@@ -1420,6 +1420,7 @@ function closeHistory() {
 // T9-R4: config/schema-change history view. The server gates per entity type — the FE renders what it returns
 // (faithful client; no client-side security filtering). The entity-type filter only narrows within the gated set.
 const configHistory = ref<{ visible: boolean; items: MetaConfigRevision[]; loading: boolean; entityType: string }>({ visible: false, items: [], loading: false, entityType: '' })
+let configHistoryGeneration = 0
 const configHistoryLabelOf = (entityId: string): string => {
   const f = scopedAllFields.value.find((x) => x.id === entityId)
   if (f) return f.name
@@ -1427,13 +1428,19 @@ const configHistoryLabelOf = (entityId: string): string => {
   return v?.name ?? entityId
 }
 async function loadConfigHistory(entityType: string) {
+  const baseId = workbench.activeBaseId.value
   const sheetId = workbench.activeSheetId.value
-  if (!sheetId) return
+  if (!sheetId || !configHistory.value.visible) return
+  const generation = ++configHistoryGeneration
+  const isCurrent = () => generation === configHistoryGeneration && configHistory.value.visible
+    && baseId === workbench.activeBaseId.value && sheetId === workbench.activeSheetId.value
   configHistory.value = { ...configHistory.value, loading: true, entityType }
   try {
     const items = await workbench.client.getConfigHistory(sheetId, entityType ? { entityType } : {})
+    if (!isCurrent()) return
     configHistory.value = { ...configHistory.value, loading: false, items }
   } catch (error) {
+    if (!isCurrent()) return
     configHistory.value = { ...configHistory.value, loading: false, items: [] }
     showError((error as Error)?.message ?? recordLabel('record.errorHistoryLoad', isZh.value))
   }
@@ -1463,7 +1470,15 @@ function openConfigHistory() {
   void loadConfigHistory('')
 }
 function onConfigHistoryFilter(entityType: string) { void loadConfigHistory(entityType) }
-function closeConfigHistory() { configHistory.value = { ...configHistory.value, visible: false } }
+function closeConfigHistory() {
+  configHistoryGeneration += 1
+  configHistory.value = { visible: false, items: [], loading: false, entityType: '' }
+}
+watch(
+  [() => workbench.activeBaseId.value, () => workbench.activeSheetId.value],
+  closeConfigHistory,
+  { flush: 'sync' },
+)
 
 function onHistoryRecordRestored(payload: { sheetId: string; recordId: string }): void {
   if (payload.sheetId === workbench.activeSheetId.value) void grid.reloadCurrentPage()
@@ -5282,6 +5297,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   workbenchAlive = false
+  closeConfigHistory()
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('resize', syncRailViewportState)
   stopDialogMetaRefresh()

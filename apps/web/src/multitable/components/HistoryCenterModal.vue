@@ -100,7 +100,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { useHistoryCenter } from '../composables/useHistoryCenter'
 import { configHistoryTime } from '../utils/meta-config-history-labels'
@@ -158,7 +158,7 @@ const canOpenDeletedRecords = computed(() => Boolean(props.sheetId && props.canR
 
 const {
   batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle: toggleBatch,
-  pinnedDetail, pinnedLoading, loadPinned, clearPinned,
+  pinnedDetail, pinnedLoading, loadPinned, clearPinned, invalidateList, invalidateDetail,
 } = useHistoryCenter()
 
 // W3-5b: local dismiss flag for the pinned banner — reset whenever a fresh deep-linked open fires (below),
@@ -187,22 +187,37 @@ function toggle(batchId: string): Promise<void> {
 }
 
 watch(
-  () => [props.open, props.baseId, props.sheetId] as const,
-  ([open]) => {
+  () => [props.open, props.baseId, props.sheetId, props.initialBatchId] as const,
+  ([open, baseId, sheetId, initialBatchId], previous) => {
     showDeletedRecords.value = false
     selectedDeletedRecordId.value = null
-    if (!open || !props.baseId) return
-    void reload()
+    const [previousOpen, previousBaseId, previousSheetId, previousBatchId] = previous ?? [undefined, undefined, undefined, undefined]
+    const scopeChanged = open !== previousOpen || baseId !== previousBaseId || sheetId !== previousSheetId
+    if (!open || !baseId) {
+      invalidateList()
+      invalidateDetail()
+      clearPinned()
+      return
+    }
+    if (scopeChanged) void reload()
     // W3-5b: the pinned banner is the sole deep-link display mechanism (see the prop doc above) — it does
     // NOT depend on `reload()` finishing or on the batch being present in the resulting page, so it fires
     // independently. Reset any earlier dismissal, and drop a stale pin from a previous deep-linked open
     // when this open has no `initialBatchId` (e.g. the toolbar's plain "History" button).
-    pinnedDismissed.value = false
-    if (props.initialBatchId) void loadPinned(props.baseId, props.initialBatchId)
-    else clearPinned()
+    if (scopeChanged || initialBatchId !== previousBatchId) {
+      pinnedDismissed.value = false
+      if (initialBatchId) void loadPinned(baseId, initialBatchId)
+      else clearPinned()
+    }
   },
   { immediate: true },
 )
+
+onBeforeUnmount(() => {
+  invalidateList()
+  invalidateDetail()
+  clearPinned()
+})
 
 function openDeletedRecords(record?: { sheetId: string; recordId: string }): void {
   if (!canOpenDeletedRecords.value) return
