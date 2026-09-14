@@ -104,6 +104,7 @@ import {
   isElearningProjectionBaseIdCandidate,
   isElearningProjectionSheetIdCandidate,
 } from '../multitable/elearning-projection-constants'
+import { isPluginSystemBaseIdCandidate } from '../multitable/plugin-scope'
 import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   checkExactAnchorRecoveryTrust,
@@ -4536,6 +4537,25 @@ function sendElearningProjectionIdentityForbidden(res: Response) {
   })
 }
 
+// B3: a plugin system base (`base_<plugin>_...`, owner/workspace NULL) is created by the plugin
+// through `ensureSystemBase`, which FAILS CLOSED on a pre-existing owned row. Without this
+// reservation any `multitable:write` holder could squat the derived id via `POST /bases` (owner
+// = themselves) and wedge the plugin's ensure into a permanent 409. Same precedent as the
+// e-learning projection identities above; only a CALLER-CHOSEN id can ever match (server-minted
+// `base_<uuid>` ids have no second `_`).
+export const PLUGIN_SYSTEM_BASE_IDENTITY_FORBIDDEN_MESSAGE =
+  'Plugin system base identities (base_<plugin>_...) are reserved; omit id or choose another.'
+
+function sendPluginSystemBaseIdentityForbidden(res: Response) {
+  return res.status(403).json({
+    ok: false,
+    error: {
+      code: 'FORBIDDEN',
+      message: PLUGIN_SYSTEM_BASE_IDENTITY_FORBIDDEN_MESSAGE,
+    },
+  })
+}
+
 /**
  * Authority to DESTROY or RESURRECT a whole sheet.
  *
@@ -7286,6 +7306,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const ownerId = parsed.data.ownerId ?? req.user?.id?.toString() ?? null
     if (isElearningProjectionBaseIdCandidate(baseId)) {
       return sendElearningProjectionIdentityForbidden(res)
+    }
+    if (isPluginSystemBaseIdCandidate(baseId)) {
+      return sendPluginSystemBaseIdentityForbidden(res)
     }
 
     try {

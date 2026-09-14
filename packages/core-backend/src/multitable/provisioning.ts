@@ -137,8 +137,25 @@ export type EnsureObjectDefaultViewResult = {
   existingViewCount: number
 }
 
+// B3 (stock-prep own base): a plugin-owned SYSTEM base — owner_id and workspace_id both NULL, like
+// `base_legacy`, but with an id the plugin derives and the plugin-scope wrapper prefix-checks.
+export type EnsureSystemBaseInput = {
+  query: MultitableProvisioningQueryFn
+  baseId: string
+  name: string
+}
+
+export type EnsureSystemBaseResult = { baseId: string; created: boolean }
+
+export type MultitableBaseAdoptionReason = 'owned' | 'workspace_scoped' | 'deleted' | 'missing'
+
 export const DEFAULT_BASE_ID = 'base_legacy'
 export const DEFAULT_BASE_NAME = 'Migrated Base'
+// The id shape `ensureSystemBase` accepts. Pure string rule, validated BEFORE any query.
+export const SYSTEM_BASE_ID_PATTERN = /^base_[A-Za-z0-9][A-Za-z0-9_-]{2,119}$/
+export const SYSTEM_BASE_NAME_MAX_LENGTH = 100
+// The shared default base is never re-adopted through this API: it belongs to everyone.
+export const RESERVED_SYSTEM_BASE_IDS: ReadonlySet<string> = new Set([DEFAULT_BASE_ID])
 
 function normalizeJson(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
@@ -255,6 +272,95 @@ export async function ensureLegacyBase(
     [DEFAULT_BASE_ID, DEFAULT_BASE_NAME, 'table', '#1677ff', null, null],
   )
   return DEFAULT_BASE_ID
+}
+
+/**
+ * B3: a plugin asked for a system base with an id or name the rule refuses. This is a plugin
+ * PROGRAMMING fault, not a request fault, so it carries no HTTP status; `reason` states the RULE
+ * that was broken and never echoes the offending value.
+ */
+export class MultitableSystemBaseInputError extends Error {
+  code = 'MULTITABLE_SYSTEM_BASE_INPUT_INVALID'
+
+  constructor(public readonly field: 'baseId' | 'name', reason: string) {
+    super(`ensureSystemBase refused ${field}: ${reason}`)
+    this.name = 'MultitableSystemBaseInputError'
+  }
+}
+
+/**
+ * B3 fail-closed adoption refusal: the row already exists and is NOT a system base — it has an
+ * owner, sits in a workspace, or was soft-deleted. A plugin must never "adopt" a user's or a
+ * workspace's base, so the ensure throws instead of returning it. `status = 409` is what the
+ * plugin route wrapper's `sendError` prefers, so the refusal reaches the client typed (409 +
+ * code) rather than as an untyped 500. The message names the base id and the reason token
+ * only — never the owner_id or workspace_id it collided with.
+ */
+export class MultitableBaseAdoptionError extends Error {
+  code = 'MULTITABLE_BASE_ADOPTION_REFUSED'
+  status = 409
+
+  constructor(public readonly baseId: string, public readonly reason: MultitableBaseAdoptionReason) {
+    super(`Refusing to adopt multitable base ${baseId} as a system base (${reason})`)
+    this.name = 'MultitableBaseAdoptionError'
+  }
+}
+
+/**
+ * B3: create-or-adopt a plugin-owned SYSTEM base (owner_id / workspace_id NULL).
+ *
+ * Order, deliberately: (1) id and name are validated with ZERO queries; (2) an idempotent
+ * `INSERT ... ON CONFLICT (id) DO NOTHING RETURNING id` — `created` is whether that returned a
+ * row; (3) the row is re-read and the ensure FAILS CLOSED unless owner_id, workspace_id and
+ * deleted_at are all NULL. `base_legacy` is refused up front: the shared default base is not a
+ * plugin's to adopt. The three `input.baseId ?? ensureLegacyBase(query)` call sites are untouched
+ * — a caller that passes no baseId still lands in the shared base exactly as before.
+ */
+export async function ensureSystemBase(
+  input: EnsureSystemBaseInput,
+): Promise<EnsureSystemBaseResult> {
+  const baseId = input.baseId
+  if (typeof baseId !== 'string' || !SYSTEM_BASE_ID_PATTERN.test(baseId)) {
+    throw new MultitableSystemBaseInputError('baseId', 'must match ^base_[A-Za-z0-9][A-Za-z0-9_-]{2,119}$')
+  }
+  if (RESERVED_SYSTEM_BASE_IDS.has(baseId)) {
+    throw new MultitableSystemBaseInputError('baseId', 'the shared default base cannot be adopted as a system base')
+  }
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  if (!name) {
+    throw new MultitableSystemBaseInputError('name', 'must not be blank')
+  }
+  if (name.length > SYSTEM_BASE_NAME_MAX_LENGTH) {
+    throw new MultitableSystemBaseInputError('name', `must be at most ${SYSTEM_BASE_NAME_MAX_LENGTH} characters`)
+  }
+
+  const insert = await input.query(
+    `INSERT INTO meta_bases (id, name, icon, color, owner_id, workspace_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (id) DO NOTHING
+     RETURNING id`,
+    [baseId, name, 'table', '#1677ff', null, null],
+  )
+  const created = Array.isArray(insert.rows) && insert.rows.length === 1
+
+  const existing = await input.query(
+    `SELECT owner_id, workspace_id, deleted_at
+     FROM meta_bases
+     WHERE id = $1`,
+    [baseId],
+  )
+  const row = (existing.rows as any[])[0]
+  if (!row) throw new MultitableBaseAdoptionError(baseId, 'missing')
+  if (row.owner_id !== null && row.owner_id !== undefined) {
+    throw new MultitableBaseAdoptionError(baseId, 'owned')
+  }
+  if (row.workspace_id !== null && row.workspace_id !== undefined) {
+    throw new MultitableBaseAdoptionError(baseId, 'workspace_scoped')
+  }
+  if (row.deleted_at !== null && row.deleted_at !== undefined) {
+    throw new MultitableBaseAdoptionError(baseId, 'deleted')
+  }
+  return { baseId, created }
 }
 
 async function loadActiveSheet(

@@ -188,6 +188,10 @@ const {
 // ZERO capability toward the canonical sheet.
 const { CARRY_CONFLICT_TYPES } = require('./stock-preparation-carry-policy.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
+// B3: the SAME base resolver the main table uses, so the ledger can never land in a different
+// base than the main table. The resolver owns the main table's identity (this module must not
+// name it — see G1) and hands back a base id only.
+const { resolveStockPreparationOwnBase } = require('./stock-preparation-own-base.cjs')
 const {
   StockPreparationTargetProvisioningError,
   ensureManagedTableDefaultView,
@@ -457,7 +461,16 @@ async function inspectConfirmationDecisionTarget({ context, projectId, permissio
   }
 }
 
-async function ensureConfirmationDecisionTarget({ context, projectId, permission, baseId, locale } = {}) {
+async function ensureConfirmationDecisionTarget({
+  context,
+  projectId,
+  permission,
+  baseId,
+  locale,
+  tenantId,
+  resolveOwnBase,
+  env,
+} = {}) {
   assertAdminPermission(permission)
   const provisioning = getProvisioningApi(context || {})
   const scopedProjectId = requiredString(projectId, 'projectId')
@@ -478,9 +491,25 @@ async function ensureConfirmationDecisionTarget({ context, projectId, permission
       { objectId: OBJECT_ID, missingFields: inspected.missingFields, requiredFields: templateFieldIds(TEMPLATE) },
     )
   }
+  // B3: the ledger's base. Own base resolution is a ROUTE opt-in (`resolveOwnBase: true`); every
+  // other caller keeps today's `optionalString(baseId)`. With the opt-in, the ledger FOLLOWS the
+  // main table when it exists (anchor — zero ensureSystemBase calls, the 222 shape) and derives
+  // the same id the main table would otherwise. The already-ready return above precedes this, so
+  // an existing ledger is never moved.
+  const ownBase = resolveOwnBase === true
+    ? await resolveStockPreparationOwnBase({
+        provisioning,
+        projectId: scopedProjectId,
+        tenantId,
+        explicitBaseId: optionalString(baseId),
+        anchorToMainTable: true,
+        locale,
+        env,
+      })
+    : { baseId: optionalString(baseId), source: 'unchanged' }
   await provisioning.ensureObject({
     projectId: scopedProjectId,
-    baseId: optionalString(baseId),
+    baseId: ownBase.baseId,
     descriptor: buildTargetDescriptor({ locale }),
   })
   const verified = await inspectConfirmationDecisionTarget({ context, projectId: scopedProjectId, permission })
@@ -508,7 +537,15 @@ async function ensureConfirmationDecisionTarget({ context, projectId, permission
     created: true,
     mode: 'confirmation_decision_created',
     defaultView,
-    evidence: { objectId: OBJECT_ID, created: true, rowsSeeded: 0, fieldCounts: templateFieldCounts(TEMPLATE) },
+    evidence: {
+      objectId: OBJECT_ID,
+      created: true,
+      rowsSeeded: 0,
+      fieldCounts: templateFieldCounts(TEMPLATE),
+      // B3, values-free: the rule that picked the base and whether this call created it.
+      ownBaseSource: ownBase.source,
+      ownBaseCreated: ownBase.created === true,
+    },
   }
 }
 

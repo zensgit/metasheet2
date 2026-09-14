@@ -6774,6 +6774,11 @@ function requireStockPreparationAudit() {
         projectId: input.projectId,
         baseId: input.baseId,
         permission: 'admin',
+        // B3: the own-base opt-in, and the ONLY tenant the derivation may eat — the authenticated
+        // principal's (`stockPreparationTargetWriteInput` -> `resolveAuthUserTenantId`), never a
+        // body/query/projectId value. `assertNoRequestBaseId` above is untouched.
+        tenantId: input.tenantId,
+        resolveOwnBase: true,
       })
       return sendOk(res, publicStockPreparationTargetResult(result), result.mode === 'canonical_create' ? 201 : 200)
     },
@@ -8167,6 +8172,10 @@ function requireStockPreparationAudit() {
         context,
         projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         permission: 'admin',
+        // B3: same opt-in and same tenant source as the main table's ensure route, so the ledger
+        // resolves to the main table's base (anchor) or to the same derived id.
+        tenantId,
+        resolveOwnBase: true,
       })
       return sendOk(res, result, result.created ? 201 : 200)
     },
