@@ -30,6 +30,7 @@
 
 # --- suites (order not significant; add new suites here) ---
 node __tests__/plugin-runtime-smoke.test.cjs
+node __tests__/transform-source-field-absent.test.cjs
 node __tests__/app-manifest.test.cjs
 node --import tsx __tests__/host-loader-smoke.test.mjs
 node __tests__/credential-store.test.cjs
