@@ -29,6 +29,17 @@ const {
 // W2 canonical repair: namespace positive control for a repaired-in field.
 const { assertExtensionFieldIdValid } = require('./stock-preparation-extension-namespace.cjs')
 
+// B3: the own-base resolver shared with the confirmation ledger (see its module header for the
+// resolution order). It resolves lazily back to this module for the error class, so this require
+// must stay top-level and that one must stay lazy.
+const {
+  STOCK_PREP_OWN_BASE_ENV,
+  STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
+  stockPreparationOwnBaseEnabled,
+  deriveStockPreparationBaseId,
+  resolveStockPreparationOwnBase,
+} = require('./stock-preparation-own-base.cjs')
+
 const CANONICAL_FIELD_MAP_MODE = 'canonical'
 const SANDBOX_FIELD_MAP_MODE = 'sandbox'
 const CANONICAL_KEY_FIELD = 'idempotencyKey'
@@ -486,6 +497,12 @@ async function inspectStockPreparationTarget(input = {}) {
 async function ensureStockPreparationCanonicalTarget(input = {}) {
   return ensureStockPreparationTarget({
     ...input,
+    // B3: own-base resolution is a ROUTE decision, opted into per call. This wrapper forwards the
+    // flag and the authenticated tenant and hard-codes NEITHER, so every module-level caller that
+    // does not pass `resolveOwnBase: true` keeps today's `baseId || null` byte for byte.
+    tenantId: input.tenantId,
+    resolveOwnBase: input.resolveOwnBase === true,
+    env: input.env,
     template: normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE),
     modePrefix: 'canonical',
     fieldMapMode: CANONICAL_FIELD_MAP_MODE,
@@ -739,9 +756,29 @@ async function ensureStockPreparationTarget(input = {}) {
     )
   }
 
+  // B3: which base the NEW table lands in. Resolved here — after the inspect branch above, so an
+  // existing table (ready or incomplete) never reaches it and is never moved — and only when the
+  // caller opted in; otherwise today's value, untouched. The tenant is whatever the caller passed
+  // explicitly (the route passes the authenticated principal's); never read from a request or a
+  // projectId here. The table's own objectId is what lets the resolver anchor this table to its
+  // pair partner (the confirmation ledger) when that already exists — the symmetric half of the
+  // ledger's anchor to the main table (round-1 refutation: without it a pre-existing ledger and
+  // a later main table split across two bases). A sandbox template's objectId is not a pair
+  // member and never anchors.
+  const ownBase = input.resolveOwnBase === true
+    ? await resolveStockPreparationOwnBase({
+        provisioning,
+        projectId,
+        objectId: template.objectId,
+        tenantId: input.tenantId,
+        explicitBaseId: input.baseId,
+        locale: input.locale,
+        env: input.env,
+      })
+    : { baseId: input.baseId || null, source: 'unchanged' }
   const ensured = await provisioning.ensureObject({
     projectId,
-    baseId: input.baseId || null,
+    baseId: ownBase.baseId,
     descriptor: buildStockPreparationTargetDescriptor({ template, description: input.description, locale: input.locale }),
   })
   const resolvedAfterCreate = await provisioning.resolveFieldIds({
@@ -825,6 +862,10 @@ async function ensureStockPreparationTarget(input = {}) {
       // or a column id.
       fillViewCreated: fillView.created === true,
       fillViewSkipped: fillView.skipped || null,
+      // B3, values-free: which rule picked the base (a source token) and whether the own base was
+      // created by THIS call — never the base id itself.
+      ownBaseSource: ownBase.source,
+      ownBaseCreated: ownBase.created === true,
     },
   }
 }
@@ -1181,6 +1222,12 @@ module.exports = {
   inspectStockPreparationSandboxTarget,
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationSandboxTarget,
+  // B3 own-base surface, re-exported from its own module.
+  STOCK_PREP_OWN_BASE_ENV,
+  STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
+  stockPreparationOwnBaseEnabled,
+  deriveStockPreparationBaseId,
+  resolveStockPreparationOwnBase,
   __internals: {
     isPlainObject,
     templateFieldIds,

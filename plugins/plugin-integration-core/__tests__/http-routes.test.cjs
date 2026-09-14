@@ -22,6 +22,8 @@ const {
   PLM_STOCK_PREPARATION_ACTION_ID,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+// B3: the base a fresh canonical ensure lands in is DERIVED from the authenticated tenant.
+const { deriveStockPreparationBaseId } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-own-base.cjs'))
 const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
 const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'lib', 'read-smoke-marker.cjs'))
 const { createReadSourceConfigStore, ReadSourceConfigNotApprovedError } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
@@ -4036,8 +4038,14 @@ function createStockPreparationTargetProvisioningApi({
   sheetExists = false,
   missingFields = [],
   currentOptionsByField = {}, // FOS-4: { [targetFieldId]: [{value,...}] } served by the read-only getObjectField
+  // B3: a CAPABLE host (the shipped one exposes ensureSystemBase). Every ensure route's decision-A
+  // pin below runs against this shape, so a base the route derives is asserted as the derived
+  // value and a base it must not derive (sandbox) is asserted as null ON A HOST THAT COULD.
+  withEnsureSystemBase = true,
+  existingBases = [], // [{ id, owned?: true }] — an owned row makes ensureSystemBase refuse (409)
 } = {}) {
   const calls = []
+  const bases = new Map(existingBases.map((base) => [base.id, { ...base }]))
   let sheet = sheetExists
     ? { id: 'sheet_stock_canonical_private', baseId: 'base_stock', name: 'PLM Stock Preparation Main', description: null }
     : null
@@ -4097,6 +4105,24 @@ function createStockPreparationTargetProvisioningApi({
         order: calls.length,
       }
     },
+  }
+  if (withEnsureSystemBase) {
+    api.ensureSystemBase = async (input) => {
+      calls.push(['ensureSystemBase', clone(input)])
+      const existing = bases.get(input.baseId)
+      if (existing && existing.owned) {
+        throw Object.assign(new Error(`Refusing to adopt multitable base ${input.baseId} as a system base (owned)`), {
+          name: 'MultitableBaseAdoptionError',
+          code: 'MULTITABLE_BASE_ADOPTION_REFUSED',
+          status: 409,
+          baseId: input.baseId,
+          reason: 'owned',
+        })
+      }
+      const created = !existing
+      if (created) bases.set(input.baseId, { id: input.baseId })
+      return { baseId: input.baseId, created }
+    }
   }
   return { api, calls }
 }
@@ -4282,13 +4308,47 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(JSON.stringify(res.body.data.evidence).includes('sheet_stock_canonical_created'), false, 'ensure evidence hides sheet id')
   const ensureCall = findCalls(provisioning.calls, 'ensureObject')[0]
   assert.equal(ensureCall[1].projectId, 'tenant_1:integration-core')
-  assert.equal(ensureCall[1].baseId, null, 'decision A: a request baseId is never forwarded to provisioning (sanitized to null)')
+  // Decision A + B3: no REQUEST value ever becomes the base. The base is DERIVED server-side from
+  // the authenticated tenant (ensureSystemBase first, then ensureObject in that base). Asserted as
+  // the derived value on a capable host — not as null on a host that could not derive.
+  assert.notEqual(ensureCall[1].baseId, null, 'B3: a fresh ensure on a capable host lands in the derived base, not the legacy null')
+  assert.equal(
+    ensureCall[1].baseId,
+    deriveStockPreparationBaseId('tenant_1'),
+    'decision A + B3: the base is derived server-side from the authenticated tenant; no request value becomes it',
+  )
+  const systemBaseCalls = findCalls(provisioning.calls, 'ensureSystemBase')
+  assert.equal(systemBaseCalls.length, 1, 'B3: exactly one ensureSystemBase on a fresh ensure')
+  assert.equal(systemBaseCalls[0][1].baseId, deriveStockPreparationBaseId('tenant_1'))
+  assert.ok(
+    provisioning.calls.findIndex(([name]) => name === 'ensureSystemBase') < provisioning.calls.findIndex(([name]) => name === 'ensureObject'),
+    'B3: the base is ensured BEFORE the table is created in it',
+  )
+  assert.equal(res.body.data.evidence.ownBaseSource, 'derived')
+  assert.equal(res.body.data.evidence.ownBaseCreated, true)
   assert.deepEqual(
     ensureCall[1].descriptor.fields.map((field) => field.id),
     STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
     'ensure descriptor is manifest-derived',
   )
   assert.equal(records.calls.length, 0, 'ensure route never uses records API')
+
+  // B3 steering leg: a request tenantId (an admin READ allowance elsewhere) is inert on this WRITE —
+  // the derived base is still the PRINCIPAL's.
+  const steeredProvisioning = createStockPreparationTargetProvisioningApi()
+  const steeredMount = mountRoutes(createMockServices().services, {
+    provisioningApi: steeredProvisioning.api,
+    recordsApi: createTableActionRecordsApi().recordsApi,
+  })
+  res = await invoke(steeredMount.routes, 'POST', '/api/integration/stock-preparation/target/ensure', {
+    user: ADMIN_USER,
+    body: { projectId: 'tenant_other:integration-core', tenantId: 'tenant_other' },
+  })
+  assertOkResponse(res, 201)
+  const steeredEnsure = findCalls(steeredProvisioning.calls, 'ensureObject')[0]
+  assert.equal(steeredEnsure[1].projectId, 'tenant_1:integration-core')
+  assert.equal(steeredEnsure[1].baseId, deriveStockPreparationBaseId('tenant_1'), 'B3: body tenantId/projectId never steer the derived base')
+  assert.notEqual(steeredEnsure[1].baseId, deriveStockPreparationBaseId('tenant_other'))
 
   const existing = createStockPreparationTargetProvisioningApi({ sheetExists: true })
   const existingMount = mountRoutes(createMockServices().services, {
@@ -4384,7 +4444,10 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(JSON.stringify(res.body.data).includes('Casting'), false, 'sandbox route response hides option labels')
   const sandboxEnsureCall = findCalls(sandboxProvisioning.calls, 'ensureObject')[0]
   assert.equal(sandboxEnsureCall[1].projectId, 'tenant_1:integration-core')
+  // Still null on a CAPABLE host (the fake exposes ensureSystemBase): the sandbox route never opts
+  // into own-base resolution, so null is its production value, not a limitation of the fake.
   assert.equal(sandboxEnsureCall[1].baseId, null, 'decision A: a request baseId is never forwarded to provisioning (sanitized to null)')
+  assert.equal(findCalls(sandboxProvisioning.calls, 'ensureSystemBase').length, 0, 'B3: the sandbox route never derives a base')
   assert.equal(sandboxEnsureCall[1].descriptor.id, sandboxObjectId)
   assert.notEqual(sandboxEnsureCall[1].descriptor.id, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
   assert.deepEqual(
