@@ -15,6 +15,7 @@
             type="button"
             class="cfg-history__chip"
             :class="{ 'cfg-history__chip--active': entityType === opt }"
+            :aria-pressed="entityType === opt"
             :data-test="`config-history-filter-${opt || 'all'}`"
             @click="$emit('filter-change', opt)"
           >{{ filterLabel(opt) }}</button>
@@ -26,9 +27,9 @@
           <ul v-else class="cfg-history__list" data-test="config-history-list">
             <li v-for="rev in items" :key="rev.id" class="cfg-history__row" :data-entity-type="rev.entityType">
               <div class="cfg-history__row-head">
-                <span class="cfg-history__action" :class="`cfg-history__action--${rev.action}`">{{ actionLabel(rev.action) }}</span>
+                <span class="cfg-history__action" :class="`cfg-history__action--${rev.action}`">{{ configHistoryOperation(rev, isZh) }}</span>
                 <span class="cfg-history__entity">{{ entityLabel(rev.entityType) }}</span>
-                <span class="cfg-history__entity-id">{{ recordLabelOf(rev.entityId) }}</span>
+                <span class="cfg-history__entity-id" :title="rev.entityId">{{ configHistoryEntityName(rev, recordLabelOf) }}</span>
                 <button
                   v-if="canRevert(rev)"
                   type="button"
@@ -39,7 +40,7 @@
               </div>
               <ul v-if="renderedChanges(rev).length" class="cfg-history__changes">
                 <li v-for="change in renderedChanges(rev)" :key="change.key" class="cfg-history__change">
-                  <span class="cfg-history__key">{{ change.key }}</span>
+                  <span class="cfg-history__key" :title="change.key">{{ configHistoryKeyLabel(change.key, rev.entityType, isZh) }}</span>
                   <template v-if="change.mode === 'update'">
                     <span class="cfg-history__before">{{ change.before }}</span>
                     <span class="cfg-history__arrow">→</span>
@@ -48,9 +49,10 @@
                   <span v-else class="cfg-history__after">{{ change.value }}</span>
                 </li>
               </ul>
+              <p v-else-if="rev.action === 'create' || rev.action === 'delete'" class="cfg-history__hint" data-test="config-history-details-unavailable">{{ l('record.configHistoryDetailsUnavailable') }}</p>
               <div class="cfg-history__meta">
-                <span v-if="rev.actorId">{{ l('record.configHistoryBy') }} {{ rev.actorId }}</span>
-                <span class="cfg-history__time">{{ rev.createdAt }}</span>
+                <span v-if="rev.actorId" data-test="config-history-actor" :title="rev.actorId">{{ l('record.configHistoryBy') }} {{ rev.actorName || rev.actorId }}</span>
+                <time class="cfg-history__time" :datetime="rev.createdAt" :title="rev.createdAt">{{ configHistoryTime(rev.createdAt, isZh) }}</time>
               </div>
             </li>
           </ul>
@@ -71,10 +73,10 @@
                 <p class="cfg-restore-summary">{{ l('record.configRestoreWillRevert') }}</p>
                 <ul class="cfg-restore-changes" data-test="config-restore-changes">
                   <li v-for="k in revert.preview.changedKeys" :key="k" class="cfg-history__change">
-                    <span class="cfg-history__key">{{ k }}</span>
-                    <span class="cfg-history__before">{{ display(revert.preview.current[k]) }}</span>
+                    <span class="cfg-history__key" :title="k">{{ configHistoryKeyLabel(k, revert.preview.entityType, isZh) }}</span>
+                    <span class="cfg-history__before">{{ displayConfig(k, revert.preview.current[k], revert.preview.entityType) }}</span>
                     <span class="cfg-history__arrow">→</span>
-                    <span class="cfg-history__after">{{ display(revert.preview.target[k]) }}</span>
+                    <span class="cfg-history__after">{{ displayConfig(k, revert.preview.target[k], revert.preview.entityType) }}</span>
                   </li>
                 </ul>
               </template>
@@ -123,6 +125,8 @@ import type { MetaConfigRevision, ConfigRestoreExecuteConfirm, ConfigRestorePrev
 import { redactString } from '../utils/automation-log-redact'
 import { recordLabel, configRestoreTypedConfirm, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 import { MtIconButton } from '../ui'
+import { configHistoryEntityName, configHistoryKeyLabel, configHistoryOperation, configHistoryTime } from '../utils/meta-config-history-labels'
+import { fieldTypeLabel } from '../utils/meta-core-labels'
 
 const props = defineProps<{
   visible: boolean
@@ -146,18 +150,15 @@ const ENTITY_KEY: Record<string, MetaRecordLabelKey> = {
   field: 'record.configHistoryEntityField', view: 'record.configHistoryEntityView',
   permission: 'record.configHistoryEntityPermission', sheet_config: 'record.configHistoryEntitySheetConfig',
 }
-const ACTION_KEY: Record<string, MetaRecordLabelKey> = {
-  create: 'record.configHistoryActionCreate', update: 'record.configHistoryActionUpdate', delete: 'record.configHistoryActionDelete',
-}
 const filterLabel = (opt: string): string => (opt === '' ? l('record.configHistoryFilterAll') : entityLabel(opt))
 const entityLabel = (t: string): string => (ENTITY_KEY[t] ? l(ENTITY_KEY[t]) : t)
-const actionLabel = (a: string): string => (ACTION_KEY[a] ? l(ACTION_KEY[a]) : a)
 // Render structural config values (a view filter/sort/group, a permission grant, a hidden-field list, a scalar) as a
 // compact human summary instead of a raw JSON blob. The one free-text config shape, field.property.aiShortcut.params,
 // is handled by a dedicated redacting branch below.
 function summarizeConfigValue(value: unknown, depth = 0): string {
   if (value === null || value === undefined) return '∅'
   if (typeof value === 'string') return value
+  if (typeof value === 'boolean' && props.isZh) return value ? '是' : '否'
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (Array.isArray(value)) {
     if (value.length === 0) return '[]'
@@ -168,12 +169,17 @@ function summarizeConfigValue(value: unknown, depth = 0): string {
     if (depth >= 2) return JSON.stringify(value) // deep nesting → safe JSON fallback
     const entries = Object.entries(value as Record<string, unknown>)
     if (entries.length === 0) return '{}'
-    return entries.map(([k, v]) => `${k}: ${summarizeConfigValue(v, depth + 1)}`).join(', ')
+    return entries.map(([k, v]) => `${props.isZh ? configHistoryKeyLabel(k, '', true) : k}: ${summarizeConfigValue(v, depth + 1)}`).join(', ')
   }
   return JSON.stringify(value)
 }
 function display(value: unknown): string {
   return summarizeConfigValue(value)
+}
+function displayConfig(key: string, value: unknown, entityType: string): string {
+  return key === 'type' && entityType === 'field' && typeof value === 'string'
+    ? fieldTypeLabel(value, props.isZh)
+    : display(value)
 }
 
 type RenderedConfigChange =
@@ -196,15 +202,34 @@ function renderedChanges(rev: MetaConfigRevision): RenderedConfigChange[] {
       changes.push({
         key,
         mode: 'update',
-        before: display(rev.before?.[key]),
-        after: display(rev.after?.[key]),
+        before: displayConfig(key, rev.before?.[key], rev.entityType),
+        after: displayConfig(key, rev.after?.[key], rev.entityType),
       })
     }
     return changes
   }
 
   if (rev.action === 'create' || rev.action === 'delete') {
-    return renderAiShortcutPropertySingle(rev)
+    const snapshot = rev.action === 'delete' ? rev.before : rev.after
+    if (!snapshot) return []
+    const changes: RenderedConfigChange[] = []
+    // Legacy entries may lack changedKeys. Only fall back to known config keys, never internal snapshot metadata.
+    const keys = rev.changedKeys.length ? rev.changedKeys : ['name', 'type', 'property', 'order', 'filterInfo', 'sortInfo', 'groupInfo', 'hiddenFieldIds', 'config', 'grant', 'role', 'rowLevelReadPermissionsEnabled', 'conditionalReadRules']
+    for (const key of keys) {
+      if (!Object.prototype.hasOwnProperty.call(snapshot, key)) continue
+      if (key === 'property') {
+        const aiChanges = renderAiShortcutPropertySingle(rev)
+        if (aiChanges.length) {
+          changes.push(...aiChanges)
+          const otherProperties = { ...asObject(snapshot.property) }
+          delete otherProperties.aiShortcut
+          if (Object.keys(otherProperties).length) changes.push({ key, mode: 'single', value: display(otherProperties) })
+          continue
+        }
+      }
+      changes.push({ key, mode: 'single', value: displayConfig(key, snapshot[key], rev.entityType) })
+    }
+    return changes
   }
 
   return []
@@ -418,8 +443,8 @@ function entitySummary(entityType: string, entityId: string, entityName?: string
 .cfg-history__hint { margin: 0; color: var(--text-secondary, #64748b); }
 .cfg-history__list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
 .cfg-history__row { padding: 8px 10px; background: var(--surface-muted, #f1f5f9); border-radius: 8px; }
-.cfg-history__row-head { display: flex; gap: 8px; align-items: baseline; }
-.cfg-history__action { font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.cfg-history__row-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.cfg-history__action { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .cfg-history__action--create { color: var(--success, #15803d); }
 .cfg-history__action--update { color: var(--primary, #2563eb); }
 .cfg-history__action--delete { color: var(--danger, #b91c1c); }
@@ -427,12 +452,12 @@ function entitySummary(entityType: string, entityId: string, entityName?: string
 .cfg-history__entity-id { font-weight: 600; word-break: break-word; }
 .cfg-history__revert { margin-left: auto; padding: 1px 8px; border-radius: 6px; border: 1px solid var(--border, #cbd5e1); background: var(--surface, #fff); cursor: pointer; font-size: 11px; }
 .cfg-history__changes { margin: 6px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
-.cfg-history__change { display: flex; gap: 6px; align-items: baseline; font-size: 12px; }
+.cfg-history__change { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; font-size: 12px; overflow-wrap: anywhere; }
 .cfg-history__key { font-weight: 600; }
 .cfg-history__before { color: var(--text-secondary, #64748b); text-decoration: line-through; word-break: break-word; }
 .cfg-history__arrow { color: var(--text-secondary, #64748b); }
 .cfg-history__after { word-break: break-word; }
-.cfg-history__meta { display: flex; gap: 10px; margin-top: 6px; font-size: 11px; color: var(--text-secondary, #64748b); }
+.cfg-history__meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; font-size: 11px; color: var(--text-secondary, #64748b); overflow-wrap: anywhere; }
 .cfg-history__time { margin-left: auto; }
 .cfg-restore-overlay { position: absolute; inset: 0; background: rgba(15, 23, 42, 0.35); display: flex; align-items: center; justify-content: center; border-radius: 10px; }
 .cfg-restore-panel { background: var(--surface, #fff); border-radius: 8px; padding: 14px 16px; width: min(420px, calc(100% - 32px)); box-shadow: 0 8px 28px rgba(15, 23, 42, 0.2); display: flex; flex-direction: column; gap: 8px; }
