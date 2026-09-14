@@ -1245,5 +1245,8 @@ module.exports = {
     assertAdminPermission,
     getProvisioningApi,
     assertNoExistingFieldMutated,
+    // 反驳 r1: the MVP repair verb maps the host's MultitableObjectScopeError through THIS predicate
+    // (readiness degrades it to computed_scope_unavailable; repair refuses it typed + values-free).
+    isObjectScopeError,
   },
 }
