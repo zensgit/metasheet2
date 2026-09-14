@@ -311,16 +311,23 @@ X02 的第一版（#5628 `c2b482c8b`）修得很像样：三条充要条件、18
 | W4-A | issue #5667：`/api/admin/safety/rules` 四条写端点补 `requireAdminRole()`，创建者/限流身份改取 `req.user`（不再信 `x-user-id`） | **#5677**（a1428b6eb + 收口 5b52fa34a） | 正式，CI 绿 | 25 代理，11 条 → 1 存活："修完 X 再合"，X 全文档——要害是代理把 `snapshot-protection` E2E 记成死件，实际它在 20.x 真 PG 上跑且本 PR 该步骤 success，恰是「admin 行为不变」的真库整链证据 | `protection-rules-require-admin-{design,verification}-20260912.md` |
 | W4-B | `admin-routes.ts` 结构性守卫测试：写路由首位必须是 admin 门，豁免表显式带理由；临时豁免条件式（**叠在 #5665 上**） | **#5680**（21fcc031e） | 正式，CI 10/10 绿 | 未起复核（纯测试+文档）；识别靠函数源文本同一性而非 mock；M3 假件化 8 红、M4 模拟 #5677 已合 21/21 绿 | `admin-routes-structural-gate-{design,verification}-20260912.md` |
 | W4-C | admin 读侧 13 条无门 GET 的暴露面盘点（**零代码**） | **#5678**（12a0caf91） | 正式，CI 绿 | 设计件：只有 `GET /dlq` 同时「含业务 payload + 跨租户」；前端零调用；#5665 终审给的行号普遍差 30–35 行（附对照表） | `admin-read-endpoints-exposure-inventory-20260912.md` |
-| W4-D | #5648 F02：PLMAdapter 的 Bearer 令牌不再写回 `config.connection`（经 PUT 深合并 + `configToRecord` 明文落库，且随 PUT 响应体与 audit_logs 回显） | **#5679**（45737eb59） | 正式，CI 29/29 绿 | 对抗复核进行中 | `plm-adapter-token-persistence-{design,verification}-20260912.md` |
+| W4-D | #5648 F02：PLMAdapter 的 Bearer 令牌不再写回 `config.connection`（经 PUT 深合并 + `configToRecord` 明文落库，且随 PUT 响应体与 audit_logs 回显） | **#5679**（45737eb59 + 收口 b6393eea0） | 正式，CI 29/29 绿（收口头待网络） | 23 代理，10 条 → 0 存活："修完 X 再合"，X 全文档；另关掉本 PR 新引入的微任务级时序窗口（令牌改在 `onConnect()` 同步段接线，新用例去掉覆写 3 红） | `plm-adapter-token-persistence-{design,verification}-20260912.md` |
 | W4-E | #5648 F03/F10：秘密键词表补 `pw/pswd/passcode` + NFKC + 粘连限定词规则；盘点 SQL 补两种列形状与嵌套路径（**叠在 #5648 上**） | **#5681**（d0796b008） | 正式，CI 11/11 绿 | 未起复核（扩既有 76 例到 123，修前 28 红；变异 9/16/13 红） | 更新 `data-source-connection-secret-keys-{design,verification}-20260912.md` |
 | W4-F | `kanban.ts:25` / `comments.ts:79` 的 `x-user-id`（#5677 顺带发现）只读核查 | —（无 PR） | 结论 C：死回退，`req.user` 永远先短路（comments 每路由挂 `rbacGuard`，kanban 靠全局门），不造伪红 | 顺带发现一条真洞 → W4-G；kanban `parseInt` 串状态（列类型裁决）；`KANBAN_AUTH_REQUIRED` 过时文档 | — |
-| W4-G | `POST …/comments/mark-all-read` 优先取请求体 `userId`，已认证用户可替他人批量标已读 | 进行中 | — | — | — |
+| W4-G | `POST …/comments/mark-all-read` 优先取请求体 `userId`，已认证用户可替他人批量标已读 | **#5682**（4d5d1da79 + 收口 970161701） | 正式 | 23 代理，10 条 → 0 存活：**可合**；合并后清单（空串 userId 400 用例、两处文档）已补成收口提交 | `comments-mark-all-read-actor-only-{design,verification}-20260912.md` |
+| W4-H | `KANBAN_AUTH_REQUIRED` / `x-user-id` 过时鉴权文档清理（**零代码**，4 份文档） | 待网络推（085bb41e6） | — | — | 无（改既有文档） |
+| W4-I | `/api/admin` 下不经 admin-routes 的 7 个 router 共 67 条写路由的门盘点（**零代码**） | 待网络推（ff2826683） | 结论 B：全部有门但在处理器体内；两套 admin 判据不同源、两份 `ensurePlatformAdmin` 副本宽度差（待裁决） | — | `admin-mounts-write-gate-inventory-20260912.md` |
+| W4-J | #5648 F01：connection URL userinfo 的分阶段迁移设计（**零代码**） | 待网络推（b50d529fe） | 实读发现：axios `http.js:580` 带 userinfo 时删 Authorization；PLM fetch 腿口令进错误文本；读取面打码不能单独上线（前端回写） | — | `data-source-url-userinfo-migration-design-20260912.md` |
+| W4-K | 7 个 router 的写路由行为守卫 + 清单双向反查（#5680 扩面，纯测试） | 待网络推（5675e92f3） | 160/160；代理在写文档时撞 session limit，协调方补验证文档收口（外部变异未实跑，如实标注） | — | `admin-mounts-write-gate-guard-{design,verification}-20260912.md` |
+| W4-L | PLM fetch 腿的错误文本经 userinfo 打码（F01 ①a，**叠在 #5679 上**） | 待网络推（b2b12e533） | 9 + 8 = 17/17；变异恒等打码 → 3 红；代理在提交前复查时撞 session limit，协调方复核 diff 后提交 | — | 更新 `plm-adapter-token-persistence-{design,verification}-20260912.md` |
 
 ### 9.2 事故（如实记）
 
 1. **清理老 worktree 时主检出被误删一部分**（09-12 18:3x）。`git worktree remove --force` 顺着老 worktree 里指向主检出的 `node_modules` / `apps/web/node_modules` junction 递归删进去，再经 pnpm 工作区符号链接 `node_modules/@metasheet/openapi-sdk` 删掉 `packages/openapi/dist-sdk` 的 13 个受控文件；`apps/web/node_modules`、根 `.bin` 被清空。我事先只用 PowerShell 做过 junction 删除实验（只删链接本身），没有测 git 的行为——**测试对象与执行者不同量**。恢复：`git checkout -- packages/openapi/dist-sdk` + `pnpm install --frozen-lockfile --force`（第一次不带 `--force` 只补了 7 包，pnpm 信任被删了一半的 node_modules）。Codex 与同伴的 worktree、pr1 检出、core-backend 的 node_modules 完好。同伴会话在盘点与删除之间复用同名目录新建的 `metasheet-wt-coerce` 被我一并删掉（删时干净、分支 ref 仍在），已如实告知，对方核过无缺失。
 2. **时间戳估高**：首日 19:00–21:00 的几条账本时间是估的，PowerShell 实测把「21:00」订正到约 19:15；此后每条先取 `Get-Date`。
 3. 一条合并了多个 heredoc 的大 Bash 命令因解析错误整个没执行（#5677 的文档收口一行都没落），拆小重做后才落地——大命令要拆。
+4. **本机 HTTPS 出口整体中断**（09-12 ~20:00 起，09-14 08:00 仍未恢复）：github/api.github/npmjs/cloudflare 全 TLS 握手失败、DNS 正常——本机网络/VPN 层，仓库外不动手。影响：W4-H/I/J/K/L 五支与 #5679/#5682 的收口提交只在本地；CI 看守全部空转。处置：合并成一条 24h 探测循环，恢复后自动推送、开 PR、追加正文。
+5. **session limit 二连**：09-12 20:40 前后 opus 子代理撞账号级限额（三个 25 代理级对抗复核工作流是主因），W4-K/W4-L 在最后一步死掉，主循环也停到 09-14 08:00（~35h）。两个代理的未提交工作经协调方复核后收口。此后复核缩到 1 finder + 1 refuter + judge，不再连开大工作流。
 
 ### 9.3 本窗口的结论与教训
 
@@ -337,7 +344,12 @@ X02 的第一版（#5628 `c2b482c8b`）修得很像样：三条充要条件、18
 4. kanban `view_states.user_id` 是 integer 而 `users.id` 是 text，`parseInt` 让所有 UUID 用户共用 `user_id=0` 行（跨用户串状态）——列类型裁决。
 5. #5681 的粘连限定词白名单成员；真库道 B 的词表与应用同步谁来做。
 6. 存量脏数据：已落库的 PLM 令牌（#5679）与 `connection` 秘密键（#5648/#5681）的清理与吊销，需真库。
-7. 合并顺序：#5680 叠 #5665、#5681 叠 #5648；#5677 与 #5680 任一顺序皆可（条件式豁免）。
+7. 合并顺序：#5680 叠 #5665、#5681 叠 #5648、W4-L 叠 #5679；#5677 与 #5680 任一顺序皆可（条件式豁免）。
+8. W4-I：两份 `ensurePlatformAdmin` 副本的宽度差（`admin-directory.ts:212` 认 `permissions` 含 `*:*`）是否收紧；`*:*` 经 `namespace-admission.ts:126` 过滤后是否仍留在 `req.user.permissions`（需真库）。
+9. W4-J（F01）七项：阶段②走「受限自动拆分 + 拒收兜底」还是「纯 400 + 前端补 Basic 字段同批」；是否允许后端替调用方拆分；percent-encoding 口径；`token@host` 形态；`audit_logs` 里已写下的明文 userinfo；回滚快照保留期；`credentials.token` 死字段是否单开。
+10. #5682：`resolve` 任何能评论者可 resolve 是出货语义还是缺口；`meta_comment_reads` 历史冒名行是否尽力清理。
+11. #5679：存量 `connection.headers.Authorization` 与审计副本只吊销还是清洗迁移；`credentials.bearerToken` 无写点但文档列出。
+12. W4-H 顺带：`scripts/smoke-kanban.sh:33` 只发 `x-user-id` 不带 Authorization，在全局门下必 401 但被 `|| true` 吞成假绿——脚本不在文档 PR 范围，待定。
 
 ### 9.5 v4 变更摘要草稿条目（第四窗口部分；不开交付指南 v4 节）
 
@@ -346,3 +358,11 @@ X02 的第一版（#5628 `c2b482c8b`）修得很像样：三条充要条件、18
 > **PLM 数据源的访问令牌不再随配置落库**（#5679）。此前认证后令牌会写进 `connection.headers` 并在保存/审计时明文入库；现只存内存。已落库的旧令牌需一次性清理。
 
 > **外接数据源 `connection` 秘密键判据加严**（#5681）。`pw`/`pswd`/`passcode`、全角键名、`dbpass`/`rootpw` 一类粘连写法也被拒收/剥离。
+
+> **`/api/multitable/:id/comments/mark-all-read` 只认登录主体**（#5682）。请求体里的 `userId` 被忽略，不能再替他人批量标记已读。
+
+> **PLM 数据源的错误信息不再回显 URL 里的口令**（W4-L，叠 #5679）。
+
+### 9.6 组合树复验（第四窗口）
+
+网络中断期间无法重建；恢复后按 `stack-all-27.sh` 加入 #5677/#5678/#5679/#5680/#5681/#5682 与 W4-H/I/J/K/L 重建一次（草稿 PR 跑完即关），结果补记于此。
