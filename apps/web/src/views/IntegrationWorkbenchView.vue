@@ -54,6 +54,7 @@
       :systems="systems"
       :connection-status-label="connectionStatusLabel"
       :runtime-blocker-for-system="runtimeBlockerForSystem"
+      :connection-scope-write-block="connectionScopeWriteBlock"
       :edit-connection="editConnection"
       :copy-connection="copyConnection"
       :deactivate-connection="deactivateConnection"
@@ -455,6 +456,8 @@ import {
   dryRunIntegrationExternalWrite,
   dryRunIntegrationTableAction,
   ensureIntegrationStockPreparationTarget,
+  externalSystemScopeTestWriteNote,
+  externalSystemScopeWriteBlock,
   getDefaultIntegrationScope,
   getIntegrationStockPreparationTargetReadiness,
   isIntegrationScopedProjectId,
@@ -462,6 +465,7 @@ import {
   getExternalSystemSchema,
   getPlmDataSourceCapabilities,
   installIntegrationStaging,
+  integrationApiErrorCode,
   isDeadLetterReplayable,
   listIntegrationDeadLetters,
   listIntegrationPipelineRuns,
@@ -2224,7 +2228,77 @@ function resetConnectionDraft(): void {
   connectionDraftMode.value = 'new'
 }
 
+// 列表加宽（非 null workspace hint 回退到同租户 null 行）与 upsert/delete 不加宽之间的那道不对称，落在这
+// 块屏幕上：回退来的行读得到，编辑/停用/启用/删除却够不着（带 id 的 upsert 被服务端以 409
+// EXTERNAL_SYSTEM_SCOPE_MISMATCH 拒掉，删除 404）。这里是屏幕侧的判据，`IntegrationConnectionSection`
+// 据此把这四个按钮置灰；下面每个写动作里再挡一次，是因为置灰只是外观——回调本身被别处调用（例如
+// openConnectionFromOverview 走 editConnection）时，按钮的 disabled 拦不住它。这两道都是 UX；唯一算数的边界
+// 在服务端（上述 409 / 404），不经浏览器直调路由也一样被拒。
+// 复制不挡：复制清空 id，本来就是在当前作用域新建一条。
+// **测试连接不在此列**，而且不许进这个名单：服务端的 persistExternalSystemTestResult（#5534）按行自己的
+// 作用域落库，对回退来的行是真的写得进去的（见 externalSystemScopeTestWriteNote）。所以那条路径保持可用，
+// 只在测完之后如实说明写到了哪一行——拿「只读」这种说法盖过去，才会让置灰的量和实际写不动的量对不上。
+function connectionScopeWriteBlock(system: WorkbenchExternalSystem): string {
+  return externalSystemScopeWriteBlock(system, currentScope())
+}
+
+function refuseScopeBlockedConnectionWrite(system: WorkbenchExternalSystem, action: string): boolean {
+  const blocked = connectionScopeWriteBlock(system)
+  if (!blocked) return false
+  setStatus(`无法${action}「${system.name}」：${blocked}`, 'error')
+  return true
+}
+
+// 同一道作用域不对称的第五、第六个入口 —— 清洗表卡片上的「作为 Dry-run 来源」/「作为目标多维表」。
+// 它们不在上面那份「四动作」名单里,但走的是同一条服务端路径:请求体带的是**按项目算出的确定性 id**
+// (`stagingSourceSystemId(projectId)` / `multitableTargetSystemId(projectId)`),不是新建用的随机 id。
+// 所以当这个项目的 staging / 目标连接早先建在租户级(workspace_id IS NULL)、而当前工作区框非空时,
+// findExisting 在精确作用域内落空,服务端 assertHintedIdDoesNotTargetTenantWideRow 直接拒:
+// 409 EXTERNAL_SYSTEM_SCOPE_MISMATCH(插件侧 L-10;加这道拒绝之前是撞 057 主键的 23505 → 无类型 500,
+// 两种都是失败,所以这里只是把失败说清楚,不是回归)。
+// 为什么在屏幕侧先拦一次:省掉一次注定失败的往返。
+// (历史:`parseIntegrationResponse` 曾只保留 error.message、丢掉 error.code,那时这两处的 catch 直出
+// message,操作员看到的就是一句英文 "external system belongs to the tenant-wide scope";现在 code 已透传,
+// 见下面 `connectionWriteErrorText` —— 那是兜底,这道预检仍在,两者说的是同一句话。)
+// 判据和文案都复用四动作那一套(`externalSystemScopeWriteBlock`),不另起第二套口径。
+// 这里只会「少发一个注定失败的请求」,绝不改写入作用域去够那行租户级的连接 —— 那才是放宽。
+// 列表里没有这一行时(没加载 / 分页外)不猜:照发,由服务端那道 409 兜底。
+// 上面那道屏幕侧预检的**兜底**：列表里没有这一行时（没加载 / 分页外 / 刚被别处建到租户级），预检按约定
+// 不猜、照发，请求就真的撞上服务端那道 409。此前 `parseIntegrationResponse` 只留 message、丢掉 code，
+// 于是这里的 catch 只能直出英文原文 "external system belongs to the tenant-wide scope"；现在服务端的
+// `error.code` 透传到 Error 上（workbench.ts），判据从「匹配英文散文」换成「匹配稳定的 wire code」。
+//
+// 为什么文案还是走 `externalSystemScopeWriteBlock`：不另起第二套口径 —— 预检拦下与服务端拒回，
+// 操作员看到的必须是同一句话（含「测试连接不受此限」那半句）。
+// 形状只有一种：服务端 assertHintedIdDoesNotTargetTenantWideRow 仅在「请求带非 null workspace hint
+// 且该 id 的行是租户级(workspace_id IS NULL)」时抛这个码（lib/external-systems.cjs:588-606），
+// 所以这里用 `{ workspaceId: null }` 对当前 hint 求那句话。hint 为空时该函数返回空串 —— 那说明这个码
+// 出现在它本不该出现的形状里，此时**不编话**，退回服务端原 message。
+const EXTERNAL_SYSTEM_SCOPE_MISMATCH_CODE = 'EXTERNAL_SYSTEM_SCOPE_MISMATCH'
+
+function scopeMismatchWriteBlockFromError(error: unknown): string {
+  if (integrationApiErrorCode(error) !== EXTERNAL_SYSTEM_SCOPE_MISMATCH_CODE) return ''
+  return externalSystemScopeWriteBlock({ workspaceId: null }, currentScope())
+}
+
+// 写动作 catch 的统一出口：认得的 code 给中文人话，其它一律照旧直出 message（不改既有行为）。
+function connectionWriteErrorText(error: unknown, action: string): string {
+  const blocked = scopeMismatchWriteBlockFromError(error)
+  if (blocked) return `无法${action}：${blocked}`
+  return error instanceof Error ? error.message : String(error)
+}
+
+function refuseScopeBlockedEnsureWrite(systemId: string, action: string): boolean {
+  const existing = systems.value.find((system) => system.id === systemId)
+  if (!existing) return false
+  const blocked = connectionScopeWriteBlock(existing)
+  if (!blocked) return false
+  setStatus(`无法${action}：这个按钮按项目算出的固定 id「${systemId}」写这条连接。${blocked}`, 'error')
+  return true
+}
+
 function editConnection(system: WorkbenchExternalSystem): void {
+  if (refuseScopeBlockedConnectionWrite(system, '编辑')) return
   connectionDraft.id = system.id
   connectionDraft.name = system.name
   connectionDraft.kind = system.kind
@@ -2257,6 +2331,7 @@ function copyConnection(system: WorkbenchExternalSystem): void {
 }
 
 async function deactivateConnection(system: WorkbenchExternalSystem): Promise<void> {
+  if (refuseScopeBlockedConnectionWrite(system, '停用')) return
   try {
     const updated = await upsertWorkbenchExternalSystem({
       ...currentScope(),
@@ -2270,11 +2345,12 @@ async function deactivateConnection(system: WorkbenchExternalSystem): Promise<vo
     normalizeSystemSelections()
     setStatus(`连接已停用：${system.name}`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '停用'), 'error')
   }
 }
 
 async function activateConnection(system: WorkbenchExternalSystem): Promise<void> {
+  if (refuseScopeBlockedConnectionWrite(system, '启用')) return
   try {
     const updated = await upsertWorkbenchExternalSystem({
       ...currentScope(),
@@ -2288,7 +2364,7 @@ async function activateConnection(system: WorkbenchExternalSystem): Promise<void
     normalizeSystemSelections()
     setStatus(`连接已启用：${system.name}`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '启用'), 'error')
   }
 }
 
@@ -2306,6 +2382,7 @@ function clearDeletedSystemState(systemId: string): void {
 }
 
 async function deleteConnection(system: WorkbenchExternalSystem): Promise<void> {
+  if (refuseScopeBlockedConnectionWrite(system, '删除')) return
   if (!confirmConnectionDelete(system)) return
   deletingConnectionId.value = system.id
   try {
@@ -2313,7 +2390,7 @@ async function deleteConnection(system: WorkbenchExternalSystem): Promise<void> 
     clearDeletedSystemState(system.id)
     setStatus(`连接已删除：${system.name}`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '删除'), 'error')
   } finally {
     deletingConnectionId.value = ''
   }
@@ -2381,7 +2458,7 @@ async function saveConnectionDraft(): Promise<void> {
     normalizeSystemSelections()
     setStatus(`连接已保存：${system.name}`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '保存连接'), 'error')
   } finally {
     savingConnectionDraft.value = false
   }
@@ -2847,17 +2924,22 @@ async function testSystem(side: WorkbenchSide): Promise<void> {
   // Capture the status BEFORE the test so a recovery (error → active) can be reported explicitly —
   // result.system already carries the post-test status, so it can't tell us where we came from.
   const priorStatus = requestSystem?.status
+  // 测试连接是这块屏幕上唯一一条能写到「列表回退来的租户级行」的写路径（服务端按行自己的作用域落库），
+  // 所以它不被 connectionScopeWriteBlock 拦下，但要如实说出写到了哪一行——否则同一屏既说这行写不动，
+  // 又把它的 status/last_tested_at/last_error 改掉。成功与失败都会写（失败是 active → error），所以两个分支都带上。
+  // 注意取的是发请求前的 requestSystem：replaceSystem 之后的行来自服务端响应，不一定还在 systems 里。
+  const scopeNote = externalSystemScopeTestWriteNote(requestSystem, currentScope())
   try {
     const result = await testExternalSystemConnection(systemId, currentScope())
     if (result.system) replaceSystem(result.system)
     if (result.ok) {
-      setStatus(priorStatus === 'error' ? `${label}连接已恢复，已重新激活` : `${label}连接测试通过`, 'success')
+      setStatus(`${priorStatus === 'error' ? `${label}连接已恢复，已重新激活` : `${label}连接测试通过`}${scopeNote}`, 'success')
     } else {
       const failure = result.message || result.code || 'unknown error'
       const failureMessage = requestSystemKind === DATA_SOURCE_BRIDGE_KIND
         ? formatWorkbenchConnectionError(failure, 'test', side)
         : `${label}连接测试失败：${failure}`
-      setStatus(failureMessage, 'error')
+      setStatus(`${failureMessage}${scopeNote}`, 'error')
     }
   } catch (error) {
     setStatus(formatSideConnectionError(error, 'test', side, requestSystemKind), 'error')
@@ -2984,10 +3066,12 @@ async function activateStagingAsSource(objectId: string, successMessage?: string
     setStatus('当前 staging 表缺少 sheetId，不能作为 dry-run 来源。', 'error')
     return
   }
+  const systemId = stagingSourceSystemId(projectId)
+  if (refuseScopeBlockedEnsureWrite(systemId, '把 staging 多维表设为 Dry-run 来源')) return
   try {
     const system = await upsertWorkbenchExternalSystem({
       ...currentScope(),
-      id: stagingSourceSystemId(projectId),
+      id: systemId,
       projectId,
       name: 'MetaSheet staging 多维表',
       kind: 'metasheet:staging',
@@ -3020,7 +3104,7 @@ async function activateStagingAsSource(objectId: string, successMessage?: string
     }
     setStatus(successMessage || `已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为 Dry-run 来源`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '把 staging 多维表设为 Dry-run 来源'), 'error')
   }
 }
 
@@ -3038,10 +3122,12 @@ async function useStagingAsTarget(objectId: string): Promise<void> {
     setStatus('当前多维表缺少 sheetId，不能作为写回目标。', 'error')
     return
   }
+  const systemId = multitableTargetSystemId(projectId)
+  if (refuseScopeBlockedEnsureWrite(systemId, '把多维表设为写回目标')) return
   try {
     const system = await upsertWorkbenchExternalSystem({
       ...currentScope(),
-      id: multitableTargetSystemId(projectId),
+      id: systemId,
       projectId,
       name: 'MetaSheet 目标多维表',
       kind: 'metasheet:multitable',
@@ -3077,7 +3163,7 @@ async function useStagingAsTarget(objectId: string): Promise<void> {
     if (mappings.value.length === 0) seedMappingsFromTargetSchema(targetSchema.value.fields)
     setStatus(`已将 ${stagingDatasetCopy[objectId]?.name || descriptor.name} 设为写回目标`, 'success')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error')
+    setStatus(connectionWriteErrorText(error, '把多维表设为写回目标'), 'error')
   }
 }
 

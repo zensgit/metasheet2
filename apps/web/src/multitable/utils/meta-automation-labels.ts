@@ -130,6 +130,7 @@ export type AutomationLabelKey =
   | 'actionConfig.message'
   | 'actionConfig.notificationMessagePlaceholder'
   | 'actionConfig.recipients'
+  | 'actionConfig.recipientsPlaceholder'
   | 'actionConfig.emailRecipientsHint'
   | 'actionConfig.subjectTemplate'
   | 'actionConfig.emailSubjectPlaceholder'
@@ -439,6 +440,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'actionConfig.message',
   'actionConfig.notificationMessagePlaceholder',
   'actionConfig.recipients',
+  'actionConfig.recipientsPlaceholder',
   'actionConfig.emailRecipientsHint',
   'actionConfig.subjectTemplate',
   'actionConfig.emailSubjectPlaceholder',
@@ -760,6 +762,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'actionConfig.message': { en: 'Message', zh: '消息' },
   'actionConfig.notificationMessagePlaceholder': { en: 'Notification message', zh: '通知内容' },
   'actionConfig.recipients': { en: 'Recipients', zh: '收件人' },
+  'actionConfig.recipientsPlaceholder': { en: 'User IDs, comma or newline separated', zh: '用户 ID，逗号或换行分隔' },
   'actionConfig.emailRecipientsHint': { en: 'Use comma or newline separated email addresses. Delivery uses the NotificationService email channel.', zh: '使用逗号或换行分隔邮箱地址。投递使用 NotificationService 邮件通道。' },
   'actionConfig.subjectTemplate': { en: 'Subject template', zh: '主题模板' },
   'actionConfig.emailSubjectPlaceholder': { en: '{{record.title}} needs attention', zh: '{{record.title}} 需要处理' },
@@ -1212,7 +1215,9 @@ export function automationCardActionSummary(
   fieldName: string,
   isZh: boolean,
 ): string {
-  if (actionType === 'update_field') {
+  // F9: `update_field` folded into `update_record`, so a single-field update still names its field
+  // here instead of degrading to the bare action label. No field name ⇒ the plain label, as before.
+  if (actionType === 'update_field' || actionType === 'update_record') {
     const rawField = fieldName.trim()
     if (!rawField) return automationActionTypeLabel(actionType, isZh)
     return isZh ? `更新“${rawField}”` : `Update "${rawField}"`

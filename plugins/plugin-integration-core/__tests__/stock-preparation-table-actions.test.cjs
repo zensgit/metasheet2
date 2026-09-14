@@ -23,6 +23,7 @@ const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
 const {
+  PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   ROW_ERROR_LIMIT_CEILING,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-bom-expansion.cjs'))
 const {
@@ -32,6 +33,20 @@ const {
 const {
   saveTableScopeConflictPolicies,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-policies.cjs'))
+const {
+  normalizeExtFieldMapping,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-ext-field-mapping.cjs'))
+const {
+  FACTORY_A_REHEARSAL_PACK,
+} = require(path.join(__dirname, '..', 'lib', 'customer-packs', 'factory-a.rehearsal.cjs'))
+const {
+  PROD_CANONICAL_OBJECT_ID,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-production-policy.cjs'))
+
+// Read off the REAL committed pack rather than a hand-typed stand-in, so the ext_ write-口 scope
+// assertions below cannot quietly disagree with the pack about which ids it declares.
+const PACK_EXTENSION_FIELD_IDS = FACTORY_A_REHEARSAL_PACK.extensionFields.map((field) => field.id)
+const UNDECLARED_EXT_FIELD_ID = 'ext_notInAnyPackWhatsoever'
 
 const PHYSICAL_FIELD_ID_MAP = Object.fromEntries(
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => [field.id, `fld_${field.id}`]),
@@ -1317,8 +1332,30 @@ async function main() {
   await testTargetScopedApiForwardsTheHostMetadataCacheCapability()
   await testTargetScopedApiForwardsTheHostFilterValueListDeclaration()
   testRevisionCarriesTheRowErrorOverflowFacts()
+  testATruncatedRowErrorSampleLeavesTheHash()
   testHardApplyBlockingRowErrorsSurviveTheCap()
   testRowErrorLimitIsAConditionalActionConfigKey()
+  testExtensionFieldIdsEnforceNamespaceShapeAndPackMembershipIsOneLayerOut()
+  await testRootSelectionIsReachableFromTheActionConfig()
+  await testCollapsedSiblingCountReachesDryRunEvidence()
+  await testParentPackColumnsReachTheInteractiveChain()
+  // X4 — canonical order for the hashed arrays (222/r34 revision churn -> apply 409).
+  await testDryRunRevisionIsBlindToExpandedRowOrder()
+  await testDryRunRevisionIsBlindToExistingRowOrder()
+  await testDryRunRevisionStillMovesWhenAnyRowValueMoves()
+  await testApplyAcceptsATokenWhenBothRecomputedReadsCameBackReshuffled()
+  await testDryRunRevisionIsBlindToTheOrderInsideADuplicateKeyGroup()
+  await testDryRunRevisionIsBlindToTheOrderOfSeveralDuplicateGroups()
+  await testDryRunRevisionIsBlindToRowErrorOrder()
+  // X5 — deterministic SELECTION at the cap (the residual X4 measured and could not close here).
+  await testATruncatedRowErrorSamplePlansTheSameWayInEitherSourceOrder()
+  await testTheCanonicalHashOrderNeverReordersWhatGetsWritten()
+  // X6 — 来料没这个键 ≠ 变更(#5625 M2 探针形状,正向钉住)。
+  await testX6DryRunDoesNotCountRowsWhoseIntakeLacksTheExtColumn()
+  // 反驳 r1 blocker A1 —— 批级闸门(valid / dryRunStatus / 409)前后钉死。
+  await testX6AbsentIdentityKeyDoesNotHoldTheDryRun()
+  // 反驳 r2 blocker B2 —— 生产闸 cleanRowCount = add + update 的触发量,前后钉死。
+  await testX6ProductionCleanRowBoundCountsOnlyRowsTheIntakeReallyChanged()
 
   console.log('stock-preparation-table-actions.test.cjs OK')
 }
@@ -1429,6 +1466,10 @@ function testRevisionCarriesTheRowErrorOverflowFacts() {
   // deleting `rowErrorsTotal` or `rowErrorsTruncated` from the projection left both suites green.
   // The day someone adds a rowError with no type, total and typeCounts decouple, and this is the
   // assertion that will be standing there.
+  //
+  // X4-b changed ONE thing here: the truncated projection no longer carries `rowErrors`. Past the
+  // cap the retained sample is a subset chosen by read order, so hashing it produced a 409 on an
+  // applyable batch (see testATruncatedRowErrorSampleLeavesTheHash). The overflow facts stay.
   const truncatedProjection = {
     actionId: ROW_ERROR_REVISION_ACTION.actionId,
     parameters: { projectNo: 'P-001' },
@@ -1442,7 +1483,6 @@ function testRevisionCarriesTheRowErrorOverflowFacts() {
       status: smaller.status,
       rows: smaller.rows,
       errors: smaller.errors,
-      rowErrors: smaller.rowErrors,
       rowErrorsTruncated: true,
       rowErrorsTotal: 5001,
       rowErrorTypeCounts: { missing_component_source_id: 5001 },
@@ -1454,7 +1494,15 @@ function testRevisionCarriesTheRowErrorOverflowFacts() {
   assert.equal(
     revisionFor(smaller),
     tableActionInternals.hashJson(truncatedProjection),
-    'a truncated expansion hashes EXACTLY these three overflow keys and no fourth',
+    'a truncated expansion hashes EXACTLY these three overflow keys, no fourth — and not the sample',
+  )
+  assert.notEqual(
+    revisionFor(smaller),
+    tableActionInternals.hashJson({
+      ...truncatedProjection,
+      expansion: { ...truncatedProjection.expansion, rowErrors: smaller.rowErrors },
+    }),
+    'the retained sample is genuinely OUT of the truncated projection (adding it back moves the hash)',
   )
   for (const key of ['rowErrorsTruncated', 'rowErrorsTotal', 'rowErrorTypeCounts']) {
     const without = clone(truncatedProjection)
@@ -1465,6 +1513,61 @@ function testRevisionCarriesTheRowErrorOverflowFacts() {
       `${key} is load-bearing in the revision — dropping it must move the hash`,
     )
   }
+}
+
+// X4-b. THE SECOND REACHABLE 409, and the one a sort cannot remove: past the cap the rowError array
+// is not a permutation of a fixed set, it is a SUBSET picked by production order ("keeps the FIRST
+// rowErrorLimit entries", stock-preparation-bom-expansion.cjs), so a reshuffled read RETAINS
+// DIFFERENT ENTRIES. Such a batch is still applyable — only `missing_child_bom` is hard blocking —
+// so it minted a token and then 409'd on the recompute. Nothing bounded by read order may be hashed:
+// the sample leaves, the order-free overflow facts stay.
+//
+// The cap is deploy-reachable, which is what makes this a live path rather than a thought
+// experiment: `rowErrorLimit` is an action-config key (testRowErrorLimitIsAConditionalActionConfigKey).
+function testATruncatedRowErrorSampleLeavesTheHash() {
+  const truncation = {
+    rowErrorsTotal: 9001,
+    rowErrorsRetained: 2,
+    rowErrorsTruncated: true,
+    rowErrorTypeCounts: { missing_component: 9001 },
+  }
+  // Same type and same totals — a cap that landed on two different pairs of the SAME failure class.
+  const retainedHere = [
+    { type: 'missing_component', field: 'part_id', depth: 1 },
+    { type: 'missing_component', field: 'part_id', depth: 2 },
+  ]
+  const retainedThere = [
+    { type: 'missing_component', field: 'part_id', depth: 5 },
+    { type: 'missing_component', field: 'part_id', depth: 8 },
+  ]
+  assert.notEqual(
+    tableActionInternals.hashJson(retainedHere),
+    tableActionInternals.hashJson(retainedThere),
+    'the two samples really are different subsets — otherwise this test proves nothing',
+  )
+
+  const here = { status: 'failed', rows: [], errors: [], rowErrors: retainedHere, summary: { status: 'failed', ...truncation } }
+  const there = { status: 'failed', rows: [], errors: [], rowErrors: retainedThere, summary: { status: 'failed', ...truncation } }
+  assert.equal(
+    revisionFor(here),
+    revisionFor(there),
+    'which entries survived the cap cannot move the revision — the batch is the same batch',
+  )
+
+  // …and the bound in the other direction, twice over, so "stop hashing the sample" cannot quietly
+  // become "stop hashing row errors".
+  const differentTotals = clone(there)
+  differentTotals.summary.rowErrorsTotal = 9002
+  differentTotals.summary.rowErrorTypeCounts = { missing_component: 9002 }
+  assert.notEqual(revisionFor(here), revisionFor(differentTotals), 'the overflow totals still separate two batches')
+
+  const underCapHere = { status: 'failed', rows: [], errors: [], rowErrors: retainedHere, summary: { status: 'failed' } }
+  const underCapThere = { status: 'failed', rows: [], errors: [], rowErrors: retainedThere, summary: { status: 'failed' } }
+  assert.notEqual(
+    revisionFor(underCapHere),
+    revisionFor(underCapThere),
+    'UNDER the cap the sample is the whole set and its content is hashed exactly as before',
+  )
 }
 
 // FAIL-CLOSED. The hard apply-blocking check used to read the array; past the cap the array can
@@ -1547,6 +1650,89 @@ function testRowErrorLimitIsAConditionalActionConfigKey() {
   }
 }
 
+// ext_ 客户包列写口守卫盘点结清 (beiliao-takeover-status-ledger.md §4, 2026-09-11 全集盘点 ⑥/⑦).
+// The write-口 THIS test owns is ⑥: `extensionFieldIds` on the table-action config -- the durable list
+// the confirm/apply writer reads to decide which `ext_` columns a write may touch
+// (lib/stock-preparation-table-actions.cjs:233 normalizeActionExtensionFieldIds -> :246
+// assertExtensionFieldIdValid, reached from :449 normalizeStockPreparationActionConfig, which the
+// registry constructor :693 and assertStockPreparationTargetReady :589 both go through).
+//
+// SCOPE, stated exactly so this test is not read as more than it is: that predicate
+// (lib/stock-preparation-extension-namespace.cjs:117-165) checks NAMESPACE SHAPE ONLY -- prefix,
+// suffix shape, forbidden content keys, collision with a frozen template field. It has no pack
+// catalog and therefore CANNOT refuse "an id no customer pack declared"; the third case below pins
+// that boundary as an ACCEPT so nobody re-reads this suite as "non-pack ids are rejected here".
+// Pack MEMBERSHIP lives one layer out and is pinned by the last two cases: the mapper's pack
+// catalog (lib/stock-preparation-ext-field-mapping.cjs:386/:394 -> :315-317 TARGET_NOT_DECLARED_IN_PACK,
+// whose own battery is __tests__/stock-preparation-ext-field-mapping.test.cjs:232) and this module's
+// agreement gate (:564 assertExtFieldMappingAgreesWithAction -> :575), which refuses a mapping aimed
+// at an `ext_` column the action config never declared -- even one the pack DID declare.
+function testExtensionFieldIdsEnforceNamespaceShapeAndPackMembershipIsOneLayerOut() {
+  // (1) guard existence: an id with no `ext_` prefix at all cannot enter extensionFieldIds.
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: ['procurementDone'] })),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && error.details && error.details.namespaceReason === 'FIELD_ID_PREFIX_MISSING',
+    'a bare non-`ext_` id cannot enter extensionFieldIds -- code/reason must stay stable',
+  )
+
+  // (2) a second, independent refusal shape: `ext_` prefix present, but the suffix collides with a
+  // frozen template field -- the shape stock-preparation-customer-pack.cjs:312 also rejects at
+  // pack-declaration time. Locking it HERE proves this write-口 does not simply trust `ext_*`.
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: ['ext_projectNo'] })),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && error.details && error.details.namespaceReason === 'FIELD_ID_TEMPLATE_COLLISION',
+    'an `ext_` id colliding with a frozen template field is refused -- code/reason must stay stable',
+  )
+
+  // (3) positive control: a real customer-pack `ext_` id (FACTORY_A_REHEARSAL_PACK declares
+  // `ext_stockPrepDate`) is admitted unchanged -- the guard does not block the feature it exists for.
+  const action = normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: ['ext_stockPrepDate'] }))
+  assert.deepEqual(action.extensionFieldIds, ['ext_stockPrepDate'], 'a legitimate customer-pack ext_ id is admitted unchanged')
+
+  // (4) THE BOUNDARY, pinned as an accept: a shape-valid id that NO pack declares also passes here.
+  // This is not a hole being blessed -- it is the scope line. If someone later teaches this guard
+  // pack membership, this assertion goes red and they must update the ledger inventory with it.
+  const undeclaredId = PACK_EXTENSION_FIELD_IDS.includes(UNDECLARED_EXT_FIELD_ID)
+    ? null
+    : UNDECLARED_EXT_FIELD_ID
+  assert.ok(undeclaredId, 'fixture must name an ext_ id the rehearsal pack does not declare')
+  const shapeOnly = normalizeStockPreparationActionConfig(baseAction({ extensionFieldIds: [undeclaredId] }))
+  assert.deepEqual(
+    shapeOnly.extensionFieldIds,
+    [undeclaredId],
+    'namespace guard is shape-only: pack membership is NOT checked at this write-口',
+  )
+
+  // (5) where an id no pack declared is actually refused: the mapper's pack catalog.
+  assert.throws(
+    () => normalizeExtFieldMapping(
+      { mappingId: 'closeout-probe', mappingVersion: 1, mappings: [{ sourceColumn: 'A', target: undeclaredId }] },
+      { pack: FACTORY_A_REHEARSAL_PACK },
+    ),
+    (error) => error.reason === 'TARGET_NOT_DECLARED_IN_PACK',
+    'an ext_ id no customer pack declared is refused by the mapper pack catalog -- reason must stay stable',
+  )
+
+  // (6) and the second half of that wall: even a pack-DECLARED column cannot be written unless this
+  // action config declared it too (:564 -> :575).
+  const mappingToUndeclaredByAction = normalizeExtFieldMapping(
+    { mappingId: 'closeout-probe', mappingVersion: 1, mappings: [{ sourceColumn: 'A', target: 'ext_spec' }] },
+    { pack: FACTORY_A_REHEARSAL_PACK },
+  )
+  assert.throws(
+    () => tableActionInternals.assertExtFieldMappingAgreesWithAction(action, mappingToUndeclaredByAction),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TARGET_SCHEMA_INCOMPLETE'
+      && Array.isArray(error.details.undeclaredExtensionFields)
+      && error.details.undeclaredExtensionFields.includes('ext_spec'),
+    'a mapping may not write an ext_ column the action config never declared -- code must stay stable',
+  )
+}
+
 async function testApplySandboxGateFailsClosed() {
   // FOS-4b-3 P0 gate (assertStockPrepApplySandboxAllowed): fail-closed by default + canonical defense-in-depth.
   const prodTarget = { sheetId: 'sheet_prod', objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId }
@@ -1598,6 +1784,1259 @@ async function testApplySandboxGateFailsClosed() {
   const envPolicy = resolveStockPrepApplySandboxPolicy({}, { STOCK_PREP_SANDBOX_MODE: 'true', STOCK_PREP_SANDBOX_TARGET_OBJECT_IDS: 'sandbox_stock_prep' })
   assert.doesNotThrow(() => assertStockPrepApplySandboxAllowed(sandboxTarget, envPolicy), 'env policy admits allowlisted sandbox target')
   assert.throws(() => assertStockPrepApplySandboxAllowed(prodTarget, envPolicy), isGate, 'env policy still rejects prod canonical')
+}
+
+// ---------------------------------------------------------------------------------------------
+// F1c — 根选择规则是 DEPLOY CONFIG,而且必须**真的接到线上**。
+//
+// 这条守的是「开关没接线」那一类漏法:`expandPlmProjectBom` 认 `rootSelection`,但交互式 dry-run
+// 的入参是一张显式白名单(computeDryRun 里逐键列举),白名单里没有这个键,配置写了也到不了展开器。
+// 所以这里不直接调纯函数,而是从 **动作配置** 出发走完整条 dry-run —— 证明的是「部署改得动」,
+// 不是「纯函数算得对」(后者由 bom-expansion 那支测试钉住)。
+//
+// 顺带钉住同一条链上的证据:dry-run 证据里要能看见 `rootsFilteredOut`,否则操作员在 dry-run 里
+// 只看到一个变小的行数,分不清「PLM 少了件」和「我们按老系统剔了根」。
+// ---------------------------------------------------------------------------------------------
+function rootSelectionPlmData() {
+  return basePlmData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-MAIN', quantity: '1' },
+      { order_id: 'ORDER-1', part_id: 'PART-OTHER', quantity: '1' },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-MAIN', IdentityNo: 'J100-00', IdentityName: '总图', Material: 'Steel', SysVer: 'V2' },
+      { OBJ_ID: 'PART-OTHER', IdentityNo: 'B-001', IdentityName: '别的件', Material: 'Steel', SysVer: 'V1' },
+    ],
+  })
+}
+
+async function dryRunWithRootSelection(rootSelection) {
+  const source = createSourceAdapter(rootSelectionPlmData())
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+  const action = normalizeStockPreparationActionConfig(baseAction(
+    rootSelection === undefined ? {} : { rootSelection },
+  ))
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: '2026-09-11T09:00:00.000Z',
+  })
+  return { action, dryRun }
+}
+
+async function testRootSelectionIsReachableFromTheActionConfig() {
+  // 默认(配置里一个字都没写)= 老系统规则,owner 裁决的那一条:有总图就只要总图。
+  const byDefault = await dryRunWithRootSelection(undefined)
+  assert.equal('rootSelection' in byDefault.action, false, '没配过的动作不长出这个键(快照/哈希不动)')
+  assert.equal(byDefault.dryRun.counts.add, 1, '默认按老系统:只有 J…-00 总图当根,另一条订单行被剔除')
+  assert.equal(
+    byDefault.dryRun.evidence.expansion.rootsFilteredOut,
+    1,
+    '被剔掉的根数进 dry-run 证据 —— 行数变少有据可查,不是静默丢行',
+  )
+
+  // 关掉 = 回到 F1c 之前的行为。没有这条接线,任何部署都回不去。
+  const disabled = await dryRunWithRootSelection({ enabled: false })
+  assert.equal(disabled.action.rootSelection.enabled, false, '配置被归一化后留在动作上')
+  assert.equal(disabled.dryRun.counts.add, 2, '关掉规则 => 订单行全部当根,与改前同量')
+  assert.equal(
+    'rootsFilteredOut' in disabled.dryRun.evidence.expansion,
+    false,
+    '一个根都没剔就不长这个键 —— 证据对象与改前逐字节相同',
+  )
+
+  // 换一家工厂的编码约定:规则是配置,不是写死的字典。
+  const retuned = await dryRunWithRootSelection({ mainDrawingPrefix: 'B', mainDrawingSuffix: '-001' })
+  assert.equal(retuned.dryRun.counts.add, 1, '换了前后缀,当根的就换成了另一条订单行')
+  assert.equal(
+    retuned.dryRun.evidence.expansion.rootsFilteredOut,
+    1,
+    '换规则之后被剔除的根同样计数',
+  )
+
+  // 配置本身 fail-closed,而且是在**配置时**就拒(存进快照的配置不能是对实际行为的谎言)。
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ rootSelection: { mainDrawingSuffix: '' } })),
+    (error) => error instanceof StockPreparationTableActionError
+      && error.code === 'TABLE_ACTION_CONFIG_INVALID'
+      && error.details.field === 'rootSelection.mainDrawingSuffix',
+    '空后缀会让每个图号都成为总图 => 422,而不是悄悄当成「没配」',
+  )
+  assert.throws(
+    () => normalizeStockPreparationActionConfig(baseAction({ rootSelection: 'legacy' })),
+    (error) => error instanceof StockPreparationTableActionError && error.code === 'TABLE_ACTION_CONFIG_INVALID',
+    '不是对象的 rootSelection 直接拒',
+  )
+}
+
+// F1c — 同父去重的条数也必须走到 dry-run 证据里,理由同上:`summarizeBomExpansionForEvidence`
+// 是一张白名单投影,summary 上的键不写进去就永远到不了操作员眼前,而这个数是「重拉之后行数
+// 变少」的唯一解释。两条 active bomHead 指着同一条明细,正是差异A(展开器 banner 自承的重复
+// 来源)的形状。
+async function testCollapsedSiblingCountReachesDryRunEvidence() {
+  const source = createSourceAdapter(childBomPlmData({
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-A', bom_id: 'BOM-A2', SysVer: 'V1', bom_able: true },
+    ],
+    DN_PDM_BomDetailsInfo: [
+      { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3' },
+      { bom_pid: 'BOM-A2', part_id: 'PART-B', Bom_ExAttr1: '3' },
+    ],
+  }))
+  const records = createRecordsApi()
+  const dryRun = await dryRunStockPreparationAction({
+    action: normalizeStockPreparationActionConfig(baseAction()),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: createMemoryStorage(),
+    plannedAt: '2026-09-11T09:00:00.000Z',
+  })
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.counts.add, 2, '根 + 一个子件:第二条 bomHead 的同键子件被同父去重吃掉')
+  assert.equal(
+    dryRun.evidence.expansion.duplicateSiblingsCollapsed,
+    1,
+    '合并条数进 dry-run 证据 —— 操作员分得清「PLM 少了件」和「我们按老系统合并了」',
+  )
+  const evidenceJson = JSON.stringify(dryRun.evidence)
+  assert.equal(evidenceJson.includes('B-001'), false, '证据里只有计数,没有图号')
+  assert.equal(evidenceJson.includes('Bolt'), false, '证据里只有计数,没有名称')
+
+  // 反向:没合并过的那次 dry-run 证据不长这个键(与改前逐字节相同)。
+  const clean = await dryRunStockPreparationAction({
+    action: normalizeStockPreparationActionConfig(baseAction()),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(childBomPlmData()).adapter,
+    recordsApi: createRecordsApi().recordsApi,
+    tokenStore: createMemoryStorage(),
+    plannedAt: '2026-09-11T09:00:00.000Z',
+  })
+  assert.equal('duplicateSiblingsCollapsed' in clean.evidence.expansion, false)
+}
+
+// ---------------------------------------------------------------------------------------------
+// F1c-b — 客户包的 父组件图号 / 父组件名称 走完**交互链**,而且两道闸都在。
+//
+// 与 large-bom-jobs 那条(后台链)同形:两条真实调用链经过同一个规划器,但各自从不同的 seam 取
+// 「动作声明的扩展列」——交互链是 computeDryRun 里的 `extensionFieldIds: action.extensionFieldIds`,
+// 后台链是 `job.actionSnapshot.extensionFieldIds`。任何一条断线,对应链上的这两列就永远空着,而
+// 纯函数用例照样绿。所以这里从**动作配置**出发,一路走到写进目标表的那条记录上。
+// ---------------------------------------------------------------------------------------------
+const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
+
+function installedParentPackColumns() {
+  return PARENT_PACK_COLUMN_IDS.map((fieldId) => ({
+    logicalId: fieldId,
+    name: fieldId,
+    type: 'string',
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system',
+        preserveOnRefresh: false,
+        required: false,
+        key: false,
+        extension: true,
+        packId: 'factory-a-rehearsal',
+        packVersion: '1.0.0',
+      },
+    },
+  }))
+}
+
+// 父件的 IdentityName 带空格:F1c 把**当前组件**那一侧切成 名称 + 规格,父件这一侧老系统从不切。
+// 所以 父组件名称 应当是全串 'Assembly DN1200',这条也顺带钉住包列没有偷偷去拿切过的首段。
+function parentPackPlmData() {
+  return childBomPlmData({
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly DN1200', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+  })
+}
+
+async function pullParentPackRowsWith(action) {
+  const source = createSourceAdapter(parentPackPlmData())
+  const records = createRecordsApi()
+  const storage = createMemoryStorage()
+  const installedFieldProperties = installedParentPackColumns()
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    plannedAt: '2026-09-12T09:00:00.000Z',
+  })
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.counts.add, 2, '根 + 一个子件')
+  const applied = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    permission: 'write',
+  })
+  assert.equal(applied.status, 'succeeded')
+  assert.equal(applied.apply.counts.created, 2)
+  return records.calls.filter((call) => call[0] === 'createRecord').map((call) => call[1].data)
+}
+
+async function testParentPackColumnsReachTheInteractiveChain() {
+  const declared = await pullParentPackRowsWith(normalizeStockPreparationActionConfig(
+    baseAction({ extensionFieldIds: PARENT_PACK_COLUMN_IDS }),
+  ))
+  const child = declared.find((data) => data.componentSourceId === 'PART-B')
+  const root = declared.find((data) => data.componentSourceId === 'PART-A')
+  assert.ok(child && root, '这批写进目标表的是一根一子')
+  assert.equal(child.ext_parentDrawingNo, 'A-001', '交互链把 父组件图号 写进客户包列')
+  assert.equal(child.ext_parentName, 'Assembly DN1200', '父组件名称 是父件**未切分**的全串(老系统 754-755 口径)')
+  // 同源:包列与模板列是同一个值,不是两套取值规则各算一遍。
+  assert.equal(child.ext_parentDrawingNo, child.parentComponentCode, '包列 = 模板列 parentComponentCode')
+  assert.equal(child.ext_parentName, child.parentComponentName, '包列 = 模板列 parentComponentName')
+  for (const fieldId of PARENT_PACK_COLUMN_IDS.concat(['parentComponentCode', 'parentComponentName'])) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(root, fieldId),
+      false,
+      '根行无父 ⇒ ' + fieldId + ' 连键都没有,不写空串',
+    )
+  }
+
+  // 负控 = 这条断线的证据:动作没声明这两列(表上照样装着包)⇒ 交互链一个 ext_ 键都不写。
+  // 声明才是「目标表 fieldIdMap 已绑定」的凭据,派进没绑的列会让整行写入被 apply-writer 硬拒。
+  const undeclared = await pullParentPackRowsWith(normalizeStockPreparationActionConfig(baseAction()))
+  for (const data of undeclared) {
+    assert.deepEqual(
+      Object.keys(data).filter((key) => key.startsWith('ext_')),
+      [],
+      '没声明扩展列的动作写不出任何 ext_ 列',
+    )
+  }
+  assert.equal(
+    undeclared.find((data) => data.componentSourceId === 'PART-B').parentComponentCode,
+    'A-001',
+    '模板列照旧 —— 这次改动是纯加法',
+  )
+}
+
+// ---------------------------------------------------------------------------------------------
+// X4 (222/r34): the dry-run revision is a function of WHAT the batch contains, never of the order
+// two incidental reads handed it back in.
+//
+// THE FIELD SHAPE THESE CASES REPRODUCE: a project with 581 existing rows answered four consecutive
+// READ-ONLY dry-runs with identical counts (update 579 / skip 2) and 1490 byte-identical leaf keys,
+// and four DIFFERENT revisions that then began repeating — a permutation of a finite set, not a
+// clock. Apply re-expands and re-reads before comparing, so every `--apply` 409'd
+// TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH on a batch nobody had touched.
+// ---------------------------------------------------------------------------------------------
+const X4_PLANNED_AT = '2026-06-04T09:00:00.000Z'
+// ONE pull stamps every row it touched with the SAME 最近刷新时间 — which is precisely why a refresh
+// stamp cannot order rows: it does not tell them apart. It rides in as CONTENT (R-c asserts it).
+const X4_EXISTING_REFRESH_STAMP = '2026-09-10T22:10:00.000Z'
+const X4_ROOT_SEEDS = [
+  { componentSourceId: 'PART-A', componentCode: 'A-001', componentName: 'Assembly', material: 'Steel', quantity: '2' },
+  { componentSourceId: 'PART-B', componentCode: 'B-001', componentName: 'Bolt', material: 'Iron', quantity: '3' },
+  { componentSourceId: 'PART-C', componentCode: 'C-001', componentName: 'Cover', material: 'Alu', quantity: '4' },
+]
+
+// Three order roots, so the read order is something the fixture can actually vary.
+function multiRootPlmData(overrides = {}) {
+  return basePlmData({
+    DN_PDM_OrderDetailInfo: X4_ROOT_SEEDS.map((seed) => ({
+      order_id: 'ORDER-1',
+      part_id: seed.componentSourceId,
+      quantity: seed.quantity,
+    })),
+    DN_PDM_PartLibraryInfo: X4_ROOT_SEEDS.map((seed) => ({
+      OBJ_ID: seed.componentSourceId,
+      IdentityNo: seed.componentCode,
+      IdentityName: seed.componentName,
+      Material: seed.material,
+      SysVer: 'V1',
+    })),
+    ...overrides,
+  })
+}
+
+// The SAME batch, handed back in the opposite order — the one thing an MSSQL read with no total
+// order over equal sort numbers is free to do between two calls.
+function reshuffledPlmData(data) {
+  const out = clone(data)
+  for (const key of Object.keys(out)) if (Array.isArray(out[key])) out[key].reverse()
+  return out
+}
+
+function x4ExistingRowData(seed, overrides = {}) {
+  return {
+    projectNo: 'P-001',
+    idempotencyKey: JSON.stringify({
+      projectNo: 'P-001',
+      componentSourceId: seed.componentSourceId,
+      parentSourceId: null,
+      path: [seed.componentSourceId],
+    }),
+    componentSourceId: seed.componentSourceId,
+    parentSourceId: null,
+    path: JSON.stringify([seed.componentSourceId]),
+    depth: 0,
+    componentCode: seed.componentCode,
+    componentName: seed.componentName,
+    material: seed.material,
+    sourceVersion: 'V1',
+    rawQuantity: Number(seed.quantity),
+    totalQuantity: Number(seed.quantity),
+    active: true,
+    lastPlmRefreshAt: X4_EXISTING_REFRESH_STAMP,
+    lastPlmRefreshRunId: 'run-r33',
+    notes: 'operator note ' + seed.componentSourceId,
+    ...overrides,
+  }
+}
+
+// Host row shape #1 — what the multitable records service actually returns: the payload lives under
+// `data`, so `unmapRecordFields` projects the record down to its columns and the record id never
+// reaches the revision. Identity there is the idempotencyKey.
+function x4ExistingRecords(overridesByComponent = {}) {
+  return X4_ROOT_SEEDS.map((seed, index) => ({
+    id: 'rec_' + (index + 1),
+    sheetId: 'sheet_stock',
+    version: 1,
+    data: x4ExistingRowData(seed, overridesByComponent[seed.componentSourceId] || {}),
+  }))
+}
+
+// Host row shape #2 — a records API that answers with FLAT rows. `unmapRecordFields` passes those
+// through whole, so `id` IS part of the hashed row here, and it is the identity the canonical order
+// uses. Both shapes have to be order-blind; only this one exercises the id branch.
+function createFlatRecordsApi(rows) {
+  return {
+    async queryRecords(input = {}) {
+      return rows
+        .filter((row) => Object.entries(input.filters || {}).every(([field, value]) => row[field] === value))
+        .map(clone)
+    },
+    async createRecord() {
+      throw new Error('X4 read-only fixture: createRecord must not be reached')
+    },
+    async patchRecord() {
+      throw new Error('X4 read-only fixture: patchRecord must not be reached')
+    },
+  }
+}
+
+async function x4DryRun({ plmData = multiRootPlmData(), recordsApi, action = baseAction() } = {}) {
+  return dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(plmData).adapter,
+    recordsApi,
+    tokenStore: createMemoryStorage(),
+    plannedAt: X4_PLANNED_AT,
+  })
+}
+
+// R-a. Same expanded batch, two source orders => one revision.
+async function testDryRunRevisionIsBlindToExpandedRowOrder() {
+  const forward = await x4DryRun({ recordsApi: createRecordsApi().recordsApi })
+  const reshuffled = await x4DryRun({
+    plmData: reshuffledPlmData(multiRootPlmData()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+
+  assert.equal(forward.status, 'ready')
+  assert.equal(forward.counts.add, 3, 'three order roots expand to three rows')
+  assert.deepEqual(reshuffled.counts, forward.counts, 'a reshuffled read plans the same batch')
+  assert.equal(
+    reshuffled.revision,
+    forward.revision,
+    'the same expanded batch in two source orders hashes to ONE revision',
+  )
+
+  // …and the permutation is REAL rather than a fixture that never varied, stated through the same
+  // hasher: the two orders hashed AS THEY ARRIVE (what buildRevision used to do) are two digests.
+  const asRead = X4_ROOT_SEEDS.map((seed) => x4ExistingRowData(seed))
+  assert.notEqual(
+    tableActionInternals.hashJson(asRead),
+    tableActionInternals.hashJson(asRead.slice().reverse()),
+    'hashing an array as-read is order-sensitive — that is the bug this test would miss otherwise',
+  )
+}
+
+// R-b. Same existing rows, two records-read orders => one revision. Both host row shapes.
+async function testDryRunRevisionIsBlindToExistingRowOrder() {
+  const forwardRecords = createRecordsApi({ existing: x4ExistingRecords() })
+  const reshuffledRecords = createRecordsApi({ existing: x4ExistingRecords().reverse() })
+  assert.notDeepEqual(
+    forwardRecords.rows.map((record) => record.id),
+    reshuffledRecords.rows.map((record) => record.id),
+    'the fixture really does hand the existing rows back in two different orders',
+  )
+
+  const forward = await x4DryRun({ recordsApi: forwardRecords.recordsApi })
+  const reshuffled = await x4DryRun({ recordsApi: reshuffledRecords.recordsApi })
+  assert.equal(forward.status, 'ready')
+  assert.deepEqual(reshuffled.counts, forward.counts, 'a reshuffled existing-row read plans the same batch')
+  assert.equal(
+    reshuffled.revision,
+    forward.revision,
+    'existing rows returned in two page orders hash to ONE revision',
+  )
+
+  // The flat-row host: `id` is part of the row here and is the identity the order is built on.
+  const flatRows = X4_ROOT_SEEDS.map((seed, index) => ({ id: 'rec_' + (index + 1), ...x4ExistingRowData(seed) }))
+  const flatForward = await x4DryRun({ recordsApi: createFlatRecordsApi(flatRows) })
+  const flatReshuffled = await x4DryRun({ recordsApi: createFlatRecordsApi(flatRows.slice().reverse()) })
+  assert.equal(flatForward.status, 'ready')
+  assert.equal(
+    flatReshuffled.revision,
+    flatForward.revision,
+    'a host that answers with flat rows is order-blind too (record id is the identity there)',
+  )
+}
+
+// R-c. The pre-existing promise, unweakened: any row value that moves moves the revision. Order was
+// removed from the hash; CONTENT was not reduced, deduped or rounded away.
+async function testDryRunRevisionStillMovesWhenAnyRowValueMoves() {
+  const baseline = await x4DryRun({ recordsApi: createRecordsApi({ existing: x4ExistingRecords() }).recordsApi })
+
+  // (1) one EXPANDED row's value changes (PLM quantity 4 -> 9 on PART-C).
+  const shiftedSource = multiRootPlmData()
+  shiftedSource.DN_PDM_OrderDetailInfo = shiftedSource.DN_PDM_OrderDetailInfo.map((detail) => (
+    detail.part_id === 'PART-C' ? { ...detail, quantity: '9' } : detail
+  ))
+  const expandedShift = await x4DryRun({
+    plmData: shiftedSource,
+    recordsApi: createRecordsApi({ existing: x4ExistingRecords() }).recordsApi,
+  })
+  assert.notEqual(expandedShift.revision, baseline.revision, 'one expanded row value moves the revision')
+
+  // (2) one EXISTING row's value changes — and deliberately a column the PLAN cannot see: the run
+  // band (最近刷新时间) is excluded from the refresh comparison, so the counts are identical and the
+  // ONLY thing that could move the revision is the row content itself.
+  const stampShift = await x4DryRun({
+    recordsApi: createRecordsApi({
+      existing: x4ExistingRecords({ 'PART-B': { lastPlmRefreshAt: '2026-09-11T01:02:03.000Z' } }),
+    }).recordsApi,
+  })
+  assert.deepEqual(stampShift.counts, baseline.counts, 'the run band does not change what will be written')
+  assert.notEqual(stampShift.revision, baseline.revision, 'one existing row value moves the revision anyway')
+
+  // (3) same, on a HUMAN column the refresh never writes.
+  const noteShift = await x4DryRun({
+    recordsApi: createRecordsApi({
+      existing: x4ExistingRecords({ 'PART-A': { notes: 'operator changed the note' } }),
+    }).recordsApi,
+  })
+  assert.deepEqual(noteShift.counts, baseline.counts)
+  assert.notEqual(noteShift.revision, baseline.revision, 'a human column edit moves the revision too')
+}
+
+// R-d. End to end, the 222 failure itself: dry-run on order A, apply re-expands and re-reads in
+// order B. Before X4 this was a 409 on a batch nobody touched.
+async function testApplyAcceptsATokenWhenBothRecomputedReadsCameBackReshuffled() {
+  const storage = createMemoryStorage()
+  const records = createRecordsApi({ existing: x4ExistingRecords() })
+  const action = baseAction()
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(multiRootPlmData()).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'ready')
+  assert.equal(dryRun.canApply, true)
+
+  // BOTH reads come back in the other order for the apply-side recompute. Same rows, same store —
+  // only the order of the array the reads produce.
+  records.rows.reverse()
+  const result = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(reshuffledPlmData(multiRootPlmData())).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'write',
+  })
+
+  assert.equal(result.status, 'succeeded', 'a reshuffled recompute applies instead of 409ing')
+  assert.equal(Number(result.apply.counts.failed || 0), 0, 'and nothing failed on the way in')
+  assert.equal(
+    JSON.stringify(result.evidence).includes('P-001'),
+    false,
+    'apply evidence stays values-free',
+  )
+}
+
+// R-e. The tie-breaker, made load-bearing. Two expanded rows can legitimately share ONE
+// idempotencyKey — duplicate_expanded_key is a planned-for shape here, not a corruption — and
+// identity alone leaves them TIED. A tied sort keeps INPUT order, i.e. exactly the nondeterminism
+// X4 removes, so the canonical order breaks ties on the row's own content.
+//
+// SCOPE, stated: one duplicate GROUP, i.e. the tie-breaker INSIDE a group. Several groups reorder
+// the planner's own diagnostics arrays as well, which is a different seam with its own case —
+// testDryRunRevisionIsBlindToTheOrderOfSeveralDuplicateGroups.
+async function testDryRunRevisionIsBlindToTheOrderInsideADuplicateKeyGroup() {
+  const forward = await x4DryRun({
+    plmData: duplicateRootPlmData(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  const reshuffled = await x4DryRun({
+    plmData: reshuffledPlmData(duplicateRootPlmData()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+
+  assert.equal(forward.status, 'manual_confirm_required', 'two order lines on one part are HELD, not written')
+  assert.deepEqual(reshuffled.counts, forward.counts, 'the hold is the same hold in either order')
+  assert.equal(
+    reshuffled.revision,
+    forward.revision,
+    'two rows sharing one idempotencyKey hash to ONE revision whichever came back first',
+  )
+}
+
+// R-e2 (X4-c). SEVERAL duplicate groups — the seam the three-array fix did NOT reach. The review's
+// `selectedPolicies` is `groups.map(...)` over the duplicate diagnostics and the planner's
+// `resolvedPolicies` / `heldPolicies` are pushed as it walks the same map, so both arrays inherit
+// the expansion order and both are hashed whole. Two groups, two source orders, and the revision
+// moved — on a batch that is `ready`, needs no operator action, and 409'd on apply.
+//
+// BOTH shapes are asserted because they are reached differently: HELD needs nothing but the
+// duplicate (`manual_confirm_required`, still applyable with acceptManualConfirmHold), RESOLVED is
+// the plain `ready` batch a saved table-scope keep_multiple_rows policy produces.
+function twoDuplicateGroupsPlmData(overrides = {}) {
+  return basePlmData({
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: '10' },
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '3', sort_id: '20' },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: '4', sort_id: '30' },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: '5', sort_id: '40' },
+    ],
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+    ...overrides,
+  })
+}
+
+async function keepMultipleRowsPolicyStoreForBothGroups() {
+  const storage = createMemoryStorage()
+  await saveTableScopeConflictPolicies({
+    action: normalizeStockPreparationActionConfig(baseAction()),
+    policyStore: storage,
+    approver: 'admin-user',
+    request: {
+      conflictType: 'duplicate_expanded_key',
+      policies: [
+        { fingerprint: rootPartFingerprint('P-001', 'PART-A'), policy: 'keep_multiple_rows' },
+        { fingerprint: rootPartFingerprint('P-001', 'PART-B'), policy: 'keep_multiple_rows' },
+      ],
+    },
+  })
+  return storage
+}
+
+async function twoGroupDryRun({ plmData, policyStore, tokenStore, recordsApi }) {
+  return dryRunStockPreparationAction({
+    action: baseAction(),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(plmData).adapter,
+    recordsApi,
+    tokenStore: tokenStore || createMemoryStorage(),
+    policyStore,
+    plannedAt: X4_PLANNED_AT,
+  })
+}
+
+async function testDryRunRevisionIsBlindToTheOrderOfSeveralDuplicateGroups() {
+  // (1) HELD: two groups, no policy at all. Applyable (acceptManualConfirmHold), so a moving
+  // revision is a 409 an operator can actually hit.
+  const heldForward = await twoGroupDryRun({
+    plmData: twoDuplicateGroupsPlmData(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  const heldReshuffled = await twoGroupDryRun({
+    plmData: reshuffledPlmData(twoDuplicateGroupsPlmData()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  assert.equal(heldForward.status, 'manual_confirm_required')
+  assert.equal(heldForward.canApply, true, 'a held duplicate batch still mints a token')
+  assert.equal(
+    heldForward.evidence.plan.duplicateExpandedKeyResolution.heldGroupCount,
+    2,
+    'the fixture really does produce TWO held groups (one group would not exercise this)',
+  )
+  assert.deepEqual(heldReshuffled.counts, heldForward.counts)
+  assert.equal(
+    heldReshuffled.revision,
+    heldForward.revision,
+    'two HELD duplicate groups hash to ONE revision in either source order',
+  )
+
+  // (2) RESOLVED: the same two groups with a saved table-scope keep_multiple_rows policy. Plain
+  // `ready`, nothing for an operator to accept — and this is the shape that 409'd before X4-c.
+  const resolvedForward = await twoGroupDryRun({
+    plmData: twoDuplicateGroupsPlmData(),
+    policyStore: await keepMultipleRowsPolicyStoreForBothGroups(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  const resolvedReshuffled = await twoGroupDryRun({
+    plmData: reshuffledPlmData(twoDuplicateGroupsPlmData()),
+    policyStore: await keepMultipleRowsPolicyStoreForBothGroups(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  assert.equal(resolvedForward.status, 'ready')
+  assert.equal(resolvedForward.counts.add, 4)
+  assert.equal(
+    resolvedForward.evidence.plan.duplicateExpandedKeyResolution.resolvedGroupCount,
+    2,
+    'both groups are auto-resolved — no operator action is involved in this path',
+  )
+  assert.deepEqual(resolvedReshuffled.counts, resolvedForward.counts)
+  assert.equal(
+    resolvedReshuffled.revision,
+    resolvedForward.revision,
+    'two RESOLVED duplicate groups hash to ONE revision in either source order',
+  )
+
+  // …and the permutation is real: the two orders put the groups' fingerprints on the wire in
+  // opposite order, which is exactly what used to reach the hash.
+  const forwardFingerprints = resolvedForward.evidence.plan.duplicateExpandedKeyResolution
+    .resolvedPolicies.map((row) => row.fingerprint)
+  const reshuffledFingerprints = resolvedReshuffled.evidence.plan.duplicateExpandedKeyResolution
+    .resolvedPolicies.map((row) => row.fingerprint)
+  assert.notDeepEqual(
+    forwardFingerprints,
+    reshuffledFingerprints,
+    'the planner summary the CALLER sees keeps its expansion order — only the hash copy is sorted',
+  )
+  assert.deepEqual(
+    forwardFingerprints.slice().sort(),
+    reshuffledFingerprints.slice().sort(),
+    '…and it is the same two groups either way',
+  )
+
+  // (3) END TO END, the 222 failure on this shape: dry-run on order A, apply re-expands in order B.
+  const storage = await keepMultipleRowsPolicyStoreForBothGroups()
+  const records = createRecordsApi()
+  const action = baseAction()
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(twoDuplicateGroupsPlmData()).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'ready')
+  const result = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(reshuffledPlmData(twoDuplicateGroupsPlmData())).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    policyStore: storage,
+    permission: 'write',
+    acceptDuplicateResolution: true,
+  })
+  assert.equal(result.status, 'succeeded', 'a reshuffled recompute of a two-group batch applies instead of 409ing')
+  assert.equal(Number(result.apply.counts.created || 0), 4)
+}
+
+// R-f. The third hashed array. `rowErrors` is a BOUNDED SAMPLE taken in production order, so two
+// reads of the same broken batch can retain the same entries in a different order. It carries no
+// row identity at all (the entries are values-free {type, field, depth, relation} stanzas), so its
+// canonical order is its content — and the two entries below are DIFFERENT stanzas, which is what
+// makes the ordering observable rather than a no-op on identical objects.
+async function testDryRunRevisionIsBlindToRowErrorOrder() {
+  const brokenBatch = () => basePlmData({
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2' },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: 'not-a-number' },
+      { order_id: 'ORDER-1', part_id: 'PART-MISSING', quantity: '1' },
+    ],
+  })
+
+  const forward = await x4DryRun({ plmData: brokenBatch(), recordsApi: createRecordsApi().recordsApi })
+  const reshuffled = await x4DryRun({
+    plmData: reshuffledPlmData(brokenBatch()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+
+  assert.equal(forward.status, 'manual_confirm_required')
+  assert.equal(forward.counts.manual_confirm, 2, 'two DIFFERENT row errors — a bad quantity and a missing part')
+  assert.deepEqual(reshuffled.counts, forward.counts)
+  assert.equal(
+    reshuffled.revision,
+    forward.revision,
+    'the same retained row-error sample in two orders hashes to ONE revision',
+  )
+}
+
+// X5. THE RESIDUAL R-f NAMED, and the 409 a canonical hash order could not remove.
+//
+// Past the cap the rowError array is a SAMPLE, and until X5 it was the sample the source happened
+// to produce first. With one slot, a batch holding one bad quantity and one missing part kept the
+// bad quantity read one way and the missing part read the other — and the planner emits one
+// manual_confirm decision per RETAINED entry, so the two dry-runs previewed genuinely different
+// plans (`conflictTypes` [add_missing, invalid_quantity] vs [add_missing, missing_component]).
+// Different plans MUST hash differently; the fix had to be in the expander's SELECTION, which now
+// keeps the N entries that sort first by row identity (stock-preparation-bom-expansion.cjs,
+// ROW_ERROR_IDENTITY_FIELDS). This is the end-to-end statement of that: same batch, two source
+// orders, one revision, one conflictTypes, and an apply that goes through.
+//
+// `rowErrorLimit: 1` is a REAL action-config key (testRowErrorLimitIsAConditionalActionConfigKey),
+// not a test hook — it is how a two-row fixture stands in for a 40k-position project past 5000.
+function x5BrokenBatchPlmData() {
+  return basePlmData({
+    DN_PDM_PartLibraryInfo: [
+      { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+      { OBJ_ID: 'PART-B', IdentityNo: 'B-001', IdentityName: 'Bolt', Material: 'Iron', SysVer: 'V1' },
+    ],
+    DN_PDM_OrderDetailInfo: [
+      { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2' },
+      { order_id: 'ORDER-1', part_id: 'PART-B', quantity: 'not-a-number' },
+      { order_id: 'ORDER-1', part_id: 'PART-MISSING', quantity: '1' },
+    ],
+  })
+}
+
+async function testATruncatedRowErrorSamplePlansTheSameWayInEitherSourceOrder() {
+  const action = baseAction({ rowErrorLimit: 1 })
+  const forward = await x4DryRun({
+    action,
+    plmData: x5BrokenBatchPlmData(),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+  const reshuffled = await x4DryRun({
+    action,
+    plmData: reshuffledPlmData(x5BrokenBatchPlmData()),
+    recordsApi: createRecordsApi().recordsApi,
+  })
+
+  // The cap fired, and the overflow facts are the TRUE totals on both sides — the sample lost an
+  // entry, the counts lost nothing.
+  assert.equal(forward.evidence.expansion.rowErrorsTruncated, true, 'one slot for two defects: the cap really fired')
+  assert.equal(forward.evidence.expansion.rowErrorsRetained, 1)
+  assert.deepEqual(
+    forward.evidence.expansion.rowErrorTypeCounts,
+    { invalid_quantity: 1, missing_component: 1 },
+    'both defects are counted however few were retained',
+  )
+  // The overflow stanza and the type vocabulary, key by key. NOT the whole expansion stanza: the
+  // read trace (`readDiagnostics`) records the per-object row counts IN READ ORDER and legitimately
+  // differs between the two orders — it is a trace of the reads, not a projection of the batch, and
+  // the revision does not hash it.
+  for (const key of ['rowErrorsTruncated', 'rowErrorsTotal', 'rowErrorsRetained', 'rowErrorTypeCounts', 'errorTypes']) {
+    assert.deepEqual(
+      reshuffled.evidence.expansion[key],
+      forward.evidence.expansion[key],
+      `the overflow stanza is order-blind: ${key}`,
+    )
+  }
+
+  // THE PLAN — the thing X4 could not make agree, because the two plans really were different.
+  assert.deepEqual(
+    forward.evidence.plan.conflictTypes,
+    ['add_missing', 'invalid_quantity'],
+    'the retained entry is the identity-first one, so the plan is the same plan in either order',
+  )
+  assert.deepEqual(reshuffled.evidence.plan.conflictTypes, forward.evidence.plan.conflictTypes)
+  assert.deepEqual(reshuffled.counts, forward.counts)
+  assert.equal(reshuffled.revision, forward.revision, 'one batch, two source orders, ONE revision')
+
+  // End to end: dry-run reads order A, apply re-expands in order B and must still recognise its own
+  // token. Before X5 this was `does not match the current dry-run revision` — a 409 on a batch
+  // nobody had touched.
+  const storage = createMemoryStorage()
+  const records = createRecordsApi()
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(x5BrokenBatchPlmData()).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'manual_confirm_required')
+  assert.equal(dryRun.revision, forward.revision)
+
+  const result = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(reshuffledPlmData(x5BrokenBatchPlmData())).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'write',
+    // The hold is REAL and stays a hold — this test is about the token surviving the reshuffle, not
+    // about waving the manual-confirm gate through.
+    acceptManualConfirmHold: true,
+  })
+  assert.equal(result.status, 'partial', 'the apply runs instead of 409ing on a batch nobody touched')
+  assert.equal(Number(result.apply.counts.created || 0), 1, 'the add row is written')
+  assert.equal(Number(result.apply.counts.held || 0), 1, 'and the manual-confirm row is still held')
+  assert.equal(Number(result.apply.counts.failed || 0), 0)
+}
+
+// R-g. The other half of the bound: the canonical order is for the HASH ONLY. `computeDryRun`
+// hands `expansion` and `existingRows` back BY REFERENCE, and the row order the planner sees is the
+// order the apply writer creates rows in — i.e. the order the operator will read the 备料表 in. A
+// sort that leaked out of the hash would silently re-order the customer's sheet.
+//
+// The fixture is chosen so the two orders CANNOT be confused: the source hands the batch back
+// C, B, A, while the canonical (idempotencyKey) order is A, B, C.
+async function testTheCanonicalHashOrderNeverReordersWhatGetsWritten() {
+  const storage = createMemoryStorage()
+  const records = createRecordsApi()
+  const action = baseAction()
+  const plmData = reshuffledPlmData(multiRootPlmData())
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(plmData).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.counts.add, 3)
+
+  const result = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(plmData).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'write',
+  })
+  assert.equal(result.status, 'succeeded')
+
+  const written = records.calls
+    .filter((call) => call[0] === 'createRecord')
+    .map((call) => call[1].data.componentSourceId)
+  assert.deepEqual(
+    written,
+    ['PART-C', 'PART-B', 'PART-A'],
+    'rows are written in SOURCE order — the hash sort never reaches the writer',
+  )
+
+  // …and the copy stated DIRECTLY on the seam that sorts, because the end-to-end half above
+  // cannot prove it: this module plans BEFORE it hashes, so an in-place sort would not move
+  // ITS writes. The consumer that would move is the one reading `expansion.rows` AFTER the
+  // revision exists — `prepareStockPreparationMvpSnapshot` returns that very array as
+  // `expansionResult`, i.e. the snapshot line order, and the large-BOM boundedPreview slices it.
+  const hashedRows = ['PART-C', 'PART-B', 'PART-A'].map((componentSourceId) => x4ExistingRowData({
+    componentSourceId,
+    componentCode: componentSourceId + '-CODE',
+    componentName: componentSourceId + ' name',
+    material: 'Steel',
+    quantity: '2',
+  }))
+  const hashedExisting = hashedRows.slice().reverse()
+  const beforeHashing = clone({ rows: hashedRows, existingRows: hashedExisting })
+  tableActionInternals.buildRevision({
+    action: ROW_ERROR_REVISION_ACTION,
+    parameters: { projectNo: 'P-001' },
+    expansion: { status: 'ready', rows: hashedRows, errors: [], rowErrors: [] },
+    existingRows: hashedExisting,
+    conflictPolicyReview: null,
+    plan: null,
+  })
+  assert.deepEqual(
+    { rows: hashedRows, existingRows: hashedExisting },
+    beforeHashing,
+    'buildRevision hashes a COPY — the arrays it was handed keep their production order',
+  )
+}
+
+// ---------------------------------------------------------------------------------------------
+// X6 — 来料没这个键 ≠ 变更。#5625(大 BOM 接带)的 M2 探针形状,从动作配置一路走到 dry-run 计数与
+// apply 的 patch:一批存量带 `ext_` 值(包列已装、在 plm_system 可写 band 里)、来料上**没有**这个
+// 键 ⇒ counts.update 不含这些行。X6 之前每一行都是一条 update —— 默认部署真的对每行发一次
+// patchRecord,并在 lastPlmConflictSummary 写下点名 ext_ 列、而 patch 里没有它的理由;配了生产策略
+// 的部署则被 maxCleanRows 拦成 403。M1(把收窄去掉)⇒ 本用例红。
+// ---------------------------------------------------------------------------------------------
+const X6_EXT_FIELD_ID = 'ext_designer'
+
+function installedX6ExtColumn() {
+  return [{
+    logicalId: X6_EXT_FIELD_ID,
+    name: X6_EXT_FIELD_ID,
+    type: 'string',
+    property: {
+      stockPreparation: {
+        ownership: 'plm_system',
+        preserveOnRefresh: false,
+        required: false,
+        key: false,
+        extension: true,
+        packId: 'factory-a-rehearsal',
+        packVersion: '1.0.0',
+      },
+    },
+  }]
+}
+
+async function testX6DryRunDoesNotCountRowsWhoseIntakeLacksTheExtColumn() {
+  // 三条存量根行,ext_ 列上三种真实形状:有值 / 有值 / 空串(F1c-b 终审 r2 的根行)。来料(multiRoot
+  // 展开)上没有任何 ext_ 键 —— 没有映射、也没有派生这一列的规则。
+  const existingShapes = {
+    'PART-A': { [X6_EXT_FIELD_ID]: '设计员甲' },
+    'PART-B': { [X6_EXT_FIELD_ID]: '设计员乙' },
+    'PART-C': { [X6_EXT_FIELD_ID]: '' },
+  }
+  const installedFieldProperties = installedX6ExtColumn()
+  const action = baseAction()
+
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(multiRootPlmData()).adapter,
+    recordsApi: createRecordsApi({ existing: x4ExistingRecords(existingShapes) }).recordsApi,
+    tokenStore: createMemoryStorage(),
+    installedFieldProperties,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'ready')
+  // 这一列**确实在**比较 band 里 —— 不然下面的 update:0 是空话。
+  assert.ok(dryRun.evidence.plan.plmSystemFields.includes(X6_EXT_FIELD_ID), '包列在 plm_system 可写/比较 band 里')
+  assert.deepEqual(
+    dryRun.counts,
+    { add: 0, update: 0, skip: 3, inactive: 0, manual_confirm: 0 },
+    '来料不带 ext_ 键 ⇒ 三条存量都是 SKIP(X6 之前 update:3,每条都是空 update)',
+  )
+  assert.equal(JSON.stringify(dryRun.evidence).includes('设计员'), false, 'dry-run 证据不带 ext_ 列的值')
+
+  // 对照:同一批里一条行的 PLM 数量变了 ⇒ 那一行照常 update,另外两行仍 SKIP;apply 发出的 patch 里
+  // 没有来料没给的 ext_ 列,理由也不点名它(#5625 代价 (b))。
+  const shiftedSource = multiRootPlmData()
+  shiftedSource.DN_PDM_OrderDetailInfo = shiftedSource.DN_PDM_OrderDetailInfo.map((detail) => (
+    detail.part_id === 'PART-C' ? { ...detail, quantity: '9' } : detail
+  ))
+  const storage = createMemoryStorage()
+  const records = createRecordsApi({ existing: x4ExistingRecords(existingShapes) })
+  const shiftedDryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(shiftedSource).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(shiftedDryRun.status, 'ready')
+  assert.deepEqual(
+    shiftedDryRun.counts,
+    { add: 0, update: 1, skip: 2, inactive: 0, manual_confirm: 0 },
+    '真变了的那一行才 update;来料缺 ext_ 键的其余两行仍 SKIP',
+  )
+  const applied = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: shiftedDryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(shiftedSource).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    permission: 'write',
+  })
+  assert.equal(applied.status, 'succeeded')
+  assert.equal(applied.apply.counts.updated, 1, 'apply 只对真变了的那一行发 patchRecord')
+  const patchCalls = records.calls.filter((call) => call[0] === 'patchRecord')
+  assert.equal(patchCalls.length, 1)
+  const changes = patchCalls[0][1].changes
+  assert.equal(Object.prototype.hasOwnProperty.call(changes, X6_EXT_FIELD_ID), false, 'patch 里没有来料没给的 ext_ 列')
+  assert.equal(changes.lastPlmRefreshDecision, DECISIONS.UPDATE)
+  const reason = JSON.parse(changes.lastPlmConflictSummary)
+  assert.equal(reason.type, 'plm_system_refresh')
+  assert.equal(reason.changedFields.includes(X6_EXT_FIELD_ID), false, 'lastPlmConflictSummary 不点名 patch 里没有的列')
+  assert.ok(reason.changedFields.includes('rawQuantity'), '理由列的是真变了的列')
+  // 存量的 ext_ 值原样留在表上,一个字没动。
+  const untouched = records.rows.filter((record) => record.data.componentSourceId !== 'PART-C')
+  assert.deepEqual(
+    untouched.map((record) => record.data[X6_EXT_FIELD_ID]).sort(),
+    ['设计员乙', '设计员甲'].sort(),
+    '没被写的两行的 ext_ 值还是原来的',
+  )
+  assert.equal(records.rows.find((record) => record.data.componentSourceId === 'PART-C').data[X6_EXT_FIELD_ID], '', '被 update 的那一行的 ext_ 空串也没被动')
+
+  // 反驳 r1 blocker A2 / B1、反驳 r2 blocker A1 / B1 —— 「没有任何一格取值改变」**不成立**;r1 的
+  // 有界表述「除四列刷新戳外没有任何业务列的取值改变」仍偏宽(行级是表示层不实、批级是绝对句),r2
+  // 收成带主语与边界的形式:
+  //   **在 X6 之前就会被写的既有行上**,除 runPatch 的四列刷新戳(lastPlmRefreshRunId / lastPlmRefreshAt /
+  //   lastPlmRefreshDecision / lastPlmConflictSummary)外,没有任何业务列的**语义**取值改变。
+  //   边界一(表示层):comparator(valuesEqualForTemplateField)判等但存量落盘表示与来料不同的格
+  //   (number 列存着数字串 ↔ 来料数字;string/date/select 列存着数字/布尔 ↔ 来料字符串),此前会随那次
+  //   空 update 被 apply-writer 归一化重写 —— 那次 patch 是 pickFields 的**全部**已给值 plm 列 + 四列戳,
+  //   不只 changed 列;X6 之后该行 SKIP,保持存量表示。这是表示层差异,不是取值差异。可达前提:存量经
+  //   unmapRecordFields 只换键名、不做类型归一化,人工 / 导入 / 早期写入留下的表示可与来料不同。
+  //   边界二(批级):lineage / identity 调用点收窄后 plan.valid(planner :1687 `counts[MANUAL_CONFIRM] === 0`)
+  //   可由 false 翻 true;放开的是**三类**写,不止 add:
+  //     (1) add —— 新建行的业务列由「整批 409 不落表」变成「落表」,见 testX6AbsentIdentityKeyDoesNotHoldTheDryRun;
+  //     (2) mark_inactive —— 存量里不在本批的 active 既有行,`active` 由 true 翻成 false(planner :1437-1440
+  //         makeInactiveDecision 的 patch = { active:false } + 四列刷新戳);
+  //     (3) 同批其余 update —— 既有行的完整 pickFields 补丁(全部已给值 plm 列,不只 changed 列)。
+  //     三类一起由 planner 侧 testX6AbsentIdentityKeyAlsoReleasesInactiveAndSameBatchUpdates 钉住。
+  //     生产闸 cleanRowCount = add + update(stock-preparation-table-actions.cjs:2191)**不数 inactive**:
+  //     「X6 让闸的触发量变小」只约束 (1)(3),**不约束 (2)** —— mark_inactive 的写本来就在 maxCleanRows
+  //     覆盖面之外,X6 之前唯一拦住它的就是整批 409。
+  //   边界三(确认账本,首次部署一次性):凡 plan.counts 移动的项目,其 dry-run revision 随之变
+  //     (stock-preparation-table-actions.cjs:1285-1287 把 plan.counts / valid / conflictTypes 折进 revision;
+  //     :1705-1711 同一 buildRevision 结果作为 sourceRevision 进确认账本)⇒ 账本 inputFingerprint 变
+  //     (stock-preparation-confirmation-decisions.cjs:693-698 折入 sourceRevision)⇒ 该项目里
+  //     duplicate_expanded_key / carry 的既有 pending / confirmed 行被 supersede 并重开为 pending(:1000-1007),
+  //     确认读回按 decisionId + inputFingerprint 双绑不再命中(:1613-1615)⇒ 重复组当轮回到 hold、apply 409,
+  //     需要重新确认一次(旧的人工决定按设计不带过来)。方向与 (1)(3) 的「409 → 落表」相反,是一次性部署
+  //     效应、不是数据回归;222 一次性部署说明与账本查询口径见
+  //     docs/development/takeover-beiliao-20260821/autonomous-24h-run-20260910.md:251。
+  // 四列戳本身:X6 之前这两行每轮都被写成本次 run 的值(runId / plannedAt / 'update' / 点名 ext_ 列的
+  // 理由);X6 之后 SKIP 决策没有 patch,四列停在**上一次真变更**留下的值(X4 fixture 里的 run-r33 /
+  // X4_EXISTING_REFRESH_STAMP)——这正是 project-board 对 `lastChangedFromPlmAt`(取 lastPlmRefreshAt
+  // 的最大值)声明的「最近变更、不是最近同步」语义,也是 suggestion-operators 按 lastPlmRefreshAt 排
+  // 新近度时拿到的值。被 update 的那一行照常盖本次戳。
+  for (const record of untouched) {
+    assert.equal(record.data.lastPlmRefreshRunId, 'run-r33', '没被写的行:lastPlmRefreshRunId 停在上一次真变更(X6 之前每轮盖成本次 runId)')
+    assert.equal(record.data.lastPlmRefreshAt, X4_EXISTING_REFRESH_STAMP, '没被写的行:lastPlmRefreshAt 停在上一次真变更(X6 之前每轮盖成本次 plannedAt)')
+    assert.equal(Object.prototype.hasOwnProperty.call(record.data, 'lastPlmRefreshDecision'), false, '没被写的行:本轮没盖 decision')
+    assert.equal(Object.prototype.hasOwnProperty.call(record.data, 'lastPlmConflictSummary'), false, '没被写的行:本轮没写理由')
+  }
+  const written = records.rows.find((record) => record.data.componentSourceId === 'PART-C')
+  assert.notEqual(written.data.lastPlmRefreshRunId, 'run-r33', '被 update 的行盖本次 runId')
+  assert.notEqual(written.data.lastPlmRefreshAt, X4_EXISTING_REFRESH_STAMP, '被 update 的行盖本次 plannedAt')
+  assert.equal(written.data.lastPlmRefreshDecision, DECISIONS.UPDATE)
+}
+
+// ---------------------------------------------------------------------------------------------
+// 反驳 r1 blocker A1 —— **批级**闸门,dry-run → apply 层。真实配置可达:readPlan.part.materialField 是
+// 可选项(bom-expansion normalizeReadPlan 的 part 可选列表);不配时 rowFromPart 照样把 `material` 键放
+// 到展开行上、值 undefined。X6 之前这三条存量(material 有值)每轮都是 component_identity_conflict ⇒
+// counts.manual_confirm=3、plan.valid=false ⇒ dry-run 状态 manual_confirm_required(`dryRunStatus`)、
+// apply 不带 acceptManualConfirmHold ⇒ 409 TABLE_ACTION_MANUAL_CONFIRM_REQUIRED —— 同批那条 add 也被整批
+// 拦住。X6 之后:三条 SKIP、状态 ready、add 直接写、零 patchRecord。对照组(默认 readPlan 带 materialField、
+// 存量 material 与来料不同)证明闸门本身没丢。M1(去掉收窄)⇒ 本用例红。
+// ---------------------------------------------------------------------------------------------
+async function testX6AbsentIdentityKeyDoesNotHoldTheDryRun() {
+  const { materialField, ...partWithoutMaterial } = PLM_STOCK_PREPARATION_BOM_READ_PLAN.part
+  assert.equal(materialField, 'Material', '前提:默认读计划配了 materialField,这里显式拿掉')
+  const action = baseAction({
+    source: {
+      ...baseAction().source,
+      readPlan: { ...PLM_STOCK_PREPARATION_BOM_READ_PLAN, part: partWithoutMaterial },
+    },
+  })
+  // 同批一条 add:第四个根行不在存量里。
+  const source = multiRootPlmData()
+  source.DN_PDM_OrderDetailInfo.push({ order_id: 'ORDER-1', part_id: 'PART-D', quantity: '1' })
+  source.DN_PDM_PartLibraryInfo.push({ OBJ_ID: 'PART-D', IdentityNo: 'D-001', IdentityName: 'Duct', Material: 'Copper', SysVer: 'V1' })
+
+  const storage = createMemoryStorage()
+  const records = createRecordsApi({ existing: x4ExistingRecords() })
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(source).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(dryRun.status, 'ready', 'X6:来料缺身份键不再把整批挂起(X6 之前 manual_confirm_required)')
+  assert.equal(dryRun.evidence.plan.valid, true, 'X6:plan.valid 由 false 翻成 true')
+  assert.deepEqual(
+    dryRun.counts,
+    { add: 1, update: 0, skip: 3, inactive: 0, manual_confirm: 0 },
+    '三条存量 SKIP、同批一条 add(X6 之前 {add:1, manual_confirm:3})',
+  )
+  // 不带 acceptManualConfirmHold —— X6 之前这里是 409 TABLE_ACTION_MANUAL_CONFIRM_REQUIRED。
+  const applied = await applyStockPreparationAction({
+    sandboxPolicy: SANDBOX_POLICY,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(source).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    permission: 'write',
+  })
+  assert.equal(applied.status, 'succeeded', 'X6:同批那条 add 直接写(X6 之前整批 409)')
+  assert.equal(applied.apply.counts.created, 1)
+  assert.equal(applied.apply.counts.updated, 0)
+  assert.equal(applied.apply.counts.held, 0)
+  assert.equal(records.calls.filter((call) => call[0] === 'patchRecord').length, 0, '三条 SKIP 行零 patchRecord')
+  // 存量的 material 一个字没动;新行不带来料没给的 material 键(pickFields 同判据)。
+  for (const seed of X4_ROOT_SEEDS) {
+    const kept = records.rows.find((record) => record.data.componentSourceId === seed.componentSourceId)
+    assert.equal(kept.data.material, seed.material, '存量 material 原样')
+    assert.equal(kept.data.lastPlmRefreshRunId, 'run-r33', 'SKIP 行的刷新戳停在上一次真变更')
+  }
+  const created = records.calls.find((call) => call[0] === 'createRecord')[1]
+  assert.equal(Object.prototype.hasOwnProperty.call(created.data, 'material'), false, 'add 记录里也没有来料没给的列')
+
+  // 对照:默认读计划(带 materialField),存量 PART-A 的 material 与来料不同 ⇒ 闸门原样。
+  const heldStorage = createMemoryStorage()
+  const heldRecords = createRecordsApi({ existing: x4ExistingRecords({ 'PART-A': { material: 'Bronze' } }) })
+  const held = await dryRunStockPreparationAction({
+    action: baseAction(),
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(source).adapter,
+    recordsApi: heldRecords.recordsApi,
+    tokenStore: heldStorage,
+    plannedAt: X4_PLANNED_AT,
+  })
+  assert.equal(held.status, 'manual_confirm_required', '键在值变 ⇒ 整批仍挂起(闸门本身没丢)')
+  assert.deepEqual(held.counts, { add: 1, update: 0, skip: 2, inactive: 0, manual_confirm: 1 })
+  await assert.rejects(
+    () => applyStockPreparationAction({
+      sandboxPolicy: SANDBOX_POLICY,
+      action: baseAction(),
+      parameters: { projectNo: 'P-001' },
+      dryRunToken: held.dryRunToken,
+      sourceAdapter: createSourceAdapter(source).adapter,
+      recordsApi: heldRecords.recordsApi,
+      tokenStore: heldStorage,
+      permission: 'write',
+    }),
+    (err) => err instanceof StockPreparationTableActionError && err.status === 409 && err.code === 'TABLE_ACTION_MANUAL_CONFIRM_REQUIRED',
+    '键在值变 ⇒ 不带 acceptManualConfirmHold 的 apply 仍是 409',
+  )
+  assert.equal(heldRecords.calls.some((call) => call[0] === 'createRecord'), false, '闸门后面那条 add 没被写')
+}
+
+// ---------------------------------------------------------------------------------------------
+// 反驳 r2 blocker B2 —— 生产闸 `cleanRowCount = add + update`(applyStockPreparationAction 里
+// assertProductionCleanRowsWithinBound 前一行)的**触发量**被 X6 改小,此前零绑定用例:既有 prod-gate
+// 用例只对闸函数喂字面量计数,对 plan 推导出来的计数是瞎的。这里把两者接起来。同一批「存量带 ext_ 值、
+// 来料不带 ext_ 键、其中一行真变了」:X6 之前 update:3 ⇒ cleanRowCount=3;X6 之后 update:1 ⇒ 1。
+// maxCleanRows=2 取在两个计数之间 ⇒ X6 之后走生产分支通过、只写真变了的那一行;M1(去掉收窄)⇒
+// 3 > 2 ⇒ 403 STOCK_PREP_PRODUCTION_APPLY_DENIED / max_clean_rows_exceeded,本用例红在 apply 那一步。
+// 对照(键在值变的真 delta 批:三行数量都变)⇒ 同一策略仍 403、零写入 —— 闸本身没松,是计数变了。
+// 不传 sandboxPolicy:闸按「有无生产策略」分支,通过本身即证明走的是生产分支(沙箱分支无策略必 403)。
+// ---------------------------------------------------------------------------------------------
+const X6_PROD_NOW = Date.parse(X4_PLANNED_AT)
+
+function x6ProductionPolicy(maxCleanRows) {
+  return {
+    enabled: true,
+    authorizedTargetObjectId: PROD_CANONICAL_OBJECT_ID,
+    authorizationId: 'auth-x6-window',
+    allowedActionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    allowedRoute: 'small',
+    maxCleanRows,
+    expiresAt: new Date(X6_PROD_NOW + 60 * 60 * 1000).toISOString(),
+    requireFreshDryRun: true,
+  }
+}
+
+async function x6ProductionDryRunThenApply({ source, existingShapes, maxCleanRows }) {
+  const installedFieldProperties = installedX6ExtColumn()
+  const action = baseAction({ target: { sheetId: 'sheet_stock', objectId: PROD_CANONICAL_OBJECT_ID } })
+  const storage = createMemoryStorage()
+  const records = createRecordsApi({ existing: x4ExistingRecords(existingShapes) })
+  const dryRun = await dryRunStockPreparationAction({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter: createSourceAdapter(source).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    plannedAt: X4_PLANNED_AT,
+  })
+  const apply = () => applyStockPreparationAction({
+    productionPolicy: x6ProductionPolicy(maxCleanRows),
+    now: X6_PROD_NOW,
+    action,
+    parameters: { projectNo: 'P-001' },
+    dryRunToken: dryRun.dryRunToken,
+    sourceAdapter: createSourceAdapter(source).adapter,
+    recordsApi: records.recordsApi,
+    tokenStore: storage,
+    installedFieldProperties,
+    permission: 'write',
+  })
+  return { dryRun, records, apply }
+}
+
+async function testX6ProductionCleanRowBoundCountsOnlyRowsTheIntakeReallyChanged() {
+  const existingShapes = {
+    'PART-A': { [X6_EXT_FIELD_ID]: '设计员甲' },
+    'PART-B': { [X6_EXT_FIELD_ID]: '设计员乙' },
+    'PART-C': { [X6_EXT_FIELD_ID]: '设计员丙' },
+  }
+  // 一行真变了(PART-C 的数量),其余两行来料只是没带 ext_ 键。
+  const oneRealDelta = multiRootPlmData()
+  oneRealDelta.DN_PDM_OrderDetailInfo = oneRealDelta.DN_PDM_OrderDetailInfo.map((detail) => (
+    detail.part_id === 'PART-C' ? { ...detail, quantity: '9' } : detail
+  ))
+  const banded = await x6ProductionDryRunThenApply({ source: oneRealDelta, existingShapes, maxCleanRows: 2 })
+  assert.equal(banded.dryRun.status, 'ready')
+  assert.ok(banded.dryRun.evidence.plan.plmSystemFields.includes(X6_EXT_FIELD_ID), '包列在 plm_system 可写/比较 band 里')
+  let applied
+  try {
+    applied = await banded.apply()
+  } catch (err) {
+    assert.fail(
+      'X6:生产闸 cleanRowCount 只数真变了的行,1 ≤ maxCleanRows=2 应通过(X6 之前 update:3 ⇒ 3 > 2 ⇒ 403 '
+      + 'max_clean_rows_exceeded);实际 ' + String(err && err.code) + ' / ' + String(err && err.details && err.details.reason),
+    )
+  }
+  assert.equal(applied.status, 'succeeded')
+  assert.deepEqual(
+    banded.dryRun.counts,
+    { add: 0, update: 1, skip: 2, inactive: 0, manual_confirm: 0 },
+    'X6:cleanRowCount = add 0 + update 1(X6 之前 update:3)',
+  )
+  assert.equal(applied.apply.counts.updated, 1, '只写真变了的那一行')
+  assert.equal(applied.apply.counts.skipped, 2)
+  const patchCalls = banded.records.calls.filter((call) => call[0] === 'patchRecord')
+  assert.equal(patchCalls.length, 1, '生产分支通过后恰好一次 patchRecord')
+  assert.equal(Object.prototype.hasOwnProperty.call(patchCalls[0][1].changes, X6_EXT_FIELD_ID), false, 'patch 里没有来料没给的 ext_ 列')
+  for (const record of banded.records.rows.filter((entry) => entry.data.componentSourceId !== 'PART-C')) {
+    assert.equal(record.data.lastPlmRefreshRunId, 'run-r33', '没被写的行停在上一次真变更')
+  }
+
+  // 对照:三行数量都变(键在、值不同的真 delta)⇒ update:3 > maxCleanRows=2 ⇒ 同一策略仍 403、零写入。
+  const threeRealDeltas = multiRootPlmData()
+  threeRealDeltas.DN_PDM_OrderDetailInfo = threeRealDeltas.DN_PDM_OrderDetailInfo.map((detail) => ({ ...detail, quantity: '9' }))
+  const control = await x6ProductionDryRunThenApply({ source: threeRealDeltas, existingShapes, maxCleanRows: 2 })
+  assert.equal(control.dryRun.status, 'ready')
+  assert.deepEqual(control.dryRun.counts, { add: 0, update: 3, skip: 0, inactive: 0, manual_confirm: 0 })
+  await assert.rejects(
+    control.apply,
+    (err) => err instanceof StockPreparationTableActionError && err.status === 403
+      && err.code === 'STOCK_PREP_PRODUCTION_APPLY_DENIED' && err.details && err.details.reason === 'max_clean_rows_exceeded',
+    '真 delta 批仍被同一上限拦住(闸本身没松,是计数变了)',
+  )
+  assert.equal(
+    control.records.calls.some((call) => call[0] === 'patchRecord' || call[0] === 'createRecord'),
+    false,
+    '403 在任何写入之前',
+  )
 }
 
 main().catch((err) => {

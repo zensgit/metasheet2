@@ -1,29 +1,47 @@
 /**
  * Which field types the field-manager edit panel may re-type INTO, and nothing else.
  *
- * BOUNDARY: the backend `PATCH /fields/:fieldId` already accepts `type`
- * (routes/univer-meta.ts:12544) and performs a raw `UPDATE meta_fields` with **no
- * cell-value migration** (multitable/lossy-retype-oracle.ts:5-7). So the only thing
- * standing between a user and a lossy retype is this table: it lists ONLY directions
- * where the stored JSON value stays readable under the new type (number → text,
- * currency/percent/rating → number|text, select → text, url/email/phone/barcode →
- * text, text → longText). Data is NOT converted; the values are simply still valid.
+ * BOUNDARY (F8A, 2026-09-11 — CHANGED): this table is no longer the only thing
+ * standing between a user and a lossy retype. The backend `PATCH /fields/:fieldId`
+ * (routes/univer-meta.ts:12905) still performs a raw `UPDATE meta_fields` with **no
+ * cell-value migration** (multitable/lossy-retype-oracle.ts:5-7), but it now refuses
+ * any (current → next) pair outside the SAME whitelist, 400
+ * `FIELD_RETYPE_NOT_LOSSLESS` (core-backend/src/multitable/field-retype-whitelist.ts).
+ * THAT copy is the authority; this one is the dropdown the user sees. Both are pinned
+ * to one shared truth table —
+ * packages/core-backend/tests/fixtures/field-retype-truth-table.json — by two mirror
+ * tests, so a one-sided edit reddens its own side and a table edit reddens both.
+ *
+ * The table lists ONLY directions where the stored JSON value stays readable under the
+ * new type (number → text, currency/percent/rating → number|text, select → text,
+ * url/email/phone/barcode → text, text → longText, plain longText → text). Data is NOT
+ * converted; the values are simply still valid.
  *
  * EXCLUSION MIRROR: no target may be a type the backend's own retype-safety set
  * rejects — `FIELD_RETYPE_EXCLUDED_TYPES` in
- * packages/core-backend/src/multitable/config-restore.ts:78-82
+ * packages/core-backend/src/multitable/config-restore.ts:78-81
  * (formula/lookup/rollup/link/attachment/button/autoNumber + the system stamp
  * types). Those need the type-transition side effects (autoNumber sequence, formula
- * deps, link join table) that the raw UPDATE skips, and `link`/`formula` targets are
- * additionally rejected by the route (univer-meta.ts:12655/:12688 → 400).
- * `losslessRetypeTargets` re-filters against that set so a careless table edit can
- * never surface an excluded target in the dropdown.
+ * deps, link join table) that the raw UPDATE skips, and `link`/`formula` conversions
+ * carry their own route-side guards (univer-meta.ts:13025/:13060). The server-side
+ * whitelist deliberately does NOT rule on pairs touching those types — and "does not
+ * rule" is NOT the same as "something else does" (corrected 2026-09-12): only
+ * link/formula/lookup/rollup as a TARGET really have a pre-existing route guard;
+ * attachment + the four system stamps have none (`text -> attachment` is a plain 200
+ * server-side), and `-> autoNumber` runs a destructive backfill (overwrite:true) AFTER
+ * the UPDATE, which is a side effect, not validation. See the server module's header.
+ * None of that is reachable from this dropdown — `losslessRetypeTargets` re-filters
+ * against the excluded set so a careless table edit can never surface an excluded
+ * target, and it returns [] for an excluded SOURCE. The seams are API-only.
  *
- * NOT included on purpose: multiSelect (array ⇄ scalar), longText → string (rich
- * HTML would be exposed raw), date/dateTime (display semantics change).
+ * NOT included on purpose: multiSelect/person (array ⇄ scalar, JSON sprayed at the
+ * user), checkbox → text (`true/false`, not 是/否), date/dateTime (ISO text is a
+ * silent downgrade), text → select (the select write path hard-validates, so the old
+ * values could never be saved again), duration/qrcode (storage shape unverified), and
+ * RICH longText → text (raw HTML would be exposed — see `losslessRetypeTargets`).
  */
 
-/** Mirror of core-backend config-restore.ts:78-82. Targets in this set are never offered. */
+/** Mirror of core-backend config-restore.ts:78-81. Targets in this set are never offered. */
 export const RETYPE_EXCLUDED_TARGET_TYPES: ReadonlySet<string> = new Set([
   'formula', 'lookup', 'rollup', 'link', 'attachment', 'button',
   'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy',
@@ -41,14 +59,38 @@ export const LOSSLESS_RETYPE: Record<string, string[]> = {
   phone: ['string'],
   barcode: ['string'],
   string: ['longText'],
+  // F8A: the one direction this cut adds. A plain longText cell IS a string — nothing
+  // about the stored value changes. Gated on `property.rich` below, not here.
+  longText: ['string'],
+}
+
+/** `property.rich === true` STRICTLY (junk → not rich) — mirrors core-backend field-codecs.ts:801. */
+function isRichLongTextProperty(property: unknown): boolean {
+  return Boolean(property) && typeof property === 'object' && !Array.isArray(property)
+    && (property as { rich?: unknown }).rich === true
 }
 
 /**
  * Target types offered for `sourceType`, minus the source itself and minus anything
  * in `RETYPE_EXCLUDED_TARGET_TYPES`. Empty array = the type stays read-only in the UI.
+ *
+ * `property` is the SOURCE field's stored property. A RICH longText (`rich === true`)
+ * offers nothing: its cells hold HTML that a plain text field would show as bare
+ * markup — that is not "the value stays readable". A missing / non-object property
+ * reads as non-rich, which matches the storage shape (a rich field always carries
+ * `rich: true`); the authoritative check runs server-side against the DB row anyway
+ * (core-backend/src/multitable/field-retype-whitelist.ts), so a stale/absent property
+ * here can only make the dropdown optimistic, never make a lossy write land.
+ *
+ * SIGNATURE ASYMMETRY (deliberate, 2026-09-12): the server-side twin takes `property`
+ * as a REQUIRED argument and throws when it is omitted — there, an omitted property is
+ * a fail-OPEN (a rich longText would be judged non-rich and the write would land). Here
+ * the worst case is an option the server then refuses with 400, so this side keeps the
+ * optional parameter and its non-rich default.
  */
-export function losslessRetypeTargets(sourceType: string | null | undefined): string[] {
+export function losslessRetypeTargets(sourceType: string | null | undefined, property?: unknown): string[] {
   if (!sourceType) return []
+  if (sourceType === 'longText' && isRichLongTextProperty(property)) return []
   const targets = LOSSLESS_RETYPE[sourceType]
   if (!targets) return []
   return targets.filter((target) => target !== sourceType && !RETYPE_EXCLUDED_TARGET_TYPES.has(target))

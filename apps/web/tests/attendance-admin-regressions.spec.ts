@@ -5326,6 +5326,7 @@ describe('Attendance admin regressions', () => {
     expect(text).toContain('scheduler_scope_forbidden × 2')
     expect(text).toContain('max_assignments_per_run × 1')
     expect(text).toContain('scanned 8; candidates 4; applied 2; skipped 2; errors 1')
+    expect(text).toContain(new Date('2026-06-14T00:00:00.000Z').toLocaleString('en'))
     expect(container!.querySelector('[data-auto-shift-auto="runs-cap"]')?.textContent || '').toContain('Showing first 1 of 3')
     expect(
       vi.mocked(apiFetch).mock.calls.some(([url]) =>

@@ -2895,8 +2895,14 @@ describe('attendance UUID route validation', () => {
       if (sql.includes('FROM attendance_shift_assignments a') && sql.includes('JOIN attendance_shifts')) {
         expect(sql).toContain('EXISTS')
         expect(sql).toContain('m.schedule_group_id = ANY')
+        expect(sql).toContain('a.producer_type')
+        expect(sql).not.toContain('a.producer_ref_id')
+        expect(sql).not.toContain('a.producer_key')
+        expect(sql).not.toContain('a.producer_run_id')
         expect(params).toEqual(['default', [scheduleGroupId], 50, 0])
-        return [shiftAssignmentListRow()]
+        return [shiftAssignmentListRow({
+          producer_type: 'attendance_group_fixed_schedule',
+        })]
       }
       throw new Error(`unexpected query: ${sql}`)
     })
@@ -2908,7 +2914,19 @@ describe('attendance UUID route validation', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({
       ok: true,
-      data: { total: 1, items: [{ assignment: { userId: 'worker-1', shiftId } }] },
+      data: {
+        total: 1,
+        items: [{
+          assignment: {
+            userId: 'worker-1',
+            shiftId,
+            producerType: 'attendance_group_fixed_schedule',
+            producerRefId: null,
+            producerKey: null,
+            producerRunId: null,
+          },
+        }],
+      },
     })
   })
 

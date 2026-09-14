@@ -55,7 +55,7 @@ describe('attendance web guard workflow contract', () => {
   it('runs makeup regressions in both unit gates and the dedicated browser lane', () => {
     const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
     const requiredCommand = required.split('\n').find(line => line.startsWith('exec npx vitest run ')) ?? ''
-    for (const spec of ['attendanceEmployeeMakeupRequestCard', 'attendance-selfservice-dashboard']) {
+    for (const spec of ['attendanceEmployeeMakeupRequestCard', 'attendanceEmployeeLeaveRequestCard', 'attendance-selfservice-dashboard']) {
       expect(requiredCommand.split(/\s+/)).toContain(spec)
       expect(targetedRunCommand(workflow).split(/\s+/)).toContain(spec)
     }

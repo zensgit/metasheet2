@@ -176,6 +176,22 @@ const apiBase = 'https://acceptance.invalid/api'
 const initialToken = 'synthetic-existing-token-only'
 const nextToken = 'synthetic-refreshed-token-only'
 
+for (const [file, expectedCalls] of [
+  ['scripts/ops/attendance-smoke-api.mjs', 5],
+  ['scripts/ops/attendance-import-perf.mjs', 2],
+]) {
+  test(`${file} binds every import prepare token to the target organization`, () => {
+    const prepareCalls = readFileSync(path.join(repoRoot, file), 'utf8')
+      .split('\n')
+      .filter(line => line.includes("apiFetch('/attendance/import/prepare'"))
+
+    assert.equal(prepareCalls.length, expectedCalls)
+    for (const call of prepareCalls) {
+      assert.match(call, /body: JSON\.stringify\(\{ orgId \}\)/)
+    }
+  })
+}
+
 function consumerFixture(file, { payload, refreshAvailable = true }) {
   const source = readFileSync(path.join(repoRoot, file), 'utf8')
   const evidence = { actions: 0, proofTokens: [] }

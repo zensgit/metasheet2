@@ -497,10 +497,13 @@ async function listOperatorProjectDirectory({
   // large-BOM panel) had no sheet id to route with and fell back to the plain multitable workbench —
   // i.e. the operator landed on a table chooser instead of their own 备料主表.
   //
-  // IT COSTS NO EXTRA IO AND OPENS NO NEW DOOR. `ownSheet` is the ALREADY-RESOLVED result of
-  // `resolveOwnBoundSheet` above — the same tenant gate, the same proof, the same object — and
-  // `resolveFillTarget` on top of it is a pure host-side id derivation. So this is the board's handle,
-  // from the board's gate, not a second answer to "which sheet may this caller be pointed at".
+  // IT OPENS NO NEW DOOR, AND IT COSTS ONE READ-ONLY SELECT. `ownSheet` is the ALREADY-RESOLVED
+  // result of `resolveOwnBoundSheet` above — the same tenant gate, the same proof, the same object —
+  // so this is the board's handle, from the board's gate, not a second answer to "which sheet may
+  // this caller be pointed at". What `resolveFillTarget` adds on top is no longer free: since the
+  // deep link started preferring the 备料填写视图 it PROBES for that view (`findObjectView`), i.e. one
+  // read-only, values-free view lookup per directory response — AFTER the tenant gate, once per
+  // response and not once per project (this line is outside the project loop below).
   //
   // AND IT IS TIED TO THE UNION OPT-IN because `ownSheet` is: a caller that did not ask for the
   // pull-target union never resolved a bound sheet, and a `fillTarget: null` on that response would

@@ -38,6 +38,9 @@ const {
   expandPlmProjectBom,
   isLargeBomBoundedExpansion,
   summarizeBomExpansionForEvidence,
+  // F1c 根选择规则的 config-time 校验器。Reused rather than reimplemented so a config can only
+  // express what the expander can mean — one vocabulary, one refusal.
+  normalizeRootSelection,
   // Values-BEARING (see the module header). The only import in this file that is.
   summarizeMissingComponents,
 } = require('./stock-preparation-bom-expansion.cjs')
@@ -450,6 +453,7 @@ function normalizeStockPreparationActionConfig(input = {}) {
   const carryPolicy = normalizeActionCarryPolicy(input.carryPolicy)
   const largeBom = normalizeActionLargeBomCaps(input.largeBom)
   const rowErrorLimit = normalizeActionRowErrorLimit(input.rowErrorLimit)
+  const rootSelection = normalizeActionRootSelection(input.rootSelection)
   return {
     actionId,
     kind,
@@ -477,6 +481,40 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // an action config is snapshotted and hashed, and an unconditional key would move every legacy
     // config's shape for a knob it never set.
     ...(rowErrorLimit ? { rowErrorLimit } : {}),
+    // F1c 根选择规则(总图前后缀 / 钣金后缀 / dash 层级剔除 / 整条规则的开关)。Spread
+    // CONDITIONALLY for the same reason as every block above: absent on a config that never set it
+    // => a normalized action byte-identical to the pre-F1c one => no stored snapshot or hash moves.
+    // Absent also means the expander applies ITS default (`DEFAULT_ROOT_SELECTION`, 老系统规则),
+    // which is the owner's ruling; a deployment that needs the pre-F1c root set writes
+    // `rootSelection: { enabled: false }` HERE and it now actually reaches both lanes.
+    ...(rootSelection ? { rootSelection } : {}),
+  }
+}
+
+/**
+ * F1c — deploy-time validation of the根选择 rules.
+ *
+ * REFUSES rather than clamps (the same argument `normalizeActionRowErrorLimit` makes): a normalized
+ * action config is snapshotted, echoed back and hashed, so silently storing a rule the expander will
+ * not honour makes the stored config a lie about what runs. The vocabulary is the EXPANDER's
+ * (`normalizeRootSelection`) — one definition of what a rule may say, including its fail-closed
+ * refusal of an empty 总图 suffix (which would make every order line a 总图).
+ *
+ * The expander's own error class is translated to this module's 422 config error so a bad deploy
+ * config fails where an operator can see it (config time) with the code every other bad key uses.
+ */
+function normalizeActionRootSelection(input) {
+  if (input === undefined || input === null) return undefined
+  try {
+    return cloneJson(normalizeRootSelection(input))
+  } catch (error) {
+    const field = (error && error.details && error.details.field) || 'rootSelection'
+    throw new StockPreparationTableActionError(
+      422,
+      'TABLE_ACTION_CONFIG_INVALID',
+      (error && error.message) || 'rootSelection is invalid',
+      { field },
+    )
   }
 }
 
@@ -1039,17 +1077,148 @@ function emptyPlan() {
   }
 }
 
+// The expansion's OWN verdict on whether it dropped rowErrors. Read in two places that must never
+// disagree: the overflow facts below, and the decision to stop hashing the sample at all (X4-b).
+function rowErrorsWereTruncated(expansion = {}) {
+  const summary = isPlainObject(expansion.summary) ? expansion.summary : {}
+  return summary.rowErrorsTruncated === true
+}
+
 // The D-C overflow facts, read off the expansion's OWN summary (the expander is the only thing in a
 // position to count what it dropped) and reduced to the three that change what will be written.
 // `{}` — and therefore no key at all — for every expansion under the cap.
 function rowErrorTruncationRevisionKeys(expansion = {}) {
   const summary = isPlainObject(expansion.summary) ? expansion.summary : {}
-  if (summary.rowErrorsTruncated !== true) return {}
+  if (!rowErrorsWereTruncated(expansion)) return {}
   return {
     rowErrorsTruncated: true,
     rowErrorsTotal: Number(summary.rowErrorsTotal || 0),
     rowErrorTypeCounts: isPlainObject(summary.rowErrorTypeCounts) ? { ...summary.rowErrorTypeCounts } : {},
   }
+}
+
+// ── X4: CANONICAL ORDER FOR THE HASHED ARRAYS (222/r34) ───────────────────────────────────────
+//
+// THE FIELD FACT. A project carrying 581 existing rows answered four consecutive READ-ONLY
+// dry-runs with identical counts (update 579 / skip 2) and 1490 byte-identical leaf keys — and
+// four DIFFERENT `revision` values that then started repeating. A finite set being permuted, not a
+// clock: nothing in the hash is time-derived. `--apply` 409'd
+// TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH every single time on a batch nobody had touched.
+//
+// THE CAUSE. `stableStringify` sorts object KEYS and leaves ARRAY ORDER alone, by design — array
+// order is data. But `expansion.rows` comes off an MSSQL read plus a tree walk (siblings sharing a
+// sort number have no total order) and `existingRows` comes off a paged records read, so THOSE TWO
+// arrays are the same set in an incidental order (`expansion.rowErrors` is too — but only while it
+// is under the cap; see X4-b). Apply re-expands and re-reads before comparing
+// its recomputed revision to the token (see applyStockPreparationAction), so one reshuffle between
+// the two reads is indistinguishable from "the data moved under review".
+//
+// THE FIX, AND ITS TWO BOUNDS.
+//  1. HASH-LOCAL. The sort happens on a COPY that only `hashJson` ever sees. `computeDryRun`
+//     hands `expansion` and `existingRows` back BY REFERENCE and callers keep reading them
+//     AFTER the revision exists: `prepareStockPreparationMvpSnapshot` returns `expansion.rows`
+//     verbatim as `expansionResult` — the snapshot LINE ORDER — and the large-BOM
+//     `boundedPreview` slices the same array. Stated precisely, because the overclaim is easy:
+//     THIS module's own apply path would survive an in-place sort, since it plans before it
+//     hashes. That is an accident of ordering, not a guarantee, so the copy is asserted head-on
+//     in the table-action tests ('buildRevision hashes a COPY') instead of being relied upon.
+//  2. ORDER-ONLY. Every row still enters the hash whole. "One field of one row changed => the
+//     revision changes" is the pre-existing promise this must not weaken, so nothing is projected
+//     away, deduped or rounded here — the same multiset is hashed in a canonical order. The ONE
+//     documented exception is the TRUNCATED rowError sample (X4-b below), where the array is not a
+//     multiset of the batch at all and no ordering could make it one.
+//  3. WHAT IT COVERS, named rather than implied. FIVE arrays reach this hash from an order that a
+//     re-read can permute: `expansion.rows`, `expansion.rowErrors`, `existingRows`, the review's
+//     `selectedPolicies`, and the planner summary's `resolvedPolicies` / `heldPolicies`. All of
+//     them are canonicalised here — except a TRUNCATED `rowErrors`, which leaves the hash instead
+//     (X4-b), and with the residual named there. Everything else in the projection is either a
+//     scalar, an object (stableStringify sorts keys) or an already-sorted set (`conflictTypes` is
+//     `Array.from(new Set(...)).sort()` in the planner). NOT covered, and out of this change's reach: a paged
+//     `existingRows` read spanning >1000 rows can return a different MULTISET (a row seen twice or
+//     missed) if the table moves between pages — that is not a permutation and a sort cannot fix
+//     it; and the large-BOM job revision (`largeBomPlanRevision`) hashes its own projection.
+//
+// THE KEY IS ROW IDENTITY (idempotencyKey / record id), never a refresh-time column: identity is
+// the part that survives a re-read unchanged. Refresh stamps DO stay in the hash as CONTENT — they
+// just must not decide the order, or a re-stamped batch would reshuffle itself.
+//
+// WHY THE CONTENT TIEBREAKER IS NOT OPTIONAL: duplicate idempotencyKeys are a real, planned-for
+// shape here (duplicate_expanded_key / resolveDuplicateExpandedRows). Sorting on identity alone
+// would leave those rows tied, and a tied sort keeps INPUT order — precisely the nondeterminism
+// being removed. So identity orders the rows and `stableStringify` breaks the ties; rows that tie
+// on BOTH are equal values, and swapping equal values cannot move a hash.
+function rowHashIdentityToken(value) {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+// Stock-preparation row identity, in the order the row itself declares it: the expander's
+// idempotencyKey (projectNo + component + parent + path) first, its `path` when a row predates or
+// fails that key, and — via the caller's tiebreaker — the row's own content when it has neither.
+function expandedRowHashIdentity(row) {
+  if (!isPlainObject(row)) return ''
+  return rowHashIdentityToken(row.idempotencyKey) || rowHashIdentityToken(row.path)
+}
+
+// Existing target rows are addressed by RECORD id when the records API surfaced one (that is the
+// id the writer patches), and by idempotencyKey otherwise — `unmapRecordFields` projects a record
+// down to its `data`, so whether `id` is present is a property of the host's row shape, not of the
+// batch. Both are stable across a re-read; the row's 最近刷新时间 / RunID columns are not, which is
+// exactly why neither is consulted here.
+function existingRowHashIdentity(row) {
+  if (!isPlainObject(row)) return ''
+  return rowHashIdentityToken(row.id) || rowHashIdentityToken(row.idempotencyKey)
+}
+
+// A COPY of `value` in canonical order, or `value` untouched when it is not an array (an absent
+// `rows`/`rowErrors` must keep hashing exactly as it did — stableStringify emits `undefined` for
+// it, and turning that into `[]` would move every legacy revision).
+function canonicalHashOrder(value, identityOf) {
+  if (!Array.isArray(value)) return value
+  return value
+    .map((item) => ({ item, identity: identityOf(item), content: stableStringify(item) }))
+    .sort((left, right) => {
+      if (left.identity !== right.identity) return left.identity < right.identity ? -1 : 1
+      if (left.content !== right.content) return left.content < right.content ? -1 : 1
+      return 0
+    })
+    .map((entry) => entry.item)
+}
+
+// X4-c: THE PLANNER'S OWN DIAGNOSTIC ARRAYS, which are hashed WHOLE and are themselves built by
+// walking the expansion. `buildConflictPolicyReview` maps over the duplicate diagnostics' groups
+// (stock-preparation-conflict-policies.cjs `groups.map(...)`, groups being keyed off `expansion.rows`)
+// and `resolveDuplicateExpandedRows` pushes one entry per group as it walks the same map
+// (stock-preparation-conflict-planner.cjs `summary.resolvedPolicies.push` / `heldPolicies.push`).
+// So a project with >= 2 duplicate-key GROUPS still reshuffled its revision after the three arrays
+// above were made order-blind — and, crucially, not only in the held case: a group the table-scope
+// policy RESOLVES needs no operator action at all, the batch is plain `ready`, and apply 409'd.
+// Each entry is addressed by its group `fingerprint` (a stable hash of the identity tuple, not a
+// position), so the same hash-local sort applies verbatim.
+function policyRowHashIdentity(row) {
+  if (!isPlainObject(row)) return ''
+  return rowHashIdentityToken(row.fingerprint)
+}
+
+// A COPY of the review with its policy list in canonical order — `{ ...review }` so no key is added
+// or dropped (stableStringify sorts keys, so the spread cannot move a hash on its own), and the
+// review the CALLER holds keeps the order evidence renders it in.
+function canonicalHashOrderConflictPolicyReview(review) {
+  if (!isPlainObject(review) || !Array.isArray(review.selectedPolicies)) return review
+  return { ...review, selectedPolicies: canonicalHashOrder(review.selectedPolicies, policyRowHashIdentity) }
+}
+
+// Same, for the planner's duplicate-resolution summary. Both arrays are CONDITIONAL keys on that
+// summary (`compactDuplicateResolutionSummary` only sets them when non-empty), so they are rewritten
+// in place on the copy rather than defaulted — a summary that never had `heldPolicies` must not
+// grow one, or every stored revision for the resolved-only shape would move.
+function canonicalHashOrderDuplicateResolution(resolution) {
+  if (!isPlainObject(resolution)) return resolution
+  const out = { ...resolution }
+  if (Array.isArray(out.resolvedPolicies)) out.resolvedPolicies = canonicalHashOrder(out.resolvedPolicies, policyRowHashIdentity)
+  if (Array.isArray(out.heldPolicies)) out.heldPolicies = canonicalHashOrder(out.heldPolicies, policyRowHashIdentity)
+  return out
 }
 
 function buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan }) {
@@ -1064,9 +1233,53 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
     target: action.target,
     expansion: {
       status: expansion.status,
-      rows: expansion.rows,
+      // X4: hashed in canonical row-identity order (see canonicalHashOrder). `errors` is
+      // deliberately NOT sorted — not because its order is proven stable, but because a batch that
+      // carries a GLOBAL error is `canApply: !hasGlobalErrors && ...` false and therefore never
+      // MINTS a token at all (`if (dryRun.canApply)` in dryRunStockPreparationAction), so an
+      // unstable order there cannot produce the failure X4 exists to remove (a 409 on an applyable
+      // batch). Stated that way on purpose: apply checks the token BEFORE it checks applyability
+      // (TOKEN_MISMATCH at the top of the recompute block, NOT_APPLYABLE right after), so it is the
+      // absent token — not that ordering — that keeps a global-error batch out of this.
+      rows: canonicalHashOrder(expansion.rows, expandedRowHashIdentity),
       errors: expansion.errors,
-      rowErrors: expansion.rowErrors,
+      // The bounded sample has no row identity to sort on, so its canonical order is its content —
+      // but ONLY while the sample is the whole set.
+      //
+      // X4-b, THE TRUNCATED CASE. When X4-b was written the array past the cap was a SUBSET chosen
+      // by production order, so a reshuffled read retained DIFFERENT entries and sorting here could
+      // not rescue it; such a batch is still applyable (only `missing_child_bom` is hard blocking),
+      // so that was the second reachable 409.
+      //
+      // X5 CHANGED THE FIRST HALF OF THAT: the truncated sample is now the deterministic top-N by
+      // row identity (`createRowErrorCollector`, stock-preparation-bom-expansion.cjs — see
+      // ROW_ERROR_IDENTITY_FIELDS' header), so two reads that produce one SET of rowErrors retain the SAME N
+      // entries in the same order whatever order the source produced them in (an early-exit batch —
+      // max_rows_exceeded and friends — is a different set, fenced by canApply=false above), and
+      // `plan.summary.conflictTypes` —
+      // one manual_confirm decision per retained entry — no longer disagrees between two dry-runs.
+      // That was the residual this comment used to record as open; it is closed at the expander,
+      // which is where it had to be closed, not by a different hash recipe here.
+      //
+      // THE SAMPLE STILL LEAVES THE HASH WHEN IT IS TRUNCATED, for a weaker reason than before: not
+      // "the selection is unstable" but "the sample is not a projection of the BATCH". Past the cap
+      // it is N entries out of a larger set, while the order-free overflow facts below — total,
+      // per-type composition, the truncation flag, all counted BEFORE the cap — are properties of
+      // the whole batch. The trade is stated rather than hidden: two batches with identical totals
+      // and identical per-type composition but different retained diagnostics share a revision.
+      // What will be WRITTEN is unaffected: rowErrors are diagnostics, the decisions they produce
+      // are counted in `plan.counts`, and the rows themselves are hashed above.
+      //
+      // PUTTING THE TRUNCATED SAMPLE BACK IN IS NOW A REAL OPTION, deliberately not taken. It would
+      // be sound (the sample is deterministic), and it would cost this: `rowErrorLimit` is a deploy
+      // config, so two deployments reading the same batch with different caps would hash different
+      // revisions, and a cap change would invalidate every outstanding dry-run token of an
+      // overflowing project. The overflow facts already distinguish the batches the sample would.
+      //
+      // Spread CONDITIONALLY so an UNDER-CAP expansion hashes byte-identically to before X4-b.
+      ...(rowErrorsWereTruncated(expansion)
+        ? {}
+        : { rowErrors: canonicalHashOrder(expansion.rowErrors, () => '') }),
       // D-C. `rowErrors` is now a BOUNDED SAMPLE, so hashing it alone stopped being enough: two
       // projects that overflow the cap with the same first 5000 entries and different totals would
       // hash identically, and one project's dry-run token would then validate against the other's
@@ -1077,14 +1290,18 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
       // hash is byte-identical to the pre-cap one.
       ...rowErrorTruncationRevisionKeys(expansion),
     },
-    existingRows,
-    conflictPolicyReview: conflictPolicyReview || null,
+    existingRows: canonicalHashOrder(existingRows, existingRowHashIdentity),
+    // X4-c: hash-local copy, fingerprint-ordered (see canonicalHashOrderConflictPolicyReview).
+    conflictPolicyReview: canonicalHashOrderConflictPolicyReview(conflictPolicyReview) || null,
     plan: plan
       ? {
           counts: plan.counts,
           valid: plan.valid === true,
           conflictTypes: plan.summary && plan.summary.conflictTypes,
-          duplicateExpandedKeyResolution: plan.summary && plan.summary.duplicateExpandedKeyResolution,
+          // X4-c: same, for `resolvedPolicies` / `heldPolicies` inside the summary.
+          duplicateExpandedKeyResolution: canonicalHashOrderDuplicateResolution(
+            plan.summary && plan.summary.duplicateExpandedKeyResolution,
+          ),
           // A dry-run token is a promise about WHAT WILL BE WRITTEN, so the pack-aware
           // writable/human bands belong in the revision: if a pack install lands between
           // dry-run and apply, the projected payloads move and the token must stop matching.
@@ -1248,9 +1465,10 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 // closed by the customer-pack INSTALL LEDGER (integration_stock_prep_pack_installs, migration
 // 076) plus the read-back seam in stock-preparation-pack-installed-fields.cjs: the ledger names
 // the candidate `ext_` ids, readObjectFieldsContent says which of them are still live and how
-// they are classified, and the small-BOM dry-run/apply routes now supply the result here. The
-// large-BOM checkpoint path still supplies nothing and stays on the legacy bands; it plans into
-// a stored job, so wiring it is a separate change.
+// they are classified, and the small-BOM dry-run/apply routes supply the result here. The
+// large-BOM checkpoint path supplies it too now (`tableActionLargeBomExpansionJobPlan` per plan;
+// the apply-job START route freezes one band into the job, and every chunk writes through that
+// snapshot rather than re-reading the ledger per HTTP request).
 //
 // The LEGACY POSTURE remains safe by construction and remains the fallback: omission yields
 // exactly the pre-pack writable set, and since the pack's `ext_` columns are then in neither
@@ -1262,25 +1480,39 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 // produced once at route registration from server config (stock-preparation-ext-field-mapping-
 // config.cjs), never built here, never request-influenced. Absent -> `rowFromPart` adds no key.
 //
-// THE TWO MUST TRAVEL TOGETHER OR NOT AT ALL. `installedFieldProperties` decides whether an `ext_`
-// column is in the planner's writable band; `extFieldMapping` decides whether a row carries an
-// `ext_` value at all. Supply the mapping without the bands and the expansion produces values the
-// planner then drops on the floor — the same "built but never reached" defect one layer down.
-// Supply the bands without the mapping and the refresh widens over columns nothing fills. On the
-// SMALL route both are resolved per request, immediately before one in-process expansion, so they
-// cannot disagree, and they are wired together here.
+// THE TWO TRAVEL TOGETHER, AND THE ASYMMETRY BETWEEN THEM IS DELIBERATE.
+// `installedFieldProperties` decides whether an `ext_` column is in the planner's writable band;
+// `extFieldMapping` decides whether a row carries an `ext_` value at all. Supply the mapping
+// without the bands and the expansion produces values the planner then drops on the floor — the
+// same "built but never reached" defect one layer down; that ordering is the dangerous one and is
+// never shipped. The reverse — bands without a mapping — is the SAFE half-state: the band widens
+// over columns nothing fills, and a column nothing fills contributes no key to the row, so
+// `pickFields` omits it and a patch does not blank what it omits. What the band still buys on its
+// own is the human WALL, which is enforced by NAME at write time. On the SMALL route both are
+// resolved per request, immediately before one in-process expansion, so they cannot disagree, and
+// they are wired together here.
 //
-// THE LARGE-BOM CHECKPOINT PATH IS STILL UNWIRED, AND THAT IS NOT "INERT". It supplies neither
-// input. Because `installedFieldProperties` is absent the planner's band is template-only
-// (derivePackAwarePlmWritableFields, packAware=false), so `pickFields` leaves every `ext_` id out of
-// the update patch — and a patch does not blank what it omits. Any `ext_` value an earlier SMALL-
-// path refresh wrote SURVIVES while every canonical column around it moves to today's source: the
-// row reads fresh and its tenant columns sit at an older epoch. Nor is the path an operator's
-// choice, or even stable — `read_time_limit_exceeded` is a bounded-expansion trigger, so one
-// unchanged project can go small one day and large the next because the source was slow. The two
-// large-BOM route families therefore stamp a conditional, values-free
-// `extFieldMappingConfiguredButNotAppliedOnThisPath` notice onto every response
+// ON THE LARGE-BOM CHECKPOINT PATH ONLY `extFieldMapping` IS STILL UNWIRED, AND THAT IS NOT
+// "INERT". `installedFieldProperties` now travels on that path as well, so the planner's band there
+// is the same pack-aware band the small route computes — but with no mapper the expansion rows
+// carry no MAPPER-FILLED `ext_` key, and `pickFields` skips `row[field] === undefined`, so every
+// mapper-territory `ext_` id stays out of the update patch exactly as it did before. The ONLY `ext_`
+// ids that can reach the patch on this path are the (<=5) F1c/F1c-b planner-derived pack columns
+// (parentDrawingNo/parentName/parentSortNo/componentSortNo/nameAndSpec), and only when the action
+// declares them AND the pack classifies them plm_system AND the incoming cell is blank — the
+// installed-fields-wiring suite pins that positively. And a patch does not blank what it
+// omits. Any `ext_` value an earlier SMALL-path refresh wrote SURVIVES while every canonical column
+// around it moves to today's source: the row reads fresh and its tenant columns sit at an older
+// epoch. Nor is the path an operator's choice, or even stable — `read_time_limit_exceeded` is a
+// bounded-expansion trigger, so one unchanged project can go small one day and large the next
+// because the source was slow. The two large-BOM route families therefore stamp a conditional,
+// values-free `extFieldMappingConfiguredButNotAppliedOnThisPath` notice onto every response
 // (`largeBomJobResponse` in http-routes.cjs) so the divergence is announced rather than silent.
+//
+// What the band DOES buy on this path is the write side: the human wall in the apply writer now
+// rejects a pack `ext_` human column BY NAME on the chunked apply, not merely by its absence from
+// the frozen template, and the wall only ever grows (derivePackAwarePlmWritableFields is
+// fail-closed, so an unclassified pack column is in neither band).
 //
 // WHAT ACTUALLY REMAINS OPEN, stated precisely, because the earlier version of this note overstated
 // it and risked deferring a small change forever:
@@ -1292,11 +1524,13 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 //     `artifactRevision`. Only the mapping's IDENTITY (mappingId/mappingVersion) is uncovered.
 //   * the one genuinely open item is that plan-time bands are read LIVE in a later request than the
 //     one that sealed the artifact. That is a PRE-EXISTING property of `installedFieldProperties` on
-//     this path, not something the mapping introduces — the same seam was already unwired here
-//     before any mapper existed.
-// So wiring this is threading two existing runtime parameters plus stamping the mapping id into the
-// job for evidence; it is not migration-shaped. It is out of scope here only because it needs its
-// own route-level tests for the stale-artifact case.
+//     this path, not something the mapping introduces — and it is now bounded rather than removed:
+//     the plan band is read once per plan request, and the APPLY band is read once per approval and
+//     frozen onto the job, so no single plan and no single approved apply can straddle two bands.
+//     Plan and apply are still two separate live reads, exactly as they are on the small route.
+// So wiring the mapping is threading ONE remaining runtime parameter plus stamping the mapping id
+// into the job for evidence; it is not migration-shaped. It is out of scope here only because it
+// needs its own route-level tests for the stale-artifact case.
 /**
  * THE B2a SEAM for every stock-preparation path that reads an external source through this module.
  *
@@ -1425,6 +1659,12 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // D-C. Absent on every existing config => the expander's default cap, which is the whole point:
     // the bound arrives without a deployment having to ask for it.
     rowErrorLimit: action.rowErrorLimit,
+    // F1c. THE WIRE for the根选择 switch — without this line the `rootSelection` block is config
+    // that no code reads, and a deployment could not get back to the pre-F1c root set at all
+    // (this input list is an explicit allowlist: an unlisted key simply never reaches the expander).
+    // Absent on every existing config => `undefined` => the expander's老系统 default, i.e. the
+    // owner's ruling arrives without anyone having to configure it.
+    rootSelection: action.rootSelection,
     extFieldMapping,
     // E3-02's 断游标 half. Armed only: a page that claims `done: false` and offers no cursor stops
     // being a silent truncation and becomes a refusal.
@@ -1470,6 +1710,16 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
       plannedAt: plannedAt || new Date().toISOString(),
       duplicatePolicyReview: review,
       installedFieldProperties,
+      // F1c/F1c-b: the DECLARED extension band. The planner derives 当前组件排序号 / 父组件排序号 /
+      // 名称及规格 / 父组件图号 / 父组件名称 into pack columns only when they are on this list.
+      // IN EXPLICIT BINDING MODE that list is exactly the one `assertTargetFieldMapCompleteness`
+      // already forces the target's fieldIdMap to bind, so a derived value cannot reach the writer
+      // as an unbound `ext_` id. In implicit mode the claim does not hold: that check returns early
+      // (:559 `if (!targetFieldMapHasExplicitBindings(action.target.fieldIdMap)) return`) and the
+      // writer's refusal is gated the same way (stock-preparation-apply-writer.cjs:146
+      // `if (explicit && ...)`), so the logical id passes through instead of failing — there the
+      // backstop is the planner's other gate, `pickFields`' pack-aware writable band.
+      extensionFieldIds: action.extensionFieldIds,
       // W4 carry: threaded from the deploy-time action config (undefined when the
       // config never opted in — the planner is then byte-identical to pre-wiring).
       carryPolicy: action.carryPolicy,

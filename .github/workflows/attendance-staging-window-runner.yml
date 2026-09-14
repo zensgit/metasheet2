@@ -199,7 +199,7 @@ jobs:
               [[ "$pair" == *"="* && -n "$value" ]] || { echo "soak_opts pair must be key=value, got: '$pair'" >&2; exit 2; }
               [[ "$value" =~ $opt_value_re ]] || { echo "soak_opts $key value has unsafe characters: '$value'" >&2; exit 2; }
               case "$key" in
-                users_per_org) [[ "$value" =~ ^[1-9][0-9]?$ ]] || { echo "users_per_org must be 1..99, got '$value'" >&2; exit 2; } ;;
+                users_per_org) [[ "$value" =~ ^[2-9]$|^[1-9][0-9]$ ]] || { echo "users_per_org must be 2..99, got '$value'" >&2; exit 2; } ;;
                 tz) ;;
                 w7_target) [[ "$value" == "group_shadow" ]] || { echo "w7_target only supports group_shadow at kickoff (deeper rungs carry compare-window exit predicates and are separate owner-run CLI acts), got '$value'" >&2; exit 2; } ;;
                 owner_ref) [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] || { echo "owner_ref must match the manifest reference pattern, got '$value'" >&2; exit 2; } ;;

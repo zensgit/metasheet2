@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
+import { recordLabel } from '../src/multitable/utils/meta-record-labels'
 
 async function flushUi(cycles = 4) {
   for (let i = 0; i < cycles; i += 1) {
@@ -373,8 +374,17 @@ describe('MetaRecordDrawer', () => {
     app.mount(container)
     await nextTick()
 
-    expect(container.textContent).toContain('Edit linked records (2)')
-    expect(container.textContent).toContain('Acme Supply, Beacon Labs')
+    // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Link chips"): the read-only comma-joined summary
+    // ("Acme Supply, Beacon Labs") is now ONE MetaCellRenderer chip per linked record, and the picker
+    // button beside POPULATED chips reads `record.editLinks` (the count-bearing "Edit linked records
+    // (2)" copy stays for the empty state — see the fields panel's `linkButtonLabel`). Both pins
+    // updated to the chip DOM. This deprecated shell threads no `fetchRecord`, so the chips are the
+    // plain (non-clickable) `span` form — zero click affordance, zero fetches (HI-1).
+    expect(container.textContent).toContain(recordLabel('record.editLinks', false))
+    expect(container.textContent).not.toContain('Edit linked records (2)')
+    const chips = Array.from(container.querySelectorAll('.meta-cell-renderer__link')).map((el) => el.textContent?.trim())
+    expect(chips).toEqual(['Acme Supply', 'Beacon Labs'])
+    expect(container.querySelector('[data-test="link-chip"]')).toBeNull()
 
     app.unmount()
     container.remove()

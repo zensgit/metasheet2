@@ -347,7 +347,12 @@ describe('platform apps router catalog feature predicate', () => {
     await handler({
       params: params ?? {},
       headers: {},
-      user: admin ? { id: 'app-admin', role: 'admin' } : undefined,
+      // Non-admin caller for the feature-flag cases. It deliberately holds a read code for EVERY
+      // app in this catalog, elearning included: these cases exist to prove the FLAG hides
+      // elearning, so their 404 must not be over-determined by the new permission gate.
+      user: admin
+        ? { id: 'app-admin', role: 'admin' }
+        : { id: 'app-reader', role: 'user', permissions: ['after_sales:read', 'attendance:read', 'elearning:read'] },
       authenticatedTenantId: admin ? 'app-org' : undefined,
     }, response)
     return response
@@ -430,5 +435,230 @@ describe('platform apps router catalog feature predicate', () => {
     const afterSales = await invoke('/:appId', { appId: 'after-sales' })
     expect(afterSales.statusCode).toBe(200)
     expect((afterSales.body as { id: string }).id).toBe('after-sales')
+  })
+})
+
+/**
+ * G-7 (4): the App Center visibility gate. Before this suite the two routes did ZERO permission
+ * work -- every authenticated account saw every app and every app's full manifest projection --
+ * while `app.manifest.json` had been declaring `permissions` and `app-registry.ts` had been
+ * projecting them to the browser all along. Each case below names the single guard line it would
+ * catch: `routes/platform-apps.ts#canSeePlatformApp` (and `#isPlatformAppAdminRequest`).
+ */
+describe('platform apps router permission filter', () => {
+  beforeEach(() => {
+    queryMock.mockReset()
+    queryForTenantMock.mockReset()
+  })
+
+  function appManifest(id: string, permissions: string[]): Record<string, unknown> {
+    return {
+      id,
+      version: '0.1.0',
+      displayName: `${id} display`,
+      pluginId: `plugin-${id}`,
+      boundedContext: { code: id },
+      platformDependencies: ['multitable'],
+      navigation: [
+        { id: `${id}-home`, title: id, path: `/p/plugin-${id}/${id}`, location: 'main-nav', order: 1 },
+      ],
+      permissions,
+      featureFlags: [],
+      objects: [],
+      workflows: [],
+      integrations: [],
+    }
+  }
+
+  /** A stock-prep app (three declared codes) plus a public app (zero declared codes). */
+  function createRouter() {
+    const gated = createLoadedPlugin('plugin-stock-prep', appManifest('stock-preparation', [
+      'stock-prep:read',
+      'stock-prep:operate',
+      'stock-prep:admin',
+    ]))
+    const open = createLoadedPlugin('plugin-open-app', appManifest('open-app', []))
+    return createPlatformAppsRouter({
+      pluginLoader: {
+        getPlugins: () => new Map([
+          ['plugin-stock-prep', gated],
+          ['plugin-open-app', open],
+        ]),
+      } as any,
+      pluginStatus: new Map([
+        ['plugin-stock-prep', { status: 'active' as const }],
+        ['plugin-open-app', { status: 'active' as const }],
+      ]),
+    })
+  }
+
+  async function list(user: unknown) {
+    const handler = getRouteHandler(createRouter(), 'get', '/')
+    const response = createMockResponse()
+    await handler({ params: {}, headers: {}, user }, response)
+    return response
+  }
+
+  async function detail(appId: string, user: unknown) {
+    const handler = getRouteHandler(createRouter(), 'get', '/:appId')
+    const response = createMockResponse()
+    await handler({ params: { appId }, headers: {}, user }, response)
+    return response
+  }
+
+  function listedIds(response: { body: unknown }): string[] {
+    return ((response.body as { list?: Array<{ id: string }> }).list ?? []).map((item) => item.id).sort()
+  }
+
+  it('hides an app whose declared codes the caller holds none of', async () => {
+    const response = await list({ id: 'u_1', role: 'user', permissions: ['elearning:read'] })
+
+    expect(response.statusCode).toBe(200)
+    expect(listedIds(response)).toEqual(['open-app'])
+    // Not merely absent from `list`: no field of the hidden app's manifest projection leaks either.
+    expect(JSON.stringify(response.body)).not.toContain('stock-preparation')
+  })
+
+  it('404s the detail route for an app the caller may not see, and reads no instance row', async () => {
+    const response = await detail('stock-preparation', {
+      id: 'u_1',
+      role: 'user',
+      permissions: ['elearning:read'],
+      tenantId: 'tenant_42',
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect(response.body).toEqual({ error: 'Platform app not found' })
+    expect(queryForTenantMock).not.toHaveBeenCalled()
+    expect(queryMock).not.toHaveBeenCalled()
+  })
+
+  it('answers a refused app and a nonexistent app identically (no existence oracle)', async () => {
+    const user = { id: 'u_1', role: 'user', permissions: ['elearning:read'] }
+    const refused = await detail('stock-preparation', user)
+    const missing = await detail('no-such-app', user)
+
+    expect(refused.statusCode).toBe(missing.statusCode)
+    expect(refused.body).toEqual(missing.body)
+  })
+
+  it('shows the app on ANY ONE of its declared codes, not on all of them', async () => {
+    for (const code of ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin']) {
+      const response = await list({ id: 'u_1', role: 'user', permissions: [code] })
+      expect(listedIds(response)).toEqual(['open-app', 'stock-preparation'])
+    }
+  })
+
+  it('runs the same code algebra the browser runs (resource wildcard, resource admin, write implies read)', async () => {
+    const readOnlyApp = createLoadedPlugin('plugin-stock-prep', appManifest('stock-preparation', ['stock-prep:read']))
+    async function listWith(permissions: string[]) {
+      const router = createPlatformAppsRouter({
+        pluginLoader: { getPlugins: () => new Map([['plugin-stock-prep', readOnlyApp]]) } as any,
+        pluginStatus: new Map([['plugin-stock-prep', { status: 'active' as const }]]),
+      })
+      const response = createMockResponse()
+      await getRouteHandler(router, 'get', '/')(
+        { params: {}, headers: {}, user: { id: 'u_1', role: 'user', permissions } },
+        response,
+      )
+      return listedIds(response)
+    }
+
+    expect(await listWith(['stock-prep:*'])).toEqual(['stock-preparation'])
+    expect(await listWith(['stock-prep:admin'])).toEqual(['stock-preparation'])
+    expect(await listWith(['stock-prep:write'])).toEqual(['stock-preparation'])
+    // The asymmetric half: a neighbouring resource never leaks in (R-11: integration:write is not a
+    // stock-prep scope), and a code with no action grants nothing.
+    expect(await listWith(['integration:write'])).toEqual([])
+    expect(await listWith(['stock-prep'])).toEqual([])
+  })
+
+  it('treats an app that declares no codes as public to any authenticated caller', async () => {
+    const response = await list({ id: 'u_1', role: 'user' })
+
+    expect(listedIds(response)).toEqual(['open-app'])
+    const detailResponse = await detail('open-app', { id: 'u_1', role: 'user' })
+    expect(detailResponse.statusCode).toBe(200)
+    expect((detailResponse.body as { id: string }).id).toBe('open-app')
+  })
+
+  it.each([
+    ['role admin', { id: 'u_admin', role: 'admin' }],
+    ['a roles list containing admin', { id: 'u_admin', role: 'user', roles: ['admin'] }],
+    ['the *:* code', { id: 'u_admin', role: 'user', permissions: ['*:*'] }],
+    ['the users.is_admin flag', { id: 'u_admin', role: 'user', is_admin: true }],
+  ] as const)('lets a platform admin through by %s', async (_label, user) => {
+    const response = await list(user)
+    expect(listedIds(response)).toEqual(['open-app', 'stock-preparation'])
+
+    const detailResponse = await detail('stock-preparation', user)
+    expect(detailResponse.statusCode).toBe(200)
+  })
+
+  it('narrows the instance read to the apps that survived the gate', async () => {
+    queryForTenantMock.mockResolvedValue({ rows: [], rowCount: 0 })
+    const response = await list({ id: 'u_1', tenantId: 'tenant_42' })
+
+    expect(listedIds(response)).toEqual(['open-app'])
+    expect(queryForTenantMock).toHaveBeenCalledTimes(1)
+    expect(queryForTenantMock).toHaveBeenCalledWith(
+      'tenant_42',
+      expect.stringContaining('FROM platform_app_instances'),
+      ['tenant_42', ['open-app']],
+    )
+  })
+
+  it('never widens the instance read to every workspace row when the caller may see nothing', async () => {
+    const onlyGated = createLoadedPlugin('plugin-stock-prep', appManifest('stock-preparation', ['stock-prep:read']))
+    const router = createPlatformAppsRouter({
+      pluginLoader: { getPlugins: () => new Map([['plugin-stock-prep', onlyGated]]) } as any,
+      pluginStatus: new Map([['plugin-stock-prep', { status: 'active' as const }]]),
+    })
+    const response = createMockResponse()
+    await getRouteHandler(router, 'get', '/')({
+      params: {},
+      headers: {},
+      user: { id: 'u_1', role: 'user', permissions: ['elearning:read'], tenantId: 'tenant_42' },
+    }, response)
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as { list: unknown[] }).list).toEqual([])
+    // An empty appIds list makes listPlatformAppInstances fall back to "every instance in this
+    // workspace" (services/PlatformAppInstanceRegistryService.ts:142-149). It must never be reached.
+    expect(queryForTenantMock).not.toHaveBeenCalled()
+    expect(queryMock).not.toHaveBeenCalled()
+  })
+
+  it('gates the shipped stock-prep manifest on the codes it actually declares', async () => {
+    const manifestPath = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../../../../plugins/plugin-integration-core/app.manifest.json',
+    )
+    const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as { id: string; permissions: string[] }
+
+    // The gate is only as real as the data it consumes: were this manifest to ship an empty
+    // `permissions`, owner decision 3 would turn the app public, and this line says so out loud.
+    expect(raw.id).toBe('stock-preparation')
+    expect(raw.permissions).toEqual(['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin'])
+
+    const loaded = createLoadedPlugin('plugin-integration-core', raw as unknown as Record<string, unknown>)
+    const router = createPlatformAppsRouter({
+      pluginLoader: { getPlugins: () => new Map([['plugin-integration-core', loaded]]) } as any,
+      pluginStatus: new Map([['plugin-integration-core', { status: 'active' as const }]]),
+    })
+
+    const denied = createMockResponse()
+    await getRouteHandler(router, 'get', '/')(
+      { params: {}, headers: {}, user: { id: 'u_1', role: 'user', permissions: ['integration:write'] } },
+      denied,
+    )
+    expect((denied.body as { list: unknown[] }).list).toEqual([])
+
+    const allowed = createMockResponse()
+    await getRouteHandler(router, 'get', '/')(
+      { params: {}, headers: {}, user: { id: 'u_2', role: 'user', permissions: ['stock-prep:operate'] } },
+      allowed,
+    )
+    expect(listedIds(allowed)).toEqual(['stock-preparation'])
   })
 })

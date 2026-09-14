@@ -22,7 +22,7 @@
       </div>
       <div class="meta-link-picker__body">
         <div v-if="loading" class="meta-link-picker__loading">{{ lp('linkPicker.loading') }}</div>
-        <div v-else-if="errorMessage" class="meta-link-picker__error">{{ errorMessage }}</div>
+        <div v-else-if="errorMessage" class="meta-link-picker__error" data-test="link-picker-error">{{ errorMessage }}</div>
         <label v-for="rec in records" :key="rec.id" class="meta-link-picker__item">
           <input type="checkbox" :checked="selected.has(rec.id)" @change="toggleSelect(rec.id)" />
           <span>{{ rec.display || rec.id }}</span>
@@ -51,6 +51,7 @@ import type { LinkedRecordSummary, MetaField } from '../types'
 import { multitableClient } from '../api/client'
 import { linkPickerSearchPlaceholder, linkPickerTitle } from '../utils/link-fields'
 import {
+  linkPickerErrorMessage,
   linkPickerLabel,
   selectedCount,
   type MetaLinkPickerLabelKey,
@@ -121,7 +122,9 @@ async function loadRecords(reset = false) {
     for (const record of data.records ?? []) summaryById[record.id] = record
   } catch (error: any) {
     if (reset) records.value = []
-    errorMessage.value = error?.message ?? lp('linkPicker.errorLoad')
+    // 按后端稳定错误码翻人话（LINK_FIELD_FOREIGN_SHEET_MISSING = 这个关联字段没设目标表）；
+    // 其余错误仍走 message → 通用文案的原有兜底。
+    errorMessage.value = linkPickerErrorMessage(error, isZh.value)
   } finally {
     loading.value = false
   }
