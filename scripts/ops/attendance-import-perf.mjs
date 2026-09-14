@@ -11,6 +11,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { assertImportTelemetry, coerceNonNegativeNumber } from './attendance-import-telemetry-utils.mjs'
+import { requireImportSessionOrg } from './attendance-import-scope.mjs'
 
 const apiBase = String(process.env.API_BASE || '').replace(/\/+$/, '')
 let token = String(process.env.AUTH_TOKEN || '')
@@ -368,7 +369,10 @@ async function rollbackImportBatch(batchId) {
   const startedAtMs = nowMs()
   let lastError = null
   for (let attempt = 1; attempt <= rollbackRetryAttempts; attempt += 1) {
-    const rb = await apiFetch(`/attendance/import/rollback/${batchId}`, { method: 'POST', body: '{}' })
+    const session = await apiFetch('/auth/me', { method: 'GET' })
+    assertOk(session, 'GET /auth/me before rollback')
+    requireImportSessionOrg(session.body, orgId)
+    const rb = await apiFetch(`/attendance/import/rollback/${encodeURIComponent(batchId)}`, { method: 'POST', body: '{}' })
     const ok = rb.res.ok && !(rb.body && typeof rb.body === 'object' && (rb.body.success === false || rb.body.ok === false))
     if (ok) {
       return {
@@ -556,7 +560,7 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
   while (true) {
     let job = null
     try {
-      job = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' })
+      job = await apiFetch(`/attendance/import/jobs/${encodeURIComponent(jobId)}?${new URLSearchParams({ orgId })}`, { method: 'GET' })
     } catch (error) {
       transientErrors += 1
       const message = (error && error.message) || String(error)
@@ -734,6 +738,7 @@ async function run() {
   // Resolve userId via auth/me.
   const me = await apiFetch('/auth/me', { method: 'GET' })
   assertOk(me, 'GET /auth/me')
+  requireImportSessionOrg(me.body, orgId)
   const user = me.body?.data?.user ?? {}
   let userId = user?.userId || user?.id || user?.user_id
   if (!userId) {
@@ -1203,7 +1208,7 @@ async function run() {
   }
   // Resolve chunk metadata from batch detail endpoint (covers async jobs and older responses).
   try {
-    const batchDetail = await apiFetch(`/attendance/import/batches/${encodeURIComponent(batchId)}`, { method: 'GET' })
+    const batchDetail = await apiFetch(`/attendance/import/batches/${encodeURIComponent(batchId)}?${new URLSearchParams({ orgId })}`, { method: 'GET' })
     if (batchDetail.res.ok && batchDetail.body?.ok) {
       if (typeof batchDetail.body?.data?.meta?.engine === 'string' && batchDetail.body.data.meta.engine) {
         engine = batchDetail.body.data.meta.engine
@@ -1265,7 +1270,7 @@ async function run() {
   let exportMs = null
   if (exportCsv) {
     const tEx0 = nowMs()
-    const ex = await apiFetchText(`/attendance/import/batches/${batchId}/export.csv?type=${encodeURIComponent(exportType)}`, { method: 'GET' })
+    const ex = await apiFetchText(`/attendance/import/batches/${encodeURIComponent(batchId)}/export.csv?${new URLSearchParams({ type: exportType, orgId })}`, { method: 'GET' })
     const tEx1 = nowMs()
     exportMs = tEx1 - tEx0
     if (!ex.res.ok) {

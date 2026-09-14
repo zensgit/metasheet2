@@ -4,6 +4,7 @@ import os from 'os'
 import path from 'path'
 import { selectAttendanceAdminWorkspaceSection } from './ops/attendance-admin-navigation.mjs'
 import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './ops/attendance-acceptance-preflight.mjs'
+import { requireImportSessionOrg } from './ops/attendance-import-scope.mjs'
 import { randomUUID } from 'node:crypto'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
@@ -268,6 +269,17 @@ async function switchToOverview(page) {
   }
 }
 
+async function ensureRequestFormVisible(page, waitMs = timeoutMs) {
+  const dateInput = page.locator('#attendance-request-work-date').first()
+  if (await dateInput.isVisible()) return dateInput
+  await switchToOverview(page)
+  const tools = page.locator('[data-attendance-request-tools]').first()
+  await tools.waitFor({ state: 'visible', timeout: waitMs })
+  if (await tools.getAttribute('open') === null) await tools.locator('summary').click()
+  await dateInput.waitFor({ state: 'visible', timeout: waitMs })
+  return dateInput
+}
+
 async function selectAdminSection(page, sectionId, headingName, waitMs = timeoutMs) {
   await selectAttendanceAdminWorkspaceSection(page, sectionId, waitMs)
 
@@ -433,6 +445,7 @@ async function run() {
     throw new Error(`GET /auth/me failed: ${me.status} ${me.raw.slice(0, 200)}`)
   }
   const meData = me.body?.data ?? {}
+  const orgId = requireImportSessionOrg(me.body, process.env.ORG_ID)
   const user = meData?.user ?? meData?.userInfo ?? meData?.me ?? {}
   const features = meData?.features ?? {}
   const userId = user?.userId || user?.id || user?.user_id
@@ -496,7 +509,8 @@ async function run() {
   end.setHours(18, 0, 0, 0)
   await clickAndMaybeContinue(
     (async () => {
-      await page.locator('#attendance-request-work-date').fill(workDate)
+      const requestDate = await ensureRequestFormVisible(page)
+      await requestDate.fill(workDate)
       await page.locator('#attendance-request-type').selectOption('missed_check_in')
       await page.locator('#attendance-request-in').fill(formatDatetimeLocal(start))
       await page.locator('#attendance-request-out').fill(formatDatetimeLocal(end))
@@ -686,7 +700,7 @@ async function run() {
   }
   await page.screenshot({ path: path.join(outputDir, '05-import-batches.png'), fullPage: true })
 
-  const batchItems = await apiGetJson(`${apiBase}/attendance/import/batches/${batchId}/items?pageSize=200`, token)
+  const batchItems = await apiGetJson(`${apiBase}/attendance/import/batches/${encodeURIComponent(batchId)}/items?${new URLSearchParams({ pageSize: '200', orgId })}`, token)
   if (!batchItems.ok) {
     throw new Error(`GET /attendance/import/batches/:id/items failed: ${batchItems.status}`)
   }

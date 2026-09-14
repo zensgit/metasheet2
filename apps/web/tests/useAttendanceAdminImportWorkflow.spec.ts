@@ -78,6 +78,50 @@ function createWorkflow(overrides: Parameters<typeof useAttendanceAdminImportWor
 }
 
 describe('useAttendanceAdminImportWorkflow', () => {
+  it.each(['preview', 'commit'] as const)('pins async %s polling, refresh and resume to the payload org', async (kind) => {
+    let selectedOrg = 'qa-selector'
+    const jobReads: URL[] = []
+    const { workflow, setStatusFromError, loadImportBatches } = createWorkflow({
+      getOrgId: () => selectedOrg,
+      thresholds: { previewAsyncThreshold: 1, commitAsyncThreshold: 1 },
+      apiFetch: vi.fn(async (input: string, init?: RequestInit) => {
+        const url = new URL(input, 'http://local.test')
+        if (url.pathname.endsWith('/prepare')) return jsonResponse(200, {
+          ok: true, data: { commitToken: 'qa-token', expiresAt: '2099-01-01T00:00:00Z' },
+        })
+        if (url.pathname.endsWith(`/${kind}-async`)) {
+          expect(JSON.parse(String(init?.body)).orgId).toBe('qa-payload')
+          selectedOrg = 'qa-changed'
+          return jsonResponse(200, { ok: true, data: { job: {
+            id: 'job-1', kind, status: 'queued', progress: 0, total: 1,
+          } } })
+        }
+        if (url.pathname === '/api/attendance/import/jobs/job-1') {
+          jobReads.push(url)
+          if (url.searchParams.get('orgId') !== 'qa-payload') return jsonResponse(404, { ok: false })
+          // Older job envelopes omit orgId; the client must preserve its request scope.
+          return jsonResponse(200, { ok: true, data: {
+            id: 'job-1', kind, status: 'completed', progress: 1, total: 1,
+            preview: { items: [], rowCount: 1 },
+          } })
+        }
+        throw new Error(`Unexpected request: ${input}`)
+      }),
+    })
+    workflow.importForm.payload = JSON.stringify({
+      orgId: 'qa-payload', source: 'manual', rows: [{ userId: 'u-1', workDate: '2026-09-12' }],
+    })
+    if (kind === 'preview') await workflow.previewImport()
+    else await workflow.runImport()
+    expect(workflow.importAsyncJob.value?.status).toBe('completed')
+    await workflow.refreshImportAsyncJob()
+    await workflow.resumeImportAsyncJobPolling()
+    expect(jobReads).toHaveLength(3)
+    expect(jobReads.map(url => url.searchParams.get('orgId'))).toEqual(Array(3).fill('qa-payload'))
+    expect(setStatusFromError).not.toHaveBeenCalled()
+    if (kind === 'commit') expect(loadImportBatches).toHaveBeenLastCalledWith({ orgId: 'qa-payload' })
+  })
+
   it('binds prepare and preview to the organization in the import payload', async () => {
     const selectedOrgId = '00000000-0000-4000-8000-000000000111'
     const payloadOrgId = '00000000-0000-4000-8000-000000000222'

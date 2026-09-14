@@ -1077,7 +1077,11 @@ describe('attendance UUID route validation', () => {
     ]
 
     for (const testCase of cases) {
-      const res = await invokeRoute(routes, testCase.key, { params: { id: 'not-a-uuid' }, body: 'body' in testCase ? testCase.body : undefined })
+      const res = await invokeRoute(routes, testCase.key, {
+        params: { id: 'not-a-uuid' },
+        body: 'body' in testCase ? testCase.body : undefined,
+        authenticatedTenantId: 'default',
+      })
       expect(res.statusCode, testCase.key).toBe(400)
       expect(res.body, testCase.key).toMatchObject({
         ok: false,

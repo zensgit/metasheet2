@@ -13973,7 +13973,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14190,7 +14190,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -15382,7 +15382,7 @@ attendanceIntegrationDescribe(
     if (!importUploadDir) return
 
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -19736,7 +19736,7 @@ attendanceIntegrationDescribe(
       }
 
       const tokenRes = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
       )
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
