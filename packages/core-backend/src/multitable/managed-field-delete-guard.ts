@@ -28,14 +28,17 @@
  * given field was provisioned by the plugin:
  *   - `meta_fields` carries no source/plugin/managed column; `POST /fields` and provisioning write the
  *     identical six columns (migration zzzz20260404153000_repair_meta_core_schema).
- *   - The registry row is keyed by sheet and carries NO field-level data. The only host tables with a
- *     `plugin_` prefix are the object registry, the automation-rule registry, the field-POLICY registry
- *     (an RBAC visibility/editability table keyed by field NAME, which `PATCH /fields` lets a user
- *     rename, and holding only fields that declare a role policy) and plugin_kv. None is a manifest of
- *     provisioned field ids.
+ *   - The registry row is keyed by sheet and carries NO field-level data. Of the host tables with a
+ *     `plugin_` prefix (twenty-one at the time of writing), the ones that could even be mistaken for a
+ *     manifest are the object registry, the automation-rule registry, the field-POLICY registry (an
+ *     RBAC visibility/editability table keyed by field NAME, which `PATCH /fields` lets a user rename,
+ *     and holding only fields that declare a role policy) and plugin_kv; none of the twenty-one carries
+ *     provisioned field ids (checked against the CREATE TABLE column lists of every plugin_ migration).
  *   - A provisioned id is `getObjectFieldId(projectId, objectId, logicalId)` = `fld_` + sha1 prefix.
  *     `projectId`/`objectId` ARE recoverable from the registry row, but the logical ids are not (sha1
- *     is one-way and nothing persists the descriptor), so the image set cannot be enumerated.
+ *     is one-way and the HOST persists no descriptor; the plugin-side pack-install store keeps LOGICAL
+ *     ids of the ext_ pack columns only, which is neither readable from this route nor a full manifest),
+ *     so the image set cannot be enumerated host-side.
  *   - Gating on the id SHAPE (`/^fld_[0-9a-f]{24}$/`) is a sound NECESSARY condition — no provisioned
  *     field escapes it, and forging the shape through `POST /fields {id}` only makes one's own column
  *     undeletable (fail-closed direction). But it has a real hole: the stock-preparation target adapter
