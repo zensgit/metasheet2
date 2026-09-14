@@ -45,6 +45,7 @@ import type {
   QueryOptions,
   QueryResult,
   SchemaInfo,
+  SchemaFetchOptions,
   TableInfo,
   ColumnInfo,
   IndexInfo,
@@ -56,6 +57,7 @@ import {
   BaseDataAdapter,
   DataSourceConfig as _DataSourceConfig
 } from './BaseAdapter'
+import { startSchemaDetailBudget } from './schema-detail-budget'
 
 export class MySQLAdapter extends BaseDataAdapter {
   protected override pool: MySQLPool | null = null
@@ -417,7 +419,11 @@ export class MySQLAdapter extends BaseDataAdapter {
     return this.query<T>(sql, whereClause.params)
   }
 
-  async getSchema(schema?: string): Promise<SchemaInfo> {
+  /** LIST-ONLY BY DEFAULT (2026-09-10 222 PLM 504) — see MSSQLAdapter.getSchema for the full rationale. */
+  async getSchema(schema?: string, options?: SchemaFetchOptions): Promise<SchemaInfo> {
+    const includeColumns = options?.includeColumns === true
+    // Started BEFORE the listing queries — the budget bounds the WHOLE call (see MSSQLAdapter).
+    const budget = includeColumns ? startSchemaDetailBudget(options?.budgetMs) : null
     const database = schema || this.dbValueToString(this.config.connection.database)
 
     const tablesQuery = `
@@ -446,19 +452,27 @@ export class MySQLAdapter extends BaseDataAdapter {
     ])
 
     const tables: TableInfo[] = []
-    for (const row of tablesResult.data) {
-      const tableInfo = await this.getTableInfo(row.table_name, row.table_schema)
-      tables.push(tableInfo)
+    if (includeColumns) {
+      for (const row of tablesResult.data) {
+        budget?.assertWithinBudget(tables.length, tablesResult.data.length)
+        const tableInfo = await this.getTableInfo(row.table_name, row.table_schema)
+        tables.push(tableInfo)
+      }
+    } else {
+      for (const row of tablesResult.data) {
+        tables.push({ name: row.table_name, schema: row.table_schema, columns: [], columnsLoaded: false })
+      }
     }
 
     const views = viewsResult.data.map(row => ({
       name: row.view_name,
       schema: row.view_schema,
       definition: row.view_definition,
-      columns: [] // Would need additional query to get column info
+      columns: [], // Would need additional query to get column info
+      columnsLoaded: false
     }))
 
-    return { tables, views }
+    return { tables, views, detail: includeColumns ? 'full' : 'list' }
   }
 
   async getTableInfo(table: string, schema?: string): Promise<TableInfo> {

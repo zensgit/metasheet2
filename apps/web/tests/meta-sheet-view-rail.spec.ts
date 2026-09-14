@@ -566,3 +566,77 @@ describe('MetaSheetViewRail — T7: sheet rename affordance', () => {
     expect(root.querySelector('[data-testid="rail-sheet-rename-input"]')).toBeNull()
   })
 })
+
+// T8 — sheet delete affordance. The trash button is gated on the SERVER-DERIVED `canDeleteSheet`
+// bit (/context, same gate as DELETE /sheets/:sheetId), which describes the CURRENT sheet only —
+// so it renders on the selected row and nowhere else, and it never keys off canManageFields
+// (a sheet-scoped full-write holder has canManageFields=true while the delete route refuses them).
+// Click only emits `delete-sheet(id)`; the confirm dialog belongs to the workbench.
+describe('MetaSheetViewRail — T8: sheet delete affordance (selected sheet only, canDeleteSheet-gated)', () => {
+  function deleteButtons(root: HTMLElement): HTMLButtonElement[] {
+    return Array.from(root.querySelectorAll('[data-testid="rail-sheet-delete"]'))
+  }
+
+  it('canDeleteSheet=false (or absent) renders NO delete affordance — even with canManageFields=true', () => {
+    const rootAbsent = mountComponent(baseProps({ canManageFields: true, canDeleteSheet: undefined }))
+    expect(deleteButtons(rootAbsent).length).toBe(0)
+
+    const rootFalse = mountComponent(baseProps({ canManageFields: true, canDeleteSheet: false }))
+    expect(deleteButtons(rootFalse).length).toBe(0)
+  })
+
+  it('canDeleteSheet=true renders EXACTLY ONE delete button, inside the ACTIVE sheet row (never on other rows)', () => {
+    const root = mountComponent(baseProps({ canDeleteSheet: true, activeSheetId: 's2' }))
+    const buttons = deleteButtons(root)
+    expect(buttons.length).toBe(1)
+    const row = buttons[0].closest('.meta-view-rail__sheet-row') as HTMLElement
+    expect(row).not.toBeNull()
+    const treeitem = row.querySelector('[data-testid="rail-sheet-node"]') as HTMLButtonElement
+    expect(treeitem.getAttribute('aria-selected')).toBe('true')
+    expect(treeitem.textContent).toContain('Inventory') // SHEETS[1] === s2
+    // and the non-active row has none
+    const otherRows = Array.from(root.querySelectorAll('.meta-view-rail__sheet-row')).filter((r) => r !== row)
+    expect(otherRows.length).toBe(SHEETS.length - 1)
+    for (const other of otherRows) expect(other.querySelector('[data-testid="rail-sheet-delete"]')).toBeNull()
+  })
+
+  it('does not depend on canManageFields: canDeleteSheet=true alone still renders it; the pencil stays independent', () => {
+    const root = mountComponent(baseProps({ canDeleteSheet: true, canManageFields: false }))
+    expect(deleteButtons(root).length).toBe(1)
+    expect(root.querySelectorAll('[data-testid="rail-sheet-rename"]').length).toBe(0)
+  })
+
+  it('clicking delete emits delete-sheet with the ACTIVE sheet id, and ONLY delete-sheet (no select-sheet)', () => {
+    const onDeleteSheet = vi.fn()
+    const onSelectSheet = vi.fn()
+    const onRenameSheet = vi.fn()
+    const root = mountComponent(baseProps({ canDeleteSheet: true, canManageFields: true, activeSheetId: 's1', onDeleteSheet, onSelectSheet, onRenameSheet }))
+    deleteButtons(root)[0].click()
+    expect(onDeleteSheet).toHaveBeenCalledTimes(1)
+    expect(onDeleteSheet).toHaveBeenCalledWith('s1')
+    expect(onSelectSheet).not.toHaveBeenCalled()
+    expect(onRenameSheet).not.toHaveBeenCalled()
+  })
+
+  it('is hidden while the active row is being renamed, and returns after cancel', async () => {
+    const root = mountComponent(baseProps({ canDeleteSheet: true, canManageFields: true, activeSheetId: 's1' }))
+    expect(deleteButtons(root).length).toBe(1)
+    const pencil = root.querySelector('[data-testid="rail-sheet-rename"]') as HTMLButtonElement
+    pencil.click()
+    await flushPromises()
+    expect(deleteButtons(root).length).toBe(0)
+    const cancelBtn = root.querySelector('[data-testid="rail-sheet-rename-cancel"]') as HTMLButtonElement
+    cancelBtn.click()
+    await flushPromises()
+    expect(deleteButtons(root).length).toBe(1)
+  })
+
+  it('bilingual title/aria-label via the rail label table', async () => {
+    const root = mountComponent(baseProps({ canDeleteSheet: true }))
+    expect(deleteButtons(root)[0].getAttribute('title')).toBe('Delete table')
+    expect(deleteButtons(root)[0].getAttribute('aria-label')).toBe('Delete table')
+    useLocale().setLocale('zh')
+    await flushPromises()
+    expect(deleteButtons(root)[0].getAttribute('title')).toBe('删除数据表')
+  })
+})

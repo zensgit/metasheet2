@@ -237,6 +237,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       pitResetEnabled: false, // T8-2: flag-off default ⇒ false (this actor is also not a sheet-admin, so false regardless)
       sheetRevertEnabled: false, // interim revert-execute master gate: flag-off default ⇒ false (also not a sheet-admin, so false regardless)
       personalViewsEnabled: false, // Slice 3: flag-off default ⇒ false (available to all readers when the flag is on)
+      canDeleteSheet: false, // scoped spreadsheet:read only, no global schema authority, not a sheet admin
     })
     expect(contextResponse.body.data.viewPermissions).toEqual({
       view_grid: {
@@ -2540,6 +2541,16 @@ describe('Multitable sheet-scoped permissions API', () => {
         if (sql.includes('UPDATE meta_sheets SET deleted_at = now()')) {
           softDeleteParams.push([...(params ?? [])])
           return { rows: [], rowCount: 1 }
+        }
+        // Managed-sheet guard (src/multitable/sheet-delete-guard.ts): an ordinary sheet has no
+        // plugin registry row and no server-owned system_kind, so the guard lets the delete through.
+        if (sql.includes('FROM plugin_multitable_object_registry')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [] }
+        }
+        if (sql.includes('SELECT system_kind, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ system_kind: null, description: null }] }
         }
         // Nothing may be destroyed: an unhandled SQL throws in this harness, so a route that still
         // issued `DELETE FROM meta_sheets` / `DELETE FROM meta_links` would fail here rather than pass.

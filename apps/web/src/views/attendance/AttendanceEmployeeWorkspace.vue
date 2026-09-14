@@ -18,6 +18,10 @@
   after this component so the reports-only sections between them (zero DOM
   nodes in overview mode) do not break that adjacency.
 
+  `afterCommon` is a layout-only slot immediately below the frozen 常用
+  band. The parent owns any dedicated request card; this component still
+  fetches nothing and does not restyle the first viewport.
+
   Visual follow-up (owner, 2026-08-24): employee-workspace chrome only —
   DingTalk/Feishu employee-page tone. No punch, policy, approval, or API change.
 
@@ -122,7 +126,7 @@
               >{{ metricOutTime }}</strong>
             </div>
             <div class="attendance__summary-item attendance__summary-item--stat">
-              <span>{{ tr("Today's hours", '今日工时') }}</span>
+              <span>{{ workbenchHoursLabel }}</span>
               <strong class="attendance__summary-value">{{ workDurationLabel }}</strong>
             </div>
             <div class="attendance__summary-item attendance__summary-item--stat">
@@ -320,6 +324,8 @@
         </div>
         <p class="attendance-ew__common-hint">{{ selfServiceQuickActionHint }}</p>
       </div>
+
+    <slot name="afterCommon" />
 
     <div class="attendance-ew__tools">
       <div class="attendance__card attendance__card--selfservice attendance-ew__balance" data-selfservice-card="annual-balance">
@@ -537,7 +543,6 @@ const props = defineProps<{
   workbenchStatusDescription: string
   workbenchRecordStatus: string | null
   workbenchFocusDateLabel: string | null
-  workbenchLatestPunchLabel: string
   workbenchWorkMinutes: number
   workbenchLateEarlyLabel: string
   workbenchHasLateEarly: boolean
@@ -669,11 +674,17 @@ const greetingSubline = computed(() => {
   return datePart
 })
 
-const clockedIn = computed(() => isClockedIn(props.heroTimeline, props.workbenchLatestPunchLabel))
+const clockedIn = computed(() => isClockedIn(props.heroTimeline))
+
+const clockedOut = computed(() => Boolean(props.heroTimeline?.checkOut))
 
 const offDutySuggest = computed(() => suggestOffDutyTime(props.selfRulesWorkWindowSummary))
+const workbenchHoursLabel = computed(() => props.workbenchFocusDateLabel
+  ? `${props.tr('Hours', '工时')} · ${props.workbenchFocusDateLabel}`
+  : props.tr('Hours', '工时'))
 
 const clockStatusLine = computed(() => {
+  if (clockedOut.value) return props.tr('Clocked out', '已下班')
   if (!clockedIn.value) return props.tr('Not clocked in yet', '尚未上班')
   const suggestAt = offDutySuggest.value
   if (suggestAt) {
@@ -702,7 +713,7 @@ const expiredBalanceLabel = computed(() =>
 
 const lateEarlyDisplay = computed(() => formatLateEarlyPair(props.workbenchLateEarlyLabel, props.tr))
 
-const metricInTime = computed(() => props.heroTimeline?.checkIn ?? props.workbenchLatestPunchLabel ?? '--:--')
+const metricInTime = computed(() => props.heroTimeline?.checkIn ?? '--:--')
 
 const metricOutTime = computed(() => props.heroTimeline?.checkOut ?? '--:--')
 

@@ -476,6 +476,13 @@ async function loadPlayableMedia(
      LEFT JOIN elearning_media m
        ON m.org_id = i.org_id AND m.id = i.media_id
      WHERE i.org_id = $1 AND i.id = $2
+       AND EXISTS (
+         SELECT 1 FROM platform_app_instances app
+          WHERE app.tenant_id = i.org_id AND app.workspace_id = i.org_id
+            AND app.app_id = 'elearning' AND app.plugin_id = 'plugin-elearning'
+            AND app.instance_key = 'primary' AND app.status = 'active'
+            AND jsonb_typeof(app.config_json->'notificationsEnabled') = 'boolean'
+       )
      FOR SHARE OF i, v, c`,
     [orgId, itemId],
   )

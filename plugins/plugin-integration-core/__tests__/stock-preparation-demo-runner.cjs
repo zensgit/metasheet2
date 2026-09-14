@@ -66,7 +66,7 @@ const {
 } = require(path.join(LIB, 'customer-packs', 'factory-a.rehearsal.cjs'))
 // THE WAREHOUSE EXPORT PROJECTION — imported from the real exporter, not copied. This used to be
 // a local 10-column list that drifted out of sync with lib/stock-preparation-prep-line-export.cjs
-// (see PR #5458's comment, since removed) as that module grew to 17 columns. Importing
+// (see PR #5458's comment, since removed) as that module grew. Importing
 // EXPORT_COLUMNS + its cell formatters means this demo step is now STRUCTURALLY unable to drift:
 // it renders whatever exportStockPreparationPrepLines renders, from the same array and the same
 // two functions, not a parallel guess at them.
@@ -521,7 +521,13 @@ async function main() {
   // EXPORT_COLUMNS + formatCellForColumn/columnSourceValue (imported above), so what prints here
   // is exactly what exportStockPreparationPrepLines would hand buildXlsxBuffer.
   const headers = REAL_EXPORT_COLUMNS.map((c) => c.label)
-  assert.equal(headers.length, 17, '导出列数与真实导出器 EXPORT_COLUMNS 一致(12 原有 + 5 个 #5447 部门完成列)')
+  // 列数 NOT 硬编码。写死 17 的那一版在 F1c 把老系统 23 列表头补齐(28 列)时炸了,而本文件不是
+  // *.test.cjs,进不了 test-chain.txt 的形状允许表(scripts/test-chain.cjs 只收
+  // `node __tests__/<name>.test.{cjs,mjs}`),CI 因此抓不到 —— 演示脚本会在一次「全绿」的合并之后静悄悄坏掉。
+  // 这里钉住的是这一步真正要保证的东西:投影与真实导出器同一份 EXPORT_COLUMNS(列 id 不重复、每列
+  // 都有中文表头),而不是「恰好 N 列」。下面每个 colIndex(id) 断言本身就是列在不在的硬检查。
+  assert.equal(new Set(REAL_EXPORT_COLUMNS.map((c) => c.id)).size, REAL_EXPORT_COLUMNS.length, '导出列 id 不重复')
+  assert.ok(headers.length >= 17 && headers.every((label) => typeof label === 'string' && label.trim() !== ''), '每一列都有非空中文表头,且老的 17 列一列没少')
   const activeRows = [...byKey.values()].filter((row) => row.active !== false)
   const exportRows = activeRows.map((row) =>
     REAL_EXPORT_COLUMNS.map((c) => formatExportCell(c, exportColumnSourceValue(row, c))))
@@ -538,8 +544,11 @@ async function main() {
     assert.equal(r[colIndex('warehouseDone')], '否', '负对照:false 渲染为 否(不是空白,不是省略)')
     assert.equal(r[colIndex('actualArrivalDate')], '2026-09-18')
   }
-  say(`\n  ${BOLD('导出(仓库/采购拿走的 XLSX 投影,与真实导出器 17 列逐字节一致)')} —— 活跃物料行 ${exportRows.length} × 列 ${headers.length}(停用的那一行掉出拣料单):`)
-  say(`    ${DIM('后 5 列是 #5447 新增的部门完成列:自制/外购、采购完成、采购回复日期、仓库完成、实际到货日期(两个完成标记渲染为 是/否,未填时留空)')}`)
+  say(`\n  ${BOLD(`导出(仓库/采购拿走的 XLSX 投影,与真实导出器 ${headers.length} 列逐字节一致)`)} —— 活跃物料行 ${exportRows.length} × 列 ${headers.length}(停用的那一行掉出拣料单):`)
+  const departmentColumnIds = ['makeOrBuy', 'procurementDone', 'procurementReplyDate', 'warehouseDone', 'actualArrivalDate']
+  const departmentLabels = departmentColumnIds.map((id) => REAL_EXPORT_COLUMNS[colIndex(id)].label)
+  say(`    ${DIM(`#5447 的部门完成列(${departmentLabels.join('、')})在第 ${departmentColumnIds.map((id) => colIndex(id) + 1).join('/')} 列,两个完成标记渲染为 是/否,未填时留空;`)}`)
+  say(`    ${DIM('其后的列是 F1c 为老系统 exportExcel 那 23 个中文表头补齐的(名称及规格/材料类型/领料节点/毛胚四项…)—— 「后 N 列是某某」这种按位置数列的说法一律不可靠,用 id 认列。')}`)
   table(headers, exportRows.map((r) => r.map((v) => (v === null || v === undefined ? '' : String(v)))))
   say(`  ${DIM('二进制打包由 packages/core-backend/src/multitable/xlsx-service.ts buildXlsxBuffer + 现有 vitest 覆盖;此处证明的是投影(与真实导出器同一份 EXPORT_COLUMNS/格式化函数)。')}`)
   say(`  ${GREEN('步骤 3 通过')}`)

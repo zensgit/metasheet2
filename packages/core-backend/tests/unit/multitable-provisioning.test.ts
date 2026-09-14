@@ -8,6 +8,10 @@ import {
   ensureObject,
   ensureView,
   findObjectSheet,
+  findObjectView,
+  getObjectSheetId,
+  getObjectViewId,
+  getObjectFieldId as getProvisionedObjectFieldId,
   patchObjectFieldProperty,
   getObjectField,
   resolveObjectFieldIds,
@@ -502,6 +506,66 @@ describe('multitable provisioning helper', () => {
     expect(first.hiddenFieldIds).toEqual(['fld_internal'])
     expect(first.config).toEqual({ density: 'compact' })
     expect(views).toHaveLength(1)
+  })
+
+  it('findObjectView reads ONE provisioned view by its derived id, read-only, null when absent', async () => {
+    // The read sibling of `ensureView`. It exists because `getObjectViewId` only COMPOSES an id and
+    // deliberately says nothing about whether the view is there — so a caller deep-linking to a
+    // provisioned view (备料's 「打开项目备料」) could not tell "provisioned" from "composed" and would
+    // hand out a link to a view that resolves to nothing.
+    const { query, views, fields, sheets } = createQuery()
+    const projectId = 'tenant_9:integration-core'
+    const objectId = 'plm_stock_preparation'
+
+    // absent BEFORE it is ensured — the negative half, and the one the fallback depends on.
+    await expect(
+      findObjectView({ query, projectId, objectId, viewId: 'prep-fill' }),
+    ).resolves.toBeNull()
+
+    await ensureObject({
+      query,
+      projectId,
+      descriptor: { id: objectId, name: 'Stock Preparation', fields: [{ id: 'active', name: 'Active', type: 'checkbox' }] },
+    })
+    const hiddenId = getProvisionedObjectFieldId(projectId, objectId, 'active')
+    await ensureView({
+      query,
+      projectId,
+      sheetId: getObjectSheetId(projectId, objectId),
+      descriptor: {
+        id: 'prep-fill',
+        objectId,
+        name: '备料填写视图',
+        type: 'grid',
+        hiddenFieldIds: [hiddenId],
+        sortInfo: { rules: [{ fieldId: hiddenId, desc: false }] },
+        groupInfo: { fieldIds: [hiddenId], fieldId: hiddenId },
+        filterInfo: { conjunction: 'and', conditions: [{ fieldId: hiddenId, operator: 'is', value: true }] },
+      },
+    })
+
+    const before = JSON.parse(JSON.stringify({ views, fields, sheets }))
+    const got = await findObjectView({ query, projectId, objectId, viewId: 'prep-fill' })
+    expect(got).toMatchObject({
+      id: getObjectViewId(projectId, objectId, 'prep-fill'),
+      name: '备料填写视图',
+      hiddenFieldIds: [hiddenId],
+    })
+    expect(got?.sortInfo).toEqual({ rules: [{ fieldId: hiddenId, desc: false }] })
+    expect(got?.groupInfo).toEqual({ fieldIds: [hiddenId], fieldId: hiddenId })
+    expect(got?.filterInfo).toEqual({ conjunction: 'and', conditions: [{ fieldId: hiddenId, operator: 'is', value: true }] })
+    // READ-ONLY: nothing in the store moved.
+    expect(JSON.parse(JSON.stringify({ views, fields, sheets }))).toEqual(before)
+
+    // A view id nobody provisioned stays null even on a sheet that HAS views — the probe answers
+    // about ONE derived id, never "does this sheet have any view".
+    await expect(
+      findObjectView({ query, projectId, objectId, viewId: 'not-provisioned' }),
+    ).resolves.toBeNull()
+    // And an object in ANOTHER project derives a different id, so it cannot read this one's view.
+    await expect(
+      findObjectView({ query, projectId: 'tenant_8:integration-core', objectId, viewId: 'prep-fill' }),
+    ).resolves.toBeNull()
   })
 
   it('persists kanban group metadata for default board views', async () => {

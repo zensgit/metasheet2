@@ -156,6 +156,7 @@ function isEntryReachable(entryPath: string): boolean {
 
 const visibleApps = computed<AppCard[]>(() => {
   return activeApps.value
+    .filter((app) => app.id !== 'elearning' || app.instance?.status === 'active')
     .map((app) => ({
       app,
       valueStatement: app.valueStatement || app.boundedContext.description || '',

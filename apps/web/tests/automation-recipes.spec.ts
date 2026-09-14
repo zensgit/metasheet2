@@ -6,7 +6,9 @@ import { AUTOMATION_RECIPES, applyRecipeToDraft, findAutomationRecipe } from '..
 // trigger/action values the form offers. These pin the table + the overlay semantics.
 
 const QUICK_FORM_TRIGGERS = new Set(['record.created', 'record.updated', 'field.changed'])
-const QUICK_FORM_ACTIONS = new Set(['notify', 'update_field'])
+// F9: the quick form no longer offers the v0 aliases — a card seeding 'notify' produced a rule the
+// executor could not dispatch at all.
+const QUICK_FORM_ACTIONS = new Set(['send_notification', 'update_record'])
 
 describe('automationRecipes', () => {
   it('every recipe uses only quick-form-supported trigger + action values', () => {
@@ -27,17 +29,23 @@ describe('automationRecipes', () => {
   })
 
   it('applyRecipeToDraft overlays ONLY trigger + action, preserving every other draft field', () => {
-    const base = { name: 'kept', triggerType: 'record.created', actionType: 'notify', notifyMessage: 'hi', extra: 42 }
+    const base = { name: 'kept', triggerType: 'record.created', actionType: 'send_notification', notifyMessage: 'hi', extra: 42 }
     const recipe = AUTOMATION_RECIPES.find((r) => r.key === 'field-changed-update')!
     const out = applyRecipeToDraft(base, recipe)
     expect(out.triggerType).toBe('field.changed')
-    expect(out.actionType).toBe('update_field')
+    expect(out.actionType).toBe('update_record')
     // untouched fields survive verbatim
     expect(out.name).toBe('kept')
     expect(out.notifyMessage).toBe('hi')
     expect(out.extra).toBe(42)
     // pure — base not mutated
     expect(base.triggerType).toBe('record.created')
+  })
+
+  it('every notification recipe seeds the CANONICAL send_notification action (F9)', () => {
+    expect(findAutomationRecipe('created-notify')?.actionType).toBe('send_notification')
+    expect(findAutomationRecipe('updated-notify')?.actionType).toBe('send_notification')
+    expect(findAutomationRecipe('field-changed-update')?.actionType).toBe('update_record')
   })
 
   it('findAutomationRecipe resolves a known key and returns undefined for junk', () => {

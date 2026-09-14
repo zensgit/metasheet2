@@ -945,6 +945,16 @@ async function runLargeBomBackgroundExpansionJob(input = {}) {
     expansion = await expandPlmProjectBom({
       sourceAdapter,
       projectNo: job.parameters && job.parameters.projectNo,
+      // F1c 根选择规则,taken from the job's STORED ACTION SNAPSHOT (`cloneJson(action)` at enqueue)
+      // — the same seam `extensionFieldIds` / `carryPolicy` already use, and the reason it has to be
+      // read here: the caller-supplied `expansionOptions` are assembled by the route module from a
+      // fixed key set, so a deployment that configured `rootSelection` would otherwise get 老系统
+      // roots interactively and pre-F1c roots in the background lane — the SAME project expanding to
+      // two different root sets depending only on how big its BOM is.
+      //
+      // Listed BEFORE the spread so an explicit caller value still wins (the route stays the
+      // authority over what it passes); absent on both => `undefined` => the expander's default.
+      rootSelection: job.actionSnapshot && job.actionSnapshot.rootSelection,
       ...expansionOptions,
     })
   } catch (error) {
@@ -1177,6 +1187,18 @@ async function createLargeBomCheckpointApplyJob(input = {}) {
       ? cloneJson(sourceJob.actionSnapshot.template)
       : undefined,
     plan,
+    // OPTIONAL pack-aware ownership band, SNAPSHOTTED at approval time next to planRevision /
+    // targetRevision, for the same reason they are: a checkpoint apply advances over many separate
+    // HTTP requests, and an input read live inside each chunk would let an install (or a column
+    // deleted in the UI) mid-run hand two chunks of ONE approved job two different writable bands —
+    // some rows written with the pack's `ext_` columns in the band and some without, inside one
+    // apply the operator approved once.
+    //
+    // Key ABSENT when the resolver returned undefined (no ledger / no pack / read failure), so a
+    // job created on a deployment with no pack installed is byte-identical to the pre-wiring job.
+    ...(input.installedFieldProperties === undefined || input.installedFieldProperties === null
+      ? {}
+      : { installedFieldProperties: cloneJson(input.installedFieldProperties) }),
     totalDecisions: Array.isArray(plan.decisions) ? plan.decisions.length : 0,
     checkpoint: {
       nextDecisionIndex: 0,
@@ -1319,7 +1341,15 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
       // Same OPTIONAL projection the plan was built from. Threading it here too keeps
       // the human wall extended at WRITE time and not only at plan time — a chunked
       // apply must not be the one path where a pack `ext_` human column slips through.
-      installedFieldProperties: input.installedFieldProperties,
+      //
+      // THE STORED SNAPSHOT WINS over any per-call input: the band belongs to the approved job, so
+      // every chunk of one job writes through the band resolved when that job was approved. The
+      // `input` fallback survives only for a job carrying NO snapshot — a direct caller, or a job
+      // approved before this key existed — and there it is the pre-existing contract, not a
+      // widening: a job that HAS a snapshot can never be widened by its caller.
+      installedFieldProperties: Object.prototype.hasOwnProperty.call(job, 'installedFieldProperties')
+        ? job.installedFieldProperties
+        : input.installedFieldProperties,
       recordsApi,
     })
 
@@ -1367,6 +1397,20 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     // OPTIONAL pack-aware ownership projection, threaded (never fetched — this module
     // does no field I/O). Omitted => the frozen-template bands, i.e. today's behaviour.
     installedFieldProperties: input.installedFieldProperties,
+    // F1c/F1c-b: same DECLARED extension band as the interactive path, taken from the job's stored
+    // action snapshot (`cloneJson(action)`) — a background apply must fill the same FIVE pack
+    // columns an interactive one does (F1c: 当前组件排序号 / 父组件排序号 / 名称及规格; F1c-b:
+    // 父组件图号 / 父组件名称), or one project would carry different columns depending on how big
+    // its BOM is.
+    //
+    // DECLARED, NOT YET LANDED on this path. The declaration below is one of two halves; the other
+    // is `installedFieldProperties` just above, and the large-BOM HTTP routes do not pass it
+    // (`resolveInstalledFieldProperties` appears only on the interactive routes) — so the band this
+    // module plans against is template-only and `pickFields` leaves every `ext_` id outside it.
+    // Today a project that goes down the background path therefore still gets NONE of the five
+    // columns on its sheet; the tests here prove the planner-level wiring, not the route. Wiring
+    // that route is an owner item (F1c's pre-existing gap, carried into F1c-b).
+    extensionFieldIds: job.actionSnapshot && job.actionSnapshot.extensionFieldIds,
     // W4 carry: threaded from the job's stored action snapshot (cloneJson of the
     // normalized deploy config). Absent => byte-identical pre-wiring planning.
     carryPolicy: job.actionSnapshot && job.actionSnapshot.carryPolicy,

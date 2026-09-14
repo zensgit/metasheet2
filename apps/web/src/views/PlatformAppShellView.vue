@@ -17,7 +17,7 @@
         </div>
         <div class="platform-app-shell__hero-actions">
           <button
-            v-if="primaryAction?.route"
+            v-if="primaryAction?.route && !(app.id === 'elearning' && primaryAction.mutation)"
             class="platform-app-shell__primary"
             type="button"
             :disabled="actionPending"
@@ -30,6 +30,8 @@
           </RouterLink>
         </div>
       </header>
+
+      <ElearningAppInstallationSection v-if="app.id === 'elearning'" @changed="load" />
 
       <section class="platform-app-shell__grid">
         <article class="platform-app-shell__panel">
@@ -173,6 +175,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import {
+  isPlatformAppAccessible,
   resolvePlatformAppInstallState,
   resolvePlatformAppInstanceLabel,
   resolvePlatformAppPrimaryAction,
@@ -181,6 +184,7 @@ import {
   usePlatformApps,
 } from '../composables/usePlatformApps'
 import { apiGet, apiPost } from '../utils/api'
+import ElearningAppInstallationSection from './ElearningAppInstallationSection.vue'
 
 interface RuntimeInstallResultSnapshot {
   status: 'installed' | 'partial' | 'failed'
@@ -204,7 +208,18 @@ const router = useRouter()
 const { apps, loading, error, fetchAppById } = usePlatformApps()
 
 const appId = computed(() => String(route.params.appId || ''))
-const app = computed(() => apps.value.find((item) => item.id === appId.value) || null)
+/**
+ * Same gate as the launcher and as the server. The detail route already 404s an app this caller
+ * may not see (routes/platform-apps.ts `GET /:appId`), so `fetchAppById` yields null for it; this
+ * keeps a summary that is ALREADY in the shared list (cached from an earlier principal, or picked
+ * up via the launcher) from rendering the shell anyway. A refused app therefore shows the same
+ * "Platform app not found." state as an app that does not exist — no existence oracle here either.
+ */
+const app = computed(() => {
+  const found = apps.value.find((item) => item.id === appId.value) || null
+  if (!found) return null
+  return isPlatformAppAccessible(found) ? found : null
+})
 const visibleNavigationItems = computed(() =>
   (app.value?.navigation ?? []).filter((item) => item.location !== 'hidden'),
 )
@@ -318,6 +333,8 @@ async function load(): Promise<void> {
 
 async function runPrimaryAction(): Promise<void> {
   if (!primaryAction.value) return
+  // Elearning writes belong to the capability- and session-bound section.
+  if (appId.value === 'elearning' && primaryAction.value.mutation) return
 
   if (primaryAction.value.mutation) {
     actionPending.value = true
@@ -333,7 +350,9 @@ async function runPrimaryAction(): Promise<void> {
         ? 'App reinstall completed and runtime state has been refreshed.'
         : 'App install completed and runtime state has been refreshed.'
     } catch (err: any) {
-      actionError.value = err?.message || 'Failed to execute app runtime action'
+      actionError.value = appId.value === 'elearning'
+        ? 'elearning_installation_request_failed'
+        : err?.message || 'Failed to execute app runtime action'
     } finally {
       actionPending.value = false
     }

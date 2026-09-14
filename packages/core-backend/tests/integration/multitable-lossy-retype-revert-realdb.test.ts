@@ -441,10 +441,44 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
   // The exploit: `changed_keys` for a property-only revert is ['property'], and BOTH drift controls key off
   // `changed_keys` (driftConflict compares current vs `after`; baselineHash hashes only those keys). A `type`
   // change in between is therefore invisible to them. It is REACHABLE because sanitizeFieldProperty is the
-  // identity for url/email/phone/barcode/qrcode/location, so a `string -> url` type-only PATCH preserves
-  // `property` byte-for-byte and the stale `string`-era property revision does not drift. Reverting it would
-  // coerce every cell under the NEW type = a forward `text -> url` value migration smuggled in through the
-  // revert door, which lock §7 puts explicitly out of bounds.
+  // identity for url/email/phone/barcode/qrcode/location, so an `attachment -> url` type-only PATCH preserves
+  // `property` byte-for-byte and the stale `attachment`-era property revision does not drift. Reverting it would
+  // coerce every cell under the NEW type = a forward `-> url` value migration smuggled in through the revert
+  // door, which lock §7 puts explicitly out of bounds.
+  //
+  // F8A (2026-09-12) — WHY THE ERA PAIR IS `attachment -> url`, NOT `string -> url` NOR `string -> longText`:
+  //   • `string -> url` is now 400 FIELD_RETYPE_NOT_LOSSLESS (src/multitable/field-retype-whitelist.ts:218-220,
+  //     mapped at src/routes/univer-meta.ts:13271), so the ORIGINAL fixture can no longer be built forward.
+  //   • `string -> longText` (the 2026-09-11 substitute) is whitelisted and DOES record a `type` revision — but it
+  //     makes this test unbuildable for a DIFFERENT reason, and that reason is NOT "longText is not an era change":
+  //     `hasFieldTypeChangeSince` (univer-meta.ts:6761-6771) matches ANY later revision carrying `type` in
+  //     `changed_keys`, so it WOULD match a `string -> longText` revision. The guard simply never RUNS, because the
+  //     whole lossy branch is entered only when the field's LIVE type is a Batch-1 codec type
+  //     (isLossyRetypeSupportedFieldType, src/multitable/lossy-retype-oracle.ts:95 -> BATCH1_FIELD_TYPES,
+  //     src/multitable/field-codecs.ts:1141-1153), tested at univer-meta.ts:9644 (preview) and :9971/:9995
+  //     (execute). `longText` is not in that set, so the revert falls through to the generic gated path — preview
+  //     200 (opKind 'gated') + execute 422 RESTORE_NOT_SUPPORTED, i.e. literally the P2-1 case below, not this
+  //     one. That is exactly how it reddened CI (preview 200 instead of 422; execute RESTORE_NOT_SUPPORTED
+  //     instead of FIELD_TYPE_ERA_MISMATCH).
+  //   • So the era pair must satisfy BOTH: (1) the forward PATCH answers 200, and (2) the LIVE (later) type is in
+  //     BATCH1_FIELD_TYPES. NO whitelisted pair can satisfy (2): LOSSLESS_FIELD_RETYPE's complete target set is
+  //     {string, number, longText} (field-retype-whitelist.ts:120-132) and none of the three is a Batch-1 type.
+  //     The only other route to a 200 is assertLosslessFieldRetype's early return for a pair with an endpoint in
+  //     FIELD_RETYPE_EXCLUDED_TYPES (field-retype-whitelist.ts:102-105 + :217) — and the SOURCE end of that set is
+  //     the seam the whitelist deliberately takes no position on (there is no `currentType === 'attachment'` branch
+  //     anywhere in PATCH /fields; a characterization test in tests/integration/multitable-context.api.test.ts pins
+  //     that 200). `attachment -> url` is that pair: an excluded SOURCE (whitelist returns early) and a plain
+  //     Batch-1 scalar TARGET whose sanitizer is the identity.
+  //   • FRAGILITY, written down so the next person need not rediscover it: if the owner later closes the
+  //     excluded-SOURCE seam (`attachment -> …` becoming a 400), this fixture must move to the OTHER era break the
+  //     same guard covers — a delete + recreate cycle, which `hasFieldTypeChangeSince` also matches because
+  //     fieldDeleteDiff/fieldCreateDiff both put `type` in `changed_keys`
+  //     (src/multitable/config-revision-recorder.ts:122-127).
+  //   • The DESTRUCTIVE POSITIVE CONTROL IS BACK (it was empty under the `longText` substitute): under the `url`
+  //     era `coerceBatch1Value` throws on 'hello world' (validateUrlValue, field-codecs.ts:668-679) so the oracle
+  //     buckets it 'dropped' (lossy-retype-oracle.ts:142-157) and the cell would be EMPTIED if the guard were
+  //     removed — the cells-equal assertion below is a real destruction detector again, not just a
+  //     nothing-moved invariant.
   const eraQ = {
     type: async (): Promise<string> => ((await q('SELECT type FROM meta_fields WHERE id=$1', [ERA_FIELD])).rows[0] as { type: string }).type,
     property: async (): Promise<unknown> => ((await q('SELECT property FROM meta_fields WHERE id=$1', [ERA_FIELD])).rows[0] as { property: unknown }).property,
@@ -453,12 +487,15 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
   /** Drives the REAL forward routes so the revision chain is exactly what production would record. */
   const seedTypeEraExploit = async (): Promise<{ propertyRevisionId: string; typeRevisionKeys: string[] }> => {
     actor = FULL
-    await request(app).post('/api/multitable/fields').send({ id: ERA_FIELD, sheetId: SHEET, name: 'EraF', type: 'string', property: {} }).expect(201)
+    await request(app).post('/api/multitable/fields').send({ id: ERA_FIELD, sheetId: SHEET, name: 'EraF', type: 'attachment', property: {} }).expect(201)
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(11), SHEET, JSON.stringify({ [ERA_FIELD]: 'hello world' })])
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(12), SHEET, JSON.stringify({ [ERA_FIELD]: 'https://ok.example' })])
-    // (1) a plain property edit while the field is still `string` -> revision with changed_keys = ['property']
+    // (1) a plain property edit while the field is still `attachment` -> revision with changed_keys = ['property'].
+    //     The attachment sanitizer always materializes `acceptedMimeTypes: []` (univer-meta.ts:2519-2526), which is
+    //     why every stored-property assertion below carries it.
     await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ property: { note: 'a' } }).expect(200)
-    // (2) a type-only PATCH -> `url`. The url sanitizer is the identity, so `property` survives byte-for-byte
+    // (2) a type-only PATCH -> `url`: 200 because the whitelist takes no position on an EXCLUDED SOURCE
+    //     (field-retype-whitelist.ts:217). The url sanitizer is the identity, so `property` survives byte-for-byte
     //     and this revision's changed_keys is ['type'] ALONE.
     await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ type: 'url' }).expect(200)
     const revs = (await q(`SELECT id, changed_keys FROM meta_config_revisions WHERE sheet_id=$1 AND entity_id=$2 AND action='update' ORDER BY created_at ASC, id ASC`, [SHEET, ERA_FIELD])).rows as Array<{ id: string; changed_keys: string[] }>
@@ -476,7 +513,10 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     // the exploit's premise, asserted: the type change is invisible to `changed_keys`-based drift control
     expect(typeRevisionKeys).toEqual(['type'])
     expect(await eraQ.type()).toBe('url')
-    expect(await eraQ.property()).toEqual({ note: 'a' }) // preserved byte-for-byte across the type PATCH
+    // preserved byte-for-byte across the type PATCH (the url sanitizer is the identity); `acceptedMimeTypes`
+    // is the attachment-era key the sanitizer materialized in step (1) and is itself part of the era mismatch
+    // this revert would write onto a `url` field.
+    expect(await eraQ.property()).toEqual({ note: 'a', acceptedMimeTypes: [] })
 
     const beforeCells = await eraQ.cells()
     expect(beforeCells).toEqual({ [rid(11)]: 'hello world', [rid(12)]: 'https://ok.example' })
@@ -490,10 +530,12 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     expect(x.body?.error?.code).toBe('FIELD_TYPE_ERA_MISMATCH')
     expectNoLeak(x.body)
 
-    // zero destruction: 'hello world' (an invalid url) is NOT dropped, and nothing else moved
+    // zero destruction, and this line is a DESTRUCTIVE POSITIVE CONTROL again (see the header): 'hello world'
+    // is not a valid url, so an allowed revert would bucket it 'dropped' and EMPTY the cell — remove either era
+    // guard and this equality fails on its own, before the ledger assertions below are even reached.
     expect(await eraQ.cells()).toEqual(beforeCells)
     expect(await eraQ.type()).toBe('url')
-    expect(await eraQ.property()).toEqual({ note: 'a' })
+    expect(await eraQ.property()).toEqual({ note: 'a', acceptedMimeTypes: [] })
     expect(await restoreConfigRevisions()).toEqual([])
     expect(await recordRevisions()).toEqual([])
     expect(await tombstones()).toEqual([])
@@ -537,25 +579,35 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     // recompute is a genuine second line for the *drifting* case. The reviewer separately proved the era guard is
     // the SOLE defence for the count-conserving email<->url case, where lossHash is blind — see
     // /tmp/pr3922-4c1-fix-review-claude-20260708.md MB. This golden pins the guard's existence + ordering.)
+    // F8A (2026-09-12): the era-1 type moved from `string` to `attachment` for the reason spelled out in the P1-1
+    // header (only an EXCLUDED source can still reach a Batch-1 live type through a 200 PATCH). That move does not
+    // touch the mutation claim above: era-1 `string` and era-1 `attachment` are BOTH outside BATCH1_FIELD_TYPES, so
+    // step (1)'s preview is the GENERIC gated preview in either case, and its token is minted WITHOUT a lossHash
+    // (univer-meta.ts:9717-9720) — which is precisely why a neutered era guard falls through to the lossHash
+    // recompute. Re-running that mutation needs the real-DB lane (no local Postgres).
     bothFlagsOn()
     process.env[CAPTURE_FLAG] = 'true'
     actor = FULL
-    await request(app).post('/api/multitable/fields').send({ id: ERA_FIELD, sheetId: SHEET, name: 'EraF', type: 'string', property: {} }).expect(201)
+    await request(app).post('/api/multitable/fields').send({ id: ERA_FIELD, sheetId: SHEET, name: 'EraF', type: 'attachment', property: {} }).expect(201)
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(11), SHEET, JSON.stringify({ [ERA_FIELD]: 'hello world' })])
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid(12), SHEET, JSON.stringify({ [ERA_FIELD]: 'https://ok.example' })])
-    // A plain property edit while the field is still `string` -> the revision we will try to revert.
+    // A plain property edit while the field is still `attachment` -> the revision we will try to revert.
     await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ property: { note: 'a' } }).expect(200)
     const propertyRev = ((await q(`SELECT id FROM meta_config_revisions WHERE sheet_id=$1 AND entity_id=$2 AND changed_keys = ARRAY['property']::text[] ORDER BY created_at DESC, id DESC LIMIT 1`, [SHEET, ERA_FIELD])).rows[0] as { id: string }).id
 
-    // (1) preview passes NOW (field is still `string`, no later type change) and mints a genuine token.
+    // (1) preview passes NOW (field is still `attachment`, no later type change) and mints a genuine, server-signed
+    //     token. It is the GENERIC gated preview (an `attachment` field is outside the Batch-1 envelope), which is
+    //     exactly the shape a real actor gets before the retype lands.
     const p = await preview(propertyRev)
     expect(p.status).toBe(200)
     const realToken = p.body?.data?.previewToken as string
     expect(typeof realToken).toBe('string')
     const beforeCells = await eraQ.cells()
 
-    // (2) TOCTOU: a type-only PATCH -> `url` lands in the window. The url sanitizer is the identity, so `property`
-    //     survives byte-for-byte and this type revision is invisible to the changed_keys-based drift controls.
+    // (2) TOCTOU: a type-only PATCH -> `url` lands in the window (F8A: still reachable after the lossless whitelist,
+    //     because the SOURCE `attachment` is in FIELD_RETYPE_EXCLUDED_TYPES — field-retype-whitelist.ts:217). Its
+    //     sanitizer is the identity, so `property` survives byte-for-byte and this type revision is invisible to the
+    //     changed_keys-based drift controls.
     await request(app).patch(`/api/multitable/fields/${ERA_FIELD}`).send({ type: 'url' }).expect(200)
 
     // (3) execute with the REAL token -> the execute-side era guard refuses, and nothing is coerced under `url`.
@@ -563,9 +615,12 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     expect(x.status).toBe(422)
     expect(x.body?.error?.code).toBe('FIELD_TYPE_ERA_MISMATCH')
     expectNoLeak(x.body)
+    // Destructive positive control, same as P1-1 (F8A, 2026-09-12): 'hello world' is not a valid url, so a
+    // TOCTOU revert allowed through would EMPTY that cell — this equality fails on its own if the execute-side
+    // era guard is removed.
     expect(await eraQ.cells()).toEqual(beforeCells) // 'hello world' NOT dropped
     expect(await eraQ.type()).toBe('url')
-    expect(await eraQ.property()).toEqual({ note: 'a' })
+    expect(await eraQ.property()).toEqual({ note: 'a', acceptedMimeTypes: [] })
     expect(await restoreConfigRevisions()).toEqual([])
     expect(await recordRevisions()).toEqual([])
     expect(await tombstones()).toEqual([])

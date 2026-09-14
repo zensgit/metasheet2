@@ -32,6 +32,13 @@ inserted AS (
   JOIN directory_departments department
     ON department.integration_id = integration.id
    AND department.is_active IS TRUE
+  WHERE EXISTS (
+    SELECT 1 FROM platform_app_instances app
+     WHERE app.tenant_id = integration.org_id AND app.workspace_id = integration.org_id
+       AND app.app_id = 'elearning' AND app.plugin_id = 'plugin-elearning'
+       AND app.instance_key = 'primary' AND app.status = 'active'
+       AND jsonb_typeof(app.config_json->'notificationsEnabled') = 'boolean'
+  )
   ON CONFLICT (org_id, kind, occurrence_key) DO NOTHING
   RETURNING id
 )

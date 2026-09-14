@@ -502,6 +502,12 @@ export interface MetaCapabilities {
   canDeleteRecord: boolean
   canManageFields: boolean
   canManageSheetAccess: boolean
+  /** Whole-sheet delete authority for the SELECTED sheet, server-derived by /context from the same gate
+   *  `DELETE /sheets/:sheetId` enforces (hasSheetLifecycleAuthority: global schema authority OR sheet-scoped
+   *  admin). Deliberately NOT a mirror of canManageFields, which a sheet-scoped full-write holder also has while
+   *  the route refuses them. Optional — absent/false ⇒ the delete entry is HIDDEN (fail-closed, same discipline as
+   *  pitResetEnabled). Single-sheet by construction: it describes the current sheet only, never the rail's others. */
+  canDeleteSheet?: boolean
   /** T8-2 Reset flag-visibility signal (#3239): flag-derived (MULTITABLE_ENABLE_PIT_RESET ∧ sheet-admin), set by
    *  /context. Optional — absent/false ⇒ the Reset entry is HIDDEN (the FE half of "inert until enabled"). */
   pitResetEnabled?: boolean
@@ -782,6 +788,55 @@ export interface MetaTemplate {
   icon: string
   color: string
   sheets: MetaTemplateSheet[]
+  /**
+   * 用户自定义模板(「把这张 Base 存为模板」存下来的)。内置模板不带这个字段。
+   * 服务端按租户过滤后才返回,前端只用它做「自定义」角标与删除入口的显隐。
+   */
+  custom?: boolean
+  createdBy?: string | null
+  createdAt?: string | null
+  /**
+   * 自定义模板的可见性:'private' = 只有建它的人看得见(默认),'tenant' = 共享给本租户。
+   * 服务端才是执行者(list/get/delete 三处 SQL 都带这个谓词),前端只用它显示角标。
+   */
+  visibility?: 'private' | 'tenant'
+}
+
+/**
+ * GET /api/multitable/templates 的返回。customTemplatesUnavailable = 服务端读不出自定义模板
+ * 那一段(表没迁移 / 库没起来)时的降级标志位 —— 前端必须显式提示,不能表现成「你没建过模板」。
+ */
+export interface ListTemplatesResult {
+  templates: MetaTemplate[]
+  customTemplatesUnavailable?: boolean
+}
+
+/** POST /api/multitable/templates —— 从一个 Base 抽结构存成模板(不含任何记录数据)。 */
+export interface CreateTemplateFromBaseInput {
+  baseId: string
+  name?: string
+  description?: string
+  category?: string
+  /** 省略 = private(只有自己看得见)。只有显式 'tenant' 才把模板发布给整个租户。 */
+  visibility?: 'private' | 'tenant'
+  /**
+   * 只存这几张数据表(**省略** = 整个 Base)。服务端把它下推进 SQL 的 WHERE 并且只做交集 ——
+   * 这是**收窄**参数,读不到的表不会因为被点名就进模板。上限 50 张,超限 400。
+   * 注意:显式传 `[]`(或只有空白字符的 id)= 零匹配 → 400,**不会**退化成「整个 Base」。
+   */
+  sheetIds?: string[]
+  /**
+   * 只存这几个字段(**省略** = 选中表的全部可读字段)。同样只做交集,服务端在抽取**之前**过滤,
+   * 所以被剔掉的字段不会在模板视图里留下悬空引用。上限 500 个,超限 400。
+   * 同样地,显式传 `[]` = 零匹配 → 400:一个「什么都没勾」的请求绝不会被放大成「全都要」。
+   */
+  fieldIds?: string[]
+}
+
+export interface CreateTemplateFromBaseResult {
+  template: MetaTemplate
+  /** 服务端的降级说明(比如关联字段被转成文本),原样展示给用户。 */
+  warnings: string[]
 }
 
 export interface InstallTemplateInput {

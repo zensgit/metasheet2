@@ -52,6 +52,23 @@ function targetedRunCommand(source: string): string {
 }
 
 describe('attendance web guard workflow contract', () => {
+  it('runs makeup regressions in both unit gates and the dedicated browser lane', () => {
+    const required = readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')
+    const requiredCommand = required.split('\n').find(line => line.startsWith('exec npx vitest run ')) ?? ''
+    for (const spec of ['attendanceEmployeeMakeupRequestCard', 'attendanceEmployeeLeaveRequestCard', 'attendance-selfservice-dashboard']) {
+      expect(requiredCommand.split(/\s+/)).toContain(spec)
+      expect(targetedRunCommand(workflow).split(/\s+/)).toContain(spec)
+    }
+    const doc = loadYaml(workflow) as { jobs: Record<string, { steps: Array<{ name?: string; run?: string; if?: string }> }> }
+    const steps = Object.values(doc.jobs).flatMap(job => job.steps)
+    const browser = steps.find(step => step.name === 'Verify makeup request in real AttendanceView at desktop and mobile sizes')
+    expect(browser?.run).toBe('pnpm --filter @metasheet/web exec playwright test --config playwright.attendance-makeup.config.ts')
+    expect(browser?.if).toBe("steps.changes.outputs.relevant == 'true'")
+    for (const path of ['apps/web/verification/attendance-makeup-request*', 'apps/web/playwright.attendance-makeup.config.ts']) {
+      expect(workflow.split(path)).toHaveLength(3)
+    }
+  })
+
   const sessionSpecs = ['useAuth', 'useSessionOrg', 'AttendanceSessionOrgSwitcher', 'useAttendanceSessionGuard']
   const sessionSources = [
     'composables/authPrincipal.ts', 'composables/useAuth.ts', 'composables/useSessionOrg.ts',
@@ -101,6 +118,10 @@ describe('attendance web guard workflow contract', () => {
     expect(workflow).toContain("if: steps.changes.outputs.relevant == 'true'")
     expect(targetedStep).toContain('NODE_OPTIONS: --max-old-space-size=8192')
     expect(workflow.match(/NODE_OPTIONS: --max-old-space-size=8192/g)).toHaveLength(1)
+    // Bound concurrent AttendanceView transforms without removing any regression specs.
+    const args = targetedRunCommand(workflow).trim().split(/\s+/)
+    expect(args).toContain('--maxWorkers=2')
+    expect(args).toContain('--minWorkers=1')
   })
 
   it('keeps the group-context route host proof in the classifier and targeted run list', () => {
@@ -162,6 +183,7 @@ describe('attendance web guard workflow contract', () => {
       'attendanceEmployeeWorkspacePresentation',
       'useAttendanceAdminConfig',
       'attendanceOverviewRequestReveal',
+      'attendanceEmployeeMakeupRequestCard',
     ]) {
       expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
       expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))

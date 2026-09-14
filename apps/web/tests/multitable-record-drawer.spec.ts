@@ -1,12 +1,22 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
+import { recordLabel } from '../src/multitable/utils/meta-record-labels'
 
 async function flushUi(cycles = 4) {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
     await nextTick()
   }
+}
+// Record inspector v3 (2026-09-05, PR-A §1.2): watch/workflow/permissions/duplicate/delete moved
+// from standalone header buttons into the kebab menu, which Teleports its open content to
+// `document.body` — NOT a descendant of `container` — so a test that needs one of those rows opens
+// the kebab first and queries `document.body`.
+async function openKebabMenu(root: HTMLElement) {
+  const trigger = root.querySelector<HTMLButtonElement>('[data-testid="record-inspector-menu"]')
+  trigger?.click()
+  await flushUi()
 }
 
 describe('MetaRecordDrawer', () => {
@@ -246,8 +256,9 @@ describe('MetaRecordDrawer', () => {
 
     app.mount(container)
     await flushUi()
+    await openKebabMenu(container)
 
-    const watchButton = Array.from(container.querySelectorAll('button')).find((button) =>
+    const watchButton = Array.from(document.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Watch'),
     ) as HTMLButtonElement | undefined
     expect(getRecordSubscriptionStatus).toHaveBeenCalledWith('sheet_orders', 'rec_watch_1')
@@ -256,9 +267,11 @@ describe('MetaRecordDrawer', () => {
     watchButton?.click()
     await flushUi()
     expect(subscribeRecord).toHaveBeenCalledWith('sheet_orders', 'rec_watch_1')
-    expect(container.textContent).toContain('Watching')
+    // Selecting the item auto-closes the menu; reopen to read the post-click "Watching" label.
+    await openKebabMenu(container)
+    expect(document.body.textContent).toContain('Watching')
 
-    ;(Array.from(container.querySelectorAll('button')).find((button) =>
+    ;(Array.from(document.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('Watching'),
     ) as HTMLButtonElement | undefined)?.click()
     await flushUi()
@@ -309,11 +322,14 @@ describe('MetaRecordDrawer', () => {
     await flushUi()
 
     expect(container.querySelector('.meta-record-drawer__input')).toBeNull()
-    expect(container.textContent).not.toContain('Delete')
-    expect(container.textContent).toContain('Workflow')
+    await openKebabMenu(container)
+    // Delete is gated on `resolvedCanDelete` (rowActions.canDelete ?? canDelete) — rowActions here
+    // sets canDelete:false, overriding the sheet-level canDelete:true prop.
+    expect(document.body.textContent).not.toContain('Delete')
+    expect(document.body.textContent).toContain('Workflow')
 
     ;(container.querySelector('button[title="Comments"]') as HTMLButtonElement | null)?.click()
-    ;(container.querySelector('button[title="Open workflow designer"]') as HTMLButtonElement | null)?.click()
+    ;(document.querySelector('button[title="Open workflow designer"]') as HTMLButtonElement | null)?.click()
     await flushUi()
 
     expect(toggleCommentsSpy).toHaveBeenCalledTimes(1)
@@ -358,8 +374,17 @@ describe('MetaRecordDrawer', () => {
     app.mount(container)
     await nextTick()
 
-    expect(container.textContent).toContain('Edit linked records (2)')
-    expect(container.textContent).toContain('Acme Supply, Beacon Labs')
+    // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Link chips"): the read-only comma-joined summary
+    // ("Acme Supply, Beacon Labs") is now ONE MetaCellRenderer chip per linked record, and the picker
+    // button beside POPULATED chips reads `record.editLinks` (the count-bearing "Edit linked records
+    // (2)" copy stays for the empty state — see the fields panel's `linkButtonLabel`). Both pins
+    // updated to the chip DOM. This deprecated shell threads no `fetchRecord`, so the chips are the
+    // plain (non-clickable) `span` form — zero click affordance, zero fetches (HI-1).
+    expect(container.textContent).toContain(recordLabel('record.editLinks', false))
+    expect(container.textContent).not.toContain('Edit linked records (2)')
+    const chips = Array.from(container.querySelectorAll('.meta-cell-renderer__link')).map((el) => el.textContent?.trim())
+    expect(chips).toEqual(['Acme Supply', 'Beacon Labs'])
+    expect(container.querySelector('[data-test="link-chip"]')).toBeNull()
 
     app.unmount()
     container.remove()

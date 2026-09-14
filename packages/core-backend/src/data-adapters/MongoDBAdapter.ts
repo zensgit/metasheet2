@@ -81,6 +81,7 @@ import type {
   QueryOptions,
   QueryResult,
   SchemaInfo,
+  SchemaFetchOptions,
   TableInfo,
   ColumnInfo,
   IndexInfo,
@@ -90,6 +91,7 @@ import {
   BaseDataAdapter,
   DataSourceConfig as _DataSourceConfig
 } from './BaseAdapter'
+import { startSchemaDetailBudget } from './schema-detail-budget'
 
 // Dynamic mongodb import
 let MongoClient: (new (uri: string, options?: MongoClientOptions) => MongoClientType) | null = null
@@ -361,21 +363,43 @@ export class MongoDBAdapter extends BaseDataAdapter {
     }
   }
 
-  async getSchema(database?: string): Promise<SchemaInfo> {
+  /**
+   * LIST-ONLY BY DEFAULT (2026-09-10 222 PLM 504) — see MSSQLAdapter.getSchema. Mongo's per-collection cost is even
+   * higher than SQL's: getColumns() SAMPLES 100 documents per collection to infer fields, so a
+   * listing of N collections used to read up to 100N documents before answering.
+   * The includeColumns path is now sequential (was Promise.all) so the budget has a checkpoint —
+   * it trades listing concurrency for a bounded, coded refusal instead of a proxy-level 504.
+   */
+  async getSchema(database?: string, options?: SchemaFetchOptions): Promise<SchemaInfo> {
+    const includeColumns = options?.includeColumns === true
+    // Started BEFORE listCollections — the budget bounds the WHOLE call (see MSSQLAdapter).
+    const budget = includeColumns ? startSchemaDetailBudget(options?.budgetMs) : null
     const db = database ? this.client!.db(database) : this.db!
 
     const collections = await db.listCollections().toArray()
 
-    const tables: TableInfo[] = await Promise.all(
-      collections.map(async (coll) => ({
+    if (!includeColumns) {
+      const listed: TableInfo[] = collections.map((coll) => ({
+        name: coll.name,
+        columns: [],
+        columnsLoaded: false,
+        primaryKey: ['_id']
+      }))
+      return { tables: listed, detail: 'list' }
+    }
+
+    const tables: TableInfo[] = []
+    for (const coll of collections) {
+      budget?.assertWithinBudget(tables.length, collections.length)
+      tables.push({
         name: coll.name,
         columns: await this.getColumns(coll.name, database),
         primaryKey: ['_id'],
         indexes: await this.getIndexes(coll.name, database)
-      }))
-    )
+      })
+    }
 
-    return { tables }
+    return { tables, detail: 'full' }
   }
 
   async getTableInfo(collection: string, database?: string): Promise<TableInfo> {

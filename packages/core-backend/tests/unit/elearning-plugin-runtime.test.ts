@@ -147,7 +147,7 @@ describe('elearning plugin runtime host (real addRoute seam)', () => {
     const parsed = parsePlatformAppManifest(raw)
     expect(parsed.id).toBe('elearning')
     expect(parsed.pluginId).toBe('plugin-elearning')
-    expect(parsed.runtimeModel).toBe('direct')
+    expect(parsed.runtimeModel).toBe('instance')
     expect(parsed.featureFlags).toEqual(['elearning'])
     expect(parsed.navigation).toEqual([
       {

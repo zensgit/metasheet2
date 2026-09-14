@@ -171,6 +171,10 @@ async function seedPublishedCourse(target: PgTarget, org: string): Promise<strin
 }
 
 async function seedAssignmentMember(org: string): Promise<{ memberId: string; userId: string }> {
+  await pool.query(`INSERT INTO platform_app_instances
+    (tenant_id, workspace_id, app_id, plugin_id, project_id, status, config_json)
+    VALUES ($1,$1,'elearning','plugin-elearning',$1,'active','{"notificationsEnabled":true}')
+    ON CONFLICT (workspace_id,app_id,instance_key) DO NOTHING`, [org])
   const versionId = await seedPublishedCourse(pool, org)
   const assignmentId = randomUUID()
   const memberId = randomUUID()
@@ -295,6 +299,7 @@ async function setCleanupTriggers(enabled: boolean): Promise<void> {
 }
 
 async function cleanupOrg(org: string): Promise<void> {
+  await pool.query("DELETE FROM platform_app_instances WHERE app_id='elearning' AND workspace_id=$1", [org])
   await setCleanupTriggers(false)
   try {
     await pool.query(

@@ -42,6 +42,8 @@ const DB_SUITES = readdirSync(INTEGRATION_DIR)
 
 const WEB_SPECS = [
   'tests/elearning-client.spec.ts',
+  'tests/elearning-app-client.spec.ts',
+  'tests/elearning-app-installation-section.spec.ts',
   'tests/elearning-analytics-admin.spec.ts',
   'tests/elearning-analytics-client.spec.ts',
   'tests/elearning-analytics-period.spec.ts',
@@ -106,6 +108,12 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/stores/featureFlags.ts',
   'plugins/plugin-elearning/app.manifest.json',
   'apps/web/tests/elearning-client.spec.ts',
+  'apps/web/tests/elearning-app-client.spec.ts',
+  'apps/web/tests/elearning-app-installation-section.spec.ts',
+  'apps/web/src/services/elearningApp.ts',
+  'apps/web/src/views/ElearningAppInstallationSection.vue',
+  'apps/web/src/views/MyAppsLandingView.vue',
+  'apps/web/src/views/PlatformAppShellView.vue',
   'apps/web/tests/elearning-analytics-admin.spec.ts',
   'apps/web/tests/elearning-analytics-client.spec.ts',
   'apps/web/tests/elearning-analytics-period.spec.ts',

@@ -5,6 +5,95 @@
 # Analytics and remaining incentive surfaces stay parked.
 
 paths:
+  /api/elearning-app/installation:
+    x-plugin: plugin-elearning
+    get:
+      operationId: getElearningAppInstallation
+      summary: Read organization cloud-classroom installation
+      description: |
+        Organization and actor come only from the authenticated session. Missing
+        instance means not-installed. canManage is server-derived from hydrated
+        global elearning administrator authority and active organization membership.
+        Administrative setup is available independently of the deployment master flag.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Closed installation state, without storage configuration or secrets.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAppInstallation'
+        '401':
+          description: Authentication required.
+        '403':
+          description: Authoritative organization context required.
+        '503':
+          description: Installation authority unavailable; no fallback enablement.
+    post:
+      operationId: installElearningApp
+      summary: Install cloud classroom inactive, notifications OFF
+      description: |
+        Requires elearning global administrator authority and active membership.
+        Repeated installation preserves existing state. Does not grant permissions,
+        enable deployment flags, provision storage, or send notifications.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, maxProperties: 0 }
+      responses:
+        '200':
+          description: Installed state; canManage true.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAppInstallation'
+        '400':
+          description: Invalid closed command.
+        '401':
+          description: Authentication required.
+        '403':
+          description: Missing organization, administrator authority, or active membership.
+        '503':
+          description: Installation authority unavailable.
+    put:
+      operationId: configureElearningAppInstallation
+      summary: Enable or disable an installed cloud classroom
+      description: |
+        Requires the same authority as installation. Deployment exact-true flags
+        remain an upper bound. Disabling forces notification opt-in OFF and retains
+        learning data. New business admission stops; admitted work and necessary
+        storage cleanup may drain. No production storage is provisioned.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled, notificationsEnabled]
+              properties:
+                enabled: { type: boolean }
+                notificationsEnabled: { type: boolean }
+      responses:
+        '200':
+          description: Updated state; canManage true.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAppInstallation'
+        '400':
+          description: Invalid closed command.
+        '401':
+          description: Authentication required.
+        '403':
+          description: Missing organization, administrator authority, or active membership.
+        '409':
+          description: Application not installed.
+        '503':
+          description: Installation authority unavailable.
   /api/elearning/capabilities:
     x-plugin: plugin-elearning
     get:

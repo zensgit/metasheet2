@@ -36,6 +36,36 @@
       {{ bi(pullBanner.text.zh, pullBanner.text.en) }}
     </p>
 
+    <!-- 打开备料多维表 (this PR) — the entry the operator asked for, and the reason it is HERE.
+         项目备料页 has had this button since it shipped, but that page needs a project number in
+         hand: before anything is pulled it 404s, so on the landing page — where an operator
+         actually starts — there was no way to reach the sheet they fill at all. The handle comes
+         from the directory read this page already makes (`?includePullTargets=1`), so this costs
+         no extra request; it renders ONLY when the server issued one, because a button that
+         cannot land on the right sheet is what the fallback copy on 项目备料页 is for.
+         WHAT IT DOES NOT CLAIM: the handle is not a permission decision. Multitable enforces
+         access when the operator lands. -->
+    <p
+      v-if="fillTarget"
+      class="sp-home__fill"
+      data-testid="stock-prep-operator-home-fill"
+    >
+      <button
+        type="button"
+        class="sp-home__link"
+        data-testid="stock-prep-operator-home-open-multitable"
+        @click="emit('open-multitable')"
+      >
+        {{ bi('打开备料多维表', 'Open the stock-preparation table') }}
+      </button>
+      <span class="sp-home__fill-hint">
+        {{ bi(
+          '表里是这台系统上所有项目的行,请按项目号找您那一个。',
+          'That table holds the rows for every project on this system — find yours by project number.',
+        ) }}
+      </span>
+    </p>
+
     <EmptyState
       v-if="emptyState"
       class="sp-home__empty"
@@ -225,6 +255,12 @@ const emit = defineEmits<{
   (e: 'open-project-in-queue', projectNo: string): void
   /** Put the cursor in the fallback input the parent renders into this component's own slot. */
   (e: 'focus-quick-open'): void
+  /**
+   * 打开备料多维表. NO PAYLOAD, deliberately: the parent already holds the directory this page is
+   * rendered from and resolves the handle in ONE place (`openFillTarget`), shared with the board's
+   * own button. Sending the target back up would be a second copy of that decision.
+   */
+  (e: 'open-multitable'): void
 }>()
 
 const { locale } = useLocale()
@@ -232,6 +268,17 @@ const { locale } = useLocale()
 function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }
+
+/**
+ * The deep-link handle the SERVER issued for this tenant, or null. Read defensively: the key is
+ * absent on a backend that predates it and on any read that did not opt into the union, and a
+ * half-shaped object must render as 「没有」 rather than as a link to nothing.
+ */
+const fillTarget = computed(() => {
+  const target = props.directory?.fillTarget
+  if (!target || typeof target.sheetId !== 'string' || typeof target.viewId !== 'string') return null
+  return target.sheetId.length > 0 && target.viewId.length > 0 ? target : null
+})
 
 const directoryProjects = computed(() => {
   const list = props.directory?.projects
@@ -447,6 +494,20 @@ async function exportCard(projectNo: string): Promise<void> {
   line-height: 1.6;
 }
 
+/* 打开备料多维表 — one line, subordinate to the banner above it: it is a way OUT of this page, not
+   a thing waiting on the operator, so it never competes with 指引位 for attention. */
+.sp-home__fill {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.sp-home__fill-hint {
+  color: var(--ms-color-text-secondary, #6b7280);
+  font-size: 12px;
+}
 .sp-home__link {
   border: none;
   background: none;

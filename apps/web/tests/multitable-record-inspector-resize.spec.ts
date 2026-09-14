@@ -725,17 +725,26 @@ describe('MetaRecordInspector resizable panel', () => {
       app.unmount()
     })
 
-    it('[source] .meta-record-drawer__header/__actions wrap and .meta-record-drawer__title ellipsizes, so nothing overflows at the panel minimum width (P3-3)', () => {
+    // Record inspector v3 (2026-09-05, PR-A §1.2) superseded this pin's own premise: moving every
+    // labeled action button into the kebab menu means Row A (`__toolbar`) is built ONLY from
+    // non-shrinking 28px icon buttons + the nav group, so it CANNOT overflow at any supported width
+    // and no longer wraps — "Header can no longer overflow by construction" (the design's own
+    // framing) replaces the old wrap-to-fit mitigation. The title's own overflow handling still
+    // exists, just renamed (`__title-text`, the read-only half of the new Row B title block).
+    it('[source] .meta-record-drawer__toolbar never wraps and .meta-record-drawer__title-text ellipsizes, so nothing overflows at the panel minimum width (P3-3, superseded by PR-A §1.2)', () => {
       const src = readSrc('src/multitable/components/MetaRecordInspector.vue')
-      const headerRule = src.match(/\.meta-record-drawer__header\s*\{[^}]*\}/)?.[0] ?? ''
-      const actionsRule = src.match(/\.meta-record-drawer__actions\s*\{[^}]*\}/)?.[0] ?? ''
-      const titleRule = src.match(/\.meta-record-drawer__title\s*\{[^}]*\}/)?.[0] ?? ''
-      expect(headerRule).toMatch(/flex-wrap:\s*wrap/)
-      expect(actionsRule).toMatch(/flex-wrap:\s*wrap/)
-      expect(titleRule).toMatch(/min-width:\s*0/)
-      expect(titleRule).toMatch(/text-overflow:\s*ellipsis/)
-      expect(titleRule).toMatch(/white-space:\s*nowrap/)
-      expect(titleRule).toMatch(/overflow:\s*hidden/)
+      const toolbarRule = src.match(/\.meta-record-drawer__toolbar\s*\{[^}]*\}/)?.[0] ?? ''
+      // Two separate rules share the class: `.meta-record-drawer__title-input, .meta-record-drawer__
+      // title-text { ... min-width:0 ... }` (shared sizing) and a standalone `.meta-record-drawer__
+      // title-text { overflow/ellipsis/nowrap ... }` (the ellipsis behavior) — the lookbehind below
+      // excludes the FIRST (comma-joined) occurrence so `titleTextOnlyRule` captures the second.
+      const titleTextRule = src.match(/\.meta-record-drawer__title-input,\s*\.meta-record-drawer__title-text\s*\{[^}]*\}/)?.[0] ?? ''
+      const titleTextOnlyRule = src.match(/(?<!, )\.meta-record-drawer__title-text\s*\{[^}]*\}/)?.[0] ?? ''
+      expect(toolbarRule).toMatch(/flex-wrap:\s*nowrap/)
+      expect(titleTextRule).toMatch(/min-width:\s*0/)
+      expect(titleTextOnlyRule).toMatch(/text-overflow:\s*ellipsis/)
+      expect(titleTextOnlyRule).toMatch(/white-space:\s*nowrap/)
+      expect(titleTextOnlyRule).toMatch(/overflow:\s*hidden/)
     })
 
     it('[source] the splitter hit area sits inside the panel edge (left:0, width:6px), not straddling into the grid column to its left (NIT-3)', () => {

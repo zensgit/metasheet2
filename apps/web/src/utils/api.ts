@@ -5,6 +5,7 @@
 import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './authRedirect'
 import { explicitSessionOrg } from '../composables/authPrincipal'
 import { clearExplicitSessionOrg } from './explicitSessionOrg'
+import { createNetworkUnavailableError } from './networkErrors'
 
 // Vite environment type declaration
 declare global {
@@ -225,6 +226,101 @@ function handlePasswordChangeRequired(path: string): void {
 }
 
 /**
+ * TRANSPORT-FAILURE HANDLING FOR THE ONE `fetch` CALL IN THIS APP'S API LAYER.
+ *
+ * Two separate things happen here, and they have different trigger sets on purpose:
+ *
+ * 1. TRANSLATION (all methods). A transport failure — backend down, connection
+ *    reset, DNS/TLS failure — rejects with a `TypeError` carrying a browser engine
+ *    literal ("Failed to fetch"). Callers put `e.message` straight on screen, so it
+ *    is rewritten into `createNetworkUnavailableError` copy. An HTTP RESPONSE is
+ *    never touched: 5xx still returns the Response unchanged, so
+ *    `apiDefaultErrorMessage` keeps owning that copy.
+ *
+ * 2. RETRY (idempotent reads only). Only when the caller asked for GET/HEAD with no
+ *    body. DELETE/PATCH/POST/PUT are NOT retried even once —
+ *    a reset can happen AFTER the server committed the write, so a replay could
+ *    double-apply it. Retrying a 5xx RESPONSE is likewise out of scope: an upgrade
+ *    window would turn every open tab into a retry storm against a backend that just
+ *    came up.
+ *
+ * Backoff waits are abortable: a caller that aborts during the pause gets an
+ * AbortError immediately, not the copy above (an abort is not an outage).
+ */
+const NETWORK_RETRY_DELAYS_MS = [1200, 3500] as const
+
+function isAbortError(error: unknown): boolean {
+  return (error as { name?: unknown } | null)?.name === 'AbortError'
+}
+
+/** Transport-layer rejection: `fetch` rejects with a TypeError and nothing else. */
+function isTransportError(error: unknown): boolean {
+  if (isAbortError(error)) return false
+  if (error instanceof TypeError) return true
+  return (error as { name?: unknown } | null)?.name === 'TypeError'
+}
+
+function abortErrorFor(signal: AbortSignal | null | undefined): unknown {
+  const reason = (signal as { reason?: unknown } | null | undefined)?.reason
+  if (reason) return reason
+  const error = new Error('The operation was aborted.')
+  error.name = 'AbortError'
+  return error
+}
+
+/** GET/HEAD with no body. A body (JSON or FormData) also means the stream cannot be replayed. */
+function isIdempotentRead(init: RequestInit): boolean {
+  const method = String(init.method || 'GET').toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD') return false
+  return init.body == null
+}
+
+function waitUnlessAborted(ms: number, signal: AbortSignal | null | undefined): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortErrorFor(signal))
+      return
+    }
+    let onAbort: (() => void) | null = null
+    const timer = setTimeout(() => {
+      if (onAbort && typeof signal?.removeEventListener === 'function') {
+        signal.removeEventListener('abort', onAbort)
+      }
+      resolve()
+    }, ms)
+    if (typeof signal?.addEventListener === 'function') {
+      onAbort = () => {
+        clearTimeout(timer)
+        reject(abortErrorFor(signal))
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+  })
+}
+
+async function fetchWithTransportCopy(url: string, init: RequestInit): Promise<Response> {
+  const signal = init.signal as AbortSignal | null | undefined
+  const maxRetries = isIdempotentRead(init) ? NETWORK_RETRY_DELAYS_MS.length : 0
+  let attempt = 0
+  for (;;) {
+    try {
+      return await fetch(url, init)
+    } catch (error) {
+      // Aborts and non-transport throws (e.g. a caller-supplied fetch stub raising a
+      // domain error) pass through untouched — only the transport literal is rewritten.
+      if (!isTransportError(error)) throw error
+      if (attempt >= maxRetries) throw createNetworkUnavailableError(error)
+      // `waitUnlessAborted` is the SINGLE place abort is enforced for a retry: it
+      // rejects immediately when the signal is already aborted, so a caller who
+      // cancelled never buys another attempt (nor an outage message for their own
+      // cancellation). Duplicating that check here would be untestable dead weight.
+      await waitUnlessAborted(NETWORK_RETRY_DELAYS_MS[attempt], signal)
+      attempt += 1
+    }
+  }
+}
+
+/**
  * Make an authenticated fetch request
  */
 export async function apiFetch(
@@ -244,7 +340,7 @@ export async function apiFetch(
     headers.set('Content-Type', 'application/json')
   }
 
-  const response = await fetch(`${base}${path}`, {
+  const response = await fetchWithTransportCopy(`${base}${path}`, {
     ...requestOptions,
     headers,
   })

@@ -72,4 +72,29 @@ describe('useMultitableCapabilities', () => {
     expect(caps.canManageSheetAccess.value).toBe(false)
     expect(caps.canManageViews.value).toBe(false)
   })
+
+  // canDeleteSheet: server-derived whole-sheet delete authority. No role fallback and no fallbackKey —
+  // an old backend that omits it (even with canManageFields true) and a legacy role source both yield false.
+  it('canDeleteSheet is false unless the backend object says true — never derived from a role or from canManageFields', async () => {
+    const omitted = useMultitableCapabilities(ref({
+      canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
+      canManageFields: true, canManageSheetAccess: true, canManageViews: true, canComment: true,
+      canManageAutomation: true, canExport: true,
+    }))
+    await nextTick()
+    expect(omitted.canManageFields.value).toBe(true)
+    expect(omitted.canDeleteSheet.value).toBe(false)
+
+    const granted = useMultitableCapabilities(ref({
+      canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true,
+      canManageFields: true, canManageSheetAccess: true, canManageViews: true, canComment: true,
+      canManageAutomation: true, canExport: true, canDeleteSheet: true,
+    }))
+    await nextTick()
+    expect(granted.canDeleteSheet.value).toBe(true)
+
+    const owner = useMultitableCapabilities(ref<'owner'>('owner'))
+    expect(owner.canManageFields.value).toBe(true)
+    expect(owner.canDeleteSheet.value).toBe(false)
+  })
 })

@@ -20,7 +20,8 @@ COPY apps ./apps
 COPY packages ./packages
 
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @metasheet/web build
+# Build-only heap budget; leave native-memory headroom on an 8GB builder.
+RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm --filter @metasheet/web build
 RUN node -e "const fs=require('fs'); const clean=(value)=>{const trimmed=(value||'').trim(); return !trimmed || trimmed === 'unknown' ? null : trimmed}; const info={commit:clean(process.env.METASHEET_BUILD_COMMIT),imageTag:clean(process.env.METASHEET_BUILD_IMAGE_TAG),source:clean(process.env.METASHEET_BUILD_SOURCE),created:clean(process.env.METASHEET_BUILD_CREATED)}; fs.writeFileSync('apps/web/dist/build-info.json', JSON.stringify(info, null, 2)+'\n')"
 
 FROM nginx:1.27-alpine

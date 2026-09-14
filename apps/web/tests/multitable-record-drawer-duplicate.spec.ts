@@ -2,12 +2,29 @@
  * Duplicate / clone record (design 2026-06-16) — MetaRecordDrawer Duplicate button.
  * The button is gated on `canCreate` (a duplicate is a create; the server re-enforces it) and emits
  * `duplicate`. Hidden when canCreate is false or when there's no record to duplicate.
+ *
+ * Record inspector v3 (2026-09-05, PR-A §1.2): Duplicate moved from a standalone header button into
+ * an `<MtMenuItem>` row inside the new kebab menu, which Teleports its open content to
+ * `document.body` (NOT a descendant of `container`) — every test below opens the kebab first
+ * (`openKebabMenu`) and queries `document.body`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, type App } from 'vue'
+import { createApp, h, nextTick, type App } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
+
+async function flushUi(cycles = 4) {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
+async function openKebabMenu(root: HTMLElement) {
+  const trigger = root.querySelector<HTMLButtonElement>('[data-testid="record-inspector-menu"]')
+  trigger?.click()
+  await flushUi()
+}
 
 const FIELDS = [{ id: 'fld_t', name: 'Title', type: 'string', property: {} }] as unknown as MetaField[]
 const RECORD = { id: 'rec_1', version: 1, data: { fld_t: 'v' } } as unknown as MetaRecord
@@ -39,7 +56,7 @@ function mountDrawer(options: HarnessOptions = {}): { container: HTMLElement; ap
   return { container, app }
 }
 
-const dupBtn = (root: HTMLElement) => root.querySelector('.meta-record-drawer__btn--duplicate') as HTMLButtonElement | null
+const dupBtn = () => document.querySelector('.meta-record-drawer__btn--duplicate') as HTMLButtonElement | null
 
 describe('MetaRecordDrawer duplicate button', () => {
   afterEach(() => {
@@ -48,33 +65,38 @@ describe('MetaRecordDrawer duplicate button', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders the Duplicate button when canCreate and a record is present', () => {
+  it('renders the Duplicate button when canCreate and a record is present', async () => {
     const { container } = mountDrawer({ canCreate: true })
-    const btn = dupBtn(container)
+    await openKebabMenu(container)
+    const btn = dupBtn()
     expect(btn).not.toBeNull()
     expect((btn!.textContent ?? '').trim()).toBe('Duplicate')
   })
 
-  it('localizes the Duplicate label in zh-CN', () => {
+  it('localizes the Duplicate label in zh-CN', async () => {
     useLocale().setLocale('zh-CN')
     const { container } = mountDrawer({ canCreate: true })
-    expect((dupBtn(container)!.textContent ?? '').trim()).toBe('复制')
+    await openKebabMenu(container)
+    expect((dupBtn()!.textContent ?? '').trim()).toBe('复制')
   })
 
-  it('hides the Duplicate button when canCreate is false (capability gate)', () => {
+  it('hides the Duplicate button when canCreate is false (capability gate)', async () => {
     const { container } = mountDrawer({ canCreate: false })
-    expect(dupBtn(container)).toBeNull()
+    await openKebabMenu(container)
+    expect(dupBtn()).toBeNull()
   })
 
-  it('hides the Duplicate button when there is no record (nothing to clone)', () => {
+  it('hides the Duplicate button when there is no record (nothing to clone)', async () => {
     const { container } = mountDrawer({ canCreate: true, record: null })
-    expect(dupBtn(container)).toBeNull()
+    await openKebabMenu(container)
+    expect(dupBtn()).toBeNull()
   })
 
-  it('emits duplicate on click', () => {
+  it('emits duplicate on click', async () => {
     const onDuplicate = vi.fn()
     const { container } = mountDrawer({ canCreate: true, onDuplicate })
-    dupBtn(container)!.click()
+    await openKebabMenu(container)
+    dupBtn()!.click()
     expect(onDuplicate).toHaveBeenCalledTimes(1)
   })
 })

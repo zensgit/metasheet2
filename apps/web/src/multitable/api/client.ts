@@ -64,6 +64,9 @@ import type {
   DashboardUpdateInput,
   FormShareConfig,
   FormShareConfigUpdate,
+  CreateTemplateFromBaseInput,
+  CreateTemplateFromBaseResult,
+  ListTemplatesResult,
   InstallTemplateInput,
   InstallTemplateResult,
   TemplateDryRunResult,
@@ -1667,8 +1670,11 @@ export class MultitableApiClient implements CommentsApiClient {
   private basesGeneration = 0
   private basesInflight: { promise: Promise<{ bases: MetaBase[] }>; generation: number } | null = null
   private templatesCache: MetaTemplate[] | null = null
+  // 服务端说「自定义模板这一段读不出来」(未迁移 / 库没起来)时带回来的标志位。
+  // 跟着缓存一起存:缓存命中的那次调用也必须把它一起还给调用方,否则提示条会闪一下就消失。
+  private templatesCacheCustomUnavailable = false
   private templatesGeneration = 0
-  private templatesInflight: { promise: Promise<{ templates: MetaTemplate[] }>; generation: number } | null = null
+  private templatesInflight: { promise: Promise<ListTemplatesResult>; generation: number } | null = null
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
@@ -1697,6 +1703,7 @@ export class MultitableApiClient implements CommentsApiClient {
 
   invalidateTemplatesCache(): void {
     this.templatesCache = null
+    this.templatesCacheCustomUnavailable = false
     this.templatesGeneration++
     this.templatesInflight = null
   }
@@ -1761,25 +1768,42 @@ export class MultitableApiClient implements CommentsApiClient {
     return data
   }
 
-  async listTemplates(opts?: { force?: boolean }): Promise<{ templates: MetaTemplate[] }> {
+  /**
+   * customTemplatesUnavailable:服务端在自定义模板那一段读失败时(表没迁移 / 库没起来)
+   * 回退成「只有内置模板」并带上这个标志位。**必须原样透传** —— 丢掉它,未迁移环境看到的
+   * 就是一个「只有 8 张内置模板」的正常页面,恰恰是「假装用户没建过模板」。
+   */
+  async listTemplates(opts?: { force?: boolean }): Promise<ListTemplatesResult> {
     if (opts?.force) {
       this.invalidateTemplatesCache()
     } else {
-      if (this.templatesCache) return { templates: [...this.templatesCache] }
+      if (this.templatesCache) {
+        return {
+          templates: [...this.templatesCache],
+          ...(this.templatesCacheCustomUnavailable ? { customTemplatesUnavailable: true } : {}),
+        }
+      }
       if (this.templatesInflight) {
-        return this.templatesInflight.promise.then((data) => (Array.isArray(data?.templates) ? { templates: [...data.templates] } : data))
+        return this.templatesInflight.promise.then((data) => (Array.isArray(data?.templates) ? { ...data, templates: [...data.templates] } : data))
       }
     }
     const generation = this.templatesGeneration
     const promise = (async () => {
       const res = await this.fetch('/api/multitable/templates')
-      const data = await this.parseJson<{ templates?: MetaTemplate[] }>(res)
+      const data = await this.parseJson<{ templates?: MetaTemplate[]; customTemplatesUnavailable?: boolean }>(res)
+      const customTemplatesUnavailable = data?.customTemplatesUnavailable === true
       // Same passthrough + generation contract as listBases.
       if (Array.isArray(data?.templates)) {
-        if (generation === this.templatesGeneration) this.templatesCache = data.templates
-        return { templates: [...data.templates] }
+        if (generation === this.templatesGeneration) {
+          this.templatesCache = data.templates
+          this.templatesCacheCustomUnavailable = customTemplatesUnavailable
+        }
+        return {
+          templates: [...data.templates],
+          ...(customTemplatesUnavailable ? { customTemplatesUnavailable: true } : {}),
+        }
       }
-      return data as { templates: MetaTemplate[] }
+      return data as ListTemplatesResult
     })()
     this.templatesInflight = { promise, generation }
     try {
@@ -1838,6 +1862,31 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson(res)
   }
 
+  /**
+   * 把一个 Base 的**结构**存成模板(服务端只读 meta_sheets/meta_fields/meta_views,
+   * 不碰任何记录)。成功后模板列表缓存必须作废,否则模板中心刷不出刚建的模板。
+   */
+  async createTemplateFromBase(input: CreateTemplateFromBaseInput): Promise<CreateTemplateFromBaseResult> {
+    const res = await this.fetch('/api/multitable/templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    const data = await this.parseJson<CreateTemplateFromBaseResult>(res)
+    this.invalidateTemplatesCache()
+    return data
+  }
+
+  /** 删除自定义模板(软删)。内置模板服务端会 403 —— 前端也不给入口。 */
+  async deleteTemplate(templateId: string): Promise<{ templateId: string }> {
+    const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}`, {
+      method: 'DELETE',
+    })
+    const data = await this.parseJson<{ templateId: string }>(res)
+    this.invalidateTemplatesCache()
+    return data
+  }
+
   async installTemplate(templateId: string, input: InstallTemplateInput = {}): Promise<InstallTemplateResult> {
     const res = await this.fetch(`/api/multitable/templates/${encodeURIComponent(templateId)}/install`, {
       method: 'POST',
@@ -1891,6 +1940,23 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     })
+    return this.parseJson(res)
+  }
+
+  // Soft-delete a whole sheet (DELETE /api/multitable/sheets/:id → `deleted_at = now()`; records and
+  // links are untouched and the sheet is restorable via restoreSheet). Server gate is
+  // hasSheetLifecycleAuthority; a 403 / 409 SHEET_PLUGIN_MANAGED / 409 SHEET_SYSTEM_MANAGED /
+  // 404 SHEET_DELETED all throw a MultitableApiError carrying `code`, so the caller can pick copy by code.
+  async deleteSheet(sheetId: string): Promise<{ deleted: string }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}`, { method: 'DELETE' })
+    return this.parseJson(res)
+  }
+
+  // Undo a soft delete (POST /api/multitable/sheets/:id/restore). API half only in this slice: there
+  // is no recycle-bin UI yet, so nothing in the workbench calls this — it exists so the follow-up
+  // (list soft-deleted sheets + restore) has its wire contract pinned now.
+  async restoreSheet(sheetId: string): Promise<{ restored: string; sheet: MetaSheet }> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/restore`, { method: 'POST' })
     return this.parseJson(res)
   }
 

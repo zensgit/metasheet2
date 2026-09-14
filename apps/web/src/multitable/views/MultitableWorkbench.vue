@@ -47,6 +47,7 @@
       <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.workflow" /></el-icon> {{ wb('toolbar.workflow', isZh) }}</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
       <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
+      <button v-if="caps.canManageFields.value && workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="save-sheet-as-template" @click="openSaveSheetAsTemplate"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('saveTpl.open', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
@@ -88,15 +89,112 @@
         />
       </div>
       <footer class="mt-template-library__footer">
-        <router-link
+        <!-- F5: programmatic navigation (NOT <router-link>) so closing this panel can wait for the
+             push RESULT. A router-link fires its inline @click synchronously while the guard
+             (MultitableEmbedHost onBeforeRouteLeave -> confirmPageLeave) can still abort the
+             navigation, which looked like "clicked, nothing happened, panel just closed".
+             The href is still real (resolved through the router) so Ctrl/Cmd/middle click, "copy
+             link address" and the status-bar preview keep working; onGoToTemplateCenter only
+             preventDefault()s the plain left click it actually handles. -->
+        <a
           class="mt-template-library__more"
-          :to="{ name: TemplateCenterRouteName }"
+          :href="templateCenterHref"
+          role="link"
+          tabindex="0"
           data-testid="multitable-workbench-template-center-link"
-          @click="showTemplateLibrary = false"
+          @click="onGoToTemplateCenter"
+          @keydown.enter="onGoToTemplateCenter"
         >
           {{ wb('tpl.more', isZh) }}
-        </router-link>
+        </a>
       </footer>
+    </div>
+    <!--
+      F7「把当前数据表存为模板」。作用于**当前激活的数据表**,提交
+      { baseId, sheetIds: [activeSheetId], fieldIds: 勾选的那几个 } —— 服务端把这两个选择器
+      当成收窄参数下推,可读性/授权闸一条不少。这里的显隐只是 UX,门在服务端
+      (univer-meta.ts 的 canManageFields 判定)。
+    -->
+    <div v-if="showSaveSheetAsTemplate" class="mt-save-tpl__overlay">
+      <div class="mt-save-tpl" role="dialog" aria-modal="true" data-testid="save-sheet-as-template-dialog">
+        <header class="mt-save-tpl__header">
+          <strong>{{ wb('saveTpl.title', isZh) }}</strong>
+          <button class="mt-save-tpl__close" data-action="save-sheet-as-template-close" @click="closeSaveSheetAsTemplate">&times;</button>
+        </header>
+        <p class="mt-save-tpl__hint">{{ wb('saveTpl.hint', isZh) }}</p>
+        <template v-if="!saveTemplateResult">
+          <label class="mt-save-tpl__row">
+            <span class="mt-save-tpl__label">{{ wb('saveTpl.nameLabel', isZh) }}</span>
+            <input
+              v-model="saveTemplateName"
+              class="mt-save-tpl__input"
+              type="text"
+              maxlength="255"
+              data-testid="save-sheet-as-template-name"
+            />
+          </label>
+          <div class="mt-save-tpl__fields">
+            <div class="mt-save-tpl__fields-head">
+              <span class="mt-save-tpl__label">{{ wb('saveTpl.fieldsLabel', isZh) }}</span>
+              <span class="mt-save-tpl__count" data-testid="save-sheet-as-template-count">{{ saveTemplateFieldIds.length }} / {{ saveTemplateFieldChoices.length }}</span>
+              <button class="mt-save-tpl__link" data-action="save-sheet-as-template-select-all" @click="setAllSaveTemplateFields(true)">{{ wb('saveTpl.selectAll', isZh) }}</button>
+              <button class="mt-save-tpl__link" data-action="save-sheet-as-template-select-none" @click="setAllSaveTemplateFields(false)">{{ wb('saveTpl.selectNone', isZh) }}</button>
+            </div>
+            <ul class="mt-save-tpl__list">
+              <li v-for="field in saveTemplateFieldChoices" :key="field.id" class="mt-save-tpl__item">
+                <label>
+                  <input
+                    type="checkbox"
+                    :data-save-template-field="field.id"
+                    :checked="saveTemplateFieldIds.includes(field.id)"
+                    @change="toggleSaveTemplateField(field.id)"
+                  />
+                  <span class="mt-save-tpl__item-name">{{ field.name }}</span>
+                  <em class="mt-save-tpl__item-type">{{ field.type }}</em>
+                </label>
+              </li>
+            </ul>
+          </div>
+          <label class="mt-save-tpl__share">
+            <input v-model="saveTemplateShare" type="checkbox" data-testid="save-sheet-as-template-share" />
+            <span>{{ wb('saveTpl.shareLabel', isZh) }}</span>
+          </label>
+          <p class="mt-save-tpl__hint">{{ wb('saveTpl.shareHint', isZh) }}</p>
+          <p v-if="saveTemplateError" class="mt-save-tpl__error" data-testid="save-sheet-as-template-error">{{ saveTemplateError }}</p>
+          <footer class="mt-save-tpl__footer">
+            <MtButton data-action="save-sheet-as-template-cancel" @click="closeSaveSheetAsTemplate">{{ wb('saveTpl.cancel', isZh) }}</MtButton>
+            <MtButton
+              variant="primary"
+              data-action="save-sheet-as-template-submit"
+              :disabled="saveTemplateSubmitting"
+              @click="onSaveSheetAsTemplate"
+            >
+              {{ saveTemplateSubmitting ? wb('saveTpl.saving', isZh) : wb('saveTpl.submit', isZh) }}
+            </MtButton>
+          </footer>
+        </template>
+        <div v-else class="mt-save-tpl__result" data-testid="save-sheet-as-template-result">
+          <strong>{{ wb('saveTpl.successTitle', isZh) }}</strong>
+          <span class="mt-save-tpl__result-name">{{ saveTemplateResult.template.name }}</span>
+          <template v-if="saveTemplateResult.warnings.length > 0">
+            <p class="mt-save-tpl__label">{{ wb('saveTpl.warningsTitle', isZh) }}</p>
+            <ul class="mt-save-tpl__warnings" data-testid="save-sheet-as-template-warnings">
+              <li v-for="(warning, index) in saveTemplateResult.warnings" :key="index">{{ warning }}</li>
+            </ul>
+          </template>
+          <footer class="mt-save-tpl__footer">
+            <router-link
+              class="mt-save-tpl__link"
+              :to="{ name: TemplateCenterRouteName }"
+              data-testid="save-sheet-as-template-center-link"
+              @click="closeSaveSheetAsTemplate"
+            >
+              {{ wb('saveTpl.openCenter', isZh) }}
+            </router-link>
+            <MtButton data-action="save-sheet-as-template-done" @click="closeSaveSheetAsTemplate">{{ wb('saveTpl.close', isZh) }}</MtButton>
+          </footer>
+        </div>
+      </div>
     </div>
     <div
       v-if="capabilityOriginNotice"
@@ -165,7 +263,7 @@
             @click="railCollapsed = !railCollapsed"
           >{{ railCollapsed ? '›' : '‹' }}</button>
         </div>
-        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" />
+        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" />
       </aside>
       <div class="mt-workbench__main">
         <MetaDashboardView
@@ -325,11 +423,17 @@
           @ai-run="onGridAiRun"
           @run-button="onRunButton"
           @selection-change="onGridSelectionChange"
+          @expand-record="onExpandRecord"
         />
       </div>
       <MetaRecordInspector
+        ref="recordInspectorRef"
         :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
-        :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
+        :visible="inspectorOpen && !!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
+        :inspector-field-layout="inspectorFieldLayout"
+        :fetch-record="fetchLinkedRecordFn"
+        :opener-el="inspectorOpenerEl"
+        :field-errors="inspectorFieldErrors"
         :sheet-id="workbench.activeSheetId.value ?? undefined"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
@@ -367,6 +471,7 @@
         :comment-composer-initial-mentions="commentComposerInitialMentions"
         :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
+        @copy-link="onCopyRecordLink"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
         @navigate="onDrawerNavigate"
@@ -391,6 +496,8 @@
           <div class="mt-workbench__shortcut"><kbd>Ctrl+V</kbd><span>{{ wb('kbd.paste', isZh) }}</span></div>
           <div class="mt-workbench__shortcut"><kbd>Ctrl+Z</kbd><span>{{ wb('kbd.undo', isZh) }}</span></div>
           <div class="mt-workbench__shortcut"><kbd>Ctrl+Y</kbd><span>{{ wb('kbd.redo', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Shift+,</kbd><span>{{ wb('kbd.recordPrev', isZh) }}</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Shift+.</kbd><span>{{ wb('kbd.recordNext', isZh) }}</span></div>
           <div class="mt-workbench__shortcut"><kbd>?</kbd><span>{{ wb('kbd.toggleHelp', isZh) }}</span></div>
         </div>
       </div>
@@ -412,9 +519,13 @@
       :visible="showImportModal"
       :sheet-id="workbench.activeSheetId.value"
       :fields="importSurfaceFields"
+      :existing-field-names="importExistingFieldNames"
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
+      :can-create-fields="caps.canManageFields.value"
+      :create-fields-error="importCreateFieldsError"
+      :created-field-columns="importCreatedFieldColumns"
       @update:dirty="importDirty = $event"
       @close="closeImportModal"
       @cancel-import="cancelImport"
@@ -604,7 +715,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
@@ -633,8 +744,12 @@ import {
   duplicateRowsSkipped as fmtDuplicateRowsSkipped,
   recordsDeleted as fmtRecordsDeleted,
   recordNotFound as fmtRecordNotFound,
+  sheetDeleteConfirm as fmtSheetDeleteConfirm,
+  sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
 } from '../utils/workbench-labels'
 import { recordLabel } from '../utils/meta-record-labels'
+import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
+import type { MetaRecordInspectorFieldLayout } from '../utils/recordDisplay'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
@@ -662,6 +777,7 @@ import type {
   MetaFieldPermissionEntry,
   MetaViewPermissionEntry,
   MetaTemplate,
+  CreateTemplateFromBaseResult,
   PersonSummary,
   RowDensity,
 } from '../types'
@@ -669,6 +785,8 @@ import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
+import { fieldAnchoredPatchMessage, resolvePatchFailureRoute } from '../utils/patch-failure-routing'
+import { metaCoreLabel } from '../utils/meta-core-labels'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { usePersonalViewToggle } from '../composables/usePersonalViewToggle'
 import { reorderViewFields } from '../utils/reorder-view-fields'
@@ -735,8 +853,22 @@ import MetaDashboardView from '../components/MetaDashboardView.vue'
 import { MtButton } from '../ui'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
-import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
+import { extractImportTokens, type ImportBuildFailure, type ImportValueResolver } from '../import/delimited'
 import { buildXlsxBuffer } from '../import/xlsx-mapping'
+import {
+  MAX_FIELD_NAME_LENGTH,
+  MAX_SHEET_FIELDS,
+  createFieldPlaceholderId,
+  planCreateFieldNames,
+  type ImportSubmitPayload,
+} from '../import/create-fields'
+import {
+  importLabel,
+  createFieldFailed as fmtCreateFieldFailed,
+  createFieldLimitReached as fmtCreateFieldLimitReached,
+  createFieldNameInvalid as fmtCreateFieldNameInvalid,
+  createFieldNameTooLong as fmtCreateFieldNameTooLong,
+} from '../utils/meta-import-labels'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isNativePersonField, isPersonField } from '../utils/link-fields'
 import {
@@ -847,6 +979,10 @@ const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workb
 // records; Reset may delete them and retains its typed confirmation. No wall-clock asOf crosses either wire.
 const pitResetEnabled = computed(() => capabilitySource.value?.pitResetEnabled === true)
 const sheetRevertEnabled = computed(() => capabilitySource.value?.sheetRevertEnabled === true)
+// Whole-sheet delete authority for the SELECTED sheet — the same server-derived, FE-read-only shape as
+// pitResetEnabled: read straight off the /context capabilities object (`=== true`), never a role fallback,
+// so an old backend, a legacy role-string source or a stale object all fail CLOSED (trash button hidden).
+const canDeleteSheet = computed(() => capabilitySource.value?.canDeleteSheet === true)
 const listHistoryEventsWire = (
   baseId: string,
   params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
@@ -943,6 +1079,71 @@ const sheetPresenceState = useMultitableSheetPresence({
 })
 
 const selectedRecordId = ref<string | null>(null)
+// Record inspector v3 (2026-09-05, PR-A §1.1 explicit-open erratum): `selectedRecordId` stays the
+// grid CURSOR (row highlight, collab presence, comment scope, `aria-selected`) — every one of its
+// 69 pre-existing consumers is untouched by this line. `inspectorOpen` is the NEW, second axis: the
+// panel is visible only while BOTH are true (`:visible="inspectorOpen && !!selectedRecordId"` on
+// `<MetaRecordInspector>` below). Session-only (no storage, OD-W2-2 discipline) — a fresh mount
+// always starts closed regardless of what a previous tab session left it at.
+const inspectorOpen = ref(false)
+// Captured by `openRecord` below (see its own comment), written by `selectRecord`'s open branch, and
+// forwarded to the inspector's `openerEl` prop for focus-restore-on-close; `null` for a caller that
+// has no natural opener element (a deep-link/comment-click-through open) — the inspector itself
+// falls back to the element focused at the moment it becomes visible in that case (see
+// MetaRecordInspector.vue's `captureOpenerAndFocusTitle`). Round 4 (2026-09-05, refuter P2): this
+// ref describes the CURRENT open only — `onCloseDrawer` clears it, and a fresh open reached without
+// an opener resets it to `null` inside `selectRecord` — so an opener from an earlier, already-closed
+// open can never be handed to a later open that did not come from that element (expand-icon open →
+// close → comment click-through open used to restore focus to the expand icon on Escape).
+const inspectorOpenerEl = ref<HTMLElement | null>(null)
+
+/** Record inspector v3 (2026-09-05, PR-A §1.1): the SINGLE explicit-open entry point — every
+ *  trigger that should OPEN the panel (not just move the cursor) routes through this, per the
+ *  design's own enumeration: (i) the grid row-number expand icon, (ii) Shift+Space on a focused
+ *  grid row, (iv) `resolveDeepLink` (see that function's own comment), (v) every
+ *  `selectRecord(..., { openComments: true })` caller. `opener` names the element that triggered
+ *  this open (when the caller has one to hand — the grid handlers below read
+ *  `document.activeElement` themselves, which at the moment their synchronous handler runs IS the
+ *  element the user just interacted with); omitted for a deep-link/programmatic open.
+ *  `inspectorOpen` itself is set INSIDE `selectRecord` (via `{ open: true }`), AFTER that
+ *  function's own discard-guard passes — not here, eagerly — so a DECLINED discard-changes prompt
+ *  (navigating away from an unsaved edit on a different record) cancels the open too, instead of
+ *  opening the panel on the record that was never actually navigated away from. Round 4
+ *  (2026-09-05, refuter P2): the resolved opener is now THREADED through `selectRecord`'s opts (not
+ *  written eagerly here) so the single open branch there is the ONE writer of `inspectorOpenerEl`
+ *  and can tell "this open has an opener" (this caller) from "this open has none" (deep-link /
+ *  comment click-through) — the latter must not inherit a stale opener from an earlier open. A
+ *  consequence: a DECLINED discard prompt now leaves the opener untouched too (the panel it kept
+ *  open was opened by something else, and that is what Escape should restore focus to). Round 5
+ *  (2026-09-05, refuter P3): the resolved candidate — explicit or `document.activeElement` — goes
+ *  through `resolveOpenerEl` below, so `document.body` (what `activeElement` IS at the instant the
+ *  expand handler runs in Safari and Firefox/macOS, where a mouse click does not focus a `<button>`,
+ *  and after any programmatic `.click()`), a disconnected element and `null` all reach `selectRecord`
+ *  as `opener: null` — the "this open has no opener" value the inspector already handles — never as
+ *  an element whose close-time `.focus()` would be a no-op that also pre-empts the inspector's
+ *  `.meta-grid` last resort. */
+function openRecord(recordId: string, opener?: HTMLElement | null) {
+  const candidate = opener ?? (typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null)
+  void selectRecord(recordId, { open: true, opener: resolveOpenerEl(candidate) })
+}
+
+/** Round 5 (2026-09-05, refuter P3): the ONE filter `openRecord` applies to whatever opener it
+ *  resolved. `document.body` is what `document.activeElement` reports when NOTHING is focused — it is
+ *  not an element the user interacted with, and restoring focus to it on close is a no-op that (in
+ *  the inspector) also pre-empted the `.meta-grid` fallback. A disconnected element can never be
+ *  refocused either. Both collapse to `null` here so the inspector's own fallbacks (pre-open
+ *  activeElement, then `.meta-grid`) run. The inspector applies the same predicate to its `openerEl`
+ *  prop on its side too (`isRestorableOpener` in MetaRecordInspector.vue) — each side guards
+ *  independently, so neither relies on the other having done it. */
+function resolveOpenerEl(candidate: HTMLElement | null | undefined): HTMLElement | null {
+  if (!candidate || !candidate.isConnected) return null
+  if (typeof document !== 'undefined' && candidate === document.body) return null
+  return candidate
+}
+
+function onExpandRecord(recordId: string) {
+  openRecord(recordId)
+}
 
 // --- A3: AI field shortcut — ONE instance drives all three trigger surfaces
 // (drawer preview/run, cell-editor run, field-manager config-time preview) so
@@ -1009,9 +1210,12 @@ function bulkFillFieldName(fieldId: string): string {
 function bulkFillRecordName(recordId: string): string {
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (!row) return recordId
-  // Prefer the first readable text field's value as a human label; fall back to the id.
-  const primaryFieldId = grid.visibleFields.value.find((f) => f.type === 'string' || f.type === 'longText')?.id
-  const label = primaryFieldId ? row.data[primaryFieldId] : undefined
+  // Record inspector v3 (2026-09-05): resolvePrimaryField (utils/recordDisplay.ts) replaces this
+  // function's own field-picking — previously the first `string`/`longText` field, now the same
+  // primary-field convention the inspector title uses (fields[0]). Falls back to the id when that
+  // field's value isn't a non-empty string (unchanged discipline).
+  const primary = resolvePrimaryField(grid.visibleFields.value)
+  const label = primary ? row.data[primary.id] : undefined
   return typeof label === 'string' && label.trim().length > 0 ? label : recordId
 }
 
@@ -1135,18 +1339,50 @@ function syncRailViewportState(): void {
 // sets), so NEITHER watch ever writes state at desktop — reusing that existing P2-2c invariant rather
 // than re-proving it, so desktop behavior (both rail and inspector may be open together, push layout,
 // OD-W2-3=a) stays a byte-for-byte no-op versus pre-S7 code.
-watch(selectedRecordId, (rid) => {
-  // Opening the inspector (a record just got selected) while the rail drawer is open: close the drawer.
-  if (rid && isRailDrawerOpen.value) railCollapsed.value = true
+// Record inspector v3 (2026-09-05, PR-A §1.1): both watches below keyed on `selectedRecordId`
+// alone pre-PR-A, back when that ref WAS the inspector's own visibility (`visible="!!selectedRecordId"`).
+// Now that a selected record can exist with the panel CLOSED, "the inspector opened" means
+// `inspectorOpen && selectedRecordId` together — watching `selectedRecordId` alone would collapse
+// the rail on a plain cursor move that never opened anything.
+watch([selectedRecordId, inspectorOpen], ([rid, open]) => {
+  // Opening the inspector (not just moving the cursor) while the rail drawer is open: close the drawer.
+  if (rid && open && isRailDrawerOpen.value) railCollapsed.value = true
 })
 watch(isRailDrawerOpen, (open) => {
-  // Opening the rail drawer while the inspector is open: close the inspector.
-  if (open && selectedRecordId.value) selectedRecordId.value = null
+  // Opening the rail drawer while the inspector is open: close the inspector — `inspectorOpen=false`
+  // (unified close semantics with `onCloseDrawer`/Esc/×), NOT clearing `selectedRecordId` (the
+  // cursor survives a close exactly like every other close path now does).
+  if (open && inspectorOpen.value) inspectorOpen.value = false
 })
 
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
+// F7「把当前数据表存为模板」对话框状态。字段清单直接用 workbench.fields(已经在手上,零新请求),
+// 默认全勾。注意 fieldIds 只是**收窄**参数:它是经视图/权限过滤后的字段集,不是权威 ——
+// 服务端拿到它只做交集,读不到的字段不会因为出现在这个清单里就进模板。
+const showSaveSheetAsTemplate = ref(false)
+const saveTemplateName = ref('')
+const saveTemplateShare = ref(false)
+const saveTemplateFieldIds = ref<string[]>([])
+const saveTemplateSubmitting = ref(false)
+const saveTemplateError = ref<string | null>(null)
+const saveTemplateResult = ref<CreateTemplateFromBaseResult | null>(null)
+
+// F5: the "More templates ->" entry navigates programmatically (so the panel can wait for the push
+// RESULT), but it must keep the native link affordances a <router-link> used to give it -- Ctrl/Cmd
+// or middle click opening a new tab, "copy link address", the status-bar preview. Hence a REAL href
+// resolved through the router (never a hardcoded path: createWebHistory(import.meta.env.BASE_URL)
+// means the app can be served from a sub-path). Guarded because several specs mock useRouter() with
+// a push-only object; a missing href only costs the new-tab affordance, the click path still works.
+const templateCenterHref = computed<string | undefined>(() => {
+  if (typeof router.resolve !== 'function') return undefined
+  try {
+    return router.resolve({ name: TemplateCenterRouteName }).href
+  } catch {
+    return undefined
+  }
+})
 const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const showTrash = ref(false)
@@ -1238,6 +1474,11 @@ const recentBaseOpens = ref(readRecentBaseOpens())
 const basePickerBases = computed(() => decorateAndSortBases(bases.value, favoriteBaseIds.value, recentBaseOpens.value))
 const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
+// PR-B2 round 2 (§1.3 "Field-anchored server errors"): imperative query handle on the record inspector —
+// `onDrawerPatch` asks its exposed `canAnchorFieldError(recordId, fieldId)` BEFORE writing an inline
+// entry and keeps today's toast when the alert could not render (other tab active, field row not
+// rendered, inspector closed or showing another record). Same idiom as `toastRef.showError` above.
+const recordInspectorRef = ref<InstanceType<typeof MetaRecordInspector> | null>(null)
 const commentDraft = ref('')
 const currentUserId = ref<string | null>(null)
 const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
@@ -1291,6 +1532,11 @@ type ImportResult = {
   failures: ImportFailure[]
 }
 const importResult = ref<ImportResult | null>(null)
+// Import → "create the missing columns as new text fields": the modal only ASKS (payload.createFields);
+// the write happens here, behind the same manage-fields capability that gates the field manager, and
+// behind the server's own 403 on POST /api/multitable/fields.
+const importCreateFieldsError = ref<string | null>(null)
+const importCreatedFieldColumns = ref<Record<number, string> | null>(null)
 // --- Display prefs (column width / row density / group collapse): server-persisted in view.config
 // (persist-display-prefs arc 2026-06-16). Each is OPTIMISTIC-LOCAL: a writable ref updates the UI
 // instantly, then `persistDisplayPref` writes the merged config in the background (no row refetch).
@@ -1311,6 +1557,24 @@ const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
 const formFieldErrors = ref<Record<string, string>>({})
+// Record inspector v3 PR-B2 (docs/development/multitable-record-inspector-v3-design-20260905.md §1.3
+// "Field-anchored server errors", §4 item 11): per-field server rejections for the OPEN inspector
+// record, keyed by fieldId — the inspector-side twin of `formFieldErrors` above (same prop shape, same
+// `:field-errors` idiom, WB → MetaRecordInspector → MetaRecordFieldsPanel). Written only by
+// `onDrawerPatch` (field / conflict routes, and only when the inspector confirms the alert can render —
+// see `recordInspectorRef`), cleared per field on that field's next successful patch, wholesale on
+// record/view change, and — for entries the VERSION_CONFLICT path wrote, and ONLY those — when
+// `grid.conflict` clears. Round 2: each entry is tagged with its ORIGIN so the conflict-clear watch
+// cannot wipe a validation alert that happens to sit on the same field (e.g. a grid-path conflict on
+// that field raised and dismissed while the drawer's validation alert is up); the panel-facing prop
+// (`inspectorFieldErrors`) is the derived fieldId → message map, recomputed as a fresh object on every
+// write so the panel's prev/next `fieldErrors` watch keeps seeing distinct snapshots.
+type InspectorFieldErrorOrigin = 'field' | 'conflict'
+const inspectorFieldErrorEntries = ref<Record<string, { message: string; origin: InspectorFieldErrorOrigin }>>({})
+const inspectorPatchOwners = new Map<string, object>()
+const inspectorFieldErrors = computed<Record<string, string>>(() =>
+  Object.fromEntries(Object.entries(inspectorFieldErrorEntries.value).map(([fieldId, entry]) => [fieldId, entry.message])),
+)
 const deepLinkedRecordLinkSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const deepLinkedRecordPersonSummaries = ref<Record<string, PersonSummary[]>>({})
 const deepLinkedRecordAttachmentSummaries = ref<Record<string, MetaAttachment[]>>({})
@@ -1407,9 +1671,14 @@ const currentViewPermission = computed<MetaViewPermission | null>(() => {
   const activeViewId = workbench.activeViewId.value
   return activeViewId ? effectiveViewPermissions.value[activeViewId] ?? null : null
 })
+// P3-2 (2026-09-05, record inspector v3 header follow-up): routed through the SAME
+// `resolveMentionDisplayField` (utils/recordDisplay.ts) that hoists this idiom — see that
+// function's own comment for why "prefer the primary field, fall back to the first text field" is
+// byte-identical to the plain `.find()` this replaces for every input, and unifies with the
+// inspector title / bulk-fill idioms whenever the sheet's primary field is itself text.
 const mentionDisplayFieldId = computed(() =>
-  grid.visibleFields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
-  ?? grid.fields.value.find((field) => field.type === 'string' || field.type === 'longText')?.id
+  resolveMentionDisplayField(grid.visibleFields.value)?.id
+  ?? resolveMentionDisplayField(grid.fields.value)?.id
   ?? null,
 )
 const canConfigureCurrentView = computed(() => currentViewPermission.value?.canConfigure ?? true)
@@ -1506,6 +1775,24 @@ const twoLayerVisibleFields = computed(() => filterPropertyVisibleFields(scopedA
 const scopedGridFields = computed(() =>
   grid.visibleFields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Sections"): the details tab's two-section field
+// layout. §1 `ordered` = view order ∩ layer-2 ∩ layer-3 — `scopedGridFields` is `grid.visibleFields`
+// (the active view's resolved `fieldOrder`, fail-soft on stale ids, minus the view's hidden ids and
+// property-hidden fields, useMultitableGrid.ts `visibleFields`) re-filtered through THIS file's
+// `effectiveFieldPermissions` (layer-3 with the deep-link/standalone-form overrides the grid's own
+// permission ref does not carry); `filterPropertyVisibleFields` is applied again explicitly so the
+// layer-2 conjunct is stated here, not inherited from the grid computed's internals. §2 `hiddenInView`
+// = the rest of `twoLayerVisibleFields` (layer-2 ∩ layer-3, sheet order) — fields this viewer may see
+// but the active view hides. Disjoint by construction; MetaRecordFieldsPanel re-applies both layers
+// anyway (negative golden N3). Applying layer-2 to the details tab is a declared behaviour change
+// (design §4 item 4): it previously received `scopedAllFields` (layer-3 only) and rendered
+// property-hidden fields.
+const inspectorFieldLayout = computed<MetaRecordInspectorFieldLayout>(() => {
+  const ordered = filterPropertyVisibleFields(scopedGridFields.value)
+  const orderedIds = new Set(ordered.map((field) => field.id))
+  const hiddenInView = twoLayerVisibleFields.value.filter((field) => !orderedIds.has(field.id))
+  return { ordered, hiddenInView }
+})
 const conditionalFormattingRules = computed(() =>
   extractRulesFromConfig(workbench.activeView.value?.config),
 )
@@ -1548,6 +1835,15 @@ const importSurfaceFields = computed(() =>
     return permission?.visible !== false && permission?.readOnly !== true
   }),
 )
+/**
+ * Names of EVERY field on the sheet, including the ones importSurfaceFields strips (formula /
+ * lookup / rollup / readonly / permission-hidden). The modal needs them to tell "this header is
+ * missing from the sheet" apart from "this header exists but is not writable" — otherwise a header
+ * matching a formula column defaults to "create a new field" and a shadow `X (2)` text column
+ * appears. Same source list applyImportCreateFields plans against, so read side and write side can
+ * not disagree. Names only; no values leave the sheet through this prop.
+ */
+const importExistingFieldNames = computed(() => workbench.fields.value.map((field) => field.name))
 const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
   const resolvers: Record<string, ImportValueResolver> = {}
   for (const field of importSurfaceFields.value) {
@@ -2127,9 +2423,39 @@ async function ensureCommentMentionSuggestions(force = false) {
   }
 }
 
-async function selectRecord(recordId: string, opts?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
+// Record inspector v3 (2026-09-05, PR-A §1.1, §3 PR-A file line "every selectRecord(...,
+// { openComments: true }) caller"): rather than touching each such call site individually
+// (onMentionPopoverSelect, onOpenRecordComments, onOpenGridFieldComments — all named in the
+// design's own enumeration), the `openComments: true` transition is detected once, HERE, since
+// every one of those callers already threads it through this single function. `select-record` from
+// the grid (plain click/arrow navigation, `openComments` absent) is UNCHANGED — it still only moves
+// the cursor (see `onSelectRecord` below), never this branch.
+async function selectRecord(recordId: string, opts?: { openComments?: boolean; open?: boolean; opener?: HTMLElement | null; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
   selectedRecordId.value = recordId
+  // `open` (from `openRecord`/`resolveDeepLink`) or `openComments` — set ONLY after the discard
+  // guard above has already passed (not before calling this function): setting it earlier let a
+  // DECLINED discard leave `inspectorOpen=true` with the navigation itself cancelled, opening the
+  // panel on the PREVIOUS record instead of the one the user actually navigated away from. See
+  // `openRecord`'s own comment for the two callers this fixes.
+  if (opts?.open || opts?.openComments) {
+    // Round 4 (2026-09-05, refuter P2 — stale opener): this is the ONLY place `inspectorOpen` flips
+    // to true, so it is also the one place that can keep `inspectorOpenerEl` honest for every open
+    // path. A caller that has an opener (`openRecord`, via `opts.opener` — possibly `null` when it
+    // could not resolve one) always writes it, open or already-open alike, exactly as before. A
+    // caller with NO opener (`resolveDeepLink`, the `openComments: true` click-through callers) on a
+    // FRESH open (panel currently closed) resets it to `null`, so the inspector's own
+    // pre-open-activeElement fallback runs instead of restoring focus to whatever element opened
+    // some EARLIER, already-closed panel. `onCloseDrawer` clears it on close as well, but two close
+    // paths bypass `onCloseDrawer` (the rail-drawer watcher and the `selectedRecordId → null`
+    // force-close watcher, both below), so a close-side reset alone is not sufficient — this
+    // open-side check covers those too. An opener-less call while the panel is ALREADY open (e.g. a
+    // comment click-through on another row from inside an open panel) leaves the current open's
+    // opener in place, unchanged from before.
+    if (opts.opener !== undefined) inspectorOpenerEl.value = opts.opener
+    else if (!inspectorOpen.value) inspectorOpenerEl.value = null
+    inspectorOpen.value = true
+  }
   commentDraft.value = ''
   if (!opts?.openComments) {
     selectedCommentFieldId.value = null
@@ -2141,10 +2467,24 @@ async function selectRecord(recordId: string, opts?: { openComments?: boolean; h
     selectedEditingCommentId.value = null
   }
   showComments.value = opts?.openComments === true
-  await loadCommentsForRecord(recordId, {
-    highlightCommentId: opts?.openComments ? (opts.highlightCommentId ?? null) : null,
-    markReadCommentId: opts?.markReadCommentId ?? null,
-  })
+  // Comment fetch moved out of the general "cursor moved" path (P12, §1.1/§2 graft table): a
+  // closed-panel `select-record` (arrowing/clicking through the grid with the inspector closed)
+  // must make ZERO comment requests — pre-check (grep `commentsState`/`loadCommentsForRecord`
+  // consumers) found the grid's OWN comment indicators read a separate, independent
+  // `commentPresenceState` (useMultitableCommentPresence), never `commentsState`/
+  // `loadCommentsForRecord`, so there is no closed-panel consumer of this fetch to preserve. Firing
+  // it here, gated on the panel actually being open (this call's own `openComments: true` sets
+  // `inspectorOpen` above before this check runs; OR `inspectorOpen` is already true from a prior
+  // `openRecord`/deep-link open, which every such caller sets synchronously before invoking THIS
+  // function), replaces the old unconditional fetch. "Follow while open" (arrowing through an
+  // ALREADY-open panel) hits this same branch on every later `select-record`, since `inspectorOpen`
+  // stays true until the panel is explicitly closed.
+  if (inspectorOpen.value) {
+    await loadCommentsForRecord(recordId, {
+      highlightCommentId: opts?.openComments ? (opts.highlightCommentId ?? null) : null,
+      markReadCommentId: opts?.markReadCommentId ?? null,
+    })
+  }
 }
 
 function onSelectRecord(recordId: string) {
@@ -2382,7 +2722,9 @@ const batchRestore = ref<{
 // later scrolling off / a view reset — the batch dialog then shows a real title instead of the bare recordId.
 const gridSelectionLabels = ref<Record<string, string>>({})
 function captureSelectionLabels(recordIds: string[]): void {
-  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  // Record inspector v3 (2026-09-05): resolvePrimaryField (utils/recordDisplay.ts) replaces the
+  // inline `visibleFields[0]` read — same field (position 0), now the single shared definition.
+  const pf = resolvePrimaryField(grid.visibleFields.value)
   gridSelectionLabels.value = resolveSelectionLabels(recordIds, grid.rows.value as ReadonlyArray<{ id: string; data?: Record<string, unknown> }>, pf?.id, gridSelectionLabels.value)
 }
 const batchRecordLabel = (recordId: string): string => {
@@ -2390,7 +2732,7 @@ const batchRecordLabel = (recordId: string): string => {
   if (captured) return captured
   // belt-and-suspenders live lookup (dialog opened without a fresh capture); else the bare id
   const row = grid.rows.value.find((r: { id: string }) => r.id === recordId) as { data?: Record<string, unknown> } | undefined
-  const pf = grid.visibleFields.value[0] as { id: string } | undefined
+  const pf = resolvePrimaryField(grid.visibleFields.value)
   const val = row && pf ? row.data?.[pf.id] : undefined
   return val != null && val !== '' ? String(val) : recordId
 }
@@ -2477,15 +2819,81 @@ async function onRetryConflict() {
   if (grid.error.value) showError(grid.error.value)
 }
 
+// PR-B2 (§1.3): immutable per-key writes so MetaRecordFieldsPanel's shallow `fieldErrors` watch sees a
+// prev/next pair (it prunes a rejected-value draft exactly when that field's error goes set → unset).
+function setInspectorFieldError(fieldId: string, message: string, origin: InspectorFieldErrorOrigin) {
+  inspectorFieldErrorEntries.value = { ...inspectorFieldErrorEntries.value, [fieldId]: { message, origin } }
+}
+/** Drop the entry for `fieldId`; with `onlyOrigin`, drop it only if THAT path wrote it (round 2: the
+ *  conflict-clear watch passes 'conflict' so it never wipes a validation alert on the same field). */
+function clearInspectorFieldError(fieldId: string, onlyOrigin?: InspectorFieldErrorOrigin) {
+  const current = inspectorFieldErrorEntries.value[fieldId]
+  if (!current) return
+  if (onlyOrigin && current.origin !== onlyOrigin) return
+  const next = { ...inspectorFieldErrorEntries.value }
+  delete next[fieldId]
+  inspectorFieldErrorEntries.value = next
+}
+
 async function onDrawerPatch(fieldId: string, value: unknown) {
   if (!selectedRecordResolved.value) return
   const record = selectedRecordResolved.value
   if (!ensureCanEditRecord(record.id)) return
-  await grid.patchCell(record.id, fieldId, value, record.version)
+  const patchOwner = {}
+  inspectorPatchOwners.set(fieldId, patchOwner)
+  // PR-B2 round 2 (§1.3): `patchCell` returns THIS call's structured rejection (null on success and on
+  // its local row-action refusal), so two in-flight drawer patches can never read each other's failure
+  // — the round-1 shape (a shared "last failure" ref read after `await`) let the first settled call
+  // toast the second's message and lose its own alert when both rejections landed in one flush.
+  const failure = await grid.patchCell(record.id, fieldId, value, record.version)
+  const latestRequest = inspectorPatchOwners.get(fieldId) === patchOwner
+  if (failure) {
+    // Route by the failure the composable returned for THIS patch — still guarded on record + field
+    // (defensive: the composable builds both from its own arguments, so a mismatch means a foreign
+    // object and falls through to today's toast). `resolvePatchFailureRoute` holds the one rule (its
+    // doc comment states the matrix: fieldErrors / 422 / VALIDATION_ERROR → field; VERSION_CONFLICT →
+    // conflict; everything else — including a plain 400 with any other code — → toast).
+    const own = failure.recordId === record.id && failure.fieldId === fieldId
+    const route = own ? resolvePatchFailureRoute(failure) : 'toast'
+    // Can the inline alert RENDER right now? Only the inspector knows (details tab active, field row
+    // rendered, still open on this record). Asked synchronously, before any write — see the doc on
+    // `canAnchorFieldError` in MetaRecordInspector.vue. `false`/unmounted → today's toast, no entry.
+    const anchorable = own && recordInspectorRef.value?.canAnchorFieldError(record.id, fieldId) === true && latestRequest
+    const toastText = (text: string) => text || metaCoreLabel('grid.errorPatchCell', isZh.value)
+    if (route === 'field') {
+      const message = fieldAnchoredPatchMessage(failure)
+      // Inline iff it can render AND the server gave us text to render; an empty message has nothing to
+      // anchor (the alert node would be blank) and falls back to the toast with the generic label.
+      if (anchorable && message) {
+        setInspectorFieldError(fieldId, message, 'field')
+        return
+      }
+      showError(toastText(message))
+      return
+    }
+    if (route === 'conflict') {
+      // The conflict banner is already up (root template `v-if="grid.conflict.value"`, set by the
+      // composable — unchanged). Add the field marker under the control with the SAME text the banner
+      // shows (when it can render), tagged 'conflict' so it clears WITH the conflict — reload / retry /
+      // dismiss, see the `grid.conflict` watch beside the record-change watch — and KEEP the toast this
+      // path always fired: round 1 suppressed it, round 2 restores it so §4 item 11's "all other codes
+      // keep the toast" is true verbatim (banner + marker + toast).
+      if (anchorable) setInspectorFieldError(fieldId, conflictMessage.value || failure.message, 'conflict')
+      showError(toastText(failure.message))
+      return
+    }
+    showError(toastText(failure.message))
+    return
+  }
   if (grid.error.value) {
+    // The composable's LOCAL row-action refusal (never reaches the server, returns no failure) — today's
+    // toast, unchanged. (Normally unreachable from the drawer: `ensureCanEditRecord` above already gates.)
     showError(grid.error.value)
     return
   }
+  // A successful patch of a field clears that field's error, whichever path wrote it (and, via the
+  // panel's watch, its draft). Other fields' errors are untouched.
+  if (latestRequest) clearInspectorFieldError(fieldId)
   if (deepLinkedRecord.value?.id === record.id) {
     deepLinkedRecord.value = {
       ...deepLinkedRecord.value,
@@ -2494,6 +2902,26 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
     }
   }
   showSuccess(wb('toast.recordUpdated', isZh.value), historyLinkAction(grid.lastBatchId.value))
+}
+
+// Record inspector v3 (design 2026-09-05, PR-B1 §1.3 "Copy link"): the inspector's copy-link icon only
+// EMITS; this is the one clipboard write. `window.location.href` already carries `#recordId=<id>`
+// while the panel is open (the PR-A hash watcher), so the copied URL reopens this record. Status goes
+// through MetaToast's existing `aria-live="polite"` / `role="status"` region via the reserved
+// `record.copyLinkDone` / `record.copyLinkFailed` keys; a missing Clipboard API (the inspector also
+// disables its button in that case) or a rejected write both land on the failed copy — never a throw.
+async function onCopyRecordLink() {
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
+  if (!clipboard || typeof clipboard.writeText !== 'function') {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+    return
+  }
+  try {
+    await clipboard.writeText(window.location.href)
+    showSuccess(recordLabel('record.copyLinkDone', isZh.value))
+  } catch {
+    showError(recordLabel('record.copyLinkFailed', isZh.value))
+  }
 }
 
 async function onFormSubmit(data: Record<string, unknown>) {
@@ -3141,6 +3569,41 @@ async function onRenameSheet(sheetId: string, name: string) {
   } catch (e: any) { showError(e.message ?? wb('toast.sheetRenameFailed', isZh.value)) }
 }
 
+// Whole-sheet soft delete (DELETE /api/multitable/sheets/:id). The rail only shows the trash button
+// for the SELECTED sheet when the server-derived `canDeleteSheet` bit is true, and this handler
+// re-checks that bit so a stale rail can never issue the request. Confirm first — the same
+// window.confirm idiom every other destructive prompt in this file uses — with copy that names the
+// sheet and states the consequence (records hidden with it; admin-only API restore, no UI yet).
+// Refusals are coded (409 SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED, 404 SHEET_DELETED) and get
+// plain-language toasts by CODE; anything else surfaces the server message or the generic toast.
+//
+// Refresh: if the deleted sheet is the ACTIVE one, re-pull the base with `loadBaseContext(baseId)`
+// — NOT `switchBase`, which short-circuits to `return true` for the same base with no sheetId
+// (useMultitableWorkbench.ts) and would leave the workbench pointing at a sheet that no longer
+// exists. /context with only baseId selects the first remaining readable sheet server-side, and
+// syncContextState falls back to the first listed sheet (or '' when the base is now empty — the
+// existing no-sheet state). If another sheet was deleted, `loadSheetMeta` re-pulls the list the way
+// onRenameSheet does.
+async function onDeleteSheet(sheetId: string) {
+  if (!canDeleteSheet.value) return
+  const target = workbench.sheets.value.find((s) => s.id === sheetId)
+  if (!window.confirm(fmtSheetDeleteConfirm(target?.name ?? sheetId, isZh.value))) return
+  try {
+    await workbench.client.deleteSheet(sheetId)
+  } catch (e: any) {
+    showError(fmtSheetDeleteErrorMessage(e, isZh.value))
+    if (e?.code === 'SHEET_DELETED') await workbench.loadSheetMeta(workbench.activeSheetId.value)
+    return
+  }
+  showSuccess(wb('toast.sheetDeleted', isZh.value))
+  if (sheetId === workbench.activeSheetId.value) {
+    const ok = await workbench.loadBaseContext(workbench.activeBaseId.value)
+    if (!ok) showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
+  } else {
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+  }
+}
+
 // --- Base management ---
 async function loadBases() {
   try {
@@ -3208,6 +3671,8 @@ function onSelectView(viewId: string) {
 }
 
 function onOpenImportModal() {
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
   showImportModal.value = true
 }
 
@@ -3221,12 +3686,22 @@ function flushActiveFieldEdit() {
   if (el && typeof el.blur === 'function') el.blur()
 }
 
+// Record inspector v3 (2026-09-05, PR-A §1.1, W2 lock §3.1 erratum W2-E2 / §4 item 2): close
+// (× or Esc, routed through `onInspectorKeydown` → this same `close` emit) now sets
+// `inspectorOpen=false` and RETAINS `selectedRecordId` — a graft from P2/P3 (row highlight/collab
+// cursor survive; Shift+Space reopens instantly). The `flushActiveFieldEdit` → discard-guard →
+// `showComments=false` → `resetCommentInteractionState` order is unchanged. Round 4 (2026-09-05,
+// refuter P2): the opener is consumed by this close — the inspector restores focus from the target it
+// captured on ITS open edge, not from the prop at close time — so it is cleared here, last, and can
+// no longer be inherited by a later open that did not come from that element (see `selectRecord`'s
+// open branch for the open-side half of the same fix).
 function onCloseDrawer() {
   flushActiveFieldEdit()
   if (!confirmDiscardRecordChanges()) return
-  selectedRecordId.value = null
+  inspectorOpen.value = false
   showComments.value = false
   resetCommentInteractionState()
+  inspectorOpenerEl.value = null
 }
 
 // W2 S4 (OD-W2-7=b, lock "收编 showComments 分支"): comments is now a tab inside the single
@@ -3521,6 +3996,79 @@ async function loadTemplateLibrary() {
   }
 }
 
+const saveTemplateFieldChoices = computed(() =>
+  workbench.fields.value.map((field) => ({ id: field.id, name: field.name, type: field.type })),
+)
+const activeSheetName = computed(() => {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) return ''
+  return workbench.sheets.value.find((sheet) => sheet.id === sheetId)?.name ?? ''
+})
+
+function openSaveSheetAsTemplate(): void {
+  // 与工具栏的 v-if 同档再判一次:显隐是 UX,这里是本地的第二道;真正的门在服务端。
+  if (!caps.canManageFields.value || !workbench.activeSheetId.value) return
+  saveTemplateResult.value = null
+  saveTemplateError.value = null
+  saveTemplateSubmitting.value = false
+  // 默认不勾「共享给本租户」——模板带着表名与全部字段名,默认全租户可见等于绕过表级权限
+  // 的元数据读面(和服务端 normalizeCustomTemplateVisibility 的默认同向)。
+  saveTemplateShare.value = false
+  // 模板名默认取**当前数据表名**(不是工作区名)——入口在工作台,心智是「存这张表」。
+  saveTemplateName.value = activeSheetName.value
+  saveTemplateFieldIds.value = saveTemplateFieldChoices.value.map((field) => field.id)
+  showSaveSheetAsTemplate.value = true
+}
+
+function closeSaveSheetAsTemplate(): void {
+  showSaveSheetAsTemplate.value = false
+}
+
+function toggleSaveTemplateField(fieldId: string): void {
+  const next = new Set(saveTemplateFieldIds.value)
+  if (next.has(fieldId)) next.delete(fieldId)
+  else next.add(fieldId)
+  // 保持与字段清单同序,提交出去的 fieldIds 顺序稳定(便于用例逐字比对 payload)。
+  saveTemplateFieldIds.value = saveTemplateFieldChoices.value
+    .map((field) => field.id)
+    .filter((id) => next.has(id))
+}
+
+function setAllSaveTemplateFields(selected: boolean): void {
+  saveTemplateFieldIds.value = selected ? saveTemplateFieldChoices.value.map((field) => field.id) : []
+}
+
+async function onSaveSheetAsTemplate(): Promise<void> {
+  const baseId = activeBaseId.value
+  const sheetId = workbench.activeSheetId.value
+  if (!baseId || !sheetId) return
+  const name = saveTemplateName.value.trim()
+  if (!name) {
+    saveTemplateError.value = wb('saveTpl.errorNoName', isZh.value)
+    return
+  }
+  if (saveTemplateFieldIds.value.length === 0) {
+    // 零字段服务端也会 400,这里只是不白跑一趟(不是把服务端那道校验搬到前端)。
+    saveTemplateError.value = wb('saveTpl.errorNoFields', isZh.value)
+    return
+  }
+  saveTemplateSubmitting.value = true
+  saveTemplateError.value = null
+  try {
+    saveTemplateResult.value = await workbench.client.createTemplateFromBase({
+      baseId,
+      name,
+      sheetIds: [sheetId],
+      fieldIds: [...saveTemplateFieldIds.value],
+      visibility: saveTemplateShare.value ? 'tenant' : 'private',
+    })
+  } catch (e: any) {
+    saveTemplateError.value = e?.message ?? wb('saveTpl.failed', isZh.value)
+  } finally {
+    saveTemplateSubmitting.value = false
+  }
+}
+
 async function openTemplateLibrary() {
   if (!canCreateBasesAndSheets.value) {
     showError(wb('toast.templateInstallBlocked', isZh.value))
@@ -3605,12 +4153,121 @@ function onReorderField(fromId: string, toId: string) {
 }
 
 // --- Bulk import ---
-async function onBulkImport(payload: ImportBuildResult) {
+/**
+ * Create the fields the import modal asked for, then rewrite the placeholder keys the modal used for
+ * those columns to the new field ids. Fail-closed: any refusal or backend error aborts BEFORE a
+ * single record is written (records are only rewritten after every create succeeded).
+ *
+ * Returns false when the caller must abort the import.
+ */
+async function applyImportCreateFields(payload: ImportSubmitPayload): Promise<boolean> {
+  const requests = payload.createFields ?? []
+  if (!requests.length) return true
+  // WRITE-SIDE GATE. The modal's `canCreateFields` prop only controls what it OFFERS; a stale prop,
+  // a revoked role, or a hand-built payload must not reach `createField` from here.
+  if (!caps.canManageFields.value) {
+    importCreateFieldsError.value = importLabel('import.createFieldsForbidden', isZh.value)
+    return false
+  }
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) {
+    importCreateFieldsError.value = wb('toast.fieldCreateFailed', isZh.value)
+    return false
+  }
+  const existingFields = workbench.fields.value
+  const plan = planCreateFieldNames({
+    requests,
+    existingNames: existingFields.map((field) => field.name),
+    existingFieldCount: existingFields.length,
+  })
+  if (!plan.ok) {
+    importCreateFieldsError.value = plan.reason === 'field-limit'
+      ? fmtCreateFieldLimitReached(MAX_SHEET_FIELDS, isZh.value)
+      : plan.reason === 'name-too-long'
+        ? fmtCreateFieldNameTooLong(plan.header, MAX_FIELD_NAME_LENGTH, isZh.value)
+        : fmtCreateFieldNameInvalid(plan.header, isZh.value)
+    return false
+  }
+
+  const createdColumns: Record<number, string> = {}
+  for (const [index, request] of requests.entries()) {
+    try {
+      const created = await workbench.client.createField({
+        sheetId,
+        name: plan.names[index],
+        type: 'string' as MetaFieldType,
+      })
+      createdColumns[request.columnIndex] = created.field.id
+    } catch (e: any) {
+      importCreateFieldsError.value = fmtCreateFieldFailed(
+        request.header,
+        e?.message ?? wb('toast.fieldCreateFailed', isZh.value),
+        isZh.value,
+      )
+      // A create can not be rolled back (there is no transaction across these calls), so the fields
+      // built before the failure are already on the sheet. Publish them: the modal rebinds those
+      // columns from the sentinel to their real ids, so the retry the user is about to make asks
+      // only for the column that actually failed. Dropping createdColumns here (the previous
+      // behaviour) left orphans behind AND made the retry create a SECOND field with the same name
+      // — meta_fields has no (sheet_id, name) unique index to stop it.
+      try {
+        await publishCreatedImportFields(payload, sheetId, createdColumns)
+      } catch {
+        // A failed sheet-meta refresh must NOT mask the create error the user has to act on; the
+        // column → id map is published regardless (see the finally inside), which is what stops the
+        // retry from duplicating.
+      }
+      return false
+    }
+  }
+
+  await publishCreatedImportFields(payload, sheetId, createdColumns)
+  return true
+}
+
+/**
+ * Adopt the fields that were actually created: rewrite the modal's placeholder keys to the real
+ * field ids, refresh the sheet meta (so a retry plans names against the CURRENT field list instead
+ * of a stale one), and hand the column → id map to the modal. Used on both the success path and the
+ * partial-failure path; on the failure path it must not clobber importCreateFieldsError.
+ */
+async function publishCreatedImportFields(
+  payload: ImportSubmitPayload,
+  sheetId: string,
+  createdColumns: Record<number, string>,
+): Promise<void> {
+  if (!Object.keys(createdColumns).length) return
+  // Rewrite IN PLACE: the modal keeps these same record objects for "retry failed rows", so the
+  // placeholder key must disappear everywhere, not just in this attempt's copy.
+  for (const record of payload.records) {
+    for (const [columnIndex, fieldId] of Object.entries(createdColumns)) {
+      const placeholder = createFieldPlaceholderId(Number(columnIndex))
+      if (!(placeholder in record)) continue
+      record[fieldId] = record[placeholder]
+      delete record[placeholder]
+    }
+  }
+  try {
+    await workbench.loadSheetMeta(sheetId)
+  } finally {
+    // Published even when the refresh threw: the modal must learn which columns now exist, or the
+    // retry asks for them again and a second same-named field appears. The throw still propagates
+    // on the success path, where a stale grid was already treated as a reason to abort.
+    importCreatedFieldColumns.value = { ...createdColumns }
+  }
+}
+
+async function onBulkImport(payload: ImportSubmitPayload) {
   const controller = new AbortController()
   importAbortController.value = controller
   importSubmitting.value = true
   importResult.value = null
+  importCreateFieldsError.value = null
   try {
+    if (!(await applyImportCreateFields(payload))) {
+      showError(importCreateFieldsError.value ?? wb('toast.fieldCreateFailed', isZh.value))
+      return
+    }
     const recordsToImport = payload.records
     const rowIndexesToImport = payload.rowIndexes
     const skippedRows: ImportFailure[] = []
@@ -3716,6 +4373,8 @@ function closeImportModal() {
   importSubmitting.value = false
   importResult.value = null
   importAbortController.value = null
+  importCreateFieldsError.value = null
+  importCreatedFieldColumns.value = null
 }
 
 // --- CSV export ---
@@ -3917,18 +4576,51 @@ async function applyCommentDeepLink(recordId: string, options?: {
   })
 }
 
-// Update URL hash when a record is selected
-watch(selectedRecordId, (rid) => {
+// Update URL hash — record inspector v3 (2026-09-05, PR-A §1.1, W2 lock §3.1 erratum W2-E2): the
+// hash means "this record is EXPANDED", so it is written only while `inspectorOpen &&
+// selectedRecordId` (both, not `selectedRecordId` alone) and stripped the moment either goes
+// false — a reload must not resurrect a panel the user explicitly closed (`selectedRecordId` alone
+// now survives close, per `onCloseDrawer` above, so it can no longer be the sole hash trigger).
+watch([selectedRecordId, inspectorOpen], ([rid, open]) => {
   try {
-    if (rid) window.history.replaceState(null, '', `#recordId=${encodeURIComponent(rid)}`)
+    if (rid && open) window.history.replaceState(null, '', `#recordId=${encodeURIComponent(rid)}`)
     else if (window.location.hash.includes('recordId=')) window.history.replaceState(null, '', window.location.pathname + window.location.search)
   } catch { /* */ }
+})
+
+// Record inspector v3 (2026-09-05, PR-A §1.1): several PRE-EXISTING paths clear `selectedRecordId`
+// outright (record deleted, bulk-delete removed it, an external-context switch, a merge finding it
+// gone) — every one of them relied, pre-PR-A, on `selectedRecordId` alone gating the panel's
+// visibility, so clearing it was sufficient to close the panel too. Now that visibility is
+// `inspectorOpen && selectedRecordId`, a stale `inspectorOpen=true` left behind by any of those
+// paths would silently reopen the panel the moment `selectedRecordId` is set again by an ordinary
+// cursor move (e.g. a plain grid click) — a real, not merely stale-state, bug. One watcher here
+// closes that loop for every current AND future such call site, rather than patching each one.
+watch(selectedRecordId, (rid) => {
+  if (!rid) inspectorOpen.value = false
 })
 
 watch([selectedRecordId, () => workbench.activeViewId.value], () => {
   formSuccessMessage.value = null
   formErrorMessage.value = null
   formFieldErrors.value = {}
+})
+
+// PR-B2 (§1.3): field-anchored errors belong to the record they were raised on — the same
+// record/view edge that resets the form-field errors above discards them (MetaRecordFieldsPanel drops
+// its rejected-value drafts on the record-id edge on its side, so control and alert reset together).
+watch([selectedRecordId, () => workbench.activeViewId.value], () => {
+  // Invalidates older requests even when navigation returns to the same record and field.
+  inspectorPatchOwners.clear()
+  inspectorFieldErrorEntries.value = {}
+}, { flush: 'sync' })
+// PR-B2 (§1.3): the VERSION_CONFLICT field marker lives exactly as long as the conflict it mirrors —
+// reload / retry / dismiss (and any later patchCell, which resets `conflict` first) all clear
+// `grid.conflict` in the composable (unchanged); the marker for that field follows. Round 2: ONLY the
+// marker — an entry the conflict path wrote. A validation alert on the same field (origin 'field')
+// survives a conflict on that field being raised and cleared, e.g. by a grid-path edit.
+watch(() => grid.conflict.value, (current, previous) => {
+  if (!current && previous) clearInspectorFieldError(previous.fieldId, 'conflict')
 })
 
 async function refreshDialogMeta() {
@@ -4058,11 +4750,23 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
 
 // --- Deep-link record fetch (when record not in current page) ---
 
+// Record inspector v3 (2026-09-05, PR-A §1.1, §3 PR-A file line names `resolveDeepLink` as an
+// open trigger): every call here opens the inspector, including its two pre-existing "refresh an
+// ALREADY-selected/open record" call sites (onTimelinePatchDates/onHierarchyReparentRecord, guarded
+// there on `selectedRecordId.value === payload.recordId`, and onReloadConflict/onRetryConflict) —
+// in every one of those the panel was already open for that exact record (the conflict banner and
+// the timeline/hierarchy edit surfaces are themselves only reachable with the record already
+// selected in an open inspector), so this is a no-op re-assertion there, not a surprise reopen of a
+// panel the user had deliberately closed for some OTHER record.
 async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
+  // `open: true` is merged into whatever `selectRecord` opts this call already builds — NOT set on
+  // `inspectorOpen` directly here — so a declined discard-changes prompt inside `selectRecord`'s own
+  // guard cancels the open too (see that function's own comment; same fix as `openRecord`).
+  const selectOpts = { ...options, open: true }
   // First check if it's in the current rows
   const inPage = grid.rows.value.find((r) => r.id === recordId)
   if (inPage) {
-    await selectRecord(recordId, options)
+    await selectRecord(recordId, selectOpts)
     return
   }
   // Fetch from server
@@ -4079,7 +4783,7 @@ async function resolveDeepLink(recordId: string, options?: { openComments?: bool
     deepLinkedRecordFieldPermissions.value = ctx.fieldPermissions ?? {}
     deepLinkedRecordViewPermissions.value = ctx.viewPermissions ?? {}
     deepLinkedRecordRowActions.value = ctx.rowActions ?? null
-    await selectRecord(recordId, options)
+    await selectRecord(recordId, selectOpts)
   } catch (e: any) {
     showError(fmtRecordNotFound(recordId, isZh.value))
   }
@@ -4270,6 +4974,47 @@ function openCommentInbox() {
   void router.push({
     name: 'multitable-comment-inbox',
   })
+}
+
+// F5 "More templates ->": close the template library ONLY when the navigation actually happened.
+// Leaving this route runs MultitableEmbedHost's onBeforeRouteLeave -> confirmPageLeave(), which
+// returns false whenever the user keeps unsaved drafts (form / field manager / view manager /
+// import wizard / comment draft) and declines the confirm. vue-router then resolves push() with a
+// NavigationFailure instead of throwing, so the old inline `@click="showTemplateLibrary = false"`
+// swallowed the block: panel gone, page unchanged. A rejected push (guard error) is treated the
+// same way -- navigation did not happen, so the panel stays open and the user gets a toast.
+//
+// NOT every NavigationFailure means "the guard blocked you": vue-router also resolves push() with
+// `cancelled` (a later navigation superseded this one -- e.g. the user double-clicks this entry and
+// the lazy template-center chunk is still loading, or MultitableEmbedHost's applyHostOverrides
+// router.replace() lands mid-flight) and with `duplicated` (already on the target route). Those are
+// not user-facing errors: the succeeding navigation owns the outcome, so we stay silent and leave
+// the panel untouched instead of flashing a bogus "unsaved changes" toast.
+function navigationWasSuperseded(failure: unknown): boolean {
+  return (
+    isNavigationFailure(failure, NavigationFailureType.cancelled) ||
+    isNavigationFailure(failure, NavigationFailureType.duplicated)
+  )
+}
+
+async function onGoToTemplateCenter(event?: MouseEvent | KeyboardEvent) {
+  if (event) {
+    // Mirror <router-link>'s guardEvent: leave modified / non-primary clicks to the browser so
+    // Ctrl/Cmd/middle click still opens the template center in a new tab via the real href.
+    if (event.defaultPrevented) return
+    if (event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return
+    if ('button' in event && typeof event.button === 'number' && event.button !== 0) return
+    event.preventDefault()
+  }
+  const failure = await router
+    .push({ name: TemplateCenterRouteName })
+    .catch((error: unknown) => error ?? new Error('navigation failed'))
+  if (!failure) {
+    showTemplateLibrary.value = false
+    return
+  }
+  if (navigationWasSuperseded(failure)) return
+  showError(wb('toast.templateCenterBlocked', isZh.value))
 }
 
 async function loadCalendarHolidays(range: CalendarVisibleRange) {
@@ -4716,8 +5461,33 @@ defineExpose({
 .mt-template-library__state--error { color: #b91c1c; background: #fef2f2; }
 .mt-template-library__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .mt-template-library__footer { margin-top: 12px; display: flex; justify-content: flex-end; }
-.mt-template-library__more { font-size: 12px; color: #2563eb; text-decoration: none; }
+/* F5: the href can be absent when the router cannot resolve it, so pin the link affordance. */
+.mt-template-library__more { font-size: 12px; color: #2563eb; text-decoration: none; cursor: pointer; }
 .mt-template-library__more:hover { text-decoration: underline; }
+.mt-save-tpl__overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
+.mt-save-tpl { background: #fff; border-radius: 12px; padding: 18px 20px; width: min(520px, 92vw); max-height: 82vh; overflow: auto; box-shadow: 0 12px 32px rgba(15,23,42,.18); display: flex; flex-direction: column; gap: 10px; }
+.mt-save-tpl__header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.mt-save-tpl__header strong { font-size: 15px; color: #0f172a; }
+.mt-save-tpl__close { border: none; background: transparent; color: #64748b; font-size: 20px; line-height: 1; cursor: pointer; }
+.mt-save-tpl__hint { margin: 0; font-size: 12px; color: #64748b; }
+.mt-save-tpl__label { font-size: 12px; color: #334155; font-weight: 600; }
+.mt-save-tpl__row { display: flex; flex-direction: column; gap: 4px; }
+.mt-save-tpl__input { border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+.mt-save-tpl__fields { display: flex; flex-direction: column; gap: 6px; }
+.mt-save-tpl__fields-head { display: flex; align-items: center; gap: 10px; }
+.mt-save-tpl__count { font-size: 12px; color: #64748b; margin-right: auto; }
+.mt-save-tpl__link { border: none; background: transparent; color: #2563eb; font-size: 12px; cursor: pointer; text-decoration: none; padding: 0; }
+.mt-save-tpl__link:hover { text-decoration: underline; }
+.mt-save-tpl__list { list-style: none; margin: 0; padding: 6px 8px; max-height: 240px; overflow: auto; border: 1px solid #e2e8f0; border-radius: 8px; display: flex; flex-direction: column; gap: 2px; }
+.mt-save-tpl__item label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; cursor: pointer; }
+.mt-save-tpl__item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-save-tpl__item-type { font-size: 11px; color: #94a3b8; font-style: normal; }
+.mt-save-tpl__share { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #0f172a; }
+.mt-save-tpl__error { margin: 0; font-size: 12px; color: #b91c1c; }
+.mt-save-tpl__footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 4px; }
+.mt-save-tpl__result { display: flex; flex-direction: column; gap: 8px; }
+.mt-save-tpl__result-name { font-size: 13px; color: #0f172a; }
+.mt-save-tpl__warnings { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #92400e; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }
 .mt-workbench__shortcuts-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 15px; }
@@ -4726,7 +5496,7 @@ defineExpose({
 .mt-workbench__shortcut { display: flex; align-items: center; gap: 12px; font-size: 13px; }
 .mt-workbench__shortcut kbd { background: #f0f0f0; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-family: monospace; font-size: 12px; min-width: 80px; text-align: center; }
 @media print {
-  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-template-library, .mt-workbench__rail { display: none !important; }
+  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-save-tpl__overlay, .mt-template-library, .mt-workbench__rail { display: none !important; }
   .mt-workbench__content { overflow: visible !important; }
   .mt-workbench__main { overflow: visible !important; }
 }

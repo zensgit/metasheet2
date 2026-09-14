@@ -163,6 +163,15 @@ describe('MyAppsLandingView', () => {
     expect(link?.getAttribute('href')).toBe('/p/plugin-after-sales/after-sales')
   })
 
+  it.each([null, 'inactive', 'active', 'failed'])('only shows active elearning instances (%s), leaving other apps unchanged', async (status) => {
+    const elearning = { ...afterSalesFixture(), id: 'elearning', displayName: 'Cloud classroom', instance: status ? { status } : null }
+    mocks.apiGet.mockResolvedValue({ list: [afterSalesFixture(), elearning] })
+    mocks.listBases.mockResolvedValue({ bases: [] })
+    const root = await mountView()
+    expect(root.textContent).toContain('After Sales')
+    expect(root.textContent?.includes('Cloud classroom')).toBe(status === 'active')
+  })
+
   it('hides a card whose entry route requires a permission the catalog reader does not hold, without inventing new permission logic', async () => {
     // No `user_permissions` in localStorage -> useAuth().hasPermission('stock-prep:read') is false
     // by the SAME real predicate the router guard itself uses (no permission logic added here).

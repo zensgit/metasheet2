@@ -15,6 +15,10 @@ export interface MultitableCapabilities {
   canManageAutomation: Ref<boolean>
   canExport: Ref<boolean>
   canSendNotification: Ref<boolean>
+  // Whole-sheet delete authority for the SELECTED sheet — server-derived by /context, FE read-only.
+  // No role fallback and no fallbackKey on purpose: an old backend that does not send it, or a
+  // legacy role-string source, yields false (delete entry hidden), never a guess from canManageFields.
+  canDeleteSheet: Ref<boolean>
 }
 
 const ROLE_CAPS: Record<MultitableRole, Record<string, boolean>> = {
@@ -68,5 +72,6 @@ export function useMultitableCapabilities(
     // Notify falls back to canEditRecord only for an OLD backend response that predates
     // canSendNotification; current backends send it explicitly.
     canSendNotification: caps('canSendNotification', 'canEditRecord'),
+    canDeleteSheet: caps('canDeleteSheet'),
   }
 }

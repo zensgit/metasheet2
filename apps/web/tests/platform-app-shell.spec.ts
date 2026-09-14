@@ -10,6 +10,11 @@ const fetchAppByIdMock = vi.fn()
 const apiGetMock = vi.fn()
 const apiPostMock = vi.fn()
 const pushMock = vi.fn()
+const installationGetMock = vi.fn()
+
+vi.mock('../src/services/elearningApp', () => ({
+  getElearningAppInstallation: (...args: unknown[]) => installationGetMock(...args),
+}))
 
 vi.mock('vue-router', async () => {
   const vue = await import('vue')
@@ -118,6 +123,8 @@ describe('PlatformAppShellView', () => {
     apiGetMock.mockReset()
     apiPostMock.mockReset()
     pushMock.mockReset()
+    installationGetMock.mockReset()
+    localStorage.clear()
   })
 
   afterEach(() => {
@@ -126,6 +133,39 @@ describe('PlatformAppShellView', () => {
     app = null
     container = null
     setPlatformAppRuntimeInstallState('after-sales', null)
+  })
+
+  it('mounts the optional installation section only for elearning', async () => {
+    currentAppId = 'elearning'
+    const target = createInstanceApp({ id: 'elearning', runtimeBindings: undefined })
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+    installationGetMock.mockResolvedValue({ status: 'not-installed', notificationsEnabled: false, canManage: true })
+    const component = (await import('../src/views/PlatformAppShellView.vue')).default
+    container = document.createElement('div')
+    app = createApp(component as Component)
+    app.mount(container)
+    await flushUi(8)
+    expect(container.querySelector('[aria-label="Cloud classroom installation"]')).not.toBeNull()
+    expect(installationGetMock).toHaveBeenCalledTimes(1)
+    expect(apiPostMock).not.toHaveBeenCalled()
+  })
+
+  it('does not expose the generic mutation path to readonly elearning users', async () => {
+    currentAppId = 'elearning'
+    const target = createInstanceApp({ id: 'elearning' })
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+    apiGetMock.mockResolvedValue({ status: 'not-installed' })
+    installationGetMock.mockResolvedValue({ status: 'not-installed', notificationsEnabled: false, canManage: false })
+    const component = (await import('../src/views/PlatformAppShellView.vue')).default
+    container = document.createElement('div')
+    app = createApp(component as Component)
+    app.mount(container)
+    await flushUi(8)
+    expect(container.querySelector('button')).toBeNull()
+    expect(container.textContent).toContain('not-installed')
+    expect(apiPostMock).not.toHaveBeenCalled()
   })
 
   it('renders runtime diagnostics from the bound current endpoint', async () => {
@@ -312,4 +352,56 @@ describe('PlatformAppShellView', () => {
     expect(container.textContent).toContain('partial')
     expect(container.textContent).toContain('runtime install is incomplete')
   })
+
+  /**
+   * G-7 (4), shell side. The detail route already 404s an app the caller may not see
+   * (packages/core-backend/src/routes/platform-apps.ts `GET /:appId`); this pins the second line for
+   * the case the server never sees -- a summary ALREADY in the shared `apps` ref. Drop
+   * `isPlatformAppAccessible` from the view's `app` computed and this goes red.
+   */
+  it('refuses to render the shell for an app whose declared codes the caller holds none of', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['elearning:read']))
+    const target = createInstanceApp({
+      id: 'stock-preparation',
+      displayName: 'Stock Preparation',
+      runtimeBindings: undefined,
+      permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin'],
+    })
+    currentAppId = 'stock-preparation'
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+
+    const component = (await import('../src/views/PlatformAppShellView.vue')).default
+    container = document.createElement('div')
+    app = createApp(component as Component)
+    app.mount(container)
+    await flushUi(8)
+
+    // Same state an app that does not exist renders: no existence oracle in the browser either.
+    expect(container.textContent).toContain('Platform app not found.')
+    expect(container.textContent).not.toContain('Stock Preparation')
+  })
+
+  it('renders that same shell once the caller holds ONE of its declared codes', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['stock-prep:admin']))
+    const target = createInstanceApp({
+      id: 'stock-preparation',
+      displayName: 'Stock Preparation',
+      runtimeBindings: undefined,
+      permissions: ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin'],
+    })
+    currentAppId = 'stock-preparation'
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+
+    const component = (await import('../src/views/PlatformAppShellView.vue')).default
+    container = document.createElement('div')
+    app = createApp(component as Component)
+    app.mount(container)
+    await flushUi(8)
+
+    expect(container.textContent).toContain('Stock Preparation')
+    expect(container.textContent).not.toContain('Platform app not found.')
+  })
+
 })

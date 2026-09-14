@@ -134,13 +134,15 @@ POST /api/integration/stock-preparation/sandbox-target/ensure
 { "objectId": "<同上 objectId>", "label": "<表名>" }
 ```
 
-响应 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`。把它**整段**贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`:
+响应 `data.targetBinding` 形如 `{ sheetId, objectId, keyField, fieldIdMap }`。**没有装 customer pack 时**,把它整段贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`;**装了 pack 时不能直接整段贴,要先合并——见紧接着的"r7 订正"**:
 
 ```json
-{ "plm.stock-preparation.pull-bom.v1": { "target": "<把 data.targetBinding 整段贴在这里>" } }
+{ "plm.stock-preparation.pull-bom.v1": { "target": "<未装 pack 时把 data.targetBinding 整段贴在这里;装了 pack 时贴合并后的结果,见下面 r7 订正>" } }
 ```
 
-> r7 订正:若装了 customer pack,**不要真的"整段"覆盖**——ensure 只返回 33 个 TEMPLATE 字段(20 个 `plm_system` + 13 个人工列),不带 pack 的 21 个 `ext_` 列,直接整段贴会静默丢掉 `ext_` 映射。正确做法是**合并**:ensure 的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId,旧物理列 id 依然有效),动手前先备份 `app.env`。
+> r7 订正:若装了 customer pack,**不要真的"整段"覆盖**——ensure 只返回 33 个 TEMPLATE 字段(20 个 `plm_system` + 13 个人工列),不带 pack 的 21 个 `ext_` 列,直接整段贴会静默丢掉 `ext_` 映射。正确做法是**合并**:ensure 的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId,旧物理列 id 依然有效),动手前先备份 `app.env`。**不想手工拼 JSON**的话,ensure 建完表后用 `node scripts/ops/stock-preparation-derive-target-binding.mjs --tenant-id <tenantId> --object-id <objectId> --pack <packFile> --pack-id <id> --action-fragment` 离线算出已经合并好的 `{ target, extensionFieldIds }`,**这两半都要贴**:`target` 贴到 `target` 键,`extensionFieldIds` 贴到与 `target` 同级的 `extensionFieldIds` 键(只贴 `target` 会让完整性门 `assertTargetFieldMapCompleteness` 与一致性门 `assertExtFieldMappingAgreesWithAction` 继续按旧的 `extensionFieldIds` 校验,`stock-preparation-table-actions.cjs:529-532`/`:564-580`,新映射对不上会 422 `TARGET_SCHEMA_INCOMPLETE`);沿用同一批 `ext_` 列时,直接用这次输出的 `extensionFieldIds` 整体替换旧配置里的那个键,不要两次输出手工拼接。
+>
+> **2026-09-10 订正**:补充上面这条脚本指向,并把下面§「排障速查」表里对应行的"整段贴回去"同步改成同一口径,避免速查表脱离本节上下文时误导操作员整段覆盖。**2026-09-10 二次订正**:上一版本条仍只教"直接贴它的 `target`",漏了 `extensionFieldIds` 这一半——已按脚本自述"the two halves an action config needs"(`stock-preparation-derive-target-binding.mjs:50-51`)与两道校验门补全。
 
 **`objectId` 改了,`sheetId` 必须一起重算,不能留用既有那个。** 沙箱门(`assertStockPrepApplySandboxAllowed`)**只读 objectId**,而 apply 写哪张表、导出读哪张表**只看 `target.sheetId`** —— 两者互相独立。「objectId 换成沙箱、sheetId 留正式表那个」会让门放行、行却写进**正式主表**,正是 D1=B 要避免的那件事。`fieldIdMap` 同理(列 id = `fld_+sha1(projectId:objectId:fieldId)`,objectId 一变整张表的列 id 全变),且**必须是完整一整份(含 13 个人工列)**。
 
@@ -295,7 +297,7 @@ POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/mvp-persis
 | **打开页面就 500** | 审计 CHECK 缺 `project_board_read` | 跑 §1-3 那条查询;缺就补 086 迁移。**这是本次最可能踩的雷**,且**不会**降级成友好的 503(脚注 [1]) |
 | 503 `STOCK_PREPARATION_AUDIT_VOCABULARY_UNAVAILABLE` | 数据库还不接受某个审计动作(目前只有接力链路由带这道友好守卫) | 报错体 `details.migration` 直接写了该跑哪支迁移,跑它 |
 | 403 `STOCK_PREP_APPLY_SANDBOX_ONLY` | 看 `reason`:`prod_canonical` = action 绑定还是 canonical;`sandbox_disabled` = env 没读到 `STOCK_PREP_SANDBOX_MODE=true`(`--update-env` 过没?);`target_not_allowlisted` = 三处 objectId 不一致 | 回 §2 |
-| `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` / `_NOT_OWNED` / `_HUMAN_FIELDS_UNBOUND` / `_NOT_PROVISIONED` / `_OWNER_UNKNOWN` / `_FIELDS_UNRESOLVED` / `_INVALID` | 结转目标表不属于本部署项目,或人工列没绑全 | **修法都是重跑 §2-2 的 ensure**,再把返回的 `targetBinding` 整段贴回去 |
+| `CONFIRM_CARRY_TARGET_TENANT_MISMATCH` / `_NOT_OWNED` / `_HUMAN_FIELDS_UNBOUND` / `_NOT_PROVISIONED` / `_OWNER_UNKNOWN` / `_FIELDS_UNRESOLVED` / `_INVALID` | 结转目标表不属于本部署项目,或人工列没绑全 | **修法都是重跑 §2-2 的 ensure**——装了 customer pack 时**不要**把返回的 `targetBinding` 整段贴回去,按 §2-2 的「r7 订正」与 `targetBinding` 合并(或用 `stock-preparation-derive-target-binding.mjs --pack` 直接算出合并结果);没装 pack 才能整段贴回去 |
 | `TARGET_SCHEMA_INCOMPLETE` | 表在,但 `ext_` 列没装齐 | 照预检 `fix.run` 装列;装列和写行是**两道独立授权** |
 | 页面显示「**当前账号没有做这件事的权限。**」 | 服务端回的是 `FORBIDDEN`(大 BOM 通道里最常见) | 多半 `stock-prep:read` 没给全或准入没开 → §3;大 BOM 八条路由已随 #5460 开到一线层,还 403 就是权限没配对 |
 | 403 `LARGE_BOM_JOB_ACTOR_MISMATCH`(只在「技术详情(排障用)」里能看到) | 大 BOM 任务属于另一个人 | 用**建任务的那个账号**继续,别换人接手 |
@@ -342,7 +344,7 @@ pg_restore --clean --if-exists -d $env:DATABASE_URL "$backupDir\pre-upgrade-db.d
 
 **[4] Runbook 没有「项目备料页」这一节。** #5460 **完全没有改** Runbook(`git diff` 对其 merge-base 为空),所以 Runbook 的 Step 6/7 仍写成「管理员用 curl 跑 dry-run + apply」。§4 的四步是**一线在页面上自己点**的等价流程,依据是 #5460 的路由与门(`requireAccess(req, STOCK_PREP_OPERATE)` + 一线拉取门拆分),不是 Runbook。两者都真,彩排走 §4。
 
-**[5] `main` 上的 Runbook Step 0-7 仍是错的。** 它写「`sheetId`:既有值,不变」——照做会顶着沙箱的名把行写进正式主表。#5459 已订正为「调 ensure、整段贴 `targetBinding`」。**#5459 合入前不要照 main 版本操作**;§2-2 用的是订正后的写法。
+**[5] `main` 上的 Runbook Step 0-7 仍是错的。** 它写「`sheetId`:既有值,不变」——照做会顶着沙箱的名把行写进正式主表。#5459 已订正为「调 ensure、整段贴 `targetBinding`」。**#5459 合入前不要照 main 版本操作**;§2-2 用的是订正后的写法(**2026-09-10 补注**:「整段贴」这个说法本身在没装 customer pack 时才成立——装了 pack 要按§2-2 的「r7 订正」先合并再贴,不能整段覆盖,详见上面§2-2)。
 
 **[6] 未覆盖项。** #5455(字段权限 reconcile + 回填,Runbook 的 3-3a)不在本次发布内,已整步略去 —— 后果是既有表上的字段级权限行不会被本次对账,人工列的可写性以当前部署现状为准。
 

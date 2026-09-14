@@ -241,11 +241,26 @@ function mount({
   // Which sheet the action is bound to. Defaults to the caller's OWN deterministic id, which is what
   // the tenant gate demands; a scenario that models a foreign binding overrides it.
   boundSheetIdOverride = null,
+  // Which OBJECT the action names. Defaults to the canonical fill object. The 222 deploy-window shape
+  // (D1=B) rebinds the action to a SANDBOX objectId while KEEPING the sheet the deployment already
+  // had, so this is how that configuration is modelled — see N7-g.
+  boundObjectIdOverride = null,
+  // THE TABLE WAS DELETED, and the provisioning registry has not forgotten it. Dropping a table is
+  // `UPDATE meta_sheets SET deleted_at = now()`; no code path ever deletes the registry row. So this
+  // keeps the rows in the records API and keeps `isSheetOwnedByProject` answering YES, and only makes
+  // the host's existence read (`findObjectSheet`, which is `deleted_at IS NULL`) stop finding it —
+  // exactly the state a real delete leaves behind (N7-f).
+  mainTableSheetDeleted = false,
   // `null` = the audit store has no `list` at all (the default). An ARRAY = what one descending
   // window over `prep_line_export` returns, newest first, as the store would return it.
   auditEntries = null,
   // MVP-side rows. `false` models the self-service main line: nobody ever ran mvp-persist here.
   archivePersisted = true,
+  // THE HOST'S PURE VIEW-ID DERIVATION (`getObjectViewId`), which composes the deep-link handle's
+  // second half. It is an OPTIONAL host capability — a plugin newer than its host has no port to
+  // call — so it is a knob rather than a constant: `false` models that host and must degrade to
+  // 「no handle」, never to a throw or to a half-built link (N7-d).
+  viewIdPort = true,
   // THE PERSISTED SOURCE-BINDING STORE, which `getTableAction` resolves through and whose throws the
   // registry deliberately lets PROPAGATE. `undefined` = no such store (the default). A function
   // models a deployment where that table is missing or unreachable — the half-migrated upgrade — and
@@ -258,6 +273,9 @@ function mount({
   const missingA = new Set()
   if (!ledgerProvisioned) missingA.add(DECISION_OBJECT_ID)
   if (!directoryProvisioned) missingA.add(PROJECT_OBJECT_ID)
+  // A DELETED table is "the existence read no longer finds it" and NOTHING else: the rows stay, the
+  // registry keeps claiming it, and only `findObjectSheet` goes quiet.
+  if (mainTableSheetDeleted) missingA.add(MAIN_OBJECT_ID)
 
   const provisioningA = makeFakeProvisioning({
     stagingProjectId: STAGING_A,
@@ -378,6 +396,13 @@ function mount({
     getObjectSheetId(projectId, objectId) {
       return `sheet__${projectId}__${objectId}`
     },
+    // The host's SECOND pure derivation — the view half of the fill handle. Same shape the board's
+    // own suite uses, so the two suites cannot disagree about what a handle looks like.
+    ...(viewIdPort ? {
+      getObjectViewId(projectId, objectId, viewId) {
+        return `view_${projectId}_${objectId}_${viewId}`
+      },
+    } : {}),
     // The host's OWNERSHIP question, a BOOLEAN about the project we name. ONLY tenant A's own
     // staging project owns the main sheet; tenant B asking about it gets `false` and therefore never
     // reads a row of it, which is what makes the cross-tenant guard below non-vacuous.
@@ -427,7 +452,7 @@ function mount({
             source: { kind: 'data-source:sql-readonly', externalSystemId: 'ext_demo' },
             target: {
               sheetId: MAIN_SHEET,
-              objectId: MAIN_OBJECT_ID,
+              objectId: boundObjectIdOverride || MAIN_OBJECT_ID,
               // THE EXPLICIT MODE, which is what a real deployment configures: logical id -> the
               // PHYSICAL fieldId provisioning materialized.
               fieldIdMap: MAIN_FIELD_ID_MAP,
@@ -1118,7 +1143,13 @@ async function main() {
       },
     }
     const provisioning = {
-      async findObjectSheet() { return null },
+      // THE BOUND SHEET IS LIVE, said by BOTH ports the gate consults. A fixture where the registry
+      // claims a sheet the host's existence read cannot find is a DELETED table (N7-f/N7-g), and the
+      // gate refuses that — so a scan fixture that left this null would be asserting over a refused
+      // read rather than over the scan it is about.
+      async findObjectSheet({ projectId, objectId } = {}) {
+        return projectId === STAGING_A && objectId === MAIN_OBJECT_ID ? { id: MAIN_SHEET_A } : null
+      },
       getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
       async isSheetOwnedByProject(sheetId, projectId) { return sheetId === MAIN_SHEET_A && projectId === STAGING_A },
     }
@@ -1159,7 +1190,13 @@ async function main() {
       },
     }
     const provisioning = {
-      async findObjectSheet() { return null },
+      // THE BOUND SHEET IS LIVE, said by BOTH ports the gate consults. A fixture where the registry
+      // claims a sheet the host's existence read cannot find is a DELETED table (N7-f/N7-g), and the
+      // gate refuses that — so a scan fixture that left this null would be asserting over a refused
+      // read rather than over the scan it is about.
+      async findObjectSheet({ projectId, objectId } = {}) {
+        return projectId === STAGING_A && objectId === MAIN_OBJECT_ID ? { id: MAIN_SHEET_A } : null
+      },
       getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
       async isSheetOwnedByProject(sheetId, projectId) { return sheetId === MAIN_SHEET_A && projectId === STAGING_A },
     }
@@ -1196,7 +1233,13 @@ async function main() {
   // question is answered from: N1-c pins {pullTargetReady:false, directoryMayBeIncomplete:false} for
   // "nothing bound", and this pins {false, true} for "the read broke". Those are the two signatures.
   const breakingScanProvisioning = {
-    async findObjectSheet() { return null },
+    // THE BOUND SHEET IS LIVE, said by BOTH ports the gate consults. A fixture where the registry
+    // claims a sheet the host's existence read cannot find is a DELETED table (N7-f/N7-g), and the
+    // gate refuses that — so a scan fixture that left this null would be asserting over a refused
+    // read rather than over the scan it is about.
+    async findObjectSheet({ projectId, objectId } = {}) {
+      return projectId === STAGING_A && objectId === MAIN_OBJECT_ID ? { id: MAIN_SHEET_A } : null
+    },
     getObjectSheetId(projectId, objectId) { return `sheet__${projectId}__${objectId}` },
     async isSheetOwnedByProject(sheetId, projectId) { return sheetId === MAIN_SHEET_A && projectId === STAGING_A },
   }
@@ -1772,6 +1815,133 @@ async function main() {
     assert.ok(pendingOnly.body.data.pendingCountsByProjectNo, 'the index really was served')
     assert.equal(Object.prototype.hasOwnProperty.call(pendingOnly.body.data, 'pullTargetReady'), false)
     assert.equal(queryLog.filter((entry) => entry.sheetId === MAIN_SHEET_A).length, 0)
+  })
+
+  // -------------------------------------------------------------------------
+  // N7 — 「打开备料多维表」: THE DEEP-LINK HANDLE ON THE DIRECTORY
+  // -------------------------------------------------------------------------
+  //
+  // WHY IT IS HERE AT ALL. 项目备料页 has returned this handle since it shipped, but that page 404s
+  // until an operator has a project number in hand — so on the landing page, the sync panel and the
+  // large-BOM panel, 「到多维表」 had no sheet id to route with and dropped the operator on the
+  // multitable chooser. The directory is the read those surfaces already make.
+  //
+  // WHAT IT MAY NOT BECOME. It is the SAME `resolveFillTarget` over the SAME `resolveOwnBoundSheet`
+  // gate the board uses (one implementation, moved to stock-preparation-pull-target-scan.cjs rather
+  // than copied), it carries TWO IDS AND NOTHING ELSE, and it is not a permission decision: this
+  // plugin has no user-aware multitable ACL seam, and multitable enforces access when the operator
+  // lands. N7-c is the assertion that the handle cannot become a way to name another tenant's sheet.
+
+  await run('N7-a a bound, provably-own fill table yields the handle — two ids, nothing else', async () => {
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }] })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200)
+    const target = res.body.data.fillTarget
+    assert.ok(target, 'the deployment binds a sheet this caller is proved to own, so there IS a handle')
+    assert.deepEqual(Object.keys(target).sort(), ['sheetId', 'viewId'],
+      'the handle is exactly sheetId + viewId — a values-free pair of ids')
+    assert.equal(target.sheetId, MAIN_SHEET_A, 'and it names the BOUND target, not the canonical table')
+    assert.equal(target.viewId, `view_${STAGING_A}_${MAIN_OBJECT_ID}_default`,
+      'the view is the one the plugin\'s own default-view provisioning creates')
+    // VALUES-FREE: the handle is ids, and adding it must not have put a customer number on the
+    // surface by another route.
+    assert.equal(JSON.stringify(target).includes(PROJECT_A3_NO), false)
+  })
+
+  await run('N7-b nothing bound -> NO handle: a link into the dark is worse than an absent button', async () => {
+    const { routes } = mount()
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200)
+    assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'fillTarget'), true,
+      'the KEY is present — the caller asked for the union, and 「没绑」 is an answer')
+    assert.equal(res.body.data.fillTarget, null,
+      'but the VALUE is null: no sheet was proved to exist, so there is no handle to hand out')
+  })
+
+  await run('N7-c the handle is TENANT-GATED: tenant B is never handed tenant A\'s sheet id', async () => {
+    // `action.target` is deploy-time configuration shared by every tenant on the deployment, so
+    // tenant B's operator is handed the SAME target — naming tenant A's sheet. This is the one
+    // reachable way this response could name a sheet outside the caller's own staging project, and
+    // `resolveOwnBoundSheet` is what stops it. Same gate as the union scan beside it (N1-d): if this
+    // ever answers non-null, the fill button becomes a cross-tenant door.
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }] })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_B, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200)
+    assert.equal(res.body.data.tenantId, TENANT_B)
+    assert.equal(res.body.data.fillTarget, null, 'not tenant B\'s own sheet, so no handle')
+    assert.equal(JSON.stringify(res.body).includes(MAIN_SHEET_A), false,
+      'and the foreign sheet id is not echoed back in any form')
+    assert.equal(JSON.stringify(res.body).includes(STAGING_A), false)
+  })
+
+  await run('N7-d a host with no getObjectViewId port DEGRADES to no handle, never to a throw', async () => {
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }], viewIdPort: false })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200, 'an older host is a deployment state, not a directory failure')
+    assert.equal(res.body.data.fillTarget, null)
+    assert.equal(res.body.data.pullTargetReady, true, 'and the rest of the union still answers')
+  })
+
+  await run('N7-e no opt-in -> the key is ABSENT, because nobody asked and null would be a claim', async () => {
+    // `fillTarget` rides `includePullTargets` because `ownSheet` does — the un-opted-in read resolves
+    // no bound sheet at all. A `fillTarget: null` on that response would say 「这台系统没有备料主表」
+    // where the truth is 「没人问过」, which is the same conflation the four union flags are absent for.
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }] })
+    const plain = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A })
+    assert.equal(plain.statusCode, 200)
+    assert.equal(Object.prototype.hasOwnProperty.call(plain.body.data, 'fillTarget'), false)
+    // THE POSITIVE CONTROL on the same substrate, so the absence above is the opt-in and not a
+    // build where the handle was never computed.
+    const asked = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.ok(asked.body.data.fillTarget)
+  })
+  await run('N7-f A DELETED fill table yields NO handle, even though the registry still claims it', async () => {
+    // THE GAP THIS CLOSES, and why it is worth a route-level guard rather than a note. Ownership is
+    // recorded in `plugin_multitable_object_registry`, written at provisioning time; dropping a table
+    // is `UPDATE meta_sheets SET deleted_at = now()` and NO code path ever deletes the registry row.
+    // So after a delete the registry still answers 「是你的」 about a table that is gone, and the gate's
+    // first proof — which took that answer as sufficient — pointed the operator at it. This PR is what
+    // put that handle on the home page and the project workbench as well as 项目备料页, so it is also
+    // what makes the gap worth three surfaces instead of one.
+    //
+    // THE FIXTURE IS THE REAL POST-DELETE STATE, not a rigged one: the rows are still in the records
+    // API, `isSheetOwnedByProject` still says YES, the hash still derives — the ONLY difference from
+    // N7-a is that the host's `deleted_at IS NULL` read no longer finds the sheet.
+    const { routes } = mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }], mainTableSheetDeleted: true })
+    const res = await call(routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(res.statusCode, 200, 'a deleted table is a deployment state, not a directory failure')
+    assert.equal(res.body.data.fillTarget, null, 'no live sheet, no handle — a link into a deleted table is worse than no button')
+    assert.equal(res.body.data.pullTargetReady, false, 'and the deleted sheet is not scanned for project numbers either')
+    assert.equal(JSON.stringify(res.body).includes(MAIN_SHEET_A), false, 'the dead sheet id is not echoed in any form')
+    // THE POSITIVE CONTROL on the same substrate, so the null above is the delete and not a mount
+    // that never had a handle to give (N7-a is the same assertion from the other end).
+    const live = await call(mount({ mainTableRows: [{ projectNo: PROJECT_A3_NO }] }).routes, 'GET', DIRECTORY_PATH,
+      { user: OPERATOR_A, query: UNION_QUERY })
+    assert.ok(live.body.data.fillTarget, 'the identical mount WITHOUT the delete does hand out the handle')
+  })
+
+  await run('N7-g the D1=B sandbox rebinding is checked for liveness too — against the CANONICAL object', async () => {
+    // The sanctioned 222 deploy-window step rebinds the action to a SANDBOX objectId while KEEPING
+    // the sheet the deployment already had — a sheet created under the CANONICAL object. Its id
+    // therefore hashes from the canonical object, not from the bound one, so a liveness read that
+    // only ever tried the bound objectId would answer 「无法判断」 on the ONE configuration a live
+    // deployment actually runs, and the whole guard would be decorative there.
+    const SANDBOX_OBJECT_ID = 'plm_stock_preparation_sandbox_main'
+    const live = await call(mount({
+      mainTableRows: [{ projectNo: PROJECT_A3_NO }],
+      boundObjectIdOverride: SANDBOX_OBJECT_ID,
+    }).routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(live.statusCode, 200)
+    assert.ok(live.body.data.fillTarget, 'the sandbox rebinding of a sheet we own must STILL yield a handle')
+    assert.equal(live.body.data.fillTarget.sheetId, MAIN_SHEET_A)
+
+    const deleted = await call(mount({
+      mainTableRows: [{ projectNo: PROJECT_A3_NO }],
+      boundObjectIdOverride: SANDBOX_OBJECT_ID,
+      mainTableSheetDeleted: true,
+    }).routes, 'GET', DIRECTORY_PATH, { user: OPERATOR_A, query: UNION_QUERY })
+    assert.equal(deleted.statusCode, 200)
+    assert.equal(deleted.body.data.fillTarget, null, '…and the same rebinding over a DELETED sheet yields none')
   })
 
   // -------------------------------------------------------------------------

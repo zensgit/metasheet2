@@ -23,9 +23,12 @@
       type="button"
       class="sp-large-bom__link"
       data-testid="stock-prep-large-bom-open-multitable"
+      :data-fill-target="fillTarget ? 'bound' : 'none'"
       @click="emit('open-multitable')"
     >
-      {{ bi('到多维表看数据', 'Open the multitable and look at the data') }}
+      {{ fillTarget
+        ? bi('打开备料多维表', 'Open the stock-preparation table')
+        : bi('打开多维表工作台', 'Open the multitable workbench') }}
     </button>
 
     <StockPrepTechnicalDetails testid="stock-prep-large-bom-tech">
@@ -51,9 +54,12 @@
 //
 // VALUES-FREE, same register as the parent panel: every string on screen is a status token, a count,
 // or plainLanguage.ts prose keyed by one of those tokens. `open-multitable` is the SAME event the
-// parent panel emits on a normal import — this component invents no new destination, because there
-// is none to invent (see StockPreparationWorkspace.vue's `handleOpenMultitable` for why the sheetId
-// itself is never available to route with).
+// parent panel emits on a normal import — this component invents no destination and composes no
+// route. What it now DOES have is the parent's `fillTarget`: the operator directory hands out the
+// same tenant-gated `{ sheetId, viewId }` 项目备料页 has always returned, so the label can name the
+// 备料主表 when the shell really can land there, and say 「打开多维表工作台」 when it cannot. (Until
+// this pass the sheet id was never available to any of these surfaces — see
+// StockPreparationWorkspace.vue's `loadWorkspaceFillTarget`.)
 import { computed, onMounted, onUnmounted, reactive } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
@@ -65,6 +71,7 @@ import {
 } from '../../../services/integration/stockPreparation/largeBomPull'
 import { STOCK_PREPARATION_PULL_BOM_ACTION_ID } from '../../../services/integration/stockPreparation/projectSync'
 import type { IntegrationScope } from '../../../services/integration/workbench'
+import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
 import {
   stockPrepErrorPlain,
   stockPrepLargeBomPhasePlain,
@@ -80,8 +87,16 @@ const props = withDefaults(
     /** Test seam ONLY — an instant resolver so specs never wait on a real timer. */
     wait?: ((ms: number) => Promise<void>) | null
     pollIntervalMs?: number
-  }>(),
-  { scope: () => ({}), actionId: STOCK_PREPARATION_PULL_BOM_ACTION_ID, api: null, wait: null, pollIntervalMs: 2000 },
+    /** The 备料主表 handle the parent holds, or null. Label only — this panel routes nothing. */
+    fillTarget?: StockPreparationFillTarget | null
+  }>(),  {
+    scope: () => ({}),
+    actionId: STOCK_PREPARATION_PULL_BOM_ACTION_ID,
+    api: null,
+    wait: null,
+    pollIntervalMs: 2000,
+    fillTarget: null,
+  },
 )
 
 const emit = defineEmits<{
