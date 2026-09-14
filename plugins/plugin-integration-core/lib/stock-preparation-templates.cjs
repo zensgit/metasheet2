@@ -89,6 +89,17 @@ function pickDefaultViewName(kind, options = {}) {
   return pickTemplateLabel(labelled, locale)
 }
 
+// B3: the display name of the stock-preparation OWN BASE (the plugin-owned system base the main
+// table and the confirmation ledger are created in on a fresh install). A labelled thing like
+// every view name above, through the same one locale reader -- zh-CN gives 备料, anything else
+// the English name.
+const STOCK_PREPARATION_OWN_BASE_LABEL = Object.freeze({ label: 'Stock preparation', labelZh: '备料' })
+
+function pickOwnBaseName(options = {}) {
+  const locale = options.locale === undefined ? resolveTemplateLabelLocale() : options.locale
+  return pickTemplateLabel(STOCK_PREPARATION_OWN_BASE_LABEL, locale)
+}
+
 const REQUIRED_SYSTEM_FIELDS = Object.freeze([
   'projectNo',
   'idempotencyKey',
@@ -1296,6 +1307,8 @@ module.exports = {
   pickTemplateLabel,
   STOCK_PREPARATION_DEFAULT_VIEW_LABELS,
   pickDefaultViewName,
+  STOCK_PREPARATION_OWN_BASE_LABEL,
+  pickOwnBaseName,
   STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID,
   STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID,
   STOCK_PREPARATION_FILL_VIEW_LABEL,
