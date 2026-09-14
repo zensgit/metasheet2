@@ -110,3 +110,67 @@ tests/unit/federation.contract.test.ts
 - 没跑集成 / db 套件（需要 PG），没跑 e2e。
 - 没有改 `scripts/ops/validate-windows-runtime.ps1`。
 - 密钥长度不在代码侧强制，只 warn 一次，没有为此写用例之外的强度校验。
+
+---
+
+# 复核返修验证（PR #5711 第一轮，同日）
+
+设计侧的说明见设计文档末尾的「复核返修」节。新增/改动的文件：
+`packages/core-backend/src/security/encrypted-secrets.ts`、
+`packages/core-backend/src/services/ConfigService.ts`、
+`plugins/plugin-attendance/index.cjs`、
+`packages/core-backend/tests/unit/encryption-material-fail-closed.test.ts`、
+`packages/core-backend/tests/unit/attendance-integration-secret-material-gate.test.ts`。
+
+## R1. 用例数
+
+| spec | 返修前 | 返修后 |
+| --- | --- | --- |
+| `tests/unit/encryption-material-fail-closed.test.ts` | 17 passed | **22 passed** |
+| `tests/unit/attendance-integration-secret-material-gate.test.ts`（新，F2） | — | **8 passed** |
+
+新增 5 条（F1）：生产下允许轮换读并 values-free warn 一次；旁路不上写路径（同一进程同一 env 下写仍抛）；
+生产 default→strong 全量轮换成功（默认 key+盐 → 强 key+盐，读用旁路、写不用，结束后无旁路也能解开）；
+生产 strong→default **key** 被拒且 env 回滚；生产 strong→default **salt** 被拒且 env 回滚。
+新增 8 条（F2）：生产未配置 / 默认 key / 默认盐三种拒绝、错误 values-free、写路径
+（`encryptIntegrationSecretValue`）同样被拦、生产配齐后往返、非生产默认材料派生**字节等同**
+`pbkdf2(默认key, 默认盐, 100000, 32, sha256)`、派生不 trim。
+
+## R2. 变异（全部离仓；TS 走 `--config` 别名，CJS 走 `require.cache` 内存注入）
+
+| # | 变异 | 结果 |
+| --- | --- | --- |
+| M1 | `isProductionRuntime()` 恒 false（F4 后该函数在 `auth-runtime-config.ts`） | **14 failed / 8 passed (22)** |
+| M2 | 去掉 warn-once 闩锁 | **1 failed / 21 passed** |
+| M3 | 去掉"默认盐在生产也拒绝" | **2 failed / 20 passed** |
+| M4 | 去掉 `ConfigService` 里 `EncryptionMaterialError` 原样重抛 | **4 failed / 18 passed** |
+| **M5（F1）** | **去掉 `allowDefaultsForRotationRead` 旁路** | **2 failed / 20 passed** —— 正是
+  `allows a rotation READ on default material…` 与
+  `rotates OFF the built-in defaults in production…` 这两条 |
+| **M6（F2）** | **去掉 plugin-attendance 的生产门** | **5 failed / 3 passed (8)** —— 三条仍绿的是
+  往返 / 不漂移 / 不 trim 这批反回归项 |
+| 还原 | 不加任何别名与注入 | **22 passed + 8 passed** |
+
+M6 的做法值得记一笔：spec 用的是 Node 的 `require()`，vite 的 `resolve.alias` **管不到**它（第一次尝试
+别名，8 条全绿＝变异根本没生效）。改成在 `setupFiles` 里用 `Module._compile(mutatedSource, 真实filename)`
+把变异模块塞进 `require.cache`，相对 `require` 照常解析，磁盘上不落任何变异文件。
+
+## R3. 相邻 suite / 类型检查（返修后重跑）
+
+- 13 个套件（原 12 个 + 新的 attendance gate）：**Test Files 13 passed / Tests 439 passed**。
+- 另抽 3 个会 `require` `plugin-attendance/index.cjs` 的既有考勤套件 + 新 spec：
+  **4 passed / 66 tests passed**（确认插件仍能正常加载、导出的测试缝没破坏既有导出）。
+- `npx tsc --noEmit -p tsconfig.json`：exit 0。
+- 临时 config（include 两个新 spec）：exit 0，跑完即删，未入库。
+- `tests/unit/runtime-dependency-classification.test.ts` 仍是 §4 里那条 Windows 路径分隔符的确定性红，
+  与本轮改动无关（本轮新增的 import 边同样都是相对路径）。
+
+## R4. 本轮未做 / 仍未验证
+
+- plugin-attendance 侧**没有**非生产告警（该处没有可用 logger）；两个 TS 管线的告警不变。
+- `rotateKey` 只覆盖 `system_configs`；钉钉 / 数据源 / 考勤集成的密文各在各自的表，迁移脚本不在本 PR。
+- 仍未在 222 上实看生产 env；上线前置未解除。
+- "第四条管线"已按两个特征全仓 grep 过：`default-key-change-in-production` /
+  `default-salt-change-in-production` 现在只剩三处生产代码（本 helper、plugin-attendance、ps1 的哨兵
+  列表）+ 两个新 spec；`process.env.ENCRYPTION_KEY || …` 形态的回退除本 helper 外只出现在测试里。
+  但这只覆盖了"同名 env + 同一批默认串"的实现，**换了变量名或换了默认串的自带加密仍可能存在，未排查**。

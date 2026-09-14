@@ -8,6 +8,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { db } from '../db/db'
 import { toISOString, toDateValue } from '../db/type-helpers'
+import type { ResolveEncryptionMaterialOptions } from '../security/encrypted-secrets'
 import { EncryptionMaterialError, resolveEncryptionMaterial } from '../security/encrypted-secrets'
 
 // js-yaml is optional - try to load dynamically
@@ -374,6 +375,16 @@ export class DefaultConfigSource implements ConfigSource {
 }
 
 /**
+ * `process.env.X = undefined` stores the literal string "undefined", which would look like a
+ * configured-but-wrong key to the production gate. rotateKey() restores env on failure, so it has
+ * to distinguish "was unset" from "was set".
+ */
+function restoreEnvValue(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name]
+  else process.env[name] = value
+}
+
+/**
  * Secret Manager for handling encrypted values
  */
 export class SecretManager {
@@ -386,8 +397,8 @@ export class SecretManager {
    * than cached in the constructor so rotateKey()'s `process.env.ENCRYPTION_KEY` swap still
    * selects the intended key for each decrypt/encrypt.
    */
-  private getKey(): Buffer {
-    const material = resolveEncryptionMaterial()
+  private getKey(options: ResolveEncryptionMaterialOptions = {}): Buffer {
+    const material = resolveEncryptionMaterial(process.env, options)
     return this.crypto.pbkdf2Sync(material.masterKey, Buffer.from(material.salt), 100000, 32, 'sha256')
   }
 
@@ -419,9 +430,14 @@ export class SecretManager {
     }
   }
 
-  async decrypt(ciphertext: string): Promise<string> {
+  /**
+   * `options` exists solely for rotateKey()'s read-with-the-old-key step (see
+   * ResolveEncryptionMaterialOptions). encrypt() has no such parameter on purpose: the rotation
+   * TARGET must always satisfy the production gate.
+   */
+  async decrypt(ciphertext: string, options: ResolveEncryptionMaterialOptions = {}): Promise<string> {
     try {
-      const key = this.getKey()
+      const key = this.getKey(options)
       const combined = Buffer.from(ciphertext, 'base64')
 
       // Extract components
@@ -450,7 +466,17 @@ export class SecretManager {
     return value
   }
 
-  async rotateKey(oldKey: string, newKey: string): Promise<void> {
+  /**
+   * Re-encrypt every `is_encrypted` system_config row from oldKey to newKey.
+   *
+   * `newSalt` is optional and defaults to leaving ENCRYPTION_SALT alone (pre-existing behaviour).
+   * It is needed for the one migration this gate exists to force: a deployment that ran on BOTH
+   * built-in defaults has its rows under (default key, default salt), so the read must use the old
+   * salt while the write must land on a non-default salt — otherwise the production gate rejects
+   * the write and the rotation can never complete. Pass the same value you will then set in the
+   * service environment.
+   */
+  async rotateKey(oldKey: string, newKey: string, options: { newSalt?: string } = {}): Promise<void> {
     // Implementation for key rotation
     logger.info('Key rotation initiated')
 
@@ -465,15 +491,22 @@ export class SecretManager {
 
     // Re-encrypt with new key
     const originalKey = process.env.ENCRYPTION_KEY
+    const originalSalt = process.env.ENCRYPTION_SALT
 
     for (const config of configs) {
       try {
-        // Decrypt with old key
+        // Decrypt with old key. `allowDefaultsForRotationRead` is what makes rotating OFF the
+        // built-in default key possible at all — the read is the only step allowed to see default
+        // material, and only because we are on our way to replacing it.
         process.env.ENCRYPTION_KEY = oldKey
-        const decrypted = await this.decrypt(config.value.toString())
+        if (options.newSalt !== undefined) restoreEnvValue('ENCRYPTION_SALT', originalSalt)
+        const decrypted = await this.decrypt(config.value.toString(), {
+          allowDefaultsForRotationRead: true,
+        })
 
-        // Encrypt with new key
+        // Encrypt with new key — NO bypass, so a default/empty newKey (or newSalt) is refused.
         process.env.ENCRYPTION_KEY = newKey
+        if (options.newSalt !== undefined) process.env.ENCRYPTION_SALT = options.newSalt
         const encrypted = await this.encrypt(decrypted)
 
         // Update database
@@ -485,12 +518,16 @@ export class SecretManager {
 
       } catch (error) {
         logger.warn(`Failed to rotate key for config ${config.key}: ${errorToString(error)}`)
-        process.env.ENCRYPTION_KEY = originalKey
+        restoreEnvValue('ENCRYPTION_KEY', originalKey)
+        if (options.newSalt !== undefined) restoreEnvValue('ENCRYPTION_SALT', originalSalt)
         throw error
       }
     }
 
+    // Pre-existing behaviour (not introduced by the fail-closed work): the process is left on the
+    // new material so subsequent operations in THIS process match what was just written.
     process.env.ENCRYPTION_KEY = newKey
+    if (options.newSalt !== undefined) process.env.ENCRYPTION_SALT = options.newSalt
     logger.info('Key rotation completed')
   }
 }

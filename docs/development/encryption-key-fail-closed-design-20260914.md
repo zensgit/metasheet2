@@ -92,38 +92,47 @@ class EncryptionMaterialError extends Error   // 带 issues[]，不带任何值
 
 "一次"是契约的一部分：变异掉 warn 闩锁会让用例红（见验证文档 M2）。
 
-## 5. 与 validate-windows-runtime.ps1 的口径关系
+## 5. 与 validate-windows-runtime.ps1 的口径关系（F3 订正）
 
-`scripts/ops/validate-windows-runtime.ps1:142-168` 早就把 `default-key-change-in-production` /
-`default-salt-change-in-production` 列进 `$weakSecrets`，并对 `ENCRYPTION_KEY` 要求 ≥32 字符。本次改动
-**不是新增要求**，是把运维验证器已经在喊的口径落到代码里，两侧共用同一组哨兵值（代码侧现在把它们导出为
-`DEFAULT_ENCRYPTION_KEY` / `DEFAULT_ENCRYPTION_SALT`，脚本侧仍是字面量数组，注释已互指）。
+`scripts/ops/validate-windows-runtime.ps1:142-168` 把 `default-key-change-in-production` /
+`default-salt-change-in-production` 列进了 `$weakSecrets`，两侧用同一组哨兵值（代码侧导出为
+`DEFAULT_ENCRYPTION_KEY` / `DEFAULT_ENCRYPTION_SALT`，脚本侧是字面量数组，注释互指）。
 
-差异，写清楚免得以后打架：
+但**不能说"验证器已经拒绝这两个值"**，初稿这么写是错的：
+
+- 这些站点一律 `Add-Check … 'WARN' …`，而脚本末尾 `:324` 是
+  `if ($failed.Count -gt 0) { exit 1 } else { exit 0 }`——只有 **FAIL** 行进 `$failed`。默认哨兵值
+  只会让它打一行黄字，**退出码仍是 0**。
+- `:164` 的 `<32` 长度检查**显式排除 ENCRYPTION_SALT**，提示语写的还是 JWT_SECRET。
 
 | 检查 | ps1 | 代码 |
 | --- | --- | --- |
-| 未设置 | WARN（env 可能挂在服务上而不在当前 shell） | 生产抛 |
-| 等于默认哨兵 | WARN | 生产抛 |
-| KEY < 32 字符 | WARN | 只 warn（不抛） |
+| 未设置 | WARN（exit 0） | 生产抛 |
+| 等于默认哨兵 | WARN（exit 0） | 生产抛 |
+| KEY < 32 字符 | WARN（exit 0） | 只 warn（不抛） |
 | SALT 长度 | 不检查 | 不检查 |
 
-ps1 之所以只 WARN 不 FAIL，是因为它是 session-scoped 的、看不见 nssm 服务自己的环境；进程内的代码看得
-见真实运行环境，所以它可以也应该更硬。**本次没有改 ps1。**
+结论：**"过了验证器"不等于"材料安全"**，本模块是唯一会真正拒绝的地方。ps1 只 WARN 有其道理（它是
+session-scoped 的，看不见 nssm 服务自己的 `AppEnvironmentExtra`，把缺失判成 FAIL 会误杀配置正确的主机）
+——但正因为如此，它不能当作安全结论的依据。**本次没有改 ps1。**
 
 ## 6. 部署前置（重要，会改变现网行为）
 
 1. **生产必须设置 `ENCRYPTION_KEY` 与 `ENCRYPTION_SALT`**，且都不能是内置默认值。否则进程在**首次凭据
    加密或解密**时抛错失败——这是有意的，不是回归。
-2. **如果某套生产环境此前一直在用内置默认密钥**（即 env 里没配），那里已有的 `enc:` 密文是用默认密钥加
+2. **上线前必须人工确认**目标环境的这两个变量已设为非默认值。不能拿
+   `validate-windows-runtime.ps1` 的退出码当依据：它对默认哨兵值只 WARN、仍然 exit 0（见 §5）。
+   去服务环境里实看（`nssm get <ServiceName> AppEnvironmentExtra`），不要只看当前 shell。
+3. **如果某套生产环境此前一直在用内置默认密钥**（即 env 里没配），那里已有的 `enc:` 密文是用默认密钥加
    的。直接补上新的 `ENCRYPTION_KEY` 会让这些旧密文解不开（authTag 校验失败）。迁移路径二选一：
-   - 先把 `ENCRYPTION_KEY`/`ENCRYPTION_SALT` 设成**内置默认值本身**跑一次
-     `SecretManager.rotateKey(默认值, 新密钥)`，再切到新值；或
+   - 在仍未设置 env 的进程里调
+     `SecretManager.rotateKey(DEFAULT_ENCRYPTION_KEY, 新密钥, { newSalt: 新盐 })`，它会用默认材料读、用
+     新材料写；跑完再把新值写进服务环境（见 §3 的 F1 说明）；或
    - 用 `packages/core-backend/scripts/encrypt-dingtalk-*-secrets.ts` 那套流程重新落密文。
 
-   这两条都需要停机窗口和 owner 决策，**不在本次改动范围内**。上线前必须先确认目标环境到底有没有配过
-   `ENCRYPTION_KEY`。
-3. 长度建议 ≥32 字符随机值；代码不强制，`validate-windows-runtime.ps1` 会 WARN。
+   注意 `rotateKey` 只覆盖 `system_configs` 表。钉钉 / 数据源 / 考勤集成的密文在各自的表里，需要各自的
+   重加密流程。这些都需要停机窗口和 owner 决策，**不在本次改动范围内**。
+4. 长度建议 ≥32 字符随机值；代码不强制，`validate-windows-runtime.ps1` 只会 WARN。
 
 ## 7. 没做 / 留给后续
 
@@ -136,5 +145,63 @@ ps1 之所以只 WARN 不 FAIL，是因为它是 session-scoped 的、看不见 
   `assertProductionEncryptionMaterial()` 已导出，将来谁建了集中校验点，接一行即可。
 - **长度不在代码侧强制**：避免打断已有的"短但非默认"密钥的部署（那种情况密文仍然是真机密，只是强度不
   够），留给运维验证器 WARN。
-- 没有改 `validate-windows-runtime.ps1`，没有碰 `plugins/`、stock-prep、multitable 编辑器。
+- 没有改 `validate-windows-runtime.ps1`，没有碰 stock-prep、multitable 编辑器。
 - 没有为"密钥轮转"加任何新的 API/路由；`rotateKey` 仍然只能从代码内调用。
+
+---
+
+# 复核返修（PR #5711 第一轮，同日）
+
+## F1 — rotateKey 死锁（blocker）
+
+初版的门把 `rotateKey()` 自己锁死了：迁移的第一步是 `process.env.ENCRYPTION_KEY = oldKey` 再
+`decrypt()`，而唯一需要迁移的场景里 `oldKey` **就是内置默认值**，于是读这一步先被门拦住，`catch` 又原样
+重抛——"先以默认值为 oldKey 跑 rotateKey"在初版下根本做不到。
+
+修法（`encrypted-secrets.ts` + `ConfigService.ts`）：
+
+- `resolveEncryptionMaterial()` / `deriveEncryptionKey()` 增加**显式**选项
+  `{ allowDefaultsForRotationRead: true }`。只在生产且确实存在"缺失/默认值"问题时生效，返回原始的默认材
+  料并**每进程 values-free warn 一次**；
+- 只有 `rotateKey()` 里"用旧密钥解密这一行"传这个选项。`encrypt()` 上**没有**这个参数，
+  `encryptStoredSecretValue()` / `decryptStoredSecretValue()` 也不转发——写入口的严格度一点没放宽；
+- 这个旁路**不可配置**：它是代码层的实参，不是 env / 请求头 / 请求体，外部无法触发。
+
+附带（只有在同一处才说得通）：`rotateKey(oldKey, newKey, { newSalt? })` 增加可选的 `newSalt`。
+`rotateKey` 原本只换 key 不换盐，而真正需要迁移的那套环境**盐也是默认值**——读要用旧盐、写必须落到非默
+认盐，否则写这一步照样被门拒绝、迁移仍然完不成。不传 `newSalt` 时行为与改动前逐字一致；`rotateKey` 此前
+在 `src/` 里没有任何调用方，加可选参数不影响既有调用。
+
+同时修掉一个既有小坑：失败回滚路径上的 `process.env.ENCRYPTION_KEY = originalKey` 在 `originalKey` 为
+`undefined` 时会写进字符串 `"undefined"`——那对新的门来说像"已配置的非默认密钥"，会静默用错密钥。改为
+`restoreEnvValue()`，未设置就 `delete`。
+
+spec 里"轮换后 `process.env.ENCRYPTION_KEY` 停在新 key"那条断言保留，但加了注释：那是 `rotateKey()`
+**原有**的收尾行为（进程切到新密钥），不是本 PR 新立的契约。
+
+## F2 — 第三条管线：plugin-attendance（blocker）
+
+`plugins/plugin-attendance/index.cjs` 自带一份 `getIntegrationSecretKey()`：同样的 `enc:` 前缀、同样的
+aes-256-gcm、同样的 pbkdf2 参数、同样两个默认值回退，并且真的用它把钉钉 `appSecret` 加密写库
+（`normalizeIntegrationConfigForStorage`）、解密读出（`normalizeIntegrationConfig`）——完全绕过前面那个
+helper。
+
+修法：CJS 无法 import TS helper，按 `plugins/plugin-integration-core/lib/credential-store.cjs:63-71` 的
+既有先例**就地最小实现**同一个生产门——同样的两个哨兵、同样 values-free 的错误、同样"校验看 trim、派生
+用原始值"的不对称，注释指回 `encrypted-secrets.ts` 要求同步。非生产行为不变；该插件此处没有可用的
+logger，**没有**加告警（两个 TS 管线的告警仍在）。
+
+`plugins/plugin-attendance/index.cjs` 不在 `.gitattributes` 的 pin 段里，也不在
+`s6a-package-provenance-pins.json` 里——**不需要重打 pin**。
+
+## F3 — 见 §5、§6（已就地改写）
+
+## F4 — 去重
+
+`isProductionRuntime()` 改为从 `src/security/auth-runtime-config.ts` 复用（该模块零 import，不会成环）。
+`normalizeEnvString()` 在那边是模块私有、没导出，所以这边保留一份并加注释要求同步。
+
+顺带写明一点两处一致的口径：`NODE_ENV` 只有恰好等于 `'production'` 才算生产，`'prod'` 不算——这与既有的
+JWT_SECRET 门用的是同一个判定函数，两个秘密不可能对"现在是不是生产"产生分歧。
+
+变异探针 M1 的目标也随之移到 `auth-runtime-config.ts`。

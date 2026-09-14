@@ -67,6 +67,10 @@ function encryptionWarnings(): string[] {
   return warnCalls.filter(message => message.includes('ENCRYPTION_KEY'))
 }
 
+function rotationReadWarnings(): string[] {
+  return warnCalls.filter(message => message.includes('rotation read'))
+}
+
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]))
   warnCalls.length = 0
@@ -162,6 +166,31 @@ describe('resolveEncryptionMaterial - production fail-closed', () => {
     const mod = await loadEncryptedSecrets()
     setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: STRONG_SALT })
     expect(() => mod.decryptStoredSecretValue(GOLDEN_DEFAULT_CIPHERTEXT)).toThrow(/ENCRYPTION_KEY/)
+  })
+
+  // F1: the rotation-read bypass exists only so a deployment stuck on the defaults can rotate off
+  // them. It must stay read-only and explicit.
+  it('allows a rotation READ on default material and warns once, values-free', async () => {
+    const mod = await loadEncryptedSecrets()
+    const prodDefaults = { NODE_ENV: 'production' }
+
+    const first = mod.resolveEncryptionMaterial(prodDefaults, { allowDefaultsForRotationRead: true })
+    expect(first.masterKey).toBe(DEFAULT_KEY_SENTINEL)
+    expect(first.salt).toBe(DEFAULT_SALT_SENTINEL)
+    mod.resolveEncryptionMaterial(prodDefaults, { allowDefaultsForRotationRead: true })
+
+    expect(rotationReadWarnings()).toHaveLength(1)
+    expect(rotationReadWarnings()[0]).not.toContain(DEFAULT_KEY_SENTINEL)
+    expect(rotationReadWarnings()[0]).not.toContain(DEFAULT_SALT_SENTINEL)
+  })
+
+  it('keeps the bypass off the write path: it is opt-in and nothing on a write passes it', async () => {
+    const mod = await loadEncryptedSecrets()
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined })
+    // same process, same env as the allowed rotation read above — but the write helpers never
+    // forward the option, so they still fail closed.
+    expect(() => mod.encryptStoredSecretValue('w5b-plaintext')).toThrow(/ENCRYPTION_KEY/)
+    expect(() => mod.resolveEncryptionMaterial()).toThrow(/ENCRYPTION_KEY/)
   })
 })
 
@@ -281,7 +310,98 @@ describe('ConfigService SecretManager shares the gate', () => {
     await manager.rotateKey(STRONG_KEY, OTHER_STRONG_KEY)
 
     expect(updates).toHaveLength(1)
+    // Pre-existing ConfigService behaviour (ConfigService.ts, end of rotateKey): the process is
+    // left on the new key. Asserted to pin it, NOT introduced as a contract by this PR.
     expect(process.env.ENCRYPTION_KEY).toBe(OTHER_STRONG_KEY)
     expect(await manager.decrypt(updates[0].value)).toBe('w5b-rotating-row')
+  })
+
+  /** Minimal kysely-shaped stub: one encrypted row in, captured UPDATEs out. */
+  function mockRowsDb(value: string, updates: Array<{ id: string; value: string }>) {
+    return {
+      db: {
+        selectFrom: () => ({
+          select: () => ({
+            where: () => ({ execute: async () => [{ id: 'cfg-1', key: 'a.b', value }] }),
+          }),
+        }),
+        updateTable: () => ({
+          set: (patch: { value: string }) => ({
+            where: (_col: string, _op: string, id: string) => ({
+              execute: async () => {
+                updates.push({ id, value: patch.value })
+              },
+            }),
+          }),
+        }),
+      },
+    }
+  }
+
+  // F1 regression: before the rotation-read bypass this deadlocked — the gate refused the
+  // decrypt-with-the-old-default-key step, so a deployment on the built-in defaults (the ONLY
+  // deployment that needs to migrate) could never rotate off them.
+  it('rotates OFF the built-in defaults in production (default key+salt -> strong key+salt)', async () => {
+    // Row written by a process running on the built-in defaults.
+    setEnv({ NODE_ENV: 'test', ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined })
+    const { SecretManager: Probe } = await import('../../src/services/ConfigService')
+    const legacyCipher = await new Probe().encrypt('w5b-legacy-default-row')
+
+    vi.resetModules()
+    const updates: Array<{ id: string; value: string }> = []
+    vi.doMock('../../src/db/db', () => mockRowsDb(legacyCipher, updates))
+
+    const { SecretManager } = await import('../../src/services/ConfigService')
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined })
+    const manager = new SecretManager()
+
+    await manager.rotateKey(DEFAULT_KEY_SENTINEL, STRONG_KEY, { newSalt: STRONG_SALT })
+
+    expect(updates).toHaveLength(1)
+    expect(process.env.ENCRYPTION_KEY).toBe(STRONG_KEY)
+    expect(process.env.ENCRYPTION_SALT).toBe(STRONG_SALT)
+    // Readable under the NEW material with no bypass at all.
+    expect(await manager.decrypt(updates[0].value)).toBe('w5b-legacy-default-row')
+    expect(rotationReadWarnings()).toHaveLength(1)
+  })
+
+  it('refuses a rotation TARGET that is the built-in default, and restores env', async () => {
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
+    const { SecretManager: Probe } = await import('../../src/services/ConfigService')
+    const cipher = await new Probe().encrypt('w5b-rotating-row')
+
+    vi.resetModules()
+    const updates: Array<{ id: string; value: string }> = []
+    vi.doMock('../../src/db/db', () => mockRowsDb(cipher, updates))
+
+    const { SecretManager } = await import('../../src/services/ConfigService')
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
+    const manager = new SecretManager()
+
+    await expect(manager.rotateKey(STRONG_KEY, DEFAULT_KEY_SENTINEL)).rejects.toThrow(
+      /ENCRYPTION_KEY uses the built-in default/,
+    )
+    expect(updates).toHaveLength(0)
+    expect(process.env.ENCRYPTION_KEY).toBe(STRONG_KEY)
+  })
+
+  it('refuses a rotation TARGET salt that is the built-in default', async () => {
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
+    const { SecretManager: Probe } = await import('../../src/services/ConfigService')
+    const cipher = await new Probe().encrypt('w5b-rotating-row')
+
+    vi.resetModules()
+    const updates: Array<{ id: string; value: string }> = []
+    vi.doMock('../../src/db/db', () => mockRowsDb(cipher, updates))
+
+    const { SecretManager } = await import('../../src/services/ConfigService')
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
+    const manager = new SecretManager()
+
+    await expect(
+      manager.rotateKey(STRONG_KEY, OTHER_STRONG_KEY, { newSalt: DEFAULT_SALT_SENTINEL }),
+    ).rejects.toThrow(/ENCRYPTION_SALT uses the built-in default/)
+    expect(updates).toHaveLength(0)
+    expect(process.env.ENCRYPTION_SALT).toBe(STRONG_SALT)
   })
 })
