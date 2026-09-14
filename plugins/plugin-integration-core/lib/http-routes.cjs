@@ -119,6 +119,10 @@ const ROUTES = [
   // #3751 MVP: provision the 9 frozen MVP tables (readonly-internal, structure-only, admin-gated).
   ['GET', '/api/integration/stock-preparation/mvp/readiness', 'stockPreparationMvpReadiness'],
   ['POST', '/api/integration/stock-preparation/mvp/ensure', 'stockPreparationMvpEnsure'],
+  // #5721 终审 / W2 repair: ADDITIVE-ONLY column repair for an already-provisioned MVP table — adds
+  // only the template fields the host's DB read says are missing (the same oracle as the mvp-persist
+  // probe), never touches an existing column or a row, admin-gated, tenant from the principal only.
+  ['POST', '/api/integration/stock-preparation/mvp/repair', 'stockPreparationMvpRepair'],
   ['POST', '/api/integration/stock-preparation/mvp/options/sync', 'stockPreparationMvpOptionsSync'],
   ['POST', '/api/integration/stock-preparation/mvp/sync/plan', 'stockPreparationMvpSyncPlan'],
   // #3751 MVP: COMMIT a previewed sync-run plan — persist its rows into the 9 internal MVP tables
@@ -571,6 +575,7 @@ const {
 const {
   inspectStockPreparationMvpTargets,
   ensureStockPreparationMvpTargets,
+  repairStockPreparationMvpTargets,
   syncStockPreparationMvpOptions,
 } = require('./stock-preparation-mvp-provisioning.cjs')
 // #3751 MVP: readonly BOM-snapshot sync-RUN PLAN orchestrator. Pure/deterministic; composes the landed
@@ -1607,6 +1612,17 @@ const VALID_STOCK_PREPARATION_MVP_TARGET_REQUEST_KEYS = new Set([
   'baseId',
   'objectIds',
 ])
+// #5721 终审: the MVP REPAIR route's closed allowlist. Deliberately NARROWER than the ensure one — a
+// repair is a structure write against an EXISTING customer table, so the three steering axes
+// (tenantId / projectId / baseId) are not even accepted-and-ignored: a request that carries one is
+// refused 400 before any host call (assertNoRequestBaseId + assertStockPreparationMvpRepairNoSteering),
+// and a caller-supplied field list has no key to arrive through — the repair set is always the
+// template's missing set, computed server-side. 反驳 r1: `workspaceId` was accepted-and-ignored here
+// (the handler never used it, the verb has no such parameter) — on a route whose design point is
+// "no accepted-and-ignored key", it is gone: `objectIds` is the ONLY key.
+const VALID_STOCK_PREPARATION_MVP_REPAIR_REQUEST_KEYS = new Set([
+  'objectIds',
+])
 const VALID_STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
   'workspaceId',
@@ -2360,6 +2376,64 @@ function stockPreparationMvpTargetWriteInput(req, rawInput = {}) {
   }
 }
 
+// #5721 终审: the MVP repair route's steering wall. Same discipline as assertNoRequestBaseId and the
+// T3a ERP auto-persist guard: an explicit tenantId / projectId / baseId anywhere on the request (body,
+// query, params) is a steering vector into ANOTHER tenant's table structure, so it is refused 400
+// fail-closed BEFORE any host call — never accepted-and-ignored. Only the AUTHENTICATED principal
+// decides which `${tenant}:integration-core` project gets repaired.
+function assertStockPreparationMvpRepairNoSteering(req, rawInput) {
+  const steeringKeys = ['tenantId', 'projectId', 'baseId']
+  const steers = (src) =>
+    Boolean(src) && typeof src === 'object' && steeringKeys.some((key) => `${src[key] ?? ''}`.trim() !== '')
+  if (steers(rawInput) || steers(requestBody(req)) || steers(requestQuery(req)) || steers(requestParams(req))) {
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_MVP_REPAIR_STEERING_NOT_ALLOWED',
+      'an explicit tenantId/projectId/baseId is not allowed on the MVP repair route; the repaired staging project is derived from the authenticated principal',
+    )
+  }
+}
+
+function normalizeStockPreparationMvpRepairRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_MVP_REPAIR_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  const objectIds = normalizeRequestedMvpObjectIds(input.objectIds)
+  if (input.objectIds !== undefined && input.objectIds !== null && objectIds === undefined) {
+    // 反驳 r1: an objectIds key that names NOTHING ([] / [123, null] / '') must not widen into
+    // "all 9 MVP tables" — that is the OMITTED-key meaning, and only an omitted key may mean it.
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_MVP_REPAIR_REQUEST_INVALID',
+      'objectIds must name at least one MVP objectId when present; omit the key to repair every MVP table',
+      { field: 'objectIds' },
+    )
+  }
+  return { objectIds }
+}
+
+// #5721 终审: WRITE-path input for the MVP repair route. The tenant/project derivation is byte-identical
+// to stockPreparationMvpTargetWriteInput (assertNoRequestBaseId, resolveAuthUserTenantId,
+// resolveIntegrationStagingProjectId(tenantId, undefined)); the ONE deliberate difference is that a
+// request tenantId/projectId is refused rather than allowlisted-and-ignored (see the steering wall).
+function stockPreparationMvpRepairInput(req, rawInput = {}) {
+  assertNoRequestBaseId(rawInput)
+  assertStockPreparationMvpRepairNoSteering(req, rawInput)
+  const input = normalizeStockPreparationMvpRepairRequest(rawInput)
+  const tenantId = resolveAuthUserTenantId(req)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+  return {
+    tenantId,
+    projectId,
+    objectIds: input.objectIds,
+  }
+}
+
 function stockPreparationMvpTargetInput(req, rawInput = {}) {
   const input = normalizeStockPreparationMvpTargetRequest(rawInput)
   const tenantId = resolveTenantId(req, input)
@@ -2785,6 +2859,28 @@ function sandboxTargetRouteError(error) {
     'sandbox stock-preparation target provisioning failed',
     { reason: 'provisioning_failed' },
   )
+}
+
+// #5721 终审: the MVP repair route's status projection. Every refusal the verb raises already carries
+// its own status (409 MVP_REPAIR_TARGET_ABSENT / 422 MVP_TARGET_OBJECT_ID_INVALID / 409
+// REPAIR_CONCURRENT_FIELD_APPEARED / 409 MVP_REPAIR_SCOPE_UNAVAILABLE — the verb's own values-free
+// re-cast of the host's status-less MultitableObjectScopeError, 反驳 r1 / …) and passes through
+// sendError unchanged. The ONE re-cast: a
+// host without the atomic repair runner (runObjectFieldsRepairTransaction) is "this server cannot
+// perform the repair" — 501 Not Implemented at the route, on the verb's own code/message/details, so
+// an old host is refused explicitly and values-free, never answered 200 as if the table had been
+// repaired. The verb keeps its 503 (its unit pin (c2)); only the HTTP face differs.
+function mvpRepairRouteError(error) {
+  if (error instanceof HttpRouteError) return error
+  if (error instanceof StockPreparationTargetProvisioningError && error.code === 'MVP_REPAIR_API_UNAVAILABLE') {
+    return new HttpRouteError(
+      501,
+      'MVP_REPAIR_API_UNAVAILABLE',
+      error.message || 'stock-preparation MVP repair requires multitable.provisioning.runObjectFieldsRepairTransaction (atomic repair)',
+      error.details || { requiredMethods: ['runObjectFieldsRepairTransaction'] },
+    )
+  }
+  return error
 }
 
 // THE BACKGROUND LANE'S OWN CAPS, not the interactive dry-run's. This used to
@@ -7026,6 +7122,39 @@ function requireStockPreparationAudit() {
       })
       const created = result.tables.some((table) => table.created)
       return sendOk(res, result, created ? 201 : 200)
+    },
+
+    // #5721 终审 / W2 repair: the production entry of repairStockPreparationMvpTargets — until now the
+    // verb had no route and no script, so the 422 TARGET_SCHEMA_INCOMPLETE the mvp-persist probe
+    // raises pointed at a dead end. ADDITIVE-ONLY: inside ONE host transaction the verb adds exactly
+    // the template fields the DB read says are missing (ensureMissingObjectFields, ON CONFLICT DO
+    // NOTHING), re-verifies completeness and proves every existing column byte-unchanged. It never
+    // creates a table (409 MVP_REPAIR_TARGET_ABSENT), never touches a row, never takes a field list
+    // from the request. Always 200 (nothing is created); the response names, per objectId, the
+    // LOGICAL field ids added — no sheet/physical ids, no values.
+    async stockPreparationMvpRepair(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpRepairInput(req, requestBody(req))
+      let result
+      try {
+        result = await repairStockPreparationMvpTargets({
+          context,
+          projectId: input.projectId,
+          permission: 'admin',
+          objectIds: input.objectIds,
+        })
+      } catch (error) {
+        throw mvpRepairRouteError(error)
+      }
+      if (routeLogger && typeof routeLogger.info === 'function') {
+        // Counts only — never a project id, a sheet id or a field value.
+        routeLogger.info('[plugin-integration-core] stock-preparation MVP repair completed', {
+          tableCount: result.tables.length,
+          repairedTableCount: result.evidence.repairedTableCount,
+          addedFieldCount: result.tables.reduce((sum, table) => sum + table.addedFieldCount, 0),
+        })
+      }
+      return sendOk(res, result)
     },
 
     // #3751 MVP: sync caller-supplied option sets onto the MVP tables' select fields (field
