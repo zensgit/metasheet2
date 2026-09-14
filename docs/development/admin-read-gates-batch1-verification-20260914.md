@@ -103,3 +103,10 @@ Test Files  9 passed (9)
 - `.github/workflows/safety-guard-e2e.yml` 会被本 PR 触发（`paths:` 含 `admin-routes.ts`），但需要 Postgres service，本机没跑；已静态查证 `scripts/test-safety-guard-e2e.sh` 对 `dlq` / `safety/rules` 的匹配数为 0，即它不碰这三条端点。
 - `scripts/verify-sprint2-staging.sh` 需要 staging 环境与 API token，本机未实跑；对它的影响判断（非管理员 token 下前 10 次 200→403、第 11 次仍 429、脚本断言仍 PASS）由单测里的限流顺序用例支撑，不是纯推理，但不等于 staging 实跑。
 - 仓库外的调用方（自建看板、人工 curl）无法证伪；仓库内已查证为零调用方。
+
+## 复核补充（查找者第二轮）
+
+- **真库 E2E 经过新门**：`tests/integration/snapshot-protection.test.ts:332/366/378` 直接打 `GET /api/admin/safety/rules` 与 `GET /:id` 并断言 200——不红是因为 `:47-56` 的 `beforeAll` 显式 `INSERT INTO user_roles (…,'admin')` 把测试用户提成平台管理员（GHSA-h8mf 时为写端点加的），限流桶也远未触顶。这是**顺带覆盖而非本 PR 设计的验证**；base 改 main 后该泳道（`plugin-tests.yml:1285-1292`，20.x 真 PG）会在本 PR 上实跑，成为三条门的真库证据。
+- **CI 影响面订正**：改 base 前，跑新单测的泳道（`:842-844`）与跑这套 E2E 的泳道同属 `plugin-tests.yml`，都被 `pull_request: branches: [main, develop]` 排除——即三条门在合并前**两条证据链同时缺席**；改 base 后 26 项检查、2 条 test 泳道 + E2E 泳道齐全。
+- **脚本第二份**：`verify-sprint2-staging.sh` 有两份（根 `scripts/` 与 `packages/core-backend/scripts/`），后者 `:332` 也 `GET /api/admin/safety/rules`，同样只在非管理员 token 下由 200 变 403、脚本结果不变。
+
