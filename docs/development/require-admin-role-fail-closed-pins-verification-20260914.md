@@ -68,6 +68,56 @@ $ pnpm exec vitest run tests/unit/require-admin-role-fail-closed.test.ts   # 变
       Tests  6 passed (6)
 ```
 
+## CI 红→绿:tripwire(PR #5716 返修,追加于 2026-09-14)
+
+**症状**:PR #5716 CI 两条 test 泳道红,不是本 spec 的断言失败,而是仓库的零容忍
+tripwire `tests/unit/supertest-app-mode-tripwire.test.ts:74` 报错:
+`require-admin-role-fail-closed.test.ts: 6 app-mode supertest site(s)`。
+
+**根因**:`tests/utils/supertest-app-mode-scan.ts` 用 AST 扫描 `tests/unit/**/*.test.ts`,
+把 `request(<express app 表达式>)` 这类调用判为 "app-mode"(supertest 会对每个请求
+起一个新的 `app.listen(0)` 临时端口监听器,是 #4154 记录的跨用例串号根因);唯一豁免
+的安全写法是 `request('http://…')`(字符串/模板字面量)或 `request(x.url())`(属性名
+为 `url` 的零参调用,对应 `usePinnedServer().url()`)。本 spec 原来 6 处都是
+`request(app)`(直接把 express app 传给 supertest),全部命中 app-mode,被
+`tests/unit/supertest-app-mode-tripwire.test.ts` 的 `totalSites === 0` 零容忍断言拦下。
+
+**改法**:读了 `packages/core-backend/tests/utils/pinned-server.ts`(`usePinnedServer()`
+起一个 `beforeAll`/`afterAll` 生命周期内的单一 http server,测试里用 `setApp()` 换装、
+`url()` 拿基址)与已经这么用的现成 spec `tests/unit/snapshot-labels-authz.test.ts`
+(同款"每个用例现造一个 app、pinned.setApp(app)、request(pinned.url())"写法)。照抄:
+- 模块顶层加 `import { usePinnedServer } from '../utils/pinned-server'` 和
+  `const pinned = usePinnedServer()`(与 `describe` 同级,复用整份 spec 一个端口)。
+- 6 处调用点全部从 `request(app)` 改成 `pinned.setApp(app); ... request(pinned.url())`,
+  断言与用例内容(状态码、`code` 字段、`handlerCalled`、`dbState.query` 调用次数)
+  一字未动。
+
+**验证**(HEAD `ad4a304b3` 基础上,同一 worktree):
+
+```
+$ pnpm exec vitest run tests/unit/require-admin-role-fail-closed.test.ts tests/unit/supertest-app-mode-tripwire.test.ts
+ ✓ tests/unit/require-admin-role-fail-closed.test.ts (6 tests)
+ ✓ tests/unit/supertest-app-mode-tripwire.test.ts > the app-mode debt IS zero and stays zero — no regeneration channel exists
+ Test Files  2 passed (2)
+      Tests  9 passed (9)
+```
+
+**变异复核**(改传输层后重新验证钉桩仍然有效,不是形式主义换壳):用同样的临时
+`vi.spyOn` 手法(动态 import `rbac/service`,把 `isAdmin` 在 pool===null 时强制
+`mockImplementation(async () => true)`),对改造后使用 `pinned.setApp` +
+`request(pinned.url())` 的用例②重跑:
+
+```
+$ pnpm exec vitest run tests/unit/require-admin-role-fail-closed.test.ts -t "MUTATION PROOF"
+ × MUTATION PROOF (temporary): pool null forced to return true -> ② assertion must fail
+   → expected 200 to be 403 // Object.is equality
+ Test Files  1 failed (1)
+      Tests  1 failed | 6 skipped (7)
+```
+
+红,与切换传输层前的结果一致。删除临时用例、还原文件后重跑两份 spec:9/9 绿(同上）。
+`git status --porcelain` 确认还原后除 6 处 `pinned.url()` 改动外无残留。
+
 ## 相邻 spec(文件名含 admin/rbac 的 tests/unit/*)
 
 ```

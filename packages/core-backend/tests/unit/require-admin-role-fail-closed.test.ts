@@ -35,6 +35,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express, { type RequestHandler } from 'express'
 import request from 'supertest'
+import { usePinnedServer } from '../utils/pinned-server'
 
 // ---------------------------------------------------------------------------
 // Mock only `../../src/db/pg` (one layer below isAdmin), never `../../src/rbac/service`.
@@ -80,6 +81,11 @@ function schemaMissingError(): Error & { code: string } {
   return Object.assign(new Error('relation "user_roles" does not exist'), { code: '42P01' })
 }
 
+// #4154 tripwire (tests/unit/supertest-app-mode-tripwire.test.ts): supertest must never receive an
+// express app directly (`request(app)` binds a fresh ephemeral-port listener per request, the
+// cross-talk mechanism). One pinned server for the whole suite; each test swaps the installed app.
+const pinned = usePinnedServer()
+
 describe('requireAdminRole() — fail-closed pins (real isAdmin, mocked at pool/query layer)', () => {
   const ADMIN_USER = { id: 'u-admin', email: 'admin@example.com' }
 
@@ -98,8 +104,9 @@ describe('requireAdminRole() — fail-closed pins (real isAdmin, mocked at pool/
   it('① user_roles has no admin row -> 403 ADMIN_REQUIRED, handler not called (audit-integration.ts:150-177 via rbac/service.ts:22-23 rows.length===0)', async () => {
     dbState.query.mockResolvedValueOnce({ rows: [] })
     const { app, handlerCalled } = buildApp(ADMIN_USER)
+    pinned.setApp(app)
 
-    const res = await request(app).get('/protected')
+    const res = await request(pinned.url()).get('/protected')
 
     expect(res.status).toBe(403)
     expect(res.body).toMatchObject({ code: 'ADMIN_REQUIRED' })
@@ -113,8 +120,9 @@ describe('requireAdminRole() — fail-closed pins (real isAdmin, mocked at pool/
   it('② pool is null -> 403 ADMIN_REQUIRED, handler not called, query never reached (rbac/service.ts:20 early-return guard)', async () => {
     dbState.pool = null
     const { app, handlerCalled } = buildApp(ADMIN_USER)
+    pinned.setApp(app)
 
-    const res = await request(app).get('/protected')
+    const res = await request(pinned.url()).get('/protected')
 
     expect(res.status).toBe(403)
     expect(res.body).toMatchObject({ code: 'ADMIN_REQUIRED' })
@@ -135,8 +143,9 @@ describe('requireAdminRole() — fail-closed pins (real isAdmin, mocked at pool/
     try {
       const { requireAdminRole: freshRequireAdminRole } = await import('../../src/guards/audit-integration')
       const { app, handlerCalled } = buildApp(ADMIN_USER, freshRequireAdminRole)
+      pinned.setApp(app)
 
-      const res = await request(app).get('/protected')
+      const res = await request(pinned.url()).get('/protected')
 
       expect(res.status).toBe(403)
       expect(res.body).toMatchObject({ code: 'ADMIN_REQUIRED' })
@@ -153,8 +162,9 @@ describe('requireAdminRole() — fail-closed pins (real isAdmin, mocked at pool/
   it('positive control: user_roles has an admin row -> 200, handler called (rbac/service.ts:22-23 rows.length>0 -> audit-integration.ts:180-186)', async () => {
     dbState.query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
     const { app, handlerCalled } = buildApp(ADMIN_USER)
+    pinned.setApp(app)
 
-    const res = await request(app).get('/protected')
+    const res = await request(pinned.url()).get('/protected')
 
     expect(res.status).toBe(200)
     expect(handlerCalled).toHaveBeenCalledTimes(1)
@@ -166,8 +176,9 @@ describe('requireAdminRole() — fail-closed pins (real isAdmin, mocked at pool/
   it('query throws a non-schema error -> 503 RBAC_CHECK_FAILED, handler not called (rbac/service.ts:32 rethrow -> audit-integration.ts:187-196)', async () => {
     dbState.query.mockRejectedValueOnce(new Error('connection terminated unexpectedly'))
     const { app, handlerCalled } = buildApp(ADMIN_USER)
+    pinned.setApp(app)
 
-    const res = await request(app).get('/protected')
+    const res = await request(pinned.url()).get('/protected')
 
     expect(res.status).toBe(503)
     expect(res.body).toMatchObject({ code: 'RBAC_CHECK_FAILED' })
@@ -180,8 +191,9 @@ describe('requireAdminRole() — fail-closed pins (real isAdmin, mocked at pool/
   // ---------------------------------------------------------------------
   it('no req.user -> 403 ADMIN_REQUIRED without calling isAdmin/query (audit-integration.ts:121-145)', async () => {
     const { app, handlerCalled } = buildApp(undefined)
+    pinned.setApp(app)
 
-    const res = await request(app).get('/protected')
+    const res = await request(pinned.url()).get('/protected')
 
     expect(res.status).toBe(403)
     expect(res.body).toMatchObject({ code: 'ADMIN_REQUIRED' })
