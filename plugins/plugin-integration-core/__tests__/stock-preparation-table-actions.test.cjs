@@ -2688,8 +2688,25 @@ async function testX6DryRunDoesNotCountRowsWhoseIntakeLacksTheExtColumn() {
   //   空 update 被 apply-writer 归一化重写 —— 那次 patch 是 pickFields 的**全部**已给值 plm 列 + 四列戳,
   //   不只 changed 列;X6 之后该行 SKIP,保持存量表示。这是表示层差异,不是取值差异。可达前提:存量经
   //   unmapRecordFields 只换键名、不做类型归一化,人工 / 导入 / 早期写入留下的表示可与来料不同。
-  //   边界二(批级):lineage / identity 调用点收窄后 plan.valid 可由 false 翻 true,同批 add 的业务列由
-  //   「整批 409 不落表」变成「落表」—— 见 testX6AbsentIdentityKeyDoesNotHoldTheDryRun。
+  //   边界二(批级):lineage / identity 调用点收窄后 plan.valid(planner :1687 `counts[MANUAL_CONFIRM] === 0`)
+  //   可由 false 翻 true;放开的是**三类**写,不止 add:
+  //     (1) add —— 新建行的业务列由「整批 409 不落表」变成「落表」,见 testX6AbsentIdentityKeyDoesNotHoldTheDryRun;
+  //     (2) mark_inactive —— 存量里不在本批的 active 既有行,`active` 由 true 翻成 false(planner :1437-1440
+  //         makeInactiveDecision 的 patch = { active:false } + 四列刷新戳);
+  //     (3) 同批其余 update —— 既有行的完整 pickFields 补丁(全部已给值 plm 列,不只 changed 列)。
+  //     三类一起由 planner 侧 testX6AbsentIdentityKeyAlsoReleasesInactiveAndSameBatchUpdates 钉住。
+  //     生产闸 cleanRowCount = add + update(stock-preparation-table-actions.cjs:2191)**不数 inactive**:
+  //     「X6 让闸的触发量变小」只约束 (1)(3),**不约束 (2)** —— mark_inactive 的写本来就在 maxCleanRows
+  //     覆盖面之外,X6 之前唯一拦住它的就是整批 409。
+  //   边界三(确认账本,首次部署一次性):凡 plan.counts 移动的项目,其 dry-run revision 随之变
+  //     (stock-preparation-table-actions.cjs:1285-1287 把 plan.counts / valid / conflictTypes 折进 revision;
+  //     :1705-1711 同一 buildRevision 结果作为 sourceRevision 进确认账本)⇒ 账本 inputFingerprint 变
+  //     (stock-preparation-confirmation-decisions.cjs:693-698 折入 sourceRevision)⇒ 该项目里
+  //     duplicate_expanded_key / carry 的既有 pending / confirmed 行被 supersede 并重开为 pending(:1000-1007),
+  //     确认读回按 decisionId + inputFingerprint 双绑不再命中(:1613-1615)⇒ 重复组当轮回到 hold、apply 409,
+  //     需要重新确认一次(旧的人工决定按设计不带过来)。方向与 (1)(3) 的「409 → 落表」相反,是一次性部署
+  //     效应、不是数据回归;222 一次性部署说明与账本查询口径见
+  //     docs/development/takeover-beiliao-20260821/autonomous-24h-run-20260910.md:251。
   // 四列戳本身:X6 之前这两行每轮都被写成本次 run 的值(runId / plannedAt / 'update' / 点名 ext_ 列的
   // 理由);X6 之后 SKIP 决策没有 patch,四列停在**上一次真变更**留下的值(X4 fixture 里的 run-r33 /
   // X4_EXISTING_REFRESH_STAMP)——这正是 project-board 对 `lastChangedFromPlmAt`(取 lastPlmRefreshAt

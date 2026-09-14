@@ -1982,6 +1982,94 @@ function testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch() {
   assert.equal(heldAdd.decision, DECISIONS.ADD, '对照组里那条 add 的行级决策不变,变的是整批能否执行')
 }
 
+// 终审 blocker 1 —— 批级边界的**完整清单**。上一条用例只钉住了三类里的 add;`plan.valid`
+// (lib 的 `valid: counts[MANUAL_CONFIRM] === 0`)由 false 翻 true,放开的是三类写:
+//   (1) **add**:新建行(testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch 已钉);
+//   (2) **mark_inactive**:既有行的 `active` 由 true 翻成 false —— 存量里不在本批的 active 行走
+//       planner 的 existing-only 循环,补丁 = { active:false } + 四列刷新戳(makeInactiveDecision);
+//   (3) **同批其余 update**:既有行的完整 `pickFields` 补丁(全部已给值 plm 列,不只 changed 列)。
+// 生产闸 `cleanRowCount = add + update`(stock-preparation-table-actions.cjs:2191)**不数 inactive**:
+// 「X6 让闸触发量变小」这句只约束 (1)(3),**不约束 (2)** —— mark_inactive 的写本来就在 maxCleanRows
+// 覆盖面之外,X6 之前唯一拦住它的就是整批 409。
+// 形状:一条来料缺身份键的既有行(readPlan 未配 materialField ⇒ 键在、值 undefined)+ 一条**不在批内**
+// 的 active 既有行(⇒ mark_inactive)+ 一条数量真变的既有行(⇒ update)。
+// X6 之前:counts.manual_confirm=1 ⇒ valid=false ⇒ dry-run manual_confirm_required、apply 409
+// (不带 acceptManualConfirmHold)⇒ inactive 补丁与 update 补丁一起**永不落表**;X6 之后:valid=true,
+// 三类都落。对照组(键在值变)证明闸门本身没丢。M1(去掉收窄)⇒ 本用例红在 `plan.valid` 那条断言。
+function testX6AbsentIdentityKeyAlsoReleasesInactiveAndSameBatchUpdates() {
+  // (a) 来料缺身份键的既有行:键在、值 undefined(真实形状,readPlan 未配 materialField)。
+  const identityAbsent = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: undefined })
+  assert.equal(Object.prototype.hasOwnProperty.call(identityAbsent, 'material'), true, '前提:来料上键在')
+  assert.equal(identityAbsent.material, undefined, '前提:来料上值为 undefined')
+  const identityAbsentExisting = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  assert.equal(typeof identityAbsentExisting.material, 'string', '前提:存量这一列有值')
+  // (b) 同批另一条既有行,数量真变 ⇒ 一次带值 update。
+  const quantityChanged = row({ componentSourceId: 'PART-UPD', pathTokens: ['PART-UPD'], rawQuantity: 5, totalQuantity: 5 })
+  const quantityChangedExisting = { ...quantityChanged, rawQuantity: 4, totalQuantity: 4 }
+  // (c) 存量里一条**不在本批**的 active 行 ⇒ mark_inactive。
+  const goneExisting = row({ componentSourceId: 'PART-GONE', pathTokens: ['PART-GONE'] })
+  assert.equal(goneExisting.active, true, '前提:这条既有行当前是 active')
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [identityAbsent, quantityChanged],
+    existingRows: [identityAbsentExisting, quantityChangedExisting, goneExisting],
+    runId: 'run-x6-batch-inactive',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+
+  assert.equal(
+    plan.valid,
+    true,
+    'X6:整批可执行 —— mark_inactive 与同批 update 的补丁这才会落表(X6 之前 valid=false ⇒ 整批 409,两者一起永不落)',
+  )
+  assert.deepEqual(
+    plan.counts,
+    { add: 0, update: 1, skip: 1, inactive: 1, manual_confirm: 0 },
+    'X6:缺身份键的行是 SKIP(X6 之前 {update:1, skip:0, inactive:1, manual_confirm:1})',
+  )
+
+  // (2) mark_inactive:这是一次**真写**,且不在生产闸的覆盖面里。
+  const inactive = byDecision(plan, DECISIONS.INACTIVE)[0]
+  assert.equal(inactive.idempotencyKey, goneExisting.idempotencyKey)
+  assert.equal(inactive.patch.active, false, 'mark_inactive:既有行的 active 由 true 翻成 false')
+  assert.equal(typeof inactive.patch.active, 'boolean', 'active 是布尔 false,不是空串/字符串')
+  assert.deepEqual(
+    Object.keys(inactive.patch).sort(),
+    ['active', 'lastPlmConflictSummary', 'lastPlmRefreshAt', 'lastPlmRefreshDecision', 'lastPlmRefreshRunId'],
+    'inactive 补丁 = active + 四列刷新戳',
+  )
+  assert.equal(inactive.conflictSummary.type, 'missing_from_plm')
+
+  // (3) 同批其余 update:补丁是 pickFields 的全部已给值 plm 列,不只 changed 列。
+  const update = byDecision(plan, DECISIONS.UPDATE)[0]
+  assert.equal(update.idempotencyKey, quantityChanged.idempotencyKey)
+  assert.deepEqual(update.changedFields.slice().sort(), ['rawQuantity', 'totalQuantity'])
+  assert.equal(update.patch.rawQuantity, 5)
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(update.patch, 'componentName'),
+    true,
+    '同批 update 落的是全部已给值 plm 列(componentName 没变也在补丁里),不只 changed 列',
+  )
+
+  const skip = byDecision(plan, DECISIONS.SKIP)[0]
+  assert.equal(skip.idempotencyKey, identityAbsent.idempotencyKey)
+  assert.equal(skip.conflictSummary.type, 'unchanged')
+  assert.equal(Object.prototype.hasOwnProperty.call(skip, 'patch'), false, 'SKIP 行没有 patch:存量 material 一个字不动')
+
+  // 对照:来料给了**不同**的 material ⇒ 闸门原样,inactive / update 的行级决策不变,变的是整批能否执行。
+  const identityChanged = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: 'Iron' })
+  const held = planStockPreparationConflicts({
+    expandedRows: [identityChanged, quantityChanged],
+    existingRows: [identityAbsentExisting, quantityChangedExisting, goneExisting],
+    runId: 'run-x6-batch-inactive-control',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  assert.deepEqual(held.counts, { add: 0, update: 1, skip: 0, inactive: 1, manual_confirm: 1 }, '键在值变 ⇒ 仍是 manual_confirm')
+  assert.equal(held.valid, false, '键在值变 ⇒ 整批仍挂起:inactive 与 update 的补丁仍被整批 409 拦在闸后')
+  assert.equal(byDecision(held, DECISIONS.INACTIVE)[0].patch.active, false, '对照组里 inactive 的行级决策不变')
+  assert.equal(byDecision(held, DECISIONS.UPDATE)[0].idempotencyKey, quantityChanged.idempotencyKey, '对照组里 update 的行级决策不变')
+}
+
 function main() {
   testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger()
   testAddUpdateSkipInactive()
@@ -2014,6 +2102,7 @@ function main() {
   testX6RefreshSkipsRowsWhoseIntakeLacksTheColumn()
   testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide()
   testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch()
+  testX6AbsentIdentityKeyAlsoReleasesInactiveAndSameBatchUpdates()
   testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
   testUnresolvableParentIsAbsenceNotAGuess()
   testExistingRowsAreBackfilledByAReRun()
