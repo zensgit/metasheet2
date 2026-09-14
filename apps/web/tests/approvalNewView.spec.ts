@@ -2,8 +2,11 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { formSchemaSignature } from '../src/approvals/formDraft'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
+// FIX 3 (gate P2-3) — used ONLY by the real-drift-guard describe block at the end of this file
+// (which temporarily un-mocks '../src/approvals/serverFormDraft') to compute the SAME real
+// signature the view itself computes, rather than a hand-typed literal.
+import { formSchemaSignature } from '../src/approvals/formDraft'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import type { ApprovalGraph, FormField, FormSchema } from '../src/types/approval'
 import { mockPendingApproval, mockPublishedTemplate } from './helpers/approval-test-fixtures'
@@ -180,6 +183,21 @@ vi.mock('../src/approvals/attachmentUpload', async () => {
     uploadApprovalAttachmentsAtomic: (...args: unknown[]) => uploadApprovalAttachmentsAtomicSpy(...(args as [File[], string, string])),
   }
 })
+
+// P3-3: draft storage moved server-side (apps/web/src/approvals/serverFormDraft.ts) — the view no
+// longer touches `window.localStorage` for drafts at all, so the G13 stale-attachment-ref tests
+// below (and any future draft-restore test) drive the RESTORE side through this mock instead of
+// seeding localStorage directly. Defaults to "no draft" (null) so every OTHER test in this file
+// (none of which care about drafts) mounts exactly as before.
+const loadFormDraftServerSpy = vi.fn(async (..._args: unknown[]) => null as Record<string, unknown> | null)
+const saveFormDraftServerSpy = vi.fn(async (..._args: unknown[]) => undefined)
+const clearFormDraftServerSpy = vi.fn(async (..._args: unknown[]) => undefined)
+vi.mock('../src/approvals/serverFormDraft', () => ({
+  loadFormDraftServer: (...args: unknown[]) => loadFormDraftServerSpy(...args),
+  saveFormDraftServer: (...args: unknown[]) => saveFormDraftServerSpy(...args),
+  clearFormDraftServer: (...args: unknown[]) => clearFormDraftServerSpy(...args),
+  listFormDraftsServer: vi.fn(async () => []),
+}))
 
 const mockActiveTemplate = ref<any>(null)
 const loadTemplateSpy = vi.fn().mockResolvedValue(undefined)
@@ -761,12 +779,15 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
       fetchApprovalAttachmentRefsSpy.mockResolvedValue([])
       messageWarningSpy.mockReset()
       messageErrorSpy.mockReset()
-      window.localStorage.clear() // no draft residue between restore tests
+      // P3-3: no draft residue between restore tests (server-backed mock, was localStorage.clear()).
+      loadFormDraftServerSpy.mockReset()
+      loadFormDraftServerSpy.mockResolvedValue(null)
+      saveFormDraftServerSpy.mockClear()
+      clearFormDraftServerSpy.mockClear()
     })
 
     afterEach(() => {
       approvalAttachmentsFlag = false
-      window.localStorage.clear()
     })
 
     function attachmentInput(): HTMLInputElement {
@@ -874,14 +895,157 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
     // rather than carry a dangling id into a create the §4.4 bind would reject whole.
     // -----------------------------------------------------------------------
     function seedDraft(proofIds: string[]) {
-      // the signature EXCLUDES attachment fields (formSchemaSignature) — derived from the REAL helper
-      // so this stays correct if the fixture schema changes, instead of a hand-copied literal.
-      const signature = formSchemaSignature(mockActiveTemplate.value.formSchema)
-      window.localStorage.setItem(
-        'approval-form-draft:user_1:tpl_numfields',
-        JSON.stringify({ signature, savedAt: new Date().toISOString(), data: { proof: proofIds } }),
-      )
+      // P3-3: the view now calls `loadFormDraftServer(templateId, expectedSignature)` — mocked to
+      // resolve with this draft's `data` directly (the mock bypasses the server's own signature
+      // comparison, which is exercised separately: the client-side comparison is unchanged pure
+      // logic covered by apps/web/tests/approval-form-draft.test.ts, and the server's OWN signature
+      // function is proven byte-identical to the client's in
+      // packages/core-backend/tests/unit/approval-form-draft-signature-web-parity.test.ts). These
+      // G13 tests are about the attachment-stale-ref restore behavior, not the signature guard.
+      loadFormDraftServerSpy.mockResolvedValueOnce({ proof: proofIds })
     }
+
+    // ---------------------------------------------------------------------
+    // P3-3 arming-order hazard: draft restore used to be a SYNCHRONOUS localStorage read, so the
+    // 800ms autosave watcher could safely arm right after calling it. Now it is an async server
+    // fetch — arming the watcher before that fetch settles would let a user's mid-flight keystrokes
+    // schedule a save (and race the eventual `Object.assign(formData, draft)` from the restore
+    // itself). `ApprovalNewView.vue` awaits `offerDraftRestore()` before setting `draftArmed = true`
+    // — this proves it behaviorally: no save is scheduled while the GET is still pending, and a
+    // save DOES fire once it has settled.
+    // ---------------------------------------------------------------------
+    it('P3-3: the autosave watcher does not arm until the initial draft-restore fetch settles', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        let resolveLoad: (value: Record<string, unknown> | null) => void = () => {}
+        loadFormDraftServerSpy.mockReset()
+        loadFormDraftServerSpy.mockImplementationOnce(() => new Promise((resolve) => { resolveLoad = resolve }))
+
+        await mountView()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed while draft GET is pending'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(1000)
+
+        // The restore GET has not resolved yet ⇒ draftArmed is still false ⇒ no save scheduled.
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        // Settle the restore (no draft found) and type again — the watcher must be armed NOW.
+        resolveLoad(null)
+        await flushUi()
+        reasonInput!.value = 'typed after settle'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy).toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // P3-3 FIX 8 (gate P3-3, PROBE-D) — the gate confirmed the call sequence `["CLEAR","SAVE"]`:
+    // the 800ms debounced autosave can already have a SAVE timer pending at the moment of submit,
+    // and clearing the draft on submit success does not itself cancel that timer, so it fires
+    // AFTERWARD and resurrects the just-submitted draft. Pre-existing shape (the same race existed
+    // against the old localStorage clear), but P3-3 gives it a bigger blast radius: the
+    // resurrection is now server-side (cross-device, appears in the drafts inbox) and CLEAR/SAVE
+    // are two independently-ordered HTTP requests rather than two synchronous same-tick calls.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX 8: a pending autosave SAVE never lands after a submit-triggered CLEAR (no CLEAR-then-SAVE resurrection)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView() // default mock resolves the initial restore GET quickly -> draftArmed=true
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed just before submit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        // A SAVE is now scheduled (800ms debounce) but has NOT fired yet.
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        submitButton().click()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalled() // the submit's own CLEAR fired
+
+        // Advance PAST the 800ms window that would otherwise have fired the pending SAVE.
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy, 'the pending debounced SAVE must have been cancelled by submit, not merely raced').not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('POSITIVE CONTROL for the assertion above: WITHOUT a submit, the identical typing DOES eventually produce a SAVE (proves the harness can detect a real SAVE firing -- the negative result above is not vacuous)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        reasonInput!.value = 'typed, never submitted'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled() // not yet -- still within the debounce window
+
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(saveFormDraftServerSpy).toHaveBeenCalled() // the SAME 800ms elapsing, absent a submit, DOES fire the save
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled() // no submit happened -- nothing cleared
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // P3-3 FIX C (gate2 P3-D): FIX 8 above only closes the PENDING-timer half of the CLEAR/SAVE
+    // race — the debounce timer can already have FIRED (the SAVE issued, its HTTP promise still
+    // unsettled) at the exact moment submit runs. Constructed deterministically (no sleeps): the
+    // save's fetcher promise is held open under our control, so "SAVE issued but not yet settled"
+    // is a real, observable state, not a timing guess.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX C: submit does not issue CLEAR while a debounced SAVE is still in flight (no resurrection via the in-flight-request window)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView() // default mock resolves the initial restore GET quickly -> draftArmed=true
+
+        let resolveSave: () => void = () => {}
+        saveFormDraftServerSpy.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { resolveSave = resolve }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed well before submit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+
+        // Let the 800ms debounce fire -- SAVE is now ISSUED (fetcher called) but its promise is
+        // held open by `resolveSave`, i.e. genuinely IN FLIGHT, not merely scheduled.
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(clearFormDraftServerSpy).not.toHaveBeenCalled()
+
+        submitButton().click()
+        await flushUi()
+
+        // The old behaviour clears immediately regardless of the in-flight save -- REDS here
+        // under that behaviour. The fix must wait for the in-flight save to settle first.
+        expect(
+          clearFormDraftServerSpy,
+          'CLEAR must not be issued while a same-slot SAVE is still in flight -- it can otherwise commit first and the save resurrects the draft on INSERT',
+        ).not.toHaveBeenCalled()
+
+        // Settle the in-flight save -- CLEAR must follow now, and only now.
+        resolveSave()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
 
     it('restore drops GC-swept attachment refs, warns, and keeps the live ones (positive control)', async () => {
       seedDraft(['att_live', 'att_swept'])
@@ -1377,6 +1541,62 @@ describe('ApprovalNewView — B2-13 再次提交 prefill', () => {
     expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
     const payload = submitApprovalSpy.mock.calls[0][0]
     expect(payload.formData).toMatchObject({ reason: '出差报销（第一次）', amount: 3000 })
+  })
+
+  // -------------------------------------------------------------------------------------------
+  // P3-3 (contract §4 G) — CONSTRUCTED RACE, not a stable-state check. With draft restore now an
+  // async server fetch (previously a synchronous localStorage read), the resubmit-prefill fetch
+  // (`getApproval`, also async) and the draft-restore fetch are two independently-timed network
+  // calls; a test that simply awaits both and then asserts is blind to a regression where they run
+  // CONCURRENTLY (a Promise.all-style refactor) instead of `applyResubmitPrefill` being fully
+  // awaited BEFORE `offerDraftRestore` is even attempted. This test makes `getApproval` resolve
+  // SLOWLY and a draft IMMEDIATELY available, and asserts that the draft fetch is not even ATTEMPTED
+  // until after the prefill fetch settles — proving the ordering by observing it mid-flight, not by
+  // inspecting only the final state (where a concurrent implementation could coincidentally look the
+  // same if the draft mock happened to resolve second).
+  // -------------------------------------------------------------------------------------------
+  it('CONSTRUCTED RACE: a slow-resolving resubmit-prefill fetch delays the draft-restore fetch entirely — prefill wins by construction, not by timing luck', async () => {
+    routeQuery = { fromInstance: 'apv_source_race' }
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_resubmit_race',
+      formSchema: formSchemaRequiredReasonAndAmount(),
+    })
+    let resolveGetApproval: (value: unknown) => void = () => {}
+    getApprovalSpy.mockImplementation(
+      () => new Promise((resolve) => { resolveGetApproval = resolve }),
+    )
+    // A draft IS available — if the ordering regresses to "concurrent", this mock resolving first
+    // would let the restore banner win the race.
+    loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'STALE DRAFT — must never win', amount: 1 })
+
+    await mountView()
+
+    // Still mid-flight: getApproval has not resolved yet, so applyResubmitPrefill has not returned.
+    // The draft-restore fetch must not have even STARTED yet — proves strict sequencing, not two
+    // fetches racing where this one simply happened to be slower this run.
+    expect(loadFormDraftServerSpy).not.toHaveBeenCalled()
+    expect(prefillNotice()).toBeNull() // notice not shown yet either — nothing has settled
+
+    resolveGetApproval(
+      mockPendingApproval({
+        id: 'apv_source_race',
+        status: 'rejected',
+        formSnapshot: { reason: '出差报销（race winner）', amount: 4200 },
+      }),
+    )
+    await flushUi()
+
+    // NOW the prefill has landed. Because prefillNoticeVisible is true, offerDraftRestore is
+    // skipped ENTIRELY — the draft fetch must still never have been called.
+    expect(loadFormDraftServerSpy).not.toHaveBeenCalled()
+    expect(prefillNotice()).toBeTruthy()
+    expect(container!.querySelector('[data-testid="approval-draft-restore-apply"]')).toBeNull()
+
+    submitButton().click()
+    await flushUi()
+    const payload = submitApprovalSpy.mock.calls[0][0]
+    // The prefilled value reached the form; the stale draft's value never did.
+    expect(payload.formData).toMatchObject({ reason: '出差报销（race winner）', amount: 4200 })
   })
 
   it('does not prefill when there is no `fromInstance` query — unchanged behavior', async () => {
@@ -1946,5 +2166,148 @@ describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser',
     const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value)
     expect(values, 'the newer response must be the one that actually rendered').toContain('u_new')
     expect(values, 'the late-arriving OLDER response must be discarded, not appended or applied').not.toContain('u_old')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX 3 (gate P2-3) — restores the view-level drift-guard coverage the P3-3 diff deleted.
+//
+// Before P3-3, `seedDraft()` (the G13 describe block above) wrote a REAL signature — computed by
+// the REAL `formSchemaSignature` — into REAL `window.localStorage`, and the view's then-current
+// `formDraft.ts`-backed `offerDraftRestore` ran the REAL signature comparison against it. So a
+// regression in the comparison itself (not just in the VIEW's handling of whatever the module
+// returns) would have shown up in that test. P3-3's diff replaced the real localStorage write with
+// `vi.mock('../src/approvals/serverFormDraft', ...)` (declared near the top of this file) — the
+// right call for isolating the VIEW's own logic in every OTHER test here, but it means the
+// comparison inside the NEW module (`serverFormDraft.ts:70`) is never exercised by anything that
+// mounts the view; a mocked `loadFormDraftServerSpy` returns whatever a test tells it to,
+// unconditionally, regardless of whether the signatures would really have matched.
+//
+// The two tests below temporarily UN-mock `serverFormDraft.ts` (`vi.doUnmock` +
+// `vi.resetModules()`) and stub only the underlying `fetch` the view's default (uninjected)
+// `apiFetch` call bottoms out in — driving the REAL `loadFormDraftServer`, including its REAL
+// signature comparison, through a REAL mount of `ApprovalNewView.vue`. The mock is restored in
+// `afterEach` (`vi.doMock` + `vi.resetModules()`) so no other test in this file is affected — this
+// block is placed LAST in the file specifically so its `resetModules()` calls (which force a fresh
+// module graph on the NEXT dynamic import, including of unrelated singleton modules like
+// `directoryResolve.ts`) cannot bleed forward into any test that runs after it, because none does.
+// ---------------------------------------------------------------------------
+describe('ApprovalNewView — P3-3 (gate P2-3): real drift-guard comparison, driven end-to-end through a real mount (not the module mock)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: formSchemaWithNumberPropsAndAttachment(),
+    })
+    submitApprovalSpy.mockReset()
+    submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_numfields_1' }))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.unstubAllGlobals()
+    // Restore the file-wide mock for every OTHER describe block (none run after this one, but this
+    // keeps the invariant explicit rather than relying on "nothing else happens to run later").
+    vi.doMock('../src/approvals/serverFormDraft', () => ({
+      loadFormDraftServer: (...args: unknown[]) => loadFormDraftServerSpy(...args),
+      saveFormDraftServer: (...args: unknown[]) => saveFormDraftServerSpy(...args),
+      clearFormDraftServer: (...args: unknown[]) => clearFormDraftServerSpy(...args),
+      listFormDraftsServer: vi.fn(async () => []),
+    }))
+    vi.resetModules()
+  })
+
+  async function mountView() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    const Host = defineComponent({ setup: () => () => h(ApprovalNewView as any) })
+    app = createApp(Host)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElDivider', ElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', ElInput)
+    app.component('ElInputNumber', ElInputNumber)
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', ElSelect)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  /** Stubs `fetch` for the draft GET and returns a promise that resolves once that GET has been
+   *  answered — a REAL `fetch`/`Response.json()` round trip takes more real event-loop turns to
+   *  settle than the synchronous-mock-resolving tests elsewhere in this file (their
+   *  `loadFormDraftServerSpy.mockResolvedValueOnce(...)` settles in one microtask), so tests await
+   *  this signal (plus a couple of `flushUi()` cycles for the resulting DOM update to commit)
+   *  instead of guessing a fixed number of cycles or sleeping a fixed duration. */
+  function stubDraftFetch(draftBody: { signature: string; data: Record<string, unknown> } | null): Promise<void> {
+    let resolveGetAnswered: () => void = () => {}
+    const getAnswered = new Promise<void>((resolve) => {
+      resolveGetAnswered = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        if (url.includes('/api/approvals/form-drafts/tpl_numfields') && method === 'GET') {
+          const body = draftBody
+            ? { data: { draft: { templateId: 'tpl_numfields', signature: draftBody.signature, data: draftBody.data, savedAt: '2026-01-01T00:00:00.000Z' } } }
+            : { data: { draft: null } }
+          const response = new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+          resolveGetAnswered()
+          return response
+        }
+        // Any other call this mount makes while un-mocked (e.g. the best-effort GC DELETE on a
+        // mismatch) — a generic 204/empty-ok response is fine, nothing here asserts on it.
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }),
+    )
+    return getAnswered
+  }
+
+  it('a MATCHING signature (computed by the REAL formSchemaSignature against the CURRENT schema) offers the restore banner with the real draft data', async () => {
+    vi.doUnmock('../src/approvals/serverFormDraft')
+    vi.resetModules()
+    const matchingSignature = formSchemaSignature(mockActiveTemplate.value.formSchema)
+    const getAnswered = stubDraftFetch({ signature: matchingSignature, data: { proof: ['att_real_match'] } })
+
+    await mountView()
+    await getAnswered
+    await flushUi()
+    await flushUi()
+
+    const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement | null
+    expect(applyBtn, 'the REAL signature comparison found a MATCH — restore must be offered').toBeTruthy()
+  })
+
+  it('a MISMATCHED signature (real comparison against a schema that has since drifted) does NOT offer the restore banner', async () => {
+    vi.doUnmock('../src/approvals/serverFormDraft')
+    vi.resetModules()
+    const getAnswered = stubDraftFetch({ signature: 'stale-signature-from-a-since-changed-schema', data: { proof: ['att_stale'] } })
+
+    await mountView()
+    await getAnswered
+    await flushUi()
+    await flushUi()
+
+    const applyBtn = container!.querySelector('[data-testid="approval-draft-restore-apply"]') as HTMLElement | null
+    expect(applyBtn, 'the REAL signature comparison found a MISMATCH — restore must NOT be offered').toBeNull()
   })
 })
