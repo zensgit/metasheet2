@@ -182,3 +182,131 @@ $ grep -n -E 'attendance-preflight|attendance-onprem-env-check|attendance-onprem
 `sed -i 's/\r$//'` 把 working tree 恢复成单一 LF 再编辑,保证新增行和原有行的
 换行风格一致;提交时 `core.autocrlf=true` 会继续按 LF 存入对象库,不引入混合
 换行。
+
+## 轻核返修(PR #5718,HEAD `ced5a84fa` 已推送后)
+
+### F1(高,必修):`require_encryption_material` 的 `==` 比对没有规范化取值
+
+`attendance-preflight.sh`/`attendance-onprem-env-check.sh` 里的 `get_env_value`
+只做 `${line#KEY=}` 这种纯字符串前缀裁剪——不脱引号、不 trim 空白、不去
+`\r`。而 `require_encryption_material` 拿到这个原始值后直接 `==` 字符串比对。
+这意味着以下写法在这两个脚本里都会被**误放行**(实测确认,见验证文档):
+
+- `ENCRYPTION_KEY="default-key-change-in-production"`(双引号包住哨兵)
+- `ENCRYPTION_KEY='default-key-change-in-production'`(单引号包住哨兵)
+- `ENCRYPTION_KEY=""`(引号包住的空值——两个引号字符本身让字符串非空)
+- `ENCRYPTION_KEY=   `(只有空白,没有值)
+- 哨兵字面量后面拖着一个 `\r`(CRLF 保存的 env 文件里,行内容本身含 `\r`;
+  在 Linux 上标准 GNU grep 不会自动剥掉这个 `\r`,会原样传下来)
+
+而这份 env 文件真正的运行时语义是 `docker compose --env-file` 或
+`attendance-onprem-bootstrap-admin.sh` 的 `source` ——两者都会按 shell/dotenv
+解析规则脱引号、忽略首尾空白;上述五种写法在**真实运行时**其实就是「哨兵值」
+或「空值」,只是我们自己写的这个简化版 `get_env_value` 没有做同样的规范化,
+导致预检脚本对同一份 env 文件的判断和运行时实际吃到的值不一致——预检说
+"OK",运行时其实在用不安全的默认哨兵。`attendance-onprem-bootstrap-admin.sh`
+因为本来就走 `source`,这五种写法在它那里从建立时起就已经正确 die,不受此
+问题影响。
+
+修法:在 `require_encryption_material` 比对前,对拿到的 `value` 做三步规范化
+(顺序:先去 `\r`,再 trim 首尾空白,再脱一层成对引号),之后才做空值/哨兵
+判断:
+
+```bash
+value="${value%$'\r'}"
+value="${value#"${value%%[![:space:]]*}"}"
+value="${value%"${value##*[![:space:]]}"}"
+if (( ${#value} >= 2 )); then
+  if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] || [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+    value="${value:1:-1}"
+  fi
+fi
+```
+
+只改了 `attendance-preflight.sh` 和 `attendance-onprem-env-check.sh` 里的
+`require_encryption_material` 函数体;`attendance-onprem-bootstrap-admin.sh`
+的同名函数不用动(它接收到的 `${ENCRYPTION_KEY:-}` 已经是 `source` 解析后的
+干净值)。
+
+**JWT 同形状洞(记录,不动)**:`require_strong_jwt_secret` 在这两个脚本里
+拿到的 `secret` 同样是 `get_env_value` 的原始输出,同样没有脱引号/trim/去
+`\r`,存在与 `ENCRYPTION_KEY`/`SALT` 完全相同的漏判形状(比如
+`JWT_SECRET="change-me"` 大概率也会被误放行)。这次任务范围只是给
+`JWT_SECRET` 校验"照抄形状"加 `ENCRYPTION_*` 校验,不包含修 `JWT_SECRET`
+自己这个既有洞——按返修指示不动它,留给后续 PR。
+
+### F2(中):`verify_onprem_env_templates` 的空值断言可被重复声明绕过
+
+原断言 `grep -q '^ENCRYPTION_KEY=$'` 只要求"至少一行匹配空占位",不要求
+"每一行都是空占位"。如果模板文件里同时出现:
+
+```
+ENCRYPTION_KEY=
+ENCRYPTION_KEY=abcdef0123456789abcdef0123456789
+```
+
+`grep -q '^ENCRYPTION_KEY='` 命中(存在声明)→ 进入 if 体;
+`grep -q '^ENCRYPTION_KEY=$'` 命中第一行(空占位)就返回真 → 断言通过 → 第
+二行的真实值被放过。
+
+修法:改成"取出所有 `^ENCRYPTION_KEY=` 开头的行,再用 `-v` 排除掉恰好是空
+占位(允许尾随空白/`\r`)的行,如果还剩下任何一行,就说明存在非空声明,
+die":
+
+```bash
+if grep -qE '^ENCRYPTION_KEY=' "$abs"; then
+  if grep -E '^ENCRYPTION_KEY=' "$abs" | grep -vqE '^ENCRYPTION_KEY=[[:space:]]*$'; then
+    die "${rel} must keep every ENCRYPTION_KEY= line empty (no real value committed to template)"
+  fi
+fi
+```
+
+`[[:space:]]*$`(而不是裸 `$`)顺带把「尾随空白」和「CRLF 保存留下的
+`\r`」也一起容忍掉,不需要单独处理。`ENCRYPTION_SALT` 同形状处理。
+
+**当前覆盖率为零,如实记录**:改动前后,`docker/app.env.attendance-onprem.template`
+和 `docker/app.env.attendance-onprem.ready.env` 两个真实模板文件里都**没有**
+`ENCRYPTION_KEY=`/`ENCRYPTION_SALT=` 这两行(#5711 的模板占位改动还没合并
+进来,见前一节"当前仓库状态")。也就是说这条修复后的断言,在当前分支上,
+`if grep -qE '^ENCRYPTION_KEY='` 这个门槛条件本身就是假,断言函数体在这个
+PR 范围内实际执行次数是零——只有在 #5711 合并、模板真的声明了这两个变量之后,
+这条断言才会被真实数据触发。本机验证是在临时构造的模板副本上做的(加占位行 /
+加真值行 / 双声明同时存在),不是对真实模板文件的正向覆盖测试,见验证文档。
+
+**新增 `docker/app.env.example` 覆盖(判断记录)**:检查
+`attendance-onprem-package-verify.sh` 的 `required=()` 数组,确认
+`docker/app.env.example` 确实是随 attendance on-prem 包一起分发的必需文件
+(和另外两个已检查的模板一样会打进发货包)。把它加进了 `ENCRYPTION_KEY`/
+`ENCRYPTION_SALT` 的检查清单——**但没有**把它加进 `JWT_SECRET=change-me`/
+`BCRYPT_SALT_ROUNDS=12` 的检查清单,因为 `docker/app.env.example` 目前只有
+`JWT_SECRET=change-me` 一行,没有 `BCRYPT_SALT_ROUNDS` 行,如果原样并入那个
+循环会立刻因为一个和本次任务无关的既有原因(`BCRYPT_SALT_ROUNDS` 缺失)而
+die,把范围外的失败引入这个 PR。这是我做的一个判断:把函数拆成两个独立的
+`for` 循环,JWT/BCRYPT 循环维持原来两个文件不变,ENCRYPTION 循环扩到三个
+文件。如果协调方希望 `docker/app.env.example` 也补上 `BCRYPT_SALT_ROUNDS`
+占位行本身,那是另一个独立的改动,这次没有做。
+
+### F3(登记,不改):`scripts/ops/multitable-onprem-preflight.sh`
+
+实读确认该脚本同样用 `get_env_value`(其实现比本次改的两个脚本更完善——
+它本来就有一个 `strip_quotes()` 辅助函数,在赋值时统一包一层
+`strip_quotes "$(get_env_value KEY)"`,已经处理了引号和 `\r`,但**没有**
+trim 纯空白值这一步),且完全没有 `ENCRYPTION_KEY`/`ENCRYPTION_SALT` 检查。
+
+关于返修指示里说它"在 pin 集"——本次实读核对
+`plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`
+和 `.gitattributes`,搜索 `multitable-onprem-preflight` 均无匹配;pin
+集/`.gitattributes` 里出现的 `multitable-onprem-*` 只有
+`multitable-onprem-package-verify.sh` 和 `multitable-onprem-package-build.sh`
+两个(都是不同的文件)。如实记录这个差异:按我自己核对到的证据,这个文件
+**目前不在** pin 集里,不需要重算 pin 就能改。但按返修指示"登记不改",本次
+仍然不碰它,只登记进这份文档,留给后续 PR 处理(处理前建议再核一次 pin
+集,因为这份记录本身可能随时间变化)。
+
+### F4(注记,不改):`attendance-onprem-bootstrap-admin.sh` 的 `source "$ENV_FILE"`
+
+`load_env_file()` 用 `set -a; source "$ENV_FILE"; set +a` 把整份 env 文件当
+shell 脚本执行。如果 env 文件里某一行写成 `SOME_VAR=$(curl ...)` 这种命令
+替换形式,`source` 会真的执行这条命令。这是该脚本既有的行为,不是本次
+W5-G/返修引入的,超出本次任务范围,不改;记录在此供后续单独评估(风险取决于
+env 文件的写入/审核权限模型,不属于本 PR 判断范围)。

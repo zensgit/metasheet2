@@ -52,6 +52,23 @@ function require_encryption_material() {
   local var_name="$1"
   local value="$2"
   local default_sentinel="$3"
+
+  # get_env_value does a literal `${line#KEY=}` with no shell re-parsing, unlike
+  # `docker compose --env-file` / `source` (bootstrap-admin's actual runtime path
+  # for this file). Without normalizing the same way here, a quoted value
+  # (ENCRYPTION_KEY="default-key-change-in-production"), a whitespace-only value
+  # (ENCRYPTION_KEY=   ), or a sentinel with a trailing \r left by a CRLF-saved
+  # env file would all sail past a byte-for-byte `==` compare below even though
+  # Compose/source would treat them as the bare default/empty value at runtime.
+  value="${value%$'\r'}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if (( ${#value} >= 2 )); then
+    if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] || [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+      value="${value:1:-1}"
+    fi
+  fi
+
   [[ -n "$value" ]] || die "${var_name} is missing (empty) in ${ENV_FILE}. Generate one with: openssl rand -hex 32"
   if [[ "$value" == "$default_sentinel" ]]; then
     die "${var_name} uses the insecure built-in default value in ${ENV_FILE}. Generate one with: openssl rand -hex 32"

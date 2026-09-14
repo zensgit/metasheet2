@@ -187,3 +187,205 @@ exit=0          # 红:本该 die 却放行了,证明变异有效、测试有意�
 - 打包侧 `verify_onprem_env_templates` 对"没有该行"和"空值占位"两种状态都放行
   (兼容 #5711 未合并/已合并两种状态),对"真实值被提交进模板"正确拦截。
 - 变异测试证明 die 分支是真的在比对哨兵字面量,不是巧合触发。
+
+## 轻核返修验证(PR #5718,HEAD `ced5a84fa` 之后的追加提交)
+
+### `bash -n`(四脚本,F1/F2 改动后)
+
+```
+$ bash -n scripts/ops/attendance-preflight.sh && echo OK
+OK
+$ bash -n scripts/ops/attendance-onprem-env-check.sh && echo OK
+OK
+$ bash -n scripts/ops/attendance-onprem-bootstrap-admin.sh && echo OK
+OK
+$ bash -n scripts/ops/attendance-onprem-package-verify.sh && echo OK
+OK
+```
+
+### F1:五种形状,端到端(`attendance-preflight.sh`)
+
+固定用 `env-valid.env` 为底板,只替换 `ENCRYPTION_KEY=` 那一行:
+
+```
+f1-dquote-sentinel (ENCRYPTION_KEY="default-key-change-in-production")
+  -> ERROR: ENCRYPTION_KEY uses the insecure built-in default value in <path>. ...
+  exit=1
+
+f1-squote-sentinel (ENCRYPTION_KEY='default-key-change-in-production')
+  -> ERROR: ENCRYPTION_KEY uses the insecure built-in default value in <path>. ...
+  exit=1
+
+f1-quoted-empty (ENCRYPTION_KEY="")
+  -> ERROR: ENCRYPTION_KEY is missing (empty) in <path>. ...
+  exit=1
+
+f1-whitespace-only (ENCRYPTION_KEY=   )
+  -> ERROR: ENCRYPTION_KEY is missing (empty) in <path>. ...
+  exit=1
+
+f1-sentinel-cr (ENCRYPTION_KEY=default-key-change-in-production\r, 该行单独 CRLF)
+  -> ERROR: ENCRYPTION_KEY uses the insecure built-in default value in <path>. ...
+  exit=1
+```
+
+`attendance-onprem-env-check.sh` 对前四种形状重跑一遍,结果同形状(die
+消息里的脚本前缀不同,判断逻辑相同):
+
+```
+f1-dquote-sentinel -> ERROR: ENCRYPTION_KEY uses the insecure built-in default value ...  exit=1
+f1-squote-sentinel -> ERROR: ENCRYPTION_KEY uses the insecure built-in default value ...  exit=1
+f1-quoted-empty    -> ERROR: ENCRYPTION_KEY is missing (empty) ...                        exit=1
+f1-whitespace-only -> ERROR: ENCRYPTION_KEY is missing (empty) ...                        exit=1
+env-valid(control) -> Env check OK (REQUIRE_ATTENDANCE_ONLY=1)                            exit=0
+```
+
+**关于 `f1-sentinel-cr` 的一个平台说明**:直接实测发现,本机(Windows Git
+Bash,GNU grep 3.0)的 `grep -E "^ENCRYPTION_KEY=" file` 在文件该行是 CRLF
+而文件其余部分是 LF 的混合场景下,会**自己先把尾随 `\r` 吞掉**才输出匹配
+行——用 `od -c`/`cat -A` 直接看原始文件字节,确认 `\r` 真的写进了文件
+(`ENCRYPTION_KEY=default-key-change-in-production^M$`),但同一份文件经过
+`grep -E ... | tail -n 1 | od -c` 之后 `\r` 就没了。这是本机这个 grep 构建
+的一个平台特性,不是我们代码的行为;返修需求里点名的"Linux grep 保留
+CR"场景,在标准 Linux/GNU grep 环境下 `\r` 不会被自动吞掉,`require_encryption_material`
+拿到的 `value` 就会真的带着尾随 `\r`。因为本机没法用真实 grep 调用复现这
+条路径,改用**函数级直测**绕过 grep,直接把带 `\r` 的字符串喂给
+`require_encryption_material`(见下一节),这是对 `value="${value%$'\r'}"`
+这一行代码本身的直接验证,不依赖某个平台的 grep 是否已经替我们把 `\r` 处理掉。
+
+### F1:函数级直测(绕开本机 grep 的 CRLF 特性,直接调用规范化后的函数)
+
+抽取 `die()` + `require_encryption_material()`(改动后的版本)到
+`scratchpad/w5g/preflight-require-encryption-segment.sh`,`bash -n` 通过后
+`source` 并直接传入带 `\r`/引号/空白的字符串:
+
+```
+sentinel + 字面 \r (bash $'...\r' 直接构造,不经过 grep)
+  -> ERROR: ENCRYPTION_KEY uses the insecure built-in default value in fixture.env. ...
+  exit=1
+
+"default-key-change-in-production" (双引号)
+  -> ERROR: ENCRYPTION_KEY uses the insecure built-in default value in fixture.env. ...
+  exit=1
+
+'default-key-change-in-production' (单引号)
+  -> ERROR: ENCRYPTION_KEY uses the insecure built-in default value in fixture.env. ...
+  exit=1
+
+"" (引号包住的空值)
+  -> ERROR: ENCRYPTION_KEY is missing (empty) in fixture.env. ...
+  exit=1
+
+"   " (三个空格,无引号)
+  -> ERROR: ENCRYPTION_KEY is missing (empty) in fixture.env. ...
+  exit=1
+
+"abcdef0123456789abcdef0123456789" (双引号包住一个合法的非哨兵值,正控制组)
+  -> reached-past-check (未 die)
+  exit=0
+```
+
+### F1:控制组(既有行为不应改变)
+
+```
+abc=def 追加到合法 env 文件末尾(与 ENCRYPTION_KEY 无关的行)
+  -> [attendance-preflight] Preflight OK      exit=0   (未被无关行干扰)
+
+  ENCRYPTION_KEY=default-key-change-in-production (行首带前导空白)
+  -> ERROR: ENCRYPTION_KEY is missing (empty) in <path>. ...   exit=1
+  (get_env_value 的 ^KEY= 锚点本来就不匹配带前导空白的行,判定回落到"缺失"，
+   既有行为不变——不是命中了哨兵判断,而是命中了空值判断)
+
+export ENCRYPTION_KEY=default-key-change-in-production (export 前缀)
+  -> ERROR: ENCRYPTION_KEY is missing (empty) in <path>. ...   exit=1
+  (同上,^KEY= 锚点不匹配,既有行为不变)
+```
+
+### F1 回归:原 W5-G 基线用例(HEAD `ced5a84fa` 已验证过的四个 die + 一个
+valid case)重新跑一遍,确认本次改动没有破坏原有行为
+
+```
+env-valid      -> [attendance-preflight] Preflight OK                          exit=0
+env-empty-key  -> ERROR: ENCRYPTION_KEY is missing (empty) in <path>. ...      exit=1
+env-empty-salt -> ERROR: ENCRYPTION_SALT is missing (empty) in <path>. ...     exit=1
+env-default-key-> ERROR: ENCRYPTION_KEY uses the insecure built-in default ... exit=1
+env-default-salt-> ERROR: ENCRYPTION_SALT uses the insecure built-in default . exit=1
+```
+
+### F2:三个副本用例(抽 `die()` + `verify_onprem_env_templates()`,改动后版本)
+
+```
+pkgroot-dupline (同一模板里 ENCRYPTION_KEY= 空占位 + ENCRYPTION_KEY=真实值 两行同时存在)
+  -> ERROR: docker/app.env.attendance-onprem.template must keep every ENCRYPTION_KEY= line empty (no real value committed to template)
+  exit=1   (旧断言会因为命中第一行空占位而误放行;新断言正确拦截)
+
+pkgroot-trailingws (ENCRYPTION_KEY=   三个尾随空格；ENCRYPTION_SALT=\r 尾随 CRLF)
+  -> PASSED (no die)
+  exit=0   ([[:space:]]*$ 容忍尾随空白和 \r，仍判定为空占位)
+
+pkgroot-example-realvalue (docker/app.env.example 里 ENCRYPTION_KEY=真实值)
+  -> ERROR: docker/app.env.example must keep every ENCRYPTION_KEY= line empty (no real value committed to template)
+  exit=1   (新增覆盖：docker/app.env.example 现在也会被检查)
+```
+
+### F2 回归:原 W5-G 基线四个包根目录(补了一个不含 ENCRYPTION_* 的
+`docker/app.env.example` 之后)重新跑一遍
+
+```
+pkgroot-noenc    -> PASSED (no die)   exit=0
+pkgroot-emptyenc -> PASSED (no die)   exit=0
+pkgroot-realkey  -> ERROR: ... must keep every ENCRYPTION_KEY= line empty ...   exit=1
+pkgroot-realsalt -> ERROR: ... must keep every ENCRYPTION_SALT= line empty ...  exit=1
+```
+
+对真实仓库(`git worktree` 根目录本身当 `root` 传入,含真实
+`docker/app.env.example`)重新跑一次同一函数:
+
+```
+PASSED against real repo templates (no die)
+exit=0
+```
+
+**如实记录零覆盖**:上面这几个"真实仓库"级别的验证,以及 F2 设计文档里
+提到的"当前两个模板都没有 ENCRYPTION_KEY/SALT 行"这一事实,意味着 F2
+修复的两个 `if` 分支体,在真实仓库当前状态下(#5711 模板改动未合并)**实际
+执行次数为零**——`if grep -qE '^ENCRYPTION_KEY=' "$abs"` 这个门槛条件本身就
+不成立。上面 `pkgroot-dupline`/`pkgroot-trailingws`/`pkgroot-example-realvalue`
+三个用例全部是在临时构造的模板副本上跑的,不是对真实仓库文件的正向覆盖。
+
+### 变异测试(mutation),F1
+
+对 `scripts/ops/attendance-preflight.sh` 的 `require_encryption_material`
+函数体里,删掉整段"脱一层成对引号"的 `if (( ${#value} >= 2 )); then ...
+fi` 代码块(保留去 `\r` 和 trim 空白两步),预期:双引号包裹哨兵这个 die
+case 应该"假绿"(不再 die)。
+
+```
+# 改动前(baseline,见上面 F1 端到端第一节):dquote-sentinel -> die, exit=1
+
+# 变异后(去掉脱引号代码块):
+$ ENV_FILE=<f1-dquote-sentinel.env> bash scripts/ops/attendance-preflight.sh
+...
+[attendance-preflight] Preflight OK
+exit=0          # 红:本该 die 却放行了,证明脱引号这段代码确实是必需的
+```
+
+变异后立即用改动前的备份文件还原
+(`cp scratchpad/w5g/attendance-preflight.sh.bak2 scripts/ops/attendance-preflight.sh`),
+`bash -n` 重新通过,再跑一次 `f1-dquote-sentinel.env` 确认恢复到
+`die, exit=1`(上面 F1 端到端第一节展示的输出,就是还原之后重新跑出来的
+结果,不是变异前的缓存)。
+
+## 轻核返修结论
+
+- F1:五种形状(双引号哨兵、单引号哨兵、引号空值、纯空白值、哨兵+`\r`)加
+  三个控制组(无关行、前导空白行、`export` 前缀行)加原有基线五个用例,全部
+  按预期通过;变异测试证明脱引号步骤确实在起作用。
+- F2:三个副本用例(重复声明绕过、尾随空白/CRLF 容忍、`docker/app.env.example`
+  新增覆盖)加原有基线四个用例,全部按预期通过;如实记录当前仓库状态下
+  真实模板文件对这条断言的覆盖率为零(#5711 未合并)。
+- F3:确认 `scripts/ops/multitable-onprem-preflight.sh` 同形状漏洞 + 零
+  ENCRYPTION 检查,按指示登记不改;同时记录了一处与返修指示不一致的实读结果
+  (该文件实测**不在**当前 pin 集里)。
+- F4:确认 `attendance-onprem-bootstrap-admin.sh` 的 `source` 会执行 env 里
+  的命令替换,按指示登记不改。
