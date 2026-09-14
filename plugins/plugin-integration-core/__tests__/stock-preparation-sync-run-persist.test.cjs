@@ -18,6 +18,20 @@
 //       SECOND, genuinely-new batch for the same project; the patch never carries owner / sourceProjectNo
 //       / projectName (human_preserved + first-synced identity survive untouched); a duplicate/retried
 //       persist of the SAME snapshotBatchId leaves the project row untouched entirely (idempotent skip).
+//   (i) MVP 快照表字段存在性探针 (#5719 gap — the mvp-persist route probes the CANONICAL target, the
+//       four MVP snapshot tables this module writes were still resolved compute-only): a host whose
+//       DB-backed read omits columns from a snapshot table => 422 TARGET_SCHEMA_INCOMPLETE with exactly
+//       { targetObjectId, missingFields, fieldExistenceMode } and ZERO records I/O; a complete db host,
+//       an old host without the DB read, and a scope-refused host answer byte-identically (result AND
+//       writes); a host failure is a values-free 503 TARGET_SCHEMA_UNAVAILABLE; 409 not-provisioned
+//       keeps precedence; an exact replay is refused before its replay read; no sheet-identity gate
+//       (the fixture's derived sheet id diverges from findObjectSheet's and the probe still fires).
+//
+// MUTATIONS the (i) cases are calibrated against (run in-memory by the implementer's mutation runner,
+// never on disk): M1 probe loop removed => (i-a)(i-a2)(i-g)(i-h) red; M2 capability gate removed (old
+// host probed too) => (i-c) red, and `!== 'db'` guard removed (scope-degraded verdict refused) =>
+// (i-d) red; M3 details carry a sheet id / extra key => (i-a) red; M4 host failure rethrown raw =>
+// (i-e) red; M5 probe moved before sheet resolution => (i-f) red.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -31,8 +45,19 @@ const {
   RUN_OBJECT_ID,
   PROJECT_OBJECT_ID,
   PROJECT_KEY_FIELD,
-  __internals: { MVP_OBJECT_ID_SET, READ_PAGE_LIMIT, READ_MAX_PAGES, PERSIST_MAX_PLAN_LINES, readExistingSnapshotLines },
+  __internals: {
+    MVP_OBJECT_ID_SET,
+    READ_PAGE_LIMIT,
+    READ_MAX_PAGES,
+    PERSIST_MAX_PLAN_LINES,
+    readExistingSnapshotLines,
+    MVP_PERSIST_TARGET_TEMPLATES,
+    assertMvpTargetFieldsExist,
+  },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-persist.cjs'))
+const {
+  resolveFieldExistence,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
 const {
   __internals: { LINE_FIELD_IDS },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-plan.cjs'))
@@ -1338,6 +1363,288 @@ async function main() {
         error instanceof StockPreparationSyncRunPersistError &&
         error.code === 'PERSIST_TARGET_NOT_PROVISIONED',
     )
+  })
+
+  // ---- (i) MVP 快照表字段存在性探针 — the write-path half of the readiness probe (#5719 gap) ----
+  //
+  // #5719 probes the CANONICAL target inside computeDryRun; the four MVP snapshot tables this module
+  // writes were still resolved compute-only, so a snapshot line table five columns short (222) went
+  // unnoticed until the records service rejected the write. These cases pin the probe on THIS path.
+  //
+  // `makeDbProvisioning` is the suite's own fake plus the host's DB-backed read
+  // (`resolveExistingObjectFieldIds`), answering per objectId. Its `getObjectSheetId` is the fixture's
+  // — it derives sheet_<sha1(project:object)>, which is NOT the sheet_<objectId> `findObjectSheet`
+  // answers — so a probe that copied #5719's sheet-identity gate would fall silent on every case here.
+  // `computedMissingOnRepeatByObjectId` makes the compute-only map omit ids on the SECOND
+  // `resolveFieldIds` call for an object (the first feeds resolveTargetFieldIds, which fails closed
+  // on omission; the second is the shared probe's scope-degraded fallback). A real compute-only host
+  // never omits, so this is not a model of production — it is the instrument that lets the scope arm
+  // SEE a probe that refuses on a non-`db` verdict.
+  const MISSING_LINE_FIVE = Object.freeze(['pathKey', 'designQty', 'designUnit', 'totalQuantity', 'sourceFingerprint'])
+  const MVP_PERSIST_OBJECT_IDS = Object.freeze([BATCH_OBJECT_ID, LINE_OBJECT_ID, RUN_OBJECT_ID, PROJECT_OBJECT_ID])
+  const TEMPLATE_IDS_BY_OBJECT_ID = Object.fromEntries(MVP_PERSIST_TARGET_TEMPLATES.map((template) => [template.objectId, template.fields.map((field) => field.id)]))
+
+  function makeDbProvisioning({
+    dbRead = true,
+    missingByObjectId = {},
+    scopeError = null,
+    dbReadError = null,
+    computedMissingOnRepeatByObjectId = {},
+    missing = new Set(),
+  } = {}) {
+    const fake = makeFakeProvisioning({ sheetIdByObjectId: SHEET_ID_BY_OBJECT_ID, stagingProjectId: STAGING_PROJECT_ID, missing })
+    const probeCalls = []
+    const resolveFieldIdsCalls = []
+    const repeatSeen = new Map()
+    const provisioning = {
+      calls: fake.calls,
+      probeCalls,
+      resolveFieldIdsCalls,
+      findObjectSheet: fake.findObjectSheet,
+      getObjectSheetId: fake.getObjectSheetId,
+      async resolveFieldIds(input = {}) {
+        resolveFieldIdsCalls.push({ projectId: input.projectId, objectId: input.objectId })
+        const resolved = await fake.resolveFieldIds(input)
+        const seen = (repeatSeen.get(input.objectId) || 0) + 1
+        repeatSeen.set(input.objectId, seen)
+        if (seen > 1) for (const id of computedMissingOnRepeatByObjectId[input.objectId] || []) delete resolved[id]
+        return resolved
+      },
+    }
+    if (dbRead) {
+      provisioning.resolveExistingObjectFieldIds = async ({ projectId, objectId, fieldIds } = {}) => {
+        probeCalls.push({ projectId, objectId, fieldIds: [...fieldIds] })
+        if (dbReadError) throw dbReadError
+        if (scopeError) throw scopeError
+        const resolved = await fake.resolveFieldIds({ projectId, objectId, fieldIds })
+        for (const id of missingByObjectId[objectId] || []) delete resolved[id]
+        return resolved
+      }
+    }
+    return provisioning
+  }
+
+  function scopeError(shape) {
+    const error = new Error('object is not in this plugin scope')
+    if (shape === 'name') error.name = 'MultitableObjectScopeError'
+    if (shape === 'code') error.code = 'MULTITABLE_OBJECT_SCOPE_FORBIDDEN'
+    return error
+  }
+
+  function assertZeroRecordsIo(recordsApi, label) {
+    assert.equal(recordsApi.unitOfWorkCalls.length, 0, `${label}: the unit-of-work never opened`)
+    assert.equal(recordsApi.queryCalls.length, 0, `${label}: zero records reads`)
+    assert.equal(recordsApi.createCalls.length, 0, `${label}: zero creates`)
+    assert.equal(recordsApi.patchCallCount, 0, `${label}: zero patches`)
+  }
+
+  // Write payloads minus the project row's wall-clock stamp, so two runs are comparable.
+  function comparableWrites(recordsApi) {
+    return recordsApi.createCalls.map((call) => {
+      const { lastSyncedAt, ...rest } = logicalOf(call)
+      return { objectId: objectIdForSheet(call.sheetId), data: rest, stamped: typeof lastSyncedAt }
+    })
+  }
+
+  await run('(i-a) MVP field probe: a db host missing five snapshot-line columns => 422 TARGET_SCHEMA_INCOMPLETE, values-free, ZERO records I/O', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeDbProvisioning({ missingByObjectId: { [LINE_OBJECT_ID]: [...MISSING_LINE_FIVE] } })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) => {
+        assert.ok(error instanceof StockPreparationSyncRunPersistError, 'the module\'s own error class')
+        assert.equal(error.status, 422)
+        assert.equal(error.code, 'TARGET_SCHEMA_INCOMPLETE')
+        assert.deepEqual(Object.keys(error.details).sort(), ['fieldExistenceMode', 'missingFields', 'targetObjectId'], 'exactly the three #5719 keys')
+        assert.equal(error.details.targetObjectId, LINE_OBJECT_ID)
+        assert.equal(error.details.fieldExistenceMode, 'db')
+        assert.deepEqual(error.details.missingFields, [...MISSING_LINE_FIVE], 'the five, in template order')
+        const text = JSON.stringify({ message: error.message, details: error.details })
+        assert.equal(text.includes('fld_'), false, 'no physical field id in the refusal')
+        assert.equal(text.includes('sheet_'), false, 'no sheet id in the refusal')
+        assert.equal(text.includes('proj_1'), false, 'no business project id in the refusal')
+        return true
+      },
+    )
+    assertZeroRecordsIo(recordsApi, '(i-a)')
+    // The probe asked about the tables this module writes, in write-resolution order, under the
+    // STAGING project (targetProjectId) — never the business projectId — and about each template in
+    // full: the same 口径 readiness asks.
+    assert.deepEqual(
+      provisioning.probeCalls.map((call) => call.objectId),
+      [BATCH_OBJECT_ID, LINE_OBJECT_ID],
+      'judged batch (complete) then line (refused); run/project never reached',
+    )
+    for (const call of provisioning.probeCalls) {
+      assert.equal(call.projectId, STAGING_PROJECT_ID, 'probe project is the staging targetProjectId')
+      assert.deepEqual(call.fieldIds, TEMPLATE_IDS_BY_OBJECT_ID[call.objectId], 'the full frozen template, nothing invented')
+    }
+    // No sheet-identity gate on this path (see makeDbProvisioning): the derived id was never consulted.
+    assert.equal(provisioning.calls.getObjectSheetId.length, 0, 'the probe never derived a sheet id')
+    // And every sheet had been proven provisioned first (409 precedence, see (i-f)).
+    assert.equal(provisioning.calls.findObjectSheet.length, 4, 'all four sheets resolved before the probe')
+  })
+
+  await run('(i-a2) MVP field probe: each of the four tables is judged; the first drifted one in write order names itself', async () => {
+    for (const [objectId, missingIds] of [
+      [BATCH_OBJECT_ID, ['snapshotVersion']],
+      [RUN_OBJECT_ID, ['inputShape', 'resultShape']],
+      [PROJECT_OBJECT_ID, ['owner']],
+    ]) {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeDbProvisioning({ missingByObjectId: { [objectId]: missingIds, [LINE_OBJECT_ID]: [...MISSING_LINE_FIVE] } })
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+        (error) => {
+          assert.equal(error.code, 'TARGET_SCHEMA_INCOMPLETE')
+          // batch precedes line in write order; run and project follow it.
+          const expected = objectId === BATCH_OBJECT_ID ? BATCH_OBJECT_ID : LINE_OBJECT_ID
+          assert.equal(error.details.targetObjectId, expected, `${objectId}: the first drifted table in write order is the one named`)
+          assert.deepEqual(error.details.missingFields, expected === BATCH_OBJECT_ID ? missingIds : [...MISSING_LINE_FIVE])
+          return true
+        },
+      )
+      assertZeroRecordsIo(recordsApi, `(i-a2) ${objectId}`)
+    }
+    // run / project alone drifted (line complete) => named directly.
+    for (const [objectId, missingIds] of [[RUN_OBJECT_ID, ['inputShape', 'resultShape']], [PROJECT_OBJECT_ID, ['owner']]]) {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeDbProvisioning({ missingByObjectId: { [objectId]: missingIds } })
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+        (error) => error.code === 'TARGET_SCHEMA_INCOMPLETE' && error.details.targetObjectId === objectId,
+      )
+      assertZeroRecordsIo(recordsApi, `(i-a2) ${objectId} alone`)
+    }
+  })
+
+  // The old-host answer every degraded arm below must equal — built on its OWN fresh store, so the
+  // comparison cannot be trivialised by an idempotent `skipped_existing` replay.
+  const legacyRecordsApi = makeRecordsApi()
+  const legacyProvisioning = makeDbProvisioning({ dbRead: false })
+  const legacyResult = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi: legacyRecordsApi, provisioning: legacyProvisioning, ...basePlanInputs() })
+  const legacyWrites = comparableWrites(legacyRecordsApi)
+
+  await run('(i-b) MVP field probe: a db host missing nothing => result and writes deep-equal the old-host run', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeDbProvisioning()
+    const result = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    assert.equal(result.mode, 'created')
+    assert.deepEqual(result, legacyResult, '(i-b): a complete probed host answers exactly what an old host answers')
+    assert.deepEqual(comparableWrites(recordsApi), legacyWrites, '(i-b): and writes exactly what an old host writes')
+    assert.deepEqual(provisioning.probeCalls.map((call) => call.objectId), [...MVP_PERSIST_OBJECT_IDS], '(i-b): all four judged, once each')
+    for (const call of provisioning.probeCalls) assert.equal(call.projectId, STAGING_PROJECT_ID)
+  })
+
+  await run('(i-c) MVP field probe: an old host without the DB read is never probed — zero extra provisioning calls, result unchanged', async () => {
+    assert.equal(legacyResult.mode, 'created')
+    assert.deepEqual(legacyResult.created, { batch: 1, lines: 2, run: 1 })
+    assert.equal(legacyProvisioning.probeCalls.length, 0)
+    // Exactly the four compute-only resolutions resolveScopedTarget always made — the probe added none.
+    assert.deepEqual(
+      legacyProvisioning.resolveFieldIdsCalls.map((call) => call.objectId),
+      [...MVP_PERSIST_OBJECT_IDS],
+      '(i-c): the legacy call trace is the pre-probe trace',
+    )
+    assert.equal(legacyProvisioning.calls.getObjectSheetId.length, 0)
+  })
+
+  await run('(i-d) MVP field probe: a host whose DB read refuses the object scope degrades to the old-host answer (name and code arms)', async () => {
+    for (const shape of ['name', 'code']) {
+      const recordsApi = makeRecordsApi()
+      // The degraded compute-only fallback omits the five on purpose (see makeDbProvisioning): a
+      // probe that refused on a `computed_scope_unavailable` verdict would be seen here.
+      const provisioning = makeDbProvisioning({
+        scopeError: scopeError(shape),
+        computedMissingOnRepeatByObjectId: { [LINE_OBJECT_ID]: [...MISSING_LINE_FIVE] },
+      })
+      const result = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+      assert.deepEqual(result, legacyResult, `(i-d ${shape}): degraded, not refused`)
+      assert.deepEqual(comparableWrites(recordsApi), legacyWrites, `(i-d ${shape}): writes unchanged`)
+      assert.equal(provisioning.probeCalls.length, 4, `(i-d ${shape}): the DB read was attempted for each table`)
+      // The instrument fired: the line table's compute map was consulted a second time (the
+      // fallback) and that answer omitted the five — and still nothing was refused.
+      assert.equal(provisioning.resolveFieldIdsCalls.filter((call) => call.objectId === LINE_OBJECT_ID).length, 2, `(i-d ${shape}): the scope-degraded fallback consulted the compute map`)
+    }
+  })
+
+  await run('(i-e) MVP field probe: a host failure on the DB read is a values-free 503 TARGET_SCHEMA_UNAVAILABLE, never the driver text, zero I/O', async () => {
+    const boom = new Error('connection terminated unexpectedly')
+    boom.code = 'ECONNRESET'
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeDbProvisioning({ dbReadError: boom })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) => {
+        assert.ok(error instanceof StockPreparationSyncRunPersistError)
+        assert.equal(error.status, 503)
+        assert.equal(error.code, 'TARGET_SCHEMA_UNAVAILABLE')
+        assert.deepEqual(Object.keys(error.details), ['targetObjectId'], 'the object id and nothing else')
+        assert.equal(error.details.targetObjectId, BATCH_OBJECT_ID, 'the first table judged')
+        assert.equal(error.cause, boom, 'the original rides on cause for the server log')
+        const text = JSON.stringify({ message: error.message, details: error.details })
+        assert.equal(text.includes('connection terminated'), false)
+        assert.equal(text.includes('ECONNRESET'), false)
+        return true
+      },
+    )
+    assertZeroRecordsIo(recordsApi, '(i-e)')
+  })
+
+  await run('(i-f) MVP field probe: an unprovisioned sheet still answers 409 PERSIST_TARGET_NOT_PROVISIONED — the probe runs only on provisioned sheets', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeDbProvisioning({
+      missing: new Set([LINE_OBJECT_ID]),
+      missingByObjectId: { [BATCH_OBJECT_ID]: ['snapshotVersion'] },
+    })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) => error instanceof StockPreparationSyncRunPersistError && error.code === 'PERSIST_TARGET_NOT_PROVISIONED' && error.details.objectId === LINE_OBJECT_ID,
+    )
+    assert.equal(provisioning.probeCalls.length, 0, '(i-f): no DB read before every sheet is proven provisioned')
+    assertZeroRecordsIo(recordsApi, '(i-f)')
+  })
+
+  await run('(i-g) MVP field probe: an exact replay of a persisted batch is refused too when the columns are gone — before the replay read', async () => {
+    const recordsApi = makeRecordsApi()
+    const missingByObjectId = {}
+    const provisioning = makeDbProvisioning({ missingByObjectId })
+    const first = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    assert.equal(first.mode, 'created')
+    const queriesAfterCreate = recordsApi.queryCalls.length
+    const createsAfterCreate = recordsApi.createCalls.length
+    const unitsAfterCreate = recordsApi.unitOfWorkCalls.length
+    missingByObjectId[LINE_OBJECT_ID] = [...MISSING_LINE_FIVE]
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+      (error) => error.code === 'TARGET_SCHEMA_INCOMPLETE' && error.details.targetObjectId === LINE_OBJECT_ID,
+    )
+    assert.equal(recordsApi.queryCalls.length, queriesAfterCreate, '(i-g): the replay read never ran')
+    assert.equal(recordsApi.createCalls.length, createsAfterCreate)
+    assert.equal(recordsApi.unitOfWorkCalls.length, unitsAfterCreate)
+    // Control: columns back => the exact replay skips as before.
+    delete missingByObjectId[LINE_OBJECT_ID]
+    const replay = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    assert.equal(replay.mode, 'skipped_existing')
+  })
+
+  await run('(i-h) MVP field probe: the exported guard is the shared probe (resolveFieldExistence) — same verdict, same details shape', async () => {
+    const provisioning = makeDbProvisioning({ missingByObjectId: { [LINE_OBJECT_ID]: [...MISSING_LINE_FIVE] } })
+    const lineTemplate = MVP_PERSIST_TARGET_TEMPLATES.find((template) => template.objectId === LINE_OBJECT_ID)
+    const shared = await resolveFieldExistence({ provisioning, projectId: STAGING_PROJECT_ID, objectId: LINE_OBJECT_ID, fieldIds: TEMPLATE_IDS_BY_OBJECT_ID[LINE_OBJECT_ID] })
+    assert.equal(shared.fieldExistenceMode, 'db')
+    await assert.rejects(
+      () => assertMvpTargetFieldsExist(provisioning, STAGING_PROJECT_ID, lineTemplate),
+      (error) => {
+        assert.equal(error.code, 'TARGET_SCHEMA_INCOMPLETE')
+        assert.deepEqual(error.details.missingFields, TEMPLATE_IDS_BY_OBJECT_ID[LINE_OBJECT_ID].filter((id) => !shared.resolved[id]), 'the guard reports exactly what the shared probe omitted')
+        return true
+      },
+    )
+    // A complete table, an old host and a scope-refused host all resolve to undefined (no refusal).
+    assert.equal(await assertMvpTargetFieldsExist(makeDbProvisioning(), STAGING_PROJECT_ID, lineTemplate), undefined)
+    assert.equal(await assertMvpTargetFieldsExist(makeDbProvisioning({ dbRead: false }), STAGING_PROJECT_ID, lineTemplate), undefined)
+    assert.equal(await assertMvpTargetFieldsExist(makeDbProvisioning({ scopeError: scopeError('name') }), STAGING_PROJECT_ID, lineTemplate), undefined)
   })
 
   console.log(`\nstock-preparation-sync-run-persist.test.cjs: ${passed} passed, ${failed} failed`)
