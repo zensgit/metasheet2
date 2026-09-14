@@ -18,13 +18,21 @@
  *   T5c  ledger, opt-in, capable, NO tenant, main missing -> 400, nothing written (fail-closed)
  *   T6   every creation order ends in ONE base for the main table + ledger pair — including the
  *        round-1 refuted state (ledger pre-existing, main table missing: (d) through the REAL
- *        routes, (g) module-level in an arbitrary base), the gate flipped off between the two
- *        ensures (e), and host version skew between the two ensures (f)
+ *        routes, (g) module-level in base_legacy), a partner pre-existing in a plugin system base
+ *        (c), the gate flipped off between the two ensures (e), and host version skew between the
+ *        two ensures (f); and (h), the final-judge fix: a partner sitting in a FOREIGN base (a user
+ *        base, another plugin's system base) is NEVER followed — 409
+ *        STOCK_PREPARATION_OWN_BASE_ANCHOR_REFUSED through the REAL routes in both directions and
+ *        at module level, zero ensureSystemBase, zero ensureObject, no base id in the response or
+ *        the error, gate on or off; every accepted shape (null / base_legacy /
+ *        base_integration-core_*) still anchors
  *   T7   env off (every off-value, trimmed/case-insensitive) -> zero ensureSystemBase, baseId null
  *        on a fresh install; the anchor still runs (it neither derives nor creates); unset / other
  *        values -> on
  *   T8   host without ensureSystemBase + opt-in -> null with ownBaseSource api_unavailable (the ONLY
- *        pin of that degrade; unreachable in a single-repo release), in BOTH orders
+ *        pin of that degrade; unreachable in a single-repo release), in BOTH orders; a PARTIAL
+ *        provisioning object (no findObjectSheet, or none at all) degrades the same way instead of
+ *        throwing a TypeError
  *   T9   canonical, opt-in, capable, NO tenant -> 400, nothing written
  *   T10  derivation ignores the projectId prefix
  *   T11  a request baseId on the write route is still 400 STOCK_PREPARATION_BASE_ID_NOT_ALLOWED
@@ -42,7 +50,7 @@
  * T12 red (projectId variant -> T10 red); M3 remove the anchor step -> T5 red; M4 detach the
  * ledger from the resolver (no objectId) -> T5 red; M5 gate always on -> T7 red; M9 detach the
  * MAIN TABLE from the resolver (no objectId) -> T3 red, T6(d) red; M10 gate before anchor -> T6(e)
- * red.
+ * red; M11 anchor accepts ANY base (the fence removed) -> T6(h) red.
  */
 
 const assert = require('node:assert/strict')
@@ -56,11 +64,14 @@ const LEDGER_PATH = path.join(LIB, 'stock-preparation-confirmation-decisions.cjs
 const ownBase = require(path.join(LIB, 'stock-preparation-own-base.cjs'))
 const {
   STOCK_PREP_OWN_BASE_ENV,
+  STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX,
   STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
+  STOCK_PREPARATION_LEGACY_BASE_ID,
   STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS,
   stockPreparationOwnBaseEnabled,
   deriveStockPreparationBaseId,
   stockPreparationOwnBasePairPartners,
+  stockPreparationOwnBaseAnchorAccepts,
   resolveStockPreparationOwnBase,
 } = ownBase
 const {
@@ -303,6 +314,8 @@ function testDerivedIdShape() {
   assert.equal(slug, 'integration-core')
   assert.equal(STOCK_PREPARATION_OWN_BASE_ID_PREFIX, `base_${slug}_sp_`, 'T2 prefix = base_<slug>_sp_')
   assert.ok(derived.startsWith(`base_${slug}_`), 'T2 under the plugin-scope prefix base_<slug>_')
+  assert.equal(STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX, `base_${slug}_`, 'T2 the anchor fence is the plugin-scope prefix itself')
+  assert.equal(STOCK_PREPARATION_LEGACY_BASE_ID, 'base_legacy')
 }
 
 async function testDerivationIgnoresProjectId() {
@@ -487,9 +500,13 @@ async function testLedgerRouteThreadsTenantAndOptIn() {
   assert.equal(JSON.stringify(res.body).includes(derived), false, 'T13 the response never carries the base id')
 }
 
-// ── T6: three orders, one base ─────────────────────────────────────────────────────────────────
+// ── T6: every order, one base ──────────────────────────────────────────────────────────────────
 async function testThreeOrdersOneBase() {
   const derived = deriveStockPreparationBaseId('tenant_1')
+  // A system base under the plugin prefix that is NOT this tenant's derived id: the positive
+  // control that the anchor FOLLOWS the partner rather than re-deriving.
+  const otherSystemBase = deriveStockPreparationBaseId('tenant_other')
+  assert.notEqual(otherSystemBase, derived)
   const common = { projectId: PROJECT_ID, permission: 'admin', tenantId: 'tenant_1', resolveOwnBase: true, env: {} }
   // The guarantee is the MAIN TABLE + CONFIRMATION LEDGER pair only. Staging and MVP tables are
   // not resolved here and still default to the legacy base (disclosed in the PR body).
@@ -508,10 +525,10 @@ async function testThreeOrdersOneBase() {
   assert.deepEqual([...baseIdsPassedToEnsureObject(b)], [derived], 'T6(b) ledger then main: one base')
   assert.equal(findCalls(b.calls, 'ensureSystemBase').length, 1, 'T6(b) the main table anchored to the ledger, it did not derive again')
 
-  // (c) main pre-existing in some other base, then ledger
-  const c = createOwnBaseHostFake({ sheets: { [MAIN_OBJECT_ID]: mainSheet('base_stock') } })
+  // (c) main pre-existing in a plugin SYSTEM base (not this tenant's derived id), then ledger
+  const c = createOwnBaseHostFake({ sheets: { [MAIN_OBJECT_ID]: mainSheet(otherSystemBase) } })
   await ensureConfirmationDecisionTarget({ ...common, context: context(c.api) })
-  assert.deepEqual([...baseIdsPassedToEnsureObject(c)], ['base_stock'], 'T6(c) the ledger follows the pre-existing main table')
+  assert.deepEqual([...baseIdsPassedToEnsureObject(c)], [otherSystemBase], 'T6(c) the ledger follows the pre-existing main table')
   assert.equal(findCalls(c.calls, 'ensureSystemBase').length, 0, 'T6(c) zero derivation next to an existing main table')
 
   // (d) THE ROUND-1 REFUTED STATE, through the REAL routes: the ledger already sits in base_legacy
@@ -563,12 +580,99 @@ async function testThreeOrdersOneBase() {
   assert.equal(findCalls(capable.calls, 'ensureSystemBase').length, 0, 'T6(f) zero derivation on the capable host next to an existing ledger')
   assert.deepEqual([...baseIdsPassedToEnsureObject(capable)], [null], 'T6(f) legacy null, same as the ledger')
 
-  // (g) ledger pre-existing in an arbitrary base, then main (the mirror of (c)).
-  const g = createOwnBaseHostFake({ sheets: { [LEDGER_OBJECT_ID]: ledgerSheet('base_stock') } })
-  const gMain = await ensureStockPreparationCanonicalTarget({ ...common, context: context(g.api) })
-  assert.equal(gMain.evidence.ownBaseSource, 'anchor')
-  assert.deepEqual([...baseIdsPassedToEnsureObject(g)], ['base_stock'], 'T6(g) the main table follows the pre-existing ledger')
-  assert.equal(findCalls(g.calls, 'ensureSystemBase').length, 0, 'T6(g) zero derivation next to an existing ledger')
+  // (g) ledger pre-existing in the shared default base (module level; (d) is the route twin), then
+  // main; and the mirror of (c): ledger in a plugin system base.
+  for (const priorBase of [STOCK_PREPARATION_LEGACY_BASE_ID, otherSystemBase]) {
+    const g = createOwnBaseHostFake({ sheets: { [LEDGER_OBJECT_ID]: ledgerSheet(priorBase) } })
+    const gMain = await ensureStockPreparationCanonicalTarget({ ...common, context: context(g.api) })
+    assert.equal(gMain.evidence.ownBaseSource, 'anchor')
+    assert.deepEqual([...baseIdsPassedToEnsureObject(g)], [priorBase], `T6(g) the main table follows the pre-existing ledger (${priorBase === otherSystemBase ? 'system base' : priorBase})`)
+    assert.equal(findCalls(g.calls, 'ensureSystemBase').length, 0, 'T6(g) zero derivation next to an existing ledger')
+  }
+
+  // (h) THE FINAL-JUDGE FIX: a pair member sitting in a FOREIGN base is NOT followed. Before the
+  // fence, any multitable:write holder could plant an empty ledger-id sheet in THEIR base through
+  // `POST /sheets` (caller-chosen id + caller-owned baseId) and the admin's next main-table ensure
+  // created the main table INSIDE that base (refuter r1sec / r2corr live probe: 201, ensureObject
+  // baseId = base_9f1cuserowned). Through the REAL routes, both directions: 409
+  // STOCK_PREPARATION_OWN_BASE_ANCHOR_REFUSED, zero ensureSystemBase (deriving would split the
+  // pair), zero ensureObject (so would a legacy fall-back), nothing but lookups on the host, and
+  // the response never carries the foreign base id.
+  const FOREIGN = 'base_9f1cuserowned'
+  for (const [label, sheets, routePath, other, member] of [
+    ['ledger squatted in a user base, main ensured', { [LEDGER_OBJECT_ID]: ledgerSheet(FOREIGN) }, CANONICAL_ROUTE, MAIN_OBJECT_ID, 'confirmation_ledger'],
+    ['main moved into a user base, ledger ensured', { [MAIN_OBJECT_ID]: mainSheet(FOREIGN) }, LEDGER_ROUTE, LEDGER_OBJECT_ID, 'main_table'],
+  ]) {
+    const h = createOwnBaseHostFake({ sheets })
+    const res = await invoke(mountRoutes(h.api), 'POST', routePath, { user: ADMIN_USER, body: {} })
+    assert.equal(res.statusCode, 409, `T6(h) ${label}: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.ok, false)
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_OWN_BASE_ANCHOR_REFUSED', `T6(h) ${label}: typed`)
+    assert.deepEqual({ ...res.body.error.details }, { reason: 'foreign_base', anchorMember: member }, `T6(h) ${label}: names the member, not the base`)
+    assert.equal(findCalls(h.calls, 'ensureSystemBase').length, 0, `T6(h) ${label}: zero derivation`)
+    assert.equal(findCalls(h.calls, 'ensureObject').length, 0, `T6(h) ${label}: zero writes`)
+    assert.deepEqual([...new Set(names(h.calls))], ['findObjectSheet'], `T6(h) ${label}: lookups only`)
+    assert.equal(h.sheets.has(other), false, `T6(h) ${label}: the other half was never created`)
+    assert.equal(h.sheets.get(Object.keys(sheets)[0]).baseId, FOREIGN, `T6(h) ${label}: the planted sheet is untouched`)
+    const serialized = JSON.stringify(res.body)
+    for (const leak of [FOREIGN, '9f1c', 'userowned', derived, 'tenant_1']) {
+      assert.equal(serialized.includes(leak), false, `T6(h) ${label}: the response never carries ${leak}`)
+    }
+  }
+  // Module-level mirror: every foreign shape is refused typed — a user base, another plugin's
+  // system base, ids that only LOOK like the prefix or the legacy id — in both directions, with
+  // the error naming the member and the reason but never the base id; and the gate being OFF does
+  // not turn the refusal into a legacy null (the anchor precedes the gate).
+  const foreignShapes = [
+    FOREIGN,
+    'base_7f2c9d0e-4a1b-4c3d-8e9f-0a1b2c3d4e5f',
+    'base_attendance_catalog',
+    'base_el_stats_x',
+    'base_integration-core',
+    'base_integration',
+    'base_integration_core_x',
+    'base_integration-corex_y',
+    'base_legacy2',
+    'BASE_LEGACY',
+    ' base_legacy',
+  ]
+  for (const foreign of foreignShapes) {
+    assert.equal(stockPreparationOwnBaseAnchorAccepts(foreign), false, `T6(h) ${JSON.stringify(foreign)} is foreign`)
+    for (const [objectId, partnerObjectId, sheetOf, member] of [
+      [MAIN_OBJECT_ID, LEDGER_OBJECT_ID, ledgerSheet, 'confirmation_ledger'],
+      [LEDGER_OBJECT_ID, MAIN_OBJECT_ID, mainSheet, 'main_table'],
+    ]) {
+      for (const env of [{}, { [STOCK_PREP_OWN_BASE_ENV]: 'false' }]) {
+        const host = createOwnBaseHostFake({ sheets: { [partnerObjectId]: sheetOf(foreign) } })
+        await assert.rejects(
+          () => resolveStockPreparationOwnBase({ provisioning: host.api, projectId: PROJECT_ID, objectId, tenantId: 'tenant_1', env }),
+          (error) => error instanceof StockPreparationTargetProvisioningError
+            && error.status === 409
+            && error.code === 'STOCK_PREPARATION_OWN_BASE_ANCHOR_REFUSED'
+            && error.details.reason === 'foreign_base'
+            && error.details.anchorMember === member
+            && !error.message.includes(foreign.trim())
+            && !JSON.stringify(error.details).includes(foreign.trim()),
+          `T6(h) module: partner ${member} in ${JSON.stringify(foreign)} (gate ${env[STOCK_PREP_OWN_BASE_ENV] || 'on'}) -> typed 409 without the id`,
+        )
+        assert.equal(findCalls(host.calls, 'ensureSystemBase').length, 0, 'T6(h) module: zero derivation')
+        assert.equal(findCalls(host.calls, 'ensureObject').length, 0, 'T6(h) module: zero writes')
+      }
+    }
+  }
+  for (const nonString of [undefined, 42, {}, true]) {
+    assert.equal(stockPreparationOwnBaseAnchorAccepts(nonString), false, `T6(h) ${String(nonString)} is not an accepted anchor value`)
+  }
+  // ... and every ACCEPTED shape still anchors (the positive control the fence must not break):
+  // the legacy null, the shared default base, this tenant's derived id, another tenant's derived id,
+  // any other base under the plugin prefix.
+  for (const accepted of [null, STOCK_PREPARATION_LEGACY_BASE_ID, derived, otherSystemBase, `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}catalog`]) {
+    assert.equal(stockPreparationOwnBaseAnchorAccepts(accepted), true, `T6(h) ${JSON.stringify(accepted)} is accepted`)
+    const host = createOwnBaseHostFake({ sheets: { [LEDGER_OBJECT_ID]: ledgerSheet(accepted) } })
+    const resolved = await resolveStockPreparationOwnBase({ provisioning: host.api, projectId: PROJECT_ID, objectId: MAIN_OBJECT_ID, tenantId: 'tenant_1', env: {} })
+    assert.deepEqual(resolved, { baseId: accepted, source: 'anchor' }, `T6(h) ${JSON.stringify(accepted)} anchors`)
+    assert.equal(findCalls(host.calls, 'ensureSystemBase').length, 0)
+  }
 }
 
 // ── T7: the env gate ───────────────────────────────────────────────────────────────────────────
@@ -619,6 +723,21 @@ async function testIncapableHostDegrades() {
   const second = await ensureStockPreparationCanonicalTarget({ context: context(reversed.api), projectId: PROJECT_ID, permission: 'admin', tenantId: 'tenant_1', resolveOwnBase: true, env: {} })
   assert.equal(second.evidence.ownBaseSource, 'anchor', 'T8 the main table follows the (just created, null-based) ledger')
   assert.deepEqual([...baseIdsPassedToEnsureObject(reversed)], [null])
+
+  // A PARTIAL provisioning object (refuter r2 minor): no findObjectSheet, or no provisioning at
+  // all, degrades to api_unavailable BEFORE the anchor would dereference it — never a TypeError,
+  // never a derivation (both real callers 503 earlier through getProvisioningApi).
+  const ensureSystemBaseCalls = []
+  for (const partial of [
+    undefined,
+    null,
+    {},
+    { ensureSystemBase: async (input) => { ensureSystemBaseCalls.push(input); return { baseId: input.baseId, created: true } } },
+  ]) {
+    const resolved = await resolveStockPreparationOwnBase({ provisioning: partial, projectId: PROJECT_ID, objectId: MAIN_OBJECT_ID, tenantId: 'tenant_1', env: {} })
+    assert.deepEqual(resolved, { baseId: null, source: 'api_unavailable' }, `T8 partial provisioning ${JSON.stringify(partial)} degrades`)
+  }
+  assert.equal(ensureSystemBaseCalls.length, 0, 'T8 a provisioning object without findObjectSheet never derives either')
 }
 
 // ── T11 / T12 / T15: the routes ────────────────────────────────────────────────────────────────

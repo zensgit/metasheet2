@@ -200,7 +200,7 @@ describe('plugin-scope base-id prefix', () => {
     return { scoped, ensureSystemBaseDelegate }
   }
 
-  it('12. plugin-integration-core may ensure a base under its own prefix; the delegate sees the same input', async () => {
+  it('12. plugin-integration-core may ensure a base under its own prefix; the delegate sees the CHECKED baseId and the name', async () => {
     const { scoped, ensureSystemBaseDelegate } = scopedWith(async (input) => ({ baseId: input.baseId, created: true }))
     const input = { baseId: 'base_integration-core_sp_abc', name: 'Stock preparation' }
     await expect(scoped.provisioning.ensureSystemBase!(input)).resolves.toEqual({
@@ -208,7 +208,29 @@ describe('plugin-scope base-id prefix', () => {
       created: true,
     })
     expect(ensureSystemBaseDelegate).toHaveBeenCalledTimes(1)
-    expect(ensureSystemBaseDelegate).toHaveBeenCalledWith(input)
+    expect(ensureSystemBaseDelegate).toHaveBeenCalledWith({ baseId: 'base_integration-core_sp_abc', name: 'Stock preparation' })
+  })
+
+  it('12b. the baseId is read ONCE: a getter cannot show the prefix check one id and the delegate another', async () => {
+    const { scoped, ensureSystemBaseDelegate } = scopedWith(async (input) => ({ baseId: input.baseId, created: true }))
+    let reads = 0
+    const shifty = {
+      get baseId() {
+        reads += 1
+        return reads === 1 ? 'base_integration-core_sp_abc' : 'base_attendance_catalog'
+      },
+      name: 'Stock preparation',
+    }
+    await expect(scoped.provisioning.ensureSystemBase!(shifty)).resolves.toEqual({
+      baseId: 'base_integration-core_sp_abc',
+      created: true,
+    })
+    expect(reads).toBe(1)
+    expect(ensureSystemBaseDelegate).toHaveBeenCalledTimes(1)
+    const forwarded = ensureSystemBaseDelegate.mock.calls[0][0]
+    expect(forwarded).not.toBe(shifty)
+    expect(Object.getOwnPropertyDescriptor(forwarded, 'baseId')?.get).toBeUndefined()
+    expect(forwarded).toEqual({ baseId: 'base_integration-core_sp_abc', name: 'Stock preparation' })
   })
 
   it('13. every id outside the prefix is refused BEFORE the delegate runs', async () => {

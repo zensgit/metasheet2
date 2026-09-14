@@ -462,12 +462,15 @@ export function createPluginScopedMultitableApi(
       // B3: exposed iff the host exposes it (the `ensureObjectDefaultView` / `findObjectView`
       // optional-capability idiom), so a plugin's feature detection stays truthful. The wrapper
       // adds exactly one thing — the prefix assertion — and delegates. Read defensively at build
-      // time for the same reason `supportsFilterValueLists` below is.
+      // time for the same reason `supportsFilterValueLists` below is. The baseId is read ONCE and
+      // the checked value is what the delegate receives: forwarding `input` itself would let a
+      // getter hand the prefix check one id and the host another (refuter r2 minor).
       ...(typeof multitable.provisioning?.ensureSystemBase === 'function'
         ? {
             ensureSystemBase: async (input: { baseId: string; name: string }) => {
-              assertBaseIdAllowedForPlugin(pluginName, input.baseId)
-              return multitable.provisioning.ensureSystemBase!(input)
+              const baseId = input.baseId
+              assertBaseIdAllowedForPlugin(pluginName, baseId)
+              return multitable.provisioning.ensureSystemBase!({ baseId, name: input.name })
             },
           }
         : {}),

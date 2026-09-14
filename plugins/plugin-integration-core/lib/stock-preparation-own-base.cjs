@@ -12,8 +12,11 @@
 // host's `ensureSystemBase` (prefix-checked by plugin-scope, fail-closed on adoption).
 //
 // WHAT THIS MODULE IS. One pure derivation, one env gate, one resolver shared by the main
-// table and the confirmation ledger so the two can never be resolved differently. It never
-// sees req / body / query and never parses a projectId: the tenant is an explicit argument
+// table and the confirmation ledger so the two can never be resolved differently — within the
+// two opt-in routes, and short of a direct-SQL soft delete + `POST /sheets/:sheetId/restore`
+// between the two ensures (the anchor only sees LIVE partners; a soft-deleted one is invisible
+// and `restore` revives it in its old base; ops-only, no route soft-deletes a managed table). It
+// never sees req / body / query and never parses a projectId: the tenant is an explicit argument
 // the ROUTE passes from `resolveAuthUserTenantId(req)`, and nothing else.
 //
 // THE PAIR. The main table and the confirmation ledger are ONE pair that must share a base
@@ -27,20 +30,41 @@
 //
 // RESOLUTION ORDER, strictly:
 //   1. explicit baseId               -> verbatim, source 'explicit'  (sandbox / MVP / staging)
-//   2. anchor: the pair PARTNER already exists (findObjectSheet) -> ITS sheet.baseId, source
-//                                       'anchor'; ensureSystemBase is NEVER called (222 lands
-//                                       here). Runs BEFORE the gate: a rollback (gate off) must
-//                                       not split a pair whose first half already landed.
-//   3. gate off                      -> null (today's legacy value), source 'disabled'
-//   4. host lacks ensureSystemBase   -> null (legacy), source 'api_unavailable'  (version skew)
-//   5. no tenant                     -> 400 STOCK_PREPARATION_OWN_BASE_TENANT_REQUIRED (fail-closed,
+//   2. host lacks findObjectSheet    -> null (legacy), source 'api_unavailable': a partial
+//                                       provisioning object cannot anchor, so it degrades instead
+//                                       of throwing a TypeError. Unreachable through both real
+//                                       callers (getProvisioningApi 503s first); kept for a future
+//                                       direct caller.
+//   3. anchor: the pair PARTNER already exists (findObjectSheet) -> ITS sheet.baseId, source
+//                                       'anchor' — ONLY when that base is the legacy null,
+//                                       `base_legacy`, or a `base_integration-core_` system base.
+//                                       Any other base (a user base `base_<uuid>`, another
+//                                       plugin's system base) -> 409
+//                                       STOCK_PREPARATION_OWN_BASE_ANCHOR_REFUSED, values-free:
+//                                       no derivation (that would split the pair), no legacy
+//                                       fall-back (so would that), no ensureSystemBase, no
+//                                       ensureObject. ensureSystemBase is NEVER called in this
+//                                       step (222 lands here). Runs BEFORE the gate: a rollback
+//                                       (gate off) must not split a pair whose first half landed.
+//   4. gate off                      -> null (today's legacy value), source 'disabled'
+//   5. host lacks ensureSystemBase   -> null (legacy), source 'api_unavailable'  (version skew)
+//   6. no tenant                     -> 400 STOCK_PREPARATION_OWN_BASE_TENANT_REQUIRED (fail-closed,
 //                                       never legacy)
-//   6. derive + ensureSystemBase     -> derived id, source 'derived'
+//   7. derive + ensureSystemBase     -> derived id, source 'derived'
 // A table's OWN "already exists" case is decided by its caller BEFORE this resolver runs (both
 // inspect branches return ready long before the create path), so an existing table never reaches
-// step 6 and is never moved. Steps 2 and 3 never derive and never call ensureSystemBase, which is
+// step 7 and is never moved. Steps 3 and 4 never derive and never call ensureSystemBase, which is
 // what the gate promises (no derivation, no base creation) — following an existing partner is
 // not a derivation.
+//
+// WHY THE ANCHOR IS FENCED (final judge, FIX_FIRST). The anchored base goes verbatim into
+// `ensureObject`, and the host writes base_id with no ownership check — the very reason owner
+// decision A refuses a request baseId. `POST /sheets` accepts a caller-chosen sheet id (the pair's
+// stable ids are offline-computable) plus a caller-owned baseId, so before this fence any
+// multitable:write holder could plant an empty ledger-id sheet in THEIR base and have the admin's
+// next main-table ensure land inside it. Following a partner is sound only into a base the plugin
+// already accounts for: the shared default every pre-B3 install sits in, or a system base created
+// through ensureSystemBase (prefix-checked by plugin-scope, reserved on POST /bases).
 // ---------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
@@ -56,9 +80,13 @@ const STOCK_PREP_OWN_BASE_ENV = 'MULTITABLE_STOCK_PREP_OWN_BASE'
 // 2 / the tables' ready branches). Trimmed + lower-cased membership, the `batchKeyLookupDisabled`
 // precedent — a superset of the spec's `false`.
 const STOCK_PREP_OWN_BASE_OFF_VALUES = Object.freeze(new Set(['false', '0', 'off', 'no']))
-// `base_<pluginSlug>_` for plugin-integration-core, plus this line's own `sp_` segment. Must stay
-// under the prefix plugin-scope enforces (`getPluginBaseIdPrefix('plugin-integration-core')`).
-const STOCK_PREPARATION_OWN_BASE_ID_PREFIX = 'base_integration-core_sp_'
+// The plugin's system-base prefix, exactly what plugin-scope enforces
+// (`getPluginBaseIdPrefix('plugin-integration-core')` = `base_<pluginSlug>_`), plus this line's own
+// `sp_` segment for the derived id. The anchor (step 3) accepts any base under the plugin prefix.
+const STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX = 'base_integration-core_'
+const STOCK_PREPARATION_OWN_BASE_ID_PREFIX = `${STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX}sp_`
+// The shared default base every pre-B3 install (222 included) sits in; the anchor accepts it.
+const STOCK_PREPARATION_LEGACY_BASE_ID = 'base_legacy'
 const STOCK_PREPARATION_OWN_BASE_DIGEST_LENGTH = 24
 // The pair that must share one base. Both objectIds live HERE, not in the ledger module: the
 // ledger's G1 structural guard forbids it from naming the canonical object at all. Each member
@@ -117,14 +145,41 @@ function stockPreparationOwnBasePairPartners(objectId) {
   return STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS.filter((candidate) => candidate !== self)
 }
 
-// Step 2: the first pair partner that already exists decides the base. A non-string baseId on the
-// partner is the legacy null. Never derives next to an existing partner.
+// The only bases a partner may pull the other half into: the legacy null, the shared default
+// base, or a system base under this plugin's prefix. Exact strings — no trim, no case folding —
+// so `base_integration-core` (no trailing `_`), `base_integration_core_x` and `BASE_LEGACY` are
+// all foreign.
+function stockPreparationOwnBaseAnchorAccepts(baseId) {
+  if (baseId === null) return true
+  if (typeof baseId !== 'string') return false
+  return baseId === STOCK_PREPARATION_LEGACY_BASE_ID || baseId.startsWith(STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX)
+}
+
+// The pair member's role for the values-free refusal message: it names WHICH member anchored,
+// never the base it sits in.
+function stockPreparationOwnBasePairMemberRole(objectId) {
+  return objectId === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId ? 'main_table' : 'confirmation_ledger'
+}
+
+// Step 3: the first pair partner that already exists decides the base. A non-string baseId on the
+// partner is the legacy null. Never derives next to an existing partner; a partner in a FOREIGN
+// base is refused (409, values-free) before any base is created or any table written — deriving
+// here would split the pair, and so would falling back to legacy.
 async function resolveStockPreparationOwnBaseAnchor({ provisioning, projectId, objectId } = {}) {
   for (const partnerObjectId of stockPreparationOwnBasePairPartners(objectId)) {
     const sheet = await provisioning.findObjectSheet({ projectId, objectId: partnerObjectId })
-    if (sheet) {
-      return { baseId: typeof sheet.baseId === 'string' ? sheet.baseId : null, source: 'anchor' }
+    if (!sheet) continue
+    const anchorBaseId = typeof sheet.baseId === 'string' ? sheet.baseId : null
+    if (!stockPreparationOwnBaseAnchorAccepts(anchorBaseId)) {
+      const anchorMember = stockPreparationOwnBasePairMemberRole(partnerObjectId)
+      throw new (ProvisioningError())(
+        409,
+        'STOCK_PREPARATION_OWN_BASE_ANCHOR_REFUSED',
+        `stock-preparation own-base anchor refused: the existing ${anchorMember.replace('_', ' ')} sits outside the legacy/system bases; move it back before provisioning the other half of the pair`,
+        { reason: 'foreign_base', anchorMember },
+      )
     }
+    return { baseId: anchorBaseId, source: 'anchor' }
   }
   return null
 }
@@ -142,12 +197,17 @@ async function resolveStockPreparationOwnBase({
   if (explicit) {
     return { baseId: explicit, source: 'explicit' }
   }
+  // Step 2: degrade BEFORE the anchor touches the surface — a partial provisioning object takes
+  // today's value instead of a TypeError (refuter r2 minor; unreachable through both real callers).
+  if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+    return { baseId: null, source: 'api_unavailable' }
+  }
   const anchored = await resolveStockPreparationOwnBaseAnchor({ provisioning, projectId, objectId })
   if (anchored) return anchored
   if (!stockPreparationOwnBaseEnabled(env)) {
     return { baseId: null, source: 'disabled' }
   }
-  if (!provisioning || typeof provisioning.ensureSystemBase !== 'function') {
+  if (typeof provisioning.ensureSystemBase !== 'function') {
     return { baseId: null, source: 'api_unavailable' }
   }
   const baseId = deriveStockPreparationBaseId(tenantId)
@@ -158,11 +218,14 @@ async function resolveStockPreparationOwnBase({
 module.exports = {
   STOCK_PREP_OWN_BASE_ENV,
   STOCK_PREP_OWN_BASE_OFF_VALUES,
+  STOCK_PREPARATION_SYSTEM_BASE_ID_PREFIX,
   STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
+  STOCK_PREPARATION_LEGACY_BASE_ID,
   STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS,
   OWN_BASE_SOURCES,
   stockPreparationOwnBaseEnabled,
   deriveStockPreparationBaseId,
   stockPreparationOwnBasePairPartners,
+  stockPreparationOwnBaseAnchorAccepts,
   resolveStockPreparationOwnBase,
 }
