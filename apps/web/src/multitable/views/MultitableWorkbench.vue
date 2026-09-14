@@ -749,6 +749,7 @@ import {
   recordNotFound as fmtRecordNotFound,
   sheetDeleteConfirm as fmtSheetDeleteConfirm,
   sheetDeleteErrorMessage as fmtSheetDeleteErrorMessage,
+  fieldDeleteErrorMessage as fmtFieldDeleteErrorMessage,
 } from '../utils/workbench-labels'
 import { recordLabel } from '../utils/meta-record-labels'
 import { resolveMentionDisplayField, resolvePrimaryField } from '../utils/recordDisplay'
@@ -3188,12 +3189,16 @@ async function onUpdateField(fieldId: string, input: { name?: string; order?: nu
   } catch (e: any) { showError(e.message ?? wb('toast.fieldUpdateFailed', isZh.value)) }
 }
 
+// #5707 follow-up: the server refuses a field delete on a plugin-managed sheet with a coded 409
+// (MANAGED_FIELD_DELETE_REFUSED) whose message is English. Pick the copy by CODE -- same shape as
+// onDeleteSheet -- so zh-CN users get a Chinese sentence; every other failure still surfaces the
+// server's own message (and the generic toast when it sent none).
 async function onDeleteField(fieldId: string) {
   try {
     await workbench.client.deleteField(fieldId)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
-  } catch (e: any) { showError(e.message ?? wb('toast.fieldDeleteFailed', isZh.value)) }
+  } catch (e: any) { showError(fmtFieldDeleteErrorMessage(e, isZh.value)) }
 }
 
 // --- View management ---

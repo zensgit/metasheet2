@@ -90,6 +90,16 @@ const {
   assertProductionPolicyNotExpired,
 } = require('./stock-preparation-production-policy.cjs')
 const {
+  // THE ONE field-existence probe readiness runs (db / computed / computed_scope_unavailable), and
+  // the verdict readiness derives from it. Reused here, never re-implemented — see
+  // `assertTargetFieldsExist` for why the plan layer needs the same probe and the same verdict.
+  resolveFieldExistence,
+  __internals: {
+    templateFieldIds: templateLogicalFieldIds,
+    missingLogicalFields,
+  },
+} = require('./stock-preparation-target-provisioning.cjs')
+const {
   B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
   B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
   assertB2aReadAuthorization,
@@ -628,6 +638,115 @@ function assertStockPreparationTargetReady(input = {}) {
   const action = normalizeStockPreparationActionConfig(input)
   assertTargetFieldMapCompleteness(action)
   return action
+}
+
+/**
+ * 目标表字段存在性探针 — THE PLAN-TIME HALF OF THE READINESS PROBE.
+ *
+ * THE INCIDENT (2026-09-14). A customer deleted five template columns from the managed 备料 table.
+ * Readiness and ensure answered `sandbox_incomplete` / 422 TARGET_SCHEMA_INCOMPLETE, because they
+ * run `resolveFieldExistence` against `meta_fields`. Dry-run and apply never looked: the only gate
+ * on this path was `assertTargetFieldMapCompleteness` above, which inspects the SHAPE of the pasted
+ * `fieldIdMap` and cannot know whether the column behind an id still exists. So the existing-row
+ * read came back with the deleted columns as `undefined` in `row.data`, the planner read a missing
+ * `componentSourceId`/`path` as `lineage_mismatch` (580 manual_confirm on one project), and a project
+ * with NO existing rows took the ADD branch and reported `ready` for 211 rows it could not write.
+ *
+ * WHAT THIS DOES. Before a single source row is read, and before any plan exists, ask the SAME probe
+ * readiness asks — `resolveFieldExistence` from stock-preparation-target-provisioning.cjs — and apply
+ * the SAME verdict (`missingLogicalFields`: template fields + the action's declared `ext_` fields),
+ * refusing with the code readiness/ensure already use when the DB-backed read says a column is gone.
+ *
+ * THE THREE MODES, AND THE ONE THAT REFUSES:
+ *   db                         — the host read `meta_fields`; a missing field is a fact => 422.
+ *   computed                   — an older host without the DB read; its compute-only map never omits
+ *                                a field, so there is nothing to act on => no refusal, no log, no
+ *                                change to the result.
+ *   computed_scope_unavailable — the DB read refused the object scope (MultitableObjectScopeError:
+ *                                a sheet this plugin never claimed) and the probe degraded to the
+ *                                compute-only map => same as `computed`.
+ * A host without provisioning at all, or a caller that threads nothing, is the pre-probe path verbatim.
+ *
+ * THE INPUT IS SERVER-HELD. `targetFieldExistence` is `{ provisioning, projectId }`, threaded by the
+ * routes exactly like `installedFieldProperties`: the host's own provisioning surface and the staging
+ * project derived from the AUTHENTICATED tenant (`resolveIntegrationStagingProjectId(tenantId,
+ * undefined)` in http-routes.cjs). No request field reaches it — the body allowlists cannot name it.
+ *
+ * CAPABILITY-DETECTED HERE TOO, on purpose: the probe is skipped outright — not one host call — when
+ * the host lacks the DB read. `resolveFieldExistence` would answer `computed` for such a host, which
+ * can never refuse, so calling it would only add a host round-trip to every legacy dry-run; the
+ * roughly forty provisioning fakes in this suite that do not implement the read stay untouched. This
+ * detects the same capability `resolveFieldExistence` detects; it is not a second existence
+ * judgement — the verdict, whenever there is one, is always its.
+ *
+ * VALUES-FREE: the refusal carries logical ids only — never a physical field id, never a sheet id.
+ *
+ * THE SHEET IT JUDGES IS THE SHEET THE PLAN READS AND WRITES, OR IT JUDGES NOTHING. The host's DB
+ * read takes `(projectId, objectId)` and keys `meta_fields` on the sheet id it DERIVES from that pair
+ * (`getObjectSheetId`, packages/core-backend/src/multitable/provisioning.ts — one-way, no IO). The
+ * plan does not use that pair: every existing-row read and every write on this path addresses
+ * `action.target.sheetId` verbatim, and `normalizeTarget` accepts any sheetId while DEFAULTING the
+ * objectId independently, so the two halves of a binding are not required to name one tuple —
+ * pre-registry installs do not (see THE CARRY TENANT WALL in http-routes.cjs, which retired exactly
+ * this derived-id rule as a refusal). Left unguarded, a divergent binding would let the probe refuse
+ * a healthy sheet on the strength of a different one, or pass a broken sheet because the derived
+ * one is whole. So the probe derives the id the DB read is about to judge, through the same
+ * `getObjectSheetId` the host itself keys on, and runs ONLY when that id is the bound sheet. Any
+ * other binding degrades exactly like `computed_scope_unavailable`: no refusal, no log, no host
+ * read, the pre-probe result byte for byte. That is the fail-open posture the carry wall settled
+ * on for such installs; readiness answers them the same way it always did.
+ *
+ * HOST FAILURE IS A VALUES-FREE 503, NOT A PLAN. `resolveFieldExistence` degrades a scope refusal
+ * and rethrows everything else — a pool or query failure on `meta_fields`. Before this probe no
+ * metadata-store error could reach the plan path at all; it must not now reach the operator as a
+ * driver string with an inferred status. It is refused as 503 TARGET_SCHEMA_UNAVAILABLE carrying
+ * the object id and nothing else (the original stays on `cause` for the server log), the same
+ * posture the source side takes for an unreachable source database (SOURCE_UNAVAILABLE, #5586).
+ */
+async function assertTargetFieldsExist(action, targetFieldExistence) {
+  if (!isPlainObject(targetFieldExistence)) return
+  const provisioning = targetFieldExistence.provisioning
+  const projectId = optionalString(targetFieldExistence.projectId)
+  if (!provisioning || !projectId) return
+  // The DB read, the compute-only fallback `resolveFieldExistence` degrades through, and the
+  // derivation that names the sheet the read is about: the contract the shared probe calls into,
+  // and what every real host has exposed since the provisioning surface existed.
+  if (
+    typeof provisioning.resolveExistingObjectFieldIds !== 'function'
+    || typeof provisioning.resolveFieldIds !== 'function'
+    || typeof provisioning.getObjectSheetId !== 'function'
+  ) return
+  const objectId = action.target.objectId
+  const extensionFieldIds = Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : []
+  let verdict
+  try {
+    const judgedSheetId = optionalString(provisioning.getObjectSheetId(projectId, objectId))
+    if (!judgedSheetId || judgedSheetId !== action.target.sheetId) return
+    verdict = await resolveFieldExistence({
+      provisioning,
+      projectId,
+      objectId,
+      fieldIds: templateLogicalFieldIds(action.template).concat(extensionFieldIds),
+    })
+  } catch (error) {
+    const unavailable = new StockPreparationTableActionError(
+      503,
+      'TARGET_SCHEMA_UNAVAILABLE',
+      'target table schema could not be read; retry once the metadata store answers',
+      { targetObjectId: objectId },
+    )
+    unavailable.cause = error
+    throw unavailable
+  }
+  if (verdict.fieldExistenceMode !== 'db') return
+  const missingFields = missingLogicalFields(action.template, verdict.resolved, extensionFieldIds)
+  if (missingFields.length === 0) return
+  throw new StockPreparationTableActionError(
+    422,
+    'TARGET_SCHEMA_INCOMPLETE',
+    'target table is missing template or extension fields; run target readiness/ensure before planning',
+    { targetObjectId: objectId, missingFields, fieldExistenceMode: verdict.fieldExistenceMode },
+  )
 }
 
 function publicActionMetadata(action) {
@@ -1639,8 +1758,13 @@ async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2a
 // which is merged and the plan recomputed once. A confirmed decision therefore
 // downgrades a hold ONLY when its stored fingerprint matches today's input —
 // any stale confirmation leaves the hold standing.
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aNow }) {
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, confirmationDecisionResolver, b2aTrialRegistration, b2aClaimStore, b2aNow, targetFieldExistence }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
+  // 目标表字段存在性 — BEFORE the B2a contract, before the first source row, before any plan. A target
+  // whose template/ext columns are gone refuses here (422 TARGET_SCHEMA_INCOMPLETE), so no source read,
+  // no records read and no plan ever happens on a schema the writer could not address. Every entry
+  // point that plans (dry-run, reconcile, mvp-persist, apply) comes through this one line.
+  await assertTargetFieldsExist(action, targetFieldExistence)
   // R-06, BEFORE the first source row. A drifted schema refuses here, which is before `expansion`,
   // before `plan`, before `revision` and before any evidence exists to be produced.
   const b2aSchemaContract = await assertB2aReadHardeningBeforeExpansion({
@@ -1848,6 +1972,9 @@ async function dryRunStockPreparationAction(input = {}) {
     runOnlyReview,
     tableScopeReview,
     installedFieldProperties: input.installedFieldProperties,
+    // 目标表字段存在性 — server-held `{ provisioning, projectId }`, same family as the two inputs
+    // around it (see `assertTargetFieldsExist`). Absent => the pre-probe plan, byte for byte.
+    targetFieldExistence: input.targetFieldExistence,
     // The RUNTIME half of "this action writes tenant columns". Server-held, resolved once at route
     // registration (stock-preparation-ext-field-mapping-config.cjs) and threaded — never fetched
     // here, and never request-influenced. Absent/null is the default and reproduces the pre-mapper
@@ -1945,6 +2072,7 @@ async function prepareStockPreparationConfirmationDecisions(input = {}) {
     tableScopeReview,
     installedFieldProperties: input.installedFieldProperties,
     extFieldMapping: input.extFieldMapping,
+    targetFieldExistence: input.targetFieldExistence,
   })
   if (dryRun.expansion.status === 'not_found') {
     throw new StockPreparationTableActionError(404, 'CONFIRMATION_DECISION_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
@@ -1993,6 +2121,7 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     runId: input.runId,
     runOnlyReview: null,
     tableScopeReview: null,
+    targetFieldExistence: input.targetFieldExistence,
     // `extFieldMapping` is NOT wired here, deliberately, and for a different reason than the
     // large-BOM path: this handoff never writes the canonical sheet. It feeds the MetaSheet-internal
     // MVP snapshot tables through stock-preparation-expansion-snapshot-mapper.cjs, which projects
@@ -2163,6 +2292,13 @@ async function applyStockPreparationAction(input = {}) {
     purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
     now: input.now,
   })
+  // Column existence BEFORE the token consume as well, for the reason B2a gives above: a target whose
+  // columns vanished between plan and apply is refused without burning the single-use token, so the
+  // operator who runs ensure can apply the plan they proved instead of planning again. The line
+  // inside `computeDryRun` runs once more a moment later; that second indexed read is the price of
+  // keeping "everything that plans through computeDryRun is probed" a property of computeDryRun
+  // itself rather than of whoever calls it.
+  await assertTargetFieldsExist(action, input.targetFieldExistence)
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
     parametersHash: hashJson(parameters),
@@ -2185,6 +2321,9 @@ async function applyStockPreparationAction(input = {}) {
     runOnlyReview,
     tableScopeReview,
     installedFieldProperties: input.installedFieldProperties,
+    // Same server-held probe input the dry-run used: a column deleted between plan and apply is
+    // refused here before the re-expansion rather than surfacing as a write on a schema that moved.
+    targetFieldExistence: input.targetFieldExistence,
     // Apply RE-EXPANDS the source and compares the recomputed revision against the token, so it must
     // expand with the SAME mapping the dry-run used. Passing it on one path and not the other would
     // turn every apply into a TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
@@ -2290,6 +2429,7 @@ module.exports = {
     assertB2aTrialForStockPreparationRead,
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,
+    assertTargetFieldsExist,
     buildRevision,
     confirmationDecisionEvidence,
     hasHardApplyBlockingRowErrors,
