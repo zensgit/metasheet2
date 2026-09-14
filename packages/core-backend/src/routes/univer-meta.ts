@@ -9562,14 +9562,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (entityType === 'sheet_config') return redactConditionalReadRuleLiterals(val as { conditionalReadRules?: unknown }, allowedFieldIds)
         return val
       }
+      // Resolve only actors from rows that survived the per-entity permission predicate above. This stays a
+      // single batched directory read, after the authorization/redaction-sensitive row selection is complete.
+      const actorNames = await resolveUserDisplayNames(
+        pool.query.bind(pool),
+        rows.map((r) => typeof r.actor_id === 'string' ? r.actor_id : null),
+      )
       return res.json({ ok: true, data: { items: rows.map((r) => {
         const et = String(r.entity_type)
+        const actorId = typeof r.actor_id === 'string' ? r.actor_id : null
         return {
           id: String(r.id), entityType: et, entityId: String(r.entity_id), action: String(r.action),
           before: redactPayload(et, r.before),
           after: redactPayload(et, r.after),
           changedKeys: r.changed_keys ?? [],
-          batchId: r.batch_id ?? null, actorId: r.actor_id ?? null, createdAt: r.created_at,
+          batchId: r.batch_id ?? null, actorId, actorName: actorId ? (actorNames.get(actorId) ?? null) : null, createdAt: r.created_at,
         }
       }), limit, offset } })
     } catch (err: unknown) {

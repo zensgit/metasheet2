@@ -58,7 +58,7 @@ describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
     ] })
     await nextTick()
     expect(q('[data-test="config-history-list"]')).toBeTruthy()
-    expect(document.body.textContent).toContain('name:fld_1') // recordLabelOf resolved
+    expect(q('.cfg-history__entity-id')?.textContent).toBe('New') // prefer the revision's historical name
     expect(document.body.textContent).toContain('Old') // before
     expect(document.body.textContent).toContain('New') // after
     expect(document.body.querySelectorAll('.cfg-history__row').length).toBe(2) // BOTH rendered — the FE doesn't drop rows
@@ -98,6 +98,80 @@ describe('MetaConfigHistoryModal — T9-R4 config-history view', () => {
     const props = mountModal({ items: [rev({})] }); await nextTick()
     ;(q('.cfg-history__close') as HTMLButtonElement).click()
     expect(props.onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('MetaConfigHistoryModal — readable configuration operations', () => {
+  it('names deleted fields from the before snapshot and shows their complete declared configuration', async () => {
+    mountModal({ isZh: true, recordLabelOf: (id) => id, items: [rev({
+      action: 'delete', changedKeys: ['name', 'type', 'property', 'order'],
+      before: { name: '联系电话', type: 'string', property: { required: true }, order: 3, lastValue: 987654 }, after: null,
+    })] })
+    await nextTick()
+    expect(q('.cfg-history__action')?.textContent).toBe('删除字段')
+    expect(q('.cfg-history__entity-id')?.textContent).toBe('联系电话')
+    const text = q('.cfg-history__changes')?.textContent ?? ''
+    expect(text).toContain('字段名称联系电话')
+    expect(text).toContain('字段类型文本')
+    expect(text).toContain('字段属性')
+    expect(text).toContain('必填: 是')
+    expect(text).toContain('字段排列顺序3')
+    expect(text).not.toContain('987654') // sequence state is not a declared configuration key
+  })
+
+  it.each([
+    ['field', ['order'], '调整字段位置'],
+    ['field', ['name'], '重命名字段'],
+    ['field', ['type'], '修改字段类型'],
+    ['field', ['property'], '修改字段属性'],
+    ['view', ['filterInfo'], '修改筛选条件'],
+    ['view', ['sortInfo'], '修改排序规则'],
+    ['view', ['hiddenFieldIds'], '修改隐藏字段'],
+    ['permission', ['grant'], '修改权限'],
+    ['sheet_config', ['name'], '重命名数据表'],
+    ['sheet_config', ['conditionalReadRules'], '修改条件读取规则'],
+  ])('describes %s %j updates without changing the stored action', async (entityType, changedKeys, label) => {
+    const item = rev({ entityType, action: 'update', changedKeys, before: {}, after: {} })
+    mountModal({ isZh: true, items: [item] })
+    await nextTick()
+    expect(q('.cfg-history__action')?.textContent).toBe(label)
+    expect(q('.cfg-history__action')?.classList.contains('cfg-history__action--update')).toBe(true)
+    expect(item.action).toBe('update')
+  })
+
+  it('lists every changed key for mixed updates and keeps unknown keys readable', async () => {
+    mountModal({ isZh: true, items: [rev({ action: 'update', changedKeys: ['name', 'type', 'futureKey'], before: {}, after: {} })] })
+    await nextTick()
+    expect(q('.cfg-history__action')?.textContent).toBe('更新字段：字段名称、字段类型、futureKey')
+    expect(document.body.querySelectorAll('.cfg-history__change')).toHaveLength(3)
+  })
+
+  it('uses current labels only when the history has no name, and never invents missing deletion details', async () => {
+    mountModal({ items: [rev({ action: 'delete', before: null, after: null })] })
+    await nextTick()
+    expect(q('.cfg-history__entity-id')?.textContent).toBe('name:fld_1')
+    expect(q('[data-test="config-history-details-unavailable"]')).toBeTruthy()
+    expect(q('.cfg-history__changes')).toBeFalsy()
+  })
+
+  it('renders create details and English operation labels without exposing aiShortcut secrets', async () => {
+    mountModal({ items: [rev({ action: 'create', changedKeys: ['name', 'type', 'property', 'order'], after: {
+      name: 'AI result', type: 'string', order: 0,
+      property: { aiShortcut: { kind: 'classify', params: { instruction: 'key sk-123456789012345678901234' } } },
+    } })] })
+    await nextTick()
+    expect(q('.cfg-history__action')?.textContent).toBe('Create field')
+    expect(q('.cfg-history__changes')?.textContent).toContain('Field nameAI result')
+    expect(q('.cfg-history__changes')?.textContent).toContain('Field order0')
+    expect(document.body.textContent).toContain('sk-<redacted>')
+    expect(document.body.textContent).not.toContain('sk-123456789012345678901234')
+  })
+
+  it('prefers the server actor name, preserving the ID fallback when unavailable', async () => {
+    mountModal({ isZh: true, items: [rev({ actorName: '张三' }), rev({ id: 'r2', actorId: 'unknown-user', actorName: null })] })
+    await nextTick()
+    const actors = [...document.body.querySelectorAll('[data-test="config-history-actor"]')].map((el) => el.textContent)
+    expect(actors).toEqual(['操作人 张三', '操作人 unknown-user'])
   })
 })
 
