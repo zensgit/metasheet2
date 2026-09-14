@@ -26,7 +26,19 @@
           v-for="(field, idx) in fields"
           :key="field.id"
           class="meta-field-mgr__row"
+          :class="{
+            'meta-field-mgr__row--dragging': dragFieldId === field.id,
+            'meta-field-mgr__row--drop-before': dropIndicatorFor(field.id) === 'before',
+            'meta-field-mgr__row--drop-after': dropIndicatorFor(field.id) === 'after',
+          }"
+          :draggable="editingId !== field.id"
+          @dragstart="onRowDragStart($event, field.id)"
+          @dragover.prevent="onRowDragOver(field.id)"
+          @dragleave="onRowDragLeave($event, field.id)"
+          @drop.prevent="onRowDrop(idx)"
+          @dragend="onRowDragEnd"
         >
+          <span class="meta-field-mgr__grip" aria-hidden="true" :title="ml('action.dragToReorder')">&#x283F;</span>
           <span class="meta-field-mgr__icon">{{ FIELD_ICONS[displayFieldType(field)] ?? '?' }}</span>
 
           <template v-if="editingId === field.id">
@@ -1164,6 +1176,17 @@ const newFieldConfigVisible = ref(false)
 const editingId = ref<string | null>(null)
 const editingName = ref('')
 const deleteTargetId = ref<string | null>(null)
+// Feedback B (2026-09-14): the field list could only be reordered one slot at a time with the
+// ▲▼ buttons. These two refs back a press-and-drag reorder of the same rows. HTML5 drag
+// (`draggable` + dragstart/dragover/drop), mirroring MetaFieldHeader.vue's column reorder in this
+// same package -- the browser then supplies the drag image, the auto-scroll inside the scrolling
+// `.meta-field-mgr__body`, and the Escape-cancels-the-drag behaviour for free, none of which a
+// hand-rolled pointer drag would get. The dragged id lives in a REF (the MetaHierarchyView.vue
+// variant) instead of being read back out of `event.dataTransfer`, so the drop knows its source
+// even where the platform DataTransfer is unavailable; `setData` is still called on dragstart
+// because Firefox refuses to start a drag without it.
+const dragFieldId = ref<string | null>(null)
+const dragOverFieldId = ref<string | null>(null)
 const configTargetId = ref<string | null>(null)
 const configDraftType = ref<string | null>(null)
 // #9: the type the panel was HYDRATED with. Splits the two signals that used to be
@@ -2201,6 +2224,8 @@ function resetTransientState() {
   newFieldName.value = ''
   newFieldType.value = 'string'
   editingId.value = null
+  dragFieldId.value = null
+  dragOverFieldId.value = null
   editingName.value = ''
   deleteTargetId.value = null
   configTargetId.value = null
@@ -2879,6 +2904,65 @@ function moveField(fieldId: string, newIdx: number) {
   emit('update-field', fieldId, { order: newIdx })
 }
 
+/** Which edge of `fieldId`'s row the dragged field would land on -- the drop placeholder. Dragging
+ *  DOWN (fromIdx < toIdx) lands the field after the hovered row, dragging UP lands it before, which
+ *  is exactly where the splice in `moveField`'s destination-index semantics puts it. */
+function dropIndicatorFor(fieldId: string): 'before' | 'after' | null {
+  if (!dragFieldId.value || dragOverFieldId.value !== fieldId || dragFieldId.value === fieldId) return null
+  const fromIdx = props.fields.findIndex((field) => field.id === dragFieldId.value)
+  const toIdx = props.fields.findIndex((field) => field.id === fieldId)
+  if (fromIdx < 0 || toIdx < 0) return null
+  return fromIdx < toIdx ? 'after' : 'before'
+}
+
+function onRowDragStart(event: DragEvent, fieldId: string) {
+  // A row being renamed is not draggable (`:draggable` is false there) so its <input> keeps native
+  // caret dragging; this guard is the belt to that suspenders.
+  if (editingId.value === fieldId) return
+  dragFieldId.value = fieldId
+  dragOverFieldId.value = null
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', fieldId)
+  }
+}
+
+function onRowDragOver(fieldId: string) {
+  // `@dragover.prevent` in the template is what makes the row a valid drop target at all -- without
+  // the preventDefault the browser never fires `drop`.
+  if (!dragFieldId.value) return
+  dragOverFieldId.value = fieldId
+}
+
+function onRowDragLeave(event: DragEvent, fieldId: string) {
+  // dragleave bubbles up from the row's OWN children (the action buttons), so an unguarded handler
+  // flickers the placeholder off every time the pointer crosses one.
+  const row = event.currentTarget as HTMLElement | null
+  const related = event.relatedTarget as Node | null
+  if (related && row?.contains(related)) return
+  if (dragOverFieldId.value === fieldId) dragOverFieldId.value = null
+}
+
+/** LOAD-BEARING: the drop persists through `moveField` -- the very function the ▲▼ buttons call --
+ *  so drag and the arrows are ONE code path, ONE `update-field` emit, and ONE ordering semantics
+ *  (`order` = destination index). Nothing is written on dragstart/dragover/dragend, so a cancelled
+ *  drag (Escape, or a drop outside the list) persists nothing at all. */
+function onRowDrop(targetIdx: number) {
+  const fromId = dragFieldId.value
+  dragFieldId.value = null
+  dragOverFieldId.value = null
+  if (!fromId) return
+  const fromIdx = props.fields.findIndex((field) => field.id === fromId)
+  // Dropping a row on itself (or on nothing we can locate) is not a move: no emit, no PATCH.
+  if (fromIdx < 0 || fromIdx === targetIdx) return
+  moveField(fromId, targetIdx)
+}
+
+function onRowDragEnd() {
+  dragFieldId.value = null
+  dragOverFieldId.value = null
+}
+
 function onDeleteField(field: MetaField) {
   deleteTargetId.value = field.id
 }
@@ -3278,6 +3362,16 @@ onBeforeUnmount(() => {
 .meta-field-mgr__expand { padding: 2px 8px; border: 1px solid #ddd; border-radius: 3px; background: #fff; color: #666; cursor: pointer; font-size: 12px; line-height: 1; }
 .meta-field-mgr__expand--active { border-color: #409eff; color: #409eff; }
 .meta-field-mgr__row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f5f5f5; }
+/* Feedback B: press-and-drag reorder. The grip is decorative (`aria-hidden`) -- it adds no tab stop
+   and the ▲▼ buttons remain the keyboard/touch path (HTML5 drag does not fire on touch). */
+.meta-field-mgr__grip { width: 12px; text-align: center; color: #c0c4cc; font-size: 12px; line-height: 1; cursor: grab; user-select: none; }
+.meta-field-mgr__row:active .meta-field-mgr__grip { cursor: grabbing; }
+.meta-field-mgr__row--dragging { opacity: 0.45; }
+/* Drop placeholder. `box-shadow: inset` rather than a border so the 2px cue costs no layout shift
+   (a border would nudge every later row). Same #ecf5ff / #409eff pair the grid's column-reorder
+   drop target already uses (MetaFieldHeader.vue .meta-field-header--drag-over). */
+.meta-field-mgr__row--drop-before { background: #ecf5ff; box-shadow: inset 0 2px 0 0 #409eff; }
+.meta-field-mgr__row--drop-after { background: #ecf5ff; box-shadow: inset 0 -2px 0 0 #409eff; }
 .meta-field-mgr__icon { width: 24px; text-align: center; color: #999; font-size: 13px; }
 .meta-field-mgr__name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-field-mgr__type { font-size: 11px; color: #999; background: #f5f5f5; padding: 1px 6px; border-radius: 3px; }

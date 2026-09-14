@@ -2085,3 +2085,184 @@ describe('MetaFieldManager — a retype leaves the old type validation behind', 
     } finally { app.unmount(); container.remove(); vi.restoreAllMocks() }
   })
 })
+
+describe('MetaFieldManager drag-to-reorder (feedback B)', () => {
+  const FIELDS = [
+    { id: 'fld_a', name: 'Alpha', type: 'string', property: {} },
+    { id: 'fld_b', name: 'Bravo', type: 'string', property: {} },
+    { id: 'fld_c', name: 'Charlie', type: 'string', property: {} },
+  ]
+
+  function mountManager(fields = FIELDS) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+    const app = createApp({
+      render: () => h(MetaFieldManager, {
+        visible: true,
+        sheetId: 'sheet_1',
+        sheets: [],
+        fields,
+        onUpdateField: updateSpy,
+      }),
+    })
+    app.mount(container)
+    return { container, app, updateSpy }
+  }
+
+  const rows = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('.meta-field-mgr__row')) as HTMLElement[]
+
+  /** jsdom 27 has neither DragEvent nor a DataTransfer constructor; the component keeps the dragged
+   *  id in a ref (the MetaHierarchyView.vue variant), so a bare bubbling Event is enough. */
+  const fire = (el: HTMLElement, type: string) => el.dispatchEvent(new Event(type, { bubbles: true, cancelable: true }))
+
+  const arrow = (row: HTMLElement, title: string) =>
+    row.querySelector(`.meta-field-mgr__action[title="${title}"]`) as HTMLButtonElement
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  // --- The golden the drag path has to match, byte for byte ---
+  it('the down arrow emits update-field with the destination index', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      arrow(rows(container)[0], 'Move down').click()
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy).toHaveBeenCalledWith('fld_a', { order: 1 })
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('dragging a row onto a lower row persists through the SAME call shape as the arrows', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      fire(list[0], 'dragstart')
+      fire(list[2], 'dragover')
+      await nextTick()
+      fire(list[2], 'drop')
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledTimes(1)
+      expect(updateSpy).toHaveBeenCalledWith('fld_a', { order: 2 })
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('dragging a row upward emits the destination index too', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      fire(list[2], 'dragstart')
+      fire(list[0], 'dragover')
+      await nextTick()
+      fire(list[0], 'drop')
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledWith('fld_c', { order: 0 })
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('shows a drop placeholder on the hovered row while dragging, on the landing edge', async () => {
+    const { container, app } = mountManager()
+    try {
+      await nextTick()
+      let list = rows(container)
+      fire(list[0], 'dragstart')
+      fire(list[2], 'dragover')
+      await nextTick()
+      list = rows(container)
+      expect(list[0].className).toContain('meta-field-mgr__row--dragging')
+      // dragging DOWN lands after the hovered row
+      expect(list[2].className).toContain('meta-field-mgr__row--drop-after')
+      expect(list[1].className).not.toContain('meta-field-mgr__row--drop')
+
+      // leaving the row clears the placeholder again
+      fire(list[2], 'dragleave')
+      await nextTick()
+      expect(rows(container)[2].className).not.toContain('meta-field-mgr__row--drop')
+
+      // and dragging UP lands before the hovered row
+      fire(rows(container)[2], 'dragend')
+      await nextTick()
+      list = rows(container)
+      fire(list[2], 'dragstart')
+      fire(list[0], 'dragover')
+      await nextTick()
+      expect(rows(container)[0].className).toContain('meta-field-mgr__row--drop-before')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('ignores a drop onto the row itself (same index = no write)', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      fire(list[1], 'dragstart')
+      fire(list[1], 'dragover')
+      await nextTick()
+      fire(list[1], 'drop')
+      await nextTick()
+      expect(updateSpy).not.toHaveBeenCalled()
+      expect(rows(container)[1].className).not.toContain('meta-field-mgr__row--drop')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('persists nothing when the drag is cancelled (Escape / dropped outside the list)', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      fire(list[0], 'dragstart')
+      fire(list[2], 'dragover')
+      await nextTick()
+      // Escape / a drop outside a row surfaces as dragend with no drop.
+      fire(list[0], 'dragend')
+      await nextTick()
+      expect(updateSpy).not.toHaveBeenCalled()
+      expect(rows(container)[0].className).not.toContain('meta-field-mgr__row--dragging')
+      expect(rows(container)[2].className).not.toContain('meta-field-mgr__row--drop')
+
+      // a stray drop AFTER the cancel must stay a no-op as well
+      fire(rows(container)[2], 'drop')
+      await nextTick()
+      expect(updateSpy).not.toHaveBeenCalled()
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('keeps the arrow buttons focusable, enabled and bounded (keyboard path does not regress)', async () => {
+    const { container, app, updateSpy } = mountManager()
+    try {
+      await nextTick()
+      const list = rows(container)
+      expect(arrow(list[0], 'Move up').disabled).toBe(true)
+      expect(arrow(list[0], 'Move down').disabled).toBe(false)
+      expect(arrow(list[2], 'Move down').disabled).toBe(true)
+      // native <button>: tab-reachable, Enter/Space-activatable, no tabindex override, and the new
+      // grip adds no tab stop of its own.
+      expect(arrow(list[1], 'Move up').tagName).toBe('BUTTON')
+      expect(arrow(list[1], 'Move up').getAttribute('tabindex')).toBeNull()
+      expect(list[1].querySelector('.meta-field-mgr__grip')?.getAttribute('aria-hidden')).toBe('true')
+      expect(list[1].querySelector('.meta-field-mgr__grip')?.getAttribute('tabindex')).toBeNull()
+
+      arrow(list[2], 'Move up').click()
+      await nextTick()
+      expect(updateSpy).toHaveBeenCalledWith('fld_c', { order: 1 })
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a row being renamed is not draggable (the rename input keeps native caret dragging)', async () => {
+    const { container, app } = mountManager()
+    try {
+      await nextTick()
+      expect(rows(container)[0].getAttribute('draggable')).toBe('true')
+      ;(rows(container)[0].querySelector('.meta-field-mgr__action[title="Rename"]') as HTMLButtonElement).click()
+      await nextTick()
+      expect(rows(container)[0].getAttribute('draggable')).toBe('false')
+      expect(rows(container)[1].getAttribute('draggable')).toBe('true')
+    } finally { app.unmount(); container.remove() }
+  })
+})
