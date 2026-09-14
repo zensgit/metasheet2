@@ -6,7 +6,10 @@
  * user could create/patch/delete protection rules under any identity they typed into a header.
  *
  * The writes are now platform-admin (requireAdminRole) and identity comes ONLY from req.user.id.
- * Reads (GET / and GET /:id) are deliberately unchanged.
+ *
+ * issue #5678 (batch 1) then closed the reads too: GET / and GET /:id enumerated every rule's name,
+ * conditions and effects to any authenticated caller. The read specs at the bottom of this file
+ * replace the earlier "reads are deliberately UNCHANGED" pin.
  *
  * Mirrors snapshot-labels-authz.test.ts (GHSA-h8mf F2) — the sibling router mounted by the same
  * admin-routes block, hardened the same way.
@@ -227,17 +230,104 @@ describe('protection-rules router — platform-admin gate + identity (issue #566
     expect(statuses).toContain(429)
   })
 
-  it('reads are deliberately UNCHANGED — a non-admin can still GET / and GET /:id', async () => {
+  // ── Reads (issue #5678 batch 1) ──────────────────────────────────────────────────────────────
+  // #5667 left GET / and GET /:id open on purpose and this suite pinned that. #5678's inventory
+  // showed the reads are an enumeration of the very rules the writes now protect — every rule's
+  // name, conditions and effects, i.e. the exact recipe for which destructive operations are
+  // blocked and how to shape one that is not. They are now admin-only too; these specs replace the
+  // old "reads are deliberately UNCHANGED" assertion.
+
+  it('non-admin -> 403 ADMIN_REQUIRED on GET / and GET /:id, NO read service call', async () => {
     vi.mocked(isAdmin).mockResolvedValue(false)
     const app = buildApp({ id: 'u-reader' })
     pinned.setApp(app)
 
+    const list = await request(pinned.url()).get('/api/admin/safety/rules').expect(403)
+    expect(list.body.code).toBe('ADMIN_REQUIRED')
+    expect(list.body.rules).toBeUndefined()
+
+    const one = await request(pinned.url()).get('/api/admin/safety/rules/r1').expect(403)
+    expect(one.body.code).toBe('ADMIN_REQUIRED')
+    expect(one.body.rule).toBeUndefined()
+
+    expect(protectionRuleService.listRules).not.toHaveBeenCalled()
+    expect(protectionRuleService.getRule).not.toHaveBeenCalled()
+  })
+
+  it('unauthenticated (no req.user) -> 403 on both reads, no read service call', async () => {
+    const app = buildApp(undefined)
+    pinned.setApp(app)
+
+    await request(pinned.url()).get('/api/admin/safety/rules').expect(403)
+    await request(pinned.url()).get('/api/admin/safety/rules/r1').expect(403)
+
+    expect(protectionRuleService.listRules).not.toHaveBeenCalled()
+    expect(protectionRuleService.getRule).not.toHaveBeenCalled()
+  })
+
+  it('RBAC check failure on a read -> 503 fail-closed, no read service call', async () => {
+    vi.mocked(isAdmin).mockRejectedValue(new Error('rbac db down'))
+    const app = buildApp({ id: 'u-read-503' })
+    pinned.setApp(app)
+
+    const list = await request(pinned.url()).get('/api/admin/safety/rules').expect(503)
+    expect(list.body.code).toBe('RBAC_CHECK_FAILED')
+    await request(pinned.url()).get('/api/admin/safety/rules/r1').expect(503)
+
+    expect(protectionRuleService.listRules).not.toHaveBeenCalled()
+    expect(protectionRuleService.getRule).not.toHaveBeenCalled()
+  })
+
+  it('platform-admin -> both reads still work, shape unchanged', async () => {
+    const app = buildApp({ id: 'u-readadmin' })
+    pinned.setApp(app)
+
     const list = await request(pinned.url()).get('/api/admin/safety/rules').expect(200)
     expect(list.body.success).toBe(true)
+    expect(list.body.count).toBe(0)
+
     const one = await request(pinned.url()).get('/api/admin/safety/rules/r1').expect(200)
     expect(one.body.success).toBe(true)
+    expect(one.body.rule).toEqual({ id: 'r1', rule_name: 'r' })
 
     expect(protectionRuleService.listRules).toHaveBeenCalledTimes(1)
     expect(protectionRuleService.getRule).toHaveBeenCalledTimes(1)
+  })
+
+  it('the rate limiter still runs BEFORE the read gate — a denied caller is metered, not unmetered', async () => {
+    // Load-bearing for the ops note in docs/development/admin-read-gates-batch1-design-20260914.md:
+    // scripts/verify-sprint2-staging.sh fires 11 quick GETs at /api/admin/safety/rules and PASSES on
+    // the 11th being 429. The limiter is a router.use registered above the routes, so it still fires
+    // for a non-admin: that probe's 429 assertion survives this change even with a non-admin token —
+    // only the first ten codes move from 200 to 403.
+    vi.mocked(isAdmin).mockResolvedValue(false)
+    const app = buildApp({ id: 'u-denied-ratelimit' })
+    pinned.setApp(app)
+
+    const statuses: number[] = []
+    for (let i = 0; i < RATE_LIMIT_MAX + 1; i++) {
+      const res = await request(pinned.url()).get('/api/admin/safety/rules')
+      statuses.push(res.status)
+    }
+
+    expect(statuses).toContain(403)
+    expect(statuses).toContain(429)
+    expect(protectionRuleService.listRules).not.toHaveBeenCalled()
+  })
+
+  it('the read filters (target_type / is_active) still reach the service for an admin', async () => {
+    // Guards against a "fix" that gates by dropping the query plumbing.
+    const app = buildApp({ id: 'u-readadmin2' })
+    pinned.setApp(app)
+
+    await request(pinned.url())
+      .get('/api/admin/safety/rules')
+      .query({ target_type: 'snapshot', is_active: 'true' })
+      .expect(200)
+
+    expect(protectionRuleService.listRules).toHaveBeenCalledWith({
+      target_type: 'snapshot',
+      is_active: true,
+    })
   })
 })

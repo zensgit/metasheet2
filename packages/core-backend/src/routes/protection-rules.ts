@@ -22,7 +22,16 @@ const logger = new Logger('ProtectionRulesRoutes');
 // platform-admin (requireAdminRole: isAdmin throwing -> 503; no pool -> isAdmin returns false -> 403,
 // see rbac/service.ts) and identity
 // comes ONLY from req.user.id. Same treatment as the sibling snapshot-labels router (GHSA-h8mf F2).
-// Reads (GET /, GET /:id) are deliberately left as they were.
+//
+// SECURITY (issue #5678, batch 1): the two reads (GET /, GET /:id) were left open by #5667 and are
+// now admin-only as well. They return each rule's name, conditions and effects — the full map of
+// which destructive operations are blocked and under what predicate — to any authenticated caller,
+// which is reconnaissance for the writes the gate above protects. Same guard, same semantics
+// (403 ADMIN_REQUIRED / 503 RBAC_CHECK_FAILED); admins see exactly what they saw before.
+// Ordering note: the rate limiter below is a router.use registered ahead of every route, so it runs
+// BEFORE this gate. A denied caller is still metered against its own quota instead of getting an
+// unmetered probing channel — and the 11th request in a burst is still 429, not 403, which is what
+// keeps scripts/verify-sprint2-staging.sh's rate-limit probe meaningful.
 const getUserId = (req: Request): string => {
   const id = req.user?.id;
   if (id === undefined || id === null || String(id).length === 0) {
@@ -72,7 +81,7 @@ function isDatabaseError(error: unknown): error is DatabaseError {
  * GET /api/admin/safety/rules
  * List all protection rules
  */
-router.get('/', async (req, res) => {
+router.get('/', requireAdminRole(), async (req, res) => {
   try {
     const { target_type, is_active } = req.query;
 
@@ -100,7 +109,7 @@ router.get('/', async (req, res) => {
  * GET /api/admin/safety/rules/:id
  * Get a single protection rule
  */
-router.get('/:id', async (req, res) => {
+router.get('/:id', requireAdminRole(), async (req, res) => {
   try {
     const { id } = req.params;
     const rule = await protectionRuleService.getRule(id);
