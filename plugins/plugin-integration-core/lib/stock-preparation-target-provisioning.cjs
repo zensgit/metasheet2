@@ -760,11 +760,16 @@ async function ensureStockPreparationTarget(input = {}) {
   // existing table (ready or incomplete) never reaches it and is never moved — and only when the
   // caller opted in; otherwise today's value, untouched. The tenant is whatever the caller passed
   // explicitly (the route passes the authenticated principal's); never read from a request or a
-  // projectId here.
+  // projectId here. The table's own objectId is what lets the resolver anchor this table to its
+  // pair partner (the confirmation ledger) when that already exists — the symmetric half of the
+  // ledger's anchor to the main table (round-1 refutation: without it a pre-existing ledger and
+  // a later main table split across two bases). A sandbox template's objectId is not a pair
+  // member and never anchors.
   const ownBase = input.resolveOwnBase === true
     ? await resolveStockPreparationOwnBase({
         provisioning,
         projectId,
+        objectId: template.objectId,
         tenantId: input.tenantId,
         explicitBaseId: input.baseId,
         locale: input.locale,

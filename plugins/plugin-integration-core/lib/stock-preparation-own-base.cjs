@@ -16,39 +16,58 @@
 // sees req / body / query and never parses a projectId: the tenant is an explicit argument
 // the ROUTE passes from `resolveAuthUserTenantId(req)`, and nothing else.
 //
-// RESOLUTION ORDER (spec design 4), strictly:
-//   1. gate off                      -> today's value (explicit || null), source 'disabled'
-//   2. explicit baseId               -> verbatim, source 'explicit'  (sandbox / MVP / staging)
-//   3. anchor (ledger only): the main table already EXISTS -> ITS sheet.baseId, source 'anchor',
-//                                       and ensureSystemBase is NEVER called (222 lands here)
+// THE PAIR. The main table and the confirmation ledger are ONE pair that must share a base
+// (spec design 4). The resolver knows both identities (the ledger's G1 guard forbids the ledger
+// module from naming the main table, so the pair lives here) and anchors SYMMETRICALLY: whichever
+// half already exists decides the base for the half being created — the ledger follows an
+// existing main table, and the main table follows an existing ledger. Round-1 refutation:
+// the first cut anchored only ledger -> main, so a ledger that already sat in one base (an
+// install page that ensured the ledger and stopped, a rollback window, a re-provision after the
+// main table was deleted) split the pair when the main table was created later.
+//
+// RESOLUTION ORDER, strictly:
+//   1. explicit baseId               -> verbatim, source 'explicit'  (sandbox / MVP / staging)
+//   2. anchor: the pair PARTNER already exists (findObjectSheet) -> ITS sheet.baseId, source
+//                                       'anchor'; ensureSystemBase is NEVER called (222 lands
+//                                       here). Runs BEFORE the gate: a rollback (gate off) must
+//                                       not split a pair whose first half already landed.
+//   3. gate off                      -> null (today's legacy value), source 'disabled'
 //   4. host lacks ensureSystemBase   -> null (legacy), source 'api_unavailable'  (version skew)
 //   5. no tenant                     -> 400 STOCK_PREPARATION_OWN_BASE_TENANT_REQUIRED (fail-closed,
 //                                       never legacy)
 //   6. derive + ensureSystemBase     -> derived id, source 'derived'
-// The MAIN TABLE's own "already exists" case is decided by its caller BEFORE this resolver runs
-// (the inspect branch returns ready long before the create path), so a main table that exists
-// never reaches step 6 either.
+// A table's OWN "already exists" case is decided by its caller BEFORE this resolver runs (both
+// inspect branches return ready long before the create path), so an existing table never reaches
+// step 6 and is never moved. Steps 2 and 3 never derive and never call ensureSystemBase, which is
+// what the gate promises (no derivation, no base creation) — following an existing partner is
+// not a derivation.
 // ---------------------------------------------------------------------------
 
 const crypto = require('node:crypto')
 
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   pickOwnBaseName,
 } = require('./stock-preparation-templates.cjs')
 
 const STOCK_PREP_OWN_BASE_ENV = 'MULTITABLE_STOCK_PREP_OWN_BASE'
 // Unset = ON (the owner asked for this behaviour; existing installs are unchanged through step
-// 3 / the main table's ready branch). Trimmed + lower-cased membership, the `batchKeyLookupDisabled`
+// 2 / the tables' ready branches). Trimmed + lower-cased membership, the `batchKeyLookupDisabled`
 // precedent — a superset of the spec's `false`.
 const STOCK_PREP_OWN_BASE_OFF_VALUES = Object.freeze(new Set(['false', '0', 'off', 'no']))
 // `base_<pluginSlug>_` for plugin-integration-core, plus this line's own `sp_` segment. Must stay
 // under the prefix plugin-scope enforces (`getPluginBaseIdPrefix('plugin-integration-core')`).
 const STOCK_PREPARATION_OWN_BASE_ID_PREFIX = 'base_integration-core_sp_'
 const STOCK_PREPARATION_OWN_BASE_DIGEST_LENGTH = 24
-// The ledger anchors to the MAIN TABLE. The objectId lives HERE, not in the ledger module: the
-// ledger's G1 structural guard forbids it from naming the canonical object at all.
-const STOCK_PREPARATION_OWN_BASE_ANCHOR_OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
+// The pair that must share one base. Both objectIds live HERE, not in the ledger module: the
+// ledger's G1 structural guard forbids it from naming the canonical object at all. Each member
+// anchors to the OTHER member(s); an objectId outside the pair (sandbox, MVP, staging) never
+// anchors.
+const STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS = Object.freeze([
+  STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+  STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.objectId,
+])
 
 const OWN_BASE_SOURCES = Object.freeze(['disabled', 'explicit', 'anchor', 'api_unavailable', 'derived'])
 
@@ -90,32 +109,43 @@ function deriveStockPreparationBaseId(tenantId) {
   return `${STOCK_PREPARATION_OWN_BASE_ID_PREFIX}${digest}`
 }
 
+// The pair partners of `objectId`: the other member(s) of the pair, or nothing when the objectId
+// is not a pair member (so sandbox / MVP / staging tables never anchor to anything).
+function stockPreparationOwnBasePairPartners(objectId) {
+  const self = optionalString(objectId)
+  if (!self || !STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS.includes(self)) return []
+  return STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS.filter((candidate) => candidate !== self)
+}
+
+// Step 2: the first pair partner that already exists decides the base. A non-string baseId on the
+// partner is the legacy null. Never derives next to an existing partner.
+async function resolveStockPreparationOwnBaseAnchor({ provisioning, projectId, objectId } = {}) {
+  for (const partnerObjectId of stockPreparationOwnBasePairPartners(objectId)) {
+    const sheet = await provisioning.findObjectSheet({ projectId, objectId: partnerObjectId })
+    if (sheet) {
+      return { baseId: typeof sheet.baseId === 'string' ? sheet.baseId : null, source: 'anchor' }
+    }
+  }
+  return null
+}
+
 async function resolveStockPreparationOwnBase({
   provisioning,
   projectId,
+  objectId,
   tenantId,
   explicitBaseId,
-  anchorToMainTable = false,
   locale,
   env,
 } = {}) {
   const explicit = optionalString(explicitBaseId)
-  if (!stockPreparationOwnBaseEnabled(env)) {
-    return { baseId: explicit, source: 'disabled' }
-  }
   if (explicit) {
     return { baseId: explicit, source: 'explicit' }
   }
-  if (anchorToMainTable === true) {
-    const sheet = await provisioning.findObjectSheet({
-      projectId,
-      objectId: STOCK_PREPARATION_OWN_BASE_ANCHOR_OBJECT_ID,
-    })
-    if (sheet) {
-      // The main table exists: the ledger follows it, whatever base that is (a non-string
-      // baseId is the legacy null). Never derive next to an existing main table.
-      return { baseId: typeof sheet.baseId === 'string' ? sheet.baseId : null, source: 'anchor' }
-    }
+  const anchored = await resolveStockPreparationOwnBaseAnchor({ provisioning, projectId, objectId })
+  if (anchored) return anchored
+  if (!stockPreparationOwnBaseEnabled(env)) {
+    return { baseId: null, source: 'disabled' }
   }
   if (!provisioning || typeof provisioning.ensureSystemBase !== 'function') {
     return { baseId: null, source: 'api_unavailable' }
@@ -129,9 +159,10 @@ module.exports = {
   STOCK_PREP_OWN_BASE_ENV,
   STOCK_PREP_OWN_BASE_OFF_VALUES,
   STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
-  STOCK_PREPARATION_OWN_BASE_ANCHOR_OBJECT_ID,
+  STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS,
   OWN_BASE_SOURCES,
   stockPreparationOwnBaseEnabled,
   deriveStockPreparationBaseId,
+  stockPreparationOwnBasePairPartners,
   resolveStockPreparationOwnBase,
 }

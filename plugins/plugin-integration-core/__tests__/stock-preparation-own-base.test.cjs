@@ -3,23 +3,28 @@
 /**
  * B3 — the stock-preparation OWN BASE (方案 ③): a fresh install lands the main table AND the
  * confirmation ledger in one plugin-owned system base derived from the AUTHENTICATED tenant, not in
- * the shared `base_legacy`; an existing install (222) is untouched because an existing main table
- * anchors everything to its own base and never derives.
+ * the shared `base_legacy`; an existing install (222) is untouched because whichever half of the
+ * pair already exists anchors the other to its own base and nothing ever derives next to it.
  *
  *   T1   derived id: deterministic, prefixed, regex-valid, tenant-opaque; blank tenant -> 400
  *   T2   the prefix is the plugin's own (`base_<plugin.json name minus plugin->_`)
- *   T3   fresh install with the opt-in: ensureSystemBase BEFORE ensureObject, baseId = derived,
- *        name by locale (zh-CN -> 备料), evidence ownBaseSource/ownBaseCreated
+ *   T3   fresh install with the opt-in: anchor lookup (ledger absent), ensureSystemBase BEFORE
+ *        ensureObject, baseId = derived, name by locale (zh-CN -> 备料), evidence
+ *        ownBaseSource/ownBaseCreated
  *   T3b  a caller WITHOUT the opt-in on a capable host: today's contract (null, zero ensureSystemBase)
  *   T4   main table exists -> zero ensureSystemBase, zero ensureObject, canonical_existing
  *   T5   ledger with the opt-in follows an EXISTING main table's base, zero ensureSystemBase
  *   T5b  ledger without the opt-in on a capable host -> null, zero ensureSystemBase
  *   T5c  ledger, opt-in, capable, NO tenant, main missing -> 400, nothing written (fail-closed)
- *   T6   three creation orders end in ONE base for the main table + ledger pair
- *   T7   env off (every off-value, trimmed/case-insensitive) -> zero anchor lookup, zero
- *        ensureSystemBase, baseId null; unset / other values -> on
+ *   T6   every creation order ends in ONE base for the main table + ledger pair — including the
+ *        round-1 refuted state (ledger pre-existing, main table missing: (d) through the REAL
+ *        routes, (g) module-level in an arbitrary base), the gate flipped off between the two
+ *        ensures (e), and host version skew between the two ensures (f)
+ *   T7   env off (every off-value, trimmed/case-insensitive) -> zero ensureSystemBase, baseId null
+ *        on a fresh install; the anchor still runs (it neither derives nor creates); unset / other
+ *        values -> on
  *   T8   host without ensureSystemBase + opt-in -> null with ownBaseSource api_unavailable (the ONLY
- *        pin of that degrade; unreachable in a single-repo release)
+ *        pin of that degrade; unreachable in a single-repo release), in BOTH orders
  *   T9   canonical, opt-in, capable, NO tenant -> 400, nothing written
  *   T10  derivation ignores the projectId prefix
  *   T11  a request baseId on the write route is still 400 STOCK_PREPARATION_BASE_ID_NOT_ALLOWED
@@ -28,11 +33,16 @@
  *   T14  sandbox and MVP routes never call ensureSystemBase and pass baseId null on a capable host
  *   T15  a 409 MULTITABLE_BASE_ADOPTION_REFUSED reaches the client typed, zero ensureObject, and
  *        leaks no owner value
- *   T16  structural: exactly the two write routes opt in; the ledger anchors to the main table
+ *   T16  structural: exactly the two write routes opt in; BOTH pair members hand the resolver
+ *        their own objectId (the ledger only ever names OBJECT_ID — G1); the pair constant is
+ *        exactly {main, ledger} and partners are symmetric
+ *   T17  the anchor is pair-scoped: a non-member objectId (or none) never looks anything up
  *
  * Mutation witnesses (in-memory only; recorded in the PR body): M2 derive from body/query ->
- * T12 red (projectId variant -> T10 red); M3 remove the anchor step -> T5, T6(c) red; M4 detach the
- * ledger from the anchor -> T5, T6(c) red; M5 gate always on -> T7 red.
+ * T12 red (projectId variant -> T10 red); M3 remove the anchor step -> T5 red; M4 detach the
+ * ledger from the resolver (no objectId) -> T5 red; M5 gate always on -> T7 red; M9 detach the
+ * MAIN TABLE from the resolver (no objectId) -> T3 red, T6(d) red; M10 gate before anchor -> T6(e)
+ * red.
  */
 
 const assert = require('node:assert/strict')
@@ -47,8 +57,10 @@ const ownBase = require(path.join(LIB, 'stock-preparation-own-base.cjs'))
 const {
   STOCK_PREP_OWN_BASE_ENV,
   STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
+  STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS,
   stockPreparationOwnBaseEnabled,
   deriveStockPreparationBaseId,
+  stockPreparationOwnBasePairPartners,
   resolveStockPreparationOwnBase,
 } = ownBase
 const {
@@ -59,8 +71,10 @@ const {
 const { ensureConfirmationDecisionTarget, OBJECT_ID: LEDGER_OBJECT_ID } = require(LEDGER_PATH)
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   TEMPLATE_LABEL_LOCALE_ENV,
 } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
+const TARGET_PROVISIONING_PATH = path.join(LIB, 'stock-preparation-target-provisioning.cjs')
 const httpRoutes = require(HTTP_ROUTES_PATH)
 const pluginManifest = require(path.join(__dirname, '..', 'plugin.json'))
 
@@ -87,6 +101,14 @@ function findCalls(calls, name) {
 
 function mainSheet(baseId) {
   return { id: 'sheet_main_existing', baseId, name: 'PLM Stock Preparation Main', description: null }
+}
+
+function ledgerSheet(baseId) {
+  return { id: 'sheet_ledger_existing', baseId, name: 'Stock Preparation Confirmation Decision', description: null }
+}
+
+function baseIdsPassedToEnsureObject(host) {
+  return new Set(findCalls(host.calls, 'ensureObject').map(([, input]) => input.baseId))
 }
 
 // ── the host fake: ONE ordered call log across every provisioning method ───────────────────────
@@ -295,6 +317,27 @@ async function testDerivationIgnoresProjectId() {
   assert.equal(resolved.source, 'derived')
   assert.equal(resolved.created, true)
   assert.equal(deriveStockPreparationBaseId.length, 1, 'T10 derive takes the tenant and nothing else')
+  assert.equal(findCalls(host.calls, 'findObjectSheet').length, 0, 'T10 no objectId -> no anchor lookup')
+}
+
+// ── T17: the anchor is pair-scoped ─────────────────────────────────────────────────────────────
+async function testAnchorIsPairScoped() {
+  assert.deepEqual(stockPreparationOwnBasePairPartners(MAIN_OBJECT_ID), [LEDGER_OBJECT_ID], 'T17 main -> ledger')
+  assert.deepEqual(stockPreparationOwnBasePairPartners(LEDGER_OBJECT_ID), [MAIN_OBJECT_ID], 'T17 ledger -> main')
+  for (const outsider of ['plm_stock_preparation_sandbox_validation', 'plm_stock_preparation_line', '', null, undefined, 42]) {
+    assert.deepEqual(stockPreparationOwnBasePairPartners(outsider), [], `T17 ${JSON.stringify(outsider)} has no partner`)
+  }
+  // A non-member with BOTH pair tables present in some base never follows them: no lookup, derives.
+  const host = createOwnBaseHostFake({ sheets: { [MAIN_OBJECT_ID]: mainSheet('base_legacy'), [LEDGER_OBJECT_ID]: ledgerSheet('base_legacy') } })
+  const resolved = await resolveStockPreparationOwnBase({
+    provisioning: host.api,
+    projectId: PROJECT_ID,
+    objectId: 'plm_stock_preparation_sandbox_validation',
+    tenantId: 'tenant_1',
+    env: {},
+  })
+  assert.equal(findCalls(host.calls, 'findObjectSheet').length, 0, 'T17 a non-member never looks the pair up')
+  assert.equal(resolved.source, 'derived')
 }
 
 // ── T3 / T3b / T4 / T9: the main table ─────────────────────────────────────────────────────────
@@ -310,7 +353,9 @@ async function testFreshInstallDerivesBeforeEnsureObject() {
   })
   const derived = deriveStockPreparationBaseId('tenant_1')
   assert.equal(result.mode, 'canonical_create')
-  assert.deepEqual(names(host.calls).slice(0, 4), ['findObjectSheet', 'ensureSystemBase', 'ensureObject', 'resolveFieldIds'], 'T3 order')
+  assert.deepEqual(names(host.calls).slice(0, 5), ['findObjectSheet', 'findObjectSheet', 'ensureSystemBase', 'ensureObject', 'resolveFieldIds'], 'T3 order')
+  const lookups = findCalls(host.calls, 'findObjectSheet').map(([, input]) => input.objectId)
+  assert.deepEqual(lookups, [MAIN_OBJECT_ID, LEDGER_OBJECT_ID], 'T3 own readiness, then the anchor lookup of the ledger, before any derivation')
   const ensureBase = findCalls(host.calls, 'ensureSystemBase')
   assert.equal(ensureBase.length, 1)
   assert.deepEqual(ensureBase[0][1], { baseId: derived, name: 'Stock preparation' }, 'T3 derived id + English name by default')
@@ -448,9 +493,6 @@ async function testThreeOrdersOneBase() {
   const common = { projectId: PROJECT_ID, permission: 'admin', tenantId: 'tenant_1', resolveOwnBase: true, env: {} }
   // The guarantee is the MAIN TABLE + CONFIRMATION LEDGER pair only. Staging and MVP tables are
   // not resolved here and still default to the legacy base (disclosed in the PR body).
-  function baseIdsPassedToEnsureObject(host) {
-    return new Set(findCalls(host.calls, 'ensureObject').map(([, input]) => input.baseId))
-  }
 
   // (a) main first, then ledger
   const a = createOwnBaseHostFake()
@@ -464,15 +506,69 @@ async function testThreeOrdersOneBase() {
   await ensureConfirmationDecisionTarget({ ...common, context: context(b.api) })
   await ensureStockPreparationCanonicalTarget({ ...common, context: context(b.api) })
   assert.deepEqual([...baseIdsPassedToEnsureObject(b)], [derived], 'T6(b) ledger then main: one base')
-  const bEnsures = findCalls(b.calls, 'ensureSystemBase')
-  assert.equal(bEnsures.length, 2, 'T6(b) both derived (idempotent ensure)')
-  assert.equal(bEnsures[0][1].baseId, bEnsures[1][1].baseId)
+  assert.equal(findCalls(b.calls, 'ensureSystemBase').length, 1, 'T6(b) the main table anchored to the ledger, it did not derive again')
 
   // (c) main pre-existing in some other base, then ledger
   const c = createOwnBaseHostFake({ sheets: { [MAIN_OBJECT_ID]: mainSheet('base_stock') } })
   await ensureConfirmationDecisionTarget({ ...common, context: context(c.api) })
   assert.deepEqual([...baseIdsPassedToEnsureObject(c)], ['base_stock'], 'T6(c) the ledger follows the pre-existing main table')
   assert.equal(findCalls(c.calls, 'ensureSystemBase').length, 0, 'T6(c) zero derivation next to an existing main table')
+
+  // (d) THE ROUND-1 REFUTED STATE, through the REAL routes: the ledger already sits in base_legacy
+  // (an install page that ensured the ledger and stopped at PACK_CATALOG_EMPTY, a rollback window,
+  // a re-provision after the main table was deleted), the main table is missing, the gate is on.
+  // The first cut derived here and split the pair. Now the main table follows the ledger.
+  const d = createOwnBaseHostFake({ sheets: { [LEDGER_OBJECT_ID]: ledgerSheet('base_legacy') } })
+  const dRoutes = mountRoutes(d.api)
+  const dLedger = await invoke(dRoutes, 'POST', LEDGER_ROUTE, { user: ADMIN_USER, body: {} })
+  assert.equal(dLedger.statusCode, 200, JSON.stringify(dLedger.body))
+  assert.equal(dLedger.body.data.mode, 'confirmation_decision_existing')
+  const dMain = await invoke(dRoutes, 'POST', CANONICAL_ROUTE, { user: ADMIN_USER, body: {} })
+  assert.equal(dMain.statusCode, 201, JSON.stringify(dMain.body))
+  assert.equal(dMain.body.data.mode, 'canonical_create')
+  assert.equal(dMain.body.data.evidence.ownBaseSource, 'anchor', 'T6(d) the main table anchored to the pre-existing ledger')
+  assert.equal(dMain.body.data.evidence.ownBaseCreated, false)
+  assert.equal(findCalls(d.calls, 'ensureSystemBase').length, 0, 'T6(d) zero derivation next to an existing ledger')
+  assert.deepEqual([...baseIdsPassedToEnsureObject(d)], ['base_legacy'], 'T6(d) the main table lands in the LEDGER\'s base')
+  assert.equal(d.sheets.get(MAIN_OBJECT_ID).baseId, d.sheets.get(LEDGER_OBJECT_ID).baseId, 'T6(d) one base for the pair')
+  assert.equal(JSON.stringify(dMain.body).includes('base_legacy'), false, 'T6(d) the response never carries the base id')
+
+  // (e) the gate flipped OFF between the two ensures: the ledger landed in the derived base while
+  // the gate was on, then MULTITABLE_STOCK_PREP_OWN_BASE=false, then the main table is ensured.
+  // The anchor runs BEFORE the gate, so the rollback switch cannot split a pair whose first half
+  // already landed; it still derives nothing and creates no base.
+  const e = createOwnBaseHostFake()
+  await ensureConfirmationDecisionTarget({ ...common, context: context(e.api) })
+  assert.equal(e.sheets.get(LEDGER_OBJECT_ID).baseId, derived)
+  const eMain = await ensureStockPreparationCanonicalTarget({ ...common, context: context(e.api), env: { [STOCK_PREP_OWN_BASE_ENV]: 'false' } })
+  assert.equal(eMain.evidence.ownBaseSource, 'anchor', 'T6(e) gate off + existing ledger -> anchor, not disabled')
+  assert.deepEqual([...baseIdsPassedToEnsureObject(e)], [derived], 'T6(e) gate off after the ledger landed: still one base')
+  assert.equal(findCalls(e.calls, 'ensureSystemBase').length, 1, 'T6(e) the gate-off leg derived nothing')
+  // ... and the mirror (main landed derived, gate off, then the ledger).
+  const e2 = createOwnBaseHostFake()
+  await ensureStockPreparationCanonicalTarget({ ...common, context: context(e2.api) })
+  const e2Ledger = await ensureConfirmationDecisionTarget({ ...common, context: context(e2.api), env: { [STOCK_PREP_OWN_BASE_ENV]: 'false' } })
+  assert.equal(e2Ledger.evidence.ownBaseSource, 'anchor')
+  assert.deepEqual([...baseIdsPassedToEnsureObject(e2)], [derived], 'T6(e) mirror: still one base')
+  assert.equal(findCalls(e2.calls, 'ensureSystemBase').length, 1)
+
+  // (f) host version skew between the two ensures: the ledger was created on a host WITHOUT
+  // ensureSystemBase (api_unavailable -> legacy null), the main table later on a capable host.
+  const f = createOwnBaseHostFake({ withEnsureSystemBase: false })
+  const fLedger = await ensureConfirmationDecisionTarget({ ...common, context: context(f.api) })
+  assert.equal(fLedger.evidence.ownBaseSource, 'api_unavailable')
+  const capable = createOwnBaseHostFake({ sheets: { [LEDGER_OBJECT_ID]: f.sheets.get(LEDGER_OBJECT_ID) } })
+  const fMain = await ensureStockPreparationCanonicalTarget({ ...common, context: context(capable.api) })
+  assert.equal(fMain.evidence.ownBaseSource, 'anchor', 'T6(f) the main table follows the null-based ledger on the newer host')
+  assert.equal(findCalls(capable.calls, 'ensureSystemBase').length, 0, 'T6(f) zero derivation on the capable host next to an existing ledger')
+  assert.deepEqual([...baseIdsPassedToEnsureObject(capable)], [null], 'T6(f) legacy null, same as the ledger')
+
+  // (g) ledger pre-existing in an arbitrary base, then main (the mirror of (c)).
+  const g = createOwnBaseHostFake({ sheets: { [LEDGER_OBJECT_ID]: ledgerSheet('base_stock') } })
+  const gMain = await ensureStockPreparationCanonicalTarget({ ...common, context: context(g.api) })
+  assert.equal(gMain.evidence.ownBaseSource, 'anchor')
+  assert.deepEqual([...baseIdsPassedToEnsureObject(g)], ['base_stock'], 'T6(g) the main table follows the pre-existing ledger')
+  assert.equal(findCalls(g.calls, 'ensureSystemBase').length, 0, 'T6(g) zero derivation next to an existing ledger')
 }
 
 // ── T7: the env gate ───────────────────────────────────────────────────────────────────────────
@@ -495,11 +591,14 @@ async function testEnvGate() {
     for (const [, input] of findCalls(host.calls, 'ensureObject')) {
       assert.equal(input.baseId, null, 'T7 env off: today\'s legacy null')
     }
-    assert.equal(canonical.body.data.evidence.ownBaseSource, 'disabled')
-    assert.equal(ledger.body.data.evidence.ownBaseSource, 'disabled')
-    // Zero anchor lookups: the ledger's findObjectSheet calls name only its own object.
-    const ledgerLookups = findCalls(host.calls, 'findObjectSheet').map(([, input]) => input.objectId)
-    assert.equal(ledgerLookups.filter((objectId) => objectId === MAIN_OBJECT_ID).length, 1, 'T7 the only main-table lookup is the canonical route\'s own readiness inspect')
+    assert.equal(canonical.body.data.evidence.ownBaseSource, 'disabled', 'T7 fresh install, gate off: the main table takes today\'s value')
+    assert.equal(ledger.body.data.evidence.ownBaseSource, 'anchor', 'T7 gate off: the ledger still follows the (null-based) main table just created')
+    // The anchor lookup still runs with the gate off (it neither derives nor creates — see T6(e));
+    // on this fresh install it finds nothing on the canonical leg. The main-table lookups are the
+    // canonical route's own readiness inspect plus the ledger route's anchor lookup.
+    const lookups = findCalls(host.calls, 'findObjectSheet').map(([, input]) => input.objectId)
+    assert.equal(lookups.filter((objectId) => objectId === MAIN_OBJECT_ID).length, 2, 'T7 gate off: readiness inspect + the ledger\'s anchor lookup')
+    assert.equal(lookups.filter((objectId) => objectId === LEDGER_OBJECT_ID).length, 3, 'T7 gate off: the main table\'s anchor lookup + the ledger\'s inspect + verify')
   })
 }
 
@@ -513,6 +612,13 @@ async function testIncapableHostDegrades() {
   const ledger = await ensureConfirmationDecisionTarget({ context: context(host.api), projectId: PROJECT_ID, permission: 'admin', tenantId: 'tenant_1', resolveOwnBase: true, env: {} })
   assert.equal(ledger.evidence.ownBaseSource, 'anchor', 'T8 the ledger still follows the (just created, null-based) main table')
   assert.equal(findCalls(host.calls, 'ensureObject')[1][1].baseId, null)
+
+  const reversed = createOwnBaseHostFake({ withEnsureSystemBase: false })
+  const first = await ensureConfirmationDecisionTarget({ context: context(reversed.api), projectId: PROJECT_ID, permission: 'admin', tenantId: 'tenant_1', resolveOwnBase: true, env: {} })
+  assert.equal(first.evidence.ownBaseSource, 'api_unavailable', 'T8 ledger first on an older host degrades the same way')
+  const second = await ensureStockPreparationCanonicalTarget({ context: context(reversed.api), projectId: PROJECT_ID, permission: 'admin', tenantId: 'tenant_1', resolveOwnBase: true, env: {} })
+  assert.equal(second.evidence.ownBaseSource, 'anchor', 'T8 the main table follows the (just created, null-based) ledger')
+  assert.deepEqual([...baseIdsPassedToEnsureObject(reversed)], [null])
 }
 
 // ── T11 / T12 / T15: the routes ────────────────────────────────────────────────────────────────
@@ -542,7 +648,7 @@ async function testOnlyThePrincipalTenantDerives() {
   const ensureBase = findCalls(host.calls, 'ensureSystemBase')
   assert.equal(ensureBase.length, 1)
   assert.equal(ensureBase[0][1].baseId, derived, 'T12 the derived base is the PRINCIPAL\'s tenant')
-  assert.notEqual(ensureBase[0][1].baseId, steered, 'T12 body/query/header tenant values are inert')
+  assert.notEqual(ensureBase[0][1].baseId, steered, 'T12 body/query/header tenant values are inert at the plugin boundary (upstream, the host jwt middleware may fill a CLAIMLESS token\'s user.tenantId from x-tenant-id unless MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED is on — the known hole, unchanged by B3)')
   const ensureObject = findCalls(host.calls, 'ensureObject')[0][1]
   assert.equal(ensureObject.baseId, derived)
   assert.equal(ensureObject.projectId, PROJECT_ID, 'T12 the write projectId is the principal\'s too')
@@ -640,16 +746,35 @@ function testStructuralPins() {
     const body = routesSrc.slice(start, routesSrc.indexOf('\n    },', start))
     assert.equal(body.includes('resolveOwnBase'), false, `T16 ${handler} does not opt in`)
   }
+  // Both pair members hand the resolver their OWN objectId; the resolver (which owns the pair)
+  // anchors each to the other. The ledger only ever names OBJECT_ID (G1); the main table passes
+  // the template's objectId (a sandbox template is not a pair member and never anchors).
+  function resolverCallBlock(src, label) {
+    const start = src.indexOf('await resolveStockPreparationOwnBase({')
+    assert.ok(start > 0, `T16 ${label} calls the resolver`)
+    assert.equal(src.indexOf('await resolveStockPreparationOwnBase({', start + 1), -1, `T16 ${label} calls the resolver exactly once`)
+    return src.slice(start, src.indexOf('})', start))
+  }
   const ledgerSrc = fs.readFileSync(LEDGER_PATH, 'utf8')
-  assert.ok(ledgerSrc.includes('anchorToMainTable: true'), 'T16 the ledger anchors to the main table')
+  assert.ok(resolverCallBlock(ledgerSrc, 'the ledger').includes('objectId: OBJECT_ID,'), 'T16 the ledger anchors through its own objectId')
+  assert.equal(ledgerSrc.includes('anchorToMainTable'), false, 'T16 the one-directional anchor flag is gone')
   assert.ok(ledgerSrc.includes('resolveOwnBase === true'), 'T16 the ledger resolves only on the opt-in')
   assert.equal(ledgerSrc.includes(MAIN_OBJECT_ID), false, 'T16 the ledger still never names the canonical object (G1)')
+  const provisioningSrc = fs.readFileSync(TARGET_PROVISIONING_PATH, 'utf8')
+  assert.ok(resolverCallBlock(provisioningSrc, 'the main table').includes('objectId: template.objectId,'), 'T16 the main table anchors through its own objectId')
+  assert.equal(provisioningSrc.includes('anchorToMainTable'), false)
+  // The pair is exactly {main, ledger}, spelled from the two templates, and the ledger's identity
+  // in the pair is the ledger module's exported OBJECT_ID.
+  assert.deepEqual([...STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS], [MAIN_OBJECT_ID, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.objectId], 'T16 the pair')
+  assert.equal(STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.objectId, LEDGER_OBJECT_ID, 'T16 the pair names the ledger by its module\'s own id')
+  assert.ok(Object.isFrozen(STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS))
 }
 
 async function main() {
   await withEnv({ [TEMPLATE_LABEL_LOCALE_ENV]: undefined, [STOCK_PREP_OWN_BASE_ENV]: undefined }, async () => {
     testDerivedIdShape()
     await testDerivationIgnoresProjectId()
+    await testAnchorIsPairScoped()
     await testFreshInstallDerivesBeforeEnsureObject()
     await testModuleCallerWithoutOptInIsUnchanged()
     await testExistingMainTableNeverDerives()

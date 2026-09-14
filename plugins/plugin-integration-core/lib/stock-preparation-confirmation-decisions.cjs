@@ -189,8 +189,8 @@ const {
 const { CARRY_CONFLICT_TYPES } = require('./stock-preparation-carry-policy.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
 // B3: the SAME base resolver the main table uses, so the ledger can never land in a different
-// base than the main table. The resolver owns the main table's identity (this module must not
-// name it — see G1) and hands back a base id only.
+// base than the main table. The resolver owns the pair's identities (this module must not name
+// the main table — see G1): the ledger passes only its OWN objectId and gets a base id back.
 const { resolveStockPreparationOwnBase } = require('./stock-preparation-own-base.cjs')
 const {
   StockPreparationTargetProvisioningError,
@@ -492,17 +492,18 @@ async function ensureConfirmationDecisionTarget({
     )
   }
   // B3: the ledger's base. Own base resolution is a ROUTE opt-in (`resolveOwnBase: true`); every
-  // other caller keeps today's `optionalString(baseId)`. With the opt-in, the ledger FOLLOWS the
-  // main table when it exists (anchor — zero ensureSystemBase calls, the 222 shape) and derives
-  // the same id the main table would otherwise. The already-ready return above precedes this, so
-  // an existing ledger is never moved.
+  // other caller keeps today's `optionalString(baseId)`. With the opt-in, the resolver anchors
+  // this ledger (identified by its OWN objectId — the resolver knows the pair partner, this
+  // module must not) to the main table when it exists (zero ensureSystemBase calls, the 222
+  // shape) and derives the same id the main table would otherwise. The already-ready return
+  // above precedes this, so an existing ledger is never moved.
   const ownBase = resolveOwnBase === true
     ? await resolveStockPreparationOwnBase({
         provisioning,
         projectId: scopedProjectId,
+        objectId: OBJECT_ID,
         tenantId,
         explicitBaseId: optionalString(baseId),
-        anchorToMainTable: true,
         locale,
         env,
       })
