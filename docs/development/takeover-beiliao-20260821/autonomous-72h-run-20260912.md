@@ -4,7 +4,7 @@
 
 ## 0. 一句话结论(进行中)
 
-截至 09-14 11:05:四支合入(X5 #5685、E #5684、X6 #5686、#5625),r36 → r37 两次上 222 均 exit 0;演示项目 dry-run 从 r35 的「根行永不收敛的空 update」变为全量收敛;后台大 BOM 链的包列写面与小 BOM 对齐。剩余全是 owner 决策项(§5)。窗口 09-15 18:2x 结束前本文继续更新。
+截至 09-14 16:20:七支合入(X5 #5685、E #5684、X6 #5686、#5625、品牌链接 #5700、② #5701、③ #5702),r36 → r37 两次上 222 均 exit 0,r38(#5700)已建待 18:00 后上;演示项目 dry-run 从 r35 的「根行永不收敛的空 update」变为全量收敛;后台大 BOM 链的包列写面与小 BOM 对齐。剩余全是 owner 决策项(§5)。窗口 09-15 18:2x 结束前本文继续更新。
 
 ## 1. 授权、边界与本轮规矩
 
@@ -25,7 +25,7 @@
 | E | 通知中心保留期清理(env 默认关) | Opus | `eb58d8f5d` → PR #5684;反驳 5+3 → 修 → 终审 FIX_FIRST 3 条(真库 lane 接线 / 「死代码」误判更正 / 变异护栏)已落实;CI 首轮四红 = plugin-tests.yml 溯源 pin 未重算,已重钉 → **PR #5684 CI 52/53 → 合入 `0029f4094`** |
 | F | 上机 r36 / r37 | 协调方 | r36 09:16、r37 10:54 上 222,均 exit 0(§4.1);F4A 小项不动 |
 | G | 顶栏左上品牌字改为回首页链接(用户 09-14 现场需求) | 协调方直做(前端小改)+ 挂载测试 | `App.vue` 品牌字原是纯 span 不可点 → `router-link` 经 `resolveHomePath()`(platform → `/home` 我的应用;两种聚焦模式各回各家;守卫不动);App.spec +3 例、M1/M2 变异各 2 红、vue-tsc 0;CI 两轮红 = 五个挂 App.vue 的 spec 对 featureFlags 用部分 mock 缺 `resolveHomePath`(逐 mock 块扫描后补齐)→ **PR #5700 CI 23/23 → 合入 `8f917f9ff`**;进 r38(白天不上,等用户定时间或 18:00 后) |
-| H | ③ 备料开通派生自有 base + ② 考勤目录种子 env 开关(用户「按建议执行」) | 工作流:三读者(opus)→ 设计(Fable)+ 批评(opus)→ 双实现(Fable / opus)→ 双镜头反驳(opus)→ 修 ≤2 → 终审(Fable) | 规格 `spec-B3-stock-prep-own-base.md`;批评者一轮 REVISE(用户可经 POST /bases 抢注派生 id ⇒ fail-closed 变拒绝服务);实现 B3 `a7fc9aae` / ② `b0163985`;反驳 r1:② PASS,B3 两镜头 BLOCK(同一洞:单向锚点致某种顺序下主表与账本落不同 base)→ fix `1b941407`(对称锚点、锚点先于开关)→ r2 双 PASS → 终审 FIX_FIRST 1 条必修(锚点原样跟随伙伴表所在的任意 base:`POST /sheets` 自选 id 可把主表引进用户自有 base)→ judge-fix `6cf091a8`(围栏 null / base_legacy / 前缀)→ 复驳 BLOCK(裸前缀宽于 `POST /bases` 预留正则,`base_integration-core_x` 可过栏)→ fix `72632020`(围栏收窄到插件能铸出的形状 = 核心正则字面量,3000 样本 fuzz 证围栏 ⊆ 预留;M11c/d/e 红)→ 复驳 PASS(minor:围栏按形状不按归属,仅 SQL 可达,已写入 runbook)→ **PR #5702 CI 中**;② **PR #5701 CI 26/26 → 合入 `2e120a7d5`**。两支都不进 r38,进 r39(下个窗口) |
+| H | ③ 备料开通派生自有 base + ② 考勤目录种子 env 开关(用户「按建议执行」) | 工作流:三读者(opus)→ 设计(Fable)+ 批评(opus)→ 双实现(Fable / opus)→ 双镜头反驳(opus)→ 修 ≤2 → 终审(Fable) | 规格 `spec-B3-stock-prep-own-base.md`;批评者一轮 REVISE(用户可经 POST /bases 抢注派生 id ⇒ fail-closed 变拒绝服务);实现 B3 `a7fc9aae` / ② `b0163985`;反驳 r1:② PASS,B3 两镜头 BLOCK(同一洞:单向锚点致某种顺序下主表与账本落不同 base)→ fix `1b941407`(对称锚点、锚点先于开关)→ r2 双 PASS → 终审 FIX_FIRST 1 条必修(锚点原样跟随伙伴表所在的任意 base:`POST /sheets` 自选 id 可把主表引进用户自有 base)→ judge-fix `6cf091a8`(围栏 null / base_legacy / 前缀)→ 复驳 BLOCK(裸前缀宽于 `POST /bases` 预留正则,`base_integration-core_x` 可过栏)→ fix `72632020`(围栏收窄到插件能铸出的形状 = 核心正则字面量,3000 样本 fuzz 证围栏 ⊆ 预留;M11c/d/e 红)→ 复驳 PASS(minor:围栏按形状不按归属,仅 SQL 可达,已写入 runbook)→ PR #5702 首轮 CI 两红 = Global-History flag manifest 完整性 grep 把三个新错误码当 flag(登记 NON_GH_EXACT,`4a094eacd`)→ **CI 35/35 → 合入 `c13e40769`**;② **PR #5701 CI 26/26 → 合入 `2e120a7d5`**。两支都不进 r38,进 r39(下个窗口;上机后 `GET /bases` 只读核对,222 已有安装按 (ii) 锚点零变化) |
 
 ## 3. 替 owner 定的口径(本轮)
 
