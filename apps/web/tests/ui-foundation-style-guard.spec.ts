@@ -80,6 +80,10 @@ const TARGET_FILES = [
   'src/components/integration/IntegrationMonitoringSection.vue',
   'src/components/integration/IntegrationCleaningDatasetSection.vue',
   'src/components/integration/IntegrationMappingRulesSection.vue',
+  // G27 (docs/development/integration-mapping-transform-ui-parity-design-20260910.md): the
+  // transform-argument controls extracted out of the mapping-rules section copy their CSS from
+  // that same token-only file, so this one is born clean too.
+  'src/components/integration/IntegrationMappingTransformArgs.vue',
   // IU-2c (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
   // stage C — round 2 per-section extraction): same verbatim-copy-from-token-only-parent pattern.
   'src/components/integration/IntegrationObjectTemplateSection.vue',
