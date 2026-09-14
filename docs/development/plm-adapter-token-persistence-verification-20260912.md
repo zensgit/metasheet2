@@ -200,3 +200,11 @@ M1 与 M5 只红空格/斜杠那一条、其余 discussion 用例仍绿,是**真
 3. **axios 腿未覆盖**:见设计文档 R6。`routes/plm-workbench.ts:1131/1219` 的 `result.error.message` 直传仍在;axios 错误在带 userinfo 配置下到底带不带 URL 原文,本轮**没有**实证。
 4. **`response.data` 未打码**:非 2xx 时上游载荷原样挂在错误上(`:2750`)。若上游把请求 URL 回显进 body 而不是 `detail`,那条路径仍会带原文——本刀只处理了 message 面,理由见设计文档 §6.2 第 5 条。
 5. **过度打码的代价未量化**:`extractUrlUserinfo` 取最后一个 `@`,路径里带 `@` 又没凭据的 base URL 会连主机名一起被遮。仓内没见过这种 base URL,但没有普查。
+
+### 复核订正（#5691 缩水版对抗复核：1 finder → 1 refuter → judge，5 条 → 2 存活）
+
+- **F1（major，已修）**：`extractUrlUserinfo` 先按 `[?#]` 预切再找 `@`，口令含 `#`/`?` 时（如 `u:pa#ss/x@host`）userinfo 取空、值层整层空转，正则 `[^/\s]*` 又撞 `/` 即止——真实 Node fetch 复跑确认口令进 `QueryResult.error.message`。修法：预切后的 head 不含 `@` 时回退整段 head；代价是 path 里带 `@` 的 base URL 在错误文本里会连主机一起打掉（与「宁可多打码」原则一致）。新增 `FAKE#PW/SLASH`、`FAKE?PW SPACE` 两形状进循环，修前必红。
+- **F2（minor，已修）**：`connect()` 的 info 日志只过了 `redactUrlUserinfo` 正则一刀，含空格/斜杠的口令照样进日志；改走 `redactErrorText`（值层 + 形状层），新增用例钉住。
+- **口径订正**：本刀 `redactErrorText` 的调用点只有 discussion 腿的 `detail` 与上游 `detail` 两处（登录腿结构性只存 `err.name`，不需要打码），不是「另 9 处」。
+- 终审确认的没人看的路径：全文件无 `logger.error(err)` 整对象序列化；两条 fetch 腿无 throw；spec 用的是真实 fetch（`tests/setup.ts` 的 stub 晚于模块求值抓到的真 fetch）。
+

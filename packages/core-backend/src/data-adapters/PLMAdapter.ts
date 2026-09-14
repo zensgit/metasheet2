@@ -20,7 +20,9 @@ function redactUrlUserinfo(text: string): string {
  * parsing. `new URL()` is unusable here by construction -- the URLs that reach this helper are
  * exactly the ones the platform URL parser rejects, and that rejection is what produced the error
  * text we are about to scrub. Rule: everything between `://` and the LAST '@' of the authority-ish
- * head (query/fragment are cut off first, where '@' is legal and common).
+ * head. Query/fragment are cut off first (a bare '@' there is legal and common) -- but only when
+ * the cut head still holds an '@'; otherwise the whole head is used, so a password containing '?'
+ * or '#' is still captured (#5691 review, F1).
  *
  * Deliberately over-inclusive: a base URL that carries '@' in its PATH and no credentials at all
  * loses its host to `<redacted>` inside error text. That costs a little diagnosability; missing one
@@ -31,7 +33,12 @@ function extractUrlUserinfo(rawUrl: unknown): string {
   const raw = typeof rawUrl === 'string' ? rawUrl : ''
   const schemeEnd = raw.indexOf('://')
   if (schemeEnd < 0) return ''
-  const head = raw.slice(schemeEnd + 3).split(/[?#]/)[0]
+  const whole = raw.slice(schemeEnd + 3)
+  const preCut = whole.split(/[?#]/)[0]
+  // Prefer the pre-cut head (a bare '@' inside query/fragment is legal and common). Fall back to the
+  // WHOLE head when the pre-cut swallowed the '@': a password that itself contains '?' or '#' would
+  // otherwise yield '' here and the value layer would silently do nothing (#5691 review, F1).
+  const head = preCut.includes('@') ? preCut : whole
   const at = head.lastIndexOf('@')
   return at > 0 ? head.slice(0, at) : ''
 }
@@ -1209,7 +1216,8 @@ export class PLMAdapter extends HTTPAdapter {
 
     // #5648 F01 (adjacent, logging only): a base URL may carry userinfo (scheme://user:pass@host);
     // strip it before it reaches the log sink. No semantic change — the URL used to connect is untouched.
-    this.logger.info(`PLM Adapter connecting to ${redactUrlUserinfo(String(this.config.connection.url ?? ''))}`);
+    // #5691 review (F2): value layer too -- a password with a space or '/' defeats the shape regex alone.
+    this.logger.info(`PLM Adapter connecting to ${this.redactErrorText(String(this.config.connection.url ?? ''))}`);
     await super.connect();
     // #5648 F02: the instance-held Bearer token is wired onto the axios client inside onConnect() (see
     // below) — i.e. in the same synchronous segment where HTTPAdapter.connect() flips `connected`,
