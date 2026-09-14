@@ -720,7 +720,34 @@ async function assertTargetFieldsExist(action, targetFieldExistence) {
   const extensionFieldIds = Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : []
   let verdict
   try {
-    const judgedSheetId = optionalString(provisioning.getObjectSheetId(projectId, objectId))
+    // THE DERIVATION MUST ANSWER A STRING SYNCHRONOUSLY, OR THE PROBE HAS NOT DEGRADED - IT HAS
+    // GONE BLIND. `optionalString` here accepts nothing but a string (:137), so ANY other value a
+    // future host returns - a Promise above all, which is what `getObjectSheetId` becomes the day
+    // the host makes it `async` - normalises to null and falls into the `!judgedSheetId` return
+    // below. That return is the DEGRADE path, and it is only safe when the host TOLD us something:
+    // an absent or different id is a fact about the binding (see the divergent-binding paragraph
+    // above). A Promise is not that fact. It would silently turn the probe off for every install of
+    // that host - the incident-shaped target plans and writes unprobed again, with nothing in the
+    // response, the log or this suite to show for it. Fail-open by accident is exactly what this
+    // probe exists to remove, so the contract is asserted rather than inferred.
+    //
+    // WHICH OF THE TWO PERMITTED ANSWERS THIS TAKES: the 503. A value the probe cannot compare
+    // means the derivation contract it depends on no longer holds, which is the same predicament
+    // as a `meta_fields` read that blew up - the probe cannot answer - and it is refused through
+    // the SAME values-free 503 TARGET_SCHEMA_UNAVAILABLE below, no new response vocabulary, the
+    // reason on `cause` for the server log. Loud and retryable beats silent: readiness/ensure still
+    // answer, and the host upgrade gets noticed on the first plan instead of on the next incident.
+    //
+    // `undefined`/`null` KEEP THEIR EXISTING READING, deliberately: a host answering "I have no id
+    // for this pair" is an absence, the same information an empty string already carries here, and
+    // it degrades exactly like a divergent binding did before this line existed. Today's host is a
+    // pure `stableMetaId` derivation (packages/core-backend/src/multitable/provisioning.ts:187) and
+    // returns neither, so no shipped host changes behaviour from this assertion.
+    const derivedSheetId = provisioning.getObjectSheetId(projectId, objectId)
+    if (derivedSheetId !== undefined && derivedSheetId !== null && typeof derivedSheetId !== 'string') {
+      throw new Error('provisioning.getObjectSheetId must answer a string sheet id synchronously')
+    }
+    const judgedSheetId = optionalString(derivedSheetId)
     if (!judgedSheetId || judgedSheetId !== action.target.sheetId) return
     verdict = await resolveFieldExistence({
       provisioning,
