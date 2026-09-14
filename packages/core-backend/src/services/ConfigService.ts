@@ -8,6 +8,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { db } from '../db/db'
 import { toISOString, toDateValue } from '../db/type-helpers'
+import { EncryptionMaterialError, resolveEncryptionMaterial } from '../security/encrypted-secrets'
 
 // js-yaml is optional - try to load dynamically
 let yaml: { load(content: string): unknown } | null = null
@@ -378,17 +379,16 @@ export class DefaultConfigSource implements ConfigSource {
 export class SecretManager {
   private crypto = require('crypto')
   private algorithm = 'aes-256-gcm'
-  private keyDerivationSalt: Buffer
 
-  constructor() {
-    // Use environment variable or generate a salt
-    const salt = process.env.ENCRYPTION_SALT || 'default-salt-change-in-production'
-    this.keyDerivationSalt = Buffer.from(salt)
-  }
-
+  /**
+   * Key + salt come from the shared resolver (src/security/encrypted-secrets.ts), which
+   * fail-closes in production on missing / built-in-default material. Resolved per call rather
+   * than cached in the constructor so rotateKey()'s `process.env.ENCRYPTION_KEY` swap still
+   * selects the intended key for each decrypt/encrypt.
+   */
   private getKey(): Buffer {
-    const masterKey = process.env.ENCRYPTION_KEY || 'default-key-change-in-production'
-    return this.crypto.pbkdf2Sync(masterKey, this.keyDerivationSalt, 100000, 32, 'sha256')
+    const material = resolveEncryptionMaterial()
+    return this.crypto.pbkdf2Sync(material.masterKey, Buffer.from(material.salt), 100000, 32, 'sha256')
   }
 
   async encrypt(plaintext: string): Promise<string> {
@@ -411,6 +411,9 @@ export class SecretManager {
 
       return combined.toString('base64')
     } catch (error) {
+      // A misconfigured production key is an operator-actionable failure, not a generic crypto
+      // error — keep the (values-free) diagnostic instead of flattening it to 'Failed to encrypt'.
+      if (error instanceof EncryptionMaterialError) throw error
       logger.warn(`Encryption failed: ${errorToString(error)}`)
       throw new Error('Failed to encrypt value')
     }
@@ -434,6 +437,7 @@ export class SecretManager {
 
       return decrypted
     } catch (error) {
+      if (error instanceof EncryptionMaterialError) throw error
       logger.warn(`Decryption failed: ${errorToString(error)}`)
       throw new Error('Failed to decrypt value')
     }
