@@ -24,6 +24,8 @@
 | D | F8A 第二刀(有损预检) | — | 视时间 / owner 决策 |
 | E | 通知中心保留期清理(env 默认关) | Opus | `eb58d8f5d` → PR #5684;反驳 5+3 → 修 → 终审 FIX_FIRST 3 条(真库 lane 接线 / 「死代码」误判更正 / 变异护栏)已落实;CI 首轮四红 = plugin-tests.yml 溯源 pin 未重算,已重钉 → **PR #5684 CI 52/53 → 合入 `0029f4094`** |
 | F | 上机 r36 / r37 | 协调方 | r36 09:16、r37 10:54 上 222,均 exit 0(§4.1);F4A 小项不动 |
+| G | 顶栏左上品牌字改为回首页链接(用户 09-14 现场需求) | 协调方直做(前端小改)+ 挂载测试 | `App.vue` 品牌字原是纯 span 不可点 → `router-link` 经 `resolveHomePath()`(platform → `/home` 我的应用;两种聚焦模式各回各家;守卫不动);App.spec +3 例、M1/M2 变异各 2 红、vue-tsc 0;CI 两轮红 = 五个挂 App.vue 的 spec 对 featureFlags 用部分 mock 缺 `resolveHomePath`(逐 mock 块扫描后补齐)→ **PR #5700 CI 23/23 → 合入 `8f917f9ff`**;进 r38(白天不上,等用户定时间或 18:00 后) |
+| H | ③ 备料开通派生自有 base + ② 考勤目录种子 env 开关(用户「按建议执行」) | 工作流:三读者(opus)→ 设计(Fable)+ 批评(opus)→ 双实现(Fable / opus)→ 双镜头反驳(opus)→ 修 ≤2 → 终审(Fable) | 规格 `spec-B3-stock-prep-own-base.md`;批评者一轮 REVISE(用户可经 POST /bases 抢注派生 id ⇒ fail-closed 变拒绝服务);实现 B3 `a7fc9aae` / ② `b0163985`;反驳 r1:② PASS,B3 两镜头 BLOCK(同一洞:某种顺序下主表与账本仍可落不同 base,正文不变量被证伪)→ 修复中。只出 PR,不上 222(r39 下个窗口) |
 
 ## 3. 替 owner 定的口径(本轮)
 
@@ -66,3 +68,4 @@
 4. **改 plugin-tests.yml 必重钉 `evidenceFiles.pluginTestsWorkflow`**(与 http-routes/package.json 同一类 pin);不重钉 = Sealed-export 三项 + integration-guard 同时红。
 5. **规格里的绝对句会被自己的用例证伪**:X6 的「没有任何一格取值会变」在批级不成立;写规格时把「行级/批级/表示层」分开写。
 6. **上机标记别猜子串**:#5625 第二子标记因猜的字符串不存在而假红;标记要么取自 diff 里真实存在的标识符,要么直接比对文件 sha256 与 provenance pin(后者更强)。
+7. **部分 mock 要按 mock 块判,不按文件 grep**:给 `App.vue` 加一个 store 成员,五个挂它的 spec 因部分 mock 连带红;首轮用「文件里出现过 resolveHomePath」筛,漏掉一个(它出现的是守卫用例的本地假 flags),多跑一轮 CI。
