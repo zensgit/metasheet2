@@ -48,6 +48,7 @@
 - **主表改名**:`sheet_32df959afa3cecfa564e5486` 按用户要求改名为 `bom备料`(先只读枚举再 UPDATE name;中文经 hex `convert_from(decode(...))` 传,绕开 222 的 GBK 控制台)。
 - **「考勤统计字段目录」为何在 bom备料 同一个多维表里**:它不是备料的表,是考勤插件自己的字段目录(`plugins/plugin-attendance/index.cjs` `getAttendanceReportFieldCatalogDescriptor`,47 行种子记录 / 16 列),插件 `activate` 时就 `ensureAttendanceReportFieldCatalog(DEFAULT_ORG_ID)` 建出来。三张表同居的根因在核心层:`packages/core-backend/src/multitable/provisioning.ts` 的 `createSheet` 对不带 `baseId` 的调用一律 `ensureLegacyBase()` 落到 `base_legacy`(界面上叫 Migrated Base,owner/workspace 都是 null);考勤插件不传 baseId,备料写路径按 GHSA-m6qv-2rpf-q7mh 决议 A **主动拒绝**请求带 baseId(`assertNoRequestBaseId`,因为核心写 `meta_sheets.base_id` 不校验 base 归属),于是也落 `base_legacy`。222 时间线印证:`base_legacy` 09-07 18:20:13 建(后端首次起)→ 考勤目录 18:21:12(插件激活)→ 备料两张 18:42:13(沙箱开通)。
 - **重建应用会不会再出现**:会,而且是结构性的——只要考勤插件还装着,每次后端启动都会保证这张目录存在于 `base_legacy`;备料开通今天没有别的落点。三条出路留给 owner 选:① 最小动作:把考勤目录挪到单独的 base(一行 `UPDATE meta_sheets SET base_id`,插件按 sheet id 找表,不受影响;可逆);② 代码:考勤目录的种子改为 env 开关,222 这种不用考勤的实例不建;③ 正解:备料开通派生出自己的可写 base(GHSA 注释里点名的 `resolveBaseWritable`,从已认证主体推导而非信请求),bom备料 与考勤目录彻底分家。①③ 不互斥;未得 owner 点头前我不动 222 数据。
+- **用户裁决(09-14 11:5x「按建议执行」)→ ① 已做,③ 下个窗口,② 并入 ③**:222 上一笔事务(`ops1800/base-split.sql`,两行原值先读出留底):新建 base `base_attendance_catalog`(名「考勤」,owner/workspace 与 Migrated Base 同为 null,`/bases` 列表不按 owner 过滤所以同样可见)→ 考勤目录 `sheet_75b4…` 挪入 → `base_legacy` 改名「备料」。回读:备料 base 只剩 bom备料 + 确认账本;考勤 base 只有考勤目录。插件按 sheet id 找表(`findObjectSheet` → `loadActiveSheet(id)`,`createSheet` ON CONFLICT DO NOTHING),重启不会在旧 base 重建。回滚 = 两条反向 UPDATE + 删新 base 行。
 
 ## 5. 未做与原因(截至 09-14 11:00)
 
@@ -55,7 +56,7 @@
 - **F8A 第二刀(D)**:owner 决策(有损预检是否允许带确认的破坏性改型),未开始。
 - **F4A 小项(F)**:升级脚本已连续 6 次实跑成功,不在窗口尾动它。
 - ~~X6 边界三的 222 一次性核查~~:已查(只读 SQL):备料确认账本两张,6 行全部 pending(SOURCE_VALUE_NOT_A_STRING)、无 CONFIRMED ⇒ X6 上机不作废任何人工决定。
-- **owner 待办(沿上一轮)**:F1c-b 包列二选一、F8A 7 条、ext_spec、「测试」规则收件人、X5 配额式选择;**新增**:bom备料 与考勤目录分家三选一(§4.2)。
+- **owner 待办(沿上一轮)**:F1c-b 包列二选一、F8A 7 条、ext_spec、「测试」规则收件人、X5 配额式选择;**新增**:~~bom备料 与考勤目录分家三选一~~ → 用户选「按建议」:① 已落(§4.2),③(备料开通派生自己的可写 base)排下个窗口,② 并入 ③。
 
 ## 6. 教训
 
