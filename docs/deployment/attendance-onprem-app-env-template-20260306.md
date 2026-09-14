@@ -27,15 +27,21 @@ cd /opt/metasheet
 cp docker/app.env.attendance-onprem.ready.env docker/app.env
 ```
 
-然后只替换这 3 项：
+然后替换这 5 项：
 
 1. `JWT_SECRET`
 2. `POSTGRES_PASSWORD`
 3. `DATABASE_URL` 里的数据库密码
+4. `ENCRYPTION_KEY`（模板里留空）
+5. `ENCRYPTION_SALT`（模板里留空）
 
 注意：
 - `JWT_SECRET` 现在要求至少 32 字符，且不能继续使用任何开发默认值。
 - `BCRYPT_SALT_ROUNDS` 需要保持 `12` 或更高，on-prem 校验脚本会直接拦截更低配置。
+- `ENCRYPTION_KEY` / `ENCRYPTION_SALT` 生产必填：留空或仍是内置默认值时，后端在第一次加密/解密落库
+  凭据（数据源口令、钉钉 appSecret 等）时直接抛错 fail-closed。各自用
+  `openssl rand -hex 32` 生成，两者不要相同。**已有密文的环境改这两个值会让旧密文全部解不开**，
+  属于密钥轮转，需要单独的迁移窗口。
 
 ## 2) 推荐模板（考勤专注模式）
 
