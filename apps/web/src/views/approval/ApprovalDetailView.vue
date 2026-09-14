@@ -29,6 +29,19 @@
         >
           打印
         </el-button>
+        <!-- P3-2(a) design-lock 2026-09-12: navigation-only entry to the viewer's OWN approval-
+             projection sheet. Rendered ONLY when the server hands back a handle — a missing
+             `projectionEntry` (no template, not a participant, or server-side resolution
+             failure) hides this button entirely; there is no client-side fallback derivation. -->
+        <el-button
+          v-if="approval?.projectionEntry"
+          plain
+          class="approval-detail__hide-on-print"
+          data-testid="approval-open-projection-button"
+          @click="handleOpenProjection"
+        >
+          在多维表中查看
+        </el-button>
         <!-- G-B2-10: appears only after a successful approve/reject AND with another pending
              item available in the store list (deep-link entries with no list render nothing). -->
         <el-button
@@ -1118,6 +1131,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { AppRouteNames } from '../../router/types'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
@@ -2883,6 +2897,19 @@ async function handleCopySummary() {
 // sticky action bar + header buttons and collapses the two-column body (see <style>).
 function handlePrint() {
   window.print()
+}
+
+// P3-2(a) design-lock 2026-09-12: navigate to the viewer's OWN approval-projection sheet using
+// EXACTLY the ids the server resolved (never re-derive a sheetId from templateId, never guess a
+// viewId — the button itself is v-if-gated on `projectionEntry` being present, so this is a
+// defensive re-check, not the real gate).
+function handleOpenProjection(): void {
+  const entry = approval.value?.projectionEntry
+  if (!entry) return
+  router.push({
+    name: AppRouteNames.MULTITABLE,
+    params: { sheetId: entry.sheetId, viewId: entry.viewId },
+  })
 }
 
 // Wave 2 WP3 slice 1: 催办. Loading state is local to this button so the main

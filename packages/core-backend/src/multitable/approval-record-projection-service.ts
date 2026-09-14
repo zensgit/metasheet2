@@ -54,6 +54,7 @@ const logger = new Logger('ApprovalRecordProjection')
 export { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
 import { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
 import { fenceWriterEntry } from './canonical-sheet-fence'
+import { loadApprovalProjectionParticipantSheetIds, type QueryFn } from './permission-service'
 /** Reserved owner/actor for the system-managed base + record rows (not a real user). */
 export const APPROVAL_PROJECTION_SYSTEM_OWNER = 'system:approval-projection'
 
@@ -111,6 +112,72 @@ export function deriveProjectionFieldId(sheetId: string, columnKey: string): str
 
 export function deriveProjectionRecordId(instanceId: string): string {
   return `rec_apr_${instanceId}`
+}
+
+/** P3-2(a) navigation handle: the viewer's own approval-projection sheet + its default view. */
+export interface ApprovalProjectionEntry {
+  sheetId: string
+  viewId: string
+}
+
+/**
+ * P3-2(a) — design-lock 2026-09-12 (owner-authorized: "entry only; reuse the participant
+ * predicate; projection form-content stays fenced behind O-4"). Computes the nullable
+ * navigation handle the approval detail response attaches so a viewer can jump to THEIR OWN
+ * projection sheet — never form content, just a link target.
+ *
+ * Every step is fail-closed to `null` (never throws, never falls back to "show the entry and
+ * let the multitable landing page refuse it" — design-lock §2):
+ *   1. no templateId / no viewerId ⇒ null (nothing to resolve).
+ *   2. sheetId comes from the EXISTING exported `deriveProjectionSheetId` — never re-built here.
+ *   3. viewId is resolved SERVER-SIDE from `meta_views` (oldest-first — the SAME "first view of
+ *      the sheet" convention the multitable home 打开 flow already uses as a sheet's default
+ *      view). This does NOT read or depend on any other endpoint's response shape — it is a
+ *      plain, direct SQL lookup against `meta_views` by this function alone. The client is never
+ *      asked to guess or hardcode a viewId. Checked BEFORE participation (NIT-5 perf — see
+ *      below) but no less REQUIRED: no view ⇒ null exactly as before.
+ *   4. participation is decided by the CANONICAL predicate
+ *      `loadApprovalProjectionParticipantSheetIds` (permission-service.ts) — the SAME function
+ *      every other projection-read choke calls. This function does not re-implement or
+ *      approximate that check. The predicate is itself fail-closed (bad input / query error ⇒
+ *      empty set), and this wrapper adds its OWN try/catch on top so a thrown error anywhere in
+ *      the chain (either lookup) still degrades to `null` rather than surfacing a 500 on the
+ *      detail read.
+ * Non-participant (or any failure) ⇒ null, so the entry existing is never a signal that the
+ * system-owned projection sheet exists at all (§2: showing it unconditionally would leak
+ * existence to non-participants who cannot see it in any listing today).
+ *
+ * NIT-5 perf / query order: the default-view lookup runs FIRST, the participant predicate SECOND
+ * — reversed from this function's first cut. Both legs remain mandatory and fail-closed, so the
+ * result is byte-identical (AND of two conditions; order does not change the truth table) — this
+ * only changes which query runs when the OTHER leg would fail. As of 2026-09-14, EVERY approval-
+ * projection sheet repo-wide has zero `meta_views` rows (130 sheets / 0 views — see the P3-2(a)
+ * blocker note), so today the view lookup is the one that decides `null` for 100% of callers.
+ * Before this change, every viewer of every approval detail paid the participant predicate's
+ * `meta_sheets ⋈ meta_records` JOIN AND the view lookup, unconditionally, for a feature that
+ * cannot currently light up for anyone. Now they pay only the cheap `meta_views` lookup unless a
+ * view actually exists.
+ */
+export async function resolveApprovalProjectionEntryForViewer(
+  query: QueryFn,
+  templateId: string | null | undefined,
+  viewerId: string | null | undefined,
+): Promise<ApprovalProjectionEntry | null> {
+  if (!templateId || !viewerId) return null
+  try {
+    const sheetId = deriveProjectionSheetId(templateId)
+    const viewResult = await query(
+      'SELECT id FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 1',
+      [sheetId],
+    )
+    const viewId = (viewResult.rows[0] as { id?: string } | undefined)?.id
+    if (!viewId) return null
+    const participantSheetIds = await loadApprovalProjectionParticipantSheetIds(query, [sheetId], viewerId)
+    if (!participantSheetIds.has(sheetId)) return null
+    return { sheetId, viewId }
+  } catch {
+    return null
+  }
 }
 
 export type ProjectionOutcome =
