@@ -10,6 +10,13 @@
  * runtimes are wired through the shared event bus and the durable bridge table, not merely
  * through hand-built fixtures.
  */
+/**
+ * G05 note: the rule-driven `send_webhook` action is now SSRF-gated, and the gate RESOLVES a target name.
+ * These specs use a TEST-NET-3 literal (RFC 5737, documentation-only and not routable) because the gate
+ * accepts a public IP literal WITHOUT any DNS lookup — so the run stays deterministic offline. The previous
+ * `example.test` host is RFC 6761 guaranteed-NXDOMAIN: the gate would fail closed on it (and stall for the
+ * resolver timeout first). The stubbed fetchFn still means no packet is ever sent.
+ */
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import { db } from '../../src/db/db'
@@ -54,7 +61,17 @@ const approvalIds: string[] = []
 const testRunRoots: string[] = []
 let templateSeq = 0
 
-function makeAutomationService(fetchFn?: typeof fetch): AutomationService {
+/**
+ * G05: the parameter DEFAULTS to a stub. Four call sites construct the service bare
+ * (`makeAutomationService()`), and their rules carry a tail `send_webhook` — unreachable today because the
+ * run fails/suspends first, but with no stub an executor change that reaches the tail would fall back to
+ * `globalThis.fetch` and put a real SYN on the wire from a test lane (at a documentation-only TEST-NET-3
+ * address, i.e. a per-case black-hole stall, not a millisecond failure). The default closes that by
+ * construction instead of by luck.
+ */
+const STUB_OK_FETCH = (async () => new Response('OK', { status: 200 })) as unknown as typeof fetch
+
+function makeAutomationService(fetchFn: typeof fetch = STUB_OK_FETCH): AutomationService {
   const svc = new AutomationService(eventBus, db as never, q as never, fetchFn as never)
   svc.init()
   return svc
@@ -199,7 +216,7 @@ async function createStartApprovalRule(svc: AutomationService, templateId: strin
     actionConfig: startApproval.config,
     actions: [
       startApproval,
-      { type: 'send_webhook', config: { url: 'https://example.test/w6-tail' } },
+      { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-tail' } },
     ] as never,
     executionMode: 'workflow_job_v1',
     createdBy: REQUESTER,
@@ -309,7 +326,7 @@ async function executeAndApprove(
           resultWriteback,
         },
       },
-      { type: 'send_webhook', config: { url: 'https://example.test/w6-tail' } },
+      { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-tail' } },
     ],
     enabled: true,
     createdBy: REQUESTER,
@@ -359,7 +376,7 @@ async function runCrossBaseBackwrite(
     trigger: { type: 'record.created', config: {} },
     actions: [
       { type: 'start_approval', config: { templateId, formDataMapping: { summary: 'Record {{record.title}} needs approval' }, requester: { mode: 'trigger_actor' }, resultWriteback } },
-      { type: 'send_webhook', config: { url: 'https://example.test/w6-tail' } },
+      { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-tail' } },
     ],
     enabled: true,
     createdBy: REQUESTER,
@@ -477,7 +494,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               requester: { mode: 'trigger_actor' },
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w6-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -537,7 +554,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
         approvalInstanceId: bridge.rows[0].approval_instance_id,
         outcome: 'approved',
       })
-      expect(calls).toEqual(['https://example.test/w6-tail'])
+      expect(calls).toEqual(['https://203.0.113.10/w6-tail'])
 
       const finalBridge = await q(
         'SELECT status, outcome, resumed_at FROM multitable_automation_approval_bridges WHERE execution_id = $1',
@@ -613,7 +630,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
         ['start_approval', 'success'],
         ['send_webhook', 'success'],
       ])
-      expect(calls).toEqual(['https://example.test/w6-tail'])
+      expect(calls).toEqual(['https://203.0.113.10/w6-tail'])
       expect((await q(
         `SELECT kind, root_execution_id, action_key, status
            FROM meta_automation_outbound_intent
@@ -625,7 +642,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
         action_key: deriveActionKey({
           structuralPath: '1',
           actionType: 'send_webhook',
-          canonicalConfig: { url: 'https://example.test/w6-tail' },
+          canonicalConfig: { url: 'https://203.0.113.10/w6-tail' },
         }),
         status: 'sent',
       }])
@@ -658,7 +675,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               resultWriteback: RW,
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w6-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -721,7 +738,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
         trigger: { type: 'record.created', config: {} },
         actions: [
           { type: 'start_approval', config: { templateId, formDataMapping: { summary: 'Record {{record.title}} needs approval' }, requester: { mode: 'trigger_actor' }, resultWriteback: RW } },
-          { type: 'send_webhook', config: { url: 'https://example.test/w7a-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w7a-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -762,7 +779,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
       expect(data.title).toBe('Missing writeback field')
       expect(data).not.toHaveProperty('missing_approval_status')
       // Field-validation failure is fail-closed for the write, not a second way to block W6 resume.
-      expect(calls).toEqual(['https://example.test/w6-tail'])
+      expect(calls).toEqual(['https://203.0.113.10/w6-tail'])
       // W7-obs: the skip reason is surfaced on the start_approval step result (run history), not just logs.
       const resumed = await waitForExecutionStatus(svc, executionId, 'success')
       const startStep = resumed.steps.find((step) => step.actionType === 'start_approval')
@@ -1016,7 +1033,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               requester: { mode: 'trigger_actor' },
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w6-rejected-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-rejected-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -1107,7 +1124,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               resultWriteback: RW,
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w7-rejected-approved-only-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w7-rejected-approved-only-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -1201,7 +1218,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               resultWriteback: RW,
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w7-rejected-writeback-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w7-rejected-writeback-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -1286,7 +1303,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               requester: { mode: 'trigger_actor' },
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w6-missing-template-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-missing-template-tail' } },
         ] as never,
         executionMode: 'workflow_job_v1',
         createdBy: REQUESTER,
@@ -1423,7 +1440,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               requester: { mode: 'trigger_actor' },
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w6-denied-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-denied-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -1479,7 +1496,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               requester: { mode: 'trigger_actor' },
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w6-post-claim-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-post-claim-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -1549,7 +1566,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               requester: { mode: 'trigger_actor' },
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w6-finalization-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-finalization-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -1608,7 +1625,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
           requester: { mode: 'trigger_actor' },
         },
       } as const
-      const tailAction = { type: 'send_webhook', config: { url: 'https://example.test/w6-wait-approval-tail' } } as const
+      const tailAction = { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-wait-approval-tail' } } as const
       const created = await svc.createRule(SHEET, {
         name: 'W6 wait then start approval',
         triggerType: 'record.created',
@@ -1689,7 +1706,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
         ['start_approval', 'success'],
         ['send_webhook', 'success'],
       ])
-      expect(calls).toEqual(['https://example.test/w6-wait-approval-tail'])
+      expect(calls).toEqual(['https://203.0.113.10/w6-wait-approval-tail'])
     } finally {
       svc.shutdown()
     }
@@ -1721,7 +1738,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
               requester: { mode: 'trigger_actor' },
             },
           },
-          { type: 'send_webhook', config: { url: 'https://example.test/w6-auto-tail' } },
+          { type: 'send_webhook', config: { url: 'https://203.0.113.10/w6-auto-tail' } },
         ],
         enabled: true,
         createdBy: REQUESTER,
@@ -1742,7 +1759,7 @@ describeIfDatabase('multitable automation start_approval bridge (W6-1, real DB)'
         ['start_approval', 'success'],
         ['send_webhook', 'success'],
       ])
-      expect(calls).toEqual(['https://example.test/w6-auto-tail'])
+      expect(calls).toEqual(['https://203.0.113.10/w6-auto-tail'])
 
       const bridge = await q(
         `SELECT status, outcome, approval_instance_id

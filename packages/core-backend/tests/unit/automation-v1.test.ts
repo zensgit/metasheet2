@@ -139,6 +139,10 @@ function createMockDeps(overrides: Partial<AutomationDeps> = {}): AutomationDeps
       return { rows: [], rowCount: 0 }
     }),
     fetchFn: vi.fn(async () => new Response('OK', { status: 200 })) as unknown as typeof fetch,
+    // G05: `send_webhook` is SSRF-gated and the gate resolves the target name. Inject a deterministic
+    // PUBLIC resolution (TEST-NET-3, RFC 5737 — documentation-only, not routable) so these specs never
+    // touch real DNS. The seam supplies ADDRESSES only; the gate still judges them.
+    ssrfLookupFn: async () => [{ address: '203.0.113.10', family: 4 }],
     ...overrides,
   }
 }
