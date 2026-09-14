@@ -60,7 +60,7 @@
     "stockPreparationDecoder": "8868b8c51c7f96d81eb224c81d8d270b1dc79b1f7bca702b4e8b7849259b0c6a",
     "stockPreparationReadonlyIntake": "d518a5310e5b8da97f0e85db717ab2816210793d9e2e658690c0635fa19e3704",
     "stockPreparationPlmSourcePersistBridge": "d5051a1e2baee502fa2ee809d62490e108c26ed8d1da3812444798cbda36a8c2",
-    "stockPreparationSyncRunPersist": "d8e1f295d08ef4bdbbd0ab920f603230700f7c150ede7fbd54c4ac37eaf90058"
+    "stockPreparationSyncRunPersist": "a8c06254f22a0dbb2c79f2b3588bb6bf742f6f7140cae2a46fbd8b25c8c62ac2"
   },
   "dependencies": {
     "mssql": "^10.0.4",
