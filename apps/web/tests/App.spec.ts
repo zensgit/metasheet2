@@ -25,6 +25,10 @@ const mocks = vi.hoisted(() => ({
   fetchPlugins: vi.fn().mockResolvedValue(undefined),
   getApiBase: vi.fn(() => 'https://api.example.com'),
   clearStoredAuthState: vi.fn(),
+  // Brand-link cases: the top-left brand must follow resolveHomePath(), so the mock exposes the
+  // focus flags and the resolver as configurable state instead of constants.
+  focus: { attendance: false, plm: false },
+  resolveHomePath: vi.fn(() => '/home'),
 }))
 
 vi.mock('vue-router', () => ({
@@ -41,9 +45,10 @@ vi.mock('../src/composables/usePlugins', () => ({
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
     loadProductFeatures: mocks.loadProductFeatures,
-    isAttendanceFocused: () => false,
-    isPlmWorkbenchFocused: () => false,
+    isAttendanceFocused: () => mocks.focus.attendance,
+    isPlmWorkbenchFocused: () => mocks.focus.plm,
     hasFeature: () => false,
+    resolveHomePath: mocks.resolveHomePath,
   }),
 }))
 
@@ -349,5 +354,86 @@ describe('App top-bar account identity display', () => {
 
     const el = await mountApp()
     expect(el.querySelector('.nav-user')).toBeNull()
+  })
+})
+
+describe('App top-bar brand link (owner request 2026-09-14: brand goes back to the landing page)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mocks.route.path = '/multitable'
+    mocks.route.fullPath = '/multitable'
+    mocks.route.meta = {}
+    mocks.focus.attendance = false
+    mocks.focus.plm = false
+    mocks.resolveHomePath.mockReturnValue('/home')
+    mocks.loadProductFeatures.mockResolvedValue(undefined)
+    mocks.fetchPlugins.mockResolvedValue(undefined)
+    mocks.getApiBase.mockReturnValue('https://api.example.com')
+    window.localStorage.clear()
+    globalThis.fetch = vi.fn(async () => new Response('{}', { status: 200 })) as typeof fetch
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    mocks.focus.attendance = false
+    mocks.focus.plm = false
+    setMultitableApiErrorLocaleResolver(undefined)
+    window.localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  async function mountApp(): Promise<HTMLDivElement> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(App as Component)
+    app.component('router-view', { render: () => h('div') })
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container)
+    await flushUi()
+    return container
+  }
+
+  function brandLink(root: HTMLDivElement): HTMLAnchorElement | null {
+    return root.querySelector('[data-testid="nav-brand-link"]') as HTMLAnchorElement | null
+  }
+
+  it('renders the brand as a router-link whose target is resolveHomePath() (platform mode: /home)', async () => {
+    const root = await mountApp()
+    const link = brandLink(root)
+    expect(link).not.toBeNull()
+    expect(link!.tagName).toBe('A')
+    expect(link!.getAttribute('href')).toBe('/home')
+    expect(link!.textContent?.trim()).toBe('MetaSheet')
+    expect(mocks.resolveHomePath).toHaveBeenCalled()
+  })
+
+  it('follows resolveHomePath() in a focused product mode instead of hard-coding /home', async () => {
+    mocks.focus.attendance = true
+    mocks.resolveHomePath.mockReturnValue('/attendance')
+    const root = await mountApp()
+    const link = brandLink(root)
+    expect(link).not.toBeNull()
+    expect(link!.getAttribute('href')).toBe('/attendance')
+    // brandText switches to the attendance label in focus mode — the link wraps whatever the brand says.
+    expect(link!.textContent?.trim()).not.toBe('')
+    expect(link!.textContent?.trim()).not.toBe('MetaSheet')
+  })
+
+  it('is absent when the navbar is hidden (guest routes keep no brand link)', async () => {
+    mocks.route.path = '/login'
+    mocks.route.fullPath = '/login'
+    mocks.route.meta = { hideNavbar: true, requiresGuest: true }
+    const root = await mountApp()
+    expect(brandLink(root)).toBeNull()
   })
 })
