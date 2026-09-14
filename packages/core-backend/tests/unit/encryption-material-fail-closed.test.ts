@@ -115,6 +115,14 @@ describe('resolveEncryptionMaterial - production fail-closed', () => {
     ).toThrow(/ENCRYPTION_SALT uses the built-in default/)
   })
 
+  // R2 parity: NODE_ENV is trimmed before the comparison, here and in the plugin copy.
+  it('treats a whitespace-padded NODE_ENV as production', async () => {
+    const mod = await loadEncryptedSecrets()
+    expect(() => mod.resolveEncryptionMaterial({ NODE_ENV: ' production ' })).toThrow(
+      /ENCRYPTION_KEY not configured/,
+    )
+  })
+
   it('throws when ENCRYPTION_SALT is not configured', async () => {
     const mod = await loadEncryptedSecrets()
     expect(() =>
@@ -316,13 +324,21 @@ describe('ConfigService SecretManager shares the gate', () => {
     expect(await manager.decrypt(updates[0].value)).toBe('w5b-rotating-row')
   })
 
-  /** Minimal kysely-shaped stub: one encrypted row in, captured UPDATEs out. */
-  function mockRowsDb(value: string, updates: Array<{ id: string; value: string }>) {
+  /**
+   * Minimal kysely-shaped stub: `rows` encrypted rows in, captured UPDATEs out.
+   * Pass an empty array for the "nothing is encrypted yet" shape — the one where the per-row
+   * loop never runs.
+   */
+  function mockRowsDb(
+    value: string | null,
+    updates: Array<{ id: string; value: string }>,
+  ) {
+    const rows = value === null ? [] : [{ id: 'cfg-1', key: 'a.b', value }]
     return {
       db: {
         selectFrom: () => ({
           select: () => ({
-            where: () => ({ execute: async () => [{ id: 'cfg-1', key: 'a.b', value }] }),
+            where: () => ({ execute: async () => rows }),
           }),
         }),
         updateTable: () => ({
@@ -403,5 +419,49 @@ describe('ConfigService SecretManager shares the gate', () => {
     ).rejects.toThrow(/ENCRYPTION_SALT uses the built-in default/)
     expect(updates).toHaveLength(0)
     expect(process.env.ENCRYPTION_SALT).toBe(STRONG_SALT)
+  })
+
+  // R1: with ZERO encrypted rows the per-row loop never runs, so encrypt() — the only other place
+  // that validates the target — is never reached. Before the pre-loop assertion this "succeeded"
+  // and left the process on the default sentinel.
+  it('refuses a default rotation TARGET even when there is nothing to re-encrypt', async () => {
+    const updates: Array<{ id: string; value: string }> = []
+    vi.doMock('../../src/db/db', () => mockRowsDb(null, updates))
+
+    const { SecretManager } = await import('../../src/services/ConfigService')
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
+    const manager = new SecretManager()
+
+    await expect(manager.rotateKey(STRONG_KEY, DEFAULT_KEY_SENTINEL)).rejects.toThrow(
+      /ENCRYPTION_KEY uses the built-in default/,
+    )
+    expect(updates).toHaveLength(0)
+    expect(process.env.ENCRYPTION_KEY).toBe(STRONG_KEY)
+    expect(process.env.ENCRYPTION_SALT).toBe(STRONG_SALT)
+  })
+
+  it('refuses an empty rotation TARGET on an empty table', async () => {
+    const updates: Array<{ id: string; value: string }> = []
+    vi.doMock('../../src/db/db', () => mockRowsDb(null, updates))
+
+    const { SecretManager } = await import('../../src/services/ConfigService')
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
+    const manager = new SecretManager()
+
+    await expect(manager.rotateKey(STRONG_KEY, '   ')).rejects.toThrow(/ENCRYPTION_KEY not configured/)
+    expect(process.env.ENCRYPTION_KEY).toBe(STRONG_KEY)
+  })
+
+  it('accepts a strong rotation TARGET on an empty table', async () => {
+    const updates: Array<{ id: string; value: string }> = []
+    vi.doMock('../../src/db/db', () => mockRowsDb(null, updates))
+
+    const { SecretManager } = await import('../../src/services/ConfigService')
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
+    const manager = new SecretManager()
+
+    await manager.rotateKey(STRONG_KEY, OTHER_STRONG_KEY)
+    expect(updates).toHaveLength(0)
+    expect(process.env.ENCRYPTION_KEY).toBe(OTHER_STRONG_KEY)
   })
 })

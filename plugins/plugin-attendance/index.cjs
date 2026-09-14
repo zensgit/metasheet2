@@ -6101,7 +6101,10 @@ const DEFAULT_INTEGRATION_SECRET_SALT = 'default-salt-change-in-production'
 function getIntegrationSecretKey() {
   const rawKey = process.env.ENCRYPTION_KEY
   const rawSalt = process.env.ENCRYPTION_SALT
-  if (process.env.NODE_ENV === 'production') {
+  // Trim before comparing, matching auth-runtime-config.ts `isProductionRuntime` (which
+  // encrypted-secrets.ts reuses). A strict === here made NODE_ENV=" production " fail-close in
+  // core-backend while this plugin quietly wrote appSecrets under the built-in default key.
+  if (normalizeTextValue(process.env.NODE_ENV) === 'production') {
     // values-free: variable names + reason only, never the value.
     const issues = []
     const key = normalizeTextValue(rawKey)

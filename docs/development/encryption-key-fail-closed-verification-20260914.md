@@ -170,7 +170,66 @@ M6 的做法值得记一笔：spec 用的是 Node 的 `require()`，vite 的 `re
 - plugin-attendance 侧**没有**非生产告警（该处没有可用 logger）；两个 TS 管线的告警不变。
 - `rotateKey` 只覆盖 `system_configs`；钉钉 / 数据源 / 考勤集成的密文各在各自的表，迁移脚本不在本 PR。
 - 仍未在 222 上实看生产 env；上线前置未解除。
+- （第二轮已补：反驳者换角度扫 cipher 也确认没有第四条带仓库默认值的管线——`SecurityService` 用
+  `randomBytes`、`credential-store` 自带门、`recovery-archive` 走 KMS。）
 - "第四条管线"已按两个特征全仓 grep 过：`default-key-change-in-production` /
   `default-salt-change-in-production` 现在只剩三处生产代码（本 helper、plugin-attendance、ps1 的哨兵
   列表）+ 两个新 spec；`process.env.ENCRYPTION_KEY || …` 形态的回退除本 helper 外只出现在测试里。
   但这只覆盖了"同名 env + 同一批默认串"的实现，**换了变量名或换了默认串的自带加密仍可能存在，未排查**。
+
+---
+
+# 复核返修验证（PR #5711 第二轮，同日）
+
+设计侧说明见设计文档末尾的「第二轮」节。
+
+## S1. 用例数
+
+| spec | 上一轮 | 本轮 |
+| --- | --- | --- |
+| `tests/unit/encryption-material-fail-closed.test.ts` | 22 | **26** |
+| `tests/unit/attendance-integration-secret-material-gate.test.ts` | 8 | **9** |
+| `tests/unit/deploy-template-encryption-material.test.ts`（新，R3） | — | **5** |
+| 合计 | 30 | **40 全绿** |
+
+新增：R1 三条（空表 + 目标为默认 key → 抛且 env 未变；空表 + 目标为空白串 → 抛；空表 + 强目标 → 成功
+且 env 切到新 key），R2 两条（TS 侧与插件侧各一条 `NODE_ENV=" production "`），R3 五条（五个模板各一条）。
+
+## S2. 变异
+
+| # | 变异 | 结果 |
+| --- | --- | --- |
+| **M7（R1）** | 去掉循环前的轮换目标断言 | **2 failed / 24 passed (26)** —— 正是两条"空表 + 坏目标"用例；"空表 + 强目标"仍绿（证明不是把整条路径拆了） |
+| **M8（R2）** | 插件门改回未 trim 的严格 `===` | **1 failed / 8 passed (9)** —— 正是 `" production "` 那条 |
+| M6 | 去掉插件生产门（上一轮探针，锚点已随 R2 更新） | **6 failed / 3 passed (9)** |
+| **M9（R3）** | 内存里 patch `fs.readFileSync`，把模板里的 `ENCRYPTION_*` 两行删掉 | **5 failed / 5**，还原后 **5 passed** |
+| 还原 | 不加任何别名/注入/patch | **40 passed** |
+
+M9 的实现细节值得记：spec 原本写 `import { readFileSync } from 'node:fs'`，内置模块的 ESM 命名空间是
+**快照**，`require('fs').readFileSync = …` 打不到它（第一次探针 5 条全绿＝变异没生效）。改成
+`import fs from 'node:fs'`（CJS 内置的 ESM default **就是** `module.exports` 那个对象，属性查找是活的）
+之后 patch 生效。这一条和上一轮 M6 的 `require.cache` 是同一类坑：**先证明探针真的改到了被测代码，再信它的
+绿。**
+
+## S3. 相邻 suite / 类型检查（本轮重跑）
+
+- 17 个套件（13 个 + 新 template guard + 3 个既有考勤套件）：**Test Files 17 passed / Tests 507 passed**。
+- `npx tsc --noEmit -p tsconfig.json`：exit 0；临时 config（include 三个新 spec）：exit 0，跑完即删、未入库。
+- `runtime-dependency-classification.test.ts` 仍是那条 Windows 路径分隔符的确定性红，与本轮无关。
+
+## S4. 反驳者未推翻（记录在案）
+
+- 旁路封闭：`allowDefaultsForRotationRead` 全仓 5 处引用，生产代码里零调用方（只有 `rotateKey` 的读那一步）。
+- 回滚对称：失败路径对 KEY/SALT 都走 `restoreEnvValue()`，未设置时 `delete` 而不是写 `"undefined"`。
+- 插件门接线唯一：`getIntegrationSecretKey()` 是 encrypt/decrypt 的唯一取密钥点。
+- 无第四条带仓库默认值的加密管线（SecurityService `randomBytes` / credential-store 自带门 /
+  recovery-archive 走 KMS）。
+
+## S5. 本轮未做 / 仍未验证
+
+- 模板加的是**空值**，不是可用值：按模板新装的实例在运维填值之前，第一次存密仍会 fail-closed。这是刻意
+  的（绝不发默认密钥），但意味着**部署流程必须把"填这两个值"写进步骤**，否则只是把失败从"用公开密钥
+  加密"换成"启动后第一次存密报错"。
+- 打包链没有注入步骤（已实证），本 PR 也**没有**加——是否要让 `*-package-build.sh` 生成随机值属于运维
+  决策，未做。
+- 仍未在 222 上实看生产 env；上线前置未解除。

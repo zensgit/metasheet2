@@ -205,3 +205,59 @@ logger，**没有**加告警（两个 TS 管线的告警仍在）。
 JWT_SECRET 门用的是同一个判定函数，两个秘密不可能对"现在是不是生产"产生分歧。
 
 变异探针 M1 的目标也随之移到 `auth-runtime-config.ts`。
+
+---
+
+# 复核返修（PR #5711 第二轮，同日）
+
+## R1 — 空表轮换零校验（medium）
+
+`rotateKey()` 里唯一校验目标材料的地方是 `encrypt()`，而 `encrypt()` 在**每行**循环里调用。
+`system_configs` 没有 `is_encrypted=true` 的行时循环体一次都不执行，于是
+`rotateKey(强密钥, 内置默认值)` 会"成功"返回，并在收尾处把 `process.env.ENCRYPTION_KEY` 设成默认哨兵
+——进程被悄悄切到一把公开密钥上。
+
+修法：在**取行之前**（比循环还早，也就比任何 env 改动都早）用
+`assertProductionEncryptionMaterial()` 对 `(newKey, newSalt ?? 当前盐)` 做一次生产口径校验。它与行数无关，
+失败时 env 一个字节都还没改过，所以"抛了但 env 半旋转"不可能发生。非生产仍是 no-op（与本模块其它地方
+口径一致）。
+
+## R2 — 插件门不 trim（medium-low）
+
+插件侧写的是严格 `process.env.NODE_ENV === 'production'`，而 TS 侧
+（`auth-runtime-config.ts` 的 `isProductionRuntime`）先 trim。于是 `NODE_ENV=" production "` 这种由
+env 文件/服务配置带进空格的情况下，core-backend 已经 fail-close，插件却仍然用内置默认密钥把 appSecret
+写进库——同一台机器上两条管线对"现在是不是生产"给出相反答案。
+
+修法：插件侧改用它自己已有的 `normalizeTextValue()`（等价于 `String(x ?? '').trim()`）再比较，注释指回
+同口径来源。两侧各加一条 `" production "` 的用例。
+
+## R3 — 出厂模板缺加密材料（high，运维面）
+
+五个随包发布的模板都 `NODE_ENV=production` 却完全没有提到 `ENCRYPTION_KEY` / `ENCRYPTION_SALT`：
+
+- `docker/app.env.example`
+- `docker/app.env.attendance-onprem.template`
+- `docker/app.env.multitable-onprem.template`
+- `docker/app.staging.env.example`
+- `docker/app.env.attendance-onprem.ready.env`
+
+本 PR 合并后，按这些模板新装的实例会在**第一次存密**（钉钉集成保存、数据源口令、加密的
+`system_configs`）直接抛错——失败落在客户那边。
+
+修法：每个模板在 `JWT_SECRET` 之后加一段注释 + 两行**空值**声明（values-free，不写任何示例值），注释说明
+生产必填、`openssl rand -hex 32` 生成、缺失或默认值时后端 fail-closed（指向
+`encrypted-secrets.ts`）、已有密文时改这两个值等于密钥轮转。
+
+**`.ready.env` 的判定**：它是**模板**，不是某次真实部署的落盘——文件头自称 "ready draft"、敏感值全是
+`change-me`、`scripts/ops/attendance-onprem-package-build.sh:48` 把它整份打进安装包、多份部署文档让运维
+`cp docker/app.env.attendance-onprem.ready.env docker/app.env`。所以同样加。同时把它文件头"只需替换 3 个
+`change-me`"的说法和 `docs/deployment/attendance-onprem-app-env-template-20260306.md` 的"替换这 3 项"一起
+改成 5 项，否则文档立刻变成假的。
+
+**打包时是否注入：否。** `attendance-onprem-package-build.sh` / `multitable-onprem-package-build.sh` 只是
+把模板逐份复制进包（没有 `envsubst`、没有 `sed -i`、全文没有 `ENCRYPTION` 字样）；
+`validate-windows-runtime.ps1` 也从不读写 `docker/app.env*`，它注册服务时读的是**当前 shell** 的环境变量。
+也就是说**模板就是契约**：值必须由运维填，没有任何一步会替他们补上。新加的
+`tests/unit/deploy-template-encryption-material.test.ts` 把这个契约钉住（两个 key 必须声明、必须为空、
+必须有解释性注释）。

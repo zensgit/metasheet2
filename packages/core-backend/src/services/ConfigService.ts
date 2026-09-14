@@ -9,7 +9,11 @@ import * as path from 'path'
 import { db } from '../db/db'
 import { toISOString, toDateValue } from '../db/type-helpers'
 import type { ResolveEncryptionMaterialOptions } from '../security/encrypted-secrets'
-import { EncryptionMaterialError, resolveEncryptionMaterial } from '../security/encrypted-secrets'
+import {
+  assertProductionEncryptionMaterial,
+  EncryptionMaterialError,
+  resolveEncryptionMaterial,
+} from '../security/encrypted-secrets'
 
 // js-yaml is optional - try to load dynamically
 let yaml: { load(content: string): unknown } | null = null
@@ -481,6 +485,17 @@ export class SecretManager {
     logger.info('Key rotation initiated')
 
     if (!db) throw new Error('Database not available')
+
+    // R1: validate the rotation TARGET here, before anything else and independently of how many
+    // rows exist. encrypt() is otherwise the only thing that checks it, and encrypt() is never
+    // reached when `system_configs` has no is_encrypted row — so rotateKey(strong, DEFAULT) on an
+    // empty table used to "succeed" and leave the process on the default sentinel. Nothing has
+    // been mutated yet at this point, so throwing here cannot leave env half-rotated.
+    assertProductionEncryptionMaterial({
+      ...process.env,
+      ENCRYPTION_KEY: newKey,
+      ENCRYPTION_SALT: options.newSalt !== undefined ? options.newSalt : process.env.ENCRYPTION_SALT,
+    })
 
     // Get all encrypted configs
     const configs = await db

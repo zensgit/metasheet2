@@ -75,6 +75,14 @@ describe('plugin-attendance integration secret material gate', () => {
     expect(() => getIntegrationSecretKey()).toThrow(/ENCRYPTION_SALT uses the built-in default/)
   })
 
+  // R2: a strict `=== 'production'` here made NODE_ENV=" production " fail-close in core-backend
+  // (auth-runtime-config trims) while this plugin silently used the built-in default key.
+  it('treats a whitespace-padded NODE_ENV as production, like core-backend does', () => {
+    setEnv({ NODE_ENV: ' production ', ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined })
+    expect(() => getIntegrationSecretKey()).toThrow(/ENCRYPTION_KEY not configured/)
+    expect(() => encryptIntegrationSecretValue('w5b-fake-app-secret')).toThrow(/ENCRYPTION_KEY/)
+  })
+
   it('keeps the production failure values-free', () => {
     setEnv({
       NODE_ENV: 'production',
