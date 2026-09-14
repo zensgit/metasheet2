@@ -3,6 +3,13 @@
 // Scope: frontend-generated fallback strings only. Backend payload messages,
 // field error values, legacy string errors, codes, and HTTP status metadata
 // stay raw in the API client.
+//
+// P5: the outage sentence is NOT authored here any more. `utils/networkErrors.ts`
+// owns both outage copies and the response/no-response decision between them; this
+// module only ever sees a real `Response` (parseJson read its status), so it always
+// resolves to the "server answered" side.
+
+import { SERVICE_UNAVAILABLE_COPY } from '../../utils/networkErrors'
 
 type LocaleText = { en: string; zh: string }
 
@@ -34,6 +41,7 @@ export type MetaApiErrorLabelKey =
   | 'error.aiBulkJobCommitInProgress'
   // Gateway-side outage copy (F4-B): 502/503/504 arrive while the backend is down or
   // restarting. Neutral wording by owner ruling — it must NOT say "upgrading".
+  // A RESPONSE EXISTS on this path, so it must NOT claim the network is unreachable.
   | 'error.serverRestarting'
 
 const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
@@ -93,13 +101,12 @@ const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
     en: 'Another write for this bulk-fill job is already in progress.',
     zh: '该批量填充任务已有另一次写入正在进行中。',
   },
-  // Deliberately identical in spirit to utils/networkErrors.ts: the user cannot tell
-  // (and should not have to) whether the gateway answered 502 or the connection was
-  // reset outright — both mean "the backend is not there right now".
-  'error.serverRestarting': {
-    en: 'The service is temporarily unavailable. Please try again in a moment.',
-    zh: '服务暂时不可用，请稍后重试',
-  },
+  // P5 — REVERSAL of the old "one wording, two layers" ruling. A 502/503/504 proves the
+  // request REACHED something that answered; a rejected fetch proves it did not. On
+  // 2026-09-14 the customer link dropped and this sentence was shown for the
+  // no-response case too, so the customer read it as "delete is broken". Sourced from
+  // the shared table so the two sentences can never drift or re-merge by accident.
+  'error.serverRestarting': { ...SERVICE_UNAVAILABLE_COPY },
 }
 
 export const META_API_ERROR_LABEL_KEYS = Object.freeze(

@@ -126,22 +126,25 @@ describe('meta-api-error-labels', () => {
     expect(apiDefaultErrorMessage(undefined, 505, true)).toBe('API 505')
   })
 
-  // F4-B CONTRACT (cross-module): the two outage copies live in two files on two different
-  // layers — utils/networkErrors.ts (no HTTP response at all) and this module (gateway answered
-  // 502/503/504). A user cannot tell the two apart, so they must be BYTE-IDENTICAL per locale.
-  // Nothing else enforces that: api.spec.ts's EN assertion used to compare the helper with
-  // itself, so rewriting only one of the two files left every spec green. These assertions are
-  // the whole enforcement of the "one wording, two layers" ruling.
-  it('F4-B CONTRACT: transport copy and gateway-status copy are identical in both locales', () => {
-    expect(networkUnavailableMessage(false)).toBe(metaApiErrorLabel('error.serverRestarting', false))
-    expect(networkUnavailableMessage(true)).toBe(metaApiErrorLabel('error.serverRestarting', true))
-    // …and identical through the status path the gateway actually takes.
-    expect(networkUnavailableMessage(false)).toBe(apiDefaultErrorMessage(undefined, 502, false))
-    expect(networkUnavailableMessage(true)).toBe(apiDefaultErrorMessage(undefined, 503, true))
-    expect(networkUnavailableMessage(false)).toBe(apiDefaultErrorMessage(undefined, 504, false))
-    // Both sides pinned to the literal, so a matched rename of BOTH files still turns this red.
-    expect(networkUnavailableMessage(false)).toBe('The service is temporarily unavailable. Please try again in a moment.')
-    expect(networkUnavailableMessage(true)).toBe('服务暂时不可用，请稍后重试')
+  // P5 CONTRACT (cross-module, REPLACES the old F4-B "one wording, two layers" ruling).
+  // On 2026-09-14 the customer link to the 222 host dropped; every action rendered the
+  // gateway sentence, so the customer reported "delete is broken" instead of "my network
+  // is down". The two layers now say two different things, and the split is only real if
+  // something forbids them from converging again — that is this test.
+  it('P5 CONTRACT: no-response copy and gateway-status copy are DIFFERENT, per locale', () => {
+    expect(networkUnavailableMessage(false)).not.toBe(metaApiErrorLabel('error.serverRestarting', false))
+    expect(networkUnavailableMessage(true)).not.toBe(metaApiErrorLabel('error.serverRestarting', true))
+    expect(networkUnavailableMessage(false)).not.toBe(apiDefaultErrorMessage(undefined, 502, false))
+    expect(networkUnavailableMessage(true)).not.toBe(apiDefaultErrorMessage(undefined, 503, true))
+    expect(networkUnavailableMessage(false)).not.toBe(apiDefaultErrorMessage(undefined, 504, false))
+    // Each side pinned to its literal, so silently rewriting either one turns this red.
+    expect(networkUnavailableMessage(false)).toBe('Cannot reach the server (no response received). Check your network connection, or try again later.')
+    expect(networkUnavailableMessage(true)).toBe('无法连接服务器（未收到任何响应），请检查网络或稍后重试')
+    expect(metaApiErrorLabel('error.serverRestarting', false)).toBe('The service is temporarily unavailable. Please try again in a moment.')
+    expect(metaApiErrorLabel('error.serverRestarting', true)).toBe('服务暂时不可用，请稍后重试')
+    // The gateway sentence must never claim the network is unreachable, in either locale.
+    expect(metaApiErrorLabel('error.serverRestarting', true)).not.toContain('无法连接')
+    expect(metaApiErrorLabel('error.serverRestarting', false).toLowerCase()).not.toContain('cannot reach')
     // The EN/zh pair must stay two distinct strings (a copy-paste slip is a real failure mode).
     expect(networkUnavailableMessage(true)).not.toBe(networkUnavailableMessage(false))
   })
