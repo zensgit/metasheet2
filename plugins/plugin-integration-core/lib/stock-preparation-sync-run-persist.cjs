@@ -280,7 +280,7 @@ async function assertMvpTargetFieldsExist(provisioning, projectId, template) {
   throw new StockPreparationSyncRunPersistError(
     422,
     'TARGET_SCHEMA_INCOMPLETE',
-    'stock-preparation MVP target table is missing template fields; run MVP target readiness/ensure before persisting',
+    'stock-preparation MVP target table is missing template fields; the MVP readiness/ensure routes do not add columns to an existing table - repair the table (repairStockPreparationMvpTargets / host ensureMissingObjectFields) before persisting',
     { targetObjectId: objectId, missingFields, fieldExistenceMode: verdict.fieldExistenceMode },
   )
 }
