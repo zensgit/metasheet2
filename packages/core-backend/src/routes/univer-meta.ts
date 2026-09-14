@@ -100,6 +100,7 @@ import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { operatorFieldPermissionCreatedBy } from '../services/stock-preparation-field-permissions'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
 import { resolveSheetDeleteRefusal, sheetDeleteRefusalBody } from '../multitable/sheet-delete-guard'
+import { managedFieldDeleteRefusalBody, resolveManagedFieldDeleteRefusal } from '../multitable/managed-field-delete-guard'
 import {
   isElearningProjectionBaseIdCandidate,
   isElearningProjectionSheetIdCandidate,
@@ -13373,6 +13374,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // MANAGED-TABLE GUARD (field-level twin of the DELETE /sheets refusal below; same registry row,
+      // same ordering: after the authority gate so an unauthorised actor never learns the table is
+      // plugin-owned, before the fence plan and the transaction so a refusal is literally zero-write —
+      // no advisory lock, no tombstone capture, no config revision, no record strip). Every field on a
+      // registered sheet is refused, not only the provisioned ones: the host cannot prove which fields
+      // a plugin provisioned. See multitable/managed-field-delete-guard.ts for the incident and argument.
+      if (await resolveManagedFieldDeleteRefusal(pool.query.bind(pool), sheetId)) {
+        return res.status(409).json(managedFieldDeleteRefusalBody())
+      }
       const fieldLinkDropFencePlan = await prepareFieldLinkDropFencePlan(pool.query.bind(pool), {
         sourceSheetId: sheetId,
         fieldId,
