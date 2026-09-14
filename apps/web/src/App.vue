@@ -126,7 +126,7 @@ import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchT
 import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
-import { STOCK_PREP_ROUTE_PERMISSION } from './services/integration/stockPreparation/workbenchAccess'
+import { canReachStockPrepWorkbench } from './services/integration/stockPreparation/workbenchAccess'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
 import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
@@ -159,12 +159,15 @@ const canUseIntegration = computed(() => {
   void route.fullPath
   return hasPermission('integration:write')
 })
-// O2 / R-11: `/stock-prep` reachability is exactly STOCK_PREP_ROUTE_PERMISSION, the same code the
-// route meta declares and the same one the plugin gates the queue read with. Imported from the
-// shared vocabulary rather than typed inline so the nav link cannot drift from the guard.
+// O2 / R-11: `/stock-prep` reachability is exactly the workbench's own gate — `satisfiesStockPrepAccess`
+// over this principal, via `canReachStockPrepWorkbench` — NOT the app-wide `hasPermission` probe:
+// that probe expands `stock-prep:*` / `*:*` / `:write` and treats `users:write` as admin, none of which
+// the server does, so the link used to render for three principals every panel behind it refuses and to
+// stay hidden from a bare `integration:admin` the server serves in full. The route guard
+// (`buildStockPrepAwarePermissionProbe`) now asks the same question, so nav and guard cannot drift.
 const canUseStockPreparation = computed(() => {
   void route.fullPath
-  return hasPermission(STOCK_PREP_ROUTE_PERMISSION)
+  return canReachStockPrepWorkbench(getAccessSnapshot())
 })
 const canUseApprovals = computed(() => {
   void route.fullPath

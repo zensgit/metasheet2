@@ -2,19 +2,20 @@
   <section class="stock-prep-gs" data-testid="stock-prep-getting-started">
     <h3 class="stock-prep-gs__title">
       {{ bi('开始使用', 'Getting started') }}
-      <!-- 进度 N/6 (wireframe B). `done` only — 未检查/看不到/需要别人做 are not progress. -->
+      <!-- 进度 N/7 (wireframe B, one row longer since ① became ①a + ①b). `done` only —
+           未检查/看不到/需要别人做 are not progress. -->
       <span class="stock-prep-gs__progress" data-testid="stock-prep-getting-started-progress">
         {{ bi('进度', 'Progress') }} {{ progress.done }}/{{ progress.total }}
       </span>
     </h3>
     <p class="stock-prep-gs__intro" data-testid="stock-prep-getting-started-intro">
       {{ bi(
-        '第一次接入,按顺序走完这六步,一线就能开始用了。整个过程不会碰您 ERP/K3 里的数据。任何一步都能点开看 —— 这是一张地图,不是一道闸机。',
-        'First time setting up: work through these six steps in order and the floor can start using it. None of this touches your ERP/K3 data. Any step can be opened at any time — this is a map, not a gate.',
+        '第一次接入,按顺序走完这七步(第①步是两件事,分成 ①a、①b),一线就能开始用了。整个过程不会碰您 ERP/K3 里的数据。任何一步都能点开看 —— 这是一张地图,不是一道闸机。',
+        'First time setting up: work through these seven steps in order (the first one is two separate acts, so it is split into 1a and 1b) and the floor can start using it. None of this touches your ERP/K3 data. Any step can be opened at any time — this is a map, not a gate.',
       ) }}
     </p>
 
-    <!-- THE SIX-STEP MAP. Every badge is DERIVED (gettingStarted.ts) from data this page already has
+    <!-- THE SEVEN-STEP MAP. Every badge is DERIVED (gettingStarted.ts) from data this page already has
          via props — nothing here fetches. It renders on the FIRST tick, before any button anywhere on
          this page has been pressed: `steps` computes off whatever the parent already holds (all null
          on first mount, which the derivation reads as 「未检查」 / 「? 看不到」 / 「需要别人做」,
@@ -45,27 +46,70 @@
       </li>
     </ol>
 
-    <!-- ① 接一条只读连接 — off-page by construction; the one thing this page can do is link out. -->
-    <p v-if="steps['source-connect'] !== 'done'" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-step-source-connect">
-      {{ bi('还没登记连接?', 'No connection registered yet?') }}
-      <!-- 整合切片 (2026-09-09): 外接数据源 now lives in 数据工厂's 连接管理 section, behind the
-           workbench route's own `integration:write` gate. So the LINK renders only when the host
-           says this principal can actually open 数据工厂 (`canOpenDataFactory`). A
-           `stock-prep:admin` holder — the audience 交付指南 lists for 「开始使用」 — holds no
-           integration:write and would be bounced to the home path by the router guard: a link that
-           redirects is not an entry point, it is the R-11 「看得见点不动」 failure. Denied readers
-           get the same fact in words instead — which permission, and who to ask.
-           A plain <a>, not <router-link>: this component is mounted bare in its own spec (no router,
-           no router-link stub), where a <router-link> would silently resolve to nothing and take
-           the link — and the step it explains — off the page. -->
+    <!-- ①a / ①b — BOTH off-page by construction; the one thing this page can do is link out.
+         WHY TWO ROWS AND NOT ONE. 整合切片 (2026-09-09) folded 外接数据源 into 数据工厂's
+         连接管理 section, and that section now holds TWO controls doing two different things:
+         the panel at its top registers a physical connection + credentials (writes `data_sources`),
+         and the editor below it creates a connection draft that REFERENCES one by `connectionId`.
+         They are done at different times, by possibly different people, and — the reason the map
+         had to split — they are answered by two DIFFERENT reads: ①a by the data-source registry
+         (`dataSourceRegistry.ts`), ①b by the source-binding envelope. One row could only ever badge
+         one of them, and it badged ①b while its sentence described ①a.
+
+         THE LINKS ARE GATED, THE SENTENCES ARE NOT. Both destinations are the same 数据工厂 page,
+         whose route declares `permissions: ['integration:write']`. A `stock-prep:admin` holder —
+         the audience 交付指南 lists for 「开始使用」 — holds no `integration:write` and would be
+         bounced to the home path by the router guard: a link that redirects is not an entry point,
+         it is the R-11 「看得见点不动」 failure. Denied readers get the same fact in words
+         instead — which permission, and who to ask — in the same shape step ②'s `denied` control
+         already uses. A plain <a>, not <router-link>: this component is mounted bare in its own
+         spec (no router, no router-link stub), where a <router-link> would silently resolve to
+         nothing and take the link — and the step it explains — off the page. -->
+    <!-- F06 (2026-09-10 对抗复核): a `bridge:legacy-sql-readonly` deployment can NEVER be offered a
+         `data-source:sql-readonly` system — the server narrows `eligibleSources` to the action's own
+         frozen kind — so ①a and ①b are not 「还没做」 for it, they are NOT ITS STEPS. Before this,
+         such a deployment was told to go register a data source the action cannot use, and ①b's
+         evidence called its working configuration 「都是旧式桥接」 as though that were a shortfall.
+         One sentence replaces both instructions; the two MAP ROWS stay (G5 — the map is not a gate,
+         and a step that does not apply still has to be visible with its reason). -->
+    <p
+      v-if="isLegacyBridgeDeployment"
+      class="stock-prep-gs__hint"
+      data-testid="stock-prep-getting-started-step-source-legacy-bridge"
+    >
+      {{ bi(
+        '本部署走的是旧式桥接(bridge:legacy-sql-readonly),连接信息就在桥接自身上 —— ①a「登记外接数据源」与 ①b「新增 SQL 绑定」对本部署不适用,不用去数据工厂登记。',
+        'This deployment runs on the legacy bridge (bridge:legacy-sql-readonly), which carries its own connection details — (1a) “register the external data source” and (1b) “add the SQL binding” do not apply here, and there is nothing to register in Data Factory.',
+      ) }}
+    </p>
+    <p v-if="!isLegacyBridgeDeployment && steps['source-register'] !== 'done'" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-step-source-register">
+      {{ bi(
+        '①a 先把对方的数据库登记成一条外接数据源(填地址与登录凭据,并点一下测试连接)。',
+        '(1a) First register the customer’s database as an external data source — its address and sign-in credentials — and press its test-connection button once.',
+      ) }}
       <a
         v-if="props.canOpenDataFactory"
         href="/integrations/workbench#int-sec-connection"
         data-testid="stock-prep-getting-started-link-data-sources"
-      >{{ bi('去数据工厂 · 连接管理 ↗', 'Open Data Factory · Connections ↗') }}</a>
+      >{{ bi('去数据工厂 · 连接管理(分区顶部的「外接数据源」) ↗', 'Open Data Factory · Connections (the “External data sources” panel at the top) ↗') }}</a>
       <span v-else data-testid="stock-prep-getting-started-link-data-sources-denied">{{ bi(
         '登记外接数据源需要数据工厂权限(integration:write),请联系实施在数据工厂 · 连接管理里登记。',
         'Registering an external data source needs Data Factory permission (integration:write) — ask your implementer to register it under Data Factory · Connections.',
+      ) }}</span>
+    </p>
+    <p v-if="!isLegacyBridgeDeployment && steps['source-connect'] !== 'done'" class="stock-prep-gs__hint" data-testid="stock-prep-getting-started-step-source-connect">
+      {{ bi(
+        '①b 再在同一个分区下方的「新增连接草稿」里建一条 SQL 只读绑定,引用 ①a 那条数据源 —— 备料能选的是这条绑定,不是数据源本身。',
+        '(1b) Then, in “New connection draft” lower down that same section, create a read-only SQL binding that references the data source from (1a) — what stock-prep can pick is the binding, not the data source itself.',
+      ) }}
+      <a
+        v-if="props.canOpenDataFactory"
+        href="/integrations/workbench#int-sec-connection"
+        data-testid="stock-prep-getting-started-link-connection-draft"
+      >{{ bi('去数据工厂 · 连接管理(分区下方的「新增连接草稿」) ↗', 'Open Data Factory · Connections (“New connection draft”, lower in the section) ↗') }}</a>
+      <span v-else data-testid="stock-prep-getting-started-link-connection-draft-denied">{{ bi(
+        '新增 SQL 绑定同样需要数据工厂权限(integration:write),请让同一位实施顺手把这条绑定也建了。',
+        'Adding the SQL binding needs the same Data Factory permission (integration:write) — ask the same implementer to create it while they are there.',
       ) }}</span>
     </p>
 
@@ -494,6 +538,11 @@ import {
   type StockPrepGettingStartedStepKey,
 } from '../../../services/integration/stockPreparation/gettingStarted'
 import {
+  readStockPrepDataSourceRegistry,
+  stockPrepDataSourceRegistryUnknown,
+  type StockPrepDataSourceRegistry,
+} from '../../../services/integration/stockPreparation/dataSourceRegistry'
+import {
   readStockPrepOnboardingReadiness,
   stockPrepOnboardingReadinessUnknown,
   type StockPrepOnboardingReadiness,
@@ -502,6 +551,7 @@ import {
   stockPrepBlockerPlain,
   stockPrepPermissionPlain,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import { STOCK_PREPARATION_LEGACY_BRIDGE_KIND } from '../../../services/integration/stockPreparation/sourceBinding'
 
 const props = defineProps<{
   defaults: StockPreparationInstallDefaults | null
@@ -747,14 +797,76 @@ const accessPlatformAdminNote = computed<{ zh: string; en: string } | null>(() =
   }
 })
 
+// ---------------------------------------------------------------------------
+// ①a「登记外接数据源」— the second live read (向导①拆分, 2026-09-10)
+//
+// WHY A READ AND NOT A DERIVATION. The source-binding envelope this page already holds enumerates
+// external SYSTEMS, so it is SILENT about whether a data source is registered: a deployment can hold
+// a working SQL Server and simply not have wired a binding to it yet. Deriving ①a from that silence
+// would report 「还没登记」 to an administrator who registered one an hour ago — see
+// `dataSourceRegistry.ts`'s header for the whole argument.
+//
+// D6 IS UNTOUCHED: that rule is about probing the CUSTOMER's database, and this reads our own
+// in-process adapter list. G3 too — the service never rejects and collapses every unanswerable
+// outcome into `unknown`, so a refusal becomes a badge, never a banner and never a redirect.
+// ---------------------------------------------------------------------------
+
+/** `null` until the first read settles — the FIRST-PAINT state, rendered 「? 看不到」, not a verdict. */
+const dataSourceRegistry = ref<StockPrepDataSourceRegistry | null>(null)
+
+/**
+ * Fire-and-forget on mount. NO soft timeout and NO sequence latch, deliberately, because neither has
+ * anything to guard here: this read has no 「重新检查」 button, so there is never a second one in
+ * flight to be overtaken, and a request that never settles simply leaves ①a at its honest
+ * first-paint 「? 看不到」 rather than stranding a disabled control (the two reasons ⑤ needs both).
+ * The unmount latch IS shared — #3365「卸载即作废」 applies to every callback a view schedules.
+ */
+async function loadDataSourceRegistry(): Promise<void> {
+  let answer: StockPrepDataSourceRegistry
+  try {
+    answer = await readStockPrepDataSourceRegistry()
+  } catch {
+    // The service is documented never to reject; this is the belt to that braces, so a future change
+    // there can never turn this fire-and-forget call into an unhandled rejection.
+    answer = stockPrepDataSourceRegistryUnknown(null)
+  }
+  if (accessDisposed) return
+  dataSourceRegistry.value = answer
+}
+
+onMounted(() => { void loadDataSourceRegistry() })
+
 const derivationInput = computed(() => ({
   preflight: props.preflight,
   preflightErrorStatus: props.preflightErrorStatus,
   sourcePreflight: props.sourcePreflight,
   sourcePreflightErrorStatus: props.sourcePreflightErrorStatus,
   binding: props.binding,
+  // The service's own verdict plus one integer. Nothing here re-decides anything, and no connection
+  // NAME exists in this projection to be rendered by accident.
+  dataSourceRegistry: dataSourceRegistry.value
+    ? {
+        state: dataSourceRegistry.value.state,
+        sqlCount: dataSourceRegistry.value.sqlCount,
+        // The status rides along ONLY so a 401/403 can name the missing permission. No other
+        // status produces a sentence, and no count or name is added by carrying it.
+        status: dataSourceRegistry.value.status,
+      }
+    : null,
   roleReadiness: accessReadiness.value?.state ?? null,
 }))
+
+/**
+ * F06 — is this deployment wired for the bridge that carries its own connection details?
+ *
+ * Read off the ACTION's own frozen kind, which the source-binding envelope already resolved
+ * (`effectiveSourceKind`); nothing here re-derives it. `false` while the envelope has not arrived,
+ * which is the right default: the ①a/①b instructions are what this page shows by default, and a
+ * page that suppressed them on a guess would hide the only two steps most deployments need.
+ */
+const isLegacyBridgeDeployment = computed(
+  () => props.binding?.requiredKind === STOCK_PREPARATION_LEGACY_BRIDGE_KIND,
+)
 
 const steps = computed(() => stockPrepGettingStartedSteps(derivationInput.value))
 const progress = computed(() => stockPrepGettingStartedProgress(steps.value))

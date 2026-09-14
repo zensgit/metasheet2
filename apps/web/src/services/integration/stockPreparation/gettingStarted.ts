@@ -1,4 +1,4 @@
-// BOM备料 接入向导「开始使用」— 六步地图的纯派生逻辑 (P0-4).
+// BOM备料 接入向导「开始使用」— 七步地图的纯派生逻辑 (P0-4; ① 拆成 ①a/①b 于 2026-09-10).
 //
 // ARCHITECTURE: this module is PURE and issues no read of its own. Five of the six badges are derived
 // from data the install page already fetches through EXISTING calls (the manifest, the deployment
@@ -20,15 +20,24 @@
 // G5 「地图不是闸机」: nothing here computes a boolean that DISABLES an action. Every badge is prose,
 // never a gate — the wizard's own buttons (in the .vue) are enabled purely by permission + busy state,
 // completely independent of what this module returns.
+import type { StockPrepDataSourceRegistryState } from './dataSourceRegistry'
+import { STOCK_PREPARATION_LEGACY_BRIDGE_KIND } from './sourceBinding'
 import type { StockPreparationPreflight, StockPreparationPreflightBlocker } from './installPlan'
 import type { StockPrepOnboardingReadinessState } from './onboardingReadiness'
 import type { StockPrepSourcePreflight } from './sourcePreflight'
 
 // ---------------------------------------------------------------------------
-// The six steps
+// The seven steps
 // ---------------------------------------------------------------------------
 
 export type StockPrepGettingStartedStepKey =
+  /**
+   * (1a) 登记外接数据源. SPLIT OUT OF THE OLD (1) (2026-09-10). 整合切片 put 外接数据源 and the
+   * connection-draft editor in the SAME 数据工厂 section, which left one step describing two acts
+   * with two different controls, two different destinations, and two different reads behind them.
+   */
+  | 'source-register'
+  /** (1b) 在数据工厂新增 SQL 绑定. The old (1)'s key and the old (1)'s evidence, kept where they belong. */
   | 'source-connect'
   | 'source-verify'
   | 'source-bind'
@@ -37,6 +46,7 @@ export type StockPrepGettingStartedStepKey =
   | 'first-project-run'
 
 export const STOCK_PREP_GETTING_STARTED_STEP_ORDER: readonly StockPrepGettingStartedStepKey[] = Object.freeze([
+  'source-register',
   'source-connect',
   'source-verify',
   'source-bind',
@@ -46,7 +56,8 @@ export const STOCK_PREP_GETTING_STARTED_STEP_ORDER: readonly StockPrepGettingSta
 ])
 
 export const STOCK_PREP_GETTING_STARTED_STEP_LABEL: Record<StockPrepGettingStartedStepKey, { zh: string; en: string }> = Object.freeze({
-  'source-connect': Object.freeze({ zh: '接一条只读连接', en: 'Connect a read-only source' }),
+  'source-register': Object.freeze({ zh: '①a 登记外接数据源', en: '(1a) Register the external data source' }),
+  'source-connect': Object.freeze({ zh: '①b 在数据工厂新增 SQL 绑定', en: '(1b) Add the SQL binding in Data Factory' }),
   'source-verify': Object.freeze({ zh: '证明它只能读', en: 'Prove it can only read' }),
   'source-bind': Object.freeze({ zh: '告诉备料用这条源', en: 'Tell stock-prep to use this source' }),
   'install-tables': Object.freeze({ zh: '建表 + 装列', en: 'Create tables and install columns' }),
@@ -131,6 +142,57 @@ export interface StockPrepGettingStartedBinding {
   effectiveExternalSystemId: string | null
   /** How many read-only connections the server considers eligible. Server-filtered, never counted here. */
   eligibleSourceCount: number
+  /**
+   * How many of those eligible connections are the DATA-SOURCE-BACKED kind
+   * (`data-source:sql-readonly`) — the kind 数据工厂's 「新增连接草稿」 produces, which carries a
+   * `connectionId` into `data_sources` rather than its own host and credentials.
+   *
+   * A SUBSET of `eligibleSourceCount`, never a separate population, and NOT what (1b)'s badge is
+   * computed from. The server narrows `eligibleSources` to the ACTION's own frozen `source.kind`
+   * (`listEligibleSources(..., { requiredKind })`), and the other BOM read kind
+   * (`bridge:legacy-sql-readonly`) is a legitimate, working configuration. Badging (1b) off this
+   * number alone would report 「没完成」 to a deployment whose legacy bridge has been feeding the
+   * floor for months — 「叫人去做一件已经做完的事」, the one answer this map must never produce.
+   * So the badge reads `eligibleSourceCount`, and this number rides in the EVIDENCE line, which is
+   * where 「走的是哪条路」 belongs.
+   */
+  dataSourceBackedSourceCount: number
+  /**
+   * The ACTION's own frozen `source.kind`, as the server resolved it — `effectiveSourceKind` off
+   * the same envelope. `null` when no action is resolvable.
+   *
+   * This is what decides whether ①a and ①b APPLY. The server narrows `eligibleSources` to this
+   * kind, so on a `bridge:legacy-sql-readonly` deployment a `data-source:sql-readonly` system can
+   * never be offered — and a wizard that still told such a deployment to go register one would be
+   * handing out busywork with a 「需要别人做」 badge over it.
+   */
+  requiredKind: string | null
+}
+
+/**
+ * WHAT THE DATA-SOURCE REGISTRY READ ANSWERED, projected to the two fields step (1a) is about.
+ *
+ * DELIBERATELY NOT DERIVED FROM `binding`. `eligibleSources` enumerates external SYSTEMS — the
+ * bindings — not the data sources behind them, so an empty list is SILENT about whether a data
+ * source is registered: a deployment can hold a perfectly good SQL Server and simply not have wired
+ * a binding to it yet. Reading that silence as 「还没登记」 is exactly the false-negative R7 forbids.
+ *
+ * `null` means NO ANSWER EXISTS on this page right now — the read has not returned, failed, or was
+ * never attempted. That is `unknown`, never 「没做」.
+ */
+export interface StockPrepGettingStartedRegistry {
+  /** The service's already-decided verdict. Nothing here re-decides it. */
+  state: StockPrepDataSourceRegistryState
+  /** How many visible sources are of a SQL type. An integer — never a name, never an id. */
+  sqlCount: number
+  /**
+   * The HTTP status behind an unanswered read, `null` when the read answered.
+   *
+   * Carried for exactly one sentence: a 401/403 is the server saying WHY, and the wizard's primary
+   * audience (`stock-prep:admin`, who holds no `data_sources:read`) hits it every single time. Every
+   * other status stays wordless — see the evidence function.
+   */
+  status: number | null
 }
 
 export interface StockPrepGettingStartedInput {
@@ -146,6 +208,12 @@ export interface StockPrepGettingStartedInput {
   sourcePreflightErrorStatus: number | null
   /** The source-binding panel's own answer, or `null` when this page has none. */
   binding: StockPrepGettingStartedBinding | null
+  /**
+   * 第(1a)步的真实检测结果 (`dataSourceRegistry.ts`), or `null` while the read is still in
+   * flight / was never started. `null` and a `'unknown'` state are the same thing to this module —
+   * 「本页判断不了」 — and both render 「? 看不到」.
+   */
+  dataSourceRegistry: StockPrepGettingStartedRegistry | null
   /**
    * 第⑤步的真实检测结果 (P1-3), or `null` while the read is still in flight / was never started.
    *
@@ -170,9 +238,38 @@ export type StockPrepGettingStartedSteps = Record<StockPrepGettingStartedStepKey
  * work that exists and is somebody's, which this page does not claim to have observed.
  */
 export function stockPrepGettingStartedSteps(input: StockPrepGettingStartedInput): StockPrepGettingStartedSteps {
-  const { preflight, preflightErrorStatus, sourcePreflight, sourcePreflightErrorStatus, binding, roleReadiness } = input
+  const {
+    preflight,
+    preflightErrorStatus,
+    sourcePreflight,
+    sourcePreflightErrorStatus,
+    binding,
+    dataSourceRegistry,
+    roleReadiness,
+  } = input
 
-  // ①③ — the binding envelope, or no answer at all.
+  // (1a)(1b) DO NOT APPLY on a legacy-bridge deployment. The action's frozen kind is the whole
+  // answer: the server narrows `eligibleSources` to it, so a `data-source:sql-readonly` system is
+  // never offered here and registering one cannot help. Reported as `done` rather than `held` —
+  // 「需要别人做」 over a step nobody should do is the same false instruction as 「去做一件已经
+  // 做完的事」, and it would cap this deployment's progress at 6/7 forever. The evidence line
+  // says WHY, so the tick is never bare.
+  const legacyBridge = binding !== null && binding.requiredKind === STOCK_PREPARATION_LEGACY_BRIDGE_KIND
+
+  // (1a) — the data-source registry read, and nothing else. `null` (in flight / never started) and
+  // `'unknown'` (403 for a caller holding no `data_sources:read`, a 500, a shape this page does not
+  // recognise) are the same answer: 「本页判断不了」. `'absent'` IS an answer — the list was read
+  // and holds no relational source — and it is `held`, because registering one is somebody's work
+  // behind a control on another page, never 「卡住了」.
+  const sourceRegister: StockPrepGettingStartedBadgeKey = legacyBridge
+    ? 'done'
+    : dataSourceRegistry === null || dataSourceRegistry.state === 'unknown'
+      ? 'unknown'
+      : dataSourceRegistry.state === 'present'
+        ? 'done'
+        : 'held'
+
+  // (1b)(3) — the binding envelope, or no answer at all.
   const sourceConnect: StockPrepGettingStartedBadgeKey = binding === null
     ? 'unknown'
     : binding.eligibleSourceCount > 0
@@ -225,6 +322,7 @@ export function stockPrepGettingStartedSteps(input: StockPrepGettingStartedInput
   const grantAccess: StockPrepGettingStartedBadgeKey = roleReadiness === 'unknown' ? 'unknown' : 'held'
 
   return {
+    'source-register': sourceRegister,
     'source-connect': sourceConnect,
     'source-verify': sourceVerify,
     'source-bind': sourceBind,
@@ -236,7 +334,7 @@ export function stockPrepGettingStartedSteps(input: StockPrepGettingStartedInput
 }
 
 /**
- * 进度 N/6 (wireframe B's header). Only `done` counts — `not_checked`, `unknown` and `held` are all
+ * 进度 N/7 (wireframe B's header, one row longer since (1) became (1a) + (1b)). Only `done` counts — `not_checked`, `unknown` and `held` are all
  * 「we do not know / not ours」 and none of them is progress. Narrative only: nothing gates on it.
  */
 export function stockPrepGettingStartedProgress(steps: StockPrepGettingStartedSteps): { done: number; total: number } {
@@ -255,11 +353,52 @@ export function stockPrepGettingStartedEvidence(
   key: StockPrepGettingStartedStepKey,
   input: StockPrepGettingStartedInput,
 ): { zh: string; en: string } | null {
+  // (1a) on a legacy-bridge deployment: the tick is NEVER bare. It means 「不适用」, and a ✔ with
+  // no words under it would read as 「已经登记好了」 — a different, false claim.
+  if (key === 'source-register' && input.binding?.requiredKind === STOCK_PREPARATION_LEGACY_BRIDGE_KIND) {
+    return { zh: '本部署走旧式桥接,这一步不适用', en: 'This deployment uses the legacy bridge — this step does not apply' }
+  }
+  // (1a) — counts only, straight off the registry projection. The wording says 「本账号看得到」
+  // rather than 「这台机器上有」 because the list is owner-scoped (#5401): 0 means this account
+  // sees none, not that none exists.
+  //
+  // THE ONE `unknown` THAT DOES GET A SENTENCE (2026-09-10 review, item 5). Normally `unknown`
+  // returns nothing — the badge already says 「? 看不到」 and inventing a cause would be this page
+  // claiming to know why. A 401/403 is different: the SERVER said why, and this step's most likely
+  // reader is exactly the principal it happens to — a `stock-prep:admin` holder, who opens
+  // 「开始使用」 by design and holds no `data_sources:read`, so ①a is `unknown` for them EVERY
+  // time and their progress tops out at 6/7. Leaving that unexplained is a permanent unexplained
+  // shrug on the page's own primary audience.
+  if (key === 'source-register' && input.dataSourceRegistry) {
+    if (input.dataSourceRegistry.state === 'unknown') {
+      const status = input.dataSourceRegistry.status
+      if (status === 401 || status === 403) {
+        return {
+          zh: '看不到外接数据源清单(需要 data_sources:read),请找实施确认',
+          en: 'Cannot read the data-source list (needs data_sources:read) — ask your implementer to confirm',
+        }
+      }
+      return null
+    }
+    const n = input.dataSourceRegistry.sqlCount
+    return n > 0
+      ? { zh: `本账号看得到 ${n} 个数据库连接`, en: `${n} database connection(s) visible to this account` }
+      : { zh: '本账号还看不到数据库类型的数据源', en: 'No database-type data source visible to this account yet' }
+  }
   if (key === 'source-connect' && input.binding) {
     const n = input.binding.eligibleSourceCount
-    return n > 0
-      ? { zh: `已登记 ${n} 条`, en: `${n} registered` }
-      : { zh: '还没有可用的连接', en: 'No usable connection yet' }
+    if (n === 0) return { zh: '还没有可选的绑定', en: 'No binding to choose from yet' }
+    // WHICH ROAD, said out loud — but never as a REPROACH. On a legacy-bridge deployment the
+    // absence of data-source-backed candidates is the configuration working exactly as deployed,
+    // and the earlier wording (「都是旧式桥接,不经外接数据源」, read next to a ①a telling them
+    // to go register one) described a correct deployment as a shortfall.
+    const m = input.binding.dataSourceBackedSourceCount
+    if (input.binding.requiredKind === STOCK_PREPARATION_LEGACY_BRIDGE_KIND) {
+      return { zh: `已登记 ${n} 条(本部署就是走旧式桥接)`, en: `${n} registered (this deployment runs on the legacy bridge)` }
+    }
+    return m > 0
+      ? { zh: `已登记 ${n} 条,其中 ${m} 条走外接数据源`, en: `${n} registered, ${m} of them backed by a data source` }
+      : { zh: `已登记 ${n} 条(尚未有一条走外接数据源)`, en: `${n} registered (none backed by a data source yet)` }
   }
   if (key === 'source-bind' && input.binding) {
     return input.binding.effectiveExternalSystemId
