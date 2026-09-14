@@ -22416,6 +22416,1098 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '503':
           $ref: '#/components/responses/ElearningError'
+  /api/integration/status:
+    get:
+      summary: Integration plugin status (adapter kinds + registered route table)
+      description: >-
+        Gate `requireAccess(req, 'read')`. Resolves no tenant. `data` is `{
+        adapters: string[], routes: { method, path }[] }` — the adapter-kind
+        list and the plugin's own route inventory (http-routes.cjs:4613-4618).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/adapters:
+    get:
+      summary: List adapter kinds with their metadata
+      description: >-
+        Gate `requireAccess(req, 'read')`. Resolves no tenant. `data` is one
+        descriptor per registered adapter kind (http-routes.cjs:4630-4636).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/hub/overview:
+    get:
+      summary: 对接总览 — one joined read of systems, consumers and connection descriptors
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped. Joins the
+        external-system registry to the data_sources display descriptor
+        (name/type/status only), the server-held stock-prep table-action
+        binding, pipelines, and approved read-source configs/compositions. Page
+        sizes are server-held constants, not request-tunable. Writes nothing and
+        opens no connection (http-routes.cjs:4653-4726).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: tenantId
+          required: false
+          description: >-
+            Tenantless platform admins only; any other principal must omit it or
+            repeat its own tenant (403 TENANT_MISMATCH otherwise). An API token
+            can never use it.
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '400':
+          description: TENANT_REQUIRED — no tenant could be resolved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/external-systems:
+    get:
+      summary: List registered external systems
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped. Credentials are never
+        returned (http-routes.cjs:4729-4738).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: kind
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          description: Capped server-side at 500 (MAX_LIST_LIMIT).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          description: Capped server-side at 10000 (MAX_LIST_OFFSET).
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '400':
+          description: TENANT_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/external-systems/{id}:
+    get:
+      summary: Get one external system (credential-stripped)
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:4760-4763).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/integration/read-source-configs:
+    get:
+      summary: List read-source configs
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:4896-4908).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: systemId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '400':
+          description: TENANT_REQUIRED or a values-free config validation tuple
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/read-source-configs/{id}:
+    get:
+      summary: Get one read-source config
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:4911-4918).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/integration/read-source-configs/{id}/audit:
+    get:
+      summary: Read-source config audit trail
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:4920-4931).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/read-source-compositions:
+    get:
+      summary: List read-source compositions
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:5057-5069).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/read-source-compositions/{id}:
+    get:
+      summary: Get one read-source composition
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:5071-5078).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/integration/read-source-compositions/{id}/audit:
+    get:
+      summary: Read-source composition audit trail
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:5080-5091).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/bridge-agent-checklists/{id}:
+    get:
+      summary: Get an approved Bridge-Agent change checklist
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped. This GET is the
+        BA-APPLY approval gate itself — it is approved-only and fails closed on
+        a draft/retired checklist. It reads; it applies nothing and never
+        reaches the Bridge Agent (http-routes.cjs:5217-5224).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/integration/pipelines:
+    get:
+      summary: List pipelines
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:5296-5306).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: sourceSystemId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: targetSystemId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/pipelines/{id}:
+    get:
+      summary: Get one pipeline definition
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped. Field mappings are
+        included unless `includeFieldMappings=false`
+        (http-routes.cjs:5318-5325).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: includeFieldMappings
+          required: false
+          description: >-
+            Only the exact string "false" suppresses field mappings; any other
+            value includes them.
+          schema:
+            type: string
+            enum:
+              - 'true'
+              - 'false'
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/integration/table-actions:
+    get:
+      summary: List registered table actions
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:5730-5736).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: actionId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/table-actions/{actionId}/conflict-policies:
+    get:
+      summary: Read a table action's conflict policies
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped. The PUT and DELETE
+        legs of this same path are `requireAccess(req, 'admin')` and are
+        deliberately absent from this contract (http-routes.cjs:6475-6483).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: path
+          name: actionId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/integration/templates:
+    get:
+      summary: List integration templates
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:5328-5337).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: targetKind
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/templates/references:
+    get:
+      summary: Reference (example) integration template catalog
+      description: >-
+        Gate `requireAccess(req, 'read')`. Resolves no tenant — the catalog is
+        values-free constants (http-routes.cjs:5341-5344). Registered BEFORE
+        `/templates/{id}` so `references` can never be captured as an id.
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/templates/{id}:
+    get:
+      summary: Get one integration template
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:5356-5361).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/integration/staging/descriptors:
+    get:
+      summary: List staging sheet descriptors
+      description: >-
+        Gate `requireAccess(req, 'read')`. Resolves no tenant; describes the
+        staging structures only and installs nothing (the install leg is POST
+        and is absent from this contract) (http-routes.cjs:9550-9553).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/runs:
+    get:
+      summary: List pipeline runs
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped
+        (http-routes.cjs:9639-9648).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: pipelineId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/provenance:
+    get:
+      summary: Provenance timeline for one target row (cross-run)
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped. `rowId` is REQUIRED
+        (400 ROW_ID_REQUIRED without it). Answers 501
+        PROVENANCE_READ_NOT_IMPLEMENTED on a host whose pipeline registry
+        predates the read (http-routes.cjs:9654-9671).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: rowId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: pipelineId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: from
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: to
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '400':
+          description: ROW_ID_REQUIRED / TENANT_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '501':
+          description: PROVENANCE_READ_NOT_IMPLEMENTED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/integration/dead-letters:
+    get:
+      summary: >-
+        List dead letters (payloads redacted unless the caller is an integration
+        admin)
+      description: >-
+        Gate `requireAccess(req, 'read')`. Tenant-scoped. `includePayload=true`
+        is honoured ONLY for a caller `isAdmin` recognises (`role:admin` /
+        `integration:admin`); every other caller — including every `mst_` API
+        token, whose identity carries exactly `integration:read` and no role —
+        receives redacted rows (http-routes.cjs:9674-9685).
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: pipelineId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: runId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: includePayload
+          required: false
+          description: Admin-only; ignored for every other principal.
+          schema:
+            type: string
+            enum:
+              - 'true'
+              - 'false'
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/integration/stock-preparation/projects:
+    get:
+      summary: 备料 values-free project roster
+      description: >-
+        Gate `requireAccess(req, 'read')` — the integration read tier, NOT the
+        stock-prep vocabulary. Tenant-scoped, and the query is a CLOSED
+        allowlist of exactly `tenantId` and `workspaceId`
+        (http-routes.cjs:1681-1684, 2523-2531, 7176-7192); the staging target
+        project is derived from the resolved tenant and is never
+        request-sourced. Answers 501 when the host exposes no multitable
+        provisioning API.
+      security:
+        - bearerAuth: []
+      x-api-token-scope: integration:read
+      parameters:
+        - in: query
+          name: tenantId
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: workspaceId
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '400':
+          description: >-
+            STOCK_PREPARATION_PROJECT_LIST_REQUEST_INVALID (unknown query key) /
+            TENANT_REQUIRED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '501':
+          description: PROJECT_READS_PROVISIONING_API_UNAVAILABLE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/multitable/bases:
     get:
       summary: List multitable bases
