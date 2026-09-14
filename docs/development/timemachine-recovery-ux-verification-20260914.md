@@ -1,0 +1,139 @@
+# Time Machine Recovery UX Verification
+
+## Exact Code and Release Boundary
+
+- Main baseline: `c13e40769690a4ed51b3f3a7ac2f8026638f3e88`.
+- Carried configuration-history Draft: #5704 at
+  `e92e462b84e74aa242382c2f31eab326ceb60854`, retained by true merge.
+- Recovery code commit: `6f035bdb60560b63ffb30c14db0a6fdf89af905f`.
+- Code tree: `6ff6959d51b10660c9acccb3f74c1dbc134c34b5`.
+- Branch: `codex/timemachine-recovery-ux-20260914`.
+- Recovery commit: 28 files, +2442/-132. Relative to main, the code candidate
+  includes 35 files, including the earlier configuration-history evidence.
+- This report and screenshots are a report-only child, not additional runtime code.
+- Publication is Draft/HOLD only. Remote exact-head CI and merged-main evidence
+  are NOT claimed by this local report. No Ready, merge, flag change, dispatch,
+  staging, deployment, real tenant, production or permanent-delete operation.
+
+## Delivered Surface
+
+| Surface | Recovery object | Authority and evidence |
+| --- | --- | --- |
+| Recycle bin | Whole soft-deleted table | New permission-filtered list; existing lifecycle restore writer; retained records/fields/views, last-sheet empty-base recovery |
+| History | Current deleted record | Historical before-side display; current server tombstone lookup; explicit confirmation and matching record/sheet reply |
+| Configuration history | Field/view/permission/table-setting definition | Readable action/name/order/diff; existing server preview/execute and undelete gates, no fabricated field values |
+| Time/actor | Viewer-local time; available actor name | Browser timezone and selected UI locale; honest ID fallback; no assumed production setting |
+
+Record details remain limited to the current two-layer-visible field metadata and
+server-masked values. Missing details are indicated. Row recovery does not use the
+live-version restore API. Purged tables and unavailable tombstones cannot be
+re-created by this change. Config undelete may remain disabled by the existing
+server flag; this UI reports the refusal without enabling it.
+
+## Local Gates
+
+| Gate | Result |
+| --- | --- |
+| Four parent frontend specs | 137/137 PASS: API client, table recycle bin, config history, sheet-delete workbench |
+| Five history/record frontend specs | 71/71 PASS: inline diff, record trash, modal migration, current-field wiring, pinned deep link |
+| Required web script | Frozen code PASS, all groups; final group 456 files / 6699 tests. Groups overlap, so counts are not summed as distinct tests |
+| Backend TypeScript | PASS, `pnpm --filter @metasheet/core-backend exec tsc --noEmit` |
+| Web application TypeScript | PASS, `pnpm --filter @metasheet/web exec vue-tsc --noEmit -p tsconfig.app.json` |
+| New/changed component and composable lint | PASS after replacing a constant-condition pagination loop; no rule suppression |
+| OpenAPI | Official build/guard/validate PASS; parity 1/1 PASS; four generated artifacts deterministic |
+| CI selector union | Existing path/test tokens preserved; new table-trash spec in both multitable guard and required-web |
+| Sealed provenance | Official live/frozen comparison differenceCount=0; no pin edits; complete 11-file S5 chain PASS |
+| Diff | `git diff --check` PASS |
+
+The OpenAPI parity test already expected a closed field-type enum but omitted the
+pre-existing `duration` member. Its expected list was aligned with the existing
+runtime/source enum; no field capability was added.
+
+The full web project typecheck previously encountered the existing Vite dependency
+typing conflict; the application tsconfig above is the verified scope. Broad
+targeted lint also observes baseline errors outside the changed logic: the API
+client's existing unused comment-reaction import, config spec escape warnings,
+and an existing backend-route semicolon. This is not a repository-wide lint PASS.
+No dependency/lockfile change or unrelated lint cleanup is included.
+
+## PostgreSQL Authority
+
+Dedicated disposable PostgreSQL 15, synthetic fixtures only:
+
+- Fresh full migration stream: 402 migrations applied; second replay no-op.
+- CI-matching Node 20 combined run: 5 files, 68/68 PASS, zero skipped tests.
+- `multitable-dangling-link-repair-realdb.test.ts`: 30/30, including the new table
+  list. Covers lifecycle vs record-write authority, explicit read deny, group/role
+  precedence, cross-base cursor rejection, protected sheets, Unicode normalization,
+  list pagination, soft-delete/restore fidelity and repeated restore.
+- `multitable-record-recycle-bin.test.ts`: 10/10.
+- `multitable-conditional-rule-trash-realdb.test.ts`: 6/6.
+- `multitable-undelete-config-realdb.test.ts`: 16/16.
+- `multitable-tombstone-field-rehydrate-revision-realdb.test.ts`: 6/6.
+- After mutation restoration the same combined suite passed 68/68 again.
+- Fixture base/sheet prefixes: zero; other database connections: zero. Dedicated
+  database dropped; database-prefix and backend residue zero; dedicated PG stopped
+  and its port had no response. No shared/customer DB was used.
+
+These are real SQL/Express route tests with controlled test identity injection,
+not a real-login browser UAT. Initial runs under the machine-default Node runtime
+had one transient route refusal and one connection reset in existing neighboring
+tests. Isolated checks and two combined runs under installed Node 20 passed. The
+observations are retained locally; runtime causation is not claimed.
+
+## Discriminating Checks
+
+| Changed guard | Counterexample |
+| --- | --- |
+| SQL vs shared permission/People normalization | Old whitespace normalization: two real-DB failures, then canonical ECMAScript trim parity GREEN |
+| Lifecycle list admission | Replacing lifecycle authority with record-write: unauthorized list returned 200 instead of 403; restored GREEN |
+| Table/config dialog scope | Neutralized generation guards: four stale-response cases RED; restored combined 61/61 GREEN |
+| Table page/restore coordination | Red-first additions: confirmation remained enabled during load-more, retry lost its cursor, list permission copy was wrong; three RED then 16/16 table tests GREEN |
+| Record restore identity | Missing/mismatched restored ID/sheet never becomes local success; same-ID old-finally cannot clear a newer operation |
+| Current tombstone selection | Historical ID absent from current pages remains unavailable; later-page matches can be confirmed; hidden fields remain excluded |
+| Record pagination coordination | Deferred restore blocks page load; deferred page load blocks restore; late closed/reopened replies ignored |
+
+## Browser Evidence
+
+Real Vue components in a local Vite preview with explicitly synthetic API replies.
+Chromium checked 1440x960 and 390x960: table confirmation/cancel/success, current
+record details and restore, readable deleted-field configuration, disabled config
+undelete refusal, zero page errors and zero dialog horizontal overflow. Viewer
+timezone checks covered Asia/Taipei and America/New_York with different correct
+local display times for the same server timestamp.
+
+The first sandboxed browser launch failed before any page load with macOS Mach-port
+permission denial. The bounded unsandboxed local Chromium run then passed. This
+does not stand in for browser -> authenticated backend -> PostgreSQL acceptance.
+
+Screenshots: `artifacts/timemachine-recovery-ux-20260914/` contains desktop/mobile
+table restore, history, record restore and configuration history images, all
+synthetic. The local harness is in the worktree's ignored `apps/web/tmp/`; screenshots
+are presentation evidence, not a new required-browser CI lane.
+
+## Review Provenance
+
+- Sol implemented backend authority and tests. A separate Sol read-only reviewer
+  found the two Unicode normalization issues, independently reproduced/fixed by
+  the coordinator; final backend-only review: 0 P1/P2/P3.
+- Terra implemented record-history UI/composable/tests. Coordinator reviewed and
+  added final pagination/restore serialization and stale-response checks.
+- Claude CLI `fable` resolved to `claude-fable-5-1` for an actual bounded read-only
+  table-trash/client review. Pagination coordination/retry/copy and identity test
+  gaps were addressed with red-first tests. Its suggestion about the pre-existing
+  general restoreSheet client method is outside this modal's validated scope.
+  No unreturned or unexecuted external review is counted as approval.
+- Coordinator final scoped review: no known P1/P2 in this recovery delta. Kimi/Grok
+  installation checks are not review evidence. No model changed flags or remote
+  PR state. Earlier #5704 reports remain historical SHA-bound evidence.
+
+## Operational Notes
+
+Dependencies were reused through ignored worktree symlinks. OpenAPI tooling used
+the already-installed SDK dependency tree. The initial full S5 run could not find
+the existing `mssql` package; resolving that installed package with temporary
+NODE_PATH yielded all 11 files PASS, without install or lock changes.
+
+Local logs are under `/private/tmp/tm-recovery-*-20260914.log`; they are session-local
+and not remote CI artifacts. GitHub checks on the publication head must be observed
+independently before any later owner-authorized merge.
