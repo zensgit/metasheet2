@@ -9542,6 +9542,7 @@ async function testStockPreparationStructureWriteSteeringHasNoEffect() {
     ['/api/integration/stock-preparation/sandbox-target/ensure', { label: 'probe' }],
     ['/api/integration/stock-preparation/options/sync', {}],
     ['/api/integration/stock-preparation/mvp/ensure', {}],
+    ['/api/integration/stock-preparation/mvp/repair', {}],
     ['/api/integration/stock-preparation/mvp/options/sync', {}],
     ['/api/integration/field-options/sync', { presetId: 'stock-preparation-v1' }],
   ]
@@ -9589,6 +9590,7 @@ async function testStockPreparationWriteRejectsExplicitBaseId() {
     ['/api/integration/stock-preparation/target/ensure', {}],
     ['/api/integration/stock-preparation/sandbox-target/ensure', { objectId: 'obj1', label: 'x' }],
     ['/api/integration/stock-preparation/mvp/ensure', {}],
+    ['/api/integration/stock-preparation/mvp/repair', {}],
   ]
   for (const [routePath, baseBody] of routesUnderTest) {
     const { services } = createMockServices()

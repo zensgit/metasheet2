@@ -455,11 +455,16 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
         const found = descriptor.fields.find((field) => field.id === id)
         if (found) missingDescriptors.push(found)
       }
-      const result = await tx.ensureMissingObjectFields({
-        projectId: scopedProjectId,
-        objectId: template.objectId,
-        fields: missingDescriptors,
-      })
+      // #5721 终审: nothing missing => NO host write call at all (the route's "repair 0 = zero
+      // writes" claim is literal, not "an INSERT of an empty list"). The post-write re-verify and
+      // the before/after content comparison below still run, so "already ready" stays PROVEN.
+      const result = missingDescriptors.length
+        ? await tx.ensureMissingObjectFields({
+          projectId: scopedProjectId,
+          objectId: template.objectId,
+          fields: missingDescriptors,
+        })
+        : { addedFieldIds: [], skippedExistingFieldIds: [] }
       // CONCURRENCY fail-close (round-5 review P2): we submitted ONLY this round's missing
       // set, so a skipped-existing id means a competing writer inserted that column between
       // our resolve and our write. We neither added it nor content-verified its row against
@@ -491,8 +496,15 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
         repaired: result.addedFieldIds.length > 0,
         mode: result.addedFieldIds.length > 0 ? 'mvp_repaired' : 'mvp_already_ready',
         addedFieldCount: result.addedFieldIds.length,
+        // #5721 终审: the LOGICAL template ids this sweep submitted (== the probe's missingFields
+        // 口径: missingLogicalFields over the DB read) — never the physical fld_* ids the host
+        // returned, so the route can answer "which fields" values-free.
+        addedFieldIds: missingDescriptors.map((field) => field.id),
         skippedExistingFieldCount: result.skippedExistingFieldIds.length,
         schemaCompleteAfter: true,
+        // Repair only ever judges existence through the tx-bound DB read; there is no computed
+        // fallback here (an old host is refused at getMvpRepairApi before this runs).
+        fieldExistenceMode: 'db',
         templateVersion: template.version,
       })
     }
@@ -508,6 +520,7 @@ async function repairStockPreparationMvpTargets({ context, projectId, permission
         objectId: table.objectId,
         mode: table.mode,
         addedFieldCount: table.addedFieldCount,
+        addedFieldIds: table.addedFieldIds.slice(),
         templateVersion: table.templateVersion,
       })),
     },
