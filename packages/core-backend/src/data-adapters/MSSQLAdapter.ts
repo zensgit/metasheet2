@@ -89,6 +89,19 @@ function mapFKAction(rule: string): FKActionType {
   return 'NO ACTION'
 }
 
+// G52B — the JOIN clause's two caller-chosen tokens, as ALLOWLISTS rather than as text.
+//
+// A `Map` and a `Set`, deliberately, not object literals: `JOIN_TYPE_KEYWORDS['constructor']` on a
+// plain object returns a truthy INHERITED member, and that value would then have been spliced in
+// front of the word JOIN. A Map lookup can only ever return something this file put in it.
+const JOIN_TYPE_KEYWORDS = new Map<string, string>([
+  ['inner', 'INNER'],
+  ['left', 'LEFT'],
+  ['right', 'RIGHT'],
+  ['full', 'FULL'],
+])
+const JOIN_ON_KEYS = new Set(['left', 'right', 'op'])
+
 export class MSSQLAdapter extends BaseDataAdapter {
   protected override pool: MssqlConnectionPool | null = null
 
@@ -307,9 +320,11 @@ export class MSSQLAdapter extends BaseDataAdapter {
 
   /**
    * WHERE identifiers are BRACKETED, exactly like every other IDENTIFIER this adapter emits (projection,
-   * table, JOIN TARGET, ORDER BY all go through `quoteIdent` already — note that is the join's TARGET,
-   * not its ON expression, which `select()` still splices in verbatim; see the note at that line and
-   * design §9.1). The base class emits them bare
+   * table, JOIN target, JOIN ON predicate and ORDER BY all go through `quoteIdent`). G52B closed the one
+   * exception this comment used to carry: the join's ON expression, spliced in verbatim, is now a
+   * STRUCTURED `{ left, right, op?: '=' }` built from two quoted identifiers (`buildJoinOn` below), so
+   * "every identifier this adapter emits is quoted" is now also "every clause it builds is made of
+   * identifiers it quoted". The base class emits them bare
    * because it has no dialect quoting; MSSQL must not, and the reason is specific to THIS adapter:
    *
    * `query()` below applies `isPureReadStatement` to the finished SQL TEXT. A bare identifier that
@@ -355,10 +370,12 @@ export class MSSQLAdapter extends BaseDataAdapter {
     // into a statement is quoted, so a structured read it builds cannot be misread as a write.
     //
     // With that closed, reads — every internal select() and a read of any table — are byte-identical
-    // to a deployment that never heard of this gate. The one fragment this adapter still passes
-    // through verbatim is `options.joins[].on` (a caller-supplied raw SQL string, `select()` below);
-    // it is not quoted here because it is an expression, not an identifier, and a caller that puts a
-    // bare reserved word in it is in the raw-SQL lane the gate is designed for.
+    // to a deployment that never heard of this gate. G52B removed the last fragment this adapter passed
+    // through verbatim, `options.joins[].on`: a JOIN predicate is now BUILT from two quoted identifiers
+    // (`buildJoinOn`), so no clause of a statement this adapter BUILDS has text a caller chose. That
+    // matters here specifically because this gate could not have backstopped it — `union`/`select`/
+    // `from` are READ-grammar keywords, so `ON 1=1 UNION ALL SELECT password, 1 FROM dbo.users` is a
+    // PURE READ by this gate's own (correct) definition. Raw SQL keeps its lane: `query()` itself.
     assertSqlWriteAllowed(
       (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
       sql,
@@ -386,6 +403,122 @@ export class MSSQLAdapter extends BaseDataAdapter {
     }
   }
 
+  /**
+   * A JOIN refusal: values-free message, fixed `code`, numeric `status`.
+   *
+   * The shape matters — `routes/data-sources.ts`'s `codedGateRefusal()` forwards an Error carrying a
+   * numeric `status` AND a string `code` verbatim to the client, so this surfaces as its own 400 with
+   * a machine-readable reason instead of collapsing into a 500 "Select query failed". The message
+   * renders NO caller text: `field` is this adapter's own path (`joins[0].on`) and `reason` comes from
+   * a fixed vocabulary, so a hostile `on` cannot ride an error message into a log line or an HTTP
+   * body. (The identifier refusals below come from `quoteIdent`, which escapes what it echoes — same
+   * property, different mechanism.)
+   */
+  private joinRefusal(code: string, field: string, reason: string): Error {
+    return Object.assign(new Error(`Unsupported JOIN for a SQL Server read (${field}: ${reason})`), {
+      status: 400,
+      code,
+      details: { field, reason },
+    })
+  }
+
+  /**
+   * The JOIN type keyword — an ALLOWLIST lookup, not `toUpperCase()`.
+   *
+   * `join.type` is TYPED `'inner' | 'left' | 'right' | 'full'`, and a type is not a guard: the previous
+   * `join.type?.toUpperCase() || 'INNER'` put caller text directly in front of the word JOIN, reachable
+   * from any JS caller or any `as QueryOptions` cast. Same class as `on` below, same fix — nothing
+   * becomes SQL unless this adapter chose the exact bytes. The one narrowing: `''` used to fall back to
+   * INNER (it is falsy) and is now refused; no typed caller can produce it.
+   */
+  private joinTypeKeyword(type: unknown, field: string): string {
+    if (type === undefined || type === null) return 'INNER'
+    const keyword = typeof type === 'string' ? JOIN_TYPE_KEYWORDS.get(type.toLowerCase()) : undefined
+    if (!keyword) {
+      throw this.joinRefusal('SQLSERVER_JOIN_TYPE_INVALID', field, 'must be one of inner/left/right/full')
+    }
+    return keyword
+  }
+
+  /**
+   * Build the ON predicate from a STRUCTURED equality — `{ left, right, op?: '=' }` — where both sides
+   * are IDENTIFIERS quoted by `quoteIdent`, the same one rule the table/projection/WHERE/ORDER BY use.
+   * The only text this method can return is `<quoted> = <quoted>`.
+   *
+   * WHY THE STRING FORM IS REFUSED RATHER THAN SANITISED. `on` used to be a caller-supplied SQL
+   * expression concatenated verbatim. Quoting is not available as a fix (an expression is not an
+   * identifier), and the write gate in `query()` does not backstop it: that gate asks "is this text
+   * provably a pure READ?", and `union`, `select`, `from` and `exists` are all READ-grammar keywords,
+   * so
+   *   ON 1 = 1 UNION ALL SELECT password, 1 FROM dbo.users
+   * classifies as a pure read, passes the default-deny gate, and returns another table's rows. The
+   * defence-in-depth layer that catches a mangled identifier is blind to a well-formed second SELECT.
+   * So the fragment is gone rather than filtered: there is no accept-path for SQL text here.
+   *
+   * WHAT THIS REFUSES, AND WHAT IT MERELY ESCAPES — stated so the tests are not over-read. `;`, `--`,
+   * `(`, `'`, `*` and `=` are outside the identifier character class, so a side carrying them is
+   * REFUSED. A side that is only letters/digits/spaces/underscores is ACCEPTED and bracketed, which
+   * includes injection-SHAPED text such as `a UNION ALL SELECT x FROM sys` — G52 admits space
+   * separators on purpose (customers' column names have them), and the brackets, not the character
+   * class, are what make it inert: it reaches SQL as ONE identifier, `[a UNION ALL SELECT x FROM sys]`,
+   * which the server reads as a (missing) column name and the write gate reads as a single stripped
+   * token. Four-part names stay refused (they target a LINKED SERVER), unchanged from G52.
+   *
+   * OUT OF SCOPE BY CONSTRUCTION: a VALUE predicate (`ON a.x = 5`) and any non-equality comparison.
+   * Values belong in `where`, where they travel as bound parameters and never enter statement text; a
+   * read that genuinely needs `<>` / `>` / `BETWEEN` in an ON clause belongs in the raw SQL lane
+   * (`query()`), which the write gate does classify. Widening `op` here would widen the accepted
+   * grammar, so the comparison is a single hard-coded `=`.
+   */
+  private buildJoinOn(on: unknown, field: string): string {
+    if (typeof on === 'string') {
+      throw this.joinRefusal(
+        'SQLSERVER_JOIN_ON_UNSUPPORTED',
+        field,
+        'a raw SQL string is not accepted — pass { left, right, op?: "=" } with identifiers',
+      )
+    }
+    if (!on || typeof on !== 'object' || Array.isArray(on)) {
+      throw this.joinRefusal('SQLSERVER_JOIN_ON_INVALID', field, 'must be { left, right, op?: "=" }')
+    }
+    const predicate = on as Record<string, unknown>
+    for (const key of Object.keys(predicate)) {
+      if (!JOIN_ON_KEYS.has(key)) {
+        // A typo'd `operator: '<>'` must not be silently emitted as `=`: an unknown key is a caller
+        // whose intent this adapter cannot honour, so it is refused rather than ignored.
+        throw this.joinRefusal('SQLSERVER_JOIN_ON_INVALID', field, 'unknown key — only left/right/op are accepted')
+      }
+    }
+    if (predicate.op !== undefined && predicate.op !== '=') {
+      throw this.joinRefusal('SQLSERVER_JOIN_ON_OPERATOR_INVALID', field, 'only "=" is supported')
+    }
+    const left = this.quoteJoinSide(predicate.left, `${field}.left`)
+    const right = this.quoteJoinSide(predicate.right, `${field}.right`)
+    return `${left} = ${right}`
+  }
+
+  /**
+   * One side of the ON predicate, through the SAME `quoteIdent` every other clause uses — no local
+   * pattern, no second rule to keep in sync, so the JOIN can never be looser (or stricter) about what
+   * an identifier is than the FROM clause next to it. The G52 refusal is re-thrown with the offending
+   * FIELD and a numeric `status`, so a caller sees WHICH side failed and the route answers 400 instead
+   * of 500; `code` stays `SQLSERVER_IDENTIFIER_INVALID` so existing branching still works, and the
+   * message is the one `quoteIdent` already made log-safe.
+   */
+  private quoteJoinSide(value: unknown, field: string): string {
+    if (typeof value !== 'string') {
+      throw this.joinRefusal('SQLSERVER_JOIN_ON_INVALID', field, 'must be an identifier string')
+    }
+    try {
+      return this.quoteIdent(value)
+    } catch (error) {
+      if ((error as { code?: string }).code === 'SQLSERVER_IDENTIFIER_INVALID') {
+        throw Object.assign(error as Error, { status: 400, details: { field } })
+      }
+      throw error
+    }
+  }
+
   async select<T = Record<string, DbValue>>(table: string, options: QueryOptions = {}): Promise<QueryResult<T>> {
     const conn = this.config.connection
     const selectClause = options.select?.length
@@ -402,18 +535,24 @@ export class MSSQLAdapter extends BaseDataAdapter {
     let sql = `SELECT ${useTop ? `TOP (${limit}) ` : ''}${selectClause} FROM ${this.quoteIdent(table)}`
     let params: DbValue[] = []
 
+    // G52B — THE JOIN CLAUSE IS STRUCTURED END TO END. The target was always quoted; the ON predicate
+    // is now BUILT from two identifiers (`buildJoinOn` above) instead of accepted as SQL text, and the
+    // join TYPE comes from an allowlist instead of `toUpperCase()`. Both throw BEFORE `this.query()` is
+    // reached, so a refused join sends no statement at all.
+    //
+    // A contract change, not a compatibility break: repo-wide nothing passes `options.joins` to any
+    // adapter. The HTTP `POST /:id/select` body is parsed by `SelectSchema`, which has no `joins` key
+    // and is a non-strict zod object, so the field is STRIPPED before `manager.select()` sees it; the
+    // plugin facade (`data-source-plugin-facade.ts`) builds its `QueryOptions` field by field from
+    // limit/offset/where/orderBy; `DataSourceManager`'s copy loop passes where/limit/offset. The
+    // stock-prep read plan even lists `joins` among its FORBIDDEN plan keys. See
+    // docs/development/mssql-join-on-hardening-design-20260912.md §2 for the full caller census.
     if (options.joins?.length) {
-      for (const join of options.joins) {
-        const joinType = join.type?.toUpperCase() || 'INNER'
-        // G52 SCOPE NOTE — the join TARGET is quoted; `join.on` is NOT. It is a caller-supplied raw SQL
-        // EXPRESSION concatenated verbatim, which is why quoting it is not the fix (it is not an
-        // identifier) and why the identifier hardening in `quoteIdent` above does not reach it. It sits
-        // inside the same function that hardening lives in, so state it here rather than leave a reader
-        // to infer coverage: everything a caller puts in `on` is in the raw-SQL lane the write gate in
-        // `query()` is designed for, and nothing repo-wide passes `options.joins` to this adapter
-        // today. Closing it means refusing `joins` here or giving `on` a structured shape — tracked in
-        // docs/development/mssql-unicode-identifiers-design-20260910.md §9.1, not done in that PR.
-        sql += ` ${joinType} JOIN ${this.quoteIdent(join.table)} ON ${join.on}`
+      for (let index = 0; index < options.joins.length; index += 1) {
+        const join = options.joins[index]
+        const joinType = this.joinTypeKeyword(join.type, `joins[${index}].type`)
+        const onSql = this.buildJoinOn(join.on, `joins[${index}].on`)
+        sql += ` ${joinType} JOIN ${this.quoteIdent(join.table)} ON ${onSql}`
       }
     }
 

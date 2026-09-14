@@ -236,6 +236,10 @@ production caller reaches it today), and each is a separate change with its own 
    `on: '1 = 1'` likewise exercises only the hardened half (the target), so treat that row as covering
    the target, not the JOIN path. Repo-wide there is no production caller passing `joins` to this
    adapter.
+   **CLOSED by G52B** (stacked branch `fix/mssql-join-on-hardening`): `on` is now a structured
+   `{ left, right, op?: '=' }` whose sides go through the same quoter, a string `on` is refused with a
+   coded 400, and `join.type` — the second unvalidated splice in that line, found there — is an
+   allowlist. See `docs/development/mssql-join-on-hardening-design-20260912.md`.
 2. **`buildGenericWhereClause`'s `options.quoteIdentifier` can replace THE ONE RULE.** A caller may pass
    any function, including `(field) => field` — which two in-repo tests already do, legitimately, to
    assert unquoted shapes. So the module's own guarantee has a caller-supplied hole in it by design.

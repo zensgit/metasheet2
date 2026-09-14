@@ -94,22 +94,32 @@ describe('G52 — MSSQLAdapter emits Unicode identifiers bracketed, in every cla
     expect(fp.calls[0]).not.toContain('FROM [a] DROP TABLE x]')
   })
 
-  // SCOPE: this covers the join TARGET and the paging clause. It does NOT cover `join.on`, which
-  // `select()` splices in verbatim as a caller-supplied SQL expression (see the note at that line and
-  // design §9.1) — `on: '1 = 1'` below is an inert placeholder needed to build the clause, not a
-  // certification of the ON path. Naming that here so a future reader does not read this test as
-  // "JOINs are covered".
-  it('select(): join TARGET and offset paging quote the same way (ON expression NOT covered)', async () => {
+  // SCOPE (updated by G52B): this covers the join TARGET, the join ON PREDICATE and the paging clause.
+  // G52 could only cover the target — `on` was a caller-supplied SQL string spliced in verbatim, and the
+  // `on: '1 = 1'` this case used to pass was an inert placeholder, explicitly NOT a certification of the
+  // ON path. G52B gave `on` a structured shape, so the predicate is now built from two quoted
+  // identifiers and is asserted here like every other clause. The refusal matrix (a string `on`, a
+  // four-part side, a non-`=` operator, a smuggled join TYPE) lives in mssql-join-on-hardening.test.ts.
+  it('select(): join TARGET, join ON predicate and offset paging all quote the same way', async () => {
     const fp = fakePool()
     await adapterWithPool(fp).select(CJK_TABLE, {
-      joins: [{ table: `${CJK_SCHEMA}.物料`, type: 'inner', on: '1 = 1' }],
+      joins: [{
+        table: `${CJK_SCHEMA}.物料`,
+        type: 'inner',
+        on: { left: `${CJK_TABLE}.${CJK_COLUMN}`, right: `${CJK_SCHEMA}.物料.${CJK_COLUMN}` },
+      }],
       orderBy: [{ column: CJK_COLUMN, direction: 'desc' }],
       offset: 10,
       limit: 5,
     })
     const sql = fp.calls[0]
     expect(sql).toContain(`INNER JOIN [${CJK_SCHEMA}].[物料]`)
+    expect(sql).toContain(`ON [${CJK_TABLE}].[${CJK_COLUMN}] = [${CJK_SCHEMA}].[物料].[${CJK_COLUMN}]`)
     expect(sql).toContain(`ORDER BY [${CJK_COLUMN}] DESC OFFSET 10 ROWS`)
+    // Nothing bare survives in the ON clause either: the only unbracketed run is the ` = ` operator.
+    expect(sql.slice(sql.indexOf(' ON ') + 4, sql.indexOf(' ORDER BY '))).toBe(
+      `[${CJK_TABLE}].[${CJK_COLUMN}] = [${CJK_SCHEMA}].[物料].[${CJK_COLUMN}]`,
+    )
   })
 
   it('refuses an identifier the rule rejects — and the refusal is log-safe', async () => {
