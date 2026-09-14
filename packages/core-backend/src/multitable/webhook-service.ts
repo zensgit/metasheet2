@@ -2,6 +2,16 @@
  * Webhook Service
  * PostgreSQL-backed webhook management and delivery for multitable open API.
  * V2: persistent store via Kysely — state survives restarts.
+ *
+ * EGRESS POSTURE (F-3 of the #5619 security review). `multitable_webhooks.url` is a SUBSCRIBER-supplied
+ * target: any authenticated user can POST /api/multitable/webhooks and have this process send them every
+ * matching record/comment event, signed with the subscription's own secret. That made this the second
+ * un-gated egress out of the same EventBus as the rule-driven `send_webhook` action, and the one with the
+ * wider write surface (a rule needs sheet-edit rights; a webhook row needs only a session). The single
+ * dispatch site in `executeDelivery` is therefore gated by the SAME `checkWebhookTargetUrl` the button
+ * route and the automation path use, and refuses to follow redirects. There is exactly ONE outbound call
+ * in this file; both entry points (`deliverEvent` fan-out and the `retryFailedDeliveries` tick) funnel
+ * through it, so one gate covers both.
  */
 
 import { createHmac, randomBytes } from 'crypto'
@@ -21,6 +31,15 @@ import {
   WEBHOOK_DEFAULT_BASE_RETRY_DELAY_MS,
   WEBHOOK_DEFAULT_MAX_RETRIES,
 } from './webhooks'
+import { checkWebhookTargetUrl, type SsrfLookupFn } from './webhook-ssrf-guard'
+import {
+  classifyWebhookFailure,
+  classifyWebhookRefusal,
+  isRefusedRedirectStatus,
+  REDIRECT_NOT_ALLOWED,
+  WEBHOOK_TARGET_REJECTED,
+  webhookHostFamily,
+} from './webhook-refusal-class'
 
 const logger = new Logger('WebhookService')
 
@@ -35,6 +54,15 @@ const RETRY_CLAIM_LEASE_MS = DELIVERY_TIMEOUT_MS * 4
  *  before the retry tick claims it as a crashed-process stray. Must exceed DELIVERY_TIMEOUT_MS by a wide
  *  margin so a live in-flight first attempt is never double-fired. */
 const FIRST_ATTEMPT_STRAY_GRACE_MS = Math.max(5 * 60_000, DELIVERY_TIMEOUT_MS * 10)
+
+/**
+ * Values-free marker persisted into `response_body` when there is no RECEIVER body to record: a
+ * pre-dispatch refusal, or a transport failure where nothing came back. The suffix is always a
+ * closed-set token from `webhook-refusal-class.ts`, never free text and never the URL, so the
+ * operator-facing delivery row carries a reason without carrying a value. (An HTTP failure response
+ * still stores the receiver's real body, exactly as before.)
+ */
+const DELIVERY_FAILURE_MARKER = 'WEBHOOK_DELIVERY_FAILED'
 
 function generateId(): string {
   return randomBytes(16).toString('hex')
@@ -134,10 +162,19 @@ export class WebhookService {
   private db: Kysely<Database>
   /** Pluggable fetch for testing */
   private fetchFn: typeof fetch
+  /**
+   * DNS seam for the SSRF gate, same shape as `AutomationDeps.ssrfLookupFn`. OMITTED (every production
+   * construction: `routes/api-tokens.ts:26`, `webhook-event-bridge.ts:79`, `WebhookRetryScheduler.ts:81`,
+   * `index.ts:3890`) means the REAL resolver, so production is gated by actual DNS. This is a RESOLVER
+   * seam only and cannot disable the gate: `checkWebhookTargetUrl` still judges every address it returns,
+   * so a seam that answers with an internal address is refused like any other.
+   */
+  private ssrfLookupFn?: SsrfLookupFn
 
-  constructor(db: Kysely<Database>, fetchFn?: typeof fetch) {
+  constructor(db: Kysely<Database>, fetchFn?: typeof fetch, ssrfLookupFn?: SsrfLookupFn) {
     this.db = db
     this.fetchFn = fetchFn ?? globalThis.fetch
+    this.ssrfLookupFn = ssrfLookupFn
   }
 
   // ─── CRUD ────────────────────────────────────────────────────────────
@@ -368,6 +405,87 @@ export class WebhookService {
       return
     }
 
+    // SSRF GATE (F-3 of the #5619 security review) - the ONE decision that makes this file safe.
+    //
+    // `wh.url` is written by whoever created the subscription (POST /api/multitable/webhooks ->
+    // `createWebhook`, routes/api-tokens.ts:320), and PATCH (`updateWebhook`, :286-293) accepts any
+    // parseable URL with no scheme check at all. So a plain session holder could aim this process at
+    // 127.0.0.1 / 10.x / 169.254.169.254 and have every matching record event POSTed there, signed with
+    // their own secret - request forgery with a delivery guarantee and a retry tick behind it.
+    //
+    // PLACEMENT is load-bearing, three ways (same argument as the rule-driven path,
+    // automation-executor.ts:4128):
+    //  1. BEFORE the header/HMAC assembly below - a refused target never has a signature computed over
+    //     the payload, so the subscription's secret is not exercised on a target we refuse to speak to.
+    //  2. INSIDE `executeDelivery`, which is the single funnel for BOTH entry points (the `deliverEvent`
+    //     fan-out and the `retryFailedDeliveries` tick): one call gates both, and a queued row that was
+    //     created before the gate existed is re-judged on every attempt.
+    //  3. BEFORE the only `fetchFn` call in this file - refusal means the request is never made, which
+    //     is the whole property. Nothing is scrubbed; nothing is dispatched.
+    //
+    // NOT terminal on its own: the refusal is handed to the EXISTING `handleDeliveryFailure`, so the
+    // gate changes WHETHER we send, never WHEN we give up. A refused target consumes its retries and
+    // then fails exactly like an unreachable one (and counts toward the auto-disable threshold), so a
+    // transient resolver failure keeps today's retry behaviour instead of silently dropping an event.
+    // Re-attempting costs nothing in containment terms: every attempt re-enters this gate and still
+    // sends nothing. (The redirect refusal below IS terminal - see the reason there.)
+    const ssrf = await checkWebhookTargetUrl(wh.url, this.ssrfLookupFn)
+    if (!ssrf.ok) {
+      // `strict: false` in this package disables discriminated-union narrowing (same as the button
+      // route and the automation path); read `reason` off the rejection variant explicitly.
+      const guardReason = (ssrf as { reason?: string }).reason
+      // VALUES-FREE: the guard's `reason` is never logged - it is only mapped to a closed-set label.
+      // The URL itself may carry userinfo or a query token, so nothing derived from it but the host
+      // SHAPE is recorded; the ids below are identifiers, and `event` is a fixed enum.
+      const refusal = classifyWebhookRefusal(wh.url, guardReason)
+      logger.warn('[webhook.delivery.refused]', {
+        code: refusal.code,
+        refusalClass: refusal.refusalClass,
+        hostFamily: refusal.hostFamily,
+        webhookId: wh.id,
+        deliveryId: delivery.id,
+        event: delivery.event,
+      })
+      // An attempt IS consumed even though nothing was dispatched: `handleDeliveryFailure` terminates on
+      // `attemptCount >= maxRetries`, so not counting it would re-check a permanently refused target
+      // forever. No HTTP happened, so a previous attempt's status must not be re-persisted as this
+      // attempt's outcome.
+      delivery.attemptCount += 1
+      delivery.httpStatus = undefined
+      delivery.responseBody = `${WEBHOOK_TARGET_REJECTED}:${refusal.refusalClass}`
+      // BOOKKEEPING FAILURE IS THIS ROW'S PROBLEM ONLY. `handleDeliveryFailure` issues two UPDATEs, and
+      // this branch runs BEFORE the `try` below, so an exception here would leave `executeDelivery` -
+      // which the retry tick awaits per row without its own guard - and abort the whole pass in
+      // `retryFailedDeliveries`. Every other row that pass already CLAIMED has had `next_retry_at`
+      // leased forward, so they would sit undelivered until the lease expires, and the scheduler's
+      // catch would log the raw `err.message` (`services/WebhookRetryScheduler.ts:157`). Contained
+      // here instead, so THIS branch's failed bookkeeping cannot stall its batch. Scoped, not general:
+      // `getWebhookById` (:397) and the not-found UPDATE (:399-404) are still un-guarded DB calls ahead
+      // of the `try` in the same loop; a per-row guard at :731 is the real answer and is existing code.
+      //
+      // Swallowing is safe in containment terms, and ONLY in containment terms: the gate already
+      // refused, so nothing was dispatched and nothing is dispatched by the recovery either. The cost
+      // is bookkeeping - the delivery row keeps the state it had (a claimed row keeps its lease and is
+      // re-judged by this same gate after it expires; `failure_count` does not advance this attempt).
+      //
+      // NO BINDING on the catch, deliberately: the DB driver's message can carry the statement and its
+      // parameters, so the error object is not reachable from this scope at all and the line below is
+      // closed-set labels plus identifiers, the same discipline as the refusal log above.
+      try {
+        await this.handleDeliveryFailure(delivery, wh)
+      } catch {
+        logger.warn('[webhook.delivery.refusal_unrecorded]', {
+          code: WEBHOOK_TARGET_REJECTED,
+          refusalClass: refusal.refusalClass,
+          hostFamily: refusal.hostFamily,
+          webhookId: wh.id,
+          deliveryId: delivery.id,
+          event: delivery.event,
+        })
+      }
+      return
+    }
+
     const bodyStr = JSON.stringify(delivery.payload)
     const timestamp = new Date().toISOString()
 
@@ -396,9 +514,25 @@ export class WebhookService {
         headers,
         body: bodyStr,
         signal: controller.signal,
+        // F-3: do NOT let the platform follow. The gate above judged exactly ONE url; `fetch`'s default
+        // `redirect: 'follow'` would replay this method, this body, and the signature headers at a
+        // `Location` chosen by whoever answers the first hop - a target the gate never saw. `manual`
+        // resolves with the 3xx itself and issues no second request. Same posture as the button route
+        // (`webhook-pinned-fetch.ts` uses `https.request`, which does not follow) and the rule-driven
+        // path (automation-executor.ts:4249).
+        redirect: 'manual',
       })
 
       clearTimeout(timer)
+
+      if (isRefusedRedirectStatus(response)) {
+        // Checked BEFORE the body is read, so nothing from the redirect response - `Location` above all
+        // - is read, logged or persisted. TERMINAL, unlike the target refusal above: a retry would
+        // re-send the same body to the same first hop, which answers 3xx again; that is real repeated
+        // egress with no chance of success, so it is reported as the refusal it is.
+        await this.handleRefusedRedirect(delivery, wh, response.status)
+        return
+      }
 
       delivery.httpStatus = response.status
       try {
@@ -432,11 +566,91 @@ export class WebhookService {
         await this.handleDeliveryFailure(delivery, wh)
       }
     } catch (err) {
-      logger.error(
-        `Webhook delivery error for ${wh.id}: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      // VALUES-FREE, CLOSED FAILURE CLASS. This line used to be
+      // `Webhook delivery error for ${wh.id}: ${err.message}` - free text straight from the transport,
+      // and on this runtime the transport's own text CAN BE the credential: a subscription whose url
+      // carries userinfo makes the native client throw, at request CONSTRUCTION,
+      //   `TypeError: Request cannot be constructed from a URL that includes credentials: https://u:<pw>@h/x`
+      // i.e. the message IS the whole url, password and query token included. `createWebhook` accepts
+      // such a url (it only checks that `new URL()` parses), so this was reachable from the public
+      // route, and the log had no redaction on it at all - not even the shared redactor, which has no
+      // generic userinfo rule anyway (`automation-log-redact.ts:30-61`). So no free text goes into this
+      // line: host SHAPE + a closed-set class + identifiers, the same discipline as the refusal line.
+      //
+      // `classifyWebhookFailure` gets the RAW error, never its message - it reads only `name`/`code`/
+      // `cause.*`, which is what makes "a value cannot reach the label" true by construction.
+      //
+      // SCOPE, stated exactly: the level drops from `error` to `warn` because `Logger.error(msg, err)`
+      // has no structured-meta parameter (core/logger.ts:112) and folds `err.message` into the record
+      // itself - the very thing being removed. Nothing else about the failure path changes.
+      const failureClass = classifyWebhookFailure({ kind: 'error', error: err })
+      logger.warn('[webhook.delivery.failed]', {
+        failureClass,
+        hostFamily: webhookHostFamily(wh.url),
+        webhookId: wh.id,
+        deliveryId: delivery.id,
+        attempts: delivery.attemptCount,
+      })
+      // PERSISTENCE FACE: the transport's free text is not stored either (there is no `last_error`
+      // column on this table and this change does not add one). What the operator reads in the delivery
+      // row is the closed-set class - strictly more than before, where a transport failure left
+      // `response_body` holding a STALE body from an earlier attempt and `http_status` a stale status.
+      delivery.httpStatus = undefined
+      delivery.responseBody = `${DELIVERY_FAILURE_MARKER}:${failureClass}`
       await this.handleDeliveryFailure(delivery, wh)
     }
+  }
+
+  /**
+   * The first hop answered 3xx while we asked for `redirect: 'manual'`, so nothing followed it.
+   *
+   * Terminal by design: `status = 'failed'`, no backoff row, `next_retry_at` cleared - so a row this
+   * method actually WROTE is not re-claimed by the retry tick, which only claims `pending` rows.
+   * QUALIFIED, not absolute: this call site is INSIDE the `try` at `:508`, so if the terminal UPDATE
+   * below itself throws (a DB blip), that throw is caught by the generic catch, classified like any
+   * other failure, and `handleDeliveryFailure` writes `status='pending'` + a backoff instead - the row
+   * IS re-picked and the same body re-sent to the same first hop, bounded by `max_retries`. Containment
+   * is unaffected either way (every re-attempt re-enters the SSRF gate, and the first hop is the URL the
+   * gate already judged); what is wrong in that case is the LABEL (`transport-error` for a DB fault).
+   * Moving the redirect decision out of the `try` is registered as FS-8 in the design doc, not done here.
+   * The webhook's `failure_count` is NOT
+   * touched - auto-disable is the flap counter for a receiver that cannot be reached, and this receiver
+   * answered; a subscription that permanently redirects therefore stays active and produces one refused
+   * delivery per event until an operator fixes the url (registered as a follow-up in the design doc).
+   *
+   * The `Location` is never read, logged or followed: it is the one input the gate never judged.
+   */
+  private async handleRefusedRedirect(
+    delivery: WebhookDelivery,
+    wh: Webhook,
+    status: number,
+  ): Promise<void> {
+    const httpStatus = typeof status === 'number' && Number.isFinite(status) ? status : undefined
+    logger.warn('[webhook.delivery.refused]', {
+      code: WEBHOOK_TARGET_REJECTED,
+      refusalClass: REDIRECT_NOT_ALLOWED,
+      hostFamily: webhookHostFamily(wh.url),
+      webhookId: wh.id,
+      deliveryId: delivery.id,
+      event: delivery.event,
+      // The STATUS is a response shape, not a value - it is what tells the operator this was a redirect.
+      httpStatus,
+    })
+    delivery.status = 'failed'
+    delivery.httpStatus = httpStatus
+    delivery.responseBody = `${WEBHOOK_TARGET_REJECTED}:${REDIRECT_NOT_ALLOWED}`
+
+    await this.db
+      .updateTable('multitable_webhook_deliveries')
+      .set({
+        status: 'failed',
+        attempt_count: delivery.attemptCount,
+        http_status: delivery.httpStatus ?? null,
+        response_body: delivery.responseBody,
+        next_retry_at: null,
+      })
+      .where('id', '=', delivery.id)
+      .execute()
   }
 
   /**
