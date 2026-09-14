@@ -6385,22 +6385,25 @@ function requireStockPreparationAudit() {
         // never the live binding, which may have been re-pointed since the expansion was sealed).
         // `undefined` => the frozen-template bands, i.e. byte-identical to the pre-wiring plan.
         //
-        // WHAT IT COSTS ON A DEPLOYMENT WITH NO PRODUCTION POLICY — the DEFAULT deployment, and the
-        // half the production-bound note further down does not cover. A pack's `ext_` plm_system
-        // column now joins the COMPARED band while this family still supplies no `extFieldMapping`,
-        // so the expansion rows carry no `ext_` cell and an existing value compared against an
-        // absent one reads as CHANGED. With no bound configured nothing refuses that: every row
-        // that already holds an `ext_` value flips from SKIP to a REAL patchRecord on EVERY
-        // refresh, and that patch stamps `lastPlmRefreshDecision: 'update'` plus a
-        // `lastPlmConflictSummary` naming the `ext_` column as the reason — a reason the patch does
-        // NOT honour, because `pickFields` leaves that very column out of it. Both stamps are
-        // plm_system DISPLAY columns with no downstream consumer, so the price is write volume
-        // (order of magnitude: rows-carrying-an-`ext_`-value x ~47ms of server wall-clock per row,
-        // measured in the W8-4 note in stock-preparation-apply-writer.cjs) plus a refresh record
-        // that overstates what was written — never a lost cell. It lasts until an `extFieldMapping`
-        // reaches this path or `changedFields` is narrowed to cells the incoming row actually
-        // defines (the SHARED planner, a separate decision). Pinned by `the default deployment pays
-        // in writes and in an unhonoured refresh reason` in
+        // WHAT IT COST BEFORE X6, AND WHY THAT COST IS GONE. Until #5686 (`caf8128ad`) this note
+        // disclosed a real price in two halves: a pack's `ext_` plm_system column joins the
+        // COMPARED band while this family still supplies no `extFieldMapping`, so the expansion
+        // rows carry no such cell, and `changedFields` read an existing value against an ABSENT
+        // incoming one as CHANGED. (a) On a deployment with a production policy the resulting
+        // add+update count could push a one-row refresh past `maxCleanRows` and 403 it every round.
+        // (b) On the DEFAULT deployment nothing refused it: every row already holding an `ext_`
+        // value flipped from SKIP to a REAL patchRecord on every refresh, stamped
+        // `lastPlmRefreshDecision: 'update'` and a `lastPlmConflictSummary` naming the `ext_`
+        // column — a reason `pickFields` had left out of that very patch.
+        //
+        // X6 narrowed `changedFields` to cells the incoming row actually DEFINES
+        // (`intakeProvidesField`, stock-preparation-conflict-planner.cjs), which is the same
+        // predicate `pickFields` projects on. An absent incoming cell is no longer a change, so
+        // BOTH (a) and (b) are eliminated at the root, for the small-BOM path as well as this one.
+        // What remains on this path is the band itself: the human wall enforced BY NAME at write
+        // time, and the planner-derived pack columns (F1c) reaching `pickFields` at all. Pinned by
+        // `the default deployment only rewrites rows the intake really changed` and `the production
+        // clean-row bound is not moved by the pack-aware band` in
         // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs.
         installedFieldProperties: await resolveInstalledFieldProperties(req, action),
       })
@@ -6495,24 +6498,22 @@ function requireStockPreparationAudit() {
       // chunked runs, so checking it on each chunk consistently rejects an over-bound run before any write.
       //
       // WHAT THE PACK-AWARE BAND DOES TO THIS NUMBER — disclosed here because this is where it is
-      // consumed. Since the plan route resolves `installedFieldProperties`, a customer pack's `ext_`
-      // plm_system columns are COMPARED by the planner, and this family still supplies no
-      // `extFieldMapping`, so its expansion rows carry no `ext_` key at all. An existing `ext_` value
-      // against an absent incoming one reads as CHANGED (`changedFields` compares cells, and an
-      // absent cell is not an equal cell), so a row that was SKIPped before the band became reachable
-      // is now an UPDATE and is counted below. On a deployment whose owner configured a production
-      // policy this can push a refresh past `maxCleanRows` and 403 it — every round, not
-      // occasionally, for as long as the mapping is missing. WHERE THIS BOUND EXISTS the direction is
-      // the safe one: the refusal is fail-closed and lands BEFORE any write, so an over-count costs a
-      // refresh and never a row (the patch omits the `ext_` id either way — see the notice above
-      // `computeDryRun`'s caller). That safety is about the REFUSAL, not about the flip: on the
-      // DEFAULT deployment (no production policy at all) nothing refuses, and the same flip is paid
-      // in real writes and in an overstated refresh record instead — disclosed at the plan route
-      // above, where the band enters. Fixing it at the root means narrowing `changedFields` to cells
-      // the incoming row actually defines, which changes the SHARED planner the small-BOM path runs
-      // on and is a separate decision, not a drive-by here. Pinned by `the widened band is counted by the
-      // production clean-row bound` in
-      // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs.
+      // consumed. The answer since #5686 (`caf8128ad`) is NOTHING. Before it, the plan route's
+      // `installedFieldProperties` put a customer pack's `ext_` plm_system columns into the COMPARED
+      // band while this family supplied (and still supplies) no `extFieldMapping`, so its expansion
+      // rows carried no `ext_` key and an existing value against an absent incoming one read as
+      // CHANGED: a row that used to be SKIPped became an UPDATE and was counted here, which on a
+      // deployment with a configured production policy could push a refresh past `maxCleanRows` and
+      // 403 it every round. X6 narrowed `changedFields` to cells the incoming row actually DEFINES
+      // (`intakeProvidesField`), which is `pickFields`'s own predicate, so that flip no longer
+      // happens and this count is the same with the band as without it.
+      //
+      // THE BOUND ITSELF IS UNCHANGED and still bites on a genuine delta: the refusal is fail-closed
+      // and lands BEFORE any write, so an over-bound refresh costs a refresh and never a row. Both
+      // halves are pinned by `the production clean-row bound is not moved by the pack-aware band` in
+      // __tests__/stock-preparation-large-bom-installed-fields-wiring.test.cjs — one arm for band ==
+      // no band, one arm for two genuinely changed rows against a one-row window still taking the
+      // 403, so a green here can never mean the gate went dormant.
       const planDecisions = (pendingJob && pendingJob.plan && Array.isArray(pendingJob.plan.decisions)) ? pendingJob.plan.decisions : []
       const largeBomCleanRowCount = planDecisions.filter((d) => d && (d.decision === 'add' || d.decision === 'update')).length
       assertProductionCleanRowsWithinBound(applyGate, largeBomCleanRowCount)
