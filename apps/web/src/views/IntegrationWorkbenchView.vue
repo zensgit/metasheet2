@@ -213,6 +213,8 @@
       :mapping-detail="mappingDetail"
       :add-mapping="addMapping"
       :remove-mapping="removeMapping"
+      :add-transform-step="addTransformStep"
+      :remove-transform-step="removeTransformStep"
     />
 
     <section id="int-sec-run-push" class="integration-workbench__panel">
@@ -528,6 +530,15 @@ import IntegrationWorkbenchRail, {
 import IntegrationMonitoringSection from '../components/integration/IntegrationMonitoringSection.vue'
 import IntegrationCleaningDatasetSection from '../components/integration/IntegrationCleaningDatasetSection.vue'
 import IntegrationMappingRulesSection from '../components/integration/IntegrationMappingRulesSection.vue'
+// G27: the cleaning-rules payload shapes (transform steps/chains, validation rules, the
+// mapping-level default) live in a plain module so a unit test can assert the exact bytes and
+// compare the UI's transform list against the engine's SUPPORTED_TRANSFORMS.
+import {
+  TRANSFORM_OPTIONS,
+  buildFieldMappingPayload,
+  createEditableMapping,
+  createTransformStep,
+} from '../components/integration/integrationMappingTransform'
 import IntegrationObjectTemplateSection from '../components/integration/IntegrationObjectTemplateSection.vue'
 import IntegrationPayloadPreviewSection from '../components/integration/IntegrationPayloadPreviewSection.vue'
 import IntegrationConnectionSection from '../components/integration/IntegrationConnectionSection.vue'
@@ -540,9 +551,27 @@ import IntegrationTableActionsPanel from '../components/integration/IntegrationT
 import IntegrationFieldOptionSyncPanel from '../components/integration/IntegrationFieldOptionSyncPanel.vue'
 
 type WorkbenchSide = 'source' | 'target'
-type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
+// G27: the full engine whitelist (transform-engine.cjs:10-19). Kept in lockstep with
+// components/integration/integrationWorkbenchSectionTypes.ts (structural prop-type check) and
+// with the engine itself (tests/integrationMappingTransformParity.spec.ts).
+type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'toDate' | 'defaultValue' | 'concat' | 'dictMap'
 type ExportFormat = 'csv' | 'xlsx'
 type WatermarkType = 'updated_at' | 'monotonic_id'
+type MappingDateFormat = 'iso' | 'date'
+
+interface MappingTransformArgs {
+  dateFormat: MappingDateFormat
+  defaultValueText: string
+  concatFields: string[]
+  concatSeparator: string
+}
+
+interface MappingTransformStep {
+  id: string
+  fn: TransformFn
+  dictMapText: string
+  args: MappingTransformArgs
+}
 
 interface EditableMapping {
   id: string
@@ -550,9 +579,16 @@ interface EditableMapping {
   targetField: string
   transformFn: TransformFn
   dictMapText: string
+  transformArgs: MappingTransformArgs
+  extraSteps: MappingTransformStep[]
   required: boolean
   minValueText: string
   maxValueText: string
+  patternText: string
+  enumText: string
+  defaultValueText: string
+  // Editor-only: what a loaded payload carried but this editor cannot represent. Never sent.
+  loadWarnings?: string[]
 }
 
 interface SourceFieldOption {
@@ -802,14 +838,9 @@ const recommendedStagingSourceByTarget: Record<string, string> = {
   bom: 'bom_cleanse',
 }
 
-const transformOptions: Array<{ value: TransformFn, label: string }> = [
-  { value: '', label: '无转换' },
-  { value: 'trim', label: 'trim 去空格' },
-  { value: 'upper', label: 'upper 转大写' },
-  { value: 'lower', label: 'lower 转小写' },
-  { value: 'toNumber', label: 'toNumber 转数字' },
-  { value: 'dictMap', label: 'dictMap 字典映射' },
-]
+// G27: single source of the transform list (module const), so the select, the payload builder and
+// the engine-parity tripwire can never disagree about which transforms the UI offers.
+const transformOptions: Array<{ value: TransformFn, label: string }> = TRANSFORM_OPTIONS
 
 const defaultScope = getDefaultIntegrationScope()
 const scope = reactive({
@@ -3210,97 +3241,42 @@ function guessSourceField(targetField: string): string {
 
 function seedMappingsFromTargetSchema(fields: IntegrationObjectSchemaField[]): void {
   if (mappings.value.length > 0 || fields.length === 0) return
-  mappings.value = fields.slice(0, 8).map((field, index) => ({
+  mappings.value = fields.slice(0, 8).map((field, index) => createEditableMapping({
     id: `mapping_${index}_${field.name}`,
     sourceField: guessSourceField(field.name),
     targetField: field.name,
     transformFn: field.type === 'number' ? 'toNumber' : 'trim',
-    dictMapText: '',
     required: field.required === true,
-    minValueText: '',
-    maxValueText: '',
   }))
 }
 
 function addMapping(): void {
-  mappings.value.push({
+  mappings.value.push(createEditableMapping({
     id: `mapping_${Date.now()}_${mappings.value.length}`,
-    sourceField: '',
-    targetField: '',
-    transformFn: '',
-    dictMapText: '',
-    required: false,
-    minValueText: '',
-    maxValueText: '',
-  })
+  }))
 }
 
 function removeMapping(index: number): void {
   mappings.value.splice(index, 1)
 }
 
-function parseDictionaryMap(text: string): Record<string, string> {
-  const trimmed = text.trim()
-  if (!trimmed) throw new Error('dictMap 字典映射不能为空')
-  if (trimmed.startsWith('{')) {
-    const parsed = JSON.parse(trimmed) as unknown
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('dictMap JSON 必须是对象')
-    }
-    return Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, String(value)]))
-  }
-  const entries = trimmed.split(/\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-    const separatorIndex = line.indexOf('=')
-    if (separatorIndex <= 0) throw new Error('dictMap 每行必须使用 source=target 格式')
-    const key = line.slice(0, separatorIndex).trim()
-    const value = line.slice(separatorIndex + 1).trim()
-    if (!key || !value) throw new Error('dictMap 每行必须同时包含 source 和 target')
-    return [key, value] as const
-  })
-  return Object.fromEntries(entries)
+// G27 transform chain: steps 2..n. A fresh step starts empty ('' = ignored by the builder), so
+// clicking "再加一步" never changes the payload until the operator picks a transform.
+function addTransformStep(mapping: EditableMapping): void {
+  mapping.extraSteps.push(createTransformStep(`${mapping.id}:step_${Date.now()}_${mapping.extraSteps.length}`))
 }
 
-function parseTransform(mapping: EditableMapping): unknown {
-  if (!mapping.transformFn) return undefined
-  if (mapping.transformFn === 'dictMap') {
-    return {
-      fn: 'dictMap',
-      map: parseDictionaryMap(mapping.dictMapText),
-    }
-  }
-  return { fn: mapping.transformFn }
+function removeTransformStep(mapping: EditableMapping, stepIndex: number): void {
+  mapping.extraSteps.splice(stepIndex, 1)
 }
 
-function parseOptionalNumber(value: string, label: string): number | undefined {
-  const trimmed = value.trim()
-  if (!trimmed) return undefined
-  const numeric = Number(trimmed)
-  if (!Number.isFinite(numeric)) throw new Error(`${label} 必须是数字`)
-  return numeric
-}
-
-function buildValidationRules(mapping: EditableMapping): Array<Record<string, unknown>> | undefined {
-  const validation: Array<Record<string, unknown>> = []
-  if (mapping.required) validation.push({ type: 'required' })
-  const min = parseOptionalNumber(mapping.minValueText, 'min')
-  const max = parseOptionalNumber(mapping.maxValueText, 'max')
-  if (min !== undefined) validation.push({ type: 'min', value: min })
-  if (max !== undefined) validation.push({ type: 'max', value: max })
-  return validation.length > 0 ? validation : undefined
-}
-
+// G27: parseDictionaryMap / parseOptionalNumber / parseTransform / buildValidationRules moved
+// into components/integration/integrationMappingTransform.ts (same messages, same shapes, plus
+// the newly reachable transforms and rules). buildMappings keeps its name and its filter.
 function buildMappings(): IntegrationFieldMapping[] {
   return mappings.value
     .filter((mapping) => mapping.sourceField.trim() && mapping.targetField.trim())
-    .map((mapping, index) => {
-      return {
-        sourceField: mapping.sourceField.trim(),
-        targetField: mapping.targetField.trim(),
-        transform: parseTransform(mapping),
-        validation: buildValidationRules(mapping),
-        sortOrder: index,
-      }
-    })
+    .map((mapping, index) => buildFieldMappingPayload(mapping, index))
 }
 
 function parseList(value: string): string[] {
@@ -3348,8 +3324,13 @@ function mappingSummary(mapping: EditableMapping, index: number): string {
 
 function mappingDetail(mapping: EditableMapping): string {
   const parts = [transformLabel(mapping.transformFn)]
+  const chainedSteps = (mapping.extraSteps || []).filter((step) => step.fn !== '')
+  if (chainedSteps.length > 0) parts.push(`转换链 ${chainedSteps.length + (mapping.transformFn ? 1 : 0)} 步`)
   if (mapping.required) parts.push('必填')
   if (mapping.minValueText.trim() || mapping.maxValueText.trim()) parts.push('数值范围')
+  if ((mapping.patternText || '').trim()) parts.push('正则')
+  if ((mapping.enumText || '').trim()) parts.push('枚举')
+  if ((mapping.defaultValueText || '').trim()) parts.push('默认值')
   if (mapping.transformFn === 'dictMap') parts.push('字典映射')
   return parts.join(' · ')
 }
