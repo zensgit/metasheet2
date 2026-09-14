@@ -89,6 +89,7 @@ import {
   patchObjectFieldProperty as patchProvisionedObjectFieldProperty,
   getObjectField as getProvisionedObjectField,
   findObjectView as findProvisionedObjectView,
+  ensureSystemBase as ensureMultitableSystemBase,
   runObjectFieldsRepairTransactionWith,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
@@ -1010,6 +1011,24 @@ export class MetaSheetServer {
               }
             }
             return getProvisionedObjectField({ query: readQuery, projectId, objectId, fieldId })
+          },
+          // B3: plugin-owned system base. Runs in ONE transaction (insert + fail-closed re-read);
+          // the prefix rule is applied by the plugin-scope wrapper in front of this, and every
+          // refusal propagates unwrapped (connection-pool rethrows) so the plugin route sees
+          // `.status` / `.code` on the original error.
+          ensureSystemBase: async ({ baseId, name }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return ensureMultitableSystemBase({ query: txQuery, baseId, name })
+            })
           },
         },
         records: {

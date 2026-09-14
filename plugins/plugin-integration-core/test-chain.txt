@@ -72,6 +72,7 @@ node __tests__/stock-preparation-large-bom-jobs.test.cjs
 node __tests__/stock-preparation-conflict-planner.test.cjs
 node __tests__/stock-preparation-conflict-policies.test.cjs
 node __tests__/stock-preparation-confirmation-decisions.test.cjs
+node __tests__/stock-preparation-own-base.test.cjs
 node __tests__/stock-preparation-permission-matrix.test.cjs
 node __tests__/stock-preparation-prep-line-export.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs

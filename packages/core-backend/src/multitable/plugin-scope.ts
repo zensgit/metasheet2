@@ -108,6 +108,16 @@ export class MultitableSheetScopeError extends Error {
   }
 }
 
+// B3: same shape as the projectId namespace refusal, for a system-base id outside the plugin's prefix.
+export class MultitableBaseScopeError extends Error {
+  code = 'MULTITABLE_BASE_SCOPE_FORBIDDEN'
+
+  constructor(pluginName: string, baseId: string) {
+    super(`Plugin ${pluginName} cannot access multitable baseId ${baseId}`)
+    this.name = 'MultitableBaseScopeError'
+  }
+}
+
 export function getPluginProjectNamespaces(pluginName: string): string[] {
   const raw = typeof pluginName === 'string' ? pluginName.trim() : ''
   if (!raw) return []
@@ -129,6 +139,55 @@ export function assertProjectIdAllowedForPlugin(pluginName: string, projectId: s
   if (!suffix || !allowedNamespaces.includes(suffix)) {
     throw new MultitableProjectNamespaceError(pluginName, projectId)
   }
+}
+
+/**
+ * B3 — the plugin system-base PREFIX RULE. Computed directly from the plugin name, with NO
+ * sanitising: the slug is the name minus a leading `plugin-`, and it must match
+ * `PLUGIN_BASE_SLUG_PATTERN` exactly or the plugin has no system-base surface at all (null) —
+ * never a trimmed or lower-cased one. Because the slug cannot contain `_`, the prefix ends at
+ * the first `_` after `base_`, which makes the rule injective on its accepted domain:
+ * `base_integration_x` does not start with `base_integration-core_`, and `base_a_...` is not
+ * under `base_a-b_`. `attendance` and `plugin-attendance` share `base_attendance_` by design —
+ * exactly the aliasing `getPluginProjectNamespaces` already applies to projectId namespaces.
+ */
+export const PLUGIN_BASE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
+
+export function getPluginBaseSlug(pluginName: string): string | null {
+  const raw = typeof pluginName === 'string' ? pluginName.trim() : ''
+  const slug = raw.startsWith('plugin-') ? raw.slice('plugin-'.length) : raw
+  return PLUGIN_BASE_SLUG_PATTERN.test(slug) ? slug : null
+}
+
+export function getPluginBaseIdPrefix(pluginName: string): string | null {
+  const slug = getPluginBaseSlug(pluginName)
+  return slug ? `base_${slug}_` : null
+}
+
+/** Pure string rule, no I/O: a system-base id must sit strictly under the plugin's own prefix. */
+export function assertBaseIdAllowedForPlugin(pluginName: string, baseId: string): void {
+  const prefix = getPluginBaseIdPrefix(pluginName)
+  if (!prefix) {
+    throw new MultitableBaseScopeError(pluginName, String(baseId))
+  }
+  if (typeof baseId !== 'string' || baseId.trim().length === 0) {
+    throw new MultitableBaseScopeError(pluginName, String(baseId))
+  }
+  if (!baseId.startsWith(prefix) || baseId.length === prefix.length) {
+    throw new MultitableBaseScopeError(pluginName, baseId)
+  }
+}
+
+/**
+ * B3 — the RESERVATION half of the same rule, for the user-facing `POST /bases` route: does this
+ * caller-chosen id look like a plugin system-base id (`base_<slug>_<rest>`)? Server-minted ids
+ * (`base_<uuid>`, no second `_`) and `base_legacy` never match; `base_attendance_catalog` and
+ * `base_integration-core_sp_...` do. One rule, two enforcement points, no shared mutable state.
+ */
+export const PLUGIN_SYSTEM_BASE_ID_PATTERN = /^base_[a-z0-9][a-z0-9-]*_[A-Za-z0-9_-]+$/
+
+export function isPluginSystemBaseIdCandidate(baseId: string): boolean {
+  return typeof baseId === 'string' && PLUGIN_SYSTEM_BASE_ID_PATTERN.test(baseId)
 }
 
 export async function claimPluginObjectScope(
@@ -400,6 +459,21 @@ export function createPluginScopedMultitableApi(
           return fn(scoped)
         })
       },
+      // B3: exposed iff the host exposes it (the `ensureObjectDefaultView` / `findObjectView`
+      // optional-capability idiom), so a plugin's feature detection stays truthful. The wrapper
+      // adds exactly one thing — the prefix assertion — and delegates. Read defensively at build
+      // time for the same reason `supportsFilterValueLists` below is. The baseId is read ONCE and
+      // the checked value is what the delegate receives: forwarding `input` itself would let a
+      // getter hand the prefix check one id and the host another (refuter r2 minor).
+      ...(typeof multitable.provisioning?.ensureSystemBase === 'function'
+        ? {
+            ensureSystemBase: async (input: { baseId: string; name: string }) => {
+              const baseId = input.baseId
+              assertBaseIdAllowedForPlugin(pluginName, baseId)
+              return multitable.provisioning.ensureSystemBase!({ baseId, name: input.name })
+            },
+          }
+        : {}),
       ensureObject: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         if (hooks.ensureObjectInScope) {
