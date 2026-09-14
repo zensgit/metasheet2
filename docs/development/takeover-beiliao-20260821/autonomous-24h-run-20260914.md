@@ -23,8 +23,9 @@
 | P5 | 前端「服务暂时不可用」区分网络不通/服务端错误 | opus | impl `4c85a5c8`(统一到 `utils/networkErrors.ts` 的 hasHttpResponse 判据;两处产生点收敛)→ 反驳 BLOCK(helper spec 不在任何 CI 车道)→ fix `b96a8f0a`(接进 run-required-web-tests.sh + CI 接线用例)→ 复驳 PASS → **PR #5712 已开、不合**:它推翻了既有 F4-B「两层同文案」裁决,等 owner 决定 |
 | P6 | 审计写失败 warn→error+计数(观测性) | opus | `5f0c228b`(单参数 error 调用堵住驱动原文回显;去 resourceId;coreMetrics 计数;非阻塞契约用例)→ 反驳 PASS → **PR #5713 CI 25/25 → 合入 `6a4f3e57b`**,进 r40 |
 | P7 | 本 MD + 72h MD 收尾合并 | 协调方 | 窗口末 |
+| P10 | 探针后续:reconcile / mvp-persist 线程用例、getObjectSheetId typeof 守卫、MVP 快照表的漂移探针(该表仍按 compute-only 解析) | opus / Fable | 派出 |
 | P8 | #5707 后续:受管字段拒绝码的中英文案(前端) | opus | `d8021751`(workbench-labels `toast.fieldManagedRefused` + `fieldDeleteErrorMessage`;挂载用例 zh/en;变异 4 红)→ **PR #5714 CI 24/24 → 合入 `acd24ca4c`**(小改动未派反驳,CI 为准),进 r40 |
-| P9 | 就绪检查盲点:五列缺失时计划任务 dry-run 仍报 ready | opus(只读)→ Fable 实现 + opus 双反驳 + Fable 终审 | 根因:dry-run/apply 完全不看 meta_fields(只查贴进来的 fieldIdMap 形状),只有 readiness/ensure 有 DB 探针;无既有行的项目走 ADD 分支看不到缺列,有既有行的项目把 componentSourceId/path 判成 lineage_mismatch(580 条 hold)。修法(规格 T):在 computeDryRun 层加能力探测探针,db 模式缺列 ⇒ 422 `TARGET_SCHEMA_INCOMPLETE` 零写零规划,老 host/scope 错误逐字节同形;impl `ee8b32b3` → 安全反驳 BLOCK(探针裁决派生表而非绑定表)→ fix `7a45fe7a`(只裁决 getObjectSheetId == target.sheetId 的绑定表)→ 复驳 PASS → 终审 FIX_FIRST 3 条全文本级(carry 会写绑定表的有范围陈述 / 大 BOM apply-run 未覆盖列入 / 222 武装条件写死)→ **PR #5719 CI 中**;非阻塞后续三条记入正文 |
+| P9 | 就绪检查盲点:五列缺失时计划任务 dry-run 仍报 ready | opus(只读)→ Fable 实现 + opus 双反驳 + Fable 终审 | 根因:dry-run/apply 完全不看 meta_fields(只查贴进来的 fieldIdMap 形状),只有 readiness/ensure 有 DB 探针;无既有行的项目走 ADD 分支看不到缺列,有既有行的项目把 componentSourceId/path 判成 lineage_mismatch(580 条 hold)。修法(规格 T):在 computeDryRun 层加能力探测探针,db 模式缺列 ⇒ 422 `TARGET_SCHEMA_INCOMPLETE` 零写零规划,老 host/scope 错误逐字节同形;impl `ee8b32b3` → 安全反驳 BLOCK(探针裁决派生表而非绑定表)→ fix `7a45fe7a`(只裁决 getObjectSheetId == target.sheetId 的绑定表)→ 复驳 PASS → 终审 FIX_FIRST 3 条全文本级(carry 会写绑定表的有范围陈述 / 大 BOM apply-run 未覆盖列入 / 222 武装条件写死)→ **PR #5719 CI 27/27 → 合入 `7e74936dc`** → r40 上 222(§4.2);非阻塞后续三条记入正文,已另派(P10) |
 
 ## 3. 替 owner 定的口径(本轮)
 
@@ -43,6 +44,7 @@
 
 - **r38**:备份 `upgrade-backup-20260914-180125`;维护门 WIRED → 后端直连 attempt 3 → nginx 200;migration 0;smoke PASS;`nav-brand-link` 标记 True。
 - **r39(`ce9da32ae`)**:备份 `upgrade-backup-20260914-184958`;维护门 WIRED → attempt 3 → nginx 200;migration 0;upgrade exit 0;smoke PASS(新 bundle `index-jb44UN8k.js`);标记:own-base 模块 / ensureSystemBase dist / managed-field-delete-guard dist / attendance seed gate 皆 True,`ATTENDANCE_REPORT_FIELD_CATALOG_SEED` 未设(默认开);一个「http-routes 含 ensureSystemBase」标记 False 是我猜的子串(接线在 target-provisioning.cjs),改用哈希核对:222 上 `http-routes.cjs` sha256 前缀 `0ec8534b` == main 的 `runtimeFiles.pluginHttpRoutes` pin。演示 dry-run:update 0 / skip 578 / inactive 1 / manual_confirm 3(与 r38 + 五列恢复后一致)。
+- **r40(`7e74936dc` = r39 + #5713 审计 error+计数 + #5714 拒绝文案 + #5719 dry-run 字段探针,21:55 上 222)**:备份 `upgrade-backup-20260914-215546`;维护门 WIRED → attempt 3 → nginx 200;migration 0;upgrade exit 0;smoke PASS(bundle `index-DB6dBpCI.js`);标记:`assertTargetFieldsExist` / 探针用例 / audit dist / `fieldManagedRefused` 皆 True;222 上 `http-routes.cjs` sha256 前缀 `b19baab6` == main 的 `runtimeFiles.pluginHttpRoutes` pin;计划任务 dry-run(2-20231625)ready / add 211,演示 dry-run update 0 / skip 578 / inactive 1 / manual_confirm 3 —— 探针在五列齐全时通过,结果与 r39 逐字节同形。上一条「http-routes 含 ensureSystemBase」的猜测标记已从脚本删除,改为哈希核对(教训进 memory)。
 
 ## 5. 未做与原因
 
