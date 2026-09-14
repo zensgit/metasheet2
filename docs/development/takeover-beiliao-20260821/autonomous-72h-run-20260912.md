@@ -18,11 +18,11 @@
 
 | # | 项 | 难度/模型 | 状态 |
 |---|---|---|---|
-| A | X6 `changedFields` 收窄(来料缺键 ≠ 变更;#5625 推荐 ② 的前置;F1c-b 发现的空 update 根因) | 写路径 / Fable 实现 + Opus 反驳 + Fable 终审 | lib 21 行 `63af19045`;三轮反驳 + 终审 FIX_FIRST(2 条均为测试/正文);fix r3 在跑 |
-| B | #5625 重基合入(大 BOM 计划与分片 apply 补传 installedFieldProperties) | Opus | 等 A |
-| C | X5 展开器 rowErrors 截断样本确定性 top-N(X4 残留) | Opus | `916366677` → PR #5685;三轮反驳 + 终审 FIX_FIRST(2 条注释)已落实 |
+| A | X6 `changedFields` 收窄(来料缺键 ≠ 变更;#5625 推荐 ② 的前置;F1c-b 发现的空 update 根因) | 写路径 / Fable 实现 + Opus 反驳 + Fable 终审 | lib 21 行 `63af19045`;三轮反驳 + 终审 FIX_FIRST(2 条均为测试/正文)→ fix r3 `f00c81088`(边界二三类 + planner 用例 + 边界三 + 222 部署说明)→ **PR #5686 CI 21/21 → 合入 `caf8128ad`** |
+| B | #5625 重基合入(大 BOM 计划与分片 apply 补传 installedFieldProperties) | Opus | X6 已合,重基代理已派(改三条「翻转 update」断言 + 解 ledger 文档冲突) |
+| C | X5 展开器 rowErrors 截断样本确定性 top-N(X4 残留) | Opus | `916366677` → **PR #5685 CI 21/21 → 合入 `8d6bcc593`**;三轮反驳 + 终审 FIX_FIRST(2 条注释)已落实 |
 | D | F8A 第二刀(有损预检) | — | 视时间 / owner 决策 |
-| E | 通知中心保留期清理(env 默认关) | Opus | `eb58d8f5d` → PR #5684;反驳 5+3 → 修 → 终审 FIX_FIRST 3 条(真库 lane 接线 / 「死代码」误判更正 / 变异护栏)已落实;CI 首轮四红 = plugin-tests.yml 溯源 pin 未重算,已重钉 |
+| E | 通知中心保留期清理(env 默认关) | Opus | `eb58d8f5d` → PR #5684;反驳 5+3 → 修 → 终审 FIX_FIRST 3 条(真库 lane 接线 / 「死代码」误判更正 / 变异护栏)已落实;CI 首轮四红 = plugin-tests.yml 溯源 pin 未重算,已重钉 → **PR #5684 CI 52/53 → 合入 `0029f4094`** |
 | F | F4A 小项 + 夜间上机 r36… | Sonnet/Opus | 视时间 |
 
 ## 3. 替 owner 定的口径(本轮)
@@ -41,7 +41,7 @@
 - **#5625 重基合入(B)**:等 X6 合入;需改三条「翻转 update」用例断言并解 ledger 文档冲突。若今天时间不够,留下一窗口(后台大 BOM 链的 ext_ 列继续落不到表上;交互链不受影响)。
 - **F8A 第二刀(D)**:owner 决策(有损预检是否允许带确认的破坏性改型),未开始。
 - **F4A 小项(F)**:升级脚本已连续 6 次实跑成功,不在窗口尾动它。
-- **X6 边界三的 222 一次性核查**:合入前查 222 确认账本是否有 CONFIRMED 行(fix r3 会给出查询口径)。
+- ~~X6 边界三的 222 一次性核查~~:已查(只读 SQL):备料确认账本两张,6 行全部 pending(SOURCE_VALUE_NOT_A_STRING)、无 CONFIRMED ⇒ X6 上机不作废任何人工决定。
 - **owner 待办(沿上一轮)**:F1c-b 包列二选一、F8A 7 条、ext_spec、「测试」规则收件人、X5 配额式选择。
 
 ## 6. 教训
