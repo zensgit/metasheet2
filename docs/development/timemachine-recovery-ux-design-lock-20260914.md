@@ -75,6 +75,23 @@ provenance pin, migration, package dependency or runtime flag changes are needed
 
 ## Verification
 
+### Request Lifetimes
+
+Configuration-history list requests belong to the open dialog's captured base,
+sheet and request generation. Filtering starts a new generation; closing, changing
+scope or unmounting invalidates the old one, including a switch away and back.
+An obsolete success or error must not replace rows or finish a newer spinner.
+
+Record-history list/page, expanded detail and deep-linked pin use independent
+generations. Pages retain their original filter/cursor snapshot. A list reload
+invalidates expanded detail; collapsing, closing and unmounting invalidate pending
+detail. Changing only the deep-linked batch must not reload the list or collapse
+an unrelated expanded row. Every asynchronous success, catch and finally may
+update only its current generation. This changes presentation request ownership,
+not the permission-filtered backend or any restore write authority.
+
+### Gates
+
 - Red-first focused frontend tests, adjacent history/config/trash/navigation tests.
 - Isolated PostgreSQL tests for list authority, scoped access, pagination, restore
   fidelity and repeat/denied operations; no customer data.

@@ -184,3 +184,72 @@ Luna ran no tests or writes; the coordinator ran the gates above. No old mutatio
 result is relabeled as a new mutation run. New remote exact-head CI remains a
 separate post-push gate. This appendix is a report-only child of the merge code
 head; it grants no Ready/merge, flag, dispatch, deployment or production authority.
+
+## History Request-Lifetime Fix
+
+- Code head: `8a55e082cfda598b138f1e7bb1249c5f08f893b3`.
+- Code tree: `98efd303b723dc4ccdd1c7075a0e5f515f02f017`.
+- Parent: `947eaa44b16553aae5d10d690c3a2020125e1a48`.
+- Replayed main remains `7e74936dc5734d98f2acebfcc737120febafc530`.
+- Exact code delta: six frontend files, +499/-32. No backend, migration,
+  OpenAPI, selector, package, provenance pin or restore writer changes.
+
+The completion audit found stale configuration-list results after filter/scope
+changes and analogous history list/page/detail/pin races. Generation checks now
+cover success, catch and finally; close/unmount/scope invalidation handles an
+away-and-back scope as well. Pin-only navigation does not reload the normal list
+or collapse its expanded row. Existing record recovery relay remains unchanged.
+
+### Final Local Gates
+
+| Gate | Result |
+| --- | --- |
+| Recovery/history/config/trash neighbors | 11 files / 188 tests PASS on Node 20 |
+| Required web | All groups PASS; final group 456 files / 6740 tests; overlapping groups not summed |
+| Actual required collection | Updated workbench 26/26, history composable 16/16 and pin modal 6/6 present in required-web output |
+| Web application typecheck | `vue-tsc --noEmit -p tsconfig.app.json` PASS |
+| Six-file ESLint | Zero errors; nine multiple-component warnings in the workbench test's capture-stub pattern |
+| Browser | 1440px and 390px Chromium PASS: table confirmation/cancel/restore, deleted-record details/restore/return, config display/refusal; zero page errors or horizontal overflow |
+| Timezones | Asia/Taipei and America/New_York display assertions PASS |
+| Source boundaries | Backend, plugins, workflows and required-web script byte-identical to parent |
+| Diff | `git diff --check` PASS; all mutations restored |
+
+Red-first configuration tests: six failures. Neutralizing its request guard
+reproduced six failures; neutralizing scope invalidation reproduced two failures.
+History red-first: five failures; the initial four-family mutation produced four
+failures. Review-added stale page/detail/pin catch/finally negatives produced five
+failures when those guards were removed. Making pin-only changes reload the list
+produced one exact failure. All were restored; the final two-file restoration run
+passed 22/22. Production hashes after the last restoration:
+
+- HistoryCenterModal: `396596e09241fe1aa3857ec22d761d03aa9f0b86338d7488ae2168c9b4730b41`.
+- useHistoryCenter: `c4d95fe114587b85744f11f65e64ad602d094a52e65f6b78017b6c68c4f7e001`.
+- MultitableWorkbench: `0cddbd2302a6aeb23f439a48aa1e0f988c498ad733fce3631c62bd74dd10dd48`.
+
+Terra implemented the four history-owned files; the coordinator implemented the
+two configuration-list files. Sol high independently reviewed the frozen six-file
+production delta: zero P1/P2. Sol ran no tests. Its requested stale-rejection,
+pin-loading, list-independence and observed-close coverage was added and mutation
+verified by the coordinator. No external reviewer remained running.
+
+### Failed Attempts and Evidence Boundaries
+
+One expanded run overlapped required-web and typecheck: its unchanged
+`multitable-workbench-history-field-scope-wiring.spec.ts` timed out during its
+dynamic Workbench import, followed by a missing-chip failure (181 PASS / 2 FAIL).
+The identical 11-file command, after competing heavy tasks ended and before new
+edits, passed 183/183. With the five additional negatives it passed 188/188; the
+final required-web run also passed. No timeout was increased and no neighbor
+assertion was weakened. The failed attempt is retained, not erased as a pass.
+
+Chromium's first sandboxed launch failed at macOS Mach-port registration before
+tests. The same scoped script outside that sandbox passed. Screenshots and log
+under `/private/tmp/tm-history-race-browser-20260914*` are synthetic component
+evidence, not authenticated browser-to-DB UAT. The viewer preview runs on loopback
+only; no backend, production or customer data was accessed.
+
+The six-file fix leaves the prior 402-migration replay and 6-file/77-test real-DB
+code byte-identical; these are reused prior-checkpoint results, not a new DB run.
+Local logs use `/private/tmp/tm-history-*-20260914.log`. This report appendix is
+documentation-only relative to the code head above. Fresh published exact-head CI
+is still a separate gate; no Ready, merge, flag, dispatch or deployment is granted.
