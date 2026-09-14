@@ -217,7 +217,7 @@ function inertService(methods) {
 
 function baseServices() {
   return {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
     pipelineRunner: inertService(['runPipeline']),
@@ -617,19 +617,24 @@ function mountDryRun({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     config: { stockPreparationTableActions: [pullActionConfig()] },
   }
   const services = baseServices()
+  const sourceRow = (input = {}) => ({
+    id: PULL_SOURCE_SYSTEM_ID,
+    tenantId: input && input.tenantId,
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    config: { dataSourceId: `ds_${input && input.tenantId}`, dataSourceOwnerId: 'u_binding_owner' },
+  })
   services.externalSystemRegistry = {
-    async getExternalSystem(input = {}) {
+    // G4/M2 (#5553 §3): the PUBLIC accessor records NOTHING. `adapterTenants` counts
+    // credential-context loads only, so a call site that degraded back to this projection would
+    // leave the list empty and W-02 below would fail rather than read green off the wrong read.
+    async getExternalSystem(input = {}) { return sourceRow(input) },
+    async getExternalSystemForAdapter(input = {}) {
       // The tenant the ROUTE resolved decides which customer's PLM this is. Recorded so a guard can
       // state which tenant's source was opened, not merely which values came back.
       adapterTenants.push(input && input.tenantId)
-      return {
-        id: PULL_SOURCE_SYSTEM_ID,
-        tenantId: input && input.tenantId,
-        kind: 'data-source:sql-readonly',
-        role: 'source',
-        status: 'active',
-        config: { dataSourceId: `ds_${input && input.tenantId}`, dataSourceOwnerId: 'u_binding_owner' },
-      }
+      return sourceRow(input)
     },
     async upsertExternalSystem() { throw new Error('unexpected') },
     async deleteExternalSystem() { throw new Error('unexpected') },
