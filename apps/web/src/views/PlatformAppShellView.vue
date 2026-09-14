@@ -175,6 +175,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import {
+  isPlatformAppAccessible,
   resolvePlatformAppInstallState,
   resolvePlatformAppInstanceLabel,
   resolvePlatformAppPrimaryAction,
@@ -207,7 +208,18 @@ const router = useRouter()
 const { apps, loading, error, fetchAppById } = usePlatformApps()
 
 const appId = computed(() => String(route.params.appId || ''))
-const app = computed(() => apps.value.find((item) => item.id === appId.value) || null)
+/**
+ * Same gate as the launcher and as the server. The detail route already 404s an app this caller
+ * may not see (routes/platform-apps.ts `GET /:appId`), so `fetchAppById` yields null for it; this
+ * keeps a summary that is ALREADY in the shared list (cached from an earlier principal, or picked
+ * up via the launcher) from rendering the shell anyway. A refused app therefore shows the same
+ * "Platform app not found." state as an app that does not exist — no existence oracle here either.
+ */
+const app = computed(() => {
+  const found = apps.value.find((item) => item.id === appId.value) || null
+  if (!found) return null
+  return isPlatformAppAccessible(found) ? found : null
+})
 const visibleNavigationItems = computed(() =>
   (app.value?.navigation ?? []).filter((item) => item.location !== 'hidden'),
 )

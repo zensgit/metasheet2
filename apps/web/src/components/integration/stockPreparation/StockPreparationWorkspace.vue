@@ -188,9 +188,10 @@
       <StockPreparationProjectWorkspaceView
         v-else-if="effectiveKey === 'project-workspace'"
         :scope="scope"
+        :fill-target="workspaceFillTarget"
         @select-project="handleProjectSelect"
         @navigate-stage="handleNavigateStage"
-        @open-multitable="handleOpenMultitable"
+        @open-multitable="handleOpenFillTarget"
       />
       <StockPreparationSnapshotDiffView
         v-else-if="effectiveKey === 'bom-snapshot-diff'"
@@ -291,6 +292,8 @@ import {
 import { readStockPreparationPreflight } from '../../../services/integration/stockPreparation/installPlan'
 import { createStockPreparationInstallApi } from '../../../services/integration/stockPreparation/installRun'
 import { createStockPreparationProjectSyncApi } from '../../../services/integration/stockPreparation/projectSync'
+import { readStockPreparationOperatorHomeDirectory } from '../../../services/integration/stockPreparation/operatorHomeDirectory'
+import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
 import {
   stockPrepAdminActionPlain,
   stockPrepErrorPlain,
@@ -1048,19 +1051,51 @@ function handleNavigateStage(viewKey: string, projectNo?: string): void {
 }
 
 /**
- * 项目接入's 「到多维表看数据」. The shell owns routing, and it routes to the multitable HOME rather
- * than to the sheet the import just wrote: the sheetId is a physical handle the values-free read
- * surfaces deliberately never hand to the browser, so there is nothing here to compose a deep link
- * from — and inventing one is how a link ends up pointing at another customer's table.
+ * 项目接入's 「到多维表」 HANDLE, for the ONE tab that had none.
+ *
+ * WHAT WAS WRONG. This shell used to route that button to the multitable HOME unconditionally,
+ * because 「the sheetId is a physical handle the values-free read surfaces never hand to the
+ * browser」. That was true of the reads this tab makes, and it is no longer true of the operator
+ * directory: it returns the same tenant-gated `{ sheetId, viewId }` 项目备料页 has always returned.
+ * So the operator who just imported a BOM lands in their own 备料主表 instead of a table chooser.
+ *
+ * ONE READ PER SHELL MOUNT, AND ONLY ON THIS TAB. The handle rides `?includePullTargets=1`, whose
+ * scan the owner ruled may not be charged on every open, so it is fetched lazily when this tab is
+ * first shown and never again — through the SAME 5-second throttle 今天要处理 uses, so a shell that
+ * opened the home page a moment ago pays nothing at all here.
+ *
+ * A FAILED READ IS 「no handle」, NOT AN ERROR ON SCREEN. The buttons then behave exactly as they
+ * did before this pass: they open the multitable workbench.
  */
-function handleOpenMultitable(): void {
-  void router.push({ path: '/multitable' })
+const workspaceFillTarget = ref<StockPreparationFillTarget | null>(null)
+let workspaceFillTargetRequested = false
+
+async function loadWorkspaceFillTarget(): Promise<void> {
+  if (workspaceFillTargetRequested) return
+  workspaceFillTargetRequested = true
+  try {
+    const directory = await readStockPreparationOperatorHomeDirectory(scope)
+    const target = directory.fillTarget
+    workspaceFillTarget.value = target
+      && typeof target.sheetId === 'string' && target.sheetId.length > 0
+      && typeof target.viewId === 'string' && target.viewId.length > 0
+      ? target
+      : null
+  } catch {
+    workspaceFillTarget.value = null
+  }
 }
 
+watch(effectiveKey, (key) => {
+  if (key === 'project-workspace') void loadWorkspaceFillTarget()
+}, { immediate: true })
+
 /**
- * 项目备料页's 「到多维表填写这个项目」. Unlike `handleOpenMultitable` above, this one HAS a handle to
- * route from: the board read returns `{ sheetId, viewId }`, and only when the server has proved that
- * sheet exists.
+ * 项目备料页's 「到多维表填写这个项目」 — AND, since this pass, every other 到多维表 button on this
+ * workbench: 今天要处理's own entry and 项目工作台's panels all arrive here, because they all now have
+ * a handle to route from. The board read returns `{ sheetId, viewId }`, and only when the server has
+ * proved that sheet exists and belongs to the caller's own tenant; the operator directory returns the
+ * same object from the same gate for the surfaces that have no board read.
  *
  * WHAT THIS LINK DOES NOT CLAIM. It is not permission-checked here and cannot be: the plugin has no
  * user-aware multitable ACL seam, so it can say the sheet exists and nothing about who may open it.

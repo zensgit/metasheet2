@@ -50,7 +50,12 @@ export type RealFireTestRunEligibility =
 /**
  * #4196 §6 real-fire admission. Every action is inspected, including branch children. Later action
  * families that are absent from #4196 (currently FWB) remain fail-closed until their own lock admits
- * test-run dispatch; non-durable send_notification is explicitly forbidden by Q-A.
+ * test-run dispatch. send_notification is DURABLE since F9b (the rule path writes
+ * `meta_record_subscription_notifications` rows), but the RULE path has NO dedup ledger - the
+ * button's `multitable_button_run_dedup` is deliberately NOT borrowed - so every real-fire test run
+ * would write a fresh set of notification rows to real people. It stays TEST_RUN_ACTION_UNSUPPORTED
+ * until a rule-side dedup ledger exists; the verdict below is unchanged, only its reason is restated
+ * (the old wording said 'non-durable', which since F9b would argue for ADMITTING it).
  */
 export function realFireTestRunEligibility(
   actions: ReadonlyArray<{ type: string; config?: unknown }> | undefined,

@@ -144,7 +144,12 @@ function toComparableString(value: unknown): string | null {
   return null
 }
 
-function isEmptyValue(value: unknown): boolean {
+// Record inspector v3 (2026-09-05, PR-B1 §1.3 "Hide empty" / §2 graft table): EXPORTED so this stays
+// the single emptiness definition. Consumers besides this file's own is_empty/is_not_empty operators:
+// field-display.ts's empty-glyph branch (`formatFieldDisplay` returns '—' iff this returns true) and
+// MetaRecordFieldsPanel.vue's hide-empty filter — glyph and filter share ONE predicate by
+// construction, so a field that renders '—' is exactly a field hide-empty hides (no second predicate).
+export function isEmptyValue(value: unknown): boolean {
   if (value === undefined || value === null) return true
   if (typeof value === 'string') return value.trim() === ''
   if (Array.isArray(value)) return value.length === 0

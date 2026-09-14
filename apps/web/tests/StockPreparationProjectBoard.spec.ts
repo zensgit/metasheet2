@@ -116,7 +116,7 @@ function boardPayload(overrides: Record<string, unknown> = {}): Record<string, u
   }
 }
 
-function directoryPayload(): Record<string, unknown> {
+function directoryPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     tenantId: SCOPE.tenantId,
     directoryReady: true,
@@ -135,6 +135,10 @@ function directoryPayload(): Record<string, unknown> {
       readyLineCount: 47,
       pendingDecisionCount: 0,
     }],
+    // U2's union opt-in is what 今天要处理 sends, and this is the key it now brings back: the SAME
+    // `{ sheetId, viewId }` the board returns, from the same server-side tenant gate.
+    fillTarget: { sheetId: SHEET_ID, viewId: VIEW_ID },
+    ...overrides,
   }
 }
 
@@ -219,12 +223,21 @@ function notFound(code: string): Response {
 interface RouteOptions {
   board?: Response | (() => Response)
   handoff?: Response | (() => Response)
+  /** Overrides folded into the directory payload — F-01/F-02 vary `fillTarget` and nothing else. */
+  directory?: Record<string, unknown>
 }
 
 /** Route the mocked apiFetch by path so a spec can vary one endpoint without restating the others. */
 function routeApi(options: RouteOptions = {}): void {
   h.apiFetch.mockImplementation(async (path: string) => {
-    if (path.includes('/operator/projects')) return ok(directoryPayload())
+    if (path.includes('/operator/projects')) {
+      // FAITHFUL TO THE SERVER CONTRACT, and B-11 depends on it: `fillTarget` rides the U2 opt-in,
+      // so the un-opted-in read 项目备料页 makes (see the view's `loadDirectory`) carries NO handle at
+      // all. A fixture that returned it on every call would hand the workspace face a handle the real
+      // server never sends there, and would quietly turn B-11's null-handle case into a deep link.
+      const unioned = path.includes('includePullTargets=1')
+      return ok(directoryPayload(unioned ? options.directory : { ...options.directory, fillTarget: undefined }))
+    }
     if (path.includes('/board')) {
       const answer = options.board ?? ok(boardPayload())
       return typeof answer === 'function' ? answer() : answer
@@ -1023,6 +1036,45 @@ describe('项目备料页 — the operator project board', () => {
     expect(routerPush).toHaveBeenCalledWith({ path: `/multitable/${SHEET_ID}/${VIEW_ID}` })
   })
 
+  // ---- F: 「打开关联的备料多维表」 FROM THE LANDING PAGE ----------------------------------------
+  //
+  // THE GAP THIS CLOSES. B-11 above proves the handle works on 项目备料页 — a page that 404s until a
+  // project number has been typed. An operator arriving at /stock-prep sees 今天要处理 first, and
+  // until now nothing on it could reach the sheet they fill: the only 到多维表 buttons in reach
+  // opened the multitable CHOOSER. The directory read this page already makes now carries the same
+  // tenant-gated handle, so the entry lands where its label says.
+
+  it('F-01: 今天要处理 offers 打开备料多维表 and the shell deep-links it to the bound sheet', async () => {
+    routeApi({})
+    const root = mount(StockPreparationWorkspace)
+    await flush()
+    // No project is open, so this really is the home face — the board read has not even happened.
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+    const entry = root.querySelector('[data-testid="stock-prep-operator-home-open-multitable"]') as HTMLButtonElement
+    expect(entry, 'the handle came back, so the entry must be on screen').not.toBeNull()
+    expect(entry.textContent).toContain('打开备料多维表')
+    entry.click()
+    await flush()
+    expect(routerPush).toHaveBeenCalledWith({ path: `/multitable/${SHEET_ID}/${VIEW_ID}` })
+  })
+
+  it('F-02: no handle in the directory -> no entry at all, and nothing routes', async () => {
+    // `null` is the server saying 「这台系统上没有能证明属于您的备料主表」 — an entry that opened the
+    // chooser under a label promising the 备料主表 is the promise this pass exists to stop making.
+    routeApi({ directory: { fillTarget: null } })
+    const root = mount(StockPreparationWorkspace)
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home-open-multitable"]')).toBeNull()
+    expect(routerPush).not.toHaveBeenCalledWith({ path: `/multitable/${SHEET_ID}/${VIEW_ID}` })
+  })
+
+  it('F-03: an ABSENT key (older backend / no opt-in) is the same silence as null', async () => {
+    routeApi({ directory: { fillTarget: undefined } })
+    const root = mount(StockPreparationWorkspace)
+    await flush()
+    expect(root.querySelector('[data-testid="stock-prep-operator-home-open-multitable"]')).toBeNull()
+  })
   // ---- P0-2: 二级视图寄生 —— `?projectNo=` 无值渲染首页,有值走既有工作区分支 --------------------
   //
   // 设计稿 §2.3's whole point: EVERY test above this block mounts with a `projectNo`, so it always

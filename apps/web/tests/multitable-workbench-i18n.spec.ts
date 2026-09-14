@@ -52,6 +52,7 @@ const ALL_KEYS: WorkbenchLabelKey[] = [
   'toast.sheetCreateBlocked', 'toast.sheetRefreshFailed', 'toast.sheetCreateFailed',
   'toast.baseLoadFailed', 'toast.contextSyncFailed',
   'toast.externalContextBusy', 'toast.externalContextUnsaved',
+  'toast.templateCenterBlocked',
   'toast.baseCreateBlocked', 'toast.baseCreateFailed',
   'toast.importCancelled', 'toast.importFailed',
   'toast.excelExportFailed', 'toast.bulkDeleteFailed',
@@ -89,6 +90,9 @@ describe('workbench-labels static table', () => {
     expect(workbenchLabel('card.installing', false)).toBe('Installing...')
     expect(workbenchLabel('error.loadSheets', true)).toBe('加载数据表失败')
     expect(workbenchLabel('error.loadSheetMetadata', false)).toBe('Failed to load sheet metadata')
+    // F5: the toast shown when the page-leave guard blocks "More templates ->" (zh text is the
+    // user-facing wording agreed in the feedback triage; it must not drift into the .vue file).
+    expect(workbenchLabel('toast.templateCenterBlocked', true)).toBe('有未保存的更改，请先处理')
   })
 
   // W1 G-10 (2026-07-13, display layer only): Sheet = 数据表, Base = 工作区 in zh — locks the

@@ -183,6 +183,10 @@ on:
       - 'apps/web/tests/useAttendanceAdminRailNavigation.spec.ts'
       - 'apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts'
       - 'apps/web/tests/attendance-selfservice-dashboard.spec.ts'
+      - 'apps/web/tests/attendanceEmployeeMakeupRequestCard.spec.ts'
+      - 'apps/web/tests/attendanceEmployeeLeaveRequestCard.spec.ts'
+      - 'apps/web/verification/attendance-makeup-request*'
+      - 'apps/web/playwright.attendance-makeup.config.ts'
       - 'apps/web/tests/attendance-caliber-transparency.spec.ts'
       - 'apps/web/tests/attendance-punch-outcome.spec.ts'
       - 'apps/web/tests/attendance-import-override-guard.spec.ts'
@@ -306,6 +310,10 @@ jobs:
               apps/web/tests/useAttendanceAdminRailNavigation.spec.ts|\
               apps/web/tests/AttendanceRequestCenterSection.result-edit.spec.ts|\
               apps/web/tests/attendance-selfservice-dashboard.spec.ts|\
+              apps/web/tests/attendanceEmployeeMakeupRequestCard.spec.ts|\
+              apps/web/tests/attendanceEmployeeLeaveRequestCard.spec.ts|\
+              apps/web/verification/attendance-makeup-request*|\
+              apps/web/playwright.attendance-makeup.config.ts|\
               apps/web/tests/attendance-caliber-transparency.spec.ts|\
               apps/web/tests/attendance-punch-outcome.spec.ts|\
               apps/web/tests/attendance-import-override-guard.spec.ts|\
@@ -437,4 +445,12 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         env:
           NODE_OPTIONS: --max-old-space-size=8192
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-date-only-format attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation useAttendanceAdminConfig attendanceOverviewRequestReveal tests/AttendanceReportFieldsSection.spec.ts attendance-web-guard-workflow.spec --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run --maxWorkers=2 --minWorkers=1 attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-date-only-format attendanceCapabilityUnavailable attendanceRequestReviewEntitlement attendanceFeatureOverride attendanceUserPickerEndpoint attendanceAdminEndpointCompatibility useAttendanceAdminProvisioning useAttendanceAdminUsers attendanceEmployeeQuickActionIcons attendanceEmployeeWorkspaceCommonIcons attendanceEmployeeWorkspacePresentation useAttendanceAdminConfig attendanceOverviewRequestReveal attendanceEmployeeMakeupRequestCard attendanceEmployeeLeaveRequestCard tests/AttendanceReportFieldsSection.spec.ts attendance-web-guard-workflow.spec --reporter=dot
+
+      - name: Install Chromium for makeup request browser regression
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm --filter @metasheet/web exec playwright install --with-deps chromium
+
+      - name: Verify makeup request in real AttendanceView at desktop and mobile sizes
+        if: steps.changes.outputs.relevant == 'true'
+        run: pnpm --filter @metasheet/web exec playwright test --config playwright.attendance-makeup.config.ts

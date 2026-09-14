@@ -326,6 +326,31 @@
       <span>{{ bi('先挂起的', 'Parked for later') }}: {{ queue.parkedCount }}</span>
     </div>
 
+    <!-- 顶部一句话 (2026-09-10 field report): when every row still waiting on a human is a kind this
+         page cannot decide, the per-row hints below are each individually true but the page as a
+         whole never SAID that — an operator had to open every row to learn the same fact six times.
+         values-free on purpose: names counts and points at the per-row 「什么情况」 column, never a
+         cell's content.
+
+         IT NAMES NO CAUSE (2026-09-10, second cut). The first cut said "the problem is in the source
+         data" and offered the source fix as THE way out. That is true of the coercion family and of
+         missing_component — and false of the carry family (`carry_reattach_requires_confirm` and its
+         two siblings), which is a question about OUR reattachment to a previous version, with
+         nothing in the source system to go change; its confirmation surface is the K2 carry route
+         (anonymous-hold-identity-spec-20260829.md:258), not this page. A banner covering a mixed set
+         cannot diagnose it, so this one only routes: the reasons differ, they are per-row, and the
+         source fix is offered CONDITIONALLY ("能在源系统修正的") rather than as the diagnosis. -->
+    <p
+      v-if="queue && allPendingRowsUnconfirmable"
+      class="stock-prep-confirm__hint"
+      data-testid="stock-prep-confirmation-all-unconfirmable-banner"
+    >
+      {{ bi(
+        `这 ${pendingUnconfirmableCount} 条目前都在这里确认不了,原因各不相同,请看每行「什么情况」;能在源系统修正的,修正后重新同步会自动关闭;其余请联系管理员。`,
+        `None of these ${pendingUnconfirmableCount} rows can be confirmed here right now, and the reasons differ — see "What happened" on each row. The ones a source-system fix covers close on their own after the next sync; for the rest, contact an administrator.`,
+      ) }}
+    </p>
+
     <table v-if="queue && queue.rows.length > 0" class="stock-prep-confirm__table" data-testid="stock-prep-confirmation-rows">
       <thead>
         <tr>
@@ -340,7 +365,7 @@
       <tbody>
         <tr v-for="row in queue.rows" :key="row.decisionId || ''" data-testid="stock-prep-confirmation-row">
           <td><code class="stock-prep-confirm__token">{{ row.decisionId }}</code></td>
-          <td>{{ row.conflictType }}</td>
+          <td :title="row.conflictType || undefined" data-testid="stock-prep-confirmation-conflict-type">{{ conflictTypeLabel(row.conflictType) }}</td>
           <td>
             <span>{{ decisionStatusLabel(row.status) }}</span>
             <code v-if="row.status" class="stock-prep-confirm__token">{{ row.status }}</code>
@@ -462,12 +487,17 @@
       data-testid="stock-prep-confirmation-value-entry-pane"
     >
       <h3>{{ bi('您在这一条上填过的内容', 'What you entered on this one') }}</h3>
+      <!-- 2026-09-10 field report: the raw request-body field name (`resolvedValue` etc.) used to sit
+           right next to the plain label here, and a reader who is not the person who built this page
+           read it as "the grey word is what I'm looking at" — it is not, it is the wire name. The
+           same three names are still on screen, verbatim, in 技术详情 below (「请求体字段名」), which
+           is where an implementer actually needs them; this readback keeps only the plain label. -->
       <dl>
-        <dt>{{ bi('填的值', 'The value you entered') }} <code class="stock-prep-confirm__token">resolvedValue</code></dt>
+        <dt>{{ bi('填的值', 'The value you entered') }}</dt>
         <dd data-testid="stock-prep-confirmation-value-entry-value">{{ valueEntry.valueEntry.resolvedValue }}</dd>
-        <dt>{{ bi('附带的值', 'The extra value') }} <code class="stock-prep-confirm__token">resolvedAuxValue</code></dt>
+        <dt>{{ bi('附带的值', 'The extra value') }}</dt>
         <dd data-testid="stock-prep-confirmation-value-entry-aux">{{ valueEntry.valueEntry.resolvedAuxValue }}</dd>
-        <dt>{{ bi('备注', 'Your note') }} <code class="stock-prep-confirm__token">notes</code></dt>
+        <dt>{{ bi('备注', 'Your note') }}</dt>
         <dd data-testid="stock-prep-confirmation-value-entry-notes">{{ valueEntry.valueEntry.notes }}</dd>
       </dl>
     </section>
@@ -578,6 +608,7 @@ import {
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
   type StockPreparationResolutionAction,
+  isCarryConflictType,
   isConfirmableConflictType,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import {
@@ -597,6 +628,7 @@ import {
   STOCK_PREP_QUEUE_RESYNC_ACTION_EMBEDDED,
   STOCK_PREP_RECONCILE_BUTTON_NOTE,
   STOCK_PREP_TOOLTIP_PENDING_CONFIRM,
+  stockPrepConflictTypePlain,
   stockPrepDirectoryEmptyPlain,
   stockPrepDirectoryEmptyState,
   stockPrepEnumPlain,
@@ -1241,11 +1273,74 @@ function rowUnconfirmableReason(row: StockPreparationDecisionRow): string {
       'This one cannot be settled here: the BOM line points at a part that is not in the source system\'s parts library. Add the part there (or correct its id) and the next sync closes this entry by itself.',
     )
   }
+  // THE CARRY FAMILY IS NOT A SOURCE-DATA DEFECT (2026-09-10, second cut). Splicing the source-fix
+  // remedy onto every mapped type produced sentences that contradicted their own first half:
+  // 「这一行要不要接上一版数据,需要有人确认。请到源系统修正数据后重新同步」 — the customer's source
+  // system holds nothing to correct, and the next sync leaves the row exactly where it is. A carry
+  // hold asks whether THIS new ADD row continues from an earlier version; its confirmation surface
+  // is the K2 carry route (`applyCarryViaConfirm` / `carry_via_confirm`, see
+  // docs/development/takeover-beiliao-20260821/anonymous-hold-identity-spec-20260829.md:258), which
+  // this queue does not drive. So: describe it, refuse it, route it to a human who can — and claim
+  // no cause. MUST stay ahead of the mapped branch below, which is the one that offers the fix.
+  if (isCarryConflictType(row.conflictType)) {
+    // Fail-soft exactly like every other lookup on this page: a carry type the vocabulary somehow
+    // lacks still gets the refusal, with its raw token standing in for the description.
+    const carryPlain = stockPrepConflictTypePlain(row.conflictType)
+    const carryZh = carryPlain ? carryPlain.zh : (row.conflictType || '')
+    const carryEn = carryPlain ? carryPlain.en : (row.conflictType || '')
+    return bi(
+      `这条在这一页处理不了:${carryZh}。这一类不是源数据问题,本页还没有对应的确认入口,请联系管理员。`,
+      `This one cannot be settled here: ${carryEn}. This kind is not a source-data problem — this page has no place to confirm it yet; contact an administrator.`,
+    )
+  }
+  // Any OTHER conflict type this vocabulary knows about — today exactly the per-cell coercion family
+  // (`SOURCE_VALUE_*`), the carry family having been routed above and `missing_component` having
+  // returned already — gets the same "what it means, what would work" shape as the missing_component
+  // branch; anything it does NOT know about (a genuinely future type) degrades to the conservative
+  // sentence that follows — still refused, still explained.
+  // ADDING A KEY TO `STOCK_PREP_CONFLICT_TYPE_PLAIN` MEANS CHOOSING A BRANCH HERE: landing in this
+  // one asserts a person can fix the row in the source system. `StockPreparationUnconfirmableHold`
+  // pins the vocabulary's key set for that reason — a new family turns it red until it is routed.
+  const plain = stockPrepConflictTypePlain(row.conflictType)
+  if (plain) {
+    return bi(
+      `这条在这一页处理不了:${plain.zh}。请到源系统修正数据后重新同步;确实需要人工处理请联系管理员。`,
+      `This one cannot be settled here: ${plain.en}. Fix the data in the source system and sync again; contact an administrator if it genuinely needs manual handling.`,
+    )
+  }
   return bi(
     '这一类目前还不能在这一页确认,系统会拒绝。请联系我们,或先到源系统修正数据后重新同步。',
     'This kind cannot be confirmed here yet — the server refuses it. Contact us, or fix the data in the source system and sync again.',
   )
 }
+
+/** 「什么情况」column text — the plain sentence when the vocabulary knows this conflict type, the raw
+ *  server token otherwise (EVERY LOOKUP FAILS SOFT — see plainLanguage.ts). The raw code stays on
+ *  screen either way via the cell's `title`. */
+function conflictTypeLabel(conflictType: string | null): string {
+  const plain = stockPrepConflictTypePlain(conflictType)
+  if (plain) return bi(plain.zh, plain.en)
+  return conflictType || ''
+}
+
+/**
+ * 顶部一句话 (2026-09-10). True only when there is at least one row still waiting on a human AND
+ * every one of them is a conflict type this page cannot act on — never true on an empty queue (there
+ * is nothing to say), never true while a single confirmable row remains (that row's own controls are
+ * the more useful thing on screen). Scoped to `status === 'pending'`: a `confirmed`/`superseded` row
+ * is not "waiting", whatever its conflict type, and `queue.rows` can hold all three statuses at once
+ * once the status filter above is set to "all".
+ */
+const pendingQueueRows = computed<StockPreparationDecisionRow[]>(() =>
+  (queue.value?.rows ?? []).filter((row) => row.status === 'pending' && Boolean(row.decisionId)),
+)
+/** Only meaningful while `allPendingRowsUnconfirmable` is true — every pending row counted here IS
+ *  one of the unconfirmable ones, because at that point they are the same set. */
+const pendingUnconfirmableCount = computed<number>(() => pendingQueueRows.value.length)
+const allPendingRowsUnconfirmable = computed<boolean>(() =>
+  pendingQueueRows.value.length > 0
+  && pendingQueueRows.value.every((row) => !isConfirmableConflictType(row.conflictType)),
+)
 
 function selectRow(row: StockPreparationDecisionRow): void {
   if (!isConfirmableConflictType(row.conflictType)) return

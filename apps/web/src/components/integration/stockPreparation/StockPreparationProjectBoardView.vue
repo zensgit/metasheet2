@@ -20,6 +20,7 @@
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
       @focus-quick-open="focusProjectNoInput"
+      @open-multitable="openFillTarget"
     />
 
     <!-- 线框 C ①: the way BACK. Without it `?projectNo=` is a one-way door — once an operator opens
@@ -160,6 +161,7 @@
         :api="syncApi"
         :large-bom-api="largeBomApi"
         :large-bom-poll-wait="largeBomPollWait"
+        :fill-target="composedFillTarget"
         @navigate-stage="(key: string) => emit('navigate-stage', key)"
         @open-multitable="openFillTarget"
         @synced="onSyncReportChanged"
@@ -1400,6 +1402,24 @@ function triggerExportDownload(blob: Blob, filename: string): void {
 }
 
 /**
+ * THE HANDLE THIS TAB CAN OFFER RIGHT NOW, and WHICH READ IS ALLOWED TO ANSWER.
+ *
+ * `openFillTarget` below emits exactly this, and the composed 项目接入 panel is handed it so its
+ * button can NAME the destination instead of promising a sheet the shell cannot reach. One
+ * expression, so the label and the navigation can never disagree — a button that reads
+ * 「打开备料多维表」 and lands on the workbench chooser is the failure this whole pass is about.
+ *
+ * A BOARD THAT ANSWERED WINS OUTRIGHT, null included. `fillTarget: null` on a board read is the
+ * server SAYING 「这台系统上没有能证明属于您的备料主表」, and the fallback copy under the button says
+ * exactly that; letting a directory handle override it would make the page contradict its own
+ * sentence. The directory is consulted only where NO board answered — 今天要处理 (no project is open,
+ * so that read never happens) and a project the board 404s on — where nothing has claimed anything.
+ */
+const composedFillTarget = computed(() => {
+  if (board.value) return board.value.fillTarget ?? null
+  return directory.value?.fillTarget ?? null
+})
+/**
  * The shell owns routing — this view hands it the handle the server proved exists, or `null`.
  *
  * IT NEVER DOES NOTHING. The old body returned early when there was no `fillTarget`, which made the
@@ -1410,7 +1430,14 @@ function triggerExportDownload(blob: Blob, filename: string): void {
  * workbench, which is exactly where the legacy tab's own button goes.
  */
 function openFillTarget(): void {
-  emit('open-multitable', board.value?.fillTarget ?? null)
+  // TWO SOURCES, ONE RESOLVER, and the second one is what makes the home page's button work at
+  // all. On 项目备料页 the board read supplies the handle. On 今天要处理 there IS no board read (no
+  // project is open — that read 404s by design), so the handle comes from the directory this
+  // component already fetched with `?includePullTargets=1`. Both are the SAME server-side object
+  // from the SAME tenant gate, so preferring the board's is a matter of freshness, not of trust.
+  // The workspace's own directory read is un-opted-in and carries no handle, which is exactly why
+  // this falls through to `null` there rather than inventing one.
+  emit('open-multitable', composedFillTarget.value)
 }
 
 /**

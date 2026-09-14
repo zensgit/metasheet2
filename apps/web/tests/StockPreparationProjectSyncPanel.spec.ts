@@ -218,6 +218,29 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(onOpenMultitable).toHaveBeenCalledTimes(1)
   })
 
+  // ---- 打开备料多维表: THE LABEL AND THE DESTINATION AGREE -----------------------------------
+  //
+  // The parent owns routing, and until this pass it had nowhere to route: the panel's link always
+  // said 「到多维表看数据」 and always landed on the multitable chooser. The operator directory now
+  // hands the parent the same tenant-gated `{ sheetId, viewId }` 项目备料页 returns, so the button
+  // says which of the two things it will actually do. It still composes NO route itself.
+
+  it('with a fill handle the link names the 备料主表', async () => {
+    const root = mountPanel({ api: api(), fillTarget: { sheetId: 'sheet_x', viewId: 'view_x' } })
+    await runSync(root)
+    const link = root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]') as HTMLButtonElement
+    expect(link.getAttribute('data-fill-target')).toBe('bound')
+    expect(link.textContent).toContain('打开备料多维表')
+  })
+
+  it('with NO handle it promises only the workbench — the destination the parent really has', async () => {
+    const root = mountPanel({ api: api() })
+    await runSync(root)
+    const link = root.querySelector('[data-testid="stock-prep-project-sync-open-multitable"]') as HTMLButtonElement
+    expect(link.getAttribute('data-fill-target')).toBe('none')
+    expect(link.textContent).toContain('打开多维表工作台')
+    expect(link.textContent).not.toContain('打开备料多维表')
+  })
   // ---- P-04 --------------------------------------------------------------------------------
   it('P-04: the plan counts read as a sentence, with the zero clauses dropped', async () => {
     const root = mountPanel({ api: api() })

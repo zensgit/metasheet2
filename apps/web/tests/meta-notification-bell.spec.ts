@@ -11,6 +11,11 @@ import type { MetaRecordSubscriptionNotification } from '../src/multitable/types
 function notif(id: string, readAt: string | null = null): MetaRecordSubscriptionNotification {
   return { id, sheetId: 's1', recordId: `rec_${id}`, userId: 'u1', eventType: 'record.updated', actorId: null, revisionId: null, commentId: null, message: null, createdAt: '2026-06-16T00:00:00Z', readAt }
 }
+// F9b (#5664): non-record-triggered automations (webhook.received / approval.task_created|completed /
+// schedule) deliver `send_notification` rows with `record_id = ''` — there is no record to locate.
+function notifNoRecord(id: string, readAt: string | null = null): MetaRecordSubscriptionNotification {
+  return { id, sheetId: 's1', recordId: '', userId: 'u1', eventType: 'notification.sent', actorId: null, revisionId: null, commentId: null, message: 'Webhook received', createdAt: '2026-06-16T00:00:00Z', readAt }
+}
 // B1-S1 D0-A: a durable button-delivered notification carries a custom message body.
 function notifSent(id: string, message: string): MetaRecordSubscriptionNotification {
   return { id, sheetId: 's1', recordId: `rec_${id}`, userId: 'u1', eventType: 'notification.sent', actorId: null, revisionId: null, commentId: null, message, createdAt: '2026-06-16T00:00:00Z', readAt: null }
@@ -62,6 +67,24 @@ describe('MetaNotificationBell (S1b)', () => {
     await flush()
     expect(onNavigate).toHaveBeenCalledWith({ sheetId: 's1', recordId: 'rec_a' })
     expect(m.apiClient.markRecordSubscriptionNotificationsRead).toHaveBeenCalledWith(['a'])
+  })
+
+  it('F9b (#5664): clicking a non-record notification (record_id = "") marks it read but does not emit navigate', async () => {
+    const onNavigate = vi.fn()
+    const m = mount({
+      listRecordSubscriptionNotifications: vi.fn(async () => [notifNoRecord('n1')]),
+      getRecordSubscriptionUnreadCount: vi.fn(async () => 1),
+    }, onNavigate)
+    mounted = m
+    await flush()
+    m.container.querySelector<HTMLButtonElement>('[data-test="notification-bell-btn"]')!.click()
+    await flush()
+    m.container.querySelector<HTMLElement>('[data-test="notification-item"]')!.click()
+    await flush()
+    expect(onNavigate).not.toHaveBeenCalled()
+    expect(m.apiClient.markRecordSubscriptionNotificationsRead).toHaveBeenCalledWith(['n1'])
+    // the panel still closes on click, same as a normal item
+    expect(m.container.querySelector('[data-test="notification-panel"]')).toBeNull()
   })
 
   it('mark-all-read calls the client and the panel closes the item back to read', async () => {
