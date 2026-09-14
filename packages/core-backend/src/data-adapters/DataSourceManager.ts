@@ -683,6 +683,102 @@ export class DataSourceManager extends EventEmitter {
   }
 
   /**
+   * BATCH form of countExternalSystemReferences: reference counts for MANY ids
+   * in ONE pair of grouped queries (two `GROUP BY` statements total, never one
+   * pair per id). This exists for the LISTING surface, which would otherwise be
+   * N+1; the delete guard keeps calling the singular method, whose fail-closed
+   * posture is what actually gates removal.
+   *
+   * SAME semantics as the singular method, deliberately:
+   * - canonical: rows whose connection_id equals the id;
+   * - legacy: rows with connection_id IS NULL whose config->>'dataSourceId'
+   *   equals the id AND whose server-stamped config->>'dataSourceOwnerId'
+   *   equals THAT id's owner (P2-A owner attribution — a foreign pin must not
+   *   be counted, here just as it is not counted for the delete guard).
+   *
+   * WHY the owner match is applied in TS and not in the WHERE clause: one
+   * grouped query serves many ids, and each id has its OWN owner, so the
+   * predicate is not a single constant. The query therefore groups by the
+   * (dataSourceId, dataSourceOwnerId) PAIR and this method keeps only the
+   * groups whose owner equals the scope owner of that id — arithmetically the
+   * same filter, evaluated once per group instead of once per row. Widening it
+   * to a raw dataSourceId match would re-open P2-A (a stranger's pin inflating
+   * — and, worse, appearing to justify — someone else's reference count).
+   *
+   * `ids` with no known scope get 0 without being queried, matching the
+   * singular method's "no owner scope -> nothing attributable" short-circuit.
+   *
+   * Failure posture matches the singular method: no db -> all zero; SQLSTATE
+   * 42P01 on the FIRST (canonical) query -> all zero (integration schema not
+   * installed); any other failure, and any failure of the second query,
+   * PROPAGATES. Callers that merely DISPLAY the counts must degrade to
+   * "unknown" rather than to 0 — see the listing route.
+   *
+   * Returns a Map keyed by the requested ids only (every requested id is
+   * present). Values are counts; no name, tenant, owner or config of any
+   * referencing row is returned to the caller.
+   */
+  async countExternalSystemReferencesByIds(ids: readonly string[]): Promise<Map<string, number>> {
+    const counts = new Map<string, number>()
+    for (const id of ids) counts.set(id, 0)
+    if (!this.db || counts.size === 0) return counts
+
+    // Only owner-scoped ids can be attributed; unscoped ones stay 0 unqueried.
+    const attributable = [...counts.keys()].filter((id) => this.scopes.get(id)?.ownerId !== undefined)
+    if (attributable.length === 0) return counts
+
+    try {
+      const canonicalRows = await this.db
+        .selectFrom('integration_external_systems' as never)
+        .select([
+          sql<string>`connection_id`.as('reference_id') as never,
+          sql<number>`count(*)::int`.as('count') as never,
+        ] as never)
+        .where('connection_id' as never, 'in', attributable as never)
+        .groupBy('connection_id' as never)
+        .execute() as Array<{ reference_id: string | null; count: number }>
+      for (const row of canonicalRows) {
+        const id = row.reference_id
+        // Never let a row widen the answer beyond what was asked for.
+        if (id === null || id === undefined || !counts.has(id)) continue
+        counts.set(id, (counts.get(id) ?? 0) + (row.count ?? 0))
+      }
+    } catch (err) {
+      // Mirrors the singular method: only the FIRST observation may prove the
+      // referencing layer does not exist, and only via the SQLSTATE.
+      if ((err as { code?: string } | null)?.code === UNDEFINED_TABLE_SQLSTATE) return counts
+      throw err
+    }
+
+    const legacyRows = await this.db
+      .selectFrom('integration_external_systems' as never)
+      .select([
+        sql<string>`config->>'dataSourceId'`.as('reference_id') as never,
+        sql<string>`config->>'dataSourceOwnerId'`.as('reference_owner_id') as never,
+        sql<number>`count(*)::int`.as('count') as never,
+      ] as never)
+      .where('connection_id' as never, 'is', null as never)
+      .where(sql`config->>'dataSourceId'` as never, 'in', attributable as never)
+      .groupBy([
+        sql`config->>'dataSourceId'` as never,
+        sql`config->>'dataSourceOwnerId'` as never,
+      ] as never)
+      .execute() as Array<{ reference_id: string | null; reference_owner_id: string | null; count: number }>
+    for (const row of legacyRows) {
+      const id = row.reference_id
+      if (id === null || id === undefined || !counts.has(id)) continue
+      // P2-A: unstamped rows are unattributable and do NOT count; a stamp that
+      // names anyone but this id's owner is a foreign pin and does NOT count.
+      const stamped = row.reference_owner_id
+      if (stamped === null || stamped === undefined) continue
+      if (this.scopes.get(id)?.ownerId !== stamped) continue
+      counts.set(id, (counts.get(id) ?? 0) + (row.count ?? 0))
+    }
+
+    return counts
+  }
+
+  /**
    * Internal method to add data source to memory.
    *
    * `phase` distinguishes the DEPLOY-controlled LOAD path (`loadFromDatabase`, which re-observes the
