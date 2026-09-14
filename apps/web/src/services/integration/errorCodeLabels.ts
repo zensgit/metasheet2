@@ -130,6 +130,11 @@ export type IntegrationErrorCode =
   | (typeof BRIDGE_AGENT_ERROR_CODES)[number]
   // Dead-letter known mainline (10) — see DEAD_LETTER_MAINLINE_ERROR_CODES above
   | (typeof DEAD_LETTER_MAINLINE_ERROR_CODES)[number]
+  // SQL Server read path (1) — packages/mssql-readonly-utils/index.cjs, the ONE place an object name
+  // becomes bracketed SQL text. G52 widened its rule to Unicode (中文表名 and names containing spaces
+  // now read), so a code that used to mean "your table name is not ASCII" now means the name really is
+  // unusable — worth a human label rather than the generic unknown-error text.
+  | 'SQLSERVER_IDENTIFIER_INVALID'
 
 // Exported (IU-6c, design-lock §2 IU-6c): the help-center error-code table renders straight off this
 // map so a future label addition/removal shows up there automatically — SINGLE SOURCE, no copy-paste.
@@ -366,6 +371,16 @@ export const INTEGRATION_ERROR_CODE_LABELS: Record<IntegrationErrorCode, Integra
   UNKNOWN_ERROR: {
     zh: '发生未知错误',
     en: 'An unknown error occurred.',
+  },
+
+  // --- SQL Server read path (1) ---
+  SQLSERVER_IDENTIFIER_INVALID: {
+    zh: '数据库对象名无法安全使用',
+    en: 'The database object name cannot be used safely.',
+    hint: {
+      zh: '中文名、含空格的名称都是支持的；请让 DBA 提供合法的对象名，或建一个 ASCII 别名视图。名称不能含换行/控制字符或标点，单段不超过 128 个字符，最多三段（跨服务器的四段名不支持）。',
+      en: 'Chinese names and names containing spaces are supported. Ask the DBA for a valid object name, or for an ASCII-aliased view. A name may not contain newlines, control characters or punctuation, each part is limited to 128 characters, and at most three parts are allowed (four-part cross-server names are not).',
+    },
   },
 }
 

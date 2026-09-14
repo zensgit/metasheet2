@@ -108,9 +108,38 @@
             </option>
           </select>
         </label>
+        <div v-if="sourceSchema.fields.length" class="integration-workbench__schema-filter">
+          <input
+            v-model="sourceFieldQuery"
+            type="search"
+            data-testid="source-field-filter"
+            :placeholder="`搜索来源字段（共 ${sourceSchema.fields.length} 个）`"
+            aria-label="搜索来源字段"
+          />
+          <span class="integration-workbench__schema-count" data-testid="source-field-count">
+            {{ sourceFields.length }} / {{ sourceSchema.fields.length }}
+          </span>
+        </div>
         <ul class="integration-workbench__schema-list">
-          <li v-for="field in sourceSchema.fields" :key="field.name">
-            {{ field.label || field.name }} <code>{{ field.name }}</code>
+          <li
+            v-for="field in sourceFields"
+            :key="field.name"
+            class="integration-workbench__schema-row"
+            :data-testid="`source-field-${field.name}`"
+            :title="copiedField === field.name ? '已复制字段名' : '点击复制字段名'"
+            @click="copyFieldName(field.name)"
+          >
+            <span class="integration-workbench__schema-label">{{ field.label || field.name }}</span>
+            <code>{{ field.name }}</code>
+            <em v-if="field.type" class="integration-workbench__schema-type">{{ field.type }}</em>
+            <small
+              v-if="copiedField === field.name"
+              class="integration-workbench__schema-copied"
+              data-testid="source-field-copied"
+            >已复制</small>
+          </li>
+          <li v-if="!sourceFields.length" class="integration-workbench__schema-empty" data-testid="source-field-empty">
+            没有匹配「{{ sourceFieldQuery }}」的字段
           </li>
         </ul>
       </div>
@@ -147,10 +176,39 @@
             </option>
           </select>
         </label>
+        <div v-if="targetSchema.fields.length" class="integration-workbench__schema-filter">
+          <input
+            v-model="targetFieldQuery"
+            type="search"
+            data-testid="target-field-filter"
+            :placeholder="`搜索目标字段（共 ${targetSchema.fields.length} 个）`"
+            aria-label="搜索目标字段"
+          />
+          <span class="integration-workbench__schema-count" data-testid="target-field-count">
+            {{ targetFields.length }} / {{ targetSchema.fields.length }}
+          </span>
+        </div>
         <ul class="integration-workbench__schema-list">
-          <li v-for="field in targetSchema.fields" :key="field.name">
-            {{ field.label || field.name }} <code>{{ field.name }}</code>
+          <li
+            v-for="field in targetFields"
+            :key="field.name"
+            class="integration-workbench__schema-row"
+            :data-testid="`target-field-${field.name}`"
+            :title="copiedField === field.name ? '已复制字段名' : '点击复制字段名'"
+            @click="copyFieldName(field.name)"
+          >
+            <span class="integration-workbench__schema-label">{{ field.label || field.name }}</span>
+            <code>{{ field.name }}</code>
+            <em v-if="field.type" class="integration-workbench__schema-type">{{ field.type }}</em>
             <strong v-if="field.required">必填</strong>
+            <small
+              v-if="copiedField === field.name"
+              class="integration-workbench__schema-copied"
+              data-testid="target-field-copied"
+            >已复制</small>
+          </li>
+          <li v-if="!targetFields.length" class="integration-workbench__schema-empty" data-testid="target-field-empty">
+            没有匹配「{{ targetFieldQuery }}」的字段
           </li>
         </ul>
       </div>
@@ -192,8 +250,11 @@
 // `PLM_APPROVAL_AUTOMATION_FEATURE_KEY` / `PLM_BOM_MULTITABLE_FEATURE_KEY` are plain literal
 // string constants used only for display; duplicated locally (same rationale as the shared
 // type file's duplicated shapes) rather than passed as props or touching the parent's script.
+import { computed, ref } from 'vue'
+
 import type {
   IntegrationObjectSchema,
+  IntegrationObjectSchemaField,
   IntegrationSystemObject,
   WorkbenchExternalSystem,
 } from '../../services/integration/workbench'
@@ -203,7 +264,7 @@ import PlmBomReviewPanel from '../plm/PlmBomReviewPanel.vue'
 const PLM_APPROVAL_AUTOMATION_FEATURE_KEY = 'approval_automation'
 const PLM_BOM_MULTITABLE_FEATURE_KEY = 'bom_multitable'
 
-defineProps<{
+const props = defineProps<{
   sourceSystems: WorkbenchExternalSystem[]
   isSourceOptionDisabled: (system: WorkbenchExternalSystem) => boolean
   handleSourceSystemChange: () => void
@@ -246,6 +307,57 @@ const sourceSystemId = defineModel<string>('sourceSystemId', { default: '' })
 const sourceObjectName = defineModel<string>('sourceObjectName', { default: '' })
 const targetSystemId = defineModel<string>('targetSystemId', { default: '' })
 const targetObjectName = defineModel<string>('targetObjectName', { default: '' })
+
+// G52 (second half) — the field list used to be a bare `<ul>`. A real ERP table is 40-200 columns, and
+// once SQL Server object names may be 中文 (the first half of G52) the list an operator has to eyeball
+// is BOTH long and hard to skim. Three purely LOCAL affordances, none of which touch the parent's state,
+// its service calls, or the wire:
+//   • a filter box (matches name AND label AND type, case-insensitively, so `qty` finds `数量` when the
+//     adapter supplied a label, and `nvarchar` finds every text column);
+//   • the declared type rendered as a badge — it is already on `IntegrationObjectSchemaField.type` and
+//     was simply not displayed;
+//   • click-to-copy of the exact field NAME, because a 中文 column name is the one thing an operator
+//     cannot reliably retype into a mapping expression.
+// Values-free: only schema METADATA (names/labels/types) is rendered or copied — never a row value.
+const sourceFieldQuery = ref('')
+const targetFieldQuery = ref('')
+const copiedField = ref('')
+
+function matchesQuery(field: IntegrationObjectSchemaField, query: string): boolean {
+  const needle = query.trim().toLocaleLowerCase()
+  if (!needle) return true
+  return [field.name, field.label, field.type]
+    .filter((part): part is string => typeof part === 'string' && part.length > 0)
+    .some((part) => part.toLocaleLowerCase().includes(needle))
+}
+
+function filterFields(schema: IntegrationObjectSchema, query: string): IntegrationObjectSchemaField[] {
+  const fields = Array.isArray(schema?.fields) ? schema.fields : []
+  return fields.filter((field) => matchesQuery(field, query))
+}
+
+const sourceFields = computed(() => filterFields(props.sourceSchema, sourceFieldQuery.value))
+const targetFields = computed(() => filterFields(props.targetSchema, targetFieldQuery.value))
+
+let copiedTimer: ReturnType<typeof setTimeout> | undefined
+
+async function copyFieldName(name: string): Promise<void> {
+  // Best-effort. A non-secure browsing context has no `navigator.clipboard` at all, and the on-prem
+  // deployments this workbench runs in are frequently plain HTTP. When the copy cannot happen we do
+  // NOTHING — never a "已复制" badge for a copy that did not occur.
+  const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard
+  if (typeof clipboard?.writeText !== 'function') return
+  try {
+    await clipboard.writeText(name)
+  } catch {
+    return
+  }
+  copiedField.value = name
+  if (copiedTimer) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    if (copiedField.value === name) copiedField.value = ''
+  }, 1500)
+}
 </script>
 
 <style scoped>
@@ -484,6 +596,69 @@ const targetObjectName = defineModel<string>('targetObjectName', { default: '' }
 
 .integration-workbench__schema-list strong {
   color: var(--el-color-danger);
+  font-size: 12px;
+}
+
+/* G52 (second half): filter + type badge + click-to-copy for the schema field list. */
+.integration-workbench__schema-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.integration-workbench__schema-filter input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--ms-text-1);
+  font: inherit;
+  font-size: 13px;
+}
+
+.integration-workbench__schema-count {
+  color: var(--ms-text-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.integration-workbench__schema-row {
+  cursor: pointer;
+}
+
+.integration-workbench__schema-row:hover {
+  background: var(--el-fill-color-light);
+}
+
+.integration-workbench__schema-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.integration-workbench__schema-type {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  padding: 0 6px;
+  color: var(--ms-text-3);
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.integration-workbench__schema-copied {
+  color: var(--el-color-success);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.integration-workbench__schema-empty {
+  color: var(--ms-text-3);
+  cursor: default;
   font-size: 12px;
 }
 
