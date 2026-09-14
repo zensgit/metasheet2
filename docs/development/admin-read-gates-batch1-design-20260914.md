@@ -87,7 +87,14 @@
 
 - **[已修] CI 触发面**：本 PR 原 base 为 #5677 分支，`.github/workflows/plugin-tests.yml:17-18` 只对 `pull_request: branches: [main, develop]` 触发，core-backend 单测（`:842-844`）在叠加 PR 上**不跑**（rollup 10 条、无 `test (18.x/20.x)`）。已把 base 改为 main：diff = #5677 + 本批次，与合并后内容一致，CI 才真正执行两个新 spec。教训：叠加 PR 的保证只有本地证据，要么改 base 要么进组合树。
 - **[登记，批次 2] `GET /queues`**（`admin-routes.ts:1583`）无门，内部三次 `dlqService.list({limit:0})`，而 `DeadLetterQueueService.ts:167` 是 `.limit(options.limit || 50)`——`0` 被 falsy 吞成 50，每次未鉴权请求真取 50 行全字段（含 payload），只回 `.total`。外泄的是全平台 DLQ 计数不是 payload；与 `/dlq` 同数据面，建议随批次 2 一并加门，并把 `limit:0` 改成显式 `count` 路径。
-- **[登记，#5667 遗留] 限流键含 `:id` 且在门之前**（`protection-rules.ts:48-62`）：key = `${userId}:${method}:${path}`，`GET /:id` 时随机 id 进 key，module 级 Map 只在同 key 复访时剪枝 → 未认证方可让其无界增长；且每次 403 都写一条 audit（`guards/audit-integration.ts:120-145`）。本 PR 未加剧（改前那些请求回的是真数据），但「限流先跑」不只是优点。
+- **[登记，#5667 遗留] 限流键含 `:id` 且在门之前**（`protection-rules.ts:48-62`）：key = `${userId}:${method}:${path}`，`GET /:id` 时随机 id 进 key，module 级 Map 只在同 key 复访时剪枝 → 已认证的非管理员可让其无界增长（`/api/admin` 前有 JWT 门 `index.ts:1670-1683`，未认证到不了 router——终审订正）；且每次 403 都写一条 audit（`guards/audit-integration.ts:120-145`）。本 PR 未加剧（改前那些请求回的是真数据），但「限流先跑」不只是优点。
 - **口径降调**：`verify-sprint2-staging.sh:167` 对非 429 只 `[WARN]` 不计 fail，且建/删规则本就需管理员 token（#5677），所以本 PR 对该脚本结果**零影响**；正文原来把「第 11 次仍 429」当载荷性理由略夸大。
 - 查找者核过未发现反例：假件背书（spec 只 mock `isAdmin`，`requireAdminRole` 本体真跑，放行用例经真门）、守卫没接线（`/dlq` 全仓唯一读路由，`/safety/rules` 唯一挂载点，无 v2 别名）、逐套绿整链红（#5680 结构 spec 明写读侧不管，反例控制用 `GET /slo/status`）。残留弱点：protection-rules spec 直挂 router 而非经 `initAdminRoutes()`（继承 #5667）。
+
+## 终审（security-judge）：可合，条件 test (18.x)/(20.x) 绿
+
+- 五类：假件背书/守卫没接线/触发与边界不同量未成立；边界无强制部分成立（`/queues` 已登记批次 2）；**逐套绿整链红成立但非本 PR 代码问题**：本仓 squash 合并，本分支含 #5677 的提交，若先 squash 合 #5677 再合本 PR，`protection-rules.ts:25-38` 注释块与 `protection-rules-authz.test.ts` 会 add/add 冲突。**合并顺序二选一**：合本 PR 后把 #5677 关成 superseded（零改动）；或先合 #5677，再对本分支 `git rebase --onto origin/main 5b52fa34a` 丢掉三个已合提交、重推等 CI。若先合 #5677 后按「取 main 一侧」乱解冲突会把批次 1 回退。
+- OPTIONS 自动应答只泄方法面且 `index.ts:1586` 本就放行 GET/HEAD/OPTIONS——不登记。
+- 终审补的没人看的路径（留批次 2 钉桩）：spec 未区分「有用户但 `user_roles` 无行」「pool 为 null」「RBAC_OPTIONAL=1 且表缺」三种，真 `isAdmin`（`rbac/service.ts:20-30`）三者都返回 false→403，fail-closed 成立但无测试钉住「pool null→403 而非放行」。
+- 非管理员打任意 `/:id` 恒 403 且 `getRule` 未调用（`protection-rules-authz.test.ts:254`）——**无 403/404 存在性 oracle**。
 
