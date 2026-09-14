@@ -351,16 +351,25 @@ afterEach(() => {
 })
 
 describe('D7 flag-off HTTP parity', () => {
-  // REBASELINED DELIBERATELY (sheet soft delete). This pin hashes the exact SQL sequence the recovery
-  // routes issue with the archive flag off. The sequence changed for one stated reason: capability
-  // resolution now establishes SHEET LIVENESS first (`SELECT deleted_at FROM meta_sheets WHERE id = $1`,
-  // multitable/sheet-liveness.ts), because `DELETE /sheets/:sheetId` became a SOFT delete and a
-  // deleted sheet would otherwise stay fully readable and writable to anyone holding its id.
+  // REBASELINED DELIBERATELY (managed-sheet schema-write gate). This pin hashes the exact SQL sequence
+  // the recovery routes issue with the archive flag off. The sequence changed for one stated reason:
+  // capability resolution now asks whether the sheet is plugin-managed
+  // (`SELECT 1 FROM plugin_multitable_object_registry WHERE sheet_id = $1 LIMIT 1`,
+  // multitable/managed-sheet-schema-write-guard.ts) before a NON-admin may keep `canManageFields` —
+  // a sheet-scoped write grant used to imply authority over a plugin-provisioned table's COLUMN SET.
+  // The added query is a single read, issued once, immediately after the scope load; it is visible as
+  // index 3 of the traced sequence and NOTHING else about the trace or the three responses moved.
+  //
+  // Previous rebaseline (sheet soft delete): capability resolution establishes SHEET LIVENESS first
+  // (`SELECT deleted_at FROM meta_sheets WHERE id = $1`, multitable/sheet-liveness.ts), because
+  // `DELETE /sheets/:sheetId` became a SOFT delete and a deleted sheet would otherwise stay fully
+  // readable and writable to anyone holding its id.
   //
   // The pin's PURPOSE is intact: it still proves the flag-off path is byte-identical across every
   // non-exact archive flag value. Only the frozen constant moved, and only by the one added query.
-  // Previous value (pre-soft-delete): d44200359ffcbed8462e9655944244dbfd6933e11351e5b687b31b82e83876f6
-  const HISTORICAL_FLAG_OFF_SHA256 = '626bd3e1d1fbe6010b149ca7fba822462312094a2a67911d26de2577056db455'
+  // Previous value (pre-managed-gate): 626bd3e1d1fbe6010b149ca7fba822462312094a2a67911d26de2577056db455
+  // Previous value (pre-soft-delete):  d44200359ffcbed8462e9655944244dbfd6933e11351e5b687b31b82e83876f6
+  const HISTORICAL_FLAG_OFF_SHA256 = '568c3552ee1845fe5d2f69119c204f8b5d6bd8babb958a1f65454d65a4dbaeac'
 
   it('keeps existing recovery responses and SQL byte-identical for every non-exact archive flag value', async () => {
     const probe = async (archiveFlag: string | undefined) => {

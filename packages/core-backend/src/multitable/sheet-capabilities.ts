@@ -13,6 +13,10 @@ import {
   restrictElearningProjectionCapabilities,
 } from './elearning-projection-constants'
 import { deriveCanManageFields } from './manage-schema-permission'
+import {
+  isPluginManagedSheetFailClosed,
+  restrictManagedSheetSchemaWriteCapabilities,
+} from './managed-sheet-schema-write-guard'
 
 // ── Permission code sets ────────────────────────────────────────────
 
@@ -257,6 +261,23 @@ export async function resolveSheetCapabilitiesForUser(
   const scopeMap = await loadSheetPermissionScopeMap(query, [sheetId], userId)
   const sheetScope = scopeMap.get(sheetId)
   let capabilities = applyContextSheetSchemaWriteGrant(baseCapabilities, sheetScope, isAdminRole)
+  // MANAGED-SHEET SCHEMA-WRITE FENCE — the SAME restrict, at the SAME place, as the request-bound
+  // resolver (permission-service.ts's `resolveSheetCapabilitiesForAccess`): immediately after the
+  // grant that lifts `canManageFields` for any sheet-scoped full-write holder, and before the two
+  // projection fences. Wired here even though today's callers of THIS resolver (collab sheet/comment
+  // rooms + Yjs record auth in index.ts, automation-service's FWB save-time gates,
+  // routes/api-tokens.ts) read only canRead / canCreateRecord / canEditRecord / canManageSheetAccess /
+  // canManageAutomation and never this bit: two resolvers answering the SAME question differently IS
+  // the defect — the next caller to reach for `capabilities.canManageFields` through this seam would
+  // inherit an open schema plane silently. Same skip-when-nothing-to-narrow, same admin exemption,
+  // same fail-closed-on-lookup-error as the other resolver (managed-sheet-schema-write-guard.ts).
+  if (!isAdminRole && capabilities.canManageFields) {
+    capabilities = restrictManagedSheetSchemaWriteCapabilities(
+      capabilities,
+      await isPluginManagedSheetFailClosed(query, sheetId),
+      isAdminRole,
+    )
+  }
   // A: this resolver ALSO fronts the collab sheet-room auth + Yjs record auth + api-token capability paths
   // (index.ts / routes/api-tokens.ts), NOT just REST. The approval projection base is admin-only, so a
   // non-admin with global multitable:read must be denied here too (same guard + query shape as the REST chokes).
