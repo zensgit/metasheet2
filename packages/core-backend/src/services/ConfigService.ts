@@ -245,6 +245,12 @@ export class DatabaseConfigSource implements ConfigSource {
 
       return configValue
     } catch (error) {
+      // X1: this catch-all is what USES the gate's diagnostic, so it must not swallow it.
+      // `undefined` here reads as "no such config", and callers treat that as "fall back"
+      // (e.g. PLMAdapter drops to the plaintext env var) — i.e. a misconfigured production would
+      // silently downgrade instead of failing closed. The facade ConfigService.get() has no
+      // catch, so this propagates to the caller.
+      if (error instanceof EncryptionMaterialError) throw error
       logger.warn(`Failed to get config from database: ${errorToString(error)}`)
       return undefined
     }
@@ -309,6 +315,8 @@ export class DatabaseConfigSource implements ConfigSource {
 
       return config
     } catch (error) {
+      // X1: same as get() — `{}` would read as "no config at all" and silently downgrade.
+      if (error instanceof EncryptionMaterialError) throw error
       logger.warn(`Failed to get all configs from database: ${errorToString(error)}`)
       return {}
     }

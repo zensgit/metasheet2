@@ -233,3 +233,58 @@ M9 的实现细节值得记：spec 原本写 `import { readFileSync } from 'node
 - 打包链没有注入步骤（已实证），本 PR 也**没有**加——是否要让 `*-package-build.sh` 生成随机值属于运维
   决策，未做。
 - 仍未在 222 上实看生产 env；上线前置未解除。
+
+---
+
+# 终审返修验证（PR #5711 第三轮，同日）
+
+## T1. X1 守卫半接线
+
+`SecretManager.encrypt/decrypt` 的不包装上抛（第一轮 F2 那两行）到了
+`DatabaseConfigSource.get()`（`ConfigService.ts:247`）/ `getAll()`（`:311`）的 catch-all 就被吞成
+`undefined` / `{}`。门面 `ConfigService.get()`（`:574`）自己没有 catch，所以它返回的是"这个配置不存在"，
+调用方照着回退——`PLMAdapter.ts:1054` 就会掉到明文 env 变量上。守卫只接了一半。
+
+修法：两处 catch 首行加 `if (error instanceof EncryptionMaterialError) throw error`。
+
+新增三条用例（都走**门面** `ConfigService.get()/getAll()`，不是直接调 source 类）：
+
+| 用例 | 断言 |
+| --- | --- |
+| `ConfigService.get() surfaces the material error instead of a silent undefined` | 生产 + 默认材料 + 库里一行 `enc:` → reject，且 `error.name === 'EncryptionMaterialError'`、消息含 `ENCRYPTION_KEY` |
+| `ConfigService.getAll() surfaces the material error instead of a silent {}` | 同形状，reject 而不是 `{}` |
+| `ConfigService.get() still returns the decrypted value when material is configured`（反向对照） | 同一条路径、材料配齐 → resolve 成明文值 |
+
+变异 **M10（只去掉 `DatabaseConfigSource.get/getAll` 的重抛，保留 encrypt/decrypt 的）**：
+**2 failed / 28 passed (30)** —— 正是前两条，反向对照仍绿（证明钉的是门、不是探针坏了）。
+M4（去掉 `encrypt/decrypt` 的重抛）重跑：**4 failed / 26 passed**（原两条 + 这两条，同一条链的上游）。
+
+## T2. X3 空串
+
+新增 `treats an empty-string value (compose \`ENCRYPTION_KEY=\`) as not configured`：`''` 与
+`ENCRYPTION_SALT=''` 在生产都判为"未配置"。这正是本 PR 给模板加的那两行经 compose `env_file` 进程序后的
+形状（空值不是"变量不存在"，是空串）。
+
+说明（不粉饰）：`''` 同时被两道机制挡住——`normalizeEnvString` 的 trim，以及 issue 判定里的
+`if (!key)` falsy 检查，所以**没有单一变异能只红这一条**；真正依赖 trim 的是 `'   '`，那条由
+`refuses an empty rotation TARGET on an empty table` 覆盖，去掉 trim 会让它红。
+
+## T3. 计数与相邻
+
+- `encryption-material-fail-closed.test.ts` 26 → **30**；另两个 spec 不变（9 / 5）；三者合计 **44 全绿**。
+- 相邻 **17 套件 / 511 条全绿**；`tsc --noEmit -p tsconfig.json` exit 0；临时 config（三个新 spec）exit 0，
+  跑完即删、未入库。
+
+## T4. 登记「不做」（建议后续单独一条 PR）
+
+这些运维脚本只校验 `JWT_SECRET`，对 `ENCRYPTION_*` 一字未提，本 PR **没有**动它们：
+
+- `scripts/ops/attendance-preflight.sh:83-94`
+- `scripts/ops/attendance-onprem-env-check.sh:57-67`
+- `scripts/ops/bootstrap-admin.sh:81`
+- `scripts/ops/attendance-onprem-package-verify.sh:79-89` 的 `verify_onprem_env_templates`
+  （只 grep `JWT_SECRET=change-me` 与 `BCRYPT_SALT_ROUNDS=12`）
+
+建议后续给前三个加 die、给最后一个加"模板必须声明 `ENCRYPTION_KEY=` / `ENCRYPTION_SALT=`"的断言。
+本 PR 内该契约由 `tests/unit/deploy-template-encryption-material.test.ts` 单独守住，但那是 CI 侧，
+**不覆盖装机现场**。

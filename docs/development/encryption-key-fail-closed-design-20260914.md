@@ -120,9 +120,11 @@ session-scoped 的，看不见 nssm 服务自己的 `AppEnvironmentExtra`，把�
 
 1. **生产必须设置 `ENCRYPTION_KEY` 与 `ENCRYPTION_SALT`**，且都不能是内置默认值。否则进程在**首次凭据
    加密或解密**时抛错失败——这是有意的，不是回归。
-2. **上线前必须人工确认**目标环境的这两个变量已设为非默认值。不能拿
-   `validate-windows-runtime.ps1` 的退出码当依据：它对默认哨兵值只 WARN、仍然 exit 0（见 §5）。
-   去服务环境里实看（`nssm get <ServiceName> AppEnvironmentExtra`），不要只看当前 shell。
+2. **上线前必须人工确认**目标环境的这两个变量已设为非默认值，**222 与 staging 两处都要看**：
+   222 用 `nssm get <ServiceName> AppEnvironmentExtra` 看服务自己的环境（不要只看当前 shell）；
+   staging 看 `docker-compose.app.staging.yml` 的 `env_file` 实际指向的那份 `app.staging.env`。
+   不能拿 `validate-windows-runtime.ps1` 的退出码当依据：它对默认哨兵值只 WARN、仍然 exit 0（见 §5）。
+   也不能拿健康检查当依据：缺材料时进程照样起得来（见「延迟爆炸形状」）。
 3. **如果某套生产环境此前一直在用内置默认密钥**（即 env 里没配），那里已有的 `enc:` 密文是用默认密钥加
    的。直接补上新的 `ENCRYPTION_KEY` 会让这些旧密文解不开（authTag 校验失败）。迁移路径二选一：
    - 在仍未设置 env 的进程里调
@@ -254,6 +256,25 @@ env 文件/服务配置带进空格的情况下，core-backend 已经 fail-close
 `cp docker/app.env.attendance-onprem.ready.env docker/app.env`。所以同样加。同时把它文件头"只需替换 3 个
 `change-me`"的说法和 `docs/deployment/attendance-onprem-app-env-template-20260306.md` 的"替换这 3 项"一起
 改成 5 项，否则文档立刻变成假的。
+
+**（第三轮补充，X2）延迟爆炸形状**——这个门不是启动期门，缺材料时**不会**在启动时报错，所以别指望
+健康检查替你发现：
+
+- **启动期不碰加密行。** `src/index.ts:3638` 启动时只读 `app.port`（非加密行），`ConfigService.get()`
+  对它不会触发任何密钥派生。进程起得来、`/api/health` 绿。
+- **首症点因消费者而异**，谁先被用谁先炸：
+  | 位置 | 行为 |
+  | --- | --- |
+  | `src/data-adapters/DataSourceManager.ts:352`（保存时加密） | 抛 → 数据源保存 500 |
+  | 同上 `:371`（读取时解密） | 抛，但被重新包成 `Failed to decrypt credential '<key>' (ENCRYPTION_KEY may have changed)` —— 措辞会把"从未配置"误导成"被改过"，排查时注意 |
+  | `src/directory/directory-sync.ts:1802` | 抛 → 通讯录集成**列表页**与**每次定时同步**都炸；staging 最可能从这里先冒烟 |
+  | `plugins/plugin-attendance/index.cjs:6194` | 抛 → 钉钉集成配置读取失败 |
+  | `src/integrations/dingtalk/approval-card-config.ts:76-79` | **吞成 `''`**（对签名是 fail-closed，但没有声音） |
+  | `src/services/ConfigService.ts:247` | 第三轮 X1 之前**吞成 `undefined`**，会让 `PLMAdapter.ts:1054` 回退到明文 env；X1 之后改为上抛 |
+
+  所以「上线前置」里的"人工确认"要落到 **222 与 staging 两处**：staging 走
+  `docker-compose.app.staging.yml:6/32` 的 `env_file: ${APP_ENV_FILE:-./docker/app.staging.env}`，
+  那份 `app.staging.env` 是从 `docker/app.staging.env.example` 抄的，**两边都要看实际生效的 env**。
 
 **打包时是否注入：否。** `attendance-onprem-package-build.sh` / `multitable-onprem-package-build.sh` 只是
 把模板逐份复制进包（没有 `envsubst`、没有 `sed -i`、全文没有 `ENCRYPTION` 字样）；

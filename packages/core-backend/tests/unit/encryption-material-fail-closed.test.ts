@@ -229,6 +229,26 @@ describe('resolveEncryptionMaterial - non-production stays permissive', () => {
     expect(mod.resolveEncryptionMaterial().masterKey).toBe(`  ${STRONG_KEY}  `)
   })
 
+  // X3: docker compose `env_file` turns a bare `ENCRYPTION_KEY=` line into an EMPTY STRING, not an
+  // absent variable — exactly the shape the shipped templates now carry. It must count as missing.
+  it('treats an empty-string value (compose `ENCRYPTION_KEY=`) as not configured', async () => {
+    const mod = await loadEncryptedSecrets()
+    expect(() =>
+      mod.resolveEncryptionMaterial({
+        NODE_ENV: 'production',
+        ENCRYPTION_KEY: '',
+        ENCRYPTION_SALT: STRONG_SALT,
+      }),
+    ).toThrow(/ENCRYPTION_KEY not configured/)
+    expect(() =>
+      mod.resolveEncryptionMaterial({
+        NODE_ENV: 'production',
+        ENCRYPTION_KEY: STRONG_KEY,
+        ENCRYPTION_SALT: '',
+      }),
+    ).toThrow(/ENCRYPTION_SALT not configured/)
+  })
+
   it('does not warn when non-production material is explicitly configured', async () => {
     const mod = await loadEncryptedSecrets()
     setEnv({ NODE_ENV: 'test', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
@@ -450,6 +470,82 @@ describe('ConfigService SecretManager shares the gate', () => {
 
     await expect(manager.rotateKey(STRONG_KEY, '   ')).rejects.toThrow(/ENCRYPTION_KEY not configured/)
     expect(process.env.ENCRYPTION_KEY).toBe(STRONG_KEY)
+  })
+
+  /**
+   * X1: DatabaseConfigSource.get()/getAll() wrap everything in a catch-all that returns
+   * `undefined` / `{}`. That reads to callers as "this config does not exist", and callers fall
+   * back — PLMAdapter, for one, drops to the plaintext env var. So a production with missing
+   * encryption material would silently DOWNGRADE instead of failing closed. These two cases drive
+   * the real facade (ConfigService.get/getAll), not the source class directly.
+   */
+  function mockSingleConfigRow(value: string) {
+    return {
+      db: {
+        selectFrom: () => ({
+          select: () => ({
+            where: () => ({
+              executeTakeFirst: async () => ({ value, is_encrypted: true }),
+            }),
+            execute: async () => [{ key: PROBE_KEY, value, is_encrypted: true }],
+          }),
+        }),
+      },
+    }
+  }
+
+  const PROBE_KEY = 'w5b.probe.secret'
+
+  async function sealedUnderDefaults(): Promise<string> {
+    setEnv({ NODE_ENV: 'test', ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined })
+    const { SecretManager: Probe } = await import('../../src/services/ConfigService')
+    return `enc:${await new Probe().encrypt(JSON.stringify('w5b-secret-value'))}`
+  }
+
+  it('ConfigService.get() surfaces the material error instead of a silent undefined', async () => {
+    const sealed = await sealedUnderDefaults()
+
+    vi.resetModules()
+    vi.doMock('../../src/db/db', () => mockSingleConfigRow(sealed))
+    const { ConfigService } = await import('../../src/services/ConfigService')
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined })
+
+    const service = new ConfigService()
+    const outcome = await service.get(PROBE_KEY).then(
+      value => ({ kind: 'resolved' as const, value }),
+      error => ({ kind: 'rejected' as const, error: error as Error }),
+    )
+
+    expect(outcome.kind).toBe('rejected')
+    if (outcome.kind !== 'rejected') return
+    expect(outcome.error.name).toBe('EncryptionMaterialError')
+    expect(outcome.error.message).toMatch(/ENCRYPTION_KEY/)
+  })
+
+  it('ConfigService.getAll() surfaces the material error instead of a silent {}', async () => {
+    const sealed = await sealedUnderDefaults()
+
+    vi.resetModules()
+    vi.doMock('../../src/db/db', () => mockSingleConfigRow(sealed))
+    const { ConfigService } = await import('../../src/services/ConfigService')
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: undefined, ENCRYPTION_SALT: undefined })
+
+    await expect(new ConfigService().getAll()).rejects.toThrow(/ENCRYPTION_KEY/)
+  })
+
+  // Negative control: with usable material the very same path returns the decrypted value, so the
+  // two cases above are proving a gate, not a broken probe.
+  it('ConfigService.get() still returns the decrypted value when material is configured', async () => {
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
+    const { SecretManager: Probe } = await import('../../src/services/ConfigService')
+    const sealed = `enc:${await new Probe().encrypt(JSON.stringify('w5b-secret-value'))}`
+
+    vi.resetModules()
+    vi.doMock('../../src/db/db', () => mockSingleConfigRow(sealed))
+    const { ConfigService } = await import('../../src/services/ConfigService')
+    setEnv({ NODE_ENV: 'production', ENCRYPTION_KEY: STRONG_KEY, ENCRYPTION_SALT: STRONG_SALT })
+
+    await expect(new ConfigService().get(PROBE_KEY)).resolves.toBe('w5b-secret-value')
   })
 
   it('accepts a strong rotation TARGET on an empty table', async () => {
