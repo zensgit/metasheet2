@@ -16489,6 +16489,17 @@ function isAttendanceReportSyncScheduledTriggerRuntimeEnabled() {
   return parseBoolean(process.env.ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED, false)
 }
 
+// B3 item 2 (spec-B3-stock-prep-own-base): opt-out gate for the activate()-time PRELOAD of the
+// attendance report field catalog. Default ON - unset keeps today's behaviour (the catalog object is
+// provisioned and seeded at plugin boot). Setting ATTENDANCE_REPORT_FIELD_CATALOG_SEED=false (trimmed,
+// case-insensitive) skips ONLY that boot preload and logs one values-free info line; the on-demand
+// callers (saveAttendanceReportFormulaField / buildAttendanceReportFieldCatalogResponse) are untouched,
+// so opening a report still provisions the catalog. Read at call time, never at module load, so both
+// branches are exercisable in a single process.
+function isAttendanceReportFieldCatalogSeedEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_REPORT_FIELD_CATALOG_SEED, true)
+}
+
 function confidenceRank(value) {
   if (value === 'high') return 3
   if (value === 'medium') return 2
@@ -24689,6 +24700,7 @@ module.exports = {
     cloneAttendanceReportFieldCategories,
     cloneAttendanceReportFieldDefinitions,
     ensureAttendanceReportFieldCatalog,
+    isAttendanceReportFieldCatalogSeedEnabled,
     getAttendanceRecordReportFieldValue,
     getAttendanceReportFieldCatalogDescriptor,
     getAttendanceReportFieldProjectId,
@@ -50756,10 +50768,14 @@ module.exports = {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
 
-	    try {
-	      await ensureAttendanceReportFieldCatalog(context, DEFAULT_ORG_ID, logger)
-	    } catch (error) {
-	      logger.warn('Attendance report field catalog preload failed', error)
+	    if (isAttendanceReportFieldCatalogSeedEnabled()) {
+	      try {
+	        await ensureAttendanceReportFieldCatalog(context, DEFAULT_ORG_ID, logger)
+	      } catch (error) {
+	        logger.warn('Attendance report field catalog preload failed', error)
+	      }
+	    } else {
+	      logger.info('Attendance report field catalog preload skipped (ATTENDANCE_REPORT_FIELD_CATALOG_SEED=false)')
 	    }
 
     logger.info('Attendance plugin activated')
