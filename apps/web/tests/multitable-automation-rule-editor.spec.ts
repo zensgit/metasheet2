@@ -733,8 +733,10 @@ describe('MetaAutomationRuleEditor', () => {
     const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
     expect(epSelectValue(actionSelect)).toBe('send_notification')
     expect(epOptions(actionSelect).map((option) => option.value)).toContain('send_notification')
-    const recipientInput = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-config input') as HTMLInputElement
+    // Recipient picker: the persisted ids back the manual textarea and render as chips.
+    const recipientInput = container.querySelector('[data-action-index="0"] [data-field="notificationUserIds"]') as HTMLTextAreaElement
     expect(recipientInput.value).toBe('u1')
+    expect(container.querySelector('[data-notification-recipient="u1"]')).toBeTruthy()
 
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
     await flushPromises()
@@ -2184,7 +2186,8 @@ describe('MetaAutomationRuleEditor', () => {
     epSetSelect(followUpSelect, 'send_notification')
     await flushPromises()
 
-    const [userInput, messageInput] = Array.from(followUpRow.querySelectorAll('.el-input__inner, textarea')) as Array<HTMLInputElement | HTMLTextAreaElement>
+    const userInput = followUpRow.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement
+    const messageInput = followUpRow.querySelector('[data-field="notificationMessage"]') as HTMLTextAreaElement
     userInput.value = 'user_1, user_2'
     userInput.dispatchEvent(new Event('input'))
     messageInput.value = 'Resume completed'
@@ -4087,6 +4090,14 @@ describe('MetaAutomationRuleEditor', () => {
     epSetSelect(actionSelect, 'send_notification')
     await flushPromises()
 
+    // A notification with no recipients is refused by the backend save gate (NO_RECIPIENTS) — the
+    // editor now mirrors that inline, so give the action a recipient before expecting Save to open.
+    expect(saveBtn.disabled).toBe(true)
+    const recipientIdsInput = container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement
+    recipientIdsInput.value = 'user_1'
+    recipientIdsInput.dispatchEvent(new Event('input'))
+    await flushPromises()
+
     // Outcomes default to approved-only; add "rejected".
     const approvedBox = container.querySelector('[data-field="approvalOutcome-approved"] input') as HTMLInputElement
     const rejectedBox = container.querySelector('[data-field="approvalOutcome-rejected"] input') as HTMLInputElement
@@ -4191,5 +4202,196 @@ describe('MetaAutomationRuleEditor', () => {
     saveBtn.click()
     expect(saved).toHaveBeenCalledTimes(2)
     expect(saved.mock.calls[1][0].triggerConfig).toEqual({ secret: 'rotated-secret' })
+  })
+
+  describe('send_notification recipient picker', () => {
+    // A q-aware candidate stub: only user_1 ("Lin Lan" / lin@example.com) is a roster member, so an
+    // id like "4" resolves to nothing — the shape of the customer's failing rule.
+    function rosterClient() {
+      const client = mockClient()
+      client.listFormShareCandidates = vi.fn(async (_sheetId: string, params: { q?: string; limit?: number }) => {
+        const q = (params.q ?? '').toLowerCase()
+        const linLan = {
+          subjectType: 'user',
+          subjectId: 'user_1',
+          label: 'Lin Lan',
+          subtitle: 'lin@example.com',
+          isActive: true,
+          dingtalkBound: true,
+          dingtalkGrantEnabled: true,
+          dingtalkPersonDeliveryAvailable: true,
+        }
+        const matches = ['user_1', 'lin lan', 'lin@example.com'].some((value) => value.includes(q)) ? [linLan] : []
+        return { items: matches, total: matches.length, limit: params.limit ?? 8, query: params.q ?? '' }
+      })
+      return client
+    }
+
+    it('searches users by name/email, shows name + email, and saves only user ids', async () => {
+      const saved = vi.fn()
+      const client = mockClient()
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, onSave: saved })
+      await flushPromises()
+
+      const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+      nameInput.value = 'Notify picked users'
+      nameInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+
+      const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+      epSetSelect(actionSelect, 'send_notification')
+      await flushPromises()
+
+      // No recipients yet: the client-side gate mirrors the backend NO_RECIPIENTS 400.
+      const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(saveBtn.disabled).toBe(true)
+
+      const searchInput = container.querySelector('[data-field="notificationRecipientSearch"]') as HTMLInputElement
+      searchInput.value = 'lin'
+      searchInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+      expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: 'lin', limit: 8 })
+
+      const suggestion = container.querySelector('[data-notification-recipient-suggestion="user_1"]') as HTMLButtonElement
+      expect(suggestion).toBeTruthy()
+      expect(suggestion.textContent).toContain('Lin Lan')
+      expect(suggestion.textContent).toContain('lin@example.com')
+      // Member groups are not valid send_notification recipients — never offered.
+      expect(container.querySelector('[data-notification-recipient-suggestion="group_1"]')).toBeNull()
+      suggestion.click()
+      await flushPromises()
+
+      const chip = container.querySelector('[data-notification-recipient="user_1"]') as HTMLElement
+      expect(chip).toBeTruthy()
+      expect(chip.textContent).toContain('Lin Lan')
+      expect(chip.textContent).toContain('lin@example.com')
+      expect(chip.getAttribute('data-notification-recipient-unresolved')).toBeNull()
+      expect(searchInput.value).toBe('')
+      expect((container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement).value).toBe('user_1')
+
+      searchInput.value = 'zhao'
+      searchInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+      ;(container.querySelector('[data-notification-recipient-suggestion="user_2"]') as HTMLButtonElement).click()
+      await flushPromises()
+      expect(container.querySelectorAll('[data-notification-recipient]').length).toBe(2)
+      expect((container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement).value).toBe('user_1, user_2')
+
+      const messageInput = container.querySelector('[data-field="notificationMessage"]') as HTMLTextAreaElement
+      messageInput.value = 'Hello'
+      messageInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+
+      expect(saveBtn.disabled).toBe(false)
+      saveBtn.click()
+      await flushPromises()
+      expect(saved).toHaveBeenCalledTimes(1)
+      const payload = saved.mock.calls[0][0]
+      expect(payload.actions).toEqual([
+        { type: 'send_notification', config: { userIds: ['user_1', 'user_2'], message: 'Hello' } },
+      ])
+      // Storage stays ids-only: no name/email leaves the picker.
+      const serialized = JSON.stringify(payload)
+      expect(serialized).not.toContain('Lin Lan')
+      expect(serialized).not.toContain('lin@example.com')
+    })
+
+    it('keeps an unresolvable stored id as a raw chip with an unmatched hint, lets it be removed, and gates save until a user is picked', async () => {
+      const saved = vi.fn()
+      const client = rosterClient()
+      const rule = fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['4'], message: 'Ping' },
+        actions: [{ type: 'send_notification', config: { userIds: ['4'], message: 'Ping' } }],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, rule, onSave: saved })
+      await flushPromises()
+
+      // Persisted ids are resolved by exact-id lookup on open.
+      expect(client.listFormShareCandidates).toHaveBeenCalledWith('sheet_1', { q: '4', limit: 50 })
+      const rawChip = container.querySelector('[data-notification-recipient="4"]') as HTMLElement
+      expect(rawChip).toBeTruthy()
+      expect(rawChip.textContent).toContain('4')
+      expect(rawChip.getAttribute('data-notification-recipient-unresolved')).toBe('true')
+      expect(rawChip.textContent).toContain('No matching user for this ID')
+
+      // Still deletable.
+      rawChip.click()
+      await flushPromises()
+      expect(container.querySelector('[data-notification-recipient="4"]')).toBeNull()
+      expect((container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement).value).toBe('')
+      const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
+      expect(saveBtn.disabled).toBe(true)
+
+      // Pick a real member; the save payload carries the id list only.
+      const searchInput = container.querySelector('[data-field="notificationRecipientSearch"]') as HTMLInputElement
+      searchInput.value = 'lin@'
+      searchInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+      ;(container.querySelector('[data-notification-recipient-suggestion="user_1"]') as HTMLButtonElement).click()
+      await flushPromises()
+      expect(saveBtn.disabled).toBe(false)
+      saveBtn.click()
+      await flushPromises()
+      expect(saved.mock.calls[0][0].actions).toEqual([
+        { type: 'send_notification', config: { userIds: ['user_1'], message: 'Ping' } },
+      ])
+    })
+
+    it('opens an existing rule with resolved recipients shown by name and email', async () => {
+      const client = rosterClient()
+      const rule = fakeRule({
+        actionType: 'send_notification',
+        actionConfig: { userIds: ['user_1'], message: 'Ping' },
+        actions: [{ type: 'send_notification', config: { userIds: ['user_1'], message: 'Ping' } }],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, rule })
+      await flushPromises()
+
+      const chip = container.querySelector('[data-notification-recipient="user_1"]') as HTMLElement
+      expect(chip.textContent).toContain('Lin Lan')
+      expect(chip.textContent).toContain('lin@example.com')
+      expect(chip.getAttribute('data-notification-recipient-unresolved')).toBeNull()
+    })
+
+    it('surfaces a candidate search failure instead of an empty list and keeps the manual id entry usable', async () => {
+      const saved = vi.fn()
+      const client = mockClient()
+      client.listFormShareCandidates = vi.fn(async () => { throw new Error('Forbidden') })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client, onSave: saved })
+      await flushPromises()
+
+      const nameInput = container.querySelector('[data-field="name"]') as HTMLInputElement
+      nameInput.value = 'Notify without search permission'
+      nameInput.dispatchEvent(new Event('input'))
+      const actionSelect = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+      epSetSelect(actionSelect, 'send_notification')
+      await flushPromises()
+
+      const searchInput = container.querySelector('[data-field="notificationRecipientSearch"]') as HTMLInputElement
+      searchInput.value = 'lin'
+      searchInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+      expect((container.querySelector('[data-field="notificationRecipientSearchError"]') as HTMLElement).textContent).toContain('Forbidden')
+
+      const userIdsInput = container.querySelector('[data-field="notificationUserIds"]') as HTMLTextAreaElement
+      userIdsInput.value = 'user_9'
+      userIdsInput.dispatchEvent(new Event('input'))
+      const messageInput = container.querySelector('[data-field="notificationMessage"]') as HTMLTextAreaElement
+      messageInput.value = 'Hi'
+      messageInput.dispatchEvent(new Event('input'))
+      await flushPromises()
+
+      // Lookup failed rather than "not found": plain raw chip, no unmatched badge.
+      const chip = container.querySelector('[data-notification-recipient="user_9"]') as HTMLElement
+      expect(chip).toBeTruthy()
+      expect(chip.getAttribute('data-notification-recipient-unresolved')).toBeNull()
+
+      ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
+      await flushPromises()
+      expect(saved.mock.calls[0][0].actions).toEqual([
+        { type: 'send_notification', config: { userIds: ['user_9'], message: 'Hi' } },
+      ])
+    })
   })
 })

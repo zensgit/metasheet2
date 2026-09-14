@@ -131,6 +131,15 @@ export type AutomationLabelKey =
   | 'actionConfig.notificationMessagePlaceholder'
   | 'actionConfig.recipients'
   | 'actionConfig.recipientsPlaceholder'
+  | 'actionConfig.recipientSearch'
+  | 'actionConfig.recipientSearchPlaceholder'
+  | 'actionConfig.recipientSearching'
+  | 'actionConfig.recipientNoMatch'
+  | 'actionConfig.recipientUnresolved'
+  | 'actionConfig.recipientRemove'
+  | 'actionConfig.recipientInactive'
+  | 'actionConfig.recipientIdsManual'
+  | 'actionConfig.recipientIdsManualPlaceholder'
   | 'actionConfig.emailRecipientsHint'
   | 'actionConfig.subjectTemplate'
   | 'actionConfig.emailSubjectPlaceholder'
@@ -441,6 +450,15 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'actionConfig.notificationMessagePlaceholder',
   'actionConfig.recipients',
   'actionConfig.recipientsPlaceholder',
+  'actionConfig.recipientSearch',
+  'actionConfig.recipientSearchPlaceholder',
+  'actionConfig.recipientSearching',
+  'actionConfig.recipientNoMatch',
+  'actionConfig.recipientUnresolved',
+  'actionConfig.recipientRemove',
+  'actionConfig.recipientInactive',
+  'actionConfig.recipientIdsManual',
+  'actionConfig.recipientIdsManualPlaceholder',
   'actionConfig.emailRecipientsHint',
   'actionConfig.subjectTemplate',
   'actionConfig.emailSubjectPlaceholder',
@@ -763,6 +781,17 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'actionConfig.notificationMessagePlaceholder': { en: 'Notification message', zh: '通知内容' },
   'actionConfig.recipients': { en: 'Recipients', zh: '收件人' },
   'actionConfig.recipientsPlaceholder': { en: 'User IDs, comma or newline separated', zh: '用户 ID，逗号或换行分隔' },
+  // Notification recipient picker (send_notification): the author searches sheet members by name or
+  // email and picks them; only the user id is stored (actionConfig.userIds), never the name/email.
+  'actionConfig.recipientSearch': { en: 'Search users by name or email', zh: '按姓名或邮箱搜索用户' },
+  'actionConfig.recipientSearchPlaceholder': { en: 'Type a name or email to search', zh: '输入姓名或邮箱搜索' },
+  'actionConfig.recipientSearching': { en: 'Searching users…', zh: '正在搜索用户…' },
+  'actionConfig.recipientNoMatch': { en: 'No matching users', zh: '没有匹配的用户' },
+  'actionConfig.recipientUnresolved': { en: 'No matching user for this ID', zh: '未匹配到用户' },
+  'actionConfig.recipientRemove': { en: 'Remove', zh: '移除' },
+  'actionConfig.recipientInactive': { en: 'Inactive users cannot be added', zh: '不能添加已停用用户' },
+  'actionConfig.recipientIdsManual': { en: 'User IDs (manual entry, optional)', zh: '手动填写用户 ID（可选）' },
+  'actionConfig.recipientIdsManualPlaceholder': { en: 'Comma or newline separated user IDs, for users the search cannot find', zh: '搜索不到时可直接填写用户 ID，逗号或换行分隔' },
   'actionConfig.emailRecipientsHint': { en: 'Use comma or newline separated email addresses. Delivery uses the NotificationService email channel.', zh: '使用逗号或换行分隔邮箱地址。投递使用 NotificationService 邮件通道。' },
   'actionConfig.subjectTemplate': { en: 'Subject template', zh: '主题模板' },
   'actionConfig.emailSubjectPlaceholder': { en: '{{record.title}} needs attention', zh: '{{record.title}} 需要处理' },
