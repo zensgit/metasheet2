@@ -92,6 +92,11 @@ REQUIRED_PATHS=(
   "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   "scripts/ops/stock-preparation-onprem-acceptance.ps1"
   "scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
+  # SQL source onboarding acceptance: the "build a source -> bind it -> test it
+  # -> front-line dry-run" chain plus its tenant/permission refusals, run
+  # against the upgraded box. Values-free and PowerShell 5.1, same as its two
+  # siblings above, and useless unless it ships WITH the package it verifies.
+  "scripts/ops/stock-preparation-sql-source-onboarding-acceptance.ps1"
   "scripts/ops/stock-preparation-pm2-sample.mjs"
   "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/fixtures/integration-k3wise"

@@ -378,6 +378,7 @@ function verify_stock_preparation_mvp_contract() {
   local sealed_acceptance="${root}/scripts/ops/stock-preparation-s6a-onprem-acceptance.ps1"
   local sealed_runbook="${root}/docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md"
   local pm2_sample="${root}/scripts/ops/stock-preparation-pm2-sample.mjs"
+  local sql_source_acceptance="${root}/scripts/ops/stock-preparation-sql-source-onboarding-acceptance.ps1"
 
   search_fixed_string 'integration_stock_prep_audit' "$migration" || die "migration 066 must create the stock-preparation audit surface"
   search_fixed_string 'integration_sealed_export_stock_prep_bindings' "$sealed_runtime_migration" || die "migration 073 must create the sealed-export stock-preparation binding authority"
@@ -414,6 +415,18 @@ function verify_stock_preparation_mvp_contract() {
   search_fixed_string 'Unconditional Flag-Off Restoration' "$sealed_runbook" || die "S6-A runbook must require flag-off restoration"
   search_fixed_string 'nextTestMachineAction=STOP_AND_WAIT' "$sealed_runbook" || die "S6-A runbook must retain the separate S6-B execution gate"
   search_fixed_string 'metasheet-backend' "$pm2_sample" || die "stock-preparation PM2 safe projection helper must be packaged"
+
+  # SQL source onboarding acceptance. Existence FIRST (search_fixed_string on a
+  # missing file already dies, but the message would name a keyword instead of
+  # the absent script), then the four load-bearing markers: the cross-tenant
+  # alarm, the no-request planning mode, the offline self-test of its own
+  # classifiers, and the closed-loop claim it must never overstate.
+  [ -f "$sql_source_acceptance" ] || die "SQL source onboarding acceptance script must be packaged"
+  search_fixed_string 'ISOLATION_BREACH' "$sql_source_acceptance" || die "SQL source onboarding acceptance must flag an expected refusal that returned 2xx"
+  search_fixed_string '[switch]$DryRun' "$sql_source_acceptance" || die "SQL source onboarding acceptance must support a no-request dry run"
+  search_fixed_string 'stock-preparation/sql-source-onboarding-acceptance/self-test/v1' "$sql_source_acceptance" || die "SQL source onboarding acceptance must ship its values-free offline self-test"
+  search_fixed_string 'CLOSED_LOOP_PASS' "$sql_source_acceptance" || die "SQL source onboarding acceptance must distinguish a closed-loop pass from an environment probe"
+  search_fixed_string 'Read-AcceptanceCredential' "$sql_source_acceptance" || die "SQL source onboarding acceptance must read SQL credentials byte-exact, not through the token trimmer"
 }
 
 function verify_sealed_export_package_provenance() {

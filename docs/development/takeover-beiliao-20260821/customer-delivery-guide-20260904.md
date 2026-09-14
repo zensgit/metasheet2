@@ -95,6 +95,22 @@ New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
 3. 浏览器打开首页,Ctrl+F5 强刷一次,看到登录页才算通过。
 包侧的兜底:打包工作流的 `base_path` 参数默认就是 `/`,**不要在 Git Bash 里显式传 `-f base_path=/`**(MSYS 会把它改写成 Git 安装目录);打包完成后先解开 `apps/web/dist/index.html` 检查资源前缀,再上传。
 
+**升级后必查:SQL 源接入链路验收(2026-09-10 新增,PR #5576)**:前端 smoke 之后,再跑一遍 SQL 源接入的九步链路,证明"建源→绑定→测连接→源预检→删除保护→一线 dry-run"在这个包上仍然通,并且租户/权限门没被升级放开。脚本 `scripts/ops/stock-preparation-sql-source-onboarding-acceptance.ps1`(Windows PowerShell 5.1 可跑,values-free,凭据与 token 只从文件读、永不回显):先 `-DryRun` 打印计划不发请求,再正式跑:`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ops\stock-preparation-sql-source-onboarding-acceptance.ps1 -BaseUrl http://127.0.0.1 -OwnerTokenFile <owner.token> -OperatorTokenFile <operator.token> -ClaimlessTokenFile <claimless.token> -TenantId <租户id> -SqlHost <源库地址> -SqlDatabase <库名> -SqlUsernameFile <user.txt> -SqlPasswordFile <pass.txt> -ProjectNo <项目号>`。正例九步全部 PASS、负例(无租户声明 403、跨租户 404/403、被引用源删除 409)全部按预期拒绝、且报告里没有 `ISOLATION_BREACH` 才算通过;任一 ISOLATION_BREACH 立即停止并回滚,那是跨租户泄漏,不是环境问题。报告默认写到当前目录(`-ReportPath` 可改),留档到 `output\releases\incoming\tools-rNN\`。第 6 步源预检若答 503 `SOURCE_UNAVAILABLE`,是源库不可达而不是脚本或权限问题(见 §7 ⑪)。
+
+**怎么读结论:闭环 vs 非闭环(必读,否则会把绿当成"新源能用")**:脚本末尾会打三行——`CHAIN:`、必要时的 `-> NOT A CLOSED LOOP:`、以及 `CONCLUSION:`;JSON 报告里对应 `chainMode` / `closedLoop` / `boundSourceDigest` / `conclusion`。原因是 STEP4 源预检和 STEP6 一线 dry-run 读的是**部署里那张备料表动作当前绑定的源**,而不是本次新建的临时源;脚本绝不会去改生产绑定来凑闭环,它只读 `GET /api/integration/stock-preparation/source-binding` 的 `effectiveExternalSystemId`,再读该外接系统的 `connectionId` 和本次新建的数据源 id 比对。另一半是**必需步骤有没有真跑过**:只有那十步全是 PASS,才谈得上"通过"。四种结论:
+
+- `CONCLUSION: CLOSED_LOOP_PASS` —— 绑定的确实是本次新建的源,"建源→一线 dry-run"整条链被证明通了。这是唯一能对客户说"新接的源能用"的情形。
+- `CONCLUSION: ENV_PROBE_PASS` —— **全绿,但不是闭环**。九步都过了,只是 STEP4/STEP6 测的是既有那条已经绑好的源(报告里 `closedLoop: false`,既有源用 `boundSourceDigest` 指代,即其 id 的 sha256 前 12 位,不回显 id)。含义:这台机器上的备料链路是好的,但"新建的这个源本身能不能被一线拉数"这次没测到。要真正验新源,得先在工作台里把动作绑到新源再跑一遍。日常升级回归跑到这一档就够;新源接入交付必须拿到 CLOSED_LOOP_PASS。
+- `CONCLUSION: INCOMPLETE` —— **不完整,不是通过**。闭环必需的十步(建源、绑定读回比对、
+  测连接的调用与落库、三条绑定/预检腿、一线项目目录与 dry-run)里有步骤没跑或没过,
+  脚本会逐行打 `MISSING STEP <步骤id> <SKIP|WARN|NOT_RUN>`,并用 `MISSING INPUT` 点名缺的输入:
+  `PROJECT_NO`(没给 `-ProjectNo`)或 `OPERATOR_TOKEN`(没给 `-OperatorTokenFile`)。
+  这一档**既不能说闭环通过,也不能说环境探针通过**——一线那一腿根本没测。补上缺的输入重跑。
+  注意这一档退出码仍是 0,别只看退出码。
+- `CONCLUSION: FAILED` —— 有 FAIL 或 ISOLATION_BREACH,退出码 1,按上一段处理。
+
+另外三点口径:STEP3 测连接**只有 HTTP 200 不算过**,必须 `data.ok=true` 且回读的 `status` 不是 `error`、`lastError` 为空——源库连不上时接口照样答 200 并把失败存进去,老口径会把连不上判成通过;STEP4 源预检看的是 `data.ok` 与 `data.verdict`,`verdict: no-go` 判 FAIL。凭据文件的换行约定:`-SqlUsernameFile` / `-SqlPasswordFile` **按字节原样读,只剥一个结尾换行(CRLF 或 LF)**,首尾空格属于密码的一部分会保留(用 `Set-Content -NoNewline` 或留一个结尾换行都可以,别留两个);token 文件仍然首尾去空白。文件请存成 UTF-8 或纯 ASCII。上机前可以先跑 `-SelfTest` 自检(不发任何请求、不读真凭据),打印一份分类器判定的 JSON。
+
 **r17 升级验证记录(2026-09-08,222,main `61ecc67d1`,包 12.49 MB)**:
 
 - **04:55 就地升级**:pg_dump 备份完成、442 个文件哈希核对通过、迁移 0 条(无新增迁移)、health 200。
