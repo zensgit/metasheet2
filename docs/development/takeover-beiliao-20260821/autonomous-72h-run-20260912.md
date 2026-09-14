@@ -36,6 +36,11 @@
 - **X6**:impl 63af19045 → r1 2+2 → fix d1e0bb1a6 → r2 1+4 → fix 4779a0997 → r3 2+2 → 终审 FIX_FIRST 2 条(边界二三类点名 + planner 级用例;边界三:plan.counts 变 ⇒ revision 变 ⇒ 确认账本已确认决议 supersede、当轮 hold/409 一次)。规格两句绝对句被证伪(「没有任何一格取值会变」/「mark_inactive/add 不受影响」),正文改成有界版。M1/M2/M3/M5 红;表示层探针证实 X6 后 SKIP 保持存量表示。
 - **环境**:09-12 18:30 另一会话清 worktree 误删主检出 node_modules(18:50 恢复);09-12 21:10 起 429 + 直连被墙 ⇒ 主循环停 ~35 h(09-14 08:03 由用户 continue 唤醒);根因 = 重启后无 TUN,本机代理 127.0.0.1:52520 可用,所有 git/gh 改走代理。
 
+### 4.1 上机
+
+- **r36(`caf8128ad` = r35 + X5 #5685 + E #5684 + X6 #5686,09-14 09:16 上 222;用户「今天要交出来」⇒ 白天上机)**:备份 `pre-r36-20260914-091630.dump`;维护门 WIRED → 后端直连 attempt 7 → 删 flag → nginx 200;upgrade exit 0;web smoke PASS(bundle 与 r35 相同,三支都是后端/插件改动);标记 X5 `createRowErrorCollector` / E `notification-retention` dist(env 未设 ⇒ 默认关)/ X6 `intakeProvidesField` 全 True;事后错误 0 行、flag 不存在、health 200。
+- **X6 现场实证**:演示项目 2-20241722.1723 dry-run 从 r35 的「update:1(根行永不收敛的空 update)」变为 **update 0 / skip 581 / manual_confirm 0**——全量收敛。
+
 ## 5. 未做与原因(截至 09-14 上午)
 
 - **#5625 重基合入(B)**:等 X6 合入;需改三条「翻转 update」用例断言并解 ledger 文档冲突。若今天时间不够,留下一窗口(后台大 BOM 链的 ext_ 列继续落不到表上;交互链不受影响)。
