@@ -60,6 +60,7 @@ import type {
 import {
   collectSecretConfigValues,
   DATA_SOURCE_CONNECTION_SECRET_REJECTED_CODE,
+  findSecretConfigKeyPaths,
   isSecretConfigKey,
   secretKeyValueTextPattern,
   stripSecretConfigKeys,
@@ -312,6 +313,14 @@ describe('#5621 A — write entry refuses secrets under connection (fail-closed,
     // before the `pass` whole-token test, so these camel/underscore spellings hit and 400.
     ['passThroughMode (camel split -> [pass, through, mode])', { passThroughMode: 'direct' }],
     ['pass_through (underscore split -> [pass, through])', { pass_through: 'yes' }],
+    // F03 (#5648 §6 follow-up): every one of these was ACCEPTED before the vocabulary widening —
+    // stored in plaintext under `connection` and echoed back by GET /:id.
+    ['dbpass (qualifier glued with no separator)', { dbpass: 'x' }],
+    ['db_pw (pw token)', { db_pw: 'x' }],
+    ['pswd', { pswd: 'x' }],
+    ['passcode', { passcode: 'x' }],
+    ['ｐａｓｓｗｏｒｄ (fullwidth, folded by NFKC)', { 'ｐａｓｓｗｏｒｄ': 'x' }],
+    ['Ｔｏｋｅｎ (fullwidth, folded by NFKC)', { 'Ｔｏｋｅｎ': 'x' }],
   ])('POST create refuses connection.%s', async (_label, extra) => {
     const res = await as(OWNER)
       .post('/api/data-sources')
@@ -349,6 +358,41 @@ describe('#5621 A — write entry refuses secrets under connection (fail-closed,
     })
   })
 
+  /**
+   * F03 ZERO-COLLATERAL CHECK at the WRITE ENTRY, not just at the predicate. Every `connection` key
+   * the five REGISTERED adapters actually read (PostgresAdapter/MySQLAdapter: host, port, database,
+   * ssl; MSSQLAdapter: server, encrypt, trustServerCertificate, legacyTls, tlsMinVersion,
+   * tlsCiphers, connectionTimeoutMs, requestTimeoutMs, strictOffsetOrdering; HTTPAdapter/PLMAdapter:
+   * baseURL, url) plus `instanceName` (data-source-plugin-facade.ts:680-688 sealed-snapshot field)
+   * is sent in ONE payload. `headers` — the 17th — is object-valued and cannot pass the scalar-only
+   * ConnectionConfigSchema, so it is covered by the predicate table in group D instead.
+   * A single new word that over-matches turns this 201 into a 400.
+   */
+  it('F03 NARROWNESS: all 16 scalar connection keys the registered adapters read still create 201', async () => {
+    const id = 'dscs-legit-all'
+    const connection = {
+      host: 'db.internal.example',
+      server: 'db.internal.example\\INST',
+      port: 1433,
+      database: 'plm',
+      ssl: false,
+      encrypt: true,
+      trustServerCertificate: false,
+      instanceName: 'INST',
+      legacyTls: false,
+      tlsMinVersion: 'TLSv1.2',
+      tlsCiphers: 'DEFAULT',
+      connectionTimeoutMs: 10000,
+      requestTimeoutMs: 30000,
+      strictOffsetOrdering: true,
+      baseURL: 'https://api.internal.example',
+      url: 'https://api.internal.example/v1',
+    }
+    const res = await as(OWNER).post('/api/data-sources').send(createPayload(id, { connection }))
+    expect(res.status).toBe(201)
+    expect(res.body.data.connection).toMatchObject(connection)
+  })
+
   it('NESTED shape (connection.headers.Authorization) => the SAME coded 400, not a generic VALIDATION_ERROR', async () => {
     const res = await as(OWNER)
       .post('/api/data-sources')
@@ -372,6 +416,22 @@ describe('#5621 A — write entry refuses secrets under connection (fail-closed,
     expect(res.body.error.code).toBe(DATA_SOURCE_CONNECTION_SECRET_REJECTED_CODE)
     expect(res.body.error.message).toContain('connection.<key>')
     expect(res.body.error.message).not.toContain('hunter2')
+  })
+
+  it('F03 a FULLWIDTH secret key is refused and reported as <key> (the raw key is never echoed)', async () => {
+    const res = await as(OWNER)
+      .post('/api/data-sources')
+      .send(createPayload('dscs-refuse-fullwidth', {
+        connection: { host: 'db.internal.example', 'ｐａｓｓｗｏｒｄ': POISON.connectionPassword },
+      }))
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe(DATA_SOURCE_CONNECTION_SECRET_REJECTED_CODE)
+    // NFKC decides the MATCH; `safeSegment` still governs what is echoed, and fullwidth code points
+    // are not identifier-shaped, so the path is reported as `<key>` rather than reflected back.
+    expect(res.body.error.message).toContain('connection.<key>')
+    expect(res.body.error.message).not.toContain('ｐａｓｓｗｏｒｄ')
+    expectNoPoison(res.body)
+    expect(persisted.has('dscs-refuse-fullwidth')).toBe(false)
   })
 
   it('PUT /api/data-sources/:id with connection.password => coded 400, stored connection untouched', async () => {
@@ -524,6 +584,84 @@ describe('#5621 D — one word list feeds the schema refusal, the read strip and
     'passthrough', 'bypass', 'keyspace', 'primaryKeyColumn',
   ])('isSecretConfigKey("%s") === false (narrowness)', (key) => {
     expect(isSecretConfigKey(key)).toBe(false)
+  })
+
+  // ── F03 (#5648 §6 follow-up): vocabulary + NFKC ──────────────────────────────────────────────
+  // Every key below returned FALSE before the fix, i.e. it was accepted by the write entry, stored
+  // in plaintext under `connection` and echoed by GET /:id.
+  it.each([
+    // glued qualifier, no separator — `pass` alone could not see these
+    'dbpass', 'pgpass', 'sqlpass', 'userpass', 'adminpass',
+    // `pw`
+    'pw', 'db_pw', 'dbPw', 'userPw', 'rootpw',
+    // misspellings / synonyms
+    'pswd', 'dbPswd', 'passcode', 'devicePasscode',
+    // fullwidth compatibility forms (NFKC); before the fold these normalised to '' and matched nothing
+    'ｐａｓｓｗｏｒｄ', 'ｐｗｄ', 'ｓｅｃｒｅｔ', 'Ｔｏｋｅｎ', 'ＡＰＩ＿ＫＥＹ',
+  ])('F03 isSecretConfigKey("%s") === true (was false before the widening)', (key) => {
+    expect(isSecretConfigKey(key)).toBe(true)
+  })
+
+  // The price of the qualifier LIST instead of a plain substring `pass` / `pw`: these stay legal.
+  // A substring rule would refuse every one of them, and the write entry is fail-closed, so each
+  // false positive would be a configuration a caller can no longer send.
+  it.each([
+    'bypass', 'compass', 'compassPoint', 'surpass', 'trespass', 'overpass', 'encompass',
+    'passive', 'passiveMode', 'passenger',
+    'httpwait', 'httpWait', 'tcpWindowSize', 'sftpWorkdir', 'ftpWorkingDirectory',
+  ])('F03 isSecretConfigKey("%s") === false (qualifier list, not a substring rule)', (key) => {
+    expect(isSecretConfigKey(key)).toBe(false)
+  })
+
+  // Pinned so the rejected proposal cannot come back in through the F03 door: matching "the LAST
+  // token" would make these two FALSE. They are real secret shapes and must stay TRUE.
+  it.each(['passHash', 'passValue'])('isSecretConfigKey("%s") === true (last-token rule stays rejected)', (key) => {
+    expect(isSecretConfigKey(key)).toBe(true)
+  })
+
+  it('F03 the SAME new words reach all three legs: path scan, strip, and the write entry', () => {
+    // leg 1 — findSecretConfigKeyPaths (what the route refuses on), including nested containers
+    expect(
+      findSecretConfigKeyPaths(
+        { host: 'h', dbpass: 'a', headers: { pswd: 'b', 'ｐａｓｓｗｏｒｄ': 'c' }, passive: true },
+        'connection',
+      ).sort(),
+    ).toEqual(['connection.dbpass', 'connection.headers.<key>', 'connection.headers.pswd'])
+
+    // leg 2 — stripSecretConfigKeys (what a legacy row is echoed as). Keys are deleted by their
+    // ORIGINAL spelling; only the MATCH is NFKC-folded.
+    expect(
+      stripSecretConfigKeys({
+        host: 'h',
+        dbpass: 'a',
+        'ｐａｓｓｗｏｒｄ': 'b',
+        passive: true,
+        headers: { 'content-type': 'application/json', passcode: 'c' },
+      }),
+    ).toEqual({ host: 'h', passive: true, headers: { 'content-type': 'application/json' } })
+
+    // leg 3 — the value list redactSecrets works from
+    expect(collectSecretConfigValues([{ dbpass: 'conn-secret' }, { headers: { 'ｐｗｄ': 'nested' } }]).sort())
+      .toEqual(['conn-secret', 'nested'])
+  })
+
+  it('F03 VALUES ARE NEVER NFKC-FOLDED — only key names are', () => {
+    const fullwidthValue = 'ｈｕｎｔｅｒ２'
+    // The value survives byte-for-byte under a legitimate key…
+    expect(stripSecretConfigKeys({ host: fullwidthValue })).toEqual({ host: fullwidthValue })
+    // …and is collected verbatim (not folded to 'hunter2') when it sits under a secret key.
+    expect(collectSecretConfigValues([{ password: fullwidthValue }])).toEqual([fullwidthValue])
+  })
+
+  it('F03 the text pattern gained the same words and kept the same narrowness', () => {
+    const redact = (text: string) => text.replace(secretKeyValueTextPattern(), '$1***')
+    for (const word of ['dbpass', 'pgpass', 'pw', 'db_pw', 'pswd', 'passcode']) {
+      expect(redact(`boom ${word}=hunter2`)).not.toContain('hunter2')
+    }
+    // …and still does NOT eat the non-secret neighbours (no qualifier matches `by` / `com`).
+    for (const word of ['bypass', 'compass', 'passive']) {
+      expect(redact(`boom ${word}=keepme`)).toContain('keepme')
+    }
   })
 
   it('stripSecretConfigKeys removes secret-shaped keys at every depth and keeps the rest verbatim', () => {
