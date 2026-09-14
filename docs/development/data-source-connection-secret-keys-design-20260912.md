@@ -143,7 +143,7 @@ SELECT column_name, data_type
    AND column_name IN ('config', 'connection');
 ```
 
-**(2) 两段正则**（下文所有 SQL 里的 `<SECRET_SUBSTRING>` / `<SECRET_GLUED>` 都原样替换成这两行，改词表时只改这里）：
+**(2) 两段正则**（下文所有 SQL 里的 `<SECRET_SUBSTRING>` / `<SECRET_GLUED>` 都原样替换成这两行，改词表时只改这里；唯一的例外是下面的 **B**——它被真库道逐字执行，所以两段正则在那里是**已展开**的字面量，改词表要连它一起改，真库道的 doc-sync 断言会逼你改）：
 
 ```
 <SECRET_SUBSTRING> = (password|passwd|pwd|pswd|passphrase|passcode|secret|token|credential|apikey|accesskey|privatekey|authorization)
@@ -164,7 +164,33 @@ SELECT k AS connection_key, count(*)::int AS rows
  ORDER BY rows DESC, connection_key;
 ```
 
-B. 命中计数（**顶层键**，#5648 版词表，只出一个数）：
+B. 命中计数（**顶层 + `{connection,headers}` 嵌套**，F03 词表，只出一个数）——形状 A（现役 `config jsonb`）：
+
+```sql
+SELECT count(*)::int AS affected_rows
+  FROM data_sources ds
+ WHERE EXISTS (
+         SELECT 1
+           FROM (VALUES ('{connection}'::text[]),
+                        ('{connection,headers}'::text[])
+                ) AS p(path)
+           CROSS JOIN LATERAL jsonb_object_keys(
+                 CASE WHEN jsonb_typeof(ds.config #> p.path) = 'object'
+                      THEN ds.config #> p.path
+                      ELSE '{}'::jsonb END
+               ) AS keys(k)
+          WHERE lower(regexp_replace(keys.k, '[^A-Za-z0-9]', '', 'g'))
+                ~ '(password|passwd|pwd|pswd|passphrase|passcode|secret|token|credential|apikey|accesskey|privatekey|authorization)'
+             OR lower(regexp_replace(keys.k, '[^A-Za-z0-9]', '', 'g'))
+                ~ '^(db|pg|pgsql|my|sql|mysql|mssql|ora|oracle|redis|mongo|user|usr|admin|root|login|account|acct|svc|service|app|client|api|auth|conn|connection|ftp|sftp|ssh|smtp|imap|mail|proxy)?(pass|pw)$'
+       );
+```
+
+**逐字同源（F11）。** 上面这块与真库件常量 `INVENTORY_SQL`（`packages/core-backend/tests/integration/data-source-connection-secret-keys-realdb.test.ts:89` 起）**逐字一致**，唯一的差别是本块结尾那个 `;`——常量不带分号，因为它还要被 `scopeToIds` 拼进一段行过滤。真库道拿同一个字符串跑两种执行：**不带过滤原样跑**（证明它在真 schema 上能解析执行，且只回一列 `affected_rows`、从不 SELECT 值），再**按 id 限定**跑若干次做正例/反例。件里那条 `the design doc §5 B block is byte-identical…` 断言直接读本文件，把「doc 里含 `INVENTORY_SQL + ';'`」钉死：**改了一边不改另一边，真库道当场红**（该断言不需要数据库，任何一次收集本件都会跑）。
+
+**为什么从 #5648 版升级（F11）。** 旧 B（下面那块）是 #5648 的词表 + 只看顶层，于是**应用拒收的键比它盘得出的多**：`connection.dbpass`（F03 的限定词规则）与 `connection.headers.Authorization`（嵌套）它都盘不到。盘点**少报**是迁移单唯一不能犯的错——没数进来的行就是没人清的行，所以 B 跟着应用判据走。真库件各种了一行做正例：升级后的 B 盘出 2 行、旧 B 盘出 0 行；同时对既有的 `connection.password` 遗留行两版都盘出 1（是**超集**不是替换）。另有一行只带 `passive` / `bypass` / `compass` / 普通 `headers` 的**反例**行，B 必须盘出 0——`<SECRET_GLUED>` 会被迁移的 `UPDATE` 拿去**删键**，多报就是删掉在用配置。
+
+旧 B（**#5648 版，已被上面取代**；留在这里只为真库件那条对照断言有同源出处，**不要拿它规划迁移**）：
 
 ```sql
 SELECT count(*)::int AS affected_rows
@@ -177,30 +203,11 @@ SELECT count(*)::int AS affected_rows
        );
 ```
 
-B 由真库道**原样执行**（`tests/integration/data-source-connection-secret-keys-realdb.test.ts` 最后一例），所以它不会随 schema 变化而腐烂——代价是它的正则被钉成了 #5648 那一版（既没有 F03 的新词，也没有嵌套分支）。**真正盘点以下面的 B2 为准**，B 只当"这段 SQL 还能在真 schema 上跑"的活证据。
+B2. **B 的两个扩展位**（都**没有**被真库道执行，本机也一条未跑）：
 
-B2. 命中计数（**顶层 + 嵌套路径**，F03 词表）——形状 A：
+**(a) 加路径行。** 若 A 的键普查显示还有别的嵌套容器，在 VALUES 表里照 `('{connection,headers}'::text[])` 的样子加行。`('{credentials}'::text[])` 是最常被想到的一行，但**默认不要加进盘点数**：`credentials` 是加密后的合法归宿，加进去会把完全正常的行一并计入"明文存量"。排查时临时加，出工单数时去掉。
 
-```sql
-SELECT count(*)::int AS affected_rows
-  FROM data_sources ds
- WHERE EXISTS (
-         SELECT 1
-           FROM (VALUES ('{connection}'::text[]),
-                        ('{connection,headers}'::text[]),
-                        ('{credentials}'::text[])        -- 可按 A 的键普查继续加行
-                ) AS p(path)
-           CROSS JOIN LATERAL jsonb_object_keys(
-                 CASE WHEN jsonb_typeof(ds.config #> p.path) = 'object'
-                      THEN ds.config #> p.path
-                      ELSE '{}'::jsonb END
-               ) AS keys(k)
-          WHERE lower(regexp_replace(keys.k, '[^A-Za-z0-9]', '', 'g')) ~  '<SECRET_SUBSTRING>'
-             OR lower(regexp_replace(keys.k, '[^A-Za-z0-9]', '', 'g')) ~  '<SECRET_GLUED>'
-       );
-```
-
-形状 B 只需把 `ds.config #> p.path` 换成 `ds.connection #> p.path`，并把 VALUES 里的路径去掉首段（`'{}'::text[]` 表示 `connection` 自身、`'{headers}'` 表示嵌套头）：
+**(b) 形状 B（独立 `connection` 列）。** 只需把 `ds.config #> p.path` 换成 `ds.connection #> p.path`，并把 VALUES 里的路径去掉首段（`'{}'::text[]` 表示 `connection` 自身、`'{headers}'` 表示嵌套头）。真库件只种/只跑**形状 A**（它 INSERT 的就是 `config jsonb`，应用代码也只认这一种），所以下面这段没有任何执行证据：
 
 ```sql
            FROM (VALUES ('{}'::text[]), ('{headers}'::text[])) AS p(path)
@@ -235,16 +242,17 @@ SELECT count(DISTINCT w.id)::int AS affected_rows
 
 （把最后两行的 `count(DISTINCT w.id)` 换成 `SELECT DISTINCT w.path || keys.k AS secret_path` 就得到"键路径清单"，仍然只出键名、不出值。没用 `jsonb_path_query(..., '$.**.keyvalue()')` 那个更短的写法：`.**` 配 `.keyvalue()` 在 lax 模式下对非对象节点的行为本机无 PG 可证，递归 CTE 的语义是确定的。）
 
-B/B2/B3 与应用判据的**已知差异**（都只会**漏报**，不会多报）：
+B/B2/B3 与应用判据的**已知差异**（F11 之后 B 的**词表与路径**已经与应用判据对齐；下面 1-4 是仍然存在的**漏报**，第 5 条是唯一一个**多报**方向，别把这段读成"只会漏报"）：
 
 1. **切词只在应用侧**：应用把 `passThroughMode` 切成 `[pass, through, mode]` 后命中，SQL 归一化成 `passthroughmode` 后不命中；同理 `passHash` 应用命中、SQL 不命中。SQL 认得的是"整键就是（限定词+）`pass`/`pw`"。以 A 的键普查兜底，人工过一眼键名。
 2. **数组不进 B3**：`jsonb_each` 对数组报错，B3 用 `jsonb_typeof(e.value) = 'object'` 只下钻对象；应用侧 `findSecretConfigKeyPaths` 会走数组。存量 `connection` 里出现数组容器的概率极低，但这是差异。
 3. **全角/兼容字形**：应用侧 F03 之后做 NFKC，SQL 侧**没做**——`connection.ｐａｓｓｗｏｒｄ` 归一化后是空串，B/B2/B3 都盘不到。PG 侧要补需要 `normalize(k, NFKC)`（PG 13+ 对 `text` 可用），本机无 PG 未验证，先由 A 的键普查肉眼兜住（全角键在键名清单里一眼可见）。
 4. **值面盘不出来**：口令藏在 URL userinfo（`connection.baseURL = 'https://user:pw@host'`）里时键名是 `baseURL`，所有这些查询都只认键名，永远看不见它。见 §6（F01）。
+5. **唯一的多报方向：被分隔符拆开的词**。SQL 是"先去掉所有非字母数字、再整体比对"，应用是"先按非字母数字**切词**、再逐词比对"，所以 `p-ass`、`d_b_p_a_s_s` 这种把词本身拆碎的键，SQL 命中而应用**不**命中（应用切出的 token 是 `p`/`ass`）。真库件的反例行钉住的是常见误伤（`passive` / `bypass` / `compass` / 普通 `headers`），钉不住这种病态拼写；迁移的 `UPDATE` 是**删键**，所以第 1 步的 A 键普查必须人工过一眼键名表，别只看 B 的那个数字。
 
 ### 迁移方案（另单执行）
 
-1. 先跑列形状探针 + A + B2，把受影响行数与键名固定成工单证据；
+1. 先跑列形状探针 + A + B（需要别的嵌套容器或形状 B 时按 B2 的两个扩展位改 B），把受影响行数与键名固定成工单证据；
 2. 备份 `data_sources`（形状 A 至少 `id, config` 两列；形状 B 至少 `id, connection`）；
 3. 去键（不改任何其它字段）。**顶层**（形状 A）：
 
@@ -259,7 +267,7 @@ UPDATE data_sources ds
        ),
        updated_at = NOW()
  WHERE jsonb_typeof(ds.config->'connection') = 'object'
-   AND <与 B2 相同的 EXISTS 条件>;
+   AND <与 B 相同的 EXISTS 条件>;
 ```
 
 3b. **嵌套 `{connection,headers}`**（形状 A）——**单独一步，且不能和上一步一起无脑跑**，理由见第 5 条：
@@ -294,7 +302,7 @@ UPDATE data_sources ds
                       WHERE lower(regexp_replace(e.key, '[^A-Za-z0-9]', '', 'g')) !~ '<SECRET_SUBSTRING>'
                         AND lower(regexp_replace(e.key, '[^A-Za-z0-9]', '', 'g')) !~ '<SECRET_GLUED>'),
        updated_at = NOW()
- WHERE jsonb_typeof(ds.connection) = 'object' AND <与 B2 相同的 EXISTS 条件>;
+ WHERE jsonb_typeof(ds.connection) = 'object' AND <与 B 相同的 EXISTS 条件（按 B2(b) 换成 ds.connection）>;
 
 -- 形状 B 嵌套
 UPDATE data_sources ds
@@ -308,9 +316,9 @@ UPDATE data_sources ds
  WHERE jsonb_typeof(ds.connection #> '{headers}') = 'object' AND <同上 EXISTS>;
 ```
 
-**以上 SQL 一条都没有实跑**（本机无 Postgres，见验证文档 §4/§9），语法按 PG 16 文档写：`jsonb_set(target, path, new_value[, create_missing])`、`#>`、`jsonb_typeof`、`jsonb_object_keys`、`jsonb_each`、`jsonb_object_agg`、`WITH RECURSIVE`。上机前先在**备份库**上跑一遍，并先用 `SELECT` 版（把 `UPDATE … SET` 换成 `SELECT ds.id, <新值>`）对照几行再落 UPDATE。
+**以上迁移 SQL 一条都没有实跑**（本机无 Postgres，见验证文档 §4/§9；§5 里唯一有执行证据的是盘点 **B**——它由 CI 真库道在 `postgres:16` 上原样执行，本机同样没跑，见验证文档 §9.8），语法按 PG 16 文档写：`jsonb_set(target, path, new_value[, create_missing])`、`#>`、`jsonb_typeof`、`jsonb_object_keys`、`jsonb_each`、`jsonb_object_agg`、`WITH RECURSIVE`。上机前先在**备份库**上跑一遍，并先用 `SELECT` 版（把 `UPDATE … SET` 换成 `SELECT ds.id, <新值>`）对照几行再落 UPDATE。
 
-4. 复跑 **B2**（不是 B），期望 0；
+4. 复跑 **B**（F11 之后 B 已经是与应用判据对齐的那一版；`credentials` 不在它的路径表里，所以"清干净"就是 0），期望 0；
 5. **把被删掉的口令视为已泄露**（它进过 GET 响应，多半也进过 `audit_logs.meta`），通知 owner 走 `PUT /:id/credentials` 轮换；删除这些**顶层秘密形状键**不会弄坏任何连接——§1 证明的是"没有适配器按**键名**从 `connection` 取秘密"。
 
    **第 3b 步（嵌套 headers）不享受这条理由，必须单独走。** §1 的反例 2 是实测的：`connection.headers.Authorization` 是 PLMAdapter 在运行时写回、HTTPAdapter 真的会铺进 axios 默认头的**在用凭证**（`PLMAdapter.ts:1076-1080`/`:1200-1205`、`HTTPAdapter.ts:140,:147`）。删掉它 = 让该数据源当场失去认证，直到令牌重新签发。因此 3b 是"先与 owner 约定重新签发/重连窗口，再执行"的一步，不能和第 3 步打包成一条运维命令；F02 落地（Bearer 不再写回 config）之后 3b 才会退化成纯清理。URL userinfo 里的口令（反例 1）同理是在用凭证，且**任何一条 SQL 都看不见它**（键名是 `baseURL`）。
@@ -331,6 +339,7 @@ UPDATE data_sources ds
 | F02 | **PLMAdapter 别把 Bearer 写回 `config.connection`**：改存私有字段、建 axios client 时再合并 headers，从源头消掉"PUT 一次就把进程内令牌落库一次" | `PLMAdapter.ts:1076-1080`、`:1200-1205` |
 | ~~F03~~ | **已落地**（分支 `fix/data-source-secret-keys-vocab-nfkc`，叠在本 PR 上）：词表补 `pw` / `pswd` / `passcode` + 限定词前缀 + NFKC，`dbpass`、`db_pw`、`pswd`、`passcode`、`ｐａｓｓｗｏｒｄ` 全部改判拒收。见上面 §2 的「F03 词表扩容 + NFKC」与验证文档 §9 | `data-source-secret-keys.ts` |
 | ~~F10~~ | **已落地**（同上分支）：§5 加了列形状探针、B2（顶层 + `{connection,headers}` 嵌套）、B3（全深度递归）、迁移 UPDATE 的 3b 嵌套分支，形状 A / 形状 B 两套都给；**全部未实跑**（本机无 PG） | 本文件 §5 |
+| ~~F11~~ | **已落地**（同上分支）：F10 之后 B 还停在 #5648 的词表 + 只看顶层，**应用拒收的键比 B 盘得出的多**（少报）。现在 B = F03 词表 + `{connection,headers}`，与真库件常量 `INVENTORY_SQL` 逐字同源，并由真库道用种下的粘连行（`connection.dbpass`）/ 嵌套行（`connection.headers.Authorization`）/ 反例行（`passive`·`bypass`·`compass`）实跑出正例、对照与零误伤；形状 B 仍然无执行证据 | 本文件 §5 + `tests/integration/data-source-connection-secret-keys-realdb.test.ts` |
 | — | **admin bulk 路由对 `data_sources` 的原始写**：`routes/admin-routes.ts:1259-1318` 的 `PUT /api/admin/data/bulk`，`validTables` 含 `data_sources`（`:1283`），`:1315` `db.updateTable(table).set(updates)` 原样落库，绕过 `refuseConnectionSecrets` 与 `configToRecord`；同文件 `:1197` 的 bulk delete 同理可删源。**门是 `requireSafetyCheck({operation: BULK_UPDATE})`（`:1261-1268`）而不是 `requireAdminRole`**（`admin-routes.ts:92` 的 `requireAdminRole()` 挂在另一条"安全确认"端点上，不在这条链里）；`BULK_UPDATE` 在 `guards/SafetyGuard.ts:57` 是 `RiskLevel.HIGH`，因此要走确认令牌流程——该流程是否等价于"仅平台管理员"本轮未复核。读面仍被 `sanitizeConfig` 剥。建议把 `data_sources` 从两张 `validTables` 里摘掉，与在飞的 #5593 存储线协调后执行 | `routes/admin-routes.ts` |
 
 ## 7. 与在飞 PR 的争用

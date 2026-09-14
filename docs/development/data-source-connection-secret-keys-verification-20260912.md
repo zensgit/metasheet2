@@ -13,7 +13,7 @@
 | `packages/core-backend/src/routes/data-sources.ts` | 改：import（:13、:35-40）、`sanitizeConfig` 剥离（:338-344）、拒收判据/守卫（:346-396）、三条写路由接线（:532/:618/:684） |
 | `packages/core-backend/src/data-adapters/BaseAdapter.ts` | 改：import（:3）、`redactSecrets` 改用共享词表（:502-517） |
 | `packages/core-backend/tests/unit/data-source-connection-secret-keys.test.ts` | 新增：68 例（终审返修 → 76；后续单 F03 → 123，见 §9） |
-| `packages/core-backend/tests/integration/data-source-connection-secret-keys-realdb.test.ts` | 新增：4 例（真库道，本机 skip） |
+| `packages/core-backend/tests/integration/data-source-connection-secret-keys-realdb.test.ts` | 新增：4 例（真库道，本机 skip）；后续单 F11 → 6 例 + 1 条无库也跑的 doc-sync 断言，见 §9.8 |
 | `.github/workflows/data-source-connection-secret-keys-realdb.yml` | 新增：**独立**真库道（`plugin-tests.yml` 是 s6a pin 输入，本刀逐字未动） |
 | `packages/core-backend/vitest.config.ts` | 改：把真库件排除出无库默认配置（与上一行同提交，两点接线） |
 
@@ -259,7 +259,59 @@ $ tsc --noEmit -p packages/core-backend/tsconfig.json                 -> exit 0
 设计文档 §5 新增的列形状探针、B2、B3、迁移 3b 以及形状 B 的两条 UPDATE，**本机全部未执行**（无 Postgres，`DATABASE_URL` 未设），语法按 PG 16 文档写。已经做到的核对只有三条，不要读成"验证过"：
 
 1. **列形状二选一是实读出来的**：`src/db/migrations/20251206000001_create_data_sources_table.ts:30` 建 `config jsonb`，`migrations/040_data_sources.sql:12` 建 `connection JSONB`（两份 DDL 都带 `IF NOT EXISTS`/`checkTableExists` 守卫，谁先跑谁生效）；`db/types.ts:895` 与全部应用代码按 `config` 走。所以文档给了两套并要求上机前先跑 `information_schema` 探针。
-2. **B 未改一个字节**：真库件 `tests/integration/data-source-connection-secret-keys-realdb.test.ts:160-169` 里那段与文档 §5 的 B **仍逐字相同**（本次没碰真库件），CI 真库道的那条断言不受影响；代价是 B 的正则停在 #5648 版，文档已改成"盘点以 B2 为准，B 只作活证据"。
+2. **B 未改一个字节**：真库件 `tests/integration/data-source-connection-secret-keys-realdb.test.ts:160-169` 里那段与文档 §5 的 B **仍逐字相同**（本次没碰真库件），CI 真库道的那条断言不受影响；代价是 B 的正则停在 #5648 版，文档已改成"盘点以 B2 为准，B 只作活证据"。**【F11 已推翻本条，见 §9.8】**——"B 只作活证据、盘点看 B2"是个不该留的分岔：应用拒收的键比 B 盘得出的多，B **少报**。现在 B = F03 词表 + 嵌套路径，并与真库件常量逐字同源。
 3. **没有采用 `jsonb_path_query('$.**.keyvalue()')`**：`.**` 配 `.keyvalue()` 在 lax 模式下对非对象节点的行为无法本机证实，改用语义确定的 `WITH RECURSIVE` + `jsonb_typeof` 守卫。
 
 还留着的 SQL 侧差异（都是漏报，写进了 §5「已知差异」）：SQL 不切 camel 词（`passThroughMode` / `passHash` 盘不到）、B3 不下钻数组、SQL 侧**没有做 NFKC**（全角键盘不到，PG 侧要补得用 `normalize(k, NFKC)`，同样未验证）。
+
+### 9.8 F11：存量盘点 B 与 F03 词表同步（叠在 F03/F10 之上）
+
+分支 `test/secret-keys-realdb-inventory-sync`（worktree `metasheet-wt-w4m`），只动真库件与两份文档；`data-source-secret-keys.ts` / `routes/data-sources.ts` / `BaseAdapter.ts` / `.github/workflows/*` / pin **一个字节没动**。
+
+**缺口。** F10 之后设计文档 §5 的 B 仍是 #5648 的词表且只看顶层键，而真库道**逐字执行的就是它**。于是「应用拒收的键」⊃「B 盘得出的键」：`connection.dbpass`（F03 限定词规则）、`connection.headers.Authorization`（嵌套）应用都拒收/剥离，B 一个都数不到——盘点**少报**，而少报的行就是迁移单不会清的行。
+
+**改法（B 升级前后）。**
+
+| | 旧 B（#5648） | 新 B（F11） |
+|---|---|---|
+| 路径 | 只 `config->'connection'` 顶层 | `VALUES ('{connection}'), ('{connection,headers}')` + `jsonb_typeof(...)='object'` 守卫 |
+| 子串词表 | `password\|passwd\|pwd\|passphrase\|secret\|token\|credential\|apikey\|accesskey\|privatekey\|authorization` | 同上 **+ `pswd` + `passcode`**（= `<SECRET_SUBSTRING>`，与 `DATA_SOURCE_SECRET_KEY_WORDS` 的非 `wholeTokenOnly` 词逐项对应） |
+| 粘连词规则 | 无 | 新增第二条 `~ '^(db\|pg\|…\|proxy)?(pass\|pw)$'`（= `<SECRET_GLUED>`，对应 `wholeTokenOnly` 的 `pass`/`pw` + `GLUED_KEY_QUALIFIERS`） |
+| 列形状 | 形状 A | 形状 A（真库件 INSERT 的就是 `config jsonb`；形状 B 仍无任何执行证据，写在 §5 的 B2(b)） |
+
+**同源做法（可执行，不是散文）。** SQL 只写在真库件的常量 `INVENTORY_SQL`（`tests/integration/data-source-connection-secret-keys-realdb.test.ts:89`）与 `INVENTORY_SQL_5648`（`:112`）里；设计文档 §5 的 B / 旧 B 两块与它们**逐字一致**，差别只有块尾的 `;`。件里 `:142` 那条 `the design doc §5 B block is byte-identical…` 直接读设计文档、断言其包含 `INVENTORY_SQL + ';'` 与 `INVENTORY_SQL_5648 + ';'`；它**不需要数据库**，放在顶层，任何一次收集本件都会跑（含本机）。按 id 限定的执行由 `scopeToIds`（`:128`）在 `\n WHERE EXISTS (` 这个锚点上拼 `ds.id = ANY($1::text[])`，锚点不在就抛错——否则"0 命中"的反例断言会在一条没过滤的查询上假过。
+
+**新增真库用例（本机 skip，CI 真库道判）。**
+
+- `:211-247` 三行 fixture（在 `initializeDataSourceManager` **之后**种，纯表级证据、不参与 manager 装载）：`connection.dbpass`（粘连）、`connection.headers.Authorization = 'Bearer …'`（嵌套，值是 `POISON-realdb-nested-<pid>_<ts>` 标记，不是任何真凭证）、以及只带 `passive`/`bypass`/`compass`/普通 `headers` 的**反例**行。
+- `:311` 原用例升级：改跑新 B（不带过滤，原样一整条），期望 `>= 3`，并断言结果**只有 `affected_rows` 一列**（永不 SELECT 值）。
+- `:321` 新用例 `F11: the inventory SQL counts what the write entry refuses`：新 B 对 `[粘连行, 嵌套行]` = **2**、旧 B 对同样两行 = **0**（这就是"为什么要升级"的对照）；再各自单跑一行定位（各 1）；旧 B/新 B 对既有 `connection.password` 遗留行都 = 1（**超集**不是替换）；新 B 对反例行 = **0**（迁移 `UPDATE` 用同一正则**删键**，多报即数据丢失）。
+- 既有 4 例（拒收零落库 / 支持形状 201 + `enc:` / 遗留行读剥离 + 存储不动 / 盘点 SQL 能跑）**全部保留**，只有第 4 例换了 SQL。
+
+**本机执行（无 Postgres，仍未实跑任何一条 SQL）。**
+
+```
+$ vitest --config vitest.integration.config.ts run tests/integration/data-source-connection-secret-keys-realdb.test.ts --reporter=verbose
+  ✓ the design doc §5 B block is byte-identical to the SQL this spec executes
+  Test Files  1 passed (1) ;  Tests  1 passed | 6 skipped (7)        -> exit 0（6 条 DB 用例 skip，不是假绿）
+
+$ EXPECT_DB=1 vitest …（同上，仍无 DATABASE_URL）
+  × sentinel: EXPECT_DB lane must have DATABASE_URL … AssertionError: expected undefined to be truthy
+  Test Files  1 failed (1) ;  Tests  1 failed | 1 passed | 5 skipped (7)  -> exit 1（哨兵仍在）
+
+$ vitest run tests/unit/data-source-connection-secret-keys.test.ts      -> 123 passed (123)（相邻件不受影响）
+$ npx tsc --noEmit -p packages/core-backend/tsconfig.json                -> exit 0
+```
+
+**变异（落盘变异 + `finally` 还原 + sha256 复核；探针前 spec=`491a893b…`、doc=`f6fadf15…`，四轮后逐字节一致）。** 脚本 `%TEMP%/claude/.../scratchpad/wt-w4m/w4m-mutate.py`；基线无库 exit 0（`1 passed | 6 skipped`）。
+
+| 探针 | 变异 | 结果 |
+|---|---|---|
+| M1 | **spec** 的 `INVENTORY_SQL` 词表退回 #5648 | exit 1，`1 failed \| 6 skipped`（doc 里没有这段了） |
+| M2 | **doc** 的 B 块词表退回 #5648 | exit 1，同上（spec 与 doc 不再同源） |
+| M3 | **doc** 的 B 块删掉 `('{connection,headers}'::text[])` 那一行 | exit 1，同上 |
+| M4 | **doc** 的旧 B 对照块被改写 | exit 1，同上 |
+
+没有一条 M 让测试保持绿——doc-sync 断言是真接线的，不是注释。
+
+**没做到的（别读成验证过）。** 本机仍无 Postgres，**6 条真库用例一条没跑**，新 B / 旧 B / `scopeToIds` 拼出的 4 种 SQL **一条没在真 PG 上执行**；语法按 PG 16 文档写，可执行性由 CI 真库道（`postgres:16` service，`EXPECT_DB=1`）判。本机只做到两件弱核对：(1) 四种 SQL 都能被 `sqlglot 30.18.0` 的 `postgres` 方言解析（`parse=OK`，装在 `%TEMP%` 的 `--target` 目录里，没污染仓库；sqlglot 不是 PG 的语法，解析过 ≠ PG 能跑）；(2) 词表两段正则与 `DATA_SOURCE_SECRET_KEY_WORDS` / `GLUED_KEY_QUALIFIERS` 逐项肉眼对齐。另外 `.github/workflows/data-source-connection-secret-keys-realdb.yml` 的头注释里"Four cases"现在少了两例——该文件在本轮任务的禁改清单里（它的 `paths` 已含本 spec，功能上不需要改），留作下一刀的文字修正。
