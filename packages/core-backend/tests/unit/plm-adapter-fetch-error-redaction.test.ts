@@ -32,6 +32,9 @@ const FAKE_USER = 'plm-fake-user'
 const FAKE_PW = 'FAKE-PW-NEVER-REAL-7x9'
 const FAKE_PW_SPACED = 'FAKE PW WITH SPACE'
 const FAKE_PW_SLASHED = 'FAKE/PW/WITH/SLASH'
+// '#' / '?' inside the password: the pre-cut in extractUrlUserinfo used to swallow the '@' (#5691 review, F1).
+const FAKE_PW_HASH_SLASH = 'FAKE#PW/SLASH'
+const FAKE_PW_QUERY_SPACE = 'FAKE?PW SPACE'
 const FAKE_LOGIN_TOKEN = 'fake-login-token-for-tests-0002'
 const FAKE_SESSION_TOKEN = 'fake-discussion-session-token-0003'
 const FAKE_EMBED_TOKEN = 'fake-embed-token-0004'
@@ -179,6 +182,18 @@ describe('PLM fetch 腿的错误文本经 userinfo 打码(#5648 F01 ①a,叠 #56
     expect(joined).toContain('TypeError')
   })
 
+  it('connect() 的 info 日志:配置 URL 口令含斜杠时也被值层打掉(#5691 复核 F2)', async () => {
+    const adapter = makeAdapter({ 'plm.apiMode': 'yuantus' })
+    // connection 与实例内是同一个对象引用;在 connect() 之前把配置 URL 换成带斜杠口令的 userinfo 形状
+    ;(adapter.getConfig().connection as Record<string, unknown>).url = userinfoUrl(FAKE_PW_SLASHED)
+    ;(adapter.getConfig().connection as Record<string, unknown>).baseURL = userinfoUrl(FAKE_PW_SLASHED)
+    logger.info.mockClear()
+    await adapter.connect().catch(() => undefined)
+    const joined = logger.info.mock.calls.map((c) => c.map(String).join(' ')).join('\n')
+    expect(joined).toContain('PLM Adapter connecting to')
+    expect(joined).not.toContain(FAKE_PW_SLASHED)
+  })
+
   it('登录腿:info/warn/error/debug 四个汇里都不出现 URL 口令', async () => {
     const adapter = makeAdapter({
       'plm.apiMode': 'yuantus',
@@ -237,11 +252,11 @@ describe('PLM fetch 腿的错误文本经 userinfo 打码(#5648 F01 ①a,叠 #56
     expect((result.error as { cause?: unknown } | undefined)?.cause).toBeUndefined()
   })
 
-  it('discussion 腿:口令含空格/斜杠(纯 userinfo 正则打不掉的形状)时仍不泄漏', async () => {
+  it('discussion 腿:口令含空格/斜杠/#/?(纯 userinfo 正则打不掉、预切会吞掉的形状)时仍不泄漏', async () => {
     // 为什么不走 plm.url:这两种形状会让 axios 在 connect() 阶段先炸,遮住被测的 fetch 腿。
     // 直接改 connection.baseURL 反而更贴近现实 —— 落库行本来就可能存着这种 URL,而
     // yuantusDiscussionFetch 读的正是 `connection.baseURL || connection.url`。
-    for (const password of [FAKE_PW_SPACED, FAKE_PW_SLASHED]) {
+    for (const password of [FAKE_PW_SPACED, FAKE_PW_SLASHED, FAKE_PW_HASH_SLASH, FAKE_PW_QUERY_SPACE]) {
       logger.warn.mockClear()
       const adapter = makeAdapter({ 'plm.apiMode': 'yuantus' })
       await adapter.connect()
