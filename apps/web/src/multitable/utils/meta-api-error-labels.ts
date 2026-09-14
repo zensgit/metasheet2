@@ -9,7 +9,7 @@
 // module only ever sees a real `Response` (parseJson read its status), so it always
 // resolves to the "server answered" side.
 
-import { SERVICE_UNAVAILABLE_COPY } from '../../utils/networkErrors'
+import { SERVICE_UNAVAILABLE_COPY, unavailableMessageFor } from '../../utils/networkErrors'
 
 type LocaleText = { en: string; zh: string }
 
@@ -139,7 +139,14 @@ export function apiDefaultErrorMessage(code: string | undefined, status: number,
       // 500 is an application bug with a real stack behind it, and telling the user
       // to "try again in a moment" would hide it. Pinned by a spec assertion.
       if (status === 502 || status === 503 || status === 504) {
-        return metaApiErrorLabel('error.serverRestarting', isZh)
+        // A RESPONSE EXISTS here -- we are reading `status` off it -- so the copy is resolved by
+        // the shared discriminator rather than read straight out of the label table. That is not
+        // decoration: it makes the `hasHttpResponse === true` arm a PRODUCTION path, so a mutation
+        // that makes the discriminator answer "no response received" for a real 503 turns the
+        // already-CI-wired F4-B assertions in tests/meta-api-error-labels.spec.ts red. Reading the
+        // static entry instead left that arm test-only, and the only spec covering it ran nowhere.
+        // `{ status, ok: false }` is the minimal response-shaped witness `hasHttpResponse` accepts.
+        return unavailableMessageFor({ status, ok: false }, isZh)
       }
       return `API ${status}`
   }

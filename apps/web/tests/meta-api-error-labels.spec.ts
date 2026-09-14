@@ -149,6 +149,19 @@ describe('meta-api-error-labels', () => {
     expect(networkUnavailableMessage(true)).not.toBe(networkUnavailableMessage(false))
   })
 
+  // apiDefaultErrorMessage no longer READS the label table for gateway statuses -- it asks the
+  // shared discriminator (`unavailableMessageFor({ status, ok: false }, ...)`), which is what makes
+  // the "a response exists" arm a production path instead of a test-only contract. That leaves two
+  // faces of one sentence -- the label-table entry (exported through META_API_ERROR_LABEL_KEYS) and
+  // what the gateway branch actually emits -- so this pins them EQUAL. Rewriting either face alone
+  // turns it red; both are spreads of utils/networkErrors.ts's SERVICE_UNAVAILABLE_COPY today.
+  it('P5: the gateway branch emits exactly the `error.serverRestarting` label, in both locales', () => {
+    for (const status of [502, 503, 504]) {
+      expect(apiDefaultErrorMessage(undefined, status, true)).toBe(metaApiErrorLabel('error.serverRestarting', true))
+      expect(apiDefaultErrorMessage(undefined, status, false)).toBe(metaApiErrorLabel('error.serverRestarting', false))
+    }
+  })
+
   it('F4-B REGRESSION: the code-keyed branches still win over the new status branch', () => {
     expect(apiDefaultErrorMessage('FORBIDDEN', 502, true)).toBe('权限不足')
     expect(apiDefaultErrorMessage('UNAUTHENTICATED', 503, true)).toBe('请先登录后继续。')

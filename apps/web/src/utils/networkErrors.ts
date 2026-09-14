@@ -23,9 +23,17 @@
  *     which names the missing response and points at the network.
  *   - A response exists (5xx, a 503 maintenance-page JSON, even a 200 that is not
  *     JSON) -> SERVICE_UNAVAILABLE_COPY, i.e. today's wording, unchanged.
- * `unavailableMessageFor` is the SINGLE place that decision is made; both producing
- * sites (utils/api.ts transport rewrite, multitable/utils/meta-api-error-labels.ts
- * gateway statuses) resolve their copy through this module and nowhere else.
+ * `unavailableMessageFor` is the SINGLE place that decision is made, and both
+ * producing sites CALL it: utils/api.ts (`createNetworkUnavailableError`, transport
+ * rewrite) and multitable/utils/meta-api-error-labels.ts (`apiDefaultErrorMessage`,
+ * gateway 502/503/504). SCOPE, stated exactly because an earlier draft of this
+ * paragraph overclaimed: "both producing sites" means the two sites that produce THIS
+ * pair of outage sentences. It is NOT a claim about every connectivity string in the
+ * app -- views/GalleryView.vue and views/KanbanView.vue still set their own legacy
+ * '无法连接到服务器' out of a blanket `catch` that also swallows real 5xx RESPONSES.
+ * That copy is older than this module, is not routed through it, and is deliberately
+ * left alone here; it is a separate cleanup, and it is the reason this header does not
+ * say "and nowhere else".
  *
  * WORDING IS DELIBERATELY NEUTRAL. Neither copy may say "upgrading"/"升级": that
  * would tell a customer we touched their machine during their working hours. This
